@@ -99,6 +99,37 @@ pub async fn register(
     .execute(&state.db)
     .await?;
 
+    // Create containers for the new player
+    // Player inventory (24 slots, 6 columns)
+    sqlx::query(
+        "INSERT INTO containers (id, container_type, owner_id) VALUES ($1, $2, $3)"
+    )
+    .bind(Uuid::new_v4())
+    .bind("player_inventory")
+    .bind(player_id)
+    .execute(&state.db)
+    .await?;
+
+    // Crafting input (4 slots, 2 columns)
+    sqlx::query(
+        "INSERT INTO containers (id, container_type, owner_id) VALUES ($1, $2, $3)"
+    )
+    .bind(Uuid::new_v4())
+    .bind("crafting_input")
+    .bind(player_id)
+    .execute(&state.db)
+    .await?;
+
+    // Crafting output (1 slot)
+    sqlx::query(
+        "INSERT INTO containers (id, container_type, owner_id) VALUES ($1, $2, $3)"
+    )
+    .bind(Uuid::new_v4())
+    .bind("crafting_output")
+    .bind(player_id)
+    .execute(&state.db)
+    .await?;
+
     // Generate JWT
     let token = generate_token(&state, account_id, "free")?;
 

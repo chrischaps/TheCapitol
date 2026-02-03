@@ -4,3 +4,7 @@
   display: block;
   cursor: crosshair;
 }
+
+.game-canvas.placement-mode {
+  cursor: cell;
+}

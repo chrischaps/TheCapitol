@@ -16,6 +16,29 @@ pub struct Player {
     pub created_at: DateTime<Utc>,
 }
 
+/// Player action state for the game engine
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ActionState {
+    Idle,
+    Extracting {
+        node_id: Uuid,
+        progress: i32,
+        duration: i32,
+    },
+    Crafting {
+        operation_id: Uuid,
+        recipe_id: String,
+        progress: i32,
+        duration: i32,
+    },
+}
+
+impl Default for ActionState {
+    fn default() -> Self {
+        ActionState::Idle
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerState {
     pub id: Uuid,
@@ -26,6 +49,7 @@ pub struct PlayerState {
     pub dest_x: Option<f64>,
     pub dest_y: Option<f64>,
     pub speed: f32,
+    pub action_state: ActionState,
 }
 
 impl From<Player> for PlayerState {
@@ -39,6 +63,7 @@ impl From<Player> for PlayerState {
             dest_x: p.destination_x,
             dest_y: p.destination_y,
             speed: p.speed,
+            action_state: ActionState::Idle,
         }
     }
 }

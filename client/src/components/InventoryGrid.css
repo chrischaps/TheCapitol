@@ -1,0 +1,7 @@
+.inventory-grid {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  background: rgba(20, 20, 30, 0.6);
+  border-radius: 8px;
+}
