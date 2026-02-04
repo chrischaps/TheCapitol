@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -25,12 +26,22 @@ pub fn router(state: AppState) -> Router<AppState> {
 }
 
 /// Station info for nearby query
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct NearbyStationsResponse {
+    /// Stations within visibility range
     pub stations: Vec<StationInfo>,
 }
 
 /// Get all stations near the player
+#[utoipa::path(
+    get,
+    path = "/stations/nearby",
+    responses(
+        (status = 200, description = "Nearby stations", body = NearbyStationsResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Stations"
+)]
 pub async fn get_nearby_stations(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
@@ -108,20 +119,37 @@ pub async fn get_nearby_stations(
     Ok(Json(NearbyStationsResponse { stations: station_infos }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct PlaceStationRequest {
+    /// Station type to place (workbench, forge, storage_chest)
     pub station_type: String,
+    /// X position in world coordinates
     pub x: f64,
+    /// Y position in world coordinates
     pub y: f64,
+    /// Kit item ID to consume
     pub kit_item_id: Uuid,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PlaceStationResponse {
+    /// The newly placed station
     pub station: StationInfo,
 }
 
-/// Place a new station in the world
+/// Place a new station on a plot you own
+#[utoipa::path(
+    post,
+    path = "/stations/place",
+    request_body = PlaceStationRequest,
+    responses(
+        (status = 200, description = "Station placed", body = PlaceStationResponse),
+        (status = 400, description = "Invalid placement (out of range, wrong item, plot full)"),
+        (status = 403, description = "Don't own the plot")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Stations"
+)]
 pub async fn place_station(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
@@ -151,6 +179,45 @@ pub async fn place_station(
     let distance = (dx * dx + dy * dy).sqrt();
     if distance > station_type.interaction_range as f64 {
         return Err(AppError::BadRequest("Too far to place station".into()));
+    }
+
+    // M7: Find plot at placement position
+    let plot: crate::models::Plot = sqlx::query_as(
+        "SELECT id, zone_id, grid_x, grid_y, world_x, world_y,
+                bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y,
+                size_category, plot_type, owner_id, claimed_at,
+                assessed_value, last_tax_paid, tax_owed, station_count
+         FROM plots
+         WHERE $1 >= bounds_min_x AND $1 <= bounds_max_x
+           AND $2 >= bounds_min_y AND $2 <= bounds_max_y
+         LIMIT 1"
+    )
+    .bind(req.x as f32)
+    .bind(req.y as f32)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::BadRequest("Must place station on a plot".into()))?;
+
+    // M7: Verify player owns the plot
+    if plot.owner_id != Some(player_id) {
+        return Err(AppError::Forbidden("You don't own this plot".into()));
+    }
+
+    // M7: Check plot capacity
+    let (station_count, station_capacity): (i32, i32) = sqlx::query_as(
+        "SELECT p.station_count, psc.station_capacity
+         FROM plots p
+         JOIN plot_size_categories psc ON p.size_category = psc.id
+         WHERE p.id = $1"
+    )
+    .bind(plot.id)
+    .fetch_one(&state.db)
+    .await?;
+
+    if station_count >= station_capacity {
+        return Err(AppError::BadRequest(format!(
+            "Plot is at capacity ({}/{})", station_count, station_capacity
+        )));
     }
 
     // Verify player owns the kit item and it's the right type
@@ -193,19 +260,26 @@ pub async fn place_station(
         return Err(AppError::BadRequest("Too close to another station".into()));
     }
 
-    // Create station
+    // Create station with plot_id
     let station_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO stations (id, station_type, owner_id, position_x, position_y)
-         VALUES ($1, $2, $3, $4, $5)"
+        "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id)
+         VALUES ($1, $2, $3, $4, $5, $6)"
     )
     .bind(station_id)
     .bind(&req.station_type)
     .bind(player_id)
     .bind(req.x as f32)
     .bind(req.y as f32)
+    .bind(plot.id)
     .execute(&state.db)
     .await?;
+
+    // Increment plot station count
+    sqlx::query("UPDATE plots SET station_count = station_count + 1 WHERE id = $1")
+        .bind(plot.id)
+        .execute(&state.db)
+        .await?;
 
     // Create container for station
     let container_id = Uuid::new_v4();
@@ -248,7 +322,21 @@ pub async fn place_station(
     Ok(Json(PlaceStationResponse { station: info }))
 }
 
-/// Remove a station (owner only)
+/// Remove a station you own
+#[utoipa::path(
+    delete,
+    path = "/stations/{id}",
+    params(
+        ("id" = Uuid, Path, description = "Station ID")
+    ),
+    responses(
+        (status = 200, description = "Station removed"),
+        (status = 403, description = "Not your station"),
+        (status = 404, description = "Station not found")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Stations"
+)]
 pub async fn remove_station(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
@@ -262,9 +350,9 @@ pub async fn remove_station(
     .fetch_one(&state.db)
     .await?;
 
-    // Verify ownership
+    // Verify ownership (include plot_id for M7)
     let station: Station = sqlx::query_as(
-        "SELECT id, station_type, owner_id, position_x, position_y, placed_at
+        "SELECT id, station_type, owner_id, position_x, position_y, plot_id, placed_at
          FROM stations WHERE id = $1"
     )
     .bind(station_id)
@@ -274,6 +362,14 @@ pub async fn remove_station(
 
     if station.owner_id != player_id {
         return Err(AppError::Forbidden("Not your station".into()));
+    }
+
+    // M7: Decrement plot station count if station was on a plot
+    if let Some(plot_id) = station.plot_id {
+        sqlx::query("UPDATE plots SET station_count = station_count - 1 WHERE id = $1 AND station_count > 0")
+            .bind(plot_id)
+            .execute(&state.db)
+            .await?;
     }
 
     // Delete station (cascade will delete container and items)
@@ -286,16 +382,35 @@ pub async fn remove_station(
 }
 
 /// Container response with slot items
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct StationContainerResponse {
+    /// Container ID
     pub id: Uuid,
+    /// Container type
     pub container_type: String,
+    /// Total slots
     pub slot_count: i32,
+    /// UI layout columns
     pub layout_columns: i32,
+    /// Items in slots
     pub slots: Vec<SlotItem>,
 }
 
-/// Get the inventory container of a station
+/// Get a station's inventory container
+#[utoipa::path(
+    get,
+    path = "/stations/{id}/container",
+    params(
+        ("id" = Uuid, Path, description = "Station ID")
+    ),
+    responses(
+        (status = 200, description = "Station container", body = StationContainerResponse),
+        (status = 403, description = "Not your station"),
+        (status = 404, description = "Station not found")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Stations"
+)]
 pub async fn get_station_container(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,

@@ -193,6 +193,16 @@ function ws:handleMessage(msg)
         if self.handlers.onError then
             self.handlers.onError(msg.message)
         end
+
+    elseif msgType == protocol.SERVER.MOVEMENT_BLOCKED then
+        if self.handlers.onMovementBlocked then
+            self.handlers.onMovementBlocked(msg.player_id, msg.reason, msg.stopped_x, msg.stopped_y)
+        end
+
+    elseif msgType == protocol.SERVER.ZONE_CHANGED then
+        if self.handlers.onZoneChanged then
+            self.handlers.onZoneChanged(msg.player_id, msg.from_zone, msg.to_zone, msg.zone_name)
+        end
     end
 end
 

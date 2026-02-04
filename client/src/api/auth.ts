@@ -6,6 +6,7 @@ export interface AuthResponse {
     id: string
     email: string
     tier: string
+    is_admin: boolean
   }
   player_id: string
 }

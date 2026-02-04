@@ -113,6 +113,20 @@ function gameScene:setupHandlers()
     client:on("onError", function(err)
         ui.setDisconnected(err)
     end)
+
+    client:on("onMovementBlocked", function(playerId, reason, stoppedX, stoppedY)
+        if playerId == game.myPlayerId then
+            game.addNotification(reason)
+            -- Clear pending extraction since we can't reach it
+            game.clearPendingExtraction()
+        end
+    end)
+
+    client:on("onZoneChanged", function(playerId, fromZone, toZone, zoneName)
+        if playerId == game.myPlayerId then
+            game.addNotification("Entering " .. zoneName)
+        end
+    end)
 end
 
 function gameScene:qualityToGrade(quality)
@@ -282,8 +296,9 @@ function gameScene:draw()
     local offsetX = vw / 2 - cameraX
     local offsetY = vh / 2 - cameraY
 
-    -- Draw world
+    -- Draw world (order: grid -> terrain -> boundary -> nodes)
     worldRender.drawGrid(offsetX, offsetY, vw, vh)
+    worldRender.drawTerrain(offsetX, offsetY)
     worldRender.drawBoundary(offsetX, offsetY)
     worldRender.drawNodes(offsetX, offsetY)
     worldRender.drawTargetLine(offsetX, offsetY)

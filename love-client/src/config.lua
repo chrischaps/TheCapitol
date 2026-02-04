@@ -2,7 +2,8 @@
 local config = {}
 
 -- World dimensions
-config.WORLD_SIZE = 1000
+config.WORLD_SIZE = 8000
+config.WORLD_CENTER = 4000
 config.GRID_SIZE = 100
 
 -- Entity sizes
@@ -53,6 +54,20 @@ config.COLORS = {
     EXTRACTION_RING_BG = {0.788, 0.635, 0.153, 0.3},
     EXTRACTION_RING = {0.788, 0.635, 0.153, 1},
     TARGET_LINE = {0.788, 0.635, 0.153, 0.5},
+
+    -- Terrain: Water
+    WATER = {0.15, 0.25, 0.45, 0.9},           -- Deep blue
+    WATER_HIGHLIGHT = {0.2, 0.35, 0.55, 0.7},  -- Lighter blue shimmer
+
+    -- Terrain: Bridges
+    BRIDGE = {0.35, 0.30, 0.25, 1.0},          -- Dark brown wood
+    BRIDGE_EDGE = {0.25, 0.20, 0.15, 1.0},     -- Darker edge
+
+    -- Terrain: Roads
+    ROAD_ARTERIAL = {0.25, 0.22, 0.20, 1.0},   -- Dark stone
+    ROAD_GRID = {0.30, 0.28, 0.25, 1.0},       -- Medium stone
+    ROAD_SUBURBAN = {0.35, 0.32, 0.28, 1.0},   -- Light stone/packed dirt
+    ROAD_TRAIL = {0.40, 0.35, 0.25, 0.7},      -- Unpaved dirt path
 }
 
 -- Server URLs

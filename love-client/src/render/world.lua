@@ -1,6 +1,7 @@
--- World rendering (grid, boundary, nodes)
+-- World rendering (grid, boundary, nodes, terrain)
 local config = require("src.config")
 local game = require("src.state.game")
+local terrain = require("src.terrain")
 
 local world = {}
 
@@ -156,6 +157,11 @@ function world.drawTargetLine(offsetX, offsetY)
 
         love.graphics.line(x1, y1, x2, y2)
     end
+end
+
+-- Draw terrain (water rings, bridges, roads)
+function world.drawTerrain(offsetX, offsetY)
+    terrain.draw(offsetX, offsetY)
 end
 
 return world

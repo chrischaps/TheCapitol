@@ -11,6 +11,7 @@ use chrono::Utc;
 use jsonwebtoken::{encode, Header, EncodingKey};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -24,17 +25,23 @@ pub fn router() -> Router<AppState> {
         .route("/logout", post(logout))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RegisterRequest {
+    /// Email address for the account
     pub email: String,
+    /// Password (will be hashed with Argon2)
     pub password: String,
+    /// Display name for the player character
     pub player_name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AuthResponse {
+    /// JWT token for authentication
     pub token: String,
+    /// Account information
     pub account: AccountInfo,
+    /// Player character ID
     pub player_id: Uuid,
 }
 
@@ -42,9 +49,21 @@ pub struct AuthResponse {
 pub struct Claims {
     pub sub: Uuid,
     pub tier: String,
+    pub is_admin: bool,
     pub exp: usize,
 }
 
+/// Register a new account
+#[utoipa::path(
+    post,
+    path = "/auth/register",
+    request_body(content = RegisterRequest, description = "Registration details", content_type = "application/json"),
+    responses(
+        (status = 200, description = "Registration successful", body = AuthResponse),
+        (status = 409, description = "Email already registered")
+    ),
+    tag = "Authentication"
+)]
 pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
@@ -130,8 +149,8 @@ pub async fn register(
     .execute(&state.db)
     .await?;
 
-    // Generate JWT
-    let token = generate_token(&state, account_id, "free")?;
+    // Generate JWT (new accounts are not admin by default)
+    let token = generate_token(&state, account_id, "free", false)?;
 
     // Store session in Redis
     let mut redis = state.redis.clone();
@@ -144,24 +163,38 @@ pub async fn register(
             id: account_id,
             email: req.email,
             tier: "free".into(),
+            is_admin: false,
         },
         player_id,
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct LoginRequest {
+    /// Account email address
     pub email: String,
+    /// Account password
     pub password: String,
 }
 
+/// Login to an existing account
+#[utoipa::path(
+    post,
+    path = "/auth/login",
+    request_body(content = LoginRequest, description = "Login credentials", content_type = "application/json"),
+    responses(
+        (status = 200, description = "Login successful", body = AuthResponse),
+        (status = 401, description = "Invalid credentials")
+    ),
+    tag = "Authentication"
+)]
 pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, AppError> {
     // Find account
     let account = sqlx::query_as::<_, crate::models::Account>(
-        "SELECT id, email, password_hash, tier, created_at, last_login FROM accounts WHERE email = $1"
+        "SELECT id, email, password_hash, tier, is_admin, created_at, last_login FROM accounts WHERE email = $1"
     )
     .bind(&req.email)
     .fetch_optional(&state.db)
@@ -192,7 +225,7 @@ pub async fn login(
     .await?;
 
     // Generate JWT
-    let token = generate_token(&state, account.id, &account.tier)?;
+    let token = generate_token(&state, account.id, &account.tier, account.is_admin)?;
 
     // Store session in Redis
     let mut redis = state.redis.clone();
@@ -206,11 +239,22 @@ pub async fn login(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct LogoutRequest {
+    /// JWT token to invalidate
     pub token: String,
 }
 
+/// Logout and invalidate the session
+#[utoipa::path(
+    post,
+    path = "/auth/logout",
+    request_body(content = LogoutRequest, description = "Token to invalidate", content_type = "application/json"),
+    responses(
+        (status = 200, description = "Logout successful")
+    ),
+    tag = "Authentication"
+)]
 pub async fn logout(
     State(state): State<AppState>,
     Json(req): Json<LogoutRequest>,
@@ -230,7 +274,7 @@ pub async fn logout(
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
-fn generate_token(state: &AppState, account_id: Uuid, tier: &str) -> Result<String, AppError> {
+fn generate_token(state: &AppState, account_id: Uuid, tier: &str, is_admin: bool) -> Result<String, AppError> {
     let expiration = chrono::Utc::now()
         .checked_add_signed(chrono::Duration::hours(24))
         .expect("valid timestamp")
@@ -239,6 +283,7 @@ fn generate_token(state: &AppState, account_id: Uuid, tier: &str) -> Result<Stri
     let claims = Claims {
         sub: account_id,
         tier: tier.to_string(),
+        is_admin,
         exp: expiration,
     };
 

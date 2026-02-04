@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::Serialize;
 use std::collections::HashMap;
+use utoipa::ToSchema;
 
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -20,12 +21,22 @@ pub fn router(state: AppState) -> Router<AppState> {
         ))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RecipesResponse {
+    /// Available crafting recipes
     pub recipes: Vec<RecipeInfo>,
 }
 
-/// Get all available recipes
+/// Get available crafting recipes
+#[utoipa::path(
+    get,
+    path = "/recipes",
+    responses(
+        (status = 200, description = "List of recipes", body = RecipesResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Recipes"
+)]
 pub async fn list_recipes(
     State(state): State<AppState>,
     Extension(_auth_user): Extension<AuthUser>,

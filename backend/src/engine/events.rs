@@ -1,7 +1,7 @@
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::models::{PlayerPosition, ResourceNodeInfo, SlotItem, StationInfo};
+use crate::models::{PlayerPosition, ResourceNodeInfo, SlotItem, StationInfo, ZoneTransition};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data")]
@@ -113,6 +113,67 @@ pub enum GameEvent {
         player_id: Uuid,
     },
     NearbyStations(Vec<StationInfo>),
+    // M5: Trading events
+    TradeRequested {
+        from_player: Uuid,
+        from_player_name: String,
+        to_player: Uuid,
+    },
+    TradeRequestDeclined {
+        by_player: Uuid,
+        initiator: Uuid,
+    },
+    TradeStarted {
+        trade_id: Uuid,
+        player_a: Uuid,
+        player_b: Uuid,
+    },
+    TradeOfferUpdated {
+        trade_id: Uuid,
+        player_id: Uuid,
+        items: Vec<TradeItem>,
+        strands: i64,
+    },
+    TradeAccepted {
+        trade_id: Uuid,
+        player_id: Uuid,
+    },
+    TradeExecuted {
+        trade_id: Uuid,
+    },
+    TradeCancelled {
+        trade_id: Uuid,
+        reason: String,
+    },
+    // M5: Currency events
+    CurrencyChanged {
+        player_id: Uuid,
+        new_balance: i64,
+    },
+    // M7: Zone events
+    ZoneChanged {
+        player_id: Uuid,
+        from_zone: String,
+        to_zone: String,
+        zone_name: String,
+    },
+    // Terrain events
+    MovementBlocked {
+        player_id: Uuid,
+        reason: String,
+        stopped_x: f64,
+        stopped_y: f64,
+    },
+}
+
+/// Item in a trade offer (for events)
+#[derive(Debug, Clone, Serialize)]
+pub struct TradeItem {
+    pub item_id: Uuid,
+    pub item_type: String,
+    pub item_name: String,
+    pub quantity: i32,
+    pub quality: i32,
 }
 
 /// Slot update for inventory events

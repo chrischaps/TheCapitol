@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 /// Static station type definition (from database)
@@ -24,6 +25,7 @@ pub struct Station {
     pub owner_id: Uuid,
     pub position_x: f32,
     pub position_y: f32,
+    pub plot_id: Option<Uuid>,
     pub placed_at: DateTime<Utc>,
 }
 
@@ -35,6 +37,7 @@ pub struct StationState {
     pub owner_id: Uuid,
     pub x: f64,
     pub y: f64,
+    pub plot_id: Option<Uuid>,
     pub container_id: Option<Uuid>,
 }
 
@@ -46,23 +49,34 @@ impl StationState {
             owner_id: station.owner_id,
             x: station.position_x as f64,
             y: station.position_y as f64,
+            plot_id: station.plot_id,
             container_id,
         }
     }
 }
 
 /// Client-facing station info
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StationInfo {
+    /// Unique station instance ID
     pub id: Uuid,
+    /// Station type identifier (e.g., "workbench", "forge")
     pub station_type: String,
+    /// Display name of the station
     pub name: String,
+    /// Station category ("crafting" or "storage")
     pub category: String,
+    /// Optional icon identifier
     pub icon: Option<String>,
+    /// X position in world coordinates
     pub x: f64,
+    /// Y position in world coordinates
     pub y: f64,
+    /// Player who owns this station
     pub owner_id: Uuid,
+    /// Container ID for station inventory
     pub container_id: Option<Uuid>,
+    /// Maximum interaction distance
     pub interaction_range: f32,
 }
 

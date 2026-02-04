@@ -13,6 +13,8 @@ pub struct Player {
     pub destination_x: Option<f64>,
     pub destination_y: Option<f64>,
     pub speed: f32,
+    pub strand_balance: i64,
+    pub current_zone: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -49,6 +51,8 @@ pub struct PlayerState {
     pub dest_x: Option<f64>,
     pub dest_y: Option<f64>,
     pub speed: f32,
+    pub strand_balance: i64,
+    pub current_zone: Option<String>,
     pub action_state: ActionState,
 }
 
@@ -63,6 +67,8 @@ impl From<Player> for PlayerState {
             dest_x: p.destination_x,
             dest_y: p.destination_y,
             speed: p.speed,
+            strand_balance: p.strand_balance,
+            current_zone: p.current_zone,
             action_state: ActionState::Idle,
         }
     }

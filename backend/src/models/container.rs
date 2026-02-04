@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::collections::HashMap;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::item::quality_to_grade;
@@ -26,14 +27,21 @@ pub struct Container {
 }
 
 /// Item in a specific slot (for API responses)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SlotItem {
+    /// Unique item instance ID
     pub item_id: Uuid,
+    /// Item type identifier
     pub item_type: String,
+    /// Display name of the item
     pub item_name: String,
+    /// Quality value (0-100)
     pub quality: i32,
+    /// Quality grade letter (A, B, C, D, F)
     pub quality_grade: String,
+    /// Stack quantity
     pub quantity: i32,
+    /// Slot index within the container
     pub slot_index: i32,
 }
 

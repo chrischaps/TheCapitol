@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 /// Static item type definition (from database)
@@ -27,13 +28,19 @@ pub struct Item {
 }
 
 /// Client-facing inventory item
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InventoryItem {
+    /// Unique item instance ID
     pub id: Uuid,
+    /// Item type identifier (e.g., "fiber", "rope")
     pub item_type: String,
+    /// Display name of the item
     pub name: String,
+    /// Quality value (0-100)
     pub quality: i32,
+    /// Quality grade letter (A, B, C, D, F)
     pub quality_grade: String,
+    /// Stack quantity
     pub quantity: i32,
 }
 

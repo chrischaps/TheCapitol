@@ -8,12 +8,15 @@ use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 mod config;
 mod engine;
 mod error;
 mod middleware;
 mod models;
+mod openapi;
 mod routes;
 mod state;
 mod ws;
@@ -145,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load stations into game state
     let stations: Vec<Station> = sqlx::query_as(
-        "SELECT id, station_type, owner_id, position_x, position_y, placed_at FROM stations"
+        "SELECT id, station_type, owner_id, position_x, position_y, plot_id, placed_at FROM stations"
     )
     .fetch_all(&db_pool)
     .await?;
@@ -195,7 +198,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest("/recipes", routes::recipes::router(app_state.clone()))
         .nest("/inventory", routes::inventory::router(app_state.clone()))
         .nest("/stations", routes::stations::router(app_state.clone()))
+        .nest("/exchange", routes::exchange::router(app_state.clone()))
+        .nest("/plots", routes::plots::router(app_state.clone()))
+        .nest("/bureaucracy", routes::bureaucracy::router(app_state.clone()))
+        .nest("/terrain", routes::terrain::router(app_state.clone()))
         .route("/ws", get(ws::ws_handler))
+        .merge(SwaggerUi::new("/swagger-ui")
+            .url("/api-doc/openapi.json", openapi::ApiDoc::openapi()))
         .layer(CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any))
         .layer(TraceLayer::new_for_http())
         .with_state(app_state);

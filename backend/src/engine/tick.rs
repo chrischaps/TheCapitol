@@ -10,7 +10,8 @@ use super::events::GameEvent;
 use super::extraction::{cancel_extraction, process_extractions, start_extraction, PendingItem};
 use super::movement::process_movement;
 use super::regeneration::process_regeneration;
-use crate::models::{ActionState, Item, ItemType, PlayerPosition, PlayerState, Recipe, ResourceNodeState, ResourceType, StationState, StationType};
+use super::trading::{TradeManager, TRADE_RANGE};
+use crate::models::{ActionState, Item, ItemType, PlayerPosition, PlayerState, Recipe, ResourceNodeState, ResourceType, StationState, StationType, TerrainConfig};
 use crate::state::AppState;
 
 const TICK_RATE_MS: u64 = 100;
@@ -32,6 +33,10 @@ pub struct GameState {
     // M4: Stations
     pub stations: HashMap<Uuid, StationState>,
     pub station_types: HashMap<String, StationType>,
+    // M5: Trading
+    pub trade_manager: TradeManager,
+    // Terrain configuration (moats, canals, bridges, roads)
+    pub terrain: TerrainConfig,
 }
 
 impl GameState {
@@ -52,6 +57,8 @@ impl GameState {
             items_to_consume: Vec::new(),
             stations: HashMap::new(),
             station_types: HashMap::new(),
+            trade_manager: TradeManager::new(),
+            terrain: TerrainConfig::get_default(),
         }
     }
 
@@ -83,6 +90,23 @@ impl GameState {
     }
 
     pub fn remove_player(&mut self, player_id: Uuid) {
+        // Cancel any active trade when player disconnects
+        if self.trade_manager.is_in_trade(player_id) {
+            if let Ok((player_a, player_b)) = self.trade_manager.cancel_trade(player_id) {
+                let trade_id = Uuid::new_v4(); // dummy for event
+                let _ = self.event_sender.send(GameEvent::TradeCancelled {
+                    trade_id,
+                    reason: "Player disconnected".to_string(),
+                });
+                // The other player needs to know the trade was cancelled
+                let other = if player_a == player_id { player_b } else { player_a };
+                tracing::info!("Trade cancelled due to player {} disconnect, notified {}", player_id, other);
+            }
+        }
+        // Remove any pending trade requests
+        self.trade_manager.pending_requests.remove(&player_id);
+        self.trade_manager.pending_requests.retain(|_, (initiator, _)| *initiator != player_id);
+
         self.players.remove(&player_id);
         let _ = self.event_sender.send(GameEvent::PlayerLeft { player_id });
     }
@@ -263,13 +287,180 @@ impl GameState {
                         }
                     }
                 }
+                // M5: Trading commands
+                Command::InitiateTrade { player_id, target_player_id } => {
+                    // Validate both players exist and are in range
+                    let (my_pos, target_pos) = match (
+                        self.players.get(&player_id),
+                        self.players.get(&target_player_id),
+                    ) {
+                        (Some(me), Some(target)) => ((me.x, me.y), (target.x, target.y)),
+                        _ => {
+                            tracing::debug!("Trade initiate failed: player not found");
+                            continue;
+                        }
+                    };
+
+                    let dx = my_pos.0 - target_pos.0;
+                    let dy = my_pos.1 - target_pos.1;
+                    let distance = (dx * dx + dy * dy).sqrt();
+
+                    if distance > TRADE_RANGE {
+                        tracing::debug!("Trade initiate failed: out of range ({})", distance);
+                        continue;
+                    }
+
+                    // Get initiator name for the request event
+                    let initiator_name = self.players.get(&player_id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_default();
+
+                    match self.trade_manager.request_trade(player_id, target_player_id) {
+                        Ok(()) => {
+                            // Check if trade started immediately (both requested each other)
+                            if let Some(trade) = self.trade_manager.get_player_trade(player_id) {
+                                let _ = self.event_sender.send(GameEvent::TradeStarted {
+                                    trade_id: trade.id,
+                                    player_a: trade.player_a,
+                                    player_b: trade.player_b,
+                                });
+                            } else {
+                                // Send trade request notification to target
+                                let _ = self.event_sender.send(GameEvent::TradeRequested {
+                                    from_player: player_id,
+                                    from_player_name: initiator_name,
+                                    to_player: target_player_id,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("Trade initiate failed: {}", e);
+                        }
+                    }
+                }
+                Command::AcceptTradeRequest { player_id } => {
+                    match self.trade_manager.accept_request(player_id) {
+                        Ok(trade) => {
+                            let _ = self.event_sender.send(GameEvent::TradeStarted {
+                                trade_id: trade.id,
+                                player_a: trade.player_a,
+                                player_b: trade.player_b,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::debug!("Trade accept failed: {}", e);
+                        }
+                    }
+                }
+                Command::DeclineTradeRequest { player_id } => {
+                    match self.trade_manager.decline_request(player_id) {
+                        Ok(initiator) => {
+                            let _ = self.event_sender.send(GameEvent::TradeRequestDeclined {
+                                by_player: player_id,
+                                initiator,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::debug!("Trade decline failed: {}", e);
+                        }
+                    }
+                }
+                Command::UpdateTradeOffer { player_id, items, strands } => {
+                    if let Err(e) = self.trade_manager.update_offer(player_id, items.clone(), strands) {
+                        tracing::debug!("Update trade offer failed: {}", e);
+                        continue;
+                    }
+
+                    // Get trade for event
+                    if let Some(trade) = self.trade_manager.get_player_trade(player_id) {
+                        // Convert items to TradeItem for event (we'll need item info from DB later)
+                        // For now, send basic info
+                        let trade_items: Vec<super::events::TradeItem> = items.iter()
+                            .map(|(item_id, qty)| super::events::TradeItem {
+                                item_id: *item_id,
+                                item_type: String::new(), // Will be filled by WS handler
+                                item_name: String::new(),
+                                quantity: *qty,
+                                quality: 0,
+                            })
+                            .collect();
+
+                        let _ = self.event_sender.send(GameEvent::TradeOfferUpdated {
+                            trade_id: trade.id,
+                            player_id,
+                            items: trade_items,
+                            strands,
+                        });
+                    }
+                }
+                Command::AcceptTrade { player_id } => {
+                    match self.trade_manager.set_accepted(player_id, true) {
+                        Ok(both_accepted) => {
+                            if let Some(trade) = self.trade_manager.get_player_trade(player_id) {
+                                let trade_id = trade.id;
+                                let _ = self.event_sender.send(GameEvent::TradeAccepted {
+                                    trade_id,
+                                    player_id,
+                                });
+
+                                // If both accepted, complete the trade
+                                // Note: actual execution happens in WS handler with DB access
+                                if both_accepted {
+                                    tracing::info!("Trade {} ready for execution", trade_id);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("Trade accept failed: {}", e);
+                        }
+                    }
+                }
+                Command::CancelTrade { player_id } => {
+                    if let Some(trade) = self.trade_manager.get_player_trade(player_id) {
+                        let trade_id = trade.id;
+                        if let Ok(_) = self.trade_manager.cancel_trade(player_id) {
+                            let _ = self.event_sender.send(GameEvent::TradeCancelled {
+                                trade_id,
+                                reason: "Cancelled by player".to_string(),
+                            });
+                        }
+                    }
+                }
             }
         }
     }
 
     fn process_movement(&mut self) {
+        use crate::models::Zone;
+
+        // Clone terrain reference to avoid borrow issues
+        let terrain = self.terrain.clone();
+
         for player in self.players.values_mut() {
-            process_movement(player);
+            let result = process_movement(player, &terrain);
+
+            // Broadcast zone transition if player changed zones
+            if let Some(transition) = result.zone_transition {
+                let zone = Zone::from_str(&transition.to_zone);
+                let zone_name = zone.map(|z| z.display_name()).unwrap_or(&transition.to_zone);
+
+                let _ = self.event_sender.send(GameEvent::ZoneChanged {
+                    player_id: player.id,
+                    from_zone: transition.from_zone,
+                    to_zone: transition.to_zone.clone(),
+                    zone_name: zone_name.to_string(),
+                });
+            }
+
+            // Broadcast movement blocked if player was stopped by water
+            if let Some(blocked) = result.blocked {
+                let _ = self.event_sender.send(GameEvent::MovementBlocked {
+                    player_id: player.id,
+                    reason: blocked.reason,
+                    stopped_x: blocked.stopped_x,
+                    stopped_y: blocked.stopped_y,
+                });
+            }
         }
     }
 
@@ -388,9 +579,17 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
             tick_count = 0;
         }
 
-        // Periodically persist player positions
+        // Periodically persist player positions (every 10 seconds)
         if tick_count % 100 == 0 {
             persist_positions(&game_state, &app_state).await;
+        }
+
+        // M7: Process property taxes hourly (36000 ticks = 1 hour at 10 ticks/sec)
+        // In practice, 10 ticks/sec * 60 sec * 60 min = 36000 ticks per hour
+        let game_tick_count = game_state.read().await.tick_count;
+        if game_tick_count > 0 && game_tick_count % 36000 == 0 {
+            tracing::info!("Processing hourly property taxes at tick {}", game_tick_count);
+            super::property_tax::process_property_taxes(&app_state.db).await;
         }
     }
 }

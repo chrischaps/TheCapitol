@@ -26,6 +26,9 @@ protocol.SERVER = {
     NODE_DEPLETED = "node_depleted",
     NODE_REGENERATED = "node_regenerated",
     NEARBY_NODES = "nearby_nodes",
+    -- Terrain events
+    MOVEMENT_BLOCKED = "movement_blocked",
+    ZONE_CHANGED = "zone_changed",
 }
 
 -- Subscription channels

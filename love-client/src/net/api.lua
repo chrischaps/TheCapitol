@@ -114,6 +114,12 @@ function api.getNearby(token)
     return request("GET", "/world/nearby", nil, token)
 end
 
+-- Terrain (public, no auth required)
+
+function api.getTerrain()
+    return request("GET", "/terrain", nil, nil)
+end
+
 -- Player
 
 function api.getInventory(token)

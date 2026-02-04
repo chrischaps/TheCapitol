@@ -3,6 +3,7 @@ local config = require("src.config")
 local scenes = require("libs.LoveLibs.core.scenes")
 local scaling = require("libs.LoveLibs.graphics.scaling")
 local protocol = require("src.net.protocol")
+local api = require("src.net.api")
 local ws = require("src.net.ws")
 local auth = require("src.state.auth")
 local game = require("src.state.game")
@@ -17,12 +18,34 @@ local connectionAttempts = 0
 local maxAttempts = 3
 
 function loading:load()
-    statusMessage = "Connecting..."
+    statusMessage = "Loading terrain..."
     errorMessage = nil
     connectionAttempts = 0
     game.reset()
 
-    self:connectWebSocket()
+    -- Fetch terrain data first, then connect WebSocket
+    self:loadTerrain()
+end
+
+function loading:loadTerrain()
+    local self_ref = self  -- Capture self for coroutine
+    local co = coroutine.create(function()
+        print("[Loading] Fetching terrain data...")
+        local response = api.getTerrain()
+        print("[Loading] Terrain response ok:", response.ok)
+        if response.ok and response.data then
+            print("[Loading] Terrain has water_rings:", response.data.water_rings ~= nil)
+            print("[Loading] Terrain has roads:", response.data.roads ~= nil)
+            game.setTerrain(response.data)
+            statusMessage = "Connecting..."
+            self_ref:connectWebSocket()
+        else
+            print("[Loading] Terrain fetch failed:", response.raw or "no data")
+            errorMessage = "Failed to load terrain data"
+            statusMessage = "Error"
+        end
+    end)
+    coroutine.resume(co)
 end
 
 function loading:unload()

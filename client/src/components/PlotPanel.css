@@ -1,0 +1,117 @@
+.plot-panel {
+  position: absolute;
+  bottom: 20px;
+  left: 20px;
+  width: 280px;
+  background: rgba(26, 26, 36, 0.95);
+  border: 1px solid #3a3a4a;
+  border-radius: 8px;
+  padding: 16px;
+  z-index: 100;
+}
+
+.plot-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #3a3a4a;
+}
+
+.plot-panel-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #c9a227;
+}
+
+.close-button {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.close-button:hover {
+  color: #e0e0e0;
+}
+
+.plot-panel-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.plot-info-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.plot-label {
+  color: #888;
+}
+
+.plot-value {
+  color: #e0e0e0;
+  font-weight: 500;
+}
+
+.plot-value.owner-me {
+  color: #22c55e;
+}
+
+.plot-claim-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #3a3a4a;
+}
+
+.plot-deed-cost {
+  font-size: 14px;
+  color: #888;
+  margin-bottom: 12px;
+  text-align: center;
+}
+
+.plot-deed-cost strong {
+  color: #c9a227;
+}
+
+.claim-button {
+  width: 100%;
+  padding: 10px 16px;
+  background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+  border: none;
+  border-radius: 6px;
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.2s;
+}
+
+.claim-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(34, 197, 94, 0.3);
+}
+
+.claim-button:disabled {
+  background: #4a4a54;
+  color: #888;
+  cursor: not-allowed;
+}
+
+.plot-owner-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #3a3a4a;
+}
+
+.plot-owner-info {
+  font-size: 13px;
+  color: #22c55e;
+  text-align: center;
+}

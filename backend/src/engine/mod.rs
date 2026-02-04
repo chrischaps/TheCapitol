@@ -1,12 +1,15 @@
 mod commands;
 mod crafting;
+pub mod currency;
 mod events;
 mod extraction;
 mod inventory;
 mod movement;
+pub mod property_tax;
 mod regeneration;
 mod stations;
 mod tick;
+pub mod trading;
 
 pub use commands::Command;
 pub use events::GameEvent;

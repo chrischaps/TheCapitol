@@ -58,4 +58,26 @@ pub enum Command {
         recipe_id: String,
         input_item_ids: Vec<Uuid>,
     },
+    // M5: Trading commands
+    InitiateTrade {
+        player_id: Uuid,
+        target_player_id: Uuid,
+    },
+    AcceptTradeRequest {
+        player_id: Uuid,
+    },
+    DeclineTradeRequest {
+        player_id: Uuid,
+    },
+    UpdateTradeOffer {
+        player_id: Uuid,
+        items: Vec<(Uuid, i32)>,
+        strands: i64,
+    },
+    AcceptTrade {
+        player_id: Uuid,
+    },
+    CancelTrade {
+        player_id: Uuid,
+    },
 }

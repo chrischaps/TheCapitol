@@ -4,6 +4,7 @@ use axum::{
     Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::engine::{Command, EXTRACTION_RANGE};
@@ -25,12 +26,22 @@ pub fn router(state: AppState) -> Router<AppState> {
         ))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct NearbyResponse {
+    /// Resource nodes within range of the player
     pub nodes: Vec<ResourceNodeInfo>,
 }
 
-/// Get resource nodes near the player's current position
+/// Get resource nodes near the player
+#[utoipa::path(
+    get,
+    path = "/world/nearby",
+    responses(
+        (status = 200, description = "Nearby resource nodes", body = NearbyResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "World"
+)]
 pub async fn get_nearby(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
@@ -68,18 +79,32 @@ pub async fn get_nearby(
     Ok(Json(NearbyResponse { nodes }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ExtractRequest {
+    /// ID of the resource node to extract from
     pub node_id: Uuid,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ExtractResponse {
+    /// Whether extraction was started successfully
     pub success: bool,
+    /// Optional message (e.g., error reason)
     pub message: Option<String>,
 }
 
 /// Start extracting from a resource node
+#[utoipa::path(
+    post,
+    path = "/world/extract",
+    request_body = ExtractRequest,
+    responses(
+        (status = 200, description = "Extraction started", body = ExtractResponse),
+        (status = 400, description = "Cannot extract (out of range, node unavailable)")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "World"
+)]
 pub async fn start_extraction(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,

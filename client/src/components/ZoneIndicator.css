@@ -1,0 +1,21 @@
+.zone-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(26, 26, 36, 0.9);
+  border: 1px solid;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #e0e0e0;
+}
+
+.zone-icon {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.zone-name {
+  font-weight: 500;
+}

@@ -7,6 +7,7 @@ interface AuthState {
   playerId: string | null
   email: string | null
   tier: string | null
+  isAdmin: boolean
 }
 
 interface AuthContextType extends AuthState {
@@ -30,7 +31,7 @@ function loadAuthState(): AuthState {
   } catch (e) {
     console.error('Failed to load auth state:', e)
   }
-  return { token: null, accountId: null, playerId: null, email: null, tier: null }
+  return { token: null, accountId: null, playerId: null, email: null, tier: null, isAdmin: false }
 }
 
 function saveAuthState(state: AuthState) {
@@ -46,7 +47,7 @@ function saveAuthState(state: AuthState) {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<AuthState>({ token: null, accountId: null, playerId: null, email: null, tier: null })
+  const [state, setState] = useState<AuthState>({ token: null, accountId: null, playerId: null, email: null, tier: null, isAdmin: false })
   const [isLoading, setIsLoading] = useState(true)
 
   useEffect(() => {
@@ -63,6 +64,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       playerId: response.player_id,
       email: response.account.email,
       tier: response.account.tier,
+      isAdmin: response.account.is_admin,
     }
     setState(newState)
     saveAuthState(newState)
@@ -76,6 +78,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       playerId: response.player_id,
       email: response.account.email,
       tier: response.account.tier,
+      isAdmin: response.account.is_admin,
     }
     setState(newState)
     saveAuthState(newState)
@@ -89,7 +92,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.error('Logout API error:', e)
       }
     }
-    const emptyState: AuthState = { token: null, accountId: null, playerId: null, email: null, tier: null }
+    const emptyState: AuthState = { token: null, accountId: null, playerId: null, email: null, tier: null, isAdmin: false }
     setState(emptyState)
     saveAuthState(emptyState)
   }

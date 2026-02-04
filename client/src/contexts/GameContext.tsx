@@ -5,6 +5,9 @@ import { getNearby } from '../api/world'
 import { getRecipes, type Recipe } from '../api/recipes'
 import { getContainers, type ContainerState as ApiContainerState, type SlotItem as ApiSlotItem } from '../api/inventory'
 import { getNearbyStations, getStationContainer, type StationInfo } from '../api/stations'
+import { getCurrency } from '../api/currency'
+import { getPlots, claimPlot as claimPlotApi } from '../api/plots'
+import { getTerrain, type TerrainData } from '../api/terrain'
 
 export interface PlayerPosition {
   id: string
@@ -85,6 +88,63 @@ export interface OpenStation {
   containerId: string
 }
 
+// M5: Trading types
+export interface TradeRequest {
+  fromPlayer: string
+  fromPlayerName: string
+}
+
+export interface TradeOffer {
+  items: TradeOfferItem[]
+  strands: number
+}
+
+export interface TradeOfferItem {
+  itemId: string
+  itemType: string
+  itemName: string
+  quantity: number
+  quality: number
+}
+
+export interface ActiveTrade {
+  tradeId: string
+  partnerId: string
+  partnerName: string
+  myOffer: TradeOffer
+  theirOffer: TradeOffer
+  iAccepted: boolean
+  theyAccepted: boolean
+}
+
+// M7: Zone types
+export interface ZoneInfo {
+  id: string
+  name: string
+}
+
+// M7: Plot types (re-export from api)
+export interface PlotInfo {
+  id: string
+  zoneId: string
+  worldX: number
+  worldY: number
+  bounds: {
+    minX: number
+    minY: number
+    maxX: number
+    maxY: number
+  }
+  sizeCategory: string
+  plotType: string
+  ownerId: string | null
+  ownerName: string | null
+  claimedAt: string | null
+  assessedValue: number
+  stationCount: number
+  stationCapacity: number
+}
+
 interface GameContextType {
   players: Map<string, PlayerPosition>
   nodes: Map<string, ResourceNode>
@@ -108,6 +168,17 @@ interface GameContextType {
   openStation: OpenStation | null
   openStationContainer: ContainerState | null
   placementMode: PlacementMode | null
+  // M5: Economy
+  strandBalance: number
+  // M5: Trading
+  tradeRequest: TradeRequest | null
+  activeTrade: ActiveTrade | null
+  // M7: Zones and Plots
+  currentZone: ZoneInfo | null
+  nearbyPlots: PlotInfo[]
+  selectedPlot: PlotInfo | null
+  // Terrain
+  terrain: TerrainData | null
   // Actions
   sendMove: (x: number, y: number) => void
   startExtraction: (nodeId: string) => void
@@ -118,6 +189,7 @@ interface GameContextType {
   refreshInventory: () => void
   refreshRecipes: () => void
   refreshContainers: () => void
+  refreshCurrency: () => void
   moveItem: (itemId: string, targetContainerId: string, targetSlot: number) => void
   // M4: Station actions
   refreshStations: () => void
@@ -129,6 +201,18 @@ interface GameContextType {
   openStationById: (stationId: string) => void
   closeStation: () => void
   craftAtStation: (stationId: string, recipeId: string, inputItemIds: string[]) => void
+  // M5: Trading actions
+  initiateTrade: (targetPlayerId: string) => void
+  acceptTradeRequest: () => void
+  declineTradeRequest: () => void
+  updateTradeOffer: (items: { itemId: string; quantity: number }[], strands: number) => void
+  acceptTrade: () => void
+  cancelTrade: () => void
+  // M7: Plot actions
+  selectPlot: (plot: PlotInfo) => void
+  closePlotPanel: () => void
+  claimPlot: (plotId: string) => void
+  refreshPlots: () => void
 }
 
 const GameContext = createContext<GameContextType | null>(null)
@@ -191,8 +275,29 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const [openStationContainer, setOpenStationContainer] = useState<ContainerState | null>(null)
   const [placementMode, setPlacementMode] = useState<PlacementMode | null>(null)
 
+  // M5: Economy
+  const [strandBalance, setStrandBalance] = useState<number>(0)
+
+  // M5: Trading
+  const [tradeRequest, setTradeRequest] = useState<TradeRequest | null>(null)
+  const [activeTrade, setActiveTrade] = useState<ActiveTrade | null>(null)
+  const activeTradeRef = useRef<ActiveTrade | null>(null)
+
+  // M7: Zones and Plots
+  const [currentZone, setCurrentZone] = useState<ZoneInfo | null>(null)
+  const [nearbyPlots, setNearbyPlots] = useState<PlotInfo[]>([])
+  const [selectedPlot, setSelectedPlot] = useState<PlotInfo | null>(null)
+
+  // Terrain
+  const [terrain, setTerrain] = useState<TerrainData | null>(null)
+
   const EXTRACTION_RANGE = 50
   const STATION_INTERACTION_RANGE = 75
+
+  // Keep activeTradeRef in sync with activeTrade state for WebSocket handler closure
+  useEffect(() => {
+    activeTradeRef.current = activeTrade
+  }, [activeTrade])
 
   // Compute inventory stacks from inventory (legacy)
   const inventoryStacks = useMemo(() => {
@@ -515,6 +620,138 @@ export function GameProvider({ children }: { children: ReactNode }) {
             return next
           })
           break
+
+        // M5: Currency events
+        case 'currency_changed':
+          setStrandBalance(msg.new_balance)
+          break
+
+        // M7: Zone events
+        case 'zone_changed':
+          if (msg.player_id === playerId) {
+            setCurrentZone({
+              id: msg.to_zone,
+              name: msg.zone_name,
+            })
+            // Add notification
+            const zoneNotification: Notification = {
+              id: `${Date.now()}`,
+              message: `Entered ${msg.zone_name}`,
+              timestamp: Date.now(),
+            }
+            setNotifications((prev) => [...prev, zoneNotification])
+            setTimeout(() => {
+              setNotifications((prev) => prev.filter((n) => n.id !== zoneNotification.id))
+            }, 3000)
+            // Refresh nearby plots when zone changes
+            refreshPlotsInternal()
+          }
+          break
+
+        // M5: Trading events
+        case 'trade_requested':
+          setTradeRequest({
+            fromPlayer: msg.from_player,
+            fromPlayerName: msg.from_player_name,
+          })
+          break
+
+        case 'trade_request_declined':
+          // The initiator gets notified their request was declined
+          const declineNotification: Notification = {
+            id: `${Date.now()}`,
+            message: 'Trade request declined',
+            timestamp: Date.now(),
+          }
+          setNotifications((prev) => [...prev, declineNotification])
+          setTimeout(() => {
+            setNotifications((prev) => prev.filter((n) => n.id !== declineNotification.id))
+          }, 3000)
+          break
+
+        case 'trade_started':
+          setTradeRequest(null)
+          setActiveTrade({
+            tradeId: msg.trade_id,
+            partnerId: msg.partner_id,
+            partnerName: msg.partner_name,
+            myOffer: { items: [], strands: 0 },
+            theirOffer: { items: [], strands: 0 },
+            iAccepted: false,
+            theyAccepted: false,
+          })
+          break
+
+        case 'trade_offer_updated':
+          // Use ref to get current activeTrade value (avoids stale closure)
+          if (activeTradeRef.current && msg.trade_id === activeTradeRef.current.tradeId) {
+            const isMyOffer = msg.player_id === playerId
+            const offerItems: TradeOfferItem[] = msg.items.map((item: { item_id: string; item_type: string; item_name: string; quantity: number; quality: number }) => ({
+              itemId: item.item_id,
+              itemType: item.item_type,
+              itemName: item.item_name,
+              quantity: item.quantity,
+              quality: item.quality,
+            }))
+
+            setActiveTrade((prev) => {
+              if (!prev) return null
+              return {
+                ...prev,
+                ...(isMyOffer
+                  ? { myOffer: { items: offerItems, strands: msg.strands } }
+                  : { theirOffer: { items: offerItems, strands: msg.strands } }),
+                // Reset acceptance when offer changes
+                iAccepted: false,
+                theyAccepted: false,
+              }
+            })
+          }
+          break
+
+        case 'trade_accepted':
+          // Use ref to get current activeTrade value (avoids stale closure)
+          if (activeTradeRef.current && msg.trade_id === activeTradeRef.current.tradeId) {
+            const isMe = msg.player_id === playerId
+            setActiveTrade((prev) => {
+              if (!prev) return null
+              return {
+                ...prev,
+                ...(isMe ? { iAccepted: true } : { theyAccepted: true }),
+              }
+            })
+          }
+          break
+
+        case 'trade_executed':
+          setActiveTrade(null)
+          const tradeNotification: Notification = {
+            id: `${Date.now()}`,
+            message: 'Trade completed!',
+            timestamp: Date.now(),
+          }
+          setNotifications((prev) => [...prev, tradeNotification])
+          setTimeout(() => {
+            setNotifications((prev) => prev.filter((n) => n.id !== tradeNotification.id))
+          }, 3000)
+          // Refresh inventory and currency
+          refreshInventory()
+          refreshContainersInternal()
+          refreshCurrencyInternal()
+          break
+
+        case 'trade_cancelled':
+          setActiveTrade(null)
+          const cancelNotification: Notification = {
+            id: `${Date.now()}`,
+            message: `Trade cancelled: ${msg.reason}`,
+            timestamp: Date.now(),
+          }
+          setNotifications((prev) => [...prev, cancelNotification])
+          setTimeout(() => {
+            setNotifications((prev) => prev.filter((n) => n.id !== cancelNotification.id))
+          }, 3000)
+          break
       }
     }
 
@@ -660,6 +897,18 @@ export function GameProvider({ children }: { children: ReactNode }) {
     }
   }, [token])
 
+  const refreshCurrencyInternal = useCallback(async () => {
+    if (!token) return
+    try {
+      const response = await getCurrency(token)
+      setStrandBalance(response.strand_balance)
+    } catch (error) {
+      console.error('Failed to refresh currency:', error)
+    }
+  }, [token])
+
+  const refreshCurrency = refreshCurrencyInternal
+
   const refreshContainersInternal = useCallback(async () => {
     if (!token) return
     try {
@@ -684,6 +933,68 @@ export function GameProvider({ children }: { children: ReactNode }) {
   }, [token])
 
   const refreshContainers = refreshContainersInternal
+
+  // M7: Plot functions
+  const refreshPlotsInternal = useCallback(async () => {
+    if (!token) return
+    try {
+      const response = await getPlots(token, { limit: 100 })
+      setNearbyPlots(response.plots)
+    } catch (error) {
+      console.error('Failed to refresh plots:', error)
+    }
+  }, [token])
+
+  const refreshPlots = refreshPlotsInternal
+
+  // Terrain fetch (no auth required - public endpoint)
+  const fetchTerrain = useCallback(async () => {
+    try {
+      const terrainData = await getTerrain()
+      setTerrain(terrainData)
+    } catch (error) {
+      console.error('Failed to fetch terrain:', error)
+    }
+  }, [])
+
+  const selectPlot = useCallback((plot: PlotInfo) => {
+    setSelectedPlot(plot)
+  }, [])
+
+  const closePlotPanel = useCallback(() => {
+    setSelectedPlot(null)
+  }, [])
+
+  const claimPlot = useCallback(async (plotId: string) => {
+    if (!token) return
+    try {
+      const response = await claimPlotApi(token, plotId)
+      setStrandBalance(response.newBalance)
+      setSelectedPlot(response.plot)
+      refreshPlotsInternal()
+      // Notify
+      const notification: Notification = {
+        id: `${Date.now()}`,
+        message: `Claimed plot in ${response.plot.zoneId}!`,
+        timestamp: Date.now(),
+      }
+      setNotifications((prev) => [...prev, notification])
+      setTimeout(() => {
+        setNotifications((prev) => prev.filter((n) => n.id !== notification.id))
+      }, 3000)
+    } catch (error) {
+      console.error('Failed to claim plot:', error)
+      const notification: Notification = {
+        id: `${Date.now()}`,
+        message: error instanceof Error ? error.message : 'Failed to claim plot',
+        timestamp: Date.now(),
+      }
+      setNotifications((prev) => [...prev, notification])
+      setTimeout(() => {
+        setNotifications((prev) => prev.filter((n) => n.id !== notification.id))
+      }, 3000)
+    }
+  }, [token, refreshPlotsInternal])
 
   // M4: Station functions
   const refreshStations = useCallback(async () => {
@@ -776,7 +1087,65 @@ export function GameProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // Load inventory, nearby nodes, recipes, containers, and stations when connected
+  // M5: Trading actions
+  const initiateTrade = useCallback((targetPlayerId: string) => {
+    const socket = socketRef.current
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
+        type: 'trade_initiate',
+        target_player_id: targetPlayerId,
+      }))
+    }
+  }, [])
+
+  const acceptTradeRequest = useCallback(() => {
+    const socket = socketRef.current
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'trade_accept_request' }))
+    }
+    setTradeRequest(null)
+  }, [])
+
+  const declineTradeRequest = useCallback(() => {
+    const socket = socketRef.current
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'trade_decline_request' }))
+    }
+    setTradeRequest(null)
+  }, [])
+
+  const updateTradeOffer = useCallback((items: { itemId: string; quantity: number }[], strands: number) => {
+    const socket = socketRef.current
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
+        type: 'trade_offer',
+        items: items.map(i => ({ item_id: i.itemId, quantity: i.quantity })),
+        strands,
+      }))
+    }
+  }, [])
+
+  const acceptTrade = useCallback(() => {
+    const socket = socketRef.current
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'trade_accept' }))
+    }
+  }, [])
+
+  const cancelTrade = useCallback(() => {
+    const socket = socketRef.current
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'trade_cancel' }))
+    }
+    setActiveTrade(null)
+  }, [])
+
+  // Fetch terrain on mount (no auth required)
+  useEffect(() => {
+    fetchTerrain()
+  }, [fetchTerrain])
+
+  // Load inventory, nearby nodes, recipes, containers, stations, plots, and currency when connected
   useEffect(() => {
     if (isConnected && token) {
       refreshInventory()
@@ -784,18 +1153,21 @@ export function GameProvider({ children }: { children: ReactNode }) {
       refreshRecipes()
       refreshContainers()
       refreshStations()
+      refreshPlots()
+      refreshCurrency()
     }
-  }, [isConnected, token, refreshInventory, refreshNearbyNodes, refreshRecipes, refreshContainers, refreshStations])
+  }, [isConnected, token, refreshInventory, refreshNearbyNodes, refreshRecipes, refreshContainers, refreshStations, refreshPlots, refreshCurrency])
 
-  // Periodically refresh nearby nodes and stations (every 5 seconds)
+  // Periodically refresh nearby nodes, stations, and plots (every 5 seconds)
   useEffect(() => {
     if (!isConnected || !token) return
     const interval = setInterval(() => {
       refreshNearbyNodes()
       refreshStations()
+      refreshPlots()
     }, 5000)
     return () => clearInterval(interval)
-  }, [isConnected, token, refreshNearbyNodes, refreshStations])
+  }, [isConnected, token, refreshNearbyNodes, refreshStations, refreshPlots])
 
   // Refresh inventory and containers after extraction/crafting completes
   useEffect(() => {
@@ -854,6 +1226,11 @@ export function GameProvider({ children }: { children: ReactNode }) {
     openStation,
     openStationContainer,
     placementMode,
+    // M5: Economy
+    strandBalance,
+    // M5: Trading
+    tradeRequest,
+    activeTrade,
     sendMove,
     startExtraction,
     moveToAndExtract,
@@ -863,6 +1240,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
     refreshInventory,
     refreshRecipes,
     refreshContainers,
+    refreshCurrency,
     moveItem,
     // M4: Station actions
     refreshStations,
@@ -874,6 +1252,23 @@ export function GameProvider({ children }: { children: ReactNode }) {
     openStationById,
     closeStation,
     craftAtStation,
+    // M5: Trading actions
+    initiateTrade,
+    acceptTradeRequest,
+    declineTradeRequest,
+    updateTradeOffer,
+    acceptTrade,
+    cancelTrade,
+    // M7: Zones and Plots
+    currentZone,
+    nearbyPlots,
+    selectedPlot,
+    selectPlot,
+    closePlotPanel,
+    claimPlot,
+    refreshPlots,
+    // Terrain
+    terrain,
   }
 
   return <GameContext.Provider value={value}>{children}</GameContext.Provider>

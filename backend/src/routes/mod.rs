@@ -1,7 +1,11 @@
 pub mod auth;
+pub mod bureaucracy;
+pub mod exchange;
 pub mod health;
 pub mod inventory;
 pub mod player;
+pub mod plots;
 pub mod recipes;
 pub mod stations;
+pub mod terrain;
 pub mod world;

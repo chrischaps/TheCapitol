@@ -34,3 +34,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 rand = "0.8"
 futures = "0.3"
+
+# API Documentation
+utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"] }
+utoipa-axum = "0.2"
+utoipa-swagger-ui = { version = "9", features = ["axum"] }

@@ -27,6 +27,29 @@
   gap: 1rem;
 }
 
+.currency-display {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  background: rgba(201, 162, 39, 0.1);
+  border: 1px solid var(--color-gold-dim);
+  border-radius: 4px;
+  padding: 0.25rem 0.75rem;
+}
+
+.currency-icon {
+  font-weight: bold;
+  color: var(--color-gold);
+  font-size: 1rem;
+}
+
+.currency-amount {
+  color: var(--color-gold);
+  font-weight: 600;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .user-email {
   color: var(--color-text-dim);
   font-size: 0.875rem;

@@ -1,5 +1,6 @@
 -- Game state management
 local config = require("src.config")
+local terrain = require("src.terrain")
 
 local game = {}
 
@@ -9,6 +10,7 @@ game.nodes = {}          -- Map of node_id -> {id, resource_type, x, y, state}
 game.inventory = {}      -- Array of {id, item_type, name, quality, quality_grade, quantity}
 game.myPlayerId = nil
 game.isConnected = false
+game.terrainLoaded = false
 
 -- Extraction state
 game.extractionState = nil -- {nodeId, progress, duration}
@@ -27,6 +29,18 @@ function game.reset()
     game.extractionState = nil
     game.pendingExtractionNodeId = nil
     game.notifications = {}
+    game.terrainLoaded = false
+end
+
+-- Terrain management
+
+function game.setTerrain(data)
+    terrain.setData(data)
+    game.terrainLoaded = true
+end
+
+function game.isTerrainLoaded()
+    return game.terrainLoaded and terrain.isLoaded()
 end
 
 -- Player management
