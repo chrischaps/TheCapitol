@@ -2,6 +2,8 @@
 
 A multiplayer online game of economic empire-building and political intrigue.
 
+**Project page:** [chaps.dev/projects/thecapitol](https://chaps.dev/projects/thecapitol/)
+
 ## M1: Living World
 
 The first playable vertical slice - players can log in, see themselves in the world, move around, and see other players in real-time.
