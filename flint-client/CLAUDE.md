@@ -75,7 +75,7 @@ git subtree pull --prefix=flint-client/engine flint main --squash
 
 The only exception was the throwaway P0.4 spike. Its subtree patches (`SPIKE(P0.4)`) live on branch `spike/p0.4` and never reach master or Flint. Keep it that way: a subtree patch on master would ride along in the next `git subtree push`.
 
-**The P1 hooks are on master ahead of Flint.** P1.1 to P1.6 (H1 to H5, plus their ADR citations and book guide) committed their engine changes to master. They're upstream as [Flint PR #41](https://github.com/chrischaps/Flint/pull/41) on `feature/player-extensions`, which waits for Chris to merge it. Until then, the subtree differs from `flint/main` by exactly that PR. Don't `git subtree pull` until it merges, and keep anything that isn't part of it out of `engine/`. Once it merges, finish #10: `git subtree pull --prefix=flint-client/engine flint main --squash`, then confirm `git diff flint/main HEAD:flint-client/engine --stat` is empty.
+**The P1 hooks are in Flint.** H1 to H5 merged as [Flint PR #41](https://github.com/chrischaps/Flint/pull/41) (Flint `main` 1481637), and the subtree was pulled back. `flint-client/engine` matches `flint/main` with no Capitol-only patches. Any engine change from here on follows the steps above: its own `feature/*` branch and PR.
 
 ## Pushing to GitHub from this machine
 
