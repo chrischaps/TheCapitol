@@ -1,0 +1,27 @@
+# The Capitol's Flint client. Its own workspace with its own target/, kept out
+# of the root (backend) workspace. The engine at engine/ is a git subtree with
+# a workspace of its own; it's excluded here and reached by path.
+[workspace]
+resolver = "2"
+members = ["crates/capitol-core", "crates/capitol-client"]
+exclude = ["engine"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris"]
+
+[workspace.dependencies]
+# Engine crates, by path into the subtree. Add more as the client needs them.
+flint-core = { path = "engine/crates/flint-core" }
+flint-ecs = { path = "engine/crates/flint-ecs" }
+flint-script = { path = "engine/crates/flint-script" }
+flint-player = { path = "engine/crates/flint-player" }
+
+# Our crates
+capitol-core = { path = "crates/capitol-core" }
+
+# Third-party crates the engine also uses must match engine/Cargo.toml
+# [workspace.dependencies] (egui 0.30, winit 0.30, wgpu 23, rhai 1, glam 0.30),
+# or two copies get linked and types stop lining up across the boundary.

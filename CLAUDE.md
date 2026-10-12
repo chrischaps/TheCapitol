@@ -208,6 +208,19 @@ ui/
   inventory.lua  - Inventory UI
 ```
 
+### Flint Client (`flint-client/`)
+
+The 3D client, built on the Flint engine. It's a separate Cargo workspace (the root workspace excludes it) with the engine as a git subtree at `flint-client/engine/`.
+
+```
+crates/capitol-core/    - Networking and state, no engine dependency
+crates/capitol-client/  - The game binary (`capitol`), wraps Flint's PlayerApp
+scenes/ schemas/ scripts/ fonts/ audio/ models/ fixtures/
+play.bat                - Build release and run
+```
+
+Build, run, subtree pull/push and the engine-upstream rules are in **`flint-client/CLAUDE.md`**. Read it before working there.
+
 ### Tick System
 
 The game runs on a 100ms server tick. Different systems process at different rates:

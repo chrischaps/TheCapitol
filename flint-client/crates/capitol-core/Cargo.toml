@@ -1,0 +1,9 @@
+[package]
+name = "capitol-core"
+description = "Networking and state for The Capitol's Flint client. No engine dependency."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]

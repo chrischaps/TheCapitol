@@ -90,7 +90,9 @@ TheCapitol/
     src/terrain.rs           #   TerrainResponse, WaterRing, Road, TerrainPlot
     src/rules.rs             #   ranges, speeds, quality grades, zone radii, water-crossing test
   flint-client/
-    Cargo.toml               # its own workspace; path deps into engine/crates/*
+    Cargo.toml               # its own workspace, exclude = ["engine"]; path deps into engine/crates/*
+    Cargo.lock               # committed, seeded from engine/Cargo.lock
+    CLAUDE.md                # build/run, subtree pull/push, engine-upstream rules
     engine/                  # Flint, git subtree (squash)
     crates/
       capitol-core/          # net + state, no engine dependency, fast tests
@@ -111,6 +113,8 @@ TheCapitol/
     fixtures/terrain.json    # captured /terrain for offline mode and tests
     play.bat
 ```
+
+**Workspace wiring (P0.2).** `engine/` has a workspace of its own. If the client's workspace didn't exclude it, cargo would make the engine crates members, because they sit under the client's root. With the exclusion, the engine crates are plain path dependencies, and they still inherit `version.workspace` and their other settings from `engine/Cargo.toml`. Third-party crates that cross the engine boundary (egui 0.30, winit 0.30, wgpu 23, rhai 1, glam 0.30) must use the engine's versions. The root `.gitignore` ignores `Cargo.lock`; `flint-client/.gitignore` re-includes the client's.
 
 **Why a game crate, when Flint games are usually data only?** Every Flint game so far has been self-contained. The Capitol client is a window onto a server, so much of its logic is protocol and state that exists only because of this backend. If that code went into the engine, every other Flint game would carry it. The general-purpose pieces become engine hooks (§4.4) and go upstream. The Capitol-specific code stays in `flint-client/crates`.
 

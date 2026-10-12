@@ -1,3 +1,5 @@
 [workspace]
 resolver = "2"
 members = ["backend"]
+# The Flint client is its own workspace (see flint-client/CLAUDE.md).
+exclude = ["flint-client"]
