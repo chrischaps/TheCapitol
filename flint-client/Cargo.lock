@@ -514,9 +514,17 @@ dependencies = [
 name = "capitol-client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "capitol-core",
  "capitol-protocol",
+ "clap",
  "flint-player",
+ "flint-render",
+ "flint-scene",
+ "flint-schema",
+ "rhai",
+ "tracing-subscriber",
+ "winit",
 ]
 
 [[package]]
@@ -1373,6 +1381,7 @@ dependencies = [
  "gilrs",
  "image",
  "pollster",
+ "rhai",
  "serde_json",
  "toml",
  "tracing",

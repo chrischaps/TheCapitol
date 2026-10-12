@@ -18,6 +18,9 @@ flint-core = { path = "engine/crates/flint-core" }
 flint-ecs = { path = "engine/crates/flint-ecs" }
 flint-script = { path = "engine/crates/flint-script" }
 flint-player = { path = "engine/crates/flint-player" }
+flint-render = { path = "engine/crates/flint-render" }
+flint-scene = { path = "engine/crates/flint-scene" }
+flint-schema = { path = "engine/crates/flint-schema" }
 
 # Our crates
 capitol-core = { path = "crates/capitol-core" }
@@ -27,3 +30,9 @@ capitol-protocol = { path = "../protocol" }
 # Third-party crates the engine also uses must match engine/Cargo.toml
 # [workspace.dependencies] (egui 0.30, winit 0.30, wgpu 23, rhai 1, glam 0.30),
 # or two copies get linked and types stop lining up across the boundary.
+rhai = { version = "1", features = ["sync"] }
+winit = "0.30"
+
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

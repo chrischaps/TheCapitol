@@ -100,7 +100,8 @@ TheCapitol/
         src/state/           #   world mirror, interpolation, polling scheduler, trade FSM
         src/bin/capitol-bot.rs  # headless client for integration tests
       capitol-client/        # the game binary
-        src/main.rs          #   wraps PlayerApp, installs CapitolExtension
+        src/main.rs          #   builds PlayerApp, installs CapitolExtension
+        src/extension.rs     #   CapitolExtension: the PlayerExtension (H1) the game installs
         src/coords.rs        #   server <-> world mapping
         src/world/           #   terrain -> meshes (ground, water, roads, bridges, plots, tower)
         src/entities.rs      #   state -> ECS entities each frame (players, nodes, stations)
@@ -180,6 +181,14 @@ H1–H5 are needed for the vertical slice. H6 belongs to P8.
 - **H3 (egui).** One extra callback inside the existing egui pass, after `render_draw_commands` and before the debug panels, gives the draw order H3 wants. With that callback installed, every window event goes to `egui_winit` first. A focused `TextEdit` consumes the keystrokes, and the rest still reach the game. Tested with real keystrokes sent to the window, including backspace. Not tested yet: IME, and Escape while a text box has focus, which flint-player treats as quit when the cursor isn't captured. H3 must handle that case.
 - **Camera and cursor.** With no player entity, the cursor isn't captured and script `set_camera_position`/`set_camera_target` drive the view, which is what the Capitol's camera rig needs.
 - **Small gaps.** The renderer has no clear-colour setter. The `sky` component (gradient, stars) covers the background instead. Scene entities don't need an archetype.
+
+**How H1 was built (P1.1).**
+- **Shape.** `flint_player::PlayerExtension` has the four methods in the table, each with a no-op default. `PlayerApp::add_extension` calls `register_script_api` straight away, on the engine from the new `ScriptSystem::rhai_engine_mut()`. Flint's API is registered first, so a same-signature registration replaces Flint's. The engine survives scene transitions, so registrations last the whole run.
+- **`pre_update`** runs each frame after the clock ticks, the input script applies and the transition advances, and before game events are collected and `on_update` runs. Extensions run in the order they were added. `ExtensionCtx` holds `world` (mutable), `clock`, `input`, `camera` (last frame's) and `gpu: Option<ExtensionGpu>`, which groups the renderer, device and queue and is `None` until the renderer exists. H2 adds `fire_event` to it, and H4 builds the mesh lifecycle on `gpu`.
+- **`on_window_event`** runs after open debug panels have had the event, and before the player's own handling. The first extension to return `true` consumes the event, but only input events can be consumed (keyboard, IME, mouse buttons, wheel, cursor movement, touch). Lifecycle events (`Resized`, `CloseRequested`, `RedrawRequested` and the rest) reach every extension and the player whatever they return.
+- **`ui`** is declared but not called yet. H3 calls it and adds the egui routing.
+- **No wrapper.** The spike's forwarding `ApplicationHandler` isn't needed any more. `capitol` runs `PlayerApp` directly with `CapitolExtension` installed, and `cap_spike_note()` is registered through the trait.
+- **Where the hooks live until P1.6.** P1.1 to P1.5 commit their engine changes to master under `flint-client/engine/`. P1.6 pushes them all upstream as one PR. Until it merges, the subtree differs from `flint/main` on purpose.
 
 ### 4.5 Networking and state (`capitol-core`)
 

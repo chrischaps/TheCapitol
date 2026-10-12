@@ -75,6 +75,8 @@ git subtree pull --prefix=flint-client/engine flint main --squash
 
 The only exception was the throwaway P0.4 spike. Its subtree patches (`SPIKE(P0.4)`) live on branch `spike/p0.4` and never reach master or Flint. Keep it that way: a subtree patch on master would ride along in the next `git subtree push`.
 
+**The P1 hooks are on master ahead of Flint.** P1.1 to P1.5 (H1 to H5) commit their engine changes to master, and P1.6 pushes them upstream together as one PR on `feature/player-extensions`. Until that merges, the subtree differs from `flint/main` by exactly those hooks. Don't `git subtree pull` before P1.6 unless you have to, and keep anything that isn't a hook out of `engine/`.
+
 ## Pushing to GitHub from this machine
 
 Large HTTPS pushes to GitHub get reset here. Push by SSH URL, then fetch so `origin/master` isn't stale:
