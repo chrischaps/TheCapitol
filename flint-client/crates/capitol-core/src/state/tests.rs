@@ -4,8 +4,9 @@
 use std::time::Duration;
 
 use capitol_protocol::rest::*;
-use capitol_protocol::ws::{PlayerPosition, ServerMessage as M, TradeItemInfo};
+use capitol_protocol::ws::{PlayerPosition, ServerMessage as M};
 
+use super::trade::tests as trade;
 use super::*;
 use crate::net::{RestError, RestResponse as R};
 
@@ -19,7 +20,6 @@ const CRAFT_IN: Uuid = Uuid::from_u128(31);
 const STATION_BOX: Uuid = Uuid::from_u128(32);
 const OP: Uuid = Uuid::from_u128(40);
 const PLOT: Uuid = Uuid::from_u128(50);
-const TRADE: Uuid = Uuid::from_u128(60);
 const ITEM: Uuid = Uuid::from_u128(70);
 
 fn pos(id: Uuid, name: &str, x: f64, y: f64) -> PlayerPosition {
@@ -193,13 +193,13 @@ fn test_for(message: &M) -> fn() {
         M::StationOpened { .. } => station_opened_only_for_me,
         M::StationClosed { .. } => station_closed_only_for_me,
         M::NearbyStations { .. } => nearby_stations_merge,
-        M::TradeRequested { .. }
-        | M::TradeRequestDeclined { .. }
-        | M::TradeStarted { .. }
-        | M::TradeOfferUpdated { .. }
-        | M::TradeAccepted { .. }
-        | M::TradeExecuted { .. }
-        | M::TradeCancelled { .. } => trade_messages_pass_through,
+        M::TradeRequested { .. } => trade::trade_requested_prompts,
+        M::TradeRequestDeclined { .. } => trade::trade_request_declined_ends_our_request,
+        M::TradeStarted { .. } => trade::trade_started_opens_from_any_state,
+        M::TradeOfferUpdated { .. } => trade::offers_update_their_side_and_reset_accepts,
+        M::TradeAccepted { .. } => trade::trade_accepted_marks_the_right_side,
+        M::TradeExecuted { .. } => trade::trade_executed_counts_only_ours,
+        M::TradeCancelled { .. } => trade::trade_cancelled_counts_only_ours,
         M::CurrencyChanged { .. } => currency_changed_sets_the_balance,
         M::ZoneChanged { .. } => zone_changed_updates_my_zone,
         M::MovementBlocked { .. } => movement_blocked_moves_me_back,
@@ -978,54 +978,8 @@ fn station_container_is_kept_only_while_open() {
 }
 
 // ---------------------------------------------------------------------------
-// Trades, currency, terrain
+// Currency, terrain (trades are in `trade/tests.rs`)
 // ---------------------------------------------------------------------------
-
-#[test]
-fn trade_messages_pass_through() {
-    let mut state = with_players();
-    let before = format!("{state:?}");
-    let messages = [
-        M::TradeRequested {
-            from_player: OTHER,
-            from_player_name: "Brin".into(),
-        },
-        M::TradeRequestDeclined { by_player: OTHER },
-        M::TradeStarted {
-            trade_id: TRADE,
-            partner_id: OTHER,
-            partner_name: "Brin".into(),
-        },
-        M::TradeOfferUpdated {
-            trade_id: TRADE,
-            player_id: OTHER,
-            items: vec![TradeItemInfo {
-                item_id: ITEM,
-                item_type: "rope".into(),
-                item_name: "Rope".into(),
-                quantity: 1,
-                quality: 80,
-            }],
-            strands: 5,
-        },
-        M::TradeAccepted {
-            trade_id: TRADE,
-            player_id: OTHER,
-        },
-        M::TradeExecuted { trade_id: TRADE },
-        M::TradeCancelled {
-            trade_id: TRADE,
-            reason: "Cancelled".into(),
-        },
-    ];
-    for message in messages {
-        assert_eq!(
-            state.apply_ws(&message),
-            vec![StateEvent::Trade(message.clone())]
-        );
-    }
-    assert_eq!(format!("{state:?}"), before, "trade state is P2.6's");
-}
 
 #[test]
 fn currency_changed_sets_the_balance() {

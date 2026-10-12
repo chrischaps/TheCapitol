@@ -31,7 +31,7 @@
 //! | `station_opened` (mine) | that station's container |
 //! | `station_placed` (mine: a kit was used) | containers |
 //! | extraction or crafting completed (mine) | containers |
-//! | `trade_executed` | containers, currency |
+//! | `trade_executed` (our trade) | containers, currency |
 //! | a deposit or withdrawal answered | containers, currency |
 //! | a REST `move_item` answered | containers, and the open station's container |
 //! | `zone_changed` (mine, a real crossing) | plots |
@@ -52,11 +52,10 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use capitol_protocol::rest::ListPlotsQuery;
-use capitol_protocol::ws::ServerMessage;
 use uuid::Uuid;
 
 use crate::net::{ConnectionState, NetEvent, RestRequest, RestResponse, Tag};
-use crate::state::{GameState, StateEvent};
+use crate::state::{GameState, StateEvent, TradeEvent};
 
 /// The first tag the poller uses. Tags count up from here, so the game's own
 /// tags should stay below it.
@@ -266,9 +265,9 @@ impl Poller {
             StateEvent::ExtractionCompleted { .. } | StateEvent::CraftingCompleted { .. } => {
                 self.request(Fetch::Containers)
             }
-            // Broadcast to everyone, so this may be someone else's trade; P2.6
-            // narrows it. Nothing is held in escrow, so a cancel changes nothing.
-            StateEvent::Trade(ServerMessage::TradeExecuted { .. }) => {
+            // Only our own trade: the store drops other players' `trade_executed`.
+            // Nothing is held in escrow, so a cancel changes nothing.
+            StateEvent::Trade(TradeEvent::Executed { .. }) => {
                 self.request(Fetch::Containers);
                 self.request(Fetch::Currency);
             }

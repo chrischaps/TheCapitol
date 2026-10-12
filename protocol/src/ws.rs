@@ -269,8 +269,9 @@ pub enum ServerMessage {
     TradeAccepted { trade_id: Uuid, player_id: Uuid },
     #[serde(rename = "trade_executed")]
     TradeExecuted { trade_id: Uuid },
-    /// On a disconnect the server sends a placeholder `trade_id`, so while a
-    /// trade is open, treat any cancellation as being about it.
+    /// Broadcast to every client, like `trade_executed`, so only a matching
+    /// `trade_id` is yours. On a disconnect the server sends a placeholder
+    /// `trade_id` (B6, #48); the leaving player's `player_left` follows it.
     #[serde(rename = "trade_cancelled")]
     TradeCancelled { trade_id: Uuid, reason: String },
     // M5: Currency events

@@ -1,7 +1,8 @@
 //! The world mirror. [`GameState`] takes what the net layer reports (a
 //! [`ServerMessage`], a REST result, a connection change) and returns the
-//! [`StateEvent`]s the UI and the 3D world react to. It does no IO and keeps no
-//! clock, so every rule here is a plain reducer test.
+//! [`StateEvent`]s the UI and the 3D world react to. It does no IO and never
+//! reads the clock, so every rule here is a plain reducer test. The trade
+//! timeouts run on the `now` the game passes to [`GameState::tick`].
 //!
 //! ```no_run
 //! # use capitol_core::{net::*, state::*};
@@ -12,6 +13,9 @@
 //!     for change in state.apply(&event) {
 //!         // spawn a node, toast a completion, refetch containers, ...
 //!     }
+//! }
+//! for change in state.tick(std::time::Instant::now()) {
+//!     // a trade command the server never answered
 //! }
 //! ```
 //!
@@ -27,6 +31,7 @@
 //! Make a new `GameState` for each login. It assumes one local player.
 
 mod container;
+mod trade;
 
 use std::collections::HashMap;
 
@@ -39,6 +44,10 @@ use crate::catalog::{self, container_type};
 use crate::net::{ConnectionState, NetEvent, RestResponse};
 
 pub use container::Container;
+pub use trade::{
+    Offer, OpenTrade, Trade, TradeAction, TradeEvent, TradeRefusal, CANCEL_UNCONFIRMED,
+    CONNECTION_LOST, PARTNER_LEFT, REPLY_TIMEOUT,
+};
 
 /// What one player is busy with. The server allows one action at a time
 /// (`ActionState` in `backend/src/models/player.rs`).
@@ -194,10 +203,8 @@ pub enum StateEvent {
     /// Refetch `/terrain`.
     TerrainUpdated,
 
-    /// A trade message for the local player, passed through untouched. The
-    /// trade state machine (P2.6) will replace this. Note that
-    /// `trade_executed` and `trade_cancelled` are broadcast to everyone.
-    Trade(ServerMessage),
+    /// The local player's trading changed. See [`GameState::trade`].
+    Trade(TradeEvent),
 }
 
 /// The client's mirror of the world.
@@ -225,6 +232,8 @@ pub struct GameState {
     recipes: Vec<RecipeInfo>,
     strands: Option<i64>,
     plots: Vec<PlotInfo>,
+
+    trade: trade::TradeBook,
 }
 
 impl Default for GameState {
@@ -254,6 +263,7 @@ impl GameState {
             recipes: Vec::new(),
             strands: None,
             plots: Vec::new(),
+            trade: trade::TradeBook::default(),
         }
     }
 
@@ -277,6 +287,9 @@ impl GameState {
         let mut out = Vec::new();
         self.connection = state.clone();
         out.push(StateEvent::Connection(state.clone()));
+        if !matches!(state, ConnectionState::Connected { .. }) {
+            self.trade_connection_lost(&mut out);
+        }
         if let ConnectionState::Connected { player_id } = state {
             self.me = Some(*player_id);
             if !self.ever_connected {
@@ -288,10 +301,11 @@ impl GameState {
     }
 
     /// The session reconnected. The server dropped the player while it was
-    /// away, which cancelled their action and closed any open station, and
-    /// whatever happened meanwhile was missed.
+    /// away, which cancelled their action and any trade, closed any open
+    /// station, and whatever happened meanwhile was missed.
     pub fn apply_resync(&mut self) -> Vec<StateEvent> {
         let mut out = Vec::new();
+        self.trade_connection_lost(&mut out);
         for (player_id, _) in self.activities.drain() {
             out.push(StateEvent::ActivityChanged { player_id });
         }
@@ -566,7 +580,7 @@ impl GameState {
             | M::TradeOfferUpdated { .. }
             | M::TradeAccepted { .. }
             | M::TradeExecuted { .. }
-            | M::TradeCancelled { .. } => out.push(StateEvent::Trade(message.clone())),
+            | M::TradeCancelled { .. } => self.apply_trade(message, &mut out),
 
             // Only ever sent to the player whose balance it is.
             M::CurrencyChanged { new_balance } => self.set_strands(*new_balance, &mut out),
@@ -828,6 +842,7 @@ impl GameState {
         if self.players.remove(&id).is_some() {
             out.push(StateEvent::PlayerLeft(id));
         }
+        self.trade_player_left(id, out);
         if self.activities.remove(&id).is_some() && !self.is_me(id) {
             out.push(StateEvent::ActivityChanged { player_id: id });
         }

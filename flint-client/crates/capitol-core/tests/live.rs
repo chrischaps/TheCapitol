@@ -15,7 +15,7 @@ use capitol_core::poll::{Fetch, Poller};
 use capitol_core::protocol::rest::{LoginRequest, RegisterRequest};
 use capitol_core::protocol::rules;
 use capitol_core::protocol::ws::{ClientMessage, ServerMessage};
-use capitol_core::state::{GameState, StateEvent};
+use capitol_core::state::{GameState, StateEvent, Trade, TradeEvent, PARTNER_LEFT};
 
 const WAIT: Duration = Duration::from_secs(10);
 const FRAME: Duration = Duration::from_millis(16);
@@ -185,6 +185,7 @@ impl Mirror {
                 self.poller.observe(&event, &changes, &self.state);
                 seen.extend(changes);
             }
+            seen.extend(self.state.tick(Instant::now()));
             for (request, tag) in self.poller.tick(Instant::now()) {
                 self.fetched.push(self.poller.in_flight(tag).unwrap());
                 self.net.rest(request, tag);
@@ -410,4 +411,144 @@ fn the_prediction_agrees_with_a_real_walk() {
         "home: {last:?}"
     );
     net.disconnect();
+}
+
+impl Mirror {
+    /// Registers a fresh account and connects it, up to a full snapshot.
+    fn register(label: &str) -> Mirror {
+        let net = net();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let auth = match rest(
+            &net,
+            RestRequest::Register(RegisterRequest {
+                email: format!("flint-{label}-{stamp}@test.local"),
+                password: "correct horse battery staple".into(),
+                player_name: format!("{label}{}", stamp % 100_000),
+            }),
+            1,
+        ) {
+            Ok(RestResponse::Auth(auth)) => auth,
+            other => panic!("register {label}: {other:?}"),
+        };
+        let mut mirror = Mirror {
+            net,
+            state: GameState::new(),
+            poller: Poller::new(),
+            fetched: Vec::new(),
+        };
+        mirror.net.connect(auth.token);
+        mirror.pump_until("a snapshot", |s, _| {
+            s.local_player().is_some() && s.strands().is_some()
+        });
+        mirror
+    }
+
+    fn me(&self) -> uuid::Uuid {
+        self.state.me().unwrap()
+    }
+
+    /// Runs a trade action and sends the message it returns.
+    fn act(
+        &mut self,
+        action: impl FnOnce(
+            &mut GameState,
+            Instant,
+        ) -> Result<ClientMessage, capitol_core::state::TradeRefusal>,
+    ) {
+        let message = action(&mut self.state, Instant::now()).expect("the action is allowed");
+        self.net.ws(message);
+    }
+}
+
+fn has(seen: &[StateEvent], wanted: impl Fn(&TradeEvent) -> bool) -> bool {
+    seen.iter()
+        .any(|e| matches!(e, StateEvent::Trade(t) if wanted(t)))
+}
+
+/// Two fresh players (both spawn at the same point, so in range) trade 10
+/// strands, then open and cancel a trade, then lose one to a disconnect.
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn two_players_trade() {
+    let mut ada = Mirror::register("Ada");
+    let mut brin = Mirror::register("Brin");
+    let (ada_id, brin_id) = (ada.me(), brin.me());
+    ada.pump_until("Brin in the world", |s, _| s.player(brin_id).is_some());
+    let start = ada.state.strands().unwrap();
+    let brin_start = brin.state.strands().unwrap();
+
+    // Request, accept, open.
+    ada.act(|s, now| s.trade_initiate(now, brin_id));
+    brin.pump_until(
+        "Ada's request",
+        |s, _| matches!(s.trade(), Trade::Incoming { from, .. } if *from == ada_id),
+    );
+    brin.act(|s, now| s.trade_accept_request(now));
+    brin.pump_until("the trade to open", |s, _| s.open_trade().is_some());
+    ada.pump_until("the trade to open", |s, _| s.open_trade().is_some());
+    let trade_id = ada.state.open_trade().unwrap().trade_id;
+    assert_eq!(brin.state.open_trade().unwrap().trade_id, trade_id);
+
+    // Ada offers 10 strands; both see it.
+    ada.act(|s, now| s.trade_offer(now, vec![], 10));
+    ada.pump_until("our offer echoed", |s, _| {
+        s.open_trade().unwrap().mine.strands == 10 && s.trade_waiting().is_none()
+    });
+    brin.pump_until("Ada's offer", |s, _| {
+        s.open_trade().unwrap().theirs.strands == 10
+    });
+
+    // Brin accepts, then Ada; the trade executes and the balances refetch.
+    brin.act(|s, now| s.trade_accept(now));
+    ada.pump_until("Brin's accept", |s, _| {
+        s.open_trade().unwrap().they_accepted
+    });
+    ada.fetched.clear();
+    ada.act(|s, now| s.trade_accept(now));
+    let seen = ada.pump_until("the trade to execute", |s, _| {
+        s.trade() == &Trade::Idle && s.strands() == Some(start - 10)
+    });
+    assert!(has(&seen, |t| *t == TradeEvent::Executed { trade_id }));
+    assert!(ada.fetched.contains(&Fetch::Currency), "{:?}", ada.fetched);
+    brin.pump_until("Brin's strands", |s, _| {
+        s.trade() == &Trade::Idle && s.strands() == Some(brin_start + 10)
+    });
+
+    // Brin asks this time; Ada accepts, then cancels.
+    brin.act(|s, now| s.trade_initiate(now, ada_id));
+    ada.pump_until("Brin's request", |s, _| {
+        matches!(s.trade(), Trade::Incoming { .. })
+    });
+    ada.act(|s, now| s.trade_accept_request(now));
+    ada.pump_until("the second trade", |s, _| s.open_trade().is_some());
+    brin.pump_until("the second trade", |s, _| s.open_trade().is_some());
+    ada.act(|s, now| s.trade_cancel(now));
+    let seen = brin.pump_until("the cancel", |s, _| s.trade() == &Trade::Idle);
+    assert!(has(
+        &seen,
+        |t| matches!(t, TradeEvent::Cancelled { reason, .. } if reason == "Cancelled by player")
+    ));
+    ada.pump_until("the cancel", |s, _| s.trade() == &Trade::Idle);
+
+    // A third trade, and Brin drops. Ada gets the dummy-id cancel, which the
+    // store ignores, then Brin's leave, which ends it.
+    ada.act(|s, now| s.trade_initiate(now, brin_id));
+    brin.pump_until("the third request", |s, _| {
+        matches!(s.trade(), Trade::Incoming { .. })
+    });
+    brin.act(|s, now| s.trade_accept_request(now));
+    ada.pump_until("the third trade", |s, _| s.open_trade().is_some());
+    let third = ada.state.open_trade().unwrap().trade_id;
+    brin.net.disconnect();
+    let seen = ada.pump_until("Brin's leave to end it", |s, _| s.trade() == &Trade::Idle);
+    assert!(has(&seen, |t| *t
+        == TradeEvent::Cancelled {
+            trade_id: third,
+            reason: PARTNER_LEFT.into()
+        }));
+
+    ada.net.disconnect();
 }

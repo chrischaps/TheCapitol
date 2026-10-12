@@ -15,6 +15,7 @@ const INVENTORY: Uuid = Uuid::from_u128(30);
 const STATION_BOX: Uuid = Uuid::from_u128(32);
 const STRANGERS_BOX: Uuid = Uuid::from_u128(33);
 const TRADE: Uuid = Uuid::from_u128(60);
+const STRANGERS_TRADE: Uuid = Uuid::from_u128(61);
 /// A tag of the game's own, below [`FIRST_TAG`].
 const GAME_TAG: Tag = 7;
 
@@ -49,6 +50,17 @@ impl Rig {
         }));
         rig.answer_all(); // the snapshot
         assert!(rig.poller.is_idle());
+        rig
+    }
+
+    /// Settled, in a trade with `OTHER`.
+    fn trading() -> Self {
+        let mut rig = Self::settled();
+        rig.feed(NetEvent::Ws(M::TradeStarted {
+            trade_id: TRADE,
+            partner_id: OTHER,
+            partner_name: "Brin".into(),
+        }));
         rig
     }
 
@@ -209,6 +221,8 @@ enum Start {
     Fresh,
     Settled,
     AtStation,
+    /// Settled, in a trade with `OTHER`.
+    Trading,
 }
 
 /// Each row: where it starts, the events of one frame, and exactly what the
@@ -385,14 +399,22 @@ fn rules() -> Vec<(&'static str, Start, Vec<NetEvent>, Vec<Fetch>)> {
             vec![Fetch::Containers],
         ),
         (
-            "trade_executed fetches containers and currency",
-            Settled,
+            "our trade_executed fetches containers and currency",
+            Trading,
             vec![NetEvent::Ws(M::TradeExecuted { trade_id: TRADE })],
             vec![Fetch::Containers, Fetch::Currency],
         ),
         (
+            "a stranger's trade_executed fetches nothing",
+            Trading,
+            vec![NetEvent::Ws(M::TradeExecuted {
+                trade_id: STRANGERS_TRADE,
+            })],
+            vec![],
+        ),
+        (
             "trade_cancelled fetches nothing (no escrow)",
-            Settled,
+            Trading,
             vec![NetEvent::Ws(M::TradeCancelled {
                 trade_id: TRADE,
                 reason: "Cancelled".into(),
@@ -489,6 +511,7 @@ fn each_trigger_sends_exactly_its_fetches() {
             Start::Fresh => Rig::new(),
             Start::Settled => Rig::settled(),
             Start::AtStation => Rig::at_station(),
+            Start::Trading => Rig::trading(),
         };
         for event in events {
             rig.feed(event);
@@ -588,7 +611,7 @@ fn a_failed_answer_still_clears_the_fetch() {
 
 #[test]
 fn different_fetches_go_out_together() {
-    let mut rig = Rig::settled();
+    let mut rig = Rig::trading();
     rig.feed(my_inventory_updated());
     rig.tick();
     rig.feed(NetEvent::Ws(M::TradeExecuted { trade_id: TRADE }));
