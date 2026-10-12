@@ -3,9 +3,11 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
+
+use capitol_protocol::rest::{
+    CurrencyResponse, Destination, InventoryResponse, MoveRequest, MoveResponse,
+};
 
 use crate::engine::Command;
 use crate::error::AppError;
@@ -24,14 +26,6 @@ pub fn router(state: AppState) -> Router<AppState> {
         ))
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct MoveRequest {
-    /// Destination X coordinate (0-1000)
-    pub x: f64,
-    /// Destination Y coordinate (0-1000)
-    pub y: f64,
-}
-
 /// Set player movement destination
 #[utoipa::path(
     post,
@@ -48,7 +42,7 @@ pub async fn move_player(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<MoveRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<MoveResponse>, AppError> {
     // Validate coordinates
     if req.x < 0.0 || req.x > 1000.0 || req.y < 0.0 || req.y > 1000.0 {
         return Err(AppError::BadRequest("Coordinates out of bounds".into()));
@@ -70,16 +64,10 @@ pub async fn move_player(
         dest_y: req.y,
     });
 
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "destination": { "x": req.x, "y": req.y }
-    })))
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct InventoryResponse {
-    /// All items owned by the player
-    pub items: Vec<InventoryItem>,
+    Ok(Json(MoveResponse {
+        success: true,
+        destination: Destination { x: req.x, y: req.y },
+    }))
 }
 
 /// Get player's inventory items
@@ -132,17 +120,11 @@ pub async fn get_inventory(
                 .get(&item.item_type)
                 .cloned()
                 .unwrap_or_else(|| item.item_type.clone());
-            InventoryItem::from_item(item, &name)
+            item.to_inventory_item(&name)
         })
         .collect();
 
     Ok(Json(InventoryResponse { items: inventory_items }))
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct CurrencyResponse {
-    /// Current Strand balance
-    pub strand_balance: i64,
 }
 
 /// Get player's currency balance

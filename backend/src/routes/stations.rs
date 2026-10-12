@@ -3,10 +3,13 @@ use axum::{
     routing::{delete, get, post},
     Extension, Json, Router,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use utoipa::ToSchema;
 use uuid::Uuid;
+
+use capitol_protocol::rest::{
+    NearbyStationsResponse, PlaceStationRequest, PlaceStationResponse, StationContainerResponse,
+    SuccessResponse,
+};
 
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -23,13 +26,6 @@ pub fn router(state: AppState) -> Router<AppState> {
             state,
             crate::middleware::auth::auth_middleware,
         ))
-}
-
-/// Station info for nearby query
-#[derive(Debug, Serialize, ToSchema)]
-pub struct NearbyStationsResponse {
-    /// Stations within visibility range
-    pub stations: Vec<StationInfo>,
 }
 
 /// Get all stations near the player
@@ -117,24 +113,6 @@ pub async fn get_nearby_stations(
         .collect();
 
     Ok(Json(NearbyStationsResponse { stations: station_infos }))
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct PlaceStationRequest {
-    /// Station type to place (workbench, forge, storage_chest)
-    pub station_type: String,
-    /// X position in world coordinates
-    pub x: f64,
-    /// Y position in world coordinates
-    pub y: f64,
-    /// Kit item ID to consume
-    pub kit_item_id: Uuid,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct PlaceStationResponse {
-    /// The newly placed station
-    pub station: StationInfo,
 }
 
 /// Place a new station on a plot you own
@@ -252,7 +230,7 @@ pub async fn place_station(
     )
     .bind(req.x)
     .bind(req.y)
-    .bind(50.0 * 50.0)
+    .bind(capitol_protocol::rules::STATION_MIN_SPACING * capitol_protocol::rules::STATION_MIN_SPACING)
     .fetch_optional(&state.db)
     .await?;
 
@@ -341,7 +319,7 @@ pub async fn remove_station(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Path(station_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<SuccessResponse>, AppError> {
     // Get player ID
     let player_id = sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM players WHERE account_id = $1 LIMIT 1"
@@ -378,22 +356,7 @@ pub async fn remove_station(
         .execute(&state.db)
         .await?;
 
-    Ok(Json(serde_json::json!({ "success": true })))
-}
-
-/// Container response with slot items
-#[derive(Debug, Serialize, ToSchema)]
-pub struct StationContainerResponse {
-    /// Container ID
-    pub id: Uuid,
-    /// Container type
-    pub container_type: String,
-    /// Total slots
-    pub slot_count: i32,
-    /// UI layout columns
-    pub layout_columns: i32,
-    /// Items in slots
-    pub slots: Vec<SlotItem>,
+    Ok(Json(SuccessResponse::ok()))
 }
 
 /// Get a station's inventory container

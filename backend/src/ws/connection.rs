@@ -8,295 +8,16 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use redis::AsyncCommands;
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::timeout;
 use uuid::Uuid;
+
+use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo};
 
 use crate::engine::GameEvent;
 use crate::models::PlayerState;
 use crate::routes::auth::Claims;
 use crate::state::AppState;
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum ClientMessage {
-    #[serde(rename = "auth")]
-    Auth { token: String },
-    #[serde(rename = "subscribe")]
-    Subscribe { channel: String },
-    #[serde(rename = "move")]
-    Move { x: f64, y: f64 },
-    #[serde(rename = "extract")]
-    Extract { node_id: String },
-    #[serde(rename = "cancel_extraction")]
-    CancelExtraction,
-    // M3: Crafting
-    #[serde(rename = "craft")]
-    Craft { recipe_id: String, input_item_ids: Vec<String> },
-    #[serde(rename = "cancel_crafting")]
-    CancelCrafting,
-    // M3.5: Inventory
-    #[serde(rename = "move_item")]
-    MoveItem {
-        item_id: String,
-        target_container_id: String,
-        target_slot: i32,
-    },
-    // M4: Stations
-    #[serde(rename = "place_station")]
-    PlaceStation {
-        station_type: String,
-        x: f64,
-        y: f64,
-        kit_item_id: String,
-    },
-    #[serde(rename = "remove_station")]
-    RemoveStation {
-        station_id: String,
-    },
-    #[serde(rename = "open_station")]
-    OpenStation {
-        station_id: String,
-    },
-    #[serde(rename = "close_station")]
-    CloseStation,
-    #[serde(rename = "craft_at_station")]
-    CraftAtStation {
-        station_id: String,
-        recipe_id: String,
-        input_item_ids: Vec<String>,
-    },
-    // M5: Trading
-    #[serde(rename = "trade_initiate")]
-    TradeInitiate { target_player_id: String },
-    #[serde(rename = "trade_accept_request")]
-    TradeAcceptRequest,
-    #[serde(rename = "trade_decline_request")]
-    TradeDeclineRequest,
-    #[serde(rename = "trade_offer")]
-    TradeOffer {
-        items: Vec<TradeOfferItem>,
-        strands: i64,
-    },
-    #[serde(rename = "trade_accept")]
-    TradeAccept,
-    #[serde(rename = "trade_cancel")]
-    TradeCancel,
-}
-
-#[derive(Debug, Deserialize)]
-struct TradeOfferItem {
-    item_id: String,
-    quantity: i32,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-enum ServerMessage {
-    #[serde(rename = "auth_ok")]
-    AuthOk { player_id: Uuid },
-    #[serde(rename = "auth_error")]
-    AuthError { message: String },
-    #[serde(rename = "subscribed")]
-    Subscribed { channel: String },
-    #[serde(rename = "positions")]
-    Positions { players: Vec<crate::models::PlayerPosition> },
-    #[serde(rename = "player_joined")]
-    PlayerJoined { player: crate::models::PlayerPosition },
-    #[serde(rename = "player_left")]
-    PlayerLeft { player_id: Uuid },
-    #[serde(rename = "error")]
-    Error { message: String },
-    // M2: Extraction events
-    #[serde(rename = "extraction_started")]
-    ExtractionStarted {
-        player_id: Uuid,
-        node_id: Uuid,
-        duration_ticks: u32,
-    },
-    #[serde(rename = "extraction_progress")]
-    ExtractionProgress {
-        player_id: Uuid,
-        progress: u32,
-        duration: u32,
-    },
-    #[serde(rename = "extraction_completed")]
-    ExtractionCompleted {
-        player_id: Uuid,
-        node_id: Uuid,
-        item_type: String,
-        item_name: String,
-        quantity: i32,
-        quality: i32,
-    },
-    #[serde(rename = "extraction_cancelled")]
-    ExtractionCancelled { player_id: Uuid },
-    #[serde(rename = "node_depleted")]
-    NodeDepleted { node_id: Uuid },
-    #[serde(rename = "node_regenerated")]
-    NodeRegenerated { node_id: Uuid },
-    #[serde(rename = "nearby_nodes")]
-    NearbyNodes { nodes: Vec<crate::models::ResourceNodeInfo> },
-    // M3: Crafting events
-    #[serde(rename = "crafting_started")]
-    CraftingStarted {
-        player_id: Uuid,
-        operation_id: Uuid,
-        recipe_id: String,
-        recipe_name: String,
-        duration_ticks: u32,
-    },
-    #[serde(rename = "crafting_progress")]
-    CraftingProgress {
-        player_id: Uuid,
-        operation_id: Uuid,
-        progress: u32,
-        duration: u32,
-    },
-    #[serde(rename = "crafting_completed")]
-    CraftingCompleted {
-        player_id: Uuid,
-        operation_id: Uuid,
-        item_type: String,
-        item_name: String,
-        quantity: i32,
-        quality: i32,
-    },
-    #[serde(rename = "crafting_cancelled")]
-    CraftingCancelled {
-        player_id: Uuid,
-        operation_id: Uuid,
-    },
-    #[serde(rename = "crafting_failed")]
-    CraftingFailed {
-        player_id: Uuid,
-        reason: String,
-    },
-    // M3.5: Inventory events
-    #[serde(rename = "inventory_updated")]
-    InventoryUpdated {
-        player_id: Uuid,
-        container_id: Uuid,
-    },
-    #[serde(rename = "item_moved")]
-    ItemMoved {
-        player_id: Uuid,
-        item_id: Uuid,
-        from_container: Uuid,
-        from_slot: i32,
-        to_container: Uuid,
-        to_slot: i32,
-    },
-    #[serde(rename = "items_merged")]
-    ItemsMerged {
-        player_id: Uuid,
-        source_item_id: Uuid,
-        target_item_id: Uuid,
-        new_quantity: i32,
-        new_quality: i32,
-    },
-    // M4: Station events
-    #[serde(rename = "station_placed")]
-    StationPlaced {
-        station_id: Uuid,
-        station_type: String,
-        name: String,
-        owner_id: Uuid,
-        x: f64,
-        y: f64,
-        container_id: Uuid,
-    },
-    #[serde(rename = "station_removed")]
-    StationRemoved {
-        station_id: Uuid,
-    },
-    #[serde(rename = "station_opened")]
-    StationOpened {
-        player_id: Uuid,
-        station_id: Uuid,
-        station_type: String,
-        name: String,
-        container_id: Uuid,
-    },
-    #[serde(rename = "station_closed")]
-    StationClosed {
-        player_id: Uuid,
-    },
-    #[serde(rename = "nearby_stations")]
-    NearbyStations {
-        stations: Vec<crate::models::StationInfo>,
-    },
-    // M5: Trading events
-    #[serde(rename = "trade_requested")]
-    TradeRequested {
-        from_player: Uuid,
-        from_player_name: String,
-    },
-    #[serde(rename = "trade_request_declined")]
-    TradeRequestDeclined {
-        by_player: Uuid,
-    },
-    #[serde(rename = "trade_started")]
-    TradeStarted {
-        trade_id: Uuid,
-        partner_id: Uuid,
-        partner_name: String,
-    },
-    #[serde(rename = "trade_offer_updated")]
-    TradeOfferUpdated {
-        trade_id: Uuid,
-        player_id: Uuid,
-        items: Vec<TradeItemInfo>,
-        strands: i64,
-    },
-    #[serde(rename = "trade_accepted")]
-    TradeAcceptedMsg {
-        trade_id: Uuid,
-        player_id: Uuid,
-    },
-    #[serde(rename = "trade_executed")]
-    TradeExecuted {
-        trade_id: Uuid,
-    },
-    #[serde(rename = "trade_cancelled")]
-    TradeCancelled {
-        trade_id: Uuid,
-        reason: String,
-    },
-    // M5: Currency events
-    #[serde(rename = "currency_changed")]
-    CurrencyChanged {
-        new_balance: i64,
-    },
-    // M7: Zone events
-    #[serde(rename = "zone_changed")]
-    ZoneChanged {
-        player_id: Uuid,
-        from_zone: String,
-        to_zone: String,
-        zone_name: String,
-    },
-    // Terrain events
-    #[serde(rename = "movement_blocked")]
-    MovementBlocked {
-        player_id: Uuid,
-        reason: String,
-        stopped_x: f64,
-        stopped_y: f64,
-    },
-    #[serde(rename = "terrain_updated")]
-    TerrainUpdated,
-}
-
-#[derive(Debug, Serialize)]
-struct TradeItemInfo {
-    item_id: Uuid,
-    item_type: String,
-    item_name: String,
-    quantity: i32,
-    quality: i32,
-}
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -990,7 +711,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
                         if let Some((player_a, player_b)) = participants {
                             if player_id == player_a || player_id == player_b {
-                                let msg = ServerMessage::TradeAcceptedMsg { trade_id, player_id: accepting_player };
+                                let msg = ServerMessage::TradeAccepted { trade_id, player_id: accepting_player };
                                 let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                             }
                         }
@@ -1326,7 +1047,7 @@ async fn handle_place_station(
     )
     .bind(x)
     .bind(y)
-    .bind(50.0 * 50.0)
+    .bind(capitol_protocol::rules::STATION_MIN_SPACING * capitol_protocol::rules::STATION_MIN_SPACING)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| format!("Database error: {}", e))?;

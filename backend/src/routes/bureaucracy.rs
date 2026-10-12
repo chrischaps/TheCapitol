@@ -3,8 +3,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use serde::Serialize;
-use utoipa::ToSchema;
+use capitol_protocol::rest::{DeedPrice, DeedPricesResponse, ZonesResponse};
 
 use crate::error::AppError;
 use crate::models::ZoneInfo;
@@ -14,12 +13,6 @@ pub fn router(_state: AppState) -> Router<AppState> {
     Router::new()
         .route("/zones", get(get_zones))
         .route("/deed-prices", get(get_deed_prices))
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ZonesResponse {
-    /// All zones in the game world
-    pub zones: Vec<ZoneInfo>,
 }
 
 /// Get all zone definitions
@@ -43,26 +36,6 @@ pub async fn get_zones(
     .await?;
 
     Ok(Json(ZonesResponse { zones }))
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct DeedPrice {
-    /// Zone identifier
-    pub zone_id: String,
-    /// Zone display name
-    pub zone_name: String,
-    /// Cost in Strands to purchase a deed
-    pub deed_cost: i32,
-    /// Plot size category name
-    pub plot_size: String,
-    /// Maximum stations allowed on plots in this zone
-    pub station_capacity: i32,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct DeedPricesResponse {
-    /// Deed prices for all zones with purchasable plots
-    pub prices: Vec<DeedPrice>,
 }
 
 /// Get deed prices for all zones with purchasable plots

@@ -21,6 +21,8 @@ flint-player = { path = "engine/crates/flint-player" }
 
 # Our crates
 capitol-core = { path = "crates/capitol-core" }
+# Shared with the backend (root workspace). No `backend` feature: no sqlx or utoipa.
+capitol-protocol = { path = "../protocol" }
 
 # Third-party crates the engine also uses must match engine/Cargo.toml
 # [workspace.dependencies] (egui 0.30, winit 0.30, wgpu 23, rhai 1, glam 0.30),

@@ -4,7 +4,7 @@ use uuid::Uuid;
 use crate::models::{PlayerState, StationState, StationType};
 
 /// Maximum distance from player to station for interaction (world units)
-pub const STATION_INTERACTION_RANGE: f64 = 75.0;
+pub use capitol_protocol::rules::STATION_INTERACTION_RANGE;
 
 /// Check if a player is within interaction range of a station
 pub fn is_player_near_station(player: &PlayerState, station: &StationState, range: f32) -> bool {
@@ -88,20 +88,10 @@ pub fn is_valid_placement(
 
 /// Get station kit item type for a station type
 pub fn get_station_kit_type(station_type: &str) -> Option<&'static str> {
-    match station_type {
-        "workbench" => Some("workbench_kit"),
-        "forge" => Some("forge_kit"),
-        "storage_chest" => Some("chest_kit"),
-        _ => None,
-    }
+    capitol_protocol::rules::station_kit_item(station_type)
 }
 
 /// Get station type from kit item type
 pub fn get_station_type_from_kit(item_type: &str) -> Option<&'static str> {
-    match item_type {
-        "workbench_kit" => Some("workbench"),
-        "forge_kit" => Some("forge"),
-        "chest_kit" => Some("storage_chest"),
-        _ => None,
-    }
+    capitol_protocol::rules::station_type_for_kit(item_type)
 }

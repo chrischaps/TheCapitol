@@ -3,22 +3,18 @@
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
-use crate::models::{
-    AccountInfo, Bounds, InventoryItem, PlotInfo, PlotPermissions, RecipeInfo,
-    RecipeInputInfo, RecipeOutputInfo, ResourceNodeInfo, SlotItem, StationInfo, ZoneInfo,
+use capitol_protocol::rest::{
+    AccountInfo, AuthResponse, Bounds, ClaimPlotResponse, ContainerResponse, ContainersResponse,
+    CurrencyResponse, DeedPrice, DeedPricesResponse, DepositRequest, DepositResponse,
+    ExtractRequest, ExtractResponse, HealthResponse, InventoryItem, InventoryResponse,
+    ListPlotsResponse, LoginRequest, LogoutRequest, MoveItemRequest, MoveItemResponse,
+    MoveRequest, NearbyResponse, NearbyStationsResponse, PlaceStationRequest,
+    PlaceStationResponse, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
+    RecipeOutputInfo, RecipesResponse, RegisterRequest, ResourceNodeInfo, SlotItem,
+    StationContainerResponse, StationInfo, WithdrawRequest, WithdrawResponse, ZoneInfo,
+    ZonesResponse,
 };
-
-use crate::routes::auth::{AuthResponse, LoginRequest, LogoutRequest, RegisterRequest};
-use crate::routes::bureaucracy::{DeedPrice, DeedPricesResponse, ZonesResponse};
-use crate::routes::exchange::{DepositRequest, DepositResponse, WithdrawRequest, WithdrawResponse};
-use crate::routes::health::HealthResponse;
-use crate::routes::inventory::{ContainerResponse, ContainersResponse, MoveItemRequest, MoveItemResponse};
-use crate::routes::player::{CurrencyResponse, InventoryResponse, MoveRequest};
-use crate::routes::plots::{ClaimPlotResponse, ListPlotsResponse};
-use crate::routes::recipes::RecipesResponse;
-use crate::routes::stations::{NearbyStationsResponse, PlaceStationRequest, PlaceStationResponse, StationContainerResponse};
-use crate::routes::terrain::{BridgeResponse, RoadResponse, TerrainResponse, WaterRingResponse};
-use crate::routes::world::{ExtractRequest, ExtractResponse, NearbyResponse};
+use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPlot, TerrainResponse, WaterRing};
 
 /// Security scheme modifier for JWT Bearer authentication
 struct SecurityAddon;
@@ -161,9 +157,11 @@ then include it in the `Authorization: Bearer <token>` header.",
         DeedPrice,
         // Terrain
         TerrainResponse,
-        WaterRingResponse,
-        BridgeResponse,
-        RoadResponse,
+        WaterRing,
+        Bridge,
+        RoadSegment,
+        RoadType,
+        TerrainPlot,
     ))
 )]
 pub struct ApiDoc;

@@ -3,17 +3,14 @@ use axum::{
     routing::post,
     Extension, Json, Router,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use capitol_protocol::rest::{DepositRequest, DepositResponse, WithdrawRequest, WithdrawResponse};
+use capitol_protocol::rules::EXCHANGE_FEE_RATE;
 use uuid::Uuid;
 
 use crate::engine::currency::{add_strands, subtract_strands, TransactionType};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
-
-/// Exchange fee rate (0.5% = 0.005)
-const EXCHANGE_FEE_RATE: f64 = 0.005;
 
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
@@ -23,24 +20,6 @@ pub fn router(state: AppState) -> Router<AppState> {
             state,
             crate::middleware::auth::auth_middleware,
         ))
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct DepositRequest {
-    /// Item IDs to deposit (must be fiber items)
-    pub item_ids: Vec<Uuid>,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct DepositResponse {
-    /// Total fiber quantity deposited
-    pub deposited_quantity: i32,
-    /// Exchange fee (0.5%)
-    pub fee: i64,
-    /// Net Strands received after fee
-    pub strands_received: i64,
-    /// New Strand balance
-    pub new_balance: i64,
 }
 
 /// Deposit fiber items to receive Strands
@@ -145,24 +124,6 @@ pub async fn deposit_fiber(
         strands_received: net_strands,
         new_balance,
     }))
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct WithdrawRequest {
-    /// Amount of fiber to withdraw
-    pub quantity: i32,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct WithdrawResponse {
-    /// Total Strands spent (including fee)
-    pub strands_spent: i64,
-    /// Exchange fee (0.5%)
-    pub fee: i64,
-    /// Fiber items received
-    pub fiber_received: i32,
-    /// New Strand balance
-    pub new_balance: i64,
 }
 
 /// Withdraw Strands to receive fiber items

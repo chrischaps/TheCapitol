@@ -2,10 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::collections::HashMap;
-use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::item::quality_to_grade;
+pub use capitol_protocol::rest::SlotItem;
 
 /// Static container type definition (from database)
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -24,46 +23,6 @@ pub struct Container {
     pub owner_id: Option<Uuid>,
     pub station_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
-}
-
-/// Item in a specific slot (for API responses)
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SlotItem {
-    /// Unique item instance ID
-    pub item_id: Uuid,
-    /// Item type identifier
-    pub item_type: String,
-    /// Display name of the item
-    pub item_name: String,
-    /// Quality value (0-100)
-    pub quality: i32,
-    /// Quality grade letter (A, B, C, D, F)
-    pub quality_grade: String,
-    /// Stack quantity
-    pub quantity: i32,
-    /// Slot index within the container
-    pub slot_index: i32,
-}
-
-impl SlotItem {
-    pub fn new(
-        item_id: Uuid,
-        item_type: String,
-        item_name: String,
-        quality: i32,
-        quantity: i32,
-        slot_index: i32,
-    ) -> Self {
-        Self {
-            item_id,
-            item_type,
-            item_name,
-            quality,
-            quality_grade: quality_to_grade(quality),
-            quantity,
-            slot_index,
-        }
-    }
 }
 
 /// Container state with all its slots (for API responses)

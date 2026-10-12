@@ -2,6 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::f64::consts::PI;
 
+use capitol_protocol::rules;
+
+// The terrain types the client sees are shared through capitol-protocol, so
+// GET /terrain serves the generated terrain as-is.
+pub use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPlot, WaterRing};
+
 /// Configuration for suburban street generation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuburbanGenParams {
@@ -126,37 +132,6 @@ impl Default for WorldGenParams {
     }
 }
 
-/// A terrain-level plot with 4-sided polygon shape (urban, suburban, or rural)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TerrainPlot {
-    /// Unique identifier for this plot
-    pub id: String,
-    /// Four corners of the plot, clockwise from street-left
-    pub corners: [(f64, f64); 4],
-    /// Indices of corners forming the street-facing edge (start, end)
-    pub street_facing_edge: (usize, usize),
-    /// Area of the plot in square units
-    pub area: f64,
-    /// ID of the adjacent street
-    pub adjacent_street_id: String,
-    /// Zone this plot belongs to: "urban", "suburban", or "rural"
-    pub zone: String,
-}
-
-impl TerrainPlot {
-    /// Calculate the area of a quadrilateral using the shoelace formula
-    pub fn calculate_area(corners: &[(f64, f64); 4]) -> f64 {
-        let n = corners.len();
-        let mut area = 0.0;
-        for i in 0..n {
-            let j = (i + 1) % n;
-            area += corners[i].0 * corners[j].1;
-            area -= corners[j].0 * corners[i].1;
-        }
-        (area / 2.0).abs()
-    }
-}
-
 /// Pattern type for local suburban streets
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum LocalStreetPattern {
@@ -196,66 +171,6 @@ pub struct TerrainConfig {
     pub water_rings: Vec<WaterRing>,
     pub roads: Vec<RoadSegment>,
     pub terrain_plots: Vec<TerrainPlot>,
-}
-
-/// A circular water feature (moat or canal)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WaterRing {
-    pub id: String,
-    pub radius: f64,
-    pub width: f64,
-    pub bridges: Vec<Bridge>,
-}
-
-impl WaterRing {
-    /// Inner edge of the water
-    pub fn inner_radius(&self) -> f64 {
-        self.radius - self.width / 2.0
-    }
-
-    /// Outer edge of the water
-    pub fn outer_radius(&self) -> f64 {
-        self.radius + self.width / 2.0
-    }
-}
-
-/// A bridge crossing a water ring
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Bridge {
-    pub angle_degrees: f64,
-    pub width: f64,
-}
-
-impl Bridge {
-    /// Calculate the angular half-width of this bridge in degrees
-    /// based on its physical width and the ring radius
-    pub fn angular_half_width(&self, ring_radius: f64) -> f64 {
-        if ring_radius <= 0.0 {
-            return 180.0; // Avoid division by zero
-        }
-        // Convert width to angular measure: width / circumference * 360
-        // angular_width = width / radius * (180/π)
-        (self.width / ring_radius) * (180.0 / PI)
-    }
-
-    /// Check if a given angle (in degrees) falls within this bridge
-    pub fn contains_angle(&self, angle: f64, ring_radius: f64) -> bool {
-        let half_width = self.angular_half_width(ring_radius);
-        let diff = normalize_angle_diff(angle, self.angle_degrees);
-        diff.abs() <= half_width
-    }
-}
-
-/// Normalize the difference between two angles to [-180, 180]
-fn normalize_angle_diff(a: f64, b: f64) -> f64 {
-    let mut diff = a - b;
-    while diff > 180.0 {
-        diff -= 360.0;
-    }
-    while diff < -180.0 {
-        diff += 360.0;
-    }
-    diff
 }
 
 /// Catmull-Rom spline interpolation for smooth curves
@@ -650,25 +565,6 @@ fn check_road_intersection_angle(
     }
 
     true
-}
-
-/// A road segment
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoadSegment {
-    pub id: String,
-    pub road_type: RoadType,
-    pub points: Vec<(f64, f64)>,
-    pub width: f64,
-}
-
-/// Type of road
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RoadType {
-    Arterial,    // Major roads from urban to wilderness
-    Grid,        // Urban grid streets
-    Suburban,    // Winding suburban streets
-    Trail,       // Unpaved rural paths
 }
 
 /// Spatial hash grid for accelerating collision queries during terrain generation.
@@ -3012,161 +2908,23 @@ pub struct MovementValidation {
 impl TerrainConfig {
     /// Validate if movement from one point to another crosses water without a bridge
     pub fn validate_movement(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64) -> MovementValidation {
-        // Check each water ring
-        for ring in &self.water_rings {
-            if let Some((block_x, block_y)) = self.check_water_crossing(from_x, from_y, to_x, to_y, ring) {
-                return MovementValidation {
-                    allowed: false,
-                    blocked_at: Some((block_x, block_y)),
-                    blocked_by: Some(ring.id.clone()),
-                };
-            }
+        match rules::check_water_crossing(
+            (self.center_x, self.center_y),
+            &self.water_rings,
+            (from_x, from_y),
+            (to_x, to_y),
+        ) {
+            Some(block) => MovementValidation {
+                allowed: false,
+                blocked_at: Some((block.x, block.y)),
+                blocked_by: Some(block.ring_id),
+            },
+            None => MovementValidation {
+                allowed: true,
+                blocked_at: None,
+                blocked_by: None,
+            },
         }
-
-        MovementValidation {
-            allowed: true,
-            blocked_at: None,
-            blocked_by: None,
-        }
-    }
-
-    /// Check if a movement path crosses a water ring without using a bridge
-    /// Returns the blocking point if blocked, None if allowed
-    fn check_water_crossing(
-        &self,
-        from_x: f64,
-        from_y: f64,
-        to_x: f64,
-        to_y: f64,
-        ring: &WaterRing,
-    ) -> Option<(f64, f64)> {
-        let from_dist = self.distance_from_center(from_x, from_y);
-        let to_dist = self.distance_from_center(to_x, to_y);
-
-        let inner = ring.inner_radius();
-        let outer = ring.outer_radius();
-
-        // Check if the path crosses the ring
-        let crosses_inward = from_dist >= outer && to_dist <= inner;
-        let crosses_outward = from_dist <= inner && to_dist >= outer;
-        let enters_from_outside = from_dist >= outer && to_dist > inner && to_dist < outer;
-        let enters_from_inside = from_dist <= inner && to_dist > inner && to_dist < outer;
-        let exits_to_outside = from_dist > inner && from_dist < outer && to_dist >= outer;
-        let exits_to_inside = from_dist > inner && from_dist < outer && to_dist <= inner;
-
-        if !crosses_inward && !crosses_outward && !enters_from_outside && !enters_from_inside
-           && !exits_to_outside && !exits_to_inside {
-            return None; // Path doesn't interact with the ring
-        }
-
-        // Find intersection points with the ring
-        let intersections = self.find_ring_intersections(from_x, from_y, to_x, to_y, ring);
-
-        for (ix, iy) in intersections {
-            let angle = self.angle_from_center(ix, iy);
-
-            // Check if this intersection is on a bridge
-            let on_bridge = ring.bridges.iter().any(|b| b.contains_angle(angle, ring.radius));
-
-            if !on_bridge {
-                // Blocked - return the point just before the water
-                let dx = to_x - from_x;
-                let dy = to_y - from_y;
-                let len = (dx * dx + dy * dy).sqrt();
-                if len > 0.0 {
-                    // Back up slightly from the intersection
-                    let backup = 2.0;
-                    let block_x = ix - (dx / len) * backup;
-                    let block_y = iy - (dy / len) * backup;
-                    return Some((block_x, block_y));
-                }
-                return Some((ix, iy));
-            }
-        }
-
-        None // All crossings are on bridges
-    }
-
-    /// Find intersection points of a line segment with a water ring
-    fn find_ring_intersections(
-        &self,
-        from_x: f64,
-        from_y: f64,
-        to_x: f64,
-        to_y: f64,
-        ring: &WaterRing,
-    ) -> Vec<(f64, f64)> {
-        let mut intersections = Vec::new();
-
-        // Check both inner and outer edges
-        for radius in [ring.inner_radius(), ring.outer_radius()] {
-            if let Some((x, y)) = self.line_circle_intersection(from_x, from_y, to_x, to_y, radius) {
-                intersections.push((x, y));
-            }
-        }
-
-        intersections
-    }
-
-    /// Find the first intersection of a line segment with a circle centered at world center
-    fn line_circle_intersection(
-        &self,
-        from_x: f64,
-        from_y: f64,
-        to_x: f64,
-        to_y: f64,
-        radius: f64,
-    ) -> Option<(f64, f64)> {
-        // Translate to center-relative coordinates
-        let x1 = from_x - self.center_x;
-        let y1 = from_y - self.center_y;
-        let x2 = to_x - self.center_x;
-        let y2 = to_y - self.center_y;
-
-        let dx = x2 - x1;
-        let dy = y2 - y1;
-
-        // Quadratic formula for line-circle intersection
-        let a = dx * dx + dy * dy;
-        let b = 2.0 * (x1 * dx + y1 * dy);
-        let c = x1 * x1 + y1 * y1 - radius * radius;
-
-        let discriminant = b * b - 4.0 * a * c;
-
-        if discriminant < 0.0 {
-            return None; // No intersection
-        }
-
-        let sqrt_disc = discriminant.sqrt();
-
-        // Find the two potential intersection t values
-        let t1 = (-b - sqrt_disc) / (2.0 * a);
-        let t2 = (-b + sqrt_disc) / (2.0 * a);
-
-        // Return the first intersection along the path (t in [0, 1])
-        for t in [t1, t2] {
-            if t >= 0.0 && t <= 1.0 {
-                let ix = from_x + dx * t;
-                let iy = from_y + dy * t;
-                return Some((ix, iy));
-            }
-        }
-
-        None
-    }
-
-    /// Calculate distance from world center
-    fn distance_from_center(&self, x: f64, y: f64) -> f64 {
-        let dx = x - self.center_x;
-        let dy = y - self.center_y;
-        (dx * dx + dy * dy).sqrt()
-    }
-
-    /// Calculate angle from world center in degrees (0 = East, 90 = South)
-    fn angle_from_center(&self, x: f64, y: f64) -> f64 {
-        let dx = x - self.center_x;
-        let dy = y - self.center_y;
-        dy.atan2(dx).to_degrees()
     }
 }
 

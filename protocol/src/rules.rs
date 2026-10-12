@@ -1,0 +1,451 @@
+//! Game rules both sides need to agree on: world geometry, speeds, ranges, zones,
+//! quality grades and the water-crossing test.
+//!
+//! The server is authoritative. Clients use these to predict (move the local player,
+//! grey out an out-of-range node, grade an item from its numeric quality) without
+//! waiting for a round trip.
+
+use std::fmt;
+
+use crate::terrain::WaterRing;
+
+// ---------------------------------------------------------------------------
+// World and timing
+// ---------------------------------------------------------------------------
+
+/// The world is a square, 0..WORLD_SIZE on both axes. y points down (south).
+pub const WORLD_SIZE: f64 = 8000.0;
+/// World centre X; the Capitol tower stands here.
+pub const CENTER_X: f64 = 4000.0;
+/// World centre Y.
+pub const CENTER_Y: f64 = 4000.0;
+
+/// Length of one server tick in milliseconds.
+pub const TICK_MS: u64 = 100;
+/// Length of one server tick in seconds.
+pub const TICK_SECS: f64 = TICK_MS as f64 / 1000.0;
+
+// ---------------------------------------------------------------------------
+// Speeds and ranges (world units)
+// ---------------------------------------------------------------------------
+
+/// Default player speed in units per second. New players are created with it.
+pub const PLAYER_SPEED: f64 = 50.0;
+/// A move that ends within this distance of the destination snaps onto it.
+pub const ARRIVAL_EPSILON: f64 = 0.5;
+/// Maximum distance from a resource node to start extracting.
+pub const EXTRACTION_RANGE: f64 = 50.0;
+/// Fallback station interaction range. Each station type carries its own
+/// `interaction_range`; this applies when the type doesn't set one.
+pub const STATION_INTERACTION_RANGE: f64 = 75.0;
+/// Maximum distance between two players to trade.
+pub const TRADE_RANGE: f64 = 75.0;
+/// Minimum distance between two placed stations.
+pub const STATION_MIN_SPACING: f64 = 50.0;
+/// `GET /world/nearby` returns resource nodes within this radius of the player.
+pub const NEARBY_NODE_RANGE: f64 = 200.0;
+/// `GET /stations/nearby` returns stations within this many units of the player on
+/// each axis (a square, not a circle).
+pub const NEARBY_STATION_HALF_EXTENT: f64 = 500.0;
+
+/// Fee on Strand/Fiber exchange, as a fraction (0.5%).
+pub const EXCHANGE_FEE_RATE: f64 = 0.005;
+
+// ---------------------------------------------------------------------------
+// Quality
+// ---------------------------------------------------------------------------
+
+/// Letter grade for an item quality (0-100): A >= 90, B >= 75, C >= 55, D >= 35,
+/// otherwise F. WebSocket events carry only the number, so clients grade it here.
+pub fn quality_grade(quality: i32) -> &'static str {
+    match quality {
+        90..=100 => "A",
+        75..=89 => "B",
+        55..=74 => "C",
+        35..=54 => "D",
+        _ => "F",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stations
+// ---------------------------------------------------------------------------
+
+/// The kit item consumed to place a station of this type.
+pub fn station_kit_item(station_type: &str) -> Option<&'static str> {
+    match station_type {
+        "workbench" => Some("workbench_kit"),
+        "forge" => Some("forge_kit"),
+        "storage_chest" => Some("chest_kit"),
+        _ => None,
+    }
+}
+
+/// The station type a kit item places, if it is a kit.
+pub fn station_type_for_kit(item_type: &str) -> Option<&'static str> {
+    match item_type {
+        "workbench_kit" => Some("workbench"),
+        "forge_kit" => Some("forge"),
+        "chest_kit" => Some("storage_chest"),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Zones
+// ---------------------------------------------------------------------------
+
+/// Zones are concentric rings around the Capitol at (CENTER_X, CENTER_Y).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Zone {
+    Capitol,
+    TradeDistrict,
+    GuildDistrict,
+    Urban,
+    Suburban,
+    Rural,
+    Wilderness,
+}
+
+impl Zone {
+    pub const CENTER_X: f64 = CENTER_X;
+    pub const CENTER_Y: f64 = CENTER_Y;
+    pub const WORLD_SIZE: f64 = WORLD_SIZE;
+
+    /// All zones, from the centre outward.
+    pub const ALL: [Zone; 7] = [
+        Zone::Capitol,
+        Zone::TradeDistrict,
+        Zone::GuildDistrict,
+        Zone::Urban,
+        Zone::Suburban,
+        Zone::Rural,
+        Zone::Wilderness,
+    ];
+
+    /// Which zone a position falls into, by distance from the centre.
+    pub fn from_position(x: f64, y: f64) -> Self {
+        let dx = x - CENTER_X;
+        let dy = y - CENTER_Y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        Self::ALL
+            .into_iter()
+            .find(|zone| distance < zone.radii().1)
+            .unwrap_or(Zone::Wilderness)
+    }
+
+    /// The zone ID used in the database and on the wire (`zone_changed`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Zone::Capitol => "capitol",
+            Zone::TradeDistrict => "trade_district",
+            Zone::GuildDistrict => "guild_district",
+            Zone::Urban => "urban",
+            Zone::Suburban => "suburban",
+            Zone::Rural => "rural",
+            Zone::Wilderness => "wilderness",
+        }
+    }
+
+    /// Parse a zone ID.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|zone| zone.as_str() == s)
+    }
+
+    /// The zone's display name.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Zone::Capitol => "The Capitol",
+            Zone::TradeDistrict => "Trade District",
+            Zone::GuildDistrict => "Guild District",
+            Zone::Urban => "Urban Zone",
+            Zone::Suburban => "Suburban Zone",
+            Zone::Rural => "Rural Zone",
+            Zone::Wilderness => "Wilderness",
+        }
+    }
+
+    /// Whether the zone has private plots.
+    pub fn has_plots(&self) -> bool {
+        matches!(
+            self,
+            Zone::GuildDistrict | Zone::Urban | Zone::Suburban | Zone::Rural
+        )
+    }
+
+    /// Ring order: 0 is the centre, higher is further out.
+    pub fn ring_order(&self) -> u8 {
+        *self as u8
+    }
+
+    /// Inner and outer radius of the zone's ring.
+    pub fn radii(&self) -> (f64, f64) {
+        match self {
+            Zone::Capitol => (0.0, 200.0),
+            Zone::TradeDistrict => (200.0, 600.0),
+            Zone::GuildDistrict => (600.0, 1000.0),
+            Zone::Urban => (1000.0, 1600.0),
+            Zone::Suburban => (1600.0, 2400.0),
+            Zone::Rural => (2400.0, 3400.0),
+            Zone::Wilderness => (3400.0, 4000.0),
+        }
+    }
+}
+
+impl fmt::Display for Zone {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Water crossing
+// ---------------------------------------------------------------------------
+
+/// Where a straight move was stopped by water.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaterBlock {
+    /// Where the mover stops: just short of the water's edge.
+    pub x: f64,
+    pub y: f64,
+    /// ID of the ring that blocked it (`moat`, `inner_canal`, ...).
+    pub ring_id: String,
+}
+
+/// How far short of the water's edge a blocked move stops.
+const BLOCK_BACKOFF: f64 = 2.0;
+
+/// Test a straight move from `from` to `to` against every water ring, in order.
+/// Returns the first block, or `None` if the move stays dry or crosses only at bridges.
+///
+/// This is the server's movement test. A client can run it to predict a
+/// `movement_blocked` before the server sends one.
+pub fn check_water_crossing(
+    center: (f64, f64),
+    rings: &[WaterRing],
+    from: (f64, f64),
+    to: (f64, f64),
+) -> Option<WaterBlock> {
+    rings.iter().find_map(|ring| {
+        ring_crossing(center, ring, from, to).map(|(x, y)| WaterBlock {
+            x,
+            y,
+            ring_id: ring.id.clone(),
+        })
+    })
+}
+
+/// Test a straight move against one ring. Returns the stopping point if it's blocked.
+pub fn ring_crossing(
+    center: (f64, f64),
+    ring: &WaterRing,
+    from: (f64, f64),
+    to: (f64, f64),
+) -> Option<(f64, f64)> {
+    let (from_x, from_y) = from;
+    let (to_x, to_y) = to;
+    let from_dist = distance(center, from);
+    let to_dist = distance(center, to);
+
+    let inner = ring.inner_radius();
+    let outer = ring.outer_radius();
+
+    // Does the path touch the ring at all?
+    let crosses_inward = from_dist >= outer && to_dist <= inner;
+    let crosses_outward = from_dist <= inner && to_dist >= outer;
+    let enters_from_outside = from_dist >= outer && to_dist > inner && to_dist < outer;
+    let enters_from_inside = from_dist <= inner && to_dist > inner && to_dist < outer;
+    let exits_to_outside = from_dist > inner && from_dist < outer && to_dist >= outer;
+    let exits_to_inside = from_dist > inner && from_dist < outer && to_dist <= inner;
+
+    if !crosses_inward
+        && !crosses_outward
+        && !enters_from_outside
+        && !enters_from_inside
+        && !exits_to_outside
+        && !exits_to_inside
+    {
+        return None;
+    }
+
+    // Where the path meets the inner and outer edges. Each must be on a bridge.
+    let intersections = [inner, outer]
+        .into_iter()
+        .filter_map(|radius| line_circle_intersection(center, from, to, radius));
+
+    for (ix, iy) in intersections {
+        let angle = angle_from_center(center, ix, iy);
+        let on_bridge = ring
+            .bridges
+            .iter()
+            .any(|b| b.contains_angle(angle, ring.radius));
+
+        if !on_bridge {
+            // Blocked: stop just before the water.
+            let dx = to_x - from_x;
+            let dy = to_y - from_y;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len > 0.0 {
+                return Some((
+                    ix - (dx / len) * BLOCK_BACKOFF,
+                    iy - (dy / len) * BLOCK_BACKOFF,
+                ));
+            }
+            return Some((ix, iy));
+        }
+    }
+
+    None
+}
+
+/// The first point where the segment `from -> to` meets the circle of `radius`
+/// around `center`, if any.
+fn line_circle_intersection(
+    center: (f64, f64),
+    from: (f64, f64),
+    to: (f64, f64),
+    radius: f64,
+) -> Option<(f64, f64)> {
+    let x1 = from.0 - center.0;
+    let y1 = from.1 - center.1;
+    let x2 = to.0 - center.0;
+    let y2 = to.1 - center.1;
+
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+
+    let a = dx * dx + dy * dy;
+    let b = 2.0 * (x1 * dx + y1 * dy);
+    let c = x1 * x1 + y1 * y1 - radius * radius;
+
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant < 0.0 {
+        return None;
+    }
+
+    let sqrt_disc = discriminant.sqrt();
+    let t1 = (-b - sqrt_disc) / (2.0 * a);
+    let t2 = (-b + sqrt_disc) / (2.0 * a);
+
+    [t1, t2]
+        .into_iter()
+        .find(|t| (0.0..=1.0).contains(t))
+        .map(|t| (from.0 + dx * t, from.1 + dy * t))
+}
+
+fn distance(center: (f64, f64), p: (f64, f64)) -> f64 {
+    let dx = p.0 - center.0;
+    let dy = p.1 - center.1;
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Angle of a point around `center`, in degrees: 0 = East, 90 = South (y is down).
+pub fn angle_from_center(center: (f64, f64), x: f64, y: f64) -> f64 {
+    (y - center.1).atan2(x - center.0).to_degrees()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terrain::Bridge;
+
+    #[test]
+    fn grades_match_server_thresholds() {
+        assert_eq!(quality_grade(100), "A");
+        assert_eq!(quality_grade(90), "A");
+        assert_eq!(quality_grade(89), "B");
+        assert_eq!(quality_grade(75), "B");
+        assert_eq!(quality_grade(74), "C");
+        assert_eq!(quality_grade(55), "C");
+        assert_eq!(quality_grade(54), "D");
+        assert_eq!(quality_grade(35), "D");
+        assert_eq!(quality_grade(34), "F");
+        assert_eq!(quality_grade(0), "F");
+    }
+
+    #[test]
+    fn zones_by_distance() {
+        assert_eq!(Zone::from_position(4000.0, 4000.0), Zone::Capitol);
+        assert_eq!(Zone::from_position(4199.0, 4000.0), Zone::Capitol);
+        assert_eq!(Zone::from_position(4200.0, 4000.0), Zone::TradeDistrict);
+        assert_eq!(Zone::from_position(4000.0, 4999.0), Zone::GuildDistrict);
+        assert_eq!(Zone::from_position(5500.0, 4000.0), Zone::Urban);
+        assert_eq!(Zone::from_position(4000.0, 6000.0), Zone::Suburban);
+        assert_eq!(Zone::from_position(1000.0, 4000.0), Zone::Rural);
+        assert_eq!(Zone::from_position(7600.0, 4000.0), Zone::Wilderness);
+        assert_eq!(Zone::from_position(0.0, 0.0), Zone::Wilderness);
+    }
+
+    #[test]
+    fn zone_ids_round_trip() {
+        for zone in Zone::ALL {
+            assert_eq!(Zone::from_str(zone.as_str()), Some(zone));
+        }
+        assert_eq!(Zone::from_str("atlantis"), None);
+        assert_eq!(Zone::Wilderness.ring_order(), 6);
+    }
+
+    #[test]
+    fn kits_and_stations_pair_up() {
+        for station in ["workbench", "forge", "storage_chest"] {
+            let kit = station_kit_item(station).unwrap();
+            assert_eq!(station_type_for_kit(kit), Some(station));
+        }
+        assert_eq!(station_kit_item("throne"), None);
+    }
+
+    fn moat() -> WaterRing {
+        WaterRing {
+            id: "moat".into(),
+            radius: 200.0,
+            width: 20.0,
+            bridges: vec![Bridge {
+                angle_degrees: 0.0,
+                width: 30.0,
+            }],
+        }
+    }
+
+    #[test]
+    fn crossing_at_a_bridge_is_allowed() {
+        let rings = [moat()];
+        // Due east, straight over the bridge at 0 degrees.
+        let block = check_water_crossing(
+            (CENTER_X, CENTER_Y),
+            &rings,
+            (4150.0, 4000.0),
+            (4250.0, 4000.0),
+        );
+        assert_eq!(block, None);
+    }
+
+    #[test]
+    fn crossing_away_from_a_bridge_is_blocked_short_of_the_water() {
+        let rings = [moat()];
+        // Due south: no bridge there.
+        let block = check_water_crossing(
+            (CENTER_X, CENTER_Y),
+            &rings,
+            (4000.0, 4150.0),
+            (4000.0, 4250.0),
+        )
+        .expect("blocked");
+        assert_eq!(block.ring_id, "moat");
+        assert!((block.x - 4000.0).abs() < 1e-9);
+        // Inner edge is at radius 190; the mover stops 2 units short.
+        assert!((block.y - 4188.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn moves_inside_a_ring_never_touch_it() {
+        let rings = [moat()];
+        let block = check_water_crossing(
+            (CENTER_X, CENTER_Y),
+            &rings,
+            (4000.0, 4000.0),
+            (4050.0, 4050.0),
+        );
+        assert_eq!(block, None);
+    }
+}

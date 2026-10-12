@@ -3,10 +3,12 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use utoipa::ToSchema;
 use uuid::Uuid;
+
+use capitol_protocol::rest::{
+    ContainerResponse, ContainersResponse, MoveItemRequest, MoveItemResponse,
+};
 
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -21,27 +23,6 @@ pub fn router(state: AppState) -> Router<AppState> {
             state,
             crate::middleware::auth::auth_middleware,
         ))
-}
-
-/// Container state for API response
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ContainerResponse {
-    /// Container instance ID
-    pub id: Uuid,
-    /// Container type identifier
-    pub container_type: String,
-    /// Total number of slots
-    pub slot_count: i32,
-    /// Number of columns for UI layout
-    pub layout_columns: i32,
-    /// Items in each slot
-    pub slots: Vec<SlotItem>,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ContainersResponse {
-    /// All containers owned by the player
-    pub containers: Vec<ContainerResponse>,
 }
 
 /// Get all player containers with their contents
@@ -151,30 +132,6 @@ pub async fn get_containers(
     Ok(Json(ContainersResponse {
         containers: response_containers,
     }))
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct MoveItemRequest {
-    /// ID of the item to move
-    pub item_id: Uuid,
-    /// Target container ID
-    pub target_container_id: Uuid,
-    /// Target slot index
-    pub target_slot: i32,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct MoveItemResponse {
-    /// Whether the operation succeeded
-    pub success: bool,
-    /// Action taken: "moved", "merged", or "swapped"
-    pub action: String,
-    /// New quantity if items were merged
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub merged_quantity: Option<i32>,
-    /// New quality if items were merged
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub merged_quality: Option<i32>,
 }
 
 /// Move an item to a different slot or container

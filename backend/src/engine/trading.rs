@@ -320,4 +320,4 @@ impl Default for TradeManager {
 }
 
 /// Trade proximity range (same as station interaction range)
-pub const TRADE_RANGE: f64 = 75.0;
+pub use capitol_protocol::rules::TRADE_RANGE;

@@ -3,9 +3,9 @@ use axum::{
     routing::get,
     Extension, Json, Router,
 };
-use serde::Serialize;
 use std::collections::HashMap;
-use utoipa::ToSchema;
+
+use capitol_protocol::rest::RecipesResponse;
 
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -19,12 +19,6 @@ pub fn router(state: AppState) -> Router<AppState> {
             state,
             crate::middleware::auth::auth_middleware,
         ))
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct RecipesResponse {
-    /// Available crafting recipes
-    pub recipes: Vec<RecipeInfo>,
 }
 
 /// Get available crafting recipes

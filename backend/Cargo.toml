@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Shared wire types and rules (with the server-only derives)
+capitol-protocol = { path = "../protocol", features = ["backend"] }
+
 # Web framework
 axum = { version = "0.8", features = ["ws"] }
 axum-extra = { version = "0.10", features = ["typed-header"] }

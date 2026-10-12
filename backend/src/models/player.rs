@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+pub use capitol_protocol::ws::PlayerPosition;
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Player {
     pub id: Uuid,
@@ -72,12 +74,4 @@ impl From<Player> for PlayerState {
             action_state: ActionState::Idle,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlayerPosition {
-    pub id: Uuid,
-    pub name: String,
-    pub x: f64,
-    pub y: f64,
 }

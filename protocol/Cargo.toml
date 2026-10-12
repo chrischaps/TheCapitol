@@ -1,0 +1,23 @@
+[package]
+name = "capitol-protocol"
+description = "The Capitol's wire protocol: WebSocket messages, REST DTOs, terrain types and shared game rules."
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[features]
+default = []
+# Server-side derives: OpenAPI schemas and query params (utoipa) and database rows
+# (sqlx::FromRow). The backend turns this on; clients leave it off and stay light.
+backend = ["dep:utoipa", "dep:sqlx"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
+
+utoipa = { version = "5", features = ["uuid", "chrono"], optional = true }
+sqlx = { version = "0.8", default-features = false, features = ["derive"], optional = true }
+
+[dev-dependencies]
+serde_json = "1"

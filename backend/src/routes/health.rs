@@ -1,18 +1,7 @@
 use axum::{extract::State, Json};
-use serde::Serialize;
-use utoipa::ToSchema;
+use capitol_protocol::rest::HealthResponse;
 
 use crate::state::AppState;
-
-#[derive(Serialize, ToSchema)]
-pub struct HealthResponse {
-    /// Overall health status: "healthy" or "degraded"
-    pub status: String,
-    /// Database connection status
-    pub database: String,
-    /// Redis connection status
-    pub redis: String,
-}
 
 /// Check server health
 #[utoipa::path(

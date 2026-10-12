@@ -3,9 +3,9 @@ use axum::{
     routing::{get, post, put},
     Extension, Json, Router,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
+
+use capitol_protocol::rest::{ClaimPlotResponse, ListPlotsQuery, ListPlotsResponse, PositionQuery};
 
 use crate::engine::currency::{subtract_strands, TransactionType};
 use crate::error::AppError;
@@ -25,28 +25,6 @@ pub fn router(state: AppState) -> Router<AppState> {
             state,
             crate::middleware::auth::auth_middleware,
         ))
-}
-
-#[derive(Debug, Deserialize, IntoParams)]
-pub struct ListPlotsQuery {
-    /// Filter by zone ID
-    pub zone: Option<String>,
-    /// Only show unclaimed plots
-    pub unclaimed: Option<bool>,
-    /// Filter by owner player ID
-    pub owner: Option<Uuid>,
-    /// Max results (default 50, max 100)
-    pub limit: Option<i32>,
-    /// Pagination offset
-    pub offset: Option<i32>,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ListPlotsResponse {
-    /// Matching plots
-    pub plots: Vec<PlotInfo>,
-    /// Total count (for pagination)
-    pub total: i64,
 }
 
 /// List plots with optional filters
@@ -150,14 +128,6 @@ pub async fn get_plot(
     Ok(Json(row.to_plot_info()))
 }
 
-#[derive(Debug, Deserialize, IntoParams)]
-pub struct PositionQuery {
-    /// X coordinate
-    pub x: f64,
-    /// Y coordinate
-    pub y: f64,
-}
-
 /// Get the plot at a specific position
 #[utoipa::path(
     get,
@@ -192,14 +162,6 @@ pub async fn get_plot_at_position(
     .await?;
 
     Ok(Json(row.map(|r| r.to_plot_info())))
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ClaimPlotResponse {
-    /// The claimed plot
-    pub plot: PlotInfo,
-    /// New Strand balance after purchase
-    pub new_balance: i64,
 }
 
 /// Claim an unclaimed plot

@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use utoipa::ToSchema;
 use uuid::Uuid;
+
+pub use capitol_protocol::rest::InventoryItem;
 
 /// Static item type definition (from database)
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -27,43 +28,21 @@ pub struct Item {
     pub created_at: DateTime<Utc>,
 }
 
-/// Client-facing inventory item
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct InventoryItem {
-    /// Unique item instance ID
-    pub id: Uuid,
-    /// Item type identifier (e.g., "fiber", "rope")
-    pub item_type: String,
-    /// Display name of the item
-    pub name: String,
-    /// Quality value (0-100)
-    pub quality: i32,
-    /// Quality grade letter (A, B, C, D, F)
-    pub quality_grade: String,
-    /// Stack quantity
-    pub quantity: i32,
-}
-
-impl InventoryItem {
-    pub fn from_item(item: &Item, item_type_name: &str) -> Self {
-        Self {
-            id: item.id,
-            item_type: item.item_type.clone(),
+impl Item {
+    /// The client-facing view of this item
+    pub fn to_inventory_item(&self, item_type_name: &str) -> InventoryItem {
+        InventoryItem {
+            id: self.id,
+            item_type: self.item_type.clone(),
             name: item_type_name.to_string(),
-            quality: item.quality,
-            quality_grade: quality_to_grade(item.quality),
-            quantity: item.quantity,
+            quality: self.quality,
+            quality_grade: quality_to_grade(self.quality),
+            quantity: self.quantity,
         }
     }
 }
 
 /// Convert quality (0-100) to letter grade
 pub fn quality_to_grade(quality: i32) -> String {
-    match quality {
-        90..=100 => "A".to_string(),
-        75..=89 => "B".to_string(),
-        55..=74 => "C".to_string(),
-        35..=54 => "D".to_string(),
-        _ => "F".to_string(),
-    }
+    capitol_protocol::rules::quality_grade(quality).to_string()
 }

@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use utoipa::ToSchema;
 use uuid::Uuid;
+
+pub use capitol_protocol::rest::StationInfo;
 
 /// Static station type definition (from database)
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -55,43 +56,19 @@ impl StationState {
     }
 }
 
-/// Client-facing station info
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct StationInfo {
-    /// Unique station instance ID
-    pub id: Uuid,
-    /// Station type identifier (e.g., "workbench", "forge")
-    pub station_type: String,
-    /// Display name of the station
-    pub name: String,
-    /// Station category ("crafting" or "storage")
-    pub category: String,
-    /// Optional icon identifier
-    pub icon: Option<String>,
-    /// X position in world coordinates
-    pub x: f64,
-    /// Y position in world coordinates
-    pub y: f64,
-    /// Player who owns this station
-    pub owner_id: Uuid,
-    /// Container ID for station inventory
-    pub container_id: Option<Uuid>,
-    /// Maximum interaction distance
-    pub interaction_range: f32,
-}
-
-impl StationInfo {
-    pub fn from_state(state: &StationState, station_type: &StationType) -> Self {
-        Self {
-            id: state.id,
-            station_type: state.station_type.clone(),
+impl StationState {
+    /// The client-facing view of this station
+    pub fn to_info(&self, station_type: &StationType) -> StationInfo {
+        StationInfo {
+            id: self.id,
+            station_type: self.station_type.clone(),
             name: station_type.name.clone(),
             category: station_type.category.clone(),
             icon: station_type.icon.clone(),
-            x: state.x,
-            y: state.y,
-            owner_id: state.owner_id,
-            container_id: state.container_id,
+            x: self.x,
+            y: self.y,
+            owner_id: self.owner_id,
+            container_id: self.container_id,
             interaction_range: station_type.interaction_range,
         }
     }

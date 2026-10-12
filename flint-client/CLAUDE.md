@@ -23,6 +23,8 @@ The root `Cargo.toml` (the backend workspace) has `exclude = ["flint-client"]`. 
 
 **Engine crates are path dependencies.** They're declared once in `[workspace.dependencies]` in `Cargo.toml` (`flint-player = { path = "engine/crates/flint-player" }`). Member crates use `{ workspace = true }`. The engine's own workspace is excluded rather than nested. Its crates still pick up `version.workspace = true` and similar settings from `engine/Cargo.toml`.
 
+**The wire types come from `../protocol`** (crate `capitol-protocol`, a member of the root workspace). It holds the WebSocket enums, REST DTOs, `/terrain` types and shared rules (ranges, zones, quality grades, the water-crossing test). The backend compiles against the same crate, so use its types rather than redefining shapes here. The client leaves its `backend` feature off. Change the protocol from the repo root, and run `cargo test -p capitol-protocol` there.
+
 **Match the engine's versions.** A third-party crate that crosses the engine boundary (egui, winit, wgpu, rhai, glam) must use the same version as `engine/Cargo.toml`. Otherwise two copies get linked and the types don't line up.
 
 ## Build and run

@@ -3,18 +3,16 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
+
+use capitol_protocol::rest::{ExtractRequest, ExtractResponse, NearbyResponse};
+use capitol_protocol::rules::NEARBY_NODE_RANGE;
 
 use crate::engine::{Command, EXTRACTION_RANGE};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::ResourceNodeInfo;
 use crate::state::AppState;
-
-/// Maximum distance to return nearby nodes
-const NEARBY_RANGE: f64 = 200.0;
 
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
@@ -24,12 +22,6 @@ pub fn router(state: AppState) -> Router<AppState> {
             state,
             crate::middleware::auth::auth_middleware,
         ))
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct NearbyResponse {
-    /// Resource nodes within range of the player
-    pub nodes: Vec<ResourceNodeInfo>,
 }
 
 /// Get resource nodes near the player
@@ -71,26 +63,12 @@ pub async fn get_nearby(
             let dx = node.x - player_x;
             let dy = node.y - player_y;
             let distance = (dx * dx + dy * dy).sqrt();
-            distance <= NEARBY_RANGE
+            distance <= NEARBY_NODE_RANGE
         })
         .map(ResourceNodeInfo::from)
         .collect();
 
     Ok(Json(NearbyResponse { nodes }))
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct ExtractRequest {
-    /// ID of the resource node to extract from
-    pub node_id: Uuid,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ExtractResponse {
-    /// Whether extraction was started successfully
-    pub success: bool,
-    /// Optional message (e.g., error reason)
-    pub message: Option<String>,
 }
 
 /// Start extracting from a resource node

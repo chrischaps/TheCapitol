@@ -87,7 +87,7 @@ TheCapitol/
   protocol/                  # NEW crate `capitol-protocol`, shared by the backend and the Flint client
     src/ws.rs                #   ClientMessage / ServerMessage (moved out of backend ws/connection.rs)
     src/rest.rs              #   request/response DTOs
-    src/terrain.rs           #   TerrainResponse, WaterRing, Road, TerrainPlot
+    src/terrain.rs           #   TerrainResponse, WaterRing, Bridge, RoadSegment, RoadType, TerrainPlot
     src/rules.rs             #   ranges, speeds, quality grades, zone radii, water-crossing test
   flint-client/
     Cargo.toml               # its own workspace, exclude = ["engine"]; path deps into engine/crates/*
@@ -119,6 +119,20 @@ TheCapitol/
 **Why a game crate, when Flint games are usually data only?** Every Flint game so far has been self-contained. The Capitol client is a window onto a server, so much of its logic is protocol and state that exists only because of this backend. If that code went into the engine, every other Flint game would carry it. The general-purpose pieces become engine hooks (§4.4) and go upstream. The Capitol-specific code stays in `flint-client/crates`.
 
 **Why `capitol-protocol`?** The React and Love clients each copy the message shapes by hand, and they have already drifted apart. Quality thresholds alone exist in three versions (§4.7). A shared Rust crate means the backend and the Flint client compile against the same enums, so drift becomes a build error. It is the only backend refactor this plan asks for, and it changes how types are organised, not how anything behaves.
+
+**How `capitol-protocol` was built (P0.3).**
+- **Dependencies.** By default it needs only serde, uuid and chrono. A `backend` feature adds the server-only derives: `utoipa::ToSchema`/`IntoParams` and, for `ZoneInfo` and `PlotPermissions`, `sqlx::FromRow`. The backend turns the feature on; `capitol-core` already depends on the crate with it off.
+- **Shared types.** The backend re-exports the shared types from `models/` (`pub use capitol_protocol::...`), so engine code didn't change. The helpers that built them became methods on the backend types: `Item::to_inventory_item`, `Plot::to_info` and `StationState::to_info`.
+- **Terrain.** The generator's own `WaterRing`, `Bridge`, `RoadSegment`, `RoadType` and `TerrainPlot` had the same fields as the `/terrain` response types, so they are now one set of types in `capitol_protocol::terrain`. `/terrain` serves them as generated. `road_type` is now a typed enum on the client, and the JSON is the same. Swagger shows the shared names (`WaterRing`, not `WaterRingResponse`).
+- **Rules.** `rules.rs` holds:
+  - the world, tick, speed, range and spacing constants, which the backend now uses;
+  - the `Zone` enum;
+  - `quality_grade`;
+  - the station-to-kit mapping;
+  - `check_water_crossing`, the server's own movement test, which a client can use to predict `movement_blocked`. `TerrainConfig::validate_movement` delegates to it.
+- **Message names.** `ClientMessage::type_name()` and `ServerMessage::type_name()` return the wire tag. P1/P2 can use this for the `on_event(name, data)` bridge. `ServerMessage::TradeAcceptedMsg` was renamed `TradeAccepted`; the wire tag `trade_accepted` didn't change.
+- **Fixtures.** `protocol/tests/fixtures/server/*.json` were captured by serialising the backend's old `ServerMessage` enum before the move, so they are the server's real bytes. `tests/ws_fixtures.rs` round-trips every message type byte for byte.
+- **Untyped responses.** The ad-hoc `json!` responses became `SuccessResponse` (logout, station removal) and `MoveResponse` (`POST /player/move`). Key order may differ, but the values are the same.
 
 ### 4.2 Rust for the wire and the world, Rhai for the feel
 
@@ -185,7 +199,7 @@ H1–H5 are needed for the vertical slice. H6 belongs to P8.
   - Failures to initiate or offer are only logged on the server, so the client times out after about 5 s with a hint.
   - `trade_cancelled` on disconnect carries a dummy `trade_id` (`engine/tick.rs:109`), so while a trade is open, any cancellation is treated as ours.
   - No `inventory_updated` follows a trade, so the client refetches containers and currency itself.
-- **Quality grades.** Use the server's thresholds from `models/item.rs:61-69`: A ≥ 90, B ≥ 75, C ≥ 55, D ≥ 35, otherwise F. These move into `capitol-protocol::rules`. WebSocket events carry only the numeric quality, so the client computes the grade.
+- **Quality grades.** Use the server's thresholds: A ≥ 90, B ≥ 75, C ≥ 55, D ≥ 35, otherwise F. Since P0.3 they live in `capitol_protocol::rules::quality_grade`, and the backend calls the same function. WebSocket events carry only the numeric quality, so the client computes the grade.
 
 ### 4.6 Coordinates and scale
 

@@ -1,6 +1,6 @@
 use crate::models::{PlayerState, TerrainConfig, Zone, ZoneTransition};
 
-const TICK_DURATION_SECS: f64 = 0.1; // 100ms
+use capitol_protocol::rules::{ARRIVAL_EPSILON, TICK_SECS as TICK_DURATION_SECS};
 
 /// Result of processing movement
 pub struct MovementResult {
@@ -29,7 +29,7 @@ pub fn process_movement(player: &mut PlayerState, terrain: &TerrainConfig) -> Mo
     let old_zone = player.current_zone.clone();
     let mut blocked_result: Option<MovementBlocked> = None;
 
-    if distance < 0.5 {
+    if distance < ARRIVAL_EPSILON {
         // Arrived at destination
         player.x = dest_x;
         player.y = dest_y;

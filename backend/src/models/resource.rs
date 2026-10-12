@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use utoipa::ToSchema;
 use uuid::Uuid;
+
+pub use capitol_protocol::rest::ResourceNodeInfo;
 
 /// Static resource type definition (from database)
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -88,21 +89,6 @@ impl From<ResourceNode> for ResourceNodeState {
             regenerates_at_tick: node.regenerates_at_tick.map(|t| t as u64),
         }
     }
-}
-
-/// Client-facing resource node data
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ResourceNodeInfo {
-    /// Unique node identifier
-    pub id: Uuid,
-    /// Type of resource (e.g., "fiber_plant")
-    pub resource_type: String,
-    /// X position in world coordinates
-    pub x: f64,
-    /// Y position in world coordinates
-    pub y: f64,
-    /// Current state: "available", "harvesting", or "depleted"
-    pub state: String,
 }
 
 impl From<&ResourceNodeState> for ResourceNodeInfo {

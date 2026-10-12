@@ -77,6 +77,10 @@ Copy `backend/.env.example` to `backend/.env`. Default config:
 
 ## Architecture
 
+### Shared Protocol (`protocol/`)
+
+Crate `capitol-protocol`, a root-workspace member that both the backend and the Flint client depend on. It contains `ws.rs` (`ClientMessage`/`ServerMessage`), `rest.rs` (request and response DTOs), `terrain.rs` (`/terrain` types, which the generator also uses) and `rules.rs` (ranges, speeds, `Zone`, quality grades, the water-crossing test). The backend re-exports these from `models/`. Server-only derives (utoipa, sqlx) sit behind its `backend` feature. Any wire change goes here. `tests/fixtures/` holds one JSON fixture per WS message type, and they must round-trip byte for byte.
+
 ### Backend Structure (`backend/src/`)
 
 ```

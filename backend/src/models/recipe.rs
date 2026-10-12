@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use utoipa::ToSchema;
+
+pub use capitol_protocol::rest::{RecipeInfo, RecipeInputInfo, RecipeOutputInfo};
 
 /// Recipe input requirement
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,49 +83,6 @@ impl From<RecipeRow> for Recipe {
             required_station_type: row.required_station_type,
         }
     }
-}
-
-/// Client-facing recipe info for UI
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct RecipeInfo {
-    /// Unique recipe identifier
-    pub id: String,
-    /// Display name of the recipe
-    pub name: String,
-    /// Optional description
-    pub description: Option<String>,
-    /// Recipe category (e.g., "hand_crafting")
-    pub category: String,
-    /// Required input items
-    pub inputs: Vec<RecipeInputInfo>,
-    /// Produced output items
-    pub outputs: Vec<RecipeOutputInfo>,
-    /// Base crafting duration in ticks
-    pub duration_ticks: i32,
-    /// Station type required (null for hand crafting)
-    pub required_station_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct RecipeInputInfo {
-    /// Item type identifier
-    pub item_type: String,
-    /// Display name of the item
-    pub item_name: String,
-    /// Required quantity
-    pub quantity: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct RecipeOutputInfo {
-    /// Item type identifier
-    pub item_type: String,
-    /// Display name of the item
-    pub item_name: String,
-    /// Minimum output quantity
-    pub quantity_min: i32,
-    /// Maximum output quantity
-    pub quantity_max: i32,
 }
 
 impl Recipe {

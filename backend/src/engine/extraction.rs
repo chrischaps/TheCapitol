@@ -7,7 +7,7 @@ use crate::models::{ActionState, NodeState, PlayerState, ResourceNodeState, Reso
 use super::events::GameEvent;
 
 /// Maximum distance from player to node for extraction (world units)
-pub const EXTRACTION_RANGE: f64 = 50.0;
+pub use capitol_protocol::rules::EXTRACTION_RANGE;
 
 /// Represents an item to be created after extraction/crafting
 #[derive(Debug, Clone)]

@@ -11,8 +11,11 @@ use chrono::Utc;
 use jsonwebtoken::{encode, Header, EncodingKey};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
+
+use capitol_protocol::rest::{
+    AuthResponse, LoginRequest, LogoutRequest, RegisterRequest, SuccessResponse,
+};
 
 use crate::error::AppError;
 use crate::models::AccountInfo;
@@ -23,26 +26,6 @@ pub fn router() -> Router<AppState> {
         .route("/register", post(register))
         .route("/login", post(login))
         .route("/logout", post(logout))
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct RegisterRequest {
-    /// Email address for the account
-    pub email: String,
-    /// Password (will be hashed with Argon2)
-    pub password: String,
-    /// Display name for the player character
-    pub player_name: String,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct AuthResponse {
-    /// JWT token for authentication
-    pub token: String,
-    /// Account information
-    pub account: AccountInfo,
-    /// Player character ID
-    pub player_id: Uuid,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -113,7 +96,7 @@ pub async fn register(
     .bind(&req.player_name)
     .bind(500.0)
     .bind(500.0)
-    .bind(50.0f32)
+    .bind(capitol_protocol::rules::PLAYER_SPEED as f32)
     .bind(now)
     .execute(&state.db)
     .await?;
@@ -167,14 +150,6 @@ pub async fn register(
         },
         player_id,
     }))
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct LoginRequest {
-    /// Account email address
-    pub email: String,
-    /// Account password
-    pub password: String,
 }
 
 /// Login to an existing account
@@ -239,12 +214,6 @@ pub async fn login(
     }))
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct LogoutRequest {
-    /// JWT token to invalidate
-    pub token: String,
-}
-
 /// Logout and invalidate the session
 #[utoipa::path(
     post,
@@ -258,7 +227,7 @@ pub struct LogoutRequest {
 pub async fn logout(
     State(state): State<AppState>,
     Json(req): Json<LogoutRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<SuccessResponse>, AppError> {
     // Decode token to get account_id
     let token_data = jsonwebtoken::decode::<Claims>(
         &req.token,
@@ -271,7 +240,7 @@ pub async fn logout(
     let session_key = format!("session:{}", token_data.claims.sub);
     redis.del::<_, ()>(&session_key).await?;
 
-    Ok(Json(serde_json::json!({ "success": true })))
+    Ok(Json(SuccessResponse::ok()))
 }
 
 fn generate_token(state: &AppState, account_id: Uuid, tier: &str, is_admin: bool) -> Result<String, AppError> {

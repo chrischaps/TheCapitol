@@ -14,7 +14,7 @@ use super::trading::{TradeManager, TRADE_RANGE};
 use crate::models::{ActionState, Item, ItemType, PlayerPosition, PlayerState, Recipe, ResourceNodeState, ResourceType, StationState, StationType, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
 
-const TICK_RATE_MS: u64 = 100;
+use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
 
 pub struct GameState {
     pub players: HashMap<Uuid, PlayerState>,
