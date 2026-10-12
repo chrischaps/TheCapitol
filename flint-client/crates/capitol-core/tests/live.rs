@@ -9,6 +9,7 @@
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use capitol_core::motion::Motion;
 use capitol_core::net::*;
 use capitol_core::poll::{Fetch, Poller};
 use capitol_core::protocol::rest::{LoginRequest, RegisterRequest};
@@ -295,4 +296,118 @@ fn the_store_mirrors_a_real_session() {
     );
 
     mirror.net.disconnect();
+}
+
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn the_prediction_agrees_with_a_real_walk() {
+    let net = net();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let auth = match rest(
+        &net,
+        RestRequest::Register(RegisterRequest {
+            email: format!("flint-motion-{stamp}@test.local"),
+            password: "correct horse battery staple".into(),
+            player_name: format!("Walker{}", stamp % 100_000),
+        }),
+        1,
+    ) {
+        Ok(RestResponse::Auth(auth)) => auth,
+        other => panic!("register: {other:?}"),
+    };
+    net.connect(auth.token.clone());
+
+    let mut state = GameState::new();
+    let mut motion = Motion::new();
+    // Frames until `done`, drawing the local player each frame.
+    let mut frames: Vec<(f64, f64)> = Vec::new();
+    let run = |state: &mut GameState,
+               motion: &mut Motion,
+               frames: &mut Vec<(f64, f64)>,
+               what: &str,
+               done: &dyn Fn(&GameState, &Motion) -> bool| {
+        let start = Instant::now();
+        while start.elapsed() < WAIT {
+            if let Some(event) = net.recv_timeout(FRAME) {
+                let changes = state.apply(&event);
+                motion.observe(Instant::now(), &changes, state);
+            }
+            let now = Instant::now();
+            if let Some(me) = state.me() {
+                motion.sample(now);
+                if let Some(pose) = motion.pose(me) {
+                    frames.push((pose.x, pose.y));
+                }
+            }
+            if done(state, motion) {
+                return;
+            }
+        }
+        panic!("timed out waiting for {what}");
+    };
+    run(
+        &mut state,
+        &mut motion,
+        &mut frames,
+        "our position",
+        &|s, m| s.me().and_then(|me| m.pose(me)).is_some(),
+    );
+    let start = state.local_player().unwrap().clone();
+
+    // Out 25 east and back, the second click mid-walk, as a player would.
+    let legs = [(start.x + 25.0, start.y), (start.x, start.y)];
+    for (i, &(x, y)) in legs.iter().enumerate() {
+        motion.move_to(Instant::now(), x, y);
+        net.ws(ClientMessage::Move { x, y });
+        let at = |s: &GameState| {
+            let p = s.local_player().unwrap();
+            (p.x - x).hypot(p.y - y) < 1e-6
+        };
+        if i + 1 < legs.len() {
+            run(&mut state, &mut motion, &mut frames, "halfway", &|s, _| {
+                (s.local_player().unwrap().x - start.x) > 15.0
+            });
+        } else {
+            run(
+                &mut state,
+                &mut motion,
+                &mut frames,
+                "the walk home",
+                &|s, m| at(s) && m.destination().is_none(),
+            );
+        }
+    }
+    // A few more frames, so the server's last snapshots are checked too.
+    let settle = Instant::now();
+    run(&mut state, &mut motion, &mut frames, "settling", &|_, _| {
+        settle.elapsed() > Duration::from_millis(800)
+    });
+
+    let jump = frames
+        .windows(2)
+        .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+        .fold(0.0, f64::max);
+    println!(
+        "{} frames, largest step {jump:.2}, lag {:?}, {} corrections",
+        frames.len(),
+        motion.lag(),
+        motion.corrections()
+    );
+    assert_eq!(
+        motion.corrections(),
+        0,
+        "the server walked where we predicted"
+    );
+    // A frame is at most ~16 ms of walking (0.8 units), with slack for a
+    // slow frame on a busy machine.
+    assert!(jump < 3.0, "largest step {jump}");
+    let last = frames.last().unwrap();
+    assert!(
+        (last.0 - start.x).hypot(last.1 - start.y) < 1e-6,
+        "home: {last:?}"
+    );
+    net.disconnect();
 }

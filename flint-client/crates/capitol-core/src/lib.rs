@@ -6,11 +6,14 @@
 //!   [`net::NetEvent`]s once per frame; it never blocks on the network.
 //! - [`state`]: the world mirror. [`state::GameState::apply`] takes each
 //!   `NetEvent` and returns the [`state::StateEvent`]s the game reacts to.
+//! - [`motion`]: smooth positions. [`motion::Motion`] draws other players
+//!   150 ms behind between snapshots and predicts the local player's walk.
 //! - [`poll`]: the polling scheduler. [`poll::Poller`] turns those events, and
 //!   a 5 s timer, into the REST refetches the server never pushes.
 //! - [`catalog`]: item, station and resource types the server has no endpoint for.
 
 pub mod catalog;
+pub mod motion;
 pub mod net;
 pub mod poll;
 pub mod state;
