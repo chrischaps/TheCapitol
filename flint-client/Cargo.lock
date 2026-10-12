@@ -514,8 +514,20 @@ dependencies = [
 name = "capitol-client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "capitol-core",
+ "capitol-protocol",
+ "clap",
+ "egui",
+ "flint-import",
  "flint-player",
+ "flint-render",
+ "flint-scene",
+ "flint-schema",
+ "rhai",
+ "tracing-subscriber",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]

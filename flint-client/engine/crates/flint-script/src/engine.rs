@@ -193,6 +193,12 @@ impl ScriptEngine {
         self.module_base.as_deref()
     }
 
+    // SPIKE(P0.4): raw engine access so an embedding game can register native
+    // functions. P1 H1 replaces this with PlayerExtension::register_script_api.
+    pub fn engine_mut(&mut self) -> &mut Engine {
+        &mut self.engine
+    }
+
     /// Compile a Rhai source file into an AST
     pub fn compile(&self, source: &str) -> Result<AST, String> {
         self.engine.compile(source).map_err(|e| format!("{}", e))

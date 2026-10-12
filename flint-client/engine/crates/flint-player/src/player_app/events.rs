@@ -340,6 +340,7 @@ impl ApplicationHandler for PlayerApp {
         let any_panel_open = self.debug_panels.iter().any(|p| p.is_open());
         #[cfg(not(feature = "debug-hud"))]
         let any_panel_open = false;
+        let any_panel_open = any_panel_open || self.spike_ui.is_some(); // SPIKE(P0.4)
         if any_panel_open {
             if let (Some(egui_winit), Some(window)) = (&mut self.egui_winit, &self.window) {
                 let response = egui_winit.on_window_event(window, &event);

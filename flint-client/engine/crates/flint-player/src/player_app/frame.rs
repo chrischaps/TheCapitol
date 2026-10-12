@@ -1297,11 +1297,17 @@ impl PlayerApp {
             None
         };
 
+        let mut spike_ui = self.spike_ui.take(); // SPIKE(P0.4)
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             // Script UI first: it shares the panels' background layer, so
             // issuing it before the panels puts the panels in front of it
             // (title card, HUD) — see render_draw_commands.
             render_draw_commands(ctx, &draw_commands, ui_textures, ui_fonts, ui_fonts_warned);
+
+            // SPIKE(P0.4): game egui above the script HUD, below debug panels.
+            if let Some(ui) = spike_ui.as_mut() {
+                ui(ctx);
+            }
 
             #[cfg(feature = "debug-hud")]
             {
@@ -1372,6 +1378,7 @@ impl PlayerApp {
         });
 
         self.draw_commands = draw_commands;
+        self.spike_ui = spike_ui; // SPIKE(P0.4)
         #[cfg(feature = "debug-hud")]
         {
             self.debug_panels = debug_panels;

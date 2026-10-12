@@ -300,6 +300,15 @@ pub struct PlayerApp {
     // Android JNI axis reader for trigger/right-stick values from GameActivity
     #[cfg(target_os = "android")]
     android_axis_reader: Option<fn() -> [f32; 4]>,
+
+    // SPIKE(P0.4): embedding hooks for The Capitol's integration spike.
+    // P1 H1/H3/H4 replace them with PlayerExtension (pre_update with the
+    // renderer and device, ui(), on_window_event).
+    /// Runs once after the renderer exists, before scripts init.
+    pub spike_on_init: Option<Box<dyn FnOnce(&mut SceneRenderer, &wgpu::Device)>>,
+    /// Game egui, drawn every frame after the script HUD. While set, every
+    /// window event goes to egui first.
+    pub spike_ui: Option<Box<dyn FnMut(&egui::Context)>>,
 }
 
 use input_config::{InputConfigPaths, PendingRebind};

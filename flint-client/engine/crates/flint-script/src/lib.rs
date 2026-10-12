@@ -371,6 +371,11 @@ impl ScriptSystem {
         }
     }
 
+    // SPIKE(P0.4): see ScriptEngine::engine_mut.
+    pub fn rhai_engine_mut(&mut self) -> &mut rhai::Engine {
+        self.engine.engine_mut()
+    }
+
     /// Set the terrain height sampling callback for scripts
     pub fn set_terrain_height_fn(&mut self, f: Option<Box<dyn Fn(f32, f32) -> f32 + Send + Sync>>) {
         let mut c = crate::lock_or_recover(&self.engine.ctx);

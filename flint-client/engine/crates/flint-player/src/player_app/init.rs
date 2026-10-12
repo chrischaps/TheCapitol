@@ -56,6 +56,8 @@ impl PlayerApp {
             animation: AnimationSystem::new(),
             particles: ParticleSystem::new(),
             script: ScriptSystem::new(),
+            spike_on_init: None, // SPIKE(P0.4)
+            spike_ui: None,      // SPIKE(P0.4)
             window: None,
             render_context: None,
             scene_renderer: None,
@@ -206,6 +208,11 @@ impl PlayerApp {
 
         // Splines, ambient/wrap/sheen, skybox, terrain, camera, post config
         self.apply_scene_environment(&render_context, &mut scene_renderer);
+
+        // SPIKE(P0.4): let the embedding game upload meshes.
+        if let Some(on_init) = self.spike_on_init.take() {
+            on_init(&mut scene_renderer, &render_context.device);
+        }
 
         self.render_context = Some(render_context);
         self.scene_renderer = Some(scene_renderer);
