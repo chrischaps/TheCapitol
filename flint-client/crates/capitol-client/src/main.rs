@@ -1,14 +1,15 @@
 //! The Capitol client. It builds a `flint_player::PlayerApp` for the scene
 //! and installs `CapitolExtension`, through which everything the Capitol
 //! adds reaches the engine. For now it runs the P0.4 spike scene with its
-//! native Rhai function; the spike's meshes and egui window come back
-//! through the extension hooks in P1.3 and P1.4 (they're on branch
-//! `spike/p0.4` until then).
+//! native Rhai function and the inscription window (game egui). The spike's
+//! meshes come back through the runtime mesh hook in P1.4 (they're on
+//! branch `spike/p0.4` until then).
 
 #[allow(dead_code)] // used once the world is built (P3)
 mod coords;
 mod extension;
 mod script_api;
+mod ui;
 
 use anyhow::{Context, Result};
 use clap::Parser;

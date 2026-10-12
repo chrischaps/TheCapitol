@@ -518,6 +518,7 @@ dependencies = [
  "capitol-core",
  "capitol-protocol",
  "clap",
+ "egui",
  "flint-player",
  "flint-render",
  "flint-scene",

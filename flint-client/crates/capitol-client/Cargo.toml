@@ -17,6 +17,7 @@ flint-player = { workspace = true }
 flint-render = { workspace = true }
 flint-scene = { workspace = true }
 flint-schema = { workspace = true }
+egui = { workspace = true }
 rhai = { workspace = true }
 winit = { workspace = true }
 anyhow = { workspace = true }
