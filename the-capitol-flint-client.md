@@ -261,7 +261,7 @@ H1–H5 are needed for the vertical slice. H6 belongs to P8.
   - **Resync.** `NetEvent::Resync` follows `Connected` when an earlier connection in the same session had gone live. The net layer only signals; the state store (P2.3) does the refetching. A first connect that needed retries has nothing stale, so it gets no `Resync`.
   - **Which `auth_error`s are final.** The server sends `auth_error` for a bad token (`Invalid token`), another login (`Session expired`) and a missing player, but also for `Auth timeout` and `Database error: …`. The last two say nothing about the token, so they're retried; the rest end in `AuthFailed`.
   - **Messages while down.** `Ws` commands sent while waiting to reconnect are dropped with a warning, not queued. Held messages during a handshake work as before.
-  - **Known server gap.** When the client gives up on a half-open socket, the server's old handler can outlive the new connection. When its writes finally fail, it calls `remove_player` for the same `player_id` and removes the player the new connection just added. Normal drops and the lag cut-off aren't affected, because the server ends its side first.
+  - **Known server gap ([#59](https://github.com/chrischaps/TheCapitol/issues/59), B8).** When the client gives up on a half-open socket, the server's old handler can outlive the new connection. When its writes finally fail, it calls `remove_player` for the same `player_id` and removes the player the new connection just added. Normal drops and the lag cut-off aren't affected, because the server ends its side first.
 - **Auth.**
   - Tokens last 24 h and there is no refresh endpoint (`routes/auth.rs:277-296`). A stored token is tried first, and an `auth_error` returns the player to the login screen.
   - Only one session per account is allowed, enforced in Redis (`middleware/auth.rs:59-69`). Logging in from the Flint client logs the same account out of React.
@@ -361,8 +361,9 @@ These are small server changes the client depends on or would expose. They are t
 | B5 [#47](https://github.com/chrischaps/TheCapitol/issues/47) | Send `error{message}` when `trade_initiate`, `trade_accept_request` or `trade_offer` fails | Trade failures are silent today | P7 (nice to have) | S |
 | B6 [#48](https://github.com/chrischaps/TheCapitol/issues/48) | Use the real `trade_id` in the disconnect `trade_cancelled` (`engine/tick.rs:109`) | The dummy UUID can't be matched to the trade | P7 (nice to have) | S |
 | B7 [#42](https://github.com/chrischaps/TheCapitol/issues/42) | **Decide how to unify the plot systems.** Terrain plots are visual, with string IDs. Claimable DB plots are axis-aligned boxes with UUIDs, and station placement checks against them. | The 3D world draws terrain plots, but you claim DB plots, and the two don't line up | P6 (decision needed) | M–L |
+| B8 [#59](https://github.com/chrischaps/TheCapitol/issues/59) | On disconnect, remove the player only if the ending connection is still the player's current one (`ws/connection.rs` end of `handle_socket`, `engine/tick.rs` `remove_player`) | A stale handler, from a half-open socket the client reconnected past or a client logged out by a newer login, removes the player the new connection is serving | P2.2 reconnect, P4 (two-client play) | S |
 
-The client can start without B1–B7. P2 and P3 are unaffected, and P4 works with B1 outstanding: you just walk a long way. The cleanest order is B1 before P4 and B4/B7 before P6.
+The client can start without B1–B8. P2 and P3 are unaffected, and P4 works with B1 outstanding: you just walk a long way. The cleanest order is B1 before P4 and B4/B7 before P6.
 
 ## 6. Phases and work packages
 
