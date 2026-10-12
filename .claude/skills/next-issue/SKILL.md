@@ -92,16 +92,38 @@ git push origin issue-<n>:master           # fast-forward only; never force-push
 
 If the push is rejected, rebase, re-verify and push again.
 
-Close the issue with a summary for whoever picks up the next one:
+The push closes the issue, because of `Closes #<n>`. Post the summary for whoever picks up the next one as a comment. Don't use `gh issue close <n> --comment`: on an issue that's already closed it fails, and the comment is never posted.
 
 ```bash
-gh issue close <n> --comment "Done in <sha>.
+gh issue comment <n> --body "Done in <sha>.
 
 <What was built, and anything that differs from the plan.>
 Verified: <commands run>. [H] <what Chris should look at, if anything>"
+gh issue view <n> --json state -q .state   # CLOSED; if not, gh issue close <n>
 ```
 
-Then clean up with `git worktree remove ../TheCapitol-<n>` and `git branch -d issue-<n>`.
+Then clean up. Run these from the main checkout, not from the worktree or its parent directory:
+
+```bash
+git worktree remove ../TheCapitol-<n>
+git branch -d issue-<n>
+```
+
+Chris works in the main checkout, and nothing else updates it. Without this step his `master` falls behind and his `[H]` checks run against stale code. Fast-forward it, but only if both of these hold:
+- it's on `master`
+- none of the incoming commits touch a file he has modified
+
+If either check fails, leave it alone and tell him how far behind it is.
+
+```bash
+git fetch origin
+git branch --show-current                           # must print master
+git status --short                                  # his local changes
+git diff --name-only HEAD origin/master             # must not overlap the modified files above
+git merge --ff-only origin/master
+```
+
+His untracked and modified files carry over a fast-forward untouched. Never stash, reset or check out over them.
 
 ## 7. Leave a trail
 
