@@ -18,7 +18,9 @@ pub fn upload_static(gpu: &mut ExtensionGpu) {
     ] {
         let mut marker = MeshBuf::default();
         let [cx, cz] = polar_to_world(400.0, angle);
-        marker.annulus(0.0, 30.0, layer::ROAD, color, &[]);
+        // On the trade ring road, so a layer above the greatest road.
+        let y = layer::road(capitol_protocol::terrain::RoadType::Arterial) + 0.02;
+        marker.annulus(0.0, 30.0, y, color, &[]);
         for v in &mut marker.vertices {
             v.position[0] += cx;
             v.position[2] += cz;

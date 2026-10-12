@@ -51,7 +51,7 @@ Every visual change is checked with a capture, run from `flint-client/`:
 target/release/capitol.exe --offline fixtures/terrain.json --screenshot-at 3 --exit-after 4
 ```
 
-That writes `renders/capitol.png`. `--view street|district|map|bridge` picks the framing (map is straight down over the whole world; bridge stands on a canal quay) until the camera rig lands in P3.9. `--screenshot <path>` names the file, `--input-script <file>` plays timed keys (flint-player's format: `1.0 tap KeyE`), and `--exit-after` prints the average ms/frame. Look at the PNG before calling a visual change done.
+That writes `renders/capitol.png`. `--view street|district|map|bridge|suburb` picks the framing (map is straight down over the whole world; bridge stands on a canal quay; suburb is low over curving streets) until the camera rig lands in P3.9. `--screenshot <path>` names the file, `--input-script <file>` plays timed keys (flint-player's format: `1.0 tap KeyE`), and `--exit-after` prints the average ms/frame. Look at the PNG before calling a visual change done.
 
 ## Testing against the server
 

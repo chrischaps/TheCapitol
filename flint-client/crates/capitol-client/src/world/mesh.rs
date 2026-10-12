@@ -53,6 +53,24 @@ impl MeshBuf {
         }
     }
 
+    /// A flat-shaded triangle fan from `centre` through each point of `rim`
+    /// in turn, facing `normal`. Each triangle winds itself, as in `quad`.
+    pub fn fan(&mut self, centre: [f32; 3], rim: &[[f32; 3]], normal: [f32; 3], color: [f32; 4]) {
+        let c = self.vertex(centre, normal, color);
+        let first = self.vertices.len() as u32;
+        for &p in rim {
+            self.vertex(p, normal, color);
+        }
+        for (k, w) in rim.windows(2).enumerate() {
+            let (a, b) = (first + k as u32, first + k as u32 + 1);
+            if facing(centre, w[0], w[1], normal) {
+                self.indices.extend([c, a, b]);
+            } else {
+                self.indices.extend([c, b, a]);
+            }
+        }
+    }
+
     /// Adds all of `other`'s triangles to this mesh.
     pub fn append(&mut self, other: MeshBuf) {
         let base = self.vertices.len() as u32;
@@ -121,6 +139,33 @@ pub fn facing(a: [f32; 3], b: [f32; 3], c: [f32; 3], normal: [f32; 3]) -> bool {
         u[0] * v[1] - u[1] * v[0],
     ];
     cross[0] * normal[0] + cross[1] * normal[1] + cross[2] * normal[2] > 0.0
+}
+
+/// Looking at a built mesh from above, for tests.
+#[cfg(test)]
+pub mod probe {
+    use super::MeshBuf;
+    use flint_render::Vertex;
+
+    pub fn triangles(m: &MeshBuf) -> impl Iterator<Item = [Vertex; 3]> + '_ {
+        m.indices
+            .chunks_exact(3)
+            .map(|t| [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]))
+    }
+
+    /// Whether world (x, z) is under some triangle of `m`, seen from above.
+    pub fn covered(m: &MeshBuf, [x, z]: [f32; 2]) -> bool {
+        triangles(m).any(|tri| {
+            let [a, b, c] = tri.map(|v| [v.position[0], v.position[2]]);
+            if x < a[0].min(b[0]).min(c[0]) || x > a[0].max(b[0]).max(c[0]) {
+                return false;
+            }
+            let side =
+                |p: [f32; 2], q: [f32; 2]| (q[0] - p[0]) * (z - p[1]) - (q[1] - p[1]) * (x - p[0]);
+            let (d0, d1, d2) = (side(a, b), side(b, c), side(c, a));
+            (d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0) || (d0 <= 0.0 && d1 <= 0.0 && d2 <= 0.0)
+        })
+    }
 }
 
 #[cfg(test)]

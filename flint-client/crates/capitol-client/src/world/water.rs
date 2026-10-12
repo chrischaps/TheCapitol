@@ -21,7 +21,7 @@
 //! (`Bridge::angular_half_width`), so everywhere drawn dry is walkable,
 //! and a little drawn wet near a bridge is too.
 
-use crate::coords::{layer, polar_to_world};
+use crate::coords::{layer, polar_to_world, S};
 use crate::world::ground;
 use crate::world::mesh::{MeshBuf, UP};
 use crate::world::palette::{self, hex, mix};
@@ -34,7 +34,7 @@ pub const MESH: &str = "canals";
 /// Vertex spacing along a ring, in server units (1 m).
 const STEP: f64 = 10.0;
 /// The kerb's width in metres.
-const KERB: f32 = 1.0;
+pub const KERB: f32 = 1.0;
 /// Rows of quads across a causeway, so its ground colour follows the
 /// zone blend.
 const CAUSEWAY_ROWS: usize = 4;
@@ -134,6 +134,18 @@ pub fn holes(rings: &[WaterRing]) -> Vec<(f64, f64)> {
     rings
         .iter()
         .map(|r| (r.inner_radius(), r.outer_radius()))
+        .collect()
+}
+
+/// The bands of radii a road keeps out of, one per ring: the channel and
+/// the kerb along each side of it, `(inner, outer)` in server units. A road
+/// stops at the kerb's land face, at a bridge too, where P3.5's deck takes
+/// over.
+pub fn kerbed(rings: &[WaterRing]) -> Vec<(f64, f64)> {
+    let kerb = (KERB / S) as f64;
+    rings
+        .iter()
+        .map(|r| (r.inner_radius() - kerb, r.outer_radius() + kerb))
         .collect()
 }
 
@@ -312,25 +324,7 @@ mod tests {
         terrain.water_rings
     }
 
-    fn triangles(m: &MeshBuf) -> impl Iterator<Item = [flint_render::Vertex; 3]> + '_ {
-        m.indices
-            .chunks_exact(3)
-            .map(|t| [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]))
-    }
-
-    /// Whether world (x, z) is under some triangle of `m`, seen from above.
-    fn covered(m: &MeshBuf, [x, z]: [f32; 2]) -> bool {
-        triangles(m).any(|tri| {
-            let [a, b, c] = tri.map(|v| [v.position[0], v.position[2]]);
-            if x < a[0].min(b[0]).min(c[0]) || x > a[0].max(b[0]).max(c[0]) {
-                return false;
-            }
-            let side =
-                |p: [f32; 2], q: [f32; 2]| (q[0] - p[0]) * (z - p[1]) - (q[1] - p[1]) * (x - p[0]);
-            let (d0, d1, d2) = (side(a, b), side(b, c), side(c, a));
-            (d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0) || (d0 <= 0.0 && d1 <= 0.0 && d2 <= 0.0)
-        })
-    }
+    use crate::world::mesh::probe::{covered, triangles};
 
     /// The server point `along` units out from the centre along a bridge's
     /// axis and `beside` units to one side of it.

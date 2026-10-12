@@ -27,7 +27,7 @@ pub const S: f32 = 0.1;
 /// through, so a canal is a stone-walled channel with the sea showing at
 /// its bottom: a water table. Steps between layers are at least 2 cm,
 /// which the depth buffer resolves from the map view (plan §4.6).
-#[allow(dead_code)] // PLOT and road() wait for plots (P3.6) and roads (P3.4)
+#[allow(dead_code)] // PLOT waits for plots (P3.6)
 pub mod layer {
     use capitol_protocol::terrain::RoadType;
 
@@ -44,7 +44,10 @@ pub mod layer {
     pub const BANK: f32 = GROUND + 0.3;
 
     /// A road's height: trail < suburban < grid < arterial, so where two
-    /// cross, the greater road is drawn on top.
+    /// cross, the greater road is drawn on top. The ranks are 2 cm apart,
+    /// like every other layer: 5 mm is finer than the depth buffer resolves
+    /// from the map view. Arterials top out 10 cm above the land, well
+    /// under the kerb.
     pub fn road(road_type: RoadType) -> f32 {
         let rank = match road_type {
             RoadType::Trail => 0.0,
@@ -52,7 +55,7 @@ pub mod layer {
             RoadType::Grid => 2.0,
             RoadType::Arterial => 3.0,
         };
-        ROAD + rank * 0.005
+        ROAD + rank * 0.02
     }
 }
 

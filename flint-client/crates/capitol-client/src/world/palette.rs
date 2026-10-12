@@ -3,6 +3,7 @@
 //! hex as written there; vertex colours are linear, so convert with `hex`.
 
 use capitol_protocol::rules::Zone;
+use capitol_protocol::terrain::RoadType;
 use flint_render::srgb_to_linear;
 
 pub const BACKGROUND: u32 = 0x0a0a0f;
@@ -12,6 +13,16 @@ pub const GOLD_DIM: u32 = 0x8a7019;
 /// the scene's ocean, whose colours are set in the scene file; this tints
 /// the canal beds.
 pub const WATER: u32 = 0x1e64a0;
+
+/// A road's colour in the 2D clients: the greater the road, the lighter.
+pub fn road(road_type: RoadType) -> u32 {
+    match road_type {
+        RoadType::Arterial => 0x4a4a5a,
+        RoadType::Grid => 0x3a3a4a,
+        RoadType::Suburban => 0x2a2a3a,
+        RoadType::Trail => 0x1a1a2a,
+    }
+}
 
 /// A zone's colour in the 2D clients.
 pub fn zone(zone: Zone) -> u32 {
