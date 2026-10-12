@@ -73,7 +73,7 @@ git subtree pull --prefix=flint-client/engine flint main --squash
    ```
 4. **Chris merges Flint PRs.** Never push to Flint `main`. Leave the issue open until the merge. Then `git subtree pull` (above) and check that the subtree matches `flint/main`: `git diff flint/main HEAD:flint-client/engine --stat` should be empty.
 
-The only exception is a throwaway spike (P0.4), which may patch the subtree temporarily. Those patches are reverted and never pushed.
+The only exception was the throwaway P0.4 spike. Its subtree patches (`SPIKE(P0.4)`) live on branch `spike/p0.4` and never reach master or Flint. Keep it that way: a subtree patch on master would ride along in the next `git subtree push`.
 
 ## Pushing to GitHub from this machine
 

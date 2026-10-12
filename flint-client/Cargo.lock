@@ -515,6 +515,7 @@ name = "capitol-client"
 version = "0.1.0"
 dependencies = [
  "capitol-core",
+ "capitol-protocol",
  "flint-player",
 ]
 

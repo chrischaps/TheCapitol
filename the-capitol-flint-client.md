@@ -173,6 +173,14 @@ These go to Flint on a `feature/*` branch and PR, following the subtree conventi
 
 H1–H5 are needed for the vertical slice. H6 belongs to P8.
 
+**What the P0.4 spike found** (branch `spike/p0.4`; its subtree patches are marked `SPIKE(P0.4)`):
+- **Embedding.** `PlayerApp` already implements `ApplicationHandler` publicly. A wrapper that forwards all nine callbacks works, and the capture flags (`--screenshot`, `--exit-after`) work through it. `PlayerApp::new` plus the public fields `main.rs` sets are enough to boot a scene. The game must pass `engine/schemas` itself.
+- **H1 (Rhai).** Registering on the `rhai::Engine` before the scene loads works. Scripts call native functions with no other change. The engine uses rhai's `sync` feature, so every native function and the state it captures must be `Send + Sync` (`Arc<Mutex<…>>`, atomics). `register_script_api` should take `&mut rhai::Engine` and run before `load_scripts_from_scene`.
+- **H4 (meshes).** Uploading with `load_procedural_mesh` after init works. An entity whose `model.asset` names the mesh draws it, because `update_from_world` rebuilds the draw list every frame. The scene's model loader then logs a "Model file not found" warning for each runtime-only name, so H4 should give runtime meshes a way to be declared or skip them quietly. **Vertex colours are linear** (the surface is sRGB), so the React hex tokens need an sRGB-to-linear conversion; without it the palette washes out. Use `ImportedMaterial { use_vertex_color: true, .. }`.
+- **H3 (egui).** One extra callback inside the existing egui pass, after `render_draw_commands` and before the debug panels, gives the draw order H3 wants. With that callback installed, every window event goes to `egui_winit` first. A focused `TextEdit` consumes the keystrokes, and the rest still reach the game. Tested with real keystrokes sent to the window, including backspace. Not tested yet: IME, and Escape while a text box has focus, which flint-player treats as quit when the cursor isn't captured. H3 must handle that case.
+- **Camera and cursor.** With no player entity, the cursor isn't captured and script `set_camera_position`/`set_camera_target` drive the view, which is what the Capitol's camera rig needs.
+- **Small gaps.** The renderer has no clear-colour setter. The `sky` component (gradient, stars) covers the background instead. Scene entities don't need an archetype.
+
 ### 4.5 Networking and state (`capitol-core`)
 
 - **IO thread.** A tokio runtime runs on one background thread, with `reqwest` (rustls) for REST and `tokio-tungstenite` for the WebSocket. The game loop talks to it over two `std::sync::mpsc` channels. `Command` goes in: `Ws(ClientMessage)` or `Rest(RestRequest, tag)`. `NetEvent` comes out: `Ws(ServerMessage)`, `Rest(tag, Result<…>)` or `Connection(state)`. The game drains the inbound channel once per frame in `pre_update`.
@@ -211,7 +219,9 @@ world.z =  (y - 4000) * S        // server "down" = +Z = south; north is -Z
 world.y =  height layer
 ```
 
-`S` is a single constant. The proposal is **S = 0.1**: the world becomes 800 m across, a player (radius 8) is about 1.6 m wide, and a 60-unit arterial is 6 m. The P0 spike confirms Flint's handedness and the value of S before anything else depends on it.
+`S` is a single constant, **S = 0.1**: the world is 800 m across, a player (radius 8) is about 1.6 m wide, a 60-unit arterial is 6 m, and the moat is a 2 m channel 20 m from the centre.
+
+**Verified in P0.4.** Flint is **right-handed and Y-up**. `Camera::view_matrix` (`flint-render/src/camera.rs`) builds `right = forward × up`, so a camera looking toward -Z has +X on its right. With the mapping above, the map isn't mirrored: from above, with north (-Z) at the top of the screen, east (+X) is on the right, as in the 2D clients. The spike rendered the moat's single bridge (server angle 90) on the south side, facing a camera placed south of centre, and an east marker (angle 0) on the right. S = 0.1 read well at that distance. `coords.rs` has the mapping and tests (`to_world`, `to_server`, `polar_to_world`).
 
 Flat geometry is layered in Y to avoid z-fighting: ground 0, plots +0.02, roads +0.04 (by type: trail < suburban < grid < arterial), bridge decks raised above the water surface.
 
@@ -293,7 +303,7 @@ Sizes: **S** is about 1 focused session, **M** 2–3, **L** 4 or more. Each phas
 | P0.1 [#1](https://github.com/chrischaps/TheCapitol/issues/1) | Bring `C:\Users\chris\dev\Flint` up to `origin/main`. Add it as a squash subtree at `flint-client/engine` (`git subtree add --prefix=flint-client/engine <flint-remote> main --squash`). | S | none |
 | P0.2 [#2](https://github.com/chrischaps/TheCapitol/issues/2) | Create the `flint-client/` workspace, add `exclude` to the root `Cargo.toml`, and give it its own `target/`. Copy `.cargo/config.toml` from the engine (8 MB stack). Write `play.bat`. Add a `flint-client/CLAUDE.md` with the subtree-sync commands. | S | P0.1 |
 | P0.3 [#3](https://github.com/chrischaps/TheCapitol/issues/3) | Extract `capitol-protocol`: move `ClientMessage`/`ServerMessage` from `ws/connection.rs:21-290`, the REST DTOs, the terrain response types and the rules constants. Point the backend at it, and keep `cargo test` green. | M | none |
-| P0.4 [#4](https://github.com/chrischaps/TheCapitol/issues/4) | **Embedding spike** (throwaway): a binary that wraps `PlayerApp` like `flint-android` does. Register one Rhai function by temporarily patching the subtree, upload one annulus mesh, and type into an egui text box. Confirm Y-up handedness and the scale `S`. | M | P0.2 |
+| P0.4 [#4](https://github.com/chrischaps/TheCapitol/issues/4) | **Embedding spike** (throwaway): a binary that wraps `PlayerApp` like `flint-android` does. Register one Rhai function by temporarily patching the subtree, upload one annulus mesh, and type into an egui text box. Confirm Y-up handedness and the scale `S`. *Done: the spike lives on branch `spike/p0.4`, never merged, so master's subtree stays identical to Flint. Master keeps `coords.rs`. Findings are under §4.4.* | M | P0.2 |
 
 **Exit:** a window showing a ring mesh, an egui box that accepts typing, and a Rhai script calling a Rust function. The backend builds against `capitol-protocol`.
 
