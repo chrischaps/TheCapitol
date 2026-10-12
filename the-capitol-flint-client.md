@@ -271,13 +271,24 @@ H1–H5 are needed for the vertical slice. H6 belongs to P8.
   - containers after `inventory_updated`, `trade_executed`, extraction and crafting completion
   - currency after any trade or exchange
 - **Filtering.** Many messages are broadcast to everyone, including extraction, crafting, `inventory_updated` and `positions`. The state layer filters by `player_id` and never assumes a message is about the local player.
+- **How P2.3 built it** (`crates/capitol-core/src/state/`, plus `catalog.rs`):
+  - **A pure reducer.** `GameState::apply(&NetEvent) -> Vec<StateEvent>`. It does no IO and keeps no clock. `StateEvent`s are facts: `SnapshotStale`, `InventoryChanged{container_id}`, `StationOpened`, `PlayerJoined`, `NodeAdded`, `ExtractionCompleted{item}` and so on. The store never asks for a refetch itself; P2.4 maps events to REST calls. Notifications aren't stored either: the UI toasts from events.
+  - **Snapshots.** `SnapshotStale` comes on the first `Connected` and on every `Resync`. A resync also clears every player's activity and the open station, because the server dropped the player (`remove_player`) and re-added them idle.
+  - **`positions` replaces the player set.** It lists every online player (`broadcast_positions`), so anyone missing has gone, even if their `player_left` was lost. Joins and leaves are reported as diffs.
+  - **Nodes and stations merge.** Nearby answers upsert and report only real differences, so the 5 s polls are quiet. Entries out of range stay, as in React. The first answer after a resync *replaces* instead, which drops anything removed while the client was away.
+  - **Activity is one entry per player.** The server allows one action at a time (`ActionState`), so `activities: player → Extracting | Crafting` holds everyone. The local player's starts and finishes come out as `ExtractionStarted`/`CraftingCompleted` and so on. Anyone else's come out as `ActivityChanged{player_id}`, so the world can show other players working. A finish for the local player is reported even if its start was missed.
+  - **Inventory filter.** `inventory_updated` counts if it's from the local player *or* names a container the store holds (the player's own, or the open station's). That covers two players at one storage chest, which React's filter would miss.
+  - **Zone.** The server sends `zone_changed` only on a crossing. So the first zone is computed from the first known position (`Zone::from_position`) and reported as `ZoneChanged{from: None, ..}`.
+  - **Static data.** `catalog.rs` hardcodes item, station, resource and container types from the migration seed rows. `station_placed` uses it to fill in category, icon and interaction range.
+  - **Trades pass through** as `StateEvent::Trade(msg)` until P2.6 builds the state machine.
+  - **Coverage.** The reducer tests map every `ServerMessage` variant to its test in an exhaustive `match`, so a new variant doesn't compile without one. They also run every protocol fixture through the store. The live test `the_store_mirrors_a_real_session` drives a real session: snapshot, walk, extract, then refetch the inventory.
 - **Interpolation.**
   - `positions` arrives every 100 ms with no velocity (`engine/tick.rs:480-493`).
   - Other players render about 150 ms behind real time, lerped between the two surrounding snapshots, with a velocity estimate for brief gaps.
   - The local player is predicted: the client moves toward the clicked destination at 50 u/s, which mirrors `engine/movement.rs`. When a snapshot disagrees by more than about 4 units, the client blends back. `movement_blocked` snaps to `stopped_x/y`.
 - **Trade state machine.** `Idle → Requested(out) / Incoming(from) → Open(trade_id) → (Accepted mine/theirs) → Executed / Cancelled`. It handles three protocol quirks:
   - Failures to initiate or offer are only logged on the server, so the client times out after about 5 s with a hint.
-  - `trade_cancelled` on disconnect carries a dummy `trade_id` (`engine/tick.rs:109`), so while a trade is open, any cancellation is treated as ours.
+  - `trade_cancelled` on disconnect carries a dummy `trade_id` (`engine/tick.rs:109`, a fresh `Uuid::new_v4()`, so it can't be recognised). But `trade_cancelled` and `trade_executed` are broadcast to *every* client (`ws/connection.rs`), so "treat any cancellation as ours" would let a stranger's cancel close our trade. Instead: a matching `trade_id` is ours. A non-matching one with reason `Player disconnected` is ours only if our partner's `player_left` follows it. `remove_player` sends that leave straight after the cancel, so hold the cancel until the leave arrives or the next `positions` shows the partner still online. `trade_executed` with someone else's `trade_id` is ignored. (Found in P2.3.)
   - No `inventory_updated` follows a trade, so the client refetches containers and currency itself.
 - **Quality grades.** Use the server's thresholds: A ≥ 90, B ≥ 75, C ≥ 55, D ≥ 35, otherwise F. Since P0.3 they live in `capitol_protocol::rules::quality_grade`, and the backend calls the same function. WebSocket events carry only the numeric quality, so the client computes the grade.
 

@@ -1,0 +1,990 @@
+//! The world mirror. [`GameState`] takes what the net layer reports (a
+//! [`ServerMessage`], a REST result, a connection change) and returns the
+//! [`StateEvent`]s the UI and the 3D world react to. It does no IO and keeps no
+//! clock, so every rule here is a plain reducer test.
+//!
+//! ```no_run
+//! # use capitol_core::{net::*, state::*};
+//! # let net = Net::spawn(NetConfig::default()).unwrap();
+//! let mut state = GameState::new();
+//! // once per frame:
+//! for event in net.drain() {
+//!     for change in state.apply(&event) {
+//!         // spawn a node, toast a completion, refetch containers, ...
+//!     }
+//! }
+//! ```
+//!
+//! **Filtering.** The server broadcasts extraction, crafting, station and
+//! `inventory_updated` events to everyone. Each carries a `player_id`, and only
+//! the local player's change local state. Other players' activity goes in a
+//! per-player map so the world can show them working.
+//!
+//! **Facts, not requests.** The store never decides what to refetch. It emits
+//! [`StateEvent::SnapshotStale`], [`StateEvent::InventoryChanged`] and so on, and
+//! the polling scheduler (P2.4) turns those into REST calls.
+//!
+//! Make a new `GameState` for each login. It assumes one local player.
+
+mod container;
+
+use std::collections::HashMap;
+
+use capitol_protocol::rest::{PlotInfo, RecipeInfo, ResourceNodeInfo, StationInfo};
+use capitol_protocol::rules::{self, Zone};
+use capitol_protocol::ws::{PlayerPosition, ServerMessage};
+use uuid::Uuid;
+
+use crate::catalog::{self, container_type};
+use crate::net::{ConnectionState, NetEvent, RestResponse};
+
+pub use container::Container;
+
+/// What one player is busy with. The server allows one action at a time
+/// (`ActionState` in `backend/src/models/player.rs`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Activity {
+    Extracting {
+        node_id: Uuid,
+        progress: u32,
+        duration: u32,
+    },
+    Crafting {
+        operation_id: Uuid,
+        recipe_id: String,
+        recipe_name: String,
+        progress: u32,
+        duration: u32,
+    },
+}
+
+impl Activity {
+    /// Progress from 0 to 1, for a ring or a bar.
+    pub fn fraction(&self) -> f32 {
+        let (progress, duration) = match self {
+            Activity::Extracting {
+                progress, duration, ..
+            }
+            | Activity::Crafting {
+                progress, duration, ..
+            } => (*progress, *duration),
+        };
+        if duration == 0 {
+            0.0
+        } else {
+            (progress as f32 / duration as f32).min(1.0)
+        }
+    }
+}
+
+/// The station the local player has open (`station_opened`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenStation {
+    pub station_id: Uuid,
+    pub station_type: String,
+    pub name: String,
+    pub container_id: Uuid,
+}
+
+/// What an extraction or a craft produced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Yield {
+    pub item_type: String,
+    pub item_name: String,
+    pub quantity: i32,
+    /// 0–100. Grade it with [`rules::quality_grade`].
+    pub quality: i32,
+}
+
+/// A change the store made, for the UI and the world to react to. The state
+/// itself is already updated when these come out.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StateEvent {
+    /// The connection state changed. See [`GameState::connection`].
+    Connection(ConnectionState),
+    /// What the client holds is missing or out of date: refetch containers,
+    /// nearby nodes and stations, currency, plots and recipes. Sent on the
+    /// first `Connected` and after every reconnect.
+    SnapshotStale,
+    /// The server's `error` message, usually a rejected command.
+    ServerError {
+        message: String,
+    },
+
+    /// A player came online (or into the snapshot after a reconnect).
+    PlayerJoined(Uuid),
+    PlayerLeft(Uuid),
+    /// A `positions` snapshot arrived. Positions are server truth, 100 ms apart.
+    PositionsUpdated,
+    /// The local player hit water. Their server position is now `(x, y)`.
+    MovementBlocked {
+        reason: String,
+        x: f64,
+        y: f64,
+    },
+    /// The local player's zone. `from` is `None` for the first one, which is
+    /// worked out from the first known position, not sent by the server.
+    ZoneChanged {
+        from: Option<Zone>,
+        to: Zone,
+    },
+
+    /// The local player started extracting.
+    ExtractionStarted {
+        node_id: Uuid,
+    },
+    ExtractionCompleted {
+        node_id: Uuid,
+        item: Yield,
+    },
+    ExtractionCancelled,
+    /// The local player started crafting, by hand or at a station.
+    CraftingStarted {
+        recipe_id: String,
+        recipe_name: String,
+    },
+    CraftingCompleted {
+        item: Yield,
+    },
+    CraftingCancelled,
+    CraftingFailed {
+        reason: String,
+    },
+    /// Another player's activity started or stopped. See [`GameState::activity`].
+    ActivityChanged {
+        player_id: Uuid,
+    },
+
+    NodeAdded(Uuid),
+    NodeChanged(Uuid),
+    NodeRemoved(Uuid),
+
+    StationAdded(Uuid),
+    StationChanged(Uuid),
+    StationRemoved(Uuid),
+    /// `station_placed`: someone placed a station just now. When `owner_id` is
+    /// the local player, a kit left their inventory.
+    StationPlaced {
+        station_id: Uuid,
+        owner_id: Uuid,
+    },
+    /// The local player opened a station. Its container still has to be fetched.
+    StationOpened {
+        station_id: Uuid,
+        container_id: Uuid,
+    },
+    StationClosed,
+
+    /// The server says a container the local player holds or has open changed.
+    InventoryChanged {
+        container_id: Uuid,
+    },
+    /// New `/inventory/containers` contents.
+    ContainersUpdated,
+    /// New contents for the open station's container.
+    StationContainerUpdated,
+    RecipesUpdated,
+    CurrencyChanged {
+        balance: i64,
+    },
+    PlotsUpdated,
+    PlotClaimed {
+        plot_id: Uuid,
+    },
+    /// Refetch `/terrain`.
+    TerrainUpdated,
+
+    /// A trade message for the local player, passed through untouched. The
+    /// trade state machine (P2.6) will replace this. Note that
+    /// `trade_executed` and `trade_cancelled` are broadcast to everyone.
+    Trade(ServerMessage),
+}
+
+/// The client's mirror of the world.
+#[derive(Debug, Clone)]
+pub struct GameState {
+    connection: ConnectionState,
+    ever_connected: bool,
+    me: Option<Uuid>,
+
+    players: HashMap<Uuid, PlayerPosition>,
+    activities: HashMap<Uuid, Activity>,
+    zone: Option<Zone>,
+
+    nodes: HashMap<Uuid, ResourceNodeInfo>,
+    stations: HashMap<Uuid, StationInfo>,
+    /// Set by a reconnect: the next nearby response replaces rather than merges,
+    /// which drops whatever was removed while the client was away.
+    nodes_stale: bool,
+    stations_stale: bool,
+
+    containers: HashMap<Uuid, Container>,
+    open_station: Option<OpenStation>,
+    station_container: Option<Container>,
+
+    recipes: Vec<RecipeInfo>,
+    strands: Option<i64>,
+    plots: Vec<PlotInfo>,
+}
+
+impl Default for GameState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GameState {
+    pub fn new() -> Self {
+        Self {
+            connection: ConnectionState::Disconnected {
+                reason: "not connected".into(),
+            },
+            ever_connected: false,
+            me: None,
+            players: HashMap::new(),
+            activities: HashMap::new(),
+            zone: None,
+            nodes: HashMap::new(),
+            stations: HashMap::new(),
+            nodes_stale: false,
+            stations_stale: false,
+            containers: HashMap::new(),
+            open_station: None,
+            station_container: None,
+            recipes: Vec::new(),
+            strands: None,
+            plots: Vec::new(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Applying
+    // -----------------------------------------------------------------------
+
+    /// Applies anything the net layer reports. REST failures change nothing;
+    /// the caller sees them on the `NetEvent` itself.
+    pub fn apply(&mut self, event: &NetEvent) -> Vec<StateEvent> {
+        match event {
+            NetEvent::Ws(message) => self.apply_ws(message),
+            NetEvent::Rest(_, Ok(response)) => self.apply_rest(response),
+            NetEvent::Rest(_, Err(_)) => Vec::new(),
+            NetEvent::Connection(state) => self.apply_connection(state),
+            NetEvent::Resync => self.apply_resync(),
+        }
+    }
+
+    pub fn apply_connection(&mut self, state: &ConnectionState) -> Vec<StateEvent> {
+        let mut out = Vec::new();
+        self.connection = state.clone();
+        out.push(StateEvent::Connection(state.clone()));
+        if let ConnectionState::Connected { player_id } = state {
+            self.me = Some(*player_id);
+            if !self.ever_connected {
+                self.ever_connected = true;
+                out.push(StateEvent::SnapshotStale);
+            }
+        }
+        out
+    }
+
+    /// The session reconnected. The server dropped the player while it was
+    /// away, which cancelled their action and closed any open station, and
+    /// whatever happened meanwhile was missed.
+    pub fn apply_resync(&mut self) -> Vec<StateEvent> {
+        let mut out = Vec::new();
+        for (player_id, _) in self.activities.drain() {
+            out.push(StateEvent::ActivityChanged { player_id });
+        }
+        if self.open_station.take().is_some() {
+            self.station_container = None;
+            out.push(StateEvent::StationClosed);
+        }
+        self.nodes_stale = true;
+        self.stations_stale = true;
+        out.push(StateEvent::SnapshotStale);
+        out
+    }
+
+    pub fn apply_ws(&mut self, message: &ServerMessage) -> Vec<StateEvent> {
+        use ServerMessage as M;
+        let mut out = Vec::new();
+        match message {
+            M::AuthOk { player_id } => self.me = Some(*player_id),
+            // The net layer turns these into connection states.
+            M::AuthError { .. } | M::Subscribed { .. } => {}
+            M::Error { message } => out.push(StateEvent::ServerError {
+                message: message.clone(),
+            }),
+
+            M::Positions { players } => self.positions(players, &mut out),
+            M::PlayerJoined { player } => {
+                if self.players.insert(player.id, player.clone()).is_none() {
+                    out.push(StateEvent::PlayerJoined(player.id));
+                }
+                self.learn_zone(&mut out);
+            }
+            M::PlayerLeft { player_id } => self.remove_player(*player_id, &mut out),
+            M::MovementBlocked {
+                player_id,
+                reason,
+                stopped_x,
+                stopped_y,
+            } => {
+                if self.is_me(*player_id) {
+                    if let Some(me) = self.players.get_mut(player_id) {
+                        me.x = *stopped_x;
+                        me.y = *stopped_y;
+                    }
+                    out.push(StateEvent::MovementBlocked {
+                        reason: reason.clone(),
+                        x: *stopped_x,
+                        y: *stopped_y,
+                    });
+                }
+            }
+            M::ZoneChanged {
+                player_id, to_zone, ..
+            } => {
+                if self.is_me(*player_id) {
+                    match Zone::from_str(to_zone) {
+                        Some(to) => self.set_zone(to, &mut out),
+                        None => tracing::warn!("zone_changed to unknown zone {to_zone:?}"),
+                    }
+                }
+            }
+
+            M::ExtractionStarted {
+                player_id,
+                node_id,
+                duration_ticks,
+            } => {
+                let activity = Activity::Extracting {
+                    node_id: *node_id,
+                    progress: 0,
+                    duration: *duration_ticks,
+                };
+                let local = StateEvent::ExtractionStarted { node_id: *node_id };
+                self.start(*player_id, activity, local, &mut out);
+            }
+            M::ExtractionProgress {
+                player_id,
+                progress: p,
+                duration: d,
+            } => {
+                if let Some(Activity::Extracting {
+                    progress, duration, ..
+                }) = self.activities.get_mut(player_id)
+                {
+                    *progress = *p;
+                    *duration = *d;
+                }
+            }
+            M::ExtractionCompleted {
+                player_id,
+                node_id,
+                item_type,
+                item_name,
+                quantity,
+                quality,
+            } => {
+                let local = StateEvent::ExtractionCompleted {
+                    node_id: *node_id,
+                    item: Yield {
+                        item_type: item_type.clone(),
+                        item_name: item_name.clone(),
+                        quantity: *quantity,
+                        quality: *quality,
+                    },
+                };
+                self.finish(*player_id, local, &mut out);
+            }
+            M::ExtractionCancelled { player_id } => {
+                self.finish(*player_id, StateEvent::ExtractionCancelled, &mut out)
+            }
+            M::NodeDepleted { node_id } => self.set_node_state(*node_id, "depleted", &mut out),
+            M::NodeRegenerated { node_id } => self.set_node_state(*node_id, "available", &mut out),
+            M::NearbyNodes { nodes } => self.merge_nodes(nodes, &mut out),
+
+            M::CraftingStarted {
+                player_id,
+                operation_id,
+                recipe_id,
+                recipe_name,
+                duration_ticks,
+            } => {
+                let activity = Activity::Crafting {
+                    operation_id: *operation_id,
+                    recipe_id: recipe_id.clone(),
+                    recipe_name: recipe_name.clone(),
+                    progress: 0,
+                    duration: *duration_ticks,
+                };
+                let local = StateEvent::CraftingStarted {
+                    recipe_id: recipe_id.clone(),
+                    recipe_name: recipe_name.clone(),
+                };
+                self.start(*player_id, activity, local, &mut out);
+            }
+            M::CraftingProgress {
+                player_id,
+                progress: p,
+                duration: d,
+                ..
+            } => {
+                if let Some(Activity::Crafting {
+                    progress, duration, ..
+                }) = self.activities.get_mut(player_id)
+                {
+                    *progress = *p;
+                    *duration = *d;
+                }
+            }
+            M::CraftingCompleted {
+                player_id,
+                item_type,
+                item_name,
+                quantity,
+                quality,
+                ..
+            } => {
+                let local = StateEvent::CraftingCompleted {
+                    item: Yield {
+                        item_type: item_type.clone(),
+                        item_name: item_name.clone(),
+                        quantity: *quantity,
+                        quality: *quality,
+                    },
+                };
+                self.finish(*player_id, local, &mut out);
+            }
+            M::CraftingCancelled { player_id, .. } => {
+                self.finish(*player_id, StateEvent::CraftingCancelled, &mut out)
+            }
+            M::CraftingFailed { player_id, reason } => {
+                let local = StateEvent::CraftingFailed {
+                    reason: reason.clone(),
+                };
+                self.finish(*player_id, local, &mut out);
+            }
+
+            // The player who changed a container isn't always the one holding it
+            // (two players at one storage chest), so either counts.
+            M::InventoryUpdated {
+                player_id,
+                container_id,
+            } => self.inventory_changed(*player_id, *container_id, &mut out),
+            // `item_moved` and `items_merged` are never sent, but mean the same.
+            M::ItemMoved {
+                player_id,
+                from_container,
+                to_container,
+                ..
+            } => {
+                self.inventory_changed(*player_id, *from_container, &mut out);
+                if to_container != from_container {
+                    self.inventory_changed(*player_id, *to_container, &mut out);
+                }
+            }
+            M::ItemsMerged { player_id, .. } => {
+                // It names items, not a container; report it against the inventory.
+                if let (true, Some(inventory)) = (self.is_me(*player_id), self.inventory()) {
+                    out.push(StateEvent::InventoryChanged {
+                        container_id: inventory.id,
+                    });
+                }
+            }
+
+            M::StationPlaced {
+                station_id,
+                station_type,
+                name,
+                owner_id,
+                x,
+                y,
+                container_id,
+            } => {
+                let kind = catalog::station_type(station_type);
+                let station = StationInfo {
+                    id: *station_id,
+                    station_type: station_type.clone(),
+                    name: name.clone(),
+                    category: kind.map_or("crafting", |k| k.category).to_string(),
+                    icon: kind.map(|k| k.icon.to_string()),
+                    x: *x,
+                    y: *y,
+                    owner_id: *owner_id,
+                    container_id: Some(*container_id),
+                    interaction_range: kind.map_or(rules::STATION_INTERACTION_RANGE as f32, |k| {
+                        k.interaction_range
+                    }),
+                };
+                self.upsert_station(station, &mut out);
+                out.push(StateEvent::StationPlaced {
+                    station_id: *station_id,
+                    owner_id: *owner_id,
+                });
+            }
+            M::StationRemoved { station_id } => {
+                if self.stations.remove(station_id).is_some() {
+                    out.push(StateEvent::StationRemoved(*station_id));
+                }
+                if self.open_station.as_ref().map(|s| s.station_id) == Some(*station_id) {
+                    self.close_station(&mut out);
+                }
+            }
+            M::StationOpened {
+                player_id,
+                station_id,
+                station_type,
+                name,
+                container_id,
+            } => {
+                if self.is_me(*player_id) {
+                    self.open_station = Some(OpenStation {
+                        station_id: *station_id,
+                        station_type: station_type.clone(),
+                        name: name.clone(),
+                        container_id: *container_id,
+                    });
+                    self.station_container = None;
+                    out.push(StateEvent::StationOpened {
+                        station_id: *station_id,
+                        container_id: *container_id,
+                    });
+                }
+            }
+            M::StationClosed { player_id } => {
+                if self.is_me(*player_id) && self.open_station.is_some() {
+                    self.close_station(&mut out);
+                }
+            }
+            M::NearbyStations { stations } => self.merge_stations(stations, &mut out),
+
+            M::TradeRequested { .. }
+            | M::TradeRequestDeclined { .. }
+            | M::TradeStarted { .. }
+            | M::TradeOfferUpdated { .. }
+            | M::TradeAccepted { .. }
+            | M::TradeExecuted { .. }
+            | M::TradeCancelled { .. } => out.push(StateEvent::Trade(message.clone())),
+
+            // Only ever sent to the player whose balance it is.
+            M::CurrencyChanged { new_balance } => self.set_strands(*new_balance, &mut out),
+            M::TerrainUpdated => out.push(StateEvent::TerrainUpdated),
+        }
+        out
+    }
+
+    /// Applies a successful REST response. Responses the world doesn't mirror
+    /// (terrain, health, move and extract acks, permissions, zones, deed
+    /// prices, the flat `/player/inventory`) change nothing.
+    pub fn apply_rest(&mut self, response: &RestResponse) -> Vec<StateEvent> {
+        use RestResponse as R;
+        let mut out = Vec::new();
+        match response {
+            R::Auth(auth) => self.me = Some(auth.player_id),
+            R::Nearby(nearby) => self.merge_nodes(&nearby.nodes, &mut out),
+            R::NearbyStations(nearby) => self.merge_stations(&nearby.stations, &mut out),
+            R::PlaceStation(placed) => self.upsert_station(placed.station.clone(), &mut out),
+            R::Containers(response) => {
+                self.containers = response
+                    .containers
+                    .iter()
+                    .map(|c| (c.id, Container::from(c)))
+                    .collect();
+                out.push(StateEvent::ContainersUpdated);
+            }
+            R::StationContainer(container) => {
+                // A late answer for a station that has since closed is dropped.
+                if self.open_station.as_ref().map(|s| s.container_id) == Some(container.id) {
+                    self.station_container = Some(Container::from(container));
+                    out.push(StateEvent::StationContainerUpdated);
+                }
+            }
+            R::Recipes(response) => {
+                self.recipes = response.recipes.clone();
+                out.push(StateEvent::RecipesUpdated);
+            }
+            R::Currency(c) => self.set_strands(c.strand_balance, &mut out),
+            R::Deposit(d) => self.set_strands(d.new_balance, &mut out),
+            R::Withdraw(w) => self.set_strands(w.new_balance, &mut out),
+            R::Plots(response) => {
+                self.plots = response.plots.clone();
+                out.push(StateEvent::PlotsUpdated);
+            }
+            R::Plot(plot) | R::PlotAt(Some(plot)) => {
+                if self.upsert_plot(plot) {
+                    out.push(StateEvent::PlotsUpdated);
+                }
+            }
+            R::ClaimPlot(claim) => {
+                self.upsert_plot(&claim.plot);
+                out.push(StateEvent::PlotsUpdated);
+                out.push(StateEvent::PlotClaimed {
+                    plot_id: claim.plot.id,
+                });
+                self.set_strands(claim.new_balance, &mut out);
+            }
+            R::PlotAt(None)
+            | R::Success(_)
+            | R::Health(_)
+            | R::Terrain(_)
+            | R::Move(_)
+            | R::Inventory(_)
+            | R::Extract(_)
+            | R::MoveItem(_)
+            | R::PlotPermissions(_)
+            | R::Zones(_)
+            | R::DeedPrices(_) => {}
+        }
+        out
+    }
+
+    // -----------------------------------------------------------------------
+    // Reading
+    // -----------------------------------------------------------------------
+
+    pub fn connection(&self) -> &ConnectionState {
+        &self.connection
+    }
+
+    /// Authenticated and subscribed: events are flowing.
+    pub fn is_connected(&self) -> bool {
+        matches!(self.connection, ConnectionState::Connected { .. })
+    }
+
+    /// The local player's ID, from login or `auth_ok`.
+    pub fn me(&self) -> Option<Uuid> {
+        self.me
+    }
+
+    /// The local player's name and server position. Known from the first
+    /// `positions` that includes them (until B2 adds `GET /player/me`).
+    pub fn local_player(&self) -> Option<&PlayerPosition> {
+        self.me.and_then(|id| self.players.get(&id))
+    }
+
+    /// Everyone online, the local player included, at their last server position.
+    pub fn players(&self) -> &HashMap<Uuid, PlayerPosition> {
+        &self.players
+    }
+
+    pub fn player(&self, id: Uuid) -> Option<&PlayerPosition> {
+        self.players.get(&id)
+    }
+
+    /// What a player is doing, if anything.
+    pub fn activity(&self, player_id: Uuid) -> Option<&Activity> {
+        self.activities.get(&player_id)
+    }
+
+    pub fn local_activity(&self) -> Option<&Activity> {
+        self.me.and_then(|id| self.activities.get(&id))
+    }
+
+    /// The local player's extraction: node, progress and duration in ticks.
+    pub fn extraction(&self) -> Option<(Uuid, u32, u32)> {
+        match self.local_activity()? {
+            Activity::Extracting {
+                node_id,
+                progress,
+                duration,
+            } => Some((*node_id, *progress, *duration)),
+            Activity::Crafting { .. } => None,
+        }
+    }
+
+    pub fn is_extracting(&self) -> bool {
+        self.extraction().is_some()
+    }
+
+    pub fn is_crafting(&self) -> bool {
+        matches!(self.local_activity(), Some(Activity::Crafting { .. }))
+    }
+
+    pub fn zone(&self) -> Option<Zone> {
+        self.zone
+    }
+
+    /// Resource nodes seen so far. Nodes never move, so ones out of range stay.
+    pub fn nodes(&self) -> &HashMap<Uuid, ResourceNodeInfo> {
+        &self.nodes
+    }
+
+    pub fn node(&self, id: Uuid) -> Option<&ResourceNodeInfo> {
+        self.nodes.get(&id)
+    }
+
+    /// Stations seen so far.
+    pub fn stations(&self) -> &HashMap<Uuid, StationInfo> {
+        &self.stations
+    }
+
+    pub fn station(&self, id: Uuid) -> Option<&StationInfo> {
+        self.stations.get(&id)
+    }
+
+    /// The local player's containers, as `/inventory/containers` last returned them.
+    pub fn containers(&self) -> &HashMap<Uuid, Container> {
+        &self.containers
+    }
+
+    /// A container by ID: one of the player's, or the open station's.
+    pub fn container(&self, id: Uuid) -> Option<&Container> {
+        self.station_container
+            .as_ref()
+            .filter(|c| c.id == id)
+            .or_else(|| self.containers.get(&id))
+    }
+
+    fn container_of_type(&self, kind: &str) -> Option<&Container> {
+        self.containers.values().find(|c| c.container_type == kind)
+    }
+
+    pub fn inventory(&self) -> Option<&Container> {
+        self.container_of_type(container_type::PLAYER_INVENTORY)
+    }
+
+    pub fn crafting_input(&self) -> Option<&Container> {
+        self.container_of_type(container_type::CRAFTING_INPUT)
+    }
+
+    pub fn crafting_output(&self) -> Option<&Container> {
+        self.container_of_type(container_type::CRAFTING_OUTPUT)
+    }
+
+    pub fn open_station(&self) -> Option<&OpenStation> {
+        self.open_station.as_ref()
+    }
+
+    /// The open station's container, once fetched.
+    pub fn station_container(&self) -> Option<&Container> {
+        self.station_container.as_ref()
+    }
+
+    pub fn recipes(&self) -> &[RecipeInfo] {
+        &self.recipes
+    }
+
+    pub fn recipe(&self, id: &str) -> Option<&RecipeInfo> {
+        self.recipes.iter().find(|r| r.id == id)
+    }
+
+    /// The Strand balance, once fetched.
+    pub fn strands(&self) -> Option<i64> {
+        self.strands
+    }
+
+    pub fn plots(&self) -> &[PlotInfo] {
+        &self.plots
+    }
+
+    pub fn plot(&self, id: Uuid) -> Option<&PlotInfo> {
+        self.plots.iter().find(|p| p.id == id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn is_me(&self, player_id: Uuid) -> bool {
+        self.me == Some(player_id)
+    }
+
+    fn holds_container(&self, id: Uuid) -> bool {
+        self.containers.contains_key(&id)
+            || self.open_station.as_ref().map(|s| s.container_id) == Some(id)
+    }
+
+    fn inventory_changed(&self, player_id: Uuid, container_id: Uuid, out: &mut Vec<StateEvent>) {
+        if self.is_me(player_id) || self.holds_container(container_id) {
+            out.push(StateEvent::InventoryChanged { container_id });
+        }
+    }
+
+    /// `positions` lists every online player (`broadcast_positions` in
+    /// `engine/tick.rs`), so it replaces the set. A `player_left` missed during a
+    /// reconnect can't leave a ghost.
+    fn positions(&mut self, players: &[PlayerPosition], out: &mut Vec<StateEvent>) {
+        let gone: Vec<Uuid> = self
+            .players
+            .keys()
+            .filter(|id| !players.iter().any(|p| p.id == **id))
+            .copied()
+            .collect();
+        for id in gone {
+            self.remove_player(id, out);
+        }
+        for player in players {
+            if self.players.insert(player.id, player.clone()).is_none() {
+                out.push(StateEvent::PlayerJoined(player.id));
+            }
+        }
+        out.push(StateEvent::PositionsUpdated);
+        self.learn_zone(out);
+    }
+
+    fn remove_player(&mut self, id: Uuid, out: &mut Vec<StateEvent>) {
+        if self.players.remove(&id).is_some() {
+            out.push(StateEvent::PlayerLeft(id));
+        }
+        if self.activities.remove(&id).is_some() && !self.is_me(id) {
+            out.push(StateEvent::ActivityChanged { player_id: id });
+        }
+    }
+
+    /// The server only sends `zone_changed` on a crossing, so the first zone
+    /// comes from the first known position.
+    fn learn_zone(&mut self, out: &mut Vec<StateEvent>) {
+        if self.zone.is_none() {
+            if let Some(me) = self.local_player() {
+                let zone = Zone::from_position(me.x, me.y);
+                self.set_zone(zone, out);
+            }
+        }
+    }
+
+    fn set_zone(&mut self, to: Zone, out: &mut Vec<StateEvent>) {
+        let from = self.zone.replace(to);
+        if from != Some(to) {
+            out.push(StateEvent::ZoneChanged { from, to });
+        }
+    }
+
+    fn start(
+        &mut self,
+        player_id: Uuid,
+        activity: Activity,
+        local: StateEvent,
+        out: &mut Vec<StateEvent>,
+    ) {
+        self.activities.insert(player_id, activity);
+        out.push(if self.is_me(player_id) {
+            local
+        } else {
+            StateEvent::ActivityChanged { player_id }
+        });
+    }
+
+    /// Completion, cancellation and failure. The local player's always reports,
+    /// even with no start on record (it began before a reconnect).
+    fn finish(&mut self, player_id: Uuid, local: StateEvent, out: &mut Vec<StateEvent>) {
+        let had = self.activities.remove(&player_id).is_some();
+        if self.is_me(player_id) {
+            out.push(local);
+        } else if had {
+            out.push(StateEvent::ActivityChanged { player_id });
+        }
+    }
+
+    fn set_node_state(&mut self, id: Uuid, state: &str, out: &mut Vec<StateEvent>) {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            if node.state != state {
+                node.state = state.to_string();
+                out.push(StateEvent::NodeChanged(id));
+            }
+        }
+    }
+
+    fn merge_nodes(&mut self, nodes: &[ResourceNodeInfo], out: &mut Vec<StateEvent>) {
+        let replace = std::mem::take(&mut self.nodes_stale);
+        let diff = merge(
+            &mut self.nodes,
+            nodes.iter().map(|n| (n.id, n.clone())),
+            replace,
+        );
+        out.extend(diff.removed.into_iter().map(StateEvent::NodeRemoved));
+        out.extend(diff.added.into_iter().map(StateEvent::NodeAdded));
+        out.extend(diff.changed.into_iter().map(StateEvent::NodeChanged));
+    }
+
+    fn merge_stations(&mut self, stations: &[StationInfo], out: &mut Vec<StateEvent>) {
+        let replace = std::mem::take(&mut self.stations_stale);
+        let diff = merge(
+            &mut self.stations,
+            stations.iter().map(|s| (s.id, s.clone())),
+            replace,
+        );
+        out.extend(diff.removed.into_iter().map(StateEvent::StationRemoved));
+        out.extend(diff.added.into_iter().map(StateEvent::StationAdded));
+        out.extend(diff.changed.into_iter().map(StateEvent::StationChanged));
+    }
+
+    fn upsert_station(&mut self, station: StationInfo, out: &mut Vec<StateEvent>) {
+        let diff = merge(&mut self.stations, [(station.id, station)], false);
+        out.extend(diff.added.into_iter().map(StateEvent::StationAdded));
+        out.extend(diff.changed.into_iter().map(StateEvent::StationChanged));
+    }
+
+    fn close_station(&mut self, out: &mut Vec<StateEvent>) {
+        self.open_station = None;
+        self.station_container = None;
+        out.push(StateEvent::StationClosed);
+    }
+
+    fn set_strands(&mut self, balance: i64, out: &mut Vec<StateEvent>) {
+        if self.strands.replace(balance) != Some(balance) {
+            out.push(StateEvent::CurrencyChanged { balance });
+        }
+    }
+
+    /// Returns whether anything changed.
+    fn upsert_plot(&mut self, plot: &PlotInfo) -> bool {
+        match self.plots.iter_mut().find(|p| p.id == plot.id) {
+            Some(existing) if existing == plot => false,
+            Some(existing) => {
+                *existing = plot.clone();
+                true
+            }
+            None => {
+                self.plots.push(plot.clone());
+                true
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct Diff {
+    added: Vec<Uuid>,
+    changed: Vec<Uuid>,
+    removed: Vec<Uuid>,
+}
+
+/// Upserts `incoming` into `map`, reporting what actually changed. With
+/// `replace`, entries missing from `incoming` are removed too.
+fn merge<T: PartialEq>(
+    map: &mut HashMap<Uuid, T>,
+    incoming: impl IntoIterator<Item = (Uuid, T)>,
+    replace: bool,
+) -> Diff {
+    let mut diff = Diff::default();
+    let mut seen = Vec::new();
+    for (id, value) in incoming {
+        seen.push(id);
+        match map.get_mut(&id) {
+            Some(existing) if *existing == value => {}
+            Some(existing) => {
+                *existing = value;
+                diff.changed.push(id);
+            }
+            None => {
+                map.insert(id, value);
+                diff.added.push(id);
+            }
+        }
+    }
+    if replace {
+        map.retain(|id, _| {
+            let keep = seen.contains(id);
+            if !keep {
+                diff.removed.push(*id);
+            }
+            keep
+        });
+    }
+    diff
+}
+
+#[cfg(test)]
+mod tests;

@@ -7,11 +7,14 @@
 //!
 //! `CAPITOL_SERVER` overrides the default `http://localhost:3000`.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use capitol_core::net::*;
-use capitol_core::protocol::rest::{LoginRequest, RegisterRequest};
+use capitol_core::protocol::rest::{ListPlotsQuery, LoginRequest, RegisterRequest};
+use capitol_core::protocol::rules;
 use capitol_core::protocol::ws::{ClientMessage, ServerMessage};
+use capitol_core::state::{GameState, StateEvent};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -148,4 +151,163 @@ fn register_login_connect_and_move() {
     );
     net.disconnect();
     wait_for(&net, "logout", |e| matches!(e, NetEvent::Rest(7, Ok(_))));
+}
+
+/// A live session fed through the store, doing the refetches P2.4 will own.
+struct Mirror {
+    net: Net,
+    state: GameState,
+    next_tag: Tag,
+    /// REST calls not yet answered.
+    outstanding: HashSet<Tag>,
+}
+
+impl Mirror {
+    fn send(&mut self, request: RestRequest) {
+        self.next_tag += 1;
+        self.outstanding.insert(self.next_tag);
+        self.net.rest(request, self.next_tag);
+    }
+
+    /// Applies events until `done` holds and every REST call has been answered,
+    /// answering `SnapshotStale` and `InventoryChanged` with refetches. Returns
+    /// the events seen.
+    fn pump_until(
+        &mut self,
+        what: &str,
+        done: impl Fn(&GameState, &[StateEvent]) -> bool,
+    ) -> Vec<StateEvent> {
+        let start = Instant::now();
+        let mut seen = Vec::new();
+        while let Some(remaining) = WAIT.checked_sub(start.elapsed()) {
+            let Some(event) = self.net.recv_timeout(remaining) else {
+                break;
+            };
+            if let NetEvent::Rest(tag, result) = &event {
+                if let Err(e) = result {
+                    panic!("REST failed while waiting for {what}: {e}");
+                }
+                self.outstanding.remove(tag);
+            }
+            for change in self.state.apply(&event) {
+                match &change {
+                    StateEvent::SnapshotStale => {
+                        for request in [
+                            RestRequest::Containers,
+                            RestRequest::WorldNearby,
+                            RestRequest::NearbyStations,
+                            RestRequest::PlayerCurrency,
+                            RestRequest::ListPlots(ListPlotsQuery {
+                                limit: Some(100),
+                                ..Default::default()
+                            }),
+                            RestRequest::Recipes,
+                        ] {
+                            self.send(request);
+                        }
+                    }
+                    StateEvent::InventoryChanged { .. } => self.send(RestRequest::Containers),
+                    _ => {}
+                }
+                seen.push(change);
+            }
+            if self.outstanding.is_empty() && done(&self.state, &seen) {
+                return seen;
+            }
+        }
+        let tail: Vec<_> = seen.iter().rev().take(20).collect();
+        panic!("timed out waiting for {what}; last events: {tail:#?}");
+    }
+}
+
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn the_store_mirrors_a_real_session() {
+    let net = net();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let name = format!("Mirror{}", stamp % 100_000);
+    let auth = match rest(
+        &net,
+        RestRequest::Register(RegisterRequest {
+            email: format!("flint-state-{stamp}@test.local"),
+            password: "correct horse battery staple".into(),
+            player_name: name.clone(),
+        }),
+        1,
+    ) {
+        Ok(RestResponse::Auth(auth)) => auth,
+        other => panic!("register: {other:?}"),
+    };
+    let mut mirror = Mirror {
+        net,
+        state: GameState::new(),
+        next_tag: 100,
+        outstanding: HashSet::new(),
+    };
+    mirror.net.connect(auth.token.clone());
+
+    // The first Connected asks for a snapshot; the answers fill the store.
+    mirror.pump_until("a full snapshot", |s, _| {
+        s.local_player().is_some()
+            && s.inventory().is_some()
+            && !s.recipes().is_empty()
+            && s.strands().is_some()
+            && s.zone().is_some()
+    });
+    let state = &mirror.state;
+    assert_eq!(state.me(), Some(auth.player_id));
+    assert_eq!(state.local_player().unwrap().name, name);
+    assert!(state.crafting_input().is_some() && state.crafting_output().is_some());
+    assert!(state.recipe("rope_basic").is_some());
+    println!(
+        "snapshot: {} players, {} nodes, {} stations, {} plots, zone {:?}, {} strands",
+        state.players().len(),
+        state.nodes().len(),
+        state.stations().len(),
+        state.plots().len(),
+        state.zone(),
+        state.strands().unwrap()
+    );
+
+    // Walk to the nearest available node and extract it.
+    let me = state.local_player().unwrap().clone();
+    let distance = |x: f64, y: f64| ((x - me.x).powi(2) + (y - me.y).powi(2)).sqrt();
+    let Some(node) = state
+        .nodes()
+        .values()
+        .filter(|n| n.state == "available")
+        .min_by(|a, b| distance(a.x, a.y).total_cmp(&distance(b.x, b.y)))
+        .cloned()
+    else {
+        println!("no available node near spawn; skipping extraction");
+        return;
+    };
+    mirror.net.ws(ClientMessage::Move {
+        x: node.x,
+        y: node.y,
+    });
+    mirror.pump_until("arriving at the node", |s, _| {
+        let p = s.local_player().unwrap();
+        ((p.x - node.x).powi(2) + (p.y - node.y).powi(2)).sqrt() < rules::EXTRACTION_RANGE - 5.0
+    });
+    mirror.net.ws(ClientMessage::Extract {
+        node_id: node.id.to_string(),
+    });
+    let events = mirror.pump_until("the extraction to finish", |_, seen| {
+        seen.iter()
+            .any(|e| matches!(e, StateEvent::ExtractionCompleted { .. }))
+    });
+    assert!(events.contains(&StateEvent::ExtractionStarted { node_id: node.id }));
+    assert!(!mirror.state.is_extracting());
+
+    // inventory_updated → refetch → the fiber is in a slot.
+    mirror.pump_until("fiber in the inventory", |s, _| {
+        s.inventory()
+            .is_some_and(|inv| inv.items().any(|i| i.item_type == "fiber"))
+    });
+
+    mirror.net.disconnect();
 }
