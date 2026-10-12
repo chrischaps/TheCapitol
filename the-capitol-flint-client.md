@@ -1,0 +1,492 @@
+# The Capitol: Flint Client Plan
+
+**Status:** Planning, written 2026-10-11
+**Scope:** Players can do everything in the Flint client that the React client allows through M7, Windows desktop first
+**Location:** `flint-client/` in this repo, with the Flint engine as a git subtree at `flint-client/engine/`
+
+**Tracking:** every work package (P0.1 … P8.7) and backend prerequisite (B1 … B7) is a GitHub issue labelled [`flint-client`](https://github.com/chrischaps/TheCapitol/issues?q=label%3Aflint-client), created in dependency order. The lowest open, unblocked issue is next. Agents pick it up with the `next-issue` skill (`.claude/skills/next-issue/SKILL.md`). The issue number for each work package is in §6. When the plan changes, update this doc in the same commit.
+
+This document breaks down the work of building a third client for The Capitol on [Flint](https://github.com/chrischaps/Flint), the Rust/wgpu engine. The research behind it covers the Flint engine at `origin/main` 8cc8306, the backend in `backend/src`, and both existing clients (`client/`, `love-client/`). File references point at those sources so each claim can be checked.
+
+---
+
+## 1. Vision
+
+Today The Capitol is drawn as flat discs on a dark canvas. The Flint client should let you *stand in it*.
+
+The GDD describes a radial world where everyone travels inward toward the Capitol. That shape suits a game about ambition, and the 3D client should make it something you can see:
+
+- **The tower is always visible.** A modern structure arranged like a medieval castle (GDD §World) stands at the center as the one landmark you can see from anywhere. Wherever you are, you know which way "up in the world" is.
+- **Water draws the shape of the city.** The moat and the two canals are the strongest silhouettes in the world. Bridges are the few places where the rings open up, so they feel like thresholds you cross on purpose.
+- **Each zone has its own light.** The zone palette from the React client becomes ground tints and the colour of the light: gold at the core, then blue for Trade, violet for the Guilds, slate for Urban, green for Suburban and lime for Rural. The edges fade into the dark of the wilderness. At dusk the city reads as rings of light.
+- **Gold means you.** Your avatar, your plots and your stations carry the gold accent `#c9a227`. Your progress shows up as gold spreading across the map.
+- **Zooming out turns the city into a map.** At the furthest zoom the camera looks straight down, the lighting flattens, and the world becomes the React client's flat vector style. Every client shows the same world, so the 3D client nods to the 2D one.
+
+GDD Pillar 4 says clients are "interchangeable windows into the world". This client is the window that lets the place feel like somewhere you could live.
+
+## 2. Goals and non-goals
+
+**Goals**
+- Everything a player can do through M7: auth, movement, extraction, inventory, crafting, stations, exchange, P2P trading and plots. See §8 for the full checklist.
+- A 3D world built at runtime from `GET /terrain`, with a tilted, zoomable and orbitable camera.
+- Fixes for two weaknesses both existing clients share: other players are **interpolated**, and the **WebSocket reconnects** after a drop. M10 lists reconnection as a deliverable anyway.
+- Architecture with room for M6 markets, M8 automation and M9 social panels without restructuring.
+- Engine improvements that are general enough to go back upstream to Flint. Every Flint game so far has made the engine better.
+
+**Non-goals for this plan**
+- Admin tools: the F1 debug camera, F2 world tweaker and F3 perf panel stay in the React client.
+- The M6 Markets UI. The backend doesn't have markets yet.
+- Web/wasm. Flint has no wasm target.
+- Android. Flint supports it (`crates/flint-android`), but it's out of scope here.
+- Server-side changes beyond the small prerequisites in §5.
+
+## 3. What Flint gives us, and what it doesn't
+
+### What exists
+
+| Capability | Where |
+|---|---|
+| `flint-player` as a library with a public `PlayerApp`, embeddable from another crate | `crates/flint-player/src/lib.rs`; working example in `crates/flint-android/src/lib.rs:130-174` |
+| Runtime procedural mesh upload | `SceneRenderer::load_procedural_mesh` (`crates/flint-render/src/scene_renderer/mod.rs:1956`) |
+| Mesh building: quads/triangles, merge, normals, extrude-along-curve | `crates/flint-procgen/src/algorithms/mesh_builder/` |
+| Stylised Gerstner water with foam | `crates/flint-render/src/ocean_pipeline.rs` (a camera-following grid, see H6) |
+| Compute-instanced grass | `crates/flint-render/src/grass_pipeline.rs` |
+| Sky, fog, volumetrics, SSAO, bloom, Kuwahara painterly post | `crates/flint-render/src/*` |
+| Particles v2 (forge fire, extraction puffs) | `crates/flint-particles` |
+| Rhai scripting with hot reload, imports, `load_data` | `crates/flint-script/src/api.rs` |
+| Script HUD drawing: text, rect, ring, arc, convex polygon, `world_to_screen`, project fonts | `hud_render.rs`, `draw2d.rs`, `player_app/fonts.rs` |
+| Orthographic and perspective cameras controllable from script | `set_camera_*`, `set_camera_orthographic` |
+| Spatial audio | `crates/flint-audio` |
+| On-disk `PersistentStore` | `persist_*` script API |
+| Headless capture: `--screenshot`, `--screenshot-at`, `--input-script`, `--exit-after` | `flint-player` CLI (8cc8306) |
+| Thread-plus-`mpsc` pattern feeding the game loop | `crates/flint-input-capture/src/lib.rs:157-184` |
+
+### What's missing (each gap is closed in §4 or §6)
+
+| Gap | Evidence |
+|---|---|
+| **No networking.** No tokio, reqwest or tungstenite anywhere. `ureq` is used only by `flint-asset-gen`. | `Cargo.toml` across all crates |
+| No way for a game to register native Rhai functions | `ScriptEngine.engine` is private (`crates/flint-script/src/engine.rs:145`) and `register_all` is hard-wired |
+| No plugin or extension hook. `PlayerApp`'s renderer isn't reachable from outside. | `player_app/mod.rs:127-250` |
+| `GameEvent::Custom` never reaches scripts. Only collisions, triggers and `ActionPressed` are routed. | `engine.rs:328` `process_events` |
+| **No text input** in any form: data-driven UI, Rhai, or `KeyEvent.text`/IME | n/a |
+| egui gets input only while a debug panel is open | `player_app/events.rs:337-345` |
+| No script-level screen-to-world function. `Camera::unproject_ray` exists in Rust only. | `crates/flint-render/src/camera.rs:268` |
+| Instancing covers sprites, particles, billboards and grass only. Each mesh entity is one draw. | `scene_renderer` |
+| The ocean shader can't render an arbitrary mesh such as a ring canal | `ocean_pipeline.rs` |
+
+**Housekeeping:** the local checkout `C:\Users\chris\dev\Flint` is 23 commits behind `origin/main`. The mouse API, polygon and ring drawing, project fonts, `ui_hit`, the renderer resource cache and the capture flags all live in those commits. Pull before adding the subtree.
+
+## 4. Architecture
+
+### 4.1 Repository layout
+
+```
+TheCapitol/
+  Cargo.toml                 # root workspace: members = ["backend", "protocol"], exclude = ["flint-client"]
+  protocol/                  # NEW crate `capitol-protocol`, shared by the backend and the Flint client
+    src/ws.rs                #   ClientMessage / ServerMessage (moved out of backend ws/connection.rs)
+    src/rest.rs              #   request/response DTOs
+    src/terrain.rs           #   TerrainResponse, WaterRing, Road, TerrainPlot
+    src/rules.rs             #   ranges, speeds, quality grades, zone radii, water-crossing test
+  flint-client/
+    Cargo.toml               # its own workspace; path deps into engine/crates/*
+    engine/                  # Flint, git subtree (squash)
+    crates/
+      capitol-core/          # net + state, no engine dependency, fast tests
+        src/net/             #   REST client, WS client, reconnect, IO thread
+        src/state/           #   world mirror, interpolation, polling scheduler, trade FSM
+        src/bin/capitol-bot.rs  # headless client for integration tests
+      capitol-client/        # the game binary
+        src/main.rs          #   wraps PlayerApp, installs CapitolExtension
+        src/coords.rs        #   server <-> world mapping
+        src/world/           #   terrain -> meshes (ground, water, roads, bridges, plots, tower)
+        src/entities.rs      #   state -> ECS entities each frame (players, nodes, stations)
+        src/script_api.rs    #   cap_* Rhai functions
+        src/ui/              #   egui panels + Capitol theme
+    scenes/capitol.scene.toml
+    schemas/                 # capitol_player, resource_node, station, ... (layered over engine/schemas)
+    scripts/                 # camera.rhai, input.rhai, hud.rhai, feedback.rhai, lib/
+    fonts/ audio/ models/
+    fixtures/terrain.json    # captured /terrain for offline mode and tests
+    play.bat
+```
+
+**Why a game crate, when Flint games are usually data only?** Every Flint game so far has been self-contained. The Capitol client is a window onto a server, so much of its logic is protocol and state that exists only because of this backend. If that code went into the engine, every other Flint game would carry it. The general-purpose pieces become engine hooks (§4.4) and go upstream. The Capitol-specific code stays in `flint-client/crates`.
+
+**Why `capitol-protocol`?** The React and Love clients each copy the message shapes by hand, and they have already drifted apart. Quality thresholds alone exist in three versions (§4.7). A shared Rust crate means the backend and the Flint client compile against the same enums, so drift becomes a build error. It is the only backend refactor this plan asks for, and it changes how types are organised, not how anything behaves.
+
+### 4.2 Rust for the wire and the world, Rhai for the feel
+
+| Layer | Language | Responsibilities |
+|---|---|---|
+| `capitol-core` | Rust | Sockets, auth, reconnect, applying server messages, polling cadence, interpolation buffers, trade state machine |
+| `capitol-client` world | Rust | Terrain mesh building, spawning and despawning entities, transforms for players, nodes and stations. This is the hot path, kept out of Rhai. |
+| `capitol-client` UI | Rust (egui) | Login, inventory, crafting, station, exchange, trade and plot panels |
+| `scripts/*.rhai` | Rhai, hot-reloaded | Camera rig, input to intents (click priority), world HUD (names, rings, toasts), juice, audio cues |
+
+Scripts call into Rust through registered functions such as `cap_move(x, z)`, `cap_extract(node_id)`, `cap_open_station(id)`, `cap_state()` (returns a map), `cap_entity_at(x, z)` and `cap_set_panel(name, open)`. They receive server happenings through `on_event(name, data)`, for example `"extraction_completed"`, `"zone_changed"` and `"movement_blocked"`.
+
+### 4.3 Game UI: egui themed as The Capitol
+
+Panels (login, inventory, crafting, station, exchange, trade, plot) are drawn with **egui**, styled with the Capitol tokens:
+- Panels use `rgba(15,15,25,0.95)` with 1px `rgba(80,80,100,0.3)` borders and 10–12px rounding.
+- Accents: gold `#c9a227`, crafting purple `#8b5cf6`, in-range orange `#f97316`.
+- Body text is `#e0e0e0`. The project font replaces egui's default.
+
+*Why:* the panels need text entry (login, exchange quantity, trade strands), scrolling lists, drag and drop between slots, and numeric fields. egui has all of these today. Flint's data-driven `.ui.toml` UI has Panel, Text, Rect, Circle and Image, so it would need at least four new widgets plus focus handling and IME.
+
+*Alternative recorded:* extend Flint's data-driven UI with TextField, ScrollList, Draggable and NumberField, and build the panels in `.ui.toml`. Revisit this if themed egui still looks like a tool after the P5 theme pass, or once Flint's UI has gained those widgets for another game.
+
+World-attached HUD (name labels, extraction and crafting rings, the targeting line, toasts, the zone banner) uses Flint's script drawing through `world_to_screen`. That keeps it hot-reloadable and in the same visual language as the other Flint games.
+
+### 4.4 Engine hooks (upstream to Flint)
+
+These go to Flint on a `feature/*` branch and PR, following the subtree conventions (vault: *Git Subtree Branch Conventions*). Each one gets an ADR (next free number is 0071) and a page in the Flint book. Each is general enough that any Flint game could use it.
+
+| ID | Hook | Shape | Size |
+|---|---|---|---|
+| H1 | **`PlayerExtension` trait.** The first step toward the roadmap's plugin system. | `fn register_script_api(&mut self, engine: &mut rhai::Engine)`, `fn pre_update(&mut self, ctx: &mut ExtensionCtx)` (world, renderer and device for meshes, clock, input), `fn on_window_event(&mut self, ev) -> bool` (consumed), `fn ui(&mut self, egui: &egui::Context)`. Installed with `PlayerApp::add_extension(Box<dyn PlayerExtension>)`. | M |
+| H2 | **Script event delivery.** | Route `GameEvent::Custom { name, data }` to a new `on_event(name, data)` callback in `ScriptEngine::process_events`. Add `ExtensionCtx::fire_event` as well. | S |
+| H3 | **Game egui layer.** | Run the extension `ui()` callback every frame. Forward window events to egui first, and treat them as consumed when `wants_pointer_input()`/`wants_keyboard_input()`. Draw order: world, then script HUD, then game egui, then debug panels (vault: *egui layer ordering - panels vs script UI*). | M |
+| H4 | **Runtime procedural mesh lifecycle.** | Create, replace and remove named meshes after init. Support vertex colours and per-mesh AABBs for frustum culling, and attach a mesh to an entity by name. | M |
+| H5 | **Screen to ground.** | `screen_to_ground(x, y, plane_y) -> [x, z]` in Rhai, plus the Rust equivalent on `Camera`, built on `unproject_ray` in perspective and orthographic modes. | S |
+| H6 | *(Polish, optional)* **Water on any mesh, plus mesh instancing.** | Reuse the ocean shader's waves and foam ramp on an arbitrary mesh, masked by distance to the edge so canals get foam at the banks. Add an instanced mesh draw path for repeated props such as houses, trees and stations. | L |
+
+H1–H5 are needed for the vertical slice. H6 belongs to P8.
+
+### 4.5 Networking and state (`capitol-core`)
+
+- **IO thread.** A tokio runtime runs on one background thread, with `reqwest` (rustls) for REST and `tokio-tungstenite` for the WebSocket. The game loop talks to it over two `std::sync::mpsc` channels. `Command` goes in: `Ws(ClientMessage)` or `Rest(RestRequest, tag)`. `NetEvent` comes out: `Ws(ServerMessage)`, `Rest(tag, Result<…>)` or `Connection(state)`. The game drains the inbound channel once per frame in `pre_update`.
+- **Handshake:**
+  1. Connect to `/ws`.
+  2. Send `{"type":"auth","token"}`. The server allows 10 s (`ws/connection.rs:312-337`).
+  3. On `auth_ok`, send `subscribe{channel:"position"}`. Until then the server silently drops every event (`connection.rs:787-790`).
+  4. Send a WebSocket Ping every 15 s. The server answers Ping frames with Pong (`connection.rs:776`) but has no idle timeout of its own.
+- **Reconnect.** Back off exponentially from 0.5 s up to 10 s. After reconnecting, auth and subscribe again, then **resync** by refetching containers, nearby nodes, nearby stations, currency, plots and recipes. A lagging client that overflows the 1024-event buffer is disconnected by the server (`connection.rs:1034`). Reconnect covers that case too.
+- **Auth.**
+  - Tokens last 24 h and there is no refresh endpoint (`routes/auth.rs:277-296`). A stored token is tried first, and an `auth_error` returns the player to the login screen.
+  - Only one session per account is allowed, enforced in Redis (`middleware/auth.rs:59-69`). Logging in from the Flint client logs the same account out of React.
+  - The token is kept with `PersistentStore`.
+- **Polling.** These messages are defined but never sent: `currency_changed`, `nearby_nodes`, `nearby_stations`, `item_moved`, `items_merged`. The client mirrors React's polling instead:
+  - nodes, stations and plots every 5 s
+  - containers after `inventory_updated`, `trade_executed`, extraction and crafting completion
+  - currency after any trade or exchange
+- **Filtering.** Many messages are broadcast to everyone, including extraction, crafting, `inventory_updated` and `positions`. The state layer filters by `player_id` and never assumes a message is about the local player.
+- **Interpolation.**
+  - `positions` arrives every 100 ms with no velocity (`engine/tick.rs:480-493`).
+  - Other players render about 150 ms behind real time, lerped between the two surrounding snapshots, with a velocity estimate for brief gaps.
+  - The local player is predicted: the client moves toward the clicked destination at 50 u/s, which mirrors `engine/movement.rs`. When a snapshot disagrees by more than about 4 units, the client blends back. `movement_blocked` snaps to `stopped_x/y`.
+- **Trade state machine.** `Idle → Requested(out) / Incoming(from) → Open(trade_id) → (Accepted mine/theirs) → Executed / Cancelled`. It handles three protocol quirks:
+  - Failures to initiate or offer are only logged on the server, so the client times out after about 5 s with a hint.
+  - `trade_cancelled` on disconnect carries a dummy `trade_id` (`engine/tick.rs:109`), so while a trade is open, any cancellation is treated as ours.
+  - No `inventory_updated` follows a trade, so the client refetches containers and currency itself.
+- **Quality grades.** Use the server's thresholds from `models/item.rs:61-69`: A ≥ 90, B ≥ 75, C ≥ 55, D ≥ 35, otherwise F. These move into `capitol-protocol::rules`. WebSocket events carry only the numeric quality, so the client computes the grade.
+
+### 4.6 Coordinates and scale
+
+Server space runs 0–8000 on both axes with the centre at (4000, 4000), y pointing down, and angle 0 = East, 90 = South (`models/terrain.rs:3165`). Flint is Y-up. All conversion goes through one module, `coords.rs`:
+
+```
+world.x =  (x - 4000) * S
+world.z =  (y - 4000) * S        // server "down" = +Z = south; north is -Z
+world.y =  height layer
+```
+
+`S` is a single constant. The proposal is **S = 0.1**: the world becomes 800 m across, a player (radius 8) is about 1.6 m wide, and a 60-unit arterial is 6 m. The P0 spike confirms Flint's handedness and the value of S before anything else depends on it.
+
+Flat geometry is layered in Y to avoid z-fighting: ground 0, plots +0.02, roads +0.04 (by type: trail < suburban < grid < arterial), bridge decks raised above the water surface.
+
+### 4.7 Visual language carried over
+
+Tokens come from `client/src/index.css` and `components/GameCanvas.tsx`.
+
+**Base colours**
+
+| Token | Value |
+|---|---|
+| Background | `#0a0a0f` |
+| Panel | `#12121a` |
+| Text | `#e0e0e0` |
+| Dim text | `#808080` |
+| Gold | `#c9a227` |
+| Gold dim | `#8a7019` |
+
+**Zones**
+
+| Zone | Colour |
+|---|---|
+| Capitol | `#c9a227` |
+| Trade | `#3b82f6` |
+| Guild | `#8b5cf6` |
+| Urban | `#64748b` |
+| Suburban | `#22c55e` |
+| Rural | `#84cc16` |
+| Wilderness | `#1a1a24` |
+
+**Roads**
+
+| Road type | Colour |
+|---|---|
+| Arterial | `#4a4a5a` |
+| Grid | `#3a3a4a` |
+| Suburban | `#2a2a3a` |
+| Trail | `#1a1a2a` |
+
+**Water, bridges and grades**
+- Water: `rgba(30,100,160,0.7)` with a highlight of `rgba(100,180,220,0.4)`.
+- Bridges: `#8b6914`.
+- Quality pips (slot palette):
+
+| Grade | Colour |
+|---|---|
+| A | gold `#ffd700` |
+| B | `#22c55e` |
+| C | `#3b82f6` |
+| D | `#a855f7` |
+| F | `#6b7280` |
+
+In 3D these become ground and material tints rather than literal fills. The flat map at maximum zoom uses them directly.
+
+## 5. Backend prerequisites
+
+These are small server changes the client depends on or would expose. They are tagged by the phase they block, and none is large.
+
+| ID | Change | Why | Blocks | Size |
+|---|---|---|---|---|
+| B1 [#29](https://github.com/chrischaps/TheCapitol/issues/29) | **Move to the 0–8000 world scale**: spawn point (`routes/auth.rs:114`, currently 500,500), resource nodes (all near 575–1325), DB plots (`migrations/20260209_001_m7_zones_plots.sql:126`, centred on 1000,1000), `/bureaucracy/zones` radii, and the REST `/player/move` bounds check (`routes/player.rs:53`, rejects anything over 1000) | New players currently spawn in the far wilderness corner with every resource near them. A 3D world with a visible tower makes that obvious. | P4 (strongly recommended) | M |
+| B2 [#30](https://github.com/chrischaps/TheCapitol/issues/30) | `GET /player/me` → `{player_id, name, x, y, zone, strand_balance}` | Today your own position and name only arrive in the first `positions` broadcast | P4 (nice to have) | S |
+| B3 [#18](https://github.com/chrischaps/TheCapitol/issues/18) | `CompressionLayer` (tower-http gzip) on `/terrain`, plus a `version` hash field | About 1–1.5 MB of uncompressed JSON on every login. With a hash, the client can cache on disk. | P3 (nice to have; the client can hash locally meanwhile) | S |
+| B4 [#41](https://github.com/chrischaps/TheCapitol/issues/41) | Fix the `move_item` ownership check for station containers (`routes/inventory.rs:218`, `ws/connection.rs:1127`) | You can't move items into a storage chest | P6 | S |
+| B5 [#47](https://github.com/chrischaps/TheCapitol/issues/47) | Send `error{message}` when `trade_initiate`, `trade_accept_request` or `trade_offer` fails | Trade failures are silent today | P7 (nice to have) | S |
+| B6 [#48](https://github.com/chrischaps/TheCapitol/issues/48) | Use the real `trade_id` in the disconnect `trade_cancelled` (`engine/tick.rs:109`) | The dummy UUID can't be matched to the trade | P7 (nice to have) | S |
+| B7 [#42](https://github.com/chrischaps/TheCapitol/issues/42) | **Decide how to unify the plot systems.** Terrain plots are visual, with string IDs. Claimable DB plots are axis-aligned boxes with UUIDs, and station placement checks against them. | The 3D world draws terrain plots, but you claim DB plots, and the two don't line up | P6 (decision needed) | M–L |
+
+The client can start without B1–B7. P2 and P3 are unaffected, and P4 works with B1 outstanding: you just walk a long way. The cleanest order is B1 before P4 and B4/B7 before P6.
+
+## 6. Phases and work packages
+
+Sizes: **S** is about 1 focused session, **M** 2–3, **L** 4 or more. Each phase ends with an exit test.
+
+### P0: Foundations
+
+| WP | Work | Size | Depends on |
+|---|---|---|---|
+| P0.1 [#1](https://github.com/chrischaps/TheCapitol/issues/1) | Bring `C:\Users\chris\dev\Flint` up to `origin/main`. Add it as a squash subtree at `flint-client/engine` (`git subtree add --prefix=flint-client/engine <flint-remote> main --squash`). | S | none |
+| P0.2 [#2](https://github.com/chrischaps/TheCapitol/issues/2) | Create the `flint-client/` workspace, add `exclude` to the root `Cargo.toml`, and give it its own `target/`. Copy `.cargo/config.toml` from the engine (8 MB stack). Write `play.bat`. Add a `flint-client/CLAUDE.md` with the subtree-sync commands. | S | P0.1 |
+| P0.3 [#3](https://github.com/chrischaps/TheCapitol/issues/3) | Extract `capitol-protocol`: move `ClientMessage`/`ServerMessage` from `ws/connection.rs:21-290`, the REST DTOs, the terrain response types and the rules constants. Point the backend at it, and keep `cargo test` green. | M | none |
+| P0.4 [#4](https://github.com/chrischaps/TheCapitol/issues/4) | **Embedding spike** (throwaway): a binary that wraps `PlayerApp` like `flint-android` does. Register one Rhai function by temporarily patching the subtree, upload one annulus mesh, and type into an egui text box. Confirm Y-up handedness and the scale `S`. | M | P0.2 |
+
+**Exit:** a window showing a ring mesh, an egui box that accepts typing, and a Rhai script calling a Rust function. The backend builds against `capitol-protocol`.
+
+### P1: Engine hooks (Flint PR)
+
+| WP | Work | Size | Depends on |
+|---|---|---|---|
+| P1.1 [#5](https://github.com/chrischaps/TheCapitol/issues/5) | H1 `PlayerExtension` + `ExtensionCtx` | M | P0.4 |
+| P1.2 [#6](https://github.com/chrischaps/TheCapitol/issues/6) | H2 `on_event` delivery | S | P1.1 |
+| P1.3 [#7](https://github.com/chrischaps/TheCapitol/issues/7) | H3 game egui layer and input routing | M | P1.1 |
+| P1.4 [#8](https://github.com/chrischaps/TheCapitol/issues/8) | H4 runtime mesh lifecycle with vertex colours and AABBs | M | P1.1 |
+| P1.5 [#9](https://github.com/chrischaps/TheCapitol/issues/9) | H5 `screen_to_ground` (Rhai and Rust) | S | none |
+| P1.6 [#10](https://github.com/chrischaps/TheCapitol/issues/10) | ADRs and Flint book pages. Full engine suite green (`cargo test` per crate; `--workspace` fails on Windows because of `ndk-sys`). PR on `feature/player-extensions`. Pull the subtree back into `flint-client/engine`. | S | P1.1–P1.5 |
+
+**Exit:** the PR is merged and the spike is rewritten against the real hooks with no subtree patches. The other Flint games keep working, since every hook is opt-in.
+
+### P2: Core networking and state (runs alongside P1)
+
+| WP | Work | Size | Depends on |
+|---|---|---|---|
+| P2.1 [#11](https://github.com/chrischaps/TheCapitol/issues/11) | IO thread, REST client, WebSocket client, handshake, ping | M | P0.3 |
+| P2.2 [#12](https://github.com/chrischaps/TheCapitol/issues/12) | Reconnect with backoff and snapshot resync; connection state events | S | P2.1 |
+| P2.3 [#13](https://github.com/chrischaps/TheCapitol/issues/13) | State store: players, nodes, stations, containers, recipes, currency, zone, plots. Applies messages and filters by `player_id`. | M | P2.1 |
+| P2.4 [#14](https://github.com/chrischaps/TheCapitol/issues/14) | Polling scheduler and refetch-on-event rules (§4.5) | S | P2.3 |
+| P2.5 [#15](https://github.com/chrischaps/TheCapitol/issues/15) | Interpolation buffers and local prediction | S | P2.3 |
+| P2.6 [#16](https://github.com/chrischaps/TheCapitol/issues/16) | Trade state machine, including the quirks | S | P2.3 |
+| P2.7 [#17](https://github.com/chrischaps/TheCapitol/issues/17) | `capitol-bot`: a headless client that scripts login → move → extract → craft rope. Doubles as a test harness and as "other players" to watch. | S | P2.1–P2.4 |
+
+**Exit:** `cargo test -p capitol-core` is green. An `#[ignore]` integration test against `docker-compose up -d` plus `cargo run` has the bot extract fiber and craft rope.
+
+### P3: The world in 3D
+
+| WP | Work | Size | Depends on |
+|---|---|---|---|
+| P3.1 [#19](https://github.com/chrischaps/TheCapitol/issues/19) | Terrain fetch with an on-disk cache keyed by hash. `--offline <terrain.json>` mode. Capture `fixtures/terrain.json`. | S | P2.1 |
+| P3.2 [#20](https://github.com/chrischaps/TheCapitol/issues/20) | **Ground.** Concentric zone discs with vertex-colour tints and soft blends at the boundaries. A wilderness fade toward the 8000 edge, into fog. | S | P1.4 |
+| P3.3 [#21](https://github.com/chrischaps/TheCapitol/issues/21) | **Water.** Annulus meshes for the moat (r200), inner canal (r600) and outer canal (r1000), with gaps at bridge angles. A translucent animated material; upgraded to H6 later. Banks as a low lip. | M | P1.4 |
+| P3.4 [#22](https://github.com/chrischaps/TheCapitol/issues/22) | **Roads.** Ribbon meshes from polylines with mitered joins (capped at sharp angles), round end caps and widths from the data. Merged into one mesh per road type per sector. Ring roads, arterials, urban grid, suburban collectors and cul-de-sacs, rural trails. | M | P1.4 |
+| P3.5 [#23](https://github.com/chrischaps/TheCapitol/issues/23) | **Bridges.** Decks with side rails at each bridge angle and width. | S | P3.3 |
+| P3.6 [#24](https://github.com/chrischaps/TheCapitol/issues/24) | **Plots.** Lot meshes from the `terrain_plots` quads (about 2,500 or more) with a slight inset, a curb lip and zone tints. Split into angular sectors × rings (for example 16 × 4) for frustum culling. | M | P1.4 |
+| P3.7 [#25](https://github.com/chrischaps/TheCapitol/issues/25) | **The Capitol tower.** A procedural landmark at the origin: castle-like massing in contemporary materials, a lit crown, and a bailey ring at r200 inside the moat. Built with `MeshBuilder`, or authored as glTF. | M | P1.4 |
+| P3.8 [#26](https://github.com/chrischaps/TheCapitol/issues/26) | **Atmosphere.** Sky, distance fog, a warm key light, SSAO and bloom. Dusk as the default mood. Tuned with the `flint-render` skill's camera presets. | S | P3.2–P3.7 |
+| P3.9 [#27](https://github.com/chrischaps/TheCapitol/issues/27) | **Camera rig** (`camera.rhai`). Follows the player with damping. Pitch is about 50° at street level, eased to 90° at map zoom. Wheel zoom from street level to the whole world; Q/E or right-drag to orbit; a home key to recentre. Map mode flattens lighting into the 2D palette. | M | P1.5 |
+| P3.10 [#28](https://github.com/chrischaps/TheCapitol/issues/28) | Terrain hot-swap on `terrain_updated`: rebuild only the affected meshes | S | P3.2–P3.6 |
+
+**Exit:** offline-mode screenshots at street, district and map zoom. At least 60 fps at map zoom on the dev machine (`--exit-after` reports ms/frame). Meshes rebuild without leaks when the terrain changes.
+
+### P4: The living world (vertical slice)
+
+| WP | Work | Size | Depends on |
+|---|---|---|---|
+| P4.1 [#31](https://github.com/chrischaps/TheCapitol/issues/31) | **Login and register** in egui over the live world. `/terrain` needs no auth, so the camera slowly orbits the tower behind the form. Remembered email, stored token, a server-URL setting and error states. | M | P1.3, P3 |
+| P4.2 [#32](https://github.com/chrischaps/TheCapitol/issues/32) | **Players.** A simple stylised avatar with a gold self-marker and name labels via `world_to_screen`. Interpolated movement and facing. `player_joined`/`player_left` fade in and out. | M | P2.5, P1.4 |
+| P4.3 [#33](https://github.com/chrischaps/TheCapitol/issues/33) | **Click to move.** `screen_to_ground` → `cap_move`. A destination marker and path line. `movement_blocked` produces a splash and shake at the water's edge with a "Find a bridge" hint. Clicks clamped to 0–8000. | S | P1.5 |
+| P4.4 [#34](https://github.com/chrischaps/TheCapitol/issues/34) | **Resource nodes.** Grass tufts with a 3D available/depleted look. Extract within 50, or move then extract automatically on arrival (React's rule). A progress ring, a gold targeting line and an "+N fiber (B)" toast on completion. Regrowth animation on `node_regenerated`. | M | P4.2, P4.3 |
+| P4.5 [#35](https://github.com/chrischaps/TheCapitol/issues/35) | **Zone and connection.** A zone banner on `zone_changed`, a connection overlay while reconnecting, and a header strip with zone and strand balance. | S | P2.2 |
+
+**Exit:** the Flint client and the React client, logged in as two accounts, see each other move. In Flint the other player moves smoothly. Extraction works end to end, and pulling the network cable reconnects without restarting.
+
+### P5: Inventory and crafting
+
+| WP | Work | Size | Depends on |
+|---|---|---|---|
+| P5.1 [#36](https://github.com/chrischaps/TheCapitol/issues/36) | **Theme.** egui `Visuals` and `Style` from the tokens, the project font, panel frames and a gold focus ring. Reviewed with screenshots against the React panels. | S | P1.3 |
+| P5.2 [#37](https://github.com/chrischaps/TheCapitol/issues/37) | **Item icons.** Fiber, rope and the three kits, generated through `flint-asset-gen` or procedural shapes, at a consistent size and style. | S | none |
+| P5.3 [#38](https://github.com/chrischaps/TheCapitol/issues/38) | **Slot grid widget.** Icon, quantity, quality pip (§4.7) and a tooltip with name, quality and grade. Drag and drop between slots sends `move_item`. Handles the moved, merged and swapped results. | M | P5.1, P2.3 |
+| P5.4 [#39](https://github.com/chrischaps/TheCapitol/issues/39) | **Inventory panel.** Toggled with `I`. A 24-slot, 6-column grid. | S | P5.3 |
+| P5.5 [#40](https://github.com/chrischaps/TheCapitol/issues/40) | **Crafting panel.** Recipe list, the `crafting_input` (4 slots) and `crafting_output` (1 slot) containers, a quality preview, a progress bar, cancel, and a purple crafting ring on the avatar. Warns when the output slot is full, because the server destroys output that has nowhere to go (`engine/tick.rs:727`). | M | P5.3 |
+
+**Exit:** gather fiber, craft rope and a workbench kit, and drag items around. Every action matches what the React client shows for the same account.
+
+### P6: Stations and plots
+
+| WP | Work | Size | Depends on |
+|---|---|---|---|
+| P6.1 [#43](https://github.com/chrischaps/TheCapitol/issues/43) | **Station models.** Workbench, forge (ember glow plus fire particles) and storage chest. An orange in-range ring. | M | P1.4 |
+| P6.2 [#44](https://github.com/chrischaps/TheCapitol/issues/44) | **Placement mode.** Right-click a `*_kit` to show a ghost at the cursor, green or red against three checks: within 75 of the player, at least 50 from other stations, and inside an owned plot. Click to send `place_station`, right-click to cancel. | M | P6.1, P1.5 |
+| P6.3 [#45](https://github.com/chrischaps/TheCapitol/issues/45) | **Station panel.** Opened by clicking a station within 75, or by walking there first. Shows the station container and recipes filtered by `required_station_type`, with craft-at-station and remove. | M | P5.3 |
+| P6.4 [#46](https://github.com/chrischaps/TheCapitol/issues/46) | **Plots.** Alt-click picking, a plot panel (zone, size, type, stations used and capacity, assessed value, owner), claiming with the deed cost, and gold edges and ground glow on owned plots. *Depends on the B7 decision.* Until then, claimable DB plots appear as an overlay. | M | B7 |
+
+**Exit:** claim a plot, place a workbench on it, open it, craft at it, then remove it. Item moves into a storage chest work once B4 lands.
+
+### P7: Economy
+
+| WP | Work | Size | Depends on |
+|---|---|---|---|
+| P7.1 [#49](https://github.com/chrischaps/TheCapitol/issues/49) | Strand balance in the header, with a tick animation when it changes | S | P2.4 |
+| P7.2 [#50](https://github.com/chrischaps/TheCapitol/issues/50) | **Exchange panel.** Deposit (select fiber items) and withdraw (quantity), with the 0.5% fee preview and resulting balance. REST-backed. | S | P5.3 |
+| P7.3 [#51](https://github.com/chrischaps/TheCapitol/issues/51) | **Trading.** Shift-click a player within 75 (or walk to them) to send a request. An incoming-request notification. A two-sided trade window with items and strands, accept states that reset when either offer changes, and an executed or cancelled result with refetch. Timeout hints for silent failures. | M | P2.6, P5.3 |
+
+**Exit:** two accounts, one in each client, complete a trade of rope for strands. Both inventories and balances are correct afterwards.
+
+### P8: Polish and beauty
+
+| WP | Work | Size |
+|---|---|---|
+| P8.1 [#52](https://github.com/chrischaps/TheCapitol/issues/52) | **Audio.** Ambience by zone (city hum near the core, birds in the suburbs, wind in the wilderness), water lapping near the rings, UI clicks, extraction rustle, a craft-complete chime. | M |
+| P8.2 [#53](https://github.com/chrischaps/TheCapitol/issues/53) | **Juice.** Toasts, pickup arcs from node to inventory, a quality-grade sparkle for A items, camera ease-ins on zone change. | S |
+| P8.3 [#54](https://github.com/chrischaps/TheCapitol/issues/54) | **Onboarding.** Hints for the first walk, extraction and craft. A keyboard-shortcut overlay (`?`). | S |
+| P8.4 [#55](https://github.com/chrischaps/TheCapitol/issues/55) | **Settings.** Server URL, graphics quality, audio volumes, camera sensitivity, all persisted. | S |
+| P8.5 [#56](https://github.com/chrischaps/TheCapitol/issues/56) | **Performance.** Sector culling checks, label decluttering at distance, H6 instancing for repeated props. | M |
+| P8.6 [#57](https://github.com/chrischaps/TheCapitol/issues/57) | **Optional beauty.** H6 water shading on the canals; compute grass fields in rural and wilderness areas; procedural houses that grow on claimed plots so the city fills in as players build; a day/night cycle tied to server time, with owned plots glowing gold at night. | L |
+| P8.7 [#58](https://github.com/chrischaps/TheCapitol/issues/58) | **Packaging.** A release build script, a zip with the engine binary and data, a README section, a chaps.dev showcase capture. | S |
+
+### Later (outside this plan, but planned for)
+- **Admin tools.** F1 debug camera, F2 world tweaker and F3 perf panel slot in as egui panels gated on `is_admin`. Flint's own debug panels sit alongside them.
+- **M6 markets.** A market browser and order book as egui panels, plus a price chart (`egui_plot`). Real-time updates arrive through the same `on_event` path.
+- **M7 leftovers.** The map view (P3.9's map mode is most of it), an ownership overlay and a permissions editor.
+- **M8 automation and M9 social.** More panels on the same patterns. Automated stations get animated states in the world: a forge glows while it runs and dims when it's paused.
+
+## 7. Dependency graph and estimate
+
+```
+P0.1 ─ P0.2 ─ P0.4 ─┬─ P1 (hooks, Flint PR) ─┬─ P3 (world) ─┬─ P4 (vertical slice) ─ P5 ─ P6 ─ P7 ─ P8
+P0.3 ───────────────┴─ P2 (net/state) ───────┴──────────────┘                         ▲     ▲
+                                                                       B1 ────────────┘     │
+                                                                       B4, B7 ─────────────┘
+```
+
+| Phase | Sessions (approx.) |
+|---|---|
+| P0 | 4–6 |
+| P1 | 5–7 |
+| P2 | 5–7 |
+| P3 | 9–12 |
+| P4 | 5–7 |
+| P5 | 5–6 |
+| P6 | 5–7 |
+| P7 | 3–4 |
+| P8 | 6–10 |
+| **Total** | **about 47–66 focused sessions** for parity with polish, **about 41–56** for parity without P8, and **about 28–39** to the end of the P4 vertical slice |
+
+P2 can run alongside P1 and P3 in a separate worktree, since it has no engine dependency. P4 is the natural place to pause, review and adjust the rest of this plan.
+
+## 8. Parity checklist (React → Flint)
+
+| React feature | React file | Flint WP |
+|---|---|---|
+| Login / register, stored auth | `pages/Login.tsx`, `Register.tsx`, `AuthContext.tsx` | P4.1 |
+| Header: title, zone, strands, email, logout | `pages/Game.tsx` | P4.5, P7.1 |
+| Zone indicator on `zone_changed` | `ZoneIndicator.tsx` | P4.5 |
+| Zone rings | `GameCanvas.tsx` | P3.2 |
+| Terrain plots | `GameCanvas.tsx` | P3.6 |
+| Roads by type | `GameCanvas.tsx` | P3.4 |
+| Water rings with bridge gaps | `GameCanvas.tsx` | P3.3 |
+| Bridges | `GameCanvas.tsx` | P3.5 |
+| World boundary | `GameCanvas.tsx` | P3.2 (fade) |
+| Resource nodes, available/depleted/targeted | `GameCanvas.tsx` | P4.4 |
+| Stations and in-range ring | `GameCanvas.tsx` | P6.1 |
+| Placement preview, valid/invalid | `GameCanvas.tsx` | P6.2 |
+| Targeting line to pending extraction | `GameCanvas.tsx` | P4.4 |
+| Players: self gold, others green, names | `GameCanvas.tsx` | P4.2 |
+| Extraction ring, crafting ring | `GameCanvas.tsx` | P4.4, P5.5 |
+| Notifications, "Connecting…" overlay | `GameCanvas.tsx` | P4.5, P8.2 |
+| Click priority 1: placement click / right-click cancel | `GameCanvas.tsx` | P6.2 |
+| Click priority 2: shift-click player to trade or walk | `GameCanvas.tsx` | P7.3 |
+| Click priority 3: click station to open or walk | `GameCanvas.tsx` | P6.3 |
+| Click priority 4: alt-click plot to select | `GameCanvas.tsx` | P6.4 |
+| Click priority 5: click node to extract or move then extract | `GameCanvas.tsx` | P4.4 |
+| Click priority 6: click ground to move | `GameCanvas.tsx` | P4.3 |
+| Inventory grid, drag and drop, quality pips | `InventoryPanel.tsx`, `InventoryGrid.tsx`, `InventorySlot.tsx`, `DragDropContext.tsx` | P5.3, P5.4 |
+| Right-click kit to place | `InventorySlot.tsx` | P6.2 |
+| Crafting panel | `CraftingPanel.tsx` | P5.5 |
+| Station panel, craft at station | `StationPanel.tsx` | P6.3 |
+| Exchange deposit / withdraw | `ExchangePanel.tsx` | P7.2 |
+| Trade request notification | `TradeRequestNotification.tsx` | P7.3 |
+| Trade window | `TradeWindow.tsx` | P7.3 |
+| Plot panel and claim | `PlotPanel.tsx` | P6.4 |
+| WS handling: `positions`, `player_joined/left` | `GameContext.tsx` | P2.3, P4.2 |
+| WS handling: `extraction_*`, `crafting_*`, `node_*` | `GameContext.tsx` | P2.3, P4.4, P5.5 |
+| WS handling: `inventory_updated` → refetch | `GameContext.tsx` | P2.4 |
+| WS handling: `station_*` | `GameContext.tsx` | P2.3, P6 |
+| WS handling: `zone_changed` → refetch plots | `GameContext.tsx` | P2.4, P4.5 |
+| WS handling: `trade_*` | `GameContext.tsx` | P2.6, P7.3 |
+| WS handling: `terrain_updated` → refetch | `GameContext.tsx` | P3.10 |
+| 5 s polling of nodes, stations, plots | `GameContext.tsx` | P2.4 |
+| *New:* `movement_blocked` feedback (React ignores it) | — | P4.3 |
+| *New:* interpolation, reconnect | — | P2.2, P2.5 |
+| *Out of scope:* F1 debug camera, F2 world tweaker, F3 perf panel | `GameCanvas.tsx`, `WorldTweakPanel.tsx`, `AdminPerfPanel.tsx` | Later |
+
+## 9. Risks and open questions
+
+| Risk / question | Mitigation |
+|---|---|
+| **Themed egui may still look like a tool.** | Do the theme pass early (P5.1) and compare screenshots side by side with the React panels. Keep panel code behind a small widget layer so moving to `.ui.toml` later is a contained job (§4.3). |
+| **Engine hooks are rejected or drift from upstream.** | Every hook is opt-in and general. Use a PR on a feature branch rather than pushing to `main`. Run the full engine suite. Pull the subtree with `--squash` and diff against the Flint remote (vault: *Flint Engine Sync Across All Games*). |
+| **Build times.** The engine plus wgpu in a nested workspace makes for long cold builds. | A separate `target/`, plus `capitol-core` with no engine dependency, so most logic tests in seconds. |
+| **Terrain payload size** (about 1–1.5 MB, no version) | Cache on disk under a local hash now. Use B3 when it lands. |
+| **Two plot systems** (B7) | Decide before P6. Until then, show claimable DB plots as an overlay. |
+| **Rhai performance with many entities** | Keep per-entity and per-frame work in Rust (`entities.rs`). Rhai handles intents and HUD only. |
+| **One session per account** | Testing always uses two accounts. Document it in `flint-client/CLAUDE.md`. |
+| **World scale** (B1) | Strongly recommended before P4. Otherwise the slice happens in the corner of the map. |
+| **Windows only** | Accepted for now. Android is possible later through `flint-android`, but touch input and UI scale would need their own plan. |
+| **The quality cascade isn't real yet** (`engine/crafting.rs` averages inputs and ignores weights) | Not a client problem, but the quality preview in P5.5 should be computed by the server or labelled as an estimate so it doesn't lock in the current maths. |
+
+## 10. Verification strategy
+
+- **Unit tests (`cargo test -p capitol-core`, `-p capitol-protocol`):**
+  - Serde round-trips against JSON fixtures captured from a running server, one per message type.
+  - Interpolation and prediction maths.
+  - The state reducer for each message.
+  - Trade state machine transitions, including the quirks.
+  - Quality grade boundaries.
+- **Mesh builder tests (`capitol-client`):**
+  - No NaNs.
+  - Consistent winding (normals face +Y).
+  - Expected vertex and index counts for known inputs.
+  - Water gaps line up with bridge angles.
+  - Sector bounds contain their vertices.
+  - `coords.rs` round-trip and orientation (East = +X, South = +Z).
+- **Integration test:** `capitol-bot` against a local stack (`docker-compose up -d`, `cargo run` in `backend/`), marked `#[ignore]`. It logs in, moves, extracts and crafts rope. It reconnects after the WS drops, then resyncs.
+- **Visual checks:** `flint render` doesn't run scripts or game code, so it can't build the runtime world. Instead use offline mode with `flint-player`-style capture: `capitol-client --offline fixtures/terrain.json --screenshot-at 3 --input-script <camera path> --exit-after 4`. Output goes to `flint-client/renders/`. Each world-facing WP ends with a before/after pair and a note on what to look at.
+- **Two-client manual test:** the Flint client and the React client on two accounts, run at the end of P4, P6 and P7 against the exit criteria above.
+- **Performance budget:** `--exit-after` ms/frame at street, district and map zoom. Target 16.6 ms or better on the dev machine with all plots visible.

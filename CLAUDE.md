@@ -10,6 +10,24 @@ The Capitol is an MMO economic simulation where the economy is the primary gamep
 - `the-capitol-gdd.md` - Game design, systems, quality cascade mechanics
 - `the-capitol-tdd.md` - Technical architecture, protocol spec, data models
 - `the-capitol-milestones.md` - Development roadmap (M0-M10)
+- `the-capitol-flint-client.md` - Plan and work breakdown for the 3D Flint engine client (`flint-client/`)
+
+## Current Focus: the Flint Client
+
+Active work is a third client built on Chris's Flint engine (Rust/wgpu). It goes in `flint-client/`, with the engine as a git subtree at `flint-client/engine/`. The plan is `the-capitol-flint-client.md`. The work queue is the GitHub issues labelled `flint-client`: one issue per work package, created in dependency order, with phase labels `fc:P0-…` to `fc:P8-…` and `fc:backend-prereq` for the small server changes the client needs.
+
+**When asked to "tackle the next issue", "do the next one" or "work on #N", use the `next-issue` skill** (`.claude/skills/next-issue/SKILL.md`). It covers:
+- picking the lowest open issue that is unclaimed and unblocked
+- what to read first
+- working in a `../TheCapitol-<n>` worktree on branch `issue-<n>`
+- verification
+- committing with `Closes #<n>`
+- closing the issue with a hand-off comment
+
+Rules that hold across issues:
+- Engine changes go upstream to Flint as a PR on a `feature/*` branch. Chris merges Flint PRs.
+- The plan doc stays true. Update it in the same commit when a decision changes it.
+- Assume another agent may be working at the same time. Use your own worktree, stage by path, and never touch changes you didn't make.
 
 ## Development Commands
 
