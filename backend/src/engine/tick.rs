@@ -37,6 +37,8 @@ pub struct GameState {
     pub trade_manager: TradeManager,
     // Terrain configuration (moats, canals, bridges, roads)
     pub terrain: TerrainConfig,
+    // `terrain.version()`, kept beside it so `/terrain` doesn't rehash on every request
+    pub terrain_version: String,
     // World generation parameters (for admin tweaking)
     pub world_gen_params: WorldGenParams,
     // Performance tracking
@@ -52,6 +54,7 @@ impl GameState {
     pub fn with_params(params: WorldGenParams) -> Self {
         let (event_sender, _) = broadcast::channel(1024);
         let terrain = TerrainConfig::from_params(&params);
+        let terrain_version = terrain.version();
         Self {
             players: HashMap::new(),
             resource_nodes: HashMap::new(),
@@ -69,10 +72,17 @@ impl GameState {
             station_types: HashMap::new(),
             trade_manager: TradeManager::new(),
             terrain,
+            terrain_version,
             world_gen_params: params,
             last_tps: 0.0,
             uptime_seconds: 0.0,
         }
+    }
+
+    /// Replace the terrain, and its version with it
+    pub fn set_terrain(&mut self, terrain: TerrainConfig) {
+        self.terrain_version = terrain.version();
+        self.terrain = terrain;
     }
 
     pub fn take_pending_items(&mut self) -> Vec<PendingItem> {

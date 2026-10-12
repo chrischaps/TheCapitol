@@ -697,6 +697,17 @@ impl TerrainConfig {
         Self::from_params(&WorldGenParams::default())
     }
 
+    /// A stable hash of the generated terrain, as 16 hex digits: FNV-1a over its
+    /// JSON. It hashes the output rather than the params, so a generator change
+    /// also changes it, and clients can key a disk cache on it.
+    pub fn version(&self) -> String {
+        let json = serde_json::to_vec(self).expect("terrain serializes");
+        let hash = json.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
+            (hash ^ byte as u64).wrapping_mul(0x0100_0000_01b3)
+        });
+        format!("{hash:016x}")
+    }
+
     /// Build terrain from explicit world generation parameters
     pub fn from_params(params: &WorldGenParams) -> Self {
         let mut config = TerrainConfig {
@@ -2937,6 +2948,19 @@ mod tests {
         let config = TerrainConfig::get_default();
         assert_eq!(config.world_size, 8000.0);
         assert_eq!(config.water_rings.len(), 3);
+    }
+
+    #[test]
+    fn test_version_is_stable_and_follows_params() {
+        let version = TerrainConfig::get_default().version();
+        assert_eq!(version.len(), 16);
+        // Regenerating from the same params gives the same terrain, so the same version
+        assert_eq!(TerrainConfig::get_default().version(), version);
+
+        let params = WorldGenParams { seed: 43, ..WorldGenParams::default() };
+        assert_ne!(TerrainConfig::from_params(&params).version(), version);
+        let params = WorldGenParams { moat_width: 70.0, ..WorldGenParams::default() };
+        assert_ne!(TerrainConfig::from_params(&params).version(), version);
     }
 
     #[test]

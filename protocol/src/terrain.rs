@@ -23,6 +23,10 @@ pub struct TerrainResponse {
     pub roads: Vec<RoadSegment>,
     /// Terrain-level plots (urban, suburban, rural)
     pub terrain_plots: Vec<TerrainPlot>,
+    /// A stable hash of this terrain, which changes whenever the terrain does.
+    /// Also sent as the response's ETag. Optional so older payloads still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// A circular water feature (moat or canal) around the world center

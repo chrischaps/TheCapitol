@@ -52,8 +52,7 @@ pub async fn update_world_params(
 
     let mut game = state.game.write().await;
 
-    let new_terrain = TerrainConfig::from_params(&params);
-    game.terrain = new_terrain;
+    game.set_terrain(TerrainConfig::from_params(&params));
     game.world_gen_params = params.clone();
 
     let _ = game.event_sender.send(GameEvent::TerrainUpdated);
