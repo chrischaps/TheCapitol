@@ -1,5 +1,6 @@
 //! One WebSocket session: connect, authenticate, subscribe, then pump
-//! messages both ways until the socket closes.
+//! messages both ways. If the socket drops, wait and do it all again, until
+//! the game closes the session or the server rejects the token.
 //!
 //! The server's side of the handshake is in `backend/src/ws/connection.rs`
 //! (`handle_socket`): it waits 10 s for `auth`, answers `auth_ok` or
@@ -7,8 +8,11 @@
 //! has sent `subscribe{channel:"position"}`. Messages the game sends before
 //! that are held here and flushed once `subscribed` arrives.
 
+use std::collections::hash_map::RandomState;
 use std::collections::VecDeque;
+use std::hash::{BuildHasher, Hasher};
 use std::sync::mpsc;
+use std::time::Duration;
 
 use capitol_protocol::ws::{ClientMessage, ServerMessage};
 use futures_util::{SinkExt, StreamExt};
@@ -86,43 +90,137 @@ enum Phase {
     Live,
 }
 
-/// How the session ended.
+/// How one connection ended.
 enum End {
-    Disconnected(String),
+    /// The game asked to close.
+    Closed,
+    /// Lost, refused or timed out. Worth retrying.
+    Dropped(String),
+    /// The server rejected the token.
     AuthFailed(String),
 }
+
+const CLOSED_BY_CLIENT: &str = "closed by client";
 
 async fn run(
     url: String,
     token: String,
     config: NetConfig,
-    outbound: tmpsc::UnboundedReceiver<Outbound>,
+    mut outbound: tmpsc::UnboundedReceiver<Outbound>,
     events: mpsc::Sender<NetEvent>,
 ) {
     let emit = |state| {
         let _ = events.send(NetEvent::Connection(state));
     };
-    emit(ConnectionState::Connecting);
-    let end = session(&url, token, &config, outbound, &events, &emit).await;
-    match end {
-        End::Disconnected(reason) => {
-            tracing::info!("websocket disconnected: {reason}");
-            emit(ConnectionState::Disconnected { reason });
+    let closed = || {
+        tracing::info!("websocket {CLOSED_BY_CLIENT}");
+        emit(ConnectionState::Disconnected {
+            reason: CLOSED_BY_CLIENT.into(),
+        });
+    };
+    let mut attempt = 0;
+    // Once a connection has gone live, the game holds state that the next
+    // one must refresh.
+    let mut was_live = false;
+
+    loop {
+        emit(ConnectionState::Connecting);
+        let mut live_since = None;
+        let end = connection(
+            &url,
+            &token,
+            &config,
+            &mut outbound,
+            &events,
+            &emit,
+            was_live,
+            &mut live_since,
+        )
+        .await;
+        let reason = match end {
+            End::Closed => return closed(),
+            End::AuthFailed(message) => {
+                tracing::warn!("websocket auth failed: {message}");
+                emit(ConnectionState::AuthFailed { message });
+                return;
+            }
+            End::Dropped(reason) => reason,
+        };
+
+        was_live |= live_since.is_some();
+        if live_since.is_some_and(|t: Instant| t.elapsed() >= config.reconnect_max) {
+            attempt = 0;
         }
-        End::AuthFailed(message) => {
-            tracing::warn!("websocket auth failed: {message}");
-            emit(ConnectionState::AuthFailed { message });
+        attempt += 1;
+        let delay = backoff(
+            attempt,
+            config.reconnect_initial,
+            config.reconnect_max,
+            jitter(),
+        );
+        tracing::info!("websocket dropped ({reason}); attempt {attempt} in {delay:?}");
+        emit(ConnectionState::Reconnecting {
+            attempt,
+            delay,
+            reason,
+        });
+
+        // Wait, but stay responsive to the game closing the session.
+        let wait = time::sleep(delay);
+        tokio::pin!(wait);
+        loop {
+            tokio::select! {
+                _ = &mut wait => break,
+                out = outbound.recv() => match out {
+                    Some(Outbound::Send(message)) => {
+                        tracing::warn!("reconnecting; dropping {}", message.type_name());
+                    }
+                    Some(Outbound::Close) | None => return closed(),
+                },
+            }
         }
     }
 }
 
-async fn session(
+/// The wait before reconnect attempt `attempt` (counting from 1): `initial`,
+/// doubled for each attempt after the first, capped at `max`. `jitter`, in
+/// [0, 1), then trims up to a fifth off, so clients the server dropped
+/// together don't all come back on the same tick.
+pub(crate) fn backoff(attempt: u32, initial: Duration, max: Duration, jitter: f64) -> Duration {
+    let doublings = attempt.saturating_sub(1).min(31);
+    let nominal = initial.saturating_mul(1 << doublings).min(max);
+    nominal.mul_f64(1.0 - 0.2 * jitter.clamp(0.0, 1.0))
+}
+
+/// A number in [0, 1). `RandomState` is seeded randomly, which is plenty for
+/// spreading out reconnects and saves a dependency.
+fn jitter() -> f64 {
+    let bits = RandomState::new().build_hasher().finish();
+    (bits >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// Whether an `auth_error` means the token is no good. The server also sends
+/// `auth_error` when `auth` didn't arrive within 10 s, or when the database
+/// failed while loading the player (`backend/src/ws/connection.rs`,
+/// `handle_socket`). Neither says anything about the token, so those are
+/// retried.
+pub(crate) fn auth_error_is_final(message: &str) -> bool {
+    !(message == "Auth timeout" || message.starts_with("Database error"))
+}
+
+/// One connection: connect, handshake, then pump until it ends. Sets
+/// `live_since` when `subscribed` arrives, and sends [`NetEvent::Resync`]
+/// straight after `Connected` if `resync` is set.
+#[allow(clippy::too_many_arguments)]
+async fn connection(
     url: &str,
-    token: String,
+    token: &str,
     config: &NetConfig,
-    mut outbound: tmpsc::UnboundedReceiver<Outbound>,
+    outbound: &mut tmpsc::UnboundedReceiver<Outbound>,
     events: &mpsc::Sender<NetEvent>,
     emit: &impl Fn(ConnectionState),
+    resync: bool,
+    live_since: &mut Option<Instant>,
 ) -> End {
     let connect = async {
         let tcp = connect_tcp(url).await?;
@@ -132,14 +230,17 @@ async fn session(
     };
     let socket = match time::timeout(config.connect_timeout, connect).await {
         Ok(Ok((socket, _))) => socket,
-        Ok(Err(e)) => return End::Disconnected(format!("could not connect to {url}: {e}")),
-        Err(_) => return End::Disconnected(format!("could not connect to {url}: timed out")),
+        Ok(Err(e)) => return End::Dropped(format!("could not connect to {url}: {e}")),
+        Err(_) => return End::Dropped(format!("could not connect to {url}: timed out")),
     };
     let (mut sink, mut stream) = socket.split();
 
     emit(ConnectionState::Authenticating);
-    if let Err(e) = sink.send(encode(&ClientMessage::Auth { token })).await {
-        return End::Disconnected(format!("send failed: {e}"));
+    let auth = ClientMessage::Auth {
+        token: token.into(),
+    };
+    if let Err(e) = sink.send(encode(&auth)).await {
+        return End::Dropped(format!("send failed: {e}"));
     }
 
     let mut phase = Phase::Authenticating;
@@ -155,8 +256,8 @@ async fn session(
             frame = stream.next() => {
                 let frame = match frame {
                     Some(Ok(frame)) => frame,
-                    Some(Err(e)) => return End::Disconnected(format!("connection lost: {e}")),
-                    None => return End::Disconnected("connection closed by server".into()),
+                    Some(Err(e)) => return End::Dropped(format!("connection lost: {e}")),
+                    None => return End::Dropped("connection closed by server".into()),
                 };
                 last_heard = Instant::now();
                 let text = match frame {
@@ -166,7 +267,7 @@ async fn session(
                             .map(|f| f.reason.to_string())
                             .filter(|r| !r.is_empty())
                             .unwrap_or_else(|| "connection closed by server".into());
-                        return End::Disconnected(reason);
+                        return End::Dropped(reason);
                     }
                     // Pongs only refresh `last_heard`; tungstenite answers pings itself.
                     _ => continue,
@@ -187,7 +288,7 @@ async fn session(
                     (Phase::Authenticating, ServerMessage::AuthOk { player_id }) => {
                         let subscribe = ClientMessage::Subscribe { channel: POSITION_CHANNEL.into() };
                         if let Err(e) = sink.send(encode(&subscribe)).await {
-                            return End::Disconnected(format!("send failed: {e}"));
+                            return End::Dropped(format!("send failed: {e}"));
                         }
                         phase = Phase::Subscribing { player_id: *player_id };
                     }
@@ -204,14 +305,22 @@ async fn session(
                 let _ = events.send(NetEvent::Ws(message));
 
                 if let Some(message) = auth_failed {
-                    return End::AuthFailed(message);
+                    return if auth_error_is_final(&message) {
+                        End::AuthFailed(message)
+                    } else {
+                        End::Dropped(format!("auth_error: {message}"))
+                    };
                 }
                 if let Some(player_id) = became_live {
                     phase = Phase::Live;
+                    *live_since = Some(Instant::now());
                     emit(ConnectionState::Connected { player_id });
+                    if resync {
+                        let _ = events.send(NetEvent::Resync);
+                    }
                     while let Some(message) = pending.pop_front() {
                         if let Err(e) = sink.send(encode(&message)).await {
-                            return End::Disconnected(format!("send failed: {e}"));
+                            return End::Dropped(format!("send failed: {e}"));
                         }
                     }
                 }
@@ -221,7 +330,7 @@ async fn session(
                 Some(Outbound::Send(message)) => {
                     if matches!(phase, Phase::Live) {
                         if let Err(e) = sink.send(encode(&message)).await {
-                            return End::Disconnected(format!("send failed: {e}"));
+                            return End::Dropped(format!("send failed: {e}"));
                         }
                     } else {
                         if pending.len() == MAX_PENDING {
@@ -238,7 +347,7 @@ async fn session(
                     // the server can lose our Close frame with it.
                     let drain = async { while let Some(Ok(_)) = stream.next().await {} };
                     let _ = time::timeout(CLOSE_GRACE, drain).await;
-                    return End::Disconnected("closed by client".into());
+                    return End::Closed;
                 }
             },
 
@@ -246,15 +355,15 @@ async fn session(
                 // The server has no idle timeout of its own, so a half-open
                 // socket would otherwise look connected forever.
                 if last_heard.elapsed() > config.idle_timeout {
-                    return End::Disconnected("server stopped responding".into());
+                    return End::Dropped("server stopped responding".into());
                 }
                 if let Err(e) = sink.send(Message::Ping(Default::default())).await {
-                    return End::Disconnected(format!("send failed: {e}"));
+                    return End::Dropped(format!("send failed: {e}"));
                 }
             }
 
             _ = &mut handshake_deadline, if !matches!(phase, Phase::Live) => {
-                return End::Disconnected("handshake timed out".into());
+                return End::Dropped("handshake timed out".into());
             }
         }
     }
@@ -293,4 +402,42 @@ async fn connect_tcp(url: &str) -> std::io::Result<TcpStream> {
 fn encode(message: &ClientMessage) -> Message {
     // ClientMessage is plain data; serialising it can't fail.
     Message::text(serde_json::to_string(message).expect("ClientMessage serialises"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_from_half_a_second_to_ten() {
+        let config = NetConfig::default();
+        let at = |attempt| backoff(attempt, config.reconnect_initial, config.reconnect_max, 0.0);
+        let secs: Vec<f64> = (1..=8).map(|n| at(n).as_secs_f64()).collect();
+        assert_eq!(secs, [0.5, 1.0, 2.0, 4.0, 8.0, 10.0, 10.0, 10.0]);
+        // Far past the cap, nothing overflows.
+        assert_eq!(at(u32::MAX), config.reconnect_max);
+    }
+
+    #[test]
+    fn jitter_only_shortens_the_wait_by_up_to_a_fifth() {
+        let (initial, max) = (Duration::from_millis(500), Duration::from_secs(10));
+        assert_eq!(backoff(1, initial, max, 1.0), Duration::from_millis(400));
+        for _ in 0..1000 {
+            let j = jitter();
+            assert!((0.0..1.0).contains(&j));
+            let delay = backoff(6, initial, max, j);
+            assert!(delay > Duration::from_secs(8) && delay <= max, "{delay:?}");
+        }
+    }
+
+    #[test]
+    fn only_token_problems_are_final() {
+        assert!(auth_error_is_final("Invalid token"));
+        assert!(auth_error_is_final("Session expired"));
+        assert!(auth_error_is_final("Player not found"));
+        assert!(!auth_error_is_final("Auth timeout"));
+        assert!(!auth_error_is_final(
+            "Database error: pool timed out while waiting for an open connection"
+        ));
+    }
 }

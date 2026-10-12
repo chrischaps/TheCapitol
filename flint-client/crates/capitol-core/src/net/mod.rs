@@ -50,6 +50,12 @@ pub struct NetConfig {
     pub idle_timeout: Duration,
     /// Whole-request timeout for REST calls.
     pub rest_timeout: Duration,
+    /// The wait before the first reconnect attempt. It doubles with each
+    /// failed attempt, up to `reconnect_max`.
+    pub reconnect_initial: Duration,
+    /// The longest wait between reconnect attempts. A session that stays
+    /// connected this long resets the backoff.
+    pub reconnect_max: Duration,
 }
 
 impl Default for NetConfig {
@@ -61,6 +67,8 @@ impl Default for NetConfig {
             ping_interval: Duration::from_secs(15),
             idle_timeout: Duration::from_secs(45),
             rest_timeout: Duration::from_secs(30),
+            reconnect_initial: Duration::from_millis(500),
+            reconnect_max: Duration::from_secs(10),
         }
     }
 }
@@ -96,11 +104,14 @@ impl NetConfig {
 pub enum Command {
     /// Use `token` for REST calls and open the WebSocket with it: connect,
     /// `auth`, then `subscribe` to positions. Replaces any open session.
+    /// If the session drops, it reconnects with backoff until the server
+    /// rejects the token or the game sends `Disconnect`.
     Connect { token: String },
     /// Close the WebSocket and forget the token.
     Disconnect,
     /// Send over the WebSocket. Held until the handshake finishes if one is
-    /// running; dropped with a warning if there's no session.
+    /// running; dropped with a warning if there's no session or it's waiting
+    /// to reconnect.
     Ws(ClientMessage),
     /// Make a REST call. The result comes back as [`NetEvent::Rest`] with `tag`.
     /// Calls run concurrently, so results can arrive out of order.
@@ -114,11 +125,20 @@ pub enum NetEvent {
     Ws(ServerMessage),
     Rest(Tag, Result<RestResponse, RestError>),
     Connection(ConnectionState),
+    /// Sent right after `Connected` when the session has reconnected. Events
+    /// were lost while it was down, so refetch everything the server doesn't
+    /// push: containers, nearby nodes and stations, currency, plots, recipes.
+    Resync,
 }
 
 /// The WebSocket's state. A session moves
-/// `Connecting → Authenticating → Connected`, and ends in `Disconnected`
-/// or `AuthFailed`.
+/// `Connecting → Authenticating → Connected`. If it drops, from any of those,
+/// it goes to `Reconnecting` and starts over with `Connecting`. It ends only
+/// in `Disconnected` (the game closed it) or `AuthFailed`.
+///
+/// The server drops a client that falls 1024 events behind
+/// (`backend/src/ws/connection.rs`, the `Err(_)` arm of the event loop)
+/// without a Close frame. That arrives here as an ordinary drop.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionState {
     Connecting,
@@ -128,11 +148,21 @@ pub enum ConnectionState {
     Connected {
         player_id: Uuid,
     },
-    /// The session ended. Retrying may help.
+    /// The session dropped, and the next attempt starts after `delay`.
+    /// `attempt` counts from 1, and resets once a session stays up for
+    /// [`NetConfig::reconnect_max`].
+    Reconnecting {
+        attempt: u32,
+        delay: Duration,
+        reason: String,
+    },
+    /// The game closed the session (`disconnect`, a new `connect`, or
+    /// dropping `Net`). Nothing is retried.
     Disconnected {
         reason: String,
     },
-    /// The server rejected the token. Retrying won't help: log in again.
+    /// The server rejected the token: it expired, or the account logged in
+    /// somewhere else. Nothing is retried: log in again.
     AuthFailed {
         message: String,
     },

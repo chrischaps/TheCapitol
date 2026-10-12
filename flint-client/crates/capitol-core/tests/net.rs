@@ -4,6 +4,7 @@
 //! frames, silence) to prove the client survives it.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,16 @@ enum Scenario {
     GoesSilent,
     /// Accepts the socket and never answers `auth`.
     NeverAnswers,
+    /// Hangs up without a Close frame straight after `subscribed`, the way
+    /// the backend cuts a client that falls 1024 events behind. Only the
+    /// first `times` connections; after that it's `Normal`.
+    DropsAfterSubscribe { times: usize },
+    /// The first connection is dropped after `subscribed`. Every later one
+    /// is refused with `Session expired`, as if the account logged in
+    /// somewhere else meanwhile.
+    RevokedWhileAway,
+    /// The first `auth` gets `Database error: …`, the rest succeed.
+    DatabaseHiccup,
 }
 
 #[derive(Clone)]
@@ -39,6 +50,8 @@ struct Mock {
     /// What the server received on the socket, in order: raw JSON text,
     /// `"ping"` or `"close"`.
     log: Arc<Mutex<Vec<String>>>,
+    /// WebSocket connections accepted so far.
+    connections: Arc<AtomicUsize>,
 }
 
 impl Mock {
@@ -46,6 +59,7 @@ impl Mock {
         let mock = Mock {
             scenario,
             log: Arc::default(),
+            connections: Arc::default(),
         };
         let app = Router::new()
             .route("/auth/login", post(login))
@@ -134,10 +148,23 @@ async fn send(socket: &mut WebSocket, message: &ServerMessage) {
 }
 
 async fn serve_socket(mut socket: WebSocket, mock: Mock) {
+    let connection = mock.connections.fetch_add(1, Ordering::SeqCst);
     if let Scenario::NeverAnswers = mock.scenario {
         tokio::time::sleep(Duration::from_secs(30)).await;
         return;
     }
+    let refusal = match mock.scenario {
+        Scenario::RevokedWhileAway if connection > 0 => Some("Session expired"),
+        Scenario::DatabaseHiccup if connection == 0 => {
+            Some("Database error: pool timed out while waiting for an open connection")
+        }
+        _ => None,
+    };
+    let drops_after_subscribe = match mock.scenario {
+        Scenario::DropsAfterSubscribe { times } => connection < times,
+        Scenario::RevokedWhileAway => connection == 0,
+        _ => false,
+    };
     while let Some(Ok(frame)) = socket.recv().await {
         let text = match frame {
             Message::Text(text) => text.to_string(),
@@ -153,6 +180,11 @@ async fn serve_socket(mut socket: WebSocket, mock: Mock) {
         };
         mock.log.lock().unwrap().push(text.clone());
         match serde_json::from_str::<ClientMessage>(&text) {
+            Ok(ClientMessage::Auth { .. }) if refusal.is_some() => {
+                let message = refusal.unwrap().into();
+                send(&mut socket, &ServerMessage::AuthError { message }).await;
+                return;
+            }
             Ok(ClientMessage::Auth { token }) if token == GOOD_TOKEN => {
                 send(&mut socket, &ServerMessage::AuthOk { player_id: PLAYER }).await;
             }
@@ -168,6 +200,9 @@ async fn serve_socket(mut socket: WebSocket, mock: Mock) {
             }
             Ok(ClientMessage::Subscribe { channel }) => {
                 send(&mut socket, &ServerMessage::Subscribed { channel }).await;
+                if drops_after_subscribe {
+                    return;
+                }
                 if let Scenario::GoesSilent = mock.scenario {
                     tokio::time::sleep(Duration::from_secs(30)).await;
                     return;
@@ -196,6 +231,28 @@ fn config(addr: SocketAddr) -> NetConfig {
     NetConfig::with_base_url(format!("http://{addr}"))
 }
 
+/// A server that accepts TCP and hangs up straight away. A refused port
+/// would do, but Windows takes about 2 s to report each refusal.
+fn hangs_up_at_once() -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            drop(stream);
+        }
+    });
+    addr
+}
+
+/// Reconnects quickly, so tests don't wait on the real backoff.
+fn quick_reconnect(addr: SocketAddr) -> NetConfig {
+    NetConfig {
+        reconnect_initial: Duration::from_millis(20),
+        reconnect_max: Duration::from_millis(200),
+        ..config(addr)
+    }
+}
+
 /// Collects events until `done` matches one, and returns them all.
 fn wait_for(net: &Net, what: &str, done: impl Fn(&NetEvent) -> bool) -> Vec<NetEvent> {
     let start = Instant::now();
@@ -218,6 +275,33 @@ fn is_connected(event: &NetEvent) -> bool {
         event,
         NetEvent::Connection(ConnectionState::Connected { .. })
     )
+}
+
+fn is_reconnecting(event: &NetEvent) -> bool {
+    matches!(
+        event,
+        NetEvent::Connection(ConnectionState::Reconnecting { .. })
+    )
+}
+
+/// The reason given by the first `Reconnecting` in `events`.
+fn reconnect_reason(events: &[NetEvent]) -> &str {
+    events
+        .iter()
+        .find_map(|e| match e {
+            NetEvent::Connection(ConnectionState::Reconnecting { reason, .. }) => {
+                Some(reason.as_str())
+            }
+            _ => None,
+        })
+        .expect("a Reconnecting event")
+}
+
+/// Asserts nothing more arrives for a while: no retry, no stray event.
+fn assert_quiet(net: &Net, for_: Duration) {
+    if let Some(event) = net.recv_timeout(for_) {
+        panic!("expected silence, got {event:?}");
+    }
 }
 
 fn states(events: &[NetEvent]) -> Vec<ConnectionState> {
@@ -342,7 +426,7 @@ fn messages_sent_during_the_handshake_wait_for_subscribe() {
 #[test]
 fn a_rejected_token_ends_in_auth_failed() {
     let (mock, addr) = Mock::start(Scenario::Normal);
-    let net = Net::spawn(config(addr)).unwrap();
+    let net = Net::spawn(quick_reconnect(addr)).unwrap();
     net.connect("stale-token");
 
     let events = wait_for(&net, "AuthFailed", |e| {
@@ -354,13 +438,16 @@ fn a_rejected_token_ends_in_auth_failed() {
             message: "Invalid token".into()
         })
     );
-    // No subscribe after a failed auth.
+    // No subscribe after a failed auth, and no second attempt, even though
+    // a retry would have come after 20 ms.
+    assert_quiet(&net, Duration::from_millis(300));
     assert_eq!(
         mock.received(),
         [ClientMessage::Auth {
             token: "stale-token".into()
         }]
     );
+    assert_eq!(mock.connections.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -373,18 +460,8 @@ fn a_silent_handshake_times_out() {
     .unwrap();
     net.connect(GOOD_TOKEN);
 
-    let events = wait_for(&net, "Disconnected", |e| {
-        matches!(
-            e,
-            NetEvent::Connection(ConnectionState::Disconnected { .. })
-        )
-    });
-    assert_eq!(
-        states(&events).last(),
-        Some(&ConnectionState::Disconnected {
-            reason: "handshake timed out".into()
-        })
-    );
+    let events = wait_for(&net, "Reconnecting", is_reconnecting);
+    assert_eq!(reconnect_reason(&events), "handshake timed out");
 }
 
 #[test]
@@ -406,19 +483,9 @@ fn pings_keep_flowing_and_a_silent_server_is_dropped() {
     let (_mock, addr) = Mock::start(Scenario::GoesSilent);
     let net = Net::spawn(fast(addr)).unwrap();
     net.connect(GOOD_TOKEN);
-    let events = wait_for(&net, "Disconnected", |e| {
-        matches!(
-            e,
-            NetEvent::Connection(ConnectionState::Disconnected { .. })
-        )
-    });
+    let events = wait_for(&net, "Reconnecting", is_reconnecting);
     assert!(states(&events).contains(&ConnectionState::Connected { player_id: PLAYER }));
-    assert_eq!(
-        states(&events).last(),
-        Some(&ConnectionState::Disconnected {
-            reason: "server stopped responding".into()
-        })
-    );
+    assert_eq!(reconnect_reason(&events), "server stopped responding");
 }
 
 #[test]
@@ -543,13 +610,9 @@ fn unreachable_servers_report_rather_than_hang() {
     ));
 
     net.connect(GOOD_TOKEN);
-    let events = wait_for(&net, "Disconnected", |e| {
-        matches!(
-            e,
-            NetEvent::Connection(ConnectionState::Disconnected { .. })
-        )
-    });
+    let events = wait_for(&net, "Reconnecting", is_reconnecting);
     assert_eq!(states(&events)[0], ConnectionState::Connecting);
+    assert!(reconnect_reason(&events).starts_with("could not connect"));
 }
 
 #[test]
@@ -567,4 +630,157 @@ fn dropping_net_closes_the_socket_and_joins() {
         start.elapsed()
     );
     mock.wait_until("close", |log| log.iter().any(|t| t == "close"));
+}
+
+#[test]
+fn a_dropped_connection_reconnects_reauths_resubscribes_and_resyncs() {
+    let (mock, addr) = Mock::start(Scenario::DropsAfterSubscribe { times: 1 });
+    let net = Net::spawn(quick_reconnect(addr)).unwrap();
+    net.connect(GOOD_TOKEN);
+
+    let first = wait_for(&net, "Connected", is_connected);
+    assert!(!first.contains(&NetEvent::Resync), "nothing to resync yet");
+    let events = wait_for(&net, "Resync", |e| *e == NetEvent::Resync);
+    let states = states(&events);
+    assert!(
+        matches!(
+            states[..],
+            [
+                ConnectionState::Reconnecting { attempt: 1, .. },
+                ConnectionState::Connecting,
+                ConnectionState::Authenticating,
+                ConnectionState::Connected { player_id: PLAYER },
+            ]
+        ),
+        "{states:#?}"
+    );
+    // Resync comes straight after the second Connected.
+    assert!(matches!(
+        events[events.len() - 2..],
+        [
+            NetEvent::Connection(ConnectionState::Connected { .. }),
+            NetEvent::Resync
+        ]
+    ));
+
+    let handshake = [
+        ClientMessage::Auth {
+            token: GOOD_TOKEN.into(),
+        },
+        ClientMessage::Subscribe {
+            channel: "position".into(),
+        },
+    ];
+    assert_eq!(mock.received(), [handshake.clone(), handshake].concat());
+
+    // And the new session works.
+    net.ws(ClientMessage::Move {
+        x: 4100.0,
+        y: 3900.0,
+    });
+    wait_for(&net, "positions", |e| {
+        matches!(e, NetEvent::Ws(ServerMessage::Positions { .. }))
+    });
+}
+
+#[test]
+fn backoff_grows_while_the_server_is_down() {
+    let addr = hangs_up_at_once();
+    let net = Net::spawn(NetConfig {
+        reconnect_initial: Duration::from_millis(10),
+        reconnect_max: Duration::from_millis(40),
+        ..config(addr)
+    })
+    .unwrap();
+    net.connect(GOOD_TOKEN);
+
+    let mut waits = Vec::new();
+    while waits.len() < 5 {
+        let events = wait_for(&net, "Reconnecting", is_reconnecting);
+        if let Some(NetEvent::Connection(ConnectionState::Reconnecting {
+            attempt, delay, ..
+        })) = events.last()
+        {
+            waits.push((*attempt, *delay));
+        }
+    }
+    let nominal_ms = [10, 20, 40, 40, 40];
+    for (i, (attempt, delay)) in waits.iter().enumerate() {
+        assert_eq!(*attempt as usize, i + 1);
+        let nominal = Duration::from_millis(nominal_ms[i]);
+        assert!(
+            *delay <= nominal && *delay >= nominal.mul_f64(0.8),
+            "attempt {attempt} waited {delay:?}, expected about {nominal:?}"
+        );
+    }
+}
+
+#[test]
+fn a_token_revoked_while_away_ends_in_auth_failed() {
+    let (mock, addr) = Mock::start(Scenario::RevokedWhileAway);
+    let net = Net::spawn(quick_reconnect(addr)).unwrap();
+    net.connect(GOOD_TOKEN);
+    wait_for(&net, "Connected", is_connected);
+
+    let events = wait_for(&net, "AuthFailed", |e| {
+        matches!(e, NetEvent::Connection(ConnectionState::AuthFailed { .. }))
+    });
+    assert_eq!(
+        states(&events).last(),
+        Some(&ConnectionState::AuthFailed {
+            message: "Session expired".into()
+        })
+    );
+    assert_quiet(&net, Duration::from_millis(300));
+    assert_eq!(mock.connections.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_database_hiccup_during_auth_is_retried() {
+    let (_mock, addr) = Mock::start(Scenario::DatabaseHiccup);
+    let net = Net::spawn(quick_reconnect(addr)).unwrap();
+    net.connect(GOOD_TOKEN);
+
+    let events = wait_for(&net, "Connected", is_connected);
+    assert!(reconnect_reason(&events).starts_with("auth_error: Database error"));
+    assert!(!states(&events)
+        .iter()
+        .any(|s| matches!(s, ConnectionState::AuthFailed { .. })));
+    // The first connection never went live, so there's nothing to resync.
+    // A Resync would land before the `player_left` the mock sends next.
+    let events = wait_for(&net, "player_left", |e| {
+        matches!(e, NetEvent::Ws(ServerMessage::PlayerLeft { .. }))
+    });
+    assert!(!events.contains(&NetEvent::Resync));
+}
+
+#[test]
+fn disconnect_during_backoff_stops_retrying() {
+    let addr = hangs_up_at_once();
+    let net = Net::spawn(NetConfig {
+        reconnect_initial: Duration::from_secs(30),
+        ..config(addr)
+    })
+    .unwrap();
+    net.connect(GOOD_TOKEN);
+    wait_for(&net, "Reconnecting", is_reconnecting);
+
+    // Sent while waiting to reconnect: dropped, not queued.
+    net.ws(ClientMessage::Move { x: 1.0, y: 1.0 });
+    let start = Instant::now();
+    net.disconnect();
+    let events = wait_for(&net, "Disconnected", |e| {
+        matches!(
+            e,
+            NetEvent::Connection(ConnectionState::Disconnected { .. })
+        )
+    });
+    assert!(start.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        states(&events),
+        [ConnectionState::Disconnected {
+            reason: "closed by client".into()
+        }]
+    );
+    assert_quiet(&net, Duration::from_millis(200));
 }
