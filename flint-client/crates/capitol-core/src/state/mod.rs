@@ -22,7 +22,7 @@
 //!
 //! **Facts, not requests.** The store never decides what to refetch. It emits
 //! [`StateEvent::SnapshotStale`], [`StateEvent::InventoryChanged`] and so on, and
-//! the polling scheduler (P2.4) turns those into REST calls.
+//! the polling scheduler ([`crate::poll::Poller`]) turns those into REST calls.
 //!
 //! Make a new `GameState` for each login. It assumes one local player.
 

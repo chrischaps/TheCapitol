@@ -7,16 +7,17 @@
 //!
 //! `CAPITOL_SERVER` overrides the default `http://localhost:3000`.
 
-use std::collections::HashSet;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use capitol_core::net::*;
-use capitol_core::protocol::rest::{ListPlotsQuery, LoginRequest, RegisterRequest};
+use capitol_core::poll::{Fetch, Poller};
+use capitol_core::protocol::rest::{LoginRequest, RegisterRequest};
 use capitol_core::protocol::rules;
 use capitol_core::protocol::ws::{ClientMessage, ServerMessage};
 use capitol_core::state::{GameState, StateEvent};
 
 const WAIT: Duration = Duration::from_secs(10);
+const FRAME: Duration = Duration::from_millis(16);
 
 fn net() -> Net {
     let base = std::env::var("CAPITOL_SERVER").unwrap_or_else(|_| "http://localhost:3000".into());
@@ -153,25 +154,19 @@ fn register_login_connect_and_move() {
     wait_for(&net, "logout", |e| matches!(e, NetEvent::Rest(7, Ok(_))));
 }
 
-/// A live session fed through the store, doing the refetches P2.4 will own.
+/// A live session wired the way the game wires it: the store applies each
+/// event and the poller turns the results into refetches.
 struct Mirror {
     net: Net,
     state: GameState,
-    next_tag: Tag,
-    /// REST calls not yet answered.
-    outstanding: HashSet<Tag>,
+    poller: Poller,
+    /// Everything the poller sent, for the assertions.
+    fetched: Vec<Fetch>,
 }
 
 impl Mirror {
-    fn send(&mut self, request: RestRequest) {
-        self.next_tag += 1;
-        self.outstanding.insert(self.next_tag);
-        self.net.rest(request, self.next_tag);
-    }
-
-    /// Applies events until `done` holds and every REST call has been answered,
-    /// answering `SnapshotStale` and `InventoryChanged` with refetches. Returns
-    /// the events seen.
+    /// Applies events until `done` holds and the poller has nothing queued or
+    /// in flight. Returns the events seen.
     fn pump_until(
         &mut self,
         what: &str,
@@ -180,38 +175,20 @@ impl Mirror {
         let start = Instant::now();
         let mut seen = Vec::new();
         while let Some(remaining) = WAIT.checked_sub(start.elapsed()) {
-            let Some(event) = self.net.recv_timeout(remaining) else {
-                break;
-            };
-            if let NetEvent::Rest(tag, result) = &event {
-                if let Err(e) = result {
+            // Short waits stand in for frames, so the poller's timer runs.
+            if let Some(event) = self.net.recv_timeout(remaining.min(FRAME)) {
+                if let NetEvent::Rest(_, Err(e)) = &event {
                     panic!("REST failed while waiting for {what}: {e}");
                 }
-                self.outstanding.remove(tag);
+                let changes = self.state.apply(&event);
+                self.poller.observe(&event, &changes, &self.state);
+                seen.extend(changes);
             }
-            for change in self.state.apply(&event) {
-                match &change {
-                    StateEvent::SnapshotStale => {
-                        for request in [
-                            RestRequest::Containers,
-                            RestRequest::WorldNearby,
-                            RestRequest::NearbyStations,
-                            RestRequest::PlayerCurrency,
-                            RestRequest::ListPlots(ListPlotsQuery {
-                                limit: Some(100),
-                                ..Default::default()
-                            }),
-                            RestRequest::Recipes,
-                        ] {
-                            self.send(request);
-                        }
-                    }
-                    StateEvent::InventoryChanged { .. } => self.send(RestRequest::Containers),
-                    _ => {}
-                }
-                seen.push(change);
+            for (request, tag) in self.poller.tick(Instant::now()) {
+                self.fetched.push(self.poller.in_flight(tag).unwrap());
+                self.net.rest(request, tag);
             }
-            if self.outstanding.is_empty() && done(&self.state, &seen) {
+            if self.poller.is_idle() && done(&self.state, &seen) {
                 return seen;
             }
         }
@@ -244,8 +221,8 @@ fn the_store_mirrors_a_real_session() {
     let mut mirror = Mirror {
         net,
         state: GameState::new(),
-        next_tag: 100,
-        outstanding: HashSet::new(),
+        poller: Poller::new(),
+        fetched: Vec::new(),
     };
     mirror.net.connect(auth.token.clone());
 
@@ -258,6 +235,7 @@ fn the_store_mirrors_a_real_session() {
             && s.zone().is_some()
     });
     let state = &mirror.state;
+    assert_eq!(mirror.fetched, Fetch::SNAPSHOT, "the snapshot, once each");
     assert_eq!(state.me(), Some(auth.player_id));
     assert_eq!(state.local_player().unwrap().name, name);
     assert!(state.crafting_input().is_some() && state.crafting_output().is_some());
@@ -293,6 +271,7 @@ fn the_store_mirrors_a_real_session() {
         let p = s.local_player().unwrap();
         ((p.x - node.x).powi(2) + (p.y - node.y).powi(2)).sqrt() < rules::EXTRACTION_RANGE - 5.0
     });
+    mirror.fetched.clear();
     mirror.net.ws(ClientMessage::Extract {
         node_id: node.id.to_string(),
     });
@@ -308,6 +287,12 @@ fn the_store_mirrors_a_real_session() {
         s.inventory()
             .is_some_and(|inv| inv.items().any(|i| i.item_type == "fiber"))
     });
+
+    assert!(
+        mirror.fetched.contains(&Fetch::Containers),
+        "{:?}",
+        mirror.fetched
+    );
 
     mirror.net.disconnect();
 }
