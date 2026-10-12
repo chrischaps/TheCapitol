@@ -202,6 +202,25 @@ H1–H5 are needed for the vertical slice. H6 belongs to P8.
 - **Input routing** (`player_app/egui_input.rs`). With any extension installed, or any debug panel open, every window event goes to egui first. Keys and IME are consumed while an egui widget has keyboard focus. Pointer events follow egui-winit: buttons and the wheel over an egui area, and motion while egui owns a drag. Unlike egui-winit, Tab isn't consumed when nothing is focused. **A release follows its press**, so a key or button never sticks down on either side when focus moves mid-press. Escape while a text field is focused unfocuses the field instead of quitting.
 - **For the Capitol.** Draw panels with `Window`/`Area` or side and top panels, never `CentralPanel`, because it covers the window and takes every click. The inscription window in `capitol-client/src/ui.rs` uses the §4.3 tokens and is the template for the P4/P5 panels.
 
+**How H4 was built (P1.4).**
+- **Lifecycle.** Most of it already existed, because `load_procedural_mesh` replaces a mesh uploaded under the same name. The new pieces:
+  - `SceneRenderer::remove_mesh(name)`.
+  - `ExtensionGpu::upload_mesh` and `ExtensionGpu::remove_mesh`.
+  - `ExtensionCtx::attach_mesh(entity, name)`, which merges `{ asset = name, runtime = true }` into the entity's `model`.
+- **Leaks.** Draw lists hold `Arc` clones of a mesh's buffers. A replaced or removed mesh's buffers are therefore freed at the next `update_from_world`. The per-entity bind cache (`e1aa69d`) holds only transform and material resources, and drops stale entries every frame. Measured in `flint-render/tests/runtime_mesh.rs`: across 1,000 replacements the application held 26 buffers before and after. On DX12 the allocator held 55,967,744 bytes before and after.
+- **`model.runtime = true`** marks a scene model as uploaded by code, and the model loader skips it. This settles the spike's "Model file not found" question. Entities that the extension spawns or attaches don't need the flag in a scene, though `attach_mesh` sets it anyway.
+- **Vertex colours.** The material path already supported them (`use_vertex_color`). H4 adds two helpers: `ImportedMaterial::vertex_colored(name)` and `flint_render::srgb_to_linear` (vertex colours are linear). The hook takes `flint_render::Vertex`. `flint-procgen`'s `MeshBuilder` vertices have no colour field, so P3 builds `Vertex` lists directly. The spike's `MeshBuf::annulus` in `spike_world.rs` is the starting point.
+- **Culling.**
+  - Every `GpuMesh` gets a local AABB at upload, on all upload paths, imported glTF meshes included.
+  - Each opaque and transparent model draw carries its world AABB (Arvo's method).
+  - `render_to` sets aside draws outside the camera frustum after the shadow pass, and gives them another chance at the next `render_to`.
+  - The shadow pass culls the same draws against each cascade's frustum.
+  - `RenderStats::culled_draws` counts them, and F2 shows `Entities: N (M culled)`.
+  - Skinned meshes, wireframes and `bounds` boxes aren't culled.
+  - The culling applies to every Flint game, so P1.6's ADR should cover it.
+- **For the Capitol (P3).** Cull by sector: a mesh is culled whole, so one mesh for the whole city never culls. P3.6 already plans for this with plot sectors.
+- **Client.** `CapitolExtension::pre_update` uploads the spike's ground and markers once, and rebuilds the water every frame with a slow twelve-second tide. The tide exercises replacement in the live client. `scenes/spike.scene.toml` declares the meshes with `runtime = true`. Over a 30 s live run, private memory held at about 588 MB.
+
 ### 4.5 Networking and state (`capitol-core`)
 
 - **IO thread.** A tokio runtime runs on one background thread, with `reqwest` (rustls) for REST and `tokio-tungstenite` for the WebSocket. The game loop talks to it over two `std::sync::mpsc` channels. `Command` goes in: `Ws(ClientMessage)` or `Rest(RestRequest, tag)`. `NetEvent` comes out: `Ws(ServerMessage)`, `Rest(tag, Result<…>)` or `Connection(state)`. The game drains the inbound channel once per frame in `pre_update`.

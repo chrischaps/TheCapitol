@@ -1,8 +1,9 @@
 # The P0.4 spike, carried on master against the real hooks. Dusk sky,
 # lights and one script; the HUD reads the inscription through the native
-# Rhai function the CapitolExtension registers. The runtime meshes (moat,
-# canals, zone-tinted ground) return with H4 in P1.4. Superseded by
-# scenes/capitol.scene.toml in P3.
+# Rhai function the CapitolExtension registers. The moat, canals and
+# zone-tinted ground are runtime meshes the extension uploads
+# (spike_world.rs), named below with `runtime = true` so the model loader
+# doesn't look for files. Superseded by scenes/capitol.scene.toml in P3.
 
 [scene]
 name = "The Capitol (spike)"
@@ -37,6 +38,22 @@ type = "directional"
 direction = [-0.5, 0.6, -0.4]
 color = [0.55, 0.62, 0.95]
 intensity = 0.5
+
+[entities.ground.model]
+asset = "spike_ground"
+runtime = true
+
+[entities.water.model]
+asset = "spike_water"
+runtime = true
+
+[entities.marker_east.model]
+asset = "spike_marker_east"
+runtime = true
+
+[entities.marker_north.model]
+asset = "spike_marker_north"
+runtime = true
 
 [entities.spike.script]
 source = "spike.rhai"

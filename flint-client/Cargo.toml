@@ -16,6 +16,7 @@ authors = ["Chris"]
 # Engine crates, by path into the subtree. Add more as the client needs them.
 flint-core = { path = "engine/crates/flint-core" }
 flint-ecs = { path = "engine/crates/flint-ecs" }
+flint-import = { path = "engine/crates/flint-import" }
 flint-script = { path = "engine/crates/flint-script" }
 flint-player = { path = "engine/crates/flint-player" }
 flint-render = { path = "engine/crates/flint-render" }

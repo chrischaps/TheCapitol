@@ -1,8 +1,8 @@
 // The P0.4 spike on master. Camera: south of the Capitol looking north, so
-// east is on the right. Until the runtime meshes return (P1.4) the moat and
-// inner canal are traced in the air as hairlines, a plan of the city drawn
-// before it's built, and the inscription comes from Rust through
-// cap_spike_note(), which CapitolExtension registers.
+// east is on the right. The ground and water are runtime meshes the
+// extension builds (P1.4); over them the moat and inner canal are traced
+// as hairlines, the plan the city was drawn from. The inscription comes
+// from Rust through cap_spike_note(), which CapitolExtension registers.
 //
 // Two inputs test the game egui layer (P1.3). E ("interact") shows and
 // hides the plan; typing an e in the inscription box must not. A left
