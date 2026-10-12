@@ -1,6 +1,7 @@
 // The P0.4 spike on master. Camera: south of the Capitol looking north, so
 // east is on the right. `--view` picks the framing until the camera rig
-// (P3.9): street (a slow drift), district, or map (straight down). The ground and water are runtime meshes the
+// (P3.9): street (a slow drift), district, map (straight down), or bridge
+// (close over a canal crossing). The ground and water are runtime meshes the
 // extension builds (P1.4); over them the moat and inner canal are traced
 // as hairlines, the plan the city was drawn from. The inscription comes
 // from Rust through cap_spike_note(), which CapitolExtension registers.
@@ -29,6 +30,11 @@ fn on_update() {
         // so the look-at keeps north at the top of the screen.
         set_camera_position(0.0, 620.0, 1.0);
         set_camera_target(0.0, 0.0, 0.0);
+    } else if view == "bridge" {
+        // Close over the inner canal's south crossing (server angle 90),
+        // from the land outside it: the water, its kerbs and the gap.
+        set_camera_position(9.0, 9.0, 80.0);
+        set_camera_target(0.0, 0.0, 61.0);
     } else if view == "district" {
         set_camera_position(0.0, 260.0, 300.0);
         set_camera_target(0.0, 0.0, 30.0);

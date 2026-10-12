@@ -18,8 +18,14 @@ use capitol_protocol::rules::{CENTER_X, CENTER_Y};
 pub const S: f32 = 0.1;
 
 /// Heights of the flat layers in metres (plan §4.6). Everything flat lies
-/// a hair above the layer under it so nothing z-fights. Water (P3.3) and
-/// bridge decks (P3.5) find their places in this list when they land.
+/// a hair above the layer under it so nothing z-fights. Bridge decks (P3.5)
+/// find their place in this list when they land, above `BANK`.
+///
+/// The water sits *above* the roads: a canal is a stone-kerbed channel,
+/// its bed and surface raised a little inside banks that stand higher
+/// still, so from any height you look over the kerb into the water. Steps
+/// here are at least 6 cm, which the depth buffer resolves from the map
+/// view (plan §4.6). Roads should stop at the bank, not run under it.
 #[allow(dead_code)] // PLOT and road() wait for plots (P3.6) and roads (P3.4)
 pub mod layer {
     use capitol_protocol::terrain::RoadType;
@@ -40,6 +46,13 @@ pub mod layer {
         };
         ROAD + rank * 0.005
     }
+
+    /// The canal bed under the water, seen through it.
+    pub const WATER_BED: f32 = 0.08;
+    /// The water's surface.
+    pub const WATER: f32 = 0.16;
+    /// The top of the stone kerb that rims every stretch of water.
+    pub const BANK: f32 = 0.30;
 }
 
 /// Server (x, y) to world (X, Z) on the ground plane.
@@ -103,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn layers_stack_ground_plots_then_roads_by_rank() {
+    fn layers_stack_ground_plots_roads_by_rank_then_water() {
         use capitol_protocol::terrain::RoadType;
         let roads = [
             RoadType::Trail,
@@ -114,6 +127,8 @@ mod tests {
         .map(layer::road);
         assert!(layer::GROUND < layer::PLOT && layer::PLOT < roads[0]);
         assert!(roads.windows(2).all(|w| w[0] < w[1]));
+        assert!(roads[3] < layer::WATER_BED);
+        const { assert!(layer::WATER_BED < layer::WATER && layer::WATER < layer::BANK) };
     }
 
     #[test]

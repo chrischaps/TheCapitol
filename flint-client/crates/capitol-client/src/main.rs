@@ -41,8 +41,9 @@ struct Args {
     offline: Option<PathBuf>,
 
     /// Where the camera looks from, until the camera rig (P3.9) lands:
-    /// street (the spike's drift), district, or map (straight down)
-    #[arg(long, default_value = "street", value_parser = ["street", "district", "map"])]
+    /// street (the spike's drift), district, map (straight down), or
+    /// bridge (close, over the inner canal's south crossing)
+    #[arg(long, default_value = "street", value_parser = ["street", "district", "map", "bridge"])]
     view: String,
 
     #[arg(long, default_value_t = 1280)]
