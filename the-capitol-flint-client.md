@@ -161,7 +161,7 @@ World-attached HUD (name labels, extraction and crafting rings, the targeting li
 
 ### 4.4 Engine hooks (upstream to Flint)
 
-These go to Flint on a `feature/*` branch and PR, following the subtree conventions (vault: *Git Subtree Branch Conventions*). Each one gets an ADR (next free number is 0071) and a page in the Flint book. Each is general enough that any Flint game could use it.
+These go to Flint on a `feature/*` branch and PR, following the subtree conventions (vault: *Git Subtree Branch Conventions*). Each one gets an ADR and a page in the Flint book. H1–H5 are ADRs 0071–0075. Flint's ADRs live in `C:\Users\chris\dev\Starchild\docs\adr\`, not in the Flint repo, and the next free number is 0076. Each is general enough that any Flint game could use it.
 
 | ID | Hook | Shape | Size |
 |---|---|---|---|
@@ -230,6 +230,12 @@ H1–H5 are needed for the vertical slice. H6 belongs to P8.
 - **Timing.** Scripts' camera matrix is now refreshed after the script camera overrides are applied and before `on_draw_ui` (`flint-player` `frame.rs`). So in `on_draw_ui`, `world_to_screen` and `screen_to_ground` use exactly the camera the frame renders with. Before this, HUD overlays trailed the world by one frame of camera motion. `on_update` still sees the previous frame's camera, because it runs before the script moves it. Pick in `on_update` (a click is a state change there), and draw reticles in `on_draw_ui`.
 - **Client.** `spike.rhai` lays a gold reticle on the ground under the cursor, drawn in world space and foreshortened by the view. A click leaves its ripple on the ground rather than on the screen. A probe capture checked that the script's picking agrees with the rendered meshes. Fixed screen points, plus the projected moat south bridge `(0, 20)` and canal east bridge `(60, 0)`, came back centred on their crosshairs and on the water meshes, at this machine's 1.25 display scale.
 - **For P4.3 (click to move).** `screen_to_ground(mouse_x(), mouse_y(), 0.0)`, then `coords::to_server`. For P6 plot picking, do the same, then point-in-polygon on the lot.
+
+**How H1–H5 went upstream (P1.6).**
+- **ADRs.** 0071 `PlayerExtension`, 0072 `on_event` and `fire_event`, 0073 game egui layer and input routing (including the debug panels' move to Foreground), 0074 runtime meshes and frustum culling, 0075 `screen_to_ground`, the overhead view basis and the script camera refresh. They're committed in Starchild's `docs/adr/`. The engine cites 0068–0070 but has no files for them, and they kept their numbers.
+- **Book.** A new guide, *Player Extensions* (`docs/book/src/guides/player-extensions.md`), covers the game binary, the four hooks, the frame order, events, meshes, egui layering and input routing. It's linked from *Building a Game Project* and from the roadmap's plugin-system item. The engine CLAUDE.md has a one-line summary. `tools/docs-check/check.py` reports no drift. It isn't in `flint/main` yet (it's uncommitted in Chris's Flint checkout), so it was run from a temporary copy.
+- **Engine comments** cite the ADR numbers instead of the Capitol's H1–H5 labels.
+- **Commit messages.** The split carried `Closes #5`…`#9`, which would point at unrelated Flint issues, so the pushed branch rewrites them to `Part of chrischaps/TheCapitol#N`. The content is the same, so the post-merge `subtree pull --squash` doesn't care.
 
 ### 4.5 Networking and state (`capitol-core`)
 
