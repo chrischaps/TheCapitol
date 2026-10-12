@@ -61,30 +61,30 @@ Each milestone builds on the previous. Do not skip ahead.
 ### Deliverables
 
 #### Backend
-- [ ] Rust project initialized with Cargo workspace
-- [ ] Axum web server running on configurable port
-- [ ] PostgreSQL connection pool (sqlx)
-- [ ] Redis connection
-- [ ] Health check endpoint: `GET /health`
-- [ ] Basic error handling middleware
-- [ ] Environment configuration (.env support)
-- [ ] Logging setup (tracing)
+- [x] Rust project initialized with Cargo workspace
+- [x] Axum web server running on configurable port
+- [x] PostgreSQL connection pool (sqlx)
+- [x] Redis connection
+- [x] Health check endpoint: `GET /health`
+- [x] Basic error handling middleware
+- [x] Environment configuration (.env support)
+- [x] Logging setup (tracing)
 
 #### Database
-- [ ] Docker Compose for local PostgreSQL and Redis
-- [ ] Migration system setup (sqlx-cli or refinery)
-- [ ] Initial migration: `accounts` and `players` tables (see TDD Section 5.3)
+- [x] Docker Compose for local PostgreSQL and Redis
+- [x] Migration system setup (sqlx-cli or refinery)
+- [x] Initial migration: `accounts` and `players` tables (see TDD Section 5.3)
 
 #### Client
-- [ ] React app initialized (Vite + TypeScript)
-- [ ] Basic routing setup
-- [ ] Environment configuration
-- [ ] Placeholder pages: Login, Game
+- [x] React app initialized (Vite + TypeScript)
+- [x] Basic routing setup
+- [x] Environment configuration
+- [x] Placeholder pages: Login, Game
 
 #### DevOps
-- [ ] Git repository initialized
-- [ ] README with setup instructions
-- [ ] Scripts for local development (`cargo run`, `npm run dev`)
+- [x] Git repository initialized
+- [x] README with setup instructions
+- [x] Scripts for local development (`cargo run`, `npm run dev`)
 
 ### Acceptance Criteria
 - `cargo run` starts the backend server
@@ -108,52 +108,52 @@ Each milestone builds on the previous. Do not skip ahead.
 ### Deliverables
 
 #### Backend - Auth
-- [ ] `POST /auth/register` - Create account and player
-- [ ] `POST /auth/login` - Authenticate, return JWT
-- [ ] `POST /auth/logout` - Invalidate session
-- [ ] JWT validation middleware
-- [ ] Password hashing with Argon2id
-- [ ] Session storage in Redis
+- [x] `POST /auth/register` - Create account and player
+- [x] `POST /auth/login` - Authenticate, return JWT
+- [x] `POST /auth/logout` - Invalidate session
+- [x] JWT validation middleware
+- [x] Password hashing with Argon2id
+- [x] Session storage in Redis
 
 #### Backend - Tick Engine (Basic)
-- [ ] Tick loop running at 100ms intervals
-- [ ] Tick counter tracking
-- [ ] Command queue (receive commands, process at tick boundary)
-- [ ] In-memory game state structure
-- [ ] Player loading on connect
+- [x] Tick loop running at 100ms intervals
+- [x] Tick counter tracking
+- [x] Command queue (receive commands, process at tick boundary)
+- [x] In-memory game state structure
+- [x] Player loading on connect
 
 #### Backend - Movement
-- [ ] Player position stored (x, y, zone)
-- [ ] `POST /player/move` - Set destination
-- [ ] Movement processing in tick loop
-- [ ] Speed-based position interpolation
-- [ ] Boundary checking (can't walk off world)
+- [x] Player position stored (x, y, zone)
+- [x] `POST /player/move` - Set destination
+- [x] Movement processing in tick loop
+- [x] Speed-based position interpolation
+- [x] Boundary checking (can't walk off world)
 
 #### Backend - WebSocket
-- [ ] WebSocket endpoint: `/ws`
-- [ ] Connection authentication (JWT in handshake)
-- [ ] Subscription system (subscribe to channels)
-- [ ] Position broadcast to nearby players
-- [ ] Heartbeat (ping/pong)
+- [x] WebSocket endpoint: `/ws`
+- [x] Connection authentication (JWT in handshake)
+- [x] Subscription system (subscribe to channels)
+- [x] Position broadcast to nearby players
+- [x] Heartbeat (ping/pong)
 
 #### Database
-- [ ] Migration: Full `players` table with position fields
-- [ ] Player CRUD operations
+- [x] Migration: Full `players` table with position fields
+- [x] Player CRUD operations
 
 #### Client - Auth
-- [ ] Login page with email/password form
-- [ ] Registration page
-- [ ] JWT storage (localStorage or memory)
-- [ ] Auth context/provider
-- [ ] Redirect to game on successful login
+- [x] Login page with email/password form
+- [x] Registration page
+- [x] JWT storage (localStorage or memory)
+- [x] Auth context/provider
+- [x] Redirect to game on successful login
 
 #### Client - Game View
-- [ ] 2D canvas or SVG world view
-- [ ] Player position rendered as marker/sprite
-- [ ] Click-to-move interaction
-- [ ] WebSocket connection on game load
-- [ ] Real-time position updates from server
-- [ ] Other players visible as markers
+- [x] 2D canvas or SVG world view
+- [x] Player position rendered as marker/sprite
+- [x] Click-to-move interaction
+- [x] WebSocket connection on game load
+- [x] Real-time position updates from server
+- [x] Other players visible as markers
 
 ### Acceptance Criteria
 - Can register a new account
@@ -181,48 +181,48 @@ Each milestone builds on the previous. Do not skip ahead.
 ### Deliverables
 
 #### Backend - Resources
-- [ ] `resource_nodes` table and model
-- [ ] `resource_types` static data table
-- [ ] Resource node spawning (seed test area with grass nodes)
-- [ ] Resource node states (available, being_harvested, depleted)
-- [ ] Regeneration system (depleted → available after time)
+- [x] `resource_nodes` table and model
+- [x] `resource_types` static data table
+- [x] Resource node spawning (seed test area with grass nodes)
+- [x] Resource node states (available, being_harvested, depleted)
+- [x] Regeneration system (depleted → available after time)
 
 #### Backend - Items & Inventory
-- [ ] `items` table and model
-- [ ] `item_types` static data table
-- [ ] Item location enum (PlayerInventory, World, etc.)
-- [ ] **Quality system**: each item has quality 0-100
-- [ ] `GET /player/inventory` - List player's items
-- [ ] Inventory capacity (weight-based or slot-based, simple for now)
+- [x] `items` table and model
+- [x] `item_types` static data table
+- [x] Item location enum (PlayerInventory, World, etc.)
+- [x] **Quality system**: each item has quality 0-100
+- [x] `GET /player/inventory` - List player's items
+- [x] Inventory capacity (weight-based or slot-based, simple for now)
 
 #### Backend - Extraction
-- [ ] `POST /world/extract` - Begin extraction from resource node
-- [ ] Player action state (Extracting)
-- [ ] Extraction processing in tick loop
-- [ ] Duration based on resource type
-- [ ] On completion: create item(s), set quality from node + variance
-- [ ] Node depletion after extraction
-- [ ] Hand-gathering (no tool required for grass/fiber)
+- [x] `POST /world/extract` - Begin extraction from resource node
+- [x] Player action state (Extracting)
+- [x] Extraction processing in tick loop
+- [x] Duration based on resource type
+- [x] On completion: create item(s), set quality from node + variance
+- [x] Node depletion after extraction
+- [x] Hand-gathering (no tool required for grass/fiber)
 
 #### Backend - Nearby Query
-- [ ] `GET /world/nearby` - Return entities near player
-- [ ] Spatial query for resource nodes in range
-- [ ] Include node type, position, state
+- [x] `GET /world/nearby` - Return entities near player
+- [x] Spatial query for resource nodes in range
+- [x] Include node type, position, state
 
 #### Client - Resource Display
-- [ ] Render resource nodes on world view
-- [ ] Different appearance by type (grass nodes for now)
-- [ ] Show node state (available vs depleted)
+- [x] Render resource nodes on world view
+- [x] Different appearance by type (grass nodes for now)
+- [x] Show node state (available vs depleted)
 
 #### Client - Extraction Interaction
-- [ ] Click on resource node to begin extraction
-- [ ] Show extraction progress indicator
-- [ ] Feedback on completion (item added notification)
+- [x] Click on resource node to begin extraction
+- [x] Show extraction progress indicator
+- [x] Feedback on completion (item added notification)
 
 #### Client - Inventory UI
-- [ ] Inventory panel/sidebar
-- [ ] List items with type, quantity, quality
-- [ ] Quality displayed as number or simple grade
+- [x] Inventory panel/sidebar
+- [x] List items with type, quantity, quality
+- [x] Quality displayed as number or simple grade
 
 ### Acceptance Criteria
 - World shows grass resource nodes scattered around
@@ -255,44 +255,44 @@ Create static data for:
 ### Deliverables
 
 #### Backend - Recipes
-- [ ] `recipes` static data table
-- [ ] Recipe structure: inputs, outputs, duration, quality weights
-- [ ] Recipe validation (player has required inputs)
-- [ ] `GET /recipes` - List available recipes (or embed in client)
+- [x] `recipes` static data table
+- [x] Recipe structure: inputs, outputs, duration, quality weights
+- [x] Recipe validation (player has required inputs)
+- [x] `GET /recipes` - List available recipes (or embed in client)
 
 #### Backend - Crafting Operations
-- [ ] `POST /world/craft` - Begin crafting operation
-- [ ] Crafting operation model (in-memory during operation)
-- [ ] Player action state (Crafting)
-- [ ] Crafting processing in tick loop
-- [ ] Progress tracking and completion detection
+- [x] `POST /world/craft` - Begin crafting operation *(implemented as WS `StartCrafting` command)*
+- [x] Crafting operation model (in-memory during operation)
+- [x] Player action state (Crafting)
+- [x] Crafting processing in tick loop
+- [x] Progress tracking and completion detection
 
 #### Backend - Quality Cascade (Core)
-- [ ] Quality calculation on craft completion:
+- [ ] Quality calculation on craft completion: *(currently a plain average + variance; recipe weights ignored, see `engine/crafting.rs`)*
   ```
   output_quality = Σ(input_quality × input_weight) + random_variance
   ```
-- [ ] Input items consumed on craft start
-- [ ] Output item created on craft completion
-- [ ] Quality clamped to 0-100
+- [x] Input items consumed on craft start
+- [x] Output item created on craft completion
+- [x] Quality clamped to 0-100
 
 #### Backend - Item Stack Aggregation
-- [ ] Stack view: items of same type in same location grouped
-- [ ] Stack quality = average of constituent items
+- [x] Stack view: items of same type in same location grouped
+- [x] Stack quality = average of constituent items
 - [ ] `POST /items/{id}/split` - Split stack by quantity or quality threshold
-- [ ] `POST /items/{id}/merge` - Merge compatible stacks
+- [ ] `POST /items/{id}/merge` - Merge compatible stacks *(merge only happens implicitly via `/inventory/move`)*
 
 #### Client - Crafting UI
-- [ ] Crafting panel showing available recipes
-- [ ] Recipe shows: inputs needed, output, player's available materials
-- [ ] Select recipe → select input items from inventory
-- [ ] Start craft button
-- [ ] Progress indicator during crafting
-- [ ] Result shown on completion
+- [x] Crafting panel showing available recipes
+- [x] Recipe shows: inputs needed, output, player's available materials
+- [x] Select recipe → select input items from inventory
+- [x] Start craft button
+- [x] Progress indicator during crafting
+- [x] Result shown on completion
 
 #### Client - Inventory Enhancements
-- [ ] Items displayed as stacks (grouped by type)
-- [ ] Stack shows: type, quantity, average quality
+- [x] Items displayed as stacks (grouped by type)
+- [x] Stack shows: type, quantity, average quality
 - [ ] Click stack to expand/see distribution (optional for M3)
 - [ ] Stack splitting UI (optional for M3)
 
@@ -329,24 +329,24 @@ Create static data for:
 ### Deliverables
 
 #### Backend - Stations
-- [ ] `stations` table and model
-- [ ] `station_types` static data table
-- [ ] Station placement (at player position for now, no plots yet)
-- [ ] Station state (idle, in_use_manual)
-- [ ] `POST /stations` - Place a new station
+- [x] `stations` table and model
+- [x] `station_types` static data table
+- [x] Station placement (at player position for now, no plots yet)
+- [x] Station state (idle, in_use_manual)
+- [x] `POST /stations` - Place a new station *(`POST /stations/place`)*
 - [ ] `GET /stations/{id}` - Get station details
 
 #### Backend - Station Crafting
-- [ ] `POST /stations/{id}/use` - Begin using station
-- [ ] `POST /stations/{id}/release` - Stop using station
-- [ ] Station contributes to quality calculation:
+- [x] `POST /stations/{id}/use` - Begin using station *(WS open/close station commands)*
+- [x] `POST /stations/{id}/release` - Stop using station *(WS open/close station commands)*
+- [ ] Station contributes to quality calculation: *(not yet: no station term in the quality formula)*
   ```
   output_quality = Σ(input_quality × input_weight) 
                  + (station_quality × station_weight)
                  + random_variance
   ```
-- [ ] Stations have quality (from their own crafting)
-- [ ] Recipes can require specific station types
+- [ ] Stations have quality (from their own crafting) *(stations have no quality column yet)*
+- [x] Recipes can require specific station types
 
 #### Backend - Tool Installation
 - [ ] Some stations have tool slots
@@ -362,12 +362,12 @@ Create static data for:
 - [ ] `ToolType`: Axe, Pickaxe, Sickle, Hammer, etc.
 
 #### Client - Station Display
-- [ ] Stations rendered in world view
-- [ ] Station interaction (click to open)
-- [ ] Station panel: type, quality, installed tool, status
+- [x] Stations rendered in world view
+- [x] Station interaction (click to open)
+- [x] Station panel: type, quality, installed tool, status
 
 #### Client - Station Crafting UI
-- [ ] When using station: show station-enabled recipes
+- [x] When using station: show station-enabled recipes
 - [ ] Quality preview (estimate output quality)
 - [ ] Tool installation interface
 
@@ -409,39 +409,39 @@ Create static data for:
 ### Deliverables
 
 #### Backend - Currency
-- [ ] `strand_balance` field on player (already in schema)
-- [ ] Currency operations: add, subtract, transfer
-- [ ] `currency_transactions` audit log
-- [ ] `GET /player/currency` - Get balance
-- [ ] Starting balance for new players (e.g., 100 Strands for testing)
+- [x] `strand_balance` field on player (already in schema)
+- [x] Currency operations: add, subtract, transfer
+- [x] `currency_transactions` audit log
+- [x] `GET /player/currency` - Get balance
+- [x] Starting balance for new players (e.g., 100 Strands for testing)
 
 #### Backend - Fiber/Strand Exchange
-- [ ] Fiber is the backing commodity
-- [ ] `POST /exchange/deposit` - Convert fiber items to Strands
-- [ ] `POST /exchange/withdraw` - Convert Strands to fiber items
-- [ ] 1 fiber = 1 Strand (1:1 backing)
-- [ ] Exchange fee (0.5%) deducted
+- [x] Fiber is the backing commodity
+- [x] `POST /exchange/deposit` - Convert fiber items to Strands
+- [x] `POST /exchange/withdraw` - Convert Strands to fiber items
+- [x] 1 fiber = 1 Strand (1:1 backing)
+- [x] Exchange fee (0.5%) deducted
 
 #### Backend - P2P Trading
-- [ ] Trade session model
-- [ ] `POST /trade/initiate` - Start trade with nearby player
-- [ ] `POST /trade/{id}/offer` - Add item or currency to trade window
-- [ ] `POST /trade/{id}/accept` - Accept current offer
-- [ ] `POST /trade/{id}/cancel` - Cancel trade
-- [ ] Both parties must accept for trade to execute
-- [ ] Atomic transfer on execution
+- [x] Trade session model
+- [x] `POST /trade/initiate` - Start trade with nearby player
+- [x] `POST /trade/{id}/offer` - Add item or currency to trade window
+- [x] `POST /trade/{id}/accept` - Accept current offer
+- [x] `POST /trade/{id}/cancel` - Cancel trade
+- [x] Both parties must accept for trade to execute
+- [x] Atomic transfer on execution
 
 #### Client - Currency Display
-- [ ] Strand balance shown in UI (header or inventory)
-- [ ] Exchange interface (deposit/withdraw fiber)
+- [x] Strand balance shown in UI (header or inventory)
+- [x] Exchange interface (deposit/withdraw fiber)
 
 #### Client - Trading UI
-- [ ] Trade request notification
-- [ ] Trade window showing both parties' offers
-- [ ] Add items from inventory to offer
-- [ ] Add currency to offer
-- [ ] Accept/cancel buttons
-- [ ] Trade completion feedback
+- [x] Trade request notification
+- [x] Trade window showing both parties' offers
+- [x] Add items from inventory to offer
+- [x] Add currency to offer
+- [x] Accept/cancel buttons
+- [x] Trade completion feedback
 
 ### Acceptance Criteria
 - New players start with some Strands
@@ -531,55 +531,55 @@ Create static data for:
 ### Deliverables
 
 #### Backend - World Structure
-- [ ] Zone definitions (Capitol, TradeDistrict, GuildDistrict, Urban, Suburban, Rural, Wilderness)
-- [ ] Zone boundaries (concentric rings)
-- [ ] Player position now includes zone
-- [ ] Zone transitions detected on movement
+- [x] Zone definitions (Capitol, TradeDistrict, GuildDistrict, Urban, Suburban, Rural, Wilderness)
+- [x] Zone boundaries (concentric rings)
+- [x] Player position now includes zone
+- [x] Zone transitions detected on movement
 
 #### Backend - Plots
-- [ ] `plots` table and model
-- [ ] Plot generation for each zone (predefined grid)
-- [ ] Plot types and sizes by zone
-- [ ] Ownership (owner_id, deed_id)
-- [ ] `GET /plots` - List plots (with filters)
-- [ ] `GET /plots/{id}` - Plot details
+- [x] `plots` table and model
+- [x] Plot generation for each zone (predefined grid)
+- [x] Plot types and sizes by zone
+- [x] Ownership (owner_id, deed_id)
+- [x] `GET /plots` - List plots (with filters)
+- [x] `GET /plots/{id}` - Plot details
 
 #### Backend - Deeds
-- [ ] Deed as item type
-- [ ] `POST /plots/{id}/claim` - Claim unclaimed plot (requires deed purchase)
+- [ ] Deed as item type *(claim charges the deed cost in Strands directly; no deed item)*
+- [x] `POST /plots/{id}/claim` - Claim unclaimed plot (requires deed purchase)
 - [ ] Deed purchase from Capitol bureaucracy (Strand cost by zone)
 - [ ] `POST /plots/{id}/transfer` - Transfer ownership
 
 #### Backend - Plot Permissions
-- [ ] Permission levels (Owner, Guild, Friends, Public)
-- [ ] `GET /plots/{id}/permissions`
-- [ ] `PUT /plots/{id}/permissions`
-- [ ] Permission checks on entry and interaction
+- [x] Permission levels (Owner, Guild, Friends, Public)
+- [x] `GET /plots/{id}/permissions`
+- [x] `PUT /plots/{id}/permissions`
+- [ ] Permission checks on entry and interaction *(permissions are stored but never read outside the permissions routes)*
 
 #### Backend - Station Placement on Plots
-- [ ] Stations must be placed on owned plot
-- [ ] Station position relative to plot bounds
-- [ ] Plot capacity limits (station count)
-- [ ] Remove free-floating station placement from M4
+- [x] Stations must be placed on owned plot
+- [x] Station position relative to plot bounds
+- [x] Plot capacity limits (station count)
+- [x] Remove free-floating station placement from M4
 
 #### Backend - Property Tax
-- [ ] Weekly property tax calculation
-- [ ] Tax based on assessed plot value
-- [ ] Tax collection in hourly tick
-- [ ] Delinquency tracking (future: penalties)
+- [x] Weekly property tax calculation
+- [x] Tax based on assessed plot value
+- [x] Tax collection in hourly tick
+- [x] Delinquency tracking (future: penalties)
 
 #### Client - World Map
 - [ ] Zoomed-out map showing zones
-- [ ] Zone boundaries visible
-- [ ] Plot grid visible when zoomed in
-- [ ] Plot ownership indicated (colors or markers)
-- [ ] Click plot for details
+- [x] Zone boundaries visible
+- [x] Plot grid visible when zoomed in
+- [ ] Plot ownership indicated (colors or markers) *(rectangle ownership overlay was removed in the terrain-plot refactor)*
+- [x] Click plot for details *(Alt+click)*
 
 #### Client - Plot Management
-- [ ] Plot detail panel
-- [ ] Claim button (if unclaimed)
+- [x] Plot detail panel
+- [x] Claim button (if unclaimed)
 - [ ] Permissions editor (if owned)
-- [ ] Build mode for placing stations on owned plot
+- [x] Build mode for placing stations on owned plot
 
 ### Acceptance Criteria
 - World has distinct zones with boundaries
