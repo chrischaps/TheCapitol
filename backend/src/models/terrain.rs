@@ -47,9 +47,88 @@ impl Default for SuburbanGenParams {
     }
 }
 
-/// A suburban plot with 4-sided polygon shape
+/// Master world generation parameters capturing all tweakable values
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SuburbanPlot {
+#[serde(default)]
+pub struct WorldGenParams {
+    // Zone radii (concentric from center)
+    pub capitol_radius: f64,
+    pub trade_outer_radius: f64,
+    pub guild_outer_radius: f64,
+    pub urban_outer_radius: f64,
+    pub suburban_outer_radius: f64,
+    pub rural_outer_radius: f64,
+    // Water/Canals
+    pub moat_width: f64,
+    pub moat_bridge_width: f64,
+    pub canal_inner_width: f64,
+    pub canal_outer_width: f64,
+    pub canal_bridge_width: f64,
+    // Ring roads
+    pub guild_ring_radius: f64,
+    pub guild_ring_width: f64,
+    pub trade_ring_radius: f64,
+    pub trade_ring_width: f64,
+    // Arterials
+    pub arterial_width: f64,
+    pub arterial_end_radius: f64,
+    // Urban grid
+    pub urban_radial_spacing: f64,
+    pub urban_spoke_count: u32,
+    pub urban_street_width: f64,
+    // Suburban (nested)
+    pub suburban: SuburbanGenParams,
+    // Urban plots
+    pub urban_plot_frontage: f64,
+    pub urban_plot_depth: f64,
+    // Rural
+    pub rural_trail_width: f64,
+    pub rural_trail_count: u32,
+    // Rural plots
+    pub rural_plot_frontage: f64,
+    pub rural_plot_depth: f64,
+    // Seeds
+    pub seed: u64,
+}
+
+impl Default for WorldGenParams {
+    fn default() -> Self {
+        Self {
+            capitol_radius: 200.0,
+            trade_outer_radius: 600.0,
+            guild_outer_radius: 1000.0,
+            urban_outer_radius: 1600.0,
+            suburban_outer_radius: 2400.0,
+            rural_outer_radius: 3400.0,
+            moat_width: 20.0,
+            moat_bridge_width: 30.0,
+            canal_inner_width: 15.0,
+            canal_outer_width: 15.0,
+            canal_bridge_width: 25.0,
+            guild_ring_radius: 800.0,
+            guild_ring_width: 30.0,
+            trade_ring_radius: 400.0,
+            trade_ring_width: 30.0,
+            arterial_width: 60.0,
+            arterial_end_radius: 3800.0,
+            urban_radial_spacing: 100.0,
+            urban_spoke_count: 48,
+            urban_street_width: 16.0,
+            suburban: SuburbanGenParams::default(),
+            urban_plot_frontage: 40.0,
+            urban_plot_depth: 50.0,
+            rural_trail_width: 6.0,
+            rural_trail_count: 12,
+            rural_plot_frontage: 200.0,
+            rural_plot_depth: 150.0,
+            seed: 42,
+        }
+    }
+}
+
+/// A terrain-level plot with 4-sided polygon shape (urban, suburban, or rural)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerrainPlot {
     /// Unique identifier for this plot
     pub id: String,
     /// Four corners of the plot, clockwise from street-left
@@ -60,9 +139,11 @@ pub struct SuburbanPlot {
     pub area: f64,
     /// ID of the adjacent street
     pub adjacent_street_id: String,
+    /// Zone this plot belongs to: "urban", "suburban", or "rural"
+    pub zone: String,
 }
 
-impl SuburbanPlot {
+impl TerrainPlot {
     /// Calculate the area of a quadrilateral using the shoelace formula
     pub fn calculate_area(corners: &[(f64, f64); 4]) -> f64 {
         let n = corners.len();
@@ -114,7 +195,7 @@ pub struct TerrainConfig {
     pub center_y: f64,
     pub water_rings: Vec<WaterRing>,
     pub roads: Vec<RoadSegment>,
-    pub suburban_plots: Vec<SuburbanPlot>,
+    pub terrain_plots: Vec<TerrainPlot>,
 }
 
 /// A circular water feature (moat or canal)
@@ -322,15 +403,8 @@ fn point_at_distance(points: &[(f64, f64)], distance: f64) -> Option<(f64, f64, 
 
 /// Check if a point is near any point on a polyline
 fn point_near_polyline(px: f64, py: f64, polyline: &[(f64, f64)], threshold: f64) -> bool {
-    for i in 0..polyline.len() {
-        let (lx, ly) = polyline[i];
-        let dist = ((px - lx).powi(2) + (py - ly).powi(2)).sqrt();
-        if dist < threshold {
-            return true;
-        }
-    }
-
-    // Also check distance to line segments
+    // point_to_segment_distance already handles endpoints (returns endpoint distance
+    // when projection falls outside the segment), so no separate vertex loop needed.
     for i in 1..polyline.len() {
         let (x1, y1) = polyline[i - 1];
         let (x2, y2) = polyline[i];
@@ -339,6 +413,12 @@ fn point_near_polyline(px: f64, py: f64, polyline: &[(f64, f64)], threshold: f64
         if dist < threshold {
             return true;
         }
+    }
+
+    // Handle single-point polyline edge case
+    if polyline.len() == 1 {
+        let (lx, ly) = polyline[0];
+        return ((px - lx).powi(2) + (py - ly).powi(2)).sqrt() < threshold;
     }
 
     false
@@ -591,100 +671,239 @@ pub enum RoadType {
     Trail,       // Unpaved rural paths
 }
 
+/// Spatial hash grid for accelerating collision queries during terrain generation.
+/// Divides the world into fixed-size cells and tracks which segment indices overlap each cell.
+struct SpatialGrid {
+    cells: Vec<Vec<usize>>,
+    grid_width: usize,
+    grid_height: usize,
+    cell_size: f64,
+    origin_x: f64,
+    origin_y: f64,
+}
+
+impl SpatialGrid {
+    /// Create a new spatial grid covering a square region centered at (center_x, center_y)
+    /// with half-extent `radius` and the given cell size.
+    fn new(center_x: f64, center_y: f64, radius: f64, cell_size: f64) -> Self {
+        let origin_x = center_x - radius;
+        let origin_y = center_y - radius;
+        let extent = radius * 2.0;
+        let grid_width = (extent / cell_size).ceil() as usize + 1;
+        let grid_height = grid_width;
+        let cells = vec![Vec::new(); grid_width * grid_height];
+        Self {
+            cells,
+            grid_width,
+            grid_height,
+            cell_size,
+            origin_x,
+            origin_y,
+        }
+    }
+
+    /// Convert world coordinate to grid cell index (clamped to grid bounds)
+    #[inline]
+    fn cell_x(&self, x: f64) -> usize {
+        let cx = ((x - self.origin_x) / self.cell_size) as isize;
+        cx.clamp(0, self.grid_width as isize - 1) as usize
+    }
+
+    #[inline]
+    fn cell_y(&self, y: f64) -> usize {
+        let cy = ((y - self.origin_y) / self.cell_size) as isize;
+        cy.clamp(0, self.grid_height as isize - 1) as usize
+    }
+
+    /// Insert a polyline's AABB into all overlapping cells with the given segment index.
+    fn insert(&mut self, segment_idx: usize, points: &[(f64, f64)]) {
+        if points.is_empty() {
+            return;
+        }
+        let (mut min_x, mut min_y) = points[0];
+        let (mut max_x, mut max_y) = points[0];
+        for &(x, y) in &points[1..] {
+            if x < min_x { min_x = x; }
+            if x > max_x { max_x = x; }
+            if y < min_y { min_y = y; }
+            if y > max_y { max_y = y; }
+        }
+        let cx0 = self.cell_x(min_x);
+        let cy0 = self.cell_y(min_y);
+        let cx1 = self.cell_x(max_x);
+        let cy1 = self.cell_y(max_y);
+        for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
+                self.cells[cy * self.grid_width + cx].push(segment_idx);
+            }
+        }
+    }
+
+    /// Query for all segment indices near a point within `radius`.
+    /// Returns deduplicated indices.
+    fn query_point(&self, x: f64, y: f64, radius: f64) -> Vec<usize> {
+        let cx0 = self.cell_x(x - radius);
+        let cy0 = self.cell_y(y - radius);
+        let cx1 = self.cell_x(x + radius);
+        let cy1 = self.cell_y(y + radius);
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+        for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
+                for &idx in &self.cells[cy * self.grid_width + cx] {
+                    if seen.insert(idx) {
+                        result.push(idx);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Query for all segment indices whose AABB overlaps the given AABB.
+    /// Returns deduplicated indices.
+    fn query_aabb(&self, min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Vec<usize> {
+        let cx0 = self.cell_x(min_x);
+        let cy0 = self.cell_y(min_y);
+        let cx1 = self.cell_x(max_x);
+        let cy1 = self.cell_y(max_y);
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+        for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
+                for &idx in &self.cells[cy * self.grid_width + cx] {
+                    if seen.insert(idx) {
+                        result.push(idx);
+                    }
+                }
+            }
+        }
+        result
+    }
+}
+
+/// Compute the AABB of a polyline, returning (min_x, min_y, max_x, max_y).
+fn polyline_aabb(points: &[(f64, f64)]) -> (f64, f64, f64, f64) {
+    let (mut min_x, mut min_y) = points[0];
+    let (mut max_x, mut max_y) = points[0];
+    for &(x, y) in &points[1..] {
+        if x < min_x { min_x = x; }
+        if x > max_x { max_x = x; }
+        if y < min_y { min_y = y; }
+        if y > max_y { max_y = y; }
+    }
+    (min_x, min_y, max_x, max_y)
+}
+
 impl TerrainConfig {
-    /// Get the static terrain configuration for the world
+    /// Get the static terrain configuration for the world (uses default params)
     pub fn get_default() -> Self {
+        Self::from_params(&WorldGenParams::default())
+    }
+
+    /// Build terrain from explicit world generation parameters
+    pub fn from_params(params: &WorldGenParams) -> Self {
         let mut config = TerrainConfig {
             world_size: 8000.0,
             center_x: 4000.0,
             center_y: 4000.0,
             water_rings: vec![
-                // Moat: Capitol/Trade boundary at radius 200
-                // In screen coordinates: 0° = East, 90° = South, 180° = West, 270° = North
+                // Moat: Capitol/Trade boundary
                 WaterRing {
                     id: "moat".to_string(),
-                    radius: 200.0,
-                    width: 20.0,
+                    radius: params.capitol_radius,
+                    width: params.moat_width,
                     bridges: vec![
-                        Bridge { angle_degrees: 90.0, width: 30.0 }, // South
+                        Bridge { angle_degrees: 90.0, width: params.moat_bridge_width },
                     ],
                 },
-                // Canal 1: Trade/Guild boundary at radius 600
+                // Canal 1: Trade/Guild boundary
                 WaterRing {
                     id: "canal_inner".to_string(),
-                    radius: 600.0,
-                    width: 15.0,
+                    radius: params.trade_outer_radius,
+                    width: params.canal_inner_width,
                     bridges: vec![
-                        Bridge { angle_degrees: 270.0, width: 25.0 }, // North
-                        Bridge { angle_degrees: 0.0, width: 25.0 },   // East
-                        Bridge { angle_degrees: 90.0, width: 25.0 },  // South
-                        Bridge { angle_degrees: 180.0, width: 25.0 }, // West
+                        Bridge { angle_degrees: 270.0, width: params.canal_bridge_width },
+                        Bridge { angle_degrees: 0.0, width: params.canal_bridge_width },
+                        Bridge { angle_degrees: 90.0, width: params.canal_bridge_width },
+                        Bridge { angle_degrees: 180.0, width: params.canal_bridge_width },
                     ],
                 },
-                // Canal 2: Guild/Urban boundary at radius 1000
+                // Canal 2: Guild/Urban boundary
                 WaterRing {
                     id: "canal_outer".to_string(),
-                    radius: 1000.0,
-                    width: 15.0,
+                    radius: params.guild_outer_radius,
+                    width: params.canal_outer_width,
                     bridges: vec![
-                        Bridge { angle_degrees: 270.0, width: 25.0 }, // N
-                        Bridge { angle_degrees: 315.0, width: 25.0 }, // NE
-                        Bridge { angle_degrees: 0.0, width: 25.0 },   // E
-                        Bridge { angle_degrees: 45.0, width: 25.0 },  // SE
-                        Bridge { angle_degrees: 90.0, width: 25.0 },  // S
-                        Bridge { angle_degrees: 135.0, width: 25.0 }, // SW
-                        Bridge { angle_degrees: 180.0, width: 25.0 }, // W
-                        Bridge { angle_degrees: 225.0, width: 25.0 }, // NW
+                        Bridge { angle_degrees: 270.0, width: params.canal_bridge_width },
+                        Bridge { angle_degrees: 315.0, width: params.canal_bridge_width },
+                        Bridge { angle_degrees: 0.0, width: params.canal_bridge_width },
+                        Bridge { angle_degrees: 45.0, width: params.canal_bridge_width },
+                        Bridge { angle_degrees: 90.0, width: params.canal_bridge_width },
+                        Bridge { angle_degrees: 135.0, width: params.canal_bridge_width },
+                        Bridge { angle_degrees: 180.0, width: params.canal_bridge_width },
+                        Bridge { angle_degrees: 225.0, width: params.canal_bridge_width },
                     ],
                 },
             ],
             roads: Vec::new(),
-            suburban_plots: Vec::new(),
+            terrain_plots: Vec::new(),
         };
 
-        // Generate roads
-        config.roads = config.generate_all_roads();
+        // Generate roads using params
+        config.roads = config.generate_all_roads_with_params(params);
 
-        // Generate suburban plots based on the roads
-        let params = SuburbanGenParams::default();
-        config.suburban_plots = config.generate_suburban_plots_internal(&params);
+        // Generate terrain plots for all zones
+        config.terrain_plots = config.generate_suburban_plots_internal(&params.suburban);
+        config.terrain_plots.extend(config.generate_urban_plots(params));
+        config.terrain_plots.extend(config.generate_rural_plots(params));
 
         config
     }
 
-    /// Generate all road segments
+    /// Generate all road segments (legacy, uses hardcoded defaults)
     fn generate_all_roads(&self) -> Vec<RoadSegment> {
+        self.generate_all_roads_with_params(&WorldGenParams::default())
+    }
+
+    /// Generate all road segments from params
+    fn generate_all_roads_with_params(&self, params: &WorldGenParams) -> Vec<RoadSegment> {
         let mut roads = Vec::new();
 
-        // Ring roads (circular streets within districts)
-        roads.extend(self.generate_ring_roads());
+        // Ring roads
+        roads.extend(self.generate_ring_roads_with_params(params));
 
-        // Arterial roads (radial streets connecting rings)
-        roads.extend(self.generate_arterial_roads());
+        // Arterial roads
+        roads.extend(self.generate_arterial_roads_with_params(params));
 
         // Urban grid
-        roads.extend(self.generate_urban_grid());
+        roads.extend(self.generate_urban_grid_with_params(params));
 
-        // Suburban streets (seeded procedural with smooth curves)
-        roads.extend(self.generate_suburban_streets(42));
+        // Suburban streets
+        let suburban_params = SuburbanGenParams {
+            inner_radius: params.urban_outer_radius,
+            outer_radius: params.suburban_outer_radius,
+            seed: params.seed,
+            ..params.suburban.clone()
+        };
+        roads.extend(self.generate_suburban_streets_with_params(&suburban_params));
 
         // Rural trails
-        roads.extend(self.generate_rural_paths(42));
+        roads.extend(self.generate_rural_paths_with_params(params));
 
         roads
     }
 
     /// Generate circular ring roads within districts
     fn generate_ring_roads(&self) -> Vec<RoadSegment> {
+        self.generate_ring_roads_with_params(&WorldGenParams::default())
+    }
+
+    fn generate_ring_roads_with_params(&self, params: &WorldGenParams) -> Vec<RoadSegment> {
         let mut roads = Vec::new();
 
-        // Guild district ring road (center of guild district: midway between 600 and 1000)
-        let guild_ring_radius = 800.0;
-        roads.push(self.generate_circular_road("guild_ring", guild_ring_radius, 30.0));
-
-        // Trade district ring road (center of trade district: midway between 200 and 600)
-        let trade_ring_radius = 400.0;
-        roads.push(self.generate_circular_road("trade_ring", trade_ring_radius, 30.0));
+        roads.push(self.generate_circular_road("guild_ring", params.guild_ring_radius, params.guild_ring_width));
+        roads.push(self.generate_circular_road("trade_ring", params.trade_ring_radius, params.trade_ring_width));
 
         roads
     }
@@ -711,23 +930,25 @@ impl TerrainConfig {
 
     /// Generate arterial roads connecting ring roads to wilderness edge
     fn generate_arterial_roads(&self) -> Vec<RoadSegment> {
+        self.generate_arterial_roads_with_params(&WorldGenParams::default())
+    }
+
+    fn generate_arterial_roads_with_params(&self, params: &WorldGenParams) -> Vec<RoadSegment> {
         let mut roads = Vec::new();
         let outer_canal = self.water_rings.iter().find(|r| r.id == "canal_outer");
         let inner_canal = self.water_rings.iter().find(|r| r.id == "canal_inner");
         let moat = self.water_rings.iter().find(|r| r.id == "moat");
 
-        let guild_ring_radius = 800.0;  // Center of guild district
-        let trade_ring_radius = 400.0;  // Center of trade district
+        let guild_ring_radius = params.guild_ring_radius;
+        let trade_ring_radius = params.trade_ring_radius;
 
         if let Some(outer) = outer_canal {
-            // 8 arterial roads from guild ring road to wilderness edge
             for (i, bridge) in outer.bridges.iter().enumerate() {
                 let angle_rad = bridge.angle_degrees.to_radians();
                 let angle_deg = bridge.angle_degrees;
 
-                // Main arterial: from guild ring to wilderness edge
                 let start_radius = guild_ring_radius;
-                let end_radius = 3800.0; // Near wilderness edge
+                let end_radius = params.arterial_end_radius;
 
                 let start_x = self.center_x + start_radius * angle_rad.cos();
                 let start_y = self.center_y + start_radius * angle_rad.sin();
@@ -738,10 +959,9 @@ impl TerrainConfig {
                     id: format!("arterial_{}", i),
                     road_type: RoadType::Arterial,
                     points: vec![(start_x, start_y), (end_x, end_y)],
-                    width: 60.0,  // 3x wider than before
+                    width: params.arterial_width,
                 });
 
-                // NSEW streets extend into trade district (connect guild ring to trade ring)
                 let is_cardinal = angle_deg == 0.0 || angle_deg == 90.0 || angle_deg == 180.0 || angle_deg == 270.0;
                 if is_cardinal {
                     if let Some(_inner) = inner_canal {
@@ -754,7 +974,7 @@ impl TerrainConfig {
                             id: format!("arterial_inner_{}", i),
                             road_type: RoadType::Arterial,
                             points: vec![(guild_x, guild_y), (trade_x, trade_y)],
-                            width: 60.0,
+                            width: params.arterial_width,
                         });
                     }
                 }
@@ -763,7 +983,7 @@ impl TerrainConfig {
 
         // South street extends into Capitol (from trade ring to moat)
         if let Some(moat_ring) = moat {
-            let south_angle = 90.0_f64.to_radians(); // South in screen coords
+            let south_angle = 90.0_f64.to_radians();
             let trade_x = self.center_x + trade_ring_radius * south_angle.cos();
             let trade_y = self.center_y + trade_ring_radius * south_angle.sin();
             let capitol_x = self.center_x + (moat_ring.inner_radius() - 10.0) * south_angle.cos();
@@ -773,7 +993,7 @@ impl TerrainConfig {
                 id: "arterial_capitol".to_string(),
                 road_type: RoadType::Arterial,
                 points: vec![(trade_x, trade_y), (capitol_x, capitol_y)],
-                width: 60.0,
+                width: params.arterial_width,
             });
         }
 
@@ -781,14 +1001,18 @@ impl TerrainConfig {
     }
 
     /// Generate radial urban grid streets within the Urban zone
-    /// Creates concentric arc streets and radial spoke streets
     fn generate_urban_grid(&self) -> Vec<RoadSegment> {
+        self.generate_urban_grid_with_params(&WorldGenParams::default())
+    }
+
+    fn generate_urban_grid_with_params(&self, params: &WorldGenParams) -> Vec<RoadSegment> {
         let mut roads = Vec::new();
-        let inner_radius = 1000.0; // Guild/Urban boundary
-        let outer_radius = 1600.0; // Urban/Suburban boundary
-        let radial_spacing = 100.0; // Distance between concentric arcs
-        let spoke_count = 48; // Number of radial spokes
-        let street_width = 16.0; // Wide enough for player character
+        // Start past the outer canal so roads/plots don't overlap the water ring
+        let inner_radius = params.guild_outer_radius + params.canal_outer_width / 2.0;
+        let outer_radius = params.urban_outer_radius;
+        let radial_spacing = params.urban_radial_spacing;
+        let spoke_count = params.urban_spoke_count;
+        let street_width = params.urban_street_width;
 
         let mut id = 0;
 
@@ -851,8 +1075,11 @@ impl TerrainConfig {
         let mut roads = Vec::new();
         let mut suburban_streets: Vec<SuburbanStreet> = Vec::new();
 
+        // Create spatial grid for accelerated collision detection
+        let mut grid = SpatialGrid::new(self.center_x, self.center_y, params.outer_radius + 100.0, 50.0);
+
         // Phase 1: Generate collector roads
-        let collectors = self.generate_collector_roads(params);
+        let collectors = self.generate_collector_roads(params, &mut grid);
         for street in &collectors {
             roads.push(street.segment.clone());
         }
@@ -863,7 +1090,7 @@ impl TerrainConfig {
         // This allows cul-de-sacs and loops to branch from connector roads.
         const MAX_ITERATIONS: usize = 8;
         for iteration in 0..MAX_ITERATIONS {
-            let locals = self.generate_local_streets(params, &suburban_streets, iteration);
+            let locals = self.generate_local_streets(params, &suburban_streets, iteration, &mut grid);
             if locals.is_empty() {
                 break;
             }
@@ -885,7 +1112,7 @@ impl TerrainConfig {
 
     /// Phase 1: Generate curved collector roads that connect to arterials
     /// Collectors branch off arterials and curve through the suburban zone
-    fn generate_collector_roads(&self, params: &SuburbanGenParams) -> Vec<SuburbanStreet> {
+    fn generate_collector_roads(&self, params: &SuburbanGenParams, grid: &mut SpatialGrid) -> Vec<SuburbanStreet> {
         let mut streets = Vec::new();
         let mut placed_segments: Vec<Vec<(f64, f64)>> = Vec::new();
         let mut rng = SeededRng::new(params.seed);
@@ -972,10 +1199,13 @@ impl TerrainConfig {
 
                 // Verify the road stays in zone and has reasonable length
                 if clamped_points.len() >= 2 && polyline_length(&clamped_points) > 50.0 {
-                    // Check intersection angles with already placed collectors
+                    // Check intersection angles with already placed collectors (use grid)
+                    let (cp_aabb_min_x, cp_aabb_min_y, cp_aabb_max_x, cp_aabb_max_y) = polyline_aabb(&clamped_points);
+                    let nearby = grid.query_aabb(cp_aabb_min_x, cp_aabb_min_y, cp_aabb_max_x, cp_aabb_max_y);
+
                     let mut valid_angles = true;
-                    for existing in &placed_segments {
-                        if !check_road_intersection_angle(&clamped_points, existing, 45.0) {
+                    for &seg_idx in &nearby {
+                        if !check_road_intersection_angle(&clamped_points, &placed_segments[seg_idx], 45.0) {
                             valid_angles = false;
                             break;
                         }
@@ -983,6 +1213,8 @@ impl TerrainConfig {
 
                     if valid_angles {
                         let street_id = format!("collector_{}_{}", arterial_idx, c);
+                        let seg_idx = placed_segments.len();
+                        grid.insert(seg_idx, &clamped_points);
                         placed_segments.push(clamped_points.clone());
                         streets.push(SuburbanStreet {
                             segment: RoadSegment {
@@ -1057,6 +1289,7 @@ impl TerrainConfig {
         params: &SuburbanGenParams,
         existing_streets: &[SuburbanStreet],
         iteration: usize,
+        grid: &mut SpatialGrid,
     ) -> Vec<SuburbanStreet> {
         let mut streets = Vec::new();
         // Vary seed by iteration to get different random choices each pass
@@ -1149,7 +1382,7 @@ impl TerrainConfig {
             let cp = &connection_points[idx];
 
             // Check if we have room for a street here
-            let depth = self.available_depth(cp.x, cp.y, cp.tangent_angle, params, &placed_segments);
+            let depth = self.available_depth(cp.x, cp.y, cp.tangent_angle, params, &placed_segments, grid);
             if depth < 60.0 {
                 continue;
             }
@@ -1170,25 +1403,25 @@ impl TerrainConfig {
                 LocalStreetPattern::CulDeSac => {
                     self.generate_cul_de_sac_v2(
                         cp_x, cp_y, &cp_road_id, cp_tangent,
-                        params, &mut rng, street_id, &placed_segments, parent_idx
+                        params, &mut rng, street_id, &placed_segments, parent_idx, grid
                     )
                 }
                 LocalStreetPattern::Loop => {
                     self.generate_loop_street_v2(
                         cp_x, cp_y, &cp_road_id, cp_tangent,
-                        params, &mut rng, street_id, &placed_segments, parent_idx
+                        params, &mut rng, street_id, &placed_segments, parent_idx, grid
                     )
                 }
                 LocalStreetPattern::PShaped => {
                     self.generate_p_shaped_v2(
                         cp_x, cp_y, &cp_road_id, cp_tangent,
-                        params, &mut rng, street_id, &placed_segments, parent_idx
+                        params, &mut rng, street_id, &placed_segments, parent_idx, grid
                     )
                 }
                 LocalStreetPattern::CurvedConnector => {
                     self.generate_curved_connector_v2(
                         cp_x, cp_y, &cp_road_id, cp_tangent,
-                        params, &mut rng, street_id, &placed_segments, &connection_points, parent_idx
+                        params, &mut rng, street_id, &placed_segments, &connection_points, parent_idx, grid
                     )
                 }
             };
@@ -1196,7 +1429,9 @@ impl TerrainConfig {
             if let Some(mut new_streets) = generated {
                 for street in &new_streets {
                     // Add to index mapping before pushing to placed_segments
-                    road_id_to_idx.insert(street.segment.id.clone(), placed_segments.len());
+                    let seg_idx = placed_segments.len();
+                    road_id_to_idx.insert(street.segment.id.clone(), seg_idx);
+                    grid.insert(seg_idx, &street.segment.points);
                     placed_segments.push(street.segment.points.clone());
                 }
                 streets.append(&mut new_streets);
@@ -1215,6 +1450,7 @@ impl TerrainConfig {
         params: &SuburbanGenParams,
         existing_streets: &[SuburbanStreet],
         iteration: usize,
+        grid: &mut SpatialGrid,
     ) -> Vec<SuburbanStreet> {
         let mut streets = Vec::new();
         let mut rng = SeededRng::new(params.seed.wrapping_add(2000 + iteration as u64 * 500));
@@ -1281,7 +1517,7 @@ impl TerrainConfig {
             }
 
             let cp = &connection_points[idx];
-            let depth = self.available_depth(cp.x, cp.y, cp.tangent_angle, params, &placed_segments);
+            let depth = self.available_depth(cp.x, cp.y, cp.tangent_angle, params, &placed_segments, grid);
             if depth < 80.0 {
                 continue;
             }
@@ -1297,10 +1533,12 @@ impl TerrainConfig {
             // Only generate curved connectors
             if let Some(mut new_streets) = self.generate_curved_connector_v2(
                 cp_x, cp_y, &cp_road_id, cp_tangent,
-                params, &mut rng, street_id, &placed_segments, &connection_points, parent_idx
+                params, &mut rng, street_id, &placed_segments, &connection_points, parent_idx, grid
             ) {
                 for street in &new_streets {
-                    road_id_to_idx.insert(street.segment.id.clone(), placed_segments.len());
+                    let seg_idx = placed_segments.len();
+                    road_id_to_idx.insert(street.segment.id.clone(), seg_idx);
+                    grid.insert(seg_idx, &street.segment.points);
                     placed_segments.push(street.segment.points.clone());
                 }
                 streets.append(&mut new_streets);
@@ -1319,6 +1557,7 @@ impl TerrainConfig {
         params: &SuburbanGenParams,
         existing_streets: &[SuburbanStreet],
         iteration: usize,
+        grid: &mut SpatialGrid,
     ) -> Vec<SuburbanStreet> {
         let mut streets = Vec::new();
         let mut rng = SeededRng::new(params.seed.wrapping_add(3000 + iteration as u64 * 500));
@@ -1385,7 +1624,7 @@ impl TerrainConfig {
             }
 
             let cp = &connection_points[idx];
-            let depth = self.available_depth(cp.x, cp.y, cp.tangent_angle, params, &placed_segments);
+            let depth = self.available_depth(cp.x, cp.y, cp.tangent_angle, params, &placed_segments, grid);
             if depth < 60.0 {
                 continue;
             }
@@ -1405,19 +1644,19 @@ impl TerrainConfig {
                 LocalStreetPattern::CulDeSac => {
                     self.generate_cul_de_sac_v2(
                         cp_x, cp_y, &cp_road_id, cp_tangent,
-                        params, &mut rng, street_id, &placed_segments, parent_idx
+                        params, &mut rng, street_id, &placed_segments, parent_idx, grid
                     )
                 }
                 LocalStreetPattern::Loop => {
                     self.generate_loop_street_v2(
                         cp_x, cp_y, &cp_road_id, cp_tangent,
-                        params, &mut rng, street_id, &placed_segments, parent_idx
+                        params, &mut rng, street_id, &placed_segments, parent_idx, grid
                     )
                 }
                 LocalStreetPattern::PShaped => {
                     self.generate_p_shaped_v2(
                         cp_x, cp_y, &cp_road_id, cp_tangent,
-                        params, &mut rng, street_id, &placed_segments, parent_idx
+                        params, &mut rng, street_id, &placed_segments, parent_idx, grid
                     )
                 }
                 LocalStreetPattern::CurvedConnector => {
@@ -1428,7 +1667,9 @@ impl TerrainConfig {
 
             if let Some(mut new_streets) = generated {
                 for street in &new_streets {
-                    road_id_to_idx.insert(street.segment.id.clone(), placed_segments.len());
+                    let seg_idx = placed_segments.len();
+                    road_id_to_idx.insert(street.segment.id.clone(), seg_idx);
+                    grid.insert(seg_idx, &street.segment.points);
                     placed_segments.push(street.segment.points.clone());
                 }
                 streets.append(&mut new_streets);
@@ -1482,6 +1723,7 @@ impl TerrainConfig {
         tangent_angle: f64,
         params: &SuburbanGenParams,
         placed_segments: &[Vec<(f64, f64)>],
+        grid: &SpatialGrid,
     ) -> f64 {
         // Check perpendicular directions (both sides)
         let perp_angles = [tangent_angle + PI / 2.0, tangent_angle - PI / 2.0];
@@ -1504,10 +1746,11 @@ impl TerrainConfig {
                     break;
                 }
 
-                // Check collision with existing streets
+                // Check collision with existing streets (via spatial grid)
                 let mut collision = false;
-                for segment in placed_segments {
-                    if point_near_polyline(check_x, check_y, segment, 20.0) {
+                let nearby = grid.query_point(check_x, check_y, 20.0);
+                for &seg_idx in &nearby {
+                    if point_near_polyline(check_x, check_y, &placed_segments[seg_idx], 20.0) {
                         collision = true;
                         break;
                     }
@@ -1565,16 +1808,18 @@ impl TerrainConfig {
         placed_segments: &[Vec<(f64, f64)>],
         min_spacing: f64,
         parent_segment_idx: Option<usize>,
+        grid: &SpatialGrid,
     ) -> bool {
         // Skip the first few points (they connect to parent road)
         let skip_count = 3.min(points.len());
-        for (px, py) in points.iter().skip(skip_count) {
-            for (idx, segment) in placed_segments.iter().enumerate() {
+        for &(px, py) in points.iter().skip(skip_count) {
+            let nearby = grid.query_point(px, py, min_spacing);
+            for &seg_idx in &nearby {
                 // Skip the parent road segment
-                if parent_segment_idx == Some(idx) {
+                if parent_segment_idx == Some(seg_idx) {
                     continue;
                 }
-                if point_near_polyline(*px, *py, segment, min_spacing) {
+                if point_near_polyline(px, py, &placed_segments[seg_idx], min_spacing) {
                     return true;
                 }
             }
@@ -1589,9 +1834,16 @@ impl TerrainConfig {
         points: &[(f64, f64)],
         placed_segments: &[Vec<(f64, f64)>],
         min_angle_degrees: f64,
+        grid: &SpatialGrid,
     ) -> bool {
-        for segment in placed_segments {
-            if !check_road_intersection_angle(points, segment, min_angle_degrees) {
+        if points.is_empty() {
+            return true;
+        }
+        // Query grid for segments whose AABB overlaps this polyline's AABB
+        let (min_x, min_y, max_x, max_y) = polyline_aabb(points);
+        let nearby = grid.query_aabb(min_x, min_y, max_x, max_y);
+        for &seg_idx in &nearby {
+            if !check_road_intersection_angle(points, &placed_segments[seg_idx], min_angle_degrees) {
                 return false;
             }
         }
@@ -1608,13 +1860,14 @@ impl TerrainConfig {
         params: &SuburbanGenParams,
         placed_segments: &[Vec<(f64, f64)>],
         parent_segment_idx: Option<usize>,
+        grid: &SpatialGrid,
     ) -> f64 {
         let perp1 = tangent_angle + PI / 2.0;
         let perp2 = tangent_angle - PI / 2.0;
 
         // Check depth in each perpendicular direction directly
-        let depth1 = self.available_depth_in_direction(x, y, perp1, params, placed_segments, parent_segment_idx);
-        let depth2 = self.available_depth_in_direction(x, y, perp2, params, placed_segments, parent_segment_idx);
+        let depth1 = self.available_depth_in_direction(x, y, perp1, params, placed_segments, parent_segment_idx, grid);
+        let depth2 = self.available_depth_in_direction(x, y, perp2, params, placed_segments, parent_segment_idx, grid);
 
         if depth1 >= depth2 {
             perp1
@@ -1633,6 +1886,7 @@ impl TerrainConfig {
         params: &SuburbanGenParams,
         placed_segments: &[Vec<(f64, f64)>],
         parent_segment_idx: Option<usize>,
+        grid: &SpatialGrid,
     ) -> f64 {
         // Start probing past the parent road width to avoid false collision
         let start_depth = 40.0;
@@ -1650,14 +1904,15 @@ impl TerrainConfig {
                 break;
             }
 
-            // Check collision with existing streets
+            // Check collision with existing streets (via spatial grid)
             let mut collision = false;
-            for (idx, segment) in placed_segments.iter().enumerate() {
+            let nearby = grid.query_point(check_x, check_y, 20.0);
+            for &seg_idx in &nearby {
                 // Skip the parent road segment
-                if parent_segment_idx == Some(idx) {
+                if parent_segment_idx == Some(seg_idx) {
                     continue;
                 }
-                if point_near_polyline(check_x, check_y, segment, 20.0) {
+                if point_near_polyline(check_x, check_y, &placed_segments[seg_idx], 20.0) {
                     collision = true;
                     break;
                 }
@@ -1684,11 +1939,12 @@ impl TerrainConfig {
         base_id: usize,
         placed_segments: &[Vec<(f64, f64)>],
         parent_segment_idx: Option<usize>,
+        grid: &SpatialGrid,
     ) -> Option<Vec<SuburbanStreet>> {
-        let perp_angle = self.find_best_perpendicular_v2(cp_x, cp_y, tangent_angle, params, placed_segments, parent_segment_idx);
+        let perp_angle = self.find_best_perpendicular_v2(cp_x, cp_y, tangent_angle, params, placed_segments, parent_segment_idx, grid);
 
         // Check available depth in the chosen perpendicular direction
-        let available_depth = self.available_depth_in_direction(cp_x, cp_y, perp_angle, params, placed_segments, parent_segment_idx);
+        let available_depth = self.available_depth_in_direction(cp_x, cp_y, perp_angle, params, placed_segments, parent_segment_idx, grid);
 
         // Minimum cul-de-sac needs at least 150 units of space for meaningful length
         let min_culdesac_length = 150.0;
@@ -1720,12 +1976,12 @@ impl TerrainConfig {
 
         let stem_points = catmull_rom_spline(&stem_controls, 10);
 
-        if self.check_street_collision(&stem_points, placed_segments, params.min_street_spacing, parent_segment_idx) {
+        if self.check_street_collision(&stem_points, placed_segments, params.min_street_spacing, parent_segment_idx, grid) {
             return None;
         }
 
         // Check intersection angles are at least 30 degrees
-        if !self.check_street_intersection_angles(&stem_points, placed_segments, 30.0) {
+        if !self.check_street_intersection_angles(&stem_points, placed_segments, 30.0, grid) {
             return None;
         }
 
@@ -1777,8 +2033,9 @@ impl TerrainConfig {
         base_id: usize,
         placed_segments: &[Vec<(f64, f64)>],
         parent_segment_idx: Option<usize>,
+        grid: &SpatialGrid,
     ) -> Option<Vec<SuburbanStreet>> {
-        let perp_angle = self.find_best_perpendicular_v2(cp_x, cp_y, tangent_angle, params, placed_segments, parent_segment_idx);
+        let perp_angle = self.find_best_perpendicular_v2(cp_x, cp_y, tangent_angle, params, placed_segments, parent_segment_idx, grid);
 
         let loop_width = 150.0 + rng.next() * 100.0;  // 150-250 width
         let loop_depth = 200.0 + rng.next() * 200.0;  // 200-400 depth (extends further from collector)
@@ -1812,12 +2069,12 @@ impl TerrainConfig {
             return None;
         }
 
-        if self.check_street_collision(&clamped_points, placed_segments, params.min_street_spacing, parent_segment_idx) {
+        if self.check_street_collision(&clamped_points, placed_segments, params.min_street_spacing, parent_segment_idx, grid) {
             return None;
         }
 
         // Check intersection angles are at least 45 degrees
-        if !self.check_street_intersection_angles(&clamped_points, placed_segments, 30.0) {
+        if !self.check_street_intersection_angles(&clamped_points, placed_segments, 30.0, grid) {
             return None;
         }
 
@@ -1847,8 +2104,9 @@ impl TerrainConfig {
         base_id: usize,
         placed_segments: &[Vec<(f64, f64)>],
         parent_segment_idx: Option<usize>,
+        grid: &SpatialGrid,
     ) -> Option<Vec<SuburbanStreet>> {
-        let perp_angle = self.find_best_perpendicular_v2(cp_x, cp_y, tangent_angle, params, placed_segments, parent_segment_idx);
+        let perp_angle = self.find_best_perpendicular_v2(cp_x, cp_y, tangent_angle, params, placed_segments, parent_segment_idx, grid);
 
         let stem_length = 150.0 + rng.next() * 150.0;  // 150-300 stem length
         let loop_radius = 60.0 + rng.next() * 40.0;   // 60-100 loop radius
@@ -1886,12 +2144,12 @@ impl TerrainConfig {
             return None;
         }
 
-        if self.check_street_collision(&clamped_points, placed_segments, params.min_street_spacing, parent_segment_idx) {
+        if self.check_street_collision(&clamped_points, placed_segments, params.min_street_spacing, parent_segment_idx, grid) {
             return None;
         }
 
         // Check intersection angles are at least 45 degrees
-        if !self.check_street_intersection_angles(&clamped_points, placed_segments, 30.0) {
+        if !self.check_street_intersection_angles(&clamped_points, placed_segments, 30.0, grid) {
             return None;
         }
 
@@ -1922,8 +2180,9 @@ impl TerrainConfig {
         placed_segments: &[Vec<(f64, f64)>],
         connection_points: &[ConnectionPoint],
         parent_segment_idx: Option<usize>,
+        grid: &SpatialGrid,
     ) -> Option<Vec<SuburbanStreet>> {
-        let perp_angle = self.find_best_perpendicular_v2(cp_x, cp_y, tangent_angle, params, placed_segments, parent_segment_idx);
+        let perp_angle = self.find_best_perpendicular_v2(cp_x, cp_y, tangent_angle, params, placed_segments, parent_segment_idx, grid);
 
         let target_dist = 150.0 + rng.next() * 100.0;
         let target_x = cp_x + target_dist * perp_angle.cos();
@@ -1970,12 +2229,12 @@ impl TerrainConfig {
             return None;
         }
 
-        if self.check_street_collision(&clamped_points, placed_segments, params.min_street_spacing, parent_segment_idx) {
+        if self.check_street_collision(&clamped_points, placed_segments, params.min_street_spacing, parent_segment_idx, grid) {
             return None;
         }
 
         // Check intersection angles are at least 45 degrees
-        if !self.check_street_intersection_angles(&clamped_points, placed_segments, 30.0) {
+        if !self.check_street_intersection_angles(&clamped_points, placed_segments, 30.0, grid) {
             return None;
         }
 
@@ -2225,13 +2484,13 @@ impl TerrainConfig {
 
     /// Generate suburban plots from the street layout
     /// Returns plots that fill the space between streets
-    pub fn generate_suburban_plots(&self, params: &SuburbanGenParams) -> Vec<SuburbanPlot> {
+    pub fn generate_suburban_plots(&self, params: &SuburbanGenParams) -> Vec<TerrainPlot> {
         let roads = self.generate_suburban_streets_with_params(params);
         self.extract_plots_from_roads(&roads, params)
     }
 
     /// Generate suburban plots using the already-generated roads in self.roads
-    fn generate_suburban_plots_internal(&self, params: &SuburbanGenParams) -> Vec<SuburbanPlot> {
+    fn generate_suburban_plots_internal(&self, params: &SuburbanGenParams) -> Vec<TerrainPlot> {
         self.extract_plots_from_roads(&self.roads, params)
     }
 
@@ -2240,9 +2499,23 @@ impl TerrainConfig {
         &self,
         roads: &[RoadSegment],
         params: &SuburbanGenParams,
-    ) -> Vec<SuburbanPlot> {
+    ) -> Vec<TerrainPlot> {
         let mut plots = Vec::new();
         let mut placed_plot_corners: Vec<[(f64, f64); 4]> = Vec::new();
+
+        // Build spatial grid for roads to accelerate road intersection checks
+        let mut road_grid = SpatialGrid::new(self.center_x, self.center_y, params.outer_radius + 200.0, 50.0);
+        // Build index of suburban road indices (by position in roads slice)
+        let mut road_idx_map: HashMap<String, usize> = HashMap::new();
+        for (i, road) in roads.iter().enumerate() {
+            if !road.points.is_empty() {
+                road_grid.insert(i, &road.points);
+            }
+            road_idx_map.insert(road.id.clone(), i);
+        }
+
+        // Spatial grid for placed plots
+        let mut plot_grid = SpatialGrid::new(self.center_x, self.center_y, params.outer_radius + 200.0, 50.0);
 
         // For each road segment, generate plots on both sides
         for road in roads {
@@ -2250,10 +2523,22 @@ impl TerrainConfig {
                 continue;
             }
 
-            let road_plots = self.generate_plots_along_road(road, params, roads, &placed_plot_corners);
+            let road_plots = self.generate_plots_along_road(
+                road, params, roads, &placed_plot_corners,
+                &road_grid, &road_idx_map, &plot_grid
+            );
 
             // Add corners of successfully placed plots to our tracking list
             for plot in &road_plots {
+                let plot_idx = placed_plot_corners.len();
+                // Insert plot AABB into plot grid
+                let cs = &plot.corners;
+                let min_x = cs[0].0.min(cs[1].0).min(cs[2].0).min(cs[3].0);
+                let min_y = cs[0].1.min(cs[1].1).min(cs[2].1).min(cs[3].1);
+                let max_x = cs[0].0.max(cs[1].0).max(cs[2].0).max(cs[3].0);
+                let max_y = cs[0].1.max(cs[1].1).max(cs[2].1).max(cs[3].1);
+                // Use insert with a synthetic polyline covering the corners' AABB
+                plot_grid.insert(plot_idx, &[(min_x, min_y), (max_x, max_y)]);
                 placed_plot_corners.push(plot.corners);
             }
 
@@ -2270,7 +2555,10 @@ impl TerrainConfig {
         params: &SuburbanGenParams,
         all_roads: &[RoadSegment],
         placed_plots: &[[(f64, f64); 4]],
-    ) -> Vec<SuburbanPlot> {
+        road_grid: &SpatialGrid,
+        road_idx_map: &HashMap<String, usize>,
+        plot_grid: &SpatialGrid,
+    ) -> Vec<TerrainPlot> {
         let mut plots = Vec::new();
         let mut local_placed: Vec<[(f64, f64); 4]> = Vec::new();
 
@@ -2287,6 +2575,9 @@ impl TerrainConfig {
         let total_length = polyline_length(points);
         let num_plots_estimate = (total_length / target_frontage).ceil() as usize; // Use ceil for more plots
         let actual_frontage = total_length / num_plots_estimate.max(1) as f64;
+
+        // Get this road's index so we can exclude it from road intersection checks
+        let this_road_idx = road_idx_map.get(&road.id).copied();
 
         // Generate plots on both sides of road
         for side in [-1.0, 1.0] {
@@ -2339,13 +2630,21 @@ impl TerrainConfig {
 
                         let corners_slice: &[(f64, f64)] = &corners;
 
-                        // Check if plot intersects with any road (not just back midpoint)
+                        // Compute plot AABB for grid queries
+                        let plot_min_x = corners[0].0.min(corners[1].0).min(corners[2].0).min(corners[3].0);
+                        let plot_min_y = corners[0].1.min(corners[1].1).min(corners[2].1).min(corners[3].1);
+                        let plot_max_x = corners[0].0.max(corners[1].0).max(corners[2].0).max(corners[3].0);
+                        let plot_max_y = corners[0].1.max(corners[1].1).max(corners[2].1).max(corners[3].1);
+
+                        // Check if plot intersects with any road (via spatial grid)
                         let mut intersects_road = false;
-                        for other_road in all_roads {
+                        let nearby_roads = road_grid.query_aabb(plot_min_x, plot_min_y, plot_max_x, plot_max_y);
+                        for &road_idx in &nearby_roads {
                             // Skip the road this plot is on (front edge touches it by design)
-                            if other_road.id == road.id {
+                            if this_road_idx == Some(road_idx) {
                                 continue;
                             }
+                            let other_road = &all_roads[road_idx];
                             if polygon_intersects_road(corners_slice, &other_road.points, other_road.width) {
                                 intersects_road = true;
                                 break;
@@ -2353,12 +2652,12 @@ impl TerrainConfig {
                         }
 
                         if !intersects_road {
-                            // Check for overlap with already placed plots
+                            // Check for overlap with already placed plots (via spatial grid)
                             let mut overlaps = false;
 
-                            // Check against globally placed plots
-                            for existing in placed_plots {
-                                let existing_slice: &[(f64, f64)] = existing;
+                            let nearby_plots = plot_grid.query_aabb(plot_min_x, plot_min_y, plot_max_x, plot_max_y);
+                            for &plot_idx in &nearby_plots {
+                                let existing_slice: &[(f64, f64)] = &placed_plots[plot_idx];
                                 if polygons_overlap(corners_slice, existing_slice) {
                                     overlaps = true;
                                     break;
@@ -2377,16 +2676,17 @@ impl TerrainConfig {
                             }
 
                             if !overlaps {
-                                let area = SuburbanPlot::calculate_area(&corners);
+                                let area = TerrainPlot::calculate_area(&corners);
 
                                 if area >= params.min_plot_area && area <= params.max_plot_area {
                                     local_placed.push(corners);
-                                    plots.push(SuburbanPlot {
+                                    plots.push(TerrainPlot {
                                         id: format!("{}_{}_{}_{}", road.id, if side > 0.0 { "R" } else { "L" }, plot_id, (current_dist as i32)),
                                         corners,
                                         street_facing_edge: (0, 1),
                                         area,
                                         adjacent_street_id: road.id.clone(),
+                                        zone: "suburban".to_string(),
                                     });
                                     plot_id += 1;
                                     plot_placed = true;
@@ -2410,18 +2710,22 @@ impl TerrainConfig {
 
     /// Generate unpaved trails in the rural zone with smooth meandering paths
     fn generate_rural_paths(&self, seed: u64) -> Vec<RoadSegment> {
-        let mut roads = Vec::new();
-        let inner_radius = 2400.0;
-        let outer_radius = 3400.0;
+        let params = WorldGenParams { seed, ..Default::default() };
+        self.generate_rural_paths_with_params(&params)
+    }
 
-        let mut rng_state = seed.wrapping_add(12345); // Different seed offset
+    fn generate_rural_paths_with_params(&self, params: &WorldGenParams) -> Vec<RoadSegment> {
+        let mut roads = Vec::new();
+        let inner_radius = params.suburban_outer_radius;
+        let outer_radius = params.rural_outer_radius;
+
+        let mut rng_state = params.seed.wrapping_add(12345);
         let mut next_rand = || {
             rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
             ((rng_state >> 16) & 0x7fff) as f64 / 0x7fff as f64
         };
 
-        // Generate meandering trails that connect to arterial roads
-        let num_trails = 12;
+        let num_trails = params.rural_trail_count;
         for i in 0..num_trails {
             let base_angle = (i as f64 / num_trails as f64) * 2.0 * PI + next_rand() * 0.3;
 
@@ -2450,11 +2754,250 @@ impl TerrainConfig {
                 id: format!("trail_{}", i),
                 road_type: RoadType::Trail,
                 points: smooth_points,
-                width: 6.0,
+                width: params.rural_trail_width,
             });
         }
 
         roads
+    }
+
+    /// Generate plots filling the urban grid blocks (trapezoids between arcs and spokes)
+    fn generate_urban_plots(&self, params: &WorldGenParams) -> Vec<TerrainPlot> {
+        let mut plots = Vec::new();
+        // Start past the outer canal so plots don't overlap the water ring
+        let inner_radius = params.guild_outer_radius + params.canal_outer_width / 2.0;
+        let outer_radius = params.urban_outer_radius;
+        let radial_spacing = params.urban_radial_spacing;
+        let spoke_count = params.urban_spoke_count;
+        let half_w = params.urban_street_width / 2.0;
+        let frontage = params.urban_plot_frontage;
+        let depth = params.urban_plot_depth;
+
+        let angle_step = 2.0 * PI / spoke_count as f64;
+
+        // Walk concentric rings
+        let mut r = inner_radius + radial_spacing;
+        let mut ring_idx = 0u32;
+        while r < outer_radius {
+            let r_in = r - radial_spacing + half_w; // inner arc inset from road centerline
+            let r_out = r - half_w;                 // outer arc inset from road centerline
+
+            // Skip if block is too thin after insets
+            if r_out - r_in < depth.min(20.0) {
+                r += radial_spacing;
+                ring_idx += 1;
+                continue;
+            }
+
+            for spoke_idx in 0..spoke_count {
+                let a1 = spoke_idx as f64 * angle_step;
+                let a2 = (spoke_idx + 1) as f64 * angle_step;
+
+                // Angular insets for street width at inner and outer arcs
+                let angular_inset_in = if r_in > 0.0 { half_w / r_in } else { 0.0 };
+                let angular_inset_out = if r_out > 0.0 { half_w / r_out } else { 0.0 };
+
+                let block_a1_in = a1 + angular_inset_in;
+                let block_a2_in = a2 - angular_inset_in;
+                let block_a1_out = a1 + angular_inset_out;
+                let block_a2_out = a2 - angular_inset_out;
+
+                // Check if block has positive angular extent
+                if block_a2_in <= block_a1_in || block_a2_out <= block_a1_out {
+                    continue;
+                }
+
+                // Calculate arc length at the midpoint radius to determine subdivision
+                let mid_r = (r_in + r_out) / 2.0;
+                let arc_length = mid_r * (block_a2_in - block_a1_in);
+
+                // Subdivide along arc if block is wider than frontage
+                let num_subdivs = if frontage > 0.0 {
+                    (arc_length / frontage).ceil() as u32
+                } else {
+                    1
+                }.max(1);
+
+                // Also subdivide radially if block is deeper than depth
+                let block_depth = r_out - r_in;
+                let num_depth_subdivs = if depth > 0.0 {
+                    (block_depth / depth).ceil() as u32
+                } else {
+                    1
+                }.max(1);
+
+                for d in 0..num_depth_subdivs {
+                    let sub_r_in = r_in + (block_depth / num_depth_subdivs as f64) * d as f64;
+                    let sub_r_out = r_in + (block_depth / num_depth_subdivs as f64) * (d + 1) as f64;
+
+                    // Recalculate angular insets for this depth band
+                    let sub_inset_in = if sub_r_in > 0.0 { half_w / sub_r_in } else { 0.0 };
+                    let sub_inset_out = if sub_r_out > 0.0 { half_w / sub_r_out } else { 0.0 };
+                    let sub_a1_in = a1 + sub_inset_in;
+                    let sub_a2_in = a2 - sub_inset_in;
+                    let sub_a1_out = a1 + sub_inset_out;
+                    let sub_a2_out = a2 - sub_inset_out;
+
+                    for s in 0..num_subdivs {
+                        let frac0 = s as f64 / num_subdivs as f64;
+                        let frac1 = (s + 1) as f64 / num_subdivs as f64;
+
+                        let sa1_in = sub_a1_in + (sub_a2_in - sub_a1_in) * frac0;
+                        let sa2_in = sub_a1_in + (sub_a2_in - sub_a1_in) * frac1;
+                        let sa1_out = sub_a1_out + (sub_a2_out - sub_a1_out) * frac0;
+                        let sa2_out = sub_a1_out + (sub_a2_out - sub_a1_out) * frac1;
+
+                        let corners = [
+                            (self.center_x + sub_r_in * sa1_in.cos(), self.center_y + sub_r_in * sa1_in.sin()),
+                            (self.center_x + sub_r_in * sa2_in.cos(), self.center_y + sub_r_in * sa2_in.sin()),
+                            (self.center_x + sub_r_out * sa2_out.cos(), self.center_y + sub_r_out * sa2_out.sin()),
+                            (self.center_x + sub_r_out * sa1_out.cos(), self.center_y + sub_r_out * sa1_out.sin()),
+                        ];
+
+                        let area = TerrainPlot::calculate_area(&corners);
+                        if area < 50.0 {
+                            continue; // Skip degenerate plots
+                        }
+
+                        // Find nearest arc road for adjacent_street_id
+                        let adjacent_id = format!("urban_arc_{}", ring_idx);
+
+                        plots.push(TerrainPlot {
+                            id: format!("urban_plot_{}_{}_{}{}", ring_idx, spoke_idx, s,
+                                if num_depth_subdivs > 1 { format!("_d{}", d) } else { String::new() }),
+                            corners,
+                            street_facing_edge: (0, 1),
+                            area,
+                            adjacent_street_id: adjacent_id,
+                            zone: "urban".to_string(),
+                        });
+                    }
+                }
+            }
+
+            r += radial_spacing;
+            ring_idx += 1;
+        }
+
+        plots
+    }
+
+    /// Generate plots along rural trail roads
+    fn generate_rural_plots(&self, params: &WorldGenParams) -> Vec<TerrainPlot> {
+        let mut plots = Vec::new();
+        let mut placed_plot_corners: Vec<[(f64, f64); 4]> = Vec::new();
+        let inner_radius = params.suburban_outer_radius;
+        let outer_radius = params.rural_outer_radius;
+        let frontage = params.rural_plot_frontage;
+        let depth = params.rural_plot_depth;
+
+        // Iterate over trail roads
+        for road in &self.roads {
+            if road.road_type != RoadType::Trail {
+                continue;
+            }
+
+            let points = &road.points;
+            if points.len() < 2 {
+                continue;
+            }
+
+            let total_length = polyline_length(points);
+            if total_length < frontage {
+                continue;
+            }
+
+            let half_trail_w = road.width / 2.0 + 2.0;
+            let mut plot_id = 0u32;
+
+            // Place plots on both sides of the trail
+            for side in [-1.0_f64, 1.0_f64] {
+                let mut current_dist = 10.0; // Start slightly in from trail start
+
+                while current_dist + frontage <= total_length - 10.0 {
+                    let front_start = point_at_distance(points, current_dist);
+                    let front_end = point_at_distance(points, current_dist + frontage);
+
+                    if let (Some((fs_x, fs_y, fs_angle)), Some((fe_x, fe_y, fe_angle))) = (front_start, front_end) {
+                        let perp_angle = (fs_angle + fe_angle) / 2.0 + side * PI / 2.0;
+
+                        // Offset front corners away from trail center
+                        let fs_off_x = fs_x + half_trail_w * perp_angle.cos();
+                        let fs_off_y = fs_y + half_trail_w * perp_angle.sin();
+                        let fe_off_x = fe_x + half_trail_w * perp_angle.cos();
+                        let fe_off_y = fe_y + half_trail_w * perp_angle.sin();
+
+                        // Back corners at depth offset
+                        let bs_x = fs_x + depth * perp_angle.cos();
+                        let bs_y = fs_y + depth * perp_angle.sin();
+                        let be_x = fe_x + depth * perp_angle.cos();
+                        let be_y = fe_y + depth * perp_angle.sin();
+
+                        let corners = [
+                            (fs_off_x, fs_off_y),
+                            (fe_off_x, fe_off_y),
+                            (be_x, be_y),
+                            (bs_x, bs_y),
+                        ];
+
+                        // Validate all corners are within rural zone
+                        let all_in_zone = corners.iter().all(|(x, y)| {
+                            let dist = ((x - self.center_x).powi(2) + (y - self.center_y).powi(2)).sqrt();
+                            dist >= inner_radius && dist <= outer_radius
+                        });
+
+                        if all_in_zone {
+                            let corners_slice: &[(f64, f64)] = &corners;
+
+                            // Check overlap with other roads
+                            let mut intersects_road = false;
+                            for other_road in &self.roads {
+                                if other_road.id == road.id {
+                                    continue;
+                                }
+                                if polygon_intersects_road(corners_slice, &other_road.points, other_road.width) {
+                                    intersects_road = true;
+                                    break;
+                                }
+                            }
+
+                            if !intersects_road {
+                                // Check overlap with already placed plots
+                                let mut overlaps = false;
+                                for existing in &placed_plot_corners {
+                                    let existing_slice: &[(f64, f64)] = existing;
+                                    if polygons_overlap(corners_slice, existing_slice) {
+                                        overlaps = true;
+                                        break;
+                                    }
+                                }
+
+                                if !overlaps {
+                                    let area = TerrainPlot::calculate_area(&corners);
+                                    if area >= 100.0 {
+                                        placed_plot_corners.push(corners);
+                                        plots.push(TerrainPlot {
+                                            id: format!("rural_plot_{}_{}_{}",
+                                                road.id, if side > 0.0 { "R" } else { "L" }, plot_id),
+                                            corners,
+                                            street_facing_edge: (0, 1),
+                                            area,
+                                            adjacent_street_id: road.id.clone(),
+                                            zone: "rural".to_string(),
+                                        });
+                                        plot_id += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    current_dist += frontage;
+                }
+            }
+        }
+
+        plots
     }
 }
 
@@ -2738,9 +3281,9 @@ mod tests {
         let params = SuburbanGenParams::default();
         assert_eq!(params.inner_radius, 1600.0);
         assert_eq!(params.outer_radius, 2400.0);
-        assert_eq!(params.min_plot_area, 10_000.0);
-        assert_eq!(params.max_plot_area, 20_000.0);
-        assert_eq!(params.target_plot_area, 14_000.0);
+        assert_eq!(params.min_plot_area, 6_000.0);
+        assert_eq!(params.max_plot_area, 12_000.0);
+        assert_eq!(params.target_plot_area, 8_000.0);
     }
 
     #[test]
@@ -2890,7 +3433,7 @@ mod tests {
             (100.0, 100.0),
             (0.0, 100.0),
         ];
-        let area = SuburbanPlot::calculate_area(&square);
+        let area = TerrainPlot::calculate_area(&square);
         assert!((area - 10_000.0).abs() < 0.01, "Expected area 10000, got {}", area);
 
         // Test a rectangle
@@ -2900,7 +3443,7 @@ mod tests {
             (200.0, 100.0),
             (0.0, 100.0),
         ];
-        let rect_area = SuburbanPlot::calculate_area(&rect);
+        let rect_area = TerrainPlot::calculate_area(&rect);
         assert!((rect_area - 20_000.0).abs() < 0.01, "Expected area 20000, got {}", rect_area);
     }
 
@@ -2991,9 +3534,10 @@ mod tests {
 
         // Run the full iterative generation process
         let mut suburban_streets: Vec<SuburbanStreet> = Vec::new();
+        let mut grid = SpatialGrid::new(config.center_x, config.center_y, params.outer_radius + 100.0, 50.0);
 
         // Phase 1: Generate collector roads
-        let collectors = config.generate_collector_roads(&params);
+        let collectors = config.generate_collector_roads(&params, &mut grid);
         println!("Generated {} collector roads", collectors.len());
         assert!(!collectors.is_empty(), "Should generate collector roads");
         suburban_streets.extend(collectors);
@@ -3018,14 +3562,14 @@ mod tests {
                     for i in 1..=num_cp {
                         let t = i as f64 / (num_cp + 1) as f64;
                         if let Some((x, y, angle)) = point_and_tangent_at_t(&cs.segment.points, t) {
-                            let depth = config.available_depth(x, y, angle, &params, &placed_segs);
+                            let depth = config.available_depth(x, y, angle, &params, &placed_segs, &grid);
                             println!("    CP at t={:.2}: ({:.0},{:.0}) depth={:.0}", t, x, y, depth);
                         }
                     }
                 }
             }
 
-            let locals = config.generate_local_streets(&params, &suburban_streets, iteration);
+            let locals = config.generate_local_streets(&params, &suburban_streets, iteration, &mut grid);
             if locals.is_empty() {
                 println!("Iteration {} produced 0 streets, stopping", iteration);
                 break;
@@ -3154,5 +3698,91 @@ mod tests {
             problematic_roads.len(),
             problematic_roads.iter().map(|(id, _, _, _)| id.clone()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_terrain_generation_determinism() {
+        // Generate terrain twice with the same params and verify identical output
+        let params = WorldGenParams::default();
+        let config1 = TerrainConfig::from_params(&params);
+        let config2 = TerrainConfig::from_params(&params);
+
+        // Same number of roads
+        assert_eq!(config1.roads.len(), config2.roads.len(),
+            "Road count differs between runs: {} vs {}", config1.roads.len(), config2.roads.len());
+
+        // Same road IDs and points
+        for (r1, r2) in config1.roads.iter().zip(config2.roads.iter()) {
+            assert_eq!(r1.id, r2.id, "Road IDs differ");
+            assert_eq!(r1.points.len(), r2.points.len(),
+                "Road {} point count differs: {} vs {}", r1.id, r1.points.len(), r2.points.len());
+            for (i, (p1, p2)) in r1.points.iter().zip(r2.points.iter()).enumerate() {
+                assert!((p1.0 - p2.0).abs() < 1e-10 && (p1.1 - p2.1).abs() < 1e-10,
+                    "Road {} point {} differs: ({},{}) vs ({},{})", r1.id, i, p1.0, p1.1, p2.0, p2.1);
+            }
+        }
+
+        // Same plots
+        assert_eq!(config1.terrain_plots.len(), config2.terrain_plots.len(),
+            "Plot count differs: {} vs {}", config1.terrain_plots.len(), config2.terrain_plots.len());
+
+        for (p1, p2) in config1.terrain_plots.iter().zip(config2.terrain_plots.iter()) {
+            assert_eq!(p1.id, p2.id, "Plot IDs differ");
+            for (i, (c1, c2)) in p1.corners.iter().zip(p2.corners.iter()).enumerate() {
+                assert!((c1.0 - c2.0).abs() < 1e-10 && (c1.1 - c2.1).abs() < 1e-10,
+                    "Plot {} corner {} differs", p1.id, i);
+            }
+        }
+    }
+
+    #[test]
+    fn test_terrain_generation_performance() {
+        use std::time::Instant;
+
+        let params = WorldGenParams::default();
+
+        let start = Instant::now();
+        let _config = TerrainConfig::from_params(&params);
+        let elapsed = start.elapsed();
+
+        println!("Terrain generation took: {:?}", elapsed);
+        // Generous bound for debug-mode parallel test runs.
+        // Typical: ~1.3s debug, ~100ms release. Pre-optimization was ~115s debug.
+        assert!(elapsed.as_millis() < 5000,
+            "Terrain generation took too long: {:?} (expected <5000ms)", elapsed);
+    }
+
+    #[test]
+    fn test_spatial_grid_basic() {
+        let mut grid = SpatialGrid::new(0.0, 0.0, 100.0, 10.0);
+
+        // Insert a horizontal line segment
+        grid.insert(0, &[(-50.0, 0.0), (50.0, 0.0)]);
+
+        // Point near the line should find it
+        let results = grid.query_point(0.0, 0.0, 5.0);
+        assert!(results.contains(&0), "Should find segment near origin");
+
+        // Point far away should not find it
+        let results = grid.query_point(0.0, 80.0, 5.0);
+        assert!(!results.contains(&0), "Should not find segment far away");
+    }
+
+    #[test]
+    fn test_spatial_grid_multiple_segments() {
+        let mut grid = SpatialGrid::new(0.0, 0.0, 100.0, 10.0);
+
+        grid.insert(0, &[(-50.0, -50.0), (-40.0, -50.0)]);
+        grid.insert(1, &[(40.0, 40.0), (50.0, 50.0)]);
+
+        // Query near first segment
+        let near_first = grid.query_point(-45.0, -50.0, 5.0);
+        assert!(near_first.contains(&0));
+        assert!(!near_first.contains(&1));
+
+        // Query near second segment
+        let near_second = grid.query_point(45.0, 45.0, 5.0);
+        assert!(!near_second.contains(&0));
+        assert!(near_second.contains(&1));
     }
 }

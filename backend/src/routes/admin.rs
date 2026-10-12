@@ -1,0 +1,139 @@
+use axum::{
+    extract::{Extension, State},
+    routing::{get, post, put},
+    Json, Router,
+};
+use chrono::Utc;
+use serde::Serialize;
+
+use crate::error::AppError;
+use crate::middleware::auth::AuthUser;
+use crate::models::{ActionState, TerrainConfig, WorldGenParams};
+use crate::state::AppState;
+use crate::engine::GameEvent;
+
+fn require_admin(user: &AuthUser) -> Result<(), AppError> {
+    if !user.is_admin {
+        return Err(AppError::Forbidden("Admin access required".to_string()));
+    }
+    Ok(())
+}
+
+pub fn router(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/world-params", get(get_world_params))
+        .route("/world-params", put(update_world_params))
+        .route("/world-params/commit", post(commit_world_params))
+        .route("/stats", get(get_server_stats))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::middleware::auth::auth_middleware,
+        ))
+}
+
+/// Get current world generation parameters
+pub async fn get_world_params(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<WorldGenParams>, AppError> {
+    require_admin(&user)?;
+
+    let game = state.game.read().await;
+    Ok(Json(game.world_gen_params.clone()))
+}
+
+/// Regenerate terrain in memory (does NOT persist to database)
+pub async fn update_world_params(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(params): Json<WorldGenParams>,
+) -> Result<Json<WorldGenParams>, AppError> {
+    require_admin(&user)?;
+
+    let mut game = state.game.write().await;
+
+    let new_terrain = TerrainConfig::from_params(&params);
+    game.terrain = new_terrain;
+    game.world_gen_params = params.clone();
+
+    let _ = game.event_sender.send(GameEvent::TerrainUpdated);
+
+    tracing::info!("Admin {} regenerated terrain (uncommitted)", user.account_id);
+
+    Ok(Json(params))
+}
+
+/// Commit current in-memory world params to the database
+pub async fn commit_world_params(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<WorldGenParams>, AppError> {
+    require_admin(&user)?;
+
+    let game = state.game.read().await;
+    let params = game.world_gen_params.clone();
+    drop(game); // release lock before DB call
+
+    let params_json = serde_json::to_value(&params)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize params: {}", e)))?;
+
+    sqlx::query(
+        "INSERT INTO world_config (id, params, updated_at) VALUES (1, $1, $2)
+         ON CONFLICT (id) DO UPDATE SET params = $1, updated_at = $2"
+    )
+    .bind(&params_json)
+    .bind(Utc::now())
+    .execute(&state.db)
+    .await?;
+
+    tracing::info!("Admin {} committed world params to database", user.account_id);
+
+    Ok(Json(params))
+}
+
+#[derive(Serialize)]
+pub struct ServerStats {
+    pub tps: f64,
+    pub tick_count: u64,
+    pub uptime_seconds: f64,
+    pub active_players: usize,
+    pub active_crafting: usize,
+    pub active_extracting: usize,
+    pub active_trades: usize,
+    pub resource_nodes: usize,
+    pub station_count: usize,
+    pub command_queue_size: usize,
+    pub broadcast_subscribers: usize,
+}
+
+/// Get real-time server performance stats
+pub async fn get_server_stats(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<ServerStats>, AppError> {
+    require_admin(&user)?;
+
+    let game = state.game.read().await;
+
+    let active_extracting = game
+        .players
+        .values()
+        .filter(|p| matches!(p.action_state, ActionState::Extracting { .. }))
+        .count();
+
+    let stats = ServerStats {
+        tps: game.last_tps,
+        tick_count: game.tick_count,
+        uptime_seconds: game.uptime_seconds,
+        active_players: game.players.len(),
+        active_crafting: game.crafting_operations.len(),
+        active_extracting,
+        active_trades: game.trade_manager.active_trades.len(),
+        resource_nodes: game.resource_nodes.len(),
+        station_count: game.stations.len(),
+        command_queue_size: game.command_queue.len(),
+        broadcast_subscribers: game.event_sender.receiver_count(),
+    };
+
+    Ok(Json(stats))
+}

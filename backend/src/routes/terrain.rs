@@ -2,7 +2,7 @@ use axum::{extract::State, routing::get, Json, Router};
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use crate::models::{Bridge, RoadSegment, RoadType, SuburbanPlot, TerrainConfig, WaterRing};
+use crate::models::{Bridge, RoadSegment, RoadType, TerrainPlot, TerrainConfig, WaterRing};
 use crate::state::AppState;
 
 /// Response for terrain data endpoint
@@ -18,8 +18,8 @@ pub struct TerrainResponse {
     pub water_rings: Vec<WaterRingResponse>,
     /// Road network
     pub roads: Vec<RoadResponse>,
-    /// Suburban zone plots
-    pub suburban_plots: Vec<SuburbanPlotResponse>,
+    /// Terrain-level plots (urban, suburban, rural)
+    pub terrain_plots: Vec<PlotResponse>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -55,7 +55,7 @@ pub struct RoadResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct SuburbanPlotResponse {
+pub struct PlotResponse {
     /// Plot identifier
     pub id: String,
     /// Four corners of the plot (clockwise from street-left)
@@ -66,6 +66,8 @@ pub struct SuburbanPlotResponse {
     pub area: f64,
     /// ID of the adjacent street
     pub adjacent_street_id: String,
+    /// Zone this plot belongs to: "urban", "suburban", or "rural"
+    pub zone: String,
 }
 
 impl From<&TerrainConfig> for TerrainResponse {
@@ -76,7 +78,7 @@ impl From<&TerrainConfig> for TerrainResponse {
             center_y: config.center_y,
             water_rings: config.water_rings.iter().map(|r| r.into()).collect(),
             roads: config.roads.iter().map(|r| r.into()).collect(),
-            suburban_plots: config.suburban_plots.iter().map(|p| p.into()).collect(),
+            terrain_plots: config.terrain_plots.iter().map(|p| p.into()).collect(),
         }
     }
 }
@@ -117,14 +119,15 @@ impl From<&RoadSegment> for RoadResponse {
     }
 }
 
-impl From<&SuburbanPlot> for SuburbanPlotResponse {
-    fn from(plot: &SuburbanPlot) -> Self {
-        SuburbanPlotResponse {
+impl From<&TerrainPlot> for PlotResponse {
+    fn from(plot: &TerrainPlot) -> Self {
+        PlotResponse {
             id: plot.id.clone(),
             corners: plot.corners,
             street_facing_edge: plot.street_facing_edge,
             area: plot.area,
             adjacent_street_id: plot.adjacent_street_id.clone(),
+            zone: plot.zone.clone(),
         }
     }
 }

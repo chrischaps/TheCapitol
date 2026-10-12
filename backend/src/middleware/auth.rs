@@ -17,6 +17,7 @@ use crate::state::AppState;
 pub struct AuthUser {
     pub account_id: Uuid,
     pub tier: String,
+    pub is_admin: bool,
 }
 
 pub async fn auth_middleware(
@@ -71,6 +72,7 @@ pub async fn auth_middleware(
     request.extensions_mut().insert(AuthUser {
         account_id: token_data.claims.sub,
         tier: token_data.claims.tier,
+        is_admin: token_data.claims.is_admin,
     });
 
     Ok(next.run(request).await)

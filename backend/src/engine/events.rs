@@ -164,6 +164,8 @@ pub enum GameEvent {
         stopped_x: f64,
         stopped_y: f64,
     },
+    /// Terrain was regenerated with new params (broadcast to all clients)
+    TerrainUpdated,
 }
 
 /// Item in a trade offer (for events)

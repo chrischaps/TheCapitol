@@ -179,6 +179,8 @@ interface GameContextType {
   selectedPlot: PlotInfo | null
   // Terrain
   terrain: TerrainData | null
+  // Performance
+  wsMessagesPerSecond: number
   // Actions
   sendMove: (x: number, y: number) => void
   startExtraction: (nodeId: string) => void
@@ -291,6 +293,10 @@ export function GameProvider({ children }: { children: ReactNode }) {
   // Terrain
   const [terrain, setTerrain] = useState<TerrainData | null>(null)
 
+  // Performance: WS messages per second
+  const [wsMessagesPerSecond, setWsMessagesPerSecond] = useState(0)
+  const wsMessageCountRef = useRef(0)
+
   const EXTRACTION_RANGE = 50
   const STATION_INTERACTION_RANGE = 75
 
@@ -298,6 +304,15 @@ export function GameProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     activeTradeRef.current = activeTrade
   }, [activeTrade])
+
+  // Track WS messages per second
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setWsMessagesPerSecond(wsMessageCountRef.current)
+      wsMessageCountRef.current = 0
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [])
 
   // Compute inventory stacks from inventory (legacy)
   const inventoryStacks = useMemo(() => {
@@ -350,6 +365,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
     }
 
     ws.onmessage = (event) => {
+      wsMessageCountRef.current++
       const msg = JSON.parse(event.data)
       console.log('WebSocket message:', msg.type)
 
@@ -751,6 +767,11 @@ export function GameProvider({ children }: { children: ReactNode }) {
           setTimeout(() => {
             setNotifications((prev) => prev.filter((n) => n.id !== cancelNotification.id))
           }, 3000)
+          break
+
+        case 'terrain_updated':
+          console.log('Terrain updated by admin, re-fetching...')
+          fetchTerrain()
           break
       }
     }
@@ -1269,6 +1290,8 @@ export function GameProvider({ children }: { children: ReactNode }) {
     refreshPlots,
     // Terrain
     terrain,
+    // Performance
+    wsMessagesPerSecond,
   }
 
   return <GameContext.Provider value={value}>{children}</GameContext.Provider>

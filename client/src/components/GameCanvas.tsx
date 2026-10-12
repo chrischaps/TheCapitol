@@ -130,9 +130,9 @@ export default function GameCanvas() {
 
       // Draw terrain (roads first so water covers road ends)
       if (terrain) {
-        // Suburban plots (draw first, underneath roads)
-        if (terrain.suburban_plots) {
-          drawSuburbanPlots(ctx, offsetX, offsetY, terrain.suburban_plots)
+        // Terrain plots (draw first, underneath roads)
+        if (terrain.terrain_plots) {
+          drawTerrainPlots(ctx, offsetX, offsetY, terrain.terrain_plots)
         }
         // Roads
         if (terrain.roads) {
@@ -152,46 +152,6 @@ export default function GameCanvas() {
       ctx.strokeStyle = GOLDEN
       ctx.lineWidth = 2
       ctx.strokeRect(offsetX, offsetY, WORLD_SIZE, WORLD_SIZE)
-
-      // M7: Draw nearby plots
-      nearbyPlots.forEach((plot) => {
-        const plotScreenX = plot.worldX + offsetX
-        const plotScreenY = plot.worldY + offsetY
-        const halfWidth = (plot.bounds.maxX - plot.bounds.minX) / 2
-        const halfHeight = (plot.bounds.maxY - plot.bounds.minY) / 2
-
-        // Determine plot color based on ownership
-        let plotColor = '#4a4a54' // unclaimed - gray
-        let plotAlpha = 0.2
-        if (plot.ownerId) {
-          if (myPlayerId && plot.ownerId === myPlayerId) {
-            plotColor = '#22c55e' // owned by me - green
-            plotAlpha = 0.3
-          } else {
-            plotColor = '#ef4444' // owned by others - red
-            plotAlpha = 0.2
-          }
-        }
-
-        // Draw plot area
-        ctx.fillStyle = plotColor + Math.round(plotAlpha * 255).toString(16).padStart(2, '0')
-        ctx.fillRect(
-          plotScreenX - halfWidth,
-          plotScreenY - halfHeight,
-          halfWidth * 2,
-          halfHeight * 2
-        )
-
-        // Draw plot border
-        ctx.strokeStyle = plotColor + '80'
-        ctx.lineWidth = 1
-        ctx.strokeRect(
-          plotScreenX - halfWidth,
-          plotScreenY - halfHeight,
-          halfWidth * 2,
-          halfHeight * 2
-        )
-      })
 
       // Draw resource nodes
       nodes.forEach((node) => {
@@ -572,18 +532,24 @@ export default function GameCanvas() {
     ctx.stroke()
   }
 
-  // Draw suburban plots as polygons
-  function drawSuburbanPlots(
+  // Draw terrain plots as polygons (urban, suburban, rural)
+  function drawTerrainPlots(
     ctx: CanvasRenderingContext2D,
     offsetX: number,
     offsetY: number,
-    plots: { id: string; corners: [[number, number], [number, number], [number, number], [number, number]]; area: number }[]
+    plots: { id: string; corners: [[number, number], [number, number], [number, number], [number, number]]; area: number; zone?: string }[]
   ) {
-    const PLOT_FILL_COLOR = 'rgba(34, 197, 94, 0.08)' // Subtle green
-    const PLOT_STROKE_COLOR = 'rgba(34, 197, 94, 0.25)' // Green border
+    // Zone-specific colors for visual differentiation
+    const ZONE_COLORS: Record<string, { fill: string; stroke: string }> = {
+      urban: { fill: 'rgba(100, 116, 139, 0.08)', stroke: 'rgba(100, 116, 139, 0.25)' },
+      suburban: { fill: 'rgba(34, 197, 94, 0.08)', stroke: 'rgba(34, 197, 94, 0.25)' },
+      rural: { fill: 'rgba(132, 204, 22, 0.08)', stroke: 'rgba(132, 204, 22, 0.25)' },
+    }
+    const DEFAULT_COLORS = { fill: 'rgba(34, 197, 94, 0.08)', stroke: 'rgba(34, 197, 94, 0.25)' }
 
     for (const plot of plots) {
       const corners = plot.corners
+      const colors = ZONE_COLORS[plot.zone || 'suburban'] || DEFAULT_COLORS
 
       // Draw filled polygon
       ctx.beginPath()
@@ -592,11 +558,11 @@ export default function GameCanvas() {
         ctx.lineTo(corners[i][0] + offsetX, corners[i][1] + offsetY)
       }
       ctx.closePath()
-      ctx.fillStyle = PLOT_FILL_COLOR
+      ctx.fillStyle = colors.fill
       ctx.fill()
 
       // Draw border
-      ctx.strokeStyle = PLOT_STROKE_COLOR
+      ctx.strokeStyle = colors.stroke
       ctx.lineWidth = 1
       ctx.stroke()
     }

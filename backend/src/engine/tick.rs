@@ -11,7 +11,7 @@ use super::extraction::{cancel_extraction, process_extractions, start_extraction
 use super::movement::process_movement;
 use super::regeneration::process_regeneration;
 use super::trading::{TradeManager, TRADE_RANGE};
-use crate::models::{ActionState, Item, ItemType, PlayerPosition, PlayerState, Recipe, ResourceNodeState, ResourceType, StationState, StationType, TerrainConfig};
+use crate::models::{ActionState, Item, ItemType, PlayerPosition, PlayerState, Recipe, ResourceNodeState, ResourceType, StationState, StationType, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
 
 const TICK_RATE_MS: u64 = 100;
@@ -37,11 +37,21 @@ pub struct GameState {
     pub trade_manager: TradeManager,
     // Terrain configuration (moats, canals, bridges, roads)
     pub terrain: TerrainConfig,
+    // World generation parameters (for admin tweaking)
+    pub world_gen_params: WorldGenParams,
+    // Performance tracking
+    pub last_tps: f64,
+    pub uptime_seconds: f64,
 }
 
 impl GameState {
     pub fn new() -> Self {
+        Self::with_params(WorldGenParams::default())
+    }
+
+    pub fn with_params(params: WorldGenParams) -> Self {
         let (event_sender, _) = broadcast::channel(1024);
+        let terrain = TerrainConfig::from_params(&params);
         Self {
             players: HashMap::new(),
             resource_nodes: HashMap::new(),
@@ -58,7 +68,10 @@ impl GameState {
             stations: HashMap::new(),
             station_types: HashMap::new(),
             trade_manager: TradeManager::new(),
-            terrain: TerrainConfig::get_default(),
+            terrain,
+            world_gen_params: params,
+            last_tps: 0.0,
+            uptime_seconds: 0.0,
         }
     }
 
@@ -527,6 +540,7 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
     let mut interval = tokio::time::interval(Duration::from_millis(TICK_RATE_MS));
     let mut last_log = Instant::now();
     let mut tick_count = 0u64;
+    let loop_start = Instant::now();
 
     loop {
         interval.tick().await;
@@ -575,6 +589,11 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
         if last_log.elapsed() >= Duration::from_secs(10) {
             let tps = tick_count as f64 / last_log.elapsed().as_secs_f64();
             tracing::debug!("Tick rate: {:.1} ticks/sec", tps);
+            {
+                let mut game = game_state.write().await;
+                game.last_tps = tps;
+                game.uptime_seconds = loop_start.elapsed().as_secs_f64();
+            }
             last_log = Instant::now();
             tick_count = 0;
         }

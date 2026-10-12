@@ -285,6 +285,8 @@ enum ServerMessage {
         stopped_x: f64,
         stopped_y: f64,
     },
+    #[serde(rename = "terrain_updated")]
+    TerrainUpdated,
 }
 
 #[derive(Debug, Serialize)]
@@ -1023,6 +1025,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let msg = ServerMessage::MovementBlocked { player_id: pid, reason, stopped_x, stopped_y };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
+                    }
+                    Ok(GameEvent::TerrainUpdated) => {
+                        // Broadcast to all connected clients
+                        let msg = ServerMessage::TerrainUpdated;
+                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
                     Err(_) => {
                         // Channel closed

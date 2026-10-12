@@ -10,6 +10,8 @@ import TradeRequestNotification from '../components/TradeRequestNotification'
 import TradeWindow from '../components/TradeWindow'
 import ZoneIndicator from '../components/ZoneIndicator'
 import PlotPanel from '../components/PlotPanel'
+import WorldTweakPanel from '../components/WorldTweakPanel'
+import AdminPerfPanel from '../components/AdminPerfPanel'
 import './Game.css'
 
 function CurrencyDisplay() {
@@ -48,6 +50,8 @@ function GameContent() {
         {tradeRequest && <TradeRequestNotification />}
         {activeTrade && <TradeWindow />}
         {selectedPlot && <PlotPanel />}
+        <WorldTweakPanel />
+        <AdminPerfPanel />
       </main>
     </div>
   )

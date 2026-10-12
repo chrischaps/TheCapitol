@@ -59,8 +59,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let redis_conn = redis::aio::ConnectionManager::new(redis_client).await?;
     tracing::info!("Connected to Redis");
 
-    // Initialize game state
-    let game_state = Arc::new(RwLock::new(engine::GameState::new()));
+    // Load world gen params from DB (if previously saved by admin), else use defaults
+    let saved_params: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT params FROM world_config WHERE id = 1"
+    )
+    .fetch_optional(&db_pool)
+    .await?;
+
+    let world_gen_params: models::WorldGenParams = if let Some((json,)) = saved_params {
+        match serde_json::from_value(json) {
+            Ok(params) => {
+                tracing::info!("Loaded world gen params from database");
+                params
+            }
+            Err(e) => {
+                tracing::warn!("Failed to deserialize saved world params, using defaults: {}", e);
+                models::WorldGenParams::default()
+            }
+        }
+    } else {
+        tracing::info!("No saved world params, using defaults");
+        models::WorldGenParams::default()
+    };
+
+    // Initialize game state with loaded params
+    let game_state = Arc::new(RwLock::new(engine::GameState::with_params(world_gen_params)));
 
     // Load resource types into game state
     let resource_types: Vec<ResourceType> = sqlx::query_as(
@@ -202,6 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest("/plots", routes::plots::router(app_state.clone()))
         .nest("/bureaucracy", routes::bureaucracy::router(app_state.clone()))
         .nest("/terrain", routes::terrain::router(app_state.clone()))
+        .nest("/admin", routes::admin::router(app_state.clone()))
         .route("/ws", get(ws::ws_handler))
         .merge(SwaggerUi::new("/swagger-ui")
             .url("/api-doc/openapi.json", openapi::ApiDoc::openapi()))

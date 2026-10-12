@@ -19,12 +19,13 @@ export interface RoadSegment {
   width: number
 }
 
-export interface SuburbanPlot {
+export interface TerrainPlot {
   id: string
   corners: [[number, number], [number, number], [number, number], [number, number]]
   street_facing_edge: [number, number]
   area: number
   adjacent_street_id: string
+  zone: string
 }
 
 export interface TerrainData {
@@ -33,7 +34,7 @@ export interface TerrainData {
   center_y: number
   water_rings: WaterRing[]
   roads: RoadSegment[]
-  suburban_plots: SuburbanPlot[]
+  terrain_plots: TerrainPlot[]
 }
 
 export async function getTerrain(): Promise<TerrainData> {
