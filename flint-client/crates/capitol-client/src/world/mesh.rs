@@ -53,6 +53,14 @@ impl MeshBuf {
         }
     }
 
+    /// Adds all of `other`'s triangles to this mesh.
+    pub fn append(&mut self, other: MeshBuf) {
+        let base = self.vertices.len() as u32;
+        self.vertices.extend(other.vertices);
+        self.indices
+            .extend(other.indices.into_iter().map(|i| i + base));
+    }
+
     /// A flat ring at height `y` from `r_in` to `r_out` server units,
     /// skipping each `(centre_deg, half_width_deg)` gap. `r_in = 0` gives a
     /// disc. Triangles wind counter-clockwise seen from above (+Y).

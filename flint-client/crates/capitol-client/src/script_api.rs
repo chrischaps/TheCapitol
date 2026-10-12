@@ -26,6 +26,9 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     engine.register_fn("cap_view", move || -> String {
         view.lock().map(|s| s.clone()).unwrap_or_default()
     });
+    // `cap_ground_y() -> float`: the land's height in metres, for picking
+    // and for drawing on the ground. The sea is at 0.
+    engine.register_fn("cap_ground_y", || crate::coords::layer::GROUND as f64);
 }
 
 #[cfg(test)]

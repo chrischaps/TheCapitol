@@ -8,10 +8,10 @@ use flint_render::srgb_to_linear;
 pub const BACKGROUND: u32 = 0x0a0a0f;
 pub const DIM_TEXT: u32 = 0x808080;
 pub const GOLD_DIM: u32 = 0x8a7019;
-/// Water, `rgba(30,100,160,0.7)` in the 2D clients, and its highlight,
-/// `rgba(100,180,220,0.4)`. Alphas are the 3D material's business.
+/// Water, `rgba(30,100,160,0.7)` in the 2D clients. In 3D the water is
+/// the scene's ocean, whose colours are set in the scene file; this tints
+/// the canal beds.
 pub const WATER: u32 = 0x1e64a0;
-pub const WATER_HIGHLIGHT: u32 = 0x64b4dc;
 
 /// A zone's colour in the 2D clients.
 pub fn zone(zone: Zone) -> u32 {

@@ -2,7 +2,7 @@
 //! handedness. The ground moved to `world::ground` (P3.2) and the water to
 //! `world::water` (P3.3).
 
-use crate::coords::polar_to_world;
+use crate::coords::{layer, polar_to_world};
 use crate::world::mesh::MeshBuf;
 use crate::world::palette::hex;
 use flint_player::ExtensionGpu;
@@ -18,7 +18,7 @@ pub fn upload_static(gpu: &mut ExtensionGpu) {
     ] {
         let mut marker = MeshBuf::default();
         let [cx, cz] = polar_to_world(400.0, angle);
-        marker.annulus(0.0, 30.0, 0.04, color, &[]);
+        marker.annulus(0.0, 30.0, layer::ROAD, color, &[]);
         for v in &mut marker.vertices {
             v.position[0] += cx;
             v.position[2] += cz;

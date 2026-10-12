@@ -21,19 +21,27 @@ pub const S: f32 = 0.1;
 /// a hair above the layer under it so nothing z-fights. Bridge decks (P3.5)
 /// find their place in this list when they land, above `BANK`.
 ///
-/// The water sits *above* the roads: a canal is a stone-kerbed channel,
-/// its bed and surface raised a little inside banks that stand higher
-/// still, so from any height you look over the kerb into the water. Steps
-/// here are at least 6 cm, which the depth buffer resolves from the map
-/// view (plan §4.6). Roads should stop at the bank, not run under it.
+/// The land stands above the sea. The water is Flint's Gerstner ocean
+/// (the one Float drifts on), an endless sheet at y = 0 that follows the
+/// camera. The ground hides it everywhere except where the canals are cut
+/// through, so a canal is a stone-walled channel with the sea showing at
+/// its bottom: a water table. Steps between layers are at least 2 cm,
+/// which the depth buffer resolves from the map view (plan §4.6).
 #[allow(dead_code)] // PLOT and road() wait for plots (P3.6) and roads (P3.4)
 pub mod layer {
     use capitol_protocol::terrain::RoadType;
 
-    pub const GROUND: f32 = 0.0;
-    pub const PLOT: f32 = 0.02;
+    /// The ocean's rest level, fixed by the engine.
+    pub const SEA: f32 = 0.0;
+    /// The floor of a canal, under the water and seen through it.
+    pub const CHANNEL_BED: f32 = -1.6;
+    /// The land, high enough above the sea that no wave reaches it.
+    pub const GROUND: f32 = 0.6;
+    pub const PLOT: f32 = GROUND + 0.02;
     /// The lowest road layer; see [`road`].
-    pub const ROAD: f32 = 0.04;
+    pub const ROAD: f32 = GROUND + 0.04;
+    /// The top of the stone kerb that rims every canal.
+    pub const BANK: f32 = GROUND + 0.3;
 
     /// A road's height: trail < suburban < grid < arterial, so where two
     /// cross, the greater road is drawn on top.
@@ -46,13 +54,6 @@ pub mod layer {
         };
         ROAD + rank * 0.005
     }
-
-    /// The canal bed under the water, seen through it.
-    pub const WATER_BED: f32 = 0.08;
-    /// The water's surface.
-    pub const WATER: f32 = 0.16;
-    /// The top of the stone kerb that rims every stretch of water.
-    pub const BANK: f32 = 0.30;
 }
 
 /// Server (x, y) to world (X, Z) on the ground plane.
@@ -116,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn layers_stack_ground_plots_roads_by_rank_then_water() {
+    fn layers_stack_sea_ground_plots_roads_by_rank_then_bank() {
         use capitol_protocol::terrain::RoadType;
         let roads = [
             RoadType::Trail,
@@ -127,8 +128,8 @@ mod tests {
         .map(layer::road);
         assert!(layer::GROUND < layer::PLOT && layer::PLOT < roads[0]);
         assert!(roads.windows(2).all(|w| w[0] < w[1]));
-        assert!(roads[3] < layer::WATER_BED);
-        const { assert!(layer::WATER_BED < layer::WATER && layer::WATER < layer::BANK) };
+        assert!(roads[3] < layer::BANK);
+        const { assert!(layer::CHANNEL_BED < layer::SEA && layer::SEA < layer::GROUND) };
     }
 
     #[test]

@@ -10,6 +10,9 @@
 // hides the plan; typing an e in the inscription box must not. A left
 // click on the city leaves a gold ripple; a click on the box must not.
 //
+// The land stands cap_ground_y() metres above the sea (P3.3), and
+// everything here is drawn on it.
+//
 // The cursor is picked off the ground with screen_to_ground (P1.5): a gold
 // reticle lies on the ground under it, foreshortened by the view, and a
 // click's ripple spreads across the ground like a stone dropped in still
@@ -31,10 +34,10 @@ fn on_update() {
         set_camera_position(0.0, 620.0, 1.0);
         set_camera_target(0.0, 0.0, 0.0);
     } else if view == "bridge" {
-        // Close over the inner canal's south crossing (server angle 90),
-        // from the land outside it: the water, its kerbs and the gap.
-        set_camera_position(9.0, 9.0, 80.0);
-        set_camera_target(0.0, 0.0, 61.0);
+        // Standing on the quay by the inner canal's south crossing
+        // (server angle 90), looking along the water to the gap.
+        set_camera_position(7.0, 3.4, 65.5);
+        set_camera_target(-3.0, 0.0, 60.0);
     } else if view == "district" {
         set_camera_position(0.0, 260.0, 300.0);
         set_camera_target(0.0, 0.0, 30.0);
@@ -51,7 +54,7 @@ fn on_update() {
     }
     if is_mouse_just_pressed(0) {
         // The ground under the cursor, or () over the sky.
-        let g = screen_to_ground(mouse_x(), mouse_y(), 0.0);
+        let g = screen_to_ground(mouse_x(), mouse_y(), cap_ground_y());
         if g != () {
             ripples.push(#{ x: g[0], z: g[1], born: t });
             log("mark at " + g[0].round() + ", " + g[1].round() + " m");
@@ -76,7 +79,7 @@ fn trace_ring_at(cx, cz, r, gaps, gap, red, green, blue, alpha, width, steps) {
             let d = (a - g.to_float().to_radians() + 3.0 * PI()) % (2.0 * PI()) - PI();
             if d.abs() < gap { in_gap = true; }
         }
-        let p = world_to_screen(cx + r * a.cos(), 0.0, cz + r * a.sin());
+        let p = world_to_screen(cx + r * a.cos(), cap_ground_y(), cz + r * a.sin());
         if in_gap || !p.visible {
             prev = ();
             continue;
@@ -89,7 +92,7 @@ fn trace_ring_at(cx, cz, r, gaps, gap, red, green, blue, alpha, width, steps) {
 }
 
 fn label(x, z, text, size, r, g, b) {
-    let p = world_to_screen(x, 0.5, z);
+    let p = world_to_screen(x, cap_ground_y() + 0.5, z);
     if !p.visible { return; }
     let m = measure_text(text, size);
     let tx = p.x - m.width / 2.0;
@@ -120,8 +123,8 @@ fn draw_reticle(g, now) {
     trace_ring_at(g[0], g[1], r, [], 0.0, 0.788, 0.635, 0.153, 0.9, 1.5, 40);
     trace_ring_at(g[0], g[1], r * 1.9, [], 0.0, 0.788, 0.635, 0.153, 0.25, 1.0, 56);
     for a in [0.0, 0.5 * PI(), PI(), 1.5 * PI()] {
-        let p = world_to_screen(g[0] + r * 1.25 * a.cos(), 0.0, g[1] + r * 1.25 * a.sin());
-        let q = world_to_screen(g[0] + r * 1.7 * a.cos(), 0.0, g[1] + r * 1.7 * a.sin());
+        let p = world_to_screen(g[0] + r * 1.25 * a.cos(), cap_ground_y(), g[1] + r * 1.25 * a.sin());
+        let q = world_to_screen(g[0] + r * 1.7 * a.cos(), cap_ground_y(), g[1] + r * 1.7 * a.sin());
         if p.visible && q.visible {
             draw_line(p.x, p.y, q.x, q.y, 0.788, 0.635, 0.153, 0.7, 1.5);
         }
@@ -147,7 +150,7 @@ fn on_draw_ui() {
     }
     // Picked here rather than in on_update: on_draw_ui sees the camera this
     // frame renders with, so the reticle can't trail the ground under it.
-    let hover = screen_to_ground(mouse_x(), mouse_y(), 0.0);
+    let hover = screen_to_ground(mouse_x(), mouse_y(), cap_ground_y());
     if hover != () {
         draw_reticle(hover, now);
     }

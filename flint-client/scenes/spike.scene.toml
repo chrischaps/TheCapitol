@@ -1,7 +1,7 @@
 # The P0.4 spike, carried on master against the real hooks. Dusk sky,
 # lights and one script; the HUD reads the inscription through the native
 # Rhai function the CapitolExtension registers. The zone-tinted ground,
-# the water and its banks, and the markers are runtime meshes the extension
+# the canals' stone and the markers are runtime meshes the extension
 # uploads (world/ and spike_world.rs), named below with `runtime = true` so the model loader
 # doesn't look for files. Superseded by scenes/capitol.scene.toml in P3.
 
@@ -50,13 +50,48 @@ intensity = 0.5
 asset = "ground"
 runtime = true
 
-[entities.water_banks.model]
-asset = "water_banks"
+[entities.canals.model]
+asset = "canals"
 runtime = true
 
-[entities.water.model]
-asset = "water"
-runtime = true
+# The canals' water: Flint's Gerstner ocean, the one Float drifts on, at
+# canal scale. It's an endless sheet at y = 0 that follows the camera; the
+# land stands 0.6 m above it and the ground is cut away over each ring, so
+# it only shows in the channels (world/water.rs). Waves are centimetres
+# high and a few metres long, and the colours are dusk: deep blue-black in
+# the troughs, the violet sky caught in the faces. Tune live with F3.
+[entities.ocean.ocean]
+seed = 11
+num_waves = 12
+wavelength_min = 0.6
+wavelength_max = 6.0
+amplitude = 0.06
+choppiness = 0.55
+direction_deg = 30.0
+spread_deg = 70.0
+speed_scale = 0.8
+wind_speed = 2.5
+fetch_km = 0.2
+peak_enhancement = 2.0
+deep_color = [0.005, 0.018, 0.06, 1.0]
+shallow_color = [0.025, 0.09, 0.21, 1.0]
+foam_color = [0.80, 0.82, 0.90, 1.0]
+sss_color = [0.03, 0.15, 0.18, 1.0]
+foam_threshold = 0.25
+foam_noise_scale = 3.0
+ramp_steps = 3.0
+specular_strength = 1.0
+band_wobble = 0.4
+band_dither = 0.1
+band_dither_scale = 40.0
+turbidity = 1.6
+refraction_strength = 0.4
+absorption_color = [0.9, 0.35, 0.22]
+sky_reflection_strength = 0.7
+grid_scale = 60.0
+fade_start = 120.0
+fade_end = 300.0
+splash_strength = 0.0
 
 [entities.marker_east.model]
 asset = "spike_marker_east"

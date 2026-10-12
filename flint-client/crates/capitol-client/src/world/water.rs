@@ -1,49 +1,43 @@
-//! The water (P3.3): the moat and the two canals, each a channel of
-//! translucent water inside a low stone kerb, broken where a bridge
-//! crosses.
+//! The canals (P3.3): the moat and the two canals, cut through the land
+//! down to the sea.
+//!
+//! The water itself is Flint's Gerstner ocean, the one Float drifts on,
+//! configured in the scene at canal scale. It's an endless sheet at y = 0
+//! (`layer::SEA`) that follows the camera. The land stands above it
+//! (`layer::GROUND`), and the ground leaves a hole over each ring
+//! ([`holes`]), so the sea shows only in the channels. This module builds
+//! everything solid around that water, as one opaque mesh:
+//!
+//! - a stone wall down each side of every channel, through the water to a
+//!   dark bed that the ocean's refraction shows;
+//! - a low kerb along the top of each wall, the Capitol's dim gold at the
+//!   moat and a warm grey at the canals;
+//! - a causeway at land height across each bridge's gap, for P3.5's deck.
 //!
 //! Each ring is cut into *reaches*, the open water between one bridge and
 //! the next. A gap has straight, parallel sides exactly the bridge's
-//! nominal width apart, so the deck P3.5 lays across it fits. The server
-//! is more generous than that: it lets a move cross anywhere within twice
-//! the width (`Bridge::angular_half_width`), so everywhere drawn dry is
-//! walkable, and a little drawn wet near a bridge is too.
-//!
-//! Two meshes. The banks (the dark bed under the water and the kerb that
-//! rims every reach) are opaque and built once per terrain. The surface is
-//! translucent and recoloured every frame: slow swells drift around each
-//! ring, their crests catching the highlight colour, and tilt the normals
-//! so the low sun glints off them. Toward the kerbs the water darkens and
-//! thins, as if shaded by the walls. The ocean shader (H6, P8) replaces
-//! the surface later.
+//! nominal width apart, so the deck fits it. The server is more generous:
+//! it lets a move cross anywhere within twice the width
+//! (`Bridge::angular_half_width`), so everywhere drawn dry is walkable,
+//! and a little drawn wet near a bridge is too.
 
-use crate::coords::{layer, polar_to_world, S};
+use crate::coords::{layer, polar_to_world};
+use crate::world::ground;
 use crate::world::mesh::{MeshBuf, UP};
 use crate::world::palette::{self, hex, mix};
 use capitol_protocol::terrain::WaterRing;
-use flint_import::{AlphaMode, ImportedMaterial};
 use flint_player::ExtensionGpu;
 
-/// The runtime meshes' names, as the scene's water entities name them.
-pub const SURFACE_MESH: &str = "water";
-pub const BANKS_MESH: &str = "water_banks";
+/// The runtime mesh's name, as the scene's canals entity names it.
+pub const MESH: &str = "canals";
 
-/// Vertex spacing along a ring, in server units (1 m): a few vertices to
-/// the shortest swell.
+/// Vertex spacing along a ring, in server units (1 m).
 const STEP: f64 = 10.0;
-/// Rows of vertices across the channel, so the water can darken toward
-/// its kerbs.
-const ROWS: usize = 6;
 /// The kerb's width in metres.
 const KERB: f32 = 1.0;
-/// The swells' wavelengths in metres, rounded per ring to a whole number of
-/// waves so a ring with no bridge has no seam.
-const SWELLS: [f32; 2] = [9.0, 5.5];
-/// How fast each swell's phase turns, in radians a second. They drift in
-/// opposite directions, at about 0.7 and 0.3 m/s.
-const DRIFT: [f32; 2] = [0.5, -0.35];
-/// How far a swell tilts the surface normal, at its steepest.
-const TILT: f32 = 0.12;
+/// Rows of quads across a causeway, so its ground colour follows the
+/// zone blend.
+const CAUSEWAY_ROWS: usize = 4;
 
 /// Open water between two bridges, or a whole ring when it has none.
 #[derive(Debug, Clone, Copy)]
@@ -62,21 +56,18 @@ impl Reach {
     /// Where the reach starts and ends at radius `r`, in degrees: on the
     /// lines half a bridge's width either side of its axis.
     fn span(&self, r: f64) -> (f64, f64) {
-        let side = |h: f64| (h / r).clamp(-1.0, 1.0).asin().to_degrees();
-        (self.from.0 + side(self.from.1), self.to.0 - side(self.to.1))
+        (
+            self.from.0 + gap_side(self.from.1, r),
+            self.to.0 - gap_side(self.to.1, r),
+        )
     }
 
-    /// The server polar point (radius, degrees) at `t` along the reach
-    /// (0 = start, 1 = end) and `u` across it (0 = inner edge, 1 = outer).
-    fn polar(&self, t: f64, u: f64) -> (f64, f64) {
+    /// World (X, Z) at `t` along the reach (0 = start, 1 = end) and `u`
+    /// across it (0 = inner edge, 1 = outer).
+    fn world(&self, t: f64, u: f64) -> [f32; 2] {
         let r = self.r_in + (self.r_out - self.r_in) * u;
         let (a, b) = self.span(r);
-        (r, a + (b - a) * t)
-    }
-
-    fn world(&self, t: f64, u: f64) -> [f32; 2] {
-        let (r, deg) = self.polar(t, u);
-        polar_to_world(r, deg)
+        polar_to_world(r, a + (b - a) * t)
     }
 
     /// Columns along the reach: one per `STEP` at its outer edge.
@@ -86,15 +77,27 @@ impl Reach {
     }
 }
 
-/// A ring's reaches, in order round from its first bridge.
-fn reaches(ring: &WaterRing) -> Vec<Reach> {
-    let (r_in, r_out) = (ring.inner_radius(), ring.outer_radius());
+/// The angle, in degrees, between a bridge's axis and the side of its gap
+/// at radius `r`, for a gap `half` server units either side of the axis.
+fn gap_side(half: f64, r: f64) -> f64 {
+    (half / r).clamp(-1.0, 1.0).asin().to_degrees()
+}
+
+/// A ring's bridges as (axis degrees in 0..360, half width), in order.
+fn bridges(ring: &WaterRing) -> Vec<(f64, f64)> {
     let mut bridges: Vec<(f64, f64)> = ring
         .bridges
         .iter()
         .map(|b| (b.angle_degrees.rem_euclid(360.0), b.width * 0.5))
         .collect();
     bridges.sort_by(|a, b| a.0.total_cmp(&b.0));
+    bridges
+}
+
+/// A ring's reaches, in order round from its first bridge.
+fn reaches(ring: &WaterRing) -> Vec<Reach> {
+    let (r_in, r_out) = (ring.inner_radius(), ring.outer_radius());
+    let bridges = bridges(ring);
     if bridges.is_empty() {
         return vec![Reach {
             r_in,
@@ -125,166 +128,114 @@ fn reaches(ring: &WaterRing) -> Vec<Reach> {
         .collect()
 }
 
-/// Where a surface vertex sits in the water, for shading.
-#[derive(Debug, Clone, Copy)]
-struct Sample {
-    /// Each swell's phase here, in radians.
-    phase: [f32; 2],
-    /// 0 at the inner kerb, 1 at the outer.
-    across: f32,
-    /// Unit direction along the ring (increasing angle), world XZ.
-    tangent: [f32; 2],
+/// The bands of radii the ground leaves open, one per ring, so the sea
+/// shows through: `(inner edge, outer edge)` in server units.
+pub fn holes(rings: &[WaterRing]) -> Vec<(f64, f64)> {
+    rings
+        .iter()
+        .map(|r| (r.inner_radius(), r.outer_radius()))
+        .collect()
 }
 
-/// The water's surface: built once per terrain, recoloured every frame.
-#[derive(Default)]
-pub struct Water {
-    mesh: MeshBuf,
-    samples: Vec<Sample>,
-}
-
-impl Water {
-    pub fn new(rings: &[WaterRing]) -> Self {
-        let mut water = Water::default();
-        for ring in rings {
-            let waves = SWELLS.map(|l| {
-                let metres = std::f64::consts::TAU * ring.radius * S as f64;
-                (metres / l as f64).round().max(1.0) as f32
-            });
-            for reach in reaches(ring) {
-                water.add_reach(&reach, waves);
-            }
-        }
-        water
-    }
-
-    fn add_reach(&mut self, reach: &Reach, waves: [f32; 2]) {
-        let cols = reach.columns();
-        let base = self.mesh.vertices.len() as u32;
-        for i in 0..=cols {
-            let t = i as f64 / cols as f64;
-            for k in 0..=ROWS {
-                let u = k as f64 / ROWS as f64;
-                let (r, deg) = reach.polar(t, u);
-                self.mesh
-                    .flat_vertex(polar_to_world(r, deg), layer::WATER, [0.0; 4]);
-                let theta = deg.to_radians();
-                self.samples.push(Sample {
-                    phase: waves.map(|n| (theta * n as f64) as f32),
-                    across: u as f32,
-                    tangent: [-theta.sin() as f32, theta.cos() as f32],
-                });
-            }
-        }
-        let stride = (ROWS + 1) as u32;
-        for i in 0..cols as u32 {
-            for k in 0..ROWS as u32 {
-                let inner = base + i * stride + k;
-                let outer = inner + 1;
-                let (inner_next, outer_next) = (inner + stride, outer + stride);
-                self.mesh
-                    .indices
-                    .extend([inner, outer_next, outer, inner, inner_next, outer_next]);
-            }
-        }
-    }
-
-    /// Recolour the surface for game time `t` (seconds) and upload it.
-    pub fn upload(&mut self, gpu: &mut ExtensionGpu, t: f64) {
-        self.animate(t as f32);
-        self.mesh.upload_material(
-            gpu,
-            ImportedMaterial {
-                roughness: 0.15,
-                alpha_mode: AlphaMode::Blend,
-                ..ImportedMaterial::vertex_colored(SURFACE_MESH)
-            },
-        );
-    }
-
-    fn animate(&mut self, t: f32) {
-        for (v, s) in self.mesh.vertices.iter_mut().zip(&self.samples) {
-            (v.color, v.normal) = shade(s, t);
-        }
+/// The kerb stone for a ring: dim gold round the Capitol, warm grey
+/// elsewhere.
+fn stone(ring: &WaterRing) -> [f32; 4] {
+    if ring.id == "moat" {
+        hex(palette::GOLD_DIM)
+    } else {
+        let warm = mix(hex(palette::DIM_TEXT), hex(palette::GOLD_DIM), 0.25);
+        mix(warm, hex(palette::BACKGROUND), 0.35)
     }
 }
 
-/// A surface vertex's colour and normal at time `t`.
-fn shade(s: &Sample, t: f32) -> ([f32; 4], [f32; 3]) {
-    let a = s.phase[0] + DRIFT[0] * t + s.across * 1.7;
-    let b = s.phase[1] + DRIFT[1] * t - s.across * 2.3;
-    let swell = 0.6 * a.sin() + 0.4 * b.sin();
-    let crest = swell.max(0.0).powi(4);
-    let slope = 0.6 * a.cos() + 0.4 * b.cos();
-
-    // 0 against a kerb, 1 out in the channel.
-    let open = smoothstep(0.0, 0.35, s.across.min(1.0 - s.across));
-    let deep = mix(hex(palette::BACKGROUND), hex(palette::WATER), 0.25);
-    let body = mix(deep, hex(palette::WATER), 0.25 + 0.45 * open);
-    let mut colour = mix(body, hex(palette::WATER_HIGHLIGHT), 0.4 * crest);
-    colour[3] = 0.62 + 0.2 * open + 0.12 * crest;
-
-    let [tx, tz] = s.tangent;
-    let n = [-TILT * slope * tx, 1.0, -TILT * slope * tz];
-    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-    (colour, n.map(|c| c / len))
-}
-
-fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
-    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// The opaque part of the water: a dark bed under each reach and a stone
-/// kerb around it. The moat's kerb is the Capitol's dim gold; the canals'
-/// are a warm grey.
-fn banks(rings: &[WaterRing]) -> MeshBuf {
+/// The channel floor under each reach, down at `layer::CHANNEL_BED`.
+fn beds(ring: &WaterRing) -> MeshBuf {
     let mut m = MeshBuf::default();
-    let bed = mix(hex(palette::BACKGROUND), hex(palette::WATER), 0.2);
-    for ring in rings {
-        let stone = if ring.id == "moat" {
-            hex(palette::GOLD_DIM)
-        } else {
-            let warm = mix(hex(palette::DIM_TEXT), hex(palette::GOLD_DIM), 0.25);
-            mix(warm, hex(palette::BACKGROUND), 0.35)
-        };
-        for reach in reaches(ring) {
-            let cols = reach.columns();
-            let at = |i: usize, u: f64| reach.world(i as f64 / cols as f64, u);
-            for i in 0..cols {
-                let corners = [at(i, 0.0), at(i, 1.0), at(i + 1, 1.0), at(i + 1, 0.0)];
-                m.quad(corners.map(|p| lift(p, layer::WATER_BED)), UP, bed);
-            }
-            let inner: Vec<_> = (0..=cols).map(|i| at(i, 0.0)).collect();
-            let outer: Vec<_> = (0..=cols).rev().map(|i| at(i, 1.0)).collect();
-            if reach.closed {
-                // The first and last columns meet; drop the repeat.
-                kerb(&mut m, &inner[..cols], false, stone);
-                kerb(&mut m, &outer[..cols], true, stone);
-            } else {
-                // Round the water: in along the inner edge, across the gap
-                // line, back along the outer edge and across the other.
-                let outline: Vec<_> = inner.into_iter().chain(outer).collect();
-                kerb(&mut m, &outline, true, stone);
-            }
+    let bed = mix(hex(palette::BACKGROUND), hex(palette::WATER), 0.3);
+    for reach in reaches(ring) {
+        let cols = reach.columns();
+        let at = |i: usize, u: f64| reach.world(i as f64 / cols as f64, u);
+        for i in 0..cols {
+            let corners = [at(i, 0.0), at(i, 1.0), at(i + 1, 1.0), at(i + 1, 0.0)];
+            m.quad(corners.map(|p| lift(p, layer::CHANNEL_BED)), UP, bed);
         }
     }
     m
 }
 
-/// Upload the banks for these rings (once per terrain).
-pub fn upload_banks(gpu: &mut ExtensionGpu, rings: &[WaterRing]) {
-    banks(rings).upload(gpu, BANKS_MESH, 0.85);
+/// The walls and kerbs round each reach.
+fn walls(ring: &WaterRing) -> MeshBuf {
+    let mut m = MeshBuf::default();
+    let stone = stone(ring);
+    for reach in reaches(ring) {
+        let cols = reach.columns();
+        let at = |i: usize, u: f64| reach.world(i as f64 / cols as f64, u);
+        let inner: Vec<_> = (0..=cols).map(|i| at(i, 0.0)).collect();
+        let outer: Vec<_> = (0..=cols).rev().map(|i| at(i, 1.0)).collect();
+        if reach.closed {
+            // The first and last columns meet; drop the repeat.
+            kerb(&mut m, &inner[..cols], false, stone);
+            kerb(&mut m, &outer[..cols], true, stone);
+        } else {
+            // Round the water: along the inner edge, across the gap line,
+            // back along the outer edge and across the other.
+            let outline: Vec<_> = inner.into_iter().chain(outer).collect();
+            kerb(&mut m, &outline, true, stone);
+        }
+    }
+    m
+}
+
+/// Land across each bridge's gap, coloured like the ground around it, in
+/// a world whose edge is `edge` server units out.
+fn causeways(ring: &WaterRing, edge: f64) -> MeshBuf {
+    let mut m = MeshBuf::default();
+    let (r_in, r_out) = (ring.inner_radius(), ring.outer_radius());
+    for (axis, half) in bridges(ring) {
+        let corner = |r: f64, side: f64| polar_to_world(r, axis + side * gap_side(half, r));
+        for k in 0..CAUSEWAY_ROWS {
+            let r0 = r_in + (r_out - r_in) * k as f64 / CAUSEWAY_ROWS as f64;
+            let r1 = r_in + (r_out - r_in) * (k + 1) as f64 / CAUSEWAY_ROWS as f64;
+            let shade = ground::shade((r0 + r1) * 0.5, edge);
+            let mottle = ground::mottle(polar_to_world((r0 + r1) * 0.5, axis));
+            let colour = [shade[0] * mottle, shade[1] * mottle, shade[2] * mottle, 1.0];
+            let corners = [
+                corner(r0, -1.0),
+                corner(r1, -1.0),
+                corner(r1, 1.0),
+                corner(r0, 1.0),
+            ];
+            m.quad(corners.map(|p| lift(p, layer::GROUND)), UP, colour);
+        }
+    }
+    m
+}
+
+/// Everything solid about the canals, for a world `world_size` across.
+fn build(rings: &[WaterRing], world_size: f64) -> MeshBuf {
+    let mut m = MeshBuf::default();
+    for ring in rings {
+        m.append(beds(ring));
+        m.append(walls(ring));
+        m.append(causeways(ring, world_size * 0.5));
+    }
+    m
+}
+
+/// Upload the canals for these rings (once per terrain).
+pub fn upload(gpu: &mut ExtensionGpu, rings: &[WaterRing], world_size: f64) {
+    build(rings, world_size).upload(gpu, MESH, 0.85);
 }
 
 fn lift([x, z]: [f32; 2], y: f32) -> [f32; 3] {
     [x, y, z]
 }
 
-/// A kerb `KERB` wide and up to `layer::BANK` round the closed loop `pts`
-/// (world XZ), on its outside when `water_inside`, else on its inside.
-/// Corners are mitred. The wall facing the water runs down to the bed, so
-/// it shows through the water; the one facing the land runs to the ground.
+/// A kerb `KERB` wide round the closed loop `pts` (world XZ), on its
+/// outside when `water_inside`, else on its inside. Corners are mitred.
+/// Its top is `layer::BANK`. The wall facing the land drops to the ground;
+/// the one facing the water drops through it to the channel bed, so the
+/// water is held between stone.
 fn kerb(m: &mut MeshBuf, pts: &[[f32; 2]], water_inside: bool, colour: [f32; 4]) {
     let n = pts.len();
     if n < 3 {
@@ -316,21 +267,26 @@ fn kerb(m: &mut MeshBuf, pts: &[[f32; 2]], water_inside: bool, colour: [f32; 4])
             [pts[i][0] + dir[0] * reach, pts[i][1] + dir[1] * reach]
         })
         .collect();
+    let top = layer::BANK;
     for i in 0..n {
         let j = (i + 1) % n;
         let [nx, nz] = normals[i];
         let (p, q, po, qo) = (pts[i], pts[j], offset[i], offset[j]);
-        let top = layer::BANK;
         m.quad([p, q, qo, po].map(|c| lift(c, top)), UP, colour);
         m.quad(
-            [lift(po, 0.0), lift(qo, 0.0), lift(qo, top), lift(po, top)],
+            [
+                lift(po, layer::GROUND),
+                lift(qo, layer::GROUND),
+                lift(qo, top),
+                lift(po, top),
+            ],
             [nx, 0.0, nz],
             colour,
         );
         m.quad(
             [
-                lift(p, layer::WATER_BED),
-                lift(q, layer::WATER_BED),
+                lift(p, layer::CHANNEL_BED),
+                lift(q, layer::CHANNEL_BED),
                 lift(q, top),
                 lift(p, top),
             ],
@@ -345,7 +301,7 @@ mod tests {
     use super::*;
     use crate::coords::to_world;
     use crate::world::mesh::facing;
-    use capitol_protocol::rules::{CENTER_X, CENTER_Y};
+    use capitol_protocol::rules::{CENTER_X, CENTER_Y, WORLD_SIZE};
     use capitol_protocol::terrain::Bridge;
     use std::path::Path;
 
@@ -356,25 +312,24 @@ mod tests {
         terrain.water_rings
     }
 
-    /// Whether world (x, z) is under some triangle of `m`, seen from above.
-    fn covered(m: &MeshBuf, [x, z]: [f32; 2]) -> bool {
+    fn triangles(m: &MeshBuf) -> impl Iterator<Item = [flint_render::Vertex; 3]> + '_ {
         m.indices
             .chunks_exact(3)
-            .map(|t| [t[0], t[1], t[2]])
-            .any(|tri| {
-                let [a, b, c] = tri.map(|i| {
-                    let p = m.vertices[i as usize].position;
-                    [p[0], p[2]]
-                });
-                if x < a[0].min(b[0]).min(c[0]) || x > a[0].max(b[0]).max(c[0]) {
-                    return false;
-                }
-                let side = |p: [f32; 2], q: [f32; 2]| {
-                    (q[0] - p[0]) * (z - p[1]) - (q[1] - p[1]) * (x - p[0])
-                };
-                let (d0, d1, d2) = (side(a, b), side(b, c), side(c, a));
-                (d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0) || (d0 <= 0.0 && d1 <= 0.0 && d2 <= 0.0)
-            })
+            .map(|t| [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]))
+    }
+
+    /// Whether world (x, z) is under some triangle of `m`, seen from above.
+    fn covered(m: &MeshBuf, [x, z]: [f32; 2]) -> bool {
+        triangles(m).any(|tri| {
+            let [a, b, c] = tri.map(|v| [v.position[0], v.position[2]]);
+            if x < a[0].min(b[0]).min(c[0]) || x > a[0].max(b[0]).max(c[0]) {
+                return false;
+            }
+            let side =
+                |p: [f32; 2], q: [f32; 2]| (q[0] - p[0]) * (z - p[1]) - (q[1] - p[1]) * (x - p[0]);
+            let (d0, d1, d2) = (side(a, b), side(b, c), side(c, a));
+            (d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0) || (d0 <= 0.0 && d1 <= 0.0 && d2 <= 0.0)
+        })
     }
 
     /// The server point `along` units out from the centre along a bridge's
@@ -392,7 +347,7 @@ mod tests {
     #[test]
     fn each_gap_is_exactly_its_bridge_wide_with_straight_sides() {
         for ring in rings() {
-            let water = Water::new(std::slice::from_ref(&ring));
+            let (water, land) = (beds(&ring), causeways(&ring, WORLD_SIZE * 0.5));
             for bridge in &ring.bridges {
                 let h = bridge.width * 0.5;
                 for u in [0.05, 0.25, 0.5, 0.75, 0.95] {
@@ -401,9 +356,7 @@ mod tests {
                         for (offset, wet) in [(h - 0.5, false), (h + 0.5, true)] {
                             let along = (r * r - offset * offset).sqrt();
                             let p = beside_bridge(bridge, along, side * offset);
-                            assert_eq!(
-                                covered(&water.mesh, p),
-                                wet,
+                            let what = format!(
                                 "{} bridge {}: {offset} units {} of the axis at r {r}",
                                 ring.id,
                                 bridge.angle_degrees,
@@ -413,6 +366,8 @@ mod tests {
                                     "clockwise"
                                 },
                             );
+                            assert_eq!(covered(&water, p), wet, "water at {what}");
+                            assert_eq!(covered(&land, p), !wet, "causeway at {what}");
                         }
                     }
                 }
@@ -423,20 +378,17 @@ mod tests {
     #[test]
     fn the_only_gaps_round_each_ring_are_its_bridges() {
         for ring in rings() {
-            let water = Water::new(std::slice::from_ref(&ring));
+            let water = beds(&ring);
             for step in 0..1440 {
                 let deg = step as f64 * 0.25;
                 let a = deg.to_radians();
                 let (x, y) = (ring.radius * a.cos(), ring.radius * a.sin());
-                // Distance from each bridge's axis, on its side of the centre.
+                // Distance outside the nearest gap (negative inside one).
                 let gap_edge = ring
                     .bridges
                     .iter()
                     .map(|b| {
-                        let (bx, by) = (
-                            b.angle_degrees.to_radians().cos(),
-                            b.angle_degrees.to_radians().sin(),
-                        );
+                        let (by, bx) = b.angle_degrees.to_radians().sin_cos();
                         let ahead = x * bx + y * by;
                         let off = (x * by - y * bx).abs();
                         if ahead > 0.0 {
@@ -450,12 +402,50 @@ mod tests {
                     continue; // on a gap's edge
                 }
                 let p = to_world(CENTER_X + x, CENTER_Y + y);
-                assert_eq!(
-                    covered(&water.mesh, p),
-                    gap_edge > 0.0,
-                    "{} at {deg}°",
-                    ring.id
-                );
+                assert_eq!(covered(&water, p), gap_edge > 0.0, "{} at {deg}°", ring.id);
+            }
+        }
+    }
+
+    #[test]
+    fn the_sea_shows_only_in_the_channels() {
+        let rings = rings();
+        let ground = ground::build(WORLD_SIZE, &holes(&rings));
+        for ring in &rings {
+            // Only the ground near this ring, to keep the test quick.
+            let (lo, hi) = (
+                ring.inner_radius() * 0.1 - 6.0,
+                ring.outer_radius() * 0.1 + 6.0,
+            );
+            let mut ground_here = MeshBuf::default();
+            for tri in triangles(&ground) {
+                let r = |v: &flint_render::Vertex| v.position[0].hypot(v.position[2]) as f64;
+                if tri.iter().any(|v| (lo..hi).contains(&r(v))) {
+                    let i = ground_here.vertices.len() as u32;
+                    ground_here.vertices.extend(tri);
+                    ground_here.indices.extend([i, i + 1, i + 2]);
+                }
+            }
+            let ground = ground_here;
+            let water = beds(ring);
+            let land = causeways(ring, WORLD_SIZE * 0.5);
+            for step in 0..90 {
+                let deg = step as f64 * 4.0 + 1.3;
+                for (r, in_band) in [
+                    (ring.inner_radius() - 3.0, false),
+                    (ring.inner_radius() + 2.0, true),
+                    (ring.radius, true),
+                    (ring.outer_radius() - 2.0, true),
+                    (ring.outer_radius() + 3.0, false),
+                ] {
+                    let p = polar_to_world(r, deg);
+                    let at = format!("{} r {r} at {deg}°", ring.id);
+                    assert_eq!(covered(&ground, p), !in_band, "ground, {at}");
+                    if in_band {
+                        // Either water, or a causeway over a bridge's gap.
+                        assert!(covered(&water, p) ^ covered(&land, p), "{at}");
+                    }
+                }
             }
         }
     }
@@ -463,53 +453,33 @@ mod tests {
     #[test]
     fn the_server_lets_you_cross_wherever_a_gap_is_drawn() {
         for ring in rings() {
+            let find = |angle: f64| {
+                ring.bridges
+                    .iter()
+                    .find(|b| b.angle_degrees.rem_euclid(360.0) == angle.rem_euclid(360.0))
+                    .unwrap()
+            };
             for reach in reaches(&ring) {
                 for r in [ring.inner_radius(), ring.radius, ring.outer_radius()] {
                     let (start, end) = reach.span(r);
-                    let after = ring
-                        .bridges
-                        .iter()
-                        .find(|b| b.angle_degrees.rem_euclid(360.0) == reach.from.0)
-                        .unwrap();
-                    let before = ring
-                        .bridges
-                        .iter()
-                        .find(|b| b.angle_degrees.rem_euclid(360.0) == reach.to.0.rem_euclid(360.0))
-                        .unwrap();
                     assert!(
-                        after.contains_angle(start, ring.radius),
+                        find(reach.from.0).contains_angle(start, ring.radius),
                         "{} {start}",
                         ring.id
                     );
-                    assert!(before.contains_angle(end, ring.radius), "{} {end}", ring.id);
+                    assert!(
+                        find(reach.to.0).contains_angle(end, ring.radius),
+                        "{} {end}",
+                        ring.id
+                    );
                 }
             }
         }
     }
 
-    #[test]
-    fn a_ring_with_no_bridges_is_water_all_the_way_round() {
-        let ring = WaterRing {
-            id: "test".into(),
-            radius: 600.0,
-            width: 50.0,
-            bridges: vec![],
-        };
-        let water = Water::new(std::slice::from_ref(&ring));
-        for step in 0..360 {
-            let a = (step as f64 + 0.5).to_radians();
-            let p = to_world(CENTER_X + 600.0 * a.cos(), CENTER_Y + 600.0 * a.sin());
-            assert!(covered(&water.mesh, p), "{step}°");
-        }
-        // Two kerbs, inner and outer, both on land.
-        let banks = banks(std::slice::from_ref(&ring));
-        assert_kerbs_on_land(&banks, &water.mesh);
-    }
-
-    fn assert_kerbs_on_land(banks: &MeshBuf, water: &MeshBuf) {
+    fn assert_kerbs_on_land(walls: &MeshBuf, water: &MeshBuf) {
         let mut tops = 0;
-        for tri in banks.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]) {
-            let v = tri.map(|i| banks.vertices[i as usize]);
+        for v in triangles(walls) {
             if v.iter().all(|v| v.position[1] == layer::BANK) {
                 tops += 1;
                 let c = [0, 2].map(|k| v.iter().map(|v| v.position[k]).sum::<f32>() / 3.0);
@@ -520,46 +490,55 @@ mod tests {
     }
 
     #[test]
+    fn a_ring_with_no_bridges_is_water_all_the_way_round() {
+        let ring = WaterRing {
+            id: "test".into(),
+            radius: 600.0,
+            width: 50.0,
+            bridges: vec![],
+        };
+        let water = beds(&ring);
+        for step in 0..360 {
+            let p = polar_to_world(600.0, step as f64 + 0.5);
+            assert!(covered(&water, p), "{step}°");
+        }
+        assert!(causeways(&ring, WORLD_SIZE * 0.5).indices.is_empty());
+        assert_kerbs_on_land(&walls(&ring), &water);
+    }
+
+    #[test]
     fn kerbs_rim_the_water_on_land() {
         for ring in rings() {
-            let one = std::slice::from_ref(&ring);
-            assert_kerbs_on_land(&banks(one), &Water::new(one).mesh);
+            assert_kerbs_on_land(&walls(&ring), &beds(&ring));
         }
     }
 
     #[test]
-    fn every_bank_face_faces_its_normal() {
-        let banks = banks(&rings());
-        for tri in banks.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]) {
-            let v = tri.map(|i| banks.vertices[i as usize]);
+    fn walls_run_from_the_bed_through_the_sea_to_the_kerb() {
+        let m = walls(&rings()[1]);
+        let lowest = m
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::MAX, f32::min);
+        let highest = m
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::MIN, f32::max);
+        assert_eq!((lowest, highest), (layer::CHANNEL_BED, layer::BANK));
+    }
+
+    #[test]
+    fn every_face_faces_its_normal() {
+        let m = build(&rings(), WORLD_SIZE);
+        for v in triangles(&m) {
             assert!(facing(
                 v[0].position,
                 v[1].position,
                 v[2].position,
                 v[0].normal
             ));
-        }
-    }
-
-    #[test]
-    fn the_surface_faces_up_and_stays_translucent() {
-        let mut water = Water::new(&rings());
-        for t in [0.0, 1.7, 40.0] {
-            water.animate(t);
-            for tri in water
-                .mesh
-                .indices
-                .chunks_exact(3)
-                .map(|t| [t[0], t[1], t[2]])
-            {
-                let p = tri.map(|i| water.mesh.vertices[i as usize].position);
-                assert!(facing(p[0], p[1], p[2], UP));
-            }
-            for v in &water.mesh.vertices {
-                assert!((0.5..0.98).contains(&v.color[3]), "alpha {}", v.color[3]);
-                let len = v.normal.iter().map(|c| c * c).sum::<f32>().sqrt();
-                assert!((len - 1.0).abs() < 1e-4 && v.normal[1] > 0.98);
-            }
         }
     }
 }

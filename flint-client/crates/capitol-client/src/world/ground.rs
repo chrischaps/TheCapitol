@@ -23,9 +23,10 @@ pub const MESH: &str = "ground";
 const BLEND: f64 = 40.0;
 /// Rural into wilderness is a wider, slower change: the city thinning out.
 const WILD_BLEND: f64 = 200.0;
-/// Where the disc ends, in server units from the centre: well past the
-/// world's corners (about 5657), out where the fog has everything.
-const SKIRT: f64 = 12_000.0;
+/// Where the disc ends, in server units from the centre: past the camera's
+/// far plane (4 km) from anywhere in the world, so the sea under the land
+/// (the canals' water, `world::water`) never shows at the horizon.
+const SKIRT: f64 = 50_000.0;
 /// Angular segments. At the world's edge one is about 52 units (5 m) wide.
 const SEGMENTS: usize = 480;
 /// How far the mottling moves a colour's brightness, either way.
@@ -129,7 +130,7 @@ fn value_noise(x: f32, z: f32) -> f32 {
 }
 
 /// The mottling at world (X, Z): a brightness factor within ±`MOTTLE`.
-fn mottle([x, z]: [f32; 2]) -> f32 {
+pub fn mottle([x, z]: [f32; 2]) -> f32 {
     let broad = value_noise(x / MOTTLE_SCALE, z / MOTTLE_SCALE);
     let fine = value_noise(
         x / (MOTTLE_SCALE * 0.37) + 17.0,
@@ -142,7 +143,7 @@ fn mottle([x, z]: [f32; 2]) -> f32 {
 /// (finer in the inner city, where the camera spends its time), extra
 /// rings across every blend so the curve is drawn rather than sampled
 /// twice, then a few wide steps out to the skirt.
-fn ring_radii(edge: f64) -> Vec<f64> {
+fn ring_radii(edge: f64, holes: &[(f64, f64)]) -> Vec<f64> {
     let mut radii = Vec::new();
     let mut r = 0.0;
     while r < edge {
@@ -153,16 +154,28 @@ fn ring_radii(edge: f64) -> Vec<f64> {
         let (b, h) = (Zone::ALL[i].radii().1, blend_after(i));
         radii.extend((-4..=4).map(|k| b + h * k as f64 / 4.0));
     }
+    for &(lo, hi) in holes {
+        radii.extend([lo, hi]);
+    }
     let skirt = SKIRT.max(edge * 3.0);
-    radii.extend([edge * 1.15, edge * 1.4, edge * 1.8, edge * 2.4, skirt]);
+    radii.extend([
+        edge * 1.15,
+        edge * 1.4,
+        edge * 1.8,
+        edge * 2.4,
+        edge * 4.0,
+        skirt,
+    ]);
     radii.retain(|&r| r > 0.0);
     radii.sort_by(f64::total_cmp);
     radii.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
     radii
 }
 
-/// The ground for a world `world_size` server units across.
-pub fn build(world_size: f64) -> MeshBuf {
+/// The ground for a world `world_size` server units across, open over
+/// each `(inner, outer)` band of radii in `holes`: the canals, where the
+/// sea shows through.
+pub fn build(world_size: f64, holes: &[(f64, f64)]) -> MeshBuf {
     let edge = world_size * 0.5;
     let mut mesh = MeshBuf::default();
     let vertex = |mesh: &mut MeshBuf, r: f64, deg: f64| {
@@ -177,13 +190,17 @@ pub fn build(world_size: f64) -> MeshBuf {
     // A fan for the innermost ring, then a strip between each pair.
     let centre = vertex(&mut mesh, 0.0, 0.0);
     let mut inner: Option<u32> = None;
-    for r in ring_radii(edge) {
+    let mut last = 0.0;
+    for r in ring_radii(edge, holes) {
+        let mid = (last + r) * 0.5;
+        last = r;
+        let open = holes.iter().any(|&(lo, hi)| lo < mid && mid < hi);
         let first = mesh.vertices.len() as u32;
         for j in 0..SEGMENTS {
             vertex(&mut mesh, r, angle(j));
         }
         let outer = |j: usize| first + j as u32;
-        for j in 0..SEGMENTS {
+        for j in (0..SEGMENTS).filter(|_| !open) {
             let (o0, o1) = (outer(j), outer(next(j)));
             match inner {
                 None => mesh.indices.extend([centre, o1, o0]),
@@ -199,8 +216,8 @@ pub fn build(world_size: f64) -> MeshBuf {
 }
 
 /// Builds and uploads the ground.
-pub fn upload(gpu: &mut ExtensionGpu, world_size: f64) {
-    build(world_size).upload(gpu, MESH, 0.92);
+pub fn upload(gpu: &mut ExtensionGpu, world_size: f64, holes: &[(f64, f64)]) {
+    build(world_size, holes).upload(gpu, MESH, 0.92);
 }
 
 #[cfg(test)]
@@ -264,7 +281,7 @@ mod tests {
 
     #[test]
     fn the_disc_lies_flat_faces_up_and_reaches_past_the_corners() {
-        let mesh = build(WORLD_SIZE);
+        let mesh = build(WORLD_SIZE, &[]);
         assert!(mesh.vertices.iter().all(|v| v.position[1] == layer::GROUND));
         assert!(mesh.vertices.iter().all(|v| v.normal == [0.0, 1.0, 0.0]));
         let reach = mesh
@@ -283,7 +300,7 @@ mod tests {
 
     #[test]
     fn every_triangle_winds_counter_clockwise_from_above() {
-        let mesh = build(WORLD_SIZE);
+        let mesh = build(WORLD_SIZE, &[]);
         for tri in mesh.indices.chunks(3) {
             let [a, b, c] = [0, 1, 2].map(|k| mesh.vertices[tri[k] as usize].position);
             let (e1, e2) = ([b[0] - a[0], b[2] - a[2]], [c[0] - a[0], c[2] - a[2]]);
