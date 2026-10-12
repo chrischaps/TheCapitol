@@ -22,8 +22,10 @@ pub enum RestRequest {
     Logout(LogoutRequest),
     /// `GET /health`
     Health,
-    /// `GET /terrain`
-    Terrain,
+    /// `GET /terrain`. With `cached_version`, it's sent as `If-None-Match`, and
+    /// an unchanged terrain answers [`RestResponse::TerrainUnchanged`] (a 304
+    /// with no body) instead of the whole megabyte again.
+    Terrain { cached_version: Option<String> },
 
     /// `POST /player/move`. The WebSocket `move` is what the game uses.
     PlayerMove(MoveRequest),
@@ -91,6 +93,8 @@ pub enum RestResponse {
     Health(HealthResponse),
     /// Boxed: it's about a megabyte of roads and plots.
     Terrain(Box<TerrainResponse>),
+    /// `/terrain` still has the `cached_version` the request named.
+    TerrainUnchanged,
     Move(MoveResponse),
     Inventory(InventoryResponse),
     Currency(CurrencyResponse),
@@ -163,7 +167,7 @@ impl RestRequest {
             UpdatePlotPermissions { .. } => Method::PUT,
             RemoveStation { .. } => Method::DELETE,
             Health
-            | Terrain
+            | Terrain { .. }
             | PlayerInventory
             | PlayerCurrency
             | WorldNearby
@@ -188,7 +192,7 @@ impl RestRequest {
             Login(_) => "/auth/login".into(),
             Logout(_) => "/auth/logout".into(),
             Health => "/health".into(),
-            Terrain => "/terrain".into(),
+            Terrain { .. } => "/terrain".into(),
             PlayerMove(_) => "/player/move".into(),
             PlayerInventory => "/player/inventory".into(),
             PlayerCurrency => "/player/currency".into(),
@@ -231,6 +235,10 @@ impl RestRequest {
             UpdatePlotPermissions { update, .. } => req.json(update),
             ListPlots(q) => req.query(q),
             PlotAt(q) => req.query(q),
+            // The server's ETag is weak, `W/"<version>"` (B3).
+            Terrain {
+                cached_version: Some(version),
+            } => req.header(reqwest::header::IF_NONE_MATCH, format!("W/\"{version}\"")),
             _ => req,
         }
     }
@@ -244,7 +252,7 @@ impl RestRequest {
             Q::Register(_) | Q::Login(_) => A::Auth(de(body)?),
             Q::Logout(_) | Q::RemoveStation { .. } => A::Success(de(body)?),
             Q::Health => A::Health(de(body)?),
-            Q::Terrain => A::Terrain(Box::new(de(body)?)),
+            Q::Terrain { .. } => A::Terrain(Box::new(de(body)?)),
             Q::PlayerMove(_) => A::Move(de(body)?),
             Q::PlayerInventory => A::Inventory(de(body)?),
             Q::PlayerCurrency => A::Currency(de(body)?),
@@ -302,6 +310,16 @@ pub(crate) async fn execute(
     }
     .map_err(transport)?;
     let status = response.status();
+    if status == reqwest::StatusCode::NOT_MODIFIED
+        && matches!(
+            request,
+            RestRequest::Terrain {
+                cached_version: Some(_)
+            }
+        )
+    {
+        return Ok(RestResponse::TerrainUnchanged);
+    }
     let body = response.bytes().await.map_err(transport)?;
 
     if !status.is_success() {

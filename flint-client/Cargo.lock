@@ -604,6 +604,7 @@ dependencies = [
  "flint-scene",
  "flint-schema",
  "rhai",
+ "tracing",
  "tracing-subscriber",
  "winit",
 ]

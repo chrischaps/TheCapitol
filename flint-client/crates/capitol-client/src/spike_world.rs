@@ -2,27 +2,15 @@
 //! ground, the moat and both canals with their real bridge gaps, and two
 //! compass markers. The water is rebuilt every frame, breathing slowly
 //! like a tide, which exercises mesh replacement in the live client.
-//! P3 replaces all of this with the world built from `/terrain`.
+//! The water comes from the terrain (P3.1); P3.2–P3.7 replace the rest
+//! with the world built from `/terrain`.
 
 use crate::coords::{polar_to_world, S};
 use capitol_protocol::rules::Zone;
+use capitol_protocol::terrain::WaterRing;
 use flint_import::ImportedMaterial;
 use flint_player::ExtensionGpu;
 use flint_render::{srgb_to_linear, Vertex};
-
-/// The backend's default rings (`TerrainConfig::from_params`): radius,
-/// width, bridge width and bridge angles, in server units. P3 reads these
-/// from `/terrain`.
-const WATER_RINGS: &[(f64, f64, f64, &[f64])] = &[
-    (200.0, 20.0, 30.0, &[90.0]),                    // moat
-    (600.0, 15.0, 25.0, &[270.0, 0.0, 90.0, 180.0]), // canal_inner
-    (
-        1000.0,
-        15.0,
-        25.0,
-        &[270.0, 315.0, 0.0, 45.0, 90.0, 135.0, 180.0, 225.0],
-    ), // canal_outer
-];
 
 /// A hex colour token (sRGB, as in the React client) as linear RGBA.
 fn hex(h: u32) -> [f32; 4] {
@@ -83,7 +71,12 @@ impl MeshBuf {
         }
     }
 
+    /// Uploads under `name`. An empty mesh is skipped (wgpu can't make an
+    /// empty buffer), so nothing is drawn until there's something to draw.
     fn upload(&self, gpu: &mut ExtensionGpu, name: &str, roughness: f32) {
+        if self.indices.is_empty() {
+            return;
+        }
         let material = ImportedMaterial {
             roughness,
             ..ImportedMaterial::vertex_colored(name)
@@ -128,22 +121,28 @@ pub fn upload_static(gpu: &mut ExtensionGpu) {
     }
 }
 
-/// Rebuild the water for game time `t`: the rings swell and ease back by
-/// about a metre over a slow twelve-second tide, a hair above the ground,
-/// open at each bridge.
-pub fn upload_water(gpu: &mut ExtensionGpu, t: f64) {
+/// Rebuild the terrain's water for game time `t`: the rings swell and ease
+/// back by about a metre over a slow twelve-second tide, a hair above the
+/// ground, open at each bridge.
+pub fn upload_water(gpu: &mut ExtensionGpu, t: f64, rings: &[WaterRing]) {
     let tide = (t * std::f64::consts::TAU / 12.0).sin();
     // The React water colour reads too close to the Trade tint once lit,
     // so this sits between it and the highlight rgba(100, 180, 220).
     let colour = hex(0x4696c8);
     let mut water = MeshBuf::default();
-    for &(radius, width, bridge_width, angles) in WATER_RINGS {
-        let width = width + tide * 0.5 / S as f64;
-        let half_gap = ((bridge_width * 0.5) / radius).asin().to_degrees();
-        let gaps: Vec<(f64, f64)> = angles.iter().map(|&a| (a, half_gap)).collect();
+    for ring in rings {
+        let width = ring.width + tide * 0.5 / S as f64;
+        let gaps: Vec<(f64, f64)> = ring
+            .bridges
+            .iter()
+            .map(|b| {
+                let half = ((b.width * 0.5) / ring.radius).asin().to_degrees();
+                (b.angle_degrees, half)
+            })
+            .collect();
         water.annulus(
-            radius - width * 0.5,
-            radius + width * 0.5,
+            ring.radius - width * 0.5,
+            ring.radius + width * 0.5,
             0.02,
             colour,
             &gaps,

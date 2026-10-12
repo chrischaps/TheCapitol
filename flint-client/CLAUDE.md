@@ -41,6 +41,18 @@ From bash, run `play.bat` through PowerShell with an absolute path:
 
 If another build or a running client could lock the exe, use your own `CARGO_TARGET_DIR`.
 
+## Terrain, offline mode and captures
+
+`capitol` fetches `/terrain` from `--server` (or `CAPITOL_SERVER`, default `http://localhost:3000`) and caches it in `cache/terrain-<host_port>.json` (gitignored). A cached terrain is drawn at once and revalidated by version: the server answers 304 while it's current. `--offline <file>` builds the world from a `/terrain` JSON with no server at all. `fixtures/terrain.json` is a captured one; refresh it with `curl -s -o fixtures/terrain.json http://localhost:3000/terrain`.
+
+Every visual change is checked with a capture, run from `flint-client/`:
+
+```bash
+target/release/capitol.exe --offline fixtures/terrain.json --screenshot-at 3 --exit-after 4
+```
+
+That writes `renders/capitol.png`. `--screenshot <path>` names the file, `--input-script <file>` plays timed keys (flint-player's format: `1.0 tap KeyE`), and `--exit-after` prints the average ms/frame. Look at the PNG before calling a visual change done.
+
 ## Testing against the server
 
 The local stack is `docker-compose up -d` at the repo root, then `cargo run` from `backend/` (API on port 3000). With it up, `cargo test -p capitol-core -- --ignored` runs the live tests: register, login, the WebSocket handshake and a move. Set `CAPITOL_SERVER` to point them somewhere other than `http://localhost:3000`.

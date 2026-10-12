@@ -25,8 +25,9 @@ fn panel_frame() -> egui::Frame {
         .inner_margin(egui::Margin::same(14.0))
 }
 
-/// The inscription window, top left.
-pub fn inscription(ctx: &egui::Context, shared: &Shared) {
+/// The inscription window, top left, with where the terrain came from
+/// (`status`) underneath.
+pub fn inscription(ctx: &egui::Context, shared: &Shared, status: &str) {
     egui::Window::new("inscription")
         .title_bar(false)
         .resizable(false)
@@ -57,5 +58,6 @@ pub fn inscription(ctx: &egui::Context, shared: &Shared) {
                     .color(DIM)
                     .size(11.0),
             );
+            ui.label(RichText::new(status).color(DIM).size(11.0));
         });
 }

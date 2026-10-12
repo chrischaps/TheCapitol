@@ -114,7 +114,10 @@ impl Fetch {
                 ..Default::default()
             }),
             Fetch::Recipes => RestRequest::Recipes,
-            Fetch::Terrain => RestRequest::Terrain,
+            // `terrain_updated` means it changed, so there's nothing to revalidate.
+            Fetch::Terrain => RestRequest::Terrain {
+                cached_version: None,
+            },
         }
     }
 }

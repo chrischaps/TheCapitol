@@ -23,4 +23,5 @@ rhai = { workspace = true }
 winit = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+tracing = "0.1"
 tracing-subscriber = { workspace = true }

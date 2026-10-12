@@ -647,7 +647,12 @@ fn answers_name_their_fetch() {
     let mut rig = Rig::settled();
     rig.feed(NetEvent::Ws(M::TerrainUpdated));
     let (request, tag) = rig.tick().remove(0);
-    assert_eq!(request, RestRequest::Terrain);
+    assert_eq!(
+        request,
+        RestRequest::Terrain {
+            cached_version: None
+        }
+    );
     // The game sees which fetch an event answered, to route `/terrain` to the world.
     let terrain = NetEvent::Rest(tag, Err(RestError::Transport("test".into())));
     assert_eq!(rig.feed(terrain), Some(Fetch::Terrain));

@@ -643,6 +643,7 @@ impl GameState {
             | R::Success(_)
             | R::Health(_)
             | R::Terrain(_)
+            | R::TerrainUnchanged
             | R::Move(_)
             | R::Inventory(_)
             | R::Extract(_)

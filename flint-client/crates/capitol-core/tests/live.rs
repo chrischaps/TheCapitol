@@ -56,6 +56,43 @@ fn rest(net: &Net, request: RestRequest, tag: Tag) -> Result<RestResponse, RestE
 
 #[test]
 #[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn terrain_is_fetched_gzipped_then_revalidated() {
+    let net = net();
+    // No token: /terrain is public. (That gzip is offered is checked against
+    // the mock in tests/net.rs.)
+    let Ok(RestResponse::Terrain(terrain)) = rest(
+        &net,
+        RestRequest::Terrain {
+            cached_version: None,
+        },
+        1,
+    ) else {
+        panic!("expected the terrain");
+    };
+    let version = terrain.version.clone().expect("B3 adds a version");
+    assert!(terrain.terrain_plots.len() > 2000);
+
+    let unchanged = rest(
+        &net,
+        RestRequest::Terrain {
+            cached_version: Some(version),
+        },
+        2,
+    );
+    assert_eq!(unchanged, Ok(RestResponse::TerrainUnchanged));
+
+    let stale = rest(
+        &net,
+        RestRequest::Terrain {
+            cached_version: Some("0000000000000000".into()),
+        },
+        3,
+    );
+    assert!(matches!(stale, Ok(RestResponse::Terrain(_))));
+}
+
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
 fn register_login_connect_and_move() {
     let net = net();
     let stamp = SystemTime::now()

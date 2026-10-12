@@ -64,6 +64,7 @@ impl Mock {
         let app = Router::new()
             .route("/auth/login", post(login))
             .route("/recipes", get(recipes))
+            .route("/terrain", get(terrain))
             .route(
                 "/player/currency",
                 get(|| async { Json(serde_json::json!({ "nope": 1 })) }),
@@ -135,6 +136,30 @@ async fn recipes(headers: HeaderMap) -> Response {
         return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
     }
     Json(RecipesResponse { recipes: vec![] }).into_response()
+}
+
+/// Like the backend's `/terrain` since B3: version `v1`, a weak ETag, and a
+/// 304 for a matching `If-None-Match`. A client that doesn't offer gzip is
+/// refused, since the real one would be sent a megabyte uncompressed.
+async fn terrain(headers: HeaderMap) -> Response {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+    };
+    if !header("accept-encoding").contains("gzip") {
+        let body = serde_json::json!({ "error": "no gzip offered" });
+        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+    }
+    if header("if-none-match") == "W/\"v1\"" {
+        return StatusCode::NOT_MODIFIED.into_response();
+    }
+    Json(serde_json::json!({
+        "world_size": 8000.0, "center_x": 4000.0, "center_y": 4000.0,
+        "water_rings": [], "roads": [], "terrain_plots": [], "version": "v1"
+    }))
+    .into_response()
 }
 
 async fn upgrade(ws: WebSocketUpgrade, State(mock): State<Mock>) -> Response {
@@ -591,6 +616,36 @@ fn rest_login_and_errors() {
         events.last(),
         Some(NetEvent::Rest(5, Err(RestError::Decode(_))))
     ));
+}
+
+#[test]
+fn terrain_offers_gzip_and_revalidates_by_version() {
+    let (_mock, addr) = Mock::start(Scenario::Normal);
+    let net = Net::spawn(config(addr)).unwrap();
+    let fetch = |cached_version: Option<&str>, tag: Tag| {
+        net.rest(
+            RestRequest::Terrain {
+                cached_version: cached_version.map(String::from),
+            },
+            tag,
+        );
+        match wait_for(
+            &net,
+            "terrain",
+            |e| matches!(e, NetEvent::Rest(t, _) if *t == tag),
+        )
+        .pop()
+        {
+            Some(NetEvent::Rest(_, result)) => result,
+            other => panic!("{other:?}"),
+        }
+    };
+    match fetch(None, 1) {
+        Ok(RestResponse::Terrain(t)) => assert_eq!(t.version.as_deref(), Some("v1")),
+        other => panic!("full fetch: {other:?}"),
+    }
+    assert_eq!(fetch(Some("v1"), 2), Ok(RestResponse::TerrainUnchanged));
+    assert!(matches!(fetch(Some("v0"), 3), Ok(RestResponse::Terrain(_))));
 }
 
 #[test]

@@ -2,12 +2,14 @@
 //! and installs `CapitolExtension`, through which everything the Capitol
 //! adds reaches the engine. For now it runs the P0.4 spike scene: a native
 //! Rhai function, the inscription window (game egui), and the moat, canals
-//! and zone-tinted ground as runtime meshes.
+//! and zone-tinted ground as runtime meshes. The water follows the terrain,
+//! fetched from the server (and cached) or read from `--offline <file>`.
 
 mod coords;
 mod extension;
 mod script_api;
 mod spike_world;
+mod terrain;
 mod ui;
 
 use anyhow::{Context, Result};
@@ -27,17 +29,27 @@ struct Args {
     #[arg(long, default_value = "The Capitol")]
     note: String,
 
+    /// Server root
+    #[arg(long, env = "CAPITOL_SERVER", default_value = "http://localhost:3000")]
+    server: String,
+
+    /// Build the world from this /terrain JSON and never touch the network
+    /// (fixtures/terrain.json, or a file from cache/)
+    #[arg(long, value_name = "TERRAIN_JSON")]
+    offline: Option<PathBuf>,
+
     #[arg(long, default_value_t = 1280)]
     width: u32,
     #[arg(long, default_value_t = 720)]
     height: u32,
 
-    /// Write a PNG of the presented frame (scene and egui)
+    /// Write a PNG of the presented frame (scene and egui). Defaults to
+    /// renders/capitol.png when only --screenshot-at is given.
     #[arg(long, value_name = "PATH")]
     screenshot: Option<PathBuf>,
-    /// Game time in seconds for the screenshot
-    #[arg(long, default_value_t = 0.0, value_name = "SECS")]
-    screenshot_at: f64,
+    /// Game time in seconds for the screenshot (default: the first frame)
+    #[arg(long, value_name = "SECS")]
+    screenshot_at: Option<f64>,
     /// Exit once game time reaches this many seconds
     #[arg(long, value_name = "SECS")]
     exit_after: Option<f64>,
@@ -49,11 +61,16 @@ struct Args {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("warn,capitol=info,capitol_core=info")
+            }),
         )
         .init();
     let args = Args::parse();
+    let terrain = match &args.offline {
+        Some(path) => terrain::TerrainSource::offline(path)?,
+        None => terrain::TerrainSource::online(&args.server)?,
+    };
 
     // Engine schemas first, then the game's own layered over them.
     let schema_dirs: Vec<String> = ["engine/schemas", "schemas"]
@@ -89,9 +106,13 @@ fn main() -> Result<()> {
         }
     }
     player.set_schema_paths(schema_dirs);
+    let screenshot = args.screenshot.or_else(|| {
+        args.screenshot_at
+            .map(|_| PathBuf::from("renders/capitol.png"))
+    });
     player.capture = flint_player::CaptureConfig::new(
-        args.screenshot,
-        args.screenshot_at,
+        screenshot,
+        args.screenshot_at.unwrap_or(0.0),
         None,
         args.exit_after,
     );
@@ -101,7 +122,7 @@ fn main() -> Result<()> {
 
     let shared = script_api::Shared::default();
     *shared.note.lock().unwrap() = args.note;
-    player.add_extension(Box::new(extension::CapitolExtension::new(shared)));
+    player.add_extension(Box::new(extension::CapitolExtension::new(shared, terrain)));
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);

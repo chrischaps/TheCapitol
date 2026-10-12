@@ -1,5 +1,7 @@
 /target/
 /renders/
+# The /terrain disk cache (crates/capitol-client/src/terrain.rs)
+/cache/
 # The binary client pins its lockfile, seeded from engine/Cargo.lock so it
 # resolves to the versions Flint is tested with.
 !Cargo.lock
