@@ -239,13 +239,22 @@ H1–H5 are needed for the vertical slice. H6 belongs to P8.
 
 ### 4.5 Networking and state (`capitol-core`)
 
-- **IO thread.** A tokio runtime runs on one background thread, with `reqwest` (rustls) for REST and `tokio-tungstenite` for the WebSocket. The game loop talks to it over two `std::sync::mpsc` channels. `Command` goes in: `Ws(ClientMessage)` or `Rest(RestRequest, tag)`. `NetEvent` comes out: `Ws(ServerMessage)`, `Rest(tag, Result<…>)` or `Connection(state)`. The game drains the inbound channel once per frame in `pre_update`.
+- **IO thread.** A tokio runtime runs on one background thread, with `reqwest` (rustls) for REST and `tokio-tungstenite` for the WebSocket. The game loop talks to it through `Net`. `Command` goes in: `Connect{token}`, `Disconnect`, `Ws(ClientMessage)` or `Rest(RestRequest, tag)`. `NetEvent` comes out: `Ws(ServerMessage)`, `Rest(tag, Result<…>)` or `Connection(state)`. The game drains events once per frame in `pre_update`.
 - **Handshake:**
   1. Connect to `/ws`.
-  2. Send `{"type":"auth","token"}`. The server allows 10 s (`ws/connection.rs:312-337`).
-  3. On `auth_ok`, send `subscribe{channel:"position"}`. Until then the server silently drops every event (`connection.rs:787-790`).
-  4. Send a WebSocket Ping every 15 s. The server answers Ping frames with Pong (`connection.rs:776`) but has no idle timeout of its own.
-- **Reconnect.** Back off exponentially from 0.5 s up to 10 s. After reconnecting, auth and subscribe again, then **resync** by refetching containers, nearby nodes, nearby stations, currency, plots and recipes. A lagging client that overflows the 1024-event buffer is disconnected by the server (`connection.rs:1034`). Reconnect covers that case too.
+  2. Send `{"type":"auth","token"}`. The server allows 10 s (`ws/connection.rs:32-92`).
+  3. On `auth_ok`, send `subscribe{channel:"position"}`. Until then the server silently drops every event (`connection.rs:509-511`).
+  4. Send a WebSocket Ping every 15 s. The server answers Ping frames with Pong (`connection.rs:497-499`) but has no idle timeout of its own.
+- **How P2.1 built it** (`crates/capitol-core/src/net/`):
+  - **Channels.** Commands travel on a tokio unbounded channel, not `std::sync::mpsc`. Its `send` is just as non-blocking for the game, and the IO loop can `await` it without a bridging thread. Events come back on `std::sync::mpsc`, so the game uses a plain `try_iter`.
+  - **Routes.** `RestRequest` has one variant per non-admin route, and each decodes to one `RestResponse` variant. The bearer token from the last `Connect` is attached to every call. Failures are `RestError::Http{status, message}` (the body's `error` field), `Transport` or `Decode`; `is_unauthorized()` flags a 401.
+  - **Connection states.** `Connecting → Authenticating → Connected{player_id}`, ending in `Disconnected{reason}` or `AuthFailed{message}`. `Connected` means `subscribed` has arrived, so events are flowing. `AuthFailed` is terminal; P2.2 should retry only after `Disconnected`. Handshake replies are forwarded as `NetEvent::Ws` too.
+  - **Held messages.** `Ws` commands sent during the handshake are held and flushed after `subscribed`. With no session they're dropped with a warning.
+  - **Liveness.** Ping every 15 s. If nothing arrives for 45 s, the session ends with `Disconnected{"server stopped responding"}`. The handshake must finish within 10 s.
+  - **Malformed frames.** Frames that don't parse as `ServerMessage`, including unknown types, are logged and skipped. The session stays up.
+  - **Closing.** On close, the client waits up to 1 s for the server's Close reply before dropping the socket. On Windows, dropping a socket with unread data sends a reset, and the server could lose the Close.
+  - **Connecting.** The client connects to every resolved address at once. `localhost` resolves to `::1` first and the backend listens on IPv4 only, so trying addresses in order added about 2 s to every connect on Windows.
+- **Reconnect.** Back off exponentially from 0.5 s up to 10 s. After reconnecting, auth and subscribe again, then **resync** by refetching containers, nearby nodes, nearby stations, currency, plots and recipes. A lagging client that overflows the 1024-event buffer is disconnected by the server (`connection.rs:755-757`). Reconnect covers that case too.
 - **Auth.**
   - Tokens last 24 h and there is no refresh endpoint (`routes/auth.rs:277-296`). A stored token is tried first, and an `auth_error` returns the player to the login screen.
   - Only one session per account is allowed, enforced in Redis (`middleware/auth.rs:59-69`). Logging in from the Flint client logs the same account out of React.

@@ -8,3 +8,19 @@ authors.workspace = true
 
 [dependencies]
 capitol-protocol.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+uuid = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+# rustls rather than the platform TLS, so https/wss servers work without
+# OpenSSL. gzip is ready for B3 (#18), which compresses /terrain.
+reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "rustls-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+
+[dev-dependencies]
+# The mock server in tests/net.rs is built on the backend's own stack.
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
