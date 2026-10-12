@@ -17,12 +17,37 @@ use capitol_protocol::rules::{CENTER_X, CENTER_Y};
 /// (radius 8) is about 1.6 m wide, and a 60-unit arterial is 6 m.
 pub const S: f32 = 0.1;
 
+/// Heights of the flat layers in metres (plan §4.6). Everything flat lies
+/// a hair above the layer under it so nothing z-fights. Water (P3.3) and
+/// bridge decks (P3.5) find their places in this list when they land.
+#[allow(dead_code)] // PLOT and road() wait for plots (P3.6) and roads (P3.4)
+pub mod layer {
+    use capitol_protocol::terrain::RoadType;
+
+    pub const GROUND: f32 = 0.0;
+    pub const PLOT: f32 = 0.02;
+    /// The lowest road layer; see [`road`].
+    pub const ROAD: f32 = 0.04;
+
+    /// A road's height: trail < suburban < grid < arterial, so where two
+    /// cross, the greater road is drawn on top.
+    pub fn road(road_type: RoadType) -> f32 {
+        let rank = match road_type {
+            RoadType::Trail => 0.0,
+            RoadType::Suburban => 1.0,
+            RoadType::Grid => 2.0,
+            RoadType::Arterial => 3.0,
+        };
+        ROAD + rank * 0.005
+    }
+}
+
 /// Server (x, y) to world (X, Z) on the ground plane.
 pub fn to_world(x: f64, y: f64) -> [f32; 2] {
     [((x - CENTER_X) as f32) * S, ((y - CENTER_Y) as f32) * S]
 }
 
-/// World (X, Z) back to server (x, y). Unused until clicks map to the ground (P1 H5).
+/// World (X, Z) back to server (x, y). Unused until clicks map to the ground (P4.3).
 #[allow(dead_code)]
 pub fn to_server(wx: f32, wz: f32) -> [f64; 2] {
     [(wx / S) as f64 + CENTER_X, (wz / S) as f64 + CENTER_Y]
@@ -53,6 +78,42 @@ mod tests {
         assert!(close(polar_to_world(200.0, 0.0), [20.0, 0.0]));
         assert!(close(polar_to_world(200.0, 90.0), [0.0, 20.0]));
         assert!(close(polar_to_world(200.0, 270.0), [0.0, -20.0]));
+    }
+
+    #[test]
+    fn a_server_step_south_or_east_is_a_world_step_along_plus_z_or_plus_x() {
+        let [x0, z0] = to_world(4000.0, 4000.0);
+        let [x1, z1] = to_world(4010.0, 4000.0); // east
+        let [x2, z2] = to_world(4000.0, 4010.0); // south (server y down)
+        assert!(close([x1 - x0, z1 - z0], [10.0 * S, 0.0]));
+        assert!(close([x2 - x0, z2 - z0], [0.0, 10.0 * S]));
+        // And back: +X is east, -Z is north.
+        let [x, y] = to_server(5.0, -5.0);
+        assert!(x > 4000.0 && y < 4000.0);
+    }
+
+    #[test]
+    fn polar_round_trips_through_server_space() {
+        for (r, deg) in [(0.0, 0.0), (600.0, 45.0), (2400.0, 200.0), (3999.0, 359.0)] {
+            let [wx, wz] = polar_to_world(r, deg);
+            let [x, y] = to_server(wx, wz);
+            let (dx, dy) = (x - CENTER_X, y - CENTER_Y);
+            assert!((dx.hypot(dy) - r).abs() < 0.05, "r {r}");
+        }
+    }
+
+    #[test]
+    fn layers_stack_ground_plots_then_roads_by_rank() {
+        use capitol_protocol::terrain::RoadType;
+        let roads = [
+            RoadType::Trail,
+            RoadType::Suburban,
+            RoadType::Grid,
+            RoadType::Arterial,
+        ]
+        .map(layer::road);
+        assert!(layer::GROUND < layer::PLOT && layer::PLOT < roads[0]);
+        assert!(roads.windows(2).all(|w| w[0] < w[1]));
     }
 
     #[test]

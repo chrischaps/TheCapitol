@@ -1,11 +1,11 @@
 //! `CapitolExtension`: everything the Capitol adds to Flint's player, as a
 //! `PlayerExtension`. Today that's the script API, the game egui, the terrain
-//! (fetched and cached, or read from a file offline) and the spike's runtime
-//! meshes, whose water now follows the terrain.
+//! (fetched and cached, or read from a file offline), the world built from
+//! it (`world`, so far the ground) and the spike's water and markers.
 
 use crate::script_api::{self, Shared};
 use crate::terrain::TerrainSource;
-use crate::{spike_world, ui};
+use crate::{spike_world, ui, world};
 use capitol_core::protocol::terrain::WaterRing;
 use flint_player::{ExtensionCtx, PlayerExtension};
 
@@ -14,7 +14,7 @@ pub struct CapitolExtension {
     terrain: TerrainSource,
     /// The terrain's water, redrawn every frame with the tide.
     water: Vec<WaterRing>,
-    /// Whether the ground and markers have been uploaded.
+    /// Whether the spike's markers have been uploaded.
     world_built: bool,
 }
 
@@ -47,6 +47,7 @@ impl PlayerExtension for CapitolExtension {
         // Held until the renderer exists, so a terrain that arrives first
         // (offline, or from the cache) isn't consumed with nothing to draw on.
         if let Some(terrain) = self.terrain.take_changed() {
+            world::ground::upload(gpu, terrain.world_size);
             self.water = terrain.water_rings.clone();
         }
         spike_world::upload_water(gpu, t, &self.water);

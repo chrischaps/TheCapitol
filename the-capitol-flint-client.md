@@ -355,6 +355,8 @@ world.y =  height layer
 
 Flat geometry is layered in Y to avoid z-fighting: ground 0, plots +0.02, roads +0.04 (by type: trail < suburban < grid < arterial), bridge decks raised above the water surface.
 
+These live in `coords::layer` (P3.2): `GROUND`, `PLOT`, and `road(RoadType)`, which steps 5 mm per rank from `ROAD`. P3.3 and P3.5 add water and bridge decks there. **Depth precision caps how thin the layers can be.** The depth buffer is standard (not reversed) Z, so at 1 km the smallest step it can resolve is about `distance² / (near × 2²⁴)`: roughly 0.6 m with the default `near = 0.1`, and 6 cm with `near = 1`. The scene sets `near = 1.0` and `far = 4000.0`. At map zoom, centimetre layers can still z-fight, so P3.9's rig should push `near` out as it zooms (10 m at the top of the zoom gives a few millimetres). Otherwise the map view should lean on draw order.
+
 ### 4.7 Visual language carried over
 
 Tokens come from `client/src/index.css` and `components/GameCanvas.tsx`.
@@ -481,6 +483,12 @@ Sizes: **S** is about 1 focused session, **M** 2–3, **L** 4 or more. Each phas
 | P3.8 [#26](https://github.com/chrischaps/TheCapitol/issues/26) | **Atmosphere.** Sky, distance fog, a warm key light, SSAO and bloom. Dusk as the default mood. Tuned with the `flint-render` skill's camera presets. | S | P3.2–P3.7 |
 | P3.9 [#27](https://github.com/chrischaps/TheCapitol/issues/27) | **Camera rig** (`camera.rhai`). Follows the player with damping. Pitch is about 50° at street level, eased to 90° at map zoom. Wheel zoom from street level to the whole world; Q/E or right-drag to orbit; a home key to recentre. Map mode flattens lighting into the 2D palette. | M | P1.5 |
 | P3.10 [#28](https://github.com/chrischaps/TheCapitol/issues/28) | Terrain hot-swap on `terrain_updated`: rebuild only the affected meshes | S | P3.2–P3.6 |
+
+**How P3.2 built it:**
+- **`world/`** holds the meshes built from the terrain: `mesh.rs` (`MeshBuf`, moved out of `spike_world.rs`), `palette.rs` (the §4.7 tokens, sRGB hex converted to linear) and `ground.rs`. The ground is rebuilt from `terrain.world_size` each time `take_changed` hands over a terrain. P3.3–P3.7 add their builders beside it.
+- **The ground** is one disc with per-vertex colour: 480 segments, with rings every 20 units inside r1000 and every 40 units out to the edge. There are extra rings across each blend, then wide steps out to a skirt at r12000, well past the world's corners (about 5657), so the rim is only seen at the horizon. That's about 90k vertices, and capture still runs at vsync (59.6 fps). Each zone is its token pulled toward the background (`strength`: Capitol 0.40, Trade 0.17, Guild 0.16, Urban 0.20, Suburban 0.10, Rural 0.085). The brighter greens get less, so the rings sit at similar darkness and differ in hue. Boundaries blend with a smoothstep over ±40 units, and ±200 for rural into wilderness. From r3400 the colour fades to the background, reaching it at the world edge (r4000). A ±10% value-noise mottling (30 m wavelength) breaks up the flat tints.
+- **No fog yet.** The ground fades to the background colour, so P3.8's fog only has to meet it at the horizon. At map zoom fog works on camera distance, so it would wash the whole city out. That's for P3.8 and P3.9 to settle together.
+- **`--view street|district|map`** (read by scripts as `cap_view()`) frames the capture until P3.9's rig replaces it. Map is 620 m up, straight down: the player's vertical FOV is about 70°, not the renderer's default 45°.
 
 **How P3.1 built it:**
 - **Revalidation in the REST layer.** `RestRequest::Terrain { cached_version }` sends `If-None-Match: W/"<version>"`, and a 304 decodes to `RestResponse::TerrainUnchanged`. The poller's `terrain_updated` refetch sends no version, because that event means the terrain changed. reqwest's `gzip` feature offers gzip and decodes it; the mock server in `tests/net.rs` refuses a client that doesn't offer it.

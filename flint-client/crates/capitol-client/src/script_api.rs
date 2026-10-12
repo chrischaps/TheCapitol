@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 pub struct Shared {
     /// The inscription over the Capitol (`--note`).
     pub note: Arc<Mutex<String>>,
+    /// The camera view the script frames (`--view`): street, district or map.
+    pub view: Arc<Mutex<String>>,
 }
 
 pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
@@ -18,6 +20,11 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     let note = shared.note.clone();
     engine.register_fn("cap_spike_note", move || -> String {
         note.lock().map(|s| s.clone()).unwrap_or_default()
+    });
+    // `cap_view() -> String`: which view to frame. P3.9's rig replaces it.
+    let view = shared.view.clone();
+    engine.register_fn("cap_view", move || -> String {
+        view.lock().map(|s| s.clone()).unwrap_or_default()
     });
 }
 

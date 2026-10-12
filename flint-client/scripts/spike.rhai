@@ -1,5 +1,6 @@
 // The P0.4 spike on master. Camera: south of the Capitol looking north, so
-// east is on the right. The ground and water are runtime meshes the
+// east is on the right. `--view` picks the framing until the camera rig
+// (P3.9): street (a slow drift), district, or map (straight down). The ground and water are runtime meshes the
 // extension builds (P1.4); over them the moat and inner canal are traced
 // as hairlines, the plan the city was drawn from. The inscription comes
 // from Rust through cap_spike_note(), which CapitolExtension registers.
@@ -21,11 +22,22 @@ let ripples = [];
 fn ripple_life() { 1.6 }
 
 fn on_update() {
-    // A slow breath of a drift, staying south of centre.
     let t = total_time();
-    let sway = 6.0 * (t * 0.15).sin();
-    set_camera_position(sway, 70.0, 95.0);
-    set_camera_target(0.0, 0.0, 4.0);
+    let view = cap_view();
+    if view == "map" {
+        // The whole world from 620 m up. A hair south of straight down,
+        // so the look-at keeps north at the top of the screen.
+        set_camera_position(0.0, 620.0, 1.0);
+        set_camera_target(0.0, 0.0, 0.0);
+    } else if view == "district" {
+        set_camera_position(0.0, 260.0, 300.0);
+        set_camera_target(0.0, 0.0, 30.0);
+    } else {
+        // A slow breath of a drift, staying south of centre.
+        let sway = 6.0 * (t * 0.15).sin();
+        set_camera_position(sway, 70.0, 95.0);
+        set_camera_target(0.0, 0.0, 4.0);
+    }
 
     if is_action_just_pressed("interact") {
         plan_shown = !plan_shown;

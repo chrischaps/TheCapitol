@@ -1,9 +1,10 @@
 //! The Capitol client. It builds a `flint_player::PlayerApp` for the scene
 //! and installs `CapitolExtension`, through which everything the Capitol
 //! adds reaches the engine. For now it runs the P0.4 spike scene: a native
-//! Rhai function, the inscription window (game egui), and the moat, canals
-//! and zone-tinted ground as runtime meshes. The water follows the terrain,
-//! fetched from the server (and cached) or read from `--offline <file>`.
+//! Rhai function, the inscription window (game egui), and the world as
+//! runtime meshes built from the terrain (the zone-tinted ground so far,
+//! plus the spike's water), fetched from the server (and cached) or read
+//! from `--offline <file>`.
 
 mod coords;
 mod extension;
@@ -11,6 +12,7 @@ mod script_api;
 mod spike_world;
 mod terrain;
 mod ui;
+mod world;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -37,6 +39,11 @@ struct Args {
     /// (fixtures/terrain.json, or a file from cache/)
     #[arg(long, value_name = "TERRAIN_JSON")]
     offline: Option<PathBuf>,
+
+    /// Where the camera looks from, until the camera rig (P3.9) lands:
+    /// street (the spike's drift), district, or map (straight down)
+    #[arg(long, default_value = "street", value_parser = ["street", "district", "map"])]
+    view: String,
 
     #[arg(long, default_value_t = 1280)]
     width: u32,
@@ -122,6 +129,7 @@ fn main() -> Result<()> {
 
     let shared = script_api::Shared::default();
     *shared.note.lock().unwrap() = args.note;
+    *shared.view.lock().unwrap() = args.view;
     player.add_extension(Box::new(extension::CapitolExtension::new(shared, terrain)));
 
     let event_loop = EventLoop::new()?;

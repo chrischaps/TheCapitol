@@ -1,0 +1,54 @@
+//! The Capitol's colour tokens (plan §4.7), shared with the React client
+//! (`client/src/index.css`, `components/GameCanvas.tsx`). Tokens are sRGB
+//! hex as written there; vertex colours are linear, so convert with `hex`.
+
+use capitol_protocol::rules::Zone;
+use flint_render::srgb_to_linear;
+
+pub const BACKGROUND: u32 = 0x0a0a0f;
+
+/// A zone's colour in the 2D clients.
+pub fn zone(zone: Zone) -> u32 {
+    match zone {
+        Zone::Capitol => 0xc9a227,
+        Zone::TradeDistrict => 0x3b82f6,
+        Zone::GuildDistrict => 0x8b5cf6,
+        Zone::Urban => 0x64748b,
+        Zone::Suburban => 0x22c55e,
+        Zone::Rural => 0x84cc16,
+        Zone::Wilderness => 0x1a1a24,
+    }
+}
+
+/// A hex colour token (sRGB) as linear RGBA.
+pub fn hex(h: u32) -> [f32; 4] {
+    let c = |shift: u32| ((h >> shift) & 0xff) as f32 / 255.0;
+    srgb_to_linear([c(16), c(8), c(0), 1.0])
+}
+
+/// `a` moved toward `b` by `t` (0 = a, 1 = b), alpha included.
+pub fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_is_linear() {
+        assert_eq!(hex(0xffffff), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(hex(0x000000), [0.0, 0.0, 0.0, 1.0]);
+        // sRGB mid-grey is about 0.214 linear.
+        assert!((hex(0x808080)[0] - 0.2158).abs() < 1e-3);
+    }
+
+    #[test]
+    fn every_zone_has_its_own_colour() {
+        for (i, a) in Zone::ALL.iter().enumerate() {
+            for b in &Zone::ALL[i + 1..] {
+                assert_ne!(zone(*a), zone(*b), "{a} and {b}");
+            }
+        }
+    }
+}
