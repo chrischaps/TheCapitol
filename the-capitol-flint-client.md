@@ -75,7 +75,7 @@ GDD Pillar 4 says clients are "interchangeable windows into the world". This cli
 | Instancing covers sprites, particles, billboards and grass only. Each mesh entity is one draw. | `scene_renderer` |
 | The ocean shader can't render an arbitrary mesh such as a ring canal | `ocean_pipeline.rs` |
 
-**Housekeeping:** the local checkout `C:\Users\chris\dev\Flint` is 23 commits behind `origin/main`. The mouse API, polygon and ring drawing, project fonts, `ui_hit`, the renderer resource cache and the capture flags all live in those commits. Pull before adding the subtree.
+**Housekeeping (done in P0.1):** the local checkout `C:\Users\chris\dev\Flint` was 23 commits behind `origin/main`. The mouse API, polygon and ring drawing, project fonts, `ui_hit`, the renderer resource cache and the capture flags all live in those commits. It was pulled to `8cc8306`, and the subtree at `flint-client/engine` was added from that commit.
 
 ## 4. Architecture
 
