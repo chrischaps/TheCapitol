@@ -74,6 +74,7 @@ Copy `backend/.env.example` to `backend/.env`. Default config:
 - PostgreSQL on port 5433 (not 5432, to avoid conflicts)
 - Redis on port 6379
 - Backend API on port 3000
+- Backend bound to `127.0.0.1` (`HOST` in the local `backend/.env`; `.env.example` still says `0.0.0.0`). Binding to all interfaces makes Windows Firewall prompt once for every new exe path, and each `TheCapitol-<n>` worktree builds its own exe. Loopback is enough for several clients on this machine. **Testing from another device** (phone, second PC, LAN players) needs `HOST=0.0.0.0` and one firewall prompt. Clients on the other device must also point at this PC's LAN IP, not `localhost`.
 
 ## Architecture
 
