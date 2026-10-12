@@ -7,13 +7,18 @@
 // Two inputs test the game egui layer (P1.3). E ("interact") shows and
 // hides the plan; typing an e in the inscription box must not. A left
 // click on the city leaves a gold ripple; a click on the box must not.
+//
+// The cursor is picked off the ground with screen_to_ground (P1.5): a gold
+// reticle lies on the ground under it, foreshortened by the view, and a
+// click's ripple spreads across the ground like a stone dropped in still
+// water, not across the glass of the screen.
 
 let plan_shown = true;
 let ripples = [];
 
 // How long a ripple takes to spread and fade, in seconds. A function, not
 // a top-level const, because helper functions can't see the script's scope.
-fn ripple_life() { 1.4 }
+fn ripple_life() { 1.6 }
 
 fn on_update() {
     // A slow breath of a drift, staying south of centre.
@@ -27,8 +32,12 @@ fn on_update() {
         log("plan " + if plan_shown { "shown" } else { "hidden" });
     }
     if is_mouse_just_pressed(0) {
-        ripples.push(#{ x: mouse_x(), y: mouse_y(), born: t });
-        log("mark at " + mouse_x().round() + ", " + mouse_y().round());
+        // The ground under the cursor, or () over the sky.
+        let g = screen_to_ground(mouse_x(), mouse_y(), 0.0);
+        if g != () {
+            ripples.push(#{ x: g[0], z: g[1], born: t });
+            log("mark at " + g[0].round() + ", " + g[1].round() + " m");
+        }
     }
     ripples = ripples.filter(|r| t - r.born < ripple_life());
 }
@@ -37,7 +46,10 @@ fn on_update() {
 // `gap` (radians) at each angle in `gaps` (degrees, server convention:
 // 0 = east, 90 = south). Drawn as projected segments.
 fn trace_ring(r, gaps, gap, red, green, blue, alpha) {
-    let steps = 96;
+    trace_ring_at(0.0, 0.0, r, gaps, gap, red, green, blue, alpha, 1.5, 96);
+}
+
+fn trace_ring_at(cx, cz, r, gaps, gap, red, green, blue, alpha, width, steps) {
     let prev = ();
     for i in 0..=steps {
         let a = i.to_float() / steps.to_float() * 2.0 * PI();
@@ -46,13 +58,13 @@ fn trace_ring(r, gaps, gap, red, green, blue, alpha) {
             let d = (a - g.to_float().to_radians() + 3.0 * PI()) % (2.0 * PI()) - PI();
             if d.abs() < gap { in_gap = true; }
         }
-        let p = world_to_screen(r * a.cos(), 0.0, r * a.sin());
+        let p = world_to_screen(cx + r * a.cos(), 0.0, cz + r * a.sin());
         if in_gap || !p.visible {
             prev = ();
             continue;
         }
         if prev != () {
-            draw_line(prev.x, prev.y, p.x, p.y, red, green, blue, alpha, 1.5);
+            draw_line(prev.x, prev.y, p.x, p.y, red, green, blue, alpha, width);
         }
         prev = p;
     }
@@ -68,16 +80,33 @@ fn label(x, z, text, size, r, g, b) {
     draw_text(tx, ty, text, size, r, g, b, 1.0);
 }
 
-// Two gold rings spreading out from where the click landed, the second a
-// beat behind, both easing out as they fade.
+// Two gold rings spreading over the ground from where the click landed,
+// the second a beat behind, both easing out as they fade.
 fn draw_ripple(rip, now) {
     for k in 0..2 {
-        let age = (now - rip.born) / ripple_life() - k.to_float() * 0.18;
+        let age = (now - rip.born) / ripple_life() - k.to_float() * 0.2;
         if age <= 0.0 || age >= 1.0 { continue; }
         let ease = 1.0 - (1.0 - age) * (1.0 - age);
-        let radius = 3.0 + 34.0 * ease;
+        let radius = 0.3 + 5.5 * ease;
         let alpha = 0.85 * (1.0 - age) * (1.0 - age);
-        draw_circle_outline(rip.x, rip.y, radius, 0.788, 0.635, 0.153, alpha, 1.5);
+        trace_ring_at(rip.x, rip.z, radius, [], 0.0, 0.788, 0.635, 0.153, alpha, 1.5, 48);
+    }
+}
+
+// The reticle: a thin gold ring lying on the ground under the cursor, a
+// fainter one outside it, and four ticks pointing north, east, south and
+// west, so the ground's own perspective shows in its shape.
+fn draw_reticle(g, now) {
+    let breathe = 1.0 + 0.06 * (now * 2.4).sin();
+    let r = 0.9 * breathe;
+    trace_ring_at(g[0], g[1], r, [], 0.0, 0.788, 0.635, 0.153, 0.9, 1.5, 40);
+    trace_ring_at(g[0], g[1], r * 1.9, [], 0.0, 0.788, 0.635, 0.153, 0.25, 1.0, 56);
+    for a in [0.0, 0.5 * PI(), PI(), 1.5 * PI()] {
+        let p = world_to_screen(g[0] + r * 1.25 * a.cos(), 0.0, g[1] + r * 1.25 * a.sin());
+        let q = world_to_screen(g[0] + r * 1.7 * a.cos(), 0.0, g[1] + r * 1.7 * a.sin());
+        if p.visible && q.visible {
+            draw_line(p.x, p.y, q.x, q.y, 0.788, 0.635, 0.153, 0.7, 1.5);
+        }
     }
 }
 
@@ -97,5 +126,11 @@ fn on_draw_ui() {
     let now = total_time();
     for rip in ripples {
         draw_ripple(rip, now);
+    }
+    // Picked here rather than in on_update: on_draw_ui sees the camera this
+    // frame renders with, so the reticle can't trail the ground under it.
+    let hover = screen_to_ground(mouse_x(), mouse_y(), 0.0);
+    if hover != () {
+        draw_reticle(hover, now);
     }
 }
