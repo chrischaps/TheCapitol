@@ -190,6 +190,12 @@ H1–H5 are needed for the vertical slice. H6 belongs to P8.
 - **No wrapper.** The spike's forwarding `ApplicationHandler` isn't needed any more. `capitol` runs `PlayerApp` directly with `CapitolExtension` installed, and `cap_spike_note()` is registered through the trait.
 - **Where the hooks live until P1.6.** P1.1 to P1.5 commit their engine changes to master under `flint-client/engine/`. P1.6 pushes them all upstream as one PR. Until it merges, the subtree differs from `flint/main` on purpose.
 
+**How H2 was built (P1.2).**
+- **`on_event(name, data)`** is a broadcast. Every script that defines it gets every `GameEvent::Custom`, in entity-id order, including the script that fired it. `data` is always a Rhai map. A non-table payload arrives as `#{ value: .. }`. An error in one listener doesn't stop the others. Events are dropped while scripts are paused, the same as input actions.
+- **`ExtensionCtx::fire_event(name, data: impl Into<toml::Value>)`** queues onto the physics event queue right after the extensions' `pre_update`. Scripts see it in the same frame, before `on_update`, and audio triggers see it too.
+- **Timing differs by source.** Extension and engine events arrive the same frame. A script's `fire_event_data` is a command drained after `on_update`, so it arrives next frame. The Capitol's network events go through the extension, so they don't pay that frame.
+- **The payload is TOML, so there's no null.** The wire is JSON. When the client forwards server data to scripts, it must turn `null` into an absent key, or drop it.
+
 ### 4.5 Networking and state (`capitol-core`)
 
 - **IO thread.** A tokio runtime runs on one background thread, with `reqwest` (rustls) for REST and `tokio-tungstenite` for the WebSocket. The game loop talks to it over two `std::sync::mpsc` channels. `Command` goes in: `Ws(ClientMessage)` or `Rest(RestRequest, tag)`. `NetEvent` comes out: `Ws(ServerMessage)`, `Rest(tag, Result<…>)` or `Connection(state)`. The game drains the inbound channel once per frame in `pre_update`.
