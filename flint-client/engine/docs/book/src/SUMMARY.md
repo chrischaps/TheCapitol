@@ -1,0 +1,74 @@
+# Summary
+
+[Introduction](introduction.md)
+[Quick Reference](quick-reference.md)
+
+---
+
+# Philosophy
+
+- [Why Flint?](philosophy/why-flint.md)
+- [Design Principles](philosophy/design-principles.md)
+- [CLI-First Workflow](philosophy/cli-first.md)
+- [AI Agent Interface](philosophy/ai-agent.md)
+
+# Getting Started
+
+- [Installation](getting-started/installation.md)
+- [Your First Project](getting-started/first-project.md)
+- [Your First Scene](getting-started/first-scene.md)
+- [Querying Entities](getting-started/first-query.md)
+- [The Scene Viewer](getting-started/viewing.md)
+
+# Core Concepts
+
+- [Entities and ECS](concepts/entities-and-ecs.md)
+- [Schemas](concepts/schemas.md)
+- [Scenes](concepts/scenes.md)
+- [Queries](concepts/queries.md)
+- [Constraints](concepts/constraints.md)
+- [Assets](concepts/assets.md)
+- [Rendering](concepts/rendering.md)
+- [Lighting](concepts/lighting.md)
+- [Sky](concepts/sky.md)
+- [Ocean](concepts/ocean.md)
+- [Post-Processing](concepts/post-processing.md)
+- [Audio](concepts/audio.md)
+- [Music Sessions](concepts/music-sessions.md)
+- [Animation](concepts/animation.md)
+- [Terrain](concepts/terrain.md)
+- [Particles](concepts/particles.md)
+- [Physics and Runtime](concepts/physics-and-runtime.md)
+- [Scripting](concepts/scripting.md)
+- [2D Sprites](concepts/sprites-2d.md)
+- [Touch Input](concepts/touch-input.md)
+- [Procedural Generation](concepts/procgen.md)
+- [AI Asset Generation](concepts/ai-generation.md)
+
+# Guides
+
+- [Building a Tavern](guides/building-a-tavern.md)
+- [Writing Constraints](guides/writing-constraints.md)
+- [Importing Assets](guides/importing-assets.md)
+- [Headless Rendering](guides/headless-rendering.md)
+- [AI Agent Workflow](guides/ai-agent-workflow.md)
+- [Building a Game Project](guides/building-a-game-project.md)
+- [Deploying to Android](guides/android.md)
+- [Debug Panels](guides/debug-panels.md)
+- [Particle Editor](guides/particle-editor.md)
+
+# Reference
+
+- [CLI Reference](cli-reference/overview.md)
+  - [Music and Rhythm Commands](cli-reference/music.md)
+- [File Formats](formats/overview.md)
+
+# Architecture
+
+- [Architecture Overview](architecture/overview.md)
+- [Crate Dependency Graph](architecture/crate-graph.md)
+
+---
+
+[Roadmap](roadmap.md)
+[Contributing](contributing.md)

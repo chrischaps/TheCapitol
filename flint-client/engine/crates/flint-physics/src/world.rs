@@ -1,0 +1,291 @@
+//! Physics world wrapping Rapier 3D
+
+use rapier3d::prelude::*;
+
+/// Wraps Rapier's physics pipeline and body/collider sets
+pub struct PhysicsWorld {
+    pub(crate) rigid_body_set: RigidBodySet,
+    pub(crate) collider_set: ColliderSet,
+    pub(crate) gravity: Vector<Real>,
+    pub(crate) integration_parameters: IntegrationParameters,
+    pub(crate) physics_pipeline: PhysicsPipeline,
+    pub(crate) island_manager: IslandManager,
+    pub(crate) broad_phase: DefaultBroadPhase,
+    pub(crate) narrow_phase: NarrowPhase,
+    pub(crate) impulse_joint_set: ImpulseJointSet,
+    pub(crate) multibody_joint_set: MultibodyJointSet,
+    pub(crate) ccd_solver: CCDSolver,
+    pub(crate) query_pipeline: QueryPipeline,
+
+    /// Collision events from the last step
+    collision_recv: crossbeam::channel::Receiver<CollisionEvent>,
+    contact_force_recv: crossbeam::channel::Receiver<ContactForceEvent>,
+    event_handler: ChannelEventCollector,
+}
+
+impl PhysicsWorld {
+    /// Create a new physics world with standard gravity
+    pub fn new() -> Self {
+        let (collision_send, collision_recv) = crossbeam::channel::unbounded();
+        let (contact_force_send, contact_force_recv) = crossbeam::channel::unbounded();
+        let event_handler = ChannelEventCollector::new(collision_send, contact_force_send);
+
+        Self {
+            rigid_body_set: RigidBodySet::new(),
+            collider_set: ColliderSet::new(),
+            gravity: vector![0.0, -9.81, 0.0],
+            integration_parameters: {
+                // One solver substep with four internal iterations. Rapier's
+                // default TGS profile substeps dynamic bodies but solves each
+                // substep against a kinematic body's start-of-step pose, so a
+                // joint child trails a script-driven parent by (n-1)/n of the
+                // parent's per-step travel. Flint drives vehicles and rigs
+                // kinematically and hangs sprung parts on them, which must
+                // keep up exactly; stacking piles of loose bodies matters less.
+                let mut p = IntegrationParameters::default();
+                p.num_solver_iterations = std::num::NonZeroUsize::new(1).unwrap();
+                p.num_internal_pgs_iterations = 4;
+                p
+            },
+            physics_pipeline: PhysicsPipeline::new(),
+            island_manager: IslandManager::new(),
+            broad_phase: DefaultBroadPhase::new(),
+            narrow_phase: NarrowPhase::new(),
+            impulse_joint_set: ImpulseJointSet::new(),
+            multibody_joint_set: MultibodyJointSet::new(),
+            ccd_solver: CCDSolver::new(),
+            query_pipeline: QueryPipeline::new(),
+            collision_recv,
+            contact_force_recv,
+            event_handler,
+        }
+    }
+
+    /// Step the physics simulation by dt seconds
+    pub fn step(&mut self, dt: f32) {
+        self.integration_parameters.dt = dt;
+
+        self.physics_pipeline.step(
+            &self.gravity,
+            &self.integration_parameters,
+            &mut self.island_manager,
+            &mut self.broad_phase,
+            &mut self.narrow_phase,
+            &mut self.rigid_body_set,
+            &mut self.collider_set,
+            &mut self.impulse_joint_set,
+            &mut self.multibody_joint_set,
+            &mut self.ccd_solver,
+            Some(&mut self.query_pipeline),
+            &(),
+            &self.event_handler,
+        );
+    }
+
+    /// Drain collision events from the last step
+    pub fn drain_collision_events(&self) -> Vec<CollisionEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = self.collision_recv.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    /// Drain contact force events from the last step
+    pub fn drain_contact_force_events(&self) -> Vec<ContactForceEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = self.contact_force_recv.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    /// Insert a rigid body and return its handle
+    pub fn insert_rigid_body(&mut self, body: RigidBody) -> RigidBodyHandle {
+        self.rigid_body_set.insert(body)
+    }
+
+    /// Insert a collider attached to a rigid body
+    pub fn insert_collider_with_parent(
+        &mut self,
+        collider: Collider,
+        parent: RigidBodyHandle,
+    ) -> ColliderHandle {
+        self.collider_set
+            .insert_with_parent(collider, parent, &mut self.rigid_body_set)
+    }
+
+    /// Remove a rigid body and its attached colliders
+    pub fn remove_rigid_body(&mut self, handle: RigidBodyHandle) {
+        self.rigid_body_set.remove(
+            handle,
+            &mut self.island_manager,
+            &mut self.collider_set,
+            &mut self.impulse_joint_set,
+            &mut self.multibody_joint_set,
+            true,
+        );
+    }
+
+    /// Remove a standalone collider
+    pub fn remove_collider(&mut self, handle: ColliderHandle) {
+        self.collider_set.remove(
+            handle,
+            &mut self.island_manager,
+            &mut self.rigid_body_set,
+            true,
+        );
+    }
+
+    /// Insert an impulse joint between two bodies (`body1` = parent, `body2` = child)
+    pub fn insert_impulse_joint(
+        &mut self,
+        body1: RigidBodyHandle,
+        body2: RigidBodyHandle,
+        data: impl Into<GenericJoint>,
+    ) -> ImpulseJointHandle {
+        self.impulse_joint_set.insert(body1, body2, data, true)
+    }
+
+    /// Remove an impulse joint, waking its bodies
+    pub fn remove_impulse_joint(&mut self, handle: ImpulseJointHandle) {
+        self.impulse_joint_set.remove(handle, true);
+    }
+
+    /// Mutable access to an impulse joint (motor targets, limits)
+    pub fn get_impulse_joint_mut(
+        &mut self,
+        handle: ImpulseJointHandle,
+    ) -> Option<&mut ImpulseJoint> {
+        self.impulse_joint_set.get_mut(handle)
+    }
+
+    /// Number of live impulse joints
+    pub fn impulse_joint_count(&self) -> usize {
+        self.impulse_joint_set.len()
+    }
+
+    /// Get a rigid body by handle
+    pub fn get_rigid_body(&self, handle: RigidBodyHandle) -> Option<&RigidBody> {
+        self.rigid_body_set.get(handle)
+    }
+
+    /// Get a mutable rigid body by handle
+    pub fn get_rigid_body_mut(&mut self, handle: RigidBodyHandle) -> Option<&mut RigidBody> {
+        self.rigid_body_set.get_mut(handle)
+    }
+
+    /// Cast a ray and return the first hit
+    pub fn cast_ray(
+        &self,
+        origin: [f32; 3],
+        direction: [f32; 3],
+        max_distance: f32,
+        exclude_collider: Option<ColliderHandle>,
+    ) -> Option<RaycastHit> {
+        let ray = Ray::new(
+            point![origin[0], origin[1], origin[2]],
+            vector![direction[0], direction[1], direction[2]],
+        );
+
+        let predicate = |handle: ColliderHandle, _collider: &rapier3d::prelude::Collider| -> bool {
+            if let Some(exclude) = exclude_collider {
+                handle != exclude
+            } else {
+                true
+            }
+        };
+        let filter = QueryFilter::default().predicate(&predicate);
+
+        self.query_pipeline
+            .cast_ray_and_get_normal(
+                &self.rigid_body_set,
+                &self.collider_set,
+                &ray,
+                max_distance,
+                true,
+                filter,
+            )
+            .map(|(collider_handle, intersection)| {
+                let point = ray.point_at(intersection.time_of_impact);
+                RaycastHit {
+                    collider_handle,
+                    distance: intersection.time_of_impact,
+                    point: [point.x, point.y, point.z],
+                    normal: [
+                        intersection.normal.x,
+                        intersection.normal.y,
+                        intersection.normal.z,
+                    ],
+                }
+            })
+    }
+}
+
+/// Result of a raycast query
+#[derive(Debug, Clone)]
+pub struct RaycastHit {
+    pub collider_handle: ColliderHandle,
+    pub distance: f32,
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+}
+
+impl Default for PhysicsWorld {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_physics_world() {
+        let world = PhysicsWorld::new();
+        assert_eq!(world.rigid_body_set.len(), 0);
+        assert_eq!(world.collider_set.len(), 0);
+    }
+
+    #[test]
+    fn test_insert_body_and_collider() {
+        let mut world = PhysicsWorld::new();
+
+        let body = RigidBodyBuilder::dynamic()
+            .translation(vector![0.0, 5.0, 0.0])
+            .build();
+        let handle = world.insert_rigid_body(body);
+
+        let collider = ColliderBuilder::ball(0.5).build();
+        world.insert_collider_with_parent(collider, handle);
+
+        assert_eq!(world.rigid_body_set.len(), 1);
+        assert_eq!(world.collider_set.len(), 1);
+    }
+
+    #[test]
+    fn test_gravity_simulation() {
+        let mut world = PhysicsWorld::new();
+
+        let body = RigidBodyBuilder::dynamic()
+            .translation(vector![0.0, 10.0, 0.0])
+            .build();
+        let handle = world.insert_rigid_body(body);
+
+        let collider = ColliderBuilder::ball(0.5).build();
+        world.insert_collider_with_parent(collider, handle);
+
+        let initial_y = world.get_rigid_body(handle).unwrap().translation().y;
+
+        // Step several times
+        for _ in 0..60 {
+            world.step(1.0 / 60.0);
+        }
+
+        let final_y = world.get_rigid_body(handle).unwrap().translation().y;
+
+        // Object should have fallen due to gravity
+        assert!(final_y < initial_y);
+    }
+}
