@@ -279,12 +279,28 @@ pub(crate) async fn execute(
     request: &RestRequest,
 ) -> Result<RestResponse, RestError> {
     let url = format!("{base}{}", request.path());
-    let mut builder = request.with_payload(http.request(request.method(), url));
-    if let Some(token) = token {
-        builder = builder.bearer_auth(token);
-    }
+    let send = || {
+        let mut builder = request.with_payload(http.request(request.method(), &url));
+        if let Some(token) = token {
+            builder = builder.bearer_auth(token);
+        }
+        builder.send()
+    };
 
-    let response = builder.send().await.map_err(transport)?;
+    // A GET that fails to send is tried once more. Requests go out on pooled
+    // keep-alive connections, and one the server has just closed fails with
+    // "connection closed before message completed" (tests/net.rs,
+    // `a_get_on_a_dead_pooled_connection_is_sent_again`). The poller never
+    // retries, so a refetch lost that way stays stale until something asks
+    // again. A GET is safe to repeat; the others aren't.
+    let response = match send().await {
+        Err(e) if request.method() == Method::GET => {
+            tracing::debug!("GET {} failed to send, trying again: {e}", request.path());
+            send().await
+        }
+        sent => sent,
+    }
+    .map_err(transport)?;
     let status = response.status();
     let body = response.bytes().await.map_err(transport)?;
 

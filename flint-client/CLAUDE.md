@@ -45,6 +45,15 @@ If another build or a running client could lock the exe, use your own `CARGO_TAR
 
 The local stack is `docker-compose up -d` at the repo root, then `cargo run` from `backend/` (API on port 3000). With it up, `cargo test -p capitol-core -- --ignored` runs the live tests: register, login, the WebSocket handshake and a move. Set `CAPITOL_SERVER` to point them somewhere other than `http://localhost:3000`.
 
+**`capitol-bot`** is a headless player for smoke tests and for company:
+
+```bash
+cargo run -p capitol-core --bin capitol-bot                          # gather fiber, craft rope, report
+cargo run -p capitol-core --bin capitol-bot -- --accounts 5 --wander --near <your player name>
+```
+
+Bots log in as `bot1@bots.capitol.local` and up, registering the first time. `--prefix` picks another set. `--help` lists the rest. A bot resumes wherever it last stood, so use `--near` to bring a fleet to you.
+
 The server allows **one session per account**. A second login kicks the first one, so a two-client test (Flint + React, or two Flint) needs two accounts. Clients on this machine can share the local server. A client on another device can't reach it, because the backend listens on `127.0.0.1` (see "Environment Setup" in the root `CLAUDE.md`).
 
 ## The engine subtree

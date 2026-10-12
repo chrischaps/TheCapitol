@@ -615,6 +615,78 @@ fn unreachable_servers_report_rather_than_hang() {
     assert!(reconnect_reason(&events).starts_with("could not connect"));
 }
 
+/// The server answers one request per connection and keeps the connection
+/// alive, then hangs up on the next request that arrives on it. That's what
+/// a dropped server does to the client's pooled REST connections. A GET is
+/// sent again on a new connection; anything else reports the failure.
+#[test]
+fn a_get_on_a_dead_pooled_connection_is_sent_again() {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counted = requests.clone();
+    std::thread::spawn(move || {
+        // Reads one request head. None of these requests has a body that matters.
+        let read_request = |stream: &mut std::net::TcpStream| {
+            let mut head = Vec::new();
+            let mut byte = [0u8];
+            while !head.ends_with(b"\r\n\r\n") {
+                if stream.read(&mut byte).unwrap_or(0) == 0 {
+                    return false;
+                }
+                head.push(byte[0]);
+            }
+            counted.fetch_add(1, Ordering::SeqCst);
+            true
+        };
+        let body = r#"{"status":"healthy","database":"ok","redis":"ok"}"#;
+        let answer = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            if read_request(&mut stream) {
+                stream.write_all(answer.as_bytes()).unwrap();
+                read_request(&mut stream);
+            }
+        }
+    });
+    let net = Net::spawn(config(addr)).unwrap();
+    let call = |request: RestRequest, tag| {
+        net.rest(request, tag);
+        match wait_for(
+            &net,
+            "REST",
+            |e| matches!(e, NetEvent::Rest(t, _) if *t == tag),
+        )
+        .pop()
+        {
+            Some(NetEvent::Rest(_, result)) => result,
+            _ => unreachable!(),
+        }
+    };
+
+    assert!(matches!(
+        call(RestRequest::Health, 1),
+        Ok(RestResponse::Health(_))
+    ));
+    // Pooled, then hung up on, so it goes again on a fresh connection.
+    assert!(matches!(
+        call(RestRequest::Health, 2),
+        Ok(RestResponse::Health(_))
+    ));
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
+
+    // A POST isn't repeated: the server may have acted on it.
+    let logout =
+        RestRequest::Logout(capitol_core::protocol::rest::LogoutRequest { token: "t".into() });
+    assert!(matches!(call(logout, 3), Err(RestError::Transport(_))));
+    assert_eq!(requests.load(Ordering::SeqCst), 4);
+}
+
 #[test]
 fn dropping_net_closes_the_socket_and_joins() {
     let (mock, addr) = Mock::start(Scenario::Normal);

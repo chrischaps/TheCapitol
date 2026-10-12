@@ -11,7 +11,10 @@
 //! - [`poll`]: the polling scheduler. [`poll::Poller`] turns those events, and
 //!   a 5 s timer, into the REST refetches the server never pushes.
 //! - [`catalog`]: item, station and resource types the server has no endpoint for.
+//! - [`bot`]: a headless player built on all of the above, for `capitol-bot`
+//!   and the live tests.
 
+pub mod bot;
 pub mod catalog;
 pub mod motion;
 pub mod net;
