@@ -44,6 +44,12 @@ struct Args {
     #[arg(long, value_name = "TERRAIN_JSON")]
     offline: Option<PathBuf>,
 
+    /// Sign in and rebuild the world whenever the server's terrain changes
+    /// (an admin regenerating it from the React client's F2 tweaker). Until
+    /// P4.1's login screen it signs in as flint1@bots.capitol.local
+    #[arg(long, conflicts_with = "offline")]
+    live: bool,
+
     /// Where the camera rig starts. street, district and map are its own
     /// zooms. The rest are fixed shots, held until the first camera input:
     /// bridge (close, over the inner canal's south crossing), suburb (low
@@ -97,7 +103,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let terrain = match &args.offline {
         Some(path) => terrain::TerrainSource::offline(path)?,
-        None => terrain::TerrainSource::online(&args.server)?,
+        None => terrain::TerrainSource::online(&args.server, args.live)?,
     };
 
     // Engine schemas first, then the game's own layered over them.

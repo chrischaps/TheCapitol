@@ -10,6 +10,7 @@
 //!   150 ms behind between snapshots and predicts the local player's walk.
 //! - [`poll`]: the polling scheduler. [`poll::Poller`] turns those events, and
 //!   a 5 s timer, into the REST refetches the server never pushes.
+//! - [`signin`]: log in, or register, one event at a time.
 //! - [`terrain`]: `/terrain` with a disk cache, revalidated by version.
 //! - [`catalog`]: item, station and resource types the server has no endpoint for.
 //! - [`bot`]: a headless player built on all of the above, for `capitol-bot`
@@ -20,6 +21,7 @@ pub mod catalog;
 pub mod motion;
 pub mod net;
 pub mod poll;
+pub mod signin;
 pub mod state;
 pub mod terrain;
 

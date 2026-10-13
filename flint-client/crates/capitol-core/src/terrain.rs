@@ -179,6 +179,22 @@ impl TerrainFetch {
         self.version.as_deref()
     }
 
+    /// Keeps `terrain`, fetched here or some other way (the poller's refetch
+    /// on `terrain_updated`): writes it to the cache, and revalidates against
+    /// its version from now on.
+    pub fn adopt(&mut self, terrain: &TerrainResponse) {
+        if let Some(cache) = &self.cache {
+            match cache.store(terrain) {
+                Ok(()) => tracing::info!("terrain: cached at {}", cache.path().display()),
+                Err(e) => tracing::warn!(
+                    "terrain: couldn't write cache {}: {e}",
+                    cache.path().display()
+                ),
+            }
+        }
+        self.version = terrain.version.clone();
+    }
+
     /// Feed every [`NetEvent`]. Returns a terrain when the server sent one
     /// the world doesn't have yet; it's in the cache by then.
     pub fn observe(&mut self, event: &NetEvent, now: Instant) -> Option<Box<TerrainResponse>> {
@@ -205,16 +221,7 @@ impl TerrainFetch {
                     terrain.roads.len(),
                     terrain.terrain_plots.len(),
                 );
-                if let Some(cache) = &self.cache {
-                    match cache.store(terrain) {
-                        Ok(()) => tracing::info!("terrain: cached at {}", cache.path().display()),
-                        Err(e) => tracing::warn!(
-                            "terrain: couldn't write cache {}: {e}",
-                            cache.path().display()
-                        ),
-                    }
-                }
-                self.version = terrain.version.clone();
+                self.adopt(terrain);
                 Some(terrain.clone())
             }
             Ok(other) => {
@@ -336,6 +343,26 @@ mod tests {
         assert!(fetch.observe(&answer, now).is_some());
         assert_eq!(fetch.version(), Some("v2"));
         assert_eq!(cache.load(), Some(terrain("v2")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_terrain_fetched_elsewhere_is_adopted() {
+        let dir = temp_dir("adopt");
+        let cache = TerrainCache::new(&dir, "http://localhost:3000");
+        cache.store(&terrain("v1")).unwrap();
+        let (mut fetch, _) = TerrainFetch::start(Some(cache.clone()), 9);
+
+        fetch.adopt(&terrain("v2"));
+        assert_eq!(fetch.version(), Some("v2"));
+        assert_eq!(cache.load(), Some(terrain("v2")));
+        let (request, _) = fetch.tick(Instant::now()).unwrap();
+        assert_eq!(
+            request,
+            RestRequest::Terrain {
+                cached_version: Some("v2".into())
+            }
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

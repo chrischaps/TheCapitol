@@ -10,8 +10,11 @@ use crate::atmosphere::Atmosphere;
 use crate::script_api::{self, Shared};
 use crate::terrain::TerrainSource;
 use crate::world::plots::Lot;
+use crate::world::Rebuild;
 use crate::{spike_world, ui, world};
+use capitol_core::protocol::terrain::TerrainResponse;
 use flint_player::{ExtensionCtx, PlayerExtension};
+use std::time::Instant;
 use winit::event::{MouseScrollDelta, WindowEvent};
 
 /// Pixels of a touchpad's smooth scroll that make one wheel notch.
@@ -22,6 +25,9 @@ pub struct CapitolExtension {
     terrain: TerrainSource,
     /// Whether the spike's markers have been uploaded.
     world_built: bool,
+    /// The terrain the world was last built from, to tell what a new one
+    /// changes (`world::Rebuild`).
+    built: Option<TerrainResponse>,
     /// Where each of the terrain's plots is in the plot meshes, in order.
     #[allow(dead_code)] // P6.4 finds a lot here to highlight it
     lots: Vec<Option<Lot>>,
@@ -36,6 +42,7 @@ impl CapitolExtension {
             shared,
             terrain,
             world_built: false,
+            built: None,
             lots: Vec::new(),
             stats_logged: 0.0,
             atmosphere: Atmosphere::default(),
@@ -78,16 +85,37 @@ impl PlayerExtension for CapitolExtension {
         let Some(terrain) = self.terrain.take_changed() else {
             return;
         };
+        // A rebuild replaces each mesh by name, so the old buffers are freed
+        // at the next draw, and empties the sectors the new terrain leaves bare.
+        let rebuild = Rebuild::between(self.built.as_ref(), terrain);
+        let started = Instant::now();
         let rings = &terrain.water_rings;
-        world::ground::upload(gpu, terrain.world_size, &world::water::holes(rings));
-        world::water::upload(gpu, rings);
-        world::bridges::upload(gpu, rings);
-        world::tower::upload(gpu, rings);
-        let roads = world::roads::upload(gpu, &terrain.roads, rings);
-        let (plots, lots) =
-            world::plots::upload(gpu, &terrain.terrain_plots, &terrain.roads, rings);
-        self.lots = lots;
-        attach_each(ctx, roads.iter().chain(&plots));
+        if rebuild.ground {
+            world::ground::upload(gpu, terrain.world_size, &world::water::holes(rings));
+        }
+        if rebuild.rings {
+            world::water::upload(gpu, rings);
+            world::bridges::upload(gpu, rings);
+            world::tower::upload(gpu, rings);
+        }
+        let mut sectors = Vec::new();
+        if rebuild.roads {
+            sectors.extend(world::roads::upload(gpu, &terrain.roads, rings));
+        }
+        if rebuild.plots {
+            let (plots, lots) =
+                world::plots::upload(gpu, &terrain.terrain_plots, &terrain.roads, rings);
+            sectors.extend(plots);
+            self.lots = lots;
+        }
+        if self.built.is_some() {
+            tracing::info!(
+                "world: rebuilt {rebuild} in {} ms",
+                started.elapsed().as_millis()
+            );
+        }
+        self.built = Some(terrain.clone());
+        attach_each(ctx, sectors.iter());
     }
 
     /// Collect the wheel for the camera rig (`cap_take_wheel`), because

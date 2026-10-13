@@ -43,7 +43,7 @@ If another build or a running client could lock the exe, use your own `CARGO_TAR
 
 ## Terrain, offline mode and captures
 
-`capitol` fetches `/terrain` from `--server` (or `CAPITOL_SERVER`, default `http://localhost:3000`) and caches it in `cache/terrain-<host_port>.json` (gitignored). A cached terrain is drawn at once and revalidated by version: the server answers 304 while it's current. `--offline <file>` builds the world from a `/terrain` JSON with no server at all. `fixtures/terrain.json` is a captured one; refresh it with `curl -s -o fixtures/terrain.json http://localhost:3000/terrain`.
+`capitol` fetches `/terrain` from `--server` (or `CAPITOL_SERVER`, default `http://localhost:3000`) and caches it in `cache/terrain-<host_port>.json` (gitignored). A cached terrain is drawn at once and revalidated by version: the server answers 304 while it's current. `--live` also signs in, as `flint1@bots.capitol.local` until P4.1's login screen, and rebuilds the world whenever the server sends `terrain_updated` (P3.10). An admin sends it by regenerating from the React client's F2 tweaker. Only the layers whose inputs changed are rebuilt (`world::Rebuild`). `--offline <file>` builds the world from a `/terrain` JSON with no server at all. `fixtures/terrain.json` is a captured one; refresh it with `curl -s -o fixtures/terrain.json http://localhost:3000/terrain`.
 
 Every visual change is checked with a capture, run from `flint-client/`:
 
