@@ -46,7 +46,8 @@ impl PlayerExtension for CapitolExtension {
             return;
         };
         // How much the sectors cull: with RUST_LOG=capitol=debug, the last
-        // frame's draws every 2 s.
+        // frame's draws every 2 s. A workaround: captures can't open F2's
+        // overlay until Flint lets them (H9, issue #65).
         let now = ctx.clock.total_time;
         if tracing::enabled!(tracing::Level::DEBUG) && now - self.stats_logged >= 2.0 {
             self.stats_logged = now;

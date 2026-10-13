@@ -174,7 +174,10 @@ These go to Flint on a `feature/*` branch and PR, following the subtree conventi
 
 | H7 [#63](https://github.com/chrischaps/TheCapitol/issues/63) | **Emissive materials.** Found in P3.7. | `ImportedMaterial::emissive` (linear HDR, default zero; glTF `emissiveFactor`), added after lighting and before tonemapping so bloom picks it up, plus a per-vertex form for vertex-coloured runtime meshes. Replaces P3.7's down-normal workaround (`MeshBuf::glowing`). | S |
 
-H1–H5 are needed for the vertical slice. H6 belongs to P8. H7 isn't blocking, because P3.7 works round it, but it should land before the light gets tuned (P3.8, P8).
+| H8 [#64](https://github.com/chrischaps/TheCapitol/issues/64) | **Schema type `"integer"`.** Found in P3.3. | `ocean.toml` and `terrain.toml` type four fields as `"integer"`, which `parse_field_type` doesn't know, so they fall back to `String` and the scene warns. Alias it to `int`, and catch unknown type names at load or in a test. | S |
+| H9 [#65](https://github.com/chrischaps/TheCapitol/issues/65) | **Debug keys and render stats from captures.** Found in P3.6. | `--input-script` writes `InputState`, but F2–F4 are matched only on window events, so a capture can't show the stats overlay. Route scripted keys through the debug-key handler and/or add `--stats`. That replaces the Capitol's periodic stats log. | S |
+
+H1–H5 are needed for the vertical slice. H6 belongs to P8. H7–H9 aren't blocking. H7 and H9 have workarounds, and H8 costs only a warning. H7 should land before the light gets tuned (P3.8, P8).
 
 **What the P0.4 spike found** (branch `spike/p0.4`; its subtree patches are marked `SPIKE(P0.4)`):
 - **Embedding.** `PlayerApp` already implements `ApplicationHandler` publicly. A wrapper that forwards all nine callbacks works, and the capture flags (`--screenshot`, `--exit-after`) work through it. `PlayerApp::new` plus the public fields `main.rs` sets are enough to boot a scene. The game must pass `engine/schemas` itself.
@@ -539,7 +542,7 @@ Sizes: **S** is about 1 focused session, **M** 2–3, **L** 4 or more. Each phas
 - **`MeshBuf`** gained `vertex`, `quad` (winds itself from the normal, since back faces are culled), `append` and `upload_material`. Uploading an empty mesh now removes the old one of that name, so a rebuild that finds nothing (P3.10) clears the screen rather than leaving stale geometry.
 - **`--view bridge`** stands on the quay by the inner canal's south crossing, for P3.4 and P3.5 to check against.
 - **Roads meet water.** The data's arterials are 60 units wide but cross at 25-unit bridges, and the urban spokes start at r1025, the outer canal's edge. P3.4 should stop roads at the kerb, or narrow them onto the bridge, rather than run them over the channel.
-- **Engine nit:** `engine/schemas/components/ocean.toml` types `seed` and `num_waves` as `"integer"`, which the schema doesn't know (it wants `"int"`), so the loader warns. The ocean still reads the values. Worth a one-line Flint fix sometime.
+- **Engine nit:** `engine/schemas/components/ocean.toml` types `seed` and `num_waves` as `"integer"`, which the schema doesn't know (it wants `"int"`), so the loader warns. The ocean still reads the values. `terrain.toml` has the same typo. Filed as H8, [#64](https://github.com/chrischaps/TheCapitol/issues/64).
 
 **How P3.2 built it:**
 - **`world/`** holds the meshes built from the terrain: `mesh.rs` (`MeshBuf`, moved out of `spike_world.rs`), `palette.rs` (the §4.7 tokens, sRGB hex converted to linear) and `ground.rs`. The ground is rebuilt from `terrain.world_size` each time `take_changed` hands over a terrain. P3.3–P3.7 add their builders beside it.
