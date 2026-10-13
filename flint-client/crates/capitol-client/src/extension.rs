@@ -2,9 +2,10 @@
 //! `PlayerExtension`. Today that's the script API, the game egui, the terrain
 //! (fetched and cached, or read from a file offline), the world built from
 //! it (`world`, so far the ground, the canals, whose water is the scene's
-//! ocean, the roads, the bridges, the plots and the Capitol tower) and the
-//! spike's markers.
+//! ocean, the roads, the bridges, the plots and the Capitol tower), the
+//! fog as the camera climbs (`atmosphere`) and the spike's markers.
 
+use crate::atmosphere::Atmosphere;
 use crate::script_api::{self, Shared};
 use crate::terrain::TerrainSource;
 use crate::world::plots::Lot;
@@ -21,6 +22,7 @@ pub struct CapitolExtension {
     lots: Vec<Option<Lot>>,
     /// Game time of the last render-stats line (debug log only).
     stats_logged: f64,
+    atmosphere: Atmosphere,
 }
 
 impl CapitolExtension {
@@ -31,6 +33,7 @@ impl CapitolExtension {
             world_built: false,
             lots: Vec::new(),
             stats_logged: 0.0,
+            atmosphere: Atmosphere::default(),
         }
     }
 }
@@ -45,6 +48,7 @@ impl PlayerExtension for CapitolExtension {
         let Some(gpu) = ctx.gpu.as_mut() else {
             return;
         };
+        self.atmosphere.update(gpu.renderer, ctx.camera.position.y);
         // How much the sectors cull: with RUST_LOG=capitol=debug, the last
         // frame's draws every 2 s. A workaround: captures can't open F2's
         // overlay until Flint lets them (H9, issue #65).

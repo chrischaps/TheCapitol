@@ -1,11 +1,12 @@
 //! The Capitol client. It builds a `flint_player::PlayerApp` for the scene
 //! and installs `CapitolExtension`, through which everything the Capitol
-//! adds reaches the engine. For now it runs the P0.4 spike scene: a native
-//! Rhai function, the inscription window (game egui), and the world as
-//! runtime meshes built from the terrain (the zone-tinted ground so far,
-//! plus the spike's water), fetched from the server (and cached) or read
-//! from `--offline <file>`.
+//! adds reaches the engine. It runs `scenes/capitol.scene.toml`: the city at
+//! dusk, as runtime meshes built from the terrain, which is fetched from the
+//! server (and cached) or read from `--offline <file>`. The P0.4 spike's
+//! script, markers and inscription window (game egui) stay until the camera
+//! rig (P3.9) and the living world (P4) replace them.
 
+mod atmosphere;
 mod coords;
 mod extension;
 mod script_api;
@@ -24,7 +25,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 #[command(name = "capitol", about = "The Capitol, as a Flint game")]
 struct Args {
     /// Scene file, relative to flint-client/
-    #[arg(long, default_value = "scenes/spike.scene.toml")]
+    #[arg(long, default_value = "scenes/capitol.scene.toml")]
     scene: String,
 
     /// Text written over the Capitol

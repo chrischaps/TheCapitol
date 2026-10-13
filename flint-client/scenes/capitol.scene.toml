@@ -1,0 +1,165 @@
+# The Capitol at dusk (P3.8). The zone-tinted ground, the canals' stone,
+# the roads, the plots, the bridges and the tower are runtime meshes the
+# extension uploads (world/), named below with `runtime = true` so the model
+# loader doesn't look for files; the road and plot sectors are spawned by the
+# extension itself. The spike's script and markers (P0.4) stay until the
+# camera rig (P3.9) and the living world (P4) replace them.
+
+[scene]
+name = "The Capitol"
+version = "1.0"
+description = "The Capitol at dusk: the city in rings of light round its tower"
+
+# The script places the camera. Near is 1 m, not the default 0.1: from the
+# map view 620 m up the depth buffer then resolves about 2 cm, not 20 (see
+# plan §4.6). Far is 20 km, well past the ground's 5 km skirt. The fog
+# below skips every pixel deeper than 0.9999 in the depth buffer, to spare
+# the sky, and with far at 4 km that cut came 2.9 km out, so the skirt
+# drew an unfogged dark band under the horizon. At 20 km it's 6.7 km out,
+# and everything nearer than that is ground, fogged. The ocean past the
+# skirt fogs itself. A workaround: H10 (issue #66) fogs everything drawn.
+[camera]
+near = 1.0
+far = 20000.0
+
+# ambient_ground calibrates every light the tower gives off (palette.rs
+# AMBIENT_GROUND, held to this file by a test): change both together.
+[environment]
+ambient_sky = [0.16, 0.17, 0.24]
+ambient_ground = [0.05, 0.05, 0.07]
+
+# Dusk: deep navy overhead, the first stars, and a rose band of haze on
+# the horizon where the sun has just gone down to it.
+[entities.sky.sky]
+zenith_color = [0.010, 0.012, 0.032, 1.0]
+horizon_color = [0.110, 0.065, 0.120, 1.0]
+haze_color = [0.36, 0.17, 0.16, 0.45]
+cloud_tint = [0.35, 0.22, 0.30, 0.4]
+cloud_coverage = 0.2
+star_opacity = 0.6
+sun_disc_size = 0.014
+sun_glow = 0.3
+ambient_sky = [0.16, 0.17, 0.24, 1.0]
+ambient_ground = [0.05, 0.05, 0.07, 1.0]
+
+# The key: a low amber sun in the south-west, 8° up, sitting in the haze.
+# That's 45° off the usual camera, looking north: the tower's south-west
+# faces and its gold catch it, and every wall throws a long shadow
+# north-east. A sunlit wall stays under the bloom threshold. The disc is
+# 0.8° across (the default is 2° in radius) with a soft glow, and seen from
+# the north it sets behind the Capitol.
+[entities.sun.light]
+type = "directional"
+direction = [-0.68, 0.14, 0.68]
+color = [1.0, 0.60, 0.32]
+intensity = 3.2
+
+# A cool fill from the east, where the sky is already night
+[entities.fill.light]
+type = "directional"
+direction = [0.6, 0.5, -0.4]
+color = [0.50, 0.58, 0.95]
+intensity = 0.4
+
+# Fog is the sky's colour on the horizon (horizon_color mixed 45% toward
+# haze_color), so the land runs out into the sky with no line where they
+# meet: change the sky, change this. It's exponential from 100 m: about a
+# quarter across the world (400 m), and nearly all of it by the ground's
+# edge at 5 km. The extension thins it as the camera climbs and turns it
+# off at map height (atmosphere.rs). Bloom picks up the tower's light
+# (radiance 3.5 at the lantern, 8 at the needle) and the sun, but no sunlit
+# wall and no window. No dither: the engine's ordered dither shows as a
+# checkerboard over the whole frame.
+[post_process]
+exposure = 1.0
+bloom_enabled = true
+bloom_threshold = 2.5
+bloom_intensity = 0.12
+ssao_enabled = true
+ssao_radius = 1.5
+ssao_intensity = 0.8
+ssao_samples = 16
+fog_enabled = true
+fog_color = [0.2225, 0.1123, 0.1380]
+fog_density = 0.0009
+fog_start = 100.0
+vignette_enabled = true
+vignette_intensity = 0.25
+
+[entities.ground.model]
+asset = "ground"
+runtime = true
+
+[entities.canals.model]
+asset = "canals"
+runtime = true
+
+[entities.bridges.model]
+asset = "bridges"
+runtime = true
+
+# The Capitol tower (world/tower.rs): stone, glass, and gold with its light.
+[entities.capitol.model]
+asset = "capitol"
+runtime = true
+
+[entities.capitol_glass.model]
+asset = "capitol_glass"
+runtime = true
+
+[entities.capitol_gold.model]
+asset = "capitol_gold"
+runtime = true
+
+# The canals' water: Flint's Gerstner ocean, the one Float drifts on, at
+# canal scale. It's an endless sheet at y = 0 that follows the camera; the
+# land stands 0.6 m above it and the ground is cut away over each ring, so
+# it only shows in the channels (world/water.rs). Waves are centimetres
+# high and a few metres long, and the colours are dusk: deep blue-black in
+# the troughs, the violet sky caught in the faces. Tune live with F3.
+[entities.ocean.ocean]
+seed = 11
+num_waves = 12
+wavelength_min = 0.6
+wavelength_max = 6.0
+amplitude = 0.06
+choppiness = 0.55
+direction_deg = 30.0
+spread_deg = 70.0
+speed_scale = 0.8
+wind_speed = 2.5
+fetch_km = 0.2
+peak_enhancement = 2.0
+deep_color = [0.005, 0.018, 0.06, 1.0]
+shallow_color = [0.025, 0.09, 0.21, 1.0]
+foam_color = [0.80, 0.82, 0.90, 1.0]
+sss_color = [0.03, 0.15, 0.18, 1.0]
+foam_threshold = 0.25
+foam_noise_scale = 3.0
+# Five bands, not three: the shade is N·L plus wave height, and under an
+# 8° sun nearly all of it fell inside one of three bands, so the swells
+# vanished. Five puts a band edge back in the middle of the range.
+ramp_steps = 5.0
+specular_strength = 1.0
+band_wobble = 0.4
+band_dither = 0.1
+band_dither_scale = 40.0
+turbidity = 1.6
+refraction_strength = 0.4
+absorption_color = [0.9, 0.35, 0.22]
+sky_reflection_strength = 0.7
+grid_scale = 60.0
+fade_start = 120.0
+fade_end = 300.0
+splash_strength = 0.0
+
+[entities.marker_east.model]
+asset = "spike_marker_east"
+runtime = true
+
+[entities.marker_north.model]
+asset = "spike_marker_north"
+runtime = true
+
+[entities.spike.script]
+source = "spike.rhai"

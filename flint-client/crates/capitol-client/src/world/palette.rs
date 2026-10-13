@@ -80,8 +80,8 @@ mod tests {
     /// every light in the world dims or flares.
     #[test]
     fn glow_is_calibrated_to_the_scene_ambient() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenes/spike.scene.toml");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scenes/capitol.scene.toml");
         let scene = std::fs::read_to_string(path).expect("scene");
         let mut seen = 0;
         for line in scene.lines() {
