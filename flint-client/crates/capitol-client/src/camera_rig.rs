@@ -206,3 +206,50 @@ fn the_camera_never_goes_into_the_land_or_the_tower() {
         }
     }
 }
+
+#[test]
+fn the_login_circle_keeps_the_tower_right_of_the_form() {
+    // The form covers the left third of a 16:9 window (ui/login.rs), so the
+    // whole tower, foot to needle, must stand right of centre and in frame,
+    // all the way round, with the fog still on.
+    let rig = Rig::load();
+    let half_v = (VFOV / 2.0).to_radians().tan();
+    let half_h = half_v * 16.0 / 9.0;
+    let lap = std::f64::consts::TAU / rig.num("login_rate");
+    for i in 0..64 {
+        let t = lap * i as f64 / 64.0;
+        let shot: Map = rig.call("login_shot", (t,));
+        let v = |k: &str| -> [f64; 3] {
+            let a = shot[k].clone().into_typed_array::<f64>().unwrap();
+            [a[0], a[1], a[2]]
+        };
+        let (p, at) = (v("pos"), v("at"));
+        assert!(
+            p[1] - (GROUND as f64) < CLEAR_FROM as f64,
+            "fogless at {p:?}"
+        );
+        let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let norm = |a: [f64; 3]| {
+            let l = dot(a, a).sqrt();
+            [a[0] / l, a[1] / l, a[2] / l]
+        };
+        let f = norm(sub(at, p));
+        let r = norm([-f[2], 0.0, f[0]]);
+        let u = [
+            r[1] * f[2] - r[2] * f[1],
+            r[2] * f[0] - r[0] * f[2],
+            r[0] * f[1] - r[1] * f[0],
+        ];
+        for y in [GROUND as f64, tower::CROWN_Y as f64] {
+            let d = sub([0.0, y, 0.0], p);
+            let x = dot(d, r) / dot(d, f) / half_h;
+            let y_ndc = dot(d, u) / dot(d, f) / half_v;
+            assert!(
+                (0.2..0.7).contains(&x),
+                "tower at screen x {x:.2} (ndc) from {p:?} at t {t:.0}"
+            );
+            assert!(y_ndc.abs() < 0.95, "tower out of frame at y {y} from {p:?}");
+        }
+    }
+}

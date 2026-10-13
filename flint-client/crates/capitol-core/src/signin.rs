@@ -23,7 +23,7 @@
 use capitol_protocol::rest::{AuthResponse, LoginRequest, RegisterRequest};
 
 use crate::bot::Account;
-use crate::net::{NetEvent, RestRequest, RestResponse, Tag};
+use crate::net::{NetEvent, RestError, RestRequest, RestResponse, Tag};
 
 /// Where a sign-in is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,10 @@ enum Phase {
 
 #[derive(Debug, Clone)]
 pub struct SignIn {
-    account: Account,
+    email: String,
+    /// Sent after a login's 401, when the sign-in may register. `None` for
+    /// [`SignIn::log_in`], and once it has been sent.
+    register: Option<RegisterRequest>,
     tag: Tag,
     phase: Phase,
 }
@@ -48,21 +51,61 @@ pub enum Step {
     /// Done: `connect` with the token.
     SignedIn(Box<AuthResponse>),
     /// Done, without a session. Nothing more is sent.
-    Failed(String),
+    Failed(Failure),
+}
+
+/// Why a sign-in ended without a session.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[error("{}: {error}", if *.registering { "register" } else { "login" })]
+pub struct Failure {
+    /// The register failed, not the login.
+    pub registering: bool,
+    pub error: RestError,
 }
 
 impl SignIn {
-    /// Starts with a login. Send the request with `tag`; the answers carry it.
+    /// Logs in, and registers the account if the login gets a 401: a bot's
+    /// way in, where the account is made on first use. Send the request with
+    /// `tag`; the answers carry it.
     pub fn start(account: Account, tag: Tag) -> (SignIn, RestRequest) {
+        let (mut sign_in, request) = SignIn::log_in(&account.email, &account.password, tag);
+        sign_in.register = Some(RegisterRequest {
+            email: account.email,
+            password: account.password,
+            player_name: account.name,
+        });
+        (sign_in, request)
+    }
+
+    /// Logs in only. A 401 is a failure: a person who mistyped their password
+    /// must not get a new account.
+    pub fn log_in(email: &str, password: &str, tag: Tag) -> (SignIn, RestRequest) {
         let request = RestRequest::Login(LoginRequest {
-            email: account.email.clone(),
-            password: account.password.clone(),
+            email: email.to_owned(),
+            password: password.to_owned(),
         });
         let sign_in = SignIn {
-            account,
+            email: email.to_owned(),
+            register: None,
             tag,
             phase: Phase::LoggingIn,
         };
+        (sign_in, request)
+    }
+
+    /// Registers a new account. A taken email fails with a 409.
+    pub fn register(account: Account, tag: Tag) -> (SignIn, RestRequest) {
+        let sign_in = SignIn {
+            email: account.email.clone(),
+            register: None,
+            tag,
+            phase: Phase::Registering,
+        };
+        let request = RestRequest::Register(RegisterRequest {
+            email: account.email,
+            password: account.password,
+            player_name: account.name,
+        });
         (sign_in, request)
     }
 
@@ -70,8 +113,13 @@ impl SignIn {
         self.tag
     }
 
-    pub fn account(&self) -> &Account {
-        &self.account
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+
+    /// Whether it has got as far as registering.
+    pub fn is_registering(&self) -> bool {
+        self.phase == Phase::Registering
     }
 
     /// Feed every [`NetEvent`]; only answers carrying [`SignIn::tag`] count.
@@ -82,20 +130,24 @@ impl SignIn {
         if *tag != self.tag || self.phase == Phase::Over {
             return None;
         }
-        let step = match (self.phase, result) {
-            (_, Ok(RestResponse::Auth(auth))) => Step::SignedIn(Box::new(auth.clone())),
-            (Phase::LoggingIn, Err(e)) if e.is_unauthorized() => {
+        let registering = self.phase == Phase::Registering;
+        let step = match result {
+            Ok(RestResponse::Auth(auth)) => Step::SignedIn(Box::new(auth.clone())),
+            Err(e) if !registering && e.is_unauthorized() && self.register.is_some() => {
                 self.phase = Phase::Registering;
-                return Some(Step::Send(RestRequest::Register(RegisterRequest {
-                    email: self.account.email.clone(),
-                    password: self.account.password.clone(),
-                    player_name: self.account.name.clone(),
-                })));
+                return self
+                    .register
+                    .take()
+                    .map(|r| Step::Send(RestRequest::Register(r)));
             }
-            (Phase::LoggingIn, Err(e)) => Step::Failed(format!("login: {e}")),
-            (Phase::Registering, Err(e)) => Step::Failed(format!("register: {e}")),
-            (_, Ok(other)) => Step::Failed(format!("unexpected answer {other:?}")),
-            (Phase::Over, _) => unreachable!("answers after the end are dropped above"),
+            Err(e) => Step::Failed(Failure {
+                registering,
+                error: e.clone(),
+            }),
+            Ok(other) => Step::Failed(Failure {
+                registering,
+                error: RestError::Decode(format!("unexpected answer {other:?}")),
+            }),
         };
         self.phase = Phase::Over;
         Some(step)
@@ -160,12 +212,14 @@ mod tests {
     fn other_failures_end_it() {
         let mut s = started();
         let step = s.observe(&NetEvent::Rest(TAG, Err(status(500))));
-        assert!(matches!(step, Some(Step::Failed(why)) if why.starts_with("login")));
+        assert!(matches!(step, Some(Step::Failed(f)) if f.to_string().starts_with("login")));
 
         let mut s = started();
         s.observe(&NetEvent::Rest(TAG, Err(status(401))));
         let step = s.observe(&NetEvent::Rest(TAG, Err(status(409))));
-        assert!(matches!(step, Some(Step::Failed(why)) if why.starts_with("register")));
+        assert!(
+            matches!(step, Some(Step::Failed(f)) if f.registering && f.error.status() == Some(409))
+        );
         assert_eq!(s.observe(&NetEvent::Rest(TAG, Ok(auth()))), None);
     }
 
@@ -175,5 +229,38 @@ mod tests {
         assert_eq!(s.observe(&NetEvent::Rest(TAG + 1, Ok(auth()))), None);
         assert_eq!(s.observe(&NetEvent::Resync), None);
         assert!(s.observe(&NetEvent::Rest(TAG, Ok(auth()))).is_some());
+    }
+
+    #[test]
+    fn a_login_only_sign_in_never_registers() {
+        let (mut s, request) = SignIn::log_in("ada@capitol.local", "hunter22", TAG);
+        assert!(matches!(request, RestRequest::Login(l) if l.password == "hunter22"));
+        let step = s.observe(&NetEvent::Rest(TAG, Err(status(401))));
+        assert!(
+            matches!(step, Some(Step::Failed(f)) if !f.registering && f.error.is_unauthorized())
+        );
+        assert_eq!(s.observe(&NetEvent::Rest(TAG, Ok(auth()))), None);
+    }
+
+    #[test]
+    fn a_register_sign_in_registers_straight_away() {
+        let account = Account {
+            email: "ada@capitol.local".into(),
+            password: "hunter22".into(),
+            name: "Ada".into(),
+        };
+        let (mut s, request) = SignIn::register(account, TAG);
+        assert!(matches!(request, RestRequest::Register(r) if r.player_name == "Ada"));
+        assert!(s.is_registering());
+        let step = s.observe(&NetEvent::Rest(TAG, Ok(auth())));
+        assert!(matches!(step, Some(Step::SignedIn(_))));
+    }
+
+    #[test]
+    fn an_unreachable_server_ends_it() {
+        let (mut s, _) = SignIn::log_in("ada@capitol.local", "hunter22", TAG);
+        let refused = RestError::Transport("connection refused".into());
+        let step = s.observe(&NetEvent::Rest(TAG, Err(refused)));
+        assert!(matches!(step, Some(Step::Failed(f)) if f.error.status().is_none()));
     }
 }

@@ -21,6 +21,12 @@
 // Until the player exists (P4.2), the point is a free one you move with
 // WASD, drawn as a gold mark. P4.2 makes follow_target the avatar.
 //
+// While the login form is up (cap_at_login, P4.1) the rig takes no input.
+// The camera circles the tower slowly from beyond the canals, with the
+// tower held right of centre so the form on the left doesn't cover it.
+// Once the player is in, that circle is let go like any fixed shot: the
+// camera eases down to the street on the side it was circling.
+//
 // `--view` (cap_view) frames a capture. street, district and map are rig
 // framings. The rest are fixed shots: bridge (the quay by the inner canal's
 // south crossing), suburb (low over the southern suburbs' curving streets),
@@ -67,6 +73,17 @@ fn orbit_rate() { 1.6 }     // radians per second on Q/E
 fn drag_rate() { 0.006 }    // radians per point of right-drag
 // How long a fixed shot takes to ease into the rig, in seconds.
 fn release_time() { 1.0 }
+// The circle behind the login form: radius and height (m), where it
+// starts (radians round the tower, 0 south; -0.6 is south-west, facing the
+// sun's side), how fast it turns (one lap in about three minutes), what it
+// looks at, and how far that's shifted left so the tower sits right of
+// the form.
+fn login_radius() { 118.0 }
+fn login_height() { 34.0 }
+fn login_start() { -0.6 }
+fn login_rate() { 0.035 }
+fn login_look_y() { 34.0 }
+fn login_shift() { 40.0 }
 
 // The Capitol's keep, crown and needle as a column the camera stays out
 // of (world/tower.rs: its corner turrets reach 9.6 m out, the needle's
@@ -95,6 +112,8 @@ let rig = #{
     // runs 0 -> 1 as it eases into the rig.
     shot: (), release: 1.0,
     started: false,
+    // The login circle held last frame.
+    at_login: false,
 };
 
 // ── Per frame ────────────────────────────────────────────────────────────
@@ -107,7 +126,19 @@ fn on_update() {
         rig.start_view(cap_view());
     }
 
-    let moved = rig.steer(dt);
+    let moved = false;
+    if cap_at_login() {
+        rig.shot = login_shot(total_time());
+        rig.release = 1.0;
+        rig.at_login = true;
+        // The wheel turned over the form isn't for later.
+        cap_take_wheel();
+    } else if rig.at_login {
+        rig.at_login = false;
+        rig.take_over_from_shot();
+    } else {
+        moved = rig.steer(dt);
+    }
     if moved && rig.shot != () && rig.release >= 1.0 {
         rig.take_over_from_shot();
     }
@@ -265,6 +296,19 @@ fn take_over_from_shot() {
     this.zoom = street_zoom();
     this.zoom_to = street_zoom();
     this.release = 0.0;
+}
+
+// The camera behind the login form at game time t: on its circle round the
+// tower, looking at the tower with the aim shifted left. Right of the
+// camera, looking in, is (cos a, -sin a).
+fn login_shot(t) {
+    let a = login_start() + t * login_rate();
+    let s = a.sin();
+    let c = a.cos();
+    #{
+        pos: [login_radius() * s, login_height(), login_radius() * c],
+        at: [-c * login_shift(), login_look_y(), s * login_shift()],
+    }
 }
 
 fn view_shot(view) {

@@ -18,6 +18,7 @@ flint-ecs = { workspace = true }
 flint-import = { workspace = true }
 flint-player = { workspace = true }
 flint-render = { workspace = true }
+flint-runtime = { workspace = true }
 flint-scene = { workspace = true }
 flint-schema = { workspace = true }
 egui = { workspace = true }

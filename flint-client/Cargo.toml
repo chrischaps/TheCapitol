@@ -20,6 +20,7 @@ flint-import = { path = "engine/crates/flint-import" }
 flint-script = { path = "engine/crates/flint-script" }
 flint-player = { path = "engine/crates/flint-player" }
 flint-render = { path = "engine/crates/flint-render" }
+flint-runtime = { path = "engine/crates/flint-runtime" }
 flint-scene = { path = "engine/crates/flint-scene" }
 flint-schema = { path = "engine/crates/flint-schema" }
 

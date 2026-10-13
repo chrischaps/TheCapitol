@@ -603,6 +603,7 @@ dependencies = [
  "flint-import",
  "flint-player",
  "flint-render",
+ "flint-runtime",
  "flint-scene",
  "flint-schema",
  "rhai",

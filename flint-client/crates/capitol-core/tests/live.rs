@@ -615,3 +615,148 @@ fn two_players_trade() {
 
     ada.net.disconnect();
 }
+
+/// Carries out an [`Auth`]'s effects on `net`, keeping what it asks to
+/// remember, and feeds it events until `done` holds.
+fn drive_auth(
+    net: &Net,
+    auth: &mut capitol_core::auth::Auth,
+    effects: Vec<capitol_core::auth::Effect>,
+    remembered: &mut capitol_core::auth::Remembered,
+    what: &str,
+    done: impl Fn(&capitol_core::auth::Auth) -> bool,
+) {
+    use capitol_core::auth::Effect;
+    let mut pending = effects;
+    let start = Instant::now();
+    loop {
+        for effect in pending.drain(..) {
+            match effect {
+                Effect::Rest(request, tag) => net.rest(request, tag),
+                Effect::Connect(token) => net.connect(token),
+                Effect::Disconnect => net.disconnect(),
+                Effect::Remember(r) => *remembered = r,
+            }
+        }
+        if done(auth) {
+            return;
+        }
+        assert!(
+            start.elapsed() < WAIT,
+            "timed out waiting for {what}: {:?}, {:?}",
+            auth.phase(),
+            auth.notice()
+        );
+        pending.extend(auth.tick(Instant::now()));
+        if let Some(event) = net.recv_timeout(FRAME) {
+            pending.extend(auth.observe(&event));
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn the_login_form_signs_in_out_and_back() {
+    use capitol_core::auth::{Auth, Notice, Phase, Remembered};
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let email = format!("flint-auth-{stamp}@test.local");
+    let password = "correct horse battery staple";
+    let mut remembered = Remembered::default();
+
+    // A first run: nothing remembered, so the form. The server's health is
+    // known before anything is submitted.
+    let net = net();
+    let (mut auth, effects) = Auth::new(remembered.clone(), 10);
+    assert_eq!(auth.phase(), Phase::SignedOut);
+    drive_auth(&net, &mut auth, effects, &mut remembered, "health", |a| {
+        a.reachable() == Some(true)
+    });
+
+    // Signing in to an account that doesn't exist is a wrong password, and
+    // never registers it.
+    let effects = auth.log_in(&email, password);
+    drive_auth(&net, &mut auth, effects, &mut remembered, "a 401", |a| {
+        a.phase() == Phase::SignedOut
+    });
+    assert_eq!(auth.notice(), Some(&Notice::WrongPassword));
+
+    // Create account, then into the world.
+    let name = format!("Auth{}", stamp % 100_000);
+    let effects = auth.register(&name, &email, password);
+    drive_auth(
+        &net,
+        &mut auth,
+        effects,
+        &mut remembered,
+        "the world",
+        |a| a.phase() == Phase::InWorld,
+    );
+    assert_eq!(remembered.email.as_deref(), Some(email.as_str()));
+    let token = remembered.token.clone().expect("the token is remembered");
+
+    // Registering it again: taken. (A second Auth, signed out.)
+    let other = self::net();
+    let mut scratch = Remembered::default();
+    let (mut second, _) = Auth::new(Remembered::default(), 10);
+    let effects = second.register(&name, &email, password);
+    drive_auth(&other, &mut second, effects, &mut scratch, "a 409", |a| {
+        a.phase() == Phase::SignedOut
+    });
+    assert_eq!(second.notice(), Some(&Notice::EmailTaken));
+    drop(other);
+
+    // The next run: the stored token goes straight in, no form.
+    drop(net);
+    let net = self::net();
+    let (mut auth, effects) = Auth::new(remembered.clone(), 10);
+    assert_eq!(auth.phase(), Phase::Entering { resumed: true });
+    drive_auth(
+        &net,
+        &mut auth,
+        effects,
+        &mut remembered,
+        "the world again",
+        |a| a.phase() == Phase::InWorld,
+    );
+
+    // Sign out: the email stays, the token goes. Then a wrong password on
+    // the real account says so.
+    let effects = auth.log_out();
+    drive_auth(
+        &net,
+        &mut auth,
+        effects,
+        &mut remembered,
+        "signed out",
+        |a| a.phase() == Phase::SignedOut,
+    );
+    assert_eq!(remembered.token, None);
+    assert_eq!(remembered.email.as_deref(), Some(email.as_str()));
+    let effects = auth.log_in(&email, "not the password");
+    drive_auth(&net, &mut auth, effects, &mut remembered, "a 401", |a| {
+        a.phase() == Phase::SignedOut
+    });
+    assert_eq!(auth.notice(), Some(&Notice::WrongPassword));
+
+    // The old token is refused once the logout lands, which sends the form
+    // back with a notice.
+    let stale = Remembered {
+        email: Some(email.clone()),
+        token: Some(token),
+    };
+    let mut kept = stale.clone();
+    let (mut auth, effects) = Auth::new(stale, 10);
+    drive_auth(
+        &net,
+        &mut auth,
+        effects,
+        &mut kept,
+        "the stale token refused",
+        |a| a.phase() == Phase::SignedOut,
+    );
+    assert!(matches!(auth.notice(), Some(Notice::SessionEnded { .. })));
+    assert_eq!(kept.token, None);
+}

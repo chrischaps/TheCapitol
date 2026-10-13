@@ -4,6 +4,7 @@
 //! Rhai runs with its `sync` feature, so every closure here and the state
 //! it captures must be `Send + Sync`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// State the Rust side writes and scripts read.
@@ -16,6 +17,8 @@ pub struct Shared {
     /// Mouse-wheel notches since the camera rig last took them, up = in.
     /// A workaround: Flint doesn't feed the wheel to actions (issue #67).
     pub wheel: Arc<Mutex<f32>>,
+    /// The login form is up (P4.1): the camera circles the tower behind it.
+    pub at_login: Arc<AtomicBool>,
 }
 
 pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
@@ -38,6 +41,10 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             .map(|mut w| std::mem::take(&mut *w) as f64)
             .unwrap_or_default()
     });
+    // `cap_at_login() -> bool`: the login form is up, so the camera rig
+    // circles the tower instead of taking input.
+    let at_login = shared.at_login.clone();
+    engine.register_fn("cap_at_login", move || at_login.load(Ordering::Relaxed));
     // `cap_ground_y() -> float`: the land's height in metres, for picking
     // and for drawing on the ground. The sea is at 0.
     engine.register_fn("cap_ground_y", || crate::coords::layer::GROUND as f64);

@@ -1,28 +1,40 @@
 //! `CapitolExtension`: everything the Capitol adds to Flint's player, as a
-//! `PlayerExtension`. Today that's the script API, the game egui, the terrain
-//! (fetched and cached, or read from a file offline), the world built from
-//! it (`world`, so far the ground, the canals, whose water is the scene's
-//! ocean, the roads, the bridges, the plots and the Capitol tower), the
-//! fog and the light as the camera climbs (`atmosphere`), the wheel for
-//! the camera rig, and the spike's markers.
+//! `PlayerExtension`. Today that's the script API, the session (the login
+//! form, and once signed in the store and poller), the game egui, the
+//! terrain (fetched and cached, or read from a file offline), the world
+//! built from it (`world`, so far the ground, the canals, whose water is
+//! the scene's ocean, the roads, the bridges, the plots and the Capitol
+//! tower), the fog and the light as the camera climbs (`atmosphere`), the
+//! wheel for the camera rig, and the spike's markers.
 
 use crate::atmosphere::Atmosphere;
 use crate::script_api::{self, Shared};
+use crate::session::Session;
 use crate::terrain::TerrainSource;
+use crate::ui::login::{FormAction, LoginForm, LoginView};
 use crate::world::plots::Lot;
 use crate::world::Rebuild;
 use crate::{spike_world, ui, world};
+use capitol_core::auth::{Notice, Phase};
 use capitol_core::protocol::terrain::TerrainResponse;
 use flint_player::{ExtensionCtx, PlayerExtension};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 use winit::event::{MouseScrollDelta, WindowEvent};
 
 /// Pixels of a touchpad's smooth scroll that make one wheel notch.
 const PIXELS_PER_NOTCH: f32 = 50.0;
 
+/// How long the login form takes to fade out once the player is in, in
+/// seconds. The camera comes down from its circle over about the same time.
+const FORM_FADE: f32 = 0.8;
+
 pub struct CapitolExtension {
     shared: Shared,
     terrain: TerrainSource,
+    /// `None` offline: no server, so no login, just the world.
+    session: Option<Session>,
+    form: LoginForm,
     /// Whether the spike's markers have been uploaded.
     world_built: bool,
     /// The terrain the world was last built from, to tell what a new one
@@ -37,15 +49,58 @@ pub struct CapitolExtension {
 }
 
 impl CapitolExtension {
-    pub fn new(shared: Shared, terrain: TerrainSource) -> Self {
+    pub fn new(shared: Shared, terrain: TerrainSource, session: Option<Session>) -> Self {
         Self {
             shared,
             terrain,
+            session,
+            form: LoginForm::default(),
             world_built: false,
             built: None,
             lots: Vec::new(),
             stats_logged: 0.0,
             atmosphere: Atmosphere::default(),
+        }
+    }
+
+    /// The login form is up: online, and not yet in the world.
+    fn at_login(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|s| s.auth().phase() != Phase::InWorld)
+    }
+
+    fn act(&mut self, action: FormAction) {
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        match action {
+            FormAction::LogIn { email, password } => session.log_in(&email, &password),
+            FormAction::Register {
+                name,
+                email,
+                password,
+            } => session.register(&name, &email, &password),
+            FormAction::SignInAsSomeoneElse => session.log_out(),
+            FormAction::SetServer(server) => self.switch_server(&server),
+        }
+    }
+
+    /// A new session on `server`, and its terrain: the world is rebuilt from
+    /// that server's cache, or once its `/terrain` arrives.
+    fn switch_server(&mut self, server: &str) {
+        let Some(old) = self.session.take() else {
+            return;
+        };
+        tracing::info!("session: switching from {} to {server}", old.server());
+        let mut file = old.into_file();
+        file.set_server(server);
+        match Session::start(server, file) {
+            Ok(session) => {
+                self.terrain = TerrainSource::online(server);
+                self.session = Some(session);
+            }
+            Err(e) => tracing::error!("session: couldn't start for {server}: {e:#}"),
         }
     }
 }
@@ -56,7 +111,12 @@ impl PlayerExtension for CapitolExtension {
     }
 
     fn pre_update(&mut self, ctx: &mut ExtensionCtx) {
-        self.terrain.update();
+        if let Some(session) = &mut self.session {
+            session.update(Instant::now(), &mut self.terrain);
+        }
+        self.shared
+            .at_login
+            .store(self.at_login(), Ordering::Relaxed);
         let Some(gpu) = ctx.gpu.as_mut() else {
             return;
         };
@@ -135,7 +195,39 @@ impl PlayerExtension for CapitolExtension {
     }
 
     fn ui(&mut self, ctx: &egui::Context) {
-        ui::inscription(ctx, &self.shared, &self.terrain.status());
+        let at_login = self.at_login();
+        let mut action = None;
+        if let Some(session) = &mut self.session {
+            // Starts at its target, so a first frame in the world doesn't fade.
+            let opacity = ctx.animate_bool_with_time(
+                egui::Id::new("capitol_login_fade"),
+                at_login,
+                FORM_FADE,
+            );
+            if opacity > 0.0 {
+                let auth = session.auth();
+                let view = LoginView {
+                    phase: auth.phase(),
+                    notice: auth.notice().map(ToString::to_string),
+                    wrong_password: auth.notice() == Some(&Notice::WrongPassword),
+                    reachable: auth.reachable(),
+                    server: session.server(),
+                    remembered_email: auth.email(),
+                    who: session.who(),
+                    connection: auth.connection(),
+                };
+                action = self.form.show(ctx, &view, opacity);
+            }
+            if !at_login && ui::account(ctx, &session.who(), session.auth().connection()) {
+                session.log_out();
+            }
+        }
+        if !at_login {
+            ui::inscription(ctx, &self.shared, &self.terrain.status());
+        }
+        if let Some(action) = action {
+            self.act(action);
+        }
     }
 }
 

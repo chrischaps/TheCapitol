@@ -2,10 +2,11 @@
 //! and installs `CapitolExtension`, through which everything the Capitol
 //! adds reaches the engine. It runs `scenes/capitol.scene.toml`: the city at
 //! dusk, as runtime meshes built from the terrain, which is fetched from the
-//! server (and cached) or read from `--offline <file>`. The camera is the
-//! rig in `scripts/camera.rhai`. The P0.4 spike's script, markers and
-//! inscription window (game egui) stay until the living world (P4) replaces
-//! them.
+//! server (and cached) or read from `--offline <file>`. Online it opens on
+//! the login form, with the camera circling the tower behind it, unless a
+//! stored session lets it straight in. The camera is the rig in
+//! `scripts/camera.rhai`. The P0.4 spike's script, markers and inscription
+//! window (game egui) stay until the living world (P4) replaces them.
 
 mod atmosphere;
 #[cfg(test)]
@@ -13,6 +14,7 @@ mod camera_rig;
 mod coords;
 mod extension;
 mod script_api;
+mod session;
 mod spike_world;
 mod terrain;
 mod ui;
@@ -35,20 +37,15 @@ struct Args {
     #[arg(long, default_value = "The Capitol")]
     note: String,
 
-    /// Server root
-    #[arg(long, env = "CAPITOL_SERVER", default_value = "http://localhost:3000")]
-    server: String,
+    /// Server root, for this run. Without it, the server last chosen on the
+    /// login form, or http://localhost:3000
+    #[arg(long, env = "CAPITOL_SERVER")]
+    server: Option<String>,
 
-    /// Build the world from this /terrain JSON and never touch the network
-    /// (fixtures/terrain.json, or a file from cache/)
-    #[arg(long, value_name = "TERRAIN_JSON")]
+    /// Build the world from this /terrain JSON and never touch the network:
+    /// no server, so no login (fixtures/terrain.json, or a file from cache/)
+    #[arg(long, value_name = "TERRAIN_JSON", conflicts_with = "server")]
     offline: Option<PathBuf>,
-
-    /// Sign in and rebuild the world whenever the server's terrain changes
-    /// (an admin regenerating it from the React client's F2 tweaker). Until
-    /// P4.1's login screen it signs in as flint1@bots.capitol.local
-    #[arg(long, conflicts_with = "offline")]
-    live: bool,
 
     /// Where the camera rig starts. street, district and map are its own
     /// zooms. The rest are fixed shots, held until the first camera input:
@@ -101,9 +98,20 @@ fn main() -> Result<()> {
         )
         .init();
     let args = Args::parse();
-    let terrain = match &args.offline {
-        Some(path) => terrain::TerrainSource::offline(path)?,
-        None => terrain::TerrainSource::online(&args.server, args.live)?,
+    let (terrain, session) = match &args.offline {
+        Some(path) => (terrain::TerrainSource::offline(path)?, None),
+        None => {
+            let file = session::SessionFile::load(session::SessionFile::PATH);
+            let server = match &args.server {
+                Some(s) => session::normalize_server(s)
+                    .with_context(|| format!("--server {s:?} isn't a server URL"))?,
+                None => file
+                    .server()
+                    .unwrap_or_else(|| session::DEFAULT_SERVER.to_owned()),
+            };
+            let session = session::Session::start(&server, file)?;
+            (terrain::TerrainSource::online(&server), Some(session))
+        }
     };
 
     // Engine schemas first, then the game's own layered over them.
@@ -158,7 +166,9 @@ fn main() -> Result<()> {
     let shared = script_api::Shared::default();
     *shared.note.lock().unwrap() = args.note;
     *shared.view.lock().unwrap() = args.view;
-    player.add_extension(Box::new(extension::CapitolExtension::new(shared, terrain)));
+    player.add_extension(Box::new(extension::CapitolExtension::new(
+        shared, terrain, session,
+    )));
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
