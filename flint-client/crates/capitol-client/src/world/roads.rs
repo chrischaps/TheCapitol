@@ -28,11 +28,11 @@ use std::collections::HashMap;
 use std::f64::consts::PI;
 
 use crate::coords::{layer, to_world};
+use crate::world::geom::*;
 use crate::world::mesh::{MeshBuf, UP};
 use crate::world::palette::{self, hex};
 use crate::world::sector::{self, Sector};
 use crate::world::water;
-use capitol_protocol::rules::{CENTER_X, CENTER_Y};
 use capitol_protocol::terrain::{RoadSegment, RoadType, WaterRing};
 use flint_import::ImportedMaterial;
 use flint_player::ExtensionGpu;
@@ -54,47 +54,6 @@ const MITER_LIMIT: f64 = 2.0;
 /// suburban data repeats some. A cut closer than this to a point is moved
 /// onto it.
 const MIN_STEP: f64 = 0.5;
-
-/// A point in server space.
-type P = [f64; 2];
-
-fn add(a: P, b: P) -> P {
-    [a[0] + b[0], a[1] + b[1]]
-}
-fn sub(a: P, b: P) -> P {
-    [a[0] - b[0], a[1] - b[1]]
-}
-fn scale(a: P, k: f64) -> P {
-    [a[0] * k, a[1] * k]
-}
-fn dot(a: P, b: P) -> f64 {
-    a[0] * b[0] + a[1] * b[1]
-}
-fn dist(a: P, b: P) -> f64 {
-    (a[0] - b[0]).hypot(a[1] - b[1])
-}
-fn unit(a: P) -> P {
-    scale(a, 1.0 / a[0].hypot(a[1]))
-}
-/// `d` turned a quarter anticlockwise (in maths axes): its left.
-fn left(d: P) -> P {
-    [-d[1], d[0]]
-}
-fn rot(a: P, radians: f64) -> P {
-    let (s, c) = radians.sin_cos();
-    [a[0] * c - a[1] * s, a[0] * s + a[1] * c]
-}
-/// `t` of the way from `a` to `b`, landing exactly on each end.
-fn lerp(a: P, b: P, t: f64) -> P {
-    if t == 1.0 {
-        b
-    } else {
-        add(a, scale(sub(b, a), t))
-    }
-}
-fn radius(p: P) -> f64 {
-    (p[0] - CENTER_X).hypot(p[1] - CENTER_Y)
-}
 
 /// How a stretch of road ends.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -221,13 +180,6 @@ fn natural_ends(roads: &[RoadSegment], i: usize) -> [End; 2] {
         _ => End::Round,
     };
     [end(points.first()), end(points.last())]
-}
-
-/// Server distance from `p` to the segment `a`→`b`.
-fn distance_to_segment(p: P, a: P, b: P) -> f64 {
-    let ab = sub(b, a);
-    let t = (dot(sub(p, a), ab) / dot(ab, ab).max(1e-12)).clamp(0.0, 1.0);
-    dist(p, lerp(a, b, t))
 }
 
 /// The ribbon's (left, right) edge points at a place on the road.

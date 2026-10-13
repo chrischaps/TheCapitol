@@ -50,6 +50,19 @@ impl Sector {
         (0..RINGS).flat_map(|ring| (0..WEDGES).map(move |wedge| Sector { ring, wedge }))
     }
 
+    /// The sector's extent: its (inner, outer) radii, the outer ring
+    /// running on to infinity, and the angles in degrees between which it
+    /// lies, the first possibly negative.
+    #[cfg(test)]
+    pub fn span(self) -> ([f64; 2], [f64; 2]) {
+        let edges = ring_edges();
+        let r = self.ring as usize;
+        let lo = if r == 0 { 0.0 } else { edges[r - 1] };
+        let hi = edges.get(r).copied().unwrap_or(f64::INFINITY);
+        let a = wedge_start(self.wedge);
+        ([lo, hi], [a, a + WEDGE_DEG])
+    }
+
     /// A short name for mesh and entity names: `r1w07`.
     pub fn tag(self) -> String {
         format!("r{}w{:02}", self.ring, self.wedge)
@@ -140,6 +153,23 @@ mod tests {
             ],
             [0, 0, 1, 2, 3, 3]
         );
+    }
+
+    #[test]
+    fn a_sector_spans_the_points_that_are_in_it() {
+        for (r, deg) in [
+            (10.0, 0.0),
+            (999.0, 11.0),
+            (1200.0, 349.0),
+            (2000.0, 180.0),
+            (3900.0, 260.0),
+        ] {
+            let s = Sector::of(polar(r, deg));
+            let ([lo, hi], [a0, a1]) = s.span();
+            assert!(lo <= r && r < hi, "r {r} in {s:?}");
+            let d = (deg - a0).rem_euclid(360.0);
+            assert!(d < a1 - a0, "{deg} deg in {s:?}");
+        }
     }
 
     #[test]

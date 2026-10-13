@@ -28,7 +28,6 @@ pub const S: f32 = 0.1;
 /// through, so a canal is a stone-walled channel with the sea showing at
 /// its bottom: a water table. Steps between layers are at least 2 cm,
 /// which the depth buffer resolves from the map view (plan §4.6).
-#[allow(dead_code)] // PLOT waits for plots (P3.6)
 pub mod layer {
     use capitol_protocol::terrain::RoadType;
 
@@ -38,9 +37,12 @@ pub mod layer {
     pub const CHANNEL_BED: f32 = -1.6;
     /// The land, high enough above the sea that no wave reaches it.
     pub const GROUND: f32 = 0.6;
-    pub const PLOT: f32 = GROUND + 0.02;
     /// The lowest road layer; see [`road`].
     pub const ROAD: f32 = GROUND + 0.04;
+    /// The top of a lot (P3.6), a step above the highest road, like a
+    /// pavement. Lots are clipped clear of the roads, so they never
+    /// overlap; each has a curb a few centimetres higher round its edge.
+    pub const PLOT: f32 = GROUND + 0.12;
     /// The top of the stone kerb that rims every canal.
     pub const BANK: f32 = GROUND + 0.3;
     /// The crown of a bridge's deck (P3.5), high enough over the kerbs
@@ -127,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn layers_stack_sea_ground_plots_roads_by_rank_then_bank_then_deck() {
+    fn layers_stack_sea_ground_roads_by_rank_plots_then_bank_then_deck() {
         use capitol_protocol::terrain::RoadType;
         let roads = [
             RoadType::Trail,
@@ -136,9 +138,10 @@ mod tests {
             RoadType::Arterial,
         ]
         .map(layer::road);
-        assert!(layer::GROUND < layer::PLOT && layer::PLOT < roads[0]);
+        assert!(layer::GROUND < roads[0]);
         assert!(roads.windows(2).all(|w| w[0] < w[1]));
-        assert!(roads[3] < layer::BANK && layer::BANK < layer::DECK);
+        assert!(roads[3] + 0.02 <= layer::PLOT);
+        const { assert!(layer::PLOT < layer::BANK && layer::BANK < layer::DECK) };
         const { assert!(layer::CHANNEL_BED < layer::SEA && layer::SEA < layer::GROUND) };
         const { assert!(layer::CHANNEL_BED < layer::ARCH_SPRING && layer::ARCH_SPRING < layer::SEA) };
     }

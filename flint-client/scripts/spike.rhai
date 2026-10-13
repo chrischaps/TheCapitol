@@ -1,7 +1,8 @@
 // The P0.4 spike on master. Camera: south of the Capitol looking north, so
 // east is on the right. `--view` picks the framing until the camera rig
 // (P3.9): street (a slow drift), district, map (straight down), bridge
-// (close over a canal crossing) or suburb (low over curving streets). The
+// (close over a canal crossing), suburb (low over curving streets) or
+// urban (close over the lots by the south arterial). The
 // ground, water and roads are runtime meshes the extension builds (P1.4);
 // over them the moat and inner canal are traced
 // as hairlines, the plan the city was drawn from. The inscription comes
@@ -44,6 +45,11 @@ fn on_update() {
         // branch into cul-de-sacs (P3.4's joins and caps).
         set_camera_position(-35.0, 45.0, 245.0);
         set_camera_target(-35.0, 0.0, 200.0);
+    } else if view == "urban" {
+        // Close over the urban lots west of the south arterial, looking
+        // north-east across the arterial at their curbs.
+        set_camera_position(-14.0, 9.0, 142.0);
+        set_camera_target(4.0, 0.0, 124.0);
     } else if view == "district" {
         set_camera_position(0.0, 260.0, 300.0);
         set_camera_target(0.0, 0.0, 30.0);
