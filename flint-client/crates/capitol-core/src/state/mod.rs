@@ -597,6 +597,26 @@ impl GameState {
         let mut out = Vec::new();
         match response {
             R::Auth(auth) => self.me = Some(auth.player_id),
+            R::Me(me) => {
+                self.me = Some(me.player_id);
+                self.set_strands(me.strand_balance, &mut out);
+                // Before the first `positions`, this is how we learn who and
+                // where we are. After it, `positions` is newer than any REST
+                // answer, so a player already known keeps their position.
+                if me.online && self.is_connected() && !self.players.contains_key(&me.player_id) {
+                    self.players.insert(
+                        me.player_id,
+                        PlayerPosition {
+                            id: me.player_id,
+                            name: me.name.clone(),
+                            x: me.x,
+                            y: me.y,
+                        },
+                    );
+                    out.push(StateEvent::PlayerJoined(me.player_id));
+                    self.learn_zone(&mut out);
+                }
+            }
             R::Nearby(nearby) => self.merge_nodes(&nearby.nodes, &mut out),
             R::NearbyStations(nearby) => self.merge_stations(&nearby.stations, &mut out),
             R::PlaceStation(placed) => self.upsert_station(placed.station.clone(), &mut out),
@@ -673,8 +693,9 @@ impl GameState {
         self.me
     }
 
-    /// The local player's name and server position. Known from the first
-    /// `positions` that includes them (until B2 adds `GET /player/me`).
+    /// The local player's name and server position. Known from `GET
+    /// /player/me` in the connect snapshot, or the first `positions` that
+    /// includes them, whichever lands first.
     pub fn local_player(&self) -> Option<&PlayerPosition> {
         self.me.and_then(|id| self.players.get(&id))
     }

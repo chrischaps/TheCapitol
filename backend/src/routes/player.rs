@@ -7,8 +7,9 @@ use uuid::Uuid;
 
 use capitol_protocol::rest::{
     CurrencyResponse, Destination, InventoryResponse, MoveRequest, MoveResponse,
+    PlayerMeResponse,
 };
-use capitol_protocol::rules::WORLD_SIZE;
+use capitol_protocol::rules::{Zone, WORLD_SIZE};
 
 use crate::engine::Command;
 use crate::error::AppError;
@@ -18,6 +19,7 @@ use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
+        .route("/me", get(get_me))
         .route("/move", post(move_player))
         .route("/inventory", get(get_inventory))
         .route("/currency", get(get_currency))
@@ -25,6 +27,52 @@ pub fn router(state: AppState) -> Router<AppState> {
             state,
             crate::middleware::auth::auth_middleware,
         ))
+}
+
+/// Get the player's name, live position, zone and balance
+///
+/// While the player is in the game, the name and position come from the tick
+/// loop's state, not the `players` row, which is only written every 10 s. The
+/// balance always comes from the row: trades, the exchange and property tax
+/// write it there, and the in-memory copy is never updated after login.
+#[utoipa::path(
+    get,
+    path = "/player/me",
+    responses(
+        (status = 200, description = "The player, as the server sees them now", body = PlayerMeResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Player"
+)]
+pub async fn get_me(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+) -> Result<Json<PlayerMeResponse>, AppError> {
+    let (player_id, name, x, y, strand_balance) =
+        sqlx::query_as::<_, (Uuid, String, f64, f64, i64)>(
+            "SELECT id, name, position_x, position_y, strand_balance
+             FROM players WHERE account_id = $1 LIMIT 1"
+        )
+        .bind(auth_user.account_id)
+        .fetch_one(&state.db)
+        .await?;
+
+    let live = {
+        let game = state.game.read().await;
+        game.players.get(&player_id).map(|p| (p.name.clone(), p.x, p.y))
+    };
+    let online = live.is_some();
+    let (name, x, y) = live.unwrap_or((name, x, y));
+
+    Ok(Json(PlayerMeResponse {
+        player_id,
+        name,
+        x,
+        y,
+        zone: Zone::from_position(x, y).as_str().to_string(),
+        strand_balance,
+        online,
+    }))
 }
 
 /// Set player movement destination

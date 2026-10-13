@@ -9,7 +9,7 @@ use capitol_protocol::rest::{
     ExtractRequest, ExtractResponse, HealthResponse, InventoryItem, InventoryResponse,
     ListPlotsResponse, LoginRequest, LogoutRequest, MoveItemRequest, MoveItemResponse,
     MoveRequest, NearbyResponse, NearbyStationsResponse, PlaceStationRequest,
-    PlaceStationResponse, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
+    PlaceStationResponse, PlayerMeResponse, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
     RecipeOutputInfo, RecipesResponse, RegisterRequest, ResourceNodeInfo, SlotItem,
     StationContainerResponse, StationInfo, WithdrawRequest, WithdrawResponse, ZoneInfo,
     ZonesResponse,
@@ -71,6 +71,7 @@ then include it in the `Authorization: Bearer <token>` header.",
         // Health
         crate::routes::health::health_check,
         // Player
+        crate::routes::player::get_me,
         crate::routes::player::move_player,
         crate::routes::player::get_inventory,
         crate::routes::player::get_currency,
@@ -113,6 +114,7 @@ then include it in the `Authorization: Bearer <token>` header.",
         // Health
         HealthResponse,
         // Player
+        PlayerMeResponse,
         MoveRequest,
         InventoryResponse,
         InventoryItem,

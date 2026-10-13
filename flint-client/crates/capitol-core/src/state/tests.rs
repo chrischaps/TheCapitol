@@ -1025,6 +1025,67 @@ fn login_sets_the_local_player() {
     assert_eq!(state.me(), Some(ME));
 }
 
+fn me_response(online: bool) -> R {
+    R::Me(PlayerMeResponse {
+        player_id: ME,
+        name: "Ada".into(),
+        x: 4000.0,
+        y: 7350.0,
+        zone: "rural".into(),
+        strand_balance: 250,
+        online,
+    })
+}
+
+#[test]
+fn player_me_is_the_local_player_before_any_positions() {
+    let mut state = connected();
+    let events = state.apply_rest(&me_response(true));
+    assert_eq!(
+        events,
+        vec![
+            StateEvent::CurrencyChanged { balance: 250 },
+            StateEvent::PlayerJoined(ME),
+            StateEvent::ZoneChanged {
+                from: None,
+                to: Zone::Rural
+            },
+        ]
+    );
+    assert_eq!(state.local_player(), Some(&pos(ME, "Ada", 4000.0, 7350.0)));
+    assert_eq!(state.strands(), Some(250));
+
+    // The first positions moves me without joining me again.
+    let events = state.apply_ws(&M::Positions {
+        players: vec![pos(ME, "Ada", 4000.0, 7345.0)],
+    });
+    assert!(!events.contains(&StateEvent::PlayerJoined(ME)));
+    assert_eq!(state.local_player().unwrap().y, 7345.0);
+}
+
+#[test]
+fn player_me_never_moves_a_player_positions_already_placed() {
+    let mut state = with_players();
+    let events = state.apply_rest(&me_response(true));
+    assert_eq!(events, vec![StateEvent::CurrencyChanged { balance: 250 }]);
+    assert_eq!(state.local_player(), Some(&pos(ME, "Ada", 4000.0, 4000.0)));
+}
+
+#[test]
+fn player_me_offline_or_disconnected_only_sets_the_balance() {
+    // Offline: the position is the saved one, and the player isn't in the game.
+    let mut state = connected();
+    let events = state.apply_rest(&me_response(false));
+    assert_eq!(events, vec![StateEvent::CurrencyChanged { balance: 250 }]);
+    assert_eq!(state.local_player(), None);
+
+    // A late answer after the connection dropped can't leave a ghost.
+    let mut state = GameState::new();
+    state.apply_rest(&me_response(true));
+    assert_eq!(state.local_player(), None);
+    assert_eq!(state.me(), Some(ME));
+}
+
 #[test]
 fn balances_come_from_every_money_response() {
     let mut state = connected();

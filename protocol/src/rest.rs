@@ -127,6 +127,25 @@ pub struct Destination {
     pub y: f64,
 }
 
+/// `GET /player/me`: the token's player, and where they are now
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct PlayerMeResponse {
+    pub player_id: Uuid,
+    pub name: String,
+    /// Live X while `online`, otherwise the last saved one (0-8000)
+    pub x: f64,
+    /// Live Y while `online`, otherwise the last saved one (0-8000)
+    pub y: f64,
+    /// Zone ID at that position, as in `zone_changed` (e.g. "rural")
+    pub zone: String,
+    /// Current Strand balance
+    pub strand_balance: i64,
+    /// Whether a WebSocket session has the player in the game. When false,
+    /// `x`/`y` come from the database, which the server writes every 10 s.
+    pub online: bool,
+}
+
 /// `GET /player/inventory`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]

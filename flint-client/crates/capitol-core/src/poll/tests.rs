@@ -152,6 +152,15 @@ fn container(id: Uuid, container_type: &str) -> ContainerResponse {
 
 fn answer_for(fetch: Fetch) -> RestResponse {
     match fetch {
+        Fetch::Me => RestResponse::Me(PlayerMeResponse {
+            player_id: ME,
+            name: "Me".into(),
+            x: 4000.0,
+            y: 7350.0,
+            zone: "rural".into(),
+            strand_balance: 100,
+            online: true,
+        }),
         Fetch::Containers => RestResponse::Containers(ContainersResponse {
             containers: vec![container(INVENTORY, "player_inventory")],
         }),

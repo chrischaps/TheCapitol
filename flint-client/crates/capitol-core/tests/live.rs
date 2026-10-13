@@ -176,13 +176,39 @@ fn register_login_connect_and_move() {
         _ => None,
     };
     let start = me(&wait_for(&net, "our position", |e| me(e).is_some())).unwrap();
+    // North, up the south arterial from the spawn: no water for 200 units.
     net.ws(ClientMessage::Move {
-        x: start.x + 20.0,
-        y: start.y,
+        x: start.x,
+        y: start.y - 200.0,
     });
     wait_for(&net, "movement", |e| {
-        me(e).is_some_and(|p| (p.x - start.x).abs() > 1.0 || (p.y - start.y).abs() > 1.0)
+        me(e).is_some_and(|p| start.y - p.y > 50.0)
     });
+
+    // Mid-walk, /player/me is the tick loop's position, not the row saved at
+    // registration: it matches the next positions to within a tick or two.
+    let Ok(RestResponse::Me(live)) = rest(&net, RestRequest::PlayerMe, 8) else {
+        panic!("expected /player/me");
+    };
+    let next = me(&wait_for(&net, "positions after /player/me", |e| {
+        me(e).is_some()
+    }))
+    .unwrap();
+    assert!(live.online);
+    assert_eq!(live.player_id, player_id);
+    assert_eq!(live.name, start.name);
+    assert_eq!(
+        live.zone,
+        rules::Zone::from_position(live.x, live.y).as_str()
+    );
+    assert!(
+        start.y - live.y > 50.0,
+        "{live:?} is the saved spawn, not live"
+    );
+    assert!(
+        (live.x - next.x).abs() < 15.0 && (live.y - next.y).abs() < 15.0,
+        "{live:?} vs positions {next:?}"
+    );
 
     net.rest(
         RestRequest::Logout(capitol_core::protocol::rest::LogoutRequest { token: auth.token }),

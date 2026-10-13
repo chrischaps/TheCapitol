@@ -25,7 +25,7 @@
 //!
 //! | Trigger | Fetch |
 //! |---|---|
-//! | first `Connected`, every `Resync` | containers, nearby nodes, nearby stations, currency, plots, recipes |
+//! | first `Connected`, every `Resync` | me (name, position, currency), containers, nearby nodes, nearby stations, plots, recipes |
 //! | every 5 s while connected | nearby nodes, nearby stations, plots |
 //! | `inventory_updated` (mine, or a container I hold) | containers, or the open station's container |
 //! | `station_opened` (mine) | that station's container |
@@ -70,6 +70,8 @@ const PLOT_LIMIT: i32 = 100;
 /// Something the client refetches because the server doesn't push it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Fetch {
+    /// `GET /player/me`
+    Me,
     /// `GET /inventory/containers`
     Containers,
     /// `GET /stations/{id}/container`
@@ -90,11 +92,12 @@ pub enum Fetch {
 
 impl Fetch {
     /// Everything the server doesn't push, refetched on connect and resync.
+    /// `Me` comes first and carries the balance, so `Currency` isn't needed here.
     pub const SNAPSHOT: [Fetch; 6] = [
+        Fetch::Me,
         Fetch::Containers,
         Fetch::NearbyNodes,
         Fetch::NearbyStations,
-        Fetch::Currency,
         Fetch::Plots,
         Fetch::Recipes,
     ];
@@ -104,6 +107,7 @@ impl Fetch {
 
     pub fn request(&self) -> RestRequest {
         match *self {
+            Fetch::Me => RestRequest::PlayerMe,
             Fetch::Containers => RestRequest::Containers,
             Fetch::StationContainer { station_id } => RestRequest::StationContainer { station_id },
             Fetch::NearbyNodes => RestRequest::WorldNearby,

@@ -27,6 +27,8 @@ pub enum RestRequest {
     /// with no body) instead of the whole megabyte again.
     Terrain { cached_version: Option<String> },
 
+    /// `GET /player/me`: name, live position, zone and balance (B2)
+    PlayerMe,
     /// `POST /player/move`. The WebSocket `move` is what the game uses.
     PlayerMove(MoveRequest),
     /// `GET /player/inventory`
@@ -95,6 +97,7 @@ pub enum RestResponse {
     Terrain(Box<TerrainResponse>),
     /// `/terrain` still has the `cached_version` the request named.
     TerrainUnchanged,
+    Me(PlayerMeResponse),
     Move(MoveResponse),
     Inventory(InventoryResponse),
     Currency(CurrencyResponse),
@@ -168,6 +171,7 @@ impl RestRequest {
             RemoveStation { .. } => Method::DELETE,
             Health
             | Terrain { .. }
+            | PlayerMe
             | PlayerInventory
             | PlayerCurrency
             | WorldNearby
@@ -193,6 +197,7 @@ impl RestRequest {
             Logout(_) => "/auth/logout".into(),
             Health => "/health".into(),
             Terrain { .. } => "/terrain".into(),
+            PlayerMe => "/player/me".into(),
             PlayerMove(_) => "/player/move".into(),
             PlayerInventory => "/player/inventory".into(),
             PlayerCurrency => "/player/currency".into(),
@@ -253,6 +258,7 @@ impl RestRequest {
             Q::Logout(_) | Q::RemoveStation { .. } => A::Success(de(body)?),
             Q::Health => A::Health(de(body)?),
             Q::Terrain { .. } => A::Terrain(Box::new(de(body)?)),
+            Q::PlayerMe => A::Me(de(body)?),
             Q::PlayerMove(_) => A::Move(de(body)?),
             Q::PlayerInventory => A::Inventory(de(body)?),
             Q::PlayerCurrency => A::Currency(de(body)?),
@@ -376,6 +382,7 @@ mod tests {
         let cases = [
             (RestRequest::Health, "GET", "/health".to_string()),
             (RestRequest::Recipes, "GET", "/recipes".into()),
+            (RestRequest::PlayerMe, "GET", "/player/me".into()),
             (
                 RestRequest::ListPlots(Default::default()),
                 "GET",
