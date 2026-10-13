@@ -1,7 +1,7 @@
 //! The Capitol's egui UI, drawn through `PlayerExtension::ui` (plan §4.3).
 //! For now that's one window: the inscription, whose text box writes the
 //! note the spike script draws over the Capitol. It exercises the game
-//! egui layer. Typing in it must not reach the script's E binding, and
+//! egui layer. Typing in it must not reach the script's P binding, and
 //! clicks outside it must still reach the script.
 
 use crate::script_api::Shared;
@@ -54,7 +54,12 @@ pub fn inscription(ctx: &egui::Context, shared: &Shared, status: &str) {
             );
             ui.add_space(6.0);
             ui.label(
-                RichText::new("E traces the plan · click the city to mark it")
+                RichText::new("WASD moves · wheel or R/F zooms · Q/E or right-drag turns · H home")
+                    .color(DIM)
+                    .size(11.0),
+            );
+            ui.label(
+                RichText::new("P traces the plan · click the city to mark it")
                     .color(DIM)
                     .size(11.0),
             );

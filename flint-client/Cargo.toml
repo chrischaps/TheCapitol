@@ -29,10 +29,12 @@ capitol-core = { path = "crates/capitol-core" }
 capitol-protocol = { path = "../protocol" }
 
 # Third-party crates the engine also uses must match engine/Cargo.toml
-# [workspace.dependencies] (egui 0.30, winit 0.30, wgpu 23, rhai 1, glam 0.30),
-# or two copies get linked and types stop lining up across the boundary.
+# [workspace.dependencies] (egui 0.30, winit 0.30, wgpu 23, rhai 1, glam 0.30,
+# toml 0.8), or two copies get linked and types stop lining up across the
+# boundary.
 egui = "0.30.0"
 rhai = { version = "1", features = ["sync"] }
+toml = "0.8"
 winit = "0.30"
 
 anyhow = "1.0"

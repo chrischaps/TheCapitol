@@ -2,11 +2,14 @@
 //! and installs `CapitolExtension`, through which everything the Capitol
 //! adds reaches the engine. It runs `scenes/capitol.scene.toml`: the city at
 //! dusk, as runtime meshes built from the terrain, which is fetched from the
-//! server (and cached) or read from `--offline <file>`. The P0.4 spike's
-//! script, markers and inscription window (game egui) stay until the camera
-//! rig (P3.9) and the living world (P4) replace them.
+//! server (and cached) or read from `--offline <file>`. The camera is the
+//! rig in `scripts/camera.rhai`. The P0.4 spike's script, markers and
+//! inscription window (game egui) stay until the living world (P4) replaces
+//! them.
 
 mod atmosphere;
+#[cfg(test)]
+mod camera_rig;
 mod coords;
 mod extension;
 mod script_api;
@@ -41,13 +44,14 @@ struct Args {
     #[arg(long, value_name = "TERRAIN_JSON")]
     offline: Option<PathBuf>,
 
-    /// Where the camera looks from, until the camera rig (P3.9) lands:
-    /// street (the spike's drift), district, map (straight down), bridge
-    /// (close, over the inner canal's south crossing), suburb (low over
-    /// the southern suburbs' curving streets), urban (close over the
+    /// Where the camera rig starts. street, district and map are its own
+    /// zooms. The rest are fixed shots, held until the first camera input:
+    /// bridge (close, over the inner canal's south crossing), suburb (low
+    /// over the southern suburbs' curving streets), urban (close over the
     /// urban lots by the south arterial), capitol (up at the tower from
-    /// beyond the moat), crown (level with its lantern), or from-urban, from-suburban, from-rural and
-    /// from-wilderness (the tower on the horizon from each outer zone)
+    /// beyond the moat), crown (level with its lantern), or from-urban,
+    /// from-suburban, from-rural and from-wilderness (the tower on the
+    /// horizon from each outer zone)
     #[arg(long, default_value = "street", value_parser = [
         "street", "district", "map", "bridge", "suburb", "urban", "capitol", "crown",
         "from-urban", "from-suburban", "from-rural", "from-wilderness",
@@ -66,6 +70,14 @@ struct Args {
     /// Game time in seconds for the screenshot (default: the first frame)
     #[arg(long, value_name = "SECS")]
     screenshot_at: Option<f64>,
+    /// Also write a numbered PNG this often (game seconds), from
+    /// --screenshot-at on: renders/capitol_0001.png and on
+    #[arg(long, value_name = "SECS")]
+    screenshot_every: Option<f64>,
+    /// Advance game time exactly this much per frame, whatever the wall
+    /// clock does, so a scripted capture plays the same every time
+    #[arg(long, value_name = "SECS")]
+    frame_step: Option<f64>,
     /// Exit once game time reaches this many seconds
     #[arg(long, value_name = "SECS")]
     exit_after: Option<f64>,
@@ -123,15 +135,16 @@ fn main() -> Result<()> {
     }
     player.set_schema_paths(schema_dirs);
     let screenshot = args.screenshot.or_else(|| {
-        args.screenshot_at
-            .map(|_| PathBuf::from("renders/capitol.png"))
+        (args.screenshot_at.is_some() || args.screenshot_every.is_some())
+            .then(|| PathBuf::from("renders/capitol.png"))
     });
     player.capture = flint_player::CaptureConfig::new(
         screenshot,
         args.screenshot_at.unwrap_or(0.0),
-        None,
+        args.screenshot_every,
         args.exit_after,
     );
+    player.clock.frame_step = args.frame_step.filter(|s| *s > 0.0);
     if let Some(path) = &args.input_script {
         player.capture.input_script = Some(flint_player::InputScript::load(path)?);
     }

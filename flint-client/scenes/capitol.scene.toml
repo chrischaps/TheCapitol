@@ -2,15 +2,16 @@
 # the roads, the plots, the bridges and the tower are runtime meshes the
 # extension uploads (world/), named below with `runtime = true` so the model
 # loader doesn't look for files; the road and plot sectors are spawned by the
-# extension itself. The spike's script and markers (P0.4) stay until the
-# camera rig (P3.9) and the living world (P4) replace them.
+# extension itself. The camera is the rig (camera.rhai, P3.9). The spike's
+# script and markers (P0.4) stay until the living world (P4) replaces them.
 
 [scene]
 name = "The Capitol"
 version = "1.0"
 description = "The Capitol at dusk: the city in rings of light round its tower"
+input_config = "config/input.toml"
 
-# The script places the camera. Near is 1 m, not the default 0.1: from the
+# The camera rig (camera.rhai) places the camera. Near is 1 m, not the default 0.1: from the
 # map view 620 m up the depth buffer then resolves about 2 cm, not 20 (see
 # plan §4.6). Far is 20 km, well past the ground's 5 km skirt. The fog
 # below skips every pixel deeper than 0.9999 in the depth buffer, to spare
@@ -163,3 +164,7 @@ runtime = true
 
 [entities.spike.script]
 source = "spike.rhai"
+
+# The camera rig: follow, tilt, zoom to the map, orbit (P3.9)
+[entities.camera_rig.script]
+source = "camera.rhai"

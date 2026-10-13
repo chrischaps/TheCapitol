@@ -1,18 +1,12 @@
-// The P0.4 spike on master. Camera: south of the Capitol looking north, so
-// east is on the right. `--view` picks the framing until the camera rig
-// (P3.9): street (a slow drift), district, map (straight down), bridge
-// (close over a canal crossing), suburb (low over curving streets) or
-// urban (close over the lots by the south arterial), capitol (up at the
-// tower from beyond the moat), crown (level with its lantern) or from-urban, from-suburban, from-rural and
-// from-wilderness (the tower on the horizon from each outer zone). The
-// ground, water and roads are runtime meshes the extension builds (P1.4);
-// over them the moat and inner canal are traced
-// as hairlines, the plan the city was drawn from. The inscription comes
-// from Rust through cap_spike_note(), which CapitolExtension registers.
+// The P0.4 spike on master. The camera is the rig's (camera.rhai, P3.9).
+// The ground, water and roads are runtime meshes the extension builds
+// (P1.4); over them the moat and inner canal are traced as hairlines, the
+// plan the city was drawn from. The inscription comes from Rust through
+// cap_spike_note(), which CapitolExtension registers.
 //
-// Two inputs test the game egui layer (P1.3). E ("interact") shows and
-// hides the plan; typing an e in the inscription box must not. A left
-// click on the city leaves a gold ripple; a click on the box must not.
+// Two inputs test the game egui layer (P1.3). P ("plan") shows and hides
+// the plan; typing a p in the inscription box must not. A left click on
+// the city leaves a gold ripple; a click on the box must not.
 //
 // The land stands cap_ground_y() metres above the sea (P3.3), and
 // everything here is drawn on it.
@@ -31,61 +25,7 @@ fn ripple_life() { 1.6 }
 
 fn on_update() {
     let t = total_time();
-    let view = cap_view();
-    if view == "map" {
-        // The whole world from 620 m up. A hair south of straight down,
-        // so the look-at keeps north at the top of the screen.
-        set_camera_position(0.0, 620.0, 1.0);
-        set_camera_target(0.0, 0.0, 0.0);
-    } else if view == "bridge" {
-        // Standing on the quay by the inner canal's south crossing
-        // (server angle 90), looking along the water to the gap.
-        set_camera_position(7.0, 3.4, 65.5);
-        set_camera_target(-3.0, 0.0, 60.0);
-    } else if view == "suburb" {
-        // Low over the southern suburbs, where the streets curve and
-        // branch into cul-de-sacs (P3.4's joins and caps).
-        set_camera_position(-35.0, 45.0, 245.0);
-        set_camera_target(-35.0, 0.0, 200.0);
-    } else if view == "urban" {
-        // Close over the urban lots west of the south arterial, looking
-        // north-east across the arterial at their curbs.
-        set_camera_position(-14.0, 9.0, 142.0);
-        set_camera_target(4.0, 0.0, 124.0);
-    } else if view == "capitol" {
-        // On the trade district's quay south of the moat, looking up past
-        // the gatehouse at the keep and its crown (P3.7).
-        set_camera_position(9.0, 3.0, 52.0);
-        set_camera_target(0.0, 32.0, 0.0);
-    } else if view == "crown" {
-        // Level with the crown from the south-west, for its light.
-        set_camera_position(-14.0, 64.0, 22.0);
-        set_camera_target(0.0, 66.0, 0.0);
-    } else if view.starts_with("from-") {
-        // The tower on the horizon from a street-height camera in one of
-        // the four outer zones, each from its own side of the city.
-        let at = if view == "from-urban" {
-            [-92.0, 10.0, 92.0]
-        } else if view == "from-suburban" {
-            [141.0, 16.0, 141.0]
-        } else if view == "from-rural" {
-            [145.0, 22.0, -251.0]
-        } else {
-            [-348.0, 26.0, -127.0]
-        };
-        set_camera_position(at[0], at[1], at[2]);
-        set_camera_target(0.0, 30.0, 0.0);
-    } else if view == "district" {
-        set_camera_position(0.0, 260.0, 300.0);
-        set_camera_target(0.0, 0.0, 30.0);
-    } else {
-        // A slow breath of a drift, staying south of centre.
-        let sway = 6.0 * (t * 0.15).sin();
-        set_camera_position(sway, 70.0, 95.0);
-        set_camera_target(0.0, 0.0, 4.0);
-    }
-
-    if is_action_just_pressed("interact") {
+    if is_action_just_pressed("plan") {
         plan_shown = !plan_shown;
         log("plan " + if plan_shown { "shown" } else { "hidden" });
     }

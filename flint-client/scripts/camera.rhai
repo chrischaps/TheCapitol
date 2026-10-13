@@ -1,0 +1,384 @@
+// The camera rig (P3.9). The camera follows a point on the ground with
+// damping. Zoom runs on one dial, from standing over someone's shoulder to
+// the whole world seen from above, and the tilt rides on it:
+//
+//   - closest (11 m off): 15° down and under 3 m up, standing in the
+//     street with the sky in the top third of the frame, and from the
+//     outer zones the tower on the horizon;
+//   - street (32 m): about 50° down, where the camera rests;
+//   - map (640 m): straight down, north at the top, the light flattened
+//     into the 2D client's palette (atmosphere.rs keys that on height).
+//
+// On the way to the map the view drifts to the Capitol and turns north up,
+// so the furthest zoom is always the same map.
+//
+// Controls (config/input.toml): WASD or the arrows move the point, R and F
+// or the wheel zoom, Q and E or a right-drag orbit, H comes home. The wheel
+// arrives through cap_take_wheel(), because Flint doesn't feed it to
+// actions yet (issue #67). The keys stand in for Home, PageUp and +/-,
+// which Flint can't bind yet (issue #68).
+//
+// Until the player exists (P4.2), the point is a free one you move with
+// WASD, drawn as a gold mark. P4.2 makes follow_target the avatar.
+//
+// `--view` (cap_view) frames a capture. street, district and map are rig
+// framings. The rest are fixed shots: bridge (the quay by the inner canal's
+// south crossing), suburb (low over the southern suburbs' curving streets),
+// urban (close over the lots by the south arterial), capitol (up at the
+// tower from beyond the moat), crown (level with its lantern), and
+// from-urban, from-suburban, from-rural and from-wilderness (the tower on
+// the horizon from each outer zone). A shot holds until the first camera
+// input, then eases into the rig.
+//
+// rig_pose and the functions under it are pure, and a Rust test
+// (camera_rig.rs) drives them across every zoom, yaw and position.
+
+// ── Tuning ───────────────────────────────────────────────────────────────
+
+// Camera distance from the point it looks at (m) at zoom 0 and zoom 1.
+// Zoom is linear in the log of distance, so each wheel notch feels alike.
+fn near_distance() { 11.0 }
+fn far_distance() { 640.0 }
+// Where the camera rests: 32 m off, 50° down, about 25 m up.
+fn street_distance() { 32.0 }
+fn street_zoom() {
+    (street_distance() / near_distance()).ln() / (far_distance() / near_distance()).ln()
+}
+fn district_zoom() { 0.75 }
+// Tilt (degrees below level) at zoom 0, at street and at the map. Just
+// short of 90 at the map, so the look-at keeps a heading.
+fn closest_pitch() { 15.0 }
+fn street_pitch() { 50.0 }
+fn map_pitch() { 89.9 }
+// The view drifts from the point to the Capitol over this zoom range, and
+// turns north up over the second one.
+fn centre_from() { 0.62 }
+fn north_from() { 0.80 }
+// Keep the free point on the world (its ground fades out by r400).
+fn world_radius() { 420.0 }
+// How fast things settle: 1/e in 1/k seconds.
+fn follow_k() { 6.0 }
+fn zoom_k() { 8.0 }
+fn yaw_k() { 10.0 }
+// Input rates.
+fn wheel_step() { 0.045 }   // zoom per wheel notch
+fn key_zoom_rate() { 0.45 } // zoom per second on R/F
+fn orbit_rate() { 1.6 }     // radians per second on Q/E
+fn drag_rate() { 0.006 }    // radians per point of right-drag
+// How long a fixed shot takes to ease into the rig, in seconds.
+fn release_time() { 1.0 }
+
+// The Capitol's keep, crown and needle as a column the camera stays out
+// of (world/tower.rs: its corner turrets reach 9.6 m out, the needle's
+// tip under 84 m). Over the whole bailey the camera keeps above the curtain
+// wall, its towers (which stand inside it, from r13.4) and its gatehouses,
+// and it eases down to the street past the moat. camera_rig.rs holds these
+// to the tower as built.
+fn keep_radius() { 11.0 }
+fn keep_top() { 86.0 }
+fn wall_outer() { 22.5 }
+fn wall_clear() { 10.0 } // above the land: over the gatehouse (8.8 m) by the near plane
+fn ground_clear() { 1.5 }
+
+// ── State ────────────────────────────────────────────────────────────────
+
+let rig = #{
+    // The point followed, and where the camera looks, damped toward it.
+    target_x: 0.0, target_z: 48.0,
+    focus_x: 0.0, focus_z: 48.0,
+    zoom: street_zoom(), zoom_to: street_zoom(),
+    // Radians round the point. 0 puts the camera south, looking north.
+    yaw: 0.0, yaw_to: 0.0,
+    // Cursor x last frame while the right button is held.
+    drag_x: (),
+    // A --view shot: #{ pos, at } held until camera input, then `release`
+    // runs 0 -> 1 as it eases into the rig.
+    shot: (), release: 1.0,
+    started: false,
+};
+
+// ── Per frame ────────────────────────────────────────────────────────────
+
+fn on_update() {
+    // A hitch mustn't fling the camera across the city.
+    let dt = delta_time().min(0.1);
+    if !rig.started {
+        rig.started = true;
+        rig.start_view(cap_view());
+    }
+
+    let moved = rig.steer(dt);
+    if moved && rig.shot != () && rig.release >= 1.0 {
+        rig.take_over_from_shot();
+    }
+
+    // Damping: exponential, so it's the same at any frame rate.
+    let f = 1.0 - (-follow_k() * dt).exp();
+    rig.focus_x += (rig.target_x - rig.focus_x) * f;
+    rig.focus_z += (rig.target_z - rig.focus_z) * f;
+    rig.zoom += (rig.zoom_to - rig.zoom) * (1.0 - (-zoom_k() * dt).exp());
+    rig.yaw += (rig.yaw_to - rig.yaw) * (1.0 - (-yaw_k() * dt).exp());
+
+    let pose = rig_pose(rig.focus_x, rig.focus_z, rig.zoom, rig.yaw);
+    if rig.shot != () {
+        // Held, or easing out of it.
+        let s = rig.shot;
+        if rig.release < 1.0 {
+            rig.release = (rig.release + dt / release_time()).min(1.0);
+            let t = smooth(rig.release);
+            pose = #{
+                px: lerp(s.pos[0], pose.px, t), py: lerp(s.pos[1], pose.py, t),
+                pz: lerp(s.pos[2], pose.pz, t),
+                tx: lerp(s.at[0], pose.tx, t), ty: lerp(s.at[1], pose.ty, t),
+                tz: lerp(s.at[2], pose.tz, t),
+            };
+            if rig.release >= 1.0 { rig.shot = (); }
+        } else {
+            pose = #{ px: s.pos[0], py: s.pos[1], pz: s.pos[2],
+                      tx: s.at[0], ty: s.at[1], tz: s.at[2] };
+        }
+    }
+    set_camera_position(pose.px, pose.py, pose.pz);
+    set_camera_target(pose.tx, pose.ty, pose.tz);
+}
+
+// Read this frame's camera input into the rig (`this`). Returns whether
+// there was any, which is what lets go of a fixed shot.
+fn steer(dt) {
+    let any = false;
+
+    // Move the point, relative to the way the camera faces. Faster the
+    // further out the camera is, so a screen's width takes the same time.
+    let fwd = action_axis("move_forward", "move_backward");
+    let side = action_axis("move_right", "move_left");
+    if fwd != 0.0 || side != 0.0 {
+        any = true;
+        let speed = (0.6 * rig_distance(this.zoom)).max(8.0) * dt;
+        let len = (fwd * fwd + side * side).sqrt();
+        let sy = this.yaw.sin();
+        let cy = this.yaw.cos();
+        // Forward is from the camera to the point: (-sin, -cos) in x, z.
+        // Right is (cos, -sin).
+        this.target_x += (-sy * fwd + cy * side) / len * speed;
+        this.target_z += (-cy * fwd - sy * side) / len * speed;
+        let r = (this.target_x * this.target_x + this.target_z * this.target_z).sqrt();
+        if r > world_radius() {
+            this.target_x *= world_radius() / r;
+            this.target_z *= world_radius() / r;
+        }
+    }
+
+    // Zoom: the wheel (up is in) and R/F.
+    let notches = cap_take_wheel();
+    let keys = action_axis("zoom_out", "zoom_in");
+    if notches != 0.0 || keys != 0.0 {
+        any = true;
+        this.zoom_to = (this.zoom_to - notches * wheel_step() + keys * key_zoom_rate() * dt)
+            .max(0.0).min(1.0);
+    }
+
+    // Orbit: Q turns the view left, E right, and so does dragging right.
+    let turn = action_axis("orbit_left", "orbit_right");
+    if turn != 0.0 {
+        any = true;
+        this.yaw_to += turn * orbit_rate() * dt;
+    }
+    if is_mouse_pressed(1) {
+        let x = mouse_x();
+        if this.drag_x != () && x != this.drag_x {
+            any = true;
+            this.yaw_to -= (x - this.drag_x) * drag_rate();
+        }
+        this.drag_x = x;
+    } else {
+        this.drag_x = ();
+    }
+
+    // Home: back to the start, at street zoom, north up. The yaw unwinds
+    // by the short way, never a full turn.
+    if is_action_just_pressed("home") {
+        any = true;
+        let home = follow_home();
+        this.target_x = home[0];
+        this.target_z = home[1];
+        this.zoom_to = street_zoom();
+        this.yaw_to = this.yaw - wrap_angle(this.yaw);
+    }
+    any
+}
+
+// Where H brings the point back to. P4.2: the avatar.
+fn follow_home() { [0.0, 48.0] }
+
+// +1 while `plus` is held, -1 while `minus` is, 0 for both or neither.
+fn action_axis(plus, minus) {
+    let v = 0.0;
+    if is_action_pressed(plus) { v += 1.0; }
+    if is_action_pressed(minus) { v -= 1.0; }
+    v
+}
+
+// Frame `view` (from --view) at start: a rig framing or a fixed shot.
+fn start_view(view) {
+    let at = (); // the rig's focus as [x, z]
+    if view == "map" {
+        this.zoom = 1.0;
+    } else if view == "district" {
+        this.zoom = district_zoom();
+        at = [0.0, 30.0];
+    } else if view == "street" || view == "" {
+        at = [0.0, 48.0];
+    } else {
+        this.shot = view_shot(view);
+        this.release = 1.0;
+    }
+    if at != () {
+        this.target_x = at[0];
+        this.target_z = at[1];
+    }
+    this.zoom_to = this.zoom;
+    this.focus_x = this.target_x;
+    this.focus_z = this.target_z;
+}
+
+// The shot hands over to the rig, at street zoom, keeping the camera
+// where it stood: the point followed is just ahead of it, the way it
+// faced. Then the camera eases across from the shot.
+fn take_over_from_shot() {
+    let s = this.shot;
+    let dx = s.at[0] - s.pos[0];
+    let dz = s.at[2] - s.pos[2];
+    let len = (dx * dx + dz * dz).sqrt();
+    if len < 0.001 {
+        // Straight down: north up.
+        dx = 0.0;
+        dz = -1.0;
+        len = 1.0;
+    }
+    let ahead = rig_distance(street_zoom()) * street_pitch().to_radians().cos();
+    this.target_x = s.pos[0] + dx / len * ahead;
+    this.target_z = s.pos[2] + dz / len * ahead;
+    this.focus_x = this.target_x;
+    this.focus_z = this.target_z;
+    this.yaw = atan(-dx, -dz);
+    this.yaw_to = this.yaw;
+    this.zoom = street_zoom();
+    this.zoom_to = street_zoom();
+    this.release = 0.0;
+}
+
+fn view_shot(view) {
+    if view == "bridge" {
+        // On the quay by the inner canal's south crossing (server angle 90),
+        // looking along the water to the gap.
+        #{ pos: [7.0, 3.4, 65.5], at: [-3.0, 0.0, 60.0] }
+    } else if view == "suburb" {
+        // Low over the southern suburbs, where the streets curve and branch
+        // into cul-de-sacs.
+        #{ pos: [-35.0, 45.0, 245.0], at: [-35.0, 0.0, 200.0] }
+    } else if view == "urban" {
+        // Close over the urban lots west of the south arterial, looking
+        // north-east across the arterial at their curbs.
+        #{ pos: [-14.0, 9.0, 142.0], at: [4.0, 0.0, 124.0] }
+    } else if view == "capitol" {
+        // On the trade district's quay south of the moat, looking up past
+        // the gatehouse at the keep and its crown.
+        #{ pos: [9.0, 3.0, 52.0], at: [0.0, 32.0, 0.0] }
+    } else if view == "crown" {
+        // Level with the crown from the south-west, for its light.
+        #{ pos: [-14.0, 64.0, 22.0], at: [0.0, 66.0, 0.0] }
+    } else if view == "from-urban" {
+        // The tower on the horizon from a street-height camera in each
+        // outer zone, each from its own side of the city.
+        #{ pos: [-92.0, 10.0, 92.0], at: [0.0, 30.0, 0.0] }
+    } else if view == "from-suburban" {
+        #{ pos: [141.0, 16.0, 141.0], at: [0.0, 30.0, 0.0] }
+    } else if view == "from-rural" {
+        #{ pos: [145.0, 22.0, -251.0], at: [0.0, 30.0, 0.0] }
+    } else {
+        #{ pos: [-348.0, 26.0, -127.0], at: [0.0, 30.0, 0.0] }
+    }
+}
+
+// The free point, marked in gold: gold means you. A dot and a ring on the
+// screen, a constant size at every zoom. P4.2's avatar replaces it.
+fn on_draw_ui() {
+    if rig.shot != () && rig.release >= 1.0 { return; }
+    let p = world_to_screen(rig.target_x, cap_ground_y(), rig.target_z);
+    if !p.visible { return; }
+    let breathe = 1.0 + 0.08 * (total_time() * 2.0).sin();
+    draw_circle_outline(p.x, p.y, 9.0 * breathe, 0.788, 0.635, 0.153, 0.85, 2.0);
+    draw_circle(p.x, p.y, 3.0, 0.788, 0.635, 0.153, 1.0);
+}
+
+// ── The rig's geometry (pure) ────────────────────────────────────────────
+
+// The camera for a focus point (fx, fz) on the ground, a zoom and a yaw:
+// #{ px, py, pz } where it stands and #{ tx, ty, tz } what it looks at.
+fn rig_pose(fx, fz, zoom, yaw) {
+    let g = cap_ground_y();
+    // Toward the map, look at the Capitol, north up.
+    let c = smooth((zoom - centre_from()) / (1.0 - centre_from()));
+    let lx = fx * (1.0 - c);
+    let lz = fz * (1.0 - c);
+    let n = smooth((zoom - north_from()) / (1.0 - north_from()));
+    let heading = yaw - wrap_angle(yaw) * n;
+
+    let d = rig_distance(zoom);
+    let p = rig_pitch(zoom).to_radians();
+    let across = d * p.cos();
+    let px = lx + across * heading.sin();
+    let pz = lz + across * heading.cos();
+    let py = g + d * p.sin();
+
+    // Stay out of the keep: slide out round it.
+    let r = (px * px + pz * pz).sqrt();
+    if r < keep_radius() && py < g + keep_top() {
+        let u = if r > 0.001 { [px / r, pz / r] } else { [heading.sin(), heading.cos()] };
+        px = u[0] * keep_radius();
+        pz = u[1] * keep_radius();
+        r = keep_radius();
+    }
+    // Rise over the curtain wall, and never touch the land.
+    py = py.max(g + rig_floor(r));
+    #{ px: px, py: py, pz: pz, tx: lx, ty: g, tz: lz }
+}
+
+// Distance from the focus (m) at a zoom.
+fn rig_distance(zoom) {
+    near_distance() * (far_distance() / near_distance()) ** zoom
+}
+
+// Tilt in degrees below level at a zoom: up from closest to street, held
+// there, then easing to straight down. Smooth at the join.
+fn rig_pitch(zoom) {
+    let zs = street_zoom();
+    if zoom <= zs {
+        lerp(closest_pitch(), street_pitch(), smooth(zoom / zs))
+    } else {
+        lerp(street_pitch(), map_pitch(), smooth((zoom - zs) / (1.0 - zs)))
+    }
+}
+
+// The lowest the camera may be above the land at horizontal radius r: over
+// the bailey it clears the wall, eased out past the moat so crossing it is
+// a rise, not a step.
+fn rig_floor(r) {
+    let inside = smooth((wall_outer() - r) / 2.0);
+    ground_clear() + (wall_clear() - ground_clear()) * inside
+}
+
+fn smooth(t) {
+    let t = t.max(0.0).min(1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn lerp(a, b, t) { a + (b - a) * t }
+
+// An angle brought into (-PI, PI].
+fn wrap_angle(a) {
+    let tau = 2.0 * PI();
+    let w = (a + PI()) % tau;
+    if w < 0.0 { w += tau; }
+    w - PI()
+}

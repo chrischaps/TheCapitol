@@ -3,7 +3,8 @@
 //! (fetched and cached, or read from a file offline), the world built from
 //! it (`world`, so far the ground, the canals, whose water is the scene's
 //! ocean, the roads, the bridges, the plots and the Capitol tower), the
-//! fog as the camera climbs (`atmosphere`) and the spike's markers.
+//! fog and the light as the camera climbs (`atmosphere`), the wheel for
+//! the camera rig, and the spike's markers.
 
 use crate::atmosphere::Atmosphere;
 use crate::script_api::{self, Shared};
@@ -11,6 +12,10 @@ use crate::terrain::TerrainSource;
 use crate::world::plots::Lot;
 use crate::{spike_world, ui, world};
 use flint_player::{ExtensionCtx, PlayerExtension};
+use winit::event::{MouseScrollDelta, WindowEvent};
+
+/// Pixels of a touchpad's smooth scroll that make one wheel notch.
+const PIXELS_PER_NOTCH: f32 = 50.0;
 
 pub struct CapitolExtension {
     shared: Shared,
@@ -48,7 +53,8 @@ impl PlayerExtension for CapitolExtension {
         let Some(gpu) = ctx.gpu.as_mut() else {
             return;
         };
-        self.atmosphere.update(gpu.renderer, ctx.camera.position.y);
+        self.atmosphere
+            .update(gpu.renderer, ctx.world, ctx.camera.position.y);
         // How much the sectors cull: with RUST_LOG=capitol=debug, the last
         // frame's draws every 2 s. A workaround: captures can't open F2's
         // overlay until Flint lets them (H9, issue #65).
@@ -82,6 +88,22 @@ impl PlayerExtension for CapitolExtension {
             world::plots::upload(gpu, &terrain.terrain_plots, &terrain.roads, rings);
         self.lots = lots;
         attach_each(ctx, roads.iter().chain(&plots));
+    }
+
+    /// Collect the wheel for the camera rig (`cap_take_wheel`), because
+    /// Flint doesn't feed it to actions. A workaround: issue #67. Never
+    /// consumed; egui has already kept any wheel over its windows.
+    fn on_window_event(&mut self, event: &WindowEvent) -> bool {
+        if let WindowEvent::MouseWheel { delta, .. } = event {
+            let notches = match delta {
+                MouseScrollDelta::LineDelta(_, y) => *y,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32 / PIXELS_PER_NOTCH,
+            };
+            if let Ok(mut wheel) = self.shared.wheel.lock() {
+                *wheel += notches;
+            }
+        }
+        false
     }
 
     fn ui(&mut self, ctx: &egui::Context) {
