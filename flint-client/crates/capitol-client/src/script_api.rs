@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 pub struct Shared {
     /// The inscription over the Capitol (`--note`).
     pub note: Arc<Mutex<String>>,
-    /// The camera view the script frames (`--view`): street, district or map.
+    /// The camera view the script frames (`--view`).
     pub view: Arc<Mutex<String>>,
 }
 
@@ -29,6 +29,9 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     // `cap_ground_y() -> float`: the land's height in metres, for picking
     // and for drawing on the ground. The sea is at 0.
     engine.register_fn("cap_ground_y", || crate::coords::layer::GROUND as f64);
+    // `cap_crown_y() -> float`: just above the tip of the Capitol's needle,
+    // in metres, where the inscription hangs.
+    engine.register_fn("cap_crown_y", || crate::world::tower::CROWN_Y as f64);
 }
 
 #[cfg(test)]

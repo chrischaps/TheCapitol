@@ -2,7 +2,8 @@
 //! `PlayerExtension`. Today that's the script API, the game egui, the terrain
 //! (fetched and cached, or read from a file offline), the world built from
 //! it (`world`, so far the ground, the canals, whose water is the scene's
-//! ocean, the roads, the bridges and the plots) and the spike's markers.
+//! ocean, the roads, the bridges, the plots and the Capitol tower) and the
+//! spike's markers.
 
 use crate::script_api::{self, Shared};
 use crate::terrain::TerrainSource;
@@ -70,6 +71,7 @@ impl PlayerExtension for CapitolExtension {
         world::ground::upload(gpu, terrain.world_size, &world::water::holes(rings));
         world::water::upload(gpu, rings);
         world::bridges::upload(gpu, rings);
+        world::tower::upload(gpu, rings);
         let roads = world::roads::upload(gpu, &terrain.roads, rings);
         let (plots, lots) =
             world::plots::upload(gpu, &terrain.terrain_plots, &terrain.roads, rings);

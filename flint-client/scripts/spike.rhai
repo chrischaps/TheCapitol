@@ -2,7 +2,9 @@
 // east is on the right. `--view` picks the framing until the camera rig
 // (P3.9): street (a slow drift), district, map (straight down), bridge
 // (close over a canal crossing), suburb (low over curving streets) or
-// urban (close over the lots by the south arterial). The
+// urban (close over the lots by the south arterial), capitol (up at the
+// tower from beyond the moat), crown (level with its lantern) or from-urban, from-suburban, from-rural and
+// from-wilderness (the tower on the horizon from each outer zone). The
 // ground, water and roads are runtime meshes the extension builds (P1.4);
 // over them the moat and inner canal are traced
 // as hairlines, the plan the city was drawn from. The inscription comes
@@ -50,6 +52,29 @@ fn on_update() {
         // north-east across the arterial at their curbs.
         set_camera_position(-14.0, 9.0, 142.0);
         set_camera_target(4.0, 0.0, 124.0);
+    } else if view == "capitol" {
+        // On the trade district's quay south of the moat, looking up past
+        // the gatehouse at the keep and its crown (P3.7).
+        set_camera_position(9.0, 3.0, 52.0);
+        set_camera_target(0.0, 32.0, 0.0);
+    } else if view == "crown" {
+        // Level with the crown from the south-west, for its light.
+        set_camera_position(-14.0, 64.0, 22.0);
+        set_camera_target(0.0, 66.0, 0.0);
+    } else if view.starts_with("from-") {
+        // The tower on the horizon from a street-height camera in one of
+        // the four outer zones, each from its own side of the city.
+        let at = if view == "from-urban" {
+            [-92.0, 10.0, 92.0]
+        } else if view == "from-suburban" {
+            [141.0, 16.0, 141.0]
+        } else if view == "from-rural" {
+            [145.0, 22.0, -251.0]
+        } else {
+            [-348.0, 26.0, -127.0]
+        };
+        set_camera_position(at[0], at[1], at[2]);
+        set_camera_target(0.0, 30.0, 0.0);
     } else if view == "district" {
         set_camera_position(0.0, 260.0, 300.0);
         set_camera_target(0.0, 0.0, 30.0);
@@ -103,8 +128,9 @@ fn trace_ring_at(cx, cz, r, gaps, gap, red, green, blue, alpha, width, steps) {
     }
 }
 
-fn label(x, z, text, size, r, g, b) {
-    let p = world_to_screen(x, cap_ground_y() + 0.5, z);
+// Text centred on the point (x, y, z), in metres.
+fn label(x, y, z, text, size, r, g, b) {
+    let p = world_to_screen(x, y, z);
     if !p.visible { return; }
     let m = measure_text(text, size);
     let tx = p.x - m.width / 2.0;
@@ -153,7 +179,7 @@ fn on_draw_ui() {
 
     let note = cap_spike_note();
     if note != "" {
-        label(0.0, 0.0, note, 30.0, 0.788, 0.635, 0.153);
+        label(0.0, cap_crown_y(), 0.0, note, 30.0, 0.788, 0.635, 0.153);
     }
 
     let now = total_time();

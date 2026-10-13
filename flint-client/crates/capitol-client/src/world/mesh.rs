@@ -9,6 +9,10 @@ use flint_render::Vertex;
 /// Straight up, for everything that lies flat on the ground.
 pub const UP: [f32; 3] = [0.0, 1.0, 0.0];
 
+/// Straight down: the normal every glowing face is shaded with (see
+/// [`MeshBuf::glowing`]).
+pub const GLOW: [f32; 3] = [0.0, -1.0, 0.0];
+
 #[derive(Default)]
 pub struct MeshBuf {
     pub vertices: Vec<Vertex>,
@@ -77,6 +81,24 @@ impl MeshBuf {
         self.vertices.extend(other.vertices);
         self.indices
             .extend(other.indices.into_iter().map(|i| i + base));
+    }
+
+    /// This mesh as light. Flint's material has no emissive term, so a
+    /// face glows by being shaded with a normal that points straight down
+    /// ([`GLOW`]), whichever way it faces (its winding still decides that).
+    /// Every light in the scene shines from above the horizon, so such a
+    /// face takes no direct light and no specular. It takes only the
+    /// hemisphere's ground ambient, which is the same from every side.
+    /// Its colour times `palette::AMBIENT_GROUND` is the radiance it gives;
+    /// `palette::glow` picks colours that way.
+    ///
+    /// A workaround until Flint's material can emit light (H7, issue #63),
+    /// which replaces it.
+    pub fn glowing(mut self) -> Self {
+        for v in &mut self.vertices {
+            v.normal = GLOW;
+        }
+        self
     }
 
     /// A flat ring at height `y` from `r_in` to `r_out` server units,

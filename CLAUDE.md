@@ -28,6 +28,7 @@ Rules that hold across issues:
 - Engine changes go upstream to Flint as a PR on a `feature/*` branch. Chris merges Flint PRs.
 - The plan doc stays true. Update it in the same commit when a decision changes it.
 - Assume another agent may be working at the same time. Use your own worktree, stage by path, and never touch changes you didn't make.
+- **Cut a ticket for every limitation you hit.** This covers anything you work round instead of fix: an engine gap, a missing hook, a tool that can't do something, a backend quirk. Open a GitHub issue for it in the same session, labelled `flint-client` plus `engine-upstream` or `fc:backend-prereq` where they apply. Say what's missing, what the workaround costs, and what removing the workaround involves. Then link the issue from the workaround's code comment and the plan. A limitation recorded only in a closing comment or a vault note gets lost.
 
 ## Development Commands
 

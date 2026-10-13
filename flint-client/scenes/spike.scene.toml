@@ -58,6 +58,19 @@ runtime = true
 asset = "bridges"
 runtime = true
 
+# The Capitol tower (world/tower.rs): stone, glass, and gold with its light.
+[entities.capitol.model]
+asset = "capitol"
+runtime = true
+
+[entities.capitol_glass.model]
+asset = "capitol_glass"
+runtime = true
+
+[entities.capitol_gold.model]
+asset = "capitol_gold"
+runtime = true
+
 # The canals' water: Flint's Gerstner ocean, the one Float drifts on, at
 # canal scale. It's an endless sheet at y = 0 that follows the camera; the
 # land stands 0.6 m above it and the ground is cut away over each ring, so

@@ -43,6 +43,9 @@ pub mod layer {
     /// pavement. Lots are clipped clear of the roads, so they never
     /// overlap; each has a curb a few centimetres higher round its edge.
     pub const PLOT: f32 = GROUND + 0.12;
+    /// The paving inside the moat (P3.7), level with the arterials, so the
+    /// moat bridge's ramp lands on it 2 cm up, as it does on a road.
+    pub const BAILEY: f32 = ROAD + 0.06;
     /// The top of the stone kerb that rims every canal.
     pub const BANK: f32 = GROUND + 0.3;
     /// The crown of a bridge's deck (P3.5), high enough over the kerbs
@@ -141,6 +144,7 @@ mod tests {
         assert!(layer::GROUND < roads[0]);
         assert!(roads.windows(2).all(|w| w[0] < w[1]));
         assert!(roads[3] + 0.02 <= layer::PLOT);
+        assert_eq!(layer::BAILEY, roads[3]);
         const { assert!(layer::PLOT < layer::BANK && layer::BANK < layer::DECK) };
         const { assert!(layer::CHANNEL_BED < layer::SEA && layer::SEA < layer::GROUND) };
         const { assert!(layer::CHANNEL_BED < layer::ARCH_SPRING && layer::ARCH_SPRING < layer::SEA) };

@@ -43,9 +43,14 @@ struct Args {
     /// Where the camera looks from, until the camera rig (P3.9) lands:
     /// street (the spike's drift), district, map (straight down), bridge
     /// (close, over the inner canal's south crossing), suburb (low over
-    /// the southern suburbs' curving streets) or urban (close over the
-    /// urban lots by the south arterial)
-    #[arg(long, default_value = "street", value_parser = ["street", "district", "map", "bridge", "suburb", "urban"])]
+    /// the southern suburbs' curving streets), urban (close over the
+    /// urban lots by the south arterial), capitol (up at the tower from
+    /// beyond the moat), crown (level with its lantern), or from-urban, from-suburban, from-rural and
+    /// from-wilderness (the tower on the horizon from each outer zone)
+    #[arg(long, default_value = "street", value_parser = [
+        "street", "district", "map", "bridge", "suburb", "urban", "capitol", "crown",
+        "from-urban", "from-suburban", "from-rural", "from-wilderness",
+    ])]
     view: String,
 
     #[arg(long, default_value_t = 1280)]

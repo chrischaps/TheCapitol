@@ -69,6 +69,7 @@ The local stack is `docker-compose up -d`, then `cargo run` from `backend/`. It'
 If you made a decision the plan didn't, or found a size, dependency or approach was wrong:
 - update `the-capitol-flint-client.md` in the same commit
 - if later issues are affected, comment on them (`gh issue comment <m> --body ...`) rather than silently diverging
+- if you hit a limitation and worked round it (engine, tooling, backend), cut an issue for it now (see "Cut a ticket for every limitation" in the root `CLAUDE.md`), link it from the workaround, and name it in your closing comment
 
 ## 6. Commit, push, close
 

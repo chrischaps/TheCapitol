@@ -172,7 +172,9 @@ These go to Flint on a `feature/*` branch and PR, following the subtree conventi
 | H5 | **Screen to ground.** | `screen_to_ground(x, y, plane_y) -> [x, z]` in Rhai, plus the Rust equivalent on `Camera`, built on `unproject_ray` in perspective and orthographic modes. | S |
 | H6 | *(Polish, optional)* **Water on any mesh, plus mesh instancing.** | Reuse the ocean shader's waves and foam ramp on an arbitrary mesh, masked by distance to the edge so canals get foam at the banks. Add an instanced mesh draw path for repeated props such as houses, trees and stations. | L |
 
-H1–H5 are needed for the vertical slice. H6 belongs to P8.
+| H7 [#63](https://github.com/chrischaps/TheCapitol/issues/63) | **Emissive materials.** Found in P3.7. | `ImportedMaterial::emissive` (linear HDR, default zero; glTF `emissiveFactor`), added after lighting and before tonemapping so bloom picks it up, plus a per-vertex form for vertex-coloured runtime meshes. Replaces P3.7's down-normal workaround (`MeshBuf::glowing`). | S |
+
+H1–H5 are needed for the vertical slice. H6 belongs to P8. H7 isn't blocking, because P3.7 works round it, but it should land before the light gets tuned (P3.8, P8).
 
 **What the P0.4 spike found** (branch `spike/p0.4`; its subtree patches are marked `SPIKE(P0.4)`):
 - **Embedding.** `PlayerApp` already implements `ApplicationHandler` publicly. A wrapper that forwards all nine callbacks works, and the capture flags (`--screenshot`, `--exit-after`) work through it. `PlayerApp::new` plus the public fields `main.rs` sets are enough to boot a scene. The game must pass `engine/schemas` itself.
@@ -355,7 +357,7 @@ world.y =  height layer
 
 Flat geometry is layered in Y to avoid z-fighting. Since P3.3 the land stands above the sea: the sea (the engine ocean) at 0, the canal beds at -1.6, the ground at +0.6, roads +0.04 above it (by type: trail < suburban < grid < arterial, up to +0.10), plots at +0.12 above it like a pavement, with their curbs a few centimetres higher, and the canals' stone kerbs at +0.3 above it. *(P3.6 moved plots from below the roads to above them. Lots are clipped clear of every road, so the two never overlap.)* The ground is cut away over each water ring, so the ocean shows only in the channels. Roads must stop at the kerb rather than run over the channel, and bridge decks go above the kerb.
 
-These live in `coords::layer` (P3.2): `GROUND`, `PLOT` (raised over the roads in P3.6), and `road(RoadType)`, which steps 2 cm per rank from `ROAD` (P3.4 widened it from 5 mm, finer than the map view resolves), so arterials sit 10 cm above the land. P3.3 added `SEA`, `CHANNEL_BED` and `BANK`, and lifted `GROUND` to 0.6 (the rest follow it). Scripts read the land height as `cap_ground_y()`. P3.5 added `DECK` (a bridge's crown, 0.4 m over the kerb) and `ARCH_SPRING` (0.2 m under the sea, where its arch leaves the channel walls). **Depth precision caps how thin the layers can be.** The depth buffer is standard (not reversed) Z, so at 1 km the smallest step it can resolve is about `distance² / (near × 2²⁴)`: roughly 0.6 m with the default `near = 0.1`, and 6 cm with `near = 1`. The scene sets `near = 1.0` and `far = 4000.0`. At map zoom, centimetre layers can still z-fight, so P3.9's rig should push `near` out as it zooms (10 m at the top of the zoom gives a few millimetres). Otherwise the map view should lean on draw order.
+These live in `coords::layer` (P3.2): `GROUND`, `PLOT` (raised over the roads in P3.6), and `road(RoadType)`, which steps 2 cm per rank from `ROAD` (P3.4 widened it from 5 mm, finer than the map view resolves), so arterials sit 10 cm above the land. P3.3 added `SEA`, `CHANNEL_BED` and `BANK`, and lifted `GROUND` to 0.6 (the rest follow it). Scripts read the land height as `cap_ground_y()`. P3.5 added `DECK` (a bridge's crown, 0.4 m over the kerb) and `ARCH_SPRING` (0.2 m under the sea, where its arch leaves the channel walls). P3.7 added `BAILEY`, the paving inside the moat, level with the arterials so the moat bridge's ramp lands on it 2 cm up. **Depth precision caps how thin the layers can be.** The depth buffer is standard (not reversed) Z, so at 1 km the smallest step it can resolve is about `distance² / (near × 2²⁴)`: roughly 0.6 m with the default `near = 0.1`, and 6 cm with `near = 1`. The scene sets `near = 1.0` and `far = 4000.0`. At map zoom, centimetre layers can still z-fight, so P3.9's rig should push `near` out as it zooms (10 m at the top of the zoom gives a few millimetres). Otherwise the map view should lean on draw order.
 
 ### 4.7 Visual language carried over
 
@@ -483,6 +485,24 @@ Sizes: **S** is about 1 focused session, **M** 2–3, **L** 4 or more. Each phas
 | P3.8 [#26](https://github.com/chrischaps/TheCapitol/issues/26) | **Atmosphere.** Sky, distance fog, a warm key light, SSAO and bloom. Dusk as the default mood. Tuned with the `flint-render` skill's camera presets. | S | P3.2–P3.7 |
 | P3.9 [#27](https://github.com/chrischaps/TheCapitol/issues/27) | **Camera rig** (`camera.rhai`). Follows the player with damping. Pitch is about 50° at street level, eased to 90° at map zoom. Wheel zoom from street level to the whole world; Q/E or right-drag to orbit; a home key to recentre. Map mode flattens lighting into the 2D palette. | M | P1.5 |
 | P3.10 [#28](https://github.com/chrischaps/TheCapitol/issues/28) | Terrain hot-swap on `terrain_updated`: rebuild only the affected meshes | S | P3.2–P3.6 |
+
+**How P3.7 built it:**
+- **`world/tower.rs`** builds the Capitol from the terrain's innermost ring (the moat). "A modern structure arranged like a medieval castle" is read as castle massing in contemporary materials:
+  - **Curtain wall.** Pale concrete, standing 10 cm into the moat's inner kerb, so it rises straight from the water's edge. It has a parapet, square merlons and a line of warm light under the parapet. There's a round tower every 45° from the front, each with a gold collar.
+  - **Gatehouse.** One over each moat bridge (one in the fixture, at 90°, south). Its passage is the deck's width plus 45 cm either side and 4.3 m high. The ceiling glows down into it, with a gold line of light over the opening.
+  - **Bailey.** Paving at `layer::BAILEY`, a gold ring of light set into it at 11.7 m, and a path from each gate to the keep's lit door.
+  - **Keep.** It faces the first gate. A chamfered podium, four glass corner turrets (24 m) capped in gold, and a glass tower in three setbacks (36, 50 and 60 m) under concrete slabs edged in gold light. A stone pier at every corner stands 1.2 m above each terrace, like a merlon. About three windows in five are lit, each a slightly different brightness and warmth, picked by a hash so the result is the same every build.
+  - **Crown.** A 4 m lantern of gold light, its roof lit too, so the centre of the map view is a point of gold. Round it are gold blades, tall and short in turn, with taller posts at the corners, and a gold needle with a point of light at its tip. The top is about 84 m above the land.
+- **Draw cost: 3 draws, 10,364 vertices, 5,366 triangles.** The meshes are `capitol` (stone, roughness 0.8), `capitol_glass` (roughness 0.18) and `capitol_gold` (metallic 0.85, roughness 0.35, with all the light merged in). That's about 2% of the triangles in a from-urban frame. Captures stay at vsync (55–60 fps). A test caps it at 20k triangles.
+- **Light without an emissive term (a workaround, H7 [#63](https://github.com/chrischaps/TheCapitol/issues/63)).** Flint's material can't emit. A glowing face is built facing the right way, then shaded with a normal pointing straight down (`MeshBuf::glowing`). Every light above the horizon misses it, so only the hemisphere's ground ambient lights it, the same from every side. `palette::glow(colour, radiance)` divides by `palette::AMBIENT_GROUND`, which a test holds equal to the scene's `ambient_ground`. **P3.8 must keep them in step**, and must leave `diffuse_wrap` at 0 until H7 lands. Radiances run from about 0.3–0.75 for the windows to 3.5 for the lantern and 8 for the needle's tip.
+- **Tests:**
+  - nothing reaches the moat's water
+  - each gate is clear over the deck, from the paving to the passage ceiling
+  - every face faces its normal
+  - the needle's light is the top, over 80 m up
+  - with no moat, the wall closes and all eight towers stand
+  - the triangle budget
+- **Views.** `--view capitol` looks up at the tower from the quay south of the moat, and `--view crown` is level with the lantern. `--view from-urban|from-suburban|from-rural|from-wilderness` puts the tower on the horizon from each outer zone, each from a different side. The inscription (`--note`) now hangs over the needle at `cap_crown_y()`.
 
 **How P3.6 built it:**
 - **`world/plots.rs`** draws every `/terrain` lot as a slab at `layer::PLOT` (12 cm above the land, 2 cm over the arterials), with a curb lip round it and walls down to the ground. Lots by a road show a dark gutter.
