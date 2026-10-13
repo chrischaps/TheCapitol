@@ -1,7 +1,7 @@
 # The P0.4 spike, carried on master against the real hooks. Dusk sky,
 # lights and one script; the HUD reads the inscription through the native
 # Rhai function the CapitolExtension registers. The zone-tinted ground,
-# the canals' stone and the markers are runtime meshes the extension
+# the canals' stone, the bridges and the markers are runtime meshes the extension
 # uploads (world/ and spike_world.rs), named below with `runtime = true` so the model loader
 # doesn't look for files. Superseded by scenes/capitol.scene.toml in P3.
 
@@ -52,6 +52,10 @@ runtime = true
 
 [entities.canals.model]
 asset = "canals"
+runtime = true
+
+[entities.bridges.model]
+asset = "bridges"
 runtime = true
 
 # The canals' water: Flint's Gerstner ocean, the one Float drifts on, at

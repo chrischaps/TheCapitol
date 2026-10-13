@@ -75,7 +75,7 @@ fn smoothstep(lo: f64, hi: f64, x: f64) -> f32 {
 
 /// The ground's colour at `r` server units from the centre, before
 /// mottling, with the world's edge at `edge`.
-pub fn shade(r: f64, edge: f64) -> [f32; 4] {
+fn shade(r: f64, edge: f64) -> [f32; 4] {
     let zones = Zone::ALL;
     let i = zones
         .iter()
@@ -130,7 +130,7 @@ fn value_noise(x: f32, z: f32) -> f32 {
 }
 
 /// The mottling at world (X, Z): a brightness factor within ±`MOTTLE`.
-pub fn mottle([x, z]: [f32; 2]) -> f32 {
+fn mottle([x, z]: [f32; 2]) -> f32 {
     let broad = value_noise(x / MOTTLE_SCALE, z / MOTTLE_SCALE);
     let fine = value_noise(
         x / (MOTTLE_SCALE * 0.37) + 17.0,

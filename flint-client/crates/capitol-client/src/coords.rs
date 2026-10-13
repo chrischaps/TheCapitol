@@ -19,7 +19,8 @@ pub const S: f32 = 0.1;
 
 /// Heights of the flat layers in metres (plan §4.6). Everything flat lies
 /// a hair above the layer under it so nothing z-fights. Bridge decks (P3.5)
-/// find their place in this list when they land, above `BANK`.
+/// rise from the roads over the kerbs to `DECK`, on arches that spring from
+/// `ARCH_SPRING`, under the waves.
 ///
 /// The land stands above the sea. The water is Flint's Gerstner ocean
 /// (the one Float drifts on), an endless sheet at y = 0 that follows the
@@ -42,6 +43,12 @@ pub mod layer {
     pub const ROAD: f32 = GROUND + 0.04;
     /// The top of the stone kerb that rims every canal.
     pub const BANK: f32 = GROUND + 0.3;
+    /// The crown of a bridge's deck (P3.5), high enough over the kerbs
+    /// that its ramps clear them.
+    pub const DECK: f32 = BANK + 0.4;
+    /// Where a bridge's arch springs from the channel walls, just under the
+    /// waves so no trough shows a gap.
+    pub const ARCH_SPRING: f32 = SEA - 0.2;
 
     /// A road's height: trail < suburban < grid < arterial, so where two
     /// cross, the greater road is drawn on top. The ranks are 2 cm apart,
@@ -120,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn layers_stack_sea_ground_plots_roads_by_rank_then_bank() {
+    fn layers_stack_sea_ground_plots_roads_by_rank_then_bank_then_deck() {
         use capitol_protocol::terrain::RoadType;
         let roads = [
             RoadType::Trail,
@@ -131,8 +138,9 @@ mod tests {
         .map(layer::road);
         assert!(layer::GROUND < layer::PLOT && layer::PLOT < roads[0]);
         assert!(roads.windows(2).all(|w| w[0] < w[1]));
-        assert!(roads[3] < layer::BANK);
+        assert!(roads[3] < layer::BANK && layer::BANK < layer::DECK);
         const { assert!(layer::CHANNEL_BED < layer::SEA && layer::SEA < layer::GROUND) };
+        const { assert!(layer::CHANNEL_BED < layer::ARCH_SPRING && layer::ARCH_SPRING < layer::SEA) };
     }
 
     #[test]

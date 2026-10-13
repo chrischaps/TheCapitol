@@ -8,6 +8,7 @@ use flint_render::srgb_to_linear;
 
 pub const BACKGROUND: u32 = 0x0a0a0f;
 pub const DIM_TEXT: u32 = 0x808080;
+pub const GOLD: u32 = 0xc9a227;
 pub const GOLD_DIM: u32 = 0x8a7019;
 /// Water, `rgba(30,100,160,0.7)` in the 2D clients. In 3D the water is
 /// the scene's ocean, whose colours are set in the scene file; this tints
