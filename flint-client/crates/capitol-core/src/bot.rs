@@ -425,7 +425,8 @@ impl Bot {
 
     /// Finds a node that yields `item_type`. If none is known, walks toward
     /// the Capitol, asking `/world/nearby` every second, until one turns up.
-    /// Nodes start some way from the spawn until B1 (#29) moves them.
+    /// Since B1 (#29) a fresh player sees grass from the spawn, so the walk is
+    /// for a player who has wandered off, or whose nearby nodes are all taken.
     pub fn scout(&mut self, item_type: &str) -> Result<ResourceNodeInfo, BotError> {
         if let Some(node) = self.nearest_node(item_type) {
             return Ok(node);

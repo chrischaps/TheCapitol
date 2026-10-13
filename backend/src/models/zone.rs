@@ -37,6 +37,28 @@ mod tests {
     }
 
     #[test]
+    fn test_world_scale_migration_matches_zone_radii() {
+        let migration = include_str!("../../migrations/20260212_001_world_scale.sql");
+        let mut checked = 0;
+        for line in migration.lines().filter(|l| l.starts_with("UPDATE zones SET")) {
+            let number = |key: &str| -> f64 {
+                let rest = &line[line.find(key).unwrap() + key.len()..];
+                rest.trim_start_matches([' ', '='])
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            };
+            let id = line.rsplit('\'').nth(1).unwrap();
+            let zone = Zone::from_str(id).unwrap();
+            assert_eq!((number("inner_radius"), number("outer_radius")), zone.radii(), "{id}");
+            checked += 1;
+        }
+        assert_eq!(checked, Zone::ALL.len());
+    }
+
+    #[test]
     fn test_zone_has_plots() {
         assert!(!Zone::Capitol.has_plots());
         assert!(!Zone::TradeDistrict.has_plots());

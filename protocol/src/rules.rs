@@ -20,6 +20,16 @@ pub const CENTER_X: f64 = 4000.0;
 /// World centre Y.
 pub const CENTER_Y: f64 = 4000.0;
 
+/// Where new players arrive: on the south arterial, just inside the rural zone's
+/// outer edge. The road runs straight north to the moat's one bridge, so the
+/// first thing a player sees is the way in, with the tower at the end of it.
+pub const SPAWN_X: f64 = CENTER_X;
+/// Spawn Y (3350 south of the centre).
+pub const SPAWN_Y: f64 = CENTER_Y + 3350.0;
+/// New players land up to this far either side of `SPAWN_X`, so a crowd of
+/// arrivals doesn't stack on one point. It keeps them on the 60-wide arterial.
+pub const SPAWN_SCATTER: f64 = 20.0;
+
 /// Length of one server tick in milliseconds.
 pub const TICK_MS: u64 = 100;
 /// Length of one server tick in seconds.

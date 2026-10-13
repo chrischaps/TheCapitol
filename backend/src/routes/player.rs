@@ -8,6 +8,7 @@ use uuid::Uuid;
 use capitol_protocol::rest::{
     CurrencyResponse, Destination, InventoryResponse, MoveRequest, MoveResponse,
 };
+use capitol_protocol::rules::WORLD_SIZE;
 
 use crate::engine::Command;
 use crate::error::AppError;
@@ -44,7 +45,7 @@ pub async fn move_player(
     Json(req): Json<MoveRequest>,
 ) -> Result<Json<MoveResponse>, AppError> {
     // Validate coordinates
-    if req.x < 0.0 || req.x > 1000.0 || req.y < 0.0 || req.y > 1000.0 {
+    if !(0.0..=WORLD_SIZE).contains(&req.x) || !(0.0..=WORLD_SIZE).contains(&req.y) {
         return Err(AppError::BadRequest("Coordinates out of bounds".into()));
     }
 

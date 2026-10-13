@@ -340,7 +340,7 @@ fn point_near_polyline(px: f64, py: f64, polyline: &[(f64, f64)], threshold: f64
 }
 
 /// Calculate distance from point to line segment
-fn point_to_segment_distance(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
+pub(crate) fn point_to_segment_distance(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
     let dx = x2 - x1;
     let dy = y2 - y1;
     let len_sq = dx * dx + dy * dy;

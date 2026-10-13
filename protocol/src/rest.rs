@@ -109,9 +109,9 @@ pub struct HealthResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct MoveRequest {
-    /// Destination X coordinate (0-1000)
+    /// Destination X coordinate (0-8000)
     pub x: f64,
-    /// Destination Y coordinate (0-1000)
+    /// Destination Y coordinate (0-8000)
     pub y: f64,
 }
 

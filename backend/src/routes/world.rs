@@ -6,7 +6,7 @@ use axum::{
 use uuid::Uuid;
 
 use capitol_protocol::rest::{ExtractRequest, ExtractResponse, NearbyResponse};
-use capitol_protocol::rules::NEARBY_NODE_RANGE;
+use capitol_protocol::rules::{NEARBY_NODE_RANGE, SPAWN_X, SPAWN_Y};
 
 use crate::engine::{Command, EXTRACTION_RANGE};
 use crate::error::AppError;
@@ -53,7 +53,7 @@ pub async fn get_nearby(
         .players
         .get(&player_id)
         .map(|p| (p.x, p.y))
-        .unwrap_or((500.0, 500.0));
+        .unwrap_or((SPAWN_X, SPAWN_Y));
 
     // Filter nodes within range
     let nodes: Vec<ResourceNodeInfo> = game

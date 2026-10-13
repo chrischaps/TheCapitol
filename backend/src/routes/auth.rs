@@ -16,6 +16,7 @@ use uuid::Uuid;
 use capitol_protocol::rest::{
     AuthResponse, LoginRequest, LogoutRequest, RegisterRequest, SuccessResponse,
 };
+use capitol_protocol::rules::{SPAWN_SCATTER, SPAWN_X, SPAWN_Y};
 
 use crate::error::AppError;
 use crate::models::AccountInfo;
@@ -85,8 +86,9 @@ pub async fn register(
     .execute(&state.db)
     .await?;
 
-    // Create player
+    // Create player at the spawn, scattered across the road so arrivals don't stack
     let player_id = Uuid::new_v4();
+    let spawn_x = SPAWN_X + (rand::random::<f64>() * 2.0 - 1.0) * SPAWN_SCATTER;
     sqlx::query(
         "INSERT INTO players (id, account_id, name, position_x, position_y, speed, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7)"
@@ -94,8 +96,8 @@ pub async fn register(
     .bind(player_id)
     .bind(account_id)
     .bind(&req.player_name)
-    .bind(500.0)
-    .bind(500.0)
+    .bind(spawn_x)
+    .bind(SPAWN_Y)
     .bind(capitol_protocol::rules::PLAYER_SPEED as f32)
     .bind(now)
     .execute(&state.db)
