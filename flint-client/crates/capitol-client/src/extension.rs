@@ -5,7 +5,7 @@
 //! built from it (`world`, so far the ground, the canals, whose water is
 //! the scene's ocean, the roads, the bridges, the plots and the Capitol
 //! tower), the players walking it (`entities`), the resource nodes they
-//! gather from (`nodes`), the crafting panel (`ui::crafting`), the fog and the light as
+//! gather from (`nodes`), the stations they build (`stations`), the crafting panel (`ui::crafting`), the fog and the light as
 //! the camera climbs (`atmosphere`), the wheel for the camera rig, and the
 //! spike's markers.
 
@@ -14,6 +14,7 @@ use crate::entities::Players;
 use crate::nodes::Nodes;
 use crate::script_api::{self, Shared, ZoneBanner};
 use crate::session::Session;
+use crate::stations::Stations;
 use crate::terrain::TerrainSource;
 use crate::ui::containers::BenchAction;
 use crate::ui::crafting::Action as CraftAction;
@@ -70,6 +71,7 @@ pub struct CapitolExtension {
     players: Players,
     overlay: ConnectionOverlay,
     nodes: Nodes,
+    stations: Stations,
     crafting: ui::crafting::CraftingPanel,
     /// Enter (the `craft` action) was pressed since `ui` last looked.
     craft_key: bool,
@@ -95,6 +97,7 @@ impl CapitolExtension {
             players: Players::default(),
             overlay: ConnectionOverlay::default(),
             nodes: Nodes::default(),
+            stations: Stations::default(),
             crafting: ui::crafting::CraftingPanel::default(),
             craft_key: false,
         }
@@ -205,6 +208,10 @@ impl PlayerExtension for CapitolExtension {
                 data.insert("z".into(), (z as f64).into());
                 ctx.fire_event(c.name, data);
             }
+            let placed = session.take_placed();
+            let me = self.shared.follow.lock().ok().and_then(|f| *f);
+            self.stations
+                .update(ctx, session.state(), me, &placed, dt, &self.shared);
         }
         self.shared
             .at_login

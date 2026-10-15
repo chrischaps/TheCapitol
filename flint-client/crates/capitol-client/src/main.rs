@@ -19,6 +19,7 @@ mod nodes;
 mod script_api;
 mod session;
 mod spike_world;
+mod stations;
 mod terrain;
 mod ui;
 mod world;

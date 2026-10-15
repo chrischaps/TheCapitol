@@ -15,6 +15,7 @@
 //!   the ask to the settled inventory.
 //! - [`poll`]: the polling scheduler. [`poll::Poller`] turns those events, and
 //!   a 5 s timer, into the REST refetches the server never pushes.
+//! - [`station`]: stations in the world: whether one is in reach.
 //! - [`signin`]: log in, or register, one event at a time.
 //! - [`auth`]: the way in for a person: the login form's states, a stored
 //!   token tried first, and the server's health while signed out.
@@ -33,6 +34,7 @@ pub mod net;
 pub mod poll;
 pub mod signin;
 pub mod state;
+pub mod station;
 pub mod terrain;
 
 /// The wire types, shared with the backend.

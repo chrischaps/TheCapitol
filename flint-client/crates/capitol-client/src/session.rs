@@ -15,6 +15,7 @@
 //! The server URL, the last email and the token are kept in
 //! `save/session.toml` ([`SessionFile`]).
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -82,6 +83,8 @@ pub struct Session {
     crafting: Crafting,
     /// What your crafts made since the extension last took them.
     crafted: Vec<Yield>,
+    /// Stations placed (`station_placed`) since the frame last took them.
+    placed: HashSet<Uuid>,
     /// Why the last craft didn't happen, and when.
     craft_refused: Option<(String, Instant)>,
 }
@@ -142,6 +145,7 @@ impl Session {
             yields: Vec::new(),
             crafting: Crafting::default(),
             crafted: Vec::new(),
+            placed: HashSet::new(),
             craft_refused: None,
         };
         session.apply(effects);
@@ -341,6 +345,12 @@ impl Session {
         std::mem::take(&mut self.crafted)
     }
 
+    /// The stations placed since this was last called, so they can drop
+    /// in rather than rise (P6.1).
+    pub fn take_placed(&mut self) -> HashSet<Uuid> {
+        std::mem::take(&mut self.placed)
+    }
+
     /// Sends a message on the socket. Dropped while not connected.
     pub fn ws(&self, message: ClientMessage) {
         self.net.ws(message);
@@ -428,6 +438,9 @@ impl Session {
                         self.yields.push((*node_id, item.clone()));
                     }
                     StateEvent::CraftingCompleted { item } => self.crafted.push(item.clone()),
+                    StateEvent::StationPlaced { station_id, .. } => {
+                        self.placed.insert(*station_id);
+                    }
                     _ => {}
                 }
             }

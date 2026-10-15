@@ -14,6 +14,7 @@ flint-client/
     capitol-core/     # net + state, no engine dependency, fast tests
     capitol-client/   # the game binary (`capitol`)
   scenes/ schemas/ scripts/ fonts/ audio/ models/ fixtures/
+  particles/          # *.particles.toml effects, loaded by name (the forge's fire, P6.1)
   assets/icons/       # item icons: <item_type>.svg, fallback.svg; style in its README (P5.2)
   play.bat            # build release and run
   renders/            # screenshots and captures (gitignored)
@@ -75,6 +76,14 @@ target/release/capitol.exe --offline fixtures/terrain.json --width 1920 --height
 **Slots (P5.3).** Every container is drawn with `ui::slots::SlotGrid::new(&container).show(ui, &mut icons)`, which returns `Option<Move>`. Send the move with `session.move_item(m)`, and show `session.move_refused(now)` when it's `Some`. Don't draw slots by hand. A drag between any two grids on screen just works (egui DnD payload). **The inventory panel (P5.4)** is `ui/inventory.rs`, bottom right, toggled with `I` (the `inventory` action, so `--input-script` can press it) or the header's Inventory chip. `--containers` shows, top right, the containers no panel has taken yet (crafting, a station's box), which is the place to try drags until those panels exist. `--ui-sample`'s grids move, merge and swap locally, so the widget can be tried offline. `cargo test -p capitol-client slots` drives drags headless. With the stack up, `capitol-bot --prefix slots` once, then `cargo test -p capitol-client a_move_reaches -- --ignored`, checks the server round trip. Captures can't show a drag or a tooltip ([#76](https://github.com/chrischaps/TheCapitol/issues/76)).
 
 **Crafting (P5.5).** The panel is `ui/crafting.rs` and its rules are `capitol_core::craft`. `Session::craft(now, recipe_id)` checks and sends; `Session::crafting()` is where the craft stands. The ring and the finish are in `scripts/input.rhai` (`cap_players()`' `craft`, and the `crafting_completed` event). C (the `crafting` action) or the header's Crafting chip toggles the panel, and Enter (`craft`) crafts, so an `--input-script` can craft: `7.0 tap Enter`. With the stack up, `cargo test -p capitol-client rope_then -- --ignored` runs Fill, rope, a blocked kit, a cancel and the kit through `Session`. It gathers its own fiber on `craft1@bots.capitol.local`. To stock any account for a capture, use `capitol-bot --prefix <p> --gather <n>`. Captures can't click, so arrange the boxes beforehand with `POST /inventory/move`, using the token in `save/session.toml`.
+
+**Stations (P6.1)** are `stations.rs` (the models, from the store) and `draw_station_ring` in `input.rhai` (from `cap_stations()`). The reach rule is `capitol_core::station`, the place for P6.2's placement checks too. The forge's fire is `particles/forge.particles.toml`: Flint loads every effect in `particles/` at start, and `stations.rs` names it in a `particle_effect` component. Placing a station needs an owned plot (B7, #42), so to see some before that, insert rows straight into the local DB beside an account:
+
+```bash
+docker exec capitol-postgres psql -U capitol -d capitol -c "insert into stations (id, station_type, owner_id, position_x, position_y) select gen_random_uuid(), t, p.id, x, y from players p, (values ('workbench',3960::real,7330::real),('forge',4050,7330),('storage_chest',3955,7400)) v(t,x,y) where p.name='Stations1'"
+```
+
+`capitol-bot --prefix stations --gather 0` makes `Stations1` at the spawn, and its password is `stations-1-capitol-bot`, so `POST /auth/login` gives a token for `save/session.toml`. Rows inserted this way fire no `station_placed`, so they rise rather than drop. Delete them when you're done, because new players spawn right there.
 
 ## Testing against the server
 

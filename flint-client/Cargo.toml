@@ -23,6 +23,7 @@ flint-render = { path = "engine/crates/flint-render" }
 flint-runtime = { path = "engine/crates/flint-runtime" }
 flint-scene = { path = "engine/crates/flint-scene" }
 flint-schema = { path = "engine/crates/flint-schema" }
+flint-particles = { path = "engine/crates/flint-particles" }
 
 # Our crates
 capitol-core = { path = "crates/capitol-core" }

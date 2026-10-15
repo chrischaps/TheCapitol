@@ -39,6 +39,9 @@ pub struct Shared {
     /// The node a script last asked to extract from (`cap_extract`). The
     /// extension takes it next frame.
     pub extract: Arc<Mutex<Option<String>>>,
+    /// Every station shown this frame (P6.1), as `stations::Stations` left
+    /// them, for the in-range ring.
+    pub stations: Arc<Mutex<Vec<StationMark>>>,
 }
 
 /// The zone banner's words and colour, and when it started.
@@ -67,6 +70,23 @@ pub struct NodeMark {
     pub mine: bool,
     /// How far the extraction on it has got, 0 to 1, if one is under way.
     pub progress: Option<f32>,
+}
+
+/// One station as scripts see it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StationMark {
+    pub id: String,
+    /// "workbench", "forge", "storage_chest", or "generic" for a type the
+    /// client has no model for.
+    pub kind: &'static str,
+    /// Where it stands, world metres (X, Z).
+    pub at: [f32; 2],
+    /// The in-range ring's radius, metres: just round the model.
+    pub radius: f32,
+    /// You're within its interaction range (`capitol_core::station`).
+    pub in_reach: bool,
+    /// 0 to 1: the ring, eased toward `in_reach`.
+    pub reach: f32,
 }
 
 /// How near a click must land to a node to pick it, in metres. A node's
@@ -205,6 +225,16 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         };
         nodes.iter().map(|n| node_map(n).into()).collect()
     });
+    // `cap_stations() -> [#{ id, kind, x, z, radius, in_reach, reach }]`:
+    // the stations shown, in world metres. `in_reach` is whether you're
+    // within its interaction range; `reach` eases from 0 to 1 with it.
+    let stations = shared.stations.clone();
+    engine.register_fn("cap_stations", move || -> rhai::Array {
+        let Ok(stations) = stations.lock() else {
+            return rhai::Array::new();
+        };
+        stations.iter().map(|s| station_map(s).into()).collect()
+    });
     // `cap_node_at(x, z) -> #{ ... } or ()`: the node nearest the ground
     // point (x, z), within NODE_PICK metres, as in `cap_nodes`.
     let nodes = shared.nodes.clone();
@@ -246,6 +276,18 @@ fn node_map(n: &NodeMark) -> rhai::Map {
         n.progress
             .map_or(rhai::Dynamic::UNIT, |p| (p as f64).into()),
     );
+    m
+}
+
+fn station_map(s: &StationMark) -> rhai::Map {
+    let mut m = rhai::Map::new();
+    m.insert("id".into(), s.id.clone().into());
+    m.insert("kind".into(), s.kind.into());
+    m.insert("x".into(), (s.at[0] as f64).into());
+    m.insert("z".into(), (s.at[1] as f64).into());
+    m.insert("radius".into(), (s.radius as f64).into());
+    m.insert("in_reach".into(), s.in_reach.into());
+    m.insert("reach".into(), (s.reach as f64).into());
     m
 }
 

@@ -31,3 +31,6 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+flint-particles = { workspace = true }

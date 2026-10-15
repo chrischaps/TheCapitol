@@ -44,6 +44,13 @@
 // over your name, as a gather's yield rises off its tuft. Walking cancels
 // a craft on the server, so a click on the ground while crafting stops it.
 //
+// Stations (P6.1) have no click yet (P6.3 opens them). Within reach of
+// one, 75 units (7.5 m) by capitol_core::station, an orange ring
+// (#f97316, React's in-range ring) closes in round it, with four short
+// marks turning slowly outside it, and opens out again as you leave.
+// Like every ring here it's screen-space lines with no depth test, so its
+// far side crosses the model's front (issue #86).
+//
 // The right button is the camera's (a right-drag orbits), so this is the
 // left button only. egui keeps any click over its panels.
 
@@ -228,6 +235,9 @@ fn on_draw_ui() {
     }
     // The tuft you're going to gather, if any. While you walk to it, the
     // sight round it stands in for the ring at your destination.
+    for s in cap_stations() {
+        if s.reach > 0.01 { draw_station_ring(s, now); }
+    }
     let target = ();
     for n in cap_nodes() {
         if n.targeted { target = n; }
@@ -269,6 +279,25 @@ fn on_draw_ui() {
 fn gold() { [0.788, 0.635, 0.153] }
 // Spray off a canal: the water blue of the 2D clients, lifted toward white.
 fn spray() { [0.78, 0.88, 1.0] }
+
+// React's in-range orange, #f97316.
+fn station_orange() { [0.976, 0.451, 0.086] }
+
+// The ring round a station you can reach: it closes in from a little wider
+// and brightens as `reach` eases up, React's half-alpha orange at full,
+// with four marks outside it turning a quarter turn every eight seconds.
+fn draw_station_ring(s, now) {
+    let y = cap_ground_y() + 0.02;
+    let c = station_orange();
+    let k = s.reach;
+    let r = s.radius * (1.2 - 0.2 * k);
+    ring(s.x, s.z, y, r, c, 0.5 * k, 2.0, 56);
+    let spin = now * 0.196;
+    for i in 0..4 {
+        let a = spin + i.to_float() * 0.5 * PI();
+        arc(s.x, s.z, y, r + 0.22, a - 0.16, a + 0.16, c, 0.4 * k, 1.5);
+    }
+}
 
 // A ring of radius r (m) on the ground at (cx, cz), as projected segments.
 fn ring(cx, cz, y, r, c, alpha, width, steps) {

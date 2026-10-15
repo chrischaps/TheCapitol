@@ -601,6 +601,7 @@ dependencies = [
  "flint-core",
  "flint-ecs",
  "flint-import",
+ "flint-particles",
  "flint-player",
  "flint-render",
  "flint-runtime",

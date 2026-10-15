@@ -1,0 +1,82 @@
+# The forge's fire (P6.1): flames licking in its mouth, and embers and a
+# thread of smoke out of its chimney. Spawned on each forge by
+# `stations.rs` as a `particle_effect`; the offsets are in the forge
+# model's own space (its mouth faces +Z), so `local_axes` turns them with
+# it. Based on Flint's `fire` preset, smaller.
+
+name = "forge"
+
+[[emitters]]
+name = "flames"
+emission_rate = 30.0
+max_particles = 96
+lifetime = [0.3, 0.6]
+speed = [0.3, 0.6]
+direction = [0, 1, 0.35]
+spread = 16.0
+gravity = [0, 1.4, 0]
+blend_mode = "additive"
+# Out of the top of the arch, in front of the stone, so they show
+# against it rather than vanishing into the mouth's glow.
+shape_offset = [0, 0.62, 0.66]
+local_axes = true
+size = { keys = [ { t = 0.0, v = [0.07, 0.07] }, { t = 0.3, v = [0.11, 0.13] }, { t = 1.0, v = [0.015, 0.015] } ], interp = "smooth" }
+size_scale = [0.8, 1.2]
+color = { keys = [ { t = 0.0, v = [1.0, 0.8, 0.25, 0.85] }, { t = 0.5, v = [1.0, 0.35, 0.03, 0.6] }, { t = 1.0, v = [0.35, 0.03, 0.0, 0.0] } ] }
+angular_velocity = [-90, 90]
+
+[emitters.shape]
+kind = "box"
+extents = [0.14, 0.02, 0.03]
+
+[[emitters.forces]]
+kind = "noise"
+strength = 0.6
+frequency = 1.2
+speed = 0.8
+
+[[emitters]]
+name = "embers"
+emission_rate = 5.0
+max_particles = 48
+lifetime = [1.2, 2.6]
+speed = [0.6, 1.4]
+direction = [0, 1, 0]
+spread = 30.0
+gravity = [0, 0.5, 0]
+damping = 0.5
+blend_mode = "additive"
+shape_offset = [0, 2.45, -0.1]
+local_axes = true
+size = { start = [0.05, 0.05], end = [0.0, 0.0] }
+color = { start = [1.0, 0.6, 0.2, 1.0], end = [1.0, 0.18, 0.0, 0.0] }
+
+[emitters.shape]
+kind = "sphere"
+radius = 0.12
+
+[[emitters.forces]]
+kind = "noise"
+strength = 0.9
+frequency = 0.6
+speed = 0.5
+
+[[emitters]]
+name = "smoke"
+emission_rate = 3.0
+max_particles = 32
+lifetime = [2.5, 4.0]
+speed = [0.3, 0.6]
+direction = [0, 1, 0]
+spread = 12.0
+gravity = [0.15, 0.25, 0.05]
+damping = 0.3
+blend_mode = "alpha"
+shape_offset = [0, 2.5, -0.1]
+local_axes = true
+size = { keys = [ { t = 0.0, v = [0.12, 0.12] }, { t = 1.0, v = [0.6, 0.6] } ], interp = "smooth" }
+color = { keys = [ { t = 0.0, v = [0.3, 0.28, 0.3, 0.0] }, { t = 0.15, v = [0.3, 0.28, 0.3, 0.22] }, { t = 1.0, v = [0.4, 0.4, 0.44, 0.0] } ] }
+
+[emitters.shape]
+kind = "sphere"
+radius = 0.1
