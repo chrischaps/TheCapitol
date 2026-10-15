@@ -27,8 +27,27 @@ Active work is a third client built on Chris's Flint engine (Rust/wgpu). It goes
 Rules that hold across issues:
 - Engine changes go upstream to Flint as a PR on a `feature/*` branch. Chris merges Flint PRs.
 - The plan doc stays true. Update it in the same commit when a decision changes it.
-- Assume another agent may be working at the same time. Use your own worktree, stage by path, and never touch changes you didn't make.
+- Assume another agent may be working at the same time, on this machine or another. Claim the issue first, use your own worktree, stage by path, and never touch changes you didn't make. See the next section.
 - **Cut a ticket for every limitation you hit.** This covers anything you work round instead of fix: an engine gap, a missing hook, a tool that can't do something, a backend quirk. Open a GitHub issue for it in the same session, labelled `flint-client` plus `engine-upstream` or `fc:backend-prereq` where they apply. Say what's missing, what the workaround costs, and what removing the workaround involves. Then link the issue from the workaround's code comment and the plan. A limitation recorded only in a closing comment or a vault note gets lost.
+
+## Several Agents, Several Machines
+
+Agents on several machines work this repo at once, all as the same GitHub user. Assignees, labels and comments can't tell them apart, and none of them is atomic. So claims are git branches. `scripts/issue.sh` (bash; on Windows it runs under Git Bash) does the whole cycle, and it applies to any issue, not just `flint-client` ones:
+
+```bash
+scripts/issue.sh list                         # who holds what, on every machine, and for how long
+scripts/issue.sh claim <n>                    # exit 2: someone else holds it; pick another
+git worktree add ../TheCapitol-<n> -b issue-<n> origin/master
+# ...work, commit with "Closes #<n>"...
+scripts/issue.sh land <n> --verify "<cmd>"    # rebase, re-verify, ff-push to master, release
+```
+
+- **A claim is the branch `claim/issue-<n>` on origin.** It holds one commit with no files, and the commit message names the agent and the host. Git rejects the second push of a new branch, so only one claimant can win, even when two push in the same second. The `claimed` label and the "Claimed by" comment are only there for people reading GitHub.
+- **Only the checkout that claimed an issue can renew, release or land it.** It keeps a record in `.git/agent-claims/`. Never delete another agent's `claim/*` branch by hand.
+- **Claims go stale after 24 hours** (`CLAIM_TTL_HOURS`). Run `renew <n>` at the start of each session on long work. A claim past the TTL can be taken over with `claim <n> --steal`. Before stealing, check the issue's comments and `origin/issue-<n>` for work in progress, and continue from it.
+- **Master only moves forward, and only through `land`.** It pushes fast-forward only and retries when another agent lands first. Never force-push master. Exit 3 is a rebase conflict: resolve it, `git rebase --continue`, then land again.
+- **Giving up?** Push `issue-<n>`, comment on the issue where the work stands, then `release <n>`.
+- **Setting up a new machine:** clone the repo, run `gh auth login` as the shared account, and run `gh auth setup-git` so git pushes use the same credentials. The script needs nothing else.
 
 ## Development Commands
 

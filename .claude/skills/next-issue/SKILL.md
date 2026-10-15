@@ -13,15 +13,21 @@ If the user names an issue number, skip step 1 and use that one.
 
 ```bash
 gh issue list --repo chrischaps/TheCapitol --label flint-client --state open --limit 100 --json number,title,labels --jq 'sort_by(.number)[] | "#\(.number) \(.title)"'
-git fetch
-git worktree list
-git branch -a
+scripts/issue.sh list      # claims held by every agent, on every machine
 ```
 
 Starting from the lowest number, take the first issue that meets all three conditions:
-- **Not claimed.** No `issue-<n>` branch or `../TheCapitol-<n>` worktree exists, and no open PR mentions it.
+- **Not claimed.** It isn't in `scripts/issue.sh list`, and no open PR mentions it. A `claimed` label on GitHub is only a display; the claim branch is what counts.
 - **Unblocked.** Every issue under its "Depends on" heading is closed. Check them with `gh issue view <dep> --json state`.
 - **Doesn't need Chris first.** Some issues say they need a decision from Chris, B7 for example. Do the write-up part, post it as a comment on the issue, and stop there.
+
+Then claim it, before reading anything else:
+
+```bash
+scripts/issue.sh claim <n>
+```
+
+Exit 2 means another agent got there first, perhaps seconds ago on another machine. Go back to the list and take the next one. Never work on an issue you didn't claim. The claim protocol is described under "Several agents, several machines" in the root `CLAUDE.md`.
 
 Tell the user which issue you picked and why any lower-numbered ones were skipped. Then start without waiting.
 
@@ -39,8 +45,13 @@ Tell the user which issue you picked and why any lower-numbered ones were skippe
 Another agent, or Chris, may be working at the same time.
 
 ```bash
+git fetch origin
 git worktree add ../TheCapitol-<n> -b issue-<n> origin/master
 ```
+
+If `origin/issue-<n>` exists, an earlier agent pushed work in progress before its claim went stale. Branch from that instead and read its commits.
+
+If the work will outlast a day (an engine PR waiting for Chris, say), run `scripts/issue.sh renew <n>` at the start of each session so the claim doesn't look abandoned. Push work in progress with `git push origin issue-<n>` so it survives if this machine goes away.
 
 - Leave the main checkout alone, and don't touch changes you didn't make.
 - Stage files by path, never with `git add -A`.
@@ -51,7 +62,7 @@ git worktree add ../TheCapitol-<n> -b issue-<n> origin/master
 
 Engine changes are made in `flint-client/engine/` and go upstream to Flint (`https://github.com/chrischaps/Flint`, primary branch **`main`**):
 - Push them with `git subtree push --prefix=flint-client/engine flint feature/<name>` and open a PR. Never push to Flint `main` directly.
-- Chris merges Flint PRs. Stop at "PR open", say so in your summary, and leave the issue open until the merge and the follow-up `git subtree pull --prefix=flint-client/engine flint main --squash`.
+- Chris merges Flint PRs. Stop at "PR open", say so in your summary, and leave the issue open until the merge and the follow-up `git subtree pull --prefix=flint-client/engine flint main --squash`. Keep the claim while you wait, and push `issue-<n>` so whichever agent does the follow-up can pick it up. If you stop for good without landing, run `scripts/issue.sh release <n>` and say in an issue comment where the work stands.
 - Don't run `cargo fmt` on engine files you didn't change.
 - Test crate by crate with `cargo test -p <crate>`. `--workspace` fails on Windows because of `ndk-sys`.
 
@@ -87,11 +98,10 @@ Closes #<n>
 Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
 )"
-git fetch && git rebase origin/master      # re-run the Verify commands if anything came in
-git push origin issue-<n>:master           # fast-forward only; never force-push master
+scripts/issue.sh land <n> --verify "<the issue's Verify commands>"
 ```
 
-If the push is rejected, rebase, re-verify and push again.
+`land` rebases on `origin/master`, re-runs `--verify` if the rebase brought anything in, and pushes `HEAD:master` fast-forward only. If another agent lands first, it loops. Once the push succeeds, it releases the claim and deletes `origin/issue-<n>`. Exit 3 is a rebase conflict: resolve it, `git rebase --continue`, re-verify, then run `land` again. Never force-push master, and never push it any other way.
 
 The push closes the issue, because of `Closes #<n>`. Post the summary for whoever picks up the next one as a comment. Don't use `gh issue close <n> --comment`: on an issue that's already closed it fails, and the comment is never posted.
 
