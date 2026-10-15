@@ -15,12 +15,17 @@
 //! return the [`ClientMessage`] for the game to send. The server's replies come
 //! back through [`GameState::apply`] as [`StateEvent::Trade`].
 //!
-//! **Silent failures.** Until B5 (#47) the server only logs a trade command
-//! that fails. So each action waits [`REPLY_TIMEOUT`] for the answer it
-//! expects, and [`GameState::tick`] reports [`TradeEvent::NoReply`] when it
-//! doesn't come. A request is a special case: the server never tells the
-//! asker it arrived, so `NoReply(Initiate)` is a hint, not an ending, and the
-//! request stays [`Trade::Requested`] until it's answered.
+//! **Failures.** Since B5 (#47) the server answers a trade command it refuses
+//! with `error{message}`, sent only to us. The `error` carries no command, so
+//! one that arrives while an action is waiting is taken as that action's
+//! refusal: [`TradeEvent::Refused`], with the wait cleared. The store still
+//! reports the `error` as [`StateEvent::ServerError`] too, so the UI should
+//! toast that and use `Refused` only to update the trade window. Each action
+//! still waits [`REPLY_TIMEOUT`] as a backstop, and [`GameState::tick`]
+//! reports [`TradeEvent::NoReply`] when nothing comes. A request is a special
+//! case: the server never confirms a delivered one, so `NoReply(Initiate)`
+//! means it most likely arrived, and the request stays [`Trade::Requested`]
+//! until it's answered.
 //!
 //! **Whose message is it.** `trade_requested`, `trade_request_declined` and
 //! `trade_started` reach only the players involved. `trade_offer_updated` and
@@ -112,10 +117,7 @@ impl TradeAction {
     /// A default line for the UI when this action gets no reply.
     pub fn hint(self) -> &'static str {
         match self {
-            TradeAction::Initiate => {
-                "No answer yet. The request stays open until they answer, but it only \
-                 arrives if they're in range and not already trading."
-            }
+            TradeAction::Initiate => "No answer yet. The request stays open until they answer.",
             TradeAction::AcceptRequest => {
                 "The trade didn't start. They may have left, or started another trade."
             }
@@ -167,6 +169,14 @@ pub enum TradeEvent {
     },
     /// The server didn't answer in time. See [`TradeAction::hint`].
     NoReply(TradeAction),
+    /// The server refused `action` with an `error` while it was waiting.
+    /// `reason` is the server's message. The machine has already moved on: a
+    /// refused request or accept-request is gone, a refused cancel has closed
+    /// the trade, and a refused offer or accept leaves the trade as it was.
+    Refused {
+        action: TradeAction,
+        reason: String,
+    },
 }
 
 /// Why an action wasn't sent. Each is a failure the server would have
@@ -534,6 +544,35 @@ impl GameState {
             }
             _ => {}
         }
+    }
+
+    /// The server sent `error`. If a trade action is waiting, it's that
+    /// action's refusal (B5, #47); otherwise it isn't ours.
+    pub(super) fn trade_error(&mut self, message: &str, out: &mut Vec<StateEvent>) {
+        let Some((action, _)) = self.trade.waiting.take() else {
+            return;
+        };
+        match action {
+            // The server keeps no request it refused.
+            TradeAction::Initiate => {
+                if matches!(self.trade.trade, Trade::Requested { .. }) {
+                    self.trade.trade = Trade::Idle;
+                }
+            }
+            // Gone already, or the asker started another trade.
+            TradeAction::AcceptRequest => {
+                if matches!(self.trade.trade, Trade::Incoming { .. }) {
+                    self.trade.trade = Trade::Idle;
+                }
+            }
+            TradeAction::Offer | TradeAction::Accept => {}
+            // The server only refuses a cancel when it has no trade for us.
+            TradeAction::Cancel => self.end_trade(message, out),
+        }
+        out.push(StateEvent::Trade(TradeEvent::Refused {
+            action,
+            reason: message.to_string(),
+        }));
     }
 
     /// A player left (`player_left`, or missing from `positions`).

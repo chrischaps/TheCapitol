@@ -8,11 +8,12 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use redis::AsyncCommands;
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo};
+use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo, TradeOfferItem};
 
 use crate::engine::container_access::check_container_access;
 use crate::engine::GameEvent;
@@ -421,14 +422,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     });
                                 }
                                 ClientMessage::TradeOffer { items, strands } => {
-                                    let item_tuples: Vec<(Uuid, i32)> = items
-                                        .iter()
-                                        .filter_map(|item| {
-                                            Uuid::parse_str(&item.item_id)
-                                                .ok()
-                                                .map(|id| (id, item.quantity))
-                                        })
-                                        .collect();
+                                    let item_tuples = match validate_trade_offer(&state, player_id, &items, strands).await {
+                                        Ok(tuples) => tuples,
+                                        Err(message) => {
+                                            let _ = sender.send(Message::Text(
+                                                serde_json::to_string(&ServerMessage::Error { message }).unwrap().into()
+                                            )).await;
+                                            continue;
+                                        }
+                                    };
 
                                     let mut game = state.game.write().await;
                                     game.queue_command(crate::engine::Command::UpdateTradeOffer {
@@ -457,6 +459,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             }
                                             Err(e) => {
                                                 tracing::debug!("Trade accept failed: {}", e);
+                                                let _ = sender.send(Message::Text(
+                                                    serde_json::to_string(&ServerMessage::Error { message: e }).unwrap().into()
+                                                )).await;
                                                 (false, None)
                                             }
                                         }
@@ -725,6 +730,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::TradeCancelled { trade_id, reason };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
+                    Ok(GameEvent::TradeFailed { player_id: pid, reason }) => {
+                        if pid == player_id {
+                            let msg = ServerMessage::Error { message: reason };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
                     // M5: Currency events
                     Ok(GameEvent::CurrencyChanged { player_id: pid, new_balance }) => {
                         if pid == player_id {
@@ -823,6 +834,98 @@ async fn fetch_player_items(state: &AppState, player_id: Uuid, item_ids: &[Uuid]
     .unwrap_or_default();
 
     items
+}
+
+/// Check a `trade_offer` before it reaches the trade session: parse its item ids, check its
+/// amounts, and check the player owns every item in the quantity offered and has the strands.
+/// The `Err` is the message the client shows. `execute_trade` checks ownership again at the end,
+/// since items can move between offer and accept.
+async fn validate_trade_offer(
+    state: &AppState,
+    player_id: Uuid,
+    items: &[TradeOfferItem],
+    strands: i64,
+) -> Result<Vec<(Uuid, i32)>, String> {
+    let offer = parse_trade_offer(items, strands)?;
+
+    let item_ids: Vec<Uuid> = offer.iter().map(|(id, _)| *id).collect();
+    let owned: Vec<(Uuid, i32)> = if item_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as("SELECT id, quantity FROM items WHERE id = ANY($1) AND owner_id = $2")
+            .bind(&item_ids)
+            .bind(player_id)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!("Trade offer ownership check failed: {}", e);
+                "Couldn't check your items; try again".to_string()
+            })?
+    };
+    let owned: HashMap<Uuid, i32> = owned.into_iter().collect();
+
+    let balance: Option<(i64,)> = if strands > 0 {
+        sqlx::query_as("SELECT strand_balance FROM players WHERE id = $1")
+            .bind(player_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!("Trade offer balance check failed: {}", e);
+                "Couldn't check your strands; try again".to_string()
+            })?
+    } else {
+        None
+    };
+
+    check_trade_offer_holdings(&offer, &owned, strands, balance.map(|(b,)| b).unwrap_or(0))?;
+    Ok(offer)
+}
+
+/// The parts of a `trade_offer` that need no database: ids parse, quantities and strands make
+/// sense, and no item appears twice.
+fn parse_trade_offer(items: &[TradeOfferItem], strands: i64) -> Result<Vec<(Uuid, i32)>, String> {
+    if strands < 0 {
+        return Err("You can't offer a negative amount of strands".to_string());
+    }
+    let mut offer: Vec<(Uuid, i32)> = Vec::with_capacity(items.len());
+    for item in items {
+        let id = Uuid::parse_str(&item.item_id)
+            .map_err(|_| format!("Invalid item ID: {}", item.item_id))?;
+        if item.quantity <= 0 {
+            return Err("Offered quantities must be at least 1".to_string());
+        }
+        if offer.iter().any(|(seen, _)| *seen == id) {
+            return Err("The same item is in the offer twice".to_string());
+        }
+        offer.push((id, item.quantity));
+    }
+    Ok(offer)
+}
+
+/// Check the player holds everything they offer. `owned` maps the offered item ids the player
+/// owns to the quantity they own.
+fn check_trade_offer_holdings(
+    offer: &[(Uuid, i32)],
+    owned: &HashMap<Uuid, i32>,
+    strands: i64,
+    strand_balance: i64,
+) -> Result<(), String> {
+    for (id, qty) in offer {
+        match owned.get(id) {
+            None => return Err("You don't own an item in that offer".to_string()),
+            Some(have) if have < qty => {
+                return Err(format!("You only have {} of an item you offered {} of", have, qty))
+            }
+            Some(_) => {}
+        }
+    }
+    if strands > strand_balance {
+        return Err(format!(
+            "You only have {} strands, not the {} offered",
+            strand_balance, strands
+        ));
+    }
+    Ok(())
 }
 
 /// Handle move item request directly via database
@@ -1472,4 +1575,74 @@ async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<Uuid, String
     tracing::info!("Trade {} executed successfully between {} and {}", trade_id, player_a, player_b);
 
     Ok(trade_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn offer_item(id: &str, quantity: i32) -> TradeOfferItem {
+        TradeOfferItem { item_id: id.to_string(), quantity }
+    }
+
+    #[test]
+    fn trade_offer_rejects_a_bad_item_id() {
+        let err = parse_trade_offer(&[offer_item("not-a-uuid", 1)], 0).unwrap_err();
+        assert!(err.contains("Invalid item ID"), "{err}");
+    }
+
+    #[test]
+    fn trade_offer_rejects_zero_and_negative_quantities() {
+        let id = Uuid::new_v4().to_string();
+        assert!(parse_trade_offer(&[offer_item(&id, 0)], 0).is_err());
+        assert!(parse_trade_offer(&[offer_item(&id, -3)], 0).is_err());
+    }
+
+    #[test]
+    fn trade_offer_rejects_negative_strands() {
+        let err = parse_trade_offer(&[], -1).unwrap_err();
+        assert!(err.contains("negative"), "{err}");
+    }
+
+    #[test]
+    fn trade_offer_rejects_the_same_item_twice() {
+        let id = Uuid::new_v4().to_string();
+        let err = parse_trade_offer(&[offer_item(&id, 1), offer_item(&id, 2)], 0).unwrap_err();
+        assert!(err.contains("twice"), "{err}");
+    }
+
+    #[test]
+    fn trade_offer_parses_a_good_offer() {
+        let id = Uuid::new_v4();
+        let offer = parse_trade_offer(&[offer_item(&id.to_string(), 4)], 10).unwrap();
+        assert_eq!(offer, vec![(id, 4)]);
+    }
+
+    #[test]
+    fn trade_offer_rejects_an_item_not_owned() {
+        let offer = vec![(Uuid::new_v4(), 1)];
+        let err = check_trade_offer_holdings(&offer, &HashMap::new(), 0, 0).unwrap_err();
+        assert!(err.contains("don't own"), "{err}");
+    }
+
+    #[test]
+    fn trade_offer_rejects_more_than_the_player_has() {
+        let id = Uuid::new_v4();
+        let owned = HashMap::from([(id, 2)]);
+        let err = check_trade_offer_holdings(&[(id, 5)], &owned, 0, 0).unwrap_err();
+        assert!(err.contains("only have 2"), "{err}");
+    }
+
+    #[test]
+    fn trade_offer_rejects_more_strands_than_the_balance() {
+        let err = check_trade_offer_holdings(&[], &HashMap::new(), 50, 20).unwrap_err();
+        assert!(err.contains("only have 20 strands"), "{err}");
+    }
+
+    #[test]
+    fn trade_offer_accepts_what_the_player_holds() {
+        let id = Uuid::new_v4();
+        let owned = HashMap::from([(id, 5)]);
+        assert!(check_trade_offer_holdings(&[(id, 5)], &owned, 20, 20).is_ok());
+    }
 }

@@ -616,6 +616,80 @@ fn two_players_trade() {
     ada.net.disconnect();
 }
 
+/// B5 (#47): the server answers refused trade commands with `error`, and the
+/// store turns one that arrives while an action waits into `Refused`.
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn trade_refusals_come_back_as_errors() {
+    use capitol_core::protocol::ws::TradeOfferItem;
+    use capitol_core::state::TradeAction;
+
+    fn refused<'a>(seen: &'a [StateEvent], action: TradeAction) -> Option<&'a str> {
+        seen.iter().find_map(|e| match e {
+            StateEvent::Trade(TradeEvent::Refused { action: a, reason }) if *a == action => {
+                Some(reason.as_str())
+            }
+            _ => None,
+        })
+    }
+
+    let mut ada = Mirror::register("Ada");
+    let mut brin = Mirror::register("Brin");
+    let mut cato = Mirror::register("Cato");
+    let (ada_id, brin_id) = (ada.me(), brin.me());
+
+    // Accepting a request nobody sent. The store would refuse it, so send it raw.
+    brin.net.ws(ClientMessage::TradeAcceptRequest);
+    brin.pump_until("the server's refusal", |_, seen| {
+        seen.iter().any(|e| {
+            matches!(e, StateEvent::ServerError { message } if message == "No pending trade request")
+        })
+    });
+
+    // Ada and Brin open a trade.
+    ada.pump_until("Brin in the world", |s, _| s.player(brin_id).is_some());
+    ada.act(|s, now| s.trade_initiate(now, brin_id));
+    brin.pump_until("Ada's request", |s, _| matches!(s.trade(), Trade::Incoming { .. }));
+    brin.act(|s, now| s.trade_accept_request(now));
+    ada.pump_until("the trade to open", |s, _| s.open_trade().is_some());
+
+    // Cato asks Ada, who's busy.
+    cato.pump_until("Ada in the world", |s, _| s.player(ada_id).is_some());
+    cato.act(|s, now| s.trade_initiate(now, ada_id));
+    let seen = cato.pump_until("the refusal", |s, _| s.trade_waiting().is_none());
+    let reason = refused(&seen, TradeAction::Initiate).expect("a refused initiate");
+    assert!(reason.contains("already in a trade"), "{reason}");
+    assert_eq!(cato.state.trade(), &Trade::Idle);
+
+    // Ada offers an item she doesn't own, then more strands than she has.
+    ada.act(|s, now| {
+        s.trade_offer(
+            now,
+            vec![TradeOfferItem {
+                item_id: uuid::Uuid::from_u128(0xdead_beef).to_string(),
+                quantity: 1,
+            }],
+            0,
+        )
+    });
+    let seen = ada.pump_until("the refusal", |s, _| s.trade_waiting().is_none());
+    let reason = refused(&seen, TradeAction::Offer).expect("a refused offer");
+    assert!(reason.contains("don't own"), "{reason}");
+
+    let balance = ada.state.strands().unwrap();
+    ada.act(|s, now| s.trade_offer(now, vec![], balance + 1));
+    let seen = ada.pump_until("the refusal", |s, _| s.trade_waiting().is_none());
+    let reason = refused(&seen, TradeAction::Offer).expect("a refused offer");
+    assert!(reason.contains("strands"), "{reason}");
+    assert_eq!(ada.state.open_trade().unwrap().mine.strands, 0);
+
+    ada.act(|s, now| s.trade_cancel(now));
+    ada.pump_until("the cancel", |s, _| s.trade() == &Trade::Idle);
+    for mirror in [&ada, &brin, &cato] {
+        mirror.net.disconnect();
+    }
+}
+
 /// Carries out an [`Auth`]'s effects on `net`, keeping what it asks to
 /// remember, and feeds it events until `done` holds.
 fn drive_auth(

@@ -145,6 +145,11 @@ pub enum GameEvent {
         trade_id: Uuid,
         reason: String,
     },
+    /// A trade command from `player_id` was refused. Goes to that player only, as `error`.
+    TradeFailed {
+        player_id: Uuid,
+        reason: String,
+    },
     // M5: Currency events
     CurrencyChanged {
         player_id: Uuid,

@@ -326,9 +326,12 @@ impl GameState {
             M::AuthOk { player_id } => self.me = Some(*player_id),
             // The net layer turns these into connection states.
             M::AuthError { .. } | M::Subscribed { .. } => {}
-            M::Error { message } => out.push(StateEvent::ServerError {
-                message: message.clone(),
-            }),
+            M::Error { message } => {
+                out.push(StateEvent::ServerError {
+                    message: message.clone(),
+                });
+                self.trade_error(message, &mut out);
+            }
 
             M::Positions { players } => self.positions(players, &mut out),
             M::PlayerJoined { player } => {

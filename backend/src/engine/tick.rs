@@ -52,8 +52,13 @@ impl GameState {
     }
 
     pub fn with_params(params: WorldGenParams) -> Self {
-        let (event_sender, _) = broadcast::channel(1024);
         let terrain = TerrainConfig::from_params(&params);
+        Self::with_terrain(params, terrain)
+    }
+
+    /// A game on terrain already generated from `params`
+    fn with_terrain(params: WorldGenParams, terrain: TerrainConfig) -> Self {
+        let (event_sender, _) = broadcast::channel(1024);
         let terrain_version = terrain.version();
         Self {
             players: HashMap::new(),
@@ -136,6 +141,13 @@ impl GameState {
 
     pub fn subscribe(&self) -> broadcast::Receiver<GameEvent> {
         self.event_sender.subscribe()
+    }
+
+    /// Tell `player_id`, and only them, why their trade command was refused
+    fn trade_failed(&self, player_id: Uuid, reason: impl Into<String>) {
+        let reason = reason.into();
+        tracing::debug!("Trade command from {} refused: {}", player_id, reason);
+        let _ = self.event_sender.send(GameEvent::TradeFailed { player_id, reason });
     }
 
     fn process_commands(&mut self) {
@@ -312,14 +324,20 @@ impl GameState {
                 }
                 // M5: Trading commands
                 Command::InitiateTrade { player_id, target_player_id } => {
+                    if target_player_id == player_id {
+                        self.trade_failed(player_id, "You can't trade with yourself");
+                        continue;
+                    }
+
                     // Validate both players exist and are in range
-                    let (my_pos, target_pos) = match (
-                        self.players.get(&player_id),
-                        self.players.get(&target_player_id),
-                    ) {
-                        (Some(me), Some(target)) => ((me.x, me.y), (target.x, target.y)),
-                        _ => {
-                            tracing::debug!("Trade initiate failed: player not found");
+                    let my_pos = match self.players.get(&player_id) {
+                        Some(me) => (me.x, me.y),
+                        None => continue, // the requester left before the tick; nobody to tell
+                    };
+                    let (target_pos, target_name) = match self.players.get(&target_player_id) {
+                        Some(target) => ((target.x, target.y), target.name.clone()),
+                        None => {
+                            self.trade_failed(player_id, "That player is offline");
                             continue;
                         }
                     };
@@ -329,7 +347,13 @@ impl GameState {
                     let distance = (dx * dx + dy * dy).sqrt();
 
                     if distance > TRADE_RANGE {
-                        tracing::debug!("Trade initiate failed: out of range ({})", distance);
+                        self.trade_failed(
+                            player_id,
+                            format!(
+                                "{} is too far away to trade ({:.0} units; trading needs {:.0})",
+                                target_name, distance, TRADE_RANGE
+                            ),
+                        );
                         continue;
                     }
 
@@ -356,9 +380,7 @@ impl GameState {
                                 });
                             }
                         }
-                        Err(e) => {
-                            tracing::debug!("Trade initiate failed: {}", e);
-                        }
+                        Err(e) => self.trade_failed(player_id, e),
                     }
                 }
                 Command::AcceptTradeRequest { player_id } => {
@@ -370,9 +392,7 @@ impl GameState {
                                 player_b: trade.player_b,
                             });
                         }
-                        Err(e) => {
-                            tracing::debug!("Trade accept failed: {}", e);
-                        }
+                        Err(e) => self.trade_failed(player_id, e),
                     }
                 }
                 Command::DeclineTradeRequest { player_id } => {
@@ -383,14 +403,12 @@ impl GameState {
                                 initiator,
                             });
                         }
-                        Err(e) => {
-                            tracing::debug!("Trade decline failed: {}", e);
-                        }
+                        Err(e) => self.trade_failed(player_id, e),
                     }
                 }
                 Command::UpdateTradeOffer { player_id, items, strands } => {
                     if let Err(e) = self.trade_manager.update_offer(player_id, items.clone(), strands) {
-                        tracing::debug!("Update trade offer failed: {}", e);
+                        self.trade_failed(player_id, e);
                         continue;
                     }
 
@@ -433,9 +451,7 @@ impl GameState {
                                 }
                             }
                         }
-                        Err(e) => {
-                            tracing::debug!("Trade accept failed: {}", e);
-                        }
+                        Err(e) => self.trade_failed(player_id, e),
                     }
                 }
                 Command::CancelTrade { player_id } => {
@@ -447,6 +463,8 @@ impl GameState {
                                 reason: "Cancelled by player".to_string(),
                             });
                         }
+                    } else {
+                        self.trade_failed(player_id, "Not in a trade");
                     }
                 }
             }
@@ -827,4 +845,182 @@ async fn consume_items(app_state: &AppState, items: Vec<(Uuid, i32)>) -> Vec<(Uu
     }
 
     affected
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::ActionState;
+
+    fn player(name: &str, x: f64, y: f64) -> PlayerState {
+        PlayerState {
+            id: Uuid::new_v4(),
+            account_id: Uuid::new_v4(),
+            name: name.into(),
+            x,
+            y,
+            dest_x: None,
+            dest_y: None,
+            speed: 50.0,
+            strand_balance: 0,
+            current_zone: None,
+            action_state: ActionState::Idle,
+        }
+    }
+
+    /// A game on the default terrain, generated once for all these tests. Generating it per
+    /// test (about a second each in debug) slows the parallel run enough to fail
+    /// `test_terrain_generation_performance`.
+    fn game() -> GameState {
+        static TERRAIN: std::sync::OnceLock<TerrainConfig> = std::sync::OnceLock::new();
+        let terrain = TERRAIN.get_or_init(TerrainConfig::get_default).clone();
+        GameState::with_terrain(WorldGenParams::default(), terrain)
+    }
+
+    /// A game with two players `gap` units apart, and a receiver subscribed after they joined
+    fn two_players(gap: f64) -> (GameState, Uuid, Uuid, broadcast::Receiver<GameEvent>) {
+        let mut game = game();
+        let a = player("Ada", 4000.0, 4000.0);
+        let b = player("Bram", 4000.0 + gap, 4000.0);
+        let (a_id, b_id) = (a.id, b.id);
+        game.add_player(a);
+        game.add_player(b);
+        let rx = game.subscribe();
+        (game, a_id, b_id, rx)
+    }
+
+    /// Run `command` and return the reason of the one `TradeFailed` it sent, checking who it went to
+    fn refusal(game: &mut GameState, rx: &mut broadcast::Receiver<GameEvent>, command: Command, to: Uuid) -> String {
+        game.queue_command(command);
+        game.process_commands();
+        let mut reasons = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let GameEvent::TradeFailed { player_id, reason } = event {
+                assert_eq!(player_id, to, "TradeFailed went to the wrong player");
+                reasons.push(reason);
+            }
+        }
+        assert_eq!(reasons.len(), 1, "expected exactly one TradeFailed, got {reasons:?}");
+        reasons.pop().unwrap()
+    }
+
+    #[test]
+    fn initiate_out_of_range_tells_the_asker() {
+        let (mut game, a, b, mut rx) = two_players(TRADE_RANGE + 50.0);
+        let reason = refusal(&mut game, &mut rx, Command::InitiateTrade { player_id: a, target_player_id: b }, a);
+        assert!(reason.contains("too far"), "{reason}");
+        assert!(reason.contains("Bram"), "{reason}");
+    }
+
+    #[test]
+    fn initiate_with_an_offline_player_tells_the_asker() {
+        let (mut game, a, _, mut rx) = two_players(10.0);
+        let reason = refusal(
+            &mut game,
+            &mut rx,
+            Command::InitiateTrade { player_id: a, target_player_id: Uuid::new_v4() },
+            a,
+        );
+        assert!(reason.contains("offline"), "{reason}");
+    }
+
+    #[test]
+    fn initiate_with_yourself_is_refused() {
+        let (mut game, a, _, mut rx) = two_players(10.0);
+        let reason = refusal(&mut game, &mut rx, Command::InitiateTrade { player_id: a, target_player_id: a }, a);
+        assert!(reason.contains("yourself"), "{reason}");
+    }
+
+    #[test]
+    fn initiate_while_the_target_is_trading_tells_the_asker() {
+        let (mut game, a, b, mut rx) = two_players(10.0);
+        let c = player("Cato", 4010.0, 4010.0);
+        let c_id = c.id;
+        game.add_player(c);
+        game.trade_manager.request_trade(b, c_id).unwrap();
+        game.trade_manager.accept_request(c_id).unwrap();
+        while rx.try_recv().is_ok() {}
+
+        let reason = refusal(&mut game, &mut rx, Command::InitiateTrade { player_id: a, target_player_id: b }, a);
+        assert!(reason.contains("already in a trade"), "{reason}");
+    }
+
+    #[test]
+    fn initiate_while_already_trading_tells_the_asker() {
+        let (mut game, a, b, mut rx) = two_players(10.0);
+        let c = player("Cato", 4010.0, 4010.0);
+        let c_id = c.id;
+        game.add_player(c);
+        game.trade_manager.request_trade(a, c_id).unwrap();
+        game.trade_manager.accept_request(c_id).unwrap();
+        while rx.try_recv().is_ok() {}
+
+        let reason = refusal(&mut game, &mut rx, Command::InitiateTrade { player_id: a, target_player_id: b }, a);
+        assert!(reason.contains("You are already in a trade"), "{reason}");
+    }
+
+    #[test]
+    fn repeat_request_is_refused() {
+        let (mut game, a, b, mut rx) = two_players(10.0);
+        game.queue_command(Command::InitiateTrade { player_id: a, target_player_id: b });
+        game.process_commands();
+        while rx.try_recv().is_ok() {}
+
+        let reason = refusal(&mut game, &mut rx, Command::InitiateTrade { player_id: a, target_player_id: b }, a);
+        assert!(reason.contains("already pending"), "{reason}");
+    }
+
+    #[test]
+    fn accept_request_with_none_pending_tells_the_player() {
+        let (mut game, _, b, mut rx) = two_players(10.0);
+        let reason = refusal(&mut game, &mut rx, Command::AcceptTradeRequest { player_id: b }, b);
+        assert!(reason.contains("No pending trade request"), "{reason}");
+    }
+
+    #[test]
+    fn decline_request_with_none_pending_tells_the_player() {
+        let (mut game, _, b, mut rx) = two_players(10.0);
+        let reason = refusal(&mut game, &mut rx, Command::DeclineTradeRequest { player_id: b }, b);
+        assert!(reason.contains("No pending trade request"), "{reason}");
+    }
+
+    #[test]
+    fn offer_outside_a_trade_tells_the_player() {
+        let (mut game, a, _, mut rx) = two_players(10.0);
+        let reason = refusal(
+            &mut game,
+            &mut rx,
+            Command::UpdateTradeOffer { player_id: a, items: vec![], strands: 5 },
+            a,
+        );
+        assert!(reason.contains("Not in a trade"), "{reason}");
+    }
+
+    #[test]
+    fn accept_outside_a_trade_tells_the_player() {
+        let (mut game, a, _, mut rx) = two_players(10.0);
+        let reason = refusal(&mut game, &mut rx, Command::AcceptTrade { player_id: a }, a);
+        assert!(reason.contains("Not in a trade"), "{reason}");
+    }
+
+    #[test]
+    fn cancel_outside_a_trade_tells_the_player() {
+        let (mut game, a, _, mut rx) = two_players(10.0);
+        let reason = refusal(&mut game, &mut rx, Command::CancelTrade { player_id: a }, a);
+        assert!(reason.contains("Not in a trade"), "{reason}");
+    }
+
+    #[test]
+    fn a_request_in_range_sends_no_error() {
+        let (mut game, a, b, mut rx) = two_players(10.0);
+        game.queue_command(Command::InitiateTrade { player_id: a, target_player_id: b });
+        game.process_commands();
+        let mut requested = false;
+        while let Ok(event) = rx.try_recv() {
+            assert!(!matches!(event, GameEvent::TradeFailed { .. }), "unexpected {event:?}");
+            requested |= matches!(event, GameEvent::TradeRequested { to_player, .. } if to_player == b);
+        }
+        assert!(requested);
+    }
 }

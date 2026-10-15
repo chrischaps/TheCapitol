@@ -787,3 +787,119 @@ fn losing_the_connection_ends_everything() {
     let mut state = GameState::new();
     assert!(trades(state.apply(&NetEvent::Connection(ConnectionState::Connecting))).is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Refusals (B5, #47): the server answers a refused command with `error`
+// ---------------------------------------------------------------------------
+
+fn error(message: &str) -> M {
+    M::Error {
+        message: message.into(),
+    }
+}
+
+fn refused(action: TradeAction, reason: &str) -> TradeEvent {
+    TradeEvent::Refused {
+        action,
+        reason: reason.into(),
+    }
+}
+
+#[test]
+fn a_refused_request_goes_idle_with_the_servers_reason() {
+    let mut state = world();
+    state.trade_initiate(Instant::now(), BRIN).unwrap();
+    let events = state.apply_ws(&error("Target player is already in a trade"));
+    assert!(events.contains(&StateEvent::ServerError {
+        message: "Target player is already in a trade".into()
+    }));
+    assert_eq!(
+        trades(events),
+        vec![refused(TradeAction::Initiate, "Target player is already in a trade")]
+    );
+    assert_eq!(state.trade(), &Trade::Idle);
+    assert_eq!(state.trade_waiting(), None);
+}
+
+#[test]
+fn a_refused_accept_request_drops_the_request() {
+    let mut state = world();
+    state.apply_ws(&requested_by(BRIN, "Brin"));
+    state.trade_accept_request(Instant::now()).unwrap();
+    assert_eq!(
+        ws(&mut state, error("Other player is now in a trade")),
+        vec![refused(TradeAction::AcceptRequest, "Other player is now in a trade")]
+    );
+    assert_eq!(state.trade(), &Trade::Idle);
+}
+
+#[test]
+fn a_refused_offer_leaves_the_trade_as_it_was() {
+    let mut state = trading();
+    state.apply_ws(&offer_updated(TRADE, ME, 5));
+    state
+        .trade_offer(
+            Instant::now(),
+            vec![TradeOfferItem {
+                item_id: ITEM.to_string(),
+                quantity: 9,
+            }],
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        ws(&mut state, error("You only have 1 of an item you offered 9 of")),
+        vec![refused(TradeAction::Offer, "You only have 1 of an item you offered 9 of")]
+    );
+    assert_eq!(open(&state).mine.strands, 5);
+    assert_eq!(state.trade_waiting(), None);
+    // No longer waiting on the offer, so accepting is allowed again.
+    assert!(state.trade_accept(Instant::now()).is_ok());
+}
+
+#[test]
+fn a_refused_accept_leaves_the_trade_open() {
+    let mut state = trading();
+    state.trade_accept(Instant::now()).unwrap();
+    assert_eq!(
+        ws(&mut state, error("Not in a trade")),
+        vec![refused(TradeAction::Accept, "Not in a trade")]
+    );
+    assert!(!open(&state).i_accepted);
+}
+
+#[test]
+fn a_refused_cancel_closes_the_trade() {
+    let mut state = trading();
+    state.trade_cancel(Instant::now()).unwrap();
+    assert_eq!(
+        ws(&mut state, error("Not in a trade")),
+        vec![
+            cancelled_event(TRADE, "Not in a trade"),
+            refused(TradeAction::Cancel, "Not in a trade"),
+        ]
+    );
+    assert_eq!(state.trade(), &Trade::Idle);
+}
+
+#[test]
+fn an_error_with_nothing_waiting_is_not_a_trade_event() {
+    let mut state = trading();
+    let events = state.apply_ws(&error("Slot is occupied"));
+    assert_eq!(
+        events,
+        vec![StateEvent::ServerError {
+            message: "Slot is occupied".into()
+        }]
+    );
+    assert!(state.open_trade().is_some());
+}
+
+#[test]
+fn a_refusal_stops_the_timeout() {
+    let mut state = world();
+    let now = Instant::now();
+    state.trade_initiate(now, BRIN).unwrap();
+    state.apply_ws(&error("That player is offline"));
+    assert!(trades(state.tick(now + REPLY_TIMEOUT + Duration::from_secs(1))).is_empty());
+}
