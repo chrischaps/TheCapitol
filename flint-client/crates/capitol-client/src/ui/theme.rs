@@ -113,11 +113,23 @@ pub fn grade_light(letter: &str) -> Color32 {
     }
 }
 
-/// A zone's colour, as the zone banner and the map show it.
-#[allow(dead_code)] // the zone banner (P4.5) is the first to use it
+/// A zone's colour where it's named: the header's zone chip, as React's
+/// zone indicator. The banner (`hud.rhai`) gets the same colour.
 pub fn zone(zone: Zone) -> Color32 {
-    rgb(palette::zone(zone))
+    rgb(palette::zone_mark(zone))
 }
+
+/// The header strip's ground: a panel, a touch less solid, so the dusk
+/// shows through at the top of the screen.
+pub const STRIP: Color32 = rgba(15, 15, 25, 0.88);
+/// The zone chip's ground: `rgba(26,26,36,0.9)` (`ZoneIndicator.css`).
+pub const CHIP: Color32 = rgba(26, 26, 36, 0.9);
+/// The strand balance's ground: gold at 10% (`.currency-display`).
+pub const GOLD_WASH: Color32 = rgba(201, 162, 39, 0.1);
+/// The glass under a hint: a panel at half strength.
+pub const HINT: Color32 = rgba(15, 15, 25, 0.55);
+/// What dims the world while the connection is down.
+pub const SCRIM: Color32 = rgba(5, 5, 12, 0.45);
 
 // ---------------------------------------------------------------------------
 // Type
@@ -406,6 +418,24 @@ pub fn tray() -> egui::Frame {
         .fill(TRAY)
         .rounding(8.0)
         .inner_margin(Margin::same(8.0))
+}
+
+/// A small bordered chip in the header strip: the zone (edged in its
+/// colour) and the strand balance (gold on a gold wash).
+pub fn chip(edge: Color32, fill: Color32) -> egui::Frame {
+    egui::Frame::none()
+        .fill(fill)
+        .stroke(Stroke::new(1.0, edge))
+        .rounding(5.0)
+        .inner_margin(Margin::symmetric(10.0, 4.0))
+}
+
+/// A faint glass under a few lines of hint text over the world.
+pub fn hint() -> egui::Frame {
+    egui::Frame::none()
+        .fill(HINT)
+        .rounding(6.0)
+        .inner_margin(Margin::symmetric(10.0, 6.0))
 }
 
 /// The form's message, in the React client's error box.

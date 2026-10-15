@@ -9,13 +9,19 @@
 //!   inventory, crafting and station panels take them over.
 //! - [`sample`]: a panel showing the theme's parts, for reviewing the theme
 //!   against the React client (`--ui-sample`).
-//! - [`account`]: who's signed in, and Sign out, top right.
+//! - [`hud`]: the header strip (zone, strands, who, Sign out) and the
+//!   overlay while the connection is down (P4.5).
 //! - [`inscription`]: the spike's window, whose text box writes the note the
 //!   spike script draws over the Capitol. It exercises the game egui layer.
 //!   Typing in it must not reach the script's P binding, and clicks outside
-//!   it must still reach the script. P4 replaces it.
+//!   it must still reach the script. Offline only now: the login form
+//!   tests the same thing (P4.1).
+//! - [`controls`]: once signed in, the inscription's place is a quiet
+//!   reminder of the controls, bottom left, clear of the header, the zone
+//!   banner and the toasts (P4.5).
 
 pub mod containers;
+pub mod hud;
 pub mod icons;
 pub mod login;
 pub mod sample;
@@ -23,14 +29,32 @@ pub mod slots;
 pub mod theme;
 
 use crate::script_api::Shared;
-use capitol_core::net::ConnectionState;
-use theme::{DIM, ERROR, SUCCESS};
 
 /// Longest inscription the box accepts.
 const NOTE_MAX_CHARS: usize = 32;
 
+/// The controls, and where the terrain came from (`status`), small and dim
+/// at the bottom left. Not interactable, so clicks reach the world.
+pub fn controls(ctx: &egui::Context, status: &str) {
+    egui::Area::new(egui::Id::new("capitol_controls"))
+        .anchor(egui::Align2::LEFT_BOTTOM, [16.0, -14.0])
+        .interactable(false)
+        .show(ctx, |ui| {
+            theme::hint().show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                for line in [
+                    "Click the ground to walk · WASD pans · H home",
+                    "Wheel or R/F zooms · Q/E or right-drag turns",
+                    status,
+                ] {
+                    ui.label(theme::dim(line).size(theme::size::LABEL));
+                }
+            });
+        });
+}
+
 /// The inscription window, top left, with where the terrain came from
-/// (`status`) underneath.
+/// (`status`) underneath. Offline only.
 pub fn inscription(ctx: &egui::Context, shared: &Shared, status: &str) {
     egui::Window::new("inscription")
         .title_bar(false)
@@ -58,34 +82,4 @@ pub fn inscription(ctx: &egui::Context, shared: &Shared, status: &str) {
             ));
             ui.label(theme::dim(status));
         });
-}
-
-/// Who's signed in, and the way out, top right. The connection overlay and
-/// header strip (P4.5) take this over. Returns whether Sign out was clicked.
-pub fn account(ctx: &egui::Context, who: &str, connection: Option<&ConnectionState>) -> bool {
-    let mut sign_out = false;
-    egui::Area::new(egui::Id::new("capitol_account"))
-        .anchor(egui::Align2::RIGHT_TOP, [-16.0, 16.0])
-        .show(ctx, |ui| {
-            theme::panel()
-                .inner_margin(egui::Margin::symmetric(14.0, 8.0))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let (colour, hover) = match connection {
-                            Some(ConnectionState::Connected { .. }) => (SUCCESS, "connected"),
-                            Some(ConnectionState::Reconnecting { .. }) => (ERROR, "reconnecting…"),
-                            _ => (DIM, "connecting…"),
-                        };
-                        theme::status_dot(ui, colour, hover);
-                        ui.label(
-                            egui::RichText::new(who)
-                                .font(theme::strong(theme::size::BODY))
-                                .color(theme::GOLD),
-                        );
-                        ui.add_space(8.0);
-                        sign_out = theme::link(ui, "Sign out", theme::size::SMALL).clicked();
-                    });
-                });
-        });
-    sign_out
 }

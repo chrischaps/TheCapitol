@@ -15,6 +15,12 @@
 //! - **The server's health is known before you submit.** While signed out,
 //!   `GET /health` goes every [`HEALTH_EVERY`], so the form can say the
 //!   server is down rather than wait for a login to fail.
+//! - **A refused token ends the session wherever it's seen.** The server
+//!   checks the session only when the WebSocket authenticates, so a login
+//!   elsewhere leaves this one's socket open. Its REST calls are refused
+//!   at once, though, and the poller makes one every 5 s: a 401 on any of
+//!   the game's calls ends the session as an `auth_error` does (issue #78
+//!   asks the server to say so on the socket).
 //! - **The email is remembered once it signs in**, so a typo isn't. The
 //!   password is never kept.
 
@@ -282,6 +288,20 @@ impl Auth {
             }
             NetEvent::Rest(tag, _) if *tag == self.tag => self.observe_sign_in(event, &mut effects),
             NetEvent::Connection(state) => self.observe_connection(state, &mut effects),
+            // Any of the game's calls, refused for the session's token.
+            NetEvent::Rest(
+                tag,
+                Err(RestError::Http {
+                    status: 401,
+                    message,
+                }),
+            ) if *tag != self.logout_tag()
+                && matches!(self.phase, Phase::Entering { .. } | Phase::InWorld) =>
+            {
+                tracing::info!("auth: the server refused the session's token: {message}");
+                effects.push(Effect::Disconnect);
+                self.session_ended(message, &mut effects);
+            }
             _ => {}
         }
         effects
@@ -327,14 +347,19 @@ impl Auth {
             }
             ConnectionState::AuthFailed { message } => {
                 tracing::info!("auth: the server ended the session: {message}");
-                self.remembered.token = None;
-                effects.push(Effect::Remember(self.remembered.clone()));
-                self.signed_out(Some(Notice::SessionEnded {
-                    elsewhere: message == REPLACED,
-                }));
+                self.session_ended(message, effects);
             }
             _ => {}
         }
+    }
+
+    /// The server refused the session's token: back to the form, and forget it.
+    fn session_ended(&mut self, message: &str, effects: &mut Vec<Effect>) {
+        self.remembered.token = None;
+        effects.push(Effect::Remember(self.remembered.clone()));
+        self.signed_out(Some(Notice::SessionEnded {
+            elsewhere: message == REPLACED,
+        }));
     }
 
     /// Call once per frame: the health check, while signed out or entering.
@@ -554,6 +579,54 @@ mod tests {
             auth.notice(),
             Some(&Notice::SessionEnded { elsewhere: true })
         );
+    }
+
+    #[test]
+    fn a_refused_rest_call_ends_the_session() {
+        // In the world, a login elsewhere: the socket stays open, but the
+        // next poll is refused.
+        let (mut auth, _) = Auth::new(
+            Remembered {
+                email: Some("ada@capitol.local".into()),
+                token: Some("old".into()),
+            },
+            TAG,
+        );
+        auth.observe(&connected());
+        assert_eq!(auth.phase(), Phase::InWorld);
+        // A 401 on a call that isn't the session's says nothing about it.
+        let logout = auth.observe(&http(TAG + 2, 401, REPLACED));
+        assert!(logout.is_empty());
+        assert_eq!(auth.phase(), Phase::InWorld);
+
+        let effects = auth.observe(&http(1 << 63, 401, REPLACED));
+        assert_eq!(auth.phase(), Phase::SignedOut);
+        assert_eq!(
+            auth.notice(),
+            Some(&Notice::SessionEnded { elsewhere: true })
+        );
+        assert_eq!(
+            effects,
+            vec![
+                Effect::Disconnect,
+                Effect::Remember(Remembered {
+                    email: Some("ada@capitol.local".into()),
+                    token: None,
+                }),
+            ]
+        );
+        // Other errors, and a 401 once signed out, change nothing.
+        assert!(auth.observe(&http(1 << 63, 401, REPLACED)).is_empty());
+        let (mut auth, _) = Auth::new(
+            Remembered {
+                email: None,
+                token: Some("t".into()),
+            },
+            TAG,
+        );
+        auth.observe(&connected());
+        assert!(auth.observe(&http(1 << 63, 500, "boom")).is_empty());
+        assert_eq!(auth.phase(), Phase::InWorld);
     }
 
     #[test]

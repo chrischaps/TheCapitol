@@ -725,9 +725,9 @@ fn a_slow_poll_is_not_doubled() {
     let mut rig = Rig::settled();
     rig.advance(POLL_INTERVAL);
     let first = rig.tick();
-    assert_eq!(first.len(), 3);
+    assert_eq!(first.len(), Fetch::POLLED.len());
 
-    // The next interval passes with all three still out: nothing new is sent,
+    // The next interval passes with all of them still out: nothing new is sent,
     // and each goes once more when its answer arrives.
     rig.advance(POLL_INTERVAL);
     assert_eq!(rig.tick(), vec![]);
@@ -747,7 +747,7 @@ fn a_stall_does_not_burst() {
     rig.advance(POLL_INTERVAL - Duration::from_millis(1));
     assert_eq!(rig.tick(), vec![]);
     rig.advance(Duration::from_millis(1));
-    assert_eq!(rig.tick().len(), 3);
+    assert_eq!(rig.tick().len(), Fetch::POLLED.len());
 }
 
 #[test]

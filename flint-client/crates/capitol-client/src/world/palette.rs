@@ -52,6 +52,24 @@ pub fn zone(zone: Zone) -> u32 {
     }
 }
 
+/// A zone's colour where it's named rather than painted: the React
+/// client's zone indicator (`ZoneIndicator.tsx`), the header strip and the
+/// zone banner. The same as [`zone`], except the wilderness, whose ground
+/// colour is too dark to read on a dark panel.
+pub fn zone_mark(zone: Zone) -> u32 {
+    match zone {
+        Zone::Wilderness => 0x6b7280,
+        zone => self::zone(zone),
+    }
+}
+
+/// An sRGB hex token as `[r, g, b]` from 0 to 1, for the script HUD, whose
+/// colours are sRGB.
+pub fn srgb(h: u32) -> [f32; 3] {
+    let c = |shift: u32| ((h >> shift) & 0xff) as f32 / 255.0;
+    [c(16), c(8), c(0)]
+}
+
 /// A hex colour token (sRGB) as linear RGBA.
 pub fn hex(h: u32) -> [f32; 4] {
     let c = |shift: u32| ((h >> shift) & 0xff) as f32 / 255.0;

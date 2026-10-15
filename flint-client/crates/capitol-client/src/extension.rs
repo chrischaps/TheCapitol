@@ -10,16 +10,19 @@
 
 use crate::atmosphere::Atmosphere;
 use crate::entities::Players;
-use crate::script_api::{self, Shared};
+use crate::script_api::{self, Shared, ZoneBanner};
 use crate::session::Session;
 use crate::terrain::TerrainSource;
 use crate::ui::containers::BenchAction;
+use crate::ui::hud::{ConnectionOverlay, HeaderView};
 use crate::ui::icons::ItemIcons;
 use crate::ui::login::{FormAction, LoginForm, LoginView};
+use crate::world::palette;
 use crate::world::plots::Lot;
 use crate::world::Rebuild;
 use crate::{spike_world, ui, world};
 use capitol_core::auth::{Notice, Phase};
+use capitol_core::net::ConnectionState;
 use capitol_core::protocol::terrain::TerrainResponse;
 use capitol_core::protocol::ws::ClientMessage;
 use flint_player::{ExtensionCtx, PlayerExtension};
@@ -59,6 +62,7 @@ pub struct CapitolExtension {
     /// `--containers`: every container as a slot grid (P5.3).
     containers: bool,
     players: Players,
+    overlay: ConnectionOverlay,
 }
 
 impl CapitolExtension {
@@ -78,6 +82,7 @@ impl CapitolExtension {
             sample: None,
             containers: false,
             players: Players::default(),
+            overlay: ConnectionOverlay::default(),
         }
     }
 
@@ -155,6 +160,15 @@ impl PlayerExtension for CapitolExtension {
             let (poses, state) = session.sample(now);
             let dt = ctx.clock.delta_time.min(0.1) as f32;
             self.players.update(ctx, poses, state, dt, &self.shared);
+            let banner = session.arrival().map(|a| ZoneBanner {
+                name: a.zone.display_name().to_owned(),
+                colour: palette::srgb(palette::zone_mark(a.zone)),
+                at: a.at,
+                first: a.first,
+            });
+            if let Ok(mut shared) = self.shared.banner.lock() {
+                *shared = banner;
+            }
         }
         self.shared
             .at_login
@@ -244,6 +258,32 @@ impl PlayerExtension for CapitolExtension {
         let at_login = self.at_login();
         let mut action = None;
         if let Some(session) = &mut self.session {
+            // First, so every other panel is placed below it.
+            let mut sign_out = false;
+            if !at_login {
+                let state = session.state();
+                let view = HeaderView {
+                    zone: state.zone(),
+                    strands: state.strands(),
+                    who: &session.who(),
+                    connection: session.auth().connection(),
+                    down: session.link().outage().is_some(),
+                };
+                sign_out |= ui::hud::header(ctx, &view);
+            }
+            let outage = if at_login {
+                None
+            } else {
+                session.link().outage()
+            };
+            let connected = matches!(
+                session.auth().connection(),
+                Some(ConnectionState::Connected { .. })
+            );
+            sign_out |= self.overlay.show(ctx, outage, connected, Instant::now());
+            if sign_out {
+                session.log_out();
+            }
             // Starts at its target, so a first frame in the world doesn't fade.
             let opacity = ctx.animate_bool_with_time(
                 egui::Id::new("capitol_login_fade"),
@@ -264,9 +304,6 @@ impl PlayerExtension for CapitolExtension {
                 };
                 action = self.form.show(ctx, &view, opacity);
             }
-            if !at_login && ui::account(ctx, &session.who(), session.auth().connection()) {
-                session.log_out();
-            }
             if !at_login && self.containers {
                 let refused = session.move_refused(Instant::now());
                 match ui::containers::bench(ctx, &mut self.icons, session.state(), refused) {
@@ -279,8 +316,10 @@ impl PlayerExtension for CapitolExtension {
                 }
             }
         }
-        if !at_login {
+        if self.session.is_none() {
             ui::inscription(ctx, &self.shared, &self.terrain.status());
+        } else if !at_login {
+            ui::controls(ctx, &self.terrain.status());
         }
         if self.icon_sheet {
             ui::icons::sheet(ctx, &mut self.icons);

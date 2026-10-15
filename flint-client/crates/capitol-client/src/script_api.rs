@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// State the Rust side writes and scripts read.
 #[derive(Clone, Default)]
@@ -30,6 +31,20 @@ pub struct Shared {
     /// Where you're walking to (P4.3), in world metres, for the marker.
     /// `None` when standing, and offline.
     pub destination: Arc<Mutex<Option<[f32; 2]>>>,
+    /// The zone you last entered (P4.5), for the banner in `hud.rhai`.
+    pub banner: Arc<Mutex<Option<ZoneBanner>>>,
+}
+
+/// The zone banner's words and colour, and when it started.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZoneBanner {
+    pub name: String,
+    /// sRGB, 0 to 1.
+    pub colour: [f32; 3],
+    /// When the banner starts; it may be a moment ahead.
+    pub at: Instant,
+    /// The zone you came into the world in, not one you walked into.
+    pub first: bool,
 }
 
 /// One avatar's name tag, as `entities::Players` placed it this frame.
@@ -117,6 +132,31 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             None => rhai::Dynamic::UNIT,
         }
     });
+    // `cap_zone_banner() -> #{ name, r, g, b, age, first } or ()`: the zone
+    // you last entered, its colour (sRGB) and how many seconds ago its
+    // banner started. `age` is negative while it waits to start. `first`
+    // when it's the zone you came into the world in. () offline, and
+    // signed out.
+    let banner = shared.banner.clone();
+    engine.register_fn("cap_zone_banner", move || -> rhai::Dynamic {
+        let Some(b) = banner.lock().ok().and_then(|b| b.clone()) else {
+            return rhai::Dynamic::UNIT;
+        };
+        let now = Instant::now();
+        let age = if now >= b.at {
+            (now - b.at).as_secs_f64()
+        } else {
+            -(b.at - now).as_secs_f64()
+        };
+        let mut m = rhai::Map::new();
+        m.insert("name".into(), b.name.into());
+        m.insert("r".into(), (b.colour[0] as f64).into());
+        m.insert("g".into(), (b.colour[1] as f64).into());
+        m.insert("b".into(), (b.colour[2] as f64).into());
+        m.insert("age".into(), age.into());
+        m.insert("first".into(), b.first.into());
+        m.into()
+    });
     // `cap_ground_y() -> float`: the land's height in metres, for picking
     // and for drawing on the ground. The sea is at 0.
     engine.register_fn("cap_ground_y", || crate::coords::layer::GROUND as f64);
@@ -166,6 +206,24 @@ mod tests {
             .eval(r#"let p = cap_players()[0]; `${p.name} ${p.alpha} ${p.me}`"#)
             .unwrap();
         assert_eq!(who, "Ada 0.5 true");
+    }
+
+    #[test]
+    fn scripts_read_the_zone_banner() {
+        let shared = Shared::default();
+        let mut engine = rhai::Engine::new();
+        register(&mut engine, &shared);
+        assert!(engine.eval::<()>("cap_zone_banner()").is_ok());
+        *shared.banner.lock().unwrap() = Some(ZoneBanner {
+            name: "Trade District".into(),
+            colour: [0.25, 0.5, 1.0],
+            at: Instant::now() + std::time::Duration::from_secs(60),
+            first: true,
+        });
+        let words: String = engine
+            .eval(r#"let b = cap_zone_banner(); `${b.name} ${b.b} ${b.first} ${b.age < -59.0}`"#)
+            .unwrap();
+        assert_eq!(words, "Trade District 1.0 true true");
     }
 
     #[test]

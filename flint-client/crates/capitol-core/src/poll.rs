@@ -26,7 +26,7 @@
 //! | Trigger | Fetch |
 //! |---|---|
 //! | first `Connected`, every `Resync` | me (name, position, currency), containers, nearby nodes, nearby stations, plots, recipes |
-//! | every 5 s while connected | nearby nodes, nearby stations, plots |
+//! | every 5 s while connected | nearby nodes, nearby stations, plots, currency |
 //! | `inventory_updated` (mine, or a container I hold) | containers, or the open station's container |
 //! | `station_opened` (mine) | that station's container |
 //! | `station_placed` (mine: a kit was used) | containers |
@@ -102,8 +102,15 @@ impl Fetch {
         Fetch::Recipes,
     ];
 
-    /// What the timer refetches.
-    pub const POLLED: [Fetch; 3] = [Fetch::NearbyNodes, Fetch::NearbyStations, Fetch::Plots];
+    /// What the timer refetches. Currency is here for what the server
+    /// changes without saying so, such as the hourly property tax (P4.5's
+    /// header shows the balance).
+    pub const POLLED: [Fetch; 4] = [
+        Fetch::NearbyNodes,
+        Fetch::NearbyStations,
+        Fetch::Plots,
+        Fetch::Currency,
+    ];
 
     pub fn request(&self) -> RestRequest {
         match *self {

@@ -21,9 +21,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use capitol_core::auth::{Auth, Effect, Phase, Remembered};
 use capitol_core::motion::{Motion, Pose};
-use capitol_core::net::{Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag};
+use capitol_core::net::{
+    ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
+};
 use capitol_core::poll::{Fetch, Poller};
 use capitol_core::protocol::rest::MoveItemRequest;
+use capitol_core::protocol::rules::Zone;
 use capitol_core::protocol::ws::ClientMessage;
 use capitol_core::state::{GameState, StateEvent};
 use flint_runtime::PersistentStore;
@@ -53,6 +56,10 @@ pub struct Session {
     poller: Poller,
     /// Every player's pose, smoothed between snapshots (P2.5).
     motion: Motion,
+    /// The connection's outage, if it's down, for the overlay (P4.5).
+    link: Link,
+    /// The zone you last entered, for the banner (P4.5).
+    arrival: Option<Arrival>,
     /// The store, poller and motion have seen events since they were last reset.
     used: bool,
     /// Why the last move was refused, and when.
@@ -76,6 +83,21 @@ pub struct Blocked {
     pub toward: Option<(f64, f64)>,
 }
 
+/// How long after the first zone is known its banner waits: about as long
+/// as the camera takes to come down onto you from the login circle, so the
+/// name lands with you.
+pub const FIRST_BANNER_DELAY: Duration = Duration::from_millis(2600);
+
+/// A zone the player entered: the banner names it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Arrival {
+    pub zone: Zone,
+    /// When the banner starts, which for the first zone is a little later.
+    pub at: Instant,
+    /// The zone you came into the world in, rather than walked into.
+    pub first: bool,
+}
+
 impl Session {
     /// Starts the net thread for `server`. If the file holds a token for
     /// this server, it's tried at once.
@@ -94,6 +116,8 @@ impl Session {
             state: GameState::new(),
             poller: Poller::new(),
             motion: Motion::new(),
+            link: Link::default(),
+            arrival: None,
             used: false,
             move_refused: None,
             file,
@@ -121,6 +145,16 @@ impl Session {
     /// `positions` has placed them), and the store they were drawn from.
     pub fn sample(&mut self, now: Instant) -> (&[Pose], &GameState) {
         (self.motion.sample(now), &self.state)
+    }
+
+    /// The connection's outage while it's down.
+    pub fn link(&self) -> &Link {
+        &self.link
+    }
+
+    /// The zone you last entered, and when.
+    pub fn arrival(&self) -> Option<Arrival> {
+        self.arrival
     }
 
     /// Who's signed in: the player's name once the server has said it,
@@ -231,7 +265,25 @@ impl Session {
                 NetEvent::Rest(MOVE_TAG, Ok(_)) => self.move_refused = None,
                 _ => {}
             }
+            if let NetEvent::Connection(connection) = event {
+                self.link.observe(connection, now);
+            }
             let changes = self.state.apply(event);
+            for change in &changes {
+                if let StateEvent::ZoneChanged { from, to } = change {
+                    let first = from.is_none();
+                    self.arrival = Some(Arrival {
+                        zone: *to,
+                        at: now
+                            + if first {
+                                FIRST_BANNER_DELAY
+                            } else {
+                                Duration::ZERO
+                            },
+                        first,
+                    });
+                }
+            }
             self.motion.observe(now, &changes, &self.state);
             for change in &changes {
                 if let StateEvent::MovementBlocked { reason, x, y } = change {
@@ -275,6 +327,8 @@ impl Session {
             self.last_move = None;
             self.blocked.clear();
             self.move_refused = None;
+            self.link = Link::default();
+            self.arrival = None;
         }
     }
 
@@ -298,6 +352,62 @@ fn refusal(e: &RestError) -> String {
         RestError::Http { status, .. } => format!("The server refused (HTTP {status})"),
         RestError::Transport(_) => "Couldn't reach the server".into(),
         RestError::Decode(_) => "The server's answer didn't make sense".into(),
+    }
+}
+
+/// The connection seen from the overlay: up, or down since when, on which
+/// attempt, and when the next try starts. `ConnectionState` says each step
+/// as it happens; this keeps what the overlay needs between them, such as
+/// the attempt number while that attempt is connecting.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Link {
+    outage: Option<Outage>,
+}
+
+/// A dropped connection that's being retried.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Outage {
+    /// When it dropped.
+    pub since: Instant,
+    /// The retry under way or waited for, counting from 1.
+    pub attempt: u32,
+    /// Why the last try ended, in the net layer's words.
+    pub reason: String,
+    /// The wait before this attempt.
+    pub delay: Duration,
+    /// When the attempt starts. Past it, the attempt is connecting.
+    pub next_try: Instant,
+}
+
+impl Link {
+    pub fn observe(&mut self, state: &ConnectionState, now: Instant) {
+        match state {
+            ConnectionState::Reconnecting {
+                attempt,
+                delay,
+                reason,
+            } => {
+                let since = self.outage.as_ref().map_or(now, |o| o.since);
+                self.outage = Some(Outage {
+                    since,
+                    attempt: *attempt,
+                    reason: reason.clone(),
+                    delay: *delay,
+                    next_try: now + *delay,
+                });
+            }
+            // An attempt under way: the outage holds until it's through.
+            ConnectionState::Connecting | ConnectionState::Authenticating => {}
+            // Back, or the session is over and the form takes it from here.
+            ConnectionState::Connected { .. }
+            | ConnectionState::Disconnected { .. }
+            | ConnectionState::AuthFailed { .. } => self.outage = None,
+        }
+    }
+
+    /// The outage, if the connection is down.
+    pub fn outage(&self) -> Option<&Outage> {
+        self.outage.as_ref()
     }
 }
 
@@ -421,6 +531,54 @@ pub fn server_label(server: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_outage_lasts_from_the_drop_to_the_reconnect() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs_f32;
+        let mut link = Link::default();
+        link.observe(
+            &ConnectionState::Connected {
+                player_id: Default::default(),
+            },
+            t0,
+        );
+        assert_eq!(link.outage(), None);
+
+        let reconnecting = |attempt, delay| ConnectionState::Reconnecting {
+            attempt,
+            delay,
+            reason: "connection reset".into(),
+        };
+        link.observe(&reconnecting(1, s(0.5)), t0);
+        link.observe(&ConnectionState::Connecting, t0 + s(0.5));
+        link.observe(&reconnecting(2, s(1.0)), t0 + s(0.6));
+        // The attempt and its wait move on; when it dropped doesn't.
+        let o = link.outage().unwrap();
+        assert_eq!((o.since, o.attempt, o.delay), (t0, 2, s(1.0)));
+        assert_eq!(o.next_try, t0 + s(1.6));
+        // While that attempt connects, the overlay still says which it is.
+        link.observe(&ConnectionState::Authenticating, t0 + s(1.7));
+        assert_eq!(link.outage().unwrap().attempt, 2);
+
+        link.observe(
+            &ConnectionState::Connected {
+                player_id: Default::default(),
+            },
+            t0 + s(1.8),
+        );
+        assert_eq!(link.outage(), None);
+
+        // A token refused while away ends it too: the form takes over.
+        link.observe(&reconnecting(1, s(0.5)), t0 + s(5.0));
+        link.observe(
+            &ConnectionState::AuthFailed {
+                message: "Session expired".into(),
+            },
+            t0 + s(5.6),
+        );
+        assert_eq!(link.outage(), None);
+    }
 
     #[test]
     fn server_urls_are_tidied() {
