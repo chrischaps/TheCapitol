@@ -1098,22 +1098,10 @@ async fn handle_place_station(
     }
 
     // M7: Find plot at placement position
-    let plot: crate::models::Plot = sqlx::query_as(
-        "SELECT id, zone_id, grid_x, grid_y, world_x, world_y,
-                bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y,
-                size_category, plot_type, owner_id, claimed_at,
-                assessed_value, last_tax_paid, tax_owed, station_count
-         FROM plots
-         WHERE $1 >= bounds_min_x AND $1 <= bounds_max_x
-           AND $2 >= bounds_min_y AND $2 <= bounds_max_y
-         LIMIT 1"
-    )
-    .bind(x as f32)
-    .bind(y as f32)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?
-    .ok_or_else(|| "Must place station on a plot".to_string())?;
+    let plot = crate::routes::plots::find_plot_at_position(&state.db, x, y)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?
+        .ok_or_else(|| "Must place station on a plot".to_string())?;
 
     // M7: Verify player owns the plot
     if plot.owner_id != Some(player_id) {

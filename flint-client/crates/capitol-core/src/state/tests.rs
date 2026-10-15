@@ -118,6 +118,8 @@ fn plot(owner: Option<Uuid>) -> PlotInfo {
         assessed_value: 500,
         station_count: 0,
         station_capacity: 2,
+        terrain_id: None,
+        corners: None,
     }
 }
 

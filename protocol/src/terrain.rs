@@ -156,6 +156,28 @@ impl TerrainPlot {
     }
 }
 
+/// Whether a point is inside a lot's quad, or on its edge. The quad may wind
+/// either way. A lot is convex, but this holds for any simple quad.
+pub fn quad_contains(corners: &[(f64, f64); 4], x: f64, y: f64) -> bool {
+    const EDGE: f64 = 1e-9;
+    let mut inside = false;
+    for i in 0..4 {
+        let (a, b) = (corners[i], corners[(i + 1) % 4]);
+        // On the edge counts as on the plot.
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let cross = dx * (y - a.1) - dy * (x - a.0);
+        let within = (x - a.0) * (x - b.0) <= EDGE && (y - a.1) * (y - b.1) <= EDGE;
+        if cross.abs() <= EDGE * (dx.abs() + dy.abs()).max(1.0) && within {
+            return true;
+        }
+        // Even-odd crossing test.
+        if (a.1 > y) != (b.1 > y) && x < a.0 + (y - a.1) * dx / dy {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +193,20 @@ mod tests {
         assert!(!bridge.contains_angle(5.0, 600.0));
         assert!(bridge.contains_angle(359.0, 600.0));
         assert!(bridge.contains_angle(-1.0, 600.0));
+    }
+
+    #[test]
+    fn quad_contains_inside_edge_and_outside() {
+        // A rotated square (a diamond) round (10, 10), wound anticlockwise.
+        let d = [(10.0, 0.0), (20.0, 10.0), (10.0, 20.0), (0.0, 10.0)];
+        assert!(quad_contains(&d, 10.0, 10.0));
+        assert!(quad_contains(&d, 15.0, 5.0), "on an edge");
+        assert!(quad_contains(&d, 10.0, 0.0), "on a corner");
+        assert!(!quad_contains(&d, 2.0, 2.0), "inside the box, outside the lot");
+        assert!(!quad_contains(&d, 21.0, 10.0));
+        let mut cw = d;
+        cw.reverse();
+        assert!(quad_contains(&cw, 10.0, 10.0) && !quad_contains(&cw, 2.0, 2.0));
     }
 
     #[test]

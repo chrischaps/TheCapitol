@@ -6,6 +6,7 @@ mod events;
 mod extraction;
 mod inventory;
 mod movement;
+pub mod plot_sync;
 pub mod property_tax;
 mod regeneration;
 mod stations;

@@ -10,7 +10,7 @@ use capitol_protocol::rest::{ClaimPlotResponse, ListPlotsQuery, ListPlotsRespons
 use crate::engine::currency::{subtract_strands, TransactionType};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
-use crate::models::{Plot, PlotInfo, PlotPermissions, PlotWithJoins, UpdatePermissionsRequest};
+use crate::models::{Plot, PlotInfo, PLOT_COLUMNS, PlotPermissions, PlotWithJoins, UpdatePermissionsRequest};
 use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router<AppState> {
@@ -113,6 +113,7 @@ pub async fn get_plot(
                 p.bounds_min_x, p.bounds_min_y, p.bounds_max_x, p.bounds_max_y,
                 p.size_category, p.plot_type, p.owner_id, p.claimed_at,
                 p.assessed_value, p.last_tax_paid, p.tax_owed, p.station_count,
+                p.terrain_id, p.corners,
                 pl.name as owner_name, psc.station_capacity
          FROM plots p
          LEFT JOIN players pl ON p.owner_id = pl.id
@@ -143,28 +144,12 @@ pub async fn get_plot_at_position(
     State(state): State<AppState>,
     Query(query): Query<PositionQuery>,
 ) -> Result<Json<Option<PlotInfo>>, AppError> {
-    let row: Option<PlotWithJoins> = sqlx::query_as(
-        "SELECT p.id, p.zone_id, p.grid_x, p.grid_y, p.world_x, p.world_y,
-                p.bounds_min_x, p.bounds_min_y, p.bounds_max_x, p.bounds_max_y,
-                p.size_category, p.plot_type, p.owner_id, p.claimed_at,
-                p.assessed_value, p.last_tax_paid, p.tax_owed, p.station_count,
-                pl.name as owner_name, psc.station_capacity
-         FROM plots p
-         LEFT JOIN players pl ON p.owner_id = pl.id
-         JOIN plot_size_categories psc ON p.size_category = psc.id
-         WHERE $1 >= p.bounds_min_x AND $1 <= p.bounds_max_x
-           AND $2 >= p.bounds_min_y AND $2 <= p.bounds_max_y
-         LIMIT 1"
-    )
-    .bind(query.x as f32)
-    .bind(query.y as f32)
-    .fetch_optional(&state.db)
-    .await?;
-
-    Ok(Json(row.map(|r| r.to_plot_info())))
+    let Some(plot) = find_plot_at_position(&state.db, query.x, query.y).await? else {
+        return Ok(Json(None));
+    };
+    Ok(Json(Some(get_plot(State(state), Path(plot.id)).await?.0)))
 }
 
-/// Claim an unclaimed plot
 #[utoipa::path(
     post,
     path = "/plots/{id}/claim",
@@ -366,28 +351,28 @@ pub async fn update_permissions(
 }
 
 /// Helper to find plot at a position (used by station placement)
+/// The plot under a point: the lot that contains it, tested against the lot's
+/// own corners, not its box (B7). Used by station placement (REST and WS) and
+/// `/plots/at`. The box index narrows it to a few candidates first.
 pub async fn find_plot_at_position(
     db: &sqlx::PgPool,
     x: f64,
     y: f64,
 ) -> Result<Option<Plot>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, zone_id, grid_x, grid_y, world_x, world_y,
-                bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y,
-                size_category, plot_type, owner_id, claimed_at,
-                assessed_value, last_tax_paid, tax_owed, station_count
-         FROM plots
-         WHERE $1 >= bounds_min_x AND $1 <= bounds_max_x
-           AND $2 >= bounds_min_y AND $2 <= bounds_max_y
-         LIMIT 1"
-    )
+    // The boxes are stored as REAL, so widen them a little against rounding.
+    let candidates: Vec<Plot> = sqlx::query_as(&format!(
+        "SELECT {PLOT_COLUMNS} FROM plots
+         WHERE $1 >= bounds_min_x - 0.01 AND $1 <= bounds_max_x + 0.01
+           AND $2 >= bounds_min_y - 0.01 AND $2 <= bounds_max_y + 0.01
+         ORDER BY terrain_id NULLS LAST"
+    ))
     .bind(x as f32)
     .bind(y as f32)
-    .fetch_optional(db)
-    .await
+    .fetch_all(db)
+    .await?;
+    Ok(candidates.into_iter().find(|p| p.contains(x, y)))
 }
 
-/// Get station capacity for a plot
 pub async fn get_plot_capacity(db: &sqlx::PgPool, plot_id: Uuid) -> Result<(i32, i32), sqlx::Error> {
     let row: (i32, i32) = sqlx::query_as(
         "SELECT p.station_count, psc.station_capacity

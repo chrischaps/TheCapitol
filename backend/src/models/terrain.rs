@@ -764,6 +764,14 @@ impl TerrainConfig {
         config.terrain_plots = config.generate_suburban_plots_internal(&params.suburban);
         config.terrain_plots.extend(config.generate_urban_plots(params));
         config.terrain_plots.extend(config.generate_rural_plots(params));
+        // Pull every lot clear of the roads and the water, and make the ids unique
+        // (B7): a lot is what players claim, so it must be the ground it looks like.
+        config.terrain_plots = super::lot_clearance::finish_lots(
+            std::mem::take(&mut config.terrain_plots),
+            &config.roads,
+            &config.water_rings,
+            (config.center_x, config.center_y),
+        );
 
         config
     }
@@ -2682,11 +2690,35 @@ impl TerrainConfig {
 
         let angle_step = 2.0 * PI / spoke_count as f64;
 
+        // Some spokes are really arterials (every 45 degrees, at the canal
+        // bridges), which are far wider than a grid street. A block side on
+        // one of those is inset by the arterial's half width instead.
+        let arterial_angles: Vec<f64> = self
+            .roads
+            .iter()
+            .filter(|r| r.road_type == RoadType::Arterial)
+            .filter_map(|r| r.points.last())
+            .map(|&(x, y)| (y - self.center_y).atan2(x - self.center_x))
+            .collect();
+        let side_half = |a: f64| {
+            let on_arterial = arterial_angles.iter().any(|&b| {
+                let d = (a - b).rem_euclid(2.0 * PI);
+                d.min(2.0 * PI - d) < 1e-6
+            });
+            if on_arterial { half_w.max(params.arterial_width / 2.0) } else { half_w }
+        };
+
         // Walk concentric rings
         let mut r = inner_radius + radial_spacing;
         let mut ring_idx = 0u32;
         while r < outer_radius {
-            let r_in = r - radial_spacing + half_w; // inner arc inset from road centerline
+            // Inner arc inset from road centerline. The first ring backs onto
+            // the canal, not a street, so it keeps back from the water's kerb.
+            let r_in = if ring_idx == 0 {
+                inner_radius + super::lot_clearance::WATER_KERB + 1.0
+            } else {
+                r - radial_spacing + half_w
+            };
             let r_out = r - half_w;                 // outer arc inset from road centerline
 
             // Skip if block is too thin after insets
@@ -2701,13 +2733,11 @@ impl TerrainConfig {
                 let a2 = (spoke_idx + 1) as f64 * angle_step;
 
                 // Angular insets for street width at inner and outer arcs
-                let angular_inset_in = if r_in > 0.0 { half_w / r_in } else { 0.0 };
-                let angular_inset_out = if r_out > 0.0 { half_w / r_out } else { 0.0 };
-
-                let block_a1_in = a1 + angular_inset_in;
-                let block_a2_in = a2 - angular_inset_in;
-                let block_a1_out = a1 + angular_inset_out;
-                let block_a2_out = a2 - angular_inset_out;
+                let (h1, h2) = (side_half(a1), side_half(a2));
+                let block_a1_in = a1 + h1 / r_in;
+                let block_a2_in = a2 - h2 / r_in;
+                let block_a1_out = a1 + h1 / r_out;
+                let block_a2_out = a2 - h2 / r_out;
 
                 // Check if block has positive angular extent
                 if block_a2_in <= block_a1_in || block_a2_out <= block_a1_out {
@@ -2738,12 +2768,10 @@ impl TerrainConfig {
                     let sub_r_out = r_in + (block_depth / num_depth_subdivs as f64) * (d + 1) as f64;
 
                     // Recalculate angular insets for this depth band
-                    let sub_inset_in = if sub_r_in > 0.0 { half_w / sub_r_in } else { 0.0 };
-                    let sub_inset_out = if sub_r_out > 0.0 { half_w / sub_r_out } else { 0.0 };
-                    let sub_a1_in = a1 + sub_inset_in;
-                    let sub_a2_in = a2 - sub_inset_in;
-                    let sub_a1_out = a1 + sub_inset_out;
-                    let sub_a2_out = a2 - sub_inset_out;
+                    let sub_a1_in = a1 + h1 / sub_r_in;
+                    let sub_a2_in = a2 - h2 / sub_r_in;
+                    let sub_a1_out = a1 + h1 / sub_r_out;
+                    let sub_a2_out = a2 - h2 / sub_r_out;
 
                     for s in 0..num_subdivs {
                         let frac0 = s as f64 / num_subdivs as f64;

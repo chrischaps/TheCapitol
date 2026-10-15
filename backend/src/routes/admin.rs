@@ -1,15 +1,16 @@
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, Query, State},
     routing::{get, post, put},
     Json, Router,
 };
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::{ActionState, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
+use crate::engine::plot_sync::{sync_plots, OnOwned, SyncError};
 use crate::engine::GameEvent;
 
 fn require_admin(user: &AuthUser) -> Result<(), AppError> {
@@ -62,16 +63,59 @@ pub async fn update_world_params(
     Ok(Json(params))
 }
 
-/// Commit current in-memory world params to the database
+#[derive(Debug, Deserialize)]
+pub struct CommitQuery {
+    /// Release owned plots the new terrain moves or removes (refunding the
+    /// deed and removing their stations) instead of refusing the commit.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Commit current in-memory world params to the database.
+///
+/// The claimable plots follow the terrain's lots (B7), so this also syncs the
+/// `plots` table. If that would move or remove an owned plot, the commit is
+/// refused with 409 and changes nothing, unless `?force=true`.
 pub async fn commit_world_params(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
+    Query(query): Query<CommitQuery>,
 ) -> Result<Json<WorldGenParams>, AppError> {
     require_admin(&user)?;
 
     let game = state.game.read().await;
     let params = game.world_gen_params.clone();
+    let lots = game.terrain.terrain_plots.clone();
     drop(game); // release lock before DB call
+
+    let on_owned = if query.force { OnOwned::Release } else { OnOwned::Refuse };
+    let report = match sync_plots(&state.db, &lots, on_owned).await {
+        Ok(report) => report,
+        Err(SyncError::Db(e)) => return Err(e.into()),
+        Err(SyncError::OwnedConflicts(conflicts)) => {
+            let list: Vec<String> = conflicts
+                .iter()
+                .map(|c| format!("{} ({}, {})", c.terrain_id, c.plot_id, if c.removed { "gone" } else { "reshaped" }))
+                .collect();
+            return Err(AppError::Conflict(format!(
+                "The new terrain moves or removes {} owned plot(s): {}. Commit with ?force=true to release them, refund their deeds and remove their stations.",
+                conflicts.len(),
+                list.join(", ")
+            )));
+        }
+    };
+    if !report.removed_stations.is_empty() {
+        let mut game = state.game.write().await;
+        for station_id in &report.removed_stations {
+            game.stations.remove(station_id);
+            let _ = game.event_sender.send(GameEvent::StationRemoved { station_id: *station_id });
+        }
+    }
+    tracing::info!(
+        "Admin {} commit synced plots: {} added, {} updated, {} removed, {} owned released",
+        user.account_id, report.inserted, report.updated, report.deleted,
+        if query.force { report.conflicts.len() } else { 0 }
+    );
 
     let params_json = serde_json::to_value(&params)
         .map_err(|e| AppError::Internal(format!("Failed to serialize params: {}", e)))?;

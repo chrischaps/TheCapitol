@@ -85,6 +85,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize game state with loaded params
     let game_state = Arc::new(RwLock::new(engine::GameState::with_params(world_gen_params)));
 
+    // The claimable plots are the terrain's lots (B7). Bring the table up to
+    // date with them. An owned plot the terrain no longer matches is left as it
+    // is: only an admin's forced commit releases one.
+    let lots = game_state.read().await.terrain.terrain_plots.clone();
+    let report = match engine::plot_sync::sync_plots(&db_pool, &lots, engine::plot_sync::OnOwned::Keep).await {
+        Ok(report) => report,
+        Err(engine::plot_sync::SyncError::Db(e)) => return Err(e.into()),
+        Err(engine::plot_sync::SyncError::OwnedConflicts(_)) => unreachable!("Keep never refuses"),
+    };
+    tracing::info!(
+        "Plots synced with the terrain's {} lots: {} added, {} updated, {} removed",
+        lots.len(), report.inserted, report.updated, report.deleted
+    );
+    for c in &report.conflicts {
+        tracing::warn!(
+            "Owned plot {} ({}) no longer matches the terrain ({}); kept as it is",
+            c.plot_id, c.terrain_id, if c.removed { "lot gone" } else { "lot reshaped" }
+        );
+    }
+
     // Load resource types into game state
     let resource_types: Vec<ResourceType> = sqlx::query_as(
         "SELECT id, name, yields_item, yield_quantity_min, yield_quantity_max,

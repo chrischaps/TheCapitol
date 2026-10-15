@@ -26,6 +26,22 @@ pub struct Plot {
     pub last_tax_paid: Option<DateTime<Utc>>,
     pub tax_owed: i32,
     pub station_count: i32,
+    pub terrain_id: Option<String>,
+    pub corners: Option<Vec<f64>>,
+}
+
+/// The columns a `Plot` reads, for `SELECT {PLOT_COLUMNS} FROM plots`.
+pub const PLOT_COLUMNS: &str = "id, zone_id, grid_x, grid_y, world_x, world_y,
+    bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y,
+    size_category, plot_type, owner_id, claimed_at,
+    assessed_value, last_tax_paid, tax_owed, station_count, terrain_id, corners";
+
+/// The flattened `corners` column as four points, if it holds them.
+pub fn corners_from_column(column: Option<&[f64]>) -> Option<[(f64, f64); 4]> {
+    match column {
+        Some(&[x0, y0, x1, y1, x2, y2, x3, y3]) => Some([(x0, y0), (x1, y1), (x2, y2), (x3, y3)]),
+        _ => None,
+    }
 }
 
 impl Plot {
@@ -39,9 +55,17 @@ impl Plot {
         )
     }
 
-    /// Check if a point is within this plot's bounds
+    /// The lot's corners, or `None` for a pre-B7 plot that only has a box.
+    pub fn quad(&self) -> Option<[(f64, f64); 4]> {
+        corners_from_column(self.corners.as_deref())
+    }
+
+    /// Whether a point is on this plot: inside its lot, or its box if it has none.
     pub fn contains(&self, x: f64, y: f64) -> bool {
-        self.bounds().contains(x, y)
+        match self.quad() {
+            Some(q) => capitol_protocol::terrain::quad_contains(&q, x, y),
+            None => self.bounds().contains(x, y),
+        }
     }
 
     /// Check if this plot is owned
@@ -113,6 +137,8 @@ impl Plot {
             assessed_value: self.assessed_value,
             station_count: self.station_count,
             station_capacity,
+            terrain_id: self.terrain_id.clone(),
+            corners: self.quad(),
         }
     }
 }
@@ -144,6 +170,8 @@ pub struct PlotWithJoins {
     pub last_tax_paid: Option<DateTime<Utc>>,
     pub tax_owed: i32,
     pub station_count: i32,
+    pub terrain_id: Option<String>,
+    pub corners: Option<Vec<f64>>,
     pub owner_name: Option<String>,
     pub station_capacity: i32,
 }
@@ -169,6 +197,8 @@ impl PlotWithJoins {
             assessed_value: self.assessed_value,
             station_count: self.station_count,
             station_capacity: self.station_capacity,
+            terrain_id: self.terrain_id.clone(),
+            corners: corners_from_column(self.corners.as_deref()),
         }
     }
 }

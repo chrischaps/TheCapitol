@@ -21,6 +21,30 @@ export interface PlotInfo {
   assessedValue: number
   stationCount: number
   stationCapacity: number
+  /** The `/terrain` lot this plot is. Null only for a pre-B7 plot. */
+  terrainId: string | null
+  /** The lot's corners: the shape that's claimed and that placement tests. */
+  corners: [number, number][] | null
+}
+
+/** Whether a point is on a plot: inside its lot, or its box if it has none. */
+export function plotContains(plot: PlotInfo, x: number, y: number): boolean {
+  const c = plot.corners
+  if (!c) {
+    const b = plot.bounds
+    return x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY
+  }
+  // Even-odd crossing test. The server's test also counts the edge, which
+  // matters only to a click exactly on the line.
+  let inside = false
+  for (let i = 0, j = c.length - 1; i < c.length; j = i++) {
+    const [xi, yi] = c[i]
+    const [xj, yj] = c[j]
+    if ((yi > y) !== (yj > y) && x < xi + ((y - yi) * (xj - xi)) / (yj - yi)) {
+      inside = !inside
+    }
+  }
+  return inside
 }
 
 export interface ListPlotsResponse {
@@ -60,6 +84,8 @@ interface ApiPlotInfo {
   assessed_value: number
   station_count: number
   station_capacity: number
+  terrain_id?: string | null
+  corners?: [number, number][] | null
 }
 
 function transformPlot(api: ApiPlotInfo): PlotInfo {
@@ -82,6 +108,8 @@ function transformPlot(api: ApiPlotInfo): PlotInfo {
     assessedValue: api.assessed_value,
     stationCount: api.station_count,
     stationCapacity: api.station_capacity,
+    terrainId: api.terrain_id ?? null,
+    corners: api.corners ?? null,
   }
 }
 

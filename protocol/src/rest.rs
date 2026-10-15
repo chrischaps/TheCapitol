@@ -575,6 +575,25 @@ pub struct PlotInfo {
     pub station_count: i32,
     /// Maximum stations allowed
     pub station_capacity: i32,
+    /// The `/terrain` lot this plot is (`TerrainPlot::id`). Clients join the two
+    /// on it. `None` only for a plot claimed before B7 that no lot replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terrain_id: Option<String>,
+    /// The lot's four corners, as `/terrain` draws them. This is the shape that's
+    /// claimed and that station placement tests. `bounds` is its bounding box.
+    /// `None` only for a pre-B7 plot, whose shape is `bounds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corners: Option<[(f64, f64); 4]>,
+}
+
+impl PlotInfo {
+    /// Whether a point is on this plot: inside its lot, or its box if it has none.
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        match &self.corners {
+            Some(corners) => crate::terrain::quad_contains(corners, x, y),
+            None => self.bounds.contains(x, y),
+        }
+    }
 }
 
 /// Axis-aligned bounding box for a plot

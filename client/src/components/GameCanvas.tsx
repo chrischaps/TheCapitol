@@ -3,6 +3,7 @@ import { useGame } from '../contexts/GameContext'
 import { useAuth } from '../contexts/AuthContext'
 import type { ResourceNode, PlayerPosition } from '../contexts/GameContext'
 import type { StationInfo } from '../api/stations'
+import { plotContains } from '../api/plots'
 import './GameCanvas.css'
 
 // M7: World expanded to 8000x8000, centered at (4000, 4000)
@@ -68,7 +69,7 @@ export default function GameCanvas() {
     exitPlacementMode,
     openStationById,
     initiateTrade,
-    selectPlot,
+    selectPlotAt,
     terrain,
   } = useGame()
 
@@ -132,7 +133,10 @@ export default function GameCanvas() {
       if (terrain) {
         // Terrain plots (draw first, underneath roads)
         if (terrain.terrain_plots) {
-          drawTerrainPlots(ctx, offsetX, offsetY, terrain.terrain_plots)
+          const owned = new Set(
+            nearbyPlots.filter((p) => p.ownerId === myPlayerId && p.terrainId).map((p) => p.terrainId as string)
+          )
+          drawTerrainPlots(ctx, offsetX, offsetY, terrain.terrain_plots, owned)
         }
         // Roads
         if (terrain.roads) {
@@ -211,11 +215,8 @@ export default function GameCanvas() {
         let onOwnedPlot = false
         for (const plot of nearbyPlots) {
           if (
-            placementMode.previewX >= plot.bounds.minX &&
-            placementMode.previewX <= plot.bounds.maxX &&
-            placementMode.previewY >= plot.bounds.minY &&
-            placementMode.previewY <= plot.bounds.maxY &&
-            plot.ownerId === myPlayerId
+            plot.ownerId === myPlayerId &&
+            plotContains(plot, placementMode.previewX, placementMode.previewY)
           ) {
             onOwnedPlot = true
             break
@@ -537,7 +538,8 @@ export default function GameCanvas() {
     ctx: CanvasRenderingContext2D,
     offsetX: number,
     offsetY: number,
-    plots: { id: string; corners: [[number, number], [number, number], [number, number], [number, number]]; area: number; zone?: string }[]
+    plots: { id: string; corners: [[number, number], [number, number], [number, number], [number, number]]; area: number; zone?: string }[],
+    owned: Set<string>
   ) {
     // Zone-specific colors for visual differentiation
     const ZONE_COLORS: Record<string, { fill: string; stroke: string }> = {
@@ -561,9 +563,16 @@ export default function GameCanvas() {
       ctx.fillStyle = colors.fill
       ctx.fill()
 
-      // Draw border
-      ctx.strokeStyle = colors.stroke
-      ctx.lineWidth = 1
+      // Draw border: gold for your own plots
+      if (owned.has(plot.id)) {
+        ctx.fillStyle = 'rgba(201, 162, 39, 0.15)'
+        ctx.fill()
+        ctx.strokeStyle = '#c9a227'
+        ctx.lineWidth = 2
+      } else {
+        ctx.strokeStyle = colors.stroke
+        ctx.lineWidth = 1
+      }
       ctx.stroke()
     }
   }
@@ -916,13 +925,7 @@ export default function GameCanvas() {
       // M7: Check if on owned plot
       let onOwnedPlot = false
       for (const plot of nearbyPlots) {
-        if (
-          worldX >= plot.bounds.minX &&
-          worldX <= plot.bounds.maxX &&
-          worldY >= plot.bounds.minY &&
-          worldY <= plot.bounds.maxY &&
-          plot.ownerId === myPlayerId
-        ) {
+        if (plot.ownerId === myPlayerId && plotContains(plot, worldX, worldY)) {
           onOwnedPlot = true
           break
         }
@@ -1003,18 +1006,8 @@ export default function GameCanvas() {
 
     // M7: Check if clicking on a plot (Alt+click to select)
     if (e.altKey) {
-      for (const plot of nearbyPlots) {
-        if (
-          worldX >= plot.bounds.minX &&
-          worldX <= plot.bounds.maxX &&
-          worldY >= plot.bounds.minY &&
-          worldY <= plot.bounds.maxY
-        ) {
-          console.log('Selected plot:', plot.id)
-          selectPlot(plot)
-          return
-        }
-      }
+      selectPlotAt(worldX, worldY)
+      return
     }
 
     // Check if clicking on a resource node

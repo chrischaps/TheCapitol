@@ -1,10 +1,13 @@
 //! The plots (P3.6): every `/terrain` lot as a low slab a step above the
 //! street, edged with a curb, in its zone's tint.
 //!
-//! - **Each lot keeps off the roads and the water.** The data's urban lots
-//!   reach 22 units into the arterials, a few suburban ones a few units
-//!   into their streets, and the innermost urban row into the outer canal.
-//!   So a lot is first clipped back to the edge of every road ribbon it
+//! - **Each lot keeps off the roads and the water.** Before B7 (#42) the
+//!   data's urban lots reached 22 units into the arterials, a few suburban
+//!   ones a few units into their streets, and the innermost urban row into
+//!   the outer canal. The server now clears them itself
+//!   (`backend/src/models/lot_clearance.rs`, kerb included), so for a
+//!   current server this is a no-op kept as a guard, and
+//!   `fixtures/terrain.json` still has the old lots. A lot is first clipped back to the edge of every road ribbon it
 //!   overlaps and to the kerb's land face (`water::kerbed`), the way the
 //!   roads stop at the kerb. What survives is convex, so clipping is a
 //!   run of half-planes. A lot clipped to under `MIN_KEPT` of itself is
@@ -21,8 +24,11 @@
 //! - **One mesh per sector** (`sector`), each lot in the sector of its
 //!   centre, so each part culls on its own. `Lot` records where each lot's
 //!   vertices and indices sit in its sector's mesh, for P6.4 to find and
-//!   highlight one. Lots are listed in `terrain_plots` order, not by id:
-//!   the generator gives some lots on P-shaped streets the same id.
+//!   highlight one. Lots are listed in `terrain_plots` order, not by id,
+//!   because the generator used to give some lots on P-shaped streets the
+//!   same id. Since B7 ids are unique, and a claimable plot names its lot
+//!   in `PlotInfo::terrain_id`, so P6.4 can key on it. The fixture still
+//!   has the repeats.
 
 use std::collections::HashMap;
 use std::ops::Range;

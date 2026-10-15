@@ -6,7 +6,7 @@ import { getRecipes, type Recipe } from '../api/recipes'
 import { getContainers, type ContainerState as ApiContainerState, type SlotItem as ApiSlotItem } from '../api/inventory'
 import { getNearbyStations, getStationContainer, type StationInfo } from '../api/stations'
 import { getCurrency } from '../api/currency'
-import { getPlots, claimPlot as claimPlotApi } from '../api/plots'
+import { getPlots, getPlotAtPosition, claimPlot as claimPlotApi } from '../api/plots'
 import { getTerrain, type TerrainData } from '../api/terrain'
 
 export interface PlayerPosition {
@@ -143,6 +143,10 @@ export interface PlotInfo {
   assessedValue: number
   stationCount: number
   stationCapacity: number
+  /** The `/terrain` lot this plot is. Null only for a pre-B7 plot. */
+  terrainId: string | null
+  /** The lot's corners: the shape that's claimed and that placement tests. */
+  corners: [number, number][] | null
 }
 
 interface GameContextType {
@@ -212,6 +216,7 @@ interface GameContextType {
   cancelTrade: () => void
   // M7: Plot actions
   selectPlot: (plot: PlotInfo) => void
+  selectPlotAt: (x: number, y: number) => void
   closePlotPanel: () => void
   claimPlot: (plotId: string) => void
   refreshPlots: () => void
@@ -959,12 +964,15 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const refreshPlotsInternal = useCallback(async () => {
     if (!token) return
     try {
-      const response = await getPlots(token, { limit: 100 })
+      // Your own plots: placement checks them and the map outlines them.
+      // There are thousands of lots, so any other is looked up on alt-click.
+      if (!playerId) return
+      const response = await getPlots(token, { owner: playerId, limit: 100 })
       setNearbyPlots(response.plots)
     } catch (error) {
       console.error('Failed to refresh plots:', error)
     }
-  }, [token])
+  }, [token, playerId])
 
   const refreshPlots = refreshPlotsInternal
 
@@ -981,6 +989,17 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const selectPlot = useCallback((plot: PlotInfo) => {
     setSelectedPlot(plot)
   }, [])
+
+  // Select whatever plot is under a world point, if any.
+  const selectPlotAt = useCallback(async (x: number, y: number) => {
+    if (!token) return
+    try {
+      const plot = await getPlotAtPosition(token, x, y)
+      if (plot) setSelectedPlot(plot)
+    } catch (error) {
+      console.error('Failed to look up plot:', error)
+    }
+  }, [token])
 
   const closePlotPanel = useCallback(() => {
     setSelectedPlot(null)
@@ -1285,6 +1304,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
     nearbyPlots,
     selectedPlot,
     selectPlot,
+    selectPlotAt,
     closePlotPanel,
     claimPlot,
     refreshPlots,

@@ -1,6 +1,7 @@
 pub mod account;
 pub mod container;
 pub mod item;
+pub mod lot_clearance;
 pub mod player;
 pub mod plot;
 pub mod recipe;
