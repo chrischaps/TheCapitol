@@ -33,6 +33,12 @@ pub struct Shared {
     pub destination: Arc<Mutex<Option<[f32; 2]>>>,
     /// The zone you last entered (P4.5), for the banner in `hud.rhai`.
     pub banner: Arc<Mutex<Option<ZoneBanner>>>,
+    /// Every resource node shown this frame (P4.4), as `nodes::Nodes` left
+    /// them, for picking and the HUD.
+    pub nodes: Arc<Mutex<Vec<NodeMark>>>,
+    /// The node a script last asked to extract from (`cap_extract`). The
+    /// extension takes it next frame.
+    pub extract: Arc<Mutex<Option<String>>>,
 }
 
 /// The zone banner's words and colour, and when it started.
@@ -46,6 +52,26 @@ pub struct ZoneBanner {
     /// The zone you came into the world in, not one you walked into.
     pub first: bool,
 }
+
+/// One resource node as scripts see it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeMark {
+    pub id: String,
+    /// Where it stands, world metres (X, Z).
+    pub at: [f32; 2],
+    /// "available", "harvesting" or "depleted".
+    pub state: &'static str,
+    /// You're walking to it to extract, or have asked to.
+    pub targeted: bool,
+    /// You're extracting it.
+    pub mine: bool,
+    /// How far the extraction on it has got, 0 to 1, if one is under way.
+    pub progress: Option<f32>,
+}
+
+/// How near a click must land to a node to pick it, in metres. A node's
+/// tuft is about 1.2 m across; React picks within 16 server units.
+pub const NODE_PICK: f32 = 1.8;
 
 /// One avatar's name tag, as `entities::Players` placed it this frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -157,12 +183,69 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         m.insert("first".into(), b.first.into());
         m.into()
     });
+    // `cap_nodes() -> [#{ id, x, z, state, targeted, mine, progress }]`:
+    // the resource nodes shown, at ground level in world metres. `state` is
+    // "available", "harvesting" or "depleted"; `progress` is 0 to 1 while
+    // someone extracts, otherwise ().
+    let nodes = shared.nodes.clone();
+    engine.register_fn("cap_nodes", move || -> rhai::Array {
+        let Ok(nodes) = nodes.lock() else {
+            return rhai::Array::new();
+        };
+        nodes.iter().map(|n| node_map(n).into()).collect()
+    });
+    // `cap_node_at(x, z) -> #{ ... } or ()`: the node nearest the ground
+    // point (x, z), within NODE_PICK metres, as in `cap_nodes`.
+    let nodes = shared.nodes.clone();
+    engine.register_fn("cap_node_at", move |x: f64, z: f64| -> rhai::Dynamic {
+        let Ok(nodes) = nodes.lock() else {
+            return rhai::Dynamic::UNIT;
+        };
+        match node_at(&nodes, x as f32, z as f32) {
+            Some(n) => node_map(n).into(),
+            None => rhai::Dynamic::UNIT,
+        }
+    });
+    // `cap_extract(id)`: extract from the node `id` (from `cap_node_at`):
+    // at once within range, otherwise after walking there. Sent next frame.
+    let extract = shared.extract.clone();
+    engine.register_fn("cap_extract", move |id: &str| {
+        if let Ok(mut e) = extract.lock() {
+            *e = Some(id.to_owned());
+        }
+    });
     // `cap_ground_y() -> float`: the land's height in metres, for picking
     // and for drawing on the ground. The sea is at 0.
     engine.register_fn("cap_ground_y", || crate::coords::layer::GROUND as f64);
     // `cap_crown_y() -> float`: just above the tip of the Capitol's needle,
     // in metres, where the inscription hangs.
     engine.register_fn("cap_crown_y", || crate::world::tower::CROWN_Y as f64);
+}
+
+fn node_map(n: &NodeMark) -> rhai::Map {
+    let mut m = rhai::Map::new();
+    m.insert("id".into(), n.id.clone().into());
+    m.insert("x".into(), (n.at[0] as f64).into());
+    m.insert("z".into(), (n.at[1] as f64).into());
+    m.insert("state".into(), n.state.into());
+    m.insert("targeted".into(), n.targeted.into());
+    m.insert("mine".into(), n.mine.into());
+    m.insert(
+        "progress".into(),
+        n.progress
+            .map_or(rhai::Dynamic::UNIT, |p| (p as f64).into()),
+    );
+    m
+}
+
+/// The node nearest (x, z), within [`NODE_PICK`].
+pub fn node_at(nodes: &[NodeMark], x: f32, z: f32) -> Option<&NodeMark> {
+    nodes
+        .iter()
+        .map(|n| (n, (n.at[0] - x).hypot(n.at[1] - z)))
+        .filter(|(_, d)| *d <= NODE_PICK)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(n, _)| n)
 }
 
 /// World (X, Z) in metres to the server point a move goes to: inside the
@@ -248,6 +331,30 @@ mod tests {
         assert_eq!(*shared.move_to.lock().unwrap(), Some([8000.0, 0.0]));
         let [x, y] = clamp_to_world(5.0, -2.5);
         assert!((x - 4050.0).abs() < 1e-3 && (y - 3975.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_click_picks_the_nearest_node_and_asks_to_extract_it() {
+        let shared = Shared::default();
+        let mark = |id: &str, x: f32| NodeMark {
+            id: id.into(),
+            at: [x, 0.0],
+            state: "available",
+            targeted: false,
+            mine: false,
+            progress: None,
+        };
+        *shared.nodes.lock().unwrap() = vec![mark("a", 0.0), mark("b", 2.0)];
+        let mut engine = rhai::Engine::new();
+        register(&mut engine, &shared);
+        let picked: String = engine
+            .eval("let n = cap_node_at(1.2, 0.3); cap_extract(n.id); n.id")
+            .unwrap();
+        assert_eq!(picked, "b");
+        assert_eq!(shared.extract.lock().unwrap().as_deref(), Some("b"));
+        assert!(engine.eval::<()>("cap_node_at(9.0, 9.0)").is_ok());
+        let p: bool = engine.eval("cap_nodes()[0].progress == ()").unwrap();
+        assert!(p);
     }
 
     #[test]

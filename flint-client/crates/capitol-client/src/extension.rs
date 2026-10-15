@@ -4,12 +4,14 @@
 //! terrain (fetched and cached, or read from a file offline), the world
 //! built from it (`world`, so far the ground, the canals, whose water is
 //! the scene's ocean, the roads, the bridges, the plots and the Capitol
-//! tower), the players walking it (`entities`), the fog and the light as
+//! tower), the players walking it (`entities`), the resource nodes they
+//! gather from (`nodes`), the fog and the light as
 //! the camera climbs (`atmosphere`), the wheel for the camera rig, and the
 //! spike's markers.
 
 use crate::atmosphere::Atmosphere;
 use crate::entities::Players;
+use crate::nodes::Nodes;
 use crate::script_api::{self, Shared, ZoneBanner};
 use crate::session::Session;
 use crate::terrain::TerrainSource;
@@ -22,6 +24,7 @@ use crate::world::plots::Lot;
 use crate::world::Rebuild;
 use crate::{spike_world, ui, world};
 use capitol_core::auth::{Notice, Phase};
+use capitol_core::harvest::Note;
 use capitol_core::net::ConnectionState;
 use capitol_core::protocol::terrain::TerrainResponse;
 use capitol_core::protocol::ws::ClientMessage;
@@ -63,6 +66,7 @@ pub struct CapitolExtension {
     containers: bool,
     players: Players,
     overlay: ConnectionOverlay,
+    nodes: Nodes,
 }
 
 impl CapitolExtension {
@@ -83,6 +87,7 @@ impl CapitolExtension {
             containers: false,
             players: Players::default(),
             overlay: ConnectionOverlay::default(),
+            nodes: Nodes::default(),
         }
     }
 
@@ -156,6 +161,7 @@ impl PlayerExtension for CapitolExtension {
         if let Some(session) = &mut self.session {
             session.update(now, &mut self.terrain);
             walk(ctx, session, &self.shared, now);
+            gather(ctx, session, &self.shared, now);
             // Signed out, the store is empty, so everyone fades away.
             let (poses, state) = session.sample(now);
             let dt = ctx.clock.delta_time.min(0.1) as f32;
@@ -168,6 +174,17 @@ impl PlayerExtension for CapitolExtension {
             });
             if let Ok(mut shared) = self.shared.banner.lock() {
                 *shared = banner;
+            }
+            let target = session.harvest_target();
+            for c in self
+                .nodes
+                .update(ctx, session.state(), target, dt, &self.shared)
+            {
+                let [x, z] = c.at;
+                let mut data = toml::Table::new();
+                data.insert("x".into(), (x as f64).into());
+                data.insert("z".into(), (z as f64).into());
+                ctx.fire_event(c.name, data);
             }
         }
         self.shared
@@ -374,6 +391,79 @@ fn walk(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Shar
         data.insert("water".into(), water_name(&blocked.reason).into());
         data.insert("reason".into(), blocked.reason.into());
         ctx.fire_event("movement_blocked", data);
+    }
+}
+
+/// Resource nodes (P4.4): send the extraction a script asked for
+/// (`cap_extract`), and fire at the scripts what came of it:
+/// `extraction_completed` with the node's place (`x`, `z`), the yield
+/// (`item_name`, `quantity`, `quality`) and its `grade` letter and `colour`
+/// (sRGB, 0 to 1), and `extraction_note` with a `title` and `body` when an
+/// extraction didn't happen.
+fn gather(
+    ctx: &mut ExtensionCtx,
+    session: &mut Session,
+    shared: &script_api::Shared,
+    now: Instant,
+) {
+    if let Some(id) = shared.extract.lock().ok().and_then(|mut e| e.take()) {
+        match uuid::Uuid::parse_str(&id) {
+            Ok(node) => session.extract(now, node),
+            Err(e) => tracing::warn!("cap_extract: {id:?} isn't a node id: {e}"),
+        }
+    }
+    for (node, item) in session.take_yields() {
+        let at = session
+            .state()
+            .node(node)
+            .map(|n| crate::coords::to_world(n.x, n.y))
+            .or_else(|| {
+                shared
+                    .follow
+                    .lock()
+                    .ok()
+                    .and_then(|f| *f)
+                    .map(|f| [f[0], f[2]])
+            });
+        let [x, z] = at.unwrap_or_default();
+        let letter = capitol_core::protocol::rules::quality_grade(item.quality);
+        let c = ui::theme::grade(letter);
+        let mut data = toml::Table::new();
+        data.insert("x".into(), (x as f64).into());
+        data.insert("z".into(), (z as f64).into());
+        data.insert("item_name".into(), item.item_name.into());
+        data.insert("quantity".into(), (item.quantity as i64).into());
+        data.insert("quality".into(), (item.quality as i64).into());
+        data.insert("grade".into(), letter.into());
+        data.insert(
+            "colour".into(),
+            toml::Value::Array(
+                [c.r(), c.g(), c.b()]
+                    .iter()
+                    .map(|v| toml::Value::Float(*v as f64 / 255.0))
+                    .collect(),
+            ),
+        );
+        ctx.fire_event("extraction_completed", data);
+    }
+    for note in session.take_harvest_notes() {
+        let (title, body) = note_words(note);
+        tracing::info!("extract: {note:?}");
+        let mut data = toml::Table::new();
+        data.insert("title".into(), title.into());
+        data.insert("body".into(), body.into());
+        ctx.fire_event("extraction_note", data);
+    }
+}
+
+/// What to tell the player about an extraction that didn't happen. A
+/// refused `extract` has no reason yet: the server only logs it, so the
+/// words guess the likeliest (B9, issue #60, sends the real one).
+fn note_words(note: Note) -> (&'static str, &'static str) {
+    match note {
+        Note::Lost(_) => ("Taken", "Someone else got to that grass first"),
+        Note::Unanswered(_) => ("Couldn't gather", "Someone may have got there first"),
+        Note::Busy => ("Busy", "Finish what you're doing first"),
     }
 }
 

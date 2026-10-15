@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use capitol_core::auth::{Auth, Effect, Phase, Remembered};
+use capitol_core::harvest::{Harvest, Note, Step};
 use capitol_core::motion::{Motion, Pose};
 use capitol_core::net::{
     ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
@@ -28,8 +29,9 @@ use capitol_core::poll::{Fetch, Poller};
 use capitol_core::protocol::rest::MoveItemRequest;
 use capitol_core::protocol::rules::Zone;
 use capitol_core::protocol::ws::ClientMessage;
-use capitol_core::state::{GameState, StateEvent};
+use capitol_core::state::{GameState, StateEvent, Yield};
 use flint_runtime::PersistentStore;
+use uuid::Uuid;
 
 use crate::terrain::TerrainSource;
 use crate::ui::slots::Move;
@@ -69,6 +71,11 @@ pub struct Session {
     last_move: Option<(f64, f64)>,
     /// Water you walked into since the extension last took them (P4.3).
     blocked: Vec<Blocked>,
+    /// Clicking nodes: extract, or walk there and extract (P4.4).
+    harvest: Harvest,
+    /// What your extractions yielded, by node, since the extension last
+    /// took them.
+    yields: Vec<(Uuid, Yield)>,
 }
 
 /// The server stopped you at the water's edge (`movement_blocked`).
@@ -123,6 +130,8 @@ impl Session {
             file,
             last_move: None,
             blocked: Vec::new(),
+            harvest: Harvest::default(),
+            yields: Vec::new(),
         };
         session.apply(effects);
         Ok(session)
@@ -169,12 +178,61 @@ impl Session {
     /// Walk to `(x, y)` in server units: the prediction starts at once and
     /// the server hears `move`. Only in the world.
     pub fn move_to(&mut self, now: Instant, x: f64, y: f64) {
+        self.harvest.walked();
+        self.walk(now, x, y);
+    }
+
+    fn walk(&mut self, now: Instant, x: f64, y: f64) {
         if self.auth.phase() != Phase::InWorld {
             return;
         }
         self.motion.move_to(now, x, y);
         self.net.ws(ClientMessage::Move { x, y });
         self.last_move = Some((x, y));
+    }
+
+    /// You clicked a resource node: extract from it if it's in range, or
+    /// walk there and extract on arrival (`capitol_core::harvest`). A node
+    /// that can't be taken now is walked to, as React does.
+    pub fn extract(&mut self, now: Instant, node: Uuid) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        match self.harvest.click(node, &self.state, now) {
+            Some(step) => self.step(now, step),
+            None => {
+                if let Some(n) = self.state.node(node) {
+                    let (x, y) = (n.x, n.y);
+                    self.move_to(now, x, y);
+                }
+            }
+        }
+    }
+
+    fn step(&mut self, now: Instant, step: Step) {
+        match step {
+            Step::Extract(node) => self.net.ws(ClientMessage::Extract {
+                node_id: node.to_string(),
+            }),
+            Step::WalkTo { x, y } => self.walk(now, x, y),
+            Step::Hold => {}
+        }
+    }
+
+    /// The node you're walking to, to extract on arrival, or the one an
+    /// `extract` is out for: the node to mark as targeted.
+    pub fn harvest_target(&self) -> Option<Uuid> {
+        self.harvest.target().or(self.harvest.asked())
+    }
+
+    /// What your extractions yielded since the last call, by node.
+    pub fn take_yields(&mut self) -> Vec<(Uuid, Yield)> {
+        std::mem::take(&mut self.yields)
+    }
+
+    /// What's worth telling the player about extracting, since the last call.
+    pub fn take_harvest_notes(&mut self) -> Vec<Note> {
+        self.harvest.take_notes()
     }
 
     /// Where you're walking to, in server units, for the marker.
@@ -286,14 +344,23 @@ impl Session {
             }
             self.motion.observe(now, &changes, &self.state);
             for change in &changes {
-                if let StateEvent::MovementBlocked { reason, x, y } = change {
-                    self.blocked.push(Blocked {
-                        x: *x,
-                        y: *y,
-                        reason: reason.clone(),
-                        toward: self.last_move.take(),
-                    });
+                match change {
+                    StateEvent::MovementBlocked { reason, x, y } => {
+                        self.blocked.push(Blocked {
+                            x: *x,
+                            y: *y,
+                            reason: reason.clone(),
+                            toward: self.last_move.take(),
+                        });
+                    }
+                    StateEvent::ExtractionCompleted { node_id, item } => {
+                        self.yields.push((*node_id, item.clone()));
+                    }
+                    _ => {}
                 }
+            }
+            if let Some(step) = self.harvest.observe(&changes, &self.state, now) {
+                self.step(now, step);
             }
             let answered = self.poller.observe(event, &changes, &self.state);
             match (answered, event) {
@@ -307,6 +374,7 @@ impl Session {
             }
         }
         if self.in_session() {
+            self.harvest.tick(now);
             self.state.tick(now);
             for (request, tag) in self.poller.tick(now) {
                 self.net.rest(request, tag);
@@ -329,6 +397,8 @@ impl Session {
             self.move_refused = None;
             self.link = Link::default();
             self.arrival = None;
+            self.harvest = Harvest::default();
+            self.yields.clear();
         }
     }
 

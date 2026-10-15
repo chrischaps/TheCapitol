@@ -8,6 +8,8 @@
 //!   `NetEvent` and returns the [`state::StateEvent`]s the game reacts to.
 //! - [`motion`]: smooth positions. [`motion::Motion`] draws other players
 //!   150 ms behind between snapshots and predicts the local player's walk.
+//! - [`harvest`]: clicking a node: extract it, or walk there and extract
+//!   on arrival.
 //! - [`poll`]: the polling scheduler. [`poll::Poller`] turns those events, and
 //!   a 5 s timer, into the REST refetches the server never pushes.
 //! - [`signin`]: log in, or register, one event at a time.
@@ -21,6 +23,7 @@
 pub mod auth;
 pub mod bot;
 pub mod catalog;
+pub mod harvest;
 pub mod motion;
 pub mod net;
 pub mod poll;

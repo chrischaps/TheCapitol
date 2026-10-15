@@ -43,7 +43,8 @@ pub fn controls(ctx: &egui::Context, status: &str) {
             theme::hint().show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 for line in [
-                    "Click the ground to walk · WASD pans · H home",
+                    "Click the ground to walk, or grass to gather",
+                    "WASD pans · H home",
                     "Wheel or R/F zooms · Q/E or right-drag turns",
                     status,
                 ] {

@@ -1,5 +1,5 @@
 // Input to intents (plan §4.2): what a left click on the world means, and
-// the marks it leaves. P4.3 is click to move.
+// the marks it leaves. P4.3 is click to move; P4.4 is gathering.
 //
 // A click is picked off the ground with screen_to_ground and offered to
 // each intent in the React client's order (GameCanvas.tsx handleClick).
@@ -9,10 +9,10 @@
 //   2. shift-click a player: trade, or walk closer  (P7.3)
 //   3. a station: open it, or walk closer           (P6.3)
 //   4. alt-click a plot: select it                  (P6.4)
-//   5. an available resource node: extract          (P4.4)
+//   5. an available resource node: extract          (P4.4, here)
 //   6. anywhere else: walk there                    (P4.3, here)
 //
-// Each of 1-5 is a function below that says no for now. To add one, fill
+// Each of 1-4 is a function below that says no for now. To add one, fill
 // its body: it gets the click (#{ x, z } in world metres, `shift`, `alt`)
 // and returns true when it took it.
 //
@@ -26,6 +26,16 @@
 // water splashes just ahead of you, the camera rig gives a small nudge
 // (camera.rhai), and a toast says to find a bridge.
 //
+// Gathering: a click on a grass tuft (cap_node_at) asks Rust to extract it
+// (cap_extract). Within 50 units (5 m) that's at once; further, you walk
+// there and it starts as you arrive (capitol_core::harvest). While you
+// walk, a gold sight turns round the tuft and the dashes run to it. While
+// anyone extracts, a ring fills round the tuft: gold for you, pale green
+// for others. On completion "+N fiber" rises from it with the grade on a
+// pip of its colour. A tuft cut down throws up bits of blade; one that
+// grows back breathes out a green ring. Hovering a tuft you can take
+// draws the reticle round it.
+//
 // The right button is the camera's (a right-drag orbits), so this is the
 // left button only. egui keeps any click over its panels.
 
@@ -35,6 +45,10 @@ let ripples = [];
 let marker = ();
 let splashes = [];
 let toast = ();
+// "+N fiber" rising from a tuft, bits of a cut one, and a regrown one's ring.
+let yields = [];
+let cuttings = [];
+let sprouts = [];
 
 // ── Tuning ───────────────────────────────────────────────────────────────
 
@@ -49,6 +63,15 @@ fn splash_ahead() { 1.1 }
 fn toast_in() { 0.25 }
 fn toast_hold() { 2.8 }
 fn toast_out() { 0.7 }
+// The yield rising off a tuft (s), and how far (m).
+fn yield_life() { 2.4 }
+fn yield_rise() { 1.1 }
+// Bits of a cut tuft, and a regrown one's ring (s).
+fn cutting_life() { 0.9 }
+fn sprout_life() { 1.4 }
+// The ring round a tuft being worked, and the sight round your target (m).
+fn work_ring() { 1.15 }
+fn sight_ring() { 1.0 }
 
 // ── Per frame ────────────────────────────────────────────────────────────
 
@@ -56,6 +79,9 @@ fn on_update() {
     let t = total_time();
     ripples = ripples.filter(|r| t - r.born < ripple_life());
     splashes = splashes.filter(|s| t - s.born < splash_life());
+    yields = yields.filter(|y| t - y.born < yield_life());
+    cuttings = cuttings.filter(|c| t - c.born < cutting_life());
+    sprouts = sprouts.filter(|s| t - s.born < sprout_life());
     if toast != () && t - toast.born > toast_in() + toast_hold() + toast_out() {
         toast = ();
     }
@@ -84,13 +110,52 @@ fn place_station(click) { false } // P6.2
 fn trade_with(click) { false }    // P7.3, shift
 fn open_station(click) { false }  // P6.3
 fn select_plot(click) { false }   // P6.4, alt
-fn extract(click) { false }       // P4.4
+
+// A tuft you can take: extract it, or walk there and extract. Anything
+// else (a cut tuft, one someone is working) falls through to walking.
+fn extract(click) {
+    let n = cap_node_at(click.x, click.z);
+    if n == () || n.state != "available" { return false; }
+    cap_extract(n.id);
+    true
+}
 
 // ── Server happenings ────────────────────────────────────────────────────
 
 fn on_event(name, data) {
-    if name != "movement_blocked" { return; }
     let t = total_time();
+    if name == "extraction_completed" {
+        yields.push(#{
+            x: data.x, z: data.z, born: t,
+            text: "+" + data.quantity + " " + data.item_name,
+            grade: data.grade, colour: data.colour,
+        });
+        return;
+    }
+    if name == "extraction_note" {
+        toast = #{ title: data.title, body: data.body, born: t };
+        return;
+    }
+    if name == "node_depleted" {
+        let bits = [];
+        for i in 0..18 {
+            let a = random() * 2.0 * PI();
+            let out = random_range(0.3, 1.2);
+            bits.push(#{
+                vx: a.cos() * out, vz: a.sin() * out,
+                vy: random_range(1.6, 3.2),
+                spin: random_range(-9.0, 9.0), turn: random() * PI(),
+                len: random_range(5.0, 10.0),
+            });
+        }
+        cuttings.push(#{ x: data.x, z: data.z, born: t, bits: bits });
+        return;
+    }
+    if name == "node_regenerated" {
+        sprouts.push(#{ x: data.x, z: data.z, born: t });
+        return;
+    }
+    if name != "movement_blocked" { return; }
     let x = data.x + data.dir_x * splash_ahead();
     let z = data.z + data.dir_z * splash_ahead();
     // Droplets thrown up and on over the water, fixed at the splash.
@@ -131,13 +196,26 @@ fn on_draw_ui() {
     if marker != () && marker.gone != () && now - marker.gone > marker_fade() {
         marker = ();
     }
-    if marker != () {
-        let you = cap_follow();
+    // The tuft you're going to gather, if any. While you walk to it, the
+    // sight round it stands in for the ring at your destination.
+    let target = ();
+    for n in cap_nodes() {
+        if n.targeted { target = n; }
+        if n.progress != () { draw_work(n, now); }
+    }
+    let you = cap_follow();
+    if target != () {
+        if you != () { draw_path(you[0], you[2], target.x, target.z, now, 0.6); }
+        draw_sight(target, now);
+    } else if marker != () {
         if you != () && marker.gone == () {
-            draw_path(you[0], you[2], marker.x, marker.z, now);
+            draw_path(you[0], you[2], marker.x, marker.z, now, 0.38);
         }
         draw_marker(marker, now);
     }
+    for c in cuttings { draw_cutting(c, now); }
+    for s in sprouts { draw_sprout(s, now); }
+    for y in yields { draw_yield(y, now); }
 
     for rip in ripples { draw_ripple(rip, now); }
     for s in splashes { draw_splash(s, now); }
@@ -146,7 +224,11 @@ fn on_draw_ui() {
     // Picked here rather than in on_update: on_draw_ui sees the camera this
     // frame renders with, so the reticle can't trail the ground under it.
     let hover = screen_to_ground(mouse_x(), mouse_y(), cap_ground_y());
-    if hover != () { draw_reticle(hover, now); }
+    if hover != () {
+        let n = cap_node_at(hover[0], hover[1]);
+        if n != () && n.state == "available" && !n.targeted { draw_reticle_on(n, now); }
+        else { draw_reticle(hover, now); }
+    }
 }
 
 // The Capitol's gold, #c9a227.
@@ -169,7 +251,7 @@ fn ring(cx, cz, y, r, c, alpha, width, steps) {
 // The way you're walking: dashes from your feet to the ring, marching
 // toward it, faint, and fading in from under you so they don't cross the
 // avatar. Long walks get longer dashes, so the count stays bounded.
-fn draw_path(x0, z0, x1, z1, now) {
+fn draw_path(x0, z0, x1, z1, now, strength) {
     let dx = x1 - x0;
     let dz = z1 - z0;
     let len = (dx * dx + dz * dz).sqrt();
@@ -191,7 +273,7 @@ fn draw_path(x0, z0, x1, z1, now) {
             let p = world_to_screen(x0 + ux * a, y, z0 + uz * a);
             let q = world_to_screen(x0 + ux * b, y, z0 + uz * b);
             if p.visible && q.visible {
-                draw_line(p.x, p.y, q.x, q.y, c[0], c[1], c[2], 0.38 * fade, 1.5);
+                draw_line(p.x, p.y, q.x, q.y, c[0], c[1], c[2], strength * fade, 1.5);
             }
         }
         s += step;
@@ -216,6 +298,123 @@ fn draw_marker(m, now) {
     ring(m.x, m.z, y, r * 1.8, c, alpha * 0.22, 1.0, 48);
     let p = world_to_screen(m.x, y, m.z);
     if p.visible { draw_circle(p.x, p.y, 2.5, c[0], c[1], c[2], alpha); }
+}
+
+// An arc of a ring on the ground, from angle a0 to a1 (radians, 0 east,
+// a quarter turn south), as projected segments.
+fn arc(cx, cz, y, r, a0, a1, c, alpha, width) {
+    let steps = ((a1 - a0).abs() / (2.0 * PI()) * 48.0).to_int() + 2;
+    let prev = ();
+    for i in 0..=steps {
+        let a = a0 + (a1 - a0) * i.to_float() / steps.to_float();
+        let p = world_to_screen(cx + r * a.cos(), y, cz + r * a.sin());
+        if !p.visible { prev = (); continue; }
+        if prev != () { draw_line(prev.x, prev.y, p.x, p.y, c[0], c[1], c[2], alpha, width); }
+        prev = p;
+    }
+}
+
+// The tuft you're walking to: four gold arcs turning slowly round it, a
+// faint ring inside them, breathing. React's targeting ring, with aim.
+fn draw_sight(n, now) {
+    let y = cap_ground_y();
+    let c = gold();
+    let r = sight_ring() * (1.0 + 0.06 * (now * 3.0).sin());
+    let spin = now * 0.9;
+    for k in 0..4 {
+        let a = spin + k.to_float() * 0.5 * PI();
+        arc(n.x, n.z, y, r, a - 0.5, a + 0.5, c, 0.95, 2.0);
+    }
+    ring(n.x, n.z, y, r * 0.82, c, 0.3, 1.0, 40);
+}
+
+// The reticle over a tuft you could take: it settles round the tuft
+// rather than lying under the cursor, so you can see the click will gather.
+fn draw_reticle_on(n, now) {
+    let y = cap_ground_y();
+    let c = gold();
+    let r = sight_ring() * (1.0 + 0.04 * (now * 2.4).sin());
+    ring(n.x, n.z, y, r, c, 0.7, 1.5, 44);
+    ring(n.x, n.z, y, r * 1.3, c, 0.2, 1.0, 52);
+}
+
+// An extraction under way: a track round the tuft, filling clockwise from
+// north as it goes. Gold when it's yours, a pale green when it's someone
+// else's, with a bead at the leading edge.
+fn draw_work(n, now) {
+    let y = cap_ground_y() + 0.02;
+    let r = work_ring();
+    let c = if n.mine { gold() } else { [0.66, 0.84, 0.69] };
+    let w = if n.mine { 3.0 } else { 2.0 };
+    let a = if n.mine { 1.0 } else { 0.7 };
+    ring(n.x, n.z, y, r, c, 0.22 * a, w, 48);
+    let start = -0.5 * PI();
+    let end = start + n.progress * 2.0 * PI();
+    arc(n.x, n.z, y, r, start, end, c, 0.95 * a, w);
+    let p = world_to_screen(n.x + r * end.cos(), y, n.z + r * end.sin());
+    if p.visible { draw_circle(p.x, p.y, w * 1.1, c[0], c[1], c[2], a); }
+}
+
+// What a gather brought in, rising off the tuft and fading: "+3 Plant
+// Fiber" with its grade on a pip in the grade's colour.
+fn draw_yield(y, now) {
+    let age = now - y.born;
+    let k = age / yield_life();
+    let rise = yield_rise() * (1.0 - (1.0 - k) * (1.0 - k));
+    let p = world_to_screen(y.x, cap_ground_y() + 1.3 + rise, y.z);
+    if !p.visible { return; }
+    let a = if age < 0.2 { smooth(age / 0.2) } else { 1.0 - smooth((k - 0.6) / 0.4) };
+    if a <= 0.0 { return; }
+    let size = 17.0;
+    let m = measure_text_ex(y.text, size, "strong", 0.0);
+    let pip = 18.0;
+    let gap = 6.0;
+    let w = m.width + gap + pip;
+    let x = p.x - w / 2.0;
+    let top = p.y - m.height / 2.0;
+    // A soft shadow under the words, so they read over grass and road.
+    draw_text_opts(x + 1.0, top + 1.0, y.text, size, #{
+        font: "strong", color: [0.0, 0.0, 0.0, 0.6 * a],
+    });
+    draw_text_opts(x, top, y.text, size, #{
+        font: "strong", color: [0.95, 0.92, 0.82, a],
+    });
+    let c = y.colour;
+    let px = x + m.width + gap;
+    let py = p.y - pip / 2.0;
+    draw_rect_ex(px, py, pip, pip, c[0], c[1], c[2], 0.95 * a, pip / 2.0, 0);
+    draw_rect_outline_ex(px, py, pip, pip, 0.0, 0.0, 0.0, 0.3 * a, 1.0, pip / 2.0, 0);
+    let g = measure_text_ex(y.grade, 12.0, "strong", 0.0);
+    draw_text_opts(px + (pip - g.width) / 2.0, p.y - g.height / 2.0, y.grade, 12.0, #{
+        font: "strong", color: [0.06, 0.06, 0.1, a],
+    });
+}
+
+// A tuft cut down: bits of blade flung up and out, turning as they fall.
+fn draw_cutting(c, now) {
+    let age = now - c.born;
+    let k = age / cutting_life();
+    let green = [0.42, 0.64, 0.47];
+    for b in c.bits {
+        let t = age * 0.9;
+        let y = cap_ground_y() + 0.3 + b.vy * t - 4.9 * t * t;
+        if y < cap_ground_y() { continue; }
+        let p = world_to_screen(c.x + b.vx * t, y, c.z + b.vz * t);
+        if !p.visible { continue; }
+        let a = b.turn + b.spin * t;
+        let half = b.len * 0.5 * (1.0 - k * 0.4);
+        draw_line(p.x - a.cos() * half, p.y - a.sin() * half,
+                  p.x + a.cos() * half, p.y + a.sin() * half,
+                  green[0], green[1], green[2], 0.9 * (1.0 - k), 2.0);
+    }
+}
+
+// A tuft grown back: a green ring breathing out over the ground.
+fn draw_sprout(s, now) {
+    let k = (now - s.born) / sprout_life();
+    let ease = 1.0 - (1.0 - k) * (1.0 - k);
+    let c = [0.42, 0.64, 0.47];
+    ring(s.x, s.z, cap_ground_y() + 0.02, 0.4 + 1.6 * ease, c, 0.7 * (1.0 - k), 1.5, 40);
 }
 
 // Two gold rings spreading over the ground from where the click landed,

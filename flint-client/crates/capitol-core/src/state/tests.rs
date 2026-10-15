@@ -713,6 +713,26 @@ fn node_depleted_and_regenerated_flip_state() {
 }
 
 #[test]
+fn a_node_someone_is_extracting_is_not_available() {
+    let mut state = with_players();
+    state.apply_rest(&R::Nearby(NearbyResponse {
+        nodes: vec![node(NODE, "available")],
+    }));
+    assert!(state.node_available(NODE));
+    state.apply_ws(&M::ExtractionStarted {
+        player_id: OTHER,
+        node_id: NODE,
+        duration_ticks: 30,
+    });
+    assert_eq!(state.harvester(NODE), Some(OTHER));
+    assert!(!state.node_available(NODE));
+    state.apply_ws(&M::ExtractionCancelled { player_id: OTHER });
+    assert_eq!(state.harvester(NODE), None);
+    assert!(state.node_available(NODE));
+    assert!(!state.node_available(Uuid::from_u128(11)));
+}
+
+#[test]
 fn nearby_nodes_merge() {
     let mut state = connected();
     let far = Uuid::from_u128(12);

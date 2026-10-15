@@ -15,6 +15,7 @@ mod camera_rig;
 mod coords;
 mod entities;
 mod extension;
+mod nodes;
 mod script_api;
 mod session;
 mod spike_world;

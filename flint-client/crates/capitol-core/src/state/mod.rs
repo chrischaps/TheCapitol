@@ -751,6 +751,23 @@ impl GameState {
         self.nodes.get(&id)
     }
 
+    /// Who is extracting from a node, as far as the events say. The node's
+    /// own `state` only turns to "harvesting" at the next poll.
+    pub fn harvester(&self, node_id: Uuid) -> Option<Uuid> {
+        self.activities.iter().find_map(|(player, activity)| {
+            matches!(activity, Activity::Extracting { node_id: n, .. } if *n == node_id)
+                .then_some(*player)
+        })
+    }
+
+    /// A node that can be extracted from now: known, "available", and
+    /// nobody has started on it since the last poll.
+    pub fn node_available(&self, id: Uuid) -> bool {
+        self.nodes
+            .get(&id)
+            .is_some_and(|n| n.state == "available" && self.harvester(id).is_none())
+    }
+
     /// Stations seen so far.
     pub fn stations(&self) -> &HashMap<Uuid, StationInfo> {
         &self.stations
