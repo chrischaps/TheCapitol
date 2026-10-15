@@ -38,6 +38,9 @@ rhai = { version = "1", features = ["sync"] }
 toml = "0.8"
 winit = "0.30"
 
+# Item icons (P5.2) are SVGs; no text, so no font features.
+resvg = { version = "0.45", default-features = false }
+
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

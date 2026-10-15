@@ -23,6 +23,7 @@ flint-scene = { workspace = true }
 flint-schema = { workspace = true }
 egui = { workspace = true }
 rhai = { workspace = true }
+resvg = { workspace = true }
 toml = { workspace = true }
 winit = { workspace = true }
 anyhow = { workspace = true }

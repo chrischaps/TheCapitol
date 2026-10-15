@@ -111,6 +111,7 @@ TheCapitol/
     schemas/                 # capitol_player, resource_node, station, ... (layered over engine/schemas)
     scripts/                 # camera.rhai, input.rhai, hud.rhai, feedback.rhai, lib/
     fonts/ audio/ models/
+    assets/icons/            # item icons, <item_type>.svg + fallback.svg (P5.2)
     fixtures/terrain.json    # captured /terrain for offline mode and tests
     play.bat
 ```
@@ -619,7 +620,7 @@ Sizes: **S** is about 1 focused session, **M** 2–3, **L** 4 or more. Each phas
 | WP | Work | Size | Depends on |
 |---|---|---|---|
 | P5.1 [#36](https://github.com/chrischaps/TheCapitol/issues/36) | **Theme.** egui `Visuals` and `Style` from the tokens, the project font, panel frames and a gold focus ring. Reviewed with screenshots against the React panels. | S | P1.3 |
-| P5.2 [#37](https://github.com/chrischaps/TheCapitol/issues/37) | **Item icons.** Fiber, rope and the three kits, generated through `flint-asset-gen` or procedural shapes, at a consistent size and style. | S | none |
+| P5.2 [#37](https://github.com/chrischaps/TheCapitol/issues/37) | **Item icons.** Fiber, rope and the three kits, at a consistent size and style. *Built (P5.2):* hand-drawn SVGs in `assets/icons/<item_type>.svg`, plus `fallback.svg` for any type without one, rasterized with `resvg` for each size and DPI (`ui/icons.rs`). A new item type needs only a file. They're SVG rather than `flint-asset-gen` output so they stay sharp at any scale and can be edited by hand. The style rules are in `assets/icons/README.md`. `--icon-sheet` shows them all for review. | S | none |
 | P5.3 [#38](https://github.com/chrischaps/TheCapitol/issues/38) | **Slot grid widget.** Icon, quantity, quality pip (§4.7) and a tooltip with name, quality and grade. Drag and drop between slots sends `move_item`. Handles the moved, merged and swapped results. | M | P5.1, P2.3 |
 | P5.4 [#39](https://github.com/chrischaps/TheCapitol/issues/39) | **Inventory panel.** Toggled with `I`. A 24-slot, 6-column grid. | S | P5.3 |
 | P5.5 [#40](https://github.com/chrischaps/TheCapitol/issues/40) | **Crafting panel.** Recipe list, the `crafting_input` (4 slots) and `crafting_output` (1 slot) containers, a quality preview, a progress bar, cancel, and a purple crafting ring on the avatar. Warns when the output slot is full, because the server destroys output that has nowhere to go (`engine/tick.rs:727`). | M | P5.3 |

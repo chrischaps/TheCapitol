@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Rope: a twisted coil with its end trailing, whipped in gold. -->
+  <ellipse cx="32" cy="56.5" rx="18" ry="3.2" fill="#000" fill-opacity="0.35"/>
+  <g fill="none" stroke-linecap="round">
+    <!-- the trailing end, under the coil -->
+    <path d="M19.3 44.7 Q13 51 9.5 56.5" stroke="#1b1206" stroke-width="10"/>
+    <path d="M19.3 44.7 Q13 51 9.5 56.5" stroke="#b08850" stroke-width="7"/>
+    <path d="M19.3 44.7 Q13 51 9.5 56.5" stroke="#7a5530" stroke-width="7" stroke-dasharray="1.6 3.2" stroke-linecap="butt"/>
+    <path d="M8.6 51.6 L14.4 55.4" stroke="#c9a227" stroke-width="3"/>
+    <!-- outer turn -->
+    <circle cx="32" cy="31" r="18" stroke="#1b1206" stroke-width="11"/>
+    <circle cx="32" cy="31" r="18" stroke="#b08850" stroke-width="8"/>
+    <circle cx="32" cy="31" r="18" stroke="#7a5530" stroke-width="8" stroke-dasharray="1.6 3.2" stroke-linecap="butt"/>
+    <!-- inner turn -->
+    <circle cx="32" cy="31" r="8.5" stroke="#1b1206" stroke-width="10"/>
+    <circle cx="32" cy="31" r="8.5" stroke="#c49a5c" stroke-width="7"/>
+    <circle cx="32" cy="31" r="8.5" stroke="#7a5530" stroke-width="7" stroke-dasharray="1.4 2.8" stroke-linecap="butt"/>
+    <!-- light from the top left -->
+    <path d="M17.3 22.5 A17 17 0 0 1 26.2 15" stroke="#fff3d6" stroke-opacity="0.45" stroke-width="1.5"/>
+    <path d="M25.2 27.5 A8 8 0 0 1 29.5 23.4" stroke="#fff3d6" stroke-opacity="0.4" stroke-width="1.2"/>
+  </g>
+</svg>

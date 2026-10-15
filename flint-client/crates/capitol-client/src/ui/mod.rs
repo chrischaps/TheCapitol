@@ -1,12 +1,14 @@
 //! The Capitol's egui UI, drawn through `PlayerExtension::ui` (plan §4.3).
 //!
 //! - [`login`]: the login form over the live world (P4.1).
+//! - [`icons`]: item icons by `item_type`, and the `--icon-sheet` review (P5.2).
 //! - [`account`]: who's signed in, and Sign out, top right.
 //! - [`inscription`]: the spike's window, whose text box writes the note the
 //!   spike script draws over the Capitol. It exercises the game egui layer.
 //!   Typing in it must not reach the script's P binding, and clicks outside
 //!   it must still reach the script. P4 replaces it.
 
+pub mod icons;
 pub mod login;
 
 use crate::script_api::Shared;

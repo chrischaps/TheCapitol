@@ -14,6 +14,7 @@ flint-client/
     capitol-core/     # net + state, no engine dependency, fast tests
     capitol-client/   # the game binary (`capitol`)
   scenes/ schemas/ scripts/ fonts/ audio/ models/ fixtures/
+  assets/icons/       # item icons: <item_type>.svg, fallback.svg; style in its README (P5.2)
   play.bat            # build release and run
   renders/            # screenshots and captures (gitignored)
   target/             # this workspace's build output (gitignored)

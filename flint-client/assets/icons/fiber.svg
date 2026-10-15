@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Plant Fiber: a sheaf of grass blades tied with gold twine. -->
+  <ellipse cx="32" cy="56.5" rx="15" ry="3.2" fill="#000" fill-opacity="0.35"/>
+  <g stroke="#14240a" stroke-width="1.5" stroke-linejoin="round">
+    <path d="M28 55 C24 43 18 31 9 21 C20 27 28 39 32 55 Z" fill="#4d7c0f"/>
+    <path d="M36 55 C40 43 46 31 55 19 C45 27 37 39 32 55 Z" fill="#4d7c0f"/>
+    <path d="M29 55 C27 41 22 27 17 12 C26 24 31 39 33 55 Z" fill="#65a30d"/>
+    <path d="M35 55 C37 41 41 28 47 11 C40 25 34 39 31 55 Z" fill="#65a30d"/>
+    <path d="M30 55 C29 41 30 24 32 6 C34 24 35 41 34 55 Z" fill="#84cc16"/>
+  </g>
+  <path d="M32.2 11 C32.9 24 33.3 35 33.2 41" fill="none" stroke="#ecfccb" stroke-opacity="0.55" stroke-width="1" stroke-linecap="round"/>
+  <path d="M24.5 40.5 Q32 43.5 39.5 40.5 L39.5 46.5 Q32 49.5 24.5 46.5 Z" fill="#c9a227" stroke="#3d300a" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M26 42.4 Q32 44.8 38 42.4" fill="none" stroke="#fde68a" stroke-opacity="0.6" stroke-width="1" stroke-linecap="round"/>
+</svg>

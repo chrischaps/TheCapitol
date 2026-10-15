@@ -11,6 +11,7 @@ use crate::atmosphere::Atmosphere;
 use crate::script_api::{self, Shared};
 use crate::session::Session;
 use crate::terrain::TerrainSource;
+use crate::ui::icons::ItemIcons;
 use crate::ui::login::{FormAction, LoginForm, LoginView};
 use crate::world::plots::Lot;
 use crate::world::Rebuild;
@@ -46,6 +47,9 @@ pub struct CapitolExtension {
     /// Game time of the last render-stats line (debug log only).
     stats_logged: f64,
     atmosphere: Atmosphere,
+    icons: ItemIcons,
+    /// `--icon-sheet`: every item icon on a panel, for review.
+    icon_sheet: bool,
 }
 
 impl CapitolExtension {
@@ -60,7 +64,15 @@ impl CapitolExtension {
             lots: Vec::new(),
             stats_logged: 0.0,
             atmosphere: Atmosphere::default(),
+            icons: ItemIcons::load(std::path::Path::new(ItemIcons::DIR)),
+            icon_sheet: false,
         }
+    }
+
+    /// Show every item icon on a panel (`--icon-sheet`).
+    pub fn with_icon_sheet(mut self, on: bool) -> Self {
+        self.icon_sheet = on;
+        self
     }
 
     /// The login form is up: online, and not yet in the world.
@@ -224,6 +236,9 @@ impl PlayerExtension for CapitolExtension {
         }
         if !at_login {
             ui::inscription(ctx, &self.shared, &self.terrain.status());
+        }
+        if self.icon_sheet {
+            ui::icons::sheet(ctx, &mut self.icons);
         }
         if let Some(action) = action {
             self.act(action);

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Workbench Kit: a bench with a hammer laid on it. -->
+  <ellipse cx="32" cy="56.5" rx="23" ry="3.2" fill="#000" fill-opacity="0.35"/>
+  <g stroke="#1b1206" stroke-width="1.5" stroke-linejoin="round">
+    <rect x="13" y="35" width="6" height="21" fill="#6b4a1a"/>
+    <rect x="45" y="35" width="6" height="21" fill="#6b4a1a"/>
+    <rect x="17" y="46" width="30" height="4" fill="#5a3d14"/>
+    <rect x="8" y="28" width="48" height="9" rx="1.5" fill="#a0742c"/>
+  </g>
+  <rect x="8.75" y="33" width="46.5" height="3.25" fill="#7d5820"/>
+  <path d="M10 29.6 L54 29.6" stroke="#ffe7b0" stroke-opacity="0.4" stroke-width="1" stroke-linecap="round"/>
+  <!-- the hammer -->
+  <g stroke="#14141c" stroke-width="1.5" stroke-linejoin="round">
+    <rect x="13" y="23.5" width="25" height="4" rx="1.5" fill="#d4a76a"/>
+    <rect x="36" y="15" width="8" height="13" rx="1" fill="#94a3b8"/>
+  </g>
+  <rect x="29" y="23.5" width="3" height="4" fill="#c9a227" stroke="#3d300a" stroke-width="1"/>
+  <path d="M37.5 16.6 L37.5 26" stroke="#e2e8f0" stroke-opacity="0.6" stroke-width="1" stroke-linecap="round"/>
+</svg>
