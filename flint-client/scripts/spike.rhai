@@ -4,40 +4,20 @@
 // plan the city was drawn from. The inscription comes from Rust through
 // cap_spike_note(), which CapitolExtension registers.
 //
-// Two inputs test the game egui layer (P1.3). P ("plan") shows and hides
-// the plan; typing a p in the inscription box must not. A left click on
-// the city leaves a gold ripple; a click on the box must not.
+// P ("plan") shows and hides the plan, which tests the game egui layer
+// (P1.3): typing a p in the inscription box must not.
 //
 // The land stands cap_ground_y() metres above the sea (P3.3), and
-// everything here is drawn on it.
-//
-// The cursor is picked off the ground with screen_to_ground (P1.5): a gold
-// reticle lies on the ground under it, foreshortened by the view, and a
-// click's ripple spreads across the ground like a stone dropped in still
-// water, not across the glass of the screen.
+// everything here is drawn on it. The click ripple and the cursor's
+// reticle moved to input.rhai with click to move (P4.3).
 
 let plan_shown = true;
-let ripples = [];
-
-// How long a ripple takes to spread and fade, in seconds. A function, not
-// a top-level const, because helper functions can't see the script's scope.
-fn ripple_life() { 1.6 }
 
 fn on_update() {
-    let t = total_time();
     if is_action_just_pressed("plan") {
         plan_shown = !plan_shown;
         log("plan " + if plan_shown { "shown" } else { "hidden" });
     }
-    if is_mouse_just_pressed(0) {
-        // The ground under the cursor, or () over the sky.
-        let g = screen_to_ground(mouse_x(), mouse_y(), cap_ground_y());
-        if g != () {
-            ripples.push(#{ x: g[0], z: g[1], born: t });
-            log("mark at " + g[0].round() + ", " + g[1].round() + " m");
-        }
-    }
-    ripples = ripples.filter(|r| t - r.born < ripple_life());
 }
 
 // A ring of radius r (metres) on the ground, with a gap of half-width
@@ -84,36 +64,6 @@ fn label(x, y, z, text, size, r, g, b) {
     });
 }
 
-// Two gold rings spreading over the ground from where the click landed,
-// the second a beat behind, both easing out as they fade.
-fn draw_ripple(rip, now) {
-    for k in 0..2 {
-        let age = (now - rip.born) / ripple_life() - k.to_float() * 0.2;
-        if age <= 0.0 || age >= 1.0 { continue; }
-        let ease = 1.0 - (1.0 - age) * (1.0 - age);
-        let radius = 0.3 + 5.5 * ease;
-        let alpha = 0.85 * (1.0 - age) * (1.0 - age);
-        trace_ring_at(rip.x, rip.z, radius, [], 0.0, 0.788, 0.635, 0.153, alpha, 1.5, 48);
-    }
-}
-
-// The reticle: a thin gold ring lying on the ground under the cursor, a
-// fainter one outside it, and four ticks pointing north, east, south and
-// west, so the ground's own perspective shows in its shape.
-fn draw_reticle(g, now) {
-    let breathe = 1.0 + 0.06 * (now * 2.4).sin();
-    let r = 0.9 * breathe;
-    trace_ring_at(g[0], g[1], r, [], 0.0, 0.788, 0.635, 0.153, 0.9, 1.5, 40);
-    trace_ring_at(g[0], g[1], r * 1.9, [], 0.0, 0.788, 0.635, 0.153, 0.25, 1.0, 56);
-    for a in [0.0, 0.5 * PI(), PI(), 1.5 * PI()] {
-        let p = world_to_screen(g[0] + r * 1.25 * a.cos(), cap_ground_y(), g[1] + r * 1.25 * a.sin());
-        let q = world_to_screen(g[0] + r * 1.7 * a.cos(), cap_ground_y(), g[1] + r * 1.7 * a.sin());
-        if p.visible && q.visible {
-            draw_line(p.x, p.y, q.x, q.y, 0.788, 0.635, 0.153, 0.7, 1.5);
-        }
-    }
-}
-
 fn on_draw_ui() {
     // Moat (server radius 200, one bridge to the south) and inner canal
     // (radius 600, four bridges), in the water blue of the 2D clients.
@@ -125,16 +75,5 @@ fn on_draw_ui() {
     let note = cap_spike_note();
     if note != "" {
         label(0.0, cap_crown_y(), 0.0, note, 30.0, 0.788, 0.635, 0.153);
-    }
-
-    let now = total_time();
-    for rip in ripples {
-        draw_ripple(rip, now);
-    }
-    // Picked here rather than in on_update: on_draw_ui sees the camera this
-    // frame renders with, so the reticle can't trail the ground under it.
-    let hover = screen_to_ground(mouse_x(), mouse_y(), cap_ground_y());
-    if hover != () {
-        draw_reticle(hover, now);
     }
 }

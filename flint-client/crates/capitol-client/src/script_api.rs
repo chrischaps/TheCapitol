@@ -24,6 +24,12 @@ pub struct Shared {
     pub follow: Arc<Mutex<Option<[f32; 3]>>>,
     /// The name over each avatar this frame (P4.2), for `hud.rhai`.
     pub players: Arc<Mutex<Vec<PlayerLabel>>>,
+    /// Where a script last asked to walk (`cap_move`, P4.3), in server
+    /// units, clamped to the world. The extension takes it next frame.
+    pub move_to: Arc<Mutex<Option<[f64; 2]>>>,
+    /// Where you're walking to (P4.3), in world metres, for the marker.
+    /// `None` when standing, and offline.
+    pub destination: Arc<Mutex<Option<[f32; 2]>>>,
 }
 
 /// One avatar's name tag, as `entities::Players` placed it this frame.
@@ -92,12 +98,39 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             })
             .collect()
     });
+    // `cap_move(x, z)`: walk to the ground point (x, z), in world metres.
+    // It's clamped to the world's edge and sent next frame. Offline, and
+    // before the server has placed you, it does nothing.
+    let move_to = shared.move_to.clone();
+    engine.register_fn("cap_move", move |x: f64, z: f64| {
+        if let Ok(mut m) = move_to.lock() {
+            *m = Some(clamp_to_world(x as f32, z as f32));
+        }
+    });
+    // `cap_destination() -> [x, z] or ()`: where you're walking to, in
+    // world metres. () when you're standing, or following a walk the
+    // server resumed after a reconnect.
+    let destination = shared.destination.clone();
+    engine.register_fn("cap_destination", move || -> rhai::Dynamic {
+        match destination.lock().ok().and_then(|d| *d) {
+            Some(p) => rhai::Dynamic::from_array(p.iter().map(|v| (*v as f64).into()).collect()),
+            None => rhai::Dynamic::UNIT,
+        }
+    });
     // `cap_ground_y() -> float`: the land's height in metres, for picking
     // and for drawing on the ground. The sea is at 0.
     engine.register_fn("cap_ground_y", || crate::coords::layer::GROUND as f64);
     // `cap_crown_y() -> float`: just above the tip of the Capitol's needle,
     // in metres, where the inscription hangs.
     engine.register_fn("cap_crown_y", || crate::world::tower::CROWN_Y as f64);
+}
+
+/// World (X, Z) in metres to the server point a move goes to: inside the
+/// world, 0 to `WORLD_SIZE` on both axes, as the React client clamps it.
+pub fn clamp_to_world(wx: f32, wz: f32) -> [f64; 2] {
+    use capitol_protocol::rules::WORLD_SIZE;
+    let [x, y] = crate::coords::to_server(wx, wz);
+    [x.clamp(0.0, WORLD_SIZE), y.clamp(0.0, WORLD_SIZE)]
 }
 
 #[cfg(test)]
@@ -144,5 +177,29 @@ mod tests {
         let first: f64 = engine.eval("cap_take_wheel()").unwrap();
         let second: f64 = engine.eval("cap_take_wheel()").unwrap();
         assert_eq!((first, second), (2.5, 0.0));
+    }
+
+    #[test]
+    fn a_move_is_clamped_to_the_world_and_the_last_one_wins() {
+        let shared = Shared::default();
+        let mut engine = rhai::Engine::new();
+        register(&mut engine, &shared);
+        engine
+            .run("cap_move(5.0, -2.5); cap_move(1000.0, -1000.0);")
+            .unwrap();
+        assert_eq!(*shared.move_to.lock().unwrap(), Some([8000.0, 0.0]));
+        let [x, y] = clamp_to_world(5.0, -2.5);
+        assert!((x - 4050.0).abs() < 1e-3 && (y - 3975.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn scripts_read_where_you_are_walking_to() {
+        let shared = Shared::default();
+        let mut engine = rhai::Engine::new();
+        register(&mut engine, &shared);
+        assert!(engine.eval::<()>("cap_destination()").is_ok());
+        *shared.destination.lock().unwrap() = Some([3.0, -4.0]);
+        let z: f64 = engine.eval("cap_destination()[1]").unwrap();
+        assert_eq!(z, -4.0);
     }
 }

@@ -52,3 +52,13 @@ bindings = [{ type = "key", code = "KeyH" }]
 [actions.plan]
 kind = "button"
 bindings = [{ type = "key", code = "KeyP" }]
+
+# Modifiers for a left click on the world (scripts/input.rhai, P4.3):
+# shift-click a player to trade (P7.3), alt-click a plot to select it (P6.4).
+[actions.with_shift]
+kind = "button"
+bindings = [{ type = "key", code = "ShiftLeft" }, { type = "key", code = "ShiftRight" }]
+
+[actions.with_alt]
+kind = "button"
+bindings = [{ type = "key", code = "AltLeft" }, { type = "key", code = "AltRight" }]

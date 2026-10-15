@@ -170,6 +170,10 @@ source = "spike.rhai"
 [entities.camera_rig.script]
 source = "camera.rhai"
 
+# Input to intents: click to move, the marker, water feedback (P4.3)
+[entities.input.script]
+source = "input.rhai"
+
 # The world HUD: the players' names (P4.2)
 [entities.hud.script]
 source = "hud.rhai"

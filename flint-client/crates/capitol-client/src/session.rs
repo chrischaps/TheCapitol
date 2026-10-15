@@ -23,7 +23,8 @@ use capitol_core::auth::{Auth, Effect, Phase, Remembered};
 use capitol_core::motion::{Motion, Pose};
 use capitol_core::net::{Net, NetConfig, NetEvent, RestResponse, Tag};
 use capitol_core::poll::{Fetch, Poller};
-use capitol_core::state::GameState;
+use capitol_core::protocol::ws::ClientMessage;
+use capitol_core::state::{GameState, StateEvent};
 use flint_runtime::PersistentStore;
 
 use crate::terrain::TerrainSource;
@@ -46,6 +47,22 @@ pub struct Session {
     /// The store, poller and motion have seen events since they were last reset.
     used: bool,
     file: SessionFile,
+    /// Where the last click sent you, in server units (P4.3).
+    last_move: Option<(f64, f64)>,
+    /// Water you walked into since the extension last took them (P4.3).
+    blocked: Vec<Blocked>,
+}
+
+/// The server stopped you at the water's edge (`movement_blocked`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Blocked {
+    /// Where you stand now, in server units.
+    pub x: f64,
+    pub y: f64,
+    /// The server's words, such as "Cannot cross Moat without a bridge".
+    pub reason: String,
+    /// Where you were going when the water stopped you, if it was a click.
+    pub toward: Option<(f64, f64)>,
 }
 
 impl Session {
@@ -68,6 +85,8 @@ impl Session {
             motion: Motion::new(),
             used: false,
             file,
+            last_move: None,
+            blocked: Vec::new(),
         };
         session.apply(effects);
         Ok(session)
@@ -100,6 +119,27 @@ impl Session {
             Some(me) => me.name.clone(),
             None => self.auth.email().unwrap_or_default().to_owned(),
         }
+    }
+
+    /// Walk to `(x, y)` in server units: the prediction starts at once and
+    /// the server hears `move`. Only in the world.
+    pub fn move_to(&mut self, now: Instant, x: f64, y: f64) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        self.motion.move_to(now, x, y);
+        self.net.ws(ClientMessage::Move { x, y });
+        self.last_move = Some((x, y));
+    }
+
+    /// Where you're walking to, in server units, for the marker.
+    pub fn destination(&self) -> Option<(f64, f64)> {
+        self.motion.destination()
+    }
+
+    /// Every time the water stopped you since the last call.
+    pub fn take_blocked(&mut self) -> Vec<Blocked> {
+        std::mem::take(&mut self.blocked)
     }
 
     pub fn log_in(&mut self, email: &str, password: &str) {
@@ -144,6 +184,16 @@ impl Session {
             self.used = true;
             let changes = self.state.apply(event);
             self.motion.observe(now, &changes, &self.state);
+            for change in &changes {
+                if let StateEvent::MovementBlocked { reason, x, y } = change {
+                    self.blocked.push(Blocked {
+                        x: *x,
+                        y: *y,
+                        reason: reason.clone(),
+                        toward: self.last_move.take(),
+                    });
+                }
+            }
             let answered = self.poller.observe(event, &changes, &self.state);
             match (answered, event) {
                 (Some(Fetch::Terrain), NetEvent::Rest(_, Ok(RestResponse::Terrain(t)))) => {
@@ -173,6 +223,8 @@ impl Session {
             self.state = GameState::new();
             self.poller = Poller::new();
             self.motion = Motion::new();
+            self.last_move = None;
+            self.blocked.clear();
         }
     }
 

@@ -76,8 +76,7 @@ pub fn to_world(x: f64, y: f64) -> [f32; 2] {
     [((x - CENTER_X) as f32) * S, ((y - CENTER_Y) as f32) * S]
 }
 
-/// World (X, Z) back to server (x, y). Unused until clicks map to the ground (P4.3).
-#[allow(dead_code)]
+/// World (X, Z) back to server (x, y), for a click on the ground (P4.3).
 pub fn to_server(wx: f32, wz: f32) -> [f64; 2] {
     [(wx / S) as f64 + CENTER_X, (wz / S) as f64 + CENTER_Y]
 }

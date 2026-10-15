@@ -139,6 +139,7 @@ impl PlayerExtension for CapitolExtension {
         let now = Instant::now();
         if let Some(session) = &mut self.session {
             session.update(now, &mut self.terrain);
+            walk(ctx, session, &self.shared, now);
             // Signed out, the store is empty, so everyone fades away.
             let (poses, state) = session.sample(now);
             let dt = ctx.clock.delta_time.min(0.1) as f32;
@@ -271,6 +272,67 @@ impl PlayerExtension for CapitolExtension {
     }
 }
 
+/// Click to move (P4.3): send the walk a script asked for (`cap_move`),
+/// tell scripts where you're walking to (`cap_destination`), and fire
+/// `movement_blocked` at them for each time the water stopped you, with
+/// where you stand (`x`, `z`, world metres), which way you were going
+/// (`dir_x`, `dir_z`, a unit vector, or 0 if unknown), the server's
+/// `reason`, and the `water` it named, in words ("the outer canal").
+fn walk(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Shared, now: Instant) {
+    if let Some([x, y]) = shared.move_to.lock().ok().and_then(|mut m| m.take()) {
+        session.move_to(now, x, y);
+    }
+    if let Ok(mut d) = shared.destination.lock() {
+        *d = session
+            .destination()
+            .map(|(x, y)| crate::coords::to_world(x, y));
+    }
+    for blocked in session.take_blocked() {
+        let [x, z] = crate::coords::to_world(blocked.x, blocked.y);
+        let (mut dx, mut dz) = match blocked.toward {
+            Some((tx, ty)) => ((tx - blocked.x) as f32, (ty - blocked.y) as f32),
+            None => (0.0, 0.0),
+        };
+        let len = dx.hypot(dz);
+        if len > 1e-3 {
+            (dx, dz) = (dx / len, dz / len);
+        } else {
+            (dx, dz) = (0.0, 0.0);
+        }
+        tracing::info!(
+            "move: blocked at ({:.0}, {:.0}): {}",
+            blocked.x,
+            blocked.y,
+            blocked.reason
+        );
+        let mut data = toml::Table::new();
+        data.insert("x".into(), (x as f64).into());
+        data.insert("z".into(), (z as f64).into());
+        data.insert("dir_x".into(), (dx as f64).into());
+        data.insert("dir_z".into(), (dz as f64).into());
+        data.insert("water".into(), water_name(&blocked.reason).into());
+        data.insert("reason".into(), blocked.reason.into());
+        ctx.fire_event("movement_blocked", data);
+    }
+}
+
+/// The water a `movement_blocked` reason names, for people: the server says
+/// "Cannot cross canal_outer without a bridge", with the ring's id. A
+/// workaround: the message has no field for it (issue #74).
+fn water_name(reason: &str) -> String {
+    let id = reason
+        .strip_prefix("Cannot cross ")
+        .and_then(|r| r.strip_suffix(" without a bridge"))
+        .unwrap_or("water");
+    match id {
+        "moat" => "the moat".into(),
+        "canal_inner" => "the inner canal".into(),
+        "canal_outer" => "the outer canal".into(),
+        "water" => "the water".into(),
+        other => format!("the {}", other.replace('_', " ")),
+    }
+}
+
 /// One entity per sector mesh, made the first time that mesh has anything
 /// in it. A rebuild replaces the meshes by name, so the entities stay; one
 /// whose mesh is now empty draws nothing.
@@ -286,5 +348,19 @@ fn attach_each<'a>(ctx: &mut ExtensionCtx, names: impl Iterator<Item = &'a Strin
         if let Err(e) = attached {
             tracing::warn!("world: no entity for {name}: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::water_name;
+
+    #[test]
+    fn the_water_is_named_for_people() {
+        let name = |id: &str| water_name(&format!("Cannot cross {id} without a bridge"));
+        assert_eq!(name("canal_outer"), "the outer canal");
+        assert_eq!(name("moat"), "the moat");
+        assert_eq!(name("canal_far"), "the canal far");
+        assert_eq!(water_name("something else"), "the water");
     }
 }

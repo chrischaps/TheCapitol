@@ -67,6 +67,10 @@ fn north_from() { 0.80 }
 fn world_radius() { 420.0 }
 // How fast things settle: 1/e in 1/k seconds.
 fn follow_k() { 6.0 }
+// The nudge when a canal stops you (P4.3): how long it rings, and how far
+// it swings as a share of the camera's distance from what it looks at.
+fn bump_life() { 0.7 }
+fn bump_size() { 0.025 }
 fn zoom_k() { 8.0 }
 fn yaw_k() { 10.0 }
 // Input rates.
@@ -124,6 +128,9 @@ let rig = #{
     at_login: false, waited: 0.0,
     // How far the view is panned from your avatar (m). Unused offline.
     pan_x: 0.0, pan_z: 0.0,
+    // A canal stopped you (P4.3): #{ born, dx, dz }, the way you were
+    // going, for a nudge toward the water and back. () when still.
+    bump: (),
 };
 
 // ── Per frame ────────────────────────────────────────────────────────────
@@ -197,8 +204,35 @@ fn on_update() {
                       tx: s.at[0], ty: s.at[1], tz: s.at[2] };
         }
     }
+    pose = rig.nudged(pose);
     set_camera_position(pose.px, pose.py, pose.pz);
     set_camera_target(pose.tx, pose.ty, pose.tz);
+}
+
+// The water stopped your walk (input.rhai draws the splash): the view
+// lurches a little on toward it and settles back.
+fn on_event(name, data) {
+    if name == "movement_blocked" {
+        rig.bump = #{ born: total_time(), dx: data.dir_x, dz: data.dir_z };
+    }
+}
+
+// The pose shifted by the bump: a damped swing along the way you were
+// going, with a small dip, sized to how far the camera is from what it
+// looks at, so it reads the same at street and district zoom.
+fn nudged(pose) {
+    if this.bump == () { return pose; }
+    let age = total_time() - this.bump.born;
+    if age > bump_life() { this.bump = (); return pose; }
+    let dist = ((pose.px - pose.tx) * (pose.px - pose.tx)
+              + (pose.py - pose.ty) * (pose.py - pose.ty)
+              + (pose.pz - pose.tz) * (pose.pz - pose.tz)).sqrt();
+    let a = (dist * bump_size()).min(2.5) * (-age * 7.0).exp() * (age * 15.0).sin();
+    let dx = this.bump.dx * a;
+    let dz = this.bump.dz * a;
+    let dy = -0.35 * a.abs();
+    #{ px: pose.px + dx, py: pose.py + dy, pz: pose.pz + dz,
+       tx: pose.tx + dx, ty: pose.ty + dy, tz: pose.tz + dz }
 }
 
 // Read this frame's camera input into the rig (`this`). Returns whether
