@@ -1,9 +1,10 @@
-//! `--containers`: every container the player holds, as slot grids, so drag
-//! and drop can be played against the server before the panels exist
-//! (P5.3). The inventory panel (P5.4), crafting (P5.5) and the station
-//! panel (P6.3) each take their own container from here; when they're all
-//! in, this goes. Until P6.3 it also lists the stations nearby, to open
-//! one and try its box.
+//! `--containers`: the containers the player holds that no panel shows yet,
+//! as slot grids, so drag and drop can be played against the server before
+//! the panels exist (P5.3). The inventory panel (P5.4) has taken its own;
+//! crafting (P5.5) and the station panel (P6.3) take theirs next, and then
+//! this goes. Until P6.3 it also lists the stations nearby, to open one and
+//! try its box. It sits top right, clear of the inventory panel, so a drag
+//! between the two works.
 
 use super::icons::ItemIcons;
 use super::slots::{Move, SlotGrid};
@@ -28,19 +29,12 @@ pub fn bench(
 ) -> Option<BenchAction> {
     let mut action = None;
     egui::Area::new(egui::Id::new("capitol_containers"))
-        .anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -20.0])
+        .anchor(egui::Align2::RIGHT_TOP, [-20.0, 60.0])
         .show(ctx, |ui| {
             theme::panel_edged(CRAFT).show(ui, |ui| {
-                // The inventory's six columns and its tray (React's panel).
+                // The inventory panel's width, so the two line up.
                 ui.set_width(6.0 * theme::SLOT_SIZE + 5.0 * theme::SLOT_GAP + 16.0);
-                let used = state.inventory().map_or(0, Container::used_slots);
-                let total = state.inventory().map_or(0, Container::slot_count);
-                theme::header(
-                    ui,
-                    "Containers",
-                    None,
-                    Some((&format!("{used}/{total}"), theme::PILL)),
-                );
+                theme::header(ui, "Containers", None, None);
                 let mut moved = None;
                 let mut grid = |ui: &mut egui::Ui, name: &str, c: Option<&Container>| {
                     ui.label(theme::label(name));
@@ -55,7 +49,6 @@ pub fn bench(
                         }
                     }
                 };
-                grid(ui, "Inventory", state.inventory());
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| grid(ui, "Crafting input", state.crafting_input()));
                     ui.vertical(|ui| grid(ui, "Output", state.crafting_output()));

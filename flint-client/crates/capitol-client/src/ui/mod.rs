@@ -5,8 +5,9 @@
 //! - [`login`]: the login form over the live world (P4.1).
 //! - [`icons`]: item icons by `item_type`, and the `--icon-sheet` review (P5.2).
 //! - [`slots`]: the slot grid, with drag and drop between containers (P5.3).
-//! - [`containers`]: `--containers`, every container as a grid, until the
-//!   inventory, crafting and station panels take them over.
+//! - [`inventory`]: the inventory panel, toggled with `I` (P5.4).
+//! - [`containers`]: `--containers`, the containers no panel shows yet, as
+//!   grids, until the crafting and station panels take them over.
 //! - [`sample`]: a panel showing the theme's parts, for reviewing the theme
 //!   against the React client (`--ui-sample`).
 //! - [`hud`]: the header strip (zone, strands, who, Sign out) and the
@@ -23,6 +24,7 @@
 pub mod containers;
 pub mod hud;
 pub mod icons;
+pub mod inventory;
 pub mod login;
 pub mod sample;
 pub mod slots;

@@ -37,12 +37,21 @@ pub struct HeaderView<'a> {
     /// The connection dropped and hasn't come back, whichever step of an
     /// attempt `connection` is at.
     pub down: bool,
+    /// Whether the inventory panel is open, to light its button.
+    pub inventory_open: bool,
+}
+
+/// What was clicked in the header.
+#[derive(Default)]
+pub struct HeaderClicks {
+    pub sign_out: bool,
+    pub inventory: bool,
 }
 
 /// The header strip. Draw it before any other panel or window, so theirs
-/// are placed below it. Returns whether Sign out was clicked.
-pub fn header(ctx: &egui::Context, view: &HeaderView) -> bool {
-    let mut sign_out = false;
+/// are placed below it.
+pub fn header(ctx: &egui::Context, view: &HeaderView) -> HeaderClicks {
+    let mut clicks = HeaderClicks::default();
     let shown = egui::TopBottomPanel::top("capitol_header")
         .frame(
             egui::Frame::none()
@@ -56,7 +65,7 @@ pub fn header(ctx: &egui::Context, view: &HeaderView) -> bool {
                 ui.label(theme::title("The Capitol", size::LARGE + 3.0));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
-                    sign_out = theme::link(ui, "Sign out", size::SMALL).clicked();
+                    clicks.sign_out = theme::link(ui, "Sign out", size::SMALL).clicked();
                     ui.label(
                         RichText::new(view.who)
                             .font(theme::strong(size::BODY))
@@ -73,6 +82,10 @@ pub fn header(ctx: &egui::Context, view: &HeaderView) -> bool {
                     if let Some(zone) = view.zone {
                         zone_chip(ui, zone);
                     }
+                    ui.add_space(4.0);
+                    clicks.inventory = theme::toggle_chip(ui, "Inventory", view.inventory_open)
+                        .on_hover_text("Inventory (I)")
+                        .clicked();
                 });
             });
         });
@@ -90,7 +103,7 @@ pub fn header(ctx: &egui::Context, view: &HeaderView) -> bool {
             Stroke::new(1.0, theme::GOLD_DIM.gamma_multiply(fade)),
         );
     }
-    sign_out
+    clicks
 }
 
 // The chips sit in the header's right-to-left row, and `ui.horizontal`

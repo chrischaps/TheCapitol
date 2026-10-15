@@ -430,6 +430,24 @@ pub fn chip(edge: Color32, fill: Color32) -> egui::Frame {
         .inner_margin(Margin::symmetric(10.0, 4.0))
 }
 
+/// A header chip that opens and closes a panel: lit in the panel's purple
+/// while it's open, a quiet chip while it's closed.
+pub fn toggle_chip(ui: &mut Ui, text: &str, on: bool) -> Response {
+    let (edge, fill, ink) = if on {
+        (CRAFT.gamma_multiply(0.6), CRAFT.gamma_multiply(0.18), TEXT)
+    } else {
+        (BORDER, CHIP, DIM)
+    };
+    ui.add(
+        egui::Button::new(RichText::new(text).size(size::BODY).color(ink))
+            .fill(fill)
+            .stroke(Stroke::new(1.0, edge))
+            .rounding(5.0)
+            .min_size(egui::vec2(0.0, 26.0)),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// A faint glass under a few lines of hint text over the world.
 pub fn hint() -> egui::Frame {
     egui::Frame::none()

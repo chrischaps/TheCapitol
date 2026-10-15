@@ -18,6 +18,7 @@ use crate::terrain::TerrainSource;
 use crate::ui::containers::BenchAction;
 use crate::ui::hud::{ConnectionOverlay, HeaderView};
 use crate::ui::icons::ItemIcons;
+use crate::ui::inventory::InventoryPanel;
 use crate::ui::login::{FormAction, LoginForm, LoginView};
 use crate::world::palette;
 use crate::world::plots::Lot;
@@ -62,8 +63,9 @@ pub struct CapitolExtension {
     icon_sheet: bool,
     /// The theme's sample panels, with `--ui-sample`.
     sample: Option<ui::sample::Sample>,
-    /// `--containers`: every container as a slot grid (P5.3).
+    /// `--containers`: the containers no panel shows yet (P5.3).
     containers: bool,
+    inventory: InventoryPanel,
     players: Players,
     overlay: ConnectionOverlay,
     nodes: Nodes,
@@ -85,6 +87,7 @@ impl CapitolExtension {
             icon_sheet: false,
             sample: None,
             containers: false,
+            inventory: InventoryPanel::default(),
             players: Players::default(),
             overlay: ConnectionOverlay::default(),
             nodes: Nodes::default(),
@@ -158,6 +161,10 @@ impl PlayerExtension for CapitolExtension {
 
     fn pre_update(&mut self, ctx: &mut ExtensionCtx) {
         let now = Instant::now();
+        // Never while a text field has the keys: egui consumes those.
+        if !self.at_login() && ctx.input.is_action_just_pressed("inventory") {
+            self.inventory.toggle();
+        }
         if let Some(session) = &mut self.session {
             session.update(now, &mut self.terrain);
             walk(ctx, session, &self.shared, now);
@@ -285,8 +292,13 @@ impl PlayerExtension for CapitolExtension {
                     who: &session.who(),
                     connection: session.auth().connection(),
                     down: session.link().outage().is_some(),
+                    inventory_open: self.inventory.open,
                 };
-                sign_out |= ui::hud::header(ctx, &view);
+                let clicks = ui::hud::header(ctx, &view);
+                sign_out |= clicks.sign_out;
+                if clicks.inventory {
+                    self.inventory.toggle();
+                }
             }
             let outage = if at_login {
                 None
@@ -321,8 +333,19 @@ impl PlayerExtension for CapitolExtension {
                 };
                 action = self.form.show(ctx, &view, opacity);
             }
-            if !at_login && self.containers {
+            if !at_login {
                 let refused = session.move_refused(Instant::now());
+                let inventory = session.state().inventory();
+                if let Some(m) = self
+                    .inventory
+                    .show(ctx, &mut self.icons, inventory, refused)
+                {
+                    session.move_item(m);
+                }
+            }
+            if !at_login && self.containers {
+                // The inventory panel shows a refused move's reason.
+                let refused = None;
                 match ui::containers::bench(ctx, &mut self.icons, session.state(), refused) {
                     Some(BenchAction::Move(m)) => session.move_item(m),
                     Some(BenchAction::OpenStation(id)) => session.ws(ClientMessage::OpenStation {

@@ -88,7 +88,12 @@ impl Sample {
             .anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -20.0])
             .show(ctx, |ui| {
                 theme::panel_edged(CRAFT).show(ui, |ui| {
-                    moved = moved.or(inventory(ui, icons, &self.containers[0]));
+                    moved = moved.or(super::inventory::body(
+                        ui,
+                        icons,
+                        Some(&self.containers[0]),
+                        None,
+                    ));
                 });
             });
         if let Some(m) = moved {
@@ -196,24 +201,6 @@ impl Sample {
         });
         moved
     }
-}
-
-fn inventory(ui: &mut egui::Ui, icons: &mut ItemIcons, c: &Container) -> Option<Move> {
-    ui.set_width(6.0 * theme::SLOT_SIZE + 5.0 * SLOT_GAP + 16.0);
-    let badge = format!("{}/{}", c.used_slots(), c.slot_count());
-    theme::header(ui, "Inventory", None, Some((&badge, theme::PILL)));
-    let moved = SlotGrid::new(c).show(ui, icons);
-    ui.add_space(2.0);
-    theme::divider(ui);
-    let total: i32 = c.items().map(|i| i.quantity).sum();
-    ui.vertical_centered(|ui| {
-        ui.label(
-            RichText::new(format!("{total} items"))
-                .color(DIM)
-                .size(size::LABEL),
-        );
-    });
-    moved
 }
 
 /// A move as the server makes it (`backend/src/routes/inventory.rs`): into

@@ -48,6 +48,11 @@ bindings = [{ type = "key", code = "KeyF" }]
 kind = "button"
 bindings = [{ type = "key", code = "KeyH" }]
 
+# The inventory panel (P5.4); the header's Inventory button does the same.
+[actions.inventory]
+kind = "button"
+bindings = [{ type = "key", code = "KeyI" }]
+
 # The spike's plan hairlines (scripts/spike.rhai), on P now that E orbits.
 [actions.plan]
 kind = "button"
