@@ -4,10 +4,12 @@
 //! terrain (fetched and cached, or read from a file offline), the world
 //! built from it (`world`, so far the ground, the canals, whose water is
 //! the scene's ocean, the roads, the bridges, the plots and the Capitol
-//! tower), the fog and the light as the camera climbs (`atmosphere`), the
-//! wheel for the camera rig, and the spike's markers.
+//! tower), the players walking it (`entities`), the fog and the light as
+//! the camera climbs (`atmosphere`), the wheel for the camera rig, and the
+//! spike's markers.
 
 use crate::atmosphere::Atmosphere;
+use crate::entities::Players;
 use crate::script_api::{self, Shared};
 use crate::session::Session;
 use crate::terrain::TerrainSource;
@@ -52,6 +54,7 @@ pub struct CapitolExtension {
     icon_sheet: bool,
     /// The theme's sample panels, with `--ui-sample`.
     sample: Option<ui::sample::Sample>,
+    players: Players,
 }
 
 impl CapitolExtension {
@@ -69,6 +72,7 @@ impl CapitolExtension {
             icons: ItemIcons::load(std::path::Path::new(ItemIcons::DIR)),
             icon_sheet: false,
             sample: None,
+            players: Players::default(),
         }
     }
 
@@ -132,8 +136,13 @@ impl PlayerExtension for CapitolExtension {
     }
 
     fn pre_update(&mut self, ctx: &mut ExtensionCtx) {
+        let now = Instant::now();
         if let Some(session) = &mut self.session {
-            session.update(Instant::now(), &mut self.terrain);
+            session.update(now, &mut self.terrain);
+            // Signed out, the store is empty, so everyone fades away.
+            let (poses, state) = session.sample(now);
+            let dt = ctx.clock.delta_time.min(0.1) as f32;
+            self.players.update(ctx, poses, state, dt, &self.shared);
         }
         self.shared
             .at_login
@@ -175,6 +184,7 @@ impl PlayerExtension for CapitolExtension {
             world::ground::upload(gpu, terrain.world_size, &world::water::holes(rings));
         }
         if rebuild.rings {
+            self.players.set_rings(rings);
             world::water::upload(gpu, rings);
             world::bridges::upload(gpu, rings);
             world::tower::upload(gpu, rings);

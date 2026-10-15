@@ -12,20 +12,23 @@
 // On the way to the map the view drifts to the Capitol and turns north up,
 // so the furthest zoom is always the same map.
 //
-// Controls (config/input.toml): WASD or the arrows move the point, R and F
-// or the wheel zoom, Q and E or a right-drag orbit, H comes home. The wheel
+// Controls (config/input.toml): WASD or the arrows pan, R and F or the
+// wheel zoom, Q and E or a right-drag orbit, H comes home. The wheel
 // arrives through cap_take_wheel(), because Flint doesn't feed it to
 // actions yet (issue #67). The keys stand in for Home, PageUp and +/-,
 // which Flint can't bind yet (issue #68).
 //
-// Until the player exists (P4.2), the point is a free one you move with
-// WASD, drawn as a gold mark. P4.2 makes follow_target the avatar.
+// Signed in, the point is your avatar (cap_follow, P4.2), and WASD pans
+// the view away from it: the pan stays put relative to you as you walk,
+// and H brings it home to you. Offline there's no avatar, so the point is
+// a free one WASD moves, drawn as a gold mark.
 //
 // While the login form is up (cap_at_login, P4.1) the rig takes no input.
 // The camera circles the tower slowly from beyond the canals, with the
 // tower held right of centre so the form on the left doesn't cover it.
-// Once the player is in, that circle is let go like any fixed shot: the
-// camera eases down to the street on the side it was circling.
+// Once the player is in, that circle is let go like any fixed shot, and
+// the camera comes down out of it onto your avatar. It keeps circling
+// until the server has said where you are, for at most `landing_wait`.
 //
 // `--view` (cap_view) frames a capture. street, district and map are rig
 // framings. The rest are fixed shots: bridge (the quay by the inner canal's
@@ -71,8 +74,12 @@ fn wheel_step() { 0.045 }   // zoom per wheel notch
 fn key_zoom_rate() { 0.45 } // zoom per second on R/F
 fn orbit_rate() { 1.6 }     // radians per second on Q/E
 fn drag_rate() { 0.006 }    // radians per point of right-drag
-// How long a fixed shot takes to ease into the rig, in seconds.
+// How long a fixed shot takes to ease into the rig, in seconds, and how
+// long the camera takes to come down from the login circle onto you.
 fn release_time() { 1.0 }
+fn landing_time() { 2.2 }
+// How long the circle waits past the form for where you are (s).
+fn landing_wait() { 1.5 }
 // The circle behind the login form: radius and height (m), where it
 // starts (radians round the tower, 0 south; -0.6 is south-west, facing the
 // sun's side), how fast it turns (one lap in about three minutes), what it
@@ -110,10 +117,13 @@ let rig = #{
     drag_x: (),
     // A --view shot: #{ pos, at } held until camera input, then `release`
     // runs 0 -> 1 as it eases into the rig.
-    shot: (), release: 1.0,
+    shot: (), release: 1.0, release_len: 1.0,
     started: false,
-    // The login circle held last frame.
-    at_login: false,
+    // The login circle held last frame, and how long it has waited past
+    // the form for where you are.
+    at_login: false, waited: 0.0,
+    // How far the view is panned from your avatar (m). Unused offline.
+    pan_x: 0.0, pan_z: 0.0,
 };
 
 // ── Per frame ────────────────────────────────────────────────────────────
@@ -127,7 +137,10 @@ fn on_update() {
     }
 
     let moved = false;
-    if cap_at_login() {
+    let you = cap_follow();
+    let waiting = !cap_at_login() && rig.at_login && you == () && rig.waited < landing_wait();
+    if cap_at_login() || waiting {
+        rig.waited = if waiting { rig.waited + dt } else { 0.0 };
         rig.shot = login_shot(total_time());
         rig.release = 1.0;
         rig.at_login = true;
@@ -135,9 +148,24 @@ fn on_update() {
         cap_take_wheel();
     } else if rig.at_login {
         rig.at_login = false;
+        rig.waited = 0.0;
         rig.take_over_from_shot();
+        if you != () {
+            // Down onto you, not onto wherever the circle was.
+            rig.target_x = you[0];
+            rig.target_z = you[2];
+            rig.focus_x = you[0];
+            rig.focus_z = you[2];
+            rig.pan_x = 0.0;
+            rig.pan_z = 0.0;
+            rig.release_len = landing_time();
+        }
     } else {
-        moved = rig.steer(dt);
+        moved = rig.steer(dt, you);
+    }
+    if you != () && !rig.at_login {
+        rig.target_x = you[0] + rig.pan_x;
+        rig.target_z = you[2] + rig.pan_z;
     }
     if moved && rig.shot != () && rig.release >= 1.0 {
         rig.take_over_from_shot();
@@ -155,7 +183,7 @@ fn on_update() {
         // Held, or easing out of it.
         let s = rig.shot;
         if rig.release < 1.0 {
-            rig.release = (rig.release + dt / release_time()).min(1.0);
+            rig.release = (rig.release + dt / rig.release_len).min(1.0);
             let t = smooth(rig.release);
             pose = #{
                 px: lerp(s.pos[0], pose.px, t), py: lerp(s.pos[1], pose.py, t),
@@ -174,8 +202,9 @@ fn on_update() {
 }
 
 // Read this frame's camera input into the rig (`this`). Returns whether
-// there was any, which is what lets go of a fixed shot.
-fn steer(dt) {
+// there was any, which is what lets go of a fixed shot. `you` is
+// cap_follow(): with an avatar, WASD moves the pan from it.
+fn steer(dt, you) {
     let any = false;
 
     // Move the point, relative to the way the camera faces. Faster the
@@ -196,6 +225,10 @@ fn steer(dt) {
         if r > world_radius() {
             this.target_x *= world_radius() / r;
             this.target_z *= world_radius() / r;
+        }
+        if you != () {
+            this.pan_x = this.target_x - you[0];
+            this.pan_z = this.target_z - you[2];
         }
     }
 
@@ -229,17 +262,21 @@ fn steer(dt) {
     // by the short way, never a full turn.
     if is_action_just_pressed("home") {
         any = true;
-        let home = follow_home();
+        let home = follow_home(you);
         this.target_x = home[0];
         this.target_z = home[1];
+        this.pan_x = 0.0;
+        this.pan_z = 0.0;
         this.zoom_to = street_zoom();
         this.yaw_to = this.yaw - wrap_angle(this.yaw);
     }
     any
 }
 
-// Where H brings the point back to. P4.2: the avatar.
-fn follow_home() { [0.0, 48.0] }
+// Where H brings the point back to: you, or offline where the rig starts.
+fn follow_home(you) {
+    if you != () { [you[0], you[2]] } else { [0.0, 48.0] }
+}
 
 // +1 while `plus` is held, -1 while `minus` is, 0 for both or neither.
 fn action_axis(plus, minus) {
@@ -296,6 +333,7 @@ fn take_over_from_shot() {
     this.zoom = street_zoom();
     this.zoom_to = street_zoom();
     this.release = 0.0;
+    this.release_len = release_time();
 }
 
 // The camera behind the login form at game time t: on its circle round the
@@ -344,9 +382,11 @@ fn view_shot(view) {
     }
 }
 
-// The free point, marked in gold: gold means you. A dot and a ring on the
-// screen, a constant size at every zoom. P4.2's avatar replaces it.
+// Offline, the free point, marked in gold: gold means you. A dot and a
+// ring on the screen, a constant size at every zoom. Signed in, your
+// avatar carries the gold instead (entities.rs).
 fn on_draw_ui() {
+    if cap_follow() != () || cap_at_login() { return; }
     if rig.shot != () && rig.release >= 1.0 { return; }
     let p = world_to_screen(rig.target_x, cap_ground_y(), rig.target_z);
     if !p.visible { return; }

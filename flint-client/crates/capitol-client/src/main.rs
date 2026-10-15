@@ -5,13 +5,15 @@
 //! server (and cached) or read from `--offline <file>`. Online it opens on
 //! the login form, with the camera circling the tower behind it, unless a
 //! stored session lets it straight in. The camera is the rig in
-//! `scripts/camera.rhai`. The P0.4 spike's script, markers and inscription
+//! `scripts/camera.rhai`, and it follows your avatar once you're in; the
+//! names over the players are `scripts/hud.rhai`. The P0.4 spike's script, markers and inscription
 //! window (game egui) stay until the living world (P4) replaces them.
 
 mod atmosphere;
 #[cfg(test)]
 mod camera_rig;
 mod coords;
+mod entities;
 mod extension;
 mod script_api;
 mod session;

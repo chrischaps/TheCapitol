@@ -1,14 +1,14 @@
 //! The client's one connection to the server: the `Net`, the way in
-//! (`capitol_core::auth`), and once signed in, the store and the poller
-//! the living world runs on (P4).
+//! (`capitol_core::auth`), and once signed in, the store, the poller and
+//! the players' motion the living world runs on (P4).
 //!
 //! It exists whenever the client is online, signed in or not, because
 //! `/terrain` and `/health` need no account. [`Session::update`] runs once
 //! per frame. It sends the terrain fetch and the auth machine's requests,
 //! drains the net and feeds every event to the terrain, the auth machine,
-//! and the store and poller.
+//! and the store, the poller and the motion.
 //!
-//! The store and poller only see events between a sign-in and a sign-out,
+//! The store, poller and motion only see events between a sign-in and a sign-out,
 //! and start fresh each time, so one player's world never leaks into the
 //! next one's.
 //!
@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use capitol_core::auth::{Auth, Effect, Phase, Remembered};
+use capitol_core::motion::{Motion, Pose};
 use capitol_core::net::{Net, NetConfig, NetEvent, RestResponse, Tag};
 use capitol_core::poll::{Fetch, Poller};
 use capitol_core::state::GameState;
@@ -40,7 +41,9 @@ pub struct Session {
     auth: Auth,
     state: GameState,
     poller: Poller,
-    /// The store and poller have seen events since they were last reset.
+    /// Every player's pose, smoothed between snapshots (P2.5).
+    motion: Motion,
+    /// The store, poller and motion have seen events since they were last reset.
     used: bool,
     file: SessionFile,
 }
@@ -62,6 +65,7 @@ impl Session {
             auth,
             state: GameState::new(),
             poller: Poller::new(),
+            motion: Motion::new(),
             used: false,
             file,
         };
@@ -78,9 +82,15 @@ impl Session {
     }
 
     /// The world mirror. Empty until signed in.
-    #[allow(dead_code)] // P4.2 draws the players from it
+    #[allow(dead_code)] // P4.4's nodes and P5's panels read it
     pub fn state(&self) -> &GameState {
         &self.state
+    }
+
+    /// Every player's pose at `now`, the local player first (once the first
+    /// `positions` has placed them), and the store they were drawn from.
+    pub fn sample(&mut self, now: Instant) -> (&[Pose], &GameState) {
+        (self.motion.sample(now), &self.state)
     }
 
     /// Who's signed in: the player's name once the server has said it,
@@ -133,6 +143,7 @@ impl Session {
             }
             self.used = true;
             let changes = self.state.apply(event);
+            self.motion.observe(now, &changes, &self.state);
             let answered = self.poller.observe(event, &changes, &self.state);
             match (answered, event) {
                 (Some(Fetch::Terrain), NetEvent::Rest(_, Ok(RestResponse::Terrain(t)))) => {
@@ -161,6 +172,7 @@ impl Session {
         if std::mem::take(&mut self.used) {
             self.state = GameState::new();
             self.poller = Poller::new();
+            self.motion = Motion::new();
         }
     }
 

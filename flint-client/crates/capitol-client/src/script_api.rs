@@ -19,6 +19,23 @@ pub struct Shared {
     pub wheel: Arc<Mutex<f32>>,
     /// The login form is up (P4.1): the camera circles the tower behind it.
     pub at_login: Arc<AtomicBool>,
+    /// Where you stand in world metres (P4.2), for the camera to follow.
+    /// `None` offline, and until the server has said where you are.
+    pub follow: Arc<Mutex<Option<[f32; 3]>>>,
+    /// The name over each avatar this frame (P4.2), for `hud.rhai`.
+    pub players: Arc<Mutex<Vec<PlayerLabel>>>,
+}
+
+/// One avatar's name tag, as `entities::Players` placed it this frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerLabel {
+    pub name: String,
+    /// Where the name hangs, over the head, in world metres.
+    pub at: [f32; 3],
+    /// 0 to 1 as the player fades in or out.
+    pub alpha: f32,
+    /// You.
+    pub me: bool,
 }
 
 pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
@@ -45,6 +62,36 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     // circles the tower instead of taking input.
     let at_login = shared.at_login.clone();
     engine.register_fn("cap_at_login", move || at_login.load(Ordering::Relaxed));
+    // `cap_follow() -> [x, y, z] or ()`: where you stand, in world metres,
+    // for the camera rig. () offline, and until the server has placed you.
+    let follow = shared.follow.clone();
+    engine.register_fn("cap_follow", move || -> rhai::Dynamic {
+        match follow.lock().ok().and_then(|f| *f) {
+            Some(p) => rhai::Dynamic::from_array(p.iter().map(|v| (*v as f64).into()).collect()),
+            None => rhai::Dynamic::UNIT,
+        }
+    });
+    // `cap_players() -> [#{ name, x, y, z, alpha, me }]`: every avatar's
+    // name and where it hangs (world metres), with how far it has faded in.
+    let players = shared.players.clone();
+    engine.register_fn("cap_players", move || -> rhai::Array {
+        let Ok(players) = players.lock() else {
+            return rhai::Array::new();
+        };
+        players
+            .iter()
+            .map(|p| {
+                let mut m = rhai::Map::new();
+                m.insert("name".into(), p.name.clone().into());
+                m.insert("x".into(), (p.at[0] as f64).into());
+                m.insert("y".into(), (p.at[1] as f64).into());
+                m.insert("z".into(), (p.at[2] as f64).into());
+                m.insert("alpha".into(), (p.alpha as f64).into());
+                m.insert("me".into(), p.me.into());
+                m.into()
+            })
+            .collect()
+    });
     // `cap_ground_y() -> float`: the land's height in metres, for picking
     // and for drawing on the ground. The sea is at 0.
     engine.register_fn("cap_ground_y", || crate::coords::layer::GROUND as f64);
@@ -65,6 +112,27 @@ mod tests {
         register(&mut engine, &shared);
         let note: String = engine.eval("cap_spike_note()").unwrap();
         assert_eq!(note, "Ad astra");
+    }
+
+    #[test]
+    fn scripts_read_where_you_stand_and_who_is_about() {
+        let shared = Shared::default();
+        let mut engine = rhai::Engine::new();
+        register(&mut engine, &shared);
+        assert!(engine.eval::<()>("cap_follow()").is_ok());
+        *shared.follow.lock().unwrap() = Some([1.0, 0.7, -2.0]);
+        shared.players.lock().unwrap().push(PlayerLabel {
+            name: "Ada".into(),
+            at: [1.0, 2.9, -2.0],
+            alpha: 0.5,
+            me: true,
+        });
+        let z: f64 = engine.eval("cap_follow()[2]").unwrap();
+        assert_eq!(z, -2.0);
+        let who: String = engine
+            .eval(r#"let p = cap_players()[0]; `${p.name} ${p.alpha} ${p.me}`"#)
+            .unwrap();
+        assert_eq!(who, "Ada 0.5 true");
     }
 
     #[test]

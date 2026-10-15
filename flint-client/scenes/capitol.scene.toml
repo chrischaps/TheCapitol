@@ -2,7 +2,8 @@
 # the roads, the plots, the bridges and the tower are runtime meshes the
 # extension uploads (world/), named below with `runtime = true` so the model
 # loader doesn't look for files; the road and plot sectors are spawned by the
-# extension itself. The camera is the rig (camera.rhai, P3.9). The spike's
+# extension itself, and so are the players' avatars (entities.rs, P4.2).
+# The camera is the rig (camera.rhai, P3.9). The spike's
 # script and markers (P0.4) stay until the living world (P4) replaces them.
 
 [scene]
@@ -168,3 +169,7 @@ source = "spike.rhai"
 # The camera rig: follow, tilt, zoom to the map, orbit (P3.9)
 [entities.camera_rig.script]
 source = "camera.rhai"
+
+# The world HUD: the players' names (P4.2)
+[entities.hud.script]
+source = "hud.rhai"

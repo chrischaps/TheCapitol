@@ -46,7 +46,7 @@ pub fn inscription(ctx: &egui::Context, shared: &Shared, status: &str) {
             );
             ui.add_space(6.0);
             ui.label(theme::dim(
-                "WASD moves · wheel or R/F zooms · Q/E or right-drag turns · H home",
+                "WASD pans · wheel or R/F zooms · Q/E or right-drag turns · H home",
             ));
             ui.label(theme::dim("P traces the plan · click the city to mark it"));
             ui.label(theme::dim(status));

@@ -425,6 +425,29 @@ pub fn upload(gpu: &mut ExtensionGpu, rings: &[WaterRing]) {
     build(rings).upload(gpu, MESH, 0.8);
 }
 
+/// Every deck's footprint, for standing on it (P4.2): an avatar on a
+/// bridge stands on the hump, not at the road's height under it. Built
+/// once per terrain, so a lookup doesn't allocate.
+#[derive(Debug, Clone, Default)]
+pub struct Decks(Vec<Span>);
+
+impl Decks {
+    pub fn new(rings: &[WaterRing]) -> Self {
+        Self(spans(rings))
+    }
+
+    /// The deck's top in metres under server (x, y), if a deck is there:
+    /// across the bridge's width, from ramp toe to ramp toe.
+    pub fn top(&self, x: f64, y: f64) -> Option<f32> {
+        let (dx, dy) = (x - CENTER_X, y - CENTER_Y);
+        self.0.iter().find_map(|span| {
+            let s = dx * span.axis[0] + dy * span.axis[1];
+            let o = dx * span.across[0] + dy * span.across[1];
+            (o.abs() <= span.half && (span.start..=span.end).contains(&s)).then(|| span.top(s))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,6 +605,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_walker_stands_on_the_deck_from_toe_to_crown() {
+        let rings = rings();
+        let decks = Decks::new(&rings);
+        let ring = &rings[0];
+        let b = &ring.bridges[0];
+        let span = Span::new(ring, b.angle_degrees, b.width);
+        let at = |s: f64, o: f64| {
+            (
+                CENTER_X + span.axis[0] * s + span.across[0] * o,
+                CENTER_Y + span.axis[1] * s + span.across[1] * o,
+            )
+        };
+        // At the crown, on the deck's height, which is above the road's.
+        let (x, y) = at(ring.radius, 0.0);
+        let crown = decks.top(x, y).expect("on the deck");
+        assert!(crown > layer::BANK, "{crown}");
+        // At a toe, level with the road the ramp lands on.
+        let (x, y) = at(span.start + 0.01, 0.0);
+        assert!((decks.top(x, y).unwrap() - toe()).abs() < 0.01);
+        // Past the toe, or over the rail, it's the road again.
+        let (x, y) = at(span.start - 1.0, 0.0);
+        assert_eq!(decks.top(x, y), None);
+        let (x, y) = at(ring.radius, span.half + 1.0);
+        assert_eq!(decks.top(x, y), None);
     }
 
     #[test]
