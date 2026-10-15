@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo};
 
+use crate::engine::container_access::check_container_access;
 use crate::engine::GameEvent;
 use crate::models::PlayerState;
 use crate::routes::auth::Claims;
@@ -844,17 +845,26 @@ async fn handle_move_item(
     .map_err(|e| format!("Database error: {}", e))?
     .ok_or_else(|| "Item not found".to_string())?;
 
-    // Verify target container belongs to player
-    let _target_container: crate::models::Container = sqlx::query_as(
-        "SELECT id, container_type, owner_id, station_id, created_at
-         FROM containers WHERE id = $1 AND owner_id = $2"
-    )
-    .bind(target_container_id)
-    .bind(player_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?
-    .ok_or_else(|| "Container not found".to_string())?;
+    // Both ends must be usable: the player's own containers, or a station's
+    // within reach (B4). The source matters too, since a swap fills it.
+    if let Some(source_container_id) = source_item.container_id {
+        check_container_access(&state.db, player_id, source_container_id)
+            .await
+            .map_err(|e| e.message())?;
+    }
+    let target_container = check_container_access(&state.db, player_id, target_container_id)
+        .await
+        .map_err(|e| e.message())?;
+
+    // Validate slot bounds (REST always has; WS didn't)
+    let slot_count: i32 = sqlx::query_scalar("SELECT slot_count FROM container_types WHERE id = $1")
+        .bind(&target_container.container_type)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?;
+    if target_slot < 0 || target_slot >= slot_count {
+        return Err(format!("Slot {} out of bounds (0-{})", target_slot, slot_count - 1));
+    }
 
     // Check if target slot is occupied
     let target_item: Option<crate::models::Item> = sqlx::query_as(
@@ -866,6 +876,12 @@ async fn handle_move_item(
     .fetch_optional(&state.db)
     .await
     .map_err(|e| format!("Database error: {}", e))?;
+
+    // A shared station can hold other players' items. Merging into or swapping
+    // with one would hand it over, so only empty slots or your own items.
+    if target_item.as_ref().is_some_and(|t| t.owner_id != Some(player_id)) {
+        return Err("That slot holds someone else's item".into());
+    }
 
     match target_item {
         None => {

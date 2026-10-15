@@ -1,4 +1,5 @@
 mod commands;
+pub mod container_access;
 mod crafting;
 pub mod currency;
 mod events;
