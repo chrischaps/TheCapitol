@@ -30,6 +30,8 @@ FLAGS:
     --near <player>     Wander around this player, and follow them
     --radius <units>    How far a wanderer strays from where it started [default: 120]
     --seconds <s>       Stop wandering after this long [default: never]
+    --gather <n>        Instead of the script, gather until the inventory holds
+                        n fiber, and stop (to stock an account for a test)
     -h, --help          Print this
 
 The script logs in (or registers), scouts for fiber, walks to the nearest
@@ -45,6 +47,7 @@ struct Options {
     near: Option<String>,
     radius: f64,
     seconds: Option<f64>,
+    gather: Option<i32>,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
@@ -56,6 +59,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         near: None,
         radius: 120.0,
         seconds: None,
+        gather: None,
     };
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -78,6 +82,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             "--near" => options.near = Some(value()?),
             "--radius" => options.radius = number(&flag, &value()?)?,
             "--seconds" => options.seconds = Some(number(&flag, &value()?)?),
+            "--gather" => options.gather = Some(number(&flag, &value()?)?),
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown flag {other}")),
         }
@@ -102,6 +107,10 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
             .seconds
             .map(|s| Instant::now() + Duration::from_secs_f64(s));
         bot.wander(options.radius, options.near.as_deref(), deadline)
+    } else if let Some(want) = options.gather {
+        bot.gather("fiber", want)?;
+        bot.say(format!("holding {want} fiber or more"));
+        Ok(())
     } else {
         println!("{}", bot.run_script()?);
         Ok(())
@@ -168,6 +177,10 @@ mod tests {
         assert_eq!(o.radius, 80.0);
         assert_eq!(o.seconds, Some(30.0));
         assert_eq!(o.prefix, "scout");
+        assert_eq!(
+            parse(args("--gather 12")).unwrap().unwrap().gather,
+            Some(12)
+        );
         assert_eq!(o.near.as_deref(), Some("Ada"));
         assert!(parse(args("--help")).unwrap().is_none());
     }

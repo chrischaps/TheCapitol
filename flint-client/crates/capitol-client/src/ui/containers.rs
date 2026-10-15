@@ -1,10 +1,10 @@
 //! `--containers`: the containers the player holds that no panel shows yet,
 //! as slot grids, so drag and drop can be played against the server before
-//! the panels exist (P5.3). The inventory panel (P5.4) has taken its own;
-//! crafting (P5.5) and the station panel (P6.3) take theirs next, and then
-//! this goes. Until P6.3 it also lists the stations nearby, to open one and
-//! try its box. It sits top right, clear of the inventory panel, so a drag
-//! between the two works.
+//! the panels exist (P5.3). The inventory panel (P5.4) and the crafting
+//! panel (P5.5) have taken theirs; the station panel (P6.3) takes its own
+//! next, and then this goes. Until P6.3 it also lists the stations nearby,
+//! to open one and try its box. It sits top right, clear of the inventory
+//! panel, so a drag between the two works.
 
 use super::icons::ItemIcons;
 use super::slots::{Move, SlotGrid};
@@ -49,10 +49,6 @@ pub fn bench(
                         }
                     }
                 };
-                ui.horizontal_top(|ui| {
-                    ui.vertical(|ui| grid(ui, "Crafting input", state.crafting_input()));
-                    ui.vertical(|ui| grid(ui, "Output", state.crafting_output()));
-                });
                 match state.open_station() {
                     Some(open) => {
                         grid(ui, &open.name, state.station_container());

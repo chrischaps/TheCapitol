@@ -16,12 +16,13 @@
 
 use crate::coords::{layer, to_world};
 use crate::script_api::{PlayerLabel, Shared};
+use crate::ui::crafting::Fill;
 use crate::world::bridges::Decks;
 use crate::world::mesh::{MeshBuf, UP};
 use crate::world::palette::{glow, hex, mix};
 use capitol_core::motion::Pose;
 use capitol_core::protocol::terrain::{RoadType, WaterRing};
-use capitol_core::state::GameState;
+use capitol_core::state::{Activity, GameState};
 use flint_core::EntityId;
 use flint_player::{ExtensionCtx, ExtensionGpu};
 use std::collections::HashMap;
@@ -67,6 +68,8 @@ struct Avatar {
     walk: f32,
     /// Server position last frame, to measure the stride.
     last: Option<(f64, f64)>,
+    /// Their craft's progress as drawn, eased between updates (P5.5).
+    craft: Fill,
 }
 
 #[derive(Default)]
@@ -135,6 +138,7 @@ impl Players {
                         stride: 0.0,
                         walk: 0.0,
                         last: None,
+                        craft: Fill::default(),
                     })
                 }
             };
@@ -145,6 +149,7 @@ impl Players {
                 }
             }
             avatar.step(pose, &self.decks, dt);
+            avatar.craft.update(state.activity(pose.id), dt);
         }
 
         let mut labels = shared.players.lock().ok();
@@ -166,11 +171,14 @@ impl Players {
             place(world, avatar);
             if let Some(labels) = labels.as_deref_mut() {
                 let [x, y, z] = avatar.at;
+                let crafting = matches!(state.activity(*id), Some(Activity::Crafting { .. }));
                 labels.push(PlayerLabel {
                     name: avatar.name.clone(),
                     at: [x, y + LABEL_Y, z],
+                    feet_y: y,
                     alpha: smooth(avatar.shown),
                     me: Some(*id) == me,
+                    craft: crafting.then_some(avatar.craft.shown),
                 });
             }
             true

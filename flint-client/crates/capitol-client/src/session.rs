@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use capitol_core::auth::{Auth, Effect, Phase, Remembered};
+use capitol_core::craft::{self, Crafting};
 use capitol_core::harvest::{Harvest, Note, Step};
 use capitol_core::motion::{Motion, Pose};
 use capitol_core::net::{
@@ -76,6 +77,13 @@ pub struct Session {
     /// What your extractions yielded, by node, since the extension last
     /// took them.
     yields: Vec<(Uuid, Yield)>,
+    /// Crafting by hand (P5.5): the craft under way, from the ask to the
+    /// settled inventory.
+    crafting: Crafting,
+    /// What your crafts made since the extension last took them.
+    crafted: Vec<Yield>,
+    /// Why the last craft didn't happen, and when.
+    craft_refused: Option<(String, Instant)>,
 }
 
 /// The server stopped you at the water's edge (`movement_blocked`).
@@ -132,6 +140,9 @@ impl Session {
             blocked: Vec::new(),
             harvest: Harvest::default(),
             yields: Vec::new(),
+            crafting: Crafting::default(),
+            crafted: Vec::new(),
+            craft_refused: None,
         };
         session.apply(effects);
         Ok(session)
@@ -270,6 +281,66 @@ impl Session {
             .map(|(why, _)| why.as_str())
     }
 
+    /// Sends several moves at once (the crafting panel's Fill and Clear).
+    /// Their targets must differ, or two could race for one slot.
+    pub fn move_items(&mut self, shifts: &[craft::Shift]) {
+        for &(item_id, target_container_id, target_slot) in shifts {
+            self.move_item(Move {
+                item_id,
+                target_container_id,
+                target_slot,
+            });
+        }
+    }
+
+    /// The craft under way, for the crafting panel.
+    pub fn crafting(&self) -> &Crafting {
+        &self.crafting
+    }
+
+    /// Crafts `recipe_id` from the input box by hand, if it's ready and
+    /// nothing else is under way.
+    pub fn craft(&mut self, now: Instant, recipe_id: &str) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        let (Some(recipe), Some(input)) =
+            (self.state.recipe(recipe_id), self.state.crafting_input())
+        else {
+            return;
+        };
+        let check = craft::check(recipe, input, self.state.crafting_output());
+        if let Some(message) = self.crafting.start(&check, &self.state, now) {
+            tracing::info!(
+                "craft: {} from {} stacks",
+                check.recipe.id,
+                check.inputs.len()
+            );
+            self.craft_refused = None;
+            self.net.ws(message);
+        }
+    }
+
+    /// Stops the craft under way.
+    pub fn cancel_craft(&mut self) {
+        if let Some(message) = self.crafting.cancel(&self.state) {
+            self.net.ws(message);
+        }
+    }
+
+    /// Why the last craft didn't happen, for a few seconds after.
+    pub fn craft_refused(&self, now: Instant) -> Option<&str> {
+        self.craft_refused
+            .as_ref()
+            .filter(|(_, at)| now.duration_since(*at) < NOTICE_FOR)
+            .map(|(why, _)| why.as_str())
+    }
+
+    /// What your crafts made since the last call.
+    pub fn take_crafted(&mut self) -> Vec<Yield> {
+        std::mem::take(&mut self.crafted)
+    }
+
     /// Sends a message on the socket. Dropped while not connected.
     pub fn ws(&self, message: ClientMessage) {
         self.net.ws(message);
@@ -356,9 +427,12 @@ impl Session {
                     StateEvent::ExtractionCompleted { node_id, item } => {
                         self.yields.push((*node_id, item.clone()));
                     }
+                    StateEvent::CraftingCompleted { item } => self.crafted.push(item.clone()),
                     _ => {}
                 }
             }
+            self.crafting.observe(&changes, &self.state, now);
+            self.note_crafting(now);
             if let Some(step) = self.harvest.observe(&changes, &self.state, now) {
                 self.step(now, step);
             }
@@ -375,6 +449,8 @@ impl Session {
         }
         if self.in_session() {
             self.harvest.tick(now);
+            self.crafting.tick(now);
+            self.note_crafting(now);
             self.state.tick(now);
             for (request, tag) in self.poller.tick(now) {
                 self.net.rest(request, tag);
@@ -399,6 +475,21 @@ impl Session {
             self.arrival = None;
             self.harvest = Harvest::default();
             self.yields.clear();
+            self.crafting = Crafting::default();
+            self.crafted.clear();
+            self.craft_refused = None;
+        }
+    }
+
+    /// Keeps the crafting machine's last note for the panel to show.
+    fn note_crafting(&mut self, now: Instant) {
+        for note in self.crafting.take_notes() {
+            let why = match note {
+                craft::Note::Failed(reason) => reason,
+                craft::Note::Unanswered => "The server didn't answer. Try again".into(),
+            };
+            tracing::info!("craft: refused: {why}");
+            self.craft_refused = Some((why, now));
         }
     }
 
@@ -754,6 +845,143 @@ mod tests {
             "refused: {why} / {}",
             session.move_refused(Instant::now()).unwrap()
         );
+        session.log_out();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Against the local stack, the crafting panel's rules end to end: Fill,
+    /// a rope, the rope then blocking a workbench kit's output, a cancel
+    /// that uses nothing, and the kit. A bot gathers the fiber first, on
+    /// `craft1@bots.capitol.local`.
+    #[test]
+    #[ignore = "needs the local stack; gathers fiber, so takes a minute"]
+    fn rope_then_a_workbench_kit_through_the_panel_rules() {
+        use capitol_core::bot::{Account, Bot};
+        use capitol_core::catalog::container_type::{CRAFTING_INPUT, CRAFTING_OUTPUT};
+        use capitol_core::craft::{self, Phase};
+        use capitol_core::state::Container;
+
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let account = Account::numbered("craft", 1);
+        {
+            let mut bot = Bot::sign_in(NetConfig::with_base_url(&server), &account).unwrap();
+            bot.gather("fiber", 12).unwrap();
+        }
+
+        let dir = std::env::temp_dir().join(format!("capitol-craft-{}", std::process::id()));
+        let mut session = Session::start(&server, SessionFile::load(dir.join("s.toml"))).unwrap();
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let mut terrain = TerrainSource::offline(&fixture).unwrap();
+        session.log_in(&account.email, &account.password);
+        let mut wait = |session: &mut Session, what: &str, done: &dyn Fn(&Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !done(session) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                session.update(Instant::now(), &mut terrain);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait(&mut session, "the boxes and recipes", &|s| {
+            let st = s.state();
+            st.inventory().is_some()
+                && st.crafting_input().is_some()
+                && st.crafting_output().is_some()
+                && !st.recipes().is_empty()
+        });
+        let boxed = |s: &Session, kind: &str| -> Container {
+            s.state()
+                .containers()
+                .values()
+                .find(|c| c.container_type == kind)
+                .unwrap()
+                .clone()
+        };
+        let held = |s: &Session, kind: &str, t: &str| craft::count(&boxed(s, kind), t);
+        // Everything in a box back into the inventory.
+        let drain = |session: &mut Session, kind: &str| {
+            let shifts =
+                craft::empty_into(&boxed(session, kind), session.state().inventory().unwrap());
+            session.move_items(&shifts);
+        };
+        let fill = |session: &mut Session, id: &str| {
+            let r = session.state().recipe(id).unwrap().clone();
+            let st = session.state();
+            let shifts = craft::fill(&r, st.inventory().unwrap(), st.crafting_input().unwrap());
+            session.move_items(&shifts);
+        };
+        let check = |s: &Session, id: &str| {
+            let st = s.state();
+            let r = st.recipe(id).unwrap().clone();
+            let c = craft::check(&r, st.crafting_input().unwrap(), st.crafting_output());
+            (c.satisfied(), c.blocked.is_some())
+        };
+        let idle = |s: &Session| *s.crafting().phase() == Phase::Idle && !s.state().is_crafting();
+
+        // Start clean: both boxes back into the inventory.
+        for kind in [CRAFTING_INPUT, CRAFTING_OUTPUT] {
+            drain(&mut session, kind);
+            wait(&mut session, kind, &|s| boxed(s, kind).used_slots() == 0);
+        }
+
+        // Rope.
+        fill(&mut session, "rope_basic");
+        wait(&mut session, "fiber for rope", &|s| {
+            check(s, "rope_basic").0
+        });
+        let before = held(&session, CRAFTING_INPUT, "fiber");
+        session.craft(Instant::now(), "rope_basic");
+        wait(&mut session, "the rope to start", &|s| {
+            s.state().is_crafting()
+        });
+        wait(&mut session, "the rope", &idle);
+        assert_eq!(held(&session, CRAFTING_OUTPUT, "rope"), 1);
+        assert_eq!(held(&session, CRAFTING_INPUT, "fiber"), before - 2);
+        assert_eq!(session.take_crafted().len(), 1);
+
+        // The rope sits in the output: a workbench kit would be lost.
+        drain(&mut session, CRAFTING_INPUT);
+        wait(&mut session, "the inputs back", &|s| {
+            boxed(s, CRAFTING_INPUT).used_slots() == 0
+        });
+        fill(&mut session, "craft_workbench");
+        wait(&mut session, "fiber for the kit", &|s| {
+            check(s, "craft_workbench").0
+        });
+        assert_eq!(check(&session, "craft_workbench"), (true, true));
+        session.craft(Instant::now(), "craft_workbench");
+        assert_eq!(
+            *session.crafting().phase(),
+            Phase::Idle,
+            "a blocked craft isn't sent"
+        );
+
+        // Move the rope out, then start and cancel: nothing is used.
+        drain(&mut session, CRAFTING_OUTPUT);
+        wait(&mut session, "the output to clear", &|s| {
+            boxed(s, CRAFTING_OUTPUT).used_slots() == 0
+        });
+        let before = held(&session, CRAFTING_INPUT, "fiber");
+        session.craft(Instant::now(), "craft_workbench");
+        wait(&mut session, "the kit to start", &|s| {
+            s.state().is_crafting()
+        });
+        session.cancel_craft();
+        wait(&mut session, "the cancel", &idle);
+        assert_eq!(held(&session, CRAFTING_INPUT, "fiber"), before);
+        assert_eq!(held(&session, CRAFTING_OUTPUT, "workbench_kit"), 0);
+
+        // And the kit.
+        session.craft(Instant::now(), "craft_workbench");
+        wait(&mut session, "the kit to start again", &|s| {
+            s.state().is_crafting()
+        });
+        wait(&mut session, "the kit", &idle);
+        assert_eq!(held(&session, CRAFTING_OUTPUT, "workbench_kit"), 1);
+        assert_eq!(held(&session, CRAFTING_INPUT, "fiber"), before - 10);
+        let made = session.take_crafted();
+        eprintln!("made {made:?}");
+        assert_eq!(made[0].item_type, "workbench_kit");
         session.log_out();
         let _ = std::fs::remove_dir_all(dir);
     }

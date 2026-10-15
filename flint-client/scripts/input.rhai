@@ -36,6 +36,14 @@
 // grows back breathes out a green ring. Hovering a tuft you can take
 // draws the reticle round it.
 //
+// Crafting (P5.5) has no click of its own: the panel sends it. While
+// anyone crafts, a purple ring fills round their feet (cap_players'
+// `craft`), with two faint strands winding round it opposite ways, as
+// fibre twists into rope. Yours is bright, others' fainter. When yours
+// finishes, a purple ring breathes out from you and what you made rises
+// over your name, as a gather's yield rises off its tuft. Walking cancels
+// a craft on the server, so a click on the ground while crafting stops it.
+//
 // The right button is the camera's (a right-drag orbits), so this is the
 // left button only. egui keeps any click over its panels.
 
@@ -49,6 +57,8 @@ let toast = ();
 let yields = [];
 let cuttings = [];
 let sprouts = [];
+// A finished craft's ring, breathing out from where you stood.
+let blooms = [];
 
 // ── Tuning ───────────────────────────────────────────────────────────────
 
@@ -69,6 +79,14 @@ fn yield_rise() { 1.1 }
 // Bits of a cut tuft, and a regrown one's ring (s).
 fn cutting_life() { 0.9 }
 fn sprout_life() { 1.4 }
+// A finished craft's ring (s).
+fn bloom_life() { 1.3 }
+// The ring round someone crafting (m). A craft's yield starts where your
+// name hangs (entities.rs LABEL_Y, m over your feet) and that many points
+// higher on the screen, so it clears the name at any zoom.
+fn craft_ring() { 0.95 }
+fn name_height() { 2.25 }
+fn craft_lift() { 30.0 }
 // The ring round a tuft being worked, and the sight round your target (m).
 fn work_ring() { 1.15 }
 fn sight_ring() { 1.0 }
@@ -82,6 +100,7 @@ fn on_update() {
     yields = yields.filter(|y| t - y.born < yield_life());
     cuttings = cuttings.filter(|c| t - c.born < cutting_life());
     sprouts = sprouts.filter(|s| t - s.born < sprout_life());
+    blooms = blooms.filter(|b| t - b.born < bloom_life());
     if toast != () && t - toast.born > toast_in() + toast_hold() + toast_out() {
         toast = ();
     }
@@ -126,10 +145,21 @@ fn on_event(name, data) {
     let t = total_time();
     if name == "extraction_completed" {
         yields.push(#{
-            x: data.x, z: data.z, born: t,
+            x: data.x, z: data.z, born: t, base: cap_ground_y() + 1.3, up: 0.0,
             text: "+" + data.quantity + " " + data.item_name,
             grade: data.grade, colour: data.colour,
         });
+        return;
+    }
+    if name == "crafting_completed" {
+        let you = cap_follow();
+        let feet = if you != () { you[1] } else { cap_ground_y() };
+        yields.push(#{
+            x: data.x, z: data.z, born: t, base: feet + name_height(), up: craft_lift(),
+            text: "+" + data.quantity + " " + data.item_name,
+            grade: data.grade, colour: data.colour,
+        });
+        blooms.push(#{ x: data.x, z: data.z, y: feet + 0.03, born: t });
         return;
     }
     if name == "extraction_note" {
@@ -203,6 +233,10 @@ fn on_draw_ui() {
         if n.targeted { target = n; }
         if n.progress != () { draw_work(n, now); }
     }
+    for p in cap_players() {
+        if p.craft != () { draw_craft(p, now); }
+    }
+    for b in blooms { draw_bloom(b, now); }
     let you = cap_follow();
     if target != () {
         if you != () { draw_path(you[0], you[2], target.x, target.z, now, 0.6); }
@@ -361,8 +395,9 @@ fn draw_yield(y, now) {
     let age = now - y.born;
     let k = age / yield_life();
     let rise = yield_rise() * (1.0 - (1.0 - k) * (1.0 - k));
-    let p = world_to_screen(y.x, cap_ground_y() + 1.3 + rise, y.z);
+    let p = world_to_screen(y.x, y.base + rise, y.z);
     if !p.visible { return; }
+    p.y -= y.up;
     let a = if age < 0.2 { smooth(age / 0.2) } else { 1.0 - smooth((k - 0.6) / 0.4) };
     if a <= 0.0 { return; }
     let size = 17.0;
@@ -407,6 +442,45 @@ fn draw_cutting(c, now) {
                   p.x + a.cos() * half, p.y + a.sin() * half,
                   green[0], green[1], green[2], 0.9 * (1.0 - k), 2.0);
     }
+}
+
+// The crafting purple, #8b5cf6, and the lilac of its strands.
+fn craft_purple() { [0.545, 0.361, 0.965] }
+fn lilac() { [0.80, 0.72, 1.0] }
+
+// A craft under way: a purple track round the crafter's feet, filling
+// clockwise from north, a bead at its leading edge, and two strands
+// winding round outside it opposite ways.
+fn draw_craft(p, now) {
+    let y = p.feet_y + 0.03;
+    let r = craft_ring();
+    let c = craft_purple();
+    let a = p.alpha * (if p.me { 1.0 } else { 0.6 });
+    let w = if p.me { 3.0 } else { 2.0 };
+    ring(p.x, p.z, y, r, c, 0.22 * a, w, 48);
+    let start = -0.5 * PI();
+    let end = start + p.craft * 2.0 * PI();
+    if p.craft > 0.0 { arc(p.x, p.z, y, r, start, end, c, 0.95 * a, w); }
+    let b = world_to_screen(p.x + r * end.cos(), y, p.z + r * end.sin());
+    if b.visible { draw_circle(b.x, b.y, w * 1.1, c[0], c[1], c[2], a); }
+    let l = lilac();
+    for k in 0..2 {
+        let turn = if k == 0 { 1.0 } else { -1.0 };
+        let s = now * 1.7 * turn + k.to_float() * PI();
+        arc(p.x, p.z, y, r * 1.2, s, s + 1.1, l, 0.4 * a, 1.0);
+    }
+}
+
+// A craft finished: a purple ring breathing out from where you stand,
+// with a fainter one just behind it.
+fn draw_bloom(b, now) {
+    let k = (now - b.born) / bloom_life();
+    let ease = 1.0 - (1.0 - k) * (1.0 - k);
+    let c = craft_purple();
+    ring(b.x, b.z, b.y, craft_ring() + 1.4 * ease, c, 0.8 * (1.0 - k), 2.0, 44);
+    let k2 = (k - 0.15).max(0.0) / 0.85;
+    let e2 = 1.0 - (1.0 - k2) * (1.0 - k2);
+    ring(b.x, b.z, b.y, craft_ring() + 0.9 * e2, lilac(), 0.4 * (1.0 - k2), 1.0, 40);
 }
 
 // A tuft grown back: a green ring breathing out over the ground.

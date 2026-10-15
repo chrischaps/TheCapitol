@@ -53,6 +53,16 @@ bindings = [{ type = "key", code = "KeyH" }]
 kind = "button"
 bindings = [{ type = "key", code = "KeyI" }]
 
+# The crafting panel (P5.5); the header's Crafting button does the same.
+[actions.crafting]
+kind = "button"
+bindings = [{ type = "key", code = "KeyC" }]
+
+# Craft what the crafting panel is set to, while it's open (P5.5).
+[actions.craft]
+kind = "button"
+bindings = [{ type = "key", code = "Enter" }]
+
 # The spike's plan hairlines (scripts/spike.rhai), on P now that E orbits.
 [actions.plan]
 kind = "button"

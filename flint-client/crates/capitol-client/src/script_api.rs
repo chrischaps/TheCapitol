@@ -79,10 +79,14 @@ pub struct PlayerLabel {
     pub name: String,
     /// Where the name hangs, over the head, in world metres.
     pub at: [f32; 3],
+    /// Where they stand: the height of their feet, in world metres.
+    pub feet_y: f32,
     /// 0 to 1 as the player fades in or out.
     pub alpha: f32,
     /// You.
     pub me: bool,
+    /// How far their craft has got, 0 to 1, while they craft (P5.5).
+    pub craft: Option<f32>,
 }
 
 pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
@@ -118,8 +122,10 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             None => rhai::Dynamic::UNIT,
         }
     });
-    // `cap_players() -> [#{ name, x, y, z, alpha, me }]`: every avatar's
-    // name and where it hangs (world metres), with how far it has faded in.
+    // `cap_players() -> [#{ name, x, y, z, feet_y, alpha, me, craft }]`:
+    // every avatar's name and where it hangs (world metres), the height of
+    // its feet, how far it has faded in, and how far its craft has got
+    // (0 to 1, or () when it isn't crafting).
     let players = shared.players.clone();
     engine.register_fn("cap_players", move || -> rhai::Array {
         let Ok(players) = players.lock() else {
@@ -135,6 +141,11 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
                 m.insert("z".into(), (p.at[2] as f64).into());
                 m.insert("alpha".into(), (p.alpha as f64).into());
                 m.insert("me".into(), p.me.into());
+                m.insert("feet_y".into(), (p.feet_y as f64).into());
+                m.insert(
+                    "craft".into(),
+                    p.craft.map_or(rhai::Dynamic::UNIT, |c| (c as f64).into()),
+                );
                 m.into()
             })
             .collect()
@@ -280,8 +291,10 @@ mod tests {
         shared.players.lock().unwrap().push(PlayerLabel {
             name: "Ada".into(),
             at: [1.0, 2.9, -2.0],
+            feet_y: 0.65,
             alpha: 0.5,
             me: true,
+            craft: Some(0.25),
         });
         let z: f64 = engine.eval("cap_follow()[2]").unwrap();
         assert_eq!(z, -2.0);
@@ -289,6 +302,28 @@ mod tests {
             .eval(r#"let p = cap_players()[0]; `${p.name} ${p.alpha} ${p.me}`"#)
             .unwrap();
         assert_eq!(who, "Ada 0.5 true");
+        let craft: f64 = engine.eval("cap_players()[0].craft").unwrap();
+        assert_eq!(craft, 0.25);
+    }
+
+    /// Every script parses, so a typo fails here rather than in a capture.
+    /// (Parsing only: the engine's own functions aren't registered.)
+    #[test]
+    fn the_scripts_parse() {
+        let mut engine = rhai::Engine::new();
+        engine.set_max_expr_depths(128, 128); // as flint-script sets it
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+        let mut parsed = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "rhai") {
+                if let Err(e) = engine.compile_file(path.clone()) {
+                    panic!("{}: {e}", path.display());
+                }
+                parsed += 1;
+            }
+        }
+        assert!(parsed >= 4, "only {parsed} scripts in {}", dir.display());
     }
 
     #[test]

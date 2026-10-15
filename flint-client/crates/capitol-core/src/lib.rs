@@ -10,6 +10,9 @@
 //!   150 ms behind between snapshots and predicts the local player's walk.
 //! - [`harvest`]: clicking a node: extract it, or walk there and extract
 //!   on arrival.
+//! - [`craft`]: crafting by hand: the recipe the inputs make, what's
+//!   missing, an estimate, output with nowhere to go, and one craft from
+//!   the ask to the settled inventory.
 //! - [`poll`]: the polling scheduler. [`poll::Poller`] turns those events, and
 //!   a 5 s timer, into the REST refetches the server never pushes.
 //! - [`signin`]: log in, or register, one event at a time.
@@ -23,6 +26,7 @@
 pub mod auth;
 pub mod bot;
 pub mod catalog;
+pub mod craft;
 pub mod harvest;
 pub mod motion;
 pub mod net;

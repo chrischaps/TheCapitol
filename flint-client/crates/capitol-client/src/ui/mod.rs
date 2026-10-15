@@ -6,8 +6,9 @@
 //! - [`icons`]: item icons by `item_type`, and the `--icon-sheet` review (P5.2).
 //! - [`slots`]: the slot grid, with drag and drop between containers (P5.3).
 //! - [`inventory`]: the inventory panel, toggled with `I` (P5.4).
+//! - [`crafting`]: the crafting panel, toggled with C (P5.5).
 //! - [`containers`]: `--containers`, the containers no panel shows yet, as
-//!   grids, until the crafting and station panels take them over.
+//!   grids, until the station panel takes them over.
 //! - [`sample`]: a panel showing the theme's parts, for reviewing the theme
 //!   against the React client (`--ui-sample`).
 //! - [`hud`]: the header strip (zone, strands, who, Sign out) and the
@@ -22,6 +23,7 @@
 //!   banner and the toasts (P4.5).
 
 pub mod containers;
+pub mod crafting;
 pub mod hud;
 pub mod icons;
 pub mod inventory;
@@ -35,9 +37,17 @@ use crate::script_api::Shared;
 /// Longest inscription the box accepts.
 const NOTE_MAX_CHARS: usize = 32;
 
+/// How tall the controls hint stands, in points, for a panel above it.
+const CONTROLS_HEIGHT: f32 = 130.0;
+
 /// The controls, and where the terrain came from (`status`), small and dim
-/// at the bottom left. Not interactable, so clicks reach the world.
-pub fn controls(ctx: &egui::Context, status: &str) {
+/// at the bottom left. Not interactable, so clicks reach the world. It
+/// steps aside while a panel (`clear_of`) reaches down into its place.
+pub fn controls(ctx: &egui::Context, status: &str, clear_of: Option<egui::Rect>) {
+    let floor = ctx.screen_rect().bottom() - CONTROLS_HEIGHT;
+    if clear_of.is_some_and(|r| r.bottom() > floor) {
+        return;
+    }
     egui::Area::new(egui::Id::new("capitol_controls"))
         .anchor(egui::Align2::LEFT_BOTTOM, [16.0, -14.0])
         .interactable(false)
@@ -46,6 +56,7 @@ pub fn controls(ctx: &egui::Context, status: &str) {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 for line in [
                     "Click the ground to walk, or grass to gather",
+                    "I inventory · C crafting · Enter crafts",
                     "WASD pans · H home",
                     "Wheel or R/F zooms · Q/E or right-drag turns",
                     status,

@@ -39,6 +39,8 @@ pub struct HeaderView<'a> {
     pub down: bool,
     /// Whether the inventory panel is open, to light its button.
     pub inventory_open: bool,
+    /// The same for the crafting panel.
+    pub crafting_open: bool,
 }
 
 /// What was clicked in the header.
@@ -46,6 +48,7 @@ pub struct HeaderView<'a> {
 pub struct HeaderClicks {
     pub sign_out: bool,
     pub inventory: bool,
+    pub crafting: bool,
 }
 
 /// The header strip. Draw it before any other panel or window, so theirs
@@ -85,6 +88,9 @@ pub fn header(ctx: &egui::Context, view: &HeaderView) -> HeaderClicks {
                     ui.add_space(4.0);
                     clicks.inventory = theme::toggle_chip(ui, "Inventory", view.inventory_open)
                         .on_hover_text("Inventory (I)")
+                        .clicked();
+                    clicks.crafting = theme::toggle_chip(ui, "Crafting", view.crafting_open)
+                        .on_hover_text("Crafting (C)")
                         .clicked();
                 });
             });

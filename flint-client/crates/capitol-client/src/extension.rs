@@ -5,7 +5,7 @@
 //! built from it (`world`, so far the ground, the canals, whose water is
 //! the scene's ocean, the roads, the bridges, the plots and the Capitol
 //! tower), the players walking it (`entities`), the resource nodes they
-//! gather from (`nodes`), the fog and the light as
+//! gather from (`nodes`), the crafting panel (`ui::crafting`), the fog and the light as
 //! the camera climbs (`atmosphere`), the wheel for the camera rig, and the
 //! spike's markers.
 
@@ -16,6 +16,7 @@ use crate::script_api::{self, Shared, ZoneBanner};
 use crate::session::Session;
 use crate::terrain::TerrainSource;
 use crate::ui::containers::BenchAction;
+use crate::ui::crafting::Action as CraftAction;
 use crate::ui::hud::{ConnectionOverlay, HeaderView};
 use crate::ui::icons::ItemIcons;
 use crate::ui::inventory::InventoryPanel;
@@ -69,6 +70,9 @@ pub struct CapitolExtension {
     players: Players,
     overlay: ConnectionOverlay,
     nodes: Nodes,
+    crafting: ui::crafting::CraftingPanel,
+    /// Enter (the `craft` action) was pressed since `ui` last looked.
+    craft_key: bool,
 }
 
 impl CapitolExtension {
@@ -91,6 +95,8 @@ impl CapitolExtension {
             players: Players::default(),
             overlay: ConnectionOverlay::default(),
             nodes: Nodes::default(),
+            crafting: ui::crafting::CraftingPanel::default(),
+            craft_key: false,
         }
     }
 
@@ -165,10 +171,16 @@ impl PlayerExtension for CapitolExtension {
         if !self.at_login() && ctx.input.is_action_just_pressed("inventory") {
             self.inventory.toggle();
         }
+        if !self.at_login() && ctx.input.is_action_just_pressed("crafting") {
+            self.crafting.toggle();
+        }
+        // Taken in `ui`, where the panel knows its recipe.
+        self.craft_key |= !self.at_login() && ctx.input.is_action_just_pressed("craft");
         if let Some(session) = &mut self.session {
             session.update(now, &mut self.terrain);
             walk(ctx, session, &self.shared, now);
             gather(ctx, session, &self.shared, now);
+            crafted(ctx, session, &self.shared);
             // Signed out, the store is empty, so everyone fades away.
             let (poses, state) = session.sample(now);
             let dt = ctx.clock.delta_time.min(0.1) as f32;
@@ -293,11 +305,15 @@ impl PlayerExtension for CapitolExtension {
                     connection: session.auth().connection(),
                     down: session.link().outage().is_some(),
                     inventory_open: self.inventory.open,
+                    crafting_open: self.crafting.open,
                 };
                 let clicks = ui::hud::header(ctx, &view);
                 sign_out |= clicks.sign_out;
                 if clicks.inventory {
                     self.inventory.toggle();
+                }
+                if clicks.crafting {
+                    self.crafting.toggle();
                 }
             }
             let outage = if at_login {
@@ -334,6 +350,28 @@ impl PlayerExtension for CapitolExtension {
                 action = self.form.show(ctx, &view, opacity);
             }
             if !at_login {
+                let now = Instant::now();
+                let key = (std::mem::take(&mut self.craft_key) && self.crafting.open)
+                    .then_some(CraftAction::Craft);
+                let view = ui::crafting::View {
+                    state: session.state(),
+                    phase: session.crafting().phase(),
+                    // The inventory panel shows a refused move.
+                    refused: session.craft_refused(now),
+                };
+                let dt = ctx.input(|i| i.stable_dt).min(0.1);
+                match self.crafting.show(ctx, &mut self.icons, &view, dt).or(key) {
+                    Some(CraftAction::Move(m)) => session.move_item(m),
+                    Some(CraftAction::Moves(shifts)) => session.move_items(&shifts),
+                    Some(CraftAction::Craft) => {
+                        let recipe = self.crafting.recipe(session.state()).map(|r| r.id.clone());
+                        if let Some(id) = recipe {
+                            session.craft(now, &id);
+                        }
+                    }
+                    Some(CraftAction::Cancel) => session.cancel_craft(),
+                    None => {}
+                }
                 let refused = session.move_refused(Instant::now());
                 let inventory = session.state().inventory();
                 if let Some(m) = self
@@ -359,7 +397,7 @@ impl PlayerExtension for CapitolExtension {
         if self.session.is_none() {
             ui::inscription(ctx, &self.shared, &self.terrain.status());
         } else if !at_login {
-            ui::controls(ctx, &self.terrain.status());
+            ui::controls(ctx, &self.terrain.status(), self.crafting.rect);
         }
         if self.icon_sheet {
             ui::icons::sheet(ctx, &mut self.icons);
@@ -449,24 +487,9 @@ fn gather(
                     .map(|f| [f[0], f[2]])
             });
         let [x, z] = at.unwrap_or_default();
-        let letter = capitol_core::protocol::rules::quality_grade(item.quality);
-        let c = ui::theme::grade(letter);
-        let mut data = toml::Table::new();
+        let mut data = yield_data(&item);
         data.insert("x".into(), (x as f64).into());
         data.insert("z".into(), (z as f64).into());
-        data.insert("item_name".into(), item.item_name.into());
-        data.insert("quantity".into(), (item.quantity as i64).into());
-        data.insert("quality".into(), (item.quality as i64).into());
-        data.insert("grade".into(), letter.into());
-        data.insert(
-            "colour".into(),
-            toml::Value::Array(
-                [c.r(), c.g(), c.b()]
-                    .iter()
-                    .map(|v| toml::Value::Float(*v as f64 / 255.0))
-                    .collect(),
-            ),
-        );
         ctx.fire_event("extraction_completed", data);
     }
     for note in session.take_harvest_notes() {
@@ -477,6 +500,54 @@ fn gather(
         data.insert("body".into(), body.into());
         ctx.fire_event("extraction_note", data);
     }
+}
+
+/// Crafting (P5.5): fire `crafting_completed` at the scripts for each craft
+/// that finished, with where you stand (`x`, `z`), what it made
+/// (`item_name`, `quantity`, `quality`) and its `grade` and `colour`, as
+/// `extraction_completed` has.
+fn crafted(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Shared) {
+    for item in session.take_crafted() {
+        let [x, _, z] = shared
+            .follow
+            .lock()
+            .ok()
+            .and_then(|f| *f)
+            .unwrap_or_default();
+        tracing::info!(
+            "craft: made {} x{} at {}",
+            item.item_name,
+            item.quantity,
+            item.quality
+        );
+        let mut data = yield_data(&item);
+        data.insert("x".into(), (x as f64).into());
+        data.insert("z".into(), (z as f64).into());
+        ctx.fire_event("crafting_completed", data);
+    }
+}
+
+/// What a gather or a craft made, for the scripts: `item_name`,
+/// `quantity`, `quality`, its `grade` letter and the grade's `colour`
+/// (sRGB, 0 to 1).
+fn yield_data(item: &capitol_core::state::Yield) -> toml::Table {
+    let letter = capitol_core::protocol::rules::quality_grade(item.quality);
+    let c = ui::theme::grade(letter);
+    let mut data = toml::Table::new();
+    data.insert("item_name".into(), item.item_name.clone().into());
+    data.insert("quantity".into(), (item.quantity as i64).into());
+    data.insert("quality".into(), (item.quality as i64).into());
+    data.insert("grade".into(), letter.into());
+    data.insert(
+        "colour".into(),
+        toml::Value::Array(
+            [c.r(), c.g(), c.b()]
+                .iter()
+                .map(|v| toml::Value::Float(*v as f64 / 255.0))
+                .collect(),
+        ),
+    );
+    data
 }
 
 /// What to tell the player about an extraction that didn't happen. A
