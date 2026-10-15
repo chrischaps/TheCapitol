@@ -67,7 +67,7 @@ pub async fn get_nearby_stations(
 
     // Get all stations within a generous range (500 units for visibility)
     let stations: Vec<Station> = sqlx::query_as(
-        "SELECT id, station_type, owner_id, position_x, position_y, placed_at
+        "SELECT id, station_type, owner_id, position_x, position_y, plot_id, placed_at
          FROM stations
          WHERE position_x BETWEEN $1 - 500 AND $1 + 500
            AND position_y BETWEEN $2 - 500 AND $2 + 500"
@@ -389,7 +389,7 @@ pub async fn get_station_container(
 
     // Verify station exists and player can access (owner only for now)
     let station: Station = sqlx::query_as(
-        "SELECT id, station_type, owner_id, position_x, position_y, placed_at
+        "SELECT id, station_type, owner_id, position_x, position_y, plot_id, placed_at
          FROM stations WHERE id = $1"
     )
     .bind(station_id)
