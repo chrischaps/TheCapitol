@@ -58,7 +58,7 @@ That writes `renders/capitol.png`. The camera is the rig in `scripts/camera.rhai
 
 ## The UI theme
 
-All egui panels take their look from `crates/capitol-client/src/ui/theme.rs` (P5.1, plan §4.3). It holds the colour tokens, egui's `Style` and `Visuals`, the fonts, and the parts panels are made of (`panel`, `well`, `tray`, `header`, `pill`, `primary_button`, `accent_button`, `grade_badge`, `empty_slot`, ...). **Panels use no colours or sizes of their own.** If a panel needs one that's missing, add it to `theme.rs`. `theme::install` runs at the top of `CapitolExtension::ui` and returns false on the frame its fonts go in. Draw nothing on that frame (#72).
+All egui panels take their look from `crates/capitol-client/src/ui/theme.rs` (P5.1, plan §4.3). It holds the colour tokens, egui's `Style` and `Visuals`, the fonts, and the parts panels are made of (`panel`, `well`, `tray`, `header`, `pill`, `primary_button`, `accent_button`, `grade_badge`, `quality_badge`, ...). **Panels use no colours or sizes of their own.** If a panel needs one that's missing, add it to `theme.rs`. `theme::install` runs at the top of `CapitolExtension::ui` and returns false on the frame its fonts go in. Draw nothing on that frame (#72).
 
 The fonts are in `fonts/`: Source Sans 3 (text) and Cinzel (titles), both OFL, with licences beside them. `fonts.toml` gives the script HUD the names `body`, `strong` and `display` (`draw_text_opts(..., #{ font: "display" })`). `theme.rs` embeds the same files for egui.
 
@@ -71,6 +71,8 @@ target/release/capitol.exe --offline fixtures/terrain.json --width 1920 --height
 ```
 
 `tools/theme-sample.html` is the sample's two panels in the React markup and CSS, with the panel-less world capture as the backdrop.
+
+**Slots (P5.3).** Every container is drawn with `ui::slots::SlotGrid::new(&container).show(ui, &mut icons)`, which returns `Option<Move>`. Send the move with `session.move_item(m)`, and show `session.move_refused(now)` when it's `Some`. Don't draw slots by hand. A drag between any two grids on screen just works (egui DnD payload). `--containers` shows every container you hold once signed in, which is the place to try drags until the panels exist. `--ui-sample`'s grids move, merge and swap locally, so the widget can be tried offline. `cargo test -p capitol-client slots` drives drags headless. With the stack up, `capitol-bot --prefix slots` once, then `cargo test -p capitol-client a_move_reaches -- --ignored`, checks the server round trip. Captures can't show a drag or a tooltip ([#76](https://github.com/chrischaps/TheCapitol/issues/76)).
 
 ## Testing against the server
 

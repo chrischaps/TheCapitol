@@ -13,6 +13,7 @@ use crate::entities::Players;
 use crate::script_api::{self, Shared};
 use crate::session::Session;
 use crate::terrain::TerrainSource;
+use crate::ui::containers::BenchAction;
 use crate::ui::icons::ItemIcons;
 use crate::ui::login::{FormAction, LoginForm, LoginView};
 use crate::world::plots::Lot;
@@ -20,6 +21,7 @@ use crate::world::Rebuild;
 use crate::{spike_world, ui, world};
 use capitol_core::auth::{Notice, Phase};
 use capitol_core::protocol::terrain::TerrainResponse;
+use capitol_core::protocol::ws::ClientMessage;
 use flint_player::{ExtensionCtx, PlayerExtension};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -54,6 +56,8 @@ pub struct CapitolExtension {
     icon_sheet: bool,
     /// The theme's sample panels, with `--ui-sample`.
     sample: Option<ui::sample::Sample>,
+    /// `--containers`: every container as a slot grid (P5.3).
+    containers: bool,
     players: Players,
 }
 
@@ -72,6 +76,7 @@ impl CapitolExtension {
             icons: ItemIcons::load(std::path::Path::new(ItemIcons::DIR)),
             icon_sheet: false,
             sample: None,
+            containers: false,
             players: Players::default(),
         }
     }
@@ -85,6 +90,12 @@ impl CapitolExtension {
     /// Also show the theme's sample panels (`--ui-sample`).
     pub fn with_ui_sample(mut self) -> Self {
         self.sample = Some(ui::sample::Sample::default());
+        self
+    }
+
+    /// Show every container as a slot grid once signed in (`--containers`).
+    pub fn with_containers(mut self, on: bool) -> Self {
+        self.containers = on;
         self
     }
 
@@ -256,6 +267,17 @@ impl PlayerExtension for CapitolExtension {
             if !at_login && ui::account(ctx, &session.who(), session.auth().connection()) {
                 session.log_out();
             }
+            if !at_login && self.containers {
+                let refused = session.move_refused(Instant::now());
+                match ui::containers::bench(ctx, &mut self.icons, session.state(), refused) {
+                    Some(BenchAction::Move(m)) => session.move_item(m),
+                    Some(BenchAction::OpenStation(id)) => session.ws(ClientMessage::OpenStation {
+                        station_id: id.to_string(),
+                    }),
+                    Some(BenchAction::CloseStation) => session.ws(ClientMessage::CloseStation),
+                    None => {}
+                }
+            }
         }
         if !at_login {
             ui::inscription(ctx, &self.shared, &self.terrain.status());
@@ -264,7 +286,7 @@ impl PlayerExtension for CapitolExtension {
             ui::icons::sheet(ctx, &mut self.icons);
         }
         if let Some(sample) = &mut self.sample {
-            sample.show(ctx);
+            sample.show(ctx, &mut self.icons);
         }
         if let Some(action) = action {
             self.act(action);

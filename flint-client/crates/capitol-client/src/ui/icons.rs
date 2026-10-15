@@ -13,7 +13,9 @@
 //! `--icon-sheet` shows every icon on a panel, in slots and large, for
 //! review ([`sheet`]).
 
+use super::slots::Slot;
 use super::theme::{self, size, DIM, TEXT};
+use capitol_core::protocol::rest::SlotItem;
 use egui::{Color32, RichText};
 use resvg::{tiny_skia, usvg};
 use std::collections::HashMap;
@@ -106,12 +108,24 @@ impl ItemIcons {
 
     /// Draw `item_type`'s icon filling `rect`, which should be square.
     pub fn paint(&mut self, ui: &egui::Ui, rect: egui::Rect, item_type: &str) {
-        let texture = self.texture(ui.ctx(), item_type, rect.width());
-        ui.painter().image(
+        self.paint_on(ui.painter(), rect, item_type, 1.0);
+    }
+
+    /// Draw `item_type`'s icon filling `rect` with `painter`, at `opacity`
+    /// (0 to 1).
+    pub fn paint_on(
+        &mut self,
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        item_type: &str,
+        opacity: f32,
+    ) {
+        let texture = self.texture(painter.ctx(), item_type, rect.width());
+        painter.image(
             texture.id(),
             rect,
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            Color32::WHITE,
+            Color32::WHITE.gamma_multiply(opacity),
         );
     }
 }
@@ -144,41 +158,20 @@ const SHEET: [(&str, &str); 6] = [
     ("lantern_oil", "(no icon yet)"),
 ];
 
-/// Grade pips for the sheet's slots (plan §4.7), A to F, so the icons are
-/// seen next to what P5.3 will put in the slot's corner.
-const PIPS: [&str; 5] = ["A", "B", "C", "D", "F"];
+/// Qualities for the sheet's slots, one per grade A to F, so the icons are
+/// seen next to every pip colour.
+const QUALITIES: [i32; 5] = [94, 81, 63, 41, 20];
 
-/// A slot as the React client draws one (`InventorySlot.css`): 48 points,
-/// with the icon at 36 in the middle, a grade pip top right and the
-/// quantity bottom right. P5.3's slot widget replaces this.
-fn sheet_slot(ui: &mut egui::Ui, icons: &mut ItemIcons, item_type: &str, pip: Color32, qty: u32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect(
-        rect.shrink(1.0),
-        6.0,
-        theme::SLOT,
-        egui::Stroke::new(2.0, theme::SLOT_EDGE_FULL),
-    );
-    icons.paint(
-        ui,
-        egui::Rect::from_center_size(rect.center(), egui::vec2(36.0, 36.0)),
-        item_type,
-    );
-    let painter = ui.painter();
-    painter.circle(
-        rect.right_top() + egui::vec2(-7.0, 7.0),
-        4.0,
-        pip,
-        egui::Stroke::new(1.0, theme::PIP_EDGE),
-    );
-    painter.text(
-        rect.right_bottom() + egui::vec2(-5.0, -3.0),
-        egui::Align2::RIGHT_BOTTOM,
-        qty.to_string(),
-        theme::body(size::LABEL),
-        TEXT,
-    );
+/// A made-up item in slot `i`, for the sheet.
+fn sheet_item(i: usize, item_type: &str, name: &str, quantity: i32) -> SlotItem {
+    SlotItem::new(
+        uuid::Uuid::nil(),
+        item_type.to_owned(),
+        name.to_owned(),
+        QUALITIES[i % QUALITIES.len()],
+        quantity,
+        i as i32,
+    )
 }
 
 /// Every icon on one panel: large, then in slots, then at the React
@@ -212,14 +205,15 @@ pub fn sheet(ctx: &egui::Context, icons: &mut ItemIcons) {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                for (i, (item_type, _)) in SHEET.iter().enumerate() {
-                    sheet_slot(
-                        ui,
-                        icons,
-                        item_type,
-                        theme::grade(PIPS[i % PIPS.len()]),
-                        [12, 3, 1, 1, 1, 7][i],
-                    );
+                for (i, (item_type, name)) in SHEET.iter().enumerate() {
+                    let item = sheet_item(i, item_type, name, [12, 3, 1, 1, 1, 7][i]);
+                    Slot {
+                        container_id: uuid::Uuid::nil(),
+                        index: i,
+                        item: Some(&item),
+                        enabled: true,
+                    }
+                    .show(ui, icons); // a drop here goes nowhere
                 }
                 ui.add_space(20.0);
                 for (item_type, _) in SHEET {

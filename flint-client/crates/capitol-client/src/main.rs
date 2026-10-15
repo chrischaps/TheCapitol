@@ -97,6 +97,10 @@ struct Args {
     /// the theme with the React client's panels (tools/theme-sample.html)
     #[arg(long)]
     ui_sample: bool,
+    /// Once signed in, show every container you hold as a slot grid, with
+    /// drag and drop between them (P5.3, until the panels take over)
+    #[arg(long)]
+    containers: bool,
 }
 
 fn main() -> Result<()> {
@@ -176,8 +180,9 @@ fn main() -> Result<()> {
     let shared = script_api::Shared::default();
     *shared.note.lock().unwrap() = args.note;
     *shared.view.lock().unwrap() = args.view;
-    let mut extension =
-        extension::CapitolExtension::new(shared, terrain, session).with_icon_sheet(args.icon_sheet);
+    let mut extension = extension::CapitolExtension::new(shared, terrain, session)
+        .with_icon_sheet(args.icon_sheet)
+        .with_containers(args.containers);
     if args.ui_sample {
         extension = extension.with_ui_sample();
     }

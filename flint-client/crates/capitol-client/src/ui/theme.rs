@@ -77,8 +77,17 @@ pub const SLOT_EDGE_FULL: Color32 = rgba(100, 100, 120, 0.7);
 pub const PIP_EDGE: Color32 = rgba(0, 0, 0, 0.3);
 /// The tray a grid of slots sits in: `rgba(20,20,30,0.6)`.
 pub const TRAY: Color32 = rgba(20, 20, 30, 0.6);
-/// A slot's side, and the gap between slots, in points.
+/// A full slot under the pointer: `rgba(40,40,55,0.9)`, edged in the
+/// inventory's purple at 60%.
+pub const SLOT_HOVER: Color32 = rgba(40, 40, 55, 0.9);
+/// A slot's quantity: white, on a dark shadow so it reads over any icon.
+pub const QUANTITY: Color32 = Color32::WHITE;
+pub const INK_SHADOW: Color32 = rgba(0, 0, 0, 0.8);
+/// A slot's side, the icon's inside it, and the gap between slots, in
+/// points (P5.2: the icons keep the pip's and the quantity's corners clear
+/// at 36 in 48).
 pub const SLOT_SIZE: f32 = 48.0;
+pub const SLOT_ICON: f32 = 36.0;
 pub const SLOT_GAP: f32 = 4.0;
 
 /// A quality grade's pip colour (plan §4.7), for a letter from
@@ -90,6 +99,17 @@ pub fn grade(letter: &str) -> Color32 {
         "C" => rgb(0x3b82f6),
         "D" => rgb(0xa855f7),
         _ => rgb(0x6b7280),
+    }
+}
+
+/// The light end of a grade pip's gradient (React's `.slot-quality-pip`).
+pub fn grade_light(letter: &str) -> Color32 {
+    match letter {
+        "A" => rgb(0xffed4e),
+        "B" => rgb(0x4ade80),
+        "C" => rgb(0x60a5fa),
+        "D" => rgb(0xc084fc),
+        _ => rgb(0x9ca3af),
     }
 }
 
@@ -534,8 +554,17 @@ pub fn progress(ui: &mut Ui, fraction: f32, accent: Color32) {
     painter.rect_filled(fill, 4.0, accent);
 }
 
-/// A quality and its grade, tinted by the grade: "~82 B".
+/// A predicted quality and its grade, tinted by the grade: "~82 B".
 pub fn grade_badge(ui: &mut Ui, quality: i32) -> Response {
+    grade_tag(ui, &format!("~{quality}"), quality)
+}
+
+/// A known quality and its grade, tinted by the grade: "82 B".
+pub fn quality_badge(ui: &mut Ui, quality: i32) -> Response {
+    grade_tag(ui, &quality.to_string(), quality)
+}
+
+fn grade_tag(ui: &mut Ui, number: &str, quality: i32) -> Response {
     let letter = capitol_protocol::rules::quality_grade(quality);
     let colour = grade(letter);
     egui::Frame::none()
@@ -544,26 +573,12 @@ pub fn grade_badge(ui: &mut Ui, quality: i32) -> Response {
         .inner_margin(Margin::symmetric(6.0, 2.0))
         .show(ui, |ui| {
             ui.label(
-                RichText::new(format!("~{quality} {letter}"))
+                RichText::new(format!("{number} {letter}"))
                     .font(strong(size::SMALL))
                     .color(colour),
             )
         })
         .response
-}
-
-/// An empty inventory slot. The slot widget (P5.3) draws full ones.
-pub fn empty_slot(ui: &mut Ui) -> Response {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(SLOT_SIZE, SLOT_SIZE), egui::Sense::hover());
-    let edge = if response.hovered() {
-        BORDER.gamma_multiply(2.0)
-    } else {
-        SLOT_EDGE
-    };
-    ui.painter()
-        .rect(rect.shrink(1.0), 6.0, SLOT, Stroke::new(2.0, edge));
-    response
 }
 
 /// Underlined words that act, in dim gold.

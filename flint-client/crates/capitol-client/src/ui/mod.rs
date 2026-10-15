@@ -4,6 +4,9 @@
 //!   type and frames from (P5.1).
 //! - [`login`]: the login form over the live world (P4.1).
 //! - [`icons`]: item icons by `item_type`, and the `--icon-sheet` review (P5.2).
+//! - [`slots`]: the slot grid, with drag and drop between containers (P5.3).
+//! - [`containers`]: `--containers`, every container as a grid, until the
+//!   inventory, crafting and station panels take them over.
 //! - [`sample`]: a panel showing the theme's parts, for reviewing the theme
 //!   against the React client (`--ui-sample`).
 //! - [`account`]: who's signed in, and Sign out, top right.
@@ -12,9 +15,11 @@
 //!   Typing in it must not reach the script's P binding, and clicks outside
 //!   it must still reach the script. P4 replaces it.
 
+pub mod containers;
 pub mod icons;
 pub mod login;
 pub mod sample;
+pub mod slots;
 pub mod theme;
 
 use crate::script_api::Shared;
