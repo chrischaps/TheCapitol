@@ -1,0 +1,105 @@
+<!doctype html>
+<!--
+  The theme sample (P5.1) in the React client's own CSS: the same two panels
+  `capitol --ui-sample` draws, in the markup of CraftingPanel.tsx and
+  InventoryPanel.tsx, styled by their stylesheets. Capture both and lay
+  them side by side to review the egui theme. From flint-client/:
+
+    capitol --offline fixtures/terrain.json --ui-sample --width 1920 --height 1080
+            --screenshot renders/p5.1-sample-flint.png --screenshot-at 3 --exit-after 4
+    capitol --offline fixtures/terrain.json --width 1920 --height 1080
+            --screenshot renders/p5.1-world.png --screenshot-at 3 --exit-after 4
+    chrome --headless --allow-file-access-from-files --window-size=1280,720
+           --force-device-scale-factor=1.5
+           --screenshot=renders/p5.1-sample-react.png tools/theme-sample.html
+
+  The second capture is the same world with no panels. It is the backdrop
+  here, so the two shots differ only in their panels. The 1.5 scale matches
+  the Flint window on a 150% Windows display (1920 px across, 1280 points).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Theme Sample</title>
+<link rel="stylesheet" href="../../client/src/index.css">
+<link rel="stylesheet" href="../../client/src/components/CraftingPanel.css">
+<link rel="stylesheet" href="../../client/src/components/InventoryPanel.css">
+<link rel="stylesheet" href="../../client/src/components/InventoryGrid.css">
+<link rel="stylesheet" href="../../client/src/components/InventorySlot.css">
+<style>
+  body {
+    margin: 0;
+    background: #0a0a0f url("../renders/p5.1-world.png") center / cover no-repeat;
+    overflow: hidden;
+  }
+</style>
+</head>
+<body>
+  <div class="crafting-panel-grid">
+    <div class="crafting-header"><h3>Crafting</h3></div>
+    <div class="recipe-selector">
+      <label>Recipe:</label>
+      <select><option>Rope</option></select>
+    </div>
+    <div class="ingredient-requirements">
+      <span class="requirements-label">Required:</span>
+      <ul class="ingredient-list">
+        <li class="ingredient-item satisfied">
+          <span class="ingredient-name">Fiber</span>
+          <span class="ingredient-count"><span class="count-ok">5</span><span class="count-separator">/</span><span class="count-required">3</span></span>
+          <span class="ingredient-status">✓</span>
+        </li>
+        <li class="ingredient-item missing">
+          <span class="ingredient-name">Resin</span>
+          <span class="ingredient-count"><span class="count-low">0</span><span class="count-separator">/</span><span class="count-required">1</span></span>
+          <span class="ingredient-status">✗</span>
+        </li>
+      </ul>
+    </div>
+    <div class="crafting-slots-layout">
+      <div class="crafting-inputs-section">
+        <span class="section-label">Inputs</span>
+        <div class="inventory-grid" style="grid-template-columns: repeat(2, 48px)">
+          <div class="inventory-slot empty"></div><div class="inventory-slot empty"></div>
+          <div class="inventory-slot empty"></div><div class="inventory-slot empty"></div>
+        </div>
+      </div>
+      <div class="crafting-arrow">→</div>
+      <div class="crafting-output-section">
+        <span class="section-label">Output</span>
+        <div class="inventory-grid" style="grid-template-columns: repeat(1, 48px)">
+          <div class="inventory-slot empty"></div>
+        </div>
+      </div>
+    </div>
+    <div class="quality-preview">
+      <span class="preview-label">Preview:</span>
+      <span class="preview-output">Rope</span>
+      <span class="preview-quality grade-b">~82 B</span>
+    </div>
+    <button class="craft-button">Craft Rope</button>
+    <div class="recipe-info">
+      <h4>Rope</h4>
+      <p class="recipe-time">Time: 3s</p>
+    </div>
+  </div>
+
+  <div class="inventory-panel-grid">
+    <div class="inventory-header">
+      <h3>Inventory</h3>
+      <span class="inventory-count">7/24</span>
+    </div>
+    <div class="inventory-grid" style="grid-template-columns: repeat(6, 48px)">
+      <div class="inventory-slot empty"></div><div class="inventory-slot empty"></div><div class="inventory-slot empty"></div>
+      <div class="inventory-slot empty"></div><div class="inventory-slot empty"></div><div class="inventory-slot empty"></div>
+      <div class="inventory-slot empty"></div><div class="inventory-slot empty"></div><div class="inventory-slot empty"></div>
+      <div class="inventory-slot empty"></div><div class="inventory-slot empty"></div><div class="inventory-slot empty"></div>
+      <div class="inventory-slot empty"></div><div class="inventory-slot empty"></div><div class="inventory-slot empty"></div>
+      <div class="inventory-slot empty"></div><div class="inventory-slot empty"></div><div class="inventory-slot empty"></div>
+      <div class="inventory-slot empty"></div><div class="inventory-slot empty"></div><div class="inventory-slot empty"></div>
+      <div class="inventory-slot empty"></div><div class="inventory-slot empty"></div><div class="inventory-slot empty"></div>
+    </div>
+    <div class="inventory-footer"><span class="total-items">31 items</span></div>
+  </div>
+</body>
+</html>

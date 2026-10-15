@@ -13,7 +13,7 @@
 //! `--icon-sheet` shows every icon on a panel, in slots and large, for
 //! review ([`sheet`]).
 
-use super::{panel_frame, DIM, GOLD, TEXT};
+use super::theme::{self, size, DIM, TEXT};
 use egui::{Color32, RichText};
 use resvg::{tiny_skia, usvg};
 use std::collections::HashMap;
@@ -146,13 +146,7 @@ const SHEET: [(&str, &str); 6] = [
 
 /// Grade pips for the sheet's slots (plan §4.7), A to F, so the icons are
 /// seen next to what P5.3 will put in the slot's corner.
-const PIPS: [Color32; 5] = [
-    Color32::from_rgb(0xff, 0xd7, 0x00),
-    Color32::from_rgb(0x22, 0xc5, 0x5e),
-    Color32::from_rgb(0x3b, 0x82, 0xf6),
-    Color32::from_rgb(0xa8, 0x55, 0xf7),
-    Color32::from_rgb(0x6b, 0x72, 0x80),
-];
+const PIPS: [&str; 5] = ["A", "B", "C", "D", "F"];
 
 /// A slot as the React client draws one (`InventorySlot.css`): 48 points,
 /// with the icon at 36 in the middle, a grade pip top right and the
@@ -163,8 +157,8 @@ fn sheet_slot(ui: &mut egui::Ui, icons: &mut ItemIcons, item_type: &str, pip: Co
     painter.rect(
         rect.shrink(1.0),
         6.0,
-        Color32::from_rgba_unmultiplied(30, 30, 40, 204),
-        egui::Stroke::new(2.0, Color32::from_rgba_unmultiplied(100, 100, 120, 179)),
+        theme::SLOT,
+        egui::Stroke::new(2.0, theme::SLOT_EDGE_FULL),
     );
     icons.paint(
         ui,
@@ -176,13 +170,13 @@ fn sheet_slot(ui: &mut egui::Ui, icons: &mut ItemIcons, item_type: &str, pip: Co
         rect.right_top() + egui::vec2(-7.0, 7.0),
         4.0,
         pip,
-        egui::Stroke::new(1.0, Color32::from_black_alpha(77)),
+        egui::Stroke::new(1.0, theme::PIP_EDGE),
     );
     painter.text(
         rect.right_bottom() + egui::vec2(-5.0, -3.0),
         egui::Align2::RIGHT_BOTTOM,
         qty.to_string(),
-        egui::FontId::proportional(11.0),
+        theme::body(size::LABEL),
         TEXT,
     );
 }
@@ -194,15 +188,9 @@ pub fn sheet(ctx: &egui::Context, icons: &mut ItemIcons) {
         .title_bar(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .frame(panel_frame())
+        .frame(theme::panel())
         .show(ctx, |ui| {
-            ui.label(
-                RichText::new("ITEM ICONS")
-                    .color(GOLD)
-                    .size(12.0)
-                    .extra_letter_spacing(1.5)
-                    .strong(),
-            );
+            ui.label(theme::title("Item icons", size::BODY));
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 for (item_type, name) in SHEET {
@@ -211,8 +199,13 @@ pub fn sheet(ctx: &egui::Context, icons: &mut ItemIcons) {
                         let (rect, _) =
                             ui.allocate_exact_size(egui::vec2(96.0, 96.0), egui::Sense::hover());
                         icons.paint(ui, rect, item_type);
-                        ui.label(RichText::new(name).color(TEXT).size(12.0));
-                        ui.label(RichText::new(item_type).color(DIM).size(10.0).monospace());
+                        ui.label(RichText::new(name).color(TEXT).size(size::SMALL));
+                        ui.label(
+                            RichText::new(item_type)
+                                .color(DIM)
+                                .size(size::TINY)
+                                .monospace(),
+                        );
                     });
                 }
             });
@@ -224,7 +217,7 @@ pub fn sheet(ctx: &egui::Context, icons: &mut ItemIcons) {
                         ui,
                         icons,
                         item_type,
-                        PIPS[i % PIPS.len()],
+                        theme::grade(PIPS[i % PIPS.len()]),
                         [12, 3, 1, 1, 1, 7][i],
                     );
                 }

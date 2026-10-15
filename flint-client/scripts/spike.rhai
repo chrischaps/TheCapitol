@@ -68,15 +68,20 @@ fn trace_ring_at(cx, cz, r, gaps, gap, red, green, blue, alpha, width, steps) {
     }
 }
 
-// Text centred on the point (x, y, z), in metres.
+// Text centred on the point (x, y, z), in metres, in the Capitol's
+// inscriptional capitals (`display` in fonts/fonts.toml), spaced like the
+// login form's title.
 fn label(x, y, z, text, size, r, g, b) {
     let p = world_to_screen(x, y, z);
     if !p.visible { return; }
-    let m = measure_text(text, size);
-    let tx = p.x - m.width / 2.0;
-    let ty = p.y - m.height / 2.0;
-    draw_text(tx + 1.5, ty + 1.5, text, size, 0.0, 0.0, 0.0, 0.6);
-    draw_text(tx, ty, text, size, r, g, b, 1.0);
+    let spacing = size * 0.18;
+    let m = measure_text_ex(text, size, "display", spacing);
+    draw_text_opts(p.x - m.width / 2.0, p.y - m.height / 2.0, text, size, #{
+        font: "display",
+        spacing: spacing,
+        color: [r, g, b, 1.0],
+        shadow: [1.5, 1.5, 0.0, 0.0, 0.0, 0.6],
+    });
 }
 
 // Two gold rings spreading over the ground from where the click landed,

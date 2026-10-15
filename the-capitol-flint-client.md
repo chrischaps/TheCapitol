@@ -154,6 +154,10 @@ Panels (login, inventory, crafting, station, exchange, trade, plot) are drawn wi
 - Accents: gold `#c9a227`, crafting purple `#8b5cf6`, in-range orange `#f97316`.
 - Body text is `#e0e0e0`. The project font replaces egui's default.
 
+**The theme (P5.1).** Everything lives in `capitol-client/src/ui/theme.rs`: the tokens as egui colours (hex from `world/palette.rs`), egui's `Style` and `Visuals`, the fonts, and the parts panels are built from. Those parts are `panel`/`panel_edged`, `well`, `tray`, `header`, `pill`, `divider`, `gold_rule`, `primary_button`, `accent_button`, `progress`, `grade_badge`, `empty_slot`, `link` and `status_dot`. Panels use no colour or size of their own. The faces are Source Sans 3 for text (the nearest open face to the React client's Segoe UI) and Cinzel, Roman inscriptional capitals, for titles. Both are OFL and sit in `flint-client/fonts/`, with `fonts.toml` aliases `body`, `strong` and `display` for the script HUD. Focus is the gold edge of egui's `active` widget style. `capitol --ui-sample` draws a crafting panel and an inventory panel made only of theme parts. `flint-client/tools/theme-sample.html` is the same pair in the React client's own CSS, for side-by-side review.
+
+*Checkpoint verdict (P5.1):* side by side with the React panels, the themed egui doesn't read as a tool. Same glass, edges, type scale and spacing; the faces are a step up. egui stays. One engine gap remains: Flint can't make a project font egui's default, so the theme embeds its fonts and reinstalls them ([#72](https://github.com/chrischaps/TheCapitol/issues/72)).
+
 *Why:* the panels need text entry (login, exchange quantity, trade strands), scrolling lists, drag and drop between slots, and numeric fields. egui has all of these today. Flint's data-driven `.ui.toml` UI has Panel, Text, Rect, Circle and Image, so it would need at least four new widgets plus focus handling and IME.
 
 *Alternative recorded:* extend Flint's data-driven UI with TextField, ScrollList, Draggable and NumberField, and build the panels in `.ui.toml`. Revisit this if themed egui still looks like a tool after the P5 theme pass, or once Flint's UI has gained those widgets for another game.
@@ -619,7 +623,7 @@ Sizes: **S** is about 1 focused session, **M** 2–3, **L** 4 or more. Each phas
 
 | WP | Work | Size | Depends on |
 |---|---|---|---|
-| P5.1 [#36](https://github.com/chrischaps/TheCapitol/issues/36) | **Theme.** egui `Visuals` and `Style` from the tokens, the project font, panel frames and a gold focus ring. Reviewed with screenshots against the React panels. | S | P1.3 |
+| P5.1 [#36](https://github.com/chrischaps/TheCapitol/issues/36) | **Theme.** egui `Visuals` and `Style` from the tokens, the project font, panel frames and a gold focus ring. Reviewed with screenshots against the React panels. *Done:* `ui/theme.rs`, see §4.3. | S | P1.3 |
 | P5.2 [#37](https://github.com/chrischaps/TheCapitol/issues/37) | **Item icons.** Fiber, rope and the three kits, at a consistent size and style. *Built (P5.2):* hand-drawn SVGs in `assets/icons/<item_type>.svg`, plus `fallback.svg` for any type without one, rasterized with `resvg` for each size and DPI (`ui/icons.rs`). A new item type needs only a file. They're SVG rather than `flint-asset-gen` output so they stay sharp at any scale and can be edited by hand. The style rules are in `assets/icons/README.md`. `--icon-sheet` shows them all for review. | S | none |
 | P5.3 [#38](https://github.com/chrischaps/TheCapitol/issues/38) | **Slot grid widget.** Icon, quantity, quality pip (§4.7) and a tooltip with name, quality and grade. Drag and drop between slots sends `move_item`. Handles the moved, merged and swapped results. | M | P5.1, P2.3 |
 | P5.4 [#39](https://github.com/chrischaps/TheCapitol/issues/39) | **Inventory panel.** Toggled with `I`. A 24-slot, 6-column grid. | S | P5.3 |
@@ -740,7 +744,7 @@ P2 can run alongside P1 and P3 in a separate worktree, since it has no engine de
 
 | Risk / question | Mitigation |
 |---|---|
-| **Themed egui may still look like a tool.** | Do the theme pass early (P5.1) and compare screenshots side by side with the React panels. Keep panel code behind a small widget layer so moving to `.ui.toml` later is a contained job (§4.3). |
+| **Themed egui may still look like a tool.** | Do the theme pass early (P5.1) and compare screenshots side by side with the React panels. Keep panel code behind a small widget layer so moving to `.ui.toml` later is a contained job (§4.3). *P5.1: retired. It passed the side-by-side, and `theme.rs` is that widget layer.* |
 | **Engine hooks are rejected or drift from upstream.** | Every hook is opt-in and general. Use a PR on a feature branch rather than pushing to `main`. Run the full engine suite. Pull the subtree with `--squash` and diff against the Flint remote (vault: *Flint Engine Sync Across All Games*). |
 | **Build times.** The engine plus wgpu in a nested workspace makes for long cold builds. | A separate `target/`, plus `capitol-core` with no engine dependency, so most logic tests in seconds. |
 | **Terrain payload size** (about 1 MB) | Resolved by B3: gzip (213 KB), a `version`, and ETag/304 revalidation for the disk cache. |

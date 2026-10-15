@@ -91,6 +91,10 @@ struct Args {
     /// Show every item icon (assets/icons/) on a panel, for review
     #[arg(long)]
     icon_sheet: bool,
+    /// Show two sample panels made of the UI theme's parts, for comparing
+    /// the theme with the React client's panels (tools/theme-sample.html)
+    #[arg(long)]
+    ui_sample: bool,
 }
 
 fn main() -> Result<()> {
@@ -170,9 +174,12 @@ fn main() -> Result<()> {
     let shared = script_api::Shared::default();
     *shared.note.lock().unwrap() = args.note;
     *shared.view.lock().unwrap() = args.view;
-    player.add_extension(Box::new(
-        extension::CapitolExtension::new(shared, terrain, session).with_icon_sheet(args.icon_sheet),
-    ));
+    let mut extension =
+        extension::CapitolExtension::new(shared, terrain, session).with_icon_sheet(args.icon_sheet);
+    if args.ui_sample {
+        extension = extension.with_ui_sample();
+    }
+    player.add_extension(Box::new(extension));
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);

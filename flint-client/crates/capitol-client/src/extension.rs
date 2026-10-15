@@ -50,6 +50,8 @@ pub struct CapitolExtension {
     icons: ItemIcons,
     /// `--icon-sheet`: every item icon on a panel, for review.
     icon_sheet: bool,
+    /// The theme's sample panels, with `--ui-sample`.
+    sample: Option<ui::sample::Sample>,
 }
 
 impl CapitolExtension {
@@ -66,12 +68,19 @@ impl CapitolExtension {
             atmosphere: Atmosphere::default(),
             icons: ItemIcons::load(std::path::Path::new(ItemIcons::DIR)),
             icon_sheet: false,
+            sample: None,
         }
     }
 
     /// Show every item icon on a panel (`--icon-sheet`).
     pub fn with_icon_sheet(mut self, on: bool) -> Self {
         self.icon_sheet = on;
+        self
+    }
+
+    /// Also show the theme's sample panels (`--ui-sample`).
+    pub fn with_ui_sample(mut self) -> Self {
+        self.sample = Some(ui::sample::Sample::default());
         self
     }
 
@@ -207,6 +216,9 @@ impl PlayerExtension for CapitolExtension {
     }
 
     fn ui(&mut self, ctx: &egui::Context) {
+        if !ui::theme::install(ctx) {
+            return; // one frame, while the fonts go in
+        }
         let at_login = self.at_login();
         let mut action = None;
         if let Some(session) = &mut self.session {
@@ -239,6 +251,9 @@ impl PlayerExtension for CapitolExtension {
         }
         if self.icon_sheet {
             ui::icons::sheet(ctx, &mut self.icons);
+        }
+        if let Some(sample) = &mut self.sample {
+            sample.show(ctx);
         }
         if let Some(action) = action {
             self.act(action);
