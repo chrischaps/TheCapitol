@@ -905,9 +905,11 @@ mod tests {
 
     #[test]
     fn the_site_is_the_island_inside_the_moat_with_a_gate_at_its_bridge() {
+        // The fixture's moat is 20 wide at r = 200, so the water starts at
+        // 190 units (19 m) and the island stops a metre short of it.
         let site = Site::new(&rings());
-        assert!((site.island - 17.5).abs() < 1e-4, "{site:?}");
-        assert!((site.water - 18.5).abs() < 1e-4);
+        assert!((site.island - 18.0).abs() < 1e-4, "{site:?}");
+        assert!((site.water - 19.0).abs() < 1e-4);
         assert_eq!(site.gates, vec![(90.0, 1.5)]);
         assert_eq!(site.front(), 90.0);
     }

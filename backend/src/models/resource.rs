@@ -115,18 +115,34 @@ mod tests {
     const WORLD_SCALE_MIGRATION: &str =
         include_str!("../../migrations/20260212_001_world_scale.sql");
 
-    /// The `(x, y, quality)` rows the world-scale migration seeds.
-    fn seeded_nodes() -> Vec<(f64, f64, i32)> {
-        WORLD_SCALE_MIGRATION
-            .lines()
+    /// Moves for seeded nodes a later street plan ran over (#62).
+    const NODE_MOVES_MIGRATION: &str =
+        include_str!("../../migrations/20260215_001_suburban_street_nodes.sql");
+
+    /// The numbers in each `(a, b, ...)` row of a migration's VALUES list.
+    fn value_rows(sql: &str) -> Vec<Vec<f64>> {
+        sql.lines()
             .filter_map(|line| {
                 let row = line.trim().strip_prefix('(')?;
                 let row = row.trim_end_matches(',').strip_suffix(')')?;
-                let mut fields = row.split(',').map(str::trim);
-                let x = fields.next()?.parse().ok()?;
-                let y = fields.next()?.parse().ok()?;
-                let quality = fields.next()?.parse().ok()?;
-                Some((x, y, quality))
+                row.split(',').map(|f| f.trim().parse().ok()).collect()
+            })
+            .collect()
+    }
+
+    /// The `(x, y, quality)` rows the world-scale migration seeds, where the
+    /// later migrations leave them.
+    fn seeded_nodes() -> Vec<(f64, f64, i32)> {
+        let moves = value_rows(NODE_MOVES_MIGRATION);
+        value_rows(WORLD_SCALE_MIGRATION)
+            .into_iter()
+            .filter(|row| row.len() == 3)
+            .map(|row| {
+                let (x, y) = moves
+                    .iter()
+                    .find(|m| m[0] == row[0] && m[1] == row[1])
+                    .map_or((row[0], row[1]), |m| (m[2], m[3]));
+                (x, y, row[2] as i32)
             })
             .collect()
     }

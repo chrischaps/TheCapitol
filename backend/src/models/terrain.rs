@@ -4,6 +4,8 @@ use std::f64::consts::PI;
 
 use capitol_protocol::rules;
 
+use super::street_plan;
+
 // The terrain types the client sees are shared through capitol-protocol, so
 // GET /terrain serves the generated terrain as-is.
 pub use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPlot, WaterRing};
@@ -33,6 +35,14 @@ pub struct SuburbanGenParams {
     pub max_frontage: f64,
     /// Random seed for generation
     pub seed: u64,
+    /// Width of the arterials the streets keep clear of. Not a tweakable:
+    /// `generate_all_roads_with_params` sets it from `WorldGenParams`.
+    #[serde(skip, default = "default_arterial_width")]
+    pub arterial_width: f64,
+}
+
+fn default_arterial_width() -> f64 {
+    WorldGenParams::default().arterial_width
 }
 
 impl Default for SuburbanGenParams {
@@ -49,6 +59,7 @@ impl Default for SuburbanGenParams {
             min_frontage: 60.0,         // Reduced from 80 for narrower plots
             max_frontage: 100.0,        // Reduced from 140
             seed: 42,
+            arterial_width: 60.0,
         }
     }
 }
@@ -131,6 +142,23 @@ impl Default for WorldGenParams {
         }
     }
 }
+
+/// Spacing of a collector's points, in world units.
+const COLLECTOR_STEP: f64 = 20.0;
+
+/// Spacing of a local street's points, in world units.
+const LOCAL_STEP: f64 = 10.0;
+
+/// How far a collector's control point may wobble, as a share of the
+/// distance to its nearer neighbour.
+const WOBBLE: f64 = 0.35;
+
+/// Draws tried for each collector before it's given up.
+const COLLECTOR_ATTEMPTS: usize = 4;
+
+/// A street may meet another road only this close to one of its own ends,
+/// where it's meant to join it.
+const JOIN_ALLOW: f64 = 1.0;
 
 /// Pattern type for local suburban streets
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -323,6 +351,14 @@ fn point_near_polyline(px: f64, py: f64, polyline: &[(f64, f64)], threshold: f64
     for i in 1..polyline.len() {
         let (x1, y1) = polyline[i - 1];
         let (x2, y2) = polyline[i];
+        // Most segments are nowhere near: rule them out by their box first.
+        if px < x1.min(x2) - threshold
+            || px > x1.max(x2) + threshold
+            || py < y1.min(y2) - threshold
+            || py > y1.max(y2) + threshold
+        {
+            continue;
+        }
 
         let dist = point_to_segment_distance(px, py, x1, y1, x2, y2);
         if dist < threshold {
@@ -642,17 +678,15 @@ impl SpatialGrid {
         let cy0 = self.cell_y(y - radius);
         let cx1 = self.cell_x(x + radius);
         let cy1 = self.cell_y(y + radius);
-        let mut seen = HashSet::new();
         let mut result = Vec::new();
         for cy in cy0..=cy1 {
             for cx in cx0..=cx1 {
-                for &idx in &self.cells[cy * self.grid_width + cx] {
-                    if seen.insert(idx) {
-                        result.push(idx);
-                    }
-                }
+                result.extend_from_slice(&self.cells[cy * self.grid_width + cx]);
             }
         }
+        // Sorted rather than hashed: the sets are small and the probes many.
+        result.sort_unstable();
+        result.dedup();
         result
     }
 
@@ -663,17 +697,15 @@ impl SpatialGrid {
         let cy0 = self.cell_y(min_y);
         let cx1 = self.cell_x(max_x);
         let cy1 = self.cell_y(max_y);
-        let mut seen = HashSet::new();
         let mut result = Vec::new();
         for cy in cy0..=cy1 {
             for cx in cx0..=cx1 {
-                for &idx in &self.cells[cy * self.grid_width + cx] {
-                    if seen.insert(idx) {
-                        result.push(idx);
-                    }
-                }
+                result.extend_from_slice(&self.cells[cy * self.grid_width + cx]);
             }
         }
+        // Sorted rather than hashed: the sets are small and the probes many.
+        result.sort_unstable();
+        result.dedup();
         result
     }
 }
@@ -799,12 +831,17 @@ impl TerrainConfig {
             inner_radius: params.urban_outer_radius,
             outer_radius: params.suburban_outer_radius,
             seed: params.seed,
+            arterial_width: params.arterial_width,
             ..params.suburban.clone()
         };
         roads.extend(self.generate_suburban_streets_with_params(&suburban_params));
 
         // Rural trails
         roads.extend(self.generate_rural_paths_with_params(params));
+
+        // Every suburban junction becomes a vertex both roads share, so
+        // clients can see where streets meet (#62).
+        street_plan::weld_junctions(&mut roads, |r| r.road_type == RoadType::Suburban);
 
         roads
     }
@@ -1031,6 +1068,7 @@ impl TerrainConfig {
         let mut streets = Vec::new();
         let mut placed_segments: Vec<Vec<(f64, f64)>> = Vec::new();
         let mut rng = SeededRng::new(params.seed);
+        let arterials = self.suburban_arterials(params);
 
         // 8 arterials at 0°, 45°, 90°, 135°, 180°, 225°, 270°, 315°
         let num_arterials = 8;
@@ -1039,7 +1077,9 @@ impl TerrainConfig {
         // Generate collectors that branch off each arterial
         for arterial_idx in 0..num_arterials {
             let arterial_angle = arterial_idx as f64 * arterial_spacing;
-            let next_arterial_angle = ((arterial_idx + 1) % num_arterials) as f64 * arterial_spacing;
+            // Unwrapped, so the last arterial's collectors sweep on to the
+            // first rather than back round the whole circle.
+            let next_arterial_angle = (arterial_idx + 1) as f64 * arterial_spacing;
 
             // Generate 2-3 collectors branching from this arterial
             let num_collectors = 2 + (rng.next() * 2.0) as usize; // 2-3
@@ -1072,83 +1112,170 @@ impl TerrainConfig {
                     (ex, ey, arterial_idx)
                 };
 
-                // Generate control points for curved path between start and end
-                // More control points = smoother S-curve winding
-                let num_control_points = 6 + (rng.next() * 3.0) as usize; // 6-8 points for winding curves
-                let mut control_points = Vec::new();
-                control_points.push((start_x, start_y));
+                // A wobble can still bend a collector too hard, so a few
+                // fresh draws are tried before the collector is given up.
+                for _attempt in 0..COLLECTOR_ATTEMPTS {
+                    // Generate control points for curved path between start and end
+                    // More control points = smoother S-curve winding
+                    let num_control_points = 6 + (rng.next() * 3.0) as usize; // 6-8 points for winding curves
+                    let mut control_points = Vec::new();
+                    control_points.push((start_x, start_y));
 
-                // Intermediate points curve into the superblock
-                for i in 1..(num_control_points - 1) {
-                    let t = i as f64 / (num_control_points - 1) as f64;
-
-                    // Interpolate angle between start and end arterials
-                    let base_angle = if connect_to_neighbor {
-                        arterial_angle + (next_arterial_angle - arterial_angle) * t
-                    } else {
-                        arterial_angle + arterial_spacing * 0.3 * (t * PI).sin() // Bulge into superblock
-                    };
-
-                    // Interpolate radius
+                    // Intermediate points curve into the superblock
                     let start_r = ((start_x - self.center_x).powi(2) + (start_y - self.center_y).powi(2)).sqrt();
                     let end_r = ((end_x - self.center_x).powi(2) + (end_y - self.center_y).powi(2)).sqrt();
-                    let base_r = start_r + (end_r - start_r) * t;
+                    let base: Vec<(f64, f64)> = (0..num_control_points)
+                        .map(|i| {
+                            let t = i as f64 / (num_control_points - 1) as f64;
+                            // Interpolate angle between start and end arterials
+                            let angle = if connect_to_neighbor {
+                                arterial_angle + (next_arterial_angle - arterial_angle) * t
+                            } else {
+                                arterial_angle + arterial_spacing * 0.3 * (t * PI).sin() // Bulge into superblock
+                            };
+                            let r = start_r + (end_r - start_r) * t;
+                            (self.center_x + r * angle.cos(), self.center_y + r * angle.sin())
+                        })
+                        .collect();
+                    let gap = |a: (f64, f64), b: (f64, f64)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
 
-                    // Add wobble for S-curve winding (more pronounced curves)
-                    let wobble_angle = (rng.next() - 0.5) * 0.35; // ±10° wobble for winding S-curves
-                    let wobble_r = (rng.next() - 0.5) * 150.0;    // ±75 unit radial wobble
+                    for i in 1..(num_control_points - 1) {
+                        // Wobble for S-curve winding, at most a third of the
+                        // way to either neighbour. A wobble wider than the
+                        // spacing sent the controls backwards, and the curve
+                        // through them doubled back on itself (#62).
+                        let reach = WOBBLE * gap(base[i], base[i - 1]).min(gap(base[i], base[i + 1]));
+                        let (bx, by) = base[i];
+                        let (rx, ry) = (bx - self.center_x, by - self.center_y);
+                        let len = (rx * rx + ry * ry).sqrt();
+                        let (ux, uy) = (rx / len, ry / len);
+                        let along = (rng.next() - 0.5) * 2.0 * reach; // across the zone's rings
+                        let across = (rng.next() - 0.5) * 2.0 * reach; // along them
 
-                    let angle = base_angle + wobble_angle;
-                    let r = (base_r + wobble_r).clamp(params.inner_radius + 20.0, params.outer_radius - 20.0);
-
-                    let x = self.center_x + r * angle.cos();
-                    let y = self.center_y + r * angle.sin();
-                    control_points.push((x, y));
-                }
-
-                control_points.push((end_x, end_y));
-
-                // Generate smooth curve and clamp all points to suburban zone
-                let smooth_points = catmull_rom_spline(&control_points, 12);
-                let clamped_points = self.clamp_points_to_zone(&smooth_points, params);
-
-                // Verify the road stays in zone and has reasonable length
-                if clamped_points.len() >= 2 && polyline_length(&clamped_points) > 50.0 {
-                    // Check intersection angles with already placed collectors (use grid)
-                    let (cp_aabb_min_x, cp_aabb_min_y, cp_aabb_max_x, cp_aabb_max_y) = polyline_aabb(&clamped_points);
-                    let nearby = grid.query_aabb(cp_aabb_min_x, cp_aabb_min_y, cp_aabb_max_x, cp_aabb_max_y);
-
-                    let mut valid_angles = true;
-                    for &seg_idx in &nearby {
-                        if !check_road_intersection_angle(&clamped_points, &placed_segments[seg_idx], 45.0) {
-                            valid_angles = false;
-                            break;
-                        }
+                        let x = bx + ux * along - uy * across;
+                        let y = by + uy * along + ux * across;
+                        let r = ((x - self.center_x).powi(2) + (y - self.center_y).powi(2)).sqrt();
+                        let r_kept = r.clamp(params.inner_radius + 20.0, params.outer_radius - 20.0);
+                        let scale = r_kept / r;
+                        control_points.push((
+                            self.center_x + (x - self.center_x) * scale,
+                            self.center_y + (y - self.center_y) * scale,
+                        ));
                     }
 
-                    if valid_angles {
-                        let street_id = format!("collector_{}_{}", arterial_idx, c);
-                        let seg_idx = placed_segments.len();
-                        grid.insert(seg_idx, &clamped_points);
-                        placed_segments.push(clamped_points.clone());
-                        streets.push(SuburbanStreet {
-                            segment: RoadSegment {
-                                id: street_id.clone(),
-                                road_type: RoadType::Suburban,
-                                points: clamped_points.clone(),
-                                width: params.collector_width,
-                            },
-                            parent_road_id: Some(format!("arterial_{}", arterial_idx)),
-                            connection_point: clamped_points.first().copied(),
-                            second_connection: Some((end_x, end_y)),
-                            pattern: LocalStreetPattern::CurvedConnector,
-                        });
+                    control_points.push((end_x, end_y));
+
+                    // Generate smooth curve, clamp it to the suburban zone, and
+                    // space its points evenly. Centripetal, because the uniform
+                    // spline looped wherever the controls bunched up (#62).
+                    let smooth_points = street_plan::centripetal_spline(&control_points, 12);
+                    let clamped_points = street_plan::resample(
+                        &self.clamp_points_to_zone(&smooth_points, params),
+                        COLLECTOR_STEP,
+                    );
+
+                    let ends = [(start_x, start_y), (end_x, end_y)];
+                    let well_formed = street_plan::sharpest_turn(&clamped_points) <= street_plan::MAX_TURN_DEG
+                        && !street_plan::self_crosses(&clamped_points)
+                        && !arterials.iter().any(|a| street_plan::crosses(&clamped_points, a, &ends, JOIN_ALLOW));
+
+                    // Verify the road stays in zone and has reasonable length
+                    if well_formed && clamped_points.len() >= 2 && polyline_length(&clamped_points) > 50.0 {
+                        // Check intersection angles with already placed collectors (use grid)
+                        let (cp_aabb_min_x, cp_aabb_min_y, cp_aabb_max_x, cp_aabb_max_y) = polyline_aabb(&clamped_points);
+                        let nearby = grid.query_aabb(cp_aabb_min_x, cp_aabb_min_y, cp_aabb_max_x, cp_aabb_max_y);
+
+                        let mut valid_angles = true;
+                        for &seg_idx in &nearby {
+                            if !check_road_intersection_angle(&clamped_points, &placed_segments[seg_idx], 45.0) {
+                                valid_angles = false;
+                                break;
+                            }
+                        }
+
+                        if valid_angles {
+                            let street_id = format!("collector_{}_{}", arterial_idx, c);
+                            let seg_idx = placed_segments.len();
+                            grid.insert(seg_idx, &clamped_points);
+                            placed_segments.push(clamped_points.clone());
+                            streets.push(SuburbanStreet {
+                                segment: RoadSegment {
+                                    id: street_id.clone(),
+                                    road_type: RoadType::Suburban,
+                                    points: clamped_points.clone(),
+                                    width: params.collector_width,
+                                },
+                                parent_road_id: Some(format!("arterial_{}", arterial_idx)),
+                                connection_point: clamped_points.first().copied(),
+                                second_connection: Some((end_x, end_y)),
+                                pattern: LocalStreetPattern::CurvedConnector,
+                            });
+                            break;
+                        }
                     }
                 }
             }
         }
 
         streets
+    }
+
+    /// The arterials' centre lines across the suburban zone, a little past
+    /// each edge, for the crossing tests.
+    fn suburban_arterials(&self, params: &SuburbanGenParams) -> Vec<Vec<(f64, f64)>> {
+        (0..8)
+            .map(|i| {
+                let a = i as f64 * PI / 4.0;
+                [params.inner_radius - 50.0, params.outer_radius + 50.0]
+                    .iter()
+                    .map(|r| (self.center_x + r * a.cos(), self.center_y + r * a.sin()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Whether a local street is fit to place: it stays in the zone, has no
+    /// hairpin, doesn't cross itself, and meets other roads only at `joins`
+    /// (its own ends that sit on a road). The spacing and angle tests are
+    /// the callers'.
+    fn local_street_fits(
+        &self,
+        points: &[(f64, f64)],
+        joins: &[(f64, f64)],
+        params: &SuburbanGenParams,
+        placed_segments: &[Vec<(f64, f64)>],
+        grid: &SpatialGrid,
+    ) -> bool {
+        if points.len() < 2 || !self.points_inside_zone(points, params) {
+            return false;
+        }
+        if street_plan::sharpest_turn(points) > street_plan::MAX_TURN_DEG || street_plan::self_crosses(points) {
+            return false;
+        }
+        // Off the arterials' whole width, not just their centre lines, except
+        // where the street leaves one.
+        let clearance = (params.arterial_width + params.local_street_width) / 2.0;
+        let exempt = params.arterial_width / 2.0 + 2.0 * params.local_street_width;
+        if self.suburban_arterials(params).iter().any(|a| {
+            street_plan::crosses(points, a, joins, JOIN_ALLOW)
+                || !street_plan::keeps_clear(points, a, clearance, joins, exempt)
+        }) {
+            return false;
+        }
+        let (min_x, min_y, max_x, max_y) = polyline_aabb(points);
+        !grid
+            .query_aabb(min_x, min_y, max_x, max_y)
+            .iter()
+            .any(|&i| street_plan::crosses(points, &placed_segments[i], joins, JOIN_ALLOW))
+    }
+
+    /// Whether every point is inside the suburban zone, clear of its edges by
+    /// the margin `clamp_points_to_zone` uses.
+    fn points_inside_zone(&self, points: &[(f64, f64)], params: &SuburbanGenParams) -> bool {
+        points.iter().all(|&(x, y)| {
+            let r = ((x - self.center_x).powi(2) + (y - self.center_y).powi(2)).sqrt();
+            r >= params.inner_radius + 5.0 && r <= params.outer_radius - 5.0
+        })
     }
 
     /// Clamp all points in a polyline to stay within the suburban zone
@@ -1177,23 +1304,6 @@ impl TerrainConfig {
         }
 
         result
-    }
-
-    /// Check if all points in a polyline are within the suburban zone
-    fn all_points_in_zone(&self, points: &[(f64, f64)], params: &SuburbanGenParams) -> bool {
-        let margin = 10.0; // Allow small margin
-
-        for &(x, y) in points {
-            let dx = x - self.center_x;
-            let dy = y - self.center_y;
-            let r = (dx * dx + dy * dy).sqrt();
-
-            if r < params.inner_radius - margin || r > params.outer_radius + margin {
-                return false;
-            }
-        }
-
-        true
     }
 
     /// Phase 2: Generate local streets with various patterns
@@ -1284,7 +1394,10 @@ impl TerrainConfig {
         rng.shuffle(&mut other_points);
         connection_points.extend(other_points);
 
-        let mut street_id = 0;
+        // Numbered on from the streets already placed. Starting each pass at 0
+        // gave later passes the same ids, and the id-to-index map then sent a
+        // street's parent lookup to another road (#62).
+        let mut street_id = existing_streets.len();
 
         // Generate streets at connection points using index-based iteration to avoid borrow issues
         let mut used_indices: HashSet<usize> = HashSet::new();
@@ -1336,7 +1449,7 @@ impl TerrainConfig {
                 LocalStreetPattern::CurvedConnector => {
                     self.generate_curved_connector_v2(
                         cp_x, cp_y, &cp_road_id, cp_tangent,
-                        params, &mut rng, street_id, &placed_segments, &connection_points, parent_idx, grid
+                        params, &mut rng, street_id, &placed_segments, &connection_points, &road_id_to_idx, parent_idx, grid
                     )
                 }
             };
@@ -1349,9 +1462,11 @@ impl TerrainConfig {
                     grid.insert(seg_idx, &street.segment.points);
                     placed_segments.push(street.segment.points.clone());
                 }
+                // Counted before the append empties new_streets, or the
+                // ids never move on (#62).
+                street_id += new_streets.len();
                 streets.append(&mut new_streets);
                 used_indices.insert(idx);
-                street_id += new_streets.len();
             }
         }
 
@@ -1448,7 +1563,7 @@ impl TerrainConfig {
             // Only generate curved connectors
             if let Some(mut new_streets) = self.generate_curved_connector_v2(
                 cp_x, cp_y, &cp_road_id, cp_tangent,
-                params, &mut rng, street_id, &placed_segments, &connection_points, parent_idx, grid
+                params, &mut rng, street_id, &placed_segments, &connection_points, &road_id_to_idx, parent_idx, grid
             ) {
                 for street in &new_streets {
                     let seg_idx = placed_segments.len();
@@ -1587,9 +1702,11 @@ impl TerrainConfig {
                     grid.insert(seg_idx, &street.segment.points);
                     placed_segments.push(street.segment.points.clone());
                 }
+                // Counted before the append empties new_streets, or the
+                // ids never move on (#62).
+                street_id += new_streets.len();
                 streets.append(&mut new_streets);
                 used_indices.insert(idx);
-                street_id += new_streets.len();
             }
         }
 
@@ -1716,13 +1833,13 @@ impl TerrainConfig {
 
     /// Check if a street collides with existing segments
     /// Skips the first few points since they're expected to be near the parent road
-    /// If parent_segment_idx is provided, excludes that specific segment from collision checking
+    /// The roads in `exclude` (the ones the street joins) aren't checked
     fn check_street_collision(
         &self,
         points: &[(f64, f64)],
         placed_segments: &[Vec<(f64, f64)>],
         min_spacing: f64,
-        parent_segment_idx: Option<usize>,
+        exclude: &[usize],
         grid: &SpatialGrid,
     ) -> bool {
         // Skip the first few points (they connect to parent road)
@@ -1730,8 +1847,8 @@ impl TerrainConfig {
         for &(px, py) in points.iter().skip(skip_count) {
             let nearby = grid.query_point(px, py, min_spacing);
             for &seg_idx in &nearby {
-                // Skip the parent road segment
-                if parent_segment_idx == Some(seg_idx) {
+                // Skip the roads the street joins
+                if exclude.contains(&seg_idx) {
                     continue;
                 }
                 if point_near_polyline(px, py, &placed_segments[seg_idx], min_spacing) {
@@ -1878,9 +1995,11 @@ impl TerrainConfig {
         let num_stem_points = 4;
         let mut stem_controls = Vec::new();
 
+        // The stem stops a bulb's width short, and the bulb rings round from
+        // there back to it, so the street closes on itself (#62).
         for i in 0..num_stem_points {
             let t = i as f64 / (num_stem_points - 1) as f64;
-            let dist = t * (length - bulb_radius);
+            let dist = t * (length - 2.0 * bulb_radius);
             let curve_offset = curve_amount * t * (1.0 - t) * length;
             let perp_offset = curve_offset * (perp_angle + PI / 2.0).cos();
 
@@ -1889,36 +2008,20 @@ impl TerrainConfig {
             stem_controls.push((x, y));
         }
 
-        let stem_points = catmull_rom_spline(&stem_controls, 10);
+        let mut all_points = street_plan::resample(&street_plan::centripetal_spline(&stem_controls, 10), LOCAL_STEP);
+        let stem_end = *all_points.last()?;
+        all_points.extend(street_plan::bulb(stem_end, street_plan::end_direction(&all_points)?, bulb_radius, 16));
 
-        if self.check_street_collision(&stem_points, placed_segments, params.min_street_spacing, parent_segment_idx, grid) {
+        let exclude: Vec<usize> = parent_segment_idx.into_iter().collect();
+        if self.check_street_collision(&all_points, placed_segments, params.min_street_spacing, &exclude, grid) {
+            return None;
+        }
+        if !self.local_street_fits(&all_points, &[(cp_x, cp_y)], params, placed_segments, grid) {
             return None;
         }
 
         // Check intersection angles are at least 30 degrees
-        if !self.check_street_intersection_angles(&stem_points, placed_segments, 30.0, grid) {
-            return None;
-        }
-
-        let bulb_center = stem_controls.last()?;
-        let mut bulb_points = Vec::new();
-        let num_bulb_segments = 16;
-        let stem_end_angle = perp_angle;
-
-        for i in 0..=num_bulb_segments {
-            let t = i as f64 / num_bulb_segments as f64;
-            let angle = stem_end_angle + PI + t * 2.0 * PI;
-            let x = bulb_center.0 + bulb_radius * angle.cos();
-            let y = bulb_center.1 + bulb_radius * angle.sin();
-            bulb_points.push((x, y));
-        }
-
-        let mut all_points = stem_points;
-        all_points.extend(bulb_points);
-
-        // Clamp to zone and verify all points are valid
-        let clamped_points = self.clamp_points_to_zone(&all_points, params);
-        if !self.all_points_in_zone(&clamped_points, params) {
+        if !self.check_street_intersection_angles(&all_points, placed_segments, 30.0, grid) {
             return None;
         }
 
@@ -1926,7 +2029,7 @@ impl TerrainConfig {
             segment: RoadSegment {
                 id: format!("culdesac_{}", base_id),
                 road_type: RoadType::Suburban,
-                points: clamped_points,
+                points: all_points,
                 width: params.local_street_width,
             },
             parent_road_id: Some(road_id.to_string()),
@@ -1953,38 +2056,63 @@ impl TerrainConfig {
         let perp_angle = self.find_best_perpendicular_v2(cp_x, cp_y, tangent_angle, params, placed_segments, parent_segment_idx, grid);
 
         let loop_width = 150.0 + rng.next() * 100.0;  // 150-250 width
-        let loop_depth = 200.0 + rng.next() * 200.0;  // 200-400 depth (extends further from collector)
+        let loop_depth = 150.0 + rng.next() * 150.0;  // 150-300 depth (extends further from collector)
 
+        // The far end goes back onto the parent, measured along it, so a
+        // curved parent doesn't leave it short (#62). An arterial is straight.
         let second_offset = loop_width * 0.8;
-        let second_x = cp_x + second_offset * tangent_angle.cos();
-        let second_y = cp_y + second_offset * tangent_angle.sin();
+        let (second_x, second_y) = match parent_segment_idx.map(|i| &placed_segments[i]) {
+            Some(parent) => {
+                let along = street_plan::distance_along(parent, (cp_x, cp_y))?;
+                let total = polyline_length(parent);
+                let at = if along + second_offset <= total - LOCAL_STEP {
+                    along + second_offset
+                } else if along - second_offset >= LOCAL_STEP {
+                    along - second_offset
+                } else {
+                    return None;
+                };
+                let (x, y, _) = point_at_distance(parent, at)?;
+                (x, y)
+            }
+            None => (
+                cp_x + second_offset * tangent_angle.cos(),
+                cp_y + second_offset * tangent_angle.sin(),
+            ),
+        };
 
-        let mut loop_controls = Vec::new();
-        loop_controls.push((cp_x, cp_y));
-        loop_controls.push((
-            cp_x + loop_depth * 0.3 * perp_angle.cos(),
-            cp_y + loop_depth * 0.3 * perp_angle.sin(),
-        ));
-
-        let mid_x = (cp_x + second_x) / 2.0 + loop_depth * perp_angle.cos();
-        let mid_y = (cp_y + second_y) / 2.0 + loop_depth * perp_angle.sin();
-        loop_controls.push((mid_x, mid_y));
-
-        loop_controls.push((
-            second_x + loop_depth * 0.3 * perp_angle.cos(),
-            second_y + loop_depth * 0.3 * perp_angle.sin(),
-        ));
-        loop_controls.push((second_x, second_y));
-
-        let loop_points = catmull_rom_spline(&loop_controls, 15);
-
-        // Clamp to zone and verify
-        let clamped_points = self.clamp_points_to_zone(&loop_points, params);
-        if !self.all_points_in_zone(&clamped_points, params) {
+        // A U on the chord between the two ends, out on the side the
+        // street leaves by, with a rounded top. One control at the apex made
+        // a corner there (#62).
+        let (chord_x, chord_y) = (second_x - cp_x, second_y - cp_y);
+        let chord = (chord_x * chord_x + chord_y * chord_y).sqrt();
+        if chord < LOCAL_STEP {
             return None;
         }
+        let (ux, uy) = (chord_x / chord, chord_y / chord);
+        let side = if -uy * perp_angle.cos() + ux * perp_angle.sin() >= 0.0 { 1.0 } else { -1.0 };
+        let (vx, vy) = (-uy * side, ux * side);
+        let at = |u: f64, v: f64| (cp_x + ux * u * chord + vx * v * loop_depth, cp_y + uy * u * chord + vy * v * loop_depth);
+        let loop_controls = vec![
+            at(0.0, 0.0),
+            at(0.0, 0.45),
+            at(0.15, 0.85),
+            at(0.5, 1.0),
+            at(0.85, 0.85),
+            at(1.0, 0.45),
+            (second_x, second_y),
+        ];
 
-        if self.check_street_collision(&clamped_points, placed_segments, params.min_street_spacing, parent_segment_idx, grid) {
+        let clamped_points = street_plan::resample(&street_plan::centripetal_spline(&loop_controls, 15), LOCAL_STEP);
+
+        let joins = [(cp_x, cp_y), (second_x, second_y)];
+
+        // Both ends are on the parent, which the spacing test leaves out.
+        let exclude: Vec<usize> = parent_segment_idx.into_iter().collect();
+        if self.check_street_collision(&clamped_points, placed_segments, params.min_street_spacing, &exclude, grid) {
+            return None;
+        }
+        if !self.local_street_fits(&clamped_points, &joins, params, placed_segments, grid) {
             return None;
         }
 
@@ -2033,33 +2161,18 @@ impl TerrainConfig {
         let stem_end_y = cp_y + stem_length * perp_angle.sin();
         stem_controls.push((stem_end_x, stem_end_y));
 
-        let stem_points = catmull_rom_spline(&stem_controls, 8);
+        // The loop leaves the stem's end and rings back to it, sharing
+        // that vertex rather than repeating it (#62).
+        let mut clamped_points = street_plan::resample(&stem_controls, LOCAL_STEP);
+        let dir = (perp_angle.cos(), perp_angle.sin());
+        clamped_points.extend(street_plan::bulb((stem_end_x, stem_end_y), dir, loop_radius, 20));
 
-        let loop_center_x = stem_end_x + loop_radius * perp_angle.cos();
-        let loop_center_y = stem_end_y + loop_radius * perp_angle.sin();
 
-        let mut loop_points = Vec::new();
-        let num_segments = 20;
-        let start_angle = perp_angle + PI;
-
-        for i in 0..=num_segments {
-            let t = i as f64 / num_segments as f64;
-            let angle = start_angle + t * 2.0 * PI;
-            let x = loop_center_x + loop_radius * angle.cos();
-            let y = loop_center_y + loop_radius * angle.sin();
-            loop_points.push((x, y));
-        }
-
-        let mut all_points = stem_points;
-        all_points.extend(loop_points);
-
-        // Clamp to zone and verify
-        let clamped_points = self.clamp_points_to_zone(&all_points, params);
-        if !self.all_points_in_zone(&clamped_points, params) {
+        let exclude: Vec<usize> = parent_segment_idx.into_iter().collect();
+        if self.check_street_collision(&clamped_points, placed_segments, params.min_street_spacing, &exclude, grid) {
             return None;
         }
-
-        if self.check_street_collision(&clamped_points, placed_segments, params.min_street_spacing, parent_segment_idx, grid) {
+        if !self.local_street_fits(&clamped_points, &[(cp_x, cp_y)], params, placed_segments, grid) {
             return None;
         }
 
@@ -2094,6 +2207,7 @@ impl TerrainConfig {
         base_id: usize,
         placed_segments: &[Vec<(f64, f64)>],
         connection_points: &[ConnectionPoint],
+        road_index: &HashMap<String, usize>,
         parent_segment_idx: Option<usize>,
         grid: &SpatialGrid,
     ) -> Option<Vec<SuburbanStreet>> {
@@ -2117,15 +2231,11 @@ impl TerrainConfig {
             }
         }
 
-        let (end_x, end_y) = if let Some(other) = best_cp {
-            (other.x, other.y)
-        } else {
-            let length = 80.0 + rng.next() * 40.0;
-            (
-                cp_x + length * perp_angle.cos(),
-                cp_y + length * perp_angle.sin(),
-            )
-        };
+        // A connector with nothing to connect to would be a stub with no
+        // bulb, a dead end that looks like a mistake, so it's not placed (#62).
+        let other = best_cp?;
+        let (end_x, end_y) = (other.x, other.y);
+        let target_idx = road_index.get(&other.road_id).copied();
 
         let mid_x = (cp_x + end_x) / 2.0 + (rng.next() - 0.5) * 30.0;
         let mid_y = (cp_y + end_y) / 2.0 + (rng.next() - 0.5) * 30.0;
@@ -2136,15 +2246,15 @@ impl TerrainConfig {
             (end_x, end_y),
         ];
 
-        let connector_points = catmull_rom_spline(&controls, 12);
+        let clamped_points = street_plan::resample(&street_plan::centripetal_spline(&controls, 12), LOCAL_STEP);
 
-        // Clamp to zone and verify
-        let clamped_points = self.clamp_points_to_zone(&connector_points, params);
-        if !self.all_points_in_zone(&clamped_points, params) {
+        let joins = [(cp_x, cp_y), (end_x, end_y)];
+
+        let exclude: Vec<usize> = parent_segment_idx.into_iter().chain(target_idx).collect();
+        if self.check_street_collision(&clamped_points, placed_segments, params.min_street_spacing, &exclude, grid) {
             return None;
         }
-
-        if self.check_street_collision(&clamped_points, placed_segments, params.min_street_spacing, parent_segment_idx, grid) {
+        if !self.local_street_fits(&clamped_points, &joins, params, placed_segments, grid) {
             return None;
         }
 
@@ -3286,6 +3396,44 @@ mod tests {
         }
     }
 
+    /// The street plan's invariants (#62), at a few seeds: no repeated
+    /// points, no hairpins outside a bulb, no road over itself, roads meeting
+    /// only at shared vertices, and every street end on a road or closed on
+    /// its own bulb.
+    #[test]
+    fn suburban_street_plan_holds_its_invariants() {
+        for seed in [42, 7, 1234, 99_999] {
+            let t = TerrainConfig::from_params(&WorldGenParams { seed, ..Default::default() });
+            let audit = street_plan::audit(&t.roads, |r| r.road_type == RoadType::Suburban);
+            assert!(audit.is_clean(), "seed {seed}: {audit:#?}");
+
+            let suburban: Vec<_> = t.roads.iter().filter(|r| r.road_type == RoadType::Suburban).collect();
+            let collectors = suburban.iter().filter(|r| r.id.starts_with("collector_")).count();
+            eprintln!("seed {seed}: {} suburban roads, {collectors} collectors", suburban.len());
+            assert!(suburban.len() >= 80 && collectors >= 10, "seed {seed}: a sparse plan");
+
+            let mut ids = HashSet::new();
+            assert!(t.roads.iter().all(|r| ids.insert(r.id.as_str())), "seed {seed}: repeated road ids");
+
+            // Off the arterials' ribbons, except near a junction at either end.
+            for art in t.roads.iter().filter(|r| r.id.starts_with("arterial_") && r.road_type == RoadType::Arterial) {
+                for street in &suburban {
+                    let ends = [street.points[0], *street.points.last().unwrap()];
+                    let joins: Vec<_> = ends
+                        .into_iter()
+                        .filter(|e| t.roads.iter().any(|o| o.id != street.id && o.points.contains(e)))
+                        .collect();
+                    let clearance = (art.width + street.width) / 2.0;
+                    let exempt = art.width / 2.0 + 2.0 * street.width;
+                    assert!(
+                        street_plan::keeps_clear(&street.points, &art.points, clearance, &joins, exempt),
+                        "seed {seed}: {} runs into {}", street.id, art.id
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_seeded_rng_determinism() {
         let mut rng1 = SeededRng::new(42);
@@ -3596,3 +3744,4 @@ mod tests {
         assert!(near_second.contains(&1));
     }
 }
+

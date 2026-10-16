@@ -289,7 +289,10 @@ The suburban zone (radius 1600-2400) uses procedural road generation in `terrain
 **Generation phases**:
 1. Generate collector roads (curved paths between arterials)
 2. Iteratively generate local streets (each pass can branch from previous pass)
-3. Generate suburban plots along roads
+3. Weld junctions (`street_plan::weld_junctions`): each street end, and each crossing, becomes a vertex both roads share
+4. Generate suburban plots along roads
+
+**Street-plan invariants** (`models/street_plan.rs`, #62): splines are centripetal Catmull-Rom, resampled at even steps. A candidate street is rejected if it hairpins (a turn over 45°), crosses itself, or crosses another road or an arterial anywhere but at its own joining ends. Cul-de-sacs and P-streets are lollipops: the bulb closes on the stem's last vertex. Loop streets end back on their parent, measured along it. A connector with no road to reach isn't placed. `suburban_street_plan_holds_its_invariants` checks it all at four seeds. The grass nodes are fixed in migrations (#70), so a generator change that runs a street over one needs a migration that moves it (see `20260215_001_suburban_street_nodes.sql`).
 
 ## Database
 

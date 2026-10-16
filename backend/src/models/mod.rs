@@ -7,6 +7,7 @@ pub mod plot;
 pub mod recipe;
 pub mod resource;
 pub mod station;
+pub mod street_plan;
 pub mod terrain;
 pub mod zone;
 

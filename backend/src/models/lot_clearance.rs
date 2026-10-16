@@ -376,12 +376,14 @@ mod tests {
     #[test]
     fn generated_lots_are_clear_and_unique() {
         use crate::models::{TerrainConfig, WorldGenParams};
-        // The defaults, and the wider canals the dev DB commits.
+        // The defaults, the wider canals the dev DB commits, and a few other
+        // seeds, which lay out other suburban streets (#62).
         let mut wide = WorldGenParams::default();
         wide.canal_inner_width = 50.0;
         wide.canal_outer_width = 50.0;
         wide.moat_width = 30.0;
-        for params in [WorldGenParams::default(), wide] {
+        let seeded = [7, 1234, 99_999].map(|seed| WorldGenParams { seed, ..WorldGenParams::default() });
+        for params in [WorldGenParams::default(), wide].into_iter().chain(seeded) {
             let t = TerrainConfig::from_params(&params);
             let obstacles = Obstacles::new(&t.roads, &t.water_rings, (t.center_x, t.center_y));
             let mut ids = std::collections::HashSet::new();
