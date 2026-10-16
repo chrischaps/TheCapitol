@@ -21,9 +21,6 @@ pub struct Shared {
     /// A clean capture (`--clean`, P8.7): offline, no inscription panel
     /// and no free-point mark, just the city.
     pub clean: Arc<AtomicBool>,
-    /// Mouse-wheel notches since the camera rig last took them, up = in.
-    /// A workaround: Flint doesn't feed the wheel to actions (issue #67).
-    pub wheel: Arc<Mutex<f32>>,
     /// The login form is up (P4.1): the camera circles the tower behind it.
     pub at_login: Arc<AtomicBool>,
     /// Where you stand in world metres (P4.2), for the camera to follow.
@@ -248,15 +245,6 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     // that are only there to steer by.
     let clean = shared.clean.clone();
     engine.register_fn("cap_clean", move || clean.load(Ordering::Relaxed));
-    // `cap_take_wheel() -> float`: wheel notches (up positive) since the
-    // last call, which zeroes them. Only the camera rig should call it.
-    let wheel = shared.wheel.clone();
-    engine.register_fn("cap_take_wheel", move || -> f64 {
-        wheel
-            .lock()
-            .map(|mut w| std::mem::take(&mut *w) as f64)
-            .unwrap_or_default()
-    });
     // `cap_setting(name) -> value`: one of the player's settings (P8.4),
     // for the scripts that need it: "camera_sensitivity" (a multiple of the
     // rig's turn and zoom rates, 1.0 as made) and "invert_orbit" (bool). ()
@@ -822,17 +810,6 @@ mod tests {
             .eval(r#"let b = cap_zone_banner(); `${b.name} ${b.b} ${b.first} ${b.age < -59.0}`"#)
             .unwrap();
         assert_eq!(words, "Trade District 1.0 true true");
-    }
-
-    #[test]
-    fn the_wheel_is_taken_once() {
-        let shared = Shared::default();
-        *shared.wheel.lock().unwrap() = 2.5;
-        let mut engine = rhai::Engine::new();
-        register(&mut engine, &shared);
-        let first: f64 = engine.eval("cap_take_wheel()").unwrap();
-        let second: f64 = engine.eval("cap_take_wheel()").unwrap();
-        assert_eq!((first, second), (2.5, 0.0));
     }
 
     #[test]

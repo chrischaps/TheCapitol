@@ -13,10 +13,9 @@
 // so the furthest zoom is always the same map.
 //
 // Controls (config/input.toml): WASD or the arrows pan, R and F or the
-// wheel zoom, Q and E or a right-drag orbit, H comes home. The wheel
-// arrives through cap_take_wheel(), because Flint doesn't feed it to
-// actions yet (issue #67). The keys stand in for Home, PageUp and +/-,
-// which Flint can't bind yet (issue #68).
+// wheel zoom, Q and E or a right-drag orbit, H comes home. The wheel is
+// the `zoom` action, in notches. The keys stand in for Home, PageUp and
+// +/-, which Flint can't bind yet (issue #68).
 //
 // Signed in, the point is your avatar (cap_follow, P4.2), and WASD pans
 // the view away from it: the pan stays put relative to you as you walk,
@@ -170,8 +169,6 @@ fn on_update() {
         rig.shot = login_shot(total_time());
         rig.release = 1.0;
         rig.at_login = true;
-        // The wheel turned over the form isn't for later.
-        cap_take_wheel();
     } else if rig.at_login {
         rig.at_login = false;
         rig.waited = 0.0;
@@ -313,7 +310,7 @@ fn steer(dt, you) {
     let way = if cap_setting("invert_orbit") == true { -1.0 } else { 1.0 };
 
     // Zoom: the wheel (up is in) and R/F.
-    let notches = cap_take_wheel();
+    let notches = action_value("zoom");
     let keys = action_axis("zoom_out", "zoom_in");
     if notches != 0.0 || keys != 0.0 {
         any = true;

@@ -11,8 +11,8 @@
 //! the station panel (`ui::station`), the first-session hints (`ui::hints`)
 //! and the shortcut overlay (`ui::shortcuts`), the fog and the light as
 //! the camera climbs (`atmosphere`), what you hear (`sound`), the player's
-//! settings and their panel (`settings`, `ui::settings`), the wheel for
-//! the camera rig, and the spike's markers.
+//! settings and their panel (`settings`, `ui::settings`), and the spike's
+//! markers.
 
 use crate::atmosphere::Atmosphere;
 use crate::entities::Players;
@@ -48,11 +48,8 @@ use flint_player::{ExtensionCtx, PlayerExtension};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::keyboard::{Key, KeyCode, PhysicalKey};
-
-/// Pixels of a touchpad's smooth scroll that make one wheel notch.
-const PIXELS_PER_NOTCH: f32 = 50.0;
 
 /// How long the login form takes to fade out once the player is in, in
 /// seconds. The camera comes down from its circle over about the same time.
@@ -507,10 +504,6 @@ impl PlayerExtension for CapitolExtension {
         attach_each(ctx, sectors.iter());
     }
 
-    /// Collect the wheel for the camera rig (`cap_take_wheel`), because
-    /// Flint doesn't feed it to actions. A workaround: issue #67. Never
-    /// consumed; egui has already kept any wheel over its windows.
-    ///
     /// While a station is being placed (P6.2), Esc stops it rather than
     /// quitting, and so does a right click on the world (not a right-drag,
     /// which orbits). egui has already kept any click over its panels.
@@ -562,15 +555,6 @@ impl PlayerExtension for CapitolExtension {
                 }
             },
             _ => {}
-        }
-        if let WindowEvent::MouseWheel { delta, .. } = event {
-            let notches = match delta {
-                MouseScrollDelta::LineDelta(_, y) => *y,
-                MouseScrollDelta::PixelDelta(p) => p.y as f32 / PIXELS_PER_NOTCH,
-            };
-            if let Ok(mut wheel) = self.shared.wheel.lock() {
-                *wheel += notches;
-            }
         }
         false
     }

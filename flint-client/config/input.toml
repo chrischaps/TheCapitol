@@ -4,10 +4,9 @@
 # under the OS config directory.
 #
 # The camera rig (scripts/camera.rhai) is laid out as in Cities: Skylines:
-# WASD moves, Q/E orbit, R/F zoom, and the wheel zooms too. The wheel isn't
-# bound here, because Flint doesn't feed it to actions yet (issue #67). The
-# rig reads it through cap_take_wheel(). H stands in for Home and R/F for
-# +/-, which Flint can't bind yet (issue #68).
+# WASD moves, Q/E orbit, R/F zoom, and the wheel zooms too (`zoom`, in
+# notches, up is in). H stands in for Home and R/F for +/-, which Flint
+# can't bind yet (issue #68).
 
 version = 1
 game_id = "capitol"
@@ -43,6 +42,11 @@ bindings = [{ type = "key", code = "KeyR" }]
 [actions.zoom_out]
 kind = "button"
 bindings = [{ type = "key", code = "KeyF" }]
+
+# Wheel notches this frame; a touchpad's 50 px of scroll is one.
+[actions.zoom]
+kind = "axis1d"
+bindings = [{ type = "mouse_wheel", axis = "y", scale = 1.0 }]
 
 [actions.home]
 kind = "button"
