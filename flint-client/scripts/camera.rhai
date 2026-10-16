@@ -12,10 +12,9 @@
 // On the way to the map the view drifts to the Capitol and turns north up,
 // so the furthest zoom is always the same map.
 //
-// Controls (config/input.toml): WASD or the arrows pan, R and F or the
-// wheel zoom, Q and E or a right-drag orbit, H comes home. The wheel is
-// the `zoom` action, in notches. The keys stand in for Home, PageUp and
-// +/-, which Flint can't bind yet (issue #68).
+// Controls (config/input.toml): WASD or the arrows pan, R and F, + and -
+// or the wheel zoom, Q and E or a right-drag orbit, H or Home comes home.
+// The wheel is the `zoom` action, in notches.
 //
 // Signed in, the point is your avatar (cap_follow, P4.2), and WASD pans
 // the view away from it: the pan stays put relative to you as you walk,
@@ -91,7 +90,7 @@ fn zoom_k() { 8.0 }
 fn yaw_k() { 10.0 }
 // Input rates.
 fn wheel_step() { 0.045 }   // zoom per wheel notch
-fn key_zoom_rate() { 0.45 } // zoom per second on R/F
+fn key_zoom_rate() { 0.45 } // zoom per second on R/F or +/-
 fn orbit_rate() { 1.6 }     // radians per second on Q/E
 fn drag_rate() { 0.006 }    // radians per point of right-drag
 // How long a fixed shot takes to ease into the rig, in seconds, and how

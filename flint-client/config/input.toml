@@ -5,8 +5,7 @@
 #
 # The camera rig (scripts/camera.rhai) is laid out as in Cities: Skylines:
 # WASD moves, Q/E orbit, R/F zoom, and the wheel zooms too (`zoom`, in
-# notches, up is in). H stands in for Home and R/F for +/-, which Flint
-# can't bind yet (issue #68).
+# notches, up is in). Home and +/- (both rows) work beside H and R/F.
 
 version = 1
 game_id = "capitol"
@@ -37,11 +36,19 @@ bindings = [{ type = "key", code = "KeyE" }]
 
 [actions.zoom_in]
 kind = "button"
-bindings = [{ type = "key", code = "KeyR" }]
+bindings = [
+    { type = "key", code = "KeyR" },
+    { type = "key", code = "Equal" },
+    { type = "key", code = "NumpadAdd" },
+]
 
 [actions.zoom_out]
 kind = "button"
-bindings = [{ type = "key", code = "KeyF" }]
+bindings = [
+    { type = "key", code = "KeyF" },
+    { type = "key", code = "Minus" },
+    { type = "key", code = "NumpadSubtract" },
+]
 
 # Wheel notches this frame; a touchpad's 50 px of scroll is one.
 [actions.zoom]
@@ -50,7 +57,7 @@ bindings = [{ type = "mouse_wheel", axis = "y", scale = 1.0 }]
 
 [actions.home]
 kind = "button"
-bindings = [{ type = "key", code = "KeyH" }]
+bindings = [{ type = "key", code = "KeyH" }, { type = "key", code = "Home" }]
 
 # The inventory panel (P5.4); the header's Inventory button does the same.
 [actions.inventory]
@@ -68,7 +75,8 @@ kind = "button"
 bindings = [{ type = "key", code = "KeyX" }]
 
 # The shortcut overlay (P8.3). `?` opens it too, read off the typed
-# character, because Flint can't bind Slash yet (issue #68).
+# character, so it's `?` on any layout. Binding Slash here as well would
+# fire on the same keypress and toggle the overlay twice.
 [actions.help]
 kind = "button"
 bindings = [{ type = "key", code = "F1" }]

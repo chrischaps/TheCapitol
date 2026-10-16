@@ -143,7 +143,7 @@ impl SettingsPanel {
         theme::setting_row(ui, "Sensitivity", |ui| {
             theme::level(ui, &mut c.sensitivity, SENSITIVITY, |v| format!("{v:.2}×"))
         })
-        .on_hover_text("How fast the wheel, R/F, Q/E and a right-drag turn and zoom");
+        .on_hover_text("How fast the wheel, R/F, +/-, Q/E and a right-drag turn and zoom");
         theme::setting_row(ui, "Invert orbit", |ui| {
             theme::switch(ui, &mut c.invert_orbit)
         })

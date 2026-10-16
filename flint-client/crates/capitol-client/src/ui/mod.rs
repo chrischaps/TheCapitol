@@ -98,9 +98,8 @@ pub fn inscription(ctx: &egui::Context, shared: &Shared, status: &str) {
                     .desired_width(240.0),
             );
             ui.add_space(6.0);
-            ui.label(theme::dim(
-                "WASD pans · wheel or R/F zooms · Q/E or right-drag turns · H home",
-            ));
+            ui.label(theme::dim("WASD pans · wheel, R/F or +/- zooms"));
+            ui.label(theme::dim("Q/E or right-drag turns · H or Home comes home"));
             ui.label(theme::dim(
                 "P traces the plan · click the ground to walk there",
             ));

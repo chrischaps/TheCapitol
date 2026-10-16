@@ -13,7 +13,7 @@ use egui::{Align2, Id, Order, RichText};
 /// How long the overlay takes to fade in or out, in seconds.
 const FADE: f32 = 0.16;
 /// The keys' width in the left column and the right, then what they do.
-const KEYS_LEFT: f32 = 168.0;
+const KEYS_LEFT: f32 = 192.0;
 const KEYS_RIGHT: f32 = 160.0;
 const WORDS_WIDTH: f32 = 150.0;
 
@@ -25,9 +25,9 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("[Click] the ground", "Walk there"),
             ("[W] [A] [S] [D] or arrows", "Pan the view"),
-            ("[Wheel] or [R] [F]", "Zoom in and out"),
+            ("[Wheel], [R] [F] or [+] [-]", "Zoom in and out"),
             ("[Q] [E] or right-drag", "Turn the view"),
-            ("[H]", "Back to you"),
+            ("[H] or [Home]", "Back to you"),
         ],
     ),
     (
