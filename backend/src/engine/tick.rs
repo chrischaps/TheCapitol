@@ -5,6 +5,7 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use uuid::Uuid;
 
 use super::commands::Command;
+use super::craft_completion::{finish_craft, FinishedCraft};
 use super::crafting::{cancel_crafting, process_crafting, start_crafting, CraftingOperation};
 use super::events::GameEvent;
 use super::extraction::{cancel_extraction, process_extractions, start_extraction, PendingItem};
@@ -38,8 +39,8 @@ pub struct GameState {
     pub event_sender: broadcast::Sender<GameEvent>,
     pub tick_count: u64,
     pub pending_items: Vec<PendingItem>,
-    /// Items to consume: (item_id, quantity_to_consume)
-    pub items_to_consume: Vec<(Uuid, i32)>,
+    /// Crafts that ran their time this tick, for the tick loop to write
+    pub finished_crafts: Vec<FinishedCraft>,
     // M4: Stations
     pub stations: HashMap<Uuid, StationState>,
     pub station_types: HashMap<String, StationType>,
@@ -84,7 +85,7 @@ impl GameState {
             event_sender,
             tick_count: 0,
             pending_items: Vec::new(),
-            items_to_consume: Vec::new(),
+            finished_crafts: Vec::new(),
             stations: HashMap::new(),
             station_types: HashMap::new(),
             trade_manager: TradeManager::new(),
@@ -106,8 +107,8 @@ impl GameState {
         std::mem::take(&mut self.pending_items)
     }
 
-    pub fn take_items_to_consume(&mut self) -> Vec<(Uuid, i32)> {
-        std::mem::take(&mut self.items_to_consume)
+    pub fn take_finished_crafts(&mut self) -> Vec<FinishedCraft> {
+        std::mem::take(&mut self.finished_crafts)
     }
 
     pub fn get_tick_count(&self) -> u64 {
@@ -598,15 +599,14 @@ impl GameState {
     }
 
     fn process_crafting(&mut self) {
-        let (new_items, consumed_items) = process_crafting(
+        let finished = process_crafting(
             &mut self.players,
             &self.recipes,
             &mut self.crafting_operations,
             &self.item_types,
             &self.event_sender,
         );
-        self.pending_items.extend(new_items);
-        self.items_to_consume.extend(consumed_items);
+        self.finished_crafts.extend(finished);
     }
 }
 
@@ -622,20 +622,20 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
         interval.tick().await;
 
         let pending_items: Vec<PendingItem>;
-        let items_to_consume: Vec<(Uuid, i32)>;
+        let finished_crafts: Vec<FinishedCraft>;
         let event_sender;
         {
             let mut game = game_state.write().await;
             game.tick();
             pending_items = game.take_pending_items();
-            items_to_consume = game.take_items_to_consume();
+            finished_crafts = game.take_finished_crafts();
             event_sender = game.event_sender.clone();
         }
 
         // Persist any items created from extractions/crafting
         // and notify clients after database writes complete
         if !pending_items.is_empty() {
-            let affected_players = persist_items(&app_state, pending_items).await;
+            let affected_players = persist_items(&app_state.db, pending_items).await;
             // Send inventory updated events AFTER persistence completes
             for (player_id, container_id) in affected_players {
                 let _ = event_sender.send(GameEvent::InventoryUpdated {
@@ -646,16 +646,36 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
             }
         }
 
-        // Delete consumed items (crafting inputs)
-        if !items_to_consume.is_empty() {
-            let affected = consume_items(&app_state, items_to_consume).await;
-            // Send inventory updated events for consumed items
-            for (player_id, container_id) in affected {
-                let _ = event_sender.send(GameEvent::InventoryUpdated {
-                    player_id,
-                    container_id,
-                    slots: Vec::new(),
-                });
+        // Finish crafts: inputs re-checked, consumed and the output written in one
+        // transaction (B10, #61). Only then is the crafter told, with one
+        // `inventory_updated` per container that changed.
+        for craft in finished_crafts {
+            match finish_craft(&app_state.db, &craft).await {
+                Ok(changed) => {
+                    for output in &craft.outputs {
+                        let _ = event_sender.send(GameEvent::CraftingCompleted {
+                            player_id: craft.player_id,
+                            operation_id: craft.operation_id,
+                            item_type: output.item_type.clone(),
+                            item_name: output.item_name.clone(),
+                            quantity: output.quantity,
+                            quality: output.quality,
+                        });
+                    }
+                    for container_id in changed {
+                        let _ = event_sender.send(GameEvent::InventoryUpdated {
+                            player_id: craft.player_id,
+                            container_id,
+                            slots: Vec::new(),
+                        });
+                    }
+                }
+                Err(reason) => {
+                    let _ = event_sender.send(GameEvent::CraftingFailed {
+                        player_id: craft.player_id,
+                        reason,
+                    });
+                }
             }
         }
 
@@ -710,7 +730,7 @@ async fn persist_positions(game_state: &Arc<RwLock<GameState>>, app_state: &AppS
     }
 }
 
-async fn persist_items(app_state: &AppState, items: Vec<PendingItem>) -> Vec<(Uuid, Uuid)> {
+async fn persist_items(db: &sqlx::PgPool, items: Vec<PendingItem>) -> Vec<(Uuid, Uuid)> {
     let mut affected: Vec<(Uuid, Uuid)> = Vec::new();
 
     for item in items {
@@ -726,7 +746,7 @@ async fn persist_items(app_state: &AppState, items: Vec<PendingItem>) -> Vec<(Uu
         )
         .bind(item.player_id)
         .bind(container_type)
-        .fetch_optional(&app_state.db)
+        .fetch_optional(db)
         .await
         .ok()
         .flatten();
@@ -747,7 +767,7 @@ async fn persist_items(app_state: &AppState, items: Vec<PendingItem>) -> Vec<(Uu
         )
         .bind(container_id)
         .bind(&item.item_type)
-        .fetch_optional(&app_state.db)
+        .fetch_optional(db)
         .await
         .ok()
         .flatten();
@@ -763,7 +783,7 @@ async fn persist_items(app_state: &AppState, items: Vec<PendingItem>) -> Vec<(Uu
             .bind(new_qty)
             .bind(new_quality)
             .bind(existing_id)
-            .execute(&app_state.db)
+            .execute(db)
             .await;
 
             if let Err(e) = result {
@@ -784,7 +804,7 @@ async fn persist_items(app_state: &AppState, items: Vec<PendingItem>) -> Vec<(Uu
                 "SELECT slot_index FROM items WHERE container_id = $1 AND slot_index IS NOT NULL"
             )
             .bind(container_id)
-            .fetch_all(&app_state.db)
+            .fetch_all(db)
             .await
             .unwrap_or_default();
 
@@ -818,7 +838,7 @@ async fn persist_items(app_state: &AppState, items: Vec<PendingItem>) -> Vec<(Uu
             .bind(item.player_id)
             .bind(container_id)
             .bind(slot_index)
-            .execute(&app_state.db)
+            .execute(db)
             .await;
 
             if let Err(e) = result {
@@ -833,61 +853,6 @@ async fn persist_items(app_state: &AppState, items: Vec<PendingItem>) -> Vec<(Uu
                     item.player_id
                 );
                 affected.push((item.player_id, container_id));
-            }
-        }
-    }
-
-    affected
-}
-
-async fn consume_items(app_state: &AppState, items: Vec<(Uuid, i32)>) -> Vec<(Uuid, Uuid)> {
-    let mut affected: Vec<(Uuid, Uuid)> = Vec::new();
-
-    for (item_id, quantity_to_consume) in items {
-        // Get item info
-        let item_info: Option<(Uuid, Option<Uuid>, i32)> = sqlx::query_as(
-            "SELECT owner_id, container_id, quantity FROM items WHERE id = $1"
-        )
-        .bind(item_id)
-        .fetch_optional(&app_state.db)
-        .await
-        .ok()
-        .flatten();
-
-        let Some((owner_id, container_id, current_quantity)) = item_info else {
-            tracing::error!("Item {} not found for consumption", item_id);
-            continue;
-        };
-
-        let new_quantity = current_quantity - quantity_to_consume;
-
-        let result = if new_quantity <= 0 {
-            // Delete the item entirely
-            sqlx::query("DELETE FROM items WHERE id = $1")
-                .bind(item_id)
-                .execute(&app_state.db)
-                .await
-        } else {
-            // Just decrement the quantity
-            sqlx::query("UPDATE items SET quantity = $1 WHERE id = $2")
-                .bind(new_quantity)
-                .bind(item_id)
-                .execute(&app_state.db)
-                .await
-        };
-
-        if let Err(e) = result {
-            tracing::error!("Failed to consume item {}: {:?}", item_id, e);
-        } else {
-            tracing::debug!(
-                "Consumed {} of item {} (had {}, now {})",
-                quantity_to_consume,
-                item_id,
-                current_quantity,
-                new_quantity.max(0)
-            );
-            if let Some(cid) = container_id {
-                affected.push((owner_id, cid));
             }
         }
     }

@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::models::{ActionState, Item, ItemType, PlayerState, Recipe};
 use super::events::GameEvent;
-use super::extraction::PendingItem;
+use super::craft_completion::{CraftOutput, FinishedCraft};
 
 /// Active crafting operation tracked in game state
 #[derive(Debug, Clone)]
@@ -18,19 +18,20 @@ pub struct CraftingOperation {
     pub input_qualities: Vec<i32>,
 }
 
-/// Process crafting for all players actively crafting
-/// Returns a list of items to be persisted and items to be consumed (item_id, quantity)
+/// Process crafting for all players actively crafting.
+/// Returns the crafts that finished this tick. The tick loop writes each one to the database
+/// (`craft_completion::finish_craft`) and only then sends `crafting_completed` or
+/// `crafting_failed`, since the inputs may have moved while it ran.
 pub fn process_crafting(
     players: &mut HashMap<Uuid, PlayerState>,
     recipes: &HashMap<String, Recipe>,
     crafting_operations: &mut HashMap<Uuid, CraftingOperation>,
     item_types: &HashMap<String, ItemType>,
     event_sender: &broadcast::Sender<GameEvent>,
-) -> (Vec<PendingItem>, Vec<(Uuid, i32)>) {
+) -> Vec<FinishedCraft> {
     let mut completed_operations: Vec<Uuid> = Vec::new();
     let mut progress_updates: Vec<(Uuid, Uuid, u32, u32)> = Vec::new();
-    let mut pending_items: Vec<PendingItem> = Vec::new();
-    let mut items_to_consume: Vec<(Uuid, i32)> = Vec::new();
+    let mut finished: Vec<FinishedCraft> = Vec::new();
 
     // Process each player's crafting progress
     for player in players.values_mut() {
@@ -65,37 +66,24 @@ pub fn process_crafting(
                 // Calculate output quality from input qualities
                 let output_quality = calculate_output_quality(&operation.input_qualities, recipe);
 
-                // Generate output items
+                // Roll the outputs; they're written, and announced, by the tick loop
                 let mut rng = rand::thread_rng();
-                for output in &recipe.outputs {
-                    let quantity = rng.gen_range(output.quantity_min..=output.quantity_max);
-
-                    let item_name = item_types
+                let outputs = recipe.outputs.iter().map(|output| CraftOutput {
+                    item_type: output.item_type.clone(),
+                    item_name: item_types
                         .get(&output.item_type)
                         .map(|t| t.name.clone())
-                        .unwrap_or_else(|| output.item_type.clone());
+                        .unwrap_or_else(|| output.item_type.clone()),
+                    quantity: rng.gen_range(output.quantity_min..=output.quantity_max),
+                    quality: output_quality,
+                }).collect();
 
-                    pending_items.push(PendingItem {
-                        player_id: operation.player_id,
-                        item_type: output.item_type.clone(),
-                        quantity,
-                        quality: output_quality,
-                        target_container_type: Some("crafting_output".to_string()),
-                    });
-
-                    // Emit completion event
-                    let _ = event_sender.send(GameEvent::CraftingCompleted {
-                        player_id: operation.player_id,
-                        operation_id: operation.operation_id,
-                        item_type: output.item_type.clone(),
-                        item_name,
-                        quantity,
-                        quality: output_quality,
-                    });
-                }
-
-                // Mark input items for consumption (with quantities)
-                items_to_consume.extend(operation.input_items_to_consume.clone());
+                finished.push(FinishedCraft {
+                    player_id: operation.player_id,
+                    operation_id: operation.operation_id,
+                    inputs: operation.input_items_to_consume.clone(),
+                    outputs,
+                });
             }
 
             // Reset player action state
@@ -105,7 +93,7 @@ pub fn process_crafting(
         }
     }
 
-    (pending_items, items_to_consume)
+    finished
 }
 
 /// Calculate output quality based on input qualities and recipe weights

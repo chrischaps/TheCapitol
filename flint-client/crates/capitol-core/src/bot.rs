@@ -673,8 +673,8 @@ impl Bot {
             })
             .expect("until stopped on one of these")?;
         self.wait_for_items(container_type::CRAFTING_OUTPUT, &item)?;
-        // The inputs are deleted after the output is written, with an
-        // `inventory_updated` of their own, so they can still show here.
+        // Output and inputs are written together (B10), but the refetch that
+        // shows the output may not be the one that shows the inputs gone.
         self.wait_until("the inputs to be used up", |bot| {
             leftover
                 .iter()
