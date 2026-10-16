@@ -43,6 +43,10 @@ From bash, run `play.bat` through PowerShell with an absolute path:
 
 If another build or a running client could lock the exe, use your own `CARGO_TARGET_DIR`.
 
+**Packaging (P8.7).** `powershell -NoProfile -File package.ps1` builds into `target\package` with a static C runtime (`+crt-static`, so no VC++ redistributable; its `RUSTFLAGS` repeat the 8 MB stack, because they replace `.cargo/config.toml`'s). It stages `dist\TheCapitol\` and zips it as `dist\TheCapitol-<git describe>.zip` (`dist/` is gitignored at the root). The zip holds the exe, the game's data dirs, `engine\schemas` (the only engine files read at run time; the shaders are compiled in), `fixtures\terrain.json`, an `Explore offline.bat` and a player's `README.txt`. **A new data dir the game reads must be added to the script's list.** The game finds its data beside the exe when the working directory lacks the scene (`enter_game_dir` in `main.rs`), so the zip runs from a shortcut or any terminal; paths given on the command line are made absolute first. To check a package, unzip it outside the repo and run it from another folder: offline, then with `--server`, then signed in (a `save\session.toml` with `server`, `email`, `token` and `token_server` keys skips the form).
+
+**Showcase.** `powershell -NoProfile -File tools\showcase.ps1` writes offline stills of every fixed `--view` and a crane shot (`capitol.mp4`, ffmpeg) into `renders\showcase\`. It runs with `--clean` (offline only: no inscription panel and no free-point mark, half of [#92](https://github.com/chrischaps/TheCapitol/issues/92)) and its own settings file: High shadows, and camera sensitivity 0.25 so held keys make a filmable move. The move is `tools\showcase-orbit.txt`.
+
 ## Terrain, offline mode and captures
 
 `capitol` fetches `/terrain` from the server and caches it in `cache/terrain-<host_port>.json` (gitignored). A cached terrain is drawn at once and revalidated by version: the server answers 304 while it's current. The server is `--server` (or `CAPITOL_SERVER`) for one run, otherwise the one last chosen on the login form, otherwise `http://localhost:3000`.

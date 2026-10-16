@@ -120,6 +120,10 @@ struct Args {
     /// No sound. Captures (--exit-after) are silent anyway
     #[arg(long)]
     mute: bool,
+    /// Offline, draw only the city: no inscription panel, no free-point
+    /// mark. For showcase captures (tools/showcase.ps1)
+    #[arg(long, requires = "offline")]
+    clean: bool,
     /// Offline, play the juice on a timetable (P8.2): pickups to an
     /// inventory panel, an A grade's sparkle, the toast stack, a zone's
     /// banner and the camera's ease into it. For captures
@@ -148,7 +152,8 @@ fn main() -> Result<()> {
             }),
         )
         .init();
-    let args = Args::parse();
+    let mut args = Args::parse();
+    enter_game_dir(&mut args)?;
     let (terrain, session) = match &args.offline {
         Some(path) => (terrain::TerrainSource::offline(path)?, None),
         None => {
@@ -231,6 +236,9 @@ fn main() -> Result<()> {
     let shared = script_api::Shared::default();
     *shared.note.lock().unwrap() = args.note;
     *shared.view.lock().unwrap() = args.view;
+    shared
+        .clean
+        .store(args.clean, std::sync::atomic::Ordering::Relaxed);
     let mut extension = extension::CapitolExtension::new(shared, terrain, session)
         .with_icon_sheet(args.icon_sheet)
         .with_containers(args.containers)
@@ -255,5 +263,39 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut player)?;
+    Ok(())
+}
+
+/// Every path the game and the engine read (scenes/, scripts/, save/, ...)
+/// is relative to the working directory. In development that's
+/// flint-client/. The packaged game (package.ps1, P8.7) has its data beside
+/// the exe, and may be started from anywhere: a shortcut, a terminal in
+/// another folder. So when the scene isn't found here but is beside the
+/// exe, move there, taking the paths given on the command line along.
+fn enter_game_dir(args: &mut Args) -> Result<()> {
+    if Path::new(&args.scene).exists() {
+        return Ok(());
+    }
+    let exe = std::env::current_exe().context("finding the exe")?;
+    let Some(dir) = exe.parent().filter(|d| d.join(&args.scene).exists()) else {
+        return Ok(()); // loading the scene will say what's missing
+    };
+    fn absolute(p: &mut PathBuf) {
+        if let Ok(a) = std::path::absolute(&*p) {
+            *p = a;
+        }
+    }
+    fn absolute_str(s: &mut String) {
+        if let Ok(a) = std::path::absolute(&*s) {
+            *s = a.to_string_lossy().into_owned();
+        }
+    }
+    args.offline.iter_mut().for_each(absolute);
+    args.screenshot.iter_mut().for_each(absolute);
+    args.input_script.iter_mut().for_each(absolute_str);
+    args.settings_file.iter_mut().for_each(absolute_str);
+    std::env::set_current_dir(dir)
+        .with_context(|| format!("moving to the game's folder {}", dir.display()))?;
+    tracing::info!("running from {}", dir.display());
     Ok(())
 }

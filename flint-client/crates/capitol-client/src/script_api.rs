@@ -18,6 +18,9 @@ pub struct Shared {
     pub note: Arc<Mutex<String>>,
     /// The camera view the script frames (`--view`).
     pub view: Arc<Mutex<String>>,
+    /// A clean capture (`--clean`, P8.7): offline, no inscription panel
+    /// and no free-point mark, just the city.
+    pub clean: Arc<AtomicBool>,
     /// Mouse-wheel notches since the camera rig last took them, up = in.
     /// A workaround: Flint doesn't feed the wheel to actions (issue #67).
     pub wheel: Arc<Mutex<f32>>,
@@ -241,6 +244,10 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     engine.register_fn("cap_view", move || -> String {
         view.lock().map(|s| s.clone()).unwrap_or_default()
     });
+    // `cap_clean() -> bool`: a clean capture (--clean), so draw no marks
+    // that are only there to steer by.
+    let clean = shared.clean.clone();
+    engine.register_fn("cap_clean", move || clean.load(Ordering::Relaxed));
     // `cap_take_wheel() -> float`: wheel notches (up positive) since the
     // last call, which zeroes them. Only the camera rig should call it.
     let wheel = shared.wheel.clone();

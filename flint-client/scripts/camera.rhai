@@ -472,7 +472,7 @@ fn view_shot(view) {
 // ring on the screen, a constant size at every zoom. Signed in, your
 // avatar carries the gold instead (entities.rs).
 fn on_draw_ui() {
-    if cap_follow() != () || cap_at_login() { return; }
+    if cap_follow() != () || cap_at_login() || cap_clean() { return; }
     if rig.shot != () && rig.release >= 1.0 { return; }
     let p = world_to_screen(rig.target_x, cap_ground_y(), rig.target_z);
     if !p.visible { return; }

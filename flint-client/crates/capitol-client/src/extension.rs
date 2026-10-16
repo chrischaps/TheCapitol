@@ -851,7 +851,9 @@ impl PlayerExtension for CapitolExtension {
             None => {}
         }
         if self.session.is_none() {
-            ui::inscription(ctx, &self.shared, &self.terrain.status());
+            if !self.shared.clean.load(Ordering::Relaxed) {
+                ui::inscription(ctx, &self.shared, &self.terrain.status());
+            }
         } else if !at_login {
             let clear_of = self.plot_panel.rect.or(self.crafting.rect);
             ui::controls(ctx, &self.terrain.status(), clear_of);
