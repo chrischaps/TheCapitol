@@ -14,15 +14,11 @@ input_config = "config/input.toml"
 
 # The camera rig (camera.rhai) places the camera. Near is 1 m, not the default 0.1: from the
 # map view 620 m up the depth buffer then resolves about 2 cm, not 20 (see
-# plan §4.6). Far is 20 km, well past the ground's 5 km skirt. The fog
-# below skips every pixel deeper than 0.9999 in the depth buffer, to spare
-# the sky, and with far at 4 km that cut came 2.9 km out, so the skirt
-# drew an unfogged dark band under the horizon. At 20 km it's 6.7 km out,
-# and everything nearer than that is ground, fogged. The ocean past the
-# skirt fogs itself. A workaround: H10 (issue #66) fogs everything drawn.
+# plan §4.6). Far is 6 km, just past the ground's 5 km skirt: what's
+# drawn. The fog reaches all of it, however far (Flint ADR 0078, H10).
 [camera]
 near = 1.0
-far = 20000.0
+far = 6000.0
 
 # ambient_ground calibrates every light the tower gives off (palette.rs
 # AMBIENT_GROUND, held to this file by a test): change both together.
@@ -67,8 +63,8 @@ intensity = 0.4
 # haze_color), so the land runs out into the sky with no line where they
 # meet: change the sky, change this. It's exponential from 100 m: about a
 # quarter across the world (400 m), and nearly all of it by the ground's
-# edge at 5 km. The extension thins it as the camera climbs and turns it
-# off at map height (atmosphere.rs). Bloom picks up the tower's light
+# edge at 5 km. The extension thins it to nothing as the camera climbs
+# (atmosphere.rs). Bloom picks up the tower's light
 # (radiance 3.5 at the lantern, 8 at the needle) and the sun, but no sunlit
 # wall and no window. No dither: the engine's ordered dither shows as a
 # checkerboard over the whole frame.

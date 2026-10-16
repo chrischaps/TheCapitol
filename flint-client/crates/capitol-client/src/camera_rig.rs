@@ -109,7 +109,7 @@ fn the_street_is_fifty_degrees_down_and_twenty_five_metres_up() {
 #[test]
 fn the_horizon_stays_out_of_frame_once_the_fog_thins() {
     // Above CLEAR_FROM the fog thins, and a horizon in frame would show the
-    // dark ground skirt against the sky (H10). The horizon is in frame when
+    // dark ground skirt, unfogged, against the sky. The horizon is in frame when
     // the tilt is less than half the vertical field of view.
     let rig = Rig::load();
     for zoom in zooms() {

@@ -23,9 +23,10 @@ pub const MESH: &str = "ground";
 const BLEND: f64 = 40.0;
 /// Rural into wilderness is a wider, slower change: the city thinning out.
 const WILD_BLEND: f64 = 200.0;
-/// Where the disc ends, in server units from the centre: past the camera's
-/// far plane (4 km) from anywhere in the world, so the sea under the land
-/// (the canals' water, `world::water`) never shows at the horizon.
+/// Where the disc ends, in server units from the centre: about the camera's
+/// far plane (6 km) from anywhere in the world, and fogged nearly to the
+/// sky's colour by then, so the sea under the land (the canals' water,
+/// `world::water`) never shows at the horizon.
 const SKIRT: f64 = 50_000.0;
 /// Angular segments. At the world's edge one is about 52 units (5 m) wide.
 const SEGMENTS: usize = 480;

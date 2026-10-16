@@ -6,10 +6,9 @@
 //!
 //! Fog works on distance from the camera, and from high up all of the city
 //! is far away: at the map view (640 m up) the scene's fog would cover it in
-//! haze. Climbing out of the fog also turns it off, not just thins it,
-//! because Flint's ocean fogs itself over a fixed 380–640 m whenever fog is
-//! on, whatever its density, and that would wash the canals out of the map.
-//! A workaround: H10 (issue #66) lets the fog reach everything it should.
+//! haze. So the density eases to nothing as the camera climbs. Fog stays on
+//! the whole way: the canals' water takes the scene's fog like the land does
+//! (Flint ADR 0078, H10), so at density zero it's clear too.
 //!
 //! The map is the React client's world: flat zone colours, no sun and no
 //! shadow. Over the top of the zoom the sun and fill fade out, the sky's
@@ -33,8 +32,8 @@ use flint_render::SceneRenderer;
 /// Up to this height (metres) the fog is the scene's own: every street,
 /// quay and tower view.
 pub const CLEAR_FROM: f32 = 100.0;
-/// Above this the fog is off. The district view (about 230 m) and the map
-/// (640 m) see the city clear.
+/// Above this the fog's density is zero. The district view (about 230 m) and
+/// the map (640 m) see the city clear.
 pub const CLEAR_BY: f32 = 250.0;
 /// From this height the light starts to flatten: above the district view,
 /// so the city keeps its dusk until it's well on the way to a map.
@@ -58,7 +57,6 @@ pub struct Atmosphere {
 
 /// What the scene set, before any of it was thinned or flattened.
 struct Authored {
-    fog_enabled: bool,
     fog_density: f32,
     ssao_intensity: f32,
     /// Each light and its `intensity`.
@@ -81,7 +79,6 @@ impl Atmosphere {
         let (fog, flat) = state;
 
         let mut config = renderer.post_process_config().clone();
-        config.fog_enabled = authored.fog_enabled && fog > 0.0;
         config.fog_density = authored.fog_density * fog;
         config.ssao_intensity = authored.ssao_intensity * (1.0 - flat);
         renderer.set_post_process_config(config);
@@ -127,7 +124,6 @@ impl Authored {
             }
         });
         Self {
-            fog_enabled: config.fog_enabled,
             fog_density: config.fog_density,
             ssao_intensity: config.ssao_intensity,
             lights,
