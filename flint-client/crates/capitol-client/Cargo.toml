@@ -24,6 +24,7 @@ flint-schema = { workspace = true }
 egui = { workspace = true }
 rhai = { workspace = true }
 resvg = { workspace = true }
+serde = { version = "1", features = ["derive"] }
 toml = { workspace = true }
 uuid = "1"
 winit = { workspace = true }

@@ -45,6 +45,10 @@
 // the horizon from each outer zone). A shot holds until the first camera
 // input, then eases into the rig.
 //
+// The player's settings (P8.4) scale how fast it turns and zooms
+// (cap_setting("camera_sensitivity")) and can turn the orbit the other way
+// (cap_setting("invert_orbit")). The rates below are the rig as made.
+//
 // rig_pose and the functions under it are pure, and a Rust test
 // (camera_rig.rs) drives them across every zoom, yaw and position.
 
@@ -305,12 +309,15 @@ fn steer(dt, you) {
         }
     }
 
+    let feel = sensitivity();
+    let way = if cap_setting("invert_orbit") == true { -1.0 } else { 1.0 };
+
     // Zoom: the wheel (up is in) and R/F.
     let notches = cap_take_wheel();
     let keys = action_axis("zoom_out", "zoom_in");
     if notches != 0.0 || keys != 0.0 {
         any = true;
-        this.zoom_to = (this.zoom_to - notches * wheel_step() + keys * key_zoom_rate() * dt)
+        this.zoom_to = (this.zoom_to - (notches * wheel_step() - keys * key_zoom_rate() * dt) * feel)
             .max(0.0).min(1.0);
     }
 
@@ -318,13 +325,13 @@ fn steer(dt, you) {
     let turn = action_axis("orbit_left", "orbit_right");
     if turn != 0.0 {
         any = true;
-        this.yaw_to += turn * orbit_rate() * dt;
+        this.yaw_to += turn * orbit_rate() * dt * feel * way;
     }
     if is_mouse_pressed(1) {
         let x = mouse_x();
         if this.drag_x != () && x != this.drag_x {
             any = true;
-            this.yaw_to -= (x - this.drag_x) * drag_rate();
+            this.yaw_to -= (x - this.drag_x) * drag_rate() * feel * way;
         }
         this.drag_x = x;
     } else {
@@ -344,6 +351,12 @@ fn steer(dt, you) {
         this.yaw_to = this.yaw - wrap_angle(this.yaw);
     }
     any
+}
+
+// The settings' camera sensitivity, or 1 if there's none to read.
+fn sensitivity() {
+    let s = cap_setting("camera_sensitivity");
+    if type_of(s) == "f64" { s } else { 1.0 }
 }
 
 // Where H brings the point back to: you, or offline where the rig starts.

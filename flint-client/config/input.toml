@@ -69,6 +69,11 @@ bindings = [{ type = "key", code = "KeyX" }]
 kind = "button"
 bindings = [{ type = "key", code = "F1" }]
 
+# The settings panel (P8.4); the header's Settings link does the same.
+[actions.settings]
+kind = "button"
+bindings = [{ type = "key", code = "F10" }]
+
 # Craft what the crafting panel is set to, while it's open (P5.5), or what
 # the open station's panel is set to (P6.3).
 [actions.craft]

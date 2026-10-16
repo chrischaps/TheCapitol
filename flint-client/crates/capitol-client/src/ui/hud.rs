@@ -48,6 +48,8 @@ pub struct HeaderView<'a> {
     pub exchange_open: bool,
     /// The same for the shortcut overlay (P8.3).
     pub help_open: bool,
+    /// The same for the settings panel.
+    pub settings_open: bool,
     /// How brightly the Inventory button glows, 0 to 1, as a pickup lands
     /// on it (P8.2).
     pub inventory_pulse: f32,
@@ -61,6 +63,7 @@ pub struct HeaderClicks {
     pub crafting: bool,
     pub exchange: bool,
     pub help: bool,
+    pub settings: bool,
     /// Where the Inventory button was drawn, for pickups to fly to.
     pub inventory_rect: Option<egui::Rect>,
 }
@@ -89,6 +92,24 @@ pub fn header(
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
                     clicks.sign_out = theme::link(ui, "Sign out", size::SMALL).clicked();
+                    let ink = if view.settings_open {
+                        theme::GOLD
+                    } else {
+                        theme::GOLD_DIM
+                    };
+                    clicks.settings = ui
+                        .add(
+                            egui::Label::new(
+                                RichText::new("Settings")
+                                    .color(ink)
+                                    .size(size::SMALL)
+                                    .underline(),
+                            )
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Settings (F10)")
+                        .clicked();
                     ui.label(
                         RichText::new(view.who)
                             .font(theme::strong(size::BODY))

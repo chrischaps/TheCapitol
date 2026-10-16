@@ -609,6 +609,7 @@ dependencies = [
  "flint-schema",
  "resvg",
  "rhai",
+ "serde",
  "toml",
  "tracing",
  "tracing-subscriber",

@@ -19,6 +19,7 @@ mod juice_sample;
 mod nodes;
 mod script_api;
 mod session;
+mod settings;
 mod sound;
 mod spike_world;
 mod stations;
@@ -128,6 +129,14 @@ struct Args {
     /// captures: they can't drag into egui (issue #76)
     #[arg(long, value_name = "ITEM[:N]")]
     trade_offer: Option<String>,
+    /// Keep the settings (graphics, volumes, camera) in this file instead
+    /// of save/settings.toml (P8.4). For captures that mustn't take the
+    /// player's own
+    #[arg(long, value_name = "PATH")]
+    settings_file: Option<String>,
+    /// Open the settings panel at start (F10 toggles it). For captures
+    #[arg(long)]
+    settings_panel: bool,
 }
 
 fn main() -> Result<()> {
@@ -228,7 +237,15 @@ fn main() -> Result<()> {
         .with_exchange(args.exchange.as_deref())
         .with_mute(args.mute || args.exit_after.is_some())
         .with_juice_sample(args.juice_sample && args.offline.is_some())
-        .with_trade_offer(args.trade_offer.as_deref());
+        .with_trade_offer(args.trade_offer.as_deref())
+        .with_settings(
+            settings::SettingsFile::load(
+                args.settings_file
+                    .as_deref()
+                    .unwrap_or(settings::Settings::PATH),
+            ),
+            args.settings_panel,
+        );
     if args.ui_sample {
         extension = extension.with_ui_sample();
     }

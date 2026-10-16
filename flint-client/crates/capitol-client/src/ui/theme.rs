@@ -744,6 +744,184 @@ pub fn gold_fields(ui: &mut Ui) {
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, GOLD_DIM);
 }
 
+// ---------------------------------------------------------------------------
+// Settings controls (P8.4)
+// ---------------------------------------------------------------------------
+
+/// A settings row's label column, in points.
+pub const ROW_LABEL: f32 = 112.0;
+/// A settings row's height, in points.
+const ROW_HEIGHT: f32 = 24.0;
+
+/// A settings row: `name` in the label column, then the control.
+pub fn setting_row<R>(ui: &mut Ui, name: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(ROW_LABEL, ROW_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(ROW_LABEL);
+                ui.label(text(name).size(size::BODY));
+            },
+        );
+        add(ui)
+    })
+    .inner
+}
+
+/// An on/off switch: a gold track with the knob right when on, a dark
+/// one with it left when off. The knob slides between them.
+pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
+    let (rect, mut response) = ui.allocate_exact_size(egui::vec2(36.0, 20.0), egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let t = ui.ctx().animate_bool_with_time(response.id, *on, 0.12);
+    let hovered = response.hovered();
+    let painter = ui.painter();
+    let track = lerp_colour(FIELD, GOLD.gamma_multiply(0.85), t);
+    let edge = if hovered {
+        GOLD
+    } else {
+        lerp_colour(GOLD_DIM.gamma_multiply(0.6), GOLD, t)
+    };
+    painter.rect(rect, 10.0, track, Stroke::new(1.0, edge));
+    let r = rect.height() / 2.0 - 3.0;
+    let x = egui::lerp(rect.left() + r + 3.0..=rect.right() - r - 3.0, t);
+    painter.circle_filled(
+        egui::pos2(x, rect.center().y),
+        r,
+        lerp_colour(DIM, BG_DARK, t),
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// One of a few choices, side by side, the chosen one in gold.
+pub fn segmented<T: PartialEq + Copy>(
+    ui: &mut Ui,
+    value: &mut T,
+    choices: &[(T, &str)],
+) -> Response {
+    ui.spacing_mut().item_spacing.x = 0.0;
+    let mut joined: Option<Response> = None;
+    for (i, &(choice, name)) in choices.iter().enumerate() {
+        let chosen = *value == choice;
+        let (first, last) = (i == 0, i + 1 == choices.len());
+        let round = |end: bool| if end { 5.0 } else { 0.0 };
+        let rounding = Rounding {
+            nw: round(first),
+            sw: round(first),
+            ne: round(last),
+            se: round(last),
+        };
+        let (fill, edge, ink) = if chosen {
+            (GOLD_WASH, GOLD, GOLD)
+        } else {
+            (FIELD, GOLD_DIM.gamma_multiply(0.5), DIM)
+        };
+        let mut r = ui
+            .add(
+                egui::Button::new(RichText::new(name).size(size::SMALL).color(ink))
+                    .fill(fill)
+                    .stroke(Stroke::new(1.0, edge))
+                    .rounding(rounding)
+                    .min_size(egui::vec2(36.0, 22.0)),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if r.clicked() && !chosen {
+            *value = choice;
+            r.mark_changed();
+        }
+        joined = Some(match joined {
+            Some(j) => j | r,
+            None => r,
+        });
+    }
+    joined.expect("at least one choice")
+}
+
+/// A level in `range`: a dark rail filled in gold up to a gold knob, with
+/// the value written after it by `show`. Drag or click anywhere on the
+/// rail; the arrow keys step it while it has focus.
+pub fn level(
+    ui: &mut Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    show: impl Fn(f32) -> String,
+) -> Response {
+    const READOUT: f32 = 40.0;
+    let width = (ui.available_width() - READOUT - 8.0).max(80.0);
+    let (rect, mut response) =
+        ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click_and_drag());
+    let (lo, hi) = (*range.start(), *range.end());
+    let rail = rect.shrink2(egui::vec2(7.0, 0.0));
+    if let Some(p) = response.interact_pointer_pos() {
+        let t = ((p.x - rail.left()) / rail.width()).clamp(0.0, 1.0);
+        let v = lo + (hi - lo) * t;
+        if v != *value {
+            *value = v;
+            response.mark_changed();
+        }
+    }
+    if response.has_focus() {
+        let nudge = ui.input(|i| {
+            i.num_presses(egui::Key::ArrowRight) as f32 - i.num_presses(egui::Key::ArrowLeft) as f32
+        });
+        if nudge != 0.0 {
+            *value = (*value + nudge * (hi - lo) / 20.0).clamp(lo, hi);
+            response.mark_changed();
+        }
+    }
+    let t = ((*value - lo) / (hi - lo)).clamp(0.0, 1.0);
+    let hot = response.hovered() || response.dragged() || response.has_focus();
+    let painter = ui.painter();
+    let y = rect.center().y;
+    let track = egui::Rect::from_min_max(
+        egui::pos2(rail.left(), y - 2.5),
+        egui::pos2(rail.right(), y + 2.5),
+    );
+    painter.rect(
+        track,
+        2.5,
+        FIELD,
+        Stroke::new(1.0, GOLD_DIM.gamma_multiply(0.4)),
+    );
+    let x = egui::lerp(rail.left()..=rail.right(), t);
+    let filled = egui::Rect::from_min_max(track.min, egui::pos2(x, track.max.y));
+    painter.rect_filled(
+        filled,
+        2.5,
+        GOLD_DIM.gamma_multiply(if hot { 1.0 } else { 0.8 }),
+    );
+    painter.circle(
+        egui::pos2(x, y),
+        if hot { 7.0 } else { 6.0 },
+        if hot { GOLD_LIGHT } else { GOLD },
+        Stroke::new(1.5, BG_DARK),
+    );
+    let (readout, _) =
+        ui.allocate_exact_size(egui::vec2(READOUT, ROW_HEIGHT), egui::Sense::hover());
+    ui.painter().text(
+        readout.right_center(),
+        egui::Align2::RIGHT_CENTER,
+        show(*value),
+        body(size::SMALL),
+        if t > 0.0 { TEXT } else { DIM },
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn lerp_colour(a: Color32, b: Color32, t: f32) -> Color32 {
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgba_premultiplied(
+        mix(a.r(), b.r()),
+        mix(a.g(), b.g()),
+        mix(a.b(), b.b()),
+        mix(a.a(), b.a()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,6 +943,69 @@ mod tests {
         );
         assert_eq!(grade("A"), Color32::from_rgb(0xff, 0xd7, 0x00));
         assert_eq!(grade("?"), grade("F"));
+    }
+
+    /// Draws `add` in a frame, then clicks at `at(rect)` of what it drew.
+    fn click(add: &mut dyn FnMut(&mut Ui) -> Response, at: impl Fn(egui::Rect) -> egui::Pos2) {
+        let ctx = egui::Context::default();
+        let rect = std::cell::Cell::new(egui::Rect::NOTHING);
+        let mut frame = |events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                if !install(ctx) {
+                    return;
+                }
+                egui::CentralPanel::default().show(ctx, |ui| rect.set(add(ui).rect));
+            });
+        };
+        frame(vec![]);
+        frame(vec![]);
+        let pos = at(rect.get());
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(pos)]);
+        frame(vec![button(true)]);
+        frame(vec![button(false)]);
+        frame(vec![]);
+    }
+
+    #[test]
+    fn a_switch_flips_when_clicked() {
+        let mut on = true;
+        click(&mut |ui| switch(ui, &mut on), |r| r.center());
+        assert!(!on);
+    }
+
+    #[test]
+    fn a_level_goes_where_its_rail_is_clicked() {
+        let mut v = 1.0;
+        // A quarter of the way along the rail, which is inset 7 points.
+        click(
+            &mut |ui| level(ui, &mut v, 0.0..=1.0, |v| format!("{v}")),
+            |r| egui::pos2(r.left() + 7.0 + (r.width() - 14.0) * 0.25, r.center().y),
+        );
+        assert!((v - 0.25).abs() < 0.02, "{v}");
+    }
+
+    #[test]
+    fn a_segment_is_chosen_when_clicked() {
+        let mut v = 1;
+        // The last of three.
+        click(
+            &mut |ui| {
+                let choices = [(0, "Off"), (1, "Low"), (2, "High")];
+                ui.horizontal(|ui| segmented(ui, &mut v, &choices)).inner
+            },
+            |r| egui::pos2(r.right() - 4.0, r.center().y),
+        );
+        assert_eq!(v, 2);
     }
 
     /// Every family the theme names exists once it's installed: an unknown

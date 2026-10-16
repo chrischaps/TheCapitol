@@ -49,6 +49,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("[I]", "Inventory"),
             ("[C]", "Crafting"),
             ("[X]", "Fiber exchange"),
+            ("[F10]", "Settings"),
             ("[?] or [F1]", "This list"),
         ],
     ),

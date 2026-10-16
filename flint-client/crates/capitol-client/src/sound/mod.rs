@@ -30,6 +30,7 @@
 pub mod dsp;
 pub mod library;
 
+use crate::settings::Volumes;
 use dsp::{smoothstep, Rng};
 use flint_core::EntityId;
 use flint_player::ExtensionCtx;
@@ -106,6 +107,8 @@ pub struct Cue {
     /// Where to play it, world metres, or `None` for no place at all.
     pub at: Option<[f32; 3]>,
     pub pitch: f32,
+    /// A panel's sound, not the world's: the interface volume sets it.
+    pub interface: bool,
 }
 
 impl Cue {
@@ -115,6 +118,14 @@ impl Cue {
             volume: volume * EFFECTS,
             at: None,
             pitch: 1.0,
+            interface: false,
+        }
+    }
+
+    fn interface(self) -> Self {
+        Self {
+            interface: true,
+            ..self
         }
     }
 
@@ -156,6 +167,10 @@ pub struct Rustling {
 
 pub struct Soundscape {
     muted: bool,
+    /// The player's volumes (P8.4). Flint's buses would be the place, but
+    /// extensions can't reach them (issue #93), so the soundscape scales
+    /// what it plays itself.
+    volumes: Volumes,
     /// The bed entities, spawned on the first update.
     beds: Option<[EntityId; 4]>,
     /// Each bed's level now, easing toward the mix.
@@ -180,6 +195,7 @@ impl Soundscape {
     pub fn new(muted: bool) -> Self {
         Self {
             muted,
+            volumes: Volumes::default(),
             beds: None,
             levels: [0.0; 4],
             written: [-1.0; 4],
@@ -202,14 +218,20 @@ impl Soundscape {
             .collect();
     }
 
+    /// Set the player's volumes. The beds ease to them; one-shots take
+    /// them from the next.
+    pub fn set_volumes(&mut self, volumes: Volumes) {
+        self.volumes = volumes;
+    }
+
     /// A button pressed in the UI.
     pub fn click(&mut self) {
-        self.cue(Cue::flat("ui_click", 0.35));
+        self.cue(Cue::flat("ui_click", 0.35).interface());
     }
 
     /// Something dropped into a slot.
     pub fn drop_in_slot(&mut self) {
-        self.cue(Cue::flat("ui_drop", 0.4));
+        self.cue(Cue::flat("ui_drop", 0.4).interface());
     }
 
     /// A gather landed.
@@ -252,7 +274,11 @@ impl Soundscape {
         self.mix = mix(r, shore, ears.height);
         let k = 1.0 - (-dt / EASE).exp();
         for (i, level) in self.levels.iter_mut().enumerate() {
-            let target = if self.muted { 0.0 } else { self.mix.bed(i) * BEDS[i].2 * AMBIENCE };
+            let target = if self.muted {
+                0.0
+            } else {
+                self.mix.bed(i) * BEDS[i].2 * AMBIENCE * self.volumes.ambience_gain()
+            };
             *level += (target - *level) * k;
         }
         if !self.muted {
@@ -260,7 +286,13 @@ impl Soundscape {
             self.bells();
             self.rustle(ears, working);
         }
-        std::mem::take(&mut self.cues)
+        let volumes = self.volumes;
+        let mut cues = std::mem::take(&mut self.cues);
+        for c in &mut cues {
+            c.volume *= volumes.effect_gain(c.interface);
+        }
+        cues.retain(|c| c.volume > 0.0);
+        cues
     }
 
     /// Spawn the beds once, then write any level that has moved.
@@ -347,6 +379,7 @@ impl Soundscape {
             volume: volume * EFFECTS,
             at: Some(at),
             pitch,
+            interface: false,
         });
     }
 
@@ -392,6 +425,7 @@ impl Soundscape {
                 volume: volume * EFFECTS,
                 at: Some(at),
                 pitch,
+                interface: false,
             });
         }
     }
@@ -521,6 +555,24 @@ mod tests {
         let mine = Rustling { id: "a".into(), at: ears.focus, mine: true };
         assert!(run(&mut s, ears, &[mine], 30.0).is_empty());
         assert_eq!(s.levels, [0.0; 4]);
+    }
+
+    #[test]
+    fn the_volumes_scale_what_plays() {
+        let mut s = Soundscape::new(false);
+        s.set_volumes(Volumes {
+            master: 0.5,
+            ambience: 0.0,
+            effects: 1.0,
+            interface: 0.0,
+        });
+        s.click();
+        s.gathered();
+        let cues = run(&mut s, ears_at(2000.0), &[], 10.0);
+        assert_eq!(sounds(&cues, "audio/ui_click"), 0, "the interface is silent");
+        let pluck = cues.iter().find(|c| c.sound == "audio/pluck.wav").unwrap();
+        assert!((pluck.volume - 0.5 * 0.5 * EFFECTS).abs() < 1e-6);
+        assert_eq!(s.levels, [0.0; 4], "no ambience");
     }
 
     #[test]

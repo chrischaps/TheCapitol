@@ -70,6 +70,9 @@ pub struct Shared {
     pub trade_with: Arc<Mutex<Option<String>>>,
     /// Where trading stands, for the thread between you (`cap_trade`).
     pub trade: Arc<Mutex<Option<TradeMark>>>,
+    /// How the camera rig answers you (P8.4), from the settings, for
+    /// `cap_setting`.
+    pub camera_feel: Arc<Mutex<crate::settings::CameraFeel>>,
 }
 
 /// Trading as scripts see it.
@@ -241,6 +244,20 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             .lock()
             .map(|mut w| std::mem::take(&mut *w) as f64)
             .unwrap_or_default()
+    });
+    // `cap_setting(name) -> value`: one of the player's settings (P8.4),
+    // for the scripts that need it: "camera_sensitivity" (a multiple of the
+    // rig's turn and zoom rates, 1.0 as made) and "invert_orbit" (bool). ()
+    // for any other name. A workaround: settings are read here rather than
+    // from the engine's store, which extensions can't reach (issue #71).
+    let feel = shared.camera_feel.clone();
+    engine.register_fn("cap_setting", move |name: &str| -> rhai::Dynamic {
+        let feel = feel.lock().map(|f| *f).unwrap_or_default();
+        match name {
+            "camera_sensitivity" => (feel.sensitivity as f64).into(),
+            "invert_orbit" => feel.invert_orbit.into(),
+            _ => rhai::Dynamic::UNIT,
+        }
     });
     // `cap_at_login() -> bool`: the login form is up, so the camera rig
     // circles the tower instead of taking input.

@@ -10,7 +10,8 @@
 //! pick, claim and own (`ui::plot`, and the gold of `world::plots::owned`),
 //! the station panel (`ui::station`), the first-session hints (`ui::hints`)
 //! and the shortcut overlay (`ui::shortcuts`), the fog and the light as
-//! the camera climbs (`atmosphere`), what you hear (`sound`), the wheel for
+//! the camera climbs (`atmosphere`), what you hear (`sound`), the player's
+//! settings and their panel (`settings`, `ui::settings`), the wheel for
 //! the camera rig, and the spike's markers.
 
 use crate::atmosphere::Atmosphere;
@@ -21,6 +22,7 @@ use crate::script_api::{
     self, PlacementMark, PlotMark, Shared, TradeMark, UiAnchor, ZoneBanner,
 };
 use crate::session::Session;
+use crate::settings::{Graphics, SettingsFile};
 use crate::sound::{Ears, Rustling, Soundscape};
 use crate::stations::{GhostView, Stations};
 use crate::terrain::TerrainSource;
@@ -122,6 +124,12 @@ pub struct CapitolExtension {
     /// The first-session hints, and the shortcut overlay (P8.3).
     hints: ui::hints::Hints,
     shortcuts: ui::shortcuts::Shortcuts,
+    /// The player's settings, and the file they're kept in (P8.4).
+    settings: SettingsFile,
+    settings_panel: ui::settings::SettingsPanel,
+    /// The graphics last applied to the renderer, or `None` before the
+    /// first frame with one.
+    graphics: Option<Graphics>,
 }
 
 impl CapitolExtension {
@@ -164,7 +172,19 @@ impl CapitolExtension {
             trade_offered: None,
             hints: ui::hints::Hints::default(),
             shortcuts: ui::shortcuts::Shortcuts::default(),
+            settings: SettingsFile::load(crate::settings::Settings::PATH),
+            settings_panel: ui::settings::SettingsPanel::default(),
+            graphics: None,
         }
+    }
+
+    /// Keep the settings in `file` rather than `save/settings.toml`
+    /// (`--settings-file`), and open their panel at start if `open`
+    /// (`--settings-panel`, for captures).
+    pub fn with_settings(mut self, file: SettingsFile, open: bool) -> Self {
+        self.settings = file;
+        self.settings_panel.open = open;
+        self
     }
 
     /// Play no sound (`--mute`, and every capture).
@@ -282,6 +302,27 @@ impl CapitolExtension {
     }
 }
 
+impl CapitolExtension {
+    /// Apply the settings live (P8.4): the volumes to the soundscape, the
+    /// camera's feel to `cap_setting`, and the graphics to the renderer
+    /// whenever they change. Then write the file once they settle.
+    fn apply_settings(&mut self, ctx: &mut ExtensionCtx, now: Instant) {
+        let settings = &self.settings.settings;
+        self.sound.set_volumes(settings.audio);
+        if let Ok(mut feel) = self.shared.camera_feel.lock() {
+            *feel = settings.camera;
+        }
+        if self.graphics != Some(settings.graphics) {
+            if let Some(gpu) = ctx.gpu.as_mut() {
+                settings.graphics.apply(self.graphics.as_ref(), gpu);
+                tracing::info!("settings: graphics {:?}", settings.graphics);
+                self.graphics = Some(settings.graphics);
+            }
+        }
+        self.settings.update(now);
+    }
+}
+
 impl PlayerExtension for CapitolExtension {
     fn register_script_api(&mut self, engine: &mut rhai::Engine) {
         script_api::register(engine, &self.shared);
@@ -305,6 +346,10 @@ impl PlayerExtension for CapitolExtension {
         if !self.at_login() && ctx.input.is_action_just_pressed("exchange") {
             self.exchange.toggle();
         }
+        if ctx.input.is_action_just_pressed("settings") {
+            self.settings_panel.toggle();
+        }
+        self.apply_settings(ctx, now);
         // Taken in `ui`, where the panel knows its recipe.
         self.craft_key |= !self.at_login() && ctx.input.is_action_just_pressed("craft");
         let station_key = !self.at_login() && ctx.input.is_action_just_pressed("station");
@@ -572,6 +617,7 @@ impl PlayerExtension for CapitolExtension {
                     crafting_open: self.crafting.open,
                     exchange_open: self.exchange.open,
                     help_open: self.shortcuts.open,
+                    settings_open: self.settings_panel.open,
                     inventory_pulse: pulse,
                 };
                 let clicks = ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
@@ -592,6 +638,9 @@ impl PlayerExtension for CapitolExtension {
                 }
                 if clicks.help {
                     self.shortcuts.toggle();
+                }
+                if clicks.settings {
+                    self.settings_panel.toggle();
                 }
             }
             let outage = if at_login {
@@ -673,7 +722,13 @@ impl PlayerExtension for CapitolExtension {
                     Some(ui::exchange::Action::Close) => self.exchange.open = false,
                     None => {}
                 }
-                self.hints.show(ctx, now);
+                // The settings panel takes the hint card's corner; the card
+                // waits behind it rather than showing through.
+                if self.settings_panel.open {
+                    self.hints.rect = None;
+                } else {
+                    self.hints.show(ctx, now);
+                }
                 let state = session.state();
                 let picked = state.picked_plot();
                 let view = ui::plot::View {
@@ -779,6 +834,17 @@ impl PlayerExtension for CapitolExtension {
                     anchors.remove("inventory");
                 }
             }
+        }
+        let view = ui::settings::View {
+            server: self.session.as_ref().map(|s| s.server()),
+        };
+        match self
+            .settings_panel
+            .show(ctx, &mut self.settings.settings, &view)
+        {
+            Some(ui::settings::Action::SetServer(server)) => self.switch_server(&server),
+            Some(ui::settings::Action::Close) => self.settings_panel.toggle(),
+            None => {}
         }
         if self.session.is_none() {
             ui::inscription(ctx, &self.shared, &self.terrain.status());

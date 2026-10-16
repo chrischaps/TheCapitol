@@ -8,6 +8,7 @@
 //! - [`inventory`]: the inventory panel, toggled with `I` (P5.4).
 //! - [`crafting`]: the crafting panel, toggled with C (P5.5).
 //! - [`plot`]: the plot panel, opened by alt-clicking a plot (P6.4).
+//! - [`settings`]: the settings panel, toggled with F10 (P8.4).
 //! - [`trade`]: a trade request's card, and the two-sided trade window (P7.3).
 //! - [`station`]: the open station's panel: its box, and its recipes at a
 //!   crafting station (P6.3).
@@ -37,6 +38,7 @@ pub mod inventory;
 pub mod login;
 pub mod plot;
 pub mod sample;
+pub mod settings;
 pub mod shortcuts;
 pub mod slots;
 pub mod station;
