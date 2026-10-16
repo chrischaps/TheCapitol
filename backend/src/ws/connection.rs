@@ -87,11 +87,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     let player_id = player.id;
 
-    // Add player to game state
-    {
+    // Add player to game state, superseding any older connection for them
+    let (connection_id, mut superseded) = {
         let mut game = state.game.write().await;
-        game.add_player(player);
-    }
+        game.connect_player(player)
+    };
 
     // Send auth success
     let _ = sender
@@ -111,6 +111,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     loop {
         tokio::select! {
+            // A newer connection took this player over: the account signed in elsewhere, or
+            // this socket is half-open and the client already reconnected past it
+            _ = &mut superseded => {
+                let msg = ServerMessage::AuthError { message: "Session expired".into() };
+                let _ = timeout(Duration::from_secs(2), async {
+                    let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                    let _ = sender.send(Message::Close(None)).await;
+                })
+                .await;
+                break;
+            }
+
             // Handle incoming messages
             msg = receiver.next() => {
                 match msg {
@@ -773,13 +785,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
-    // Remove player from game state
-    {
+    // Remove player from game state, unless a newer connection now serves them
+    let removed = {
         let mut game = state.game.write().await;
-        game.remove_player(player_id);
-    }
+        game.disconnect_player(player_id, connection_id)
+    };
 
-    tracing::info!("Player {} disconnected", player_id);
+    if removed {
+        tracing::info!("Player {} disconnected", player_id);
+    } else {
+        tracing::info!("Player {}'s superseded connection {} ended", player_id, connection_id);
+    }
 }
 
 async fn validate_token(token: &str, state: &AppState) -> Result<Claims, String> {

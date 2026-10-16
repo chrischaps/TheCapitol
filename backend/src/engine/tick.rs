@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, oneshot, RwLock};
 use uuid::Uuid;
 
 use super::commands::Command;
@@ -16,8 +16,18 @@ use crate::state::AppState;
 
 use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
 
+/// The WebSocket connection currently serving a player
+pub struct PlayerConnection {
+    pub id: u64,
+    /// Fired when a newer connection takes the player over
+    superseded: oneshot::Sender<()>,
+}
+
 pub struct GameState {
     pub players: HashMap<Uuid, PlayerState>,
+    /// player_id -> the connection serving them. Only that connection may remove them (B8, #59)
+    pub connections: HashMap<Uuid, PlayerConnection>,
+    next_connection_id: u64,
     pub resource_nodes: HashMap<Uuid, ResourceNodeState>,
     pub resource_types: HashMap<String, ResourceType>,
     pub recipes: HashMap<String, Recipe>,
@@ -62,6 +72,8 @@ impl GameState {
         let terrain_version = terrain.version();
         Self {
             players: HashMap::new(),
+            connections: HashMap::new(),
+            next_connection_id: 0,
             resource_nodes: HashMap::new(),
             resource_types: HashMap::new(),
             recipes: HashMap::new(),
@@ -115,6 +127,35 @@ impl GameState {
         };
         self.players.insert(player.id, player);
         let _ = self.event_sender.send(GameEvent::PlayerJoined(position));
+    }
+
+    /// Add `player` for a new connection. Any older connection serving the same player is
+    /// superseded: its receiver fires, and it can no longer remove the player. Returns this
+    /// connection's id and the receiver that fires when a newer connection supersedes it.
+    pub fn connect_player(&mut self, player: PlayerState) -> (u64, oneshot::Receiver<()>) {
+        self.next_connection_id += 1;
+        let id = self.next_connection_id;
+        let (superseded, rx) = oneshot::channel();
+        if let Some(old) = self.connections.insert(player.id, PlayerConnection { id, superseded }) {
+            tracing::info!("Connection {} supersedes {} for player {}", id, old.id, player.id);
+            let _ = old.superseded.send(());
+        }
+        self.add_player(player);
+        (id, rx)
+    }
+
+    /// End connection `connection_id`. The player is removed only if it is still their current
+    /// connection; a stale one (a half-open socket, or a client signed in elsewhere) leaves the
+    /// newer connection's player alone. Returns whether the player was removed.
+    pub fn disconnect_player(&mut self, player_id: Uuid, connection_id: u64) -> bool {
+        match self.connections.get(&player_id) {
+            Some(current) if current.id == connection_id => {
+                self.connections.remove(&player_id);
+                self.remove_player(player_id);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn remove_player(&mut self, player_id: Uuid) {
@@ -1040,5 +1081,48 @@ mod tests {
             "{events:?}"
         );
         assert!(!game.trade_manager.is_in_trade(b));
+    }
+
+    /// Every PlayerLeft for `id` waiting on `rx`
+    fn leaves(rx: &mut broadcast::Receiver<GameEvent>, id: Uuid) -> usize {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|e| matches!(e, GameEvent::PlayerLeft { player_id } if *player_id == id))
+            .count()
+    }
+
+    #[test]
+    fn a_stale_connection_ending_leaves_the_newer_ones_player() {
+        let mut game = game();
+        let ada = player("Ada", 4000.0, 4000.0);
+        let id = ada.id;
+        let (conn_a, mut superseded_a) = game.connect_player(ada.clone());
+        let (conn_b, mut superseded_b) = game.connect_player(ada);
+        assert_ne!(conn_a, conn_b);
+        assert!(superseded_a.try_recv().is_ok(), "A should be told B took over");
+        assert!(superseded_b.try_recv().is_err(), "B is current");
+
+        let mut rx = game.subscribe();
+        assert!(!game.disconnect_player(id, conn_a));
+        assert!(game.players.contains_key(&id), "ending A removed B's player");
+        assert_eq!(leaves(&mut rx, id), 0, "ending A broadcast player_left");
+
+        assert!(game.disconnect_player(id, conn_b));
+        assert!(!game.players.contains_key(&id));
+        assert!(!game.connections.contains_key(&id));
+        assert_eq!(leaves(&mut rx, id), 1);
+    }
+
+    #[test]
+    fn a_stale_connection_leaves_the_players_trade_open() {
+        let (mut game, a, b, _) = two_players(10.0);
+        let ada = game.players[&a].clone();
+        let (stale, _) = game.connect_player(ada.clone());
+        let (_current, _) = game.connect_player(ada);
+        game.trade_manager.request_trade(a, b).unwrap();
+        game.trade_manager.accept_request(b).unwrap();
+
+        game.disconnect_player(a, stale);
+        assert!(game.trade_manager.is_in_trade(a));
+        assert!(game.trade_manager.is_in_trade(b));
     }
 }
