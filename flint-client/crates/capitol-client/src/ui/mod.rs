@@ -22,18 +22,22 @@
 //!   it must still reach the script. Offline only now: the login form
 //!   tests the same thing (P4.1).
 //! - [`controls`]: once signed in, the inscription's place is a quiet
-//!   reminder of the controls, bottom left, clear of the header, the zone
-//!   banner and the toasts (P4.5).
+//!   pointer to the shortcut overlay, bottom left, clear of the header, the
+//!   zone banner and the toasts (P4.5; one line since P8.3).
+//! - [`hints`]: the first-session hints, once per account (P8.3).
+//! - [`shortcuts`]: every control on one card, on `?` or F1 (P8.3).
 
 pub mod containers;
 pub mod crafting;
 pub mod exchange;
+pub mod hints;
 pub mod hud;
 pub mod icons;
 pub mod inventory;
 pub mod login;
 pub mod plot;
 pub mod sample;
+pub mod shortcuts;
 pub mod slots;
 pub mod station;
 pub mod theme;
@@ -45,10 +49,10 @@ use crate::script_api::Shared;
 const NOTE_MAX_CHARS: usize = 32;
 
 /// How tall the controls hint stands, in points, for a panel above it.
-const CONTROLS_HEIGHT: f32 = 166.0;
+const CONTROLS_HEIGHT: f32 = 62.0;
 
-/// The controls, and where the terrain came from (`status`), small and dim
-/// at the bottom left. Not interactable, so clicks reach the world. It
+/// Where every control is (the `?` overlay lists them all), and where the
+/// terrain came from (`status`), small and dim at the bottom left. Not interactable, so clicks reach the world. It
 /// steps aside while a panel (`clear_of`) reaches down into its place.
 pub fn controls(ctx: &egui::Context, status: &str, clear_of: Option<egui::Rect>) {
     let floor = ctx.screen_rect().bottom() - CONTROLS_HEIGHT;
@@ -60,18 +64,13 @@ pub fn controls(ctx: &egui::Context, status: &str, clear_of: Option<egui::Rect>)
         .interactable(false)
         .show(ctx, |ui| {
             theme::hint().show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 1.0;
-                for line in [
-                    "Click the ground to walk, or grass to gather",
-                    "Alt-click a plot for its deed",
-                    "Click a station, or press O, to open it",
-                    "I inventory · C crafting · X exchange · O station · Enter crafts",
-                    "WASD pans · H home",
-                    "Wheel or R/F zooms · Q/E or right-drag turns",
-                    status,
-                ] {
-                    ui.label(theme::dim(line).size(theme::size::LABEL));
-                }
+                ui.spacing_mut().item_spacing.y = 3.0;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    theme::keycap(ui, "?");
+                    ui.label(theme::dim("every control").size(theme::size::LABEL));
+                });
+                ui.label(theme::dim(status).size(theme::size::LABEL));
             });
         });
 }

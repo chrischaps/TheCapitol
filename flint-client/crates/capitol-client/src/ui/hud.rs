@@ -46,6 +46,8 @@ pub struct HeaderView<'a> {
     pub crafting_open: bool,
     /// The same for the exchange panel.
     pub exchange_open: bool,
+    /// The same for the shortcut overlay (P8.3).
+    pub help_open: bool,
     /// How brightly the Inventory button glows, 0 to 1, as a pickup lands
     /// on it (P8.2).
     pub inventory_pulse: f32,
@@ -58,6 +60,7 @@ pub struct HeaderClicks {
     pub inventory: bool,
     pub crafting: bool,
     pub exchange: bool,
+    pub help: bool,
     /// Where the Inventory button was drawn, for pickups to fly to.
     pub inventory_rect: Option<egui::Rect>,
 }
@@ -113,6 +116,9 @@ pub fn header(
                     clicks.inventory_rect = Some(chip.rect);
                     clicks.crafting = theme::toggle_chip(ui, "Crafting", view.crafting_open)
                         .on_hover_text("Crafting (C)")
+                        .clicked();
+                    clicks.help = theme::toggle_chip(ui, "?", view.help_open)
+                        .on_hover_text("Every control (? or F1)")
                         .clicked();
                 });
             });

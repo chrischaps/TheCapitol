@@ -15,6 +15,8 @@
 //!   the ask to the settled inventory.
 //! - [`exchange`]: the fiber exchange: a deposit's or withdrawal's
 //!   numbers before you confirm, the server's own rule.
+//! - [`onboarding`]: the first-session hints: which to show, and what
+//!   counts as done (P8.3).
 //! - [`poll`]: the polling scheduler. [`poll::Poller`] turns those events, and
 //!   a 5 s timer, into the REST refetches the server never pushes.
 //! - [`trading`]: trading as a player does it: shift-click someone to
@@ -38,6 +40,7 @@ pub mod exchange;
 pub mod harvest;
 pub mod motion;
 pub mod net;
+pub mod onboarding;
 pub mod plot;
 pub mod poll;
 pub mod signin;

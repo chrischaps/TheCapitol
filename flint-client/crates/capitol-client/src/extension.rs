@@ -8,7 +8,8 @@
 //! gather from (`nodes`), the stations they build (`stations`) and place
 //! from a kit (`placing`), the crafting panel (`ui::crafting`), the plots you
 //! pick, claim and own (`ui::plot`, and the gold of `world::plots::owned`),
-//! the station panel (`ui::station`), the fog and the light as
+//! the station panel (`ui::station`), the first-session hints (`ui::hints`)
+//! and the shortcut overlay (`ui::shortcuts`), the fog and the light as
 //! the camera climbs (`atmosphere`), what you hear (`sound`), the wheel for
 //! the camera rig, and the spike's markers.
 
@@ -36,6 +37,7 @@ use crate::{spike_world, ui, world};
 use capitol_core::auth::{Notice, Phase};
 use capitol_core::harvest::Note;
 use capitol_core::net::ConnectionState;
+use capitol_core::onboarding::Did;
 use capitol_core::plot::Offer;
 use capitol_core::protocol::rules::{STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
 use capitol_core::protocol::terrain::TerrainResponse;
@@ -45,7 +47,7 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, PhysicalKey};
 
 /// Pixels of a touchpad's smooth scroll that make one wheel notch.
 const PIXELS_PER_NOTCH: f32 = 50.0;
@@ -117,6 +119,9 @@ pub struct CapitolExtension {
     /// trade it was last put in.
     trade_offer: Option<(String, i64)>,
     trade_offered: Option<uuid::Uuid>,
+    /// The first-session hints, and the shortcut overlay (P8.3).
+    hints: ui::hints::Hints,
+    shortcuts: ui::shortcuts::Shortcuts,
 }
 
 impl CapitolExtension {
@@ -157,6 +162,8 @@ impl CapitolExtension {
             trade: ui::trade::TradePanel::default(),
             trade_offer: None,
             trade_offered: None,
+            hints: ui::hints::Hints::default(),
+            shortcuts: ui::shortcuts::Shortcuts::default(),
         }
     }
 
@@ -223,6 +230,23 @@ impl CapitolExtension {
             .is_some_and(|s| s.auth().phase() != Phase::InWorld)
     }
 
+    /// Signed in and in the world, where the shortcuts and hints apply.
+    fn in_world(&self) -> bool {
+        self.session.is_some() && !self.at_login()
+    }
+
+    fn toggle_inventory(&mut self) {
+        self.inventory.toggle();
+        self.hints.saw(Did::UsedInventory);
+    }
+
+    fn toggle_crafting(&mut self) {
+        self.crafting.toggle();
+        if self.crafting.open {
+            self.hints.saw(Did::OpenedCrafting);
+        }
+    }
+
     fn act(&mut self, action: FormAction) {
         let Some(session) = &mut self.session else {
             return;
@@ -270,10 +294,13 @@ impl PlayerExtension for CapitolExtension {
         }
         // Never while a text field has the keys: egui consumes those.
         if !self.at_login() && ctx.input.is_action_just_pressed("inventory") {
-            self.inventory.toggle();
+            self.toggle_inventory();
         }
         if !self.at_login() && ctx.input.is_action_just_pressed("crafting") {
-            self.crafting.toggle();
+            self.toggle_crafting();
+        }
+        if self.in_world() && ctx.input.is_action_just_pressed("help") {
+            self.shortcuts.toggle();
         }
         if !self.at_login() && ctx.input.is_action_just_pressed("exchange") {
             self.exchange.toggle();
@@ -291,10 +318,30 @@ impl PlayerExtension for CapitolExtension {
                 session.trade_key(now);
             }
             walk(ctx, session, &self.shared, now);
-            gather(ctx, session, &self.shared, &mut self.sound, now);
+            let gathered = gather(ctx, session, &self.shared, &mut self.sound, now);
             visit(ctx, session, &self.shared, now);
-            crafted(ctx, session, &self.shared, &mut self.sound);
-            plots(ctx, session, &self.shared, &self.lots, &self.lot_of, &mut self.sound);
+            let made = crafted(ctx, session, &self.shared, &mut self.sound);
+            // The hints follow whoever is signed in (nobody, signed out).
+            let state = session.state();
+            self.hints
+                .follow(session.server(), state.me(), state.inventory());
+            if session.destination().is_some() {
+                self.hints.saw(Did::Walked);
+            }
+            if gathered {
+                self.hints.saw(Did::Gathered);
+            }
+            if made {
+                self.hints.saw(Did::Crafted);
+            }
+            plots(
+                ctx,
+                session,
+                &self.shared,
+                &self.lots,
+                &self.lot_of,
+                &mut self.sound,
+            );
             // Signed out, the store is empty, so everyone fades away.
             let (poses, state) = session.sample(now);
             let dt = ctx.clock.delta_time.min(0.1) as f32;
@@ -439,8 +486,26 @@ impl PlayerExtension for CapitolExtension {
     /// While a station is being placed (P6.2), Esc stops it rather than
     /// quitting, and so does a right click on the world (not a right-drag,
     /// which orbits). egui has already kept any click over its panels.
+    ///
+    /// `?` opens and closes the shortcut overlay (P8.3), read off the typed
+    /// character so it's `?` on any layout. While it's open, Esc closes it.
     fn on_window_event(&mut self, event: &WindowEvent) -> bool {
         let placing = self.session.as_ref().is_some_and(|s| s.placing().is_some());
+        if let WindowEvent::KeyboardInput { event: key, .. } = event {
+            let pressed = key.state == ElementState::Pressed && !key.repeat;
+            if self.in_world() && key.logical_key == Key::Character("?".into()) {
+                if pressed {
+                    self.shortcuts.toggle();
+                }
+                return true;
+            }
+            if self.shortcuts.open && key.physical_key == PhysicalKey::Code(KeyCode::Escape) {
+                if pressed {
+                    self.shortcuts.open = false;
+                }
+                return true;
+            }
+        }
         match event {
             WindowEvent::KeyboardInput { event: key, .. }
                 if placing && key.physical_key == PhysicalKey::Code(KeyCode::Escape) =>
@@ -506,6 +571,7 @@ impl PlayerExtension for CapitolExtension {
                     inventory_open: self.inventory.open,
                     crafting_open: self.crafting.open,
                     exchange_open: self.exchange.open,
+                    help_open: self.shortcuts.open,
                     inventory_pulse: pulse,
                 };
                 let clicks = ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
@@ -513,12 +579,19 @@ impl PlayerExtension for CapitolExtension {
                 inventory_chip = clicks.inventory_rect;
                 if clicks.inventory {
                     self.inventory.toggle();
+                    self.hints.saw(Did::UsedInventory);
                 }
                 if clicks.crafting {
                     self.crafting.toggle();
+                    if self.crafting.open {
+                        self.hints.saw(Did::OpenedCrafting);
+                    }
                 }
                 if clicks.exchange {
                     self.exchange.toggle();
+                }
+                if clicks.help {
+                    self.shortcuts.toggle();
                 }
             }
             let outage = if at_login {
@@ -600,6 +673,7 @@ impl PlayerExtension for CapitolExtension {
                     Some(ui::exchange::Action::Close) => self.exchange.open = false,
                     None => {}
                 }
+                self.hints.show(ctx, now);
                 let state = session.state();
                 let picked = state.picked_plot();
                 let view = ui::plot::View {
@@ -673,6 +747,7 @@ impl PlayerExtension for CapitolExtension {
                     .show(ctx, &mut self.icons, inventory, refused, pulse);
                 if let Some(m) = clicks.moved {
                     session.move_item(m);
+                    self.hints.saw(Did::UsedInventory);
                 }
                 if let Some(kit) = clicks.place {
                     session.begin_placing(&kit);
@@ -719,6 +794,12 @@ impl PlayerExtension for CapitolExtension {
         }
         if let Some(juice) = &mut self.juice {
             juice.ui(ctx, &mut self.icons, &self.shared);
+        }
+        if !self.in_world() {
+            self.shortcuts.open = false;
+        }
+        if self.shortcuts.show(ctx) {
+            self.shortcuts.open = false;
         }
         if let Some(action) = action {
             self.act(action);
@@ -949,21 +1030,23 @@ fn offer_preset(
 /// `extraction_completed` with the node's place (`x`, `z`), the yield
 /// (`item_name`, `quantity`, `quality`) and its `grade` letter and `colour`
 /// (sRGB, 0 to 1), and `extraction_note` with a `title` and `body` when an
-/// extraction didn't happen.
+/// extraction didn't happen. True if anything was gathered.
 fn gather(
     ctx: &mut ExtensionCtx,
     session: &mut Session,
     shared: &script_api::Shared,
     sound: &mut Soundscape,
     now: Instant,
-) {
+) -> bool {
     if let Some(id) = shared.extract.lock().ok().and_then(|mut e| e.take()) {
         match uuid::Uuid::parse_str(&id) {
             Ok(node) => session.extract(now, node),
             Err(e) => tracing::warn!("cap_extract: {id:?} isn't a node id: {e}"),
         }
     }
-    for (node, item) in session.take_yields() {
+    let yields = session.take_yields();
+    let any = !yields.is_empty();
+    for (node, item) in yields {
         let at = session
             .state()
             .node(node)
@@ -991,6 +1074,7 @@ fn gather(
         data.insert("body".into(), body.into());
         ctx.fire_event("extraction_note", data);
     }
+    any
 }
 
 /// Stations (P6.3): open the station a script asked for
@@ -1025,14 +1109,16 @@ fn visit(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Sha
 /// Crafting (P5.5): fire `crafting_completed` at the scripts for each craft
 /// that finished, with where you stand (`x`, `z`), what it made
 /// (`item_name`, `quantity`, `quality`) and its `grade` and `colour`, as
-/// `extraction_completed` has.
+/// `extraction_completed` has. True if anything was made.
 fn crafted(
     ctx: &mut ExtensionCtx,
     session: &mut Session,
     shared: &script_api::Shared,
     sound: &mut Soundscape,
-) {
-    for item in session.take_crafted() {
+) -> bool {
+    let made = session.take_crafted();
+    let any = !made.is_empty();
+    for item in made {
         let [x, _, z] = shared
             .follow
             .lock()
@@ -1051,6 +1137,7 @@ fn crafted(
         ctx.fire_event("crafting_completed", data);
         sound.crafted();
     }
+    any
 }
 
 /// Plots (P6.4): pick the plot a script asked for (`cap_pick_plot`), tell

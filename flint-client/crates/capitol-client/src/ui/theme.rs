@@ -136,6 +136,12 @@ pub const GOLD_LIGHT: Color32 = rgb(0xf2d675);
 pub const HINT: Color32 = rgba(15, 15, 25, 0.55);
 /// What dims the world while the connection is down.
 pub const SCRIM: Color32 = rgba(5, 5, 12, 0.45);
+/// A key cap's face, its edge and its side (`keycap`, P8.3).
+pub const KEYCAP: Color32 = rgba(48, 48, 64, 0.95);
+pub const KEYCAP_EDGE: Color32 = rgba(110, 110, 135, 0.55);
+pub const KEYCAP_SIDE: Color32 = rgba(10, 10, 16, 0.9);
+/// The narrowest cap, so a lone letter isn't a sliver.
+pub const KEYCAP_MIN_WIDTH: f32 = 22.0;
 
 // ---------------------------------------------------------------------------
 // Type
@@ -668,6 +674,65 @@ pub fn status_dot(ui: &mut Ui, colour: Color32, meaning: &str) {
     let (dot, response) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
     ui.painter().circle_filled(dot.center(), 3.5, colour);
     response.on_hover_text(meaning);
+}
+
+/// A key, or a mouse action, as a small raised cap: "Enter", "Click". The
+/// shortcut overlay and the first-session hints (P8.3) set keys in these.
+pub fn keycap(ui: &mut Ui, text: &str) -> Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), strong(size::SMALL), TEXT);
+    let pad = egui::vec2(7.0, 3.0);
+    let width = (galley.size().x + pad.x * 2.0).max(KEYCAP_MIN_WIDTH);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width, galley.size().y + pad.y * 2.0 + 2.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    // The cap's side, a shade darker, shows under its face.
+    painter.rect_filled(rect, 4.0, KEYCAP_SIDE);
+    let face = egui::Rect::from_min_max(rect.min, rect.max - egui::vec2(0.0, 2.0));
+    painter.rect(face, 4.0, KEYCAP, Stroke::new(1.0, KEYCAP_EDGE));
+    painter.galley(face.center() - galley.size() * 0.5, galley, TEXT);
+    response
+}
+
+/// How far along a run of steps is, as pips: gold for each done, a gold
+/// ring for the one at hand, and dim dots for the rest.
+pub fn step_pips(ui: &mut Ui, steps: usize, at: usize) {
+    let r = 3.5;
+    let gap = 7.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(steps as f32 * (r * 2.0 + gap) - gap, r * 2.0 + 2.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    for i in 0..steps {
+        let c = egui::pos2(
+            rect.left() + r + i as f32 * (r * 2.0 + gap),
+            rect.center().y,
+        );
+        match i.cmp(&at) {
+            std::cmp::Ordering::Less => {
+                painter.circle_filled(c, r, GOLD);
+            }
+            std::cmp::Ordering::Equal => {
+                painter.circle_filled(c, r, GOLD_WASH);
+                painter.circle_stroke(c, r, Stroke::new(1.5, GOLD));
+            }
+            std::cmp::Ordering::Greater => {
+                painter.circle_filled(c, r - 1.0, BORDER);
+            }
+        }
+    }
+}
+
+/// A tick, drawn rather than set in type, in `colour`, filling `rect`.
+pub fn tick(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
+    let p = |x: f32, y: f32| rect.min + egui::vec2(rect.width() * x, rect.height() * y);
+    let stroke = Stroke::new(2.0, colour);
+    painter.line_segment([p(0.1, 0.55), p(0.4, 0.85)], stroke);
+    painter.line_segment([p(0.4, 0.85), p(0.92, 0.18)], stroke);
 }
 
 /// Text fields as dark wells with a dim gold edge that turns gold on focus,
