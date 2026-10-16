@@ -53,6 +53,7 @@ impl InventoryPanel {
         icons: &mut ItemIcons,
         inventory: Option<&Container>,
         refused: Option<&str>,
+        pulse: f32,
     ) -> Clicks {
         let shown = ctx.animate_bool_with_time(Id::new("capitol_inventory_fade"), self.open, FADE);
         if shown <= 0.0 {
@@ -70,6 +71,13 @@ impl InventoryPanel {
                     .inner
             });
         self.rect = self.open.then_some(area.response.rect);
+        // A pickup landing lights its edge (P8.2).
+        theme::landed_glow(
+            &ctx.layer_painter(area.response.layer_id),
+            area.response.rect,
+            12.0,
+            pulse * ease,
+        );
         area.inner
     }
 }
@@ -138,7 +146,7 @@ mod tests {
                 if !theme::install(ctx) {
                     return;
                 }
-                panel.show(ctx, &mut icons, c, None);
+                panel.show(ctx, &mut icons, c, None, 0.0);
             });
         }
         if let Some(area) = ctx.memory(|m| m.area_rect(Id::new("capitol_inventory"))) {

@@ -4,6 +4,7 @@
 //! Rhai runs with its `sync` feature, so every closure here and the state
 //! it captures must be `Send + Sync`.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -59,6 +60,36 @@ pub struct Shared {
     /// The station a script last asked to open (`cap_open_station`, P6.3).
     /// The extension takes it next frame.
     pub open_station: Arc<Mutex<Option<String>>>,
+    /// Where the egui UI's landmarks were drawn last frame (P8.2), by name,
+    /// for scripts to fly things to. Only "inventory" so far.
+    pub anchors: Arc<Mutex<HashMap<&'static str, UiAnchor>>>,
+    /// When a script last lit each landmark (`cap_ui_pulse`), by name.
+    pub pulses: Arc<Mutex<HashMap<String, Instant>>>,
+}
+
+/// One of the UI's landmarks as scripts see it: a rect in logical points,
+/// as the script HUD draws in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UiAnchor {
+    /// Left, top, width, height.
+    pub rect: [f32; 4],
+    /// It's an open panel, not the button that opens it.
+    pub panel: bool,
+}
+
+/// How long a landmark glows after `cap_ui_pulse`, in seconds.
+pub const PULSE: f32 = 0.75;
+
+impl Shared {
+    /// How strongly the landmark `name` glows now: 1 as it's lit, easing
+    /// to 0 over [`PULSE`].
+    pub fn pulse(&self, name: &str, now: Instant) -> f32 {
+        let Some(at) = self.pulses.lock().ok().and_then(|p| p.get(name).copied()) else {
+            return 0.0;
+        };
+        let k = 1.0 - now.saturating_duration_since(at).as_secs_f32() / PULSE;
+        k.clamp(0.0, 1.0).powf(1.5)
+    }
 }
 
 /// The picked plot as scripts see it.
@@ -398,6 +429,32 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             *p = Some([x as f32, z as f32]);
         }
     });
+    // `cap_ui_anchor(name) -> #{ x, y, w, h, panel } or ()`: where the
+    // UI's landmark `name` was drawn last frame, in the HUD's points.
+    // "inventory" is the inventory panel while it's open (`panel` true),
+    // else the header's Inventory button. () while neither is drawn.
+    let anchors = shared.anchors.clone();
+    engine.register_fn("cap_ui_anchor", move |name: &str| -> rhai::Dynamic {
+        let Some(a) = anchors.lock().ok().and_then(|a| a.get(name).copied()) else {
+            return rhai::Dynamic::UNIT;
+        };
+        let [x, y, w, h] = a.rect.map(|v| v as f64);
+        let mut m = rhai::Map::new();
+        m.insert("x".into(), x.into());
+        m.insert("y".into(), y.into());
+        m.insert("w".into(), w.into());
+        m.insert("h".into(), h.into());
+        m.insert("panel".into(), a.panel.into());
+        m.into()
+    });
+    // `cap_ui_pulse(name)`: light the landmark `name` for a moment, as
+    // something lands on it.
+    let pulses = shared.pulses.clone();
+    engine.register_fn("cap_ui_pulse", move |name: &str| {
+        if let Ok(mut p) = pulses.lock() {
+            p.insert(name.to_owned(), Instant::now());
+        }
+    });
     // `cap_ground_y() -> float`: the land's height in metres, for picking
     // and for drawing on the ground. The sea is at 0.
     engine.register_fn("cap_ground_y", || crate::coords::layer::GROUND as f64);
@@ -722,5 +779,86 @@ mod tests {
         *shared.destination.lock().unwrap() = Some([3.0, -4.0]);
         let z: f64 = engine.eval("cap_destination()[1]").unwrap();
         assert_eq!(z, -4.0);
+    }
+
+    #[test]
+    fn scripts_find_and_light_the_inventory() {
+        let shared = Shared::default();
+        let mut engine = rhai::Engine::new();
+        register(&mut engine, &shared);
+        assert!(engine.eval::<()>(r#"cap_ui_anchor("inventory")"#).is_ok());
+        shared.anchors.lock().unwrap().insert(
+            "inventory",
+            UiAnchor {
+                rect: [10.0, 20.0, 80.0, 26.0],
+                panel: false,
+            },
+        );
+        let mid: f64 = engine
+            .eval(r#"let r = cap_ui_anchor("inventory"); r.x + r.w / 2.0"#)
+            .unwrap();
+        assert_eq!(mid, 50.0);
+        let now = Instant::now();
+        assert_eq!(shared.pulse("inventory", now), 0.0);
+        engine.run(r#"cap_ui_pulse("inventory")"#).unwrap();
+        assert!(shared.pulse("inventory", Instant::now()) > 0.9);
+        let later = Instant::now() + std::time::Duration::from_secs_f32(PULSE);
+        assert_eq!(shared.pulse("inventory", later), 0.0);
+    }
+
+    /// The toast stack (notices.rhai): the same message again takes a
+    /// count, and past four the oldest is sent out.
+    #[test]
+    fn toasts_stack_count_and_make_room() {
+        use rhai::{CallFnOptions, Scope};
+        let mut engine = rhai::Engine::new();
+        engine.set_max_expr_depths(128, 128);
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/notices.rhai");
+        let ast = engine.compile_file(path).unwrap();
+        let add = |list: rhai::Array, title: &str, t: f64| -> rhai::Array {
+            let options = CallFnOptions::new().eval_ast(false);
+            engine
+                .call_fn_with_options(
+                    options,
+                    &mut Scope::new(),
+                    &ast,
+                    "add_toast",
+                    (
+                        list,
+                        title.to_owned(),
+                        "body".to_owned(),
+                        "note".to_owned(),
+                        t,
+                    ),
+                )
+                .unwrap()
+        };
+        let field = |q: &rhai::Dynamic, k: &str| q.clone().cast::<rhai::Map>()[k].clone();
+        let mut list = add(rhai::Array::new(), "Taken", 0.0);
+        list = add(list, "Find a bridge", 0.5);
+        list = add(list, "Taken", 1.0);
+        assert_eq!(list.len(), 2, "the second Taken counts on the first");
+        let first = &list[0];
+        assert_eq!(
+            field(first, "title").into_string().unwrap(),
+            "Taken",
+            "where it stood"
+        );
+        assert_eq!(field(first, "count").as_int().unwrap(), 2);
+        for (i, title) in ["a", "b", "c"].iter().enumerate() {
+            list = add(list, title, 2.0 + i as f64);
+        }
+        assert_eq!(list.len(), 5);
+        let leaving: Vec<_> = list
+            .iter()
+            .filter(|q| !field(q, "leave").is_unit())
+            .collect();
+        assert_eq!(leaving.len(), 1, "a fifth sends one out");
+        assert_eq!(
+            field(leaving[0], "title").into_string().unwrap(),
+            "Taken",
+            "the oldest"
+        );
     }
 }

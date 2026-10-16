@@ -14,8 +14,9 @@
 
 use crate::atmosphere::Atmosphere;
 use crate::entities::Players;
+use crate::juice_sample::JuiceSample;
 use crate::nodes::Nodes;
-use crate::script_api::{self, PlacementMark, PlotMark, Shared, ZoneBanner};
+use crate::script_api::{self, PlacementMark, PlotMark, Shared, UiAnchor, ZoneBanner};
 use crate::session::Session;
 use crate::sound::{Ears, Rustling, Soundscape};
 use crate::stations::{GhostView, Stations};
@@ -107,6 +108,8 @@ pub struct CapitolExtension {
     place_on_arrival: Option<String>,
     /// The ambience and the one-shots (P8.1).
     sound: Soundscape,
+    /// `--juice-sample`: the juice on a timetable, offline (P8.2).
+    juice: Option<JuiceSample>,
 }
 
 impl CapitolExtension {
@@ -143,12 +146,19 @@ impl CapitolExtension {
             right_down: None,
             place_on_arrival: None,
             sound: Soundscape::new(false),
+            juice: None,
         }
     }
 
     /// Play no sound (`--mute`, and every capture).
     pub fn with_mute(mut self, on: bool) -> Self {
         self.sound = Soundscape::new(on);
+        self
+    }
+
+    /// Play the juice on a timetable, offline (`--juice-sample`).
+    pub fn with_juice_sample(mut self, on: bool) -> Self {
+        self.juice = on.then(JuiceSample::default);
         self
     }
 
@@ -235,6 +245,9 @@ impl PlayerExtension for CapitolExtension {
 
     fn pre_update(&mut self, ctx: &mut ExtensionCtx) {
         let now = Instant::now();
+        if let Some(juice) = &mut self.juice {
+            juice.update(ctx, &self.shared);
+        }
         // Never while a text field has the keys: egui consumes those.
         if !self.at_login() && ctx.input.is_action_just_pressed("inventory") {
             self.inventory.toggle();
@@ -447,6 +460,10 @@ impl PlayerExtension for CapitolExtension {
         }
         let at_login = self.at_login();
         let mut action = None;
+        // Where pickups fly to (P8.2): the header's Inventory button, or the
+        // inventory panel while it's open. Neither while signed out.
+        let mut inventory_chip = None;
+        let pulse = self.shared.pulse("inventory", Instant::now());
         if let Some(session) = &mut self.session {
             // First, so every other panel is placed below it.
             let mut sign_out = false;
@@ -461,9 +478,11 @@ impl PlayerExtension for CapitolExtension {
                     inventory_open: self.inventory.open,
                     crafting_open: self.crafting.open,
                     exchange_open: self.exchange.open,
+                    inventory_pulse: pulse,
                 };
                 let clicks = ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
                 sign_out |= clicks.sign_out;
+                inventory_chip = clicks.inventory_rect;
                 if clicks.inventory {
                     self.inventory.toggle();
                 }
@@ -600,7 +619,7 @@ impl PlayerExtension for CapitolExtension {
                 let inventory = session.state().inventory();
                 let clicks = self
                     .inventory
-                    .show(ctx, &mut self.icons, inventory, refused);
+                    .show(ctx, &mut self.icons, inventory, refused, pulse);
                 if let Some(m) = clicks.moved {
                     session.move_item(m);
                 }
@@ -618,6 +637,23 @@ impl PlayerExtension for CapitolExtension {
                 }
             }
         }
+        let anchor = match (self.inventory.rect, inventory_chip) {
+            _ if at_login || self.session.is_none() => None,
+            (Some(r), _) => Some((r, true)),
+            (None, Some(r)) => Some((r, false)),
+            (None, None) => None,
+        };
+        if let Ok(mut anchors) = self.shared.anchors.lock() {
+            match anchor {
+                Some((r, panel)) => {
+                    let rect = [r.left(), r.top(), r.width(), r.height()];
+                    anchors.insert("inventory", UiAnchor { rect, panel });
+                }
+                None => {
+                    anchors.remove("inventory");
+                }
+            }
+        }
         if self.session.is_none() {
             ui::inscription(ctx, &self.shared, &self.terrain.status());
         } else if !at_login {
@@ -629,6 +665,9 @@ impl PlayerExtension for CapitolExtension {
         }
         if let Some(sample) = &mut self.sample {
             sample.show(ctx, &mut self.icons);
+        }
+        if let Some(juice) = &mut self.juice {
+            juice.ui(ctx, &mut self.icons, &self.shared);
         }
         if let Some(action) = action {
             self.act(action);
@@ -1048,7 +1087,7 @@ fn placing(
 /// What a gather or a craft made, for the scripts: `item_name`,
 /// `quantity`, `quality`, its `grade` letter and the grade's `colour`
 /// (sRGB, 0 to 1).
-fn yield_data(item: &capitol_core::state::Yield) -> toml::Table {
+pub(crate) fn yield_data(item: &capitol_core::state::Yield) -> toml::Table {
     let letter = capitol_core::protocol::rules::quality_grade(item.quality);
     let c = ui::theme::grade(letter);
     let mut data = toml::Table::new();

@@ -24,7 +24,8 @@
 // The server stops a walk at a canal's edge with `movement_blocked`. Rust
 // fires it here with where you stand and which way you were going. The
 // water splashes just ahead of you, the camera rig gives a small nudge
-// (camera.rhai), and a toast says to find a bridge.
+// (camera.rhai), and a toast says to find a bridge (notices.rhai, which
+// holds every toast).
 //
 // Gathering: a click on a grass tuft (cap_node_at) asks Rust to extract it
 // (cap_extract). Within 50 units (5 m) that's at once; further, you walk
@@ -32,7 +33,8 @@
 // walk, a gold sight turns round the tuft and the dashes run to it. While
 // anyone extracts, a ring fills round the tuft: gold for you, pale green
 // for others. On completion "+N fiber" rises from it with the grade on a
-// pip of its colour. A tuft cut down throws up bits of blade; one that
+// pip of its colour, twinkling if it's an A, and the pips fly off to
+// the inventory (notices.rhai). A tuft cut down throws up bits of blade; one that
 // grows back breathes out a green ring. Hovering a tuft you can take
 // draws the reticle round it.
 //
@@ -85,7 +87,6 @@ let ripples = [];
 // `gone` from when you arrived, as it fades.
 let marker = ();
 let splashes = [];
-let toast = ();
 // "+N fiber" rising from a tuft, bits of a cut one, and a regrown one's ring.
 let yields = [];
 let cuttings = [];
@@ -104,10 +105,6 @@ fn marker_fade() { 0.45 }
 // The splash: how long, and how far past where you stopped (m).
 fn splash_life() { 1.1 }
 fn splash_ahead() { 1.1 }
-// The toast: in, held, out (s).
-fn toast_in() { 0.25 }
-fn toast_hold() { 2.8 }
-fn toast_out() { 0.7 }
 // The yield rising off a tuft (s), and how far (m).
 fn yield_life() { 2.4 }
 fn yield_rise() { 1.1 }
@@ -141,9 +138,6 @@ fn on_update() {
     sprouts = sprouts.filter(|s| t - s.born < sprout_life());
     blooms = blooms.filter(|b| t - b.born < bloom_life());
     deeds = deeds.filter(|d| t - d.born < deed_life());
-    if toast != () && t - toast.born > toast_in() + toast_hold() + toast_out() {
-        toast = ();
-    }
     if cap_at_login() { return; }
     // The ghost follows the ground under the cursor.
     if cap_placing() != () {
@@ -229,12 +223,6 @@ fn on_event(name, data) {
     }
     if name == "plot_claimed" {
         deeds.push(#{ x: data.x, z: data.z, r: data.r, born: t });
-        toast = #{ title: "The deed is yours", body: "Place stations here", born: t };
-        return;
-    }
-    if name == "extraction_note" || name == "plot_note" || name == "placement_note"
-        || name == "station_note" {
-        toast = #{ title: data.title, body: data.body, born: t };
         return;
     }
     if name == "node_depleted" {
@@ -275,9 +263,6 @@ fn on_event(name, data) {
     splashes.push(#{ x: x, z: z, born: t, drops: drops });
     // A walk stopped by water has no destination left to mark.
     if marker != () && marker.gone == () { marker.gone = t; }
-    let water = data.water;
-    let body = water.sub_string(0, 1).to_upper() + water.sub_string(1) + " has no crossing here";
-    toast = #{ title: "Find a bridge", body: body, born: t };
 }
 
 // ── Drawing ──────────────────────────────────────────────────────────────
@@ -344,7 +329,6 @@ fn on_draw_ui() {
 
     for rip in ripples { draw_ripple(rip, now); }
     for s in splashes { draw_splash(s, now); }
-    if toast != () { draw_toast(toast, now); }
 
     if hover != () && placing == () && over == () {
         let n = cap_node_at(hover[0], hover[1]);
@@ -628,6 +612,24 @@ fn draw_yield(y, now) {
     draw_text_opts(px + (pip - g.width) / 2.0, p.y - g.height / 2.0, y.grade, 12.0, #{
         font: "strong", color: [0.06, 0.06, 0.1, a],
     });
+    if y.grade == "A" { draw_twinkle(px + pip / 2.0, py + pip / 2.0, pip, now - y.born, a); }
+}
+
+// An A's pip twinkling: three glints taking turns round it, each swelling
+// and gone in under half a second, the first as the yield appears.
+fn draw_twinkle(cx, cy, size, age, a) {
+    for i in 0..3 {
+        let k = (age * 1.6 + i.to_float() / 3.0) % 1.0;
+        let swell = (1.0 - (2.0 * k / 0.7 - 1.0).abs()).max(0.0);
+        if swell <= 0.0 { continue; }
+        let around = i.to_float() * 2.1 + age * 0.6;
+        let x = cx + around.cos() * size * 0.85;
+        let y = cy + around.sin() * size * 0.85;
+        let r = size * 0.45 * swell;
+        let w = r * 0.22;
+        draw_polygon([[x, y - r], [x + w, y], [x, y + r], [x - w, y]], 1.0, 0.95, 0.7, a * swell, 2);
+        draw_polygon([[x - r, y], [x, y - w], [x + r, y], [x, y + w]], 1.0, 0.95, 0.7, a * swell, 2);
+    }
 }
 
 // A tuft cut down: bits of blade flung up and out, turning as they fall.
@@ -791,36 +793,6 @@ fn draw_splash(s, now) {
         if !p.visible { continue; }
         draw_circle(p.x, p.y, d.size * (1.0 - k * 0.5), c[0], c[1], c[2], 0.85 * (1.0 - k));
     }
-}
-
-// "Find a bridge", low in the middle of the screen, on the panels' glass,
-// with which water stopped you under it. It rises a little as it comes in.
-fn draw_toast(toast, now) {
-    let age = now - toast.born;
-    let a = if age < toast_in() { smooth(age / toast_in()) }
-            else if age < toast_in() + toast_hold() { 1.0 }
-            else { 1.0 - smooth((age - toast_in() - toast_hold()) / toast_out()) };
-    if a <= 0.0 { return; }
-    let rise = 10.0 * (1.0 - smooth((age / toast_in()).min(1.0)));
-    let title_size = 22.0;
-    let body_size = 14.0;
-    let spacing = title_size * 0.12;
-    let tm = measure_text_ex(toast.title, title_size, "display", spacing);
-    let bm = measure_text_ex(toast.body, body_size, "body", 0.0);
-    let w = tm.width.max(bm.width) + 48.0;
-    let h = tm.height + bm.height + 30.0;
-    let x = (screen_width() - w) / 2.0;
-    let y = screen_height() * 0.74 + rise;
-    // The panels' glass, rgba(15,15,25,0.95), and their edge.
-    draw_rect_ex(x, y, w, h, 0.059, 0.059, 0.098, 0.9 * a, 10.0, 0);
-    draw_rect_outline_ex(x, y, w, h, 0.314, 0.314, 0.392, 0.3 * a, 1.0, 10.0, 0);
-    let c = gold();
-    draw_text_opts(x + (w - tm.width) / 2.0, y + 11.0, toast.title, title_size, #{
-        font: "display", spacing: spacing, color: [c[0], c[1], c[2], a],
-    });
-    draw_text_opts(x + (w - bm.width) / 2.0, y + 17.0 + tm.height, toast.body, body_size, #{
-        font: "body", color: [0.878, 0.878, 0.878, 0.85 * a],
-    });
 }
 
 // The reticle: a thin gold ring lying on the ground under the cursor, a

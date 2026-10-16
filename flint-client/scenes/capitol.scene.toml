@@ -181,3 +181,8 @@ source = "hud.rhai"
 # What you hear: plays the one-shots the extension fires as `sound` (P8.1)
 [entities.audio.script]
 source = "audio.rhai"
+
+# Notices: the toast stack and the pickups flying to the inventory (P8.2).
+# Last, so they draw over the names.
+[entities.notices.script]
+source = "notices.rhai"

@@ -272,6 +272,10 @@ fn paint_slot(
         egui::vec2(theme::SLOT_ICON, theme::SLOT_ICON),
     );
     icons.paint_on(painter, icon, &item.item_type, fade);
+    if quality_grade(item.quality) == "A" && look != Look::Source {
+        let time = painter.ctx().input(|i| i.time);
+        glint(painter, icon, item.item_id.as_u128(), time, fade);
+    }
     // React's pip: 8 px, 3 px in from the inside of the 2 px edge.
     pip(
         painter,
@@ -320,6 +324,44 @@ fn pip(painter: &Painter, centre: Pos2, quality: i32, fade: f32) {
         R,
         Stroke::new(1.0, theme::PIP_EDGE.gamma_multiply(fade)),
     );
+}
+
+/// How often an A's slot glints, and how long a glint lasts (s).
+const GLINT_EVERY: f64 = 4.5;
+const GLINT_LIFE: f64 = 0.55;
+
+/// An A-grade item's glint (P8.2): every few seconds a four-pointed star
+/// swells and turns on the icon's upper left and is gone. Each item keeps
+/// its own time, from its id, so a row of A's doesn't flash at once.
+fn glint(painter: &Painter, icon: Rect, id: u128, time: f64, fade: f32) {
+    let offset = (id % 997) as f64 / 997.0 * GLINT_EVERY;
+    let age = (time + offset) % GLINT_EVERY;
+    if age > GLINT_LIFE {
+        return;
+    }
+    let k = (age / GLINT_LIFE) as f32;
+    let swell = 1.0 - (2.0 * k - 1.0).abs();
+    let centre = icon.left_top() + icon.size() * egui::vec2(0.3, 0.28);
+    let r = 7.0 * swell;
+    let w = r * 0.22;
+    let colour = theme::grade_light("A").gamma_multiply(0.95 * fade * swell);
+    let turn = k * 0.6;
+    for i in 0..2 {
+        let a = turn + i as f32 * std::f32::consts::FRAC_PI_2;
+        let u = egui::vec2(a.cos(), a.sin());
+        let n = egui::vec2(-u.y, u.x);
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                centre + u * r,
+                centre + n * w,
+                centre - u * r,
+                centre - n * w,
+            ],
+            colour,
+            Stroke::NONE,
+        ));
+    }
+    painter.circle_filled(centre, w * 1.2, Color32::WHITE.gamma_multiply(fade * swell));
 }
 
 fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {

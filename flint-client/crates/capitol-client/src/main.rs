@@ -15,6 +15,7 @@ mod camera_rig;
 mod coords;
 mod entities;
 mod extension;
+mod juice_sample;
 mod nodes;
 mod script_api;
 mod session;
@@ -117,6 +118,11 @@ struct Args {
     /// No sound. Captures (--exit-after) are silent anyway
     #[arg(long)]
     mute: bool,
+    /// Offline, play the juice on a timetable (P8.2): pickups to an
+    /// inventory panel, an A grade's sparkle, the toast stack, a zone's
+    /// banner and the camera's ease into it. For captures
+    #[arg(long)]
+    juice_sample: bool,
 }
 
 fn main() -> Result<()> {
@@ -215,7 +221,8 @@ fn main() -> Result<()> {
         .with_containers(args.containers)
         .with_place(args.place)
         .with_exchange(args.exchange.as_deref())
-        .with_mute(args.mute || args.exit_after.is_some());
+        .with_mute(args.mute || args.exit_after.is_some())
+        .with_juice_sample(args.juice_sample && args.offline.is_some());
     if args.ui_sample {
         extension = extension.with_ui_sample();
     }

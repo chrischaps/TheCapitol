@@ -95,6 +95,12 @@ docker exec capitol-postgres psql -U capitol -d capitol -c "with s as (insert in
 
 **Sound (P8.1)** is `crates/capitol-client/src/sound/`. `library.rs` synthesizes every sound and writes `audio/*.wav` at start (gitignored; written again when `library::VERSION` changes, so bump it with any recipe change). `mod.rs` is the `Soundscape`: `mix` (zone, water and height to bed levels) and the one-shot scheduling, all unit-tested (`cargo test -p capitol-client sound`). One-shots reach Flint as `sound` events played by `scripts/audio.rhai`. `--mute` silences it, and so does `--exit-after`, so captures make no noise. `RUST_LOG=capitol=debug` logs each one-shot. To check a recipe change without ears, draw spectrograms of `audio/*.wav` (P8.1 used numpy and matplotlib): look for vertical lines (clicks, a sound cut off while ringing) and long horizontal smears (reverb ringing at a pitch).
 
+**Juice (P8.2).** Every toast goes through `scripts/notices.rhai`'s stack: fire an event with a `title` and `body` (as the `*_note` events do) and add its name there. Don't draw toasts anywhere else. Pickups fly to `cap_ui_anchor("inventory")`, which Rust fills from wherever the panel or header button was drawn, and `cap_ui_pulse` lights it. Another landmark would be one more entry in `Shared::anchors`. The script HUD draws under egui ([#96](https://github.com/chrischaps/TheCapitol/issues/96)). To see it all without a server or an A-grade node:
+
+```bash
+target/release/capitol.exe --offline fixtures/terrain.json --juice-sample --frame-step 0.016666667 --screenshot-every 0.2 --screenshot renders/juice.png --exit-after 9
+```
+
 ## Testing against the server
 
 The local stack is `docker-compose up -d` at the repo root, then `cargo run` from `backend/` (API on port 3000). With it up, `cargo test -p capitol-core -- --ignored` runs the live tests: register, login, the WebSocket handshake and a move. Set `CAPITOL_SERVER` to point them somewhere other than `http://localhost:3000`.

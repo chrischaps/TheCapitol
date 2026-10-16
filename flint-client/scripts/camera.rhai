@@ -30,6 +30,12 @@
 // the camera comes down out of it onto your avatar. It keeps circling
 // until the server has said where you are, for at most `landing_wait`.
 //
+// Walking into a new zone (P8.2), the camera eases out a little, up and
+// back along its line to you, so the zone you've come into opens out round
+// you while its banner names it (hud.rhai), and then eases back in. It
+// doesn't take the zoom: it's on top of the rig, so a wheel turned meanwhile
+// still counts. It fades away toward the map, where there's nothing to open.
+//
 // `--view` (cap_view) frames a capture. street, district and map are rig
 // framings. The rest are fixed shots: bridge (the quay by the inner canal's
 // south crossing), suburb (low over the southern suburbs' curving streets),
@@ -71,6 +77,13 @@ fn follow_k() { 6.0 }
 // it swings as a share of the camera's distance from what it looks at.
 fn bump_life() { 0.7 }
 fn bump_size() { 0.025 }
+// The ease on entering a zone: how much further out the camera stands at
+// its widest, as a share of its distance, how long it takes to get there,
+// when it starts back and how long that takes (s). Timed to the banner.
+fn arrive_size() { 0.18 }
+fn arrive_out() { 1.2 }
+fn arrive_back() { 1.7 }
+fn arrive_return() { 2.0 }
 fn zoom_k() { 8.0 }
 fn yaw_k() { 10.0 }
 // Input rates.
@@ -131,6 +144,8 @@ let rig = #{
     // A canal stopped you (P4.3): #{ born, dx, dz }, the way you were
     // going, for a nudge toward the water and back. () when still.
     bump: (),
+    // The zone last seen in the banner, and when you walked into it (P8.2).
+    zone: (), arrived: (),
 };
 
 // ── Per frame ────────────────────────────────────────────────────────────
@@ -204,6 +219,8 @@ fn on_update() {
                       tx: s.at[0], ty: s.at[1], tz: s.at[2] };
         }
     }
+    rig.watch_zone();
+    if rig.shot == () { pose = rig.eased_in(pose); }
     pose = rig.nudged(pose);
     set_camera_position(pose.px, pose.py, pose.pz);
     set_camera_target(pose.tx, pose.ty, pose.tz);
@@ -233,6 +250,28 @@ fn nudged(pose) {
     let dy = -0.35 * a.abs();
     #{ px: pose.px + dx, py: pose.py + dy, pz: pose.pz + dz,
        tx: pose.tx + dx, ty: pose.ty + dy, tz: pose.tz + dz }
+}
+
+// A new zone in the banner: start the ease. The zone you come into the
+// world in only sets where you are; the landing is its ease.
+fn watch_zone() {
+    let b = cap_zone_banner();
+    if b == () { this.zone = (); return; }
+    if b.age < 0.0 || b.name == this.zone { return; }
+    if this.zone != () && !b.first { this.arrived = total_time() - b.age; }
+    this.zone = b.name;
+}
+
+// The pose eased out for a zone just entered: the camera moved along its
+// line to what it looks at, out and then back.
+fn eased_in(pose) {
+    if this.arrived == () { return pose; }
+    let age = total_time() - this.arrived;
+    if age > arrive_back() + arrive_return() { this.arrived = (); return pose; }
+    let e = smooth(age / arrive_out()) * (1.0 - smooth((age - arrive_back()) / arrive_return()));
+    let k = arrive_size() * e * (1.0 - smooth((this.zoom - centre_from()) / 0.15));
+    #{ px: pose.px + (pose.px - pose.tx) * k, py: pose.py + (pose.py - pose.ty) * k,
+       pz: pose.pz + (pose.pz - pose.tz) * k, tx: pose.tx, ty: pose.ty, tz: pose.tz }
 }
 
 // Read this frame's camera input into the rig (`this`). Returns whether

@@ -46,6 +46,9 @@ pub struct HeaderView<'a> {
     pub crafting_open: bool,
     /// The same for the exchange panel.
     pub exchange_open: bool,
+    /// How brightly the Inventory button glows, 0 to 1, as a pickup lands
+    /// on it (P8.2).
+    pub inventory_pulse: f32,
 }
 
 /// What was clicked in the header.
@@ -55,6 +58,8 @@ pub struct HeaderClicks {
     pub inventory: bool,
     pub crafting: bool,
     pub exchange: bool,
+    /// Where the Inventory button was drawn, for pickups to fly to.
+    pub inventory_rect: Option<egui::Rect>,
 }
 
 /// The header strip. Draw it before any other panel or window, so theirs
@@ -101,9 +106,11 @@ pub fn header(
                     clicks.exchange = theme::toggle_chip(ui, "Exchange", view.exchange_open)
                         .on_hover_text("Fiber exchange (X)")
                         .clicked();
-                    clicks.inventory = theme::toggle_chip(ui, "Inventory", view.inventory_open)
-                        .on_hover_text("Inventory (I)")
-                        .clicked();
+                    let chip = theme::toggle_chip(ui, "Inventory", view.inventory_open)
+                        .on_hover_text("Inventory (I)");
+                    theme::landed_glow(ui.painter(), chip.rect, 5.0, view.inventory_pulse);
+                    clicks.inventory = chip.clicked();
+                    clicks.inventory_rect = Some(chip.rect);
                     clicks.crafting = theme::toggle_chip(ui, "Crafting", view.crafting_open)
                         .on_hover_text("Crafting (C)")
                         .clicked();

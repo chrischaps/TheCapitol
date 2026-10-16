@@ -452,6 +452,25 @@ pub fn toggle_chip(ui: &mut Ui, text: &str, on: bool) -> Response {
     .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Something just landed here (P8.2): a gold edge round `rect`, and a
+/// fainter one just outside it, at strength `k` (0 to 1). Painted over
+/// what's there, so it lights the edge, not the insides.
+pub fn landed_glow(painter: &egui::Painter, rect: egui::Rect, rounding: f32, k: f32) {
+    if k <= 0.0 {
+        return;
+    }
+    painter.rect_stroke(
+        rect,
+        rounding,
+        Stroke::new(1.5, GOLD.gamma_multiply(0.9 * k)),
+    );
+    painter.rect_stroke(
+        rect.expand(2.5 + 2.0 * (1.0 - k)),
+        rounding + 2.5,
+        Stroke::new(2.0, GOLD.gamma_multiply(0.3 * k)),
+    );
+}
+
 /// A faint glass under a few lines of hint text over the world.
 pub fn hint() -> egui::Frame {
     egui::Frame::none()
