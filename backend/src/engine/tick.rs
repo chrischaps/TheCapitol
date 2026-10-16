@@ -190,6 +190,13 @@ impl GameState {
         let _ = self.event_sender.send(GameEvent::TradeFailed { player_id, reason });
     }
 
+    /// Tell `player_id`, and only them, why their extraction didn't start
+    fn extraction_failed(&self, player_id: Uuid, reason: impl Into<String>) {
+        let reason = reason.into();
+        tracing::debug!("Extraction by {} refused: {}", player_id, reason);
+        let _ = self.event_sender.send(GameEvent::ExtractionFailed { player_id, reason });
+    }
+
     fn process_commands(&mut self) {
         let commands: Vec<Command> = self.command_queue.drain(..).collect();
 
@@ -218,20 +225,21 @@ impl GameState {
                     }
                 }
                 Command::StartExtraction { player_id, node_id } => {
-                    // Get resource type first
-                    let resource_type = self.resource_nodes.get(&node_id)
-                        .and_then(|node| self.resource_types.get(&node.resource_type))
-                        .cloned();
-
-                    if let Some(resource_type) = resource_type {
-                        if let (Some(player), Some(node)) = (
-                            self.players.get_mut(&player_id),
-                            self.resource_nodes.get_mut(&node_id),
-                        ) {
-                            if let Err(e) = start_extraction(player, node, &resource_type, &self.event_sender) {
-                                tracing::debug!("Extraction failed: {}", e);
-                            }
-                        }
+                    let Some(node) = self.resource_nodes.get_mut(&node_id) else {
+                        self.extraction_failed(player_id, "That resource is gone");
+                        continue;
+                    };
+                    let Some(resource_type) = self.resource_types.get(&node.resource_type) else {
+                        let reason = format!("Unknown resource type '{}'", node.resource_type);
+                        self.extraction_failed(player_id, reason);
+                        continue;
+                    };
+                    let Some(player) = self.players.get_mut(&player_id) else {
+                        // Nobody to tell: they left between queueing and this tick
+                        continue;
+                    };
+                    if let Err(reason) = start_extraction(player, node, resource_type, &self.event_sender) {
+                        self.extraction_failed(player_id, reason);
                     }
                 }
                 Command::CancelExtraction { player_id } => {
@@ -891,7 +899,8 @@ async fn consume_items(app_state: &AppState, items: Vec<(Uuid, i32)>) -> Vec<(Uu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ActionState;
+    use super::super::extraction::EXTRACTION_RANGE;
+    use crate::models::{ActionState, NodeState};
 
     fn player(name: &str, x: f64, y: f64) -> PlayerState {
         PlayerState {
@@ -1124,5 +1133,132 @@ mod tests {
         game.disconnect_player(a, stale);
         assert!(game.trade_manager.is_in_trade(a));
         assert!(game.trade_manager.is_in_trade(b));
+    }
+
+    // B9: a refused extraction says why, to the requester only
+
+    /// Put a Wild Grass node `dx` units east of `at` into `game`, and return its id
+    fn grass_node(game: &mut GameState, at: (f64, f64), dx: f64, state: NodeState) -> Uuid {
+        game.resource_types.entry("grass".into()).or_insert_with(|| ResourceType {
+            id: "grass".into(),
+            name: "Wild Grass".into(),
+            yields_item: "fiber".into(),
+            yield_quantity_min: 1,
+            yield_quantity_max: 3,
+            base_quality_min: 40,
+            base_quality_max: 70,
+            required_tool: None,
+            extraction_duration_ticks: 30,
+            regeneration_ticks: 600,
+        });
+        let id = Uuid::new_v4();
+        game.resource_nodes.insert(id, ResourceNodeState {
+            id,
+            resource_type: "grass".into(),
+            x: at.0 + dx,
+            y: at.1,
+            base_quality: 50,
+            state,
+            harvested_by: None,
+            regenerates_at_tick: None,
+        });
+        id
+    }
+
+    /// Run `command` and return the reason of the one `ExtractionFailed` it sent, checking who it went to
+    fn extraction_refused(game: &mut GameState, rx: &mut broadcast::Receiver<GameEvent>, command: Command, to: Uuid) -> String {
+        game.queue_command(command);
+        game.process_commands();
+        let mut reasons = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            assert!(!matches!(event, GameEvent::ExtractionStarted { .. }), "unexpected {event:?}");
+            if let GameEvent::ExtractionFailed { player_id, reason } = event {
+                assert_eq!(player_id, to, "ExtractionFailed went to the wrong player");
+                reasons.push(reason);
+            }
+        }
+        assert_eq!(reasons.len(), 1, "expected exactly one ExtractionFailed, got {reasons:?}");
+        reasons.pop().unwrap()
+    }
+
+    const AT: (f64, f64) = (4000.0, 4000.0);
+
+    #[test]
+    fn extract_an_unknown_node_tells_the_player() {
+        let (mut game, a, _, mut rx) = two_players(10.0);
+        let command = Command::StartExtraction { player_id: a, node_id: Uuid::new_v4() };
+        let reason = extraction_refused(&mut game, &mut rx, command, a);
+        assert!(reason.contains("gone"), "{reason}");
+    }
+
+    #[test]
+    fn extract_a_node_of_unknown_type_tells_the_player() {
+        let (mut game, a, _, mut rx) = two_players(10.0);
+        let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
+        game.resource_nodes.get_mut(&node_id).unwrap().resource_type = "moonflower".into();
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id }, a);
+        assert!(reason.contains("moonflower"), "{reason}");
+    }
+
+    #[test]
+    fn extract_while_busy_tells_the_player() {
+        let (mut game, a, _, mut rx) = two_players(10.0);
+        let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
+        game.players.get_mut(&a).unwrap().action_state =
+            ActionState::Extracting { node_id: Uuid::new_v4(), progress: 0, duration: 30 };
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id }, a);
+        assert!(reason.contains("Already performing an action"), "{reason}");
+    }
+
+    #[test]
+    fn extract_a_node_someone_else_is_gathering_tells_the_second_player() {
+        let (mut game, a, b, mut rx) = two_players(10.0);
+        let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
+        game.queue_command(Command::StartExtraction { player_id: a, node_id });
+        game.process_commands();
+        while rx.try_recv().is_ok() {}
+
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: b, node_id }, b);
+        assert!(reason.contains("Someone else is already gathering this Wild Grass"), "{reason}");
+    }
+
+    #[test]
+    fn extract_a_depleted_node_tells_the_player() {
+        let (mut game, a, _, mut rx) = two_players(10.0);
+        let node_id = grass_node(&mut game, AT, 5.0, NodeState::Depleted);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id }, a);
+        assert!(reason.contains("grow back"), "{reason}");
+    }
+
+    #[test]
+    fn extract_out_of_range_says_how_far() {
+        let (mut game, a, _, mut rx) = two_players(10.0);
+        let node_id = grass_node(&mut game, AT, EXTRACTION_RANGE + 30.0, NodeState::Available);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id }, a);
+        assert!(reason.contains("Too far"), "{reason}");
+        assert!(reason.contains(&format!("{:.0} units", EXTRACTION_RANGE + 30.0)), "{reason}");
+    }
+
+    #[test]
+    fn extract_without_the_tool_names_it() {
+        let (mut game, a, _, mut rx) = two_players(10.0);
+        let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
+        game.resource_types.get_mut("grass").unwrap().required_tool = Some("sickle".into());
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id }, a);
+        assert!(reason.contains("sickle"), "{reason}");
+    }
+
+    #[test]
+    fn an_extraction_in_range_sends_no_failure() {
+        let (mut game, a, _, mut rx) = two_players(10.0);
+        let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
+        game.queue_command(Command::StartExtraction { player_id: a, node_id });
+        game.process_commands();
+        let mut started = false;
+        while let Ok(event) = rx.try_recv() {
+            assert!(!matches!(event, GameEvent::ExtractionFailed { .. }), "unexpected {event:?}");
+            started |= matches!(event, GameEvent::ExtractionStarted { player_id, .. } if player_id == a);
+        }
+        assert!(started);
     }
 }

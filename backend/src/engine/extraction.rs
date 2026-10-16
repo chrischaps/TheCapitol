@@ -110,21 +110,27 @@ pub fn process_extractions(
     pending_items
 }
 
-/// Start extraction for a player on a node
-pub fn start_extraction(
-    player: &mut PlayerState,
-    node: &mut ResourceNodeState,
+/// Why `player` can't start gathering `node` right now, in words the player can act on.
+/// `None` means they can. The REST `/world/extract` check uses this too.
+pub fn extraction_refusal(
+    player: &PlayerState,
+    node: &ResourceNodeState,
     resource_type: &ResourceType,
-    event_sender: &broadcast::Sender<GameEvent>,
-) -> Result<(), String> {
+) -> Option<String> {
     // Check if player is already extracting
     if !matches!(player.action_state, ActionState::Idle) {
-        return Err("Already performing an action".to_string());
+        return Some("Already performing an action".to_string());
     }
 
     // Check if node is available
-    if node.state != NodeState::Available {
-        return Err("Resource is not available".to_string());
+    match node.state {
+        NodeState::Available => {}
+        NodeState::BeingHarvested => {
+            return Some(format!("Someone else is already gathering this {}", resource_type.name));
+        }
+        NodeState::Depleted => {
+            return Some(format!("This {} is spent; it will grow back", resource_type.name));
+        }
     }
 
     // Check range
@@ -132,13 +138,30 @@ pub fn start_extraction(
     let dy = player.y - node.y;
     let distance = (dx * dx + dy * dy).sqrt();
     if distance > EXTRACTION_RANGE {
-        return Err("Too far from resource".to_string());
+        return Some(format!(
+            "Too far from resource ({:.0} units; gathering needs {:.0})",
+            distance, EXTRACTION_RANGE
+        ));
     }
 
     // Check tool requirement
-    if resource_type.required_tool.is_some() {
+    if let Some(tool) = &resource_type.required_tool {
         // For now, we only have hand-gatherable resources
-        return Err("Required tool not equipped".to_string());
+        return Some(format!("Required tool not equipped: {}", tool));
+    }
+
+    None
+}
+
+/// Start extraction for a player on a node
+pub fn start_extraction(
+    player: &mut PlayerState,
+    node: &mut ResourceNodeState,
+    resource_type: &ResourceType,
+    event_sender: &broadcast::Sender<GameEvent>,
+) -> Result<(), String> {
+    if let Some(reason) = extraction_refusal(player, node, resource_type) {
+        return Err(reason);
     }
 
     // Stop any movement

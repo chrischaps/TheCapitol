@@ -155,6 +155,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             player_id,
                                             node_id: node_uuid,
                                         });
+                                    } else {
+                                        let _ = sender.send(Message::Text(
+                                            serde_json::to_string(&ServerMessage::ExtractionFailed {
+                                                player_id,
+                                                reason: format!("Invalid resource node id '{}'", node_id),
+                                            }).unwrap().into()
+                                        )).await;
                                     }
                                 }
                                 ClientMessage::CancelExtraction => {
@@ -560,6 +567,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::ExtractionCancelled { player_id: pid };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
+                    Ok(GameEvent::ExtractionFailed { player_id: pid, reason }) => {
+                        if pid == player_id {
+                            let msg = ServerMessage::ExtractionFailed { player_id: pid, reason };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
                     Ok(GameEvent::NodeDepleted { node_id }) => {
                         let msg = ServerMessage::NodeDepleted { node_id };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
@@ -590,8 +603,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
                     Ok(GameEvent::CraftingFailed { player_id: pid, reason }) => {
-                        let msg = ServerMessage::CraftingFailed { player_id: pid, reason };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        if pid == player_id {
+                            let msg = ServerMessage::CraftingFailed { player_id: pid, reason };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
                     }
                     // M3.5: Inventory events
                     Ok(GameEvent::InventoryUpdated { player_id: pid, container_id, slots: _ }) => {

@@ -456,6 +456,24 @@ export function GameProvider({ children }: { children: ReactNode }) {
           }
           break
 
+        case 'extraction_failed':
+          // Nothing started, so whatever is under way carries on
+          if (msg.player_id === playerId) {
+            setPendingExtractionNodeId(null)
+            const failNotification: Notification = {
+              id: `${Date.now()}`,
+              message: `Couldn't gather: ${msg.reason}`,
+              timestamp: Date.now(),
+            }
+            setNotifications((prev) => [...prev, failNotification])
+            setTimeout(() => {
+              setNotifications((prev) =>
+                prev.filter((n) => n.id !== failNotification.id)
+              )
+            }, 3000)
+          }
+          break
+
         case 'node_depleted':
           setNodes((prev) => {
             const next = new Map(prev)

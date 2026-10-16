@@ -16,9 +16,10 @@
 //! own calls. Between calls the events wait in the channel, so give each bot
 //! its own thread.
 //!
-//! **What the server doesn't say.** A refused `extract` is only logged on the
-//! server, so a node someone else got to first looks like silence.
-//! [`Bot::extract`] gives up after [`START_TIMEOUT`] and remembers the node.
+//! **Refusals.** The server answers a refused `extract` with
+//! `extraction_failed` and a reason (B9, #60). [`Bot::extract`] stops on it at
+//! once and remembers the node. [`START_TIMEOUT`] stays as a backstop for an
+//! answer that never comes.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -138,9 +139,9 @@ pub enum BotError {
     #[error("blocked at ({x:.0}, {y:.0}): {reason}")]
     Blocked { reason: String, x: f64, y: f64 },
     /// The server didn't start an `extract`: someone got there first, or the
-    /// node is out of range.
-    #[error("the server didn't start extracting node {0}")]
-    Refused(Uuid),
+    /// node is out of range. `reason` is the server's, or says it never answered.
+    #[error("the server didn't start extracting node {node_id}: {reason}")]
+    Refused { node_id: Uuid, reason: String },
     #[error("{0}")]
     Failed(String),
 }
@@ -527,18 +528,28 @@ impl Bot {
         self.send(ClientMessage::Extract {
             node_id: node.id.to_string(),
         });
-        let started = |seen: &[StateEvent]| {
-            seen.contains(&StateEvent::ExtractionStarted { node_id: node.id })
-        };
-        match self.until("the extraction to start", START_TIMEOUT, |_, seen| {
-            started(seen)
+        let started = StateEvent::ExtractionStarted { node_id: node.id };
+        let answered =
+            |e: &StateEvent| *e == started || matches!(e, StateEvent::ExtractionFailed { .. });
+        let refusal = match self.until("the extraction to start", START_TIMEOUT, |_, seen| {
+            seen.iter().any(answered)
         }) {
-            Ok(_) => {}
-            Err(BotError::Timeout { .. }) => {
-                self.refused.insert(node.id, Instant::now());
-                return Err(BotError::Refused(node.id));
+            Ok(seen) if seen.contains(&started) => None,
+            Ok(seen) => seen.into_iter().find_map(|e| match e {
+                StateEvent::ExtractionFailed { reason } => Some(reason),
+                _ => None,
+            }),
+            Err(BotError::Timeout { waited, .. }) => {
+                Some(format!("no answer in {:.0} s", waited.as_secs_f64()))
             }
             Err(e) => return Err(e),
+        };
+        if let Some(reason) = refusal {
+            self.refused.insert(node.id, Instant::now());
+            return Err(BotError::Refused {
+                node_id: node.id,
+                reason,
+            });
         }
         let duration =
             catalog::resource_type(&node.resource_type).map_or(30, |t| t.extraction_duration_ticks);
@@ -584,8 +595,8 @@ impl Bot {
                     ));
                     yields.push(item);
                 }
-                Err(BotError::Refused(id)) => {
-                    self.say(format!("node {id} didn't start; trying another"));
+                Err(BotError::Refused { node_id, reason }) => {
+                    self.say(format!("node {node_id} refused ({reason}); trying another"));
                 }
                 Err(e) => return Err(e),
             }

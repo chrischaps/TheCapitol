@@ -31,6 +31,11 @@ pub enum GameEvent {
     ExtractionCancelled {
         player_id: Uuid,
     },
+    /// An extraction from `player_id` was refused. Goes to that player only.
+    ExtractionFailed {
+        player_id: Uuid,
+        reason: String,
+    },
     NodeDepleted {
         node_id: Uuid,
     },

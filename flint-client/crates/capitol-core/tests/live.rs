@@ -698,6 +698,71 @@ fn trade_refusals_come_back_as_errors() {
     }
 }
 
+/// B9 (#60): a refused `extract` comes back as `extraction_failed` with the
+/// reason, to the player who asked and nobody else.
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn extraction_refusals_say_why() {
+    fn refusal(seen: &[StateEvent]) -> Option<&str> {
+        seen.iter().find_map(|e| match e {
+            StateEvent::ExtractionFailed { reason } => Some(reason.as_str()),
+            _ => None,
+        })
+    }
+
+    let mut ada = Mirror::register("Ada");
+    let mut brin = Mirror::register("Brin");
+    let brin_id = brin.me();
+    ada.pump_until("Brin in the world", |s, _| s.player(brin_id).is_some());
+
+    // A node that doesn't exist, and an id that isn't one.
+    ada.net.ws(ClientMessage::Extract {
+        node_id: uuid::Uuid::from_u128(0xdead_beef).to_string(),
+    });
+    let seen = ada.pump_until("the refusal", |_, seen| refusal(seen).is_some());
+    assert!(refusal(&seen).unwrap().contains("gone"), "{seen:?}");
+    ada.net.ws(ClientMessage::Extract {
+        node_id: "not-a-node".into(),
+    });
+    let seen = ada.pump_until("the refusal", |_, seen| refusal(seen).is_some());
+    assert!(refusal(&seen).unwrap().contains("not-a-node"), "{seen:?}");
+
+    // The furthest node in sight is out of reach from the spawn.
+    let me = ada.state.local_player().unwrap().clone();
+    let far = ada
+        .state
+        .nodes()
+        .values()
+        .max_by(|a, b| {
+            (a.x - me.x)
+                .hypot(a.y - me.y)
+                .total_cmp(&(b.x - me.x).hypot(b.y - me.y))
+        })
+        .expect("nodes near the spawn (B1)")
+        .clone();
+    let distance = (far.x - me.x).hypot(far.y - me.y);
+    assert!(distance > rules::EXTRACTION_RANGE, "{distance}");
+    ada.net.ws(ClientMessage::Extract {
+        node_id: far.id.to_string(),
+    });
+    let seen = ada.pump_until("the refusal", |_, seen| refusal(seen).is_some());
+    let reason = refusal(&seen).unwrap();
+    assert!(reason.starts_with("Too far"), "{reason}");
+    assert!(!ada.state.is_extracting());
+
+    // None of Ada's refusals reached Brin.
+    let mut seen = Vec::new();
+    let until = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < until {
+        seen.extend(brin.pump_until("a frame", |_, _| true));
+    }
+    assert_eq!(refusal(&seen), None, "{seen:?}");
+
+    for mirror in [&ada, &brin] {
+        mirror.net.disconnect();
+    }
+}
+
 /// Carries out an [`Auth`]'s effects on `net`, keeping what it asks to
 /// remember, and feeds it events until `done` holds.
 fn drive_auth(

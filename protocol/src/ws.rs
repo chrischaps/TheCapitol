@@ -160,6 +160,9 @@ pub enum ServerMessage {
     },
     #[serde(rename = "extraction_cancelled")]
     ExtractionCancelled { player_id: Uuid },
+    /// An `extract` was refused. Sent to the requester only.
+    #[serde(rename = "extraction_failed")]
+    ExtractionFailed { player_id: Uuid, reason: String },
     #[serde(rename = "node_depleted")]
     NodeDepleted { node_id: Uuid },
     #[serde(rename = "node_regenerated")]
@@ -315,6 +318,7 @@ impl ServerMessage {
             ServerMessage::ExtractionProgress { .. } => "extraction_progress",
             ServerMessage::ExtractionCompleted { .. } => "extraction_completed",
             ServerMessage::ExtractionCancelled { .. } => "extraction_cancelled",
+            ServerMessage::ExtractionFailed { .. } => "extraction_failed",
             ServerMessage::NodeDepleted { .. } => "node_depleted",
             ServerMessage::NodeRegenerated { .. } => "node_regenerated",
             ServerMessage::NearbyNodes { .. } => "nearby_nodes",

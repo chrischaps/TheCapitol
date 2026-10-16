@@ -10,10 +10,12 @@
 //!   sends `extract`. A target that someone else takes, or that depletes,
 //!   is dropped. So is one you walk away from by clicking elsewhere
 //!   ([`Harvest::walked`]).
-//! - **Unanswered:** the server only logs a refused `extract` today. If no
-//!   `extraction_started` comes within [`UNANSWERED`], [`Harvest::tick`]
-//!   says so, so the UI can say something rather than nothing. B9 (#60)
-//!   adds `extraction_failed` with the reason; this guess goes when it lands.
+//! - **Refused:** the server answers a refused `extract` with
+//!   `extraction_failed` and its reason (B9, #60), passed on as
+//!   [`Note::Refused`].
+//! - **Unanswered:** a backstop. If neither answer comes within
+//!   [`UNANSWERED`], [`Harvest::tick`] says so, so the UI can say something
+//!   rather than nothing.
 //!
 //! ```no_run
 //! # use std::time::Instant;
@@ -52,12 +54,13 @@ pub enum Step {
 }
 
 /// Something worth telling the player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Note {
     /// The node you were walking to was taken or depleted on the way.
     Lost(Uuid),
-    /// An `extract` went out and nothing came back. Someone may have got
-    /// there first, or you were out of range by the server's reckoning.
+    /// The server refused the `extract`, and said why.
+    Refused(String),
+    /// An `extract` went out and nothing came back, not even a refusal.
     Unanswered(Uuid),
     /// You're busy with another action (extracting or crafting).
     Busy,
@@ -123,6 +126,10 @@ impl Harvest {
                 StateEvent::ExtractionStarted { .. } => {
                     self.asked = None;
                     self.target = None;
+                }
+                StateEvent::ExtractionFailed { reason } => {
+                    self.asked = None;
+                    self.notes.push(Note::Refused(reason.clone()));
                 }
                 // Walked into water: the walk is over, and so is the plan.
                 StateEvent::MovementBlocked { .. } => self.target = None,
@@ -317,6 +324,30 @@ mod tests {
             duration_ticks: 30,
         });
         h.observe(&changes, &state, now);
+        h.tick(now + UNANSWERED * 2);
+        assert!(h.take_notes().is_empty());
+    }
+
+    #[test]
+    fn a_refusal_passes_on_the_servers_reason_once() {
+        let mut state = world();
+        at(&mut state, 4190.0, 4000.0);
+        let mut h = Harvest::default();
+        let now = Instant::now();
+        h.click(NODE, &state, now);
+        let changes = state.apply_ws(&M::ExtractionFailed {
+            player_id: ME,
+            reason: "Someone else is already gathering this Wild Grass".into(),
+        });
+        h.observe(&changes, &state, now);
+        assert_eq!(
+            h.take_notes(),
+            vec![Note::Refused(
+                "Someone else is already gathering this Wild Grass".into()
+            )]
+        );
+        assert_eq!(h.asked(), None);
+        // The backstop doesn't fire as well.
         h.tick(now + UNANSWERED * 2);
         assert!(h.take_notes().is_empty());
     }

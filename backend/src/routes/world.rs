@@ -8,7 +8,7 @@ use uuid::Uuid;
 use capitol_protocol::rest::{ExtractRequest, ExtractResponse, NearbyResponse};
 use capitol_protocol::rules::{NEARBY_NODE_RANGE, SPAWN_X, SPAWN_Y};
 
-use crate::engine::{Command, EXTRACTION_RANGE};
+use crate::engine::{extraction_refusal, Command};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::ResourceNodeInfo;
@@ -108,17 +108,13 @@ pub async fn start_extraction(
             AppError::BadRequest("Resource node not found".into())
         })?;
 
-        // Check range
-        let dx = player.x - node.x;
-        let dy = player.y - node.y;
-        let distance = (dx * dx + dy * dy).sqrt();
-        if distance > EXTRACTION_RANGE {
-            return Err(AppError::BadRequest("Too far from resource".into()));
-        }
+        let resource_type = game.resource_types.get(&node.resource_type).ok_or_else(|| {
+            AppError::BadRequest(format!("Unknown resource type '{}'", node.resource_type))
+        })?;
 
-        // Check if node is available
-        if node.state != crate::models::NodeState::Available {
-            return Err(AppError::BadRequest("Resource is not available".into()));
+        // The same reasons the tick gives over the WebSocket as extraction_failed
+        if let Some(reason) = extraction_refusal(player, node, resource_type) {
+            return Err(AppError::BadRequest(reason));
         }
     }
 

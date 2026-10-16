@@ -147,6 +147,11 @@ pub enum StateEvent {
         item: Yield,
     },
     ExtractionCancelled,
+    /// The server refused the local player's `extract`. Nothing had started,
+    /// so whatever the player was doing carries on.
+    ExtractionFailed {
+        reason: String,
+    },
     /// The local player started crafting, by hand or at a station.
     CraftingStarted {
         recipe_id: String,
@@ -430,6 +435,15 @@ impl GameState {
             }
             M::ExtractionCancelled { player_id } => {
                 self.finish(*player_id, StateEvent::ExtractionCancelled, &mut out)
+            }
+            // Not `finish`: a refusal ends nothing. "Already performing an
+            // action" arrives while the activity it names is still running.
+            M::ExtractionFailed { player_id, reason } => {
+                if self.is_me(*player_id) {
+                    out.push(StateEvent::ExtractionFailed {
+                        reason: reason.clone(),
+                    });
+                }
             }
             M::NodeDepleted { node_id } => self.set_node_state(*node_id, "depleted", &mut out),
             M::NodeRegenerated { node_id } => self.set_node_state(*node_id, "available", &mut out),

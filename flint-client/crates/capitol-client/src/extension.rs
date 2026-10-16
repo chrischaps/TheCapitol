@@ -1139,7 +1139,7 @@ fn gather(
         sound.gathered();
     }
     for note in session.take_harvest_notes() {
-        let (title, body) = note_words(note);
+        let (title, body) = note_words(&note);
         tracing::info!("extract: {note:?}");
         let mut data = toml::Table::new();
         data.insert("title".into(), title.into());
@@ -1443,13 +1443,13 @@ pub(crate) fn yield_data(item: &capitol_core::state::Yield) -> toml::Table {
 }
 
 /// What to tell the player about an extraction that didn't happen. A
-/// refused `extract` has no reason yet: the server only logs it, so the
-/// words guess the likeliest (B9, issue #60, sends the real one).
-fn note_words(note: Note) -> (&'static str, &'static str) {
+/// refusal carries the server's own reason (B9, #60).
+fn note_words(note: &Note) -> (&'static str, String) {
     match note {
-        Note::Lost(_) => ("Taken", "Someone else got to that grass first"),
-        Note::Unanswered(_) => ("Couldn't gather", "Someone may have got there first"),
-        Note::Busy => ("Busy", "Finish what you're doing first"),
+        Note::Lost(_) => ("Taken", "Someone else got to that grass first".into()),
+        Note::Refused(reason) => ("Couldn't gather", reason.clone()),
+        Note::Unanswered(_) => ("Couldn't gather", "The server didn't answer".into()),
+        Note::Busy => ("Busy", "Finish what you're doing first".into()),
     }
 }
 

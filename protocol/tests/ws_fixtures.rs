@@ -24,6 +24,7 @@ const SERVER_TYPES: &[&str] = &[
     "extraction_progress",
     "extraction_completed",
     "extraction_cancelled",
+    "extraction_failed",
     "node_depleted",
     "node_regenerated",
     "nearby_nodes",

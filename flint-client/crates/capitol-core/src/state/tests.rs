@@ -179,6 +179,7 @@ fn test_for(message: &M) -> fn() {
         M::ExtractionProgress { .. } => extraction_progress_updates_the_right_player,
         M::ExtractionCompleted { .. } => extraction_completed_reports_the_yield,
         M::ExtractionCancelled { .. } => extraction_cancelled_clears_only_that_player,
+        M::ExtractionFailed { .. } => extraction_failed_reports_only_mine_and_ends_nothing,
         M::NodeDepleted { .. } => node_depleted_and_regenerated_flip_state,
         M::NodeRegenerated { .. } => node_depleted_and_regenerated_flip_state,
         M::NearbyNodes { .. } => nearby_nodes_merge,
@@ -225,7 +226,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 38, "one fixture per ServerMessage variant");
+    assert_eq!(count, 39, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -514,6 +515,34 @@ fn extraction_cancelled_clears_only_that_player() {
     assert!(state
         .apply_ws(&M::ExtractionCancelled { player_id: OTHER })
         .is_empty());
+}
+
+#[test]
+fn extraction_failed_reports_only_mine_and_ends_nothing() {
+    let mut state = with_players();
+    state.apply_ws(&extraction_started(ME));
+    state.apply_ws(&extraction_started(OTHER));
+    // Another player's refusal is theirs alone (the server doesn't send it
+    // here, but if it did it changes nothing).
+    let events = state.apply_ws(&M::ExtractionFailed {
+        player_id: OTHER,
+        reason: "Too far from resource".into(),
+    });
+    assert!(events.is_empty(), "{events:?}");
+    assert!(state.activity(OTHER).is_some());
+
+    // "Already performing an action": the extraction under way carries on.
+    let events = state.apply_ws(&M::ExtractionFailed {
+        player_id: ME,
+        reason: "Already performing an action".into(),
+    });
+    assert_eq!(
+        events,
+        vec![StateEvent::ExtractionFailed {
+            reason: "Already performing an action".into()
+        }]
+    );
+    assert!(state.is_extracting());
 }
 
 #[test]
