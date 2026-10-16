@@ -28,10 +28,11 @@ use capitol_core::net::{
     ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
 };
 use capitol_core::poll::{Fetch, Poller};
-use capitol_core::protocol::rest::{MoveItemRequest, PositionQuery};
+use capitol_core::protocol::rest::{MoveItemRequest, PositionQuery, SlotItem};
 use capitol_core::protocol::rules::Zone;
 use capitol_core::protocol::ws::ClientMessage;
 use capitol_core::state::{GameState, StateEvent, Yield};
+use capitol_core::station::{self, Kit, Placing};
 use flint_runtime::PersistentStore;
 use uuid::Uuid;
 
@@ -101,6 +102,10 @@ pub struct Session {
     /// What's worth telling the player about picking a plot, since the
     /// frame last took them.
     plot_notes: Vec<PlotNote>,
+    /// Placing a station from a kit (P6.2), while it lasts.
+    placing: Option<Placing>,
+    /// What placing has to tell the player since the extension last took it.
+    placing_notes: Vec<station::Note>,
 }
 
 /// Something to tell the player about picking a plot.
@@ -174,6 +179,8 @@ impl Session {
             claim_refused: None,
             claimed: Vec::new(),
             plot_notes: Vec::new(),
+            placing: None,
+            placing_notes: Vec::new(),
         };
         session.apply(effects);
         Ok(session)
@@ -430,6 +437,50 @@ impl Session {
         std::mem::take(&mut self.plot_notes)
     }
 
+    /// Starts placing the station `item` makes, if it's a kit: the ghost
+    /// follows the cursor until a click puts it down or it's cancelled.
+    /// Another kit's placement gives way to this one.
+    pub fn begin_placing(&mut self, item: &SlotItem) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        if let Some(kit) = Kit::of(item) {
+            tracing::info!("place: aiming a {}", kit.station_type);
+            self.placing = Some(Placing::new(kit));
+        }
+    }
+
+    /// Stops placing (a right click or Esc). A click already sent still
+    /// lands if the server takes it.
+    pub fn cancel_placing(&mut self) {
+        if self.placing.take().is_some() {
+            tracing::info!("place: cancelled");
+        }
+    }
+
+    /// The placement under way, if any.
+    pub fn placing(&self) -> Option<&Placing> {
+        self.placing.as_ref()
+    }
+
+    /// A click at `(x, y)` server units while placing: put the station there,
+    /// if it can go there.
+    pub fn place(&mut self, now: Instant, x: f64, y: f64) {
+        let Some(placing) = &mut self.placing else {
+            return;
+        };
+        if let Some(message) = placing.place([x, y], &self.state, now) {
+            tracing::info!("place: {} at ({x:.0}, {y:.0})", placing.kit().station_type);
+            self.net.ws(message);
+        }
+        self.placing_notes.extend(placing.take_notes());
+    }
+
+    /// What placing had to tell the player since the last call.
+    pub fn take_placing_notes(&mut self) -> Vec<station::Note> {
+        std::mem::take(&mut self.placing_notes)
+    }
+
     /// Sends a message on the socket. Dropped while not connected.
     pub fn ws(&self, message: ClientMessage) {
         self.net.ws(message);
@@ -554,6 +605,10 @@ impl Session {
             }
             self.crafting.observe(&changes, &self.state, now);
             self.note_crafting(now);
+            if let Some(placing) = &mut self.placing {
+                placing.observe(&changes, &self.state);
+            }
+            self.settle_placing();
             if let Some(step) = self.harvest.observe(&changes, &self.state, now) {
                 self.step(now, step);
             }
@@ -572,6 +627,10 @@ impl Session {
             self.harvest.tick(now);
             self.crafting.tick(now);
             self.note_crafting(now);
+            if let Some(placing) = &mut self.placing {
+                placing.tick(now);
+            }
+            self.settle_placing();
             self.state.tick(now);
             for (request, tag) in self.poller.tick(now) {
                 self.net.rest(request, tag);
@@ -603,6 +662,22 @@ impl Session {
             self.claim_refused = None;
             self.claimed.clear();
             self.plot_notes.clear();
+            self.placing = None;
+            self.placing_notes.clear();
+        }
+    }
+
+    /// Keeps the placement's notes, and ends it once it's done.
+    fn settle_placing(&mut self) {
+        let Some(placing) = &mut self.placing else {
+            return;
+        };
+        for note in placing.take_notes() {
+            tracing::info!("place: {note:?}");
+            self.placing_notes.push(note);
+        }
+        if placing.is_done() {
+            self.placing = None;
         }
     }
 

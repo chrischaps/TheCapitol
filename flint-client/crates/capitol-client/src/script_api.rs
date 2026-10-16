@@ -47,6 +47,15 @@ pub struct Shared {
     pub pick_plot: Arc<Mutex<Option<[f64; 2]>>>,
     /// The plot the plot panel shows, for its outline on the ground.
     pub picked_plot: Arc<Mutex<Option<PlotMark>>>,
+    /// The station being placed (P6.2), as the extension left it this
+    /// frame. `None` when nothing is.
+    pub placement: Arc<Mutex<Option<PlacementMark>>>,
+    /// The ground under the cursor, world metres, as `input.rhai` last saw
+    /// it (`cap_place_hover`). The ghost follows it.
+    pub place_hover: Arc<Mutex<Option<[f32; 2]>>>,
+    /// Where a script last asked to put the station down (`cap_place`),
+    /// world metres. The extension takes it next frame.
+    pub place_at: Arc<Mutex<Option<[f32; 2]>>>,
 }
 
 /// The picked plot as scripts see it.
@@ -60,6 +69,35 @@ pub struct PlotMark {
     pub mine: bool,
     /// Someone owns it.
     pub owned: bool,
+}
+
+/// The station being placed, as scripts see it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementMark {
+    /// As in [`StationMark::kind`].
+    pub kind: &'static str,
+    /// The kit's name, "Workbench Kit".
+    pub kit: String,
+    /// Where the ghost is, world metres (X, Z). `None` while the cursor is
+    /// off the ground.
+    pub at: Option<[f32; 2]>,
+    /// Its ring's radius, metres, as the in-range ring's.
+    pub radius: f32,
+    /// It can go down where the ghost is.
+    pub ok: bool,
+    /// Why not, in words, when it can't.
+    pub why: Option<String>,
+    /// The click went out, and the server hasn't answered.
+    pub asking: bool,
+    /// Where you stand (world metres) and how far you can place (metres).
+    pub you: Option<[f32; 2]>,
+    pub reach: f32,
+    /// How far apart stations must stand (metres), and the stations within
+    /// a few of that of the ghost, world metres.
+    pub spacing: f32,
+    pub crowding: Vec<[f32; 2]>,
+    /// Your plots' corners, world metres, for their outlines.
+    pub plots: Vec<[[f32; 2]; 4]>,
 }
 
 /// The zone banner's words and colour, and when it started.
@@ -301,6 +339,41 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         m.insert("owned".into(), p.owned.into());
         m.into()
     });
+    // `cap_placing() -> #{ kind, kit, x, z, radius, ok, why, asking, you_x,
+    // you_z, reach, spacing, crowding, plots } or ()`: the station being
+    // placed. `x`/`z` are the ghost's (or () off the ground), `why` the
+    // reason it can't go there (or ()), `crowding` the [x, z] of stations
+    // near it, `plots` your plots as four [x, z] corners each. World
+    // metres throughout. () when nothing is being placed.
+    let placement = shared.placement.clone();
+    engine.register_fn("cap_placing", move || -> rhai::Dynamic {
+        match placement.lock().ok().and_then(|p| p.clone()) {
+            Some(p) => placement_map(&p).into(),
+            None => rhai::Dynamic::UNIT,
+        }
+    });
+    // `cap_place_hover(x, z)`: the ground under the cursor this frame, for
+    // the ghost to follow. `cap_place_off()` when it's over the sky.
+    let hover = shared.place_hover.clone();
+    engine.register_fn("cap_place_hover", move |x: f64, z: f64| {
+        if let Ok(mut h) = hover.lock() {
+            *h = Some([x as f32, z as f32]);
+        }
+    });
+    let hover = shared.place_hover.clone();
+    engine.register_fn("cap_place_off", move || {
+        if let Ok(mut h) = hover.lock() {
+            *h = None;
+        }
+    });
+    // `cap_place(x, z)`: put the station down at the ground point (x, z),
+    // world metres. Sent next frame if it can go there; refused otherwise.
+    let place_at = shared.place_at.clone();
+    engine.register_fn("cap_place", move |x: f64, z: f64| {
+        if let Ok(mut p) = place_at.lock() {
+            *p = Some([x as f32, z as f32]);
+        }
+    });
     // `cap_ground_y() -> float`: the land's height in metres, for picking
     // and for drawing on the ground. The sea is at 0.
     engine.register_fn("cap_ground_y", || crate::coords::layer::GROUND as f64);
@@ -321,6 +394,50 @@ fn node_map(n: &NodeMark) -> rhai::Map {
         "progress".into(),
         n.progress
             .map_or(rhai::Dynamic::UNIT, |p| (p as f64).into()),
+    );
+    m
+}
+
+fn point(p: [f32; 2]) -> rhai::Dynamic {
+    rhai::Dynamic::from_array(vec![(p[0] as f64).into(), (p[1] as f64).into()])
+}
+
+fn placement_map(p: &PlacementMark) -> rhai::Map {
+    let unit = || rhai::Dynamic::UNIT;
+    let mut m = rhai::Map::new();
+    m.insert("kind".into(), p.kind.into());
+    m.insert("kit".into(), p.kit.clone().into());
+    m.insert("x".into(), p.at.map_or_else(unit, |a| (a[0] as f64).into()));
+    m.insert("z".into(), p.at.map_or_else(unit, |a| (a[1] as f64).into()));
+    m.insert("radius".into(), (p.radius as f64).into());
+    m.insert("ok".into(), p.ok.into());
+    m.insert(
+        "why".into(),
+        p.why.clone().map_or_else(unit, rhai::Dynamic::from),
+    );
+    m.insert("asking".into(), p.asking.into());
+    m.insert(
+        "you_x".into(),
+        p.you.map_or_else(unit, |a| (a[0] as f64).into()),
+    );
+    m.insert(
+        "you_z".into(),
+        p.you.map_or_else(unit, |a| (a[1] as f64).into()),
+    );
+    m.insert("reach".into(), (p.reach as f64).into());
+    m.insert("spacing".into(), (p.spacing as f64).into());
+    m.insert(
+        "crowding".into(),
+        rhai::Dynamic::from_array(p.crowding.iter().map(|c| point(*c)).collect()),
+    );
+    m.insert(
+        "plots".into(),
+        rhai::Dynamic::from_array(
+            p.plots
+                .iter()
+                .map(|q| rhai::Dynamic::from_array(q.iter().map(|c| point(*c)).collect()))
+                .collect(),
+        ),
     );
     m
 }
@@ -499,6 +616,42 @@ mod tests {
             .eval(r#"let p = cap_picked_plot(); `${p.outline.len()} ${p.outline[2][1]} ${p.mine}`"#)
             .unwrap();
         assert_eq!(words, "3 3.0 true");
+    }
+
+    #[test]
+    fn scripts_read_the_placement_and_ask_to_place() {
+        let shared = Shared::default();
+        let mut engine = rhai::Engine::new();
+        register(&mut engine, &shared);
+        assert!(engine.eval::<()>("cap_placing()").is_ok());
+        *shared.placement.lock().unwrap() = Some(PlacementMark {
+            kind: "forge",
+            kit: "Forge Kit".into(),
+            at: Some([1.0, 2.0]),
+            radius: 1.95,
+            ok: false,
+            why: Some("Too far from you".into()),
+            asking: false,
+            you: None,
+            reach: 7.5,
+            spacing: 5.0,
+            crowding: vec![[3.0, 4.0]],
+            plots: vec![[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]],
+        });
+        let words: String = engine
+            .eval(
+                r#"let p = cap_placing();
+                   `${p.kind} ${p.z} ${p.why} ${p.you_x == ()} ${p.crowding[0][1]} ${p.plots[0][2][0]}`"#,
+            )
+            .unwrap();
+        assert_eq!(words, "forge 2.0 Too far from you true 4.0 1.0");
+        engine
+            .run("cap_place_hover(5.0, 6.0); cap_place(7.0, 8.0);")
+            .unwrap();
+        assert_eq!(*shared.place_hover.lock().unwrap(), Some([5.0, 6.0]));
+        assert_eq!(*shared.place_at.lock().unwrap(), Some([7.0, 8.0]));
+        engine.run("cap_place_off()").unwrap();
+        assert_eq!(*shared.place_hover.lock().unwrap(), None);
     }
 
     #[test]

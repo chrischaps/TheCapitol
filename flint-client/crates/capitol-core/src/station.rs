@@ -1,13 +1,38 @@
-//! Stations in the world (P6): whether you can reach one.
+//! Stations in the world (P6): whether you can reach one, and where you may
+//! put one down.
 //!
 //! The server lets you use a station from up to its type's
 //! `interaction_range` away (75 units for every seeded type), measured
 //! from your server position to the station's. React draws its orange
 //! ring on the same test (`GameCanvas.tsx`, `distance <= 75`), and so
-//! does the Flint client. P6.2's placement checks and P6.3's open-or-walk
-//! belong here too.
+//! does the Flint client. P6.3's open-or-walk belongs here too.
+//!
+//! **Placing (P6.2).** A right click on a `*_kit` starts [`Placing`]. The
+//! ghost turns green or red on [`check`], which runs the server's own
+//! tests in the server's order (`handle_place_station` in
+//! `backend/src/ws/connection.rs`):
+//! - within 75 of you
+//! - on a plot you own (the terrain lot, B7)
+//! - with room on that plot
+//! - at least 50 from every other station
+//!
+//! A click where they all pass sends `place_station` over the socket. The
+//! REST route places the station in the database but not in the game
+//! state, so it has to be the socket. The server answers `station_placed`
+//! or an `error`, and [`Placing`] waits for one or the other.
 
-use capitol_protocol::rest::StationInfo;
+use std::time::{Duration, Instant};
+
+use capitol_protocol::rest::{PlotInfo, SlotItem, StationInfo};
+use capitol_protocol::rules::{self, STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
+use capitol_protocol::ws::ClientMessage;
+use uuid::Uuid;
+
+use crate::state::{GameState, StateEvent};
+
+/// How long a `place_station` may go unanswered. The server answers within
+/// a few database round trips.
+pub const UNANSWERED: Duration = Duration::from_secs(4);
 
 /// Whether a player at `at` (server units) is close enough to use
 /// `station`: within its interaction range, the edge included.
@@ -16,10 +41,244 @@ pub fn in_reach(at: [f64; 2], station: &StationInfo) -> bool {
     d <= station.interaction_range as f64
 }
 
+/// Why a station can't go down where the ghost is. The server refuses the
+/// same cases, in this order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// More than 75 units from where you stand.
+    TooFar,
+    /// Not on a plot of yours: someone else's, nobody's, or none at all.
+    NotYourPlot,
+    /// On your plot, but it holds all the stations it can.
+    PlotFull { capacity: i32 },
+    /// Under 50 units from another station.
+    TooClose,
+}
+
+impl Refusal {
+    /// What the ghost says under itself.
+    pub fn words(&self) -> String {
+        match self {
+            Refusal::TooFar => "Too far from you".into(),
+            Refusal::NotYourPlot => "Not on a plot you own".into(),
+            Refusal::PlotFull { capacity } => format!("This plot is full ({capacity}/{capacity})"),
+            Refusal::TooClose => "Too close to another station".into(),
+        }
+    }
+}
+
+/// Whether a station can go down at `at` (server units), for the player
+/// `me` standing at `you`. `plots` may hold anyone's; only `me`'s count.
+/// `Ok` names the plot the station would stand on.
+pub fn check<'a>(
+    at: [f64; 2],
+    you: [f64; 2],
+    me: Uuid,
+    stations: impl IntoIterator<Item = &'a StationInfo>,
+    plots: &[PlotInfo],
+) -> Result<Uuid, Refusal> {
+    let [x, y] = at;
+    // Every seeded type's range is 75; the server tests the type's own.
+    if (x - you[0]).hypot(y - you[1]) > STATION_INTERACTION_RANGE {
+        return Err(Refusal::TooFar);
+    }
+    let plot = plots
+        .iter()
+        .find(|p| p.owner_id == Some(me) && p.contains(x, y))
+        .ok_or(Refusal::NotYourPlot)?;
+    if plot.station_count >= plot.station_capacity {
+        return Err(Refusal::PlotFull {
+            capacity: plot.station_capacity,
+        });
+    }
+    if stations
+        .into_iter()
+        .any(|s| (s.x - x).hypot(s.y - y) < STATION_MIN_SPACING)
+    {
+        return Err(Refusal::TooClose);
+    }
+    Ok(plot.id)
+}
+
+/// The kit being placed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Kit {
+    pub item_id: Uuid,
+    pub item_name: String,
+    /// The station it makes: "workbench", "forge" or "storage_chest".
+    pub station_type: &'static str,
+}
+
+impl Kit {
+    /// The kit in `item`, if it is one.
+    pub fn of(item: &SlotItem) -> Option<Kit> {
+        Some(Kit {
+            item_id: item.item_id,
+            item_name: item.item_name.clone(),
+            station_type: rules::station_type_for_kit(&item.item_type)?,
+        })
+    }
+}
+
+/// Where a placement stands.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Phase {
+    /// The ghost follows the cursor; a click puts it down.
+    Aiming,
+    /// `place_station` went out for `at`; no answer yet.
+    Asking { at: [f64; 2], since: Instant },
+}
+
+/// Something worth telling the player.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Note {
+    /// A click where the station can't go.
+    Refused(Refusal),
+    /// The server refused, in its words ("Too far to place station").
+    Failed(String),
+    /// A `place_station` went out and nothing came back.
+    Unanswered,
+    /// It's down.
+    Placed { station_id: Uuid },
+}
+
+/// Placing one kit: aiming, then asking, until the station is down or the
+/// kit is gone. Feed it every batch of state changes and tick it each
+/// frame. [`Placing::is_done`] says when to leave placement mode.
+#[derive(Debug, Clone)]
+pub struct Placing {
+    kit: Kit,
+    phase: Phase,
+    notes: Vec<Note>,
+    done: bool,
+}
+
+impl Placing {
+    pub fn new(kit: Kit) -> Self {
+        Self {
+            kit,
+            phase: Phase::Aiming,
+            notes: Vec::new(),
+            done: false,
+        }
+    }
+
+    pub fn kit(&self) -> &Kit {
+        &self.kit
+    }
+
+    pub fn phase(&self) -> &Phase {
+        &self.phase
+    }
+
+    /// The station is down, or the kit has gone.
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+
+    /// Whether the station can go down at `at` now, by the store. Until the
+    /// server has placed you, it can't go anywhere.
+    pub fn check(&self, at: [f64; 2], state: &GameState) -> Result<Uuid, Refusal> {
+        let (Some(me), Some(you)) = (state.me(), state.local_player()) else {
+            return Err(Refusal::TooFar);
+        };
+        check(
+            at,
+            [you.x, you.y],
+            me,
+            state.stations().values(),
+            state.plots(),
+        )
+    }
+
+    /// A click at `at`. Returns the message to send if the station can go
+    /// there and nothing is out already; a refusal is noted instead.
+    pub fn place(
+        &mut self,
+        at: [f64; 2],
+        state: &GameState,
+        now: Instant,
+    ) -> Option<ClientMessage> {
+        if self.phase != Phase::Aiming || self.done {
+            return None;
+        }
+        if let Err(why) = self.check(at, state) {
+            self.notes.push(Note::Refused(why));
+            return None;
+        }
+        self.phase = Phase::Asking { at, since: now };
+        Some(ClientMessage::PlaceStation {
+            station_type: self.kit.station_type.to_owned(),
+            x: at[0],
+            y: at[1],
+            kit_item_id: self.kit.item_id.to_string(),
+        })
+    }
+
+    /// After every batch of state changes.
+    pub fn observe(&mut self, changes: &[StateEvent], state: &GameState) {
+        for change in changes {
+            match (change, &self.phase) {
+                (
+                    StateEvent::StationPlaced {
+                        station_id,
+                        owner_id,
+                    },
+                    Phase::Asking { .. },
+                ) if state.me() == Some(*owner_id) => {
+                    self.notes.push(Note::Placed {
+                        station_id: *station_id,
+                    });
+                    self.done = true;
+                }
+                // The socket's `error` names no command. While a placement is
+                // out, it's taken as the answer, as React's toast takes it. A
+                // workaround until errors say which command failed (#89).
+                (StateEvent::ServerError { message }, Phase::Asking { .. }) => {
+                    self.notes.push(Note::Failed(message.clone()));
+                    self.phase = Phase::Aiming;
+                }
+                // A reconnect drops the ask; the snapshot shows whether it landed.
+                (StateEvent::SnapshotStale, Phase::Asking { .. }) => self.phase = Phase::Aiming,
+                // Moved into a station's box, traded, or used: nothing to place.
+                (StateEvent::ContainersUpdated, Phase::Aiming)
+                    if !holds(state, self.kit.item_id) =>
+                {
+                    self.done = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Once per frame: gives up on an unanswered ask.
+    pub fn tick(&mut self, now: Instant) {
+        if let Phase::Asking { since, .. } = self.phase {
+            if now.duration_since(since) >= UNANSWERED {
+                self.phase = Phase::Aiming;
+                self.notes.push(Note::Unanswered);
+            }
+        }
+    }
+
+    /// What's worth telling the player since the last call.
+    pub fn take_notes(&mut self) -> Vec<Note> {
+        std::mem::take(&mut self.notes)
+    }
+}
+
+/// Whether any of the player's own containers holds the stack `item_id`.
+fn holds(state: &GameState, item_id: Uuid) -> bool {
+    state
+        .containers()
+        .values()
+        .any(|c| c.items().any(|i| i.item_id == item_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
+    use capitol_protocol::rest::Bounds;
 
     fn station(x: f64, y: f64) -> StationInfo {
         StationInfo {
@@ -33,6 +292,32 @@ mod tests {
             owner_id: Uuid::nil(),
             container_id: None,
             interaction_range: 75.0,
+        }
+    }
+
+    const ME: Uuid = Uuid::from_u128(1);
+    const THEM: Uuid = Uuid::from_u128(2);
+
+    /// A 200-unit square lot from (x, y), held by `owner`, with `count`
+    /// of its 16 stations down.
+    fn plot(id: u128, x: f64, y: f64, owner: Option<Uuid>, count: i32) -> PlotInfo {
+        let (x1, y1) = (x + 200.0, y + 200.0);
+        PlotInfo {
+            id: Uuid::from_u128(id),
+            zone_id: "suburban".into(),
+            world_x: x + 100.0,
+            world_y: y + 100.0,
+            bounds: Bounds::new(x, y, x1, y1),
+            size_category: "large".into(),
+            plot_type: "standard".into(),
+            owner_id: owner,
+            owner_name: None,
+            claimed_at: None,
+            assessed_value: 0,
+            station_count: count,
+            station_capacity: 16,
+            terrain_id: Some(format!("lot_{id}")),
+            corners: Some([(x, y), (x1, y), (x1, y1), (x, y1)]),
         }
     }
 
@@ -51,5 +336,234 @@ mod tests {
         let mut s = station(0.0, 0.0);
         s.interaction_range = 120.0;
         assert!(in_reach([100.0, 0.0], &s));
+    }
+
+    #[test]
+    fn a_station_goes_on_your_plot_near_you_and_clear_of_others() {
+        let mine = plot(10, 1000.0, 1000.0, Some(ME), 0);
+        let theirs = plot(11, 1200.0, 1000.0, Some(THEM), 0);
+        let free = plot(12, 1000.0, 1200.0, None, 0);
+        let plots = [mine.clone(), theirs, free];
+        let you = [1150.0, 1150.0];
+        let none: [StationInfo; 0] = [];
+        let at = |x, y, stations: &[StationInfo]| check([x, y], you, ME, stations, &plots);
+
+        assert_eq!(at(1100.0, 1100.0, &none), Ok(mine.id));
+        assert_eq!(at(1199.0, 1100.0, &none), Ok(mine.id), "near the edge");
+        assert_eq!(
+            at(1210.0, 1150.0, &none),
+            Err(Refusal::NotYourPlot),
+            "theirs"
+        );
+        assert_eq!(
+            at(1150.0, 1210.0, &none),
+            Err(Refusal::NotYourPlot),
+            "nobody's"
+        );
+        assert_eq!(at(1150.0, 1226.0, &none), Err(Refusal::TooFar), "76 away");
+        assert_eq!(
+            at(1150.0, 1225.0, &none),
+            Err(Refusal::NotYourPlot),
+            "75 is in range"
+        );
+
+        let near = [station(1100.0, 1149.0)];
+        assert_eq!(at(1100.0, 1100.0, &near), Err(Refusal::TooClose), "49 away");
+        assert_eq!(at(1100.0, 1099.0, &near), Ok(mine.id), "50 is clear");
+    }
+
+    #[test]
+    fn a_full_plot_takes_no_more() {
+        let full = plot(10, 1000.0, 1000.0, Some(ME), 16);
+        let r = check([1100.0, 1100.0], [1100.0, 1100.0], ME, [], &[full]);
+        assert_eq!(r, Err(Refusal::PlotFull { capacity: 16 }));
+        assert_eq!(r.unwrap_err().words(), "This plot is full (16/16)");
+    }
+
+    #[test]
+    fn the_checks_run_in_the_servers_order() {
+        // Far, off-plot and crowded all at once: the server says "too far".
+        let crowded = [station(5000.0, 5001.0)];
+        let r = check([5000.0, 5000.0], [0.0, 0.0], ME, &crowded, &[]);
+        assert_eq!(r, Err(Refusal::TooFar));
+        // On a full plot and crowded: the server says "full".
+        let full = plot(10, 4900.0, 4900.0, Some(ME), 16);
+        let r = check([5000.0, 5000.0], [5000.0, 5050.0], ME, &crowded, &[full]);
+        assert_eq!(r, Err(Refusal::PlotFull { capacity: 16 }));
+    }
+
+    #[test]
+    fn only_kits_are_placed() {
+        let item = |t: &str| SlotItem::new(Uuid::from_u128(5), t.into(), "Thing".into(), 50, 1, 0);
+        assert_eq!(Kit::of(&item("forge_kit")).unwrap().station_type, "forge");
+        assert_eq!(
+            Kit::of(&item("chest_kit")).unwrap().station_type,
+            "storage_chest"
+        );
+        assert_eq!(Kit::of(&item("rope")), None);
+    }
+
+    mod placing {
+        use super::*;
+        use crate::net::{ConnectionState, NetEvent, RestResponse};
+        use capitol_protocol::rest::{ContainerResponse, ContainersResponse, ListPlotsResponse};
+        use capitol_protocol::ws::{PlayerPosition, ServerMessage as M};
+
+        const KIT: Uuid = Uuid::from_u128(50);
+
+        fn kit_item() -> SlotItem {
+            SlotItem::new(
+                KIT,
+                "workbench_kit".into(),
+                "Workbench Kit".into(),
+                60,
+                1,
+                0,
+            )
+        }
+
+        /// Signed in as ME, standing at (1100, 1030) on our own plot, the
+        /// workbench kit in the inventory.
+        fn world() -> GameState {
+            let mut s = GameState::new();
+            s.apply(&NetEvent::Connection(ConnectionState::Connected {
+                player_id: ME,
+            }));
+            s.apply(&NetEvent::Ws(M::Positions {
+                players: vec![PlayerPosition {
+                    id: ME,
+                    name: "Ada".into(),
+                    x: 1100.0,
+                    y: 1030.0,
+                }],
+            }));
+            s.apply_rest(&RestResponse::Plots(ListPlotsResponse {
+                plots: vec![plot(10, 1000.0, 1000.0, Some(ME), 0)],
+                total: 1,
+            }));
+            set_inventory(&mut s, true);
+            s
+        }
+
+        fn set_inventory(s: &mut GameState, with_kit: bool) -> Vec<StateEvent> {
+            s.apply_rest(&RestResponse::Containers(ContainersResponse {
+                containers: vec![ContainerResponse {
+                    id: Uuid::from_u128(90),
+                    container_type: "player_inventory".into(),
+                    slot_count: 24,
+                    layout_columns: 6,
+                    slots: if with_kit { vec![kit_item()] } else { vec![] },
+                }],
+            }))
+        }
+
+        fn placing() -> Placing {
+            Placing::new(Kit::of(&kit_item()).unwrap())
+        }
+
+        fn placed(station: u128, owner: Uuid) -> StateEvent {
+            StateEvent::StationPlaced {
+                station_id: Uuid::from_u128(station),
+                owner_id: owner,
+            }
+        }
+
+        #[test]
+        fn a_good_click_asks_once_and_ends_when_its_placed() {
+            let state = world();
+            let t0 = Instant::now();
+            let mut p = placing();
+            let sent = p.place([1120.0, 1040.0], &state, t0);
+            assert_eq!(
+                sent,
+                Some(ClientMessage::PlaceStation {
+                    station_type: "workbench".into(),
+                    x: 1120.0,
+                    y: 1040.0,
+                    kit_item_id: KIT.to_string(),
+                })
+            );
+            assert!(
+                p.place([1120.0, 1040.0], &state, t0).is_none(),
+                "one at a time"
+            );
+            // Someone else's station going down isn't the answer.
+            p.observe(&[placed(70, THEM)], &state);
+            assert!(!p.is_done());
+            p.observe(&[placed(71, ME)], &state);
+            assert!(p.is_done());
+            assert_eq!(
+                p.take_notes(),
+                vec![Note::Placed {
+                    station_id: Uuid::from_u128(71)
+                }]
+            );
+        }
+
+        #[test]
+        fn a_bad_click_is_refused_and_sends_nothing() {
+            let state = world();
+            let mut p = placing();
+            assert!(p.place([1100.0, 990.0], &state, Instant::now()).is_none());
+            assert!(p.place([1300.0, 1100.0], &state, Instant::now()).is_none());
+            assert_eq!(
+                p.take_notes(),
+                vec![
+                    Note::Refused(Refusal::NotYourPlot),
+                    Note::Refused(Refusal::TooFar)
+                ]
+            );
+            assert_eq!(*p.phase(), Phase::Aiming);
+        }
+
+        #[test]
+        fn a_server_refusal_or_silence_goes_back_to_aiming() {
+            let state = world();
+            let t0 = Instant::now();
+            let mut p = placing();
+            p.place([1120.0, 1040.0], &state, t0).unwrap();
+            let refused = StateEvent::ServerError {
+                message: "Too far to place station".into(),
+            };
+            p.observe(&[refused], &state);
+            assert_eq!(*p.phase(), Phase::Aiming);
+            assert_eq!(
+                p.take_notes(),
+                vec![Note::Failed("Too far to place station".into())]
+            );
+
+            p.place([1120.0, 1040.0], &state, t0).unwrap();
+            p.tick(t0 + UNANSWERED - Duration::from_millis(1));
+            assert!(matches!(p.phase(), Phase::Asking { .. }));
+            p.tick(t0 + UNANSWERED);
+            assert_eq!(*p.phase(), Phase::Aiming);
+            assert_eq!(p.take_notes(), vec![Note::Unanswered]);
+            assert!(!p.is_done());
+        }
+
+        #[test]
+        fn it_ends_when_the_kit_leaves_the_inventory() {
+            let mut state = world();
+            let mut p = placing();
+            let changes = set_inventory(&mut state, true);
+            p.observe(&changes, &state);
+            assert!(!p.is_done());
+            let changes = set_inventory(&mut state, false);
+            p.observe(&changes, &state);
+            assert!(p.is_done());
+        }
+
+        #[test]
+        fn the_ghost_reads_the_store() {
+            let state = world();
+            let p = placing();
+            assert_eq!(p.check([1120.0, 1100.0], &state), Ok(Uuid::from_u128(10)));
+            assert_eq!(p.check([1120.0, 1190.0], &state), Err(Refusal::TooFar));
+            // Signed out, it can't go anywhere.
+            assert_eq!(
+                p.check([1120.0, 1100.0], &GameState::new()),
+                Err(Refusal::TooFar)
+            );
+        }
     }
 }

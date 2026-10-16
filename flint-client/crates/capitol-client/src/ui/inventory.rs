@@ -7,10 +7,11 @@
 //! on screen just works. It fills from the store, which the poller and the
 //! WebSocket keep fresh: gathered fiber arrives with no refresh.
 //!
-//! A right click on a `*_kit` item will start placing its station (P6.2).
+//! A right click on a `*_kit` item starts placing its station (P6.2): the
+//! panel hands the kit back, and `Session::begin_placing` takes it.
 
 use super::icons::ItemIcons;
-use super::slots::{Move, SlotGrid};
+use super::slots::{Clicks, SlotGrid};
 use super::theme::{self, size, CRAFT, DIM, SLOT_GAP};
 use capitol_core::state::Container;
 use egui::{Align2, Id, RichText};
@@ -38,17 +39,18 @@ impl InventoryPanel {
 
     /// Draws the panel, or its fade, over the world. `inventory` is `None`
     /// until the first fetch; `refused` is the server's reason for the last
-    /// move, while it's fresh. Returns the move a drop asks for.
+    /// move, while it's fresh. Returns the move a drop asks for, and the kit
+    /// a right click asks to place.
     pub fn show(
         &self,
         ctx: &egui::Context,
         icons: &mut ItemIcons,
         inventory: Option<&Container>,
         refused: Option<&str>,
-    ) -> Option<Move> {
+    ) -> Clicks {
         let shown = ctx.animate_bool_with_time(Id::new("capitol_inventory_fade"), self.open, FADE);
         if shown <= 0.0 {
-            return None;
+            return Clicks::default();
         }
         let ease = 1.0 - (1.0 - shown).powi(3);
         egui::Area::new(Id::new("capitol_inventory"))
@@ -72,16 +74,16 @@ pub fn body(
     icons: &mut ItemIcons,
     inventory: Option<&Container>,
     refused: Option<&str>,
-) -> Option<Move> {
+) -> Clicks {
     // Six slots and their gaps, and the tray's margin (React's min-width).
     ui.set_width(6.0 * theme::SLOT_SIZE + 5.0 * SLOT_GAP + 16.0);
     let Some(c) = inventory else {
         theme::header(ui, "Inventory", None, Some(("Loading…", theme::PILL)));
-        return None;
+        return Clicks::default();
     };
     let badge = format!("{}/{}", c.used_slots(), c.slot_count());
     theme::header(ui, "Inventory", None, Some((&badge, theme::PILL)));
-    let moved = SlotGrid::new(c).show(ui, icons);
+    let clicks = SlotGrid::new(c).placing(true).show_clicks(ui, icons);
     let total: i32 = c.items().map(|i| i.quantity).sum();
     if total > 0 {
         ui.add_space(2.0);
@@ -102,7 +104,7 @@ pub fn body(
         ui.add_space(4.0);
         theme::error_box(ui, why);
     }
-    moved
+    clicks
 }
 
 #[cfg(test)]

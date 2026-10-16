@@ -5,7 +5,8 @@
 //! built from it (`world`, so far the ground, the canals, whose water is
 //! the scene's ocean, the roads, the bridges, the plots and the Capitol
 //! tower), the players walking it (`entities`), the resource nodes they
-//! gather from (`nodes`), the stations they build (`stations`), the crafting panel (`ui::crafting`), the plots you
+//! gather from (`nodes`), the stations they build (`stations`) and place
+//! from a kit (`placing`), the crafting panel (`ui::crafting`), the plots you
 //! pick, claim and own (`ui::plot`, and the gold of `world::plots::owned`), the fog and the light as
 //! the camera climbs (`atmosphere`), the wheel for the camera rig, and the
 //! spike's markers.
@@ -13,9 +14,9 @@
 use crate::atmosphere::Atmosphere;
 use crate::entities::Players;
 use crate::nodes::Nodes;
-use crate::script_api::{self, PlotMark, Shared, ZoneBanner};
+use crate::script_api::{self, PlacementMark, PlotMark, Shared, ZoneBanner};
 use crate::session::Session;
-use crate::stations::Stations;
+use crate::stations::{GhostView, Stations};
 use crate::terrain::TerrainSource;
 use crate::ui::containers::BenchAction;
 use crate::ui::crafting::Action as CraftAction;
@@ -31,13 +32,16 @@ use capitol_core::auth::{Notice, Phase};
 use capitol_core::harvest::Note;
 use capitol_core::net::ConnectionState;
 use capitol_core::plot::Offer;
+use capitol_core::protocol::rules::{STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
 use capitol_core::protocol::terrain::TerrainResponse;
 use capitol_core::protocol::ws::ClientMessage;
+use capitol_core::station::{Note as PlaceNote, Phase as PlacePhase};
 use flint_player::{ExtensionCtx, PlayerExtension};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
-use winit::event::{MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::keyboard::{KeyCode, PhysicalKey};
 
 /// Pixels of a touchpad's smooth scroll that make one wheel notch.
 const PIXELS_PER_NOTCH: f32 = 50.0;
@@ -45,6 +49,10 @@ const PIXELS_PER_NOTCH: f32 = 50.0;
 /// How long the login form takes to fade out once the player is in, in
 /// seconds. The camera comes down from its circle over about the same time.
 const FORM_FADE: f32 = 0.8;
+
+/// How far the cursor may move between a right press and its release, in
+/// pixels, for it to be a click (cancel placing) rather than an orbit.
+const RIGHT_CLICK_SLOP: f64 = 6.0;
 
 pub struct CapitolExtension {
     shared: Shared,
@@ -84,6 +92,14 @@ pub struct CapitolExtension {
     crafting: ui::crafting::CraftingPanel,
     /// Enter (the `craft` action) was pressed since `ui` last looked.
     craft_key: bool,
+    /// Esc, or a right click on the world, since the last frame: stop
+    /// placing (P6.2).
+    cancel_placing: bool,
+    /// The cursor, physical pixels, and where the right button went down.
+    cursor: (f64, f64),
+    right_down: Option<(f64, f64)>,
+    /// `--place`: the kit to start placing once the inventory holds one.
+    place_on_arrival: Option<String>,
 }
 
 impl CapitolExtension {
@@ -112,6 +128,10 @@ impl CapitolExtension {
             stations: Stations::default(),
             crafting: ui::crafting::CraftingPanel::default(),
             craft_key: false,
+            cancel_placing: false,
+            cursor: (0.0, 0.0),
+            right_down: None,
+            place_on_arrival: None,
         }
     }
 
@@ -130,6 +150,13 @@ impl CapitolExtension {
     /// Show every container as a slot grid once signed in (`--containers`).
     pub fn with_containers(mut self, on: bool) -> Self {
         self.containers = on;
+        self
+    }
+
+    /// Start placing the first `item_type` kit once signed in (`--place`).
+    /// A workaround: captures can't right-click egui (issue #76).
+    pub fn with_place(mut self, item_type: Option<String>) -> Self {
+        self.place_on_arrival = item_type;
         self
     }
 
@@ -225,6 +252,20 @@ impl PlayerExtension for CapitolExtension {
             let me = self.shared.follow.lock().ok().and_then(|f| *f);
             self.stations
                 .update(ctx, session.state(), me, &placed, dt, &self.shared);
+            if let Some(kind) = &self.place_on_arrival {
+                let kit = session
+                    .state()
+                    .inventory()
+                    .and_then(|c| c.items().find(|i| &i.item_type == kind).cloned());
+                if let Some(kit) = kit {
+                    session.begin_placing(&kit);
+                    self.place_on_arrival = None;
+                }
+            }
+            if std::mem::take(&mut self.cancel_placing) {
+                session.cancel_placing();
+            }
+            placing(ctx, session, &self.shared, &mut self.stations, now, dt);
         }
         self.shared
             .at_login
@@ -317,7 +358,41 @@ impl PlayerExtension for CapitolExtension {
     /// Collect the wheel for the camera rig (`cap_take_wheel`), because
     /// Flint doesn't feed it to actions. A workaround: issue #67. Never
     /// consumed; egui has already kept any wheel over its windows.
+    ///
+    /// While a station is being placed (P6.2), Esc stops it rather than
+    /// quitting, and so does a right click on the world (not a right-drag,
+    /// which orbits). egui has already kept any click over its panels.
     fn on_window_event(&mut self, event: &WindowEvent) -> bool {
+        let placing = self.session.as_ref().is_some_and(|s| s.placing().is_some());
+        match event {
+            WindowEvent::KeyboardInput { event: key, .. }
+                if placing && key.physical_key == PhysicalKey::Code(KeyCode::Escape) =>
+            {
+                if key.state == ElementState::Pressed {
+                    self.cancel_placing = true;
+                }
+                return true;
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x, position.y);
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Right,
+                ..
+            } => match state {
+                ElementState::Pressed => self.right_down = Some(self.cursor),
+                ElementState::Released => {
+                    let (x, y) = self.cursor;
+                    let click = self
+                        .right_down
+                        .take()
+                        .is_some_and(|(px, py)| (x - px).hypot(y - py) <= RIGHT_CLICK_SLOP);
+                    self.cancel_placing |= placing && click;
+                }
+            },
+            _ => {}
+        }
         if let WindowEvent::MouseWheel { delta, .. } = event {
             let notches = match delta {
                 MouseScrollDelta::LineDelta(_, y) => *y,
@@ -433,11 +508,14 @@ impl PlayerExtension for CapitolExtension {
                 }
                 let refused = session.move_refused(Instant::now());
                 let inventory = session.state().inventory();
-                if let Some(m) = self
+                let clicks = self
                     .inventory
-                    .show(ctx, &mut self.icons, inventory, refused)
-                {
+                    .show(ctx, &mut self.icons, inventory, refused);
+                if let Some(m) = clicks.moved {
                     session.move_item(m);
+                }
+                if let Some(kit) = clicks.place {
+                    session.begin_placing(&kit);
                 }
             }
             if !at_login && self.containers {
@@ -691,6 +769,105 @@ fn owned_lots(
     owned.sort_unstable();
     owned.dedup();
     owned
+}
+
+/// Placing a station (P6.2): put it down where a script asked
+/// (`cap_place`), show the ghost at the cursor (`cap_place_hover`), tell
+/// scripts what they need to draw round it (`cap_placing`), and fire
+/// `placement_note` at them, with a `title` and `body`, when a click is
+/// refused or the server says no.
+fn placing(
+    ctx: &mut ExtensionCtx,
+    session: &mut Session,
+    shared: &Shared,
+    stations: &mut Stations,
+    now: Instant,
+    dt: f32,
+) {
+    use crate::coords::{to_server, to_world, S};
+    let click = shared.place_at.lock().ok().and_then(|mut p| p.take());
+    if let Some([x, z]) = click {
+        let [x, y] = to_server(x, z);
+        session.place(now, x, y);
+    }
+    for note in session.take_placing_notes() {
+        let (title, body) = match note {
+            PlaceNote::Refused(why) => ("Can't build here".to_owned(), why.words()),
+            PlaceNote::Failed(why) => ("Can't build here".to_owned(), why),
+            PlaceNote::Unanswered => (
+                "No answer".to_owned(),
+                "The server didn't answer. Try again".to_owned(),
+            ),
+            PlaceNote::Placed { .. } => continue,
+        };
+        let mut data = toml::Table::new();
+        data.insert("title".into(), title.into());
+        data.insert("body".into(), body.into());
+        ctx.fire_event("placement_note", data);
+    }
+
+    let hover = shared.place_hover.lock().ok().and_then(|h| *h);
+    let state = session.state();
+    let mark = session.placing().map(|p| {
+        let asking = match p.phase() {
+            PlacePhase::Asking { at, .. } => Some(*at),
+            PlacePhase::Aiming => None,
+        };
+        // Asking, the ghost holds where the click was; otherwise it's the cursor.
+        let target = asking.or_else(|| hover.map(|[x, z]| to_server(x, z)));
+        let check = target.map(|at| p.check(at, state));
+        let ok = matches!(check, Some(Ok(_)));
+        let station_type = p.kit().station_type;
+        let crowding = target.map_or_else(Vec::new, |[x, y]| {
+            state
+                .stations()
+                .values()
+                .filter(|s| (s.x - x).hypot(s.y - y) < STATION_MIN_SPACING * 2.0)
+                .map(|s| to_world(s.x, s.y))
+                .collect()
+        });
+        let me = state.me();
+        let plots = state
+            .plots()
+            .iter()
+            .filter(|plot| me.is_some() && plot.owner_id == me)
+            .filter_map(|plot| plot.corners)
+            .map(|c| c.map(|(x, y)| to_world(x, y)))
+            .collect();
+        let view = target.map(|[x, y]| GhostView {
+            station_type,
+            at: to_world(x, y),
+            ok,
+            asking: asking.is_some(),
+        });
+        let mark = PlacementMark {
+            kind: crate::stations::kind_of(station_type),
+            kit: p.kit().item_name.clone(),
+            at: None,
+            radius: crate::stations::ring_radius(station_type),
+            ok,
+            why: match &check {
+                Some(Err(why)) => Some(why.words()),
+                _ => None,
+            },
+            asking: asking.is_some(),
+            you: state.local_player().map(|you| to_world(you.x, you.y)),
+            reach: STATION_INTERACTION_RANGE as f32 * S,
+            spacing: STATION_MIN_SPACING as f32 * S,
+            crowding,
+            plots,
+        };
+        (mark, view)
+    });
+    let view = mark.as_ref().and_then(|(_, v)| *v);
+    stations.ghost(ctx, view, dt);
+    let mark = mark.map(|(mut m, _)| {
+        m.at = view.and(stations.ghost_at());
+        m
+    });
+    if let Ok(mut shared) = shared.placement.lock() {
+        *shared = mark;
+    }
 }
 
 /// What a gather or a craft made, for the scripts: `item_name`,

@@ -25,6 +25,14 @@
 //! forge's mouth, the chest's lock) away from the Capitol, give or take a
 //! little from its id. The camera mostly looks toward the tower, so that
 //! is the side you see, and a yard of them shares a grain.
+//!
+//! **The ghost (P6.2).** While a kit is being placed, [`Stations::ghost`]
+//! shows its station at the cursor. It's the same model, tinted toward
+//! React's preview green (`#22c55e`) where it can go and red (`#ef4444`)
+//! where it can't, translucent, and hovering a hand's width up. It glides
+//! after the cursor rather than snapping to it. Once the click is sent it
+//! holds still and breathes until the server answers. When the station
+//! lands, the ghost is gone and the real one drops into its place.
 
 use crate::coords::{layer, to_server, to_world};
 use crate::script_api::{Shared, StationMark};
@@ -79,7 +87,40 @@ struct Station {
 pub struct Stations {
     stations: HashMap<Uuid, Station>,
     meshes: bool,
+    ghost: Option<Ghost>,
 }
+
+/// What the ghost should show this frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GhostView {
+    /// The station type being placed.
+    pub station_type: &'static str,
+    /// Where the cursor is on the ground, world metres (X, Z).
+    pub at: [f32; 2],
+    /// It can go down here.
+    pub ok: bool,
+    /// The click went out: hold still until the server answers.
+    pub asking: bool,
+}
+
+struct Ghost {
+    entity: EntityId,
+    kind: &'static str,
+    /// The tint its mesh wears now.
+    ok: bool,
+    at: [f32; 2],
+    /// 0 to 1: faded in. Falls back to 0 as placement ends.
+    shown: f32,
+    /// Seconds shown, for its breathing.
+    age: f32,
+}
+
+/// The ghost's opacity at full, its height over the ground (m), how fast
+/// it fades in and out (per second), and how fast it closes on the cursor.
+const GHOST_OPACITY: f32 = 0.6;
+const GHOST_HOVER: f32 = 0.18;
+const GHOST_FADE: f32 = 5.0;
+const GHOST_FOLLOW: f32 = 22.0;
 
 impl Stations {
     /// Place every station for this frame from `state`. `me` is where you
@@ -167,11 +208,118 @@ impl Stations {
             *shared = marks;
         }
     }
+
+    /// The ghost of the station being placed. `None` (placement over, or
+    /// the cursor off the ground) fades it out, and it goes.
+    pub fn ghost(&mut self, ctx: &mut ExtensionCtx, view: Option<GhostView>, dt: f32) {
+        if !self.meshes {
+            return;
+        }
+        let Some(view) = view else {
+            if let Some(ghost) = &mut self.ghost {
+                ghost.shown -= dt * GHOST_FADE;
+                if ghost.shown <= 0.0 {
+                    let _ = ctx.world.despawn(ghost.entity);
+                    self.ghost = None;
+                } else {
+                    place_ghost(ctx.world, ghost, false);
+                }
+            }
+            return;
+        };
+        let kind = kind_of(view.station_type);
+        if self.ghost.as_ref().is_some_and(|g| g.kind != kind) {
+            let old = self.ghost.take().expect("checked");
+            let _ = ctx.world.despawn(old.entity);
+        }
+        if self.ghost.is_none() {
+            let Some(entity) = spawn_ghost(ctx, kind, view.ok) else {
+                return;
+            };
+            self.ghost = Some(Ghost {
+                entity,
+                kind,
+                ok: view.ok,
+                at: view.at,
+                shown: 0.0,
+                age: 0.0,
+            });
+        }
+        let ghost = self.ghost.as_mut().expect("just made");
+        if ghost.ok != view.ok {
+            ghost.ok = view.ok;
+            let _ = ctx.attach_mesh(ghost.entity, &ghost_mesh(kind, view.ok));
+        }
+        if !view.asking {
+            let k = 1.0 - (-GHOST_FOLLOW * dt).exp();
+            ghost.at[0] += (view.at[0] - ghost.at[0]) * k;
+            ghost.at[1] += (view.at[1] - ghost.at[1]) * k;
+        }
+        ghost.age += dt;
+        ghost.shown = (ghost.shown + dt * GHOST_FADE).min(1.0);
+        place_ghost(ctx.world, ghost, view.asking);
+    }
+
+    /// Where the ghost is drawn, world metres, while there is one.
+    pub fn ghost_at(&self) -> Option<[f32; 2]> {
+        self.ghost.as_ref().map(|g| g.at)
+    }
+}
+
+/// A ghost entity wearing `kind`'s tinted mesh.
+fn spawn_ghost(ctx: &mut ExtensionCtx, kind: &'static str, ok: bool) -> Option<EntityId> {
+    let entity = match ctx.world.spawn("station_ghost") {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("stations: no entity for the ghost: {e}");
+            return None;
+        }
+    };
+    if let Err(e) = ctx.attach_mesh(entity, &ghost_mesh(kind, ok)) {
+        tracing::warn!("stations: no mesh for the ghost: {e}");
+    }
+    Some(entity)
+}
+
+/// Write the ghost's transform and opacity onto its entity. It hovers and
+/// breathes. While asking it breathes faster, as if about to settle.
+fn place_ghost(world: &mut flint_ecs::FlintWorld, g: &Ghost, asking: bool) {
+    let [x, z] = g.at;
+    let rate = if asking { 7.0 } else { 2.2 };
+    let bob = 0.04 * (g.age * rate).sin();
+    let k = smooth(g.shown);
+    let mut t = toml::Table::new();
+    t.insert(
+        "position".into(),
+        vec3([x, layer::GROUND + GHOST_HOVER * k + bob, z]),
+    );
+    let (sin, cos) = (facing_plain([x, z]) * 0.5).sin_cos();
+    t.insert("rotation_quat".into(), vec4([0.0, sin, 0.0, cos]));
+    let s = 0.9 + 0.1 * k;
+    t.insert("scale".into(), vec3([s, s, s]));
+    let _ = world.set_component(g.entity, "transform", toml::Value::Table(t));
+    let pulse = if asking {
+        0.8 + 0.2 * (g.age * 7.0).sin()
+    } else {
+        1.0
+    };
+    let mut m = toml::Table::new();
+    m.insert(
+        "opacity".into(),
+        toml::Value::Float((GHOST_OPACITY * k * pulse).max(0.01) as f64),
+    );
+    let _ = world.set_component(g.entity, "material", toml::Value::Table(m));
+}
+
+/// The ghost's mesh for `kind`: tinted green where it can go, red where
+/// it can't.
+fn ghost_mesh(kind: &str, ok: bool) -> String {
+    format!("{}_ghost_{}", mesh(kind), if ok { "ok" } else { "bad" })
 }
 
 /// The type's mesh name and look: the three the server seeds, or
 /// anything else.
-fn kind_of(station_type: &str) -> &'static str {
+pub fn kind_of(station_type: &str) -> &'static str {
     match station_type {
         "workbench" => "workbench",
         "forge" => "forge",
@@ -204,7 +352,18 @@ fn footprint(kind: &str) -> f32 {
 /// the Capitol, within 15° either way by its id.
 fn facing([x, z]: [f32; 2], id: Uuid) -> f32 {
     let jitter = ((id.as_u128() % 1000) as f32 / 1000.0 - 0.5) * 30f32.to_radians();
-    x.atan2(z) + jitter
+    facing_plain([x, z]) + jitter
+}
+
+/// Straight away from the Capitol, for the ghost, which has no id yet.
+fn facing_plain([x, z]: [f32; 2]) -> f32 {
+    x.atan2(z)
+}
+
+/// The ring round a station of `station_type`, metres, as the in-range
+/// ring draws it: the ghost's ring matches.
+pub fn ring_radius(station_type: &str) -> f32 {
+    footprint(kind_of(station_type))
 }
 
 fn spawn(ctx: &mut ExtensionCtx, id: Uuid, kind: &'static str) -> Option<EntityId> {
@@ -296,12 +455,42 @@ const LID: u32 = 0xa67c1a;
 const LOCK: u32 = 0xffd700;
 const IRON: u32 = 0x2e2e36;
 const GENERIC: u32 = 0x5a5a6a;
+/// React's placement preview: `#22c55e` where it can go, `#ef4444` where not.
+const GHOST_OK: u32 = 0x22c55e;
+const GHOST_BAD: u32 = 0xef4444;
+/// How far the ghost's colours lean to its tint.
+const GHOST_TINT: f32 = 0.6;
 
+/// Every type's model, and its two ghosts.
 fn upload(gpu: &mut ExtensionGpu) {
-    workbench().upload(gpu, MESH_WORKBENCH, 0.85);
-    forge().upload(gpu, MESH_FORGE, 0.9);
-    chest().upload(gpu, MESH_CHEST, 0.7);
-    generic().upload(gpu, MESH_GENERIC, 0.8);
+    let models = [
+        ("workbench", workbench(), 0.85),
+        ("forge", forge(), 0.9),
+        ("storage_chest", chest(), 0.7),
+        ("generic", generic(), 0.8),
+    ];
+    for (kind, m, roughness) in models {
+        for ok in [true, false] {
+            let tint = if ok { GHOST_OK } else { GHOST_BAD };
+            tinted(&m, tint).upload(gpu, &ghost_mesh(kind, ok), roughness);
+        }
+        m.upload(gpu, mesh(kind), roughness);
+    }
+}
+
+/// A copy of `m` with every colour leaning toward `tint`, and lifted a
+/// little, so the ghost reads as light rather than paint.
+fn tinted(m: &MeshBuf, tint: u32) -> MeshBuf {
+    let tint = hex(tint);
+    let mut out = MeshBuf {
+        vertices: m.vertices.clone(),
+        indices: m.indices.clone(),
+    };
+    for v in &mut out.vertices {
+        let c = mix(v.color, tint, GHOST_TINT);
+        v.color = [c[0] * 1.15, c[1] * 1.15, c[2] * 1.15, 1.0];
+    }
+    out
 }
 
 /// A box from `lo` to `hi`, without its underside.

@@ -103,6 +103,11 @@ struct Args {
     /// drag and drop between them (P5.3, until the panels take over)
     #[arg(long)]
     containers: bool,
+    /// Once signed in, start placing the first kit of this item type
+    /// ("workbench_kit"), as a right click on it in the inventory does.
+    /// For captures: they can't click egui (issue #76)
+    #[arg(long, value_name = "KIT")]
+    place: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -184,7 +189,8 @@ fn main() -> Result<()> {
     *shared.view.lock().unwrap() = args.view;
     let mut extension = extension::CapitolExtension::new(shared, terrain, session)
         .with_icon_sheet(args.icon_sheet)
-        .with_containers(args.containers);
+        .with_containers(args.containers)
+        .with_place(args.place);
     if args.ui_sample {
         extension = extension.with_ui_sample();
     }

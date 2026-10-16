@@ -93,7 +93,8 @@ impl Sample {
                         icons,
                         Some(&self.containers[0]),
                         None,
-                    ));
+                    )
+                    .moved);
                 });
             });
         if let Some(m) = moved {

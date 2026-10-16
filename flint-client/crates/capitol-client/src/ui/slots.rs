@@ -12,6 +12,10 @@
 //! caller sends it (`Session::move_item`), and the server decides whether
 //! it moves, merges or swaps. Nothing changes here until the refetch that
 //! follows (`poll.rs`), so the grid never shows a state the server didn't.
+//!
+//! A grid made [`SlotGrid::placing`] also reports a right click on a
+//! `*_kit` ([`SlotGrid::show_clicks`]), and its tooltip says so. That's
+//! how a station is placed (P6.2), as React's `InventorySlot.tsx` does it.
 
 use super::icons::ItemIcons;
 use super::theme::{self, size, CRAFT, SLOT, SLOT_EDGE, SLOT_EDGE_FULL, SLOT_GAP, SLOT_SIZE};
@@ -39,10 +43,20 @@ struct Held {
     slot: usize,
 }
 
+/// What a grid's slots were asked this frame.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Clicks {
+    /// A drop onto one of them.
+    pub moved: Option<Move>,
+    /// A right click on a kit, with [`SlotGrid::placing`].
+    pub place: Option<SlotItem>,
+}
+
 /// One container as a grid of slots, `layout_columns` wide.
 pub struct SlotGrid<'a> {
     container: &'a Container,
     enabled: bool,
+    placing: bool,
 }
 
 impl<'a> SlotGrid<'a> {
@@ -50,7 +64,15 @@ impl<'a> SlotGrid<'a> {
         Self {
             container,
             enabled: true,
+            placing: false,
         }
+    }
+
+    /// A right click on a kit asks to place its station (the inventory's
+    /// grid). See [`SlotGrid::show_clicks`].
+    pub fn placing(mut self, on: bool) -> Self {
+        self.placing = on;
+        self
     }
 
     /// A disabled grid is dimmed, and nothing can be dragged out of it or
@@ -63,7 +85,13 @@ impl<'a> SlotGrid<'a> {
 
     /// Draws the grid in its tray. Returns the move a drop onto it asks for.
     pub fn show(self, ui: &mut Ui, icons: &mut ItemIcons) -> Option<Move> {
-        let mut dropped = None;
+        self.show_clicks(ui, icons).moved
+    }
+
+    /// Draws the grid in its tray. Returns the move a drop onto it asks
+    /// for, and the kit a right click asks to place.
+    pub fn show_clicks(self, ui: &mut Ui, icons: &mut ItemIcons) -> Clicks {
+        let mut clicks = Clicks::default();
         theme::tray().show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(SLOT_GAP, SLOT_GAP);
             let columns = self.container.layout_columns.max(1);
@@ -78,15 +106,22 @@ impl<'a> SlotGrid<'a> {
                             item: item.as_ref(),
                             enabled: self.enabled,
                         };
-                        if let Some(m) = slot.show(ui, icons) {
-                            dropped = Some(m);
+                        let (moved, right) = slot.show_inner(ui, icons, self.placing);
+                        clicks.moved = clicks.moved.or(moved);
+                        if right && self.placing {
+                            clicks.place = item.clone().filter(is_kit);
                         }
                     }
                 });
             }
         });
-        dropped
+        clicks
     }
+}
+
+/// A station kit: a right click on one places its station.
+fn is_kit(item: &SlotItem) -> bool {
+    capitol_core::protocol::rules::station_type_for_kit(&item.item_type).is_some()
 }
 
 /// One slot of a container. Grids are made of these; a panel with a lone
@@ -100,6 +135,12 @@ pub struct Slot<'a> {
 
 impl Slot<'_> {
     pub fn show(self, ui: &mut Ui, icons: &mut ItemIcons) -> Option<Move> {
+        self.show_inner(ui, icons, false).0
+    }
+
+    /// The drop onto this slot, and whether it was right-clicked. `placing`
+    /// adds the kit's hint to the tooltip.
+    fn show_inner(self, ui: &mut Ui, icons: &mut ItemIcons, placing: bool) -> (Option<Move>, bool) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(SLOT_SIZE, SLOT_SIZE), Sense::hover());
         let id = Id::new(("capitol_slot", self.container_id, self.index));
         let draggable = self.enabled && self.item.is_some();
@@ -144,9 +185,15 @@ impl Slot<'_> {
                 } else {
                     response.clone()
                 };
-                response.on_hover_ui(|ui| tooltip(ui, item));
+                response.on_hover_ui(|ui| {
+                    tooltip(ui, item);
+                    if placing && is_kit(item) {
+                        ui.label(theme::dim("Right-click to place"));
+                    }
+                });
             }
         }
+        let right = self.item.is_some() && response.secondary_clicked();
         if is_source && response.dragged() {
             ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
             if let (Some(item), Some(at)) = (self.item, ui.ctx().pointer_interact_pos()) {
@@ -155,14 +202,14 @@ impl Slot<'_> {
         }
 
         if !accepts {
-            return None;
+            return (None, right);
         }
-        let held = response.dnd_release_payload::<Held>()?;
-        Some(Move {
+        let moved = response.dnd_release_payload::<Held>().map(|held| Move {
             item_id: held.item.item_id,
             target_container_id: self.container_id,
             target_slot: self.index as i32,
-        })
+        });
+        (moved, right)
     }
 }
 
@@ -416,7 +463,11 @@ mod tests {
             "player_inventory",
             12,
             6,
-            &[item(0, "fiber", 12), item(3, "rope", 1)],
+            &[
+                item(0, "fiber", 12),
+                item(3, "rope", 1),
+                item(10, "forge_kit", 1),
+            ],
         );
         let input = Container::new(id(), "crafting_input", 4, 2, &[item(1, "fiber", 3)]);
         (inventory, input)
@@ -430,6 +481,8 @@ mod tests {
         /// Every slot's rect, by (container, index), from the last frame.
         rects: std::collections::HashMap<(Uuid, usize), Rect>,
         moves: Vec<Move>,
+        /// Kits a right click asked to place.
+        places: Vec<SlotItem>,
         /// Inventory disabled: nothing goes in or out.
         inventory_enabled: bool,
     }
@@ -444,6 +497,7 @@ mod tests {
                 input,
                 rects: Default::default(),
                 moves: Vec::new(),
+                places: Vec::new(),
                 inventory_enabled: true,
             };
             rig.frame(vec![]);
@@ -464,6 +518,7 @@ mod tests {
                 input: crafting,
                 rects,
                 moves,
+                places,
                 inventory_enabled,
             } = self;
             let _ = ctx.run(input, |ctx| {
@@ -471,10 +526,18 @@ mod tests {
                     return;
                 }
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    for (c, enabled) in [(&*inventory, *inventory_enabled), (&*crafting, true)] {
-                        if let Some(m) = SlotGrid::new(c).enabled(enabled).show(ui, icons) {
-                            moves.push(m);
-                        }
+                    // The inventory places kits, as its panel's grid does.
+                    let grids = [
+                        (&*inventory, *inventory_enabled, true),
+                        (&*crafting, true, false),
+                    ];
+                    for (c, enabled, placing) in grids {
+                        let clicks = SlotGrid::new(c)
+                            .enabled(enabled)
+                            .placing(placing)
+                            .show_clicks(ui, icons);
+                        moves.extend(clicks.moved);
+                        places.extend(clicks.place);
                     }
                 });
                 // Where each slot landed, read back from its interact rect.
@@ -505,6 +568,21 @@ mod tests {
             self.frame(vec![button(b, false)]);
             self.frame(vec![]);
         }
+
+        /// A right click on a slot.
+        fn right_click(&mut self, container: Uuid, slot: usize) {
+            let at = self.centre(container, slot);
+            self.frame(vec![egui::Event::PointerMoved(at)]);
+            for pressed in [true, false] {
+                self.frame(vec![egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: Default::default(),
+                }]);
+            }
+            self.frame(vec![]);
+        }
     }
 
     fn button(pos: Pos2, pressed: bool) -> egui::Event {
@@ -514,6 +592,29 @@ mod tests {
             pressed,
             modifiers: Default::default(),
         }
+    }
+
+    #[test]
+    fn a_right_click_on_a_kit_asks_to_place_it() {
+        let mut rig = Rig::new();
+        let inv = rig.inventory.id;
+        rig.right_click(inv, 3); // rope: not a kit
+        rig.right_click(inv, 1); // empty
+        assert!(rig.places.is_empty());
+        rig.right_click(inv, 10);
+        let kit = rig.inventory.slot(10).unwrap().clone();
+        assert_eq!(rig.places, [kit]);
+        assert!(rig.moves.is_empty(), "a right click moves nothing");
+    }
+
+    #[test]
+    fn only_a_placing_grid_places() {
+        let mut rig = Rig::new();
+        let kit = item(2, "chest_kit", 1);
+        rig.input = Container::new(rig.input.id, "crafting_input", 4, 2, &[kit]);
+        rig.frame(vec![]);
+        rig.right_click(rig.input.id, 2);
+        assert!(rig.places.is_empty());
     }
 
     #[test]

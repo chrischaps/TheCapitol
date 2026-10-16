@@ -12,7 +12,7 @@
 //   5. an available resource node: extract          (P4.4, here)
 //   6. anywhere else: walk there                    (P4.3, here)
 //
-// Each of 1-3 is a function below that says no for now. To add one, fill
+// Each of 2-3 is a function below that says no for now. To add one, fill
 // its body: it gets the click (#{ x, z } in world metres, `shift`, `alt`)
 // and returns true when it took it.
 //
@@ -50,6 +50,17 @@
 // marks turning slowly outside it, and opens out again as you leave.
 // Like every ring here it's screen-space lines with no depth test, so its
 // far side crosses the model's front (issue #86).
+//
+// Placing a station (P6.2): a right click on a kit in the inventory starts
+// it. Rust draws the ghost, the station itself, tinted and translucent,
+// and says through cap_placing() whether it can go where the cursor is.
+// Here go the marks round it: a ring under the ghost, green or red (React's
+// #22c55e and #ef4444), the reason under it when it's red, your plots
+// outlined in gold, a dashed ring of how far from you it may go, and a ring
+// round each station it's too close to. Every left click is the
+// placement's while it lasts: one where it can go is sent (cap_place),
+// one where it can't is refused with a toast. A right click or Esc
+// (Rust, extension.rs) stops it, and clicks walk again.
 //
 // Plots (P6.4): alt-click a lot to see it in the plot panel (Rust asks
 // the server what's there, cap_pick_plot). While the panel is open, the
@@ -124,7 +135,13 @@ fn on_update() {
     if toast != () && t - toast.born > toast_in() + toast_hold() + toast_out() {
         toast = ();
     }
-    if cap_at_login() || !is_mouse_just_pressed(0) { return; }
+    if cap_at_login() { return; }
+    // The ghost follows the ground under the cursor.
+    if cap_placing() != () {
+        let h = screen_to_ground(mouse_x(), mouse_y(), cap_ground_y());
+        if h == () { cap_place_off(); } else { cap_place_hover(h[0], h[1]); }
+    }
+    if !is_mouse_just_pressed(0) { return; }
 
     // The ground under the cursor, or () over the sky.
     let g = screen_to_ground(mouse_x(), mouse_y(), cap_ground_y());
@@ -145,7 +162,6 @@ fn on_update() {
 
 // ── The intents above walking, waiting for their issues ──────────────────
 
-fn place_station(click) { false } // P6.2
 fn trade_with(click) { false }    // P7.3, shift
 fn open_station(click) { false }  // P6.3
 
@@ -154,6 +170,14 @@ fn open_station(click) { false }  // P6.3
 fn select_plot(click) {
     if !click.alt { return false; }
     cap_pick_plot(click.x, click.z);
+    true
+}
+
+// Placing a station: every click is the placement's. Rust sends it if it
+// can go there, and refuses it with a placement_note if it can't.
+fn place_station(click) {
+    if cap_placing() == () { return false; }
+    cap_place(click.x, click.z);
     true
 }
 
@@ -194,7 +218,7 @@ fn on_event(name, data) {
         toast = #{ title: "The deed is yours", body: "Place stations here", born: t };
         return;
     }
-    if name == "extraction_note" || name == "plot_note" {
+    if name == "extraction_note" || name == "plot_note" || name == "placement_note" {
         toast = #{ title: data.title, body: data.body, born: t };
         return;
     }
@@ -260,6 +284,8 @@ fn on_draw_ui() {
     }
     // The tuft you're going to gather, if any. While you walk to it, the
     // sight round it stands in for the ring at your destination.
+    let placing = cap_placing();
+    if placing != () { draw_placement(placing, now); }
     for s in cap_stations() {
         if s.reach > 0.01 { draw_station_ring(s, now); }
     }
@@ -300,7 +326,7 @@ fn on_draw_ui() {
     // Picked here rather than in on_update: on_draw_ui sees the camera this
     // frame renders with, so the reticle can't trail the ground under it.
     let hover = screen_to_ground(mouse_x(), mouse_y(), cap_ground_y());
-    if hover != () {
+    if hover != () && placing == () {
         let n = cap_node_at(hover[0], hover[1]);
         if n != () && n.state == "available" && !n.targeted { draw_reticle_on(n, now); }
         else { draw_reticle(hover, now); }
@@ -314,6 +340,104 @@ fn spray() { [0.78, 0.88, 1.0] }
 
 // React's in-range orange, #f97316.
 fn station_orange() { [0.976, 0.451, 0.086] }
+// React's placement preview: #22c55e where it can go, #ef4444 where not.
+fn place_green() { [0.133, 0.773, 0.369] }
+fn place_red() { [0.937, 0.267, 0.267] }
+
+// Everything round the ghost while a station is placed.
+fn draw_placement(p, now) {
+    let y = cap_ground_y() + 0.02;
+    // Your plots: gold outlines, breathing, so the ground you may build on
+    // stands out from the lots around it.
+    let lot_y = cap_ground_y() + 0.12;
+    let glow = 0.5 + 0.12 * (now * 2.0).sin();
+    for q in p.plots {
+        for i in 0..4 {
+            let a = q[i];
+            let b = q[(i + 1) % 4];
+            ground_line(a[0], a[1], b[0], b[1], lot_y, gold(), glow, 2.0);
+        }
+    }
+    let c = if p.ok { place_green() } else { place_red() };
+    let ghost = p.x != ();
+    // How far from you it may go: a slow-turning dashed ring, red while
+    // the ghost is past it.
+    if p.you_x != () {
+        let far = ghost && dist(p.x, p.z, p.you_x, p.you_z) > p.reach;
+        let rc = if far { place_red() } else { gold() };
+        let ra = if far { 0.6 } else { 0.3 };
+        dashed_ring(p.you_x, p.you_z, y, p.reach, rc, ra, 1.5, 48, now * 0.08);
+    }
+    if !ghost { return; }
+    // Each station it's too close to: the ground it keeps clear, red when
+    // the ghost is inside it, faint otherwise.
+    for s in p.crowding {
+        let near = dist(p.x, p.z, s[0], s[1]) < p.spacing;
+        let sc = if near { place_red() } else { [0.9, 0.9, 0.9] };
+        let sa = if near { 0.55 } else { 0.15 };
+        ring(s[0], s[1], y, p.spacing, sc, sa, 1.5, 56);
+    }
+    // React's preview ring, round the ghost. Asking, it pulses in.
+    let r = p.radius + 0.3;
+    if p.asking {
+        let k = (now * 2.5) % 1.0;
+        ring(p.x, p.z, y, r * (1.0 - 0.35 * k), c, 0.8 * (1.0 - k), 2.0, 48);
+        ring(p.x, p.z, y, r, c, 0.5, 2.0, 48);
+    } else {
+        ring(p.x, p.z, y, r, c, 0.75, 2.5, 48);
+        ring(p.x, p.z, y, r + 0.35, c, 0.2, 1.0, 52);
+    }
+    // Under it: the kit, and what a click will do or why it can't.
+    let at = world_to_screen(p.x, y, p.z);
+    if !at.visible { return; }
+    let line = if p.asking { "Placing…" }
+               else if p.why != () { p.why }
+               else { "Click to place" };
+    let lc = if p.why != () && !p.asking { [1.0, 0.62, 0.62] } else { [0.95, 0.92, 0.82] };
+    let size = 15.0;
+    let m = measure_text_ex(line, size, "strong", 0.0);
+    let top = at.y + 26.0;
+    draw_text_opts(at.x - m.width / 2.0 + 1.0, top + 1.0, line, size, #{
+        font: "strong", color: [0.0, 0.0, 0.0, 0.6],
+    });
+    draw_text_opts(at.x - m.width / 2.0, top, line, size, #{
+        font: "strong", color: [lc[0], lc[1], lc[2], 0.95],
+    });
+    let hint = p.kit + " · right-click or Esc to stop";
+    let hm = measure_text_ex(hint, 12.0, "body", 0.0);
+    draw_text_opts(at.x - hm.width / 2.0, top + m.height + 4.0, hint, 12.0, #{
+        font: "body", color: [0.88, 0.88, 0.88, 0.6],
+    });
+}
+
+fn dist(ax, az, bx, bz) {
+    let dx = ax - bx;
+    let dz = az - bz;
+    (dx * dx + dz * dz).sqrt()
+}
+
+// A straight line along the ground from (ax, az) to (bx, bz), in short
+// projected pieces so it follows the perspective.
+fn ground_line(ax, az, bx, bz, y, c, alpha, width) {
+    let steps = (dist(ax, az, bx, bz) / 2.0).to_int() + 1;
+    let prev = ();
+    for i in 0..=steps {
+        let t = i.to_float() / steps.to_float();
+        let p = world_to_screen(ax + (bx - ax) * t, y, az + (bz - az) * t);
+        if !p.visible { prev = (); continue; }
+        if prev != () { draw_line(prev.x, prev.y, p.x, p.y, c[0], c[1], c[2], alpha, width); }
+        prev = p;
+    }
+}
+
+// A ring of `dashes` dashes, turned by `turn` radians.
+fn dashed_ring(cx, cz, y, r, c, alpha, width, dashes, turn) {
+    let step = 2.0 * PI() / dashes.to_float();
+    for i in 0..dashes {
+        let a = turn + i.to_float() * step;
+        arc(cx, cz, y, r, a, a + step * 0.55, c, alpha, width);
+    }
+}
 
 // The ring round a station you can reach: it closes in from a little wider
 // and brightens as `reach` eases up, React's half-alpha orange at full,
