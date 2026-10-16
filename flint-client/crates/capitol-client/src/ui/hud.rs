@@ -44,6 +44,8 @@ pub struct HeaderView<'a> {
     pub inventory_open: bool,
     /// The same for the crafting panel.
     pub crafting_open: bool,
+    /// The same for the exchange panel.
+    pub exchange_open: bool,
 }
 
 /// What was clicked in the header.
@@ -52,6 +54,7 @@ pub struct HeaderClicks {
     pub sign_out: bool,
     pub inventory: bool,
     pub crafting: bool,
+    pub exchange: bool,
 }
 
 /// The header strip. Draw it before any other panel or window, so theirs
@@ -95,6 +98,9 @@ pub fn header(
                         zone_chip(ui, zone);
                     }
                     ui.add_space(4.0);
+                    clicks.exchange = theme::toggle_chip(ui, "Exchange", view.exchange_open)
+                        .on_hover_text("Fiber exchange (X)")
+                        .clicked();
                     clicks.inventory = theme::toggle_chip(ui, "Inventory", view.inventory_open)
                         .on_hover_text("Inventory (I)")
                         .clicked();

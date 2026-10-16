@@ -58,6 +58,11 @@ bindings = [{ type = "key", code = "KeyI" }]
 kind = "button"
 bindings = [{ type = "key", code = "KeyC" }]
 
+# The exchange panel (P7.2); the header's Exchange button does the same.
+[actions.exchange]
+kind = "button"
+bindings = [{ type = "key", code = "KeyX" }]
+
 # Craft what the crafting panel is set to, while it's open (P5.5), or what
 # the open station's panel is set to (P6.3).
 [actions.craft]

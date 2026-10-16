@@ -13,6 +13,8 @@
 //! - [`craft`]: crafting by hand: the recipe the inputs make, what's
 //!   missing, an estimate, output with nowhere to go, and one craft from
 //!   the ask to the settled inventory.
+//! - [`exchange`]: the fiber exchange: a deposit's or withdrawal's
+//!   numbers before you confirm, the server's own rule.
 //! - [`poll`]: the polling scheduler. [`poll::Poller`] turns those events, and
 //!   a 5 s timer, into the REST refetches the server never pushes.
 //! - [`station`]: stations in the world: whether one is in reach.
@@ -30,6 +32,7 @@ pub mod auth;
 pub mod bot;
 pub mod catalog;
 pub mod craft;
+pub mod exchange;
 pub mod harvest;
 pub mod motion;
 pub mod net;

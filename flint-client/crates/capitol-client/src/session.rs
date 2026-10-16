@@ -22,13 +22,16 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use capitol_core::auth::{Auth, Effect, Phase, Remembered};
 use capitol_core::craft::{self, Crafting};
+use capitol_core::exchange::{Asked, DepositQuote, Receipt, WithdrawQuote};
 use capitol_core::harvest::{Harvest, Note, Step};
 use capitol_core::motion::{Motion, Pose};
 use capitol_core::net::{
     ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
 };
 use capitol_core::poll::{Fetch, Poller};
-use capitol_core::protocol::rest::{MoveItemRequest, PositionQuery, SlotItem};
+use capitol_core::protocol::rest::{
+    DepositRequest, MoveItemRequest, PositionQuery, SlotItem, WithdrawRequest,
+};
 use capitol_core::protocol::rules::Zone;
 use capitol_core::protocol::ws::ClientMessage;
 use capitol_core::state::{GameState, StateEvent, Yield};
@@ -51,6 +54,13 @@ const MOVE_TAG: Tag = 20;
 /// share one, a claim has its own.
 const PLOT_TAG: Tag = 30;
 const CLAIM_TAG: Tag = 31;
+
+/// The tag on the exchange panel's deposits and withdrawals (P7.2). The
+/// poller refetches the containers and the balance on either answer.
+const EXCHANGE_TAG: Tag = 40;
+
+/// How long the exchange's receipt stays up.
+const RECEIPT_FOR: Duration = Duration::from_secs(6);
 
 /// How long a refused move's reason stays up.
 const NOTICE_FOR: Duration = Duration::from_secs(5);
@@ -102,6 +112,12 @@ pub struct Session {
     /// What's worth telling the player about picking a plot, since the
     /// frame last took them.
     plot_notes: Vec<PlotNote>,
+    /// The deposit or withdrawal the server is answering (P7.2).
+    exchanging: Option<Asked>,
+    /// Why the last one was refused, and when.
+    exchange_refused: Option<(String, Instant)>,
+    /// What the last one did, and when.
+    receipt: Option<(Receipt, Instant)>,
     /// Placing a station from a kit (P6.2), while it lasts.
     placing: Option<Placing>,
     /// What placing has to tell the player since the extension last took it.
@@ -184,6 +200,9 @@ impl Session {
             claim_refused: None,
             claimed: Vec::new(),
             plot_notes: Vec::new(),
+            exchanging: None,
+            exchange_refused: None,
+            receipt: None,
             placing: None,
             placing_notes: Vec::new(),
             visit: Visit::default(),
@@ -536,6 +555,69 @@ impl Session {
         std::mem::take(&mut self.plot_notes)
     }
 
+    /// Deposits the fiber stacks `item_ids` at the exchange, as `quote`
+    /// showed it, unless a deposit or withdrawal is already out.
+    pub fn deposit(&mut self, item_ids: Vec<Uuid>, quote: DepositQuote) {
+        if self.auth.phase() != Phase::InWorld || self.exchanging.is_some() || item_ids.is_empty() {
+            return;
+        }
+        tracing::info!(
+            "exchange: depositing {} fiber for {} Strands",
+            quote.fiber,
+            quote.strands
+        );
+        self.ask_exchange(Asked::Deposit(quote));
+        self.net.rest(
+            RestRequest::Deposit(DepositRequest { item_ids }),
+            EXCHANGE_TAG,
+        );
+    }
+
+    /// Withdraws `quote.fiber` fiber, as `quote` showed it.
+    pub fn withdraw(&mut self, quote: WithdrawQuote) {
+        let Ok(quantity) = i32::try_from(quote.fiber) else {
+            return;
+        };
+        if self.auth.phase() != Phase::InWorld || self.exchanging.is_some() {
+            return;
+        }
+        tracing::info!(
+            "exchange: withdrawing {quantity} fiber for {} Strands",
+            quote.strands
+        );
+        self.ask_exchange(Asked::Withdraw(quote));
+        self.net.rest(
+            RestRequest::Withdraw(WithdrawRequest { quantity }),
+            EXCHANGE_TAG,
+        );
+    }
+
+    fn ask_exchange(&mut self, asked: Asked) {
+        self.exchanging = Some(asked);
+        self.exchange_refused = None;
+        self.receipt = None;
+    }
+
+    /// A deposit or withdrawal is out.
+    pub fn exchanging(&self) -> bool {
+        self.exchanging.is_some()
+    }
+
+    /// Why the server refused the last one, for a few seconds after.
+    pub fn exchange_refused(&self, now: Instant) -> Option<&str> {
+        self.exchange_refused
+            .as_ref()
+            .filter(|(_, at)| now.duration_since(*at) < NOTICE_FOR)
+            .map(|(why, _)| why.as_str())
+    }
+
+    /// What the last one did, and how long ago, for a few seconds after.
+    pub fn receipt(&self, now: Instant) -> Option<(Receipt, Duration)> {
+        self.receipt
+            .map(|(r, at)| (r, now.duration_since(at)))
+            .filter(|(_, age)| *age < RECEIPT_FOR)
+    }
+
     /// Starts placing the station `item` makes, if it's a kit: the ghost
     /// follows the cursor until a click puts it down or it's cancelled.
     /// Another kit's placement gives way to this one.
@@ -642,6 +724,41 @@ impl Session {
                     );
                     self.claiming = None;
                     self.claimed.push(claim.plot.id);
+                }
+                NetEvent::Rest(EXCHANGE_TAG, result) => {
+                    let asked = self.exchanging.take();
+                    let receipt = match result {
+                        Ok(RestResponse::Deposit(d)) => Ok(Receipt::deposited(
+                            d,
+                            match &asked {
+                                Some(Asked::Deposit(q)) => Some(q),
+                                _ => None,
+                            },
+                        )),
+                        Ok(RestResponse::Withdraw(w)) => Ok(Receipt::withdrew(
+                            w,
+                            match &asked {
+                                Some(Asked::Withdraw(q)) => Some(q),
+                                _ => None,
+                            },
+                        )),
+                        Err(e) => Err(refusal(e)),
+                        Ok(_) => Err("The server's answer didn't make sense".into()),
+                    };
+                    match receipt {
+                        Ok(r) => {
+                            if r.as_quoted() {
+                                tracing::info!("exchange: {r:?}");
+                            } else {
+                                tracing::warn!("exchange: not as quoted: {r:?}, asked {asked:?}");
+                            }
+                            self.receipt = Some((r, now));
+                        }
+                        Err(why) => {
+                            tracing::info!("exchange: refused: {why}");
+                            self.exchange_refused = Some((why, now));
+                        }
+                    }
                 }
                 NetEvent::Rest(CLAIM_TAG, result) => {
                     let why = match result {
@@ -762,6 +879,9 @@ impl Session {
             self.claim_refused = None;
             self.claimed.clear();
             self.plot_notes.clear();
+            self.exchanging = None;
+            self.exchange_refused = None;
+            self.receipt = None;
             self.placing = None;
             self.placing_notes.clear();
             self.visit = Visit::default();
@@ -1365,6 +1485,114 @@ mod tests {
             s.state().picked_plot().is_none()
         });
         assert_eq!(session.take_plot_notes(), vec![PlotNote::NoneThere]);
+        session.log_out();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Against the local stack, the exchange panel's calls end to end:
+    /// deposit every fiber stack, withdraw some back, and have the server
+    /// refuse a withdrawal you can't afford. Each answer must be the
+    /// panel's preview to the Strand, and the balance and inventory must
+    /// follow. The account is `exchange1@bots.capitol.local`; stock it with
+    /// `capitol-bot --prefix exchange --gather 12`.
+    #[test]
+    #[ignore = "needs the local stack and Exchange1 holding fiber"]
+    fn an_exchange_charges_what_it_previews() {
+        use capitol_core::exchange::{self, Receipt, WithdrawQuote};
+
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let dir = std::env::temp_dir().join(format!("capitol-exchange-{}", std::process::id()));
+        let mut session = Session::start(&server, SessionFile::load(dir.join("s.toml"))).unwrap();
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let mut terrain = TerrainSource::offline(&fixture).unwrap();
+        session.log_in("exchange1@bots.capitol.local", "exchange-1-capitol-bot");
+        let mut wait = |session: &mut Session, what: &str, done: &dyn Fn(&Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !done(session) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                session.update(Instant::now(), &mut terrain);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait(&mut session, "the inventory and the balance", &|s| {
+            s.state().inventory().is_some() && s.state().strands().is_some()
+        });
+
+        // Deposit every fiber stack.
+        let st = session.state();
+        let inv = st.inventory().unwrap();
+        let all = exchange::fiber_stacks(inv)
+            .iter()
+            .map(|i| i.item_id)
+            .collect();
+        let quote = exchange::deposit(inv, &all, st.strands()).expect("stock Exchange1 with fiber");
+        let ids = exchange::deposit_ids(inv, &all);
+        eprintln!("deposit preview: {quote:?}");
+        session.deposit(ids, quote);
+        assert!(session.exchanging());
+        wait(&mut session, "the deposit", &|s| !s.exchanging());
+        assert_eq!(session.exchange_refused(Instant::now()), None);
+        let (receipt, _) = session.receipt(Instant::now()).unwrap();
+        eprintln!("deposit receipt: {receipt:?}");
+        assert!(receipt.as_quoted(), "{receipt:?} against {quote:?}");
+        wait(&mut session, "the fiber to go", &|s| {
+            exchange::fiber_stacks(s.state().inventory().unwrap()).is_empty()
+        });
+        assert_eq!(session.state().strands(), quote.balance_after);
+
+        // Withdraw some back: it lands in an empty slot at quality 50.
+        let quantity = 5.min(exchange::max_withdraw(quote.balance_after.unwrap()));
+        let st = session.state();
+        let quote = exchange::withdraw(st.inventory(), quantity, st.strands()).unwrap();
+        eprintln!("withdraw preview: {quote:?}");
+        session.withdraw(quote);
+        wait(&mut session, "the withdrawal", &|s| !s.exchanging());
+        let (receipt, _) = session.receipt(Instant::now()).unwrap();
+        eprintln!("withdraw receipt: {receipt:?}");
+        assert!(matches!(
+            receipt,
+            Receipt::Withdrew {
+                as_quoted: true,
+                ..
+            }
+        ));
+        wait(&mut session, "the fiber to land", &|s| {
+            !exchange::fiber_stacks(s.state().inventory().unwrap()).is_empty()
+        });
+        let st = session.state();
+        let stacks = exchange::fiber_stacks(st.inventory().unwrap());
+        assert_eq!(
+            (stacks[0].quantity, stacks[0].quality),
+            (quantity as i32, 50)
+        );
+        if let exchange::Lands::NewSlot(slot) = quote.lands {
+            assert_eq!(stacks[0].slot_index, slot as i32);
+        }
+        wait(&mut session, "the balance", &|s| {
+            s.state().strands() == quote.balance_after
+        });
+
+        // More than you hold: the core would refuse it, so ask the server
+        // directly, and keep its reason.
+        let balance = session.state().strands().unwrap();
+        let fiber = balance + 10;
+        let (strands, fee) = capitol_core::protocol::rules::withdraw_quote(fiber);
+        session.withdraw(WithdrawQuote {
+            fiber,
+            fee,
+            strands,
+            balance_after: None,
+            lands: exchange::Lands::OnStack {
+                slot: None,
+                quality_after: None,
+            },
+        });
+        wait(&mut session, "the refusal", &|s| !s.exchanging());
+        let why = session.exchange_refused(Instant::now()).unwrap();
+        eprintln!("refused: {why}");
+        assert!(why.contains("Insufficient"), "{why}");
+        assert_eq!(session.state().strands(), Some(balance));
         session.log_out();
         let _ = std::fs::remove_dir_all(dir);
     }

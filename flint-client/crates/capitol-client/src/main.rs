@@ -108,6 +108,11 @@ struct Args {
     /// For captures: they can't click egui (issue #76)
     #[arg(long, value_name = "KIT")]
     place: Option<String>,
+    /// Once signed in, open the exchange panel: "deposit" ticks every fiber
+    /// stack, "withdraw:200" types 200. For captures: they can't click or
+    /// type into egui (issue #76)
+    #[arg(long, value_name = "TAB[:N]")]
+    exchange: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -190,7 +195,8 @@ fn main() -> Result<()> {
     let mut extension = extension::CapitolExtension::new(shared, terrain, session)
         .with_icon_sheet(args.icon_sheet)
         .with_containers(args.containers)
-        .with_place(args.place);
+        .with_place(args.place)
+        .with_exchange(args.exchange.as_deref());
     if args.ui_sample {
         extension = extension.with_ui_sample();
     }

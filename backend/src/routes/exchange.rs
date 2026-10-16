@@ -4,7 +4,7 @@ use axum::{
     Extension, Json, Router,
 };
 use capitol_protocol::rest::{DepositRequest, DepositResponse, WithdrawRequest, WithdrawResponse};
-use capitol_protocol::rules::EXCHANGE_FEE_RATE;
+use capitol_protocol::rules::{deposit_quote, withdraw_quote};
 use uuid::Uuid;
 
 use crate::engine::currency::{add_strands, subtract_strands, TransactionType};
@@ -80,10 +80,8 @@ pub async fn deposit_fiber(
         return Err(AppError::BadRequest("No fiber to deposit".into()));
     }
 
-    // Calculate strands after fee (0.5% fee)
-    let gross_strands = total_fiber as i64;
-    let fee = ((gross_strands as f64) * EXCHANGE_FEE_RATE).floor() as i64;
-    let net_strands = gross_strands - fee;
+    // Strands after the 0.5% fee (the rule clients preview with)
+    let (fee, net_strands) = deposit_quote(total_fiber as i64);
 
     if net_strands <= 0 {
         return Err(AppError::BadRequest("Deposit amount too small after fee".into()));
@@ -157,8 +155,7 @@ pub async fn withdraw_fiber(
 
     // Calculate strands needed (fiber / (1 - fee_rate), rounded up)
     // If you want 100 fiber, you pay 100 / 0.995 = ~100.5 strands
-    let strands_needed = ((req.quantity as f64) / (1.0 - EXCHANGE_FEE_RATE)).ceil() as i64;
-    let fee = strands_needed - (req.quantity as i64);
+    let (strands_needed, fee) = withdraw_quote(req.quantity as i64);
 
     // Subtract strands from player balance (validates sufficient funds)
     let new_balance = subtract_strands(

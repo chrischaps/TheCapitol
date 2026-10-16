@@ -61,6 +61,22 @@ pub const NEARBY_STATION_HALF_EXTENT: f64 = 500.0;
 /// Fee on Strand/Fiber exchange, as a fraction (0.5%).
 pub const EXCHANGE_FEE_RATE: f64 = 0.005;
 
+/// What depositing `fiber` units at the exchange gives: `(fee, strands)`,
+/// the fee rounded down. `POST /exchange/deposit` charges exactly this, so
+/// a client's preview is the server's answer.
+pub fn deposit_quote(fiber: i64) -> (i64, i64) {
+    let fee = ((fiber as f64) * EXCHANGE_FEE_RATE).floor() as i64;
+    (fee, fiber - fee)
+}
+
+/// What withdrawing `fiber` units costs: `(strands, fee)`, where `strands`
+/// is `ceil(fiber / 0.995)` and includes the fee. `POST /exchange/withdraw`
+/// charges exactly this.
+pub fn withdraw_quote(fiber: i64) -> (i64, i64) {
+    let strands = ((fiber as f64) / (1.0 - EXCHANGE_FEE_RATE)).ceil() as i64;
+    (strands, strands - fiber)
+}
+
 // ---------------------------------------------------------------------------
 // Quality
 // ---------------------------------------------------------------------------
@@ -359,6 +375,22 @@ pub fn angle_from_center(center: (f64, f64), x: f64, y: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::terrain::Bridge;
+
+    #[test]
+    fn exchange_quotes() {
+        assert_eq!(deposit_quote(199), (0, 199));
+        assert_eq!(deposit_quote(200), (1, 199));
+        assert_eq!(deposit_quote(450), (2, 448));
+        assert_eq!(withdraw_quote(1), (2, 1));
+        assert_eq!(withdraw_quote(100), (101, 1));
+        assert_eq!(withdraw_quote(199), (200, 1));
+        assert_eq!(withdraw_quote(200), (202, 2));
+        // The float rule is the exact one, with no rounding surprises.
+        for n in 1..=200_000i64 {
+            assert_eq!(deposit_quote(n).0, n / 200, "deposit {n}");
+            assert_eq!(withdraw_quote(n).0, (200 * n + 198) / 199, "withdraw {n}");
+        }
+    }
 
     #[test]
     fn grades_match_server_thresholds() {

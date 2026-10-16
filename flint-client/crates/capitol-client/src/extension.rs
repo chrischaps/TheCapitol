@@ -92,6 +92,7 @@ pub struct CapitolExtension {
     nodes: Nodes,
     stations: Stations,
     crafting: ui::crafting::CraftingPanel,
+    exchange: ui::exchange::ExchangePanel,
     station: ui::station::StationPanel,
     /// Enter (the `craft` action) was pressed since `ui` last looked.
     craft_key: bool,
@@ -131,6 +132,7 @@ impl CapitolExtension {
             nodes: Nodes::default(),
             stations: Stations::default(),
             crafting: ui::crafting::CraftingPanel::default(),
+            exchange: ui::exchange::ExchangePanel::default(),
             station: ui::station::StationPanel::default(),
             craft_key: false,
             cancel_placing: false,
@@ -162,6 +164,15 @@ impl CapitolExtension {
     /// A workaround: captures can't right-click egui (issue #76).
     pub fn with_place(mut self, item_type: Option<String>) -> Self {
         self.place_on_arrival = item_type;
+        self
+    }
+
+    /// Open the exchange panel preset (`--exchange deposit|withdraw:N`).
+    /// A workaround: captures can't click or type into egui (issue #76).
+    pub fn with_exchange(mut self, spec: Option<&str>) -> Self {
+        if let Some(spec) = spec {
+            self.exchange.preset(spec);
+        }
         self
     }
 
@@ -220,6 +231,9 @@ impl PlayerExtension for CapitolExtension {
         }
         if !self.at_login() && ctx.input.is_action_just_pressed("crafting") {
             self.crafting.toggle();
+        }
+        if !self.at_login() && ctx.input.is_action_just_pressed("exchange") {
+            self.exchange.toggle();
         }
         // Taken in `ui`, where the panel knows its recipe.
         self.craft_key |= !self.at_login() && ctx.input.is_action_just_pressed("craft");
@@ -434,6 +448,7 @@ impl PlayerExtension for CapitolExtension {
                     down: session.link().outage().is_some(),
                     inventory_open: self.inventory.open,
                     crafting_open: self.crafting.open,
+                    exchange_open: self.exchange.open,
                 };
                 let clicks = ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
                 sign_out |= clicks.sign_out;
@@ -442,6 +457,9 @@ impl PlayerExtension for CapitolExtension {
                 }
                 if clicks.crafting {
                     self.crafting.toggle();
+                }
+                if clicks.exchange {
+                    self.exchange.toggle();
                 }
             }
             let outage = if at_login {
@@ -502,6 +520,25 @@ impl PlayerExtension for CapitolExtension {
                         }
                     }
                     Some(CraftAction::Cancel) => session.cancel_craft(),
+                    None => {}
+                }
+                let state = session.state();
+                let view = ui::exchange::View {
+                    inventory: state.inventory(),
+                    strands: state.strands(),
+                    busy: session.exchanging(),
+                    refused: session.exchange_refused(now),
+                    receipt: session.receipt(now),
+                };
+                match self
+                    .exchange
+                    .show(ctx, &mut self.icons, &view, self.crafting.rect)
+                {
+                    Some(ui::exchange::Action::Deposit { item_ids, quote }) => {
+                        session.deposit(item_ids, quote)
+                    }
+                    Some(ui::exchange::Action::Withdraw(quote)) => session.withdraw(quote),
+                    Some(ui::exchange::Action::Close) => self.exchange.open = false,
                     None => {}
                 }
                 let state = session.state();

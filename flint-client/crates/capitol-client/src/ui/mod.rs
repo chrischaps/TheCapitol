@@ -26,6 +26,7 @@
 
 pub mod containers;
 pub mod crafting;
+pub mod exchange;
 pub mod hud;
 pub mod icons;
 pub mod inventory;
@@ -62,7 +63,7 @@ pub fn controls(ctx: &egui::Context, status: &str, clear_of: Option<egui::Rect>)
                     "Click the ground to walk, or grass to gather",
                     "Alt-click a plot for its deed",
                     "Click a station, or press O, to open it",
-                    "I inventory · C crafting · O station · Enter crafts",
+                    "I inventory · C crafting · X exchange · O station · Enter crafts",
                     "WASD pans · H home",
                     "Wheel or R/F zooms · Q/E or right-drag turns",
                     status,
