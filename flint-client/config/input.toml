@@ -75,6 +75,13 @@ bindings = [{ type = "key", code = "Enter" }]
 kind = "button"
 bindings = [{ type = "key", code = "KeyO" }]
 
+# Trading (P7.3): accept the request you've been sent, or else ask the
+# player nearest you, walking closer if they're out of range. A shift-click
+# on someone does the same for them, and this is a key captures can press.
+[actions.trade]
+kind = "button"
+bindings = [{ type = "key", code = "KeyT" }]
+
 # The spike's plan hairlines (scripts/spike.rhai), on P now that E orbits.
 [actions.plan]
 kind = "button"

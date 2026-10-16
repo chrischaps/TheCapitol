@@ -112,7 +112,7 @@ fn on_event(name, data) {
         return;
     }
     if name == "extraction_note" || name == "plot_note" || name == "placement_note"
-        || name == "station_note" {
+        || name == "station_note" || name == "trade_note" {
         toasts = add_toast(toasts, data.title, data.body, "note", t);
         return;
     }
@@ -340,7 +340,11 @@ fn on_draw_ui() {
 
     // The stack, newest at the bottom. Each eases toward its place above
     // the ones newer than it, so a new toast pushes the rest up.
-    let bottom = screen_height() * 0.74 + 60.0;
+    // The trade window (P7.3) stands where toasts go, so while it's open
+    // they stack above the avatars instead.
+    let trade = cap_trade();
+    let low = if trade != () && trade.state == "open" { 0.30 } else { 0.74 };
+    let bottom = screen_height() * low + 60.0;
     let above = 0.0;
     let i = toasts.len() - 1;
     while i >= 0 {

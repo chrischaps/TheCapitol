@@ -4,6 +4,7 @@
 //! capitol-bot                          # Bot1 gathers fiber, crafts rope, reports
 //! capitol-bot --accounts 5 --wander    # five players strolling about, until Ctrl-C
 //! capitol-bot --accounts 5 --wander --near Chris   # ...around Chris, following them
+//! capitol-bot --prefix trader --trade Chris --ask  # a trading partner for Chris
 //! ```
 //!
 //! Run it from `flint-client/` with `cargo run -p capitol-core --bin capitol-bot -- <flags>`.
@@ -12,7 +13,7 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use capitol_core::bot::{Account, Bot, BotError};
+use capitol_core::bot::{Account, Bot, BotError, TradeOffer};
 use capitol_core::net::NetConfig;
 
 const USAGE: &str = "\
@@ -32,6 +33,11 @@ FLAGS:
     --seconds <s>       Stop wandering after this long [default: never]
     --gather <n>        Instead of the script, gather until the inventory holds
                         n fiber, and stop (to stock an account for a test)
+    --trade <player>    Stay beside this player and trade with them: answer
+                        their requests, offer, and accept once they offer
+    --ask               With --trade, ask them too whenever idle beside them
+    --offer-strands <n> With --trade, Strands to offer [default: 10]
+    --offer <item_type> With --trade, also offer every stack of this type
     -h, --help          Print this
 
 The script logs in (or registers), scouts for fiber, walks to the nearest
@@ -48,6 +54,9 @@ struct Options {
     radius: f64,
     seconds: Option<f64>,
     gather: Option<i32>,
+    trade: Option<String>,
+    ask: bool,
+    offer: TradeOffer,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
@@ -60,6 +69,12 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         radius: 120.0,
         seconds: None,
         gather: None,
+        trade: None,
+        ask: false,
+        offer: TradeOffer {
+            strands: 10,
+            item_type: None,
+        },
     };
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -83,12 +98,21 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             "--radius" => options.radius = number(&flag, &value()?)?,
             "--seconds" => options.seconds = Some(number(&flag, &value()?)?),
             "--gather" => options.gather = Some(number(&flag, &value()?)?),
+            "--trade" => options.trade = Some(value()?),
+            "--ask" => options.ask = true,
+            "--offer-strands" => options.offer.strands = number(&flag, &value()?)?,
+            "--offer" => options.offer.item_type = Some(value()?),
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown flag {other}")),
         }
     }
     if options.near.is_some() && !options.wander {
         return Err("--near goes with --wander".into());
+    }
+    if options.trade.is_none()
+        && (options.ask || options.offer.item_type.is_some() || options.offer.strands != 10)
+    {
+        return Err("--ask, --offer and --offer-strands go with --trade".into());
     }
     Ok(Some(options))
 }
@@ -102,10 +126,12 @@ fn number<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, String> {
 fn run(options: &Options, n: usize) -> Result<(), BotError> {
     let account = Account::numbered(&options.prefix, n);
     let mut bot = Bot::sign_in(NetConfig::with_base_url(&options.server), &account)?;
-    if options.wander {
-        let deadline = options
-            .seconds
-            .map(|s| Instant::now() + Duration::from_secs_f64(s));
+    let deadline = options
+        .seconds
+        .map(|s| Instant::now() + Duration::from_secs_f64(s));
+    if let Some(name) = &options.trade {
+        bot.trade_with(name, &options.offer, options.ask, deadline)
+    } else if options.wander {
         bot.wander(options.radius, options.near.as_deref(), deadline)
     } else if let Some(want) = options.gather {
         bot.gather("fiber", want)?;
@@ -183,6 +209,13 @@ mod tests {
         );
         assert_eq!(o.near.as_deref(), Some("Ada"));
         assert!(parse(args("--help")).unwrap().is_none());
+        let t = parse(args("--trade Ada --ask --offer rope --offer-strands 25"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(t.trade.as_deref(), Some("Ada"));
+        assert!(t.ask);
+        assert_eq!(t.offer.strands, 25);
+        assert_eq!(t.offer.item_type.as_deref(), Some("rope"));
     }
 
     #[test]
@@ -196,5 +229,6 @@ mod tests {
             parse(args("--near Ada")).is_err(),
             "--near without --wander"
         );
+        assert!(parse(args("--ask")).is_err(), "--ask without --trade");
     }
 }

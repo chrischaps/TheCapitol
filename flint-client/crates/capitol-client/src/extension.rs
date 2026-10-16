@@ -16,7 +16,9 @@ use crate::atmosphere::Atmosphere;
 use crate::entities::Players;
 use crate::juice_sample::JuiceSample;
 use crate::nodes::Nodes;
-use crate::script_api::{self, PlacementMark, PlotMark, Shared, UiAnchor, ZoneBanner};
+use crate::script_api::{
+    self, PlacementMark, PlotMark, Shared, TradeMark, UiAnchor, ZoneBanner,
+};
 use crate::session::Session;
 use crate::sound::{Ears, Rustling, Soundscape};
 use crate::stations::{GhostView, Stations};
@@ -110,6 +112,11 @@ pub struct CapitolExtension {
     sound: Soundscape,
     /// `--juice-sample`: the juice on a timetable, offline (P8.2).
     juice: Option<JuiceSample>,
+    trade: ui::trade::TradePanel,
+    /// `--trade-offer`: what to put in each trade as it opens, and the
+    /// trade it was last put in.
+    trade_offer: Option<(String, i64)>,
+    trade_offered: Option<uuid::Uuid>,
 }
 
 impl CapitolExtension {
@@ -147,6 +154,9 @@ impl CapitolExtension {
             place_on_arrival: None,
             sound: Soundscape::new(false),
             juice: None,
+            trade: ui::trade::TradePanel::default(),
+            trade_offer: None,
+            trade_offered: None,
         }
     }
 
@@ -193,6 +203,16 @@ impl CapitolExtension {
         if let Some(spec) = spec {
             self.exchange.preset(spec);
         }
+        self
+    }
+
+    /// Offer this in each trade as it opens (`--trade-offer ITEM[:N]`).
+    /// A workaround: captures can't drag into egui (issue #76).
+    pub fn with_trade_offer(mut self, spec: Option<&str>) -> Self {
+        self.trade_offer = spec.map(|s| {
+            let (item, strands) = s.split_once(':').unwrap_or((s, "0"));
+            (item.to_owned(), strands.parse().unwrap_or(0))
+        });
         self
     }
 
@@ -261,10 +281,14 @@ impl PlayerExtension for CapitolExtension {
         // Taken in `ui`, where the panel knows its recipe.
         self.craft_key |= !self.at_login() && ctx.input.is_action_just_pressed("craft");
         let station_key = !self.at_login() && ctx.input.is_action_just_pressed("station");
+        let trade_key = !self.at_login() && ctx.input.is_action_just_pressed("trade");
         if let Some(session) = &mut self.session {
             session.update(now, &mut self.terrain);
             if station_key {
                 session.open_nearest_station(now);
+            }
+            if trade_key {
+                session.trade_key(now);
             }
             walk(ctx, session, &self.shared, now);
             gather(ctx, session, &self.shared, &mut self.sound, now);
@@ -275,6 +299,10 @@ impl PlayerExtension for CapitolExtension {
             let (poses, state) = session.sample(now);
             let dt = ctx.clock.delta_time.min(0.1) as f32;
             self.players.update(ctx, poses, state, dt, &self.shared);
+            trade(ctx, session, &self.shared, now);
+            if let Some((item, strands)) = &self.trade_offer {
+                offer_preset(session, item, *strands, &mut self.trade_offered, now);
+            }
             let banner = session.arrival().map(|a| ZoneBanner {
                 name: a.zone.display_name().to_owned(),
                 colour: palette::srgb(palette::zone_mark(a.zone)),
@@ -615,6 +643,29 @@ impl PlayerExtension for CapitolExtension {
                     Some(StationAction::Remove(id)) => session.remove_station(id),
                     None => {}
                 }
+                let state = session.state();
+                let walking_to = session
+                    .trade_target()
+                    .and_then(|id| state.player(id))
+                    .map(|p| p.name.clone());
+                let view = ui::trade::View {
+                    trade: state.trade(),
+                    draft: session.draft(),
+                    inventory: state.inventory(),
+                    strands: state.strands(),
+                    waiting: state.trade_waiting(),
+                    offer_changed: session.offer_changed(now),
+                    walking_to: walking_to.as_deref(),
+                };
+                let was_open = self.trade.is_open();
+                let asked = self.trade.show(ctx, &mut self.icons, &view);
+                // You'll want to drag from it.
+                if self.trade.is_open() && !was_open {
+                    self.inventory.open = true;
+                }
+                if let Some(action) = asked {
+                    act_on_trade(session, action, now);
+                }
                 let refused = session.move_refused(Instant::now());
                 let inventory = session.state().inventory();
                 let clicks = self
@@ -766,6 +817,131 @@ fn walk(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Shar
         data.insert("reason".into(), blocked.reason.into());
         ctx.fire_event("movement_blocked", data);
     }
+}
+
+/// Trading (P7.3): ask the player a script asked for (`cap_trade_with`),
+/// tell scripts where trading stands (`cap_trade`), and fire at them
+/// `trade_note`, with a `title` and `body`, for what's worth a toast, and
+/// `trade_executed` with where you and your partner stood (`x`, `z`,
+/// `tx`, `tz`, world metres; the partner's are yours if unknown) when a
+/// trade goes through.
+fn trade(ctx: &mut ExtensionCtx, session: &mut Session, shared: &Shared, now: Instant) {
+    use capitol_core::state::Trade;
+    if let Some(id) = shared.trade_with.lock().ok().and_then(|mut t| t.take()) {
+        match uuid::Uuid::parse_str(&id) {
+            Ok(player) => {
+                session.trade_with(now, player);
+            }
+            Err(e) => tracing::warn!("cap_trade_with: {id:?} isn't a player id: {e}"),
+        }
+    }
+    for note in session.take_trade_notes() {
+        let mut data = toml::Table::new();
+        data.insert("title".into(), note.title.into());
+        data.insert("body".into(), note.body.into());
+        ctx.fire_event("trade_note", data);
+    }
+    for done in session.take_traded() {
+        let Some((x, y)) = done.me else {
+            continue;
+        };
+        let [x, z] = crate::coords::to_world(x, y);
+        let [tx, tz] = done
+            .them
+            .map_or([x, z], |(x, y)| crate::coords::to_world(x, y));
+        let mut data = toml::Table::new();
+        data.insert("x".into(), (x as f64).into());
+        data.insert("z".into(), (z as f64).into());
+        data.insert("tx".into(), (tx as f64).into());
+        data.insert("tz".into(), (tz as f64).into());
+        data.insert("partner".into(), done.partner.into());
+        ctx.fire_event("trade_executed", data);
+    }
+    let state = session.state();
+    let (other, mark) = match state.trade() {
+        Trade::Idle => match session.trade_target() {
+            Some(id) => (Some(id), "walking"),
+            None => (None, ""),
+        },
+        Trade::Requested { to, .. } => (Some(*to), "asking"),
+        Trade::Incoming { from, .. } => (Some(*from), "incoming"),
+        Trade::Open(open) => (Some(open.partner_id), "open"),
+    };
+    let open = state.open_trade();
+    let mark = other.map(|id| {
+        let them = shared.players.lock().ok().and_then(|labels| {
+            labels
+                .iter()
+                .find(|l| l.id == id)
+                .map(|l| [l.at[0], l.feet_y, l.at[2]])
+        });
+        TradeMark {
+            state: mark,
+            them,
+            mine: open.is_some_and(|o| o.i_accepted),
+            theirs: open.is_some_and(|o| o.they_accepted),
+        }
+    });
+    if let Ok(mut shared) = shared.trade.lock() {
+        *shared = mark;
+    }
+}
+
+/// What the trade panel asked for.
+fn act_on_trade(session: &mut Session, action: ui::trade::Action, now: Instant) {
+    use ui::trade::Action;
+    match action {
+        Action::Answer(accept) => session.answer_trade(now, accept),
+        Action::Withdraw => session.withdraw_trade(),
+        Action::Add(item) => session.draft_mut().add(&item, now),
+        Action::Quantity {
+            item_id,
+            quantity,
+            stack,
+        } => session
+            .draft_mut()
+            .set_quantity(item_id, quantity, stack, now),
+        Action::Remove(id) => session.draft_mut().remove(id, now),
+        Action::Strands(n) => session.draft_mut().set_strands(n, now),
+        Action::Accept => session.accept_trade(now),
+        Action::Cancel => session.cancel_trade(now),
+    }
+}
+
+/// `--trade-offer`: puts every `item` stack and `strands` Strands into the
+/// draft of each trade as it opens, once.
+fn offer_preset(
+    session: &mut Session,
+    item: &str,
+    strands: i64,
+    offered: &mut Option<uuid::Uuid>,
+    now: Instant,
+) {
+    let Some(id) = session.state().open_trade().map(|o| o.trade_id) else {
+        return;
+    };
+    if *offered == Some(id) {
+        return;
+    }
+    let stacks: Vec<_> = session
+        .state()
+        .inventory()
+        .map(|c| c.items().filter(|i| i.item_type == item).cloned().collect())
+        .unwrap_or_default();
+    if session.draft().strands() != 0 || !session.draft().lines().is_empty() {
+        return;
+    }
+    *offered = Some(id);
+    // `Session::update` has already synced the draft to this trade.
+    let draft = session.draft_mut();
+    for stack in &stacks {
+        draft.add(stack, now);
+    }
+    draft.set_strands(strands, now);
+    tracing::info!(
+        "trade: --trade-offer put {} stacks and {strands} Strands in",
+        stacks.len()
+    );
 }
 
 /// Resource nodes (P4.4): send the extraction a script asked for

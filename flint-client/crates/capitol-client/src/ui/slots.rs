@@ -119,6 +119,24 @@ impl<'a> SlotGrid<'a> {
     }
 }
 
+/// The item a slot's drag let go of over `response` this frame, if any:
+/// how a panel that isn't a container takes a drop (the trade window, P7.3).
+pub fn dropped_item(response: &egui::Response) -> Option<SlotItem> {
+    response
+        .dnd_release_payload::<Held>()
+        .map(|held| held.item.clone())
+}
+
+/// A slot's item is being dragged over `response`.
+pub fn item_over(response: &egui::Response) -> bool {
+    response.dnd_hover_payload::<Held>().is_some()
+}
+
+/// A slot's item is being dragged anywhere.
+pub fn dragging_item(ctx: &egui::Context) -> bool {
+    egui::DragAndDrop::has_payload_of_type::<Held>(ctx)
+}
+
 /// A station kit: a right click on one places its station.
 fn is_kit(item: &SlotItem) -> bool {
     capitol_core::protocol::rules::station_type_for_kit(&item.item_type).is_some()

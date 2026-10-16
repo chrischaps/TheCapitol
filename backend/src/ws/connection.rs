@@ -1427,88 +1427,24 @@ async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<Uuid, String
         return Err(format!("Player B has insufficient strands"));
     }
 
-    // Transfer items from A to B
-    for (item_id, qty) in &session.offer_a.items {
-        // Get item details
-        let (item_type, quality, current_qty): (String, i32, i32) = sqlx::query_as(
-            "SELECT item_type, quality, quantity FROM items WHERE id = $1"
-        )
-        .bind(item_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| format!("DB error: {}", e))?;
-
-        if current_qty == *qty {
-            // Transfer entire item
-            sqlx::query("UPDATE items SET owner_id = $1 WHERE id = $2")
-                .bind(player_b)
-                .bind(item_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| format!("DB error: {}", e))?;
-        } else {
-            // Split stack: reduce source quantity, create new item for recipient
-            sqlx::query("UPDATE items SET quantity = quantity - $1 WHERE id = $2")
-                .bind(qty)
-                .bind(item_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| format!("DB error: {}", e))?;
-
-            let new_item_id = Uuid::new_v4();
-            sqlx::query(
-                "INSERT INTO items (id, item_type, quality, quantity, owner_id)
-                 VALUES ($1, $2, $3, $4, $5)"
-            )
-            .bind(new_item_id)
-            .bind(&item_type)
-            .bind(quality)
-            .bind(qty)
-            .bind(player_b)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| format!("DB error: {}", e))?;
+    // Hand the items over. Each stack leaves its container first (a split
+    // takes a new stack off it), and only then is each placed in its new
+    // owner's inventory, so a swap can use the slots it frees (#95). An
+    // inventory with no room fails the trade, and the transaction rolls back.
+    let mut placing: Vec<(Uuid, Uuid)> = Vec::new();
+    for (items, to) in [(&session.offer_a.items, player_b), (&session.offer_b.items, player_a)] {
+        for (item_id, qty) in items {
+            placing.push((hand_over(&mut tx, *item_id, *qty, to).await?, to));
         }
     }
-
-    // Transfer items from B to A
-    for (item_id, qty) in &session.offer_b.items {
-        let (item_type, quality, current_qty): (String, i32, i32) = sqlx::query_as(
-            "SELECT item_type, quality, quantity FROM items WHERE id = $1"
-        )
-        .bind(item_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| format!("DB error: {}", e))?;
-
-        if current_qty == *qty {
-            sqlx::query("UPDATE items SET owner_id = $1 WHERE id = $2")
-                .bind(player_a)
-                .bind(item_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| format!("DB error: {}", e))?;
-        } else {
-            sqlx::query("UPDATE items SET quantity = quantity - $1 WHERE id = $2")
-                .bind(qty)
-                .bind(item_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| format!("DB error: {}", e))?;
-
-            let new_item_id = Uuid::new_v4();
-            sqlx::query(
-                "INSERT INTO items (id, item_type, quality, quantity, owner_id)
-                 VALUES ($1, $2, $3, $4, $5)"
-            )
-            .bind(new_item_id)
-            .bind(&item_type)
-            .bind(quality)
-            .bind(qty)
-            .bind(player_a)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| format!("DB error: {}", e))?;
+    for to in [player_a, player_b] {
+        let stacks: Vec<Uuid> = placing
+            .iter()
+            .filter(|(_, owner)| *owner == to)
+            .map(|(id, _)| *id)
+            .collect();
+        if !stacks.is_empty() {
+            place_in_inventory(&mut tx, to, &stacks).await?;
         }
     }
 
@@ -1570,9 +1506,111 @@ async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<Uuid, String
     Ok(trade_id)
 }
 
+/// Gives `qty` of the stack `item_id` to `to`, out of any container: the
+/// whole stack, or a new stack split off it. Returns the stack `to` now
+/// owns, for [`place_in_inventory`].
+async fn hand_over(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    item_id: Uuid,
+    qty: i32,
+    to: Uuid,
+) -> Result<Uuid, String> {
+    let (item_type, quality, current_qty): (String, i32, i32) =
+        sqlx::query_as("SELECT item_type, quality, quantity FROM items WHERE id = $1")
+            .bind(item_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| format!("DB error: {}", e))?;
+    if current_qty == qty {
+        sqlx::query(
+            "UPDATE items SET owner_id = $1, container_id = NULL, slot_index = NULL WHERE id = $2",
+        )
+        .bind(to)
+        .bind(item_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("DB error: {}", e))?;
+        return Ok(item_id);
+    }
+    sqlx::query("UPDATE items SET quantity = quantity - $1 WHERE id = $2")
+        .bind(qty)
+        .bind(item_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("DB error: {}", e))?;
+    let new_item_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO items (id, item_type, quality, quantity, owner_id) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(new_item_id)
+    .bind(&item_type)
+    .bind(quality)
+    .bind(qty)
+    .bind(to)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("DB error: {}", e))?;
+    Ok(new_item_id)
+}
+
+/// Puts each of `stacks` in a free slot of `player`'s inventory, lowest
+/// first. Fails if there aren't enough free slots.
+async fn place_in_inventory(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    player: Uuid,
+    stacks: &[Uuid],
+) -> Result<(), String> {
+    let (container_id, slot_count): (Uuid, i32) = sqlx::query_as(
+        "SELECT c.id, ct.slot_count FROM containers c
+         JOIN container_types ct ON c.container_type = ct.id
+         WHERE c.owner_id = $1 AND c.container_type = 'player_inventory' LIMIT 1",
+    )
+    .bind(player)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| format!("DB error: {}", e))?;
+    let used: std::collections::HashSet<i32> = sqlx::query_scalar(
+        "SELECT slot_index FROM items WHERE container_id = $1 AND slot_index IS NOT NULL",
+    )
+    .bind(container_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| format!("DB error: {}", e))?
+    .into_iter()
+    .collect();
+    let free = free_slots(slot_count, &used, stacks.len())
+        .ok_or_else(|| "Not enough room in an inventory for the trade".to_string())?;
+    for (item_id, slot) in stacks.iter().zip(free) {
+        sqlx::query("UPDATE items SET container_id = $1, slot_index = $2 WHERE id = $3")
+            .bind(container_id)
+            .bind(slot)
+            .bind(item_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| format!("DB error: {}", e))?;
+    }
+    Ok(())
+}
+
+/// The lowest `n` slots below `slot_count` not in `used`, or `None` if
+/// there aren't that many.
+fn free_slots(slot_count: i32, used: &std::collections::HashSet<i32>, n: usize) -> Option<Vec<i32>> {
+    let free: Vec<i32> = (0..slot_count).filter(|s| !used.contains(s)).take(n).collect();
+    (free.len() == n).then_some(free)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn traded_stacks_take_the_lowest_free_slots_or_none() {
+        let used = std::collections::HashSet::from([0, 1, 3]);
+        assert_eq!(free_slots(6, &used, 2), Some(vec![2, 4]));
+        assert_eq!(free_slots(6, &used, 3), Some(vec![2, 4, 5]));
+        assert_eq!(free_slots(6, &used, 4), None);
+        assert_eq!(free_slots(4, &used, 0), Some(vec![]));
+    }
 
     fn offer_item(id: &str, quantity: i32) -> TradeOfferItem {
         TradeOfferItem { item_id: id.to_string(), quantity }

@@ -65,6 +65,38 @@ const MAX_EXTRACTIONS: usize = 10;
 /// [`crate::poll::FIRST_TAG`].
 const FIRST_TAG: Tag = 1;
 
+/// After a changed offer, how long [`Bot::trade_with`] waits before it
+/// accepts.
+pub const TRADE_THINK: Duration = Duration::from_millis(1500);
+/// How long [`Bot::trade_with`] leaves an unanswered request before asking
+/// again.
+const ASK_AGAIN: Duration = Duration::from_secs(20);
+
+/// What [`Bot::trade_with`] puts on its side of a trade.
+#[derive(Debug, Clone, Default)]
+pub struct TradeOffer {
+    /// Strands offered.
+    pub strands: i64,
+    /// Every stack of this item type in the inventory, if any.
+    pub item_type: Option<String>,
+}
+
+impl TradeOffer {
+    fn items(&self, bot: &Bot) -> Vec<capitol_protocol::ws::TradeOfferItem> {
+        let (Some(kind), Some(inventory)) = (&self.item_type, bot.state.inventory()) else {
+            return Vec::new();
+        };
+        inventory
+            .items()
+            .filter(|i| &i.item_type == kind)
+            .map(|i| capitol_protocol::ws::TradeOfferItem {
+                item_id: i.item_id.to_string(),
+                quantity: i.quantity,
+            })
+            .collect()
+    }
+}
+
 /// Who a bot logs in as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Account {
@@ -714,6 +746,138 @@ impl Bot {
             self.idle(Duration::from_secs_f64(pause))?;
         }
         Ok(())
+    }
+
+    /// Trades with `name` until `deadline` (or forever): a partner for
+    /// testing a client's trade window (P7.3).
+    ///
+    /// It stays within trading range of them, answers their requests, and
+    /// with `ask` asks them itself whenever it's idle beside them. In a
+    /// trade it offers what `offer` says, then accepts once their offer has
+    /// something in it, or once they've accepted. A changed offer resets
+    /// both accepts on the server, so it waits [`TRADE_THINK`] after one
+    /// before accepting again, for a person to see the reset.
+    pub fn trade_with(
+        &mut self,
+        name: &str,
+        offer: &TradeOffer,
+        ask: bool,
+        deadline: Option<Instant>,
+    ) -> Result<(), BotError> {
+        use crate::state::{Trade, TradeEvent};
+        self.say(format!("trading with {name}"));
+        let mut offered: Option<Uuid> = None;
+        let mut thinking_since = Instant::now();
+        let mut asked_at: Option<Instant> = None;
+        while deadline.is_none_or(|d| Instant::now() < d) {
+            let changes = self.frame();
+            let now = Instant::now();
+            for change in &changes {
+                let StateEvent::Trade(event) = change else {
+                    continue;
+                };
+                match event {
+                    TradeEvent::OfferChanged { .. } => thinking_since = now,
+                    TradeEvent::Executed { .. } => {
+                        self.say("trade done");
+                        offered = None;
+                    }
+                    TradeEvent::Cancelled { reason, .. } => {
+                        self.say(format!("trade cancelled: {reason}"));
+                        offered = None;
+                    }
+                    TradeEvent::Refused { reason, .. } => self.say(format!("refused: {reason}")),
+                    _ => {}
+                }
+            }
+            let Some(them) = self.player_id_named(name) else {
+                continue;
+            };
+            let trade = self.state.trade().clone();
+            match trade {
+                Trade::Incoming { from, .. } if from == them => {
+                    if let Ok(m) = self.state.trade_accept_request(now) {
+                        self.say("accepting their request");
+                        self.send(m);
+                    }
+                }
+                Trade::Incoming { .. } => {
+                    if let Ok(m) = self.state.trade_decline_request() {
+                        self.send(m);
+                    }
+                }
+                Trade::Open(open) => {
+                    if offered != Some(open.trade_id) {
+                        offered = Some(open.trade_id);
+                        let items = offer.items(self);
+                        self.say(format!(
+                            "offering {} stacks and {} Strands",
+                            items.len(),
+                            offer.strands
+                        ));
+                        if let Ok(m) = self.state.trade_offer(now, items, offer.strands) {
+                            self.send(m);
+                        }
+                        thinking_since = now;
+                    }
+                    let theirs = !open.theirs.items.is_empty() || open.theirs.strands > 0;
+                    if !open.i_accepted
+                        && (theirs || open.they_accepted)
+                        && self.state.trade_waiting().is_none()
+                        && now.duration_since(thinking_since) >= TRADE_THINK
+                    {
+                        if let Ok(m) = self.state.trade_accept(now) {
+                            self.say("accepting");
+                            self.send(m);
+                        }
+                    }
+                }
+                Trade::Idle | Trade::Requested { .. } => {
+                    let Some((x, y)) = self.player_named(name) else {
+                        continue;
+                    };
+                    let (mx, my) = self.position();
+                    let apart = (x - mx).hypot(y - my);
+                    if apart < rules::TRADE_RANGE * 0.25 {
+                        // Standing on them: step a few metres off, so both
+                        // can be seen.
+                        let a = std::f64::consts::TAU * self.random();
+                        let r = rules::TRADE_RANGE * 0.5;
+                        match self.walk_to(x + r * a.cos(), y + r * a.sin()) {
+                            Ok(()) | Err(BotError::Blocked { .. }) => {}
+                            Err(e) => return Err(e),
+                        }
+                    } else if apart > rules::TRADE_RANGE * 0.8 {
+                        let (dx, dy) = (mx - x, my - y);
+                        let d = dx.hypot(dy).max(1e-6);
+                        let r = rules::TRADE_RANGE * 0.5;
+                        match self.walk_to(x + dx / d * r, y + dy / d * r) {
+                            Ok(()) | Err(BotError::Blocked { .. }) => {}
+                            Err(e) => return Err(e),
+                        }
+                    } else if ask
+                        && matches!(trade, Trade::Idle)
+                        && asked_at.is_none_or(|t| now.duration_since(t) > ASK_AGAIN)
+                    {
+                        asked_at = Some(now);
+                        if let Ok(m) = self.state.trade_initiate(now, them) {
+                            self.say(format!("asking {name} to trade"));
+                            self.send(m);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn player_id_named(&self, name: &str) -> Option<Uuid> {
+        let me = self.state.me();
+        self.state
+            .players()
+            .values()
+            .find(|p| Some(p.id) != me && p.name.eq_ignore_ascii_case(name))
+            .map(|p| p.id)
     }
 
     /// Where another player is, by name, ignoring case.

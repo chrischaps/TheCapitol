@@ -123,6 +123,11 @@ struct Args {
     /// banner and the camera's ease into it. For captures
     #[arg(long)]
     juice_sample: bool,
+    /// Once a trade opens, offer every stack of this item type, and with
+    /// ":N" N Strands too ("rope:25", or ":25" for Strands alone). For
+    /// captures: they can't drag into egui (issue #76)
+    #[arg(long, value_name = "ITEM[:N]")]
+    trade_offer: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -222,7 +227,8 @@ fn main() -> Result<()> {
         .with_place(args.place)
         .with_exchange(args.exchange.as_deref())
         .with_mute(args.mute || args.exit_after.is_some())
-        .with_juice_sample(args.juice_sample && args.offline.is_some());
+        .with_juice_sample(args.juice_sample && args.offline.is_some())
+        .with_trade_offer(args.trade_offer.as_deref());
     if args.ui_sample {
         extension = extension.with_ui_sample();
     }

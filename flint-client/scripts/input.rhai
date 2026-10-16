@@ -13,8 +13,7 @@
 //   6. anywhere else: walk there                    (P4.3, here)
 //
 // Each is a function below that gets the click (#{ x, z } in world
-// metres, `shift`, `alt`) and returns true when it took it. Trading (2)
-// still says no until P7.3 fills its body.
+// metres, `shift`, `alt`) and returns true when it took it.
 //
 // Walking: cap_move(x, z) sends you (clamped to the world, 0-8000 server
 // units), and cap_destination() is where you're going until you arrive.
@@ -71,6 +70,19 @@
 // one where it can't is refused with a toast. A right click or Esc
 // (Rust, extension.rs) stops it, and clicks walk again.
 //
+// Trading (P7.3): shift-click someone (cap_player_at, cap_trade_with) to
+// ask them to trade. Within 75 units (7.5 m) the request goes at once;
+// further, you walk over and it goes as you arrive. Holding shift over
+// someone rings their feet in the Trade District's blue, so you can see the
+// click will ask. While a request is out, or in, a faint strand runs
+// between you, its light flowing from whoever asked. Once the window is
+// open it's a twisted strand at hand height, two fibres winding round
+// each other, and each end turns gold as that side accepts: a deal is
+// rope made between two people. When it goes through, a gold pulse runs
+// both ways along it and rings breathe out round you both. The window
+// itself is Rust's (ui/trade.rs), and refusals and endings come here as
+// `trade_note` toasts.
+//
 // Plots (P6.4): alt-click a lot to see it in the plot panel (Rust asks
 // the server what's there, cap_pick_plot). While the panel is open, the
 // picked lot's edge is traced on the ground: a fine line with a brighter
@@ -95,6 +107,8 @@ let sprouts = [];
 let blooms = [];
 // A plot just claimed: its rings breathing out over it.
 let deeds = [];
+// A trade just made: #{ x, z, tx, tz, born } for the pulse and the rings.
+let trades = [];
 
 // ── Tuning ───────────────────────────────────────────────────────────────
 
@@ -115,6 +129,9 @@ fn sprout_life() { 1.4 }
 fn bloom_life() { 1.3 }
 // A claimed plot's rings, and the flare on the picked lot's edge (s).
 fn deed_life() { 2.2 }
+// A trade's pulse and rings (s), and the strand's height over the feet (m).
+fn trade_life() { 1.8 }
+fn strand_height() { 1.0 }
 // The ring round someone crafting (m). A craft's yield starts where your
 // name hangs (entities.rs LABEL_Y, m over your feet) and that many points
 // higher on the screen, so it clears the name at any zoom.
@@ -138,6 +155,7 @@ fn on_update() {
     sprouts = sprouts.filter(|s| t - s.born < sprout_life());
     blooms = blooms.filter(|b| t - b.born < bloom_life());
     deeds = deeds.filter(|d| t - d.born < deed_life());
+    trades = trades.filter(|d| t - d.born < trade_life());
     if cap_at_login() { return; }
     // The ghost follows the ground under the cursor.
     if cap_placing() != () {
@@ -165,7 +183,15 @@ fn on_update() {
 
 // ── The intents above walking ─────────────────────────────────────────────
 
-fn trade_with(click) { false }    // P7.3, shift
+// Shift-click someone: ask them to trade, or walk over and ask. Shift
+// over no one falls through, as React's does.
+fn trade_with(click) {
+    if !click.shift { return false; }
+    let p = cap_player_at(click.x, click.z);
+    if p == () { return false; }
+    cap_trade_with(p.id);
+    true
+}
 fn open_station(click) {           // P6.3
     let s = cap_station_at(click.x, click.z);
     if s == () { return false; }
@@ -223,6 +249,10 @@ fn on_event(name, data) {
     }
     if name == "plot_claimed" {
         deeds.push(#{ x: data.x, z: data.z, r: data.r, born: t });
+        return;
+    }
+    if name == "trade_executed" {
+        trades.push(#{ x: data.x, z: data.z, tx: data.tx, tz: data.tz, born: t });
         return;
     }
     if name == "node_depleted" {
@@ -314,6 +344,15 @@ fn on_draw_ui() {
     }
     for d in deeds { draw_deed(d, now); }
     let you = cap_follow();
+    let trade = cap_trade();
+    if trade != () && trade.x != () && you != () && trade.state != "walking" {
+        draw_strand(you, trade, now);
+    }
+    for d in trades { draw_traded(d, you, now); }
+    if hover != () && placing == () && is_action_pressed("with_shift") {
+        let p = cap_player_at(hover[0], hover[1]);
+        if p != () { draw_trade_ring(p, now); }
+    }
     if target != () {
         if you != () { draw_path(you[0], you[2], target.x, target.z, now, 0.6); }
         draw_sight(target, now);
@@ -688,6 +727,100 @@ fn draw_bloom(b, now) {
     let k2 = (k - 0.15).max(0.0) / 0.85;
     let e2 = 1.0 - (1.0 - k2) * (1.0 - k2);
     ring(b.x, b.z, b.y, craft_ring() + 0.9 * e2, lilac(), 0.4 * (1.0 - k2), 1.0, 40);
+}
+
+// The Trade District's blue, #3b82f6, and the trade window's edge.
+fn trade_blue() { [0.231, 0.510, 0.965] }
+
+// Someone shift would ask: a blue ring at their feet, closing in a little
+// as it breathes, with a fainter one outside.
+fn draw_trade_ring(p, now) {
+    let y = p.feet_y + 0.03;
+    let c = trade_blue();
+    let r = 0.85 + 0.05 * (now * 3.0).sin();
+    ring(p.x, p.z, y, r, c, 0.85, 2.0, 40);
+    ring(p.x, p.z, y, r * 1.45, c, 0.25, 1.0, 48);
+}
+
+// A point on the strand between you (a) and them (b), t from 0 to 1, at
+// hand height with a little sag, lifted by `lift` metres.
+fn strand_at(a, b, t, lift) {
+    let y = a[1] + (b[1] - a[1]) * t + strand_height() - 0.25 * (PI() * t).sin() + lift;
+    world_to_screen(a[0] + (b[0] - a[0]) * t, y, a[2] + (b[2] - a[2]) * t)
+}
+
+// The strand between you and whoever you're trading with. A request is a
+// faint line with light flowing from the asker; an open trade is two
+// fibres twisting round each other, blue, each end gold once its side has
+// accepted.
+fn draw_strand(you, trade, now) {
+    let a = [you[0], you[1], you[2]];
+    let b = [trade.x, trade.y, trade.z];
+    let len = dist(a[0], a[2], b[0], b[2]);
+    if len < 0.5 { return; }
+    let blue = trade_blue();
+    let steps = 28;
+    if trade.state != "open" {
+        // From the asker: you when asking, them when they've asked you.
+        let dir = if trade.state == "asking" { 1.0 } else { -1.0 };
+        let prev = ();
+        for i in 0..=steps {
+            let t = i.to_float() / steps.to_float();
+            let p = strand_at(a, b, t, 0.0);
+            if !p.visible { prev = (); continue; }
+            if prev != () {
+                let flow = ((t * 3.0 - dir * now * 0.8) % 1.0 + 1.0) % 1.0;
+                let glow = 0.12 + 0.35 * smooth(1.0 - (flow - 0.5).abs() * 2.0);
+                draw_line(prev.x, prev.y, p.x, p.y, blue[0], blue[1], blue[2], glow, 1.5);
+            }
+            prev = p;
+        }
+        return;
+    }
+    let g = gold();
+    let turns = len * 1.2;
+    for k in 0..2 {
+        let phase = k.to_float() * PI();
+        let prev = ();
+        for i in 0..=steps {
+            let t = i.to_float() / steps.to_float();
+            let twist = 0.06 * (t * turns * 2.0 * PI() + phase + now * 1.4).sin();
+            let p = strand_at(a, b, t, twist);
+            if !p.visible { prev = (); continue; }
+            if prev != () {
+                // Your end golds as you accept, theirs as they do.
+                let mine = if trade.mine { smooth((0.55 - t) / 0.3) } else { 0.0 };
+                let theirs = if trade.theirs { smooth((t - 0.45) / 0.3) } else { 0.0 };
+                let w = mine.max(theirs);
+                let c = [blue[0] + (g[0] - blue[0]) * w,
+                         blue[1] + (g[1] - blue[1]) * w,
+                         blue[2] + (g[2] - blue[2]) * w];
+                draw_line(prev.x, prev.y, p.x, p.y, c[0], c[1], c[2], 0.75, 1.5);
+            }
+            prev = p;
+        }
+    }
+}
+
+// A trade made: a gold pulse running out from the middle of the strand to
+// each of you, and a ring breathing out round each.
+fn draw_traded(d, you, now) {
+    let k = (now - d.born) / trade_life();
+    let g = gold();
+    let feet = if you != () { you[1] } else { cap_ground_y() };
+    let ease = 1.0 - (1.0 - k) * (1.0 - k);
+    for end in [[d.x, d.z], [d.tx, d.tz]] {
+        ring(end[0], end[1], feet + 0.03, 0.5 + 1.8 * ease, g, 0.85 * (1.0 - k), 2.0, 44);
+    }
+    if k > 0.5 { return; }
+    let a = [d.x, feet, d.z];
+    let b = [d.tx, feet, d.tz];
+    let reach = smooth(k / 0.5) * 0.5;
+    for side in [-1.0, 1.0] {
+        let t = 0.5 + side * reach;
+        let p = strand_at(a, b, t, 0.0);
+        if p.visible { draw_circle(p.x, p.y, 4.0, g[0], g[1], g[2], 0.95 * (1.0 - k * 2.0)); }
+    }
 }
 
 // Pale stone, for a lot that isn't yours.

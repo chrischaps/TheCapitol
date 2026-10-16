@@ -17,6 +17,8 @@
 //!   numbers before you confirm, the server's own rule.
 //! - [`poll`]: the polling scheduler. [`poll::Poller`] turns those events, and
 //!   a 5 s timer, into the REST refetches the server never pushes.
+//! - [`trading`]: trading as a player does it: shift-click someone to
+//!   ask, or walk closer and ask, and your offer as you build it.
 //! - [`station`]: stations in the world: whether one is in reach.
 //! - [`plot`]: what the plot panel offers for a plot: yours, someone
 //!   else's, or for sale at its zone's deed price.
@@ -42,6 +44,7 @@ pub mod signin;
 pub mod state;
 pub mod station;
 pub mod terrain;
+pub mod trading;
 
 /// The wire types, shared with the backend.
 pub use capitol_protocol as protocol;

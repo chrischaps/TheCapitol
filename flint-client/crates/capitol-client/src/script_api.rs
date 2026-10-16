@@ -65,6 +65,24 @@ pub struct Shared {
     pub anchors: Arc<Mutex<HashMap<&'static str, UiAnchor>>>,
     /// When a script last lit each landmark (`cap_ui_pulse`), by name.
     pub pulses: Arc<Mutex<HashMap<String, Instant>>>,
+    /// The player a script last asked to trade with (`cap_trade_with`,
+    /// P7.3). The extension takes it next frame.
+    pub trade_with: Arc<Mutex<Option<String>>>,
+    /// Where trading stands, for the thread between you (`cap_trade`).
+    pub trade: Arc<Mutex<Option<TradeMark>>>,
+}
+
+/// Trading as scripts see it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TradeMark {
+    /// "asking", "incoming", "walking" or "open".
+    pub state: &'static str,
+    /// Where the other player stands, world metres (X, feet Y, Z), if they're
+    /// drawn.
+    pub them: Option<[f32; 3]>,
+    /// In an open trade, who has accepted.
+    pub mine: bool,
+    pub theirs: bool,
 }
 
 /// One of the UI's landmarks as scripts see it: a rect in logical points,
@@ -179,6 +197,10 @@ pub struct StationMark {
     pub reach: f32,
 }
 
+/// How near a click must land to a player's feet to pick them, in metres.
+/// An avatar is about 0.7 m across.
+pub const PLAYER_PICK: f32 = 1.2;
+
 /// How near a click must land to a node to pick it, in metres. A node's
 /// tuft is about 1.2 m across; React picks within 16 server units.
 pub const NODE_PICK: f32 = 1.8;
@@ -186,6 +208,7 @@ pub const NODE_PICK: f32 = 1.8;
 /// One avatar's name tag, as `entities::Players` placed it this frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerLabel {
+    pub id: uuid::Uuid,
     pub name: String,
     /// Where the name hangs, over the head, in world metres.
     pub at: [f32; 3],
@@ -259,6 +282,55 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
                 m.into()
             })
             .collect()
+    });
+    // `cap_player_at(x, z) -> #{ id, name, x, z, feet_y } or ()`: the other
+    // player whose feet are nearest the ground point (x, z), within
+    // PLAYER_PICK metres, and where they stand. Never you.
+    let players = shared.players.clone();
+    engine.register_fn("cap_player_at", move |x: f64, z: f64| -> rhai::Dynamic {
+        let Ok(players) = players.lock() else {
+            return rhai::Dynamic::UNIT;
+        };
+        match player_at(&players, x as f32, z as f32) {
+            Some(p) => {
+                let mut m = rhai::Map::new();
+                m.insert("id".into(), p.id.to_string().into());
+                m.insert("name".into(), p.name.clone().into());
+                m.insert("x".into(), (p.at[0] as f64).into());
+                m.insert("z".into(), (p.at[2] as f64).into());
+                m.insert("feet_y".into(), (p.feet_y as f64).into());
+                m.into()
+            }
+            None => rhai::Dynamic::UNIT,
+        }
+    });
+    // `cap_trade_with(id)`: ask the player `id` (from `cap_player_at`) to
+    // trade: at once within range, otherwise after walking closer. Sent
+    // next frame.
+    let trade_with = shared.trade_with.clone();
+    engine.register_fn("cap_trade_with", move |id: &str| {
+        if let Ok(mut t) = trade_with.lock() {
+            *t = Some(id.to_owned());
+        }
+    });
+    // `cap_trade() -> #{ state, x, y, z, mine, theirs } or ()`: where trading
+    // stands. `state` is "asking", "incoming", "walking" or "open"; x, y, z
+    // are the other player's feet in world metres, or () if they aren't
+    // drawn; `mine` and `theirs` say who has accepted an open trade.
+    let trade = shared.trade.clone();
+    engine.register_fn("cap_trade", move || -> rhai::Dynamic {
+        let Some(t) = trade.lock().ok().and_then(|t| t.clone()) else {
+            return rhai::Dynamic::UNIT;
+        };
+        let mut m = rhai::Map::new();
+        m.insert("state".into(), t.state.into());
+        let at = |i: usize| t.them.map_or(rhai::Dynamic::UNIT, |p| (p[i] as f64).into());
+        m.insert("x".into(), at(0));
+        m.insert("y".into(), at(1));
+        m.insert("z".into(), at(2));
+        m.insert("mine".into(), t.mine.into());
+        m.insert("theirs".into(), t.theirs.into());
+        m.into()
     });
     // `cap_move(x, z)`: walk to the ground point (x, z), in world metres.
     // It's clamped to the world's edge and sent next frame. Offline, and
@@ -546,6 +618,17 @@ pub fn node_at(nodes: &[NodeMark], x: f32, z: f32) -> Option<&NodeMark> {
 }
 
 /// The station nearest (x, z) whose ring it falls inside.
+/// The other player whose feet are nearest (x, z), within [`PLAYER_PICK`].
+pub fn player_at(players: &[PlayerLabel], x: f32, z: f32) -> Option<&PlayerLabel> {
+    players
+        .iter()
+        .filter(|p| !p.me && p.alpha > 0.5)
+        .map(|p| (p, (p.at[0] - x).hypot(p.at[2] - z)))
+        .filter(|(_, d)| *d <= PLAYER_PICK)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(p, _)| p)
+}
+
 pub fn station_at(stations: &[StationMark], x: f32, z: f32) -> Option<&StationMark> {
     stations
         .iter()
@@ -585,6 +668,7 @@ mod tests {
         assert!(engine.eval::<()>("cap_follow()").is_ok());
         *shared.follow.lock().unwrap() = Some([1.0, 0.7, -2.0]);
         shared.players.lock().unwrap().push(PlayerLabel {
+            id: uuid::Uuid::nil(),
             name: "Ada".into(),
             at: [1.0, 2.9, -2.0],
             feet_y: 0.65,
@@ -768,6 +852,48 @@ mod tests {
             Some("chest")
         );
         assert!(engine.eval::<()>("cap_station_at(0.0, 1.6)").is_ok());
+    }
+
+    #[test]
+    fn a_shift_click_picks_another_player_never_you() {
+        let shared = Shared::default();
+        let mut engine = rhai::Engine::new();
+        register(&mut engine, &shared);
+        let label = |n: u128, x: f32, me: bool| PlayerLabel {
+            id: uuid::Uuid::from_u128(n),
+            name: format!("P{n}"),
+            at: [x, 2.9, 0.0],
+            feet_y: 0.65,
+            alpha: 1.0,
+            me,
+            craft: None,
+        };
+        shared
+            .players
+            .lock()
+            .unwrap()
+            .extend([label(1, 0.0, true), label(2, 0.8, false)]);
+        let name: String = engine
+            .eval("let p = cap_player_at(0.1, 0.0); cap_trade_with(p.id); p.name")
+            .unwrap();
+        assert_eq!(name, "P2");
+        assert_eq!(
+            shared.trade_with.lock().unwrap().as_deref(),
+            Some(uuid::Uuid::from_u128(2).to_string().as_str())
+        );
+        assert!(engine.eval::<()>("cap_player_at(5.0, 5.0)").is_ok());
+        assert!(engine.eval::<()>("cap_trade()").is_ok());
+        *shared.trade.lock().unwrap() = Some(TradeMark {
+            state: "open",
+            them: Some([0.8, 0.65, 0.0]),
+            mine: true,
+            theirs: false,
+        });
+        let t: String = engine
+            .eval(r#"let t = cap_trade(); `${t.state} ${t.x} ${t.mine} ${t.theirs}`"#)
+            .unwrap();
+        assert!(t.starts_with("open 0.8"), "{t}");
+        assert!(t.ends_with("true false"), "{t}");
     }
 
     #[test]

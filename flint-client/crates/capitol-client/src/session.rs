@@ -34,8 +34,9 @@ use capitol_core::protocol::rest::{
 };
 use capitol_core::protocol::rules::Zone;
 use capitol_core::protocol::ws::ClientMessage;
-use capitol_core::state::{GameState, StateEvent, Yield};
+use capitol_core::state::{GameState, StateEvent, Trade, TradeAction, TradeEvent, Yield};
 use capitol_core::station::{self, Kit, Placing, Visit};
+use capitol_core::trading::{self, Approach, Draft};
 use flint_runtime::PersistentStore;
 use uuid::Uuid;
 
@@ -127,6 +128,42 @@ pub struct Session {
     /// What's worth telling the player about stations, since the extension
     /// last took it.
     station_notes: Vec<station::visit::Note>,
+    /// Shift-clicking a player: ask, or walk closer and ask (P7.3).
+    approach: Approach,
+    /// Your side of the open trade as you build it.
+    draft: Draft,
+    /// What's worth telling the player about trading, since the extension
+    /// last took it.
+    trade_notes: Vec<TradeNote>,
+    /// Trades that went through since the extension last took them.
+    traded: Vec<Traded>,
+    /// The last time an offer in the open trade changed, and whose.
+    offer_changed: Option<(bool, Instant)>,
+}
+
+/// Something to tell the player about trading, as a toast.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TradeNote {
+    pub title: String,
+    pub body: String,
+}
+
+impl TradeNote {
+    fn new(title: impl Into<String>, body: impl Into<String>) -> TradeNote {
+        TradeNote {
+            title: title.into(),
+            body: body.into(),
+        }
+    }
+}
+
+/// A trade that went through, for the world to mark.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Traded {
+    pub partner: String,
+    /// Where each of you stood, server units, if known.
+    pub me: Option<(f64, f64)>,
+    pub them: Option<(f64, f64)>,
 }
 
 /// Something to tell the player about picking a plot.
@@ -207,6 +244,11 @@ impl Session {
             placing_notes: Vec::new(),
             visit: Visit::default(),
             station_notes: Vec::new(),
+            approach: Approach::default(),
+            draft: Draft::default(),
+            trade_notes: Vec::new(),
+            traded: Vec::new(),
+            offer_changed: None,
         };
         session.apply(effects);
         Ok(session)
@@ -255,6 +297,7 @@ impl Session {
     pub fn move_to(&mut self, now: Instant, x: f64, y: f64) {
         self.harvest.walked();
         self.visit.walked();
+        self.approach.walked();
         self.walk(now, x, y);
     }
 
@@ -304,6 +347,7 @@ impl Session {
         }
         // A click on a station is a click elsewhere for the node you were after.
         self.harvest.walked();
+        self.approach.walked();
         if let Some(step) = self.visit.click(station, &self.state, now) {
             self.station_step(now, step);
         }
@@ -662,6 +706,235 @@ impl Session {
         std::mem::take(&mut self.placing_notes)
     }
 
+    /// You shift-clicked `player`: ask them to trade if they're in range, or
+    /// walk closer and ask as you arrive. False if the click wasn't for
+    /// trading (you, or nobody the store knows), so it should fall through.
+    pub fn trade_with(&mut self, now: Instant, player: Uuid) -> bool {
+        if self.auth.phase() != Phase::InWorld {
+            return false;
+        }
+        let Some(step) = self.approach.click(player, &mut self.state, now) else {
+            return false;
+        };
+        self.harvest.walked();
+        self.visit.walked();
+        self.trade_step(now, step);
+        self.note_approach();
+        true
+    }
+
+    /// Asks the player nearest you to trade (the T key), or accepts the
+    /// request you've been sent.
+    pub fn trade_key(&mut self, now: Instant) {
+        if matches!(self.state.trade(), Trade::Incoming { .. }) {
+            self.answer_trade(now, true);
+            return;
+        }
+        let Some(me) = self.state.local_player() else {
+            return;
+        };
+        let (id, x, y) = (me.id, me.x, me.y);
+        let nearest = self
+            .state
+            .players()
+            .values()
+            .filter(|p| p.id != id)
+            .min_by(|a, b| {
+                (a.x - x)
+                    .hypot(a.y - y)
+                    .total_cmp(&(b.x - x).hypot(b.y - y))
+            })
+            .map(|p| p.id);
+        match nearest {
+            Some(player) => {
+                self.trade_with(now, player);
+            }
+            None => self.trade_notes.push(TradeNote::new(
+                "Nobody about",
+                "There's no one here to trade with",
+            )),
+        }
+    }
+
+    fn trade_step(&mut self, now: Instant, step: trading::Step) {
+        match step {
+            trading::Step::Send(message) => {
+                tracing::info!("trade: {}", message.type_name());
+                self.net.ws(message);
+            }
+            trading::Step::WalkTo { x, y } => self.walk(now, x, y),
+            trading::Step::Hold => {}
+        }
+    }
+
+    fn note_approach(&mut self) {
+        for note in self.approach.take_notes() {
+            let note = match note {
+                trading::Note::Refused(why) => TradeNote::new("Can't trade", why.to_string()),
+                trading::Note::Lost { name } => {
+                    TradeNote::new("Gone", format!("{name} left before you got there"))
+                }
+            };
+            self.trade_notes.push(note);
+        }
+    }
+
+    /// Accepts or declines the request you were sent.
+    pub fn answer_trade(&mut self, now: Instant, accept: bool) {
+        let sent = if accept {
+            self.state.trade_accept_request(now)
+        } else {
+            self.state.trade_decline_request()
+        };
+        self.send_trade(sent);
+    }
+
+    /// Forgets the request you sent. The server can't take one back, so if
+    /// they accept later the trade still opens.
+    pub fn withdraw_trade(&mut self) {
+        let _ = self.state.trade_withdraw();
+    }
+
+    /// Accepts the open trade as it stands.
+    pub fn accept_trade(&mut self, now: Instant) {
+        if self.draft.unsent() {
+            return;
+        }
+        let sent = self.state.trade_accept(now);
+        self.send_trade(sent);
+    }
+
+    /// Cancels the open trade.
+    pub fn cancel_trade(&mut self, now: Instant) {
+        let sent = self.state.trade_cancel(now);
+        self.send_trade(sent);
+    }
+
+    fn send_trade(&mut self, sent: Result<ClientMessage, capitol_core::state::TradeRefusal>) {
+        match sent {
+            Ok(message) => {
+                tracing::info!("trade: {}", message.type_name());
+                self.net.ws(message);
+            }
+            Err(why) => {
+                tracing::info!("trade: not sent: {why}");
+                self.trade_notes
+                    .push(TradeNote::new("Can't trade", why.to_string()));
+            }
+        }
+    }
+
+    /// Your side of the open trade as you're building it.
+    pub fn draft(&self) -> &Draft {
+        &self.draft
+    }
+
+    /// Change your side of the open trade. It's sent once it settles.
+    pub fn draft_mut(&mut self) -> &mut Draft {
+        &mut self.draft
+    }
+
+    /// The player you're walking toward to ask, for the HUD.
+    pub fn trade_target(&self) -> Option<Uuid> {
+        self.approach.target()
+    }
+
+    /// The last change to an offer in the open trade: whether it was
+    /// theirs, and how long ago.
+    pub fn offer_changed(&self, now: Instant) -> Option<(bool, Duration)> {
+        self.offer_changed
+            .map(|(theirs, at)| (theirs, now.duration_since(at)))
+    }
+
+    /// What's worth telling the player about trading since the last call.
+    pub fn take_trade_notes(&mut self) -> Vec<TradeNote> {
+        std::mem::take(&mut self.trade_notes)
+    }
+
+    /// Trades that went through since the last call.
+    pub fn take_traded(&mut self) -> Vec<Traded> {
+        std::mem::take(&mut self.traded)
+    }
+
+    /// Turns the store's trade events into toasts and marks.
+    fn note_trades(&mut self, before: &Trade, changes: &[StateEvent], now: Instant) {
+        let name = match before {
+            Trade::Requested { name, .. } | Trade::Incoming { name, .. } => Some(name.clone()),
+            Trade::Open(open) => Some(open.partner_name.clone()),
+            Trade::Idle => None,
+        };
+        let them = name.unwrap_or_else(|| "They".into());
+        let me = self.state.me();
+        for change in changes {
+            let StateEvent::Trade(event) = change else {
+                continue;
+            };
+            tracing::info!("trade: {event:?}");
+            let note = match event {
+                TradeEvent::Declined { .. } => Some(TradeNote::new(
+                    "Declined",
+                    format!("{them} won't trade just now"),
+                )),
+                TradeEvent::RequestGone { .. } => {
+                    Some(TradeNote::new("Request gone", format!("{them} has gone")))
+                }
+                TradeEvent::Started { .. } => {
+                    self.offer_changed = None;
+                    None
+                }
+                TradeEvent::OfferChanged { player_id } => {
+                    self.offer_changed = Some((Some(*player_id) != me, now));
+                    None
+                }
+                TradeEvent::Executed { .. } => {
+                    let partner = match before {
+                        Trade::Open(open) => self.state.player(open.partner_id),
+                        _ => None,
+                    };
+                    self.traded.push(Traded {
+                        partner: them.clone(),
+                        me: self.state.local_player().map(|p| (p.x, p.y)),
+                        them: partner.map(|p| (p.x, p.y)),
+                    });
+                    Some(TradeNote::new(
+                        "Traded",
+                        format!("Your trade with {them} went through"),
+                    ))
+                }
+                TradeEvent::Cancelled { reason, .. } => {
+                    Some(TradeNote::new("Trade cancelled", reason.clone()))
+                }
+                // The request card says it's still out.
+                TradeEvent::NoReply(TradeAction::Initiate) => None,
+                TradeEvent::NoReply(action) => Some(TradeNote::new("No answer", action.hint())),
+                // The `error` that carried it is the reason, and nothing
+                // else shows the server's errors yet.
+                TradeEvent::Refused { reason, .. } => {
+                    Some(TradeNote::new("Can't trade", reason.clone()))
+                }
+                TradeEvent::Requested { .. } | TradeEvent::Accepted { .. } => None,
+            };
+            if let Some(note) = note {
+                self.trade_notes.push(note);
+            }
+        }
+    }
+
+    /// Keeps the draft true to the trade, and sends it once it settles.
+    fn send_draft(&mut self, now: Instant) {
+        self.draft
+            .sync(self.state.open_trade(), self.state.inventory(), now);
+        let Some((items, strands)) = self.draft.due(now, self.state.strands()) else {
+            return;
+        };
+        tracing::info!(
+            "trade: offering {} stacks and {strands} Strands",
+            items.len()
+        );
+        let sent = self.state.trade_offer(now, items, strands);
+        self.send_trade(sent);
+    }
+
     pub fn log_in(&mut self, email: &str, password: &str) {
         let effects = self.auth.log_in(email, password);
         self.apply(effects);
@@ -777,7 +1050,9 @@ impl Session {
             if let NetEvent::Connection(connection) = event {
                 self.link.observe(connection, now);
             }
+            let trade_before = self.state.trade().clone();
             let changes = self.state.apply(event);
+            self.note_trades(&trade_before, &changes, now);
             for change in &changes {
                 if let StateEvent::ZoneChanged { from, to } = change {
                     let first = from.is_none();
@@ -827,6 +1102,10 @@ impl Session {
                 self.station_step(now, step);
             }
             self.station_notes.extend(self.visit.take_notes());
+            if let Some(step) = self.approach.observe(&changes, &mut self.state, now) {
+                self.trade_step(now, step);
+            }
+            self.note_approach();
             let answered = self.poller.observe(event, &changes, &self.state);
             match (answered, event) {
                 (Some(Fetch::Terrain), NetEvent::Rest(_, Ok(RestResponse::Terrain(t)))) => {
@@ -848,7 +1127,10 @@ impl Session {
                 placing.tick(now);
             }
             self.settle_placing();
-            self.state.tick(now);
+            let trade_before = self.state.trade().clone();
+            let changes = self.state.tick(now);
+            self.note_trades(&trade_before, &changes, now);
+            self.send_draft(now);
             for (request, tag) in self.poller.tick(now) {
                 self.net.rest(request, tag);
             }
@@ -886,6 +1168,11 @@ impl Session {
             self.placing_notes.clear();
             self.visit = Visit::default();
             self.station_notes.clear();
+            self.approach = Approach::default();
+            self.draft = Draft::default();
+            self.trade_notes.clear();
+            self.traded.clear();
+            self.offer_changed = None;
         }
     }
 
@@ -1822,6 +2109,240 @@ mod tests {
             s.state().station(chest).is_none() && open(s).is_none()
         });
         session.log_out();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Two clients trade through the rules the trade window uses: a
+    /// shift-click's request, drafts that send themselves, a changed offer
+    /// resetting the accepts, rope for Strands, and a disconnect mid-trade.
+    /// Stock both accounts first: `capitol-bot --prefix trade --accounts 2`
+    /// makes Trade1 and Trade2 and twists each some rope.
+    #[test]
+    #[ignore = "needs the local stack, and Trade1 and Trade2 holding rope"]
+    fn two_clients_trade_rope_for_strands() {
+        use capitol_core::state::{Trade, PARTNER_LEFT};
+        use std::cell::RefCell;
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let dir = std::env::temp_dir().join(format!("capitol-trade-{}", std::process::id()));
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let start = |n: usize| {
+            let mut s =
+                Session::start(&server, SessionFile::load(dir.join(format!("s{n}.toml")))).unwrap();
+            s.log_in(
+                &format!("trade{n}@bots.capitol.local"),
+                &format!("trade-{n}-capitol-bot"),
+            );
+            s
+        };
+        let (mut ada, mut bea) = (start(1), start(2));
+        let mut terrain = TerrainSource::offline(&fixture).unwrap();
+        let notes: RefCell<Vec<TradeNote>> = RefCell::new(Vec::new());
+        let mut wait = |ada: &mut Session,
+                        bea: &mut Session,
+                        what: &str,
+                        done: &dyn Fn(&Session, &Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !done(ada, bea) {
+                let held = |s: &Session| {
+                    let st = s.state();
+                    let inv: Vec<_> = st
+                        .inventory()
+                        .map(|c| {
+                            c.items()
+                                .map(|i| (i.item_type.clone(), i.quantity))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    format!(
+                        "{:?} strands {:?} holding {inv:?}",
+                        st.trade(),
+                        st.strands()
+                    )
+                };
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for {what}
+Ada: {}
+Bea: {}",
+                    held(ada),
+                    held(bea)
+                );
+                let now = Instant::now();
+                ada.update(now, &mut terrain);
+                bea.update(now, &mut terrain);
+                notes.borrow_mut().extend(ada.take_trade_notes());
+                bea.take_trade_notes();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        let ready = |s: &Session| s.state().inventory().is_some() && s.state().strands().is_some();
+        wait(&mut ada, &mut bea, "both in the world", &|a, b| {
+            ready(a)
+                && ready(b)
+                && b.state()
+                    .me()
+                    .is_some_and(|id| a.state().player(id).is_some())
+        });
+        // A craft's rope waits in the output slot: take it into the inventory.
+        for s in [&mut ada, &mut bea] {
+            let st = s.state();
+            let (Some(out), Some(inv)) = (st.crafting_output(), st.inventory()) else {
+                continue;
+            };
+            let moves: Vec<Move> = out
+                .items()
+                .zip(inv.slots.iter().enumerate().filter(|(_, i)| i.is_none()))
+                .map(|(item, (slot, _))| Move {
+                    item_id: item.item_id,
+                    target_container_id: inv.id,
+                    target_slot: slot as i32,
+                })
+                .collect();
+            for m in moves {
+                s.move_item(m);
+            }
+        }
+        wait(&mut ada, &mut bea, "the rope in hand", &|a, b| {
+            [a, b].iter().all(|s| {
+                s.state()
+                    .crafting_output()
+                    .is_some_and(|c| c.items().next().is_none())
+            })
+        });
+        let rope = |s: &Session| -> i32 {
+            s.state()
+                .inventory()
+                .map(|c| {
+                    c.items()
+                        .filter(|i| i.item_type == "rope")
+                        .map(|i| i.quantity)
+                        .sum()
+                })
+                .unwrap_or(0)
+        };
+        let ada_rope = rope(&ada);
+        assert!(
+            ada_rope > 0,
+            "stock Trade1 with rope: capitol-bot --prefix trade --accounts 2"
+        );
+        let (ada_strands, bea_strands, bea_rope) = (
+            ada.state().strands().unwrap(),
+            bea.state().strands().unwrap(),
+            rope(&bea),
+        );
+        let bea_id = bea.state().me().unwrap();
+
+        // Ada shift-clicks Bea: asked at once, or after a walk over.
+        assert!(ada.trade_with(Instant::now(), bea_id));
+        wait(&mut ada, &mut bea, "Bea to hear", &|_, b| {
+            matches!(b.state().trade(), Trade::Incoming { .. })
+        });
+        bea.answer_trade(Instant::now(), true);
+        wait(&mut ada, &mut bea, "the trade to open", &|a, b| {
+            a.state().open_trade().is_some() && b.state().open_trade().is_some()
+        });
+
+        // Ada offers her rope; Bea offers 15 Strands. Neither presses a button.
+        let stack = ada
+            .state()
+            .inventory()
+            .unwrap()
+            .items()
+            .find(|i| i.item_type == "rope")
+            .cloned()
+            .unwrap();
+        ada.draft_mut().add(&stack, Instant::now());
+        bea.draft_mut().set_strands(15, Instant::now());
+        let settled = |s: &Session| {
+            s.state()
+                .open_trade()
+                .is_some_and(|o| !s.draft().unsent() && s.draft().confirmed(&o.mine))
+                && s.state().trade_waiting().is_none()
+        };
+        wait(&mut ada, &mut bea, "both drafts confirmed", &|a, b| {
+            settled(a)
+                && settled(b)
+                && a.state().open_trade().unwrap().theirs.strands == 15
+                && b.state().open_trade().unwrap().theirs.items.len() == 1
+        });
+
+        // Bea accepts; then Ada changes her offer, and both accepts reset.
+        bea.accept_trade(Instant::now());
+        wait(&mut ada, &mut bea, "Bea's accept", &|a, _| {
+            a.state().open_trade().unwrap().they_accepted
+        });
+        ada.draft_mut().set_strands(1, Instant::now());
+        wait(
+            &mut ada,
+            &mut bea,
+            "the change to reset the accepts",
+            &|a, b| {
+                settled(a)
+                    && !a.state().open_trade().unwrap().they_accepted
+                    && b.state().open_trade().unwrap().theirs.strands == 1
+            },
+        );
+        assert!(ada
+            .offer_changed(Instant::now())
+            .is_some_and(|(theirs, _)| !theirs));
+        assert!(bea
+            .offer_changed(Instant::now())
+            .is_some_and(|(theirs, _)| theirs));
+
+        // Both accept, and it goes through.
+        bea.accept_trade(Instant::now());
+        wait(&mut ada, &mut bea, "Bea's second accept", &|a, _| {
+            a.state().open_trade().unwrap().they_accepted
+        });
+        ada.accept_trade(Instant::now());
+        wait(&mut ada, &mut bea, "the swap", &|a, b| {
+            a.state().trade() == &Trade::Idle
+                && a.state().strands() == Some(ada_strands + 15 - 1)
+                && b.state().strands() == Some(bea_strands - 15 + 1)
+                && rope(a) == ada_rope - stack.quantity
+                && rope(b) == bea_rope + stack.quantity
+        });
+        assert!(
+            notes.borrow().iter().any(|n| n.title == "Traded"),
+            "{notes:?}"
+        );
+        let traded = ada.take_traded();
+        assert_eq!(traded.len(), 1, "{traded:?}");
+        assert!(ada.draft().is_empty());
+
+        // Again, and Bea drops mid-trade: Ada's window closes, nothing moves.
+        let (ada_strands, ada_rope) = (ada.state().strands(), rope(&ada));
+        assert!(ada.trade_with(Instant::now(), bea_id));
+        wait(&mut ada, &mut bea, "Bea to hear again", &|_, b| {
+            matches!(b.state().trade(), Trade::Incoming { .. })
+        });
+        bea.answer_trade(Instant::now(), true);
+        wait(&mut ada, &mut bea, "the second trade", &|a, b| {
+            a.state().open_trade().is_some() && b.state().open_trade().is_some()
+        });
+        bea.draft_mut().set_strands(5, Instant::now());
+        wait(&mut ada, &mut bea, "Bea's offer", &|a, _| {
+            a.state().open_trade().unwrap().theirs.strands == 5
+        });
+        notes.borrow_mut().clear();
+        bea.log_out();
+        wait(&mut ada, &mut bea, "the cancel", &|a, _| {
+            a.state().trade() == &Trade::Idle
+        });
+        assert!(
+            notes
+                .borrow()
+                .iter()
+                .any(|n| n.title == "Trade cancelled" && n.body == PARTNER_LEFT),
+            "{notes:?}"
+        );
+        // Nothing was held in escrow, so a refetch shows the same.
+        std::thread::sleep(Duration::from_secs(1));
+        wait(&mut ada, &mut bea, "a settled inventory", &|a, _| {
+            a.state().strands() == ada_strands && rope(a) == ada_rope
+        });
+        ada.log_out();
         let _ = std::fs::remove_dir_all(dir);
     }
 }

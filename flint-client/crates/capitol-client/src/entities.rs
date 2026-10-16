@@ -173,6 +173,7 @@ impl Players {
                 let [x, y, z] = avatar.at;
                 let crafting = matches!(state.activity(*id), Some(Activity::Crafting { .. }));
                 labels.push(PlayerLabel {
+                    id: *id,
                     name: avatar.name.clone(),
                     at: [x, y + LABEL_Y, z],
                     feet_y: y,
