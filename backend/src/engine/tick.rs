@@ -119,9 +119,8 @@ impl GameState {
 
     pub fn remove_player(&mut self, player_id: Uuid) {
         // Cancel any active trade when player disconnects
-        if self.trade_manager.is_in_trade(player_id) {
+        if let Some(trade_id) = self.trade_manager.get_player_trade(player_id).map(|t| t.id) {
             if let Ok((player_a, player_b)) = self.trade_manager.cancel_trade(player_id) {
-                let trade_id = Uuid::new_v4(); // dummy for event
                 let _ = self.event_sender.send(GameEvent::TradeCancelled {
                     trade_id,
                     reason: "Player disconnected".to_string(),
@@ -1022,5 +1021,24 @@ mod tests {
             requested |= matches!(event, GameEvent::TradeRequested { to_player, .. } if to_player == b);
         }
         assert!(requested);
+    }
+
+    #[test]
+    fn a_disconnect_cancels_with_the_real_trade_id_before_the_leave() {
+        let (mut game, a, b, mut rx) = two_players(10.0);
+        game.trade_manager.request_trade(a, b).unwrap();
+        let trade_id = game.trade_manager.accept_request(b).unwrap().id;
+        while rx.try_recv().is_ok() {}
+
+        game.remove_player(a);
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(&events[..], [
+                GameEvent::TradeCancelled { trade_id: id, reason },
+                GameEvent::PlayerLeft { player_id },
+            ] if *id == trade_id && reason == "Player disconnected" && *player_id == a),
+            "{events:?}"
+        );
+        assert!(!game.trade_manager.is_in_trade(b));
     }
 }

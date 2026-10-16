@@ -687,16 +687,29 @@ fn an_unanswered_cancel_closes_and_a_late_execute_still_counts() {
 }
 
 // ---------------------------------------------------------------------------
-// The disconnect quirk: a dummy `trade_id`, then the leave
+// Disconnects: the cancel with the real `trade_id` (B6), then the leave
 // ---------------------------------------------------------------------------
 
-/// `remove_player` cancels with a fresh `Uuid::new_v4()`, and every client
-/// gets it. On its own it can't be ours.
+/// `remove_player` cancels with the trade's real id, then sends the leave.
+/// The cancel ends the trade, and the leave finds nothing open.
 #[test]
-fn a_disconnect_cancel_alone_is_ignored() {
+fn the_partners_disconnect_cancel_ends_the_trade_once() {
     let mut state = trading();
-    let dummy = Uuid::from_u128(0xdead);
-    assert!(ws(&mut state, cancelled(dummy, PARTNER_LEFT)).is_empty());
+    assert_eq!(
+        ws(&mut state, cancelled(TRADE, PARTNER_LEFT)),
+        vec![cancelled_event(TRADE, PARTNER_LEFT)]
+    );
+    assert_eq!(state.trade(), &Trade::Idle);
+    assert!(ws(&mut state, M::PlayerLeft { player_id: BRIN }).is_empty());
+}
+
+/// Every client gets every disconnect cancel. A stranger's, from another
+/// trade, isn't ours.
+#[test]
+fn a_strangers_disconnect_cancel_is_ignored() {
+    let mut state = trading();
+    let theirs = Uuid::from_u128(0xdead);
+    assert!(ws(&mut state, cancelled(theirs, PARTNER_LEFT)).is_empty());
     // Fen, not Brin, was the one who left.
     assert!(ws(&mut state, M::PlayerLeft { player_id: FAR }).is_empty());
     // The next snapshot still has Brin.
@@ -711,6 +724,8 @@ fn a_disconnect_cancel_alone_is_ignored() {
     assert_eq!(open(&state).trade_id, TRADE);
 }
 
+/// The cancel can be lost (a lagging client), or come from a server before
+/// B6 with a dummy id. The leave still ends the trade.
 #[test]
 fn the_partners_leave_ends_the_trade() {
     let mut state = trading();

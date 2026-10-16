@@ -34,13 +34,13 @@
 //! (`ws/connection.rs`), so only a matching `trade_id` counts.
 //!
 //! **Disconnects.** When a player drops mid-trade, `remove_player`
-//! (`engine/tick.rs`) sends `trade_cancelled` with a fresh dummy `trade_id`,
-//! then that player's `player_left`. The dummy can't be told from a
-//! stranger's cancel, so it's ignored, and the leave ends the trade instead.
-//! A leave always means the server has cancelled: `remove_player` cancels
-//! first. A partner missing from `positions` counts as a leave. B6 (#48) will
-//! send the real `trade_id`; the cancel then ends the trade itself and the
-//! leave finds it already closed.
+//! (`engine/tick.rs`) sends `trade_cancelled` with the trade's real
+//! `trade_id` (B6, #48), then that player's `player_left`. The cancel ends
+//! the trade, and the leave finds it already closed. The leave is still a
+//! fallback, for a lost cancel or a server from before B6 (which sent a dummy
+//! id): a leave always means the server has cancelled, because
+//! `remove_player` cancels first. A partner missing from `positions` counts
+//! as a leave.
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -535,8 +535,8 @@ impl GameState {
                     }));
                 }
             }
-            // Broadcast to everyone, and a disconnect's has a dummy id. Only a
-            // match is ours; a partner's disconnect ends the trade on their leave.
+            // Broadcast to everyone, so only a match is ours. That includes a
+            // partner's disconnect, which carries the real id (B6).
             M::TradeCancelled { trade_id, reason } => {
                 if matches!(&book.trade, Trade::Open(open) if open.trade_id == *trade_id) {
                     self.end_trade(reason, out);

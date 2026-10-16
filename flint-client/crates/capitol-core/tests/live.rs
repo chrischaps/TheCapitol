@@ -226,6 +226,8 @@ struct Mirror {
     poller: Poller,
     /// Everything the poller sent, for the assertions.
     fetched: Vec<Fetch>,
+    /// The `trade_id` of every `trade_cancelled`, ours or not.
+    cancels: Vec<uuid::Uuid>,
 }
 
 impl Mirror {
@@ -243,6 +245,9 @@ impl Mirror {
             if let Some(event) = self.net.recv_timeout(remaining.min(FRAME)) {
                 if let NetEvent::Rest(_, Err(e)) = &event {
                     panic!("REST failed while waiting for {what}: {e}");
+                }
+                if let NetEvent::Ws(ServerMessage::TradeCancelled { trade_id, .. }) = &event {
+                    self.cancels.push(*trade_id);
                 }
                 let changes = self.state.apply(&event);
                 self.poller.observe(&event, &changes, &self.state);
@@ -288,6 +293,7 @@ fn the_store_mirrors_a_real_session() {
         state: GameState::new(),
         poller: Poller::new(),
         fetched: Vec::new(),
+        cancels: Vec::new(),
     };
     mirror.net.connect(auth.token.clone());
 
@@ -501,6 +507,7 @@ impl Mirror {
             state: GameState::new(),
             poller: Poller::new(),
             fetched: Vec::new(),
+            cancels: Vec::new(),
         };
         mirror.net.connect(auth.token);
         mirror.pump_until("a snapshot", |s, _| {
@@ -596,8 +603,8 @@ fn two_players_trade() {
     ));
     ada.pump_until("the cancel", |s, _| s.trade() == &Trade::Idle);
 
-    // A third trade, and Brin drops. Ada gets the dummy-id cancel, which the
-    // store ignores, then Brin's leave, which ends it.
+    // A third trade, and Brin drops. Ada gets the cancel with the trade's real
+    // id (B6, #48), which ends it, then Brin's leave.
     ada.act(|s, now| s.trade_initiate(now, brin_id));
     brin.pump_until("the third request", |s, _| {
         matches!(s.trade(), Trade::Incoming { .. })
@@ -612,6 +619,7 @@ fn two_players_trade() {
             trade_id: third,
             reason: PARTNER_LEFT.into()
         }));
+    assert!(ada.cancels.contains(&third), "{:?}", ada.cancels);
 
     ada.net.disconnect();
 }
