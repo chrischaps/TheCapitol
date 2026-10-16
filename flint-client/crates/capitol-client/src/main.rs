@@ -92,9 +92,13 @@ struct Args {
     /// Exit once game time reaches this many seconds
     #[arg(long, value_name = "SECS")]
     exit_after: Option<f64>,
-    /// Timed key input (flint-player's input-script format)
+    /// Timed key input (flint-player's input-script format). It can tap
+    /// the debug keys too: `2.0 tap F2` opens the stats overlay
     #[arg(long, value_name = "FILE")]
     input_script: Option<String>,
+    /// Open the F2 rendering stats overlay from the first frame
+    #[arg(long)]
+    stats: bool,
 
     /// Show every item icon (assets/icons/) on a panel, for review
     #[arg(long)]
@@ -232,6 +236,7 @@ fn main() -> Result<()> {
     if let Some(path) = &args.input_script {
         player.capture.input_script = Some(flint_player::InputScript::load(path)?);
     }
+    player.capture.show_stats = args.stats;
 
     let shared = script_api::Shared::default();
     *shared.note.lock().unwrap() = args.note;
