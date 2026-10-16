@@ -18,6 +18,7 @@ mod extension;
 mod nodes;
 mod script_api;
 mod session;
+mod sound;
 mod spike_world;
 mod stations;
 mod terrain;
@@ -113,6 +114,9 @@ struct Args {
     /// type into egui (issue #76)
     #[arg(long, value_name = "TAB[:N]")]
     exchange: Option<String>,
+    /// No sound. Captures (--exit-after) are silent anyway
+    #[arg(long)]
+    mute: bool,
 }
 
 fn main() -> Result<()> {
@@ -139,6 +143,20 @@ fn main() -> Result<()> {
             (terrain::TerrainSource::online(&server), Some(session))
         }
     };
+
+    // The sounds are made, not recorded (P8.1). Written before the scene
+    // loads, because that's when Flint preloads everything in audio/. A
+    // workaround: an extension can't load sounds from memory (issue #93).
+    let started = std::time::Instant::now();
+    match sound::library::ensure(Path::new("audio")) {
+        Ok(true) => tracing::info!(
+            "sound: wrote the library (v{}) in {} ms",
+            sound::library::VERSION,
+            started.elapsed().as_millis()
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("sound: couldn't write audio/: {e}; playing silent"),
+    }
 
     // Engine schemas first, then the game's own layered over them.
     let schema_dirs: Vec<String> = ["engine/schemas", "schemas"]
@@ -196,7 +214,8 @@ fn main() -> Result<()> {
         .with_icon_sheet(args.icon_sheet)
         .with_containers(args.containers)
         .with_place(args.place)
-        .with_exchange(args.exchange.as_deref());
+        .with_exchange(args.exchange.as_deref())
+        .with_mute(args.mute || args.exit_after.is_some());
     if args.ui_sample {
         extension = extension.with_ui_sample();
     }

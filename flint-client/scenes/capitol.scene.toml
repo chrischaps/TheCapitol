@@ -177,3 +177,7 @@ source = "input.rhai"
 # The world HUD: the players' names (P4.2)
 [entities.hud.script]
 source = "hud.rhai"
+
+# What you hear: plays the one-shots the extension fires as `sound` (P8.1)
+[entities.audio.script]
+source = "audio.rhai"

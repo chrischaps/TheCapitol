@@ -9,14 +9,15 @@
 //! from a kit (`placing`), the crafting panel (`ui::crafting`), the plots you
 //! pick, claim and own (`ui::plot`, and the gold of `world::plots::owned`),
 //! the station panel (`ui::station`), the fog and the light as
-//! the camera climbs (`atmosphere`), the wheel for the camera rig, and the
-//! spike's markers.
+//! the camera climbs (`atmosphere`), what you hear (`sound`), the wheel for
+//! the camera rig, and the spike's markers.
 
 use crate::atmosphere::Atmosphere;
 use crate::entities::Players;
 use crate::nodes::Nodes;
 use crate::script_api::{self, PlacementMark, PlotMark, Shared, ZoneBanner};
 use crate::session::Session;
+use crate::sound::{Ears, Rustling, Soundscape};
 use crate::stations::{GhostView, Stations};
 use crate::terrain::TerrainSource;
 use crate::ui::crafting::Action as CraftAction;
@@ -104,6 +105,8 @@ pub struct CapitolExtension {
     right_down: Option<(f64, f64)>,
     /// `--place`: the kit to start placing once the inventory holds one.
     place_on_arrival: Option<String>,
+    /// The ambience and the one-shots (P8.1).
+    sound: Soundscape,
 }
 
 impl CapitolExtension {
@@ -139,7 +142,14 @@ impl CapitolExtension {
             cursor: (0.0, 0.0),
             right_down: None,
             place_on_arrival: None,
+            sound: Soundscape::new(false),
         }
+    }
+
+    /// Play no sound (`--mute`, and every capture).
+    pub fn with_mute(mut self, on: bool) -> Self {
+        self.sound = Soundscape::new(on);
+        self
     }
 
     /// Show every item icon on a panel (`--icon-sheet`).
@@ -244,10 +254,10 @@ impl PlayerExtension for CapitolExtension {
                 session.open_nearest_station(now);
             }
             walk(ctx, session, &self.shared, now);
-            gather(ctx, session, &self.shared, now);
+            gather(ctx, session, &self.shared, &mut self.sound, now);
             visit(ctx, session, &self.shared, now);
-            crafted(ctx, session, &self.shared);
-            plots(ctx, session, &self.shared, &self.lots, &self.lot_of);
+            crafted(ctx, session, &self.shared, &mut self.sound);
+            plots(ctx, session, &self.shared, &self.lots, &self.lot_of, &mut self.sound);
             // Signed out, the store is empty, so everyone fades away.
             let (poses, state) = session.sample(now);
             let dt = ctx.clock.delta_time.min(0.1) as f32;
@@ -294,6 +304,7 @@ impl PlayerExtension for CapitolExtension {
         self.shared
             .at_login
             .store(self.at_login(), Ordering::Relaxed);
+        listen(ctx, &self.shared, &mut self.sound);
         let Some(gpu) = ctx.gpu.as_mut() else {
             return;
         };
@@ -347,6 +358,7 @@ impl PlayerExtension for CapitolExtension {
         }
         if rebuild.rings {
             self.players.set_rings(rings);
+            self.sound.set_rings(rings);
             world::water::upload(gpu, rings);
             world::bridges::upload(gpu, rings);
             world::tower::upload(gpu, rings);
@@ -621,7 +633,56 @@ impl PlayerExtension for CapitolExtension {
         if let Some(action) = action {
             self.act(action);
         }
+        // Every widget clicked, and everything let go after a drag (a slot
+        // filled), makes its sound next frame.
+        let (clicked, dropped) =
+            ctx.interaction_snapshot(|i| (i.clicked.is_some(), i.drag_stopped.is_some()));
+        if clicked {
+            self.sound.click();
+        }
+        if dropped {
+            self.sound.drop_in_slot();
+        }
     }
+}
+
+/// What you hear (P8.1): ease the beds toward where you are, and fire
+/// `sound` at `audio.rhai` for each one-shot due. The ears are on you, or
+/// offline on the point the camera looks at.
+fn listen(ctx: &mut ExtensionCtx, shared: &script_api::Shared, sound: &mut Soundscape) {
+    let cam = ctx.camera;
+    let focus = shared
+        .follow
+        .lock()
+        .ok()
+        .and_then(|f| *f)
+        .map_or([cam.target.x, cam.target.z], |f| [f[0], f[2]]);
+    let ears = Ears {
+        focus,
+        camera: [cam.position.x, cam.position.y, cam.position.z],
+        height: cam.position.y - crate::coords::layer::GROUND,
+    };
+    let working: Vec<Rustling> = shared
+        .nodes
+        .lock()
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter(|n| n.state == "harvesting")
+                .map(|n| Rustling {
+                    id: n.id.clone(),
+                    at: n.at,
+                    mine: n.mine,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let dt = ctx.clock.delta_time.min(0.1) as f32;
+    for cue in sound.update(ears, &working, dt) {
+        tracing::debug!("sound: {} at {:.2}", cue.sound, cue.volume);
+        ctx.fire_event("sound", cue.data());
+    }
+    sound.apply(ctx);
 }
 
 /// Click to move (P4.3): send the walk a script asked for (`cap_move`),
@@ -678,6 +739,7 @@ fn gather(
     ctx: &mut ExtensionCtx,
     session: &mut Session,
     shared: &script_api::Shared,
+    sound: &mut Soundscape,
     now: Instant,
 ) {
     if let Some(id) = shared.extract.lock().ok().and_then(|mut e| e.take()) {
@@ -704,6 +766,7 @@ fn gather(
         data.insert("x".into(), (x as f64).into());
         data.insert("z".into(), (z as f64).into());
         ctx.fire_event("extraction_completed", data);
+        sound.gathered();
     }
     for note in session.take_harvest_notes() {
         let (title, body) = note_words(note);
@@ -748,7 +811,12 @@ fn visit(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Sha
 /// that finished, with where you stand (`x`, `z`), what it made
 /// (`item_name`, `quantity`, `quality`) and its `grade` and `colour`, as
 /// `extraction_completed` has.
-fn crafted(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Shared) {
+fn crafted(
+    ctx: &mut ExtensionCtx,
+    session: &mut Session,
+    shared: &script_api::Shared,
+    sound: &mut Soundscape,
+) {
     for item in session.take_crafted() {
         let [x, _, z] = shared
             .follow
@@ -766,6 +834,7 @@ fn crafted(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::S
         data.insert("x".into(), (x as f64).into());
         data.insert("z".into(), (z as f64).into());
         ctx.fire_event("crafting_completed", data);
+        sound.crafted();
     }
 }
 
@@ -780,6 +849,7 @@ fn plots(
     shared: &script_api::Shared,
     lots: &[Option<Lot>],
     lot_of: &HashMap<String, usize>,
+    sound: &mut Soundscape,
 ) {
     if let Some([x, y]) = shared.pick_plot.lock().ok().and_then(|mut p| p.take()) {
         session.pick_plot(x, y);
@@ -818,6 +888,7 @@ fn plots(
             (w.hypot(h) * 0.5 * crate::coords::S as f64).into(),
         );
         ctx.fire_event("plot_claimed", data);
+        sound.claimed();
     }
     for note in session.take_plot_notes() {
         let (title, body) = match note {

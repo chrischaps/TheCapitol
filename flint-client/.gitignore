@@ -8,3 +8,6 @@
 # The engine's script store and the session file (server, email and
 # token: never commit it), crates/capitol-client/src/session.rs
 /save/
+# The sounds, written at start by crates/capitol-client/src/sound/library.rs
+/audio/*.wav
+/audio/.synth-version
