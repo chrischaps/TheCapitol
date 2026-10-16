@@ -32,7 +32,7 @@ use capitol_core::protocol::rest::{MoveItemRequest, PositionQuery, SlotItem};
 use capitol_core::protocol::rules::Zone;
 use capitol_core::protocol::ws::ClientMessage;
 use capitol_core::state::{GameState, StateEvent, Yield};
-use capitol_core::station::{self, Kit, Placing};
+use capitol_core::station::{self, Kit, Placing, Visit};
 use flint_runtime::PersistentStore;
 use uuid::Uuid;
 
@@ -106,6 +106,11 @@ pub struct Session {
     placing: Option<Placing>,
     /// What placing has to tell the player since the extension last took it.
     placing_notes: Vec<station::Note>,
+    /// Clicking stations: open, or walk there and open; close on leaving (P6.3).
+    visit: Visit,
+    /// What's worth telling the player about stations, since the extension
+    /// last took it.
+    station_notes: Vec<station::visit::Note>,
 }
 
 /// Something to tell the player about picking a plot.
@@ -181,6 +186,8 @@ impl Session {
             plot_notes: Vec::new(),
             placing: None,
             placing_notes: Vec::new(),
+            visit: Visit::default(),
+            station_notes: Vec::new(),
         };
         session.apply(effects);
         Ok(session)
@@ -228,6 +235,7 @@ impl Session {
     /// the server hears `move`. Only in the world.
     pub fn move_to(&mut self, now: Instant, x: f64, y: f64) {
         self.harvest.walked();
+        self.visit.walked();
         self.walk(now, x, y);
     }
 
@@ -266,6 +274,97 @@ impl Session {
             Step::WalkTo { x, y } => self.walk(now, x, y),
             Step::Hold => {}
         }
+    }
+
+    /// You clicked a station: open it if it's in reach, or walk to its near
+    /// side and open it on arrival (`capitol_core::station::Visit`). One the
+    /// store doesn't know is walked to, as a click on the ground would be.
+    pub fn open_station(&mut self, now: Instant, station: Uuid) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        // A click on a station is a click elsewhere for the node you were after.
+        self.harvest.walked();
+        if let Some(step) = self.visit.click(station, &self.state, now) {
+            self.station_step(now, step);
+        }
+    }
+
+    /// Opens the station nearest you, as a click on it would (the O key).
+    pub fn open_nearest_station(&mut self, now: Instant) {
+        let Some(me) = self.state.local_player() else {
+            return;
+        };
+        let (x, y) = (me.x, me.y);
+        let nearest = self
+            .state
+            .stations()
+            .values()
+            .min_by(|a, b| {
+                let d = |s: &capitol_core::protocol::rest::StationInfo| (s.x - x).hypot(s.y - y);
+                d(a).total_cmp(&d(b))
+            })
+            .map(|s| s.id);
+        if let Some(id) = nearest {
+            self.open_station(now, id);
+        }
+    }
+
+    fn station_step(&mut self, now: Instant, step: station::visit::Step) {
+        match step {
+            station::visit::Step::Open(id) => self.net.ws(ClientMessage::OpenStation {
+                station_id: id.to_string(),
+            }),
+            station::visit::Step::WalkTo { x, y } => self.walk(now, x, y),
+            station::visit::Step::Close => self.net.ws(ClientMessage::CloseStation),
+            station::visit::Step::Hold => {}
+        }
+    }
+
+    /// Closes the open station (its panel's Close).
+    pub fn close_station(&mut self) {
+        if self.state.open_station().is_some() {
+            self.net.ws(ClientMessage::CloseStation);
+        }
+    }
+
+    /// Takes a station down. The server refuses unless it's yours.
+    pub fn remove_station(&mut self, station: Uuid) {
+        tracing::info!("station: removing {station}");
+        self.net.ws(ClientMessage::RemoveStation {
+            station_id: station.to_string(),
+        });
+    }
+
+    /// Crafts `recipe_id` at the open station, from its box, if it's ready
+    /// and nothing else is under way.
+    pub fn craft_at_station(&mut self, now: Instant, recipe_id: &str) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        let (Some(open), Some(recipe), Some(bench)) = (
+            self.state.open_station(),
+            self.state.recipe(recipe_id),
+            self.state.station_container(),
+        ) else {
+            return;
+        };
+        let station_id = open.station_id;
+        let check = craft::check(recipe, bench, self.state.crafting_output());
+        if let Some(message) = self.crafting.start_at(&check, station_id, &self.state, now) {
+            tracing::info!(
+                "craft: {} at {station_id} from {} stacks",
+                check.recipe.id,
+                check.inputs.len()
+            );
+            self.craft_refused = None;
+            self.net.ws(message);
+        }
+    }
+
+    /// What's worth telling the player about stations since the last call.
+    pub fn take_station_notes(&mut self) -> Vec<station::visit::Note> {
+        std::mem::take(&mut self.station_notes)
     }
 
     /// The node you're walking to, to extract on arrival, or the one an
@@ -310,8 +409,8 @@ impl Session {
         );
     }
 
-    /// Why the server refused the last move, for a few seconds after. A
-    /// station's box refuses every move until B4 (#41) lands.
+    /// Why the server refused the last move, for a few seconds after: "Too
+    /// far from station", "Not your station", "Slot 30 out of bounds".
     pub fn move_refused(&self, now: Instant) -> Option<&str> {
         self.move_refused
             .as_ref()
@@ -481,11 +580,6 @@ impl Session {
         std::mem::take(&mut self.placing_notes)
     }
 
-    /// Sends a message on the socket. Dropped while not connected.
-    pub fn ws(&self, message: ClientMessage) {
-        self.net.ws(message);
-    }
-
     pub fn log_in(&mut self, email: &str, password: &str) {
         let effects = self.auth.log_in(email, password);
         self.apply(effects);
@@ -612,6 +706,10 @@ impl Session {
             if let Some(step) = self.harvest.observe(&changes, &self.state, now) {
                 self.step(now, step);
             }
+            if let Some(step) = self.visit.observe(&changes, &self.state, now) {
+                self.station_step(now, step);
+            }
+            self.station_notes.extend(self.visit.take_notes());
             let answered = self.poller.observe(event, &changes, &self.state);
             match (answered, event) {
                 (Some(Fetch::Terrain), NetEvent::Rest(_, Ok(RestResponse::Terrain(t)))) => {
@@ -625,6 +723,8 @@ impl Session {
         }
         if self.in_session() {
             self.harvest.tick(now);
+            self.visit.tick(now);
+            self.station_notes.extend(self.visit.take_notes());
             self.crafting.tick(now);
             self.note_crafting(now);
             if let Some(placing) = &mut self.placing {
@@ -664,6 +764,8 @@ impl Session {
             self.plot_notes.clear();
             self.placing = None;
             self.placing_notes.clear();
+            self.visit = Visit::default();
+            self.station_notes.clear();
         }
     }
 
@@ -1303,6 +1405,195 @@ mod tests {
             SessionFile::load(&path).remembered("http://a:3000").token,
             None
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Against the local stack, the station panel's rules end to end (P6.3):
+    /// walk to a workbench and open it, Fill its box, craft a forge kit
+    /// there, put the box back, open a chest and move the kit into it and
+    /// out, walk out of reach and see it close, and take the chest down.
+    ///
+    /// Needs a workbench and a storage chest owned by `Station1`, each with
+    /// its `station_inventory` container, inserted before the server started
+    /// (the tick only learns stations at startup or from `place_station`).
+    /// The SQL is under Stations in `flint-client/CLAUDE.md`. A bot gathers
+    /// the fiber and twists the rope first. The chest is gone afterwards.
+    #[test]
+    #[ignore = "needs the local stack, a workbench and chest for Station1; takes a minute or two"]
+    fn a_station_opens_crafts_stores_closes_and_comes_down() {
+        use capitol_core::bot::{Account, Bot};
+        use capitol_core::catalog::container_type::CRAFTING_OUTPUT;
+        use capitol_core::craft::{self, Phase};
+        use capitol_core::state::Container;
+
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let account = Account::numbered("station", 1);
+        {
+            let mut bot = Bot::sign_in(NetConfig::with_base_url(&server), &account).unwrap();
+            // Crafted rope lands in the crafting output, and stays there.
+            let rope = |bot: &Bot| {
+                bot.count("player_inventory", "rope") + bot.count("crafting_output", "rope")
+            };
+            while rope(&bot) < 4 {
+                bot.gather("fiber", 2).unwrap();
+                bot.craft("rope_basic").unwrap();
+            }
+            bot.gather("fiber", 6).unwrap();
+            // Back by the stations: the gathering may have wandered.
+            bot.walk_to(4006.0, 7350.0).unwrap();
+        }
+
+        let dir = std::env::temp_dir().join(format!("capitol-station-{}", std::process::id()));
+        let mut session = Session::start(&server, SessionFile::load(dir.join("s.toml"))).unwrap();
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let mut terrain = TerrainSource::offline(&fixture).unwrap();
+        session.log_in(&account.email, &account.password);
+        let mut wait = |session: &mut Session, what: &str, done: &dyn Fn(&Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(45);
+            while !done(session) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                session.update(Instant::now(), &mut terrain);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait(&mut session, "the boxes, recipes and stations", &|s| {
+            let st = s.state();
+            st.inventory().is_some()
+                && st.crafting_output().is_some()
+                && !st.recipes().is_empty()
+                && st.local_player().is_some()
+                && st.stations().len() >= 2
+        });
+        let mine = |s: &Session, kind: &str| {
+            let st = s.state();
+            st.stations()
+                .values()
+                .find(|x| x.station_type == kind && Some(x.owner_id) == st.me())
+                .map(|x| x.id)
+                .unwrap_or_else(|| panic!("no {kind} of Station1 nearby: see the doc comment"))
+        };
+        let (bench, chest) = (mine(&session, "workbench"), mine(&session, "storage_chest"));
+        let output = |s: &Session| -> Container {
+            s.state()
+                .containers()
+                .values()
+                .find(|c| c.container_type == CRAFTING_OUTPUT)
+                .unwrap()
+                .clone()
+        };
+        let station_box = |s: &Session| s.state().station_container().cloned();
+        let open = |s: &Session| s.state().open_station().map(|o| o.station_id);
+        let emptied = |session: &mut Session| {
+            let shifts = craft::empty_into(
+                &station_box(session).unwrap(),
+                session.state().inventory().unwrap(),
+            );
+            session.move_items(&shifts);
+        };
+
+        // A clear output, so the kit has somewhere to go.
+        let shifts = craft::empty_into(&output(&session), session.state().inventory().unwrap());
+        session.move_items(&shifts);
+        wait(&mut session, "a clear output", &|s| {
+            output(s).used_slots() == 0
+        });
+
+        // The workbench, out of reach: walk, then it opens.
+        session.open_station(Instant::now(), bench);
+        wait(&mut session, "the workbench to open", &|s| {
+            open(s) == Some(bench) && station_box(s).is_some()
+        });
+        emptied(&mut session);
+        wait(&mut session, "an empty workbench", &|s| {
+            station_box(s).is_some_and(|b| b.used_slots() == 0)
+        });
+        let forge = session
+            .state()
+            .recipe("craft_forge")
+            .expect("the craft_forge migration")
+            .clone();
+        assert_eq!(forge.required_station_type.as_deref(), Some("workbench"));
+        let shifts = craft::fill(
+            &forge,
+            session.state().inventory().unwrap(),
+            &station_box(&session).unwrap(),
+        );
+        session.move_items(&shifts);
+        let ready = |s: &Session| {
+            let st = s.state();
+            let r = st.recipe("craft_forge").unwrap();
+            station_box(s).is_some_and(|b| craft::check(r, &b, st.crafting_output()).ready())
+        };
+        wait(&mut session, "rope and fiber on the workbench", &ready);
+
+        session.craft_at_station(Instant::now(), "craft_forge");
+        wait(&mut session, "the forge kit to start", &|s| {
+            s.state().is_crafting()
+        });
+        wait(&mut session, "the forge kit", &|s| {
+            *s.crafting().phase() == Phase::Idle && !s.state().is_crafting()
+        });
+        assert_eq!(craft::count(&output(&session), "forge_kit"), 1);
+        assert_eq!(session.take_crafted().len(), 1);
+        let left = |s: &Session, t: &str| station_box(s).map_or(0, |b| craft::count(&b, t));
+        eprintln!(
+            "after the craft the workbench holds {} rope, {} fiber",
+            left(&session, "rope"),
+            left(&session, "fiber")
+        );
+
+        // Put the workbench's box back, so nothing is left on it.
+        emptied(&mut session);
+        wait(&mut session, "the workbench emptied", &|s| {
+            station_box(s).is_some_and(|b| b.used_slots() == 0)
+        });
+
+        // The chest: in it and out again.
+        session.open_station(Instant::now(), chest);
+        wait(&mut session, "the chest to open", &|s| {
+            open(s) == Some(chest) && station_box(s).is_some()
+        });
+        let kit = output(&session).items().next().unwrap().clone();
+        let chest_box = station_box(&session).unwrap();
+        // An empty slot: a swap would fail (#81).
+        session.move_item(Move {
+            item_id: kit.item_id,
+            target_container_id: chest_box.id,
+            target_slot: chest_box.first_empty().expect("room in the chest") as i32,
+        });
+        wait(&mut session, "the kit in the chest", &|s| {
+            station_box(s).is_some_and(|b| b.find(kit.item_id).is_some())
+        });
+        let inventory = session.state().inventory().unwrap().clone();
+        session.move_item(Move {
+            item_id: kit.item_id,
+            target_container_id: inventory.id,
+            target_slot: inventory.first_empty().unwrap() as i32,
+        });
+        wait(&mut session, "the kit back out", &|s| {
+            s.state().inventory().unwrap().find(kit.item_id).is_some()
+        });
+
+        // Walk away: it closes.
+        let me = session.state().local_player().unwrap().clone();
+        session.move_to(Instant::now(), me.x + 120.0, me.y);
+        wait(&mut session, "the chest to close", &|s| open(s).is_none());
+
+        // Back, empty it as the panel asks, and take the chest down.
+        session.open_station(Instant::now(), chest);
+        wait(&mut session, "the chest to open again", &|s| {
+            open(s) == Some(chest) && station_box(s).is_some()
+        });
+        emptied(&mut session);
+        wait(&mut session, "the chest emptied", &|s| {
+            station_box(s).is_some_and(|b| b.used_slots() == 0)
+        });
+        session.remove_station(chest);
+        wait(&mut session, "the chest to come down", &|s| {
+            s.state().station(chest).is_none() && open(s).is_none()
+        });
+        session.log_out();
         let _ = std::fs::remove_dir_all(dir);
     }
 }

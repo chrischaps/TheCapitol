@@ -24,11 +24,17 @@ const RISE: f32 = 12.0;
 /// Whether the panel is open, between frames.
 pub struct InventoryPanel {
     pub open: bool,
+    /// Where it was drawn last frame, for the station panel to sit beside.
+    /// `None` while it's closed.
+    pub rect: Option<egui::Rect>,
 }
 
 impl Default for InventoryPanel {
     fn default() -> Self {
-        Self { open: true }
+        Self {
+            open: true,
+            rect: None,
+        }
     }
 }
 
@@ -42,7 +48,7 @@ impl InventoryPanel {
     /// move, while it's fresh. Returns the move a drop asks for, and the kit
     /// a right click asks to place.
     pub fn show(
-        &self,
+        &mut self,
         ctx: &egui::Context,
         icons: &mut ItemIcons,
         inventory: Option<&Container>,
@@ -50,10 +56,11 @@ impl InventoryPanel {
     ) -> Clicks {
         let shown = ctx.animate_bool_with_time(Id::new("capitol_inventory_fade"), self.open, FADE);
         if shown <= 0.0 {
+            self.rect = None;
             return Clicks::default();
         }
         let ease = 1.0 - (1.0 - shown).powi(3);
-        egui::Area::new(Id::new("capitol_inventory"))
+        let area = egui::Area::new(Id::new("capitol_inventory"))
             .anchor(Align2::RIGHT_BOTTOM, [-20.0, -20.0 + RISE * (1.0 - ease)])
             .interactable(self.open)
             .show(ctx, |ui| {
@@ -61,8 +68,9 @@ impl InventoryPanel {
                 theme::panel_edged(CRAFT)
                     .show(ui, |ui| body(ui, icons, inventory, refused))
                     .inner
-            })
-            .inner
+            });
+        self.rect = self.open.then_some(area.response.rect);
+        area.inner
     }
 }
 
@@ -113,7 +121,7 @@ mod tests {
     use capitol_core::protocol::rest::SlotItem;
     use uuid::Uuid;
 
-    fn run(ctx: &egui::Context, panel: &InventoryPanel, c: Option<&Container>) -> egui::Rect {
+    fn run(ctx: &egui::Context, panel: &mut InventoryPanel, c: Option<&Container>) -> egui::Rect {
         let mut icons = ItemIcons::load(std::path::Path::new("no/icons/needed"));
         let mut rect = egui::Rect::NOTHING;
         let raw = egui::RawInput {
@@ -148,7 +156,7 @@ mod tests {
     fn the_panel_sits_bottom_right_six_slots_wide() {
         let ctx = egui::Context::default();
         let c = inventory();
-        let rect = run(&ctx, &InventoryPanel::default(), Some(&c));
+        let rect = run(&ctx, &mut InventoryPanel::default(), Some(&c));
         assert!(rect.is_positive(), "the panel was drawn");
         assert!((1280.0 - rect.right() - 20.0).abs() < 1.0, "{rect:?}");
         // The grid, its tray and the panel's margins.
@@ -166,7 +174,7 @@ mod tests {
         let mut panel = InventoryPanel::default();
         panel.toggle();
         // Closed from the first frame, it starts at its target: no fade.
-        run(&ctx, &panel, Some(&c));
+        run(&ctx, &mut panel, Some(&c));
         assert!(ctx
             .memory(|m| m.area_rect(Id::new("capitol_inventory")))
             .is_none());

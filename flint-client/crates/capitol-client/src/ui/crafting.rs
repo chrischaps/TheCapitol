@@ -155,7 +155,9 @@ impl CraftingPanel {
             ..
         }) = crafting
         {
-            self.under_way(ui, recipe_name, *duration, &mut action);
+            if under_way(ui, self.bar.shown, recipe_name, *duration, CRAFT) {
+                action = Some(Action::Cancel);
+            }
             ui.add_space(6.0);
         } else {
             self.picker(ui, state);
@@ -250,8 +252,8 @@ impl CraftingPanel {
         if let Some(check) = &check {
             if let Some(blocked) = &check.blocked {
                 ui.add_space(6.0);
-                if let Some(m) = blocked_box(ui, state, check, blocked) {
-                    action = Some(m);
+                if let Some(shifts) = blocked_box(ui, state, check, blocked) {
+                    action = Some(Action::Moves(shifts));
                 }
             } else if let Some(q) = check.estimate {
                 ui.add_space(6.0);
@@ -304,54 +306,55 @@ impl CraftingPanel {
                 });
         });
     }
+}
 
-    /// A craft under way: what, the bar, how long, and Cancel.
-    fn under_way(
-        &self,
-        ui: &mut egui::Ui,
-        recipe_name: &str,
-        duration: u32,
-        action: &mut Option<Action>,
-    ) {
-        ui.ctx().request_repaint();
-        let f = self.bar.shown;
-        ui.vertical_centered(|ui| {
-            ui.label(theme::text(format!("Crafting {recipe_name}…")));
-        });
-        ui.add_space(4.0);
-        theme::progress(ui, f, CRAFT);
-        ui.add_space(2.0);
-        let left = (1.0 - f) * duration as f32 * TICK_MS as f32 / 1000.0;
-        ui.horizontal(|ui| {
+/// A craft under way: what, the bar (`f`, 0 to 1) in `accent`, how long,
+/// and Cancel.
+/// True when Cancel was clicked.
+pub(super) fn under_way(
+    ui: &mut egui::Ui,
+    f: f32,
+    recipe_name: &str,
+    duration: u32,
+    accent: egui::Color32,
+) -> bool {
+    ui.ctx().request_repaint();
+    let mut cancel = false;
+    ui.vertical_centered(|ui| {
+        ui.label(theme::text(format!("Crafting {recipe_name}…")));
+    });
+    ui.add_space(4.0);
+    theme::progress(ui, f, accent);
+    ui.add_space(2.0);
+    let left = (1.0 - f) * duration as f32 * TICK_MS as f32 / 1000.0;
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("{:.0}%", f * 100.0))
+                .color(TEXT)
+                .monospace()
+                .size(size::LABEL),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
-                RichText::new(format!("{:.0}%", f * 100.0))
-                    .color(TEXT)
+                RichText::new(format!("{left:.1}s left"))
+                    .color(DIM)
                     .monospace()
                     .size(size::LABEL),
             );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(format!("{left:.1}s left"))
-                        .color(DIM)
-                        .monospace()
-                        .size(size::LABEL),
-                );
-            });
         });
-        ui.add_space(4.0);
-        ui.vertical_centered_justified(|ui| {
-            if ui.button(theme::text("Cancel")).clicked() {
-                *action = Some(Action::Cancel);
-            }
-        });
-        ui.vertical_centered(|ui| {
-            ui.label(theme::dim("Walking away cancels it too").size(size::LABEL));
-        });
-    }
+    });
+    ui.add_space(4.0);
+    ui.vertical_centered_justified(|ui| {
+        cancel = ui.button(theme::text("Cancel")).clicked();
+    });
+    ui.vertical_centered(|ui| {
+        ui.label(theme::dim("Walking away cancels it too").size(size::LABEL));
+    });
+    cancel
 }
 
 /// What the recipe needs, against what the inputs hold.
-fn needs(ui: &mut egui::Ui, check: &Check) {
+pub(super) fn needs(ui: &mut egui::Ui, check: &Check) {
     theme::well().show(ui, |ui| {
         ui.set_width(ui.available_width());
         theme::list_spacing(ui);
@@ -384,7 +387,7 @@ fn needs(ui: &mut egui::Ui, check: &Check) {
 }
 
 /// The estimate: what comes out and about how good, said as an estimate.
-fn preview(ui: &mut egui::Ui, check: &Check, quality: i32) {
+pub(super) fn preview(ui: &mut egui::Ui, check: &Check, quality: i32) {
     let output = check
         .recipe
         .outputs
@@ -406,13 +409,13 @@ fn preview(ui: &mut egui::Ui, check: &Check, quality: i32) {
 }
 
 /// The output slot is taken by something else: say so, and offer to move
-/// it to the inventory.
-fn blocked_box(
+/// it to the inventory. Returns that move when it's asked for.
+pub(super) fn blocked_box(
     ui: &mut egui::Ui,
     state: &GameState,
     check: &Check,
     blocked: &craft::Blocked,
-) -> Option<Action> {
+) -> Option<Vec<craft::Shift>> {
     let output = check
         .recipe
         .outputs
@@ -431,18 +434,18 @@ fn blocked_box(
     let mut action = None;
     ui.vertical_centered(|ui| {
         if theme::link(ui, "Move it to the inventory", size::SMALL).clicked() {
-            action = Some(Action::Moves(vec![(
-                blocked.item_id,
-                inventory.id,
-                slot as i32,
-            )]));
+            action = Some(vec![(blocked.item_id, inventory.id, slot as i32)]);
         }
     });
     action
 }
 
 /// The Craft button's words, and whether it can be pressed.
-fn craft_label(check: Option<&Check>, phase: &Phase, state: &GameState) -> (String, bool) {
+pub(super) fn craft_label(
+    check: Option<&Check>,
+    phase: &Phase,
+    state: &GameState,
+) -> (String, bool) {
     match phase {
         Phase::Asking { .. } => return ("Starting…".into(), false),
         Phase::Settling { .. } => return ("Finishing…".into(), false),

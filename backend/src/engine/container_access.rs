@@ -7,8 +7,10 @@
 //! REST `/inventory/move` and WS `move_item` both go through [`check_container_access`].
 
 use sqlx::PgPool;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use super::tick::GameState;
 use crate::models::{Container, PermissionLevel};
 
 /// Why a player can't use a container.
@@ -84,11 +86,23 @@ pub fn station_access(player_id: Uuid, s: &StationAccess) -> Result<(), AccessEr
     Ok(())
 }
 
+/// Where `player_id` stands now, from the game state, if they're online.
+///
+/// Use this, not `players.position_x`, for any range check. The tick writes
+/// positions to the database only every 100 ticks (10 s), so a player who
+/// has just walked up to a station is still "too far" by the row.
+pub async fn live_position(game: &RwLock<GameState>, player_id: Uuid) -> Option<(f64, f64)> {
+    game.read().await.players.get(&player_id).map(|p| (p.x, p.y))
+}
+
 /// Load a container and check that `player_id` may move items into or out of it.
+/// `at` is where the player stands now ([`live_position`]). When it's `None`,
+/// the position comes from their `players` row, which can be up to 10 s old.
 pub async fn check_container_access(
     db: &PgPool,
     player_id: Uuid,
     container_id: Uuid,
+    at: Option<(f64, f64)>,
 ) -> Result<Container, AccessError> {
     let container: Container = sqlx::query_as(
         "SELECT id, container_type, owner_id, station_id, created_at
@@ -129,6 +143,7 @@ pub async fn check_container_access(
         return Err(AccessError::NotFound);
     };
 
+    let (px, py) = at.unwrap_or((px, py));
     let (dx, dy) = (px - sx as f64, py - sy as f64);
     station_access(
         player_id,

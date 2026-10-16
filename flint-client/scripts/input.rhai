@@ -1,5 +1,5 @@
 // Input to intents (plan §4.2): what a left click on the world means, and
-// the marks it leaves. P4.3 is click to move; P4.4 is gathering.
+// the marks it leaves. P4.3 is click to move, P4.4 gathering, P6.3 stations.
 //
 // A click is picked off the ground with screen_to_ground and offered to
 // each intent in the React client's order (GameCanvas.tsx handleClick).
@@ -12,9 +12,9 @@
 //   5. an available resource node: extract          (P4.4, here)
 //   6. anywhere else: walk there                    (P4.3, here)
 //
-// Each of 2-3 is a function below that says no for now. To add one, fill
-// its body: it gets the click (#{ x, z } in world metres, `shift`, `alt`)
-// and returns true when it took it.
+// Each is a function below that gets the click (#{ x, z } in world
+// metres, `shift`, `alt`) and returns true when it took it. Trading (2)
+// still says no until P7.3 fills its body.
 //
 // Walking: cap_move(x, z) sends you (clamped to the world, 0-8000 server
 // units), and cap_destination() is where you're going until you arrive.
@@ -44,12 +44,19 @@
 // over your name, as a gather's yield rises off its tuft. Walking cancels
 // a craft on the server, so a click on the ground while crafting stops it.
 //
-// Stations (P6.1) have no click yet (P6.3 opens them). Within reach of
-// one, 75 units (7.5 m) by capitol_core::station, an orange ring
-// (#f97316, React's in-range ring) closes in round it, with four short
-// marks turning slowly outside it, and opens out again as you leave.
-// Like every ring here it's screen-space lines with no depth test, so its
-// far side crosses the model's front (issue #86).
+// Stations (P6.1). Within reach of one, 75 units (7.5 m) by
+// capitol_core::station, an orange ring (#f97316, React's in-range ring)
+// closes in round it, with four short marks turning slowly outside it,
+// and opens out again as you leave. Hovering one out of reach draws the
+// ring faintly, so you can see it will take a click. Like every ring here
+// it's screen-space lines with no depth test, so its far side crosses the
+// model's front (issue #86).
+//
+// A click inside a station's ring (cap_station_at) opens it (P6.3,
+// cap_open_station). Within reach that's at once. Further away, you walk
+// to its near side and it opens as you arrive (capitol_core::station). The
+// panel is Rust's (ui/station.rs). Walking out of reach closes it, and a
+// refusal ("Not your station") comes back as a `station_note` toast.
 //
 // Placing a station (P6.2): a right click on a kit in the inventory starts
 // it. Rust draws the ghost, the station itself, tinted and translucent,
@@ -119,6 +126,8 @@ fn name_height() { 2.25 }
 fn craft_lift() { 30.0 }
 // The ring round a tuft being worked, and the sight round your target (m).
 fn work_ring() { 1.15 }
+// How strongly a hovered station's ring shows when it's out of reach.
+fn hover_reach() { 0.4 }
 fn sight_ring() { 1.0 }
 
 // ── Per frame ────────────────────────────────────────────────────────────
@@ -160,10 +169,15 @@ fn on_update() {
     ripples.push(#{ x: click.x, z: click.z, born: t });
 }
 
-// ── The intents above walking, waiting for their issues ──────────────────
+// ── The intents above walking ─────────────────────────────────────────────
 
 fn trade_with(click) { false }    // P7.3, shift
-fn open_station(click) { false }  // P6.3
+fn open_station(click) {           // P6.3
+    let s = cap_station_at(click.x, click.z);
+    if s == () { return false; }
+    cap_open_station(s.id);
+    true
+}
 
 // Alt-click: the plot here, in the panel. Over a road or open ground the
 // server finds none, and a toast says so.
@@ -218,7 +232,8 @@ fn on_event(name, data) {
         toast = #{ title: "The deed is yours", body: "Place stations here", born: t };
         return;
     }
-    if name == "extraction_note" || name == "plot_note" || name == "placement_note" {
+    if name == "extraction_note" || name == "plot_note" || name == "placement_note"
+        || name == "station_note" {
         toast = #{ title: data.title, body: data.body, born: t };
         return;
     }
@@ -282,13 +297,21 @@ fn on_draw_ui() {
     if marker != () && marker.gone != () && now - marker.gone > marker_fade() {
         marker = ();
     }
-    // The tuft you're going to gather, if any. While you walk to it, the
-    // sight round it stands in for the ring at your destination.
+    // Picked here rather than in on_update: on_draw_ui sees the camera this
+    // frame renders with, so the reticle can't trail the ground under it.
+    let hover = screen_to_ground(mouse_x(), mouse_y(), cap_ground_y());
     let placing = cap_placing();
     if placing != () { draw_placement(placing, now); }
+    // While placing, a station under the cursor is in the ghost's way, not
+    // a thing to open.
+    let over = if hover != () && placing == () { cap_station_at(hover[0], hover[1]) } else { () };
     for s in cap_stations() {
+        // One under the cursor shows its ring, faintly if it's out of reach.
+        if over != () && over.id == s.id && s.reach < hover_reach() { s.reach = hover_reach(); }
         if s.reach > 0.01 { draw_station_ring(s, now); }
     }
+    // The tuft you're going to gather, if any. While you walk to it, the
+    // sight round it stands in for the ring at your destination.
     let target = ();
     for n in cap_nodes() {
         if n.targeted { target = n; }
@@ -323,10 +346,7 @@ fn on_draw_ui() {
     for s in splashes { draw_splash(s, now); }
     if toast != () { draw_toast(toast, now); }
 
-    // Picked here rather than in on_update: on_draw_ui sees the camera this
-    // frame renders with, so the reticle can't trail the ground under it.
-    let hover = screen_to_ground(mouse_x(), mouse_y(), cap_ground_y());
-    if hover != () && placing == () {
+    if hover != () && placing == () && over == () {
         let n = cap_node_at(hover[0], hover[1]);
         if n != () && n.state == "available" && !n.targeted { draw_reticle_on(n, now); }
         else { draw_reticle(hover, now); }

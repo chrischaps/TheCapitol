@@ -40,7 +40,7 @@ pub struct Shared {
     /// extension takes it next frame.
     pub extract: Arc<Mutex<Option<String>>>,
     /// Every station shown this frame (P6.1), as `stations::Stations` left
-    /// them, for the in-range ring.
+    /// them, for the in-range ring and picking.
     pub stations: Arc<Mutex<Vec<StationMark>>>,
     /// Where a script last asked to pick a plot (`cap_pick_plot`, P6.4),
     /// in server units. The extension takes it next frame.
@@ -56,6 +56,9 @@ pub struct Shared {
     /// Where a script last asked to put the station down (`cap_place`),
     /// world metres. The extension takes it next frame.
     pub place_at: Arc<Mutex<Option<[f32; 2]>>>,
+    /// The station a script last asked to open (`cap_open_station`, P6.3).
+    /// The extension takes it next frame.
+    pub open_station: Arc<Mutex<Option<String>>>,
 }
 
 /// The picked plot as scripts see it.
@@ -291,6 +294,27 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         };
         stations.iter().map(|s| station_map(s).into()).collect()
     });
+    // `cap_station_at(x, z) -> #{ ... } or ()`: the station whose ring the
+    // ground point (x, z) falls inside, the nearest if several, as in
+    // `cap_stations`.
+    let stations = shared.stations.clone();
+    engine.register_fn("cap_station_at", move |x: f64, z: f64| -> rhai::Dynamic {
+        let Ok(stations) = stations.lock() else {
+            return rhai::Dynamic::UNIT;
+        };
+        match station_at(&stations, x as f32, z as f32) {
+            Some(s) => station_map(s).into(),
+            None => rhai::Dynamic::UNIT,
+        }
+    });
+    // `cap_open_station(id)`: open the station `id` (from `cap_station_at`):
+    // at once within reach, otherwise after walking to it. Sent next frame.
+    let open_station = shared.open_station.clone();
+    engine.register_fn("cap_open_station", move |id: &str| {
+        if let Ok(mut o) = open_station.lock() {
+            *o = Some(id.to_owned());
+        }
+    });
     // `cap_node_at(x, z) -> #{ ... } or ()`: the node nearest the ground
     // point (x, z), within NODE_PICK metres, as in `cap_nodes`.
     let nodes = shared.nodes.clone();
@@ -462,6 +486,16 @@ pub fn node_at(nodes: &[NodeMark], x: f32, z: f32) -> Option<&NodeMark> {
         .filter(|(_, d)| *d <= NODE_PICK)
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(n, _)| n)
+}
+
+/// The station nearest (x, z) whose ring it falls inside.
+pub fn station_at(stations: &[StationMark], x: f32, z: f32) -> Option<&StationMark> {
+    stations
+        .iter()
+        .map(|s| (s, (s.at[0] - x).hypot(s.at[1] - z)))
+        .filter(|(s, d)| *d <= s.radius)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(s, _)| s)
 }
 
 /// World (X, Z) in metres to the server point a move goes to: inside the
@@ -652,6 +686,31 @@ mod tests {
         assert_eq!(*shared.place_at.lock().unwrap(), Some([7.0, 8.0]));
         engine.run("cap_place_off()").unwrap();
         assert_eq!(*shared.place_hover.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn a_click_inside_a_ring_picks_the_station_and_asks_to_open_it() {
+        let shared = Shared::default();
+        let mark = |id: &str, x: f32| StationMark {
+            id: id.into(),
+            kind: "workbench",
+            at: [x, 0.0],
+            radius: 1.5,
+            in_reach: false,
+            reach: 0.0,
+        };
+        *shared.stations.lock().unwrap() = vec![mark("bench", 0.0), mark("chest", 2.5)];
+        let mut engine = rhai::Engine::new();
+        register(&mut engine, &shared);
+        let picked: String = engine
+            .eval("let s = cap_station_at(1.4, 0.2); cap_open_station(s.id); s.id")
+            .unwrap();
+        assert_eq!(picked, "chest", "both rings hold it; the chest is nearer");
+        assert_eq!(
+            shared.open_station.lock().unwrap().as_deref(),
+            Some("chest")
+        );
+        assert!(engine.eval::<()>("cap_station_at(0.0, 1.6)").is_ok());
     }
 
     #[test]

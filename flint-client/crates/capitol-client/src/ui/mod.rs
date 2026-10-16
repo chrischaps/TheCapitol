@@ -8,8 +8,9 @@
 //! - [`inventory`]: the inventory panel, toggled with `I` (P5.4).
 //! - [`crafting`]: the crafting panel, toggled with C (P5.5).
 //! - [`plot`]: the plot panel, opened by alt-clicking a plot (P6.4).
-//! - [`containers`]: `--containers`, the containers no panel shows yet, as
-//!   grids, until the station panel takes them over.
+//! - [`station`]: the open station's panel: its box, and its recipes at a
+//!   crafting station (P6.3).
+//! - [`containers`]: `--containers`, any container no panel shows, as grids.
 //! - [`sample`]: a panel showing the theme's parts, for reviewing the theme
 //!   against the React client (`--ui-sample`).
 //! - [`hud`]: the header strip (zone, strands, who, Sign out) and the
@@ -32,6 +33,7 @@ pub mod login;
 pub mod plot;
 pub mod sample;
 pub mod slots;
+pub mod station;
 pub mod theme;
 
 use crate::script_api::Shared;
@@ -40,7 +42,7 @@ use crate::script_api::Shared;
 const NOTE_MAX_CHARS: usize = 32;
 
 /// How tall the controls hint stands, in points, for a panel above it.
-const CONTROLS_HEIGHT: f32 = 148.0;
+const CONTROLS_HEIGHT: f32 = 166.0;
 
 /// The controls, and where the terrain came from (`status`), small and dim
 /// at the bottom left. Not interactable, so clicks reach the world. It
@@ -59,7 +61,8 @@ pub fn controls(ctx: &egui::Context, status: &str, clear_of: Option<egui::Rect>)
                 for line in [
                     "Click the ground to walk, or grass to gather",
                     "Alt-click a plot for its deed",
-                    "I inventory · C crafting · Enter crafts",
+                    "Click a station, or press O, to open it",
+                    "I inventory · C crafting · O station · Enter crafts",
                     "WASD pans · H home",
                     "Wheel or R/F zooms · Q/E or right-drag turns",
                     status,

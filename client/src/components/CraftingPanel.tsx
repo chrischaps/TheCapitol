@@ -7,7 +7,7 @@ import './CraftingPanel.css'
 
 export default function CraftingPanel() {
   const {
-    recipes,
+    recipes: allRecipes,
     craftingInputContainer,
     craftingOutputContainer,
     craftingState,
@@ -16,6 +16,12 @@ export default function CraftingPanel() {
     cancelCrafting,
     moveItem,
   } = useGame()
+
+  // Hand recipes only: a station's are crafted at the station (StationPanel)
+  const recipes = useMemo(
+    () => allRecipes.filter(r => !r.required_station_type),
+    [allRecipes]
+  )
 
   const [selectedRecipeId, setSelectedRecipeId] = useState<string | null>(null)
 

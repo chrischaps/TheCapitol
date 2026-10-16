@@ -7,7 +7,8 @@
 //! tower), the players walking it (`entities`), the resource nodes they
 //! gather from (`nodes`), the stations they build (`stations`) and place
 //! from a kit (`placing`), the crafting panel (`ui::crafting`), the plots you
-//! pick, claim and own (`ui::plot`, and the gold of `world::plots::owned`), the fog and the light as
+//! pick, claim and own (`ui::plot`, and the gold of `world::plots::owned`),
+//! the station panel (`ui::station`), the fog and the light as
 //! the camera climbs (`atmosphere`), the wheel for the camera rig, and the
 //! spike's markers.
 
@@ -18,12 +19,12 @@ use crate::script_api::{self, PlacementMark, PlotMark, Shared, ZoneBanner};
 use crate::session::Session;
 use crate::stations::{GhostView, Stations};
 use crate::terrain::TerrainSource;
-use crate::ui::containers::BenchAction;
 use crate::ui::crafting::Action as CraftAction;
 use crate::ui::hud::{ConnectionOverlay, HeaderView};
 use crate::ui::icons::ItemIcons;
 use crate::ui::inventory::InventoryPanel;
 use crate::ui::login::{FormAction, LoginForm, LoginView};
+use crate::ui::station::Action as StationAction;
 use crate::world::palette;
 use crate::world::plots::{self as lots, Lot};
 use crate::world::Rebuild;
@@ -34,7 +35,6 @@ use capitol_core::net::ConnectionState;
 use capitol_core::plot::Offer;
 use capitol_core::protocol::rules::{STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
 use capitol_core::protocol::terrain::TerrainResponse;
-use capitol_core::protocol::ws::ClientMessage;
 use capitol_core::station::{Note as PlaceNote, Phase as PlacePhase};
 use flint_player::{ExtensionCtx, PlayerExtension};
 use std::collections::HashMap;
@@ -90,6 +90,7 @@ pub struct CapitolExtension {
     nodes: Nodes,
     stations: Stations,
     crafting: ui::crafting::CraftingPanel,
+    station: ui::station::StationPanel,
     /// Enter (the `craft` action) was pressed since `ui` last looked.
     craft_key: bool,
     /// Esc, or a right click on the world, since the last frame: stop
@@ -127,6 +128,7 @@ impl CapitolExtension {
             nodes: Nodes::default(),
             stations: Stations::default(),
             crafting: ui::crafting::CraftingPanel::default(),
+            station: ui::station::StationPanel::default(),
             craft_key: false,
             cancel_placing: false,
             cursor: (0.0, 0.0),
@@ -218,10 +220,15 @@ impl PlayerExtension for CapitolExtension {
         }
         // Taken in `ui`, where the panel knows its recipe.
         self.craft_key |= !self.at_login() && ctx.input.is_action_just_pressed("craft");
+        let station_key = !self.at_login() && ctx.input.is_action_just_pressed("station");
         if let Some(session) = &mut self.session {
             session.update(now, &mut self.terrain);
+            if station_key {
+                session.open_nearest_station(now);
+            }
             walk(ctx, session, &self.shared, now);
             gather(ctx, session, &self.shared, now);
+            visit(ctx, session, &self.shared, now);
             crafted(ctx, session, &self.shared);
             plots(ctx, session, &self.shared, &self.lots, &self.lot_of);
             // Signed out, the store is empty, so everyone fades away.
@@ -469,8 +476,12 @@ impl PlayerExtension for CapitolExtension {
             }
             if !at_login {
                 let now = Instant::now();
-                let key = (std::mem::take(&mut self.craft_key) && self.crafting.open)
-                    .then_some(CraftAction::Craft);
+                // Enter crafts at the open station, else on the crafting panel.
+                let enter = std::mem::take(&mut self.craft_key);
+                let at_station = self.station.recipe(session.state()).is_some();
+                let key =
+                    (enter && !at_station && self.crafting.open).then_some(CraftAction::Craft);
+                let station_key = (enter && at_station).then_some(StationAction::Craft);
                 let view = ui::crafting::View {
                     state: session.state(),
                     phase: session.crafting().phase(),
@@ -506,6 +517,33 @@ impl PlayerExtension for CapitolExtension {
                     Some(ui::plot::Action::Close) => session.close_plot(),
                     None => {}
                 }
+                let view = ui::station::View {
+                    state: session.state(),
+                    phase: session.crafting().phase(),
+                    refused: session
+                        .craft_refused(now)
+                        .or_else(|| session.move_refused(now)),
+                    now,
+                    beside: self.inventory.rect,
+                };
+                match self
+                    .station
+                    .show(ctx, &mut self.icons, &view, dt)
+                    .or(station_key)
+                {
+                    Some(StationAction::Move(m)) => session.move_item(m),
+                    Some(StationAction::Moves(shifts)) => session.move_items(&shifts),
+                    Some(StationAction::Craft) => {
+                        let recipe = self.station.recipe(session.state()).map(|r| r.id.clone());
+                        if let Some(id) = recipe {
+                            session.craft_at_station(now, &id);
+                        }
+                    }
+                    Some(StationAction::Cancel) => session.cancel_craft(),
+                    Some(StationAction::Close) => session.close_station(),
+                    Some(StationAction::Remove(id)) => session.remove_station(id),
+                    None => {}
+                }
                 let refused = session.move_refused(Instant::now());
                 let inventory = session.state().inventory();
                 let clicks = self
@@ -521,13 +559,10 @@ impl PlayerExtension for CapitolExtension {
             if !at_login && self.containers {
                 // The inventory panel shows a refused move's reason.
                 let refused = None;
-                match ui::containers::bench(ctx, &mut self.icons, session.state(), refused) {
-                    Some(BenchAction::Move(m)) => session.move_item(m),
-                    Some(BenchAction::OpenStation(id)) => session.ws(ClientMessage::OpenStation {
-                        station_id: id.to_string(),
-                    }),
-                    Some(BenchAction::CloseStation) => session.ws(ClientMessage::CloseStation),
-                    None => {}
+                if let Some(m) =
+                    ui::containers::bench(ctx, &mut self.icons, session.state(), refused)
+                {
+                    session.move_item(m);
                 }
             }
         }
@@ -637,6 +672,35 @@ fn gather(
         data.insert("title".into(), title.into());
         data.insert("body".into(), body.into());
         ctx.fire_event("extraction_note", data);
+    }
+}
+
+/// Stations (P6.3): open the station a script asked for
+/// (`cap_open_station`), and fire `station_note` at the scripts, with a
+/// `title` and `body`, when one wouldn't open.
+fn visit(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Shared, now: Instant) {
+    if let Some(id) = shared.open_station.lock().ok().and_then(|mut o| o.take()) {
+        match uuid::Uuid::parse_str(&id) {
+            Ok(station) => session.open_station(now, station),
+            Err(e) => tracing::warn!("cap_open_station: {id:?} isn't a station id: {e}"),
+        }
+    }
+    for note in session.take_station_notes() {
+        tracing::info!("station: {note:?}");
+        let (title, body) = match note {
+            capitol_core::station::visit::Note::Refused(why) => ("Can't open it", why),
+            capitol_core::station::visit::Note::Unanswered => (
+                "Can't open it",
+                "The server didn't answer. Try again".into(),
+            ),
+            capitol_core::station::visit::Note::Lost => {
+                ("Gone", "That station was taken down".into())
+            }
+        };
+        let mut data = toml::Table::new();
+        data.insert("title".into(), title.into());
+        data.insert("body".into(), body.into());
+        ctx.fire_event("station_note", data);
     }
 }
 

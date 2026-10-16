@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo, TradeOfferItem};
 
-use crate::engine::container_access::check_container_access;
+use crate::engine::container_access::{check_container_access, live_position};
 use crate::engine::GameEvent;
 use crate::models::PlayerState;
 use crate::routes::auth::Claims;
@@ -950,12 +950,13 @@ async fn handle_move_item(
 
     // Both ends must be usable: the player's own containers, or a station's
     // within reach (B4). The source matters too, since a swap fills it.
+    let at = live_position(&state.game, player_id).await;
     if let Some(source_container_id) = source_item.container_id {
-        check_container_access(&state.db, player_id, source_container_id)
+        check_container_access(&state.db, player_id, source_container_id, at)
             .await
             .map_err(|e| e.message())?;
     }
-    let target_container = check_container_access(&state.db, player_id, target_container_id)
+    let target_container = check_container_access(&state.db, player_id, target_container_id, at)
         .await
         .map_err(|e| e.message())?;
 
@@ -1069,14 +1070,16 @@ async fn handle_place_station(
     y: f64,
     kit_item_id: Uuid,
 ) -> Result<PlaceStationResult, String> {
-    // Get player position
-    let (player_x, player_y): (f64, f64) = sqlx::query_as(
-        "SELECT position_x, position_y FROM players WHERE id = $1"
-    )
-    .bind(player_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?;
+    // Where the player stands now. The players row lags by up to 10 s, so
+    // it's only the fallback.
+    let (player_x, player_y): (f64, f64) = match live_position(&state.game, player_id).await {
+        Some(at) => at,
+        None => sqlx::query_as("SELECT position_x, position_y FROM players WHERE id = $1")
+            .bind(player_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| format!("Database error: {}", e))?,
+    };
 
     // Verify station type exists
     let st: crate::models::StationType = sqlx::query_as(
@@ -1276,18 +1279,20 @@ async fn handle_open_station(
     player_id: Uuid,
     station_id: Uuid,
 ) -> Result<(String, String, Uuid), String> {
-    // Get player position
-    let (player_x, player_y): (f64, f64) = sqlx::query_as(
-        "SELECT position_x, position_y FROM players WHERE id = $1"
-    )
-    .bind(player_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?;
+    // Where the player stands now. The players row lags by up to 10 s, so
+    // it's only the fallback.
+    let (player_x, player_y): (f64, f64) = match live_position(&state.game, player_id).await {
+        Some(at) => at,
+        None => sqlx::query_as("SELECT position_x, position_y FROM players WHERE id = $1")
+            .bind(player_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| format!("Database error: {}", e))?,
+    };
 
     // Get station
     let station: crate::models::Station = sqlx::query_as(
-        "SELECT id, station_type, owner_id, position_x, position_y, placed_at
+        "SELECT id, station_type, owner_id, position_x, position_y, plot_id, placed_at
          FROM stations WHERE id = $1"
     )
     .bind(station_id)

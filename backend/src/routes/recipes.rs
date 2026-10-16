@@ -46,7 +46,9 @@ pub async fn list_recipes(
     // Convert recipes to client-facing info
     let recipes: Vec<RecipeInfo> = game.recipes
         .values()
-        .filter(|r| r.category == "hand_crafting")
+        // Hand recipes, and those made at a station (clients sort them by
+        // required_station_type).
+        .filter(|r| r.category == "hand_crafting" || r.required_station_type.is_some())
         .map(|r| r.to_info(&item_names))
         .collect();
 

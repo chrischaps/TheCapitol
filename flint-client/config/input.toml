@@ -58,10 +58,17 @@ bindings = [{ type = "key", code = "KeyI" }]
 kind = "button"
 bindings = [{ type = "key", code = "KeyC" }]
 
-# Craft what the crafting panel is set to, while it's open (P5.5).
+# Craft what the crafting panel is set to, while it's open (P5.5), or what
+# the open station's panel is set to (P6.3).
 [actions.craft]
 kind = "button"
 bindings = [{ type = "key", code = "Enter" }]
+
+# Open the nearest station, walking to it if it's out of reach (P6.3).
+# The same as clicking it, and a key captures can press.
+[actions.station]
+kind = "button"
+bindings = [{ type = "key", code = "KeyO" }]
 
 # The spike's plan hairlines (scripts/spike.rhai), on P now that E orbits.
 [actions.plan]

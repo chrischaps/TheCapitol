@@ -60,6 +60,8 @@ pub const GOLD_DIM: Color32 = rgb(palette::GOLD_DIM);
 pub const CRAFT: Color32 = rgb(0x8b5cf6);
 /// In range of the player.
 pub const IN_RANGE: Color32 = rgb(0xf97316);
+/// Stations: the station panel's accent, the orange of the in-range ring.
+pub const STATION: Color32 = IN_RANGE;
 pub const ERROR: Color32 = rgb(0xdc3545);
 /// The ground of an error box: the error colour at 10%.
 pub const ERROR_WASH: Color32 = rgba(220, 53, 69, 0.1);

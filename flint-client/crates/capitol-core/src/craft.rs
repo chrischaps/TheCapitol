@@ -4,6 +4,13 @@
 //! from the ask to the settled inventory. React's rules
 //! (`CraftingPanel.tsx`), kept out of the engine so they're plain tests.
 //!
+//! **At a station (P6.3)** the same rules hold, with the station's box as
+//! the input box and the station's recipes ([`crate::station::recipes_at`])
+//! in place of the hand ones. [`Crafting::start_at`] sends
+//! `craft_at_station`. The output still lands in the player's own crafting
+//! output box (`crafting.rs` on the server sets `crafting_output` whatever
+//! the bench), so that's the box [`check`] weighs it against.
+//!
 //! - **The recipe.** A recipe picked by hand wins. Otherwise [`detect`]
 //!   finds one the inputs satisfy: an exact match first, then the one that
 //!   uses the most. Only hand recipes ([`hand_recipes`]); the server
@@ -144,6 +151,15 @@ impl Check<'_> {
     /// The `craft` message for it.
     pub fn message(&self) -> ClientMessage {
         ClientMessage::Craft {
+            recipe_id: self.recipe.id.clone(),
+            input_item_ids: self.inputs.iter().map(Uuid::to_string).collect(),
+        }
+    }
+
+    /// The `craft_at_station` message for it, at `station`.
+    pub fn message_at(&self, station: Uuid) -> ClientMessage {
+        ClientMessage::CraftAtStation {
+            station_id: station.to_string(),
             recipe_id: self.recipe.id.clone(),
             input_item_ids: self.inputs.iter().map(Uuid::to_string).collect(),
         }
@@ -323,8 +339,25 @@ impl Crafting {
         state: &GameState,
         now: Instant,
     ) -> Option<ClientMessage> {
+        self.begin(check, state, now).then(|| check.message())
+    }
+
+    /// As [`Crafting::start`], at `station`: `craft_at_station`.
+    pub fn start_at(
+        &mut self,
+        check: &Check,
+        station: Uuid,
+        state: &GameState,
+        now: Instant,
+    ) -> Option<ClientMessage> {
+        self.begin(check, state, now)
+            .then(|| check.message_at(station))
+    }
+
+    /// Takes `check`'s craft as asked, if it can start.
+    fn begin(&mut self, check: &Check, state: &GameState, now: Instant) -> bool {
         if !check.ready() || !self.can_start(state) {
-            return None;
+            return false;
         }
         self.sent = check
             .inputs
@@ -335,7 +368,7 @@ impl Crafting {
             recipe_id: check.recipe.id.clone(),
             since: now,
         };
-        Some(check.message())
+        true
     }
 
     /// Asks to stop the craft under way. `None` when there's none.
@@ -360,9 +393,12 @@ impl Crafting {
             }
         }
         if matches!(self.phase, Phase::Settling { .. })
-            && changes
-                .iter()
-                .any(|c| matches!(c, StateEvent::ContainersUpdated))
+            && changes.iter().any(|c| {
+                matches!(
+                    c,
+                    StateEvent::ContainersUpdated | StateEvent::StationContainerUpdated
+                )
+            })
             && self.sent.iter().any(|&(id, q)| held(state, id) != Some(q))
         {
             self.phase = Phase::Idle;
@@ -389,11 +425,12 @@ impl Crafting {
     }
 }
 
-/// How many of a stack the player holds, in any box.
+/// How many of a stack the player holds, in any box, the open station's too.
 fn held(state: &GameState, item_id: Uuid) -> Option<i32> {
     state
         .containers()
         .values()
+        .chain(state.station_container())
         .find_map(|c| c.find(item_id))
         .map(|i| i.quantity)
 }
@@ -713,6 +750,61 @@ mod tests {
         crafting.observe(&changes, &state, t0);
         assert_eq!(crafting.phase(), &Phase::Idle);
         assert!(crafting.take_notes().is_empty());
+    }
+
+    #[test]
+    fn a_station_craft_takes_from_the_station_box_and_settles_on_it() {
+        use capitol_protocol::rest::StationContainerResponse;
+        const BENCH: Uuid = Uuid::from_u128(30);
+        const BOX: Uuid = Uuid::from_u128(31);
+        let forge = recipe("craft_forge", &[("rope", 4), ("fiber", 6)], "forge_kit");
+        let t0 = Instant::now();
+        let mut state = world(&[]);
+        state.apply_ws(&M::StationOpened {
+            player_id: ME,
+            station_id: BENCH,
+            station_type: "workbench".into(),
+            name: "Workbench".into(),
+            container_id: BOX,
+        });
+        let fill = |state: &mut GameState, rope: i32| {
+            state.apply_rest(&RestResponse::StationContainer(StationContainerResponse {
+                id: BOX,
+                container_type: "station_inventory".into(),
+                slot_count: 16,
+                layout_columns: 4,
+                slots: vec![item(1, 0, "rope", 70, rope), item(2, 1, "fiber", 50, 6)],
+            }))
+        };
+        fill(&mut state, 5);
+        let mut crafting = Crafting::default();
+        let c = check(
+            &forge,
+            state.station_container().unwrap(),
+            state.crafting_output(),
+        );
+        assert!(c.ready());
+        assert_eq!(c.estimate, Some(58), "(4×70 + 6×50) / 10");
+        assert_eq!(
+            crafting.start_at(&c, BENCH, &state, t0),
+            Some(ClientMessage::CraftAtStation {
+                station_id: BENCH.to_string(),
+                recipe_id: "craft_forge".into(),
+                input_item_ids: vec![
+                    Uuid::from_u128(1).to_string(),
+                    Uuid::from_u128(2).to_string()
+                ],
+            })
+        );
+        let changes = state.apply_ws(&started());
+        crafting.observe(&changes, &state, t0);
+        let changes = state.apply_ws(&completed());
+        crafting.observe(&changes, &state, t0);
+        assert!(matches!(crafting.phase(), Phase::Settling { .. }));
+        // The station box is refetched with the rope used up.
+        let changes = fill(&mut state, 1);
+        crafting.observe(&changes, &state, t0);
+        assert_eq!(crafting.phase(), &Phase::Idle);
     }
 
     #[test]

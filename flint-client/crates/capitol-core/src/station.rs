@@ -5,7 +5,8 @@
 //! `interaction_range` away (75 units for every seeded type), measured
 //! from your server position to the station's. React draws its orange
 //! ring on the same test (`GameCanvas.tsx`, `distance <= 75`), and so
-//! does the Flint client. P6.3's open-or-walk belongs here too.
+//! does the Flint client. Opening one, or walking to it first, is
+//! [`visit`] (P6.3).
 //!
 //! **Placing (P6.2).** A right click on a `*_kit` starts [`Placing`]. The
 //! ghost turns green or red on [`check`], which runs the server's own
@@ -29,6 +30,9 @@ use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
 
 use crate::state::{GameState, StateEvent};
+
+pub mod visit;
+pub use visit::{approach, is_storage, recipes_at, Visit};
 
 /// How long a `place_station` may go unanswered. The server answers within
 /// a few database round trips.

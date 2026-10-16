@@ -10,7 +10,7 @@ use capitol_protocol::rest::{
     ContainerResponse, ContainersResponse, MoveItemRequest, MoveItemResponse,
 };
 
-use crate::engine::container_access::check_container_access;
+use crate::engine::container_access::{check_container_access, live_position};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::{quality_to_grade, Container, ContainerType, Item, ItemType, SlotItem};
@@ -174,10 +174,12 @@ pub async fn move_item(
 
     // Both ends must be usable: the player's own containers, or a station's
     // within reach (B4). The source matters too, since a swap fills it.
+    let at = live_position(&state.game, player_id).await;
     if let Some(source_container_id) = source_item.container_id {
-        check_container_access(&state.db, player_id, source_container_id).await?;
+        check_container_access(&state.db, player_id, source_container_id, at).await?;
     }
-    let target_container = check_container_access(&state.db, player_id, req.target_container_id).await?;
+    let target_container =
+        check_container_access(&state.db, player_id, req.target_container_id, at).await?;
 
     // Get container type for slot validation
     let container_type: ContainerType = sqlx::query_as(
