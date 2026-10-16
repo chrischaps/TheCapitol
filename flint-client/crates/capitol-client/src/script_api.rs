@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::labels;
+
 /// State the Rust side writes and scripts read.
 #[derive(Clone, Default)]
 pub struct Shared {
@@ -73,6 +75,9 @@ pub struct Shared {
     /// How the camera rig answers you (P8.4), from the settings, for
     /// `cap_setting`.
     pub camera_feel: Arc<Mutex<crate::settings::CameraFeel>>,
+    /// egui, once its fonts are in, so `cap_name_tags` measures names with
+    /// the fonts the HUD draws them in. `None` until the first `ui`.
+    pub egui: Arc<Mutex<Option<egui::Context>>>,
 }
 
 /// Trading as scripts see it.
@@ -300,6 +305,77 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             })
             .collect()
     });
+    // `cap_name_anchors() -> [x, y, z, x, y, z, ...]`: where each name
+    // hangs (world metres), flat, in `cap_players()` order. For `hud.rhai`
+    // to project, without building a map per player.
+    let players = shared.players.clone();
+    engine.register_fn("cap_name_anchors", move || -> rhai::Array {
+        let Ok(players) = players.lock() else {
+            return rhai::Array::new();
+        };
+        players
+            .iter()
+            .flat_map(|p| p.at)
+            .map(|v| (v as f64).into())
+            .collect()
+    });
+    // `cap_name_tags(screens, width, height) -> [#{ name, x, y, size, a, me }]`:
+    // the names to draw, in order, where `screens[i]` is `world_to_screen`
+    // of anchor i. Each tag's x, y is its top left. See `labels::place`.
+    // The script projects only because Rust can't reach the frame's
+    // camera (#97); with that, this would take no arguments.
+    let players = shared.players.clone();
+    let egui = shared.egui.clone();
+    engine.register_fn(
+        "cap_name_tags",
+        move |screens: rhai::Array, width: f64, height: f64| -> rhai::Array {
+            let Ok(players) = players.lock() else {
+                return rhai::Array::new();
+            };
+            let screens: Vec<labels::Screen> = screens
+                .iter()
+                .map(|s| {
+                    let m = s.read_lock::<rhai::Map>()?;
+                    let num = |k: &str| m.get(k).and_then(|v| v.as_float().ok());
+                    if !m.get("visible")?.as_bool().ok()? {
+                        return None;
+                    }
+                    Some([num("x")? as f32, num("y")? as f32, num("depth")? as f32])
+                })
+                .collect();
+            if screens.len() != players.len() {
+                return rhai::Array::new(); // a stale list; next frame's will match
+            }
+            let egui = egui.lock().ok().and_then(|e| e.clone());
+            let measure = |text: &str, size: f32| match &egui {
+                Some(ctx) => ctx.fonts(|f| {
+                    let size = f
+                        .layout_no_wrap(
+                            text.to_owned(),
+                            egui::FontId::proportional(size),
+                            egui::Color32::WHITE,
+                        )
+                        .size();
+                    (size.x, size.y)
+                }),
+                // Flint's own fallback, before the fonts are in.
+                None => (text.chars().count() as f32 * size * 0.6, size),
+            };
+            labels::place(&players, &screens, [width as f32, height as f32], measure)
+                .into_iter()
+                .map(|t| {
+                    let mut m = rhai::Map::new();
+                    m.insert("name".into(), t.name.into());
+                    m.insert("x".into(), (t.x as f64).into());
+                    m.insert("y".into(), (t.y as f64).into());
+                    m.insert("size".into(), (t.size as f64).into());
+                    m.insert("a".into(), (t.alpha as f64).into());
+                    m.insert("me".into(), t.me.into());
+                    m.into()
+                })
+                .collect()
+        },
+    );
     // `cap_player_at(x, z) -> #{ id, name, x, z, feet_y } or ()`: the other
     // player whose feet are nearest the ground point (x, z), within
     // PLAYER_PICK metres, and where they stand. Never you.

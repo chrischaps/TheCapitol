@@ -596,6 +596,10 @@ impl PlayerExtension for CapitolExtension {
         if !ui::theme::install(ctx) {
             return; // one frame, while the fonts go in
         }
+        if let Ok(mut egui) = self.shared.egui.lock() {
+            // For measuring names (`cap_name_tags`), now the fonts are in.
+            egui.get_or_insert_with(|| ctx.clone());
+        }
         let at_login = self.at_login();
         let mut action = None;
         // Where pickups fly to (P8.2): the header's Inventory button, or the

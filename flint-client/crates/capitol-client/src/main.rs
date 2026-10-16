@@ -16,6 +16,7 @@ mod coords;
 mod entities;
 mod extension;
 mod juice_sample;
+mod labels;
 mod nodes;
 mod script_api;
 mod session;

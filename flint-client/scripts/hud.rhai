@@ -2,15 +2,14 @@
 // screen. So far that's the players' names (P4.2), placed through
 // world_to_screen, and the zone banner (P4.5).
 //
-// cap_players() lists every avatar Rust placed this frame (entities.rs):
-// its name, where the name hangs over its head (world metres), how far it
-// has faded in as the player joined or left, and whether it's you.
-//
-// Names fade with distance, and shrink a little, so a crowd down the
-// street doesn't read as a wall of text. Nearer names win: one that would
-// overlap a name already drawn is left out. Yours always comes first, in
-// gold, and carries further than anyone else's, so you can find yourself
-// from high up.
+// The script projects where each name hangs (cap_name_anchors) with the
+// camera this frame renders with, and Rust's labels.rs decides which names
+// to draw, where, how big and how faint (cap_name_tags). Names fade and
+// shrink with distance; nearer names win a clash, and a crowd shows only
+// its nearest two dozen. Yours always comes first, in gold, and carries
+// furthest. The placement moved to Rust in P8.5: in Rhai its overlap test
+// was quadratic, and a crowd of 50 cost about 2 ms a frame. The projection
+// stays here only because Rust can't reach this frame's camera (#97).
 
 // The zone banner names the zone you've just walked into, in its colour,
 // as an inscription: a small caption, the name in Cinzel capitals rising
@@ -20,17 +19,7 @@
 
 // ── Tuning ───────────────────────────────────────────────────────────────
 
-// Names are whole out to `near` metres from the camera and gone by `far`.
-fn near() { 70.0 }
-fn far() { 170.0 }
-// Yours carries further.
-fn my_near() { 260.0 }
-fn my_far() { 420.0 }
-// Text size in points, close up and at the fade's end.
-fn size_near() { 15.0 }
-fn size_far() { 11.0 }
-// Room kept between two names, in points.
-fn gap() { 3.0 }
+// The names' fades, sizes and spacing are in labels.rs.
 
 // The banner: seconds to fade in, when it starts to fade out, and gone.
 fn banner_in() { 0.8 }
@@ -99,47 +88,15 @@ fn zone_banner() {
 // ── The names ────────────────────────────────────────────────────────────
 
 fn names() {
-    let players = cap_players();
-    if players.is_empty() { return; }
-
-    // Each name on the screen, with what it's drawn at.
-    let tags = [];
-    for p in players {
-        let s = world_to_screen(p.x, p.y, p.z);
-        if !s.visible { continue; }
-        let d = s.depth;
-        let fade = if p.me {
-            1.0 - smooth((d - my_near()) / (my_far() - my_near()))
-        } else {
-            1.0 - smooth((d - near()) / (far() - near()))
-        };
-        let a = fade * p.alpha;
-        if a < 0.02 { continue; }
-        let size = lerp(size_near(), size_far(), smooth((d - 20.0) / (far() - 20.0)));
-        let m = measure_text(p.name, size);
-        tags.push(#{
-            name: p.name, me: p.me, a: a, size: size, depth: d,
-            x: s.x - m.width / 2.0, y: s.y - m.height, w: m.width, h: m.height,
-        });
+    let at = cap_name_anchors();
+    if at.is_empty() { return; }
+    let screens = [];
+    let i = 0;
+    while i < at.len() {
+        screens.push(world_to_screen(at[i], at[i + 1], at[i + 2]));
+        i += 3;
     }
-    // You first, then nearest first: those are the names that win a clash.
-    tags.sort(|a, b| {
-        if a.me != b.me { return if a.me { -1 } else { 1 }; }
-        if a.depth < b.depth { -1 } else if a.depth > b.depth { 1 } else { 0 }
-    });
-
-    let drawn = [];
-    for t in tags {
-        let clear = true;
-        for o in drawn {
-            if t.x < o.x + o.w + gap() && o.x < t.x + t.w + gap()
-                && t.y < o.y + o.h + gap() && o.y < t.y + t.h + gap() {
-                clear = false;
-                break;
-            }
-        }
-        if !clear { continue; }
-        drawn.push(t);
+    for t in cap_name_tags(screens, screen_width(), screen_height()) {
         draw_text(t.x + 1.0, t.y + 1.0, t.name, t.size, 0.0, 0.0, 0.0, 0.65 * t.a);
         if t.me {
             // The Capitol's gold, #c9a227.
