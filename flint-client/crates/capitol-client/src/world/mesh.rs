@@ -9,10 +9,6 @@ use flint_render::Vertex;
 /// Straight up, for everything that lies flat on the ground.
 pub const UP: [f32; 3] = [0.0, 1.0, 0.0];
 
-/// Straight down: the normal every glowing face is shaded with (see
-/// [`MeshBuf::glowing`]).
-pub const GLOW: [f32; 3] = [0.0, -1.0, 0.0];
-
 #[derive(Default)]
 pub struct MeshBuf {
     pub vertices: Vec<Vertex>,
@@ -83,24 +79,6 @@ impl MeshBuf {
             .extend(other.indices.into_iter().map(|i| i + base));
     }
 
-    /// This mesh as light. Flint's material has no emissive term, so a
-    /// face glows by being shaded with a normal that points straight down
-    /// ([`GLOW`]), whichever way it faces (its winding still decides that).
-    /// Every light in the scene shines from above the horizon, so such a
-    /// face takes no direct light and no specular. It takes only the
-    /// hemisphere's ground ambient, which is the same from every side.
-    /// Its colour times `palette::AMBIENT_GROUND` is the radiance it gives;
-    /// `palette::glow` picks colours that way.
-    ///
-    /// A workaround until Flint's material can emit light (H7, issue #63),
-    /// which replaces it.
-    pub fn glowing(mut self) -> Self {
-        for v in &mut self.vertices {
-            v.normal = GLOW;
-        }
-        self
-    }
-
     /// A flat ring at height `y` from `r_in` to `r_out` server units,
     /// skipping each `(centre_deg, half_width_deg)` gap. `r_in = 0` gives a
     /// disc. Triangles wind counter-clockwise seen from above (+Y).
@@ -139,8 +117,15 @@ impl MeshBuf {
         );
     }
 
-    /// Uploads under the material's name, with that material.
+    /// Uploads under the material's name, with that material. Every mesh
+    /// can carry light: per-vertex emission is turned on, so a vertex with
+    /// alpha 0 (`palette::glow`) gives off its colour, and the rest (alpha
+    /// 1) are lit as usual.
     pub fn upload_material(&self, gpu: &mut ExtensionGpu, material: ImportedMaterial) {
+        let material = ImportedMaterial {
+            vertex_emission: true,
+            ..material
+        };
         let name = material.name.clone();
         if self.indices.is_empty() {
             gpu.remove_mesh(&name);
@@ -148,6 +133,12 @@ impl MeshBuf {
         }
         gpu.upload_mesh(&name, &self.vertices, &self.indices, material);
     }
+}
+
+/// Whether `v` is light (`palette::glow`) rather than a lit surface.
+#[cfg(test)]
+pub fn is_light(v: &Vertex) -> bool {
+    v.color[3] < 1.0
 }
 
 /// Whether the triangle `a b c` is front-facing (counter-clockwise) when

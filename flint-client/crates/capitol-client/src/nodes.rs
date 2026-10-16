@@ -420,9 +420,6 @@ fn tuft(lit: bool) -> MeshBuf {
         let top = [0.06 * dx + lean * dx, 1.15, 0.06 * dz + lean * dz];
         head(&mut tips, top, [dx, dz], if lit { tip } else { seed });
     }
-    if lit {
-        tips = tips.glowing();
-    }
     m.append(tips);
     m
 }
@@ -646,11 +643,7 @@ mod tests {
 
     #[test]
     fn only_the_lit_tuft_glows() {
-        let glows = |m: &MeshBuf| {
-            m.vertices
-                .iter()
-                .any(|v| v.normal == crate::world::mesh::GLOW)
-        };
+        let glows = |m: &MeshBuf| m.vertices.iter().any(crate::world::mesh::is_light);
         assert!(!glows(&tuft(false)));
         assert!(glows(&tuft(true)));
         assert!(!glows(&stubble()));

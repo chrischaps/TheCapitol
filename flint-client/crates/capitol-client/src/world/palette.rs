@@ -15,18 +15,15 @@ pub const GOLD_DIM: u32 = 0x8a7019;
 /// the canal beds.
 pub const WATER: u32 = 0x1e64a0;
 
-/// The scene's ground ambient (`[environment] ambient_ground`), linear.
-/// A glowing face (`MeshBuf::glowing`) is lit by this alone, so [`glow`]
-/// divides by it. A test holds it to the scene file.
-pub const AMBIENT_GROUND: [f32; 3] = [0.05, 0.05, 0.07];
-
-/// The vertex colour that makes a glowing face give off `colour` (linear)
-/// at `radiance`: 1 is about as bright as a sunlit wall, and well over 1
-/// is a light source (bloom picks it up once P3.8 turns it on).
+/// The vertex colour of a face that gives off `colour` (linear) as light
+/// at `radiance`: 1 is about as bright as a sunlit wall, and over the
+/// scene's bloom threshold (2.5) it blooms. Alpha 0 marks it as light
+/// rather than surface (`ImportedMaterial::vertex_emission`, Flint ADR
+/// 0076, which `MeshBuf::upload_material` turns on), so it glows the same
+/// from every side and under any light.
 pub fn glow(colour: [f32; 4], radiance: f32) -> [f32; 4] {
-    let [r, g, b, a] = colour;
-    let [ar, ag, ab] = AMBIENT_GROUND;
-    [r * radiance / ar, g * radiance / ag, b * radiance / ab, a]
+    let [r, g, b, _] = colour;
+    [r * radiance, g * radiance, b * radiance, 0.0]
 }
 
 /// A road's colour in the 2D clients: the greater the road, the lighter.
@@ -93,32 +90,9 @@ mod tests {
         assert!((hex(0x808080)[0] - 0.2158).abs() < 1e-3);
     }
 
-    /// Glowing faces are calibrated against the scene's ground ambient. If
-    /// the scene's ambient changes, change `AMBIENT_GROUND` with it, or
-    /// every light in the world dims or flares.
     #[test]
-    fn glow_is_calibrated_to_the_scene_ambient() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../scenes/capitol.scene.toml");
-        let scene = std::fs::read_to_string(path).expect("scene");
-        let mut seen = 0;
-        for line in scene.lines() {
-            let Some(list) = line.trim().strip_prefix("ambient_ground = [") else {
-                continue;
-            };
-            let values: Vec<f32> = list
-                .trim_end_matches(']')
-                .split(',')
-                .map(|v| v.trim().parse().expect("a number"))
-                .collect();
-            assert_eq!(values[..3], AMBIENT_GROUND, "{line}");
-            seen += 1;
-        }
-        assert!(seen > 0, "the scene sets no ambient_ground");
-        let lit = glow([0.5, 0.25, 1.0, 1.0], 2.0);
-        for i in 0..3 {
-            assert!((lit[i] * AMBIENT_GROUND[i] - [1.0, 0.5, 2.0][i]).abs() < 1e-5);
-        }
+    fn glow_is_light_at_its_radiance() {
+        assert_eq!(glow([0.5, 0.25, 1.0, 1.0], 2.0), [1.0, 0.5, 2.0, 0.0]);
     }
 
     #[test]

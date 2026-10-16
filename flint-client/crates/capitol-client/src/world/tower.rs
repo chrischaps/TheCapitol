@@ -23,8 +23,8 @@
 //! bridge, so a new terrain (P3.10) rebuilds it to fit.
 //!
 //! Three meshes, so three draws: `capitol` (stone), `capitol_glass` and
-//! `capitol_gold` (the gold metal and all the light, which glows the way
-//! `MeshBuf::glowing` describes).
+//! `capitol_gold` (the gold metal and all the light, whose vertices give off
+//! their colour: `palette::glow`).
 
 use crate::coords::{layer, S};
 use crate::world::mesh::{MeshBuf, UP};
@@ -399,7 +399,7 @@ fn merlon_arc(m: &mut MeshBuf, r1: f32, a0: f64, a1: f64, colour: [f32; 4]) {
     }
 }
 
-/// The light colours, as vertex colours for `MeshBuf::glowing`.
+/// The light colours, as vertex colours that glow (`palette::glow`).
 fn warm(radiance: f32) -> [f32; 4] {
     glow(hex(WARM_LIGHT), radiance)
 }
@@ -865,7 +865,7 @@ pub fn upload(gpu: &mut ExtensionGpu, rings: &[WaterRing]) {
         },
     );
     let mut gold = t.gold;
-    gold.append(t.light.glowing());
+    gold.append(t.light);
     gold.upload_material(
         gpu,
         ImportedMaterial {
@@ -990,11 +990,7 @@ mod tests {
             top(&t.light) - G
         );
         assert!(CROWN_Y > top(&t.light));
-        let lit = t.light.glowing();
-        assert!(lit
-            .vertices
-            .iter()
-            .all(|v| v.normal == crate::world::mesh::GLOW));
+        assert!(t.light.vertices.iter().all(crate::world::mesh::is_light));
     }
 
     #[test]

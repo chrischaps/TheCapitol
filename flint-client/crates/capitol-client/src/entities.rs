@@ -350,12 +350,12 @@ fn figure(livery: &Livery) -> MeshBuf {
         [0.075, 0.095, 0.075],
         glow(hex(LANTERN), 1.1),
     );
-    m.append(light.glowing());
+    m.append(light);
 
     if livery.ring {
         let mut ring = MeshBuf::default();
         annulus(&mut ring, 0.62, 0.72, 0.03, glow(hex(0xc9a227), 1.4));
-        m.append(ring.glowing());
+        m.append(ring);
     }
     m
 }
@@ -530,10 +530,6 @@ mod tests {
             assert!(!m.indices.is_empty());
             for t in m.indices.chunks_exact(3) {
                 let v = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]);
-                // Glowing faces carry the glow normal, not their own.
-                if v[0].normal == crate::world::mesh::GLOW {
-                    continue;
-                }
                 assert!(
                     facing(v[0].position, v[1].position, v[2].position, v[0].normal),
                     "{:?}",

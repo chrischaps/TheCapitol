@@ -544,7 +544,7 @@ pub fn owned<'a>(lots: impl IntoIterator<Item = &'a Lot>) -> MeshBuf {
         rim.push(rim[0]);
         lit.fan(lift(centroid(&core), pad), &rim, UP, lot.colour);
     }
-    lit.append(light.glowing());
+    lit.append(light);
     lit
 }
 
@@ -856,7 +856,7 @@ mod tests {
 
     #[test]
     fn an_owned_lot_is_edged_and_washed_in_gold_over_its_own_ground() {
-        use crate::world::mesh::GLOW;
+        use crate::world::mesh::is_light;
         let (_, plots) = fixture();
         let lot = plots
             .lots
@@ -889,7 +889,7 @@ mod tests {
                 assert!(facing(a.position, b.position, c.position, UP));
             }
         }
-        let glows: Vec<_> = m.vertices.iter().filter(|v| v.normal == GLOW).collect();
+        let glows: Vec<_> = m.vertices.iter().filter(|v| is_light(v)).collect();
         assert!(!glows.is_empty());
         assert!(
             glows.iter().all(|v| v.color[0] > v.color[2]),

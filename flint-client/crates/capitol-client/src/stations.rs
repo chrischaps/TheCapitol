@@ -12,7 +12,7 @@
 //!
 //! The forge's fire is real: the scene's `particles/forge.particles.toml`
 //! (flames in the mouth, embers and a little smoke out of the chimney) on
-//! its entity, and its mouth glows (`MeshBuf::glowing`) bright enough to
+//! its entity, and its mouth glows (`palette::glow`) bright enough to
 //! bloom.
 //!
 //! A station that was placed just now (`station_placed`) drops into place
@@ -766,7 +766,7 @@ fn forge() -> MeshBuf {
         UP,
         glow(mix(hex(FIRE), hex(FLAME), 0.3), 2.8),
     );
-    m.append(lit.glowing());
+    m.append(lit);
 
     // An anvil to the right: a foot, a waist, a face and a horn.
     let iron = hex(IRON);
@@ -935,7 +935,7 @@ fn normalise([x, y, z]: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::mesh::GLOW;
+    use crate::world::mesh::is_light;
 
     fn bounds(m: &MeshBuf) -> ([f32; 3], [f32; 3]) {
         let mut lo = [f32::MAX; 3];
@@ -977,7 +977,7 @@ mod tests {
 
     #[test]
     fn only_the_forge_glows() {
-        let glows = |m: &MeshBuf| m.vertices.iter().any(|v| v.normal == GLOW);
+        let glows = |m: &MeshBuf| m.vertices.iter().any(is_light);
         assert!(glows(&forge()));
         assert!(!glows(&workbench()));
         assert!(!glows(&chest()));
@@ -989,11 +989,10 @@ mod tests {
         let brightest = forge()
             .vertices
             .iter()
-            .filter(|v| v.normal == GLOW)
+            .filter(|v| is_light(v))
             .map(|v| {
                 let [r, g, b, _] = v.color;
-                let [ar, ag, ab] = crate::world::palette::AMBIENT_GROUND;
-                (r * ar).max(g * ag).max(b * ab)
+                r.max(g).max(b)
             })
             .fold(0.0, f32::max);
         assert!(brightest > 2.5, "{brightest}");
@@ -1004,9 +1003,6 @@ mod tests {
         for m in [workbench(), forge(), chest(), generic()] {
             for t in m.indices.chunks_exact(3) {
                 let v = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]);
-                if v[0].normal == GLOW {
-                    continue;
-                }
                 assert!(crate::world::mesh::facing(
                     v[0].position,
                     v[1].position,

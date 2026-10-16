@@ -15,8 +15,8 @@
 //! shadow. Over the top of the zoom the sun and fill fade out, the sky's
 //! light from above rises to `FLAT_SKY`, and the ambient occlusion goes, so
 //! each surface shows its own colour, the §4.7 tokens. The ground's ambient
-//! is left alone, because the tower's light is calibrated to it
-//! (`palette::AMBIENT_GROUND`), so the crown still glows gold at the centre.
+//! is left alone. The lights (`palette::glow`) give off their own light,
+//! whatever the ambient, so the crown still glows gold at the centre.
 //! The light is written as the scene's own components (each light's
 //! `intensity`, the sky's `ambient_sky`), which the renderer reads every
 //! frame.
