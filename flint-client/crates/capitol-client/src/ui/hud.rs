@@ -5,7 +5,10 @@
 //! - **The header** is React's (`pages/Game.tsx`): the game's name on the
 //!   left; on the right the zone, the strand balance, who's signed in with
 //!   a connection light, and Sign out. The balance comes from the store,
-//!   which the poller keeps fresh (`Fetch::POLLED`).
+//!   which the poller keeps fresh (`Fetch::POLLED`). When it changes, the
+//!   figure counts to the new one ([`StrandTicker`], P7.1): a gain throws
+//!   bright gold motes up out of the chip, a loss lets dim ones fall, and
+//!   the difference shows under it and fades.
 //! - **The overlay** dims the world while a dropped connection is retried,
 //!   and says which attempt it is, why the last one ended, and counts down
 //!   to the next. A drop shorter than [`GRACE`] shows nothing, so a blip
@@ -16,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use capitol_core::net::ConnectionState;
 use capitol_core::protocol::rules::Zone;
-use egui::{Align, Align2, Id, Layout, Margin, Order, RichText, Stroke};
+use egui::{Align, Align2, Color32, Id, Layout, Margin, Order, RichText, Stroke};
 
 use super::theme::{self, size};
 use crate::session::Outage;
@@ -53,7 +56,13 @@ pub struct HeaderClicks {
 
 /// The header strip. Draw it before any other panel or window, so theirs
 /// are placed below it.
-pub fn header(ctx: &egui::Context, view: &HeaderView) -> HeaderClicks {
+pub fn header(
+    ctx: &egui::Context,
+    view: &HeaderView,
+    ticker: &mut StrandTicker,
+    now: Instant,
+) -> HeaderClicks {
+    ticker.update(view.strands, now);
     let mut clicks = HeaderClicks::default();
     let shown = egui::TopBottomPanel::top("capitol_header")
         .frame(
@@ -81,7 +90,7 @@ pub fn header(ctx: &egui::Context, view: &HeaderView) -> HeaderClicks {
                     };
                     theme::status_dot(ui, colour, meaning);
                     ui.add_space(4.0);
-                    strands(ui, view.strands);
+                    strands(ui, ticker, now);
                     if let Some(zone) = view.zone {
                         zone_chip(ui, zone);
                     }
@@ -129,26 +138,236 @@ fn zone_chip(ui: &mut egui::Ui, zone: Zone) {
 }
 
 /// The strand balance, gold on a gold wash. A dash until it's known.
-fn strands(ui: &mut egui::Ui, balance: Option<i64>) {
-    theme::chip(theme::GOLD_DIM, theme::GOLD_WASH)
+fn strands(ui: &mut egui::Ui, ticker: &StrandTicker, now: Instant) {
+    let tick = ticker.tick(now);
+    let glow = tick.as_ref().map_or(0.0, |t| t.glow);
+    let shown = theme::chip(lerp(theme::GOLD_DIM, theme::GOLD, glow), theme::GOLD_WASH)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 5.0;
-                let amount = balance.map_or_else(|| "—".to_owned(), grouped);
-                ui.label(
-                    RichText::new(amount)
-                        .font(theme::strong(size::BODY))
-                        .color(theme::GOLD),
+                let font = theme::strong(size::BODY);
+                let amount = ticker.shown(now).map_or_else(|| "—".to_owned(), grouped);
+                // The chip eases to the new figure's width, rather than
+                // jumping, so the chips beside it slide instead of lurch.
+                let settled = ticker
+                    .target()
+                    .map_or(0.0, |to| text_width(ui, &grouped(to), &font));
+                let width = ui
+                    .ctx()
+                    .animate_value_with_time(Id::new("capitol_strand_width"), settled, COUNT)
+                    .max(text_width(ui, &amount, &font));
+                ui.allocate_ui_with_layout(
+                    egui::vec2(width, ui.spacing().interact_size.y),
+                    Layout::right_to_left(Align::Center),
+                    |ui| {
+                        ui.set_min_width(width);
+                        ui.label(RichText::new(amount).font(font).color(theme::GOLD));
+                    },
                 );
                 ui.label(
                     RichText::new("S")
                         .font(theme::display(size::LARGE))
-                        .color(theme::GOLD),
+                        .color(lerp(theme::GOLD, theme::GOLD_LIGHT, glow)),
                 );
             });
         })
         .response
         .on_hover_text("Strands");
+    if let Some(tick) = tick {
+        sparkle(ui.ctx(), shown.rect, &tick);
+        ui.ctx().request_repaint();
+    }
+}
+
+fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
+    ui.fonts(|f| f.layout_no_wrap(text.to_owned(), font.clone(), theme::GOLD))
+        .size()
+        .x
+}
+
+fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgba_unmultiplied(
+        mix(a.r(), b.r()),
+        mix(a.g(), b.g()),
+        mix(a.b(), b.b()),
+        mix(a.a(), b.a()),
+    )
+}
+
+/// The motes and the difference, in front of the strip.
+fn sparkle(ctx: &egui::Context, chip: egui::Rect, tick: &Tick) {
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        Order::Foreground,
+        Id::new("capitol_strand_sparkle"),
+    ));
+    let gain = tick.to > tick.from;
+    let colour = if gain {
+        theme::GOLD_LIGHT
+    } else {
+        theme::GOLD_DIM
+    };
+    // A gain flies up off the chip's top edge, a loss drops off its bottom,
+    // so neither crosses the figure.
+    let from = if gain {
+        chip.center_top()
+    } else {
+        chip.center_bottom()
+    };
+    for mote in &tick.motes {
+        let at = from + mote.offset;
+        painter.circle_filled(at, mote.radius, colour.gamma_multiply(mote.alpha));
+        // The bigger ones glint, four-pointed.
+        if mote.radius > 1.6 {
+            let arm = mote.radius * 2.6;
+            let stroke = Stroke::new(0.8, colour.gamma_multiply(mote.alpha * 0.7));
+            painter.hline(at.x - arm..=at.x + arm, at.y, stroke);
+            painter.vline(at.x, at.y - arm..=at.y + arm, stroke);
+        }
+    }
+    if tick.label_alpha > 0.0 {
+        let diff = tick.to - tick.from;
+        let (text, ink) = if gain {
+            (format!("+{}", grouped(diff)), theme::GOLD_LIGHT)
+        } else {
+            (format!("\u{2212}{}", grouped(-diff)), theme::SHORT)
+        };
+        painter.text(
+            egui::pos2(chip.center().x, chip.bottom() + 3.0 + tick.label_drift),
+            Align2::CENTER_TOP,
+            text,
+            theme::strong(size::SMALL),
+            ink.gamma_multiply(tick.label_alpha),
+        );
+    }
+}
+
+/// How long the figure takes to count to a new balance, in seconds.
+const COUNT: f32 = 0.9;
+/// How long the motes and the difference last, in seconds.
+const SPARKLE: f32 = 1.4;
+/// Motes per change.
+const MOTES: u32 = 9;
+
+/// The balance the header shows, counting from the last one to the newest
+/// (P7.1). The first balance after sign-in shows as it is, because
+/// arriving isn't a change. No balance (signed out) starts it over.
+#[derive(Default)]
+pub struct StrandTicker {
+    /// The balance it's counting to.
+    to: Option<i64>,
+    /// Where the count started, and when. No `since`: nothing is moving.
+    from: i64,
+    since: Option<Instant>,
+    /// Changes so far, so each scatters its motes differently.
+    changes: u32,
+}
+
+/// One frame of a change under way.
+pub struct Tick {
+    pub from: i64,
+    pub to: i64,
+    /// 1 at the change, fading to 0: the chip's edge and its S brighten.
+    pub glow: f32,
+    pub motes: Vec<Mote>,
+    pub label_alpha: f32,
+    /// Points down from under the chip: a gain's difference lifts toward
+    /// the balance, a loss's sinks away from it.
+    pub label_drift: f32,
+}
+
+/// A spark, placed from the chip's centre.
+pub struct Mote {
+    pub offset: egui::Vec2,
+    pub radius: f32,
+    pub alpha: f32,
+}
+
+impl StrandTicker {
+    /// Takes the store's balance. A change counts from wherever the figure
+    /// stands now, so a second change mid-count doesn't jump.
+    pub fn update(&mut self, balance: Option<i64>, now: Instant) {
+        match (self.to, balance) {
+            (_, None) => *self = Self::default(),
+            (None, Some(b)) => {
+                self.to = Some(b);
+                self.from = b;
+                self.since = None;
+            }
+            (Some(to), Some(b)) if to != b => {
+                self.from = self.shown(now).unwrap_or(to);
+                self.to = Some(b);
+                self.since = Some(now);
+                self.changes = self.changes.wrapping_add(1);
+            }
+            _ => {}
+        }
+    }
+
+    /// The balance it's showing or counting to.
+    pub fn target(&self) -> Option<i64> {
+        self.to
+    }
+
+    /// The figure to draw now.
+    pub fn shown(&self, now: Instant) -> Option<i64> {
+        let to = self.to?;
+        let Some(since) = self.since else {
+            return Some(to);
+        };
+        let t = (now.saturating_duration_since(since).as_secs_f32() / COUNT).min(1.0);
+        let eased = 1.0 - (1.0 - t as f64).powi(3);
+        Some(self.from + ((to - self.from) as f64 * eased).round() as i64)
+    }
+
+    /// The change under way, if one is.
+    pub fn tick(&self, now: Instant) -> Option<Tick> {
+        let (to, since) = (self.to?, self.since?);
+        let age = now.saturating_duration_since(since).as_secs_f32();
+        if age >= SPARKLE || to == self.from {
+            return None;
+        }
+        let life = age / SPARKLE;
+        let gain = to > self.from;
+        let motes = (0..MOTES)
+            .map(|i| {
+                // A fixed scatter per change, not a random one, so captures repeat.
+                let h = hash(self.changes, i);
+                let byte = |shift: u32| ((h >> shift) & 0xff) as f32 / 255.0;
+                // Alternate sides, clear of the middle, where the difference shows.
+                let side = if i % 2 == 0 { -1.0 } else { 1.0 };
+                let spread = side * (0.45 + byte(0) * 0.55);
+                let speed = 0.6 + byte(8) * 0.6;
+                let delay = byte(16) * 0.25;
+                let t = ((life - delay) / (1.0 - delay)).clamp(0.0, 1.0);
+                let travel = 22.0 * speed * (1.0 - (1.0 - t).powi(2));
+                let dy = if gain { -travel * 0.55 } else { travel * 0.7 };
+                Mote {
+                    offset: egui::vec2(spread * (22.0 + 10.0 * t), dy),
+                    radius: 1.0 + byte(24) * 1.4,
+                    alpha: if t <= 0.0 { 0.0 } else { (1.0 - t).powf(1.5) },
+                }
+            })
+            .collect();
+        Some(Tick {
+            from: self.from,
+            to,
+            glow: (1.0 - age / 0.8).max(0.0).powi(2),
+            motes,
+            label_alpha: (1.0 - life).powf(0.8) * (age / 0.12).min(1.0),
+            label_drift: if gain { -6.0 * life } else { 6.0 * life },
+        })
+    }
+}
+
+fn hash(a: u32, b: u32) -> u32 {
+    let mut x = a.wrapping_mul(0x9e37_79b9) ^ b.wrapping_mul(0x85eb_ca6b);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^ (x >> 16)
 }
 
 /// A whole number with thousands separators, as React's `toLocaleString`.
@@ -291,6 +510,58 @@ mod tests {
         assert_eq!(grouped(1000), "1,000");
         assert_eq!(grouped(1234567), "1,234,567");
         assert_eq!(grouped(-45000), "-45,000");
+    }
+
+    #[test]
+    fn the_first_balance_shows_as_it_is() {
+        let now = Instant::now();
+        let mut t = StrandTicker::default();
+        assert_eq!(t.shown(now), None);
+        t.update(Some(500), now);
+        assert_eq!(t.shown(now), Some(500));
+        assert!(t.tick(now).is_none());
+    }
+
+    #[test]
+    fn a_change_counts_to_the_new_balance() {
+        let start = Instant::now();
+        let mut t = StrandTicker::default();
+        t.update(Some(100), start);
+        t.update(Some(200), start);
+        assert_eq!(t.shown(start), Some(100));
+        let mid = t
+            .shown(start + Duration::from_secs_f32(COUNT / 2.0))
+            .unwrap();
+        assert!(mid > 150 && mid < 200, "eases out: {mid}");
+        assert_eq!(t.shown(start + Duration::from_secs_f32(COUNT)), Some(200));
+        assert!(t.tick(start + Duration::from_millis(100)).is_some());
+        assert!(t.tick(start + Duration::from_secs_f32(SPARKLE)).is_none());
+    }
+
+    #[test]
+    fn a_second_change_counts_on_from_where_the_figure_stands() {
+        let start = Instant::now();
+        let mut t = StrandTicker::default();
+        t.update(Some(1000), start);
+        t.update(Some(0), start);
+        let later = start + Duration::from_secs_f32(COUNT / 2.0);
+        let at = t.shown(later).unwrap();
+        t.update(Some(400), later);
+        assert_eq!(t.shown(later), Some(at));
+        assert_eq!(t.tick(later).unwrap().from, at);
+    }
+
+    #[test]
+    fn signing_out_starts_over() {
+        let now = Instant::now();
+        let mut t = StrandTicker::default();
+        t.update(Some(100), now);
+        t.update(None, now);
+        t.update(Some(9000), now);
+        assert!(
+            t.tick(now).is_none(),
+            "another account's balance isn't a change"
+        );
     }
 
     #[test]

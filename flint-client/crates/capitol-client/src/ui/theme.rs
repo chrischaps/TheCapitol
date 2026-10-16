@@ -128,6 +128,8 @@ pub const STRIP: Color32 = rgba(15, 15, 25, 0.88);
 pub const CHIP: Color32 = rgba(26, 26, 36, 0.9);
 /// The strand balance's ground: gold at 10% (`.currency-display`).
 pub const GOLD_WASH: Color32 = rgba(201, 162, 39, 0.1);
+/// Gold catching the light: a gain to the balance, and its sparks (P7.1).
+pub const GOLD_LIGHT: Color32 = rgb(0xf2d675);
 /// The glass under a hint: a panel at half strength.
 pub const HINT: Color32 = rgba(15, 15, 25, 0.55);
 /// What dims the world while the connection is down.

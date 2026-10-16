@@ -20,7 +20,7 @@ use crate::session::Session;
 use crate::stations::{GhostView, Stations};
 use crate::terrain::TerrainSource;
 use crate::ui::crafting::Action as CraftAction;
-use crate::ui::hud::{ConnectionOverlay, HeaderView};
+use crate::ui::hud::{ConnectionOverlay, HeaderView, StrandTicker};
 use crate::ui::icons::ItemIcons;
 use crate::ui::inventory::InventoryPanel;
 use crate::ui::login::{FormAction, LoginForm, LoginView};
@@ -87,6 +87,8 @@ pub struct CapitolExtension {
     inventory: InventoryPanel,
     players: Players,
     overlay: ConnectionOverlay,
+    /// The header's balance, counting to each new one (P7.1).
+    strands: StrandTicker,
     nodes: Nodes,
     stations: Stations,
     crafting: ui::crafting::CraftingPanel,
@@ -125,6 +127,7 @@ impl CapitolExtension {
             inventory: InventoryPanel::default(),
             players: Players::default(),
             overlay: ConnectionOverlay::default(),
+            strands: StrandTicker::default(),
             nodes: Nodes::default(),
             stations: Stations::default(),
             crafting: ui::crafting::CraftingPanel::default(),
@@ -432,7 +435,7 @@ impl PlayerExtension for CapitolExtension {
                     inventory_open: self.inventory.open,
                     crafting_open: self.crafting.open,
                 };
-                let clicks = ui::hud::header(ctx, &view);
+                let clicks = ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
                 sign_out |= clicks.sign_out;
                 if clicks.inventory {
                     self.inventory.toggle();
