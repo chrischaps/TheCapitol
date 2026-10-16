@@ -35,7 +35,7 @@ mod trade;
 
 use std::collections::HashMap;
 
-use capitol_protocol::rest::{PlotInfo, RecipeInfo, ResourceNodeInfo, StationInfo};
+use capitol_protocol::rest::{DeedPrice, PlotInfo, RecipeInfo, ResourceNodeInfo, StationInfo};
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::ws::{PlayerPosition, ServerMessage};
 use uuid::Uuid;
@@ -196,9 +196,15 @@ pub enum StateEvent {
     CurrencyChanged {
         balance: i64,
     },
+    /// Your plots changed (`GameState::plots`), or the picked one did.
     PlotsUpdated,
     PlotClaimed {
         plot_id: Uuid,
+    },
+    /// A `/plots/at` answer picked a plot for the plot panel, or found
+    /// none there (`None`), which closes it. See [`GameState::picked_plot`].
+    PlotPicked {
+        plot_id: Option<Uuid>,
     },
     /// Refetch `/terrain`.
     TerrainUpdated,
@@ -231,7 +237,12 @@ pub struct GameState {
 
     recipes: Vec<RecipeInfo>,
     strands: Option<i64>,
+    /// Your own plots: the poller lists them by owner (P6.4).
     plots: Vec<PlotInfo>,
+    /// The plot the plot panel shows, picked with `/plots/at`.
+    picked_plot: Option<PlotInfo>,
+    /// Each zone's deed price, from `/bureaucracy/deed-prices`.
+    deed_prices: Option<Vec<DeedPrice>>,
 
     trade: trade::TradeBook,
 }
@@ -263,6 +274,8 @@ impl GameState {
             recipes: Vec::new(),
             strands: None,
             plots: Vec::new(),
+            picked_plot: None,
+            deed_prices: None,
             trade: trade::TradeBook::default(),
         }
     }
@@ -647,23 +660,41 @@ impl GameState {
             R::Withdraw(w) => self.set_strands(w.new_balance, &mut out),
             R::Plots(response) => {
                 self.plots = response.plots.clone();
+                // A picked plot of yours is fresher in the list.
+                if let Some(picked) = &mut self.picked_plot {
+                    if let Some(p) = self.plots.iter().find(|p| p.id == picked.id) {
+                        *picked = p.clone();
+                    }
+                }
                 out.push(StateEvent::PlotsUpdated);
             }
-            R::Plot(plot) | R::PlotAt(Some(plot)) => {
-                if self.upsert_plot(plot) {
+            R::Plot(plot) => {
+                if self.learn_plot(plot) {
                     out.push(StateEvent::PlotsUpdated);
                 }
             }
+            R::PlotAt(Some(plot)) => {
+                self.learn_plot(plot);
+                self.picked_plot = Some(plot.clone());
+                out.push(StateEvent::PlotPicked {
+                    plot_id: Some(plot.id),
+                });
+            }
+            R::PlotAt(None) => {
+                if self.picked_plot.take().is_some() {
+                    out.push(StateEvent::PlotPicked { plot_id: None });
+                }
+            }
             R::ClaimPlot(claim) => {
-                self.upsert_plot(&claim.plot);
+                self.learn_plot(&claim.plot);
                 out.push(StateEvent::PlotsUpdated);
                 out.push(StateEvent::PlotClaimed {
                     plot_id: claim.plot.id,
                 });
                 self.set_strands(claim.new_balance, &mut out);
             }
-            R::PlotAt(None)
-            | R::Success(_)
+            R::DeedPrices(response) => self.deed_prices = Some(response.prices.clone()),
+            R::Success(_)
             | R::Health(_)
             | R::Terrain(_)
             | R::TerrainUnchanged
@@ -672,8 +703,7 @@ impl GameState {
             | R::Extract(_)
             | R::MoveItem(_)
             | R::PlotPermissions(_)
-            | R::Zones(_)
-            | R::DeedPrices(_) => {}
+            | R::Zones(_) => {}
         }
         out
     }
@@ -831,12 +861,45 @@ impl GameState {
         self.strands
     }
 
+    /// Your own plots, as last listed.
     pub fn plots(&self) -> &[PlotInfo] {
         &self.plots
     }
 
+    /// One of your plots.
     pub fn plot(&self, id: Uuid) -> Option<&PlotInfo> {
         self.plots.iter().find(|p| p.id == id)
+    }
+
+    /// Your plot that the server point `(x, y)` is on, the way the server
+    /// tests a station's placement.
+    pub fn my_plot_at(&self, x: f64, y: f64) -> Option<&PlotInfo> {
+        self.plots.iter().find(|p| p.contains(x, y))
+    }
+
+    /// The plot the plot panel shows, kept fresh by whatever answer about it
+    /// comes in next (a claim, a refetch, the plot list).
+    pub fn picked_plot(&self) -> Option<&PlotInfo> {
+        self.picked_plot.as_ref()
+    }
+
+    /// Closes the plot panel.
+    pub fn unpick_plot(&mut self) {
+        self.picked_plot = None;
+    }
+
+    /// The deed price for `zone_id`. `None` before the prices arrive, and
+    /// for a zone whose plots can't be bought.
+    pub fn deed_price(&self, zone_id: &str) -> Option<&DeedPrice> {
+        self.deed_prices
+            .as_ref()?
+            .iter()
+            .find(|d| d.zone_id == zone_id)
+    }
+
+    /// Every zone's deed price, once `/bureaucracy/deed-prices` has answered.
+    pub fn deed_prices(&self) -> Option<&[DeedPrice]> {
+        self.deed_prices.as_deref()
     }
 
     // -----------------------------------------------------------------------
@@ -983,6 +1046,26 @@ impl GameState {
         if self.strands.replace(balance) != Some(balance) {
             out.push(StateEvent::CurrencyChanged { balance });
         }
+    }
+
+    /// Takes in one plot's latest: the picked plot if it's that one, and
+    /// your list, which it joins if it's yours and leaves if it isn't.
+    /// Returns whether anything changed.
+    fn learn_plot(&mut self, plot: &PlotInfo) -> bool {
+        let mut changed = false;
+        if let Some(picked) = &mut self.picked_plot {
+            if picked.id == plot.id && picked != plot {
+                *picked = plot.clone();
+                changed = true;
+            }
+        }
+        if self.me.is_some() && plot.owner_id == self.me {
+            changed |= self.upsert_plot(plot);
+        } else if let Some(i) = self.plots.iter().position(|p| p.id == plot.id) {
+            self.plots.remove(i);
+            changed = true;
+        }
+        changed
     }
 
     /// Returns whether anything changed.

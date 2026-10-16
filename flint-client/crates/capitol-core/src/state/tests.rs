@@ -1174,10 +1174,67 @@ fn recipes_and_plots_are_stored() {
         })),
         vec![StateEvent::PlotsUpdated]
     );
-    // A single plot fetch updates the list only when something differs.
-    assert!(state.apply_rest(&R::Plot(plot(None))).is_empty());
-    assert!(state.apply_rest(&R::PlotAt(None)).is_empty());
+    // A plot that turns out not to be yours leaves your list.
+    assert_eq!(
+        state.apply_rest(&R::Plot(plot(None))),
+        vec![StateEvent::PlotsUpdated]
+    );
+    assert!(state.plots().is_empty());
+    // One that is yours joins it, once.
+    assert_eq!(
+        state.apply_rest(&R::Plot(plot(Some(ME)))),
+        vec![StateEvent::PlotsUpdated]
+    );
+    assert!(state.apply_rest(&R::Plot(plot(Some(ME)))).is_empty());
     assert_eq!(state.plots().len(), 1);
+    assert!(state.my_plot_at(5200.0, 4000.0).is_some());
+    assert!(state.my_plot_at(5300.0, 4000.0).is_none());
+}
+
+#[test]
+fn a_picked_plot_is_kept_fresh_and_nothing_there_unpicks_it() {
+    let mut state = connected();
+    assert!(state.apply_rest(&R::PlotAt(None)).is_empty());
+    assert_eq!(
+        state.apply_rest(&R::PlotAt(Some(plot(None)))),
+        vec![StateEvent::PlotPicked {
+            plot_id: Some(PLOT)
+        }]
+    );
+    // Someone else's, so not in your list.
+    assert!(state.plots().is_empty());
+    assert_eq!(state.picked_plot().unwrap().owner_id, None);
+    // A refetch of it updates the panel.
+    let mut theirs = plot(Some(OTHER));
+    theirs.owner_name = Some("Brin".into());
+    assert_eq!(
+        state.apply_rest(&R::Plot(theirs)),
+        vec![StateEvent::PlotsUpdated]
+    );
+    assert_eq!(state.picked_plot().unwrap().owner_id, Some(OTHER));
+    assert_eq!(
+        state.apply_rest(&R::PlotAt(None)),
+        vec![StateEvent::PlotPicked { plot_id: None }]
+    );
+    assert!(state.picked_plot().is_none());
+}
+
+#[test]
+fn deed_prices_are_kept_by_zone() {
+    let mut state = connected();
+    assert!(state.deed_prices().is_none());
+    state.apply_rest(&R::DeedPrices(DeedPricesResponse {
+        prices: vec![DeedPrice {
+            zone_id: "urban".into(),
+            zone_name: "Urban Zone".into(),
+            deed_cost: 1000,
+            plot_size: "Medium Plot".into(),
+            station_capacity: 9,
+        }],
+    }));
+    assert_eq!(state.deed_prices().unwrap().len(), 1);
+    assert_eq!(state.deed_price("urban").unwrap().deed_cost, 1000);
+    assert!(state.deed_price("wilderness").is_none());
 }
 
 #[test]
@@ -1186,10 +1243,7 @@ fn claiming_a_plot_updates_it_and_the_balance() {
     state.apply_rest(&R::Currency(CurrencyResponse {
         strand_balance: 1000,
     }));
-    state.apply_rest(&R::Plots(ListPlotsResponse {
-        plots: vec![plot(None)],
-        total: 1,
-    }));
+    state.apply_rest(&R::PlotAt(Some(plot(None))));
     let events = state.apply_rest(&R::ClaimPlot(ClaimPlotResponse {
         plot: plot(Some(ME)),
         new_balance: 500,
@@ -1204,6 +1258,7 @@ fn claiming_a_plot_updates_it_and_the_balance() {
     );
     assert_eq!(state.plot(PLOT).unwrap().owner_id, Some(ME));
     assert_eq!(state.plots().len(), 1);
+    assert_eq!(state.picked_plot().unwrap().owner_id, Some(ME));
 }
 
 #[test]

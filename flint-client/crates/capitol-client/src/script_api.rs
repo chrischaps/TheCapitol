@@ -42,6 +42,24 @@ pub struct Shared {
     /// Every station shown this frame (P6.1), as `stations::Stations` left
     /// them, for the in-range ring.
     pub stations: Arc<Mutex<Vec<StationMark>>>,
+    /// Where a script last asked to pick a plot (`cap_pick_plot`, P6.4),
+    /// in server units. The extension takes it next frame.
+    pub pick_plot: Arc<Mutex<Option<[f64; 2]>>>,
+    /// The plot the plot panel shows, for its outline on the ground.
+    pub picked_plot: Arc<Mutex<Option<PlotMark>>>,
+}
+
+/// The picked plot as scripts see it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlotMark {
+    /// Its edge as drawn, world metres (X, Z), in order round it.
+    pub outline: Vec<[f32; 2]>,
+    /// The height of its top, metres.
+    pub y: f32,
+    /// It's yours.
+    pub mine: bool,
+    /// Someone owns it.
+    pub owned: bool,
 }
 
 /// The zone banner's words and colour, and when it started.
@@ -255,6 +273,34 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             *e = Some(id.to_owned());
         }
     });
+    // `cap_pick_plot(x, z)`: show the plot under the ground point (x, z),
+    // world metres, in the plot panel. Asked next frame; online only.
+    let pick = shared.pick_plot.clone();
+    engine.register_fn("cap_pick_plot", move |x: f64, z: f64| {
+        if let Ok(mut p) = pick.lock() {
+            *p = Some(clamp_to_world(x as f32, z as f32));
+        }
+    });
+    // `cap_picked_plot() -> #{ outline, y, mine, owned } or ()`: the plot
+    // the panel shows. `outline` is [[x, z], ...] round its edge in world
+    // metres, `y` its top's height; `mine` and `owned` say whose it is.
+    let picked = shared.picked_plot.clone();
+    engine.register_fn("cap_picked_plot", move || -> rhai::Dynamic {
+        let Some(p) = picked.lock().ok().and_then(|p| p.clone()) else {
+            return rhai::Dynamic::UNIT;
+        };
+        let mut m = rhai::Map::new();
+        let outline: rhai::Array = p
+            .outline
+            .iter()
+            .map(|[x, z]| rhai::Dynamic::from_array(vec![(*x as f64).into(), (*z as f64).into()]))
+            .collect();
+        m.insert("outline".into(), outline.into());
+        m.insert("y".into(), (p.y as f64).into());
+        m.insert("mine".into(), p.mine.into());
+        m.insert("owned".into(), p.owned.into());
+        m.into()
+    });
     // `cap_ground_y() -> float`: the land's height in metres, for picking
     // and for drawing on the ground. The sea is at 0.
     engine.register_fn("cap_ground_y", || crate::coords::layer::GROUND as f64);
@@ -432,6 +478,27 @@ mod tests {
         assert!(engine.eval::<()>("cap_node_at(9.0, 9.0)").is_ok());
         let p: bool = engine.eval("cap_nodes()[0].progress == ()").unwrap();
         assert!(p);
+    }
+
+    #[test]
+    fn scripts_pick_a_plot_and_read_the_picked_one() {
+        let shared = Shared::default();
+        let mut engine = rhai::Engine::new();
+        register(&mut engine, &shared);
+        assert!(engine.eval::<()>("cap_picked_plot()").is_ok());
+        engine.run("cap_pick_plot(5.0, -2.5)").unwrap();
+        let [x, y] = shared.pick_plot.lock().unwrap().unwrap();
+        assert!((x - 4050.0).abs() < 1e-3 && (y - 3975.0).abs() < 1e-3);
+        *shared.picked_plot.lock().unwrap() = Some(PlotMark {
+            outline: vec![[0.0, 0.0], [2.0, 0.0], [2.0, 3.0]],
+            y: 0.7,
+            mine: true,
+            owned: true,
+        });
+        let words: String = engine
+            .eval(r#"let p = cap_picked_plot(); `${p.outline.len()} ${p.outline[2][1]} ${p.mine}`"#)
+            .unwrap();
+        assert_eq!(words, "3 3.0 true");
     }
 
     #[test]

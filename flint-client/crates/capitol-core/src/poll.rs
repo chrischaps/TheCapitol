@@ -25,7 +25,7 @@
 //!
 //! | Trigger | Fetch |
 //! |---|---|
-//! | first `Connected`, every `Resync` | me (name, position, currency), containers, nearby nodes, nearby stations, plots, recipes |
+//! | first `Connected`, every `Resync` | me (name, position, currency), containers, nearby nodes, nearby stations, plots, recipes, deed prices |
 //! | every 5 s while connected | nearby nodes, nearby stations, plots, currency |
 //! | `inventory_updated` (mine, or a container I hold) | containers, or the open station's container |
 //! | `station_opened` (mine) | that station's container |
@@ -35,6 +35,10 @@
 //! | a deposit or withdrawal answered | containers, currency |
 //! | a REST `move_item` answered | containers, and the open station's container |
 //! | `zone_changed` (mine, a real crossing) | plots |
+//!
+//! **Plots are your own** (`/plots?owner=<you>`, P6.4), as React lists
+//! them since B7: placement tests against them and the map edges them in
+//! gold. Any other plot is one `/plots/at`, which the plot panel asks for.
 //! | `terrain_updated` | terrain |
 //!
 //! **One in flight per fetch.** Asking for something already queued does
@@ -64,7 +68,7 @@ pub const FIRST_TAG: Tag = 1 << 63;
 /// How often nodes, stations and plots are polled. React uses 5 s.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// How many plots to list, as React does. B7 (#42) may change how plots load.
+/// How many of your plots to list, as React does: `/plots` pages at 100.
 const PLOT_LIMIT: i32 = 100;
 
 /// Something the client refetches because the server doesn't push it.
@@ -82,10 +86,12 @@ pub enum Fetch {
     NearbyStations,
     /// `GET /player/currency`
     Currency,
-    /// `GET /plots?limit=100`
+    /// `GET /plots?owner=<you>&limit=100`
     Plots,
     /// `GET /recipes`
     Recipes,
+    /// `GET /bureaucracy/deed-prices`, for the plot panel's Claim button.
+    DeedPrices,
     /// `GET /terrain`
     Terrain,
 }
@@ -93,13 +99,14 @@ pub enum Fetch {
 impl Fetch {
     /// Everything the server doesn't push, refetched on connect and resync.
     /// `Me` comes first and carries the balance, so `Currency` isn't needed here.
-    pub const SNAPSHOT: [Fetch; 6] = [
+    pub const SNAPSHOT: [Fetch; 7] = [
         Fetch::Me,
         Fetch::Containers,
         Fetch::NearbyNodes,
         Fetch::NearbyStations,
         Fetch::Plots,
         Fetch::Recipes,
+        Fetch::DeedPrices,
     ];
 
     /// What the timer refetches. Currency is here for what the server
@@ -112,7 +119,8 @@ impl Fetch {
         Fetch::Currency,
     ];
 
-    pub fn request(&self) -> RestRequest {
+    /// The call, for the player `me` (whose plots are listed).
+    pub fn request(&self, me: Option<Uuid>) -> RestRequest {
         match *self {
             Fetch::Me => RestRequest::PlayerMe,
             Fetch::Containers => RestRequest::Containers,
@@ -121,10 +129,12 @@ impl Fetch {
             Fetch::NearbyStations => RestRequest::NearbyStations,
             Fetch::Currency => RestRequest::PlayerCurrency,
             Fetch::Plots => RestRequest::ListPlots(ListPlotsQuery {
+                owner: me,
                 limit: Some(PLOT_LIMIT),
                 ..Default::default()
             }),
             Fetch::Recipes => RestRequest::Recipes,
+            Fetch::DeedPrices => RestRequest::DeedPrices,
             // `terrain_updated` means it changed, so there's nothing to revalidate.
             Fetch::Terrain => RestRequest::Terrain {
                 cached_version: None,
@@ -148,6 +158,8 @@ pub struct Poller {
     connected: bool,
     /// `None` restarts the timer at the next tick.
     next_poll: Option<Instant>,
+    /// The local player, from the store, whose plots are listed.
+    me: Option<Uuid>,
 }
 
 impl Default for Poller {
@@ -170,6 +182,7 @@ impl Poller {
             again: Vec::new(),
             connected: false,
             next_poll: None,
+            me: None,
         }
     }
 
@@ -195,6 +208,8 @@ impl Poller {
         changes: &[StateEvent],
         state: &GameState,
     ) -> Option<Fetch> {
+        // Known from `Connected`, before the snapshot is asked for.
+        self.me = state.me();
         for change in changes {
             self.observe_change(change, state);
         }
@@ -319,7 +334,7 @@ impl Poller {
                 let tag = self.next_tag;
                 self.next_tag += 1;
                 self.in_flight.insert(tag, fetch);
-                (fetch.request(), tag)
+                (fetch.request(self.me), tag)
             })
             .collect()
     }

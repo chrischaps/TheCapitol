@@ -5,14 +5,15 @@
 //! built from it (`world`, so far the ground, the canals, whose water is
 //! the scene's ocean, the roads, the bridges, the plots and the Capitol
 //! tower), the players walking it (`entities`), the resource nodes they
-//! gather from (`nodes`), the stations they build (`stations`), the crafting panel (`ui::crafting`), the fog and the light as
+//! gather from (`nodes`), the stations they build (`stations`), the crafting panel (`ui::crafting`), the plots you
+//! pick, claim and own (`ui::plot`, and the gold of `world::plots::owned`), the fog and the light as
 //! the camera climbs (`atmosphere`), the wheel for the camera rig, and the
 //! spike's markers.
 
 use crate::atmosphere::Atmosphere;
 use crate::entities::Players;
 use crate::nodes::Nodes;
-use crate::script_api::{self, Shared, ZoneBanner};
+use crate::script_api::{self, PlotMark, Shared, ZoneBanner};
 use crate::session::Session;
 use crate::stations::Stations;
 use crate::terrain::TerrainSource;
@@ -23,15 +24,17 @@ use crate::ui::icons::ItemIcons;
 use crate::ui::inventory::InventoryPanel;
 use crate::ui::login::{FormAction, LoginForm, LoginView};
 use crate::world::palette;
-use crate::world::plots::Lot;
+use crate::world::plots::{self as lots, Lot};
 use crate::world::Rebuild;
 use crate::{spike_world, ui, world};
 use capitol_core::auth::{Notice, Phase};
 use capitol_core::harvest::Note;
 use capitol_core::net::ConnectionState;
+use capitol_core::plot::Offer;
 use capitol_core::protocol::terrain::TerrainResponse;
 use capitol_core::protocol::ws::ClientMessage;
 use flint_player::{ExtensionCtx, PlayerExtension};
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 use winit::event::{MouseScrollDelta, WindowEvent};
@@ -55,8 +58,14 @@ pub struct CapitolExtension {
     /// changes (`world::Rebuild`).
     built: Option<TerrainResponse>,
     /// Where each of the terrain's plots is in the plot meshes, in order.
-    #[allow(dead_code)] // P6.4 finds a lot here to highlight it
     lots: Vec<Option<Lot>>,
+    /// Each lot's place in `lots`, by its `TerrainPlot::id`, which a
+    /// claimable plot names as `PlotInfo::terrain_id` (B7).
+    lot_of: HashMap<String, usize>,
+    /// The lots `world::plots::OWNED_MESH` was last built over, or `None`
+    /// to build it again.
+    owned_drawn: Option<Vec<usize>>,
+    plot_panel: ui::plot::PlotPanel,
     /// Game time of the last render-stats line (debug log only).
     stats_logged: f64,
     atmosphere: Atmosphere,
@@ -87,6 +96,9 @@ impl CapitolExtension {
             world_built: false,
             built: None,
             lots: Vec::new(),
+            lot_of: HashMap::new(),
+            owned_drawn: None,
+            plot_panel: ui::plot::PlotPanel::default(),
             stats_logged: 0.0,
             atmosphere: Atmosphere::default(),
             icons: ItemIcons::load(std::path::Path::new(ItemIcons::DIR)),
@@ -184,6 +196,7 @@ impl PlayerExtension for CapitolExtension {
             walk(ctx, session, &self.shared, now);
             gather(ctx, session, &self.shared, now);
             crafted(ctx, session, &self.shared);
+            plots(ctx, session, &self.shared, &self.lots, &self.lot_of);
             // Signed out, the store is empty, so everyone fades away.
             let (poses, state) = session.sample(now);
             let dt = ctx.clock.delta_time.min(0.1) as f32;
@@ -239,6 +252,21 @@ impl PlayerExtension for CapitolExtension {
             spike_world::upload_static(gpu);
             self.world_built = true;
         }
+        // Your plots in gold, rebuilt when they change. Offline, none.
+        let owned = self.session.as_ref().map_or_else(Vec::new, |s| {
+            owned_lots(s.state().plots(), &self.lots, &self.lot_of)
+        });
+        if self.owned_drawn.as_ref() != Some(&owned) {
+            lots::upload_owned(gpu, owned.iter().filter_map(|&i| self.lots[i].as_ref()));
+            let any = !owned.is_empty();
+            self.owned_drawn = Some(owned);
+            if any {
+                attach_each(ctx, std::iter::once(&lots::OWNED_MESH.to_owned()));
+            }
+        }
+        let Some(gpu) = ctx.gpu.as_mut() else {
+            return;
+        };
         // Held until the renderer exists, so a terrain that arrives first
         // (offline, or from the cache) isn't consumed with nothing to draw on.
         let Some(terrain) = self.terrain.take_changed() else {
@@ -266,7 +294,15 @@ impl PlayerExtension for CapitolExtension {
             let (plots, lots) =
                 world::plots::upload(gpu, &terrain.terrain_plots, &terrain.roads, rings);
             sectors.extend(plots);
+            self.lot_of = terrain
+                .terrain_plots
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.id.clone(), i))
+                .collect();
             self.lots = lots;
+            // The lots moved, so the gold is built again next frame.
+            self.owned_drawn = None;
         }
         if self.built.is_some() {
             tracing::info!(
@@ -379,6 +415,22 @@ impl PlayerExtension for CapitolExtension {
                     Some(CraftAction::Cancel) => session.cancel_craft(),
                     None => {}
                 }
+                let state = session.state();
+                let picked = state.picked_plot();
+                let view = ui::plot::View {
+                    plot: picked,
+                    offer: picked.map_or(Offer::Unpriced, |p| {
+                        Offer::new(p, state.me(), state.deed_prices(), state.strands())
+                    }),
+                    strands: state.strands(),
+                    claiming: session.claiming(),
+                    refused: session.claim_refused(now),
+                };
+                match self.plot_panel.show(ctx, &view, self.crafting.rect) {
+                    Some(ui::plot::Action::Claim(id)) => session.claim_plot(id),
+                    Some(ui::plot::Action::Close) => session.close_plot(),
+                    None => {}
+                }
                 let refused = session.move_refused(Instant::now());
                 let inventory = session.state().inventory();
                 if let Some(m) = self
@@ -404,7 +456,8 @@ impl PlayerExtension for CapitolExtension {
         if self.session.is_none() {
             ui::inscription(ctx, &self.shared, &self.terrain.status());
         } else if !at_login {
-            ui::controls(ctx, &self.terrain.status(), self.crafting.rect);
+            let clear_of = self.plot_panel.rect.or(self.crafting.rect);
+            ui::controls(ctx, &self.terrain.status(), clear_of);
         }
         if self.icon_sheet {
             ui::icons::sheet(ctx, &mut self.icons);
@@ -532,6 +585,112 @@ fn crafted(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::S
         data.insert("z".into(), (z as f64).into());
         ctx.fire_event("crafting_completed", data);
     }
+}
+
+/// Plots (P6.4): pick the plot a script asked for (`cap_pick_plot`), tell
+/// scripts which is picked (`cap_picked_plot`), and fire at them
+/// `plot_claimed` with the claimed plot's middle (`x`, `z`, world metres)
+/// and about how far it reaches from there (`r`, metres), and `plot_note`
+/// with a `title` and `body` when a pick found nothing.
+fn plots(
+    ctx: &mut ExtensionCtx,
+    session: &mut Session,
+    shared: &script_api::Shared,
+    lots: &[Option<Lot>],
+    lot_of: &HashMap<String, usize>,
+) {
+    if let Some([x, y]) = shared.pick_plot.lock().ok().and_then(|mut p| p.take()) {
+        session.pick_plot(x, y);
+    }
+    let me = session.state().me();
+    let mark = session.state().picked_plot().map(|p| {
+        let lot = p
+            .terrain_id
+            .as_ref()
+            .and_then(|id| lot_of.get(id))
+            .and_then(|&i| lots.get(i)?.as_ref());
+        PlotMark {
+            outline: plot_outline(p, lot),
+            y: crate::coords::layer::PLOT + 0.06,
+            mine: me.is_some() && p.owner_id == me,
+            owned: p.owner_id.is_some(),
+        }
+    });
+    if let Ok(mut picked) = shared.picked_plot.lock() {
+        *picked = mark;
+    }
+    for plot_id in session.take_claimed() {
+        let Some(plot) = session.state().plot(plot_id) else {
+            continue;
+        };
+        let [x, z] = crate::coords::to_world(plot.world_x, plot.world_y);
+        let (w, h) = (
+            plot.bounds.max_x - plot.bounds.min_x,
+            plot.bounds.max_y - plot.bounds.min_y,
+        );
+        let mut data = toml::Table::new();
+        data.insert("x".into(), (x as f64).into());
+        data.insert("z".into(), (z as f64).into());
+        data.insert(
+            "r".into(),
+            (w.hypot(h) * 0.5 * crate::coords::S as f64).into(),
+        );
+        ctx.fire_event("plot_claimed", data);
+    }
+    for note in session.take_plot_notes() {
+        let (title, body) = match note {
+            crate::session::PlotNote::NoneThere => {
+                ("No plot here", "Alt-click a lot to see its deed")
+            }
+            crate::session::PlotNote::Unanswered => {
+                ("Couldn't look", "The server didn't say what's here")
+            }
+        };
+        let mut data = toml::Table::new();
+        data.insert("title".into(), title.into());
+        data.insert("body".into(), body.into());
+        ctx.fire_event("plot_note", data);
+    }
+}
+
+/// A plot's edge in world metres: the lot as drawn if the terrain has it,
+/// else the claimed quad, else its box.
+fn plot_outline(plot: &capitol_core::protocol::rest::PlotInfo, lot: Option<&Lot>) -> Vec<[f32; 2]> {
+    let world = |&(x, y): &(f64, f64)| crate::coords::to_world(x, y);
+    if let Some(lot) = lot {
+        return lot.outline.iter().map(|p| world(&(p[0], p[1]))).collect();
+    }
+    if let Some(corners) = &plot.corners {
+        return corners.iter().map(world).collect();
+    }
+    let b = &plot.bounds;
+    [
+        (b.min_x, b.min_y),
+        (b.max_x, b.min_y),
+        (b.max_x, b.max_y),
+        (b.min_x, b.max_y),
+    ]
+    .iter()
+    .map(world)
+    .collect()
+}
+
+/// Where your plots are in `lots`, sorted: each joined to its lot by
+/// `terrain_id`. A plot with no lot (pre-B7, or a terrain that no longer
+/// has it) isn't drawn.
+fn owned_lots(
+    plots: &[capitol_core::protocol::rest::PlotInfo],
+    lots: &[Option<Lot>],
+    lot_of: &HashMap<String, usize>,
+) -> Vec<usize> {
+    let mut owned: Vec<usize> = plots
+        .iter()
+        .filter_map(|p| lot_of.get(p.terrain_id.as_ref()?).copied())
+        .filter(|&i| lots.get(i).is_some_and(Option::is_some))
+        .collect();
+    owned.sort_unstable();
+    owned.dedup();
+    owned
 }
 
 /// What a gather or a craft made, for the scripts: `item_name`,

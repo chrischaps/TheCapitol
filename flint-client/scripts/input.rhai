@@ -8,11 +8,11 @@
 //   1. placing a station: put it here              (P6.2)
 //   2. shift-click a player: trade, or walk closer  (P7.3)
 //   3. a station: open it, or walk closer           (P6.3)
-//   4. alt-click a plot: select it                  (P6.4)
+//   4. alt-click a plot: select it                  (P6.4, here)
 //   5. an available resource node: extract          (P4.4, here)
 //   6. anywhere else: walk there                    (P4.3, here)
 //
-// Each of 1-4 is a function below that says no for now. To add one, fill
+// Each of 1-3 is a function below that says no for now. To add one, fill
 // its body: it gets the click (#{ x, z } in world metres, `shift`, `alt`)
 // and returns true when it took it.
 //
@@ -51,6 +51,14 @@
 // Like every ring here it's screen-space lines with no depth test, so its
 // far side crosses the model's front (issue #86).
 //
+// Plots (P6.4): alt-click a lot to see it in the plot panel (Rust asks
+// the server what's there, cap_pick_plot). While the panel is open, the
+// picked lot's edge is traced on the ground: a fine line with a brighter
+// stretch running round it, gold for yours, pale stone for anyone else's
+// or for sale. Claiming one lets the world answer: a gold ring breathes
+// out over the lot from its middle, a second just behind, and the edge
+// flares as the gold settles into its curb (world::plots::owned).
+
 // The right button is the camera's (a right-drag orbits), so this is the
 // left button only. egui keeps any click over its panels.
 
@@ -66,6 +74,8 @@ let cuttings = [];
 let sprouts = [];
 // A finished craft's ring, breathing out from where you stood.
 let blooms = [];
+// A plot just claimed: its rings breathing out over it.
+let deeds = [];
 
 // ── Tuning ───────────────────────────────────────────────────────────────
 
@@ -88,6 +98,8 @@ fn cutting_life() { 0.9 }
 fn sprout_life() { 1.4 }
 // A finished craft's ring (s).
 fn bloom_life() { 1.3 }
+// A claimed plot's rings, and the flare on the picked lot's edge (s).
+fn deed_life() { 2.2 }
 // The ring round someone crafting (m). A craft's yield starts where your
 // name hangs (entities.rs LABEL_Y, m over your feet) and that many points
 // higher on the screen, so it clears the name at any zoom.
@@ -108,6 +120,7 @@ fn on_update() {
     cuttings = cuttings.filter(|c| t - c.born < cutting_life());
     sprouts = sprouts.filter(|s| t - s.born < sprout_life());
     blooms = blooms.filter(|b| t - b.born < bloom_life());
+    deeds = deeds.filter(|d| t - d.born < deed_life());
     if toast != () && t - toast.born > toast_in() + toast_hold() + toast_out() {
         toast = ();
     }
@@ -135,7 +148,14 @@ fn on_update() {
 fn place_station(click) { false } // P6.2
 fn trade_with(click) { false }    // P7.3, shift
 fn open_station(click) { false }  // P6.3
-fn select_plot(click) { false }   // P6.4, alt
+
+// Alt-click: the plot here, in the panel. Over a road or open ground the
+// server finds none, and a toast says so.
+fn select_plot(click) {
+    if !click.alt { return false; }
+    cap_pick_plot(click.x, click.z);
+    true
+}
 
 // A tuft you can take: extract it, or walk there and extract. Anything
 // else (a cut tuft, one someone is working) falls through to walking.
@@ -169,7 +189,12 @@ fn on_event(name, data) {
         blooms.push(#{ x: data.x, z: data.z, y: feet + 0.03, born: t });
         return;
     }
-    if name == "extraction_note" {
+    if name == "plot_claimed" {
+        deeds.push(#{ x: data.x, z: data.z, r: data.r, born: t });
+        toast = #{ title: "The deed is yours", body: "Place stations here", born: t };
+        return;
+    }
+    if name == "extraction_note" || name == "plot_note" {
         toast = #{ title: data.title, body: data.body, born: t };
         return;
     }
@@ -247,6 +272,13 @@ fn on_draw_ui() {
         if p.craft != () { draw_craft(p, now); }
     }
     for b in blooms { draw_bloom(b, now); }
+    let picked = cap_picked_plot();
+    if picked != () {
+        let flare = 0.0;
+        for d in deeds { flare = flare.max(1.0 - (now - d.born) / deed_life()); }
+        draw_plot_edge(picked, now, flare);
+    }
+    for d in deeds { draw_deed(d, now); }
     let you = cap_follow();
     if target != () {
         if you != () { draw_path(you[0], you[2], target.x, target.z, now, 0.6); }
@@ -510,6 +542,69 @@ fn draw_bloom(b, now) {
     let k2 = (k - 0.15).max(0.0) / 0.85;
     let e2 = 1.0 - (1.0 - k2) * (1.0 - k2);
     ring(b.x, b.z, b.y, craft_ring() + 0.9 * e2, lilac(), 0.4 * (1.0 - k2), 1.0, 40);
+}
+
+// Pale stone, for a lot that isn't yours.
+fn stone() { [0.80, 0.78, 0.72] }
+
+// The picked lot's edge: a fine line round it, and a brighter stretch a
+// fifth of the way round, running round it every few seconds. A claim
+// just made flares the whole edge as its rings go out.
+fn draw_plot_edge(p, now, flare) {
+    let c = if p.mine { gold() } else { stone() };
+    let pts = p.outline;
+    let n = pts.len();
+    if n < 2 { return; }
+    // The perimeter, so the bright stretch runs at an even speed.
+    let lens = [];
+    let total = 0.0;
+    for i in 0..n {
+        let a = pts[i];
+        let b = pts[(i + 1) % n];
+        let l = ((b[0] - a[0]) * (b[0] - a[0]) + (b[1] - a[1]) * (b[1] - a[1])).sqrt();
+        lens.push(l);
+        total += l;
+    }
+    if total <= 0.0 { return; }
+    let head = (now / 4.0 % 1.0) * total;
+    let run = total * 0.2;
+    let base = 0.45 + 0.5 * flare;
+    let width = 1.5 + 1.5 * flare;
+    let along = 0.0;
+    for i in 0..n {
+        let a = pts[i];
+        let b = pts[(i + 1) % n];
+        // In short steps, so the stretch can brighten part of an edge.
+        let steps = (lens[i] / 0.5).to_int().max(1);
+        for k in 0..steps {
+            let t0 = k.to_float() / steps.to_float();
+            let t1 = (k + 1).to_float() / steps.to_float();
+            let mid = along + lens[i] * (t0 + t1) / 2.0;
+            let behind = (head - mid + total) % total;
+            let lit = if behind < run { 1.0 - behind / run } else { 0.0 };
+            let p0 = world_to_screen(a[0] + (b[0] - a[0]) * t0, p.y, a[1] + (b[1] - a[1]) * t0);
+            let p1 = world_to_screen(a[0] + (b[0] - a[0]) * t1, p.y, a[1] + (b[1] - a[1]) * t1);
+            if p0.visible && p1.visible {
+                draw_line(p0.x, p0.y, p1.x, p1.y, c[0], c[1], c[2],
+                          (base + 0.5 * lit).min(1.0), width + lit);
+            }
+        }
+        along += lens[i];
+    }
+}
+
+// A plot claimed: two gold rings breathing out from its middle to past
+// its edge, the second a beat behind and fainter.
+fn draw_deed(d, now) {
+    let k = (now - d.born) / deed_life();
+    let y = cap_ground_y() + 0.2;
+    for i in 0..2 {
+        let a = (k - i.to_float() * 0.18) / 0.82;
+        if a <= 0.0 || a >= 1.0 { continue; }
+        let ease = 1.0 - (1.0 - a) * (1.0 - a);
+        let alpha = (if i == 0 { 0.9 } else { 0.45 }) * (1.0 - a);
+        ring(d.x, d.z, y, 0.4 + d.r * 1.25 * ease, gold(), alpha, 2.0, 64);
+    }
 }
 
 // A tuft grown back: a green ring breathing out over the ground.

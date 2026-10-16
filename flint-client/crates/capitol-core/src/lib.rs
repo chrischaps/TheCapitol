@@ -16,6 +16,8 @@
 //! - [`poll`]: the polling scheduler. [`poll::Poller`] turns those events, and
 //!   a 5 s timer, into the REST refetches the server never pushes.
 //! - [`station`]: stations in the world: whether one is in reach.
+//! - [`plot`]: what the plot panel offers for a plot: yours, someone
+//!   else's, or for sale at its zone's deed price.
 //! - [`signin`]: log in, or register, one event at a time.
 //! - [`auth`]: the way in for a person: the login form's states, a stored
 //!   token tried first, and the server's health while signed out.
@@ -31,6 +33,7 @@ pub mod craft;
 pub mod harvest;
 pub mod motion;
 pub mod net;
+pub mod plot;
 pub mod poll;
 pub mod signin;
 pub mod state;

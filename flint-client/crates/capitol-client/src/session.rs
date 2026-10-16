@@ -28,7 +28,7 @@ use capitol_core::net::{
     ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
 };
 use capitol_core::poll::{Fetch, Poller};
-use capitol_core::protocol::rest::MoveItemRequest;
+use capitol_core::protocol::rest::{MoveItemRequest, PositionQuery};
 use capitol_core::protocol::rules::Zone;
 use capitol_core::protocol::ws::ClientMessage;
 use capitol_core::state::{GameState, StateEvent, Yield};
@@ -45,6 +45,11 @@ pub const AUTH_TAG: Tag = 10;
 /// The tag on `move_item` requests: above the auth machine's, below
 /// `poll::FIRST_TAG`. The poller refetches on any `MoveItem` answer.
 const MOVE_TAG: Tag = 20;
+
+/// The tags on the plot panel's calls (P6.4): `/plots/at` and `/plots/{id}`
+/// share one, a claim has its own.
+const PLOT_TAG: Tag = 30;
+const CLAIM_TAG: Tag = 31;
 
 /// How long a refused move's reason stays up.
 const NOTICE_FOR: Duration = Duration::from_secs(5);
@@ -87,6 +92,24 @@ pub struct Session {
     placed: HashSet<Uuid>,
     /// Why the last craft didn't happen, and when.
     craft_refused: Option<(String, Instant)>,
+    /// The plot a claim is out for (P6.4).
+    claiming: Option<Uuid>,
+    /// Why the last claim was refused, and when.
+    claim_refused: Option<(String, Instant)>,
+    /// Plots you claimed since the frame last took them.
+    claimed: Vec<Uuid>,
+    /// What's worth telling the player about picking a plot, since the
+    /// frame last took them.
+    plot_notes: Vec<PlotNote>,
+}
+
+/// Something to tell the player about picking a plot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlotNote {
+    /// The alt-click found no plot there.
+    NoneThere,
+    /// The server couldn't say.
+    Unanswered,
 }
 
 /// The server stopped you at the water's edge (`movement_blocked`).
@@ -147,6 +170,10 @@ impl Session {
             crafted: Vec::new(),
             placed: HashSet::new(),
             craft_refused: None,
+            claiming: None,
+            claim_refused: None,
+            claimed: Vec::new(),
+            plot_notes: Vec::new(),
         };
         session.apply(effects);
         Ok(session)
@@ -351,6 +378,58 @@ impl Session {
         std::mem::take(&mut self.placed)
     }
 
+    /// Picks the plot at the server point `(x, y)` for the plot panel
+    /// (an alt-click). The answer opens the panel, or closes it if there's
+    /// no plot there.
+    pub fn pick_plot(&mut self, x: f64, y: f64) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        self.claim_refused = None;
+        self.net
+            .rest(RestRequest::PlotAt(PositionQuery { x, y }), PLOT_TAG);
+    }
+
+    /// Closes the plot panel.
+    pub fn close_plot(&mut self) {
+        self.state.unpick_plot();
+        self.claim_refused = None;
+    }
+
+    /// Buys the deed to `plot_id`, unless a claim is already out.
+    pub fn claim_plot(&mut self, plot_id: Uuid) {
+        if self.auth.phase() != Phase::InWorld || self.claiming.is_some() {
+            return;
+        }
+        tracing::info!("plot: claiming {plot_id}");
+        self.claiming = Some(plot_id);
+        self.claim_refused = None;
+        self.net.rest(RestRequest::ClaimPlot { plot_id }, CLAIM_TAG);
+    }
+
+    /// A claim is out.
+    pub fn claiming(&self) -> bool {
+        self.claiming.is_some()
+    }
+
+    /// Why the server refused the last claim, for a few seconds after.
+    pub fn claim_refused(&self, now: Instant) -> Option<&str> {
+        self.claim_refused
+            .as_ref()
+            .filter(|(_, at)| now.duration_since(*at) < NOTICE_FOR)
+            .map(|(why, _)| why.as_str())
+    }
+
+    /// The plots you claimed since the last call.
+    pub fn take_claimed(&mut self) -> Vec<Uuid> {
+        std::mem::take(&mut self.claimed)
+    }
+
+    /// What to tell the player about picking plots, since the last call.
+    pub fn take_plot_notes(&mut self) -> Vec<PlotNote> {
+        std::mem::take(&mut self.plot_notes)
+    }
+
     /// Sends a message on the socket. Dropped while not connected.
     pub fn ws(&self, message: ClientMessage) {
         self.net.ws(message);
@@ -402,6 +481,35 @@ impl Session {
                     self.move_refused = Some((refusal(e), now));
                 }
                 NetEvent::Rest(MOVE_TAG, Ok(_)) => self.move_refused = None,
+                NetEvent::Rest(PLOT_TAG, Ok(RestResponse::PlotAt(None))) => {
+                    self.plot_notes.push(PlotNote::NoneThere)
+                }
+                NetEvent::Rest(PLOT_TAG, Err(e)) => {
+                    tracing::warn!("plot: lookup failed: {e}");
+                    self.plot_notes.push(PlotNote::Unanswered);
+                }
+                NetEvent::Rest(CLAIM_TAG, Ok(RestResponse::ClaimPlot(claim))) => {
+                    tracing::info!(
+                        "plot: claimed {} for {} Strands, {} left",
+                        claim.plot.id,
+                        claim.plot.assessed_value,
+                        claim.new_balance
+                    );
+                    self.claiming = None;
+                    self.claimed.push(claim.plot.id);
+                }
+                NetEvent::Rest(CLAIM_TAG, result) => {
+                    let why = match result {
+                        Err(e) => refusal(e),
+                        Ok(_) => "The server's answer didn't make sense".into(),
+                    };
+                    tracing::info!("plot: claim refused: {why}");
+                    self.claim_refused = Some((why, now));
+                    // Someone may have bought it first: show the panel what's true.
+                    if let Some(plot_id) = self.claiming.take() {
+                        self.net.rest(RestRequest::Plot { plot_id }, PLOT_TAG);
+                    }
+                }
                 _ => {}
             }
             if let NetEvent::Connection(connection) = event {
@@ -491,6 +599,10 @@ impl Session {
             self.crafting = Crafting::default();
             self.crafted.clear();
             self.craft_refused = None;
+            self.claiming = None;
+            self.claim_refused = None;
+            self.claimed.clear();
+            self.plot_notes.clear();
         }
     }
 
@@ -995,6 +1107,87 @@ mod tests {
         let made = session.take_crafted();
         eprintln!("made {made:?}");
         assert_eq!(made[0].item_type, "workbench_kit");
+        session.log_out();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Against the local stack, the plot panel's calls end to end: pick
+    /// the plot you stand on, see its deed price, claim it, and find it in
+    /// your plots (the list the gold is drawn from) with the deed paid.
+    /// Then a pick over open water finds nothing. The account is
+    /// `plots1@bots.capitol.local` (`capitol-bot --prefix plots --gather 0`
+    /// makes it), standing on an unclaimed plot with the deed's price in
+    /// hand. A plot it already owns passes as "yours" without a claim.
+    #[test]
+    #[ignore = "needs the local stack and Plots1 on an unclaimed plot with Strands"]
+    fn a_plot_is_picked_and_claimed() {
+        use capitol_core::plot::Offer;
+
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let dir = std::env::temp_dir().join(format!("capitol-plot-{}", std::process::id()));
+        let mut session = Session::start(&server, SessionFile::load(dir.join("s.toml"))).unwrap();
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let mut terrain = TerrainSource::offline(&fixture).unwrap();
+        session.log_in("plots1@bots.capitol.local", "plots-1-capitol-bot");
+        let mut wait = |session: &mut Session, what: &str, done: &dyn Fn(&Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !done(session) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                session.update(Instant::now(), &mut terrain);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait(&mut session, "me, my balance and the deed prices", &|s| {
+            let st = s.state();
+            st.local_player().is_some() && st.strands().is_some() && st.deed_prices().is_some()
+        });
+        let (x, y) = {
+            let me = session.state().local_player().unwrap();
+            (me.x, me.y)
+        };
+        session.pick_plot(x, y);
+        wait(&mut session, "the pick", &|s| {
+            s.state().picked_plot().is_some()
+        });
+        let st = session.state();
+        let plot = st.picked_plot().unwrap().clone();
+        assert!(plot.contains(x, y), "the picked plot is under you");
+        let offer = Offer::new(&plot, st.me(), st.deed_prices(), st.strands());
+        eprintln!("picked {} ({}): {offer:?}", plot.id, plot.zone_id);
+        match offer {
+            Offer::Claimable { cost } => {
+                let before = st.strands().unwrap();
+                session.claim_plot(plot.id);
+                assert!(session.claiming());
+                wait(&mut session, "the claim", &|s| !s.claiming());
+                assert_eq!(session.claim_refused(Instant::now()), None);
+                assert_eq!(session.take_claimed(), vec![plot.id]);
+                let st = session.state();
+                assert_eq!(st.strands(), Some(before - cost));
+                assert_eq!(st.picked_plot().unwrap().owner_id, st.me());
+                assert!(st.plot(plot.id).is_some(), "your plots hold it");
+                assert!(st.my_plot_at(x, y).is_some());
+            }
+            Offer::Yours => assert!(st.plot(plot.id).is_some()),
+            other => panic!("set Plots1 up first: {other:?}"),
+        }
+        // A claim on a plot that's now yours is refused, with the reason kept.
+        session.claim_plot(plot.id);
+        wait(&mut session, "the refusal", &|s| {
+            s.claim_refused(Instant::now()).is_some()
+        });
+        eprintln!(
+            "refused: {}",
+            session.claim_refused(Instant::now()).unwrap()
+        );
+
+        // The moat, at the centre: no plot there closes the panel.
+        session.pick_plot(4000.0, 4000.0);
+        wait(&mut session, "nothing there", &|s| {
+            s.state().picked_plot().is_none()
+        });
+        assert_eq!(session.take_plot_notes(), vec![PlotNote::NoneThere]);
         session.log_out();
         let _ = std::fs::remove_dir_all(dir);
     }

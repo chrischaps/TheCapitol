@@ -29,13 +29,19 @@
 //!   same id. Since B7 ids are unique, and a claimable plot names its lot
 //!   in `PlotInfo::terrain_id`, so P6.4 can key on it. The fixture still
 //!   has the repeats.
+//! - **Yours are gold** (P6.4, [`owned`]). Each lot you own gets a second
+//!   mesh laid just over it: the curb's top in glowing gold, its outer face
+//!   in dim gold, and a warm wash over the lot that's strongest at the curb
+//!   and gone by its middle, as if lit from its edge. It's one small mesh,
+//!   `plots_owned`, rebuilt when your plots change, so the sector meshes
+//!   are never touched. `Lot` keeps the drawn outline for it.
 
 use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::coords::{layer, to_world};
 use crate::world::geom::*;
-use crate::world::mesh::{MeshBuf, UP};
+use crate::world::mesh::{facing, MeshBuf, UP};
 use crate::world::palette::{self, hex, mix};
 use crate::world::sector::Sector;
 use crate::world::water;
@@ -94,12 +100,18 @@ fn style(zone: Zone) -> Style {
     }
 }
 
-/// Where one lot's geometry sits in its sector's mesh.
+/// Where one lot's geometry sits in its sector's mesh, and the shape it
+/// was drawn with.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lot {
     pub sector: Sector,
     pub vertices: Range<u32>,
     pub indices: Range<u32>,
+    /// The drawn edge, server units, anticlockwise: clipped and inset.
+    pub outline: Vec<P>,
+    pub zone: Zone,
+    /// The lot's own colour.
+    pub colour: [f32; 4],
 }
 
 /// Every lot, built: one mesh per sector, and each lot's place in it.
@@ -428,10 +440,124 @@ pub fn build(plots: &[TerrainPlot], roads: &[RoadSegment], rings: &[WaterRing]) 
             sector,
             vertices: v0..m.vertices.len() as u32,
             indices: i0..m.indices.len() as u32,
+            outline: outer,
+            zone,
+            colour,
         };
         *out.lots.last_mut().unwrap() = Some(lot);
     }
     out
+}
+
+/// The mesh that marks your own lots in gold.
+pub const OWNED_MESH: &str = "plots_owned";
+
+/// How far over the lot and its curb the gold is laid, metres: enough to
+/// win the depth test at the map's zoom, well under the curb's lip.
+const OVERLAY: f32 = 0.02;
+/// How bright the curb's gold glows (`palette::glow`).
+const EDGE_GLOW: f32 = 0.5;
+/// How far the wash comes in from the curb, as a share of the way to the
+/// lot's middle, and how much gold it carries at the curb.
+const WASH_REACH: f64 = 0.35;
+const WASH: f32 = 0.26;
+/// The edge band's width on a lot too small for a curb, server units.
+const BARE_EDGE: f64 = 1.5;
+/// How far the gold curb face stands out from the curb's own, server units.
+const FACE_OUT: f64 = 0.3;
+
+/// `poly` pulled toward its centroid, keeping `k` of each point's distance.
+fn shrunk(poly: &[P], k: f64) -> Vec<P> {
+    let c = centroid(poly);
+    poly.iter().map(|&p| add(c, scale(sub(p, c), k))).collect()
+}
+
+/// A flat band round the closed ring `outer`, in to `inner` (as many
+/// points), at height `y`, facing up: `colours.0` at the outer edge and
+/// `colours.1` at the inner.
+fn band(m: &mut MeshBuf, outer: &[P], inner: &[P], y: f32, colours: ([f32; 4], [f32; 4])) {
+    let n = outer.len();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let corners = [
+            lift(outer[i], y),
+            lift(outer[j], y),
+            lift(inner[j], y),
+            lift(inner[i], y),
+        ];
+        let tints = [colours.0, colours.0, colours.1, colours.1];
+        let [a, b, c, d]: [u32; 4] = std::array::from_fn(|k| m.vertex(corners[k], UP, tints[k]));
+        if facing(corners[0], corners[1], corners[2], UP) {
+            m.indices.extend([a, b, c, a, c, d]);
+        } else {
+            m.indices.extend([a, c, b, a, d, c]);
+        }
+    }
+}
+
+/// The gold over each of `lots`: see the module docs.
+pub fn owned<'a>(lots: impl IntoIterator<Item = &'a Lot>) -> MeshBuf {
+    let gold = hex(palette::GOLD);
+    let glow = palette::glow(gold, EDGE_GLOW);
+    let mut lit = MeshBuf::default();
+    let mut light = MeshBuf::default();
+    for lot in lots {
+        let s = style(lot.zone);
+        let outer = &lot.outline;
+        let (pad, lip) = (layer::PLOT + OVERLAY, layer::PLOT + s.lip + OVERLAY);
+        // The curb's top glows; a lot too small for a curb gets a thin band.
+        let edge = match mitred_in(outer, s.curb) {
+            Some(inner) => {
+                band(&mut light, outer, &inner, lip, (glow, glow));
+                // Just outside the curb's own face, so the two don't fight.
+                let skin = mitred_in(outer, -FACE_OUT).unwrap_or_else(|| outer.clone());
+                let face = mix(lot.colour, hex(palette::GOLD_DIM), 0.8);
+                for i in 0..skin.len() {
+                    let (a, b) = (skin[i], skin[(i + 1) % skin.len()]);
+                    let normal = level(scale(unit(left(sub(b, a))), -1.0));
+                    lit.quad(
+                        [
+                            lift(a, layer::GROUND),
+                            lift(b, layer::GROUND),
+                            lift(b, lip),
+                            lift(a, lip),
+                        ],
+                        normal,
+                        face,
+                    );
+                }
+                inner
+            }
+            None => {
+                let Some(inner) = mitred_in(outer, BARE_EDGE) else {
+                    continue;
+                };
+                band(&mut light, outer, &inner, pad, (glow, glow));
+                inner
+            }
+        };
+        // The wash: gold at the curb, the lot's own colour by the middle.
+        let warm = mix(lot.colour, gold, WASH);
+        let core = shrunk(&edge, 1.0 - WASH_REACH);
+        band(&mut lit, &edge, &core, pad, (warm, lot.colour));
+        let mut rim: Vec<[f32; 3]> = core.iter().map(|&p| lift(p, pad)).collect();
+        rim.push(rim[0]);
+        lit.fan(lift(centroid(&core), pad), &rim, UP, lot.colour);
+    }
+    lit.append(light.glowing());
+    lit
+}
+
+/// Builds and uploads the gold over `lots` as [`OWNED_MESH`]. With no lots,
+/// the mesh is removed.
+pub fn upload_owned<'a>(gpu: &mut ExtensionGpu, lots: impl IntoIterator<Item = &'a Lot>) {
+    owned(lots).upload_material(
+        gpu,
+        ImportedMaterial {
+            roughness: 0.9,
+            ..ImportedMaterial::vertex_colored(OWNED_MESH)
+        },
+    );
 }
 
 /// The runtime mesh for `sector`'s lots.
@@ -726,6 +852,59 @@ mod tests {
                 "at r {r}: {drawn} of {total} sectors drawn"
             );
         }
+    }
+
+    #[test]
+    fn an_owned_lot_is_edged_and_washed_in_gold_over_its_own_ground() {
+        use crate::world::mesh::GLOW;
+        let (_, plots) = fixture();
+        let lot = plots
+            .lots
+            .iter()
+            .flatten()
+            .find(|l| l.zone == Zone::Suburban)
+            .unwrap();
+        let m = owned([lot]);
+        assert!(!m.indices.is_empty());
+        let s = style(lot.zone);
+        // On the drawn lot (the gold face just outside its curb), and just
+        // over what it covers.
+        let n = lot.outline.len();
+        for v in &m.vertices {
+            let p = server(v.position);
+            for i in 0..n {
+                let (a, b) = (lot.outline[i], lot.outline[(i + 1) % n]);
+                let inward = dot(unit(left(sub(b, a))), sub(p, a));
+                assert!(
+                    inward >= -FACE_OUT - 0.01,
+                    "{p:?} outside the lot: {inward}"
+                );
+            }
+            assert!(v.position[1] <= layer::PLOT + s.lip + OVERLAY + 1e-4);
+        }
+        // Its tops face up (the glow keeps its winding), and the glow is gold.
+        for t in m.indices.chunks_exact(3) {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]);
+            if a.normal[1] != 0.0 {
+                assert!(facing(a.position, b.position, c.position, UP));
+            }
+        }
+        let glows: Vec<_> = m.vertices.iter().filter(|v| v.normal == GLOW).collect();
+        assert!(!glows.is_empty());
+        assert!(
+            glows.iter().all(|v| v.color[0] > v.color[2]),
+            "gold is warm"
+        );
+        // The middle is the lot's own colour, so the wash fades into it.
+        let mid = centroid(&lot.outline);
+        let near = |v: &&flint_render::Vertex| dist(server(v.position), mid);
+        let middle = m
+            .vertices
+            .iter()
+            .min_by(|a, b| near(a).total_cmp(&near(b)))
+            .unwrap();
+        assert_eq!(middle.color, lot.colour);
+        assert!(owned([]).indices.is_empty());
     }
 
     #[test]

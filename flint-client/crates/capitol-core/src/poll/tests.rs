@@ -96,7 +96,7 @@ impl Rig {
                     .poller
                     .in_flight(*tag)
                     .expect("sent tags are in flight");
-                assert_eq!(*request, fetch.request());
+                assert_eq!(*request, fetch.request(self.state.me()));
                 fetch
             })
             .collect()
@@ -185,6 +185,7 @@ fn answer_for(fetch: Fetch) -> RestResponse {
             total: 0,
         }),
         Fetch::Recipes => RestResponse::Recipes(RecipesResponse { recipes: vec![] }),
+        Fetch::DeedPrices => RestResponse::DeedPrices(DeedPricesResponse { prices: vec![] }),
         Fetch::Terrain => panic!("terrain is answered by hand in its test"),
     }
 }
@@ -548,14 +549,28 @@ fn the_first_zone_is_not_a_crossing() {
 }
 
 #[test]
-fn plots_are_listed_like_react() {
+fn your_plots_are_listed_like_react() {
     assert_eq!(
-        Fetch::Plots.request(),
+        Fetch::Plots.request(Some(ME)),
         RestRequest::ListPlots(ListPlotsQuery {
+            owner: Some(ME),
             limit: Some(100),
             ..Default::default()
         })
     );
+    // The rig knows who it is from `Connected`, before the snapshot goes.
+    let mut rig = Rig::new();
+    rig.feed(NetEvent::Connection(ConnectionState::Connected {
+        player_id: ME,
+    }));
+    let sent = rig.tick();
+    assert!(sent.iter().any(|(r, _)| matches!(
+        r,
+        RestRequest::ListPlots(ListPlotsQuery {
+            owner: Some(ME),
+            ..
+        })
+    )));
 }
 
 // ---------------------------------------------------------------------------
@@ -648,7 +663,10 @@ fn tags_start_above_the_games() {
         player_id: ME,
     }));
     let tags: Vec<Tag> = rig.tick().into_iter().map(|(_, tag)| tag).collect();
-    assert_eq!(tags, (FIRST_TAG..FIRST_TAG + 6).collect::<Vec<_>>());
+    assert_eq!(
+        tags,
+        (FIRST_TAG..FIRST_TAG + Fetch::SNAPSHOT.len() as Tag).collect::<Vec<_>>()
+    );
 }
 
 #[test]
