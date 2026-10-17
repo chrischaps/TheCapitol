@@ -93,11 +93,21 @@ Post-war suburbs look different:
      - *As built (#106):* the candidates are the row ends on a neighbourhood's arterial sides. Each one has a `gate` on the side line and an `at` on the arterial's centre line, at the perpendicular foot. The stream shuffles them, with one from each arterial side first, then draws a wanted count in [2, 4].
      - Neighbourhoods allocate in sector order. A later one skips candidates that clash with earlier entrances across the arterial. If that leaves it short of 2, it takes a clashing candidate and lines its `at` up exactly with the one it clashed with, so the stub slants.
      - The patterns may re-target entrances (a racetrack's rows aren't the frame's rows), but they must keep these rules. The test `entrances_keep_their_spacing` checks them over 200 seeds.
+     - *Changed in #107:* lining up exactly makes a 4-way on the arterial, and rows across an arterial differ in radius only by the warp, so the fallback fired in about 10 places a world. A clashing fallback now moves its `at` along the arterial to exactly 80 from the entrance it clashed with, on the nearer side. The neighbourhood's other entrances on that arterial move by the same amount where the rules allow, because the pattern bends the whole band of rows on that side to meet them (see 6).
 6. **Patterns.** Each pattern has a `fits(frame)` test. A seeded weighted pick chooses only among those that fit, so there is no reject-and-retry.
    - **(a) Warped parallels:**
      - fitted rows, joined by rail T-links every L ≈ 400;
      - links are offset by L/2 between neighbouring row gaps, so there are no 4-ways;
      - each row end is a U-turn, a bulb or an entrance.
+     - *As built (#107, `suburb/patterns.rs`):*
+       - **Ends.** A U-turn's apex and a bulb's far edge sit a lot depth plus half a street (`clear`, 123) in from the side line. Every combination of ends at each side is enumerated (entrances are fixed; each free row is a bulb or half a U-turn with a free neighbour), with both rail phases. A seeded pick, weighted 1 + U-turns, chooses among those whose cul-de-sacs are within `cul_de_sac_max`. If none are, the bulbs are pulled in towards their rail.
+       - **Rails.** `count = round(span / L)` rails per gap, evenly spread between the margins. Gaps alternate offsets of 0.25 and 0.75 of the spacing, so neighbouring gaps' rails meet their shared row half a spacing apart.
+       - **Roads.** Rows chained through U-turns are one road, `collector_{s}_{n}_{k}` (a racetrack is closed, starting and ending at a rail). A bulb end is its own `culdesac_{s}_{n}_{row}{l|h}` from the row's nearest rail junction, so `metrics` measures its stem from the network. Rails are `link_{s}_{n}_{gap}_{j}`. All are `local_width`.
+       - **Moved entrances.** Where `allocate_entrances` moved an entrance's `at`, every row on that side bends by the same smoothstep ramp, over max(200, 8·shift), so the stub meets the arterial square on and the spacing holds. A row with its own unmoved entrance stays straight. The #106 overlay still draws such a stub from the original gate.
+       - **Weld.** `weld_junctions` snaps an end to the *first* vertex of a segment within `SNAP`, even when the next is exact (#114). So a row keeps its other vertices at least 0.6·STEP (in u) from a rail's.
+       - **`StreetMeta`** (role Row/Link/CulDeSac, fronted sides, bulb centre, sector and nbhd) comes back in `SuburbPlan::meta`, one per road. Rows and cul-de-sacs are fronted both sides; rails neither, so the rows own the corners. A row's entrance stub runs through the buffer, where #108 must lay no lots.
+       - **Pattern pick.** `choose` takes one draw from the stream whatever the outcome. (b) and (c) don't fit until #109 and #110, so `force_pattern` set to one of them falls back to (a).
+       - At seeds 42, 7, 1234 and 99999: audit clean, no 4-ways, junctions ≥ 71.6°, T spacing ≥ 136 (p10 ≥ 173), stems ≤ 290, 100% connected, parallel spacing median 246, p5 ≥ 231.
    - **(b) Loops and lollipops:**
      - an inset racetrack collector, with one lot row between it and the edge, backing onto the buffer;
      - opposed combs of cul-de-sacs inside it, about 230 long, roughly 12 lots each.
@@ -143,7 +153,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - `street_plan::{resample, bulb, end_direction, distance_along, crosses, keeps_clear, self_crosses, sharpest_turn, weld_junctions, audit}`
   - `lot_clearance::finish_lots`
 - **Wiring:**
-  - `match suburban_params.layout` in `generate_all_roads_with_params` (roads) and in `generate_suburban_plots_internal` (lots). Until #107 and #108, `Neighbourhood` returns no suburban roads and no suburban lots.
+  - `match suburban_params.layout` in `generate_all_roads_with_params` (roads) and in `generate_suburban_plots_internal` (lots). Since #107 `Neighbourhood` lays streets; until #108 it lays no suburban lots.
   - Pass the plan as a local, so `version()` is unaffected.
 - **Params (#105):**
   - `SuburbanGenParams::layout` (`legacy` or `neighbourhood` on the wire) and `::neighbourhood: NeighbourhoodParams`, both `#[serde(default)]`, so `world_config` rows and admin PUTs from before #105 still load.
@@ -160,7 +170,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 - **Reading the SVG:** roads are drawn at true width and coloured by role. Suburban lots are shaded by area, with the street edge darker. Lots `finish_lots` trimmed are edged orange, and lots it dropped are drawn dashed magenta at their generated shape. A red ring marks each place that breaks a target; hover it in a browser for the reason. For the Neighbourhood layout (#106), the view also draws each frame dashed, with its rows dotted, a label giving the row count and lot depth, the green buffers, greenways and edge strips, and each entrance as a stub from its gate to a dot on the arterial.
 - **Definitions that also work for Legacy (`suburb/metrics.rs`):**
   - **neighbourhood:** a 45° sector between arterials;
-  - **entrance:** a vertex shared by a suburban road and any other road;
+  - **entrance:** a vertex shared by a suburban road and any other road, counted in the sector its suburban street comes from (#107; it sits on the arterial's centre line, which rounding used to give to either side);
   - **junction:** three or more links from at least two roads, so the vertex where a bulb closes on its own stem is not a T;
   - **cul-de-sac:** a suburban road ending in a bulb or a dead end, with its stem measured to where the bulb closes;
   - **parallel spacing:** sampled every 25 along each street, as the distance to the nearest street across it, when that street runs within 20°;

@@ -8,7 +8,8 @@
 //! What counts as a neighbourhood, a cul-de-sac and green ground has to work
 //! for the Legacy plan too, which has none of those as such:
 //! - **neighbourhood:** the 45° sector between two arterials;
-//! - **entrance:** a vertex shared by a suburban road and any other road;
+//! - **entrance:** a vertex shared by a suburban road and any other road,
+//!   counted in the sector its suburban street comes from;
 //! - **cul-de-sac:** a suburban road that ends in a bulb or a dead end;
 //! - **green:** open ground within `GREEN_STRIP` of an arterial's edge. Parks
 //!   join it once the generator makes them (#111).
@@ -101,6 +102,9 @@ pub struct Plan<'a> {
     /// ...and what `finish_lots` makes of each: `None` where it's dropped.
     pub cleared: &'a [Option<[P; 4]>],
     pub scope: Scope,
+    /// Whether to sample coverage. It's the slow part in a debug build, so
+    /// the street tests leave it out.
+    pub coverage: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -475,7 +479,10 @@ pub fn measure(plan: &Plan) -> Measured {
             continue;
         }
         if scope.contains_padded(node.at, EDGE_PAD) {
-            let s = scope.sector_of(node.at);
+            // An entrance sits on the arterial's centre line, between two
+            // sectors; it belongs to the one its suburban street comes from.
+            let from = node.links.iter().find(|l| suburban(l.road)).map_or(node.at, |l| g.nodes[l.to].at);
+            let s = scope.sector_of(from);
             if let Some(k) = sectors.iter().position(|&x| x == s) {
                 m.entrances[k] += 1;
             }
@@ -623,7 +630,11 @@ pub fn measure(plan: &Plan) -> Measured {
     // Coverage. Every lot counts here, so urban and rural lots over the line
     // aren't read as gaps.
     let (lo, hi) = scope.bounds();
-    let cover = coverage(plan.lots, roads, &all_roads, &scope, (lo, hi), |p| scope.contains(p));
+    let cover = if plan.coverage {
+        coverage(plan.lots, roads, &all_roads, &scope, (lo, hi), |p| scope.contains(p))
+    } else {
+        [0; 4]
+    };
     let total = cover.iter().sum::<usize>();
     if total > 0 {
         let share = |k: usize| Some(cover[k] as f64 / total as f64);
@@ -742,7 +753,7 @@ mod tests {
     fn a_two_by_three_block_has_no_overlap() {
         let (roads, lots) = block();
         let cleared: Vec<_> = lots.iter().map(|l| Some(l.corners)).collect();
-        let plan = Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope: block_scope() };
+        let plan = Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope: block_scope(), coverage: true };
         let measured = measure(&plan);
         let m = measured.metrics;
         assert_eq!(m.overlaps, 0);

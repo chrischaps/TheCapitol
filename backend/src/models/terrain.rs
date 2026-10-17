@@ -63,8 +63,8 @@ pub enum SuburbLayout {
     /// Collectors and rejection-sampled local streets, lots along them.
     #[default]
     Legacy,
-    /// Post-war neighbourhoods, one pattern per neighbourhood. Until #107 it
-    /// lays no suburban roads, and until #108 no suburban lots.
+    /// Post-war neighbourhoods, one pattern per neighbourhood. Until #108 it
+    /// lays no suburban lots.
     Neighbourhood,
 }
 
@@ -844,7 +844,6 @@ impl TerrainConfig {
         let suburban_params = params.suburban_params();
         match suburban_params.layout {
             SuburbLayout::Legacy => roads.extend(self.generate_suburban_streets_with_params(&suburban_params)),
-            // Neighbourhoods and frames only so far: streets come with pattern (a), #107.
             SuburbLayout::Neighbourhood => {
                 roads.extend(super::suburb::plan(&suburban_params, (self.center_x, self.center_y)).roads)
             }
@@ -3269,14 +3268,27 @@ mod tests {
         assert_eq!(new.suburban.neighbourhood.force_pattern, Some(NeighbourhoodPattern::CentralLoop));
     }
 
-    /// Until #107 the Neighbourhood layout lays no suburban roads or lots,
-    /// and leaves the rest of the world as Legacy has it.
+    /// The default world, and the Neighbourhood layout with pattern (a)
+    /// everywhere, for the suburban street tests that hold for both (#107).
+    /// Built once: five tests share them, and the performance test runs beside them.
+    fn both_layouts() -> &'static [TerrainConfig; 2] {
+        static BOTH: std::sync::OnceLock<[TerrainConfig; 2]> = std::sync::OnceLock::new();
+        BOTH.get_or_init(|| {
+            let mut params = WorldGenParams::default();
+            params.suburban.layout = SuburbLayout::Neighbourhood;
+            params.suburban.neighbourhood.force_pattern = Some(NeighbourhoodPattern::WarpedParallels);
+            [TerrainConfig::get_default(), TerrainConfig::from_params(&params)]
+        })
+    }
+
+    /// The Neighbourhood layout lays suburban streets, but no suburban lots
+    /// until #108, and leaves the rest of the world as Legacy has it.
     #[test]
-    fn neighbourhood_layout_clears_only_the_suburb() {
+    fn neighbourhood_layout_changes_only_the_suburb() {
         let mut params = WorldGenParams::default();
         params.suburban.layout = SuburbLayout::Neighbourhood;
         let t = TerrainConfig::from_params(&params);
-        assert!(t.roads.iter().all(|r| r.road_type != RoadType::Suburban));
+        assert!(t.roads.iter().any(|r| r.road_type == RoadType::Suburban));
         assert!(t.terrain_plots.iter().all(|l| l.zone != "suburban"));
         let legacy = TerrainConfig::get_default();
         let others = |t: &TerrainConfig| t.roads.iter().filter(|r| r.road_type != RoadType::Suburban).count();
@@ -3384,13 +3396,14 @@ mod tests {
 
     #[test]
     fn test_suburban_streets_smooth() {
-        let config = TerrainConfig::get_default();
-        let suburban: Vec<_> = config.roads.iter()
-            .filter(|r| r.road_type == RoadType::Suburban)
-            .collect();
-        // Each suburban street should have many points for smooth curves
-        for road in &suburban {
-            assert!(road.points.len() >= 10, "Suburban road {} should have smooth curves (10+ points), got {}", road.id, road.points.len());
+        for config in both_layouts() {
+            let suburban: Vec<_> = config.roads.iter()
+                .filter(|r| r.road_type == RoadType::Suburban)
+                .collect();
+            // Each suburban street should have many points for smooth curves
+            for road in &suburban {
+                assert!(road.points.len() >= 10, "Suburban road {} should have smooth curves (10+ points), got {}", road.id, road.points.len());
+            }
         }
     }
 
@@ -3406,40 +3419,43 @@ mod tests {
 
     #[test]
     fn test_suburban_collector_roads_generated() {
-        let config = TerrainConfig::get_default();
-        let collectors: Vec<_> = config.roads.iter()
-            .filter(|r| r.id.starts_with("collector_"))
-            .collect();
-        // Should have collectors for each of 8 superblocks (at least 8)
-        assert!(collectors.len() >= 8, "Expected at least 8 collector roads, got {}", collectors.len());
+        for config in both_layouts() {
+            let collectors: Vec<_> = config.roads.iter()
+                .filter(|r| r.id.starts_with("collector_"))
+                .collect();
+            // Should have collectors for each of 8 superblocks (at least 8)
+            assert!(collectors.len() >= 8, "Expected at least 8 collector roads, got {}", collectors.len());
+        }
     }
 
     #[test]
     fn test_suburban_cul_de_sacs_generated() {
-        let config = TerrainConfig::get_default();
-        let culdesacs: Vec<_> = config.roads.iter()
-            .filter(|r| r.id.starts_with("culdesac_"))
-            .collect();
-        // Should have some cul-de-sacs
-        assert!(culdesacs.len() > 0, "Expected at least 1 cul-de-sac road");
+        for config in both_layouts() {
+            let culdesacs: Vec<_> = config.roads.iter()
+                .filter(|r| r.id.starts_with("culdesac_"))
+                .collect();
+            // Should have some cul-de-sacs
+            assert!(culdesacs.len() > 0, "Expected at least 1 cul-de-sac road");
+        }
     }
 
     #[test]
     fn test_suburban_streets_within_zone() {
-        let config = TerrainConfig::get_default();
-        let params = SuburbanGenParams::default();
+        for config in both_layouts() {
+            let params = SuburbanGenParams::default();
 
-        // Check that all suburban street points are within the suburban zone
-        for road in config.roads.iter().filter(|r| r.road_type == RoadType::Suburban) {
-            for (x, y) in &road.points {
-                let dist = ((x - config.center_x).powi(2) + (y - config.center_y).powi(2)).sqrt();
-                // Allow some tolerance for curves near boundaries
-                let tolerance = 50.0;
-                assert!(
-                    dist >= params.inner_radius - tolerance && dist <= params.outer_radius + tolerance,
-                    "Point ({}, {}) in road {} is outside suburban zone (dist={}, expected {}..{})",
-                    x, y, road.id, dist, params.inner_radius, params.outer_radius
-                );
+            // Check that all suburban street points are within the suburban zone
+            for road in config.roads.iter().filter(|r| r.road_type == RoadType::Suburban) {
+                for (x, y) in &road.points {
+                    let dist = ((x - config.center_x).powi(2) + (y - config.center_y).powi(2)).sqrt();
+                    // Allow some tolerance for curves near boundaries
+                    let tolerance = 50.0;
+                    assert!(
+                        dist >= params.inner_radius - tolerance && dist <= params.outer_radius + tolerance,
+                        "Point ({}, {}) in road {} is outside suburban zone (dist={}, expected {}..{})",
+                        x, y, road.id, dist, params.inner_radius, params.outer_radius
+                    );
+                }
             }
         }
     }
@@ -3799,61 +3815,62 @@ mod tests {
     fn test_no_roads_terminate_at_outer_boundary() {
         // This test verifies that no suburban roads have endpoints at the outer boundary
         // of the suburban zone (which would indicate erroneous emergency connectors)
-        let config = TerrainConfig::get_default();
-        let params = SuburbanGenParams::default();
+        for config in both_layouts() {
+            let params = SuburbanGenParams::default();
 
-        let outer_boundary_tolerance = 20.0; // Within 20 units of outer boundary
+            let outer_boundary_tolerance = 20.0; // Within 20 units of outer boundary
 
-        // Calculate the 8 "corner" positions at the outer boundary (where arterials intersect)
-        let corner_positions: Vec<(f64, f64)> = (0..8)
-            .map(|i| {
-                let angle = i as f64 * PI / 4.0;
-                (
-                    config.center_x + params.outer_radius * angle.cos(),
-                    config.center_y + params.outer_radius * angle.sin(),
-                )
-            })
-            .collect();
+            // Calculate the 8 "corner" positions at the outer boundary (where arterials intersect)
+            let corner_positions: Vec<(f64, f64)> = (0..8)
+                .map(|i| {
+                    let angle = i as f64 * PI / 4.0;
+                    (
+                        config.center_x + params.outer_radius * angle.cos(),
+                        config.center_y + params.outer_radius * angle.sin(),
+                    )
+                })
+                .collect();
 
-        let mut problematic_roads = Vec::new();
+            let mut problematic_roads = Vec::new();
 
-        for road in config.roads.iter().filter(|r| r.road_type == RoadType::Suburban) {
-            // Check first and last points
-            let endpoints = [road.points.first(), road.points.last()];
+            for road in config.roads.iter().filter(|r| r.road_type == RoadType::Suburban) {
+                // Check first and last points
+                let endpoints = [road.points.first(), road.points.last()];
 
-            for endpoint_opt in endpoints.iter() {
-                if let Some(&(ex, ey)) = *endpoint_opt {
-                    // Check if this endpoint is near the outer boundary
-                    let dist_from_center = ((ex - config.center_x).powi(2) + (ey - config.center_y).powi(2)).sqrt();
-                    let dist_from_outer = (dist_from_center - params.outer_radius).abs();
+                for endpoint_opt in endpoints.iter() {
+                    if let Some(&(ex, ey)) = *endpoint_opt {
+                        // Check if this endpoint is near the outer boundary
+                        let dist_from_center = ((ex - config.center_x).powi(2) + (ey - config.center_y).powi(2)).sqrt();
+                        let dist_from_outer = (dist_from_center - params.outer_radius).abs();
 
-                    if dist_from_outer < outer_boundary_tolerance {
-                        // Check if it's near one of the arterial corner positions
-                        for (i, &(cx, cy)) in corner_positions.iter().enumerate() {
-                            let dist_to_corner = ((ex - cx).powi(2) + (ey - cy).powi(2)).sqrt();
-                            if dist_to_corner < 50.0 {
-                                problematic_roads.push((road.id.clone(), i, ex, ey));
+                        if dist_from_outer < outer_boundary_tolerance {
+                            // Check if it's near one of the arterial corner positions
+                            for (i, &(cx, cy)) in corner_positions.iter().enumerate() {
+                                let dist_to_corner = ((ex - cx).powi(2) + (ey - cy).powi(2)).sqrt();
+                                if dist_to_corner < 50.0 {
+                                    problematic_roads.push((road.id.clone(), i, ex, ey));
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Report any problematic roads
-        for (road_id, corner_idx, x, y) in &problematic_roads {
-            println!(
-                "WARNING: Road {} has endpoint ({:.0}, {:.0}) near outer boundary corner {}",
-                road_id, x, y, corner_idx
+            // Report any problematic roads
+            for (road_id, corner_idx, x, y) in &problematic_roads {
+                println!(
+                    "WARNING: Road {} has endpoint ({:.0}, {:.0}) near outer boundary corner {}",
+                    road_id, x, y, corner_idx
+                );
+            }
+
+            assert!(
+                problematic_roads.is_empty(),
+                "Found {} roads with endpoints at outer boundary corners: {:?}",
+                problematic_roads.len(),
+                problematic_roads.iter().map(|(id, _, _, _)| id.clone()).collect::<Vec<_>>()
             );
         }
-
-        assert!(
-            problematic_roads.is_empty(),
-            "Found {} roads with endpoints at outer boundary corners: {:?}",
-            problematic_roads.len(),
-            problematic_roads.iter().map(|(id, _, _, _)| id.clone()).collect::<Vec<_>>()
-        );
     }
 
     #[test]

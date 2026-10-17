@@ -771,7 +771,7 @@ mod tests {
                 outer: params.suburban_outer_radius,
                 sector,
             };
-            let plan = metrics::Plan { roads: &t.roads, lots: &t.terrain_plots, before: &before, cleared: &cleared, scope };
+            let plan = metrics::Plan { roads: &t.roads, lots: &t.terrain_plots, before: &before, cleared: &cleared, scope, coverage: true };
             let measured = metrics::measure(&plan);
             let mut m = measured.metrics;
             (m.layout, m.seed, m.gen_ms) = (layout.clone(), seed, gen_ms);
@@ -844,7 +844,7 @@ mod tests {
         let lots = vec![lot];
         let cleared = vec![Some(lots[0].corners)];
         let scope = Scope { center: (0.0, 0.0), inner: 1600.0, outer: 2400.0, sector: Some(0) };
-        let measured = metrics::measure(&metrics::Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope });
+        let measured = metrics::measure(&metrics::Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope, coverage: true });
         let viol = metrics::violations(&measured.metrics);
         let view = View {
             title: "Test".into(),

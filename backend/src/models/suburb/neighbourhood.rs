@@ -11,8 +11,8 @@
 //!   neighbourhood `n` everything else from `stream(seed, [s, n])`. Changing
 //!   one neighbourhood then leaves every other frame as it was.
 //! - **Entrances.** 2–4 per neighbourhood, at row ends on its arterial sides,
-//!   at least 150 apart. Across an arterial, entrances either line up exactly
-//!   or sit at least 80 apart along it.
+//!   at least 150 apart. Across an arterial, entrances sit at least 80
+//!   apart along it (lining up exactly would also do, but makes a 4-way).
 
 use std::f64::consts::FRAC_PI_4;
 
@@ -284,8 +284,13 @@ pub(crate) fn clash(a: &Entrance, b: &Entrance) -> bool {
 /// Pick each neighbourhood's entrances from its candidates, in sector order.
 /// An earlier neighbourhood's entrances stand; a later one skips candidates
 /// that clash with them across the arterial. If that leaves it short of two,
-/// it takes a clashing one and lines it up exactly with the one it clashed
-/// with: the stub to the arterial slants, but no target breaks.
+/// it takes a clashing one and moves its `at` along the arterial to exactly
+/// `ENTRANCE_OFFSET` from the one it clashed with, on whichever side is
+/// nearer. Lining it up exactly would also keep the rules, but it makes a 4-way.
+///
+/// The pattern bends the whole band of rows on that side to meet a moved
+/// entrance square on (#107), so the neighbourhood's other entrances on that
+/// arterial move by the same amount, wherever that keeps the rules.
 fn allocate_entrances(all: &mut [Neighbourhood], candidates: Vec<(Vec<Entrance>, usize)>) {
     let mut placed: Vec<Entrance> = Vec::new();
     for (n, (c, want)) in all.iter_mut().zip(candidates) {
@@ -296,25 +301,53 @@ fn allocate_entrances(all: &mut [Neighbourhood], candidates: Vec<(Vec<Entrance>,
                 mine.push(e.clone());
             }
         }
+        // Each arterial's move, once one entrance on it has had to move.
+        let mut moves: Vec<(u8, f64)> = Vec::new();
         for e in &c {
             if mine.len() >= MIN_ENTRANCES {
                 break;
             }
-            if mine.contains(e) || !spaced(&mine, e) {
+            if mine.iter().any(|m| m.gate == e.gate) || !spaced(&mine, e) {
                 continue;
             }
-            let mut e = e.clone();
-            if let Some(p) = placed.iter().find(|p| clash(p, &e)) {
-                (e.at, e.along) = (p.at, p.along);
+            let Some(p) = placed.iter().find(|p| clash(p, e)) else { continue };
+            let toward = if e.along >= p.along { 1.0 } else { -1.0 };
+            // The nearer side first; the other if that clashes with another.
+            let moved = [toward, -toward].into_iter().map(|sign| shifted(e, p.along + sign * ENTRANCE_OFFSET, n.frame.center));
+            if let Some(m) = moved.into_iter().find(|m| !placed.iter().any(|q| clash(q, m))) {
+                if !moves.iter().any(|&(a, _)| a == e.arterial) {
+                    moves.push((e.arterial, m.along - e.along));
+                }
+                mine.push(m);
             }
-            // Lining up with one may clash with another; leave it out then.
-            if !placed.iter().any(|p| clash(p, &e)) {
-                mine.push(e);
+        }
+        for i in 0..mine.len() {
+            let e = &mine[i];
+            let Some(&(_, by)) = moves.iter().find(|&&(a, _)| a == e.arterial) else { continue };
+            if is_foot(e, n.frame.center) {
+                let m = shifted(e, e.along + by, n.frame.center);
+                if !placed.iter().any(|q| clash(q, &m)) {
+                    mine[i] = m;
+                }
             }
         }
         placed.extend(mine.iter().cloned());
         n.entrances = mine;
     }
+}
+
+/// Whether an entrance's `at` is still its gate's foot on the arterial.
+fn is_foot(e: &Entrance, center: P) -> bool {
+    let a = e.arterial as f64 * FRAC_PI_4;
+    let along = (e.gate.0 - center.0) * a.cos() + (e.gate.1 - center.1) * a.sin();
+    (along - e.along).abs() < ALIGNED
+}
+
+/// `e` with its `at` moved along the arterial to `along`.
+fn shifted(e: &Entrance, along: f64, center: P) -> Entrance {
+    let a = e.arterial as f64 * FRAC_PI_4;
+    let at = (center.0 + along * a.cos(), center.1 + along * a.sin());
+    Entrance { at, along, ..e.clone() }
 }
 
 #[cfg(test)]
