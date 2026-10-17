@@ -11,6 +11,7 @@ The Capitol is an MMO economic simulation where the economy is the primary gamep
 - `the-capitol-tdd.md` - Technical architecture, protocol spec, data models
 - `the-capitol-milestones.md` - Development roadmap (M0-M10)
 - `the-capitol-flint-client.md` - Plan and work breakdown for the 3D Flint engine client (`flint-client/`)
+- `the-capitol-suburb-v2.md` - Plan for the post-war neighbourhood suburb generator (issues labelled `suburb-v2`, #103 to #113)
 
 ## Current Focus: the Flint Client
 
