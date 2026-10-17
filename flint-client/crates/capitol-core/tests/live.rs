@@ -7,6 +7,7 @@
 //!
 //! `CAPITOL_SERVER` overrides the default `http://localhost:3000`.
 
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use capitol_core::motion::Motion;
@@ -19,6 +20,23 @@ use capitol_core::state::{GameState, StateEvent, Trade, TradeEvent, PARTNER_LEFT
 
 const WAIT: Duration = Duration::from_secs(10);
 const FRAME: Duration = Duration::from_millis(16);
+
+/// The tests share the server, except the walk, which times it. The other
+/// live sessions on a debug backend can hold up a walk by more than the
+/// prediction's window (#98).
+static SERVER: RwLock<()> = RwLock::new(());
+
+fn shared() -> RwLockReadGuard<'static, ()> {
+    SERVER
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn alone() -> RwLockWriteGuard<'static, ()> {
+    SERVER
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn net() -> Net {
     let base = std::env::var("CAPITOL_SERVER").unwrap_or_else(|_| "http://localhost:3000".into());
@@ -57,6 +75,7 @@ fn rest(net: &Net, request: RestRequest, tag: Tag) -> Result<RestResponse, RestE
 #[test]
 #[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
 fn terrain_is_fetched_gzipped_then_revalidated() {
+    let _server = shared();
     let net = net();
     // No token: /terrain is public. (That gzip is offered is checked against
     // the mock in tests/net.rs.)
@@ -94,6 +113,7 @@ fn terrain_is_fetched_gzipped_then_revalidated() {
 #[test]
 #[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
 fn register_login_connect_and_move() {
+    let _server = shared();
     let net = net();
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -270,6 +290,7 @@ impl Mirror {
 #[test]
 #[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
 fn the_store_mirrors_a_real_session() {
+    let _server = shared();
     let net = net();
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -371,6 +392,7 @@ fn the_store_mirrors_a_real_session() {
 #[test]
 #[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
 fn the_prediction_agrees_with_a_real_walk() {
+    let _server = alone();
     let net = net();
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -393,10 +415,10 @@ fn the_prediction_agrees_with_a_real_walk() {
     let mut state = GameState::new();
     let mut motion = Motion::new();
     // Frames until `done`, drawing the local player each frame.
-    let mut frames: Vec<(f64, f64)> = Vec::new();
+    let mut frames: Vec<(Instant, f64, f64)> = Vec::new();
     let run = |state: &mut GameState,
                motion: &mut Motion,
-               frames: &mut Vec<(f64, f64)>,
+               frames: &mut Vec<(Instant, f64, f64)>,
                what: &str,
                done: &dyn Fn(&GameState, &Motion) -> bool| {
         let start = Instant::now();
@@ -409,7 +431,7 @@ fn the_prediction_agrees_with_a_real_walk() {
             if let Some(me) = state.me() {
                 motion.sample(now);
                 if let Some(pose) = motion.pose(me) {
-                    frames.push((pose.x, pose.y));
+                    frames.push((now, pose.x, pose.y));
                 }
             }
             if done(state, motion) {
@@ -456,12 +478,18 @@ fn the_prediction_agrees_with_a_real_walk() {
         settle.elapsed() > Duration::from_millis(800)
     });
 
-    let jump = frames
-        .windows(2)
-        .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
-        .fold(0.0, f64::max);
+    // How far each frame stepped beyond walking speed for its own length.
+    // A slow frame on a busy machine steps further, but only a correction
+    // (a blend or a snap) steps faster than a walk, bar the last half unit
+    // that arrival snaps across (#98).
+    let speed = motion.config().speed;
+    let (jump, excess) = frames.windows(2).fold((0.0, 0.0), |(jump, excess), w| {
+        let step = (w[1].1 - w[0].1).hypot(w[1].2 - w[0].2);
+        let walk = speed * (w[1].0 - w[0].0).as_secs_f64();
+        (f64::max(jump, step), f64::max(excess, step - walk))
+    });
     println!(
-        "{} frames, largest step {jump:.2}, lag {:?}, {} corrections",
+        "{} frames, largest step {jump:.2}, beyond a walk {excess:.4}, lag {:?}, {} corrections",
         frames.len(),
         motion.lag(),
         motion.corrections()
@@ -471,12 +499,13 @@ fn the_prediction_agrees_with_a_real_walk() {
         0,
         "the server walked where we predicted"
     );
-    // A frame is at most ~16 ms of walking (0.8 units), with slack for a
-    // slow frame on a busy machine.
-    assert!(jump < 3.0, "largest step {jump}");
+    assert!(
+        excess <= rules::ARRIVAL_EPSILON,
+        "a frame stepped {excess} beyond a walk"
+    );
     let last = frames.last().unwrap();
     assert!(
-        (last.0 - start.x).hypot(last.1 - start.y) < 1e-6,
+        (last.1 - start.x).hypot(last.2 - start.y) < 1e-6,
         "home: {last:?}"
     );
     net.disconnect();
@@ -543,6 +572,7 @@ fn has(seen: &[StateEvent], wanted: impl Fn(&TradeEvent) -> bool) -> bool {
 #[test]
 #[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
 fn two_players_trade() {
+    let _server = shared();
     let mut ada = Mirror::register("Ada");
     let mut brin = Mirror::register("Brin");
     let (ada_id, brin_id) = (ada.me(), brin.me());
@@ -631,6 +661,7 @@ fn two_players_trade() {
 fn trade_refusals_come_back_as_errors() {
     use capitol_core::protocol::ws::TradeOfferItem;
     use capitol_core::state::TradeAction;
+    let _server = shared();
 
     fn refused<'a>(seen: &'a [StateEvent], action: TradeAction) -> Option<&'a str> {
         seen.iter().find_map(|e| match e {
@@ -704,6 +735,7 @@ fn trade_refusals_come_back_as_errors() {
 #[test]
 #[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
 fn extraction_refusals_say_why() {
+    let _server = shared();
     fn refusal(seen: &[StateEvent]) -> Option<&str> {
         seen.iter().find_map(|e| match e {
             StateEvent::ExtractionFailed { reason } => Some(reason.as_str()),
@@ -806,6 +838,7 @@ fn drive_auth(
 #[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
 fn the_login_form_signs_in_out_and_back() {
     use capitol_core::auth::{Auth, Notice, Phase, Remembered};
+    let _server = shared();
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

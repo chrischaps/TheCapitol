@@ -49,7 +49,9 @@
 //! snapshot is checked against where the prediction has *been* lately: the
 //! server lags the prediction by about one round trip, so its position should
 //! lie on the trail the prediction left behind. If it's more than
-//! [`MotionConfig::reconcile_distance`] (4 units) off that trail, the
+//! [`MotionConfig::reconcile_distance`] (4 units) off that trail, and not on
+//! the way still to walk (a server that ticks the moment a move lands, or
+//! bursts through late ticks, runs ahead on the same path), the
 //! prediction moves to where the server will be by now, and the drawn position
 //! blends there over [`MotionConfig::blend_time`]. Further off than
 //! [`MotionConfig::teleport_distance`], it snaps. So does `movement_blocked`.
@@ -636,12 +638,23 @@ impl Local {
         };
         let (off, lag, on_a_walk) =
             nearest_on_trail(self.trail.as_slice(), current, since, now, sx, sy);
+        let window = config.reconcile_window.as_secs_f64();
         if off <= config.reconcile_distance {
             if on_a_walk {
-                let window = config.reconcile_window.as_secs_f64();
                 self.lag = (self.lag * 0.8 + lag * 0.2).clamp(0.0, window);
             }
             return;
+        }
+        // The server can be ahead on the way we're going. Its tick steps a
+        // whole 5 units the moment the move lands, and a server catching up
+        // on late ticks runs several at once (#98). That's the walk we
+        // predicted, early, so it's left alone, up to a window's worth of
+        // walking: the mirror of how far a slower server may fall behind.
+        if let Some((dx, dy)) = self.dest {
+            let (off, along) = off_segment(self.x, self.y, dx, dy, sx, sy);
+            if off <= config.reconcile_distance && along <= config.speed * window {
+                return;
+            }
         }
 
         // The server's position is a round trip old. If we're walking and so
@@ -737,6 +750,18 @@ fn nearest_on_trail(
         }
     }
     best
+}
+
+/// How far `(x, y)` is from the segment `a`–`b`, and how far along it from
+/// `a` its nearest point is.
+fn off_segment(ax: f64, ay: f64, bx: f64, by: f64, x: f64, y: f64) -> (f64, f64) {
+    let length = distance(ax, ay, bx, by);
+    if length == 0.0 {
+        return (distance(ax, ay, x, y), 0.0);
+    }
+    let (ux, uy) = ((bx - ax) / length, (by - ay) / length);
+    let along = ((x - ax) * ux + (y - ay) * uy).clamp(0.0, length);
+    (distance(x, y, ax + ux * along, ay + uy * along), along)
 }
 
 /// `step` units from `(x, y)` toward `(dx, dy)`, stopping there.

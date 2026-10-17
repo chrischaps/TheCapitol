@@ -353,6 +353,32 @@ fn a_lag_spike_is_not_a_disagreement() {
 }
 
 #[test]
+fn a_server_ahead_on_the_same_path_is_left_alone() {
+    let mut rig = Rig::new();
+    // The server ticks the moment the move lands, then catches up on late
+    // ticks in a burst: 150 ms (7.5 units) ahead of the prediction, as seen
+    // live under load (#98).
+    let frames = play_me(&mut rig, 2500, |ms| walked(ms as f64 + 150.0).min(4100.0));
+    for &(ms, x) in &frames {
+        assert!(
+            close(x, walked(ms as f64).min(4100.0), 1e-9),
+            "{ms} ms: x = {x}"
+        );
+    }
+    assert_eq!(rig.motion.corrections(), 0);
+}
+
+#[test]
+fn a_server_far_ahead_on_the_same_path_is_caught_up() {
+    let mut rig = Rig::new();
+    // A second (50 units) ahead: more than the window allows.
+    play_me(&mut rig, 300, |ms| walked(ms as f64 + 1000.0).min(4100.0));
+    assert!(rig.motion.corrections() > 0);
+    let me = rig.pose(300, ME);
+    assert!(me.x > walked(300.0) + 10.0, "pulled ahead: {}", me.x);
+}
+
+#[test]
 fn a_walk_the_server_resumed_is_followed() {
     let mut rig = Rig::new();
     // After a reconnect the server walks on to a stored destination: east
