@@ -551,7 +551,7 @@ mod tests {
         fn new() -> Self {
             let (inventory, input) = containers();
             let mut rig = Rig {
-                ctx: egui::Context::default(),
+                ctx: theme::test_context(),
                 icons: ItemIcons::load(std::path::Path::new("no/icons/needed")),
                 inventory,
                 input,
@@ -561,7 +561,7 @@ mod tests {
                 inventory_enabled: true,
             };
             rig.frame(vec![]);
-            rig.frame(vec![]); // the theme's fonts go in on the first
+            rig.frame(vec![]); // settle the layout before the first click
             rig
         }
 
@@ -582,9 +582,7 @@ mod tests {
                 inventory_enabled,
             } = self;
             let _ = ctx.run(input, |ctx| {
-                if !theme::install(ctx) {
-                    return;
-                }
+                theme::install(ctx);
                 egui::CentralPanel::default().show(ctx, |ui| {
                     // The inventory places kits, as its panel's grid does.
                     let grids = [

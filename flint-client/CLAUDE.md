@@ -63,9 +63,9 @@ That writes `renders/capitol.png`. The camera is the rig in `scripts/camera.rhai
 
 ## The UI theme
 
-All egui panels take their look from `crates/capitol-client/src/ui/theme.rs` (P5.1, plan §4.3). It holds the colour tokens, egui's `Style` and `Visuals`, the fonts, and the parts panels are made of (`panel`, `well`, `tray`, `header`, `pill`, `primary_button`, `accent_button`, `grade_badge`, `quality_badge`, ...). **Panels use no colours or sizes of their own.** If a panel needs one that's missing, add it to `theme.rs`. `theme::install` runs at the top of `CapitolExtension::ui` and returns false on the frame its fonts go in. Draw nothing on that frame (#72).
+All egui panels take their look from `crates/capitol-client/src/ui/theme.rs` (P5.1, plan §4.3). It holds the colour tokens, egui's `Style` and `Visuals`, the fonts, and the parts panels are made of (`panel`, `well`, `tray`, `header`, `pill`, `primary_button`, `accent_button`, `grade_badge`, `quality_badge`, ...). **Panels use no colours or sizes of their own.** If a panel needs one that's missing, add it to `theme.rs`. `theme::install` runs at the top of `CapitolExtension::ui` and sets the style once.
 
-The fonts are in `fonts/`: Source Sans 3 (text) and Cinzel (titles), both OFL, with licences beside them. `fonts.toml` gives the script HUD the names `body`, `strong` and `display` (`draw_text_opts(..., #{ font: "display" })`). `theme.rs` embeds the same files for egui.
+The fonts are in `fonts/`: Source Sans 3 (text) and Cinzel (titles), both OFL, with licences beside them. Flint installs them for the script HUD and egui alike. `fonts.toml` names them `body`, `strong` and `display` (`draw_text_opts(..., #{ font: "display" })`, `FontFamily::Name("strong")`), and its `[egui]` table makes `body` egui's default face (Flint ADR 0081, #72). Don't call `set_fonts` from the game: Flint's next font install would drop it. A font that can't live in `fonts/` goes through `PlayerExtension::fonts`. Tests that draw the theme take their context from `theme::test_context()`, which loads the fonts Flint would.
 
 Review a theme change side by side with the React client, from `flint-client/` (the steps are in the file's header comment too):
 

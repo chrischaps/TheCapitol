@@ -269,7 +269,7 @@ mod tests {
     /// Runs a few frames of the panel and returns the last frame's action
     /// and the panel's rect.
     fn run(view: &View, click_at: Option<egui::Pos2>) -> (Option<Action>, Option<egui::Rect>) {
-        let ctx = egui::Context::default();
+        let ctx = theme::test_context();
         let mut panel = PlotPanel::default();
         let mut out = (None, None);
         for frame in 0..8 {
@@ -296,9 +296,7 @@ mod tests {
                 });
             }
             let _ = ctx.run(raw, |ctx| {
-                if !theme::install(ctx) {
-                    return;
-                }
+                theme::install(ctx);
                 let a = panel.show(ctx, view, None);
                 if a.is_some() {
                     out.0 = a;

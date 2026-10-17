@@ -1,6 +1,6 @@
-# Flint registers every font here under its file stem for the script HUD
-# (`draw_text(..., font)`). These aliases are the names scripts should use.
-# The egui panels get the same files from `theme.rs`, which embeds them.
+# Flint registers every font here under its file stem, for the script HUD
+# (`draw_text(..., font)`) and for egui. These aliases are the names scripts
+# and `ui/theme.rs` use.
 
 [[font]]
 name = "body"
@@ -13,3 +13,7 @@ file = "SourceSans3-Semibold.ttf"
 [[font]]
 name = "display"
 file = "Cinzel.ttf"
+
+# egui's default face, so every panel draws in Source Sans 3 (Flint ADR 0081).
+[egui]
+proportional = "body"

@@ -248,13 +248,11 @@ mod tests {
         settings: &mut Settings,
         input: egui::RawInput,
     ) -> Option<Action> {
-        let ctx = egui::Context::default();
+        let ctx = theme::test_context();
         let mut action = None;
         for raw in [egui::RawInput::default(), egui::RawInput::default(), input] {
             let _ = ctx.run(raw, |ctx| {
-                if !theme::install(ctx) {
-                    return;
-                }
+                theme::install(ctx);
                 let view = View {
                     server: Some("http://localhost:3000"),
                 };

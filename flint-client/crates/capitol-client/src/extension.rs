@@ -545,9 +545,7 @@ impl PlayerExtension for CapitolExtension {
     }
 
     fn ui(&mut self, ctx: &egui::Context) {
-        if !ui::theme::install(ctx) {
-            return; // one frame, while the fonts go in
-        }
+        ui::theme::install(ctx);
         if let Ok(mut egui) = self.shared.egui.lock() {
             // For measuring names (`cap_name_tags`), now the fonts are in.
             egui.get_or_insert_with(|| ctx.clone());

@@ -139,13 +139,11 @@ mod tests {
             )),
             ..Default::default()
         };
-        // The theme's fonts go in on the first frame, and an anchored area
-        // takes a frame to learn its size before it's placed.
+        // An anchored area takes a frame to learn its size before it's
+        // placed.
         for _ in 0..4 {
             let _ = ctx.run(raw.clone(), |ctx| {
-                if !theme::install(ctx) {
-                    return;
-                }
+                theme::install(ctx);
                 panel.show(ctx, &mut icons, c, None, 0.0);
             });
         }
@@ -162,7 +160,7 @@ mod tests {
 
     #[test]
     fn the_panel_sits_bottom_right_six_slots_wide() {
-        let ctx = egui::Context::default();
+        let ctx = theme::test_context();
         let c = inventory();
         let rect = run(&ctx, &mut InventoryPanel::default(), Some(&c));
         assert!(rect.is_positive(), "the panel was drawn");
@@ -177,7 +175,7 @@ mod tests {
 
     #[test]
     fn closed_it_draws_nothing() {
-        let ctx = egui::Context::default();
+        let ctx = theme::test_context();
         let c = inventory();
         let mut panel = InventoryPanel::default();
         panel.toggle();

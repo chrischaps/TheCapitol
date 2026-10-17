@@ -586,7 +586,7 @@ mod tests {
     /// Runs a few frames, clicking at `click` on frame 5. Returns every
     /// action asked for.
     fn run(panel: &mut TradePanel, view: &View, click: Option<egui::Pos2>) -> Vec<Action> {
-        let ctx = egui::Context::default();
+        let ctx = theme::test_context();
         let mut icons = ItemIcons::load(std::path::Path::new("no/icons/needed"));
         let mut out = Vec::new();
         for frame in 0..10 {
@@ -609,9 +609,7 @@ mod tests {
                 }
             }
             let _ = ctx.run(raw, |ctx| {
-                if !theme::install(ctx) {
-                    return;
-                }
+                theme::install(ctx);
                 out.extend(panel.show(ctx, &mut icons, view));
             });
         }

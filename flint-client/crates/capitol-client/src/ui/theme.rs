@@ -7,20 +7,18 @@
 //! `index.css`); this turns them into egui colours. The panel values are the
 //! React panels' CSS (`InventoryPanel.css`, `CraftingPanel.css`).
 //!
-//! The fonts are embedded, so a panel can't fall back to egui's default:
-//! Source Sans 3 for text (the nearest open face to the React client's
-//! Segoe UI, and clear at 11 px) and Cinzel, Roman inscriptional capitals,
-//! for titles. The same files sit in `fonts/` for the script HUD, where
-//! Flint registers them by name (`fonts/fonts.toml`).
+//! The fonts are Source Sans 3 for text (the nearest open face to the React
+//! client's Segoe UI, and clear at 11 px) and Cinzel, Roman inscriptional
+//! capitals, for titles. They're in `fonts/`, where Flint registers them for
+//! the script HUD and for egui alike, by their `fonts/fonts.toml` names, and
+//! makes `body` egui's default face (Flint ADR 0081).
 
 use crate::world::palette;
 use capitol_protocol::rules::Zone;
 use egui::epaint::Shadow;
 use egui::{
-    Color32, FontData, FontFamily, FontId, Margin, Response, RichText, Rounding, Stroke, TextStyle,
-    Ui,
+    Color32, FontFamily, FontId, Margin, Response, RichText, Rounding, Stroke, TextStyle, Ui,
 };
-use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Colours
@@ -168,11 +166,13 @@ pub mod size {
     pub const TINY: f32 = 10.0;
 }
 
-const BODY_FONT: &str = "capitol-body";
-const STRONG_FONT: &str = "capitol-strong";
-const DISPLAY_FONT: &str = "capitol-display";
+// Family names from `fonts/fonts.toml`.
+#[cfg(test)]
+const BODY_FONT: &str = "body";
+const STRONG_FONT: &str = "strong";
+const DISPLAY_FONT: &str = "display";
 
-/// Text in the body face.
+/// Text in the body face, egui's default.
 pub fn body(size: f32) -> FontId {
     FontId::proportional(size)
 }
@@ -222,76 +222,28 @@ pub fn dim(text: impl Into<String>) -> RichText {
 // Installing it
 // ---------------------------------------------------------------------------
 
-/// Makes `ctx` look like the Capitol. Call it every frame before drawing,
-/// and draw nothing when it returns false: the fonts arrive at the start of
-/// the next frame, and text in a family egui doesn't have yet panics. It's
-/// cheap once applied, and it puts the fonts back if Flint reloads its own
-/// (on a scene change, which replaces egui's fonts).
-///
-/// A workaround: Flint can't make a project font egui's default, and its
-/// font reload drops a game's own. Issue #72 removes the embedded copies,
-/// the per-frame check and the skipped frame.
-pub fn install(ctx: &egui::Context) -> bool {
+/// Makes `ctx` look like the Capitol. Call it at the top of every frame's
+/// UI; the style goes in once. The fonts are Flint's: it installs `fonts/`
+/// before the first frame, with `body` as egui's default face (the `[egui]`
+/// table in `fonts/fonts.toml`), and keeps them across its reloads.
+pub fn install(ctx: &egui::Context) {
     let id = egui::Id::new("capitol_theme");
     if ctx.data(|d| d.get_temp::<bool>(id)).is_none() {
         ctx.all_styles_mut(style);
         ctx.data_mut(|d| d.insert_temp(id, true));
     }
-    let ready = ctx.fonts(|f| {
-        f.lock()
-            .fonts
-            .definitions()
-            .font_data
-            .contains_key(BODY_FONT)
-    });
-    if !ready {
-        let mut defs = ctx.fonts(|f| f.lock().fonts.definitions().clone());
-        with_theme_fonts(&mut defs);
-        ctx.set_fonts(defs);
-        ctx.request_repaint();
-    }
-    ready
 }
 
-/// `defs` with the theme's faces added: the body face first in
-/// `Proportional`, and a family each for the semibold and the capitals.
-/// Every family keeps what `Proportional` had after it, for the glyphs our
-/// faces lack. Flint's own families (one per file in `fonts/`) stay.
-fn with_theme_fonts(defs: &mut egui::FontDefinitions) {
-    let faces: [(&str, &'static [u8]); 3] = [
-        (
-            BODY_FONT,
-            include_bytes!("../../../../fonts/SourceSans3-Regular.ttf"),
-        ),
-        (
-            STRONG_FONT,
-            include_bytes!("../../../../fonts/SourceSans3-Semibold.ttf"),
-        ),
-        (DISPLAY_FONT, include_bytes!("../../../../fonts/Cinzel.ttf")),
-    ];
-    for (name, bytes) in faces {
-        defs.font_data
-            .insert(name.to_owned(), Arc::new(FontData::from_static(bytes)));
-    }
-    let fallbacks = defs
-        .families
-        .get(&FontFamily::Proportional)
-        .cloned()
-        .unwrap_or_default();
-    for (family, face) in [
-        (FontFamily::Proportional, BODY_FONT),
-        (FontFamily::Name(STRONG_FONT.into()), STRONG_FONT),
-        (FontFamily::Name(DISPLAY_FONT.into()), DISPLAY_FONT),
-    ] {
-        let mut list = vec![face.to_owned()];
-        list.extend(
-            fallbacks
-                .iter()
-                .filter(|f| f.as_str() != BODY_FONT)
-                .cloned(),
-        );
-        defs.families.insert(family, list);
-    }
+/// A context with the fonts Flint would give it, for tests that draw the
+/// theme without a player.
+#[cfg(test)]
+pub fn test_context() -> egui::Context {
+    let ctx = egui::Context::default();
+    ctx.set_fonts(flint_player::project_font_definitions(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scenes/capitol.scene.toml"
+    )));
+    ctx
 }
 
 /// egui's `Style` and `Visuals`, from the tokens.
@@ -947,7 +899,7 @@ mod tests {
 
     /// Draws `add` in a frame, then clicks at `at(rect)` of what it drew.
     fn click(add: &mut dyn FnMut(&mut Ui) -> Response, at: impl Fn(egui::Rect) -> egui::Pos2) {
-        let ctx = egui::Context::default();
+        let ctx = test_context();
         let rect = std::cell::Cell::new(egui::Rect::NOTHING);
         let mut frame = |events: Vec<egui::Event>| {
             let raw = egui::RawInput {
@@ -955,9 +907,7 @@ mod tests {
                 ..Default::default()
             };
             let _ = ctx.run(raw, |ctx| {
-                if !install(ctx) {
-                    return;
-                }
+                install(ctx);
                 egui::CentralPanel::default().show(ctx, |ui| rect.set(add(ui).rect));
             });
         };
@@ -1008,41 +958,29 @@ mod tests {
         assert_eq!(v, 2);
     }
 
-    /// Every family the theme names exists once it's installed: an unknown
-    /// family panics when egui lays text out in it.
+    /// Every family the theme names is one `fonts/fonts.toml` gives Flint,
+    /// and `body` leads egui's default: an unknown family panics when egui
+    /// lays text out in it. Text lays out on the first frame.
     #[test]
-    fn installed_fonts_lay_out() {
-        let ctx = egui::Context::default();
-        assert!(!run(&ctx), "the fonts can't be ready on the first frame");
-        assert!(run(&ctx));
-        fn run(ctx: &egui::Context) -> bool {
-            let mut ready = false;
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                ready = install(ctx);
-                if !ready {
-                    return;
-                }
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    ui.label(title("The Capitol", size::TITLE));
-                    ui.label(heading("Inventory"));
-                    ui.label(label("Email"));
-                    ui.label(text("Fiber ×12"));
-                });
+    fn the_theme_draws_in_flints_fonts_from_the_first_frame() {
+        let ctx = test_context();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            install(ctx);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.label(title("The Capitol", size::TITLE));
+                ui.label(heading("Inventory"));
+                ui.label(label("Email"));
+                ui.label(text("Fiber ×12"));
             });
-            ready
-        }
+        });
         ctx.fonts(|f| {
             let fonts = f.lock();
             let families = &fonts.fonts.definitions().families;
-            assert_eq!(families[&FontFamily::Proportional][0], BODY_FONT);
-            assert_eq!(
-                families[&FontFamily::Name(STRONG_FONT.into())][0],
-                STRONG_FONT
-            );
-            assert_eq!(
-                families[&FontFamily::Name(DISPLAY_FONT.into())][0],
-                DISPLAY_FONT
-            );
+            let face = |name: &str| families[&FontFamily::Name(name.into())][0].clone();
+            assert_eq!(face(BODY_FONT), "SourceSans3-Regular");
+            assert_eq!(families[&FontFamily::Proportional][0], face(BODY_FONT));
+            assert_eq!(face(STRONG_FONT), "SourceSans3-Semibold");
+            assert_eq!(face(DISPLAY_FONT), "Cinzel");
         });
     }
 }

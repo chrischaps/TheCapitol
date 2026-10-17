@@ -676,7 +676,7 @@ mod tests {
         beside: Option<egui::Rect>,
         click_at: Option<egui::Pos2>,
     ) -> Option<Action> {
-        let ctx = egui::Context::default();
+        let ctx = theme::test_context();
         let mut icons = ItemIcons::load(std::path::Path::new("no/icons/needed"));
         let mut out = None;
         for frame in 0..8 {
@@ -699,9 +699,7 @@ mod tests {
                 }
             }
             let _ = ctx.run(raw, |ctx| {
-                if !theme::install(ctx) {
-                    return;
-                }
+                theme::install(ctx);
                 if let Some(a) = panel.show(ctx, &mut icons, view, beside) {
                     out = Some(a);
                 }
