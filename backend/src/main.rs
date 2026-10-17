@@ -15,6 +15,7 @@ mod config;
 mod engine;
 mod error;
 mod middleware;
+mod migrations;
 mod models;
 mod openapi;
 mod routes;
@@ -51,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Connected to PostgreSQL");
 
     // Run migrations
-    sqlx::migrate!("./migrations").run(&db_pool).await?;
+    migrations::run(&db_pool).await?;
     tracing::info!("Migrations complete");
 
     // Redis connection
