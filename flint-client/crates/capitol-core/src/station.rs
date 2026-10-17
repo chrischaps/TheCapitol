@@ -29,7 +29,7 @@ use capitol_protocol::rules::{self, STATION_INTERACTION_RANGE, STATION_MIN_SPACI
 use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
 
-use crate::state::{GameState, StateEvent};
+use crate::state::{answers, GameState, StateEvent};
 
 pub mod visit;
 pub use visit::{approach, is_storage, recipes_at, Visit};
@@ -235,10 +235,10 @@ impl Placing {
                     });
                     self.done = true;
                 }
-                // The socket's `error` names no command. While a placement is
-                // out, it's taken as the answer, as React's toast takes it. A
-                // workaround until errors say which command failed (#89).
-                (StateEvent::ServerError { message }, Phase::Asking { .. }) => {
+                // A refused placement (#89). Errors for other commands aren't ours.
+                (StateEvent::ServerError { message, command }, Phase::Asking { .. })
+                    if answers(command, "place_station") =>
+                {
                     self.notes.push(Note::Failed(message.clone()));
                     self.phase = Phase::Aiming;
                 }
@@ -527,8 +527,18 @@ mod tests {
             let t0 = Instant::now();
             let mut p = placing();
             p.place([1120.0, 1040.0], &state, t0).unwrap();
+            // A trade refused meanwhile isn't the placement's answer (#89).
+            let other = StateEvent::ServerError {
+                message: "That player is offline".into(),
+                command: "trade_initiate".into(),
+            };
+            p.observe(&[other], &state);
+            assert!(matches!(p.phase(), Phase::Asking { .. }));
+            assert!(p.take_notes().is_empty());
+
             let refused = StateEvent::ServerError {
                 message: "Too far to place station".into(),
+                command: "place_station".into(),
             };
             p.observe(&[refused], &state);
             assert_eq!(*p.phase(), Phase::Aiming);

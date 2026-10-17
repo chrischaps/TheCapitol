@@ -161,3 +161,16 @@ fn unit_variants_are_just_a_tag() {
 fn unknown_types_are_rejected() {
     assert!(serde_json::from_str::<ServerMessage>(r#"{"type":"teleported"}"#).is_err());
 }
+
+#[test]
+fn an_error_from_an_older_server_names_no_command() {
+    // Before #89, `error` carried only `message`.
+    let msg: ServerMessage = serde_json::from_str(r#"{"type":"error","message":"Too far away"}"#).unwrap();
+    assert_eq!(
+        msg,
+        ServerMessage::Error {
+            message: "Too far away".into(),
+            command: String::new(),
+        }
+    );
+}

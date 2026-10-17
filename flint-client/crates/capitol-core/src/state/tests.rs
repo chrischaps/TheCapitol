@@ -353,11 +353,13 @@ fn error_is_reported() {
     let mut state = connected();
     let events = state.apply_ws(&M::Error {
         message: "Too far from node".into(),
+        command: "extract".into(),
     });
     assert_eq!(
         events,
         vec![StateEvent::ServerError {
-            message: "Too far from node".into()
+            message: "Too far from node".into(),
+            command: "extract".into(),
         }]
     );
 }

@@ -9,9 +9,8 @@
 //!   React leaves the panel open, and every move then fails with "Too far".
 //! - **Refused:** the server answers a refused `open_station` with
 //!   `error{message}` ("Not your station", "Too far from station"), which
-//!   [`Visit::take_notes`] hands on. The error names no command, so one
-//!   that arrives while an open is out is taken as its answer, as
-//!   [`super::Placing`] does (#89).
+//!   [`Visit::take_notes`] hands on. Only an error naming `open_station`
+//!   counts (#89).
 
 use std::time::{Duration, Instant};
 
@@ -20,7 +19,7 @@ use uuid::Uuid;
 
 use super::in_reach;
 use crate::catalog;
-use crate::state::{GameState, StateEvent};
+use crate::state::{answers, GameState, StateEvent};
 
 /// How long an `open_station` may go unanswered. The server answers at
 /// once, with `station_opened` or `error`.
@@ -145,7 +144,9 @@ impl Visit {
                     self.closing = None;
                 }
                 StateEvent::StationClosed => self.closing = None,
-                StateEvent::ServerError { message } if self.asked.is_some() => {
+                StateEvent::ServerError { message, command }
+                    if self.asked.is_some() && answers(command, "open_station") =>
+                {
                     self.asked = None;
                     self.notes.push(Note::Refused(message.clone()));
                 }
@@ -351,8 +352,18 @@ mod tests {
         let mut v = Visit::default();
         let now = Instant::now();
         v.click(BENCH, &state, now);
+        // Another command's error while the open is out isn't its answer (#89).
+        let changes = state.apply_ws(&M::Error {
+            message: "Slot is occupied".into(),
+            command: "move_item".into(),
+        });
+        v.observe(&changes, &state, now);
+        assert!(v.take_notes().is_empty());
+        assert!(v.asked().is_some());
+
         let changes = state.apply_ws(&M::Error {
             message: "Not your station".into(),
+            command: "open_station".into(),
         });
         v.observe(&changes, &state, now);
         assert_eq!(
@@ -364,6 +375,7 @@ mod tests {
         // An error with nothing asked isn't ours.
         let changes = state.apply_ws(&M::Error {
             message: "Item not found".into(),
+            command: String::new(),
         });
         v.observe(&changes, &state, now);
         assert!(v.take_notes().is_empty());

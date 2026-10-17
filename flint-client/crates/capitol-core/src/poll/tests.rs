@@ -507,6 +507,7 @@ fn rules() -> Vec<(&'static str, Start, Vec<NetEvent>, Vec<Fetch>)> {
             Settled,
             vec![NetEvent::Ws(M::Error {
                 message: "Too far".into(),
+                command: "place_station".into(),
             })],
             vec![],
         ),

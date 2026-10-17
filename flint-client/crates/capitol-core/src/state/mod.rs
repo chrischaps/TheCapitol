@@ -105,6 +105,13 @@ pub struct Yield {
     pub quality: i32,
 }
 
+/// Whether an `error` naming `error_command` answers a `command` we sent
+/// (both `ClientMessage` tags). An error from a server older than #89 names
+/// no command, so it's taken as the answer to whatever is out.
+pub fn answers(error_command: &str, command: &str) -> bool {
+    error_command.is_empty() || error_command == command
+}
+
 /// A change the store made, for the UI and the world to react to. The state
 /// itself is already updated when these come out.
 #[derive(Debug, Clone, PartialEq)]
@@ -116,8 +123,11 @@ pub enum StateEvent {
     /// first `Connected` and after every reconnect.
     SnapshotStale,
     /// The server's `error` message, usually a rejected command.
+    /// `command` is the refused message's `"type"` (`"place_station"`),
+    /// empty from a server older than #89. Test it with [`answers`].
     ServerError {
         message: String,
+        command: String,
     },
 
     /// A player came online (or into the snapshot after a reconnect).
@@ -344,11 +354,12 @@ impl GameState {
             M::AuthOk { player_id } => self.me = Some(*player_id),
             // The net layer turns these into connection states.
             M::AuthError { .. } | M::Subscribed { .. } => {}
-            M::Error { message } => {
+            M::Error { message, command } => {
                 out.push(StateEvent::ServerError {
                     message: message.clone(),
+                    command: command.clone(),
                 });
-                self.trade_error(message, &mut out);
+                self.trade_error(message, command, &mut out);
             }
 
             M::Positions { players } => self.positions(players, &mut out),

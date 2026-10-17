@@ -134,8 +134,16 @@ pub enum ServerMessage {
     PlayerJoined { player: PlayerPosition },
     #[serde(rename = "player_left")]
     PlayerLeft { player_id: Uuid },
+    /// A command was refused. Goes to the sender only.
     #[serde(rename = "error")]
-    Error { message: String },
+    Error {
+        message: String,
+        /// The refused command's `"type"` ([`ClientMessage::type_name`], e.g.
+        /// `"place_station"`), so a client with several commands out can tell
+        /// which one this answers. Empty from a server older than #89.
+        #[serde(default)]
+        command: String,
+    },
     // M2: Extraction events
     #[serde(rename = "extraction_started")]
     ExtractionStarted {

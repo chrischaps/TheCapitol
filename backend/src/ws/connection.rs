@@ -130,6 +130,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
+                            // Every `error` below names the command it refuses (#89).
+                            let command = client_msg.type_name();
                             match client_msg {
                                 ClientMessage::Subscribe { channel } => {
                                     if channel == "position" {
@@ -216,6 +218,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             let _ = sender.send(Message::Text(
                                                 serde_json::to_string(&ServerMessage::Error {
                                                     message: "Invalid item ID".to_string(),
+                                                    command: command.into(),
                                                 }).unwrap().into()
                                             )).await;
                                             continue;
@@ -227,6 +230,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             let _ = sender.send(Message::Text(
                                                 serde_json::to_string(&ServerMessage::Error {
                                                     message: "Invalid container ID".to_string(),
+                                                    command: command.into(),
                                                 }).unwrap().into()
                                             )).await;
                                             continue;
@@ -247,6 +251,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             let _ = sender.send(Message::Text(
                                                 serde_json::to_string(&ServerMessage::Error {
                                                     message: e,
+                                                    command: command.into(),
                                                 }).unwrap().into()
                                             )).await;
                                         }
@@ -260,6 +265,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             let _ = sender.send(Message::Text(
                                                 serde_json::to_string(&ServerMessage::Error {
                                                     message: "Invalid kit item ID".to_string(),
+                                                    command: command.into(),
                                                 }).unwrap().into()
                                             )).await;
                                             continue;
@@ -298,7 +304,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                         Err(e) => {
                                             let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error { message: e }).unwrap().into()
+                                                serde_json::to_string(&ServerMessage::Error { message: e, command: command.into() }).unwrap().into()
                                             )).await;
                                         }
                                     }
@@ -310,6 +316,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             let _ = sender.send(Message::Text(
                                                 serde_json::to_string(&ServerMessage::Error {
                                                     message: "Invalid station ID".to_string(),
+                                                    command: command.into(),
                                                 }).unwrap().into()
                                             )).await;
                                             continue;
@@ -330,7 +337,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                         Err(e) => {
                                             let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error { message: e.message() }).unwrap().into()
+                                                serde_json::to_string(&ServerMessage::Error { message: e.message(), command: command.into() }).unwrap().into()
                                             )).await;
                                         }
                                     }
@@ -342,6 +349,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             let _ = sender.send(Message::Text(
                                                 serde_json::to_string(&ServerMessage::Error {
                                                     message: "Invalid station ID".to_string(),
+                                                    command: command.into(),
                                                 }).unwrap().into()
                                             )).await;
                                             continue;
@@ -361,7 +369,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                         Err(e) => {
                                             let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error { message: e }).unwrap().into()
+                                                serde_json::to_string(&ServerMessage::Error { message: e, command: command.into() }).unwrap().into()
                                             )).await;
                                         }
                                     }
@@ -419,6 +427,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             let _ = sender.send(Message::Text(
                                                 serde_json::to_string(&ServerMessage::Error {
                                                     message: "Invalid player ID".to_string(),
+                                                    command: command.into(),
                                                 }).unwrap().into()
                                             )).await;
                                             continue;
@@ -448,7 +457,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         Ok(tuples) => tuples,
                                         Err(message) => {
                                             let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error { message }).unwrap().into()
+                                                serde_json::to_string(&ServerMessage::Error { message, command: command.into() }).unwrap().into()
                                             )).await;
                                             continue;
                                         }
@@ -482,7 +491,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             Err(e) => {
                                                 tracing::debug!("Trade accept failed: {}", e);
                                                 let _ = sender.send(Message::Text(
-                                                    serde_json::to_string(&ServerMessage::Error { message: e }).unwrap().into()
+                                                    serde_json::to_string(&ServerMessage::Error { message: e, command: command.into() }).unwrap().into()
                                                 )).await;
                                                 (false, None)
                                             }
@@ -760,9 +769,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::TradeCancelled { trade_id, reason };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
-                    Ok(GameEvent::TradeFailed { player_id: pid, reason }) => {
+                    Ok(GameEvent::TradeFailed { player_id: pid, command, reason }) => {
                         if pid == player_id {
-                            let msg = ServerMessage::Error { message: reason };
+                            let msg = ServerMessage::Error { message: reason, command: command.into() };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }

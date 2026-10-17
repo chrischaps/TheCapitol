@@ -807,9 +807,15 @@ fn losing_the_connection_ends_everything() {
 // Refusals (B5, #47): the server answers a refused command with `error`
 // ---------------------------------------------------------------------------
 
+/// An `error` from a server older than #89, which names no command.
 fn error(message: &str) -> M {
+    error_for("", message)
+}
+
+fn error_for(command: &str, message: &str) -> M {
     M::Error {
         message: message.into(),
+        command: command.into(),
     }
 }
 
@@ -826,7 +832,8 @@ fn a_refused_request_goes_idle_with_the_servers_reason() {
     state.trade_initiate(Instant::now(), BRIN).unwrap();
     let events = state.apply_ws(&error("Target player is already in a trade"));
     assert!(events.contains(&StateEvent::ServerError {
-        message: "Target player is already in a trade".into()
+        message: "Target player is already in a trade".into(),
+        command: String::new(),
     }));
     assert_eq!(
         trades(events),
@@ -904,10 +911,29 @@ fn an_error_with_nothing_waiting_is_not_a_trade_event() {
     assert_eq!(
         events,
         vec![StateEvent::ServerError {
-            message: "Slot is occupied".into()
+            message: "Slot is occupied".into(),
+            command: String::new(),
         }]
     );
     assert!(state.open_trade().is_some());
+}
+
+#[test]
+fn only_an_error_naming_the_waiting_action_refuses_it() {
+    let mut state = world();
+    state.trade_initiate(Instant::now(), BRIN).unwrap();
+
+    // A slot move failed while the request was out: not the request's answer (#89).
+    let events = state.apply_ws(&error_for("move_item", "Slot is occupied"));
+    assert!(trades(events).is_empty());
+    assert!(matches!(state.trade(), Trade::Requested { .. }));
+
+    let events = state.apply_ws(&error_for("trade_initiate", "That player is offline"));
+    assert_eq!(
+        trades(events),
+        vec![refused(TradeAction::Initiate, "That player is offline")]
+    );
+    assert_eq!(state.trade(), &Trade::Idle);
 }
 
 #[test]

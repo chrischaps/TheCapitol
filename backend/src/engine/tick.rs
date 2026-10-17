@@ -203,11 +203,11 @@ impl GameState {
         self.event_sender.subscribe()
     }
 
-    /// Tell `player_id`, and only them, why their trade command was refused
-    fn trade_failed(&self, player_id: Uuid, reason: impl Into<String>) {
+    /// Tell `player_id`, and only them, why their trade `command` (its `ClientMessage` tag) was refused
+    fn trade_failed(&self, player_id: Uuid, command: &'static str, reason: impl Into<String>) {
         let reason = reason.into();
-        tracing::debug!("Trade command from {} refused: {}", player_id, reason);
-        let _ = self.event_sender.send(GameEvent::TradeFailed { player_id, reason });
+        tracing::debug!("{} from {} refused: {}", command, player_id, reason);
+        let _ = self.event_sender.send(GameEvent::TradeFailed { player_id, command, reason });
     }
 
     /// Tell `player_id`, and only them, why their extraction didn't start
@@ -393,7 +393,7 @@ impl GameState {
                 // M5: Trading commands
                 Command::InitiateTrade { player_id, target_player_id } => {
                     if target_player_id == player_id {
-                        self.trade_failed(player_id, "You can't trade with yourself");
+                        self.trade_failed(player_id, "trade_initiate", "You can't trade with yourself");
                         continue;
                     }
 
@@ -405,7 +405,7 @@ impl GameState {
                     let (target_pos, target_name) = match self.players.get(&target_player_id) {
                         Some(target) => ((target.x, target.y), target.name.clone()),
                         None => {
-                            self.trade_failed(player_id, "That player is offline");
+                            self.trade_failed(player_id, "trade_initiate", "That player is offline");
                             continue;
                         }
                     };
@@ -417,6 +417,7 @@ impl GameState {
                     if distance > TRADE_RANGE {
                         self.trade_failed(
                             player_id,
+                            "trade_initiate",
                             format!(
                                 "{} is too far away to trade ({:.0} units; trading needs {:.0})",
                                 target_name, distance, TRADE_RANGE
@@ -448,7 +449,7 @@ impl GameState {
                                 });
                             }
                         }
-                        Err(e) => self.trade_failed(player_id, e),
+                        Err(e) => self.trade_failed(player_id, "trade_initiate", e),
                     }
                 }
                 Command::AcceptTradeRequest { player_id } => {
@@ -460,7 +461,7 @@ impl GameState {
                                 player_b: trade.player_b,
                             });
                         }
-                        Err(e) => self.trade_failed(player_id, e),
+                        Err(e) => self.trade_failed(player_id, "trade_accept_request", e),
                     }
                 }
                 Command::DeclineTradeRequest { player_id } => {
@@ -471,12 +472,12 @@ impl GameState {
                                 initiator,
                             });
                         }
-                        Err(e) => self.trade_failed(player_id, e),
+                        Err(e) => self.trade_failed(player_id, "trade_decline_request", e),
                     }
                 }
                 Command::UpdateTradeOffer { player_id, items, strands } => {
                     if let Err(e) = self.trade_manager.update_offer(player_id, items.clone(), strands) {
-                        self.trade_failed(player_id, e);
+                        self.trade_failed(player_id, "trade_offer", e);
                         continue;
                     }
 
@@ -519,7 +520,7 @@ impl GameState {
                                 }
                             }
                         }
-                        Err(e) => self.trade_failed(player_id, e),
+                        Err(e) => self.trade_failed(player_id, "trade_accept", e),
                     }
                 }
                 Command::CancelTrade { player_id } => {
@@ -532,7 +533,7 @@ impl GameState {
                             });
                         }
                     } else {
-                        self.trade_failed(player_id, "Not in a trade");
+                        self.trade_failed(player_id, "trade_cancel", "Not in a trade");
                     }
                 }
             }
@@ -924,14 +925,25 @@ mod tests {
         (game, a_id, b_id, rx)
     }
 
-    /// Run `command` and return the reason of the one `TradeFailed` it sent, checking who it went to
+    /// Run `command` and return the reason of the one `TradeFailed` it sent, checking who it
+    /// went to and that it names the command it refuses (#89)
     fn refusal(game: &mut GameState, rx: &mut broadcast::Receiver<GameEvent>, command: Command, to: Uuid) -> String {
+        let tag = match &command {
+            Command::InitiateTrade { .. } => "trade_initiate",
+            Command::AcceptTradeRequest { .. } => "trade_accept_request",
+            Command::DeclineTradeRequest { .. } => "trade_decline_request",
+            Command::UpdateTradeOffer { .. } => "trade_offer",
+            Command::AcceptTrade { .. } => "trade_accept",
+            Command::CancelTrade { .. } => "trade_cancel",
+            other => panic!("{other:?} isn't a trade command"),
+        };
         game.queue_command(command);
         game.process_commands();
         let mut reasons = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            if let GameEvent::TradeFailed { player_id, reason } = event {
+            if let GameEvent::TradeFailed { player_id, command, reason } = event {
                 assert_eq!(player_id, to, "TradeFailed went to the wrong player");
+                assert_eq!(command, tag, "TradeFailed named the wrong command");
                 reasons.push(reason);
             }
         }

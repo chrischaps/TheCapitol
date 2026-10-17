@@ -16,9 +16,10 @@
 //! back through [`GameState::apply`] as [`StateEvent::Trade`].
 //!
 //! **Failures.** Since B5 (#47) the server answers a trade command it refuses
-//! with `error{message}`, sent only to us. The `error` carries no command, so
-//! one that arrives while an action is waiting is taken as that action's
-//! refusal: [`TradeEvent::Refused`], with the wait cleared. The store still
+//! with `error{message, command}`, sent only to us. One that names the
+//! waiting action's command is that action's refusal: [`TradeEvent::Refused`],
+//! with the wait cleared. (A server older than #89 names no command, and its
+//! `error` is taken as the waiting action's.) The store still
 //! reports the `error` as [`StateEvent::ServerError`] too, so the UI should
 //! toast that and use `Refused` only to update the trade window. Each action
 //! still waits [`REPLY_TIMEOUT`] as a backstop, and [`GameState::tick`]
@@ -49,7 +50,7 @@ use capitol_protocol::rules;
 use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo, TradeOfferItem};
 use uuid::Uuid;
 
-use super::{GameState, StateEvent};
+use super::{answers, GameState, StateEvent};
 
 /// How long a trade command waits for the server's answer.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -114,6 +115,17 @@ pub enum TradeAction {
 }
 
 impl TradeAction {
+    /// The `ClientMessage` tag this action sends, as an `error` names it.
+    pub fn command(self) -> &'static str {
+        match self {
+            TradeAction::Initiate => "trade_initiate",
+            TradeAction::AcceptRequest => "trade_accept_request",
+            TradeAction::Offer => "trade_offer",
+            TradeAction::Accept => "trade_accept",
+            TradeAction::Cancel => "trade_cancel",
+        }
+    }
+
     /// A default line for the UI when this action gets no reply.
     pub fn hint(self) -> &'static str {
         match self {
@@ -546,12 +558,14 @@ impl GameState {
         }
     }
 
-    /// The server sent `error`. If a trade action is waiting, it's that
-    /// action's refusal (B5, #47); otherwise it isn't ours.
-    pub(super) fn trade_error(&mut self, message: &str, out: &mut Vec<StateEvent>) {
-        let Some((action, _)) = self.trade.waiting.take() else {
-            return;
+    /// The server sent `error` for `command`. If it names the waiting trade
+    /// action, it's that action's refusal (B5, #47); otherwise it isn't ours.
+    pub(super) fn trade_error(&mut self, message: &str, command: &str, out: &mut Vec<StateEvent>) {
+        let action = match self.trade.waiting {
+            Some((action, _)) if answers(command, action.command()) => action,
+            _ => return,
         };
+        self.trade.waiting = None;
         match action {
             // The server keeps no request it refused.
             TradeAction::Initiate => {

@@ -650,7 +650,8 @@ fn trade_refusals_come_back_as_errors() {
     brin.net.ws(ClientMessage::TradeAcceptRequest);
     brin.pump_until("the server's refusal", |_, seen| {
         seen.iter().any(|e| {
-            matches!(e, StateEvent::ServerError { message } if message == "No pending trade request")
+            matches!(e, StateEvent::ServerError { message, command }
+                if message == "No pending trade request" && command == "trade_accept_request")
         })
     });
 

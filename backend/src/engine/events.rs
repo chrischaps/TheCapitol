@@ -153,6 +153,8 @@ pub enum GameEvent {
     /// A trade command from `player_id` was refused. Goes to that player only, as `error`.
     TradeFailed {
         player_id: Uuid,
+        /// The refused `ClientMessage`'s `"type"`, e.g. `"trade_initiate"`.
+        command: &'static str,
         reason: String,
     },
     // M5: Currency events
