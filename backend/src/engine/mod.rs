@@ -16,6 +16,7 @@ pub mod station_removal;
 mod stations;
 mod tick;
 pub mod trading;
+pub mod zone_sync;
 
 pub use commands::Command;
 pub use events::GameEvent;

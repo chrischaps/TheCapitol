@@ -24,8 +24,8 @@ pub const CENTER_Y: f64 = 4000.0;
 /// outer edge. The road runs straight north to the moat's one bridge, so the
 /// first thing a player sees is the way in, with the tower at the end of it.
 pub const SPAWN_X: f64 = CENTER_X;
-/// Spawn Y (3350 south of the centre).
-pub const SPAWN_Y: f64 = CENTER_Y + 3350.0;
+/// Spawn Y: 50 inside the rural zone's outer edge, south of the centre.
+pub const SPAWN_Y: f64 = CENTER_Y + RURAL_OUTER_RADIUS - 50.0;
 /// New players land up to this far either side of `SPAWN_X`, so a crowd of
 /// arrivals doesn't stack on one point. It keeps them on the 60-wide arterial.
 pub const SPAWN_SCATTER: f64 = 20.0;
@@ -125,6 +125,37 @@ pub fn station_type_for_kit(item_type: &str) -> Option<&'static str> {
 // Zones
 // ---------------------------------------------------------------------------
 
+// The zone radii. This is the one table: the terrain generator's defaults, the
+// DB `zones` rows (synced on server startup), `/bureaucracy/zones` and the
+// clients' zone rings all come from here. Each zone's inner radius is the
+// outer radius of the zone inside it.
+
+/// Outer radius of the Capitol, inside the moat.
+pub const CAPITOL_RADIUS: f64 = 200.0;
+/// Outer radius of the Trade District.
+pub const TRADE_OUTER_RADIUS: f64 = 600.0;
+/// Outer radius of the Guild District.
+pub const GUILD_OUTER_RADIUS: f64 = 1000.0;
+/// Outer radius of the Urban zone.
+pub const URBAN_OUTER_RADIUS: f64 = 1600.0;
+/// Outer radius of the Suburban zone.
+pub const SUBURBAN_OUTER_RADIUS: f64 = 2400.0;
+/// Outer radius of the Rural zone.
+pub const RURAL_OUTER_RADIUS: f64 = 3400.0;
+/// Outer radius of the Wilderness: the edge of the world disc.
+pub const WILDERNESS_OUTER_RADIUS: f64 = WORLD_SIZE / 2.0;
+
+/// Each zone's outer radius, in `Zone::ALL` order.
+pub const ZONE_OUTER_RADII: [f64; 7] = [
+    CAPITOL_RADIUS,
+    TRADE_OUTER_RADIUS,
+    GUILD_OUTER_RADIUS,
+    URBAN_OUTER_RADIUS,
+    SUBURBAN_OUTER_RADIUS,
+    RURAL_OUTER_RADIUS,
+    WILDERNESS_OUTER_RADIUS,
+];
+
 /// Zones are concentric rings around the Capitol at (CENTER_X, CENTER_Y).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Zone {
@@ -153,7 +184,8 @@ impl Zone {
         Zone::Wilderness,
     ];
 
-    /// Which zone a position falls into, by distance from the centre.
+    /// Which zone a position falls into, by distance from the centre. It reads
+    /// the static table, not an admin regenerate's radii; see #118.
     pub fn from_position(x: f64, y: f64) -> Self {
         let dx = x - CENTER_X;
         let dy = y - CENTER_Y;
@@ -211,15 +243,9 @@ impl Zone {
 
     /// Inner and outer radius of the zone's ring.
     pub fn radii(&self) -> (f64, f64) {
-        match self {
-            Zone::Capitol => (0.0, 200.0),
-            Zone::TradeDistrict => (200.0, 600.0),
-            Zone::GuildDistrict => (600.0, 1000.0),
-            Zone::Urban => (1000.0, 1600.0),
-            Zone::Suburban => (1600.0, 2400.0),
-            Zone::Rural => (2400.0, 3400.0),
-            Zone::Wilderness => (3400.0, 4000.0),
-        }
+        let i = self.ring_order() as usize;
+        let inner = if i == 0 { 0.0 } else { ZONE_OUTER_RADII[i - 1] };
+        (inner, ZONE_OUTER_RADII[i])
     }
 }
 
@@ -435,15 +461,28 @@ mod tests {
 
     #[test]
     fn zones_by_distance() {
-        assert_eq!(Zone::from_position(4000.0, 4000.0), Zone::Capitol);
-        assert_eq!(Zone::from_position(4199.0, 4000.0), Zone::Capitol);
-        assert_eq!(Zone::from_position(4200.0, 4000.0), Zone::TradeDistrict);
-        assert_eq!(Zone::from_position(4000.0, 4999.0), Zone::GuildDistrict);
-        assert_eq!(Zone::from_position(5500.0, 4000.0), Zone::Urban);
-        assert_eq!(Zone::from_position(4000.0, 6000.0), Zone::Suburban);
-        assert_eq!(Zone::from_position(1000.0, 4000.0), Zone::Rural);
-        assert_eq!(Zone::from_position(7600.0, 4000.0), Zone::Wilderness);
+        assert_eq!(Zone::from_position(CENTER_X, CENTER_Y), Zone::Capitol);
+        // Each ring runs from its inner radius up to, not including, its outer.
+        for zone in Zone::ALL {
+            let (inner, outer) = zone.radii();
+            assert_eq!(Zone::from_position(CENTER_X + inner, CENTER_Y), zone, "{zone} inner edge");
+            assert_eq!(Zone::from_position(CENTER_X, CENTER_Y - (outer - 1.0)), zone, "{zone} outer edge");
+        }
+        // Past the world disc, in the corners, is still Wilderness.
         assert_eq!(Zone::from_position(0.0, 0.0), Zone::Wilderness);
+    }
+
+    #[test]
+    fn zone_rings_tile_the_world_disc() {
+        let mut inner = 0.0;
+        for zone in Zone::ALL {
+            let (zone_inner, outer) = zone.radii();
+            assert_eq!(zone_inner, inner, "{zone} starts where the ring inside it ends");
+            assert!(outer > zone_inner, "{zone} has width");
+            inner = outer;
+        }
+        assert_eq!(inner, WORLD_SIZE / 2.0);
+        assert_eq!(Zone::from_position(SPAWN_X, SPAWN_Y), Zone::Rural);
     }
 
     #[test]

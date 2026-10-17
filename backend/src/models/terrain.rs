@@ -16,7 +16,9 @@ pub use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPlot, 
 pub struct SuburbanGenParams {
     /// Inner and outer radius of the suburban zone. The generators read them
     /// only through `WorldGenParams::suburban_params`, which sets them from
-    /// the zone radii, so a saved value here has no effect.
+    /// the world's `urban_outer_radius` and `suburban_outer_radius`, so a
+    /// saved value here has no effect. They stay in the struct (and the JSON)
+    /// because the generators read the resolved radii from it.
     pub inner_radius: f64,
     pub outer_radius: f64,
     /// Width of collector roads (default: 14)
@@ -155,8 +157,8 @@ impl Default for NeighbourhoodParams {
 impl Default for SuburbanGenParams {
     fn default() -> Self {
         Self {
-            inner_radius: 1600.0,
-            outer_radius: 2400.0,
+            inner_radius: rules::URBAN_OUTER_RADIUS,
+            outer_radius: rules::SUBURBAN_OUTER_RADIUS,
             collector_width: 14.0,
             local_street_width: 10.0,
             min_street_spacing: 100.0, // Space for plots on either side of each street
@@ -237,12 +239,13 @@ impl WorldGenParams {
 impl Default for WorldGenParams {
     fn default() -> Self {
         Self {
-            capitol_radius: 200.0,
-            trade_outer_radius: 600.0,
-            guild_outer_radius: 1000.0,
-            urban_outer_radius: 1600.0,
-            suburban_outer_radius: 2400.0,
-            rural_outer_radius: 3400.0,
+            // The zone radii are the protocol's table (#116).
+            capitol_radius: rules::CAPITOL_RADIUS,
+            trade_outer_radius: rules::TRADE_OUTER_RADIUS,
+            guild_outer_radius: rules::GUILD_OUTER_RADIUS,
+            urban_outer_radius: rules::URBAN_OUTER_RADIUS,
+            suburban_outer_radius: rules::SUBURBAN_OUTER_RADIUS,
+            rural_outer_radius: rules::RURAL_OUTER_RADIUS,
             moat_width: 20.0,
             moat_bridge_width: 30.0,
             canal_inner_width: 15.0,
@@ -253,7 +256,8 @@ impl Default for WorldGenParams {
             trade_ring_radius: 400.0,
             trade_ring_width: 30.0,
             arterial_width: 60.0,
-            arterial_end_radius: 3800.0,
+            // The arterials run 400 into the wilderness.
+            arterial_end_radius: rules::RURAL_OUTER_RADIUS + 400.0,
             urban_radial_spacing: 100.0,
             urban_spoke_count: 48,
             urban_street_width: 16.0,
@@ -3410,8 +3414,8 @@ mod tests {
     #[test]
     fn test_suburban_gen_params_default() {
         let params = SuburbanGenParams::default();
-        assert_eq!(params.inner_radius, 1600.0);
-        assert_eq!(params.outer_radius, 2400.0);
+        assert_eq!(params.inner_radius, rules::URBAN_OUTER_RADIUS);
+        assert_eq!(params.outer_radius, rules::SUBURBAN_OUTER_RADIUS);
         assert_eq!(params.min_plot_area, 6_000.0);
         assert_eq!(params.max_plot_area, 12_000.0);
         assert_eq!(params.target_plot_area, 8_000.0);

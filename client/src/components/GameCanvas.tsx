@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/AuthContext'
 import type { ResourceNode, PlayerPosition } from '../contexts/GameContext'
 import type { StationInfo } from '../api/stations'
 import { plotContains } from '../api/plots'
+import { getZones } from '../api/bureaucracy'
 import './GameCanvas.css'
 
 // M7: World expanded to 8000x8000, centered at (4000, 4000)
@@ -30,16 +31,25 @@ const ROAD_COLORS = {
   trail: '#1a1a2a',
 }
 
-// M7: Zone definitions with colors (radii scaled 4x for 8000x8000 world)
-const ZONES = [
-  { id: 'capitol', name: 'Capitol', innerRadius: 0, outerRadius: 200, color: '#c9a227', alpha: 0.15 },
-  { id: 'trade_district', name: 'Trade District', innerRadius: 200, outerRadius: 600, color: '#3b82f6', alpha: 0.1 },
-  { id: 'guild_district', name: 'Guild District', innerRadius: 600, outerRadius: 1000, color: '#8b5cf6', alpha: 0.1 },
-  { id: 'urban', name: 'Urban', innerRadius: 1000, outerRadius: 1600, color: '#64748b', alpha: 0.08 },
-  { id: 'suburban', name: 'Suburban', innerRadius: 1600, outerRadius: 2400, color: '#22c55e', alpha: 0.06 },
-  { id: 'rural', name: 'Rural', innerRadius: 2400, outerRadius: 3400, color: '#84cc16', alpha: 0.04 },
-  { id: 'wilderness', name: 'Wilderness', innerRadius: 3400, outerRadius: 4000, color: '#1a1a24', alpha: 0.0 },
-]
+// M7: Zone ring colors. The radii come from the server (/bureaucracy/zones),
+// which serves the protocol's one table (#116).
+const ZONE_STYLES: Record<string, { color: string; alpha: number }> = {
+  capitol: { color: '#c9a227', alpha: 0.15 },
+  trade_district: { color: '#3b82f6', alpha: 0.1 },
+  guild_district: { color: '#8b5cf6', alpha: 0.1 },
+  urban: { color: '#64748b', alpha: 0.08 },
+  suburban: { color: '#22c55e', alpha: 0.06 },
+  rural: { color: '#84cc16', alpha: 0.04 },
+  wilderness: { color: '#1a1a24', alpha: 0.0 },
+}
+const UNKNOWN_ZONE_STYLE = { color: '#64748b', alpha: 0.0 }
+
+interface ZoneRing {
+  innerRadius: number
+  outerRadius: number
+  color: string
+  alpha: number
+}
 
 // Debug camera constants
 const DEBUG_PAN_SPEED = 400 // pixels per second
@@ -73,7 +83,24 @@ export default function GameCanvas() {
     terrain,
   } = useGame()
 
-  const { isAdmin } = useAuth()
+  const { isAdmin, token } = useAuth()
+
+  // Zone rings, from the server's zone table
+  const [zoneRings, setZoneRings] = useState<ZoneRing[]>([])
+  useEffect(() => {
+    if (!token) return
+    getZones(token)
+      .then(({ zones }) =>
+        setZoneRings(
+          zones.map((z) => ({
+            innerRadius: z.innerRadius,
+            outerRadius: z.outerRadius,
+            ...(ZONE_STYLES[z.id] ?? UNKNOWN_ZONE_STYLE),
+          }))
+        )
+      )
+      .catch((err) => console.error('Failed to load zones:', err))
+  }, [token])
 
   // Debug camera state
   const [debugMode, setDebugMode] = useState(false)
@@ -112,7 +139,7 @@ export default function GameCanvas() {
       const centerScreenX = WORLD_CENTER + offsetX
       const centerScreenY = WORLD_CENTER + offsetY
 
-      ZONES.forEach((zone) => {
+      zoneRings.forEach((zone) => {
         if (zone.alpha > 0) {
           ctx.beginPath()
           ctx.arc(centerScreenX, centerScreenY, zone.outerRadius, 0, Math.PI * 2)
@@ -321,7 +348,7 @@ export default function GameCanvas() {
         ctx.fillText('Connecting...', width / 2, height / 2)
       }
     },
-    [players, nodes, stations, nearbyPlots, myPlayerId, isConnected, extractionState, pendingExtractionNodeId, craftingState, notifications, placementMode, terrain, debugMode, debugCameraX, debugCameraY, debugZoom]
+    [players, nodes, stations, nearbyPlots, myPlayerId, isConnected, extractionState, pendingExtractionNodeId, craftingState, notifications, placementMode, terrain, zoneRings, debugMode, debugCameraX, debugCameraY, debugZoom]
   )
 
   // Draw a grass tuft shape

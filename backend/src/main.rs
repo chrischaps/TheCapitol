@@ -55,6 +55,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     migrations::run(&db_pool).await?;
     tracing::info!("Migrations complete");
 
+    // The zone radii live in capitol_protocol::rules. The zones table follows
+    // them, so /bureaucracy/zones serves the radii the game uses (#116).
+    let zones = engine::zone_sync::sync_zone_radii(&db_pool).await?;
+    if zones.updated > 0 {
+        tracing::info!("Zone radii synced from the protocol: {} rows updated", zones.updated);
+    }
+    for id in &zones.missing {
+        tracing::warn!("Zone {id} has no row in the zones table");
+    }
+
     // Redis connection
     let redis_conn = state::connect_redis(&config.redis_url).await?;
     tracing::info!("Connected to Redis");

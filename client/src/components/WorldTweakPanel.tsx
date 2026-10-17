@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useAuth } from '../contexts/AuthContext'
-import { getWorldParams, updateWorldParams, commitWorldParams, DEFAULT_WORLD_PARAMS, type SuburbLayout, type WorldGenParams } from '../api/admin'
+import { getWorldParams, getDefaultWorldParams, updateWorldParams, commitWorldParams, type SuburbLayout, type WorldGenParams } from '../api/admin'
 import './WorldTweakPanel.css'
 
 interface ParamSliderProps {
@@ -148,10 +148,16 @@ export default function WorldTweakPanel() {
     }
   }, [token, params])
 
-  const handleReset = useCallback(() => {
-    setParams(structuredClone(DEFAULT_WORLD_PARAMS))
-    setCommitted(false)
-  }, [])
+  const handleReset = useCallback(async () => {
+    if (!token) return
+    setError(null)
+    try {
+      setParams(await getDefaultWorldParams(token))
+      setCommitted(false)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to fetch defaults')
+    }
+  }, [token])
 
   const handleCommit = useCallback(async () => {
     if (!token) return

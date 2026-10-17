@@ -184,6 +184,8 @@ impl Frame {
 mod tests {
     use std::f64::consts::FRAC_PI_4;
 
+    use capitol_protocol::rules::{SUBURBAN_OUTER_RADIUS as OUTER, URBAN_OUTER_RADIUS as INNER};
+
     use super::*;
 
     const C: P = (4000.0, 4000.0);
@@ -192,7 +194,7 @@ mod tests {
         let lo = Side { angle: sector * FRAC_PI_4, inset: 50.0 };
         let hi = Side { angle: (sector + 1.0) * FRAC_PI_4, inset: 50.0 };
         let p = NeighbourhoodParams::default();
-        Frame::new(C, lo, hi, (1600.0, 2400.0), &p, &mut SplitMix64::new(phase_seed)).unwrap()
+        Frame::new(C, lo, hi, (INNER, OUTER), &p, &mut SplitMix64::new(phase_seed)).unwrap()
     }
 
     /// Distance from p to the infinite line through the centre at `angle`.
@@ -236,7 +238,7 @@ mod tests {
             let u = f.width * i as f64 / 40.0;
             let gap = r(f.to_world(u, fit.rows[1])) - r(f.to_world(u, fit.rows[0]));
             assert!((gap - 740.0 / 3.0).abs() < 1e-6, "radial spacing at u {u} is {gap}");
-            assert!(r(f.to_world(u, 0.0)) >= 1600.0 - 1e-9 && r(f.to_world(u, f.depth)) <= 2400.0 + 1e-9);
+            assert!(r(f.to_world(u, 0.0)) >= INNER - 1e-9 && r(f.to_world(u, f.depth)) <= OUTER + 1e-9);
         }
     }
 

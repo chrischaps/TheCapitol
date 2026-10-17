@@ -716,6 +716,7 @@ mod tests {
     use super::*;
     use crate::models::lot_clearance;
     use crate::models::terrain::{SuburbLayout, SuburbanGenParams, TerrainConfig, WorldGenParams};
+    use capitol_protocol::rules::{SUBURBAN_OUTER_RADIUS, URBAN_OUTER_RADIUS};
 
     fn env_or(name: &str, default: &str) -> String {
         std::env::var(name).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| default.to_string())
@@ -830,7 +831,7 @@ mod tests {
     fn the_plan_view_draws_a_small_plan() {
         let road = |id: &str, road_type, points: Vec<P>, width| RoadSegment { id: id.into(), road_type, points, width };
         let roads = vec![
-            road("arterial_0", RoadType::Arterial, vec![(1600.0, 0.0), (2400.0, 0.0)], 60.0),
+            road("arterial_0", RoadType::Arterial, vec![(URBAN_OUTER_RADIUS, 0.0), (SUBURBAN_OUTER_RADIUS, 0.0)], 60.0),
             road("culdesac_1", RoadType::Suburban, vec![(2000.0, 0.0), (2000.0, 100.0)], 16.0),
         ];
         let lot = TerrainPlot {
@@ -843,7 +844,7 @@ mod tests {
         };
         let lots = vec![lot];
         let cleared = vec![Some(lots[0].corners)];
-        let scope = Scope { center: (0.0, 0.0), inner: 1600.0, outer: 2400.0, sector: Some(0) };
+        let scope = Scope { center: (0.0, 0.0), inner: URBAN_OUTER_RADIUS, outer: SUBURBAN_OUTER_RADIUS, sector: Some(0) };
         let measured = metrics::measure(&metrics::Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope, coverage: true });
         let viol = metrics::violations(&measured.metrics);
         let view = View {

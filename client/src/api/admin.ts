@@ -84,51 +84,6 @@ export interface WorldGenParams {
   seed: number
 }
 
-export const DEFAULT_WORLD_PARAMS: WorldGenParams = {
-  capitol_radius: 200,
-  trade_outer_radius: 600,
-  guild_outer_radius: 1000,
-  urban_outer_radius: 1600,
-  suburban_outer_radius: 2400,
-  rural_outer_radius: 3400,
-  moat_width: 20,
-  moat_bridge_width: 30,
-  canal_inner_width: 15,
-  canal_outer_width: 15,
-  canal_bridge_width: 25,
-  guild_ring_radius: 800,
-  guild_ring_width: 30,
-  trade_ring_radius: 400,
-  trade_ring_width: 30,
-  arterial_width: 60,
-  arterial_end_radius: 3800,
-  urban_radial_spacing: 100,
-  urban_spoke_count: 48,
-  urban_street_width: 16,
-  urban_plot_frontage: 40,
-  urban_plot_depth: 50,
-  suburban: {
-    inner_radius: 1600,
-    outer_radius: 2400,
-    collector_width: 14,
-    local_street_width: 10,
-    min_street_spacing: 100,
-    min_plot_area: 6000,
-    max_plot_area: 12000,
-    target_plot_area: 8000,
-    min_frontage: 60,
-    max_frontage: 100,
-    seed: 42,
-    layout: 'legacy',
-  },
-  rural_trail_width: 6,
-  rural_trail_count: 12,
-  rural_plot_frontage: 200,
-  rural_plot_depth: 150,
-  guild_plot_frontage: 150,
-  seed: 42,
-}
-
 export interface ServerStats {
   tps: number
   tick_count: number
@@ -159,6 +114,18 @@ export async function getWorldParams(token: string): Promise<WorldGenParams> {
   })
   if (!response.ok) {
     throw new Error(`Failed to fetch world params: ${response.status}`)
+  }
+  return response.json()
+}
+
+// The server's defaults, for the form's reset. The client holds no copy, so the
+// zone radii live only in capitol-protocol's rules.rs (#116).
+export async function getDefaultWorldParams(token: string): Promise<WorldGenParams> {
+  const response = await fetch(`${API_URL}/admin/world-params/default`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!response.ok) {
+    throw new Error(`Failed to fetch default world params: ${response.status}`)
   }
   return response.json()
 }

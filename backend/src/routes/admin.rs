@@ -25,6 +25,7 @@ pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/world-params", get(get_world_params))
         .route("/world-params", put(update_world_params))
+        .route("/world-params/default", get(get_default_world_params))
         .route("/world-params/commit", post(commit_world_params))
         .route("/stats", get(get_server_stats))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -42,6 +43,15 @@ pub async fn get_world_params(
 
     let game = state.game.read().await;
     Ok(Json(game.world_gen_params.clone()))
+}
+
+/// The default world generation parameters, for the admin form's reset. The
+/// client keeps no copy of them, so the zone radii stay in one place (#116).
+pub async fn get_default_world_params(
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<WorldGenParams>, AppError> {
+    require_admin(&user)?;
+    Ok(Json(WorldGenParams::default()))
 }
 
 /// Regenerate terrain in memory (does NOT persist to database)
