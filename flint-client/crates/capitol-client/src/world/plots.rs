@@ -1,18 +1,13 @@
 //! The plots (P3.6): every `/terrain` lot as a low slab a step above the
 //! street, edged with a curb, in its zone's tint.
 //!
-//! - **Each lot keeps off the roads and the water.** Before B7 (#42) the
-//!   data's urban lots reached 22 units into the arterials, a few suburban
-//!   ones a few units into their streets, and the innermost urban row into
-//!   the outer canal. The server now clears them itself
-//!   (`backend/src/models/lot_clearance.rs`, kerb included), so for a
-//!   current server this is a no-op kept as a guard, and
-//!   `fixtures/terrain.json` still has the old lots. A lot is first clipped back to the edge of every road ribbon it
-//!   overlaps and to the kerb's land face (`water::kerbed`), the way the
-//!   roads stop at the kerb. What survives is convex, so clipping is a
-//!   run of half-planes. A lot clipped to under `MIN_KEPT` of itself is
-//!   dropped.
-//! - **Inset.** The lot is then pulled in by its zone's `inset`, so
+//! - **Each lot is drawn as the server sends it.** Since B7 (#42) the
+//!   server clears every lot off the roads and out of the water and its
+//!   kerb (`backend/src/models/lot_clearance.rs`), so the client trusts the
+//!   quad. It used to clip lots to the road ribbons itself, but on cleared
+//!   lots that only shaved up to 5% off those by a bend in the road (#84).
+//!   `lots_keep_off_the_roads_and_the_water` checks the fixture still holds.
+//! - **Inset.** The lot is pulled in by its zone's `inset`, so
 //!   neighbours sharing an edge stand apart with a seam of dark ground
 //!   between them, and a lot by a road has a gutter.
 //! - **Curb lip.** A band `curb` wide round the edge rises `lip` above the
@@ -24,11 +19,9 @@
 //! - **One mesh per sector** (`sector`), each lot in the sector of its
 //!   centre, so each part culls on its own. `Lot` records where each lot's
 //!   vertices and indices sit in its sector's mesh, for P6.4 to find and
-//!   highlight one. Lots are listed in `terrain_plots` order, not by id,
-//!   because the generator used to give some lots on P-shaped streets the
-//!   same id. Since B7 ids are unique, and a claimable plot names its lot
-//!   in `PlotInfo::terrain_id`, so P6.4 can key on it. The fixture still
-//!   has the repeats.
+//!   highlight one. Lots are keyed by their `TerrainPlot::id`, which is
+//!   unique since B7 and which a claimable plot names as
+//!   `PlotInfo::terrain_id`.
 //! - **Yours are gold** (P6.4, [`owned`]). Each lot you own gets a second
 //!   mesh laid just over it: the curb's top in glowing gold, its outer face
 //!   in dim gold, and a warm wash over the lot that's strongest at the curb
@@ -44,14 +37,11 @@ use crate::world::geom::*;
 use crate::world::mesh::{facing, MeshBuf, UP};
 use crate::world::palette::{self, hex, mix};
 use crate::world::sector::Sector;
-use crate::world::water;
-use capitol_protocol::rules::{Zone, CENTER_X, CENTER_Y};
-use capitol_protocol::terrain::{RoadSegment, TerrainPlot, WaterRing};
+use capitol_protocol::rules::Zone;
+use capitol_protocol::terrain::TerrainPlot;
 use flint_import::ImportedMaterial;
 use flint_player::ExtensionGpu;
 
-/// A lot clipped to less than this share of its area is dropped.
-const MIN_KEPT: f64 = 0.25;
 /// Points closer than this, in server units, are one point.
 const MIN_STEP: f64 = 0.5;
 /// How far each lot's shade wanders from its zone's, either way.
@@ -107,7 +97,7 @@ pub struct Lot {
     pub sector: Sector,
     pub vertices: Range<u32>,
     pub indices: Range<u32>,
-    /// The drawn edge, server units, anticlockwise: clipped and inset.
+    /// The drawn edge, server units, anticlockwise: inset.
     pub outline: Vec<P>,
     pub zone: Zone,
     /// The lot's own colour.
@@ -118,20 +108,9 @@ pub struct Lot {
 #[derive(Default)]
 pub struct Plots {
     pub meshes: HashMap<Sector, MeshBuf>,
-    /// Each of `terrain_plots` in turn: where it is, or `None` if it was
-    /// dropped (almost all of it on a road).
-    pub lots: Vec<Option<Lot>>,
-}
-
-fn shoelace(poly: &[P]) -> f64 {
-    let n = poly.len();
-    (0..n)
-        .map(|i| {
-            let (a, b) = (poly[i], poly[(i + 1) % n]);
-            a[0] * b[1] - b[0] * a[1]
-        })
-        .sum::<f64>()
-        * 0.5
+    /// Where each drawn lot is, by its `TerrainPlot::id`. A lot too thin
+    /// to survive its inset isn't drawn, so isn't here.
+    pub lots: HashMap<String, Lot>,
 }
 
 fn centroid(poly: &[P]) -> P {
@@ -219,124 +198,6 @@ fn mitred_in(poly: &[P], d: f64) -> Option<Vec<P>> {
     keeps_shape.then_some(inner)
 }
 
-/// Server distance between the convex polygon `poly` and the segment
-/// `a`→`b`: zero where they overlap.
-fn distance_to_polygon(poly: &[P], a: P, b: P) -> f64 {
-    let inside = |p: P| {
-        (0..poly.len()).all(|i| {
-            let (u, v) = (poly[i], poly[(i + 1) % poly.len()]);
-            (v[0] - u[0]) * (p[1] - u[1]) - (v[1] - u[1]) * (p[0] - u[0]) >= 0.0
-        })
-    };
-    if inside(a) || inside(b) {
-        return 0.0;
-    }
-    let mut d = poly
-        .iter()
-        .map(|&p| distance_to_segment(p, a, b))
-        .fold(f64::INFINITY, f64::min);
-    for i in 0..poly.len() {
-        let (u, v) = (poly[i], poly[(i + 1) % poly.len()]);
-        d = d
-            .min(distance_to_segment(a, u, v))
-            .min(distance_to_segment(b, u, v));
-        // A segment crossing an edge passes through.
-        let side = |p: P, q: P, r: P| (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
-        if side(u, v, a) * side(u, v, b) < 0.0 && side(a, b, u) * side(a, b, v) < 0.0 {
-            return 0.0;
-        }
-    }
-    d
-}
-
-/// A road, with its box for skipping lots nowhere near it.
-struct Road {
-    points: Vec<P>,
-    half: f64,
-    min: P,
-    max: P,
-}
-
-impl Road {
-    fn new(r: &RoadSegment) -> Self {
-        let points: Vec<P> = r.points.iter().map(|&(x, y)| [x, y]).collect();
-        let half = r.width * 0.5;
-        let (mut min, mut max) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
-        for p in &points {
-            for k in 0..2 {
-                min[k] = min[k].min(p[k] - half);
-                max[k] = max[k].max(p[k] + half);
-            }
-        }
-        Road {
-            points,
-            half,
-            min,
-            max,
-        }
-    }
-}
-
-/// The lot `corners` as drawn: clipped clear of `roads` and of the kerbed
-/// water `bands`, or `None` if too little is left.
-fn outline(corners: &[(f64, f64); 4], roads: &[Road], bands: &[(f64, f64)]) -> Option<Vec<P>> {
-    let original = hull(&corners.map(|(x, y)| [x, y]));
-    if original.len() < 3 {
-        return None;
-    }
-    let area = shoelace(&original);
-    let mut poly = original.clone();
-    let centre = [CENTER_X, CENTER_Y];
-    for &(lo, hi) in bands {
-        let c = centroid(&poly);
-        let u = unit(sub(c, centre));
-        let reach = poly.iter().map(|&p| dist(p, c)).fold(0.0, f64::max);
-        if radius(c) >= (lo + hi) * 0.5 {
-            // Outside the band: keep beyond the tangent at its outer edge.
-            poly = clip(&poly, u, dot(u, centre) + hi);
-        } else {
-            // Inside: keep within the chord that clears the inner edge.
-            let n = scale(u, -1.0);
-            poly = clip(&poly, n, dot(n, centre) - (lo - reach * reach / (2.0 * lo)));
-        }
-        if poly.len() < 3 {
-            return None;
-        }
-    }
-    let (mut min, mut max) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
-    for p in &poly {
-        for k in 0..2 {
-            min[k] = min[k].min(p[k]);
-            max[k] = max[k].max(p[k]);
-        }
-    }
-    for road in roads {
-        if road.max[0] < min[0]
-            || road.min[0] > max[0]
-            || road.max[1] < min[1]
-            || road.min[1] > max[1]
-        {
-            continue;
-        }
-        for w in road.points.windows(2) {
-            let (a, b) = (w[0], w[1]);
-            if dist(a, b) < MIN_STEP || distance_to_polygon(&poly, a, b) >= road.half {
-                continue;
-            }
-            // Keep the lot's side of the ribbon's edge.
-            let mut n = unit(left(sub(b, a)));
-            if dot(n, sub(centroid(&poly), a)) < 0.0 {
-                n = scale(n, -1.0);
-            }
-            poly = clip(&poly, n, dot(n, a) + road.half);
-            if poly.len() < 3 {
-                return None;
-            }
-        }
-    }
-    (shoelace(&poly) >= area * MIN_KEPT).then_some(poly)
-}
-
 /// A number in [-1, 1] from a lot's id, the same on every run.
 fn jitter(id: &str) -> f32 {
     let mut h: u32 = 0x811c_9dc5;
@@ -410,19 +271,17 @@ fn lot(m: &mut MeshBuf, outer: &[P], s: &Style, colour: [f32; 4]) {
     }
 }
 
-/// Every lot in `plots`, clear of `roads` and the water in `rings`.
-pub fn build(plots: &[TerrainPlot], roads: &[RoadSegment], rings: &[WaterRing]) -> Plots {
-    let roads: Vec<Road> = roads.iter().map(Road::new).collect();
-    let bands = water::kerbed(rings);
+/// Every lot in `plots`.
+pub fn build(plots: &[TerrainPlot]) -> Plots {
     let mut out = Plots::default();
     for plot in plots {
-        out.lots.push(None);
         let zone = Zone::from_str(&plot.zone).unwrap_or(Zone::Urban);
         let s = style(zone);
-        let Some(clear) = outline(&plot.corners, &roads, &bands) else {
+        let quad = hull(&plot.corners.map(|(x, y)| [x, y]));
+        if quad.len() < 3 {
             continue;
-        };
-        let outer = inset(&clear, s.inset);
+        }
+        let outer = inset(&quad, s.inset);
         if outer.len() < 3 {
             continue;
         }
@@ -444,7 +303,7 @@ pub fn build(plots: &[TerrainPlot], roads: &[RoadSegment], rings: &[WaterRing]) 
             zone,
             colour,
         };
-        *out.lots.last_mut().unwrap() = Some(lot);
+        out.lots.insert(plot.id.clone(), lot);
     }
     out
 }
@@ -570,10 +429,8 @@ pub fn mesh_name(sector: Sector) -> String {
 pub fn upload(
     gpu: &mut ExtensionGpu,
     plots: &[TerrainPlot],
-    roads: &[RoadSegment],
-    rings: &[WaterRing],
-) -> (Vec<String>, Vec<Option<Lot>>) {
-    let Plots { mut meshes, lots } = build(plots, roads, rings);
+) -> (Vec<String>, HashMap<String, Lot>) {
+    let Plots { mut meshes, lots } = build(plots);
     let mut drawn = Vec::new();
     let mut vertices = 0;
     for s in Sector::all() {
@@ -593,7 +450,7 @@ pub fn upload(
     }
     tracing::info!(
         "plots: {} of {} lots in {} meshes, {vertices} vertices",
-        lots.iter().flatten().count(),
+        lots.len(),
         plots.len(),
         drawn.len()
     );
@@ -607,7 +464,9 @@ mod tests {
     use crate::world::mesh::facing;
     use crate::world::mesh::probe::covered;
     use crate::world::sector::WEDGES;
-    use capitol_protocol::terrain::TerrainResponse;
+    use crate::world::water;
+    use capitol_protocol::rules::{CENTER_X, CENTER_Y};
+    use capitol_protocol::terrain::{RoadSegment, TerrainResponse};
     use std::path::Path;
     use std::sync::OnceLock;
 
@@ -617,9 +476,48 @@ mod tests {
         BUILT.get_or_init(|| {
             let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
             let t = capitol_core::terrain::read_terrain_file(&path).expect("fixture");
-            let plots = build(&t.terrain_plots, &t.roads, &t.water_rings);
+            let plots = build(&t.terrain_plots);
             (t, plots)
         })
+    }
+
+    fn shoelace(poly: &[P]) -> f64 {
+        let n = poly.len();
+        (0..n)
+            .map(|i| {
+                let (a, b) = (poly[i], poly[(i + 1) % n]);
+                a[0] * b[1] - b[0] * a[1]
+            })
+            .sum::<f64>()
+            * 0.5
+    }
+
+    /// A road, with its box for skipping lots nowhere near it.
+    struct Road {
+        points: Vec<P>,
+        half: f64,
+        min: P,
+        max: P,
+    }
+
+    impl Road {
+        fn new(r: &RoadSegment) -> Self {
+            let points: Vec<P> = r.points.iter().map(|&(x, y)| [x, y]).collect();
+            let half = r.width * 0.5;
+            let (mut min, mut max) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+            for p in &points {
+                for k in 0..2 {
+                    min[k] = min[k].min(p[k] - half);
+                    max[k] = max[k].max(p[k] + half);
+                }
+            }
+            Road {
+                points,
+                half,
+                min,
+                max,
+            }
+        }
     }
 
     fn server(position: [f32; 3]) -> P {
@@ -675,13 +573,27 @@ mod tests {
     }
 
     #[test]
-    fn nearly_every_lot_is_drawn() {
+    fn every_lot_is_drawn_under_its_own_id() {
         let (t, plots) = fixture();
         let n = t.terrain_plots.len();
         assert!(n > 2000);
         assert_eq!(plots.lots.len(), n);
-        let drawn = plots.lots.iter().flatten().count();
-        assert!(drawn * 100 >= n * 99, "{drawn} of {n}");
+        assert!(t
+            .terrain_plots
+            .iter()
+            .all(|p| plots.lots.contains_key(&p.id)));
+    }
+
+    #[test]
+    fn a_lot_is_drawn_whole_less_its_inset() {
+        // Nothing is clipped off: a square lot is the square, inset.
+        let plot = TerrainPlot {
+            corners: [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)],
+            ..fixture().0.terrain_plots[0].clone()
+        };
+        let lot = &build(std::slice::from_ref(&plot)).lots[&plot.id];
+        let side = 40.0 - 2.0 * style(lot.zone).inset;
+        assert!((shoelace(&lot.outline) - side * side).abs() < 1e-6);
     }
 
     #[test]
@@ -704,7 +616,7 @@ mod tests {
             }
         }
         // And each lot is inside the box of the mesh it's recorded in.
-        for lot in plots.lots.iter().flatten() {
+        for lot in plots.lots.values() {
             let (min, max) = bounds(&plots.meshes[&lot.sector].vertices);
             for v in lot_vertices(plots, lot) {
                 assert!((0..3).all(|k| v.position[k] >= min[k] && v.position[k] <= max[k]));
@@ -715,10 +627,8 @@ mod tests {
     #[test]
     fn each_lot_is_found_in_its_sector_mesh() {
         let (t, plots) = fixture();
-        for (plot, lot) in t.terrain_plots.iter().zip(&plots.lots) {
-            let Some(lot) = lot else {
-                continue;
-            };
+        for plot in &t.terrain_plots {
+            let lot = &plots.lots[&plot.id];
             let m = &plots.meshes[&lot.sector];
             assert!(lot.vertices.end as usize <= m.vertices.len());
             assert!(lot.indices.end as usize <= m.indices.len());
@@ -780,10 +690,8 @@ mod tests {
         // Every vertex is at least its zone's inset inside the lot's quad,
         // so two lots sharing an edge have a seam of ground between them.
         let (t, plots) = fixture();
-        for (plot, lot) in t.terrain_plots.iter().zip(&plots.lots) {
-            let Some(lot) = lot else {
-                continue;
-            };
+        for plot in &t.terrain_plots {
+            let lot = &plots.lots[&plot.id];
             let s = style(Zone::from_str(&plot.zone).unwrap());
             let quad = hull(&plot.corners.map(|(x, y)| [x, y]));
             for v in lot_vertices(plots, lot) {
@@ -860,8 +768,7 @@ mod tests {
         let (_, plots) = fixture();
         let lot = plots
             .lots
-            .iter()
-            .flatten()
+            .values()
             .find(|l| l.zone == Zone::Suburban)
             .unwrap();
         let m = owned([lot]);

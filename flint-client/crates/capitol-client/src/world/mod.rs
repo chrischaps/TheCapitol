@@ -27,7 +27,7 @@ use capitol_core::protocol::terrain::TerrainResponse;
 /// | ground | world size, water rings (its holes) |
 /// | water, bridges, tower | water rings |
 /// | roads | roads, water rings (they stop at the kerbs) |
-/// | plots | plots, roads, water rings (lots are clipped clear of both) |
+/// | plots | plots (the server clears them of roads and water, B7) |
 ///
 /// The centre isn't an input: `coords` places the world on the protocol's
 /// fixed `CENTER_X`/`CENTER_Y`.
@@ -59,7 +59,7 @@ impl Rebuild {
             ground: rings || old.world_size != new.world_size,
             rings,
             roads,
-            plots: roads || old.terrain_plots != new.terrain_plots,
+            plots: old.terrain_plots != new.terrain_plots,
         }
     }
 }
@@ -134,11 +134,10 @@ mod tests {
         new.roads[0].width += 1.0;
         let roads = Rebuild {
             roads: true,
-            plots: true,
             ..NONE
         };
         assert_eq!(Rebuild::between(Some(&old), &new), roads);
-        assert_eq!(roads.to_string(), "roads, plots");
+        assert_eq!(roads.to_string(), "roads");
 
         let mut new = old.clone();
         new.world_size += 100.0;
@@ -150,6 +149,10 @@ mod tests {
 
         let mut new = old.clone();
         new.water_rings[0].width += 1.0;
-        assert_eq!(Rebuild::between(Some(&old), &new), Rebuild::ALL);
+        let rings = Rebuild {
+            plots: false,
+            ..Rebuild::ALL
+        };
+        assert_eq!(Rebuild::between(Some(&old), &new), rings);
     }
 }

@@ -70,14 +70,13 @@ pub struct CapitolExtension {
     /// The terrain the world was last built from, to tell what a new one
     /// changes (`world::Rebuild`).
     built: Option<TerrainResponse>,
-    /// Where each of the terrain's plots is in the plot meshes, in order.
-    lots: Vec<Option<Lot>>,
-    /// Each lot's place in `lots`, by its `TerrainPlot::id`, which a
-    /// claimable plot names as `PlotInfo::terrain_id` (B7).
-    lot_of: HashMap<String, usize>,
+    /// Where each of the terrain's plots is in the plot meshes, by its
+    /// `TerrainPlot::id`, which a claimable plot names as
+    /// `PlotInfo::terrain_id` (B7).
+    lots: HashMap<String, Lot>,
     /// The lots `world::plots::OWNED_MESH` was last built over, or `None`
     /// to build it again.
-    owned_drawn: Option<Vec<usize>>,
+    owned_drawn: Option<Vec<String>>,
     plot_panel: ui::plot::PlotPanel,
     atmosphere: Atmosphere,
     icons: ItemIcons,
@@ -136,8 +135,7 @@ impl CapitolExtension {
             form: LoginForm::default(),
             world_built: false,
             built: None,
-            lots: Vec::new(),
-            lot_of: HashMap::new(),
+            lots: HashMap::new(),
             owned_drawn: None,
             plot_panel: ui::plot::PlotPanel::default(),
             atmosphere: Atmosphere::default(),
@@ -373,14 +371,7 @@ impl PlayerExtension for CapitolExtension {
             if made {
                 self.hints.saw(Did::Crafted);
             }
-            plots(
-                ctx,
-                session,
-                &self.shared,
-                &self.lots,
-                &self.lot_of,
-                &mut self.sound,
-            );
+            plots(ctx, session, &self.shared, &self.lots, &mut self.sound);
             // Signed out, the store is empty, so everyone fades away.
             let (poses, state) = session.sample(now);
             let dt = ctx.clock.delta_time.min(0.1) as f32;
@@ -442,11 +433,12 @@ impl PlayerExtension for CapitolExtension {
             self.world_built = true;
         }
         // Your plots in gold, rebuilt when they change. Offline, none.
-        let owned = self.session.as_ref().map_or_else(Vec::new, |s| {
-            owned_lots(s.state().plots(), &self.lots, &self.lot_of)
-        });
+        let owned = self
+            .session
+            .as_ref()
+            .map_or_else(Vec::new, |s| owned_lots(s.state().plots(), &self.lots));
         if self.owned_drawn.as_ref() != Some(&owned) {
-            lots::upload_owned(gpu, owned.iter().filter_map(|&i| self.lots[i].as_ref()));
+            lots::upload_owned(gpu, owned.iter().filter_map(|id| self.lots.get(id)));
             let any = !owned.is_empty();
             self.owned_drawn = Some(owned);
             if any {
@@ -481,15 +473,8 @@ impl PlayerExtension for CapitolExtension {
             sectors.extend(world::roads::upload(gpu, &terrain.roads, rings));
         }
         if rebuild.plots {
-            let (plots, lots) =
-                world::plots::upload(gpu, &terrain.terrain_plots, &terrain.roads, rings);
+            let (plots, lots) = world::plots::upload(gpu, &terrain.terrain_plots);
             sectors.extend(plots);
-            self.lot_of = terrain
-                .terrain_plots
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (p.id.clone(), i))
-                .collect();
             self.lots = lots;
             // The lots moved, so the gold is built again next frame.
             self.owned_drawn = None;
@@ -1188,8 +1173,7 @@ fn plots(
     ctx: &mut ExtensionCtx,
     session: &mut Session,
     shared: &script_api::Shared,
-    lots: &[Option<Lot>],
-    lot_of: &HashMap<String, usize>,
+    lots: &HashMap<String, Lot>,
     sound: &mut Soundscape,
 ) {
     if let Some([x, y]) = shared.pick_plot.lock().ok().and_then(|mut p| p.take()) {
@@ -1197,11 +1181,7 @@ fn plots(
     }
     let me = session.state().me();
     let mark = session.state().picked_plot().map(|p| {
-        let lot = p
-            .terrain_id
-            .as_ref()
-            .and_then(|id| lot_of.get(id))
-            .and_then(|&i| lots.get(i)?.as_ref());
+        let lot = p.terrain_id.as_ref().and_then(|id| lots.get(id));
         PlotMark {
             outline: plot_outline(p, lot),
             y: crate::coords::layer::PLOT + 0.06,
@@ -1269,18 +1249,17 @@ fn plot_outline(plot: &capitol_core::protocol::rest::PlotInfo, lot: Option<&Lot>
     .collect()
 }
 
-/// Where your plots are in `lots`, sorted: each joined to its lot by
+/// The ids of your plots' lots, sorted: each joined to its lot by
 /// `terrain_id`. A plot with no lot (pre-B7, or a terrain that no longer
 /// has it) isn't drawn.
 fn owned_lots(
     plots: &[capitol_core::protocol::rest::PlotInfo],
-    lots: &[Option<Lot>],
-    lot_of: &HashMap<String, usize>,
-) -> Vec<usize> {
-    let mut owned: Vec<usize> = plots
+    lots: &HashMap<String, Lot>,
+) -> Vec<String> {
+    let mut owned: Vec<String> = plots
         .iter()
-        .filter_map(|p| lot_of.get(p.terrain_id.as_ref()?).copied())
-        .filter(|&i| lots.get(i).is_some_and(Option::is_some))
+        .filter_map(|p| p.terrain_id.clone())
+        .filter(|id| lots.contains_key(id))
         .collect();
     owned.sort_unstable();
     owned.dedup();

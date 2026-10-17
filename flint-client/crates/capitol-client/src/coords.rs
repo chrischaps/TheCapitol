@@ -40,7 +40,7 @@ pub mod layer {
     /// The lowest road layer; see [`road`].
     pub const ROAD: f32 = GROUND + 0.04;
     /// The top of a lot (P3.6), a step above the highest road, like a
-    /// pavement. Lots are clipped clear of the roads, so they never
+    /// pavement. The server clears lots off the roads (B7), so they never
     /// overlap; each has a curb a few centimetres higher round its edge.
     pub const PLOT: f32 = GROUND + 0.12;
     /// The paving inside the moat (P3.7), level with the arterials, so the
