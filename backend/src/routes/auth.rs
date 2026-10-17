@@ -209,6 +209,9 @@ pub async fn login(
     let session_key = format!("session:{}", account.id);
     redis.set_ex::<_, _, ()>(&session_key, &token, 86400).await?;
 
+    // This login replaced any older session, so close that session's socket (#78)
+    state.game.write().await.end_session(player_id);
+
     Ok(Json(AuthResponse {
         token,
         account: account.into(),
@@ -241,6 +244,15 @@ pub async fn logout(
     let mut redis = state.redis.clone();
     let session_key = format!("session:{}", token_data.claims.sub);
     redis.del::<_, ()>(&session_key).await?;
+
+    // The session is gone, so its socket goes too (#78)
+    let player_id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM players WHERE account_id = $1 LIMIT 1")
+        .bind(token_data.claims.sub)
+        .fetch_optional(&state.db)
+        .await?;
+    if let Some(player_id) = player_id {
+        state.game.write().await.end_session(player_id);
+    }
 
     Ok(Json(SuccessResponse::ok()))
 }

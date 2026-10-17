@@ -20,8 +20,9 @@ use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
 /// The WebSocket connection currently serving a player
 pub struct PlayerConnection {
     pub id: u64,
-    /// Fired when a newer connection takes the player over
-    superseded: oneshot::Sender<()>,
+    /// Fired when a newer connection takes the player over, or their session ends (#78).
+    /// `None` once fired
+    superseded: Option<oneshot::Sender<()>>,
 }
 
 pub struct GameState {
@@ -137,12 +138,30 @@ impl GameState {
         self.next_connection_id += 1;
         let id = self.next_connection_id;
         let (superseded, rx) = oneshot::channel();
-        if let Some(old) = self.connections.insert(player.id, PlayerConnection { id, superseded }) {
+        let current = PlayerConnection { id, superseded: Some(superseded) };
+        if let Some(old) = self.connections.insert(player.id, current) {
             tracing::info!("Connection {} supersedes {} for player {}", id, old.id, player.id);
-            let _ = old.superseded.send(());
+            if let Some(tx) = old.superseded {
+                let _ = tx.send(());
+            }
         }
         self.add_player(player);
         (id, rx)
+    }
+
+    /// The player's session ended over REST: a login elsewhere replaced it, or it logged out.
+    /// Their connection's receiver fires, so it says `auth_error` and hangs up (#78). It stays
+    /// their current connection, so its own disconnect still removes the player. Returns
+    /// whether there was a connection to tell.
+    pub fn end_session(&mut self, player_id: Uuid) -> bool {
+        match self.connections.get_mut(&player_id).and_then(|c| c.superseded.take()) {
+            Some(tx) => {
+                tracing::info!("Session ended for player {}: closing their connection", player_id);
+                let _ = tx.send(());
+                true
+            }
+            None => false,
+        }
     }
 
     /// End connection `connection_id`. The player is removed only if it is still their current
@@ -1084,6 +1103,24 @@ mod tests {
         assert!(game.disconnect_player(id, conn_b));
         assert!(!game.players.contains_key(&id));
         assert!(!game.connections.contains_key(&id));
+        assert_eq!(leaves(&mut rx, id), 1);
+    }
+
+    #[test]
+    fn an_ended_session_closes_the_connection_and_its_disconnect_removes_the_player() {
+        let mut game = game();
+        let ada = player("Ada", 4000.0, 4000.0);
+        let id = ada.id;
+        assert!(!game.end_session(id), "no connection to tell");
+        let (conn, mut ended) = game.connect_player(ada);
+
+        assert!(game.end_session(id));
+        assert!(ended.try_recv().is_ok(), "the connection should be told to hang up");
+        assert!(!game.end_session(id), "told once only");
+
+        let mut rx = game.subscribe();
+        assert!(game.disconnect_player(id, conn), "it's still the player's connection");
+        assert!(!game.players.contains_key(&id));
         assert_eq!(leaves(&mut rx, id), 1);
     }
 

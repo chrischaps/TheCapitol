@@ -112,8 +112,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     loop {
         tokio::select! {
-            // A newer connection took this player over: the account signed in elsewhere, or
-            // this socket is half-open and the client already reconnected past it
+            // A newer connection took this player over (the account signed in elsewhere, or
+            // this socket is half-open and the client already reconnected past it), or a login
+            // or logout over REST ended this session (#78)
             _ = &mut superseded => {
                 let msg = ServerMessage::AuthError { message: "Session expired".into() };
                 let _ = timeout(Duration::from_secs(2), async {

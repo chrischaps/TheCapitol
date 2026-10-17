@@ -15,12 +15,10 @@
 //! - **The server's health is known before you submit.** While signed out,
 //!   `GET /health` goes every [`HEALTH_EVERY`], so the form can say the
 //!   server is down rather than wait for a login to fail.
-//! - **A refused token ends the session wherever it's seen.** The server
-//!   checks the session only when the WebSocket authenticates, so a login
-//!   elsewhere leaves this one's socket open. Its REST calls are refused
-//!   at once, though, and the poller makes one every 5 s: a 401 on any of
-//!   the game's calls ends the session as an `auth_error` does (issue #78
-//!   asks the server to say so on the socket).
+//! - **A refused token ends the session wherever it's seen.** A login
+//!   elsewhere makes the server send this socket `auth_error` and close it
+//!   (issue #78). As a backstop, a 401 on any of the game's REST calls ends
+//!   the session as an `auth_error` does; the poller makes one every 5 s.
 //! - **The email is remembered once it signs in**, so a typo isn't. The
 //!   password is never kept.
 
