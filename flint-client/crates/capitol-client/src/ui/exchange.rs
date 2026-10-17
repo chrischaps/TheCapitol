@@ -629,7 +629,7 @@ fn lands(lands: &Lands) -> String {
             "Joins your fiber in slot {}, quality becoming {q}",
             slot + 1
         ),
-        Lands::OnStack { .. } => "Joins one of your fiber stacks".into(),
+        Lands::OnStack { .. } => "Joins your fiber".into(),
         Lands::NewSlot(slot) => format!("Lands in empty slot {}", slot + 1),
     }
 }

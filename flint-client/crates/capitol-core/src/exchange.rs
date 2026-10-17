@@ -7,11 +7,11 @@
 //! - **Deposit** takes fiber stacks from the inventory, as React's panel
 //!   does. The server would take fiber from any container you own, but a
 //!   stack in the crafting input or a station's box is spoken for.
-//! - **Withdraw** gives quality-50 fiber. The server merges it into a fiber
-//!   stack in your inventory, else puts it in the first empty slot. It takes
-//!   the Strands *before* it looks for that slot, so with neither it keeps
-//!   them and answers "Inventory full" (issue #90). [`withdraw`] refuses
-//!   that case here instead.
+//! - **Withdraw** gives quality-50 fiber. The server merges it into your
+//!   inventory's lowest-slot fiber stack, else puts it in the first empty
+//!   slot. With neither it answers "Inventory full" and keeps nothing (#90
+//!   made that one transaction). [`withdraw`] refuses that case here too, so
+//!   the button never asks.
 
 use std::collections::HashSet;
 
@@ -89,8 +89,8 @@ pub fn deposit_ids(inventory: &Container, selected: &HashSet<Uuid>) -> Vec<Uuid>
 /// Where withdrawn fiber lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lands {
-    /// On a fiber stack you hold. With one stack, which and its quality
-    /// afterwards; with several, the server picks one.
+    /// On your lowest-slot fiber stack, with its quality afterwards. Both
+    /// are `None` until the inventory is known.
     OnStack {
         slot: Option<i32>,
         quality_after: Option<i32>,
@@ -138,7 +138,7 @@ pub fn withdraw(
         return Err(WithdrawRefusal::NoQuantity);
     }
     let stacks = inventory.map(fiber_stacks).unwrap_or_default();
-    let held = stacks.iter().map(|s| s.quantity as i64).max().unwrap_or(0);
+    let held = stacks.first().map_or(0, |s| s.quantity as i64);
     if quantity > MAX_STACK - held {
         return Err(WithdrawRefusal::TooMany);
     }
@@ -152,13 +152,9 @@ pub fn withdraw(
         }
     }
     let lands = match stacks.as_slice() {
-        [one] => Lands::OnStack {
-            slot: Some(one.slot_index),
-            quality_after: Some(merged_quality(one.quality, one.quantity, quantity)),
-        },
-        [_, ..] => Lands::OnStack {
-            slot: None,
-            quality_after: None,
+        [first, ..] => Lands::OnStack {
+            slot: Some(first.slot_index),
+            quality_after: Some(merged_quality(first.quality, first.quantity, quantity)),
         },
         [] => match inventory.and_then(Container::first_empty) {
             Some(slot) => Lands::NewSlot(slot),
@@ -342,15 +338,16 @@ mod tests {
             withdraw(Some(&none), 5, Some(100)).unwrap().lands,
             Lands::NewSlot(1)
         );
+        // The lowest slot, whatever order the stacks come in: (30 × 1 + 50 × 5) / 6
         let two = inventory(
             24,
-            vec![item(1, "fiber", 70, 1, 0), item(2, "fiber", 30, 1, 1)],
+            vec![item(1, "fiber", 70, 1, 3), item(2, "fiber", 30, 1, 1)],
         );
         assert_eq!(
             withdraw(Some(&two), 5, None).unwrap().lands,
             Lands::OnStack {
-                slot: None,
-                quality_after: None
+                slot: Some(1),
+                quality_after: Some(46)
             }
         );
     }
@@ -371,7 +368,7 @@ mod tests {
         );
         // Unknown balance: the server decides.
         assert!(withdraw(Some(&inv), 100, None).is_ok());
-        // Full, with no fiber to join: the server would keep the Strands.
+        // Full, with no fiber to join: the server would refuse it.
         let full = inventory(2, vec![item(1, "rope", 1, 1, 0), item(2, "rope", 1, 1, 1)]);
         assert_eq!(
             withdraw(Some(&full), 1, Some(100)),
@@ -382,6 +379,12 @@ mod tests {
             withdraw(Some(&near), 2, None),
             Err(WithdrawRefusal::TooMany)
         );
+        // Only the stack it would join counts, not the biggest
+        let later = inventory(
+            24,
+            vec![item(1, "fiber", 50, 1, 0), item(2, "fiber", 50, i32::MAX - 1, 5)],
+        );
+        assert!(withdraw(Some(&later), 2, None).is_ok());
     }
 
     #[test]

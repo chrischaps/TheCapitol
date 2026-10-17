@@ -5,9 +5,10 @@ use axum::{
 };
 use capitol_protocol::rest::{DepositRequest, DepositResponse, WithdrawRequest, WithdrawResponse};
 use capitol_protocol::rules::{deposit_quote, withdraw_quote};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::engine::currency::{add_strands, subtract_strands, TransactionType};
+use crate::engine::currency::{add_strands_in, subtract_strands_in, TransactionType};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
@@ -39,89 +40,8 @@ pub async fn deposit_fiber(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<DepositRequest>,
 ) -> Result<Json<DepositResponse>, AppError> {
-    if req.item_ids.is_empty() {
-        return Err(AppError::BadRequest("No items specified".into()));
-    }
-
-    // Get player ID
-    let player_id = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM players WHERE account_id = $1 LIMIT 1"
-    )
-    .bind(auth_user.account_id)
-    .fetch_one(&state.db)
-    .await?;
-
-    // Get the items and verify they are fiber type and owned by player
-    let items: Vec<(Uuid, String, i32)> = sqlx::query_as(
-        "SELECT id, item_type, quantity FROM items
-         WHERE id = ANY($1) AND owner_id = $2"
-    )
-    .bind(&req.item_ids)
-    .bind(player_id)
-    .fetch_all(&state.db)
-    .await?;
-
-    // Verify all requested items were found
-    if items.len() != req.item_ids.len() {
-        return Err(AppError::BadRequest("Some items not found or not owned by you".into()));
-    }
-
-    // Calculate total fiber quantity
-    let mut total_fiber: i32 = 0;
-    for (_, item_type, quantity) in &items {
-        // Only accept fiber items
-        if item_type != "fiber" {
-            return Err(AppError::BadRequest(format!("Item type '{}' cannot be deposited, only fiber", item_type)));
-        }
-        total_fiber += quantity;
-    }
-
-    if total_fiber <= 0 {
-        return Err(AppError::BadRequest("No fiber to deposit".into()));
-    }
-
-    // Strands after the 0.5% fee (the rule clients preview with)
-    let (fee, net_strands) = deposit_quote(total_fiber as i64);
-
-    if net_strands <= 0 {
-        return Err(AppError::BadRequest("Deposit amount too small after fee".into()));
-    }
-
-    // Start transaction
-    let mut tx = state.db.begin().await?;
-
-    // Delete the fiber items
-    sqlx::query("DELETE FROM items WHERE id = ANY($1)")
-        .bind(&req.item_ids)
-        .execute(&mut *tx)
-        .await?;
-
-    // Commit item deletion
-    tx.commit().await?;
-
-    // Add strands to player balance (this has its own transaction)
-    let new_balance = add_strands(
-        &state.db,
-        player_id,
-        net_strands,
-        TransactionType::ExchangeDeposit,
-        Some(&format!("Deposited {} fiber", total_fiber)),
-        None,
-    )
-    .await
-    .map_err(|e| AppError::Internal(e))?;
-
-    tracing::info!(
-        "Player {} deposited {} fiber for {} strands (fee: {})",
-        player_id, total_fiber, net_strands, fee
-    );
-
-    Ok(Json(DepositResponse {
-        deposited_quantity: total_fiber,
-        fee,
-        strands_received: net_strands,
-        new_balance,
-    }))
+    let player_id = player_of(&state.db, auth_user.account_id).await?;
+    deposit(&state.db, player_id, &req.item_ids).await.map(Json)
 }
 
 /// Withdraw Strands to receive fiber items
@@ -141,29 +61,117 @@ pub async fn withdraw_fiber(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<WithdrawRequest>,
 ) -> Result<Json<WithdrawResponse>, AppError> {
-    if req.quantity <= 0 {
+    let player_id = player_of(&state.db, auth_user.account_id).await?;
+    withdraw(&state.db, player_id, req.quantity).await.map(Json)
+}
+
+async fn player_of(db: &PgPool, account_id: Uuid) -> Result<Uuid, AppError> {
+    Ok(sqlx::query_scalar("SELECT id FROM players WHERE account_id = $1 LIMIT 1")
+        .bind(account_id)
+        .fetch_one(db)
+        .await?)
+}
+
+/// Swap the fiber stacks `item_ids` for Strands, less the fee. The items go and
+/// the Strands arrive in one transaction, so neither happens without the other.
+pub async fn deposit(db: &PgPool, player_id: Uuid, item_ids: &[Uuid]) -> Result<DepositResponse, AppError> {
+    if item_ids.is_empty() {
+        return Err(AppError::BadRequest("No items specified".into()));
+    }
+
+    let mut tx = db.begin().await?;
+
+    // Locked, so a second deposit of the same stacks waits, then finds them gone
+    let items: Vec<(Uuid, String, i32)> = sqlx::query_as(
+        "SELECT id, item_type, quantity FROM items
+         WHERE id = ANY($1) AND owner_id = $2
+         FOR UPDATE"
+    )
+    .bind(item_ids)
+    .bind(player_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if items.len() != item_ids.len() {
+        return Err(AppError::BadRequest("Some items not found or not owned by you".into()));
+    }
+
+    let mut total_fiber: i64 = 0;
+    for (_, item_type, quantity) in &items {
+        // Only accept fiber items
+        if item_type != "fiber" {
+            return Err(AppError::BadRequest(format!("Item type '{}' cannot be deposited, only fiber", item_type)));
+        }
+        total_fiber += *quantity as i64;
+    }
+
+    if total_fiber <= 0 {
+        return Err(AppError::BadRequest("No fiber to deposit".into()));
+    }
+    let deposited_quantity = i32::try_from(total_fiber)
+        .map_err(|_| AppError::BadRequest("Too much fiber for one deposit".into()))?;
+
+    // Strands after the 0.5% fee (the rule clients preview with)
+    let (fee, net_strands) = deposit_quote(total_fiber);
+
+    if net_strands <= 0 {
+        return Err(AppError::BadRequest("Deposit amount too small after fee".into()));
+    }
+
+    sqlx::query("DELETE FROM items WHERE id = ANY($1)")
+        .bind(item_ids)
+        .execute(&mut *tx)
+        .await?;
+
+    let new_balance = add_strands_in(
+        &mut tx,
+        player_id,
+        net_strands,
+        TransactionType::ExchangeDeposit,
+        Some(&format!("Deposited {} fiber", total_fiber)),
+        None,
+    )
+    .await
+    .map_err(AppError::Internal)?;
+
+    tx.commit().await?;
+
+    tracing::info!(
+        "Player {} deposited {} fiber for {} strands (fee: {})",
+        player_id, total_fiber, net_strands, fee
+    );
+
+    Ok(DepositResponse {
+        deposited_quantity,
+        fee,
+        strands_received: net_strands,
+        new_balance,
+    })
+}
+
+/// Swap Strands for `quantity` quality-50 fiber, the fee on top. The fiber
+/// joins the inventory's lowest-slot fiber stack, else takes its first empty
+/// slot. The debit and the fiber are one transaction, so with nowhere to put
+/// the fiber the Strands stay.
+pub async fn withdraw(db: &PgPool, player_id: Uuid, quantity: i32) -> Result<WithdrawResponse, AppError> {
+    if quantity <= 0 {
         return Err(AppError::BadRequest("Quantity must be positive".into()));
     }
 
-    // Get player ID
-    let player_id = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM players WHERE account_id = $1 LIMIT 1"
-    )
-    .bind(auth_user.account_id)
-    .fetch_one(&state.db)
-    .await?;
-
     // Calculate strands needed (fiber / (1 - fee_rate), rounded up)
     // If you want 100 fiber, you pay 100 / 0.995 = ~100.5 strands
-    let (strands_needed, fee) = withdraw_quote(req.quantity as i64);
+    let (strands_needed, fee) = withdraw_quote(quantity as i64);
 
-    // Subtract strands from player balance (validates sufficient funds)
-    let new_balance = subtract_strands(
-        &state.db,
+    let mut tx = db.begin().await?;
+
+    // First, because it locks the player row: two withdrawals by one player
+    // take turns, so they can't both pick the same empty slot.
+    let new_balance = subtract_strands_in(
+        &mut tx,
         player_id,
         strands_needed,
         TransactionType::ExchangeWithdraw,
-        Some(&format!("Withdrew {} fiber", req.quantity)),
+        Some(&format!("Withdrew {} fiber", quantity)),
         None,
     )
     .await
@@ -175,92 +183,274 @@ pub async fn withdraw_fiber(
         }
     })?;
 
-    // Get player's inventory container
-    let container_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'player_inventory' LIMIT 1"
+    let (container_id, slot_count): (Uuid, i32) = sqlx::query_as(
+        "SELECT c.id, ct.slot_count FROM containers c
+         JOIN container_types ct ON c.container_type = ct.id
+         WHERE c.owner_id = $1 AND c.container_type = 'player_inventory' LIMIT 1"
     )
     .bind(player_id)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await?;
 
-    // Get container slot count
-    let slot_count: i32 = sqlx::query_scalar(
-        "SELECT ct.slot_count FROM containers c
-         JOIN container_types ct ON c.container_type = ct.id
-         WHERE c.id = $1"
-    )
-    .bind(container_id)
-    .fetch_one(&state.db)
-    .await?;
-
-    // Check if there's an existing fiber stack to merge with
+    // The lowest-slot stack, so a client can tell which one it will be
     let existing_fiber: Option<(Uuid, i32, i32)> = sqlx::query_as(
         "SELECT id, quantity, quality FROM items
-         WHERE container_id = $1 AND item_type = 'fiber' LIMIT 1"
+         WHERE container_id = $1 AND item_type = 'fiber'
+         ORDER BY slot_index NULLS LAST LIMIT 1
+         FOR UPDATE"
     )
     .bind(container_id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
 
     if let Some((existing_id, existing_qty, existing_quality)) = existing_fiber {
-        // Merge with existing stack
-        let new_qty = existing_qty + req.quantity;
-        // Quality stays the same since we're adding standard quality (50)
-        let new_quality = (existing_quality * existing_qty + 50 * req.quantity) / new_qty;
+        let new_qty = existing_qty
+            .checked_add(quantity)
+            .ok_or_else(|| AppError::BadRequest("Too much fiber for one stack".into()))?;
+        // The weighted mean with the incoming quality-50 units, rounded down
+        let new_quality = ((existing_quality as i64 * existing_qty as i64 + 50 * quantity as i64)
+            / new_qty as i64) as i32;
 
         sqlx::query("UPDATE items SET quantity = $1, quality = $2 WHERE id = $3")
             .bind(new_qty)
             .bind(new_quality)
             .bind(existing_id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await?;
     } else {
-        // Find empty slot
-        let used_slots: Vec<(i32,)> = sqlx::query_as(
+        let used: std::collections::HashSet<i32> = sqlx::query_scalar(
             "SELECT slot_index FROM items WHERE container_id = $1 AND slot_index IS NOT NULL"
         )
         .bind(container_id)
-        .fetch_all(&state.db)
-        .await?;
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
 
-        let used: std::collections::HashSet<i32> = used_slots.into_iter().map(|(s,)| s).collect();
-        let mut empty_slot: Option<i32> = None;
-        for slot in 0..slot_count {
-            if !used.contains(&slot) {
-                empty_slot = Some(slot);
-                break;
-            }
-        }
-
-        let slot_index = match empty_slot {
-            Some(s) => s,
-            None => return Err(AppError::BadRequest("Inventory full".into())),
+        // Returning drops `tx`, which rolls the debit back
+        let Some(slot_index) = (0..slot_count).find(|s| !used.contains(s)) else {
+            return Err(AppError::BadRequest("Inventory full".into()));
         };
 
         // Create new fiber item with standard quality (50)
-        let item_id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
              VALUES ($1, 'fiber', 50, $2, $3, $4, $5)"
         )
-        .bind(item_id)
-        .bind(req.quantity)
+        .bind(Uuid::new_v4())
+        .bind(quantity)
         .bind(player_id)
         .bind(container_id)
         .bind(slot_index)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     }
 
+    tx.commit().await?;
+
     tracing::info!(
         "Player {} withdrew {} fiber for {} strands (fee: {})",
-        player_id, req.quantity, strands_needed, fee
+        player_id, quantity, strands_needed, fee
     );
 
-    Ok(Json(WithdrawResponse {
+    Ok(WithdrawResponse {
         strands_spent: strands_needed,
         fee,
-        fiber_received: req.quantity,
+        fiber_received: quantity,
         new_balance,
-    }))
+    })
+}
+
+/// These need the local Postgres (`docker-compose up -d`). Each runs in a fresh
+/// database that `sqlx::test` makes from the migrations. Run them with
+/// `cargo test routes::exchange -- --ignored`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::plot_sync::tests::{balance, ledger, player};
+
+    async fn inventory(db: &PgPool, owner: Uuid) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO containers (id, container_type, owner_id) VALUES ($1, 'player_inventory', $2)")
+            .bind(id)
+            .bind(owner)
+            .execute(db)
+            .await
+            .unwrap();
+        id
+    }
+
+    async fn slot_count(db: &PgPool) -> i32 {
+        sqlx::query_scalar("SELECT slot_count FROM container_types WHERE id = 'player_inventory'")
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    async fn stack(db: &PgPool, owner: Uuid, container: Uuid, slot: i32, item_type: &str, quality: i32, qty: i32) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(id)
+        .bind(item_type)
+        .bind(quality)
+        .bind(qty)
+        .bind(owner)
+        .bind(container)
+        .bind(slot)
+        .execute(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// Fill every slot of `container` with rope
+    async fn fill(db: &PgPool, owner: Uuid, container: Uuid) {
+        for slot in 0..slot_count(db).await {
+            stack(db, owner, container, slot, "rope", 50, 1).await;
+        }
+    }
+
+    /// (quantity, quality) of an item, or `None` if it's gone
+    async fn item(db: &PgPool, id: Uuid) -> Option<(i32, i32)> {
+        sqlx::query_as("SELECT quantity, quality FROM items WHERE id = $1")
+            .bind(id)
+            .fetch_optional(db)
+            .await
+            .unwrap()
+    }
+
+    async fn fiber_in(db: &PgPool, container: Uuid) -> Vec<(i32, i32, i32)> {
+        sqlx::query_as(
+            "SELECT slot_index, quantity, quality FROM items
+             WHERE container_id = $1 AND item_type = 'fiber' ORDER BY slot_index",
+        )
+        .bind(container)
+        .fetch_all(db)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_withdrawal_into_a_full_inventory_keeps_the_strands(db: PgPool) {
+        let ada = player(&db, "ada", 1000).await;
+        let inv = inventory(&db, ada).await;
+        fill(&db, ada, inv).await;
+
+        let err = withdraw(&db, ada, 100).await.unwrap_err();
+
+        assert!(matches!(&err, AppError::BadRequest(m) if m == "Inventory full"), "{err:?}");
+        assert_eq!(balance(&db, ada).await, 1000);
+        assert_eq!(ledger(&db, ada).await, vec![], "no debit was recorded");
+        assert_eq!(fiber_in(&db, inv).await, vec![]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_withdrawal_takes_the_first_empty_slot(db: PgPool) {
+        let ada = player(&db, "ada", 1000).await;
+        let inv = inventory(&db, ada).await;
+        stack(&db, ada, inv, 0, "rope", 50, 1).await;
+
+        let done = withdraw(&db, ada, 100).await.unwrap();
+
+        let (strands, fee) = withdraw_quote(100);
+        assert_eq!((done.strands_spent, done.fee, done.fiber_received), (strands, fee, 100));
+        assert_eq!(done.new_balance, 1000 - strands);
+        assert_eq!(balance(&db, ada).await, 1000 - strands);
+        assert_eq!(fiber_in(&db, inv).await, vec![(1, 100, 50)]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_withdrawal_joins_the_lowest_slot_fiber_stack(db: PgPool) {
+        let ada = player(&db, "ada", 1000).await;
+        let inv = inventory(&db, ada).await;
+        // Inserted high slot first, so insertion order can't be what picks
+        let high = stack(&db, ada, inv, 7, "fiber", 90, 10).await;
+        let low = stack(&db, ada, inv, 2, "fiber", 90, 10).await;
+
+        withdraw(&db, ada, 10).await.unwrap();
+
+        assert_eq!(item(&db, low).await, Some((20, 70)));
+        assert_eq!(item(&db, high).await, Some((10, 90)));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_withdrawal_that_would_overflow_the_stack_keeps_the_strands(db: PgPool) {
+        let ada = player(&db, "ada", i64::MAX / 2).await;
+        let inv = inventory(&db, ada).await;
+        let full = stack(&db, ada, inv, 0, "fiber", 50, i32::MAX - 5).await;
+
+        let err = withdraw(&db, ada, 10).await.unwrap_err();
+
+        assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
+        assert_eq!(item(&db, full).await, Some((i32::MAX - 5, 50)));
+        assert_eq!(balance(&db, ada).await, i64::MAX / 2);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_withdrawal_short_of_strands_gives_nothing(db: PgPool) {
+        let ada = player(&db, "ada", 50).await;
+        let inv = inventory(&db, ada).await;
+
+        let err = withdraw(&db, ada, 100).await.unwrap_err();
+
+        assert!(matches!(&err, AppError::BadRequest(m) if m.contains("Insufficient")), "{err:?}");
+        assert_eq!(balance(&db, ada).await, 50);
+        assert_eq!(fiber_in(&db, inv).await, vec![]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_deposit_swaps_the_stacks_for_strands(db: PgPool) {
+        let ada = player(&db, "ada", 0).await;
+        let inv = inventory(&db, ada).await;
+        let a = stack(&db, ada, inv, 0, "fiber", 60, 150).await;
+        let b = stack(&db, ada, inv, 1, "fiber", 40, 50).await;
+
+        let done = deposit(&db, ada, &[a, b]).await.unwrap();
+
+        let (fee, net) = deposit_quote(200);
+        assert_eq!((done.deposited_quantity, done.fee, done.strands_received), (200, fee, net));
+        assert_eq!(balance(&db, ada).await, net);
+        assert_eq!(fiber_in(&db, inv).await, vec![]);
+        assert_eq!(ledger(&db, ada).await, vec![(net, "exchange_deposit".to_string())]);
+    }
+
+    /// The items and the Strands are one transaction, so a credit that fails
+    /// (here, a balance that would overflow) leaves the fiber where it was
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_deposit_whose_credit_fails_keeps_the_fiber(db: PgPool) {
+        let ada = player(&db, "ada", i64::MAX - 10).await;
+        let inv = inventory(&db, ada).await;
+        let a = stack(&db, ada, inv, 0, "fiber", 60, 1000).await;
+
+        let err = deposit(&db, ada, &[a]).await.unwrap_err();
+
+        assert!(matches!(err, AppError::Internal(_)), "{err:?}");
+        assert_eq!(item(&db, a).await, Some((1000, 60)));
+        assert_eq!(balance(&db, ada).await, i64::MAX - 10);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_deposit_with_one_non_fiber_stack_takes_nothing(db: PgPool) {
+        let ada = player(&db, "ada", 0).await;
+        let inv = inventory(&db, ada).await;
+        let fiber = stack(&db, ada, inv, 0, "fiber", 60, 100).await;
+        let rope = stack(&db, ada, inv, 1, "rope", 60, 1).await;
+
+        let err = deposit(&db, ada, &[fiber, rope]).await.unwrap_err();
+
+        assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
+        assert_eq!(item(&db, fiber).await, Some((100, 60)));
+        assert_eq!(balance(&db, ada).await, 0);
+    }
 }
