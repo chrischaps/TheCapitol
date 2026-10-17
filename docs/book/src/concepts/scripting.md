@@ -126,8 +126,10 @@ Audio functions produce deferred commands that the player processes after the sc
 |----------|-------------|
 | `play_sound(name)` | Play a non-spatial sound at default volume |
 | `play_sound(name, volume)` | Play a non-spatial sound at the given volume (0.0--1.0) |
+| `play_sound(name, volume, pitch)` | As above, with a pitch multiplier |
 | `play_sound_at(name, x, y, z, volume)` | Play a spatial sound at a 3D position |
 | `play_sound_at(name, x, y, z, volume, pitch)` | As above, with a pitch multiplier |
+| `play_sound_at(name, x, y, z, opts)` | A spatial sound with a map of options, each optional: `volume` (1), `pitch` (1), `min_distance` (1), `max_distance` (25), `rolloff` (2) |
 | `stop_sound(name)` | Stop a playing sound |
 
 Sound names match the audio files loaded from the `audio/` directory (without extension). A one-shot naming a file that is not there fails silently — it logs a warning and plays nothing.
@@ -135,9 +137,10 @@ Sound names match the audio files loaded from the `audio/` directory (without ex
 Varying `pitch` slightly per trigger (say 0.9–1.1) is the cheapest way to stop a
 repeated one-shot sounding like a repeated one-shot.
 
-Spatial one-shot tracks attenuate to silence at 25 m. An event further away
-than that must use non-spatial `play_sound` with a hand-scaled volume, or it
-will simply not be heard.
+By default a spatial one-shot fades to silence at 25 m. A sound meant to be
+heard further away sets `max_distance` in the options map, and usually a
+`rolloff` below 1 so it fades like a sound in the open. See
+[Audio: Scripting](audio.md#scripting-integration).
 
 ### Animation API
 
@@ -760,6 +763,21 @@ for i in 0..items.len() {
     draw_text(list_x, list_y + i * 24.0 - scroll, items[i], 18.0, 1.0, 1.0, 1.0, 1.0);
 }
 pop_clip();
+```
+
+#### Over the UI
+
+| Function | Description |
+|----------|-------------|
+| `push_over_ui()` | Draw every following call above the game's egui panels and windows |
+| `pop_over_ui()` | Go back to drawing under them |
+
+The script HUD normally draws under a game's own egui ([Player Extensions](../guides/player-extensions.md)), so a panel covers any HUD drawing behind it. Calls issued between `push_over_ui()` and `pop_over_ui()` go on a layer of their own, painted after every egui panel and window but before popups, debug panels and tooltips. Among themselves they still sort by `layer`, and each can be clipped. Pushes nest, unbalanced pops are ignored, and the depth is reset every frame. Use it for short-lived effects that have to reach the UI, such as an item flying into an inventory button, and keep everything else under it, so the HUD never covers what a panel says:
+
+```rhai
+push_over_ui();
+draw_circle(pip_x, pip_y, 5.0, 0.79, 0.64, 0.15, 1.0);  // lands on the button
+pop_over_ui();
 ```
 
 #### Shared Modules (`scripts/lib`)
