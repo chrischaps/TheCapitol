@@ -51,6 +51,8 @@ export interface WorldGenParams {
   // Rural plots
   rural_plot_frontage: number
   rural_plot_depth: number
+  // Guild halls
+  guild_plot_frontage: number
   // Seeds
   seed: number
 }
@@ -95,6 +97,7 @@ export const DEFAULT_WORLD_PARAMS: WorldGenParams = {
   rural_trail_count: 12,
   rural_plot_frontage: 200,
   rural_plot_depth: 150,
+  guild_plot_frontage: 150,
   seed: 42,
 }
 

@@ -546,6 +546,7 @@ export default function GameCanvas() {
       urban: { fill: 'rgba(100, 116, 139, 0.08)', stroke: 'rgba(100, 116, 139, 0.25)' },
       suburban: { fill: 'rgba(34, 197, 94, 0.08)', stroke: 'rgba(34, 197, 94, 0.25)' },
       rural: { fill: 'rgba(132, 204, 22, 0.08)', stroke: 'rgba(132, 204, 22, 0.25)' },
+      guild_district: { fill: 'rgba(139, 92, 246, 0.08)', stroke: 'rgba(139, 92, 246, 0.25)' },
     }
     const DEFAULT_COLORS = { fill: 'rgba(34, 197, 94, 0.08)', stroke: 'rgba(34, 197, 94, 0.25)' }
 

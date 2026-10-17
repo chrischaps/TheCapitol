@@ -138,7 +138,7 @@ pub struct TerrainPlot {
     pub area: f64,
     /// ID of the adjacent street
     pub adjacent_street_id: String,
-    /// Zone this plot belongs to: "urban", "suburban", or "rural"
+    /// Zone this plot belongs to: "guild_district", "urban", "suburban", or "rural"
     pub zone: String,
 }
 

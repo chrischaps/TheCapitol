@@ -104,6 +104,8 @@ pub struct WorldGenParams {
     // Rural plots
     pub rural_plot_frontage: f64,
     pub rural_plot_depth: f64,
+    // Guild halls
+    pub guild_plot_frontage: f64,
     // Seeds
     pub seed: u64,
 }
@@ -138,10 +140,15 @@ impl Default for WorldGenParams {
             rural_trail_count: 12,
             rural_plot_frontage: 200.0,
             rural_plot_depth: 150.0,
+            guild_plot_frontage: 150.0,
             seed: 42,
         }
     }
 }
+
+/// How far a guild hall stands back from the kerb of the roads and water
+/// round it, in world units (#83).
+const GUILD_CLEAR: f64 = 1.0;
 
 /// Spacing of a collector's points, in world units.
 const COLLECTOR_STEP: f64 = 20.0;
@@ -796,6 +803,7 @@ impl TerrainConfig {
         config.terrain_plots = config.generate_suburban_plots_internal(&params.suburban);
         config.terrain_plots.extend(config.generate_urban_plots(params));
         config.terrain_plots.extend(config.generate_rural_plots(params));
+        config.terrain_plots.extend(config.generate_guild_plots(params));
         // Pull every lot clear of the roads and the water, and make the ids unique
         // (B7): a lot is what players claim, so it must be the ground it looks like.
         config.terrain_plots = super::lot_clearance::finish_lots(
@@ -2927,6 +2935,122 @@ impl TerrainConfig {
         plots
     }
 
+    /// Guild halls: big lots either side of the guild ring road, from the inner
+    /// canal to the outer one, split at every arterial that reaches the band
+    /// (#83). The four cardinal arterials cross the inner band; the other four
+    /// start at the ring, and their ends reach into it, so they split it too.
+    ///
+    /// Each band is the ground that's clear by construction: the ring road's
+    /// ribbon lies inside `R + w/2` and outside `R·cos(π/n) − w/2` (it's an
+    /// n-gon), and the water keeps its kerb. A lot's straight inner edge sags
+    /// toward the centre, so its inner corners stand far enough out that the
+    /// edge's midpoint still clears the band. A side edge runs parallel to its
+    /// arterial, `GUILD_CLEAR` past the kerb. So `finish_lots` has nothing to
+    /// trim, and the generator's ids and shapes are the ones that get claimed.
+    fn generate_guild_plots(&self, params: &WorldGenParams) -> Vec<TerrainPlot> {
+        let ring = self.roads.iter().find(|r| r.id == "guild_ring");
+        let inner_canal = self.water_rings.iter().find(|r| r.id == "canal_inner");
+        let outer_canal = self.water_rings.iter().find(|r| r.id == "canal_outer");
+        let (Some(ring), Some(inner_canal), Some(outer_canal)) = (ring, inner_canal, outer_canal) else {
+            return Vec::new();
+        };
+        let kerb = super::lot_clearance::WATER_KERB;
+        let ring_r = params.guild_ring_radius;
+        let ring_half = ring.width / 2.0;
+        let sides = ring.points.len().saturating_sub(1).max(3) as f64;
+        let bands = [
+            ("in", inner_canal.outer_radius() + kerb + GUILD_CLEAR, ring_r * (PI / sides).cos() - ring_half - GUILD_CLEAR),
+            ("out", ring_r + ring_half + GUILD_CLEAR, outer_canal.inner_radius() - kerb - GUILD_CLEAR),
+        ];
+
+        let radius = |&(x, y): &(f64, f64)| ((x - self.center_x).powi(2) + (y - self.center_y).powi(2)).sqrt();
+        let mut plots = Vec::new();
+        for (band, lo, hi) in bands {
+            if hi - lo < 20.0 {
+                continue;
+            }
+            // (angle, half width) of each radial arterial whose ribbon reaches
+            // the band. Suburban junctions weld extra vertices into the outer
+            // arterials (#62), so a radial road is any whose points share a bearing.
+            let bearing = |&(x, y): &(f64, f64)| (y - self.center_y).atan2(x - self.center_x).rem_euclid(2.0 * PI);
+            let mut dividers: Vec<(f64, f64)> = self
+                .roads
+                .iter()
+                .filter(|r| r.road_type == RoadType::Arterial && r.points.len() >= 2)
+                .filter_map(|r| {
+                    let far = *r.points.iter().max_by(|a, b| radius(a).total_cmp(&radius(b)))?;
+                    let a = bearing(&far);
+                    let radial = r.points.iter().all(|p| {
+                        let d = (bearing(p) - a).rem_euclid(2.0 * PI);
+                        radius(p) < 1e-6 || d.min(2.0 * PI - d) < 1e-6
+                    });
+                    let h = r.width / 2.0;
+                    let near = r.points.iter().map(radius).fold(f64::INFINITY, f64::min);
+                    (radial && near - h < hi && radius(&far) + h > lo).then_some((a, h))
+                })
+                .collect();
+            dividers.sort_by(|a, b| a.0.total_cmp(&b.0));
+            dividers.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-9);
+            if dividers.is_empty() {
+                continue;
+            }
+
+            for wedge in 0..dividers.len() {
+                let (a1, h1) = dividers[wedge];
+                let (mut a2, h2) = dividers[(wedge + 1) % dividers.len()];
+                if a2 <= a1 {
+                    a2 += 2.0 * PI;
+                }
+                // The wedge's edges at radius r, each GUILD_CLEAR past its arterial's kerb
+                let edges = |r: f64| (a1 + ((h1 + GUILD_CLEAR) / r).asin(), a2 - ((h2 + GUILD_CLEAR) / r).asin());
+                let (m1, m2) = edges((lo + hi) / 2.0);
+                if m2 <= m1 {
+                    continue;
+                }
+                let count = ((m2 - m1) * (lo + hi) / 2.0 / params.guild_plot_frontage.max(1.0)).ceil().max(1.0) as usize;
+
+                // Stand the inner corners out so the chord between them clears `lo`
+                let mut r_in = lo;
+                for _ in 0..3 {
+                    let (e1, e2) = edges(r_in);
+                    r_in = lo / ((e2 - e1) / count as f64 / 2.0).cos();
+                }
+                let r_out = hi;
+                let (in1, in2) = edges(r_in);
+                let (out1, out2) = edges(r_out);
+                if in2 <= in1 || out2 <= out1 {
+                    continue;
+                }
+
+                let at = |r: f64, a: f64| (self.center_x + r * a.cos(), self.center_y + r * a.sin());
+                for s in 0..count {
+                    let (f0, f1) = (s as f64 / count as f64, (s + 1) as f64 / count as f64);
+                    let (i0, i1) = (in1 + (in2 - in1) * f0, in1 + (in2 - in1) * f1);
+                    let (o0, o1) = (out1 + (out2 - out1) * f0, out1 + (out2 - out1) * f1);
+                    // Corners start with the edge on the ring road, as (0, 1)
+                    let corners = if band == "out" {
+                        [at(r_in, i0), at(r_in, i1), at(r_out, o1), at(r_out, o0)]
+                    } else {
+                        [at(r_out, o1), at(r_out, o0), at(r_in, i0), at(r_in, i1)]
+                    };
+                    let area = TerrainPlot::calculate_area(&corners);
+                    if area < 100.0 {
+                        continue;
+                    }
+                    plots.push(TerrainPlot {
+                        id: format!("guild_plot_{band}_{wedge}_{s}"),
+                        corners,
+                        street_facing_edge: (0, 1),
+                        area,
+                        adjacent_street_id: ring.id.clone(),
+                        zone: "guild_district".to_string(),
+                    });
+                }
+            }
+        }
+        plots
+    }
+
     /// Generate plots along rural trail roads
     fn generate_rural_plots(&self, params: &WorldGenParams) -> Vec<TerrainPlot> {
         let mut plots = Vec::new();
@@ -3656,6 +3780,34 @@ mod tests {
             problematic_roads.len(),
             problematic_roads.iter().map(|(id, _, _, _)| id.clone()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn guild_halls_fill_the_guild_district_untrimmed() {
+        // The defaults and the wider canals the dev DB commits (#83).
+        let mut wide = WorldGenParams::default();
+        wide.canal_inner_width = 50.0;
+        wide.canal_outer_width = 50.0;
+        for params in [WorldGenParams::default(), wide] {
+            let config = TerrainConfig::from_params(&params);
+            let generated = config.generate_guild_plots(&params);
+            let kept: Vec<_> = config.terrain_plots.iter().filter(|p| p.zone == "guild_district").collect();
+            // finish_lots had nothing to slide or drop
+            assert_eq!(kept.len(), generated.len());
+            for (k, g) in kept.iter().zip(&generated) {
+                assert_eq!(k.id, g.id);
+                assert_eq!(k.corners, g.corners, "{} was trimmed", g.id);
+            }
+            let (inner, outer) = (kept.iter().filter(|p| p.id.contains("_in_")).count(), kept.len());
+            assert!(inner >= 24 && outer - inner >= 32, "{inner} inner, {} outer", outer - inner);
+            for p in &kept {
+                assert!(p.area > 10_000.0, "{} is only {} square", p.id, p.area);
+                for &(x, y) in &p.corners {
+                    let r = ((x - config.center_x).powi(2) + (y - config.center_y).powi(2)).sqrt();
+                    assert!(r > params.trade_outer_radius && r < params.guild_outer_radius, "{} reaches r {r}", p.id);
+                }
+            }
+        }
     }
 
     #[test]

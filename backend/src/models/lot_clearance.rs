@@ -396,6 +396,7 @@ mod tests {
             }
             eprintln!("{} lots: {:?}", t.terrain_plots.len(), zones);
             assert!(zones["urban"] > 1500 && zones["suburban"] > 150 && zones["rural"] > 40, "{zones:?}");
+            assert!(zones.get("guild_district").copied().unwrap_or(0) >= 40, "{zones:?}");
         }
     }
 }

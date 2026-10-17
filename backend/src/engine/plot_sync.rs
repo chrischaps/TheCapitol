@@ -71,11 +71,14 @@ impl From<sqlx::Error> for SyncError {
     }
 }
 
-/// The size category for a lot of this area, which sets its station capacity
-/// (`plot_size_categories`). Urban lots come out medium, suburban large and
-/// rural fields estates.
-pub fn size_category(area: f64) -> &'static str {
-    if area < 2_500.0 {
+/// The size category for a lot in this zone of this area, which sets its
+/// station capacity (`plot_size_categories`). Urban lots come out medium,
+/// suburban large and rural fields estates. A guild district lot is always a
+/// guild hall, whatever its area (#83): that's the zone's `plot_size_category`.
+pub fn size_category(zone: &str, area: f64) -> &'static str {
+    if zone == "guild_district" {
+        "guild_hall"
+    } else if area < 2_500.0 {
         "medium"
     } else if area < 15_000.0 {
         "large"
@@ -209,7 +212,7 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
         if kept.contains(&lot.id.as_str()) {
             continue;
         }
-        let size = size_category(lot.area);
+        let size = size_category(&lot.zone, lot.area);
         match existing.get(&lot.id) {
             None => report.inserted += 1,
             Some(row) => {
@@ -440,9 +443,11 @@ pub(crate) mod tests {
 
     #[test]
     fn sizes_follow_area() {
-        assert_eq!(size_category(1_440.0), "medium");
-        assert_eq!(size_category(7_100.0), "large");
-        assert_eq!(size_category(28_600.0), "estate");
+        assert_eq!(size_category("urban", 1_440.0), "medium");
+        assert_eq!(size_category("suburban", 7_100.0), "large");
+        assert_eq!(size_category("rural", 28_600.0), "estate");
+        assert_eq!(size_category("guild_district", 1_440.0), "guild_hall");
+        assert_eq!(size_category("guild_district", 28_600.0), "guild_hall");
     }
 
     #[test]

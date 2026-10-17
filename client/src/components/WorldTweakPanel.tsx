@@ -184,6 +184,10 @@ export default function WorldTweakPanel() {
               <ParamSlider label="Arterial End Radius" value={params.arterial_end_radius} min={2000} max={6000} step={50} onChange={(v) => updateParam('arterial_end_radius', v)} />
             </Section>
 
+            <Section title="Guild Halls">
+              <ParamSlider label="Plot Frontage" value={params.guild_plot_frontage} min={60} max={400} step={10} onChange={(v) => updateParam('guild_plot_frontage', v)} />
+            </Section>
+
             <Section title="Urban Grid">
               <ParamSlider label="Radial Spacing" value={params.urban_radial_spacing} min={30} max={300} step={5} onChange={(v) => updateParam('urban_radial_spacing', v)} />
               <ParamSlider label="Spoke Count" value={params.urban_spoke_count} min={8} max={128} step={1} onChange={(v) => updateParam('urban_spoke_count', v)} />
