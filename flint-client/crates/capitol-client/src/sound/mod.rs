@@ -22,15 +22,13 @@
 //! set to master × ambience, and the one-shots on the sfx bus, set to
 //! master, each scaled by the effects or interface level.
 //!
-//! **One-shots** are played straight from `pre_update`. Something
-//! in the world (a bird, a rustle) is placed a few metres from the camera
-//! in its true direction, so it pans, and the soundscape sets its level
-//! from its true distance. Flint's spatial falloff ends at 25 m, and the
-//! street camera stands 32 m off, so placing them where they are would
-//! silence them all. A workaround from issue #94: since Flint ADR 0084 the
-//! extension can set a placed sound's falloff (`SoundOptions::distances`),
-//! so the sounds could stand where they are, once someone tunes the curve
-//! by ear.
+//! **One-shots** are played straight from `pre_update`. Something in the
+//! world (a bird, a rustle) sounds where it is, and Flint pans it and fades
+//! it with its distance from the camera, the listener. Its falloff is sized
+//! to the rig (#94): full within [`NEAR`], about where the street camera
+//! stands from you, then down like a sound in the open, within 1.5 dB
+//! of `(32/d)^1.2` out to 300 m, the curve this soundscape was first tuned
+//! by ear with. Past that it goes quicker, so the map view hears none of it.
 
 pub mod dsp;
 pub mod library;
@@ -60,9 +58,12 @@ const EASE: f32 = 0.8;
 /// sounds at full level, about where the street camera stands from you.
 const NEAR: f32 = 32.0;
 
-/// How far from the camera a placed one-shot is put, metres: well inside
-/// Flint's 25 m falloff, so the engine pans it and barely dims it.
-const PLACE_AT: f32 = 3.0;
+/// A placed one-shot is silent this far from the camera, metres.
+const FAR: f32 = 1250.0;
+
+/// Flint's falloff curve between [`NEAR`] and [`FAR`]
+/// (`SoundOptions::rolloff`): fitted to `(NEAR/d)^1.2`.
+const ROLLOFF: f32 = 0.6;
 
 /// The beds' weights at one place and height. Each 0 to 1.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -142,7 +143,10 @@ impl Cue {
             .pitch(self.pitch as f64)
             .bus(Bus::Sfx);
         match self.at {
-            Some([x, y, z]) => o.at(Vec3::new(x, y, z)),
+            Some([x, y, z]) => o
+                .at(Vec3::new(x, y, z))
+                .distances(NEAR, FAR)
+                .rolloff(ROLLOFF),
             None => o,
         }
     }
@@ -400,18 +404,12 @@ impl Soundscape {
         true
     }
 
-    /// Put a sound heard at `src` a few metres from the camera in its
-    /// direction, and say how loud its distance makes it.
-    fn place(ears: Ears, src: [f32; 3]) -> ([f32; 3], f32) {
+    /// How loud Flint will play a sound at `src`, from its distance to the
+    /// camera: the engine's curve with this soundscape's falloff.
+    fn heard(ears: Ears, src: [f32; 3]) -> f32 {
         let [cx, cy, cz] = ears.camera;
         let d = [src[0] - cx, src[1] - cy, src[2] - cz];
-        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-3);
-        let at = [
-            cx + d[0] / len * PLACE_AT,
-            cy + d[1] / len * PLACE_AT,
-            cz + d[2] / len * PLACE_AT,
-        ];
-        (at, (NEAR / len.max(NEAR)).powf(1.2))
+        falloff((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt())
     }
 
     fn birds(&mut self, ears: Ears) {
@@ -436,13 +434,12 @@ impl Soundscape {
             crate::coords::layer::GROUND + self.rng.range(3.0, 10.0),
             ears.focus[1] + angle.sin() * dist,
         ];
-        let (at, near) = Self::place(ears, src);
-        let volume = 0.45 * w * near * self.rng.range(0.55, 1.0);
+        let volume = 0.45 * w * self.rng.range(0.55, 1.0);
         let pitch = self.rng.range(0.9, 1.12);
         self.cue(Cue {
             sound: format!("bird_{which}"),
             volume: volume * EFFECTS,
-            at: Some(at),
+            at: Some(src),
             pitch,
             interface: false,
         });
@@ -477,10 +474,9 @@ impl Soundscape {
             };
             *due = self.now + self.rng.range(0.45, 0.85) as f64;
             let src = [w.at[0], crate::coords::layer::GROUND + 0.5, w.at[1]];
-            let (at, near) = Self::place(ears, src);
             let base = if w.mine { 0.5 } else { 0.28 };
-            let volume = base * near * self.rng.range(0.7, 1.0);
-            if volume < 0.02 {
+            let volume = base * self.rng.range(0.7, 1.0);
+            if volume * Self::heard(ears, src) < 0.02 {
                 continue;
             }
             let which = 1 + (self.rng.unit() * 3.0) as usize % 3;
@@ -488,12 +484,20 @@ impl Soundscape {
             self.cue(Cue {
                 sound: format!("rustle_{which}"),
                 volume: volume * EFFECTS,
-                at: Some(at),
+                at: Some(src),
                 pitch,
                 interface: false,
             });
         }
     }
+}
+
+/// The level Flint plays a placed one-shot at, `d` metres from the
+/// listener: Kira's spatial attenuation, `-60·r^ROLLOFF` dB, with `r` how far
+/// `d` is from [`NEAR`] to [`FAR`].
+fn falloff(d: f32) -> f32 {
+    let r = ((d - NEAR) / (FAR - NEAR)).clamp(0.0, 1.0);
+    10f32.powf(-3.0 * r.powf(ROLLOFF))
 }
 
 #[cfg(test)]
@@ -575,12 +579,13 @@ mod tests {
         let mut s = Soundscape::new(false);
         let cues = run(&mut s, ears_at(zone_middle(Zone::Suburban)), &[], 60.0);
         assert!(sounds(&cues, "bird_") >= 10, "{}", sounds(&cues, "bird_"));
-        // Every bird is placed near the camera, so Flint pans it.
+        // Every bird sings where it is, round you, in the trees.
+        let focus = ears_at(zone_middle(Zone::Suburban)).focus;
         for c in cues.iter().filter(|c| c.sound.contains("bird")) {
             let [x, y, z] = c.at.unwrap();
-            let e = ears_at(zone_middle(Zone::Suburban)).camera;
-            let d = ((x - e[0]).powi(2) + (y - e[1]).powi(2) + (z - e[2]).powi(2)).sqrt();
-            assert!((d - PLACE_AT).abs() < 1e-3);
+            let d = ((x - focus[0]).powi(2) + (z - focus[1]).powi(2)).sqrt();
+            assert!((7.9..45.1).contains(&d), "{d}");
+            assert!(y > crate::coords::layer::GROUND + 2.9);
         }
         let mut s = Soundscape::new(false);
         let cues = run(&mut s, ears_at(100.0), &[], 60.0);
@@ -659,6 +664,20 @@ mod tests {
         .options();
         assert_eq!(bird.at, Some(Vec3::new(1.0, 2.0, 3.0)));
         assert!((bird.pitch - 1.1).abs() < 1e-6);
+        assert_eq!((bird.distances, bird.rolloff), ((NEAR, FAR), ROLLOFF));
+    }
+
+    #[test]
+    fn the_engine_fades_a_sound_as_the_soundscape_was_tuned() {
+        // The curve the levels were tuned by ear with, before #94.
+        let tuned = |d: f32| (NEAR / d.max(NEAR)).powf(1.2);
+        let db = |a: f32| 20.0 * a.log10();
+        for d in (0..=300).step_by(4).map(|d| d as f32) {
+            let off = (db(falloff(d)) - db(tuned(d))).abs();
+            assert!(off < 1.5, "{off:.2} dB off at {d} m");
+        }
+        // The map view, a kilometre up, hears nothing.
+        assert!(falloff(FAR) <= 0.001 + 1e-6);
     }
 
     #[test]
