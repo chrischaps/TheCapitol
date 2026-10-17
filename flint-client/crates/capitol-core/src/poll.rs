@@ -25,7 +25,7 @@
 //!
 //! | Trigger | Fetch |
 //! |---|---|
-//! | first `Connected`, every `Resync` | me (name, position, currency), containers, nearby nodes, nearby stations, plots, recipes, deed prices |
+//! | first `Connected`, every `Resync` | me (name, position, currency), containers, nearby nodes, nearby stations, plots, recipes |
 //! | every 5 s while connected | nearby nodes, nearby stations, plots, currency |
 //! | `inventory_updated` (mine, or a container I hold) | containers, or the open station's container |
 //! | `station_opened` (mine) | that station's container |
@@ -91,8 +91,6 @@ pub enum Fetch {
     Plots,
     /// `GET /recipes`
     Recipes,
-    /// `GET /bureaucracy/deed-prices`, for the plot panel's Claim button.
-    DeedPrices,
     /// `GET /terrain`
     Terrain,
 }
@@ -100,14 +98,13 @@ pub enum Fetch {
 impl Fetch {
     /// Everything the server doesn't push, refetched on connect and resync.
     /// `Me` comes first and carries the balance, so `Currency` isn't needed here.
-    pub const SNAPSHOT: [Fetch; 7] = [
+    pub const SNAPSHOT: [Fetch; 6] = [
         Fetch::Me,
         Fetch::Containers,
         Fetch::NearbyNodes,
         Fetch::NearbyStations,
         Fetch::Plots,
         Fetch::Recipes,
-        Fetch::DeedPrices,
     ];
 
     /// What the timer refetches. Currency is here for what the server
@@ -139,7 +136,6 @@ impl Fetch {
                 ..Default::default()
             }),
             Fetch::Recipes => RestRequest::Recipes,
-            Fetch::DeedPrices => RestRequest::DeedPrices,
             // `terrain_updated` means it changed, so there's nothing to revalidate.
             Fetch::Terrain => RestRequest::Terrain {
                 cached_version: None,

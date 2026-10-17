@@ -318,6 +318,7 @@ mod tests {
             owner_name: None,
             claimed_at: None,
             assessed_value: 0,
+            deed_cost: Some(1000),
             station_count: count,
             station_capacity: 16,
             terrain_id: Some(format!("lot_{id}")),

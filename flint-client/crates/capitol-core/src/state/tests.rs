@@ -116,6 +116,7 @@ fn plot(owner: Option<Uuid>) -> PlotInfo {
         owner_name: owner.map(|_| "Ada".into()),
         claimed_at: None,
         assessed_value: 500,
+        deed_cost: Some(500),
         station_count: 0,
         station_capacity: 2,
         terrain_id: None,
@@ -1248,24 +1249,6 @@ fn a_picked_plot_is_kept_fresh_and_nothing_there_unpicks_it() {
         vec![StateEvent::PlotPicked { plot_id: None }]
     );
     assert!(state.picked_plot().is_none());
-}
-
-#[test]
-fn deed_prices_are_kept_by_zone() {
-    let mut state = connected();
-    assert!(state.deed_prices().is_none());
-    state.apply_rest(&R::DeedPrices(DeedPricesResponse {
-        prices: vec![DeedPrice {
-            zone_id: "urban".into(),
-            zone_name: "Urban Zone".into(),
-            deed_cost: 1000,
-            plot_size: "Medium Plot".into(),
-            station_capacity: 9,
-        }],
-    }));
-    assert_eq!(state.deed_prices().unwrap().len(), 1);
-    assert_eq!(state.deed_price("urban").unwrap().deed_cost, 1000);
-    assert!(state.deed_price("wilderness").is_none());
 }
 
 #[test]

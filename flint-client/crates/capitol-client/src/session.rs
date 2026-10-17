@@ -1731,9 +1731,9 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(20));
             }
         };
-        wait(&mut session, "me, my balance and the deed prices", &|s| {
+        wait(&mut session, "me and my balance", &|s| {
             let st = s.state();
-            st.local_player().is_some() && st.strands().is_some() && st.deed_prices().is_some()
+            st.local_player().is_some() && st.strands().is_some()
         });
         let (x, y) = {
             let me = session.state().local_player().unwrap();
@@ -1746,7 +1746,7 @@ mod tests {
         let st = session.state();
         let plot = st.picked_plot().unwrap().clone();
         assert!(plot.contains(x, y), "the picked plot is under you");
-        let offer = Offer::new(&plot, st.me(), st.deed_prices(), st.strands());
+        let offer = Offer::new(&plot, st.me(), st.strands());
         eprintln!("picked {} ({}): {offer:?}", plot.id, plot.zone_id);
         match offer {
             Offer::Claimable { cost } => {

@@ -141,6 +141,8 @@ export interface PlotInfo {
   ownerName: string | null
   claimedAt: string | null
   assessedValue: number
+  /** What a deed here costs, in Strands. Null where the zone sells none. */
+  deedCost: number | null
   stationCount: number
   stationCapacity: number
   /** The `/terrain` lot this plot is. Null only for a pre-B7 plot. */

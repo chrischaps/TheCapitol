@@ -122,7 +122,12 @@ impl PermissionLevel {
 
 impl Plot {
     /// The client-facing view of this plot
-    pub fn to_info(&self, owner_name: Option<String>, station_capacity: i32) -> PlotInfo {
+    pub fn to_info(
+        &self,
+        owner_name: Option<String>,
+        station_capacity: i32,
+        deed_cost: Option<i32>,
+    ) -> PlotInfo {
         PlotInfo {
             id: self.id,
             zone_id: self.zone_id.clone(),
@@ -135,6 +140,7 @@ impl Plot {
             owner_name,
             claimed_at: self.claimed_at,
             assessed_value: self.assessed_value,
+            deed_cost,
             station_count: self.station_count,
             station_capacity,
             terrain_id: self.terrain_id.clone(),
@@ -174,6 +180,8 @@ pub struct PlotWithJoins {
     pub corners: Option<Vec<f64>>,
     pub owner_name: Option<String>,
     pub station_capacity: i32,
+    /// The zone's `deed_cost`, joined from `zones`.
+    pub deed_cost: Option<i32>,
 }
 
 impl PlotWithJoins {
@@ -195,6 +203,7 @@ impl PlotWithJoins {
             owner_name: self.owner_name.clone(),
             claimed_at: self.claimed_at,
             assessed_value: self.assessed_value,
+            deed_cost: self.deed_cost,
             station_count: self.station_count,
             station_capacity: self.station_capacity,
             terrain_id: self.terrain_id.clone(),

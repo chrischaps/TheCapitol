@@ -10,7 +10,10 @@ export default function PlotPanel() {
 
   const isOwned = !!selectedPlot.ownerId
   const isOwnedByMe = selectedPlot.ownerId === myPlayerId
-  const canAfford = strandBalance >= (selectedPlot.assessedValue || 0)
+  // The deed's price, not the assessed value: that's 0 until it's bought.
+  const deedCost = selectedPlot.deedCost
+  const forSale = deedCost !== null
+  const canAfford = forSale && strandBalance >= deedCost
 
   const handleClaim = () => {
     if (!isOwned) {
@@ -65,14 +68,14 @@ export default function PlotPanel() {
         {!isOwned && (
           <div className="plot-claim-section">
             <div className="plot-deed-cost">
-              Deed Cost: <strong>{selectedPlot.assessedValue || 'N/A'} Strands</strong>
+              Deed Cost: <strong>{forSale ? `${deedCost} Strands` : 'N/A'}</strong>
             </div>
             <button
               className="claim-button"
               onClick={handleClaim}
               disabled={!canAfford}
             >
-              {canAfford ? 'Claim Plot' : 'Insufficient Strands'}
+              {!forSale ? 'Not for sale' : canAfford ? 'Claim Plot' : 'Insufficient Strands'}
             </button>
           </div>
         )}

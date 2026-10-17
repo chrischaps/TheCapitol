@@ -2,13 +2,11 @@
 //! owns it, what its zone's deed costs and what you hold. Pure, so it's
 //! tested without a server.
 //!
-//! **The deed cost is the zone's.** The server charges `zones.deed_cost`
-//! (`POST /plots/{id}/claim`), which `/bureaucracy/deed-prices` lists. An
-//! unclaimed plot's `assessed_value` is 0 until it's bought. React shows
-//! that value as the deed cost, so it reads "N/A" and never says you're
-//! short. `PlotInfo` has no deed cost of its own: issue #87.
+//! **The deed cost is the plot's `deed_cost`.** The server fills it from the
+//! zone's `zones.deed_cost`, which `POST /plots/{id}/claim` charges (#87).
+//! Not `assessed_value`: that's 0 until the plot is first bought.
 
-use capitol_protocol::rest::{DeedPrice, PlotInfo};
+use capitol_protocol::rest::PlotInfo;
 use uuid::Uuid;
 
 /// What the plot panel can offer for a plot.
@@ -25,19 +23,11 @@ pub enum Offer {
     TooDear { cost: i64, short: i64 },
     /// Unclaimed, in a zone whose plots can't be bought.
     NotForSale,
-    /// Unclaimed, and the deed prices haven't arrived yet.
-    Unpriced,
 }
 
 impl Offer {
     /// For `plot`, seen by the player `me` holding `balance` Strands.
-    /// `prices` is `None` until `/bureaucracy/deed-prices` answers.
-    pub fn new(
-        plot: &PlotInfo,
-        me: Option<Uuid>,
-        prices: Option<&[DeedPrice]>,
-        balance: Option<i64>,
-    ) -> Offer {
+    pub fn new(plot: &PlotInfo, me: Option<Uuid>, balance: Option<i64>) -> Offer {
         if let Some(owner) = plot.owner_id {
             return if Some(owner) == me {
                 Offer::Yours
@@ -47,13 +37,10 @@ impl Offer {
                 }
             };
         }
-        let Some(prices) = prices else {
-            return Offer::Unpriced;
-        };
-        let Some(price) = prices.iter().find(|p| p.zone_id == plot.zone_id) else {
+        let Some(cost) = plot.deed_cost else {
             return Offer::NotForSale;
         };
-        let cost = price.deed_cost as i64;
+        let cost = cost as i64;
         match balance {
             Some(held) if held < cost => Offer::TooDear {
                 cost,
@@ -88,10 +75,10 @@ mod tests {
     const ME: Uuid = Uuid::from_u128(1);
     const OTHER: Uuid = Uuid::from_u128(2);
 
-    fn plot(zone: &str, owner: Option<Uuid>) -> PlotInfo {
+    fn plot(deed_cost: Option<i32>, owner: Option<Uuid>) -> PlotInfo {
         PlotInfo {
             id: Uuid::from_u128(9),
-            zone_id: zone.into(),
+            zone_id: "urban".into(),
             world_x: 0.0,
             world_y: 0.0,
             bounds: Bounds::new(0.0, 0.0, 10.0, 10.0),
@@ -101,6 +88,7 @@ mod tests {
             owner_name: owner.map(|_| "Brin".into()),
             claimed_at: None,
             assessed_value: 0,
+            deed_cost,
             station_count: 0,
             station_capacity: 9,
             terrain_id: None,
@@ -108,25 +96,14 @@ mod tests {
         }
     }
 
-    fn prices() -> Vec<DeedPrice> {
-        vec![DeedPrice {
-            zone_id: "urban".into(),
-            zone_name: "Urban Zone".into(),
-            deed_cost: 1000,
-            plot_size: "Medium Plot".into(),
-            station_capacity: 9,
-        }]
-    }
-
     #[test]
     fn an_owned_plot_is_yours_or_theirs() {
-        let p = prices();
         assert_eq!(
-            Offer::new(&plot("urban", Some(ME)), Some(ME), Some(&p), Some(0)),
+            Offer::new(&plot(Some(1000), Some(ME)), Some(ME), Some(0)),
             Offer::Yours
         );
         assert_eq!(
-            Offer::new(&plot("urban", Some(OTHER)), Some(ME), Some(&p), Some(5000)),
+            Offer::new(&plot(Some(1000), Some(OTHER)), Some(ME), Some(5000)),
             Offer::Taken {
                 owner: "Brin".into()
             }
@@ -134,27 +111,24 @@ mod tests {
     }
 
     #[test]
-    fn an_unclaimed_plot_costs_its_zones_deed() {
-        let p = prices();
-        let open = plot("urban", None);
-        let offer = Offer::new(&open, Some(ME), Some(&p), Some(1000));
+    fn an_unclaimed_plot_costs_its_deed() {
+        let open = plot(Some(1000), None);
+        let offer = Offer::new(&open, Some(ME), Some(1000));
         assert_eq!(offer, Offer::Claimable { cost: 1000 });
         assert!(offer.can_claim());
         assert_eq!(
-            Offer::new(&open, Some(ME), Some(&p), Some(400)),
+            Offer::new(&open, Some(ME), Some(400)),
             Offer::TooDear {
                 cost: 1000,
                 short: 600
             }
         );
         // The server decides while the balance is unknown.
-        assert!(Offer::new(&open, Some(ME), Some(&p), None).can_claim());
+        assert!(Offer::new(&open, Some(ME), None).can_claim());
+        // Its assessed value plays no part: that's 0 until it's bought.
+        assert_eq!(open.assessed_value, 0);
         assert_eq!(
-            Offer::new(&open, Some(ME), None, Some(9999)),
-            Offer::Unpriced
-        );
-        assert_eq!(
-            Offer::new(&plot("wilderness", None), Some(ME), Some(&p), Some(9999)),
+            Offer::new(&plot(None, None), Some(ME), Some(9999)),
             Offer::NotForSale
         );
     }

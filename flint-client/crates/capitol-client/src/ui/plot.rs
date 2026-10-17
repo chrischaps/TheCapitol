@@ -7,9 +7,8 @@
 //! It has React's rows: zone, size, type, stations used of capacity,
 //! owner, and the assessed value once owned. A plot for sale shows its
 //! deed cost with your balance under it, and the Claim button. The deed
-//! cost is the zone's (`capitol_core::plot::Offer`). React shows the
-//! plot's assessed value there instead, which is 0 until someone buys it,
-//! so it reads "N/A" (issue #87).
+//! cost is the plot's `deed_cost` (`capitol_core::plot::Offer`), as React
+//! shows it too.
 //!
 //! The panel is edged in gold, the colour of what's yours (plan §1), and
 //! the claimed plot's gold edge in the world answers it.
@@ -181,7 +180,6 @@ fn claim(ui: &mut egui::Ui, plot: &PlotInfo, offer: &Offer, view: &View) -> Opti
     ui.vertical_centered(|ui| {
         let price = match cost {
             Some(c) => format!("{c} Strands"),
-            None if matches!(offer, Offer::Unpriced) => "…".into(),
             None => "N/A".into(),
         };
         let mut job = egui::text::LayoutJob::default();
@@ -260,6 +258,7 @@ mod tests {
             owner_name: owner.map(|_| "Ada".into()),
             claimed_at: None,
             assessed_value: 500,
+            deed_cost: Some(500),
             station_count: 1,
             station_capacity: 9,
             terrain_id: None,
@@ -356,7 +355,7 @@ mod tests {
     fn nothing_picked_draws_nothing() {
         let view = View {
             plot: None,
-            offer: Offer::Unpriced,
+            offer: Offer::NotForSale,
             strands: None,
             claiming: false,
             refused: None,

@@ -19,6 +19,8 @@ export interface PlotInfo {
   ownerName: string | null
   claimedAt: string | null
   assessedValue: number
+  /** What a deed here costs, in Strands. Null where the zone sells none. */
+  deedCost: number | null
   stationCount: number
   stationCapacity: number
   /** The `/terrain` lot this plot is. Null only for a pre-B7 plot. */
@@ -82,6 +84,7 @@ interface ApiPlotInfo {
   owner_name: string | null
   claimed_at: string | null
   assessed_value: number
+  deed_cost?: number | null
   station_count: number
   station_capacity: number
   terrain_id?: string | null
@@ -106,6 +109,7 @@ function transformPlot(api: ApiPlotInfo): PlotInfo {
     ownerName: api.owner_name,
     claimedAt: api.claimed_at,
     assessedValue: api.assessed_value,
+    deedCost: api.deed_cost ?? null,
     stationCount: api.station_count,
     stationCapacity: api.station_capacity,
     terrainId: api.terrain_id ?? null,

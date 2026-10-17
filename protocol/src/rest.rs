@@ -590,8 +590,13 @@ pub struct PlotInfo {
     pub owner_name: Option<String>,
     /// When the plot was claimed
     pub claimed_at: Option<DateTime<Utc>>,
-    /// Current assessed value for taxes
+    /// Current assessed value for taxes. 0 until the plot is first bought.
     pub assessed_value: i32,
+    /// What a deed to this plot costs in Strands: its zone's `deed_cost`,
+    /// which `POST /plots/{id}/claim` charges. `None` where the zone sells
+    /// no deeds. Shown whether or not the plot is owned.
+    #[serde(default)]
+    pub deed_cost: Option<i32>,
     /// Current number of stations placed
     pub station_count: i32,
     /// Maximum stations allowed

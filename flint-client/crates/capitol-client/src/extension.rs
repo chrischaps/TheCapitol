@@ -689,8 +689,8 @@ impl PlayerExtension for CapitolExtension {
                 let picked = state.picked_plot();
                 let view = ui::plot::View {
                     plot: picked,
-                    offer: picked.map_or(Offer::Unpriced, |p| {
-                        Offer::new(p, state.me(), state.deed_prices(), state.strands())
+                    offer: picked.map_or(Offer::NotForSale, |p| {
+                        Offer::new(p, state.me(), state.strands())
                     }),
                     strands: state.strands(),
                     claiming: session.claiming(),

@@ -48,10 +48,11 @@ pub async fn list_plots(
 
     // Build dynamic query
     let mut sql = String::from(
-        "SELECT p.*, pl.name as owner_name, psc.station_capacity
+        "SELECT p.*, pl.name as owner_name, psc.station_capacity, z.deed_cost
          FROM plots p
          LEFT JOIN players pl ON p.owner_id = pl.id
          JOIN plot_size_categories psc ON p.size_category = psc.id
+         LEFT JOIN zones z ON p.zone_id = z.id
          WHERE 1=1"
     );
 
@@ -115,10 +116,11 @@ pub async fn get_plot(
                 p.size_category, p.plot_type, p.owner_id, p.claimed_at,
                 p.assessed_value, p.last_tax_paid, p.tax_owed, p.station_count,
                 p.terrain_id, p.corners,
-                pl.name as owner_name, psc.station_capacity
+                pl.name as owner_name, psc.station_capacity, z.deed_cost
          FROM plots p
          LEFT JOIN players pl ON p.owner_id = pl.id
          JOIN plot_size_categories psc ON p.size_category = psc.id
+         LEFT JOIN zones z ON p.zone_id = z.id
          WHERE p.id = $1"
     )
     .bind(plot_id)

@@ -35,7 +35,7 @@ mod trade;
 
 use std::collections::HashMap;
 
-use capitol_protocol::rest::{DeedPrice, PlotInfo, RecipeInfo, ResourceNodeInfo, StationInfo};
+use capitol_protocol::rest::{PlotInfo, RecipeInfo, ResourceNodeInfo, StationInfo};
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::ws::{PlayerPosition, ServerMessage};
 use uuid::Uuid;
@@ -249,8 +249,6 @@ pub struct GameState {
     plots: Vec<PlotInfo>,
     /// The plot the plot panel shows, picked with `/plots/at`.
     picked_plot: Option<PlotInfo>,
-    /// Each zone's deed price, from `/bureaucracy/deed-prices`.
-    deed_prices: Option<Vec<DeedPrice>>,
 
     trade: trade::TradeBook,
 }
@@ -283,7 +281,6 @@ impl GameState {
             strands: None,
             plots: Vec::new(),
             picked_plot: None,
-            deed_prices: None,
             trade: trade::TradeBook::default(),
         }
     }
@@ -712,8 +709,8 @@ impl GameState {
                 });
                 self.set_strands(claim.new_balance, &mut out);
             }
-            R::DeedPrices(response) => self.deed_prices = Some(response.prices.clone()),
             R::Success(_)
+            | R::DeedPrices(_)
             | R::Health(_)
             | R::Terrain(_)
             | R::TerrainUnchanged
@@ -905,20 +902,6 @@ impl GameState {
     /// Closes the plot panel.
     pub fn unpick_plot(&mut self) {
         self.picked_plot = None;
-    }
-
-    /// The deed price for `zone_id`. `None` before the prices arrive, and
-    /// for a zone whose plots can't be bought.
-    pub fn deed_price(&self, zone_id: &str) -> Option<&DeedPrice> {
-        self.deed_prices
-            .as_ref()?
-            .iter()
-            .find(|d| d.zone_id == zone_id)
-    }
-
-    /// Every zone's deed price, once `/bureaucracy/deed-prices` has answered.
-    pub fn deed_prices(&self) -> Option<&[DeedPrice]> {
-        self.deed_prices.as_deref()
     }
 
     // -----------------------------------------------------------------------

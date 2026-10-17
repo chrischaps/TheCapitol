@@ -185,7 +185,6 @@ fn answer_for(fetch: Fetch) -> RestResponse {
             total: 0,
         }),
         Fetch::Recipes => RestResponse::Recipes(RecipesResponse { recipes: vec![] }),
-        Fetch::DeedPrices => RestResponse::DeedPrices(DeedPricesResponse { prices: vec![] }),
         Fetch::Terrain => panic!("terrain is answered by hand in its test"),
     }
 }
