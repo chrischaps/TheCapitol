@@ -461,9 +461,9 @@ impl Session {
 
     /// Asks the server to move an item (a drop on a slot grid). It moves,
     /// merges or swaps, and the poller refetches the containers when it
-    /// answers. Sent over REST rather than the socket: the socket's answer
-    /// names only the target container, so a move out of a station's box
-    /// would leave the inventory stale. A workaround: #77.
+    /// answers. Sent over REST rather than the socket. The socket now names
+    /// both containers (#77), but a refused move comes back on the request's
+    /// own tag over REST, not as an anonymous socket `error` (#89).
     pub fn move_item(&mut self, m: Move) {
         self.net.rest(
             RestRequest::MoveItem(MoveItemRequest {

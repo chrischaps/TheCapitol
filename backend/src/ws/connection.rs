@@ -234,13 +234,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
                                     // Handle move directly via database (synchronous for immediate feedback)
                                     match handle_move_item(&state, player_id, item_uuid, container_uuid, target_slot).await {
-                                        Ok(_response) => {
-                                            // Notify client of inventory update
-                                            let msg = ServerMessage::InventoryUpdated {
-                                                player_id,
-                                                container_id: container_uuid,
-                                            };
-                                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                        Ok(source_container) => {
+                                            // A move between containers changes both,
+                                            // so name each one that changed (#77).
+                                            for container_id in moved_containers(source_container, container_uuid) {
+                                                let msg = ServerMessage::InventoryUpdated { player_id, container_id };
+                                                let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                            }
                                         }
                                         Err(e) => {
                                             let _ = sender.send(Message::Text(
@@ -970,7 +970,7 @@ async fn handle_move_item(
     item_id: Uuid,
     target_container_id: Uuid,
     target_slot: i32,
-) -> Result<String, String> {
+) -> Result<Option<Uuid>, String> {
     // Verify the item belongs to player and get its current location
     let source_item: crate::models::Item = sqlx::query_as(
         "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at
@@ -1035,7 +1035,7 @@ async fn handle_move_item(
             .await
             .map_err(|e| format!("Database error: {}", e))?;
 
-            Ok("moved".to_string())
+            Ok(source_item.container_id)
         }
         Some(target) if target.item_type == source_item.item_type => {
             // Same type: merge stacks
@@ -1060,7 +1060,7 @@ async fn handle_move_item(
                 .await
                 .map_err(|e| format!("Database error: {}", e))?;
 
-            Ok("merged".to_string())
+            Ok(source_item.container_id)
         }
         Some(target) => {
             // Different type: swap
@@ -1085,9 +1085,18 @@ async fn handle_move_item(
                 .await
                 .map_err(|e| format!("Database error: {}", e))?;
 
-            Ok("swapped".to_string())
+            Ok(source_item.container_id)
         }
     }
+}
+
+/// The containers a move changed, each once: the target, then the source if
+/// it's a different one. A move, merge or swap empties or fills the source
+/// slot, so a client refetching by `container_id` needs both.
+fn moved_containers(source: Option<Uuid>, target: Uuid) -> Vec<Uuid> {
+    let mut changed = vec![target];
+    changed.extend(source.filter(|&s| s != target));
+    changed
 }
 
 /// Handle place station request
@@ -1637,6 +1646,14 @@ fn free_slots(slot_count: i32, used: &std::collections::HashSet<i32>, n: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_move_names_the_target_then_a_different_source() {
+        let (inv, chest) = (Uuid::new_v4(), Uuid::new_v4());
+        assert_eq!(moved_containers(Some(inv), chest), vec![chest, inv]);
+        assert_eq!(moved_containers(Some(chest), chest), vec![chest]);
+        assert_eq!(moved_containers(None, chest), vec![chest]);
+    }
 
     #[test]
     fn traded_stacks_take_the_lowest_free_slots_or_none() {
