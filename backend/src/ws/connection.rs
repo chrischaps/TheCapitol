@@ -316,20 +316,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                     };
 
-                                    match handle_remove_station(&state, player_id, station_uuid).await {
-                                        Ok(_) => {
-                                            // Remove from game state
-                                            {
-                                                let mut game = state.game.write().await;
-                                                game.stations.remove(&station_uuid);
-                                            }
-
-                                            let msg = ServerMessage::StationRemoved { station_id: station_uuid };
-                                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                    match crate::engine::station_removal::remove_station(&state.db, player_id, station_uuid).await {
+                                        Ok(removed) => {
+                                            // Everyone sees it go, and the owner's inventory now holds the kit.
+                                            let mut game = state.game.write().await;
+                                            game.stations.remove(&station_uuid);
+                                            let _ = game.event_sender.send(GameEvent::StationRemoved { station_id: station_uuid });
+                                            let _ = game.event_sender.send(GameEvent::InventoryUpdated {
+                                                player_id,
+                                                container_id: removed.inventory_id,
+                                                slots: vec![],
+                                            });
                                         }
                                         Err(e) => {
                                             let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error { message: e }).unwrap().into()
+                                                serde_json::to_string(&ServerMessage::Error { message: e.message() }).unwrap().into()
                                             )).await;
                                         }
                                     }
@@ -1158,8 +1159,8 @@ async fn handle_place_station(
     // Create station with plot_id
     let station_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id)
-         VALUES ($1, $2, $3, $4, $5, $6)"
+        "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id, kit_quality)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)"
     )
     .bind(station_id)
     .bind(station_type)
@@ -1167,6 +1168,7 @@ async fn handle_place_station(
     .bind(x as f32)
     .bind(y as f32)
     .bind(plot.id)
+    .bind(kit_item.quality)
     .execute(&state.db)
     .await
     .map_err(|e| format!("Database error: {}", e))?;
@@ -1220,46 +1222,6 @@ async fn handle_place_station(
         },
         plot_id: Some(plot.id),
     })
-}
-
-/// Handle remove station request
-async fn handle_remove_station(
-    state: &AppState,
-    player_id: Uuid,
-    station_id: Uuid,
-) -> Result<(), String> {
-    // Verify ownership
-    let station: crate::models::Station = sqlx::query_as(
-        "SELECT id, station_type, owner_id, position_x, position_y, plot_id, placed_at
-         FROM stations WHERE id = $1"
-    )
-    .bind(station_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?
-    .ok_or_else(|| "Station not found".to_string())?;
-
-    if station.owner_id != player_id {
-        return Err("Not your station".into());
-    }
-
-    // Delete station (cascade will delete container and items)
-    sqlx::query("DELETE FROM stations WHERE id = $1")
-        .bind(station_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| format!("Database error: {}", e))?;
-
-    // M7: Decrement plot station count if station was on a plot
-    if let Some(plot_id) = station.plot_id {
-        sqlx::query("UPDATE plots SET station_count = station_count - 1 WHERE id = $1")
-            .bind(plot_id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| format!("Database error: {}", e))?;
-    }
-
-    Ok(())
 }
 
 /// Handle open station request

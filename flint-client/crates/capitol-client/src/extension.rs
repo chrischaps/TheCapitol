@@ -707,7 +707,6 @@ impl PlayerExtension for CapitolExtension {
                     refused: session
                         .craft_refused(now)
                         .or_else(|| session.move_refused(now)),
-                    now,
                     beside: self.inventory.rect,
                 };
                 match self

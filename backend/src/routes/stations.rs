@@ -11,6 +11,7 @@ use capitol_protocol::rest::{
     SuccessResponse,
 };
 
+use crate::engine::GameEvent;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::{quality_to_grade, Container, ContainerType, Item, ItemType, SlotItem, Station, StationInfo, StationType};
@@ -229,8 +230,8 @@ pub async fn place_station(
     // Create station with plot_id
     let station_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id)
-         VALUES ($1, $2, $3, $4, $5, $6)"
+        "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id, kit_quality)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)"
     )
     .bind(station_id)
     .bind(&req.station_type)
@@ -238,6 +239,7 @@ pub async fn place_station(
     .bind(req.x as f32)
     .bind(req.y as f32)
     .bind(plot.id)
+    .bind(kit_item.quality)
     .execute(&state.db)
     .await?;
 
@@ -288,7 +290,7 @@ pub async fn place_station(
     Ok(Json(PlaceStationResponse { station: info }))
 }
 
-/// Remove a station you own
+/// Take down a station you own. Its box must be empty, and its kit goes back into your inventory.
 #[utoipa::path(
     delete,
     path = "/stations/{id}",
@@ -296,7 +298,8 @@ pub async fn place_station(
         ("id" = Uuid, Path, description = "Station ID")
     ),
     responses(
-        (status = 200, description = "Station removed"),
+        (status = 200, description = "Station removed, kit returned"),
+        (status = 400, description = "Its box isn't empty, or your inventory has no room for the kit"),
         (status = 403, description = "Not your station"),
         (status = 404, description = "Station not found")
     ),
@@ -316,33 +319,17 @@ pub async fn remove_station(
     .fetch_one(&state.db)
     .await?;
 
-    // Verify ownership (include plot_id for M7)
-    let station: Station = sqlx::query_as(
-        "SELECT id, station_type, owner_id, position_x, position_y, plot_id, placed_at
-         FROM stations WHERE id = $1"
-    )
-    .bind(station_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Station not found".into()))?;
+    let removed = crate::engine::station_removal::remove_station(&state.db, player_id, station_id).await?;
 
-    if station.owner_id != player_id {
-        return Err(AppError::Forbidden("Not your station".into()));
-    }
-
-    // M7: Decrement plot station count if station was on a plot
-    if let Some(plot_id) = station.plot_id {
-        sqlx::query("UPDATE plots SET station_count = station_count - 1 WHERE id = $1 AND station_count > 0")
-            .bind(plot_id)
-            .execute(&state.db)
-            .await?;
-    }
-
-    // Delete station (cascade will delete container and items)
-    sqlx::query("DELETE FROM stations WHERE id = $1")
-        .bind(station_id)
-        .execute(&state.db)
-        .await?;
+    let mut game = state.game.write().await;
+    game.stations.remove(&station_id);
+    let _ = game.event_sender.send(GameEvent::StationRemoved { station_id });
+    let _ = game.event_sender.send(GameEvent::InventoryUpdated {
+        player_id,
+        container_id: removed.inventory_id,
+        slots: vec![],
+    });
+    drop(game);
 
     Ok(Json(SuccessResponse::ok()))
 }

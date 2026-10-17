@@ -15,16 +15,14 @@
 //!   own crafting output, not the station's box. React doesn't say so; this
 //!   shows that slot under the box, so you can see it arrive and drag it
 //!   out.
-//! - **Remove**, for the owner. Removing destroys whatever is in the box,
-//!   and the kit doesn't come back (issue #88). So Remove waits until the
-//!   box is empty, and asks again before it sends.
-
-use std::time::{Duration, Instant};
+//! - **Remove**, for the owner, once the box is empty. The server refuses
+//!   while it holds anything and puts the kit back in your inventory (#88),
+//!   so taking a station down is how you move it, and it doesn't ask twice.
 
 use super::crafting::{blocked_box, craft_label, needs, preview, under_way, Fill};
 use super::icons::ItemIcons;
 use super::slots::{Move, SlotGrid};
-use super::theme::{self, size, DIM, SHORT, STATION};
+use super::theme::{self, size, DIM, STATION};
 use capitol_core::craft::{self, Check, Phase};
 use capitol_core::protocol::rest::RecipeInfo;
 use capitol_core::state::{Activity, GameState};
@@ -43,8 +41,6 @@ const COLUMN_GAP: f32 = 16.0;
 const GAP: f32 = 12.0;
 /// How long the panel takes to open or close, in seconds.
 const FADE: f32 = 0.18;
-/// How long "Remove for good?" waits for the second click.
-const CONFIRM: Duration = Duration::from_secs(4);
 
 /// What the panel asks for this frame.
 pub enum Action {
@@ -65,8 +61,6 @@ pub struct StationPanel {
     /// The recipe picked by hand. `None` lets the box choose.
     picked: Option<String>,
     bar: Fill,
-    /// When Remove was first clicked, while it waits for the second.
-    removing: Option<Instant>,
 }
 
 /// What the panel draws from.
@@ -75,7 +69,6 @@ pub struct View<'a> {
     pub phase: &'a Phase,
     /// Why the last craft or move was refused, if it was just now.
     pub refused: Option<&'a str>,
-    pub now: Instant,
     /// Where the inventory panel is, if it's open: the panel sits to its left.
     pub beside: Option<egui::Rect>,
 }
@@ -117,7 +110,6 @@ impl StationPanel {
         if open != self.showing {
             self.showing = open;
             self.picked = None;
-            self.removing = None;
         }
         let shown =
             ctx.animate_bool_with_time(Id::new("capitol_station_fade"), open.is_some(), FADE);
@@ -387,7 +379,7 @@ impl StationPanel {
         });
     }
 
-    /// Remove (the owner's, once the box is empty, asked twice) and Close.
+    /// Remove (the owner's, once the box is empty) and Close.
     fn footer(&mut self, ui: &mut egui::Ui, view: &View) -> Option<Action> {
         let state = view.state;
         let open = state.open_station()?;
@@ -397,43 +389,24 @@ impl StationPanel {
         let empty = state
             .station_container()
             .is_some_and(|c| c.used_slots() == 0);
-        if self
-            .removing
-            .is_some_and(|at| view.now.duration_since(at) >= CONFIRM)
-        {
-            self.removing = None;
-        }
         let mut action = None;
         ui.horizontal(|ui| {
             if mine {
-                let (words, tip) = match (self.removing, empty) {
-                    (Some(_), _) => (
-                        "Remove for good?",
-                        "It's destroyed, and the kit doesn't come back",
-                    ),
-                    (None, true) => ("Remove", "Take the station down"),
-                    (None, false) => (
-                        "Remove",
-                        "Empty its box first: removing destroys what's in it",
-                    ),
+                let tip = if empty {
+                    "Take the station down. Its kit goes back in your inventory"
+                } else {
+                    "Empty its box first"
                 };
-                let colour = if self.removing.is_some() { SHORT } else { DIM };
                 let link = ui
                     .add_enabled(
                         empty && view.state.local_activity().is_none(),
-                        egui::Label::new(RichText::new(words).color(colour).size(size::SMALL))
+                        egui::Label::new(RichText::new("Remove").color(DIM).size(size::SMALL))
                             .sense(egui::Sense::click()),
                     )
                     .on_hover_text(tip)
                     .on_disabled_hover_text(tip);
                 if link.clicked() {
-                    match self.removing {
-                        Some(_) => {
-                            self.removing = None;
-                            action = Some(Action::Remove(open.station_id));
-                        }
-                        None => self.removing = Some(view.now),
-                    }
+                    action = Some(Action::Remove(open.station_id));
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
