@@ -43,3 +43,7 @@ futures = "0.3"
 utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"] }
 utoipa-axum = "0.2"
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
+
+[dev-dependencies]
+# Thread CPU time, so a timing test isn't failed by other tests or builds sharing the CPU (#91)
+cpu-time = "1"

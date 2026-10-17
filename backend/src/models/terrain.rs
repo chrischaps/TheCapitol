@@ -3938,19 +3938,21 @@ mod tests {
 
     #[test]
     fn test_terrain_generation_performance() {
-        use std::time::Instant;
+        use cpu_time::ThreadTime;
 
         let params = WorldGenParams::default();
 
-        let start = Instant::now();
+        // CPU time on this thread, not wall time: generation is single-threaded, and in a
+        // parallel `cargo test` (or beside other agents' builds) the wall clock counts the
+        // time other work held the core. Wall time hit 14.5s that way (#91).
+        let start = ThreadTime::now();
         let _config = TerrainConfig::from_params(&params);
         let elapsed = start.elapsed();
 
-        println!("Terrain generation took: {:?}", elapsed);
-        // Generous bound for debug-mode parallel test runs.
-        // Typical: ~1.3s debug, ~100ms release. Pre-optimization was ~115s debug.
+        println!("Terrain generation took: {:?} of CPU", elapsed);
+        // Typical: ~1.4s debug, ~100ms release. Pre-optimization was ~115s debug.
         assert!(elapsed.as_millis() < 5000,
-            "Terrain generation took too long: {:?} (expected <5000ms)", elapsed);
+            "Terrain generation took too long: {:?} of CPU (expected <5000ms)", elapsed);
     }
 
     #[test]
