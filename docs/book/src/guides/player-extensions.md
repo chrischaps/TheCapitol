@@ -127,10 +127,11 @@ ctx.audio.load_bytes("door", include_bytes!("door.ogg").to_vec())?;
 // Any frame:
 ctx.audio.play("blip", &SoundOptions::new().volume(0.5).pitch(1.2))?;
 ctx.audio.play("door", &SoundOptions::new().at(pos).distances(2.0, 60.0))?;
+ctx.audio.play("bell", &SoundOptions::new().at(pos).distances(20.0, 600.0).rolloff(0.7))?;
 ctx.audio.set_bus_volume(Bus::Music, 0.4);
 ```
 
-- **`play`** plays a sound once. Without `at`, it plays flat, from nowhere. With `at`, it pans and fades with distance from the listener: full volume within `distances`' first value and silent past its second (by default 1 and 25, the same as a script's `play_sound_at`). `bus` routes it through `Bus::Sfx` (the default) or `Bus::Music`. An unknown name is an error.
+- **`play`** plays a sound once. Without `at`, it plays flat, from nowhere. With `at`, it pans and fades with distance from the listener: full volume within `distances`' first value and silent past its second (by default 1 and 25, the same as a script's `play_sound_at`). `rolloff` sets the curve between them: the default 2 holds a sound up and drops it near the far distance, and a value below 1 fades it like a sound in the open (see [Audio](../concepts/audio.md#scripting-integration)). `bus` routes it through `Bus::Sfx` (the default) or `Bus::Music`. An unknown name is an error.
 - **`load_samples`** and **`load_bytes`** replace any sound already cached under the name. A sound that's already playing carries on with the old data. A looping `audio_source` whose sound isn't cached yet stays silent, so load the sound before spawning the entity that plays it.
 - **`set_bus_volume`** scales everything on the bus, including scripts' sounds and `audio_source`s, on top of each sound's own volume. It holds across scene transitions. A game's volume settings belong here rather than in each sound's volume.
 
@@ -193,3 +194,22 @@ For fonts that don't come from the folder (embedded with `include_bytes!`, or ch
 ## Picking the Ground
 
 `Camera::screen_to_ground(x, y, width, height, plane_y)` returns the `[x, z]` point on a horizontal plane under a screen point, or `None` for the sky. Scripts have the same thing as `screen_to_ground(mouse_x(), mouse_y(), plane_y)`. See [Rendering: Picking the ground](../concepts/rendering.md#picking-the-ground).
+
+## Projecting from Native Functions
+
+A native function that places things on the screen needs the camera scripts project with, and `ExtensionCtx::camera` is a frame old by the time `on_draw_ui` runs. `PlayerApp::projector()` returns a `Projector`, a cloneable handle on the scripts' camera (ADR 0086). Take it before `add_extension`, hand it to the extension, and clone it into the closures it registers:
+
+```rust
+let projector = player.projector();
+player.add_extension(Box::new(MyGame { projector, .. }));
+
+// in register_script_api:
+let projector = self.projector.clone();
+engine.register_fn("my_labels", move || -> rhai::Array {
+    let view = projector.view(); // one lock, then plain maths
+    let size = view.screen_size();
+    anchors().filter_map(|p| view.world_to_screen(p)) /* ... */
+});
+```
+
+`View::world_to_screen` returns a `ScreenPoint { x, y, depth }` in logical points, or `None` where Rhai's `world_to_screen` says `visible: false`. The two agree exactly: called from a script, the view is the camera this frame renders with. `View::screen_to_ground` matches the Rhai function too. Outside a script call (in `pre_update`, say), the view is the previous frame's camera. `view()` takes the script context's lock, so don't call it from a callback the script system runs while holding that lock, such as a text measurer.
