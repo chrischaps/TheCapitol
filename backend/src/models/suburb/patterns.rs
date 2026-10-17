@@ -593,7 +593,7 @@ fn strand(cx: &Ctx, n: &Neighbourhood, layout: &Parallels, k0: usize, side0: usi
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::models::suburb::graph::{Graph, JunctionKind};
     use crate::models::suburb::metrics::{self, Plan, Scope};

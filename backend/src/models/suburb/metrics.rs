@@ -322,15 +322,7 @@ pub fn centroid(c: &[P; 4]) -> P {
     (c.iter().map(|p| p.0).sum::<f64>() / 4.0, c.iter().map(|p| p.1).sum::<f64>() / 4.0)
 }
 
-pub fn is_convex(c: &[P; 4]) -> bool {
-    let turns: Vec<f64> = (0..4)
-        .map(|i| {
-            let (a, b, d) = (c[i], c[(i + 1) % 4], c[(i + 2) % 4]);
-            (b.0 - a.0) * (d.1 - b.1) - (b.1 - a.1) * (d.0 - b.0)
-        })
-        .collect();
-    turns.iter().all(|&t| t >= -1e-9) || turns.iter().all(|&t| t <= 1e-9)
-}
+pub(crate) use crate::models::geom::quad_is_convex as is_convex;
 
 fn inside(c: &[P; 4], p: P) -> bool {
     let mut odd = false;

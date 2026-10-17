@@ -134,7 +134,9 @@ pub struct NeighbourhoodParams {
 impl Default for NeighbourhoodParams {
     fn default() -> Self {
         Self {
-            lot_frontage: 60.0,
+            // 64 × the 106 a five-row band fits (#117) keeps the plan's
+            // 60 × 110 area (#108).
+            lot_frontage: 64.0,
             lot_depth: 110.0,
             lot_depth_min: 95.0,
             lot_depth_max: 130.0,
@@ -2537,8 +2539,12 @@ impl TerrainConfig {
     pub(crate) fn generate_suburban_plots_internal(&self, params: &SuburbanGenParams) -> Vec<TerrainPlot> {
         match params.layout {
             SuburbLayout::Legacy => self.extract_plots_from_roads(&self.roads, params),
-            // Lots v2 fill its blocks, #108.
-            SuburbLayout::Neighbourhood => Vec::new(),
+            // The plan again rather than a copy kept on self, so `version()`
+            // doesn't see it. It's deterministic, and quick beside the lots.
+            SuburbLayout::Neighbourhood => {
+                let center = (self.center_x, self.center_y);
+                super::suburb::lots::lay(&self.roads, &super::suburb::plan(params, center), params, center)
+            }
         }
     }
 
@@ -3270,7 +3276,7 @@ mod tests {
         let new: WorldGenParams = serde_json::from_value(json).unwrap();
         assert_eq!(new.suburban.layout, SuburbLayout::Neighbourhood);
         assert_eq!(new.suburban.neighbourhood.lot_depth, 120.0);
-        assert_eq!(new.suburban.neighbourhood.lot_frontage, 60.0);
+        assert_eq!(new.suburban.neighbourhood.lot_frontage, 64.0);
         assert_eq!(new.suburban.neighbourhood.force_pattern, Some(NeighbourhoodPattern::CentralLoop));
     }
 
@@ -3287,15 +3293,15 @@ mod tests {
         })
     }
 
-    /// The Neighbourhood layout lays suburban streets, but no suburban lots
-    /// until #108, and leaves the rest of the world as Legacy has it.
+    /// The Neighbourhood layout lays suburban streets and lots (#108), and
+    /// leaves the rest of the world as Legacy has it.
     #[test]
     fn neighbourhood_layout_changes_only_the_suburb() {
         let mut params = WorldGenParams::default();
         params.suburban.layout = SuburbLayout::Neighbourhood;
         let t = TerrainConfig::from_params(&params);
         assert!(t.roads.iter().any(|r| r.road_type == RoadType::Suburban));
-        assert!(t.terrain_plots.iter().all(|l| l.zone != "suburban"));
+        assert!(t.terrain_plots.iter().filter(|l| l.zone == "suburban").count() > 600);
         let legacy = TerrainConfig::get_default();
         let others = |t: &TerrainConfig| t.roads.iter().filter(|r| r.road_type != RoadType::Suburban).count();
         assert_eq!(others(&t), others(&legacy));

@@ -148,8 +148,8 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
    - If that is a fronted road within 2·D, the lot takes half the distance, so back-to-back lots share a rear line.
    - Otherwise the depth is min(hit, 110).
    - On the concave side of a curve, depth is clamped to 0.85/κ.
-4. **Bulbs.** Bulbs get 4–5 pie lots, with rays from the bulb centre.
-5. **Overlap pass.** Lots go in priority order: through roads, then stems, then pies.
+4. **Bulbs.** Bulbs get 4–5 pie lots, with rays from the bulb centre. (#108: 2–5, by area.)
+5. **Overlap pass.** Lots go in priority order: through roads, then stems, then pies. (#108 puts pies first; see *As built* below.)
    - Each is checked with `quads_overlap_strict`. `polygons_overlap` (terrain.rs:481) can't be used: it counts lots that only touch, and back-to-back lots always touch.
    - A lot that overlaps shrinks (bisection, down to 60% depth) or is dropped.
    - `lot_clearance::finish_lots` does the final trim.
@@ -157,6 +157,24 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 7. **Ids.** Lot ids are `sub_{sector}_{nbhd}_{street}_{L|R}_{k}`.
 
 **Expected result:** about 750–1000 suburban lots, up from 394, at about 6600–7500 area each. That is still the "large" category (`plot_sync.rs:78`).
+
+*As built (#108, `suburb/lots.rs`):*
+- **Result.** At seeds 42, 7, 1234 and 99999 (pattern (a)): 2035–2070 lots (the 1800–3000 suburb holds 1.8× the old ground). Area median 6740–6800, p5 ≥ 5100, p95 ≤ 8330. Width median 64, depth median 105. All convex. No overlaps. `finish_lots` trims and drops none. No lot fronts an arterial. At most 13 lots on a cul-de-sac. Lots cover 77–78%.
+- **Frontage 64.** `lot_frontage` is 64, not 60. A five-row band fits lots 106 deep (#117), and 60 × 106 gave a median area of 6280. 64 × 106 keeps the plan's 60 × 110 area.
+- **Where lots may go.** Between the neighbourhood's side lines, inside the zone. So no lot stands in a buffer or greenway, or on a stub, and none fronts an arterial.
+- **Runs.** A run is where a ray's front point is clear: off every road, inside that ground. Rails front no lots, so the rows own the corners at every T. A fronted street's end that meets another fronted street partway along leaves that street's half width plus `lot_depth` to it (none do in pattern (a); combs in (b) will). A run's end ray against another road, such as a rail leaning up to 20°, turns to follow that road's edge, and the sample rays it shadows are dropped. So the end lot is a trapezoid against the rail, not a wedge with a slot beside it. Rays between samples (5 apart) are blended, not recast.
+- **Continuations.** Where one fronted street carries straight on as another (a strand into its cul-de-sac, a closed racetrack's start and end), each street's line runs 30 into the other. Both then cast the same ray where they meet, and their lots don't overlap there.
+- **Depth.** Back to back means a fronted road within 2·`lot_depth_max` (260), not 2·D: a row fit may go to 130 deep. A lot backing onto open ground (a back line, the zone edge, a side line) may go to `lot_depth_max`, not `lot_depth`, which takes up most of the edge strips. A lot backing onto a road that has no lots stops at `lot_depth`.
+- **Bulbs.** The stem's lots stop 20 short of the bulb, so the pies wrap about 240°. The pie count is the most of 5 down to 2 whose every pie holds 0.65 × frontage × depth. At 4–5, as the plan had it, a 160° bulb gives pies under 4000. A pie's first and last edges are the stem's last rays, shared exactly.
+- **Overlap order: pies, then rows, then stems.** A row's ray passing beside a bulb finds nothing behind it and runs a full lot deep into the pies' ground. A row lot gives that back easily, but a pie shrunk that far falls under the area floor. A lot also has to be clear of every road, convex and at least 0.45 × frontage × depth, or it shrinks (down to 60% depth) or is dropped.
+- **Ids** are `sub_{sector}_{nbhd}_{street}_{L|R|B}_{k}`. `street` is the street's place among its neighbourhood's in the plan, B marks pies, and k is numbered before the overlap pass.
+- **Gap: 8–10%, not ≤ 5%.** Measured at seed 42, the gap is:
+  - 4.3% inside frames: mostly the corners between a U-turn's or bulb's fan of lots and a straight side line, where the ground behind the fan runs over 130 deep;
+  - 2.4% edge strips, beyond `lot_depth_max`;
+  - 1.6% greenways and side buffers, which the metric counts as gap until parks exist;
+  - 1.2% near roads.
+
+  Lots can't take these without going outside 95–130 deep. #111's parks and paths are meant for exactly this leftover ground. `neighbourhood_lots_meet_their_targets` holds the gap at ≤ 10% until then.
 
 ### 4.3 Modules
 - **`backend/src/models/geom.rs`:**
@@ -168,7 +186,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - `frame.rs`
   - `neighbourhood.rs`
   - `patterns.rs`
-  - `lots.rs`
+  - `lots.rs` (#108)
   - `graph.rs`
   - `metrics.rs`
   - `render.rs`, test-only
@@ -176,11 +194,11 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - `street_plan::{resample, bulb, end_direction, distance_along, crosses, keeps_clear, self_crosses, sharpest_turn, weld_junctions, audit}`
   - `lot_clearance::finish_lots`
 - **Wiring:**
-  - `match suburban_params.layout` in `generate_all_roads_with_params` (roads) and in `generate_suburban_plots_internal` (lots). Since #107 `Neighbourhood` lays streets; until #108 it lays no suburban lots.
+  - `match suburban_params.layout` in `generate_all_roads_with_params` (roads) and in `generate_suburban_plots_internal` (lots). Since #107 `Neighbourhood` lays streets, and since #108 its lots. `generate_suburban_plots_internal` runs `suburb::plan` again for the meta, rather than keeping it on the config.
   - Pass the plan as a local, so `version()` is unaffected.
 - **Params (#105):**
   - `SuburbanGenParams::layout` (`legacy` or `neighbourhood` on the wire) and `::neighbourhood: NeighbourhoodParams`, both `#[serde(default)]`, so `world_config` rows and admin PUTs from before #105 still load.
-  - `NeighbourhoodParams` (`#[serde(default)]` on the struct, so a partial object loads): `lot_frontage` 60, `lot_depth` 110 (`lot_depth_min` 95, `lot_depth_max` 130), `local_width` 16, `collector_width` 20, `buffer` 20, `split_chance` 0.5, `greenway_width` 40 (both added in #106), `link_spacing` (L) 400, `bulb_radius` 13, `cul_de_sac_max` 300, `warp_amplitude` (A) 30, `warp_wavelength` (λ) 1600, `pattern_weights` (1 each), and `force_pattern` for tests. Tune A and λ in #111.
+  - `NeighbourhoodParams` (`#[serde(default)]` on the struct, so a partial object loads): `lot_frontage` 64 (60 until #108), `lot_depth` 110 (`lot_depth_min` 95, `lot_depth_max` 130), `local_width` 16, `collector_width` 20, `buffer` 20, `split_chance` 0.5, `greenway_width` 40 (both added in #106), `link_spacing` (L) 400, `bulb_radius` 13, `cul_de_sac_max` 300, `warp_amplitude` (A) 30, `warp_wavelength` (λ) 1600, `pattern_weights` (1 each), and `force_pattern` for tests. Tune A and λ in #111.
   - **One resolved set of radii:** `WorldGenParams::suburban_params()` takes the radii, seed and arterial width from the world. Roads and lots both read it, and `suburban.inner_radius`, `outer_radius` and `seed` have no effect. Before #105 the lots read `suburban`'s own radii. For the default world the two sets agreed, so the pin didn't move.
   - **One table of zone radii (#116):** the radii are named consts in `protocol/src/rules.rs` (`URBAN_OUTER_RADIUS`, `SUBURBAN_OUTER_RADIUS` and so on, collected in `ZONE_OUTER_RADII`). `Zone::radii()`, `WorldGenParams::default()`, `SPAWN_Y` and `arterial_end_radius` all derive from them. The server writes them into the DB `zones` table on startup (`engine::zone_sync`), and the React client draws its zone rings from `/bureaucracy/zones` and takes the admin form's defaults from `GET /admin/world-params/default`. Moving a zone edge is a one-line change, with no migration. An admin regenerate that changes the radii moves only the generator; zone classification still reads the table (#118).
   - **Pin:** `legacy_default_terrain_version_is_pinned` holds `get_default().version()` at `2f18343910f69960` (moved on purpose by #117; `6006800ab79fbff8` before).
