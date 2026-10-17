@@ -241,7 +241,10 @@ fn main() -> Result<()> {
     }
     player.capture.show_stats = args.stats;
 
-    let shared = script_api::Shared::default();
+    let shared = script_api::Shared {
+        projector: Some(player.projector()),
+        ..Default::default()
+    };
     *shared.note.lock().unwrap() = args.note;
     *shared.view.lock().unwrap() = args.view;
     if let Some(path) = &args.camera_path {

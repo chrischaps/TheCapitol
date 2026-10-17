@@ -2,14 +2,14 @@
 // screen. So far that's the players' names (P4.2), placed through
 // world_to_screen, and the zone banner (P4.5).
 //
-// The script projects where each name hangs (cap_name_anchors) with the
-// camera this frame renders with, and Rust's labels.rs decides which names
-// to draw, where, how big and how faint (cap_name_tags). Names fade and
+// Rust's labels.rs projects where each name hangs with the camera this
+// frame renders with, and decides which names to draw, where, how big and
+// how faint (cap_name_tags); the script just draws them. Names fade and
 // shrink with distance; nearer names win a clash, and a crowd shows only
 // its nearest two dozen. Yours always comes first, in gold, and carries
 // furthest. The placement moved to Rust in P8.5: in Rhai its overlap test
 // was quadratic, and a crowd of 50 cost about 2 ms a frame. The projection
-// stays here only because Rust can't reach this frame's camera (#97).
+// followed in H14 (#97), once Rust could reach the frame's camera.
 
 // The zone banner names the zone you've just walked into, in its colour,
 // as an inscription: a small caption, the name in Cinzel capitals rising
@@ -88,15 +88,7 @@ fn zone_banner() {
 // ── The names ────────────────────────────────────────────────────────────
 
 fn names() {
-    let at = cap_name_anchors();
-    if at.is_empty() { return; }
-    let screens = [];
-    let i = 0;
-    while i < at.len() {
-        screens.push(world_to_screen(at[i], at[i + 1], at[i + 2]));
-        i += 3;
-    }
-    for t in cap_name_tags(screens, screen_width(), screen_height()) {
+    for t in cap_name_tags() {
         draw_text(t.x + 1.0, t.y + 1.0, t.name, t.size, 0.0, 0.0, 0.0, 0.65 * t.a);
         if t.me {
             // The Capitol's gold, #c9a227.

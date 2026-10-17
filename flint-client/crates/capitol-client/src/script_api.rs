@@ -81,6 +81,9 @@ pub struct Shared {
     /// egui, once its fonts are in, so `cap_name_tags` measures names with
     /// the fonts the HUD draws them in. `None` until the first `ui`.
     pub egui: Arc<Mutex<Option<egui::Context>>>,
+    /// The camera scripts' `world_to_screen` uses (Flint ADR 0086), so
+    /// `cap_name_tags` projects with the frame's camera. `None` in tests.
+    pub projector: Option<flint_player::Projector>,
 }
 
 /// Trading as scripts see it.
@@ -320,47 +323,25 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             })
             .collect()
     });
-    // `cap_name_anchors() -> [x, y, z, x, y, z, ...]`: where each name
-    // hangs (world metres), flat, in `cap_players()` order. For `hud.rhai`
-    // to project, without building a map per player.
-    let players = shared.players.clone();
-    engine.register_fn("cap_name_anchors", move || -> rhai::Array {
-        let Ok(players) = players.lock() else {
-            return rhai::Array::new();
-        };
-        players
-            .iter()
-            .flat_map(|p| p.at)
-            .map(|v| (v as f64).into())
-            .collect()
-    });
-    // `cap_name_tags(screens, width, height) -> [#{ name, x, y, size, a, me }]`:
-    // the names to draw, in order, where `screens[i]` is `world_to_screen`
-    // of anchor i. Each tag's x, y is its top left. See `labels::place`.
-    // The script projects only because Rust can't reach the frame's
-    // camera (#97); with that, this would take no arguments.
+    // `cap_name_tags() -> [#{ name, x, y, size, a, me }]`: the names to
+    // draw, in order, projected with the camera this frame renders with.
+    // Each tag's x, y is its top left. See `labels::place`.
     let players = shared.players.clone();
     let egui = shared.egui.clone();
+    let projector = shared.projector.clone();
     engine.register_fn(
         "cap_name_tags",
-        move |screens: rhai::Array, width: f64, height: f64| -> rhai::Array {
+        move || -> rhai::Array {
+            let Some(view) = projector.as_ref().map(|p| p.view()) else {
+                return rhai::Array::new();
+            };
             let Ok(players) = players.lock() else {
                 return rhai::Array::new();
             };
-            let screens: Vec<labels::Screen> = screens
+            let screens: Vec<labels::Screen> = players
                 .iter()
-                .map(|s| {
-                    let m = s.read_lock::<rhai::Map>()?;
-                    let num = |k: &str| m.get(k).and_then(|v| v.as_float().ok());
-                    if !m.get("visible")?.as_bool().ok()? {
-                        return None;
-                    }
-                    Some([num("x")? as f32, num("y")? as f32, num("depth")? as f32])
-                })
+                .map(|p| view.world_to_screen(p.at).map(|s| [s.x, s.y, s.depth]))
                 .collect();
-            if screens.len() != players.len() {
-                return rhai::Array::new(); // a stale list; next frame's will match
-            }
             let egui = egui.lock().ok().and_then(|e| e.clone());
             let measure = |text: &str, size: f32| match &egui {
                 Some(ctx) => ctx.fonts(|f| {
@@ -376,7 +357,7 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
                 // Flint's own fallback, before the fonts are in.
                 None => (text.chars().count() as f32 * size * 0.6, size),
             };
-            labels::place(&players, &screens, [width as f32, height as f32], measure)
+            labels::place(&players, &screens, view.screen_size(), measure)
                 .into_iter()
                 .map(|t| {
                     let mut m = rhai::Map::new();

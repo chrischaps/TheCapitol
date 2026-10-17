@@ -10,13 +10,13 @@
 //! would take every name and your neighbours ahead would have none.
 //! Offline there's no you, and the camera's nearest win.
 //!
-//! `hud.rhai` projects each name's anchor with `world_to_screen`, which uses
-//! the camera this frame renders with, and hands the screen points to
-//! `cap_name_tags`, which runs [`place`]. The placement was Rhai until
+//! `cap_name_tags` projects each name's anchor with Flint's `Projector`
+//! (ADR 0086), the camera this frame renders with, and runs [`place`];
+//! `hud.rhai` only draws what it returns. The placement was Rhai until
 //! P8.5: interpreted, its overlap test was quadratic in the crowd, and at
-//! 49 players it took about 2 ms a frame. Here it's microseconds. The
-//! projection stays in Rhai only because native functions can't reach the
-//! frame's camera ([#97](https://github.com/chrischaps/TheCapitol/issues/97)).
+//! 49 players it took about 2 ms a frame. Here it's microseconds. Until
+//! H14 ([#97](https://github.com/chrischaps/TheCapitol/issues/97)) the
+//! script projected, and handed a map per player across and back.
 
 use crate::script_api::PlayerLabel;
 
