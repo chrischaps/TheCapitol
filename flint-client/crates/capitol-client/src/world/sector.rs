@@ -142,17 +142,13 @@ mod tests {
     #[test]
     fn rings_break_at_the_zone_edges() {
         let ring = |r| Sector::of(polar(r, 30.0)).ring;
-        assert_eq!(
-            [
-                ring(0.0),
-                ring(999.0),
-                ring(1001.0),
-                ring(1700.0),
-                ring(2500.0),
-                ring(3999.0)
-            ],
-            [0, 0, 1, 2, 3, 3]
-        );
+        // Either side of each edge, from the radii table, which moves
+        // (#117 deepened the suburb).
+        for (i, edge) in ring_edges().into_iter().enumerate() {
+            assert_eq!(ring(edge - 1.0), i as u8, "inside {edge}");
+            assert_eq!(ring(edge + 1.0), i as u8 + 1, "outside {edge}");
+        }
+        assert_eq!([ring(0.0), ring(3999.0)], [0, RINGS - 1]);
     }
 
     #[test]

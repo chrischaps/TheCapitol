@@ -681,7 +681,13 @@ impl PlayerExtension for CapitolExtension {
                 if self.settings_panel.open {
                     self.hints.rect = None;
                 } else {
-                    self.hints.show(ctx, now);
+                    // The inventory's rect is last frame's: it's drawn after.
+                    let panels: Vec<_> =
+                        [self.inventory.rect, self.crafting.rect, self.exchange.rect]
+                            .into_iter()
+                            .flatten()
+                            .collect();
+                    self.hints.show(ctx, now, &panels);
                 }
                 let state = session.state();
                 let picked = state.picked_plot();
