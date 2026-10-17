@@ -733,7 +733,9 @@ mod tests {
     }
 
     fn block_scope() -> Scope {
-        Scope { center: (0.0, 0.0), inner: 1700.0, outer: 1880.0, sector: None }
+        // One sector, so coverage samples a small box: the whole annulus is
+        // seconds of work in a debug build.
+        Scope { center: (0.0, 0.0), inner: 1700.0, outer: 1880.0, sector: Some(0) }
     }
 
     #[test]
