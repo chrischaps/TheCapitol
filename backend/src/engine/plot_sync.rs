@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use capitol_protocol::terrain::TerrainPlot;
 
-use crate::engine::currency::{add_strands, TransactionType};
+use crate::engine::currency::{add_strands_in, TransactionType};
 use crate::models::corners_from_column;
 
 /// What to do with an owned plot whose lot is gone or has changed shape.
@@ -60,6 +60,8 @@ pub struct SyncReport {
 pub enum SyncError {
     /// `OnOwned::Refuse` found owned plots in the way. Nothing was changed.
     OwnedConflicts(Vec<OwnedConflict>),
+    /// A released plot's deed couldn't be refunded. Nothing was changed.
+    Refund(String),
     Db(sqlx::Error),
 }
 
@@ -133,7 +135,6 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
     }
 
     let mut report = SyncReport::default();
-    let mut refunds: Vec<(Uuid, Uuid, i32)> = Vec::new();
     let mut tx = db.begin().await?;
 
     if on_owned == OnOwned::Release {
@@ -159,8 +160,21 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
             .bind(c.plot_id)
             .execute(&mut *tx)
             .await?;
-            let row = &existing[&c.terrain_id];
-            refunds.push((c.owner_id, c.plot_id, row.assessed_value));
+            // The refund is in this transaction, so a plot is never released
+            // without its owner getting the deed back.
+            let value = existing[&c.terrain_id].assessed_value;
+            if value > 0 {
+                add_strands_in(
+                    &mut tx,
+                    c.owner_id,
+                    value as i64,
+                    TransactionType::DeedRefund,
+                    Some("Deed refunded: the terrain changed under your plot"),
+                    Some(c.plot_id),
+                )
+                .await
+                .map_err(|e| SyncError::Refund(format!("Couldn't refund {value} strands to {} for plot {}: {e}", c.owner_id, c.plot_id)))?;
+            }
         }
     }
     // Owned plots kept as they are must not be touched below.
@@ -221,25 +235,6 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
         .await?;
     }
     tx.commit().await?;
-
-    // Refunds go through the currency ledger, which runs its own transaction.
-    for (owner_id, plot_id, value) in refunds {
-        if value <= 0 {
-            continue;
-        }
-        if let Err(e) = add_strands(
-            db,
-            owner_id,
-            value as i64,
-            TransactionType::AdminAdjustment,
-            Some("Deed refunded: the terrain changed under your plot"),
-            Some(plot_id),
-        )
-        .await
-        {
-            tracing::error!("Couldn't refund {value} strands to {owner_id} for plot {plot_id}: {e}");
-        }
-    }
 
     report.conflicts = conflicts;
     Ok(report)
@@ -334,9 +329,114 @@ fn next_up(v: f64) -> f32 {
     if (f as f64) < v { f32::from_bits(if f >= 0.0 { f.to_bits() + 1 } else { f.to_bits() - 1 }) } else { f }
 }
 
+/// The `#[ignore]`d ones need the local Postgres (`docker-compose up -d`). Each
+/// runs in a fresh database that `sqlx::test` makes from the migrations. Run
+/// them with `cargo test plot_sync -- --ignored`. The helpers are shared with
+/// `routes::plots`'s tests.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) async fn player(db: &PgPool, name: &str, balance: i64) -> Uuid {
+        let account = Uuid::new_v4();
+        sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'x')")
+            .bind(account)
+            .bind(format!("{name}@test"))
+            .execute(db)
+            .await
+            .unwrap();
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO players (id, account_id, name, strand_balance) VALUES ($1, $2, $3, $4)")
+            .bind(id)
+            .bind(account)
+            .bind(name)
+            .bind(balance)
+            .execute(db)
+            .await
+            .unwrap();
+        id
+    }
+
+    /// An urban lot, owned by `owner` with deed value `value`
+    pub(crate) async fn plot(db: &PgPool, owner: Option<Uuid>, value: i32) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO plots (id, terrain_id, zone_id, grid_x, grid_y, world_x, world_y,
+                                bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y,
+                                size_category, owner_id, assessed_value)
+             VALUES ($1, $2, 'urban', 0, 0, 1200, 0, 1190, -10, 1210, 10, 'medium', $3, $4)",
+        )
+        .bind(id)
+        .bind(format!("test-{id}"))
+        .bind(owner)
+        .bind(value)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO plot_permissions (plot_id) VALUES ($1)")
+            .bind(id)
+            .execute(db)
+            .await
+            .unwrap();
+        id
+    }
+
+    pub(crate) async fn balance(db: &PgPool, player: Uuid) -> i64 {
+        sqlx::query_scalar("SELECT strand_balance FROM players WHERE id = $1")
+            .bind(player)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    /// The player's audit records, as (amount, transaction_type)
+    pub(crate) async fn ledger(db: &PgPool, player: Uuid) -> Vec<(i64, String)> {
+        sqlx::query_as("SELECT amount, transaction_type FROM currency_transactions WHERE player_id = $1")
+            .bind(player)
+            .fetch_all(db)
+            .await
+            .unwrap()
+    }
+
+    /// The plot's owner, or `None` if the row is gone
+    pub(crate) async fn owner(db: &PgPool, plot: Uuid) -> Option<Option<Uuid>> {
+        sqlx::query_scalar("SELECT owner_id FROM plots WHERE id = $1")
+            .bind(plot)
+            .fetch_optional(db)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_released_plot_refunds_its_deed(db: PgPool) {
+        let ada = player(&db, "ada", 50).await;
+        let lot = plot(&db, Some(ada), 1000).await;
+
+        let report = sync_plots(&db, &[], OnOwned::Release).await.unwrap();
+
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(owner(&db, lot).await, None, "the lot is gone, so its row is");
+        assert_eq!(balance(&db, ada).await, 1050);
+        assert_eq!(ledger(&db, ada).await, vec![(1000, "deed_refund".to_string())]);
+    }
+
+    /// The refund is in the sync's transaction, so a failed one releases nothing
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_refund_that_fails_changes_nothing(db: PgPool) {
+        let ada = player(&db, "ada", i64::MAX - 10).await;
+        let lot = plot(&db, Some(ada), 1000).await;
+        let spare = plot(&db, None, 0).await;
+
+        let err = sync_plots(&db, &[], OnOwned::Release).await.unwrap_err();
+
+        assert!(matches!(err, SyncError::Refund(_)), "{err:?}");
+        assert_eq!(owner(&db, lot).await, Some(Some(ada)), "still ada's");
+        assert_eq!(owner(&db, spare).await, Some(None), "the unowned lot wasn't deleted either");
+        assert_eq!(balance(&db, ada).await, i64::MAX - 10);
+        assert!(ledger(&db, ada).await.is_empty());
+    }
 
     #[test]
     fn sizes_follow_area() {

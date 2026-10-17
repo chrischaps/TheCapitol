@@ -92,7 +92,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = match engine::plot_sync::sync_plots(&db_pool, &lots, engine::plot_sync::OnOwned::Keep).await {
         Ok(report) => report,
         Err(engine::plot_sync::SyncError::Db(e)) => return Err(e.into()),
-        Err(engine::plot_sync::SyncError::OwnedConflicts(_)) => unreachable!("Keep never refuses"),
+        Err(engine::plot_sync::SyncError::OwnedConflicts(_) | engine::plot_sync::SyncError::Refund(_)) => {
+            unreachable!("Keep never refuses or refunds")
+        }
     };
     tracing::info!(
         "Plots synced with the terrain's {} lots: {} added, {} updated, {} removed",

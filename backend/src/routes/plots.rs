@@ -3,11 +3,12 @@ use axum::{
     routing::{get, post, put},
     Extension, Json, Router,
 };
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use capitol_protocol::rest::{ClaimPlotResponse, ListPlotsQuery, ListPlotsResponse, PositionQuery};
 
-use crate::engine::currency::{subtract_strands, TransactionType};
+use crate::engine::currency::{subtract_strands_in, TransactionType};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::{Plot, PlotInfo, PLOT_COLUMNS, PlotPermissions, PlotWithJoins, UpdatePermissionsRequest};
@@ -177,20 +178,36 @@ pub async fn claim_plot(
     .fetch_one(&state.db)
     .await?;
 
+    let new_balance = claim(&state.db, player_id, plot_id).await?;
+
+    // Fetch updated plot info
+    let plot_info = get_plot(State(state.clone()), Path(plot_id)).await?.0;
+
+    Ok(Json(ClaimPlotResponse {
+        plot: plot_info,
+        new_balance,
+    }))
+}
+
+/// Charge the deed and give the plot to `player_id`, in one transaction. The
+/// plot row is locked first, so two players can't both pay for it, and the
+/// money only moves if the claim commits. Returns the new balance.
+async fn claim(db: &PgPool, player_id: Uuid, plot_id: Uuid) -> Result<i64, AppError> {
+    let mut tx = db.begin().await?;
+
     // Get plot with zone info
-    let plot_row: Option<(
-        Uuid, String, Option<Uuid>, Option<i32>
-    )> = sqlx::query_as(
-        "SELECT p.id, p.zone_id, p.owner_id, z.deed_cost
+    let plot_row: Option<(String, Option<Uuid>, Option<i32>)> = sqlx::query_as(
+        "SELECT p.zone_id, p.owner_id, z.deed_cost
          FROM plots p
          JOIN zones z ON p.zone_id = z.id
-         WHERE p.id = $1"
+         WHERE p.id = $1
+         FOR UPDATE OF p"
     )
     .bind(plot_id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    let (_, zone_id, owner_id, deed_cost) = plot_row
+    let (zone_id, owner_id, deed_cost) = plot_row
         .ok_or_else(|| AppError::NotFound("Plot not found".into()))?;
 
     // Verify plot is unclaimed
@@ -203,16 +220,16 @@ pub async fn claim_plot(
         .ok_or_else(|| AppError::BadRequest("This zone does not allow plot ownership".into()))?;
 
     // Deduct Strands
-    let new_balance = subtract_strands(
-        &state.db,
+    let new_balance = subtract_strands_in(
+        &mut tx,
         player_id,
         deed_cost as i64,
-        TransactionType::AdminAdjustment, // TODO: Add DeedPurchase type
+        TransactionType::DeedPurchase,
         Some(&format!("Purchased plot in {}", zone_id)),
         Some(plot_id),
     )
     .await
-    .map_err(|e| AppError::BadRequest(e))?;
+    .map_err(AppError::BadRequest)?;
 
     // Claim the plot
     sqlx::query(
@@ -221,7 +238,7 @@ pub async fn claim_plot(
     .bind(player_id)
     .bind(deed_cost)
     .bind(plot_id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     // Create default permissions if not exists
@@ -229,16 +246,11 @@ pub async fn claim_plot(
         "INSERT INTO plot_permissions (plot_id) VALUES ($1) ON CONFLICT (plot_id) DO NOTHING"
     )
     .bind(plot_id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
-    // Fetch updated plot info
-    let plot_info = get_plot(State(state.clone()), Path(plot_id)).await?.0;
-
-    Ok(Json(ClaimPlotResponse {
-        plot: plot_info,
-        new_balance,
-    }))
+    tx.commit().await?;
+    Ok(new_balance)
 }
 
 /// Get plot permissions
@@ -385,4 +397,66 @@ pub async fn get_plot_capacity(db: &sqlx::PgPool, plot_id: Uuid) -> Result<(i32,
     .await?;
 
     Ok(row)
+}
+
+/// These need the local Postgres (`docker-compose up -d`). Run them with
+/// `cargo test routes::plots -- --ignored`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::plot_sync::tests::{balance, ledger, owner, plot, player};
+
+    /// The urban deed (`zones.deed_cost`)
+    async fn urban_deed(db: &PgPool) -> i64 {
+        sqlx::query_scalar::<_, i32>("SELECT deed_cost FROM zones WHERE id = 'urban'")
+            .fetch_one(db)
+            .await
+            .unwrap() as i64
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_claim_charges_the_deed_and_takes_the_plot(db: PgPool) {
+        let deed = urban_deed(&db).await;
+        let ada = player(&db, "ada", deed + 5).await;
+        let lot = plot(&db, None, 0).await;
+
+        assert_eq!(claim(&db, ada, lot).await.unwrap(), 5);
+
+        assert_eq!(owner(&db, lot).await, Some(Some(ada)));
+        assert_eq!(balance(&db, ada).await, 5);
+        assert_eq!(ledger(&db, ada).await, vec![(-deed, "deed_purchase".to_string())]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_claim_you_cant_afford_takes_nothing(db: PgPool) {
+        let deed = urban_deed(&db).await;
+        let ada = player(&db, "ada", deed - 1).await;
+        let lot = plot(&db, None, 0).await;
+
+        assert!(matches!(claim(&db, ada, lot).await, Err(AppError::BadRequest(_))));
+
+        assert_eq!(owner(&db, lot).await, Some(None));
+        assert_eq!(balance(&db, ada).await, deed - 1);
+        assert!(ledger(&db, ada).await.is_empty());
+    }
+
+    /// The second claimant waits on the plot's lock, then finds it taken and pays nothing
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn two_claims_at_once_charge_one_player(db: PgPool) {
+        let deed = urban_deed(&db).await;
+        let ada = player(&db, "ada", deed).await;
+        let bram = player(&db, "bram", deed).await;
+        let lot = plot(&db, None, 0).await;
+
+        let (a, b) = tokio::join!(claim(&db, ada, lot), claim(&db, bram, lot));
+
+        assert!(a.is_ok() != b.is_ok(), "exactly one claim wins");
+        let (winner, loser) = if a.is_ok() { (ada, bram) } else { (bram, ada) };
+        assert_eq!(owner(&db, lot).await, Some(Some(winner)));
+        assert_eq!(balance(&db, winner).await, 0);
+        assert_eq!(balance(&db, loser).await, deed, "the loser kept their strands");
+    }
 }

@@ -1,4 +1,4 @@
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 /// Transaction types for currency audit log
@@ -8,6 +8,8 @@ pub enum TransactionType {
     TradeReceived,
     TradeSent,
     AdminAdjustment,
+    DeedPurchase,
+    DeedRefund,
 }
 
 impl TransactionType {
@@ -18,12 +20,13 @@ impl TransactionType {
             TransactionType::TradeReceived => "trade_received",
             TransactionType::TradeSent => "trade_sent",
             TransactionType::AdminAdjustment => "admin_adjustment",
+            TransactionType::DeedPurchase => "deed_purchase",
+            TransactionType::DeedRefund => "deed_refund",
         }
     }
 }
 
-/// Add strands to a player's balance with audit logging.
-/// Uses SELECT FOR UPDATE to ensure atomic operations.
+/// Add strands to a player's balance with audit logging, in its own transaction.
 /// Returns the new balance.
 pub async fn add_strands(
     pool: &PgPool,
@@ -33,34 +36,117 @@ pub async fn add_strands(
     description: Option<&str>,
     reference_id: Option<Uuid>,
 ) -> Result<i64, String> {
+    let mut tx = pool.begin().await.map_err(|e| format!("Failed to start transaction: {}", e))?;
+    let (balance_before, balance_after) =
+        apply(&mut tx, player_id, amount, false, &tx_type, description, reference_id).await?;
+    tx.commit().await.map_err(|e| format!("Failed to commit: {}", e))?;
+
+    tracing::info!(
+        "Added {} strands to player {} ({}): {} -> {}",
+        amount, player_id, tx_type.as_str(), balance_before, balance_after
+    );
+
+    Ok(balance_after)
+}
+
+/// Subtract strands from a player's balance with audit logging, in its own transaction.
+/// Returns the new balance, or error if insufficient funds.
+pub async fn subtract_strands(
+    pool: &PgPool,
+    player_id: Uuid,
+    amount: i64,
+    tx_type: TransactionType,
+    description: Option<&str>,
+    reference_id: Option<Uuid>,
+) -> Result<i64, String> {
+    let mut tx = pool.begin().await.map_err(|e| format!("Failed to start transaction: {}", e))?;
+    let (balance_before, balance_after) =
+        apply(&mut tx, player_id, amount, true, &tx_type, description, reference_id).await?;
+    tx.commit().await.map_err(|e| format!("Failed to commit: {}", e))?;
+
+    tracing::info!(
+        "Subtracted {} strands from player {} ({}): {} -> {}",
+        amount, player_id, tx_type.as_str(), balance_before, balance_after
+    );
+
+    Ok(balance_after)
+}
+
+/// [`add_strands`] inside the caller's transaction, so the money moves only if
+/// the caller's other writes commit. The caller commits, and an error here
+/// should roll the whole transaction back.
+pub async fn add_strands_in(
+    conn: &mut PgConnection,
+    player_id: Uuid,
+    amount: i64,
+    tx_type: TransactionType,
+    description: Option<&str>,
+    reference_id: Option<Uuid>,
+) -> Result<i64, String> {
+    apply(conn, player_id, amount, false, &tx_type, description, reference_id)
+        .await
+        .map(|(_, after)| after)
+}
+
+/// [`subtract_strands`] inside the caller's transaction. See [`add_strands_in`].
+pub async fn subtract_strands_in(
+    conn: &mut PgConnection,
+    player_id: Uuid,
+    amount: i64,
+    tx_type: TransactionType,
+    description: Option<&str>,
+    reference_id: Option<Uuid>,
+) -> Result<i64, String> {
+    apply(conn, player_id, amount, true, &tx_type, description, reference_id)
+        .await
+        .map(|(_, after)| after)
+}
+
+/// Add `amount` to the player's balance, or take it off if `subtract`, and
+/// write the audit record. Locks the player row with SELECT FOR UPDATE until the
+/// transaction ends. Returns the balance before and after.
+async fn apply(
+    conn: &mut PgConnection,
+    player_id: Uuid,
+    amount: i64,
+    subtract: bool,
+    tx_type: &TransactionType,
+    description: Option<&str>,
+    reference_id: Option<Uuid>,
+) -> Result<(i64, i64), String> {
     if amount <= 0 {
         return Err("Amount must be positive".to_string());
     }
-
-    // Start transaction
-    let mut tx = pool.begin().await.map_err(|e| format!("Failed to start transaction: {}", e))?;
+    let amount = if subtract { -amount } else { amount };
 
     // Lock row and get current balance
     let current_balance: (i64,) = sqlx::query_as(
         "SELECT strand_balance FROM players WHERE id = $1 FOR UPDATE"
     )
     .bind(player_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await
     .map_err(|e| format!("Player not found: {}", e))?;
 
     let balance_before = current_balance.0;
-    let balance_after = balance_before + amount;
+
+    let balance_after = balance_before
+        .checked_add(amount)
+        .ok_or_else(|| format!("Balance would overflow: {} + {}", balance_before, amount))?;
+
+    if balance_after < 0 {
+        return Err(format!("Insufficient strands: have {}, need {}", balance_before, -amount));
+    }
 
     // Update balance
     sqlx::query("UPDATE players SET strand_balance = $1 WHERE id = $2")
         .bind(balance_after)
         .bind(player_id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .map_err(|e| format!("Failed to update balance: {}", e))?;
 
-    // Insert audit record
+    // Insert audit record (negative amount for subtraction)
     sqlx::query(
         "INSERT INTO currency_transactions (player_id, amount, balance_before, balance_after, transaction_type, reference_id, description)
          VALUES ($1, $2, $3, $4, $5, $6, $7)"
@@ -72,89 +158,11 @@ pub async fn add_strands(
     .bind(tx_type.as_str())
     .bind(reference_id)
     .bind(description)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await
     .map_err(|e| format!("Failed to insert audit record: {}", e))?;
 
-    // Commit transaction
-    tx.commit().await.map_err(|e| format!("Failed to commit: {}", e))?;
-
-    tracing::info!(
-        "Added {} strands to player {} ({}): {} -> {}",
-        amount, player_id, tx_type.as_str(), balance_before, balance_after
-    );
-
-    Ok(balance_after)
-}
-
-/// Subtract strands from a player's balance with audit logging.
-/// Uses SELECT FOR UPDATE to ensure atomic operations.
-/// Returns the new balance, or error if insufficient funds.
-pub async fn subtract_strands(
-    pool: &PgPool,
-    player_id: Uuid,
-    amount: i64,
-    tx_type: TransactionType,
-    description: Option<&str>,
-    reference_id: Option<Uuid>,
-) -> Result<i64, String> {
-    if amount <= 0 {
-        return Err("Amount must be positive".to_string());
-    }
-
-    // Start transaction
-    let mut tx = pool.begin().await.map_err(|e| format!("Failed to start transaction: {}", e))?;
-
-    // Lock row and get current balance
-    let current_balance: (i64,) = sqlx::query_as(
-        "SELECT strand_balance FROM players WHERE id = $1 FOR UPDATE"
-    )
-    .bind(player_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| format!("Player not found: {}", e))?;
-
-    let balance_before = current_balance.0;
-
-    if balance_before < amount {
-        return Err(format!("Insufficient strands: have {}, need {}", balance_before, amount));
-    }
-
-    let balance_after = balance_before - amount;
-
-    // Update balance
-    sqlx::query("UPDATE players SET strand_balance = $1 WHERE id = $2")
-        .bind(balance_after)
-        .bind(player_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to update balance: {}", e))?;
-
-    // Insert audit record (negative amount for subtraction)
-    sqlx::query(
-        "INSERT INTO currency_transactions (player_id, amount, balance_before, balance_after, transaction_type, reference_id, description)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)"
-    )
-    .bind(player_id)
-    .bind(-amount)
-    .bind(balance_before)
-    .bind(balance_after)
-    .bind(tx_type.as_str())
-    .bind(reference_id)
-    .bind(description)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| format!("Failed to insert audit record: {}", e))?;
-
-    // Commit transaction
-    tx.commit().await.map_err(|e| format!("Failed to commit: {}", e))?;
-
-    tracing::info!(
-        "Subtracted {} strands from player {} ({}): {} -> {}",
-        amount, player_id, tx_type.as_str(), balance_before, balance_after
-    );
-
-    Ok(balance_after)
+    Ok((balance_before, balance_after))
 }
 
 /// Transfer strands from one player to another atomically.

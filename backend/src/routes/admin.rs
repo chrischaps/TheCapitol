@@ -98,6 +98,7 @@ pub async fn commit_world_params(
     let report = match sync_plots(&state.db, &lots, on_owned).await {
         Ok(report) => report,
         Err(SyncError::Db(e)) => return Err(e.into()),
+        Err(SyncError::Refund(e)) => return Err(AppError::Internal(format!("{e}. The commit changed nothing."))),
         Err(SyncError::OwnedConflicts(conflicts)) => {
             let list: Vec<String> = conflicts
                 .iter()
