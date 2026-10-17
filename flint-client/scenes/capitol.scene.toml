@@ -11,6 +11,9 @@ name = "The Capitol"
 version = "1.0"
 description = "The Capitol at dusk: the city in rings of light round its tower"
 input_config = "config/input.toml"
+# Every sound is made in memory and handed to Flint by the extension
+# (sound/, Flint ADR 0084), so there's nothing in audio/ to preload.
+preload_audio = false
 
 # The camera rig (camera.rhai) places the camera. Near is 1 m, not the default 0.1: from the
 # map view 620 m up the depth buffer then resolves about 2 cm, not 20 (see
@@ -173,10 +176,6 @@ source = "input.rhai"
 # The world HUD: the players' names (P4.2)
 [entities.hud.script]
 source = "hud.rhai"
-
-# What you hear: plays the one-shots the extension fires as `sound` (P8.1)
-[entities.audio.script]
-source = "audio.rhai"
 
 # Notices: the toast stack and the pickups flying to the inventory (P8.2).
 # Last, so they draw over the names.

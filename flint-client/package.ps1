@@ -8,7 +8,7 @@
 # in its own target dir (target\package), so the zip doesn't need the
 # Visual C++ redistributable and the build doesn't disturb target\release.
 # The game finds its data beside the exe wherever it's started from
-# (enter_game_dir in main.rs), and writes save\, cache\ and audio\*.wav
+# (enter_game_dir in main.rs), and writes save\ and cache\
 # there, so the folder must be somewhere the player can write.
 
 param(
@@ -92,7 +92,7 @@ KEYS
 NEEDS
   Windows 10 or 11, 64-bit, and a GPU with DirectX 12 or Vulkan.
   Keep this folder somewhere you can write to (not Program Files):
-  the game writes save\, cache\ and audio\ here.
+  the game writes save\ and cache\ here.
 
   capitol.exe --help lists the command-line options.
 

@@ -2,9 +2,8 @@
 
 Every sound in The Capitol's Flint client is synthesized from noise and sine
 waves by `crates/capitol-client/src/sound/library.rs`. No recordings and no
-third-party samples are used. The client writes the `.wav` files here when it
-starts (they're gitignored) and writes them again when `library::VERSION`
-changes.
+third-party samples are used. The client makes them in memory when it starts.
+`capitol --write-sounds <dir>` writes them out as `.wav` files to listen to.
 
 The sounds, like the code that makes them, are dedicated to the public domain
 under [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/).

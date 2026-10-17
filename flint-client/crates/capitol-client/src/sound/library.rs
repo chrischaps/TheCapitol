@@ -1,10 +1,10 @@
 //! Every sound the Capitol plays (P8.1), made here from nothing but noise
 //! and sines, so there are no recordings to licence and none in the repo.
-//! [`ensure`] writes them into `audio/` before the scene loads, where
-//! Flint's player preloads every file as `audio/<name>.wav`.
-//!
-//! Change a recipe and bump [`VERSION`], and every client writes them all
-//! again on its next start. `audio/CREDITS.md` says where each came from.
+//! [`make_all`] makes them at start, off the main thread, and the
+//! [`Soundscape`](super::Soundscape) hands them to Flint from memory
+//! (Flint ADR 0084). Nothing is written to disk: `--write-sounds <dir>`
+//! writes them as WAVs ([`write_all`]) for listening or spectrograms.
+//! `audio/CREDITS.md` says where each came from.
 //!
 //! The beds loop: four ambiences the soundscape crossfades by zone, city
 //! hum at the core, a breeze through the suburbs and fields, wind past the
@@ -16,57 +16,58 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-/// Bump when any recipe changes, so clients write the sounds again.
-pub const VERSION: u32 = 1;
+/// One sound: one channel, or two (left, right), at [`SR`].
+pub type Channels = Vec<Vec<f32>>;
 
-/// The file in `audio/` holding the [`VERSION`] the sounds there were
-/// written at.
-const STAMP: &str = ".synth-version";
+/// What makes one sound.
+pub type Recipe = fn() -> Channels;
 
-/// Each sound by file name, with the recipe that makes it.
-pub const RECIPES: &[(&str, fn() -> Vec<Vec<f32>>)] = &[
-    ("amb_city.wav", city),
-    ("amb_breeze.wav", breeze),
-    ("amb_wind.wav", wind),
-    ("amb_water.wav", water),
-    ("ui_click.wav", || vec![ui_click()]),
-    ("ui_drop.wav", || vec![ui_drop()]),
-    ("rustle_1.wav", || vec![rustle(1)]),
-    ("rustle_2.wav", || vec![rustle(2)]),
-    ("rustle_3.wav", || vec![rustle(3)]),
-    ("pluck.wav", || vec![gathered()]),
-    ("chime.wav", || vec![chime()]),
-    ("bell.wav", || vec![bell()]),
-    ("bird_1.wav", || vec![bird(1)]),
-    ("bird_2.wav", || vec![bird(2)]),
-    ("bird_3.wav", || vec![bird(3)]),
-    ("bird_4.wav", || vec![bird(4)]),
+/// Each sound by name, with the recipe that makes it.
+pub const RECIPES: &[(&str, Recipe)] = &[
+    ("amb_city", city),
+    ("amb_breeze", breeze),
+    ("amb_wind", wind),
+    ("amb_water", water),
+    ("ui_click", || vec![ui_click()]),
+    ("ui_drop", || vec![ui_drop()]),
+    ("rustle_1", || vec![rustle(1)]),
+    ("rustle_2", || vec![rustle(2)]),
+    ("rustle_3", || vec![rustle(3)]),
+    ("pluck", || vec![gathered()]),
+    ("chime", || vec![chime()]),
+    ("bell", || vec![bell()]),
+    ("bird_1", || vec![bird(1)]),
+    ("bird_2", || vec![bird(2)]),
+    ("bird_3", || vec![bird(3)]),
+    ("bird_4", || vec![bird(4)]),
 ];
 
-/// Write every sound into `dir` unless they're there already at this
-/// [`VERSION`]. About half a second in a release build, longer the
-/// first time.
-pub fn ensure(dir: &Path) -> io::Result<bool> {
-    let stamp = dir.join(STAMP);
-    let current = fs::read_to_string(&stamp).ok().and_then(|s| s.trim().parse().ok());
-    let all_there = RECIPES.iter().all(|(file, _)| dir.join(file).is_file());
-    if current == Some(VERSION) && all_there {
-        return Ok(false);
-    }
-    fs::create_dir_all(dir)?;
-    // One thread each: a fresh file can take a while to close on Windows
-    // (scanned, as any new file is), and the recipes don't share anything.
+/// Make every sound, a thread each (the recipes share nothing).
+pub fn make_all() -> Vec<(&'static str, Channels)> {
     std::thread::scope(|s| {
-        let writes: Vec<_> = RECIPES
+        let made: Vec<_> = RECIPES
             .iter()
-            .map(|(file, make)| s.spawn(move || write_wav(&dir.join(file), &make())))
+            .map(|(name, make)| (*name, s.spawn(make)))
             .collect();
-        writes
-            .into_iter()
-            .try_for_each(|w| w.join().unwrap_or_else(|_| Err(io::Error::other("a recipe panicked"))))
-    })?;
-    fs::write(stamp, VERSION.to_string())?;
-    Ok(true)
+        made.into_iter()
+            .filter_map(|(name, m)| match m.join() {
+                Ok(channels) => Some((name, channels)),
+                Err(_) => {
+                    tracing::warn!("sound: the {name} recipe panicked");
+                    None
+                }
+            })
+            .collect()
+    })
+}
+
+/// Write every sound into `dir` as `<name>.wav` (`--write-sounds`).
+pub fn write_all(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    for (name, channels) in make_all() {
+        write_wav(&dir.join(format!("{name}.wav")), &channels)?;
+    }
+    Ok(())
 }
 
 /// 16-bit PCM WAV, channels interleaved.
@@ -544,18 +545,15 @@ mod tests {
     }
 
     #[test]
-    fn ensure_writes_once_per_version() {
+    fn write_all_writes_every_sound_as_a_wav() {
         let dir = std::env::temp_dir().join(format!("capitol-sounds-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        assert!(ensure(&dir).unwrap());
-        assert!(!ensure(&dir).unwrap(), "already written");
-        let wav = fs::read(dir.join("ui_click.wav")).unwrap();
-        assert_eq!(&wav[..4], b"RIFF");
-        assert_eq!(&wav[8..16], b"WAVEfmt ");
-        fs::remove_file(dir.join("bell.wav")).unwrap();
-        assert!(ensure(&dir).unwrap(), "a missing file is written again");
-        fs::write(dir.join(STAMP), "0").unwrap();
-        assert!(ensure(&dir).unwrap(), "an old version is written again");
+        write_all(&dir).unwrap();
+        for (name, _) in RECIPES {
+            let wav = fs::read(dir.join(format!("{name}.wav"))).unwrap();
+            assert_eq!(&wav[..4], b"RIFF", "{name}");
+            assert_eq!(&wav[8..16], b"WAVEfmt ", "{name}");
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }

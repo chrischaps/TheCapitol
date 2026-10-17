@@ -838,9 +838,9 @@ impl PlayerExtension for CapitolExtension {
     }
 }
 
-/// What you hear (P8.1): ease the beds toward where you are, and fire
-/// `sound` at `audio.rhai` for each one-shot due. The ears are on you, or
-/// offline on the point the camera looks at.
+/// What you hear (P8.1): ease the beds toward where you are, and play
+/// each one-shot due. The ears are on you, or offline on the point the
+/// camera looks at.
 fn listen(ctx: &mut ExtensionCtx, shared: &script_api::Shared, sound: &mut Soundscape) {
     let cam = ctx.camera;
     let focus = shared
@@ -870,11 +870,8 @@ fn listen(ctx: &mut ExtensionCtx, shared: &script_api::Shared, sound: &mut Sound
         })
         .unwrap_or_default();
     let dt = ctx.clock.delta_time.min(0.1) as f32;
-    for cue in sound.update(ears, &working, dt) {
-        tracing::debug!("sound: {} at {:.2}", cue.sound, cue.volume);
-        ctx.fire_event("sound", cue.data());
-    }
-    sound.apply(ctx);
+    let cues = sound.update(ears, &working, dt);
+    sound.apply(ctx, &cues);
 }
 
 /// Click to move (P4.3): send the walk a script asked for (`cap_move`),

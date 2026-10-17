@@ -120,24 +120,6 @@ impl Default for Volumes {
     }
 }
 
-impl Volumes {
-    /// What a bed's level is multiplied by.
-    pub fn ambience_gain(&self) -> f32 {
-        self.master * self.ambience
-    }
-
-    /// What a one-shot's level is multiplied by: an interface sound's, or
-    /// the world's.
-    pub fn effect_gain(&self, interface: bool) -> f32 {
-        self.master
-            * if interface {
-                self.interface
-            } else {
-                self.effects
-            }
-    }
-}
-
 /// How the camera rig answers you.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -398,18 +380,5 @@ mod tests {
         assert!(file.settings.camera.invert_orbit);
         drop(file);
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn gains_multiply_through_master() {
-        let v = Volumes {
-            master: 0.5,
-            ambience: 0.5,
-            effects: 1.0,
-            interface: 0.0,
-        };
-        assert_eq!(v.ambience_gain(), 0.25);
-        assert_eq!(v.effect_gain(false), 0.5);
-        assert_eq!(v.effect_gain(true), 0.0);
     }
 }

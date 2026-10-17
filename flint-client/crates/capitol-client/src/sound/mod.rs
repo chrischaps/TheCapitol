@@ -1,7 +1,7 @@
-//! What you hear (P8.1). The sounds are made in [`library`] and written to
-//! `audio/` at start. [`Soundscape`] plays them: four looping beds whose
-//! levels follow where you are, and one-shots it fires at `audio.rhai` as
-//! `sound` events.
+//! What you hear (P8.1). The sounds are made in [`library`] at start, off
+//! the main thread, and handed to Flint from memory (`ctx.audio`, Flint
+//! ADR 0084). [`Soundscape`] plays them: four looping beds whose levels
+//! follow where you are, and one-shots it plays itself.
 //!
 //! **The beds** are `audio_source` entities on the music bus, spawned once
 //! and never stopped; only their `volume` moves. [`mix`] sets it from how
@@ -18,22 +18,28 @@
 //! swells, and their levels ease toward the mix over about a second so a
 //! jump (a zoom, a sign-in) settles rather than snaps.
 //!
-//! **One-shots** go through the script because the extension can't reach
-//! Flint's audio engine: `audio.rhai` plays each `sound` event. A
-//! workaround: issue #93 gives extensions the engine. Something
+//! **The volumes** (P8.4) are Flint's buses: the beds are on the music bus,
+//! set to master × ambience, and the one-shots on the sfx bus, set to
+//! master, each scaled by the effects or interface level.
+//!
+//! **One-shots** are played straight from `pre_update`. Something
 //! in the world (a bird, a rustle) is placed a few metres from the camera
 //! in its true direction, so it pans, and the soundscape sets its level
 //! from its true distance. Flint's spatial falloff ends at 25 m, and the
 //! street camera stands 32 m off, so placing them where they are would
-//! silence them all. A workaround: issue #94 lets a script set the falloff.
+//! silence them all. A workaround from issue #94: since Flint ADR 0084 the
+//! extension can set a placed sound's falloff (`SoundOptions::distances`),
+//! so the sounds could stand where they are, once someone tunes the curve
+//! by ear.
 
 pub mod dsp;
 pub mod library;
 
 use crate::settings::Volumes;
 use dsp::{smoothstep, Rng};
-use flint_core::EntityId;
-use flint_player::ExtensionCtx;
+use flint_core::{EntityId, Vec3};
+use flint_player::{Bus, ExtensionCtx, SoundOptions};
+use std::thread::JoinHandle;
 
 /// Overall level of the beds, and of the one-shots.
 const AMBIENCE: f32 = 0.8;
@@ -41,10 +47,10 @@ const EFFECTS: f32 = 1.0;
 
 /// Each bed's level at full weight, by ear.
 const BEDS: [(&str, &str, f32); 4] = [
-    ("ambience_city", "audio/amb_city.wav", 0.55),
-    ("ambience_breeze", "audio/amb_breeze.wav", 0.50),
-    ("ambience_wind", "audio/amb_wind.wav", 0.50),
-    ("ambience_water", "audio/amb_water.wav", 0.45),
+    ("ambience_city", "amb_city", 0.55),
+    ("ambience_breeze", "amb_breeze", 0.50),
+    ("ambience_wind", "amb_wind", 0.50),
+    ("ambience_water", "amb_water", 0.45),
 ];
 
 /// How fast a bed's level follows the mix: a time constant, seconds.
@@ -98,10 +104,10 @@ pub fn mix(r: f32, shore: f32, height: f32) -> Mix {
     }
 }
 
-/// A sound for `audio.rhai` to play.
+/// A one-shot to play.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cue {
-    /// As Flint preloaded it: `audio/<file>`.
+    /// Its name in [`library::RECIPES`].
     pub sound: String,
     pub volume: f32,
     /// Where to play it, world metres, or `None` for no place at all.
@@ -114,7 +120,7 @@ pub struct Cue {
 impl Cue {
     fn flat(sound: &str, volume: f32) -> Self {
         Self {
-            sound: format!("audio/{sound}.wav"),
+            sound: sound.to_owned(),
             volume: volume * EFFECTS,
             at: None,
             pitch: 1.0,
@@ -129,18 +135,16 @@ impl Cue {
         }
     }
 
-    /// The `sound` event's data.
-    pub fn data(&self) -> toml::Table {
-        let mut t = toml::Table::new();
-        t.insert("name".into(), self.sound.clone().into());
-        t.insert("volume".into(), (self.volume as f64).into());
-        t.insert("pitch".into(), (self.pitch as f64).into());
-        t.insert("placed".into(), self.at.is_some().into());
-        let [x, y, z] = self.at.unwrap_or_default();
-        t.insert("x".into(), (x as f64).into());
-        t.insert("y".into(), (y as f64).into());
-        t.insert("z".into(), (z as f64).into());
-        t
+    /// How Flint plays it: on the sfx bus, placed or flat.
+    pub fn options(&self) -> SoundOptions {
+        let o = SoundOptions::new()
+            .volume(self.volume as f64)
+            .pitch(self.pitch as f64)
+            .bus(Bus::Sfx);
+        match self.at {
+            Some([x, y, z]) => o.at(Vec3::new(x, y, z)),
+            None => o,
+        }
     }
 }
 
@@ -167,10 +171,14 @@ pub struct Rustling {
 
 pub struct Soundscape {
     muted: bool,
-    /// The player's volumes (P8.4). Flint's buses would be the place, but
-    /// extensions can't reach them (issue #93), so the soundscape scales
-    /// what it plays itself.
+    /// The player's volumes (P8.4), and what the buses were last set to.
     volumes: Volumes,
+    buses: Option<(f64, f64)>,
+    /// The library being made, from the first `apply`; `None` once it's
+    /// handed to Flint.
+    making: Option<JoinHandle<Vec<(&'static str, library::Channels)>>>,
+    /// The library is in Flint's cache, so the soundscape can play.
+    loaded: bool,
     /// The bed entities, spawned on the first update.
     beds: Option<[EntityId; 4]>,
     /// Each bed's level now, easing toward the mix.
@@ -196,6 +204,9 @@ impl Soundscape {
         Self {
             muted,
             volumes: Volumes::default(),
+            buses: None,
+            making: None,
+            loaded: false,
             beds: None,
             levels: [0.0; 4],
             written: [-1.0; 4],
@@ -218,8 +229,7 @@ impl Soundscape {
             .collect();
     }
 
-    /// Set the player's volumes. The beds ease to them; one-shots take
-    /// them from the next.
+    /// Set the player's volumes: the buses take them on the next `apply`.
     pub fn set_volumes(&mut self, volumes: Volumes) {
         self.volumes = volumes;
     }
@@ -257,7 +267,8 @@ impl Soundscape {
 
     /// Advance by `dt` seconds: move the beds toward the mix for `ears`,
     /// and decide which birds, rustles and bells sound. Returns the cues
-    /// for `audio.rhai`, the UI's and the game's among them.
+    /// to play, the UI's and the game's among them, scaled by the effects
+    /// or interface volume (master is the sfx bus's).
     pub fn update(&mut self, ears: Ears, working: &[Rustling], dt: f32) -> Vec<Cue> {
         self.now += dt as f64;
         let [sx, sy] = crate::coords::to_server(ears.focus[0], ears.focus[1]);
@@ -277,7 +288,7 @@ impl Soundscape {
             let target = if self.muted {
                 0.0
             } else {
-                self.mix.bed(i) * BEDS[i].2 * AMBIENCE * self.volumes.ambience_gain()
+                self.mix.bed(i) * BEDS[i].2 * AMBIENCE
             };
             *level += (target - *level) * k;
         }
@@ -289,14 +300,41 @@ impl Soundscape {
         let volumes = self.volumes;
         let mut cues = std::mem::take(&mut self.cues);
         for c in &mut cues {
-            c.volume *= volumes.effect_gain(c.interface);
+            c.volume *= if c.interface {
+                volumes.interface
+            } else {
+                volumes.effects
+            };
         }
         cues.retain(|c| c.volume > 0.0);
         cues
     }
 
-    /// Spawn the beds once, then write any level that has moved.
-    pub fn apply(&mut self, ctx: &mut ExtensionCtx) {
+    /// The music and sfx buses' volumes for the player's settings.
+    pub fn bus_volumes(&self) -> (f64, f64) {
+        let v = self.volumes;
+        ((v.master * v.ambience) as f64, v.master as f64)
+    }
+
+    /// Hand the library to Flint once it's made, set the buses, play
+    /// `cues`, spawn the beds once, then write any level that has moved.
+    /// Until the library is in, nothing plays.
+    pub fn apply(&mut self, ctx: &mut ExtensionCtx, cues: &[Cue]) {
+        if self.muted || !self.load(ctx) {
+            return;
+        }
+        let buses = self.bus_volumes();
+        if self.buses != Some(buses) {
+            ctx.audio.set_bus_volume(Bus::Music, buses.0);
+            ctx.audio.set_bus_volume(Bus::Sfx, buses.1);
+            self.buses = Some(buses);
+        }
+        for cue in cues {
+            tracing::debug!("sound: {} at {:.2}", cue.sound, cue.volume);
+            if let Err(e) = ctx.audio.play(&cue.sound, &cue.options()) {
+                tracing::warn!("sound: {e:?}");
+            }
+        }
         let beds = match self.beds {
             Some(b) => b,
             None => {
@@ -333,6 +371,33 @@ impl Soundscape {
             let _ = ctx.world.merge_component(*id, "audio_source", t.into());
             self.written[i] = v;
         }
+    }
+
+    /// Start making the library on the first call, and load it into
+    /// Flint's cache once it's made. Returns whether it's loaded.
+    fn load(&mut self, ctx: &mut ExtensionCtx) -> bool {
+        if self.loaded {
+            return true;
+        }
+        let making = self
+            .making
+            .get_or_insert_with(|| std::thread::spawn(library::make_all));
+        if !making.is_finished() {
+            return false;
+        }
+        let Some(making) = self.making.take() else {
+            return false;
+        };
+        let started = std::time::Instant::now();
+        for (name, channels) in making.join().unwrap_or_default() {
+            let channels: Vec<&[f32]> = channels.iter().map(Vec::as_slice).collect();
+            if let Err(e) = ctx.audio.load_samples(name, dsp::SR, &channels) {
+                tracing::warn!("sound: {name}: {e:?}");
+            }
+        }
+        tracing::info!("sound: the library is in, {} ms", started.elapsed().as_millis());
+        self.loaded = true;
+        true
     }
 
     /// Put a sound heard at `src` a few metres from the camera in its
@@ -375,7 +440,7 @@ impl Soundscape {
         let volume = 0.45 * w * near * self.rng.range(0.55, 1.0);
         let pitch = self.rng.range(0.9, 1.12);
         self.cue(Cue {
-            sound: format!("audio/bird_{which}.wav"),
+            sound: format!("bird_{which}"),
             volume: volume * EFFECTS,
             at: Some(at),
             pitch,
@@ -421,7 +486,7 @@ impl Soundscape {
             let which = 1 + (self.rng.unit() * 3.0) as usize % 3;
             let pitch = self.rng.range(0.9, 1.1);
             self.cue(Cue {
-                sound: format!("audio/rustle_{which}.wav"),
+                sound: format!("rustle_{which}"),
                 volume: volume * EFFECTS,
                 at: Some(at),
                 pitch,
@@ -509,7 +574,7 @@ mod tests {
     fn birds_sing_in_the_suburbs_and_not_at_the_core() {
         let mut s = Soundscape::new(false);
         let cues = run(&mut s, ears_at(zone_middle(Zone::Suburban)), &[], 60.0);
-        assert!(sounds(&cues, "audio/bird_") >= 10, "{}", sounds(&cues, "audio/bird_"));
+        assert!(sounds(&cues, "bird_") >= 10, "{}", sounds(&cues, "bird_"));
         // Every bird is placed near the camera, so Flint pans it.
         for c in cues.iter().filter(|c| c.sound.contains("bird")) {
             let [x, y, z] = c.at.unwrap();
@@ -519,7 +584,7 @@ mod tests {
         }
         let mut s = Soundscape::new(false);
         let cues = run(&mut s, ears_at(100.0), &[], 60.0);
-        assert_eq!(sounds(&cues, "audio/bird_"), 0);
+        assert_eq!(sounds(&cues, "bird_"), 0);
     }
 
     #[test]
@@ -543,7 +608,7 @@ mod tests {
         let loudest_theirs = rustles.iter().filter(|c| c.volume < 0.3).count();
         assert!(loudest_theirs > 0 && loudest_theirs < rustles.len());
         // Stopped working, it stops.
-        assert_eq!(sounds(&run(&mut s, ears, &[], 3.0), "audio/rustle"), 0);
+        assert_eq!(sounds(&run(&mut s, ears, &[], 3.0), "rustle"), 0);
     }
 
     #[test]
@@ -569,21 +634,31 @@ mod tests {
         s.click();
         s.gathered();
         let cues = run(&mut s, ears_at(2000.0), &[], 10.0);
-        assert_eq!(sounds(&cues, "audio/ui_click"), 0, "the interface is silent");
-        let pluck = cues.iter().find(|c| c.sound == "audio/pluck.wav").unwrap();
-        assert!((pluck.volume - 0.5 * 0.5 * EFFECTS).abs() < 1e-6);
-        assert_eq!(s.levels, [0.0; 4], "no ambience");
+        assert_eq!(sounds(&cues, "ui_click"), 0, "the interface is silent");
+        let pluck = cues.iter().find(|c| c.sound == "pluck").unwrap();
+        assert!((pluck.volume - 0.5 * EFFECTS).abs() < 1e-6, "master is the bus's");
+        assert_eq!(s.bus_volumes(), (0.0, 0.5), "no ambience; master on the sfx bus");
+        assert!(s.levels[1] > 0.1, "the beds follow the mix; the bus silences them");
     }
 
     #[test]
-    fn a_cue_reaches_the_script_as_floats() {
+    fn a_cue_plays_on_the_sfx_bus_flat_or_placed() {
         let mut s = Soundscape::new(false);
         s.click();
         let cues = s.update(ears_at(100.0), &[], 0.016);
-        let data = cues.iter().find(|c| c.sound == "audio/ui_click.wav").unwrap().data();
-        assert_eq!(data["name"].as_str(), Some("audio/ui_click.wav"));
-        assert!(data["volume"].is_float() && data["x"].is_float());
-        assert_eq!(data["placed"].as_bool(), Some(false));
+        let click = cues.iter().find(|c| c.sound == "ui_click").unwrap().options();
+        assert_eq!((click.bus, click.at), (Bus::Sfx, None));
+        assert!((click.volume - 0.35).abs() < 1e-6);
+        let bird = Cue {
+            sound: "bird_1".into(),
+            volume: 0.2,
+            at: Some([1.0, 2.0, 3.0]),
+            pitch: 1.1,
+            interface: false,
+        }
+        .options();
+        assert_eq!(bird.at, Some(Vec3::new(1.0, 2.0, 3.0)));
+        assert!((bird.pitch - 1.1).abs() < 1e-6);
     }
 
     #[test]
@@ -598,16 +673,13 @@ mod tests {
         let mine = Rustling { id: "a".into(), at: ears.focus, mine: true };
         let mut cues = run(&mut s, ears, &[mine], 120.0);
         cues.extend(run(&mut s, ears_at(100.0), &[], 300.0));
-        let files: Vec<String> = library::RECIPES
-            .iter()
-            .map(|(f, _)| format!("audio/{f}"))
-            .collect();
+        let files: Vec<String> = library::RECIPES.iter().map(|(f, _)| f.to_string()).collect();
         for c in &cues {
             assert!(files.contains(&c.sound), "{}", c.sound);
         }
         for (_, file, _) in BEDS {
             assert!(files.iter().any(|f| f == file), "{file}");
         }
-        assert!(sounds(&cues, "audio/bell") >= 2, "the deed, and the tower now and then");
+        assert!(sounds(&cues, "bell") >= 2, "the deed, and the tower now and then");
     }
 }
