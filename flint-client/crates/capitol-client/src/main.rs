@@ -92,7 +92,7 @@ struct Args {
     /// Exit once game time reaches this many seconds
     #[arg(long, value_name = "SECS")]
     exit_after: Option<f64>,
-    /// Timed key input (flint-player's input-script format). It can tap
+    /// Timed key and mouse input (flint-player's input-script format). It can tap
     /// the debug keys too: `2.0 tap F2` opens the stats overlay
     #[arg(long, value_name = "FILE")]
     input_script: Option<String>,
