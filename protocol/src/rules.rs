@@ -20,12 +20,14 @@ pub const CENTER_X: f64 = 4000.0;
 /// World centre Y.
 pub const CENTER_Y: f64 = 4000.0;
 
-/// Where new players arrive: on the south arterial, just inside the rural zone's
-/// outer edge. The road runs straight north to the moat's one bridge, so the
-/// first thing a player sees is the way in, with the tower at the end of it.
+/// Where new players arrive: on the south arterial, out in the rural zone. The
+/// road runs straight north to the moat's one bridge, so the first thing a
+/// player sees is the way in, with the tower at the end of it.
 pub const SPAWN_X: f64 = CENTER_X;
-/// Spawn Y: 50 inside the rural zone's outer edge, south of the centre.
-pub const SPAWN_Y: f64 = CENTER_Y + RURAL_OUTER_RADIUS - 50.0;
+/// Spawn Y: 3350 south of the centre, 350 past the suburb's outer edge. It
+/// stayed put when the suburb deepened (#117), so it no longer tracks the
+/// rural zone's outer edge.
+pub const SPAWN_Y: f64 = CENTER_Y + 3350.0;
 /// New players land up to this far either side of `SPAWN_X`, so a crowd of
 /// arrivals doesn't stack on one point. It keeps them on the 60-wide arterial.
 pub const SPAWN_SCATTER: f64 = 20.0;
@@ -137,11 +139,12 @@ pub const TRADE_OUTER_RADIUS: f64 = 600.0;
 /// Outer radius of the Guild District.
 pub const GUILD_OUTER_RADIUS: f64 = 1000.0;
 /// Outer radius of the Urban zone.
-pub const URBAN_OUTER_RADIUS: f64 = 1600.0;
-/// Outer radius of the Suburban zone.
-pub const SUBURBAN_OUTER_RADIUS: f64 = 2400.0;
+pub const URBAN_OUTER_RADIUS: f64 = 1800.0;
+/// Outer radius of the Suburban zone. The suburb is 1200 deep so that a
+/// neighbourhood fits 5 rows of streets. At 800 deep every one was 3 rows (#117).
+pub const SUBURBAN_OUTER_RADIUS: f64 = 3000.0;
 /// Outer radius of the Rural zone.
-pub const RURAL_OUTER_RADIUS: f64 = 3400.0;
+pub const RURAL_OUTER_RADIUS: f64 = 3800.0;
 /// Outer radius of the Wilderness: the edge of the world disc.
 pub const WILDERNESS_OUTER_RADIUS: f64 = WORLD_SIZE / 2.0;
 

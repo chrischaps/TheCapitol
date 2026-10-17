@@ -275,7 +275,7 @@ Moats and canals are water barriers. Players can only cross at bridges. Movement
 
 ### Suburban Road Generation
 
-The suburban zone (radius 1600-2400) uses procedural road generation in `terrain.rs`:
+The suburban zone (radius 1800-3000 since #117; the radii live in `protocol/src/rules.rs`) uses procedural road generation in `terrain.rs`:
 
 **Road hierarchy**: Arterials (8 radial spokes) → Collectors (curved roads between arterials) → Local streets (cul-de-sacs, loops, P-shaped)
 

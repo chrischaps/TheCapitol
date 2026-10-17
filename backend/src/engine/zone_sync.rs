@@ -74,6 +74,11 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
     async fn the_zones_table_follows_the_protocol(db: PgPool) {
+        // The migrations' radii are history (#117 moved four zones), so the
+        // first sync rewrites whatever differs.
+        sync_zone_radii(&db).await.unwrap();
+        assert_eq!(radii(&db).await, expected());
+
         sqlx::query("UPDATE zones SET inner_radius = 1, outer_radius = 2 WHERE id = 'suburban'")
             .execute(&db)
             .await

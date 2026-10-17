@@ -256,8 +256,9 @@ impl Default for WorldGenParams {
             trade_ring_radius: 400.0,
             trade_ring_width: 30.0,
             arterial_width: 60.0,
-            // The arterials run 400 into the wilderness.
-            arterial_end_radius: rules::RURAL_OUTER_RADIUS + 400.0,
+            // The arterials run out to where the wilderness starts. That is
+            // 3800, where they ended before the suburb deepened (#117).
+            arterial_end_radius: rules::RURAL_OUTER_RADIUS,
             urban_radial_spacing: 100.0,
             urban_spoke_count: 48,
             urban_street_width: 16.0,
@@ -3246,7 +3247,8 @@ mod tests {
     #[test]
     fn legacy_default_terrain_version_is_pinned() {
         assert_eq!(WorldGenParams::default().suburban.layout, SuburbLayout::Legacy);
-        assert_eq!(TerrainConfig::get_default().version(), "6006800ab79fbff8");
+        // Moved on purpose by #117, which deepened the suburb to 1800–3000.
+        assert_eq!(TerrainConfig::get_default().version(), "2f18343910f69960");
     }
 
     /// Saved `world_config` rows and admin PUTs from before #105 have no

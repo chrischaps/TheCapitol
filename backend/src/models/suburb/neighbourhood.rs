@@ -2,8 +2,8 @@
 //!
 //! - **Sectors.** Each 45° sector between two arterials is one neighbourhood,
 //!   or two when a seeded draw splits it by angle along a mid-angle greenway.
-//!   A split never goes by radius: 800 deep halves to about 375, which fits
-//!   one street and wastes the rest.
+//!   A split never goes by radius. Each half pays the warp margins again, so
+//!   at 1200 deep the halves fit 2 rows each, where the whole band fits 5.
 //! - **Frames.** Each neighbourhood gets a `Frame` between its side lines,
 //!   inset from the arterial by half its width plus the buffer, or from the
 //!   greenway's centre line by half the greenway.
@@ -380,6 +380,25 @@ mod tests {
         }
         let splits = |seed| neighbourhoods(&params(seed), C).len() - 8;
         assert!((0..20).map(splits).any(|s| s > 0) && (0..20).map(splits).any(|s| s < 8), "the split is a draw");
+    }
+
+    /// At the default radii the suburb is 1200 deep, so every neighbourhood,
+    /// whole or a split half, fits 5 rows. At 800 deep they were all 3 (#117).
+    /// The narrower inner arc at 1800 still lets every drawn split stand.
+    #[test]
+    fn every_neighbourhood_fits_five_rows_and_every_split_stands() {
+        for seed in 0..50 {
+            let p = params(seed);
+            let all = neighbourhoods(&p, C);
+            for n in &all {
+                let rows = n.frame.fit.as_ref().map_or(0, |f| f.rows.len());
+                assert_eq!(rows, 5, "seed {seed} sector {} nbhd {}", n.sector, n.index);
+            }
+            let drawn = (0..8u64)
+                .filter(|&s| SplitMix64::stream(p.seed, &[s]).next_f64() < p.neighbourhood.split_chance)
+                .count();
+            assert_eq!(all.len() - 8, drawn, "seed {seed}: a drawn split didn't fit");
+        }
     }
 
     #[test]

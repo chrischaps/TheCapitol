@@ -229,15 +229,15 @@ mod tests {
     #[test]
     fn rows_keep_their_spacing_and_the_band_stays_in_the_zone() {
         let f = frame(2.0, 5);
-        let fit = f.fit.as_ref().expect("an 800 band fits rows");
-        // 800 less a 30 warp each side is 740: three rows, lots about 115 deep.
-        assert_eq!(fit.rows.len(), 3);
-        assert!((fit.lot_depth - (740.0 - 48.0) / 6.0).abs() < 1e-9);
+        let fit = f.fit.as_ref().expect("a 1200 band fits rows");
+        // 1200 less a 30 warp each side is 1140: five rows, lots 106 deep (#117).
+        assert_eq!(fit.rows.len(), 5);
+        assert!((fit.lot_depth - (1140.0 - 80.0) / 10.0).abs() < 1e-9);
         let r = |p: P| (p.0 - C.0).hypot(p.1 - C.1);
         for i in 0..=40 {
             let u = f.width * i as f64 / 40.0;
             let gap = r(f.to_world(u, fit.rows[1])) - r(f.to_world(u, fit.rows[0]));
-            assert!((gap - 740.0 / 3.0).abs() < 1e-6, "radial spacing at u {u} is {gap}");
+            assert!((gap - 1140.0 / 5.0).abs() < 1e-6, "radial spacing at u {u} is {gap}");
             assert!(r(f.to_world(u, 0.0)) >= INNER - 1e-9 && r(f.to_world(u, f.depth)) <= OUTER + 1e-9);
         }
     }

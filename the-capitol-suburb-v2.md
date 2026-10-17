@@ -2,7 +2,7 @@
 
 *Plan, 2026-10-17. Tracking issue #103; work packages #104 to #113.*
 
-The suburb (annulus r 1600–2400, cut by 8 arterials) is to be rebuilt as post-war neighbourhoods. This doc is the "Read first" for every `suburb-v2` issue. Keep it true: if a decision changes, update it in the same commit.
+The suburb (annulus r 1800–3000 since #117, 1600–2400 before; cut by 8 arterials) is to be rebuilt as post-war neighbourhoods. This doc is the "Read first" for every `suburb-v2` issue. Keep it true: if a decision changes, update it in the same commit.
 
 ## 1. Why
 
@@ -65,10 +65,33 @@ Post-war suburbs look different:
 - **A mix of patterns, one per neighbourhood:** warped parallels, loops and lollipops, and central loop.
 - **Harness first, then work packages behind a switch:** `SuburbanGenParams::layout`, `Legacy` (default) or `Neighbourhood`, until the flip in #112.
 
+### Deeper suburb: 1800–3000 (#117, 2026-10-17)
+At 1600–2400 every neighbourhood frame was 740 deep, so every one fitted exactly 3 rows on every seed, and pattern (a) could only vary its row ends. Chris: "all the neighbourhoods are just slight variants of the same 3 rows with some switchbacks". The suburb is now **1800–3000**, measured with the plan report's radius overrides:
+
+| suburb | depth | rows | lot depth |
+|---|---|---|---|
+| 1600–2400 (before) | 740 | 3 | 115 |
+| 2000–2800 (moved out only) | 740 | 3 | 115 |
+| **1800–3000** | 1140 | **5** | 106 |
+| 2000–3200 | 1140 | 5 | 106 |
+| 1600–3000 | 1340 | 6 | 104 |
+
+- Depth is what counts. Moving the zone outward without deepening it changes nothing.
+- At 5 rows, the same end-picker makes racetracks, nested U-turns, combs of cul-de-sacs and mixed ends.
+- 1800–3000 keeps the 8000 world, so no centre or saved position moves. The zones are now urban 1000–1800, suburban 1800–3000, rural 3000–3800 and wilderness 3800–4000. 2000–3200 would have squeezed the rural zone to 600.
+- Spawn stays at 3350 south of the centre, and the arterials still end at 3800, now where the wilderness starts. So `SPAWN_Y` and `arterial_end_radius` no longer track the rural edge.
+- At seeds 42, 7, 1234 and 99999 (pattern (a)): audit clean, no 4-ways, junctions ≥ 72.6°, T spacing ≥ 158 (p10 ≥ 180), stems ≤ 290, parallel spacing median 227, p5 ≥ 221.
+- **What moved with the default world:**
+  - the Legacy pin;
+  - 31 seeded grass nodes, by migration `20261018_001_deeper_suburb_nodes.sql`. The 16 that fell in the grown urban zone stepped out along their radius into the suburb, and the rest moved off the new roads;
+  - the urban grid and rural trails, which regenerate at the new radii.
+- **Owned plots:** the dev DB had no owned suburban lots. Its one owned rural plot lost its lot and is kept as it was, but two new rural lots overlap it (#119).
+- `suburb-plan.ps1 -Inner -Outer` (env `SUBURB_INNER`, `SUBURB_OUTER`) draws the plan at other radii.
+
 ## 4. Approach
 
 ### 4.1 Neighbourhoods and frames
-1. **Neighbourhoods.** Each 45° sector between arterials is a neighbourhood. A seeded choice may split it by angle along a mid-angle greenway. A radial split is not used: 800 deep halves to about 375, which fits one street and wastes the rest.
+1. **Neighbourhoods.** Each 45° sector between arterials is a neighbourhood. A seeded choice may split it by angle along a mid-angle greenway. A radial split is not used: each half pays the warp margins again. At 800 deep a half fitted one street. At 1200 deep (#117) the halves fit 2 rows each, where the whole band fits 5.
    - *As built (#106):* the sector's own stream, `stream(seed, [sector])`, draws the split, with probability `split_chance` (0.5). The greenway is `greenway_width` (40) wide, and each half's side line is inset half of that from its centre line. A split stands only if both halves fit rows and are at least two street spacings (2·(2·110+16)) across at the inner edge. Otherwise the sector stays whole. At the default radii every split fits.
 2. **Frame.** Each neighbourhood gets a smooth frame `F(u,v) → world`:
    - v is radial depth.
@@ -77,12 +100,12 @@ Post-war suburbs look different:
    - Optional: rotate the frame so rows run radially, for the quadrant look of the aerial photo. *Not built in #106; left to #111 if the images want it.*
    - *As built (#106, `suburb/frame.rs`):*
      - u is in world units: `u = t·U`, where t runs 0 to 1 between the side lines at a given radius, and U is the frame's width at mid-depth. So λ means the same in every neighbourhood.
-     - The base band is inset by A from each zone edge. v = 0 is r = inner + A before the warp, and depth D = 800 − 2A, which is 740 at A = 30. The warped back lines (v = 0 and v = D) then stay inside the annulus and touch its edges only at the warp's crests.
+     - The base band is inset by A from each zone edge. v = 0 is r = inner + A before the warp, and depth D = 1200 − 2A, which is 1140 at A = 30 (it was 800 − 2A = 740 before #117). The warped back lines (v = 0 and v = D) then stay inside the annulus and touch its edges only at the warp's crests.
      - The leftover between a back line and the zone edge is an *edge strip*, a `Buffer` of kind `Edge`. #108 and #111 may give it lots or a path.
      - F and its inverse are closed forms: `r = base + v + w(u)` and `θ = θ_lo(r) + t·(θ_hi(r) − θ_lo(r))`.
      - The phase φ is the first draw from the neighbourhood's stream.
 3. **Streets are iso-lines of the frame.** Offsetting a curvy spine was considered and dropped: it gets cusps wherever the curve's radius is under the offset distance, and clipping it leaves slivers. Tensor-field streamlines were also dropped: too much machinery for 16 neighbourhoods. Iso-lines need neither, and their junctions come out near 90°.
-4. **Row fit.** Fit the row count to the band: `d = (W − n·w)/2n` must fall in [95,130]. For W = 800, n = 3 gives d ≈ 125.
+4. **Row fit.** Fit the row count to the band: `d = (W − n·w)/2n` must fall in [95,130]. For W = 1140, n = 5 gives d = 106. At the old W = 740, only n = 3 fitted (d = 115); n = 4 gives 85, too shallow.
 5. **Building blocks:**
    - row (iso-v), rail (iso-u);
    - U-turn (radius S/2);
@@ -160,14 +183,14 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - `NeighbourhoodParams` (`#[serde(default)]` on the struct, so a partial object loads): `lot_frontage` 60, `lot_depth` 110 (`lot_depth_min` 95, `lot_depth_max` 130), `local_width` 16, `collector_width` 20, `buffer` 20, `split_chance` 0.5, `greenway_width` 40 (both added in #106), `link_spacing` (L) 400, `bulb_radius` 13, `cul_de_sac_max` 300, `warp_amplitude` (A) 30, `warp_wavelength` (λ) 1600, `pattern_weights` (1 each), and `force_pattern` for tests. Tune A and λ in #111.
   - **One resolved set of radii:** `WorldGenParams::suburban_params()` takes the radii, seed and arterial width from the world. Roads and lots both read it, and `suburban.inner_radius`, `outer_radius` and `seed` have no effect. Before #105 the lots read `suburban`'s own radii. For the default world the two sets agreed, so the pin didn't move.
   - **One table of zone radii (#116):** the radii are named consts in `protocol/src/rules.rs` (`URBAN_OUTER_RADIUS`, `SUBURBAN_OUTER_RADIUS` and so on, collected in `ZONE_OUTER_RADII`). `Zone::radii()`, `WorldGenParams::default()`, `SPAWN_Y` and `arterial_end_radius` all derive from them. The server writes them into the DB `zones` table on startup (`engine::zone_sync`), and the React client draws its zone rings from `/bureaucracy/zones` and takes the admin form's defaults from `GET /admin/world-params/default`. Moving a zone edge is a one-line change, with no migration. An admin regenerate that changes the radii moves only the generator; zone classification still reads the table (#118).
-  - **Pin:** `legacy_default_terrain_version_is_pinned` holds `get_default().version()` at `6006800ab79fbff8`.
+  - **Pin:** `legacy_default_terrain_version_is_pinned` holds `get_default().version()` at `2f18343910f69960` (moved on purpose by #117; `6006800ab79fbff8` before).
   - **React:** the Suburban section of `WorldTweakPanel` has a Layout select. `neighbourhood` is optional in `api/admin.ts`, so a reset leaves it to the server's defaults.
 
 ### 4.4 Harness and targets
 - **Report test:** `#[ignore]` test `suburb::render::tests::suburb_plan_report`. Env: `SUBURB_SEEDS`, `SUBURB_LAYOUT`, `SUBURB_SECTOR`, `SUBURB_OUT` (default `target/suburb-plan/`).
 - **Outputs:** an SVG per layout and seed, metrics JSON, an `index.html` grid and a markdown table.
 - **PNG:** `backend/tools/suburb-plan.ps1` runs the test in release and converts each SVG with headless Chrome. Look at the PNGs beside `reference/`.
-- **Script options:** `-Seeds`, `-Layout`, `-Sector n` and `-Out`. `-Compare <dir>` writes `compare.html`, with each plan beside the one of the same name in an earlier run.
+- **Script options:** `-Seeds`, `-Layout`, `-Sector n`, `-Inner` and `-Outer` (the suburb's radii, #117) and `-Out`. `-Compare <dir>` writes `compare.html`, with each plan beside the one of the same name in an earlier run.
 - **Reading the SVG:** roads are drawn at true width and coloured by role. Suburban lots are shaded by area, with the street edge darker. Lots `finish_lots` trimmed are edged orange, and lots it dropped are drawn dashed magenta at their generated shape. A red ring marks each place that breaks a target; hover it in a browser for the reason. For the Neighbourhood layout (#106), the view also draws each frame dashed, with its rows dotted, a label giving the row count and lot depth, the green buffers, greenways and edge strips, and each entrance as a stub from its gate to a dot on the arterial.
 - **Definitions that also work for Legacy (`suburb/metrics.rs`):**
   - **neighbourhood:** a 45° sector between arterials;
@@ -207,7 +230,8 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 | #105 | 2. `geom.rs`, the `SuburbLayout` switch, one set of radii, React select, Legacy pin test | #104 |
 | #106 | 3. Neighbourhoods, frames, buffers, entrances, RNG streams | #105 |
 | #107 | 4. Pattern (a): warped parallels, streets | #106 |
-| #108 | 5. Lots v2 | #107 |
+| #117 | 4b. Deepen the suburb to 1800–3000, so neighbourhoods fit 5 rows | #116 |
+| #108 | 5. Lots v2 | #107, #117 |
 | #109 | 6. Pattern (b): loops and lollipops | #108 |
 | #110 | 7. Pattern (c): central loop | #108 |
 | #111 | 8. Mixing, entrances, parks, tuning; Chris signs off the images | #109, #110 |

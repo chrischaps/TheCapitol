@@ -727,7 +727,8 @@ mod tests {
     /// `cargo test --release suburb_plan_report -- --ignored --nocapture`.
     ///
     /// Env: `SUBURB_SEEDS` (comma-separated, default 42,7,1234,99999),
-    /// `SUBURB_LAYOUT` (`legacy` or `neighbourhood`), `SUBURB_SECTOR` (0–7, one sector only) and
+    /// `SUBURB_LAYOUT` (`legacy` or `neighbourhood`), `SUBURB_SECTOR` (0–7, one sector only),
+    /// `SUBURB_INNER` and `SUBURB_OUTER` (the suburb's radii, to try other depths; #117) and
     /// `SUBURB_OUT` (default `target/suburb-plan/` at the workspace root).
     #[test]
     #[ignore]
@@ -748,11 +749,23 @@ mod tests {
             &format!("{}/../target/suburb-plan", env!("CARGO_MANIFEST_DIR")),
         ));
         std::fs::create_dir_all(&out).expect("create SUBURB_OUT");
+        let radius = |name: &str, default: f64| -> f64 {
+            env_or(name, &default.to_string()).trim().parse().unwrap_or_else(|_| panic!("{name} is a number"))
+        };
+        let defaults = WorldGenParams::default();
+        let inner = radius("SUBURB_INNER", defaults.urban_outer_radius);
+        let outer = radius("SUBURB_OUTER", defaults.suburban_outer_radius);
+        assert!(
+            defaults.guild_outer_radius < inner && inner < outer && outer < defaults.rural_outer_radius,
+            "SUBURB_INNER and SUBURB_OUTER must sit between the guild district and the rural edge"
+        );
 
         let mut plans = Vec::new();
         for seed in seeds {
             let params = WorldGenParams {
                 seed,
+                urban_outer_radius: inner,
+                suburban_outer_radius: outer,
                 suburban: SuburbanGenParams { seed, layout: suburb_layout, ..Default::default() },
                 ..Default::default()
             };

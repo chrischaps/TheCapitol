@@ -119,9 +119,12 @@ mod tests {
     const WORLD_SCALE_MIGRATION: &str =
         include_str!("../../migrations/20260212_001_world_scale.sql");
 
-    /// Moves for seeded nodes a later street plan ran over (#62).
-    const NODE_MOVES_MIGRATION: &str =
-        include_str!("../../migrations/20260215_001_suburban_street_nodes.sql");
+    /// Moves for seeded nodes, in the order the migrations run: the ones a later
+    /// street plan ran over (#62), then the ones the deeper suburb moved (#117).
+    const NODE_MOVES_MIGRATIONS: [&str; 2] = [
+        include_str!("../../migrations/20260215_001_suburban_street_nodes.sql"),
+        include_str!("../../migrations/20261018_001_deeper_suburb_nodes.sql"),
+    ];
 
     /// The numbers in each `(a, b, ...)` row of a migration's VALUES list.
     fn value_rows(sql: &str) -> Vec<Vec<f64>> {
@@ -137,15 +140,14 @@ mod tests {
     /// The `(x, y, quality)` rows the world-scale migration seeds, where the
     /// later migrations leave them.
     fn seeded_nodes() -> Vec<(f64, f64, i32)> {
-        let moves = value_rows(NODE_MOVES_MIGRATION);
+        let migrations: Vec<Vec<Vec<f64>>> = NODE_MOVES_MIGRATIONS.iter().map(|sql| value_rows(sql)).collect();
         value_rows(WORLD_SCALE_MIGRATION)
             .into_iter()
             .filter(|row| row.len() == 3)
             .map(|row| {
-                let (x, y) = moves
-                    .iter()
-                    .find(|m| m[0] == row[0] && m[1] == row[1])
-                    .map_or((row[0], row[1]), |m| (m[2], m[3]));
+                let (x, y) = migrations.iter().fold((row[0], row[1]), |(x, y), moves| {
+                    moves.iter().find(|m| m[0] == x && m[1] == y).map_or((x, y), |m| (m[2], m[3]))
+                });
                 (x, y, row[2] as i32)
             })
             .collect()

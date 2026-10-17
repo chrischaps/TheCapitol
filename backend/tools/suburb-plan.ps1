@@ -18,6 +18,13 @@
   Draw and measure one 45-degree sector only, 0 to 7. Sector n runs from
   the arterial at 45n degrees to the next one.
 
+.PARAMETER Inner
+  The suburb's inner radius, to try another depth. Default: the protocol's
+  URBAN_OUTER_RADIUS.
+
+.PARAMETER Outer
+  The suburb's outer radius. Default: the protocol's SUBURBAN_OUTER_RADIUS.
+
 .PARAMETER Out
   Output folder. Default: target/suburb-plan at the repo root.
 
@@ -28,12 +35,15 @@
 .EXAMPLE
   powershell -File backend/tools/suburb-plan.ps1
   powershell -File backend/tools/suburb-plan.ps1 -Seeds 42 -Sector 3
+  powershell -File backend/tools/suburb-plan.ps1 -Layout neighbourhood -Inner 1600 -Outer 2400
   powershell -File backend/tools/suburb-plan.ps1 -Out target/suburb-new -Compare target/suburb-plan
 #>
 param(
     [string]$Seeds = "",
     [string]$Layout = "legacy",
     [int]$Sector = -1,
+    [int]$Inner = 0,
+    [int]$Outer = 0,
     [string]$Out = "",
     [string]$Compare = ""
 )
@@ -49,6 +59,8 @@ $Out = (Resolve-Path $Out).Path
 $env:SUBURB_SEEDS = $Seeds
 $env:SUBURB_LAYOUT = $Layout
 $env:SUBURB_SECTOR = if ($Sector -ge 0) { "$Sector" } else { "" }
+$env:SUBURB_INNER = if ($Inner -gt 0) { "$Inner" } else { "" }
+$env:SUBURB_OUTER = if ($Outer -gt 0) { "$Outer" } else { "" }
 $env:SUBURB_OUT = $Out
 
 # Clear old plans out, so index.html and the PNGs match this run.
