@@ -119,6 +119,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 - **`backend/src/models/geom.rs`:**
   - moved from terrain.rs: `polyline_length` and `SpatialGrid`, plus a new `insert_segments`;
   - new: `Polyline` (cumulative lengths), `quads_overlap_strict`, `SplitMix64`.
+  - #104 created the file with `quads_overlap_strict`. Until #105 moves `SpatialGrid`, it is `pub(crate)` in terrain.rs and the metrics use it there.
 - **`backend/src/models/suburb/`:**
   - `mod.rs`: `plan() -> SuburbPlan{roads, meta, neighbourhoods}`
   - `frame.rs`
@@ -140,6 +141,17 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 - **Report test:** `#[ignore]` test `suburb::render::tests::suburb_plan_report`. Env: `SUBURB_SEEDS`, `SUBURB_LAYOUT`, `SUBURB_SECTOR`, `SUBURB_OUT` (default `target/suburb-plan/`).
 - **Outputs:** an SVG per layout and seed, metrics JSON, an `index.html` grid and a markdown table.
 - **PNG:** `backend/tools/suburb-plan.ps1` runs the test in release and converts each SVG with headless Chrome. Look at the PNGs beside `reference/`.
+- **Script options:** `-Seeds`, `-Layout`, `-Sector n` and `-Out`. `-Compare <dir>` writes `compare.html`, with each plan beside the one of the same name in an earlier run.
+- **Reading the SVG:** roads are drawn at true width and coloured by role. Suburban lots are shaded by area, with the street edge darker. Lots `finish_lots` trimmed are edged orange, and lots it dropped are drawn dashed magenta at their generated shape. A red ring marks each place that breaks a target; hover it in a browser for the reason.
+- **Definitions that also work for Legacy (`suburb/metrics.rs`):**
+  - **neighbourhood:** a 45° sector between arterials;
+  - **entrance:** a vertex shared by a suburban road and any other road;
+  - **junction:** three or more links from at least two roads, so the vertex where a bulb closes on its own stem is not a T;
+  - **cul-de-sac:** a suburban road ending in a bulb or a dead end, with its stem measured to where the bulb closes;
+  - **parallel spacing:** sampled every 25 along each street, as the distance to the nearest street across it, when that street runs within 20°;
+  - **coverage:** sampled every 5 over the annulus, counting road, then lot, then green, then gap;
+  - **green:** open ground within 40 of an arterial's edge, until parks exist (#111).
+- **Legacy baseline:** posted on #104, at seeds 42, 7, 1234 and 99999. It has 315–394 lots, 6–9 suburban 4-ways, parallel spacing of about 120, lots of about 77 × 91, 28–32% of lots trimmed, and 58–65% of the ground a gap.
 
 | Metric | Target |
 |---|---|

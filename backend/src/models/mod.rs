@@ -1,5 +1,6 @@
 pub mod account;
 pub mod container;
+pub mod geom;
 pub mod item;
 pub mod lot_clearance;
 pub mod player;
@@ -8,6 +9,7 @@ pub mod recipe;
 pub mod resource;
 pub mod station;
 pub mod street_plan;
+pub mod suburb;
 pub mod terrain;
 pub mod zone;
 

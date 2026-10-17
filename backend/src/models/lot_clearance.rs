@@ -279,6 +279,19 @@ fn clear_lot(mut corners: [(f64, f64); 4], obstacles: &Obstacles) -> Option<[(f6
     (area >= original * MIN_KEPT && clear(&corners, obstacles, &near)).then_some(corners)
 }
 
+/// What clearing does to each lot: its corners once cleared, or `None` where
+/// it's dropped. The suburb plan report (#104) uses it to show which lots
+/// `finish_lots` trims and drops.
+pub(crate) fn clear_each(
+    plots: &[TerrainPlot],
+    roads: &[RoadSegment],
+    rings: &[WaterRing],
+    center: (f64, f64),
+) -> Vec<Option<[(f64, f64); 4]>> {
+    let obstacles = Obstacles::new(roads, rings, center);
+    plots.iter().map(|plot| clear_lot(plot.corners, &obstacles)).collect()
+}
+
 /// Clear every lot of the roads and the water, drop the ones that can't be,
 /// and make the ids unique. Order is kept.
 pub fn finish_lots(
@@ -287,12 +300,13 @@ pub fn finish_lots(
     rings: &[WaterRing],
     center: (f64, f64),
 ) -> Vec<TerrainPlot> {
-    let obstacles = Obstacles::new(roads, rings, center);
+    let cleared = clear_each(&plots, roads, rings, center);
     let mut seen: HashMap<String, u32> = HashMap::new();
     plots
         .into_iter()
-        .filter_map(|mut plot| {
-            let corners = clear_lot(plot.corners, &obstacles)?;
+        .zip(cleared)
+        .filter_map(|(mut plot, corners)| {
+            let corners = corners?;
             if corners != plot.corners {
                 plot.corners = corners;
                 plot.area = TerrainPlot::calculate_area(&corners);

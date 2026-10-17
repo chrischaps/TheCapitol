@@ -612,7 +612,7 @@ fn check_road_intersection_angle(
 
 /// Spatial hash grid for accelerating collision queries during terrain generation.
 /// Divides the world into fixed-size cells and tracks which segment indices overlap each cell.
-struct SpatialGrid {
+pub(crate) struct SpatialGrid {
     cells: Vec<Vec<usize>>,
     grid_width: usize,
     grid_height: usize,
@@ -624,7 +624,7 @@ struct SpatialGrid {
 impl SpatialGrid {
     /// Create a new spatial grid covering a square region centered at (center_x, center_y)
     /// with half-extent `radius` and the given cell size.
-    fn new(center_x: f64, center_y: f64, radius: f64, cell_size: f64) -> Self {
+    pub(crate) fn new(center_x: f64, center_y: f64, radius: f64, cell_size: f64) -> Self {
         let origin_x = center_x - radius;
         let origin_y = center_y - radius;
         let extent = radius * 2.0;
@@ -655,7 +655,7 @@ impl SpatialGrid {
     }
 
     /// Insert a polyline's AABB into all overlapping cells with the given segment index.
-    fn insert(&mut self, segment_idx: usize, points: &[(f64, f64)]) {
+    pub(crate) fn insert(&mut self, segment_idx: usize, points: &[(f64, f64)]) {
         if points.is_empty() {
             return;
         }
@@ -680,7 +680,7 @@ impl SpatialGrid {
 
     /// Query for all segment indices near a point within `radius`.
     /// Returns deduplicated indices.
-    fn query_point(&self, x: f64, y: f64, radius: f64) -> Vec<usize> {
+    pub(crate) fn query_point(&self, x: f64, y: f64, radius: f64) -> Vec<usize> {
         let cx0 = self.cell_x(x - radius);
         let cy0 = self.cell_y(y - radius);
         let cx1 = self.cell_x(x + radius);
@@ -699,7 +699,7 @@ impl SpatialGrid {
 
     /// Query for all segment indices whose AABB overlaps the given AABB.
     /// Returns deduplicated indices.
-    fn query_aabb(&self, min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Vec<usize> {
+    pub(crate) fn query_aabb(&self, min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Vec<usize> {
         let cx0 = self.cell_x(min_x);
         let cy0 = self.cell_y(min_y);
         let cx1 = self.cell_x(max_x);
@@ -2523,7 +2523,7 @@ impl TerrainConfig {
     }
 
     /// Generate suburban plots using the already-generated roads in self.roads
-    fn generate_suburban_plots_internal(&self, params: &SuburbanGenParams) -> Vec<TerrainPlot> {
+    pub(crate) fn generate_suburban_plots_internal(&self, params: &SuburbanGenParams) -> Vec<TerrainPlot> {
         self.extract_plots_from_roads(&self.roads, params)
     }
 
