@@ -9,9 +9,12 @@
 //! `save/session.toml`, because a token is only good on its own server.
 //! The settings panel changes it the way the login form does.
 //!
-//! A file of its own, not the engine's `save/persist.toml`, because
-//! extensions can't reach that store (issue #71). Scripts read what they
-//! need through `cap_setting`.
+//! A file of its own, not the engine's `save/persist.toml`. Extensions can
+//! reach that store now (`ExtensionCtx::persist`, #71), but its path is
+//! fixed by the scene, and `--settings-file` swaps this file whole so a
+//! capture never reads or writes the player's own settings. Moving would
+//! also strand every existing `settings.toml`, all to save scripts one
+//! function. Scripts read what they need through `cap_setting`.
 //!
 //! A missing or broken file is the defaults, and any field it lacks or gets
 //! wrong is that field's default, so an old file or a hand edit never stops
