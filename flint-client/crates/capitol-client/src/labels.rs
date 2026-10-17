@@ -11,7 +11,7 @@
 //! Offline there's no you, and the camera's nearest win.
 //!
 //! `cap_name_tags` projects each name's anchor with Flint's `Projector`
-//! (ADR 0086), the camera this frame renders with, and runs [`place`];
+//! (ADR 0087), the camera this frame renders with, and runs [`place`];
 //! `hud.rhai` only draws what it returns. The placement was Rhai until
 //! P8.5: interpreted, its overlap test was quadratic in the crowd, and at
 //! 49 players it took about 2 ms a frame. Here it's microseconds. Until

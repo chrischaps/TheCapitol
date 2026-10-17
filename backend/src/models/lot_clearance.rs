@@ -389,15 +389,22 @@ mod tests {
 
     #[test]
     fn generated_lots_are_clear_and_unique() {
+        use crate::models::terrain::SuburbLayout;
         use crate::models::{TerrainConfig, WorldGenParams};
         // The defaults, the wider canals the dev DB commits, and a few other
-        // seeds, which lay out other suburban streets (#62).
+        // seeds, which lay out other suburban streets (#62). Each in both
+        // suburban layouts (#108).
         let mut wide = WorldGenParams::default();
         wide.canal_inner_width = 50.0;
         wide.canal_outer_width = 50.0;
         wide.moat_width = 30.0;
         let seeded = [7, 1234, 99_999].map(|seed| WorldGenParams { seed, ..WorldGenParams::default() });
-        for params in [WorldGenParams::default(), wide].into_iter().chain(seeded) {
+        let legacy: Vec<_> = [WorldGenParams::default(), wide].into_iter().chain(seeded).collect();
+        let neighbourhood = legacy.clone().into_iter().map(|mut p| {
+            p.suburban.layout = SuburbLayout::Neighbourhood;
+            p
+        });
+        for params in legacy.clone().into_iter().chain(neighbourhood) {
             let t = TerrainConfig::from_params(&params);
             let obstacles = Obstacles::new(&t.roads, &t.water_rings, (t.center_x, t.center_y));
             let mut ids = std::collections::HashSet::new();

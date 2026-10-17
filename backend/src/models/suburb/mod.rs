@@ -4,6 +4,7 @@
 //! - `frame`: each neighbourhood's `F(u, v) → world` and its row fit (#106);
 //! - `patterns`: the streets each neighbourhood is filled with, and their
 //!   `StreetMeta` (pattern (a), #107);
+//! - `lots`: the lots that fill the blocks (#108);
 //! - `graph`: the street network as a graph;
 //! - `metrics`: the layout numbers and the targets they're held to;
 //! - `render`: the plan-view SVG and the `suburb_plan_report` test.
@@ -15,11 +16,12 @@ use capitol_protocol::terrain::RoadSegment;
 
 use super::terrain::SuburbanGenParams;
 
-// Patterns (#107 on) and lots v2 (#108) use what the server build doesn't yet.
+// The server build doesn't yet use everything the patterns are given.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod frame;
 #[cfg(test)]
 pub(crate) mod graph;
+pub(crate) mod lots;
 #[cfg(test)]
 pub(crate) mod metrics;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -36,9 +38,7 @@ use patterns::StreetMeta;
 pub(crate) struct SuburbPlan {
     pub roads: Vec<RoadSegment>,
     /// One for each of `roads`, in the same order.
-    #[cfg_attr(not(test), allow(dead_code))] // lots v2 reads it (#108)
     pub meta: Vec<StreetMeta>,
-    #[cfg_attr(not(test), allow(dead_code))] // the patterns and lots v2 read them
     pub neighbourhoods: Vec<Neighbourhood>,
 }
 

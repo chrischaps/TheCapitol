@@ -81,7 +81,7 @@ pub struct Shared {
     /// egui, once its fonts are in, so `cap_name_tags` measures names with
     /// the fonts the HUD draws them in. `None` until the first `ui`.
     pub egui: Arc<Mutex<Option<egui::Context>>>,
-    /// The camera scripts' `world_to_screen` uses (Flint ADR 0086), so
+    /// The camera scripts' `world_to_screen` uses (Flint ADR 0087), so
     /// `cap_name_tags` projects with the frame's camera. `None` in tests.
     pub projector: Option<flint_player::Projector>,
 }

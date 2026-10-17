@@ -19,7 +19,6 @@ const TOUCH: f64 = 1e-6;
 /// normal of one of them has their projections meeting at most at a point.
 /// A non-convex quad gets the test of its convex hull, which may report an
 /// overlap that isn't there, never miss one.
-#[cfg_attr(not(test), allow(dead_code))] // lots v2 (#108) uses it outside the harness
 pub(crate) fn quads_overlap_strict(a: &[P; 4], b: &[P; 4]) -> bool {
     !(separated_on_edges_of(a, a, b) || separated_on_edges_of(b, a, b))
 }
@@ -43,6 +42,18 @@ fn project(quad: &[P; 4], n: P) -> (f64, f64) {
     quad.iter()
         .map(|&(x, y)| x * n.0 + y * n.1)
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), d| (lo.min(d), hi.max(d)))
+}
+
+/// Whether a quad is convex, either winding. A corner on a straight edge,
+/// or two corners at one point, still counts.
+pub(crate) fn quad_is_convex(c: &[P; 4]) -> bool {
+    let turns: Vec<f64> = (0..4)
+        .map(|i| {
+            let (a, b, d) = (c[i], c[(i + 1) % 4], c[(i + 2) % 4]);
+            (b.0 - a.0) * (d.1 - b.1) - (b.1 - a.1) * (d.0 - b.0)
+        })
+        .collect();
+    turns.iter().all(|&t| t >= -1e-9) || turns.iter().all(|&t| t <= 1e-9)
 }
 
 /// Calculate total length of a polyline
@@ -192,7 +203,6 @@ impl SpatialGrid {
 /// A polyline with its cumulative lengths, so a point at a distance along it
 /// is a binary search rather than a walk from the start. Legacy's
 /// `point_at_distance` walks, which makes stepping along a road O(n²).
-#[cfg_attr(not(test), allow(dead_code))] // the v2 generator (#106 on) uses it
 #[derive(Debug, Clone)]
 pub(crate) struct Polyline {
     points: Vec<P>,
@@ -200,7 +210,6 @@ pub(crate) struct Polyline {
     cum: Vec<f64>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl Polyline {
     pub(crate) fn new(points: Vec<P>) -> Self {
         let mut cum = Vec::with_capacity(points.len());
@@ -215,6 +224,7 @@ impl Polyline {
         Self { points, cum }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn points(&self) -> &[P] {
         &self.points
     }
