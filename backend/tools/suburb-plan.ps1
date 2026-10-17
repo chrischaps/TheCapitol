@@ -12,7 +12,7 @@
   Comma-separated world seeds. Default: 42,7,1234,99999.
 
 .PARAMETER Layout
-  The suburban layout: legacy (the only one until #105).
+  The suburban layout: legacy (the default) or neighbourhood.
 
 .PARAMETER Sector
   Draw and measure one 45-degree sector only, 0 to 7. Sector n runs from

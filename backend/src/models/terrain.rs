@@ -4,6 +4,7 @@ use std::f64::consts::PI;
 
 use capitol_protocol::rules;
 
+use super::geom::{polyline_length, SpatialGrid};
 use super::street_plan;
 
 // The terrain types the client sees are shared through capitol-protocol, so
@@ -13,9 +14,10 @@ pub use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPlot, 
 /// Configuration for suburban street generation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuburbanGenParams {
-    /// Inner radius of suburban zone (default: 1600)
+    /// Inner and outer radius of the suburban zone. The generators read them
+    /// only through `WorldGenParams::suburban_params`, which sets them from
+    /// the zone radii, so a saved value here has no effect.
     pub inner_radius: f64,
-    /// Outer radius of suburban zone (default: 2400)
     pub outer_radius: f64,
     /// Width of collector roads (default: 14)
     pub collector_width: f64,
@@ -33,16 +35,115 @@ pub struct SuburbanGenParams {
     pub min_frontage: f64,
     /// Maximum frontage width (default: 140)
     pub max_frontage: f64,
-    /// Random seed for generation
+    /// Random seed for generation. Like the radii, `suburban_params` sets it
+    /// from the world's seed.
     pub seed: u64,
     /// Width of the arterials the streets keep clear of. Not a tweakable:
     /// `generate_all_roads_with_params` sets it from `WorldGenParams`.
     #[serde(skip, default = "default_arterial_width")]
     pub arterial_width: f64,
+    /// Which generator lays out the suburb (suburb v2, #103). Legacy until
+    /// the flip in #112. The serde defaults keep saved `world_config` rows
+    /// from before #105 loading.
+    #[serde(default)]
+    pub layout: SuburbLayout,
+    /// The Neighbourhood generator's knobs. Legacy ignores them.
+    #[serde(default)]
+    pub neighbourhood: NeighbourhoodParams,
 }
 
 fn default_arterial_width() -> f64 {
     WorldGenParams::default().arterial_width
+}
+
+/// The suburban generators (plan `the-capitol-suburb-v2.md` §3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuburbLayout {
+    /// Collectors and rejection-sampled local streets, lots along them.
+    #[default]
+    Legacy,
+    /// Post-war neighbourhoods, one pattern per neighbourhood. Until #107 it
+    /// lays no suburban roads, and until #108 no suburban lots.
+    Neighbourhood,
+}
+
+/// The street patterns a neighbourhood can take (plan §4.1.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NeighbourhoodPattern {
+    /// (a) Near-parallel rows two lots apart, joined by T links.
+    WarpedParallels,
+    /// (b) A racetrack collector with combs of cul-de-sacs inside it.
+    LoopsAndLollipops,
+    /// (c) A flattened loop round a park, cul-de-sacs pointing out (PW2).
+    CentralLoop,
+}
+
+/// How often each pattern is picked, among those that fit a neighbourhood.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PatternWeights {
+    pub warped_parallels: f64,
+    pub loops_and_lollipops: f64,
+    pub central_loop: f64,
+}
+
+impl Default for PatternWeights {
+    fn default() -> Self {
+        Self { warped_parallels: 1.0, loops_and_lollipops: 1.0, central_loop: 1.0 }
+    }
+}
+
+/// The Neighbourhood generator's parameters, in world units (plan §3, §4).
+/// Every field has a default, so a partial object loads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NeighbourhoodParams {
+    /// Lot width along the street.
+    pub lot_frontage: f64,
+    /// Lot depth wanted, and the range a row fit may use.
+    pub lot_depth: f64,
+    pub lot_depth_min: f64,
+    pub lot_depth_max: f64,
+    /// Street widths. Legacy's are `local_street_width` and `collector_width`.
+    pub local_width: f64,
+    pub collector_width: f64,
+    /// Green strip between a neighbourhood's edge and the arterial.
+    pub buffer: f64,
+    /// Spacing of the T links between parallel rows (L).
+    pub link_spacing: f64,
+    /// Cul-de-sac turnaround radius, and the longest stem.
+    pub bulb_radius: f64,
+    pub cul_de_sac_max: f64,
+    /// The frame's shared radial warp: amplitude A (at most 40) and
+    /// wavelength λ (at least 1200).
+    pub warp_amplitude: f64,
+    pub warp_wavelength: f64,
+    pub pattern_weights: PatternWeights,
+    /// Every neighbourhood takes this pattern, if it fits. For tests.
+    pub force_pattern: Option<NeighbourhoodPattern>,
+}
+
+impl Default for NeighbourhoodParams {
+    fn default() -> Self {
+        Self {
+            lot_frontage: 60.0,
+            lot_depth: 110.0,
+            lot_depth_min: 95.0,
+            lot_depth_max: 130.0,
+            local_width: 16.0,
+            collector_width: 20.0,
+            buffer: 20.0,
+            link_spacing: 400.0,
+            bulb_radius: 13.0,
+            cul_de_sac_max: 300.0,
+            warp_amplitude: 30.0,
+            warp_wavelength: 1600.0,
+            pattern_weights: PatternWeights::default(),
+            force_pattern: None,
+        }
+    }
 }
 
 impl Default for SuburbanGenParams {
@@ -60,6 +161,8 @@ impl Default for SuburbanGenParams {
             max_frontage: 100.0,        // Reduced from 140
             seed: 42,
             arterial_width: 60.0,
+            layout: SuburbLayout::default(),
+            neighbourhood: NeighbourhoodParams::default(),
         }
     }
 }
@@ -108,6 +211,21 @@ pub struct WorldGenParams {
     pub guild_plot_frontage: f64,
     // Seeds
     pub seed: u64,
+}
+
+impl WorldGenParams {
+    /// The suburban params the generators use: `suburban` with its radii,
+    /// seed and arterial width taken from the world. Roads and lots both read
+    /// this one set (#105). Before, the lots read `suburban`'s own radii.
+    pub fn suburban_params(&self) -> SuburbanGenParams {
+        SuburbanGenParams {
+            inner_radius: self.urban_outer_radius,
+            outer_radius: self.suburban_outer_radius,
+            seed: self.seed,
+            arterial_width: self.arterial_width,
+            ..self.suburban.clone()
+        }
+    }
 }
 
 impl Default for WorldGenParams {
@@ -290,17 +408,6 @@ struct ConnectionPoint {
     road_id: String,
     tangent_angle: f64,
     used: bool,
-}
-
-/// Calculate total length of a polyline
-fn polyline_length(points: &[(f64, f64)]) -> f64 {
-    let mut total = 0.0;
-    for i in 1..points.len() {
-        let dx = points[i].0 - points[i - 1].0;
-        let dy = points[i].1 - points[i - 1].1;
-        total += (dx * dx + dy * dy).sqrt();
-    }
-    total
 }
 
 /// Get point and tangent angle at parameter t (0-1) along polyline
@@ -610,113 +717,6 @@ fn check_road_intersection_angle(
     true
 }
 
-/// Spatial hash grid for accelerating collision queries during terrain generation.
-/// Divides the world into fixed-size cells and tracks which segment indices overlap each cell.
-pub(crate) struct SpatialGrid {
-    cells: Vec<Vec<usize>>,
-    grid_width: usize,
-    grid_height: usize,
-    cell_size: f64,
-    origin_x: f64,
-    origin_y: f64,
-}
-
-impl SpatialGrid {
-    /// Create a new spatial grid covering a square region centered at (center_x, center_y)
-    /// with half-extent `radius` and the given cell size.
-    pub(crate) fn new(center_x: f64, center_y: f64, radius: f64, cell_size: f64) -> Self {
-        let origin_x = center_x - radius;
-        let origin_y = center_y - radius;
-        let extent = radius * 2.0;
-        let grid_width = (extent / cell_size).ceil() as usize + 1;
-        let grid_height = grid_width;
-        let cells = vec![Vec::new(); grid_width * grid_height];
-        Self {
-            cells,
-            grid_width,
-            grid_height,
-            cell_size,
-            origin_x,
-            origin_y,
-        }
-    }
-
-    /// Convert world coordinate to grid cell index (clamped to grid bounds)
-    #[inline]
-    fn cell_x(&self, x: f64) -> usize {
-        let cx = ((x - self.origin_x) / self.cell_size) as isize;
-        cx.clamp(0, self.grid_width as isize - 1) as usize
-    }
-
-    #[inline]
-    fn cell_y(&self, y: f64) -> usize {
-        let cy = ((y - self.origin_y) / self.cell_size) as isize;
-        cy.clamp(0, self.grid_height as isize - 1) as usize
-    }
-
-    /// Insert a polyline's AABB into all overlapping cells with the given segment index.
-    pub(crate) fn insert(&mut self, segment_idx: usize, points: &[(f64, f64)]) {
-        if points.is_empty() {
-            return;
-        }
-        let (mut min_x, mut min_y) = points[0];
-        let (mut max_x, mut max_y) = points[0];
-        for &(x, y) in &points[1..] {
-            if x < min_x { min_x = x; }
-            if x > max_x { max_x = x; }
-            if y < min_y { min_y = y; }
-            if y > max_y { max_y = y; }
-        }
-        let cx0 = self.cell_x(min_x);
-        let cy0 = self.cell_y(min_y);
-        let cx1 = self.cell_x(max_x);
-        let cy1 = self.cell_y(max_y);
-        for cy in cy0..=cy1 {
-            for cx in cx0..=cx1 {
-                self.cells[cy * self.grid_width + cx].push(segment_idx);
-            }
-        }
-    }
-
-    /// Query for all segment indices near a point within `radius`.
-    /// Returns deduplicated indices.
-    pub(crate) fn query_point(&self, x: f64, y: f64, radius: f64) -> Vec<usize> {
-        let cx0 = self.cell_x(x - radius);
-        let cy0 = self.cell_y(y - radius);
-        let cx1 = self.cell_x(x + radius);
-        let cy1 = self.cell_y(y + radius);
-        let mut result = Vec::new();
-        for cy in cy0..=cy1 {
-            for cx in cx0..=cx1 {
-                result.extend_from_slice(&self.cells[cy * self.grid_width + cx]);
-            }
-        }
-        // Sorted rather than hashed: the sets are small and the probes many.
-        result.sort_unstable();
-        result.dedup();
-        result
-    }
-
-    /// Query for all segment indices whose AABB overlaps the given AABB.
-    /// Returns deduplicated indices.
-    pub(crate) fn query_aabb(&self, min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Vec<usize> {
-        let cx0 = self.cell_x(min_x);
-        let cy0 = self.cell_y(min_y);
-        let cx1 = self.cell_x(max_x);
-        let cy1 = self.cell_y(max_y);
-        let mut result = Vec::new();
-        for cy in cy0..=cy1 {
-            for cx in cx0..=cx1 {
-                result.extend_from_slice(&self.cells[cy * self.grid_width + cx]);
-            }
-        }
-        // Sorted rather than hashed: the sets are small and the probes many.
-        result.sort_unstable();
-        result.dedup();
-        result
-    }
-}
-
 /// Compute the AABB of a polyline, returning (min_x, min_y, max_x, max_y).
 fn polyline_aabb(points: &[(f64, f64)]) -> (f64, f64, f64, f64) {
     let (mut min_x, mut min_y) = points[0];
@@ -800,7 +800,7 @@ impl TerrainConfig {
         config.roads = config.generate_all_roads_with_params(params);
 
         // Generate terrain plots for all zones
-        config.terrain_plots = config.generate_suburban_plots_internal(&params.suburban);
+        config.terrain_plots = config.generate_suburban_plots_internal(&params.suburban_params());
         config.terrain_plots.extend(config.generate_urban_plots(params));
         config.terrain_plots.extend(config.generate_rural_plots(params));
         config.terrain_plots.extend(config.generate_guild_plots(params));
@@ -835,14 +835,12 @@ impl TerrainConfig {
         roads.extend(self.generate_urban_grid_with_params(params));
 
         // Suburban streets
-        let suburban_params = SuburbanGenParams {
-            inner_radius: params.urban_outer_radius,
-            outer_radius: params.suburban_outer_radius,
-            seed: params.seed,
-            arterial_width: params.arterial_width,
-            ..params.suburban.clone()
-        };
-        roads.extend(self.generate_suburban_streets_with_params(&suburban_params));
+        let suburban_params = params.suburban_params();
+        match suburban_params.layout {
+            SuburbLayout::Legacy => roads.extend(self.generate_suburban_streets_with_params(&suburban_params)),
+            // Its streets come with pattern (a), #107.
+            SuburbLayout::Neighbourhood => {}
+        }
 
         // Rural trails
         roads.extend(self.generate_rural_paths_with_params(params));
@@ -2522,9 +2520,14 @@ impl TerrainConfig {
         self.extract_plots_from_roads(&roads, params)
     }
 
-    /// Generate suburban plots using the already-generated roads in self.roads
+    /// The suburban lots for the already-generated roads in self.roads, as
+    /// generated, before `finish_lots`. `params` is `suburban_params()`.
     pub(crate) fn generate_suburban_plots_internal(&self, params: &SuburbanGenParams) -> Vec<TerrainPlot> {
-        self.extract_plots_from_roads(&self.roads, params)
+        match params.layout {
+            SuburbLayout::Legacy => self.extract_plots_from_roads(&self.roads, params),
+            // Lots v2 fill its blocks, #108.
+            SuburbLayout::Neighbourhood => Vec::new(),
+        }
     }
 
     /// Extract 4-sided plots from road network
@@ -3223,6 +3226,69 @@ mod tests {
         assert_ne!(TerrainConfig::from_params(&params).version(), version);
         let params = WorldGenParams { moat_width: 70.0, ..WorldGenParams::default() };
         assert_ne!(TerrainConfig::from_params(&params).version(), version);
+    }
+
+    /// Legacy is the default until #112, and suburb v2's work packages build
+    /// the Neighbourhood generator beside it. This pins what Legacy makes, so
+    /// none of them moves the live world by accident. Change the literal only
+    /// for a change that means to move it, and say so in the commit.
+    #[test]
+    fn legacy_default_terrain_version_is_pinned() {
+        assert_eq!(WorldGenParams::default().suburban.layout, SuburbLayout::Legacy);
+        assert_eq!(TerrainConfig::get_default().version(), "6006800ab79fbff8");
+    }
+
+    /// Saved `world_config` rows and admin PUTs from before #105 have no
+    /// `layout` or `neighbourhood`. They still load, as Legacy.
+    #[test]
+    fn world_params_load_with_and_without_layout() {
+        let mut json = serde_json::to_value(WorldGenParams::default()).unwrap();
+        let suburban = json["suburban"].as_object_mut().unwrap();
+        assert_eq!(suburban["layout"], "legacy");
+        suburban.remove("layout");
+        suburban.remove("neighbourhood");
+        let old: WorldGenParams = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(old.suburban.layout, SuburbLayout::Legacy);
+        assert_eq!(old.suburban.neighbourhood, NeighbourhoodParams::default());
+
+        // A layout, and a partial neighbourhood: the rest takes its defaults.
+        json["suburban"]["layout"] = "neighbourhood".into();
+        json["suburban"]["neighbourhood"] = serde_json::json!({ "lot_depth": 120.0, "force_pattern": "central_loop" });
+        let new: WorldGenParams = serde_json::from_value(json).unwrap();
+        assert_eq!(new.suburban.layout, SuburbLayout::Neighbourhood);
+        assert_eq!(new.suburban.neighbourhood.lot_depth, 120.0);
+        assert_eq!(new.suburban.neighbourhood.lot_frontage, 60.0);
+        assert_eq!(new.suburban.neighbourhood.force_pattern, Some(NeighbourhoodPattern::CentralLoop));
+    }
+
+    /// Until #107 the Neighbourhood layout lays no suburban roads or lots,
+    /// and leaves the rest of the world as Legacy has it.
+    #[test]
+    fn neighbourhood_layout_clears_only_the_suburb() {
+        let mut params = WorldGenParams::default();
+        params.suburban.layout = SuburbLayout::Neighbourhood;
+        let t = TerrainConfig::from_params(&params);
+        assert!(t.roads.iter().all(|r| r.road_type != RoadType::Suburban));
+        assert!(t.terrain_plots.iter().all(|l| l.zone != "suburban"));
+        let legacy = TerrainConfig::get_default();
+        let others = |t: &TerrainConfig| t.roads.iter().filter(|r| r.road_type != RoadType::Suburban).count();
+        assert_eq!(others(&t), others(&legacy));
+        assert!(t.terrain_plots.iter().any(|l| l.zone == "urban"));
+    }
+
+    /// Roads and lots read one set of suburban radii, from the zone radii,
+    /// whatever `suburban`'s own copies say (#105).
+    #[test]
+    fn suburban_params_take_the_zone_radii() {
+        let mut params = WorldGenParams { urban_outer_radius: 1500.0, suburban_outer_radius: 2500.0, seed: 9, ..Default::default() };
+        params.suburban.inner_radius = 1.0;
+        params.suburban.outer_radius = 2.0;
+        let s = params.suburban_params();
+        assert_eq!((s.inner_radius, s.outer_radius, s.seed), (1500.0, 2500.0, 9));
+        let mut stale = WorldGenParams::default();
+        stale.suburban.inner_radius = 1.0;
+        stale.suburban.outer_radius = 2.0;
+        assert_eq!(TerrainConfig::from_params(&stale).version(), TerrainConfig::get_default().version());
     }
 
     #[test]

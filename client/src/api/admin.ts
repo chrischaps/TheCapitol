@@ -12,6 +12,31 @@ export interface SuburbanGenParams {
   min_frontage: number
   max_frontage: number
   seed: number
+  // Suburb v2 (#103): which generator lays out the suburb
+  layout: SuburbLayout
+  // The Neighbourhood generator's knobs. Left out, the server fills its defaults.
+  neighbourhood?: NeighbourhoodParams
+}
+
+export type SuburbLayout = 'legacy' | 'neighbourhood'
+
+export type NeighbourhoodPattern = 'warped_parallels' | 'loops_and_lollipops' | 'central_loop'
+
+export interface NeighbourhoodParams {
+  lot_frontage: number
+  lot_depth: number
+  lot_depth_min: number
+  lot_depth_max: number
+  local_width: number
+  collector_width: number
+  buffer: number
+  link_spacing: number
+  bulb_radius: number
+  cul_de_sac_max: number
+  warp_amplitude: number
+  warp_wavelength: number
+  pattern_weights: Record<NeighbourhoodPattern, number>
+  force_pattern: NeighbourhoodPattern | null
 }
 
 export interface WorldGenParams {
@@ -92,6 +117,7 @@ export const DEFAULT_WORLD_PARAMS: WorldGenParams = {
     min_frontage: 60,
     max_frontage: 100,
     seed: 42,
+    layout: 'legacy',
   },
   rural_trail_width: 6,
   rural_trail_count: 12,

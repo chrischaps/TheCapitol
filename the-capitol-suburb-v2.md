@@ -119,7 +119,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 - **`backend/src/models/geom.rs`:**
   - moved from terrain.rs: `polyline_length` and `SpatialGrid`, plus a new `insert_segments`;
   - new: `Polyline` (cumulative lengths), `quads_overlap_strict`, `SplitMix64`.
-  - #104 created the file with `quads_overlap_strict`. Until #105 moves `SpatialGrid`, it is `pub(crate)` in terrain.rs and the metrics use it there.
+  - #104 created the file with `quads_overlap_strict`; #105 moved the rest in. `insert_segments` fills only the cells each segment's own box reaches. `Polyline::at(d)` is a binary search over cumulative lengths. `SplitMix64::stream(seed, &[sector, nbhd])` gives a neighbourhood its own stream. Legacy keeps its own `point_at_distance` and `insert`, so its output doesn't move.
 - **`backend/src/models/suburb/`:**
   - `mod.rs`: `plan() -> SuburbPlan{roads, meta, neighbourhoods}`
   - `frame.rs`
@@ -133,9 +133,14 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - `street_plan::{resample, bulb, end_direction, distance_along, crosses, keeps_clear, self_crosses, sharpest_turn, weld_junctions, audit}`
   - `lot_clearance::finish_lots`
 - **Wiring:**
-  - `match params.suburban.layout` at terrain.rs:845; lots at :803.
+  - `match suburban_params.layout` in `generate_all_roads_with_params` (roads) and in `generate_suburban_plots_internal` (lots). Until #107 and #108, `Neighbourhood` returns no suburban roads and no suburban lots.
   - Pass the plan as a local, so `version()` is unaffected.
-- **Params:** `#[serde(default)]` on the new `layout` and `neighbourhood` fields. Without it, a saved `world_config` row stops loading. Roads and plots must read one resolved set of radii (they read different ones today: :803 vs :838).
+- **Params (#105):**
+  - `SuburbanGenParams::layout` (`legacy` or `neighbourhood` on the wire) and `::neighbourhood: NeighbourhoodParams`, both `#[serde(default)]`, so `world_config` rows and admin PUTs from before #105 still load.
+  - `NeighbourhoodParams` (`#[serde(default)]` on the struct, so a partial object loads): `lot_frontage` 60, `lot_depth` 110 (`lot_depth_min` 95, `lot_depth_max` 130), `local_width` 16, `collector_width` 20, `buffer` 20, `link_spacing` (L) 400, `bulb_radius` 13, `cul_de_sac_max` 300, `warp_amplitude` (A) 30, `warp_wavelength` (λ) 1600, `pattern_weights` (1 each), and `force_pattern` for tests. Tune A and λ in #111.
+  - **One resolved set of radii:** `WorldGenParams::suburban_params()` takes the radii, seed and arterial width from the world. Roads and lots both read it, and `suburban.inner_radius`, `outer_radius` and `seed` have no effect. Before #105 the lots read `suburban`'s own radii. For the default world the two sets agreed, so the pin didn't move.
+  - **Pin:** `legacy_default_terrain_version_is_pinned` holds `get_default().version()` at `6006800ab79fbff8`.
+  - **React:** the Suburban section of `WorldTweakPanel` has a Layout select. `neighbourhood` is optional in `api/admin.ts`, so a reset leaves it to the server's defaults.
 
 ### 4.4 Harness and targets
 - **Report test:** `#[ignore]` test `suburb::render::tests::suburb_plan_report`. Env: `SUBURB_SEEDS`, `SUBURB_LAYOUT`, `SUBURB_SECTOR`, `SUBURB_OUT` (default `target/suburb-plan/`).

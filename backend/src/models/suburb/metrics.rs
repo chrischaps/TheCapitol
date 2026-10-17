@@ -19,9 +19,9 @@ use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot};
 use serde::Serialize;
 
 use super::graph::{Graph, JunctionKind};
-use crate::models::geom::quads_overlap_strict;
+use crate::models::geom::{quads_overlap_strict, SpatialGrid};
 use crate::models::street_plan;
-use crate::models::terrain::{point_to_segment_distance, SpatialGrid};
+use crate::models::terrain::point_to_segment_distance;
 
 type P = (f64, f64);
 

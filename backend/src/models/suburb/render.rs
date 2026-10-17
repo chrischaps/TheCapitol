@@ -561,7 +561,7 @@ mod tests {
 
     use super::*;
     use crate::models::lot_clearance;
-    use crate::models::terrain::{SuburbanGenParams, TerrainConfig, WorldGenParams};
+    use crate::models::terrain::{SuburbLayout, SuburbanGenParams, TerrainConfig, WorldGenParams};
 
     fn env_or(name: &str, default: &str) -> String {
         std::env::var(name).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| default.to_string())
@@ -572,7 +572,7 @@ mod tests {
     /// `cargo test --release suburb_plan_report -- --ignored --nocapture`.
     ///
     /// Env: `SUBURB_SEEDS` (comma-separated, default 42,7,1234,99999),
-    /// `SUBURB_LAYOUT` (`legacy`), `SUBURB_SECTOR` (0–7, one sector only) and
+    /// `SUBURB_LAYOUT` (`legacy` or `neighbourhood`), `SUBURB_SECTOR` (0–7, one sector only) and
     /// `SUBURB_OUT` (default `target/suburb-plan/` at the workspace root).
     #[test]
     #[ignore]
@@ -582,7 +582,8 @@ mod tests {
             .map(|s| s.trim().parse().expect("SUBURB_SEEDS is a list of numbers"))
             .collect();
         let layout = env_or("SUBURB_LAYOUT", "legacy").to_lowercase();
-        assert_eq!(layout, "legacy", "SUBURB_LAYOUT={layout}: only legacy exists until #105 adds the switch");
+        let suburb_layout: SuburbLayout = serde_json::from_value(serde_json::Value::String(layout.clone()))
+            .unwrap_or_else(|_| panic!("SUBURB_LAYOUT={layout}: legacy or neighbourhood"));
         let sector: Option<u8> = std::env::var("SUBURB_SECTOR")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -597,7 +598,7 @@ mod tests {
         for seed in seeds {
             let params = WorldGenParams {
                 seed,
-                suburban: SuburbanGenParams { seed, ..Default::default() },
+                suburban: SuburbanGenParams { seed, layout: suburb_layout, ..Default::default() },
                 ..Default::default()
             };
             let started = Instant::now();
@@ -605,7 +606,7 @@ mod tests {
             let gen_ms = started.elapsed().as_secs_f64() * 1000.0;
 
             // The suburban lots as generated, and what finish_lots does to each.
-            let before = t.generate_suburban_plots_internal(&params.suburban);
+            let before = t.generate_suburban_plots_internal(&params.suburban_params());
             let cleared = lot_clearance::clear_each(&before, &t.roads, &t.water_rings, (t.center_x, t.center_y));
             let kept = t.terrain_plots.iter().filter(|l| l.zone == "suburban").count();
             assert_eq!(cleared.iter().flatten().count(), kept, "seed {seed}: the lots before finish_lots don't match");
