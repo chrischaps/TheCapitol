@@ -1,9 +1,0 @@
-# The showcase clip (tools/showcase.ps1): from the street by the tower, a
-# slow crane up to the map while the camera turns. The script runs the
-# camera at a quarter of its usual sensitivity, so F held takes about
-# seven seconds from the street to the map, and the clip holds
-# there a moment.
-0.5   down  KeyE
-1.5   down  KeyF
-8.0   up    KeyF
-8.5   up    KeyE

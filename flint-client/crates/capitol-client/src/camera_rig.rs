@@ -253,3 +253,56 @@ fn the_login_circle_keeps_the_tower_right_of_the_form() {
         }
     }
 }
+
+#[test]
+fn a_shot_lets_go_with_what_it_framed_still_in_frame() {
+    // Issue #92: the first camera input after a fixed shot hands over to
+    // the rig, and what the shot was looking at must stay on screen, near
+    // the middle, so a capture can orbit or zoom on from it. The same
+    // hand-over ends a --camera-path.
+    let rig = Rig::load();
+    assert!(rig.num("framing_angle") < VFOV / 2.0 - 10.0);
+    let views = [
+        "bridge",
+        "suburb",
+        "urban",
+        "capitol",
+        "crown",
+        "from-urban",
+        "from-suburban",
+        "from-rural",
+        "from-wilderness",
+    ];
+    let mut off = Vec::new();
+    for view in views {
+        let shot: Map = rig.call("view_shot", (view.to_string(),));
+        let at = shot["at"].clone().into_typed_array::<f64>().unwrap();
+        let mut state = rhai::Dynamic::from_map(Map::from_iter([("shot".into(), shot.into())]));
+        let options = CallFnOptions::new()
+            .eval_ast(false)
+            .bind_this_ptr(&mut state);
+        rig.engine
+            .call_fn_with_options::<()>(
+                options,
+                &mut Scope::new(),
+                &rig.ast,
+                "take_over_from_shot",
+                (true,),
+            )
+            .unwrap();
+        let m = state.cast::<Map>();
+        let f = |k: &str| m[k].as_float().unwrap();
+        let pose = rig.pose(f("target_x"), f("target_z"), f("zoom"), f("yaw"));
+        let p = pose.p.map(|x| x as f64);
+        let look = [0, 1, 2].map(|i| pose.t[i] as f64 - p[i]);
+        let to = [0, 1, 2].map(|i| at[i] - p[i]);
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let angle = (dot(look, to) / (dot(look, look) * dot(to, to)).sqrt()).acos();
+        off.push((view, angle.to_degrees().round()));
+    }
+    assert!(
+        off.iter()
+            .all(|&(_, a)| a <= rig.num("framing_angle") + 0.5),
+        "degrees off the rig's centre: {off:?}"
+    );
+}

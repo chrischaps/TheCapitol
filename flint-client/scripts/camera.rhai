@@ -41,7 +41,12 @@
 // tower from beyond the moat), crown (level with its lantern), and
 // from-urban, from-suburban, from-rural and from-wilderness (the tower on
 // the horizon from each outer zone). A shot holds until the first camera
-// input, then eases into the rig.
+// input, then eases into the rig, which takes up what the shot was looking
+// at from about as far off, so the subject stays in frame.
+//
+// `--camera-path` (cap_camera_path, issue #92) films a move offline: a
+// moving shot, the camera wherever the path's keys put it at that moment.
+// It holds at its last key, and lets go into the rig like any shot.
 //
 // The player's settings (P8.4) scale how fast it turns and zooms
 // (cap_setting("camera_sensitivity")) and can turn the orbit the other way
@@ -137,6 +142,8 @@ let rig = #{
     // A --view shot: #{ pos, at } held until camera input, then `release`
     // runs 0 -> 1 as it eases into the rig.
     shot: (), release: 1.0, release_len: 1.0,
+    // The shot is a --camera-path being played.
+    path: false,
     started: false,
     // The login circle held last frame, and how long it has waited past
     // the form for where you are.
@@ -171,7 +178,7 @@ fn on_update() {
     } else if rig.at_login {
         rig.at_login = false;
         rig.waited = 0.0;
-        rig.take_over_from_shot();
+        rig.take_over_from_shot(false);
         if you != () {
             // Down onto you, not onto wherever the circle was.
             rig.target_x = you[0];
@@ -189,8 +196,17 @@ fn on_update() {
         rig.target_x = you[0] + rig.pan_x;
         rig.target_z = you[2] + rig.pan_z;
     }
+    if rig.path {
+        if moved {
+            rig.path = false;
+        } else {
+            let p = cap_camera_path(total_time());
+            rig.shot = #{ pos: p.pos, at: p.at };
+            if p.done { rig.path = false; }
+        }
+    }
     if moved && rig.shot != () && rig.release >= 1.0 {
-        rig.take_over_from_shot();
+        rig.take_over_from_shot(true);
     }
 
     // Damping: exponential, so it's the same at any frame rate.
@@ -382,6 +398,12 @@ fn start_view(view) {
         this.shot = view_shot(view);
         this.release = 1.0;
     }
+    let path = cap_camera_path(0.0);
+    if path != () {
+        this.shot = #{ pos: path.pos, at: path.at };
+        this.release = 1.0;
+        this.path = true;
+    }
     if at != () {
         this.target_x = at[0];
         this.target_z = at[1];
@@ -391,13 +413,23 @@ fn start_view(view) {
     this.focus_z = this.target_z;
 }
 
-// The shot hands over to the rig, at street zoom, keeping the camera
-// where it stood: the point followed is just ahead of it, the way it
-// faced. Then the camera eases across from the shot.
-fn take_over_from_shot() {
+// The shot hands over to the rig, facing the way the shot faced. Then the
+// camera eases across from the shot.
+//
+// `framed`: the rig takes up what the shot was looking at, the ground under
+// it, from about as far off, or further if that's what it takes to keep a
+// subject up in the air (the crown) in the middle of the frame. No wider
+// than the district, so a shot from the horizon doesn't crane to the map.
+// So the subject stays in frame, and Q/E or a drag then orbit round it
+// (issue #92). Otherwise (the
+// login circle, which lands on you next) it's street zoom, with the point
+// followed just ahead of the camera.
+fn take_over_from_shot(framed) {
     let s = this.shot;
     let dx = s.at[0] - s.pos[0];
+    let dy = s.at[1] - s.pos[1];
     let dz = s.at[2] - s.pos[2];
+    let far = (dx * dx + dy * dy + dz * dz).sqrt();
     let len = (dx * dx + dz * dz).sqrt();
     if len < 0.001 {
         // Straight down: north up.
@@ -405,15 +437,21 @@ fn take_over_from_shot() {
         dz = -1.0;
         len = 1.0;
     }
-    let ahead = rig_distance(street_zoom()) * street_pitch().to_radians().cos();
-    this.target_x = s.pos[0] + dx / len * ahead;
-    this.target_z = s.pos[2] + dz / len * ahead;
+    this.yaw = atan(-dx, -dz);
+    if framed {
+        this.target_x = s.at[0];
+        this.target_z = s.at[2];
+        this.zoom = framing_zoom(s.at, zoom_at(far), this.yaw);
+    } else {
+        let ahead = rig_distance(street_zoom()) * street_pitch().to_radians().cos();
+        this.target_x = s.pos[0] + dx / len * ahead;
+        this.target_z = s.pos[2] + dz / len * ahead;
+        this.zoom = street_zoom();
+    }
     this.focus_x = this.target_x;
     this.focus_z = this.target_z;
-    this.yaw = atan(-dx, -dz);
     this.yaw_to = this.yaw;
-    this.zoom = street_zoom();
-    this.zoom_to = street_zoom();
+    this.zoom_to = this.zoom;
     this.release = 0.0;
     this.release_len = release_time();
 }
@@ -513,6 +551,35 @@ fn rig_pose(fx, fz, zoom, yaw) {
 // Distance from the focus (m) at a zoom.
 fn rig_distance(zoom) {
     near_distance() * (far_distance() / near_distance()) ** zoom
+}
+
+// The least zoom from `from` on, up to the district's, at which the rig
+// looking at the ground under `at` (facing `yaw`) has `at` itself within
+// `framing_angle` of the middle of the frame.
+fn framing_zoom(at, from, yaw) {
+    let z = from.min(district_zoom());
+    while z < district_zoom() {
+        let pose = rig_pose(at[0], at[2], z, yaw);
+        let lx = pose.tx - pose.px;
+        let ly = pose.ty - pose.py;
+        let lz = pose.tz - pose.pz;
+        let sx = at[0] - pose.px;
+        let sy = at[1] - pose.py;
+        let sz = at[2] - pose.pz;
+        let cos = (lx * sx + ly * sy + lz * sz)
+            / ((lx * lx + ly * ly + lz * lz) * (sx * sx + sy * sy + sz * sz)).sqrt();
+        if cos >= framing_angle().to_radians().cos() { return z; }
+        z += 0.01;
+    }
+    district_zoom()
+}
+// Off the middle of the frame (degrees) a shot's subject may be once the
+// rig has it: well inside the 35° to the frame's top and bottom.
+fn framing_angle() { 20.0 }
+
+// The zoom that stands the camera `d` m from the focus.
+fn zoom_at(d) {
+    ((d / near_distance()).ln() / (far_distance() / near_distance()).ln()).max(0.0).min(1.0)
 }
 
 // Tilt in degrees below level at a zoom: up from closest to street, held

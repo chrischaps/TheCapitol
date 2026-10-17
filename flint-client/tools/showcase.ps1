@@ -27,10 +27,10 @@ if (-not $Exe) {
 }
 $out = "renders\showcase"
 New-Item -ItemType Directory -Force $out | Out-Null
-# The best shadows, and a slow camera so held keys make a steady move
-# (the rig's zoom is too quick to film at the usual speed, issue #92).
+# The best shadows. The clip's move is keyframed (--camera-path, issue
+# #92), so the camera settings don't touch it.
 $settings = Join-Path $env:TEMP "capitol-showcase-settings.toml"
-Set-Content -Encoding ascii $settings "[graphics]`nshadows = `"high`"`n[camera]`nsensitivity = 0.25`n"
+Set-Content -Encoding ascii $settings "[graphics]`nshadows = `"high`"`n"
 $common = @("--offline", "fixtures\terrain.json", "--width", $Width, "--height", $Height,
     "--settings-file", $settings, "--mute", "--clean")
 
@@ -47,10 +47,10 @@ if (-not $NoClip) {
     $frames = "$out\clip"
     if (Test-Path $frames) { Remove-Item -Recurse -Force $frames }
     New-Item -ItemType Directory -Force $frames | Out-Null
-    Write-Host "clip: 9.5 s at 30 fps"
-    & $Exe @common --view street --input-script tools\showcase-orbit.txt `
+    Write-Host "clip: 11 s at 30 fps"
+    & $Exe @common --camera-path tools\showcase-path.txt `
         --frame-step 0.033333333 --screenshot "$frames\f.png" `
-        --screenshot-at 0.5 --screenshot-every 0.033333333 --exit-after 10
+        --screenshot-at 0.5 --screenshot-every 0.033333333 --exit-after 11.5
     if ($LASTEXITCODE -ne 0) { throw "clip capture failed" }
     ffmpeg -y -loglevel error -framerate 30 -i "$frames\f_%04d.png" `
         -c:v libx264 -pix_fmt yuv420p -crf 18 -preset slow -movflags +faststart "$out\capitol.mp4"

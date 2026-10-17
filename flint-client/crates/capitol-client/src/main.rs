@@ -10,6 +10,7 @@
 //! window (game egui) stay until the living world (P4) replaces them.
 
 mod atmosphere;
+mod camera_path;
 #[cfg(test)]
 mod camera_rig;
 mod coords;
@@ -68,6 +69,12 @@ struct Args {
         "from-urban", "from-suburban", "from-rural", "from-wilderness",
     ])]
     view: String,
+    /// Offline, film a camera move: a file of timed keys, each where the
+    /// camera stands and what it looks at (`t px py pz tx ty tz`, world
+    /// metres; see camera_path.rs). It takes the place of --view, holds at
+    /// its last key, and the first camera input lets go of it into the rig
+    #[arg(long, value_name = "FILE", requires = "offline")]
+    camera_path: Option<PathBuf>,
 
     #[arg(long, default_value_t = 1280)]
     width: u32,
@@ -241,6 +248,9 @@ fn main() -> Result<()> {
     let shared = script_api::Shared::default();
     *shared.note.lock().unwrap() = args.note;
     *shared.view.lock().unwrap() = args.view;
+    if let Some(path) = &args.camera_path {
+        *shared.camera_path.lock().unwrap() = Some(camera_path::CameraPath::load(path)?);
+    }
     shared
         .clean
         .store(args.clean, std::sync::atomic::Ordering::Relaxed);
@@ -297,6 +307,7 @@ fn enter_game_dir(args: &mut Args) -> Result<()> {
     }
     args.offline.iter_mut().for_each(absolute);
     args.screenshot.iter_mut().for_each(absolute);
+    args.camera_path.iter_mut().for_each(absolute);
     args.input_script.iter_mut().for_each(absolute_str);
     args.settings_file.iter_mut().for_each(absolute_str);
     std::env::set_current_dir(dir)

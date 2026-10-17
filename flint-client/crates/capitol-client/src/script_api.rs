@@ -18,6 +18,9 @@ pub struct Shared {
     pub note: Arc<Mutex<String>>,
     /// The camera view the script frames (`--view`).
     pub view: Arc<Mutex<String>>,
+    /// A camera move to film (`--camera-path`, issue #92), played by the
+    /// rig in place of the view.
+    pub camera_path: Arc<Mutex<Option<crate::camera_path::CameraPath>>>,
     /// A clean capture (`--clean`, P8.7): offline, no inscription panel
     /// and no free-point mark, just the city.
     pub clean: Arc<AtomicBool>,
@@ -240,6 +243,23 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     let view = shared.view.clone();
     engine.register_fn("cap_view", move || -> String {
         view.lock().map(|s| s.clone()).unwrap_or_default()
+    });
+    // `cap_camera_path(t) -> #{ pos, at, done }`: the camera move from
+    // --camera-path at game time t, `done` once it has reached its last key.
+    // () with no path.
+    let path = shared.camera_path.clone();
+    engine.register_fn("cap_camera_path", move |t: f64| -> rhai::Dynamic {
+        let path = path.lock().unwrap();
+        let Some(path) = path.as_ref() else {
+            return rhai::Dynamic::UNIT;
+        };
+        let p = path.at(t);
+        let mut m = rhai::Map::new();
+        let v = |a: &[f64]| a.iter().map(|&x| x.into()).collect::<rhai::Array>();
+        m.insert("pos".into(), v(&p[..3]).into());
+        m.insert("at".into(), v(&p[3..]).into());
+        m.insert("done".into(), (t >= path.end()).into());
+        m.into()
     });
     // `cap_clean() -> bool`: a clean capture (--clean), so draw no marks
     // that are only there to steer by.
