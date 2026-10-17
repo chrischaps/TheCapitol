@@ -202,10 +202,13 @@ fn jitter() -> f64 {
 /// Whether an `auth_error` means the token is no good. The server also sends
 /// `auth_error` when `auth` didn't arrive within 10 s, or when the database
 /// failed while loading the player (`backend/src/ws/connection.rs`,
-/// `handle_socket`). Neither says anything about the token, so those are
-/// retried.
+/// `handle_socket`), or when it couldn't reach Redis to check the session
+/// (`SESSIONS_UNAVAILABLE` in `backend/src/error.rs`, #75). None of these
+/// says anything about the token, so they're retried.
 pub(crate) fn auth_error_is_final(message: &str) -> bool {
-    !(message == "Auth timeout" || message.starts_with("Database error"))
+    !(message == "Auth timeout"
+        || message.starts_with("Database error")
+        || message == "Session store unavailable")
 }
 
 /// One connection: connect, handshake, then pump until it ends. Sets
@@ -436,6 +439,7 @@ mod tests {
         assert!(auth_error_is_final("Session expired"));
         assert!(auth_error_is_final("Player not found"));
         assert!(!auth_error_is_final("Auth timeout"));
+        assert!(!auth_error_is_final("Session store unavailable"));
         assert!(!auth_error_is_final(
             "Database error: pool timed out while waiting for an open connection"
         ));

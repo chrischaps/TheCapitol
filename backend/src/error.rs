@@ -5,6 +5,11 @@ use axum::{
 };
 use serde_json::json;
 
+/// What the server answers when it can't reach Redis, where sessions live.
+/// It's a 503 over REST and an `auth_error` over the WebSocket. It says
+/// nothing about the token, so clients should retry, not sign out (#75).
+pub const SESSIONS_UNAVAILABLE: &str = "Session store unavailable";
+
 #[derive(Debug)]
 pub enum AppError {
     BadRequest(String),
@@ -33,7 +38,7 @@ impl IntoResponse for AppError {
             }
             AppError::Redis(e) => {
                 tracing::error!("Redis error: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Cache error".into())
+                (StatusCode::SERVICE_UNAVAILABLE, SESSIONS_UNAVAILABLE.into())
             }
             AppError::Jwt(e) => {
                 tracing::error!("JWT error: {:?}", e);

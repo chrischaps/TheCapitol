@@ -18,6 +18,7 @@ use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo, TradeOff
 use crate::engine::container_access::{check_container_access, live_position};
 use crate::engine::GameEvent;
 use crate::models::PlayerState;
+use crate::error::SESSIONS_UNAVAILABLE;
 use crate::routes::auth::Claims;
 use crate::state::AppState;
 
@@ -824,7 +825,10 @@ async fn validate_token(token: &str, state: &AppState) -> Result<Claims, String>
     // Verify session in Redis
     let mut redis = state.redis.clone();
     let session_key = format!("session:{}", token_data.claims.sub);
-    let stored_token: Option<String> = redis.get(&session_key).await.ok().flatten();
+    let stored_token: Option<String> = redis.get(&session_key).await.map_err(|e| {
+        tracing::error!("Redis error checking a session: {:?}", e);
+        SESSIONS_UNAVAILABLE.to_string()
+    })?;
 
     if stored_token.as_deref() != Some(token) {
         return Err("Session expired".into());

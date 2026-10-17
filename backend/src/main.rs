@@ -56,8 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Migrations complete");
 
     // Redis connection
-    let redis_client = redis::Client::open(config.redis_url.clone())?;
-    let redis_conn = redis::aio::ConnectionManager::new(redis_client).await?;
+    let redis_conn = state::connect_redis(&config.redis_url).await?;
     tracing::info!("Connected to Redis");
 
     // Load world gen params from DB (if previously saved by admin), else use defaults

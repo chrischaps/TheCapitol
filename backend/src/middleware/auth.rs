@@ -10,6 +10,7 @@ use jsonwebtoken::{decode, DecodingKey, Validation};
 use redis::AsyncCommands;
 use uuid::Uuid;
 
+use crate::error::SESSIONS_UNAVAILABLE;
 use crate::routes::auth::Claims;
 use crate::state::AppState;
 
@@ -59,7 +60,17 @@ pub async fn auth_middleware(
     // Verify session exists in Redis
     let mut redis = state.redis.clone();
     let session_key = format!("session:{}", token_data.claims.sub);
-    let stored_token: Option<String> = redis.get(&session_key).await.unwrap_or(None);
+    let stored_token: Option<String> = match redis.get(&session_key).await {
+        Ok(stored) => stored,
+        Err(e) => {
+            // Not a 401: the token may be fine, and a 401 signs the client out.
+            tracing::error!("Redis error checking a session: {:?}", e);
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": SESSIONS_UNAVAILABLE })),
+            ));
+        }
+    };
 
     if stored_token.as_deref() != Some(token) {
         return Err((
