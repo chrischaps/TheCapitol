@@ -2080,7 +2080,7 @@ mod tests {
         });
         let kit = output(&session).items().next().unwrap().clone();
         let chest_box = station_box(&session).unwrap();
-        // An empty slot: a swap would fail (#81).
+        // Into an empty slot, so nothing comes back out in a swap.
         session.move_item(Move {
             item_id: kit.item_id,
             target_container_id: chest_box.id,

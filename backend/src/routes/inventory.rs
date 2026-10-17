@@ -11,6 +11,7 @@ use capitol_protocol::rest::{
 };
 
 use crate::engine::container_access::{check_container_access, live_position};
+use crate::engine::slot_moves::{apply_move, SlotMove};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::{quality_to_grade, Container, ContainerType, Item, ItemType, SlotItem};
@@ -214,81 +215,24 @@ pub async fn move_item(
         return Err(AppError::Forbidden("That slot holds someone else's item".into()));
     }
 
-    let response = match target_item {
-        None => {
-            // Target empty: simple move
-            sqlx::query(
-                "UPDATE items SET container_id = $1, slot_index = $2 WHERE id = $3"
-            )
-            .bind(req.target_container_id)
-            .bind(req.target_slot)
-            .bind(req.item_id)
-            .execute(&state.db)
-            .await?;
-
-            MoveItemResponse {
-                success: true,
-                action: "moved".to_string(),
-                merged_quantity: None,
-                merged_quality: None,
-            }
-        }
-        Some(target) if target.item_type == source_item.item_type => {
-            // Same type: merge stacks
-            let new_qty = source_item.quantity + target.quantity;
-            let new_quality = (source_item.quality * source_item.quantity
-                + target.quality * target.quantity)
-                / new_qty;
-
-            // Update target with merged values
-            sqlx::query("UPDATE items SET quantity = $1, quality = $2 WHERE id = $3")
-                .bind(new_qty)
-                .bind(new_quality)
-                .bind(target.id)
-                .execute(&state.db)
-                .await?;
-
-            // Delete source item
-            sqlx::query("DELETE FROM items WHERE id = $1")
-                .bind(req.item_id)
-                .execute(&state.db)
-                .await?;
-
-            MoveItemResponse {
-                success: true,
-                action: "merged".to_string(),
-                merged_quantity: Some(new_qty),
-                merged_quality: Some(new_quality),
-            }
-        }
-        Some(target) => {
-            // Different type: swap
-            let source_container_id = source_item.container_id;
-            let source_slot = source_item.slot_index;
-
-            // Move source to target's location
-            sqlx::query("UPDATE items SET container_id = $1, slot_index = $2 WHERE id = $3")
-                .bind(req.target_container_id)
-                .bind(req.target_slot)
-                .bind(req.item_id)
-                .execute(&state.db)
-                .await?;
-
-            // Move target to source's location
-            sqlx::query("UPDATE items SET container_id = $1, slot_index = $2 WHERE id = $3")
-                .bind(source_container_id)
-                .bind(source_slot)
-                .bind(target.id)
-                .execute(&state.db)
-                .await?;
-
-            MoveItemResponse {
-                success: true,
-                action: "swapped".to_string(),
-                merged_quantity: None,
-                merged_quality: None,
-            }
-        }
+    let done = apply_move(
+        &state.db,
+        &source_item,
+        req.target_container_id,
+        req.target_slot,
+        target_item.as_ref(),
+    )
+    .await?;
+    let (action, merged_quantity, merged_quality) = match done {
+        SlotMove::Moved => ("moved", None, None),
+        SlotMove::Merged { quantity, quality } => ("merged", Some(quantity), Some(quality)),
+        SlotMove::Swapped => ("swapped", None, None),
+    };
+    let response = MoveItemResponse {
+        success: true,
+        action: action.to_string(),
+        merged_quantity,
+        merged_quality,
     };
 
     Ok(Json(response))

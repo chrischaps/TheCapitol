@@ -1023,72 +1023,16 @@ async fn handle_move_item(
         return Err("That slot holds someone else's item".into());
     }
 
-    match target_item {
-        None => {
-            // Target empty: simple move
-            sqlx::query(
-                "UPDATE items SET container_id = $1, slot_index = $2 WHERE id = $3"
-            )
-            .bind(target_container_id)
-            .bind(target_slot)
-            .bind(item_id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| format!("Database error: {}", e))?;
-
-            Ok(source_item.container_id)
-        }
-        Some(target) if target.item_type == source_item.item_type => {
-            // Same type: merge stacks
-            let new_qty = source_item.quantity + target.quantity;
-            let new_quality = (source_item.quality * source_item.quantity
-                + target.quality * target.quantity)
-                / new_qty;
-
-            // Update target with merged values
-            sqlx::query("UPDATE items SET quantity = $1, quality = $2 WHERE id = $3")
-                .bind(new_qty)
-                .bind(new_quality)
-                .bind(target.id)
-                .execute(&state.db)
-                .await
-                .map_err(|e| format!("Database error: {}", e))?;
-
-            // Delete source item
-            sqlx::query("DELETE FROM items WHERE id = $1")
-                .bind(item_id)
-                .execute(&state.db)
-                .await
-                .map_err(|e| format!("Database error: {}", e))?;
-
-            Ok(source_item.container_id)
-        }
-        Some(target) => {
-            // Different type: swap
-            let source_container_id = source_item.container_id;
-            let source_slot = source_item.slot_index;
-
-            // Move source to target's location
-            sqlx::query("UPDATE items SET container_id = $1, slot_index = $2 WHERE id = $3")
-                .bind(target_container_id)
-                .bind(target_slot)
-                .bind(item_id)
-                .execute(&state.db)
-                .await
-                .map_err(|e| format!("Database error: {}", e))?;
-
-            // Move target to source's location
-            sqlx::query("UPDATE items SET container_id = $1, slot_index = $2 WHERE id = $3")
-                .bind(source_container_id)
-                .bind(source_slot)
-                .bind(target.id)
-                .execute(&state.db)
-                .await
-                .map_err(|e| format!("Database error: {}", e))?;
-
-            Ok(source_item.container_id)
-        }
-    }
+    crate::engine::slot_moves::apply_move(
+        &state.db,
+        &source_item,
+        target_container_id,
+        target_slot,
+        target_item.as_ref(),
+    )
+    .await
+    .map_err(|e| format!("Database error: {}", e))?;
+    Ok(source_item.container_id)
 }
 
 /// The containers a move changed, each once: the target, then the source if

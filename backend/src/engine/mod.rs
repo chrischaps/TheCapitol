@@ -11,6 +11,7 @@ pub mod node_placement;
 pub mod plot_sync;
 pub mod property_tax;
 mod regeneration;
+pub mod slot_moves;
 mod stations;
 mod tick;
 pub mod trading;
