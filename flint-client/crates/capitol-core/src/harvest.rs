@@ -267,7 +267,8 @@ mod tests {
         h.click(NODE, &state, now);
         let changes = state.apply_ws(&M::MovementBlocked {
             player_id: ME,
-            reason: "Cannot cross moat without a bridge".into(),
+            reason: "Cannot cross the moat without a bridge".into(),
+            water_id: "moat".into(),
             stopped_x: 4100.0,
             stopped_y: 4000.0,
         });

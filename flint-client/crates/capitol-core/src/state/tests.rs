@@ -366,7 +366,8 @@ fn movement_blocked_moves_me_back() {
     let mut state = with_players();
     let blocked = |player_id| M::MovementBlocked {
         player_id,
-        reason: "water".into(),
+        reason: "Cannot cross the moat without a bridge".into(),
+        water_id: "moat".into(),
         stopped_x: 3990.0,
         stopped_y: 4001.0,
     };
@@ -378,7 +379,8 @@ fn movement_blocked_moves_me_back() {
     assert_eq!(
         events,
         vec![StateEvent::MovementBlocked {
-            reason: "water".into(),
+            reason: "Cannot cross the moat without a bridge".into(),
+            water: "moat".into(),
             x: 3990.0,
             y: 4001.0
         }]

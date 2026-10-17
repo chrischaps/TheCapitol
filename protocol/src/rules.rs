@@ -235,8 +235,22 @@ pub struct WaterBlock {
     /// Where the mover stops: just short of the water's edge.
     pub x: f64,
     pub y: f64,
-    /// ID of the ring that blocked it (`moat`, `inner_canal`, ...).
+    /// ID of the ring that blocked it (`moat`, `canal_inner`, ...).
     pub ring_id: String,
+}
+
+/// A water ring's name, for people: `canal_outer` is "the outer canal".
+/// An id it doesn't know reads as itself, underscores as spaces. The
+/// server's `movement_blocked` reason says it, and a client can say it
+/// from the message's `water_id`.
+pub fn water_name(ring_id: &str) -> String {
+    match ring_id {
+        "moat" => "the moat".into(),
+        "canal_inner" => "the inner canal".into(),
+        "canal_outer" => "the outer canal".into(),
+        "" => "the water".into(),
+        other => format!("the {}", other.replace('_', " ")),
+    }
 }
 
 /// How far short of the water's edge a blocked move stops.
@@ -390,6 +404,15 @@ mod tests {
             assert_eq!(deposit_quote(n).0, n / 200, "deposit {n}");
             assert_eq!(withdraw_quote(n).0, (200 * n + 198) / 199, "withdraw {n}");
         }
+    }
+
+    #[test]
+    fn the_water_is_named_for_people() {
+        assert_eq!(water_name("canal_outer"), "the outer canal");
+        assert_eq!(water_name("canal_inner"), "the inner canal");
+        assert_eq!(water_name("moat"), "the moat");
+        assert_eq!(water_name("canal_far"), "the canal far");
+        assert_eq!(water_name(""), "the water");
     }
 
     #[test]

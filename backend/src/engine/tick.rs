@@ -547,6 +547,7 @@ impl GameState {
                 let _ = self.event_sender.send(GameEvent::MovementBlocked {
                     player_id: player.id,
                     reason: blocked.reason,
+                    water_id: blocked.water_id,
                     stopped_x: blocked.stopped_x,
                     stopped_y: blocked.stopped_y,
                 });

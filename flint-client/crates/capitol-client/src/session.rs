@@ -181,8 +181,11 @@ pub struct Blocked {
     /// Where you stand now, in server units.
     pub x: f64,
     pub y: f64,
-    /// The server's words, such as "Cannot cross Moat without a bridge".
+    /// The server's words, such as "Cannot cross the moat without a bridge".
     pub reason: String,
+    /// The ring that stopped you (`moat`, `canal_inner`, ...), empty from a
+    /// server older than #74.
+    pub water: String,
     /// Where you were going when the water stopped you, if it was a click.
     pub toward: Option<(f64, f64)>,
 }
@@ -1071,11 +1074,17 @@ impl Session {
             self.motion.observe(now, &changes, &self.state);
             for change in &changes {
                 match change {
-                    StateEvent::MovementBlocked { reason, x, y } => {
+                    StateEvent::MovementBlocked {
+                        reason,
+                        water,
+                        x,
+                        y,
+                    } => {
                         self.blocked.push(Blocked {
                             x: *x,
                             y: *y,
                             reason: reason.clone(),
+                            water: water.clone(),
                             toward: self.last_move.take(),
                         });
                     }

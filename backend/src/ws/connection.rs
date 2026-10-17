@@ -779,10 +779,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         }
                     }
                     // Terrain events
-                    Ok(GameEvent::MovementBlocked { player_id: pid, reason, stopped_x, stopped_y }) => {
+                    Ok(GameEvent::MovementBlocked { player_id: pid, reason, water_id, stopped_x, stopped_y }) => {
                         // Only send to the player who was blocked
                         if pid == player_id {
-                            let msg = ServerMessage::MovementBlocked { player_id: pid, reason, stopped_x, stopped_y };
+                            let msg = ServerMessage::MovementBlocked { player_id: pid, reason, water_id, stopped_x, stopped_y };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }

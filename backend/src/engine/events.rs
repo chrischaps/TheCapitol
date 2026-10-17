@@ -171,6 +171,7 @@ pub enum GameEvent {
     MovementBlocked {
         player_id: Uuid,
         reason: String,
+        water_id: String,
         stopped_x: f64,
         stopped_y: f64,
     },

@@ -946,7 +946,7 @@ impl Bot {
 
 fn blocked(seen: &[StateEvent]) -> Option<BotError> {
     seen.iter().find_map(|e| match e {
-        StateEvent::MovementBlocked { reason, x, y } => Some(BotError::Blocked {
+        StateEvent::MovementBlocked { reason, x, y, .. } => Some(BotError::Blocked {
             reason: reason.clone(),
             x: *x,
             y: *y,

@@ -41,7 +41,7 @@ use capitol_core::harvest::Note;
 use capitol_core::net::ConnectionState;
 use capitol_core::onboarding::Did;
 use capitol_core::plot::Offer;
-use capitol_core::protocol::rules::{STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
+use capitol_core::protocol::rules::{water_name, STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
 use capitol_core::protocol::terrain::TerrainResponse;
 use capitol_core::station::{Note as PlaceNote, Phase as PlacePhase};
 use flint_player::{ExtensionCtx, PlayerExtension};
@@ -933,7 +933,7 @@ fn walk(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Shar
         data.insert("z".into(), (z as f64).into());
         data.insert("dir_x".into(), (dx as f64).into());
         data.insert("dir_z".into(), (dz as f64).into());
-        data.insert("water".into(), water_name(&blocked.reason).into());
+        data.insert("water".into(), water_name(&blocked.water).into());
         data.insert("reason".into(), blocked.reason.into());
         ctx.fire_event("movement_blocked", data);
     }
@@ -1420,23 +1420,6 @@ fn note_words(note: &Note) -> (&'static str, String) {
     }
 }
 
-/// The water a `movement_blocked` reason names, for people: the server says
-/// "Cannot cross canal_outer without a bridge", with the ring's id. A
-/// workaround: the message has no field for it (issue #74).
-fn water_name(reason: &str) -> String {
-    let id = reason
-        .strip_prefix("Cannot cross ")
-        .and_then(|r| r.strip_suffix(" without a bridge"))
-        .unwrap_or("water");
-    match id {
-        "moat" => "the moat".into(),
-        "canal_inner" => "the inner canal".into(),
-        "canal_outer" => "the outer canal".into(),
-        "water" => "the water".into(),
-        other => format!("the {}", other.replace('_', " ")),
-    }
-}
-
 /// One entity per sector mesh, made the first time that mesh has anything
 /// in it. A rebuild replaces the meshes by name, so the entities stay; one
 /// whose mesh is now empty draws nothing.
@@ -1452,19 +1435,5 @@ fn attach_each<'a>(ctx: &mut ExtensionCtx, names: impl Iterator<Item = &'a Strin
         if let Err(e) = attached {
             tracing::warn!("world: no entity for {name}: {e}");
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::water_name;
-
-    #[test]
-    fn the_water_is_named_for_people() {
-        let name = |id: &str| water_name(&format!("Cannot cross {id} without a bridge"));
-        assert_eq!(name("canal_outer"), "the outer canal");
-        assert_eq!(name("moat"), "the moat");
-        assert_eq!(name("canal_far"), "the canal far");
-        assert_eq!(water_name("something else"), "the water");
     }
 }

@@ -1,6 +1,6 @@
 use crate::models::{PlayerState, TerrainConfig, Zone, ZoneTransition};
 
-use capitol_protocol::rules::{ARRIVAL_EPSILON, TICK_SECS as TICK_DURATION_SECS};
+use capitol_protocol::rules::{water_name, ARRIVAL_EPSILON, TICK_SECS as TICK_DURATION_SECS};
 
 /// Result of processing movement
 pub struct MovementResult {
@@ -12,6 +12,8 @@ pub struct MovementResult {
 /// Information about blocked movement
 pub struct MovementBlocked {
     pub reason: String,
+    /// The ring that stopped the move (`moat`, `canal_inner`, ...).
+    pub water_id: String,
     pub stopped_x: f64,
     pub stopped_y: f64,
 }
@@ -65,8 +67,10 @@ pub fn process_movement(player: &mut PlayerState, terrain: &TerrainConfig) -> Mo
             player.dest_x = None;
             player.dest_y = None;
 
+            let water_id = validation.blocked_by.unwrap_or_default();
             blocked_result = Some(MovementBlocked {
-                reason: format!("Cannot cross {} without a bridge", validation.blocked_by.unwrap_or_else(|| "water".to_string())),
+                reason: format!("Cannot cross {} without a bridge", water_name(&water_id)),
+                water_id,
                 stopped_x: player.x,
                 stopped_y: player.y,
             });
@@ -186,11 +190,12 @@ mod tests {
         // Move until blocked
         for _ in 0..50 {
             let result = process_movement(&mut player, &terrain);
-            if result.blocked.is_some() {
-                assert!(result.blocked.unwrap().reason.contains("moat"));
+            if let Some(blocked) = result.blocked {
+                assert_eq!(blocked.water_id, "moat");
+                assert_eq!(blocked.reason, "Cannot cross the moat without a bridge");
                 return;
             }
         }
-        // If we got here, the path might have been too short to cross
+        panic!("the moat never stopped the walk");
     }
 }

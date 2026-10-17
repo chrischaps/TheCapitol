@@ -126,8 +126,11 @@ pub enum StateEvent {
     /// A `positions` snapshot arrived. Positions are server truth, 100 ms apart.
     PositionsUpdated,
     /// The local player hit water. Their server position is now `(x, y)`.
+    /// `water` is the ring's id (`moat`, `canal_inner`, ...), empty from a
+    /// server older than #74.
     MovementBlocked {
         reason: String,
+        water: String,
         x: f64,
         y: f64,
     },
@@ -362,6 +365,7 @@ impl GameState {
             M::MovementBlocked {
                 player_id,
                 reason,
+                water_id,
                 stopped_x,
                 stopped_y,
             } => {
@@ -372,6 +376,7 @@ impl GameState {
                     }
                     out.push(StateEvent::MovementBlocked {
                         reason: reason.clone(),
+                        water: water_id.clone(),
                         x: *stopped_x,
                         y: *stopped_y,
                     });
