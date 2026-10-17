@@ -279,6 +279,11 @@ impl SplitMix64 {
         (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
 
+    /// Uniform in [0, n), for n > 0. The modulo bias is under n / 2⁶⁴.
+    pub(crate) fn below(&mut self, n: u64) -> u64 {
+        self.next_u64() % n
+    }
+
     /// Uniform in [lo, hi).
     pub(crate) fn range(&mut self, lo: f64, hi: f64) -> f64 {
         lo + (hi - lo) * self.next_f64()

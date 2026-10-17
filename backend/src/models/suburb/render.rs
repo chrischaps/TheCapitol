@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot, WaterRing};
 
 use super::metrics::{self, fmt_num, Marker, Metrics, Scope, Violation, TARGETS};
+use super::neighbourhood::{BufferKind, Neighbourhood};
 
 type P = (f64, f64);
 
@@ -29,6 +30,10 @@ const INK: &str = "#2e2a24";
 const VIOLATION: &str = "#d7263d";
 const TRIMMED: &str = "#e8820c";
 const DROPPED: &str = "#c2189b";
+/// The Neighbourhood layout's scaffolding: frames, green buffers, entrances.
+const FRAME: &str = "#8a6d3b";
+const GREEN: &str = "#cfe0b4";
+const ENTRANCE: &str = "#1f6f8b";
 
 /// What a road is for, as the plan view colours it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -115,6 +120,8 @@ pub struct View<'a> {
     pub metrics: &'a Metrics,
     pub markers: &'a [Marker],
     pub violations: &'a [Violation],
+    /// The neighbourhoods, for the Neighbourhood layout's overlays.
+    pub neighbourhoods: &'a [Neighbourhood],
 }
 
 fn hex(c: &str) -> (f64, f64, f64) {
@@ -206,6 +213,8 @@ pub fn svg(v: &View) -> String {
         );
     }
 
+    neighbourhood_ground(&mut s, v, k);
+
     // Lots: suburban ones shaded by area with the street edge darker, the
     // rest a quiet grey. Trimmed lots get an orange edge.
     let _ = writeln!(s, r##"<g stroke-linejoin="round">"##);
@@ -272,7 +281,13 @@ pub fn svg(v: &View) -> String {
         Role::Arterial => 2,
         _ => 1,
     };
-    let mut roads: Vec<&RoadSegment> = v.roads.iter().filter(|r| r.points.iter().any(|&p| in_view(p))).collect();
+    // By extent, not by point: an arterial is two points, both outside a sector's view.
+    let box_in_view = |r: &&RoadSegment| {
+        let (x0, x1) = r.points.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.0), b.max(p.0)));
+        let (y0, y1) = r.points.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.1), b.max(p.1)));
+        x1 > lo.0 - 200.0 && x0 < hi.0 + 200.0 && y1 > lo.1 - 200.0 && y0 < hi.1 + 200.0
+    };
+    let mut roads: Vec<&RoadSegment> = v.roads.iter().filter(box_in_view).collect();
     roads.sort_by_key(|r| order(r));
     let _ = writeln!(s, r##"<g fill="none" stroke-linecap="round" stroke-linejoin="round">"##);
     for r in roads {
@@ -312,9 +327,101 @@ pub fn svg(v: &View) -> String {
     }
     let _ = writeln!(s, "</g>");
 
+    neighbourhood_marks(&mut s, v, k);
     legend(&mut s, v, lo, k, h);
     s.push_str("</svg>\n");
     s
+}
+
+/// Under the lots: the green buffers, each frame's outline dashed, and its
+/// rows dotted where the streets will run.
+fn neighbourhood_ground(s: &mut String, v: &View, k: f64) {
+    let in_scope = |n: &&Neighbourhood| v.scope.sector.is_none_or(|x| x == n.sector);
+    let _ = writeln!(s, r##"<g stroke-linejoin="round">"##);
+    for n in v.neighbourhoods.iter().filter(in_scope) {
+        for b in &n.buffers {
+            let label = match b.kind {
+                BufferKind::Arterial => "arterial buffer",
+                BufferKind::Greenway => "greenway",
+                BufferKind::Edge => "edge strip",
+            };
+            let _ = writeln!(
+                s,
+                r##"<polygon points="{}" fill="{GREEN}" fill-opacity="{}"><title>s{}·{} {label}</title></polygon>"##,
+                poly(&b.polygon),
+                if b.kind == BufferKind::Edge { 0.45 } else { 0.85 },
+                n.sector,
+                n.index
+            );
+        }
+    }
+    for n in v.neighbourhoods.iter().filter(in_scope) {
+        let f = &n.frame;
+        let _ = writeln!(
+            s,
+            r##"<polygon points="{}" fill="none" stroke="{FRAME}" stroke-width="{:.2}" stroke-dasharray="{:.1} {:.1}"/>"##,
+            poly(&f.outline()),
+            1.8 * k,
+            12.0 * k,
+            7.0 * k
+        );
+        for &row in f.fit.iter().flat_map(|fit| &fit.rows) {
+            let _ = writeln!(
+                s,
+                r##"<polyline points="{}" fill="none" stroke="{FRAME}" stroke-opacity="0.55" stroke-width="{:.2}" stroke-dasharray="{:.1} {:.1}"/>"##,
+                poly(&f.iso_v(row, 0.0, f.width)),
+                1.2 * k,
+                2.0 * k,
+                5.0 * k
+            );
+        }
+    }
+    let _ = writeln!(s, "</g>");
+}
+
+/// Over the roads: entrances, and a label in the middle of each frame.
+fn neighbourhood_marks(s: &mut String, v: &View, k: f64) {
+    let in_scope = |n: &&Neighbourhood| v.scope.sector.is_none_or(|x| x == n.sector);
+    for n in v.neighbourhoods.iter().filter(in_scope) {
+        let f = &n.frame;
+        for e in &n.entrances {
+            let _ = writeln!(
+                s,
+                r##"<g stroke="{ENTRANCE}"><line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke-width="{:.2}"/><circle cx="{:.1}" cy="{:.1}" r="{:.1}" fill="{ENTRANCE}" stroke="none"><title>s{}·{} entrance, row {} · arterial {} at {:.0}</title></circle></g>"##,
+                e.gate.0,
+                e.gate.1,
+                e.at.0,
+                e.at.1,
+                3.0 * k,
+                e.at.0,
+                e.at.1,
+                7.0 * k,
+                n.sector,
+                n.index,
+                e.row,
+                e.arterial,
+                e.along
+            );
+        }
+        let c = f.to_world(f.width / 2.0, f.depth / 2.0);
+        let fit = match &f.fit {
+            Some(fit) => format!("{} rows · lots {:.0} deep", fit.rows.len(), fit.lot_depth),
+            None => "no rows fit".to_string(),
+        };
+        for (dy, size, weight, body) in
+            [(-10.0, 22.0, "bold", format!("s{}·{}", n.sector, n.index)), (16.0, 16.0, "normal", fit)]
+        {
+            let _ = writeln!(
+                s,
+                r##"<text x="{:.1}" y="{:.1}" font-size="{:.1}" font-weight="{weight}" fill="{FRAME}" text-anchor="middle" stroke="{PAPER}" stroke-width="{:.1}" paint-order="stroke">{}</text>"##,
+                c.0,
+                c.1 + dy * k,
+                size * k,
+                4.0 * k,
+                esc(&body)
+            );
+        }
+    }
 }
 
 /// A stable key for a lot's corners, to match a finished lot to its trimmed shape.
@@ -422,6 +529,53 @@ fn legend(s: &mut String, v: &View, lo: P, k: f64, h: f64) {
             tx + 48.0 * k,
             17.0 * k
         );
+        y += line;
+    }
+    if !v.neighbourhoods.is_empty() {
+        let swatch = |s: &mut String, y: f64, body: &str| {
+            let _ = writeln!(
+                s,
+                r##"<text x="{:.1}" y="{y:.1}" font-size="{:.1}" fill="{INK}">{}</text>"##,
+                tx + 48.0 * k,
+                17.0 * k,
+                esc(body)
+            );
+        };
+        let _ = writeln!(
+            s,
+            r##"<line x1="{tx:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{FRAME}" stroke-width="{:.1}" stroke-dasharray="{:.1} {:.1}"/>"##,
+            y - 10.0 * k,
+            tx + 34.0 * k,
+            y - 10.0 * k,
+            1.8 * k,
+            6.0 * k,
+            4.0 * k
+        );
+        swatch(s, y, "neighbourhood frame, rows dotted");
+        y += line;
+        let _ = writeln!(
+            s,
+            r##"<rect x="{tx:.1}" y="{:.1}" width="{:.1}" height="{:.1}" fill="{GREEN}"/>"##,
+            y - 18.0 * k,
+            34.0 * k,
+            16.0 * k
+        );
+        swatch(s, y, "buffer, greenway, edge strip");
+        y += line;
+        let _ = writeln!(
+            s,
+            r##"<circle cx="{:.1}" cy="{:.1}" r="{:.1}" fill="{ENTRANCE}"/>"##,
+            tx + 17.0 * k,
+            y - 10.0 * k,
+            7.0 * k
+        );
+        let count: usize = v
+            .neighbourhoods
+            .iter()
+            .filter(|n| v.scope.sector.is_none_or(|x| x == n.sector))
+            .map(|n| n.entrances.len())
+            .sum();
+        swatch(s, y, &format!("entrance ({count})"));
         y += line;
     }
     let _ = writeln!(
@@ -631,6 +785,10 @@ mod tests {
                 Some(s) => format!("{} · seed {seed} · sector {s}", capitalise(&layout)),
                 None => format!("{} · seed {seed}", capitalise(&layout)),
             };
+            let neighbourhoods = match suburb_layout {
+                SuburbLayout::Neighbourhood => super::super::plan(&params.suburban_params(), scope.center).neighbourhoods,
+                SuburbLayout::Legacy => Vec::new(),
+            };
             let view = View {
                 title,
                 roads: &t.roads,
@@ -642,6 +800,7 @@ mod tests {
                 metrics: &m,
                 markers: &measured.markers,
                 violations: &viol,
+                neighbourhoods: &neighbourhoods,
             };
             std::fs::write(out.join(format!("{name}.svg")), svg(&view)).unwrap();
             let json = serde_json::json!({ "metrics": m, "violations": viol, "markers": measured.markers });
@@ -698,6 +857,7 @@ mod tests {
             metrics: &measured.metrics,
             markers: &measured.markers,
             violations: &viol,
+            neighbourhoods: &[],
         };
         let doc = svg(&view);
         assert!(doc.starts_with("<svg") && doc.trim_end().ends_with("</svg>"));

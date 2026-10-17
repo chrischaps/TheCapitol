@@ -69,11 +69,18 @@ Post-war suburbs look different:
 
 ### 4.1 Neighbourhoods and frames
 1. **Neighbourhoods.** Each 45° sector between arterials is a neighbourhood. A seeded choice may split it by angle along a mid-angle greenway. A radial split is not used: 800 deep halves to about 375, which fits one street and wastes the rest.
+   - *As built (#106):* the sector's own stream, `stream(seed, [sector])`, draws the split, with probability `split_chance` (0.5). The greenway is `greenway_width` (40) wide, and each half's side line is inset half of that from its centre line. A split stands only if both halves fit rows and are at least two street spacings (2·(2·110+16)) across at the inner edge. Otherwise the sector stays whole. At the default radii every split fits.
 2. **Frame.** Each neighbourhood gets a smooth frame `F(u,v) → world`:
    - v is radial depth.
    - u runs between the two sides, which are lines parallel to the arterials (inset e = half the arterial width + a 20 buffer): `θ_min(r) = θ_i + asin(e/r)`.
    - A gentle shared warp `r += A·sin(2πu/λ+φ)` (A ≤ 40, λ ≥ 1200) gives every street the same curve, so spacing stays exact.
-   - Optional: rotate the frame so rows run radially, for the quadrant look of the aerial photo.
+   - Optional: rotate the frame so rows run radially, for the quadrant look of the aerial photo. *Not built in #106; left to #111 if the images want it.*
+   - *As built (#106, `suburb/frame.rs`):*
+     - u is in world units: `u = t·U`, where t runs 0 to 1 between the side lines at a given radius, and U is the frame's width at mid-depth. So λ means the same in every neighbourhood.
+     - The base band is inset by A from each zone edge. v = 0 is r = inner + A before the warp, and depth D = 800 − 2A, which is 740 at A = 30. The warped back lines (v = 0 and v = D) then stay inside the annulus and touch its edges only at the warp's crests.
+     - The leftover between a back line and the zone edge is an *edge strip*, a `Buffer` of kind `Edge`. #108 and #111 may give it lots or a path.
+     - F and its inverse are closed forms: `r = base + v + w(u)` and `θ = θ_lo(r) + t·(θ_hi(r) − θ_lo(r))`.
+     - The phase φ is the first draw from the neighbourhood's stream.
 3. **Streets are iso-lines of the frame.** Offsetting a curvy spine was considered and dropped: it gets cusps wherever the curve's radius is under the offset distance, and clipping it leaves slivers. Tensor-field streamlines were also dropped: too much machinery for 16 neighbourhoods. Iso-lines need neither, and their junctions come out near 90°.
 4. **Row fit.** Fit the row count to the band: `d = (W − n·w)/2n` must fall in [95,130]. For W = 800, n = 3 gives d ≈ 125.
 5. **Building blocks:**
@@ -83,6 +90,9 @@ Post-war suburbs look different:
    - racetrack (two rows joined by two U-turns);
    - comb (stems every S off a carrier);
    - entrance: 2–4 per neighbourhood, at least 150 apart, and across an arterial either aligned exactly or offset by at least 80.
+     - *As built (#106):* the candidates are the row ends on a neighbourhood's arterial sides. Each one has a `gate` on the side line and an `at` on the arterial's centre line, at the perpendicular foot. The stream shuffles them, with one from each arterial side first, then draws a wanted count in [2, 4].
+     - Neighbourhoods allocate in sector order. A later one skips candidates that clash with earlier entrances across the arterial. If that leaves it short of 2, it takes a clashing candidate and lines its `at` up exactly with the one it clashed with, so the stub slants.
+     - The patterns may re-target entrances (a racetrack's rows aren't the frame's rows), but they must keep these rules. The test `entrances_keep_their_spacing` checks them over 200 seeds.
 6. **Patterns.** Each pattern has a `fits(frame)` test. A seeded weighted pick chooses only among those that fit, so there is no reject-and-retry.
    - **(a) Warped parallels:**
      - fitted rows, joined by rail T-links every L ≈ 400;
@@ -137,7 +147,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - Pass the plan as a local, so `version()` is unaffected.
 - **Params (#105):**
   - `SuburbanGenParams::layout` (`legacy` or `neighbourhood` on the wire) and `::neighbourhood: NeighbourhoodParams`, both `#[serde(default)]`, so `world_config` rows and admin PUTs from before #105 still load.
-  - `NeighbourhoodParams` (`#[serde(default)]` on the struct, so a partial object loads): `lot_frontage` 60, `lot_depth` 110 (`lot_depth_min` 95, `lot_depth_max` 130), `local_width` 16, `collector_width` 20, `buffer` 20, `link_spacing` (L) 400, `bulb_radius` 13, `cul_de_sac_max` 300, `warp_amplitude` (A) 30, `warp_wavelength` (λ) 1600, `pattern_weights` (1 each), and `force_pattern` for tests. Tune A and λ in #111.
+  - `NeighbourhoodParams` (`#[serde(default)]` on the struct, so a partial object loads): `lot_frontage` 60, `lot_depth` 110 (`lot_depth_min` 95, `lot_depth_max` 130), `local_width` 16, `collector_width` 20, `buffer` 20, `split_chance` 0.5, `greenway_width` 40 (both added in #106), `link_spacing` (L) 400, `bulb_radius` 13, `cul_de_sac_max` 300, `warp_amplitude` (A) 30, `warp_wavelength` (λ) 1600, `pattern_weights` (1 each), and `force_pattern` for tests. Tune A and λ in #111.
   - **One resolved set of radii:** `WorldGenParams::suburban_params()` takes the radii, seed and arterial width from the world. Roads and lots both read it, and `suburban.inner_radius`, `outer_radius` and `seed` have no effect. Before #105 the lots read `suburban`'s own radii. For the default world the two sets agreed, so the pin didn't move.
   - **Pin:** `legacy_default_terrain_version_is_pinned` holds `get_default().version()` at `6006800ab79fbff8`.
   - **React:** the Suburban section of `WorldTweakPanel` has a Layout select. `neighbourhood` is optional in `api/admin.ts`, so a reset leaves it to the server's defaults.
@@ -147,7 +157,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 - **Outputs:** an SVG per layout and seed, metrics JSON, an `index.html` grid and a markdown table.
 - **PNG:** `backend/tools/suburb-plan.ps1` runs the test in release and converts each SVG with headless Chrome. Look at the PNGs beside `reference/`.
 - **Script options:** `-Seeds`, `-Layout`, `-Sector n` and `-Out`. `-Compare <dir>` writes `compare.html`, with each plan beside the one of the same name in an earlier run.
-- **Reading the SVG:** roads are drawn at true width and coloured by role. Suburban lots are shaded by area, with the street edge darker. Lots `finish_lots` trimmed are edged orange, and lots it dropped are drawn dashed magenta at their generated shape. A red ring marks each place that breaks a target; hover it in a browser for the reason.
+- **Reading the SVG:** roads are drawn at true width and coloured by role. Suburban lots are shaded by area, with the street edge darker. Lots `finish_lots` trimmed are edged orange, and lots it dropped are drawn dashed magenta at their generated shape. A red ring marks each place that breaks a target; hover it in a browser for the reason. For the Neighbourhood layout (#106), the view also draws each frame dashed, with its rows dotted, a label giving the row count and lot depth, the green buffers, greenways and edge strips, and each entrance as a stub from its gate to a dot on the arterial.
 - **Definitions that also work for Legacy (`suburb/metrics.rs`):**
   - **neighbourhood:** a 45° sector between arterials;
   - **entrance:** a vertex shared by a suburban road and any other road;
@@ -164,7 +174,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 | suburban 4-ways | 0 |
 | junction angle | ≥ 70° |
 | T spacing along a road | min ≥ 40, p10 ≥ 150 |
-| entrances per neighbourhood | 2–4 |
+| entrances per neighbourhood | 2–4 (`metrics` counts per sector, so a split sector may show up to 8 until it learns about neighbourhoods) |
 | cul-de-sac | ≤ 300 long, ≤ 20 lots |
 | parallel spacing | median 236 ± 20, p5 ≥ 200 |
 | connected to an arterial | 100% |

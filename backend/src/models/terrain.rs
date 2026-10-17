@@ -111,6 +111,10 @@ pub struct NeighbourhoodParams {
     pub collector_width: f64,
     /// Green strip between a neighbourhood's edge and the arterial.
     pub buffer: f64,
+    /// How often a sector splits into two neighbourhoods, by angle, and the
+    /// width of the greenway between them.
+    pub split_chance: f64,
+    pub greenway_width: f64,
     /// Spacing of the T links between parallel rows (L).
     pub link_spacing: f64,
     /// Cul-de-sac turnaround radius, and the longest stem.
@@ -135,6 +139,8 @@ impl Default for NeighbourhoodParams {
             local_width: 16.0,
             collector_width: 20.0,
             buffer: 20.0,
+            split_chance: 0.5,
+            greenway_width: 40.0,
             link_spacing: 400.0,
             bulb_radius: 13.0,
             cul_de_sac_max: 300.0,
@@ -838,8 +844,10 @@ impl TerrainConfig {
         let suburban_params = params.suburban_params();
         match suburban_params.layout {
             SuburbLayout::Legacy => roads.extend(self.generate_suburban_streets_with_params(&suburban_params)),
-            // Its streets come with pattern (a), #107.
-            SuburbLayout::Neighbourhood => {}
+            // Neighbourhoods and frames only so far: streets come with pattern (a), #107.
+            SuburbLayout::Neighbourhood => {
+                roads.extend(super::suburb::plan(&suburban_params, (self.center_x, self.center_y)).roads)
+            }
         }
 
         // Rural trails

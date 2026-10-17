@@ -30,6 +30,8 @@ export interface NeighbourhoodParams {
   local_width: number
   collector_width: number
   buffer: number
+  split_chance: number
+  greenway_width: number
   link_spacing: number
   bulb_radius: number
   cul_de_sac_max: number
