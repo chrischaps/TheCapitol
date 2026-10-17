@@ -389,10 +389,10 @@ fn place_red() { [0.937, 0.267, 0.267] }
 
 // Everything round the ghost while a station is placed.
 fn draw_placement(p, now) {
-    let y = cap_ground_y() + 0.02;
+    let y = cap_mark_y();
     // Your plots: gold outlines, breathing, so the ground you may build on
     // stands out from the lots around it.
-    let lot_y = cap_ground_y() + 0.12;
+    let lot_y = cap_mark_y();
     let glow = 0.5 + 0.12 * (now * 2.0).sin();
     for q in p.plots {
         for i in 0..4 {
@@ -459,18 +459,12 @@ fn dist(ax, az, bx, bz) {
     (dx * dx + dz * dz).sqrt()
 }
 
-// A straight line along the ground from (ax, az) to (bx, bz), in short
-// projected pieces so it follows the perspective.
+// Marks on the ground are world lines (#86): drawn in the 3D frame, so
+// whatever stands in front of them hides them. Lay them at cap_mark_y().
+
+// A straight line along the ground from (ax, az) to (bx, bz).
 fn ground_line(ax, az, bx, bz, y, c, alpha, width) {
-    let steps = (dist(ax, az, bx, bz) / 2.0).to_int() + 1;
-    let prev = ();
-    for i in 0..=steps {
-        let t = i.to_float() / steps.to_float();
-        let p = world_to_screen(ax + (bx - ax) * t, y, az + (bz - az) * t);
-        if !p.visible { prev = (); continue; }
-        if prev != () { draw_line(prev.x, prev.y, p.x, p.y, c[0], c[1], c[2], alpha, width); }
-        prev = p;
-    }
+    draw_world_line(ax, y, az, bx, y, bz, c[0], c[1], c[2], alpha, width);
 }
 
 // A ring of `dashes` dashes, turned by `turn` radians.
@@ -486,7 +480,7 @@ fn dashed_ring(cx, cz, y, r, c, alpha, width, dashes, turn) {
 // and brightens as `reach` eases up, React's half-alpha orange at full,
 // with four marks outside it turning a quarter turn every eight seconds.
 fn draw_station_ring(s, now) {
-    let y = cap_ground_y() + 0.02;
+    let y = cap_mark_y();
     let c = station_orange();
     let k = s.reach;
     let r = s.radius * (1.2 - 0.2 * k);
@@ -498,15 +492,22 @@ fn draw_station_ring(s, now) {
     }
 }
 
-// A ring of radius r (m) on the ground at (cx, cz), as projected segments.
+// A ring of radius r (m) on the ground at (cx, cz), in `steps` segments.
 fn ring(cx, cz, y, r, c, alpha, width, steps) {
-    let prev = ();
-    for i in 0..=steps {
-        let a = i.to_float() / steps.to_float() * 2.0 * PI();
-        let p = world_to_screen(cx + r * a.cos(), y, cz + r * a.sin());
-        if !p.visible { prev = (); continue; }
-        if prev != () { draw_line(prev.x, prev.y, p.x, p.y, c[0], c[1], c[2], alpha, width); }
-        prev = p;
+    arc_steps(cx, cz, y, r, 0.0, 2.0 * PI(), c, alpha, width, steps);
+}
+
+// An arc from a0 to a1 in `steps` world-line segments.
+fn arc_steps(cx, cz, y, r, a0, a1, c, alpha, width, steps) {
+    let px = cx + r * a0.cos();
+    let pz = cz + r * a0.sin();
+    for i in 1..=steps {
+        let a = a0 + (a1 - a0) * i.to_float() / steps.to_float();
+        let qx = cx + r * a.cos();
+        let qz = cz + r * a.sin();
+        draw_world_line(px, y, pz, qx, y, qz, c[0], c[1], c[2], alpha, width);
+        px = qx;
+        pz = qz;
     }
 }
 
@@ -522,7 +523,7 @@ fn draw_path(x0, z0, x1, z1, now, strength) {
     let uz = dz / len;
     let step = (len / 90.0).max(1.4);
     let dash = step * 0.55;
-    let y = cap_ground_y();
+    let y = cap_mark_y();
     let c = gold();
     let s = (now * 1.6 % 1.0) * step;
     // Stop short of the ring, start clear of your feet.
@@ -532,11 +533,8 @@ fn draw_path(x0, z0, x1, z1, now, strength) {
         let b = (s + dash).min(end);
         if b > a {
             let fade = ((a - 0.8) / 2.5).min(1.0);
-            let p = world_to_screen(x0 + ux * a, y, z0 + uz * a);
-            let q = world_to_screen(x0 + ux * b, y, z0 + uz * b);
-            if p.visible && q.visible {
-                draw_line(p.x, p.y, q.x, q.y, c[0], c[1], c[2], strength * fade, 1.5);
-            }
+            draw_world_line(x0 + ux * a, y, z0 + uz * a, x0 + ux * b, y, z0 + uz * b,
+                            c[0], c[1], c[2], strength * fade, 1.5);
         }
         s += step;
     }
@@ -545,7 +543,7 @@ fn draw_path(x0, z0, x1, z1, now, strength) {
 // Where you're going: a gold ring with a soft halo, settling in from wide
 // as it appears, and closing to a point as you arrive.
 fn draw_marker(m, now) {
-    let y = cap_ground_y();
+    let y = cap_mark_y();
     let c = gold();
     let born = smooth(((now - m.seen) / 0.35).min(1.0));
     let r = 1.0 + 0.8 * (1.0 - born);
@@ -563,23 +561,16 @@ fn draw_marker(m, now) {
 }
 
 // An arc of a ring on the ground, from angle a0 to a1 (radians, 0 east,
-// a quarter turn south), as projected segments.
+// a quarter turn south), 48 segments to the full turn.
 fn arc(cx, cz, y, r, a0, a1, c, alpha, width) {
     let steps = ((a1 - a0).abs() / (2.0 * PI()) * 48.0).to_int() + 2;
-    let prev = ();
-    for i in 0..=steps {
-        let a = a0 + (a1 - a0) * i.to_float() / steps.to_float();
-        let p = world_to_screen(cx + r * a.cos(), y, cz + r * a.sin());
-        if !p.visible { prev = (); continue; }
-        if prev != () { draw_line(prev.x, prev.y, p.x, p.y, c[0], c[1], c[2], alpha, width); }
-        prev = p;
-    }
+    arc_steps(cx, cz, y, r, a0, a1, c, alpha, width, steps);
 }
 
 // The tuft you're walking to: four gold arcs turning slowly round it, a
 // faint ring inside them, breathing. React's targeting ring, with aim.
 fn draw_sight(n, now) {
-    let y = cap_ground_y();
+    let y = cap_mark_y();
     let c = gold();
     let r = sight_ring() * (1.0 + 0.06 * (now * 3.0).sin());
     let spin = now * 0.9;
@@ -593,7 +584,7 @@ fn draw_sight(n, now) {
 // The reticle over a tuft you could take: it settles round the tuft
 // rather than lying under the cursor, so you can see the click will gather.
 fn draw_reticle_on(n, now) {
-    let y = cap_ground_y();
+    let y = cap_mark_y();
     let c = gold();
     let r = sight_ring() * (1.0 + 0.04 * (now * 2.4).sin());
     ring(n.x, n.z, y, r, c, 0.7, 1.5, 44);
@@ -604,7 +595,7 @@ fn draw_reticle_on(n, now) {
 // north as it goes. Gold when it's yours, a pale green when it's someone
 // else's, with a bead at the leading edge.
 fn draw_work(n, now) {
-    let y = cap_ground_y() + 0.02;
+    let y = cap_mark_y();
     let r = work_ring();
     let c = if n.mine { gold() } else { [0.66, 0.84, 0.69] };
     let w = if n.mine { 3.0 } else { 2.0 };
@@ -698,7 +689,7 @@ fn lilac() { [0.80, 0.72, 1.0] }
 // clockwise from north, a bead at its leading edge, and two strands
 // winding round outside it opposite ways.
 fn draw_craft(p, now) {
-    let y = p.feet_y + 0.03;
+    let y = feet_mark(p.feet_y);
     let r = craft_ring();
     let c = craft_purple();
     let a = p.alpha * (if p.me { 1.0 } else { 0.6 });
@@ -735,18 +726,28 @@ fn trade_blue() { [0.231, 0.510, 0.965] }
 // Someone shift would ask: a blue ring at their feet, closing in a little
 // as it breathes, with a fainter one outside.
 fn draw_trade_ring(p, now) {
-    let y = p.feet_y + 0.03;
+    let y = feet_mark(p.feet_y);
     let c = trade_blue();
     let r = 0.85 + 0.05 * (now * 3.0).sin();
     ring(p.x, p.z, y, r, c, 0.85, 2.0, 40);
     ring(p.x, p.z, y, r * 1.45, c, 0.25, 1.0, 48);
 }
 
+// Under a player's feet: a little over them, and never under the marks'
+// layer, so a lot or a road doesn't hide the ring.
+fn feet_mark(feet_y) { (feet_y + 0.03).max(cap_mark_y()) }
+
 // A point on the strand between you (a) and them (b), t from 0 to 1, at
-// hand height with a little sag, lifted by `lift` metres.
-fn strand_at(a, b, t, lift) {
+// hand height with a little sag, lifted by `lift` metres, in the world.
+fn strand_point(a, b, t, lift) {
     let y = a[1] + (b[1] - a[1]) * t + strand_height() - 0.25 * (PI() * t).sin() + lift;
-    world_to_screen(a[0] + (b[0] - a[0]) * t, y, a[2] + (b[2] - a[2]) * t)
+    [a[0] + (b[0] - a[0]) * t, y, a[2] + (b[2] - a[2]) * t]
+}
+
+// The same point on the screen.
+fn strand_at(a, b, t, lift) {
+    let p = strand_point(a, b, t, lift);
+    world_to_screen(p[0], p[1], p[2])
 }
 
 // The strand between you and whoever you're trading with. A request is a
@@ -763,16 +764,14 @@ fn draw_strand(you, trade, now) {
     if trade.state != "open" {
         // From the asker: you when asking, them when they've asked you.
         let dir = if trade.state == "asking" { 1.0 } else { -1.0 };
-        let prev = ();
-        for i in 0..=steps {
+        let prev = strand_point(a, b, 0.0, 0.0);
+        for i in 1..=steps {
             let t = i.to_float() / steps.to_float();
-            let p = strand_at(a, b, t, 0.0);
-            if !p.visible { prev = (); continue; }
-            if prev != () {
-                let flow = ((t * 3.0 - dir * now * 0.8) % 1.0 + 1.0) % 1.0;
-                let glow = 0.12 + 0.35 * smooth(1.0 - (flow - 0.5).abs() * 2.0);
-                draw_line(prev.x, prev.y, p.x, p.y, blue[0], blue[1], blue[2], glow, 1.5);
-            }
+            let p = strand_point(a, b, t, 0.0);
+            let flow = ((t * 3.0 - dir * now * 0.8) % 1.0 + 1.0) % 1.0;
+            let glow = 0.12 + 0.35 * smooth(1.0 - (flow - 0.5).abs() * 2.0);
+            draw_world_line(prev[0], prev[1], prev[2], p[0], p[1], p[2],
+                            blue[0], blue[1], blue[2], glow, 1.5);
             prev = p;
         }
         return;
@@ -785,8 +784,7 @@ fn draw_strand(you, trade, now) {
         for i in 0..=steps {
             let t = i.to_float() / steps.to_float();
             let twist = 0.06 * (t * turns * 2.0 * PI() + phase + now * 1.4).sin();
-            let p = strand_at(a, b, t, twist);
-            if !p.visible { prev = (); continue; }
+            let p = strand_point(a, b, t, twist);
             if prev != () {
                 // Your end golds as you accept, theirs as they do.
                 let mine = if trade.mine { smooth((0.55 - t) / 0.3) } else { 0.0 };
@@ -795,7 +793,8 @@ fn draw_strand(you, trade, now) {
                 let c = [blue[0] + (g[0] - blue[0]) * w,
                          blue[1] + (g[1] - blue[1]) * w,
                          blue[2] + (g[2] - blue[2]) * w];
-                draw_line(prev.x, prev.y, p.x, p.y, c[0], c[1], c[2], 0.75, 1.5);
+                draw_world_line(prev[0], prev[1], prev[2], p[0], p[1], p[2],
+                                c[0], c[1], c[2], 0.75, 1.5);
             }
             prev = p;
         }
@@ -810,7 +809,7 @@ fn draw_traded(d, you, now) {
     let feet = if you != () { you[1] } else { cap_ground_y() };
     let ease = 1.0 - (1.0 - k) * (1.0 - k);
     for end in [[d.x, d.z], [d.tx, d.tz]] {
-        ring(end[0], end[1], feet + 0.03, 0.5 + 1.8 * ease, g, 0.85 * (1.0 - k), 2.0, 44);
+        ring(end[0], end[1], feet_mark(feet), 0.5 + 1.8 * ease, g, 0.85 * (1.0 - k), 2.0, 44);
     }
     if k > 0.5 { return; }
     let a = [d.x, feet, d.z];
@@ -861,12 +860,9 @@ fn draw_plot_edge(p, now, flare) {
             let mid = along + lens[i] * (t0 + t1) / 2.0;
             let behind = (head - mid + total) % total;
             let lit = if behind < run { 1.0 - behind / run } else { 0.0 };
-            let p0 = world_to_screen(a[0] + (b[0] - a[0]) * t0, p.y, a[1] + (b[1] - a[1]) * t0);
-            let p1 = world_to_screen(a[0] + (b[0] - a[0]) * t1, p.y, a[1] + (b[1] - a[1]) * t1);
-            if p0.visible && p1.visible {
-                draw_line(p0.x, p0.y, p1.x, p1.y, c[0], c[1], c[2],
-                          (base + 0.5 * lit).min(1.0), width + lit);
-            }
+            draw_world_line(a[0] + (b[0] - a[0]) * t0, p.y, a[1] + (b[1] - a[1]) * t0,
+                            a[0] + (b[0] - a[0]) * t1, p.y, a[1] + (b[1] - a[1]) * t1,
+                            c[0], c[1], c[2], (base + 0.5 * lit).min(1.0), width + lit);
         }
         along += lens[i];
     }
@@ -891,7 +887,7 @@ fn draw_sprout(s, now) {
     let k = (now - s.born) / sprout_life();
     let ease = 1.0 - (1.0 - k) * (1.0 - k);
     let c = [0.42, 0.64, 0.47];
-    ring(s.x, s.z, cap_ground_y() + 0.02, 0.4 + 1.6 * ease, c, 0.7 * (1.0 - k), 1.5, 40);
+    ring(s.x, s.z, cap_mark_y(), 0.4 + 1.6 * ease, c, 0.7 * (1.0 - k), 1.5, 40);
 }
 
 // Two gold rings spreading over the ground from where the click landed,
@@ -902,7 +898,7 @@ fn draw_ripple(rip, now) {
         if age <= 0.0 || age >= 1.0 { continue; }
         let ease = 1.0 - (1.0 - age) * (1.0 - age);
         let alpha = 0.85 * (1.0 - age) * (1.0 - age);
-        ring(rip.x, rip.z, cap_ground_y(), 0.3 + 5.5 * ease, gold(), alpha, 1.5, 48);
+        ring(rip.x, rip.z, cap_mark_y(), 0.3 + 5.5 * ease, gold(), alpha, 1.5, 48);
     }
 }
 
@@ -935,15 +931,13 @@ fn draw_reticle(g, now) {
     let breathe = 1.0 + 0.06 * (now * 2.4).sin();
     let r = 0.9 * breathe;
     let c = gold();
-    let y = cap_ground_y();
+    let y = cap_mark_y();
     ring(g[0], g[1], y, r, c, 0.9, 1.5, 40);
     ring(g[0], g[1], y, r * 1.9, c, 0.25, 1.0, 56);
     for a in [0.0, 0.5 * PI(), PI(), 1.5 * PI()] {
-        let p = world_to_screen(g[0] + r * 1.25 * a.cos(), y, g[1] + r * 1.25 * a.sin());
-        let q = world_to_screen(g[0] + r * 1.7 * a.cos(), y, g[1] + r * 1.7 * a.sin());
-        if p.visible && q.visible {
-            draw_line(p.x, p.y, q.x, q.y, c[0], c[1], c[2], 0.7, 1.5);
-        }
+        draw_world_line(g[0] + r * 1.25 * a.cos(), y, g[1] + r * 1.25 * a.sin(),
+                        g[0] + r * 1.7 * a.cos(), y, g[1] + r * 1.7 * a.sin(),
+                        c[0], c[1], c[2], 0.7, 1.5);
     }
 }
 

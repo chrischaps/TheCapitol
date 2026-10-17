@@ -615,9 +615,12 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             p.insert(name.to_owned(), Instant::now());
         }
     });
-    // `cap_ground_y() -> float`: the land's height in metres, for picking
-    // and for drawing on the ground. The sea is at 0.
+    // `cap_ground_y() -> float`: the land's height in metres, for picking.
+    // The sea is at 0.
     engine.register_fn("cap_ground_y", || crate::coords::layer::GROUND as f64);
+    // `cap_mark_y() -> float`: where marks on the ground are drawn with
+    // `draw_world_line`, above every road and lot and under the curbs (#86).
+    engine.register_fn("cap_mark_y", || crate::coords::layer::MARK as f64);
     // `cap_crown_y() -> float`: just above the tip of the Capitol's needle,
     // in metres, where the inscription hangs.
     engine.register_fn("cap_crown_y", || crate::world::tower::CROWN_Y as f64);

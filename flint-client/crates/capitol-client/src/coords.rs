@@ -43,6 +43,12 @@ pub mod layer {
     /// pavement. The server clears lots off the roads (B7), so they never
     /// overlap; each has a curb a few centimetres higher round its edge.
     pub const PLOT: f32 = GROUND + 0.12;
+    /// Where the scripts lay marks on the ground (rings, paths, the
+    /// reticle) now that they're depth-tested world lines (#86): a step
+    /// over the lots, so roads, lots and the gold on your own don't hide
+    /// them, and under every curb's lip, so a ring crossing one passes
+    /// behind it as paint would. Over bare land it floats 16 cm up.
+    pub const MARK: f32 = PLOT + 0.04;
     /// The paving inside the moat (P3.7), level with the arterials, so the
     /// moat bridge's ramp lands on it 2 cm up, as it does on a road.
     pub const BAILEY: f32 = ROAD + 0.06;
@@ -144,6 +150,7 @@ mod tests {
         assert!(roads.windows(2).all(|w| w[0] < w[1]));
         assert!(roads[3] + 0.02 <= layer::PLOT);
         assert_eq!(layer::BAILEY, roads[3]);
+        assert!(layer::PLOT + 0.02 < layer::MARK && layer::MARK < layer::BANK);
         const { assert!(layer::PLOT < layer::BANK && layer::BANK < layer::DECK) };
         const { assert!(layer::CHANNEL_BED < layer::SEA && layer::SEA < layer::GROUND) };
         const { assert!(layer::CHANNEL_BED < layer::ARCH_SPRING && layer::ARCH_SPRING < layer::SEA) };
