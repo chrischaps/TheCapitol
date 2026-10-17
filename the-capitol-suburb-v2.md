@@ -129,11 +129,19 @@ At 1600–2400 every neighbourhood frame was 740 deep, so every one fitted exact
        - **Moved entrances.** Where `allocate_entrances` moved an entrance's `at`, every row on that side bends by the same smoothstep ramp, over max(200, 8·shift), so the stub meets the arterial square on and the spacing holds. A row with its own unmoved entrance stays straight. The #106 overlay still draws such a stub from the original gate.
        - **Weld.** `weld_junctions` snaps an end to the *first* vertex of a segment within `SNAP`, even when the next is exact (#114). So a row keeps its other vertices at least 0.6·STEP (in u) from a rail's.
        - **`StreetMeta`** (role Row/Link/CulDeSac, fronted sides, bulb centre, sector and nbhd) comes back in `SuburbPlan::meta`, one per road. Rows and cul-de-sacs are fronted both sides; rails neither, so the rows own the corners. A row's entrance stub runs through the buffer, where #108 must lay no lots.
-       - **Pattern pick.** `choose` takes one draw from the stream whatever the outcome. (b) and (c) don't fit until #109 and #110, so `force_pattern` set to one of them falls back to (a).
+       - **Pattern pick.** `choose` takes one draw from the stream whatever the outcome. (c) doesn't fit until #110, so `force_pattern` set to it falls back to a weighted pick among the patterns that fit. Since #109, (a) and (b) both fit a whole sector, so the Neighbourhood layout mixes them.
        - At seeds 42, 7, 1234 and 99999: audit clean, no 4-ways, junctions ≥ 71.6°, T spacing ≥ 136 (p10 ≥ 173), stems ≤ 290, 100% connected, parallel spacing median 246, p5 ≥ 231.
    - **(b) Loops and lollipops:**
      - an inset racetrack collector, with one lot row between it and the edge, backing onto the buffer;
      - opposed combs of cul-de-sacs inside it, about 230 long, roughly 12 lots each.
+     - *As built (#109, `suburb/loops.rs`):*
+       - **`fits`:** three rows or more, depth ≥ 4S and width ≥ 3S at the first row, with S = 2·`lot_depth` + `local_width` (236). At the default radii every whole sector fits, and no split half does (they are under 3S across at the first row), so the halves get (a).
+       - **Racetrack.** Its rows are the frame's first and last (v = pitch/2 from each back line). Its legs sit the same distance in from the side lines, measured in the world (`side_u`), so the lot row beside a leg is as deep as the rows'. Corners have that radius too, drawn as quarter circles in coordinates measured from the leg. It is `collector_width` (20) wide, one closed road starting at the inner comb's first stem, so the start is a junction.
+       - **Entrances.** One on a middle frame row is a stub `entrance_{s}_{n}_{k}` (Link, no lots) from the leg, at the depth whose foot on the arterial is its `at`, so a moved one still meets the arterial square on. One on the first or last row *squares off* that corner: the row runs straight through to the gate, bending (`Ramp`) to a moved `at`, and the leg ends on it in a T. The racetrack then splits into a road per stretch between squared corners. A stretch that would start or end on itself in a T is split again at the stem junction nearest its middle, because a road ending on itself reads as a lollipop.
+       - **Combs.** Stems are iso-u lines a street spacing apart (in the world, at the comb's mid-depth), the first a leg's lots and a stem's lots in from each leg. The outer comb is half a spacing out of step with the inner, so each bulb points between two across the band, and their pies cover what four bulbs facing in pairs would leave. A stem wants its pies to reach the middle of the band, but stops at `cul_de_sac_max − STEP` (290): the 1140 band would want about 316. Ids are `culdesac_{s}_{n}_{i|o}{j}`.
+       - **Loops.** Each neighbouring pair of stems becomes one loop street with chance 0.25 (`LOOP_CHANCE`, a const until #111 tunes it). Two stems join in a half circle, round in the world, its apex a lot's depth short of the middle. Ids are `loop_{s}_{n}_{i|o}{j}`, role Row, fronted both sides.
+       - At seeds 42, 7, 1234 and 99999 (forced, so (a) in the split halves): audit clean, no 4-ways, junctions ≥ 72.6°, T spacing ≥ 164 (p10 ≥ 197), stems ≤ 290, at most 13 lots on a cul-de-sac, 100% connected. Lots: 1947–1992, area median 6800–6860, p5 ≥ 4530, width median 64, depth median 106. No overlaps, all convex, nothing trimmed or dropped.
+       - **Gap 12–13%** over the world, against (a)'s 8–10%. Most of it is the band between the two combs' pies, which the 290 stem limit leaves, plus the corners between neighbouring bulbs. It suits a green spine and pocket parks (#111). `loops_and_lollipops_meet_their_targets` holds it at ≤ 14%.
    - **(c) Central loop (PW2):**
      - a flattened racetrack with a park inside;
      - radial cul-de-sacs pointing outward from it.
@@ -167,6 +175,11 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 - **Depth.** Back to back means a fronted road within 2·`lot_depth_max` (260), not 2·D: a row fit may go to 130 deep. A lot backing onto open ground (a back line, the zone edge, a side line) may go to `lot_depth_max`, not `lot_depth`, which takes up most of the edge strips. A lot backing onto a road that has no lots stops at `lot_depth`.
 - **Bulbs.** The stem's lots stop 20 short of the bulb, so the pies wrap about 240°. The pie count is the most of 5 down to 2 whose every pie holds 0.65 × frontage × depth. At 4–5, as the plan had it, a 160° bulb gives pies under 4000. A pie's first and last edges are the stem's last rays, shared exactly.
 - **Overlap order: pies, then rows, then stems.** A row's ray passing beside a bulb finds nothing behind it and runs a full lot deep into the pies' ground. A row lot gives that back easily, but a pie shrunk that far falls under the area floor. A lot also has to be clear of every road, convex and at least 0.45 × frontage × depth, or it shrinks (down to 60% depth) or is dropped.
+- **Changed in #109, for pattern (b)'s combs:**
+  - A lot backing onto open ground goes to `lot_depth_max` only if its ray leaves the neighbourhood within 2·`lot_depth_max` (an edge strip, a side line). Open ground deeper inside is for other streets' lots, so it gets `lot_depth`. Otherwise the racetrack's inner lots ran 130 deep beside the stems and took their ground. Pies are the exception: facing the middle of a (b) band, they take `lot_depth_max` to fill it.
+  - A pie's back-to-back half way is measured from the street's edge (half width), not the bulb's, as the stem lots it backs onto are. Otherwise pies reached past the shared rear line, and the stem lots placed after them shrank along their whole depth.
+  - The corner a through road owns from a meeting street is `width/2 + lot_depth + 1`. The 1 covers the through road's lots starting a hair off its edge, which otherwise dropped the meeting street's first lot.
+  - Pattern (a)'s numbers barely move: gap 8–10% as before.
 - **Ids** are `sub_{sector}_{nbhd}_{street}_{L|R|B}_{k}`. `street` is the street's place among its neighbourhood's in the plan, B marks pies, and k is numbered before the overlap pass.
 - **Gap: 8–10%, not ≤ 5%.** Measured at seed 42, the gap is:
   - 4.3% inside frames: mostly the corners between a U-turn's or bulb's fan of lots and a straight side line, where the ground behind the fan runs over 130 deep;
@@ -186,6 +199,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - `frame.rs`
   - `neighbourhood.rs`
   - `patterns.rs`
+  - `loops.rs`, pattern (b) (#109)
   - `lots.rs` (#108)
   - `graph.rs`
   - `metrics.rs`
@@ -205,10 +219,10 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - **React:** the Suburban section of `WorldTweakPanel` has a Layout select. `neighbourhood` is optional in `api/admin.ts`, so a reset leaves it to the server's defaults.
 
 ### 4.4 Harness and targets
-- **Report test:** `#[ignore]` test `suburb::render::tests::suburb_plan_report`. Env: `SUBURB_SEEDS`, `SUBURB_LAYOUT`, `SUBURB_SECTOR`, `SUBURB_OUT` (default `target/suburb-plan/`).
+- **Report test:** `#[ignore]` test `suburb::render::tests::suburb_plan_report`. Env: `SUBURB_SEEDS`, `SUBURB_LAYOUT`, `SUBURB_PATTERN` (#109), `SUBURB_SECTOR`, `SUBURB_OUT` (default `target/suburb-plan/`).
 - **Outputs:** an SVG per layout and seed, metrics JSON, an `index.html` grid and a markdown table.
 - **PNG:** `backend/tools/suburb-plan.ps1` runs the test in release and converts each SVG with headless Chrome. Look at the PNGs beside `reference/`.
-- **Script options:** `-Seeds`, `-Layout`, `-Sector n`, `-Inner` and `-Outer` (the suburb's radii, #117) and `-Out`. `-Compare <dir>` writes `compare.html`, with each plan beside the one of the same name in an earlier run.
+- **Script options:** `-Seeds`, `-Layout`, `-Pattern` (force one pattern wherever it fits, #109), `-Sector n`, `-Inner` and `-Outer` (the suburb's radii, #117) and `-Out`. `-Compare <dir>` writes `compare.html`, with each plan beside the one of the same name in an earlier run.
 - **Reading the SVG:** roads are drawn at true width and coloured by role. Suburban lots are shaded by area, with the street edge darker. Lots `finish_lots` trimmed are edged orange, and lots it dropped are drawn dashed magenta at their generated shape. A red ring marks each place that breaks a target; hover it in a browser for the reason. For the Neighbourhood layout (#106), the view also draws each frame dashed, with its rows dotted, a label giving the row count and lot depth, the green buffers, greenways and edge strips, and each entrance as a stub from its gate to a dot on the arterial.
 - **Definitions that also work for Legacy (`suburb/metrics.rs`):**
   - **neighbourhood:** a 45° sector between arterials;

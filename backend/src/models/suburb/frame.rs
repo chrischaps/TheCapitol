@@ -125,11 +125,11 @@ impl Frame {
         Some(frame)
     }
 
-    fn theta_lo(&self, r: f64) -> f64 {
+    pub(crate) fn theta_lo(&self, r: f64) -> f64 {
         self.lo.angle + (self.lo.inset / r).asin()
     }
 
-    fn theta_hi(&self, r: f64) -> f64 {
+    pub(crate) fn theta_hi(&self, r: f64) -> f64 {
         self.hi.angle - (self.hi.inset / r).asin()
     }
 

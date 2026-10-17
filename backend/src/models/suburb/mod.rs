@@ -4,6 +4,7 @@
 //! - `frame`: each neighbourhood's `F(u, v) → world` and its row fit (#106);
 //! - `patterns`: the streets each neighbourhood is filled with, and their
 //!   `StreetMeta` (pattern (a), #107);
+//! - `loops`: pattern (b), loops and lollipops (#109);
 //! - `lots`: the lots that fill the blocks (#108);
 //! - `graph`: the street network as a graph;
 //! - `metrics`: the layout numbers and the targets they're held to;
@@ -22,6 +23,8 @@ pub(crate) mod frame;
 #[cfg(test)]
 pub(crate) mod graph;
 pub(crate) mod lots;
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod loops;
 #[cfg(test)]
 pub(crate) mod metrics;
 #[cfg_attr(not(test), allow(dead_code))]

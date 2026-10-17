@@ -14,7 +14,9 @@
 //!   a pie, and is cut into `n = round(L / frontage)` equal widths there.
 //! - **Depth.** A ray-march to the first road or the neighbourhood's edge. A
 //!   fronted road within `2·lot_depth_max` gives half the distance, so lots
-//!   back to back share a rear line. Otherwise `min(hit, lot_depth)`. On the
+//!   back to back share a rear line. Otherwise `min(hit, lot_depth)`, or up
+//!   to `lot_depth_max` where the ray leaves the neighbourhood within
+//!   `2·lot_depth_max`, to take up the edge strips. On the
 //!   concave side of a curve, the ray stops at `0.85/κ` from the centre line.
 //! - **Bulbs.** 4–5 pie lots round each, on rays from the bulb centre, between
 //!   the last rays of the stem's two sides.
@@ -70,6 +72,9 @@ const CURVE_REACH: f64 = 20.0;
 /// How far a lot's front may be pushed out to clear the road's curve.
 const MAX_FRONT_PUSH: f64 = 12.0;
 const PUSH_STEP: f64 = 0.25;
+/// A corner a through road owns runs this much past its lots' deepest reach,
+/// which starts a hair off the road's edge.
+const OWNED_SLACK: f64 = 1.0;
 /// How far a street's line runs on into the street it continues.
 const LEAD: f64 = 30.0;
 /// A stem's run ending this near its bulb hands its last ray to the pies.
@@ -218,13 +223,28 @@ impl<'a> World<'a> {
 
     /// How far out the ray from `o` along `d`, starting at `f`, can go.
     fn back(&self, region: &Region, o: P, d: P, f: f64, p: &NeighbourhoodParams) -> f64 {
+        self.back_from(region, o, d, f, f, p.lot_depth, p)
+    }
+
+    /// `back`, with lots back to back meeting half way between `near` and
+    /// the other road, and `open` deep onto open ground inside the
+    /// neighbourhood. A pie's ray starts at its bulb's edge, but its half
+    /// way is measured from a street's edge like the stem lots it backs
+    /// onto, or it reaches past their shared rear line. Pies facing the
+    /// middle of a pattern (b) band take `lot_depth_max`, to fill it.
+    #[allow(clippy::too_many_arguments)]
+    fn back_from(&self, region: &Region, o: P, d: P, f: f64, near: f64, open: f64, p: &NeighbourhoodParams) -> f64 {
         let exit = region.exit(o, d, f);
         match self.first_hit(o, d, f, exit.min(f + 2.0 * p.lot_depth_max)) {
             // Back to back: half way to the lots fronting the other road.
-            Some((t, r)) if self.fronted[r] => (f + t) / 2.0 - REAR_GAP,
+            Some((t, r)) if self.fronted[r] => ((near + t) / 2.0 - REAR_GAP).max(f),
             Some((t, _)) => (t - EDGE_GAP).min(f + p.lot_depth),
-            // Open ground: as deep as a lot may be, to take up the edge strip.
-            None => (exit - EDGE_GAP).min(f + p.lot_depth_max),
+            // Open ground to the neighbourhood's edge: as deep as a lot may
+            // be, to take up the edge strip.
+            None if exit - f <= 2.0 * p.lot_depth_max => (exit - EDGE_GAP).min(f + p.lot_depth_max),
+            // Open ground inside it is for other streets' lots, such as a
+            // comb's beside the racetrack (#109): a lot's usual depth.
+            None => f + open,
         }
     }
 
@@ -254,7 +274,9 @@ impl<'a> World<'a> {
     }
 
     /// Stretches of a fronted road, from its ends, that a fronted road it
-    /// meets partway along owns: that road's lots fill the corner.
+    /// meets partway along owns: that road's lots fill the corner. They run
+    /// beside this road and find open ground inside the neighbourhood, so
+    /// they're `lot_depth` deep (pattern (b)'s combs, #109).
     fn owned_ends(&self, road: usize, length: f64, p: &NeighbourhoodParams) -> Vec<(f64, f64)> {
         let pts = &self.roads[road].points;
         let mut out = Vec::new();
@@ -263,7 +285,7 @@ impl<'a> World<'a> {
                 r != road && i > 0 && i + 1 < self.roads[r].points.len()
             });
             if let Some(&(r, _)) = through {
-                let len = self.roads[r].width / 2.0 + p.lot_depth;
+                let len = self.roads[r].width / 2.0 + p.lot_depth + OWNED_SLACK;
                 out.push(if s == 0.0 { (0.0, len) } else { (length - len, length) });
             }
         }
@@ -646,7 +668,7 @@ impl Street<'_> {
             if !self.region.inside(front) || !self.world.point_clear(front) {
                 return None;
             }
-            let b = self.world.back(&self.region, centre, d, f, self.p);
+            let b = self.world.back_from(&self.region, centre, d, f, self.half() + FRONT_GAP, self.p.lot_depth_max, self.p);
             (b - f >= MIN_DEPTH * self.p.lot_depth).then_some(Ray { o: centre, d, f, b, fixed: false })
         };
         let fixed = |r: Option<Ray>| r.map(|r| Ray { fixed: true, ..r });

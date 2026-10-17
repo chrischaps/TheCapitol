@@ -16,6 +16,9 @@
 //!   row gaps, so two rails never meet a row at one point (no 4-ways);
 //! - each row end is an entrance, a U-turn or a bulb.
 //!
+//! **Pattern (b), loops and lollipops**, is in `loops.rs` (#109); it
+//! builds on the row, ramp and bulb pieces here.
+//!
 //! **Roads.** Rows joined by U-turns are one road, a *strand*, with id
 //! `collector_{sector}_{nbhd}_{k}`. A bulb end is a road of its own,
 //! `culdesac_{sector}_{nbhd}_{row}{l|h}`, from the row's last rail junction,
@@ -32,6 +35,7 @@ use std::f64::consts::PI;
 use capitol_protocol::terrain::{RoadSegment, RoadType};
 
 use super::frame::{Frame, STEP};
+use super::loops;
 use super::neighbourhood::{Edge, Entrance, Neighbourhood};
 use crate::models::geom::polyline_length;
 use crate::models::street_plan;
@@ -45,10 +49,10 @@ pub(crate) const BULB_SEGMENTS: usize = 12;
 pub(crate) const END_CLEARANCE: f64 = 40.0;
 /// Where an entrance was moved along the arterial, the rows bend to meet it
 /// over at least this much of their length, so the stub needn't slant...
-const RAMP_MIN: f64 = 200.0;
+pub(super) const RAMP_MIN: f64 = 200.0;
 /// ...and over this many times the shift, so they tilt by under 11° and the
 /// rails still cross them at 70° or more.
-const RAMP_RUN: f64 = 8.0;
+pub(super) const RAMP_RUN: f64 = 8.0;
 
 /// What a street is for, for lots v2 (#108).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,8 +88,9 @@ pub(crate) struct Laid {
 pub(crate) fn lay(n: &mut Neighbourhood, p: &NeighbourhoodParams) -> Laid {
     match choose(n, p) {
         Some(NeighbourhoodPattern::WarpedParallels) => warped_parallels(n, p),
-        // (b) and (c) come with #109 and #110; until then they never fit.
-        Some(_) | None => Laid::default(),
+        Some(NeighbourhoodPattern::LoopsAndLollipops) => loops::lay(n, p),
+        // (c) comes with #110; until then it never fits.
+        Some(NeighbourhoodPattern::CentralLoop) | None => Laid::default(),
     }
 }
 
@@ -97,7 +102,7 @@ pub(crate) fn choose(n: &mut Neighbourhood, p: &NeighbourhoodParams) -> Option<N
     let w = &p.pattern_weights;
     let fitting: Vec<(NeighbourhoodPattern, f64)> = [
         (NeighbourhoodPattern::WarpedParallels, w.warped_parallels, parallels_fit(&n.frame, p)),
-        (NeighbourhoodPattern::LoopsAndLollipops, w.loops_and_lollipops, false),
+        (NeighbourhoodPattern::LoopsAndLollipops, w.loops_and_lollipops, loops::fits(&n.frame, p)),
         (NeighbourhoodPattern::CentralLoop, w.central_loop, false),
     ]
     .into_iter()
@@ -111,7 +116,7 @@ pub(crate) fn choose(n: &mut Neighbourhood, p: &NeighbourhoodParams) -> Option<N
 }
 
 /// The item a draw in [0, 1) lands on, by weight.
-fn pick<T: Copy>(weighted: &[(T, f64)], draw: f64) -> Option<T> {
+pub(super) fn pick<T: Copy>(weighted: &[(T, f64)], draw: f64) -> Option<T> {
     let total: f64 = weighted.iter().map(|w| w.1).sum();
     let mut at = draw * total;
     for &(item, weight) in weighted {
@@ -158,7 +163,7 @@ impl Sizes {
 
 /// How far a row's other vertices keep from a rail's, in u. At the inner
 /// edge a unit of u is about 0.8 in the world, so this is over `SNAP`.
-const MARK_CLEAR: f64 = 0.6 * STEP;
+pub(super) const MARK_CLEAR: f64 = 0.6 * STEP;
 
 /// The least room between the rails' margins for a pattern (a) layout.
 const MIN_RAIL_SPAN: f64 = 100.0;
@@ -173,21 +178,21 @@ pub(crate) fn parallels_fit(frame: &Frame, p: &NeighbourhoodParams) -> bool {
 
 /// A row street: iso-v at `v`, plus any ramps.
 #[derive(Debug, Clone)]
-struct Row {
-    v: f64,
-    ramps: Vec<Ramp>,
+pub(super) struct Row {
+    pub v: f64,
+    pub ramps: Vec<Ramp>,
 }
 
 /// A smooth shift of a row's v by `dv` at u = `at`, easing to nothing `len` away.
 #[derive(Debug, Clone, Copy)]
-struct Ramp {
-    at: f64,
-    len: f64,
-    dv: f64,
+pub(super) struct Ramp {
+    pub at: f64,
+    pub len: f64,
+    pub dv: f64,
 }
 
 impl Row {
-    fn v_at(&self, u: f64) -> f64 {
+    pub(super) fn v_at(&self, u: f64) -> f64 {
         self.v
             + self
                 .ramps
@@ -240,6 +245,32 @@ fn side_options(entrances: &[Option<usize>]) -> Vec<Vec<End>> {
     out
 }
 
+/// Steps from `a` to `b`, both included, at about `STEP` apart, with a step
+/// at each of `marks` between them and no other within `MARK_CLEAR` of one.
+pub(super) fn marked_steps(a: f64, b: f64, marks: &[f64]) -> Vec<f64> {
+    let (lo, hi) = (a.min(b), a.max(b));
+    let n = ((hi - lo) / STEP).ceil().max(1.0) as usize;
+    let inner: Vec<f64> = marks.iter().copied().filter(|&m| m > lo && m < hi).collect();
+    let mut steps: Vec<f64> = (1..n)
+        .map(|i| lo + (hi - lo) * i as f64 / n as f64)
+        .filter(|&x| inner.iter().all(|&m| (x - m).abs() > MARK_CLEAR))
+        .chain(inner.iter().copied())
+        .collect();
+    steps.sort_by(f64::total_cmp);
+    let mut all = vec![lo];
+    all.extend(steps);
+    all.push(hi);
+    if a > b {
+        all.reverse();
+    }
+    all
+}
+
+/// A row street from `u0` to `u1`, with a vertex at each of `marks`.
+pub(super) fn row_points(f: &Frame, row: &Row, u0: f64, u1: f64, marks: &[f64]) -> Vec<P> {
+    marked_steps(u0, u1, marks).into_iter().map(|u| f.to_world(u, row.v_at(u))).collect()
+}
+
 /// Side 0 is the frame's lo side (u = 0), side 1 its hi side (u = width).
 const SIDES: [Edge; 2] = [Edge::Lo, Edge::Hi];
 
@@ -282,22 +313,7 @@ impl Ctx<'_> {
     /// the first vertex of a segment within `street_plan::SNAP`, even when the
     /// next one is exactly on it (#114).
     fn row(&self, k: usize, u0: f64, u1: f64, marks: &[f64]) -> Vec<P> {
-        let (lo, hi) = (u0.min(u1), u0.max(u1));
-        let n = ((hi - lo) / STEP).ceil().max(1.0) as usize;
-        let inner: Vec<f64> = marks.iter().copied().filter(|&m| m > lo && m < hi).collect();
-        let mut us: Vec<f64> = (1..n)
-            .map(|i| lo + (hi - lo) * i as f64 / n as f64)
-            .filter(|&u| inner.iter().all(|&m| (u - m).abs() > MARK_CLEAR))
-            .chain(inner.iter().copied())
-            .collect();
-        us.sort_by(f64::total_cmp);
-        let mut all = vec![lo];
-        all.extend(us);
-        all.push(hi);
-        if u0 > u1 {
-            all.reverse();
-        }
-        all.into_iter().map(|u| self.at(k, u)).collect()
+        row_points(self.f, &self.rows[k], u0, u1, marks)
     }
 
     /// The rails that meet row k, in order of u.
@@ -466,7 +482,7 @@ fn pull_in_long_stems(cx: &Ctx, layout: &mut Parallels, longest: f64) {
     }
 }
 
-fn road(id: String, points: Vec<P>, width: f64) -> RoadSegment {
+pub(super) fn road(id: String, points: Vec<P>, width: f64) -> RoadSegment {
     RoadSegment { id, road_type: RoadType::Suburban, points, width }
 }
 

@@ -715,7 +715,7 @@ mod tests {
 
     use super::*;
     use crate::models::lot_clearance;
-    use crate::models::terrain::{SuburbLayout, SuburbanGenParams, TerrainConfig, WorldGenParams};
+    use crate::models::terrain::{NeighbourhoodParams, NeighbourhoodPattern, SuburbLayout, SuburbanGenParams, TerrainConfig, WorldGenParams};
     use capitol_protocol::rules::{SUBURBAN_OUTER_RADIUS, URBAN_OUTER_RADIUS};
 
     fn env_or(name: &str, default: &str) -> String {
@@ -728,8 +728,9 @@ mod tests {
     ///
     /// Env: `SUBURB_SEEDS` (comma-separated, default 42,7,1234,99999),
     /// `SUBURB_LAYOUT` (`legacy` or `neighbourhood`), `SUBURB_SECTOR` (0–7, one sector only),
-    /// `SUBURB_INNER` and `SUBURB_OUTER` (the suburb's radii, to try other depths; #117) and
-    /// `SUBURB_OUT` (default `target/suburb-plan/` at the workspace root).
+    /// `SUBURB_INNER` and `SUBURB_OUTER` (the suburb's radii, to try other depths; #117),
+    /// `SUBURB_PATTERN` (`warped_parallels`, `loops_and_lollipops` or `central_loop`: force one
+    /// wherever it fits; #109) and `SUBURB_OUT` (default `target/suburb-plan/` at the workspace root).
     #[test]
     #[ignore]
     fn suburb_plan_report() {
@@ -740,6 +741,19 @@ mod tests {
         let layout = env_or("SUBURB_LAYOUT", "legacy").to_lowercase();
         let suburb_layout: SuburbLayout = serde_json::from_value(serde_json::Value::String(layout.clone()))
             .unwrap_or_else(|_| panic!("SUBURB_LAYOUT={layout}: legacy or neighbourhood"));
+        let pattern: Option<NeighbourhoodPattern> = std::env::var("SUBURB_PATTERN")
+            .ok()
+            .map(|v| v.trim().to_lowercase())
+            .filter(|v| !v.is_empty())
+            .map(|v| {
+                serde_json::from_value(serde_json::Value::String(v.clone()))
+                    .unwrap_or_else(|_| panic!("SUBURB_PATTERN={v}: warped_parallels, loops_and_lollipops or central_loop"))
+            });
+        // The layout's name in files and titles, with the forced pattern.
+        let layout = match pattern {
+            Some(p) => format!("{layout}-{}", serde_json::to_value(p).unwrap().as_str().unwrap().replace('_', "-")),
+            None => layout,
+        };
         let sector: Option<u8> = std::env::var("SUBURB_SECTOR")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -766,7 +780,12 @@ mod tests {
                 seed,
                 urban_outer_radius: inner,
                 suburban_outer_radius: outer,
-                suburban: SuburbanGenParams { seed, layout: suburb_layout, ..Default::default() },
+                suburban: SuburbanGenParams {
+                    seed,
+                    layout: suburb_layout,
+                    neighbourhood: NeighbourhoodParams { force_pattern: pattern, ..Default::default() },
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let started = Instant::now();
