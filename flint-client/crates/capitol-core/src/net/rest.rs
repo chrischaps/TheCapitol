@@ -37,7 +37,7 @@ pub enum RestRequest {
     PlayerCurrency,
 
     /// `GET /world/nearby`
-    WorldNearby,
+    WorldNearby(NearbyQuery),
     /// `POST /world/extract`
     Extract(ExtractRequest),
 
@@ -174,7 +174,7 @@ impl RestRequest {
             | PlayerMe
             | PlayerInventory
             | PlayerCurrency
-            | WorldNearby
+            | WorldNearby(_)
             | Containers
             | Recipes
             | NearbyStations
@@ -201,7 +201,7 @@ impl RestRequest {
             PlayerMove(_) => "/player/move".into(),
             PlayerInventory => "/player/inventory".into(),
             PlayerCurrency => "/player/currency".into(),
-            WorldNearby => "/world/nearby".into(),
+            WorldNearby(_) => "/world/nearby".into(),
             Extract(_) => "/world/extract".into(),
             Containers => "/inventory/containers".into(),
             MoveItem(_) => "/inventory/move".into(),
@@ -238,6 +238,7 @@ impl RestRequest {
             Deposit(b) => req.json(b),
             Withdraw(b) => req.json(b),
             UpdatePlotPermissions { update, .. } => req.json(update),
+            WorldNearby(q) => req.query(q),
             ListPlots(q) => req.query(q),
             PlotAt(q) => req.query(q),
             // The server's ETag is weak, `W/"<version>"` (B3).
@@ -262,7 +263,7 @@ impl RestRequest {
             Q::PlayerMove(_) => A::Move(de(body)?),
             Q::PlayerInventory => A::Inventory(de(body)?),
             Q::PlayerCurrency => A::Currency(de(body)?),
-            Q::WorldNearby => A::Nearby(de(body)?),
+            Q::WorldNearby(_) => A::Nearby(de(body)?),
             Q::Extract(_) => A::Extract(de(body)?),
             Q::Containers => A::Containers(de(body)?),
             Q::MoveItem(_) => A::MoveItem(de(body)?),

@@ -15,9 +15,9 @@
 //! Nodes never move. One the server stops listing (after a reconnect) sinks
 //! away and is despawned.
 //!
-//! The server lists nodes only within 200 units (20 m) of you, so tufts
-//! appear as you walk near; growing them in keeps that from popping. A
-//! workaround until the client can ask for more (issue #79).
+//! The poller asks `/world/nearby` for nodes within 800 units (80 m), the
+//! most the server gives (#79). Past that, tufts still arrive as you walk;
+//! growing them in keeps those from popping.
 
 use crate::coords::{layer, to_world};
 use crate::script_api::{NodeMark, Shared};

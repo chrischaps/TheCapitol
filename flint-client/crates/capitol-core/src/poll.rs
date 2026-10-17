@@ -55,7 +55,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use capitol_protocol::rest::ListPlotsQuery;
+use capitol_protocol::rest::{ListPlotsQuery, NearbyQuery};
+use capitol_protocol::rules::NEARBY_NODE_RANGE_MAX;
 use uuid::Uuid;
 
 use crate::net::{ConnectionState, NetEvent, RestRequest, RestResponse, Tag};
@@ -125,7 +126,11 @@ impl Fetch {
             Fetch::Me => RestRequest::PlayerMe,
             Fetch::Containers => RestRequest::Containers,
             Fetch::StationContainer { station_id } => RestRequest::StationContainer { station_id },
-            Fetch::NearbyNodes => RestRequest::WorldNearby,
+            // The widest the server gives, so a meadow across the road is
+            // already there at the district camera (#79).
+            Fetch::NearbyNodes => RestRequest::WorldNearby(NearbyQuery {
+                radius: Some(NEARBY_NODE_RANGE_MAX),
+            }),
             Fetch::NearbyStations => RestRequest::NearbyStations,
             Fetch::Currency => RestRequest::PlayerCurrency,
             Fetch::Plots => RestRequest::ListPlots(ListPlotsQuery {

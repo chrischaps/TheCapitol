@@ -50,7 +50,8 @@ pub const START_TIMEOUT: Duration = Duration::from_secs(3);
 /// After a finish, how long the refetch may take to show the item.
 const REFETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// While scouting, how often to ask `/world/nearby`. The poller's own 5 s is
-/// 250 units of walking, longer than the 200 that nearby covers.
+/// 250 units of walking; asking every second finds a node as soon as it is
+/// in range.
 const SCOUT_POLL: Duration = Duration::from_secs(1);
 /// Scouting stops this far from the centre: the moat and the Capitol are there.
 const SCOUT_STOP: f64 = 400.0;

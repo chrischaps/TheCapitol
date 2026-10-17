@@ -573,6 +573,17 @@ fn your_plots_are_listed_like_react() {
     )));
 }
 
+#[test]
+fn nearby_nodes_ask_for_the_widest_radius() {
+    // The district camera sees past the default 200 units (#79).
+    assert_eq!(
+        Fetch::NearbyNodes.request(Some(ME)),
+        RestRequest::WorldNearby(capitol_protocol::rest::NearbyQuery {
+            radius: Some(capitol_protocol::rules::NEARBY_NODE_RANGE_MAX),
+        })
+    );
+}
+
 // ---------------------------------------------------------------------------
 // No duplicates
 // ---------------------------------------------------------------------------

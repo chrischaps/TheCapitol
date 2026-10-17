@@ -52,8 +52,12 @@ pub const STATION_INTERACTION_RANGE: f64 = 75.0;
 pub const TRADE_RANGE: f64 = 75.0;
 /// Minimum distance between two placed stations.
 pub const STATION_MIN_SPACING: f64 = 50.0;
-/// `GET /world/nearby` returns resource nodes within this radius of the player.
+/// `GET /world/nearby` returns resource nodes within this radius of the player,
+/// unless the request asks for another `radius`.
 pub const NEARBY_NODE_RANGE: f64 = 200.0;
+/// The widest `radius` `GET /world/nearby` honours. A larger one is cut to this.
+/// It covers the Flint client's district camera (#79).
+pub const NEARBY_NODE_RANGE_MAX: f64 = 800.0;
 /// `GET /stations/nearby` returns stations within this many units of the player on
 /// each axis (a square, not a circle).
 pub const NEARBY_STATION_HALF_EXTENT: f64 = 500.0;

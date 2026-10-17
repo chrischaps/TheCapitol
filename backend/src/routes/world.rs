@@ -1,12 +1,12 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     routing::{get, post},
     Extension, Json, Router,
 };
 use uuid::Uuid;
 
-use capitol_protocol::rest::{ExtractRequest, ExtractResponse, NearbyResponse};
-use capitol_protocol::rules::{NEARBY_NODE_RANGE, SPAWN_X, SPAWN_Y};
+use capitol_protocol::rest::{ExtractRequest, ExtractResponse, NearbyQuery, NearbyResponse};
+use capitol_protocol::rules::{SPAWN_X, SPAWN_Y};
 
 use crate::engine::{extraction_refusal, Command};
 use crate::error::AppError;
@@ -28,6 +28,7 @@ pub fn router(state: AppState) -> Router<AppState> {
 #[utoipa::path(
     get,
     path = "/world/nearby",
+    params(NearbyQuery),
     responses(
         (status = 200, description = "Nearby resource nodes", body = NearbyResponse)
     ),
@@ -37,7 +38,10 @@ pub fn router(state: AppState) -> Router<AppState> {
 pub async fn get_nearby(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
+    Query(query): Query<NearbyQuery>,
 ) -> Result<Json<NearbyResponse>, AppError> {
+    let range = query.effective_radius();
+
     // Get player's current position from game state
     let player_id = sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM players WHERE account_id = $1 LIMIT 1"
@@ -63,7 +67,7 @@ pub async fn get_nearby(
             let dx = node.x - player_x;
             let dy = node.y - player_y;
             let distance = (dx * dx + dy * dy).sqrt();
-            distance <= NEARBY_NODE_RANGE
+            distance <= range
         })
         .map(ResourceNodeInfo::from)
         .collect();

@@ -184,6 +184,27 @@ pub struct CurrencyResponse {
 // /world
 // ---------------------------------------------------------------------------
 
+/// `GET /world/nearby` query string
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::IntoParams))]
+pub struct NearbyQuery {
+    /// Search radius around the player (default `NEARBY_NODE_RANGE`, 200;
+    /// capped at `NEARBY_NODE_RANGE_MAX`, 800)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
+}
+
+impl NearbyQuery {
+    /// The radius the server searches: the one asked for, cut to
+    /// `0..=NEARBY_NODE_RANGE_MAX`, or the default when none (or NaN) is given.
+    pub fn effective_radius(&self) -> f64 {
+        match self.radius {
+            Some(r) if !r.is_nan() => r.clamp(0.0, rules::NEARBY_NODE_RANGE_MAX),
+            _ => rules::NEARBY_NODE_RANGE,
+        }
+    }
+}
+
 /// `GET /world/nearby`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
@@ -768,6 +789,17 @@ mod tests {
         assert!(!bounds.contains(201.0, 150.0));
         assert_eq!(bounds.center(), (150.0, 150.0));
         assert_eq!(bounds.size(), (100.0, 100.0));
+    }
+
+    #[test]
+    fn nearby_radius_defaults_and_is_capped() {
+        let q = |radius| NearbyQuery { radius }.effective_radius();
+        assert_eq!(q(None), rules::NEARBY_NODE_RANGE);
+        assert_eq!(q(Some(f64::NAN)), rules::NEARBY_NODE_RANGE);
+        assert_eq!(q(Some(500.0)), 500.0);
+        assert_eq!(q(Some(1e9)), rules::NEARBY_NODE_RANGE_MAX);
+        assert_eq!(q(Some(f64::INFINITY)), rules::NEARBY_NODE_RANGE_MAX);
+        assert_eq!(q(Some(-5.0)), 0.0);
     }
 
     #[test]
