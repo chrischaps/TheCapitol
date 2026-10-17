@@ -110,7 +110,11 @@ mod tests {
         SPAWN_X, SPAWN_Y,
     };
 
-    use crate::models::terrain::{point_to_segment_distance, TerrainConfig};
+    use capitol_protocol::terrain::quad_contains;
+    use uuid::Uuid;
+
+    use crate::engine::node_placement::{place_nodes, KEEP_CLEAR};
+    use crate::models::terrain::{point_to_segment_distance, TerrainConfig, WorldGenParams};
 
     const WORLD_SCALE_MIGRATION: &str =
         include_str!("../../migrations/20260212_001_world_scale.sql");
@@ -161,8 +165,8 @@ mod tests {
             .fold(f64::MAX, f64::min)
     }
 
-    /// Checks against the default world only. The live world can be regenerated
-    /// with other params, and nothing moves the nodes then (#70).
+    /// The seeds were placed against the default world. A live world built
+    /// with other params has its nodes moved by `node_placement` (#70).
     #[test]
     fn seeded_nodes_sit_clear_of_the_default_terrain() {
         let terrain = TerrainConfig::get_default();
@@ -180,6 +184,54 @@ mod tests {
                 "node at ({x}, {y}) is in {zone}"
             );
         }
+    }
+
+    fn seeded_positions() -> Vec<(Uuid, (f64, f64))> {
+        seeded_nodes()
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y, _))| (Uuid::from_u128(i as u128), (x, y)))
+            .collect()
+    }
+
+    /// The default world is the one the seeds were placed for, so fitting the
+    /// nodes to it moves none of them. Startup changes nothing there.
+    #[test]
+    fn the_default_terrain_moves_no_seeded_node() {
+        let report = place_nodes(&TerrainConfig::get_default(), &seeded_positions());
+        assert!(report.moves.is_empty(), "{} seeded nodes moved: {:?}", report.moves.len(), report.moves);
+        assert!(report.stuck.is_empty());
+    }
+
+    /// Another seed and wider streets run roads over seeded nodes. Every node
+    /// ends clear of them, and fitting again moves nothing.
+    #[test]
+    fn a_regenerated_terrain_moves_the_nodes_it_runs_over() {
+        let mut params = WorldGenParams::default();
+        params.suburban.seed = 7;
+        params.suburban.local_street_width *= 2.0;
+        params.suburban.collector_width *= 2.0;
+        params.arterial_width *= 1.5;
+        let terrain = TerrainConfig::from_params(&params);
+
+        let report = place_nodes(&terrain, &seeded_positions());
+        assert!(!report.moves.is_empty(), "the new streets miss every seeded node");
+        assert!(report.stuck.is_empty(), "{} nodes found no clear spot", report.stuck.len());
+
+        let mut fitted = seeded_positions();
+        for m in &report.moves {
+            fitted.iter_mut().find(|n| n.0 == m.id).unwrap().1 = m.to;
+        }
+        for &(_, (x, y)) in &fitted {
+            let clearance = road_clearance(&terrain, x, y);
+            assert!(clearance >= KEEP_CLEAR, "node at ({x}, {y}) is {clearance:.1} from a road");
+        }
+        for m in &report.moves {
+            let (x, y) = m.to;
+            assert!(!terrain.terrain_plots.iter().any(|lot| quad_contains(&lot.corners, x, y)), "node moved onto a lot at ({x}, {y})");
+            assert_eq!(Zone::from_position(m.from.0, m.from.1), Zone::from_position(x, y));
+        }
+        assert!(place_nodes(&terrain, &fitted).moves.is_empty(), "a second fit moved nodes again");
     }
 
     #[test]

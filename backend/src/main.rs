@@ -142,6 +142,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     tracing::info!("Loaded {} resource nodes", node_count);
 
+    // The nodes are seeded against the default world. Move any the live
+    // terrain's roads or water run over, and save where they went (#70).
+    let placement = {
+        let mut game = game_state.write().await;
+        let game = &mut *game;
+        engine::node_placement::fit_to_terrain(&game.terrain, &mut game.resource_nodes)
+    };
+    engine::node_placement::save_moves(&db_pool, &placement.moves).await?;
+    tracing::info!(
+        "Resource nodes fitted to the terrain: {} moved, {} with no clear spot",
+        placement.moves.len(), placement.stuck.len()
+    );
+
     // Load item types into game state
     let item_types: Vec<ItemType> = sqlx::query_as(
         "SELECT id, name, category, stackable, weight FROM item_types"
