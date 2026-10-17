@@ -232,26 +232,26 @@ fn draw_toast(q, bottom, now) {
 // ── Pickups ──────────────────────────────────────────────────────────────
 
 // Where a pickup lands: the top of the inventory panel if it's open, else
-// just under the header's Inventory button. () when neither is up. The
-// header's strip is egui's, drawn over this HUD, so a pickup going to the
-// button stops at its foot and the button lights instead. `floor` is as
-// high as its arc may go. Issue #96 would let it land on the button.
+// the middle of the header's Inventory button. () when neither is up. The
+// panel and the header are egui's, so pickups are drawn over the UI
+// (push_over_ui, Flint ADR 0085) and land on them.
 fn anchor() {
     let r = cap_ui_anchor("inventory");
     if r == () { return (); }
-    if r.panel { #{ x: r.x + r.w / 2.0, y: r.y + 22.0, floor: 0.0 } }
-    else { #{ x: r.x + r.w / 2.0, y: r.y + r.h + 10.0, floor: r.y + r.h + 24.0 } }
+    if r.panel { #{ x: r.x + r.w / 2.0, y: r.y + 22.0 } }
+    else { #{ x: r.x + r.w / 2.0, y: r.y + r.h / 2.0 } }
 }
 
 // Where a pickup is at k (0 to 1 along its flight): on a curve from the
-// tuft up over and down into the anchor, bowed to one side.
-fn flight_at(sx, sy, ex, ey, floor, bend, k) {
+// tuft up over and down into the anchor, bowed to one side, and never
+// over the top of the screen.
+fn flight_at(sx, sy, ex, ey, bend, k) {
     let dx = ex - sx;
     let dy = ey - sy;
     let len = (dx * dx + dy * dy).sqrt().max(1.0);
     // Up from the tuft, and bowed off the straight line.
     let cx = sx + dx * 0.35 - dy / len * len * bend;
-    let cy = (sy.min(ey) - 0.25 * len - 40.0).max(floor);
+    let cy = (sy.min(ey) - 0.25 * len - 40.0).max(0.0);
     let u = 1.0 - k;
     [u * u * sx + 2.0 * u * k * cx + k * k * ex, u * u * sy + 2.0 * u * k * cy + k * k * ey]
 }
@@ -274,11 +274,11 @@ fn draw_flight(f, end, now) {
     // The tail: where it was a moment ago, smaller and fainter.
     for j in 1..7 {
         let kj = (k - j.to_float() * 0.035).max(0.0);
-        let p = flight_at(start.x, sy, end.x, end.y, end.floor, f.bend, flight_ease(kj));
+        let p = flight_at(start.x, sy, end.x, end.y, f.bend, flight_ease(kj));
         let fade = 1.0 - j.to_float() / 7.0;
         draw_circle(p[0], p[1], (6.0 - 3.0 * k) * fade, c[0], c[1], c[2], 0.45 * fade);
     }
-    let p = flight_at(start.x, sy, end.x, end.y, end.floor, f.bend, flight_ease(k));
+    let p = flight_at(start.x, sy, end.x, end.y, f.bend, flight_ease(k));
     let r = 6.0 - 2.5 * k;
     draw_circle(p[0], p[1], r + 2.0, 0.0, 0.0, 0.0, 0.3);
     draw_circle(p[0], p[1], r, c[0], c[1], c[2], 1.0);
@@ -310,6 +310,8 @@ fn on_draw_ui() {
     let now = total_time();
     let dt = delta_time().min(0.1);
 
+    // Pickups fly over the panels and the header, to land on them.
+    push_over_ui();
     let end = anchor();
     if end != () {
         for f in flights {
@@ -319,7 +321,7 @@ fn on_draw_ui() {
             if f.a && k > 0.0 && k < 1.0 && random() < 0.35 {
                 let s = world_to_screen(f.x, f.y, f.z);
                 if s.visible {
-                    let p = flight_at(s.x, s.y - 14.0, end.x, end.y, end.floor, f.bend, flight_ease(k));
+                    let p = flight_at(s.x, s.y - 14.0, end.x, end.y, f.bend, flight_ease(k));
                     glints.push(#{ x: p[0] + random_range(-8.0, 8.0), y: p[1] + random_range(-8.0, 8.0),
                                    born: now, turn: random() * PI() });
                 }
@@ -337,6 +339,7 @@ fn on_draw_ui() {
         let y = s.y + s.vy * age + 160.0 * age * age;
         draw_circle(x, y, 2.5 * (1.0 - k), s.c[0], s.c[1], s.c[2], 1.0 - k);
     }
+    pop_over_ui();
 
     // The stack, newest at the bottom. Each eases toward its place above
     // the ones newer than it, so a new toast pushes the rest up.
