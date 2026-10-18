@@ -112,8 +112,10 @@ impl TradeManager {
         }
     }
 
-    /// Request to start a trade with another player
-    pub fn request_trade(&mut self, initiator: Uuid, target: Uuid) -> Result<(), String> {
+    /// Request to start a trade with another player. A request replaces any other
+    /// pending request to `target`; the replaced request's asker is returned so they
+    /// can be told (#182)
+    pub fn request_trade(&mut self, initiator: Uuid, target: Uuid) -> Result<Option<Uuid>, String> {
         // Check neither player is already in a trade
         if self.player_trades.contains_key(&initiator) {
             return Err("You are already in a trade".to_string());
@@ -138,16 +140,15 @@ impl TradeManager {
                 self.active_trades.insert(trade_id, session);
                 self.player_trades.insert(initiator, trade_id);
                 self.player_trades.insert(target, trade_id);
-                return Ok(());
+                return Ok(None);
             }
             // Put it back, keeping its age so it still expires on time
             self.pending_requests.insert(initiator, (pending_initiator, asked_at));
         }
 
-        // Add pending request. It replaces any other request to `target`, whose asker
-        // isn't told (#182)
-        self.pending_requests.insert(target, (initiator, Instant::now()));
-        Ok(())
+        // Add pending request, replacing any other request to `target`
+        let replaced = self.pending_requests.insert(target, (initiator, Instant::now()));
+        Ok(replaced.map(|(asker, _)| asker))
     }
 
     /// Accept a pending trade request
@@ -335,5 +336,20 @@ mod tests {
         // Ada, asked by Bram, asks Cato instead: Bram's request stays, as old as it was
         trades.request_trade(ada, cato).unwrap();
         assert_eq!(trades.pending_requests[&ada], (bram, asked_at));
+    }
+
+    #[test]
+    fn a_newer_request_names_the_asker_it_replaced() {
+        let mut trades = TradeManager::new();
+        let (ada, brin, cato) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        assert_eq!(trades.request_trade(brin, ada), Ok(None));
+        assert_eq!(trades.request_trade(cato, ada), Ok(Some(brin)));
+        assert_eq!(trades.pending_requests[&ada].0, cato);
+
+        // Brin can ask again, and that replaces Cato's
+        assert_eq!(trades.request_trade(brin, ada), Ok(Some(cato)));
+        // Asking back starts the trade and replaces nobody
+        assert_eq!(trades.request_trade(ada, brin), Ok(None));
+        assert!(trades.is_in_trade(ada) && trades.is_in_trade(brin));
     }
 }

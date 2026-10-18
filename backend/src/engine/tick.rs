@@ -463,7 +463,15 @@ impl GameState {
                         .unwrap_or_default();
 
                     match self.trade_manager.request_trade(player_id, target_player_id) {
-                        Ok(()) => {
+                        Ok(replaced) => {
+                            // The request this one replaced is gone: its asker stops waiting.
+                            // The target's client ignores it, since its prompt now names us
+                            if let Some(initiator) = replaced {
+                                let _ = self.event_sender.send(GameEvent::TradeRequestExpired {
+                                    initiator,
+                                    target: target_player_id,
+                                });
+                            }
                             // Check if trade started immediately (both requested each other)
                             if let Some(trade) = self.trade_manager.get_player_trade(player_id) {
                                 let _ = self.event_sender.send(GameEvent::TradeStarted {
@@ -1200,6 +1208,33 @@ mod tests {
         );
         let reason = refusal(&mut game, &mut rx, Command::AcceptTradeRequest { player_id: b }, b);
         assert!(reason.contains("No pending trade request"), "{reason}");
+    }
+
+    #[test]
+    fn trading_a_replaced_request_tells_its_asker() {
+        let (mut game, a, b, mut rx) = two_players(10.0);
+        let c = player("Cato", 4010.0, 4010.0);
+        let c_id = c.id;
+        game.add_player(c);
+        game.queue_command(Command::InitiateTrade { player_id: b, target_player_id: a });
+        game.process_commands();
+        while rx.try_recv().is_ok() {}
+
+        // Cato asks Ada too: Bram's request goes, and Bram is told before Ada hears of Cato's
+        game.queue_command(Command::InitiateTrade { player_id: c_id, target_player_id: a });
+        game.process_commands();
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    GameEvent::TradeRequestExpired { initiator, target },
+                    GameEvent::TradeRequested { from_player, to_player, .. },
+                ] if *initiator == b && *target == a && *from_player == c_id && *to_player == a
+            ),
+            "{events:?}"
+        );
+        assert_eq!(game.trade_manager.pending_requests[&a].0, c_id);
     }
 
     #[test]
