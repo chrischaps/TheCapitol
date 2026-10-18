@@ -20,12 +20,18 @@
 //! (a)'s corners between a U-turn's fan and a side line. No lot is laid on a
 //! park, because a park is only ground no lot took.
 //!
-//! Parks aren't on the wire yet: `/terrain` has roads and lots only (#129).
+//! **On the wire** (#129). `outlines` traces each park's squares into rings
+//! for `/terrain`: the squares' boundary edges, chained into loops, then
+//! each loop through its edges' midpoints (so a staircase becomes its
+//! diagonal) simplified to `SIMPLIFY`. A park can be more than one piece
+//! where a buffer joins them, and can hold holes, so the rings are filled
+//! even-odd. A ring may cut a square's corner or `SIMPLIFY` past it, but no
+//! further: a park's edge stays within a few units of where its ground ends.
 
 use std::collections::VecDeque;
 use std::f64::consts::SQRT_2;
 
-use capitol_protocol::terrain::{RoadSegment, TerrainPlot};
+use capitol_protocol::terrain::{RoadSegment, TerrainPark, TerrainPlot};
 
 use super::neighbourhood::{Facing, Neighbourhood};
 use crate::models::terrain::SuburbanGenParams;
@@ -38,6 +44,8 @@ pub(crate) const CELL: f64 = 5.0;
 pub(crate) const MIN_HALF_WIDTH: f64 = 10.0;
 /// A park away from the buffers holds at least this share of a lot.
 pub(crate) const MIN_AREA: f64 = 0.5;
+/// How far a park's traced outline may stray from its squares' edges.
+pub(crate) const SIMPLIFY: f64 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ground {
@@ -56,6 +64,8 @@ pub(crate) struct Park {
     pub area: f64,
     /// Whether it runs into a buffer.
     pub on_buffer: bool,
+    /// Its squares, as indices into `Greens::cells`.
+    pub cells: Vec<usize>,
 }
 
 /// A neighbourhood's ground, square by square.
@@ -235,10 +245,127 @@ fn of(n: &Neighbourhood, roads: &[RoadSegment], lots: &[TerrainPlot], params: &S
         for &i in &own {
             cells[i] = Ground::Park;
         }
-        parks.push(Park { area, on_buffer });
+        parks.push(Park { area, on_buffer, cells: own });
     }
 
     Greens { sector: n.sector, nbhd: n.index, origin, cols, rows, cells, parks }
+}
+
+/// Every park in `greens`, traced for the wire, with ids
+/// `park_{sector}_{nbhd}_{k}` in the order `lay` found them.
+pub(crate) fn outlines(greens: &[Greens]) -> Vec<TerrainPark> {
+    let mut out = Vec::new();
+    for g in greens {
+        for (k, park) in g.parks.iter().enumerate() {
+            let rings: Vec<Vec<P>> = trace(g, &park.cells).into_iter().filter(|r| r.len() >= 3).collect();
+            let area = rings.iter().map(|r| TerrainPark::signed_area(r)).sum::<f64>().abs();
+            out.push(TerrainPark { id: format!("park_{}_{}_{k}", g.sector, g.nbhd), rings, area });
+        }
+    }
+    out
+}
+
+/// The squares `cells` of `g` as closed rings in world units, simplified.
+fn trace(g: &Greens, cells: &[usize]) -> Vec<Vec<P>> {
+    let cols = g.cols;
+    let mut mine = vec![false; g.cells.len()];
+    for &i in cells {
+        mine[i] = true;
+    }
+    let has = |c: i64, r: i64| c >= 0 && r >= 0 && (c as usize) < cols && (r as usize) < g.rows && mine[r as usize * cols + c as usize];
+
+    // Each boundary edge, between grid vertices, with the park on one side.
+    // Every vertex has as many edges out as in, so they chain into loops
+    // whichever way a vertex two loops touch at is taken.
+    let mut out: std::collections::HashMap<(i64, i64), Vec<(i64, i64)>> = Default::default();
+    for &i in cells {
+        let (c, r) = ((i % cols) as i64, (i / cols) as i64);
+        let mut edge = |a: (i64, i64), b: (i64, i64)| out.entry(a).or_default().push(b);
+        if !has(c, r - 1) {
+            edge((c, r), (c + 1, r));
+        }
+        if !has(c + 1, r) {
+            edge((c + 1, r), (c + 1, r + 1));
+        }
+        if !has(c, r + 1) {
+            edge((c + 1, r + 1), (c, r + 1));
+        }
+        if !has(c - 1, r) {
+            edge((c, r + 1), (c, r));
+        }
+    }
+    let mut starts: Vec<(i64, i64)> = out.keys().copied().collect();
+    starts.sort_unstable();
+
+    let mut rings = Vec::new();
+    for start in starts {
+        while out.get(&start).is_some_and(|v| !v.is_empty()) {
+            let mut lp = vec![start];
+            let mut at = start;
+            loop {
+                let next = out.get_mut(&at).and_then(|v| v.pop()).expect("a boundary edge goes on");
+                if next == start {
+                    break;
+                }
+                lp.push(next);
+                at = next;
+            }
+            // Through the edges' midpoints, in world units.
+            let n = lp.len();
+            let mids: Vec<P> = (0..n)
+                .map(|k| {
+                    let (a, b) = (lp[k], lp[(k + 1) % n]);
+                    let m = ((a.0 + b.0) as f64 / 2.0, (a.1 + b.1) as f64 / 2.0);
+                    (g.origin.0 + m.0 * CELL, g.origin.1 + m.1 * CELL)
+                })
+                .collect();
+            rings.push(simplify_ring(&mids, SIMPLIFY));
+        }
+    }
+    rings
+}
+
+/// Douglas-Peucker on a closed ring: split at the point farthest from the
+/// first, and simplify each half.
+fn simplify_ring(ring: &[P], tolerance: f64) -> Vec<P> {
+    let n = ring.len();
+    if n < 4 {
+        return ring.to_vec();
+    }
+    let far = (1..n)
+        .max_by(|&a, &b| {
+            let d = |k: usize| (ring[k].0 - ring[0].0).hypot(ring[k].1 - ring[0].1);
+            d(a).total_cmp(&d(b))
+        })
+        .unwrap();
+    let mut first: Vec<P> = ring[..=far].to_vec();
+    let mut second: Vec<P> = ring[far..].to_vec();
+    second.push(ring[0]);
+    first = simplify(&first, tolerance);
+    second = simplify(&second, tolerance);
+    first.pop();
+    second.pop();
+    first.extend(second);
+    first
+}
+
+/// Douglas-Peucker on an open polyline, keeping both ends.
+fn simplify(line: &[P], tolerance: f64) -> Vec<P> {
+    if line.len() < 3 {
+        return line.to_vec();
+    }
+    let (a, b) = (line[0], line[line.len() - 1]);
+    let (k, d) = (1..line.len() - 1)
+        .map(|k| (k, dist_to_seg(line[k], a, b)))
+        .max_by(|x, y| x.1.total_cmp(&y.1))
+        .unwrap();
+    if d <= tolerance {
+        return vec![a, b];
+    }
+    let mut left = simplify(&line[..=k], tolerance);
+    left.pop();
+    left.extend(simplify(&line[k..], tolerance));
+    left
 }
 
 /// Each square's distance to the nearest `seed` square, in world units
@@ -319,4 +446,46 @@ mod tests {
         assert!((d[18] - CELL * SQRT_2).abs() < 1e-9);
         assert_eq!(d[14], 2.0 * CELL);
     }
+
+    /// A 6×6 block of squares with a 2×2 hole, and a lone square off its
+    /// corner: two outer rings and a hole, about the squares' area.
+    #[test]
+    fn a_park_traces_into_its_rings() {
+        let (cols, rows) = (10, 10);
+        let mut cells = vec![Ground::Built; cols * rows];
+        let mut own = Vec::new();
+        for r in 1..7 {
+            for c in 1..7 {
+                if !(3..5).contains(&r) || !(3..5).contains(&c) {
+                    own.push(r * cols + c);
+                }
+            }
+        }
+        own.push(8 * cols + 8);
+        for &i in &own {
+            cells[i] = Ground::Park;
+        }
+        let area = own.len() as f64 * CELL * CELL;
+        let g = Greens {
+            sector: 3,
+            nbhd: 1,
+            origin: (100.0, 200.0),
+            cols,
+            rows,
+            cells,
+            parks: vec![Park { area, on_buffer: false, cells: own }],
+        };
+        let parks = outlines(std::slice::from_ref(&g));
+        assert_eq!(parks.len(), 1);
+        let p = &parks[0];
+        assert_eq!(p.id, "park_3_1_0");
+        assert_eq!(p.rings.len(), 3, "{:?}", p.rings);
+        // The midpoints cut each corner by an eighth of a square.
+        assert!((p.area - area).abs() < 0.1 * area, "{} vs {area}", p.area);
+        let at = |c: f64, r: f64| (100.0 + c * CELL, 200.0 + r * CELL);
+        for (q, want) in [(at(1.5, 1.5), true), (at(4.0, 4.0), false), (at(8.5, 8.5), true), (at(7.5, 7.5), false), (at(0.5, 0.5), false)] {
+            assert_eq!(p.contains(q.0, q.1), want, "{q:?}");
+        }
+    }
 }
+

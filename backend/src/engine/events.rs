@@ -189,6 +189,19 @@ pub enum GameEvent {
     PlotReleased {
         terrain_id: String,
     },
+    // #131: Property tax, to the plot's owner only
+    TaxDelinquent {
+        owner_id: Uuid,
+        terrain_id: String,
+        tax_owed: i64,
+        forecloses_at: i64,
+    },
+    PlotForeclosed {
+        owner_id: Uuid,
+        terrain_id: String,
+        tax_owed: i64,
+        refund: i64,
+    },
 }
 
 /// Item in a trade offer (for events)

@@ -576,7 +576,7 @@ impl PlayerExtension for CapitolExtension {
             self.owned_drawn = None;
             self.houses.lots_changed();
         }
-        if rebuild.ground || rebuild.roads || rebuild.plots {
+        if rebuild.ground || rebuild.roads || rebuild.plots || rebuild.parks {
             self.grass.terrain(terrain);
         }
         if self.built.is_some() {
@@ -1312,13 +1312,25 @@ fn plots(
         sound.claimed();
     }
     for note in session.take_plot_notes() {
+        use crate::session::PlotNote;
         let (title, body) = match note {
-            crate::session::PlotNote::NoneThere => {
-                ("No plot here", "Alt-click a lot to see its deed")
-            }
-            crate::session::PlotNote::Unanswered => {
-                ("Couldn't look", "The server didn't say what's here")
-            }
+            PlotNote::NoneThere => ("No plot here", "Alt-click a lot to see its deed".into()),
+            PlotNote::Unanswered => ("Couldn't look", "The server didn't say what's here".into()),
+            PlotNote::TaxOwed {
+                tax_owed,
+                forecloses_at,
+            } => (
+                "Property tax overdue",
+                format!("Your plot owes {tax_owed} Strands. At {forecloses_at} it's foreclosed"),
+            ),
+            PlotNote::Foreclosed { tax_owed, refund } => (
+                "Plot foreclosed",
+                if refund > 0 {
+                    format!("{tax_owed} Strands of tax unpaid. {refund} of the deed came back")
+                } else {
+                    format!("{tax_owed} Strands of tax unpaid took the whole deed")
+                },
+            ),
         };
         let mut data = toml::Table::new();
         data.insert("title".into(), title.into());

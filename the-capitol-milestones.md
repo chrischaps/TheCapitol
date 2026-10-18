@@ -567,6 +567,7 @@ Create static data for:
 - [x] Tax based on assessed plot value
 - [x] Tax collection in hourly tick
 - [x] Delinquency tracking (future: penalties)
+- [x] Foreclosure at four weeks of unpaid tax, with warnings, and the deed refunded less the debt (#131)
 
 #### Client - World Map
 - [ ] Zoomed-out map showing zones

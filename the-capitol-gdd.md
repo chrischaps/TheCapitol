@@ -720,6 +720,8 @@ Issues and manages property rights.
 
 *Property tax is the primary recurring sink, scaling with economy size.*
 
+**Unpaid tax and foreclosure:** tax is charged hourly. An hour the owner can't pay is added to the plot's debt, and the debt comes out of their Strands as soon as they have them. Owners are warned as the debt passes each week of tax, and again an hour before the end. A plot that owes four weeks of tax is foreclosed: it goes back on the market, its stations and their contents are lost, and the deed's value is refunded less the debt.
+
 #### Guild Registry
 
 Registers and maintains guild records.

@@ -23,6 +23,7 @@ impl From<&TerrainConfig> for TerrainResponse {
             water_rings: config.water_rings.clone(),
             roads: config.roads.clone(),
             terrain_plots: config.terrain_plots.clone(),
+            parks: config.parks.clone(),
             version: None,
         }
     }

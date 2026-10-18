@@ -285,9 +285,9 @@ The suburban zone (radius 1800-3000 since #117; the radii live in `protocol/src/
 - (b) loops and lollipops (`loops.rs`): a racetrack collector with combs of cul-de-sacs inside (whole sectors)
 - (c) central loop (`central.rs`): a loop with radial cul-de-sacs pointing out (split halves)
 
-**Then:** 2–4 entrances per neighbourhood onto the arterials (never a 4-way across one), `street_plan::weld_junctions`, lots (`lots.rs`: back-to-back blocks, pies round bulbs, `sub_{sector}_{nbhd}_{street}_{L|R|B}_{k}` ids), and parks from the open ground the lots leave (`parks.rs`; not on `/terrain` yet, #129). About 1900 lots, 2% gap.
+**Then:** 2–4 entrances per neighbourhood onto the arterials (never a 4-way across one), `street_plan::weld_junctions`, lots (`lots.rs`: back-to-back blocks, pies round bulbs, `sub_{sector}_{nbhd}_{street}_{L|R|B}_{k}` ids), and parks from the open ground the lots leave (`parks.rs`; on `/terrain` as `parks` since #129, each traced to even-odd rings with `park_{sector}_{nbhd}_{k}` ids). About 1900 lots, 2% gap.
 
-**Checking a change:** `suburb::tests::neighbourhood_suburb_meets_its_targets` (`--nocapture` prints the soft targets it misses), and `backend/tools/suburb-plan.ps1` for SVG/PNG plans and `-Compare` against an earlier run. `default_terrain_version_is_pinned` pins the default world (debug builds only, #128).
+**Checking a change:** `suburb::tests::neighbourhood_suburb_meets_its_targets` (`--nocapture` prints the soft targets it misses), and `backend/tools/suburb-plan.ps1` for SVG/PNG plans and `-Compare` against an earlier run. `default_terrain_version_is_pinned` pins the default world, in debug and release alike (#128).
 
 **Legacy** (the rejection-sampled collectors and lollipops that came before) was removed in #113, with the `layout` switch and its params. A saved `world_config` that still names it loads as the neighbourhoods.
 

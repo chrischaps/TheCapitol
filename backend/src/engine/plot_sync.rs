@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use capitol_protocol::terrain::TerrainPlot;
@@ -107,6 +107,36 @@ struct Existing {
     assessed_value: i32,
 }
 
+/// Take a plot from its owner, inside the caller's transaction: its stations
+/// go (their containers and contents with them), and the plot is back to an
+/// unclaimed one with default permissions. Returns the removed stations, for
+/// the caller to drop from the game state and announce. Refunding the deed is
+/// the caller's, as is `plot_released`. Used by a forced terrain commit and by
+/// tax foreclosure (#131).
+pub async fn release_plot(tx: &mut PgConnection, plot_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
+    let stations: Vec<Uuid> = sqlx::query_scalar("DELETE FROM stations WHERE plot_id = $1 RETURNING id")
+        .bind(plot_id)
+        .fetch_all(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE plots SET owner_id = NULL, claimed_at = NULL, assessed_value = 0,
+                tax_owed = 0, last_tax_paid = NULL, station_count = 0
+         WHERE id = $1",
+    )
+    .bind(plot_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE plot_permissions SET entry_level = 'public', visibility_level = 'public',
+                station_use_level = 'owner', modify_level = 'owner'
+         WHERE plot_id = $1",
+    )
+    .bind(plot_id)
+    .execute(&mut *tx)
+    .await?;
+    Ok(stations)
+}
+
 /// Make the `plots` table match `lots`. See the module docs.
 pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) -> Result<SyncReport, SyncError> {
     let rows: Vec<(Uuid, String, Option<Uuid>, Option<Vec<f64>>, i32)> = sqlx::query_as(
@@ -146,27 +176,7 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
     if on_owned == OnOwned::Release {
         for c in &conflicts {
             report.released.push(c.terrain_id.clone());
-            let stations: Vec<Uuid> = sqlx::query_scalar("DELETE FROM stations WHERE plot_id = $1 RETURNING id")
-                .bind(c.plot_id)
-                .fetch_all(&mut *tx)
-                .await?;
-            report.removed_stations.extend(stations);
-            sqlx::query(
-                "UPDATE plots SET owner_id = NULL, claimed_at = NULL, assessed_value = 0,
-                        tax_owed = 0, last_tax_paid = NULL, station_count = 0
-                 WHERE id = $1",
-            )
-            .bind(c.plot_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                "UPDATE plot_permissions SET entry_level = 'public', visibility_level = 'public',
-                        station_use_level = 'owner', modify_level = 'owner'
-                 WHERE plot_id = $1",
-            )
-            .bind(c.plot_id)
-            .execute(&mut *tx)
-            .await?;
+            report.removed_stations.extend(release_plot(&mut tx, c.plot_id).await?);
             // The refund is in this transaction, so a plot is never released
             // without its owner getting the deed back.
             let value = existing[&c.terrain_id].assessed_value;

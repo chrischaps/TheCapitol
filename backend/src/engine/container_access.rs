@@ -508,6 +508,7 @@ mod db_tests {
                 adjacent_street_id: String::new(),
                 zone: "rural".into(),
             }],
+            parks: Vec::new(),
         };
         let mut game = GameState::with_terrain(WorldGenParams::default(), terrain);
         let mut node = |x: f64| {

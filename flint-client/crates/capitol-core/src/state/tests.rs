@@ -210,6 +210,8 @@ fn test_for(message: &M) -> fn() {
         M::TerrainUpdated => terrain_updated_is_reported,
         M::PlotClaimed { .. } => plot_claimed_is_reported,
         M::PlotReleased { .. } => plot_released_drops_it_from_my_plots,
+        M::TaxDelinquent { .. } => tax_messages_are_reported,
+        M::PlotForeclosed { .. } => tax_messages_are_reported,
     }
 }
 
@@ -229,7 +231,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 41, "one fixture per ServerMessage variant");
+    assert_eq!(count, 43, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1136,6 +1138,35 @@ fn claimed_lots_are_the_list_then_kept_by_ws() {
     state.apply_rest(&R::ClaimedPlots(vec![lot("sub_3", OTHER)]));
     let ids: Vec<_> = state.claimed_lots().keys().cloned().collect();
     assert_eq!(ids, ["sub_3"]);
+}
+
+#[test]
+fn tax_messages_are_reported() {
+    let mut state = connected();
+    assert_eq!(
+        state.apply_ws(&M::TaxDelinquent {
+            terrain_id: "sub_2_0_3_L_4".into(),
+            tax_owed: 168,
+            forecloses_at: 672,
+        }),
+        vec![StateEvent::TaxDelinquent {
+            terrain_id: "sub_2_0_3_L_4".into(),
+            tax_owed: 168,
+            forecloses_at: 672,
+        }]
+    );
+    assert_eq!(
+        state.apply_ws(&M::PlotForeclosed {
+            terrain_id: "sub_2_0_3_L_4".into(),
+            tax_owed: 672,
+            refund: 5328,
+        }),
+        vec![StateEvent::PlotForeclosed {
+            terrain_id: "sub_2_0_3_L_4".into(),
+            tax_owed: 672,
+            refund: 5328,
+        }]
+    );
 }
 
 #[test]

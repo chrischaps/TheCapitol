@@ -8,7 +8,7 @@ use super::street_plan;
 
 // The terrain types the client sees are shared through capitol-protocol, so
 // GET /terrain serves the generated terrain as-is.
-pub use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPlot, WaterRing};
+pub use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPark, TerrainPlot, WaterRing};
 
 /// Configuration for suburban street generation
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +261,9 @@ pub struct TerrainConfig {
     pub water_rings: Vec<WaterRing>,
     pub roads: Vec<RoadSegment>,
     pub terrain_plots: Vec<TerrainPlot>,
+    /// The suburb's parks, from the open ground its lots leave (#129).
+    #[serde(default)]
+    pub parks: Vec<TerrainPark>,
 }
 
 /// Catmull-Rom spline interpolation for smooth curves
@@ -562,8 +565,28 @@ impl TerrainConfig {
     /// A stable hash of the generated terrain, as 16 hex digits: FNV-1a over its
     /// JSON. It hashes the output rather than the params, so a generator change
     /// also changes it, and clients can key a disk cache on it.
+    ///
+    /// Every float is snapped to a 1e-3 grid first, so a last-bit difference
+    /// between builds (the optimiser reordering a sum, a libm path) doesn't
+    /// count, and debug and release servers agree on the world (#128). The grid
+    /// is coarse on purpose: a value within an ulp of a grid boundary still
+    /// flips, and the odds of that grow as the grid gets finer. At 1e-3, on a
+    /// world 8000 across, they're about 1e-8 a float.
     pub fn version(&self) -> String {
-        let json = serde_json::to_vec(self).expect("terrain serializes");
+        fn quantise(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Number(n) if n.is_f64() => {
+                    let snapped = (n.as_f64().expect("is_f64") * 1000.0).round() as i64;
+                    *value = snapped.into();
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(quantise),
+                serde_json::Value::Object(fields) => fields.values_mut().for_each(quantise),
+                _ => {}
+            }
+        }
+        let mut tree = serde_json::to_value(self).expect("terrain serializes");
+        quantise(&mut tree);
+        let json = serde_json::to_vec(&tree).expect("terrain serializes");
         let hash = json.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
             (hash ^ byte as u64).wrapping_mul(0x0100_0000_01b3)
         });
@@ -617,6 +640,7 @@ impl TerrainConfig {
             ],
             roads: Vec::new(),
             terrain_plots: Vec::new(),
+            parks: Vec::new(),
         };
 
         // Generate roads using params
@@ -635,8 +659,18 @@ impl TerrainConfig {
             &config.water_rings,
             (config.center_x, config.center_y),
         );
+        // The parks are the ground the cleared lots leave.
+        config.parks = config.generate_parks(&params.suburban_params());
 
         config
+    }
+
+    /// The suburb's parks, for the roads and lots already in `self`.
+    fn generate_parks(&self, params: &SuburbanGenParams) -> Vec<TerrainPark> {
+        let center = (self.center_x, self.center_y);
+        let neighbourhoods = super::suburb::plan(params, center).neighbourhoods;
+        let greens = super::suburb::parks::lay(&self.roads, &self.terrain_plots, &neighbourhoods, params, center);
+        super::suburb::parks::outlines(&greens)
     }
 
     /// Generate all road segments from params
@@ -1314,13 +1348,30 @@ mod tests {
     /// its lots are owned plots and its nodes were placed against it. Change
     /// the literal only for a change that means to move it, write the node
     /// move migration it needs (see `models::resource::tests`), and say so in
-    /// the commit. Debug builds only: a release build's floats hash
-    /// differently (#128).
+    /// the commit. It holds in debug and release alike (#128).
     #[test]
     fn default_terrain_version_is_pinned() {
-        // Moved on purpose by #112, which made Neighbourhood the default. Not
-        // by #113, which removed Legacy.
-        assert_eq!(TerrainConfig::get_default().version(), "41b571c1a312b6c4");
+        // The world last moved on purpose in #112, which made Neighbourhood
+        // the default. #128 changed only how the version is hashed (floats
+        // quantised), not the world. #129 added the parks: no road, lot or
+        // node moved.
+        assert_eq!(TerrainConfig::get_default().version(), "c3a856792daad83d");
+    }
+
+    /// A last-bit float difference, the kind the optimiser makes, leaves the
+    /// version alone; a real move doesn't (#128).
+    #[test]
+    fn version_ignores_last_bit_float_noise() {
+        let terrain = TerrainConfig::get_default();
+        let mut nudged = terrain.clone();
+        let x = &mut nudged.terrain_plots[0].corners[0].0;
+        *x = f64::from_bits(x.to_bits() + 1);
+        let radius = &mut nudged.water_rings[0].radius;
+        *radius = f64::from_bits(radius.to_bits() - 1);
+        assert_eq!(nudged.version(), terrain.version());
+
+        nudged.terrain_plots[0].corners[0].0 += 0.01;
+        assert_ne!(nudged.version(), terrain.version());
     }
 
     /// Saved `world_config` rows and admin PUTs from before #105 have no
@@ -1847,6 +1898,35 @@ mod tests {
         }
     }
 
+    /// The default world's parks are on `/terrain` (#129), and they're ground
+    /// no lot took: no lot's centre is in one, so none can be claimed or
+    /// built on. Their rings hold the raster's park squares to within 2%,
+    /// and they're 8–18% of the suburb (14% when written).
+    #[test]
+    fn the_parks_are_on_the_terrain_and_off_the_lots() {
+        let params = WorldGenParams::default();
+        let t = TerrainConfig::from_params(&params);
+        let (sp, center) = (params.suburban_params(), (t.center_x, t.center_y));
+        let neighbourhoods = super::super::suburb::plan(&sp, center).neighbourhoods;
+        let greens = super::super::suburb::parks::lay(&t.roads, &t.terrain_plots, &neighbourhoods, &sp, center);
+        let squares: f64 = greens.iter().flat_map(|g| &g.parks).map(|p| p.area).sum();
+        assert!(t.parks.len() > 20, "{} parks", t.parks.len());
+        let mut ids: Vec<_> = t.parks.iter().map(|p| p.id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), t.parks.len(), "park ids are unique");
+        for lot in &t.terrain_plots {
+            let c = lot.corners.iter().fold((0.0, 0.0), |m, p| (m.0 + p.0 / 4.0, m.1 + p.1 / 4.0));
+            assert!(!t.parks.iter().any(|p| p.contains(c.0, c.1)), "lot {} is in a park", lot.id);
+        }
+        let area: f64 = t.parks.iter().map(|p| p.area).sum();
+        let (inner, outer) = (rules::URBAN_OUTER_RADIUS, rules::SUBURBAN_OUTER_RADIUS);
+        let share = area / (PI * (outer * outer - inner * inner));
+        println!("{} parks, {:.0} square units, {:.1}% of the suburb", t.parks.len(), area, share * 100.0);
+        assert!((area - squares).abs() <= 0.02 * squares, "traced {area:.0}, squares {squares:.0}");
+        assert!((0.08..=0.18).contains(&share), "parks are {:.1}% of the suburb", share * 100.0);
+    }
+
     #[test]
     fn test_terrain_generation_performance() {
         use cpu_time::ThreadTime;
@@ -1861,7 +1941,7 @@ mod tests {
         let elapsed = start.elapsed();
 
         println!("Terrain generation took: {:?} of CPU", elapsed);
-        // Typical: ~1.4s debug, ~100ms release. Pre-optimization was ~115s debug.
+        // Typical: ~2.4s debug since #129 added the parks (~1.4s before). Pre-optimization was ~115s debug.
         assert!(elapsed.as_millis() < 5000,
             "Terrain generation took too long: {:?} of CPU (expected <5000ms)", elapsed);
     }

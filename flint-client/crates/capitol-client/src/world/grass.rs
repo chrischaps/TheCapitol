@@ -9,6 +9,9 @@
 //! - **the rings**: none inside the suburb, easing in across its outer edge,
 //!   full through the rural ring and the wilderness, then thinning out
 //!   just past the world's edge, where the ground fades to the background;
+//! - **parks** (#129): the suburb's parks are mown lawns, shorter and more
+//!   even than the meadows, easing in from their edges where the lots and
+//!   the streets stand;
 //! - **meadows**: a slow value noise (the ground's own, so the fields and
 //!   its mottling share a grain) thins the grass in broad patches, so it
 //!   reads as fields rather than as a carpet;
@@ -18,8 +21,8 @@
 //!   a thing to take. Every clearing has a soft rim, which `scale_by_mask`
 //!   turns into the field thinning toward the edge rather than stopping.
 //!
-//! The terrain part is painted when the roads, the lots or the rings
-//! change. Nodes arrive as you walk (the server lists those within 80 m),
+//! The terrain part is painted when the roads, the lots, the parks or the
+//! rings change. Nodes arrive as you walk (the server lists those within 80 m),
 //! so their clearings are stamped onto a copy of it, at most once a
 //! second, whenever the set of nodes seen changes.
 //!
@@ -34,7 +37,7 @@ use crate::world::ground::value_noise;
 use crate::world::palette::{hex, GRASS_DRY, GRASS_ROOT, GRASS_TIP};
 use crate::world::water;
 use capitol_protocol::rules::{CENTER_X, CENTER_Y, SUBURBAN_OUTER_RADIUS};
-use capitol_protocol::terrain::TerrainResponse;
+use capitol_protocol::terrain::{TerrainPark, TerrainResponse};
 use flint_ecs::FlintWorld;
 use flint_player::{ExtensionGpu, GrassConfig, GrassGround, GrassHeight};
 use std::time::{Duration, Instant};
@@ -55,6 +58,14 @@ const EDGE_OUT: f64 = 60.0;
 /// field left in the thinnest patch.
 const MEADOW_SCALE: f32 = 26.0;
 const MEADOW_FLOOR: f32 = 0.35;
+
+/// A park's lawn: its height and fill against a full meadow's, with a
+/// little of the meadow's mottling left in, and how far in from its edge
+/// it's bare, then soft.
+const PARK_LAWN: f32 = 0.55;
+const PARK_MOTTLE: f32 = 0.2;
+const PARK_EDGE: f64 = 2.0;
+const PARK_SOFT: f64 = 7.0;
 
 /// Server units of bare verge beside every road, past its edge, and of soft
 /// rim past that, where the field thins in.
@@ -259,15 +270,23 @@ pub fn paint(terrain: &TerrainResponse, size: usize) -> Mask {
             mask.texels[j * size + i] = (v * 255.0).round() as u8;
         }
     }
-    // Roads and lots only matter where something grows. A road's box is
-    // checked against the grass's reach first, so the city's thousands of
-    // segments cost nothing.
+    let mut lawns = Vec::new();
+    for park in &terrain.parks {
+        lawns.extend(paint_park(&mut mask, park));
+    }
+    // Roads and lots only matter where something grows: past the suburb,
+    // or near a park. A road's box is checked against the grass's reach
+    // first, so the city's thousands of segments cost nothing.
+    let near = ROAD_SOFT + VERGE + 20.0;
     let grows = |lo: P, hi: P| {
         let far = [
             (lo[0] - CENTER_X).abs().max((hi[0] - CENTER_X).abs()),
             (lo[1] - CENTER_Y).abs().max((hi[1] - CENTER_Y).abs()),
         ];
         far[0].hypot(far[1]) > EASE_FROM - 100.0
+            || lawns.iter().any(|&(a, b): &(P, P)| {
+                lo[0] < b[0] + near && hi[0] > a[0] - near && lo[1] < b[1] + near && hi[1] > a[1] - near
+            })
     };
     for road in &terrain.roads {
         let half = road.width * 0.5 + VERGE;
@@ -288,6 +307,48 @@ pub fn paint(terrain: &TerrainResponse, size: usize) -> Mask {
         }
     }
     mask
+}
+
+/// Lays `park`'s lawn on the mask: inside its rings, bare along their
+/// edges and easing in past that. Returns its box, if it has one.
+fn paint_park(mask: &mut Mask, park: &TerrainPark) -> Option<(P, P)> {
+    let edges: Vec<(P, P)> = park
+        .rings
+        .iter()
+        .flat_map(|ring| {
+            (0..ring.len()).map(move |k| {
+                let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
+                ([a.0, a.1], [b.0, b.1])
+            })
+        })
+        .collect();
+    let first = edges.first()?;
+    let (lo, hi) = edges.iter().fold((first.0, first.0), |(lo, hi), (a, _)| {
+        ([lo[0].min(a[0]), lo[1].min(a[1])], [hi[0].max(a[0]), hi[1].max(a[1])])
+    });
+    let edge = PARK_EDGE + mask.slack();
+    let n = mask.size as i64;
+    let [i0, j0] = mask.texel_of(lo);
+    let [i1, j1] = mask.texel_of(hi);
+    for j in j0.max(0)..=j1.min(n - 1) {
+        for i in i0.max(0)..=i1.min(n - 1) {
+            let p = mask.at(i as usize, j as usize);
+            if !park.contains(p[0], p[1]) {
+                continue;
+            }
+            let d = edges
+                .iter()
+                .map(|&(a, b)| distance_to_segment(p, a, b))
+                .fold(f64::MAX, f64::min);
+            let [x, z] = to_world(p[0], p[1]);
+            let mottle = value_noise(x / MEADOW_SCALE + 41.0, z / MEADOW_SCALE - 23.0);
+            let lawn = PARK_LAWN * (1.0 - PARK_MOTTLE + PARK_MOTTLE * mottle);
+            let v = lawn * smoothstep(edge, edge + PARK_SOFT, d);
+            let k = j as usize * mask.size + i as usize;
+            mask.texels[k] = mask.texels[k].max((v * 255.0).round() as u8);
+        }
+    }
+    Some((lo, hi))
 }
 
 /// The grass's look: blades, reach and colour, with the scene's wind.
@@ -376,8 +437,8 @@ pub struct Grass {
 }
 
 impl Grass {
-    /// Paints the terrain's part again (when its roads, lots or rings
-    /// changed).
+    /// Paints the terrain's part again (when its roads, lots, parks or
+    /// rings changed).
     pub fn terrain(&mut self, terrain: &TerrainResponse) {
         let started = Instant::now();
         self.base = Some(paint(terrain, MASK_SIZE));
@@ -462,16 +523,46 @@ mod tests {
     }
 
     #[test]
-    fn nothing_grows_inside_the_suburb() {
+    fn nothing_grows_inside_the_suburb_but_its_parks() {
+        let t = fixture();
+        assert!(!t.parks.is_empty(), "the fixture has parks");
         let m = mask();
+        let boxes: Vec<(P, P, &TerrainPark)> = t
+            .parks
+            .iter()
+            .map(|k| {
+                let pts = k.rings.iter().flatten();
+                let lo = pts.clone().fold([f64::MAX; 2], |m, p| [m[0].min(p.0), m[1].min(p.1)]);
+                let hi = pts.fold([f64::MIN; 2], |m, p| [m[0].max(p.0), m[1].max(p.1)]);
+                (lo, hi, k)
+            })
+            .collect();
+        let in_park = |p: P| {
+            boxes.iter().any(|(lo, hi, k)| {
+                p[0] >= lo[0] && p[0] <= hi[0] && p[1] >= lo[1] && p[1] <= hi[1] && k.contains(p[0], p[1])
+            })
+        };
+        let (mut lawn, mut n) = (0, 0);
         for j in 0..SIZE {
             for i in 0..SIZE {
                 let p = m.at(i, j);
-                if radius(p) < EASE_FROM {
-                    assert_eq!(m.texels[j * SIZE + i], 0, "{p:?}");
+                if radius(p) >= EASE_FROM {
+                    continue;
+                }
+                let v = m.texels[j * SIZE + i];
+                match in_park(p) {
+                    false => assert_eq!(v, 0, "{p:?}"),
+                    true => {
+                        // Mown: never as tall as a full meadow.
+                        assert!(v as f32 <= PARK_LAWN * 255.0 + 1.0, "{p:?}: {v}");
+                        n += 1;
+                        lawn += (v > 0) as usize;
+                    }
                 }
             }
         }
+        // Most of a park is lawn; only its edges are bare.
+        assert!(lawn as f64 > 0.6 * n as f64, "{lawn} of {n} park texels grow");
     }
 
     #[test]
