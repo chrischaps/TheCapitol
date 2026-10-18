@@ -331,13 +331,15 @@ pub enum ServerMessage {
     /// with `force` released it, or it was foreclosed for unpaid tax (#131).
     #[serde(rename = "plot_released")]
     PlotReleased { terrain_id: String },
-    // #131: Property tax, sent to the plot's owner only
+    // #131: Property tax, sent to the plot's owner only. Both wait for an
+    // owner who's offline and are sent when they next subscribe (#138).
     /// Your plot `terrain_id` owes `tax_owed` strands of property tax. At
     /// `forecloses_at` owed (four weeks of tax as charged, so about four
     /// weeks unpaid) it's foreclosed. Sent when the
     /// debt passes each whole week of tax, and once more an hour before.
     /// The hourly tax run takes the debt from your strands when it can, so
-    /// any strands you have buy time.
+    /// any strands you have buy time. One that waited for you says what's
+    /// owed as you come back.
     #[serde(rename = "tax_delinquent")]
     TaxDelinquent {
         terrain_id: String,

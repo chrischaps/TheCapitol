@@ -692,16 +692,22 @@ impl GameState {
                     terrain_id: terrain_id.clone(),
                 });
             }
-            // Only ever sent to the plot's owner.
+            // Only ever sent to the plot's owner. The plot panel shows the debt
+            // as it grows, not as it was when the plot was picked (#138).
             M::TaxDelinquent {
                 terrain_id,
                 tax_owed,
                 forecloses_at,
-            } => out.push(StateEvent::TaxDelinquent {
-                terrain_id: terrain_id.clone(),
-                tax_owed: *tax_owed,
-                forecloses_at: *forecloses_at,
-            }),
+            } => {
+                if self.owe_tax(terrain_id, *tax_owed, *forecloses_at) {
+                    out.push(StateEvent::PlotsUpdated);
+                }
+                out.push(StateEvent::TaxDelinquent {
+                    terrain_id: terrain_id.clone(),
+                    tax_owed: *tax_owed,
+                    forecloses_at: *forecloses_at,
+                })
+            }
             M::PlotForeclosed {
                 terrain_id,
                 tax_owed,
@@ -802,6 +808,12 @@ impl GameState {
                 if self.picked_plot.take().is_some() {
                     out.push(StateEvent::PlotPicked { plot_id: None });
                 }
+            }
+            R::PayTax(paid) => {
+                if self.learn_plot(&paid.plot) {
+                    out.push(StateEvent::PlotsUpdated);
+                }
+                self.set_strands(paid.new_balance, &mut out);
             }
             R::ClaimPlot(claim) => {
                 self.learn_plot(&claim.plot);
@@ -1189,6 +1201,23 @@ impl GameState {
         } else if let Some(i) = self.plots.iter().position(|p| p.id == plot.id) {
             self.plots.remove(i);
             changed = true;
+        }
+        changed
+    }
+
+    /// Your plot on the lot `terrain_id` owes `tax_owed`: in your list, and
+    /// the picked plot if it's that one. Returns whether anything changed.
+    fn owe_tax(&mut self, terrain_id: &str, tax_owed: i64, forecloses_at: i64) -> bool {
+        let mut changed = false;
+        let picked = self.picked_plot.iter_mut();
+        for plot in self.plots.iter_mut().chain(picked) {
+            if plot.terrain_id.as_deref() == Some(terrain_id)
+                && (plot.tax_owed, plot.forecloses_at) != (tax_owed, Some(forecloses_at))
+            {
+                plot.tax_owed = tax_owed;
+                plot.forecloses_at = Some(forecloses_at);
+                changed = true;
+            }
         }
         changed
     }

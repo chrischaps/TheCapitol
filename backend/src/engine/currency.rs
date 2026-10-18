@@ -12,6 +12,8 @@ pub enum TransactionType {
     DeedRefund,
     /// The deed, less the tax owed, back to a foreclosed plot's owner (#131)
     ForeclosureRefund,
+    /// Property tax owed, paid off by the owner (#138)
+    TaxPayment,
 }
 
 impl TransactionType {
@@ -25,6 +27,7 @@ impl TransactionType {
             TransactionType::DeedPurchase => "deed_purchase",
             TransactionType::DeedRefund => "deed_refund",
             TransactionType::ForeclosureRefund => "foreclosure_refund",
+            TransactionType::TaxPayment => "tax_payment",
         }
     }
 }

@@ -10,6 +10,9 @@
 //! cost is the plot's `deed_cost` (`capitol_core::plot::Offer`), as React
 //! shows it too.
 //!
+//! A plot of yours that owes tax shows the debt, a bar of how near it is to
+//! foreclosure, and a button that pays what your strands cover (#138).
+//!
 //! The panel is edged in gold, the colour of what's yours (plan §1), and
 //! the claimed plot's gold edge in the world answers it.
 
@@ -30,6 +33,8 @@ const RISE: f32 = 12.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Claim(uuid::Uuid),
+    /// Pay this many strands of the plot's tax debt.
+    PayTax(uuid::Uuid, i64),
     Close,
 }
 
@@ -42,7 +47,9 @@ pub struct View<'a> {
     pub strands: Option<i64>,
     /// A claim is out.
     pub claiming: bool,
-    /// Why the last claim was refused, while it's fresh.
+    /// A tax payment is out.
+    pub paying: bool,
+    /// Why the last claim or payment was refused, while it's fresh.
     pub refused: Option<&'a str>,
 }
 
@@ -146,6 +153,12 @@ fn body(ui: &mut egui::Ui, plot: &PlotInfo, view: &View) -> Option<Action> {
     }
 
     match &view.offer {
+        Offer::Yours if plot.tax_owed > 0 => {
+            section(ui);
+            if let Some(a) = debt(ui, plot, view) {
+                action = Some(a);
+            }
+        }
         Offer::Yours => {
             section(ui);
             ui.vertical_centered(|ui| {
@@ -222,6 +235,46 @@ fn claim(ui: &mut egui::Ui, plot: &PlotInfo, offer: &Offer, view: &View) -> Opti
         .then_some(Action::Claim(plot.id))
 }
 
+/// The tax a plot of yours owes, how near that is to foreclosure, and the
+/// button that pays it off as far as your strands reach.
+fn debt(ui: &mut egui::Ui, plot: &PlotInfo, view: &View) -> Option<Action> {
+    row(
+        ui,
+        "Tax owed",
+        RichText::new(format!("{} Strands", plot.tax_owed)).color(SHORT),
+    );
+    if let Some(limit) = plot.forecloses_at.filter(|l| *l > 0) {
+        let near = (plot.tax_owed as f32 / limit as f32).clamp(0.0, 1.0);
+        ui.add_space(4.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(WIDTH, 4.0), egui::Sense::hover());
+        let painter = ui.painter();
+        painter.rect_filled(rect, 2.0, theme::WELL);
+        let mut filled = rect;
+        filled.set_width(rect.width() * near);
+        // Gold while there's time, red as the end nears
+        painter.rect_filled(filled, 2.0, GOLD.lerp_to_gamma(SHORT, near));
+        ui.add_space(3.0);
+        ui.label(theme::dim(format!("Foreclosed at {limit} owed")).size(size::LABEL));
+    }
+    ui.add_space(8.0);
+    let pay = view.strands.unwrap_or(0).clamp(0, plot.tax_owed);
+    let (text, enabled) = match pay {
+        _ if view.paying => ("Paying…".to_owned(), false),
+        0 => ("No Strands to pay with".to_owned(), false),
+        n if n == plot.tax_owed => (format!("Pay {n} Strands"), true),
+        n => (format!("Pay {n} of it"), true),
+    };
+    theme::accent_button(ui, &text, GOLD, enabled)
+        .on_hover_cursor(if enabled {
+            egui::CursorIcon::PointingHand
+        } else {
+            egui::CursorIcon::NotAllowed
+        })
+        .clicked()
+        .then_some(Action::PayTax(plot.id, pay))
+        .filter(|_| enabled)
+}
+
 /// One label and value, spread across the panel (React's `.plot-info-row`).
 fn row(ui: &mut egui::Ui, label: &str, value: RichText) {
     ui.horizontal(|ui| {
@@ -258,6 +311,8 @@ mod tests {
             owner_name: owner.map(|_| "Ada".into()),
             claimed_at: None,
             assessed_value: 500,
+            tax_owed: 0,
+            forecloses_at: None,
             deed_cost: Some(500),
             station_count: 1,
             station_capacity: 9,
@@ -315,6 +370,7 @@ mod tests {
             offer: Offer::Claimable { cost: 500 },
             strands: Some(800),
             claiming: false,
+            paying: false,
             refused: None,
         };
         let (_, rect) = run(&view, None);
@@ -338,6 +394,7 @@ mod tests {
             },
             strands: Some(400),
             claiming: false,
+            paying: false,
             refused: None,
         };
         let (_, rect) = run(&view, None);
@@ -350,12 +407,39 @@ mod tests {
     }
 
     #[test]
+    fn a_plot_that_owes_tax_pays_what_your_strands_cover() {
+        let me = Uuid::from_u128(1);
+        let mut p = plot(Some(me));
+        p.tax_owed = 120;
+        p.forecloses_at = Some(480);
+        let view = View {
+            plot: Some(&p),
+            offer: Offer::Yours,
+            strands: Some(90),
+            claiming: false,
+            paying: false,
+            refused: None,
+        };
+        let (_, rect) = run(&view, None);
+        let rect = rect.unwrap();
+        let button = egui::pos2(rect.center().x, rect.bottom() - 30.0);
+        assert_eq!(run(&view, Some(button)).0, Some(Action::PayTax(p.id, 90)));
+
+        let broke = View {
+            strands: Some(0),
+            ..view
+        };
+        assert_eq!(run(&broke, Some(button)).0, None, "nothing to pay with");
+    }
+
+    #[test]
     fn nothing_picked_draws_nothing() {
         let view = View {
             plot: None,
             offer: Offer::NotForSale,
             strands: None,
             claiming: false,
+            paying: false,
             refused: None,
         };
         assert_eq!(run(&view, None), (None, None));

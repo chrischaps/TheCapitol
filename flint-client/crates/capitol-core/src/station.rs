@@ -318,6 +318,8 @@ mod tests {
             owner_name: None,
             claimed_at: None,
             assessed_value: 0,
+            tax_owed: 0,
+            forecloses_at: None,
             deed_cost: Some(1000),
             station_count: count,
             station_capacity: 16,

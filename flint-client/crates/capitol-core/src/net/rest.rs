@@ -73,6 +73,11 @@ pub enum RestRequest {
     PlotAt(PositionQuery),
     /// `POST /plots/{id}/claim`
     ClaimPlot { plot_id: Uuid },
+    /// `POST /plots/{id}/pay-tax` (#138)
+    PayTax {
+        plot_id: Uuid,
+        request: PayTaxRequest,
+    },
     /// `GET /plots/{id}/permissions`
     PlotPermissions { plot_id: Uuid },
     /// `PUT /plots/{id}/permissions`
@@ -119,6 +124,7 @@ pub enum RestResponse {
     /// `None` when no plot covers the position
     PlotAt(Option<PlotInfo>),
     ClaimPlot(ClaimPlotResponse),
+    PayTax(PayTaxResponse),
     /// The current permissions, from both `GET` and `PUT`
     PlotPermissions(PlotPermissions),
     Zones(ZonesResponse),
@@ -169,7 +175,8 @@ impl RestRequest {
             | PlaceStation(_)
             | Deposit(_)
             | Withdraw(_)
-            | ClaimPlot { .. } => Method::POST,
+            | ClaimPlot { .. }
+            | PayTax { .. } => Method::POST,
             UpdatePlotPermissions { .. } => Method::PUT,
             RemoveStation { .. } => Method::DELETE,
             Health
@@ -221,6 +228,7 @@ impl RestRequest {
             Plot { plot_id } => format!("/plots/{plot_id}"),
             PlotAt(_) => "/plots/at".into(),
             ClaimPlot { plot_id } => format!("/plots/{plot_id}/claim"),
+            PayTax { plot_id, .. } => format!("/plots/{plot_id}/pay-tax"),
             PlotPermissions { plot_id } | UpdatePlotPermissions { plot_id, .. } => {
                 format!("/plots/{plot_id}/permissions")
             }
@@ -243,6 +251,7 @@ impl RestRequest {
             Deposit(b) => req.json(b),
             Withdraw(b) => req.json(b),
             UpdatePlotPermissions { update, .. } => req.json(update),
+            PayTax { request, .. } => req.json(request),
             WorldNearby(q) => req.query(q),
             ListPlots(q) => req.query(q),
             PlotAt(q) => req.query(q),
@@ -283,6 +292,7 @@ impl RestRequest {
             Q::Plot { .. } => A::Plot(de(body)?),
             Q::PlotAt(_) => A::PlotAt(de(body)?),
             Q::ClaimPlot { .. } => A::ClaimPlot(de(body)?),
+            Q::PayTax { .. } => A::PayTax(de(body)?),
             Q::PlotPermissions { .. } | Q::UpdatePlotPermissions { .. } => {
                 A::PlotPermissions(de(body)?)
             }
@@ -410,6 +420,14 @@ mod tests {
                 RestRequest::ClaimPlot { plot_id: id },
                 "POST",
                 format!("/plots/{id}/claim"),
+            ),
+            (
+                RestRequest::PayTax {
+                    plot_id: id,
+                    request: PayTaxRequest { amount: Some(5) },
+                },
+                "POST",
+                format!("/plots/{id}/pay-tax"),
             ),
             (
                 RestRequest::UpdatePlotPermissions {

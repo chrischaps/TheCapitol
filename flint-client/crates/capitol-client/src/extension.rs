@@ -798,10 +798,14 @@ impl PlayerExtension for CapitolExtension {
                     }),
                     strands: state.strands(),
                     claiming: session.claiming(),
-                    refused: session.claim_refused(now),
+                    paying: session.paying(),
+                    refused: session
+                        .claim_refused(now)
+                        .or_else(|| session.pay_refused(now)),
                 };
                 match self.plot_panel.show(ctx, &view, self.crafting.rect) {
                     Some(ui::plot::Action::Claim(id)) => session.claim_plot(id),
+                    Some(ui::plot::Action::PayTax(id, amount)) => session.pay_tax(id, amount),
                     Some(ui::plot::Action::Close) => session.close_plot(),
                     None => {}
                 }

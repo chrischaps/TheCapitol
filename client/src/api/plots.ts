@@ -84,6 +84,10 @@ interface ApiPlotInfo {
   owner_name: string | null
   claimed_at: string | null
   assessed_value: number
+  /** Property tax owed and unpaid (#138) */
+  tax_owed?: number
+  /** The debt at which the plot is foreclosed, while owned and taxed */
+  forecloses_at?: number | null
   deed_cost?: number | null
   station_count: number
   station_capacity: number

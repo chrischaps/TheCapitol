@@ -116,6 +116,8 @@ fn plot(owner: Option<Uuid>) -> PlotInfo {
         owner_name: owner.map(|_| "Ada".into()),
         claimed_at: None,
         assessed_value: 500,
+        tax_owed: 0,
+        forecloses_at: None,
         deed_cost: Some(500),
         station_count: 0,
         station_capacity: 2,
@@ -1425,6 +1427,38 @@ fn claiming_a_plot_updates_it_and_the_balance() {
     assert_eq!(state.plot(PLOT).unwrap().owner_id, Some(ME));
     assert_eq!(state.plots().len(), 1);
     assert_eq!(state.picked_plot().unwrap().owner_id, Some(ME));
+}
+
+#[test]
+fn a_tax_warning_and_a_payment_keep_the_picked_plot_true() {
+    let mut state = connected();
+    let mut mine = plot(Some(ME));
+    mine.terrain_id = Some("lot".into());
+    state.apply_rest(&R::PlotAt(Some(mine.clone())));
+    let events = state.apply_ws(&M::TaxDelinquent {
+        terrain_id: "lot".into(),
+        tax_owed: 120,
+        forecloses_at: 480,
+    });
+    assert_eq!(events[0], StateEvent::PlotsUpdated);
+    let picked = state.picked_plot().unwrap();
+    assert_eq!((picked.tax_owed, picked.forecloses_at), (120, Some(480)));
+    assert_eq!(state.plot(PLOT).unwrap().tax_owed, 120);
+
+    mine.tax_owed = 20;
+    mine.forecloses_at = Some(480);
+    let events = state.apply_rest(&R::PayTax(PayTaxResponse {
+        plot: mine,
+        new_balance: 0,
+    }));
+    assert_eq!(
+        events,
+        vec![
+            StateEvent::PlotsUpdated,
+            StateEvent::CurrencyChanged { balance: 0 }
+        ]
+    );
+    assert_eq!(state.picked_plot().unwrap().tax_owed, 20);
 }
 
 #[test]

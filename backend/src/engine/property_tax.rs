@@ -13,6 +13,10 @@
 //! boxes to whoever owns it (#137). What doesn't fit an inventory is lost
 //! (#141). Then it's released the same way a forced terrain commit releases
 //! one, and the deed is refunded, less the debt.
+//!
+//! Both kinds of word to the owner are queued as notices (#138), so an owner
+//! who's offline hears on their return. The owner can pay the debt off
+//! themselves with [`pay_tax_debt`] (`POST /plots/{id}/pay-tax`).
 
 use std::collections::HashMap;
 
@@ -20,11 +24,14 @@ use sqlx::PgPool;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use super::currency::{add_strands_in, TransactionType};
+use super::currency::{add_strands_in, subtract_strands_in, TransactionType};
 use super::events::GameEvent;
+use super::notices;
 use super::plot_sync::release_plot;
 use super::station_removal::return_plot_stations;
+use crate::error::AppError;
 use crate::models::StationState;
+use capitol_protocol::ws::ServerMessage;
 
 /// Weekly tax rate as a fraction (2% = 0.02)
 const TAX_RATE: f64 = 0.02;
@@ -87,6 +94,8 @@ pub struct TaxNotice {
     pub terrain_id: String,
     pub tax_owed: i64,
     pub forecloses_at: i64,
+    /// Its queued notice (#138). `None` if queuing failed: it's sent live only.
+    pub notice_id: Option<Uuid>,
 }
 
 /// A plot taken for unpaid tax.
@@ -106,6 +115,8 @@ pub struct Foreclosure {
     pub returned_to: Vec<(Uuid, Uuid)>,
     /// What didn't fit, as `(item_type, quantity)`
     pub lost: Vec<(String, i32)>,
+    /// The queued `plot_foreclosed` notice (#138), if there's a lot to name
+    pub notice_id: Option<Uuid>,
 }
 
 /// What an hour's tax run did that the game and the clients need to hear.
@@ -218,11 +229,22 @@ pub async fn process_property_taxes(db: &PgPool) -> TaxReport {
             let after = after as i64;
             if notice_due(after - hourly_tax, after, assessed_value) {
                 if let Some(terrain_id) = &terrain_id {
+                    let forecloses_at = foreclosure_threshold(assessed_value);
+                    let message = ServerMessage::TaxDelinquent {
+                        terrain_id: terrain_id.clone(),
+                        tax_owed: after,
+                        forecloses_at,
+                    };
+                    let notice_id = notices::queue(db, owner_id, terrain_id, &message)
+                        .await
+                        .map_err(|e| tracing::error!("Failed to queue a tax notice for plot {}: {:?}", plot_id, e))
+                        .ok();
                     report.notices.push(TaxNotice {
                         owner_id,
                         terrain_id: terrain_id.clone(),
                         tax_owed: after,
-                        forecloses_at: foreclosure_threshold(assessed_value),
+                        forecloses_at,
+                        notice_id,
                     });
                 }
             }
@@ -333,6 +355,13 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>
             .await
             .map_err(|e| e.to_string())?
     };
+    let notice_id = match &terrain_id {
+        Some(terrain_id) => {
+            let message = ServerMessage::PlotForeclosed { terrain_id: terrain_id.clone(), tax_owed, refund };
+            Some(notices::queue(&mut *tx, owner_id, terrain_id, &message).await.map_err(|e| e.to_string())?)
+        }
+        None => None,
+    };
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(Some(Foreclosure {
         plot_id,
@@ -344,12 +373,14 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>
         removed_stations,
         returned_to: returned.inventories,
         lost: returned.lost,
+        notice_id,
     }))
 }
 
 /// Apply a tax run to the game and tell the clients. The owner gets the
-/// notices, `plot_foreclosed` and their balance after the refund, but only
-/// if they're online; keeping those for an offline owner is #138. Everyone
+/// notices, `plot_foreclosed` and their balance after the refund if they're
+/// online. The first two were queued, so an offline owner gets them when
+/// they're back (#138); their balance they'll load anyway. Everyone
 /// hears about each removed station, and gets `plot_released`. Each player
 /// whose inventory took something from the stations gets `inventory_updated`.
 pub fn announce(report: TaxReport, stations: &mut HashMap<Uuid, StationState>, events: &broadcast::Sender<GameEvent>) {
@@ -359,6 +390,7 @@ pub fn announce(report: TaxReport, stations: &mut HashMap<Uuid, StationState>, e
             terrain_id: n.terrain_id,
             tax_owed: n.tax_owed,
             forecloses_at: n.forecloses_at,
+            notice_id: n.notice_id,
         });
     }
     for f in report.foreclosures {
@@ -378,6 +410,7 @@ pub fn announce(report: TaxReport, stations: &mut HashMap<Uuid, StationState>, e
                 terrain_id: terrain_id.clone(),
                 tax_owed: f.tax_owed,
                 refund: f.refund,
+                notice_id: f.notice_id,
             });
             let _ = events.send(GameEvent::PlotReleased { terrain_id });
         }
@@ -457,81 +490,51 @@ pub async fn get_player_tax_debt(db: &PgPool, player_id: Uuid) -> Result<i64, sq
     Ok(debt.0)
 }
 
-/// Pay off tax debt for a specific plot
+/// Pay `amount` strands (all of it if `None`) off the tax `player_id` owes
+/// on `plot_id`, as `tax_payment` in the ledger. Paying more than is owed
+/// pays what's owed. Returns what's still owed and the new balance.
 pub async fn pay_tax_debt(
     db: &PgPool,
     player_id: Uuid,
     plot_id: Uuid,
-    amount: i64,
-) -> Result<i64, String> {
-    // Verify player owns the plot
-    let plot_owner: Option<Uuid> = sqlx::query_scalar(
-        "SELECT owner_id FROM plots WHERE id = $1"
-    )
-    .bind(plot_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?
-    .flatten();
-
-    if plot_owner != Some(player_id) {
-        return Err("You don't own this plot".to_string());
+    amount: Option<i64>,
+) -> Result<(i64, i64), AppError> {
+    let mut tx = db.begin().await?;
+    // The plot before the player, as the hourly run locks them
+    let row: Option<(Option<Uuid>, i32)> =
+        sqlx::query_as("SELECT owner_id, tax_owed FROM plots WHERE id = $1 FOR UPDATE")
+            .bind(plot_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let (owner_id, tax_owed) = row.ok_or_else(|| AppError::NotFound("Plot not found".into()))?;
+    if owner_id != Some(player_id) {
+        return Err(AppError::Forbidden("You don't own this plot".into()));
     }
-
-    // Get current tax owed
-    let tax_owed: i32 = sqlx::query_scalar(
-        "SELECT tax_owed FROM plots WHERE id = $1"
-    )
-    .bind(plot_id)
-    .fetch_one(db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?;
-
-    let payment = amount.min(tax_owed as i64);
+    let payment = amount.unwrap_or(tax_owed as i64).min(tax_owed as i64);
+    if tax_owed <= 0 {
+        return Err(AppError::BadRequest("This plot owes no tax".into()));
+    }
     if payment <= 0 {
-        return Err("No tax debt to pay".to_string());
+        return Err(AppError::BadRequest("Amount must be positive".into()));
     }
-
-    // Start transaction
-    let mut tx = db.begin().await.map_err(|e| format!("Transaction error: {}", e))?;
-
-    // Deduct from player balance
-    let result = sqlx::query(
-        "UPDATE players SET strand_balance = strand_balance - $1
-         WHERE id = $2 AND strand_balance >= $1"
+    let new_balance = subtract_strands_in(
+        &mut tx,
+        player_id,
+        payment,
+        TransactionType::TaxPayment,
+        Some("Paid off property tax owed"),
+        Some(plot_id),
     )
-    .bind(payment)
-    .bind(player_id)
-    .execute(&mut *tx)
     .await
-    .map_err(|e| format!("Payment error: {}", e))?;
-
-    if result.rows_affected() == 0 {
-        return Err("Insufficient strands".to_string());
-    }
-
-    // Reduce tax debt
-    sqlx::query(
-        "UPDATE plots SET tax_owed = tax_owed - $1 WHERE id = $2"
-    )
-    .bind(payment as i32)
-    .bind(plot_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| format!("Debt update error: {}", e))?;
-
-    tx.commit().await.map_err(|e| format!("Commit error: {}", e))?;
-
-    // Get remaining debt
-    let remaining: i32 = sqlx::query_scalar(
-        "SELECT tax_owed FROM plots WHERE id = $1"
-    )
-    .bind(plot_id)
-    .fetch_one(db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?;
-
-    Ok(remaining as i64)
+    .map_err(AppError::BadRequest)?;
+    let left: i32 = sqlx::query_scalar("UPDATE plots SET tax_owed = tax_owed - $1 WHERE id = $2 RETURNING tax_owed")
+        .bind(payment as i32)
+        .bind(plot_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    tracing::info!("Player {} paid {} strands of tax on plot {} ({} left)", player_id, payment, plot_id, left);
+    Ok((left as i64, new_balance))
 }
 
 /// The `#[ignore]`d ones need the local Postgres (`docker-compose up -d`). Run
@@ -743,10 +746,16 @@ mod tests {
         assert!(matches!(&sent[2], GameEvent::InventoryUpdated { player_id, container_id, .. }
             if *player_id == guest && *container_id == guest_bag));
         assert!(matches!(&sent[3], GameEvent::CurrencyChanged { player_id, new_balance: 5520 } if *player_id == ada));
-        assert!(matches!(&sent[4], GameEvent::PlotForeclosed { owner_id, terrain_id: t, tax_owed: 480, refund: 5520 }
+        assert!(matches!(&sent[4], GameEvent::PlotForeclosed { owner_id, terrain_id: t, tax_owed: 480, refund: 5520, notice_id: Some(_) }
             if *owner_id == ada && *t == terrain_id));
         assert!(matches!(&sent[5], GameEvent::PlotReleased { terrain_id: t } if *t == terrain_id));
         assert_eq!(sent.len(), 6);
+
+        // Away when it happened, ada hears when she's back (#138)
+        assert_eq!(
+            notices::take_all(&db, ada).await.unwrap(),
+            vec![ServerMessage::PlotForeclosed { terrain_id, tax_owed: 480, refund: 5520 }]
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -803,11 +812,53 @@ mod tests {
         let report = process_property_taxes(&db).await;
 
         assert!(report.foreclosures.is_empty());
-        assert_eq!(
-            report.notices,
-            vec![TaxNotice { owner_id: ada, terrain_id: format!("test-{lot}"), tax_owed: 120, forecloses_at: 480 }]
-        );
+        let terrain_id = format!("test-{lot}");
+        assert_eq!(report.notices.len(), 1);
+        let n = &report.notices[0];
+        assert_eq!((n.owner_id, &n.terrain_id, n.tax_owed, n.forecloses_at), (ada, &terrain_id, 120, 480));
+        assert!(n.notice_id.is_some(), "queued for her return");
         assert_eq!(owner(&db, lot).await, Some(Some(ada)));
+        assert_eq!(
+            notices::take_all(&db, ada).await.unwrap(),
+            vec![ServerMessage::TaxDelinquent { terrain_id, tax_owed: 120, forecloses_at: 480 }]
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_owner_can_pay_the_debt_off(db: PgPool) {
+        let ada = player(&db, "ada", 200).await;
+        let lot = plot(&db, Some(ada), VALUE).await;
+        owe(&db, lot, 150).await;
+
+        assert_eq!(pay_tax_debt(&db, ada, lot, Some(50)).await.unwrap(), (100, 150));
+        // All of it, by default; and no more than is owed
+        assert_eq!(pay_tax_debt(&db, ada, lot, None).await.unwrap(), (0, 50));
+        assert_eq!(owed(&db, lot).await, 0);
+        assert_eq!(
+            ledger(&db, ada).await,
+            vec![(-50, "tax_payment".to_string()), (-100, "tax_payment".to_string())]
+        );
+        assert!(matches!(pay_tax_debt(&db, ada, lot, None).await, Err(AppError::BadRequest(_))), "nothing owed");
+
+        owe(&db, lot, 30).await;
+        assert_eq!(pay_tax_debt(&db, ada, lot, Some(1000)).await.unwrap(), (0, 20));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn paying_tax_takes_nothing_it_cant(db: PgPool) {
+        let ada = player(&db, "ada", 40).await;
+        let bram = player(&db, "bram", 1000).await;
+        let lot = plot(&db, Some(ada), VALUE).await;
+        owe(&db, lot, 150).await;
+
+        assert!(matches!(pay_tax_debt(&db, ada, lot, None).await, Err(AppError::BadRequest(_))), "can't afford it");
+        assert!(matches!(pay_tax_debt(&db, bram, lot, None).await, Err(AppError::Forbidden(_))), "not his");
+        assert!(matches!(pay_tax_debt(&db, ada, lot, Some(0)).await, Err(AppError::BadRequest(_))));
+        assert!(matches!(pay_tax_debt(&db, ada, Uuid::new_v4(), None).await, Err(AppError::NotFound(_))));
+        assert_eq!(owed(&db, lot).await, 150);
+        assert_eq!((balance(&db, ada).await, balance(&db, bram).await), (40, 1000));
     }
 
     #[sqlx::test(migrations = "./migrations")]

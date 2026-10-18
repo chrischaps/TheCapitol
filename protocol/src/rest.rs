@@ -594,6 +594,15 @@ pub struct PlotInfo {
     pub claimed_at: Option<DateTime<Utc>>,
     /// Current assessed value for taxes. 0 until the plot is first bought.
     pub assessed_value: i32,
+    /// Property tax owed and unpaid, in strands (#138). The hourly tax run
+    /// takes it from the owner's strands when it can, and
+    /// `POST /plots/{id}/pay-tax` pays it off.
+    #[serde(default)]
+    pub tax_owed: i64,
+    /// The debt at which the plot is foreclosed: four weeks of its tax.
+    /// `None` while it's unowned or owes no tax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecloses_at: Option<i64>,
     /// What a deed to this plot costs in Strands: its zone's `deed_cost`,
     /// which `POST /plots/{id}/claim` charges. `None` where the zone sells
     /// no deeds. Shown whether or not the plot is owned.
@@ -674,6 +683,26 @@ pub struct ClaimPlotResponse {
     /// The claimed plot
     pub plot: PlotInfo,
     /// New Strand balance after purchase
+    pub new_balance: i64,
+}
+
+/// `POST /plots/{id}/pay-tax` (#138)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct PayTaxRequest {
+    /// Strands to pay. All that's owed if absent; more than is owed pays
+    /// what's owed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<i64>,
+}
+
+/// The answer to `POST /plots/{id}/pay-tax`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct PayTaxResponse {
+    /// The plot, with what it still owes
+    pub plot: PlotInfo,
+    /// New Strand balance after paying
     pub new_balance: i64,
 }
 

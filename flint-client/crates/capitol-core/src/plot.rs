@@ -88,6 +88,8 @@ mod tests {
             owner_name: owner.map(|_| "Brin".into()),
             claimed_at: None,
             assessed_value: 0,
+            tax_owed: 0,
+            forecloses_at: None,
             deed_cost,
             station_count: 0,
             station_capacity: 9,

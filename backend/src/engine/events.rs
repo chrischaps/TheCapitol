@@ -189,18 +189,21 @@ pub enum GameEvent {
     PlotReleased {
         terrain_id: String,
     },
-    // #131: Property tax, to the plot's owner only
+    // #131: Property tax, to the plot's owner only. Each is also queued as
+    // `notice_id` (#138): the connection sends it only if it takes the notice.
     TaxDelinquent {
         owner_id: Uuid,
         terrain_id: String,
         tax_owed: i64,
         forecloses_at: i64,
+        notice_id: Option<Uuid>,
     },
     PlotForeclosed {
         owner_id: Uuid,
         terrain_id: String,
         tax_owed: i64,
         refund: i64,
+        notice_id: Option<Uuid>,
     },
 }
 

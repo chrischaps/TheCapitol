@@ -139,10 +139,24 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             match client_msg {
                                 ClientMessage::Subscribe { channel } => {
                                     if channel == "position" {
+                                        let first = !subscribed_position;
                                         subscribed_position = true;
                                         let _ = sender.send(Message::Text(
                                             serde_json::to_string(&ServerMessage::Subscribed { channel }).unwrap().into()
                                         )).await;
+                                        // What waited while they were away (#138). Events since
+                                        // auth are already on `event_rx`; whichever path takes a
+                                        // notice first sends it.
+                                        if first {
+                                            match crate::engine::notices::take_all(&state.db, player_id).await {
+                                                Ok(waiting) => {
+                                                    for msg in waiting {
+                                                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                                    }
+                                                }
+                                                Err(e) => tracing::error!("Failed to load notices for {}: {:?}", player_id, e),
+                                            }
+                                        }
                                     }
                                 }
                                 ClientMessage::Move { x, y } => {
@@ -842,15 +856,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::PlotReleased { terrain_id };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
-                    // #131: Property tax, to the plot's owner only
-                    Ok(GameEvent::TaxDelinquent { owner_id, terrain_id, tax_owed, forecloses_at }) => {
-                        if owner_id == player_id {
+                    // #131: Property tax, to the plot's owner only, if they take its notice (#138)
+                    Ok(GameEvent::TaxDelinquent { owner_id, terrain_id, tax_owed, forecloses_at, notice_id }) => {
+                        if owner_id == player_id && take_notice(&state.db, notice_id).await {
                             let msg = ServerMessage::TaxDelinquent { terrain_id, tax_owed, forecloses_at };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
-                    Ok(GameEvent::PlotForeclosed { owner_id, terrain_id, tax_owed, refund }) => {
-                        if owner_id == player_id {
+                    Ok(GameEvent::PlotForeclosed { owner_id, terrain_id, tax_owed, refund, notice_id }) => {
+                        if owner_id == player_id && take_notice(&state.db, notice_id).await {
                             let msg = ServerMessage::PlotForeclosed { terrain_id, tax_owed, refund };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
@@ -874,6 +888,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         tracing::info!("Player {} disconnected", player_id);
     } else {
         tracing::info!("Player {}'s superseded connection {} ended", player_id, connection_id);
+    }
+}
+
+/// Take a queued notice to send it live (#138). An event with no notice
+/// (queuing it failed) is sent as it is.
+async fn take_notice(db: &sqlx::PgPool, notice_id: Option<Uuid>) -> bool {
+    match notice_id {
+        None => true,
+        Some(id) => crate::engine::notices::take(db, id).await.unwrap_or_else(|e| {
+            tracing::error!("Failed to take notice {}: {:?}", id, e);
+            true
+        }),
     }
 }
 

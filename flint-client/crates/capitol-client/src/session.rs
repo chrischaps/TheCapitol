@@ -30,7 +30,7 @@ use capitol_core::net::{
 };
 use capitol_core::poll::{Fetch, Poller};
 use capitol_core::protocol::rest::{
-    DepositRequest, MoveItemRequest, PositionQuery, SlotItem, WithdrawRequest,
+    DepositRequest, MoveItemRequest, PayTaxRequest, PositionQuery, SlotItem, WithdrawRequest,
 };
 use capitol_core::protocol::rules::Zone;
 use capitol_core::protocol::ws::ClientMessage;
@@ -52,9 +52,10 @@ pub const AUTH_TAG: Tag = 10;
 const MOVE_TAG: Tag = 20;
 
 /// The tags on the plot panel's calls (P6.4): `/plots/at` and `/plots/{id}`
-/// share one, a claim has its own.
+/// share one, a claim has its own, and so does paying its tax (#138).
 const PLOT_TAG: Tag = 30;
 const CLAIM_TAG: Tag = 31;
+const PAY_TAX_TAG: Tag = 32;
 
 /// The tag on the exchange panel's deposits and withdrawals (P7.2). The
 /// poller refetches the containers and the balance on either answer.
@@ -108,6 +109,10 @@ pub struct Session {
     claiming: Option<Uuid>,
     /// Why the last claim was refused, and when.
     claim_refused: Option<(String, Instant)>,
+    /// The plot a tax payment is out for (#138).
+    paying: Option<Uuid>,
+    /// Why the last tax payment was refused, and when.
+    pay_refused: Option<(String, Instant)>,
     /// Plots you claimed since the frame last took them.
     claimed: Vec<Uuid>,
     /// What's worth telling the player about picking a plot, since the
@@ -242,6 +247,8 @@ impl Session {
             craft_refused: None,
             claiming: None,
             claim_refused: None,
+            paying: None,
+            pay_refused: None,
             claimed: Vec::new(),
             plot_notes: Vec::new(),
             exchanging: None,
@@ -581,6 +588,35 @@ impl Session {
         self.claiming = Some(plot_id);
         self.claim_refused = None;
         self.net.rest(RestRequest::ClaimPlot { plot_id }, CLAIM_TAG);
+    }
+
+    /// Pays `amount` strands of the tax `plot_id` owes, unless a payment is
+    /// already out.
+    pub fn pay_tax(&mut self, plot_id: Uuid, amount: i64) {
+        if self.auth.phase() != Phase::InWorld || self.paying.is_some() {
+            return;
+        }
+        tracing::info!("plot: paying {amount} Strands of tax on {plot_id}");
+        self.paying = Some(plot_id);
+        self.pay_refused = None;
+        let request = PayTaxRequest {
+            amount: Some(amount),
+        };
+        self.net
+            .rest(RestRequest::PayTax { plot_id, request }, PAY_TAX_TAG);
+    }
+
+    /// A tax payment is out.
+    pub fn paying(&self) -> bool {
+        self.paying.is_some()
+    }
+
+    /// Why the server refused the last tax payment, for a few seconds after.
+    pub fn pay_refused(&self, now: Instant) -> Option<&str> {
+        self.pay_refused
+            .as_ref()
+            .filter(|(_, at)| now.duration_since(*at) < NOTICE_FOR)
+            .map(|(why, _)| why.as_str())
     }
 
     /// A claim is out.
@@ -1040,6 +1076,26 @@ impl Session {
                         }
                     }
                 }
+                NetEvent::Rest(PAY_TAX_TAG, Ok(RestResponse::PayTax(paid))) => {
+                    tracing::info!(
+                        "plot: paid tax on {}, {} still owed, {} Strands left",
+                        paid.plot.id,
+                        paid.plot.tax_owed,
+                        paid.new_balance
+                    );
+                    self.paying = None;
+                }
+                NetEvent::Rest(PAY_TAX_TAG, result) => {
+                    let why = match result {
+                        Err(e) => refusal(e),
+                        Ok(_) => "The server's answer didn't make sense".into(),
+                    };
+                    tracing::info!("plot: tax payment refused: {why}");
+                    self.pay_refused = Some((why, now));
+                    if let Some(plot_id) = self.paying.take() {
+                        self.net.rest(RestRequest::Plot { plot_id }, PLOT_TAG);
+                    }
+                }
                 NetEvent::Rest(CLAIM_TAG, result) => {
                     let why = match result {
                         Err(e) => refusal(e),
@@ -1186,6 +1242,8 @@ impl Session {
             self.craft_refused = None;
             self.claiming = None;
             self.claim_refused = None;
+            self.paying = None;
+            self.pay_refused = None;
             self.claimed.clear();
             self.plot_notes.clear();
             self.exchanging = None;

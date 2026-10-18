@@ -120,6 +120,13 @@ impl PermissionLevel {
     }
 }
 
+/// `PlotInfo::forecloses_at`: the foreclosure threshold, while it's owned
+/// and taxed
+fn forecloses_at(owner_id: Option<Uuid>, assessed_value: i32) -> Option<i64> {
+    let threshold = crate::engine::property_tax::foreclosure_threshold(assessed_value);
+    (owner_id.is_some() && threshold > 0).then_some(threshold)
+}
+
 impl Plot {
     /// The client-facing view of this plot
     pub fn to_info(
@@ -140,6 +147,8 @@ impl Plot {
             owner_name,
             claimed_at: self.claimed_at,
             assessed_value: self.assessed_value,
+            tax_owed: self.tax_owed as i64,
+            forecloses_at: forecloses_at(self.owner_id, self.assessed_value),
             deed_cost,
             station_count: self.station_count,
             station_capacity,
@@ -203,6 +212,8 @@ impl PlotWithJoins {
             owner_name: self.owner_name.clone(),
             claimed_at: self.claimed_at,
             assessed_value: self.assessed_value,
+            tax_owed: self.tax_owed as i64,
+            forecloses_at: forecloses_at(self.owner_id, self.assessed_value),
             deed_cost: self.deed_cost,
             station_count: self.station_count,
             station_capacity: self.station_capacity,

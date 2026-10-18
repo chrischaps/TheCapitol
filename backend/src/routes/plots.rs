@@ -9,9 +9,12 @@ use tokio::sync::broadcast;
 use tower_http::compression::CompressionLayer;
 use uuid::Uuid;
 
-use capitol_protocol::rest::{ClaimPlotResponse, ClaimedPlot, ListPlotsQuery, ListPlotsResponse, PositionQuery};
+use capitol_protocol::rest::{
+    ClaimPlotResponse, ClaimedPlot, ListPlotsQuery, ListPlotsResponse, PayTaxRequest, PayTaxResponse, PositionQuery,
+};
 
 use crate::engine::currency::{subtract_strands_in, TransactionType};
+use crate::engine::property_tax::pay_tax_debt;
 use crate::engine::GameEvent;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -24,6 +27,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/claimed", get(list_claimed_plots).layer(CompressionLayer::new()))
         .route("/{id}", get(get_plot))
         .route("/{id}/claim", post(claim_plot))
+        .route("/{id}/pay-tax", post(pay_tax))
         .route("/{id}/permissions", get(get_permissions))
         .route("/{id}/permissions", put(update_permissions))
         .route("/at", get(get_plot_at_position))
@@ -227,6 +231,41 @@ pub async fn claim_plot(
         plot: plot_info,
         new_balance,
     }))
+}
+
+/// Pay off property tax owed on your plot (#138)
+#[utoipa::path(
+    post,
+    path = "/plots/{id}/pay-tax",
+    params(
+        ("id" = Uuid, Path, description = "Plot ID")
+    ),
+    request_body = PayTaxRequest,
+    responses(
+        (status = 200, description = "Tax paid", body = PayTaxResponse),
+        (status = 400, description = "Nothing owed, or insufficient funds"),
+        (status = 403, description = "Not your plot"),
+        (status = 404, description = "Plot not found")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Plots"
+)]
+pub async fn pay_tax(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(plot_id): Path<Uuid>,
+    Json(request): Json<PayTaxRequest>,
+) -> Result<Json<PayTaxResponse>, AppError> {
+    let player_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM players WHERE account_id = $1 LIMIT 1"
+    )
+    .bind(auth_user.account_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    let (_, new_balance) = pay_tax_debt(&state.db, player_id, plot_id, request.amount).await?;
+    let plot = get_plot(State(state.clone()), Path(plot_id)).await?.0;
+    Ok(Json(PayTaxResponse { plot, new_balance }))
 }
 
 /// Charge the deed and give the plot to `player_id`, in one transaction. The
