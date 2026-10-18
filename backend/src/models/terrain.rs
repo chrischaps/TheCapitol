@@ -44,9 +44,10 @@ pub struct SuburbanGenParams {
     /// `generate_all_roads_with_params` sets it from `WorldGenParams`.
     #[serde(skip, default = "default_arterial_width")]
     pub arterial_width: f64,
-    /// Which generator lays out the suburb (suburb v2, #103). Legacy until
-    /// the flip in #112. The serde defaults keep saved `world_config` rows
-    /// from before #105 loading.
+    /// Which generator lays out the suburb (suburb v2, #103). Neighbourhood
+    /// since the flip in #112. The serde defaults keep saved `world_config`
+    /// rows from before #105 loading, and a row without a layout gets the
+    /// default.
     #[serde(default)]
     pub layout: SuburbLayout,
     /// The Neighbourhood generator's knobs. Legacy ignores them.
@@ -62,11 +63,12 @@ fn default_arterial_width() -> f64 {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SuburbLayout {
-    /// Collectors and rejection-sampled local streets, lots along them.
-    #[default]
+    /// Collectors and rejection-sampled local streets, lots along them. Kept
+    /// for a saved `world_config` that names it, until #113 removes it.
     Legacy,
-    /// Post-war neighbourhoods, one pattern per neighbourhood. Until #108 it
-    /// lays no suburban lots.
+    /// Post-war neighbourhoods, one pattern per neighbourhood (the default
+    /// since #112).
+    #[default]
     Neighbourhood,
 }
 
@@ -3248,30 +3250,50 @@ mod tests {
         assert_ne!(TerrainConfig::from_params(&params).version(), version);
     }
 
-    /// Legacy is the default until #112, and suburb v2's work packages build
-    /// the Neighbourhood generator beside it. This pins what Legacy makes, so
-    /// none of them moves the live world by accident. Change the literal only
-    /// for a change that means to move it, and say so in the commit.
+    /// The default world's params, with the suburb laid out by Legacy.
+    fn legacy_params() -> WorldGenParams {
+        let mut params = WorldGenParams::default();
+        params.suburban.layout = SuburbLayout::Legacy;
+        params
+    }
+
+    /// Pins the default world, so nothing moves the live world by accident:
+    /// its lots are owned plots and its nodes were placed against it. Change
+    /// the literal only for a change that means to move it, write the node
+    /// move migration it needs (see `models::resource::tests`), and say so in
+    /// the commit. Debug builds only: a release build's floats hash
+    /// differently (#128).
     #[test]
-    fn legacy_default_terrain_version_is_pinned() {
-        assert_eq!(WorldGenParams::default().suburban.layout, SuburbLayout::Legacy);
-        // Moved on purpose by #117, which deepened the suburb to 1800–3000.
-        // Debug builds only: a release build's floats hash differently (#128).
-        assert_eq!(TerrainConfig::get_default().version(), "2f18343910f69960");
+    fn default_terrain_version_is_pinned() {
+        assert_eq!(WorldGenParams::default().suburban.layout, SuburbLayout::Neighbourhood);
+        // Moved on purpose by #112, which made Neighbourhood the default.
+        assert_eq!(TerrainConfig::get_default().version(), "41b571c1a312b6c4");
+    }
+
+    /// Legacy stays selectable until #113 removes it, and still makes what it
+    /// made as the default (moved by #117, which deepened the suburb).
+    #[test]
+    fn legacy_terrain_version_is_pinned() {
+        assert_eq!(TerrainConfig::from_params(&legacy_params()).version(), "2f18343910f69960");
     }
 
     /// Saved `world_config` rows and admin PUTs from before #105 have no
-    /// `layout` or `neighbourhood`. They still load, as Legacy.
+    /// `layout` or `neighbourhood`. They still load, with the default layout
+    /// (Neighbourhood since #112). One that names Legacy keeps it.
     #[test]
     fn world_params_load_with_and_without_layout() {
         let mut json = serde_json::to_value(WorldGenParams::default()).unwrap();
         let suburban = json["suburban"].as_object_mut().unwrap();
-        assert_eq!(suburban["layout"], "legacy");
+        assert_eq!(suburban["layout"], "neighbourhood");
         suburban.remove("layout");
         suburban.remove("neighbourhood");
         let old: WorldGenParams = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(old.suburban.layout, SuburbLayout::Legacy);
+        assert_eq!(old.suburban.layout, SuburbLayout::Neighbourhood);
         assert_eq!(old.suburban.neighbourhood, NeighbourhoodParams::default());
+
+        json["suburban"]["layout"] = "legacy".into();
+        let legacy: WorldGenParams = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(legacy.suburban.layout, SuburbLayout::Legacy);
 
         // A layout, and a partial neighbourhood: the rest takes its defaults.
         json["suburban"]["layout"] = "neighbourhood".into();
@@ -3283,8 +3305,9 @@ mod tests {
         assert_eq!(new.suburban.neighbourhood.force_pattern, Some(NeighbourhoodPattern::CentralLoop));
     }
 
-    /// The default world, and the Neighbourhood layout with pattern (a)
-    /// everywhere, for the suburban street tests that hold for both (#107).
+    /// The default world with the Legacy suburb, and the Neighbourhood layout
+    /// with pattern (a) everywhere, for the suburban street tests that hold
+    /// for both (#107). The mixed default is covered by `suburb::tests`.
     /// Built once: five tests share them, and the performance test runs beside them.
     fn both_layouts() -> &'static [TerrainConfig; 2] {
         static BOTH: std::sync::OnceLock<[TerrainConfig; 2]> = std::sync::OnceLock::new();
@@ -3292,7 +3315,7 @@ mod tests {
             let mut params = WorldGenParams::default();
             params.suburban.layout = SuburbLayout::Neighbourhood;
             params.suburban.neighbourhood.force_pattern = Some(NeighbourhoodPattern::WarpedParallels);
-            [TerrainConfig::get_default(), TerrainConfig::from_params(&params)]
+            [TerrainConfig::from_params(&legacy_params()), TerrainConfig::from_params(&params)]
         })
     }
 
@@ -3300,12 +3323,10 @@ mod tests {
     /// leaves the rest of the world as Legacy has it.
     #[test]
     fn neighbourhood_layout_changes_only_the_suburb() {
-        let mut params = WorldGenParams::default();
-        params.suburban.layout = SuburbLayout::Neighbourhood;
-        let t = TerrainConfig::from_params(&params);
+        let t = TerrainConfig::get_default();
         assert!(t.roads.iter().any(|r| r.road_type == RoadType::Suburban));
-        assert!(t.terrain_plots.iter().filter(|l| l.zone == "suburban").count() > 600);
-        let legacy = TerrainConfig::get_default();
+        assert!(t.terrain_plots.iter().filter(|l| l.zone == "suburban").count() > 1500);
+        let legacy = TerrainConfig::from_params(&legacy_params());
         let others = |t: &TerrainConfig| t.roads.iter().filter(|r| r.road_type != RoadType::Suburban).count();
         assert_eq!(others(&t), others(&legacy));
         assert!(t.terrain_plots.iter().any(|l| l.zone == "urban"));
@@ -3598,7 +3619,8 @@ mod tests {
 
     #[test]
     fn test_suburban_plot_generation() {
-        let config = TerrainConfig::get_default();
+        // `generate_suburban_plots` is Legacy's, until #113 removes both.
+        let config = TerrainConfig::from_params(&legacy_params());
         let params = SuburbanGenParams::default();
         let plots = config.generate_suburban_plots(&params);
 

@@ -475,9 +475,9 @@ fn view_shot(view) {
         // looking along the water to the gap.
         #{ pos: [7.0, 3.4, 65.5], at: [-3.0, 0.0, 60.0] }
     } else if view == "suburb" {
-        // Low over the southern suburbs, where the streets curve and branch
-        // into cul-de-sacs.
-        #{ pos: [-35.0, 45.0, 245.0], at: [-35.0, 0.0, 200.0] }
+        // Low over the neighbourhood west of the south arterial (#112): its
+        // warped rows and their bulbs sweep in towards the tower.
+        #{ pos: [-30.0, 26.0, 300.0], at: [-50.0, 0.0, 232.0] }
     } else if view == "urban" {
         // Close over the urban lots west of the south arterial, looking
         // north-east across the arterial at their curbs.

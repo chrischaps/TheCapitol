@@ -140,6 +140,7 @@ models/          - Database types and game state structs
   zone.rs        - Zone enum (Capitol, Trade, Urban, Rural, etc.)
   terrain.rs     - TerrainConfig, procedural road generation, water rings, bridges
   plot.rs        - Plot ownership, permissions, property tax
+  suburb/        - The suburb's neighbourhoods, streets, lots and parks (suburb v2)
 
 routes/          - Axum REST handlers
   auth.rs        - Register, login, JWT (includes is_admin in token)
@@ -273,27 +274,26 @@ Capitol → Bailey → Trade District → Guild District → Urban → Suburban 
 
 Moats and canals are water barriers. Players can only cross at bridges. Movement is blocked by water unless at a crossing point.
 
-### Suburban Road Generation
+### Suburban Generation (suburb v2)
 
-The suburban zone (radius 1800-3000 since #117; the radii live in `protocol/src/rules.rs`) uses procedural road generation in `terrain.rs`:
+The suburban zone (radius 1800-3000 since #117; the radii live in `protocol/src/rules.rs`) is laid out as post-war neighbourhoods by `backend/src/models/suburb/` (the `Neighbourhood` layout, the default since #112). The plan, with every as-built decision and the targets, is `the-capitol-suburb-v2.md`. Read it before changing the suburb.
 
-**Road hierarchy**: Arterials (8 radial spokes) → Collectors (curved roads between arterials) → Local streets (cul-de-sacs, loops, P-shaped)
+**Neighbourhoods and frames** (`neighbourhood.rs`, `frame.rs`): each 45° sector between the arterials is a neighbourhood, or two halves split along a greenway. Each has a frame: u runs between side lines parallel to the arterials, v is radial depth, and a gentle shared warp curves every row alike. Streets are iso-lines of the frame, and five rows of lots about 106 deep fit the 1200-deep band. Each neighbourhood draws from its own SplitMix64 stream, so changing one doesn't re-id the lots of the others.
 
-**Key algorithms**:
-- Collector roads use Catmull-Rom splines with S-curve wobble through control points
-- Local streets branch from connection points along existing roads
-- Index-based parent road exclusion prevents collision with the road a street branches from
-- Streets use adaptive length based on available depth (up to 500 units)
-- Min spacing of 100 units between streets for plot placement
-- All points clamped to annular zone boundaries
+**Patterns** (one per neighbourhood, a seeded weighted pick among those whose `fits` holds):
+- (a) warped parallels (`patterns.rs`): rows joined by offset rail T-links, ends as U-turns, bulbs or entrances
+- (b) loops and lollipops (`loops.rs`): a racetrack collector with combs of cul-de-sacs inside (whole sectors)
+- (c) central loop (`central.rs`): a loop with radial cul-de-sacs pointing out (split halves)
 
-**Generation phases**:
-1. Generate collector roads (curved paths between arterials)
-2. Iteratively generate local streets (each pass can branch from previous pass)
-3. Weld junctions (`street_plan::weld_junctions`): each street end, and each crossing, becomes a vertex both roads share
-4. Generate suburban plots along roads
+**Then:** 2–4 entrances per neighbourhood onto the arterials (never a 4-way across one), `street_plan::weld_junctions`, lots (`lots.rs`: back-to-back blocks, pies round bulbs, `sub_{sector}_{nbhd}_{street}_{L|R|B}_{k}` ids), and parks from the open ground the lots leave (`parks.rs`; not on `/terrain` yet, #129). About 1900 lots, 2% gap.
 
-**Street-plan invariants** (`models/street_plan.rs`, #62): splines are centripetal Catmull-Rom, resampled at even steps. A candidate street is rejected if it hairpins (a turn over 45°), crosses itself, or crosses another road or an arterial anywhere but at its own joining ends. Cul-de-sacs and P-streets are lollipops: the bulb closes on the stem's last vertex. Loop streets end back on their parent, measured along it. A connector with no road to reach isn't placed. `suburban_street_plan_holds_its_invariants` checks it all at four seeds. The grass nodes are seeded in migrations against the default world. `engine::node_placement` (#70) moves any that the live terrain's roads or water run over, on startup and on an admin regenerate, and saves the move. So a generator change no longer needs a migration like `20260215_001_suburban_street_nodes.sql`. `the_default_terrain_moves_no_seeded_node` fails if the default world itself would move one. Nodes standing on lots are left alone (#102).
+**Checking a change:** `suburb::tests::neighbourhood_suburb_meets_its_targets` (`--nocapture` prints the soft targets it misses), and `backend/tools/suburb-plan.ps1` for SVG/PNG plans and `-Compare` against an earlier run. `default_terrain_version_is_pinned` pins the default world (debug builds only, #128).
+
+**Legacy** (`SuburbLayout::Legacy`, the rejection-sampled collectors and lollipops in `terrain.rs`) stays selectable for a saved `world_config` that names it, until #113 removes it.
+
+**Street-plan invariants** (`models/street_plan.rs`, #62): roads meet only at shared vertices, with no hairpin (a turn over 45°) outside a bulb and no road over itself. A bulb closes on its stem's last vertex. `street_plan::audit` checks it.
+
+**Seeded nodes:** the grass nodes are seeded in migrations against the default world. `engine::node_placement` (#70) moves any that the live terrain's roads or water run over, on startup and on an admin regenerate, and saves the move. Nodes standing on lots are left alone (#102). `the_default_terrain_moves_no_seeded_node` fails if the default world itself would move one. A change that moves the default world on purpose needs a move migration (the ignored test `print_node_moves` prints its rows; see `20261019_001_neighbourhood_suburb.sql`), and owned plots whose lots it removes need releasing with a refund in the same migration.
 
 ## Database
 

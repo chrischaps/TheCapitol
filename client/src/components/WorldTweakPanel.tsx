@@ -60,8 +60,8 @@ function ParamSelect<T extends string>({ label, value, options, onChange }: Para
 }
 
 const SUBURB_LAYOUTS: { value: SuburbLayout; label: string }[] = [
+  { value: 'neighbourhood', label: 'Neighbourhood' },
   { value: 'legacy', label: 'Legacy' },
-  { value: 'neighbourhood', label: 'Neighbourhood (v2)' },
 ]
 
 interface SectionProps {
@@ -230,7 +230,7 @@ export default function WorldTweakPanel() {
             </Section>
 
             <Section title="Suburban">
-              <ParamSelect label="Layout" value={params.suburban.layout ?? 'legacy'} options={SUBURB_LAYOUTS} onChange={(v) => updateParam('suburban.layout', v)} />
+              <ParamSelect label="Layout" value={params.suburban.layout ?? 'neighbourhood'} options={SUBURB_LAYOUTS} onChange={(v) => updateParam('suburban.layout', v)} />
               <ParamSlider label="Collector Width" value={params.suburban.collector_width} min={4} max={40} step={1} onChange={(v) => updateParam('suburban.collector_width', v)} />
               <ParamSlider label="Local Street Width" value={params.suburban.local_street_width} min={4} max={30} step={1} onChange={(v) => updateParam('suburban.local_street_width', v)} />
               <ParamSlider label="Min Street Spacing" value={params.suburban.min_street_spacing} min={30} max={300} step={5} onChange={(v) => updateParam('suburban.min_street_spacing', v)} />

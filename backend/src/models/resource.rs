@@ -120,10 +120,12 @@ mod tests {
         include_str!("../../migrations/20260212_001_world_scale.sql");
 
     /// Moves for seeded nodes, in the order the migrations run: the ones a later
-    /// street plan ran over (#62), then the ones the deeper suburb moved (#117).
-    const NODE_MOVES_MIGRATIONS: [&str; 2] = [
+    /// street plan ran over (#62), the ones the deeper suburb moved (#117),
+    /// then the ones the Neighbourhood suburb's streets ran over (#112).
+    const NODE_MOVES_MIGRATIONS: [&str; 3] = [
         include_str!("../../migrations/20260215_001_suburban_street_nodes.sql"),
         include_str!("../../migrations/20261018_001_deeper_suburb_nodes.sql"),
+        include_str!("../../migrations/20261019_001_neighbourhood_suburb.sql"),
     ];
 
     /// The numbers in each `(a, b, ...)` row of a migration's VALUES list.
@@ -177,7 +179,10 @@ mod tests {
 
         for &(x, y, quality) in &nodes {
             let clearance = road_clearance(&terrain, x, y);
-            assert!(clearance >= 19.9, "node at ({x}, {y}) is {clearance:.1} from a road");
+            // The rule startup's `place_nodes` moves a node by. Before #112 the
+            // seeds also sat 20 clear, but the Neighbourhood suburb's streets
+            // pass some at 15-20, where nothing moves them.
+            assert!(clearance >= KEEP_CLEAR, "node at ({x}, {y}) is {clearance:.1} from a road");
             assert!((40..=70).contains(&quality), "node at ({x}, {y}) has quality {quality}");
             let near_spawn = (x - SPAWN_X).hypot(y - SPAWN_Y) <= NEARBY_NODE_RANGE;
             let zone = Zone::from_position(x, y);
@@ -203,6 +208,22 @@ mod tests {
         let report = place_nodes(&TerrainConfig::get_default(), &seeded_positions());
         assert!(report.moves.is_empty(), "{} seeded nodes moved: {:?}", report.moves.len(), report.moves);
         assert!(report.stuck.is_empty());
+    }
+
+    /// Prints the VALUES rows of a node move migration: the seeded nodes the
+    /// default world's roads run over, from where the migrations leave them
+    /// to where `place_nodes` puts them. Run it after a change that moves the
+    /// default world (`default_terrain_version_is_pinned`), paste the rows into
+    /// a new migration, and add that to `NODE_MOVES_MIGRATIONS` (#112):
+    /// `cargo test print_node_moves -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn print_node_moves() {
+        let report = place_nodes(&TerrainConfig::get_default(), &seeded_positions());
+        for m in &report.moves {
+            println!("    ({:.1}, {:.1}, {:.1}, {:.1}),", m.from.0, m.from.1, m.to.0, m.to.1);
+        }
+        println!("{} moved, {} stuck: {:?}", report.moves.len(), report.stuck.len(), report.stuck);
     }
 
     /// Another seed and wider streets run roads over seeded nodes. Every node
