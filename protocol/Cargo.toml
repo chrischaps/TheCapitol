@@ -13,6 +13,8 @@ backend = ["dep:utoipa", "dep:sqlx"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# Pure-Rust trig, so the world is bit-identical on every platform (fmath, #180)
+libm = "0.2"
 uuid = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
 

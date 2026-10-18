@@ -14,6 +14,7 @@
 //!   at least 150 apart. Across an arterial, entrances sit at least 80
 //!   apart along it (lining up exactly would also do, but makes a 4-way).
 
+use capitol_protocol::fmath::StableMath;
 use std::f64::consts::FRAC_PI_4;
 
 use crate::models::geom::SplitMix64;
@@ -191,8 +192,8 @@ fn buffers(n: &Neighbourhood, (inner, outer): (f64, f64), arterial_width: f64) -
     let c = f.center;
     let at = |angle: f64, off: f64, r: f64| {
         // The point at radius r on the line parallel to `angle`, `off` towards the frame.
-        let a = angle + (off / r).asin();
-        (c.0 + r * a.cos(), c.1 + r * a.sin())
+        let a = angle + (off / r).stable_asin();
+        (c.0 + r * a.stable_cos(), c.1 + r * a.stable_sin())
     };
     let mut out = Vec::new();
     for (side, facing, sign) in [(f.lo, n.lo, 1.0), (f.hi, n.hi, -1.0)] {
@@ -214,12 +215,12 @@ fn buffers(n: &Neighbourhood, (inner, outer): (f64, f64), arterial_width: f64) -
         (0..=steps)
             .map(|i| {
                 let a = from + (to - from) * i as f64 / steps as f64;
-                (c.0 + r * a.cos(), c.1 + r * a.sin())
+                (c.0 + r * a.stable_cos(), c.1 + r * a.stable_sin())
             })
             .collect()
     };
-    let lo_at = |r: f64| f.lo.angle + (f.lo.inset / r).asin();
-    let hi_at = |r: f64| f.hi.angle - (f.hi.inset / r).asin();
+    let lo_at = |r: f64| f.lo.angle + (f.lo.inset / r).stable_asin();
+    let hi_at = |r: f64| f.hi.angle - (f.hi.inset / r).stable_asin();
     for (v, r) in [(0.0, inner), (f.depth, outer)] {
         let mut polygon = f.iso_v(v, 0.0, f.width);
         // The back line's ends sit on the side lines, at their own radii;
@@ -240,7 +241,7 @@ fn entrance_candidates(n: &mut Neighbourhood) -> (Vec<Entrance>, usize) {
     let mut by_side = Vec::new();
     for (edge, side, u) in [(Edge::Lo, f.lo, 0.0), (Edge::Hi, f.hi, f.width)] {
         let Facing::Arterial(arterial) = n.facing(edge) else { continue };
-        let dir = (side.angle.cos(), side.angle.sin());
+        let dir = (side.angle.stable_cos(), side.angle.stable_sin());
         let mut ends: Vec<Entrance> = fit
             .rows
             .iter()
@@ -271,7 +272,7 @@ fn shuffle<T>(v: &mut [T], rng: &mut SplitMix64) {
 }
 
 fn dist(a: P, b: P) -> f64 {
-    (a.0 - b.0).hypot(a.1 - b.1)
+    (a.0 - b.0).stable_hypot(a.1 - b.1)
 }
 
 /// Whether two entrances on opposite sides of one arterial clash: neither
@@ -338,14 +339,14 @@ fn allocate_entrances(all: &mut [Neighbourhood], candidates: Vec<(Vec<Entrance>,
 /// Whether an entrance's `at` is still its gate's foot on the arterial.
 fn is_foot(e: &Entrance, center: P) -> bool {
     let a = e.arterial as f64 * FRAC_PI_4;
-    let along = (e.gate.0 - center.0) * a.cos() + (e.gate.1 - center.1) * a.sin();
+    let along = (e.gate.0 - center.0) * a.stable_cos() + (e.gate.1 - center.1) * a.stable_sin();
     (along - e.along).abs() < ALIGNED
 }
 
 /// `e` with its `at` moved along the arterial to `along`.
 fn shifted(e: &Entrance, along: f64, center: P) -> Entrance {
     let a = e.arterial as f64 * FRAC_PI_4;
-    let at = (center.0 + along * a.cos(), center.1 + along * a.sin());
+    let at = (center.0 + along * a.stable_cos(), center.1 + along * a.stable_sin());
     Entrance { at, along, ..e.clone() }
 }
 
@@ -361,7 +362,7 @@ mod tests {
     }
 
     fn off_line(p: P, angle: f64) -> f64 {
-        ((p.0 - C.0) * -angle.sin() + (p.1 - C.1) * angle.cos()).abs()
+        ((p.0 - C.0) * -angle.stable_sin() + (p.1 - C.1) * angle.stable_cos()).abs()
     }
 
     #[test]

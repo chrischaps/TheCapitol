@@ -1,3 +1,4 @@
+use capitol_protocol::fmath::StableMath;
 use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
 
@@ -336,7 +337,7 @@ fn point_and_tangent_at_t(points: &[(f64, f64)], t: f64) -> Option<(f64, f64, f6
             let local_t = (target_dist - accumulated) / segment_len;
             let x = points[i - 1].0 + dx * local_t;
             let y = points[i - 1].1 + dy * local_t;
-            let angle = dy.atan2(dx);
+            let angle = dy.stable_atan2(dx);
             return Some((x, y, angle));
         }
 
@@ -347,7 +348,7 @@ fn point_and_tangent_at_t(points: &[(f64, f64)], t: f64) -> Option<(f64, f64, f6
     let last_idx = points.len() - 1;
     let dx = points[last_idx].0 - points[last_idx - 1].0;
     let dy = points[last_idx].1 - points[last_idx - 1].1;
-    Some((points[last_idx].0, points[last_idx].1, dy.atan2(dx)))
+    Some((points[last_idx].0, points[last_idx].1, dy.stable_atan2(dx)))
 }
 
 /// Get point at specific distance along polyline
@@ -714,8 +715,8 @@ impl TerrainConfig {
 
         for i in 0..=num_segments {
             let angle = (i as f64 / num_segments as f64) * 2.0 * PI;
-            let x = self.center_x + radius * angle.cos();
-            let y = self.center_y + radius * angle.sin();
+            let x = self.center_x + radius * angle.stable_cos();
+            let y = self.center_y + radius * angle.stable_sin();
             points.push((x, y));
         }
 
@@ -745,10 +746,10 @@ impl TerrainConfig {
                 let start_radius = guild_ring_radius;
                 let end_radius = params.arterial_end_radius;
 
-                let start_x = self.center_x + start_radius * angle_rad.cos();
-                let start_y = self.center_y + start_radius * angle_rad.sin();
-                let end_x = self.center_x + end_radius * angle_rad.cos();
-                let end_y = self.center_y + end_radius * angle_rad.sin();
+                let start_x = self.center_x + start_radius * angle_rad.stable_cos();
+                let start_y = self.center_y + start_radius * angle_rad.stable_sin();
+                let end_x = self.center_x + end_radius * angle_rad.stable_cos();
+                let end_y = self.center_y + end_radius * angle_rad.stable_sin();
 
                 roads.push(RoadSegment {
                     id: format!("arterial_{}", i),
@@ -760,10 +761,10 @@ impl TerrainConfig {
                 let is_cardinal = angle_deg == 0.0 || angle_deg == 90.0 || angle_deg == 180.0 || angle_deg == 270.0;
                 if is_cardinal {
                     if let Some(_inner) = inner_canal {
-                        let guild_x = self.center_x + guild_ring_radius * angle_rad.cos();
-                        let guild_y = self.center_y + guild_ring_radius * angle_rad.sin();
-                        let trade_x = self.center_x + trade_ring_radius * angle_rad.cos();
-                        let trade_y = self.center_y + trade_ring_radius * angle_rad.sin();
+                        let guild_x = self.center_x + guild_ring_radius * angle_rad.stable_cos();
+                        let guild_y = self.center_y + guild_ring_radius * angle_rad.stable_sin();
+                        let trade_x = self.center_x + trade_ring_radius * angle_rad.stable_cos();
+                        let trade_y = self.center_y + trade_ring_radius * angle_rad.stable_sin();
 
                         roads.push(RoadSegment {
                             id: format!("arterial_inner_{}", i),
@@ -779,10 +780,10 @@ impl TerrainConfig {
         // South street extends into Capitol (from trade ring to moat)
         if let Some(moat_ring) = moat {
             let south_angle = 90.0_f64.to_radians();
-            let trade_x = self.center_x + trade_ring_radius * south_angle.cos();
-            let trade_y = self.center_y + trade_ring_radius * south_angle.sin();
-            let capitol_x = self.center_x + (moat_ring.inner_radius() - 10.0) * south_angle.cos();
-            let capitol_y = self.center_y + (moat_ring.inner_radius() - 10.0) * south_angle.sin();
+            let trade_x = self.center_x + trade_ring_radius * south_angle.stable_cos();
+            let trade_y = self.center_y + trade_ring_radius * south_angle.stable_sin();
+            let capitol_x = self.center_x + (moat_ring.inner_radius() - 10.0) * south_angle.stable_cos();
+            let capitol_y = self.center_y + (moat_ring.inner_radius() - 10.0) * south_angle.stable_sin();
 
             roads.push(RoadSegment {
                 id: "arterial_capitol".to_string(),
@@ -815,8 +816,8 @@ impl TerrainConfig {
 
             for i in 0..=num_segments {
                 let angle = (i as f64 / num_segments as f64) * 2.0 * PI;
-                let x = self.center_x + r * angle.cos();
-                let y = self.center_y + r * angle.sin();
+                let x = self.center_x + r * angle.stable_cos();
+                let y = self.center_y + r * angle.stable_sin();
                 points.push((x, y));
             }
 
@@ -835,10 +836,10 @@ impl TerrainConfig {
         for i in 0..spoke_count {
             let angle = i as f64 * angle_step;
 
-            let x1 = self.center_x + inner_radius * angle.cos();
-            let y1 = self.center_y + inner_radius * angle.sin();
-            let x2 = self.center_x + outer_radius * angle.cos();
-            let y2 = self.center_y + outer_radius * angle.sin();
+            let x1 = self.center_x + inner_radius * angle.stable_cos();
+            let y1 = self.center_y + inner_radius * angle.stable_sin();
+            let x2 = self.center_x + outer_radius * angle.stable_cos();
+            let y2 = self.center_y + outer_radius * angle.stable_sin();
 
             roads.push(RoadSegment {
                 id: format!("urban_spoke_{}", i),
@@ -889,8 +890,8 @@ impl TerrainConfig {
                 let wobble = wobble_amplitude * (next_rand() - 0.5) * 2.0;
                 let a = base_angle + wobble;
 
-                let x = self.center_x + r * a.cos();
-                let y = self.center_y + r * a.sin();
+                let x = self.center_x + r * a.stable_cos();
+                let y = self.center_y + r * a.stable_sin();
                 control_points.push((x, y));
             }
 
@@ -930,7 +931,7 @@ impl TerrainConfig {
             .iter()
             .filter(|r| r.road_type == RoadType::Arterial)
             .filter_map(|r| r.points.last())
-            .map(|&(x, y)| (y - self.center_y).atan2(x - self.center_x))
+            .map(|&(x, y)| (y - self.center_y).stable_atan2(x - self.center_x))
             .collect();
         let side_half = |a: f64| {
             let on_arterial = arterial_angles.iter().any(|&b| {
@@ -1015,10 +1016,10 @@ impl TerrainConfig {
                         let sa2_out = sub_a1_out + (sub_a2_out - sub_a1_out) * frac1;
 
                         let corners = [
-                            (self.center_x + sub_r_in * sa1_in.cos(), self.center_y + sub_r_in * sa1_in.sin()),
-                            (self.center_x + sub_r_in * sa2_in.cos(), self.center_y + sub_r_in * sa2_in.sin()),
-                            (self.center_x + sub_r_out * sa2_out.cos(), self.center_y + sub_r_out * sa2_out.sin()),
-                            (self.center_x + sub_r_out * sa1_out.cos(), self.center_y + sub_r_out * sa1_out.sin()),
+                            (self.center_x + sub_r_in * sa1_in.stable_cos(), self.center_y + sub_r_in * sa1_in.stable_sin()),
+                            (self.center_x + sub_r_in * sa2_in.stable_cos(), self.center_y + sub_r_in * sa2_in.stable_sin()),
+                            (self.center_x + sub_r_out * sa2_out.stable_cos(), self.center_y + sub_r_out * sa2_out.stable_sin()),
+                            (self.center_x + sub_r_out * sa1_out.stable_cos(), self.center_y + sub_r_out * sa1_out.stable_sin()),
                         ];
 
                         let area = TerrainPlot::calculate_area(&corners);
@@ -1073,7 +1074,7 @@ impl TerrainConfig {
         let ring_half = ring.width / 2.0;
         let sides = ring.points.len().saturating_sub(1).max(3) as f64;
         let bands = [
-            ("in", inner_canal.outer_radius() + kerb + GUILD_CLEAR, ring_r * (PI / sides).cos() - ring_half - GUILD_CLEAR),
+            ("in", inner_canal.outer_radius() + kerb + GUILD_CLEAR, ring_r * (PI / sides).stable_cos() - ring_half - GUILD_CLEAR),
             ("out", ring_r + ring_half + GUILD_CLEAR, outer_canal.inner_radius() - kerb - GUILD_CLEAR),
         ];
 
@@ -1086,7 +1087,7 @@ impl TerrainConfig {
             // (angle, half width) of each radial arterial whose ribbon reaches
             // the band. Suburban junctions weld extra vertices into the outer
             // arterials (#62), so a radial road is any whose points share a bearing.
-            let bearing = |&(x, y): &(f64, f64)| (y - self.center_y).atan2(x - self.center_x).rem_euclid(2.0 * PI);
+            let bearing = |&(x, y): &(f64, f64)| (y - self.center_y).stable_atan2(x - self.center_x).rem_euclid(2.0 * PI);
             let mut dividers: Vec<(f64, f64)> = self
                 .roads
                 .iter()
@@ -1116,7 +1117,7 @@ impl TerrainConfig {
                     a2 += 2.0 * PI;
                 }
                 // The wedge's edges at radius r, each GUILD_CLEAR past its arterial's kerb
-                let edges = |r: f64| (a1 + ((h1 + GUILD_CLEAR) / r).asin(), a2 - ((h2 + GUILD_CLEAR) / r).asin());
+                let edges = |r: f64| (a1 + ((h1 + GUILD_CLEAR) / r).stable_asin(), a2 - ((h2 + GUILD_CLEAR) / r).stable_asin());
                 let (m1, m2) = edges((lo + hi) / 2.0);
                 if m2 <= m1 {
                     continue;
@@ -1127,7 +1128,7 @@ impl TerrainConfig {
                 let mut r_in = lo;
                 for _ in 0..3 {
                     let (e1, e2) = edges(r_in);
-                    r_in = lo / ((e2 - e1) / count as f64 / 2.0).cos();
+                    r_in = lo / ((e2 - e1) / count as f64 / 2.0).stable_cos();
                 }
                 let r_out = hi;
                 let (in1, in2) = edges(r_in);
@@ -1136,7 +1137,7 @@ impl TerrainConfig {
                     continue;
                 }
 
-                let at = |r: f64, a: f64| (self.center_x + r * a.cos(), self.center_y + r * a.sin());
+                let at = |r: f64, a: f64| (self.center_x + r * a.stable_cos(), self.center_y + r * a.stable_sin());
                 for s in 0..count {
                     let (f0, f1) = (s as f64 / count as f64, (s + 1) as f64 / count as f64);
                     let (i0, i1) = (in1 + (in2 - in1) * f0, in1 + (in2 - in1) * f1);
@@ -1205,16 +1206,16 @@ impl TerrainConfig {
                         let perp_angle = (fs_angle + fe_angle) / 2.0 + side * PI / 2.0;
 
                         // Offset front corners away from trail center
-                        let fs_off_x = fs_x + half_trail_w * perp_angle.cos();
-                        let fs_off_y = fs_y + half_trail_w * perp_angle.sin();
-                        let fe_off_x = fe_x + half_trail_w * perp_angle.cos();
-                        let fe_off_y = fe_y + half_trail_w * perp_angle.sin();
+                        let fs_off_x = fs_x + half_trail_w * perp_angle.stable_cos();
+                        let fs_off_y = fs_y + half_trail_w * perp_angle.stable_sin();
+                        let fe_off_x = fe_x + half_trail_w * perp_angle.stable_cos();
+                        let fe_off_y = fe_y + half_trail_w * perp_angle.stable_sin();
 
                         // Back corners at depth offset
-                        let bs_x = fs_x + depth * perp_angle.cos();
-                        let bs_y = fs_y + depth * perp_angle.sin();
-                        let be_x = fe_x + depth * perp_angle.cos();
-                        let be_y = fe_y + depth * perp_angle.sin();
+                        let bs_x = fs_x + depth * perp_angle.stable_cos();
+                        let bs_y = fs_y + depth * perp_angle.stable_sin();
+                        let be_x = fe_x + depth * perp_angle.stable_cos();
+                        let be_y = fe_y + depth * perp_angle.stable_sin();
 
                         let corners = [
                             (fs_off_x, fs_off_y),
@@ -1354,18 +1355,24 @@ mod tests {
         // quantised), not the world. #129 added the parks: no road, lot or
         // node moved.
         //
-        // The platform's libm differs in the last bit, and Linux ends a few
-        // roads and parks a vertex apart, so each platform has its own pin.
-        // Same lots, same nodes (#180). CI runs the Linux one.
-        #[cfg(windows)]
-        let pinned = Some("c3a856792daad83d");
-        #[cfg(target_os = "linux")]
-        let pinned = Some("4d3d9d112a4f30f1");
-        #[cfg(not(any(windows, target_os = "linux")))]
-        let pinned: Option<&str> = None;
-        if let Some(pinned) = pinned {
-            assert_eq!(TerrainConfig::get_default().version(), pinned);
-        }
+        // #180 moved the trig off the platform's libm (`fmath::StableMath`),
+        // so every platform builds the same bits. That moved the Windows
+        // world (`c3a856792daad83d`) onto the one Linux already built: three
+        // suburban roads and some park rings gained or lost a vertex near a
+        // junction. No lot or node moved.
+        assert_eq!(TerrainConfig::get_default().version(), "4d3d9d112a4f30f1");
+    }
+
+    /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one
+    /// platform's world against another's (#180):
+    /// `TERRAIN_DUMP=win.json cargo test dump_default_terrain -- --ignored`.
+    #[test]
+    #[ignore]
+    fn dump_default_terrain() {
+        let path = std::env::var("TERRAIN_DUMP").expect("set TERRAIN_DUMP to the output path");
+        let terrain = TerrainConfig::get_default();
+        std::fs::write(&path, serde_json::to_string_pretty(&terrain).unwrap()).unwrap();
+        println!("{} -> {path}", terrain.version());
     }
 
     /// A last-bit float difference, the kind the optimiser makes, leaves the
@@ -1609,8 +1616,8 @@ mod tests {
             graph.insert(id.clone(), Vec::new());
             let angle = i as f64 * PI / 4.0;
             endpoints.insert(id, vec![
-                (config.center_x + params.inner_radius * angle.cos(), config.center_y + params.inner_radius * angle.sin()),
-                (config.center_x + params.outer_radius * angle.cos(), config.center_y + params.outer_radius * angle.sin()),
+                (config.center_x + params.inner_radius * angle.stable_cos(), config.center_y + params.inner_radius * angle.stable_sin()),
+                (config.center_x + params.outer_radius * angle.stable_cos(), config.center_y + params.outer_radius * angle.stable_sin()),
             ]);
         }
 
@@ -1798,8 +1805,8 @@ mod tests {
             .map(|i| {
                 let angle = i as f64 * PI / 4.0;
                 (
-                    config.center_x + params.outer_radius * angle.cos(),
-                    config.center_y + params.outer_radius * angle.sin(),
+                    config.center_x + params.outer_radius * angle.stable_cos(),
+                    config.center_y + params.outer_radius * angle.stable_sin(),
                 )
             })
             .collect();

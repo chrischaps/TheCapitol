@@ -33,6 +33,7 @@
 //!   They're numbered before the overlap pass, so dropping one lot doesn't
 //!   re-id the rest.
 
+use capitol_protocol::fmath::StableMath;
 use std::collections::HashMap;
 use std::f64::consts::{FRAC_PI_2, TAU};
 
@@ -328,8 +329,8 @@ impl Region {
         Region {
             center,
             sides: [
-                ((-lo.angle.sin(), lo.angle.cos()), lo.inset),
-                ((hi.angle.sin(), -hi.angle.cos()), hi.inset),
+                ((-lo.angle.stable_sin(), lo.angle.stable_cos()), lo.inset),
+                ((hi.angle.stable_sin(), -hi.angle.stable_cos()), hi.inset),
             ],
             inner: params.inner_radius,
             outer: params.outer_radius,
@@ -338,7 +339,7 @@ impl Region {
 
     fn inside(&self, q: P) -> bool {
         let rel = (q.0 - self.center.0, q.1 - self.center.1);
-        let r = rel.0.hypot(rel.1);
+        let r = rel.0.stable_hypot(rel.1);
         self.sides.iter().all(|&(n, c)| dot(n, rel) >= c - 1e-9) && r >= self.inner && r <= self.outer
     }
 
@@ -669,10 +670,10 @@ impl Street<'_> {
     /// Pie lots round a bulb at `centre`, whose stem ends at `tip`, between
     /// the last rays of the stem's left and right runs.
     fn pies(&self, centre: P, tip: P, last: [Option<Ray>; 2]) -> Vec<Candidate> {
-        let toward = (centre.1 - tip.1).atan2(centre.0 - tip.0);
+        let toward = (centre.1 - tip.1).stable_atan2(centre.0 - tip.0);
         let angle = |r: &Ray| {
             let m = r.mid();
-            (m.1 - centre.1).atan2(m.0 - centre.0)
+            (m.1 - centre.1).stable_atan2(m.0 - centre.0)
         };
         let from = last[0].as_ref().map_or(toward + FRAC_PI_2, angle);
         let to = last[1].as_ref().map_or(toward - FRAC_PI_2, angle);
@@ -683,7 +684,7 @@ impl Street<'_> {
         }
         let f = self.p.bulb_radius + self.half() + FRONT_GAP;
         let radial = |phi: f64| -> Option<Ray> {
-            let d = (phi.cos(), phi.sin());
+            let d = (phi.stable_cos(), phi.stable_sin());
             let front = at(centre, d, f);
             if !self.region.inside(front) || !self.world.point_clear(front) {
                 return None;
@@ -797,7 +798,7 @@ fn tangent(line: &Polyline, s: f64) -> P {
         ((b.0 - a.0) / len, (b.1 - a.1) / len)
     } else {
         let (_, _, h) = line.at(s).expect("a line");
-        (h.cos(), h.sin())
+        (h.stable_cos(), h.stable_sin())
     }
 }
 
@@ -809,7 +810,7 @@ fn curvature(line: &Polyline, s: f64) -> f64 {
         return 0.0;
     }
     let (a, b) = (tangent(line, s0), tangent(line, s1));
-    let turn = (a.0 * b.1 - a.1 * b.0).atan2(dot(a, b));
+    let turn = (a.0 * b.1 - a.1 * b.0).stable_atan2(dot(a, b));
     turn / (s1 - s0)
 }
 
@@ -868,7 +869,7 @@ fn lerp(a: P, b: P, t: f64) -> P {
 }
 
 fn dist(a: P, b: P) -> f64 {
-    (a.0 - b.0).hypot(a.1 - b.1)
+    (a.0 - b.0).stable_hypot(a.1 - b.1)
 }
 
 fn bounds(q: &[P]) -> (P, P) {

@@ -4,6 +4,8 @@
 //! moved `polyline_length` and `SpatialGrid` here from terrain.rs and added
 //! `Polyline` and `SplitMix64` for the v2 generator.
 
+use capitol_protocol::fmath::StableMath;
+
 type P = (f64, f64);
 
 /// How far two lots may reach into each other and still only touch. Lots
@@ -249,7 +251,7 @@ impl Polyline {
         let (a, b) = (self.points[i - 1], self.points[i]);
         let len = self.cum[i] - self.cum[i - 1];
         let t = if len > 0.0 { (d - self.cum[i - 1]) / len } else { 0.0 };
-        Some((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, (b.1 - a.1).atan2(b.0 - a.0)))
+        Some((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, (b.1 - a.1).stable_atan2(b.0 - a.0)))
     }
 }
 
@@ -376,7 +378,7 @@ mod tests {
         let ring: Vec<P> = (0..=64)
             .map(|i| {
                 let a = i as f64 / 64.0 * std::f64::consts::TAU;
-                (500.0 + 400.0 * a.cos(), 500.0 + 400.0 * a.sin())
+                (500.0 + 400.0 * a.stable_cos(), 500.0 + 400.0 * a.stable_sin())
             })
             .collect();
         let mut flooded = SpatialGrid::new(500.0, 500.0, 500.0, 50.0);

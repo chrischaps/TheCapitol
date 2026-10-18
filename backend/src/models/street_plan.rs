@@ -17,6 +17,7 @@
 //! - a road crosses itself, or another road, only at a vertex both share
 //! - each end is a vertex of another road, or of the road itself (a closed bulb)
 
+use capitol_protocol::fmath::StableMath;
 use capitol_protocol::terrain::RoadSegment;
 
 type P = (f64, f64);
@@ -144,7 +145,7 @@ pub(crate) fn turns(points: &[P]) -> impl Iterator<Item = (usize, f64)> + '_ {
         let (u, v) = ((b.0 - a.0, b.1 - a.1), (c.0 - b.0, c.1 - b.1));
         let cross = u.0 * v.1 - u.1 * v.0;
         let dot = u.0 * v.0 + u.1 * v.1;
-        (i, cross.atan2(dot).abs().to_degrees())
+        (i, cross.stable_atan2(dot).abs().to_degrees())
     })
 }
 
@@ -375,11 +376,11 @@ fn first_unjoined(a: &[P], b: &[P]) -> Option<(usize, usize, P)> {
 /// points start after `entry` and end exactly on it.
 pub(crate) fn bulb(entry: P, dir: P, r: f64, segments: usize) -> Vec<P> {
     let centre = (entry.0 + r * dir.0, entry.1 + r * dir.1);
-    let start = (-dir.1).atan2(-dir.0);
+    let start = (-dir.1).stable_atan2(-dir.0);
     let mut out: Vec<P> = (1..segments)
         .map(|k| {
             let a = start + k as f64 / segments as f64 * std::f64::consts::TAU;
-            (centre.0 + r * a.cos(), centre.1 + r * a.sin())
+            (centre.0 + r * a.stable_cos(), centre.1 + r * a.stable_sin())
         })
         .collect();
     out.push(entry);
@@ -540,7 +541,7 @@ mod tests {
         let (c, r) = ((30.0, 0.0), 10.0);
         for k in 1..=16 {
             let a = std::f64::consts::PI + k as f64 / 16.0 * std::f64::consts::TAU;
-            pts.push((c.0 + r * a.cos(), c.1 + r * a.sin()));
+            pts.push((c.0 + r * a.stable_cos(), c.1 + r * a.stable_sin()));
         }
         *pts.last_mut().unwrap() = (20.0, 0.0);
         assert!(!self_crosses(&pts));

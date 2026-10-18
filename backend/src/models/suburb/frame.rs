@@ -17,6 +17,7 @@
 //! Both F and its inverse are closed forms, so the round trip is exact to
 //! rounding.
 
+use capitol_protocol::fmath::StableMath;
 use std::f64::consts::TAU;
 
 use crate::models::geom::SplitMix64;
@@ -50,7 +51,7 @@ pub(crate) struct Warp {
 
 impl Warp {
     pub(crate) fn at(&self, u: f64) -> f64 {
-        self.amplitude * (TAU * u / self.wavelength + self.phase).sin()
+        self.amplitude * (TAU * u / self.wavelength + self.phase).stable_sin()
     }
 }
 
@@ -126,11 +127,11 @@ impl Frame {
     }
 
     pub(crate) fn theta_lo(&self, r: f64) -> f64 {
-        self.lo.angle + (self.lo.inset / r).asin()
+        self.lo.angle + (self.lo.inset / r).stable_asin()
     }
 
     pub(crate) fn theta_hi(&self, r: f64) -> f64 {
-        self.hi.angle - (self.hi.inset / r).asin()
+        self.hi.angle - (self.hi.inset / r).stable_asin()
     }
 
     /// The angle between the side lines at radius r.
@@ -142,16 +143,16 @@ impl Frame {
         let r = self.base + v + self.warp.at(u);
         let t = u / self.width;
         let a = self.theta_lo(r) + t * self.span(r);
-        (self.center.0 + r * a.cos(), self.center.1 + r * a.sin())
+        (self.center.0 + r * a.stable_cos(), self.center.1 + r * a.stable_sin())
     }
 
     #[allow(clippy::wrong_self_convention)] // the inverse of `to_world`, in this frame
     pub(crate) fn from_world(&self, p: P) -> (f64, f64) {
         let (dx, dy) = (p.0 - self.center.0, p.1 - self.center.1);
-        let r = dx.hypot(dy);
+        let r = dx.stable_hypot(dy);
         // The angle past `lo`'s ray, in (−π, π].
-        let a = (dy.atan2(dx) - self.lo.angle + std::f64::consts::PI).rem_euclid(TAU) - std::f64::consts::PI;
-        let t = (a - (self.lo.inset / r).asin()) / self.span(r);
+        let a = (dy.stable_atan2(dx) - self.lo.angle + std::f64::consts::PI).rem_euclid(TAU) - std::f64::consts::PI;
+        let t = (a - (self.lo.inset / r).stable_asin()) / self.span(r);
         let u = t * self.width;
         (u, r - self.warp.at(u) - self.base)
     }
@@ -165,9 +166,9 @@ impl Frame {
         for _ in 0..4 {
             let r = self.base + v + self.warp.at(u);
             let a = if side == 0 {
-                self.lo.angle + ((self.lo.inset + x) / r).asin()
+                self.lo.angle + ((self.lo.inset + x) / r).stable_asin()
             } else {
-                self.hi.angle - ((self.hi.inset + x) / r).asin()
+                self.hi.angle - ((self.hi.inset + x) / r).stable_asin()
             };
             u = (a - self.theta_lo(r)) / self.span(r) * self.width;
         }
@@ -218,7 +219,7 @@ mod tests {
 
     /// Distance from p to the infinite line through the centre at `angle`.
     fn off_line(p: P, angle: f64) -> f64 {
-        ((p.0 - C.0) * -angle.sin() + (p.1 - C.1) * angle.cos()).abs()
+        ((p.0 - C.0) * -angle.stable_sin() + (p.1 - C.1) * angle.stable_cos()).abs()
     }
 
     #[test]
@@ -252,7 +253,7 @@ mod tests {
         // 1200 less a 30 warp each side is 1140: five rows, lots 106 deep (#117).
         assert_eq!(fit.rows.len(), 5);
         assert!((fit.lot_depth - (1140.0 - 80.0) / 10.0).abs() < 1e-9);
-        let r = |p: P| (p.0 - C.0).hypot(p.1 - C.1);
+        let r = |p: P| (p.0 - C.0).stable_hypot(p.1 - C.1);
         for i in 0..=40 {
             let u = f.width * i as f64 / 40.0;
             let gap = r(f.to_world(u, fit.rows[1])) - r(f.to_world(u, fit.rows[0]));

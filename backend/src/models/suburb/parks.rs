@@ -28,6 +28,7 @@
 //! even-odd. A ring may cut a square's corner or `SIMPLIFY` past it, but no
 //! further: a park's edge stays within a few units of where its ground ends.
 
+use capitol_protocol::fmath::StableMath;
 use std::collections::VecDeque;
 use std::f64::consts::SQRT_2;
 
@@ -111,7 +112,7 @@ pub(crate) fn lay(
 /// A side line, or the arterial or greenway beyond it, as a half-plane
 /// `n·(q − center) ≥ c`.
 fn half_plane(angle: f64, inset: f64, hi: bool) -> (P, f64) {
-    let n = if hi { (angle.sin(), -angle.cos()) } else { (-angle.sin(), angle.cos()) };
+    let n = if hi { (angle.stable_sin(), -angle.stable_cos()) } else { (-angle.stable_sin(), angle.stable_cos()) };
     (n, inset)
 }
 
@@ -132,7 +133,7 @@ fn of(n: &Neighbourhood, roads: &[RoadSegment], lots: &[TerrainPlot], params: &S
     for k in 0..=32 {
         let a = lo.angle + (hi.angle - lo.angle) * k as f64 / 32.0;
         for r in [inner, outer] {
-            let q = (center.0 + r * a.cos(), center.1 + r * a.sin());
+            let q = (center.0 + r * a.stable_cos(), center.1 + r * a.stable_sin());
             bl = (bl.0.min(q.0), bl.1.min(q.1));
             bh = (bh.0.max(q.0), bh.1.max(q.1));
         }
@@ -147,7 +148,7 @@ fn of(n: &Neighbourhood, roads: &[RoadSegment], lots: &[TerrainPlot], params: &S
         for c in 0..cols {
             let q = centre_of(c, r);
             let rel = (q.0 - center.0, q.1 - center.1);
-            let d = rel.0.hypot(rel.1);
+            let d = rel.0.stable_hypot(rel.1);
             if d < inner || d > outer || !within(&ground, rel) {
                 continue;
             }
@@ -334,7 +335,7 @@ fn simplify_ring(ring: &[P], tolerance: f64) -> Vec<P> {
     }
     let far = (1..n)
         .max_by(|&a, &b| {
-            let d = |k: usize| (ring[k].0 - ring[0].0).hypot(ring[k].1 - ring[0].1);
+            let d = |k: usize| (ring[k].0 - ring[0].0).stable_hypot(ring[k].1 - ring[0].1);
             d(a).total_cmp(&d(b))
         })
         .unwrap();
@@ -418,7 +419,7 @@ fn dist_to_seg(q: P, a: P, b: P) -> f64 {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let len2 = dx * dx + dy * dy;
     let t = if len2 > 0.0 { (((q.0 - a.0) * dx + (q.1 - a.1) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
-    (q.0 - a.0 - t * dx).hypot(q.1 - a.1 - t * dy)
+    (q.0 - a.0 - t * dx).stable_hypot(q.1 - a.1 - t * dy)
 }
 
 /// Whether `q` is inside the quad `c` (even-odd).

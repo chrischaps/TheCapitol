@@ -105,6 +105,7 @@ impl From<&ResourceNodeState> for ResourceNodeInfo {
 
 #[cfg(test)]
 mod tests {
+    use capitol_protocol::fmath::StableMath;
     use capitol_protocol::rules::{
         check_water_crossing, Zone, CENTER_X, CENTER_Y, NEARBY_NODE_RANGE, SPAWN_SCATTER,
         SPAWN_X, SPAWN_Y,
@@ -184,7 +185,7 @@ mod tests {
             // pass some at 15-20, where nothing moves them.
             assert!(clearance >= KEEP_CLEAR, "node at ({x}, {y}) is {clearance:.1} from a road");
             assert!((40..=70).contains(&quality), "node at ({x}, {y}) has quality {quality}");
-            let near_spawn = (x - SPAWN_X).hypot(y - SPAWN_Y) <= NEARBY_NODE_RANGE;
+            let near_spawn = (x - SPAWN_X).stable_hypot(y - SPAWN_Y) <= NEARBY_NODE_RANGE;
             let zone = Zone::from_position(x, y);
             assert!(
                 near_spawn || matches!(zone, Zone::Suburban | Zone::Rural),
@@ -277,7 +278,7 @@ mod tests {
         // `/world/nearby` from the spawn shows grass.
         let in_sight = seeded_nodes()
             .iter()
-            .filter(|&&(x, y, _)| (x - SPAWN_X).hypot(y - SPAWN_Y) <= NEARBY_NODE_RANGE)
+            .filter(|&&(x, y, _)| (x - SPAWN_X).stable_hypot(y - SPAWN_Y) <= NEARBY_NODE_RANGE)
             .count();
         assert!(in_sight >= 4, "only {in_sight} nodes in sight of the spawn");
     }

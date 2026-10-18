@@ -21,6 +21,7 @@
 //! admits may gather it (`container_access::may_gather`, #102). A moved node
 //! does keep off lots, as the #62 migration's moves did.
 
+use capitol_protocol::fmath::StableMath;
 use std::collections::HashMap;
 
 use capitol_protocol::rules::{Zone, CENTER_X, CENTER_Y};
@@ -112,7 +113,7 @@ impl<'a> Surroundings<'a> {
 
     /// How far a point is from the nearest road edge or water kerb; negative inside one.
     fn clearance(&self, (x, y): (f64, f64)) -> f64 {
-        let r = (x - CENTER_X).hypot(y - CENTER_Y);
+        let r = (x - CENTER_X).stable_hypot(y - CENTER_Y);
         let water = self
             .bands
             .iter()
@@ -166,7 +167,7 @@ pub fn place_nodes(terrain: &TerrainConfig, nodes: &[(Uuid, (f64, f64))]) -> Pla
             positions
                 .iter()
                 .enumerate()
-                .all(|(j, &(_, p))| j == i || (p.0 - at.0).hypot(p.1 - at.1) >= NODE_SPACING)
+                .all(|(j, &(_, p))| j == i || (p.0 - at.0).stable_hypot(p.1 - at.1) >= NODE_SPACING)
         };
         let fits = |at: (f64, f64)| {
             Zone::from_position(at.0, at.1) == zone
@@ -193,7 +194,7 @@ fn nearest_spot(from: (f64, f64), fits: impl Fn((f64, f64)) -> bool) -> Option<(
         let spots = ((std::f64::consts::TAU * r) / SEARCH_STEP).ceil() as usize;
         (0..spots).find_map(|s| {
             let angle = std::f64::consts::TAU * s as f64 / spots as f64;
-            let at = (round_tenth(from.0 + r * angle.cos()), round_tenth(from.1 + r * angle.sin()));
+            let at = (round_tenth(from.0 + r * angle.stable_cos()), round_tenth(from.1 + r * angle.stable_sin()));
             fits(at).then_some(at)
         })
     })
@@ -350,7 +351,7 @@ mod tests {
         assert_eq!(report.moves.len(), 4);
         for a in &report.moves {
             for b in report.moves.iter().filter(|b| b.id != a.id) {
-                let gap = (a.to.0 - b.to.0).hypot(a.to.1 - b.to.1);
+                let gap = (a.to.0 - b.to.0).stable_hypot(a.to.1 - b.to.1);
                 assert!(gap >= NODE_SPACING, "{} and {} are {gap:.1} apart", a.id, b.id);
             }
         }
@@ -363,7 +364,7 @@ mod tests {
         let at = (CENTER_X + ring.radius, CENTER_Y);
         let report = place_nodes(&terrain, &[(id(1), at)]);
         if let Some(m) = report.moves.first() {
-            let r = (m.to.0 - CENTER_X).hypot(m.to.1 - CENTER_Y);
+            let r = (m.to.0 - CENTER_X).stable_hypot(m.to.1 - CENTER_Y);
             assert!(r < ring.inner_radius() - WATER_KERB || r > ring.outer_radius() + WATER_KERB);
         } else {
             // A narrow zone ring can hold no clear spot at all.

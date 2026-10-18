@@ -1,0 +1,17 @@
+# The platform's libm differs in the last bit between Windows and Linux, and
+# world generation turns that into a different road vertex. Use
+# capitol_protocol::fmath::StableMath instead (#180).
+disallowed-methods = [
+    { path = "f64::sin", reason = "platform libm: use StableMath::stable_sin (#180)" },
+    { path = "f64::cos", reason = "platform libm: use StableMath::stable_cos (#180)" },
+    { path = "f64::tan", reason = "platform libm: add it to StableMath (#180)" },
+    { path = "f64::sin_cos", reason = "platform libm: use stable_sin and stable_cos (#180)" },
+    { path = "f64::asin", reason = "platform libm: use StableMath::stable_asin (#180)" },
+    { path = "f64::acos", reason = "platform libm: add it to StableMath (#180)" },
+    { path = "f64::atan", reason = "platform libm: add it to StableMath (#180)" },
+    { path = "f64::atan2", reason = "platform libm: use StableMath::stable_atan2 (#180)" },
+    { path = "f64::hypot", reason = "platform libm: use StableMath::stable_hypot (#180)" },
+    { path = "f64::exp", reason = "platform libm: add it to StableMath (#180)" },
+    { path = "f64::ln", reason = "platform libm: add it to StableMath (#180)" },
+    { path = "f64::powf", reason = "platform libm: add it to StableMath (#180)" },
+]

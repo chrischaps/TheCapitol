@@ -35,6 +35,7 @@
 //! stems curving from the loop to bulbs spaced along the frame's edge, whose
 //! skewed, converging stems the lots walker couldn't tile.
 
+use capitol_protocol::fmath::StableMath;
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
 
 use super::frame::{Frame, STEP};
@@ -80,7 +81,7 @@ fn add(a: P, b: P, k: f64) -> P {
 }
 
 fn len(a: P) -> f64 {
-    a.0.hypot(a.1)
+    a.0.stable_hypot(a.1)
 }
 
 fn unit(a: P) -> P {
@@ -124,7 +125,7 @@ impl Racetrack {
         let mut out = Vec::new();
         for end in 0..2 {
             let r = self.radius[end];
-            let (x, dv) = (b + r - r * FRAC_PI_4.cos(), r * FRAC_PI_4.sin());
+            let (x, dv) = (b + r - r * FRAC_PI_4.stable_cos(), r * FRAC_PI_4.stable_sin());
             let v = if end == 0 { b + r - dv } else { d - b - r + dv };
             for side in 0..2 {
                 out.push(f.to_world(f.side_u(side, x, v), v));
@@ -147,7 +148,7 @@ impl Racetrack {
             (0..=m)
                 .map(|i| {
                     let phi = FRAC_PI_2 * (1.0 - i as f64 / m as f64);
-                    at(side, b + r - r * phi.cos(), vc + sign * r * phi.sin())
+                    at(side, b + r - r * phi.stable_cos(), vc + sign * r * phi.stable_sin())
                 })
                 .collect()
         };
@@ -213,7 +214,7 @@ fn normals(ring: &[P]) -> Vec<P> {
 fn offset_lengths(ring: &[P], out: f64) -> (Vec<f64>, f64) {
     let nrm = normals(ring);
     let n = nrm.len();
-    let turn = |a: P, b: P| (a.0 * b.1 - a.1 * b.0).atan2(a.0 * b.0 + a.1 * b.1).abs();
+    let turn = |a: P, b: P| (a.0 * b.1 - a.1 * b.0).stable_atan2(a.0 * b.0 + a.1 * b.1).abs();
     let mut acc = vec![0.0];
     for i in 1..n {
         acc.push(acc[i - 1] + len(sub(ring[i], ring[i - 1])) + out * turn(nrm[i - 1], nrm[i]));

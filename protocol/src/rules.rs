@@ -5,6 +5,7 @@
 //! grey out an out-of-range node, grade an item from its numeric quality) without
 //! waiting for a round trip.
 
+use crate::fmath::StableMath;
 use std::fmt;
 
 use crate::terrain::WaterRing;
@@ -434,7 +435,7 @@ fn distance(center: (f64, f64), p: (f64, f64)) -> f64 {
 
 /// Angle of a point around `center`, in degrees: 0 = East, 90 = South (y is down).
 pub fn angle_from_center(center: (f64, f64), x: f64, y: f64) -> f64 {
-    (y - center.1).atan2(x - center.0).to_degrees()
+    (y - center.1).stable_atan2(x - center.0).to_degrees()
 }
 
 #[cfg(test)]

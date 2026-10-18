@@ -27,6 +27,7 @@
 //! **Joins.** As in pattern (a), every end lands exactly on a vertex of its
 //! target, both mapped from the same (u, v).
 
+use capitol_protocol::fmath::StableMath;
 use std::f64::consts::{FRAC_PI_2, PI};
 
 use super::frame::{Frame, STEP};
@@ -144,10 +145,10 @@ impl Track<'_> {
         (1..m)
             .map(|i| {
                 let phi = FRAC_PI_2 * i as f64 / m as f64;
-                let x = r - r * phi.sin();
-                let v = if top == 0 { row.v + r - r * phi.cos() } else { row.v - r + r * phi.cos() };
+                let x = r - r * phi.stable_sin();
+                let v = if top == 0 { row.v + r - r * phi.stable_cos() } else { row.v - r + r * phi.stable_cos() };
                 let u = if side == 0 { self.leg_u(0, v) + x } else { self.leg_u(1, v) - x };
-                let bend = (row.v_at(u) - row.v) * phi.cos();
+                let bend = (row.v_at(u) - row.v) * phi.stable_cos();
                 self.f.to_world(u, v + bend)
             })
             .collect()
@@ -243,7 +244,7 @@ impl Track<'_> {
         let m = (PI * ru.max(rv) / STEP).ceil().max(4.0) as usize;
         pts.extend((1..m).map(|i| {
             let phi = PI * i as f64 / m as f64;
-            f.to_world(uc - ru * phi.cos(), vc + dir * rv * phi.sin())
+            f.to_world(uc - ru * phi.stable_cos(), vc + dir * rv * phi.stable_sin())
         }));
         pts.extend(f.iso_u(ub, vc, vb));
         Some(street_plan::dedupe(&pts))

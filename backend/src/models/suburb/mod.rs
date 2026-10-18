@@ -68,6 +68,8 @@ pub(crate) fn plan(params: &SuburbanGenParams, center: (f64, f64)) -> SuburbPlan
 mod tests {
     use std::f64::consts::FRAC_PI_4;
 
+    use capitol_protocol::fmath::StableMath;
+
     use capitol_protocol::terrain::RoadType;
 
     use super::metrics::{self, Metrics};
@@ -154,10 +156,10 @@ mod tests {
                         continue;
                     }
                     let rel = (end.0 - c.0, end.1 - c.1);
-                    let angle = rel.1.atan2(rel.0).rem_euclid(std::f64::consts::TAU);
+                    let angle = rel.1.stable_atan2(rel.0).rem_euclid(std::f64::consts::TAU);
                     let arterial = ((angle / FRAC_PI_4).round() as u8) % 8;
                     let side = rel.0 * (next.1 - end.1) - rel.1 * (next.0 - end.0) > 0.0;
-                    found.push((arterial, side, rel.0.hypot(rel.1)));
+                    found.push((arterial, side, rel.0.stable_hypot(rel.1)));
                 }
             }
             assert!(found.len() >= 16 * 2, "{name}: only {} entrances", found.len());

@@ -31,6 +31,7 @@
 //! stubs end on the arterial's centre line, which `weld_junctions` then puts
 //! into the arterial.
 
+use capitol_protocol::fmath::StableMath;
 use std::f64::consts::PI;
 
 use capitol_protocol::terrain::{RoadSegment, RoadType};
@@ -347,11 +348,11 @@ impl Ctx<'_> {
             .map(|i| {
                 // From `from` (φ = −90°) round the apex (0°) to `to` (90°).
                 let phi = -PI / 2.0 + PI * i as f64 / m as f64;
-                let u = c + toward * r * phi.cos();
+                let u = c + toward * r * phi.stable_cos();
                 // The rows' ramps, blended from one to the other.
-                let t = (1.0 + phi.sin()) / 2.0;
+                let t = (1.0 + phi.stable_sin()) / 2.0;
                 let bend = (1.0 - t) * (self.rows[from].v_at(u) - a) + t * (self.rows[to].v_at(u) - b);
-                self.f.to_world(u, mid + (b - a).signum() * r * phi.sin() + bend)
+                self.f.to_world(u, mid + (b - a).signum() * r * phi.stable_sin() + bend)
             })
             .collect()
     }

@@ -16,6 +16,7 @@
 //!   #111). A plan without greens counts open ground within `GREEN_STRIP`
 //!   of an arterial's edge instead.
 
+use capitol_protocol::fmath::StableMath;
 use std::collections::HashSet;
 
 use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot};
@@ -62,7 +63,7 @@ pub struct Scope {
 
 impl Scope {
     pub fn sector_of(&self, p: P) -> u8 {
-        let deg = (p.1 - self.center.1).atan2(p.0 - self.center.0).to_degrees().rem_euclid(360.0);
+        let deg = (p.1 - self.center.1).stable_atan2(p.0 - self.center.0).to_degrees().rem_euclid(360.0);
         ((deg / 45.0) as u8).min(7)
     }
 
@@ -89,7 +90,7 @@ impl Scope {
         for k in 0..=16 {
             let a = (45.0 * s as f64 + 45.0 * k as f64 / 16.0).to_radians();
             for r in [self.inner, self.outer] {
-                let p = (self.center.0 + r * a.cos(), self.center.1 + r * a.sin());
+                let p = (self.center.0 + r * a.stable_cos(), self.center.1 + r * a.stable_sin());
                 lo = (lo.0.min(p.0), lo.1.min(p.1));
                 hi = (hi.0.max(p.0), hi.1.max(p.1));
             }
@@ -568,7 +569,7 @@ pub fn measure(plan: &Plan) -> Measured {
 
     let streets = Segs::new(roads, &scope, |r| r.road_type == RoadType::Suburban);
     let mut parallel = Vec::new();
-    let cos_par = PARALLEL_DEG.to_radians().cos();
+    let cos_par = PARALLEL_DEG.to_radians().stable_cos();
     for &r in &local {
         let pts = &roads[r].points;
         let total: f64 = pts.windows(2).map(|w| dist(w[0], w[1])).sum();

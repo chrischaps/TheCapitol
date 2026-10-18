@@ -7,6 +7,7 @@
 //! lollipop's bulb closes on its own stem, which gives that vertex three
 //! links from one road; that's the end of a cul-de-sac, not a T.
 
+use capitol_protocol::fmath::StableMath;
 use std::collections::{HashMap, VecDeque};
 
 use capitol_protocol::terrain::{RoadSegment, RoadType};
@@ -134,7 +135,7 @@ impl Graph {
             .iter()
             .map(|l| {
                 let to = self.nodes[l.to].at;
-                (to.1 - at.1).atan2(to.0 - at.0).to_degrees()
+                (to.1 - at.1).stable_atan2(to.0 - at.0).to_degrees()
             })
             .collect();
         bearings.sort_by(f64::total_cmp);
@@ -276,7 +277,7 @@ mod tests {
         let js = g.junctions();
         assert_eq!(js.len(), 1);
         assert_eq!(js[0].kind, JunctionKind::FourWay);
-        let narrowest = (50.0_f64).atan2(10.0).to_degrees();
+        let narrowest = (50.0_f64).stable_atan2(10.0).to_degrees();
         assert!((js[0].min_angle - narrowest).abs() < 1e-9, "{}", js[0].min_angle);
         assert!(g.reached_from_arterials().iter().all(|&r| !r), "no arterial");
     }
