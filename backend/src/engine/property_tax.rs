@@ -8,9 +8,11 @@
 //! can, the debt comes out of their strands, as much as their balance covers.
 //! The owner hears about the debt (`tax_delinquent`) as it passes each whole
 //! week of tax, and again when one more hour's charge would bring it to
-//! [`FORECLOSE_AFTER_WEEKS`] weeks. Then the plot is foreclosed. It's released the same way a forced
-//! terrain commit releases one: its stations go, and their contents with
-//! them. The deed is refunded, less the debt.
+//! [`FORECLOSE_AFTER_WEEKS`] weeks. Then the plot is foreclosed. Its stations
+//! come down: each kit goes back to the station's owner, and what was in the
+//! boxes to whoever owns it (#137). What doesn't fit an inventory is lost
+//! (#141). Then it's released the same way a forced terrain commit releases
+//! one, and the deed is refunded, less the debt.
 
 use std::collections::HashMap;
 
@@ -21,6 +23,7 @@ use uuid::Uuid;
 use super::currency::{add_strands_in, TransactionType};
 use super::events::GameEvent;
 use super::plot_sync::release_plot;
+use super::station_removal::return_plot_stations;
 use crate::models::StationState;
 
 /// Weekly tax rate as a fraction (2% = 0.02)
@@ -99,6 +102,10 @@ pub struct Foreclosure {
     /// The owner's strands after the refund
     pub balance: i64,
     pub removed_stations: Vec<Uuid>,
+    /// `(player, inventory)` for each inventory the stations were emptied into
+    pub returned_to: Vec<(Uuid, Uuid)>,
+    /// What didn't fit, as `(item_type, quantity)`
+    pub lost: Vec<(String, i32)>,
 }
 
 /// What an hour's tax run did that the game and the clients need to hear.
@@ -283,9 +290,9 @@ async fn collect_debt(db: &PgPool, plot_id: Uuid, owner_id: Uuid) -> i64 {
     }
 }
 
-/// Foreclose a plot whose debt has reached the threshold. Releasing it and
-/// refunding the deed less the debt happen in one transaction. Its stations
-/// and their contents are destroyed; giving them back to the owner is #137. `None` if,
+/// Foreclose a plot whose debt has reached the threshold. Emptying its
+/// stations into inventories, releasing it and refunding the deed less the
+/// debt happen in one transaction. `None` if,
 /// once the row is locked, the plot is no longer owned or owes less.
 pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>, String> {
     let mut tx = db.begin().await.map_err(|e| e.to_string())?;
@@ -302,6 +309,10 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>
     let tax_owed = tax_owed as i64;
     if tax_owed <= 0 || tax_owed < foreclosure_threshold(assessed_value) {
         return Ok(None);
+    }
+    let returned = return_plot_stations(&mut tx, plot_id).await.map_err(|e| e.to_string())?;
+    if !returned.lost.is_empty() {
+        tracing::warn!("Foreclosing plot {}: no room for {:?}, lost with its stations", plot_id, returned.lost);
     }
     let removed_stations = release_plot(&mut tx, plot_id).await.map_err(|e| e.to_string())?;
     let refund = (assessed_value as i64 - tax_owed).max(0);
@@ -323,13 +334,24 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>
             .map_err(|e| e.to_string())?
     };
     tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(Some(Foreclosure { plot_id, owner_id, terrain_id, tax_owed, refund, balance, removed_stations }))
+    Ok(Some(Foreclosure {
+        plot_id,
+        owner_id,
+        terrain_id,
+        tax_owed,
+        refund,
+        balance,
+        removed_stations,
+        returned_to: returned.inventories,
+        lost: returned.lost,
+    }))
 }
 
 /// Apply a tax run to the game and tell the clients. The owner gets the
 /// notices, `plot_foreclosed` and their balance after the refund, but only
 /// if they're online; keeping those for an offline owner is #138. Everyone
-/// hears about each removed station, and gets `plot_released`.
+/// hears about each removed station, and gets `plot_released`. Each player
+/// whose inventory took something from the stations gets `inventory_updated`.
 pub fn announce(report: TaxReport, stations: &mut HashMap<Uuid, StationState>, events: &broadcast::Sender<GameEvent>) {
     for n in report.notices {
         let _ = events.send(GameEvent::TaxDelinquent {
@@ -343,6 +365,9 @@ pub fn announce(report: TaxReport, stations: &mut HashMap<Uuid, StationState>, e
         for station_id in f.removed_stations {
             stations.remove(&station_id);
             let _ = events.send(GameEvent::StationRemoved { station_id });
+        }
+        for (player_id, container_id) in f.returned_to {
+            let _ = events.send(GameEvent::InventoryUpdated { player_id, container_id, slots: Vec::new() });
         }
         if f.refund > 0 {
             let _ = events.send(GameEvent::CurrencyChanged { player_id: f.owner_id, new_balance: f.balance });
@@ -615,14 +640,63 @@ mod tests {
         (station, container)
     }
 
+    /// `player`'s inventory
+    async fn inventory(db: &PgPool, player: Uuid) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO containers (id, container_type, owner_id) VALUES ($1, 'player_inventory', $2)")
+            .bind(id)
+            .bind(player)
+            .execute(db)
+            .await
+            .unwrap();
+        id
+    }
+
+    /// `quantity` of `kind` at `quality`, owned by `owner`, in `slot` of `container`
+    async fn put(db: &PgPool, owner: Uuid, container: Uuid, slot: i32, kind: &str, quality: i32, quantity: i32) {
+        sqlx::query(
+            "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(kind)
+        .bind(quality)
+        .bind(quantity)
+        .bind(owner)
+        .bind(container)
+        .bind(slot)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    /// What `container` holds, as `(slot, item_type, quality, quantity, owner)` in slot order
+    async fn held(db: &PgPool, container: Uuid) -> Vec<(i32, String, i32, i32, Uuid)> {
+        sqlx::query_as(
+            "SELECT slot_index, item_type, quality, quantity, owner_id FROM items
+             WHERE container_id = $1 ORDER BY slot_index",
+        )
+        .bind(container)
+        .fetch_all(db)
+        .await
+        .unwrap()
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
     async fn the_last_unpaid_hour_forecloses_and_says_so(db: PgPool) {
         let ada = player(&db, "ada", 0).await;
+        let ada_bag = inventory(&db, ada).await;
+        let guest = player(&db, "guest", 0).await;
+        let guest_bag = inventory(&db, guest).await;
         let lot = plot(&db, Some(ada), VALUE).await;
         owe(&db, lot, 479).await;
         carry(&db, lot, CARRY_DUE).await;
         let (chest, chest_box) = station(&db, ada, lot).await;
+        put(&db, ada, ada_bag, 0, "fiber", 20, 10).await;
+        put(&db, ada, chest_box, 3, "fiber", 50, 30).await;
+        put(&db, ada, chest_box, 7, "forge_kit", 64, 1).await;
+        put(&db, guest, chest_box, 9, "fiber", 40, 5).await;
 
         let report = process_property_taxes(&db).await;
 
@@ -640,7 +714,19 @@ mod tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(boxes, 0, "the chest's contents went with it");
+        assert_eq!(boxes, 0, "the chest went");
+        // Its kit and what ada kept in it are ada's again; the guest's fiber is the guest's.
+        assert_eq!(
+            held(&db, ada_bag).await,
+            vec![
+                (0, "fiber".to_string(), 42, 40, ada),
+                (1, "chest_kit".to_string(), 50, 1, ada),
+                (2, "forge_kit".to_string(), 64, 1, ada),
+            ]
+        );
+        assert_eq!(held(&db, guest_bag).await, vec![(0, "fiber".to_string(), 40, 5, guest)]);
+        assert_eq!(f.returned_to, vec![(ada, ada_bag), (guest, guest_bag)]);
+        assert!(f.lost.is_empty());
 
         // The game drops the chest, the owner hears why, and everyone hears the lot is free.
         let (events, mut rx) = broadcast::channel(16);
@@ -652,11 +738,44 @@ mod tests {
         }
         let terrain_id = format!("test-{lot}");
         assert!(matches!(&sent[0], GameEvent::StationRemoved { station_id } if *station_id == chest));
-        assert!(matches!(&sent[1], GameEvent::CurrencyChanged { player_id, new_balance: 5520 } if *player_id == ada));
-        assert!(matches!(&sent[2], GameEvent::PlotForeclosed { owner_id, terrain_id: t, tax_owed: 480, refund: 5520 }
+        assert!(matches!(&sent[1], GameEvent::InventoryUpdated { player_id, container_id, .. }
+            if *player_id == ada && *container_id == ada_bag));
+        assert!(matches!(&sent[2], GameEvent::InventoryUpdated { player_id, container_id, .. }
+            if *player_id == guest && *container_id == guest_bag));
+        assert!(matches!(&sent[3], GameEvent::CurrencyChanged { player_id, new_balance: 5520 } if *player_id == ada));
+        assert!(matches!(&sent[4], GameEvent::PlotForeclosed { owner_id, terrain_id: t, tax_owed: 480, refund: 5520 }
             if *owner_id == ada && *t == terrain_id));
-        assert!(matches!(&sent[3], GameEvent::PlotReleased { terrain_id: t } if *t == terrain_id));
-        assert_eq!(sent.len(), 4);
+        assert!(matches!(&sent[5], GameEvent::PlotReleased { terrain_id: t } if *t == terrain_id));
+        assert_eq!(sent.len(), 6);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn what_finds_no_room_is_lost_and_the_plot_still_forecloses(db: PgPool) {
+        let ada = player(&db, "ada", 0).await;
+        let bag = inventory(&db, ada).await;
+        let lot = plot(&db, Some(ada), VALUE).await;
+        owe(&db, lot, 480).await;
+        let (_, chest_box) = station(&db, ada, lot).await;
+        // all but one slot full, and no fiber stack to join
+        for slot in 0..23 {
+            put(&db, ada, bag, slot, "forge_kit", 50, 1).await;
+        }
+        put(&db, ada, chest_box, 0, "fiber", 50, 30).await;
+
+        let report = process_property_taxes(&db).await;
+
+        // The kit takes the last slot; the fiber goes with the chest.
+        let f = &report.foreclosures[0];
+        assert_eq!(f.lost, vec![("fiber".to_string(), 30)]);
+        assert_eq!(f.returned_to, vec![(ada, bag)]);
+        assert_eq!(held(&db, bag).await[23], (23, "chest_kit".to_string(), 50, 1, ada));
+        assert_eq!(owner(&db, lot).await, Some(None));
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE item_type = 'fiber'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[sqlx::test(migrations = "./migrations")]

@@ -5,8 +5,14 @@
 //! into the owner's inventory at the quality it was placed with, and the station,
 //! its container and its place on the plot's station count all go. Nothing is
 //! destroyed: a station can be moved by taking it down and placing it again.
+//!
+//! A foreclosed plot's stations come down here too ([`return_plot_stations`],
+//! #137), boxes and all: what's in them goes back to the inventories of
+//! whoever owns it.
 
-use sqlx::{PgPool, Postgres, Transaction};
+use std::collections::HashMap;
+
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 /// What a removal changed, so the caller can update the game state and tell clients.
@@ -170,6 +176,190 @@ async fn remove_in(
         inventory_id,
         kit_item_id,
     })
+}
+
+/// What giving a plot's stations back did (#137).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReturnedStations {
+    /// `(player, inventory)` for each inventory that took something, in the order they first did
+    pub inventories: Vec<(Uuid, Uuid)>,
+    /// What found no room, as `(item_type, quantity)`. It's still in the
+    /// stations, and goes when they do. Keeping it somewhere is #141.
+    pub lost: Vec<(String, i32)>,
+}
+
+/// A player's inventory, locked, as things are put into it
+struct Inventory {
+    id: Uuid,
+    free: Vec<i32>,
+    /// The first stack of each stackable item type, as `(item, quantity, quality)`
+    stacks: HashMap<String, (Uuid, i32, i32)>,
+}
+
+/// Empty every station on `plot_id` into inventories, before a foreclosure
+/// releases the plot (#137). Each station's kit goes back to the station's
+/// owner at the quality it was placed with, as [`remove_station`] does. Each
+/// item in its boxes goes back to whoever owns the item: a guest's deposit is
+/// the guest's (#80), and an item with no owner is the station owner's. A
+/// stackable item joins the first stack of its type, at the weighted quality
+/// [`merge_items`](super::inventory::merge_items) gives; anything else takes
+/// the first free slot. Kits go first, so a station is the last thing lost.
+/// The stations are left, empty or holding only what didn't fit, for
+/// `release_plot` to delete.
+pub async fn return_plot_stations(
+    tx: &mut PgConnection,
+    plot_id: Uuid,
+) -> Result<ReturnedStations, sqlx::Error> {
+    let stations: Vec<(Uuid, String, Uuid, i32)> = sqlx::query_as(
+        "SELECT id, station_type, owner_id, kit_quality FROM stations
+         WHERE plot_id = $1 ORDER BY placed_at, id FOR UPDATE",
+    )
+    .bind(plot_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if stations.is_empty() {
+        return Ok(ReturnedStations::default());
+    }
+    let station_ids: Vec<Uuid> = stations.iter().map(|s| s.0).collect();
+    let station_owner: HashMap<Uuid, Uuid> = stations.iter().map(|s| (s.0, s.2)).collect();
+    // The boxes are locked too, so a deposit racing this waits (see `remove_in`)
+    let contents: Vec<(Uuid, String, i32, i32, Option<Uuid>, Uuid, bool)> = sqlx::query_as(
+        "SELECT i.id, i.item_type, i.quality, i.quantity, i.owner_id, c.station_id, it.stackable
+         FROM items i
+         JOIN containers c ON i.container_id = c.id
+         JOIN item_types it ON it.id = i.item_type
+         WHERE c.station_id = ANY($1)
+         ORDER BY c.station_id, i.slot_index NULLS LAST, i.id
+         FOR UPDATE OF i, c",
+    )
+    .bind(&station_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut returned = ReturnedStations::default();
+    let mut inventories: HashMap<Uuid, Option<Inventory>> = HashMap::new();
+
+    for (station_id, station_type, owner_id, kit_quality) in &stations {
+        let Some(kit) = capitol_protocol::rules::station_kit_item(station_type) else {
+            tracing::error!("Station {} has type {} with no kit", station_id, station_type);
+            continue;
+        };
+        let slot = match inventory(tx, &mut inventories, *owner_id).await? {
+            Some(inv) if !inv.free.is_empty() => Some((inv.id, inv.free.remove(0))),
+            _ => None,
+        };
+        let Some((inventory_id, slot)) = slot else {
+            returned.lost.push((kit.to_string(), 1));
+            continue;
+        };
+        sqlx::query(
+            "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
+             VALUES ($1, $2, $3, 1, $4, $5, $6)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(kit)
+        .bind(kit_quality)
+        .bind(owner_id)
+        .bind(inventory_id)
+        .bind(slot)
+        .execute(&mut *tx)
+        .await?;
+        took(&mut returned, *owner_id, inventory_id);
+    }
+
+    for (item_id, item_type, quality, quantity, item_owner, station_id, stackable) in contents {
+        let player = item_owner.unwrap_or(station_owner[&station_id]);
+        let Some(inv) = inventory(tx, &mut inventories, player).await? else {
+            returned.lost.push((item_type, quantity));
+            continue;
+        };
+        let inventory_id = inv.id;
+        if let Some((stack_id, qty, q)) = inv.stacks.get_mut(&item_type).filter(|_| stackable) {
+            let total = *qty + quantity;
+            *q = (*q * *qty + quality * quantity) / total;
+            *qty = total;
+            sqlx::query("UPDATE items SET quantity = $1, quality = $2 WHERE id = $3")
+                .bind(*qty)
+                .bind(*q)
+                .bind(*stack_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM items WHERE id = $1")
+                .bind(item_id)
+                .execute(&mut *tx)
+                .await?;
+        } else if !inv.free.is_empty() {
+            let slot = inv.free.remove(0);
+            if stackable {
+                inv.stacks.insert(item_type, (item_id, quantity, quality));
+            }
+            sqlx::query(
+                "UPDATE items SET container_id = $1, slot_index = $2, owner_id = $3 WHERE id = $4",
+            )
+            .bind(inventory_id)
+            .bind(slot)
+            .bind(player)
+            .bind(item_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            returned.lost.push((item_type, quantity));
+            continue;
+        }
+        took(&mut returned, player, inventory_id);
+    }
+    Ok(returned)
+}
+
+fn took(returned: &mut ReturnedStations, player: Uuid, inventory: Uuid) {
+    if !returned.inventories.contains(&(player, inventory)) {
+        returned.inventories.push((player, inventory));
+    }
+}
+
+/// `player`'s inventory, locked and loaded the first time it's asked for.
+/// `None` if they have none.
+async fn inventory<'a>(
+    tx: &mut PgConnection,
+    cache: &'a mut HashMap<Uuid, Option<Inventory>>,
+    player: Uuid,
+) -> Result<Option<&'a mut Inventory>, sqlx::Error> {
+    if !cache.contains_key(&player) {
+        let found: Option<(Uuid, i32)> = sqlx::query_as(
+            "SELECT c.id, ct.slot_count FROM containers c
+             JOIN container_types ct ON c.container_type = ct.id
+             WHERE c.owner_id = $1 AND c.container_type = 'player_inventory'
+             LIMIT 1 FOR UPDATE OF c",
+        )
+        .bind(player)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let loaded = match found {
+            None => None,
+            Some((id, slot_count)) => {
+                let held: Vec<(Uuid, String, i32, i32, Option<i32>, bool)> = sqlx::query_as(
+                    "SELECT i.id, i.item_type, i.quantity, i.quality, i.slot_index, it.stackable
+                     FROM items i JOIN item_types it ON it.id = i.item_type
+                     WHERE i.container_id = $1 ORDER BY i.slot_index NULLS LAST, i.id
+                     FOR UPDATE OF i",
+                )
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?;
+                let used: Vec<i32> = held.iter().filter_map(|h| h.4).collect();
+                let mut stacks = HashMap::new();
+                for (item, kind, qty, quality, _, stackable) in held {
+                    if stackable {
+                        stacks.entry(kind).or_insert((item, qty, quality));
+                    }
+                }
+                let free = (0..slot_count).filter(|s| !used.contains(s)).collect();
+                Some(Inventory { id, free, stacks })
+            }
+        };
+        cache.insert(player, loaded);
+    }
+    Ok(cache.get_mut(&player).and_then(Option::as_mut))
 }
 
 /// These need the local Postgres (`docker-compose up -d`). Each runs in a fresh database that

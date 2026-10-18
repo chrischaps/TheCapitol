@@ -345,7 +345,9 @@ pub enum ServerMessage {
         forecloses_at: i64,
     },
     /// Your plot `terrain_id` was foreclosed for `tax_owed` strands of unpaid
-    /// tax. Its stations and their contents are gone, and `refund` strands
+    /// tax. Its stations are gone: their kits came back to your inventory, and
+    /// what was in them to whoever owns it, as far as inventories had room
+    /// (`inventory_updated` comes first). `refund` strands
     /// (the deed, less the debt) were paid back. `plot_released` follows,
     /// to everyone.
     #[serde(rename = "plot_foreclosed")]

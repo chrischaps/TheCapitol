@@ -112,7 +112,8 @@ struct Existing {
 /// unclaimed one with default permissions. Returns the removed stations, for
 /// the caller to drop from the game state and announce. Refunding the deed is
 /// the caller's, as is `plot_released`. Used by a forced terrain commit and by
-/// tax foreclosure (#131).
+/// tax foreclosure (#131), which empties the stations into inventories first
+/// (`station_removal::return_plot_stations`, #137).
 pub async fn release_plot(tx: &mut PgConnection, plot_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
     let stations: Vec<Uuid> = sqlx::query_scalar("DELETE FROM stations WHERE plot_id = $1 RETURNING id")
         .bind(plot_id)
