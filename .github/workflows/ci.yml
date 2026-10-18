@@ -1,0 +1,91 @@
+# CI for the backend, the shared protocol and the Flint client (E0.1, #144).
+# Two jobs, one per Cargo workspace: the root (backend + protocol) and
+# flint-client/ (its own workspace; the engine is a subtree under it).
+name: CI
+
+on:
+  # Every branch, so an agent's `issue-<n>` gets a run before it lands.
+  # Claim branches hold no files, so they'd never run anyway.
+  push:
+    branches-ignore: ["claim/**"]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental builds only cost cache space on a fresh runner.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  backend:
+    name: Backend and protocol
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      # The same images as docker-compose.yml. Postgres listens on 5432 here,
+      # not the 5433 the local stack uses.
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: capitol
+          POSTGRES_PASSWORD: capitol_dev
+          POSTGRES_DB: capitol
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U capitol"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # `sqlx::test` makes a throwaway database per test from this server.
+      DATABASE_URL: postgres://capitol:capitol_dev@localhost:5432/capitol
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --all-targets -p capitol-protocol -p capitol-backend -- -D warnings
+      - name: Tests
+        run: cargo test -p capitol-protocol -p capitol-backend
+      # The database tests are `#[ignore]`d so a plain `cargo test` passes
+      # without the docker stack. Here the stack is up, so run them. The two
+      # skipped are tools, not tests: one prints migration rows, one renders
+      # suburb plans.
+      - name: Database tests
+        run: cargo test -p capitol-backend -- --ignored --skip print_node_moves --skip suburb_plan_report
+
+  flint-client:
+    name: Flint client
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: flint-client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # cpal (audio) links ALSA and gilrs (gamepads) links udev. winit loads
+      # X11 and Wayland at run time, so a check needs no display libraries.
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libudev-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: flint-client
+      # Per crate, never --workspace: the engine's flint-android needs ndk-sys.
+      # capitol-core's live.rs tests need a server and stay #[ignore]d.
+      - name: capitol-core tests
+        run: cargo test -p capitol-core
+      - name: Check capitol-client
+        run: cargo check -p capitol-client --all-targets

@@ -1,5 +1,7 @@
 # The Capitol
 
+[![CI](https://github.com/chrischaps/TheCapitol/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/chrischaps/TheCapitol/actions/workflows/ci.yml)
+
 A multiplayer online game of economic empire-building and political intrigue.
 
 **Project page:** [chaps.dev/projects/thecapitol](https://chaps.dev/projects/thecapitol/)
