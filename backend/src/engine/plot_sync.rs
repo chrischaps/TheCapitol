@@ -54,6 +54,9 @@ pub struct SyncReport {
     /// Stations removed from released plots. The caller drops them from the
     /// game state and tells the clients.
     pub removed_stations: Vec<Uuid>,
+    /// The `terrain_id`s of the plots released (`OnOwned::Release`). The
+    /// caller tells the clients (`plot_released`, B13).
+    pub released: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -142,6 +145,7 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
 
     if on_owned == OnOwned::Release {
         for c in &conflicts {
+            report.released.push(c.terrain_id.clone());
             let stations: Vec<Uuid> = sqlx::query_scalar("DELETE FROM stations WHERE plot_id = $1 RETURNING id")
                 .bind(c.plot_id)
                 .fetch_all(&mut *tx)
@@ -419,6 +423,7 @@ pub(crate) mod tests {
         let report = sync_plots(&db, &[], OnOwned::Release).await.unwrap();
 
         assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.released, vec![format!("test-{lot}")], "for plot_released");
         assert_eq!(owner(&db, lot).await, None, "the lot is gone, so its row is");
         assert_eq!(balance(&db, ada).await, 1050);
         assert_eq!(ledger(&db, ada).await, vec![(1000, "deed_refund".to_string())]);

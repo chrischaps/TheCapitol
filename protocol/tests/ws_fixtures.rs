@@ -52,6 +52,8 @@ const SERVER_TYPES: &[&str] = &[
     "zone_changed",
     "movement_blocked",
     "terrain_updated",
+    "plot_claimed",
+    "plot_released",
 ];
 
 const CLIENT_TYPES: &[&str] = &[

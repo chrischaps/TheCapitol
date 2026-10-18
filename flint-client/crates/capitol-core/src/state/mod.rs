@@ -35,7 +35,7 @@ mod trade;
 
 use std::collections::HashMap;
 
-use capitol_protocol::rest::{PlotInfo, RecipeInfo, ResourceNodeInfo, StationInfo};
+use capitol_protocol::rest::{ClaimedPlot, PlotInfo, RecipeInfo, ResourceNodeInfo, StationInfo};
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::ws::{PlayerPosition, ServerMessage};
 use uuid::Uuid;
@@ -226,6 +226,14 @@ pub enum StateEvent {
     },
     /// Refetch `/terrain`.
     TerrainUpdated,
+    /// Someone, maybe you, claimed a lot (`plot_claimed`, B13). Nothing is
+    /// stored here: whoever draws claimed lots (P8.6b) keeps its own set.
+    LotClaimed(ClaimedPlot),
+    /// A lot has no owner any more (`plot_released`, B13). If it was yours,
+    /// it's gone from [`GameState::plots`] and `PlotsUpdated` came first.
+    LotReleased {
+        terrain_id: String,
+    },
 
     /// The local player's trading changed. See [`GameState::trade`].
     Trade(TradeEvent),
@@ -635,6 +643,23 @@ impl GameState {
             // Only ever sent to the player whose balance it is.
             M::CurrencyChanged { new_balance } => self.set_strands(*new_balance, &mut out),
             M::TerrainUpdated => out.push(StateEvent::TerrainUpdated),
+            M::PlotClaimed {
+                terrain_id,
+                owner_id,
+                claimed_at,
+            } => out.push(StateEvent::LotClaimed(ClaimedPlot {
+                terrain_id: terrain_id.clone(),
+                owner_id: *owner_id,
+                claimed_at: *claimed_at,
+            })),
+            M::PlotReleased { terrain_id } => {
+                if self.release_plot(terrain_id) {
+                    out.push(StateEvent::PlotsUpdated);
+                }
+                out.push(StateEvent::LotReleased {
+                    terrain_id: terrain_id.clone(),
+                });
+            }
         }
         out
     }
@@ -1094,6 +1119,28 @@ impl GameState {
             changed |= self.upsert_plot(plot);
         } else if let Some(i) = self.plots.iter().position(|p| p.id == plot.id) {
             self.plots.remove(i);
+            changed = true;
+        }
+        changed
+    }
+
+    /// The lot `terrain_id` lost its owner: it's no longer one of yours, and
+    /// the picked plot, if it's that one, is unowned. Returns whether anything changed.
+    fn release_plot(&mut self, terrain_id: &str) -> bool {
+        let is_it = |p: &PlotInfo| p.terrain_id.as_deref() == Some(terrain_id);
+        let mut changed = false;
+        if let Some(i) = self.plots.iter().position(is_it) {
+            self.plots.remove(i);
+            changed = true;
+        }
+        if let Some(picked) = self
+            .picked_plot
+            .as_mut()
+            .filter(|p| is_it(p) && p.owner_id.is_some())
+        {
+            picked.owner_id = None;
+            picked.owner_name = None;
+            picked.claimed_at = None;
             changed = true;
         }
         changed

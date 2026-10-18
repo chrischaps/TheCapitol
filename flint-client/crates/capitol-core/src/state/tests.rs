@@ -208,6 +208,8 @@ fn test_for(message: &M) -> fn() {
         M::ZoneChanged { .. } => zone_changed_updates_my_zone,
         M::MovementBlocked { .. } => movement_blocked_moves_me_back,
         M::TerrainUpdated => terrain_updated_is_reported,
+        M::PlotClaimed { .. } => plot_claimed_is_reported,
+        M::PlotReleased { .. } => plot_released_drops_it_from_my_plots,
     }
 }
 
@@ -227,7 +229,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 39, "one fixture per ServerMessage variant");
+    assert_eq!(count, 41, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,6 +1078,66 @@ fn terrain_updated_is_reported() {
     assert_eq!(
         state.apply_ws(&M::TerrainUpdated),
         vec![StateEvent::TerrainUpdated]
+    );
+}
+
+#[test]
+fn plot_claimed_is_reported() {
+    let mut state = connected();
+    let claimed = ClaimedPlot {
+        terrain_id: "sub_2_0_3_L_4".into(),
+        owner_id: OTHER,
+        claimed_at: "2026-10-17T18:30:00Z".parse().unwrap(),
+    };
+    assert_eq!(
+        state.apply_ws(&M::PlotClaimed {
+            terrain_id: claimed.terrain_id.clone(),
+            owner_id: claimed.owner_id,
+            claimed_at: claimed.claimed_at,
+        }),
+        vec![StateEvent::LotClaimed(claimed)]
+    );
+}
+
+#[test]
+fn plot_released_drops_it_from_my_plots() {
+    let mut state = connected();
+    let mine = PlotInfo {
+        terrain_id: Some("sub_2_0_3_L_4".into()),
+        ..plot(Some(ME))
+    };
+    state.apply_rest(&R::Plots(ListPlotsResponse {
+        plots: vec![mine.clone()],
+        total: 1,
+    }));
+    state.apply_rest(&R::PlotAt(Some(mine)));
+    let released = |id: &str| M::PlotReleased {
+        terrain_id: id.into(),
+    };
+
+    // Someone else's lot: reported, but none of mine changed.
+    assert_eq!(
+        state.apply_ws(&released("rural_plot_trail_9")),
+        vec![StateEvent::LotReleased {
+            terrain_id: "rural_plot_trail_9".into()
+        }]
+    );
+    assert_eq!(state.plots().len(), 1);
+
+    assert_eq!(
+        state.apply_ws(&released("sub_2_0_3_L_4")),
+        vec![
+            StateEvent::PlotsUpdated,
+            StateEvent::LotReleased {
+                terrain_id: "sub_2_0_3_L_4".into()
+            }
+        ]
+    );
+    assert!(state.plots().is_empty());
+    let picked = state.picked_plot().unwrap();
+    assert_eq!(
+        (picked.owner_id, picked.owner_name.as_deref()),
+        (None, None)
     );
 }
 

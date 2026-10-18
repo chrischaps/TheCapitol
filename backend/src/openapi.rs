@@ -4,7 +4,7 @@ use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
 use capitol_protocol::rest::{
-    AccountInfo, AuthResponse, Bounds, ClaimPlotResponse, ContainerResponse, ContainersResponse,
+    AccountInfo, AuthResponse, Bounds, ClaimPlotResponse, ClaimedPlot, ContainerResponse, ContainersResponse,
     CurrencyResponse, DeedPrice, DeedPricesResponse, DepositRequest, DepositResponse,
     ExtractRequest, ExtractResponse, HealthResponse, InventoryItem, InventoryResponse,
     ListPlotsResponse, LoginRequest, LogoutRequest, MoveItemRequest, MoveItemResponse,
@@ -93,6 +93,7 @@ then include it in the `Authorization: Bearer <token>` header.",
         crate::routes::exchange::withdraw_fiber,
         // Plots
         crate::routes::plots::list_plots,
+        crate::routes::plots::list_claimed_plots,
         crate::routes::plots::get_plot,
         crate::routes::plots::get_plot_at_position,
         crate::routes::plots::claim_plot,
@@ -151,6 +152,7 @@ then include it in the `Authorization: Bearer <token>` header.",
         PlotInfo,
         Bounds,
         ClaimPlotResponse,
+        ClaimedPlot,
         PlotPermissions,
         // Bureaucracy
         ZonesResponse,

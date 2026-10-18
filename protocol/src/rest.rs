@@ -677,6 +677,19 @@ pub struct ClaimPlotResponse {
     pub new_balance: i64,
 }
 
+/// One claimed lot. `GET /plots/claimed` returns every one, and WS
+/// `plot_claimed` and `plot_released` keep that list current.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema, sqlx::FromRow))]
+pub struct ClaimedPlot {
+    /// The `/terrain` lot (`TerrainPlot::id`)
+    pub terrain_id: String,
+    /// The owner's player ID
+    pub owner_id: Uuid,
+    /// When the current owner claimed it
+    pub claimed_at: DateTime<Utc>,
+}
+
 /// `GET /plots/{id}/permissions`, and the response to `PUT` on the same path
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema, sqlx::FromRow))]

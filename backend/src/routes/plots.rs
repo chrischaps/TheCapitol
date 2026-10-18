@@ -3,12 +3,16 @@ use axum::{
     routing::{get, post, put},
     Extension, Json, Router,
 };
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
+use tokio::sync::broadcast;
+use tower_http::compression::CompressionLayer;
 use uuid::Uuid;
 
-use capitol_protocol::rest::{ClaimPlotResponse, ListPlotsQuery, ListPlotsResponse, PositionQuery};
+use capitol_protocol::rest::{ClaimPlotResponse, ClaimedPlot, ListPlotsQuery, ListPlotsResponse, PositionQuery};
 
 use crate::engine::currency::{subtract_strands_in, TransactionType};
+use crate::engine::GameEvent;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::{Plot, PlotInfo, PLOT_COLUMNS, PlotPermissions, PlotWithJoins, UpdatePermissionsRequest};
@@ -17,6 +21,7 @@ use crate::state::AppState;
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/", get(list_plots))
+        .route("/claimed", get(list_claimed_plots).layer(CompressionLayer::new()))
         .route("/{id}", get(get_plot))
         .route("/{id}/claim", post(claim_plot))
         .route("/{id}/permissions", get(get_permissions))
@@ -90,6 +95,38 @@ pub async fn list_plots(
         .await?;
 
     Ok(Json(ListPlotsResponse { plots, total }))
+}
+
+/// Every claimed lot, unpaged
+///
+/// One row per owned plot that is a `/terrain` lot, for drawing everyone's
+/// plots (P8.6b's houses). WS `plot_claimed` and `plot_released` keep it
+/// current. Gzipped when the request accepts it.
+#[utoipa::path(
+    get,
+    path = "/plots/claimed",
+    responses(
+        (status = 200, description = "Every claimed lot, by terrain_id", body = Vec<ClaimedPlot>)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Plots"
+)]
+pub async fn list_claimed_plots(State(state): State<AppState>) -> Result<Json<Vec<ClaimedPlot>>, AppError> {
+    Ok(Json(claimed_plots(&state.db).await?))
+}
+
+/// A pre-B7 plot with no lot is left out: clients have nothing to draw it on.
+/// An owned plot with no `claimed_at` (none should have one) reads as claimed
+/// long ago, at the Unix epoch.
+async fn claimed_plots(db: &PgPool) -> Result<Vec<ClaimedPlot>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT terrain_id, owner_id, COALESCE(claimed_at, 'epoch'::timestamptz) AS claimed_at
+         FROM plots
+         WHERE owner_id IS NOT NULL AND terrain_id IS NOT NULL
+         ORDER BY terrain_id",
+    )
+    .fetch_all(db)
+    .await
 }
 
 /// Get a single plot by ID
@@ -180,7 +217,8 @@ pub async fn claim_plot(
     .fetch_one(&state.db)
     .await?;
 
-    let new_balance = claim(&state.db, player_id, plot_id).await?;
+    let events = state.game.read().await.event_sender.clone();
+    let new_balance = claim(&state.db, &events, player_id, plot_id).await?;
 
     // Fetch updated plot info
     let plot_info = get_plot(State(state.clone()), Path(plot_id)).await?.0;
@@ -193,8 +231,14 @@ pub async fn claim_plot(
 
 /// Charge the deed and give the plot to `player_id`, in one transaction. The
 /// plot row is locked first, so two players can't both pay for it, and the
-/// money only moves if the claim commits. Returns the new balance.
-async fn claim(db: &PgPool, player_id: Uuid, plot_id: Uuid) -> Result<i64, AppError> {
+/// money only moves if the claim commits. Once it has, everyone is told
+/// (`plot_claimed`, B13). Returns the new balance.
+async fn claim(
+    db: &PgPool,
+    events: &broadcast::Sender<GameEvent>,
+    player_id: Uuid,
+    plot_id: Uuid,
+) -> Result<i64, AppError> {
     let mut tx = db.begin().await?;
 
     // Get plot with zone info
@@ -234,13 +278,14 @@ async fn claim(db: &PgPool, player_id: Uuid, plot_id: Uuid) -> Result<i64, AppEr
     .map_err(AppError::BadRequest)?;
 
     // Claim the plot
-    sqlx::query(
-        "UPDATE plots SET owner_id = $1, claimed_at = NOW(), assessed_value = $2 WHERE id = $3"
+    let (terrain_id, claimed_at): (Option<String>, DateTime<Utc>) = sqlx::query_as(
+        "UPDATE plots SET owner_id = $1, claimed_at = NOW(), assessed_value = $2 WHERE id = $3
+         RETURNING terrain_id, claimed_at"
     )
     .bind(player_id)
     .bind(deed_cost)
     .bind(plot_id)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
 
     // Create default permissions if not exists
@@ -252,6 +297,11 @@ async fn claim(db: &PgPool, player_id: Uuid, plot_id: Uuid) -> Result<i64, AppEr
     .await?;
 
     tx.commit().await?;
+
+    // A pre-B7 plot has no lot for clients to draw, as in `/plots/claimed`.
+    if let Some(terrain_id) = terrain_id {
+        let _ = events.send(GameEvent::PlotClaimed { terrain_id, owner_id: player_id, claimed_at });
+    }
     Ok(new_balance)
 }
 
@@ -416,14 +466,20 @@ mod tests {
             .unwrap() as i64
     }
 
+    /// A sender for `claim`, and a receiver to see what it broadcast
+    fn events() -> (broadcast::Sender<GameEvent>, broadcast::Receiver<GameEvent>) {
+        broadcast::channel(16)
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
     async fn a_claim_charges_the_deed_and_takes_the_plot(db: PgPool) {
         let deed = urban_deed(&db).await;
         let ada = player(&db, "ada", deed + 5).await;
         let lot = plot(&db, None, 0).await;
+        let (tx, _rx) = events();
 
-        assert_eq!(claim(&db, ada, lot).await.unwrap(), 5);
+        assert_eq!(claim(&db, &tx, ada, lot).await.unwrap(), 5);
 
         assert_eq!(owner(&db, lot).await, Some(Some(ada)));
         assert_eq!(balance(&db, ada).await, 5);
@@ -437,7 +493,10 @@ mod tests {
         let ada = player(&db, "ada", deed - 1).await;
         let lot = plot(&db, None, 0).await;
 
-        assert!(matches!(claim(&db, ada, lot).await, Err(AppError::BadRequest(_))));
+        let (tx, mut rx) = events();
+
+        assert!(matches!(claim(&db, &tx, ada, lot).await, Err(AppError::BadRequest(_))));
+        assert!(rx.try_recv().is_err(), "a failed claim tells no one");
 
         assert_eq!(owner(&db, lot).await, Some(None));
         assert_eq!(balance(&db, ada).await, deed - 1);
@@ -453,12 +512,49 @@ mod tests {
         let bram = player(&db, "bram", deed).await;
         let lot = plot(&db, None, 0).await;
 
-        let (a, b) = tokio::join!(claim(&db, ada, lot), claim(&db, bram, lot));
+        let (tx, _rx) = events();
+
+        let (a, b) = tokio::join!(claim(&db, &tx, ada, lot), claim(&db, &tx, bram, lot));
 
         assert!(a.is_ok() != b.is_ok(), "exactly one claim wins");
         let (winner, loser) = if a.is_ok() { (ada, bram) } else { (bram, ada) };
         assert_eq!(owner(&db, lot).await, Some(Some(winner)));
         assert_eq!(balance(&db, winner).await, 0);
         assert_eq!(balance(&db, loser).await, deed, "the loser kept their strands");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_claim_is_broadcast_and_listed(db: PgPool) {
+        let deed = urban_deed(&db).await;
+        let ada = player(&db, "ada", deed).await;
+        let lot = plot(&db, None, 0).await;
+        let terrain_id = format!("test-{lot}");
+        let (tx, mut rx) = events();
+        assert!(claimed_plots(&db).await.unwrap().is_empty());
+
+        claim(&db, &tx, ada, lot).await.unwrap();
+
+        let listed = claimed_plots(&db).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].terrain_id.as_str(), listed[0].owner_id), (terrain_id.as_str(), ada));
+        match rx.try_recv() {
+            Ok(GameEvent::PlotClaimed { terrain_id: sent, owner_id, claimed_at }) => {
+                assert_eq!((sent, owner_id), (terrain_id, ada));
+                assert_eq!(claimed_at, listed[0].claimed_at, "the broadcast and the list agree on when");
+            }
+            other => panic!("expected plot_claimed, got {other:?}"),
+        }
+    }
+
+    /// Only lots are listed: a pre-B7 plot has nothing for a client to draw on
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_plot_with_no_lot_isnt_listed(db: PgPool) {
+        let ada = player(&db, "ada", 0).await;
+        let lot = plot(&db, Some(ada), 100).await;
+        sqlx::query("UPDATE plots SET terrain_id = NULL WHERE id = $1").bind(lot).execute(&db).await.unwrap();
+
+        assert!(claimed_plots(&db).await.unwrap().is_empty());
     }
 }

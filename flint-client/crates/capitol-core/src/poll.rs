@@ -35,11 +35,13 @@
 //! | a deposit or withdrawal answered | containers, currency |
 //! | a REST `move_item` answered | containers, and the open station's container |
 //! | `zone_changed` (mine, a real crossing) | plots |
+//! | `plot_claimed` (mine, not yet in my plots) | plots |
+//! | `terrain_updated` | terrain |
 //!
 //! **Plots are your own** (`/plots?owner=<you>`, P6.4), as React lists
 //! them since B7: placement tests against them and the map edges them in
 //! gold. Any other plot is one `/plots/at`, which the plot panel asks for.
-//! | `terrain_updated` | terrain |
+//! Everyone's claimed lots (`/plots/claimed`, B13) aren't fetched here.
 //!
 //! **One in flight per fetch.** Asking for something already queued does
 //! nothing. Asking for something already *in flight* marks it to be sent once
@@ -304,6 +306,17 @@ impl Poller {
             // The first zone (`from: None`) arrives with the snapshot, which fetches plots.
             StateEvent::ZoneChanged { from: Some(_), .. } => self.request(Fetch::Plots),
             StateEvent::TerrainUpdated => self.request(Fetch::Terrain),
+            // A claim of yours we didn't make through this client's REST
+            // (another client, say). A release of yours the store applies itself.
+            StateEvent::LotClaimed(lot)
+                if state.me() == Some(lot.owner_id)
+                    && !state
+                        .plots()
+                        .iter()
+                        .any(|p| p.terrain_id.as_deref() == Some(lot.terrain_id.as_str())) =>
+            {
+                self.request(Fetch::Plots)
+            }
             _ => {}
         }
     }

@@ -236,6 +236,14 @@ enum Start {
 
 /// Each row: where it starts, the events of one frame, and exactly what the
 /// next tick must send, in order.
+fn plot_claimed(owner_id: Uuid) -> M {
+    M::PlotClaimed {
+        terrain_id: "sub_2_0_3_L_4".into(),
+        owner_id,
+        claimed_at: "2026-10-17T18:30:00Z".parse().unwrap(),
+    }
+}
+
 fn rules() -> Vec<(&'static str, Start, Vec<NetEvent>, Vec<Fetch>)> {
     use Start::*;
     let (item_type, item_name, quantity, quality) = yielded();
@@ -493,6 +501,26 @@ fn rules() -> Vec<(&'static str, Start, Vec<NetEvent>, Vec<Fetch>)> {
             Settled,
             vec![NetEvent::Ws(M::TerrainUpdated)],
             vec![Fetch::Terrain],
+        ),
+        (
+            "my plot_claimed fetches plots",
+            Settled,
+            vec![NetEvent::Ws(plot_claimed(ME))],
+            vec![Fetch::Plots],
+        ),
+        (
+            "a stranger's plot_claimed fetches nothing",
+            Settled,
+            vec![NetEvent::Ws(plot_claimed(OTHER))],
+            vec![],
+        ),
+        (
+            "plot_released fetches nothing",
+            Settled,
+            vec![NetEvent::Ws(M::PlotReleased {
+                terrain_id: "sub_2_0_3_L_4".into(),
+            })],
+            vec![],
         ),
         (
             "positions fetch nothing",

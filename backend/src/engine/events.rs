@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -179,6 +180,15 @@ pub enum GameEvent {
     },
     /// Terrain was regenerated with new params (broadcast to all clients)
     TerrainUpdated,
+    // B13: Plot ownership (broadcast to all clients)
+    PlotClaimed {
+        terrain_id: String,
+        owner_id: Uuid,
+        claimed_at: DateTime<Utc>,
+    },
+    PlotReleased {
+        terrain_id: String,
+    },
 }
 
 /// Item in a trade offer (for events)

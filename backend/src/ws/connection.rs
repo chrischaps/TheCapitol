@@ -820,6 +820,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::TerrainUpdated;
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
+                    // B13: Plot ownership, to everyone
+                    Ok(GameEvent::PlotClaimed { terrain_id, owner_id, claimed_at }) => {
+                        let msg = ServerMessage::PlotClaimed { terrain_id, owner_id, claimed_at };
+                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                    }
+                    Ok(GameEvent::PlotReleased { terrain_id }) => {
+                        let msg = ServerMessage::PlotReleased { terrain_id };
+                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                    }
                     Err(_) => {
                         // Channel closed
                         break;

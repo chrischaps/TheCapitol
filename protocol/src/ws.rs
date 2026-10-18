@@ -8,6 +8,7 @@
 //! Many server events are broadcast to everyone, so a client must check
 //! `player_id` rather than assume an event is about itself.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -316,6 +317,20 @@ pub enum ServerMessage {
     /// The terrain was regenerated; refetch `GET /terrain`.
     #[serde(rename = "terrain_updated")]
     TerrainUpdated,
+    // B13: Plot ownership, broadcast to everyone
+    /// Someone bought the lot `terrain_id` (as in `/terrain` and
+    /// `GET /plots/claimed`). `claimed_at` is when, so a client can tell a
+    /// claim it is seeing happen from one it missed.
+    #[serde(rename = "plot_claimed")]
+    PlotClaimed {
+        terrain_id: String,
+        owner_id: Uuid,
+        claimed_at: DateTime<Utc>,
+    },
+    /// The lot `terrain_id` has no owner any more. Today only an admin terrain
+    /// commit with `force` releases plots; tax foreclosure will too (#131).
+    #[serde(rename = "plot_released")]
+    PlotReleased { terrain_id: String },
 }
 
 impl ServerMessage {
@@ -362,6 +377,8 @@ impl ServerMessage {
             ServerMessage::ZoneChanged { .. } => "zone_changed",
             ServerMessage::MovementBlocked { .. } => "movement_blocked",
             ServerMessage::TerrainUpdated => "terrain_updated",
+            ServerMessage::PlotClaimed { .. } => "plot_claimed",
+            ServerMessage::PlotReleased { .. } => "plot_released",
         }
     }
 }

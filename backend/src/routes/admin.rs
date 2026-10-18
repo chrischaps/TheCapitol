@@ -128,6 +128,12 @@ pub async fn commit_world_params(
             let _ = game.event_sender.send(GameEvent::StationRemoved { station_id: *station_id });
         }
     }
+    if !report.released.is_empty() {
+        let game = state.game.read().await;
+        for terrain_id in report.released {
+            let _ = game.event_sender.send(GameEvent::PlotReleased { terrain_id });
+        }
+    }
     tracing::info!(
         "Admin {} commit synced plots: {} added, {} updated, {} removed, {} owned released",
         user.account_id, report.inserted, report.updated, report.deleted,
