@@ -75,30 +75,33 @@ GDD §6.3 is followed literally:
 - `qᵢ` is the quantity-weighted mean quality of the units actually consumed for input `i`.
 - The formula is one pure function in `protocol::rules` (`quality::output`) that the server and client both call. That turns the client's "est." into an exact `[min, max]` range from the variance bounds, the same move `deposit_quote` made for the exchange fee (P7.2).
 
-### D2. Blending is free; the server never blends for you (E1.2) [decided 2026-10-18]
+### D2. Units keep their quality; a stack shows the mean (E1.2, E1.8) [decided 2026-10-18, revised the same day]
 
-**Quality is a fungible quantity, not a per-unit identity.** A stack is one row with one quality, the quantity-weighted mean. Merging two stacks of any grades averages them, as now. Nothing is hidden: 1 F unit dropped onto 99 A units makes 100 units at the mean. Averaging conserves total quality (less rounding down), and the E1.1 cascade is linear in it (`quality::Inputs::mean`), so blending is neutral for crafting.
+**Every unit keeps its own quality, whatever it's stacked with** (Chris, 2026-10-18). A stack *shows* the quantity-weighted mean, and any unit can always be taken back out at its own quality. Two fiber at 50 and two at 90 show as 70. Pull a 90 out and the 90 comes out as a 90, and the three left show 63 ((50+50+90)/3).
 
-**Blending to grade is a feature.** Markets price by grade, so quality above a cutoff is wasted, and a trader who blends surplus over the line earns from it, as in real grain and coffee markets. It's free: no extra loss when grades mix. Chris's call: "keep it free".
+**A stack is a count per quality.** Quality is a whole number from 0 to 100, and two units of a type at the same quality are interchangeable, so nothing is lost by counting them. That's at most 101 rows a stack, never a row per unit, and it's TDD §4.2's `ItemStack` view with exact buckets.
 
-**Who blends is the rule:**
-- A **manual** merge (a slot drop onto a same-type stack) blends freely across grades. It's the player's choice.
-- A merge the **server** makes unasked (extraction, craft output, foreclosure and take-down returns, exchange withdrawals) joins only a stack in the same grade band (`rules::quality_grade`) and the same min grade. Otherwise it takes the first empty slot, or refuses with "no room" as now. Your A stack is never diluted behind your back.
-- `rules::auto_stacks_with(a, b)` is that one rule, used by every server-side merge.
+```sql
+item_units (item_id → items ON DELETE CASCADE, quality SMALLINT 0..=100, count INTEGER > 0,
+            PRIMARY KEY (item_id, quality))
+```
 
-**`min_quality`**: each stack also carries the lowest quality that went into it. On a merge `min = min(a.min, b.min)`; a split keeps both values (you can't un-mix); fresh items start with `min = quality`. It's the blend made visible: buyers can tell a single-origin lot from a house blend and price it. E1.2 adds the column and keeps it true; E3 lets buy orders filter on it (D7).
+- `item_units` is the truth. `items.quantity`, `items.quality` (the mean, rounded down) and `items.min_quality` are cached summaries, kept in step by one writer. The frozen React and Love2D clients read them unchanged.
+- **Merging** unions the counts. Nothing is diluted, so any merge of the same type is safe: a drop, gathering, craft output, returns, withdrawals. E1.2's same-grade rule for server-side merges (`auto_stacks_with`) goes, and with it the one-output-slot problem (#191).
+- **Taking units out** names which. `split_stack`, trade offers and market escrow can name qualities ("my six 92s"). Otherwise the default pick applies: crafting takes the **best** units first, so what's in the input box makes the best output it can; everything else takes the **lowest** first. The craft range is computed from the units actually taken, on client and server alike.
+- **Showing it:** the pip and number are the mean. The tooltip gives the makeup ("6 × 92 A, 3 × 81 B, 1 × 44 D"), as a bar of grade colours when there are many. A stack that spans grades is marked (E1.2's ring).
+- **Blending to grade still exists, at the market.** D7's **average** buy order is filled by the mean of the units sold, so a trader can still put surplus quality over a grade line, while the units stay visible. **Every unit** is filled by their min. Crafting still averages its inputs (D1).
+- **Migration:** each existing stack becomes one unit row, `(quality, quantity)`. Stacks blended before E1.8 have lost their history and become uniform at their mean.
 
-`split_stack` gets added (WS and REST), and in Flint, shift-drag splits. The tooltip shows the grade and, when it differs, the min grade ("A, blended from D").
+**As built (E1.2), the first step,** and still in place until E1.8 replaces it:
+- `rules::stacking` (protocol): `Lot { quantity, quality, min_quality }`, `merge` (mean rounded down, lower min), `split`, `is_blended` and `auto_stacks_with` (same type, grade and min grade).
+- `items.min_quality` (migration `20261101_001`), backfilled to `quality`; a trigger fills it on inserts that don't name it and keeps it at or below `quality`.
+- Server-side merges go through `slot_moves::auto_stack` and `write_lot` and join only the same grade and min grade. A drop blends any grades. A trade's part-stack copies the min.
+- `split_stack` over WS and REST `POST /items/{id}/split`, into an empty slot of the same container (another container is #190).
+- `crafting_output` has one slot, so a craft of another grade is refused until it's emptied (#191; moot once E1.8 lands).
+- Flint: shift-drag opens a split count field at half; a blend's pip is ringed in the min grade's colour and its tooltip says "Blended from 41 D". A capture can't hold Shift for egui (#189).
 
-**As built (E1.2):**
-- `rules::stacking` (protocol) is the rule. `Lot { quantity, quality, min_quality }`: `merge` gives the mean rounded down (in i64) and the lower min, `split` keeps both, `is_blended` is "the min's grade isn't the grade". `auto_stacks_with(a_type, a, b_type, b)` is the same type, grade and min grade.
-- `items.min_quality` (migration `20261101_001`) is NOT NULL, backfilled to `quality`. A trigger fills it with `quality` on an insert that doesn't name it, so the dozen fresh-item inserts didn't change. It also lowers it to `quality` if a write leaves it above, which the mean never needs. Inserts that copy a stack (a split, a trade's part-stack) name it.
-- The backend's merges go through `slot_moves::auto_stack` (the first matching stack in slot order, locked) and `write_lot`: craft output, extraction, foreclosure and take-down returns, and the exchange withdraw. Withdrawn fiber is a fresh Q50 D, so it no longer joins a better fiber stack. The manual merge in `slot_moves::apply_move` blends as before and now keeps the lower min.
-- `split_stack` splits into an empty slot of the stack's own container only, over WS and REST `POST /items/{id}/split` (`SplitStackResponse` carries the new `SlotItem`). Splitting into another container is #190.
-- `crafting_output` has one slot. A craft whose output is another grade than the stack already there is refused ("output full") with its inputs kept. Flint's `craft::check` blocks it ahead of time whenever the range could land outside the stack's grade (#191).
-- Flint: `Move::split` sends `split_stack`. A shift-drag onto an empty slot of the same grid opens a count field at half (Enter or Split sends; Esc drops). A blend's pip is ringed in the min grade's colour, and its tooltip says "Blended from 41 D". The crafting panel's Clear (`craft::empty_into`) also only joins matching stacks. A capture can't hold Shift for egui (#189).
-
-The GDD's per-unit distributions (§6.1) were the alternative. They'd cost a row per unit and make every path pick units out of a distribution; average plus min gives the market both signals for one column.
+E1.8 ([#192](https://github.com/chrischaps/TheCapitol/issues/192)) replaces `Lot` with a `Units` multiset, adds `item_units`, makes every merge a union and every take a named pick, and keeps `split_stack`, the split field and `min_quality` (now derived).
 
 ### D3. Tools (E1.4–E1.6)
 
@@ -163,7 +166,7 @@ This keeps the liquidity of a single book while making the journey inward the lo
 
 ### D7. Market mechanics (E3.1–E3.3)
 
-- Orders are Buy or Sell, for an item type, with a quantity, a price per unit in Strands and, on a buy, a `min_grade` and a `grade_rule`: **average** (the stack's mean meets `min_grade`, blends welcome) or **every unit** (its `min_quality` does). See D2.
+- Orders are Buy or Sell, for an item type, with a quantity, a price per unit in Strands and, on a buy, a `min_grade` and a `grade_rule`: **average** (the mean of the units sold meets `min_grade`, blends welcome) or **every unit** (their min does). A sell order escrows the units it names, or the default pick. See D2.
 - **Escrow:**
   - A sell order moves its items into the market's escrow container.
   - A buy order debits `quantity × price` Strands into escrow.
@@ -258,7 +261,8 @@ Sizes: S is about one session, M is 1–2, L is 2–4.
 | E1.4 [#156](https://github.com/chrischaps/TheCapitol/issues/156) | **Hand tools (D3).** Durability, ToolType, tier, effective power and the wear curve in `rules`; best-tool selection; breakage with a notice. **As built:** `protocol/src/rules/tools.rs`: `ToolType` (sickle, axe, pickaxe, hammer, saw), `Tier` (stone, bronze, iron, steel), `quality_multiplier`, `effective_power`, `max_durability`, `retention`, and `best_tool` over `Tool`s by power × retention (ties to the first, a spent tool never). Migration `20261028_001` adds `item_types.tool_type`, `tier`, `base_power` and `max_durability` (all or none, and a tool can't stack) and `items.durability`. In content a tool is `tool = { tool_type, tier, base_power, max_durability }` on its item. The validator checks the type and tier, power and durability above 0, that tools don't stack, and that recipes make them one at a time. `models::ITEM_TYPE_COLUMNS` and `ITEM_COLUMNS` are now the one column list for every `SELECT`. `SlotItem` and `InventoryItem` carry `durability` and `max_durability` (omitted for non-tools, so older fixtures are unchanged), and `/catalog` item types carry `tool` (fixture and fallback recaptured). A crafted tool starts at `max_durability(base, q)` in a slot of its own. `engine::tools`: `best_tool(db, player, type)` looks only in the `player_inventory`; `wear(conn, item)` takes 1 and deletes the tool at 0, inside the caller's transaction; `announce_broken` sends `tool_broke {item_id, item_type, item_name}` (new message and fixture) and `inventory_updated`. Nothing wears a tool yet: E1.5 calls these. The Flint client toasts "Your Stone Sickle broke". The test tool is `stone_sickle` (power 6, 60 uses at Q50), from 2 rope and 4 fiber at a workbench, since there's no stone yet; E2.4 changes its recipe. Fixed on the way: unstackable items (kits as well as tools) no longer merge, in a slot move (they swap) or in the crafting output (a second one finds it full). `the_content_is_what_the_migrations_seeded` became `the_content_keeps_what_the_migrations_seeded`: the seeded rows come through the sync unchanged, and a second sync changes nothing. | L | E1.1 |
 | E1.5 [#157](https://github.com/chrischaps/TheCapitol/issues/157) | **Tools at work.** Extraction honours `required_tool`, and the tool's power sets yield and speed, its retention scales quality. Craft recipes take a tool term. **As built:** the tool comes from the player's inventory (`engine::tools::tool_for_node` and `tool_for_recipe`). REST and WS look it up before queueing, and it rides on `StartExtraction`, `StartCrafting` and `CraftAtStation`. Resources gained `tool_type` and `difficulty` (migration `20261029_001`). `required_tool` is now a tool type, not an item, and it implies `tool_type`. The validator checks both, and treats a gate as passable only once a tool of that type can be had. Grass is worked by a sickle at difficulty 6, so a Q50 stone sickle is leverage 1. The numbers are in `rules::tools` as `leverage` (power over difficulty, capped at 4), `tool_yield`, `tool_duration`, `max_damage` and `gathered_quality`. Yield is ×(1 + 0.5·leverage), rounded and never below the hand roll. Duration is ÷(1 + 0.25·leverage), so grass takes 30 ticks by hand and 24 with the stone sickle. Quality is `min(node, round(node × retention) − damage)`, with damage rolled in `0..=round(5 / leverage)` (at most 15). That follows GDD §6.2: a tool never beats the node, and a poor or worn one damages the yield. Hand gathering keeps its old node ± 5. So a sickle trades a little quality for half again the fiber, faster, rather than making better fiber. A recipe names its tool in `crafting_requirements = { tool_type }`, and it must give the tool a `quality_weights.tool` share, and only then (validated). Without the tool it refuses ("You need a hammer to make …"). The tool term is `term_quality`, quality × retention. Wear happens in the transaction that writes the result: `wear_held` wears the tool only while it's still in the player's inventory. A craft whose tool has left fails (`TOOL_MOVED`), and so does a gather that needs the tool. Any other gather falls back to what hands would have rolled. So `extraction_completed` is now sent after the item is written, like `crafting_completed`. Both carry an optional `tool: {item_id, item_type, durability, max_durability}` (`ws::ToolUse`; the `extraction_completed` fixture shows it), followed by `tool_broke` on its last use. `/catalog` resource types gained `tool_type` and `difficulty`, and recipes gained `tool_type`, all left out when unset (fixture and fallback recaptured). The station's own tool slot is E1.6, and showing the wear in Flint is E1.7. | M | E1.4 |
 | E1.6 [#158](https://github.com/chrischaps/TheCapitol/issues/158) | **Station tool slot.** Install and remove (WS), wear per craft, the tool term at that station. **As built:** migration `20261031_001` adds `stations.installed_tool` (item, `ON DELETE SET NULL`, unique) and `tool_owner`, and a trigger that deletes a still-installed tool when its station row is deleted any other way (a forced terrain commit, #141), so no tool is left loose. `engine::station_tools`: `install_tool` and `remove_tool` (WS `install_tool {station_id, item_id}` and `remove_tool {station_id}`, under `check_station_access`; storage stations refuse, one tool per slot, only a tool with uses left, only from your inventory). Each answers with a broadcast `station_tool_changed {station_id, tool}` plus `inventory_updated`, or `error`. `StationInfo` and `/stations/nearby` carry `tool: StationTool {item_id, item_type, quality, durability, max_durability, owner_id}` (left out when empty). `tool_for_station_recipe` picks the station's tool when its type matches, else your best (`HeldTool.station_id` says which). `finish_craft` wears it with `wear_installed`, which locks the station and wears only while the tool is still in the slot; one taken out mid-craft fails it (`STATION_TOOL_MOVED`). Its last use empties the slot, `tool_broke` goes to its owner, and `station_tool_changed` follows every craft that wore it. Taking the station down puts kit and tool in the owner's inventory (two free slots, or it refuses). Foreclosure returns the tool to whoever installed it, or the station owner, after the kits; one with no room is lost with the station. Flint keeps `station.tool` up to date; showing it is E1.7. | M | E1.3, E1.4 |
-| E1.7 [#159](https://github.com/chrischaps/TheCapitol/issues/159) | **Flint: quality you can read.** Grade and durability on slots and tooltips, the crafting panel's exact range with what drives it (inputs, station, tool), and the station panel's tool slot. | M | E1.2, E1.5, E1.6 |
+| E1.7 [#159](https://github.com/chrischaps/TheCapitol/issues/159) | **Flint: quality you can read.** Grade and durability on slots and tooltips, the crafting panel's exact range with what drives it (inputs, station, tool), and the station panel's tool slot. | M | E1.5, E1.6, E1.8 |
+| E1.8 [#192](https://github.com/chrischaps/TheCapitol/issues/192) | **Units keep their quality (D2, revised).** `item_units` (a count per quality) under every stack; the cached mean, min and quantity; merges union, takes name their units (best first for crafting, lowest first otherwise); `split_stack` and trade offers by quality; Flint shows the makeup. Replaces E1.2's averaging; makes #191 moot. | L | E1.2 |
 
 ### E2: Content depth
 
@@ -298,7 +302,7 @@ Sizes: S is about one session, M is 1–2, L is 2–4.
 ## 7. Dependency graph and estimate
 
 ```
-Quality and tools   E1.1 ─┬─ E1.2 ──────────────────────────── E3.1 ─ E3.2 ─ E3.3 ─┬─ E3.4 ─┐
+Quality and tools   E1.1 ─┬─ E1.2 ─ E1.8 ───────────────────── E3.1 ─ E3.2 ─ E3.3 ─┬─ E3.4 ─┐
                           ├─ E1.3 ─┬─ E1.6 ─┬─ E1.7                                ├─ E3.5 ─┴─ E3.7
                           └─ E1.4 ─┴─ E1.5 ─┘                                      │    └─ E3.6
                                       │                                            ├─ E3.9
@@ -319,7 +323,7 @@ Health              E0.1   E0.2   E0.4   E0.5   E0.7   E0.6 ─┬─ E0.8
 | E4 | 5–8 |
 | **Total** | **about 45–66** |
 
-E0 and E1 can run in parallel worktrees from the start. E2.1 and E1.2 are the first decision points for Chris (E1.2 decided 2026-10-18: see D2).
+E0 and E1 can run in parallel worktrees from the start. E2.1 and E1.2 are the first decision points for Chris (E1.2 decided 2026-10-18, and revised the same day into E1.8: see D2).
 
 ## 8. Later (outside this plan, but planned for)
 
