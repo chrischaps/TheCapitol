@@ -18,6 +18,7 @@ use crate::state::AppState;
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/nearby", get(get_nearby))
+        .route("/nodes", get(get_all_nodes))
         .route("/extract", post(start_extraction))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
@@ -74,6 +75,28 @@ pub async fn get_nearby(
         .collect();
 
     Ok(Json(NearbyResponse { nodes }))
+}
+
+/// Every resource node in the world, wherever the player is (E2.5). The
+/// Flint client draws the woods and outcrops from it, so they stand on the
+/// horizon rather than appearing as you walk; the nearby list and the
+/// WebSocket keep the states near you current. About a thousand nodes on the
+/// default world, fetched once a session.
+#[utoipa::path(
+    get,
+    path = "/world/nodes",
+    responses(
+        (status = 200, description = "Every resource node", body = NearbyResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "World"
+)]
+pub async fn get_all_nodes(State(state): State<AppState>) -> Json<NearbyResponse> {
+    let game = state.game.read().await;
+    let mut nodes: Vec<ResourceNodeInfo> =
+        game.resource_nodes.values().map(ResourceNodeInfo::from).collect();
+    nodes.sort_by_key(|n| n.id);
+    Json(NearbyResponse { nodes })
 }
 
 /// Start extracting from a resource node

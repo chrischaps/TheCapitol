@@ -1,0 +1,54 @@
+# Sawdust and chips off a tree or a bough being worked (E2.5). Spawned by
+# `nodes/mod.rs` as a `particle_effect` on a node while it has its own
+# entity; its `emission_scale` is 1 while someone works it, a burst of 4
+# as it's taken, and 0 otherwise. In world space, so a falling tree leaves
+# its dust where it fell.
+
+name = "gather_wood"
+
+[[emitters]]
+name = "sawdust"
+emission_rate = 26.0
+max_particles = 96
+lifetime = [0.45, 0.8]
+speed = [1.0, 2.2]
+direction = [0, 0.7, 1]
+spread = 75.0
+gravity = [0, -7.5, 0]
+damping = 0.6
+world_space = true
+blend_mode = "alpha"
+lighting = 0.85
+shape_offset = [0, 0.9, 0]
+size = { start = [0.035, 0.035], end = [0.02, 0.02] }
+size_scale = [0.7, 1.4]
+color = { keys = [ { t = 0.0, v = [0.86, 0.72, 0.5, 1.0] }, { t = 0.8, v = [0.74, 0.6, 0.4, 0.9] }, { t = 1.0, v = [0.6, 0.5, 0.34, 0.0] } ] }
+brightness = [0.85, 1.15]
+angular_velocity = [-360, 360]
+
+[emitters.shape]
+kind = "sphere"
+radius = 0.2
+
+[[emitters]]
+name = "chips"
+emission_rate = 6.0
+max_particles = 24
+lifetime = [0.6, 0.9]
+speed = [1.6, 2.8]
+direction = [0, 1, 0]
+spread = 60.0
+gravity = [0, -9.8, 0]
+world_space = true
+blend_mode = "alpha"
+lighting = 1.0
+shape_offset = [0, 0.8, 0]
+size = { start = [0.07, 0.04], end = [0.07, 0.04] }
+size_scale = [0.7, 1.3]
+color = { keys = [ { t = 0.0, v = [0.9, 0.78, 0.56, 1.0] }, { t = 0.85, v = [0.82, 0.68, 0.46, 1.0] }, { t = 1.0, v = [0.82, 0.68, 0.46, 0.0] } ] }
+rotation = [0, 360]
+angular_velocity = [-540, 540]
+
+[emitters.shape]
+kind = "sphere"
+radius = 0.15

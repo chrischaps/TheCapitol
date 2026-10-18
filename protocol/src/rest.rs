@@ -400,11 +400,11 @@ impl NearbyQuery {
     }
 }
 
-/// `GET /world/nearby`
+/// `GET /world/nearby`, and `GET /world/nodes` with every node
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct NearbyResponse {
-    /// Resource nodes within range of the player
+    /// Resource nodes within range of the player (or all of them)
     pub nodes: Vec<ResourceNodeInfo>,
 }
 

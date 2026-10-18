@@ -184,6 +184,10 @@ pub struct NodeMark {
     pub id: String,
     /// Where it stands, world metres (X, Z).
     pub at: [f32; 2],
+    /// Its model (`nodes::models::Kind::name`): "grass", "tree", ...
+    pub kind: &'static str,
+    /// The radius of the ring round it, metres: clear of a trunk or a rock.
+    pub r: f32,
     /// "available", "harvesting" or "depleted".
     pub state: &'static str,
     /// You're walking to it to extract, or have asked to.
@@ -465,8 +469,12 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         m.insert("first".into(), b.first.into());
         m.into()
     });
-    // `cap_nodes() -> [#{ id, x, z, state, targeted, mine, progress }]`:
-    // the resource nodes shown, at ground level in world metres. `state` is
+    // `cap_nodes() -> [#{ id, kind, x, z, r, state, targeted, mine, progress }]`:
+    // the resource nodes someone is working or you're aiming at, at ground
+    // level in world metres. Only those: the store holds every node in the
+    // world (E2.5), and a script loop over a thousand would cost the frame.
+    // `kind` is the model ("grass", "tree", "branches", "outcrop", "vein",
+    // "clay", "other"), `r` the radius of the ring round it. `state` is
     // "available", "harvesting" or "depleted"; `progress` is 0 to 1 while
     // someone extracts, otherwise ().
     let nodes = shared.nodes.clone();
@@ -474,7 +482,11 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         let Ok(nodes) = nodes.lock() else {
             return rhai::Array::new();
         };
-        nodes.iter().map(|n| node_map(n).into()).collect()
+        nodes
+            .iter()
+            .filter(|n| n.targeted || n.progress.is_some())
+            .map(|n| node_map(n).into())
+            .collect()
     });
     // `cap_stations() -> [#{ id, kind, x, z, radius, in_reach, reach }]`:
     // the stations shown, in world metres. `in_reach` is whether you're
@@ -630,8 +642,10 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
 fn node_map(n: &NodeMark) -> rhai::Map {
     let mut m = rhai::Map::new();
     m.insert("id".into(), n.id.clone().into());
+    m.insert("kind".into(), n.kind.into());
     m.insert("x".into(), (n.at[0] as f64).into());
     m.insert("z".into(), (n.at[1] as f64).into());
+    m.insert("r".into(), (n.r as f64).into());
     m.insert("state".into(), n.state.into());
     m.insert("targeted".into(), n.targeted.into());
     m.insert("mine".into(), n.mine.into());
@@ -699,12 +713,13 @@ fn station_map(s: &StationMark) -> rhai::Map {
     m
 }
 
-/// The node nearest (x, z), within [`NODE_PICK`].
+/// The node nearest (x, z), within [`NODE_PICK`] or just inside its ring,
+/// whichever is wider: a click on a boulder's flank takes the boulder.
 pub fn node_at(nodes: &[NodeMark], x: f32, z: f32) -> Option<&NodeMark> {
     nodes
         .iter()
         .map(|n| (n, (n.at[0] - x).hypot(n.at[1] - z)))
-        .filter(|(_, d)| *d <= NODE_PICK)
+        .filter(|(n, d)| *d <= NODE_PICK.max(n.r + 0.3))
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(n, _)| n)
 }
@@ -835,6 +850,8 @@ mod tests {
         let mark = |id: &str, x: f32| NodeMark {
             id: id.into(),
             at: [x, 0.0],
+            kind: "grass",
+            r: 1.15,
             state: "available",
             targeted: false,
             mine: false,
@@ -849,7 +866,12 @@ mod tests {
         assert_eq!(picked, "b");
         assert_eq!(shared.extract.lock().unwrap().as_deref(), Some("b"));
         assert!(engine.eval::<()>("cap_node_at(9.0, 9.0)").is_ok());
-        let p: bool = engine.eval("cap_nodes()[0].progress == ()").unwrap();
+        // Nobody's working or aiming at either, so the scripts aren't given them.
+        assert_eq!(engine.eval::<i64>("cap_nodes().len()").unwrap(), 0);
+        shared.nodes.lock().unwrap()[1].targeted = true;
+        let p: bool = engine
+            .eval(r#"let n = cap_nodes()[0]; n.progress == () && n.kind == "grass" && n.r > 1.0"#)
+            .unwrap();
         assert!(p);
     }
 

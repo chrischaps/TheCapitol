@@ -140,6 +140,12 @@ fn name_height() { 2.25 }
 fn craft_lift() { 30.0 }
 // The ring round a tuft being worked, and the sight round your target (m).
 fn work_ring() { 1.15 }
+// A ring sized to the node: a tuft's own, or clear of a trunk, a boulder or
+// a bank (its `r`, E2.5), never tighter than `base`.
+fn node_ring(n, base) {
+    if n.r == () { return base; }
+    if n.r > base { n.r } else { base }
+}
 // How strongly a hovered station's ring shows when it's out of reach.
 fn hover_reach() { 0.4 }
 fn sight_ring() { 1.0 }
@@ -267,7 +273,8 @@ fn on_event(name, data) {
                 len: random_range(5.0, 10.0),
             });
         }
-        cuttings.push(#{ x: data.x, z: data.z, born: t, bits: bits });
+        let colour = if data.r == () { [0.42, 0.64, 0.47] } else { [data.r, data.g, data.b] };
+        cuttings.push(#{ x: data.x, z: data.z, born: t, bits: bits, colour: colour });
         return;
     }
     if name == "node_regenerated" {
@@ -572,7 +579,7 @@ fn arc(cx, cz, y, r, a0, a1, c, alpha, width) {
 fn draw_sight(n, now) {
     let y = cap_mark_y();
     let c = gold();
-    let r = sight_ring() * (1.0 + 0.06 * (now * 3.0).sin());
+    let r = node_ring(n, sight_ring()) * (1.0 + 0.06 * (now * 3.0).sin());
     let spin = now * 0.9;
     for k in 0..4 {
         let a = spin + k.to_float() * 0.5 * PI();
@@ -586,7 +593,7 @@ fn draw_sight(n, now) {
 fn draw_reticle_on(n, now) {
     let y = cap_mark_y();
     let c = gold();
-    let r = sight_ring() * (1.0 + 0.04 * (now * 2.4).sin());
+    let r = node_ring(n, sight_ring()) * (1.0 + 0.04 * (now * 2.4).sin());
     ring(n.x, n.z, y, r, c, 0.7, 1.5, 44);
     ring(n.x, n.z, y, r * 1.3, c, 0.2, 1.0, 52);
 }
@@ -596,7 +603,7 @@ fn draw_reticle_on(n, now) {
 // else's, with a bead at the leading edge.
 fn draw_work(n, now) {
     let y = cap_mark_y();
-    let r = work_ring();
+    let r = node_ring(n, work_ring());
     let c = if n.mine { gold() } else { [0.66, 0.84, 0.69] };
     let w = if n.mine { 3.0 } else { 2.0 };
     let a = if n.mine { 1.0 } else { 0.7 };
@@ -662,11 +669,12 @@ fn draw_twinkle(cx, cy, size, age, a) {
     }
 }
 
-// A tuft cut down: bits of blade flung up and out, turning as they fall.
+// A node taken: bits flung up and out, turning as they fall. Blades of a
+// tuft, chips of wood or stone, clods of clay, in its kind's colour.
 fn draw_cutting(c, now) {
     let age = now - c.born;
     let k = age / cutting_life();
-    let green = [0.42, 0.64, 0.47];
+    let green = c.colour;
     for b in c.bits {
         let t = age * 0.9;
         let y = cap_ground_y() + 0.3 + b.vy * t - 4.9 * t * t;

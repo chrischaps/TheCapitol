@@ -50,6 +50,8 @@ pub enum RestRequest {
 
     /// `GET /world/nearby`
     WorldNearby(NearbyQuery),
+    /// `GET /world/nodes`: every node in the world (E2.5)
+    WorldNodes,
     /// `POST /world/extract`
     Extract(ExtractRequest),
 
@@ -134,6 +136,8 @@ pub enum RestResponse {
     Inventory(InventoryResponse),
     Currency(CurrencyResponse),
     Nearby(NearbyResponse),
+    /// `/world/nodes`: the whole list, so it replaces what the store holds.
+    AllNodes(NearbyResponse),
     Extract(ExtractResponse),
     Containers(ContainersResponse),
     MoveItem(MoveItemResponse),
@@ -231,6 +235,7 @@ impl RestRequest {
             | PlayerInventory
             | PlayerCurrency
             | WorldNearby(_)
+            | WorldNodes
             | Containers
             | Recipes
             | Catalog
@@ -263,6 +268,7 @@ impl RestRequest {
             PlayerInventory => "/player/inventory".into(),
             PlayerCurrency => "/player/currency".into(),
             WorldNearby(_) => "/world/nearby".into(),
+            WorldNodes => "/world/nodes".into(),
             Extract(_) => "/world/extract".into(),
             Containers => "/inventory/containers".into(),
             MoveItem(_) => "/inventory/move".into(),
@@ -339,6 +345,7 @@ impl RestRequest {
             Q::PlayerInventory => A::Inventory(de(body)?),
             Q::PlayerCurrency => A::Currency(de(body)?),
             Q::WorldNearby(_) => A::Nearby(de(body)?),
+            Q::WorldNodes => A::AllNodes(de(body)?),
             Q::Extract(_) => A::Extract(de(body)?),
             Q::Containers => A::Containers(de(body)?),
             Q::MoveItem(_) => A::MoveItem(de(body)?),

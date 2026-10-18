@@ -78,11 +78,12 @@ const LOT_MARGIN: f64 = 2.0;
 const LOT_SOFT: f64 = 8.0;
 /// Past a canal's kerb.
 const WATER_SOFT: f64 = 8.0;
-/// A node's clearing: bare out to this radius, then soft. A tuft and its
-/// mound are about 0.5 m across (`nodes.rs`), so this leaves a ring of
-/// short ground round it.
-const NODE_CLEAR: f64 = 16.0;
-const NODE_SOFT: f64 = 14.0;
+/// A tuft's clearing: bare out to this radius, then soft. A tuft and its
+/// mound are about 0.5 m across (`nodes::models`), so this leaves a ring of
+/// short ground round it. Every other kind has its own
+/// (`nodes::models::Kind::clearing`, E2.5).
+pub const NODE_CLEAR: f64 = 16.0;
+pub const NODE_SOFT: f64 = 14.0;
 
 fn smoothstep(lo: f64, hi: f64, x: f64) -> f32 {
     let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
@@ -239,25 +240,27 @@ impl Mask {
         });
     }
 
-    /// The texels a node's clearing round `c` can touch.
-    fn node_window(&self, c: P) -> Option<Window> {
-        self.window_near(c, c, NODE_CLEAR + self.slack() + NODE_SOFT)
+    /// The texels the clearing of node `n` can touch.
+    fn node_window(&self, n: Node) -> Option<Window> {
+        let c = node_at(n);
+        self.window_near(c, c, n[2] as f64 + self.slack() + n[3] as f64)
     }
 
-    /// Clears a node's disc round `c`.
+    /// Clears a tuft's disc round `c`.
     #[cfg(test)]
     fn clear_node(&mut self, c: P) {
         let mut texels = std::mem::take(&mut self.texels);
-        self.clear_node_in(&mut texels, self.all(), c);
+        let n = [c[0] as i64, c[1] as i64, NODE_CLEAR as i64, NODE_SOFT as i64];
+        self.clear_node_in(&mut texels, self.all(), n);
         self.texels = texels;
     }
 
-    /// Clears a node's disc round `c` from `texels`, this mask's window
-    /// `win`.
-    fn clear_node_in(&self, texels: &mut [u8], win: Window, c: P) {
-        let bare = NODE_CLEAR + self.slack();
-        self.clear_near_in(texels, win, c, c, bare + NODE_SOFT, |p| {
-            smoothstep(bare, bare + NODE_SOFT, (p[0] - c[0]).hypot(p[1] - c[1]))
+    /// Clears node `n`'s disc from `texels`, this mask's window `win`.
+    fn clear_node_in(&self, texels: &mut [u8], win: Window, n: Node) {
+        let c = node_at(n);
+        let (bare, soft) = (n[2] as f64 + self.slack(), n[3] as f64);
+        self.clear_near_in(texels, win, c, c, bare + soft, |p| {
+            smoothstep(bare, bare + soft, (p[0] - c[0]).hypot(p[1] - c[1]))
         });
     }
 
@@ -278,17 +281,21 @@ struct Window {
     h: usize,
 }
 
-fn node_at([x, y]: [i64; 2]) -> P {
+/// A node's clearing, in server units: where it stands, then how far it's
+/// bare and how far soft past that. Whole units, so the sets compare.
+type Node = [i64; 4];
+
+fn node_at([x, y, ..]: Node) -> P {
     [x as f64, y as f64]
 }
 
 /// The whole mask the engine is given: the terrain's part, `base`, with a
 /// clearing round each of `nodes`.
-fn with_nodes(base: &Mask, nodes: &[[i64; 2]]) -> Mask {
+fn with_nodes(base: &Mask, nodes: &[Node]) -> Mask {
     let mut mask = base.clone();
     let mut texels = std::mem::take(&mut mask.texels);
     for &n in nodes {
-        mask.clear_node_in(&mut texels, mask.all(), node_at(n));
+        mask.clear_node_in(&mut texels, mask.all(), n);
     }
     mask.texels = texels;
     mask
@@ -299,15 +306,15 @@ fn with_nodes(base: &Mask, nodes: &[[i64; 2]]) -> Mask {
 /// worked out again from `base` and the nodes of `new` near it. Each window
 /// comes out as [`with_nodes`] would paint it, so the mask stays exactly
 /// that whatever order the nodes came in.
-fn patches(base: &Mask, old: &[[i64; 2]], new: &[[i64; 2]]) -> Vec<(Window, Vec<u8>)> {
+fn patches(base: &Mask, old: &[Node], new: &[Node]) -> Vec<(Window, Vec<u8>)> {
     let gone = old.iter().filter(|n| new.binary_search(n).is_err());
     let came = new.iter().filter(|n| old.binary_search(n).is_err());
     gone.chain(came)
-        .filter_map(|&n| base.node_window(node_at(n)))
+        .filter_map(|&n| base.node_window(n))
         .map(|win| {
             let mut texels = base.cut(win);
             for &n in new {
-                base.clear_node_in(&mut texels, win, node_at(n));
+                base.clear_node_in(&mut texels, win, n);
             }
             (win, texels)
         })
@@ -536,9 +543,9 @@ pub struct Grass {
     /// The terrain's part, `None` before the first terrain.
     base: Option<Mask>,
     /// The nodes whose clearings are wanted, in server units, sorted.
-    nodes: Vec<[i64; 2]>,
+    nodes: Vec<Node>,
     /// The nodes in the mask the engine has, or `None` to upload again.
-    painted: Option<Vec<[i64; 2]>>,
+    painted: Option<Vec<Node>>,
     wind: Option<Wind>,
 }
 
@@ -555,10 +562,14 @@ impl Grass {
         );
     }
 
-    /// The nodes the server has shown us, in server units.
-    pub fn nodes(&mut self, at: impl Iterator<Item = P>) {
-        let mut nodes: Vec<[i64; 2]> = at
-            .map(|p| [p[0].round() as i64, p[1].round() as i64])
+    /// The nodes the server has shown us, in server units, each with its
+    /// clearing: how far it's bare, then how far soft.
+    pub fn nodes(&mut self, at: impl Iterator<Item = (P, (f64, f64))>) {
+        let mut nodes: Vec<Node> = at
+            .map(|(p, (bare, soft))| {
+                let r = |v: f64| v.round() as i64;
+                [r(p[0]), r(p[1]), r(bare), r(soft)]
+            })
             .collect();
         nodes.sort_unstable();
         nodes.dedup();
@@ -791,22 +802,27 @@ mod tests {
             })
             .find(|&p| base.value_at(p) > 200)
             .expect("a full spot");
-        let at = |dx: i64, dy: i64| [c[0] as i64 + dx, c[1] as i64 + dy];
+        let tuft = [NODE_CLEAR as i64, NODE_SOFT as i64];
+        let at = |dx: i64, dy: i64| [c[0] as i64 + dx, c[1] as i64 + dy, tuft[0], tuft[1]];
+        // A tree's wide soft shade.
+        let tree = |dx: i64, dy: i64| [c[0] as i64 + dx, c[1] as i64 + dy, 14, 26];
         // Overlapping clearings, one on the mask's corner (its window
         // clipped) and one off the mask altogether.
         let corner = [
             (CENTER_X - 4000.0) as i64 + 5,
             (CENTER_Y - 4000.0) as i64 + 5,
+            tuft[0],
+            tuft[1],
         ];
-        let sorted = |mut v: Vec<[i64; 2]>| {
+        let sorted = |mut v: Vec<Node>| {
             v.sort_unstable();
             v
         };
         let sets = [
-            sorted(vec![at(0, 0), at(20, 0), [-1_000_000, 0]]),
-            sorted(vec![at(20, 0), at(10, 12), at(-25, 5), corner]),
+            sorted(vec![at(0, 0), at(20, 0), [-1_000_000, 0, 16, 14]]),
+            sorted(vec![at(20, 0), at(10, 12), tree(-25, 5), corner]),
             vec![],
-            sorted(vec![at(0, 0), at(3, -2), corner]),
+            sorted(vec![at(0, 0), tree(3, -2), corner]),
         ];
         let mut live = with_nodes(base, &sets[0]);
         for pair in sets.windows(2) {

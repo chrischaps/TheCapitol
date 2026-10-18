@@ -26,7 +26,7 @@
 //!
 //! | Trigger | Fetch |
 //! |---|---|
-//! | first `Connected`, every `Resync` | me (name, position, currency), containers, nearby nodes, nearby stations, plots, the catalog (recipes among it), everyone's claimed lots |
+//! | first `Connected`, every `Resync` | me (name, position, currency), containers, nearby nodes, every node, nearby stations, plots, the catalog (recipes among it), everyone's claimed lots |
 //! | every 5 s while connected | nearby nodes, nearby stations, plots |
 //! | `inventory_updated` (mine, or a container I hold) | containers, or the open station's container |
 //! | `station_opened` (mine) | that station's container |
@@ -38,7 +38,7 @@
 //! | `zone_changed` (mine, a real crossing) | plots |
 //! | `plot_claimed` (mine, not yet in my plots) | plots |
 //! | `plot_claimed` or `plot_released` while the claimed lots are in flight | claimed lots, again |
-//! | `terrain_updated` | terrain |
+//! | `terrain_updated` | terrain, and every node (a regenerate re-plans them) |
 //! | `/health` reports a catalog version the store doesn't have | the catalog |
 //!
 //! **Plots are your own** (`/plots?owner=<you>`, P6.4), as React lists
@@ -92,6 +92,10 @@ pub enum Fetch {
     StationContainer { station_id: Uuid },
     /// `GET /world/nearby`
     NearbyNodes,
+    /// `GET /world/nodes`: every node, so the woods stand on the horizon
+    /// (E2.5). Fetched with the snapshot, never polled; the nearby poll and
+    /// the WebSocket keep the states near you current.
+    AllNodes,
     /// `GET /stations/nearby`
     NearbyStations,
     /// `GET /plots?owner=<you>&limit=100`
@@ -108,10 +112,11 @@ impl Fetch {
     /// Everything the server doesn't push, refetched on connect and resync.
     /// `Me` comes first and carries the balance, which `currency_changed`
     /// keeps current from then on.
-    pub const SNAPSHOT: [Fetch; 7] = [
+    pub const SNAPSHOT: [Fetch; 8] = [
         Fetch::Me,
         Fetch::Containers,
         Fetch::NearbyNodes,
+        Fetch::AllNodes,
         Fetch::NearbyStations,
         Fetch::Plots,
         Fetch::Catalog,
@@ -133,6 +138,7 @@ impl Fetch {
             Fetch::NearbyNodes => RestRequest::WorldNearby(NearbyQuery {
                 radius: Some(NEARBY_NODE_RANGE_MAX),
             }),
+            Fetch::AllNodes => RestRequest::WorldNodes,
             Fetch::NearbyStations => RestRequest::NearbyStations,
             Fetch::Plots => RestRequest::ListPlots(ListPlotsQuery {
                 owner: me,
@@ -306,7 +312,10 @@ impl Poller {
             StateEvent::Trade(TradeEvent::Executed { .. }) => self.request(Fetch::Containers),
             // The first zone (`from: None`) arrives with the snapshot, which fetches plots.
             StateEvent::ZoneChanged { from: Some(_), .. } => self.request(Fetch::Plots),
-            StateEvent::TerrainUpdated => self.request(Fetch::Terrain),
+            StateEvent::TerrainUpdated => {
+                self.request(Fetch::Terrain);
+                self.request(Fetch::AllNodes);
+            }
             StateEvent::CatalogStale => self.request(Fetch::Catalog),
             // A claim of yours we didn't make through this client's REST
             // (another client, say). A release of yours the store applies itself.

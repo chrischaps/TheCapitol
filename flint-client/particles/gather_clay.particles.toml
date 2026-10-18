@@ -1,0 +1,29 @@
+# Clods thrown off a clay bank being dug (E2.5), as `gather_wood` is for
+# wood: 1 while worked, a burst of 4 as it's dug out. Heavy, wet and dark,
+# they don't fly far.
+
+name = "gather_clay"
+
+[[emitters]]
+name = "clods"
+emission_rate = 9.0
+max_particles = 40
+lifetime = [0.45, 0.7]
+speed = [1.2, 2.2]
+direction = [0, 1, 0]
+spread = 55.0
+gravity = [0, -9.8, 0]
+world_space = true
+blend_mode = "alpha"
+lighting = 1.0
+shape_offset = [0, 0.3, 0]
+size = { start = [0.08, 0.07], end = [0.07, 0.06] }
+size_scale = [0.6, 1.4]
+color = { keys = [ { t = 0.0, v = [0.5, 0.33, 0.22, 1.0] }, { t = 0.85, v = [0.44, 0.29, 0.19, 1.0] }, { t = 1.0, v = [0.44, 0.29, 0.19, 0.0] } ] }
+brightness = [0.8, 1.15]
+rotation = [0, 360]
+angular_velocity = [-360, 360]
+
+[emitters.shape]
+kind = "sphere"
+radius = 0.4

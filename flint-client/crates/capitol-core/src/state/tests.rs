@@ -1648,7 +1648,7 @@ fn resync_drops_what_the_server_dropped() {
 }
 
 #[test]
-fn after_resync_nearby_answers_replace() {
+fn after_resync_the_stations_answer_replaces_and_the_whole_node_list_does() {
     let mut state = connected();
     let gone_node = Uuid::from_u128(13);
     state.apply_rest(&R::Nearby(NearbyResponse {
@@ -1664,18 +1664,19 @@ fn after_resync_nearby_answers_replace() {
         stations: vec![station(STATION, ME)],
     }));
     assert_eq!(events, vec![StateEvent::StationRemoved(CHEST)]);
+    // A nearby answer only merges, even after a resync: dropping the far
+    // nodes would empty the woods on the horizon until the whole list came.
     let events = state.apply_rest(&R::Nearby(NearbyResponse {
         nodes: vec![node(NODE, "depleted")],
     }));
-    assert_eq!(
-        events,
-        vec![
-            StateEvent::NodeRemoved(gone_node),
-            StateEvent::NodeChanged(NODE)
-        ]
-    );
+    assert_eq!(events, vec![StateEvent::NodeChanged(NODE)]);
+    assert!(state.node(gone_node).is_some());
 
-    // Only the first answer after a resync replaces; later ones merge again.
+    // The whole list replaces, whenever it comes (E2.5).
+    let events = state.apply_rest(&R::AllNodes(NearbyResponse {
+        nodes: vec![node(NODE, "depleted")],
+    }));
+    assert_eq!(events, vec![StateEvent::NodeRemoved(gone_node)]);
     let events = state.apply_rest(&R::Nearby(NearbyResponse { nodes: vec![] }));
     assert!(events.is_empty());
     assert!(state.node(NODE).is_some());

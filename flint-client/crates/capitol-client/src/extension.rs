@@ -18,7 +18,7 @@ use crate::atmosphere::Atmosphere;
 use crate::daylight::{self, PlotGlow};
 use crate::entities::Players;
 use crate::juice_sample::JuiceSample;
-use crate::nodes::Nodes;
+use crate::nodes::{self, Nodes};
 use crate::script_api::{
     self, PlacementMark, PlotMark, Shared, TradeMark, UiAnchor, ZoneBanner,
 };
@@ -44,6 +44,7 @@ use capitol_core::onboarding::Did;
 use capitol_core::plot::Offer;
 use capitol_core::protocol::rules::{water_name, STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
 use capitol_core::protocol::terrain::TerrainResponse;
+use capitol_core::state::Activity;
 use capitol_core::station::{Note as PlaceNote, Phase as PlacePhase};
 use flint_player::{ExtensionCtx, PlayerExtension};
 use std::collections::HashMap;
@@ -85,6 +86,10 @@ pub struct CapitolExtension {
     /// Offline, one of every station, placed once the camera settles
     /// (`--station-sample`).
     station_sample: Option<Option<capitol_core::state::GameState>>,
+    /// `--node-sample`: offline, every kind of node, laid out round where
+    /// the camera first looks once it's there.
+    node_sample: bool,
+    node_sampled: Option<nodes::sample::Sample>,
     /// The grass fields over the rural ring and the wilderness (P8.6c).
     grass: world::grass::Grass,
     plot_panel: ui::plot::PlotPanel,
@@ -153,6 +158,8 @@ impl CapitolExtension {
             houses: world::houses::Houses::default(),
             claim_sample: None,
             station_sample: None,
+            node_sample: false,
+            node_sampled: None,
             grass: world::grass::Grass::default(),
             plot_panel: ui::plot::PlotPanel::default(),
             atmosphere: Atmosphere::default(),
@@ -233,6 +240,13 @@ impl CapitolExtension {
         if self.session.is_none() && on {
             self.station_sample = Some(None);
         }
+        self
+    }
+
+    /// Offline, scatter every kind of node round the camera and take some
+    /// through a day's work (`--node-sample`).
+    pub fn with_node_sample(mut self, on: bool) -> Self {
+        self.node_sample = on && self.session.is_none();
         self
     }
 
@@ -445,16 +459,30 @@ impl PlayerExtension for CapitolExtension {
                 *shared = banner;
             }
             let target = session.harvest_target();
-            for c in self
-                .nodes
-                .update(ctx, session.state(), target, dt, &self.shared)
-            {
-                let [x, z] = c.at;
-                let mut data = toml::Table::new();
-                data.insert("x".into(), (x as f64).into());
-                data.insert("z".into(), (z as f64).into());
-                ctx.fire_event(c.name, data);
-            }
+            let state = session.state();
+            let work = |id| {
+                let player = state.harvester(id)?;
+                match state.activity(player) {
+                    Some(Activity::Extracting {
+                        progress, duration, ..
+                    }) => Some(nodes::Work {
+                        player,
+                        progress: *progress,
+                        duration: *duration,
+                    }),
+                    _ => None,
+                }
+            };
+            let changes = self.nodes.update(
+                ctx,
+                state.nodes(),
+                &work,
+                state.me(),
+                target,
+                dt,
+                &self.shared,
+            );
+            fire_node_changes(ctx, changes);
             let placed = session.take_placed();
             let me = self.shared.follow.lock().ok().and_then(|f| *f);
             self.stations
@@ -493,6 +521,28 @@ impl PlayerExtension for CapitolExtension {
                 self.stations
                     .update(ctx, state, None, &none, dt, &self.shared);
             }
+        }
+        if self.session.is_none() && self.node_sample && ctx.clock.total_time > 0.5 {
+            // Offline, every kind of node round where the camera looks
+            // half a second in (`--node-sample`), once a `--view` or a
+            // `--camera-path` has put it there.
+            let dt = ctx.clock.delta_time.min(0.1) as f32;
+            let t = ctx.camera.target;
+            let sample = self
+                .node_sampled
+                .get_or_insert_with(|| nodes::sample::Sample::new(crate::coords::to_server(t.x, t.z)));
+            sample.update(dt);
+            let sample = &*sample;
+            let changes = self.nodes.update(
+                ctx,
+                sample.nodes(),
+                &|id| sample.work(id),
+                None,
+                None,
+                dt,
+                &self.shared,
+            );
+            fire_node_changes(ctx, changes);
         }
         self.shared
             .at_login
@@ -573,10 +623,18 @@ impl PlayerExtension for CapitolExtension {
         // So do the fires in the forges and kilns.
         self.stations
             .fires(ctx.world, crate::stations::fire_light(glow));
-        // The grass, cleared round every node the server has shown us.
-        if let Some(session) = &self.session {
-            let nodes = session.state().nodes().values();
-            self.grass.nodes(nodes.map(|n| [n.x, n.y]));
+        // The grass, cleared round every node the server has shown us, as
+        // wide as its kind needs.
+        let shown = match (&self.session, &self.node_sampled) {
+            (Some(session), _) => Some(session.state().nodes()),
+            (None, Some(sample)) => Some(sample.nodes()),
+            (None, None) => None,
+        };
+        if let Some(shown) = shown {
+            self.grass.nodes(shown.values().map(|n| {
+                let kind = nodes::models::Kind::of(&n.resource_type);
+                ([n.x, n.y], kind.clearing())
+            }));
         }
         if let Some(gpu) = ctx.gpu.as_mut() {
             self.grass.flush(gpu, ctx.world);
@@ -1213,6 +1271,24 @@ fn offer_preset(
         "trade: --trade-offer put {} stacks and {strands} Strands in",
         stacks.len()
     );
+}
+
+/// Tells the scripts a node was taken (`node_depleted`) or grew back
+/// (`node_regenerated`), with its place (`x`, `z`), its model (`kind`) and
+/// the colour of the bits it throws (`r`, `g`, `b`, sRGB 0 to 1).
+fn fire_node_changes(ctx: &mut ExtensionCtx, changes: Vec<nodes::Changed>) {
+    for c in changes {
+        let [x, z] = c.at;
+        let [r, g, b] = c.kind.bits();
+        let mut data = toml::Table::new();
+        data.insert("x".into(), (x as f64).into());
+        data.insert("z".into(), (z as f64).into());
+        data.insert("kind".into(), c.kind.name().into());
+        data.insert("r".into(), (r as f64).into());
+        data.insert("g".into(), (g as f64).into());
+        data.insert("b".into(), (b as f64).into());
+        ctx.fire_event(c.name, data);
+    }
 }
 
 /// Resource nodes (P4.4): send the extraction a script asked for

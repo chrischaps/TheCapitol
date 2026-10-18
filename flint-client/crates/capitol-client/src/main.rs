@@ -176,6 +176,11 @@ struct Args {
     /// For captures
     #[arg(long, requires = "offline")]
     station_sample: bool,
+    /// Offline, scatter every kind of resource node round where the camera
+    /// first looks, and take every other one through being worked, taken
+    /// and growing back on a loop (E2.5). For captures
+    #[arg(long, requires = "offline")]
+    node_sample: bool,
 }
 
 /// A time of day for `--time-of-day`: 0 to 1, 1 being midnight again.
@@ -290,6 +295,7 @@ fn main() -> Result<()> {
         .with_time_of_day(args.time_of_day)
         .with_claim_sample(args.claim_sample, args.grow_at)
         .with_station_sample(args.station_sample)
+        .with_node_sample(args.node_sample)
         .with_trade_offer(args.trade_offer.as_deref())
         .with_settings(
             settings::SettingsFile::load(

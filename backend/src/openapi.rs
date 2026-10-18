@@ -89,6 +89,7 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         crate::routes::player::mock_subscribe,
         // World
         crate::routes::world::get_nearby,
+        crate::routes::world::get_all_nodes,
         crate::routes::world::start_extraction,
         // Inventory
         crate::routes::inventory::get_containers,

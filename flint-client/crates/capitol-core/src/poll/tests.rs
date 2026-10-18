@@ -175,6 +175,7 @@ fn answer_for(fetch: Fetch) -> RestResponse {
             })
         }
         Fetch::NearbyNodes => RestResponse::Nearby(NearbyResponse { nodes: vec![] }),
+        Fetch::AllNodes => RestResponse::AllNodes(NearbyResponse { nodes: vec![] }),
         Fetch::NearbyStations => {
             RestResponse::NearbyStations(NearbyStationsResponse { stations: vec![] })
         }
@@ -491,10 +492,10 @@ fn rules() -> Vec<(&'static str, Start, Vec<NetEvent>, Vec<Fetch>)> {
             vec![],
         ),
         (
-            "terrain_updated fetches terrain",
+            "terrain_updated fetches terrain, and every node again",
             Settled,
             vec![NetEvent::Ws(M::TerrainUpdated)],
-            vec![Fetch::Terrain],
+            vec![Fetch::Terrain, Fetch::AllNodes],
         ),
         (
             "my plot_claimed fetches plots",

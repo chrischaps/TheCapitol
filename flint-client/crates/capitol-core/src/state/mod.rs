@@ -292,8 +292,9 @@ pub struct GameState {
     nodes: HashMap<Uuid, ResourceNodeInfo>,
     stations: HashMap<Uuid, StationInfo>,
     /// Set by a reconnect: the next nearby response replaces rather than merges,
-    /// which drops whatever was removed while the client was away.
-    nodes_stale: bool,
+    /// which drops whatever was removed while the client was away. Nodes
+    /// need no flag: the whole list (`/world/nodes`) always replaces, and
+    /// the nearby one only ever merges.
     stations_stale: bool,
 
     containers: HashMap<Uuid, Container>,
@@ -340,7 +341,6 @@ impl GameState {
             zone: None,
             nodes: HashMap::new(),
             stations: HashMap::new(),
-            nodes_stale: false,
             stations_stale: false,
             containers: HashMap::new(),
             open_station: None,
@@ -405,7 +405,6 @@ impl GameState {
             self.station_container = None;
             out.push(StateEvent::StationClosed);
         }
-        self.nodes_stale = true;
         self.stations_stale = true;
         out.push(StateEvent::SnapshotStale);
         out
@@ -794,7 +793,8 @@ impl GameState {
                     self.learn_zone(&mut out);
                 }
             }
-            R::Nearby(nearby) => self.merge_nodes(&nearby.nodes, &mut out),
+            R::Nearby(nearby) => self.merge_nodes(&nearby.nodes, false, &mut out),
+            R::AllNodes(all) => self.merge_nodes(&all.nodes, true, &mut out),
             R::NearbyStations(nearby) => self.merge_stations(&nearby.stations, &mut out),
             R::PlaceStation(placed) => self.upsert_station(placed.station.clone(), &mut out),
             R::Containers(response) => {
@@ -1240,8 +1240,12 @@ impl GameState {
         }
     }
 
-    fn merge_nodes(&mut self, nodes: &[ResourceNodeInfo], out: &mut Vec<StateEvent>) {
-        let replace = std::mem::take(&mut self.nodes_stale);
+    fn merge_nodes(
+        &mut self,
+        nodes: &[ResourceNodeInfo],
+        replace: bool,
+        out: &mut Vec<StateEvent>,
+    ) {
         let diff = merge(
             &mut self.nodes,
             nodes.iter().map(|n| (n.id, n.clone())),
