@@ -9,23 +9,24 @@ use axum::{
 };
 use chrono::Utc;
 use jsonwebtoken::{encode, Header, EncodingKey};
-use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use capitol_protocol::rest::{
-    AuthResponse, LoginRequest, LogoutRequest, RegisterRequest, SuccessResponse,
+    AuthResponse, LoginRequest, LogoutRequest, RefreshRequest, RegisterRequest, SuccessResponse,
 };
 use capitol_protocol::rules::{SPAWN_SCATTER, SPAWN_X, SPAWN_Y};
 
 use crate::error::AppError;
 use crate::models::AccountInfo;
+use crate::sessions::{self, Refused, RotateError, LEGACY_TTL_SECS};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/register", post(register))
         .route("/login", post(login))
+        .route("/refresh", post(refresh))
         .route("/logout", post(logout))
 }
 
@@ -35,6 +36,10 @@ pub struct Claims {
     pub tier: String,
     pub is_admin: bool,
     pub exp: usize,
+    /// The session this token belongs to (`sessions`). Tokens from before
+    /// E0.6 have none, and no session matches them.
+    #[serde(default)]
+    pub sid: String,
 }
 
 /// Register a new account
@@ -134,24 +139,15 @@ pub async fn register(
     .execute(&state.db)
     .await?;
 
-    // Generate JWT (new accounts are not admin by default)
-    let token = generate_token(&state, account_id, "free", false)?;
-
-    // Store session in Redis
-    let mut redis = state.redis.clone();
-    let session_key = format!("session:{}", account_id);
-    redis.set_ex::<_, _, ()>(&session_key, &token, 86400).await?;
-
-    Ok(Json(AuthResponse {
-        token,
-        account: AccountInfo {
-            id: account_id,
-            email: req.email,
-            tier: "free".into(),
-            is_admin: false,
-        },
-        player_id,
-    }))
+    // New accounts are not admin by default
+    let account = AccountInfo {
+        id: account_id,
+        email: req.email,
+        tier: "free".into(),
+        is_admin: false,
+    };
+    let auth = start_session(&state, account, player_id, req.refresh).await?;
+    Ok(Json(auth))
 }
 
 /// Login to an existing account
@@ -201,20 +197,87 @@ pub async fn login(
     .fetch_one(&state.db)
     .await?;
 
-    // Generate JWT
-    let token = generate_token(&state, account.id, &account.tier, account.is_admin)?;
-
-    // Store session in Redis
-    let mut redis = state.redis.clone();
-    let session_key = format!("session:{}", account.id);
-    redis.set_ex::<_, _, ()>(&session_key, &token, 86400).await?;
+    let auth = start_session(&state, account.into(), player_id, req.refresh).await?;
 
     // This login replaced any older session, so close that session's socket (#78)
     state.game.write().await.end_session(player_id);
 
+    Ok(Json(auth))
+}
+
+/// Starts the account's one session, replacing any it had, and issues its
+/// tokens: a short access token and a refresh token when `refresh`, else a
+/// legacy 24 h access token.
+async fn start_session(
+    state: &AppState,
+    account: AccountInfo,
+    player_id: Uuid,
+    refresh: bool,
+) -> Result<AuthResponse, AppError> {
+    let mut redis = state.redis.clone();
+    let refresh_ttl = refresh.then_some(state.config.refresh_ttl_secs);
+    let started = sessions::start(&mut redis, account.id, refresh_ttl).await?;
+    let expires_in = if refresh { state.config.access_ttl_secs } else { LEGACY_TTL_SECS };
+    let token = generate_token(state, &account, &started.sid, expires_in)?;
+    Ok(AuthResponse {
+        token,
+        expires_in,
+        refresh_token: started.refresh_token,
+        account,
+        player_id,
+    })
+}
+
+/// Swap a refresh token for a new access token and the next refresh token
+#[utoipa::path(
+    post,
+    path = "/auth/refresh",
+    request_body(content = RefreshRequest, description = "The session's current refresh token", content_type = "application/json"),
+    responses(
+        (status = 200, description = "A new token pair", body = AuthResponse),
+        (status = 401, description = "Unknown or expired refresh token, an ended session, or a reused token (which revokes the session)")
+    ),
+    tag = "Authentication"
+)]
+pub async fn refresh(
+    State(state): State<AppState>,
+    Json(req): Json<RefreshRequest>,
+) -> Result<Json<AuthResponse>, AppError> {
+    let mut redis = state.redis.clone();
+    let rotated = match sessions::rotate(&mut redis, &req.refresh_token, state.config.refresh_ttl_secs).await {
+        Ok(rotated) => rotated,
+        Err(RotateError::Redis(e)) => return Err(e.into()),
+        Err(RotateError::Refused(why)) => {
+            if let Refused::Reused { account_id } = why {
+                // Someone else holds a copy, so the socket goes too.
+                tracing::warn!("Refresh token reused for account {}; revoking its session", account_id);
+                end_player_session(&state, account_id).await?;
+            }
+            return Err(AppError::Unauthorized(why.to_string()));
+        }
+    };
+
+    // Read the account again, so a changed tier or admin flag reaches the token.
+    let account = sqlx::query_as::<_, crate::models::Account>(
+        "SELECT id, email, password_hash, tier, is_admin, created_at, last_login FROM accounts WHERE id = $1"
+    )
+    .bind(rotated.account_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::Unauthorized("Account not found".into()))?;
+    let player_id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM players WHERE account_id = $1 LIMIT 1")
+        .bind(account.id)
+        .fetch_one(&state.db)
+        .await?;
+
+    let account: AccountInfo = account.into();
+    let expires_in = state.config.access_ttl_secs;
+    let token = generate_token(&state, &account, &rotated.sid, expires_in)?;
     Ok(Json(AuthResponse {
         token,
-        account: account.into(),
+        expires_in,
+        refresh_token: Some(rotated.refresh_token),
+        account,
         player_id,
     }))
 }
@@ -223,7 +286,7 @@ pub async fn login(
 #[utoipa::path(
     post,
     path = "/auth/logout",
-    request_body(content = LogoutRequest, description = "Token to invalidate", content_type = "application/json"),
+    request_body(content = LogoutRequest, description = "The access or refresh token of the session to end", content_type = "application/json"),
     responses(
         (status = 200, description = "Logout successful")
     ),
@@ -233,41 +296,58 @@ pub async fn logout(
     State(state): State<AppState>,
     Json(req): Json<LogoutRequest>,
 ) -> Result<Json<SuccessResponse>, AppError> {
-    // Decode token to get account_id
-    let token_data = jsonwebtoken::decode::<Claims>(
-        &req.token,
-        &jsonwebtoken::DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
-        &jsonwebtoken::Validation::default(),
-    )?;
-
-    // Remove session from Redis
     let mut redis = state.redis.clone();
-    let session_key = format!("session:{}", token_data.claims.sub);
-    redis.del::<_, ()>(&session_key).await?;
+    let ended = match (&req.token, &req.refresh_token) {
+        (Some(token), _) => {
+            // An expired token can still log out; its signature must hold.
+            let mut validation = jsonwebtoken::Validation::default();
+            validation.validate_exp = false;
+            let claims = jsonwebtoken::decode::<Claims>(
+                token,
+                &jsonwebtoken::DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+                &validation,
+            )?
+            .claims;
+            sessions::end(&mut redis, claims.sub, &claims.sid)
+                .await?
+                .then_some(claims.sub)
+        }
+        (None, Some(refresh_token)) => sessions::end_by_refresh(&mut redis, refresh_token).await?,
+        (None, None) => return Err(AppError::BadRequest("Give a token or a refresh_token".into())),
+    };
 
     // The session is gone, so its socket goes too (#78)
-    let player_id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM players WHERE account_id = $1 LIMIT 1")
-        .bind(token_data.claims.sub)
-        .fetch_optional(&state.db)
-        .await?;
-    if let Some(player_id) = player_id {
-        state.game.write().await.end_session(player_id);
+    if let Some(account_id) = ended {
+        end_player_session(&state, account_id).await?;
     }
 
     Ok(Json(SuccessResponse::ok()))
 }
 
-fn generate_token(state: &AppState, account_id: Uuid, tier: &str, is_admin: bool) -> Result<String, AppError> {
+/// Closes the account's player's socket, its session having ended.
+async fn end_player_session(state: &AppState, account_id: Uuid) -> Result<(), AppError> {
+    let player_id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM players WHERE account_id = $1 LIMIT 1")
+        .bind(account_id)
+        .fetch_optional(&state.db)
+        .await?;
+    if let Some(player_id) = player_id {
+        state.game.write().await.end_session(player_id);
+    }
+    Ok(())
+}
+
+fn generate_token(state: &AppState, account: &AccountInfo, sid: &str, ttl_secs: u64) -> Result<String, AppError> {
     let expiration = chrono::Utc::now()
-        .checked_add_signed(chrono::Duration::hours(24))
+        .checked_add_signed(chrono::Duration::seconds(ttl_secs as i64))
         .expect("valid timestamp")
         .timestamp() as usize;
 
     let claims = Claims {
-        sub: account_id,
-        tier: tier.to_string(),
-        is_admin,
+        sub: account.id,
+        tier: account.tier.clone(),
+        is_admin: account.is_admin,
         exp: expiration,
+        sid: sid.to_owned(),
     };
 
     encode(

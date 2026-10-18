@@ -15,7 +15,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use capitol_core::net::*;
-use capitol_core::protocol::rest::{AccountInfo, AuthResponse, LoginRequest, RecipesResponse};
+use capitol_core::protocol::rest::{
+    AccountInfo, AuthResponse, LoginRequest, RecipesResponse, RefreshRequest,
+};
 use capitol_core::protocol::ws::{ClientMessage, PlayerPosition, ServerMessage};
 use uuid::Uuid;
 
@@ -52,6 +54,8 @@ struct Mock {
     log: Arc<Mutex<Vec<String>>>,
     /// WebSocket connections accepted so far.
     connections: Arc<AtomicUsize>,
+    /// Refreshes granted so far. The good refresh token is `r{n + 1}`.
+    refreshes: Arc<AtomicUsize>,
 }
 
 impl Mock {
@@ -60,9 +64,11 @@ impl Mock {
             scenario,
             log: Arc::default(),
             connections: Arc::default(),
+            refreshes: Arc::default(),
         };
         let app = Router::new()
             .route("/auth/login", post(login))
+            .route("/auth/refresh", post(refresh))
             .route("/recipes", get(recipes))
             .route("/terrain", get(terrain))
             .route(
@@ -118,9 +124,35 @@ async fn login(Json(req): Json<LoginRequest>) -> Response {
     }
     Json(AuthResponse {
         token: GOOD_TOKEN.into(),
+        expires_in: 0,
+        refresh_token: None,
         account: AccountInfo {
             id: Uuid::nil(),
             email: req.email,
+            tier: "free".into(),
+            is_admin: false,
+        },
+        player_id: PLAYER,
+    })
+    .into_response()
+}
+
+/// Like the backend's (E0.6): each refresh token works once, and is swapped
+/// for `GOOD_TOKEN`, good for an hour, and the next refresh token.
+async fn refresh(State(mock): State<Mock>, Json(req): Json<RefreshRequest>) -> Response {
+    let granted = mock.refreshes.load(Ordering::SeqCst);
+    if req.refresh_token != format!("r{}", granted + 1) {
+        let body = serde_json::json!({ "error": "Invalid refresh token" });
+        return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
+    }
+    mock.refreshes.fetch_add(1, Ordering::SeqCst);
+    Json(AuthResponse {
+        token: GOOD_TOKEN.into(),
+        expires_in: 3600,
+        refresh_token: Some(format!("r{}", granted + 2)),
+        account: AccountInfo {
+            id: Uuid::nil(),
+            email: "t@example.com".into(),
             tier: "free".into(),
             is_admin: false,
         },
@@ -211,7 +243,14 @@ async fn serve_socket(mut socket: WebSocket, mock: Mock) {
                 return;
             }
             Ok(ClientMessage::Auth { token }) if token == GOOD_TOKEN => {
-                send(&mut socket, &ServerMessage::AuthOk { player_id: PLAYER, server_time_ms: 0 }).await;
+                send(
+                    &mut socket,
+                    &ServerMessage::AuthOk {
+                        player_id: PLAYER,
+                        server_time_ms: 0,
+                    },
+                )
+                .await;
             }
             Ok(ClientMessage::Auth { .. }) => {
                 send(
@@ -567,6 +606,7 @@ fn rest_login_and_errors() {
         RestRequest::Login(LoginRequest {
             email: "t@example.com".into(),
             password: password.into(),
+            refresh: false,
         })
     };
     net.rest(login("pw"), 1);
@@ -736,8 +776,10 @@ fn a_get_on_a_dead_pooled_connection_is_sent_again() {
     assert_eq!(requests.load(Ordering::SeqCst), 3);
 
     // A POST isn't repeated: the server may have acted on it.
-    let logout =
-        RestRequest::Logout(capitol_core::protocol::rest::LogoutRequest { token: "t".into() });
+    let logout = RestRequest::Logout(capitol_core::protocol::rest::LogoutRequest {
+        token: Some("t".into()),
+        refresh_token: None,
+    });
     assert!(matches!(call(logout, 3), Err(RestError::Transport(_))));
     assert_eq!(requests.load(Ordering::SeqCst), 4);
 }
@@ -910,4 +952,89 @@ fn disconnect_during_backoff_stops_retrying() {
         }]
     );
     assert_quiet(&net, Duration::from_millis(200));
+}
+
+fn is_refreshed(event: &NetEvent) -> bool {
+    matches!(event, NetEvent::Refreshed { .. })
+}
+
+#[test]
+fn a_401_refreshes_the_token_and_sends_the_request_again() {
+    let (mock, addr) = Mock::start(Scenario::Normal);
+    let net = Net::spawn(config(addr)).unwrap();
+    net.connect(Credentials {
+        token: Some("expired".into()),
+        refresh_token: Some("r1".into()),
+        expires_in: None,
+    });
+    net.rest(RestRequest::Recipes, 1);
+    let events = wait_for(&net, "the recipes", |e| matches!(e, NetEvent::Rest(1, _)));
+    assert!(
+        matches!(
+            events.last(),
+            Some(NetEvent::Rest(1, Ok(RestResponse::Recipes(_))))
+        ),
+        "{events:#?}"
+    );
+    assert!(events.contains(&NetEvent::Refreshed {
+        refresh_token: "r2".into()
+    }));
+    // The socket got a fresh token too, since it asks the keyring each time.
+    wait_for(&net, "Connected", is_connected);
+    // One refresh between them: the socket's and the request's didn't both
+    // spend `r1`.
+    assert_eq!(mock.refreshes.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_token_is_refreshed_before_it_expires() {
+    let (mock, addr) = Mock::start(Scenario::Normal);
+    let net = Net::spawn(config(addr)).unwrap();
+    net.connect(Credentials {
+        token: Some(GOOD_TOKEN.into()),
+        refresh_token: Some("r1".into()),
+        expires_in: Some(Duration::from_secs(1)),
+    });
+    let started = Instant::now();
+    wait_for(&net, "a refresh", is_refreshed);
+    assert!(
+        started.elapsed() >= Duration::from_millis(700),
+        "refreshed too soon: {:?}",
+        started.elapsed()
+    );
+    // The new token is good for an hour, so that's the only one.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(mock.refreshes.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_resumed_session_refreshes_before_it_connects() {
+    let (mock, addr) = Mock::start(Scenario::Normal);
+    let net = Net::spawn(config(addr)).unwrap();
+    net.connect(Credentials::resume("r1"));
+    let events = wait_for(&net, "Connected", is_connected);
+    assert!(events.iter().any(is_refreshed), "{events:#?}");
+    assert!(mock.received().contains(&ClientMessage::Auth {
+        token: GOOD_TOKEN.into()
+    }));
+}
+
+#[test]
+fn a_refused_refresh_token_ends_the_session_with_the_servers_reason() {
+    let (_mock, addr) = Mock::start(Scenario::Normal);
+    let net = Net::spawn(config(addr)).unwrap();
+    net.connect(Credentials::resume("spent"));
+    let events = wait_for(&net, "AuthFailed", |e| {
+        matches!(e, NetEvent::Connection(ConnectionState::AuthFailed { .. }))
+    });
+    assert_eq!(
+        events.last(),
+        Some(&NetEvent::Connection(ConnectionState::AuthFailed {
+            message: "Invalid refresh token".into()
+        }))
+    );
+    // And a request made with no token left gets the server's 401.
+    net.rest(RestRequest::Recipes, 1);
+    let events = wait_for(&net, "the recipes", |e| matches!(e, NetEvent::Rest(1, _)));
+    assert!(matches!(events.last(), Some(NetEvent::Rest(1, Err(e))) if e.is_unauthorized()));
 }

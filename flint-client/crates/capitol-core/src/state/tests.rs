@@ -1171,6 +1171,8 @@ fn login_sets_the_local_player() {
     let mut state = GameState::new();
     state.apply_rest(&R::Auth(AuthResponse {
         token: "t".into(),
+        expires_in: 900,
+        refresh_token: None,
         account: AccountInfo {
             id: Uuid::from_u128(3),
             email: "a@b.c".into(),

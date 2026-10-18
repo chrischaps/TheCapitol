@@ -161,6 +161,7 @@ fn register_login_connect_and_move() {
             email: email.clone(),
             password: password.clone(),
             player_name: format!("Net{}", stamp % 100_000),
+            refresh: false,
         }),
         1,
     ) {
@@ -173,6 +174,7 @@ fn register_login_connect_and_move() {
         email: email.clone(),
         password: password.clone(),
         player_name: "Dup".into(),
+        refresh: false,
     });
     assert_eq!(
         rest(&net, again, 2).unwrap_err(),
@@ -185,12 +187,17 @@ fn register_login_connect_and_move() {
     let wrong = RestRequest::Login(LoginRequest {
         email: email.clone(),
         password: "nope".into(),
+        refresh: false,
     });
     assert!(rest(&net, wrong, 3).unwrap_err().is_unauthorized());
 
     let auth = match rest(
         &net,
-        RestRequest::Login(LoginRequest { email, password }),
+        RestRequest::Login(LoginRequest {
+            email,
+            password,
+            refresh: false,
+        }),
         4,
     ) {
         Ok(RestResponse::Auth(auth)) => auth,
@@ -264,7 +271,10 @@ fn register_login_connect_and_move() {
     );
 
     net.rest(
-        RestRequest::Logout(capitol_core::protocol::rest::LogoutRequest { token: auth.token }),
+        RestRequest::Logout(capitol_core::protocol::rest::LogoutRequest {
+            token: Some(auth.token),
+            refresh_token: None,
+        }),
         7,
     );
     net.disconnect();
@@ -336,6 +346,7 @@ fn the_store_mirrors_a_real_session() {
             email: format!("flint-state-{stamp}@test.local"),
             password: "correct horse battery staple".into(),
             player_name: name.clone(),
+            refresh: false,
         }),
         1,
     ) {
@@ -439,6 +450,7 @@ fn the_prediction_agrees_with_a_real_walk() {
             email: format!("flint-motion-{stamp}@test.local"),
             password: "correct horse battery staple".into(),
             player_name: format!("Walker{}", stamp % 100_000),
+            refresh: false,
         }),
         1,
     ) {
@@ -560,6 +572,7 @@ impl Mirror {
                 email: format!("flint-{label}-{stamp}@test.local"),
                 password: "correct horse battery staple".into(),
                 player_name: format!("{label}{}", stamp % 100_000),
+                refresh: false,
             }),
             1,
         ) {
@@ -913,7 +926,10 @@ fn the_login_form_signs_in_out_and_back() {
         |a| a.phase() == Phase::InWorld,
     );
     assert_eq!(remembered.email.as_deref(), Some(email.as_str()));
-    let token = remembered.token.clone().expect("the token is remembered");
+    let token = remembered
+        .refresh_token
+        .clone()
+        .expect("the session is remembered");
 
     // Registering it again: taken. (A second Auth, signed out.)
     let other = self::net();
@@ -926,7 +942,8 @@ fn the_login_form_signs_in_out_and_back() {
     assert_eq!(second.notice(), Some(&Notice::EmailTaken));
     drop(other);
 
-    // The next run: the stored token goes straight in, no form.
+    // The next run: the stored session goes straight in, no form. Its
+    // refresh token is swapped for the next, and that one is kept.
     drop(net);
     let net = self::net();
     let (mut auth, effects) = Auth::new(remembered.clone(), 10);
@@ -938,6 +955,11 @@ fn the_login_form_signs_in_out_and_back() {
         &mut remembered,
         "the world again",
         |a| a.phase() == Phase::InWorld,
+    );
+    let rotated = remembered.refresh_token.clone();
+    assert!(
+        rotated.is_some() && rotated.as_ref() != Some(&token),
+        "{rotated:?}"
     );
 
     // Sign out: the email stays, the token goes. Then a wrong password on
@@ -951,7 +973,7 @@ fn the_login_form_signs_in_out_and_back() {
         "signed out",
         |a| a.phase() == Phase::SignedOut,
     );
-    assert_eq!(remembered.token, None);
+    assert_eq!(remembered.refresh_token, None);
     assert_eq!(remembered.email.as_deref(), Some(email.as_str()));
     let effects = auth.log_in(&email, "not the password");
     drive_auth(&net, &mut auth, effects, &mut remembered, "a 401", |a| {
@@ -959,11 +981,11 @@ fn the_login_form_signs_in_out_and_back() {
     });
     assert_eq!(auth.notice(), Some(&Notice::WrongPassword));
 
-    // The old token is refused once the logout lands, which sends the form
-    // back with a notice.
+    // The first refresh token is spent, and its session has ended: it's
+    // refused, which sends the form back with a notice.
     let stale = Remembered {
         email: Some(email.clone()),
-        token: Some(token),
+        refresh_token: Some(token),
     };
     let mut kept = stale.clone();
     let (mut auth, effects) = Auth::new(stale, 10);
@@ -976,5 +998,5 @@ fn the_login_form_signs_in_out_and_back() {
         |a| a.phase() == Phase::SignedOut,
     );
     assert!(matches!(auth.notice(), Some(Notice::SessionEnded { .. })));
-    assert_eq!(kept.token, None);
+    assert_eq!(kept.refresh_token, None);
 }

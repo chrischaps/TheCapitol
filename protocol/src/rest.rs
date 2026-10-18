@@ -40,6 +40,9 @@ pub struct RegisterRequest {
     pub password: String,
     /// Display name for the player character
     pub player_name: String,
+    /// Ask for a short access token and a refresh token, as [`LoginRequest::refresh`]
+    #[serde(default)]
+    pub refresh: bool,
 }
 
 /// `POST /auth/login`
@@ -50,22 +53,47 @@ pub struct LoginRequest {
     pub email: String,
     /// Account password
     pub password: String,
+    /// Ask for a short access token (`ACCESS_TTL_SECS`, 15 min by default)
+    /// and a refresh token to renew it with (E0.6). Without it, a 24 h access
+    /// token and no refresh token, as the React and Love2D clients expect.
+    #[serde(default)]
+    pub refresh: bool,
 }
 
-/// `POST /auth/logout`; responds with [`SuccessResponse`]
+/// `POST /auth/refresh`; responds with a new [`AuthResponse`] pair. The
+/// refresh token can be used once: a second use revokes its whole family.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
-pub struct LogoutRequest {
-    /// JWT token to invalidate
-    pub token: String,
+pub struct RefreshRequest {
+    pub refresh_token: String,
 }
 
-/// Response to register and login
+/// `POST /auth/logout`; responds with [`SuccessResponse`]. Give either token;
+/// an expired access token still logs out.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct LogoutRequest {
+    /// JWT access token of the session to end
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// Refresh token of the session to end
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+}
+
+/// Response to register, login and refresh
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct AuthResponse {
     /// JWT token for authentication
     pub token: String,
+    /// Seconds until `token` expires
+    #[serde(default)]
+    pub expires_in: u64,
+    /// Opaque, single-use token for `POST /auth/refresh`; only when the
+    /// login asked for one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
     /// Account information
     pub account: AccountInfo,
     /// Player character ID

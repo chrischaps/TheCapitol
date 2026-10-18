@@ -4,11 +4,16 @@
 //! [`Auth`] does no IO and never reads the clock. The game feeds it every
 //! [`NetEvent`] and calls [`Auth::tick`] once per frame, and carries out the
 //! [`Effect`]s it returns: REST calls, connecting the WebSocket, and writing
-//! the remembered email and token to disk.
+//! the remembered email and refresh token to disk.
 //!
-//! - **A stored token is tried first.** [`Auth::new`] connects with it at
-//!   once. The server rejecting it (expired after 24 h, or replaced by a
-//!   login elsewhere) returns to the form with a [`Notice`] and forgets it.
+//! - **A stored session is tried first.** The login asks for a refresh token
+//!   (E0.6), and that's what's kept. [`Auth::new`] connects with it at once,
+//!   and the IO thread swaps it for an access token. The server refusing it
+//!   (unused for 30 days, or replaced by a login elsewhere) returns to the
+//!   form with a [`Notice`] and forgets it.
+//! - **Refreshes are the IO thread's.** It keeps the access token fresh and
+//!   retries a 401 once with a new one. Each refresh rotates the refresh
+//!   token, and [`NetEvent::Refreshed`] brings the new one here to keep.
 //! - **A login never registers.** A mistyped password is a
 //!   [`Notice::WrongPassword`], never a new account. Registering is its own
 //!   form.
@@ -28,7 +33,7 @@ use std::time::{Duration, Instant};
 use capitol_protocol::rest::LogoutRequest;
 
 use crate::bot::Account;
-use crate::net::{ConnectionState, NetEvent, RestError, RestRequest, Tag};
+use crate::net::{ConnectionState, Credentials, NetEvent, RestError, RestRequest, Tag};
 use crate::signin::{Failure, SignIn, Step};
 
 /// How often to ask whether the server is up, while signed out.
@@ -49,8 +54,8 @@ pub const PASSWORD_MIN: usize = 8;
 pub struct Remembered {
     /// The last email that signed in, to fill the form with.
     pub email: Option<String>,
-    /// That session's token, tried before the form is shown.
-    pub token: Option<String>,
+    /// That session's refresh token, tried before the form is shown.
+    pub refresh_token: Option<String>,
 }
 
 /// Where the player is on the way in.
@@ -60,8 +65,8 @@ pub enum Phase {
     SignedOut,
     /// A login or register is waiting on the server.
     SigningIn { registering: bool },
-    /// Signed in, and the WebSocket is opening. `resumed` when the token is
-    /// the stored one from an earlier run.
+    /// Signed in, and the WebSocket is opening. `resumed` when the session
+    /// is the stored one from an earlier run.
     Entering { resumed: bool },
     /// Connected at least once. If the connection drops it comes back on its
     /// own (P2.2); only the server rejecting the token ends it.
@@ -72,8 +77,8 @@ pub enum Phase {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     Rest(RestRequest, Tag),
-    /// `Net::connect` with this token.
-    Connect(String),
+    /// `Net::connect` with these.
+    Connect(Credentials),
     /// `Net::disconnect`.
     Disconnect,
     /// Write this to disk, replacing what was there.
@@ -147,13 +152,14 @@ pub struct Auth {
 }
 
 impl Auth {
-    /// Starts from what was on disk: entering with the stored token if there
-    /// is one, otherwise signed out. Uses tags `tag`, `tag + 1` and `tag + 2`.
+    /// Starts from what was on disk: entering with the stored session if
+    /// there is one, otherwise signed out. Uses tags `tag`, `tag + 1` and
+    /// `tag + 2`.
     pub fn new(remembered: Remembered, tag: Tag) -> (Auth, Vec<Effect>) {
         let mut effects = Vec::new();
-        let phase = match &remembered.token {
-            Some(token) => {
-                effects.push(Effect::Connect(token.clone()));
+        let phase = match &remembered.refresh_token {
+            Some(refresh_token) => {
+                effects.push(Effect::Connect(Credentials::resume(refresh_token)));
                 Phase::Entering { resumed: true }
             }
             None => Phase::SignedOut,
@@ -250,15 +256,18 @@ impl Auth {
     }
 
     /// Leaves the world, or gives up entering it: tells the server, closes
-    /// the WebSocket and forgets the token. The email stays.
+    /// the WebSocket and forgets the session. The email stays.
     pub fn log_out(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
         if matches!(self.phase, Phase::SignedOut | Phase::SigningIn { .. }) {
             return effects;
         }
-        if let Some(token) = self.remembered.token.take() {
+        if let Some(refresh_token) = self.remembered.refresh_token.take() {
             effects.push(Effect::Rest(
-                RestRequest::Logout(LogoutRequest { token }),
+                RestRequest::Logout(LogoutRequest {
+                    refresh_token: Some(refresh_token),
+                    ..LogoutRequest::default()
+                }),
                 self.logout_tag(),
             ));
         }
@@ -286,6 +295,12 @@ impl Auth {
             }
             NetEvent::Rest(tag, _) if *tag == self.tag => self.observe_sign_in(event, &mut effects),
             NetEvent::Connection(state) => self.observe_connection(state, &mut effects),
+            NetEvent::Refreshed { refresh_token }
+                if matches!(self.phase, Phase::Entering { .. } | Phase::InWorld) =>
+            {
+                self.remembered.refresh_token = Some(refresh_token.clone());
+                effects.push(Effect::Remember(self.remembered.clone()));
+            }
             // Any of the game's calls, refused for the session's token.
             NetEvent::Rest(
                 tag,
@@ -314,13 +329,13 @@ impl Auth {
             Some(Step::SignedIn(auth)) => {
                 self.remembered = Remembered {
                     email: Some(sign_in.email().to_owned()),
-                    token: Some(auth.token.clone()),
+                    refresh_token: auth.refresh_token.clone(),
                 };
                 self.sign_in = None;
                 self.reachable = Some(true);
                 self.phase = Phase::Entering { resumed: false };
                 effects.push(Effect::Remember(self.remembered.clone()));
-                effects.push(Effect::Connect(auth.token));
+                effects.push(Effect::Connect(Credentials::from(&*auth)));
             }
             Some(Step::Failed(failure)) => {
                 tracing::info!("auth: {failure}");
@@ -353,7 +368,7 @@ impl Auth {
 
     /// The server refused the session's token: back to the form, and forget it.
     fn session_ended(&mut self, message: &str, effects: &mut Vec<Effect>) {
-        self.remembered.token = None;
+        self.remembered.refresh_token = None;
         effects.push(Effect::Remember(self.remembered.clone()));
         self.signed_out(Some(Notice::SessionEnded {
             elsewhere: message == REPLACED,
@@ -413,11 +428,14 @@ mod tests {
 
     const TAG: Tag = 10;
 
-    fn auth_ok(token: &str) -> NetEvent {
+    /// A login's answer, with an access token and this refresh token.
+    fn auth_ok(refresh_token: &str) -> NetEvent {
         NetEvent::Rest(
             TAG,
             Ok(RestResponse::Auth(AuthResponse {
-                token: token.into(),
+                token: "access".into(),
+                expires_in: 900,
+                refresh_token: Some(refresh_token.into()),
                 account: AccountInfo {
                     id: Uuid::nil(),
                     email: "ada@capitol.local".into(),
@@ -475,13 +493,17 @@ mod tests {
         let effects = auth.observe(&auth_ok("t0ken"));
         let remembered = Remembered {
             email: Some("ada@capitol.local".into()),
-            token: Some("t0ken".into()),
+            refresh_token: Some("t0ken".into()),
         };
         assert_eq!(
             effects,
             vec![
                 Effect::Remember(remembered),
-                Effect::Connect("t0ken".into())
+                Effect::Connect(Credentials {
+                    token: Some("access".into()),
+                    refresh_token: Some("t0ken".into()),
+                    expires_in: Some(Duration::from_secs(900)),
+                })
             ]
         );
         assert_eq!(auth.phase(), Phase::Entering { resumed: false });
@@ -489,6 +511,31 @@ mod tests {
         auth.observe(&connected());
         assert_eq!(auth.phase(), Phase::InWorld);
         assert_eq!(auth.email(), Some("ada@capitol.local"));
+    }
+
+    #[test]
+    fn a_refreshed_token_is_remembered_in_place_of_the_spent_one() {
+        let mut auth = signed_out();
+        auth.log_in("ada@capitol.local", "hunter22");
+        auth.observe(&auth_ok("first"));
+        auth.observe(&connected());
+        let refreshed = NetEvent::Refreshed {
+            refresh_token: "second".into(),
+        };
+        assert_eq!(
+            auth.observe(&refreshed),
+            vec![Effect::Remember(Remembered {
+                email: Some("ada@capitol.local".into()),
+                refresh_token: Some("second".into()),
+            })]
+        );
+        // Logging out spends the newest one.
+        assert!(matches!(
+            &auth.log_out()[0],
+            Effect::Rest(RestRequest::Logout(l), _) if l.refresh_token.as_deref() == Some("second")
+        ));
+        // A late refresh doesn't bring the session back.
+        assert!(auth.observe(&refreshed).is_empty());
     }
 
     #[test]
@@ -536,13 +583,13 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_token_is_tried_first() {
+    fn a_stored_session_is_tried_first() {
         let remembered = Remembered {
             email: Some("ada@capitol.local".into()),
-            token: Some("old".into()),
+            refresh_token: Some("old".into()),
         };
         let (mut auth, effects) = Auth::new(remembered, TAG);
-        assert_eq!(effects, vec![Effect::Connect("old".into())]);
+        assert_eq!(effects, vec![Effect::Connect(Credentials::resume("old"))]);
         assert_eq!(auth.phase(), Phase::Entering { resumed: true });
         auth.observe(&connected());
         assert_eq!(auth.phase(), Phase::InWorld);
@@ -552,7 +599,7 @@ mod tests {
     fn a_rejected_token_returns_to_the_form_and_is_forgotten() {
         let remembered = Remembered {
             email: Some("ada@capitol.local".into()),
-            token: Some("old".into()),
+            refresh_token: Some("old".into()),
         };
         let (mut auth, _) = Auth::new(remembered.clone(), TAG);
         let effects = auth.observe(&auth_failed("Invalid token"));
@@ -560,7 +607,7 @@ mod tests {
             effects,
             vec![Effect::Remember(Remembered {
                 email: remembered.email.clone(),
-                token: None
+                refresh_token: None
             })]
         );
         assert_eq!(auth.phase(), Phase::SignedOut);
@@ -586,7 +633,7 @@ mod tests {
         let (mut auth, _) = Auth::new(
             Remembered {
                 email: Some("ada@capitol.local".into()),
-                token: Some("old".into()),
+                refresh_token: Some("old".into()),
             },
             TAG,
         );
@@ -609,7 +656,7 @@ mod tests {
                 Effect::Disconnect,
                 Effect::Remember(Remembered {
                     email: Some("ada@capitol.local".into()),
-                    token: None,
+                    refresh_token: None,
                 }),
             ]
         );
@@ -618,7 +665,7 @@ mod tests {
         let (mut auth, _) = Auth::new(
             Remembered {
                 email: None,
-                token: Some("t".into()),
+                refresh_token: Some("t".into()),
             },
             TAG,
         );
@@ -632,7 +679,7 @@ mod tests {
         let (mut auth, _) = Auth::new(
             Remembered {
                 email: None,
-                token: Some("t".into()),
+                refresh_token: Some("t".into()),
             },
             TAG,
         );
@@ -661,14 +708,15 @@ mod tests {
             vec![
                 Effect::Rest(
                     RestRequest::Logout(LogoutRequest {
-                        token: "t0ken".into()
+                        refresh_token: Some("t0ken".into()),
+                        token: None,
                     }),
                     TAG + 2
                 ),
                 Effect::Disconnect,
                 Effect::Remember(Remembered {
                     email: Some("ada@capitol.local".into()),
-                    token: None
+                    refresh_token: None
                 }),
             ]
         );

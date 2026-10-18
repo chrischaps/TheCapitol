@@ -7,7 +7,6 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, DecodingKey, Validation};
-use redis::AsyncCommands;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -844,15 +843,16 @@ async fn validate_token(token: &str, state: &AppState) -> Result<Claims, String>
     )
     .map_err(|_| "Invalid token".to_string())?;
 
-    // Verify session in Redis
+    // Verify the token's session is still the account's (sessions.rs)
     let mut redis = state.redis.clone();
-    let session_key = format!("session:{}", token_data.claims.sub);
-    let stored_token: Option<String> = redis.get(&session_key).await.map_err(|e| {
-        tracing::error!("Redis error checking a session: {:?}", e);
-        SESSIONS_UNAVAILABLE.to_string()
-    })?;
+    let current = crate::sessions::is_current(&mut redis, token_data.claims.sub, &token_data.claims.sid)
+        .await
+        .map_err(|e| {
+            tracing::error!("Redis error checking a session: {:?}", e);
+            SESSIONS_UNAVAILABLE.to_string()
+        })?;
 
-    if stored_token.as_deref() != Some(token) {
+    if !current {
         return Err("Session expired".into());
     }
 

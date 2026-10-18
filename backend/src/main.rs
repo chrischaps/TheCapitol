@@ -20,6 +20,7 @@ mod migrations;
 mod models;
 mod openapi;
 mod routes;
+mod sessions;
 mod state;
 mod ws;
 

@@ -223,14 +223,14 @@ pub struct Arrival {
 }
 
 impl Session {
-    /// Starts the net thread for `server`. If the file holds a token for
+    /// Starts the net thread for `server`. If the file holds a session for
     /// this server, it's tried at once.
     pub fn start(server: &str, file: SessionFile) -> Result<Session> {
         let net =
             Net::spawn(NetConfig::with_base_url(server)).context("starting the net thread")?;
         let remembered = file.remembered(server);
-        if remembered.token.is_some() {
-            tracing::info!("session: returning to {server} with the stored token");
+        if remembered.refresh_token.is_some() {
+            tracing::info!("session: returning to {server} with the stored session");
         }
         let (auth, effects) = Auth::new(remembered, AUTH_TAG);
         // The server's names and slot counts from last time, until `/catalog`
@@ -1379,7 +1379,7 @@ impl Session {
         for effect in effects {
             match effect {
                 Effect::Rest(request, tag) => self.net.rest(request, tag),
-                Effect::Connect(token) => self.net.connect(token),
+                Effect::Connect(credentials) => self.net.connect(credentials),
                 Effect::Disconnect => self.net.disconnect(),
                 Effect::Remember(remembered) => self.file.remember(&self.server, &remembered),
             }
@@ -1455,8 +1455,9 @@ impl Link {
 }
 
 /// `save/session.toml`: the server last chosen, the last email that signed
-/// in, and its token, with the server the token belongs to. A token is only
-/// tried on that server.
+/// in, and its refresh token (E0.6), with the server the token belongs to. A
+/// token is only tried on that server. The access tokens files held before
+/// E0.6, under `token`, are ignored.
 ///
 /// It's a file of its own, not the engine's `save/persist.toml`. Scripts can
 /// read and write every key in that store (`persist_get`), and a session
@@ -1469,7 +1470,7 @@ pub struct SessionFile {
 
 const SERVER: &str = "server";
 const EMAIL: &str = "email";
-const TOKEN: &str = "token";
+const TOKEN: &str = "refresh_token";
 const TOKEN_SERVER: &str = "token_server";
 
 impl SessionFile {
@@ -1514,22 +1515,22 @@ impl SessionFile {
         self.save();
     }
 
-    /// The email, and the token if it belongs to `server`.
+    /// The email, and the refresh token if it belongs to `server`.
     pub fn remembered(&self, server: &str) -> Remembered {
-        let token = match self.get(TOKEN_SERVER) {
+        let refresh_token = match self.get(TOKEN_SERVER) {
             Some(s) if s == server => self.get(TOKEN),
             _ => None,
         };
         Remembered {
             email: self.get(EMAIL),
-            token,
+            refresh_token,
         }
     }
 
     pub fn remember(&mut self, server: &str, remembered: &Remembered) {
         self.set(EMAIL, remembered.email.as_deref());
-        self.set(TOKEN, remembered.token.as_deref());
-        self.set(TOKEN_SERVER, remembered.token.as_ref().map(|_| server));
+        self.set(TOKEN, remembered.refresh_token.as_deref());
+        self.set(TOKEN_SERVER, remembered.refresh_token.as_ref().map(|_| server));
         self.save();
     }
 
@@ -2067,18 +2068,18 @@ mod tests {
             "http://a:3000",
             &Remembered {
                 email: Some("ada@capitol.local".into()),
-                token: Some("t0ken".into()),
+                refresh_token: Some("t0ken".into()),
             },
         );
 
         let file = SessionFile::load(&path);
         assert_eq!(file.server().as_deref(), Some("http://a:3000"));
         assert_eq!(
-            file.remembered("http://a:3000").token.as_deref(),
+            file.remembered("http://a:3000").refresh_token.as_deref(),
             Some("t0ken")
         );
         let elsewhere = file.remembered("http://b:3000");
-        assert_eq!(elsewhere.token, None);
+        assert_eq!(elsewhere.refresh_token, None);
         assert_eq!(elsewhere.email.as_deref(), Some("ada@capitol.local"));
 
         let mut file = file;
@@ -2086,11 +2087,11 @@ mod tests {
             "http://a:3000",
             &Remembered {
                 email: Some("ada@capitol.local".into()),
-                token: None,
+                refresh_token: None,
             },
         );
         assert_eq!(
-            SessionFile::load(&path).remembered("http://a:3000").token,
+            SessionFile::load(&path).remembered("http://a:3000").refresh_token,
             None
         );
         let _ = std::fs::remove_dir_all(dir);

@@ -18,6 +18,8 @@ pub enum RestRequest {
     Register(RegisterRequest),
     /// `POST /auth/login`
     Login(LoginRequest),
+    /// `POST /auth/refresh`. The IO thread sends these itself (E0.6).
+    Refresh(RefreshRequest),
     /// `POST /auth/logout`
     Logout(LogoutRequest),
     /// `GET /health`
@@ -97,7 +99,7 @@ pub enum RestRequest {
 /// A decoded REST response. Each [`RestRequest`] decodes to exactly one variant.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RestResponse {
-    /// Register and login
+    /// Register, login and refresh
     Auth(AuthResponse),
     /// Logout and station removal
     Success(SuccessResponse),
@@ -159,18 +161,32 @@ impl RestError {
     }
 
     /// A 401: the token is missing, expired, or another login replaced it.
-    /// The game should return to the login screen.
+    /// The IO thread has already tried a refresh, so the game should return
+    /// to the login screen.
     pub fn is_unauthorized(&self) -> bool {
         self.status() == Some(401)
     }
 }
 
 impl RestRequest {
+    /// The `/auth` routes. Their 401s are about the credentials they carry,
+    /// not the session's token, so they aren't retried after a refresh.
+    pub fn is_auth(&self) -> bool {
+        matches!(
+            self,
+            RestRequest::Register(_)
+                | RestRequest::Login(_)
+                | RestRequest::Refresh(_)
+                | RestRequest::Logout(_)
+        )
+    }
+
     pub fn method(&self) -> Method {
         use RestRequest::*;
         match self {
             Register(_)
             | Login(_)
+            | Refresh(_)
             | Logout(_)
             | PlayerMove(_)
             | Extract(_)
@@ -209,6 +225,7 @@ impl RestRequest {
         match self {
             Register(_) => "/auth/register".into(),
             Login(_) => "/auth/login".into(),
+            Refresh(_) => "/auth/refresh".into(),
             Logout(_) => "/auth/logout".into(),
             Health => "/health".into(),
             Terrain { .. } => "/terrain".into(),
@@ -248,6 +265,7 @@ impl RestRequest {
         match self {
             Register(b) => req.json(b),
             Login(b) => req.json(b),
+            Refresh(b) => req.json(b),
             Logout(b) => req.json(b),
             PlayerMove(b) => req.json(b),
             Extract(b) => req.json(b),
@@ -274,7 +292,7 @@ impl RestRequest {
         use RestRequest as Q;
         use RestResponse as A;
         Ok(match self {
-            Q::Register(_) | Q::Login(_) => A::Auth(de(body)?),
+            Q::Register(_) | Q::Login(_) | Q::Refresh(_) => A::Auth(de(body)?),
             Q::Logout(_) | Q::RemoveStation { .. } => A::Success(de(body)?),
             Q::Health => A::Health(de(body)?),
             Q::Terrain { .. } => A::Terrain(Box::new(de(body)?)),

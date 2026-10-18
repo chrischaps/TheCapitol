@@ -353,6 +353,8 @@ impl GameState {
             NetEvent::Rest(_, Err(_)) => Vec::new(),
             NetEvent::Connection(state) => self.apply_connection(state),
             NetEvent::Resync => self.apply_resync(),
+            // The session's business (`auth`), not the world's.
+            NetEvent::Refreshed { .. } => Vec::new(),
         }
     }
 

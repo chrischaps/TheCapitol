@@ -11,7 +11,7 @@
 use std::collections::hash_map::RandomState;
 use std::collections::VecDeque;
 use std::hash::{BuildHasher, Hasher};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use capitol_protocol::ws::{ClientMessage, ServerMessage};
@@ -24,6 +24,7 @@ use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
+use super::keyring::Keyring;
 use super::{ConnectionState, NetConfig, NetEvent};
 
 /// The only channel the server knows.
@@ -50,12 +51,12 @@ pub(crate) struct Session {
 impl Session {
     pub(crate) fn spawn(
         url: String,
-        token: String,
+        keyring: Arc<Keyring>,
         config: NetConfig,
         events: mpsc::Sender<NetEvent>,
     ) -> Session {
         let (outbound, rx) = tmpsc::unbounded_channel();
-        let task = tokio::spawn(run(url, token, config, rx, events));
+        let task = tokio::spawn(run(url, keyring, config, rx, events));
         Session { outbound, task }
     }
 
@@ -104,7 +105,7 @@ const CLOSED_BY_CLIENT: &str = "closed by client";
 
 async fn run(
     url: String,
-    token: String,
+    keyring: Arc<Keyring>,
     config: NetConfig,
     mut outbound: tmpsc::UnboundedReceiver<Outbound>,
     events: mpsc::Sender<NetEvent>,
@@ -122,9 +123,21 @@ async fn run(
     // Once a connection has gone live, the game holds state that the next
     // one must refresh.
     let mut was_live = false;
+    // The last connection's token was refused and a fresh one got: if that
+    // one is refused too, it's final.
+    let mut renewed = false;
+    let auth_failed = |message: String| {
+        tracing::warn!("websocket auth failed: {message}");
+        emit(ConnectionState::AuthFailed { message });
+    };
 
     loop {
         emit(ConnectionState::Connecting);
+        // Each attempt takes the keyring's token, refreshed if it's due.
+        let Some(token) = keyring.token().await else {
+            let refused = keyring.refused().await;
+            return auth_failed(refused.unwrap_or_else(|| "Session expired".into()));
+        };
         let mut live_since = None;
         let end = connection(
             &url,
@@ -137,12 +150,20 @@ async fn run(
             &mut live_since,
         )
         .await;
+        if live_since.is_some() {
+            renewed = false;
+        }
         let reason = match end {
             End::Closed => return closed(),
             End::AuthFailed(message) => {
-                tracing::warn!("websocket auth failed: {message}");
-                emit(ConnectionState::AuthFailed { message });
-                return;
+                // An expired token, say after the machine slept through the
+                // refresh: refresh and go again at once.
+                if !renewed && keyring.renew(Some(&token)).await.is_some() {
+                    tracing::info!("websocket token refused ({message}); refreshed it");
+                    renewed = true;
+                    continue;
+                }
+                return auth_failed(keyring.refused().await.unwrap_or(message));
             }
             End::Dropped(reason) => reason,
         };

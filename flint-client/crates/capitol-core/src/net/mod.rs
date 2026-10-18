@@ -7,25 +7,30 @@
 //! # use capitol_core::net::*;
 //! # use capitol_core::protocol::rest::LoginRequest;
 //! let net = Net::spawn(NetConfig::default()).unwrap();
-//! net.rest(RestRequest::Login(LoginRequest { email: "a@b.c".into(), password: "pw".into() }), 1);
+//! net.rest(RestRequest::Login(LoginRequest { email: "a@b.c".into(), password: "pw".into(), refresh: true }), 1);
 //! // once per frame:
 //! for event in net.drain() {
 //!     if let NetEvent::Rest(1, Ok(RestResponse::Auth(auth))) = event {
-//!         net.connect(auth.token);
+//!         net.connect(&auth);
 //!     }
 //! }
 //! ```
 
+mod keyring;
 mod rest;
 mod ws;
 
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
+use capitol_protocol::rest::AuthResponse;
 use capitol_protocol::ws::{ClientMessage, ServerMessage};
 use tokio::sync::mpsc as tmpsc;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
+
+use keyring::Keyring;
 
 pub use rest::{RestError, RestRequest, RestResponse};
 
@@ -99,15 +104,67 @@ impl NetConfig {
     }
 }
 
+/// What a session signs in with. With a refresh token, the IO thread keeps
+/// the access token fresh by itself (E0.6): before it expires, after a 401
+/// (and the request goes again), and before each WebSocket reconnect. Each
+/// refresh rotates the refresh token, and [`NetEvent::Refreshed`] carries the
+/// new one to keep.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Credentials {
+    /// The access token. `None` to refresh before anything is sent, as when
+    /// resuming from a stored refresh token.
+    pub token: Option<String>,
+    pub refresh_token: Option<String>,
+    /// How long `token` has left; `None` when that isn't known.
+    pub expires_in: Option<Duration>,
+}
+
+impl Credentials {
+    /// A session resumed from a stored refresh token.
+    pub fn resume(refresh_token: impl Into<String>) -> Credentials {
+        Credentials {
+            refresh_token: Some(refresh_token.into()),
+            ..Credentials::default()
+        }
+    }
+}
+
+/// An access token alone, which works until it expires.
+impl From<String> for Credentials {
+    fn from(token: String) -> Credentials {
+        Credentials {
+            token: Some(token),
+            ..Credentials::default()
+        }
+    }
+}
+
+impl From<&str> for Credentials {
+    fn from(token: &str) -> Credentials {
+        Credentials::from(token.to_owned())
+    }
+}
+
+impl From<&AuthResponse> for Credentials {
+    fn from(auth: &AuthResponse) -> Credentials {
+        Credentials {
+            token: Some(auth.token.clone()),
+            refresh_token: auth.refresh_token.clone(),
+            // An older server sends no expiry.
+            expires_in: (auth.expires_in > 0).then(|| Duration::from_secs(auth.expires_in)),
+        }
+    }
+}
+
 /// Game thread → IO thread.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    /// Use `token` for REST calls and open the WebSocket with it: connect,
-    /// `auth`, then `subscribe` to positions. Replaces any open session.
-    /// If the session drops, it reconnects with backoff until the server
-    /// rejects the token or the game sends `Disconnect`.
-    Connect { token: String },
-    /// Close the WebSocket and forget the token.
+    /// Use these credentials for REST calls and open the WebSocket with them:
+    /// connect, `auth`, then `subscribe` to positions. Replaces any open
+    /// session. If the session drops, it reconnects with backoff until the
+    /// server rejects the token or the game sends `Disconnect`.
+    Connect(Credentials),
+    /// Close the WebSocket and forget the credentials.
     Disconnect,
     /// Send over the WebSocket. Held until the handshake finishes if one is
     /// running; dropped with a warning if there's no session or it's waiting
@@ -129,6 +186,11 @@ pub enum NetEvent {
     /// were lost while it was down, so refetch everything the server doesn't
     /// push: containers, nearby nodes and stations, currency, plots, recipes.
     Resync,
+    /// The session's token was refreshed, and this is the refresh token now.
+    /// The old one is spent: keep this one instead.
+    Refreshed {
+        refresh_token: String,
+    },
 }
 
 /// The WebSocket's state. A session moves
@@ -212,11 +274,10 @@ impl Net {
         }
     }
 
-    /// [`Command::Connect`]
-    pub fn connect(&self, token: impl Into<String>) {
-        self.send(Command::Connect {
-            token: token.into(),
-        });
+    /// [`Command::Connect`], with an access token, an [`AuthResponse`] or
+    /// [`Credentials`]
+    pub fn connect(&self, credentials: impl Into<Credentials>) {
+        self.send(Command::Connect(credentials.into()));
     }
 
     /// [`Command::Disconnect`]
@@ -266,7 +327,9 @@ async fn io_loop(
     events: mpsc::Sender<NetEvent>,
 ) {
     let base = config.rest_base();
-    let mut token: Option<String> = None;
+    let mut keyring: Option<Arc<Keyring>> = None;
+    // Refreshes the keyring on time; one per session.
+    let mut keeper: Option<JoinHandle<()>> = None;
     let mut session: Option<ws::Session> = None;
 
     while let Some(control) = commands.recv().await {
@@ -275,20 +338,28 @@ async fn io_loop(
             Control::Shutdown => break,
         };
         match command {
-            Command::Connect { token: new_token } => {
+            Command::Connect(credentials) => {
                 if let Some(old) = session.take() {
                     old.close().await;
                 }
-                token = Some(new_token.clone());
+                if let Some(old) = keeper.take() {
+                    old.abort();
+                }
+                let new = Keyring::new(credentials, http.clone(), base.clone(), events.clone());
+                keeper = Some(tokio::spawn(keyring::keep_fresh(new.clone())));
                 session = Some(ws::Session::spawn(
                     config.ws_url(),
-                    new_token,
+                    new.clone(),
                     config.clone(),
                     events.clone(),
                 ));
+                keyring = Some(new);
             }
             Command::Disconnect => {
-                token = None;
+                keyring = None;
+                if let Some(old) = keeper.take() {
+                    old.abort();
+                }
                 if let Some(old) = session.take() {
                     old.close().await;
                 }
@@ -300,10 +371,10 @@ async fn io_loop(
             Command::Rest(request, tag) => {
                 let http = http.clone();
                 let base = base.clone();
-                let token = token.clone();
+                let keyring = keyring.clone();
                 let events = events.clone();
                 tokio::spawn(async move {
-                    let result = rest::execute(&http, &base, token.as_deref(), &request).await;
+                    let result = execute(&http, &base, keyring.as_deref(), &request).await;
                     if let Err(e) = &result {
                         tracing::debug!("{} {} failed: {e}", request.method(), request.path());
                     }
@@ -313,8 +384,36 @@ async fn io_loop(
         }
     }
 
+    if let Some(old) = keeper.take() {
+        old.abort();
+    }
     if let Some(old) = session.take() {
         old.close().await;
+    }
+}
+
+/// Runs a request with the session's token. A 401 refreshes the token and
+/// sends it once more: the server refuses before doing anything, so even a
+/// POST is safe to repeat.
+async fn execute(
+    http: &reqwest::Client,
+    base: &str,
+    keyring: Option<&Keyring>,
+    request: &RestRequest,
+) -> Result<RestResponse, RestError> {
+    let Some(keyring) = keyring else {
+        return rest::execute(http, base, None, request).await;
+    };
+    let token = keyring.token().await;
+    let result = rest::execute(http, base, token.as_deref(), request).await;
+    match result {
+        Err(e) if e.is_unauthorized() && !request.is_auth() => {
+            match keyring.renew(token.as_deref()).await {
+                Some(fresh) => rest::execute(http, base, Some(&fresh), request).await,
+                None => Err(e),
+            }
+        }
+        result => result,
     }
 }
 

@@ -2384,22 +2384,31 @@ POST /auth/login
 
 #### Token Refresh
 
+As built in E0.6 (see `the-capitol-economy.md`). Login and register with `"refresh": true` answer with a 15-minute access token, `expires_in` and an opaque, single-use `refresh_token`:
+
 ```
 POST /auth/refresh
-Authorization: Bearer <current_token>
+{ "refresh_token": "..." }
 
-→ Success:
+→ Success: the same shape as login, with the next refresh token
 {
     "token": "new_jwt...",
-    "expires_at": "2026-02-02T00:00:00Z"
+    "expires_in": 900,
+    "refresh_token": "next...",
+    "account": { ... },
+    "player_id": "..."
 }
+
+→ 401: "Invalid refresh token" | "Session expired" | "Refresh token reused"
 ```
+
+Using a refresh token a second time revokes its whole session.
 
 #### Logout
 
 ```
 POST /auth/logout
-Authorization: Bearer <token>
+{ "token": "<access token, even expired>" }   or   { "refresh_token": "..." }
 
 → { "success": true }
 ```
@@ -2443,10 +2452,11 @@ Authorization: Bearer <token>
 | tier | Subscription tier: "free", "active", "lapsed" |
 | client | Client type: "web", "mobile", "cli" |
 
-**Token Lifetime:**
-- Access token: 24 hours
-- Can refresh within 7 days of expiration
-- After 7 days, must re-authenticate
+**Token Lifetime (as built, E0.6):**
+- Access token: 15 minutes (`ACCESS_TTL_SECS`) with a refresh token; 24 hours for a login that doesn't ask for one (the React and Love2D clients)
+- Refresh token: single use, 30 days (`REFRESH_TTL_SECS`), renewed with each refresh
+- A refresh token unused for 30 days means signing in again
+- Tokens carry a `sid` claim, the account's current session
 
 ### 6.4 Password Security
 

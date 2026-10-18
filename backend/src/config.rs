@@ -7,6 +7,10 @@ pub struct Config {
     pub jwt_secret: String,
     pub host: String,
     pub port: u16,
+    /// Lifetime of an access token issued with a refresh token (E0.6)
+    pub access_ttl_secs: u64,
+    /// Lifetime of a refresh token, and of the session it keeps alive
+    pub refresh_ttl_secs: u64,
 }
 
 impl Config {
@@ -20,6 +24,12 @@ impl Config {
                 .unwrap_or_else(|_| "3000".into())
                 .parse()
                 .unwrap_or(3000),
+            access_ttl_secs: secs("ACCESS_TTL_SECS", 15 * 60),
+            refresh_ttl_secs: secs("REFRESH_TTL_SECS", 30 * 24 * 60 * 60),
         })
     }
+}
+
+fn secs(name: &str, default: u64) -> u64 {
+    env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }

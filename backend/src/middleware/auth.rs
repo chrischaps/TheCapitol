@@ -7,7 +7,6 @@ use axum::{
     Json,
 };
 use jsonwebtoken::{decode, DecodingKey, Validation};
-use redis::AsyncCommands;
 use uuid::Uuid;
 
 use crate::error::SESSIONS_UNAVAILABLE;
@@ -58,11 +57,10 @@ pub async fn auth_middleware(
         }
     };
 
-    // Verify session exists in Redis
+    // Verify the token's session is still the account's (sessions.rs)
     let mut redis = state.redis.clone();
-    let session_key = format!("session:{}", token_data.claims.sub);
-    let stored_token: Option<String> = match redis.get(&session_key).await {
-        Ok(stored) => stored,
+    let current = match crate::sessions::is_current(&mut redis, token_data.claims.sub, &token_data.claims.sid).await {
+        Ok(current) => current,
         Err(e) => {
             // Not a 401: the token may be fine, and a 401 signs the client out.
             tracing::error!("Redis error checking a session: {:?}", e);
@@ -73,7 +71,7 @@ pub async fn auth_middleware(
         }
     };
 
-    if stored_token.as_deref() != Some(token) {
+    if !current {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "Session expired" })),

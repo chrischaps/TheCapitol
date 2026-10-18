@@ -221,6 +221,7 @@ impl Bot {
         let login = RestRequest::Login(LoginRequest {
             email: account.email.clone(),
             password: account.password.clone(),
+            refresh: true,
         });
         let auth = match bot.call("login", login) {
             Ok(RestResponse::Auth(auth)) => auth,
@@ -229,6 +230,7 @@ impl Bot {
                     email: account.email.clone(),
                     password: account.password.clone(),
                     player_name: account.name.clone(),
+                    refresh: true,
                 });
                 match bot.call("register", register)? {
                     RestResponse::Auth(auth) => {
@@ -241,7 +243,7 @@ impl Bot {
             Ok(other) => return Err(unexpected("login", &other)),
             Err(e) => return Err(e),
         };
-        bot.net.connect(auth.token);
+        bot.net.connect(&auth);
         bot.until("a snapshot", SNAPSHOT_TIMEOUT, |s, _| {
             s.local_player().is_some()
                 && s.inventory().is_some()
