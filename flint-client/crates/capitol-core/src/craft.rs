@@ -24,6 +24,13 @@
 //!   rolls only the variance (E1.1). The server takes units from the stacks
 //!   in the order they're sent, and the best units of each stack first
 //!   (`Pick::Best`, E1.8), as [`check`] counts them.
+//! - **The tool (E1.5 to E1.7).** A recipe that names a `tool_type` takes
+//!   the tool term from the best tool of that type in the inventory, by
+//!   power times wear ([`tool_for`], the server's `best_tool`). At a
+//!   station, a tool in its slot wins when its type matches
+//!   (`tool_for_station_recipe`). Without one the server refuses, so
+//!   [`Check::missing_tool`] holds the craft back. [`Check::lifts`] says
+//!   how far an A-grade station or tool would raise the range's floor.
 //! - **Output with nowhere to go.** The server puts the output in the
 //!   output box: onto the first stack of its type, whatever its grade
 //!   (every unit keeps its quality, E1.8), else into a free slot, and if
@@ -37,12 +44,14 @@
 
 use std::time::{Duration, Instant};
 
-use capitol_protocol::rest::{RecipeInfo, SlotItem};
+use capitol_protocol::rest::{RecipeInfo, SlotItem, StationTool};
 use capitol_protocol::rules::quality;
 use capitol_protocol::rules::stacking::Pick;
+use capitol_protocol::rules::tools::{self, Tool};
 use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
 
+use crate::catalog::Catalog;
 use crate::state::{Container, GameState, StateEvent};
 
 /// How long a `craft` may go unanswered. The server always answers, with
@@ -127,6 +136,122 @@ pub struct Blocked {
     pub item_name: String,
 }
 
+/// The tool a craft would use, and where it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolPick {
+    pub item_id: Uuid,
+    pub item_type: String,
+    pub item_name: String,
+    pub tool: Tool,
+    /// It's the station's own, in its tool slot (E1.6), not yours.
+    pub installed: bool,
+}
+
+impl ToolPick {
+    /// The quality it brings to the tool term: its own, scaled by its wear
+    /// (`rules::tools::term_quality`).
+    pub fn term(&self) -> i32 {
+        tools::term_quality(&self.tool)
+    }
+}
+
+/// A tool as the rules see it: `item_type`'s power from the catalog, and
+/// its own wear. `None` for anything that isn't a tool. A missing maximum
+/// is worked out from the type and quality, as the server does.
+pub fn as_tool(
+    catalog: &Catalog,
+    item_type: &str,
+    quality: i32,
+    durability: Option<i32>,
+    max_durability: Option<i32>,
+) -> Option<Tool> {
+    let spec = catalog.item_type(item_type)?.tool.as_ref()?;
+    Some(Tool {
+        base_power: spec.base_power,
+        quality,
+        durability: durability.unwrap_or(0),
+        max_durability: max_durability
+            .unwrap_or_else(|| tools::max_durability(spec.max_durability, quality)),
+    })
+}
+
+/// The tool `recipe` would be made with, as the server picks it: the
+/// station's installed tool when it's of the recipe's type and has uses
+/// left, else the best of that type in `inventory` (power times wear, ties
+/// to the first slot). `None` when the recipe needs no tool, or there's none.
+pub fn tool_for(
+    catalog: &Catalog,
+    recipe: &RecipeInfo,
+    inventory: Option<&Container>,
+    installed: Option<&StationTool>,
+) -> Option<ToolPick> {
+    let wanted = recipe.tool_type.as_deref()?;
+    let of_type = |item_type: &str| {
+        catalog
+            .item_type(item_type)
+            .and_then(|t| t.tool.as_ref())
+            .is_some_and(|t| t.tool_type == wanted)
+    };
+    if let Some(slot) = installed.filter(|t| t.durability > 0 && of_type(&t.item_type)) {
+        let tool = as_tool(
+            catalog,
+            &slot.item_type,
+            slot.quality,
+            Some(slot.durability),
+            Some(slot.max_durability),
+        )?;
+        return Some(ToolPick {
+            item_id: slot.item_id,
+            item_type: slot.item_type.clone(),
+            item_name: catalog.item_name(&slot.item_type),
+            tool,
+            installed: true,
+        });
+    }
+    let held: Vec<(&SlotItem, Tool)> = inventory?
+        .items()
+        .filter(|i| of_type(&i.item_type))
+        .filter_map(|i| {
+            as_tool(catalog, &i.item_type, i.quality, i.durability, i.max_durability)
+                .map(|tool| (i, tool))
+        })
+        .collect();
+    let (best, tool) = tools::best_tool(held.iter().map(|&(i, tool)| ((i, tool), tool)))?;
+    Some(ToolPick {
+        item_id: best.item_id,
+        item_type: best.item_type.clone(),
+        item_name: best.item_name.clone(),
+        tool,
+        installed: false,
+    })
+}
+
+/// [`tool_for`] from what `state` holds: your inventory, and at a station
+/// (`at_station`) the open station's tool slot.
+pub fn tool_in(state: &GameState, recipe: &RecipeInfo, at_station: bool) -> Option<ToolPick> {
+    let installed = at_station
+        .then(|| state.open_station_info().and_then(|s| s.tool.as_ref()))
+        .flatten();
+    tool_for(state.catalog(), recipe, state.inventory(), installed)
+}
+
+/// The quality [`Check::lifts`] imagines a better station or tool at: the
+/// bottom of grade A.
+pub const LIFT_AT: i32 = 90;
+
+/// What a better station or tool would do for a craft.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lift {
+    /// `Station` or `Tool`.
+    pub source: quality::Source,
+    /// The quality imagined, [`LIFT_AT`].
+    pub at: i32,
+    /// The range's floor with it.
+    pub floor: i32,
+    /// How much higher that is than now.
+    pub by: i32,
+}
+
 /// A recipe weighed against the input and output boxes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Check<'a> {
@@ -144,6 +269,8 @@ pub struct Check<'a> {
     pub blocked: Option<Blocked>,
     /// The quality of the station it's made at (`quality::NO_STATION` by hand).
     pub station: i32,
+    /// The tool it would use, for a recipe that names one.
+    pub tool: Option<ToolPick>,
 }
 
 impl Check<'_> {
@@ -152,16 +279,59 @@ impl Check<'_> {
         self.needs.iter().all(Need::met)
     }
 
-    /// The craft can be sent: every input is there and the output has
-    /// somewhere to go.
+    /// The craft can be sent: every input is there, so is its tool, and the
+    /// output has somewhere to go.
     pub fn ready(&self) -> bool {
-        self.satisfied() && self.blocked.is_none()
+        self.satisfied() && self.missing_tool().is_none() && self.blocked.is_none()
+    }
+
+    /// The tool type the recipe needs and there's none of: "hammer".
+    pub fn missing_tool(&self) -> Option<&str> {
+        self.recipe.tool_type.as_deref().filter(|_| self.tool.is_none())
+    }
+
+    /// The quality the tool term counts: the tool's after wear, or 0.
+    pub fn tool_term(&self) -> i32 {
+        self.tool.as_ref().map_or(0, ToolPick::term)
     }
 
     /// Where the output's quality comes from: each input's weight and mean
-    /// quality, then the station's.
+    /// quality, then the station's and the tool's.
     pub fn breakdown(&self) -> Vec<quality::Term> {
-        quality::terms(&self.taken, self.station, 0, &self.recipe.quality_weights)
+        quality::terms(
+            &self.taken,
+            self.station,
+            self.tool_term(),
+            &self.recipe.quality_weights,
+        )
+    }
+
+    /// How far an A-grade station, or an A-grade tool in good repair, would
+    /// raise the range's floor, where one would. Nothing until every input
+    /// is there.
+    pub fn lifts(&self) -> Vec<Lift> {
+        let Some((floor, _)) = self.range else {
+            return Vec::new();
+        };
+        let weights = &self.recipe.quality_weights;
+        let tool = self.tool_term();
+        let candidates = [
+            (quality::Source::Station, weights.station, self.station, (LIFT_AT, tool)),
+            (quality::Source::Tool, weights.tool, tool, (self.station, LIFT_AT)),
+        ];
+        candidates
+            .into_iter()
+            .filter(|&(_, weight, now, _)| weight > 0.0 && now < LIFT_AT)
+            .filter_map(|(source, _, _, (station, tool))| {
+                let (lifted, _) = quality::output_range(&self.taken, station, tool, weights);
+                (lifted > floor).then(|| Lift {
+                    source,
+                    at: LIFT_AT,
+                    floor: lifted,
+                    by: lifted - floor,
+                })
+            })
+            .collect()
     }
 
     /// The `craft` message for it.
@@ -182,13 +352,15 @@ impl Check<'_> {
     }
 }
 
-/// Weighs a hand `recipe` against the input box, and the output box if it's known.
+/// Weighs a hand `recipe` against the input box, and the output box if
+/// it's known, with `tool` ([`tool_for`]) for a recipe that takes one.
 pub fn check<'a>(
     recipe: &'a RecipeInfo,
     input: &Container,
     output: Option<&Container>,
+    tool: Option<ToolPick>,
 ) -> Check<'a> {
-    check_at(recipe, input, output, quality::NO_STATION)
+    check_at(recipe, input, output, quality::NO_STATION, tool)
 }
 
 /// As [`check`], at a station of quality `station`: its share of the output
@@ -198,6 +370,7 @@ pub fn check_at<'a>(
     input: &Container,
     output: Option<&Container>,
     station: i32,
+    tool: Option<ToolPick>,
 ) -> Check<'a> {
     let mut needs = Vec::with_capacity(recipe.inputs.len());
     let mut inputs = Vec::new();
@@ -223,8 +396,9 @@ pub fn check_at<'a>(
         });
     }
     let satisfied = needs.iter().all(Need::met);
+    let tool_term = tool.as_ref().map_or(0, ToolPick::term);
     let range = satisfied.then(|| {
-        quality::output_range(&taken, station, 0, &recipe.quality_weights)
+        quality::output_range(&taken, station, tool_term, &recipe.quality_weights)
     });
     Check {
         recipe,
@@ -234,6 +408,7 @@ pub fn check_at<'a>(
         range,
         blocked: output.and_then(|o| blocked(recipe, o)),
         station,
+        tool,
     }
 }
 
@@ -586,7 +761,7 @@ mod tests {
             item(3, 2, "fiber", 60, 5),
             item(4, 3, "fiber", 10, 5),
         ]);
-        let rope = check(&r[0], &inp, None);
+        let rope = check(&r[0], &inp, None, None);
         assert_eq!(rope.needs[0].have, 11);
         assert!(rope.ready());
         // Slot order, enough and no more: one from the first, one from the second.
@@ -605,12 +780,12 @@ mod tests {
         );
 
         // Ten for the workbench: 1 × 90 + 5 × 60 + 4 × 10 = 430, over 10.
-        let bench = check(&r[1], &inp, None);
+        let bench = check(&r[1], &inp, None, None);
         assert_eq!(bench.range, Some((40, 46)));
         assert_eq!(bench.inputs.len(), 3);
 
         // Short: no range, and not ready.
-        let short = check(&r[1], &input(&[item(1, 0, "fiber", 90, 3)]), None);
+        let short = check(&r[1], &input(&[item(1, 0, "fiber", 90, 3)]), None, None);
         assert_eq!(
             short.needs[0],
             Need {
@@ -629,7 +804,7 @@ mod tests {
         let r = recipes();
         let inp = input(&[item(1, 0, "fiber", 50, 1), item(2, 1, "fiber", 51, 1)]);
         // 50.5 rounds to 51, then ±3.
-        assert_eq!(check(&r[0], &inp, None).range, Some((48, 54)));
+        assert_eq!(check(&r[0], &inp, None, None).range, Some((48, 54)));
     }
 
     #[test]
@@ -639,15 +814,15 @@ mod tests {
         let out = |items: &[SlotItem]| boxed(OUT, "crafting_output", 1, items);
 
         // Empty: fine.
-        assert!(check(&r[0], &inp, Some(&out(&[]))).ready());
+        assert!(check(&r[0], &inp, Some(&out(&[])), None).ready());
         // Rope joins rope of any grade, and keeps its quality (E1.8)
         for q in [40, 70] {
-            assert!(check(&r[0], &inp, Some(&out(&[item(9, 0, "rope", q, 1)]))).ready());
+            assert!(check(&r[0], &inp, Some(&out(&[item(9, 0, "rope", q, 1)])), None).ready());
         }
         let mixed = item(9, 0, "rope", 40, 1).with_units(Units::from_pairs([(20, 1), (95, 2)]));
-        assert!(check(&r[0], &inp, Some(&out(&[mixed]))).ready());
+        assert!(check(&r[0], &inp, Some(&out(&[mixed])), None).ready());
         // A kit in the way: the rope would be lost.
-        let c = check(&r[0], &inp, Some(&out(&[item(9, 0, "chest_kit", 70, 1)])));
+        let c = check(&r[0], &inp, Some(&out(&[item(9, 0, "chest_kit", 70, 1)])), None);
         assert!(c.satisfied() && !c.ready());
         assert_eq!(
             c.blocked,
@@ -657,7 +832,84 @@ mod tests {
             })
         );
         // Not loaded yet: nothing to say.
-        assert_eq!(check(&r[0], &inp, None).blocked, None);
+        assert_eq!(check(&r[0], &inp, None, None).blocked, None);
+    }
+
+    /// Rope that wants a sickle: fiber 70% and the tool 30%, give or take 3.
+    fn sickle_rope() -> RecipeInfo {
+        let mut r = recipe("rope_cut", &[("fiber", 2)], "rope");
+        r.tool_type = Some("sickle".into());
+        r.quality_weights = quality::Weights::for_recipe([("fiber", 1.0)], None, Some(0.3), false, -3, 3);
+        r
+    }
+
+    /// A stone sickle (power 6, 60 uses at Q50) with `left` of `max` uses.
+    fn sickle(n: u128, slot: i32, quality: i32, left: i32, max: i32) -> SlotItem {
+        item(n, slot, "stone_sickle", quality, 1).with_durability(left, max)
+    }
+
+    /// The tool term comes from the best sickle by power times wear, as the
+    /// server's `best_tool` picks it (E1.5)
+    #[test]
+    fn the_best_tool_by_power_and_wear_sets_the_tool_term() {
+        let catalog = Catalog::fallback();
+        let r = sickle_rope();
+        let inp = input(&[item(1, 0, "fiber", 80, 2)]);
+        // A Q90 sickle with 2 of 84 uses left is on the cliff: 6 × 1.4 × 0.1
+        // is under the fresh Q50's 6 × 1.0.
+        let worn = sickle(10, 0, 90, 2, 84);
+        let fresh = sickle(11, 1, 50, 60, 60);
+        let inv = boxed(INV, "player_inventory", 24, &[worn, fresh, item(12, 2, "rope", 99, 1)]);
+        let tool = tool_for(&catalog, &r, Some(&inv), None).unwrap();
+        assert_eq!((tool.item_id, tool.installed, tool.term()), (Uuid::from_u128(11), false, 50));
+
+        let c = check(&r, &inp, None, Some(tool));
+        assert!(c.ready());
+        // 0.7 × 80 + 0.3 × 50 = 71.
+        assert_eq!(c.range, Some((68, 74)));
+        let tool_term = c.breakdown().into_iter().find(|t| t.source == quality::Source::Tool);
+        assert_eq!(tool_term.map(|t| t.quality), Some(50.0));
+        // An A-grade sickle would lift the floor by 0.3 × 40 = 12; the
+        // recipe gives a station nothing.
+        assert_eq!(
+            c.lifts(),
+            [Lift { source: quality::Source::Tool, at: LIFT_AT, floor: 80, by: 12 }]
+        );
+
+        // No sickle: held back, as the server would refuse it.
+        let bare = boxed(INV, "player_inventory", 24, &[]);
+        let c = check(&r, &inp, None, tool_for(&catalog, &r, Some(&bare), None));
+        assert_eq!(c.missing_tool(), Some("sickle"));
+        assert!(c.satisfied() && !c.ready());
+        // A recipe that needs no tool never picks one.
+        assert_eq!(tool_for(&catalog, &recipes()[0], Some(&inv), None), None);
+    }
+
+    /// At a station its own tool wins when its type matches, whatever the
+    /// one in your hands could do (E1.6)
+    #[test]
+    fn a_stations_tool_wins_when_its_type_matches() {
+        let catalog = Catalog::fallback();
+        let r = sickle_rope();
+        let inv = boxed(INV, "player_inventory", 24, &[sickle(11, 0, 95, 60, 87)]);
+        let installed = |item_type: &str, durability| StationTool {
+            item_id: Uuid::from_u128(20),
+            item_type: item_type.into(),
+            quality: 40,
+            durability,
+            max_durability: 54,
+            owner_id: None,
+        };
+        let pick = |slot: StationTool| {
+            tool_for(&catalog, &r, Some(&inv), Some(&slot)).map(|t| (t.item_id, t.installed))
+        };
+        assert_eq!(pick(installed("stone_sickle", 30)), Some((Uuid::from_u128(20), true)));
+        // Spent, or not a sickle: your own.
+        assert_eq!(pick(installed("stone_sickle", 0)), Some((Uuid::from_u128(11), false)));
+        assert_eq!(pick(installed("rope", 30)), Some((Uuid::from_u128(11), false)));
+        // Worn into the decline, its term drops: 40 × 0.5 at 5% left.
+        let low = tool_for(&catalog, &r, None, Some(&StationTool { durability: 3, max_durability: 60, ..installed("stone_sickle", 0) }));
+        assert_eq!(low.map(|t| t.term()), Some(20));
     }
 
     #[test]
@@ -735,7 +987,7 @@ mod tests {
         let r = recipes();
         let mixed = item(1, 0, "fiber", 70, 4).with_units(Units::from_pairs([(50, 2), (90, 2)]));
         let nineties = item(2, 0, "fiber", 90, 2);
-        assert_eq!(check(&r[0], &input(&[mixed]), None).range, check(&r[0], &input(&[nineties]), None).range);
+        assert_eq!(check(&r[0], &input(&[mixed]), None, None).range, check(&r[0], &input(&[nineties]), None, None).range);
     }
 
     /// Connected, with an inventory, the input box holding `items`, and an
@@ -797,7 +1049,7 @@ mod tests {
         let c = check(
             &r[0],
             state.crafting_input().unwrap(),
-            state.crafting_output(),
+            state.crafting_output(), None
         );
         assert!(crafting.start(&c, &state, t0).is_some());
         assert!(matches!(crafting.phase(), Phase::Asking { .. }));
@@ -863,7 +1115,7 @@ mod tests {
             &forge,
             state.station_container().unwrap(),
             state.crafting_output(),
-            90,
+            90, None
         );
         assert!(c.ready());
         // 0.56 × 70 + 0.24 × 50 + 0.2 × 90 (an A-grade bench) = 69.2.
@@ -871,7 +1123,7 @@ mod tests {
         let points: f64 = c.breakdown().iter().map(quality::Term::points).sum();
         assert!((points - 69.2).abs() < 1e-9);
         // The same box at a D-grade bench comes out 10 points lower.
-        let d = check_at(&forge, state.station_container().unwrap(), None, 40);
+        let d = check_at(&forge, state.station_container().unwrap(), None, 40, None);
         assert_eq!(d.range, Some((56, 62)));
         assert_eq!(
             crafting.start_at(&c, BENCH, &state, t0),
@@ -914,7 +1166,7 @@ mod tests {
         let t0 = Instant::now();
         let mut state = world(&[item(1, 0, "fiber", 60, 2)]);
         let mut crafting = Crafting::default();
-        let c = check(&r[0], state.crafting_input().unwrap(), None);
+        let c = check(&r[0], state.crafting_input().unwrap(), None, None);
 
         crafting.start(&c, &state, t0).unwrap();
         let changes = state.apply_ws(&M::CraftingFailed {
@@ -945,7 +1197,7 @@ mod tests {
             node_id: Uuid::from_u128(9),
             duration_ticks: 30,
         });
-        let c = check(&r[0], state.crafting_input().unwrap(), None);
+        let c = check(&r[0], state.crafting_input().unwrap(), None, None);
         assert!(!crafting.can_start(&state));
         assert!(crafting.start(&c, &state, t0).is_none());
         assert_eq!(crafting.cancel(&state), None);

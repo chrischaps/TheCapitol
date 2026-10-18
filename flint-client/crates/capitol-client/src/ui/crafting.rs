@@ -12,8 +12,12 @@
 //!   drags while a craft is out, so nothing it uses can be moved away
 //!   (B10, #61, may make the server refuse that itself).
 //! - **The quality range**, exact: the server's own cascade over the units
-//!   the craft takes (`rules::quality`), so only the roll is left. Hover it
-//!   for where the points come from.
+//!   the craft takes (`rules::quality`), so only the roll is left. Under it
+//!   a bar shows where the points come from (E1.7): each input, the
+//!   station and the tool end to end on a 0–100 scale, the roll a pale band
+//!   at the end, the grade lines ticked below. Hover either for the sums.
+//!   Then the tool it would use and its wear, and what an A-grade station
+//!   or tool would lift the floor to, where one would.
 //! - **Output with nowhere to go** stops the craft, says what's in the way
 //!   and offers to move it, because the server would destroy the output.
 //! - **Under way**: the bar, the time left and Cancel. Walking cancels too
@@ -93,6 +97,7 @@ impl CraftingPanel {
             recipe,
             state.crafting_input()?,
             state.crafting_output(),
+            craft::tool_in(state, recipe, false),
         ))
     }
 
@@ -388,8 +393,9 @@ pub(super) fn needs(ui: &mut egui::Ui, check: &Check) {
     });
 }
 
-/// What comes out and the range its quality will land in, with the
-/// breakdown on hover.
+/// What comes out and the range its quality will land in, the bar of where
+/// that comes from (E1.7), the tool it would use, and what a better station
+/// or tool would do. The full breakdown is on hover.
 pub(super) fn preview(ui: &mut egui::Ui, check: &Check, range: (i32, i32)) {
     let output = check
         .recipe
@@ -404,7 +410,144 @@ pub(super) fn preview(ui: &mut egui::Ui, check: &Check, range: (i32, i32)) {
             ui.label(theme::text(output));
             theme::range_badge(ui, range).on_hover_ui(|ui| breakdown(ui, check));
         });
+        ui.add_space(4.0);
+        source_bar(ui, check).on_hover_ui(|ui| breakdown(ui, check));
+        legend(ui, check);
+        if let Some(tool) = &check.tool {
+            tool_line(ui, tool);
+        }
+        for lift in check.lifts() {
+            let what = match lift.source {
+                quality::Source::Station => "An A-grade station",
+                _ => "An A-grade tool in good repair",
+            };
+            ui.label(
+                theme::dim(format!(
+                    "{what} would lift the floor to {} (+{})",
+                    lift.floor, lift.by
+                ))
+                .size(size::LABEL),
+            );
+        }
     });
+}
+
+/// A source's colour in the breakdown bar: the inputs in violet, each one
+/// after the first a little lighter, then the station and the tool.
+fn source_colour(source: &quality::Source, input_index: usize) -> egui::Color32 {
+    match source {
+        quality::Source::Input(_) => {
+            theme::SOURCE_INPUT.lerp_to_gamma(egui::Color32::WHITE, 0.22 * input_index as f32)
+        }
+        quality::Source::Station => theme::SOURCE_STATION,
+        quality::Source::Tool => theme::SOURCE_TOOL,
+    }
+}
+
+/// The grade boundaries the bar marks: D, C, B and A begin here.
+const GRADE_LINES: [i32; 4] = [35, 55, 75, 90];
+
+/// Where the output's quality comes from, on a 0–100 bar (E1.7): each
+/// source's points laid end to end in its colour, the roll a pale band over
+/// the end, and the grade boundaries ticked underneath.
+fn source_bar(ui: &mut egui::Ui, check: &Check) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 16.0), egui::Sense::hover());
+    let bar = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 9.0));
+    let painter = ui.painter();
+    let x = |q: f64| bar.left() + bar.width() * (q.clamp(0.0, 100.0) / 100.0) as f32;
+    painter.rect_filled(bar, 3.0, theme::BAR_TRACK);
+    let mut at = 0.0;
+    let mut inputs = 0;
+    for term in check.breakdown() {
+        let colour = source_colour(&term.source, inputs);
+        if matches!(term.source, quality::Source::Input(_)) {
+            inputs += 1;
+        }
+        let end = at + term.points();
+        let part = egui::Rect::from_x_y_ranges(x(at)..=x(end), bar.y_range());
+        painter.rect_filled(part, 0.0, colour);
+        at = end;
+    }
+    // The roll: from the low end of the range to the high, over the bar.
+    let weights = &check.recipe.quality_weights;
+    let base = at.round();
+    let (low, high) = (base + weights.variance_min as f64, base + weights.variance_max as f64);
+    let roll = egui::Rect::from_x_y_ranges(x(low)..=x(high), bar.y_range().expand(1.5));
+    painter.rect_filled(roll, 1.0, theme::SOURCE_ROLL);
+    for edge in [roll.left(), roll.right()] {
+        painter.vline(edge, roll.y_range(), egui::Stroke::new(1.0_f32, theme::TEXT));
+    }
+    painter.rect_stroke(bar, 3.0, egui::Stroke::new(1.0_f32, theme::PIP_EDGE));
+    for q in GRADE_LINES {
+        let tick_x = x(q as f64);
+        painter.vline(
+            tick_x,
+            (bar.bottom() + 1.0)..=(bar.bottom() + 5.0),
+            egui::Stroke::new(1.0_f32, theme::GRADE_TICK),
+        );
+    }
+    response
+}
+
+/// The bar's key: each source, its colour, and the points it puts in.
+fn legend(ui: &mut egui::Ui, check: &Check) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 2.0);
+        let mut inputs = 0;
+        for term in check.breakdown() {
+            let colour = source_colour(&term.source, inputs);
+            if matches!(term.source, quality::Source::Input(_)) {
+                inputs += 1;
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                let (dot, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
+                ui.painter().rect_filled(dot, 1.5, colour);
+                ui.label(
+                    theme::dim(format!("{} {:.0}", source_name(check, &term.source), term.points()))
+                        .size(size::LABEL),
+                );
+            });
+        }
+        let w = &check.recipe.quality_weights;
+        ui.label(theme::dim(format!("roll {:+}…{:+}", w.variance_min, w.variance_max)).size(size::LABEL));
+    });
+}
+
+/// The tool the craft would use: whose, its quality, and what its wear
+/// leaves of it for the tool term.
+fn tool_line(ui: &mut egui::Ui, tool: &craft::ToolPick) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let whose = if tool.installed { "The station's" } else { "Your" };
+        ui.label(theme::dim(format!("{whose} {}", tool.item_name)).size(size::LABEL));
+        theme::quality_badge(ui, tool.tool.quality);
+        let left = format!("{} of {} uses", tool.tool.durability, tool.tool.max_durability);
+        if tool.term() < tool.tool.quality {
+            ui.label(
+                RichText::new(format!("worn: counts {} · {left}", tool.term()))
+                    .color(theme::EMBER)
+                    .size(size::LABEL),
+            );
+        } else {
+            ui.label(theme::dim(left).size(size::LABEL));
+        }
+    });
+}
+
+/// A breakdown term's name: the input's item name, "Station" or "Tool".
+fn source_name<'a>(check: &'a Check, source: &'a quality::Source) -> &'a str {
+    match source {
+        quality::Source::Input(item) => check
+            .recipe
+            .inputs
+            .iter()
+            .find(|i| &i.item_type == item)
+            .map_or(item.as_str(), |i| i.item_name.as_str()),
+        quality::Source::Station => "Station",
+        quality::Source::Tool => "Tool",
+    }
 }
 
 /// Where the output's quality comes from: each source's weight and quality,
@@ -417,17 +560,7 @@ fn breakdown(ui: &mut egui::Ui, check: &Check) {
         .show(ui, |ui| {
             let mut total = 0.0;
             for term in check.breakdown() {
-                let name = match &term.source {
-                    quality::Source::Input(item) => check
-                        .recipe
-                        .inputs
-                        .iter()
-                        .find(|i| &i.item_type == item)
-                        .map_or(item.as_str(), |i| i.item_name.as_str()),
-                    quality::Source::Station => "Station",
-                    quality::Source::Tool => "Tool",
-                };
-                ui.label(theme::text(name));
+                ui.label(theme::text(source_name(check, &term.source)));
                 ui.label(theme::dim(format!(
                     "{:.0}% of {:.1}",
                     term.weight * 100.0,
@@ -502,6 +635,8 @@ pub(super) fn craft_label(
         ("Finish gathering first".into(), false)
     } else if !check.satisfied() {
         (format!("Need materials for {name}"), false)
+    } else if let Some(tool) = check.missing_tool() {
+        (format!("Need a {tool} for {name}"), false)
     } else if check.blocked.is_some() {
         ("Clear the output first".into(), false)
     } else {

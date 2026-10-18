@@ -658,6 +658,11 @@ impl PlayerExtension for CapitolExtension {
 
     fn ui(&mut self, ctx: &egui::Context) {
         ui::theme::install(ctx);
+        // What a tool's tooltip reads its power from (E1.7)
+        match &self.session {
+            Some(session) => ui::slots::know_catalog(ctx, session.state().catalog()),
+            None => ui::slots::know_catalog(ctx, &capitol_core::catalog::Catalog::fallback()),
+        }
         if let Ok(mut egui) = self.shared.egui.lock() {
             // For measuring names (`cap_name_tags`), now the fonts are in.
             egui.get_or_insert_with(|| ctx.clone());
@@ -851,6 +856,11 @@ impl PlayerExtension for CapitolExtension {
                     Some(StationAction::Cancel) => session.cancel_craft(),
                     Some(StationAction::Close) => session.close_station(),
                     Some(StationAction::Remove(id)) => session.remove_station(id),
+                    Some(StationAction::InstallTool {
+                        station_id,
+                        item_id,
+                    }) => session.install_tool(station_id, item_id),
+                    Some(StationAction::RemoveTool(id)) => session.remove_tool(id),
                     None => {}
                 }
                 let state = session.state();
@@ -949,6 +959,7 @@ impl PlayerExtension for CapitolExtension {
         if let Some(juice) = &mut self.juice {
             juice.ui(ctx, &mut self.icons, &self.shared);
         }
+        ui::slots::paint_shatters(ctx);
         if !self.in_world() {
             self.shortcuts.open = false;
         }
@@ -1371,7 +1382,11 @@ fn plots(
         data.insert("body".into(), body.into());
         ctx.fire_event("plot_note", data);
     }
-    for name in session.take_broken_tools() {
+    let egui = shared.egui.lock().ok().and_then(|e| e.clone());
+    for (item_id, name) in session.take_broken_tools() {
+        if let Some(egui) = &egui {
+            ui::slots::shatter(egui, item_id);
+        }
         let mut data = toml::Table::new();
         data.insert("title".into(), format!("Your {name} broke").into());
         data.insert("body".into(), "Worn out. Make or buy another".into());

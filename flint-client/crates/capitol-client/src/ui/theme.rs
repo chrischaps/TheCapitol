@@ -92,6 +92,26 @@ pub const SLOT_SIZE: f32 = 48.0;
 pub const SLOT_ICON: f32 = 36.0;
 pub const SLOT_GAP: f32 = 4.0;
 
+/// A tool's wear bar (E1.7): pale tempered steel while it's sound, ember
+/// below 20% (`rules::tools::PLATEAU_FLOOR`), where its work starts to
+/// suffer, and breathing towards white heat below 5% (`CLIFF_EDGE`).
+pub const WEAR: Color32 = rgb(0xc8d3df);
+pub const EMBER: Color32 = rgb(0xf26b1d);
+pub const EMBER_HOT: Color32 = rgb(0xffc56b);
+/// The bar's empty track.
+pub const WEAR_TRACK: Color32 = rgba(0, 0, 0, 0.55);
+
+/// Where a craft's quality comes from, in the breakdown bar (E1.7): the
+/// inputs in the crafting violet, lighter for each one after the first, the
+/// station in its orange, the tool in steel, and the roll a pale band.
+pub const SOURCE_INPUT: Color32 = CRAFT;
+pub const SOURCE_STATION: Color32 = STATION;
+pub const SOURCE_TOOL: Color32 = rgb(0x94a3b8);
+pub const SOURCE_ROLL: Color32 = rgba(240, 240, 255, 0.4);
+/// The breakdown bar's empty track, and a grade boundary's tick on it.
+pub const BAR_TRACK: Color32 = rgba(0, 0, 0, 0.35);
+pub const GRADE_TICK: Color32 = rgba(255, 255, 255, 0.22);
+
 /// A quality grade's pip colour (plan §4.7), for a letter from
 /// `capitol_protocol::rules::quality_grade`.
 pub fn grade(letter: &str) -> Color32 {

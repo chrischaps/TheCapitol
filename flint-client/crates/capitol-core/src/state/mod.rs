@@ -507,7 +507,7 @@ impl GameState {
                 item_name,
                 quantity,
                 quality,
-                // The tool's wear is shown by E1.7 (#159)
+                // The tool's wear arrives with the inventory refetch that follows
                 tool: _,
             } => {
                 let local = StateEvent::ExtractionCompleted {
@@ -667,7 +667,7 @@ impl GameState {
                     });
                 }
             }
-            // Kept on the station for E1.7's tool slot (#159), which shows it
+            // Kept on the station for its panel's tool slot (E1.7)
             M::StationToolChanged { station_id, tool } => {
                 if let Some(station) = self.stations.get_mut(station_id) {
                     station.tool = tool.clone();

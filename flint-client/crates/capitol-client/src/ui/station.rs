@@ -15,17 +15,23 @@
 //!   own crafting output, not the station's box. React doesn't say so; this
 //!   shows that slot under the box, so you can see it arrive and drag it
 //!   out.
+//! - **The tool slot (E1.6, E1.7)**, under a crafting station's box: drag a
+//!   tool in to install it (`install_tool`), drag it out to any slot of the
+//!   inventory, or press Take out (`remove_tool`; the server puts it in your
+//!   inventory). Taking it out is for whoever put it in and the station's
+//!   owner. While it's there, a recipe of its type uses it before yours, and
+//!   it wears here.
 //! - **Remove**, for the owner, once the box is empty. The server refuses
 //!   while it holds anything and puts the kit back in your inventory (#88),
 //!   so taking a station down is how you move it, and it doesn't ask twice.
 
 use super::crafting::{blocked_box, craft_label, needs, preview, under_way, Fill};
 use super::icons::ItemIcons;
-use super::slots::{Move, SlotGrid};
+use super::slots::{Move, Slot, SlotGrid};
 use super::theme::{self, size, DIM, STATION};
 use capitol_core::craft::{self, Check, Phase};
 use capitol_core::protocol::rules::quality;
-use capitol_core::protocol::rest::RecipeInfo;
+use capitol_core::protocol::rest::{RecipeInfo, SlotItem};
 use capitol_core::state::{Activity, GameState};
 use capitol_core::station;
 use egui::{Align2, Id, RichText};
@@ -52,6 +58,16 @@ pub enum Action {
     Cancel,
     Close,
     Remove(Uuid),
+    /// Put this tool in the station's slot.
+    InstallTool { station_id: Uuid, item_id: Uuid },
+    /// Take the station's tool out, into your inventory.
+    RemoveTool(Uuid),
+}
+
+/// The tool slot's stand-in container id: a drop onto it is an install.
+/// Only this panel ever sees it.
+pub fn tool_slot_id(station_id: Uuid) -> Uuid {
+    Uuid::from_u128(station_id.as_u128() ^ 0x7001_7001)
 }
 
 /// What the panel keeps between frames.
@@ -89,11 +105,13 @@ impl StationPanel {
     /// The recipe weighed against the station's box and your output slot,
     /// at the station's quality.
     pub fn check<'a>(&self, state: &'a GameState) -> Option<Check<'a>> {
+        let recipe = self.recipe(state)?;
         Some(craft::check_at(
-            self.recipe(state)?,
+            recipe,
             state.station_container()?,
             state.crafting_output(),
             state.open_station_info()?.quality,
+            craft::tool_in(state, recipe, true),
         ))
     }
 
@@ -205,6 +223,8 @@ impl StationPanel {
                         ui.add_space(6.0);
                         theme::error_box(ui, why);
                     }
+                } else if let Some(a) = tool_slot(ui, icons, state, idle) {
+                    action = Some(a);
                 }
             });
             if !storage {
@@ -424,6 +444,75 @@ impl StationPanel {
         });
         action
     }
+}
+
+/// A crafting station's tool slot: the tool in it, as a slot you can drag
+/// out of or into, with its uses, and Take out for whoever may.
+fn tool_slot(
+    ui: &mut egui::Ui,
+    icons: &mut ItemIcons,
+    state: &GameState,
+    idle: bool,
+) -> Option<Action> {
+    let info = state.open_station_info()?;
+    let station_id = info.id;
+    let installed = info.tool.as_ref();
+    let item = installed.map(|t| {
+        SlotItem::new(
+            t.item_id,
+            t.item_type.clone(),
+            state.catalog().item_name(&t.item_type),
+            t.quality,
+            1,
+            0,
+        )
+        .with_durability(t.durability, t.max_durability)
+    });
+    let me = state.me();
+    let may_take = installed
+        .is_some_and(|t| me.is_some() && (t.owner_id == me || Some(info.owner_id) == me));
+    let mut action = None;
+    ui.add_space(8.0);
+    ui.label(theme::label("Tool slot"));
+    ui.horizontal(|ui| {
+        theme::tray().show(ui, |ui| {
+            let slot = Slot {
+                container_id: tool_slot_id(station_id),
+                index: 0,
+                item: item.as_ref(),
+                // A tool you may not take out can't be dragged out either
+                enabled: idle && (installed.is_none() || may_take),
+            };
+            if let Some(m) = slot.show(ui, icons) {
+                action = Some(Action::InstallTool {
+                    station_id,
+                    item_id: m.item_id,
+                });
+            }
+        });
+        ui.vertical(|ui| {
+            match installed {
+                Some(t) => {
+                    ui.label(theme::text(state.catalog().item_name(&t.item_type)).size(size::SMALL));
+                    ui.label(
+                        theme::dim(format!("{} of {} uses", t.durability, t.max_durability))
+                            .size(size::LABEL),
+                    );
+                    if may_take && idle && theme::link(ui, "Take out", size::LABEL).clicked() {
+                        action = Some(Action::RemoveTool(station_id));
+                    }
+                }
+                None => {
+                    ui.label(theme::dim("Drag a tool here").size(size::SMALL));
+                    ui.label(
+                        theme::dim("Recipes of its type use it first, and it wears here")
+                            .size(size::LABEL),
+                    );
+                }
+            }
+        });
+    });
+    action
 }
 
 /// The station's grade, and what it puts into the recipe picked: its share

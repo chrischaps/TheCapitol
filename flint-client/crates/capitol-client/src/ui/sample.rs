@@ -8,11 +8,20 @@
 //! offline.
 //!
 //! `tools/theme-sample.html` is the same pair in the React client's own CSS.
+//!
+//! **Tools and the breakdown (E1.7).** The inventory holds three stone
+//! sickles: one sound, one worn into the ember and one on the cliff, which
+//! breaks and shatters at [`BREAK_AT`] seconds. The preview is the real one
+//! (`crafting::preview`), for a made-up recipe that weighs fiber, a station
+//! and a sickle, so its bar, its tool line and its lifts can be captured
+//! offline.
 
 use super::icons::ItemIcons;
 use super::slots::{Move, SlotGrid};
 use super::theme::{self, size, CRAFT, DIM, ENOUGH, SHORT, SLOT_GAP, TEXT};
-use capitol_core::protocol::rest::SlotItem;
+use capitol_core::craft;
+use capitol_core::protocol::rest::{RecipeInfo, RecipeInputInfo, RecipeOutputInfo, SlotItem};
+use capitol_core::protocol::rules::quality;
 use capitol_core::protocol::rules::stacking::{Pick, Units};
 use capitol_core::state::Container;
 use egui::RichText;
@@ -24,6 +33,41 @@ pub struct Sample {
     quantity: String,
     /// Inventory, crafting input, crafting output.
     containers: [Container; 3],
+    /// When the sample first showed, by egui's clock.
+    since: Option<f64>,
+}
+
+/// When the sickle on the cliff breaks, in seconds after the sample shows.
+pub const BREAK_AT: f64 = 6.0;
+/// The sickle that breaks.
+const ON_THE_CLIFF: Uuid = Uuid::from_u128(12);
+/// The station quality the sample's preview is made at.
+const SAMPLE_STATION: i32 = 64;
+
+/// A recipe for the preview to weigh: three fiber, at a station, with a
+/// sickle, give or take 3.
+fn sample_recipe() -> RecipeInfo {
+    RecipeInfo {
+        id: "sample_cord".into(),
+        name: "Fine Cord".into(),
+        description: None,
+        category: "station_crafting".into(),
+        inputs: vec![RecipeInputInfo {
+            item_type: "fiber".into(),
+            item_name: "Plant Fiber".into(),
+            quantity: 3,
+        }],
+        outputs: vec![RecipeOutputInfo {
+            item_type: "rope".into(),
+            item_name: "Fine Cord".into(),
+            quantity_min: 1,
+            quantity_max: 1,
+        }],
+        duration_ticks: 60,
+        required_station_type: Some("workbench".into()),
+        quality_weights: quality::Weights::for_recipe([("fiber", 1.0)], Some(0.2), Some(0.25), true, -3, 3),
+        tool_type: Some("sickle".into()),
+    }
 }
 
 impl Default for Sample {
@@ -55,6 +99,11 @@ impl Default for Sample {
                         item(2, 1, "fiber", "Plant Fiber", 77, 9)
                             .with_units(Units::from_pairs([(44, 2), (81, 3), (92, 4)])),
                         item(3, 2, "rope", "Rope", 64, 3),
+                        // Sickles at three wear levels (E1.7): sound, the
+                        // ember below 20%, and the cliff below 5%
+                        item(10, 14, "stone_sickle", "Stone Sickle", 72, 1).with_durability(70, 73),
+                        item(11, 15, "stone_sickle", "Stone Sickle", 48, 1).with_durability(10, 59),
+                        item(12, 16, "stone_sickle", "Stone Sickle", 85, 1).with_durability(3, 81),
                         item(4, 6, "fiber", "Plant Fiber", 41, 4),
                         item(5, 7, "workbench_kit", "Workbench Kit", 70, 1),
                         item(6, 8, "chest_kit", "Storage Chest Kit", 22, 1),
@@ -79,6 +128,7 @@ impl Default for Sample {
                 ),
                 Container::new(id(3), "crafting_output", 1, 1, &[]),
             ],
+            since: None,
         }
     }
 }
@@ -112,6 +162,21 @@ impl Sample {
             });
         if let Some(m) = moved {
             apply(&mut self.containers, m);
+        }
+        let now = ctx.input(|i| i.time);
+        let since = *self.since.get_or_insert(now);
+        let inventory = &mut self.containers[0];
+        if now - since >= BREAK_AT {
+            if let Some(slot) = inventory
+                .slots
+                .iter()
+                .position(|s| s.as_ref().is_some_and(|i| i.item_id == ON_THE_CLIFF))
+            {
+                super::slots::shatter(ctx, ON_THE_CLIFF);
+                inventory.slots[slot] = None;
+            }
+        } else {
+            ctx.request_repaint();
         }
     }
 
@@ -183,15 +248,13 @@ impl Sample {
         });
         ui.add_space(6.0);
 
-        theme::well().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.add_space(((ui.available_width() - 130.0) / 2.0).max(0.0));
-                ui.label(theme::dim("Preview:"));
-                ui.label(theme::text("Rope"));
-                theme::range_badge(ui, (79, 85));
-            });
-        });
+        let recipe = sample_recipe();
+        let catalog = capitol_core::catalog::Catalog::fallback();
+        let tool = craft::tool_for(&catalog, &recipe, Some(&self.containers[0]), None);
+        let check = craft::check_at(&recipe, &self.containers[1], None, SAMPLE_STATION, tool);
+        if let Some(range) = check.range {
+            super::crafting::preview(ui, &check, range);
+        }
         ui.add_space(6.0);
 
         ui.horizontal(|ui| {

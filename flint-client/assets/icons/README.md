@@ -19,4 +19,4 @@ Keep new icons in this style so the inventory reads as one set:
 - **Light:** from the top left. One thin highlight line on the top edge, a pale tint at 40–60% opacity.
 - **Gold:** one touch of the Capitol's gold `#c9a227`: a band, a lock, a tie. It makes them read as one family on the panel.
 
-Palette so far: plant greens `#4d7c0f` `#65a30d` `#84cc16`; rope and wood `#b08850` `#a0742c` `#8b5a2b` `#6b4a1a`; iron `#64748b` `#94a3b8`; heat `#f97316` `#fbbf24`; unknown slate `#6b6b7a`.
+Palette so far: plant greens `#4d7c0f` `#65a30d` `#84cc16`; rope and wood `#b08850` `#a0742c` `#8b5a2b` `#6b4a1a`; iron `#64748b` `#94a3b8`; flint `#a8a29e` `#78716c` `#57534e` (ink `#1c1917`); heat `#f97316` `#fbbf24`; unknown slate `#6b6b7a`.

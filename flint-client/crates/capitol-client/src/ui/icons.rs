@@ -149,12 +149,13 @@ fn rasterize(tree: &usvg::Tree, px: u32) -> egui::ColorImage {
 
 /// The item types the server knows today, with their names, for the sheet.
 /// The last one has no icon, to show the fallback.
-const SHEET: [(&str, &str); 6] = [
+const SHEET: [(&str, &str); 7] = [
     ("fiber", "Plant Fiber"),
     ("rope", "Rope"),
     ("workbench_kit", "Workbench Kit"),
     ("forge_kit", "Forge Kit"),
     ("chest_kit", "Storage Chest Kit"),
+    ("stone_sickle", "Stone Sickle"),
     ("lantern_oil", "(no icon yet)"),
 ];
 
@@ -206,7 +207,7 @@ pub fn sheet(ctx: &egui::Context, icons: &mut ItemIcons) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 for (i, (item_type, name)) in SHEET.iter().enumerate() {
-                    let item = sheet_item(i, item_type, name, [12, 3, 1, 1, 1, 7][i]);
+                    let item = sheet_item(i, item_type, name, [12, 3, 1, 1, 1, 1, 7][i]);
                     Slot {
                         container_id: uuid::Uuid::nil(),
                         index: i,

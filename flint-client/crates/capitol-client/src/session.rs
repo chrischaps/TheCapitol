@@ -127,7 +127,7 @@ pub struct Session {
     /// frame last took them.
     plot_notes: Vec<PlotNote>,
     /// The names of tools that broke, for a toast each.
-    broken_tools: Vec<String>,
+    broken_tools: Vec<(Uuid, String)>,
     /// The deposit or withdrawal the server is answering (P7.2).
     exchanging: Option<Asked>,
     /// Why the last one was refused, and when.
@@ -439,6 +439,25 @@ impl Session {
         }
     }
 
+    /// Puts a tool from your inventory in a station's tool slot (E1.6). The
+    /// server answers with `station_tool_changed`, or an `error` that
+    /// [`Session::move_refused`] shows.
+    pub fn install_tool(&mut self, station: Uuid, item_id: Uuid) {
+        tracing::info!("station: installing {item_id} in {station}");
+        self.net.ws(ClientMessage::InstallTool {
+            station_id: station.to_string(),
+            item_id: item_id.to_string(),
+        });
+    }
+
+    /// Takes a station's tool out, into your inventory.
+    pub fn remove_tool(&mut self, station: Uuid) {
+        tracing::info!("station: taking the tool out of {station}");
+        self.net.ws(ClientMessage::RemoveTool {
+            station_id: station.to_string(),
+        });
+    }
+
     /// Takes a station down. The server refuses unless it's yours.
     pub fn remove_station(&mut self, station: Uuid) {
         tracing::info!("station: removing {station}");
@@ -461,7 +480,8 @@ impl Session {
             return;
         };
         let station_id = open.id;
-        let check = craft::check_at(recipe, bench, self.state.crafting_output(), open.quality);
+        let tool = craft::tool_in(&self.state, recipe, true);
+        let check = craft::check_at(recipe, bench, self.state.crafting_output(), open.quality, tool);
         if let Some(message) = self.crafting.start_at(&check, station_id, &self.state, now) {
             tracing::info!(
                 "craft: {} at {station_id} from {} stacks",
@@ -510,6 +530,17 @@ impl Session {
     /// both containers (#77), but a refused move comes back on the request's
     /// own tag over REST, not as an anonymous socket `error` (#89).
     pub fn move_item(&mut self, m: Move) {
+        // The open station's tool is in no container: a drag of it out of
+        // its slot is a `remove_tool`, and it lands where the server puts it
+        let installed = self
+            .state
+            .open_station_info()
+            .filter(|s| s.tool.as_ref().is_some_and(|t| t.item_id == m.item_id))
+            .map(|s| s.id);
+        if let Some(station) = installed {
+            self.remove_tool(station);
+            return;
+        }
         let request = match m.split {
             // A split goes into the same container: the server knows which
             Some(quantity) => RestRequest::SplitStack {
@@ -568,7 +599,8 @@ impl Session {
         else {
             return;
         };
-        let check = craft::check(recipe, input, self.state.crafting_output());
+        let tool = craft::tool_in(&self.state, recipe, false);
+        let check = craft::check(recipe, input, self.state.crafting_output(), tool);
         if let Some(message) = self.crafting.start(&check, &self.state, now) {
             tracing::info!(
                 "craft: {} from {} stacks",
@@ -682,8 +714,8 @@ impl Session {
         std::mem::take(&mut self.claimed)
     }
 
-    /// The names of the tools that broke since the last call.
-    pub fn take_broken_tools(&mut self) -> Vec<String> {
+    /// The tools that broke since the last call, and their names.
+    pub fn take_broken_tools(&mut self) -> Vec<(Uuid, String)> {
         std::mem::take(&mut self.broken_tools)
     }
 
@@ -1234,8 +1266,16 @@ impl Session {
                     StateEvent::SubscriptionLapsed { until } => self
                         .plot_notes
                         .push(PlotNote::SubscriptionLapsed { until: *until }),
-                    StateEvent::ToolBroke { item_name, .. } => {
-                        self.broken_tools.push(item_name.clone())
+                    StateEvent::ToolBroke {
+                        item_id, item_name, ..
+                    } => self.broken_tools.push((*item_id, item_name.clone())),
+                    // A tool slot refused: shown where a refused move is
+                    StateEvent::ServerError {
+                        message,
+                        command,
+                    } if command == "install_tool" || command == "remove_tool" => {
+                        tracing::info!("station: {command} refused: {message}");
+                        self.move_refused = Some((message.clone(), now));
                     }
                     _ => {}
                 }
@@ -1830,7 +1870,7 @@ mod tests {
         let check = |s: &Session, id: &str| {
             let st = s.state();
             let r = st.recipe(id).unwrap().clone();
-            let c = craft::check(&r, st.crafting_input().unwrap(), st.crafting_output());
+            let c = craft::check(&r, st.crafting_input().unwrap(), st.crafting_output(), None);
             (c.satisfied(), c.blocked.is_some())
         };
         let idle = |s: &Session| *s.crafting().phase() == Phase::Idle && !s.state().is_crafting();
@@ -2246,7 +2286,7 @@ mod tests {
         let ready = |s: &Session| {
             let st = s.state();
             let r = st.recipe("craft_forge").unwrap();
-            station_box(s).is_some_and(|b| craft::check(r, &b, st.crafting_output()).ready())
+            station_box(s).is_some_and(|b| craft::check(r, &b, st.crafting_output(), None).ready())
         };
         wait(&mut session, "rope and fiber on the workbench", &ready);
 
