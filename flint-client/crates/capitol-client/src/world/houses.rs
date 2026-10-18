@@ -1064,7 +1064,8 @@ pub fn lamp_light(glow: PlotGlow) -> f32 {
 }
 
 /// How much light a lit pane's surface share stands for: about what the
-/// low sun of dawn and dusk lit it with (matched against captures).
+/// low sun of dawn and dusk lit it with (matched against captures). An
+/// approximation until the engine can move the share itself (#139).
 const SURFACE_AS_LIGHT: f32 = 0.4;
 
 /// The windows' light against the plots' gold.

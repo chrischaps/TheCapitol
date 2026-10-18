@@ -479,7 +479,7 @@ impl PlayerExtension for CapitolExtension {
         // Your plots in gold, rebuilt when they change or the light on them
         // does (P8.6a). Not `emissive_scale` (H23, #130) like the windows:
         // the gold also slides from lit surface to light, which a strength
-        // can't, and the mesh is a few dozen quads. Offline, none.
+        // can't (#139), and the mesh is a few dozen quads. Offline, none.
         let owned = self
             .session
             .as_ref()
