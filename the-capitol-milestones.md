@@ -339,13 +339,13 @@ Create static data for:
 #### Backend - Station Crafting
 - [x] `POST /stations/{id}/use` - Begin using station *(WS open/close station commands)*
 - [x] `POST /stations/{id}/release` - Stop using station *(WS open/close station commands)*
-- [ ] Station contributes to quality calculation: *(not yet: no station term in the quality formula)*
+- [x] Station contributes to quality calculation *(E1.1 #153 added the station term, E1.3 #155 fed it the station's quality)*
   ```
   output_quality = Σ(input_quality × input_weight) 
                  + (station_quality × station_weight)
                  + random_variance
   ```
-- [ ] Stations have quality (from their own crafting) *(stations have no quality column yet)*
+- [x] Stations have quality (from their own crafting) *(the kit's quality, `stations.kit_quality` since #88; on the wire as `StationInfo.quality`, E1.3 #155)*
 - [x] Recipes can require specific station types
 
 #### Backend - Tool Installation
@@ -368,7 +368,7 @@ Create static data for:
 
 #### Client - Station Crafting UI
 - [x] When using station: show station-enabled recipes
-- [ ] Quality preview (estimate output quality)
+- [x] Quality preview (estimate output quality) *(the exact range, E1.1 #153, at the station's own quality since E1.3 #155)*
 - [ ] Tool installation interface
 
 ### Acceptance Criteria

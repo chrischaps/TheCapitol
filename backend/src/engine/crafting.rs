@@ -18,6 +18,9 @@ pub struct CraftingOperation {
     pub input_items_to_consume: Vec<(Uuid, i32)>,
     /// The units taken, by type, for each input's mean quality.
     pub inputs: quality::Inputs,
+    /// The quality of the station it's made at, as it was at the start
+    /// (`quality::NO_STATION` by hand).
+    pub station_quality: i32,
 }
 
 /// Process crafting for all players actively crafting.
@@ -65,7 +68,7 @@ pub fn process_crafting(
     for operation_id in completed_operations {
         if let Some(operation) = crafting_operations.remove(&operation_id) {
             if let Some(recipe) = recipes.get(&operation.recipe_id) {
-                let output_quality = output_quality(&operation.inputs, recipe);
+                let output_quality = output_quality(&operation.inputs, operation.station_quality, recipe);
 
                 // Roll the outputs; they're written, and announced, by the tick loop
                 let mut rng = rand::thread_rng();
@@ -98,19 +101,20 @@ pub fn process_crafting(
 }
 
 /// The output's quality: the cascade (`rules::quality::output`) with a rolled
-/// variance. Stations count as unrated until they carry a quality (E1.3,
-/// #155), and no recipe weights a tool yet (E1.4, #156).
-pub fn output_quality(inputs: &quality::Inputs, recipe: &Recipe) -> i32 {
+/// variance. No recipe weights a tool yet (E1.4, #156).
+pub fn output_quality(inputs: &quality::Inputs, station_quality: i32, recipe: &Recipe) -> i32 {
     let weights = &recipe.quality_weights;
     let variance = rand::thread_rng().gen_range(weights.variance_min..=weights.variance_max);
-    quality::output(inputs, quality::UNRATED_STATION_QUALITY, 0, weights, variance)
+    quality::output(inputs, station_quality, 0, weights, variance)
 }
 
-/// Start crafting for a player
+/// Start crafting for a player, at a station of `station_quality`
+/// (`quality::NO_STATION` by hand)
 pub fn start_crafting(
     player: &mut PlayerState,
     recipe: &Recipe,
     input_items: &[Item],
+    station_quality: i32,
     crafting_operations: &mut HashMap<Uuid, CraftingOperation>,
     event_sender: &broadcast::Sender<GameEvent>,
 ) -> Result<Uuid, String> {
@@ -168,6 +172,7 @@ pub fn start_crafting(
         recipe_id: recipe.id.clone(),
         input_items_to_consume: items_to_consume,
         inputs,
+        station_quality,
     });
 
     // Emit event
@@ -272,8 +277,8 @@ mod tests {
 
     /// What a client sends and expects (`capitol-core` `craft::check`): for
     /// each input in recipe order, stacks in slot order until it's met, and
-    /// the range over the units that takes.
-    fn client_side(recipe: &Recipe, slots: &[Item]) -> (Vec<Item>, Vec<(Uuid, i32)>, (i32, i32)) {
+    /// the range over the units that takes, at a station of `station`.
+    fn client_side(recipe: &Recipe, slots: &[Item], station: i32) -> (Vec<Item>, Vec<(Uuid, i32)>, (i32, i32)) {
         let (mut sent, mut taken, mut units) = (Vec::new(), Vec::new(), quality::Inputs::default());
         for need in &recipe.inputs {
             let mut left = need.quantity;
@@ -288,12 +293,7 @@ mod tests {
                 taken.push((item.id, used));
             }
         }
-        let range = quality::output_range(
-            &units,
-            quality::UNRATED_STATION_QUALITY,
-            0,
-            &recipe.quality_weights,
-        );
+        let range = quality::output_range(&units, station, 0, &recipe.quality_weights);
         (sent, taken, range)
     }
 
@@ -317,16 +317,42 @@ mod tests {
             for i in (1..slots.len()).rev() {
                 slots.swap(i, rng.gen_range(0..=i));
             }
-            let (sent, taken, (low, high)) = client_side(&recipe, &slots);
+            let station = rng.gen_range(0..=100);
+            let (sent, taken, (low, high)) = client_side(&recipe, &slots, station);
 
             let mut ada = player();
             let mut ops = HashMap::new();
-            start_crafting(&mut ada, &recipe, &sent, &mut ops, &events).unwrap();
+            start_crafting(&mut ada, &recipe, &sent, station, &mut ops, &events).unwrap();
             let mut players: HashMap<_, _> = [(ada.id, ada)].into();
             let done = process_crafting(&mut players, &recipes, &mut ops, &HashMap::new(), &events);
             assert_eq!(done[0].inputs, taken, "the server takes what the client counted");
             let q = done[0].outputs[0].quality;
             assert!(low <= q && q <= high, "{q} outside {low}..={high}");
+        }
+    }
+
+    /// The same inputs made at an A-grade station and a D-grade one: the
+    /// station's 0.2 share is 11 points between 95 and 40, more than the
+    /// variance's whole spread of 6, so the A station always wins.
+    #[test]
+    fn a_better_station_makes_better_output() {
+        let recipe = forge();
+        let recipes: HashMap<_, _> = [(recipe.id.clone(), recipe.clone())].into();
+        let (events, _rx) = broadcast::channel(64);
+        let mut rng = StdRng::seed_from_u64(155);
+        let craft = |items: &[Item], station: i32| {
+            let mut ada = player();
+            let mut ops = HashMap::new();
+            start_crafting(&mut ada, &recipe, items, station, &mut ops, &events).unwrap();
+            let mut players: HashMap<_, _> = [(ada.id, ada)].into();
+            process_crafting(&mut players, &recipes, &mut ops, &HashMap::new(), &events)[0].outputs[0].quality
+        };
+        for _ in 0..200 {
+            let mut items = vec![stack(&mut rng, "rope"), stack(&mut rng, "fiber")];
+            items[0].quantity = 4;
+            items[1].quantity = 6;
+            let (a, d) = (craft(&items, 95), craft(&items, 40));
+            assert!(a > d, "an A station made {a}, a D station {d}");
         }
     }
 }

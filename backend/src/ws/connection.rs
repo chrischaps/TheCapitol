@@ -383,6 +383,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                     y: station_info.y,
                                                     plot_id: result.plot_id,
                                                     container_id: station_info.container_id,
+                                                    quality: station_info.quality,
                                                 };
                                                 game.stations.insert(station_info.id, station_state);
                                             }
@@ -396,6 +397,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                 x: station_info.x,
                                                 y: station_info.y,
                                                 container_id: station_info.container_id.unwrap_or(Uuid::nil()),
+                                                quality: station_info.quality,
                                             };
                                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                                         }
@@ -1346,6 +1348,7 @@ async fn handle_place_station(
             owner_id: player_id,
             container_id: Some(container_id),
             interaction_range: st.interaction_range,
+            quality: kit_item.quality,
         },
         plot_id: Some(plot.id),
     })

@@ -50,10 +50,6 @@ pub const UNANSWERED: Duration = Duration::from_secs(3);
 /// inputs it used to leave the inventory.
 pub const SETTLE: Duration = Duration::from_secs(2);
 
-/// The quality the server gives every station until stations carry one
-/// (E1.3, #155). It only counts in station recipes.
-const STATION_QUALITY: i32 = quality::UNRATED_STATION_QUALITY;
-
 /// The recipes that need no station.
 pub fn hand_recipes(recipes: &[RecipeInfo]) -> impl Iterator<Item = &RecipeInfo> {
     recipes.iter().filter(|r| r.required_station_type.is_none())
@@ -143,6 +139,8 @@ pub struct Check<'a> {
     pub range: Option<(i32, i32)>,
     /// What's in the way in the output box, if the output would be lost.
     pub blocked: Option<Blocked>,
+    /// The quality of the station it's made at (`quality::NO_STATION` by hand).
+    pub station: i32,
 }
 
 impl Check<'_> {
@@ -160,7 +158,7 @@ impl Check<'_> {
     /// Where the output's quality comes from: each input's weight and mean
     /// quality, then the station's.
     pub fn breakdown(&self) -> Vec<quality::Term> {
-        quality::terms(&self.taken, STATION_QUALITY, 0, &self.recipe.quality_weights)
+        quality::terms(&self.taken, self.station, 0, &self.recipe.quality_weights)
     }
 
     /// The `craft` message for it.
@@ -181,11 +179,22 @@ impl Check<'_> {
     }
 }
 
-/// Weighs `recipe` against the input box, and the output box if it's known.
+/// Weighs a hand `recipe` against the input box, and the output box if it's known.
 pub fn check<'a>(
     recipe: &'a RecipeInfo,
     input: &Container,
     output: Option<&Container>,
+) -> Check<'a> {
+    check_at(recipe, input, output, quality::NO_STATION)
+}
+
+/// As [`check`], at a station of quality `station`: its share of the output
+/// counts that quality, as the server's does.
+pub fn check_at<'a>(
+    recipe: &'a RecipeInfo,
+    input: &Container,
+    output: Option<&Container>,
+    station: i32,
 ) -> Check<'a> {
     let mut needs = Vec::with_capacity(recipe.inputs.len());
     let mut inputs = Vec::new();
@@ -210,7 +219,7 @@ pub fn check<'a>(
     }
     let satisfied = needs.iter().all(Need::met);
     let range = satisfied.then(|| {
-        quality::output_range(&taken, STATION_QUALITY, 0, &recipe.quality_weights)
+        quality::output_range(&taken, station, 0, &recipe.quality_weights)
     });
     Check {
         recipe,
@@ -219,6 +228,7 @@ pub fn check<'a>(
         taken,
         range,
         blocked: output.and_then(|o| blocked(recipe, o)),
+        station,
     }
 }
 
@@ -812,16 +822,20 @@ mod tests {
         };
         fill(&mut state, 5);
         let mut crafting = Crafting::default();
-        let c = check(
+        let c = check_at(
             &forge,
             state.station_container().unwrap(),
             state.crafting_output(),
+            90,
         );
         assert!(c.ready());
-        // 0.56 × 70 + 0.24 × 50 + 0.2 × 50 (the unrated bench) = 61.2.
-        assert_eq!(c.range, Some((58, 64)));
+        // 0.56 × 70 + 0.24 × 50 + 0.2 × 90 (an A-grade bench) = 69.2.
+        assert_eq!(c.range, Some((66, 72)));
         let points: f64 = c.breakdown().iter().map(quality::Term::points).sum();
-        assert!((points - 61.2).abs() < 1e-9);
+        assert!((points - 69.2).abs() < 1e-9);
+        // The same box at a D-grade bench comes out 10 points lower.
+        let d = check_at(&forge, state.station_container().unwrap(), None, 40);
+        assert_eq!(d.range, Some((56, 62)));
         assert_eq!(
             crafting.start_at(&c, BENCH, &state, t0),
             Some(ClientMessage::CraftAtStation {

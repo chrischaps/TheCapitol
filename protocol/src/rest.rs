@@ -629,6 +629,9 @@ pub struct StationInfo {
     pub container_id: Option<Uuid>,
     /// Maximum interaction distance
     pub interaction_range: f32,
+    /// The station's quality, 0-100: the quality of the kit that placed it.
+    /// It's the station term of the quality cascade for crafts made here.
+    pub quality: i32,
 }
 
 /// `POST /stations/place`

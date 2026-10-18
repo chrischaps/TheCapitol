@@ -73,6 +73,7 @@ fn station(id: Uuid, owner: Uuid) -> StationInfo {
         owner_id: owner,
         container_id: Some(STATION_BOX),
         interaction_range: 75.0,
+        quality: 50,
     }
 }
 
@@ -887,6 +888,7 @@ fn station_placed_fills_in_from_the_catalog() {
         x: 4050.0,
         y: 4060.0,
         container_id: STATION_BOX,
+        quality: 82,
     });
     assert_eq!(
         events,
@@ -903,6 +905,7 @@ fn station_placed_fills_in_from_the_catalog() {
     assert_eq!(chest.icon.as_deref(), Some("chest"));
     assert_eq!(chest.interaction_range, 75.0);
     assert_eq!(chest.container_id, Some(STATION_BOX));
+    assert_eq!(chest.quality, 82);
 }
 
 #[test]
@@ -1429,6 +1432,7 @@ fn placing_a_station_by_rest_adds_it() {
         x: 4020.0,
         y: 4020.0,
         container_id: STATION_BOX,
+        quality: 50,
     });
     assert_eq!(
         events,
@@ -1610,6 +1614,7 @@ fn a_placed_station_takes_its_kind_from_the_catalog() {
         x: 4000.0,
         y: 4000.0,
         container_id: Uuid::from_u128(78),
+        quality: 82,
     });
     let placed = &state.stations()[&station];
     assert_eq!(placed.category, "storage");

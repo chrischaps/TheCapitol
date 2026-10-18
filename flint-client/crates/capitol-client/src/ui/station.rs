@@ -24,6 +24,7 @@ use super::icons::ItemIcons;
 use super::slots::{Move, SlotGrid};
 use super::theme::{self, size, DIM, STATION};
 use capitol_core::craft::{self, Check, Phase};
+use capitol_core::protocol::rules::quality;
 use capitol_core::protocol::rest::RecipeInfo;
 use capitol_core::state::{Activity, GameState};
 use capitol_core::station;
@@ -85,12 +86,14 @@ impl StationPanel {
         }
     }
 
-    /// The recipe weighed against the station's box and your output slot.
+    /// The recipe weighed against the station's box and your output slot,
+    /// at the station's quality.
     pub fn check<'a>(&self, state: &'a GameState) -> Option<Check<'a>> {
-        Some(craft::check(
+        Some(craft::check_at(
             self.recipe(state)?,
             state.station_container()?,
             state.crafting_output(),
+            state.open_station_info()?.quality,
         ))
     }
 
@@ -269,6 +272,10 @@ impl StationPanel {
         ui.add_space(6.0);
 
         let check = self.check(state);
+        if let Some(info) = state.open_station_info() {
+            station_quality(ui, info.quality, check.as_ref());
+            ui.add_space(4.0);
+        }
         if let Some(check) = &check {
             needs(ui, check);
             ui.add_space(4.0);
@@ -417,4 +424,29 @@ impl StationPanel {
         });
         action
     }
+}
+
+/// The station's grade, and what it puts into the recipe picked: its share
+/// of the output and the points that share is worth.
+fn station_quality(ui: &mut egui::Ui, station: i32, check: Option<&Check>) {
+    ui.horizontal(|ui| {
+        ui.label(theme::dim("Station quality:"));
+        theme::quality_badge(ui, station)
+            .on_hover_text("The quality of the kit that placed it. A better station makes better work");
+        let share = check.and_then(|c| {
+            c.breakdown()
+                .into_iter()
+                .find(|t| t.source == quality::Source::Station)
+        });
+        if let Some(term) = share.filter(|t| t.weight > 0.0) {
+            ui.label(
+                theme::dim(format!(
+                    "{:.0}% of this recipe, +{:.1}",
+                    term.weight * 100.0,
+                    term.points()
+                ))
+                .size(size::LABEL),
+            );
+        }
+    });
 }

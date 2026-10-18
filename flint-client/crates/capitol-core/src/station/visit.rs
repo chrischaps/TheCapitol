@@ -222,6 +222,7 @@ mod tests {
             owner_id: Uuid::nil(),
             container_id: None,
             interaction_range: 75.0,
+            quality: 50,
         }
     }
 

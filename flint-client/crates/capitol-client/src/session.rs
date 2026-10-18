@@ -444,14 +444,14 @@ impl Session {
             return;
         }
         let (Some(open), Some(recipe), Some(bench)) = (
-            self.state.open_station(),
+            self.state.open_station_info(),
             self.state.recipe(recipe_id),
             self.state.station_container(),
         ) else {
             return;
         };
-        let station_id = open.station_id;
-        let check = craft::check(recipe, bench, self.state.crafting_output());
+        let station_id = open.id;
+        let check = craft::check_at(recipe, bench, self.state.crafting_output(), open.quality);
         if let Some(message) = self.crafting.start_at(&check, station_id, &self.state, now) {
             tracing::info!(
                 "craft: {} at {station_id} from {} stacks",

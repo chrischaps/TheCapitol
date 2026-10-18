@@ -589,6 +589,7 @@ impl GameState {
                 x,
                 y,
                 container_id,
+                quality,
             } => {
                 let kind = self.catalog.station_type(station_type);
                 let station = StationInfo {
@@ -604,6 +605,7 @@ impl GameState {
                     interaction_range: kind.map_or(rules::STATION_INTERACTION_RANGE as f32, |k| {
                         k.interaction_range
                     }),
+                    quality: *quality,
                 };
                 self.upsert_station(station, &mut out);
                 out.push(StateEvent::StationPlaced {
@@ -989,6 +991,11 @@ impl GameState {
 
     pub fn open_station(&self) -> Option<&OpenStation> {
         self.open_station.as_ref()
+    }
+
+    /// The open station as the world lists it, with its quality.
+    pub fn open_station_info(&self) -> Option<&StationInfo> {
+        self.station(self.open_station.as_ref()?.station_id)
     }
 
     /// The open station's container, once fetched.

@@ -16,6 +16,7 @@ use crate::models::{ActionState, ContainerType, Item, ItemType, PlayerPosition, 
 use crate::state::AppState;
 
 use capitol_protocol::rest::CatalogResponse;
+use capitol_protocol::rules::quality;
 use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
 
 /// Ticks between sweeps for unanswered trade requests (once a second)
@@ -323,6 +324,7 @@ impl GameState {
                                     player,
                                     &recipe,
                                     &pending,
+                                    quality::NO_STATION,
                                     &mut self.crafting_operations,
                                     &self.event_sender,
                                 ) {
@@ -385,12 +387,14 @@ impl GameState {
                         }
 
                         // Start crafting (uses same flow as hand crafting)
+                        let station_quality = station.quality;
                         if let Some(player) = self.players.get_mut(&player_id) {
                             if let Some(pending) = self.pending_craft_items.remove(&player_id) {
                                 match start_crafting(
                                     player,
                                     &recipe,
                                     &pending,
+                                    station_quality,
                                     &mut self.crafting_operations,
                                     &self.event_sender,
                                 ) {

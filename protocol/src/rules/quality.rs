@@ -19,8 +19,9 @@ use serde::{Deserialize, Serialize};
 /// doesn't say.
 pub const DEFAULT_STATION_WEIGHT: f64 = 0.2;
 
-/// A station's quality until stations carry one (E1.3, #155).
-pub const UNRATED_STATION_QUALITY: i32 = 50;
+/// The station term of a hand craft. A hand recipe weights the station 0, so
+/// this never counts; a craft at a station passes that station's quality.
+pub const NO_STATION: i32 = 0;
 
 /// How much each source's quality counts toward the output's, summing to 1,
 /// and the spread the server adds on top.

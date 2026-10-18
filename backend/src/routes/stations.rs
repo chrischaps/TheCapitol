@@ -15,7 +15,7 @@ use crate::engine::container_access::{check_station_access, live_position};
 use crate::engine::GameEvent;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
-use crate::models::{Container, ContainerType, Item, ItemType, SlotItem, Station, StationInfo, StationType};
+use crate::models::{Container, ContainerType, Item, ItemType, SlotItem, Station, StationInfo, StationType, STATION_COLUMNS};
 use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router<AppState> {
@@ -68,12 +68,12 @@ pub async fn get_nearby_stations(
         .collect();
 
     // Get all stations within a generous range (500 units for visibility)
-    let stations: Vec<Station> = sqlx::query_as(
-        "SELECT id, station_type, owner_id, position_x, position_y, plot_id, placed_at
+    let stations: Vec<Station> = sqlx::query_as(&format!(
+        "SELECT {STATION_COLUMNS}
          FROM stations
          WHERE position_x BETWEEN $1 - 500 AND $1 + 500
            AND position_y BETWEEN $2 - 500 AND $2 + 500"
-    )
+    ))
     .bind(player_x)
     .bind(player_y)
     .fetch_all(&state.db)
@@ -110,6 +110,7 @@ pub async fn get_nearby_stations(
                 owner_id: station.owner_id,
                 container_id: container_map.get(&station.id).copied(),
                 interaction_range: st.interaction_range,
+                quality: station.quality,
             })
         })
         .collect();
@@ -284,6 +285,7 @@ pub async fn place_station(
         owner_id: player_id,
         container_id: Some(container_id),
         interaction_range: station_type.interaction_range,
+        quality: kit_item.quality,
     };
 
     Ok(Json(PlaceStationResponse { station: info }))

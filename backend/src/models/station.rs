@@ -30,7 +30,15 @@ pub struct Station {
     pub position_y: f32,
     pub plot_id: Option<Uuid>,
     pub placed_at: DateTime<Utc>,
+    /// The quality of the kit that placed it (`stations.kit_quality`, #88):
+    /// the station term of the cascade for crafts made here (E1.3)
+    pub quality: i32,
 }
+
+/// The columns of [`Station`], for `SELECT {STATION_COLUMNS} FROM stations`.
+/// The table keeps the name `kit_quality`; code calls it `quality`.
+pub const STATION_COLUMNS: &str =
+    "id, station_type, owner_id, position_x, position_y, plot_id, placed_at, kit_quality AS quality";
 
 /// Station runtime state for game engine
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +50,8 @@ pub struct StationState {
     pub y: f64,
     pub plot_id: Option<Uuid>,
     pub container_id: Option<Uuid>,
+    /// The station's quality, the station term for crafts made here
+    pub quality: i32,
 }
 
 impl StationState {
@@ -54,6 +64,7 @@ impl StationState {
             y: station.position_y as f64,
             plot_id: station.plot_id,
             container_id,
+            quality: station.quality,
         }
     }
 }

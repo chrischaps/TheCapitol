@@ -220,6 +220,8 @@ pub enum ServerMessage {
         x: f64,
         y: f64,
         container_id: Uuid,
+        /// The station's quality, the station term for crafts made here
+        quality: i32,
     },
     #[serde(rename = "station_removed")]
     StationRemoved { station_id: Uuid },

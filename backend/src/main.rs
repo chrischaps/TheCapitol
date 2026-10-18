@@ -251,7 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load stations into game state
     let stations: Vec<Station> = sqlx::query_as(
-        "SELECT id, station_type, owner_id, position_x, position_y, plot_id, placed_at FROM stations"
+        &format!("SELECT {} FROM stations", models::STATION_COLUMNS)
     )
     .fetch_all(&db_pool)
     .await?;
