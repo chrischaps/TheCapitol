@@ -11,6 +11,7 @@ use capitol_protocol::rest::{
     SuccessResponse,
 };
 
+use crate::engine::container_access::{check_station_access, live_position};
 use crate::engine::GameEvent;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -362,19 +363,10 @@ pub async fn get_station_container(
     .fetch_one(&state.db)
     .await?;
 
-    // Verify station exists and player can access (owner only for now)
-    let station: Station = sqlx::query_as(
-        "SELECT id, station_type, owner_id, position_x, position_y, plot_id, placed_at
-         FROM stations WHERE id = $1"
-    )
-    .bind(station_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Station not found".into()))?;
-
-    if station.owner_id != player_id {
-        return Err(AppError::Forbidden("Not your station".into()));
-    }
+    // The one station rule: its owner, the plot's owner, or anyone the plot's
+    // station_use_level admits, within range (#80)
+    let at = live_position(&state.game, player_id).await;
+    check_station_access(&state.db, player_id, station_id, at).await?;
 
     // Get container
     let container: Container = sqlx::query_as(

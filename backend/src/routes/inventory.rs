@@ -10,7 +10,7 @@ use capitol_protocol::rest::{
     ContainerResponse, ContainersResponse, MoveItemRequest, MoveItemResponse,
 };
 
-use crate::engine::container_access::{check_container_access, live_position};
+use crate::engine::container_access::{check_container_access, live_position, movable_item};
 use crate::engine::slot_moves::{apply_move, SlotMove};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -162,16 +162,8 @@ pub async fn move_item(
     .fetch_one(&state.db)
     .await?;
 
-    // Verify the item belongs to player and get its current location
-    let source_item: Item = sqlx::query_as(
-        "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at
-         FROM items WHERE id = $1 AND owner_id = $2"
-    )
-    .bind(req.item_id)
-    .bind(player_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Item not found".into()))?;
+    // The player's own item, or a deposit in their own station's box (#80)
+    let source_item: Item = movable_item(&state.db, player_id, req.item_id).await?;
 
     // Both ends must be usable: the player's own containers, or a station's
     // within reach (B4). The source matters too, since a swap fills it.
@@ -217,6 +209,7 @@ pub async fn move_item(
 
     let done = apply_move(
         &state.db,
+        player_id,
         &source_item,
         req.target_container_id,
         req.target_slot,

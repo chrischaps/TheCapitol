@@ -23,9 +23,13 @@ pub enum SlotMove {
 }
 
 /// Put `source` into `(target_container_id, target_slot)`, which holds
-/// `target` or nothing.
+/// `target` or nothing. `mover` becomes the source's owner: that's a no-op for
+/// their own items, and how a station owner takes a deposit from their box
+/// (`container_access::movable_item`, #80). A merge folds the source into the
+/// target, which the callers only allow when the mover owns the target.
 pub async fn apply_move(
     db: &PgPool,
+    mover: Uuid,
     source: &Item,
     target_container_id: Uuid,
     target_slot: i32,
@@ -34,12 +38,15 @@ pub async fn apply_move(
     let mut tx = db.begin().await?;
     let done = match target {
         None => {
-            sqlx::query("UPDATE items SET container_id = $1, slot_index = $2 WHERE id = $3")
-                .bind(target_container_id)
-                .bind(target_slot)
-                .bind(source.id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "UPDATE items SET container_id = $1, slot_index = $2, owner_id = $4 WHERE id = $3",
+            )
+            .bind(target_container_id)
+            .bind(target_slot)
+            .bind(source.id)
+            .bind(mover)
+            .execute(&mut *tx)
+            .await?;
             SlotMove::Moved
         }
         Some(target) if target.item_type == source.item_type => {
@@ -72,12 +79,15 @@ pub async fn apply_move(
                 .execute(&mut *tx)
                 .await?;
             // ...and the source into the target's.
-            sqlx::query("UPDATE items SET container_id = $1, slot_index = $2 WHERE id = $3")
-                .bind(target_container_id)
-                .bind(target_slot)
-                .bind(source.id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "UPDATE items SET container_id = $1, slot_index = $2, owner_id = $4 WHERE id = $3",
+            )
+            .bind(target_container_id)
+            .bind(target_slot)
+            .bind(source.id)
+            .bind(mover)
+            .execute(&mut *tx)
+            .await?;
             SlotMove::Swapped
         }
     };
@@ -99,16 +109,22 @@ mod tests {
     }
 
     async fn player(db: &PgPool) -> Player {
+        player_named(db, "ada").await
+    }
+
+    async fn player_named(db: &PgPool, name: &str) -> Player {
         let account = Uuid::new_v4();
-        sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, 'ada@test', 'x')")
+        sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'x')")
             .bind(account)
+            .bind(format!("{name}@test"))
             .execute(db)
             .await
             .unwrap();
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO players (id, account_id, name) VALUES ($1, $2, 'ada')")
+        sqlx::query("INSERT INTO players (id, account_id, name) VALUES ($1, $2, $3)")
             .bind(id)
             .bind(account)
+            .bind(name)
             .execute(db)
             .await
             .unwrap();
@@ -160,7 +176,7 @@ mod tests {
         let fiber = stack(&db, ada.id, ada.inventory, 0, "fiber", 3).await;
         let rope = stack(&db, ada.id, ada.inventory, 5, "rope", 1).await;
 
-        let done = apply_move(&db, &fiber, ada.inventory, 5, Some(&rope)).await.unwrap();
+        let done = apply_move(&db, ada.id, &fiber, ada.inventory, 5, Some(&rope)).await.unwrap();
 
         assert_eq!(done, SlotMove::Swapped);
         assert_eq!(place(&db, fiber.id).await, (ada.inventory, 5));
@@ -174,7 +190,7 @@ mod tests {
         let fiber = stack(&db, ada.id, ada.inventory, 2, "fiber", 3).await;
         let rope = stack(&db, ada.id, ada.input, 0, "rope", 1).await;
 
-        let done = apply_move(&db, &fiber, ada.input, 0, Some(&rope)).await.unwrap();
+        let done = apply_move(&db, ada.id, &fiber, ada.input, 0, Some(&rope)).await.unwrap();
 
         assert_eq!(done, SlotMove::Swapped);
         assert_eq!(place(&db, fiber.id).await, (ada.input, 0));
@@ -190,7 +206,7 @@ mod tests {
 
         // The target's last step names a container that doesn't exist, so the
         // foreign key fails after the source is parked and the target moved.
-        let err = apply_move(&db, &fiber, Uuid::new_v4(), 5, Some(&rope)).await;
+        let err = apply_move(&db, ada.id, &fiber, Uuid::new_v4(), 5, Some(&rope)).await;
 
         assert!(err.is_err());
         assert_eq!(place(&db, fiber.id).await, (ada.inventory, 0));
@@ -204,7 +220,7 @@ mod tests {
         let a = stack(&db, ada.id, ada.inventory, 0, "fiber", 3).await;
         let b = stack(&db, ada.id, ada.inventory, 1, "fiber", 1).await;
 
-        let done = apply_move(&db, &a, ada.inventory, 1, Some(&b)).await.unwrap();
+        let done = apply_move(&db, ada.id, &a, ada.inventory, 1, Some(&b)).await.unwrap();
 
         assert_eq!(done, SlotMove::Merged { quantity: 4, quality: 60 });
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE owner_id = $1")
@@ -221,9 +237,28 @@ mod tests {
         let ada = player(&db).await;
         let fiber = stack(&db, ada.id, ada.inventory, 0, "fiber", 3).await;
 
-        let done = apply_move(&db, &fiber, ada.input, 3, None).await.unwrap();
+        let done = apply_move(&db, ada.id, &fiber, ada.input, 3, None).await.unwrap();
 
         assert_eq!(done, SlotMove::Moved);
         assert_eq!(place(&db, fiber.id).await, (ada.input, 3));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_mover_becomes_the_owner(db: PgPool) {
+        // A station owner taking a deposit out of their box keeps it (#80).
+        let ada = player_named(&db, "ada").await;
+        let bob = player_named(&db, "bob").await;
+        let fiber = stack(&db, ada.id, ada.input, 0, "fiber", 3).await;
+
+        apply_move(&db, bob.id, &fiber, bob.inventory, 4, None).await.unwrap();
+
+        assert_eq!(place(&db, fiber.id).await, (bob.inventory, 4));
+        let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM items WHERE id = $1")
+            .bind(fiber.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(owner, Some(bob.id));
     }
 }

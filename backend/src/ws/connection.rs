@@ -15,7 +15,9 @@ use uuid::Uuid;
 
 use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo, TradeOfferItem};
 
-use crate::engine::container_access::{check_container_access, live_position};
+use crate::engine::container_access::{
+    check_container_access, check_station_access, live_position, movable_item,
+};
 use crate::engine::GameEvent;
 use crate::models::PlayerState;
 use crate::error::SESSIONS_UNAVAILABLE;
@@ -393,6 +395,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             continue;
                                         }
                                     };
+
+                                    // The same station rule as opening it (#80). The
+                                    // tick checks range again, but not who may use it.
+                                    let at = live_position(&state.game, player_id).await;
+                                    if let Err(e) = check_station_access(&state.db, player_id, station_uuid, at).await {
+                                        let _ = sender.send(Message::Text(
+                                            serde_json::to_string(&ServerMessage::CraftingFailed {
+                                                player_id,
+                                                reason: e.message(),
+                                            }).unwrap().into()
+                                        )).await;
+                                        continue;
+                                    }
 
                                     let item_uuids: Vec<Uuid> = input_item_ids
                                         .iter()
@@ -984,17 +999,10 @@ async fn handle_move_item(
     target_container_id: Uuid,
     target_slot: i32,
 ) -> Result<Option<Uuid>, String> {
-    // Verify the item belongs to player and get its current location
-    let source_item: crate::models::Item = sqlx::query_as(
-        "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at
-         FROM items WHERE id = $1 AND owner_id = $2"
-    )
-    .bind(item_id)
-    .bind(player_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?
-    .ok_or_else(|| "Item not found".to_string())?;
+    // The player's own item, or a deposit in their own station's box (#80)
+    let source_item = movable_item(&state.db, player_id, item_id)
+        .await
+        .map_err(|e| e.message())?;
 
     // Both ends must be usable: the player's own containers, or a station's
     // within reach (B4). The source matters too, since a swap fills it.
@@ -1037,6 +1045,7 @@ async fn handle_move_item(
 
     crate::engine::slot_moves::apply_move(
         &state.db,
+        player_id,
         &source_item,
         target_container_id,
         target_slot,
@@ -1241,50 +1250,22 @@ async fn handle_open_station(
     player_id: Uuid,
     station_id: Uuid,
 ) -> Result<(String, String, Uuid), String> {
-    // Where the player stands now. The players row lags by up to 10 s, so
-    // it's only the fallback.
-    let (player_x, player_y): (f64, f64) = match live_position(&state.game, player_id).await {
-        Some(at) => at,
-        None => sqlx::query_as("SELECT position_x, position_y FROM players WHERE id = $1")
-            .bind(player_id)
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| format!("Database error: {}", e))?,
-    };
+    // The one station rule: its owner, the plot's owner, or anyone the plot's
+    // station_use_level admits, within range (#80)
+    let at = live_position(&state.game, player_id).await;
+    check_station_access(&state.db, player_id, station_id, at)
+        .await
+        .map_err(|e| e.message())?;
 
-    // Get station
-    let station: crate::models::Station = sqlx::query_as(
-        "SELECT id, station_type, owner_id, position_x, position_y, plot_id, placed_at
-         FROM stations WHERE id = $1"
+    let (station_type, name): (String, String) = sqlx::query_as(
+        "SELECT st.id, st.name FROM stations s
+         JOIN station_types st ON st.id = s.station_type
+         WHERE s.id = $1"
     )
     .bind(station_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?
-    .ok_or_else(|| "Station not found".to_string())?;
-
-    // Verify ownership
-    if station.owner_id != player_id {
-        return Err("Not your station".into());
-    }
-
-    // Get station type for range check
-    let st: crate::models::StationType = sqlx::query_as(
-        "SELECT id, name, category, slot_count, layout_columns, interaction_range, icon, description
-         FROM station_types WHERE id = $1"
-    )
-    .bind(&station.station_type)
     .fetch_one(&state.db)
     .await
     .map_err(|e| format!("Database error: {}", e))?;
-
-    // Check range
-    let dx = player_x - station.position_x as f64;
-    let dy = player_y - station.position_y as f64;
-    let distance = (dx * dx + dy * dy).sqrt();
-    if distance > st.interaction_range as f64 {
-        return Err("Too far from station".into());
-    }
 
     // Get container
     let container: crate::models::Container = sqlx::query_as(
@@ -1297,7 +1278,7 @@ async fn handle_open_station(
     .map_err(|e| format!("Database error: {}", e))?
     .ok_or_else(|| "Station has no container".to_string())?;
 
-    Ok((station.station_type, st.name, container.id))
+    Ok((station_type, name, container.id))
 }
 
 /// Execute a trade atomically

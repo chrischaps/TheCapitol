@@ -62,12 +62,6 @@ pub fn find_nearby_station_of_type<'a>(
         .find(|station| station.station_type == station_type)
 }
 
-/// Check if player can access a station (owner check for now)
-pub fn can_player_access_station(player: &PlayerState, station: &StationState) -> bool {
-    // For now, only owner can access their stations
-    station.owner_id == player.id
-}
-
 /// Check minimum distance from other stations for placement
 pub fn is_valid_placement(
     x: f64,

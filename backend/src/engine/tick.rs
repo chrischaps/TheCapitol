@@ -334,13 +334,14 @@ impl GameState {
                     // Handled in WebSocket handler
                 }
                 Command::CraftAtStation { player_id, station_id, recipe_id, input_item_ids: _ } => {
-                    // Validate station access and start crafting
+                    // Validate range and start crafting. Who may use the station was
+                    // checked against the plot's permissions before this was queued
+                    // (`container_access::check_station_access`, #80).
                     let station_valid = self.stations.get(&station_id)
                         .map(|s| {
                             let player = self.players.get(&player_id);
                             player.map_or(false, |p| {
                                 super::stations::is_player_near_station_type(p, s, &self.station_types)
-                                    && super::stations::can_player_access_station(p, s)
                             })
                         })
                         .unwrap_or(false);
