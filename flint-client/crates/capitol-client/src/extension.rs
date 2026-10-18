@@ -477,8 +477,9 @@ impl PlayerExtension for CapitolExtension {
             self.world_built = true;
         }
         // Your plots in gold, rebuilt when they change or the light on them
-        // does (P8.6a): the engine can't change a mesh's emission after
-        // upload (H23, #130). Offline, none.
+        // does (P8.6a). Not `emissive_scale` (H23, #130) like the windows:
+        // the gold also slides from lit surface to light, which a strength
+        // can't, and the mesh is a few dozen quads. Offline, none.
         let owned = self
             .session
             .as_ref()
@@ -523,8 +524,14 @@ impl PlayerExtension for CapitolExtension {
         }
         self.houses.advance(dt, &self.lots);
         if let Some(gpu) = ctx.gpu.as_mut() {
-            let uploaded = self.houses.upload(gpu, &self.lots, glow);
+            let uploaded = self.houses.upload(gpu, &self.lots);
             attach_each(ctx, uploaded.iter());
+        }
+        // The lamps in the windows glow with the hour, set on their
+        // entities, so no mesh is rebuilt (H23, Flint ADR 0090).
+        let lamps = world::houses::lamp_light(glow);
+        for name in world::houses::lamp_meshes() {
+            set_emissive_scale(ctx.world, &name, lamps);
         }
         // The grass, cleared round every node the server has shown us.
         if let Some(session) = &self.session {
@@ -1489,6 +1496,29 @@ fn note_words(note: &Note) -> (&'static str, String) {
         Note::Refused(reason) => ("Couldn't gather", reason.clone()),
         Note::Unanswered(_) => ("Couldn't gather", "The server didn't answer".into()),
         Note::Busy => ("Busy", "Finish what you're doing first".into()),
+    }
+}
+
+/// Sets `name`'s `material.emissive_scale` (Flint ADR 0090), if it has an
+/// entity and the scale has moved, so its glow changes with no upload.
+fn set_emissive_scale(world: &mut flint_ecs::FlintWorld, name: &str, scale: f32) {
+    let Some(id) = world.get_id(name) else {
+        return;
+    };
+    let material = world.get_components(id).and_then(|c| c.get("material"));
+    let was = material
+        .and_then(|m| m.get("emissive_scale"))
+        .and_then(|v| v.as_float());
+    if was == Some(scale as f64) {
+        return;
+    }
+    let mut table = material
+        .and_then(|m| m.as_table())
+        .cloned()
+        .unwrap_or_default();
+    table.insert("emissive_scale".into(), (scale as f64).into());
+    if let Err(e) = world.set_component(id, "material", table.into()) {
+        tracing::warn!("world: no emissive scale on {name}: {e}");
     }
 }
 

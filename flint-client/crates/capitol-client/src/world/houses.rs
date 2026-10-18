@@ -13,20 +13,22 @@
 //!   stone workshops. Colours are the house tokens in `palette`.
 //! - **Seeded by the plot id** ([`Seed`]), so every client builds the same
 //!   house on the same lot.
-//! - **Windows** are meshes of their own, one per quarter of each ring
-//!   ([`windows_name`]), so they cull at street zoom. Most are lit from
-//!   inside, and they glow with the hour as the gold on your plots does
-//!   (`PlotGlow`). The engine can't change a mesh's emission after upload
-//!   (H23, #130), so the windows are rebuilt when the stepped glow
-//!   changes, and the houses themselves never are.
+//! - **Windows** are meshes of their own, one per quarter of each ring, so
+//!   they cull at street zoom: the dark glass ([`windows_name`]) and the
+//!   windows lit from inside ([`lamps_name`]). A lit window is the same
+//!   glass, and its material gives off the lamp's colour at radiance 1.
+//!   The extension scales that with the hour, as the gold on your plots
+//!   glows ([`lamp_light`]; Flint ADR 0090's `material.emissive_scale`,
+//!   H23, #130), so no window is rebuilt when the light changes.
 //! - **Growth.** A claim seen as it happens raises its house over
 //!   [`GROW_SECS`]: a timber frame, then the walls, then the roof. While it
-//!   grows it's in [`GROWING_MESH`], rebuilt each frame. Once up it joins
-//!   its sector's mesh. A claim older than that when first seen (the list
-//!   at sign-in) is simply there.
+//!   grows it's in [`GROWING_MESH`] and its lit windows in
+//!   [`GROWING_LAMPS`], rebuilt each frame. Once up it joins its sector's
+//!   mesh. A claim older than that when first seen (the list at sign-in)
+//!   is simply there.
 //! - **One mesh per sector** (`sector`, as the lots), rebuilt when a claim
-//!   in it changes, so a city of houses costs at most 64 draws, plus 16
-//!   for the windows and one for the houses going up.
+//!   in it changes, so a city of houses costs at most 64 draws, plus 32
+//!   for the windows and two for the houses going up.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -34,7 +36,7 @@ use crate::coords::{layer, to_world, S};
 use crate::daylight::PlotGlow;
 use crate::world::geom::*;
 use crate::world::mesh::{MeshBuf, UP};
-use crate::world::palette::{self, hex, mix};
+use crate::world::palette::{self, hex};
 use crate::world::plots::Lot;
 use crate::world::sector::Sector;
 use capitol_protocol::rules::Zone;
@@ -45,6 +47,8 @@ use flint_player::ExtensionGpu;
 pub const GROW_SECS: f32 = 4.0;
 /// The mesh with the houses going up.
 pub const GROWING_MESH: &str = "houses_growing";
+/// The lit windows of the houses going up.
+pub const GROWING_LAMPS: &str = "houses_growing_lamps";
 
 /// The runtime mesh for `sector`'s houses.
 pub fn mesh_name(sector: Sector) -> String {
@@ -59,9 +63,23 @@ fn quarter(s: Sector) -> (u8, u8) {
     (s.ring, s.wedge / (crate::world::sector::WEDGES / QUARTERS))
 }
 
-/// The runtime mesh for a quarter's windows.
+/// The runtime mesh for a quarter's dark windows.
 pub fn windows_name((ring, q): (u8, u8)) -> String {
     format!("houses_windows_r{ring}q{q}")
+}
+
+/// The runtime mesh for a quarter's lit windows.
+pub fn lamps_name((ring, q): (u8, u8)) -> String {
+    format!("houses_lamps_r{ring}q{q}")
+}
+
+/// Every mesh of lit windows: their entities take [`lamp_light`].
+pub fn lamp_meshes() -> impl Iterator<Item = String> {
+    let quarters: BTreeSet<(u8, u8)> = Sector::all().map(quarter).collect();
+    quarters
+        .into_iter()
+        .map(lamps_name)
+        .chain(std::iter::once(GROWING_LAMPS.to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,25 +1048,46 @@ pub fn house(id: &str, lot: &Lot, progress: f32) -> Option<House> {
     Some(raise(&plan(id, lot)?, Stage::at(progress)))
 }
 
-/// The lamp-light in a window.
-fn pane_colour(lit: bool, glow: PlotGlow) -> [f32; 4] {
-    let glass = hex(palette::GLASS);
-    if !lit || glow.radiance <= 0.0 {
-        return glass;
-    }
-    let lamp = hex(palette::LAMP);
+/// How bright the lamps in the windows are at `glow`: the
+/// `material.emissive_scale` of every [`lamp_meshes`] entity: the light's
+/// share of the glow, of its light and its lit surface both. All light at
+/// evening and night; none by day, where a lit window is glass like the
+/// rest. Before H23 the pane was part lamp-tinted surface through dawn and
+/// dusk; counting that surface as light at [`SURFACE_AS_LIGHT`] keeps
+/// those hours as bright as they were.
+pub fn lamp_light(glow: PlotGlow) -> f32 {
     let total = glow.surface + glow.radiance;
-    let hue = mix(glass, lamp, glow.radiance / total);
-    palette::lit_glow(hue, glow.surface, glow.radiance * WINDOW_GLOW)
+    if total <= 0.0 {
+        return 0.0;
+    }
+    (glow.radiance / total) * (glow.radiance * WINDOW_GLOW + glow.surface * SURFACE_AS_LIGHT)
 }
+
+/// How much light a lit pane's surface share stands for: about what the
+/// low sun of dawn and dusk lit it with (matched against captures).
+const SURFACE_AS_LIGHT: f32 = 0.4;
 
 /// The windows' light against the plots' gold.
 const WINDOW_GLOW: f32 = 1.1;
 
-fn panes(m: &mut MeshBuf, panes: &[Pane], glow: PlotGlow) {
-    let (lit, dark) = (pane_colour(true, glow), pane_colour(false, glow));
-    for p in panes {
-        m.quad(p.corners, p.normal, if p.lit { lit } else { dark });
+/// The panes that are `lit` (or not), as glass. A lit one's light is its
+/// material's ([`lamps_material`]).
+fn panes(m: &mut MeshBuf, panes: &[Pane], lit: bool) {
+    let glass = hex(palette::GLASS);
+    for p in panes.iter().filter(|p| p.lit == lit) {
+        m.quad(p.corners, p.normal, glass);
+    }
+}
+
+/// Glass that gives off the lamp's colour at radiance 1 over every vertex,
+/// for the entity's `emissive_scale` to set by the hour.
+fn lamps_material(name: &str) -> ImportedMaterial {
+    let [r, g, b, _] = hex(palette::LAMP);
+    ImportedMaterial {
+        roughness: 0.25,
+        emissive: [r, g, b],
+        emissive_strength: 1.0,
+        ..ImportedMaterial::vertex_colored(name)
     }
 }
 
@@ -1068,8 +1107,6 @@ pub struct Houses {
     growing: HashMap<String, f32>,
     /// Sectors whose mesh is out of date.
     dirty: BTreeSet<Sector>,
-    /// The glow the windows were last lit with.
-    glow: Option<PlotGlow>,
     /// Whether the growing mesh has anything in it.
     growing_drawn: bool,
     /// Seconds since the layer began, for growth.
@@ -1162,9 +1199,10 @@ impl Houses {
         m
     }
 
-    /// The houses going up, as they stand now, windows and all.
-    fn growing_mesh(&self, lots: &HashMap<String, Lot>, glow: PlotGlow) -> MeshBuf {
-        let mut m = MeshBuf::default();
+    /// The houses going up, as they stand now, with their dark windows;
+    /// and their lit windows apart.
+    fn growing_mesh(&self, lots: &HashMap<String, Lot>) -> (MeshBuf, MeshBuf) {
+        let (mut m, mut lamps) = (MeshBuf::default(), MeshBuf::default());
         for (id, &t0) in &self.growing {
             let Some(lot) = lots.get(id) else {
                 continue;
@@ -1172,20 +1210,17 @@ impl Houses {
             let p = ((self.time - t0) / GROW_SECS).clamp(0.0, 0.999);
             if let Some(h) = house(id, lot, p) {
                 m.append(h.body);
-                panes(&mut m, &h.panes, glow);
+                panes(&mut m, &h.panes, false);
+                panes(&mut lamps, &h.panes, true);
             }
         }
-        m
+        (m, lamps)
     }
 
-    /// Uploads whatever changed, with the windows lit as `glow` says, and
-    /// returns the names of the meshes uploaded with something in them.
-    pub fn upload(
-        &mut self,
-        gpu: &mut ExtensionGpu,
-        lots: &HashMap<String, Lot>,
-        glow: PlotGlow,
-    ) -> Vec<String> {
+    /// Uploads whatever changed, and returns the names of the meshes
+    /// uploaded with something in them. The hour never rebuilds a mesh:
+    /// the lamps take it as their entities' `emissive_scale`.
+    pub fn upload(&mut self, gpu: &mut ExtensionGpu, lots: &HashMap<String, Lot>) -> Vec<String> {
         let material = |name: &str, roughness: f32| ImportedMaterial {
             roughness,
             ..ImportedMaterial::vertex_colored(name)
@@ -1200,34 +1235,38 @@ impl Houses {
             }
             m.upload_material(gpu, material(&name, 0.85));
         }
-        // A quarter's windows with any of its sectors, or all of them when
-        // the hour has moved the light in them.
-        let quarters: BTreeSet<(u8, u8)> = if self.glow != Some(glow) {
-            Sector::all().map(quarter).collect()
-        } else {
-            dirty.iter().copied().map(quarter).collect()
-        };
-        self.glow = Some(glow);
+        // A quarter's windows with any of its sectors.
+        let quarters: BTreeSet<(u8, u8)> = dirty.iter().copied().map(quarter).collect();
         for q in quarters {
-            let name = windows_name(q);
-            let mut m = MeshBuf::default();
+            let (mut dark, mut lamps) = (MeshBuf::default(), MeshBuf::default());
             for (s, h) in self.built.values() {
                 if quarter(*s) == q {
-                    panes(&mut m, &h.panes, glow);
+                    panes(&mut dark, &h.panes, false);
+                    panes(&mut lamps, &h.panes, true);
                 }
             }
-            if !m.indices.is_empty() {
-                uploaded.push(name.clone());
+            for (m, material) in [
+                (dark, material(&windows_name(q), 0.25)),
+                (lamps, lamps_material(&lamps_name(q))),
+            ] {
+                if !m.indices.is_empty() {
+                    uploaded.push(material.name.clone());
+                }
+                m.upload_material(gpu, material);
             }
-            m.upload_material(gpu, material(&name, 0.25));
         }
         if !self.growing.is_empty() || self.growing_drawn {
-            let m = self.growing_mesh(lots, glow);
+            let (m, lamps) = self.growing_mesh(lots);
             self.growing_drawn = !m.indices.is_empty();
-            if self.growing_drawn {
-                uploaded.push(GROWING_MESH.to_owned());
+            for (m, material) in [
+                (m, material(GROWING_MESH, 0.85)),
+                (lamps, lamps_material(GROWING_LAMPS)),
+            ] {
+                if !m.indices.is_empty() {
+                    uploaded.push(material.name.clone());
+                }
+                m.upload_material(gpu, material);
             }
-            m.upload_material(gpu, material(GROWING_MESH, 0.85));
         }
         uploaded
     }
@@ -1485,17 +1524,28 @@ mod tests {
             surface: 0.0,
             radiance: 1.6,
         };
-        let mut m = MeshBuf::default();
-        panes(&mut m, &h.panes, noon);
-        assert!(!m.vertices.iter().any(is_light));
-        let mut m = MeshBuf::default();
-        panes(&mut m, &h.panes, night);
-        let glowing: Vec<_> = m.vertices.iter().filter(|v| is_light(v)).collect();
-        assert_eq!(glowing.len(), lit * 4);
+        assert_eq!(lamp_light(noon), 0.0);
+        assert!(lamp_light(night) > lamp_light(PlotGlow::EVENING));
+        assert_eq!(lamp_light(night), 1.6 * WINDOW_GLOW);
+        let dawn = PlotGlow {
+            surface: 0.6,
+            radiance: 0.25,
+        };
+        let d = lamp_light(dawn);
         assert!(
-            glowing.iter().all(|v| v.color[0] > v.color[2]),
-            "lamp-light is warm"
+            d > 0.0 && d < lamp_light(PlotGlow::EVENING),
+            "dawn is dimmer: {d}"
         );
+        // Every pane is glass, lit or not: a lamp's light is its mesh's
+        // material, so by day the two look alike.
+        let (mut dark, mut lamps) = (MeshBuf::default(), MeshBuf::default());
+        panes(&mut dark, &h.panes, false);
+        panes(&mut lamps, &h.panes, true);
+        assert_eq!(lamps.vertices.len(), lit * 4);
+        assert_eq!(dark.vertices.len(), (h.panes.len() - lit) * 4);
+        assert!(!dark.vertices.iter().chain(&lamps.vertices).any(is_light));
+        let [r, _, b] = lamps_material("x").emissive;
+        assert!(r > b, "lamp-light is warm");
     }
 
     #[test]
@@ -1519,10 +1569,7 @@ mod tests {
         assert!(layer.dirty.is_empty());
         layer.advance(GROW_SECS * 0.5, lots);
         assert_eq!(layer.counts(), (1, 1));
-        assert!(!layer
-            .growing_mesh(lots, PlotGlow::EVENING)
-            .indices
-            .is_empty());
+        assert!(!layer.growing_mesh(lots).0.indices.is_empty());
         layer.advance(GROW_SECS * 0.6, lots);
         assert_eq!(layer.counts(), (2, 0));
         assert!(layer.dirty.contains(&lots[&new].sector));
