@@ -1,8 +1,11 @@
 //! The air over the city (P3.8), and the light it lets through. The scene
 //! sets the dusk: the sky, the low sun, and a fog the colour of the sky's
 //! horizon, so the land runs out into the sky with no line where they meet.
-//! Here, as the camera climbs, the fog thins and is gone by the district
-//! view, and then the light flattens into a map (P3.9).
+//! The day goes round from there (`daylight`, P8.6a): the dusk is its
+//! evening, and the sky, the sun and moon, the fill, the fog's colour and
+//! the light from above move with the server's clock. Here, as the camera
+//! climbs, the fog thins and is gone by the district view, and then the
+//! light flattens into a map (P3.9), whatever the hour.
 //!
 //! Fog works on distance from the camera, and from high up all of the city
 //! is far away: at the map view (640 m up) the scene's fog would cover it in
@@ -16,9 +19,8 @@
 //! each surface shows its own colour, the §4.7 tokens. The ground's ambient
 //! is left alone. The lights (`palette::glow`) give off their own light,
 //! whatever the ambient, so the crown still glows gold at the centre.
-//! The light is written as the scene's own components (each light's
-//! `intensity`, the sky's `ambient_sky`), which the renderer reads every
-//! frame.
+//! The light is written as the scene's own components (the `sun` and
+//! `fill` lights, the sky), which the renderer reads every frame.
 //!
 //! The camera rig (`scripts/camera.rhai`) sets the heights: above
 //! `CLEAR_FROM` it always looks down past the horizon (its pitch is over
@@ -28,6 +30,8 @@
 use flint_core::EntityId;
 use flint_ecs::FlintWorld;
 use flint_render::SceneRenderer;
+
+use crate::daylight::{self, Daylight, Light, Palette, PlotGlow, Sky};
 
 /// Up to this height (metres) the fog is the scene's own: every street,
 /// quay and tower view.
@@ -46,90 +50,205 @@ const _: () = assert!(CLEAR_BY <= FLAT_FROM);
 /// else, a surface shows about its own colour after tone mapping.
 pub const FLAT_SKY: [f32; 3] = [1.3, 1.3, 1.3];
 
+/// The scene's key light (the sun, and by night the moon) and its fill.
+const SUN: &str = "sun";
+const FILL: &str = "fill";
+
+/// The phase is written in steps of a day over this: under a real second.
+const PHASE_STEPS: f64 = 8192.0;
+
 #[derive(Default)]
 pub struct Atmosphere {
     /// The scene as authored, read the first frame there is a renderer.
     authored: Option<Authored>,
-    /// The (fog, flat) pair last written, so a still camera writes nothing,
-    /// and a value tuned live in F3 holds until the camera climbs or falls.
-    written: Option<(f32, f32)>,
+    /// The time of day shown. It eases toward the clock's after a jump
+    /// (`daylight::approach`); `None` until the first frame.
+    shown: Option<f64>,
+    /// The (fog, flat, phase step) last written, so a still camera at a
+    /// pinned hour writes nothing, and a value tuned live in F3 holds until
+    /// the camera climbs or falls or the day moves on.
+    written: Option<(f32, f32, i64)>,
+    /// How the gold on your plots shows at the hour shown, in steps.
+    plots: Option<PlotGlow>,
 }
 
-/// What the scene set, before any of it was thinned or flattened.
+/// What the scene set, before any of it was thinned or flattened: the
+/// day's evening.
 struct Authored {
     fog_density: f32,
     ssao_intensity: f32,
-    /// Each light and its `intensity`.
-    lights: Vec<(EntityId, f32)>,
-    /// The sky entity and its `ambient_sky` (RGBA), if it sets one.
-    sky: Option<(EntityId, [f32; 4])>,
+    key: Light,
+    evening: Palette,
+    sun: Option<EntityId>,
+    fill: Option<EntityId>,
+    sky: Option<EntityId>,
 }
 
 impl Atmosphere {
-    /// Thin the fog and flatten the light for a camera `height` metres up.
-    pub fn update(&mut self, renderer: &mut SceneRenderer, world: &mut FlintWorld, height: f32) {
+    /// Light the scene for `phase` (the time of day, 0..1 from midnight),
+    /// and thin the fog and flatten the light for a camera `height` metres
+    /// up. `dt` eases a jump in the phase.
+    pub fn update(
+        &mut self,
+        renderer: &mut SceneRenderer,
+        world: &mut FlintWorld,
+        height: f32,
+        phase: f64,
+        dt: f64,
+    ) {
         let authored = self
             .authored
             .get_or_insert_with(|| Authored::read(renderer, world));
-        let state = (fog_scale(height), flatness(height));
+        let shown = match self.shown {
+            Some(shown) => daylight::approach(shown, phase, dt),
+            None => phase.rem_euclid(1.0),
+        };
+        self.shown = Some(shown);
+        let state = (
+            fog_scale(height),
+            flatness(height),
+            (shown * PHASE_STEPS).round() as i64,
+        );
         if self.written == Some(state) {
             return;
         }
         self.written = Some(state);
-        let (fog, flat) = state;
+        let (fog, flat, _) = state;
+        let Daylight { key, palette } = daylight::at(shown, &authored.key, &authored.evening);
+        self.plots = Some(palette.plots.stepped());
 
         let mut config = renderer.post_process_config().clone();
         config.fog_density = authored.fog_density * fog;
+        config.fog_color = palette.fog_color;
+        config.exposure = palette.exposure;
         config.ssao_intensity = authored.ssao_intensity * (1.0 - flat);
         renderer.set_post_process_config(config);
 
-        for &(id, intensity) in &authored.lights {
-            let dimmed = f64::from(intensity * (1.0 - flat));
-            write(world, id, "light", "intensity", dimmed.into());
-        }
-        if let Some((id, sky)) = authored.sky {
-            let mut lit = sky;
-            for (c, to) in lit.iter_mut().zip(FLAT_SKY) {
-                *c += (to - *c) * flat;
+        for (id, light) in [(authored.sun, key), (authored.fill, palette.fill)] {
+            if let Some(id) = id {
+                write_light(world, id, &light, 1.0 - flat);
             }
-            let lit: Vec<toml::Value> = lit.iter().map(|&c| f64::from(c).into()).collect();
-            write(world, id, "sky", "ambient_sky", lit.into());
+        }
+        if let Some(id) = authored.sky {
+            write_sky(world, id, &palette.sky, flat);
         }
     }
+
+    /// How the gold on your own plots shows at the hour shown, in steps
+    /// (`PlotGlow::stepped`): rebuild it when this changes. Evening until
+    /// the first frame.
+    pub fn plots(&self) -> PlotGlow {
+        self.plots.unwrap_or(PlotGlow::EVENING)
+    }
+}
+
+/// `light`, its intensity times `dim`.
+fn write_light(world: &mut FlintWorld, id: EntityId, light: &Light, dim: f32) {
+    let mut table = toml::Table::new();
+    table.insert("direction".into(), array(&light.direction));
+    table.insert("color".into(), array(&light.color));
+    table.insert("intensity".into(), f64::from(light.intensity * dim).into());
+    merge(world, id, "light", table);
+}
+
+/// `sky`, its light from above eased toward `FLAT_SKY` by `flat`.
+fn write_sky(world: &mut FlintWorld, id: EntityId, sky: &Sky, flat: f32) {
+    let mut ambient = sky.ambient_sky;
+    for (c, to) in ambient.iter_mut().zip(FLAT_SKY) {
+        *c += (to - *c) * flat;
+    }
+    let mut table = toml::Table::new();
+    for (field, value) in [
+        ("zenith_color", sky.zenith),
+        ("horizon_color", sky.horizon),
+        ("haze_color", sky.haze),
+        ("cloud_tint", sky.cloud_tint),
+        ("ambient_sky", ambient),
+    ] {
+        table.insert(field.into(), array(&value));
+    }
+    for (field, value) in [
+        ("cloud_coverage", sky.cloud_coverage),
+        ("star_opacity", sky.star_opacity),
+        ("sun_disc_size", sky.sun_disc_size),
+        ("sun_glow", sky.sun_glow),
+    ] {
+        table.insert(field.into(), f64::from(value).into());
+    }
+    merge(world, id, "sky", table);
 }
 
 impl Authored {
     fn read(renderer: &SceneRenderer, world: &FlintWorld) -> Self {
         let config = renderer.post_process_config();
-        let mut lights: Vec<(EntityId, f32)> = world
-            .entities_with_component("light")
-            .iter()
-            .filter_map(|&id| {
-                let light = world.get_component(id, "light")?;
-                Some((id, number(light.get("intensity")).unwrap_or(1.0)))
-            })
-            .collect();
-        lights.sort_by_key(|(id, _)| *id);
-        let sky = world.entities_with_component("sky").iter().find_map(|&id| {
-            let field = world.get_component(id, "sky")?.get("ambient_sky")?;
-            let rgba: Vec<f32> = field
-                .as_array()?
-                .iter()
-                .filter_map(|v| number(Some(v)))
-                .collect();
-            match rgba[..] {
-                [r, g, b] => Some((id, [r, g, b, 1.0])),
-                [r, g, b, a, ..] => Some((id, [r, g, b, a])),
-                _ => None,
+        let light = |name: &str| -> (Option<EntityId>, Light) {
+            let id = world.get_id(name);
+            if id.is_none() {
+                tracing::warn!("atmosphere: the scene has no `{name}` light to drive");
             }
+            let component = id.and_then(|id| world.get_component(id, "light"));
+            let field = |f: &str| component.and_then(|c| c.get(f));
+            let light = Light {
+                direction: field("direction")
+                    .and_then(floats::<3>)
+                    .unwrap_or([0.0, 1.0, 0.0]),
+                color: field("color").and_then(floats::<3>).unwrap_or([1.0; 3]),
+                intensity: number(field("intensity")).unwrap_or(1.0),
+            };
+            (id, light)
+        };
+        let (sun, key) = light(SUN);
+        let (fill, fill_light) = light(FILL);
+        let sky = world.entities_with_component("sky").iter().min().copied();
+        let params = sky
+            .and_then(|id| world.get_component(id, "sky"))
+            .map(flint_render::sky_pipeline::SkyParams::from_component)
+            .unwrap_or_default();
+        let ambient_sky = params.ambient_sky.unwrap_or_else(|| {
+            let [r, g, b] = flint_render::LightUniforms::DEFAULT_AMBIENT_SKY;
+            [r, g, b, 1.0]
         });
+        let evening = Palette {
+            sky: Sky {
+                zenith: params.zenith_color,
+                horizon: params.horizon_color,
+                haze: params.haze_color,
+                cloud_tint: params.cloud_tint,
+                cloud_coverage: params.cloud_coverage,
+                star_opacity: params.star_opacity,
+                sun_disc_size: params.sun_disc_size,
+                sun_glow: params.sun_glow,
+                ambient_sky,
+            },
+            fill: fill_light,
+            fog_color: config.fog_color,
+            exposure: config.exposure,
+            plots: PlotGlow::EVENING,
+        };
         Self {
             fog_density: config.fog_density,
             ssao_intensity: config.ssao_intensity,
-            lights,
+            key,
+            evening,
+            sun,
+            fill,
             sky,
         }
     }
+}
+
+fn array(values: &[f32]) -> toml::Value {
+    let values: Vec<toml::Value> = values.iter().map(|&c| f64::from(c).into()).collect();
+    values.into()
+}
+
+fn floats<const N: usize>(v: &toml::Value) -> Option<[f32; N]> {
+    let values: Vec<f32> = v
+        .as_array()?
+        .iter()
+        .filter_map(|v| number(Some(v)))
+        .collect();
+    values.get(..N)?.try_into().ok()
 }
 
 fn number(v: Option<&toml::Value>) -> Option<f32> {
@@ -140,11 +259,9 @@ fn number(v: Option<&toml::Value>) -> Option<f32> {
     }
 }
 
-fn write(world: &mut FlintWorld, id: EntityId, component: &str, field: &str, value: toml::Value) {
-    let mut table = toml::Table::new();
-    table.insert(field.into(), value);
+fn merge(world: &mut FlintWorld, id: EntityId, component: &str, table: toml::Table) {
     if let Err(e) = world.merge_component(id, component, table.into()) {
-        tracing::warn!("atmosphere: can't write {component}.{field}: {e}");
+        tracing::warn!("atmosphere: can't write {component}: {e}");
     }
 }
 

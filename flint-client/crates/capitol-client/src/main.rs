@@ -14,6 +14,7 @@ mod camera_path;
 #[cfg(test)]
 mod camera_rig;
 mod coords;
+mod daylight;
 mod entities;
 mod extension;
 mod juice_sample;
@@ -157,6 +158,19 @@ struct Args {
     /// Open the settings panel at start (F10 toggles it). For captures
     #[arg(long)]
     settings_panel: bool,
+    /// Pin the time of day, 0 to 1 from midnight (0.25 dawn, 0.5 noon, 0.8
+    /// evening), in place of the server's clock. Offline it's evening
+    /// unless this says otherwise. For captures
+    #[arg(long, value_name = "0..1", value_parser = phase)]
+    time_of_day: Option<f64>,
+}
+
+/// A time of day for `--time-of-day`: 0 to 1, 1 being midnight again.
+fn phase(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(t) if (0.0..=1.0).contains(&t) => Ok(t),
+        _ => Err(format!("{s} isn't a time of day from 0 to 1")),
+    }
 }
 
 fn main() -> Result<()> {
@@ -260,6 +274,7 @@ fn main() -> Result<()> {
         .with_exchange(args.exchange.as_deref())
         .with_mute(args.mute || args.exit_after.is_some())
         .with_juice_sample(args.juice_sample && args.offline.is_some())
+        .with_time_of_day(args.time_of_day)
         .with_trade_offer(args.trade_offer.as_deref())
         .with_settings(
             settings::SettingsFile::load(

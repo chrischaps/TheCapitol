@@ -15,6 +15,7 @@
 //! markers.
 
 use crate::atmosphere::Atmosphere;
+use crate::daylight::{self, PlotGlow};
 use crate::entities::Players;
 use crate::juice_sample::JuiceSample;
 use crate::nodes::Nodes;
@@ -74,11 +75,14 @@ pub struct CapitolExtension {
     /// `TerrainPlot::id`, which a claimable plot names as
     /// `PlotInfo::terrain_id` (B7).
     lots: HashMap<String, Lot>,
-    /// The lots `world::plots::OWNED_MESH` was last built over, or `None`
-    /// to build it again.
-    owned_drawn: Option<Vec<String>>,
+    /// The lots `world::plots::OWNED_MESH` was last built over, and how
+    /// their gold was lit then, or `None` to build it again.
+    owned_drawn: Option<(Vec<String>, PlotGlow)>,
     plot_panel: ui::plot::PlotPanel,
     atmosphere: Atmosphere,
+    /// `--time-of-day`: the hour pinned, 0..1 from midnight, in place of
+    /// the server's clock (P8.6a).
+    time_of_day: Option<f64>,
     icons: ItemIcons,
     /// `--icon-sheet`: every item icon on a panel, for review.
     icon_sheet: bool,
@@ -139,6 +143,7 @@ impl CapitolExtension {
             owned_drawn: None,
             plot_panel: ui::plot::PlotPanel::default(),
             atmosphere: Atmosphere::default(),
+            time_of_day: None,
             icons: ItemIcons::load(std::path::Path::new(ItemIcons::DIR)),
             icon_sheet: false,
             sample: None,
@@ -183,6 +188,21 @@ impl CapitolExtension {
     pub fn with_mute(mut self, on: bool) -> Self {
         self.sound = Soundscape::new(on);
         self
+    }
+
+    /// Pin the time of day (`--time-of-day`), 0..1 from midnight.
+    pub fn with_time_of_day(mut self, phase: Option<f64>) -> Self {
+        self.time_of_day = phase;
+        self
+    }
+
+    /// The time of day to light the city for: `--time-of-day` if given,
+    /// else the server's clock (B12), else, offline or before the first
+    /// `AuthOk`, the evening, which is the scene as authored.
+    fn phase(&self) -> f64 {
+        self.time_of_day
+            .or_else(|| self.session.as_ref()?.state().time_of_day())
+            .unwrap_or(daylight::EVENING)
     }
 
     /// Play the juice on a timetable, offline (`--juice-sample`).
@@ -426,21 +446,34 @@ impl PlayerExtension for CapitolExtension {
         let Some(gpu) = ctx.gpu.as_mut() else {
             return;
         };
-        self.atmosphere
-            .update(gpu.renderer, ctx.world, ctx.camera.position.y);
+        let phase = self.phase();
+        self.atmosphere.update(
+            gpu.renderer,
+            ctx.world,
+            ctx.camera.position.y,
+            phase,
+            ctx.clock.delta_time.min(0.1),
+        );
         if !self.world_built {
             spike_world::upload_static(gpu);
             self.world_built = true;
         }
-        // Your plots in gold, rebuilt when they change. Offline, none.
+        // Your plots in gold, rebuilt when they change or the light on them
+        // does (P8.6a): the engine can't change a mesh's emission after
+        // upload (H23, #130). Offline, none.
         let owned = self
             .session
             .as_ref()
             .map_or_else(Vec::new, |s| owned_lots(s.state().plots(), &self.lots));
-        if self.owned_drawn.as_ref() != Some(&owned) {
-            lots::upload_owned(gpu, owned.iter().filter_map(|id| self.lots.get(id)));
+        let glow = self.atmosphere.plots();
+        let drawn = self.owned_drawn.as_ref();
+        if drawn.map(|(lots, _)| lots) != Some(&owned)
+            || drawn.is_some_and(|(lots, was)| !lots.is_empty() && *was != glow)
+        {
+            let lit = owned.iter().filter_map(|id| self.lots.get(id));
+            lots::upload_owned(gpu, lit, glow);
             let any = !owned.is_empty();
-            self.owned_drawn = Some(owned);
+            self.owned_drawn = Some((owned, glow));
             if any {
                 attach_each(ctx, std::iter::once(&lots::OWNED_MESH.to_owned()));
             }

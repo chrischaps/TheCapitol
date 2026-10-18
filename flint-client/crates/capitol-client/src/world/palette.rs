@@ -26,6 +26,20 @@ pub fn glow(colour: [f32; 4], radiance: f32) -> [f32; 4] {
     [r * radiance, g * radiance, b * radiance, 0.0]
 }
 
+/// The vertex colour of a face that is `surface` of a lit `colour` and
+/// also gives off `colour` as light at `radiance`. The engine lights
+/// `rgb × alpha` and gives off `rgb × (1 − alpha)`, so any share of each
+/// fits in one vertex: surface 0 is [`glow`], radiance 0 a plain surface.
+/// Day/night (P8.6a) slides the gold on your plots between the two.
+pub fn lit_glow(colour: [f32; 4], surface: f32, radiance: f32) -> [f32; 4] {
+    let total = surface + radiance;
+    if total <= 0.0 {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
+    let [r, g, b, _] = colour;
+    [r * total, g * total, b * total, surface / total]
+}
+
 /// A road's colour in the 2D clients: the greater the road, the lighter.
 pub fn road(road_type: RoadType) -> u32 {
     match road_type {
@@ -93,6 +107,16 @@ mod tests {
     #[test]
     fn glow_is_light_at_its_radiance() {
         assert_eq!(glow([0.5, 0.25, 1.0, 1.0], 2.0), [1.0, 0.5, 2.0, 0.0]);
+    }
+
+    #[test]
+    fn lit_glow_spans_surface_to_light() {
+        let gold = [0.5, 0.25, 0.0, 1.0];
+        assert_eq!(lit_glow(gold, 0.0, 2.0), glow(gold, 2.0));
+        assert_eq!(lit_glow(gold, 1.0, 0.0), gold);
+        // Half each: the engine lights rgb × a and gives off rgb × (1 − a).
+        let [r, _, _, a] = lit_glow(gold, 1.0, 1.0);
+        assert_eq!((r * a, r * (1.0 - a)), (0.5, 0.5));
     }
 
     #[test]

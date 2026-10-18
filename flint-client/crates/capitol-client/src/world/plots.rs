@@ -27,12 +27,15 @@
 //!   in dim gold, and a warm wash over the lot that's strongest at the curb
 //!   and gone by its middle, as if lit from its edge. It's one small mesh,
 //!   `plots_owned`, rebuilt when your plots change, so the sector meshes
-//!   are never touched. `Lot` keeps the drawn outline for it.
+//!   are never touched. `Lot` keeps the drawn outline for it. The curb's
+//!   top follows the day (P8.6a, [`PlotGlow`]): plain gold in the sun,
+//!   light at dusk, and brighter light at night.
 
 use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::coords::{layer, to_world};
+use crate::daylight::PlotGlow;
 use crate::world::geom::*;
 use crate::world::mesh::{facing, MeshBuf, UP};
 use crate::world::palette::{self, hex, mix};
@@ -314,8 +317,6 @@ pub const OWNED_MESH: &str = "plots_owned";
 /// How far over the lot and its curb the gold is laid, metres: enough to
 /// win the depth test at the map's zoom, well under the curb's lip.
 const OVERLAY: f32 = 0.02;
-/// How bright the curb's gold glows (`palette::glow`).
-const EDGE_GLOW: f32 = 0.5;
 /// How far the wash comes in from the curb, as a share of the way to the
 /// lot's middle, and how much gold it carries at the curb.
 const WASH_REACH: f64 = 0.35;
@@ -354,10 +355,11 @@ fn band(m: &mut MeshBuf, outer: &[P], inner: &[P], y: f32, colours: ([f32; 4], [
     }
 }
 
-/// The gold over each of `lots`: see the module docs.
-pub fn owned<'a>(lots: impl IntoIterator<Item = &'a Lot>) -> MeshBuf {
+/// The gold over each of `lots`, its curb's top lit as `glow` says: see
+/// the module docs.
+pub fn owned<'a>(lots: impl IntoIterator<Item = &'a Lot>, glow: PlotGlow) -> MeshBuf {
     let gold = hex(palette::GOLD);
-    let glow = palette::glow(gold, EDGE_GLOW);
+    let glow = palette::lit_glow(gold, glow.surface, glow.radiance);
     let mut lit = MeshBuf::default();
     let mut light = MeshBuf::default();
     for lot in lots {
@@ -407,10 +409,14 @@ pub fn owned<'a>(lots: impl IntoIterator<Item = &'a Lot>) -> MeshBuf {
     lit
 }
 
-/// Builds and uploads the gold over `lots` as [`OWNED_MESH`]. With no lots,
-/// the mesh is removed.
-pub fn upload_owned<'a>(gpu: &mut ExtensionGpu, lots: impl IntoIterator<Item = &'a Lot>) {
-    owned(lots).upload_material(
+/// Builds and uploads the gold over `lots` as [`OWNED_MESH`], lit as `glow`
+/// says. With no lots, the mesh is removed.
+pub fn upload_owned<'a>(
+    gpu: &mut ExtensionGpu,
+    lots: impl IntoIterator<Item = &'a Lot>,
+    glow: PlotGlow,
+) {
+    owned(lots, glow).upload_material(
         gpu,
         ImportedMaterial {
             roughness: 0.9,
@@ -771,7 +777,7 @@ mod tests {
             .values()
             .find(|l| l.zone == Zone::Suburban)
             .unwrap();
-        let m = owned([lot]);
+        let m = owned([lot], PlotGlow::EVENING);
         assert!(!m.indices.is_empty());
         let s = style(lot.zone);
         // On the drawn lot (the gold face just outside its curb), and just
@@ -811,7 +817,13 @@ mod tests {
             .min_by(|a, b| near(a).total_cmp(&near(b)))
             .unwrap();
         assert_eq!(middle.color, lot.colour);
-        assert!(owned([]).indices.is_empty());
+        assert!(owned([], PlotGlow::EVENING).indices.is_empty());
+        // By day the curb is plain lit gold, with no light of its own.
+        let noon = PlotGlow {
+            surface: 1.0,
+            radiance: 0.0,
+        };
+        assert!(!owned([lot], noon).vertices.iter().any(is_light));
     }
 
     #[test]
