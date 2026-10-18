@@ -11,6 +11,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+mod api_keys;
 mod config;
 mod content;
 mod engine;
@@ -304,6 +305,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             app_state.clone(),
             rate_limit::by_ip,
         )))
+        .nest("/account", routes::account::router(app_state.clone()))
         .nest("/player", routes::player::router(app_state.clone()))
         .nest("/world", routes::world::router(app_state.clone()))
         .nest("/recipes", routes::recipes::router(app_state.clone()))

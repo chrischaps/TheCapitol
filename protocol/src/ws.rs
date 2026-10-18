@@ -19,6 +19,8 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
+    /// `token` is an access token, or an API key's secret (E0.9). A key
+    /// with only `read` watches without taking the player over.
     #[serde(rename = "auth")]
     Auth { token: String },
     #[serde(rename = "subscribe")]

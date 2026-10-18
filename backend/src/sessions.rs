@@ -76,7 +76,7 @@ fn used_key(hash: &str) -> String {
     format!("refresh_used:{hash}")
 }
 
-fn hash(token: &str) -> String {
+pub(crate) fn hash(token: &str) -> String {
     hex(&Sha256::digest(token.as_bytes()))
 }
 
@@ -85,7 +85,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// 32 random bytes, as hex: an opaque token or a session id.
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     hex(&rand::random::<[u8; 32]>())
 }
 

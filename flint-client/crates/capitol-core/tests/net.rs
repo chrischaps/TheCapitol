@@ -22,6 +22,8 @@ use capitol_core::protocol::ws::{ClientMessage, PlayerPosition, ServerMessage};
 use uuid::Uuid;
 
 const GOOD_TOKEN: &str = "good-token";
+/// A bot's API key (E0.9), which `/recipes` takes as `ApiKey`.
+const GOOD_KEY: &str = "cap_good-key";
 const PLAYER: Uuid = Uuid::from_u128(0x1111);
 const OTHER: Uuid = Uuid::from_u128(0x2222);
 const WAIT: Duration = Duration::from_secs(5);
@@ -162,8 +164,8 @@ async fn refresh(State(mock): State<Mock>, Json(req): Json<RefreshRequest>) -> R
 }
 
 async fn recipes(headers: HeaderMap) -> Response {
-    let expected = format!("Bearer {GOOD_TOKEN}");
-    if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some(expected.as_str()) {
+    let given = headers.get("authorization").and_then(|v| v.to_str().ok());
+    if given != Some(&format!("Bearer {GOOD_TOKEN}")) && given != Some(&format!("ApiKey {GOOD_KEY}")) {
         let body = serde_json::json!({ "error": "Missing authorization header" });
         return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
     }
@@ -984,6 +986,26 @@ fn a_401_refreshes_the_token_and_sends_the_request_again() {
     // One refresh between them: the socket's and the request's didn't both
     // spend `r1`.
     assert_eq!(mock.refreshes.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn an_api_key_is_sent_as_an_api_key_and_never_refreshed() {
+    let (mock, addr) = Mock::start(Scenario::Normal);
+    let net = Net::spawn(config(addr)).unwrap();
+    net.connect(GOOD_KEY);
+    net.rest(RestRequest::Recipes, 1);
+    let events = wait_for(&net, "the recipes", |e| matches!(e, NetEvent::Rest(1, _)));
+    assert!(
+        matches!(
+            events.last(),
+            Some(NetEvent::Rest(1, Ok(RestResponse::Recipes(_))))
+        ),
+        "{events:#?}"
+    );
+    mock.wait_until("the key on the socket", |log| {
+        log.iter().any(|t| t.contains(GOOD_KEY))
+    });
+    assert_eq!(mock.refreshes.load(Ordering::SeqCst), 0);
 }
 
 #[test]

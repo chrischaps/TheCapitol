@@ -2,7 +2,8 @@
 //!
 //! Paths are relative to the server root (`http://localhost:3000` locally).
 //! Endpoints other than auth, health, terrain, catalog and bureaucracy need an
-//! `Authorization: Bearer <token>` header.
+//! `Authorization: Bearer <token>` header, or `Authorization: ApiKey <secret>`
+//! for a bot's API key, which reaches only what its scopes allow.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,81 @@ pub struct AccountInfo {
     pub tier: String,
     /// Whether this account has admin privileges (debug features)
     pub is_admin: bool,
+}
+
+// ---------------------------------------------------------------------------
+// /account
+// ---------------------------------------------------------------------------
+
+/// How every API key's secret starts, which is how the server tells one from
+/// an access token
+pub const API_KEY_PREFIX: &str = "cap_";
+
+/// What an API key may do (E0.9). `play` and `trade` imply `read`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKeyScope {
+    /// GETs and the WebSocket feed, watching without taking the player over
+    Read,
+    /// Moving, gathering, crafting, inventory and stations
+    Play,
+    /// Trades, the exchange and plots (and, from E3, the market)
+    Trade,
+}
+
+impl ApiKeyScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ApiKeyScope::Read => "read",
+            ApiKeyScope::Play => "play",
+            ApiKeyScope::Trade => "trade",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ApiKeyScope> {
+        match s {
+            "read" => Some(ApiKeyScope::Read),
+            "play" => Some(ApiKeyScope::Play),
+            "trade" => Some(ApiKeyScope::Trade),
+            _ => None,
+        }
+    }
+}
+
+/// `POST /account/api-keys`. Only a signed-in player can mint keys, not a key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CreateApiKeyRequest {
+    /// A label for the owner's list, e.g. "fiber bot"
+    pub name: String,
+    /// At least one
+    pub scopes: Vec<ApiKeyScope>,
+}
+
+/// One key, as `GET /account/api-keys` lists it. The secret is never shown again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ApiKeyInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub scopes: Vec<ApiKeyScope>,
+    /// The secret's first characters, to tell keys apart
+    pub prefix: String,
+    pub created_at: DateTime<Utc>,
+    /// To the minute
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// The answer to `POST /account/api-keys`: the key, and its secret, shown
+/// this once. Send it as `Authorization: ApiKey <secret>`, or as the
+/// WebSocket `auth` message's `token`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CreatedApiKey {
+    pub key: ApiKeyInfo,
+    pub secret: String,
 }
 
 // ---------------------------------------------------------------------------

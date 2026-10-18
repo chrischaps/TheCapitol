@@ -838,7 +838,9 @@ impl GameState {
             | R::Extract(_)
             | R::MoveItem(_)
             | R::PlotPermissions(_)
-            | R::Zones(_) => {}
+            | R::Zones(_)
+            | R::CreatedApiKey(_)
+            | R::ApiKeys(_) => {}
         }
         out
     }

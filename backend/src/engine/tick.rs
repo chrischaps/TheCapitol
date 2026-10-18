@@ -34,6 +34,8 @@ pub struct GameState {
     /// player_id -> the connection serving them. Only that connection may remove them (B8, #59)
     pub connections: HashMap<Uuid, PlayerConnection>,
     next_connection_id: u64,
+    /// API key id -> what fires to close each socket open on it (E0.9)
+    key_sockets: HashMap<Uuid, Vec<oneshot::Sender<()>>>,
     pub resource_nodes: HashMap<Uuid, ResourceNodeState>,
     pub resource_types: HashMap<String, ResourceType>,
     pub recipes: HashMap<String, Recipe>,
@@ -80,6 +82,7 @@ impl GameState {
             players: HashMap::new(),
             connections: HashMap::new(),
             next_connection_id: 0,
+            key_sockets: HashMap::new(),
             resource_nodes: HashMap::new(),
             resource_types: HashMap::new(),
             recipes: HashMap::new(),
@@ -177,6 +180,26 @@ impl GameState {
             }
             None => false,
         }
+    }
+
+    /// A socket opened on API key `key_id`. The receiver fires when the key is revoked.
+    pub fn watch_key(&mut self, key_id: Uuid) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        let sockets = self.key_sockets.entry(key_id).or_default();
+        // Forget sockets that have closed since.
+        sockets.retain(|tx| !tx.is_closed());
+        sockets.push(tx);
+        rx
+    }
+
+    /// API key `key_id` was revoked: every socket open on it hangs up. Returns how many.
+    pub fn revoke_key(&mut self, key_id: Uuid) -> usize {
+        self.key_sockets
+            .remove(&key_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|tx| tx.send(()).ok())
+            .count()
     }
 
     /// End connection `connection_id`. The player is removed only if it is still their current
@@ -1083,6 +1106,22 @@ mod tests {
         assert!(!game.players.contains_key(&id));
         assert!(!game.connections.contains_key(&id));
         assert_eq!(leaves(&mut rx, id), 1);
+    }
+
+    #[test]
+    fn revoking_a_key_closes_only_its_open_sockets() {
+        let mut game = game();
+        let (key, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut a = game.watch_key(key);
+        let closed = game.watch_key(key);
+        drop(closed);
+        let mut b = game.watch_key(key);
+        let mut c = game.watch_key(other);
+
+        assert_eq!(game.revoke_key(key), 2, "the closed socket isn't told");
+        assert!(a.try_recv().is_ok() && b.try_recv().is_ok());
+        assert!(c.try_recv().is_err(), "another key's socket stays open");
+        assert_eq!(game.revoke_key(key), 0, "told once only");
     }
 
     #[test]

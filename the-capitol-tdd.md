@@ -2665,6 +2665,8 @@ Deletion process:
 
 ### 6.9 API Key Authentication (for Bots)
 
+> **As built (E0.9, #152):** three scopes, `read`, `play` and `trade`, in place of the eight permissions below. Keys are sent as `Authorization: ApiKey cap_…`. See the E0.9 row of `the-capitol-economy.md`. The design below is the original sketch.
+
 Subscribers can generate API keys for bot access:
 
 ```

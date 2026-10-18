@@ -5,6 +5,7 @@
 //! capitol-bot --accounts 5 --wander    # five players strolling about, until Ctrl-C
 //! capitol-bot --accounts 5 --wander --near Chris   # ...around Chris, following them
 //! capitol-bot --prefix trader --trade Chris --ask  # a trading partner for Chris
+//! capitol-bot --api-key cap_…          # the script, as the key's own player
 //! ```
 //!
 //! Run it from `flint-client/` with `cargo run -p capitol-core --bin capitol-bot -- <flags>`.
@@ -24,6 +25,10 @@ USAGE:
 
 FLAGS:
     --server <url>      Server root [default: $CAPITOL_SERVER, else http://localhost:3000]
+    --api-key <secret>  Play as the account that minted this key (POST
+                        /account/api-keys) instead of a bot account. Its
+                        scopes decide what it may do: the script needs play.
+                        [default: $CAPITOL_API_KEY]
     --accounts <n>      How many bots, each on its own account [default: 1]
     --prefix <name>     Accounts are <name>1@bots.capitol.local and up, players
                         <Name>1 and up. Registered on first use. [default: bot]
@@ -43,10 +48,13 @@ FLAGS:
 The script logs in (or registers), scouts for fiber, walks to the nearest
 node, extracts until it holds enough for rope_basic, crafts the rope and
 reports. The server allows one session per account, so two copies with the
-same --prefix log each other out.";
+same --prefix log each other out. A key isn't a session: it leaves its
+owner signed in, though a play key's socket still takes the player over
+from their client (#151).";
 
 struct Options {
     server: String,
+    api_key: Option<String>,
     accounts: usize,
     prefix: String,
     wander: bool,
@@ -62,6 +70,7 @@ struct Options {
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
     let mut options = Options {
         server: std::env::var("CAPITOL_SERVER").unwrap_or_else(|_| "http://localhost:3000".into()),
+        api_key: std::env::var("CAPITOL_API_KEY").ok().filter(|k| !k.is_empty()),
         accounts: 1,
         prefix: "bot".into(),
         wander: false,
@@ -81,6 +90,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
         match flag.as_str() {
             "--server" => options.server = value()?,
+            "--api-key" => options.api_key = Some(value()?),
             "--accounts" => {
                 options.accounts = number(&flag, &value()?)?;
                 if options.accounts == 0 {
@@ -106,6 +116,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             other => return Err(format!("unknown flag {other}")),
         }
     }
+    if options.api_key.is_some() && options.accounts != 1 {
+        return Err("--api-key plays one account; it doesn't go with --accounts".into());
+    }
     if options.near.is_some() && !options.wander {
         return Err("--near goes with --wander".into());
     }
@@ -124,8 +137,11 @@ fn number<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, String> {
 }
 
 fn run(options: &Options, n: usize) -> Result<(), BotError> {
-    let account = Account::numbered(&options.prefix, n);
-    let mut bot = Bot::sign_in(NetConfig::with_base_url(&options.server), &account)?;
+    let config = NetConfig::with_base_url(&options.server);
+    let mut bot = match &options.api_key {
+        Some(key) => Bot::with_api_key(config, key)?,
+        None => Bot::sign_in(config, &Account::numbered(&options.prefix, n))?,
+    };
     let deadline = options
         .seconds
         .map(|s| Instant::now() + Duration::from_secs_f64(s));
@@ -164,7 +180,11 @@ fn main() -> ExitCode {
                 scope.spawn(move || {
                     let result = run(options, n);
                     if let Err(e) = &result {
-                        eprintln!("{}: {e}", Account::numbered(&options.prefix, n).name);
+                        let who = match &options.api_key {
+                            Some(key) => key.chars().take(12).collect(),
+                            None => Account::numbered(&options.prefix, n).name,
+                        };
+                        eprintln!("{who}: {e}");
                     }
                     result.is_err()
                 })
@@ -208,6 +228,8 @@ mod tests {
             Some(12)
         );
         assert_eq!(o.near.as_deref(), Some("Ada"));
+        let k = parse(args("--api-key cap_abc --wander")).unwrap().unwrap();
+        assert_eq!(k.api_key.as_deref(), Some("cap_abc"));
         assert!(parse(args("--help")).unwrap().is_none());
         let t = parse(args("--trade Ada --ask --offer rope --offer-strands 25"))
             .unwrap()
@@ -230,5 +252,9 @@ mod tests {
             "--near without --wander"
         );
         assert!(parse(args("--ask")).is_err(), "--ask without --trade");
+        assert!(
+            parse(args("--api-key cap_x --accounts 2")).is_err(),
+            "a key is one account"
+        );
     }
 }

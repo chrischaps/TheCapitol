@@ -203,21 +203,7 @@ impl Bot {
     /// Logs in, or registers if the account doesn't exist, then connects and
     /// waits for a full snapshot.
     pub fn sign_in(config: NetConfig, account: &Account) -> Result<Bot, BotError> {
-        let net = Net::spawn(config)
-            .map_err(|e| BotError::Failed(format!("starting the net thread: {e}")))?;
-        let mut bot = Bot {
-            net,
-            state: GameState::new(),
-            poller: Poller::new(),
-            name: account.name.clone(),
-            next_tag: FIRST_TAG,
-            replies: Vec::new(),
-            refused: HashMap::new(),
-            last_position: None,
-            walked: 0.0,
-            quiet: false,
-            rng: seed(&account.email),
-        };
+        let mut bot = Bot::new(config, account.name.clone(), &account.email)?;
         let login = RestRequest::Login(LoginRequest {
             email: account.email.clone(),
             password: account.password.clone(),
@@ -244,15 +230,63 @@ impl Bot {
             Err(e) => return Err(e),
         };
         bot.net.connect(&auth);
+        bot.enter()?;
+        Ok(bot)
+    }
+
+    /// Signs in with an API key (E0.9) in place of a password, as the key's
+    /// account, then connects and waits for a full snapshot. A key with only
+    /// `read` watches: the server refuses its moves, so it can't run a script.
+    pub fn with_api_key(config: NetConfig, key: &str) -> Result<Bot, BotError> {
+        // Named after its player once the snapshot is in.
+        let shown: String = key.chars().take(12).collect();
+        let mut bot = Bot::new(config, shown, key)?;
+        bot.net.connect(key);
+        // A watching key's player isn't in the world, so wait for the rest first.
         bot.until("a snapshot", SNAPSHOT_TIMEOUT, |s, _| {
+            s.inventory().is_some() && s.crafting_output().is_some() && !s.recipes().is_empty()
+        })?;
+        if bot.until("the player", Duration::from_secs(3), |s, _| s.local_player().is_some()).is_err() {
+            return Err(BotError::Failed(
+                "this key only watches (it has no `play` or `trade` scope), so it can't play".into(),
+            ));
+        }
+        bot.enter()?;
+        Ok(bot)
+    }
+
+    fn new(config: NetConfig, name: String, seeded_by: &str) -> Result<Bot, BotError> {
+        let net = Net::spawn(config)
+            .map_err(|e| BotError::Failed(format!("starting the net thread: {e}")))?;
+        Ok(Bot {
+            net,
+            state: GameState::new(),
+            poller: Poller::new(),
+            name,
+            next_tag: FIRST_TAG,
+            replies: Vec::new(),
+            refused: HashMap::new(),
+            last_position: None,
+            walked: 0.0,
+            quiet: false,
+            rng: seed(seeded_by),
+        })
+    }
+
+    /// Waits for the snapshot after connecting.
+    fn enter(&mut self) -> Result<(), BotError> {
+        self.until("a snapshot", SNAPSHOT_TIMEOUT, |s, _| {
             s.local_player().is_some()
                 && s.inventory().is_some()
                 && s.crafting_output().is_some()
                 && !s.recipes().is_empty()
         })?;
-        let (x, y) = bot.position();
-        bot.say(format!("in the world at ({x:.0}, {y:.0})"));
-        Ok(bot)
+        if let Some(me) = self.state.local_player() {
+            self.name = me.name.clone();
+        }
+        let (x, y) = self.position();
+        self.say(format!("in the world at ({x:.0}, {y:.0})"));
+        Ok(())
     }
 
     /// Stops the bot narrating to stdout.

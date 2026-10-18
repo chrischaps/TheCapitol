@@ -2,8 +2,8 @@
 //! (admin routes aside), each paired with the [`RestResponse`] variant it
 //! decodes to.
 //!
-//! The bearer token is attached whenever the IO thread has one, so callers
-//! never handle headers. Errors arrive as `{"error": msg}` from the server
+//! The bearer token (or a bot's API key, E0.9) is attached whenever the IO
+//! thread has one, so callers never handle headers. Errors arrive as `{"error": msg}` from the server
 //! (`backend/src/error.rs`) and become [`RestError::Http`].
 
 use capitol_protocol::rest::*;
@@ -24,6 +24,14 @@ pub enum RestRequest {
     Refresh(RefreshRequest),
     /// `POST /auth/logout`
     Logout(LogoutRequest),
+    /// `POST /account/api-keys`: mint a bot's key (E0.9). Needs the
+    /// player's own token: a key can't manage keys.
+    CreateApiKey(CreateApiKeyRequest),
+    /// `GET /account/api-keys`
+    ApiKeys,
+    /// `DELETE /account/api-keys/{id}`
+    RevokeApiKey { key_id: Uuid },
+
     /// `GET /health`
     Health,
     /// `GET /terrain`. With `cached_version`, it's sent as `If-None-Match`, and
@@ -103,8 +111,10 @@ pub enum RestRequest {
 pub enum RestResponse {
     /// Register, login and refresh
     Auth(AuthResponse),
-    /// Logout and station removal
+    /// Logout, station removal and key revocation
     Success(SuccessResponse),
+    CreatedApiKey(CreatedApiKey),
+    ApiKeys(Vec<ApiKeyInfo>),
     Health(HealthResponse),
     /// Boxed: it's about a megabyte of roads and plots.
     Terrain(Box<TerrainResponse>),
@@ -190,6 +200,7 @@ impl RestRequest {
             | Login(_)
             | Refresh(_)
             | Logout(_)
+            | CreateApiKey(_)
             | PlayerMove(_)
             | Extract(_)
             | MoveItem(_)
@@ -199,8 +210,9 @@ impl RestRequest {
             | ClaimPlot { .. }
             | PayTax { .. } => Method::POST,
             UpdatePlotPermissions { .. } => Method::PUT,
-            RemoveStation { .. } => Method::DELETE,
-            Health
+            RemoveStation { .. } | RevokeApiKey { .. } => Method::DELETE,
+            ApiKeys
+            | Health
             | Terrain { .. }
             | PlayerMe
             | PlayerInventory
@@ -229,6 +241,8 @@ impl RestRequest {
             Login(_) => "/auth/login".into(),
             Refresh(_) => "/auth/refresh".into(),
             Logout(_) => "/auth/logout".into(),
+            CreateApiKey(_) | ApiKeys => "/account/api-keys".into(),
+            RevokeApiKey { key_id } => format!("/account/api-keys/{key_id}"),
             Health => "/health".into(),
             Terrain { .. } => "/terrain".into(),
             PlayerMe => "/player/me".into(),
@@ -269,6 +283,7 @@ impl RestRequest {
             Login(b) => req.json(b),
             Refresh(b) => req.json(b),
             Logout(b) => req.json(b),
+            CreateApiKey(b) => req.json(b),
             PlayerMove(b) => req.json(b),
             Extract(b) => req.json(b),
             MoveItem(b) => req.json(b),
@@ -295,7 +310,11 @@ impl RestRequest {
         use RestResponse as A;
         Ok(match self {
             Q::Register(_) | Q::Login(_) | Q::Refresh(_) => A::Auth(de(body)?),
-            Q::Logout(_) | Q::RemoveStation { .. } => A::Success(de(body)?),
+            Q::Logout(_) | Q::RemoveStation { .. } | Q::RevokeApiKey { .. } => {
+                A::Success(de(body)?)
+            }
+            Q::CreateApiKey(_) => A::CreatedApiKey(de(body)?),
+            Q::ApiKeys => A::ApiKeys(de(body)?),
             Q::Health => A::Health(de(body)?),
             Q::Terrain { .. } => A::Terrain(Box::new(de(body)?)),
             Q::PlayerMe => A::Me(de(body)?),
@@ -338,8 +357,13 @@ pub(crate) async fn execute(
     let url = format!("{base}{}", request.path());
     let send = || {
         let mut builder = request.with_payload(http.request(request.method(), &url));
-        if let Some(token) = token {
-            builder = builder.bearer_auth(token);
+        match token {
+            // A bot's API key (E0.9). It doesn't expire, so it's never refreshed.
+            Some(key) if key.starts_with(API_KEY_PREFIX) => {
+                builder = builder.header(reqwest::header::AUTHORIZATION, format!("ApiKey {key}"));
+            }
+            Some(token) => builder = builder.bearer_auth(token),
+            None => {}
         }
         builder.send()
     };
@@ -460,6 +484,12 @@ mod tests {
         let id = Uuid::nil();
         let cases = [
             (RestRequest::Health, "GET", "/health".to_string()),
+            (RestRequest::ApiKeys, "GET", "/account/api-keys".into()),
+            (
+                RestRequest::RevokeApiKey { key_id: id },
+                "DELETE",
+                format!("/account/api-keys/{id}"),
+            ),
             (RestRequest::Recipes, "GET", "/recipes".into()),
             (RestRequest::Catalog, "GET", "/catalog".into()),
             (RestRequest::PlayerMe, "GET", "/player/me".into()),

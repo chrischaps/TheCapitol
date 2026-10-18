@@ -17,6 +17,7 @@ use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo, TradeOff
 use crate::engine::container_access::{
     check_container_access, check_station_access, live_position, movable_item,
 };
+use crate::api_keys::{self, KeyGrant};
 use crate::engine::GameEvent;
 use crate::engine::currency::announce_balances;
 use crate::models::{ItemType, PlayerState};
@@ -62,9 +63,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     };
 
-    // Validate token
-    let claims = match validate_token(&token, &state).await {
-        Ok(claims) => claims,
+    // Validate the token, or the API key (E0.9)
+    let authed = match authenticate(&token, &state).await {
+        Ok(authed) => authed,
         Err(msg) => {
             let _ = sender
                 .send(Message::Text(
@@ -76,7 +77,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     // Load player into game state
-    let player = match load_player(&state, claims.sub).await {
+    let player = match load_player(&state, authed.account_id).await {
         Ok(player) => player,
         Err(msg) => {
             let _ = sender
@@ -89,12 +90,43 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     let player_id = player.id;
+    let key = authed.key;
+    // A key with only `read` watches: it leaves the player, and any client
+    // serving them, alone (`api_keys`).
+    let presence = key.is_none_or(|key| key.scopes.takes_presence());
 
-    // Add player to game state, superseding any older connection for them
-    let (connection_id, mut superseded) = {
+    // Add player to game state, superseding any older connection for them. A
+    // watcher's never fires: it has no connection to be superseded, and 0
+    // matches none, so its disconnect removes nobody.
+    let (_never, never) = tokio::sync::oneshot::channel::<()>();
+    let (connection_id, mut superseded) = if presence {
         let mut game = state.game.write().await;
         game.connect_player(player)
+    } else {
+        (0, never)
     };
+    // Fires when the socket's API key is revoked
+    let (_unrevokable, unrevokable) = tokio::sync::oneshot::channel::<()>();
+    let mut revoked = match key {
+        Some(key) => state.game.write().await.watch_key(key.id),
+        None => unrevokable,
+    };
+    // A revocation between the key's check and the watch above found no
+    // socket to close, so look again now the watch is in place.
+    if let Some(key) = key {
+        if !api_keys::is_live(&state.db, key.id).await.unwrap_or(true) {
+            let _ = sender
+                .send(Message::Text(
+                    serde_json::to_string(&ServerMessage::AuthError { message: "API key revoked".into() })
+                        .unwrap()
+                        .into(),
+                ))
+                .await;
+            let mut game = state.game.write().await;
+            game.disconnect_player(player_id, connection_id);
+            return;
+        }
+    }
 
     // Send auth success, with the server's clock for the time of day
     let auth_ok = ServerMessage::AuthOk {
@@ -131,6 +163,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 break;
             }
 
+            // The API key this socket opened with was revoked
+            _ = &mut revoked => {
+                let msg = ServerMessage::AuthError { message: "API key revoked".into() };
+                let _ = timeout(Duration::from_secs(2), async {
+                    let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                    let _ = sender.send(Message::Close(None)).await;
+                })
+                .await;
+                break;
+            }
+
             // Handle incoming messages
             msg = receiver.next() => {
                 match msg {
@@ -148,6 +191,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 )).await;
                                 continue;
                             }
+                            if let Some(key) = key {
+                                let needed = api_keys::ws_scope(&client_msg);
+                                if !key.scopes.allows(needed) {
+                                    let msg = ServerMessage::Error {
+                                        message: api_keys::refusal(command, Some(needed)),
+                                        command: command.to_string(),
+                                    };
+                                    let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                    continue;
+                                }
+                            }
                             match client_msg {
                                 ClientMessage::Subscribe { channel } => {
                                     if channel == "position" {
@@ -158,8 +212,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         )).await;
                                         // What waited while they were away (#138). Events since
                                         // auth are already on `event_rx`; whichever path takes a
-                                        // notice first sends it.
-                                        if first {
+                                        // notice first sends it. A watcher takes none.
+                                        if first && presence {
                                             match crate::engine::notices::take_all(&state.db, player_id).await {
                                                 Ok(waiting) => {
                                                     for msg in waiting {
@@ -800,15 +854,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::PlotReleased { terrain_id };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
-                    // #131: Property tax, to the plot's owner only, if they take its notice (#138)
+                    // #131: Property tax, to the plot's owner only, if they take its notice (#138).
+                    // A watcher sends it without taking it, leaving it for the player.
                     Ok(GameEvent::TaxDelinquent { owner_id, terrain_id, tax_owed, forecloses_at, notice_id }) => {
-                        if owner_id == player_id && take_notice(&state.db, notice_id).await {
+                        if owner_id == player_id && (!presence || take_notice(&state.db, notice_id).await) {
                             let msg = ServerMessage::TaxDelinquent { terrain_id, tax_owed, forecloses_at };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
                     Ok(GameEvent::PlotForeclosed { owner_id, terrain_id, tax_owed, refund, notice_id }) => {
-                        if owner_id == player_id && take_notice(&state.db, notice_id).await {
+                        if owner_id == player_id && (!presence || take_notice(&state.db, notice_id).await) {
                             let msg = ServerMessage::PlotForeclosed { terrain_id, tax_owed, refund };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
@@ -844,6 +899,26 @@ async fn take_notice(db: &sqlx::PgPool, notice_id: Option<Uuid>) -> bool {
             tracing::error!("Failed to take notice {}: {:?}", id, e);
             true
         }),
+    }
+}
+
+/// Who a socket's `auth` message signs in as.
+struct Authed {
+    account_id: Uuid,
+    /// The API key it signed in with, if it did
+    key: Option<KeyGrant>,
+}
+
+async fn authenticate(token: &str, state: &AppState) -> Result<Authed, String> {
+    if !api_keys::is_secret(token) {
+        let claims = validate_token(token, state).await?;
+        return Ok(Authed { account_id: claims.sub, key: None });
+    }
+    match api_keys::authenticate(&state.db, token).await {
+        Ok(Some(user)) => Ok(Authed { account_id: user.account_id, key: Some(user.grant) }),
+        Ok(None) => Err("Invalid or revoked API key".into()),
+        // Retried by capitol-core, like any other database error (`auth_error_is_final`)
+        Err(e) => Err(format!("Database error: {}", e)),
     }
 }
 

@@ -4,7 +4,7 @@ use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
 use capitol_protocol::rest::{
-    AccountInfo, AuthResponse, Bounds, CatalogContainerType, CatalogItemType, CatalogResourceType,
+    AccountInfo, ApiKeyInfo, ApiKeyScope, CreateApiKeyRequest, CreatedApiKey, AuthResponse, Bounds, CatalogContainerType, CatalogItemType, CatalogResourceType,
     CatalogResponse, CatalogStationType, ClaimPlotResponse, ClaimedPlot, ContainerResponse, ContainersResponse,
     CurrencyResponse, DeedPrice, DeedPricesResponse, DepositRequest, DepositResponse,
     ExtractRequest, ExtractResponse, HealthResponse, InventoryItem, InventoryResponse,
@@ -44,7 +44,8 @@ impl Modify for SecurityAddon {
         description = "Backend API for The Capitol - a resource extraction and crafting game.
 
 Most endpoints require JWT authentication. Obtain a token via `/auth/login` or `/auth/register`,
-then include it in the `Authorization: Bearer <token>` header.",
+then include it in the `Authorization: Bearer <token>` header. A bot can use an API key
+from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within its scopes.",
         license(name = "MIT")
     ),
     servers(
@@ -53,6 +54,7 @@ then include it in the `Authorization: Bearer <token>` header.",
     modifiers(&SecurityAddon),
     tags(
         (name = "Authentication", description = "User registration, login, and logout"),
+        (name = "Account", description = "API keys for bots"),
         (name = "Health", description = "Server health checks"),
         (name = "Player", description = "Player state and movement"),
         (name = "World", description = "World state, resource nodes, and extraction"),
@@ -71,6 +73,10 @@ then include it in the `Authorization: Bearer <token>` header.",
         crate::routes::auth::login,
         crate::routes::auth::refresh,
         crate::routes::auth::logout,
+        // Account
+        crate::routes::account::create_api_key,
+        crate::routes::account::list_api_keys,
+        crate::routes::account::revoke_api_key,
         // Health
         crate::routes::health::health_check,
         // Catalog
@@ -119,6 +125,11 @@ then include it in the `Authorization: Bearer <token>` header.",
         RefreshRequest,
         AuthResponse,
         AccountInfo,
+        // Account
+        CreateApiKeyRequest,
+        CreatedApiKey,
+        ApiKeyInfo,
+        ApiKeyScope,
         // Health
         HealthResponse,
         // Player

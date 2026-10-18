@@ -1000,3 +1000,100 @@ fn the_login_form_signs_in_out_and_back() {
     assert!(matches!(auth.notice(), Some(Notice::SessionEnded { .. })));
     assert_eq!(kept.refresh_token, None);
 }
+
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn a_read_key_watches_cant_move_and_revoking_it_drops_its_socket() {
+    use capitol_core::protocol::rest::{ApiKeyScope, CreateApiKeyRequest};
+    let _server = shared();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let owner = net();
+    let auth = match rest(
+        &owner,
+        RestRequest::Register(RegisterRequest {
+            email: format!("flint-key-{stamp}@test.local"),
+            password: "correct horse battery staple".into(),
+            player_name: format!("Key{}", stamp % 100_000),
+            refresh: true,
+        }),
+        1,
+    ) {
+        Ok(RestResponse::Auth(auth)) => auth,
+        other => panic!("register: {other:?}"),
+    };
+    owner.connect(&auth);
+    wait_for(&owner, "the owner connected", |e| {
+        matches!(e, NetEvent::Connection(ConnectionState::Connected { .. }))
+    });
+    let mint = CreateApiKeyRequest {
+        name: "watcher".into(),
+        scopes: vec![ApiKeyScope::Read],
+    };
+    let key = match rest(&owner, RestRequest::CreateApiKey(mint), 2) {
+        Ok(RestResponse::CreatedApiKey(created)) => created,
+        other => panic!("mint: {other:?}"),
+    };
+    assert_eq!(key.key.scopes, vec![ApiKeyScope::Read]);
+
+    // The key watches as the owner's player...
+    let watcher = net();
+    watcher.connect(key.secret.as_str());
+    let NetEvent::Connection(ConnectionState::Connected { player_id }) =
+        wait_for(&watcher, "the watcher connected", |e| {
+            matches!(e, NetEvent::Connection(ConnectionState::Connected { .. }))
+        })
+    else {
+        unreachable!()
+    };
+    assert_eq!(player_id, auth.player_id);
+    // ...and sees the world, but can't move.
+    assert!(matches!(
+        rest(&watcher, RestRequest::PlayerMe, 3),
+        Ok(RestResponse::Me(_))
+    ));
+    watcher.ws(ClientMessage::Move { x: 4000.0, y: 4000.0 });
+    let NetEvent::Ws(ServerMessage::Error { message, command }) =
+        wait_for(&watcher, "the move refused", |e| {
+            matches!(e, NetEvent::Ws(ServerMessage::Error { .. }))
+        })
+    else {
+        unreachable!()
+    };
+    assert_eq!(command, "move");
+    assert!(message.contains("`play`"), "{message}");
+    // A key can't mint keys, even its own account's.
+    let refused = rest(&watcher, RestRequest::ApiKeys, 4).unwrap_err();
+    assert_eq!(refused.status(), Some(403), "{refused:?}");
+
+    // Revoking it closes its socket, for good.
+    assert!(matches!(
+        rest(&owner, RestRequest::RevokeApiKey { key_id: key.key.id }, 5),
+        Ok(RestResponse::Success(_))
+    ));
+    let NetEvent::Connection(ConnectionState::AuthFailed { message }) =
+        wait_for(&watcher, "the watcher dropped", |e| {
+            matches!(e, NetEvent::Connection(ConnectionState::AuthFailed { .. }))
+        })
+    else {
+        unreachable!()
+    };
+    assert!(message.contains("revoked"), "{message}");
+    assert!(rest(&watcher, RestRequest::PlayerMe, 6).unwrap_err().is_unauthorized());
+
+    // All the while, the owner stayed connected: a watcher doesn't take
+    // the player over.
+    while let Some(event) = owner.try_recv() {
+        assert!(
+            !matches!(event, NetEvent::Connection(ConnectionState::AuthFailed { .. })),
+            "the owner was signed out: {event:?}"
+        );
+    }
+    let keys = match rest(&owner, RestRequest::ApiKeys, 7) {
+        Ok(RestResponse::ApiKeys(keys)) => keys,
+        other => panic!("list: {other:?}"),
+    };
+    assert!(keys[0].revoked_at.is_some() && keys[0].last_used_at.is_some());
+}
