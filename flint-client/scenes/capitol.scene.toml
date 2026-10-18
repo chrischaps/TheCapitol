@@ -153,6 +153,16 @@ grid_scale = 60.0
 fade_start = 120.0
 fade_end = 300.0
 splash_strength = 0.0
+# Shoreline foam (H22, Flint ADR 0088): a thin lapping band where the
+# water meets each wall and bridge pier. The walls run down to the bed at
+# 1.6 m (world/water.rs), so near a wall the stone behind the water is
+# shallow and far from it the bed is deep, with no mask. The width is the
+# depth that foams: a little over the waves' 6 cm, so the band breathes
+# with them. Warm, so it reads as the dusk on the water, not a white line.
+shore_foam_width = 0.14
+shore_foam_strength = 0.8
+shore_foam_speed = 0.7
+shore_foam_color = [0.86, 0.74, 0.66, 1.0]
 
 [entities.marker_east.model]
 asset = "spike_marker_east"
