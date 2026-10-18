@@ -13,6 +13,7 @@ use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot, WaterRing};
 
 use super::metrics::{self, fmt_num, Marker, Metrics, Scope, Violation, TARGETS};
 use super::neighbourhood::{BufferKind, Neighbourhood};
+use super::parks::{Ground, Greens, CELL};
 
 type P = (f64, f64);
 
@@ -33,6 +34,9 @@ const DROPPED: &str = "#c2189b";
 /// The Neighbourhood layout's scaffolding: frames, green buffers, entrances.
 const FRAME: &str = "#8a6d3b";
 const GREEN: &str = "#cfe0b4";
+/// Parks: a pale meadow with trees dotted over it.
+const PARK: &str = "#dcebb8";
+const TREE: &str = "#6f9a4e";
 const ENTRANCE: &str = "#1f6f8b";
 
 /// What a road is for, as the plan view colours it.
@@ -122,6 +126,8 @@ pub struct View<'a> {
     pub violations: &'a [Violation],
     /// The neighbourhoods, for the Neighbourhood layout's overlays.
     pub neighbourhoods: &'a [Neighbourhood],
+    /// Each neighbourhood's ground, for its parks (#111).
+    pub greens: &'a [Greens],
 }
 
 fn hex(c: &str) -> (f64, f64, f64) {
@@ -355,6 +361,38 @@ fn neighbourhood_ground(s: &mut String, v: &View, k: f64) {
             );
         }
     }
+    // Parks, as runs of squares along each raster row, filled with trees.
+    let _ = writeln!(
+        s,
+        r##"<defs><pattern id="trees" patternUnits="userSpaceOnUse" width="28" height="24"><rect width="28" height="24" fill="{PARK}"/><circle cx="7" cy="6" r="3.6" fill="{TREE}" fill-opacity="0.55"/><circle cx="21" cy="18" r="4.2" fill="{TREE}" fill-opacity="0.45"/></pattern></defs>"##
+    );
+    for g in v.greens.iter().filter(|g| v.scope.sector.is_none_or(|x| x == g.sector)) {
+        let mut d = String::new();
+        for r in 0..g.rows {
+            let mut c = 0;
+            while c < g.cols {
+                if g.cells[r * g.cols + c] != Ground::Park {
+                    c += 1;
+                    continue;
+                }
+                let start = c;
+                while c < g.cols && g.cells[r * g.cols + c] == Ground::Park {
+                    c += 1;
+                }
+                let (x, y) = g.corner(start, r);
+                let _ = write!(d, "M{x:.1} {y:.1}h{:.1}v{CELL}h{:.1}z", (c - start) as f64 * CELL, -((c - start) as f64) * CELL);
+            }
+        }
+        if !d.is_empty() {
+            let _ = writeln!(
+                s,
+                r##"<path d="{d}" fill="url(#trees)" shape-rendering="crispEdges"><title>s{}·{} parks: {}</title></path>"##,
+                g.sector,
+                g.nbhd,
+                g.parks.len()
+            );
+        }
+    }
     for n in v.neighbourhoods.iter().filter(in_scope) {
         let f = &n.frame;
         let _ = writeln!(
@@ -564,6 +602,16 @@ fn legend(s: &mut String, v: &View, lo: P, k: f64, h: f64) {
         y += line;
         let _ = writeln!(
             s,
+            r##"<rect x="{tx:.1}" y="{:.1}" width="{:.1}" height="{:.1}" fill="url(#trees)"/>"##,
+            y - 18.0 * k,
+            34.0 * k,
+            16.0 * k
+        );
+        let parks: usize = v.greens.iter().map(|g| g.parks.len()).sum();
+        swatch(s, y, &format!("park ({parks})"));
+        y += line;
+        let _ = writeln!(
+            s,
             r##"<circle cx="{:.1}" cy="{:.1}" r="{:.1}" fill="{ENTRANCE}"/>"##,
             tx + 17.0 * k,
             y - 10.0 * k,
@@ -711,11 +759,10 @@ figcaption {{ margin-top: 6px; color: #6b6253; }}
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::time::Instant;
 
     use super::*;
-    use crate::models::lot_clearance;
-    use crate::models::terrain::{NeighbourhoodParams, NeighbourhoodPattern, SuburbLayout, SuburbanGenParams, TerrainConfig, WorldGenParams};
+    use crate::models::suburb::metrics::Measurement;
+    use crate::models::terrain::{NeighbourhoodParams, NeighbourhoodPattern, SuburbLayout, SuburbanGenParams, WorldGenParams};
     use capitol_protocol::rules::{SUBURBAN_OUTER_RADIUS, URBAN_OUTER_RADIUS};
 
     fn env_or(name: &str, default: &str) -> String {
@@ -788,26 +835,13 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let started = Instant::now();
-            let t = TerrainConfig::from_params(&params);
-            let gen_ms = started.elapsed().as_secs_f64() * 1000.0;
-
-            // The suburban lots as generated, and what finish_lots does to each.
-            let before = t.generate_suburban_plots_internal(&params.suburban_params());
-            let cleared = lot_clearance::clear_each(&before, &t.roads, &t.water_rings, (t.center_x, t.center_y));
+            let Measurement { terrain: t, before, cleared, neighbourhoods, greens, scope, measured } =
+                metrics::measure_world(&params, sector);
             let kept = t.terrain_plots.iter().filter(|l| l.zone == "suburban").count();
             assert_eq!(cleared.iter().flatten().count(), kept, "seed {seed}: the lots before finish_lots don't match");
-
-            let scope = Scope {
-                center: (t.center_x, t.center_y),
-                inner: params.urban_outer_radius,
-                outer: params.suburban_outer_radius,
-                sector,
-            };
-            let plan = metrics::Plan { roads: &t.roads, lots: &t.terrain_plots, before: &before, cleared: &cleared, scope, coverage: true };
-            let measured = metrics::measure(&plan);
             let mut m = measured.metrics;
-            (m.layout, m.seed, m.gen_ms) = (layout.clone(), seed, gen_ms);
+            m.layout = layout.clone();
+            let gen_ms = m.gen_ms;
             let viol = metrics::violations(&m);
 
             let name = match sector {
@@ -817,10 +851,6 @@ mod tests {
             let title = match sector {
                 Some(s) => format!("{} · seed {seed} · sector {s}", capitalise(&layout)),
                 None => format!("{} · seed {seed}", capitalise(&layout)),
-            };
-            let neighbourhoods = match suburb_layout {
-                SuburbLayout::Neighbourhood => super::super::plan(&params.suburban_params(), scope.center).neighbourhoods,
-                SuburbLayout::Legacy => Vec::new(),
             };
             let view = View {
                 title,
@@ -834,6 +864,7 @@ mod tests {
                 markers: &measured.markers,
                 violations: &viol,
                 neighbourhoods: &neighbourhoods,
+                greens: &greens,
             };
             std::fs::write(out.join(format!("{name}.svg")), svg(&view)).unwrap();
             let json = serde_json::json!({ "metrics": m, "violations": viol, "markers": measured.markers });
@@ -877,7 +908,7 @@ mod tests {
         let lots = vec![lot];
         let cleared = vec![Some(lots[0].corners)];
         let scope = Scope { center: (0.0, 0.0), inner: URBAN_OUTER_RADIUS, outer: SUBURBAN_OUTER_RADIUS, sector: Some(0) };
-        let measured = metrics::measure(&metrics::Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope, coverage: true });
+        let measured = metrics::measure(&metrics::Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope, coverage: true, greens: &[] });
         let viol = metrics::violations(&measured.metrics);
         let view = View {
             title: "Test".into(),
@@ -891,6 +922,7 @@ mod tests {
             markers: &measured.markers,
             violations: &viol,
             neighbourhoods: &[],
+            greens: &[],
         };
         let doc = svg(&view);
         assert!(doc.starts_with("<svg") && doc.trim_end().ends_with("</svg>"));

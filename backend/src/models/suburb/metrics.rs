@@ -11,8 +11,9 @@
 //! - **entrance:** a vertex shared by a suburban road and any other road,
 //!   counted in the sector its suburban street comes from;
 //! - **cul-de-sac:** a suburban road that ends in a bulb or a dead end;
-//! - **green:** open ground within `GREEN_STRIP` of an arterial's edge. Parks
-//!   join it once the generator makes them (#111).
+//! - **green:** for the Neighbourhood layout, its buffers, greenways and
+//!   parks (`parks`, #111). Legacy has none, so for it: open ground within
+//!   `GREEN_STRIP` of an arterial's edge.
 
 use std::collections::HashSet;
 
@@ -20,6 +21,10 @@ use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot};
 use serde::Serialize;
 
 use super::graph::{Graph, JunctionKind};
+use super::neighbourhood::Neighbourhood;
+use super::parks::{self, Ground, Greens};
+use crate::models::lot_clearance;
+use crate::models::terrain::{SuburbLayout, TerrainConfig, WorldGenParams};
 use crate::models::geom::{quads_overlap_strict, SpatialGrid};
 use crate::models::street_plan;
 use crate::models::terrain::point_to_segment_distance;
@@ -105,6 +110,9 @@ pub struct Plan<'a> {
     /// Whether to sample coverage. It's the slow part in a debug build, so
     /// the street tests leave it out.
     pub coverage: bool,
+    /// Each neighbourhood's ground, with its parks. Empty for Legacy, which
+    /// counts the strip along the arterials as green instead.
+    pub greens: &'a [Greens],
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -151,6 +159,9 @@ pub struct Metrics {
     pub cover_roads: Option<f64>,
     pub cover_green: Option<f64>,
     pub cover_gap: Option<f64>,
+    pub parks: usize,
+    /// The smallest park away from the buffers.
+    pub park_area_min: Option<f64>,
 }
 
 impl Metrics {
@@ -389,6 +400,49 @@ pub struct Measured {
     pub markers: Vec<Marker>,
 }
 
+/// A Neighbourhood world, generated and measured over the whole suburb, or
+/// one `sector` of it.
+pub struct Measurement {
+    pub terrain: TerrainConfig,
+    /// The suburban lots before `finish_lots`, and what it made of each.
+    pub before: Vec<TerrainPlot>,
+    pub cleared: Vec<Option<[P; 4]>>,
+    pub neighbourhoods: Vec<Neighbourhood>,
+    pub greens: Vec<Greens>,
+    pub scope: Scope,
+    pub measured: Measured,
+}
+
+/// Generates the world `params` describes and measures its suburb, parks
+/// and all. `gen_ms` is how long the terrain took.
+pub fn measure_world(params: &WorldGenParams, sector: Option<u8>) -> Measurement {
+    let started = std::time::Instant::now();
+    let terrain = TerrainConfig::from_params(params);
+    let gen_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let sp = params.suburban_params();
+    let center = (terrain.center_x, terrain.center_y);
+    let before = terrain.generate_suburban_plots_internal(&sp);
+    let cleared = lot_clearance::clear_each(&before, &terrain.roads, &terrain.water_rings, center);
+    let neighbourhoods = match sp.layout {
+        SuburbLayout::Neighbourhood => super::plan(&sp, center).neighbourhoods,
+        SuburbLayout::Legacy => Vec::new(),
+    };
+    let greens = parks::lay(&terrain.roads, &terrain.terrain_plots, &neighbourhoods, &sp, center);
+    let scope = Scope { center, inner: params.urban_outer_radius, outer: params.suburban_outer_radius, sector };
+    let plan = Plan {
+        roads: &terrain.roads,
+        lots: &terrain.terrain_plots,
+        before: &before,
+        cleared: &cleared,
+        scope,
+        coverage: true,
+        greens: &greens,
+    };
+    let mut measured = measure(&plan);
+    (measured.metrics.seed, measured.metrics.gen_ms) = (params.seed, gen_ms);
+    Measurement { terrain, before, cleared, neighbourhoods, greens, scope, measured }
+}
+
 pub fn measure(plan: &Plan) -> Measured {
     let scope = plan.scope;
     let roads = plan.roads;
@@ -623,7 +677,7 @@ pub fn measure(plan: &Plan) -> Measured {
     // aren't read as gaps.
     let (lo, hi) = scope.bounds();
     let cover = if plan.coverage {
-        coverage(plan.lots, roads, &all_roads, &scope, (lo, hi), |p| scope.contains(p))
+        coverage(plan.lots, roads, &all_roads, plan.greens, &scope, (lo, hi), |p| scope.contains(p))
     } else {
         [0; 4]
     };
@@ -633,15 +687,26 @@ pub fn measure(plan: &Plan) -> Measured {
         (m.cover_lots, m.cover_roads, m.cover_green, m.cover_gap) = (share(0), share(1), share(2), share(3));
     }
 
+    // Parks, in the neighbourhoods measured.
+    let parks: Vec<_> = plan
+        .greens
+        .iter()
+        .filter(|g| scope.sector.is_none_or(|x| x == g.sector))
+        .flat_map(|g| &g.parks)
+        .collect();
+    m.parks = parks.len();
+    m.park_area_min = parks.iter().filter(|k| !k.on_buffer).map(|k| k.area).reduce(f64::min);
+
     Measured { metrics: m, markers }
 }
 
 /// Samples the box `lo`..`hi` where `keep` holds, every `COVER_STEP`, and
-/// counts the samples on lots, on roads, on the green strip and on nothing.
+/// counts the samples on lots, on roads, on green ground and on nothing.
 fn coverage(
     lots: &[TerrainPlot],
     roads: &[RoadSegment],
     segs: &Segs,
+    greens: &[Greens],
     scope: &Scope,
     (lo, hi): (P, P),
     keep: impl Fn(P) -> bool,
@@ -677,7 +742,9 @@ fn coverage(
                 1
             } else if grid.query_point(p.0, p.1, 0.0).into_iter().any(|i| inside(&lots[i].corners, p)) {
                 0
-            } else if near_arterial {
+            } else if greens.is_empty() && near_arterial
+                || greens.iter().any(|g| matches!(g.at(p), Some(Ground::Buffer | Ground::Park)))
+            {
                 2
             } else {
                 3
@@ -745,7 +812,7 @@ mod tests {
     fn a_two_by_three_block_has_no_overlap() {
         let (roads, lots) = block();
         let cleared: Vec<_> = lots.iter().map(|l| Some(l.corners)).collect();
-        let plan = Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope: block_scope(), coverage: true };
+        let plan = Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope: block_scope(), coverage: true, greens: &[] };
         let measured = measure(&plan);
         let m = measured.metrics;
         assert_eq!(m.overlaps, 0);
@@ -769,7 +836,7 @@ mod tests {
         let segs = Segs::new(&roads, &scope, |_| true);
         // The block and its two streets, kerb to kerb.
         let (lo, hi) = ((1700.0, -16.0), (1880.0, 236.0));
-        let [on_lots, on_roads, green, gap] = coverage(&lots, &roads, &segs, &scope, (lo, hi), |_| true);
+        let [on_lots, on_roads, green, gap] = coverage(&lots, &roads, &segs, &[], &scope, (lo, hi), |_| true);
         assert_eq!((green, gap), (0, 0));
         // 5-unit samples: 36 across, 44 down the lots and 2 × 3 down each street.
         assert_eq!((on_lots, on_roads), (36 * 44, 36 * 6));

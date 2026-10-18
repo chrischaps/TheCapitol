@@ -97,13 +97,14 @@ At 1600–2400 every neighbourhood frame was 740 deep, so every one fitted exact
    - v is radial depth.
    - u runs between the two sides, which are lines parallel to the arterials (inset e = half the arterial width + a 20 buffer): `θ_min(r) = θ_i + asin(e/r)`.
    - A gentle shared warp `r += A·sin(2πu/λ+φ)` (A ≤ 40, λ ≥ 1200) gives every street the same curve, so spacing stays exact.
-   - Optional: rotate the frame so rows run radially, for the quadrant look of the aerial photo. *Not built in #106; left to #111 if the images want it.*
+   - Optional: rotate the frame so rows run radially, for the quadrant look of the aerial photo. *Not built in #106 or #111.* The three patterns already vary the look, and a radial frame would need its own row fit and side lines (rows would end on the zone edges, not on side lines). Left until Chris asks for it from the images.
    - *As built (#106, `suburb/frame.rs`):*
      - u is in world units: `u = t·U`, where t runs 0 to 1 between the side lines at a given radius, and U is the frame's width at mid-depth. So λ means the same in every neighbourhood.
      - The base band is inset by A from each zone edge. v = 0 is r = inner + A before the warp, and depth D = 1200 − 2A, which is 1140 at A = 30 (it was 800 − 2A = 740 before #117). The warped back lines (v = 0 and v = D) then stay inside the annulus and touch its edges only at the warp's crests.
      - The leftover between a back line and the zone edge is an *edge strip*, a `Buffer` of kind `Edge`. #108 and #111 may give it lots or a path.
      - F and its inverse are closed forms: `r = base + v + w(u)` and `θ = θ_lo(r) + t·(θ_hi(r) − θ_lo(r))`.
      - The phase φ is the first draw from the neighbourhood's stream.
+     - *Tuned in #111:* λ 1600 → **1200**, A stays **30**. At 1200, a whole sector's rows read as one gentle S, as in the aerial photo. A = 40 was tried: it costs the band 20 of depth, so lots come out 104 deep, the lot-area median falls under 6600, and (c)'s ring kinks.
 3. **Streets are iso-lines of the frame.** Offsetting a curvy spine was considered and dropped: it gets cusps wherever the curve's radius is under the offset distance, and clipping it leaves slivers. Tensor-field streamlines were also dropped: too much machinery for 16 neighbourhoods. Iso-lines need neither, and their junctions come out near 90°.
 4. **Row fit.** Fit the row count to the band: `d = (W − n·w)/2n` must fall in [95,130]. For W = 1140, n = 5 gives d = 106. At the old W = 740, only n = 3 fitted (d = 115); n = 4 gives 85, too shallow.
 5. **Building blocks:**
@@ -116,6 +117,7 @@ At 1600–2400 every neighbourhood frame was 740 deep, so every one fitted exact
      - *As built (#106):* the candidates are the row ends on a neighbourhood's arterial sides. Each one has a `gate` on the side line and an `at` on the arterial's centre line, at the perpendicular foot. The stream shuffles them, with one from each arterial side first, then draws a wanted count in [2, 4].
      - Neighbourhoods allocate in sector order. A later one skips candidates that clash with earlier entrances across the arterial. If that leaves it short of 2, it takes a clashing candidate and lines its `at` up exactly with the one it clashed with, so the stub slants.
      - The patterns may re-target entrances (a racetrack's rows aren't the frame's rows), but they must keep these rules. The test `entrances_keep_their_spacing` checks them over 200 seeds.
+     - *Checked as laid (#111):* `entrances_line_up_across_the_arterials` finds every suburban street end on an arterial in the mixed world (5 seeds and the wide canals). Along each arterial, ends from opposite sides are at least 80 apart (no 4-way), and ends from the same side at least 150. All three patterns keep the rules, so #111 needed no change here.
      - *Changed in #107:* lining up exactly makes a 4-way on the arterial, and rows across an arterial differ in radius only by the warp, so the fallback fired in about 10 places a world. A clashing fallback now moves its `at` along the arterial to exactly 80 from the entrance it clashed with, on the nearer side. The neighbourhood's other entrances on that arterial move by the same amount where the rules allow, because the pattern bends the whole band of rows on that side to meet them (see 6).
 6. **Patterns.** Each pattern has a `fits(frame)` test. A seeded weighted pick chooses only among those that fit, so there is no reject-and-retry.
    - **(a) Warped parallels:**
@@ -129,7 +131,7 @@ At 1600–2400 every neighbourhood frame was 740 deep, so every one fitted exact
        - **Moved entrances.** Where `allocate_entrances` moved an entrance's `at`, every row on that side bends by the same smoothstep ramp, over max(200, 8·shift), so the stub meets the arterial square on and the spacing holds. A row with its own unmoved entrance stays straight. The #106 overlay still draws such a stub from the original gate.
        - **Weld.** `weld_junctions` snaps an end to the *first* vertex of a segment within `SNAP`, even when the next is exact (#114). So a row keeps its other vertices at least 0.6·STEP (in u) from a rail's.
        - **`StreetMeta`** (role Row/Link/CulDeSac, fronted sides, bulb centre, sector and nbhd) comes back in `SuburbPlan::meta`, one per road. Rows and cul-de-sacs are fronted both sides; rails neither, so the rows own the corners. A row's entrance stub runs through the buffer, where #108 must lay no lots.
-       - **Pattern pick.** `choose` takes one draw from the stream whatever the outcome. `force_pattern` set to a pattern that doesn't fit falls back to a weighted pick among those that do. Since #109, (a) and (b) both fit a whole sector, so the Neighbourhood layout mixes them. Since #110, (a) and (c) both fit a split half, so the halves mix too. A test forcing one pattern zeroes the other's weight, so the neighbourhoods it doesn't fit get (a).
+       - **Pattern pick.** `choose` takes one draw from the stream whatever the outcome, and picks by weight among the patterns whose `fits` holds, so there is no reject-and-retry. #111 kept the weights at 1 each: whole sectors mix (a) and (b), split halves (a) and (c), and with parks (c) no longer costs the gap. `force_pattern` set to a pattern that doesn't fit falls back to a weighted pick among those that do. Since #109, (a) and (b) both fit a whole sector, so the Neighbourhood layout mixes them. Since #110, (a) and (c) both fit a split half, so the halves mix too. A test forcing one pattern zeroes the other's weight, so the neighbourhoods it doesn't fit get (a).
        - At seeds 42, 7, 1234 and 99999: audit clean, no 4-ways, junctions ≥ 71.6°, T spacing ≥ 136 (p10 ≥ 173), stems ≤ 290, 100% connected, parallel spacing median 246, p5 ≥ 231.
    - **(b) Loops and lollipops:**
      - an inset racetrack collector, with one lot row between it and the edge, backing onto the buffer;
@@ -154,8 +156,15 @@ At 1600–2400 every neighbourhood frame was 740 deep, so every one fitted exact
        - **Tried and dropped:** a stadium on a straight axis down the middle (its round ends fan the stems so far apart that a quarter of the ground is left, and only 6 stems fit); stems curving from the loop to bulbs spaced along the frame's edge (the walker can't tile skewed, converging streets: lots were dropped and the gap rose to 34%); fronting the loop's outside too (its lots took the stems' roots, and the gap rose).
        - At seeds 42, 7, 1234 and 99999 (forced, so (a) or (b) in the whole sectors): audit clean, no 4-ways, junctions ≥ 79°, T spacing ≥ 59, stems ≤ 290, at most 13 lots on a cul-de-sac, 100% connected. Lots: 1793–1888, area median 6690–6770, p5 ≥ 4290, width median 64, depth median 106. No overlaps, all convex, nothing trimmed or dropped.
        - **Gap 15–21%** over the world with (a) in the whole sectors, against (a)'s 8–10%. A comb pointing out from a convex loop fans through a full turn, and a split half is only about 3.5 spacings across, so the wedges at the frame's corners and the ground past the bulbs are left. That is #111's ground for parks and paths. `central_loop_meets_its_targets` holds it at ≤ 22%. A deeper band (`STEM` ≥ 195) no longer fits a split half.
-7. **Determinism.** Each neighbourhood draws from its own SplitMix64 stream, seeded with hash(seed, sector, nbhd). Changing one neighbourhood then doesn't re-id the lots in the others, which matters because lots are owned plots.
-8. **Joins.** Every street end is placed exactly on its target. Any other end stays at least 40 from roads it doesn't join. `weld_junctions` and `audit` stay unchanged.
+7. **Parks** (*#111, `suburb/parks.rs`*). The open ground the lots leave, where it's big enough to use:
+   - **Ground.** Each neighbourhood's ground runs from its arterials' edges (or its greenway's centre line) between its side lines, inside the zone. It's rasterised in 5-unit squares: *built* under a road or a lot, *buffer* between a side line and the arterial or greenway, *open* otherwise.
+   - **Usable.** Open ground is opened (eroded, then dilated) by 10, so only ground at least 20 across is kept. The slivers between a lot and a road, or between rear lines, stay gap.
+   - **Parks.** Each piece of usable ground is a park if it holds at least half a lot (0.5 × frontage × depth), or runs into a buffer, where it widens the green strip.
+   - The patterns leave this ground on purpose: (b)'s spine down its band, (c)'s green inside the loop and its corner wedges, (a)'s corners between a fan and a side line, and the edge strips. No lot is laid on a park, because a park is only ground no lot took. A pocket lollipop wasn't needed: the gap is 2%.
+   - **Not on the wire yet** (#129): `/terrain` carries roads and lots only, so parks show in the plan report and the metrics, and clients draw bare ground there.
+   - At seeds 42, 7, 1234, 99999 and 2024 (mixed): 120–150 parks, green 16–18%, gap 2%.
+8. **Determinism.** Each neighbourhood draws from its own SplitMix64 stream, seeded with hash(seed, sector, nbhd). Changing one neighbourhood then doesn't re-id the lots in the others, which matters because lots are owned plots.
+9. **Joins.** Every street end is placed exactly on its target. Any other end stays at least 40 from roads it doesn't join. `weld_junctions` and `audit` stay unchanged.
 
 ### 4.2 Lots fill the blocks
 A walker runs over the welded roads, using a `StreetMeta` for each street (role, which sides are fronted, bulb centre, neighbourhood). Lots stay 4-corner `TerrainPlot`s, so **the protocol doesn't change**.
@@ -211,6 +220,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - `loops.rs`, pattern (b) (#109)
   - `central.rs`, pattern (c) (#110)
   - `lots.rs` (#108)
+  - `parks.rs` (#111)
   - `graph.rs`
   - `metrics.rs`
   - `render.rs`, test-only
@@ -222,7 +232,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - Pass the plan as a local, so `version()` is unaffected.
 - **Params (#105):**
   - `SuburbanGenParams::layout` (`legacy` or `neighbourhood` on the wire) and `::neighbourhood: NeighbourhoodParams`, both `#[serde(default)]`, so `world_config` rows and admin PUTs from before #105 still load.
-  - `NeighbourhoodParams` (`#[serde(default)]` on the struct, so a partial object loads): `lot_frontage` 64 (60 until #108), `lot_depth` 110 (`lot_depth_min` 95, `lot_depth_max` 130), `local_width` 16, `collector_width` 20, `buffer` 20, `split_chance` 0.5, `greenway_width` 40 (both added in #106), `link_spacing` (L) 400, `bulb_radius` 13, `cul_de_sac_max` 300, `warp_amplitude` (A) 30, `warp_wavelength` (λ) 1600, `pattern_weights` (1 each), and `force_pattern` for tests. Tune A and λ in #111.
+  - `NeighbourhoodParams` (`#[serde(default)]` on the struct, so a partial object loads): `lot_frontage` 64 (60 until #108), `lot_depth` 110 (`lot_depth_min` 95, `lot_depth_max` 130), `local_width` 16, `collector_width` 20, `buffer` 20, `split_chance` 0.5, `greenway_width` 40 (both added in #106), `link_spacing` (L) 400, `bulb_radius` 13, `cul_de_sac_max` 300, `warp_amplitude` (A) 30, `warp_wavelength` (λ) 1200 (1600 until #111), `pattern_weights` (1 each), and `force_pattern` for tests.
   - **One resolved set of radii:** `WorldGenParams::suburban_params()` takes the radii, seed and arterial width from the world. Roads and lots both read it, and `suburban.inner_radius`, `outer_radius` and `seed` have no effect. Before #105 the lots read `suburban`'s own radii. For the default world the two sets agreed, so the pin didn't move.
   - **One table of zone radii (#116):** the radii are named consts in `protocol/src/rules.rs` (`URBAN_OUTER_RADIUS`, `SUBURBAN_OUTER_RADIUS` and so on, collected in `ZONE_OUTER_RADII`). `Zone::radii()`, `WorldGenParams::default()`, `SPAWN_Y` and `arterial_end_radius` all derive from them. The server writes them into the DB `zones` table on startup (`engine::zone_sync`), and the React client draws its zone rings from `/bureaucracy/zones` and takes the admin form's defaults from `GET /admin/world-params/default`. Moving a zone edge is a one-line change, with no migration. An admin regenerate that changes the radii moves only the generator; zone classification still reads the table (#118).
   - **Pin:** `legacy_default_terrain_version_is_pinned` holds `get_default().version()` at `2f18343910f69960` (moved on purpose by #117; `6006800ab79fbff8` before).
@@ -230,6 +240,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 
 ### 4.4 Harness and targets
 - **Release builds** hash the Legacy pin differently (#128). Run the pin, and the suite, with plain `cargo test`.
+- **Acceptance (#111):** `suburb::tests::neighbourhood_suburb_meets_its_targets` measures the mixed suburb (default weights) at seeds 42, 7, 1234, 99999 and 2024, and at seed 42 with the wide canals. It asserts the hard targets and those the patterns hold one by one, including green 8–20% and gap ≤ 5%, and prints the soft ones it misses (run with `--nocapture`). `metrics::measure_world` generates and measures a world, parks and all, for every pattern test and the report.
 - **Report test:** `#[ignore]` test `suburb::render::tests::suburb_plan_report`. Env: `SUBURB_SEEDS`, `SUBURB_LAYOUT`, `SUBURB_PATTERN` (#109), `SUBURB_SECTOR`, `SUBURB_OUT` (default `target/suburb-plan/`).
 - **Outputs:** an SVG per layout and seed, metrics JSON, an `index.html` grid and a markdown table.
 - **PNG:** `backend/tools/suburb-plan.ps1` runs the test in release and converts each SVG with headless Chrome. Look at the PNGs beside `reference/`.
@@ -242,7 +253,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - **cul-de-sac:** a suburban road ending in a bulb or a dead end, with its stem measured to where the bulb closes;
   - **parallel spacing:** sampled every 25 along each street, as the distance to the nearest street across it, when that street runs within 20°;
   - **coverage:** sampled every 5 over the annulus, counting road, then lot, then green, then gap;
-  - **green:** open ground within 40 of an arterial's edge, until parks exist (#111).
+  - **green:** the Neighbourhood layout's buffers, greenways and parks (#111). Legacy has none of those, so for it green is open ground within 40 of an arterial's edge.
 - **Legacy baseline:** posted on #104, at seeds 42, 7, 1234 and 99999. It has 315–394 lots, 6–9 suburban 4-ways, parallel spacing of about 120, lots of about 77 × 91, 28–32% of lots trimmed, and 58–65% of the ground a gap.
 
 | Metric | Target |
@@ -261,9 +272,14 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 | convex lots | 100% |
 | lot-lot overlaps | 0 (hard) |
 | lots trimmed / dropped by `finish_lots` | ≤ 10% / ≤ 3% |
-| coverage: lots / roads / green / gap | ≥ 55% / 15–22% / 8–20% / ≤ 5% |
+| coverage: lots / roads / green / gap | ≥ 55% / 15–22% / 8–20% / ≤ 5% (roads: see below) |
 | lots fronting arterials | 0 |
 | generation (debug) | well under the 5 s test |
+
+*Mixed suburb at #111* (seeds 42, 7, 1234, 99999, 2024): audit clean, no 4-ways, no overlaps, junctions ≥ 74.6°, 1883–1921 lots, area median 6716–6783, lots 70–71%, green 16–18%, gap 2%, generation about 200 ms in release. Soft targets still missed, all left for Chris:
+- **roads 10–11%, not 15–22%.** The roads are drawn at paving width (16 and 20). The target came from a right of way (50 ft with verges). Meeting it would mean wider streets or counting verges as road; neither seems worth it.
+- **T spacing p10 90–140 and parallel spacing p5 down to 25: pattern (c).** Its corner stems fan from the loop, so their roots sit close together along it and run nearly parallel there. That's the fan's shape, not crowding: (a) alone holds p10 ≥ 180 and p5 ≥ 216.
+- **entrances per neighbourhood, most 5–7.** The metric counts per sector, so split sectors read double (#115).
 
 ## 5. Work packages
 

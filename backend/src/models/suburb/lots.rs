@@ -908,7 +908,7 @@ fn inside_convex(c: &[P; 4], q: P) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::suburb::metrics::{self, Scope};
+    use crate::models::suburb::metrics;
     use crate::models::suburb::patterns::tests::parallels_world;
     use crate::models::terrain::TerrainConfig;
 
@@ -970,17 +970,7 @@ mod tests {
     fn neighbourhood_lots_meet_their_targets() {
         for seed in [42, 7, 1234, 99999] {
             let params = parallels_world(seed);
-            let t = TerrainConfig::from_params(&params);
-            let before = t.generate_suburban_plots_internal(&params.suburban_params());
-            let cleared = crate::models::lot_clearance::clear_each(&before, &t.roads, &t.water_rings, (t.center_x, t.center_y));
-            let scope = Scope {
-                center: (t.center_x, t.center_y),
-                inner: params.urban_outer_radius,
-                outer: params.suburban_outer_radius,
-                sector: None,
-            };
-            let plan = metrics::Plan { roads: &t.roads, lots: &t.terrain_plots, before: &before, cleared: &cleared, scope, coverage: true };
-            let m = metrics::measure(&plan).metrics;
+            let m = metrics::measure_world(&params, None).measured.metrics;
             let why = format!("seed {seed}: {m:#?}");
             assert_eq!(m.overlaps, 0, "{why}");
             assert_eq!(m.convex_share, Some(1.0), "{why}");
@@ -991,11 +981,8 @@ mod tests {
             assert!((100.0..=125.0).contains(&m.lot_depth_median.unwrap()), "{why}");
             assert!(m.trimmed_share.unwrap() <= 0.10, "{why}");
             assert!(m.dropped_share.unwrap() <= 0.03, "{why}");
-            // The plan's target is 5%. What's left (about 9%) is the corners
-            // between a U-turn's or bulb's fan and a straight side line, the
-            // edge strips and the greenways: leftover ground that #111 makes
-            // parks and paths. This holds what #108 reached.
-            assert!(m.cover_gap.unwrap() <= 0.10, "{why}");
+            // The open ground left is parks (#111): what's too thin to use is the gap.
+            assert!(m.cover_gap.unwrap() <= 0.05, "{why}");
             assert!(m.culdesac_max_lots.unwrap() <= 20.0, "{why}");
         }
     }

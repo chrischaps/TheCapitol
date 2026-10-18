@@ -458,7 +458,7 @@ pub(crate) fn lay(n: &mut Neighbourhood, p: &NeighbourhoodParams) -> Laid {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::models::suburb::metrics::{self, Scope};
+    use crate::models::suburb::metrics;
     use crate::models::terrain::{NeighbourhoodPattern, SuburbLayout, TerrainConfig, WorldGenParams};
 
     pub(crate) fn loops_world(seed: u64) -> WorldGenParams {
@@ -497,16 +497,7 @@ pub(crate) mod tests {
             let stems = plan.roads.iter().filter(|r| r.id.starts_with("culdesac_") && r.id.contains("_i")).count();
             assert!(loops >= 1 && stems >= 5, "seed {seed}: {loops} loops, {stems} inner-comb stems");
 
-            let before = t.generate_suburban_plots_internal(&sp);
-            let cleared = crate::models::lot_clearance::clear_each(&before, &t.roads, &t.water_rings, (t.center_x, t.center_y));
-            let scope = Scope {
-                center: (t.center_x, t.center_y),
-                inner: params.urban_outer_radius,
-                outer: params.suburban_outer_radius,
-                sector: None,
-            };
-            let mp = metrics::Plan { roads: &t.roads, lots: &t.terrain_plots, before: &before, cleared: &cleared, scope, coverage: true };
-            let m = metrics::measure(&mp).metrics;
+            let m = metrics::measure_world(&params, None).measured.metrics;
             let why = format!("seed {seed}: {m:#?}");
             // Streets (WP4).
             assert_eq!(m.audit_issues, 0, "{why}");
@@ -526,11 +517,10 @@ pub(crate) mod tests {
             assert!((100.0..=125.0).contains(&m.lot_depth_median.unwrap()), "{why}");
             assert!(m.trimmed_share.unwrap() <= 0.10, "{why}");
             assert!(m.dropped_share.unwrap() <= 0.03, "{why}");
-            // Pattern (a) holds 10%. Here the band between the two combs,
-            // past the stems' 300 limit, and the corners between bulbs leave
-            // 12–13% over the world: a green spine and pockets for #111's
-            // parks and paths. This holds what #109 reached.
-            assert!(m.cover_gap.unwrap() <= 0.14, "{why}");
+            // The band between the two combs and the corners between bulbs
+            // are a green spine and pocket parks (#111): what's too thin to
+            // use is the gap.
+            assert!(m.cover_gap.unwrap() <= 0.05, "{why}");
         }
     }
 

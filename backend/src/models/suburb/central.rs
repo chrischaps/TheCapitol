@@ -419,7 +419,7 @@ pub(crate) fn lay(n: &mut Neighbourhood, p: &NeighbourhoodParams) -> Laid {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::models::suburb::metrics::{self, Scope};
+    use crate::models::suburb::metrics;
     use crate::models::terrain::{NeighbourhoodPattern, SuburbLayout, TerrainConfig, WorldGenParams};
 
     pub(crate) fn central_world(seed: u64) -> WorldGenParams {
@@ -481,16 +481,7 @@ pub(crate) mod tests {
             let stems = plan.roads.iter().filter(|r| r.id.starts_with("culdesac_")).count();
             assert!(halves == 0 || stems >= 5 * halves, "seed {seed}: {stems} stems in {halves} loops");
 
-            let before = t.generate_suburban_plots_internal(&sp);
-            let cleared = crate::models::lot_clearance::clear_each(&before, &t.roads, &t.water_rings, (t.center_x, t.center_y));
-            let scope = Scope {
-                center: (t.center_x, t.center_y),
-                inner: params.urban_outer_radius,
-                outer: params.suburban_outer_radius,
-                sector: None,
-            };
-            let mp = metrics::Plan { roads: &t.roads, lots: &t.terrain_plots, before: &before, cleared: &cleared, scope, coverage: true };
-            let m = metrics::measure(&mp).metrics;
+            let m = metrics::measure_world(&params, None).measured.metrics;
             let why = format!("seed {seed}: {m:#?}");
             // Streets (WP4).
             assert_eq!(m.audit_issues, 0, "{why}");
@@ -510,12 +501,8 @@ pub(crate) mod tests {
             assert!((100.0..=125.0).contains(&m.lot_depth_median.unwrap()), "{why}");
             assert!(m.trimmed_share.unwrap() <= 0.10, "{why}");
             assert!(m.dropped_share.unwrap() <= 0.03, "{why}");
-            // (a) in the whole sectors leaves about 9%. A comb pointing out
-            // from a convex loop fans through a full turn, and a split
-            // half is only about 3.5 spacings across: the wedges at the
-            // frame's corners and past the bulbs leave 15–21% over the
-            // world, for #111's parks and paths. This holds what #110 reached.
-            assert!(m.cover_gap.unwrap() <= 0.22, "{why}");
+            // The open ground left is parks (#111): what's too thin to use is the gap.
+            assert!(m.cover_gap.unwrap() <= 0.05, "{why}");
         }
     }
 

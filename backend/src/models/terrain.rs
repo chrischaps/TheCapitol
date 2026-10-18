@@ -123,7 +123,9 @@ pub struct NeighbourhoodParams {
     pub bulb_radius: f64,
     pub cul_de_sac_max: f64,
     /// The frame's shared radial warp: amplitude A (at most 40) and
-    /// wavelength λ (at least 1200).
+    /// wavelength λ (at least 1200). #111 tuned them to 30 and 1200: a
+    /// 40 warp costs the band 20 of depth, and the lots fall under the
+    /// 6600 area floor.
     pub warp_amplitude: f64,
     pub warp_wavelength: f64,
     pub pattern_weights: PatternWeights,
@@ -149,7 +151,7 @@ impl Default for NeighbourhoodParams {
             bulb_radius: 13.0,
             cul_de_sac_max: 300.0,
             warp_amplitude: 30.0,
-            warp_wavelength: 1600.0,
+            warp_wavelength: 1200.0,
             pattern_weights: PatternWeights::default(),
             force_pattern: None,
         }
