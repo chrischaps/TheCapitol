@@ -28,7 +28,7 @@
 //!
 //! **Joins.** Every stem and entrance road starts exactly on a loop vertex.
 //! The loop is resampled at `STEP` in the world, so no other vertex is
-//! within `SNAP` of a junction (#114).
+//! within `SNAP` of a junction.
 //!
 //! Tried and dropped (#110): a stadium on a straight axis, whose round ends
 //! fanned the stems so far apart that a quarter of the ground was left; and

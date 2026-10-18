@@ -269,13 +269,23 @@ fn nearest_on(points: &[P], p: P) -> Option<(usize, P, f64)> {
     best
 }
 
+/// The nearer of segment `seg`'s two vertices to `x`, if it's within
+/// [`SNAP`]. The nearer, not the first: when `x` sits on the far vertex and
+/// the near one is also within `SNAP`, the far one is the junction (#114).
+fn snap_vertex(points: &[P], seg: usize, x: P) -> Option<usize> {
+    [seg, seg + 1]
+        .into_iter()
+        .map(|k| (k, dist(points[k], x)))
+        .filter(|&(_, d)| d < SNAP)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(k, _)| k)
+}
+
 /// Puts `x` into segment `seg` of `points` as a vertex, or uses the
 /// segment's own vertex if one is within [`SNAP`]. Returns the vertex used.
 fn insert_vertex(points: &mut Vec<P>, seg: usize, x: P) -> P {
-    for k in [seg, seg + 1] {
-        if dist(points[k], x) < SNAP {
-            return points[k];
-        }
+    if let Some(k) = snap_vertex(points, seg, x) {
+        return points[k];
     }
     points.insert(seg + 1, x);
     x
@@ -284,11 +294,9 @@ fn insert_vertex(points: &mut Vec<P>, seg: usize, x: P) -> P {
 /// Moves the vertex of `points` nearest `x` along segment `seg` onto `x` if
 /// it's within [`SNAP`], or puts `x` in as a new vertex.
 fn bring_to(points: &mut Vec<P>, seg: usize, x: P) {
-    for k in [seg, seg + 1] {
-        if dist(points[k], x) < SNAP {
-            points[k] = x;
-            return;
-        }
+    if let Some(k) = snap_vertex(points, seg, x) {
+        points[k] = x;
+        return;
     }
     points.insert(seg + 1, x);
 }
@@ -527,6 +535,26 @@ mod tests {
         assert_eq!(roads[0].points.len(), 4, "{:?}", roads[0].points);
         // t's far end and both of x's are dead ends.
         assert_eq!(a.loose_ends.len(), 3, "{a:?}");
+    }
+
+    #[test]
+    fn an_end_on_a_vertex_snaps_to_it_not_to_its_close_neighbour() {
+        let road = |id: &str, points: Vec<P>| RoadSegment {
+            id: id.into(),
+            road_type: capitol_protocol::terrain::RoadType::Suburban,
+            points,
+            width: 10.0,
+        };
+        // Main has a vertex at x = 50 and another 3 before it, inside SNAP.
+        // The nearest segment to t's end is the short one, with the point
+        // at its far end (#114).
+        let mut roads = vec![
+            road("main", vec![(0.0, 0.0), (47.0, 0.0), (50.0, 0.0), (100.0, 0.0)]),
+            road("t", vec![(50.0, 13.0), (50.0, 80.0)]),
+        ];
+        weld_junctions(&mut roads, |r| r.id != "main");
+        assert_eq!(roads[1].points[0], (50.0, 0.0));
+        assert_eq!(roads[0].points, vec![(0.0, 0.0), (47.0, 0.0), (50.0, 0.0), (100.0, 0.0)]);
     }
 
     #[test]

@@ -163,7 +163,9 @@ impl Sizes {
 }
 
 /// How far a row's other vertices keep from a rail's, in u. At the inner
-/// edge a unit of u is about 0.8 in the world, so this is over `SNAP`.
+/// edge a unit of u is about 0.8 in the world, so this is over `SNAP`. Since
+/// #114 the weld no longer needs it, but it keeps slivers out of the rows,
+/// and dropping it would move the default world.
 pub(super) const MARK_CLEAR: f64 = 0.6 * STEP;
 
 /// The least room between the rails' margins for a pattern (a) layout.
@@ -310,9 +312,8 @@ impl Ctx<'_> {
 
     /// Row k from `u0` to `u1`, at about `STEP` apart, with a vertex at each
     /// of `marks` between them, so rails meet it on a vertex. No other vertex
-    /// comes within `MARK_CLEAR` of a mark: `weld_junctions` snaps an end to
-    /// the first vertex of a segment within `street_plan::SNAP`, even when the
-    /// next one is exactly on it (#114).
+    /// comes within `MARK_CLEAR` of a mark, so no segment beside a junction is
+    /// shorter than `street_plan::SNAP`.
     fn row(&self, k: usize, u0: f64, u1: f64, marks: &[f64]) -> Vec<P> {
         row_points(self.f, &self.rows[k], u0, u1, marks)
     }

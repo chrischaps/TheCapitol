@@ -3271,10 +3271,11 @@ mod tests {
     }
 
     /// Legacy stays selectable until #113 removes it, and still makes what it
-    /// made as the default (moved by #117, which deepened the suburb).
+    /// made as the default (moved by #117, which deepened the suburb, and by
+    /// #114, whose weld snaps an end to the nearer vertex).
     #[test]
     fn legacy_terrain_version_is_pinned() {
-        assert_eq!(TerrainConfig::from_params(&legacy_params()).version(), "2f18343910f69960");
+        assert_eq!(TerrainConfig::from_params(&legacy_params()).version(), "1a59dc1bd07783ce");
     }
 
     /// Saved `world_config` rows and admin PUTs from before #105 have no
