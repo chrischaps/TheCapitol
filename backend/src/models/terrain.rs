@@ -562,8 +562,28 @@ impl TerrainConfig {
     /// A stable hash of the generated terrain, as 16 hex digits: FNV-1a over its
     /// JSON. It hashes the output rather than the params, so a generator change
     /// also changes it, and clients can key a disk cache on it.
+    ///
+    /// Every float is snapped to a 1e-3 grid first, so a last-bit difference
+    /// between builds (the optimiser reordering a sum, a libm path) doesn't
+    /// count, and debug and release servers agree on the world (#128). The grid
+    /// is coarse on purpose: a value within an ulp of a grid boundary still
+    /// flips, and the odds of that grow as the grid gets finer. At 1e-3, on a
+    /// world 8000 across, they're about 1e-8 a float.
     pub fn version(&self) -> String {
-        let json = serde_json::to_vec(self).expect("terrain serializes");
+        fn quantise(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Number(n) if n.is_f64() => {
+                    let snapped = (n.as_f64().expect("is_f64") * 1000.0).round() as i64;
+                    *value = snapped.into();
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(quantise),
+                serde_json::Value::Object(fields) => fields.values_mut().for_each(quantise),
+                _ => {}
+            }
+        }
+        let mut tree = serde_json::to_value(self).expect("terrain serializes");
+        quantise(&mut tree);
+        let json = serde_json::to_vec(&tree).expect("terrain serializes");
         let hash = json.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
             (hash ^ byte as u64).wrapping_mul(0x0100_0000_01b3)
         });
@@ -1314,13 +1334,29 @@ mod tests {
     /// its lots are owned plots and its nodes were placed against it. Change
     /// the literal only for a change that means to move it, write the node
     /// move migration it needs (see `models::resource::tests`), and say so in
-    /// the commit. Debug builds only: a release build's floats hash
-    /// differently (#128).
+    /// the commit. It holds in debug and release alike (#128).
     #[test]
     fn default_terrain_version_is_pinned() {
-        // Moved on purpose by #112, which made Neighbourhood the default. Not
-        // by #113, which removed Legacy.
-        assert_eq!(TerrainConfig::get_default().version(), "41b571c1a312b6c4");
+        // The world last moved on purpose in #112, which made Neighbourhood
+        // the default. #128 changed only how the version is hashed (floats
+        // quantised), not the world.
+        assert_eq!(TerrainConfig::get_default().version(), "ed1853f1971d61be");
+    }
+
+    /// A last-bit float difference, the kind the optimiser makes, leaves the
+    /// version alone; a real move doesn't (#128).
+    #[test]
+    fn version_ignores_last_bit_float_noise() {
+        let terrain = TerrainConfig::get_default();
+        let mut nudged = terrain.clone();
+        let x = &mut nudged.terrain_plots[0].corners[0].0;
+        *x = f64::from_bits(x.to_bits() + 1);
+        let radius = &mut nudged.water_rings[0].radius;
+        *radius = f64::from_bits(radius.to_bits() - 1);
+        assert_eq!(nudged.version(), terrain.version());
+
+        nudged.terrain_plots[0].corners[0].0 += 0.01;
+        assert_ne!(nudged.version(), terrain.version());
     }
 
     /// Saved `world_config` rows and admin PUTs from before #105 have no
