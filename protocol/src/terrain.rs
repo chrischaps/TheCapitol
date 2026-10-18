@@ -1,5 +1,5 @@
 //! The `GET /terrain` response: water rings with their bridges, the road network,
-//! and the terrain-level plots.
+//! the terrain-level plots and the suburb's parks.
 //!
 //! The backend's generator builds these types directly, so the response is the
 //! generated terrain as-is.
@@ -23,6 +23,10 @@ pub struct TerrainResponse {
     pub roads: Vec<RoadSegment>,
     /// Terrain-level plots (urban, suburban, rural)
     pub terrain_plots: Vec<TerrainPlot>,
+    /// The suburb's parks: open ground no lot took, big enough to use (#129).
+    /// Defaults to none, so payloads from before them still parse.
+    #[serde(default)]
+    pub parks: Vec<TerrainPark>,
     /// A stable hash of this terrain, which changes whenever the terrain does.
     /// Also sent as the response's ETag. Optional so older payloads still parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -156,6 +160,46 @@ impl TerrainPlot {
     }
 }
 
+/// A park: a piece of a suburban neighbourhood's open ground that no lot
+/// took, big enough to use (the backend's `suburb::parks`). No lot overlaps
+/// one, so nothing can be claimed or built on it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct TerrainPark {
+    /// `park_{sector}_{neighbourhood}_{k}`
+    pub id: String,
+    /// Its outline as closed rings (the last point doesn't repeat the
+    /// first), filled even-odd: a ring inside another is a hole. A park can
+    /// have more than one outer ring.
+    pub rings: Vec<Vec<(f64, f64)>>,
+    /// Its area in square units: the rings', holes taken out.
+    pub area: f64,
+}
+
+impl TerrainPark {
+    /// Whether `(x, y)` is in the park (even-odd over all its rings).
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        let mut inside = false;
+        for ring in &self.rings {
+            let n = ring.len();
+            for i in 0..n {
+                let (a, b) = (ring[i], ring[(i + 1) % n]);
+                if (a.1 > y) != (b.1 > y) && x < a.0 + (y - a.1) * (b.0 - a.0) / (b.1 - a.1) {
+                    inside = !inside;
+                }
+            }
+        }
+        inside
+    }
+
+    /// The signed shoelace area of a ring: positive one way round, negative
+    /// the other.
+    pub fn signed_area(ring: &[(f64, f64)]) -> f64 {
+        let n = ring.len();
+        (0..n).map(|i| ring[i].0 * ring[(i + 1) % n].1 - ring[(i + 1) % n].0 * ring[i].1).sum::<f64>() / 2.0
+    }
+}
+
 /// Whether a point is inside a lot's quad, or on its edge. The quad may wind
 /// either way. A lot is convex, but this holds for any simple quad.
 pub fn quad_contains(corners: &[(f64, f64); 4], x: f64, y: f64) -> bool {
@@ -207,6 +251,23 @@ mod tests {
         let mut cw = d;
         cw.reverse();
         assert!(quad_contains(&cw, 10.0, 10.0) && !quad_contains(&cw, 2.0, 2.0));
+    }
+
+    #[test]
+    fn a_park_with_a_hole() {
+        let park = TerrainPark {
+            id: "park_0_0_0".into(),
+            rings: vec![
+                vec![(0.0, 0.0), (30.0, 0.0), (30.0, 30.0), (0.0, 30.0)],
+                vec![(10.0, 10.0), (10.0, 20.0), (20.0, 20.0), (20.0, 10.0)],
+            ],
+            area: 800.0,
+        };
+        assert!(park.contains(5.0, 5.0));
+        assert!(!park.contains(15.0, 15.0), "in the hole");
+        assert!(!park.contains(35.0, 5.0));
+        let total: f64 = park.rings.iter().map(|r| TerrainPark::signed_area(r)).sum();
+        assert_eq!(total.abs(), park.area);
     }
 
     #[test]

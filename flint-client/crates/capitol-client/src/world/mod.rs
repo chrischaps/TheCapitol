@@ -30,6 +30,7 @@ use capitol_core::protocol::terrain::TerrainResponse;
 /// | water, bridges, tower | water rings |
 /// | roads | roads, water rings (they stop at the kerbs) |
 /// | plots | plots (the server clears them of roads and water, B7) |
+/// | parks | parks (only the grass reads them, #129) |
 ///
 /// The centre isn't an input: `coords` places the world on the protocol's
 /// fixed `CENTER_X`/`CENTER_Y`.
@@ -40,6 +41,7 @@ pub struct Rebuild {
     pub rings: bool,
     pub roads: bool,
     pub plots: bool,
+    pub parks: bool,
 }
 
 impl Rebuild {
@@ -48,6 +50,7 @@ impl Rebuild {
         rings: true,
         roads: true,
         plots: true,
+        parks: true,
     };
 
     /// What to build for `new`, when the world was last built from `old`.
@@ -62,6 +65,7 @@ impl Rebuild {
             rings,
             roads,
             plots: old.terrain_plots != new.terrain_plots,
+            parks: old.parks != new.parks,
         }
     }
 }
@@ -73,6 +77,7 @@ impl std::fmt::Display for Rebuild {
             (self.rings, "water, bridges, tower"),
             (self.roads, "roads"),
             (self.plots, "plots"),
+            (self.parks, "parks"),
         ];
         let names: Vec<_> = layers
             .iter()
@@ -103,6 +108,7 @@ mod tests {
         rings: false,
         roads: false,
         plots: false,
+        parks: false,
     };
 
     #[test]
@@ -153,8 +159,18 @@ mod tests {
         new.water_rings[0].width += 1.0;
         let rings = Rebuild {
             plots: false,
+            parks: false,
             ..Rebuild::ALL
         };
         assert_eq!(Rebuild::between(Some(&old), &new), rings);
+
+        let mut new = old.clone();
+        new.parks.pop();
+        let parks = Rebuild {
+            parks: true,
+            ..NONE
+        };
+        assert_eq!(Rebuild::between(Some(&old), &new), parks);
+        assert_eq!(parks.to_string(), "parks");
     }
 }

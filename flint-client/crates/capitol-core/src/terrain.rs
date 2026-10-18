@@ -251,6 +251,7 @@ mod tests {
             water_rings: vec![],
             roads: vec![],
             terrain_plots: vec![],
+            parks: vec![],
             version: Some(version.into()),
         }
     }

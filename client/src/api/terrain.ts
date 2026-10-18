@@ -28,6 +28,13 @@ export interface TerrainPlot {
   zone: string
 }
 
+/** A suburban park: open ground no lot took. Its rings fill even-odd, so a ring inside another is a hole. */
+export interface TerrainPark {
+  id: string
+  rings: [number, number][][]
+  area: number
+}
+
 export interface TerrainData {
   world_size: number
   center_x: number
@@ -35,6 +42,8 @@ export interface TerrainData {
   water_rings: WaterRing[]
   roads: RoadSegment[]
   terrain_plots: TerrainPlot[]
+  /** Absent from servers older than #129 */
+  parks?: TerrainPark[]
 }
 
 export async function getTerrain(): Promise<TerrainData> {

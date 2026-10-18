@@ -158,6 +158,10 @@ export default function GameCanvas() {
 
       // Draw terrain (roads first so water covers road ends)
       if (terrain) {
+        // Parks under everything: the lots and roads edge them
+        if (terrain.parks) {
+          drawParks(ctx, offsetX, offsetY, terrain.parks)
+        }
         // Terrain plots (draw first, underneath roads)
         if (terrain.terrain_plots) {
           const owned = new Set(
@@ -558,6 +562,30 @@ export default function GameCanvas() {
     ctx.strokeStyle = PURPLE
     ctx.lineWidth = 3
     ctx.stroke()
+  }
+
+  // Draw the suburb's parks: deeper green than a lot, rings filled even-odd
+  function drawParks(
+    ctx: CanvasRenderingContext2D,
+    offsetX: number,
+    offsetY: number,
+    parks: { rings: [number, number][][] }[]
+  ) {
+    ctx.fillStyle = 'rgba(22, 163, 74, 0.22)'
+    ctx.strokeStyle = 'rgba(21, 128, 61, 0.35)'
+    ctx.lineWidth = 1
+    for (const park of parks) {
+      ctx.beginPath()
+      for (const ring of park.rings) {
+        ctx.moveTo(ring[0][0] + offsetX, ring[0][1] + offsetY)
+        for (let i = 1; i < ring.length; i++) {
+          ctx.lineTo(ring[i][0] + offsetX, ring[i][1] + offsetY)
+        }
+        ctx.closePath()
+      }
+      ctx.fill('evenodd')
+      ctx.stroke()
+    }
   }
 
   // Draw terrain plots as polygons (urban, suburban, rural)

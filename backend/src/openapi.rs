@@ -14,7 +14,7 @@ use capitol_protocol::rest::{
     StationContainerResponse, StationInfo, WithdrawRequest, WithdrawResponse, ZoneInfo,
     ZonesResponse,
 };
-use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPlot, TerrainResponse, WaterRing};
+use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPark, TerrainPlot, TerrainResponse, WaterRing};
 
 /// Security scheme modifier for JWT Bearer authentication
 struct SecurityAddon;
@@ -166,6 +166,7 @@ then include it in the `Authorization: Bearer <token>` header.",
         RoadSegment,
         RoadType,
         TerrainPlot,
+        TerrainPark,
     ))
 )]
 pub struct ApiDoc;

@@ -569,7 +569,7 @@ impl PlayerExtension for CapitolExtension {
             self.owned_drawn = None;
             self.houses.lots_changed();
         }
-        if rebuild.ground || rebuild.roads || rebuild.plots {
+        if rebuild.ground || rebuild.roads || rebuild.plots || rebuild.parks {
             self.grass.terrain(terrain);
         }
         if self.built.is_some() {
