@@ -11,7 +11,7 @@ use crate::middleware::auth::AuthUser;
 use crate::models::{ActionState, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
 use crate::engine::currency::{announce_balances, balances_of};
-use crate::engine::node_placement;
+use crate::engine::{node_placement, node_spawn};
 use crate::engine::plot_sync::{sync_plots, OnOwned, SyncError};
 use crate::engine::GameEvent;
 
@@ -87,6 +87,13 @@ pub async fn update_world_params(
     // In memory only, like the terrain. The commit saves where the nodes are (#70).
     let game = &mut *game;
     node_placement::fit_to_terrain(&game.terrain, &mut game.resource_nodes);
+    // The woods, outcrops, veins and clay grow from the terrain, so they're
+    // planned afresh (E2.3). Also in memory only until the commit.
+    let replan = node_spawn::replan(&game.terrain, &game.resource_types, &mut game.resource_nodes, params.seed);
+    tracing::info!(
+        "Re-planned {} resource nodes: {} removed, {} added",
+        replan.nodes.len(), replan.removed, replan.added
+    );
 
     let _ = game.event_sender.send(GameEvent::TerrainUpdated);
 
@@ -120,6 +127,8 @@ pub async fn commit_world_params(
     let lots = game.terrain.terrain_plots.clone();
     // The regenerates since the last commit may have moved nodes (#70).
     let node_positions: Vec<_> = game.resource_nodes.values().map(|n| (n.id, (n.x, n.y))).collect();
+    // And re-planned the woods, outcrops, veins and clay (E2.3).
+    let planned = node_spawn::planned_in(&game.resource_types, &game.resource_nodes);
     drop(game); // release lock before DB call
 
     let on_owned = if query.force { OnOwned::Release } else { OnOwned::Refuse };
@@ -176,11 +185,12 @@ pub async fn commit_world_params(
     .execute(&state.db)
     .await?;
 
+    let replanned = node_spawn::save_replan(&state.db, &planned).await?;
     let moved = node_placement::save_positions(&state.db, &node_positions).await?;
 
     tracing::info!(
-        "Admin {} committed world params to database ({} resource nodes saved where the terrain moved them)",
-        user.account_id, moved
+        "Admin {} committed world params to database ({} resource nodes saved where the terrain moved them, {} planned ones gone)",
+        user.account_id, moved, replanned
     );
 
     Ok(Json(params))

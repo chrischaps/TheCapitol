@@ -84,6 +84,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         synced.upserted, synced.retired
     );
 
+    // Nodes a migration wrote for resource types the sync has just added (#162).
+    let planted = engine::node_spawn::plant_seeds(&db_pool).await?;
+    if planted > 0 {
+        tracing::info!("Planted {} resource nodes from resource_node_seeds", planted);
+    }
+
     // Redis connection
     let redis_conn = state::connect_redis(&config.redis_url).await?;
     tracing::info!("Connected to Redis");

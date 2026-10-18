@@ -148,6 +148,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::engine::node_placement::{place_nodes, KEEP_CLEAR};
+    use crate::engine::node_spawn::{self, NodeSeed, SpawnTable};
     use crate::models::terrain::{point_to_segment_distance, TerrainConfig, WorldGenParams};
 
     const WORLD_SCALE_MIGRATION: &str =
@@ -314,5 +315,190 @@ mod tests {
             .filter(|&&(x, y, _)| (x - SPAWN_X).stable_hypot(y - SPAWN_Y) <= NEARBY_NODE_RANGE)
             .count();
         assert!(in_sight >= 4, "only {in_sight} nodes in sight of the spawn");
+    }
+
+    /// E2.3's nodes on the default world, kept clear of the seeds as the
+    /// migration's were.
+    fn default_plan() -> Vec<NodeSeed> {
+        let existing: Vec<(f64, f64)> = seeded_nodes().iter().map(|&(x, y, _)| (x, y)).collect();
+        node_spawn::plan(&TerrainConfig::get_default(), &content_tables(), &existing, WorldGenParams::default().seed)
+    }
+
+    fn content_tables() -> Vec<SpawnTable> {
+        crate::content::load().unwrap().resources.iter().map(|r| SpawnTable::from(&r.to_type())).collect()
+    }
+
+    const NEW_NODES_MIGRATION: &str = include_str!("../../migrations/20261106_001_seeded_nodes_by_zone.sql");
+
+    /// The `('id', 'type', x, y, quality)` rows of a node seed insert.
+    fn insert_rows(sql: &str) -> Vec<NodeSeed> {
+        sql.lines()
+            .filter_map(|line| {
+                let row = line.trim().strip_prefix("('")?.trim_end_matches(',').strip_suffix(')')?;
+                let f: Vec<&str> = row.split(',').map(|f| f.trim().trim_matches('\'')).collect();
+                Some(NodeSeed {
+                    id: f[0].parse().ok()?,
+                    resource_type: f[1].to_string(),
+                    x: f[2].parse().ok()?,
+                    y: f[3].parse().ok()?,
+                    base_quality: f[4].parse().ok()?,
+                })
+            })
+            .collect()
+    }
+
+    /// D5: woods, branches, outcrops and veins in the rural ring, clay by the
+    /// canal and in the suburb's parks, branches in the parks too. Each at
+    /// about its density, and none on a road, the water or a lot.
+    #[test]
+    fn the_default_world_grows_what_d5_says() {
+        let terrain = TerrainConfig::get_default();
+        let plan = default_plan();
+        let tables = content_tables();
+        for table in &tables {
+            for spawn in &table.spawns {
+                let zone = Zone::from_str(&spawn.zone).unwrap();
+                if !table.is_planned() || zone == Zone::Wilderness {
+                    continue;
+                }
+                let (inner, outer) = zone.radii();
+                let want = spawn.density * std::f64::consts::PI * (outer * outer - inner * inner) / 1e6;
+                let got = plan.iter().filter(|s| s.resource_type == table.id && Zone::from_position(s.x, s.y) == zone).count();
+                assert!(got as f64 >= 0.95 * want.round(), "{} in {zone}: {got} of {want:.0}", table.id);
+            }
+        }
+        for s in &plan {
+            let clearance = road_clearance(&terrain, s.x, s.y);
+            assert!(clearance >= KEEP_CLEAR, "{} at ({}, {}) is {clearance:.1} from a road", s.resource_type, s.x, s.y);
+            assert!(terrain.lot_at(s.x, s.y).is_none(), "{} on a lot at ({}, {})", s.resource_type, s.x, s.y);
+            let r = (s.x - CENTER_X).stable_hypot(s.y - CENTER_Y);
+            assert!(terrain.water_rings.iter().all(|w| r < w.inner_radius() - KEEP_CLEAR || r > w.outer_radius() + KEEP_CLEAR));
+            let table = tables.iter().find(|t| t.id == s.resource_type).unwrap();
+            assert!((table.quality.0..=table.quality.1).contains(&s.base_quality));
+        }
+        let suburb_branches = plan.iter().filter(|s| s.resource_type == "fallen_branches" && Zone::from_position(s.x, s.y) == Zone::Suburban);
+        for s in suburb_branches {
+            assert!(terrain.parks.iter().any(|p| p.contains(s.x, s.y)), "suburban branches outside the parks at ({}, {})", s.x, s.y);
+        }
+    }
+
+    /// The new nodes are where startup's fit leaves them, as the seeds are.
+    #[test]
+    fn the_default_terrain_moves_no_planned_node() {
+        let mut nodes = seeded_positions();
+        let n = nodes.len() as u128;
+        nodes.extend(default_plan().iter().enumerate().map(|(i, s)| (Uuid::from_u128(n + i as u128), (s.x, s.y))));
+        let report = place_nodes(&TerrainConfig::get_default(), &nodes);
+        assert!(report.moves.is_empty(), "{} nodes moved: {:?}", report.moves.len(), report.moves);
+    }
+
+    /// The migration writes exactly the default world's plan. After a change to
+    /// the placer, the content's spawn tables or the default world, write a new
+    /// migration from `print_new_nodes`.
+    #[test]
+    fn the_migration_writes_the_default_plan() {
+        let rows = insert_rows(NEW_NODES_MIGRATION);
+        let plan = default_plan();
+        assert_eq!(rows.len(), plan.len());
+        for (row, seed) in rows.iter().zip(&plan) {
+            assert_eq!(row, seed);
+        }
+    }
+
+    /// Prints the VALUES rows of E2.3's node insert for the default world:
+    /// `cargo test print_new_nodes -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn print_new_nodes() {
+        let plan = default_plan();
+        for s in &plan {
+            println!("    ('{}', '{}', {:.1}, {:.1}, {}),", s.id, s.resource_type, s.x, s.y, s.base_quality);
+        }
+        let mut counts = std::collections::BTreeMap::new();
+        for s in &plan {
+            *counts.entry((s.resource_type.clone(), Zone::from_position(s.x, s.y).as_str())).or_insert(0) += 1;
+        }
+        for ((t, z), n) in counts {
+            println!("-- {t} in {z}: {n}");
+        }
+    }
+
+    /// Draws the default world's nodes by type over its rings, roads, lots and
+    /// parks, for review: the whole world, and a close look at the rural ring
+    /// east of the road in. `backend/tools/node-plan.ps1` runs it and makes PNGs:
+    /// `cargo test --release node_plan_svg -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn node_plan_svg() {
+        use std::fmt::Write;
+        let out = std::env::var("NODE_PLAN_OUT").unwrap_or_else(|_| "../target/node-plan".into());
+        std::fs::create_dir_all(&out).unwrap();
+        let terrain = TerrainConfig::get_default();
+        let plan = default_plan();
+        let seeds: Vec<(f64, f64)> = seeded_nodes().iter().map(|&(x, y, _)| (x, y)).collect();
+        const KINDS: [(&str, &str, &str); 7] = [
+            ("grass", "#9cc46a", "wild grass (seeded before)"),
+            ("tree", "#2f6b3a", "tree"),
+            ("fallen_branches", "#a0773f", "fallen branches"),
+            ("rock_outcrop", "#7d7d86", "rock outcrop"),
+            ("iron_vein", "#b5402a", "iron vein"),
+            ("clay_bank", "#d9925b", "clay bank"),
+            ("", "", ""),
+        ];
+        let views = [
+            ("nodes-world", (CENTER_X - 4000.0, CENTER_Y - 4000.0, 8000.0), 1600.0, 3.0),
+            ("nodes-rural-east", (CENTER_X + 2850.0, CENTER_Y - 600.0, 1100.0), 1100.0, 5.0),
+            ("nodes-urban-north", (CENTER_X - 550.0, CENTER_Y - 1850.0, 1100.0), 1100.0, 5.0),
+        ];
+        for (name, (x0, y0, span), px, dot) in views {
+            let k = px / span;
+            let at = |x: f64, y: f64| ((x - x0) * k, (y - y0) * k);
+            let mut svg = String::new();
+            let legend_h = 40.0;
+            writeln!(svg, r#"<svg xmlns="http://www.w3.org/2000/svg" width="{px}" height="{}" viewBox="0 0 {px} {}">"#, px + legend_h, px + legend_h).unwrap();
+            writeln!(svg, r##"<rect width="100%" height="100%" fill="#f3eee2"/>"##).unwrap();
+            for zone in Zone::ALL {
+                let (cx, cy) = at(CENTER_X, CENTER_Y);
+                writeln!(svg, r##"<circle cx="{cx:.1}" cy="{cy:.1}" r="{:.1}" fill="none" stroke="#c9bfa8" stroke-dasharray="6 4"/>"##, zone.radii().1 * k).unwrap();
+            }
+            for park in &terrain.parks {
+                let d: String = park.rings.iter().map(|r| {
+                    let pts: Vec<String> = r.iter().map(|&(x, y)| { let (a, b) = at(x, y); format!("{a:.1},{b:.1}") }).collect();
+                    format!("M{}Z", pts.join("L"))
+                }).collect();
+                writeln!(svg, r##"<path d="{d}" fill="#d7e6c0" fill-rule="evenodd"/>"##).unwrap();
+            }
+            for lot in &terrain.terrain_plots {
+                let pts: Vec<String> = lot.corners.iter().map(|&(x, y)| { let (a, b) = at(x, y); format!("{a:.1},{b:.1}") }).collect();
+                writeln!(svg, r##"<polygon points="{}" fill="#e6dcc6" stroke="#d6cab0" stroke-width="0.5"/>"##, pts.join(" ")).unwrap();
+            }
+            for ring in &terrain.water_rings {
+                let (cx, cy) = at(CENTER_X, CENTER_Y);
+                writeln!(svg, r##"<circle cx="{cx:.1}" cy="{cy:.1}" r="{:.1}" fill="none" stroke="#6f9fc4" stroke-width="{:.1}"/>"##, ring.radius * k, (ring.width * k).max(1.0)).unwrap();
+            }
+            for road in &terrain.roads {
+                let pts: Vec<String> = road.points.iter().map(|&(x, y)| { let (a, b) = at(x, y); format!("{a:.1},{b:.1}") }).collect();
+                writeln!(svg, r##"<polyline points="{}" fill="none" stroke="#a89f8f" stroke-width="{:.1}" stroke-linecap="round"/>"##, pts.join(" "), (road.width * k).max(0.8)).unwrap();
+            }
+            let dots = seeds.iter().map(|&p| ("grass", p)).chain(plan.iter().map(|s| (s.resource_type.as_str(), (s.x, s.y))));
+            for (kind, (x, y)) in dots {
+                let (a, b) = at(x, y);
+                if a < -dot || b < -dot || a > px + dot || b > px + dot {
+                    continue;
+                }
+                let colour = KINDS.iter().find(|c| c.0 == kind).map_or("#000", |c| c.1);
+                writeln!(svg, r#"<circle cx="{a:.1}" cy="{b:.1}" r="{dot}" fill="{colour}" fill-opacity="0.9"/>"#).unwrap();
+            }
+            let mut lx = 12.0;
+            for (kind, colour, label) in KINDS.iter().filter(|c| !c.0.is_empty()) {
+                let n = if *kind == "grass" { seeds.len() } else { plan.iter().filter(|s| s.resource_type == *kind).count() };
+                writeln!(svg, r##"<circle cx="{lx}" cy="{}" r="6" fill="{colour}"/><text x="{}" y="{}" font-family="Georgia, serif" font-size="14" fill="#2e2a24">{label} ({n})</text>"##, px + 20.0, lx + 10.0, px + 25.0).unwrap();
+                lx += 12.0 + 8.0 * (label.len() as f64 + 6.0);
+            }
+            svg.push_str("</svg>\n");
+            let path = format!("{out}/{name}.svg");
+            std::fs::write(&path, svg).unwrap();
+            println!("wrote {path}");
+        }
     }
 }

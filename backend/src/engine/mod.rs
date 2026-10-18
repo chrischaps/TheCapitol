@@ -9,6 +9,7 @@ mod extraction;
 pub mod market;
 mod movement;
 pub mod node_placement;
+pub mod node_spawn;
 pub mod notices;
 pub mod plot_sync;
 pub mod property_tax;
