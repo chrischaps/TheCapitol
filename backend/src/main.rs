@@ -19,6 +19,7 @@ mod middleware;
 mod migrations;
 mod models;
 mod openapi;
+mod rate_limit;
 mod routes;
 mod sessions;
 mod state;
@@ -282,6 +283,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create app state
     let app_state = AppState::new(db_pool, redis_conn, config.clone(), game_state.clone());
+    if config.rate_limits.enabled {
+        tracing::info!("Rate limits: {:?}", config.rate_limits);
+    } else {
+        tracing::warn!("Rate limits are off (RATE_LIMITS=off)");
+    }
 
     // Start tick engine
     let tick_state = game_state.clone();
@@ -293,7 +299,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build router
     let app = Router::new()
         .route("/health", get(routes::health::health_check))
-        .nest("/auth", routes::auth::router())
+        // Auth is limited by IP; the authenticated routes by account, in auth_middleware (E0.7)
+        .nest("/auth", routes::auth::router().route_layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            rate_limit::by_ip,
+        )))
         .nest("/player", routes::player::router(app_state.clone()))
         .nest("/world", routes::world::router(app_state.clone()))
         .nest("/recipes", routes::recipes::router(app_state.clone()))
@@ -316,7 +326,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    // With the peer address, for the per-IP auth limit
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
 
     Ok(())
 }

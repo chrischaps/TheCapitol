@@ -113,6 +113,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Handle messages and events
     let mut subscribed_position = false;
+    // This connection's command allowance (E0.7)
+    let limit_key = state.limiter.connection();
 
     loop {
         tokio::select! {
@@ -136,6 +138,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
                             // Every `error` below names the command it refuses (#89).
                             let command = client_msg.type_name();
+                            if let Err(wait) = state.limiter.check(limit_key) {
+                                tracing::info!("Rate limited WS {command} from player {player_id}");
+                                let _ = sender.send(Message::Text(
+                                    serde_json::to_string(&ServerMessage::Error {
+                                        message: crate::rate_limit::ws_message(wait),
+                                        command: command.into(),
+                                    }).unwrap().into()
+                                )).await;
+                                continue;
+                            }
                             match client_msg {
                                 ClientMessage::Subscribe { channel } => {
                                     if channel == "position" {

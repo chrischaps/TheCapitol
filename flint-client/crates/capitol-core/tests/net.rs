@@ -1038,3 +1038,83 @@ fn a_refused_refresh_token_ends_the_session_with_the_servers_reason() {
     let events = wait_for(&net, "the recipes", |e| matches!(e, NetEvent::Rest(1, _)));
     assert!(matches!(events.last(), Some(NetEvent::Rest(1, Err(e))) if e.is_unauthorized()));
 }
+
+/// A server whose rate limit refuses the first request (E0.7). The client
+/// waits out `Retry-After` and sends it again, POST or not, since a `429` was
+/// refused before anything happened. The caller sees only the answer.
+#[test]
+fn a_rate_limited_request_waits_and_goes_again() {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counted = requests.clone();
+    std::thread::spawn(move || {
+        let auth = serde_json::to_string(&AuthResponse {
+            token: GOOD_TOKEN.into(),
+            expires_in: 0,
+            refresh_token: None,
+            account: AccountInfo {
+                id: Uuid::nil(),
+                email: "a@b.c".into(),
+                tier: "free".into(),
+                is_admin: false,
+            },
+            player_id: PLAYER,
+        })
+        .unwrap();
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            // The head, then the body by its content-length.
+            let mut head = Vec::new();
+            let mut byte = [0u8];
+            while !head.ends_with(b"\r\n\r\n") {
+                if stream.read(&mut byte).unwrap_or(0) == 0 {
+                    break;
+                }
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|n| n.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let mut body = vec![0u8; length];
+            stream.read_exact(&mut body).unwrap();
+            let answer = if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                let body = r#"{"error":"Too many requests"}"#;
+                format!(
+                    "HTTP/1.1 429 Too Many Requests\r\nretry-after: 1\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+            } else {
+                format!(
+                    "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{auth}",
+                    auth.len()
+                )
+            };
+            stream.write_all(answer.as_bytes()).unwrap();
+        }
+    });
+    let net = Net::spawn(config(addr)).unwrap();
+    let login = RestRequest::Login(LoginRequest {
+        email: "a@b.c".into(),
+        password: "pw".into(),
+        refresh: false,
+    });
+    let start = Instant::now();
+    net.rest(login, 1);
+    let result = match wait_for(&net, "REST", |e| matches!(e, NetEvent::Rest(1, _))).pop() {
+        Some(NetEvent::Rest(_, result)) => result,
+        _ => unreachable!(),
+    };
+    assert!(matches!(result, Ok(RestResponse::Auth(_))), "{result:?}");
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+    assert!(
+        start.elapsed() >= Duration::from_secs(1),
+        "didn't wait: {:?}",
+        start.elapsed()
+    );
+}

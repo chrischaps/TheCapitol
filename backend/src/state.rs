@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::engine::GameState;
+use crate::rate_limit::RateLimiter;
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -39,6 +40,7 @@ pub struct AppState {
     pub redis: ConnectionManager,
     pub config: Config,
     pub game: Arc<RwLock<GameState>>,
+    pub limiter: Arc<RateLimiter>,
 }
 
 impl AppState {
@@ -51,6 +53,7 @@ impl AppState {
         Self {
             db,
             redis,
+            limiter: Arc::new(RateLimiter::new(config.rate_limits.clone())),
             config,
             game,
         }

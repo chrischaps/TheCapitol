@@ -1,5 +1,7 @@
 use std::env;
 
+use crate::rate_limit::RateLimitConfig;
+
 #[derive(Clone)]
 pub struct Config {
     pub database_url: String,
@@ -11,6 +13,7 @@ pub struct Config {
     pub access_ttl_secs: u64,
     /// Lifetime of a refresh token, and of the session it keeps alive
     pub refresh_ttl_secs: u64,
+    pub rate_limits: RateLimitConfig,
 }
 
 impl Config {
@@ -26,6 +29,7 @@ impl Config {
                 .unwrap_or(3000),
             access_ttl_secs: secs("ACCESS_TTL_SECS", 15 * 60),
             refresh_ttl_secs: secs("REFRESH_TTL_SECS", 30 * 24 * 60 * 60),
+            rate_limits: RateLimitConfig::from_env(),
         })
     }
 }

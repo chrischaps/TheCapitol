@@ -8,6 +8,8 @@
 
 use capitol_protocol::rest::*;
 use capitol_protocol::terrain::TerrainResponse;
+use std::time::Duration;
+
 use reqwest::Method;
 use uuid::Uuid;
 
@@ -342,20 +344,39 @@ pub(crate) async fn execute(
         builder.send()
     };
 
-    // A GET that fails to send is tried once more. Requests go out on pooled
-    // keep-alive connections, and one the server has just closed fails with
-    // "connection closed before message completed" (tests/net.rs,
-    // `a_get_on_a_dead_pooled_connection_is_sent_again`). The poller never
-    // retries, so a refetch lost that way stays stale until something asks
-    // again. A GET is safe to repeat; the others aren't.
-    let response = match send().await {
-        Err(e) if request.method() == Method::GET => {
-            tracing::debug!("GET {} failed to send, trying again: {e}", request.path());
-            send().await
+    // A `429` means the server's rate limit refused the request before acting
+    // on it (E0.7), so any method is safe to send again. Wait as long as
+    // `Retry-After` says, a few times, and only then report it.
+    let mut limited = 0;
+    let response = loop {
+        // A GET that fails to send is tried once more. Requests go out on pooled
+        // keep-alive connections, and one the server has just closed fails with
+        // "connection closed before message completed" (tests/net.rs,
+        // `a_get_on_a_dead_pooled_connection_is_sent_again`). The poller never
+        // retries, so a refetch lost that way stays stale until something asks
+        // again. A GET is safe to repeat; the others aren't.
+        let response = match send().await {
+            Err(e) if request.method() == Method::GET => {
+                tracing::debug!("GET {} failed to send, trying again: {e}", request.path());
+                send().await
+            }
+            sent => sent,
         }
-        sent => sent,
-    }
-    .map_err(transport)?;
+        .map_err(transport)?;
+        if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS
+            || limited == RATE_LIMIT_RETRIES
+        {
+            break response;
+        }
+        limited += 1;
+        let wait = retry_after(response.headers());
+        tracing::debug!(
+            "{} {} rate limited; sending again in {wait:?}",
+            request.method(),
+            request.path()
+        );
+        tokio::time::sleep(wait).await;
+    };
     let status = response.status();
     if status == reqwest::StatusCode::NOT_MODIFIED
         && matches!(
@@ -378,6 +399,23 @@ pub(crate) async fn execute(
     request
         .decode(&body)
         .map_err(|e| RestError::Decode(format!("{} {}: {e}", request.method(), request.path())))
+}
+
+/// How many times a rate-limited request is sent again before the `429` is
+/// reported.
+const RATE_LIMIT_RETRIES: u32 = 4;
+/// The longest a `Retry-After` is honoured for, and the wait when there's none.
+const RETRY_AFTER_MAX: Duration = Duration::from_secs(30);
+
+/// How long a `429` asks us to wait: `Retry-After` in seconds, at least one
+/// and at most [`RETRY_AFTER_MAX`].
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Duration {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|secs| Duration::from_secs(secs.max(1)).min(RETRY_AFTER_MAX))
+        .unwrap_or(RETRY_AFTER_MAX)
 }
 
 fn transport(e: reqwest::Error) -> RestError {

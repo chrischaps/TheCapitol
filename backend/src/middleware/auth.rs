@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::State,
+    extract::{OriginalUri, State},
     http::{header, Request, StatusCode},
     middleware::Next,
     response::Response,
@@ -76,6 +76,20 @@ pub async fn auth_middleware(
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "Session expired" })),
         ));
+    }
+
+    // Each account's allowance, by what it's asking for (E0.7). The router
+    // is nested, so the full path is in OriginalUri.
+    let path = request
+        .extensions()
+        .get::<OriginalUri>()
+        .map(|OriginalUri(uri)| uri.path().to_owned())
+        .unwrap_or_else(|| request.uri().path().to_owned());
+    let category = crate::rate_limit::Category::of(request.method(), &path);
+    let key = crate::rate_limit::Key::Account(token_data.claims.sub, category);
+    if let Err(wait) = state.limiter.check(key) {
+        tracing::info!("Rate limited {} {path} for account {}", request.method(), token_data.claims.sub);
+        return Ok(crate::rate_limit::too_many(wait));
     }
 
     // Insert auth user into request extensions
