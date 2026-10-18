@@ -88,6 +88,11 @@ pub enum GameEvent {
     StationRemoved {
         station_id: Uuid,
     },
+    /// A station's tool slot changed: installed, removed, or worn by a craft (E1.6)
+    StationToolChanged {
+        station_id: Uuid,
+        tool: Option<capitol_protocol::rest::StationTool>,
+    },
     // M5: Trading events
     TradeRequested {
         from_player: Uuid,

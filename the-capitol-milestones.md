@@ -349,10 +349,10 @@ Create static data for:
 - [x] Recipes can require specific station types
 
 #### Backend - Tool Installation
-- [ ] Some stations have tool slots
-- [ ] `POST /stations/{id}/install-tool` - Put tool in station
-- [ ] `POST /stations/{id}/remove-tool` - Remove tool from station
-- [ ] Installed tool contributes to quality
+- [x] Some stations have tool slots *(E1.6 #158: every crafting station has one; storage has none)*
+- [x] `POST /stations/{id}/install-tool` - Put tool in station *(E1.6 #158: WS `install_tool`, not REST)*
+- [x] `POST /stations/{id}/remove-tool` - Remove tool from station *(E1.6 #158: WS `remove_tool`, not REST)*
+- [x] Installed tool contributes to quality *(E1.6 #158: it supplies the recipe's tool term at that station, and wears with each craft)*
 
 #### Backend - Hand Tools
 - [x] Tools as items with durability *(E1.4 #156)*

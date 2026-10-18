@@ -14,6 +14,7 @@ pub mod property_tax;
 mod regeneration;
 pub mod slot_moves;
 pub mod station_removal;
+pub mod station_tools;
 mod stations;
 mod tick;
 pub mod tools;

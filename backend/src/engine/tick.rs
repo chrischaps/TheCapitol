@@ -687,6 +687,9 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
                     if let Some(broken) = &done.broken {
                         tools::announce_broken(&event_sender, broken);
                     }
+                    if let Some((station_id, tool)) = done.station_tool {
+                        super::station_tools::announce(&event_sender, station_id, tool);
+                    }
                     for container_id in done.changed {
                         let _ = event_sender.send(GameEvent::InventoryUpdated {
                             player_id: craft.player_id,

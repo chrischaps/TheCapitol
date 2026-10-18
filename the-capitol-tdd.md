@@ -1136,8 +1136,11 @@ struct Station {
     // Current operation (manual or automated)
     current_operation: Option<StationOperation>,
     
-    // Installed tool (some stations need one)
+    // Installed tool (one slot on every crafting station, E1.6). It supplies
+    // the recipe's tool term for crafts here, and wears with each one.
     installed_tool: Option<ItemId>,
+    // Who installed it, and whose it is when it comes out
+    tool_owner: Option<PlayerId>,
     
     // === AUTOMATION (optional) ===
     automation_enabled: bool,
@@ -1848,7 +1851,8 @@ CREATE TABLE stations (
     
     current_operation JSONB,
     
-    installed_tool_id VARCHAR(32) REFERENCES items(id),
+    installed_tool  UUID REFERENCES items(id) ON DELETE SET NULL,  -- E1.6; the item sits in no container, owned by no one
+    tool_owner      UUID REFERENCES players(id) ON DELETE SET NULL,
     
     automation_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     automation_config JSONB,

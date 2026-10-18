@@ -2,13 +2,14 @@
 //!
 //! REST `DELETE /stations/{id}` and WS `remove_station` both come here. In one
 //! transaction the station's box must be empty, the kit that placed it goes back
-//! into the owner's inventory at the quality it was placed with, and the station,
+//! into the owner's inventory at the quality it was placed with, with the tool
+//! in its tool slot if it holds one (E1.6), and the station,
 //! its container and its place on the plot's station count all go. Nothing is
 //! destroyed: a station can be moved by taking it down and placing it again.
 //!
 //! A foreclosed plot's stations come down here too ([`return_plot_stations`],
-//! #137), boxes and all: what's in them goes back to the inventories of
-//! whoever owns it.
+//! #137), boxes and tools and all: what's in them goes back to the inventories
+//! of whoever owns it.
 
 use std::collections::HashMap;
 
@@ -22,6 +23,9 @@ pub struct RemovedStation {
     pub inventory_id: Uuid,
 #[cfg_attr(not(test), allow(dead_code))] // the tests read it; callers only need the inventory
     pub kit_item_id: Uuid,
+    /// The tool that was in its tool slot, now beside the kit (E1.6)
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub tool_item_id: Option<Uuid>,
 }
 
 /// Why a station can't be taken down.
@@ -32,7 +36,7 @@ pub enum RemoveError {
     /// Its box still holds items. They may not all be the owner's (#80), so
     /// they aren't moved for them.
     BoxNotEmpty,
-    /// No free inventory slot for the kit.
+    /// No free inventory slot for the kit, or for the kit and its tool.
     NoRoomForKit,
     Database(sqlx::Error),
 }
@@ -43,7 +47,7 @@ impl RemoveError {
             RemoveError::NotFound => "Station not found".into(),
             RemoveError::NotYours => "Not your station".into(),
             RemoveError::BoxNotEmpty => "Empty the station's box before taking it down".into(),
-            RemoveError::NoRoomForKit => "No room in your inventory for the kit".into(),
+            RemoveError::NoRoomForKit => "No room in your inventory for the kit and its tool".into(),
             RemoveError::Database(e) => format!("Database error: {}", e),
         }
     }
@@ -86,9 +90,9 @@ async fn remove_in(
     player_id: Uuid,
     station_id: Uuid,
 ) -> Result<RemovedStation, RemoveError> {
-    let (station_type, owner_id, plot_id, kit_quality, kit): (String, Uuid, Option<Uuid>, i32, Option<String>) =
+    let (station_type, owner_id, plot_id, kit_quality, kit, tool): (String, Uuid, Option<Uuid>, i32, Option<String>, Option<Uuid>) =
         sqlx::query_as(
-            "SELECT s.station_type, s.owner_id, s.plot_id, s.kit_quality, st.kit_item
+            "SELECT s.station_type, s.owner_id, s.plot_id, s.kit_quality, st.kit_item, s.installed_tool
              FROM stations s LEFT JOIN station_types st ON st.id = s.station_type
              WHERE s.id = $1 FOR UPDATE OF s",
         )
@@ -124,26 +128,17 @@ async fn remove_in(
         return Err(RemoveError::BoxNotEmpty);
     }
 
-    // Kits don't stack, so the kit takes the first free inventory slot.
-    let (inventory_id, slot_count): (Uuid, i32) = sqlx::query_as(
-        "SELECT c.id, ct.slot_count FROM containers c
-         JOIN container_types ct ON c.container_type = ct.id
-         WHERE c.owner_id = $1 AND c.container_type = 'player_inventory'
-         LIMIT 1 FOR UPDATE OF c",
-    )
-    .bind(player_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or(RemoveError::NoRoomForKit)?;
-    let used: Vec<i32> = sqlx::query_scalar(
-        "SELECT slot_index FROM items WHERE container_id = $1 AND slot_index IS NOT NULL",
-    )
-    .bind(inventory_id)
-    .fetch_all(&mut **tx)
-    .await?;
-    let slot = (0..slot_count)
-        .find(|s| !used.contains(s))
+    // Kits and tools don't stack, so each takes the first free inventory slot.
+    // The tool comes out to the station's owner, who may take any tool from
+    // their own station (`station_tools::remove_tool`).
+    let wanted = 1 + tool.is_some() as usize;
+    let (inventory_id, slots) = free_slots(tx, player_id, wanted)
+        .await?
         .ok_or(RemoveError::NoRoomForKit)?;
+    let slot = slots[0];
+    if let Some(tool) = tool {
+        super::station_tools::give_back(tx, station_id, tool, player_id, inventory_id, slots[1]).await?;
+    }
 
     let kit_item_id = Uuid::new_v4();
     sqlx::query(
@@ -177,7 +172,37 @@ async fn remove_in(
     Ok(RemovedStation {
         inventory_id,
         kit_item_id,
+        tool_item_id: tool,
     })
+}
+
+/// The first `n` free slots of `player_id`'s inventory, which is locked, or
+/// `None` if it has fewer (or they have none).
+pub(crate) async fn free_slots(
+    conn: &mut PgConnection,
+    player_id: Uuid,
+    n: usize,
+) -> Result<Option<(Uuid, Vec<i32>)>, sqlx::Error> {
+    let found: Option<(Uuid, i32)> = sqlx::query_as(
+        "SELECT c.id, ct.slot_count FROM containers c
+         JOIN container_types ct ON c.container_type = ct.id
+         WHERE c.owner_id = $1 AND c.container_type = 'player_inventory'
+         LIMIT 1 FOR UPDATE OF c",
+    )
+    .bind(player_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((inventory_id, slot_count)) = found else {
+        return Ok(None);
+    };
+    let used: Vec<i32> = sqlx::query_scalar(
+        "SELECT slot_index FROM items WHERE container_id = $1 AND slot_index IS NOT NULL",
+    )
+    .bind(inventory_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let free: Vec<i32> = (0..slot_count).filter(|s| !used.contains(s)).take(n).collect();
+    Ok((free.len() == n).then_some((inventory_id, free)))
 }
 
 /// What giving a plot's stations back did (#137).
@@ -205,15 +230,18 @@ struct Inventory {
 /// the guest's (#80), and an item with no owner is the station owner's. A
 /// stackable item joins the first stack of its type, at the two stacks' quality
 /// averaged by quantity; anything else takes
-/// the first free slot. Kits go first, so a station is the last thing lost.
+/// the first free slot. A tool in a station's tool slot goes back to whoever
+/// put it there (E1.6), or the station owner if they're gone. Kits go first,
+/// so a station is the last thing lost, then tools. A tool that finds no room
+/// goes with its station.
 /// The stations are left, empty or holding only what didn't fit, for
 /// `release_plot` to delete.
 pub async fn return_plot_stations(
     tx: &mut PgConnection,
     plot_id: Uuid,
 ) -> Result<ReturnedStations, sqlx::Error> {
-    let stations: Vec<(Uuid, String, Uuid, i32, Option<String>)> = sqlx::query_as(
-        "SELECT s.id, s.station_type, s.owner_id, s.kit_quality, st.kit_item
+    let stations: Vec<(Uuid, String, Uuid, i32, Option<String>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT s.id, s.station_type, s.owner_id, s.kit_quality, st.kit_item, s.installed_tool, s.tool_owner
          FROM stations s LEFT JOIN station_types st ON st.id = s.station_type
          WHERE s.plot_id = $1 ORDER BY s.placed_at, s.id FOR UPDATE OF s",
     )
@@ -242,7 +270,7 @@ pub async fn return_plot_stations(
     let mut returned = ReturnedStations::default();
     let mut inventories: HashMap<Uuid, Option<Inventory>> = HashMap::new();
 
-    for (station_id, station_type, owner_id, kit_quality, kit) in &stations {
+    for (station_id, station_type, owner_id, kit_quality, kit, _, _) in &stations {
         let Some(kit) = kit else {
             tracing::error!("Station {} has type {} with no kit", station_id, station_type);
             continue;
@@ -268,6 +296,25 @@ pub async fn return_plot_stations(
         .execute(&mut *tx)
         .await?;
         took(&mut returned, *owner_id, inventory_id);
+    }
+
+    for (station_id, _, owner_id, _, _, tool, tool_owner) in &stations {
+        let Some(tool) = tool else { continue };
+        let player = tool_owner.unwrap_or(*owner_id);
+        let slot = match inventory(tx, &mut inventories, player).await? {
+            Some(inv) if !inv.free.is_empty() => Some((inv.id, inv.free.remove(0))),
+            _ => None,
+        };
+        let Some((inventory_id, slot)) = slot else {
+            let item_type: String = sqlx::query_scalar("SELECT item_type FROM items WHERE id = $1")
+                .bind(tool)
+                .fetch_one(&mut *tx)
+                .await?;
+            returned.lost.push((item_type, 1));
+            continue;
+        };
+        super::station_tools::give_back(tx, *station_id, *tool, player, inventory_id, slot).await?;
+        took(&mut returned, player, inventory_id);
     }
 
     for (item_id, item_type, quality, quantity, item_owner, station_id, stackable) in contents {
@@ -521,6 +568,92 @@ mod tests {
 
         assert!(matches!(err, RemoveError::NoRoomForKit), "{err:?}");
         assert!(station_exists(&db, station).await);
+    }
+
+    /// A workbench whose tool slot holds a stone sickle with 7 uses left, put
+    /// there by `tool_owner`. Returns the station and the sickle.
+    async fn bench_with_tool(db: &PgPool, owner: Uuid, tool_owner: Uuid) -> (Uuid, Uuid) {
+        crate::content::sync(db, &crate::content::load().unwrap()).await.unwrap();
+        let station = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, kit_quality)
+             VALUES ($1, 'workbench', $2, 0, 0, 61)",
+        )
+        .bind(station)
+        .bind(owner)
+        .execute(db)
+        .await
+        .unwrap();
+        let sickle: Uuid = sqlx::query_scalar(
+            "INSERT INTO items (id, item_type, quality, quantity, durability)
+             VALUES ($1, 'stone_sickle', 50, 1, 7) RETURNING id",
+        )
+        .bind(Uuid::new_v4())
+        .fetch_one(db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE stations SET installed_tool = $2, tool_owner = $3 WHERE id = $1")
+            .bind(station)
+            .bind(sickle)
+            .bind(tool_owner)
+            .execute(db)
+            .await
+            .unwrap();
+        (station, sickle)
+    }
+
+    /// The tool comes back with the kit, to the station's owner (E1.6)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_station_comes_down_with_its_tool(db: PgPool) {
+        let me = player(&db, "builder").await;
+        let guest = player(&db, "guest").await;
+        let (station, sickle) = bench_with_tool(&db, me.id, guest.id).await;
+
+        let removed = remove_station(&db, me.id, station).await.unwrap();
+
+        assert_eq!(removed.tool_item_id, Some(sickle));
+        let held: Vec<(Uuid, String, i32, Option<i32>)> = sqlx::query_as(
+            "SELECT owner_id, item_type, slot_index, durability FROM items
+             WHERE container_id = $1 ORDER BY slot_index",
+        )
+        .bind(me.inventory)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            held,
+            vec![
+                (me.id, "workbench_kit".to_string(), 0, None),
+                (me.id, "stone_sickle".to_string(), 1, Some(7)),
+            ]
+        );
+        assert!(!station_exists(&db, station).await);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn no_room_for_the_kit_and_its_tool_keeps_the_station_up(db: PgPool) {
+        let me = player(&db, "builder").await;
+        let slots: i32 = sqlx::query_scalar("SELECT slot_count FROM container_types WHERE id = 'player_inventory'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        for slot in 1..slots {
+            put(&db, me.id, me.inventory, slot).await;
+        }
+        let (station, sickle) = bench_with_tool(&db, me.id, me.id).await;
+
+        let err = remove_station(&db, me.id, station).await.unwrap_err();
+
+        assert!(matches!(err, RemoveError::NoRoomForKit), "{err:?}");
+        assert!(station_exists(&db, station).await);
+        let installed: Option<Uuid> = sqlx::query_scalar("SELECT installed_tool FROM stations WHERE id = $1")
+            .bind(station)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(installed, Some(sickle));
     }
 
     #[sqlx::test(migrations = "./migrations")]

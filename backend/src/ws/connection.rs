@@ -467,6 +467,34 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                     }
                                 }
+                                ClientMessage::InstallTool { station_id, item_id } => {
+                                    let (Ok(station_uuid), Ok(item_uuid)) = (Uuid::parse_str(&station_id), Uuid::parse_str(&item_id)) else {
+                                        let _ = sender.send(Message::Text(
+                                            serde_json::to_string(&ServerMessage::Error {
+                                                message: "Invalid station or item ID".to_string(),
+                                                command: command.into(),
+                                            }).unwrap().into()
+                                        )).await;
+                                        continue;
+                                    };
+                                    let at = live_position(&state.game, player_id).await;
+                                    let result = crate::engine::station_tools::install_tool(&state.db, player_id, station_uuid, item_uuid, at).await;
+                                    announce_tool_slot(&state, &mut sender, player_id, station_uuid, command, result).await;
+                                }
+                                ClientMessage::RemoveTool { station_id } => {
+                                    let Ok(station_uuid) = Uuid::parse_str(&station_id) else {
+                                        let _ = sender.send(Message::Text(
+                                            serde_json::to_string(&ServerMessage::Error {
+                                                message: "Invalid station ID".to_string(),
+                                                command: command.into(),
+                                            }).unwrap().into()
+                                        )).await;
+                                        continue;
+                                    };
+                                    let at = live_position(&state.game, player_id).await;
+                                    let result = crate::engine::station_tools::remove_tool(&state.db, player_id, station_uuid, at).await;
+                                    announce_tool_slot(&state, &mut sender, player_id, station_uuid, command, result).await;
+                                }
                                 ClientMessage::OpenStation { station_id } => {
                                     let station_uuid = match Uuid::parse_str(&station_id) {
                                         Ok(id) => id,
@@ -548,7 +576,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         continue;
                                     }
 
-                                    let tool = match crate::engine::tools::tool_for_recipe(&state.db, &state.game, player_id, &recipe_id).await {
+                                    // The station's own tool if it holds the right one (E1.6)
+                                    let tool = match crate::engine::station_tools::tool_for_station_recipe(&state.db, &state.game, player_id, station_uuid, &recipe_id).await {
                                         Ok(tool) => tool,
                                         Err(e) => {
                                             tracing::error!("Tool lookup for {} failed: {:?}", player_id, e);
@@ -771,6 +800,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     // M4: Station events
                     Ok(GameEvent::StationRemoved { station_id }) => {
                         let msg = ServerMessage::StationRemoved { station_id };
+                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                    }
+                    Ok(GameEvent::StationToolChanged { station_id, tool }) => {
+                        let msg = ServerMessage::StationToolChanged { station_id, tool };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
                     // M5: Trading events
@@ -1386,9 +1419,38 @@ async fn handle_place_station(
             container_id: Some(container_id),
             interaction_range: st.interaction_range,
             quality: kit_item.quality,
+            tool: None,
         },
         plot_id: Some(plot.id),
     })
+}
+
+/// Answer `install_tool` or `remove_tool` (E1.6): everyone hears what the
+/// station's slot holds now, and the player's inventory refetches. A refusal
+/// goes to the player alone.
+async fn announce_tool_slot(
+    state: &AppState,
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    player_id: Uuid,
+    station_id: Uuid,
+    command: &str,
+    result: Result<crate::engine::station_tools::SlotChange, crate::engine::station_tools::ToolSlotError>,
+) {
+    match result {
+        Ok(change) => {
+            let game = state.game.read().await;
+            crate::engine::station_tools::announce(&game.event_sender, station_id, change.tool);
+            let _ = game.event_sender.send(GameEvent::InventoryUpdated {
+                player_id,
+                container_id: change.inventory_id,
+                slots: vec![],
+            });
+        }
+        Err(e) => {
+            let msg = ServerMessage::Error { message: e.message(), command: command.into() };
+            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+        }
+    }
 }
 
 /// Handle open station request

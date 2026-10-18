@@ -93,6 +93,7 @@ pub async fn get_nearby_stations(
     };
 
     let container_map: HashMap<Uuid, Uuid> = containers.into_iter().collect();
+    let tools = crate::engine::station_tools::tools_at(&state.db, &station_ids).await?;
 
     // Build response
     let station_infos: Vec<StationInfo> = stations
@@ -111,6 +112,7 @@ pub async fn get_nearby_stations(
                 container_id: container_map.get(&station.id).copied(),
                 interaction_range: st.interaction_range,
                 quality: station.quality,
+                tool: tools.get(&station.id).cloned(),
             })
         })
         .collect();
@@ -283,6 +285,7 @@ pub async fn place_station(
         container_id: Some(container_id),
         interaction_range: station_type.interaction_range,
         quality: kit_item.quality,
+        tool: None,
     };
 
     Ok(Json(PlaceStationResponse { station: info }))

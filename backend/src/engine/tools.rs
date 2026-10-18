@@ -14,12 +14,15 @@ use uuid::Uuid;
 
 use super::{GameEvent, GameState};
 
-/// A tool a player holds, as [`best_tool`] found it.
+/// A tool a player holds, as [`best_tool`] found it, or one installed in a
+/// station they craft at (`station_tools::installed_tool`, E1.6).
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeldTool {
     pub item_id: Uuid,
     pub item_type: String,
     pub tool: Tool,
+    /// The station whose tool slot holds it; `None` for one in the player's inventory.
+    pub station_id: Option<Uuid>,
 }
 
 impl HeldTool {
@@ -82,7 +85,7 @@ pub async fn best_tool(db: &PgPool, player_id: Uuid, tool_type: ToolType) -> Res
             durability,
             max_durability: tools::max_durability(base_durability, quality),
         };
-        (HeldTool { item_id, item_type, tool }, tool)
+        (HeldTool { item_id, item_type, tool, station_id: None }, tool)
     });
     Ok(tools::best_tool(candidates))
 }

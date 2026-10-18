@@ -12,7 +12,7 @@ use capitol_protocol::rest::{
     MoveRequest, NearbyResponse, NearbyStationsResponse, PlaceStationRequest,
     PayTaxRequest, PayTaxResponse, PlaceStationResponse, PlayerMeResponse, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
     RecipeOutputInfo, RecipesResponse, RegisterRequest, ResourceNodeInfo, SlotItem,
-    StationContainerResponse, StationInfo, SubscribeRequest, Subscription, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
+    StationContainerResponse, StationInfo, StationTool, SubscribeRequest, Subscription, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
     ZonesResponse,
 };
 use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPark, TerrainPlot, TerrainResponse, WaterRing};
@@ -167,6 +167,7 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         // Stations
         NearbyStationsResponse,
         StationInfo,
+        StationTool,
         PlaceStationRequest,
         PlaceStationResponse,
         StationContainerResponse,

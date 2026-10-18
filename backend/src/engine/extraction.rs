@@ -307,6 +307,7 @@ mod tests {
                 durability,
                 max_durability: tools::max_durability(60, quality),
             },
+            station_id: None,
         }
     }
 

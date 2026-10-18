@@ -37,7 +37,7 @@ pub enum Command {
         recipe_id: String,
         #[allow(dead_code)] // crafting picks its own inputs (#183)
         input_item_ids: Vec<Uuid>,
-        /// The best tool held for it (`tools::tool_for_recipe`). E1.6 (#158) adds the station's own
+        /// The station's own tool, or else the best held (`station_tools::tool_for_station_recipe`)
         tool: Option<HeldTool>,
     },
     // M5: Trading commands

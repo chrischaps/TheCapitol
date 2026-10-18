@@ -779,6 +779,49 @@ mod tests {
         assert_eq!(left, 0);
     }
 
+    /// A tool in a station's tool slot goes back to whoever put it there (E1.6)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_foreclosed_stations_tool_goes_back_to_who_put_it_there(db: PgPool) {
+        crate::content::sync(&db, &crate::content::load().unwrap()).await.unwrap();
+        let ada = player(&db, "ada", 0).await;
+        let ada_bag = inventory(&db, ada).await;
+        let guest = player(&db, "guest", 0).await;
+        let guest_bag = inventory(&db, guest).await;
+        let lot = plot(&db, Some(ada), VALUE).await;
+        owe(&db, lot, 480).await;
+        let (bench, _) = station(&db, ada, lot).await;
+        sqlx::query("UPDATE stations SET station_type = 'workbench' WHERE id = $1")
+            .bind(bench)
+            .execute(&db)
+            .await
+            .unwrap();
+        let sickle: Uuid = sqlx::query_scalar(
+            "INSERT INTO items (id, item_type, quality, quantity, durability)
+             VALUES ($1, 'stone_sickle', 70, 1, 12) RETURNING id",
+        )
+        .bind(Uuid::new_v4())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE stations SET installed_tool = $2, tool_owner = $3 WHERE id = $1")
+            .bind(bench)
+            .bind(sickle)
+            .bind(guest)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let report = process_property_taxes(&db).await;
+
+        let f = &report.foreclosures[0];
+        assert_eq!(f.removed_stations, vec![bench]);
+        assert_eq!(held(&db, ada_bag).await, vec![(0, "workbench_kit".to_string(), 50, 1, ada)]);
+        assert_eq!(held(&db, guest_bag).await, vec![(0, "stone_sickle".to_string(), 70, 1, guest)]);
+        assert_eq!(f.returned_to, vec![(ada, ada_bag), (guest, guest_bag)]);
+        assert!(f.lost.is_empty());
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
     async fn a_debt_past_the_deed_refunds_nothing(db: PgPool) {

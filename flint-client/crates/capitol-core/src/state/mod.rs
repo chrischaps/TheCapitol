@@ -630,6 +630,7 @@ impl GameState {
                         k.interaction_range
                     }),
                     quality: *quality,
+                    tool: None,
                 };
                 self.upsert_station(station, &mut out);
                 out.push(StateEvent::StationPlaced {
@@ -664,6 +665,12 @@ impl GameState {
                         station_id: *station_id,
                         container_id: *container_id,
                     });
+                }
+            }
+            // Kept on the station for E1.7's tool slot (#159), which shows it
+            M::StationToolChanged { station_id, tool } => {
+                if let Some(station) = self.stations.get_mut(station_id) {
+                    station.tool = tool.clone();
                 }
             }
             M::StationClosed { player_id } => {

@@ -136,7 +136,9 @@ pub fn ws_scope(message: &ClientMessage) -> ApiKeyScope {
         | ClientMessage::RemoveStation { .. }
         | ClientMessage::OpenStation { .. }
         | ClientMessage::CloseStation
-        | ClientMessage::CraftAtStation { .. } => ApiKeyScope::Play,
+        | ClientMessage::CraftAtStation { .. }
+        | ClientMessage::InstallTool { .. }
+        | ClientMessage::RemoveTool { .. } => ApiKeyScope::Play,
         ClientMessage::TradeInitiate { .. }
         | ClientMessage::TradeAcceptRequest
         | ClientMessage::TradeDeclineRequest

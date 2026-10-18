@@ -223,6 +223,7 @@ mod tests {
             container_id: None,
             interaction_range: 75.0,
             quality: 50,
+            tool: None,
         }
     }
 

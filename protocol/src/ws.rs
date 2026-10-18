@@ -11,7 +11,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::rest::Subscription;
+use crate::rest::{StationTool, Subscription};
 
 /// Client to server.
 ///
@@ -67,6 +67,15 @@ pub enum ClientMessage {
         recipe_id: String,
         input_item_ids: Vec<String>,
     },
+    /// Put a tool from your inventory into a station's tool slot (E1.6). Anyone
+    /// who may use the station may; the slot must be empty. Answered by
+    /// `station_tool_changed`, or `error`.
+    #[serde(rename = "install_tool")]
+    InstallTool { station_id: String, item_id: String },
+    /// Take a station's tool into your inventory (E1.6): your own, or anyone's
+    /// from your own station. Answered by `station_tool_changed`, or `error`.
+    #[serde(rename = "remove_tool")]
+    RemoveTool { station_id: String },
     // M5: Trading
     #[serde(rename = "trade_initiate")]
     TradeInitiate { target_player_id: String },
@@ -102,6 +111,8 @@ impl ClientMessage {
             ClientMessage::OpenStation { .. } => "open_station",
             ClientMessage::CloseStation => "close_station",
             ClientMessage::CraftAtStation { .. } => "craft_at_station",
+            ClientMessage::InstallTool { .. } => "install_tool",
+            ClientMessage::RemoveTool { .. } => "remove_tool",
             ClientMessage::TradeInitiate { .. } => "trade_initiate",
             ClientMessage::TradeAcceptRequest => "trade_accept_request",
             ClientMessage::TradeDeclineRequest => "trade_decline_request",
@@ -248,6 +259,11 @@ pub enum ServerMessage {
     },
     #[serde(rename = "station_closed")]
     StationClosed { player_id: Uuid },
+    /// A station's tool slot changed (E1.6): a tool went in or came out, or a
+    /// craft there wore it (`tool` is `None` once it breaks). Broadcast, so
+    /// only a station you're showing is yours to update.
+    #[serde(rename = "station_tool_changed")]
+    StationToolChanged { station_id: Uuid, tool: Option<StationTool> },
     // M5: Trading events
     #[serde(rename = "trade_requested")]
     TradeRequested {
@@ -393,6 +409,7 @@ impl ServerMessage {
             ServerMessage::StationRemoved { .. } => "station_removed",
             ServerMessage::StationOpened { .. } => "station_opened",
             ServerMessage::StationClosed { .. } => "station_closed",
+            ServerMessage::StationToolChanged { .. } => "station_tool_changed",
             ServerMessage::TradeRequested { .. } => "trade_requested",
             ServerMessage::TradeRequestDeclined { .. } => "trade_request_declined",
             ServerMessage::TradeRequestExpired { .. } => "trade_request_expired",

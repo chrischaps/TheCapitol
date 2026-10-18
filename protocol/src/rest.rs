@@ -761,6 +761,23 @@ pub struct StationInfo {
     /// The station's quality, 0-100: the quality of the kit that placed it.
     /// It's the station term of the quality cascade for crafts made here.
     pub quality: i32,
+    /// The tool in the station's tool slot, if any (E1.6). It supplies the tool
+    /// term for crafts made here, and wears with each one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<StationTool>,
+}
+
+/// A tool installed in a station (E1.6)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct StationTool {
+    pub item_id: Uuid,
+    pub item_type: String,
+    pub quality: i32,
+    pub durability: i32,
+    pub max_durability: i32,
+    /// Who put it there, and whose it is when it comes out
+    pub owner_id: Option<Uuid>,
 }
 
 /// `POST /stations/place`

@@ -6,10 +6,12 @@
 //! enough), the inputs are consumed and the output is written. If anything is wrong the craft
 //! fails and nothing changes.
 
+use capitol_protocol::rest::StationTool;
 use capitol_protocol::ws::ToolUse;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use super::station_tools;
 use super::tools::{self, BrokenTool, HeldTool, Wear};
 
 /// A craft that has run its time, waiting to be written
@@ -33,6 +35,9 @@ pub struct Finished {
     pub tool: Option<ToolUse>,
     /// Set when that use broke the tool, for `tools::announce_broken`
     pub broken: Option<BrokenTool>,
+    /// When the tool was a station's (E1.6): the station, and what its slot
+    /// holds now, for `station_tool_changed`
+    pub station_tool: Option<(Uuid, Option<StationTool>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +56,8 @@ pub struct CraftOutput {
 pub const INPUTS_MOVED: &str = "The craft's inputs moved before it finished";
 /// The reason shown when the recipe's tool left the inventory while the craft ran
 pub const TOOL_MOVED: &str = "The craft's tool left your inventory before it finished";
+/// The reason shown when the station's tool was taken out while the craft ran
+pub const STATION_TOOL_MOVED: &str = "The station's tool was taken out before the craft finished";
 /// The reason shown when the output slot holds something else
 pub const OUTPUT_FULL: &str = "Your crafting output is full. Empty it and craft again";
 
@@ -61,11 +68,28 @@ pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Finished
     let mut changed: Vec<Uuid> = Vec::new();
 
     consume_inputs(&mut tx, craft, &mut changed).await?;
-    let (mut tool, mut broken) = (None, None);
+    let (mut tool, mut broken, mut station_tool) = (None, None, None);
     if let Some(held) = &craft.tool {
-        let Some(wear) = tools::wear_held(&mut tx, held.item_id, craft.player_id).await.map_err(db_error)? else {
-            tracing::info!("Craft {} by {} failed: tool {} moved", craft.operation_id, craft.player_id, held.item_id);
-            return Err(TOOL_MOVED.to_string());
+        let wear = match held.station_id {
+            // A station's own tool wears while it's still in the slot (E1.6)
+            Some(station_id) => {
+                let Some((wear, now)) =
+                    station_tools::wear_installed(&mut tx, station_id, held.item_id).await.map_err(db_error)?
+                else {
+                    tracing::info!("Craft {} by {} failed: station {}'s tool {} was taken out",
+                        craft.operation_id, craft.player_id, station_id, held.item_id);
+                    return Err(STATION_TOOL_MOVED.to_string());
+                };
+                station_tool = Some((station_id, now));
+                wear
+            }
+            None => {
+                let Some(wear) = tools::wear_held(&mut tx, held.item_id, craft.player_id).await.map_err(db_error)? else {
+                    tracing::info!("Craft {} by {} failed: tool {} moved", craft.operation_id, craft.player_id, held.item_id);
+                    return Err(TOOL_MOVED.to_string());
+                };
+                wear
+            }
         };
         tool = Some(held.after(&wear));
         if let Wear::Broke(b) = wear {
@@ -80,7 +104,7 @@ pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Finished
     }
 
     tx.commit().await.map_err(db_error)?;
-    Ok(Finished { changed, tool, broken })
+    Ok(Finished { changed, tool, broken, station_tool })
 }
 
 /// Check every input again and use it up. Rows are locked as they're read, so a move or trade

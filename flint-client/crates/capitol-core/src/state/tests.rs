@@ -74,6 +74,7 @@ fn station(id: Uuid, owner: Uuid) -> StationInfo {
         container_id: Some(STATION_BOX),
         interaction_range: 75.0,
         quality: 50,
+        tool: None,
     }
 }
 
@@ -196,6 +197,7 @@ fn test_for(message: &M) -> fn() {
         M::StationRemoved { .. } => station_removed_closes_it_if_open,
         M::StationOpened { .. } => station_opened_only_for_me,
         M::StationClosed { .. } => station_closed_only_for_me,
+        M::StationToolChanged { .. } => station_tool_changed_updates_the_station,
         M::TradeRequested { .. } => trade::trade_requested_prompts,
         M::TradeRequestDeclined { .. } => trade::trade_request_declined_ends_our_request,
         M::TradeRequestExpired { .. } => trade::trade_request_expired_ends_the_request_either_way,
@@ -233,7 +235,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 42, "one fixture per ServerMessage variant");
+    assert_eq!(count, 43, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -968,6 +970,30 @@ fn station_placed_fills_in_from_the_catalog() {
     assert_eq!(chest.interaction_range, 75.0);
     assert_eq!(chest.container_id, Some(STATION_BOX));
     assert_eq!(chest.quality, 82);
+}
+
+#[test]
+fn station_tool_changed_updates_the_station() {
+    let mut state = connected();
+    state.apply_rest(&R::NearbyStations(NearbyStationsResponse {
+        stations: vec![station(STATION, ME)],
+    }));
+    let tool = capitol_protocol::rest::StationTool {
+        item_id: Uuid::from_u128(0xa1),
+        item_type: "stone_sickle".into(),
+        quality: 64,
+        durability: 41,
+        max_durability: 68,
+        owner_id: Some(ME),
+    };
+
+    state.apply_ws(&M::StationToolChanged { station_id: STATION, tool: Some(tool.clone()) });
+    assert_eq!(state.station(STATION).and_then(|s| s.tool.clone()), Some(tool));
+
+    state.apply_ws(&M::StationToolChanged { station_id: STATION, tool: None });
+    assert_eq!(state.station(STATION).and_then(|s| s.tool.clone()), None);
+    // A station we don't know of is ignored
+    state.apply_ws(&M::StationToolChanged { station_id: CHEST, tool: None });
 }
 
 #[test]
