@@ -6,7 +6,7 @@
 //! ([`wear`]); the use that takes the last of it destroys the tool, and its
 //! owner hears `tool_broke` ([`announce_broken`]).
 
-use capitol_protocol::rules::tools::{self, Tool, ToolType};
+use capitol_protocol::rules::tools::{self, Tier, Tool, ToolType};
 use capitol_protocol::ws::ToolUse;
 use sqlx::{PgConnection, PgPool};
 use tokio::sync::{broadcast, RwLock};
@@ -21,6 +21,8 @@ pub struct HeldTool {
     pub item_id: Uuid,
     pub item_type: String,
     pub tool: Tool,
+    /// Its material, which picks the row of a resource's yield table it gathers by (E2.2)
+    pub tier: Option<Tier>,
     /// The station whose tool slot holds it; `None` for one in the player's inventory.
     pub station_id: Option<Uuid>,
 }
@@ -64,8 +66,8 @@ pub struct BrokenTool {
 /// ([`tools::best_tool`]), or `None` if they have none with any use left. Ties go
 /// to the lower slot.
 pub async fn best_tool(db: &PgPool, player_id: Uuid, tool_type: ToolType) -> Result<Option<HeldTool>, sqlx::Error> {
-    let held: Vec<(Uuid, String, i32, i32, f64, i32)> = sqlx::query_as(
-        "SELECT i.id, i.item_type, i.quality, i.durability, it.base_power, it.max_durability
+    let held: Vec<(Uuid, String, i32, i32, f64, i32, Option<String>)> = sqlx::query_as(
+        "SELECT i.id, i.item_type, i.quality, i.durability, it.base_power, it.max_durability, it.tier
          FROM items i
          JOIN containers c ON c.id = i.container_id
          JOIN item_types it ON it.id = i.item_type
@@ -78,14 +80,15 @@ pub async fn best_tool(db: &PgPool, player_id: Uuid, tool_type: ToolType) -> Res
     .fetch_all(db)
     .await?;
 
-    let candidates = held.into_iter().map(|(item_id, item_type, quality, durability, base_power, base_durability)| {
+    let candidates = held.into_iter().map(|(item_id, item_type, quality, durability, base_power, base_durability, tier)| {
         let tool = Tool {
             base_power,
             quality,
             durability,
             max_durability: tools::max_durability(base_durability, quality),
         };
-        (HeldTool { item_id, item_type, tool, station_id: None }, tool)
+        let tier = tier.as_deref().and_then(Tier::from_str);
+        (HeldTool { item_id, item_type, tool, tier, station_id: None }, tool)
     });
     Ok(tools::best_tool(candidates))
 }

@@ -753,13 +753,25 @@ pub struct CatalogResourceType {
     pub extraction_duration_ticks: i32,
     pub regeneration_ticks: i32,
     /// The tool type that works it, if any: the best one held speeds the
-    /// gather and raises its yield (`rules::tools::tool_yield`), and wears.
+    /// gather, reads its tier's row of `yields`, and wears.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_type: Option<String>,
-    /// The power that counts as the right tool for it (`rules::tools::leverage`).
-    /// Set exactly when `tool_type` is.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub difficulty: Option<f64>,
+    /// How hard it is to work, on the tools' power scale: hands are 4, a Q50
+    /// stone tool 10, iron 18 (`rules::tools::leverage`, plan D5).
+    #[serde(default)]
+    pub difficulty: f64,
+    /// Units a gather gives, by `hand` or tool tier (`rules::resources::yield_for`).
+    /// `yield_quantity_min`/`_max` above are its `hand` row, or its lowest
+    /// tier's for a resource that needs a tool.
+    #[serde(default)]
+    pub yields: rules::resources::YieldTable,
+    /// How its nodes group: `scattered`, `clumped`, `woods`, `along_water`
+    /// or `under_trees` (`rules::resources::Cluster`)
+    #[serde(default)]
+    pub cluster: String,
+    /// The zones its nodes grow in, and how thickly (E2.2)
+    #[serde(default)]
+    pub spawns: Vec<rules::resources::Spawn>,
 }
 
 /// A container type (`container_types`).

@@ -140,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let resource_types: Vec<ResourceType> = sqlx::query_as(
         "SELECT id, name, yields_item, yield_quantity_min, yield_quantity_max,
          base_quality_min, base_quality_max, required_tool, extraction_duration_ticks, regeneration_ticks,
-         tool_type, difficulty
+         tool_type, difficulty, yields, cluster, spawns
          FROM resource_types"
     )
     .fetch_all(&db_pool)

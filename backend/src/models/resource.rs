@@ -1,6 +1,8 @@
-use capitol_protocol::rules::tools::ToolType;
+use capitol_protocol::rules::resources::{self, ResourceYield, Spawn, YieldTable};
+use capitol_protocol::rules::tools::{Tier, ToolType};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::types::Json;
 use sqlx::FromRow;
 use uuid::Uuid;
 
@@ -22,8 +24,14 @@ pub struct ResourceType {
     pub regeneration_ticks: i32,
     /// The tool type that works it: the best one held is used (E1.5)
     pub tool_type: Option<String>,
-    /// The power that counts as the right tool for it (`rules::tools::leverage`)
-    pub difficulty: Option<f64>,
+    /// How hard it is to work, on the tools' power scale (`rules::tools::leverage`)
+    pub difficulty: f64,
+    /// Units a gather gives, by `hand` or tool tier (E2.2)
+    pub yields: Json<YieldTable>,
+    /// How its nodes group (`rules::resources::Cluster`)
+    pub cluster: String,
+    /// The zones its nodes grow in (E2.2)
+    pub spawns: Json<Vec<Spawn>>,
 }
 
 impl ResourceType {
@@ -36,6 +44,12 @@ impl ResourceType {
     /// The tool type it can't be gathered without, if any.
     pub fn required(&self) -> Option<ToolType> {
         self.required_tool.as_deref().and_then(ToolType::from_str)
+    }
+
+    /// The row of its yield table a gather with a tool of `tier`, or by hand
+    /// (`None`), reads (`rules::resources::yield_for`).
+    pub fn yield_for(&self, tier: Option<Tier>) -> Option<&ResourceYield> {
+        resources::yield_for(&self.yields, tier)
     }
 }
 

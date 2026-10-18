@@ -614,6 +614,7 @@ impl GameState {
             &mut self.players,
             &mut self.resource_nodes,
             &self.resource_types,
+            &self.item_types,
             &mut self.gather_tools,
             self.tick_count,
             &self.event_sender,
@@ -1286,19 +1287,8 @@ mod tests {
 
     /// Put a Wild Grass node `dx` units east of `at` into `game`, and return its id
     fn grass_node(game: &mut GameState, at: (f64, f64), dx: f64, state: NodeState) -> Uuid {
-        game.resource_types.entry("grass".into()).or_insert_with(|| ResourceType {
-            id: "grass".into(),
-            name: "Wild Grass".into(),
-            yields_item: "fiber".into(),
-            yield_quantity_min: 1,
-            yield_quantity_max: 3,
-            base_quality_min: 40,
-            base_quality_max: 70,
-            required_tool: None,
-            tool_type: None,
-            difficulty: None,
-            extraction_duration_ticks: 30,
-            regeneration_ticks: 600,
+        game.resource_types.entry("grass".into()).or_insert_with(|| {
+            ResourceType { tool_type: None, ..crate::content::resource_type("grass") }
         });
         let id = Uuid::new_v4();
         game.resource_nodes.insert(id, ResourceNodeState {

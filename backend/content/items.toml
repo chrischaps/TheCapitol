@@ -64,3 +64,71 @@ category = "tool"
 stackable = false
 weight = 1.5
 tool = { tool_type = "sickle", tier = "stone", base_power = 6.0, max_durability = 60 }
+
+# What the D5 resources yield (E2.2). E2.4 (#163) brings the rest of D5's items.
+[[item]]
+id = "sticks"
+name = "Sticks"
+category = "raw_material"
+stackable = true
+weight = 0.3
+
+[[item]]
+id = "clay"
+name = "Clay"
+category = "raw_material"
+stackable = true
+weight = 0.5
+
+[[item]]
+id = "stone"
+name = "Stone"
+category = "raw_material"
+stackable = true
+weight = 1.0
+
+[[item]]
+id = "log"
+name = "Log"
+category = "raw_material"
+stackable = true
+weight = 3.0
+
+[[item]]
+id = "iron_ore"
+name = "Iron Ore"
+category = "raw_material"
+stackable = true
+weight = 1.5
+
+# The stone axe and pickaxe, and their parts: trees and veins need them, so
+# without them logs and ore couldn't be had (E2.2). The D5 stone tier.
+[[item]]
+id = "tool_handle"
+name = "Tool Handle"
+category = "processed_material"
+stackable = true
+weight = 0.4
+
+[[item]]
+id = "knapped_stone"
+name = "Knapped Stone"
+category = "processed_material"
+stackable = true
+weight = 0.5
+
+[[item]]
+id = "stone_axe"
+name = "Stone Axe"
+category = "tool"
+stackable = false
+weight = 1.4
+tool = { tool_type = "axe", tier = "stone", base_power = 10.0, max_durability = 60 }
+
+[[item]]
+id = "stone_pickaxe"
+name = "Stone Pickaxe"
+category = "tool"
+stackable = false
+weight = 1.6
+tool = { tool_type = "pickaxe", tier = "stone", base_power = 10.0, max_durability = 60 }

@@ -116,6 +116,9 @@ pub mod stacking;
 /// The market: the listing fee, order bounds and the grade test (E3.1).
 pub mod market;
 
+/// Resource types: yield by tool tier, spawn tables and cluster shapes.
+pub mod resources;
+
 /// Letter grade for an item quality (0-100): A >= 90, B >= 75, C >= 55, D >= 35,
 /// otherwise F. WebSocket events carry only the number, so clients grade it here.
 pub fn quality_grade(quality: i32) -> &'static str {

@@ -215,8 +215,8 @@ pub(crate) async fn give_back(
 
 /// The tool in `station_id`'s slot, if it's a `tool_type` with uses left.
 pub async fn installed_tool(db: &PgPool, station_id: Uuid, tool_type: ToolType) -> Result<Option<HeldTool>, sqlx::Error> {
-    let row: Option<(Uuid, String, i32, i32, f64, i32)> = sqlx::query_as(
-        "SELECT i.id, i.item_type, i.quality, i.durability, it.base_power, it.max_durability
+    let row: Option<(Uuid, String, i32, i32, f64, i32, Option<String>)> = sqlx::query_as(
+        "SELECT i.id, i.item_type, i.quality, i.durability, it.base_power, it.max_durability, it.tier
          FROM stations s
          JOIN items i ON i.id = s.installed_tool
          JOIN item_types it ON it.id = i.item_type
@@ -226,10 +226,11 @@ pub async fn installed_tool(db: &PgPool, station_id: Uuid, tool_type: ToolType) 
     .bind(tool_type.as_str())
     .fetch_optional(db)
     .await?;
-    Ok(row.map(|(item_id, item_type, quality, durability, base_power, base_durability)| HeldTool {
+    Ok(row.map(|(item_id, item_type, quality, durability, base_power, base_durability, tier)| HeldTool {
         item_id,
         item_type,
         tool: Tool { base_power, quality, durability, max_durability: tools::max_durability(base_durability, quality) },
+        tier: tier.as_deref().and_then(tools::Tier::from_str),
         station_id: Some(station_id),
     }))
 }

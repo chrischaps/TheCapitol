@@ -89,3 +89,65 @@ inputs = [
 outputs = [{ item_type = "stone_sickle", quantity_min = 1, quantity_max = 1 }]
 quality_weights = { variance_min = -3, variance_max = 3 }
 crafting_requirements = {}
+
+# The stone axe and pickaxe (D5), so trees and veins can be worked (E2.2).
+# Craft recipes give the station 0.4; assembly leaves the output to its parts.
+
+[[recipe]]
+id = "tool_handle"
+name = "Tool Handle"
+description = "Bind sticks into a handle at a workbench."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 60
+inputs = [
+    { item_type = "sticks", quantity = 2, quality_weight = 0.8 },
+    { item_type = "rope", quantity = 1, quality_weight = 0.2 },
+]
+outputs = [{ item_type = "tool_handle", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -5, variance_max = 5, station = 0.4 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "knapped_stone"
+name = "Knapped Stone"
+description = "Strike stone against stone at a workbench for a sharp edge."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 80
+inputs = [{ item_type = "stone", quantity = 2, quality_weight = 1.0 }]
+outputs = [{ item_type = "knapped_stone", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -5, variance_max = 5, station = 0.4 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "stone_axe"
+name = "Stone Axe"
+description = "Lash two knapped stones to a handle. Trees need an axe."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 120
+inputs = [
+    { item_type = "knapped_stone", quantity = 2, quality_weight = 2.0 },
+    { item_type = "tool_handle", quantity = 1, quality_weight = 1.0 },
+    { item_type = "rope", quantity = 1, quality_weight = 0.3 },
+]
+outputs = [{ item_type = "stone_axe", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "stone_pickaxe"
+name = "Stone Pickaxe"
+description = "Lash two knapped stones to a handle. Iron veins need a pick, and rock gives to one far faster than to hands."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 120
+inputs = [
+    { item_type = "knapped_stone", quantity = 2, quality_weight = 2.0 },
+    { item_type = "tool_handle", quantity = 1, quality_weight = 1.0 },
+    { item_type = "rope", quantity = 1, quality_weight = 0.3 },
+]
+outputs = [{ item_type = "stone_pickaxe", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1 }
+crafting_requirements = {}

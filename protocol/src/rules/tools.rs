@@ -169,20 +169,21 @@ pub fn best_tool<K>(tools: impl IntoIterator<Item = (K, Tool)>) -> Option<K> {
 // Tools at work (E1.5)
 // ---------------------------------------------------------------------------
 
+/// The power of bare hands (D5): what a resource's `difficulty` is measured
+/// against when no tool works it, and the least difficulty [`leverage`] counts.
+pub const HAND_POWER: f64 = 4.0;
+
 /// How much of a resource's `difficulty` a tool's power covers, capped at
 /// [`MAX_LEVERAGE`]. Difficulty is the power that counts as the right tool for
-/// the job, so leverage 1 is a Q50 tool of the first tier that fits.
+/// the job, so leverage 1 is a Q50 tool of the first tier that fits. Anything
+/// hands can manage (difficulty up to [`HAND_POWER`]) counts as `HAND_POWER`:
+/// a tool still helps there, but no more than it would a hand's job.
 pub fn leverage(power: f64, difficulty: f64) -> f64 {
-    if difficulty <= 0.0 {
-        return MAX_LEVERAGE;
-    }
-    (power / difficulty).clamp(0.0, MAX_LEVERAGE)
+    (power / difficulty.max(HAND_POWER)).clamp(0.0, MAX_LEVERAGE)
 }
 
-/// Past this much power over difficulty, a better tool gathers no more.
+/// Past this much power over difficulty, a better tool gathers no faster.
 pub const MAX_LEVERAGE: f64 = 4.0;
-/// Extra yield per unit of [`leverage`]: half again at 1, three times at the cap.
-pub const YIELD_PER_LEVERAGE: f64 = 0.5;
 /// Extra speed per unit of [`leverage`]: a quarter faster at 1, twice as fast at the cap.
 pub const SPEED_PER_LEVERAGE: f64 = 0.25;
 /// The most quality a tool at leverage 1 can knock off a gather (GDD §6.2's
@@ -190,13 +191,6 @@ pub const SPEED_PER_LEVERAGE: f64 = 0.25;
 /// up to [`MAX_DAMAGE`].
 pub const DAMAGE_AT_PAR: f64 = 5.0;
 pub const MAX_DAMAGE: i32 = 15;
-
-/// How many units a gather gives with a tool, from the `rolled` units the
-/// resource gives by hand: `rolled × (1 + 0.5 × leverage)`, rounded, never fewer.
-pub fn tool_yield(rolled: i32, power: f64, difficulty: f64) -> i32 {
-    let factor = 1.0 + YIELD_PER_LEVERAGE * leverage(power, difficulty);
-    ((rolled as f64 * factor).round() as i32).max(rolled)
-}
 
 /// How long a gather takes with a tool, from the resource's `base` ticks:
 /// `base / (1 + 0.25 × leverage)`, rounded up, at least 1.
@@ -335,24 +329,29 @@ mod tests {
         assert!(Tier::Stone < Tier::Steel);
     }
 
-    /// A stone sickle at Q50 (power 6) on grass (difficulty 6) is leverage 1
+    /// A Q50 tool of power 6 on a difficulty-6 resource is leverage 1
     #[test]
-    fn the_right_tool_gathers_half_again_a_quarter_faster() {
+    fn the_right_tool_gathers_a_quarter_faster() {
         assert!(close(leverage(6.0, 6.0), 1.0));
-        assert_eq!(tool_yield(2, 6.0, 6.0), 3);
-        assert_eq!(tool_yield(1, 6.0, 6.0), 2, "1.5 rounds up");
         assert_eq!(tool_duration(30, 6.0, 6.0), 24);
         assert_eq!(max_damage(6.0, 6.0), 5);
     }
 
+    /// D5's easy resources (grass and branches are 0) count as hands' work
+    #[test]
+    fn difficulty_under_a_hands_counts_as_a_hands() {
+        assert!(close(leverage(10.0, 0.0), 2.5));
+        assert!(close(leverage(10.0, 2.0), 2.5));
+        assert!(close(leverage(10.0, HAND_POWER), 2.5));
+        assert!(close(leverage(10.0, 8.0), 1.25), "above it, difficulty is its own");
+    }
+
     #[test]
     fn more_power_helps_up_to_the_cap() {
-        assert_eq!(tool_yield(3, 1000.0, 6.0), 9, "three times at the cap");
         assert_eq!(tool_duration(30, 1000.0, 6.0), 15, "twice as fast at the cap");
         assert_eq!(max_damage(1000.0, 6.0), 1);
-        assert!(tool_yield(3, 12.0, 6.0) > tool_yield(3, 6.0, 6.0));
-        // A weak tool never gathers less than hands do, but it damages more
-        assert_eq!(tool_yield(3, 0.5, 6.0), 3);
+        assert!(tool_duration(30, 12.0, 6.0) < tool_duration(30, 6.0, 6.0));
+        // A weak tool damages more
         assert_eq!(max_damage(2.0, 6.0), 15);
         assert_eq!(max_damage(0.0, 6.0), MAX_DAMAGE);
         assert_eq!(tool_duration(1, 6.0, 6.0), 1, "never under a tick");

@@ -13,10 +13,11 @@
 //! ingredient. Startup runs it before [`sync`] ([`load_and_sync`]), and so
 //! does `cargo test`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
-use capitol_protocol::rules::tools;
+use capitol_protocol::rules::resources::{self, Cluster, ResourceYield, Spawn};
+use capitol_protocol::rules::{tools, Zone};
 pub use crate::models::CraftingRequirements;
 use serde::Deserialize;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -60,19 +61,23 @@ pub struct ResourceDef {
     pub id: String,
     pub name: String,
     pub yields_item: String,
-    pub yield_quantity_min: i32,
-    pub yield_quantity_max: i32,
     pub base_quality_min: i32,
     pub base_quality_max: i32,
     /// A tool type it can't be gathered without (E1.5). It's then `tool_type` too.
     pub required_tool: Option<String>,
-    /// The tool type that works it: the best one held speeds the gather, raises
-    /// its yield and wears (`rules::tools`). Defaults to `required_tool`.
+    /// The tool type that works it: the best one held speeds the gather, reads
+    /// its tier's yield row and wears (`rules::tools`). Defaults to `required_tool`.
     pub tool_type: Option<String>,
-    /// The power that counts as the right tool for it. Needed with a tool type.
-    pub difficulty: Option<f64>,
+    /// How hard it is to work, on the tools' power scale (hands are 4).
+    pub difficulty: f64,
     pub extraction_duration_ticks: i32,
     pub regeneration_ticks: i32,
+    /// Units a gather gives, by `hand` or tool tier (E2.2)
+    pub yields: BTreeMap<String, YieldDef>,
+    /// How its nodes group (`rules::resources::Cluster`)
+    pub cluster: String,
+    /// The zones its nodes grow in
+    pub spawns: Vec<SpawnDef>,
 }
 
 impl ResourceDef {
@@ -80,6 +85,76 @@ impl ResourceDef {
     pub fn tool(&self) -> Option<&str> {
         self.tool_type.as_deref().or(self.required_tool.as_deref())
     }
+
+    /// Its yield table as the rules read it.
+    pub fn yield_table(&self) -> resources::YieldTable {
+        self.yields
+            .iter()
+            .map(|(k, y)| (k.clone(), ResourceYield { min: y.min, max: y.max, ticks: y.ticks }))
+            .collect()
+    }
+
+    /// The row `resource_types.yield_quantity_min`/`_max` keep: by hand, or
+    /// the least tool that works it.
+    pub fn first_yield(&self) -> Option<ResourceYield> {
+        resources::yield_for(&self.yield_table(), None).cloned()
+    }
+
+    pub fn spawn_table(&self) -> Vec<Spawn> {
+        self.spawns
+            .iter()
+            .map(|s| Spawn { zone: s.zone.clone(), density: s.density, quality_floor: s.quality_floor })
+            .collect()
+    }
+}
+
+/// `id` from the built-in content as the engine holds it, for tests.
+#[cfg(test)]
+pub fn resource_type(id: &str) -> crate::models::ResourceType {
+    load().unwrap().resources.iter().find(|r| r.id == id).expect("a resource in the content").to_type()
+}
+
+#[cfg(test)]
+impl ResourceDef {
+    /// This resource as `main` loads it from `resource_types` after a sync.
+    pub fn to_type(&self) -> crate::models::ResourceType {
+        let first = self.first_yield().unwrap_or(ResourceYield { min: 1, max: 1, ticks: None });
+        crate::models::ResourceType {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            yields_item: self.yields_item.clone(),
+            yield_quantity_min: first.min,
+            yield_quantity_max: first.max,
+            base_quality_min: self.base_quality_min,
+            base_quality_max: self.base_quality_max,
+            required_tool: self.required_tool.clone(),
+            extraction_duration_ticks: self.extraction_duration_ticks,
+            regeneration_ticks: self.regeneration_ticks,
+            tool_type: self.tool().map(str::to_string),
+            difficulty: self.difficulty,
+            yields: sqlx::types::Json(self.yield_table()),
+            cluster: self.cluster.clone(),
+            spawns: sqlx::types::Json(self.spawn_table()),
+        }
+    }
+}
+
+/// A row of a resource's yield table (`rules::resources::ResourceYield`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct YieldDef {
+    pub min: i32,
+    pub max: i32,
+    pub ticks: Option<i32>,
+}
+
+/// A row of a resource's spawn table (`rules::resources::Spawn`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnDef {
+    pub zone: String,
+    pub density: f64,
+    pub quality_floor: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -328,14 +403,11 @@ pub fn validate(content: &Content) -> Vec<String> {
                 problems.push(format!("resource '{}' requires a {required} but is worked by a {works}", r.id));
             }
         }
-        match (r.tool(), r.difficulty) {
-            (Some(_), None) => problems.push(format!("resource '{}' has a tool type but no difficulty", r.id)),
-            (None, Some(_)) => problems.push(format!("resource '{}' has a difficulty but no tool type", r.id)),
-            (Some(_), Some(d)) if !(d.is_finite() && d > 0.0) => {
-                problems.push(format!("resource '{}' has a difficulty that isn't above 0", r.id))
-            }
-            _ => {}
+        if !(r.difficulty.is_finite() && r.difficulty >= 0.0) {
+            problems.push(format!("resource '{}' has a difficulty that is negative or not a number", r.id));
         }
+        validate_yields(r, &mut problems);
+        validate_spawns(r, &mut problems);
     }
     for s in &content.stations {
         item(&mut problems, format!("station '{}' (its kit)", s.id), &s.kit);
@@ -464,6 +536,66 @@ pub fn validate(content: &Content) -> Vec<String> {
     }
 
     problems
+}
+
+/// A resource's yield table: known rows, sane ranges, and a hand row exactly
+/// when it can be gathered by hand.
+fn validate_yields(r: &ResourceDef, problems: &mut Vec<String>) {
+    if r.yields.is_empty() {
+        problems.push(format!("resource '{}' has no yields", r.id));
+    }
+    for (row, y) in &r.yields {
+        let tier = tools::Tier::from_str(row);
+        if row != resources::HAND && tier.is_none() {
+            problems.push(format!("resource '{}' has a yield row '{row}', which is neither hand nor a tier", r.id));
+        }
+        if tier.is_some() && r.tool().is_none() {
+            problems.push(format!("resource '{}' has a {row} yield row but no tool type to use it", r.id));
+        }
+        if y.min < 1 || y.max < y.min {
+            problems.push(format!("resource '{}' yields {}..{} at {row}: not at least 1, low to high", r.id, y.min, y.max));
+        }
+        if y.ticks.is_some_and(|t| t < 1) {
+            problems.push(format!("resource '{}' takes no time at {row}", r.id));
+        }
+    }
+    let by_hand = r.yields.contains_key(resources::HAND);
+    match (&r.required_tool, by_hand) {
+        (Some(tool), true) => problems.push(format!("resource '{}' needs a {tool} but has a hand yield row", r.id)),
+        (None, false) => problems.push(format!("resource '{}' needs no tool but has no hand yield row", r.id)),
+        _ => {}
+    }
+}
+
+/// A resource's spawn table and cluster: known zones, once each, at a density,
+/// with a floor inside the quality range.
+fn validate_spawns(r: &ResourceDef, problems: &mut Vec<String>) {
+    if Cluster::from_str(&r.cluster).is_none() {
+        problems.push(format!("resource '{}' has unknown cluster '{}'", r.id, r.cluster));
+    }
+    if r.base_quality_min > r.base_quality_max {
+        problems.push(format!("resource '{}' has base_quality_min above base_quality_max", r.id));
+    }
+    let mut zones = HashSet::new();
+    for s in &r.spawns {
+        if Zone::from_str(&s.zone).is_none() {
+            problems.push(format!("resource '{}' spawns in unknown zone '{}'", r.id, s.zone));
+        }
+        if !zones.insert(s.zone.as_str()) {
+            problems.push(format!("resource '{}' lists zone '{}' twice", r.id, s.zone));
+        }
+        if !(s.density.is_finite() && s.density > 0.0) {
+            problems.push(format!("resource '{}' has a density in '{}' that isn't above 0", r.id, s.zone));
+        }
+        if let Some(floor) = s.quality_floor {
+            if !(r.base_quality_min..=r.base_quality_max).contains(&floor) {
+                problems.push(format!(
+                    "resource '{}' has a quality floor in '{}' outside {}..{}",
+                    r.id, s.zone, r.base_quality_min, r.base_quality_max
+                ));
+            }
+        }
+    }
 }
 
 /// A loop of items where each is an ingredient of the next, if there is one.
@@ -612,24 +744,27 @@ async fn upsert(tx: &mut Transaction<'_, Postgres>, content: &Content) -> Result
         n += 1;
     }
     for r in &content.resources {
+        // Validated: there's always a row
+        let first = r.first_yield().unwrap_or(ResourceYield { min: 1, max: 1, ticks: None });
         sqlx::query(
             "INSERT INTO resource_types (id, name, yields_item, yield_quantity_min, yield_quantity_max,
                  base_quality_min, base_quality_max, required_tool, extraction_duration_ticks, regeneration_ticks,
-                 tool_type, difficulty)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 tool_type, difficulty, yields, cluster, spawns)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
              ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, yields_item = EXCLUDED.yields_item,
                  yield_quantity_min = EXCLUDED.yield_quantity_min, yield_quantity_max = EXCLUDED.yield_quantity_max,
                  base_quality_min = EXCLUDED.base_quality_min, base_quality_max = EXCLUDED.base_quality_max,
                  required_tool = EXCLUDED.required_tool,
                  extraction_duration_ticks = EXCLUDED.extraction_duration_ticks,
                  regeneration_ticks = EXCLUDED.regeneration_ticks,
-                 tool_type = EXCLUDED.tool_type, difficulty = EXCLUDED.difficulty",
+                 tool_type = EXCLUDED.tool_type, difficulty = EXCLUDED.difficulty,
+                 yields = EXCLUDED.yields, cluster = EXCLUDED.cluster, spawns = EXCLUDED.spawns",
         )
         .bind(&r.id)
         .bind(&r.name)
         .bind(&r.yields_item)
-        .bind(r.yield_quantity_min)
-        .bind(r.yield_quantity_max)
+        .bind(first.min)
+        .bind(first.max)
         .bind(r.base_quality_min)
         .bind(r.base_quality_max)
         .bind(&r.required_tool)
@@ -637,6 +772,9 @@ async fn upsert(tx: &mut Transaction<'_, Postgres>, content: &Content) -> Result
         .bind(r.regeneration_ticks)
         .bind(r.tool())
         .bind(r.difficulty)
+        .bind(sqlx::types::Json(r.yield_table()))
+        .bind(&r.cluster)
+        .bind(sqlx::types::Json(r.spawn_table()))
         .execute(&mut **tx)
         .await?;
         n += 1;
@@ -773,29 +911,85 @@ mod tests {
     fn the_validator_checks_tools_at_work() {
         let mut content = load().unwrap();
         let grass = content.resources.iter_mut().find(|r| r.id == "grass").unwrap();
-        grass.difficulty = None;
+        grass.difficulty = -1.0;
         let mut gated = grass.clone();
         gated.id = "reeds".into();
         gated.required_tool = Some("axe".into());
-        gated.difficulty = Some(0.0);
+        gated.difficulty = 3.0;
         let mut unknown = gated.clone();
         unknown.id = "moss".into();
         unknown.required_tool = Some("spoon".into());
         unknown.tool_type = None;
-        unknown.difficulty = Some(3.0);
         content.resources.extend([gated, unknown]);
         content.recipes[0].crafting_requirements.tool_type = Some("ladle".into());
         content.recipes[1].quality_weights.tool = Some(0.2);
         let problems = validate(&content).join("\n");
-        assert!(problems.contains("'grass' has a tool type but no difficulty"), "{problems}");
+        assert!(problems.contains("'grass' has a difficulty that is negative"), "{problems}");
         assert!(problems.contains("'reeds' requires a axe but is worked by a sickle"), "{problems}");
-        assert!(problems.contains("'reeds' has a difficulty that isn't above 0"), "{problems}");
         assert!(problems.contains("'moss' names unknown tool type 'spoon'"), "{problems}");
         assert!(problems.contains("needs unknown tool type 'ladle'"), "{problems}");
         let share = format!("recipe '{}' must name a tool type", content.recipes[0].id);
         assert!(problems.contains(&share), "a tool with no share: {problems}");
         let share = format!("recipe '{}' must name a tool type", content.recipes[1].id);
         assert!(problems.contains(&share), "a share with no tool: {problems}");
+    }
+
+    /// Every resource in D5, with its tool, yield rows and spawn table
+    #[test]
+    fn every_d5_resource_is_content() {
+        let content = load().unwrap();
+        let d5 = [
+            ("grass", "fiber", None, Some("sickle"), 0.0),
+            ("fallen_branches", "sticks", None, Some("axe"), 0.0),
+            ("clay_bank", "clay", None, None, 2.0),
+            ("rock_outcrop", "stone", None, Some("pickaxe"), 8.0),
+            ("tree", "log", Some("axe"), Some("axe"), 12.0),
+            ("iron_vein", "iron_ore", Some("pickaxe"), Some("pickaxe"), 20.0),
+        ];
+        assert_eq!(content.resources.len(), d5.len());
+        for (id, item, required, tool, difficulty) in d5 {
+            let r = content.resources.iter().find(|r| r.id == id).unwrap_or_else(|| panic!("no {id}"));
+            assert_eq!(r.yields_item, item);
+            assert_eq!((r.required_tool.as_deref(), r.tool(), r.difficulty), (required, tool, difficulty), "{id}");
+            assert_eq!(r.yields.contains_key("hand"), required.is_none(), "{id}");
+            assert!(!r.spawns.is_empty(), "{id} grows nowhere");
+        }
+        // D5's own numbers, spot-checked
+        let outcrop = content.resources.iter().find(|r| r.id == "rock_outcrop").unwrap();
+        assert_eq!(outcrop.yields["hand"].ticks, Some(80));
+        let vein = content.resources.iter().find(|r| r.id == "iron_vein").unwrap();
+        assert_eq!((vein.yields["iron"].min, vein.yields["iron"].max), (1, 2));
+        assert_eq!(vein.spawns.iter().find(|s| s.zone == "wilderness").unwrap().quality_floor, Some(47));
+    }
+
+    #[test]
+    fn the_validator_checks_yields_and_spawns() {
+        let mut content = load().unwrap();
+        let tree = content.resources.iter_mut().find(|r| r.id == "tree").unwrap();
+        tree.yields.insert("hand".into(), YieldDef { min: 1, max: 1, ticks: None });
+        tree.yields.insert("mithril".into(), YieldDef { min: 3, max: 2, ticks: Some(0) });
+        tree.cluster = "heap".into();
+        tree.spawns.push(SpawnDef { zone: "rural".into(), density: 0.0, quality_floor: Some(99) });
+        tree.spawns.push(SpawnDef { zone: "moon".into(), density: 1.0, quality_floor: None });
+        let clay = content.resources.iter_mut().find(|r| r.id == "clay_bank").unwrap();
+        clay.yields.clear();
+        clay.yields.insert("stone".into(), YieldDef { min: 1, max: 2, ticks: None });
+        let problems = validate(&content).join("\n");
+        for expected in [
+            "'tree' needs a axe but has a hand yield row",
+            "'tree' has a yield row 'mithril', which is neither hand nor a tier",
+            "'tree' yields 3..2 at mithril",
+            "'tree' takes no time at mithril",
+            "'tree' has unknown cluster 'heap'",
+            "'tree' lists zone 'rural' twice",
+            "'tree' has a density in 'rural' that isn't above 0",
+            "'tree' has a quality floor in 'rural' outside 35..80",
+            "'tree' spawns in unknown zone 'moon'",
+            "'clay_bank' has a stone yield row but no tool type",
+            "'clay_bank' needs no tool but has no hand yield row",
+        ] {
+            assert!(problems.contains(expected), "missing {expected:?} in:\n{problems}");
+        }
     }
 
     /// A gated resource, or a recipe that needs a tool, can only be had once a
@@ -832,7 +1026,7 @@ mod tests {
     #[test]
     fn a_station_needs_a_kit_recipe_and_something_to_make() {
         let mut content = load().unwrap();
-        content.recipes.retain(|r| !["craft_chest", "craft_forge", "craft_stone_sickle"].contains(&r.id.as_str()));
+        content.recipes.retain(|r| r.id != "craft_chest" && r.required_station_type.as_deref() != Some("workbench"));
         let problems = validate(&content).join("\n");
         assert!(problems.contains("no recipe makes its kit 'chest_kit'"), "{problems}");
         assert!(problems.contains("station 'workbench' has nothing to make"), "{problems}");

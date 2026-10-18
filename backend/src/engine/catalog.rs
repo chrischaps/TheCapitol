@@ -64,6 +64,9 @@ pub fn build(game: &GameState) -> CatalogResponse {
             regeneration_ticks: t.regeneration_ticks,
             tool_type: t.tool_type.clone(),
             difficulty: t.difficulty,
+            yields: t.yields.0.clone(),
+            cluster: t.cluster.clone(),
+            spawns: t.spawns.0.clone(),
         })
         .collect();
     resource_types.sort_by(|a, b| a.id.cmp(&b.id));
@@ -184,5 +187,28 @@ mod tests {
 
         game.item_types.get_mut("rope").unwrap().name = "Twine".into();
         assert_ne!(build(&game).version, first.version);
+    }
+
+    /// E2.2: every resource's yields, cluster and spawn table reach the
+    /// catalog as the content has them, and come back the same off the wire.
+    #[test]
+    fn resource_tables_round_trip_through_the_catalog() {
+        let mut game = game();
+        let content = crate::content::load().unwrap();
+        for def in &content.resources {
+            game.resource_types.insert(def.id.clone(), def.to_type());
+        }
+        let catalog = build(&game);
+        let wire: CatalogResponse = serde_json::from_str(&serde_json::to_string(&catalog).unwrap()).unwrap();
+        assert_eq!(wire, catalog);
+        assert_eq!(wire.resource_types.len(), content.resources.len());
+        for def in &content.resources {
+            let t = wire.resource_types.iter().find(|t| t.id == def.id).unwrap();
+            assert_eq!(t.spawns, def.spawn_table(), "{}", def.id);
+            assert_eq!(t.yields, def.yield_table(), "{}", def.id);
+            assert_eq!((t.cluster.as_str(), t.difficulty), (def.cluster.as_str(), def.difficulty), "{}", def.id);
+        }
+        let tree = wire.resource_types.iter().find(|t| t.id == "tree").unwrap();
+        assert_eq!((tree.yield_quantity_min, tree.yield_quantity_max), (1, 2), "a gated resource's least tier");
     }
 }

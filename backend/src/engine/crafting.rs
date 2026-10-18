@@ -413,6 +413,7 @@ mod tests {
             item_id: Uuid::new_v4(),
             item_type: "stone_hammer".into(),
             tool: tools::Tool { base_power: 6.0, quality, durability, max_durability: 60 },
+            tier: Some(tools::Tier::Stone),
             station_id: None,
         }
     }

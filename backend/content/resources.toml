@@ -1,35 +1,147 @@
-# Resource types: what a resource node is, and what gathering it gives.
+# Resource types: what a resource node is, what gathering it gives, and where
+# its nodes grow.
 #
 # Upserted into `resource_types` at startup (E0.3, see backend/src/content/).
 # The nodes themselves are world instances in `resource_nodes`, not content.
-# One [[resource]] table per type:
+# The numbers are the economy plan's D5 (E2.1). One [[resource]] table per type:
 #
 #   id                         the key. Nodes name it, so retire it rather than delete it.
 #   name                       shown to players
 #   yields_item                an id from items.toml
-#   yield_quantity_min, _max   units per gather, inclusive
 #   base_quality_min, _max     the range a node's base quality is drawn from
 #   required_tool              a tool type (sickle, axe, pickaxe, hammer, saw) it
 #                              can't be gathered without, or leave it out to
 #                              gather by hand
 #   tool_type                  the tool type that works it, if any (defaults to
-#                              required_tool). The best one held raises the yield,
-#                              speeds the gather and wears; protocol rules::tools.
-#   difficulty                 with a tool type: the power that counts as the right
-#                              tool (a Q50 stone sickle is 6). More power gathers
-#                              more, faster and cleaner, up to 4 times it.
-#   extraction_duration_ticks  how long a gather takes (10 ticks a second)
+#                              required_tool). The best one held reads its tier's
+#                              yield row, speeds the gather and wears; protocol
+#                              rules::tools.
+#   difficulty                 how hard it is to work, on the tools' power scale:
+#                              hands are 4, a Q50 stone tool 10, iron 18. A tool's
+#                              power over it (counted as at least 4) is its
+#                              leverage: more is faster and cleaner, up to 4 times.
+#   extraction_duration_ticks  how long a gather takes (10 ticks a second), before
+#                              a tool's speed
 #   regeneration_ticks         how long a harvested node takes to come back
+#   yields                     { hand?, stone?, bronze?, iron?, steel? }, each
+#                              { min, max, ticks? }: the units a gather gives by
+#                              hand or with a tool of that tier, inclusive, and
+#                              the ticks it takes there if not the resource's own.
+#                              A tier with no row reads the best one below it.
+#                              A resource with a hand row can be gathered by hand;
+#                              one that needs a tool has none. Tier rows need a
+#                              tool type.
+#   cluster                    how its nodes group: scattered, clumped, woods,
+#                              along_water or under_trees
+#   spawns                     [{ zone, density, quality_floor? }]: the zones its
+#                              nodes grow in (protocol rules::Zone ids), in nodes
+#                              per km² of the zone's open ground, and the least
+#                              base quality they're drawn at there. E2.3 places
+#                              them; grass is seeded by migrations already.
 
+# The starter, and the GDD's universal fiber. Its hand numbers are what they
+# have always been; the spawn densities are today's seeded grass.
 [[resource]]
 id = "grass"
 name = "Wild Grass"
 yields_item = "fiber"
-yield_quantity_min = 1
-yield_quantity_max = 3
 base_quality_min = 40
 base_quality_max = 70
 tool_type = "sickle"
-difficulty = 6.0
+difficulty = 0.0
 extraction_duration_ticks = 30
 regeneration_ticks = 600
+yields = { hand = { min = 1, max = 3 }, stone = { min = 2, max = 4 }, iron = { min = 3, max = 5 } }
+cluster = "scattered"
+spawns = [
+    { zone = "suburban", density = 5.0 },
+    { zone = "rural", density = 2.5 },
+]
+
+[[resource]]
+id = "fallen_branches"
+name = "Fallen Branches"
+yields_item = "sticks"
+base_quality_min = 30
+base_quality_max = 65
+tool_type = "axe"
+difficulty = 0.0
+extraction_duration_ticks = 30
+regeneration_ticks = 900
+yields = { hand = { min = 1, max = 2 }, stone = { min = 2, max = 3 }, iron = { min = 2, max = 4 } }
+cluster = "under_trees"
+spawns = [
+    { zone = "suburban", density = 4.0 },
+    { zone = "rural", density = 15.0 },
+    { zone = "wilderness", density = 30.0, quality_floor = 42 },
+]
+
+[[resource]]
+id = "clay_bank"
+name = "Clay Bank"
+yields_item = "clay"
+base_quality_min = 40
+base_quality_max = 80
+difficulty = 2.0
+extraction_duration_ticks = 40
+regeneration_ticks = 1200
+yields = { hand = { min = 1, max = 2 } }
+cluster = "along_water"
+spawns = [
+    { zone = "urban", density = 6.0 },
+    { zone = "suburban", density = 2.0 },
+]
+
+# By hand it's slow and gives one stone; a pick is the way.
+[[resource]]
+id = "rock_outcrop"
+name = "Rock Outcrop"
+yields_item = "stone"
+base_quality_min = 30
+base_quality_max = 75
+tool_type = "pickaxe"
+difficulty = 8.0
+extraction_duration_ticks = 50
+regeneration_ticks = 1800
+yields = { hand = { min = 1, max = 1, ticks = 80 }, stone = { min = 1, max = 2 }, iron = { min = 2, max = 3 } }
+cluster = "clumped"
+spawns = [
+    { zone = "rural", density = 6.0 },
+    { zone = "wilderness", density = 20.0, quality_floor = 45 },
+]
+
+[[resource]]
+id = "tree"
+name = "Tree"
+yields_item = "log"
+base_quality_min = 35
+base_quality_max = 80
+required_tool = "axe"
+difficulty = 12.0
+extraction_duration_ticks = 60
+regeneration_ticks = 3000
+yields = { stone = { min = 1, max = 2 }, iron = { min = 2, max = 3 } }
+cluster = "woods"
+spawns = [
+    { zone = "rural", density = 25.0 },
+    { zone = "wilderness", density = 60.0, quality_floor = 50 },
+]
+
+# Rare in the country, commoner past r3800. W6 (#199) moves the Wilderness's
+# onto bare rock once the wilds have a height field.
+[[resource]]
+id = "iron_vein"
+name = "Iron Vein"
+yields_item = "iron_ore"
+base_quality_min = 25
+base_quality_max = 90
+required_tool = "pickaxe"
+difficulty = 20.0
+extraction_duration_ticks = 80
+regeneration_ticks = 6000
+yields = { stone = { min = 1, max = 1 }, iron = { min = 1, max = 2 } }
+cluster = "clumped"
+spawns = [
+    { zone = "rural", density = 0.5 },
+    { zone = "wilderness", density = 8.0, quality_floor = 47 },
+]
