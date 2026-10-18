@@ -93,8 +93,8 @@ pub struct Stations {
 /// What the ghost should show this frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GhostView {
-    /// The station type being placed.
-    pub station_type: &'static str,
+    /// The model of the station being placed ([`kind_of`] its type).
+    pub kind: &'static str,
     /// Where the cursor is on the ground, world metres (X, Z).
     pub at: [f32; 2],
     /// It can go down here.
@@ -227,7 +227,7 @@ impl Stations {
             }
             return;
         };
-        let kind = kind_of(view.station_type);
+        let kind = view.kind;
         if self.ghost.as_ref().is_some_and(|g| g.kind != kind) {
             let old = self.ghost.take().expect("checked");
             let _ = ctx.world.despawn(old.entity);

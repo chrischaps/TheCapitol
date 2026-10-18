@@ -92,6 +92,7 @@ impl Sample {
                     moved = moved.or(super::inventory::body(
                         ui,
                         icons,
+                        &capitol_core::catalog::Catalog::fallback(),
                         Some(&self.containers[0]),
                         None,
                     )

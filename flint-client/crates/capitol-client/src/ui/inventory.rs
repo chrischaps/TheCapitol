@@ -13,6 +13,7 @@
 use super::icons::ItemIcons;
 use super::slots::{Clicks, SlotGrid};
 use super::theme::{self, size, CRAFT, DIM, SLOT_GAP};
+use capitol_core::catalog::Catalog;
 use capitol_core::state::Container;
 use egui::{Align2, Id, RichText};
 
@@ -45,12 +46,13 @@ impl InventoryPanel {
 
     /// Draws the panel, or its fade, over the world. `inventory` is `None`
     /// until the first fetch; `refused` is the server's reason for the last
-    /// move, while it's fresh. Returns the move a drop asks for, and the kit
-    /// a right click asks to place.
+    /// move, while it's fresh. `catalog` says which items are kits. Returns
+    /// the move a drop asks for, and the kit a right click asks to place.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
         icons: &mut ItemIcons,
+        catalog: &Catalog,
         inventory: Option<&Container>,
         refused: Option<&str>,
         pulse: f32,
@@ -67,7 +69,7 @@ impl InventoryPanel {
             .show(ctx, |ui| {
                 ui.multiply_opacity(ease);
                 theme::panel_edged(CRAFT)
-                    .show(ui, |ui| body(ui, icons, inventory, refused))
+                    .show(ui, |ui| body(ui, icons, catalog, inventory, refused))
                     .inner
             });
         self.rect = self.open.then_some(area.response.rect);
@@ -88,6 +90,7 @@ impl InventoryPanel {
 pub fn body(
     ui: &mut egui::Ui,
     icons: &mut ItemIcons,
+    catalog: &Catalog,
     inventory: Option<&Container>,
     refused: Option<&str>,
 ) -> Clicks {
@@ -99,7 +102,7 @@ pub fn body(
     };
     let badge = format!("{}/{}", c.used_slots(), c.slot_count());
     theme::header(ui, "Inventory", None, Some((&badge, theme::PILL)));
-    let clicks = SlotGrid::new(c).placing(true).show_clicks(ui, icons);
+    let clicks = SlotGrid::new(c).placing(catalog).show_clicks(ui, icons);
     let total: i32 = c.items().map(|i| i.quantity).sum();
     if total > 0 {
         ui.add_space(2.0);
@@ -144,7 +147,7 @@ mod tests {
         for _ in 0..4 {
             let _ = ctx.run(raw.clone(), |ctx| {
                 theme::install(ctx);
-                panel.show(ctx, &mut icons, c, None, 0.0);
+                panel.show(ctx, &mut icons, &Catalog::fallback(), c, None, 0.0);
             });
         }
         if let Some(area) = ctx.memory(|m| m.area_rect(Id::new("capitol_inventory"))) {

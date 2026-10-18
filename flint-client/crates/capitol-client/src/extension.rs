@@ -877,10 +877,15 @@ impl PlayerExtension for CapitolExtension {
                     act_on_trade(session, action, now);
                 }
                 let refused = session.move_refused(Instant::now());
-                let inventory = session.state().inventory();
-                let clicks = self
-                    .inventory
-                    .show(ctx, &mut self.icons, inventory, refused, pulse);
+                let state = session.state();
+                let clicks = self.inventory.show(
+                    ctx,
+                    &mut self.icons,
+                    state.catalog(),
+                    state.inventory(),
+                    refused,
+                    pulse,
+                );
                 if let Some(m) = clicks.moved {
                     session.move_item(m);
                     self.hints.saw(Did::UsedInventory);
@@ -1460,7 +1465,7 @@ fn placing(
         let target = asking.or_else(|| hover.map(|[x, z]| to_server(x, z)));
         let check = target.map(|at| p.check(at, state, terrain));
         let ok = matches!(check, Some(Ok(_)));
-        let station_type = p.kit().station_type;
+        let station_type = p.kit().station_type.as_str();
         let crowding = target.map_or_else(Vec::new, |[x, y]| {
             state
                 .stations()
@@ -1478,7 +1483,7 @@ fn placing(
             .map(|c| c.map(|(x, y)| to_world(x, y)))
             .collect();
         let view = target.map(|[x, y]| GhostView {
-            station_type,
+            kind: crate::stations::kind_of(station_type),
             at: to_world(x, y),
             ok,
             asking: asking.is_some(),

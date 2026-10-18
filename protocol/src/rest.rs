@@ -719,7 +719,8 @@ pub struct CatalogStationType {
     pub interaction_range: f32,
     pub icon: Option<String>,
     pub description: Option<String>,
-    /// The item type a placement consumes (`rules::station_kit_item`).
+    /// The item type a placement consumes. Clients pair kits and stations
+    /// from this alone (#181).
     pub kit: Option<String>,
     /// Whether it may stand off a plot, on dry ground no lot covers (#187).
     /// Omitted when false.

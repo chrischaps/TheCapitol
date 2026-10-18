@@ -35,6 +35,7 @@ use capitol_protocol::terrain::{quad_contains, TerrainResponse};
 use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
 
+use crate::catalog::Catalog;
 use crate::state::{answers, GameState, StateEvent};
 
 pub mod visit;
@@ -145,17 +146,17 @@ pub fn check<'a>(
 pub struct Kit {
     pub item_id: Uuid,
     pub item_name: String,
-    /// The station it makes: "workbench", "forge" or "storage_chest".
-    pub station_type: &'static str,
+    /// The station it makes, "workbench" say.
+    pub station_type: String,
 }
 
 impl Kit {
-    /// The kit in `item`, if it is one.
-    pub fn of(item: &SlotItem) -> Option<Kit> {
+    /// The kit in `item`, if the catalog says it is one.
+    pub fn of(catalog: &Catalog, item: &SlotItem) -> Option<Kit> {
         Some(Kit {
             item_id: item.item_id,
             item_name: item.item_name.clone(),
-            station_type: rules::station_type_for_kit(&item.item_type)?,
+            station_type: catalog.station_for_kit(&item.item_type)?.id.clone(),
         })
     }
 }
@@ -229,7 +230,7 @@ impl Placing {
         };
         let off_plot = state
             .catalog()
-            .station_type(self.kit.station_type)
+            .station_type(&self.kit.station_type)
             .is_some_and(|t| t.off_plot);
         check(
             at,
@@ -260,7 +261,7 @@ impl Placing {
         }
         self.phase = Phase::Asking { at, since: now };
         Some(ClientMessage::PlaceStation {
-            station_type: self.kit.station_type.to_owned(),
+            station_type: self.kit.station_type.clone(),
             x: at[0],
             y: at[1],
             kit_item_id: self.kit.item_id.to_string(),
@@ -558,12 +559,11 @@ mod tests {
     #[test]
     fn only_kits_are_placed() {
         let item = |t: &str| SlotItem::new(Uuid::from_u128(5), t.into(), "Thing".into(), 50, 1, 0);
-        assert_eq!(Kit::of(&item("forge_kit")).unwrap().station_type, "forge");
-        assert_eq!(
-            Kit::of(&item("chest_kit")).unwrap().station_type,
-            "storage_chest"
-        );
-        assert_eq!(Kit::of(&item("rope")), None);
+        let catalog = Catalog::fallback();
+        let kit = |t: &str| Kit::of(&catalog, &item(t)).map(|k| k.station_type);
+        assert_eq!(kit("forge_kit").as_deref(), Some("forge"));
+        assert_eq!(kit("chest_kit").as_deref(), Some("storage_chest"));
+        assert_eq!(kit("rope"), None);
     }
 
     mod placing {
@@ -621,7 +621,7 @@ mod tests {
         }
 
         fn placing() -> Placing {
-            Placing::new(Kit::of(&kit_item()).unwrap())
+            Placing::new(Kit::of(&Catalog::fallback(), &kit_item()).unwrap())
         }
 
         fn placed(station: u128, owner: Uuid) -> StateEvent {

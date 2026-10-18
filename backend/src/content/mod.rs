@@ -722,18 +722,6 @@ mod tests {
     }
 
     #[test]
-    fn kits_agree_with_the_protocol() {
-        // The Flint client still pairs kits and stations through
-        // `rules::station_kit_item` and `station_type_for_kit`, not the
-        // catalog's `kit`. Until it doesn't (#181), the two must agree.
-        use capitol_protocol::rules::{station_kit_item, station_type_for_kit};
-        for s in load().unwrap().stations {
-            assert_eq!(station_kit_item(&s.id), Some(s.kit.as_str()), "{}", s.id);
-            assert_eq!(station_type_for_kit(&s.kit), Some(s.id.as_str()), "{}", s.kit);
-        }
-    }
-
-    #[test]
     fn the_validator_catches_what_it_should() {
         let mut content = load().unwrap();
         content.recipes[0].inputs[0].item_type = "moonbeam".into();

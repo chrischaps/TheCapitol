@@ -91,6 +91,19 @@ impl Catalog {
         self.data.station_types.iter().find(|t| t.id == id)
     }
 
+    /// The station type a kit places, if `item_type` is a kit: the one
+    /// whose `kit` it is (#181).
+    pub fn station_for_kit(&self, item_type: &str) -> Option<&CatalogStationType> {
+        self.station_types()
+            .iter()
+            .find(|t| t.kit.as_deref() == Some(item_type))
+    }
+
+    /// The kit item a station type's placement consumes.
+    pub fn kit_for_station(&self, station_type: &str) -> Option<&str> {
+        self.station_type(station_type)?.kit.as_deref()
+    }
+
     pub fn resource_types(&self) -> &[CatalogResourceType] {
         &self.data.resource_types
     }
@@ -187,7 +200,6 @@ impl CatalogCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::rules;
 
     #[test]
     fn the_fallback_is_the_protocol_fixture() {
@@ -205,11 +217,24 @@ mod tests {
             .iter()
             .filter(|t| t.category == "placeable");
         for item in placeable {
-            let station = rules::station_type_for_kit(&item.id).expect(&item.id);
-            let kind = catalog.station_type(station).expect(station);
-            assert_eq!(kind.kit.as_deref(), Some(item.id.as_str()));
+            let station = catalog.station_for_kit(&item.id).expect(&item.id);
+            assert_eq!(catalog.kit_for_station(&station.id), Some(item.id.as_str()));
             assert!(!item.stackable);
         }
+        assert!(catalog.station_for_kit("rope").is_none());
+        assert_eq!(catalog.kit_for_station("throne"), None);
+    }
+
+    #[test]
+    fn a_kit_the_client_never_heard_of_comes_from_the_catalog() {
+        let mut data = Catalog::fallback().data().clone();
+        let mut loom = data.station_types[0].clone();
+        loom.id = "loom".into();
+        loom.kit = Some("loom_kit".into());
+        data.station_types.push(loom);
+        let catalog = Catalog::new(data);
+        assert_eq!(catalog.station_for_kit("loom_kit").unwrap().id, "loom");
+        assert_eq!(catalog.kit_for_station("loom"), Some("loom_kit"));
     }
 
     #[test]

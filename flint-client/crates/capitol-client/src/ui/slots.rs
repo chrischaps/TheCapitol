@@ -30,6 +30,7 @@
 
 use super::icons::ItemIcons;
 use super::theme::{self, size, CRAFT, SLOT, SLOT_EDGE, SLOT_EDGE_FULL, SLOT_GAP, SLOT_SIZE};
+use capitol_core::catalog::Catalog;
 use capitol_core::protocol::rest::SlotItem;
 use capitol_core::protocol::rules::quality_grade;
 use capitol_core::state::Container;
@@ -118,7 +119,8 @@ pub struct Clicks {
 pub struct SlotGrid<'a> {
     container: &'a Container,
     enabled: bool,
-    placing: bool,
+    /// Set by [`SlotGrid::placing`]: the catalog that says what's a kit.
+    placing: Option<&'a Catalog>,
 }
 
 impl<'a> SlotGrid<'a> {
@@ -126,14 +128,15 @@ impl<'a> SlotGrid<'a> {
         Self {
             container,
             enabled: true,
-            placing: false,
+            placing: None,
         }
     }
 
     /// A right click on a kit asks to place its station (the inventory's
-    /// grid). See [`SlotGrid::show_clicks`].
-    pub fn placing(mut self, on: bool) -> Self {
-        self.placing = on;
+    /// grid). A kit is what `catalog` pairs with a station type (#181). See
+    /// [`SlotGrid::show_clicks`].
+    pub fn placing(mut self, catalog: &'a Catalog) -> Self {
+        self.placing = Some(catalog);
         self
     }
 
@@ -170,8 +173,8 @@ impl<'a> SlotGrid<'a> {
                         };
                         let (moved, right) = slot.show_inner(ui, icons, self.placing);
                         clicks.moved = clicks.moved.or(moved);
-                        if right && self.placing {
-                            clicks.place = item.clone().filter(is_kit);
+                        if let Some(catalog) = self.placing.filter(|_| right) {
+                            clicks.place = item.clone().filter(|i| is_kit(catalog, i));
                         }
                     }
                 });
@@ -250,8 +253,8 @@ pub fn dragging_item(ctx: &egui::Context) -> bool {
 }
 
 /// A station kit: a right click on one places its station.
-fn is_kit(item: &SlotItem) -> bool {
-    capitol_core::protocol::rules::station_type_for_kit(&item.item_type).is_some()
+fn is_kit(catalog: &Catalog, item: &SlotItem) -> bool {
+    catalog.station_for_kit(&item.item_type).is_some()
 }
 
 /// One slot of a container. Grids are made of these; a panel with a lone
@@ -265,12 +268,17 @@ pub struct Slot<'a> {
 
 impl Slot<'_> {
     pub fn show(self, ui: &mut Ui, icons: &mut ItemIcons) -> Option<Move> {
-        self.show_inner(ui, icons, false).0
+        self.show_inner(ui, icons, None).0
     }
 
     /// The drop onto this slot, and whether it was right-clicked. `placing`
     /// adds the kit's hint to the tooltip.
-    fn show_inner(self, ui: &mut Ui, icons: &mut ItemIcons, placing: bool) -> (Option<Move>, bool) {
+    fn show_inner(
+        self,
+        ui: &mut Ui,
+        icons: &mut ItemIcons,
+        placing: Option<&Catalog>,
+    ) -> (Option<Move>, bool) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(SLOT_SIZE, SLOT_SIZE), Sense::hover());
         let id = Id::new(("capitol_slot", self.container_id, self.index));
         let draggable = self.enabled && self.item.is_some();
@@ -329,7 +337,7 @@ impl Slot<'_> {
                 };
                 response.on_hover_ui(|ui| {
                     tooltip(ui, item);
-                    if placing && is_kit(item) {
+                    if placing.is_some_and(|c| is_kit(c, item)) {
                         ui.label(theme::dim("Right-click to place"));
                     }
                     if draggable && item.quantity > 1 {
@@ -743,15 +751,17 @@ mod tests {
                 theme::install(ctx);
                 egui::CentralPanel::default().show(ctx, |ui| {
                     // The inventory places kits, as its panel's grid does.
+                    let catalog = Catalog::fallback();
                     let grids = [
                         (&*inventory, *inventory_enabled, true),
                         (&*crafting, true, false),
                     ];
                     for (c, enabled, placing) in grids {
-                        let clicks = SlotGrid::new(c)
-                            .enabled(enabled)
-                            .placing(placing)
-                            .show_clicks(ui, icons);
+                        let mut grid = SlotGrid::new(c).enabled(enabled);
+                        if placing {
+                            grid = grid.placing(&catalog);
+                        }
+                        let clicks = grid.show_clicks(ui, icons);
                         moves.extend(clicks.moved);
                         places.extend(clicks.place);
                     }

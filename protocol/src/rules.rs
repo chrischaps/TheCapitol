@@ -126,30 +126,6 @@ pub fn quality_grade(quality: i32) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// Stations
-// ---------------------------------------------------------------------------
-
-/// The kit item consumed to place a station of this type.
-pub fn station_kit_item(station_type: &str) -> Option<&'static str> {
-    match station_type {
-        "workbench" => Some("workbench_kit"),
-        "forge" => Some("forge_kit"),
-        "storage_chest" => Some("chest_kit"),
-        _ => None,
-    }
-}
-
-/// The station type a kit item places, if it is a kit.
-pub fn station_type_for_kit(item_type: &str) -> Option<&'static str> {
-    match item_type {
-        "workbench_kit" => Some("workbench"),
-        "forge_kit" => Some("forge"),
-        "chest_kit" => Some("storage_chest"),
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Zones
 // ---------------------------------------------------------------------------
 
@@ -546,15 +522,6 @@ mod tests {
         }
         assert_eq!(Zone::from_str("atlantis"), None);
         assert_eq!(Zone::Wilderness.ring_order(), 6);
-    }
-
-    #[test]
-    fn kits_and_stations_pair_up() {
-        for station in ["workbench", "forge", "storage_chest"] {
-            let kit = station_kit_item(station).unwrap();
-            assert_eq!(station_type_for_kit(kit), Some(station));
-        }
-        assert_eq!(station_kit_item("throne"), None);
     }
 
     fn moat() -> WaterRing {

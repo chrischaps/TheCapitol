@@ -111,8 +111,9 @@ impl JuiceSample {
     /// The inventory panel, and where the pickups land.
     pub fn ui(&mut self, ctx: &egui::Context, icons: &mut ItemIcons, shared: &Shared) {
         let pulse = shared.pulse("inventory", Instant::now());
+        let catalog = capitol_core::catalog::Catalog::fallback();
         self.panel
-            .show(ctx, icons, Some(&self.inventory), None, pulse);
+            .show(ctx, icons, &catalog, Some(&self.inventory), None, pulse);
         if let (Some(r), Ok(mut anchors)) = (self.panel.rect, shared.anchors.lock()) {
             let rect = [r.left(), r.top(), r.width(), r.height()];
             anchors.insert("inventory", UiAnchor { rect, panel: true });

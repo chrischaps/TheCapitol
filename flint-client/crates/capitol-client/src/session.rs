@@ -760,7 +760,7 @@ impl Session {
         if self.auth.phase() != Phase::InWorld {
             return;
         }
-        if let Some(kit) = Kit::of(item) {
+        if let Some(kit) = Kit::of(self.state().catalog(), item) {
             tracing::info!("place: aiming a {}", kit.station_type);
             self.placing = Some(Placing::new(kit));
         }
