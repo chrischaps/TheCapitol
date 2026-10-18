@@ -97,7 +97,7 @@ Radial layout with concentric zones, divided by waterways:
     ↓
 [Rural Zone] - Large plots
     ↓
-[Wilderness] - Raw resources, newbie spawn
+[The Wilds] - Mountains, rivers and lakes; the best raw resources; nobody's land
 ```
 
 The Capitol Tower is a modern structure arranged like a medieval castle, surrounded by bailey, curtain wall, and moat - but with contemporary architecture.
@@ -108,6 +108,15 @@ The Capitol Tower is a modern structure arranged like a medieval castle, surroun
 - Distance to Capitol creates natural friction for resource transport
 - Travel can be optimized (roads, mounts, vehicles, canal barges?) but never eliminated
 - Canals serve as zone dividers and potential transport routes
+
+#### The Wilds
+
+Past the rural ring the land rises into the wilds: the Wilderness zone, from r3800 to the world's edge at r6000. The plan of record is `the-capitol-wilds.md` (2026-10-18).
+- **The land:** hills and mountain ranges you walk over. Slopes slow you and cliffs stop you.
+- **The water:** rivers and lakes block you, as the canals do, so you cross at fords and bridges. You can wade a stream, slowly.
+- **The resources:** the wilds hold the best raw materials, and their quality rises the further out and the higher up you go: ore in the ranges, old timber in the valleys, clay and reeds on the banks.
+- **The law:** nobody can claim the wilds. There are no plots and no deeds. A workbench may stand there, but any other station needs a plot.
+- **The trails** follow the valleys out from the arterials.
 
 #### Plots
 
@@ -300,14 +309,14 @@ Layered system for meaningful competition at all levels:
 
 ### Phase 1: Arrival (First Session)
 
-- Spawn in wilderness newbie zone at world's edge
+- Spawn on the rural edge, on the south arterial: the tower ahead down the road, the wilds behind. *(The spawn was once the wilderness at the world's edge. B1 moved it, because a newcomer out there has every resource at hand and no reason to go in. The first trip out into the wilds is better as a choice made with a tool in hand.)*
 - Minimal tutorial: gather basic resources, craft a simple tool
 - Earn small amount of currency through menial tasks
 - Goal: earn enough to acquire a deed and travel to The Capitol to claim it
 
 ### Phase 2: The Journey Inward
 
-- Travel from wilderness toward The Capitol
+- Travel from the rural edge toward The Capitol
 - Pass through Rural → Suburban → Urban → Guild District → Trade District → Capitol Tower
 - Witness the spectrum of player activity and infrastructure
 - Experience the geography firsthand
@@ -711,7 +720,6 @@ Issues and manages property rights.
 
 | Service | Fee | Frequency |
 |---------|-----|-----------|
-| Initial deed claim (Wilderness) | 100 Strands | One-time |
 | Initial deed claim (Rural) | 250 Strands | One-time |
 | Initial deed claim (Suburban) | 500 Strands | One-time |
 | Initial deed claim (Urban) | 1,000 Strands | One-time |
@@ -721,7 +729,9 @@ Issues and manages property rights.
 
 *Property tax is the primary recurring sink, scaling with economy size.*
 
-**Unpaid tax and foreclosure:** tax is charged hourly, a 168th of the week's tax at a time. Whole Strands are charged and the fraction carries to the next hour, so a week costs exactly 2%: an urban deed of 1000 pays 1 Strand about every eighth hour, 20 a week, and a wilderness deed of 100 pays 1 every 84 hours. (Until #136 each hour rounded up, so every deed under 8400 paid at least 168 a week.) An hour the owner can't pay is added to the plot's debt, and the debt comes out of their Strands as soon as they have them. Owners are warned as the debt passes each week of tax, and again when one more charge would end it. A plot that owes four weeks of tax is foreclosed: it goes back on the market and the deed's value is refunded less the debt. Its stations come down: each kit goes back to the station's owner, and everything in them to whoever owns it (a guest's deposit to the guest). Whatever doesn't fit in an inventory is lost (#141). Warnings and the foreclosure itself wait for an owner who's offline, so nobody comes back to find a plot gone with no word why, and an owner can pay the debt off whenever they like from the plot panel (#138).
+*The wilds have no deeds: nothing there can be claimed (`the-capitol-wilds.md` WD6).*
+
+**Unpaid tax and foreclosure:** tax is charged hourly, a 168th of the week's tax at a time. Whole Strands are charged and the fraction carries to the next hour, so a week costs exactly 2%: an urban deed of 1000 pays 1 Strand about every eighth hour, 20 a week, and a rural deed of 250 pays 1 every 33.6 hours, 5 a week. (Until #136 each hour rounded up, so every deed under 8400 paid at least 168 a week.) An hour the owner can't pay is added to the plot's debt, and the debt comes out of their Strands as soon as they have them. Owners are warned as the debt passes each week of tax, and again when one more charge would end it. A plot that owes four weeks of tax is foreclosed: it goes back on the market and the deed's value is refunded less the debt. Its stations come down: each kit goes back to the station's owner, and everything in them to whoever owns it (a guest's deposit to the guest). Whatever doesn't fit in an inventory is lost (#141). Warnings and the foreclosure itself wait for an owner who's offline, so nobody comes back to find a plot gone with no word why, and an owner can pay the debt off whenever they like from the plot panel (#138).
 
 #### Guild Registry
 
@@ -853,11 +863,11 @@ These interventions are rare, predictable, and transparent - safety nets, not ma
 
 A new player's economic journey:
 
-1. **Spawn in Wilderness** - No currency, no property
+1. **Spawn on the rural edge** - No currency, no property
 2. **Gather Fiber** - 10-15 minutes of gathering = ~500-1000 Fiber
 3. **Travel to Capitol** - Experience the world, use Fiber for canal tolls
 4. **Exchange Fiber for Strands** - Establish account at Capitol Exchange
-5. **Claim Deed** - Spend ~100-500 Strands depending on zone choice
+5. **Claim Deed** - Spend ~250-500 Strands depending on zone choice
 6. **Establish Workshop** - Begin crafting/gathering loop
 7. **Earn through labor** - Take contracts, sell goods, or continue gathering
 
@@ -917,10 +927,10 @@ The commodity standard ensures new players can always earn currency through simp
 
 - Zone sizing (how big is each ring? how many plots?)
 - Travel times between zones
-- Resource distribution by region
+- Resource distribution by region *(the wilds' part is answered: `the-capitol-wilds.md` WD8)*
 - Plot dimensions by zone type
 - World generation parameters
-- Wilderness structure (is it uniform or varied biomes?)
+- ~~Wilderness structure (is it uniform or varied biomes?)~~ *Answered 2026-10-18: a height field with ranges, rivers, streams and lakes (`the-capitol-wilds.md`)*
 - Seasonal/cyclical changes to resource quality
 - Canal transport mechanics (barges? capacity? speed?)
 

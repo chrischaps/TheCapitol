@@ -13,6 +13,7 @@ The Capitol is an MMO economic simulation where the economy is the primary gamep
 - `the-capitol-flint-client.md` - Plan and work breakdown for the 3D Flint engine client (`flint-client/`)
 - `the-capitol-suburb-v2.md` - Plan for the post-war neighbourhood suburb generator (issues labelled `suburb-v2`, #103 to #113)
 - `the-capitol-economy.md` - Economy v1: quality and tools, content depth, markets (M6), automation (M8), plus CI and auth (issues labelled `economy`, #144 to #179)
+- `the-capitol-wilds.md` - The wilds: the Wilderness grown to r3800 to r6000 (the world to 12000), with a height field, rivers, streams and lakes, and nothing claimable (issues labelled `wilds`, #193 to #204)
 
 ## Current Focus: Economy v1
 
@@ -276,6 +277,8 @@ Recipe weights are defined in `recipes` table. See GDD Section 6 for details.
 
 Concentric zones from center outward:
 Capitol → Bailey → Trade District → Guild District → Urban → Suburban → Rural → Wilderness
+
+The Wilderness is "the wilds" (`the-capitol-wilds.md`): planned as r3800 to r6000 once the world grows to 12000 (#194), with a shared height field (`capitol_protocol::land`), rivers and lakes that block, streams you wade, wild trails, and no plots. Until W1 lands it is still the r3800 to r4000 rim.
 
 Moats and canals are water barriers. Players can only cross at bridges. Movement is blocked by water unless at a crossing point.
 

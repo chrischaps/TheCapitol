@@ -597,7 +597,7 @@ Create static data for:
 - Start with simplified zone layout (concentric circles)
 - Capitol and TradeDistrict have no player-ownable plots
 - See TDD Section 4.4 for Plot model
-- Wilderness has resource nodes but no plots (public gathering)
+- Wilderness has resource nodes but no plots (public gathering). Since 2026-10-18 it's the wilds, r3800 to r6000, with ranges, rivers and lakes; the claim path refuses it outright (`the-capitol-wilds.md` WD6)
 
 ---
 

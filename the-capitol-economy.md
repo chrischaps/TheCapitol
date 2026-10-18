@@ -156,6 +156,14 @@ Tools come in stone and iron: sickle (more fiber per pull), axe, pickaxe and ham
 
 That's about 6 resources, 22 items and 22 recipes. Every station has a reason to exist, and quality flows through a five-step chain (vein → ore → ingot → head → axe) where tools and stations matter.
 
+**The wilds (2026-10-18).** The Wilderness becomes the wilds: r3800 to r6000, with mountains, rivers and lakes, and no claims (`the-capitol-wilds.md`).
+- WD8 there proposes what it yields, for this tree to take or leave:
+  - copper and tin veins, which give the `bronze` tier its alloy
+  - old-growth trees with a higher ceiling than rural woods
+  - stone from scree
+  - clay and reeds on the riverbanks
+- Here "Wilderness" in the zone column means placed by the land (altitude, slope, water). That placement is W6 ([#199](https://github.com/chrischaps/TheCapitol/issues/199)), not E2.3.
+
 ### D6. Where the market is (E3.4) [Chris]
 
 There's **one global order book** (as M6 and the TDD specify). Placing or collecting an order needs you to be within range of the **Exchange hall** in the Trade District:
@@ -228,6 +236,7 @@ A workbench can go down without a plot, so a new player can craft before they ca
   - It writes their rows in a migration and keeps `the_default_terrain_moves_no_seeded_node` passing.
   - It doesn't change terrain generation, so `default_terrain_version_is_pinned` stays put.
   - Where a node would sit on a lot, it moves rather than spawns.
+  - The wilds (`the-capitol-wilds.md`) do move the default world: W1 shifts every position as the world grows to 12000, and W3 and W5 add water and trails past r3800. E2.3 needn't wait for them, since W1's migration moves its rows like any others. Ore in the ranges and clay on the riverbanks are W6 ([#199](https://github.com/chrischaps/TheCapitol/issues/199)).
 - **The Flint client.**
   - New panels follow P5–P7's split: rules in `capitol-core` (pure, tested), egui in `capitol-client/src/ui/`.
   - New world objects follow P8.6b: procedural, seeded by id, merged per sector.
@@ -270,7 +279,7 @@ Sizes: S is about one session, M is 1–2, L is 2–4.
 |---|---|---|---|
 | E2.1 [#160](https://github.com/chrischaps/TheCapitol/issues/160) | **Content tree v1 (D5) [Chris approves].** Final list of resources, items, stations, recipes and weights, written into D5 with the quality weights per recipe type. | S | E0.3 |
 | E2.2 [#161](https://github.com/chrischaps/TheCapitol/issues/161) | **Resource types.** Difficulty, tool gating, yield by tool, and zone spawn tables in content data. | M | E2.1, E1.5 |
-| E2.3 [#162](https://github.com/chrischaps/TheCapitol/issues/162) | **Seeded nodes by zone.** Deterministic placement from the terrain (woods in clusters, outcrops, veins, clay by the water), clear of roads, water and lots, written by a migration. | L | E2.2 |
+| E2.3 [#162](https://github.com/chrischaps/TheCapitol/issues/162) | **Seeded nodes by zone.** Deterministic placement from the terrain (woods in clusters, outcrops, veins, clay by the water), clear of roads, water and lots, written by a migration. Ore in the ranges and clay on the wild riverbanks come later from the land, in W6 ([#199](https://github.com/chrischaps/TheCapitol/issues/199)). | L | E2.2 |
 | E2.4 [#163](https://github.com/chrischaps/TheCapitol/issues/163) | **Seed content v1.** The new items, stations, kits and recipes through the content pipeline. Every station makes something. | M | E2.1, E0.3 |
 | E2.5 [#164](https://github.com/chrischaps/TheCapitol/issues/164) | **Flint: the new nodes.** Procedural trees, branch litter, rock outcrops, iron veins and clay banks, with grass clearings (H25) and a depleted look. | L | E2.3, E0.2 |
 | E2.6 [#165](https://github.com/chrischaps/TheCapitol/issues/165) | **Flint: items and stations.** Icons for every new item and models for sawbench, kiln and anvil, all from the catalog. | M | E2.4, E0.2 |
