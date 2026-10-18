@@ -9,6 +9,7 @@
 
 pub mod bridges;
 pub mod geom;
+pub mod grass;
 pub mod ground;
 pub mod houses;
 pub mod mesh;
