@@ -7,6 +7,8 @@ pub mod currency;
 mod events;
 mod extraction;
 pub mod market;
+pub mod market_book;
+pub mod market_matcher;
 mod movement;
 pub mod node_placement;
 pub mod node_spawn;

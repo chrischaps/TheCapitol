@@ -3,6 +3,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::models::{PlayerPosition, SlotItem};
+use capitol_protocol::rest::{MarketOrder, MarketTrade};
 use capitol_protocol::ws::{ToolUse, TradeItemInfo};
 
 #[derive(Debug, Clone, Serialize)]
@@ -200,6 +201,17 @@ pub enum GameEvent {
         until: DateTime<Utc>,
         notice_id: Option<Uuid>,
     },
+    // E3.2: the market's matching engine
+    /// Some or all of `player_id`'s order traded. One to each party.
+    OrderFilled {
+        player_id: Uuid,
+        order: MarketOrder,
+        trade: MarketTrade,
+    },
+    /// `player_id`'s order left the book, expired (its `status` says so)
+    OrderClosed { player_id: Uuid, order: MarketOrder },
+    /// A fill, for the item's market channel (E3.3 subscribes)
+    MarketTrade { trade: MarketTrade },
 }
 
 /// Slot update for inventory events

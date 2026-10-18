@@ -22,8 +22,11 @@ pub enum TransactionType {
     MarketEscrow,
     /// The 1% listing fee on placing an order: a sink, never refunded (E3.1)
     MarketFee,
-    /// What's left of a buy's escrow, back on a cancel or expiry (E3.1)
+    /// What's left of a buy's escrow, back on a cancel or expiry (E3.1), or
+    /// what it paid over a fill's price (E3.2)
     MarketRefund,
+    /// A fill's proceeds to the seller: the fill's price × its quantity (E3.2)
+    MarketSale,
 }
 
 impl TransactionType {
@@ -41,6 +44,7 @@ impl TransactionType {
             TransactionType::MarketEscrow => "market_escrow",
             TransactionType::MarketFee => "market_fee",
             TransactionType::MarketRefund => "market_refund",
+            TransactionType::MarketSale => "market_sale",
         }
     }
 }

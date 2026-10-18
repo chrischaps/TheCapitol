@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::stacking::Units;
+use super::stacking::{Pick, Units};
 
 /// The listing fee, in hundredths of the order value (1%).
 pub const LISTING_FEE_PERCENT: i64 = 1;
@@ -196,6 +196,89 @@ pub fn meets_grade(units: &Units, min_grade: &str, rule: GradeRule) -> bool {
     shown.is_some_and(|q| q >= floor)
 }
 
+/// Which units of a sell's `units` a buy for up to `want` of them, at
+/// `min_grade` under `rule`, takes in one fill (E3.2). `None` if no unit can
+/// meet it, and then no fill can.
+///
+/// It's as many as can meet the grade, up to `want`, leaning low: the buyer
+/// gets what they asked for and the seller keeps the quality left over for
+/// buyers who ask for more.
+/// - **every unit**: the lowest units at the grade's floor or better.
+/// - **average**: the most units whose best mean still meets the floor, then
+///   as many of the lowest as that mean can carry, the rest from the top.
+///   (Not always the lowest total that would do: a pair from the middle can
+///   beat a low and a high. It's simple, and never takes fewer units.)
+///
+/// Whether there's a fill at all doesn't depend on `want`, and taking units
+/// never makes a lot meet a grade it didn't. So once a book has no fill left,
+/// only a new order can make one.
+pub fn fill_units(units: &Units, want: i32, min_grade: &str, rule: GradeRule) -> Option<Units> {
+    let floor = grade_floor(min_grade)? as i64;
+    let n = (want as i64).min(units.count());
+    if n < 1 {
+        return None;
+    }
+    match rule {
+        GradeRule::EveryUnit => {
+            let eligible = Units::from_pairs(units.pairs().filter(|&(q, _)| q as i64 >= floor));
+            let m = n.min(eligible.count());
+            eligible.pick(m as i32, Pick::Lowest)
+        }
+        GradeRule::Average => {
+            // The best `m` units' mean falls as `m` grows: the most that meet it
+            let meets = |total: i64, m: i64| total >= floor * m;
+            let m = largest(1, n, |m| meets(sum_of(units, m, Pick::Best), m))?;
+            // Swapping a top unit for a bottom one only lowers the total: the
+            // most bottom units the floor allows
+            let k = largest(0, m, |k| {
+                meets(sum_of(units, k, Pick::Lowest) + sum_of(units, m - k, Pick::Best), m)
+            })?;
+            let mut rest = units.clone();
+            let mut taken = if k > 0 { rest.take(k as i32, Pick::Lowest)? } else { Units::new() };
+            if m > k {
+                taken.merge(&rest.take((m - k) as i32, Pick::Best)?);
+            }
+            Some(taken)
+        }
+    }
+}
+
+/// The summed quality of the `n` units `pick` would take.
+fn sum_of(units: &Units, n: i64, pick: Pick) -> i64 {
+    let order: Box<dyn Iterator<Item = (i32, i32)>> = match pick {
+        Pick::Lowest => Box::new(units.pairs()),
+        Pick::Best => Box::new(units.pairs().rev()),
+    };
+    let (mut left, mut sum) = (n, 0i64);
+    for (q, c) in order {
+        if left == 0 {
+            break;
+        }
+        let used = (c as i64).min(left);
+        sum += q as i64 * used;
+        left -= used;
+    }
+    sum
+}
+
+/// The largest `x` in `lo..=hi` for which `ok` holds, where `ok` holds up to
+/// some point and not after. `None` if it fails at `lo`.
+fn largest(lo: i64, hi: i64, ok: impl Fn(i64) -> bool) -> Option<i64> {
+    if !ok(lo) {
+        return None;
+    }
+    let (mut good, mut bad) = (lo, hi + 1);
+    while bad - good > 1 {
+        let mid = good + (bad - good) / 2;
+        if ok(mid) {
+            good = mid;
+        } else {
+            bad = mid;
+        }
+    }
+    Some(good)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::quality_grade;
@@ -256,6 +339,78 @@ mod tests {
         assert!(meets_grade(&Units::uniform(1, 0), "F", GradeRule::EveryUnit));
         assert!(!meets_grade(&blend, "Z", GradeRule::Average));
         assert!(!meets_grade(&Units::new(), "F", GradeRule::Average));
+    }
+
+    #[test]
+    fn a_fill_takes_the_lowest_units_that_meet_the_grade() {
+        let lot = Units::from_pairs([(40, 3), (60, 2), (92, 2)]);
+        // Every unit at B or better: only the 92s can go
+        assert_eq!(fill_units(&lot, 5, "B", GradeRule::EveryUnit), Some(Units::uniform(2, 92)));
+        // At D every unit is fine, so the lowest first
+        assert_eq!(fill_units(&lot, 4, "D", GradeRule::EveryUnit), Some(Units::from_pairs([(40, 3), (60, 1)])));
+        // C on average for 4: two 40s ride on the 92s (40+40+92+92 = 264 ≥ 220)
+        assert_eq!(
+            fill_units(&lot, 4, "C", GradeRule::Average),
+            Some(Units::from_pairs([(40, 2), (92, 2)]))
+        );
+        // A on average: only the 92s, however many are wanted
+        assert_eq!(fill_units(&lot, 7, "A", GradeRule::Average), Some(Units::uniform(2, 92)));
+        // F takes the lowest, as any trade does
+        assert_eq!(fill_units(&lot, 2, "F", GradeRule::Average), Some(Units::uniform(2, 40)));
+        // Nothing meets A at every unit in a lot topping out at 89; nothing meets a non-grade
+        assert_eq!(fill_units(&Units::uniform(9, 89), 3, "A", GradeRule::EveryUnit), None);
+        assert_eq!(fill_units(&Units::uniform(9, 89), 3, "A", GradeRule::Average), None);
+        assert_eq!(fill_units(&lot, 3, "Z", GradeRule::Average), None);
+        assert_eq!(fill_units(&lot, 0, "F", GradeRule::Average), None);
+        assert_eq!(fill_units(&Units::new(), 1, "F", GradeRule::Average), None);
+    }
+
+    /// Against every sub-lot of small random lots: a fill meets the grade,
+    /// takes as many units as any sub-lot could, and there's a fill whenever
+    /// one unit alone could meet it.
+    #[test]
+    fn a_fill_is_as_big_as_any_that_meets_the_grade() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for _ in 0..3000 {
+            let mut lot = Units::new();
+            for _ in 0..=next(4) {
+                lot.add(next(101) as i32, 1 + next(2) as i32);
+            }
+            let want = 1 + next(lot.count() as u64 + 1) as i32;
+            let grade = ["A", "B", "C", "D", "F"][next(5) as usize];
+            for rule in [GradeRule::Average, GradeRule::EveryUnit] {
+                let best = biggest_meeting(&lot, want, grade, rule);
+                match fill_units(&lot, want, grade, rule) {
+                    None => assert_eq!(best, 0, "{lot:?} {want} {grade} {rule:?}"),
+                    Some(taken) => {
+                        assert!(lot.contains(&taken));
+                        assert!(meets_grade(&taken, grade, rule), "{lot:?} gave {taken:?}");
+                        assert_eq!(taken.count(), best, "{lot:?} {want} {grade} {rule:?} gave {taken:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The most units of `lot`, up to `want`, that some sub-lot of meets the grade
+    fn biggest_meeting(lot: &Units, want: i32, grade: &str, rule: GradeRule) -> i64 {
+        let flat: Vec<i32> = lot.pairs().flat_map(|(q, c)| std::iter::repeat_n(q, c as usize)).collect();
+        let mut best = 0;
+        for mask in 1u32..(1 << flat.len()) {
+            let picked = Units::from_pairs(
+                flat.iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, &q)| (q, 1)),
+            );
+            if picked.count() <= want as i64 && meets_grade(&picked, grade, rule) {
+                best = best.max(picked.count());
+            }
+        }
+        best
     }
 
     #[test]

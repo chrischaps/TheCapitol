@@ -470,26 +470,26 @@ Create static data for:
 ### Deliverables
 
 #### Backend - Order Book
-- [ ] `market_orders` table and model
-- [ ] Order types: Buy, Sell
-- [ ] Order status: Open, PartiallyFilled, Filled, Cancelled, Expired
+- [x] `market_orders` table and model (E3.1)
+- [x] Order types: Buy, Sell (E3.1)
+- [x] Order status: Open, Filled, Cancelled, Expired (E3.1; a partly filled order is open with `quantity_remaining` under `quantity_total`)
 - [ ] `POST /market/orders` - Create order
 - [ ] `DELETE /market/orders/{id}` - Cancel order
 - [ ] `GET /market/orders` - List orders (with filters)
 
 #### Backend - Order Matching
-- [ ] Match engine runs on tick (1s interval)
-- [ ] Price-time priority matching
-- [ ] Buy orders: match with lowest sell price ≤ buy price
-- [ ] Sell orders: match with highest buy price ≥ sell price
-- [ ] Partial fills supported
-- [ ] Escrow: sell order locks items, buy order locks currency
+- [x] Match engine runs on tick (1s interval) (E3.2: a task of its own on the 1 s cadence)
+- [x] Price-time priority matching (E3.2)
+- [x] Buy orders: match with lowest sell price ≤ buy price (E3.2, among sells that meet the grade)
+- [x] Sell orders: match with highest buy price ≥ sell price (E3.2)
+- [x] Partial fills supported (E3.2)
+- [x] Escrow: sell order locks items, buy order locks currency (E3.1)
 
 #### Backend - Trade Execution
-- [ ] `market_trades` history table
-- [ ] On match: transfer items, transfer currency
-- [ ] Update order quantities
-- [ ] Emit events for trade execution
+- [x] `market_trades` history table (E3.1)
+- [x] On match: transfer items, transfer currency (E3.2)
+- [x] Update order quantities (E3.2)
+- [x] Emit events for trade execution (E3.2)
 
 #### Backend - Market Data
 - [ ] `GET /market/history` - Price history for item type

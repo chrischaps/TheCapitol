@@ -963,6 +963,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
+                    // E3.2: fills and expiries, to the order's owner
+                    Ok(GameEvent::OrderFilled { player_id: whose, order, trade }) => {
+                        if whose == player_id {
+                            let msg = ServerMessage::OrderFilled { order, trade };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
+                    Ok(GameEvent::OrderClosed { player_id: whose, order }) => {
+                        if whose == player_id {
+                            let msg = ServerMessage::OrderCancelled { order };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
+                    // The item's market channel is E3.3's (#169)
+                    Ok(GameEvent::MarketTrade { .. }) => {}
                     Err(_) => {
                         // Channel closed
                         break;

@@ -289,8 +289,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     tracing::info!("Loaded {} stations", station_count);
 
+    // E3.2: the market's book, from the open orders
+    let market = Arc::new(
+        engine::market_matcher::Market::load(&db_pool)
+            .await
+            .expect("Failed to load the market's open orders"),
+    );
+
     // Create app state
-    let app_state = AppState::new(db_pool, redis_conn, config.clone(), game_state.clone());
+    let app_state = AppState::new(db_pool, redis_conn, config.clone(), game_state.clone(), market.clone());
     if config.rate_limits.enabled {
         tracing::info!("Rate limits: {:?}", config.rate_limits);
     } else {
@@ -302,6 +309,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tick_app_state = app_state.clone();
     tokio::spawn(async move {
         engine::run_tick_loop(tick_state, tick_app_state).await;
+    });
+
+    // Market matching, a cycle a second, in a task of its own so a burst of
+    // fills never holds up the tick
+    let market_events = game_state.read().await.event_sender.clone();
+    let market_db = app_state.db.clone();
+    tokio::spawn(async move {
+        engine::market_matcher::run_market_loop(market, market_db, market_events).await;
     });
 
     // Build router

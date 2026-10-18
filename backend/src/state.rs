@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::engine::market_matcher::Market;
 use crate::engine::GameState;
 use crate::rate_limit::RateLimiter;
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
@@ -49,6 +50,9 @@ pub struct AppState {
     pub config: Config,
     pub game: Arc<RwLock<GameState>>,
     pub limiter: Arc<RateLimiter>,
+    /// The market's order book (E3.2), matched by its own task
+    #[allow(dead_code)] // the market routes (#169) place and cancel through it
+    pub market: Arc<Market>,
 }
 
 impl AppState {
@@ -57,6 +61,7 @@ impl AppState {
         redis: ConnectionManager,
         config: Config,
         game: Arc<RwLock<GameState>>,
+        market: Arc<Market>,
     ) -> Self {
         Self {
             db,
@@ -64,6 +69,7 @@ impl AppState {
             limiter: Arc::new(RateLimiter::new(config.rate_limits.clone())),
             config,
             game,
+            market,
         }
     }
 }

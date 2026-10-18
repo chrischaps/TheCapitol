@@ -1,5 +1,6 @@
 //! The market's escrow (E3.1, economy plan D7): placing and cancelling orders.
-//! Matching them is E3.2, and the routes that call these are E3.3.
+//! Matching them is `market_book` and `market_matcher` (E3.2), and the routes
+//! that call these are E3.3.
 //!
 //! Each operation is one transaction, and every Strand it moves goes through
 //! the currency audit log:
@@ -15,7 +16,7 @@
 //! So for any run of these, the Strands and units held plus those in escrow
 //! plus the fees are what there were at the start (the conservation test).
 //! The fee and bounds are `rules::market`, shared with the clients.
-#![allow(dead_code)] // the market's model; the matching engine (#168) and routes (#169) call it
+#![allow(dead_code)] // the market's model; the routes (#169) call place and cancel
 
 use capitol_protocol::rest::{MarketOrder, PlaceOrder};
 use capitol_protocol::rules::market::{self, GradeRule, OrderError, OrderSide, OrderStatus};
@@ -52,6 +53,8 @@ pub enum MarketError {
     NotOpen,
     /// The market box has no room for what's coming back
     MarketBoxFull,
+    /// A fill found an order not as the book had it (E3.2): the book reloads it
+    Changed,
     Db(sqlx::Error),
 }
 
@@ -69,6 +72,7 @@ impl MarketError {
             MarketError::NotFound => "No such order".to_string(),
             MarketError::NotOpen => "That order is no longer open".to_string(),
             MarketError::MarketBoxFull => "Your market box is full: collect from it first".to_string(),
+            MarketError::Changed => "The order changed before it could trade".to_string(),
             MarketError::Db(e) => format!("Database error: {e}"),
         }
     }
@@ -257,7 +261,7 @@ pub async fn cancel(db: &PgPool, player_id: Uuid, order_id: Uuid) -> Result<Canc
 /// Take the open order `order_id` (locked by the caller) off the book as
 /// `status`, giving back what's left of its escrow. Expiry (E3.2) is this with
 /// `Expired`.
-async fn close(conn: &mut PgConnection, order_id: Uuid, status: OrderStatus) -> Result<Cancelled, MarketError> {
+pub(super) async fn close(conn: &mut PgConnection, order_id: Uuid, status: OrderStatus) -> Result<Cancelled, MarketError> {
     let (player_id, side, escrow_item_id, escrow_strands): (Uuid, String, Option<Uuid>, i64) = sqlx::query_as(
         "SELECT player_id, side, escrow_item_id, escrow_strands FROM market_orders WHERE id = $1",
     )
@@ -305,7 +309,7 @@ async fn close(conn: &mut PgConnection, order_id: Uuid, status: OrderStatus) -> 
 /// Move the escrow stack `stack` into `player_id`'s market box `into`: onto
 /// the first stack of its type there, if it stacks (D2: nothing is diluted),
 /// or into the first free slot. Returns its units.
-async fn return_to_box(conn: &mut PgConnection, player_id: Uuid, stack: Uuid, into: Uuid) -> Result<Units, MarketError> {
+pub(super) async fn return_to_box(conn: &mut PgConnection, player_id: Uuid, stack: Uuid, into: Uuid) -> Result<Units, MarketError> {
     let units = units::units_of(conn, stack).await?;
     let (item_type, stackable): (String, bool) = sqlx::query_as(
         "SELECT i.item_type, t.stackable FROM items i JOIN item_types t ON t.id = i.item_type WHERE i.id = $1",
@@ -433,19 +437,21 @@ pub async fn load(conn: &mut PgConnection, order_id: Uuid) -> Result<Option<Mark
 /// These need the local Postgres (`docker-compose up -d`). Run them with
 /// `cargo test market -- --ignored`.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::engine::market_matcher::{run_cycle, Market};
     use crate::engine::units::test_units::{all_in, stack_of, units};
     use rand::rngs::StdRng;
+    use tokio::sync::broadcast;
     use rand::{Rng, SeedableRng};
     use std::collections::BTreeMap;
 
-    struct Player {
-        id: Uuid,
-        inventory: Uuid,
+    pub(crate) struct Player {
+        pub(crate) id: Uuid,
+        pub(crate) inventory: Uuid,
     }
 
-    async fn player(db: &PgPool, name: &str, strands: i64) -> Player {
+    pub(crate) async fn player(db: &PgPool, name: &str, strands: i64) -> Player {
         let account = Uuid::new_v4();
         sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'x')")
             .bind(account)
@@ -472,7 +478,7 @@ mod tests {
         Player { id, inventory }
     }
 
-    async fn balance(db: &PgPool, player: Uuid) -> i64 {
+    pub(crate) async fn balance(db: &PgPool, player: Uuid) -> i64 {
         sqlx::query_scalar("SELECT strand_balance FROM players WHERE id = $1")
             .bind(player)
             .fetch_one(db)
@@ -480,12 +486,12 @@ mod tests {
             .unwrap()
     }
 
-    async fn box_of(db: &PgPool, player: Uuid) -> Uuid {
+    pub(crate) async fn box_of(db: &PgPool, player: Uuid) -> Uuid {
         let mut conn = db.acquire().await.unwrap();
         market_box(&mut conn, player).await.unwrap()
     }
 
-    fn sell(item_type: &str, item_id: Uuid, price: i64, quantity: i32, qualities: Option<Units>) -> PlaceOrder {
+    pub(crate) fn sell(item_type: &str, item_id: Uuid, price: i64, quantity: i32, qualities: Option<Units>) -> PlaceOrder {
         PlaceOrder {
             side: OrderSide::Sell,
             item_type: item_type.into(),
@@ -498,7 +504,7 @@ mod tests {
         }
     }
 
-    fn buy(item_type: &str, price: i64, quantity: i32, min_grade: Option<&str>) -> PlaceOrder {
+    pub(crate) fn buy(item_type: &str, price: i64, quantity: i32, min_grade: Option<&str>) -> PlaceOrder {
         PlaceOrder {
             side: OrderSide::Buy,
             item_type: item_type.into(),
@@ -660,18 +666,21 @@ mod tests {
         ));
     }
 
-    /// For any run of places and cancels, Strands held + in escrow + fees, and
+    /// For any run of places, cancels and fills (E3.2), Strands held + in
+    /// escrow + fees, and
     /// every unit of every type, are what there were at the start. Each open
     /// sell's escrow holds exactly its remaining units, and every balance is
     /// its start plus its audit entries.
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
-    async fn places_and_cancels_conserve_strands_and_units(db: PgPool) {
+    async fn places_cancels_and_fills_conserve_strands_and_units(db: PgPool) {
         // Each run adds its own players to the same world, so the totals
         // checked are everything's, across the runs
+        let mut fills = 0;
         for seed in 0..6 {
-            conservation_run(&db, seed, 120).await;
+            fills += conservation_run(&db, seed, 120).await;
         }
+        assert!(fills > 30, "only {fills} fills in six runs");
     }
 
     /// Strands held, in open escrow and paid in fees: the total there is
@@ -687,7 +696,7 @@ mod tests {
         held + escrowed + fees
     }
 
-    async fn conservation_run(pool: &PgPool, seed: u64, steps: usize) {
+    async fn conservation_run(pool: &PgPool, seed: u64, steps: usize) -> usize {
         const TYPES: [&str; 2] = ["rope", "fiber"];
         let db = pool.clone();
         let mut rng = StdRng::seed_from_u64(seed);
@@ -716,7 +725,9 @@ mod tests {
             start_units.insert(item_type, every_unit(&db, item_type).await);
         }
 
-        let (mut placed, mut refused) = (Vec::new(), 0);
+        let (mut placed, mut refused, mut fills, mut untold) = (Vec::new(), 0, 0, Vec::new());
+        let market = Market::default();
+        let (events, _heard) = broadcast::channel(4096);
         for step in 0..steps {
             let p = &players[rng.gen_range(0..players.len())];
             let item_type = TYPES[rng.gen_range(0..TYPES.len())];
@@ -743,13 +754,19 @@ mod tests {
                     } else {
                         None
                     };
-                    place(&db, p.id, &sell(item_type, stack, price, n, named)).await.map(|o| placed.push((o.id, o.player_id)))
+                    place(&db, p.id, &sell(item_type, stack, price, n, named)).await.map(|o| {
+                        market.placed(&o);
+                        placed.push((o.id, o.player_id))
+                    })
                 }
                 4..=6 => {
                     let grade = ["A", "B", "C", "D", "F"][rng.gen_range(0..5)];
                     place(&db, p.id, &buy(item_type, price, rng.gen_range(1..12), Some(grade)))
                         .await
-                        .map(|o| placed.push((o.id, o.player_id)))
+                        .map(|o| {
+                            market.placed(&o);
+                            placed.push((o.id, o.player_id))
+                        })
                 }
                 _ if placed.is_empty() => continue,
                 _ => {
@@ -760,11 +777,23 @@ mod tests {
                     } else {
                         placed[rng.gen_range(0..placed.len())].0
                     };
-                    cancel(&db, p.id, order).await.map(|_| ())
+                    // Now and then the book isn't told, and a fill finds it gone
+                    let told = rng.gen_bool(0.75);
+                    cancel(&db, p.id, order).await.map(|_| {
+                        if told {
+                            market.cancelled(order)
+                        } else {
+                            untold.push(order);
+                        }
+                    })
                 }
             };
             if outcome.is_err() {
                 refused += 1;
+            }
+            // The matcher runs every few steps, so orders cross in batches
+            if rng.gen_bool(0.3) {
+                fills += run_cycle(&market, &db, &events, Utc::now()).await.fills;
             }
 
             assert_eq!(strands_accounted(&db).await, total_strands, "Strands after step {step} of run {seed}");
@@ -804,6 +833,20 @@ mod tests {
             .unwrap();
             assert_eq!(balance(&db, player).await, start + audited);
         }
+
+        // The book is the DB's open orders, each with what's left of it
+        fills += run_cycle(&market, &db, &events, Utc::now()).await.fills;
+        for (id, _) in &placed {
+            let order = load(&mut conn, *id).await.unwrap().unwrap();
+            let booked = market.with_book(|b| b.get(*id).map(|o| (o.remaining, o.units.clone())));
+            match order.status {
+                OrderStatus::Open => assert_eq!(booked, Some((order.quantity_remaining, order.units))),
+                // A cancel the book wasn't told of waits there for a fill to find it
+                _ if untold.contains(id) => {}
+                _ => assert_eq!(booked, None, "{:?} order {id} is still on the book", order.status),
+            }
+        }
+        fills
     }
 
     /// Every unit of `item_type` there is, held or in escrow, in one query
