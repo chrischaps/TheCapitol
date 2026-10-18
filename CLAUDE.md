@@ -12,10 +12,15 @@ The Capitol is an MMO economic simulation where the economy is the primary gamep
 - `the-capitol-milestones.md` - Development roadmap (M0-M10)
 - `the-capitol-flint-client.md` - Plan and work breakdown for the 3D Flint engine client (`flint-client/`)
 - `the-capitol-suburb-v2.md` - Plan for the post-war neighbourhood suburb generator (issues labelled `suburb-v2`, #103 to #113)
+- `the-capitol-economy.md` - Economy v1: quality and tools, content depth, markets (M6), automation (M8), plus CI and auth (issues labelled `economy`, #144 to #179)
 
-## Current Focus: the Flint Client
+## Current Focus: Economy v1
 
-Active work is a third client built on Chris's Flint engine (Rust/wgpu). It goes in `flint-client/`, with the engine as a git subtree at `flint-client/engine/`. The plan is `the-capitol-flint-client.md`. The work queue is the GitHub issues labelled `flint-client`: one issue per work package, created in dependency order, with phase labels `fc:P0-…` to `fc:P8-…` and `fc:backend-prereq` for the small server changes the client needs.
+P0 to P8 of the Flint client are built. Active work is **Economy v1**: making the economy the game. The plan is `the-capitol-economy.md`. The work queue is the GitHub issues labelled `economy` (#144 to #179): one issue per work package, created in dependency order. The phase labels run `ec:E0-foundations` to `ec:E4-automation`. Client work also carries `flint-client`. New gameplay UI goes in the Flint client only; the React and Love2D clients are frozen and only need to keep compiling. A few issues say they need Chris's decision first (E0.8, E1.2, E2.1, E3.4).
+
+### The Flint client
+
+The Flint client is a third client built on Chris's Flint engine (Rust/wgpu). It lives in `flint-client/`, with the engine as a git subtree at `flint-client/engine/`. The plan is `the-capitol-flint-client.md`. Its queue, now mostly done, is the GitHub issues labelled `flint-client`. There's one issue per work package, created in dependency order, with phase labels `fc:P0-…` to `fc:P8-…` and `fc:backend-prereq` for the small server changes the client needs.
 
 **When asked to "tackle the next issue", "do the next one" or "work on #N", use the `next-issue` skill** (`.claude/skills/next-issue/SKILL.md`). It covers:
 - picking the lowest open issue that is unclaimed and unblocked

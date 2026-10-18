@@ -1,25 +1,33 @@
 ---
 name: next-issue
-description: Pick up and implement the next open issue for The Capitol's Flint client (or a specific issue number). Use when asked to "tackle the next issue", "do the next one", "work on #N", or to continue the Flint client work. Finds the next unblocked issue on GitHub, loads the plan context, works in its own worktree, verifies against the issue's acceptance list, then commits, pushes and closes.
+description: Pick up and implement the next open issue for The Capitol (the Economy v1 queue, the Flint client queue, or a specific issue number). Use when asked to "tackle the next issue", "do the next one", "work on #N", or to continue the Economy v1 or Flint client work. Finds the next unblocked issue on GitHub, loads the plan context, works in its own worktree, verifies against the issue's acceptance list, then commits, pushes and closes.
 ---
 
 # next-issue
 
-The work queue for The Capitol's Flint client is the GitHub issues labelled `flint-client` on `chrischaps/TheCapitol`. Each issue is one work package from `the-capitol-flint-client.md`, the plan doc at the repo root. Issues were created in dependency order, so **the lowest open number is usually next**.
+There are two work queues on `chrischaps/TheCapitol`, each with its own plan doc at the repo root:
+
+| Label | Plan | Work packages |
+|---|---|---|
+| `economy` (current) | `the-capitol-economy.md` | E0.1 … E4.4 (#144 to #179) |
+| `flint-client` | `the-capitol-flint-client.md` | P0.1 … P8.7, B1 … B13, engine hooks H… |
+
+Each issue is one work package from its plan, and its header line links the plan. Some economy issues also carry `flint-client` because they touch the client; they still belong to the economy plan. Issues were created in dependency order, so **the lowest open number is usually next**. Below, "the plan" means the doc the issue's header links.
 
 If the user names an issue number, skip step 1 and use that one.
 
 ## 1. Find the next issue
 
 ```bash
+gh issue list --repo chrischaps/TheCapitol --label economy --state open --limit 100 --json number,title,labels --jq 'sort_by(.number)[] | "#\(.number) \(.title)"'
 gh issue list --repo chrischaps/TheCapitol --label flint-client --state open --limit 100 --json number,title,labels --jq 'sort_by(.number)[] | "#\(.number) \(.title)"'
 scripts/issue.sh list      # claims held by every agent, on every machine
 ```
 
-Starting from the lowest number, take the first issue that meets all three conditions:
+Work the `economy` queue first. Take a leftover `flint-client` follow-up only when nothing in it is free, or when Chris asks for one. Starting from the lowest number, take the first issue that meets all three conditions:
 - **Not claimed.** It isn't in `scripts/issue.sh list`, and no open PR mentions it. A `claimed` label on GitHub is only a display; the claim branch is what counts.
 - **Unblocked.** Every issue under its "Depends on" heading is closed. Check them with `gh issue view <dep> --json state`.
-- **Doesn't need Chris first.** Some issues say they need a decision from Chris, B7 for example. Do the write-up part, post it as a comment on the issue, and stop there.
+- **Doesn't need Chris first.** Some issues say they need a decision from Chris, such as B7, E0.8, E1.2, E2.1 or E3.4. Do the write-up part, post it as a comment on the issue, and stop there.
 
 Then claim it, before reading anything else:
 
@@ -36,8 +44,8 @@ Tell the user which issue you picked and why any lower-numbered ones were skippe
 ## 2. Load the context
 
 1. `gh issue view <n>`. Read the Work, Depends on, Acceptance and Verify sections.
-2. Read every plan section listed under "Read first". The links point into `the-capitol-flint-client.md`; read the local copy.
-3. Read `flint-client/CLAUDE.md` if it exists (it's created by P0.2). It has the layout, build commands and subtree commands.
+2. Read every plan section listed under "Read first". The links point into the plan doc (`the-capitol-economy.md` or `the-capitol-flint-client.md`); read the local copy.
+3. If the issue touches `flint-client/`, read `flint-client/CLAUDE.md`. It has the layout, build commands and subtree commands.
 4. Skim the closing comments of the issues this one depends on (`gh issue view <dep> --comments`). They record what was actually built, and that can differ from the plan.
 5. Check Claude's Vault for recent Capitol and Flint notes: `ls ~/OneDrive/Documents/"Claude's Vault" | grep -i -E "capitol|flint" | tail`.
 6. Read the code before changing it. The backend contract is in `backend/src`, and the plan cites file:line for most of it. Line numbers drift, so search when they don't match.
@@ -76,7 +84,7 @@ The local stack is `docker-compose up -d`, then `cargo run` from `backend/`. It'
 ## 5. Keep the plan honest
 
 If you made a decision the plan didn't, or found a size, dependency or approach was wrong:
-- update `the-capitol-flint-client.md` in the same commit
+- update the plan doc (the one the issue links) in the same commit, including an as-built note in the work package's row
 - if later issues are affected, comment on them (`gh issue comment <m> --body ...`) rather than silently diverging
 - if you hit a limitation and worked round it (engine, tooling, backend), cut an issue for it now (see "Cut a ticket for every limitation" in the root `CLAUDE.md`), link it from the workaround, and name it in your closing comment
 
