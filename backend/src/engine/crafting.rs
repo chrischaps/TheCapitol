@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use capitol_protocol::rules::quality;
 use rand::Rng;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -15,7 +16,8 @@ pub struct CraftingOperation {
     pub recipe_id: String,
     /// Items to consume: (item_id, quantity_to_consume)
     pub input_items_to_consume: Vec<(Uuid, i32)>,
-    pub input_qualities: Vec<i32>,
+    /// The units taken, by type, for each input's mean quality.
+    pub inputs: quality::Inputs,
 }
 
 /// Process crafting for all players actively crafting.
@@ -63,8 +65,7 @@ pub fn process_crafting(
     for operation_id in completed_operations {
         if let Some(operation) = crafting_operations.remove(&operation_id) {
             if let Some(recipe) = recipes.get(&operation.recipe_id) {
-                // Calculate output quality from input qualities
-                let output_quality = calculate_output_quality(&operation.input_qualities, recipe);
+                let output_quality = output_quality(&operation.inputs, recipe);
 
                 // Roll the outputs; they're written, and announced, by the tick loop
                 let mut rng = rand::thread_rng();
@@ -96,21 +97,13 @@ pub fn process_crafting(
     finished
 }
 
-/// Calculate output quality based on input qualities and recipe weights
-pub fn calculate_output_quality(input_qualities: &[i32], recipe: &Recipe) -> i32 {
-    if input_qualities.is_empty() {
-        return 50; // Default if no inputs
-    }
-
-    // Calculate weighted average of input qualities
-    let avg_quality: f32 = input_qualities.iter().sum::<i32>() as f32 / input_qualities.len() as f32;
-
-    // Apply variance
-    let mut rng = rand::thread_rng();
-    let variance = rng.gen_range(recipe.quality_weights.variance_min..=recipe.quality_weights.variance_max);
-
-    // Clamp result to valid range
-    (avg_quality as i32 + variance).clamp(0, 100)
+/// The output's quality: the cascade (`rules::quality::output`) with a rolled
+/// variance. Stations count as unrated until they carry a quality (E1.3,
+/// #155), and no recipe weights a tool yet (E1.4, #156).
+pub fn output_quality(inputs: &quality::Inputs, recipe: &Recipe) -> i32 {
+    let weights = &recipe.quality_weights;
+    let variance = rand::thread_rng().gen_range(weights.variance_min..=weights.variance_max);
+    quality::output(inputs, quality::UNRATED_STATION_QUALITY, 0, weights, variance)
 }
 
 /// Start crafting for a player
@@ -133,18 +126,16 @@ pub fn start_crafting(
     }
 
     let mut items_to_consume: Vec<(Uuid, i32)> = Vec::new();
-    let mut input_qualities: Vec<i32> = Vec::new();
+    let mut inputs = quality::Inputs::default();
 
+    // In the order the client sent them, so its range matches what is taken
     for item in input_items {
         if let Some(required) = remaining_requirements.get_mut(&item.item_type) {
             if *required > 0 {
                 let use_quantity = (*required).min(item.quantity);
                 *required -= use_quantity;
                 items_to_consume.push((item.id, use_quantity));
-                // Add quality weighted by quantity used
-                for _ in 0..use_quantity {
-                    input_qualities.push(item.quality);
-                }
+                inputs.add(&item.item_type, use_quantity, item.quality);
             }
         }
     }
@@ -176,7 +167,7 @@ pub fn start_crafting(
         player_id: player.id,
         recipe_id: recipe.id.clone(),
         input_items_to_consume: items_to_consume,
-        input_qualities,
+        inputs,
     });
 
     // Emit event
@@ -213,3 +204,129 @@ pub fn cancel_crafting(
     player.action_state = ActionState::Idle;
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{RecipeInput, RecipeOutput};
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    fn player() -> PlayerState {
+        PlayerState {
+            id: Uuid::new_v4(),
+            account_id: Uuid::new_v4(),
+            name: "Ada".into(),
+            x: 0.0,
+            y: 0.0,
+            dest_x: None,
+            dest_y: None,
+            speed: 50.0,
+            strand_balance: 0,
+            current_zone: None,
+            action_state: ActionState::Idle,
+        }
+    }
+
+    /// The forge kit as the content has it: rope 0.7 and fiber 0.3 at a workbench.
+    fn forge() -> Recipe {
+        Recipe {
+            id: "craft_forge".into(),
+            name: "Forge Kit".into(),
+            description: None,
+            category: "station_crafting".into(),
+            inputs: vec![
+                RecipeInput { item_type: "rope".into(), quantity: 4, quality_weight: 0.7 },
+                RecipeInput { item_type: "fiber".into(), quantity: 6, quality_weight: 0.3 },
+            ],
+            outputs: vec![RecipeOutput {
+                item_type: "forge_kit".into(),
+                quantity_min: 1,
+                quantity_max: 1,
+            }],
+            base_duration_ticks: 1,
+            quality_weights: quality::Weights::for_recipe(
+                [("rope", 0.7), ("fiber", 0.3)],
+                None,
+                None,
+                true,
+                -3,
+                3,
+            ),
+            required_station_type: Some("workbench".into()),
+        }
+    }
+
+    fn stack(rng: &mut StdRng, kind: &str) -> Item {
+        Item {
+            id: Uuid::new_v4(),
+            item_type: kind.into(),
+            quality: rng.gen_range(0..=100),
+            quantity: rng.gen_range(1..=5),
+            owner_id: None,
+            container_id: None,
+            slot_index: None,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// What a client sends and expects (`capitol-core` `craft::check`): for
+    /// each input in recipe order, stacks in slot order until it's met, and
+    /// the range over the units that takes.
+    fn client_side(recipe: &Recipe, slots: &[Item]) -> (Vec<Item>, Vec<(Uuid, i32)>, (i32, i32)) {
+        let (mut sent, mut taken, mut units) = (Vec::new(), Vec::new(), quality::Inputs::default());
+        for need in &recipe.inputs {
+            let mut left = need.quantity;
+            for item in slots.iter().filter(|i| i.item_type == need.item_type) {
+                if left <= 0 {
+                    break;
+                }
+                let used = left.min(item.quantity);
+                left -= used;
+                units.add(&item.item_type, used, item.quality);
+                sent.push(item.clone());
+                taken.push((item.id, used));
+            }
+        }
+        let range = quality::output_range(
+            &units,
+            quality::UNRATED_STATION_QUALITY,
+            0,
+            &recipe.quality_weights,
+        );
+        (sent, taken, range)
+    }
+
+    #[test]
+    fn every_craft_lands_in_the_range_the_client_shows() {
+        let recipe = forge();
+        let recipes: HashMap<_, _> = [(recipe.id.clone(), recipe.clone())].into();
+        let (events, _rx) = broadcast::channel(64);
+        let mut rng = StdRng::seed_from_u64(153);
+        for _ in 0..1000 {
+            // Enough of both, in a shuffled slot order.
+            let mut slots: Vec<Item> = Vec::new();
+            for (kind, need) in [("rope", 4), ("fiber", 6)] {
+                let mut have = 0;
+                while have < need || rng.gen_bool(0.3) {
+                    let s = stack(&mut rng, kind);
+                    have += s.quantity;
+                    slots.push(s);
+                }
+            }
+            for i in (1..slots.len()).rev() {
+                slots.swap(i, rng.gen_range(0..=i));
+            }
+            let (sent, taken, (low, high)) = client_side(&recipe, &slots);
+
+            let mut ada = player();
+            let mut ops = HashMap::new();
+            start_crafting(&mut ada, &recipe, &sent, &mut ops, &events).unwrap();
+            let mut players: HashMap<_, _> = [(ada.id, ada)].into();
+            let done = process_crafting(&mut players, &recipes, &mut ops, &HashMap::new(), &events);
+            assert_eq!(done[0].inputs, taken, "the server takes what the client counted");
+            let q = done[0].outputs[0].quality;
+            assert!(low <= q && q <= high, "{q} outside {low}..={high}");
+        }
+    }
+}

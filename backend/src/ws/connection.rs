@@ -892,7 +892,7 @@ async fn fetch_player_items(state: &AppState, player_id: Uuid, item_ids: &[Uuid]
     }
 
     // Fetch items owned by this player from the provided IDs
-    let items: Vec<crate::models::Item> = sqlx::query_as(
+    let mut items: Vec<crate::models::Item> = sqlx::query_as(
         "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at
          FROM items WHERE id = ANY($1) AND owner_id = $2"
     )
@@ -902,6 +902,9 @@ async fn fetch_player_items(state: &AppState, player_id: Uuid, item_ids: &[Uuid]
     .await
     .unwrap_or_default();
 
+    // In the order asked for: a craft takes its units from the stacks in that
+    // order, as the client's quality range assumes (`capitol-core` `craft::check`).
+    items.sort_by_key(|item| item_ids.iter().position(|id| *id == item.id));
     items
 }
 

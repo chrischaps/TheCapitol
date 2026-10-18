@@ -99,6 +99,13 @@ pub struct OutputDef {
 pub struct VarianceDef {
     pub variance_min: i32,
     pub variance_max: i32,
+    /// The station's share of the output's quality; 0.2 if the recipe needs
+    /// a station and this is left out (`rules::quality::Weights::for_recipe`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub station: Option<f64>,
+    /// The tool's share; 0 if left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -301,6 +308,20 @@ pub fn validate(content: &Content) -> Vec<String> {
         }
         if r.outputs.is_empty() {
             problems.push(format!("recipe '{}' makes nothing", r.id));
+        }
+        if r.inputs.is_empty() {
+            problems.push(format!("recipe '{}' takes nothing", r.id));
+        }
+        let q = &r.quality_weights;
+        if q.variance_min > q.variance_max {
+            problems.push(format!("recipe '{}' has variance_min above variance_max", r.id));
+        }
+        let shares = r.inputs.iter().map(|i| i.quality_weight).chain(q.station).chain(q.tool);
+        if shares.into_iter().any(|w| !w.is_finite() || w < 0.0) {
+            problems.push(format!("recipe '{}' has a quality weight that is negative or not a number", r.id));
+        }
+        if q.station.unwrap_or(0.0) + q.tool.unwrap_or(0.0) > 1.0 {
+            problems.push(format!("recipe '{}' gives its station and tool more than the whole", r.id));
         }
         if let Some(station) = &r.required_station_type {
             if !stations.contains(station) {
@@ -629,6 +650,20 @@ mod tests {
         assert!(problems.contains("item 'fiber' is defined twice"), "{problems}");
         assert!(problems.contains("item 'lint' can't be had"), "{problems}");
         assert!(problems.contains("is both defined and retired"), "{problems}");
+    }
+
+    #[test]
+    fn the_validator_checks_quality_weights() {
+        let mut content = load().unwrap();
+        content.recipes[0].quality_weights.variance_min = 5;
+        content.recipes[0].quality_weights.variance_max = -5;
+        content.recipes[1].inputs[0].quality_weight = -1.0;
+        content.recipes[2].quality_weights.station = Some(0.8);
+        content.recipes[2].quality_weights.tool = Some(0.4);
+        let problems = validate(&content).join("\n");
+        assert!(problems.contains("variance_min above variance_max"), "{problems}");
+        assert!(problems.contains("negative or not a number"), "{problems}");
+        assert!(problems.contains("more than the whole"), "{problems}");
     }
 
     #[test]

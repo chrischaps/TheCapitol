@@ -410,6 +410,9 @@ pub struct RecipeInfo {
     pub duration_ticks: i32,
     /// Station type required (null for hand crafting)
     pub required_station_type: Option<String>,
+    /// The quality cascade's weights, defaults filled and summing to 1, so a
+    /// client gets the server's range from `rules::quality::output_range`
+    pub quality_weights: rules::quality::Weights,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

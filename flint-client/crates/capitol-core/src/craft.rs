@@ -1,5 +1,5 @@
 //! Crafting by hand (P5.5): which recipe the input slots make, what's still
-//! missing, what the craft would send, a quality estimate, and whether the
+//! missing, what the craft would send, its quality range, and whether the
 //! output has anywhere to go. Then [`Crafting`], which follows one craft
 //! from the ask to the settled inventory. React's rules
 //! (`CraftingPanel.tsx`), kept out of the engine so they're plain tests.
@@ -18,10 +18,11 @@
 //! - **What's sent.** [`Check::inputs`] holds the input stacks a craft
 //!   needs, in slot order, and no more. The server takes what it needs from
 //!   them and leaves the rest. React sends every stack in the inputs.
-//! - **The estimate.** The mean quality of the units the craft would use.
-//!   The server averages its inputs and adds a few points either way
-//!   (`engine/crafting.rs`, which ignores the recipe's weights for now), so
-//!   this is labelled an estimate and will drift once the cascade is real.
+//! - **The quality range.** The server's own formula,
+//!   `rules::quality::output_range`, over the units the craft would take
+//!   and the recipe's weights from the catalog, so it's exact: the server
+//!   rolls only the variance (E1.1). The server takes units from the stacks
+//!   in the order they're sent, as [`check`] counts them.
 //! - **Output with nowhere to go.** The server puts the output in the
 //!   output box: onto a stack of the same type, else into a free slot, and
 //!   if there's neither it's lost (`persist_items` in `engine/tick.rs`).
@@ -35,6 +36,7 @@
 use std::time::{Duration, Instant};
 
 use capitol_protocol::rest::RecipeInfo;
+use capitol_protocol::rules::quality;
 use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
 
@@ -47,6 +49,10 @@ pub const UNANSWERED: Duration = Duration::from_secs(3);
 /// The longest a finished craft holds the next one, waiting for the
 /// inputs it used to leave the inventory.
 pub const SETTLE: Duration = Duration::from_secs(2);
+
+/// The quality the server gives every station until stations carry one
+/// (E1.3, #155). It only counts in station recipes.
+const STATION_QUALITY: i32 = quality::UNRATED_STATION_QUALITY;
 
 /// The recipes that need no station.
 pub fn hand_recipes(recipes: &[RecipeInfo]) -> impl Iterator<Item = &RecipeInfo> {
@@ -130,8 +136,11 @@ pub struct Check<'a> {
     /// The stacks to send with `craft`, in slot order: enough of each
     /// input, and nothing the recipe doesn't use.
     pub inputs: Vec<Uuid>,
-    /// The output's likely quality, 0–100, once every need is met.
-    pub estimate: Option<i32>,
+    /// The units the craft would take, by type.
+    pub taken: quality::Inputs,
+    /// The lowest and highest quality the output can come out at, once
+    /// every need is met. The server's result is always in it.
+    pub range: Option<(i32, i32)>,
     /// What's in the way in the output box, if the output would be lost.
     pub blocked: Option<Blocked>,
 }
@@ -146,6 +155,12 @@ impl Check<'_> {
     /// somewhere to go.
     pub fn ready(&self) -> bool {
         self.satisfied() && self.blocked.is_none()
+    }
+
+    /// Where the output's quality comes from: each input's weight and mean
+    /// quality, then the station's.
+    pub fn breakdown(&self) -> Vec<quality::Term> {
+        quality::terms(&self.taken, STATION_QUALITY, 0, &self.recipe.quality_weights)
     }
 
     /// The `craft` message for it.
@@ -174,7 +189,7 @@ pub fn check<'a>(
 ) -> Check<'a> {
     let mut needs = Vec::with_capacity(recipe.inputs.len());
     let mut inputs = Vec::new();
-    let (mut units, mut quality) = (0i64, 0i64);
+    let mut taken = quality::Inputs::default();
     for need in &recipe.inputs {
         let mut left = need.quantity;
         for item in input.items().filter(|i| i.item_type == need.item_type) {
@@ -183,8 +198,7 @@ pub fn check<'a>(
             }
             let used = left.min(item.quantity);
             left -= used;
-            units += used as i64;
-            quality += used as i64 * item.quality as i64;
+            taken.add(&item.item_type, used, item.quality);
             inputs.push(item.item_id);
         }
         needs.push(Need {
@@ -195,15 +209,15 @@ pub fn check<'a>(
         });
     }
     let satisfied = needs.iter().all(Need::met);
-    let estimate = (satisfied && units > 0).then(|| {
-        // Rounded half up, as React's Math.round.
-        ((quality * 2 + units) / (units * 2)).clamp(0, 100) as i32
+    let range = satisfied.then(|| {
+        quality::output_range(&taken, STATION_QUALITY, 0, &recipe.quality_weights)
     });
     Check {
         recipe,
         needs,
         inputs,
-        estimate,
+        taken,
+        range,
         blocked: output.and_then(|o| blocked(recipe, o)),
     }
 }
@@ -449,6 +463,7 @@ mod tests {
     const IN: Uuid = Uuid::from_u128(101);
     const OUT: Uuid = Uuid::from_u128(102);
 
+    /// A hand recipe, its inputs weighted evenly, give or take 3.
     fn recipe(id: &str, inputs: &[(&str, i32)], output: &str) -> RecipeInfo {
         RecipeInfo {
             id: id.into(),
@@ -471,6 +486,14 @@ mod tests {
             }],
             duration_ticks: 50,
             required_station_type: None,
+            quality_weights: quality::Weights::for_recipe(
+                inputs.iter().map(|(t, _)| (*t, 1.0)),
+                None,
+                None,
+                false,
+                -3,
+                3,
+            ),
         }
     }
 
@@ -546,7 +569,8 @@ mod tests {
         assert!(rope.ready());
         // Slot order, enough and no more: one from the first, one from the second.
         assert_eq!(rope.inputs, [Uuid::from_u128(1), Uuid::from_u128(3)]);
-        assert_eq!(rope.estimate, Some(75));
+        // (90 + 60) / 2 = 75, give or take 3.
+        assert_eq!(rope.range, Some((72, 78)));
         assert_eq!(
             rope.message(),
             ClientMessage::Craft {
@@ -560,10 +584,10 @@ mod tests {
 
         // Ten for the workbench: 1 × 90 + 5 × 60 + 4 × 10 = 430, over 10.
         let bench = check(&r[1], &inp, None);
-        assert_eq!(bench.estimate, Some(43));
+        assert_eq!(bench.range, Some((40, 46)));
         assert_eq!(bench.inputs.len(), 3);
 
-        // Short: no estimate, and not ready.
+        // Short: no range, and not ready.
         let short = check(&r[1], &input(&[item(1, 0, "fiber", 90, 3)]), None);
         assert_eq!(
             short.needs[0],
@@ -575,14 +599,15 @@ mod tests {
             }
         );
         assert!(!short.needs[0].met() && !short.ready());
-        assert_eq!(short.estimate, None);
+        assert_eq!(short.range, None);
     }
 
     #[test]
-    fn the_estimate_rounds_half_up() {
+    fn the_range_rounds_half_up() {
         let r = recipes();
         let inp = input(&[item(1, 0, "fiber", 50, 1), item(2, 1, "fiber", 51, 1)]);
-        assert_eq!(check(&r[0], &inp, None).estimate, Some(51));
+        // 50.5 rounds to 51, then ±3.
+        assert_eq!(check(&r[0], &inp, None).range, Some((48, 54)));
     }
 
     #[test]
@@ -757,7 +782,16 @@ mod tests {
         use capitol_protocol::rest::StationContainerResponse;
         const BENCH: Uuid = Uuid::from_u128(30);
         const BOX: Uuid = Uuid::from_u128(31);
-        let forge = recipe("craft_forge", &[("rope", 4), ("fiber", 6)], "forge_kit");
+        let mut forge = recipe("craft_forge", &[("rope", 4), ("fiber", 6)], "forge_kit");
+        forge.required_station_type = Some("workbench".into());
+        forge.quality_weights = quality::Weights::for_recipe(
+            [("rope", 0.7), ("fiber", 0.3)],
+            None,
+            None,
+            true,
+            -3,
+            3,
+        );
         let t0 = Instant::now();
         let mut state = world(&[]);
         state.apply_ws(&M::StationOpened {
@@ -784,7 +818,10 @@ mod tests {
             state.crafting_output(),
         );
         assert!(c.ready());
-        assert_eq!(c.estimate, Some(58), "(4×70 + 6×50) / 10");
+        // 0.56 × 70 + 0.24 × 50 + 0.2 × 50 (the unrated bench) = 61.2.
+        assert_eq!(c.range, Some((58, 64)));
+        let points: f64 = c.breakdown().iter().map(quality::Term::points).sum();
+        assert!((points - 61.2).abs() < 1e-9);
         assert_eq!(
             crafting.start_at(&c, BENCH, &state, t0),
             Some(ClientMessage::CraftAtStation {

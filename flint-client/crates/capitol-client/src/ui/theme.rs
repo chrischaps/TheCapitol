@@ -585,9 +585,19 @@ pub fn progress(ui: &mut Ui, fraction: f32, accent: Color32) {
     painter.rect_filled(fill, 4.0, accent);
 }
 
-/// A predicted quality and its grade, tinted by the grade: "~82 B".
-pub fn grade_badge(ui: &mut Ui, quality: i32) -> Response {
-    grade_tag(ui, &format!("~{quality}"), quality)
+/// The range a craft's quality will land in, and its grades, tinted by the
+/// grade of the middle: "58–64 C", or "52–58 D–C" across a boundary.
+pub fn range_badge(ui: &mut Ui, (low, high): (i32, i32)) -> Response {
+    if low == high {
+        return quality_badge(ui, low);
+    }
+    let (from, to) = (
+        capitol_protocol::rules::quality_grade(low),
+        capitol_protocol::rules::quality_grade(high),
+    );
+    let grades = if from == to { to.to_string() } else { format!("{from}–{to}") };
+    let colour = grade(capitol_protocol::rules::quality_grade((low + high) / 2));
+    tag(ui, &format!("{low}–{high} {grades}"), colour)
 }
 
 /// A known quality and its grade, tinted by the grade: "82 B".
@@ -597,14 +607,17 @@ pub fn quality_badge(ui: &mut Ui, quality: i32) -> Response {
 
 fn grade_tag(ui: &mut Ui, number: &str, quality: i32) -> Response {
     let letter = capitol_protocol::rules::quality_grade(quality);
-    let colour = grade(letter);
+    tag(ui, &format!("{number} {letter}"), grade(letter))
+}
+
+fn tag(ui: &mut Ui, text: &str, colour: Color32) -> Response {
     egui::Frame::none()
         .fill(colour.gamma_multiply(0.2))
         .rounding(4.0)
         .inner_margin(Margin::symmetric(6.0, 2.0))
         .show(ui, |ui| {
             ui.label(
-                RichText::new(format!("{number} {letter}"))
+                RichText::new(text)
                     .font(strong(size::SMALL))
                     .color(colour),
             )

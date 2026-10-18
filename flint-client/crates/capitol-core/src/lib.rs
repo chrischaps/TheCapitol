@@ -11,7 +11,7 @@
 //! - [`harvest`]: clicking a node: extract it, or walk there and extract
 //!   on arrival.
 //! - [`craft`]: crafting by hand: the recipe the inputs make, what's
-//!   missing, an estimate, output with nowhere to go, and one craft from
+//!   missing, the quality range, output with nowhere to go, and one craft from
 //!   the ask to the settled inventory.
 //! - [`exchange`]: the fiber exchange: a deposit's or withdrawal's
 //!   numbers before you confirm, the server's own rule.

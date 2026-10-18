@@ -1295,6 +1295,7 @@ fn recipes_and_plots_are_stored() {
         outputs: vec![],
         duration_ticks: 50,
         required_station_type: None,
+        quality_weights: capitol_protocol::rules::quality::Weights::for_recipe([], None, None, false, -3, 3),
     };
     assert_eq!(
         state.apply_rest(&R::Recipes(RecipesResponse {

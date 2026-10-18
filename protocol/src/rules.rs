@@ -1,5 +1,5 @@
 //! Game rules both sides need to agree on: world geometry, speeds, ranges, zones,
-//! quality grades and the water-crossing test.
+//! quality grades, the quality cascade and the water-crossing test.
 //!
 //! The server is authoritative. Clients use these to predict (move the local player,
 //! grey out an out-of-range node, grade an item from its numeric quality) without
@@ -102,6 +102,9 @@ pub fn withdraw_quote(fiber: i64) -> (i64, i64) {
 // ---------------------------------------------------------------------------
 // Quality
 // ---------------------------------------------------------------------------
+
+/// The cascade: a craft's output quality from its inputs, station and tool.
+pub mod quality;
 
 /// Letter grade for an item quality (0-100): A >= 90, B >= 75, C >= 55, D >= 35,
 /// otherwise F. WebSocket events carry only the number, so clients grade it here.

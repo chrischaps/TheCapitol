@@ -10,10 +10,15 @@
 #                          for a hand recipe
 #   base_duration_ticks    how long one craft takes (10 ticks a second)
 #   inputs                 [{ item_type, quantity, quality_weight }]: how much
-#                          of each input's quality flows into the output
+#                          of each input's quality flows into the output,
+#                          relative to the other inputs
 #   outputs                [{ item_type, quantity_min, quantity_max }]
-#   quality_weights        { variance_min, variance_max }: the random spread
-#                          added to the output's quality
+#   quality_weights        { variance_min, variance_max, station?, tool? }:
+#                          the random spread added to the output's quality,
+#                          and the station's and tool's shares of it (0 to 1).
+#                          Left out, a station recipe gives the station 0.2
+#                          and the tool gets 0; the inputs split the rest.
+#                          The formula is protocol/src/rules/quality.rs (D1).
 #   crafting_requirements  a table, empty for now (tool gating fills it, E1.5)
 #
 # Item ids must be in items.toml, and no item may be its own ingredient,

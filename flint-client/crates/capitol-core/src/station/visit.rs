@@ -407,6 +407,14 @@ mod tests {
             outputs: vec![],
             duration_ticks: 10,
             required_station_type: at.map(Into::into),
+            quality_weights: capitol_protocol::rules::quality::Weights::for_recipe(
+                [],
+                None,
+                None,
+                at.is_some(),
+                -3,
+                3,
+            ),
         };
         let all = [
             recipe("rope_basic", None),

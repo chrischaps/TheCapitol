@@ -11,7 +11,9 @@
 //! - **The slots**, `crafting_input` (4) → `crafting_output` (1), shut to
 //!   drags while a craft is out, so nothing it uses can be moved away
 //!   (B10, #61, may make the server refuse that itself).
-//! - **The estimate**, labelled as one: the server's sums will change.
+//! - **The quality range**, exact: the server's own cascade over the units
+//!   the craft takes (`rules::quality`), so only the roll is left. Hover it
+//!   for where the points come from.
 //! - **Output with nowhere to go** stops the craft, says what's in the way
 //!   and offers to move it, because the server would destroy the output.
 //! - **Under way**: the bar, the time left and Cancel. Walking cancels too
@@ -22,7 +24,7 @@ use super::slots::{Move, SlotGrid};
 use super::theme::{self, size, CRAFT, DIM, ENOUGH, SHORT, SLOT_GAP, TEXT};
 use capitol_core::craft::{self, Check, Phase};
 use capitol_core::protocol::rest::RecipeInfo;
-use capitol_core::protocol::rules::TICK_MS;
+use capitol_core::protocol::rules::{quality, TICK_MS};
 use capitol_core::state::{Activity, GameState};
 use egui::RichText;
 
@@ -255,9 +257,9 @@ impl CraftingPanel {
                 if let Some(shifts) = blocked_box(ui, state, check, blocked) {
                     action = Some(Action::Moves(shifts));
                 }
-            } else if let Some(q) = check.estimate {
+            } else if let Some(range) = check.range {
                 ui.add_space(6.0);
-                preview(ui, check, q);
+                preview(ui, check, range);
             }
         }
         ui.add_space(6.0);
@@ -386,8 +388,9 @@ pub(super) fn needs(ui: &mut egui::Ui, check: &Check) {
     });
 }
 
-/// The estimate: what comes out and about how good, said as an estimate.
-pub(super) fn preview(ui: &mut egui::Ui, check: &Check, quality: i32) {
+/// What comes out and the range its quality will land in, with the
+/// breakdown on hover.
+pub(super) fn preview(ui: &mut egui::Ui, check: &Check, range: (i32, i32)) {
     let output = check
         .recipe
         .outputs
@@ -399,13 +402,53 @@ pub(super) fn preview(ui: &mut egui::Ui, check: &Check, quality: i32) {
             ui.add_space(((ui.available_width() - 190.0) / 2.0).max(0.0));
             ui.label(theme::dim("Preview:"));
             ui.label(theme::text(output));
-            theme::grade_badge(ui, quality).on_hover_text(
-                "An estimate: the mean of the inputs it uses, give or take a few points. \
-                 How the server weighs quality will change.",
-            );
-            ui.label(theme::dim("est.").size(size::LABEL));
+            theme::range_badge(ui, range).on_hover_ui(|ui| breakdown(ui, check));
         });
     });
+}
+
+/// Where the output's quality comes from: each source's weight and quality,
+/// the points it puts in, and the roll on top.
+fn breakdown(ui: &mut egui::Ui, check: &Check) {
+    let weights = &check.recipe.quality_weights;
+    egui::Grid::new("quality_breakdown")
+        .num_columns(3)
+        .spacing([12.0, 2.0])
+        .show(ui, |ui| {
+            let mut total = 0.0;
+            for term in check.breakdown() {
+                let name = match &term.source {
+                    quality::Source::Input(item) => check
+                        .recipe
+                        .inputs
+                        .iter()
+                        .find(|i| &i.item_type == item)
+                        .map_or(item.as_str(), |i| i.item_name.as_str()),
+                    quality::Source::Station => "Station",
+                    quality::Source::Tool => "Tool",
+                };
+                ui.label(theme::text(name));
+                ui.label(theme::dim(format!(
+                    "{:.0}% of {:.1}",
+                    term.weight * 100.0,
+                    term.quality
+                )));
+                ui.label(theme::text(format!("{:.1}", term.points())));
+                ui.end_row();
+                total += term.points();
+            }
+            ui.label(theme::text("Roll"));
+            ui.label(theme::dim("at random"));
+            ui.label(theme::text(format!(
+                "{:+} to {:+}",
+                weights.variance_min, weights.variance_max
+            )));
+            ui.end_row();
+            ui.label(theme::dim("Before the roll"));
+            ui.label("");
+            ui.label(theme::text(format!("{total:.1}")));
+            ui.end_row();
+        });
 }
 
 /// The output slot is taken by something else: say so, and offer to move

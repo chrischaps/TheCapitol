@@ -8,7 +8,7 @@
 //!   from the inventory (bottom right) just works. A chest is only this.
 //! - **At a crafting station:** its recipes (`required_station_type`), what
 //!   the one picked or detected needs against the box, Fill and Clear as on
-//!   the crafting panel, the estimate, and Craft, which sends
+//!   the crafting panel, the quality range, and Craft, which sends
 //!   `craft_at_station`. While it runs: the bar, the time left and Cancel.
 //!   The rules are `capitol_core::craft`, as for crafting by hand.
 //! - **Where the output goes.** The server puts a station's output in your
@@ -328,9 +328,9 @@ impl StationPanel {
                 if let Some(shifts) = blocked_box(ui, state, check, blocked) {
                     action = Some(Action::Moves(shifts));
                 }
-            } else if let Some(q) = check.estimate {
+            } else if let Some(range) = check.range {
                 ui.add_space(6.0);
-                preview(ui, check, q);
+                preview(ui, check, range);
             }
         }
         ui.add_space(6.0);

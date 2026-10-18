@@ -176,7 +176,7 @@ impl Sample {
                 ui.add_space(((ui.available_width() - 130.0) / 2.0).max(0.0));
                 ui.label(theme::dim("Preview:"));
                 ui.label(theme::text("Rope"));
-                theme::grade_badge(ui, 82);
+                theme::range_badge(ui, (79, 85));
             });
         });
         ui.add_space(6.0);

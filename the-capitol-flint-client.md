@@ -813,7 +813,7 @@ P2 can run alongside P1 and P3 in a separate worktree, since it has no engine de
 | **One session per account** | Testing always uses two accounts. Document it in `flint-client/CLAUDE.md`. |
 | **World scale** (B1) | Resolved by B1: the spawn, nodes, zones and move bounds are on the 8000 world. DB plots were only scaled. B7 replaced them with the terrain's lots. |
 | **Windows only** | Accepted for now. Android is possible later through `flint-android`, but touch input and UI scale would need their own plan. |
-| **The quality cascade isn't real yet** (`engine/crafting.rs` averages inputs and ignores weights) | Not a client problem, but the quality preview in P5.5 should be computed by the server or labelled as an estimate so it doesn't lock in the current maths. *P5.5: labelled. The panel shows "~52 D est.", with a tooltip saying the server's sums will change. `craft::check` holds the maths in one place.* |
+| **The quality cascade isn't real yet** (`engine/crafting.rs` averages inputs and ignores weights) | Not a client problem, but the quality preview in P5.5 should be computed by the server or labelled as an estimate so it doesn't lock in the current maths. *P5.5: labelled. The panel shows "~52 D est.", with a tooltip saying the server's sums will change. `craft::check` holds the maths in one place.* **Resolved in E1.1 ([#153](https://github.com/chrischaps/TheCapitol/issues/153)):** the cascade is `protocol::rules::quality`, which the server and client both call. The panel shows the exact range ("64–70 C") with no "est.", and a breakdown on hover. |
 
 ## 10. Verification strategy
 
