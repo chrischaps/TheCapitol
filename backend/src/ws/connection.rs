@@ -128,10 +128,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
-    // Send auth success, with the server's clock for the time of day
+    // Send auth success, with the server's clock for the time of day and
+    // the account's subscription (E4.1)
+    let subscription = crate::subscriptions::of(&state.db, authed.account_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to read {}'s subscription: {:?}", authed.account_id, e);
+            None
+        })
+        .unwrap_or_default();
     let auth_ok = ServerMessage::AuthOk {
         player_id,
         server_time_ms: chrono::Utc::now().timestamp_millis(),
+        subscription,
     };
     let _ = sender
         .send(Message::Text(serde_json::to_string(&auth_ok).unwrap().into()))
@@ -867,6 +876,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     Ok(GameEvent::PlotForeclosed { owner_id, terrain_id, tax_owed, refund, notice_id }) => {
                         if owner_id == player_id && (!presence || take_notice(&state.db, notice_id).await) {
                             let msg = ServerMessage::PlotForeclosed { terrain_id, tax_owed, refund };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
+                    Ok(GameEvent::SubscriptionLapsed { player_id: whose, until, notice_id }) => {
+                        if whose == player_id && take_notice(&state.db, notice_id).await {
+                            let msg = ServerMessage::SubscriptionLapsed { until };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }

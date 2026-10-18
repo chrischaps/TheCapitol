@@ -160,6 +160,7 @@ fn answer_for(fetch: Fetch) -> RestResponse {
             zone: "rural".into(),
             strand_balance: 100,
             online: true,
+            subscription: Default::default(),
         }),
         Fetch::Containers => RestResponse::Containers(ContainersResponse {
             containers: vec![container(INVENTORY, "player_inventory")],

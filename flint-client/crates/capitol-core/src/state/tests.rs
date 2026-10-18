@@ -212,6 +212,7 @@ fn test_for(message: &M) -> fn() {
         M::PlotReleased { .. } => plot_released_drops_it_from_my_plots,
         M::TaxDelinquent { .. } => tax_messages_are_reported,
         M::PlotForeclosed { .. } => tax_messages_are_reported,
+        M::SubscriptionLapsed { .. } => subscription_follows_auth_ok_me_and_the_lapse,
     }
 }
 
@@ -231,12 +232,60 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 40, "one fixture per ServerMessage variant");
+    assert_eq!(count, 41, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
 // Handshake and players
 // ---------------------------------------------------------------------------
+
+#[test]
+fn subscription_follows_auth_ok_me_and_the_lapse() {
+    let now = chrono::DateTime::from_timestamp_millis(now_ms()).unwrap();
+    let in_days = |days| now + chrono::Duration::days(days);
+    let active = |days| Subscription {
+        status: SubscriptionStatus::Active,
+        until: Some(in_days(days)),
+    };
+    let mut state = GameState::new();
+    assert_eq!(state.subscription(), None);
+    assert!(!state.is_patron());
+
+    state.apply_ws(&M::AuthOk {
+        player_id: ME,
+        server_time_ms: now_ms(),
+        subscription: active(30),
+    });
+    assert!(state.is_patron());
+
+    // `/player/me` is newer, and one past its end has lapsed already
+    let mut me = match me_response(true) {
+        R::Me(me) => me,
+        _ => unreachable!(),
+    };
+    me.subscription = active(-1);
+    state.apply_rest(&R::Me(me));
+    assert!(!state.is_patron());
+    assert_eq!(
+        state.subscription().unwrap().status,
+        SubscriptionStatus::Lapsed
+    );
+
+    state.apply_rest(&R::Subscription(active(7)));
+    assert!(state.is_patron());
+
+    let until = in_days(0);
+    let events = state.apply_ws(&M::SubscriptionLapsed { until });
+    assert_eq!(events, vec![StateEvent::SubscriptionLapsed { until }]);
+    assert!(!state.is_patron());
+    assert_eq!(
+        state.subscription(),
+        Some(Subscription {
+            status: SubscriptionStatus::Lapsed,
+            until: Some(until)
+        })
+    );
+}
 
 #[test]
 fn auth_ok_sets_the_local_player() {
@@ -246,7 +295,11 @@ fn auth_ok_sets_the_local_player() {
     // A server clock an hour ahead of this machine's.
     let hour = 3_600_000;
     let ahead = now_ms() + hour;
-    let events = state.apply_ws(&M::AuthOk { player_id: ME, server_time_ms: ahead });
+    let events = state.apply_ws(&M::AuthOk {
+        player_id: ME,
+        server_time_ms: ahead,
+        subscription: Default::default(),
+    });
     assert!(events.is_empty());
     assert_eq!(state.me(), Some(ME));
     let server = state.server_time_ms().unwrap();
@@ -254,7 +307,11 @@ fn auth_ok_sets_the_local_player() {
     assert_eq!(state.time_of_day(), Some(capitol_protocol::rules::time_of_day(server)));
 
     // A reconnect rebases it.
-    state.apply_ws(&M::AuthOk { player_id: ME, server_time_ms: now_ms() });
+    state.apply_ws(&M::AuthOk {
+        player_id: ME,
+        server_time_ms: now_ms(),
+        subscription: Default::default(),
+    });
     assert!((state.server_time_ms().unwrap() - now_ms()).abs() < 1000);
 }
 
@@ -1196,6 +1253,7 @@ fn me_response(online: bool) -> R {
         zone: "rural".into(),
         strand_balance: 250,
         online,
+        subscription: Default::default(),
     })
 }
 

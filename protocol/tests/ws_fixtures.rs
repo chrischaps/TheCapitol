@@ -53,6 +53,7 @@ const SERVER_TYPES: &[&str] = &[
     "plot_released",
     "tax_delinquent",
     "plot_foreclosed",
+    "subscription_lapsed",
 ];
 
 const CLIENT_TYPES: &[&str] = &[

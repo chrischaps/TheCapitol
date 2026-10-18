@@ -29,10 +29,27 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/world-params/default", get(get_default_world_params))
         .route("/world-params/commit", post(commit_world_params))
         .route("/stats", get(get_server_stats))
+        .route("/accounts/{id}/subscription", post(subscribe_account))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
         ))
+}
+
+/// Start or extend an account's subscription by `days` (E4.1). There are no
+/// payments yet, so this is how one starts.
+pub async fn subscribe_account(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    axum::extract::Path(account_id): axum::extract::Path<uuid::Uuid>,
+    Json(req): Json<capitol_protocol::rest::SubscribeRequest>,
+) -> Result<Json<capitol_protocol::rest::Subscription>, AppError> {
+    require_admin(&user)?;
+    let subscription = crate::subscriptions::extend(&state.db, account_id, req.days)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Account not found".into()))?;
+    tracing::info!("Admin {} subscribed account {} for {} days", user.account_id, account_id, req.days);
+    Ok(Json(subscription))
 }
 
 /// Get current world generation parameters

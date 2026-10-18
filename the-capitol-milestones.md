@@ -610,9 +610,9 @@ Create static data for:
 ### Deliverables
 
 #### Backend - Subscription System
-- [ ] `subscription_status` on account (Free, Active, Lapsed)
-- [ ] Subscription check middleware
-- [ ] Mock subscription activation (no real payments yet)
+- [x] `subscription_status` on account (Free, Active, Lapsed), with `subscription_until` (#176)
+- [x] Subscription check middleware: the `Subscriber` extractor, `403` with a reason (#176)
+- [x] Mock subscription activation (no real payments yet): `POST /admin/accounts/{id}/subscription`, and `POST /player/subscription` behind `MOCK_SUBSCRIPTIONS` (#176)
 
 #### Backend - Containers
 - [ ] `containers` table and model

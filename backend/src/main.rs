@@ -24,6 +24,7 @@ mod rate_limit;
 mod routes;
 mod sessions;
 mod state;
+mod subscriptions;
 mod ws;
 
 use config::Config;

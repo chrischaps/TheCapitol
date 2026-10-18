@@ -37,9 +37,11 @@ use std::collections::HashMap;
 
 use capitol_protocol::rest::{
     CatalogResponse, ClaimedPlot, PlotInfo, RecipeInfo, ResourceNodeInfo, StationInfo,
+    Subscription, SubscriptionStatus,
 };
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::ws::{PlayerPosition, ServerMessage};
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::catalog::{container_type, Catalog};
@@ -257,6 +259,10 @@ pub enum StateEvent {
         tax_owed: i64,
         refund: i64,
     },
+    /// Your subscription ran out at `until` (`subscription_lapsed`, E4.1).
+    SubscriptionLapsed {
+        until: DateTime<Utc>,
+    },
 
     /// The local player's trading changed. See [`GameState::trade`].
     Trade(TradeEvent),
@@ -291,6 +297,8 @@ pub struct GameState {
     /// From `/catalog` (or an old `/recipes`); empty until the server answers.
     recipes: Vec<RecipeInfo>,
     strands: Option<i64>,
+    /// Your account's subscription, from `auth_ok` and `/player/me` (E4.1).
+    subscription: Option<Subscription>,
     /// Your own plots: the poller lists them by owner (P6.4).
     plots: Vec<PlotInfo>,
     /// The plot the plot panel shows, picked with `/plots/at`.
@@ -332,6 +340,7 @@ impl GameState {
             catalog: Catalog::fallback(),
             recipes: Vec::new(),
             strands: None,
+            subscription: None,
             plots: Vec::new(),
             picked_plot: None,
             claimed: HashMap::new(),
@@ -398,8 +407,13 @@ impl GameState {
         use ServerMessage as M;
         let mut out = Vec::new();
         match message {
-            M::AuthOk { player_id, server_time_ms } => {
+            M::AuthOk {
+                player_id,
+                server_time_ms,
+                subscription,
+            } => {
                 self.me = Some(*player_id);
+                self.subscription = Some(*subscription);
                 // Rebased on every AuthOk, so a reconnect corrects any drift.
                 self.clock_offset_ms = Some(server_time_ms - local_unix_ms());
             }
@@ -710,6 +724,13 @@ impl GameState {
                 tax_owed: *tax_owed,
                 refund: *refund,
             }),
+            M::SubscriptionLapsed { until } => {
+                self.subscription = Some(Subscription {
+                    status: SubscriptionStatus::Lapsed,
+                    until: Some(*until),
+                });
+                out.push(StateEvent::SubscriptionLapsed { until: *until });
+            }
         }
         out
     }
@@ -725,6 +746,7 @@ impl GameState {
             R::Me(me) => {
                 self.me = Some(me.player_id);
                 self.set_strands(me.strand_balance, &mut out);
+                self.subscription = Some(me.subscription);
                 // Before the first `positions`, this is how we learn who and
                 // where we are. After it, `positions` is newer than any REST
                 // answer, so a player already known keeps their position.
@@ -780,6 +802,7 @@ impl GameState {
                 }
             }
             R::Currency(c) => self.set_strands(c.strand_balance, &mut out),
+            R::Subscription(s) => self.subscription = Some(*s),
             R::Deposit(d) => self.set_strands(d.new_balance, &mut out),
             R::Withdraw(w) => self.set_strands(w.new_balance, &mut out),
             R::Plots(response) => {
@@ -1025,6 +1048,24 @@ impl GameState {
     /// The Strand balance, once fetched.
     pub fn strands(&self) -> Option<i64> {
         self.strands
+    }
+
+    /// Your account's subscription, as of now. `None` until the server says.
+    pub fn subscription(&self) -> Option<Subscription> {
+        self.subscription.map(|s| s.as_of(self.utc_now()))
+    }
+
+    /// The server's clock now if it's known, else this machine's: when a
+    /// subscription ends is the server's to say.
+    fn utc_now(&self) -> DateTime<Utc> {
+        let ms = self.server_time_ms().unwrap_or_else(local_unix_ms);
+        DateTime::from_timestamp_millis(ms).unwrap_or_default()
+    }
+
+    /// Whether you're a subscriber now: the header's Patron chip (E4.1).
+    pub fn is_patron(&self) -> bool {
+        self.subscription
+            .is_some_and(|s| s.is_active_at(self.utc_now()))
     }
 
     /// Your own plots, as last listed.

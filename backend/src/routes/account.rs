@@ -192,7 +192,6 @@ mod tests {
     fn a_key_cant_manage_keys() {
         let mut user = AuthUser {
             account_id: Uuid::new_v4(),
-            tier: "free".into(),
             is_admin: false,
             key: None,
         };

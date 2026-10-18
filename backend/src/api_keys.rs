@@ -78,7 +78,6 @@ pub struct KeyGrant {
 #[derive(Debug, Clone)]
 pub struct KeyUser {
     pub account_id: Uuid,
-    pub tier: String,
     pub grant: KeyGrant,
 }
 
@@ -158,15 +157,15 @@ pub fn refusal(what: &str, needed: Option<ApiKeyScope>) -> String {
 /// The account a secret belongs to, if it's a live key. Notes the use, at
 /// most once a minute.
 pub async fn authenticate(db: &PgPool, secret: &str) -> Result<Option<KeyUser>, sqlx::Error> {
-    let row: Option<(Uuid, Uuid, Vec<String>, Option<DateTime<Utc>>, String)> = sqlx::query_as(
-        "SELECT k.id, k.account_id, k.scopes, k.last_used_at, a.tier
-         FROM api_keys k JOIN accounts a ON a.id = k.account_id
+    let row: Option<(Uuid, Uuid, Vec<String>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT k.id, k.account_id, k.scopes, k.last_used_at
+         FROM api_keys k
          WHERE k.secret_hash = $1 AND k.revoked_at IS NULL",
     )
     .bind(crate::sessions::hash(secret))
     .fetch_optional(db)
     .await?;
-    let Some((id, account_id, scopes, last_used_at, tier)) = row else {
+    let Some((id, account_id, scopes, last_used_at)) = row else {
         return Ok(None);
     };
     let now = Utc::now();
@@ -180,7 +179,6 @@ pub async fn authenticate(db: &PgPool, secret: &str) -> Result<Option<KeyUser>, 
     let scopes: Vec<ApiKeyScope> = scopes.iter().filter_map(|s| ApiKeyScope::parse(s)).collect();
     Ok(Some(KeyUser {
         account_id,
-        tier,
         grant: KeyGrant {
             id,
             scopes: Scopes::of(&scopes),
@@ -231,6 +229,8 @@ mod tests {
         assert_eq!(rest(Method::PUT, "/admin/world-params"), None);
         assert_eq!(rest(Method::POST, "/auth/logout"), None);
         assert_eq!(rest(Method::POST, "/player/teleport"), None);
+        // Subscribing is the account's own business, as paying will be
+        assert_eq!(rest(Method::POST, "/player/subscription"), None);
         assert_eq!(rest(Method::PATCH, "/player/move"), None);
     }
 
@@ -270,7 +270,7 @@ mod tests {
 
     async fn account(db: &PgPool) -> Uuid {
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO accounts (id, email, password_hash, tier) VALUES ($1, $2, 'x', 'free')")
+        sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'x')")
             .bind(id)
             .bind(format!("{id}@test.local"))
             .execute(db)

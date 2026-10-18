@@ -162,6 +162,13 @@ This keeps the liquidity of a single book while making the journey inward the lo
 
 No payments. `accounts.subscription_status` (Free / Active / Lapsed) and `subscription_until`, set by an admin endpoint and by `capitol-bot`. One middleware extractor (`Subscriber`) gates the features in GDD §5's access matrix that this plan touches: automation that runs offline, and later guild leadership.
 
+**As built (#176):**
+- `subscription_status` is the old `accounts.tier` column, renamed and constrained. `AccountInfo.tier` and the JWT's `tier` claim still carry it, for the frozen clients.
+- The time decides, not the column. An `Active` row past its `until` reads as `Lapsed` (`Subscription::as_of`) and the extractor refuses it at once. The hourly check (`subscriptions::lapse_expired`, half an hour off the tax run) only catches the row up and queues `subscription_lapsed` in `player_notices`, so a player who was away hears it on return.
+- Activation adds days to what's left, or starts from now. Two ways in: `POST /admin/accounts/{id}/subscription {days}` (admin), and `POST /player/subscription {days}`, a self-serve stand-in for payment that the server allows only with `MOCK_SUBSCRIPTIONS` on (the default in debug builds only). `capitol-bot --subscribe <days>` uses the second, so a bot needs no admin account.
+- The extractor (`subscriptions::Subscriber`) only needs `PgPool: FromRef<S>`. E4.3's tick has no request to extract from: it should call `subscriptions::of` for the owner.
+- `/player/me` and `auth_ok` carry `subscription {status, until}`. In Flint, `GameState::is_patron` lights a gold Patron chip beside the name, and the lapse shows as a notice.
+
 ### D9. Sessions (E0.8) [Chris]
 
 Today one session per account is enforced on purpose (#78). TDD §6.7 wants several, because of bots, the CLI, and a second device.
@@ -255,7 +262,7 @@ Sizes: S is about one session, M is 1–2, L is 2–4.
 
 | WP | Work | Size | Depends on |
 |---|---|---|---|
-| E4.1 [#176](https://github.com/chrischaps/TheCapitol/issues/176) | **Subscriptions (D8).** Status, an admin and bot activation, and the `Subscriber` extractor. | S | – |
+| E4.1 [#176](https://github.com/chrischaps/TheCapitol/issues/176) | **Subscriptions (D8).** Status, an admin and bot activation, and the `Subscriber` extractor. *Done: see D8's as-built note.* | S | – |
 | E4.2 [#177](https://github.com/chrischaps/TheCapitol/issues/177) | **Automation config.** A recipe and a repeat count or "forever" per station; `PUT /stations/{id}/automation`, start and stop; the station's own container is its input and output. | M | E1.6, E2.4 |
 | E4.3 [#178](https://github.com/chrischaps/TheCapitol/issues/178) | **Automation tick.** On the 1 s cadence: pull inputs, craft with the cascade, push the output, wear the tool, and pause on MissingInput, OutputFull, ToolBroken or OwnerOffline. Subscribers keep running offline. Pauses go to the notices log. | L | E4.1, E4.2, [#138](https://github.com/chrischaps/TheCapitol/issues/138) |
 | E4.4 [#179](https://github.com/chrischaps/TheCapitol/issues/179) | **Flint: automation.** A panel on the station (recipe, run and stop, status, production log). In the world, running stations glow and smoke (H23 emission, particles) and paused ones dim. | M | E4.3 |

@@ -250,6 +250,7 @@ async fn serve_socket(mut socket: WebSocket, mock: Mock) {
                     &ServerMessage::AuthOk {
                         player_id: PLAYER,
                         server_time_ms: 0,
+                        subscription: Default::default(),
                     },
                 )
                 .await;

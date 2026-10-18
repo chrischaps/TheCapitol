@@ -12,7 +12,7 @@ use capitol_protocol::rest::{
     MoveRequest, NearbyResponse, NearbyStationsResponse, PlaceStationRequest,
     PayTaxRequest, PayTaxResponse, PlaceStationResponse, PlayerMeResponse, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
     RecipeOutputInfo, RecipesResponse, RegisterRequest, ResourceNodeInfo, SlotItem,
-    StationContainerResponse, StationInfo, WithdrawRequest, WithdrawResponse, ZoneInfo,
+    StationContainerResponse, StationInfo, SubscribeRequest, Subscription, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
     ZonesResponse,
 };
 use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPark, TerrainPlot, TerrainResponse, WaterRing};
@@ -86,6 +86,7 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         crate::routes::player::move_player,
         crate::routes::player::get_inventory,
         crate::routes::player::get_currency,
+        crate::routes::player::mock_subscribe,
         // World
         crate::routes::world::get_nearby,
         crate::routes::world::start_extraction,
@@ -138,6 +139,9 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         InventoryResponse,
         InventoryItem,
         CurrencyResponse,
+        Subscription,
+        SubscriptionStatus,
+        SubscribeRequest,
         // World
         NearbyResponse,
         ResourceNodeInfo,

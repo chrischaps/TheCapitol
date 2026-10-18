@@ -190,6 +190,11 @@ pub enum PlotNote {
     TaxOwed { tax_owed: i64, forecloses_at: i64 },
     /// One of your plots was foreclosed for `tax_owed`, and `refund` came back.
     Foreclosed { tax_owed: i64, refund: i64 },
+    /// Not about a plot, but a notice like the tax ones, and shown the same
+    /// way: your subscription ran out at `until` (E4.1).
+    SubscriptionLapsed {
+        until: capitol_core::chrono::DateTime<capitol_core::chrono::Utc>,
+    },
 }
 
 /// The server stopped you at the water's edge (`movement_blocked`).
@@ -1205,6 +1210,9 @@ impl Session {
                         tax_owed: *tax_owed,
                         refund: *refund,
                     }),
+                    StateEvent::SubscriptionLapsed { until } => self
+                        .plot_notes
+                        .push(PlotNote::SubscriptionLapsed { until: *until }),
                     _ => {}
                 }
             }

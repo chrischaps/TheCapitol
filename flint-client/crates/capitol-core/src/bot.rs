@@ -25,7 +25,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use capitol_protocol::rest::{LoginRequest, RegisterRequest, ResourceNodeInfo};
+use capitol_protocol::rest::{
+    LoginRequest, RegisterRequest, ResourceNodeInfo, SubscribeRequest, Subscription,
+};
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
@@ -287,6 +289,28 @@ impl Bot {
         let (x, y) = self.position();
         self.say(format!("in the world at ({x:.0}, {y:.0})"));
         Ok(())
+    }
+
+    /// Adds `days` to the account's subscription, with the server's mock
+    /// activation (E4.1). A server with `MOCK_SUBSCRIPTIONS` off refuses it.
+    pub fn subscribe(&mut self, days: i32) -> Result<Subscription, BotError> {
+        match self.call(
+            "subscribe",
+            RestRequest::Subscribe(SubscribeRequest { days }),
+        )? {
+            RestResponse::Subscription(subscription) => {
+                self.state
+                    .apply_rest(&RestResponse::Subscription(subscription));
+                if let Some(until) = subscription.until {
+                    self.say(format!(
+                        "subscribed until {}",
+                        until.format("%-d %b %Y %H:%M UTC")
+                    ));
+                }
+                Ok(subscription)
+            }
+            other => Err(unexpected("subscribe", &other)),
+        }
     }
 
     /// Stops the bot narrating to stdout.

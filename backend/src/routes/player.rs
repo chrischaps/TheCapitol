@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use capitol_protocol::rest::{
     CurrencyResponse, Destination, InventoryResponse, MoveRequest, MoveResponse,
-    PlayerMeResponse,
+    PlayerMeResponse, SubscribeRequest, Subscription,
 };
 use capitol_protocol::rules::{Zone, WORLD_SIZE};
 
@@ -23,6 +23,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/move", post(move_player))
         .route("/inventory", get(get_inventory))
         .route("/currency", get(get_currency))
+        .route("/subscription", post(mock_subscribe))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
@@ -63,6 +64,9 @@ pub async fn get_me(
     };
     let online = live.is_some();
     let (name, x, y) = live.unwrap_or((name, x, y));
+    let subscription = crate::subscriptions::of(&state.db, auth_user.account_id)
+        .await?
+        .unwrap_or_default();
 
     Ok(Json(PlayerMeResponse {
         player_id,
@@ -72,7 +76,40 @@ pub async fn get_me(
         zone: Zone::from_position(x, y).as_str().to_string(),
         strand_balance,
         online,
+        subscription,
     }))
+}
+
+/// Start or extend your own subscription, with no payment (E4.1)
+///
+/// Stands in for a payment on a development server, for local runs and
+/// `capitol-bot --subscribe`. Refused unless the server has
+/// `MOCK_SUBSCRIPTIONS` on, as it does by default only in debug builds.
+#[utoipa::path(
+    post,
+    path = "/player/subscription",
+    request_body = SubscribeRequest,
+    responses(
+        (status = 200, description = "The subscription as it now stands", body = Subscription),
+        (status = 400, description = "Days out of range"),
+        (status = 403, description = "Mock subscriptions are off on this server")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Player"
+)]
+pub async fn mock_subscribe(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Json(req): Json<SubscribeRequest>,
+) -> Result<Json<Subscription>, AppError> {
+    if !state.config.mock_subscriptions {
+        return Err(AppError::Forbidden("Mock subscriptions are off on this server".into()));
+    }
+    let subscription = crate::subscriptions::extend(&state.db, auth_user.account_id, req.days)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Account not found".into()))?;
+    tracing::info!("Account {} mock-subscribed for {} days", auth_user.account_id, req.days);
+    Ok(Json(subscription))
 }
 
 /// Set player movement destination

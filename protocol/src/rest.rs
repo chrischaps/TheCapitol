@@ -108,7 +108,8 @@ pub struct AccountInfo {
     pub id: Uuid,
     /// Email address
     pub email: String,
-    /// Account tier (free, premium, etc.)
+    /// The subscription status, as [`SubscriptionStatus`] names it (`free`,
+    /// `active` or `lapsed`). The React client reads it as a tier.
     pub tier: String,
     /// Whether this account has admin privileges (debug features)
     pub is_admin: bool,
@@ -190,6 +191,80 @@ pub struct CreatedApiKey {
 }
 
 // ---------------------------------------------------------------------------
+// Subscriptions (E4.1)
+// ---------------------------------------------------------------------------
+
+/// Where an account stands. There are no payments yet: an admin, or the mock
+/// activation on a development server, starts one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum SubscriptionStatus {
+    /// Never subscribed
+    #[default]
+    Free,
+    /// Subscribed until [`Subscription::until`]
+    Active,
+    /// Was subscribed, and it ran out
+    Lapsed,
+}
+
+impl SubscriptionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubscriptionStatus::Free => "free",
+            SubscriptionStatus::Active => "active",
+            SubscriptionStatus::Lapsed => "lapsed",
+        }
+    }
+
+    /// The column's value. Anything else reads as `Free`.
+    pub fn parse(s: &str) -> SubscriptionStatus {
+        match s {
+            "active" => SubscriptionStatus::Active,
+            "lapsed" => SubscriptionStatus::Lapsed,
+            _ => SubscriptionStatus::Free,
+        }
+    }
+}
+
+/// An account's subscription, in `/player/me` and `auth_ok`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Subscription {
+    pub status: SubscriptionStatus,
+    /// When it ends, or ended. `None` for an account that never subscribed.
+    pub until: Option<DateTime<Utc>>,
+}
+
+impl Subscription {
+    /// Whether it's running at `now`. One past its `until` has run out, even
+    /// before the hourly check marks it lapsed.
+    pub fn is_active_at(&self, now: DateTime<Utc>) -> bool {
+        self.status == SubscriptionStatus::Active && self.until.is_some_and(|until| until > now)
+    }
+
+    /// As it stands at `now`: an `Active` one past its `until` is `Lapsed`.
+    pub fn as_of(self, now: DateTime<Utc>) -> Subscription {
+        if self.status == SubscriptionStatus::Active && !self.is_active_at(now) {
+            Subscription { status: SubscriptionStatus::Lapsed, ..self }
+        } else {
+            self
+        }
+    }
+}
+
+/// `POST /admin/accounts/{id}/subscription` and `POST /player/subscription`;
+/// both respond with the [`Subscription`] as it now stands. The days are
+/// added to what's left, or start now if nothing is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct SubscribeRequest {
+    /// 1 to 3650
+    pub days: i32,
+}
+
+// ---------------------------------------------------------------------------
 // /health
 // ---------------------------------------------------------------------------
 
@@ -255,6 +330,9 @@ pub struct PlayerMeResponse {
     /// Whether a WebSocket session has the player in the game. When false,
     /// `x`/`y` come from the database, which the server writes every 10 s.
     pub online: bool,
+    /// The account's subscription, as of now (E4.1)
+    #[serde(default)]
+    pub subscription: Subscription,
 }
 
 /// `GET /player/inventory`

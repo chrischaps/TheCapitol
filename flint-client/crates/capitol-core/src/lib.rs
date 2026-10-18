@@ -51,3 +51,5 @@ pub mod trading;
 
 /// The wire types, shared with the backend.
 pub use capitol_protocol as protocol;
+/// The clock and the dates in subscriptions (E4.1), for the client to format.
+pub use chrono;

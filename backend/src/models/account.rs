@@ -10,6 +10,7 @@ pub struct Account {
     pub id: Uuid,
     pub email: String,
     pub password_hash: String,
+    /// `subscription_status` (E4.1), under its old name
     pub tier: String,
     pub is_admin: bool,
     pub created_at: DateTime<Utc>,

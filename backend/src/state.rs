@@ -34,6 +34,14 @@ pub async fn connect_redis(url: &str) -> redis::RedisResult<ConnectionManager> {
     ConnectionManager::new_with_config(client, config).await
 }
 
+/// For extractors that only need the database, such as
+/// [`crate::subscriptions::Subscriber`].
+impl axum::extract::FromRef<AppState> for PgPool {
+    fn from_ref(state: &AppState) -> PgPool {
+        state.db.clone()
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,

@@ -669,6 +669,12 @@ impl PlayerExtension for CapitolExtension {
                     zone: state.zone(),
                     strands: state.strands(),
                     who: &session.who(),
+                    patron: state.is_patron().then(|| {
+                        match state.subscription().and_then(|s| s.until) {
+                            Some(until) => format!("Patron until {}", until.format("%-d %B %Y")),
+                            None => "Patron".to_owned(),
+                        }
+                    }),
                     connection: session.auth().connection(),
                     down: session.link().outage().is_some(),
                     inventory_open: self.inventory.open,
@@ -1330,6 +1336,13 @@ fn plots(
             } => (
                 "Property tax overdue",
                 format!("Your plot owes {tax_owed} Strands. At {forecloses_at} it's foreclosed"),
+            ),
+            PlotNote::SubscriptionLapsed { until } => (
+                "Subscription lapsed",
+                format!(
+                    "It ran out on {}. Stations stop working while you're away",
+                    until.format("%-d %B")
+                ),
             ),
             PlotNote::Foreclosed { tax_owed, refund } => (
                 "Plot foreclosed",

@@ -8,7 +8,8 @@
 //!   which the poller keeps fresh (`Fetch::POLLED`). When it changes, the
 //!   figure counts to the new one ([`StrandTicker`], P7.1): a gain throws
 //!   bright gold motes up out of the chip, a loss lets dim ones fall, and
-//!   the difference shows under it and fades.
+//!   the difference shows under it and fades. A subscriber has a small
+//!   gold Patron chip beside their name (E4.1).
 //! - **The overlay** dims the world while a dropped connection is retried,
 //!   and says which attempt it is, why the last one ended, and counts down
 //!   to the next. A drop shorter than [`GRACE`] shows nothing, so a blip
@@ -36,6 +37,9 @@ pub struct HeaderView<'a> {
     pub zone: Option<Zone>,
     pub strands: Option<i64>,
     pub who: &'a str,
+    /// A subscriber's Patron chip, with its hover text ("Patron until …").
+    /// `None` hides it.
+    pub patron: Option<String>,
     pub connection: Option<&'a ConnectionState>,
     /// The connection dropped and hasn't come back, whichever step of an
     /// attempt `connection` is at.
@@ -115,6 +119,9 @@ pub fn header(
                             .font(theme::strong(size::BODY))
                             .color(theme::GOLD),
                     );
+                    if let Some(hover) = &view.patron {
+                        patron_chip(ui, hover);
+                    }
                     let (colour, meaning) = match view.connection {
                         _ if view.down => (theme::ERROR, "reconnecting…"),
                         Some(ConnectionState::Connected { .. }) => (theme::SUCCESS, "connected"),
@@ -175,6 +182,37 @@ fn zone_chip(ui: &mut egui::Ui, zone: Zone) {
             ui.painter().circle_filled(dot.center(), 5.0, colour);
         });
     });
+}
+
+/// A subscriber's mark: a gold lozenge and "Patron", on the strand chip's
+/// wash, so it reads as belonging with the name, not as a button.
+fn patron_chip(ui: &mut egui::Ui, hover: &str) {
+    theme::chip(theme::GOLD_DIM, theme::GOLD_WASH)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 5.0;
+                ui.label(
+                    RichText::new("Patron")
+                        .font(theme::strong(size::SMALL))
+                        .color(theme::GOLD_LIGHT),
+                );
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 10.0), egui::Sense::hover());
+                let c = rect.center();
+                let lozenge = vec![
+                    c + egui::vec2(0.0, -4.5),
+                    c + egui::vec2(3.5, 0.0),
+                    c + egui::vec2(0.0, 4.5),
+                    c + egui::vec2(-3.5, 0.0),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(
+                    lozenge,
+                    theme::GOLD,
+                    Stroke::new(0.8, theme::GOLD_LIGHT),
+                ));
+            });
+        })
+        .response
+        .on_hover_text(hover);
 }
 
 /// The strand balance, gold on a gold wash. A dash until it's known.

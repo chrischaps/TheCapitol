@@ -14,6 +14,10 @@ pub struct Config {
     /// Lifetime of a refresh token, and of the session it keeps alive
     pub refresh_ttl_secs: u64,
     pub rate_limits: RateLimitConfig,
+    /// Whether players may start their own subscription with
+    /// `POST /player/subscription`, standing in for payments (E4.1).
+    /// `MOCK_SUBSCRIPTIONS=on` or `off`; on by default in debug builds only.
+    pub mock_subscriptions: bool,
 }
 
 impl Config {
@@ -30,6 +34,11 @@ impl Config {
             access_ttl_secs: secs("ACCESS_TTL_SECS", 15 * 60),
             refresh_ttl_secs: secs("REFRESH_TTL_SECS", 30 * 24 * 60 * 60),
             rate_limits: RateLimitConfig::from_env(),
+            mock_subscriptions: match env::var("MOCK_SUBSCRIPTIONS").as_deref() {
+                Ok("on") => true,
+                Ok("off") => false,
+                _ => cfg!(debug_assertions),
+            },
         })
     }
 }

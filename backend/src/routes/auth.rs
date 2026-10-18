@@ -80,7 +80,7 @@ pub async fn register(
     let now = Utc::now();
 
     sqlx::query(
-        "INSERT INTO accounts (id, email, password_hash, tier, created_at, last_login)
+        "INSERT INTO accounts (id, email, password_hash, subscription_status, created_at, last_login)
          VALUES ($1, $2, $3, $4, $5, $5)"
     )
     .bind(account_id)
@@ -167,7 +167,7 @@ pub async fn login(
 ) -> Result<Json<AuthResponse>, AppError> {
     // Find account
     let account = sqlx::query_as::<_, crate::models::Account>(
-        "SELECT id, email, password_hash, tier, is_admin, created_at, last_login FROM accounts WHERE email = $1"
+        "SELECT id, email, password_hash, subscription_status AS tier, is_admin, created_at, last_login FROM accounts WHERE email = $1"
     )
     .bind(&req.email)
     .fetch_optional(&state.db)
@@ -259,7 +259,7 @@ pub async fn refresh(
 
     // Read the account again, so a changed tier or admin flag reaches the token.
     let account = sqlx::query_as::<_, crate::models::Account>(
-        "SELECT id, email, password_hash, tier, is_admin, created_at, last_login FROM accounts WHERE id = $1"
+        "SELECT id, email, password_hash, subscription_status AS tier, is_admin, created_at, last_login FROM accounts WHERE id = $1"
     )
     .bind(rotated.account_id)
     .fetch_optional(&state.db)

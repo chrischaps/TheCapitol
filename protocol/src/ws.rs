@@ -11,6 +11,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use crate::rest::Subscription;
 
 /// Client to server.
 ///
@@ -124,8 +125,14 @@ pub struct TradeOfferItem {
 pub enum ServerMessage {
     /// `server_time_ms` is the server's clock (Unix ms) as it sent this. A
     /// client keeps its offset from that, for [`crate::rules::time_of_day`].
+    /// `subscription` is the account's, as of now (E4.1).
     #[serde(rename = "auth_ok")]
-    AuthOk { player_id: Uuid, server_time_ms: i64 },
+    AuthOk {
+        player_id: Uuid,
+        server_time_ms: i64,
+        #[serde(default)]
+        subscription: Subscription,
+    },
     #[serde(rename = "auth_error")]
     AuthError { message: String },
     #[serde(rename = "subscribed")]
@@ -341,6 +348,10 @@ pub enum ServerMessage {
         tax_owed: i64,
         refund: i64,
     },
+    /// Your subscription ran out at `until` (E4.1). What it kept running
+    /// stops. One that ran out while you were away is sent as you come back.
+    #[serde(rename = "subscription_lapsed")]
+    SubscriptionLapsed { until: DateTime<Utc> },
 }
 
 impl ServerMessage {
@@ -388,6 +399,7 @@ impl ServerMessage {
             ServerMessage::PlotReleased { .. } => "plot_released",
             ServerMessage::TaxDelinquent { .. } => "tax_delinquent",
             ServerMessage::PlotForeclosed { .. } => "plot_foreclosed",
+            ServerMessage::SubscriptionLapsed { .. } => "subscription_lapsed",
         }
     }
 }

@@ -104,6 +104,10 @@ pub enum RestRequest {
     Zones,
     /// `GET /bureaucracy/deed-prices`
     DeedPrices,
+
+    /// `POST /player/subscription`: mock activation, on a server with
+    /// `MOCK_SUBSCRIPTIONS` on (E4.1)
+    Subscribe(SubscribeRequest),
 }
 
 /// A decoded REST response. Each [`RestRequest`] decodes to exactly one variant.
@@ -146,6 +150,7 @@ pub enum RestResponse {
     PlotPermissions(PlotPermissions),
     Zones(ZonesResponse),
     DeedPrices(DeedPricesResponse),
+    Subscription(Subscription),
 }
 
 /// Why a REST call failed.
@@ -208,7 +213,8 @@ impl RestRequest {
             | Deposit(_)
             | Withdraw(_)
             | ClaimPlot { .. }
-            | PayTax { .. } => Method::POST,
+            | PayTax { .. }
+            | Subscribe(_) => Method::POST,
             UpdatePlotPermissions { .. } => Method::PUT,
             RemoveStation { .. } | RevokeApiKey { .. } => Method::DELETE,
             ApiKeys
@@ -272,6 +278,7 @@ impl RestRequest {
             }
             Zones => "/bureaucracy/zones".into(),
             DeedPrices => "/bureaucracy/deed-prices".into(),
+            Subscribe(_) => "/player/subscription".into(),
         }
     }
 
@@ -290,6 +297,7 @@ impl RestRequest {
             PlaceStation(b) => req.json(b),
             Deposit(b) => req.json(b),
             Withdraw(b) => req.json(b),
+            Subscribe(b) => req.json(b),
             UpdatePlotPermissions { update, .. } => req.json(update),
             PayTax { request, .. } => req.json(request),
             WorldNearby(q) => req.query(q),
@@ -343,6 +351,7 @@ impl RestRequest {
             }
             Q::Zones => A::Zones(de(body)?),
             Q::DeedPrices => A::DeedPrices(de(body)?),
+            Q::Subscribe(_) => A::Subscription(de(body)?),
         })
     }
 }
@@ -534,6 +543,11 @@ mod tests {
                 RestRequest::DeedPrices,
                 "GET",
                 "/bureaucracy/deed-prices".into(),
+            ),
+            (
+                RestRequest::Subscribe(SubscribeRequest { days: 30 }),
+                "POST",
+                "/player/subscription".into(),
             ),
         ];
         for (request, method, path) in cases {

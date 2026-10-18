@@ -729,6 +729,21 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
             let game = &mut *game;
             super::property_tax::announce(report, &mut game.stations, &game.event_sender);
         }
+
+        // E4.1: subscriptions that ran out, hourly with the tax but half an
+        // hour apart from it. The Subscriber extractor refuses them on time
+        // anyway; this marks them lapsed and tells their players.
+        if game_tick_count > 0 && game_tick_count % 36000 == 18000 {
+            let lapses = crate::subscriptions::lapse_expired(&app_state.db).await;
+            let game = game_state.read().await;
+            for l in lapses {
+                let _ = game.event_sender.send(GameEvent::SubscriptionLapsed {
+                    player_id: l.player_id,
+                    until: l.until,
+                    notice_id: l.notice_id,
+                });
+            }
+        }
     }
 }
 

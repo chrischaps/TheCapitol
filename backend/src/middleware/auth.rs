@@ -17,8 +17,6 @@ use crate::state::AppState;
 #[derive(Clone, Debug)]
 pub struct AuthUser {
     pub account_id: Uuid,
-#[allow(dead_code)] // the subscription tier; #176 (E4.1) gates on it
-    pub tier: String,
     pub is_admin: bool,
     /// The API key the request came with (E0.9), or `None` for a player's
     /// access token. The middleware has already checked the key's scope.
@@ -105,7 +103,6 @@ async fn token_user(state: &AppState, token: &str) -> Result<AuthUser, Refusal> 
 
     Ok(AuthUser {
         account_id: token_data.claims.sub,
-        tier: token_data.claims.tier,
         is_admin: token_data.claims.is_admin,
         key: None,
     })
@@ -130,7 +127,6 @@ async fn key_user(state: &AppState, method: Method, path: &str, secret: &str) ->
 
     Ok(AuthUser {
         account_id: user.account_id,
-        tier: user.tier,
         // `/admin` is closed to keys anyway.
         is_admin: false,
         key: Some(user.grant),

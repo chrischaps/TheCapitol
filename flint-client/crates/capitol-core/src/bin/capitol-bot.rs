@@ -6,6 +6,7 @@
 //! capitol-bot --accounts 5 --wander --near Chris   # ...around Chris, following them
 //! capitol-bot --prefix trader --trade Chris --ask  # a trading partner for Chris
 //! capitol-bot --api-key cap_…          # the script, as the key's own player
+//! capitol-bot --subscribe 30 --wander             # a subscriber, for a month
 //! ```
 //!
 //! Run it from `flint-client/` with `cargo run -p capitol-core --bin capitol-bot -- <flags>`.
@@ -43,6 +44,9 @@ FLAGS:
     --ask               With --trade, ask them too whenever idle beside them
     --offer-strands <n> With --trade, Strands to offer [default: 10]
     --offer <item_type> With --trade, also offer every stack of this type
+    --subscribe <days>  Subscribe each bot for this many days first, with the
+                        server's mock activation (MOCK_SUBSCRIPTIONS, on by
+                        default in a debug build of the backend)
     -h, --help          Print this
 
 The script logs in (or registers), scouts for fiber, walks to the nearest
@@ -65,6 +69,7 @@ struct Options {
     trade: Option<String>,
     ask: bool,
     offer: TradeOffer,
+    subscribe: Option<i32>,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
@@ -84,6 +89,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             strands: 10,
             item_type: None,
         },
+        subscribe: None,
     };
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -112,12 +118,22 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             "--ask" => options.ask = true,
             "--offer-strands" => options.offer.strands = number(&flag, &value()?)?,
             "--offer" => options.offer.item_type = Some(value()?),
+            "--subscribe" => {
+                let days = number(&flag, &value()?)?;
+                if !(1..=3650).contains(&days) {
+                    return Err("--subscribe takes 1 to 3650 days".into());
+                }
+                options.subscribe = Some(days);
+            }
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown flag {other}")),
         }
     }
     if options.api_key.is_some() && options.accounts != 1 {
         return Err("--api-key plays one account; it doesn't go with --accounts".into());
+    }
+    if options.api_key.is_some() && options.subscribe.is_some() {
+        return Err("--subscribe needs a sign-in; an API key can't subscribe its account".into());
     }
     if options.near.is_some() && !options.wander {
         return Err("--near goes with --wander".into());
@@ -142,6 +158,9 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
         Some(key) => Bot::with_api_key(config, key)?,
         None => Bot::sign_in(config, &Account::numbered(&options.prefix, n))?,
     };
+    if let Some(days) = options.subscribe {
+        bot.subscribe(days)?;
+    }
     let deadline = options
         .seconds
         .map(|s| Instant::now() + Duration::from_secs_f64(s));
@@ -238,6 +257,13 @@ mod tests {
         assert!(t.ask);
         assert_eq!(t.offer.strands, 25);
         assert_eq!(t.offer.item_type.as_deref(), Some("rope"));
+        assert_eq!(
+            parse(args("--subscribe 30 --wander"))
+                .unwrap()
+                .unwrap()
+                .subscribe,
+            Some(30)
+        );
     }
 
     #[test]
@@ -255,6 +281,12 @@ mod tests {
         assert!(
             parse(args("--api-key cap_x --accounts 2")).is_err(),
             "a key is one account"
+        );
+        assert!(parse(args("--subscribe 0")).is_err());
+        assert!(parse(args("--subscribe forever")).is_err());
+        assert!(
+            parse(args("--api-key cap_x --subscribe 30")).is_err(),
+            "a key can't subscribe its account"
         );
     }
 }
