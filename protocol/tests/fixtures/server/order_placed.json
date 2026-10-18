@@ -1,0 +1,1 @@
+{"type":"order_placed","order":{"id":"6a1f0c2e-4b7d-4e19-9c3a-000000000070","player_id":"6a1f0c2e-4b7d-4e19-9c3a-000000000002","side":"buy","item_type":"plank","price":12,"quantity_total":20,"quantity_remaining":20,"status":"open","min_grade":"B","grade_rule":"every_unit","escrow_strands":240,"fee":3,"created_at":"2026-10-18T12:00:00Z","expires_at":"2026-10-25T12:00:00Z"}}

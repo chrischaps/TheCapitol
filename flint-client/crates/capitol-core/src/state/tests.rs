@@ -216,6 +216,9 @@ fn test_for(message: &M) -> fn() {
         M::TaxDelinquent { .. } => tax_messages_are_reported,
         M::PlotForeclosed { .. } => tax_messages_are_reported,
         M::SubscriptionLapsed { .. } => subscription_follows_auth_ok_me_and_the_lapse,
+        M::OrderPlaced { .. } => market_messages_change_nothing_yet,
+        M::OrderFilled { .. } => market_messages_change_nothing_yet,
+        M::OrderCancelled { .. } => market_messages_change_nothing_yet,
     }
 }
 
@@ -235,7 +238,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 43, "one fixture per ServerMessage variant");
+    assert_eq!(count, 46, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1132,6 +1135,20 @@ fn tool_broke_is_reported() {
             item_name: "Stone Sickle".into(),
         }]
     );
+}
+
+/// Orders have no panel until E3.5 (#171), so the store ignores them.
+#[test]
+fn market_messages_change_nothing_yet() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../protocol/tests/fixtures/server");
+    let mut state = with_players();
+    let before = format!("{state:?}");
+    for name in ["order_placed", "order_filled", "order_cancelled"] {
+        let json = std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap();
+        let message: M = serde_json::from_str(&json).unwrap();
+        assert!(state.apply_ws(&message).is_empty(), "{name}");
+    }
+    assert_eq!(format!("{state:?}"), before);
 }
 
 #[test]

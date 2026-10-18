@@ -5,11 +5,13 @@
 //! (`capitol-core/src/catalog_fallback.json`), and a test there keeps them equal.
 //! `fixtures/rest/stations_nearby.json` is `GET /stations/nearby`.
 //! `fixtures/rest/split_stack.json` is `POST /items/{id}/split` taking named qualities (E1.8).
+//! `fixtures/rest/place_order.json` is a sell order naming its units (E3.1).
 
 use std::fs;
 use std::path::Path;
 
-use capitol_protocol::rest::{CatalogResponse, NearbyStationsResponse, SplitStackResponse};
+use capitol_protocol::rest::{CatalogResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse};
+use capitol_protocol::rules::market::{GradeRule, OrderSide};
 
 fn fixture(name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -46,4 +48,21 @@ fn a_split_round_trips_with_its_units() {
     assert_eq!(split.item.units.mean(), Some(split.item.quality));
     assert!(split.item.units.spans_grades());
     assert_eq!(serde_json::to_string(&split).unwrap(), json);
+}
+
+#[test]
+fn a_sell_order_round_trips_with_its_units() {
+    let json = fixture("place_order.json");
+    let order: PlaceOrder = serde_json::from_str(&json).unwrap();
+    assert_eq!(order.side, OrderSide::Sell);
+    assert_eq!(order.qualities.as_ref().map(|u| u.count()), Some(order.quantity as i64));
+    assert_eq!(serde_json::to_string(&order).unwrap(), json);
+}
+
+#[test]
+fn a_bare_buy_order_takes_the_defaults() {
+    let order: PlaceOrder =
+        serde_json::from_str(r#"{"side":"buy","item_type":"plank","price":12,"quantity":20}"#).unwrap();
+    assert_eq!((order.item_id, order.qualities, order.min_grade, order.grade_rule), (None, None, None, None));
+    assert_eq!(GradeRule::default(), GradeRule::Average);
 }

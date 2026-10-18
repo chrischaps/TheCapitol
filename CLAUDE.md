@@ -132,6 +132,7 @@ engine/
   stations.rs    - Station placement and interaction
   regeneration.rs - Resource node regeneration
   trading.rs     - P2P trade sessions and trade manager
+  market.rs      - Market escrow: placing and cancelling orders (E3.1)
   currency.rs    - Strand/Fiber exchange operations
   property_tax.rs - Hourly tax processing
 

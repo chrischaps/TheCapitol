@@ -31,3 +31,18 @@ id = "station_inventory"
 name = "Station Inventory"
 slot_count = 16
 layout_columns = 4
+
+# The market's shared escrow (E3.1): each sell order's units wait here as a
+# stack with no slot and no owner, so it has no grid
+[[container]]
+id = "market_escrow"
+name = "Market Escrow"
+slot_count = 0
+layout_columns = 1
+
+# Where a player's cancelled, expired and bought goods wait (E3.1, plan D6)
+[[container]]
+id = "market_box"
+name = "Market Box"
+slot_count = 48
+layout_columns = 8

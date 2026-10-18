@@ -341,6 +341,15 @@ This keeps the liquidity of a single book while making the journey inward the lo
 - **Lifetime:** orders expire after 7 days. Expiry returns escrow through the market box.
 - **History:** `market_trades` keeps every fill. `/market/history` serves OHLC buckets for the chart.
 
+**As built (E3.1, [#167](https://github.com/chrischaps/TheCapitol/issues/167)):**
+- `rules::market` (protocol): `listing_fee` (1%, rounded up in integers, so every order pays at least 1), `order_value`, `buy_debit`, `validate` (price 1 to 10⁹ each, quantity 1 to 10,000, so a value fits easily in an `i64`), `ORDER_LIFETIME_SECS` (7 days), `grade_floor` and `meets_grade(units, min_grade, rule)` for E3.2's match test. `OrderSide`, `GradeRule` (`average`, `every_unit`) and `OrderStatus` (`open`, `filled`, `cancelled`, `expired`) live there too.
+- Migration `20261104_001_market`: `market_orders` and `market_trades` as above. Trades also keep `min_quality`, for an every-unit chart. There's one shared `market_escrow` container, with no owner and no slots, and a 48-slot `market_box` a player, backfilled and otherwise made the first time it's needed (`engine::market::market_box`).
+- **Escrow** (`engine::market`): a sell's units go to a stack of their own in the escrow with no owner, so `move_item` can't reach them, and the order names it (`escrow_item_id`, which goes NULL when a fill uses it up). You sell from your inventory or your market box. A buy's Strands are kept in `escrow_strands`, not worked out from the price: a taker buy filled at a lower resting price has some left over, and **E3.2 must refund that surplus when the buy closes**. On a sell, `min_grade` and `grade_rule` are ignored. On a buy they default to F and average.
+- Audit entries: `market_escrow` (a buy's value), `market_fee` and `market_refund`. E3.2's fills will need their own (proceeds to the seller).
+- `cancel` returns units to the market box: onto the first stack of the type there if it stacks, otherwise to the first free slot. It's refused if the box is full. `close(order, status)` is the same path with `Expired` for E3.2.
+- Wire: `PlaceOrder` is a REST body, since the routes are E3.3. `MarketOrder` and `MarketTrade` are REST DTOs, and `order_placed`, `order_filled {order, trade}` and `order_cancelled` (its `status` says cancelled or expired) are WS server messages for the order's owner. Flint's store ignores them until E3.5.
+- The conservation test runs six seeded runs of 120 random places and cancels. After every step, Strands held + open escrow + fees, and every unit of each type, equal the start. Afterwards each balance is its start plus its audit entries.
+
 ### D8. Subscriptions (E4.1)
 
 No payments. `accounts.subscription_status` (Free / Active / Lapsed) and `subscription_until`, set by an admin endpoint and by `capitol-bot`. One middleware extractor (`Subscriber`) gates the features in GDD §5's access matrix that this plan touches: automation that runs offline, and later guild leadership.
@@ -442,7 +451,7 @@ Sizes: S is about one session, M is 1–2, L is 2–4.
 
 | WP | Work | Size | Depends on |
 |---|---|---|---|
-| E3.1 [#167](https://github.com/chrischaps/TheCapitol/issues/167) | **Market model (D7).** `market_orders`, `market_trades`, the escrow container and market boxes; DTOs and fixtures in `protocol`; the fee in `rules`. | M | E1.2 |
+| E3.1 [#167](https://github.com/chrischaps/TheCapitol/issues/167) | **Market model (D7).** `market_orders`, `market_trades`, the escrow container and market boxes; DTOs and fixtures in `protocol`; the fee in `rules`. *Built: see D7's E3.1 as-built.* | M | E1.2 |
 | E3.2 [#168](https://github.com/chrischaps/TheCapitol/issues/168) | **Matching engine.** On the 1 s cadence, with price-time priority, partial fills, `min_grade`, expiry, one transaction per fill, and exhaustive tests. | L | E3.1 |
 | E3.3 [#169](https://github.com/chrischaps/TheCapitol/issues/169) | **Market API.** REST create, cancel, list (book depth), my orders and history (OHLC); a WS `market:<item>` channel; fill notices. | M | E3.2 |
 | E3.4 [#170](https://github.com/chrischaps/TheCapitol/issues/170) | **Where trading happens (D6) [Chris].** The Exchange hall's position in the Trade District on `/terrain`, the range check on place and collect, and collecting from the market box. | S | E3.3 |

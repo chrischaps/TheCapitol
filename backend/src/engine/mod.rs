@@ -6,6 +6,7 @@ mod crafting;
 pub mod currency;
 mod events;
 mod extraction;
+pub mod market;
 mod movement;
 pub mod node_placement;
 pub mod notices;

@@ -914,6 +914,86 @@ pub struct WithdrawResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /market (E3, plan D7)
+// ---------------------------------------------------------------------------
+
+/// Placing an order (E3.1; the routes are E3.3). A sell names the stack it
+/// sells from, and which of its units; a buy names the grade it wants.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct PlaceOrder {
+    pub side: rules::market::OrderSide,
+    pub item_type: String,
+    /// Strands per unit
+    pub price: i64,
+    pub quantity: i32,
+    /// Sell: the stack the units come from, in your inventory or market box
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<Uuid>,
+    /// Sell: which units, as `[quality, count]` pairs adding up to
+    /// `quantity` ("my six 92s"). Without it the lowest go first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualities: Option<Units>,
+    /// Buy: the lowest grade it takes, A to F. Without it, any (F).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_grade: Option<String>,
+    /// Buy: how `min_grade` reads the units sold. Without it, `average`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade_rule: Option<rules::market::GradeRule>,
+}
+
+/// An order, as its owner sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MarketOrder {
+    pub id: Uuid,
+    pub player_id: Uuid,
+    pub side: rules::market::OrderSide,
+    pub item_type: String,
+    /// Strands per unit
+    pub price: i64,
+    pub quantity_total: i32,
+    pub quantity_remaining: i32,
+    pub status: rules::market::OrderStatus,
+    /// Buy: the lowest grade it takes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_grade: Option<String>,
+    /// Buy: how `min_grade` reads the units sold
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade_rule: Option<rules::market::GradeRule>,
+    /// Sell: the units still in escrow, which a fill hands over
+    #[serde(default, skip_serializing_if = "Units::is_empty")]
+    pub units: Units,
+    /// Buy: the Strands still in escrow
+    #[serde(default)]
+    pub escrow_strands: i64,
+    /// The listing fee it paid (1%, not refunded)
+    pub fee: i64,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// One fill: a sell's units traded to a buy, at the resting order's price.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MarketTrade {
+    pub id: Uuid,
+    pub buy_order_id: Uuid,
+    pub sell_order_id: Uuid,
+    pub item_type: String,
+    /// The grade of `quality`
+    pub grade: String,
+    /// The mean of the units traded, rounded down
+    pub quality: i32,
+    /// The lowest of them
+    pub min_quality: i32,
+    /// Strands per unit
+    pub price: i64,
+    pub quantity: i32,
+    pub at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
 // /plots
 // ---------------------------------------------------------------------------
 

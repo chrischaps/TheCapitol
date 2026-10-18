@@ -11,7 +11,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::rest::{StationTool, Subscription};
+use crate::rest::{MarketOrder, MarketTrade, StationTool, Subscription};
 use crate::rules::stacking::Units;
 
 /// Client to server.
@@ -397,6 +397,18 @@ pub enum ServerMessage {
     /// stops. One that ran out while you were away is sent as you come back.
     #[serde(rename = "subscription_lapsed")]
     SubscriptionLapsed { until: DateTime<Utc> },
+
+    // E3: Market (plan D7). Each goes only to the order's owner.
+    /// Your order is on the book, its escrow and fee taken
+    #[serde(rename = "order_placed")]
+    OrderPlaced { order: MarketOrder },
+    /// Some or all of your order traded: `order` as it stands after `trade`
+    #[serde(rename = "order_filled")]
+    OrderFilled { order: MarketOrder, trade: MarketTrade },
+    /// Your order left the book, cancelled or expired (its `status` says
+    /// which), and what was left went back to your market box or balance
+    #[serde(rename = "order_cancelled")]
+    OrderCancelled { order: MarketOrder },
 }
 
 impl ServerMessage {
@@ -447,6 +459,9 @@ impl ServerMessage {
             ServerMessage::TaxDelinquent { .. } => "tax_delinquent",
             ServerMessage::PlotForeclosed { .. } => "plot_foreclosed",
             ServerMessage::SubscriptionLapsed { .. } => "subscription_lapsed",
+            ServerMessage::OrderPlaced { .. } => "order_placed",
+            ServerMessage::OrderFilled { .. } => "order_filled",
+            ServerMessage::OrderCancelled { .. } => "order_cancelled",
         }
     }
 }

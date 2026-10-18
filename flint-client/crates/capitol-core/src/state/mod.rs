@@ -758,6 +758,9 @@ impl GameState {
                 });
                 out.push(StateEvent::SubscriptionLapsed { until: *until });
             }
+            // The market panel (E3.5, #171) is where these land; until then
+            // the client has nothing that shows an order
+            M::OrderPlaced { .. } | M::OrderFilled { .. } | M::OrderCancelled { .. } => {}
         }
         out
     }
