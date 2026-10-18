@@ -26,7 +26,9 @@ use std::fmt;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use capitol_protocol::rest::{
-    LoginRequest, RegisterRequest, ResourceNodeInfo, SubscribeRequest, Subscription,
+    DepositRequest, DepositResponse, HealthResponse, ListPlotsQuery, LoginRequest,
+    MoveItemRequest, PlaceStationRequest, PlotInfo, RegisterRequest, ResourceNodeInfo,
+    StationInfo, SubscribeRequest, Subscription,
 };
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::ws::ClientMessage;
@@ -200,6 +202,9 @@ pub struct Bot {
     walked: f64,
     quiet: bool,
     rng: u64,
+    /// What [`Bot::record`] keeps for [`Bot::take_journal`]: the finishes,
+    /// breakages and balance changes seen in every frame, whichever call ran it.
+    journal: Option<Vec<StateEvent>>,
 }
 
 impl Bot {
@@ -273,6 +278,7 @@ impl Bot {
             walked: 0.0,
             quiet: false,
             rng: seed(seeded_by),
+            journal: None,
         })
     }
 
@@ -361,6 +367,9 @@ impl Bot {
                 }
             }
         }
+        if let Some(journal) = &mut self.journal {
+            journal.extend(changes.iter().filter(|c| journaled(c)).cloned());
+        }
         let now = Instant::now();
         changes.extend(self.state.tick(now));
         for (request, tag) in self.poller.tick(now) {
@@ -435,7 +444,7 @@ impl Bot {
     }
 
     /// A REST call of the bot's own, answered in order with everything else.
-    fn call(&mut self, what: &'static str, request: RestRequest) -> Result<RestResponse, BotError> {
+    pub(crate) fn call(&mut self, what: &'static str, request: RestRequest) -> Result<RestResponse, BotError> {
         let tag = self.next_tag;
         self.next_tag += 1;
         self.net.rest(request, tag);
@@ -677,6 +686,12 @@ impl Bot {
     /// Crafts `recipe_id` by hand from the inventory, and waits for the output
     /// to show up in the crafting output slot and the inputs to leave.
     pub fn craft(&mut self, recipe_id: &str) -> Result<Yield, BotError> {
+        self.craft_at(recipe_id, None)
+    }
+
+    /// Crafts `recipe_id` from the inventory, at `station` if one is given
+    /// (stand within its reach first) or by hand. Otherwise as [`craft`](Self::craft).
+    pub fn craft_at(&mut self, recipe_id: &str, station: Option<Uuid>) -> Result<Yield, BotError> {
         let recipe = self
             .state
             .recipe(recipe_id)
@@ -712,9 +727,16 @@ impl Bot {
                 (i.item_type.clone(), have - i.quantity)
             })
             .collect();
-        self.send(ClientMessage::Craft {
-            recipe_id: recipe.id.clone(),
-            input_item_ids: inputs,
+        self.send(match station {
+            Some(station_id) => ClientMessage::CraftAtStation {
+                station_id: station_id.to_string(),
+                recipe_id: recipe.id.clone(),
+                input_item_ids: inputs,
+            },
+            None => ClientMessage::Craft {
+                recipe_id: recipe.id.clone(),
+                input_item_ids: inputs,
+            },
         });
         let timeout = Duration::from_millis(recipe.duration_ticks.max(0) as u64 * rules::TICK_MS)
             + START_TIMEOUT
@@ -750,6 +772,131 @@ impl Bot {
         })?;
         self.settle()?;
         Ok(item)
+    }
+
+    /// Moves whatever is in the crafting output into the inventory: onto a
+    /// stack of the same type, or into the first empty slot. A craft whose
+    /// output differs fails while the output is full, and only the inventory
+    /// lends its tools to gathering and crafting.
+    pub fn collect_output(&mut self) -> Result<(), BotError> {
+        let Some(output) = self.state.crafting_output() else {
+            return Ok(());
+        };
+        let made: Vec<_> = output.items().cloned().collect();
+        for item in made {
+            let inventory = self
+                .state
+                .inventory()
+                .ok_or_else(|| BotError::Failed("no inventory".into()))?;
+            let stackable = self
+                .state
+                .catalog()
+                .item_type(&item.item_type)
+                .is_none_or(|t| t.stackable);
+            let onto = inventory
+                .items()
+                .find(|i| stackable && i.item_type == item.item_type)
+                .map(|i| i.slot_index as usize)
+                .or_else(|| inventory.first_empty())
+                .ok_or_else(|| BotError::Failed("the inventory is full".into()))?;
+            let request = RestRequest::MoveItem(MoveItemRequest {
+                item_id: item.item_id,
+                target_container_id: inventory.id,
+                target_slot: onto as i32,
+            });
+            self.call("collecting the crafting output", request)?;
+        }
+        self.wait_until("the crafting output to empty", |bot| {
+            bot.state.crafting_output().is_none_or(|c| c.used_slots() == 0)
+        })?;
+        self.settle()
+    }
+
+    /// Puts a station down at `(x, y)` from the kit `kit_item_id`, over REST.
+    /// Stand within the station type's reach of the spot first.
+    pub fn place_station(
+        &mut self,
+        station_type: &str,
+        kit_item_id: Uuid,
+        x: f64,
+        y: f64,
+    ) -> Result<StationInfo, BotError> {
+        let request = RestRequest::PlaceStation(PlaceStationRequest {
+            station_type: station_type.to_string(),
+            x,
+            y,
+            kit_item_id,
+        });
+        match self.call("placing a station", request)? {
+            RestResponse::PlaceStation(placed) => {
+                self.refetch(Fetch::Containers);
+                self.refetch(Fetch::Plots);
+                self.settle()?;
+                Ok(placed.station)
+            }
+            other => Err(unexpected("placing a station", &other)),
+        }
+    }
+
+    /// Up to 100 unclaimed plots in `zone`.
+    pub fn unclaimed_plots(&mut self, zone: &str) -> Result<Vec<PlotInfo>, BotError> {
+        let request = RestRequest::ListPlots(ListPlotsQuery {
+            zone: Some(zone.to_string()),
+            unclaimed: Some(true),
+            limit: Some(100),
+            ..Default::default()
+        });
+        match self.call("listing plots", request)? {
+            RestResponse::Plots(list) => Ok(list.plots),
+            other => Err(unexpected("listing plots", &other)),
+        }
+    }
+
+    /// Buys the deed to `plot_id`. Returns the plot, now ours.
+    pub fn claim_plot(&mut self, plot_id: Uuid) -> Result<PlotInfo, BotError> {
+        match self.call("claiming a plot", RestRequest::ClaimPlot { plot_id })? {
+            RestResponse::ClaimPlot(claim) => Ok(claim.plot),
+            other => Err(unexpected("claiming a plot", &other)),
+        }
+    }
+
+    /// Deposits every fiber stack in the inventory at the exchange.
+    pub fn deposit_fiber(&mut self) -> Result<DepositResponse, BotError> {
+        let item_ids: Vec<Uuid> = self
+            .state
+            .inventory()
+            .map(|inv| crate::exchange::fiber_stacks(inv).iter().map(|i| i.item_id).collect())
+            .unwrap_or_default();
+        if item_ids.is_empty() {
+            return Err(BotError::Failed("no fiber to deposit".into()));
+        }
+        match self.call("depositing fiber", RestRequest::Deposit(DepositRequest { item_ids }))? {
+            RestResponse::Deposit(deposit) => {
+                self.settle()?;
+                Ok(deposit)
+            }
+            other => Err(unexpected("depositing fiber", &other)),
+        }
+    }
+
+    /// `GET /health`.
+    pub fn health(&mut self) -> Result<HealthResponse, BotError> {
+        match self.call("asking the server's health", RestRequest::Health)? {
+            RestResponse::Health(health) => Ok(health),
+            other => Err(unexpected("asking the server's health", &other)),
+        }
+    }
+
+    /// Keeps the finishes, tool breakages and balance changes every frame
+    /// sees from now on, for [`take_journal`](Self::take_journal). The
+    /// economy sim counts from them.
+    pub fn record(&mut self) {
+        self.journal.get_or_insert_with(Vec::new);
+    }
+
+    /// What [`record`](Self::record) kept since the last call.
+    pub fn take_journal(&mut self) -> Vec<StateEvent> {
+        self.journal.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// The script: gather enough fiber for `rope_basic`, craft it, report.
@@ -1023,6 +1170,17 @@ fn blocked(seen: &[StateEvent]) -> Option<BotError> {
     })
 }
 
+/// What [`Bot::record`] keeps.
+fn journaled(change: &StateEvent) -> bool {
+    matches!(
+        change,
+        StateEvent::ExtractionCompleted { .. }
+            | StateEvent::CraftingCompleted { .. }
+            | StateEvent::ToolBroke { .. }
+            | StateEvent::CurrencyChanged { .. }
+    )
+}
+
 fn unexpected(what: &str, response: &RestResponse) -> BotError {
     BotError::Failed(format!("{what} answered with {response:?}"))
 }
@@ -1095,6 +1253,7 @@ mod tests {
             walked: 0.0,
             quiet: true,
             rng: seed("t@x"),
+            journal: None,
         };
         let draws: Vec<f64> = (0..1000).map(|_| bot.random()).collect();
         assert!(draws.iter().all(|r| (0.0..1.0).contains(r)));

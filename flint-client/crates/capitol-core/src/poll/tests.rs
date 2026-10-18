@@ -930,6 +930,7 @@ fn health(catalog_version: Option<&str>) -> NetEvent {
             redis: "healthy".into(),
             server_time_ms: 0,
             catalog_version: catalog_version.map(str::to_owned),
+            sim_tick_scale: None,
         })),
     )
 }

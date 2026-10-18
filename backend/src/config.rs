@@ -18,6 +18,13 @@ pub struct Config {
     /// `POST /player/subscription`, standing in for payments (E4.1).
     /// `MOCK_SUBSCRIPTIONS=on` or `off`; on by default in debug builds only.
     pub mock_subscriptions: bool,
+    /// How many times faster than real time the tick runs (E2.7), so the
+    /// economy sim's hours take minutes. `SIM_TICK_SCALE`, 1 to 100; debug
+    /// builds only, and 1 (real time) unless set. Everything counted in
+    /// ticks speeds up with it: walking, gathering, crafting, regrowth and
+    /// the hourly tax. What runs on the wall clock doesn't: token lifetimes,
+    /// rate limits, trade request expiry and the market's matching task.
+    pub sim_tick_scale: f64,
 }
 
 impl Config {
@@ -39,10 +46,53 @@ impl Config {
                 Ok("off") => false,
                 _ => cfg!(debug_assertions),
             },
+            sim_tick_scale: match tick_scale(
+                env::var("SIM_TICK_SCALE").ok().as_deref(),
+                cfg!(debug_assertions),
+            ) {
+                Ok(scale) => scale,
+                Err(e) => {
+                    tracing::warn!("SIM_TICK_SCALE ignored: {e}");
+                    1.0
+                }
+            },
         })
     }
 }
 
 fn secs(name: &str, default: u64) -> u64 {
     env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// `SIM_TICK_SCALE` as set (`raw`), or why it can't be used. Unset is 1.
+fn tick_scale(raw: Option<&str>, debug_build: bool) -> Result<f64, String> {
+    let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Ok(1.0);
+    };
+    let scale: f64 = raw.parse().map_err(|_| format!("{raw:?} isn't a number"))?;
+    if !(1.0..=100.0).contains(&scale) {
+        return Err(format!("{scale} is outside 1 to 100"));
+    }
+    if scale != 1.0 && !debug_build {
+        return Err("a release build always runs in real time".into());
+    }
+    Ok(scale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tick_scale;
+
+    #[test]
+    fn the_tick_scale_is_real_time_unless_a_debug_build_asks() {
+        assert_eq!(tick_scale(None, true), Ok(1.0));
+        assert_eq!(tick_scale(Some(""), false), Ok(1.0));
+        assert_eq!(tick_scale(Some("10"), true), Ok(10.0));
+        assert_eq!(tick_scale(Some(" 2.5 "), true), Ok(2.5));
+        assert!(tick_scale(Some("10"), false).is_err(), "release builds stay real time");
+        assert_eq!(tick_scale(Some("1"), false), Ok(1.0));
+        assert!(tick_scale(Some("0.5"), true).is_err());
+        assert!(tick_scale(Some("1000"), true).is_err());
+        assert!(tick_scale(Some("fast"), true).is_err());
+    }
 }

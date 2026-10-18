@@ -643,9 +643,20 @@ impl GameState {
 }
 
 pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppState) {
-    tracing::info!("Starting tick engine at {}ms interval", TICK_RATE_MS);
+    // The economy sim's time multiplier (E2.7); 1, real time, everywhere else
+    let scale = app_state.config.sim_tick_scale;
+    let period = Duration::from_secs_f64(TICK_RATE_MS as f64 / 1000.0 / scale);
+    if scale == 1.0 {
+        tracing::info!("Starting tick engine at {}ms interval", TICK_RATE_MS);
+    } else {
+        tracing::warn!(
+            "Starting tick engine at {:?} interval: SIM_TICK_SCALE runs the world {}x real time",
+            period,
+            scale
+        );
+    }
 
-    let mut interval = tokio::time::interval(Duration::from_millis(TICK_RATE_MS));
+    let mut interval = tokio::time::interval(period);
     let mut last_log = Instant::now();
     let mut tick_count = 0u64;
     let loop_start = Instant::now();

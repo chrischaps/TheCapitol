@@ -149,6 +149,7 @@ pub async fn place_station(
         req.kit_item_id,
     )
     .await?;
+    placed.remember(&state).await;
     Ok(Json(PlaceStationResponse { station: placed.info }))
 }
 

@@ -7,6 +7,7 @@
 //! capitol-bot --prefix trader --trade Chris --ask  # a trading partner for Chris
 //! capitol-bot --api-key cap_…          # the script, as the key's own player
 //! capitol-bot --subscribe 30 --wander             # a subscriber, for a month
+//! capitol-bot --sim 20 --hours 2               # the economy sim (E2.7), with a report
 //! ```
 //!
 //! Run it from `flint-client/` with `cargo run -p capitol-core --bin capitol-bot -- <flags>`.
@@ -17,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use capitol_core::bot::{Account, Bot, BotError, TradeOffer};
 use capitol_core::net::NetConfig;
+use capitol_core::sim::run::{self as sim, SimConfig};
 
 const USAGE: &str = "\
 capitol-bot: headless players for The Capitol
@@ -47,6 +49,16 @@ FLAGS:
     --subscribe <days>  Subscribe each bot for this many days first, with the
                         server's mock activation (MOCK_SUBSCRIPTIONS, on by
                         default in a debug build of the backend)
+    --sim <bots>        Run the economy sim: this many bots, each with a role
+                        (gatherer, crafter or builder), gather, craft and build
+                        for --hours game hours, then write a report to --out.
+                        Start the backend with SIM_TICK_SCALE=10 so a game hour
+                        takes six minutes, and RATE_LIMITS=off, since bots at
+                        that pace go over every limit. Accounts are
+                        <prefix>1@bots.capitol.local and up, prefix `sim` unless
+                        --prefix says otherwise.
+    --hours <h>         With --sim, game hours to run [default: 2]
+    --out <dir>         With --sim, where the report goes [default: renders/sim]
     -h, --help          Print this
 
 The script logs in (or registers), scouts for fiber, walks to the nearest
@@ -70,6 +82,9 @@ struct Options {
     ask: bool,
     offer: TradeOffer,
     subscribe: Option<i32>,
+    sim: Option<usize>,
+    hours: f64,
+    out: String,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
@@ -90,7 +105,11 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             item_type: None,
         },
         subscribe: None,
+        sim: None,
+        hours: 2.0,
+        out: "renders/sim".into(),
     };
+    let mut prefix_given = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -104,6 +123,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                 }
             }
             "--prefix" => {
+                prefix_given = true;
                 options.prefix = value()?;
                 if options.prefix.is_empty() || !options.prefix.chars().all(char::is_alphanumeric) {
                     return Err("--prefix must be letters and digits".into());
@@ -125,9 +145,39 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                 }
                 options.subscribe = Some(days);
             }
+            "--sim" => {
+                let bots = number(&flag, &value()?)?;
+                if bots == 0 {
+                    return Err("--sim needs at least 1 bot".into());
+                }
+                options.sim = Some(bots);
+            }
+            "--hours" => {
+                options.hours = number(&flag, &value()?)?;
+                if !(options.hours > 0.0 && options.hours <= 48.0) {
+                    return Err("--hours takes more than 0 and at most 48".into());
+                }
+            }
+            "--out" => options.out = value()?,
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown flag {other}")),
         }
+    }
+    if options.sim.is_some() {
+        if options.api_key.is_some()
+            || options.accounts != 1
+            || options.wander
+            || options.gather.is_some()
+            || options.trade.is_some()
+            || options.subscribe.is_some()
+        {
+            return Err("--sim runs its own bots; it only goes with --server, --prefix, --hours and --out".into());
+        }
+        if !prefix_given {
+            options.prefix = "sim".into();
+        }
+    } else if options.hours != 2.0 || options.out != "renders/sim" {
+        return Err("--hours and --out go with --sim".into());
     }
     if options.api_key.is_some() && options.accounts != 1 {
         return Err("--api-key plays one account; it doesn't go with --accounts".into());
@@ -178,6 +228,36 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
     }
 }
 
+fn run_sim(options: &Options, bots: usize) -> ExitCode {
+    let config = SimConfig {
+        server: options.server.clone(),
+        bots,
+        hours: options.hours,
+        prefix: options.prefix.clone(),
+        out_dir: options.out.clone().into(),
+    };
+    println!(
+        "capitol-bot: {bots} bots for {} game hours against {}",
+        options.hours, options.server
+    );
+    match sim::run(&config) {
+        Ok((report, md, csv)) => {
+            println!("{}", report.to_markdown());
+            println!("wrote {} and {}", md.display(), csv.display());
+            if report.errors.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("capitol-bot: {} bots stopped early", report.errors.len());
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("capitol-bot: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let options = match parse(std::env::args().skip(1)) {
         Ok(Some(options)) => options,
@@ -190,6 +270,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if let Some(bots) = options.sim {
+        return run_sim(&options, bots);
+    }
     let options = &options;
     let failures = thread::scope(|scope| {
         let bots: Vec<_> = (1..=options.accounts)
@@ -264,6 +347,22 @@ mod tests {
                 .subscribe,
             Some(30)
         );
+    }
+
+    #[test]
+    fn sim_flags_parse() {
+        let o = parse(args("--sim 20 --hours 0.5 --out x/y")).unwrap().unwrap();
+        assert_eq!(o.sim, Some(20));
+        assert_eq!(o.hours, 0.5);
+        assert_eq!(o.out, "x/y");
+        assert_eq!(o.prefix, "sim");
+        let o = parse(args("--sim 3 --prefix swarm")).unwrap().unwrap();
+        assert_eq!((o.prefix.as_str(), o.hours), ("swarm", 2.0));
+        assert!(parse(args("--sim 0")).is_err());
+        assert!(parse(args("--sim 2 --hours 0")).is_err());
+        assert!(parse(args("--sim 2 --wander")).is_err());
+        assert!(parse(args("--sim 2 --accounts 4")).is_err());
+        assert!(parse(args("--hours 3")).is_err(), "--hours without --sim");
     }
 
     #[test]

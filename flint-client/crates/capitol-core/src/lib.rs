@@ -31,6 +31,8 @@
 //! - [`catalog`]: item, station and resource types the server has no endpoint for.
 //! - [`bot`]: a headless player built on all of the above, for `capitol-bot`
 //!   and the live tests.
+//! - [`sim`]: the economy sim (E2.7), a swarm of bots that gathers, crafts and
+//!   builds, then reports what the economy produced.
 
 pub mod auth;
 pub mod bot;
@@ -44,6 +46,7 @@ pub mod onboarding;
 pub mod plot;
 pub mod poll;
 pub mod signin;
+pub mod sim;
 pub mod state;
 pub mod station;
 pub mod terrain;

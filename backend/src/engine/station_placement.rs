@@ -118,11 +118,31 @@ pub struct Placed {
     pub plot_id: Option<Uuid>,
 }
 
+impl Placed {
+    /// Adds the station to the game state, where the tick finds it for
+    /// crafting. WS and REST placement both call this; before E2.7 only WS
+    /// did, so a station placed over REST couldn't be crafted at until a
+    /// restart loaded it.
+    pub async fn remember(&self, state: &AppState) {
+        let station = crate::models::StationState {
+            id: self.info.id,
+            station_type: self.info.station_type.clone(),
+            owner_id: self.info.owner_id,
+            x: self.info.x,
+            y: self.info.y,
+            plot_id: self.plot_id,
+            container_id: self.info.container_id,
+            quality: self.info.quality,
+        };
+        state.game.write().await.stations.insert(station.id, station);
+    }
+}
+
 /// Put a station of `station_type` down at (`x`, `y`) for `player_id`, from
 /// their kit `kit_item_id`. `at` is where they stand now
 /// ([`live_position`]); when it's `None`, the position comes from their
 /// `players` row, which can be up to 10 s old. The game state isn't touched:
-/// adding the station to it is the caller's.
+/// the caller adds the station to it with [`Placed::remember`].
 pub async fn place_station(
     state: &AppState,
     player_id: Uuid,

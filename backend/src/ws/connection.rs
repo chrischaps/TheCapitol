@@ -412,22 +412,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
                                     match crate::engine::station_placement::place_station(&state, player_id, &station_type, x, y, kit_uuid).await {
                                         Ok(result) => {
+                                            result.remember(&state).await;
                                             let station_info = result.info;
-                                            // Add to game state
-                                            {
-                                                let mut game = state.game.write().await;
-                                                let station_state = crate::models::StationState {
-                                                    id: station_info.id,
-                                                    station_type: station_info.station_type.clone(),
-                                                    owner_id: station_info.owner_id,
-                                                    x: station_info.x,
-                                                    y: station_info.y,
-                                                    plot_id: result.plot_id,
-                                                    container_id: station_info.container_id,
-                                                    quality: station_info.quality,
-                                                };
-                                                game.stations.insert(station_info.id, station_state);
-                                            }
 
                                             // Notify client
                                             let msg = ServerMessage::StationPlaced {

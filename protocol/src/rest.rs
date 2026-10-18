@@ -286,6 +286,11 @@ pub struct HealthResponse {
     /// older than the catalog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_version: Option<String>,
+    /// How many times real time the tick runs, when a dev server was started
+    /// with `SIM_TICK_SCALE` (E2.7). Absent at real time. The economy sim
+    /// reads it to turn its wall clock into game hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim_tick_scale: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------

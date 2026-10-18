@@ -835,6 +835,9 @@ impl GameState {
             R::Subscription(s) => self.subscription = Some(*s),
             R::Deposit(d) => self.set_strands(d.new_balance, &mut out),
             R::Withdraw(w) => self.set_strands(w.new_balance, &mut out),
+            // The poller lists your own plots. Another listing (a bot looking
+            // for unclaimed land, E2.7) mustn't replace them.
+            R::Plots(response) if response.plots.iter().any(|p| p.owner_id != self.me) => {}
             R::Plots(response) => {
                 self.plots = response.plots.clone();
                 // A picked plot of yours is fresher in the list.

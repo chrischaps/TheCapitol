@@ -1435,7 +1435,7 @@ fn recipes_and_plots_are_stored() {
 
     assert_eq!(
         state.apply_rest(&R::Plots(ListPlotsResponse {
-            plots: vec![plot(None)],
+            plots: vec![plot(Some(ME))],
             total: 1
         })),
         vec![StateEvent::PlotsUpdated]
@@ -1747,4 +1747,27 @@ fn a_placed_station_takes_its_kind_from_the_catalog() {
     assert_eq!(placed.category, "storage");
     assert_eq!(placed.icon.as_deref(), Some("chest"));
     assert_eq!(placed.interaction_range, 120.0);
+}
+
+#[test]
+fn a_listing_of_other_plots_leaves_mine_alone() {
+    let mut state = connected();
+    state.apply_rest(&R::Plots(ListPlotsResponse {
+        plots: vec![plot(Some(ME))],
+        total: 1,
+    }));
+    assert_eq!(state.plots().len(), 1);
+    // A bot looking for land to buy (E2.7) lists the unclaimed ones.
+    let changes = state.apply_rest(&R::Plots(ListPlotsResponse {
+        plots: vec![plot(None), plot(None)],
+        total: 2,
+    }));
+    assert!(changes.is_empty());
+    assert_eq!(state.plots(), &[plot(Some(ME))]);
+    // My own list, now empty, still replaces it.
+    state.apply_rest(&R::Plots(ListPlotsResponse {
+        plots: vec![],
+        total: 0,
+    }));
+    assert!(state.plots().is_empty());
 }
