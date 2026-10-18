@@ -726,7 +726,10 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
         let game_tick_count = game_state.read().await.tick_count;
         if game_tick_count > 0 && game_tick_count % 36000 == 0 {
             tracing::info!("Processing hourly property taxes at tick {}", game_tick_count);
-            super::property_tax::process_property_taxes(&app_state.db).await;
+            let report = super::property_tax::process_property_taxes(&app_state.db).await;
+            let mut game = game_state.write().await;
+            let game = &mut *game;
+            super::property_tax::announce(report, &mut game.stations, &game.event_sender);
         }
     }
 }

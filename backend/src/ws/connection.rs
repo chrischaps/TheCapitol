@@ -842,6 +842,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::PlotReleased { terrain_id };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
+                    // #131: Property tax, to the plot's owner only
+                    Ok(GameEvent::TaxDelinquent { owner_id, terrain_id, tax_owed, forecloses_at }) => {
+                        if owner_id == player_id {
+                            let msg = ServerMessage::TaxDelinquent { terrain_id, tax_owed, forecloses_at };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
+                    Ok(GameEvent::PlotForeclosed { owner_id, terrain_id, tax_owed, refund }) => {
+                        if owner_id == player_id {
+                            let msg = ServerMessage::PlotForeclosed { terrain_id, tax_owed, refund };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
                     Err(_) => {
                         // Channel closed
                         break;

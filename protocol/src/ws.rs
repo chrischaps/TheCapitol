@@ -327,10 +327,33 @@ pub enum ServerMessage {
         owner_id: Uuid,
         claimed_at: DateTime<Utc>,
     },
-    /// The lot `terrain_id` has no owner any more. Today only an admin terrain
-    /// commit with `force` releases plots; tax foreclosure will too (#131).
+    /// The lot `terrain_id` has no owner any more: an admin terrain commit
+    /// with `force` released it, or it was foreclosed for unpaid tax (#131).
     #[serde(rename = "plot_released")]
     PlotReleased { terrain_id: String },
+    // #131: Property tax, sent to the plot's owner only
+    /// Your plot `terrain_id` owes `tax_owed` strands of property tax. At
+    /// `forecloses_at` owed (four weeks of tax as charged, so about four
+    /// weeks unpaid) it's foreclosed. Sent when the
+    /// debt passes each whole week of tax, and once more an hour before.
+    /// The hourly tax run takes the debt from your strands when it can, so
+    /// any strands you have buy time.
+    #[serde(rename = "tax_delinquent")]
+    TaxDelinquent {
+        terrain_id: String,
+        tax_owed: i64,
+        forecloses_at: i64,
+    },
+    /// Your plot `terrain_id` was foreclosed for `tax_owed` strands of unpaid
+    /// tax. Its stations and their contents are gone, and `refund` strands
+    /// (the deed, less the debt) were paid back. `plot_released` follows,
+    /// to everyone.
+    #[serde(rename = "plot_foreclosed")]
+    PlotForeclosed {
+        terrain_id: String,
+        tax_owed: i64,
+        refund: i64,
+    },
 }
 
 impl ServerMessage {
@@ -379,6 +402,8 @@ impl ServerMessage {
             ServerMessage::TerrainUpdated => "terrain_updated",
             ServerMessage::PlotClaimed { .. } => "plot_claimed",
             ServerMessage::PlotReleased { .. } => "plot_released",
+            ServerMessage::TaxDelinquent { .. } => "tax_delinquent",
+            ServerMessage::PlotForeclosed { .. } => "plot_foreclosed",
         }
     }
 }

@@ -237,6 +237,20 @@ pub enum StateEvent {
     LotReleased {
         terrain_id: String,
     },
+    /// Your plot `terrain_id` owes `tax_owed` in property tax, and is
+    /// foreclosed at `forecloses_at` (`tax_delinquent`, #131).
+    TaxDelinquent {
+        terrain_id: String,
+        tax_owed: i64,
+        forecloses_at: i64,
+    },
+    /// Your plot `terrain_id` was foreclosed for unpaid tax, and `refund`
+    /// of the deed came back (`plot_foreclosed`, #131). `LotReleased` follows.
+    PlotForeclosed {
+        terrain_id: String,
+        tax_owed: i64,
+        refund: i64,
+    },
 
     /// The local player's trading changed. See [`GameState::trade`].
     Trade(TradeEvent),
@@ -678,6 +692,25 @@ impl GameState {
                     terrain_id: terrain_id.clone(),
                 });
             }
+            // Only ever sent to the plot's owner.
+            M::TaxDelinquent {
+                terrain_id,
+                tax_owed,
+                forecloses_at,
+            } => out.push(StateEvent::TaxDelinquent {
+                terrain_id: terrain_id.clone(),
+                tax_owed: *tax_owed,
+                forecloses_at: *forecloses_at,
+            }),
+            M::PlotForeclosed {
+                terrain_id,
+                tax_owed,
+                refund,
+            } => out.push(StateEvent::PlotForeclosed {
+                terrain_id: terrain_id.clone(),
+                tax_owed: *tax_owed,
+                refund: *refund,
+            }),
         }
         out
     }

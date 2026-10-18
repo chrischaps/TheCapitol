@@ -173,6 +173,10 @@ pub enum PlotNote {
     NoneThere,
     /// The server couldn't say.
     Unanswered,
+    /// One of your plots owes `tax_owed` in tax, and goes at `forecloses_at` (#131).
+    TaxOwed { tax_owed: i64, forecloses_at: i64 },
+    /// One of your plots was foreclosed for `tax_owed`, and `refund` came back.
+    Foreclosed { tax_owed: i64, refund: i64 },
 }
 
 /// The server stopped you at the water's edge (`movement_blocked`).
@@ -1095,6 +1099,20 @@ impl Session {
                     StateEvent::StationPlaced { station_id, .. } => {
                         self.placed.insert(*station_id);
                     }
+                    StateEvent::TaxDelinquent {
+                        tax_owed,
+                        forecloses_at,
+                        ..
+                    } => self.plot_notes.push(PlotNote::TaxOwed {
+                        tax_owed: *tax_owed,
+                        forecloses_at: *forecloses_at,
+                    }),
+                    StateEvent::PlotForeclosed {
+                        tax_owed, refund, ..
+                    } => self.plot_notes.push(PlotNote::Foreclosed {
+                        tax_owed: *tax_owed,
+                        refund: *refund,
+                    }),
                     _ => {}
                 }
             }
