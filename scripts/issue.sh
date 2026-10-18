@@ -13,11 +13,19 @@
 #   scripts/issue.sh claim <n>                claim issue n (exit 2 if held) and
 #                                             make its worktree, ../<repo>-<n>
 #   scripts/issue.sh claim <n> --steal        take over a claim older than the TTL
+#   scripts/issue.sh claim <n> --steal --override "<reason>"
+#                                             take over a younger claim, because
+#                                             a human asked; the reason is recorded
 #   scripts/issue.sh claim <n> --no-worktree  claim without making a worktree
 #   scripts/issue.sh renew <n>                refresh your claim's timestamp
 #   scripts/issue.sh release <n>              give up your claim
 #   scripts/issue.sh land <n> [--verify CMD]  catch up with master, verify, push,
 #                                             release the claim
+#
+# --override is for a human who knows the holder is gone (a session they
+# closed, a machine that's off). Agents use it only when asked to. The reason
+# goes into the claim commit and the issue comment, so the takeover is on
+# record (#140).
 #
 # Two sessions started in one checkout share its .git, so the record of a
 # claim can't by itself say which of them made it (#134). So claim makes the
@@ -42,7 +50,7 @@ LABEL=claimed
 
 die() { echo "issue.sh: $*" >&2; exit 1; }
 
-usage() { sed -n '12,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '12,23p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 
 gh_on() { [ "${CLAIM_NO_GH:-}" != 1 ]; }
 
@@ -86,14 +94,15 @@ age_text() {
   if [ "$s" -lt 3600 ]; then echo "$(( s / 60 ))m"; else echo "$(( s / 3600 ))h$(( s % 3600 / 60 ))m"; fi
 }
 
-make_claim() { # <n> <agent> [parent]
+make_claim() { # <n> <agent> [parent] [extra trailer lines]
   local msg parent=()
   [ -n "${3:-}" ] && parent=(-p "$3")
   msg="claim #$1
 
 agent: $2
 host: $(hostname)
-at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+at: $(date -u +%Y-%m-%dT%H:%M:%SZ)${4:+
+$4}"
   printf '%s\n' "$msg" | git commit-tree "$(git mktree </dev/null)" ${parent[@]+"${parent[@]}"}
 }
 
@@ -138,15 +147,20 @@ held() { # <n> <claim sha> <claim time> <worktree>
 }
 
 cmd_claim() {
-  local n=${1:?issue number} steal="" make_wt=1 ref agent sha old old_t state wt base="" arg
+  local n=${1:?issue number} steal="" override="" make_wt=1 ref agent sha old old_t state wt base="" note=""
   shift
-  for arg in "$@"; do
-    case $arg in
+  while [ $# -gt 0 ]; do
+    case $1 in
       --steal) steal=--steal ;;
+      --override)
+        [ $# -ge 2 ] && [ -n "${2// /}" ] && [ "${2#-}" = "$2" ] || die "--override needs a reason, e.g. --override \"Chris closed that session\""
+        override=$2; shift ;;
       --no-worktree) make_wt="" ;;
-      *) die "claim: unknown option $arg" ;;
+      *) die "claim: unknown option $1" ;;
     esac
+    shift
   done
+  [ -z "$override" ] || [ -n "$steal" ] || die "--override goes with --steal"
   ref=$(ref_of "$n")
   if gh_on; then
     state=$(gh issue view "$n" --json state -q .state)
@@ -171,20 +185,30 @@ cmd_claim() {
   fi
 
   agent=${CLAIM_AGENT_ID:-$(hostname)-$(now)-$RANDOM}
-  sha=$(make_claim "$n" "$agent")
 
   if [ -n "$steal" ]; then
     read -r old old_t <<<"$(remote_claim "$n")"
     [ -n "${old:-}" ] || die "#$n isn't claimed; claim it without --steal"
-    [ $(( $(now) - old_t )) -ge $(( TTL_HOURS * 3600 )) ] \
-      || die "#$n claim by $(agent_of "$old") is $(age_text "$old_t") old, under the ${TTL_HOURS}h TTL"
+    if [ -n "$override" ]; then
+      note="taken over from \`$(agent_of "$old")\`'s $(age_text "$old_t")-old claim, by override: $override"
+      sha=$(make_claim "$n" "$agent" "" "stolen-from: $(agent_of "$old")
+override: $override")
+    else
+      [ $(( $(now) - old_t )) -ge $(( TTL_HOURS * 3600 )) ] \
+        || die "#$n claim by $(agent_of "$old") is $(age_text "$old_t") old, under the ${TTL_HOURS}h TTL. Only a human can say it's gone sooner: then add --override \"<reason>\""
+      note="taken over from \`$(agent_of "$old")\`'s stale claim"
+      sha=$(make_claim "$n" "$agent" "" "stolen-from: $(agent_of "$old")")
+    fi
     # Compare-and-swap: fails if the holder renewed since we looked.
     git push -q --force-with-lease="$ref:$old" "$REMOTE" "$sha:$ref" \
       || die "#$n claim changed while stealing it; run list and look again"
-  elif ! git push -q "$REMOTE" "$sha:$ref" 2>/dev/null; then
-    read -r old old_t <<<"$(remote_claim "$n")"
-    [ -n "${old:-}" ] || die "push of the claim for #$n failed, and nobody holds it; check the network and retry"
-    held "$n" "$old" "$old_t" "$wt"
+  else
+    sha=$(make_claim "$n" "$agent")
+    if ! git push -q "$REMOTE" "$sha:$ref" 2>/dev/null; then
+      read -r old old_t <<<"$(remote_claim "$n")"
+      [ -n "${old:-}" ] || die "push of the claim for #$n failed, and nobody holds it; check the network and retry"
+      held "$n" "$old" "$old_t" "$wt"
+    fi
   fi
 
   mkdir -p "$(record_dir)"
@@ -206,9 +230,9 @@ cmd_claim() {
   fi
   if gh_on; then
     gh issue edit "$n" --add-label "$LABEL" >/dev/null || true
-    gh issue comment "$n" --body "Claimed by \`$agent\` on \`$(hostname)\`${steal:+ (taken over from a stale claim)}." >/dev/null || true
+    gh issue comment "$n" --body "Claimed by \`$agent\` on \`$(hostname)\`${note:+, $note}." >/dev/null || true
   fi
-  echo "claimed #$n as $agent"
+  echo "claimed #$n as $agent${note:+, ${note//\`/}}"
   [ -z "$make_wt" ] || echo "worktree: $wt (branch issue-$n from $base). Work there; renew, release and land run only from it"
 }
 

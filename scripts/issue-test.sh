@@ -77,5 +77,21 @@ expect 0 "claim --no-worktree" bash "$SCRIPT" claim 10 --no-worktree
 [ ! -e "$TMP/repo-10" ] && ok "makes no worktree" || bad "makes no worktree"
 expect 0 "release a --no-worktree claim from the main checkout" bash "$SCRIPT" release 10
 
+# A young claim can't be stolen, except by an override with a reason (#140).
+CLAIM_AGENT_ID=holder bash "$SCRIPT" claim 11 --no-worktree >/dev/null
+expect 1 "steal of a young claim is refused" bash "$SCRIPT" claim 11 --steal --no-worktree
+grep -q -- "--override" "$TMP/out" && ok "the refusal points at --override" || bad "the refusal points at --override"
+expect 1 "--override without a reason is refused" bash "$SCRIPT" claim 11 --steal --override --no-worktree
+expect 1 "--override with a blank reason is refused" bash "$SCRIPT" claim 11 --steal --override "  " --no-worktree
+expect 1 "--override without --steal is refused" bash "$SCRIPT" claim 11 --override "gone" --no-worktree
+expect 0 "--steal --override takes a young claim" \
+  env CLAIM_AGENT_ID=taker bash "$SCRIPT" claim 11 --steal --override "Chris closed that session" --no-worktree
+grep -q "by override: Chris closed that session" "$TMP/out" && ok "the output gives the reason" || bad "the output gives the reason"
+body=$(git log -1 --format=%B "$(git ls-remote origin refs/heads/claim/issue-11 | cut -f1)")
+grep -q "^agent: taker$" <<<"$body" && grep -q "^stolen-from: holder$" <<<"$body" \
+  && grep -q "^override: Chris closed that session$" <<<"$body" \
+  && ok "the claim commit records holder and reason" || bad "the claim commit records holder and reason"
+expect 0 "the new holder can release it" env CLAIM_AGENT_ID=taker bash "$SCRIPT" release 11
+
 echo
 [ "$fails" = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }
