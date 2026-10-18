@@ -131,29 +131,183 @@ Removing a row is an error unless it's listed under `retired`, so items in playe
 
 ### D5. Content tree v1 (E2.1)
 
-This is a proposal for Chris to approve in E2.1. Grass stays the starter and the GDD's universal Fiber.
+**Status: final draft, waiting for Chris's approval (E2.1, #160).** E2.2 to E2.6 build from these tables. Grass stays the starter and the GDD's universal Fiber, and its hand numbers don't change.
 
-| Resource (zone) | Tool | Yields |
+v1 has **6 resources, 32 items, 6 stations and 27 recipes**, which is more than the first sketch's 22 items. Most of the extra items are the four iron heads and the four kits that give the new stations a way in. The longest chain is vein → ore → ingot → head → axe, with charcoal from the kiln feeding the forge. Tools and stations both carry quality along it.
+
+#### The tree
+
+```mermaid
+flowchart LR
+  classDef res fill:#e8f0e0,stroke:#5a7a3a
+  classDef tool fill:#f6e8d0,stroke:#a06a20
+  classDef kit fill:#e4e4f4,stroke:#5050a0
+
+  grass[(Grass)]:::res --> fiber
+  branches[(Fallen branches)]:::res --> sticks
+  tree[(Tree)]:::res -- axe --> log
+  outcrop[(Rock outcrop)]:::res -- hand / pickaxe --> stone
+  vein[(Iron vein)]:::res -- pickaxe --> ore[iron ore]
+  claybank[(Clay bank)]:::res --> clay
+
+  fiber -- hand --> rope
+  fiber -- hand --> wbk[workbench kit]:::kit
+  fiber -- hand --> chk[chest kit]:::kit
+
+  sticks & rope -- workbench --> handle[tool handle]
+  log -- sawbench --> plank
+  plank -- sawbench --> handle
+  stone -- workbench --> knap[knapped stone]
+  handle & knap & rope -- workbench --> stools[stone sickle / axe / pickaxe / hammer]:::tool
+
+  log -- kiln --> charcoal
+  clay & charcoal -- kiln --> brick
+  ore & charcoal -- forge --> ingot[iron ingot]
+  ingot -- forge --> nails[iron nails]
+  ingot -- "anvil + hammer" --> heads[iron heads ×4]
+  heads & handle -- workbench --> itools[iron sickle / axe / pickaxe / hammer]:::tool
+
+  stone & clay & sticks -- "workbench + hammer" --> kik[kiln kit]:::kit
+  brick & stone & rope -- "workbench + hammer" --> fok[forge kit]:::kit
+  log & ingot & nails & rope -- "workbench + hammer" --> sbk[sawbench kit]:::kit
+  ingot & plank -- "workbench + hammer" --> ank[anvil kit]:::kit
+```
+
+The bootstrap order, which every new player walks: grass → rope → workbench → handle and knapped stone → stone axe, pickaxe and hammer → logs and ore → kiln (charcoal) → forge (ingots) → anvil and sawbench → iron tools. No step needs an item that only a later step makes.
+
+#### Tools
+
+The tool types are **sickle, axe, pickaxe and hammer**. D3's `saw` is dropped from v1, because the sawbench is the saw. The ToolType enum can keep the value reserved. There are two tiers, and each is a separate item type (GDD §6.4).
+
+| Tier | `base_power` | `max_durability` at Q50 | Its use |
+|---|---|---|---|
+| hand (no tool) | 4 | – | grass, branches and clay at today's numbers. Stone by hand is slow and poor. |
+| stone | 10 | 60 uses | the bootstrap: the first logs, ore and anvil work. Weak against veins. |
+| iron | 18 | 200 uses | the upgrade: more yield, fewer failures, cleaner quality and a longer life |
+
+`quality_multiplier` is 0.5× at Q0, 1× at Q50 and 1.5× at Q100, so an excellent stone pick (Q100, power 15) beats a poor iron one (Q10, power 10.8). That's the GDD's bronze-against-steel example at our two tiers. `max_durability(base, q)` scales the Q50 figure by the same curve, so a Q100 iron axe lasts 300 uses. E1.4 owns the exact formula.
+
+| Tool type | Required for | Optional for (a better tool helps) |
 |---|---|---|
-| Grass (everywhere off-road) | hand | fiber |
-| Fallen branches (Suburban, Rural) | hand | sticks |
-| Trees (Rural woods, Wilderness) | axe | logs |
-| Rock outcrop (Rural, Wilderness) | hand / pickaxe | stone (hand: slow, low yield) |
-| Iron vein (Wilderness) | pickaxe | iron ore |
-| Clay bank (by the canals, Urban edge) | hand | clay |
+| sickle | – | grass (yield) |
+| axe | trees | fallen branches (speed) |
+| pickaxe | iron veins | rock outcrops (hand is slow) |
+| hammer | anvil recipes, and the four kit recipes at the workbench | – |
 
-| Station | Makes |
+#### Resources
+
+`difficulty` is set against the tiers' power at Q50: hand 4, stone 10, iron 18. When a tool's effective power is under the difficulty, it's slow and it fails some pulls (GDD §6.2). The suggested failure chance is `clamp((difficulty − power) / difficulty, 0, 0.75)`, and a pull that succeeds keeps its quality. The yields below are the targets at Q50 that E1.5's power-against-difficulty curve should reproduce. Durations and regeneration are in ticks (10 a second). Density is nodes per km² of the zone's open ground (1 unit = 1 m), with a rough count for the default world.
+
+| id | Name → item | Zones (density, about how many) | Cluster | Tool | Difficulty | Yield (hand / stone / iron) | Base quality | Duration | Regen |
+|---|---|---|---|---|---|---|---|---|---|
+| `grass` | Wild Grass → `fiber` | everywhere off-road, as today | as today | hand, sickle | 0 | 1–3 / 2–4 / 3–5 | 40–70 | 30 | 600 |
+| `fallen_branches` | Fallen Branches → `sticks` | Suburban parks 4 (~70), Rural 15 (~250), Wilderness 30 (~150) | under trees, scattered | hand, axe | 0 | 1–2 / 2–3 / 2–4 | 30–65 | 30 (axe 20) | 900 |
+| `clay_bank` | Clay Bank → `clay` | Urban 6 (~40), Suburban 2 (~35), along canals and moats | linear along water | hand | 2 | 1–2 / – / – | 40–80 | 40 | 1200 |
+| `rock_outcrop` | Rock Outcrop → `stone` | Rural 6 (~100), Wilderness 20 (~100) | clumped | hand, pickaxe | 8 | 1 at 80 ticks / 1–2 / 2–3 | 30–75 | 50 | 1800 |
+| `tree` | Tree → `log` | Rural woods 25 (~400), Wilderness 60 (~300) | woods (noise patches) | axe, required | 12 | – / 1–2 / 2–3 | 35–80 | 60 | 3000 |
+| `iron_vein` | Iron Vein → `iron_ore` | Rural 0.5 (~8, rare), Wilderness 8 (~40) | clumped, on rough ground | pickaxe, required | 20 | – / 1 / 1–2 | 25–90 | 80 | 6000 |
+
+Regional tendency: Wilderness nodes draw base quality from the top two-thirds of the range (so 50–90 for a vein), and Rural from the whole range. That is the reason to walk out. E2.2 holds it as a per-zone quality floor in the spawn table.
+
+#### Items
+
+Weights are per unit. Tools and kits don't stack, and everything else does.
+
+| Category | Items (weight) |
 |---|---|
-| Workbench | stone tools, handles, rope goods, kits |
-| Sawbench (new) | planks from logs |
-| Kiln (new) | charcoal from logs, bricks from clay |
-| Forge | iron ingots from ore and charcoal |
-| Anvil (new) | iron tool heads, iron fittings |
-| Storage chest | – |
+| raw_material | `fiber` (0.1), `sticks` (0.3), `clay` (0.5), `stone` (1.0), `log` (3.0), `iron_ore` (1.5) |
+| processed_material | `rope` (0.2), `tool_handle` (0.4), `knapped_stone` (0.5), `plank` (1.0), `charcoal` (0.4), `brick` (1.2), `iron_ingot` (1.0), `iron_nails` (0.05) |
+| component | `iron_sickle_blade` (0.6), `iron_axe_head` (1.2), `iron_pickaxe_head` (1.4), `iron_hammer_head` (1.2) |
+| tool | `stone_sickle` (0.8), `stone_axe` (1.4), `stone_pickaxe` (1.6), `stone_hammer` (1.4), `iron_sickle` (1.0), `iron_axe` (1.6), `iron_pickaxe` (1.8), `iron_hammer` (1.6) |
+| placeable | `workbench_kit` (10), `chest_kit` (8), `kiln_kit` (14), `forge_kit` (15), `sawbench_kit` (12), `anvil_kit` (20) |
 
-Tools come in stone and iron: sickle (more fiber per pull), axe, pickaxe and hammer, each made as handle + head (an *assembly* recipe in GDD §6.3 terms).
+`component` and `tool` are new categories. A tool's `tool_type`, tier, `base_power` and `max_durability` come from the tool tables above.
 
-That's about 6 resources, 22 items and 22 recipes. Every station has a reason to exist, and quality flows through a five-step chain (vein → ore → ingot → head → axe) where tools and stations matter.
+#### Stations
+
+| id | Kit | Slots | Recipes |
+|---|---|---|---|
+| `workbench` | `workbench_kit` | 16 | 14: handle, knapped stone, 4 stone tools, 4 iron tools, 4 kits |
+| `sawbench` (new) | `sawbench_kit` | 8 | 2: planks, sawn handles |
+| `kiln` (new) | `kiln_kit` | 8 | 2: charcoal, bricks |
+| `forge` | `forge_kit` | 12 | 2: iron ingots, iron nails |
+| `anvil` (new) | `anvil_kit` | 8 | 4: the iron heads |
+| `storage_chest` | `chest_kit` | 16 | – (storage) |
+
+Every crafting station makes at least two things, so E2.4 can remove E0.3's forge exemption.
+
+#### Quality weights by recipe type (GDD §6.3)
+
+These are shares of the whole (D1). The inputs split what's left by their relative `quality_weight`.
+
+| Type | Inputs | Station | Tool | Variance | Used by |
+|---|---|---|---|---|---|
+| hand | 1.0 | – | – | ±3 | rope, workbench kit, chest kit (unchanged) |
+| processing | 0.7 (main ingredient heavy) | 0.3 | – | ±3 | plank, charcoal, brick, ingot, nails |
+| craft | 0.4 (0.6 with no tool) | 0.4 | 0.2 (hammer, at the anvil) | ±5 | handle, knapped stone, iron heads |
+| assembly | 0.9 (head 2 : handle 1) | 0.1 | – | ±2 | stone and iron tools |
+| kit assembly | 0.7 | 0.1 | 0.2 (hammer) | ±2 | kiln, forge, sawbench and anvil kits |
+
+Craft recipes are where a good station or tool can lift output above its inputs. Assembly recipes leave the output to the parts. Processing preserves the main ingredient.
+
+#### Recipes
+
+Durations are in ticks. Inputs are written as `quantity item (relative weight)`.
+
+| id | Station (+tool) | Inputs | Output | Type | Duration |
+|---|---|---|---|---|---|
+| `rope_basic` | hand | 2 fiber | 1 rope | hand | 50 |
+| `craft_workbench` | hand | 10 fiber | workbench kit | hand | 100 |
+| `craft_chest` | hand | 8 fiber | chest kit | hand | 80 |
+| `tool_handle` | workbench | 2 sticks (0.8), 1 rope (0.2) | 1 tool handle | craft | 60 |
+| `knapped_stone` | workbench | 2 stone | 1 knapped stone | craft | 80 |
+| `stone_sickle` | workbench | 1 knapped stone (2), 1 handle (1), 1 rope (0.3) | stone sickle | assembly | 100 |
+| `stone_axe` | workbench | 2 knapped stone (2), 1 handle (1), 1 rope (0.3) | stone axe | assembly | 120 |
+| `stone_pickaxe` | workbench | 2 knapped stone (2), 1 handle (1), 1 rope (0.3) | stone pickaxe | assembly | 120 |
+| `stone_hammer` | workbench | 2 knapped stone (2), 1 handle (1), 1 rope (0.3) | stone hammer | assembly | 120 |
+| `plank` | sawbench | 1 log | 3 plank | processing | 60 |
+| `sawn_handle` | sawbench | 1 plank | 2 tool handle | craft | 60 |
+| `charcoal` | kiln | 1 log | 2 charcoal | processing | 150 |
+| `brick` | kiln | 2 clay (0.85), 1 charcoal (0.15) | 2 brick | processing | 150 |
+| `iron_ingot` | forge | 2 iron ore (0.85), 1 charcoal (0.15) | 1 iron ingot | processing | 200 |
+| `iron_nails` | forge | 1 iron ingot | 10 iron nails | processing | 100 |
+| `iron_sickle_blade` | anvil + hammer | 1 iron ingot | 1 iron sickle blade | craft | 150 |
+| `iron_axe_head` | anvil + hammer | 2 iron ingot | 1 iron axe head | craft | 200 |
+| `iron_pickaxe_head` | anvil + hammer | 2 iron ingot | 1 iron pickaxe head | craft | 200 |
+| `iron_hammer_head` | anvil + hammer | 2 iron ingot | 1 iron hammer head | craft | 200 |
+| `iron_sickle` | workbench | 1 blade (2), 1 handle (1) | iron sickle | assembly | 100 |
+| `iron_axe` | workbench | 1 head (2), 1 handle (1) | iron axe | assembly | 100 |
+| `iron_pickaxe` | workbench | 1 head (2), 1 handle (1) | iron pickaxe | assembly | 100 |
+| `iron_hammer` | workbench | 1 head (2), 1 handle (1) | iron hammer | assembly | 100 |
+| `craft_kiln` | workbench + hammer | 10 stone (0.5), 6 clay (0.4), 4 sticks (0.1) | kiln kit | kit assembly | 150 |
+| `craft_forge` | workbench + hammer | 12 brick (0.6), 8 stone (0.3), 4 rope (0.1) | forge kit | kit assembly | 200 |
+| `craft_sawbench` | workbench + hammer | 4 log (0.5), 1 iron ingot (0.3), 10 nails (0.1), 2 rope (0.1) | sawbench kit | kit assembly | 200 |
+| `craft_anvil` | workbench + hammer | 6 iron ingot (0.8), 4 plank (0.2) | anvil kit | kit assembly | 250 |
+
+`craft_forge` changes from today's rope and fiber to bricks and stone. Forge kits already in players' hands are unaffected. There are two routes to a tool handle. The cheap one is sticks and rope. The sawn one is a plank at a sawbench, and it carries the log's quality with a 0.4 station share. That's a choice of quality against effort, and it gives planks a use.
+
+#### Value chain (where prices start)
+
+The anchor is **1 Strand = 1 fiber**. Grass gives about 2 fiber per 3-second pull. With walking and regrowth, that's about 15 fiber a minute at the face, so **one labour-minute is about 15 Strands**. The values below are rough labour, including the inputs and an even share of tool wear. They're starting points for market-maker bots (E3.8) and the sim (E2.7), not prices anyone sets.
+
+| Item | ≈ labour | ≈ Strands |
+|---|---|---|
+| fiber | 4 s | 1 |
+| rope, sticks, clay | 10–15 s | 3–4 |
+| plank, charcoal, stone (pick) | 20–25 s | 4–6 |
+| log (stone axe), brick | 30–35 s | 8 |
+| tool handle, knapped stone | ~1 min | 12–15 |
+| iron ore (stone pick) | 1.5 min | ~20 |
+| stone tool | 3–4 min | 45–55 |
+| iron ingot | 3.5 min | ~50 |
+| iron head | 7 min | ~110 |
+| iron tool | 9 min | ~130 |
+| workbench / chest kit | <1 min | 10–13 |
+| kiln kit | 6 min | ~90 |
+| forge / sawbench kit | 10 min | ~150 |
+| anvil kit | 21 min | ~320 |
+
+At this anchor, a Suburban deed (500 Strands) is about half an hour of grass, and a Rural one (250) is about fifteen minutes. That's cheap next to an anvil. Deed costs aren't part of v1 content, but E2.7's sim should report hours of labour per deed so the two can be tuned together.
 
 **The wilds (2026-10-18).** The Wilderness becomes the wilds: r3800 to r6000, with mountains, rivers and lakes, and no claims (`the-capitol-wilds.md`).
 - WD8 there proposes what it yields, for this tree to take or leave:
@@ -276,7 +430,7 @@ Sizes: S is about one session, M is 1–2, L is 2–4.
 
 | WP | Work | Size | Depends on |
 |---|---|---|---|
-| E2.1 [#160](https://github.com/chrischaps/TheCapitol/issues/160) | **Content tree v1 (D5) [Chris approves].** Final list of resources, items, stations, recipes and weights, written into D5 with the quality weights per recipe type. | S | E0.3 |
+| E2.1 [#160](https://github.com/chrischaps/TheCapitol/issues/160) | **Content tree v1 (D5) [Chris approves].** Final list of resources, items, stations, recipes and weights, written into D5 with the quality weights per recipe type. **As built (pending approval):** 6 resources, 32 items, 6 stations and 27 recipes. Tool types are sickle, axe, pickaxe and hammer, with `saw` dropped because the sawbench is the saw. Stone tools are handle + knapped stone + rope, and iron tools are an anvil-made head + handle. `component` and `tool` are new item categories. `craft_forge` moves to bricks. The value chain's anchor is 1 labour-minute ≈ 15 Strands. | S | E0.3 |
 | E2.2 [#161](https://github.com/chrischaps/TheCapitol/issues/161) | **Resource types.** Difficulty, tool gating, yield by tool, and zone spawn tables in content data. | M | E2.1, E1.5 |
 | E2.3 [#162](https://github.com/chrischaps/TheCapitol/issues/162) | **Seeded nodes by zone.** Deterministic placement from the terrain (woods in clusters, outcrops, veins, clay by the water), clear of roads, water and lots, written by a migration. Ore in the ranges and clay on the wild riverbanks come later from the land, in W6 ([#199](https://github.com/chrischaps/TheCapitol/issues/199)). | L | E2.2 |
 | E2.4 [#163](https://github.com/chrischaps/TheCapitol/issues/163) | **Seed content v1.** The new items, stations, kits and recipes through the content pipeline. Every station makes something. | M | E2.1, E0.3 |
