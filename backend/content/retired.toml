@@ -1,0 +1,20 @@
+# Retired ids: rows that stay in the static tables though the content files
+# no longer define them.
+#
+# At startup every row in a static table must be in its content file or here.
+# A row that is in neither stops the server, so deleting an item from
+# items.toml can't strand the items players hold. A retired row keeps the
+# values it last had, and the game still loads it. It just stops being
+# content you edit. An id can't be both retired and defined.
+#
+#   items       ids from item_types
+#   resources   ids from resource_types
+#   containers  ids from container_types
+#   stations    ids from station_types
+#   recipes     ids from recipes
+
+items = []
+resources = []
+containers = []
+stations = []
+recipes = []

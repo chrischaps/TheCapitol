@@ -86,10 +86,11 @@ async fn remove_in(
     player_id: Uuid,
     station_id: Uuid,
 ) -> Result<RemovedStation, RemoveError> {
-    let (station_type, owner_id, plot_id, kit_quality): (String, Uuid, Option<Uuid>, i32) =
+    let (station_type, owner_id, plot_id, kit_quality, kit): (String, Uuid, Option<Uuid>, i32, Option<String>) =
         sqlx::query_as(
-            "SELECT station_type, owner_id, plot_id, kit_quality
-             FROM stations WHERE id = $1 FOR UPDATE",
+            "SELECT s.station_type, s.owner_id, s.plot_id, s.kit_quality, st.kit_item
+             FROM stations s LEFT JOIN station_types st ON st.id = s.station_type
+             WHERE s.id = $1 FOR UPDATE OF s",
         )
         .bind(station_id)
         .fetch_optional(&mut **tx)
@@ -98,7 +99,7 @@ async fn remove_in(
     if owner_id != player_id {
         return Err(RemoveError::NotYours);
     }
-    let kit = capitol_protocol::rules::station_kit_item(&station_type).ok_or_else(|| {
+    let kit = kit.ok_or_else(|| {
         tracing::error!(
             "Station {} has type {} with no kit",
             station_id,
@@ -211,9 +212,10 @@ pub async fn return_plot_stations(
     tx: &mut PgConnection,
     plot_id: Uuid,
 ) -> Result<ReturnedStations, sqlx::Error> {
-    let stations: Vec<(Uuid, String, Uuid, i32)> = sqlx::query_as(
-        "SELECT id, station_type, owner_id, kit_quality FROM stations
-         WHERE plot_id = $1 ORDER BY placed_at, id FOR UPDATE",
+    let stations: Vec<(Uuid, String, Uuid, i32, Option<String>)> = sqlx::query_as(
+        "SELECT s.id, s.station_type, s.owner_id, s.kit_quality, st.kit_item
+         FROM stations s LEFT JOIN station_types st ON st.id = s.station_type
+         WHERE s.plot_id = $1 ORDER BY s.placed_at, s.id FOR UPDATE OF s",
     )
     .bind(plot_id)
     .fetch_all(&mut *tx)
@@ -240,8 +242,8 @@ pub async fn return_plot_stations(
     let mut returned = ReturnedStations::default();
     let mut inventories: HashMap<Uuid, Option<Inventory>> = HashMap::new();
 
-    for (station_id, station_type, owner_id, kit_quality) in &stations {
-        let Some(kit) = capitol_protocol::rules::station_kit_item(station_type) else {
+    for (station_id, station_type, owner_id, kit_quality, kit) in &stations {
+        let Some(kit) = kit else {
             tracing::error!("Station {} has type {} with no kit", station_id, station_type);
             continue;
         };

@@ -1,0 +1,68 @@
+# Recipes: inputs in, outputs out, with the quality cascade's weights.
+#
+# Upserted into `recipes` at startup (E0.3, see backend/src/content/).
+# One [[recipe]] table per recipe:
+#
+#   id                     the key
+#   name, description      shown to players
+#   category               hand_crafting or station_crafting
+#   required_station_type  a station id from stations.toml, or leave it out
+#                          for a hand recipe
+#   base_duration_ticks    how long one craft takes (10 ticks a second)
+#   inputs                 [{ item_type, quantity, quality_weight }]: how much
+#                          of each input's quality flows into the output
+#   outputs                [{ item_type, quantity_min, quantity_max }]
+#   quality_weights        { variance_min, variance_max }: the random spread
+#                          added to the output's quality
+#   crafting_requirements  a table, empty for now (tool gating fills it, E1.5)
+#
+# Item ids must be in items.toml, and no item may be its own ingredient,
+# however many recipes away.
+
+[[recipe]]
+id = "rope_basic"
+name = "Basic Rope"
+description = "Twist plant fibers into sturdy rope."
+category = "hand_crafting"
+base_duration_ticks = 50
+inputs = [{ item_type = "fiber", quantity = 2, quality_weight = 0.5 }]
+outputs = [{ item_type = "rope", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -3, variance_max = 3 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "craft_workbench"
+name = "Workbench Kit"
+description = "Craft a portable workbench kit."
+category = "hand_crafting"
+base_duration_ticks = 100
+inputs = [{ item_type = "fiber", quantity = 10, quality_weight = 1.0 }]
+outputs = [{ item_type = "workbench_kit", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -3, variance_max = 3 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "craft_chest"
+name = "Storage Chest Kit"
+description = "Craft a portable storage chest kit."
+category = "hand_crafting"
+base_duration_ticks = 80
+inputs = [{ item_type = "fiber", quantity = 8, quality_weight = 1.0 }]
+outputs = [{ item_type = "chest_kit", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -3, variance_max = 3 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "craft_forge"
+name = "Forge Kit"
+description = "Build a forge kit at a workbench, from rope and fiber."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 120
+inputs = [
+    { item_type = "rope", quantity = 4, quality_weight = 0.7 },
+    { item_type = "fiber", quantity = 6, quality_weight = 0.3 },
+]
+outputs = [{ item_type = "forge_kit", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -3, variance_max = 3 }
+crafting_requirements = {}

@@ -12,6 +12,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 mod config;
+mod content;
 mod engine;
 mod error;
 mod middleware;
@@ -64,6 +65,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for id in &zones.missing {
         tracing::warn!("Zone {id} has no row in the zones table");
     }
+
+    // The static game data comes from backend/content/*.toml (E0.3). Write it
+    // into its tables before anything below loads them.
+    let synced = match content::load_and_sync(&db_pool).await {
+        Ok(synced) => synced,
+        Err(e) => {
+            tracing::error!("Content not loaded: {e}");
+            std::process::exit(1);
+        }
+    };
+    tracing::info!(
+        "Content synced: {} rows upserted, {} retired rows kept",
+        synced.upserted, synced.retired
+    );
 
     // Redis connection
     let redis_conn = state::connect_redis(&config.redis_url).await?;
@@ -200,7 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load station types into game state
     let station_types: Vec<StationType> = sqlx::query_as(
-        "SELECT id, name, category, slot_count, layout_columns, interaction_range, icon, description
+        "SELECT id, name, category, slot_count, layout_columns, interaction_range, icon, description, kit_item
          FROM station_types"
     )
     .fetch_all(&db_pool)

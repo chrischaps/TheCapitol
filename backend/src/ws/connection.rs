@@ -1154,7 +1154,7 @@ async fn handle_place_station(
 
     // Verify station type exists
     let st: crate::models::StationType = sqlx::query_as(
-        "SELECT id, name, category, slot_count, layout_columns, interaction_range, icon, description
+        "SELECT id, name, category, slot_count, layout_columns, interaction_range, icon, description, kit_item
          FROM station_types WHERE id = $1"
     )
     .bind(station_type)
@@ -1199,12 +1199,7 @@ async fn handle_place_station(
     }
 
     // Verify player owns the kit item and it's the right type
-    let expected_kit = match station_type {
-        "workbench" => "workbench_kit",
-        "forge" => "forge_kit",
-        "storage_chest" => "chest_kit",
-        _ => return Err("Invalid station type".into()),
-    };
+    let expected_kit = st.kit_item.as_deref().ok_or("Invalid station type")?;
 
     let kit_item: crate::models::Item = sqlx::query_as(
         "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at

@@ -11,7 +11,6 @@ use capitol_protocol::rest::{
     CatalogContainerType, CatalogItemType, CatalogResourceType, CatalogResponse,
     CatalogStationType,
 };
-use capitol_protocol::rules;
 
 use super::GameState;
 
@@ -42,7 +41,7 @@ pub fn build(game: &GameState) -> CatalogResponse {
             interaction_range: t.interaction_range,
             icon: t.icon.clone(),
             description: t.description.clone(),
-            kit: rules::station_kit_item(&t.id).map(str::to_owned),
+            kit: t.kit_item.clone(),
         })
         .collect();
     station_types.sort_by(|a, b| a.id.cmp(&b.id));
@@ -141,6 +140,7 @@ mod tests {
                 interaction_range: 75.0,
                 icon: Some("workbench".into()),
                 description: None,
+                kit_item: Some("workbench_kit".into()),
             },
         );
         game.container_types.insert(

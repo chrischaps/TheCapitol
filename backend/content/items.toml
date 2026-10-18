@@ -1,0 +1,48 @@
+# Item types: everything that can sit in a slot.
+#
+# Upserted into `item_types` at startup (E0.3, see backend/src/content/).
+# One [[item]] table per type:
+#
+#   id         the key. Never rename or delete one: items in players' hands
+#              name it. Move a type you no longer want to retired.toml instead.
+#   name       shown to players
+#   category   raw_material, processed_material or placeable (a station kit)
+#   stackable  false for one-per-slot items such as kits
+#   weight     per unit
+#
+# Every item must be obtainable: a resource yields it, or a recipe makes it.
+
+[[item]]
+id = "fiber"
+name = "Plant Fiber"
+category = "raw_material"
+stackable = true
+weight = 0.1
+
+[[item]]
+id = "rope"
+name = "Rope"
+category = "processed_material"
+stackable = true
+weight = 0.2
+
+[[item]]
+id = "workbench_kit"
+name = "Workbench Kit"
+category = "placeable"
+stackable = false
+weight = 10
+
+[[item]]
+id = "forge_kit"
+name = "Forge Kit"
+category = "placeable"
+stackable = false
+weight = 15
+
+[[item]]
+id = "chest_kit"
+name = "Storage Chest Kit"
+category = "placeable"
+stackable = false
+weight = 8

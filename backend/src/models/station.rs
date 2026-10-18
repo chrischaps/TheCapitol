@@ -16,6 +16,8 @@ pub struct StationType {
     pub interaction_range: f32,
     pub icon: Option<String>,
     pub description: Option<String>,
+    /// The item that places it, and that taking it down gives back (E0.3)
+    pub kit_item: Option<String>,
 }
 
 /// Station instance in the world (from database)

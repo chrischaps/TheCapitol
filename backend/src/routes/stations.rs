@@ -56,7 +56,7 @@ pub async fn get_nearby_stations(
 
     // Get station types for metadata
     let station_types: Vec<StationType> = sqlx::query_as(
-        "SELECT id, name, category, slot_count, layout_columns, interaction_range, icon, description
+        "SELECT id, name, category, slot_count, layout_columns, interaction_range, icon, description, kit_item
          FROM station_types"
     )
     .fetch_all(&state.db)
@@ -145,7 +145,7 @@ pub async fn place_station(
 
     // Verify station type exists
     let station_type: StationType = sqlx::query_as(
-        "SELECT id, name, category, slot_count, layout_columns, interaction_range, icon, description
+        "SELECT id, name, category, slot_count, layout_columns, interaction_range, icon, description, kit_item
          FROM station_types WHERE id = $1"
     )
     .bind(&req.station_type)
@@ -189,12 +189,10 @@ pub async fn place_station(
     }
 
     // Verify player owns the kit item and it's the right type
-    let expected_kit = match req.station_type.as_str() {
-        "workbench" => "workbench_kit",
-        "forge" => "forge_kit",
-        "storage_chest" => "chest_kit",
-        _ => return Err(AppError::BadRequest("Invalid station type".into())),
-    };
+    let expected_kit = station_type
+        .kit_item
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("Invalid station type".into()))?;
 
     let kit_item: Item = sqlx::query_as(
         "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at

@@ -1,0 +1,25 @@
+# Resource types: what a resource node is, and what gathering it gives.
+#
+# Upserted into `resource_types` at startup (E0.3, see backend/src/content/).
+# The nodes themselves are world instances in `resource_nodes`, not content.
+# One [[resource]] table per type:
+#
+#   id                         the key. Nodes name it, so retire it rather than delete it.
+#   name                       shown to players
+#   yields_item                an id from items.toml
+#   yield_quantity_min, _max   units per gather, inclusive
+#   base_quality_min, _max     the range a node's base quality is drawn from
+#   required_tool              an item id, or leave it out to gather by hand
+#   extraction_duration_ticks  how long a gather takes (10 ticks a second)
+#   regeneration_ticks         how long a harvested node takes to come back
+
+[[resource]]
+id = "grass"
+name = "Wild Grass"
+yields_item = "fiber"
+yield_quantity_min = 1
+yield_quantity_max = 3
+base_quality_min = 40
+base_quality_max = 70
+extraction_duration_ticks = 30
+regeneration_ticks = 600
