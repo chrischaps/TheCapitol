@@ -27,7 +27,9 @@ Then claim it, before reading anything else:
 scripts/issue.sh claim <n>
 ```
 
-Exit 2 means another agent got there first, perhaps seconds ago on another machine. Go back to the list and take the next one. Never work on an issue you didn't claim. The claim protocol is described under "Several agents, several machines" in the root `CLAUDE.md`.
+It makes your worktree, `../TheCapitol-<n>` on branch `issue-<n>` (from `origin/issue-<n>` if an earlier agent pushed work in progress, otherwise `origin/master`), and prints its path. Work only there: `renew`, `release` and `land` refuse to run anywhere else.
+
+Exit 2 means another agent got there first, perhaps seconds ago on another machine, or in another session on this same checkout. Go back to the list and take the next one. **Don't touch an existing `../TheCapitol-<n>` worktree for an issue you didn't claim**, even when it's on this machine: it's that session's (#134). If `claim` refuses because the worktree or branch already exists, the same goes: it's someone else's until `issue.sh list` shows the claim stale. Never work on an issue you didn't claim. The claim protocol is described under "Several agents, several machines" in the root `CLAUDE.md`.
 
 Tell the user which issue you picked and why any lower-numbered ones were skipped. Then start without waiting.
 
@@ -42,14 +44,9 @@ Tell the user which issue you picked and why any lower-numbered ones were skippe
 
 ## 3. Work in your own worktree
 
-Another agent, or Chris, may be working at the same time.
+Another agent, or Chris, may be working at the same time. `claim` already made your worktree, `../TheCapitol-<n>`. Run everything for the issue from there, including `issue.sh renew`, `release` and `land`.
 
-```bash
-git fetch origin
-git worktree add ../TheCapitol-<n> -b issue-<n> origin/master
-```
-
-If `origin/issue-<n>` exists, an earlier agent pushed work in progress before its claim went stale. Branch from that instead and read its commits.
+If it started from `origin/issue-<n>` (the claim says so), an earlier agent pushed work in progress before its claim went stale. Read its commits first.
 
 If the work will outlast a day (an engine PR waiting for Chris, say), run `scripts/issue.sh renew <n>` at the start of each session so the claim doesn't look abandoned. Push work in progress with `git push origin issue-<n>` so it survives if this machine goes away.
 

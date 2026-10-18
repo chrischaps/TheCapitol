@@ -37,14 +37,14 @@ Agents on several machines work this repo at once, all as the same GitHub user. 
 
 ```bash
 scripts/issue.sh list                         # who holds what, on every machine, and for how long
-scripts/issue.sh claim <n>                    # exit 2: someone else holds it; pick another
-git worktree add ../TheCapitol-<n> -b issue-<n> origin/master
+scripts/issue.sh claim <n>                    # makes ../TheCapitol-<n>; exit 2: someone else holds it, pick another
+cd ../TheCapitol-<n>
 # ...work, commit with "Closes #<n>"...
 scripts/issue.sh land <n> --verify "<cmd>"    # catch up, verify, ff-push to master, release
 ```
 
 - **A claim is the branch `claim/issue-<n>` on origin.** It holds one commit with no files, and the commit message names the agent and the host. Git rejects the second push of a new branch, so only one claimant can win, even when two push in the same second. The `claimed` label and the "Claimed by" comment are only there for people reading GitHub.
-- **Only the checkout that claimed an issue can renew, release or land it.** It keeps a record in `.git/agent-claims/`. Never delete another agent's `claim/*` branch by hand.
+- **Only the session that claimed an issue can renew, release or land it.** `claim` makes the worktree `../TheCapitol-<n>` itself and records it, with the agent id, in `.git/agent-claims/`. `renew`, `release` and `land` run only from that worktree, so a second session on the same checkout can't act on the first one's claim (#134). An existing worktree for an issue you didn't claim belongs to another session: leave it alone. `claim <n> --no-worktree` skips the worktree, for write-up-only issues. Never delete another agent's `claim/*` branch by hand.
 - **Claims go stale after 24 hours** (`CLAIM_TTL_HOURS`). Run `renew <n>` at the start of each session on long work. A claim past the TTL can be taken over with `claim <n> --steal`. Before stealing, check the issue's comments and `origin/issue-<n>` for work in progress, and continue from it.
 - **Master only moves forward, and only through `land`.** It pushes fast-forward only and retries when another agent lands first. Never force-push master. To catch up it rebases, unless the branch holds a merge or a subtree squash: then it merges master in, so the subtree merge survives. `--verify` runs before the first push and again after any catch-up. Exit 3 is a conflict: resolve it, `git rebase --continue` (or `git commit` for a merge), then land again.
 - **Giving up?** Push `issue-<n>`, comment on the issue where the work stands, then `release <n>`.

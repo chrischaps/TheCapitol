@@ -10,17 +10,27 @@
 # them is compare-and-swap.
 #
 #   scripts/issue.sh list                     every claim: issue, holder, age
-#   scripts/issue.sh claim <n>                claim issue n (exit 2 if held)
+#   scripts/issue.sh claim <n>                claim issue n (exit 2 if held) and
+#                                             make its worktree, ../<repo>-<n>
 #   scripts/issue.sh claim <n> --steal        take over a claim older than the TTL
+#   scripts/issue.sh claim <n> --no-worktree  claim without making a worktree
 #   scripts/issue.sh renew <n>                refresh your claim's timestamp
 #   scripts/issue.sh release <n>              give up your claim
 #   scripts/issue.sh land <n> [--verify CMD]  catch up with master, verify, push,
 #                                             release the claim
 #
+# Two sessions started in one checkout share its .git, so the record of a
+# claim can't by itself say which of them made it (#134). So claim makes the
+# worktree, records its path beside the agent id, and renew, release and land
+# run only from that worktree. A session whose claim exits 2 gets no worktree,
+# and must leave the existing one alone.
+#
 # Environment:
 #   CLAIM_REMOTE     remote to use (default origin)
 #   CLAIM_TTL_HOURS  age after which a claim may be stolen (default 24)
-#   CLAIM_AGENT_ID   name to claim under (default <host>-<time>-<random>)
+#   CLAIM_AGENT_ID   name to claim under (default <host>-<time>-<random>);
+#                    when set, renew, release and land refuse a claim made
+#                    under another name
 #   CLAIM_NO_GH=1    skip GitHub calls (labels, comments, issue state); for tests
 
 set -euo pipefail
@@ -32,16 +42,28 @@ LABEL=claimed
 
 die() { echo "issue.sh: $*" >&2; exit 1; }
 
-usage() { sed -n '12,19p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '12,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 
 gh_on() { [ "${CLAIM_NO_GH:-}" != 1 ]; }
 
 ref_of() { echo "refs/heads/claim/issue-$1"; }
 
 # Local record of the claims this checkout made, shared by all its worktrees.
-# Only the machine that claimed an issue can renew, release or land it.
-record_dir() { echo "$(git rev-parse --path-format=absolute --git-common-dir)/agent-claims"; }
+# Line 1 is the agent id, line 2 the worktree claim made (absent after
+# --no-worktree, and in records older than #134). Only the machine that
+# claimed an issue can renew, release or land it, and only from that worktree.
+common_dir() { git rev-parse --path-format=absolute --git-common-dir; }
+record_dir() { echo "$(common_dir)/agent-claims"; }
 record_of() { echo "$(record_dir)/issue-$1"; }
+record_agent() { sed -n 1p "$(record_of "$1")"; }
+record_worktree() { sed -n 2p "$(record_of "$1")"; }
+
+# ../<repo>-<n> beside the main checkout, whichever worktree we're run from.
+worktree_of() {
+  local main
+  main=$(dirname "$(common_dir)")
+  echo "$(dirname "$main")/$(basename "$main")-$1"
+}
 
 now() { date +%s; }
 
@@ -75,15 +97,26 @@ at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '%s\n' "$msg" | git commit-tree "$(git mktree </dev/null)" ${parent[@]+"${parent[@]}"}
 }
 
-# Fails unless this checkout holds the claim. Prints the remote claim sha.
+# Fails unless this checkout holds the claim and we're in the worktree that
+# claim made. Prints the remote claim sha.
 require_mine() {
-  local n=$1 rec sha _t
+  local n=$1 rec agent wt here sha _t
   rec=$(record_of "$n")
   [ -f "$rec" ] || die "#$n wasn't claimed from this checkout (no $rec)"
+  agent=$(record_agent "$n")
+  if [ -n "${CLAIM_AGENT_ID:-}" ] && [ "$CLAIM_AGENT_ID" != "$agent" ]; then
+    die "#$n was claimed here as $agent, not as $CLAIM_AGENT_ID: it's another session's claim"
+  fi
+  wt=$(record_worktree "$n")
+  if [ -n "$wt" ]; then
+    here=$(git rev-parse --show-toplevel)
+    [ "$here" = "$wt" ] \
+      || die "#$n belongs to the session working in $wt; run this from there, not $here. If that session isn't you, leave it alone"
+  fi
   read -r sha _t <<<"$(remote_claim "$n")"
   [ -n "${sha:-}" ] || die "#$n has no claim on $REMOTE"
-  [ "$(agent_of "$sha")" = "$(cat "$rec")" ] \
-    || die "#$n is now held by $(agent_of "$sha"), not $(cat "$rec")"
+  [ "$(agent_of "$sha")" = "$agent" ] \
+    || die "#$n is now held by $(agent_of "$sha"), not $agent"
   echo "$sha"
 }
 
@@ -99,17 +132,48 @@ cmd_list() {
   [ "$found" = 1 ] || echo "no claims"
 }
 
+held() { # <n> <claim sha> <claim time> <worktree>
+  echo "#$1 is already claimed by $(agent_of "$2"), $(age_text "$3") ago. It isn't yours: pick another issue, and don't touch $4" >&2
+  exit 2
+}
+
 cmd_claim() {
-  local n=${1:?issue number} steal=${2:-} ref agent sha old old_t state
+  local n=${1:?issue number} steal="" make_wt=1 ref agent sha old old_t state wt base="" arg
+  shift
+  for arg in "$@"; do
+    case $arg in
+      --steal) steal=--steal ;;
+      --no-worktree) make_wt="" ;;
+      *) die "claim: unknown option $arg" ;;
+    esac
+  done
   ref=$(ref_of "$n")
   if gh_on; then
     state=$(gh issue view "$n" --json state -q .state)
     [ "$state" = OPEN ] || die "#$n is $state"
   fi
+
+  # A held claim is exit 2 even when its worktree is here, so the session
+  # that lost knows to pick another issue.
+  wt=$(worktree_of "$n")
+  if [ -z "$steal" ]; then
+    read -r old old_t <<<"$(remote_claim "$n")"
+    [ -z "${old:-}" ] || held "$n" "$old" "$old_t" "$wt"
+  fi
+
+  # Checked before claiming, so a refusal leaves nothing to undo. A worktree
+  # or branch already here is another session's, or a stale one: never adopt it.
+  if [ -n "$make_wt" ]; then
+    [ ! -e "$wt" ] \
+      || die "$wt already exists: another session's worktree, or a stale one. Leave it alone unless it's stale ('issue.sh list', 'git -C $wt status'); then push or drop its work, remove it, and claim again"
+    ! git show-ref -q --verify "refs/heads/issue-$n" \
+      || die "branch issue-$n already exists here. If it's stale, push or drop its work, delete it, and claim again"
+  fi
+
   agent=${CLAIM_AGENT_ID:-$(hostname)-$(now)-$RANDOM}
   sha=$(make_claim "$n" "$agent")
 
-  if [ "$steal" = --steal ]; then
+  if [ -n "$steal" ]; then
     read -r old old_t <<<"$(remote_claim "$n")"
     [ -n "${old:-}" ] || die "#$n isn't claimed; claim it without --steal"
     [ $(( $(now) - old_t )) -ge $(( TTL_HOURS * 3600 )) ] \
@@ -120,23 +184,38 @@ cmd_claim() {
   elif ! git push -q "$REMOTE" "$sha:$ref" 2>/dev/null; then
     read -r old old_t <<<"$(remote_claim "$n")"
     [ -n "${old:-}" ] || die "push of the claim for #$n failed, and nobody holds it; check the network and retry"
-    echo "#$n is already claimed by $(agent_of "$old"), $(age_text "$old_t") ago" >&2
-    exit 2
+    held "$n" "$old" "$old_t" "$wt"
   fi
 
   mkdir -p "$(record_dir)"
-  echo "$agent" >"$(record_of "$n")"
+  if [ -n "$make_wt" ]; then
+    # Continue an earlier agent's pushed work in progress, if there is any.
+    git fetch -q "$REMOTE" master
+    base=$REMOTE/master
+    if git fetch -q "$REMOTE" "refs/heads/issue-$n:refs/remotes/$REMOTE/issue-$n" 2>/dev/null; then
+      base=$REMOTE/issue-$n
+    fi
+    if ! git worktree add -q "$wt" -b "issue-$n" "$base"; then
+      git push -q --force-with-lease="$ref:$sha" "$REMOTE" ":$ref" || true
+      die "couldn't make the worktree $wt, so the claim on #$n was dropped"
+    fi
+    wt=$(git -C "$wt" rev-parse --show-toplevel)
+    printf '%s\n%s\n' "$agent" "$wt" >"$(record_of "$n")"
+  else
+    echo "$agent" >"$(record_of "$n")"
+  fi
   if gh_on; then
     gh issue edit "$n" --add-label "$LABEL" >/dev/null || true
     gh issue comment "$n" --body "Claimed by \`$agent\` on \`$(hostname)\`${steal:+ (taken over from a stale claim)}." >/dev/null || true
   fi
   echo "claimed #$n as $agent"
+  [ -z "$make_wt" ] || echo "worktree: $wt (branch issue-$n from $base). Work there; renew, release and land run only from it"
 }
 
 cmd_renew() {
   local n=${1:?issue number} old new
   old=$(require_mine "$n")
-  new=$(make_claim "$n" "$(cat "$(record_of "$n")")" "$old")
+  new=$(make_claim "$n" "$(record_agent "$n")" "$old")
   git push -q "$REMOTE" "$new:$(ref_of "$n")" || die "renew of #$n was rejected"
   echo "renewed #$n"
 }
