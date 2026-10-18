@@ -14,7 +14,7 @@ use super::tools::{self, HeldTool, Wear};
 use super::movement::process_movement;
 use super::regeneration::process_regeneration;
 use super::trading::{TradeManager, TRADE_RANGE};
-use crate::models::{ActionState, ContainerType, Item, ItemType, PlayerPosition, PlayerState, Recipe, ResourceNodeState, ResourceType, StationState, StationType, TerrainConfig, WorldGenParams};
+use crate::models::{ActionState, ContainerType, ItemType, PlayerPosition, PlayerState, Recipe, ResourceNodeState, ResourceType, StationState, StationType, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
 
 use capitol_protocol::rest::CatalogResponse;
@@ -49,7 +49,6 @@ pub struct GameState {
     /// [`GameState::refresh_catalog`] once they're loaded
     pub catalog: Arc<CatalogResponse>,
     pub crafting_operations: HashMap<Uuid, CraftingOperation>,
-    pub pending_craft_items: HashMap<Uuid, Vec<Item>>, // player_id -> validated items for crafting
     pub command_queue: Vec<Command>,
     pub event_sender: broadcast::Sender<GameEvent>,
     pub tick_count: u64,
@@ -103,7 +102,6 @@ impl GameState {
                 recipes: Vec::new(),
             }),
             crafting_operations: HashMap::new(),
-            pending_craft_items: HashMap::new(),
             command_queue: Vec::new(),
             event_sender,
             tick_count: 0,
@@ -311,11 +309,9 @@ impl GameState {
                     }
                 }
                 // M3: Crafting commands
-                Command::StartCrafting { player_id, recipe_id, input_item_ids: _, tool } => {
-                    // This command is only queued after items are validated
-                    // The items are passed as pre-validated from the WebSocket handler
-                    // We need to store input_items temporarily for the command
-                    // Since we can't fetch from DB here, the WS handler must pre-validate
+                Command::StartCrafting { player_id, recipe_id, inputs, tool } => {
+                    // The WS handler fetched `inputs` by the ids the client sent,
+                    // checking they're the player's (`fetch_player_items`)
                     if let Some(recipe) = self.recipes.get(&recipe_id).cloned() {
                         // Check if recipe requires a station (hand crafting should not use station recipes)
                         if let Some(required_station) = &recipe.required_station_type {
@@ -327,24 +323,21 @@ impl GameState {
                         }
 
                         if let Some(player) = self.players.get_mut(&player_id) {
-                            // Create placeholder items with qualities from pending_craft_items
-                            if let Some(pending) = self.pending_craft_items.remove(&player_id) {
-                                match start_crafting(
-                                    player,
-                                    &recipe,
-                                    &pending,
-                                    quality::NO_STATION,
-                                    tool,
-                                    &mut self.crafting_operations,
-                                    &self.event_sender,
-                                ) {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        let _ = self.event_sender.send(GameEvent::CraftingFailed {
-                                            player_id,
-                                            reason: e,
-                                        });
-                                    }
+                            match start_crafting(
+                                player,
+                                &recipe,
+                                &inputs,
+                                quality::NO_STATION,
+                                tool,
+                                &mut self.crafting_operations,
+                                &self.event_sender,
+                            ) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    let _ = self.event_sender.send(GameEvent::CraftingFailed {
+                                        player_id,
+                                        reason: e,
+                                    });
                                 }
                             }
                         }
@@ -360,7 +353,7 @@ impl GameState {
                         cancel_crafting(player, &mut self.crafting_operations, &self.event_sender);
                     }
                 }
-                Command::CraftAtStation { player_id, station_id, recipe_id, input_item_ids: _, tool } => {
+                Command::CraftAtStation { player_id, station_id, recipe_id, inputs, tool } => {
                     // Validate range and start crafting. Who may use the station was
                     // checked against the plot's permissions before this was queued
                     // (`container_access::check_station_access`, #80).
@@ -399,23 +392,21 @@ impl GameState {
                         // Start crafting (uses same flow as hand crafting)
                         let station_quality = station.quality;
                         if let Some(player) = self.players.get_mut(&player_id) {
-                            if let Some(pending) = self.pending_craft_items.remove(&player_id) {
-                                match start_crafting(
-                                    player,
-                                    &recipe,
-                                    &pending,
-                                    station_quality,
-                                    tool,
-                                    &mut self.crafting_operations,
-                                    &self.event_sender,
-                                ) {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        let _ = self.event_sender.send(GameEvent::CraftingFailed {
-                                            player_id,
-                                            reason: e,
-                                        });
-                                    }
+                            match start_crafting(
+                                player,
+                                &recipe,
+                                &inputs,
+                                station_quality,
+                                tool,
+                                &mut self.crafting_operations,
+                                &self.event_sender,
+                            ) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    let _ = self.event_sender.send(GameEvent::CraftingFailed {
+                                        player_id,
+                                        reason: e,
+                                    });
                                 }
                             }
                         }
@@ -1565,5 +1556,76 @@ mod tests {
             Units::from_pairs([(40, 5), (50, 5), (60, 5), (95, 5)]),
             "every unit kept its quality"
         );
+    }
+
+    /// Rope from fiber, by hand
+    fn rope_recipe() -> Recipe {
+        use crate::models::{RecipeInput, RecipeOutput};
+        Recipe {
+            id: "craft_rope".into(),
+            name: "Rope".into(),
+            description: None,
+            category: "crafting".into(),
+            inputs: vec![RecipeInput { item_type: "fiber".into(), quantity: 3, quality_weight: 1.0 }],
+            outputs: vec![RecipeOutput { item_type: "rope".into(), quantity_min: 1, quantity_max: 1 }],
+            base_duration_ticks: 10,
+            quality_weights: quality::Weights::for_recipe([("fiber", 1.0)], None, None, false, 0, 0),
+            required_station_type: None,
+            tool_type: None,
+        }
+    }
+
+    fn fiber_stack(owner: Uuid, n: i32, quality: i32) -> crate::models::Item {
+        crate::models::Item {
+            id: Uuid::new_v4(),
+            item_type: "fiber".into(),
+            quality,
+            quantity: n,
+            owner_id: Some(owner),
+            container_id: None,
+            slot_index: None,
+            created_at: chrono::Utc::now(),
+            durability: None,
+            min_quality: quality,
+            units: Units::uniform(n, quality),
+        }
+    }
+
+    /// The craft takes the stacks its own command names. Before #183 they went
+    /// through a table keyed by player, so a second `craft` sent before the
+    /// tick swapped the first one's inputs for its own, and was itself dropped
+    /// without a word.
+    #[test]
+    fn a_craft_takes_the_stacks_its_own_command_names() {
+        let mut game = game();
+        let recipe = rope_recipe();
+        game.recipes.insert(recipe.id.clone(), recipe.clone());
+        let ada = player("Ada", 4000.0, 4000.0);
+        let a = ada.id;
+        game.add_player(ada);
+        let mut rx = game.subscribe();
+
+        let (poor, fine) = (fiber_stack(a, 3, 20), fiber_stack(a, 3, 90));
+        for stack in [&poor, &fine] {
+            game.queue_command(Command::StartCrafting {
+                player_id: a,
+                recipe_id: recipe.id.clone(),
+                inputs: vec![stack.clone()],
+                tool: None,
+            });
+        }
+        game.process_commands();
+
+        let ops: Vec<_> = game.crafting_operations.values().collect();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].input_items_to_consume, vec![(poor.id, Units::uniform(3, 20))], "the first craft spends the poor fiber");
+        let mut refusals = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let GameEvent::CraftingFailed { player_id, reason } = event {
+                assert_eq!(player_id, a);
+                refusals.push(reason);
+            }
+        }
+        assert_eq!(refusals, ["Already performing an action"], "the second craft is refused out loud");
     }
 }

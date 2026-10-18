@@ -1,5 +1,7 @@
 use uuid::Uuid;
 
+use crate::models::Item;
+
 use super::tools::HeldTool;
 
 #[derive(Debug, Clone)]
@@ -22,8 +24,10 @@ pub enum Command {
     StartCrafting {
         player_id: Uuid,
         recipe_id: String,
-        #[allow(dead_code)] // crafting picks its own inputs (#183)
-        input_item_ids: Vec<Uuid>,
+        /// The stacks the client named, owned by the player, in the order
+        /// it sent them (`input_item_ids`). The craft takes from them in
+        /// that order and from nothing else (#183).
+        inputs: Vec<Item>,
         /// The best tool held for it, looked up before queueing (`tools::tool_for_recipe`)
         tool: Option<HeldTool>,
     },
@@ -35,8 +39,8 @@ pub enum Command {
         player_id: Uuid,
         station_id: Uuid,
         recipe_id: String,
-        #[allow(dead_code)] // crafting picks its own inputs (#183)
-        input_item_ids: Vec<Uuid>,
+        /// As `StartCrafting`'s
+        inputs: Vec<Item>,
         /// The station's own tool, or else the best held (`station_tools::tool_for_station_recipe`)
         tool: Option<HeldTool>,
     },

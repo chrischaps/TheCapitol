@@ -319,12 +319,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                     };
                                     let mut game = state.game.write().await;
-                                    // Store validated items for the command handler
-                                    game.pending_craft_items.insert(player_id, items);
                                     game.queue_command(crate::engine::Command::StartCrafting {
                                         player_id,
                                         recipe_id,
-                                        input_item_ids: item_uuids,
+                                        inputs: items,
                                         tool,
                                     });
                                 }
@@ -602,12 +600,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                     };
                                     let mut game = state.game.write().await;
-                                    game.pending_craft_items.insert(player_id, items);
                                     game.queue_command(crate::engine::Command::CraftAtStation {
                                         player_id,
                                         station_id: station_uuid,
                                         recipe_id,
-                                        input_item_ids: item_uuids,
+                                        inputs: items,
                                         tool,
                                     });
                                 }
