@@ -9,7 +9,7 @@ use flint_render::Vertex;
 /// Straight up, for everything that lies flat on the ground.
 pub const UP: [f32; 3] = [0.0, 1.0, 0.0];
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct MeshBuf {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,

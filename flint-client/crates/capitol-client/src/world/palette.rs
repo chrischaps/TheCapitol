@@ -15,6 +15,46 @@ pub const GOLD_DIM: u32 = 0x8a7019;
 /// the canal beds.
 pub const WATER: u32 = 0x1e64a0;
 
+// The houses on claimed plots (P8.6b). Each zone has its own materials,
+// a little lighter than the lots under them, so the city reads as built
+// up from its ground. Each house picks one of each and shades it.
+
+/// The urban terraces: brick, buff brick and old render.
+pub const URBAN_WALLS: [u32; 6] = [0x8e5b45, 0x7d4f3d, 0x9b7a5c, 0xa48a6c, 0xc4bcae, 0xa9a39a];
+/// Slate, for the city and the guilds.
+pub const URBAN_ROOFS: [u32; 4] = [0x3a3d46, 0x2f333b, 0x44464d, 0x3b3532];
+/// The post-war suburb: cream, sage, pale blue-grey and sand render,
+/// and some brick.
+pub const SUBURBAN_WALLS: [u32; 7] = [
+    0xd8cfbf, 0xc9c2b0, 0xb9c4bb, 0xbfc6cf, 0xd6c3a5, 0xcfb9a8, 0x9a6a52,
+];
+/// Brown and red tile, and grey.
+pub const SUBURBAN_ROOFS: [u32; 5] = [0x5a4a44, 0x6e4636, 0x7a4a38, 0x464a55, 0x4f4b45];
+/// The cottages: whitewash, field stone and ochre.
+pub const RURAL_WALLS: [u32; 4] = [0xe0dacb, 0xd2c9b4, 0xa8a090, 0xc8b48a];
+/// Thatch, slate and old red tile.
+pub const RURAL_ROOFS: [u32; 4] = [0x8a7550, 0x7d6a48, 0x3e414a, 0x7a3e2e];
+/// The guild halls' dressed stone.
+pub const GUILD_WALLS: [u32; 3] = [0xb5aa94, 0xa69c88, 0xc2b9a6];
+/// Front doors: post-war paints and plain wood.
+pub const DOORS: [u32; 6] = [0x5b2a2a, 0x2a3f5b, 0x2f4a33, 0x6b5a2a, 0x3a2a22, 0x4a4f58];
+pub const GARAGE_DOOR: u32 = 0xb8b2a6;
+/// Barn boards: oxblood and weathered timber.
+pub const BARNS: [u32; 3] = [0x6e3a2e, 0x5e3328, 0x5a4a3a];
+pub const BARN_ROOF: u32 = 0x45474c;
+pub const BARN_DOOR: u32 = 0x3a2a22;
+/// New timber, on a house going up.
+pub const TIMBER: u32 = 0xb08a5c;
+pub const CHIMNEY: u32 = 0x6e4a3c;
+/// Window glass by day, and the lamp-light in it at night.
+pub const GLASS: u32 = 0x27313d;
+pub const LAMP: u32 = 0xffb766;
+
+/// `c` darker (`k` < 1) or lighter, alpha kept.
+pub fn shade(c: [f32; 4], k: f32) -> [f32; 4] {
+    [c[0] * k, c[1] * k, c[2] * k, c[3]]
+}
+
 /// The vertex colour of a face that gives off `colour` (linear) as light
 /// at `radiance`: 1 is about as bright as a sunlit wall, and over the
 /// scene's bloom threshold (2.5) it blooms. Alpha 0 marks it as light

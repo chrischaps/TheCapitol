@@ -328,6 +328,8 @@ fn the_store_mirrors_a_real_session() {
     });
     let state = &mirror.state;
     assert_eq!(mirror.fetched, Fetch::SNAPSHOT, "the snapshot, once each");
+    // Everyone's claimed lots came with it (P8.6b), even if there are none.
+    assert!(state.claimed_version() > 0, "no /plots/claimed answer");
     assert_eq!(state.me(), Some(auth.player_id));
     assert_eq!(state.local_player().unwrap().name, name);
     assert!(state.crafting_input().is_some() && state.crafting_output().is_some());

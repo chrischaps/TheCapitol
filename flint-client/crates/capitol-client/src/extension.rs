@@ -78,6 +78,10 @@ pub struct CapitolExtension {
     /// The lots `world::plots::OWNED_MESH` was last built over, and how
     /// their gold was lit then, or `None` to build it again.
     owned_drawn: Option<(Vec<String>, PlotGlow)>,
+    /// The houses on everyone's claimed lots (P8.6b).
+    houses: world::houses::Houses,
+    /// `--claim-sample`: offline, claims to build houses on.
+    claim_sample: Option<world::houses::Sample>,
     plot_panel: ui::plot::PlotPanel,
     atmosphere: Atmosphere,
     /// `--time-of-day`: the hour pinned, 0..1 from midnight, in place of
@@ -141,6 +145,8 @@ impl CapitolExtension {
             built: None,
             lots: HashMap::new(),
             owned_drawn: None,
+            houses: world::houses::Houses::default(),
+            claim_sample: None,
             plot_panel: ui::plot::PlotPanel::default(),
             atmosphere: Atmosphere::default(),
             time_of_day: None,
@@ -203,6 +209,15 @@ impl CapitolExtension {
         self.time_of_day
             .or_else(|| self.session.as_ref()?.state().time_of_day())
             .unwrap_or(daylight::EVENING)
+    }
+
+    /// Offline, claim `share` of the lots, and with `grow_at`, the lots
+    /// nearest the camera at that second (`--claim-sample`, `--grow-at`).
+    pub fn with_claim_sample(mut self, share: Option<f32>, grow_at: Option<f32>) -> Self {
+        if self.session.is_none() && (share.is_some() || grow_at.is_some()) {
+            self.claim_sample = Some(world::houses::Sample::new(share.unwrap_or(0.0), grow_at));
+        }
+        self
     }
 
     /// Play the juice on a timetable, offline (`--juice-sample`).
@@ -478,6 +493,36 @@ impl PlayerExtension for CapitolExtension {
                 attach_each(ctx, std::iter::once(&lots::OWNED_MESH.to_owned()));
             }
         }
+        // Houses on everyone's claimed lots (P8.6b): online the store's set,
+        // offline `--claim-sample`'s.
+        let dt = ctx.clock.delta_time.min(0.1) as f32;
+        if let Some(session) = &self.session {
+            let state = session.state();
+            let claims = state.claimed_lots();
+            let now = state.server_time_ms();
+            let fresh = |id: &str| {
+                claims
+                    .get(id)
+                    .is_some_and(|c| world::houses::fresh(c.claimed_at.timestamp_millis(), now))
+            };
+            self.houses
+                .sync(state.claimed_version(), claims.keys(), fresh, &self.lots);
+        } else if let Some(sample) = &mut self.claim_sample {
+            let t = ctx.camera.target;
+            sample.update(dt, crate::coords::to_server(t.x, t.z), &self.lots);
+            let growing = &sample.growing;
+            self.houses.sync(
+                sample.version,
+                &sample.claimed,
+                |id| growing.contains(id),
+                &self.lots,
+            );
+        }
+        self.houses.advance(dt, &self.lots);
+        if let Some(gpu) = ctx.gpu.as_mut() {
+            let uploaded = self.houses.upload(gpu, &self.lots, glow);
+            attach_each(ctx, uploaded.iter());
+        }
         let Some(gpu) = ctx.gpu.as_mut() else {
             return;
         };
@@ -509,8 +554,9 @@ impl PlayerExtension for CapitolExtension {
             let (plots, lots) = world::plots::upload(gpu, &terrain.terrain_plots);
             sectors.extend(plots);
             self.lots = lots;
-            // The lots moved, so the gold is built again next frame.
+            // The lots moved, so the gold and the houses are built again.
             self.owned_drawn = None;
+            self.houses.lots_changed();
         }
         if self.built.is_some() {
             tracing::info!(

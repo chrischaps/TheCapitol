@@ -65,6 +65,8 @@ pub enum RestRequest {
 
     /// `GET /plots`
     ListPlots(ListPlotsQuery),
+    /// `GET /plots/claimed`: every claimed lot, everyone's (B13)
+    ClaimedPlots,
     /// `GET /plots/{id}`
     Plot { plot_id: Uuid },
     /// `GET /plots/at?x=&y=`
@@ -112,6 +114,7 @@ pub enum RestResponse {
     Deposit(DepositResponse),
     Withdraw(WithdrawResponse),
     Plots(ListPlotsResponse),
+    ClaimedPlots(Vec<ClaimedPlot>),
     Plot(PlotInfo),
     /// `None` when no plot covers the position
     PlotAt(Option<PlotInfo>),
@@ -180,6 +183,7 @@ impl RestRequest {
             | NearbyStations
             | StationContainer { .. }
             | ListPlots(_)
+            | ClaimedPlots
             | Plot { .. }
             | PlotAt(_)
             | PlotPermissions { .. }
@@ -213,6 +217,7 @@ impl RestRequest {
             Deposit(_) => "/exchange/deposit".into(),
             Withdraw(_) => "/exchange/withdraw".into(),
             ListPlots(_) => "/plots".into(),
+            ClaimedPlots => "/plots/claimed".into(),
             Plot { plot_id } => format!("/plots/{plot_id}"),
             PlotAt(_) => "/plots/at".into(),
             ClaimPlot { plot_id } => format!("/plots/{plot_id}/claim"),
@@ -274,6 +279,7 @@ impl RestRequest {
             Q::Deposit(_) => A::Deposit(de(body)?),
             Q::Withdraw(_) => A::Withdraw(de(body)?),
             Q::ListPlots(_) => A::Plots(de(body)?),
+            Q::ClaimedPlots => A::ClaimedPlots(de(body)?),
             Q::Plot { .. } => A::Plot(de(body)?),
             Q::PlotAt(_) => A::PlotAt(de(body)?),
             Q::ClaimPlot { .. } => A::ClaimPlot(de(body)?),
@@ -389,6 +395,7 @@ mod tests {
                 "GET",
                 "/plots".into(),
             ),
+            (RestRequest::ClaimedPlots, "GET", "/plots/claimed".into()),
             (
                 RestRequest::RemoveStation { station_id: id },
                 "DELETE",

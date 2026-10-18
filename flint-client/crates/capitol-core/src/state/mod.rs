@@ -226,11 +226,14 @@ pub enum StateEvent {
     },
     /// Refetch `/terrain`.
     TerrainUpdated,
-    /// Someone, maybe you, claimed a lot (`plot_claimed`, B13). Nothing is
-    /// stored here: whoever draws claimed lots (P8.6b) keeps its own set.
+    /// Someone, maybe you, claimed a lot (`plot_claimed`, B13). It's in
+    /// [`GameState::claimed_lots`] now.
     LotClaimed(ClaimedPlot),
-    /// A lot has no owner any more (`plot_released`, B13). If it was yours,
-    /// it's gone from [`GameState::plots`] and `PlotsUpdated` came first.
+    /// `/plots/claimed` answered: [`GameState::claimed_lots`] is the list.
+    ClaimedLotsUpdated,
+    /// A lot has no owner any more (`plot_released`, B13). It's gone from
+    /// [`GameState::claimed_lots`], and if it was yours, from
+    /// [`GameState::plots`] too, and `PlotsUpdated` came first.
     LotReleased {
         terrain_id: String,
     },
@@ -269,6 +272,11 @@ pub struct GameState {
     plots: Vec<PlotInfo>,
     /// The plot the plot panel shows, picked with `/plots/at`.
     picked_plot: Option<PlotInfo>,
+    /// Everyone's claimed lots, by `terrain_id` (P8.6b): `/plots/claimed`
+    /// with the snapshot, then WS `plot_claimed` and `plot_released`.
+    claimed: HashMap<String, ClaimedPlot>,
+    /// Counts every change to `claimed`, so a drawer can tell it moved.
+    claimed_version: u64,
 
     trade: trade::TradeBook,
 }
@@ -302,6 +310,8 @@ impl GameState {
             strands: None,
             plots: Vec::new(),
             picked_plot: None,
+            claimed: HashMap::new(),
+            claimed_version: 0,
             trade: trade::TradeBook::default(),
         }
     }
@@ -647,12 +657,20 @@ impl GameState {
                 terrain_id,
                 owner_id,
                 claimed_at,
-            } => out.push(StateEvent::LotClaimed(ClaimedPlot {
-                terrain_id: terrain_id.clone(),
-                owner_id: *owner_id,
-                claimed_at: *claimed_at,
-            })),
+            } => {
+                let lot = ClaimedPlot {
+                    terrain_id: terrain_id.clone(),
+                    owner_id: *owner_id,
+                    claimed_at: *claimed_at,
+                };
+                self.claimed.insert(terrain_id.clone(), lot.clone());
+                self.claimed_version += 1;
+                out.push(StateEvent::LotClaimed(lot));
+            }
             M::PlotReleased { terrain_id } => {
+                if self.claimed.remove(terrain_id).is_some() {
+                    self.claimed_version += 1;
+                }
                 if self.release_plot(terrain_id) {
                     out.push(StateEvent::PlotsUpdated);
                 }
@@ -726,6 +744,14 @@ impl GameState {
                     }
                 }
                 out.push(StateEvent::PlotsUpdated);
+            }
+            R::ClaimedPlots(lots) => {
+                self.claimed = lots
+                    .iter()
+                    .map(|lot| (lot.terrain_id.clone(), lot.clone()))
+                    .collect();
+                self.claimed_version += 1;
+                out.push(StateEvent::ClaimedLotsUpdated);
             }
             R::Plot(plot) => {
                 if self.learn_plot(plot) {
@@ -934,6 +960,16 @@ impl GameState {
     /// Your own plots, as last listed.
     pub fn plots(&self) -> &[PlotInfo] {
         &self.plots
+    }
+
+    /// Everyone's claimed lots, by `TerrainPlot::id` (P8.6b's houses).
+    pub fn claimed_lots(&self) -> &HashMap<String, ClaimedPlot> {
+        &self.claimed
+    }
+
+    /// Goes up whenever [`claimed_lots`](Self::claimed_lots) changes.
+    pub fn claimed_version(&self) -> u64 {
+        self.claimed_version
     }
 
     /// One of your plots.
