@@ -72,14 +72,11 @@ mod tests {
 
     use super::metrics::{self, Metrics};
     use super::neighbourhood::{ENTRANCE_OFFSET, ENTRANCE_SPACING};
-    use crate::models::terrain::{point_to_segment_distance, SuburbLayout, TerrainConfig, WorldGenParams};
+    use crate::models::terrain::{point_to_segment_distance, TerrainConfig, WorldGenParams};
 
-    /// The Neighbourhood layout as it will ship: every pattern, mixed by
-    /// the default weights.
+    /// The suburb as it ships: every pattern, mixed by the default weights.
     fn mixed_world(seed: u64) -> WorldGenParams {
-        let mut params = WorldGenParams { seed, ..Default::default() };
-        params.suburban.layout = SuburbLayout::Neighbourhood;
-        params
+        WorldGenParams { seed, ..Default::default() }
     }
 
     /// The wider canals the dev DB commits (#83).

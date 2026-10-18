@@ -459,11 +459,10 @@ pub(crate) fn lay(n: &mut Neighbourhood, p: &NeighbourhoodParams) -> Laid {
 pub(crate) mod tests {
     use super::*;
     use crate::models::suburb::metrics;
-    use crate::models::terrain::{NeighbourhoodPattern, SuburbLayout, TerrainConfig, WorldGenParams};
+    use crate::models::terrain::{NeighbourhoodPattern, TerrainConfig, WorldGenParams};
 
     pub(crate) fn loops_world(seed: u64) -> WorldGenParams {
         let mut params = WorldGenParams { seed, ..Default::default() };
-        params.suburban.layout = SuburbLayout::Neighbourhood;
         params.suburban.neighbourhood.force_pattern = Some(NeighbourhoodPattern::LoopsAndLollipops);
         // The split halves, which (b) doesn't fit, get (a) as they did
         // before (c) could take them (#110).

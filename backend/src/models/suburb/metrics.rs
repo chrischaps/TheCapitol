@@ -5,15 +5,16 @@
 //! places that break a target, which the plan view draws in red.
 //! [`violations`] holds the numbers against [`TARGETS`].
 //!
-//! What counts as a neighbourhood, a cul-de-sac and green ground has to work
-//! for the Legacy plan too, which has none of those as such:
+//! What counts as a neighbourhood, a cul-de-sac and green ground works from
+//! the roads alone, so it also holds for the hand-built plans in the tests.
+//! (It was first written for the Legacy plan, which #113 removed.)
 //! - **neighbourhood:** the 45° sector between two arterials;
 //! - **entrance:** a vertex shared by a suburban road and any other road,
 //!   counted in the sector its suburban street comes from;
 //! - **cul-de-sac:** a suburban road that ends in a bulb or a dead end;
-//! - **green:** for the Neighbourhood layout, its buffers, greenways and
-//!   parks (`parks`, #111). Legacy has none, so for it: open ground within
-//!   `GREEN_STRIP` of an arterial's edge.
+//! - **green:** the neighbourhoods' buffers, greenways and parks (`parks`,
+//!   #111). A plan without greens counts open ground within `GREEN_STRIP`
+//!   of an arterial's edge instead.
 
 use std::collections::HashSet;
 
@@ -24,7 +25,7 @@ use super::graph::{Graph, JunctionKind};
 use super::neighbourhood::Neighbourhood;
 use super::parks::{self, Ground, Greens};
 use crate::models::lot_clearance;
-use crate::models::terrain::{SuburbLayout, TerrainConfig, WorldGenParams};
+use crate::models::terrain::{TerrainConfig, WorldGenParams};
 use crate::models::geom::{quads_overlap_strict, SpatialGrid};
 use crate::models::street_plan;
 use crate::models::terrain::point_to_segment_distance;
@@ -110,8 +111,9 @@ pub struct Plan<'a> {
     /// Whether to sample coverage. It's the slow part in a debug build, so
     /// the street tests leave it out.
     pub coverage: bool,
-    /// Each neighbourhood's ground, with its parks. Empty for Legacy, which
-    /// counts the strip along the arterials as green instead.
+    /// Each neighbourhood's ground, with its parks. A plan without them (the
+    /// hand-built test plans) counts the strip along the arterials as green
+    /// instead.
     pub greens: &'a [Greens],
 }
 
@@ -423,10 +425,7 @@ pub fn measure_world(params: &WorldGenParams, sector: Option<u8>) -> Measurement
     let center = (terrain.center_x, terrain.center_y);
     let before = terrain.generate_suburban_plots_internal(&sp);
     let cleared = lot_clearance::clear_each(&before, &terrain.roads, &terrain.water_rings, center);
-    let neighbourhoods = match sp.layout {
-        SuburbLayout::Neighbourhood => super::plan(&sp, center).neighbourhoods,
-        SuburbLayout::Legacy => Vec::new(),
-    };
+    let neighbourhoods = super::plan(&sp, center).neighbourhoods;
     let greens = parks::lay(&terrain.roads, &terrain.terrain_plots, &neighbourhoods, &sp, center);
     let scope = Scope { center, inner: params.urban_outer_radius, outer: params.suburban_outer_radius, sector };
     let plan = Plan {

@@ -201,8 +201,9 @@ impl SpatialGrid {
 }
 
 /// A polyline with its cumulative lengths, so a point at a distance along it
-/// is a binary search rather than a walk from the start. Legacy's
-/// `point_at_distance` walks, which makes stepping along a road O(n²).
+/// is a binary search rather than a walk from the start. `terrain.rs`'s
+/// `point_at_distance` (the rural lots use it) walks, which makes stepping
+/// along a road O(n²).
 #[derive(Debug, Clone)]
 pub(crate) struct Polyline {
     points: Vec<P>,

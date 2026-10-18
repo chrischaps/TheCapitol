@@ -231,9 +231,9 @@ mod tests {
     #[test]
     fn a_regenerated_terrain_moves_the_nodes_it_runs_over() {
         let mut params = WorldGenParams::default();
-        params.suburban.seed = 7;
-        params.suburban.local_street_width *= 2.0;
-        params.suburban.collector_width *= 2.0;
+        params.seed = 7;
+        params.suburban.neighbourhood.local_width *= 2.0;
+        params.suburban.neighbourhood.collector_width *= 2.0;
         params.arterial_width *= 1.5;
         let terrain = TerrainConfig::from_params(&params);
 

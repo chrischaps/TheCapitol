@@ -63,7 +63,7 @@ Post-war suburbs look different:
   - Local streets 16 wide, collectors 20.
   - Parallel street spacing S ≈ 2·110 + 16 ≈ 236.
 - **A mix of patterns, one per neighbourhood:** warped parallels, loops and lollipops, and central loop.
-- **Harness first, then work packages behind a switch:** `SuburbanGenParams::layout`, `Legacy` (default) or `Neighbourhood`, until the flip in #112. *Flipped in #112, after Chris signed off #111's images: `Neighbourhood` is the default.*
+- **Harness first, then work packages behind a switch:** `SuburbanGenParams::layout`, `Legacy` (default) or `Neighbourhood`, until the flip in #112. *Flipped in #112, after Chris signed off #111's images: `Neighbourhood` is the default. #113 removed Legacy and the switch.*
 
 ### Deeper suburb: 1800–3000 (#117, 2026-10-17)
 At 1600–2400 every neighbourhood frame was 740 deep, so every one fitted exactly 3 rows on every seed, and pattern (a) could only vary its row ends. Chris: "all the neighbourhoods are just slight variants of the same 3 rows with some switchbacks". The suburb is now **1800–3000**, measured with the plan report's radius overrides:
@@ -225,35 +225,35 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - `metrics.rs`
   - `render.rs`, test-only
 - **Reuse:**
-  - `street_plan::{resample, bulb, end_direction, distance_along, crosses, keeps_clear, self_crosses, sharpest_turn, weld_junctions, audit}`
+  - `street_plan::{resample, bulb, end_direction, keeps_clear, self_crosses, sharpest_turn, weld_junctions, audit}`
   - `lot_clearance::finish_lots`
 - **Wiring:**
-  - `match suburban_params.layout` in `generate_all_roads_with_params` (roads) and in `generate_suburban_plots_internal` (lots). Since #107 `Neighbourhood` lays streets, and since #108 its lots. `generate_suburban_plots_internal` runs `suburb::plan` again for the meta, rather than keeping it on the config.
+  - `suburb::plan` in `generate_all_roads_with_params` (roads), and `suburb::lots::lay` in `generate_suburban_plots_internal` (lots). Until #113 each was a `match suburban_params.layout`. `generate_suburban_plots_internal` runs `suburb::plan` again for the meta, rather than keeping it on the config.
   - Pass the plan as a local, so `version()` is unaffected.
 - **Params (#105):**
-  - `SuburbanGenParams::layout` (`legacy` or `neighbourhood` on the wire) and `::neighbourhood: NeighbourhoodParams`, both `#[serde(default)]`, so `world_config` rows and admin PUTs from before #105 still load.
+  - `SuburbanGenParams::neighbourhood: NeighbourhoodParams`, `#[serde(default)]`, so `world_config` rows and admin PUTs from before #105 still load. The `layout` switch (`legacy` or `neighbourhood`) went with Legacy in #113, along with Legacy's own params. Unknown fields are ignored, so an old row that still has them loads as the neighbourhoods.
   - `NeighbourhoodParams` (`#[serde(default)]` on the struct, so a partial object loads): `lot_frontage` 64 (60 until #108), `lot_depth` 110 (`lot_depth_min` 95, `lot_depth_max` 130), `local_width` 16, `collector_width` 20, `buffer` 20, `split_chance` 0.5, `greenway_width` 40 (both added in #106), `link_spacing` (L) 400, `bulb_radius` 13, `cul_de_sac_max` 300, `warp_amplitude` (A) 30, `warp_wavelength` (λ) 1200 (1600 until #111), `pattern_weights` (1 each), and `force_pattern` for tests.
-  - **One resolved set of radii:** `WorldGenParams::suburban_params()` takes the radii, seed and arterial width from the world. Roads and lots both read it, and `suburban.inner_radius`, `outer_radius` and `seed` have no effect. Before #105 the lots read `suburban`'s own radii. For the default world the two sets agreed, so the pin didn't move.
+  - **One resolved set of radii:** `WorldGenParams::suburban_params()` takes the radii, seed and arterial width from the world. Roads and lots both read it, and `suburban.inner_radius` and `outer_radius` have no effect. `seed` is `#[serde(skip)]` since #113, like `arterial_width`. Before #105 the lots read `suburban`'s own radii. For the default world the two sets agreed, so the pin didn't move.
   - **One table of zone radii (#116):** the radii are named consts in `protocol/src/rules.rs` (`URBAN_OUTER_RADIUS`, `SUBURBAN_OUTER_RADIUS` and so on, collected in `ZONE_OUTER_RADII`). `Zone::radii()`, `WorldGenParams::default()`, `SPAWN_Y` and `arterial_end_radius` all derive from them. The server writes them into the DB `zones` table on startup (`engine::zone_sync`), and the React client draws its zone rings from `/bureaucracy/zones` and takes the admin form's defaults from `GET /admin/world-params/default`. Moving a zone edge is a one-line change, with no migration. An admin regenerate that changes the radii moves only the generator; zone classification still reads the table (#118).
-  - **Pin:** `default_terrain_version_is_pinned` holds `get_default().version()` at `41b571c1a312b6c4`, the Neighbourhood default (#112). Until #113, `legacy_terrain_version_is_pinned` holds Legacy at `2f18343910f69960` (moved on purpose by #117; `6006800ab79fbff8` before).
-  - **React:** the Suburban section of `WorldTweakPanel` has a Layout select. `neighbourhood` is optional in `api/admin.ts`, so a reset leaves it to the server's defaults.
+  - **Pin:** `default_terrain_version_is_pinned` holds `get_default().version()` at `41b571c1a312b6c4`, the Neighbourhood default (#112). Removing Legacy (#113) didn't move it. Legacy's own pin (`1a59dc1bd07783ce` at the end, after #114) went with it.
+  - **React:** the Suburban section of `WorldTweakPanel` has a Pattern select (Mixed, or one `force_pattern`) and sliders for the street widths, lot frontage and depth (within `lot_depth_min`–`max`), split chance and warp amplitude (#113). Before #113 it had a Layout select and Legacy's sliders.
 
 ### 4.4 Harness and targets
 - **Release builds** hash the pins differently (#128). Run the pin, and the suite, with plain `cargo test`.
 - **Acceptance (#111):** `suburb::tests::neighbourhood_suburb_meets_its_targets` measures the mixed suburb (default weights) at seeds 42, 7, 1234, 99999 and 2024, and at seed 42 with the wide canals. It asserts the hard targets and those the patterns hold one by one, including green 8–20% and gap ≤ 5%, and prints the soft ones it misses (run with `--nocapture`). `metrics::measure_world` generates and measures a world, parks and all, for every pattern test and the report.
-- **Report test:** `#[ignore]` test `suburb::render::tests::suburb_plan_report`. Env: `SUBURB_SEEDS`, `SUBURB_LAYOUT`, `SUBURB_PATTERN` (#109), `SUBURB_SECTOR`, `SUBURB_OUT` (default `target/suburb-plan/`).
-- **Outputs:** an SVG per layout and seed, metrics JSON, an `index.html` grid and a markdown table.
+- **Report test:** `#[ignore]` test `suburb::render::tests::suburb_plan_report`. Env: `SUBURB_SEEDS`, `SUBURB_PATTERN` (#109), `SUBURB_SECTOR`, `SUBURB_OUT` (default `target/suburb-plan/`).
+- **Outputs:** an SVG per seed (named `neighbourhood-<seed>`, as before #113, so `-Compare` still lines up with older runs), metrics JSON, an `index.html` grid and a markdown table.
 - **PNG:** `backend/tools/suburb-plan.ps1` runs the test in release and converts each SVG with headless Chrome. Look at the PNGs beside `reference/`.
-- **Script options:** `-Seeds`, `-Layout`, `-Pattern` (force one pattern wherever it fits, #109), `-Sector n`, `-Inner` and `-Outer` (the suburb's radii, #117) and `-Out`. `-Compare <dir>` writes `compare.html`, with each plan beside the one of the same name in an earlier run.
+- **Script options:** `-Seeds`, `-Pattern` (force one pattern wherever it fits, #109), `-Sector n`, `-Inner` and `-Outer` (the suburb's radii, #117) and `-Out`. `-Compare <dir>` writes `compare.html`, with each plan beside the one of the same name in an earlier run.
 - **Reading the SVG:** roads are drawn at true width and coloured by role. Suburban lots are shaded by area, with the street edge darker. Lots `finish_lots` trimmed are edged orange, and lots it dropped are drawn dashed magenta at their generated shape. A red ring marks each place that breaks a target; hover it in a browser for the reason. For the Neighbourhood layout (#106), the view also draws each frame dashed, with its rows dotted, a label giving the row count and lot depth, the green buffers, greenways and edge strips, and each entrance as a stub from its gate to a dot on the arterial.
-- **Definitions that also work for Legacy (`suburb/metrics.rs`):**
+- **Definitions that work from the roads alone (`suburb/metrics.rs`).** They were written to work for Legacy too, and still hold for the hand-built test plans:
   - **neighbourhood:** a 45° sector between arterials;
   - **entrance:** a vertex shared by a suburban road and any other road, counted in the sector its suburban street comes from (#107; it sits on the arterial's centre line, which rounding used to give to either side);
   - **junction:** three or more links from at least two roads, so the vertex where a bulb closes on its own stem is not a T;
   - **cul-de-sac:** a suburban road ending in a bulb or a dead end, with its stem measured to where the bulb closes;
   - **parallel spacing:** sampled every 25 along each street, as the distance to the nearest street across it, when that street runs within 20°;
   - **coverage:** sampled every 5 over the annulus, counting road, then lot, then green, then gap;
-  - **green:** the Neighbourhood layout's buffers, greenways and parks (#111). Legacy has none of those, so for it green is open ground within 40 of an arterial's edge.
+  - **green:** the Neighbourhood layout's buffers, greenways and parks (#111). A plan without them (Legacy had none) counts open ground within 40 of an arterial's edge.
 - **Legacy baseline:** posted on #104, at seeds 42, 7, 1234 and 99999. It has 315–394 lots, 6–9 suburban 4-ways, parallel spacing of about 120, lots of about 77 × 91, 28–32% of lots trimmed, and 58–65% of the ground a gap.
 
 | Metric | Target |
@@ -311,3 +311,10 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 - **Seeded node clearance.** `seeded_nodes_sit_clear_of_the_default_terrain` now holds nodes `KEEP_CLEAR` (15) from a road, the rule startup moves them by, not 20. One node stands 16 from a new street, where nothing would move it.
 - **Thresholds.** `generated_lots_are_clear_and_unique` wants > 1500 suburban lots in the Neighbourhood worlds (> 150 still for Legacy), and so does `neighbourhood_layout_changes_only_the_suburb`. `both_layouts()` and `test_suburban_plot_generation` build Legacy explicitly, since `generate_suburban_plots` is Legacy's.
 - **Flint.** `fixtures/terrain.json` recaptured (version `41b571c1a312b6c4`, 1905 suburban lots). The `suburb` shot is now low over the (a) neighbourhood west of the south arterial, its rows and bulbs sweeping in towards the tower.
+
+*As built (#113):*
+- **Gone from `terrain.rs`:** the Legacy generator (collectors, the rejection-sampled local streets, connectivity repair, emergency connectors), its plot walk (`generate_suburban_plots`, `extract_plots_from_roads`, `generate_plots_along_road`) and the helpers only it used (`SeededRng`, `ConnectionPoint`, the intersection-angle checks, its step constants). Also gone: the no-params wrappers (`generate_all_roads()` and the rest), which nothing called, and `street_plan::{crosses, distance_along}`. About 2,000 lines in all.
+- **Params:** `SuburbLayout` and `layout` went, and so did `collector_width`, `local_street_width`, `min_street_spacing`, the plot-area window (`min_`/`max_`/`target_plot_area`) and the frontage window. Nothing but Legacy read them. `seed` stays on the struct, because the generators read the resolved seed from it, but it's `#[serde(skip)]`. **A saved row that names `legacy` loads as the neighbourhoods**, with no alias needed, because the field no longer exists and unknown fields are ignored (`world_params_load_old_and_new`). The dev DB has no `world_config` row.
+- **Tests:** Legacy's pin, `test_suburban_plot_generation`, `test_seeded_rng_determinism` and `test_local_streets_branch_from_connectors` went with it. `both_layouts()` is now `warped_parallels()`, one world. `neighbourhood_layout_changes_only_the_suburb` is now `the_default_world_has_a_suburb`, because it has nothing to compare against. `generated_lots_are_clear_and_unique` runs the five Neighbourhood worlds only. `a_regenerated_terrain_moves_the_nodes_it_runs_over` set `suburban.seed` and Legacy's widths, which had done nothing since #105 and #112. It now sets the world seed and the neighbourhood widths, so it tests what it says.
+- **Tools:** `suburb-plan.ps1 -Layout` and `SUBURB_LAYOUT` are gone. Plans are still named `neighbourhood-…`.
+- **Pin:** `41b571c1a312b6c4`, unchanged.

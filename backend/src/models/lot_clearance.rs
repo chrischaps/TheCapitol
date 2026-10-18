@@ -389,22 +389,15 @@ mod tests {
 
     #[test]
     fn generated_lots_are_clear_and_unique() {
-        use crate::models::terrain::SuburbLayout;
         use crate::models::{TerrainConfig, WorldGenParams};
         // The defaults, the wider canals the dev DB commits, and a few other
-        // seeds, which lay out other suburban streets (#62). Each in both
-        // suburban layouts (#108); Neighbourhood is the default since #112.
+        // seeds, which lay out other suburban streets (#62).
         let mut wide = WorldGenParams::default();
         wide.canal_inner_width = 50.0;
         wide.canal_outer_width = 50.0;
         wide.moat_width = 30.0;
         let seeded = [7, 1234, 99_999].map(|seed| WorldGenParams { seed, ..WorldGenParams::default() });
-        let neighbourhood: Vec<_> = [WorldGenParams::default(), wide].into_iter().chain(seeded).collect();
-        let legacy = neighbourhood.clone().into_iter().map(|mut p| {
-            p.suburban.layout = SuburbLayout::Legacy;
-            p
-        });
-        for params in neighbourhood.into_iter().chain(legacy) {
+        for params in [WorldGenParams::default(), wide].into_iter().chain(seeded) {
             let t = TerrainConfig::from_params(&params);
             let obstacles = Obstacles::new(&t.roads, &t.water_rings, (t.center_x, t.center_y));
             let mut ids = std::collections::HashSet::new();
@@ -416,9 +409,8 @@ mod tests {
                 *zones.entry(p.zone.as_str()).or_default() += 1;
             }
             eprintln!("{} lots: {:?}", t.terrain_plots.len(), zones);
-            // Legacy lays 315–394 suburban lots, Neighbourhood about 1900.
-            let suburban_min = if params.suburban.layout == SuburbLayout::Legacy { 150 } else { 1500 };
-            assert!(zones["urban"] > 1500 && zones["suburban"] > suburban_min && zones["rural"] > 40, "{zones:?}");
+            // The neighbourhoods lay about 1900 suburban lots.
+            assert!(zones["urban"] > 1500 && zones["suburban"] > 1500 && zones["rural"] > 40, "{zones:?}");
             assert!(zones.get("guild_district").copied().unwrap_or(0) >= 40, "{zones:?}");
         }
     }

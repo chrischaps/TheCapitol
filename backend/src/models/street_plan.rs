@@ -221,28 +221,6 @@ fn segments_in(road: &[P], (lo, hi): (P, P)) -> Vec<(usize, [P; 2])> {
         .collect()
 }
 
-/// Whether `street` crosses `road`, leaving out crossings within `allow` of
-/// one of the `ends` (where the street is meant to join a road).
-pub(crate) fn crosses(street: &[P], road: &[P], ends: &[P], allow: f64) -> bool {
-    let near = segments_in(road, bounds(street));
-    if near.is_empty() {
-        return false;
-    }
-    for a in street.windows(2) {
-        for (_, b) in &near {
-            if !boxes_meet(a[0], a[1], b[0], b[1], 0.0) {
-                continue;
-            }
-            if let Some((_, _, x)) = crossing(a[0], a[1], b[0], b[1]) {
-                if !ends.iter().any(|&e| dist(e, x) <= allow) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
 /// Whether every point of `street` stays `clearance` from `road`, except
 /// within `exempt` of one of the `ends` (where the street joins it).
 pub(crate) fn keeps_clear(street: &[P], road: &[P], clearance: f64, ends: &[P], exempt: f64) -> bool {
@@ -411,13 +389,6 @@ pub(crate) fn end_direction(points: &[P]) -> Option<P> {
     let (a, b) = (points[n - 2], points[n - 1]);
     let l = dist(a, b);
     (l > 0.0).then(|| ((b.0 - a.0) / l, (b.1 - a.1) / l))
-}
-
-/// How far along `points` the point nearest `p` is.
-pub(crate) fn distance_along(points: &[P], p: P) -> Option<f64> {
-    let (seg, q, _) = nearest_on(points, p)?;
-    let before: f64 = points.windows(2).take(seg).map(|w| dist(w[0], w[1])).sum();
-    Some(before + dist(points[seg], q))
 }
 
 /// What's wrong with a street plan, for the invariant tests.

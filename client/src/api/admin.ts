@@ -3,22 +3,10 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000'
 export interface SuburbanGenParams {
   inner_radius: number
   outer_radius: number
-  collector_width: number
-  local_street_width: number
-  min_street_spacing: number
-  min_plot_area: number
-  max_plot_area: number
-  target_plot_area: number
-  min_frontage: number
-  max_frontage: number
-  seed: number
-  // Suburb v2 (#103): which generator lays out the suburb
-  layout: SuburbLayout
-  // The Neighbourhood generator's knobs. Left out, the server fills its defaults.
-  neighbourhood?: NeighbourhoodParams
+  // The neighbourhood generator's knobs (suburb v2, #103). The Legacy
+  // generator, its params and the layout switch went in #113.
+  neighbourhood: NeighbourhoodParams
 }
-
-export type SuburbLayout = 'legacy' | 'neighbourhood'
 
 export type NeighbourhoodPattern = 'warped_parallels' | 'loops_and_lollipops' | 'central_loop'
 

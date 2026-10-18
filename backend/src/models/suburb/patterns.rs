@@ -615,11 +615,10 @@ pub(crate) mod tests {
     use super::*;
     use crate::models::suburb::graph::{Graph, JunctionKind};
     use crate::models::suburb::metrics::{self, Plan, Scope};
-    use crate::models::terrain::{SuburbLayout, TerrainConfig, WorldGenParams};
+    use crate::models::terrain::{TerrainConfig, WorldGenParams};
 
     pub(crate) fn parallels_world(seed: u64) -> WorldGenParams {
         let mut params = WorldGenParams { seed, ..Default::default() };
-        params.suburban.layout = SuburbLayout::Neighbourhood;
         params.suburban.neighbourhood.force_pattern = Some(NeighbourhoodPattern::WarpedParallels);
         params
     }

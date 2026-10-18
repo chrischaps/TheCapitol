@@ -54,8 +54,7 @@ enum Role {
 }
 
 impl Role {
-    /// Legacy names its streets by kind; the v2 generator will carry a
-    /// `StreetMeta` instead (#108).
+    /// Streets are named by kind (`collector_`, `culdesac_`, ...).
     fn of(road: &RoadSegment) -> Role {
         match road.road_type {
             RoadType::Arterial => Role::Arterial,
@@ -762,7 +761,7 @@ mod tests {
 
     use super::*;
     use crate::models::suburb::metrics::Measurement;
-    use crate::models::terrain::{NeighbourhoodParams, NeighbourhoodPattern, SuburbLayout, SuburbanGenParams, WorldGenParams};
+    use crate::models::terrain::{NeighbourhoodParams, NeighbourhoodPattern, SuburbanGenParams, WorldGenParams};
     use capitol_protocol::rules::{SUBURBAN_OUTER_RADIUS, URBAN_OUTER_RADIUS};
 
     fn env_or(name: &str, default: &str) -> String {
@@ -774,7 +773,7 @@ mod tests {
     /// `cargo test --release suburb_plan_report -- --ignored --nocapture`.
     ///
     /// Env: `SUBURB_SEEDS` (comma-separated, default 42,7,1234,99999),
-    /// `SUBURB_LAYOUT` (`legacy` or `neighbourhood`), `SUBURB_SECTOR` (0–7, one sector only),
+    /// `SUBURB_SECTOR` (0–7, one sector only),
     /// `SUBURB_INNER` and `SUBURB_OUTER` (the suburb's radii, to try other depths; #117),
     /// `SUBURB_PATTERN` (`warped_parallels`, `loops_and_lollipops` or `central_loop`: force one
     /// wherever it fits; #109) and `SUBURB_OUT` (default `target/suburb-plan/` at the workspace root).
@@ -785,9 +784,9 @@ mod tests {
             .split(',')
             .map(|s| s.trim().parse().expect("SUBURB_SEEDS is a list of numbers"))
             .collect();
-        let layout = env_or("SUBURB_LAYOUT", "legacy").to_lowercase();
-        let suburb_layout: SuburbLayout = serde_json::from_value(serde_json::Value::String(layout.clone()))
-            .unwrap_or_else(|_| panic!("SUBURB_LAYOUT={layout}: legacy or neighbourhood"));
+        // The plan's name in files and titles. `neighbourhood` is the one
+        // layout since #113 removed Legacy, and keeps old runs comparable.
+        let layout = "neighbourhood".to_string();
         let pattern: Option<NeighbourhoodPattern> = std::env::var("SUBURB_PATTERN")
             .ok()
             .map(|v| v.trim().to_lowercase())
@@ -828,8 +827,6 @@ mod tests {
                 urban_outer_radius: inner,
                 suburban_outer_radius: outer,
                 suburban: SuburbanGenParams {
-                    seed,
-                    layout: suburb_layout,
                     neighbourhood: NeighbourhoodParams { force_pattern: pattern, ..Default::default() },
                     ..Default::default()
                 },

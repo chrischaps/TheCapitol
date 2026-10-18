@@ -276,7 +276,7 @@ Moats and canals are water barriers. Players can only cross at bridges. Movement
 
 ### Suburban Generation (suburb v2)
 
-The suburban zone (radius 1800-3000 since #117; the radii live in `protocol/src/rules.rs`) is laid out as post-war neighbourhoods by `backend/src/models/suburb/` (the `Neighbourhood` layout, the default since #112). The plan, with every as-built decision and the targets, is `the-capitol-suburb-v2.md`. Read it before changing the suburb.
+The suburban zone (radius 1800-3000 since #117; the radii live in `protocol/src/rules.rs`) is laid out as post-war neighbourhoods by `backend/src/models/suburb/` (the `Neighbourhood` layout, the only one since #113). The plan, with every as-built decision and the targets, is `the-capitol-suburb-v2.md`. Read it before changing the suburb.
 
 **Neighbourhoods and frames** (`neighbourhood.rs`, `frame.rs`): each 45° sector between the arterials is a neighbourhood, or two halves split along a greenway. Each has a frame: u runs between side lines parallel to the arterials, v is radial depth, and a gentle shared warp curves every row alike. Streets are iso-lines of the frame, and five rows of lots about 106 deep fit the 1200-deep band. Each neighbourhood draws from its own SplitMix64 stream, so changing one doesn't re-id the lots of the others.
 
@@ -289,7 +289,7 @@ The suburban zone (radius 1800-3000 since #117; the radii live in `protocol/src/
 
 **Checking a change:** `suburb::tests::neighbourhood_suburb_meets_its_targets` (`--nocapture` prints the soft targets it misses), and `backend/tools/suburb-plan.ps1` for SVG/PNG plans and `-Compare` against an earlier run. `default_terrain_version_is_pinned` pins the default world (debug builds only, #128).
 
-**Legacy** (`SuburbLayout::Legacy`, the rejection-sampled collectors and lollipops in `terrain.rs`) stays selectable for a saved `world_config` that names it, until #113 removes it.
+**Legacy** (the rejection-sampled collectors and lollipops that came before) was removed in #113, with the `layout` switch and its params. A saved `world_config` that still names it loads as the neighbourhoods.
 
 **Street-plan invariants** (`models/street_plan.rs`, #62): roads meet only at shared vertices, with no hairpin (a turn over 45°) outside a bulb and no road over itself. A bulb closes on its stem's last vertex. `street_plan::audit` checks it.
 

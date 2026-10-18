@@ -420,11 +420,10 @@ pub(crate) fn lay(n: &mut Neighbourhood, p: &NeighbourhoodParams) -> Laid {
 pub(crate) mod tests {
     use super::*;
     use crate::models::suburb::metrics;
-    use crate::models::terrain::{NeighbourhoodPattern, SuburbLayout, TerrainConfig, WorldGenParams};
+    use crate::models::terrain::{NeighbourhoodPattern, TerrainConfig, WorldGenParams};
 
     pub(crate) fn central_world(seed: u64) -> WorldGenParams {
         let mut params = WorldGenParams { seed, ..Default::default() };
-        params.suburban.layout = SuburbLayout::Neighbourhood;
         params.suburban.neighbourhood.force_pattern = Some(NeighbourhoodPattern::CentralLoop);
         // The whole sectors, which (c) doesn't fit, get (a), so the numbers
         // compare with (a)'s own.

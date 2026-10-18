@@ -11,12 +11,9 @@
 .PARAMETER Seeds
   Comma-separated world seeds. Default: 42,7,1234,99999.
 
-.PARAMETER Layout
-  The suburban layout: legacy (the default) or neighbourhood.
-
 .PARAMETER Pattern
-  Force one neighbourhood pattern wherever it fits (neighbourhood layout
-  only): warped_parallels, loops_and_lollipops or central_loop.
+  Force one neighbourhood pattern wherever it fits: warped_parallels,
+  loops_and_lollipops or central_loop.
 
 .PARAMETER Sector
   Draw and measure one 45-degree sector only, 0 to 7. Sector n runs from
@@ -39,13 +36,12 @@
 .EXAMPLE
   powershell -File backend/tools/suburb-plan.ps1
   powershell -File backend/tools/suburb-plan.ps1 -Seeds 42 -Sector 3
-  powershell -File backend/tools/suburb-plan.ps1 -Layout neighbourhood -Inner 1600 -Outer 2400
-  powershell -File backend/tools/suburb-plan.ps1 -Layout neighbourhood -Pattern loops_and_lollipops
+  powershell -File backend/tools/suburb-plan.ps1 -Inner 1600 -Outer 2400
+  powershell -File backend/tools/suburb-plan.ps1 -Pattern loops_and_lollipops
   powershell -File backend/tools/suburb-plan.ps1 -Out target/suburb-new -Compare target/suburb-plan
 #>
 param(
     [string]$Seeds = "",
-    [string]$Layout = "legacy",
     [string]$Pattern = "",
     [int]$Sector = -1,
     [int]$Inner = 0,
@@ -63,7 +59,6 @@ New-Item -ItemType Directory -Force $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
 
 $env:SUBURB_SEEDS = $Seeds
-$env:SUBURB_LAYOUT = $Layout
 $env:SUBURB_PATTERN = $Pattern
 $env:SUBURB_SECTOR = if ($Sector -ge 0) { "$Sector" } else { "" }
 $env:SUBURB_INNER = if ($Inner -gt 0) { "$Inner" } else { "" }

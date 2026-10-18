@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useAuth } from '../contexts/AuthContext'
-import { getWorldParams, getDefaultWorldParams, updateWorldParams, commitWorldParams, type SuburbLayout, type WorldGenParams } from '../api/admin'
+import { getWorldParams, getDefaultWorldParams, updateWorldParams, commitWorldParams, type NeighbourhoodPattern, type WorldGenParams } from '../api/admin'
 import './WorldTweakPanel.css'
 
 interface ParamSliderProps {
@@ -59,9 +59,12 @@ function ParamSelect<T extends string>({ label, value, options, onChange }: Para
   )
 }
 
-const SUBURB_LAYOUTS: { value: SuburbLayout; label: string }[] = [
-  { value: 'neighbourhood', label: 'Neighbourhood' },
-  { value: 'legacy', label: 'Legacy' },
+// '' is no forced pattern: each neighbourhood picks one by the weights.
+const SUBURB_PATTERNS: { value: NeighbourhoodPattern | ''; label: string }[] = [
+  { value: '', label: 'Mixed' },
+  { value: 'warped_parallels', label: 'Warped parallels' },
+  { value: 'loops_and_lollipops', label: 'Loops and lollipops' },
+  { value: 'central_loop', label: 'Central loop' },
 ]
 
 interface SectionProps {
@@ -119,7 +122,7 @@ export default function WorldTweakPanel() {
       .finally(() => setLoading(false))
   }, [isOpen, token, params])
 
-  const updateParam = useCallback((path: string, value: number | string) => {
+  const updateParam = useCallback((path: string, value: number | string | null) => {
     setParams((prev) => {
       if (!prev) return prev
       const next = structuredClone(prev)
@@ -230,15 +233,13 @@ export default function WorldTweakPanel() {
             </Section>
 
             <Section title="Suburban">
-              <ParamSelect label="Layout" value={params.suburban.layout ?? 'neighbourhood'} options={SUBURB_LAYOUTS} onChange={(v) => updateParam('suburban.layout', v)} />
-              <ParamSlider label="Collector Width" value={params.suburban.collector_width} min={4} max={40} step={1} onChange={(v) => updateParam('suburban.collector_width', v)} />
-              <ParamSlider label="Local Street Width" value={params.suburban.local_street_width} min={4} max={30} step={1} onChange={(v) => updateParam('suburban.local_street_width', v)} />
-              <ParamSlider label="Min Street Spacing" value={params.suburban.min_street_spacing} min={30} max={300} step={5} onChange={(v) => updateParam('suburban.min_street_spacing', v)} />
-              <ParamSlider label="Min Plot Area" value={params.suburban.min_plot_area} min={1000} max={20000} step={500} onChange={(v) => updateParam('suburban.min_plot_area', v)} />
-              <ParamSlider label="Max Plot Area" value={params.suburban.max_plot_area} min={2000} max={40000} step={500} onChange={(v) => updateParam('suburban.max_plot_area', v)} />
-              <ParamSlider label="Target Plot Area" value={params.suburban.target_plot_area} min={2000} max={30000} step={500} onChange={(v) => updateParam('suburban.target_plot_area', v)} />
-              <ParamSlider label="Min Frontage" value={params.suburban.min_frontage} min={20} max={200} step={5} onChange={(v) => updateParam('suburban.min_frontage', v)} />
-              <ParamSlider label="Max Frontage" value={params.suburban.max_frontage} min={40} max={300} step={5} onChange={(v) => updateParam('suburban.max_frontage', v)} />
+              <ParamSelect label="Pattern" value={params.suburban.neighbourhood.force_pattern ?? ''} options={SUBURB_PATTERNS} onChange={(v) => updateParam('suburban.neighbourhood.force_pattern', v || null)} />
+              <ParamSlider label="Collector Width" value={params.suburban.neighbourhood.collector_width} min={10} max={40} step={1} onChange={(v) => updateParam('suburban.neighbourhood.collector_width', v)} />
+              <ParamSlider label="Local Street Width" value={params.suburban.neighbourhood.local_width} min={8} max={30} step={1} onChange={(v) => updateParam('suburban.neighbourhood.local_width', v)} />
+              <ParamSlider label="Lot Frontage" value={params.suburban.neighbourhood.lot_frontage} min={40} max={100} step={1} onChange={(v) => updateParam('suburban.neighbourhood.lot_frontage', v)} />
+              <ParamSlider label="Lot Depth" value={params.suburban.neighbourhood.lot_depth} min={params.suburban.neighbourhood.lot_depth_min} max={params.suburban.neighbourhood.lot_depth_max} step={1} onChange={(v) => updateParam('suburban.neighbourhood.lot_depth', v)} />
+              <ParamSlider label="Split Chance" value={params.suburban.neighbourhood.split_chance} min={0} max={1} step={0.05} onChange={(v) => updateParam('suburban.neighbourhood.split_chance', v)} />
+              <ParamSlider label="Warp Amplitude" value={params.suburban.neighbourhood.warp_amplitude} min={0} max={40} step={1} onChange={(v) => updateParam('suburban.neighbourhood.warp_amplitude', v)} />
             </Section>
 
             <Section title="Rural">
