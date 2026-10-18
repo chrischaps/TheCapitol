@@ -88,19 +88,7 @@ struct Track<'a> {
 impl Track<'_> {
     /// u at `x` in from a side line (0 lo, 1 hi), in the world, at depth v.
     fn side_u(&self, side: usize, x: f64, v: f64) -> f64 {
-        let f = self.f;
-        let mut u = if side == 0 { 0.0 } else { f.width };
-        // The warp moves r with u, but slowly: a few rounds settle it.
-        for _ in 0..4 {
-            let r = f.base + v + f.warp.at(u);
-            let a = if side == 0 {
-                f.lo.angle + ((f.lo.inset + x) / r).asin()
-            } else {
-                f.hi.angle - ((f.hi.inset + x) / r).asin()
-            };
-            u = (a - f.theta_lo(r)) / f.span(r) * f.width;
-        }
-        u
+        self.f.side_u(side, x, v)
     }
 
     fn leg_u(&self, side: usize, v: f64) -> f64 {
@@ -477,6 +465,9 @@ pub(crate) mod tests {
         let mut params = WorldGenParams { seed, ..Default::default() };
         params.suburban.layout = SuburbLayout::Neighbourhood;
         params.suburban.neighbourhood.force_pattern = Some(NeighbourhoodPattern::LoopsAndLollipops);
+        // The split halves, which (b) doesn't fit, get (a) as they did
+        // before (c) could take them (#110).
+        params.suburban.neighbourhood.pattern_weights.central_loop = 0.0;
         params
     }
 

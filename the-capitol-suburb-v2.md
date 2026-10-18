@@ -129,7 +129,7 @@ At 1600–2400 every neighbourhood frame was 740 deep, so every one fitted exact
        - **Moved entrances.** Where `allocate_entrances` moved an entrance's `at`, every row on that side bends by the same smoothstep ramp, over max(200, 8·shift), so the stub meets the arterial square on and the spacing holds. A row with its own unmoved entrance stays straight. The #106 overlay still draws such a stub from the original gate.
        - **Weld.** `weld_junctions` snaps an end to the *first* vertex of a segment within `SNAP`, even when the next is exact (#114). So a row keeps its other vertices at least 0.6·STEP (in u) from a rail's.
        - **`StreetMeta`** (role Row/Link/CulDeSac, fronted sides, bulb centre, sector and nbhd) comes back in `SuburbPlan::meta`, one per road. Rows and cul-de-sacs are fronted both sides; rails neither, so the rows own the corners. A row's entrance stub runs through the buffer, where #108 must lay no lots.
-       - **Pattern pick.** `choose` takes one draw from the stream whatever the outcome. (c) doesn't fit until #110, so `force_pattern` set to it falls back to a weighted pick among the patterns that fit. Since #109, (a) and (b) both fit a whole sector, so the Neighbourhood layout mixes them.
+       - **Pattern pick.** `choose` takes one draw from the stream whatever the outcome. `force_pattern` set to a pattern that doesn't fit falls back to a weighted pick among those that do. Since #109, (a) and (b) both fit a whole sector, so the Neighbourhood layout mixes them. Since #110, (a) and (c) both fit a split half, so the halves mix too. A test forcing one pattern zeroes the other's weight, so the neighbourhoods it doesn't fit get (a).
        - At seeds 42, 7, 1234 and 99999: audit clean, no 4-ways, junctions ≥ 71.6°, T spacing ≥ 136 (p10 ≥ 173), stems ≤ 290, 100% connected, parallel spacing median 246, p5 ≥ 231.
    - **(b) Loops and lollipops:**
      - an inset racetrack collector, with one lot row between it and the edge, backing onto the buffer;
@@ -145,6 +145,15 @@ At 1600–2400 every neighbourhood frame was 740 deep, so every one fitted exact
    - **(c) Central loop (PW2):**
      - a flattened racetrack with a park inside;
      - radial cul-de-sacs pointing outward from it.
+     - *As built (#110, `suburb/central.rs`):*
+       - **`fits`:** about as wide as deep (width ≤ 1.3 × depth), with room for the loop's legs and a lot each side inside. At the default radii every split half fits and no whole sector does (about 1.6 times wider than deep, which would leave a park the size of a block of (a) inside the loop).
+       - **Loop.** A collector (20 wide) `band` in from every edge of the frame, in the world (`Frame::side_u`, moved there from (b)'s `Track`). `band` = half the collector + `STEM` (170) + a bulb + a lot depth, about 312. Its corners are as round as the inside allows, capped at 180, so a split half's narrow inner end is a half circle. The loop is one closed road, starting at an entrance's junction. **Only its inside has lots** (one block, back to back, with open ground down the middle where the inside is wider than two lots). Its outside is all stems' and entrance roads' lots, as Southworth's ideal has it: no house on the collector.
+       - **Cul-de-sacs.** Straight stems on the loop's outward normal, a street spacing apart measured `STEM` out (at the tips), so the fans at the corners get enough stems for their lots to back onto each other. A stem is pinned to each corner's diagonal, the longest ground a stem reaches, unless an entrance is already there. Each runs to a bulb and a lot's depth short of the frame's edge, at most `cul_de_sac_max − STEP` (290).
+       - **Entrances** are roads from the loop vertex nearest the gate (spread to 0.9 of a spacing apart), leaving the loop square on and curving (a cubic Hermite) to cross the side line square on, then straight to the arterial. Lots both sides, role Row.
+       - **Lots** (`lots.rs`): frontage is now per side. A ray backing onto a road's unfronted side stops at `lot_depth` instead of meeting half way, and a road owns a meeting street's corner only on a side it fronts. (a) and (b) front every road on both sides or neither, so they don't move.
+       - **Tried and dropped:** a stadium on a straight axis down the middle (its round ends fan the stems so far apart that a quarter of the ground is left, and only 6 stems fit); stems curving from the loop to bulbs spaced along the frame's edge (the walker can't tile skewed, converging streets: lots were dropped and the gap rose to 34%); fronting the loop's outside too (its lots took the stems' roots, and the gap rose).
+       - At seeds 42, 7, 1234 and 99999 (forced, so (a) or (b) in the whole sectors): audit clean, no 4-ways, junctions ≥ 79°, T spacing ≥ 59, stems ≤ 290, at most 13 lots on a cul-de-sac, 100% connected. Lots: 1793–1888, area median 6690–6770, p5 ≥ 4290, width median 64, depth median 106. No overlaps, all convex, nothing trimmed or dropped.
+       - **Gap 15–21%** over the world with (a) in the whole sectors, against (a)'s 8–10%. A comb pointing out from a convex loop fans through a full turn, and a split half is only about 3.5 spacings across, so the wedges at the frame's corners and the ground past the bulbs are left. That is #111's ground for parks and paths. `central_loop_meets_its_targets` holds it at ≤ 22%. A deeper band (`STEM` ≥ 195) no longer fits a split half.
 7. **Determinism.** Each neighbourhood draws from its own SplitMix64 stream, seeded with hash(seed, sector, nbhd). Changing one neighbourhood then doesn't re-id the lots in the others, which matters because lots are owned plots.
 8. **Joins.** Every street end is placed exactly on its target. Any other end stays at least 40 from roads it doesn't join. `weld_junctions` and `audit` stay unchanged.
 
@@ -200,6 +209,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - `neighbourhood.rs`
   - `patterns.rs`
   - `loops.rs`, pattern (b) (#109)
+  - `central.rs`, pattern (c) (#110)
   - `lots.rs` (#108)
   - `graph.rs`
   - `metrics.rs`
@@ -219,6 +229,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - **React:** the Suburban section of `WorldTweakPanel` has a Layout select. `neighbourhood` is optional in `api/admin.ts`, so a reset leaves it to the server's defaults.
 
 ### 4.4 Harness and targets
+- **Release builds** hash the Legacy pin differently (#128). Run the pin, and the suite, with plain `cargo test`.
 - **Report test:** `#[ignore]` test `suburb::render::tests::suburb_plan_report`. Env: `SUBURB_SEEDS`, `SUBURB_LAYOUT`, `SUBURB_PATTERN` (#109), `SUBURB_SECTOR`, `SUBURB_OUT` (default `target/suburb-plan/`).
 - **Outputs:** an SVG per layout and seed, metrics JSON, an `index.html` grid and a markdown table.
 - **PNG:** `backend/tools/suburb-plan.ps1` runs the test in release and converts each SVG with headless Chrome. Look at the PNGs beside `reference/`.

@@ -5,6 +5,7 @@
 //! - `patterns`: the streets each neighbourhood is filled with, and their
 //!   `StreetMeta` (pattern (a), #107);
 //! - `loops`: pattern (b), loops and lollipops (#109);
+//! - `central`: pattern (c), central loop (#110);
 //! - `lots`: the lots that fill the blocks (#108);
 //! - `graph`: the street network as a graph;
 //! - `metrics`: the layout numbers and the targets they're held to;
@@ -18,6 +19,8 @@ use capitol_protocol::terrain::RoadSegment;
 use super::terrain::SuburbanGenParams;
 
 // The server build doesn't yet use everything the patterns are given.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod central;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod frame;
 #[cfg(test)]

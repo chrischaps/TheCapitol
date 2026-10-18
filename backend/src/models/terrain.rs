@@ -3254,6 +3254,7 @@ mod tests {
     fn legacy_default_terrain_version_is_pinned() {
         assert_eq!(WorldGenParams::default().suburban.layout, SuburbLayout::Legacy);
         // Moved on purpose by #117, which deepened the suburb to 1800–3000.
+        // Debug builds only: a release build's floats hash differently (#128).
         assert_eq!(TerrainConfig::get_default().version(), "2f18343910f69960");
     }
 

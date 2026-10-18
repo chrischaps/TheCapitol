@@ -17,7 +17,8 @@
 //! - each row end is an entrance, a U-turn or a bulb.
 //!
 //! **Pattern (b), loops and lollipops**, is in `loops.rs` (#109); it
-//! builds on the row, ramp and bulb pieces here.
+//! builds on the row, ramp and bulb pieces here. **Pattern (c), central
+//! loop**, is in `central.rs` (#110).
 //!
 //! **Roads.** Rows joined by U-turns are one road, a *strand*, with id
 //! `collector_{sector}_{nbhd}_{k}`. A bulb end is a road of its own,
@@ -35,7 +36,7 @@ use std::f64::consts::PI;
 use capitol_protocol::terrain::{RoadSegment, RoadType};
 
 use super::frame::{Frame, STEP};
-use super::loops;
+use super::{central, loops};
 use super::neighbourhood::{Edge, Entrance, Neighbourhood};
 use crate::models::geom::polyline_length;
 use crate::models::street_plan;
@@ -89,8 +90,8 @@ pub(crate) fn lay(n: &mut Neighbourhood, p: &NeighbourhoodParams) -> Laid {
     match choose(n, p) {
         Some(NeighbourhoodPattern::WarpedParallels) => warped_parallels(n, p),
         Some(NeighbourhoodPattern::LoopsAndLollipops) => loops::lay(n, p),
-        // (c) comes with #110; until then it never fits.
-        Some(NeighbourhoodPattern::CentralLoop) | None => Laid::default(),
+        Some(NeighbourhoodPattern::CentralLoop) => central::lay(n, p),
+        None => Laid::default(),
     }
 }
 
@@ -103,7 +104,7 @@ pub(crate) fn choose(n: &mut Neighbourhood, p: &NeighbourhoodParams) -> Option<N
     let fitting: Vec<(NeighbourhoodPattern, f64)> = [
         (NeighbourhoodPattern::WarpedParallels, w.warped_parallels, parallels_fit(&n.frame, p)),
         (NeighbourhoodPattern::LoopsAndLollipops, w.loops_and_lollipops, loops::fits(&n.frame, p)),
-        (NeighbourhoodPattern::CentralLoop, w.central_loop, false),
+        (NeighbourhoodPattern::CentralLoop, w.central_loop, central::fits(&n.frame, p)),
     ]
     .into_iter()
     .filter(|&(_, weight, fits)| fits && weight > 0.0)

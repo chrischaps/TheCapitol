@@ -154,6 +154,9 @@ struct World<'a> {
     grid: SpatialGrid,
     max_half: f64,
     fronted: Vec<bool>,
+    /// Which sides of each road have lots, left and right along its points.
+    /// Pattern (c)'s loop has lots only inside (#110).
+    sides: Vec<(bool, bool)>,
     /// Each fronted road's vertices, so a street's end can find a road it
     /// meets partway along.
     vertices: HashMap<(u64, u64), Vec<(usize, usize)>>,
@@ -177,14 +180,15 @@ impl<'a> World<'a> {
             }
         }
         let max_half = roads.iter().map(|r| r.width / 2.0).fold(0.0, f64::max);
-        let fronted: Vec<bool> = meta.iter().map(|m| m.is_some_and(|m| m.fronted != (false, false))).collect();
+        let sides: Vec<(bool, bool)> = meta.iter().map(|m| m.map_or((false, false), |m| m.fronted)).collect();
+        let fronted: Vec<bool> = sides.iter().map(|&s| s != (false, false)).collect();
         let mut vertices: HashMap<(u64, u64), Vec<(usize, usize)>> = HashMap::new();
         for (road, r) in roads.iter().enumerate().filter(|&(i, _)| fronted[i]) {
             for (i, &q) in r.points.iter().enumerate() {
                 vertices.entry(key(q)).or_default().push((road, i));
             }
         }
-        Self { roads, segs, grid, max_half, fronted, vertices, center, outer }
+        Self { roads, segs, grid, max_half, fronted, sides, vertices, center, outer }
     }
 
     fn near(&self, lo: P, hi: P) -> impl Iterator<Item = &Seg> {
@@ -211,14 +215,28 @@ impl<'a> World<'a> {
         })
     }
 
-    /// The first road the ray `o + t·d` enters after `t0` and by `limit`.
-    fn first_hit(&self, o: P, d: P, t0: f64, limit: f64) -> Option<(f64, usize)> {
+    /// The first road the ray `o + t·d` enters after `t0` and by `limit`,
+    /// and whether it has lots on the side the ray comes from.
+    fn first_hit(&self, o: P, d: P, t0: f64, limit: f64) -> Option<(f64, usize, bool)> {
         let (a, b) = (at(o, d, t0), at(o, d, limit));
         let (lo, hi) = bounds(&[a, b]);
         self.near(lo, hi)
-            .filter_map(|s| capsule_entry(o, d, t0, s.a, s.b, s.half).map(|t| (t, s.road)))
-            .filter(|&(t, _)| t <= limit)
+            .filter_map(|s| {
+                capsule_entry(o, d, t0, s.a, s.b, s.half).map(|t| (t, s.road, self.fronts(s.road, s.a, s.b, o)))
+            })
+            .filter(|&(t, _, _)| t <= limit)
             .min_by(|x, y| x.0.total_cmp(&y.0))
+    }
+
+    /// Whether `road` has lots on the side of its stretch `a`..`b` that `q` is on.
+    fn fronts(&self, road: usize, a: P, b: P, q: P) -> bool {
+        let (l, r) = self.sides[road];
+        let left = (b.0 - a.0) * (q.1 - a.1) - (b.1 - a.1) * (q.0 - a.0) > 0.0;
+        if left {
+            l
+        } else {
+            r
+        }
     }
 
     /// How far out the ray from `o` along `d`, starting at `f`, can go.
@@ -237,8 +255,8 @@ impl<'a> World<'a> {
         let exit = region.exit(o, d, f);
         match self.first_hit(o, d, f, exit.min(f + 2.0 * p.lot_depth_max)) {
             // Back to back: half way to the lots fronting the other road.
-            Some((t, r)) if self.fronted[r] => ((near + t) / 2.0 - REAR_GAP).max(f),
-            Some((t, _)) => (t - EDGE_GAP).min(f + p.lot_depth),
+            Some((t, _, true)) => ((near + t) / 2.0 - REAR_GAP).max(f),
+            Some((t, _, false)) => (t - EDGE_GAP).min(f + p.lot_depth),
             // Open ground to the neighbourhood's edge: as deep as a lot may
             // be, to take up the edge strip.
             None if exit - f <= 2.0 * p.lot_depth_max => (exit - EDGE_GAP).min(f + p.lot_depth_max),
@@ -276,13 +294,16 @@ impl<'a> World<'a> {
     /// Stretches of a fronted road, from its ends, that a fronted road it
     /// meets partway along owns: that road's lots fill the corner. They run
     /// beside this road and find open ground inside the neighbourhood, so
-    /// they're `lot_depth` deep (pattern (b)'s combs, #109).
+    /// they're `lot_depth` deep (pattern (b)'s combs, #109). A road with no
+    /// lots on this road's side owns nothing (pattern (c)'s loop, #110).
     fn owned_ends(&self, road: usize, length: f64, p: &NeighbourhoodParams) -> Vec<(f64, f64)> {
         let pts = &self.roads[road].points;
+        let n = pts.len();
         let mut out = Vec::new();
-        for (end, s) in [(pts[0], 0.0), (pts[pts.len() - 1], length)] {
+        for (end, next, s) in [(pts[0], pts[1], 0.0), (pts[n - 1], pts[n - 2], length)] {
             let through = self.vertices.get(&key(end)).into_iter().flatten().find(|&&(r, i)| {
-                r != road && i > 0 && i + 1 < self.roads[r].points.len()
+                let rp = &self.roads[r].points;
+                r != road && i > 0 && i + 1 < rp.len() && self.fronts(r, rp[i - 1], rp[i + 1], next)
             });
             if let Some(&(r, _)) = through {
                 let len = self.roads[r].width / 2.0 + p.lot_depth + OWNED_SLACK;

@@ -155,6 +155,24 @@ impl Frame {
         (u, r - self.warp.at(u) - self.base)
     }
 
+    /// u at `x` in from a side line (0 lo, 1 hi), in the world, at depth v.
+    /// Use it wherever something must keep a real distance from the side
+    /// lines: u units shrink to about 0.8 at the inner edge.
+    pub(crate) fn side_u(&self, side: usize, x: f64, v: f64) -> f64 {
+        let mut u = if side == 0 { 0.0 } else { self.width };
+        // The warp moves r with u, but slowly: a few rounds settle it.
+        for _ in 0..4 {
+            let r = self.base + v + self.warp.at(u);
+            let a = if side == 0 {
+                self.lo.angle + ((self.lo.inset + x) / r).asin()
+            } else {
+                self.hi.angle - ((self.hi.inset + x) / r).asin()
+            };
+            u = (a - self.theta_lo(r)) / self.span(r) * self.width;
+        }
+        u
+    }
+
     /// The iso-v line from u0 to u1: a row street's centre line, or a back line.
     pub(crate) fn iso_v(&self, v: f64, u0: f64, u1: f64) -> Vec<P> {
         let n = ((u1 - u0).abs() / STEP).ceil().max(1.0) as usize;
