@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use capitol_protocol::rules::quality;
+use capitol_protocol::rules::{quality, tools};
 use rand::Rng;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::models::{ActionState, Item, ItemType, PlayerState, Recipe};
 use super::events::GameEvent;
 use super::craft_completion::{CraftOutput, FinishedCraft};
+use super::tools::HeldTool;
 
 /// Active crafting operation tracked in game state
 #[derive(Debug, Clone)]
@@ -21,6 +22,8 @@ pub struct CraftingOperation {
     /// The quality of the station it's made at, as it was at the start
     /// (`quality::NO_STATION` by hand).
     pub station_quality: i32,
+    /// The tool the recipe needs, as it was at the start (E1.5)
+    pub tool: Option<HeldTool>,
 }
 
 /// Process crafting for all players actively crafting.
@@ -68,7 +71,8 @@ pub fn process_crafting(
     for operation_id in completed_operations {
         if let Some(operation) = crafting_operations.remove(&operation_id) {
             if let Some(recipe) = recipes.get(&operation.recipe_id) {
-                let output_quality = output_quality(&operation.inputs, operation.station_quality, recipe);
+                let tool_quality = operation.tool.as_ref().map_or(0, |t| tools::term_quality(&t.tool));
+                let output_quality = output_quality(&operation.inputs, operation.station_quality, tool_quality, recipe);
 
                 // Roll the outputs; they're written, and announced, by the tick loop
                 let mut rng = rand::thread_rng();
@@ -89,6 +93,7 @@ pub fn process_crafting(
                     operation_id: operation.operation_id,
                     inputs: operation.input_items_to_consume.clone(),
                     outputs,
+                    tool: operation.tool.clone(),
                 });
             }
 
@@ -103,26 +108,36 @@ pub fn process_crafting(
 }
 
 /// The output's quality: the cascade (`rules::quality::output`) with a rolled
-/// variance. No recipe weights a tool yet (E1.4, #156).
-pub fn output_quality(inputs: &quality::Inputs, station_quality: i32, recipe: &Recipe) -> i32 {
+/// variance. `tool_quality` is the tool's quality as its wear leaves it
+/// (`rules::tools::term_quality`), 0 with no tool.
+pub fn output_quality(inputs: &quality::Inputs, station_quality: i32, tool_quality: i32, recipe: &Recipe) -> i32 {
     let weights = &recipe.quality_weights;
     let variance = rand::thread_rng().gen_range(weights.variance_min..=weights.variance_max);
-    quality::output(inputs, station_quality, 0, weights, variance)
+    quality::output(inputs, station_quality, tool_quality, weights, variance)
 }
 
 /// Start crafting for a player, at a station of `station_quality`
-/// (`quality::NO_STATION` by hand)
+/// (`quality::NO_STATION` by hand), with the best `tool` they hold of the type the
+/// recipe needs (`tools::tool_for_recipe`)
 pub fn start_crafting(
     player: &mut PlayerState,
     recipe: &Recipe,
     input_items: &[Item],
     station_quality: i32,
+    tool: Option<HeldTool>,
     crafting_operations: &mut HashMap<Uuid, CraftingOperation>,
     event_sender: &broadcast::Sender<GameEvent>,
 ) -> Result<Uuid, String> {
     // Check if player is already doing something
     if !matches!(player.action_state, ActionState::Idle) {
         return Err("Already performing an action".to_string());
+    }
+
+    // A recipe that needs a tool takes one from the inventory
+    if let Some(tool_type) = recipe.tool_type {
+        if tool.is_none() {
+            return Err(format!("You need a {} to make {}", tool_type, recipe.name));
+        }
     }
 
     // Validate inputs match recipe requirements
@@ -175,6 +190,7 @@ pub fn start_crafting(
         input_items_to_consume: items_to_consume,
         inputs,
         station_quality,
+        tool,
     });
 
     // Emit event
@@ -261,6 +277,7 @@ mod tests {
                 3,
             ),
             required_station_type: Some("workbench".into()),
+            tool_type: None,
         }
     }
 
@@ -325,7 +342,7 @@ mod tests {
 
             let mut ada = player();
             let mut ops = HashMap::new();
-            start_crafting(&mut ada, &recipe, &sent, station, &mut ops, &events).unwrap();
+            start_crafting(&mut ada, &recipe, &sent, station, None, &mut ops, &events).unwrap();
             let mut players: HashMap<_, _> = [(ada.id, ada)].into();
             let done = process_crafting(&mut players, &recipes, &mut ops, &HashMap::new(), &events);
             assert_eq!(done[0].inputs, taken, "the server takes what the client counted");
@@ -346,7 +363,7 @@ mod tests {
         let craft = |items: &[Item], station: i32| {
             let mut ada = player();
             let mut ops = HashMap::new();
-            start_crafting(&mut ada, &recipe, items, station, &mut ops, &events).unwrap();
+            start_crafting(&mut ada, &recipe, items, station, None, &mut ops, &events).unwrap();
             let mut players: HashMap<_, _> = [(ada.id, ada)].into();
             process_crafting(&mut players, &recipes, &mut ops, &HashMap::new(), &events)[0].outputs[0].quality
         };
@@ -356,6 +373,76 @@ mod tests {
             items[1].quantity = 6;
             let (a, d) = (craft(&items, 95), craft(&items, 40));
             assert!(a > d, "an A station made {a}, a D station {d}");
+        }
+    }
+
+    /// The forge kit, as if it took a hammer with a 0.25 share
+    fn hammered() -> Recipe {
+        let mut recipe = forge();
+        recipe.tool_type = Some(tools::ToolType::Hammer);
+        recipe.quality_weights = quality::Weights::for_recipe(
+            [("rope", 0.7), ("fiber", 0.3)],
+            None,
+            Some(0.25),
+            true,
+            -3,
+            3,
+        );
+        recipe
+    }
+
+    fn hammer(quality: i32, durability: i32) -> HeldTool {
+        HeldTool {
+            item_id: Uuid::new_v4(),
+            item_type: "stone_hammer".into(),
+            tool: tools::Tool { base_power: 6.0, quality, durability, max_durability: 60 },
+        }
+    }
+
+    #[test]
+    fn a_recipe_that_needs_a_tool_refuses_without_one() {
+        let recipe = hammered();
+        let (events, _rx) = broadcast::channel(64);
+        let mut rng = StdRng::seed_from_u64(157);
+        let mut items = vec![stack(&mut rng, "rope"), stack(&mut rng, "fiber")];
+        items[0].quantity = 4;
+        items[1].quantity = 6;
+        let mut ada = player();
+        let mut ops = HashMap::new();
+        let refusal = start_crafting(&mut ada, &recipe, &items, 50, None, &mut ops, &events).unwrap_err();
+        assert_eq!(refusal, "You need a hammer to make Forge Kit");
+        assert!(ops.is_empty());
+        assert_eq!(ada.action_state, ActionState::Idle);
+    }
+
+    /// The tool term: a fine hammer lifts the output over a poor one, and a
+    /// worn-out fine one falls back. The finished craft carries the tool to wear.
+    #[test]
+    fn the_best_tool_supplies_the_tool_term_and_goes_to_be_worn() {
+        let recipe = hammered();
+        let recipes: HashMap<_, _> = [(recipe.id.clone(), recipe.clone())].into();
+        let (events, _rx) = broadcast::channel(64);
+        let mut rng = StdRng::seed_from_u64(1157);
+        let craft = |items: &[Item], tool: HeldTool| {
+            let mut ada = player();
+            let mut ops = HashMap::new();
+            start_crafting(&mut ada, &recipe, items, 50, Some(tool), &mut ops, &events).unwrap();
+            let mut players: HashMap<_, _> = [(ada.id, ada)].into();
+            process_crafting(&mut players, &recipes, &mut ops, &HashMap::new(), &events).remove(0)
+        };
+        for _ in 0..200 {
+            let mut items = vec![stack(&mut rng, "rope"), stack(&mut rng, "fiber")];
+            items[0].quantity = 4;
+            items[1].quantity = 6;
+            let fine = hammer(95, 60);
+            let done = craft(&items, fine.clone());
+            assert_eq!(done.tool.as_ref().map(|t| t.item_id), Some(fine.item_id));
+            // 0.25 × (95 − 20) is 18.75 points, past the variance's spread of 6
+            let (good, poor) = (done.outputs[0].quality, craft(&items, hammer(20, 60)).outputs[0].quality);
+            assert!(good > poor, "a Q95 hammer made {good}, a Q20 one {poor}");
+            // 1 use of 60 left: the cliff
+            let worn = craft(&items, hammer(95, 1)).outputs[0].quality;
+            assert!(good > worn, "a fresh hammer made {good}, a spent one {worn}");
         }
     }
 }

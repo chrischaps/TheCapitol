@@ -9,6 +9,7 @@ use super::craft_completion::{finish_craft, FinishedCraft};
 use super::crafting::{cancel_crafting, process_crafting, start_crafting, CraftingOperation};
 use super::events::GameEvent;
 use super::extraction::{cancel_extraction, process_extractions, start_extraction, PendingItem};
+use super::tools::{self, HeldTool, Wear};
 use super::movement::process_movement;
 use super::regeneration::process_regeneration;
 use super::trading::{TradeManager, TRADE_RANGE};
@@ -51,6 +52,8 @@ pub struct GameState {
     pub event_sender: broadcast::Sender<GameEvent>,
     pub tick_count: u64,
     pub pending_items: Vec<PendingItem>,
+    /// The tool each gather under way started with, by player (E1.5)
+    pub gather_tools: HashMap<Uuid, HeldTool>,
     /// Crafts that ran their time this tick, for the tick loop to write
     pub finished_crafts: Vec<FinishedCraft>,
     // M4: Stations
@@ -103,6 +106,7 @@ impl GameState {
             event_sender,
             tick_count: 0,
             pending_items: Vec::new(),
+            gather_tools: HashMap::new(),
             finished_crafts: Vec::new(),
             stations: HashMap::new(),
             station_types: HashMap::new(),
@@ -231,6 +235,7 @@ impl GameState {
                 tracing::info!("Trade cancelled due to player {} disconnect, notified {}", player_id, other);
             }
         }
+        self.gather_tools.remove(&player_id);
         // Remove any pending trade requests
         self.trade_manager.pending_requests.remove(&player_id);
         self.trade_manager.pending_requests.retain(|_, (initiator, _)| *initiator != player_id);
@@ -278,7 +283,7 @@ impl GameState {
                         player.dest_y = Some(dest_y);
                     }
                 }
-                Command::StartExtraction { player_id, node_id } => {
+                Command::StartExtraction { player_id, node_id, tool } => {
                     let Some(node) = self.resource_nodes.get_mut(&node_id) else {
                         self.extraction_failed(player_id, "That resource is gone");
                         continue;
@@ -292,7 +297,9 @@ impl GameState {
                         // Nobody to tell: they left between queueing and this tick
                         continue;
                     };
-                    if let Err(reason) = start_extraction(player, node, resource_type, &self.event_sender) {
+                    if let Err(reason) =
+                        start_extraction(player, node, resource_type, tool, &mut self.gather_tools, &self.event_sender)
+                    {
                         self.extraction_failed(player_id, reason);
                     }
                 }
@@ -302,7 +309,7 @@ impl GameState {
                     }
                 }
                 // M3: Crafting commands
-                Command::StartCrafting { player_id, recipe_id, input_item_ids: _ } => {
+                Command::StartCrafting { player_id, recipe_id, input_item_ids: _, tool } => {
                     // This command is only queued after items are validated
                     // The items are passed as pre-validated from the WebSocket handler
                     // We need to store input_items temporarily for the command
@@ -325,6 +332,7 @@ impl GameState {
                                     &recipe,
                                     &pending,
                                     quality::NO_STATION,
+                                    tool,
                                     &mut self.crafting_operations,
                                     &self.event_sender,
                                 ) {
@@ -350,7 +358,7 @@ impl GameState {
                         cancel_crafting(player, &mut self.crafting_operations, &self.event_sender);
                     }
                 }
-                Command::CraftAtStation { player_id, station_id, recipe_id, input_item_ids: _ } => {
+                Command::CraftAtStation { player_id, station_id, recipe_id, input_item_ids: _, tool } => {
                     // Validate range and start crafting. Who may use the station was
                     // checked against the plot's permissions before this was queued
                     // (`container_access::check_station_access`, #80).
@@ -395,6 +403,7 @@ impl GameState {
                                     &recipe,
                                     &pending,
                                     station_quality,
+                                    tool,
                                     &mut self.crafting_operations,
                                     &self.event_sender,
                                 ) {
@@ -604,6 +613,7 @@ impl GameState {
             &mut self.players,
             &mut self.resource_nodes,
             &self.resource_types,
+            &mut self.gather_tools,
             self.tick_count,
             &self.event_sender,
         );
@@ -652,18 +662,9 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
             event_sender = game.event_sender.clone();
         }
 
-        // Persist any items created from extractions/crafting
-        // and notify clients after database writes complete
-        if !pending_items.is_empty() {
-            let affected_players = persist_items(&app_state.db, pending_items).await;
-            // Send inventory updated events AFTER persistence completes
-            for (player_id, container_id) in affected_players {
-                let _ = event_sender.send(GameEvent::InventoryUpdated {
-                    player_id,
-                    container_id,
-                    slots: Vec::new(), // Client will refresh all slots
-                });
-            }
+        // Write the gathers, wearing their tools, and only then tell the gatherers
+        for item in pending_items {
+            persist_gather(&app_state.db, item, &event_sender).await;
         }
 
         // Finish crafts: inputs re-checked, consumed and the output written in one
@@ -671,7 +672,7 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
         // `inventory_updated` per container that changed.
         for craft in finished_crafts {
             match finish_craft(&app_state.db, &craft).await {
-                Ok(changed) => {
+                Ok(done) => {
                     for output in &craft.outputs {
                         let _ = event_sender.send(GameEvent::CraftingCompleted {
                             player_id: craft.player_id,
@@ -680,9 +681,13 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
                             item_name: output.item_name.clone(),
                             quantity: output.quantity,
                             quality: output.quality,
+                            tool: done.tool.clone(),
                         });
                     }
-                    for container_id in changed {
+                    if let Some(broken) = &done.broken {
+                        tools::announce_broken(&event_sender, broken);
+                    }
+                    for container_id in done.changed {
                         let _ = event_sender.send(GameEvent::InventoryUpdated {
                             player_id: craft.player_id,
                             container_id,
@@ -768,134 +773,157 @@ async fn persist_positions(game_state: &Arc<RwLock<GameState>>, app_state: &AppS
     }
 }
 
-async fn persist_items(db: &sqlx::PgPool, items: Vec<PendingItem>) -> Vec<(Uuid, Uuid)> {
-    let mut affected: Vec<(Uuid, Uuid)> = Vec::new();
-
-    for item in items {
-        // Determine target container type
-        let container_type = item.target_container_type.as_deref().unwrap_or("player_inventory");
-
-        // Get the appropriate container
-        let container_result: Option<(Uuid, i32)> = sqlx::query_as(
-            "SELECT c.id, ct.slot_count FROM containers c
-             JOIN container_types ct ON c.container_type = ct.id
-             WHERE c.owner_id = $1 AND c.container_type = $2
-             LIMIT 1"
-        )
-        .bind(item.player_id)
-        .bind(container_type)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten();
-
-        let (container_id, slot_count) = match container_result {
-            Some((id, count)) => (id, count),
-            None => {
-                tracing::error!("No {} container for player {}", container_type, item.player_id);
-                continue;
-            }
-        };
-
-        // Check if there's an existing stack of same type to merge with
-        let existing: Option<(Uuid, i32, i32, i32)> = sqlx::query_as(
-            "SELECT id, quantity, quality, slot_index FROM items
-             WHERE container_id = $1 AND item_type = $2
-             LIMIT 1"
-        )
-        .bind(container_id)
-        .bind(&item.item_type)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten();
-
-        if let Some((existing_id, existing_qty, existing_quality, _slot)) = existing {
-            // Merge with existing stack (weighted average quality)
-            let new_qty = existing_qty + item.quantity;
-            let new_quality = (existing_quality * existing_qty + item.quality * item.quantity) / new_qty;
-
-            let result = sqlx::query(
-                "UPDATE items SET quantity = $1, quality = $2 WHERE id = $3"
-            )
-            .bind(new_qty)
-            .bind(new_quality)
-            .bind(existing_id)
-            .execute(db)
-            .await;
-
-            if let Err(e) = result {
-                tracing::error!("Failed to merge item: {:?}", e);
-            } else {
-                tracing::info!(
-                    "Merged {} x{} (quality {}) into existing stack for player {}",
-                    item.item_type,
-                    item.quantity,
-                    item.quality,
-                    item.player_id
-                );
-                affected.push((item.player_id, container_id));
-            }
-        } else {
-            // Find first empty slot
-            let used_slots: Vec<(i32,)> = sqlx::query_as(
-                "SELECT slot_index FROM items WHERE container_id = $1 AND slot_index IS NOT NULL"
-            )
-            .bind(container_id)
-            .fetch_all(db)
-            .await
-            .unwrap_or_default();
-
-            let used: std::collections::HashSet<i32> = used_slots.into_iter().map(|(s,)| s).collect();
-            let mut empty_slot: Option<i32> = None;
-            for slot in 0..slot_count {
-                if !used.contains(&slot) {
-                    empty_slot = Some(slot);
-                    break;
+/// Write one finished gather, then tell the gatherer: `extraction_completed` with
+/// what the tool has left, `inventory_updated`, and `tool_broke` if that was its
+/// last use.
+///
+/// The tool wears in the same transaction that writes the item. If it left the
+/// player's inventory while they gathered, the gather is what bare hands would
+/// have given, or nothing for a resource that needs the tool.
+async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broadcast::Sender<GameEvent>) {
+    let mut tx = match db.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!("Failed to start saving a gather: {:?}", e);
+            return;
+        }
+    };
+    let (mut used, mut broken) = (None, None);
+    if let Some(gather) = item.tool.take() {
+        match tools::wear_held(&mut tx, gather.held.item_id, item.player_id).await {
+            Ok(Some(wear)) => {
+                used = Some(gather.held.after(&wear));
+                if let Wear::Broke(b) = wear {
+                    broken = Some(b);
                 }
             }
-
-            let slot_index = match empty_slot {
-                Some(s) => s,
+            Ok(None) => match gather.by_hand {
+                Some((quantity, quality)) => (item.quantity, item.quality) = (quantity, quality),
                 None => {
-                    tracing::warn!("Container {} full for player {}, item lost!", container_type, item.player_id);
-                    continue;
+                    let _ = events.send(GameEvent::ExtractionFailed {
+                        player_id: item.player_id,
+                        reason: format!(
+                            "Your {} left your inventory before the gather finished",
+                            gather.held.item_type
+                        ),
+                    });
+                    return;
                 }
-            };
-
-            // Create new item in slot
-            let item_id = Uuid::new_v4();
-            let result = sqlx::query(
-                "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)"
-            )
-            .bind(item_id)
-            .bind(&item.item_type)
-            .bind(item.quality)
-            .bind(item.quantity)
-            .bind(item.player_id)
-            .bind(container_id)
-            .bind(slot_index)
-            .execute(db)
-            .await;
-
-            if let Err(e) = result {
-                tracing::error!("Failed to persist item: {:?}", e);
-            } else {
-                tracing::info!(
-                    "Created {} x{} (quality {}) in slot {} for player {}",
-                    item.item_type,
-                    item.quantity,
-                    item.quality,
-                    slot_index,
-                    item.player_id
-                );
-                affected.push((item.player_id, container_id));
+            },
+            Err(e) => {
+                tracing::error!("Failed to wear tool {}: {:?}", gather.held.item_id, e);
+                return;
             }
         }
     }
+    let container_id = match place_gathered(&mut tx, &item).await {
+        Ok(Some(container_id)) => container_id,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::error!("Failed to persist {} for {}: {:?}", item.item_type, item.player_id, e);
+            return;
+        }
+    };
+    if let Err(e) = tx.commit().await {
+        tracing::error!("Failed to save a gather: {:?}", e);
+        return;
+    }
 
-    affected
+    let _ = events.send(GameEvent::ExtractionCompleted {
+        player_id: item.player_id,
+        node_id: item.node_id,
+        item_type: item.item_type.clone(),
+        item_name: item.item_name.clone(),
+        quantity: item.quantity,
+        quality: item.quality,
+        tool: used,
+    });
+    let _ = events.send(GameEvent::InventoryUpdated {
+        player_id: item.player_id,
+        container_id,
+        slots: Vec::new(), // Client will refresh all slots
+    });
+    if let Some(broken) = &broken {
+        tools::announce_broken(events, broken);
+    }
+}
+
+/// Put a gathered item in its gatherer's inventory: onto a stack of its type
+/// (quality averaged by quantity), or into the first free slot. Returns the
+/// container, or `None` if there's no room (the item is lost, as before).
+async fn place_gathered(conn: &mut sqlx::PgConnection, item: &PendingItem) -> Result<Option<Uuid>, sqlx::Error> {
+    let container: Option<(Uuid, i32)> = sqlx::query_as(
+        "SELECT c.id, ct.slot_count FROM containers c
+         JOIN container_types ct ON c.container_type = ct.id
+         WHERE c.owner_id = $1 AND c.container_type = 'player_inventory'
+         LIMIT 1"
+    )
+    .bind(item.player_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((container_id, slot_count)) = container else {
+        tracing::error!("No player_inventory container for player {}", item.player_id);
+        return Ok(None);
+    };
+
+    // Check if there's an existing stack of same type to merge with
+    let existing: Option<(Uuid, i32, i32)> = sqlx::query_as(
+        "SELECT id, quantity, quality FROM items
+         WHERE container_id = $1 AND item_type = $2
+         LIMIT 1 FOR UPDATE"
+    )
+    .bind(container_id)
+    .bind(&item.item_type)
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    if let Some((existing_id, existing_qty, existing_quality)) = existing {
+        // Merge with existing stack (weighted average quality)
+        let new_qty = existing_qty + item.quantity;
+        let new_quality = (existing_quality * existing_qty + item.quality * item.quantity) / new_qty;
+        sqlx::query("UPDATE items SET quantity = $1, quality = $2 WHERE id = $3")
+            .bind(new_qty)
+            .bind(new_quality)
+            .bind(existing_id)
+            .execute(&mut *conn)
+            .await?;
+        tracing::info!(
+            "Merged {} x{} (quality {}) into existing stack for player {}",
+            item.item_type, item.quantity, item.quality, item.player_id
+        );
+        return Ok(Some(container_id));
+    }
+
+    // Find first empty slot
+    let used: Vec<(i32,)> = sqlx::query_as(
+        "SELECT slot_index FROM items WHERE container_id = $1 AND slot_index IS NOT NULL"
+    )
+    .bind(container_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let Some(slot_index) = (0..slot_count).find(|s| !used.iter().any(|(u,)| u == s)) else {
+        tracing::warn!("Inventory full for player {}, item lost!", item.player_id);
+        return Ok(None);
+    };
+
+    sqlx::query(
+        "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)"
+    )
+    .bind(Uuid::new_v4())
+    .bind(&item.item_type)
+    .bind(item.quality)
+    .bind(item.quantity)
+    .bind(item.player_id)
+    .bind(container_id)
+    .bind(slot_index)
+    .execute(&mut *conn)
+    .await?;
+    tracing::info!(
+        "Created {} x{} (quality {}) in slot {} for player {}",
+        item.item_type, item.quantity, item.quality, slot_index, item.player_id
+    );
+    Ok(Some(container_id))
 }
 
 
@@ -1253,6 +1281,8 @@ mod tests {
             base_quality_min: 40,
             base_quality_max: 70,
             required_tool: None,
+            tool_type: None,
+            difficulty: None,
             extraction_duration_ticks: 30,
             regeneration_ticks: 600,
         });
@@ -1291,7 +1321,7 @@ mod tests {
     #[test]
     fn extract_an_unknown_node_tells_the_player() {
         let (mut game, a, _, mut rx) = two_players(10.0);
-        let command = Command::StartExtraction { player_id: a, node_id: Uuid::new_v4() };
+        let command = Command::StartExtraction { player_id: a, node_id: Uuid::new_v4(), tool: None };
         let reason = extraction_refused(&mut game, &mut rx, command, a);
         assert!(reason.contains("gone"), "{reason}");
     }
@@ -1301,7 +1331,7 @@ mod tests {
         let (mut game, a, _, mut rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
         game.resource_nodes.get_mut(&node_id).unwrap().resource_type = "moonflower".into();
-        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id }, a);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None }, a);
         assert!(reason.contains("moonflower"), "{reason}");
     }
 
@@ -1311,7 +1341,7 @@ mod tests {
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
         game.players.get_mut(&a).unwrap().action_state =
             ActionState::Extracting { node_id: Uuid::new_v4(), progress: 0, duration: 30 };
-        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id }, a);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None }, a);
         assert!(reason.contains("Already performing an action"), "{reason}");
     }
 
@@ -1319,11 +1349,11 @@ mod tests {
     fn extract_a_node_someone_else_is_gathering_tells_the_second_player() {
         let (mut game, a, b, mut rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
-        game.queue_command(Command::StartExtraction { player_id: a, node_id });
+        game.queue_command(Command::StartExtraction { player_id: a, node_id, tool: None });
         game.process_commands();
         while rx.try_recv().is_ok() {}
 
-        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: b, node_id }, b);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: b, node_id, tool: None }, b);
         assert!(reason.contains("Someone else is already gathering this Wild Grass"), "{reason}");
     }
 
@@ -1331,7 +1361,7 @@ mod tests {
     fn extract_a_depleted_node_tells_the_player() {
         let (mut game, a, _, mut rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Depleted);
-        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id }, a);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None }, a);
         assert!(reason.contains("grow back"), "{reason}");
     }
 
@@ -1339,7 +1369,7 @@ mod tests {
     fn extract_out_of_range_says_how_far() {
         let (mut game, a, _, mut rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, EXTRACTION_RANGE + 30.0, NodeState::Available);
-        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id }, a);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None }, a);
         assert!(reason.contains("Too far"), "{reason}");
         assert!(reason.contains(&format!("{:.0} units", EXTRACTION_RANGE + 30.0)), "{reason}");
     }
@@ -1349,7 +1379,7 @@ mod tests {
         let (mut game, a, _, mut rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
         game.resource_types.get_mut("grass").unwrap().required_tool = Some("sickle".into());
-        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id }, a);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None }, a);
         assert!(reason.contains("sickle"), "{reason}");
     }
 
@@ -1357,7 +1387,7 @@ mod tests {
     fn an_extraction_in_range_sends_no_failure() {
         let (mut game, a, _, mut rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
-        game.queue_command(Command::StartExtraction { player_id: a, node_id });
+        game.queue_command(Command::StartExtraction { player_id: a, node_id, tool: None });
         game.process_commands();
         let mut started = false;
         while let Ok(event) = rx.try_recv() {
@@ -1365,5 +1395,121 @@ mod tests {
             started |= matches!(event, GameEvent::ExtractionStarted { player_id, .. } if player_id == a);
         }
         assert!(started);
+    }
+
+    // E1.5: a gather wears its tool as it's written
+
+    /// A player with an inventory holding a stone sickle with `durability` left, in a
+    /// fresh database. Returns (player, inventory, the sickle as `best_tool` finds it).
+    async fn gatherer(db: &sqlx::PgPool, durability: i32) -> (Uuid, Uuid, HeldTool) {
+        crate::content::sync(db, &crate::content::load().unwrap()).await.unwrap();
+        let account = Uuid::new_v4();
+        sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, 'ada@test', 'x')")
+            .bind(account)
+            .execute(db)
+            .await
+            .unwrap();
+        let (player, inventory) = (Uuid::new_v4(), Uuid::new_v4());
+        sqlx::query("INSERT INTO players (id, account_id, name) VALUES ($1, $2, 'ada')")
+            .bind(player)
+            .bind(account)
+            .execute(db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO containers (id, container_type, owner_id) VALUES ($1, 'player_inventory', $2)")
+            .bind(inventory)
+            .bind(player)
+            .execute(db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index, durability)
+             VALUES ($1, 'stone_sickle', 50, 1, $2, $3, 0, $4)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(player)
+        .bind(inventory)
+        .bind(durability)
+        .execute(db)
+        .await
+        .unwrap();
+        let sickle = tools::best_tool(db, player, capitol_protocol::rules::tools::ToolType::Sickle)
+            .await
+            .unwrap()
+            .unwrap();
+        (player, inventory, sickle)
+    }
+
+    fn sickle_gather(player: Uuid, sickle: &HeldTool) -> PendingItem {
+        PendingItem {
+            player_id: player,
+            node_id: Uuid::new_v4(),
+            item_type: "fiber".into(),
+            item_name: "Plant Fiber".into(),
+            quantity: 5,
+            quality: 52,
+            tool: Some(super::super::extraction::GatherTool { held: sickle.clone(), by_hand: Some((3, 58)) }),
+        }
+    }
+
+    async fn fiber(db: &sqlx::PgPool, inventory: Uuid) -> Option<(i32, i32)> {
+        sqlx::query_as("SELECT quantity, quality FROM items WHERE container_id = $1 AND item_type = 'fiber'")
+            .bind(inventory)
+            .fetch_optional(db)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn each_pull_wears_the_sickle(db: sqlx::PgPool) {
+        let (ada, inventory, sickle) = gatherer(&db, 2).await;
+        let (events, mut heard) = broadcast::channel(16);
+
+        persist_gather(&db, sickle_gather(ada, &sickle), &events).await;
+        assert_eq!(fiber(&db, inventory).await, Some((5, 52)), "the sickle's yield");
+        let GameEvent::ExtractionCompleted { quantity: 5, tool: Some(used), .. } = heard.try_recv().unwrap() else {
+            panic!("expected extraction_completed with the sickle");
+        };
+        assert_eq!((used.item_id, used.durability, used.max_durability), (sickle.item_id, 1, 60));
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::InventoryUpdated { .. }));
+
+        // The second pull is its last
+        persist_gather(&db, sickle_gather(ada, &sickle), &events).await;
+        assert_eq!(fiber(&db, inventory).await.map(|f| f.0), Some(10));
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::ExtractionCompleted { tool: Some(ref t), .. } if t.durability == 0));
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::InventoryUpdated { .. }));
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::ToolBroke { item_id, .. } if item_id == sickle.item_id));
+    }
+
+    /// A sickle put down mid-gather: the gather is what hands would have given,
+    /// and a resource that needs the sickle gives nothing
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_gather_whose_tool_left_falls_back_to_hands(db: sqlx::PgPool) {
+        let (ada, inventory, sickle) = gatherer(&db, 10).await;
+        sqlx::query("UPDATE items SET container_id = NULL, slot_index = NULL WHERE id = $1")
+            .bind(sickle.item_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let (events, mut heard) = broadcast::channel(16);
+
+        persist_gather(&db, sickle_gather(ada, &sickle), &events).await;
+        assert_eq!(fiber(&db, inventory).await, Some((3, 58)), "by hand");
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::ExtractionCompleted { quantity: 3, tool: None, .. }));
+
+        let mut gated = sickle_gather(ada, &sickle);
+        gated.tool.as_mut().unwrap().by_hand = None;
+        persist_gather(&db, gated, &events).await;
+        assert_eq!(fiber(&db, inventory).await, Some((3, 58)), "nothing more");
+        let _ = heard.try_recv(); // the first gather's inventory_updated
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::ExtractionFailed { player_id, .. } if player_id == ada));
+        let left: i32 = sqlx::query_scalar("SELECT durability FROM items WHERE id = $1")
+            .bind(sickle.item_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(left, 10, "a tool that wasn't used doesn't wear");
     }
 }

@@ -3,7 +3,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::models::{PlayerPosition, SlotItem};
-use capitol_protocol::ws::TradeItemInfo;
+use capitol_protocol::ws::{ToolUse, TradeItemInfo};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data")]
@@ -29,6 +29,8 @@ pub enum GameEvent {
         item_name: String,
         quantity: i32,
         quality: i32,
+        /// The tool that did it, after the use (E1.5)
+        tool: Option<ToolUse>,
     },
     ExtractionCancelled {
         player_id: Uuid,
@@ -65,6 +67,8 @@ pub enum GameEvent {
         item_name: String,
         quantity: i32,
         quality: i32,
+        /// The recipe's tool, after the use (E1.5)
+        tool: Option<ToolUse>,
     },
     CraftingCancelled {
         player_id: Uuid,

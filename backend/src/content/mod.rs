@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use capitol_protocol::rules::tools;
+pub use crate::models::CraftingRequirements;
 use serde::Deserialize;
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -63,9 +64,22 @@ pub struct ResourceDef {
     pub yield_quantity_max: i32,
     pub base_quality_min: i32,
     pub base_quality_max: i32,
+    /// A tool type it can't be gathered without (E1.5). It's then `tool_type` too.
     pub required_tool: Option<String>,
+    /// The tool type that works it: the best one held speeds the gather, raises
+    /// its yield and wears (`rules::tools`). Defaults to `required_tool`.
+    pub tool_type: Option<String>,
+    /// The power that counts as the right tool for it. Needed with a tool type.
+    pub difficulty: Option<f64>,
     pub extraction_duration_ticks: i32,
     pub regeneration_ticks: i32,
+}
+
+impl ResourceDef {
+    /// The tool type that works it, given or implied by `required_tool`.
+    pub fn tool(&self) -> Option<&str> {
+        self.tool_type.as_deref().or(self.required_tool.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -133,12 +147,8 @@ pub struct RecipeDef {
     pub inputs: Vec<InputDef>,
     pub outputs: Vec<OutputDef>,
     pub quality_weights: VarianceDef,
-    #[serde(default = "empty_table")]
-    pub crafting_requirements: serde_json::Value,
-}
-
-fn empty_table() -> serde_json::Value {
-    serde_json::json!({})
+    #[serde(default)]
+    pub crafting_requirements: CraftingRequirements,
 }
 
 /// The ids `retired.toml` keeps in the tables, by table.
@@ -305,8 +315,23 @@ pub fn validate(content: &Content) -> Vec<String> {
     };
     for r in &content.resources {
         item(&mut problems, format!("resource '{}'", r.id), &r.yields_item);
-        if let Some(tool) = &r.required_tool {
-            item(&mut problems, format!("resource '{}' (its tool)", r.id), tool);
+        for tool in [&r.required_tool, &r.tool_type].into_iter().flatten() {
+            if tools::ToolType::from_str(tool).is_none() {
+                problems.push(format!("resource '{}' names unknown tool type '{tool}'", r.id));
+            }
+        }
+        if let (Some(required), Some(works)) = (&r.required_tool, &r.tool_type) {
+            if required != works {
+                problems.push(format!("resource '{}' requires a {required} but is worked by a {works}", r.id));
+            }
+        }
+        match (r.tool(), r.difficulty) {
+            (Some(_), None) => problems.push(format!("resource '{}' has a tool type but no difficulty", r.id)),
+            (None, Some(_)) => problems.push(format!("resource '{}' has a difficulty but no tool type", r.id)),
+            (Some(_), Some(d)) if !(d.is_finite() && d > 0.0) => {
+                problems.push(format!("resource '{}' has a difficulty that isn't above 0", r.id))
+            }
+            _ => {}
         }
     }
     for s in &content.stations {
@@ -330,6 +355,19 @@ pub fn validate(content: &Content) -> Vec<String> {
     let is_tool: HashSet<&str> =
         content.items.iter().filter(|i| i.tool.is_some()).map(|i| i.id.as_str()).collect();
     for r in &content.recipes {
+        if let Some(tool) = &r.crafting_requirements.tool_type {
+            if tools::ToolType::from_str(tool).is_none() {
+                problems.push(format!("recipe '{}' needs unknown tool type '{tool}'", r.id));
+            }
+        }
+        // A tool that wears for nothing, or a share nothing fills
+        let tool_share = r.quality_weights.tool.unwrap_or(0.0) > 0.0;
+        if tool_share != r.crafting_requirements.tool_type.is_some() {
+            problems.push(format!(
+                "recipe '{}' must name a tool type exactly when it gives the tool a quality share",
+                r.id
+            ));
+        }
         for i in &r.inputs {
             item(&mut problems, format!("recipe '{}'", r.id), &i.item_type);
         }
@@ -367,14 +405,21 @@ pub fn validate(content: &Content) -> Vec<String> {
     }
 
     // What a player can come to hold, starting empty-handed: what grows
-    // (given its tool), then what recipes make from that (given their station).
+    // (given its tool), then what recipes make from that (given their station
+    // and tool).
     let kit_of: HashMap<&str, &str> =
         content.stations.iter().map(|s| (s.id.as_str(), s.kit.as_str())).collect();
+    let tool_of: HashMap<&str, &str> = content
+        .items
+        .iter()
+        .filter_map(|i| Some((i.id.as_str(), i.tool.as_ref()?.tool_type.as_str())))
+        .collect();
+    let held = |had: &HashSet<&str>, t: &str| had.iter().any(|i| tool_of.get(i) == Some(&t));
     let mut had: HashSet<&str> = HashSet::new();
     loop {
         let before = had.len();
         for r in &content.resources {
-            if r.required_tool.as_deref().is_none_or(|t| had.contains(t)) {
+            if r.required_tool.as_deref().is_none_or(|t| held(&had, t)) {
                 had.insert(&r.yields_item);
             }
         }
@@ -383,7 +428,8 @@ pub fn validate(content: &Content) -> Vec<String> {
                 .required_station_type
                 .as_deref()
                 .is_none_or(|s| kit_of.get(s).is_some_and(|kit| had.contains(kit)));
-            if station && r.inputs.iter().all(|i| had.contains(i.item_type.as_str())) {
+            let tool = r.crafting_requirements.tool_type.as_deref().is_none_or(|t| held(&had, t));
+            if station && tool && r.inputs.iter().all(|i| had.contains(i.item_type.as_str())) {
                 had.extend(r.outputs.iter().map(|o| o.item_type.as_str()));
             }
         }
@@ -565,14 +611,16 @@ async fn upsert(tx: &mut Transaction<'_, Postgres>, content: &Content) -> Result
     for r in &content.resources {
         sqlx::query(
             "INSERT INTO resource_types (id, name, yields_item, yield_quantity_min, yield_quantity_max,
-                 base_quality_min, base_quality_max, required_tool, extraction_duration_ticks, regeneration_ticks)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 base_quality_min, base_quality_max, required_tool, extraction_duration_ticks, regeneration_ticks,
+                 tool_type, difficulty)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
              ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, yields_item = EXCLUDED.yields_item,
                  yield_quantity_min = EXCLUDED.yield_quantity_min, yield_quantity_max = EXCLUDED.yield_quantity_max,
                  base_quality_min = EXCLUDED.base_quality_min, base_quality_max = EXCLUDED.base_quality_max,
                  required_tool = EXCLUDED.required_tool,
                  extraction_duration_ticks = EXCLUDED.extraction_duration_ticks,
-                 regeneration_ticks = EXCLUDED.regeneration_ticks",
+                 regeneration_ticks = EXCLUDED.regeneration_ticks,
+                 tool_type = EXCLUDED.tool_type, difficulty = EXCLUDED.difficulty",
         )
         .bind(&r.id)
         .bind(&r.name)
@@ -584,6 +632,8 @@ async fn upsert(tx: &mut Transaction<'_, Postgres>, content: &Content) -> Result
         .bind(&r.required_tool)
         .bind(r.extraction_duration_ticks)
         .bind(r.regeneration_ticks)
+        .bind(r.tool())
+        .bind(r.difficulty)
         .execute(&mut **tx)
         .await?;
         n += 1;
@@ -724,6 +774,53 @@ mod tests {
         assert!(problems.contains("no power or no durability"), "{problems}");
         assert!(problems.contains("tools don't stack"), "{problems}");
         assert!(problems.contains("other than one at a time"), "{problems}");
+    }
+
+    #[test]
+    fn the_validator_checks_tools_at_work() {
+        let mut content = load().unwrap();
+        let grass = content.resources.iter_mut().find(|r| r.id == "grass").unwrap();
+        grass.difficulty = None;
+        let mut gated = grass.clone();
+        gated.id = "reeds".into();
+        gated.required_tool = Some("axe".into());
+        gated.difficulty = Some(0.0);
+        let mut unknown = gated.clone();
+        unknown.id = "moss".into();
+        unknown.required_tool = Some("spoon".into());
+        unknown.tool_type = None;
+        unknown.difficulty = Some(3.0);
+        content.resources.extend([gated, unknown]);
+        content.recipes[0].crafting_requirements.tool_type = Some("ladle".into());
+        content.recipes[1].quality_weights.tool = Some(0.2);
+        let problems = validate(&content).join("\n");
+        assert!(problems.contains("'grass' has a tool type but no difficulty"), "{problems}");
+        assert!(problems.contains("'reeds' requires a axe but is worked by a sickle"), "{problems}");
+        assert!(problems.contains("'reeds' has a difficulty that isn't above 0"), "{problems}");
+        assert!(problems.contains("'moss' names unknown tool type 'spoon'"), "{problems}");
+        assert!(problems.contains("needs unknown tool type 'ladle'"), "{problems}");
+        let share = format!("recipe '{}' must name a tool type", content.recipes[0].id);
+        assert!(problems.contains(&share), "a tool with no share: {problems}");
+        let share = format!("recipe '{}' must name a tool type", content.recipes[1].id);
+        assert!(problems.contains(&share), "a share with no tool: {problems}");
+    }
+
+    /// A gated resource, or a recipe that needs a tool, can only be had once a
+    /// tool of that type can.
+    #[test]
+    fn a_tool_gate_needs_a_tool_that_can_be_had() {
+        let mut content = load().unwrap();
+        let grass = content.resources.iter_mut().find(|r| r.id == "grass").unwrap();
+        grass.required_tool = Some("sickle".into());
+        let problems = validate(&content).join("\n");
+        assert!(problems.contains("item 'fiber' can't be had"), "the sickle needs fiber: {problems}");
+
+        let mut content = load().unwrap();
+        let rope = content.recipes.iter_mut().find(|r| r.outputs[0].item_type == "rope").unwrap();
+        rope.crafting_requirements.tool_type = Some("saw".into());
+        rope.quality_weights.tool = Some(0.2);
+        let problems = validate(&content).join("\n");
+        assert!(problems.contains("item 'rope' can't be had"), "no saw anywhere: {problems}");
     }
 
     #[test]

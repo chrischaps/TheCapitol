@@ -400,6 +400,7 @@ mod tests {
     #[test]
     fn recipes_are_filtered_by_station_and_the_chest_only_stores() {
         let recipe = |id: &str, at: Option<&str>| RecipeInfo {
+            tool_type: None,
             id: id.into(),
             name: id.into(),
             description: None,

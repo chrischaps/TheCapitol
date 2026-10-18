@@ -351,6 +351,7 @@ fn rules() -> Vec<(&'static str, Start, Vec<NetEvent>, Vec<Fetch>)> {
             "my extraction completing fetches containers",
             Settled,
             vec![NetEvent::Ws(M::ExtractionCompleted {
+                tool: None,
                 player_id: ME,
                 node_id: NODE,
                 item_type: item_type.clone(),
@@ -364,6 +365,7 @@ fn rules() -> Vec<(&'static str, Start, Vec<NetEvent>, Vec<Fetch>)> {
             "a stranger's extraction completing fetches nothing",
             Settled,
             vec![NetEvent::Ws(M::ExtractionCompleted {
+                tool: None,
                 player_id: OTHER,
                 node_id: NODE,
                 item_type: item_type.clone(),
@@ -377,6 +379,7 @@ fn rules() -> Vec<(&'static str, Start, Vec<NetEvent>, Vec<Fetch>)> {
             "my crafting completing fetches containers",
             Settled,
             vec![NetEvent::Ws(M::CraftingCompleted {
+                tool: None,
                 player_id: ME,
                 operation_id: Uuid::from_u128(40),
                 item_type: "rope".into(),
@@ -391,6 +394,7 @@ fn rules() -> Vec<(&'static str, Start, Vec<NetEvent>, Vec<Fetch>)> {
             Settled,
             vec![
                 NetEvent::Ws(M::ExtractionCompleted {
+                    tool: None,
                     player_id: ME,
                     node_id: NODE,
                     item_type,

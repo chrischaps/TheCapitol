@@ -101,6 +101,9 @@ pub async fn start_extraction(
     .fetch_one(&state.db)
     .await?;
 
+    // The best tool for it, if it takes one (E1.5)
+    let tool = crate::engine::tools::tool_for_node(&state.db, &state.game, player_id, req.node_id).await?;
+
     // Validate that the node exists and is in range
     {
         let game = state.game.read().await;
@@ -118,7 +121,7 @@ pub async fn start_extraction(
         })?;
 
         // The same reasons the tick gives over the WebSocket as extraction_failed
-        if let Some(reason) = extraction_refusal(player, node, resource_type) {
+        if let Some(reason) = extraction_refusal(player, node, resource_type, tool.as_ref()) {
             return Err(AppError::BadRequest(reason));
         }
     }
@@ -133,6 +136,7 @@ pub async fn start_extraction(
     game.queue_command(Command::StartExtraction {
         player_id,
         node_id: req.node_id,
+        tool,
     });
 
     Ok(Json(ExtractResponse {

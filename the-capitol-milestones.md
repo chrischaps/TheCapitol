@@ -355,11 +355,11 @@ Create static data for:
 - [ ] Installed tool contributes to quality
 
 #### Backend - Hand Tools
-- [ ] Tools as items with durability
-- [ ] Tool degradation on use (per action)
-- [ ] Tool quality affects extraction/crafting
-- [ ] Degradation curve: stable until 20%, then degrades
-- [ ] `ToolType`: Axe, Pickaxe, Sickle, Hammer, etc.
+- [x] Tools as items with durability *(E1.4 #156)*
+- [x] Tool degradation on use (per action) *(E1.5 #157: each gather or craft wears the tool by 1)*
+- [x] Tool quality affects extraction/crafting *(E1.5 #157: power sets yield and speed, retention scales quality, and the tool term in the cascade)*
+- [x] Degradation curve: stable until 20%, then degrades *(E1.4 #156, `rules::tools::retention`)*
+- [x] `ToolType`: Axe, Pickaxe, Sickle, Hammer, etc. *(E1.4 #156)*
 
 #### Client - Station Display
 - [x] Stations rendered in world view
@@ -376,9 +376,9 @@ Create static data for:
 - Can place workbench in world
 - Can use workbench for crafting rope
 - Rope crafted at workbench has better quality (station bonus)
-- Can craft a basic sickle (tool)
-- Sickle makes fiber extraction faster/better quality
-- Sickle degrades with use
+- [x] Can craft a basic sickle (tool) *(`stone_sickle`, E1.4 #156)*
+- [x] Sickle makes fiber extraction faster/better quality *(E1.5 #157: faster and half again the fiber; quality stays capped at the node's, GDD §6.2)*
+- [x] Sickle degrades with use *(E1.5 #157)*
 - Tools can be installed in appropriate stations
 
 ### Technical Notes

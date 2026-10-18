@@ -6,8 +6,11 @@
 //! enough), the inputs are consumed and the output is written. If anything is wrong the craft
 //! fails and nothing changes.
 
+use capitol_protocol::ws::ToolUse;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
+
+use super::tools::{self, BrokenTool, HeldTool, Wear};
 
 /// A craft that has run its time, waiting to be written
 #[derive(Debug, Clone)]
@@ -17,6 +20,19 @@ pub struct FinishedCraft {
     /// (item_id, quantity to consume)
     pub inputs: Vec<(Uuid, i32)>,
     pub outputs: Vec<CraftOutput>,
+    /// The tool the recipe needs, as it was at the start (E1.5). It wears once.
+    pub tool: Option<HeldTool>,
+}
+
+/// A craft that was written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Finished {
+    /// The containers that changed, each once, for `inventory_updated`
+    pub changed: Vec<Uuid>,
+    /// The tool it wore, and what it has left, for `crafting_completed`
+    pub tool: Option<ToolUse>,
+    /// Set when that use broke the tool, for `tools::announce_broken`
+    pub broken: Option<BrokenTool>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,17 +49,29 @@ pub struct CraftOutput {
 
 /// The reason shown when an input moved, split or changed hands while the craft ran
 pub const INPUTS_MOVED: &str = "The craft's inputs moved before it finished";
+/// The reason shown when the recipe's tool left the inventory while the craft ran
+pub const TOOL_MOVED: &str = "The craft's tool left your inventory before it finished";
 /// The reason shown when the output slot holds something else
 pub const OUTPUT_FULL: &str = "Your crafting output is full. Empty it and craft again";
 
-/// Consume the inputs and write the outputs, together or not at all. Returns the containers
-/// that changed, each once, for `inventory_updated`. The `Err` is the reason for
-/// `crafting_failed`.
-pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Vec<Uuid>, String> {
+/// Consume the inputs, wear the tool and write the outputs, together or not at all. The
+/// `Err` is the reason for `crafting_failed`.
+pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Finished, String> {
     let mut tx = db.begin().await.map_err(db_error)?;
     let mut changed: Vec<Uuid> = Vec::new();
 
     consume_inputs(&mut tx, craft, &mut changed).await?;
+    let (mut tool, mut broken) = (None, None);
+    if let Some(held) = &craft.tool {
+        let Some(wear) = tools::wear_held(&mut tx, held.item_id, craft.player_id).await.map_err(db_error)? else {
+            tracing::info!("Craft {} by {} failed: tool {} moved", craft.operation_id, craft.player_id, held.item_id);
+            return Err(TOOL_MOVED.to_string());
+        };
+        tool = Some(held.after(&wear));
+        if let Wear::Broke(b) = wear {
+            broken = Some(b);
+        }
+    }
     for output in &craft.outputs {
         let container = place_output(&mut tx, craft.player_id, output).await?;
         if !changed.contains(&container) {
@@ -52,7 +80,7 @@ pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Vec<Uuid
     }
 
     tx.commit().await.map_err(db_error)?;
-    Ok(changed)
+    Ok(Finished { changed, tool, broken })
 }
 
 /// Check every input again and use it up. Rows are locked as they're read, so a move or trade
@@ -276,6 +304,7 @@ mod tests {
                 stackable: true,
                 durability: None,
             }],
+            tool: None,
         }
     }
 
@@ -306,7 +335,7 @@ mod tests {
         let ada = crafter(&db, "ada").await;
         let fiber = stack(&db, ada.id, ada.input, 0, "fiber", 5).await;
 
-        let changed = finish_craft(&db, &rope(&ada, fiber)).await.unwrap();
+        let changed = finish_craft(&db, &rope(&ada, fiber)).await.unwrap().changed;
 
         assert_eq!(item(&db, fiber).await.map(|i| i.2), Some(3), "two fiber used");
         assert_eq!(rope_made(&db, &ada).await, 1);
@@ -385,7 +414,7 @@ mod tests {
         let ada = crafter(&db, "ada").await;
         let fiber = stack(&db, ada.id, ada.inventory, 4, "fiber", 4).await;
 
-        let changed = finish_craft(&db, &rope(&ada, fiber)).await.unwrap();
+        let changed = finish_craft(&db, &rope(&ada, fiber)).await.unwrap().changed;
 
         assert_eq!(item(&db, fiber).await.map(|i| i.2), Some(2));
         assert_eq!(changed, vec![ada.inventory, ada.output]);
@@ -463,5 +492,65 @@ mod tests {
         finish_craft(&db, &rope(&ada, fiber)).await.unwrap();
 
         assert_eq!(rope_made(&db, &ada).await, 4);
+    }
+
+    /// A stone sickle in `player`'s inventory with `durability` left, as `best_tool` would find it
+    async fn held_sickle(db: &PgPool, player: &Crafter, durability: i32) -> HeldTool {
+        crate::content::sync(db, &crate::content::load().unwrap()).await.unwrap();
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index, durability)
+             VALUES ($1, 'stone_sickle', 50, 1, $2, $3, 9, $4)",
+        )
+        .bind(id)
+        .bind(player.id)
+        .bind(player.inventory)
+        .bind(durability)
+        .execute(db)
+        .await
+        .unwrap();
+        tools::best_tool(db, player.id, capitol_protocol::rules::tools::ToolType::Sickle).await.unwrap().unwrap()
+    }
+
+    /// The recipe's tool wears with the craft, and the crafter hears what it has left
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_craft_wears_its_tool(db: PgPool) {
+        let ada = crafter(&db, "ada").await;
+        let fiber = stack(&db, ada.id, ada.input, 0, "fiber", 4).await;
+        let sickle = held_sickle(&db, &ada, 2).await;
+        let mut craft = rope(&ada, fiber);
+        craft.tool = Some(sickle.clone());
+
+        let done = finish_craft(&db, &craft).await.unwrap();
+        let used = done.tool.unwrap();
+        assert_eq!((used.item_id, used.durability, used.max_durability), (sickle.item_id, 1, 60));
+        assert_eq!(done.broken, None);
+
+        let done = finish_craft(&db, &craft).await.unwrap();
+        assert_eq!(done.tool.unwrap().durability, 0);
+        assert_eq!(done.broken.unwrap().item_id, sickle.item_id, "the last use breaks it");
+        assert_eq!(item(&db, sickle.item_id).await, None);
+    }
+
+    /// A tool put away mid-craft fails it, and nothing is used up
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_craft_whose_tool_left_fails(db: PgPool) {
+        let ada = crafter(&db, "ada").await;
+        let fiber = stack(&db, ada.id, ada.input, 0, "fiber", 4).await;
+        let sickle = held_sickle(&db, &ada, 5).await;
+        sqlx::query("UPDATE items SET container_id = $1, slot_index = 3 WHERE id = $2")
+            .bind(ada.input)
+            .bind(sickle.item_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut craft = rope(&ada, fiber);
+        craft.tool = Some(sickle);
+
+        assert_eq!(finish_craft(&db, &craft).await, Err(TOOL_MOVED.to_string()));
+        assert_eq!(item(&db, fiber).await.map(|i| i.2), Some(4), "the fiber stays");
+        assert_eq!(rope_made(&db, &ada).await, 0);
     }
 }

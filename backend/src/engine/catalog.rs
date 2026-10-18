@@ -61,6 +61,8 @@ pub fn build(game: &GameState) -> CatalogResponse {
             required_tool: t.required_tool.clone(),
             extraction_duration_ticks: t.extraction_duration_ticks,
             regeneration_ticks: t.regeneration_ticks,
+            tool_type: t.tool_type.clone(),
+            difficulty: t.difficulty,
         })
         .collect();
     resource_types.sort_by(|a, b| a.id.cmp(&b.id));

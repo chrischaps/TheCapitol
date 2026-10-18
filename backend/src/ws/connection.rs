@@ -251,6 +251,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         let refusal = crate::engine::container_access::gathering_refusal(
                                             &state.db, &state.game, player_id, node_uuid,
                                         ).await.unwrap_or_else(|e| Some(format!("Database error: {}", e)));
+                                        // The best tool for it, if it takes one (E1.5)
+                                        let tool = crate::engine::tools::tool_for_node(
+                                            &state.db, &state.game, player_id, node_uuid,
+                                        ).await;
+                                        let (tool, refusal) = match tool {
+                                            Ok(tool) => (tool, refusal),
+                                            Err(e) => (None, refusal.or(Some(format!("Database error: {}", e)))),
+                                        };
                                         if let Some(reason) = refusal {
                                             let _ = sender.send(Message::Text(
                                                 serde_json::to_string(&ServerMessage::ExtractionFailed {
@@ -264,6 +272,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         game.queue_command(crate::engine::Command::StartExtraction {
                                             player_id,
                                             node_id: node_uuid,
+                                            tool,
                                         });
                                     } else {
                                         let _ = sender.send(Message::Text(
@@ -301,6 +310,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         continue;
                                     }
 
+                                    let tool = match crate::engine::tools::tool_for_recipe(&state.db, &state.game, player_id, &recipe_id).await {
+                                        Ok(tool) => tool,
+                                        Err(e) => {
+                                            tracing::error!("Tool lookup for {} failed: {:?}", player_id, e);
+                                            None
+                                        }
+                                    };
                                     let mut game = state.game.write().await;
                                     // Store validated items for the command handler
                                     game.pending_craft_items.insert(player_id, items);
@@ -308,6 +324,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         player_id,
                                         recipe_id,
                                         input_item_ids: item_uuids,
+                                        tool,
                                     });
                                 }
                                 ClientMessage::CancelCrafting => {
@@ -531,6 +548,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         continue;
                                     }
 
+                                    let tool = match crate::engine::tools::tool_for_recipe(&state.db, &state.game, player_id, &recipe_id).await {
+                                        Ok(tool) => tool,
+                                        Err(e) => {
+                                            tracing::error!("Tool lookup for {} failed: {:?}", player_id, e);
+                                            None
+                                        }
+                                    };
                                     let mut game = state.game.write().await;
                                     game.pending_craft_items.insert(player_id, items);
                                     game.queue_command(crate::engine::Command::CraftAtStation {
@@ -538,6 +562,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         station_id: station_uuid,
                                         recipe_id,
                                         input_item_ids: item_uuids,
+                                        tool,
                                     });
                                 }
                                 // M5: Trading
@@ -693,8 +718,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::ExtractionProgress { player_id: pid, progress, duration };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
-                    Ok(GameEvent::ExtractionCompleted { player_id: pid, node_id, item_type, item_name, quantity, quality }) => {
-                        let msg = ServerMessage::ExtractionCompleted { player_id: pid, node_id, item_type, item_name, quantity, quality };
+                    Ok(GameEvent::ExtractionCompleted { player_id: pid, node_id, item_type, item_name, quantity, quality, tool }) => {
+                        let msg = ServerMessage::ExtractionCompleted { player_id: pid, node_id, item_type, item_name, quantity, quality, tool };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
                     Ok(GameEvent::ExtractionCancelled { player_id: pid }) => {
@@ -724,8 +749,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::CraftingProgress { player_id: pid, operation_id, progress, duration };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
-                    Ok(GameEvent::CraftingCompleted { player_id: pid, operation_id, item_type, item_name, quantity, quality }) => {
-                        let msg = ServerMessage::CraftingCompleted { player_id: pid, operation_id, item_type, item_name, quantity, quality };
+                    Ok(GameEvent::CraftingCompleted { player_id: pid, operation_id, item_type, item_name, quantity, quality, tool }) => {
+                        let msg = ServerMessage::CraftingCompleted { player_id: pid, operation_id, item_type, item_name, quantity, quality, tool };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
                     Ok(GameEvent::CraftingCancelled { player_id: pid, operation_id }) => {

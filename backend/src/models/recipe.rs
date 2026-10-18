@@ -1,4 +1,5 @@
 use capitol_protocol::rules::quality::Weights;
+use capitol_protocol::rules::tools::ToolType;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
@@ -49,6 +50,17 @@ impl Default for QualityWeights {
     }
 }
 
+/// `recipes.crafting_requirements`: what a craft needs besides its inputs and
+/// station. `backend/content/recipes.toml` writes it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CraftingRequirements {
+    /// A tool type (`rules::tools::ToolType`) the crafter must hold. The best one
+    /// supplies the tool term and wears with each craft (E1.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_type: Option<String>,
+}
+
 /// Recipe definition from database
 #[derive(Debug, Clone, FromRow)]
 pub struct RecipeRow {
@@ -60,8 +72,7 @@ pub struct RecipeRow {
     pub outputs: sqlx::types::Json<Vec<RecipeOutput>>,
     pub base_duration_ticks: i32,
     pub quality_weights: sqlx::types::Json<QualityWeights>,
-#[allow(dead_code)] // tool gating in crafting (#157, E1.5) reads it
-    pub crafting_requirements: sqlx::types::Json<serde_json::Value>,
+    pub crafting_requirements: sqlx::types::Json<CraftingRequirements>,
     pub required_station_type: Option<String>,
 }
 
@@ -78,6 +89,8 @@ pub struct Recipe {
     /// The cascade's weights, defaults filled and normalised.
     pub quality_weights: Weights,
     pub required_station_type: Option<String>,
+    /// The tool the crafter must hold (E1.5)
+    pub tool_type: Option<ToolType>,
 }
 
 impl From<RecipeRow> for Recipe {
@@ -101,6 +114,8 @@ impl From<RecipeRow> for Recipe {
             base_duration_ticks: row.base_duration_ticks,
             quality_weights,
             required_station_type: row.required_station_type,
+            // The content validator rejects an unknown tool type
+            tool_type: row.crafting_requirements.0.tool_type.as_deref().and_then(ToolType::from_str),
         }
     }
 }
@@ -127,6 +142,7 @@ impl Recipe {
             duration_ticks: self.base_duration_ticks,
             required_station_type: self.required_station_type.clone(),
             quality_weights: self.quality_weights.clone(),
+            tool_type: self.tool_type.map(|t| t.as_str().to_string()),
         }
     }
 }

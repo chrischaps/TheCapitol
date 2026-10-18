@@ -586,6 +586,10 @@ pub struct RecipeInfo {
     /// The quality cascade's weights, defaults filled and summing to 1, so a
     /// client gets the server's range from `rules::quality::output_range`
     pub quality_weights: rules::quality::Weights,
+    /// The tool the recipe needs (`rules::tools::ToolType`), from the crafter's
+    /// inventory: the best one supplies the tool term and wears (E1.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -693,9 +697,19 @@ pub struct CatalogResourceType {
     pub yield_quantity_max: i32,
     pub base_quality_min: i32,
     pub base_quality_max: i32,
+    /// The tool type (`rules::tools::ToolType`) without which it can't be
+    /// gathered, or null to gather by hand. Since E1.5 a tool type, not an item.
     pub required_tool: Option<String>,
     pub extraction_duration_ticks: i32,
     pub regeneration_ticks: i32,
+    /// The tool type that works it, if any: the best one held speeds the
+    /// gather and raises its yield (`rules::tools::tool_yield`), and wears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_type: Option<String>,
+    /// The power that counts as the right tool for it (`rules::tools::leverage`).
+    /// Set exactly when `tool_type` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub difficulty: Option<f64>,
 }
 
 /// A container type (`container_types`).

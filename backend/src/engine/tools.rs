@@ -7,11 +7,12 @@
 //! owner hears `tool_broke` ([`announce_broken`]).
 
 use capitol_protocol::rules::tools::{self, Tool, ToolType};
+use capitol_protocol::ws::ToolUse;
 use sqlx::{PgConnection, PgPool};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
-use super::GameEvent;
+use super::{GameEvent, GameState};
 
 /// A tool a player holds, as [`best_tool`] found it.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,6 +20,21 @@ pub struct HeldTool {
     pub item_id: Uuid,
     pub item_type: String,
     pub tool: Tool,
+}
+
+impl HeldTool {
+    /// What the client hears about this tool after `wear`: what it has left.
+    pub fn after(&self, wear: &Wear) -> ToolUse {
+        ToolUse {
+            item_id: self.item_id,
+            item_type: self.item_type.clone(),
+            durability: match wear {
+                Wear::Worn { durability } => *durability,
+                Wear::Broke(_) => 0,
+            },
+            max_durability: self.tool.max_durability,
+        }
+    }
 }
 
 /// What a use did to a tool.
@@ -44,7 +60,6 @@ pub struct BrokenTool {
 /// The best tool of `tool_type` in `player_id`'s inventory, by power × retention
 /// ([`tools::best_tool`]), or `None` if they have none with any use left. Ties go
 /// to the lower slot.
-#[allow(dead_code)] // E1.5 (#157) puts tools to work in extraction and crafting
 pub async fn best_tool(db: &PgPool, player_id: Uuid, tool_type: ToolType) -> Result<Option<HeldTool>, sqlx::Error> {
     let held: Vec<(Uuid, String, i32, i32, f64, i32)> = sqlx::query_as(
         "SELECT i.id, i.item_type, i.quality, i.durability, it.base_power, it.max_durability
@@ -76,7 +91,6 @@ pub async fn best_tool(db: &PgPool, player_id: Uuid, tool_type: ToolType) -> Res
 /// `conn`, so a caller can wear the tool in the same transaction as the work it did;
 /// once that commits, it passes a [`Wear::Broke`] to [`announce_broken`]. `None` if
 /// the item is gone or isn't a tool.
-#[allow(dead_code)] // E1.5 (#157) puts tools to work in extraction and crafting
 pub async fn wear(conn: &mut PgConnection, item_id: Uuid) -> Result<Option<Wear>, sqlx::Error> {
     let worn: Option<(i32, Option<Uuid>, Option<Uuid>, String, String)> = sqlx::query_as(
         "UPDATE items i SET durability = GREATEST(i.durability - $2, 0)
@@ -103,9 +117,67 @@ pub async fn wear(conn: &mut PgConnection, item_id: Uuid) -> Result<Option<Wear>
     Ok(Some(Wear::Broke(BrokenTool { owner_id, container_id, item_id, item_type, item_name })))
 }
 
+/// [`wear`], but only while the tool is still in `player_id`'s inventory: a gather
+/// or craft wears the tool it started with, and one that has since been dropped,
+/// stashed or traded away isn't theirs to wear. `None` if it isn't there. The row is
+/// locked, so a move at the same moment waits for the caller's transaction.
+pub async fn wear_held(conn: &mut PgConnection, item_id: Uuid, player_id: Uuid) -> Result<Option<Wear>, sqlx::Error> {
+    let held: Option<Uuid> = sqlx::query_scalar(
+        "SELECT i.id FROM items i
+         JOIN containers c ON c.id = i.container_id
+         WHERE i.id = $1 AND c.owner_id = $2 AND c.container_type = 'player_inventory'
+         FOR UPDATE OF i",
+    )
+    .bind(item_id)
+    .bind(player_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if held.is_none() {
+        return Ok(None);
+    }
+    wear(conn, item_id).await
+}
+
+/// The best tool `player_id` holds for gathering `node_id`, of the type its resource
+/// names (`resource_types.tool_type`). `None` if it names none, the player holds
+/// none, or the node is gone (the tick says so). Look it up before queueing
+/// `StartExtraction`, from REST and WS alike.
+pub async fn tool_for_node(
+    db: &PgPool,
+    game: &RwLock<GameState>,
+    player_id: Uuid,
+    node_id: Uuid,
+) -> Result<Option<HeldTool>, sqlx::Error> {
+    let tool_type = {
+        let game = game.read().await;
+        game.resource_nodes
+            .get(&node_id)
+            .and_then(|n| game.resource_types.get(&n.resource_type))
+            .and_then(|t| t.tool())
+    };
+    match tool_type {
+        Some(t) => best_tool(db, player_id, t).await,
+        None => Ok(None),
+    }
+}
+
+/// The best tool `player_id` holds for crafting `recipe_id`, of the type it needs
+/// (`crafting_requirements.tool_type`). `None` if it needs none or they hold none.
+pub async fn tool_for_recipe(
+    db: &PgPool,
+    game: &RwLock<GameState>,
+    player_id: Uuid,
+    recipe_id: &str,
+) -> Result<Option<HeldTool>, sqlx::Error> {
+    let tool_type = game.read().await.recipes.get(recipe_id).and_then(|r| r.tool_type);
+    match tool_type {
+        Some(t) => best_tool(db, player_id, t).await,
+        None => Ok(None),
+    }
+}
+
 /// Tell a broken tool's owner: `tool_broke`, and `inventory_updated` for the
 /// container it left.
-#[allow(dead_code)] // E1.5 (#157) puts tools to work in extraction and crafting
 pub fn announce_broken(events: &broadcast::Sender<GameEvent>, broken: &BrokenTool) {
     let _ = events.send(GameEvent::ToolBroke {
         player_id: broken.owner_id,
@@ -249,6 +321,26 @@ mod tests {
         assert!(matches!(heard.try_recv().unwrap(),
             GameEvent::InventoryUpdated { player_id, container_id, .. }
                 if player_id == ada.id && container_id == ada.inventory));
+    }
+
+    /// A tool that has left the player's inventory isn't worn on their behalf
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn only_a_held_tool_is_worn(db: PgPool) {
+        let ada = setup(&db).await;
+        let held = tool(&db, ada.id, ada.inventory, 0, "stone_sickle", 50, 10).await;
+        let stashed = tool(&db, ada.id, ada.chest, 0, "stone_sickle", 50, 10).await;
+        let mut conn = db.acquire().await.unwrap();
+
+        assert_eq!(wear_held(&mut conn, held, ada.id).await.unwrap(), Some(Wear::Worn { durability: 9 }));
+        assert_eq!(wear_held(&mut conn, held, Uuid::new_v4()).await.unwrap(), None, "not theirs");
+        assert_eq!(wear_held(&mut conn, stashed, ada.id).await.unwrap(), None, "not in the inventory");
+        let left: i32 = sqlx::query_scalar("SELECT durability FROM items WHERE id = $1")
+            .bind(stashed)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(left, 10);
     }
 
     #[sqlx::test(migrations = "./migrations")]

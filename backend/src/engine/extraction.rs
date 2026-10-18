@@ -1,31 +1,52 @@
 use std::collections::HashMap;
+use capitol_protocol::rules::tools;
 use rand::Rng;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::models::{ActionState, NodeState, PlayerState, ResourceNodeState, ResourceType};
 use super::events::GameEvent;
+use super::tools::HeldTool;
 
 /// Maximum distance from player to node for extraction (world units)
 pub use capitol_protocol::rules::EXTRACTION_RANGE;
 
-/// Represents an item to be created after extraction/crafting
+/// Quality a hand gather lands either side of its node's (`node ± 5`)
+pub const HAND_VARIANCE: i32 = 5;
+
+/// A gather that has run its time, waiting to be written. The tick loop
+/// (`persist_gathers`) wears the tool, writes the item, and only then sends
+/// `extraction_completed`.
 #[derive(Debug, Clone)]
 pub struct PendingItem {
     pub player_id: Uuid,
+    pub node_id: Uuid,
     pub item_type: String,
+    pub item_name: String,
     pub quantity: i32,
     pub quality: i32,
-    /// Target container type (e.g., "crafting_output"). If None, goes to player_inventory.
-    pub target_container_type: Option<String>,
+    /// The tool that did it, if one did (E1.5)
+    pub tool: Option<GatherTool>,
 }
 
-/// Process extraction for all players actively extracting
-/// Returns a list of items to be persisted to the database
+/// The tool behind a gather, and what the gather would have been without it.
+#[derive(Debug, Clone)]
+pub struct GatherTool {
+    pub held: HeldTool,
+    /// `(quantity, quality)` by hand, for when the tool left the player's
+    /// inventory before the gather finished. `None` for a resource that needs
+    /// the tool: then nothing is gathered.
+    pub by_hand: Option<(i32, i32)>,
+}
+
+/// Process extraction for all players actively extracting.
+/// `tools` holds the tool each gather started with ([`start_extraction`]).
+/// Returns the gathers that finished, for the tick loop to write.
 pub fn process_extractions(
     players: &mut HashMap<Uuid, PlayerState>,
     nodes: &mut HashMap<Uuid, ResourceNodeState>,
     resource_types: &HashMap<String, ResourceType>,
+    tools: &mut HashMap<Uuid, HeldTool>,
     tick_count: u64,
     event_sender: &broadcast::Sender<GameEvent>,
 ) -> Vec<PendingItem> {
@@ -60,33 +81,22 @@ pub fn process_extractions(
 
     // Handle completed extractions
     for (player_id, node_id) in completed_extractions {
+        let tool = tools.remove(&player_id);
         if let Some(node) = nodes.get(&node_id) {
             if let Some(resource_type) = resource_types.get(&node.resource_type) {
-                // Calculate yield
                 let mut rng = rand::thread_rng();
-                let quantity = rng.gen_range(resource_type.yield_quantity_min..=resource_type.yield_quantity_max);
+                let (quantity, quality, tool) =
+                    roll_gather(&mut rng, node.base_quality, resource_type, tool);
 
-                // Calculate quality: node base quality +/- 5
-                let quality_variance = rng.gen_range(-5..=5);
-                let quality = (node.base_quality + quality_variance).clamp(0, 100);
-
-                // Add to pending items for database persistence
+                // Written, and announced, by the tick loop
                 pending_items.push(PendingItem {
-                    player_id,
-                    item_type: resource_type.yields_item.clone(),
-                    quantity,
-                    quality,
-                    target_container_type: None, // Goes to player inventory
-                });
-
-                // Emit completion event
-                let _ = event_sender.send(GameEvent::ExtractionCompleted {
                     player_id,
                     node_id,
                     item_type: resource_type.yields_item.clone(),
                     item_name: get_item_name(&resource_type.yields_item),
                     quantity,
                     quality,
+                    tool,
                 });
 
                 // Mark node as depleted
@@ -110,12 +120,41 @@ pub fn process_extractions(
     pending_items
 }
 
+/// One gather's `(quantity, quality)`, and the tool behind it.
+///
+/// - By hand: the resource's yield range, and the node's quality ± [`HAND_VARIANCE`],
+///   as it has always been.
+/// - With a tool: the same roll, scaled by the tool's power against the
+///   resource's difficulty (`rules::tools::tool_yield`). The node's quality is the
+///   ceiling, the tool's wear scales it and a poor tool damages it
+///   (`rules::tools::gathered_quality`).
+pub fn roll_gather(
+    rng: &mut impl Rng,
+    node_quality: i32,
+    resource_type: &ResourceType,
+    tool: Option<HeldTool>,
+) -> (i32, i32, Option<GatherTool>) {
+    let rolled = rng.gen_range(resource_type.yield_quantity_min..=resource_type.yield_quantity_max);
+    let by_hand = (node_quality + rng.gen_range(-HAND_VARIANCE..=HAND_VARIANCE)).clamp(0, 100);
+    let (Some(held), Some(difficulty)) = (tool, resource_type.difficulty) else {
+        return (rolled, by_hand, None);
+    };
+    let power = held.tool.effective_power();
+    let damage = rng.gen_range(0..=tools::max_damage(power, difficulty));
+    let quantity = tools::tool_yield(rolled, power, difficulty);
+    let quality = tools::gathered_quality(node_quality, held.tool.retention(), damage);
+    let by_hand = resource_type.required().is_none().then_some((rolled, by_hand));
+    (quantity, quality, Some(GatherTool { held, by_hand }))
+}
+
 /// Why `player` can't start gathering `node` right now, in words the player can act on.
-/// `None` means they can. The REST `/world/extract` check uses this too.
+/// `None` means they can. `tool` is the best one they hold of the type that works
+/// it (`tools::tool_for_node`). The REST `/world/extract` check uses this too.
 pub fn extraction_refusal(
     player: &PlayerState,
     node: &ResourceNodeState,
     resource_type: &ResourceType,
+    tool: Option<&HeldTool>,
 ) -> Option<String> {
     // Check if player is already extracting
     if !matches!(player.action_state, ActionState::Idle) {
@@ -145,22 +184,27 @@ pub fn extraction_refusal(
     }
 
     // Check tool requirement
-    if let Some(tool) = &resource_type.required_tool {
-        // For now, we only have hand-gatherable resources
-        return Some(format!("Required tool not equipped: {}", tool));
+    if let Some(required) = &resource_type.required_tool {
+        if tool.is_none() {
+            return Some(format!("You need a {} to gather {}", required, resource_type.name));
+        }
     }
 
     None
 }
 
-/// Start extraction for a player on a node
+/// Start extraction for a player on a node, with the best `tool` they hold for it.
+/// The tool shortens the gather (`rules::tools::tool_duration`) and is kept in
+/// `tools` until it finishes.
 pub fn start_extraction(
     player: &mut PlayerState,
     node: &mut ResourceNodeState,
     resource_type: &ResourceType,
+    tool: Option<HeldTool>,
+    tools: &mut HashMap<Uuid, HeldTool>,
     event_sender: &broadcast::Sender<GameEvent>,
 ) -> Result<(), String> {
-    if let Some(reason) = extraction_refusal(player, node, resource_type) {
+    if let Some(reason) = extraction_refusal(player, node, resource_type, tool.as_ref()) {
         return Err(reason);
     }
 
@@ -169,11 +213,21 @@ pub fn start_extraction(
     player.dest_y = None;
 
     // Start extraction
-    let duration = resource_type.extraction_duration_ticks;
+    let base = resource_type.extraction_duration_ticks;
+    let duration = match (&tool, resource_type.difficulty) {
+        (Some(held), Some(difficulty)) => {
+            tools::tool_duration(base, held.tool.effective_power(), difficulty)
+        }
+        _ => base,
+    };
     player.action_state = ActionState::Extracting {
         node_id: node.id,
         progress: 0,
         duration,
+    };
+    match tool {
+        Some(held) => tools.insert(player.id, held),
+        None => tools.remove(&player.id),
     };
 
     // Mark node as being harvested
@@ -214,5 +268,179 @@ fn get_item_name(item_type: &str) -> String {
     match item_type {
         "fiber" => "Plant Fiber".to_string(),
         _ => item_type.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use capitol_protocol::rules::tools::Tool;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    /// Wild Grass as the content has it
+    fn grass() -> ResourceType {
+        ResourceType {
+            id: "grass".into(),
+            name: "Wild Grass".into(),
+            yields_item: "fiber".into(),
+            yield_quantity_min: 1,
+            yield_quantity_max: 3,
+            base_quality_min: 40,
+            base_quality_max: 70,
+            required_tool: None,
+            extraction_duration_ticks: 30,
+            regeneration_ticks: 600,
+            tool_type: Some("sickle".into()),
+            difficulty: Some(6.0),
+        }
+    }
+
+    /// The stone sickle at `quality`, with `durability` of its uses left
+    fn sickle(quality: i32, durability: i32) -> HeldTool {
+        HeldTool {
+            item_id: Uuid::new_v4(),
+            item_type: "stone_sickle".into(),
+            tool: Tool {
+                base_power: 6.0,
+                quality,
+                durability,
+                max_durability: tools::max_durability(60, quality),
+            },
+        }
+    }
+
+    /// Hand gathering is what it was before tools: 1 to 3 fiber at the node's
+    /// quality ± 5, every value reachable and none outside
+    #[test]
+    fn gathering_grass_by_hand_is_unchanged() {
+        let mut rng = StdRng::seed_from_u64(157);
+        let (mut quantities, mut qualities) = (Vec::new(), Vec::new());
+        for _ in 0..2000 {
+            let (quantity, quality, tool) = roll_gather(&mut rng, 55, &grass(), None);
+            assert!(tool.is_none());
+            quantities.push(quantity);
+            qualities.push(quality);
+        }
+        for q in 1..=3 {
+            assert!(quantities.contains(&q), "never gathered {q}");
+        }
+        assert!(quantities.iter().all(|q| (1..=3).contains(q)));
+        for q in 50..=60 {
+            assert!(qualities.contains(&q), "never came out at {q}");
+        }
+        assert!(qualities.iter().all(|q| (50..=60).contains(q)));
+
+        // And it takes the resource's own time
+        let (events, _rx) = broadcast::channel(16);
+        let (mut ada, mut node, mut held) = (player(), node(), HashMap::new());
+        start_extraction(&mut ada, &mut node, &grass(), None, &mut held, &events).unwrap();
+        assert!(matches!(ada.action_state, ActionState::Extracting { duration: 30, .. }));
+    }
+
+    /// A Q50 stone sickle is leverage 1 on grass: half again the fiber before
+    /// rounding (1, 2, 3 become 2, 3, 5), never over the node's quality and at
+    /// most 5 under it
+    #[test]
+    fn a_sickle_raises_the_fiber_yield() {
+        let mut rng = StdRng::seed_from_u64(1157);
+        let (mut by_hand, mut with_sickle) = (0, 0);
+        for _ in 0..2000 {
+            by_hand += roll_gather(&mut rng, 55, &grass(), None).0;
+            let (quantity, quality, tool) = roll_gather(&mut rng, 55, &grass(), Some(sickle(50, 60)));
+            with_sickle += quantity;
+            assert!([2, 3, 5].contains(&quantity), "{quantity}");
+            assert!((50..=55).contains(&quality), "{quality}");
+            let (hand_quantity, hand_quality) = tool.unwrap().by_hand.unwrap();
+            assert!((1..=3).contains(&hand_quantity) && (50..=60).contains(&hand_quality));
+        }
+        let ratio = with_sickle as f64 / by_hand as f64;
+        assert!((1.55..1.8).contains(&ratio), "a sickle gathered {ratio:.2}× as much");
+    }
+
+    #[test]
+    fn a_worn_sickle_gathers_poorer_fiber() {
+        let mut rng = StdRng::seed_from_u64(2157);
+        for _ in 0..200 {
+            // 3 of 60 left: 5%, half retention
+            let (_, quality, _) = roll_gather(&mut rng, 60, &grass(), Some(sickle(50, 3)));
+            assert!((25..=30).contains(&quality), "{quality}");
+        }
+    }
+
+    #[test]
+    fn a_sickle_shortens_the_gather() {
+        let (events, _rx) = broadcast::channel(16);
+        let (mut ada, mut node, mut held) = (player(), node(), HashMap::new());
+        start_extraction(&mut ada, &mut node, &grass(), Some(sickle(50, 60)), &mut held, &events).unwrap();
+        assert!(matches!(ada.action_state, ActionState::Extracting { duration: 24, .. }), "{:?}", ada.action_state);
+        assert!(held.contains_key(&ada.id));
+    }
+
+    #[test]
+    fn a_gated_resource_refuses_without_its_tool() {
+        let mut reeds = grass();
+        reeds.required_tool = Some("sickle".into());
+        let (events, _rx) = broadcast::channel(16);
+        let (mut ada, mut node, mut held) = (player(), node(), HashMap::new());
+        let refusal = start_extraction(&mut ada, &mut node, &reeds, None, &mut held, &events).unwrap_err();
+        assert_eq!(refusal, "You need a sickle to gather Wild Grass");
+        assert_eq!(node.state, NodeState::Available, "the node is left alone");
+
+        // With one it starts, and there's nothing to fall back on by hand
+        start_extraction(&mut ada, &mut node, &reeds, Some(sickle(50, 60)), &mut held, &events).unwrap();
+        let mut rng = StdRng::seed_from_u64(3157);
+        let (_, _, tool) = roll_gather(&mut rng, 55, &reeds, Some(sickle(50, 60)));
+        assert!(tool.unwrap().by_hand.is_none());
+    }
+
+    #[test]
+    fn a_finished_gather_hands_its_tool_to_the_tick_loop() {
+        let (events, _rx) = broadcast::channel(64);
+        let (mut ada, mut node, mut held) = (player(), node(), HashMap::new());
+        let sickle = sickle(50, 60);
+        start_extraction(&mut ada, &mut node, &grass(), Some(sickle.clone()), &mut held, &events).unwrap();
+        let (ada_id, node_id) = (ada.id, node.id);
+        let mut players: HashMap<_, _> = [(ada.id, ada)].into();
+        let mut nodes: HashMap<_, _> = [(node.id, node)].into();
+        let types: HashMap<_, _> = [("grass".to_string(), grass())].into();
+        let mut done = Vec::new();
+        for tick in 0..24 {
+            done.extend(process_extractions(&mut players, &mut nodes, &types, &mut held, tick, &events));
+        }
+        assert_eq!(done.len(), 1);
+        assert_eq!((done[0].player_id, done[0].node_id), (ada_id, node_id));
+        assert_eq!(done[0].tool.as_ref().unwrap().held.item_id, sickle.item_id);
+        assert!(held.is_empty());
+        assert_eq!(players[&ada_id].action_state, ActionState::Idle);
+    }
+
+    fn player() -> PlayerState {
+        PlayerState {
+            id: Uuid::new_v4(),
+            account_id: Uuid::new_v4(),
+            name: "Ada".into(),
+            x: 0.0,
+            y: 0.0,
+            dest_x: None,
+            dest_y: None,
+            speed: 50.0,
+            strand_balance: 0,
+            current_zone: None,
+            action_state: ActionState::Idle,
+        }
+    }
+
+    fn node() -> ResourceNodeState {
+        ResourceNodeState {
+            id: Uuid::new_v4(),
+            resource_type: "grass".into(),
+            x: 5.0,
+            y: 0.0,
+            base_quality: 55,
+            state: NodeState::Available,
+            harvested_by: None,
+            regenerates_at_tick: None,
+        }
     }
 }

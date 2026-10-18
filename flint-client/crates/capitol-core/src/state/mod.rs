@@ -507,6 +507,8 @@ impl GameState {
                 item_name,
                 quantity,
                 quality,
+                // The tool's wear is shown by E1.7 (#159)
+                tool: _,
             } => {
                 let local = StateEvent::ExtractionCompleted {
                     node_id: *node_id,

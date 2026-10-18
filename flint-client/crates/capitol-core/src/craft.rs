@@ -476,6 +476,7 @@ mod tests {
     /// A hand recipe, its inputs weighted evenly, give or take 3.
     fn recipe(id: &str, inputs: &[(&str, i32)], output: &str) -> RecipeInfo {
         RecipeInfo {
+            tool_type: None,
             id: id.into(),
             name: id.into(),
             description: None,
@@ -740,6 +741,7 @@ mod tests {
 
     fn completed() -> M {
         M::CraftingCompleted {
+            tool: None,
             player_id: ME,
             operation_id: Uuid::from_u128(50),
             item_type: "rope".into(),

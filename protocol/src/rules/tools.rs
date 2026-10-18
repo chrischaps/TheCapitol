@@ -14,7 +14,8 @@
 use std::fmt;
 
 /// What a tool is for. An item type is a tool when it names one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ToolType {
     Sickle,
     Axe,
@@ -164,6 +165,72 @@ pub fn best_tool<K>(tools: impl IntoIterator<Item = (K, Tool)>) -> Option<K> {
     best.map(|(key, _)| key)
 }
 
+// ---------------------------------------------------------------------------
+// Tools at work (E1.5)
+// ---------------------------------------------------------------------------
+
+/// How much of a resource's `difficulty` a tool's power covers, capped at
+/// [`MAX_LEVERAGE`]. Difficulty is the power that counts as the right tool for
+/// the job, so leverage 1 is a Q50 tool of the first tier that fits.
+pub fn leverage(power: f64, difficulty: f64) -> f64 {
+    if difficulty <= 0.0 {
+        return MAX_LEVERAGE;
+    }
+    (power / difficulty).clamp(0.0, MAX_LEVERAGE)
+}
+
+/// Past this much power over difficulty, a better tool gathers no more.
+pub const MAX_LEVERAGE: f64 = 4.0;
+/// Extra yield per unit of [`leverage`]: half again at 1, three times at the cap.
+pub const YIELD_PER_LEVERAGE: f64 = 0.5;
+/// Extra speed per unit of [`leverage`]: a quarter faster at 1, twice as fast at the cap.
+pub const SPEED_PER_LEVERAGE: f64 = 0.25;
+/// The most quality a tool at leverage 1 can knock off a gather (GDD §6.2's
+/// extraction damage). It shrinks as the leverage grows and grows as it falls,
+/// up to [`MAX_DAMAGE`].
+pub const DAMAGE_AT_PAR: f64 = 5.0;
+pub const MAX_DAMAGE: i32 = 15;
+
+/// How many units a gather gives with a tool, from the `rolled` units the
+/// resource gives by hand: `rolled × (1 + 0.5 × leverage)`, rounded, never fewer.
+pub fn tool_yield(rolled: i32, power: f64, difficulty: f64) -> i32 {
+    let factor = 1.0 + YIELD_PER_LEVERAGE * leverage(power, difficulty);
+    ((rolled as f64 * factor).round() as i32).max(rolled)
+}
+
+/// How long a gather takes with a tool, from the resource's `base` ticks:
+/// `base / (1 + 0.25 × leverage)`, rounded up, at least 1.
+pub fn tool_duration(base: i32, power: f64, difficulty: f64) -> i32 {
+    let speed = 1.0 + SPEED_PER_LEVERAGE * leverage(power, difficulty);
+    ((base as f64 / speed).ceil() as i32).max(1)
+}
+
+/// The most quality a gather with this tool can lose: [`DAMAGE_AT_PAR`] at
+/// leverage 1, less for a tool well above the resource, more for one below it
+/// (GDD §6.2: a poor tool damages what it takes).
+pub fn max_damage(power: f64, difficulty: f64) -> i32 {
+    let lev = leverage(power, difficulty);
+    if lev <= 0.0 {
+        return MAX_DAMAGE;
+    }
+    ((DAMAGE_AT_PAR / lev).round() as i32).clamp(0, MAX_DAMAGE)
+}
+
+/// What a gather with a tool comes out at. The node's quality is the ceiling
+/// (GDD §6.2: gathering can't improve it). The tool's [`retention`] scales it,
+/// and `damage` (rolled in `0..=max_damage`) takes some off:
+/// `min(node, round(node × retention) − damage)`, clamped to 0..=100.
+pub fn gathered_quality(node_quality: i32, retention: f64, damage: i32) -> i32 {
+    let kept = (node_quality as f64 * retention.clamp(0.0, 1.0)).round() as i32;
+    (kept - damage.max(0)).min(node_quality).clamp(0, 100)
+}
+
+/// The quality a tool brings to a craft's tool term (`rules::quality`): its
+/// own quality, scaled by how much of it still reaches the work.
+pub fn term_quality(tool: &Tool) -> i32 {
+    (tool.quality as f64 * tool.retention()).round() as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +333,45 @@ mod tests {
         }
         assert_eq!(ToolType::from_str("spoon"), None);
         assert!(Tier::Stone < Tier::Steel);
+    }
+
+    /// A stone sickle at Q50 (power 6) on grass (difficulty 6) is leverage 1
+    #[test]
+    fn the_right_tool_gathers_half_again_a_quarter_faster() {
+        assert!(close(leverage(6.0, 6.0), 1.0));
+        assert_eq!(tool_yield(2, 6.0, 6.0), 3);
+        assert_eq!(tool_yield(1, 6.0, 6.0), 2, "1.5 rounds up");
+        assert_eq!(tool_duration(30, 6.0, 6.0), 24);
+        assert_eq!(max_damage(6.0, 6.0), 5);
+    }
+
+    #[test]
+    fn more_power_helps_up_to_the_cap() {
+        assert_eq!(tool_yield(3, 1000.0, 6.0), 9, "three times at the cap");
+        assert_eq!(tool_duration(30, 1000.0, 6.0), 15, "twice as fast at the cap");
+        assert_eq!(max_damage(1000.0, 6.0), 1);
+        assert!(tool_yield(3, 12.0, 6.0) > tool_yield(3, 6.0, 6.0));
+        // A weak tool never gathers less than hands do, but it damages more
+        assert_eq!(tool_yield(3, 0.5, 6.0), 3);
+        assert_eq!(max_damage(2.0, 6.0), 15);
+        assert_eq!(max_damage(0.0, 6.0), MAX_DAMAGE);
+        assert_eq!(tool_duration(1, 6.0, 6.0), 1, "never under a tick");
+    }
+
+    #[test]
+    fn the_node_is_the_ceiling_and_wear_takes_quality_off() {
+        assert_eq!(gathered_quality(60, 1.0, 0), 60, "a fresh tool, cleanly: the node");
+        assert_eq!(gathered_quality(60, 1.0, 4), 56);
+        assert_eq!(gathered_quality(60, 0.5, 0), 30, "half retention, half the quality");
+        assert_eq!(gathered_quality(60, 1.5, 0), 60, "never over the node");
+        assert_eq!(gathered_quality(3, 0.1, 15), 0, "never under 0");
+    }
+
+    #[test]
+    fn a_worn_tool_brings_less_to_a_craft() {
+        let fresh = Tool { base_power: 6.0, quality: 80, durability: 60, max_durability: 60 };
+        assert_eq!(term_quality(&fresh), 80);
+        let worn = Tool { durability: 3, ..fresh };
+        assert_eq!(term_quality(&worn), 40, "0.5 retention at 5%");
     }
 }

@@ -553,6 +553,7 @@ fn extraction_completed_reports_the_yield() {
     state.apply_ws(&extraction_started(ME));
     state.apply_ws(&extraction_started(OTHER));
     let completed = |player_id| M::ExtractionCompleted {
+        tool: None,
         player_id,
         node_id: NODE,
         item_type: "fiber".into(),
@@ -682,6 +683,7 @@ fn crafting_completed_reports_the_yield() {
     state.apply_ws(&crafting_started(ME));
     state.apply_ws(&crafting_started(OTHER));
     let completed = |player_id| M::CraftingCompleted {
+        tool: None,
         player_id,
         operation_id: OP,
         item_type: "rope".into(),
@@ -749,6 +751,7 @@ fn other_players_activity_never_touches_mine() {
             duration: 30,
         },
         M::ExtractionCompleted {
+            tool: None,
             player_id: OTHER,
             node_id: NODE,
             item_type: "fiber".into(),
@@ -765,6 +768,7 @@ fn other_players_activity_never_touches_mine() {
             duration: 50,
         },
         M::CraftingCompleted {
+            tool: None,
             player_id: OTHER,
             operation_id: OP,
             item_type: "rope".into(),
@@ -1367,6 +1371,7 @@ fn balances_come_from_every_money_response() {
 fn recipes_and_plots_are_stored() {
     let mut state = connected();
     let recipe = RecipeInfo {
+        tool_type: None,
         id: "rope_basic".into(),
         name: "Basic Rope".into(),
         description: None,

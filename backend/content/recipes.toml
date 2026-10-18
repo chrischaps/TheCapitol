@@ -19,7 +19,10 @@
 #                          Left out, a station recipe gives the station 0.2
 #                          and the tool gets 0; the inputs split the rest.
 #                          The formula is protocol/src/rules/quality.rs (D1).
-#   crafting_requirements  a table, empty for now (tool gating fills it, E1.5)
+#   crafting_requirements  { tool_type? }: a tool type the crafter must hold
+#                          (E1.5). The best one gives the tool term its quality
+#                          and wears once per craft. Give it a quality_weights
+#                          tool share, or it counts for nothing.
 #
 # Item ids must be in items.toml, and no item may be its own ingredient,
 # however many recipes away.

@@ -1,5 +1,7 @@
 use uuid::Uuid;
 
+use super::tools::HeldTool;
+
 #[derive(Debug, Clone)]
 pub enum Command {
     Move {
@@ -10,6 +12,8 @@ pub enum Command {
     StartExtraction {
         player_id: Uuid,
         node_id: Uuid,
+        /// The best tool held for it, looked up before queueing (`tools::tool_for_node`)
+        tool: Option<HeldTool>,
     },
     CancelExtraction {
         player_id: Uuid,
@@ -20,6 +24,8 @@ pub enum Command {
         recipe_id: String,
         #[allow(dead_code)] // crafting picks its own inputs (#183)
         input_item_ids: Vec<Uuid>,
+        /// The best tool held for it, looked up before queueing (`tools::tool_for_recipe`)
+        tool: Option<HeldTool>,
     },
     CancelCrafting {
         player_id: Uuid,
@@ -31,6 +37,8 @@ pub enum Command {
         recipe_id: String,
         #[allow(dead_code)] // crafting picks its own inputs (#183)
         input_item_ids: Vec<Uuid>,
+        /// The best tool held for it (`tools::tool_for_recipe`). E1.6 (#158) adds the station's own
+        tool: Option<HeldTool>,
     },
     // M5: Trading commands
     InitiateTrade {

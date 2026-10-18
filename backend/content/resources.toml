@@ -9,7 +9,15 @@
 #   yields_item                an id from items.toml
 #   yield_quantity_min, _max   units per gather, inclusive
 #   base_quality_min, _max     the range a node's base quality is drawn from
-#   required_tool              an item id, or leave it out to gather by hand
+#   required_tool              a tool type (sickle, axe, pickaxe, hammer, saw) it
+#                              can't be gathered without, or leave it out to
+#                              gather by hand
+#   tool_type                  the tool type that works it, if any (defaults to
+#                              required_tool). The best one held raises the yield,
+#                              speeds the gather and wears; protocol rules::tools.
+#   difficulty                 with a tool type: the power that counts as the right
+#                              tool (a Q50 stone sickle is 6). More power gathers
+#                              more, faster and cleaner, up to 4 times it.
 #   extraction_duration_ticks  how long a gather takes (10 ticks a second)
 #   regeneration_ticks         how long a harvested node takes to come back
 
@@ -21,5 +29,7 @@ yield_quantity_min = 1
 yield_quantity_max = 3
 base_quality_min = 40
 base_quality_max = 70
+tool_type = "sickle"
+difficulty = 6.0
 extraction_duration_ticks = 30
 regeneration_ticks = 600

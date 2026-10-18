@@ -175,6 +175,9 @@ pub enum ServerMessage {
         item_name: String,
         quantity: i32,
         quality: i32,
+        /// The tool that did the work and what it has left (E1.5). Absent by hand.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<ToolUse>,
     },
     #[serde(rename = "extraction_cancelled")]
     ExtractionCancelled { player_id: Uuid },
@@ -209,6 +212,9 @@ pub enum ServerMessage {
         item_name: String,
         quantity: i32,
         quality: i32,
+        /// The tool the recipe used and what it has left (E1.5). Absent if it used none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<ToolUse>,
     },
     #[serde(rename = "crafting_cancelled")]
     CraftingCancelled { player_id: Uuid, operation_id: Uuid },
@@ -407,6 +413,16 @@ impl ServerMessage {
             ServerMessage::SubscriptionLapsed { .. } => "subscription_lapsed",
         }
     }
+}
+
+/// A tool used by a gather or a craft, after the use (E1.5). `durability` 0 means
+/// that use broke it, and `tool_broke` follows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolUse {
+    pub item_id: Uuid,
+    pub item_type: String,
+    pub durability: i32,
+    pub max_durability: i32,
 }
 
 /// A player's position, as broadcast in `positions` and `player_joined`.

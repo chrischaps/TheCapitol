@@ -1,3 +1,4 @@
+use capitol_protocol::rules::tools::ToolType;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -15,9 +16,27 @@ pub struct ResourceType {
     pub yield_quantity_max: i32,
     pub base_quality_min: i32,
     pub base_quality_max: i32,
+    /// A tool type it can't be gathered without (E1.5); then `tool_type` too
     pub required_tool: Option<String>,
     pub extraction_duration_ticks: i32,
     pub regeneration_ticks: i32,
+    /// The tool type that works it: the best one held is used (E1.5)
+    pub tool_type: Option<String>,
+    /// The power that counts as the right tool for it (`rules::tools::leverage`)
+    pub difficulty: Option<f64>,
+}
+
+impl ResourceType {
+    /// The tool type that works it, if any. The content validator rejects an
+    /// unknown one, and the schema makes a required tool its tool type.
+    pub fn tool(&self) -> Option<ToolType> {
+        self.tool_type.as_deref().and_then(ToolType::from_str)
+    }
+
+    /// The tool type it can't be gathered without, if any.
+    pub fn required(&self) -> Option<ToolType> {
+        self.required_tool.as_deref().and_then(ToolType::from_str)
+    }
 }
 
 /// Resource node in the world (from database)
