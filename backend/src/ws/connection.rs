@@ -12,6 +12,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use capitol_protocol::rules::stacking::{Pick, Units};
 use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo, TradeOfferItem};
 
 use crate::engine::container_access::{
@@ -380,7 +381,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                     }
                                 }
-                                ClientMessage::SplitStack { item_id, quantity, to_slot } => {
+                                ClientMessage::SplitStack { item_id, quantity, to_slot, qualities } => {
                                     let Ok(item_uuid) = Uuid::parse_str(&item_id) else {
                                         let _ = sender.send(Message::Text(
                                             serde_json::to_string(&ServerMessage::Error {
@@ -390,7 +391,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         )).await;
                                         continue;
                                     };
-                                    let msg = match handle_split_stack(&state, player_id, item_uuid, quantity, to_slot).await {
+                                    let msg = match handle_split_stack(&state, player_id, item_uuid, quantity, to_slot, qualities.as_ref()).await {
                                         Ok(container_id) => ServerMessage::InventoryUpdated { player_id, container_id },
                                         Err(message) => ServerMessage::Error { message, command: command.into() },
                                     };
@@ -1078,9 +1079,10 @@ async fn fetch_player_items(state: &AppState, player_id: Uuid, item_ids: &[Uuid]
 }
 
 /// Check a `trade_offer` before it reaches the trade session: parse its item ids, check its
-/// amounts, and check the player owns every item in the quantity offered and has the strands.
-/// The `Err` is the message the client shows. `execute_trade` checks ownership again at the end,
-/// since items can move between offer and accept.
+/// amounts, and check the player holds every unit offered and has the strands. Each line is
+/// settled to exact units here (the ones named, or the lowest), so the other player sees, and
+/// gets, exactly those (E1.8). The `Err` is the message the client shows. `execute_trade`
+/// checks them again at the end, since items can move between offer and accept.
 async fn validate_trade_offer(
     state: &AppState,
     player_id: Uuid,
@@ -1089,11 +1091,11 @@ async fn validate_trade_offer(
 ) -> Result<Vec<TradeItemInfo>, String> {
     let offer = parse_trade_offer(items, strands)?;
 
-    let item_ids: Vec<Uuid> = offer.iter().map(|(id, _)| *id).collect();
-    let owned: Vec<OwnedItem> = if item_ids.is_empty() {
+    let item_ids: Vec<Uuid> = offer.iter().map(|line| line.0).collect();
+    let owned: Vec<crate::models::Item> = if item_ids.is_empty() {
         Vec::new()
     } else {
-        sqlx::query_as("SELECT id, quantity, item_type, quality FROM items WHERE id = ANY($1) AND owner_id = $2")
+        sqlx::query_as(&format!("SELECT {} FROM items WHERE id = ANY($1) AND owner_id = $2", crate::models::ITEM_COLUMNS))
             .bind(&item_ids)
             .bind(player_id)
             .fetch_all(&state.db)
@@ -1103,8 +1105,9 @@ async fn validate_trade_offer(
                 "Couldn't check your items; try again".to_string()
             })?
     };
-    let owned: HashMap<Uuid, OwnedItem> = owned.into_iter().map(|item| (item.0, item)).collect();
-    let quantities: HashMap<Uuid, i32> = owned.iter().map(|(id, item)| (*id, item.1)).collect();
+    let owned: HashMap<Uuid, OwnedItem> =
+        owned.into_iter().map(|item| (item.id, (item.item_type, item.units))).collect();
+    let held: HashMap<Uuid, Units> = owned.iter().map(|(id, (_, units))| (*id, units.clone())).collect();
 
     let balance: Option<(i64,)> = if strands > 0 {
         sqlx::query_as("SELECT strand_balance FROM players WHERE id = $1")
@@ -1119,74 +1122,87 @@ async fn validate_trade_offer(
         None
     };
 
-    check_trade_offer_holdings(&offer, &quantities, strands, balance.map(|(b,)| b).unwrap_or(0))?;
+    let settled = check_trade_offer_holdings(&offer, &held, strands, balance.map(|(b,)| b).unwrap_or(0))?;
     let game = state.game.read().await;
-    Ok(trade_offer_lines(&offer, &owned, &game.item_types))
+    Ok(trade_offer_lines(&settled, &owned, &game.item_types))
 }
 
-/// An item a trade offer names, as the player holds it: `(id, quantity, item_type, quality)`
-type OwnedItem = (Uuid, i32, String, i32);
+/// An item a trade offer names, as the player holds it: `(item_type, units)`
+type OwnedItem = (String, Units);
 
-/// The offer as `trade_offer_updated` reports it: each line with the item's type, name and
-/// quality, and the quantity offered. Run it after [`check_trade_offer_holdings`], which makes
+/// One line of an offer as parsed: the item, how many, and which units if named
+type OfferLine = (Uuid, i32, Option<Units>);
+
+/// The offer as `trade_offer_updated` reports it: each line with the item's type and name, and
+/// the units offered and their mean. Run it after [`check_trade_offer_holdings`], which makes
 /// sure every item is in `owned`. A type missing from `item_types` shows its id as its name.
 fn trade_offer_lines(
-    offer: &[(Uuid, i32)],
+    offer: &[(Uuid, Units)],
     owned: &HashMap<Uuid, OwnedItem>,
     item_types: &HashMap<String, ItemType>,
 ) -> Vec<TradeItemInfo> {
     offer
         .iter()
-        .filter_map(|(id, quantity)| {
-            let (_, _, item_type, quality) = owned.get(id)?;
+        .filter_map(|(id, units)| {
+            let (item_type, _) = owned.get(id)?;
             Some(TradeItemInfo {
                 item_id: *id,
                 item_type: item_type.clone(),
                 item_name: item_types.get(item_type).map_or_else(|| item_type.clone(), |t| t.name.clone()),
-                quantity: *quantity,
-                quality: *quality,
+                quantity: units.count() as i32,
+                quality: units.mean()?,
+                units: units.clone(),
             })
         })
         .collect()
 }
 
 /// The parts of a `trade_offer` that need no database: ids parse, quantities and strands make
-/// sense, and no item appears twice.
-fn parse_trade_offer(items: &[TradeOfferItem], strands: i64) -> Result<Vec<(Uuid, i32)>, String> {
+/// sense, named units add up to the quantity, and no item appears twice.
+fn parse_trade_offer(items: &[TradeOfferItem], strands: i64) -> Result<Vec<OfferLine>, String> {
     if strands < 0 {
         return Err("You can't offer a negative amount of strands".to_string());
     }
-    let mut offer: Vec<(Uuid, i32)> = Vec::with_capacity(items.len());
+    let mut offer: Vec<OfferLine> = Vec::with_capacity(items.len());
     for item in items {
         let id = Uuid::parse_str(&item.item_id)
             .map_err(|_| format!("Invalid item ID: {}", item.item_id))?;
         if item.quantity <= 0 {
             return Err("Offered quantities must be at least 1".to_string());
         }
-        if offer.iter().any(|(seen, _)| *seen == id) {
+        if item.qualities.as_ref().is_some_and(|q| q.count() != item.quantity as i64) {
+            return Err("The qualities offered don't add up to the quantity".to_string());
+        }
+        if offer.iter().any(|(seen, _, _)| *seen == id) {
             return Err("The same item is in the offer twice".to_string());
         }
-        offer.push((id, item.quantity));
+        offer.push((id, item.quantity, item.qualities.clone()));
     }
     Ok(offer)
 }
 
-/// Check the player holds everything they offer. `owned` maps the offered item ids the player
-/// owns to the quantity they own.
+/// Check the player holds everything they offer, and settle each line to exact units: the
+/// ones named, or the lowest (`Pick::default`). `held` maps the offered item ids the player
+/// owns to their units.
 fn check_trade_offer_holdings(
-    offer: &[(Uuid, i32)],
-    owned: &HashMap<Uuid, i32>,
+    offer: &[OfferLine],
+    held: &HashMap<Uuid, Units>,
     strands: i64,
     strand_balance: i64,
-) -> Result<(), String> {
-    for (id, qty) in offer {
-        match owned.get(id) {
-            None => return Err("You don't own an item in that offer".to_string()),
-            Some(have) if have < qty => {
-                return Err(format!("You only have {} of an item you offered {} of", have, qty))
-            }
-            Some(_) => {}
-        }
+) -> Result<Vec<(Uuid, Units)>, String> {
+    let mut settled = Vec::with_capacity(offer.len());
+    for (id, qty, named) in offer {
+        let Some(have) = held.get(id) else {
+            return Err("You don't own an item in that offer".to_string());
+        };
+        let units = match named {
+            Some(named) if have.contains(named) => named.clone(),
+            Some(_) => return Err("You don't hold those qualities of an item you offered".to_string()),
+            None => have.pick(*qty, Pick::default()).ok_or_else(|| {
+                format!("You only have {} of an item you offered {} of", have.count(), qty)
+            })?,
+        };
+        settled.push((*id, units));
     }
     if strands > strand_balance {
         return Err(format!(
@@ -1194,7 +1210,7 @@ fn check_trade_offer_holdings(
             strand_balance, strands
         ));
     }
-    Ok(())
+    Ok(settled)
 }
 
 /// Handle move item request directly via database
@@ -1260,13 +1276,15 @@ async fn handle_move_item(
 }
 
 /// Split `quantity` off a stack into the empty `to_slot` of its container
-/// (E1.2). Returns the container, which is the only one that changed.
+/// (E1.2): the units `qualities` names, or the lowest (E1.8). Returns the
+/// container, which is the only one that changed.
 async fn handle_split_stack(
     state: &AppState,
     player_id: Uuid,
     item_id: Uuid,
     quantity: i32,
     to_slot: i32,
+    qualities: Option<&Units>,
 ) -> Result<Uuid, String> {
     let source = movable_item(&state.db, player_id, item_id)
         .await
@@ -1278,7 +1296,7 @@ async fn handle_split_stack(
     check_container_access(&state.db, player_id, container_id, at)
         .await
         .map_err(|e| e.message())?;
-    crate::engine::slot_moves::split(&state.db, player_id, &source, quantity, to_slot)
+    crate::engine::slot_moves::split(&state.db, player_id, &source, quantity, to_slot, qualities)
         .await
         .map_err(|e| format!("Database error: {}", e))?
         .map_err(|e| e.message().to_string())?;
@@ -1395,37 +1413,23 @@ async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<(Uuid, Vec<(
     // Start database transaction
     let mut tx = state.db.begin().await.map_err(|e| format!("DB error: {}", e))?;
 
-    // Verify all items in offer A still exist and are owned by player A
-    for (item_id, qty) in &session.offer_a.items {
-        let item: Option<(i32,)> = sqlx::query_as(
-            "SELECT quantity FROM items WHERE id = $1 AND owner_id = $2"
-        )
-        .bind(item_id)
-        .bind(player_a)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| format!("DB error: {}", e))?;
-
-        match item {
-            Some((actual_qty,)) if actual_qty >= *qty => {}
-            _ => return Err("Item no longer available".to_string()),
-        }
-    }
-
-    // Verify all items in offer B still exist and are owned by player B
-    for (item_id, qty) in &session.offer_b.items {
-        let item: Option<(i32,)> = sqlx::query_as(
-            "SELECT quantity FROM items WHERE id = $1 AND owner_id = $2"
-        )
-        .bind(item_id)
-        .bind(player_b)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| format!("DB error: {}", e))?;
-
-        match item {
-            Some((actual_qty,)) if actual_qty >= *qty => {}
-            _ => return Err("Item no longer available".to_string()),
+    // Verify every item offered still exists, is its offerer's, and holds the units offered
+    for (items, owner) in [(&session.offer_a.items, player_a), (&session.offer_b.items, player_b)] {
+        for (item_id, units) in items {
+            let owned: Option<(i32,)> = sqlx::query_as(
+                "SELECT 1 FROM items WHERE id = $1 AND owner_id = $2 FOR UPDATE"
+            )
+            .bind(item_id)
+            .bind(owner)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| format!("DB error: {}", e))?;
+            let held = crate::engine::units::units_of(&mut tx, *item_id)
+                .await
+                .map_err(|e| format!("DB error: {}", e))?;
+            if owned.is_none() || !held.contains(units) {
+                return Err("Item no longer available".to_string());
+            }
         }
     }
 
@@ -1455,8 +1459,8 @@ async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<(Uuid, Vec<(
     // inventory with no room fails the trade, and the transaction rolls back.
     let mut placing: Vec<(Uuid, Uuid)> = Vec::new();
     for (items, to) in [(&session.offer_a.items, player_b), (&session.offer_b.items, player_a)] {
-        for (item_id, qty) in items {
-            placing.push((hand_over(&mut tx, *item_id, *qty, to).await?, to));
+        for (item_id, units) in items {
+            placing.push((hand_over(&mut tx, *item_id, units, to).await?, to));
         }
     }
     for to in [player_a, player_b] {
@@ -1533,22 +1537,23 @@ async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<(Uuid, Vec<(
     Ok((trade_id, balances))
 }
 
-/// Gives `qty` of the stack `item_id` to `to`, out of any container: the
-/// whole stack, or a new stack split off it. Returns the stack `to` now
-/// owns, for [`place_in_inventory`].
+/// Gives `units` of the stack `item_id` to `to`, out of any container: the
+/// whole stack, or a new stack split off it, each unit at its own quality
+/// (E1.8). Returns the stack `to` now owns, for [`place_in_inventory`].
 async fn hand_over(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     item_id: Uuid,
-    qty: i32,
+    units: &Units,
     to: Uuid,
 ) -> Result<Uuid, String> {
-    let (item_type, quality, min_quality, current_qty): (String, i32, i32, i32) =
-        sqlx::query_as("SELECT item_type, quality, min_quality, quantity FROM items WHERE id = $1")
-            .bind(item_id)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(|e| format!("DB error: {}", e))?;
-    if current_qty == qty {
+    let db_error = |e: sqlx::Error| format!("DB error: {}", e);
+    let item_type: String = sqlx::query_scalar("SELECT item_type FROM items WHERE id = $1")
+        .bind(item_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(db_error)?;
+    let held = crate::engine::units::units_of(tx, item_id).await.map_err(db_error)?;
+    if held == *units {
         sqlx::query(
             "UPDATE items SET owner_id = $1, container_id = NULL, slot_index = NULL WHERE id = $2",
         )
@@ -1559,28 +1564,23 @@ async fn hand_over(
         .map_err(|e| format!("DB error: {}", e))?;
         return Ok(item_id);
     }
-    sqlx::query("UPDATE items SET quantity = quantity - $1 WHERE id = $2")
-        .bind(qty)
-        .bind(item_id)
-        .execute(&mut **tx)
+    crate::engine::units::take_units(tx, item_id, units)
         .await
-        .map_err(|e| format!("DB error: {}", e))?;
-    // The split keeps the min: a blend handed over is still a blend (D2)
-    let new_item_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO items (id, item_type, quality, quantity, owner_id, min_quality)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+        .map_err(db_error)?
+        .ok_or_else(|| "Item no longer available".to_string())?;
+    crate::engine::units::insert_stack(
+        tx,
+        crate::engine::units::NewStack {
+            item_type: &item_type,
+            owner_id: Some(to),
+            container_id: None,
+            slot_index: None,
+            durability: None,
+        },
+        units,
     )
-    .bind(new_item_id)
-    .bind(&item_type)
-    .bind(quality)
-    .bind(qty)
-    .bind(to)
-    .bind(min_quality)
-    .execute(&mut **tx)
     .await
-    .map_err(|e| format!("DB error: {}", e))?;
-    Ok(new_item_id)
+    .map_err(db_error)
 }
 
 /// Puts each of `stacks` in a free slot of `player`'s inventory, lowest
@@ -1651,7 +1651,7 @@ mod tests {
     }
 
     fn offer_item(id: &str, quantity: i32) -> TradeOfferItem {
-        TradeOfferItem { item_id: id.to_string(), quantity }
+        TradeOfferItem { item_id: id.to_string(), quantity, qualities: None }
     }
 
     #[test]
@@ -1684,12 +1684,20 @@ mod tests {
     fn trade_offer_parses_a_good_offer() {
         let id = Uuid::new_v4();
         let offer = parse_trade_offer(&[offer_item(&id.to_string(), 4)], 10).unwrap();
-        assert_eq!(offer, vec![(id, 4)]);
+        assert_eq!(offer, vec![(id, 4, None)]);
+    }
+
+    #[test]
+    fn trade_offer_rejects_qualities_that_dont_add_up() {
+        let id = Uuid::new_v4().to_string();
+        let mut line = offer_item(&id, 4);
+        line.qualities = Some(Units::uniform(3, 90));
+        assert!(parse_trade_offer(&[line], 0).unwrap_err().contains("add up"));
     }
 
     #[test]
     fn trade_offer_rejects_an_item_not_owned() {
-        let offer = vec![(Uuid::new_v4(), 1)];
+        let offer = vec![(Uuid::new_v4(), 1, None)];
         let err = check_trade_offer_holdings(&offer, &HashMap::new(), 0, 0).unwrap_err();
         assert!(err.contains("don't own"), "{err}");
     }
@@ -1697,9 +1705,17 @@ mod tests {
     #[test]
     fn trade_offer_rejects_more_than_the_player_has() {
         let id = Uuid::new_v4();
-        let owned = HashMap::from([(id, 2)]);
-        let err = check_trade_offer_holdings(&[(id, 5)], &owned, 0, 0).unwrap_err();
+        let held = HashMap::from([(id, Units::uniform(2, 60))]);
+        let err = check_trade_offer_holdings(&[(id, 5, None)], &held, 0, 0).unwrap_err();
         assert!(err.contains("only have 2"), "{err}");
+    }
+
+    #[test]
+    fn trade_offer_rejects_qualities_the_player_doesnt_hold() {
+        let id = Uuid::new_v4();
+        let held = HashMap::from([(id, Units::from_pairs([(50, 2), (90, 1)]))]);
+        let err = check_trade_offer_holdings(&[(id, 2, Some(Units::uniform(2, 90)))], &held, 0, 0).unwrap_err();
+        assert!(err.contains("qualities"), "{err}");
     }
 
     #[test]
@@ -1708,38 +1724,48 @@ mod tests {
         assert!(err.contains("only have 20 strands"), "{err}");
     }
 
+    /// An offer settles to exact units: the ones named, or the lowest first
     #[test]
-    fn trade_offer_accepts_what_the_player_holds() {
-        let id = Uuid::new_v4();
-        let owned = HashMap::from([(id, 5)]);
-        assert!(check_trade_offer_holdings(&[(id, 5)], &owned, 20, 20).is_ok());
+    fn trade_offer_settles_to_the_units_named_or_the_lowest() {
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let mixed = Units::from_pairs([(50, 2), (90, 2)]);
+        let held = HashMap::from([(a, mixed.clone()), (b, mixed)]);
+        let settled = check_trade_offer_holdings(
+            &[(a, 2, Some(Units::uniform(2, 90))), (b, 3, None)],
+            &held,
+            20,
+            20,
+        )
+        .unwrap();
+        assert_eq!(settled, vec![(a, Units::uniform(2, 90)), (b, Units::from_pairs([(50, 2), (90, 1)]))]);
     }
 
     #[test]
-    fn trading_offer_lines_carry_type_name_and_quality() {
+    fn trading_offer_lines_carry_type_name_and_units() {
         let (rope, mystery) = (Uuid::new_v4(), Uuid::new_v4());
         let owned = HashMap::from([
-            (rope, (rope, 7, "rope".to_string(), 82)),
-            (mystery, (mystery, 1, "relic".to_string(), 40)),
+            (rope, ("rope".to_string(), Units::from_pairs([(80, 4), (86, 3)]))),
+            (mystery, ("relic".to_string(), Units::uniform(1, 40))),
         ]);
         let item_types = HashMap::from([(
             "rope".to_string(),
             ItemType { id: "rope".into(), name: "Rope".into(), category: "material".into(), stackable: true, weight: 1.0, ..Default::default() },
         )]);
+        let offered = Units::from_pairs([(80, 1), (86, 2)]);
 
-        let lines = trade_offer_lines(&[(rope, 3), (mystery, 1)], &owned, &item_types);
+        let lines = trade_offer_lines(&[(rope, offered.clone()), (mystery, Units::uniform(1, 40))], &owned, &item_types);
         assert_eq!(lines, vec![
-            TradeItemInfo { item_id: rope, item_type: "rope".into(), item_name: "Rope".into(), quantity: 3, quality: 82 },
+            TradeItemInfo { item_id: rope, item_type: "rope".into(), item_name: "Rope".into(), quantity: 3, quality: 84, units: offered },
             // An unknown type keeps its id as its name
-            TradeItemInfo { item_id: mystery, item_type: "relic".into(), item_name: "relic".into(), quantity: 1, quality: 40 },
+            TradeItemInfo { item_id: mystery, item_type: "relic".into(), item_name: "relic".into(), quantity: 1, quality: 40, units: Units::uniform(1, 40) },
         ]);
     }
 
-    /// A traded blend is still a blend, whether the whole stack goes or part (D2)
+    /// A trade hands over exactly the units offered, part of a stack or all of it (E1.8)
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
-    async fn a_trade_hands_over_the_min_quality(db: sqlx::PgPool) {
-        use crate::engine::slot_moves::test_stacks::lot_in;
+    async fn a_trade_hands_over_exactly_the_units_offered(db: sqlx::PgPool) {
+        use crate::engine::units::test_units::{all_held, stack_of, units};
         let mut players = Vec::new();
         for name in ["ada", "bob"] {
             let account = Uuid::new_v4();
@@ -1767,29 +1793,31 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        let blend = lot_in(&db, ada, inventory, 0, "fiber", 91, 40, 10).await;
-        let rope = lot_in(&db, ada, inventory, 1, "rope", 80, 55, 2).await;
+        let mixed = Units::from_pairs([(40, 2), (92, 6)]);
+        let fiber = stack_of(&db, ada, inventory, 0, "fiber", &mixed).await;
+        let rope = stack_of(&db, ada, inventory, 1, "rope", &Units::from_pairs([(55, 1), (80, 1)])).await;
 
         let mut tx = db.begin().await.unwrap();
-        let part = hand_over(&mut tx, blend, 4, bob).await.unwrap();
-        let whole = hand_over(&mut tx, rope, 2, bob).await.unwrap();
+        let part = hand_over(&mut tx, fiber, &Units::uniform(4, 92), bob).await.unwrap();
+        let whole = hand_over(&mut tx, rope, &Units::from_pairs([(55, 1), (80, 1)]), bob).await.unwrap();
         tx.commit().await.unwrap();
 
-        let lots = |id: Uuid| {
+        let owner = |id: Uuid| {
             let db = db.clone();
             async move {
-                sqlx::query_as::<_, (Uuid, i32, i32, i32)>(
-                    "SELECT owner_id, quantity, quality, min_quality FROM items WHERE id = $1",
-                )
-                .bind(id)
-                .fetch_one(&db)
-                .await
-                .unwrap()
+                sqlx::query_scalar::<_, Uuid>("SELECT owner_id FROM items WHERE id = $1")
+                    .bind(id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap()
             }
         };
-        assert_eq!(lots(part).await, (bob, 4, 91, 40));
-        assert_eq!(lots(blend).await, (ada, 6, 91, 40));
+        assert_eq!((owner(part).await, units(&db, part).await), (bob, Units::uniform(4, 92)));
+        assert_eq!((owner(fiber).await, units(&db, fiber).await), (ada, Units::from_pairs([(40, 2), (92, 2)])));
         assert_eq!(whole, rope);
-        assert_eq!(lots(rope).await, (bob, 2, 80, 55));
+        assert_eq!(owner(rope).await, bob);
+        let mut all = all_held(&db, ada, "fiber").await;
+        all.merge(&all_held(&db, bob, "fiber").await);
+        assert_eq!(all, mixed, "no unit lost its quality");
     }
 }

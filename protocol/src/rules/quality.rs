@@ -124,6 +124,13 @@ impl Inputs {
         *sum += quantity as i64 * quality as i64;
     }
 
+    /// Each of `units` of `item_type` (E1.8).
+    pub fn add_units(&mut self, item_type: &str, units: &super::stacking::Units) {
+        for (quality, count) in units.pairs() {
+            self.add(item_type, count, quality);
+        }
+    }
+
     /// The mean quality of the `item_type` units taken, if any were.
     pub fn mean(&self, item_type: &str) -> Option<f64> {
         self.units

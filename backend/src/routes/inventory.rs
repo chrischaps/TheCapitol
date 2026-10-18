@@ -203,7 +203,7 @@ pub async fn move_item(
     .await?;
     let (action, merged_quantity, merged_quality) = match done {
         SlotMove::Moved => ("moved", None, None),
-        SlotMove::Merged { quantity, quality, .. } => ("merged", Some(quantity), Some(quality)),
+        SlotMove::Merged { units } => ("merged", Some(units.count() as i32), units.mean()),
         SlotMove::Swapped => ("swapped", None, None),
     };
     let response = MoveItemResponse {
@@ -217,7 +217,8 @@ pub async fn move_item(
 }
 
 /// Split part of a stack into an empty slot of the same container (E1.2).
-/// Both stacks keep the quality and the min quality.
+/// `qualities` names which units, as `[quality, count]` pairs adding up to
+/// `quantity`; without it the lowest go. Every unit keeps its quality (E1.8).
 #[utoipa::path(
     post,
     path = "/items/{id}/split",
@@ -225,7 +226,7 @@ pub async fn move_item(
     request_body = SplitStackRequest,
     responses(
         (status = 200, description = "The new stack", body = SplitStackResponse),
-        (status = 400, description = "Bad quantity, or the slot is taken or doesn't exist"),
+        (status = 400, description = "Bad quantity, qualities the stack doesn't hold, or the slot is taken or doesn't exist"),
         (status = 404, description = "Item not found")
     ),
     security(("bearer_auth" = [])),
@@ -251,7 +252,7 @@ pub async fn split_stack(
     let at = live_position(&state.game, player_id).await;
     check_container_access(&state.db, player_id, container_id, at).await?;
 
-    let new = slot_moves::split(&state.db, player_id, &source, req.quantity, req.to_slot)
+    let new = slot_moves::split(&state.db, player_id, &source, req.quantity, req.to_slot, req.qualities.as_ref())
         .await?
         .map_err(|e| AppError::BadRequest(e.message().into()))?;
     let item_type: Option<ItemType> =

@@ -5,16 +5,18 @@ use uuid::Uuid;
 
 use capitol_protocol::rest::{CatalogTool, SlotItem};
 pub use capitol_protocol::rest::InventoryItem;
-use capitol_protocol::rules::stacking::Lot;
+use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::rules::tools;
 
 /// The `item_types` columns an [`ItemType`] reads, for `SELECT`s.
 pub const ITEM_TYPE_COLUMNS: &str =
     "id, name, category, stackable, weight, tool_type, tier, base_power, max_durability";
 
-/// The `items` columns an [`Item`] reads, for `SELECT`s.
+/// The `items` columns an [`Item`] reads, for `SELECT ... FROM items` (not
+/// an alias: the units subquery names `items.id`). Not for `RETURNING`, which
+/// can't see the units an insert's trigger writes.
 pub const ITEM_COLUMNS: &str =
-    "id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at, durability, min_quality";
+    "id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at, durability, min_quality,      COALESCE((SELECT json_agg(json_build_array(u.quality, u.count) ORDER BY u.quality)                FROM item_units u WHERE u.item_id = items.id), '[]'::json) AS units";
 
 /// Static item type definition (from database)
 #[derive(Debug, Clone, Default, Serialize, Deserialize, FromRow)]
@@ -65,8 +67,12 @@ pub struct Item {
     pub created_at: DateTime<Utc>,
     /// Uses left, for a tool (E1.4); `None` for anything else.
     pub durability: Option<i32>,
-    /// The lowest quality blended into this stack (E1.2)
+    /// The lowest quality of its units (E1.2, E1.8)
     pub min_quality: i32,
+    /// Every unit, a count per quality (E1.8). `quantity`, `quality` and
+    /// `min_quality` summarise these.
+    #[sqlx(json)]
+    pub units: Units,
 }
 
 impl Item {
@@ -95,16 +101,11 @@ impl Item {
             self.quantity,
             self.slot_index?,
         )
-        .with_min_quality(self.min_quality);
+        .with_units(self.units.clone());
         Some(match (self.durability, self.max_durability(item_type)) {
             (Some(left), Some(max)) => slot.with_durability(left, max),
             _ => slot,
         })
-    }
-
-    /// This stack as a lot, for `rules::stacking`.
-    pub fn lot(&self) -> Lot {
-        Lot { quantity: self.quantity, quality: self.quality, min_quality: self.min_quality }
     }
 
     /// This tool's most durability, from its type and its own quality. `None` for

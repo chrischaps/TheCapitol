@@ -5,15 +5,18 @@
 //! transaction, every input is checked again (it still exists, the crafter owns it, it holds
 //! enough), the inputs are consumed and the output is written. If anything is wrong the craft
 //! fails and nothing changes.
+//!
+//! A craft takes the very units its quality was worked out from (E1.8): the start names them
+//! (the best of each stack first), and completion takes exactly those, or fails.
 
 use capitol_protocol::rest::StationTool;
-use capitol_protocol::rules::stacking::Lot;
+use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::ws::ToolUse;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::station_tools;
-use super::slot_moves::{auto_stack, write_lot};
+use super::units;
 use super::tools::{self, BrokenTool, HeldTool, Wear};
 
 /// A craft that has run its time, waiting to be written
@@ -21,8 +24,8 @@ use super::tools::{self, BrokenTool, HeldTool, Wear};
 pub struct FinishedCraft {
     pub player_id: Uuid,
     pub operation_id: Uuid,
-    /// (item_id, quantity to consume)
-    pub inputs: Vec<(Uuid, i32)>,
+    /// (item_id, the units to consume from it)
+    pub inputs: Vec<(Uuid, Units)>,
     pub outputs: Vec<CraftOutput>,
     /// The tool the recipe needs, as it was at the start (E1.5). It wears once.
     pub tool: Option<HeldTool>,
@@ -116,50 +119,37 @@ async fn consume_inputs(
     craft: &FinishedCraft,
     changed: &mut Vec<Uuid>,
 ) -> Result<(), String> {
-    // The same stack listed twice must hold both amounts
-    let mut wanted: Vec<(Uuid, i32)> = Vec::new();
-    for &(id, qty) in &craft.inputs {
-        match wanted.iter_mut().find(|(w, _)| *w == id) {
-            Some((_, total)) => *total += qty,
-            None => wanted.push((id, qty)),
+    // The same stack listed twice must hold both lots
+    let mut wanted: Vec<(Uuid, Units)> = Vec::new();
+    for (id, lot) in &craft.inputs {
+        match wanted.iter_mut().find(|(w, _)| w == id) {
+            Some((_, all)) => {
+                all.merge(lot);
+            }
+            None => wanted.push((*id, lot.clone())),
         }
     }
 
-    for (item_id, qty) in wanted {
-        let held: Option<(Option<Uuid>, i32)> = sqlx::query_as(
-            "SELECT container_id, quantity FROM items WHERE id = $1 AND owner_id = $2 FOR UPDATE",
+    for (item_id, lot) in wanted {
+        let held: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT container_id FROM items WHERE id = $1 AND owner_id = $2 FOR UPDATE",
         )
         .bind(item_id)
         .bind(craft.player_id)
         .fetch_optional(&mut **tx)
         .await
         .map_err(db_error)?;
-
-        let (container_id, have) = match held {
-            Some(row) if row.1 >= qty => row,
-            _ => {
-                tracing::info!(
-                    "Craft {} by {} failed: input {} is gone, or no longer {}'s, or under {}",
-                    craft.operation_id, craft.player_id, item_id, craft.player_id, qty
-                );
-                return Err(INPUTS_MOVED.to_string());
-            }
+        let taken = match held {
+            Some(_) => units::take_units(tx, item_id, &lot).await.map_err(db_error)?,
+            None => None,
         };
-
-        if have == qty {
-            sqlx::query("DELETE FROM items WHERE id = $1")
-                .bind(item_id)
-                .execute(&mut **tx)
-                .await
-                .map_err(db_error)?;
-        } else {
-            sqlx::query("UPDATE items SET quantity = $1 WHERE id = $2")
-                .bind(have - qty)
-                .bind(item_id)
-                .execute(&mut **tx)
-                .await
-                .map_err(db_error)?;
-        }
+        let (Some(container_id), Some(_)) = (held, taken) else {
+            tracing::info!(
+                "Craft {} by {} failed: input {} is gone, or no longer {}'s, or no longer holds {:?}",
+                craft.operation_id, craft.player_id, item_id, craft.player_id, lot
+            );
+            return Err(INPUTS_MOVED.to_string());
+        };
         if let Some(c) = container_id {
             if !changed.contains(&c) {
                 changed.push(c);
@@ -169,9 +159,9 @@ async fn consume_inputs(
     Ok(())
 }
 
-/// Put `output` in the crafter's output container: onto a stack of the same type, grade
-/// and min grade (`slot_moves::auto_stack`) if it stacks, or into the first free slot.
-/// Returns the container.
+/// Put `output` in the crafter's output container: onto the first stack of its type if it
+/// stacks (`units::join_first_stack`: every unit keeps its quality, so any grade may join),
+/// or into the first free slot. Returns the container.
 async fn place_output(
     tx: &mut Transaction<'_, Postgres>,
     player_id: Uuid,
@@ -192,17 +182,9 @@ async fn place_output(
         "You have no crafting output".to_string()
     })?;
 
-    // Only onto a stack of the same grade and min grade: the server doesn't
-    // blend your stacks for you (plan D2). With one output slot, a craft of
-    // another grade waits for it to be emptied (#191).
     if output.stackable {
-        let lot = Lot::fresh(output.quantity, output.quality);
-        if let Some((id, stack)) = auto_stack(tx, container_id, &output.item_type, &lot)
-            .await
-            .map_err(db_error)?
-        {
-            let merged = stack.merge(lot).ok_or_else(|| OUTPUT_FULL.to_string())?;
-            write_lot(tx, id, &merged).await.map_err(db_error)?;
+        let made = Units::uniform(output.quantity, output.quality);
+        if units::join_first_stack(tx, container_id, &output.item_type, &made).await.map_err(db_error)? {
             return Ok(container_id);
         }
     }
@@ -304,12 +286,12 @@ mod tests {
         id
     }
 
-    /// Basic rope: 2 fiber, 1 rope
+    /// Basic rope: 2 fiber at 60, 1 rope
     fn rope(player: &Crafter, fiber: Uuid) -> FinishedCraft {
         FinishedCraft {
             player_id: player.id,
             operation_id: Uuid::new_v4(),
-            inputs: vec![(fiber, 2)],
+            inputs: vec![(fiber, Units::uniform(2, 60))],
             outputs: vec![CraftOutput {
                 item_type: "rope".into(),
                 item_name: "Rope".into(),
@@ -397,8 +379,9 @@ mod tests {
         let ada = crafter(&db, "ada").await;
         let fiber = stack(&db, ada.id, ada.input, 0, "fiber", 2).await;
         let other = stack(&db, ada.id, ada.inventory, 0, "fiber", 3).await;
-        sqlx::query("DELETE FROM items WHERE id = $1").bind(fiber).execute(&db).await.unwrap();
-        sqlx::query("UPDATE items SET quantity = 5 WHERE id = $1").bind(other).execute(&db).await.unwrap();
+        let mut conn = db.acquire().await.unwrap();
+        units::merge_into(&mut conn, fiber, other).await.unwrap();
+        drop(conn);
 
         let result = finish_craft(&db, &rope(&ada, fiber)).await;
 
@@ -412,7 +395,9 @@ mod tests {
     async fn fiber_split_below_the_recipe_fails_the_craft(db: PgPool) {
         let ada = crafter(&db, "ada").await;
         let fiber = stack(&db, ada.id, ada.input, 0, "fiber", 2).await;
-        sqlx::query("UPDATE items SET quantity = 1 WHERE id = $1").bind(fiber).execute(&db).await.unwrap();
+        let mut conn = db.acquire().await.unwrap();
+        units::take(&mut conn, fiber, 1, Default::default()).await.unwrap().unwrap();
+        drop(conn);
 
         let result = finish_craft(&db, &rope(&ada, fiber)).await;
 
@@ -508,36 +493,32 @@ mod tests {
         assert_eq!(rope_made(&db, &ada).await, 4);
     }
 
-    /// Output joins only a stack of its own grade and min grade (D2). The
-    /// output box has one slot, so rope of another grade, or onto a blend, has
-    /// nowhere to go and the craft is refused with its inputs kept.
+    /// Output joins any stack of its type, and every unit keeps its quality (D2, E1.8): rope
+    /// at 60 onto two at 92 is three units, two 92s and a 60, shown as 81
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
-    async fn output_joins_only_its_own_grade_and_min_grade(db: PgPool) {
-        use crate::engine::slot_moves::test_stacks::{lot_in, stacks_in};
+    async fn output_joins_any_grade_and_keeps_its_own_quality(db: PgPool) {
+        use crate::engine::units::test_units::{all_held, stack_of, units};
         let ada = crafter(&db, "ada").await;
-        let fiber = stack(&db, ada.id, ada.input, 0, "fiber", 2).await;
-        let held = lot_in(&db, ada.id, ada.output, 0, "rope", 92, 92, 2).await;
-        let set = |quality: i32, min_quality: i32| {
-            sqlx::query("UPDATE items SET quality = $1, min_quality = $2 WHERE id = $3")
-                .bind(quality)
-                .bind(min_quality)
-                .bind(held)
-                .execute(&db)
-        };
+        let fiber = stack_of(&db, ada.id, ada.input, 0, "fiber", &Units::from_pairs([(60, 2), (95, 1)])).await;
+        let held = stack_of(&db, ada.id, ada.output, 0, "rope", &Units::uniform(2, 92)).await;
+        let fiber_before = all_held(&db, ada.id, "fiber").await;
 
-        // Rope at 60 is a C: not onto an A...
-        assert_eq!(finish_craft(&db, &rope(&ada, fiber)).await.unwrap_err(), OUTPUT_FULL);
-        // ...nor onto a C blended from F
-        set(62, 30).await.unwrap();
-        assert_eq!(finish_craft(&db, &rope(&ada, fiber)).await.unwrap_err(), OUTPUT_FULL);
-        assert_eq!(stacks_in(&db, ada.output, "rope").await, vec![(0, 2, 62, 30)]);
-        assert_eq!(item(&db, fiber).await.map(|i| i.2), Some(2), "the inputs are kept");
+        let mut craft = rope(&ada, fiber);
+        finish_craft(&db, &craft).await.unwrap();
 
-        // A plain C takes it
-        set(70, 70).await.unwrap();
-        finish_craft(&db, &rope(&ada, fiber)).await.unwrap();
-        assert_eq!(stacks_in(&db, ada.output, "rope").await, vec![(0, 3, 66, 60)]);
+        let made = units(&db, held).await;
+        assert_eq!(made, Units::from_pairs([(60, 1), (92, 2)]));
+        assert_eq!(made.mean(), Some(81));
+        // The craft took exactly the two 60s it named, and left the 95
+        let mut used = fiber_before.clone();
+        used.take_units(&Units::uniform(2, 60)).unwrap();
+        assert_eq!(all_held(&db, ada.id, "fiber").await, used);
+
+        // Units the stack doesn't hold any more fail the craft
+        craft.inputs = vec![(fiber, Units::uniform(1, 60))];
+        assert_eq!(finish_craft(&db, &craft).await.unwrap_err(), INPUTS_MOVED);
+        assert_eq!(units(&db, fiber).await, Units::uniform(1, 95));
     }
 
     /// A stone sickle in `player`'s inventory with `durability` left, as `best_tool` would find it

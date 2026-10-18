@@ -334,6 +334,9 @@ impl Draft {
             .map(|l| TradeOfferItem {
                 item_id: l.item_id.to_string(),
                 quantity: l.quantity,
+                // The lowest go first; the server settles exactly which.
+                // Choosing qualities here is #205
+                qualities: None,
             })
             .collect();
         Some((items, self.strands))
@@ -505,7 +508,8 @@ mod tests {
             Some((
                 vec![TradeOfferItem {
                     item_id: ROPE.to_string(),
-                    quantity: 3
+                    quantity: 3,
+                    qualities: None,
                 }],
                 25
             ))
@@ -531,6 +535,7 @@ mod tests {
                 item_name: "Rope".into(),
                 quantity: 2,
                 quality: 70,
+                units: capitol_protocol::rules::stacking::Units::uniform(2, 70),
             }],
             strands: 0,
         };

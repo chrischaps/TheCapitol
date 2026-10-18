@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::rules::TRADE_REQUEST_TTL_SECS;
 
 /// How long a trade request waits for an answer before the tick drops it
@@ -22,8 +23,8 @@ pub struct TradeSession {
 /// A player's offer in a trade
 #[derive(Debug, Clone, Default)]
 pub struct TradeOffer {
-    /// Items being offered: (item_id, quantity)
-    pub items: Vec<(Uuid, i32)>,
+    /// Items being offered: (item_id, the very units offered, E1.8)
+    pub items: Vec<(Uuid, Units)>,
     /// Strands being offered
     pub strands: i64,
 }
@@ -194,7 +195,7 @@ impl TradeManager {
     }
 
     /// Update a player's offer
-    pub fn update_offer(&mut self, player_id: Uuid, items: Vec<(Uuid, i32)>, strands: i64) -> Result<(), String> {
+    pub fn update_offer(&mut self, player_id: Uuid, items: Vec<(Uuid, Units)>, strands: i64) -> Result<(), String> {
         let trade = self.get_player_trade_mut(player_id)
             .ok_or("Not in a trade")?;
 

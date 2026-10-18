@@ -17,6 +17,7 @@
 //! `station_count` includes it. A terrain change that lays a lot under one
 //! isn't handled yet (#188).
 
+use capitol_protocol::rules::stacking::Pick;
 use capitol_protocol::rules::{in_water, water_name, STATION_MIN_SPACING};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -168,6 +169,10 @@ pub async fn place_station(
     if kit_item.item_type != expected_kit {
         return Err(PlacementError::WrongKit { expected: expected_kit, got: kit_item.item_type });
     }
+    // Kits don't stack, so this is the kit's one unit; an old stack of them
+    // gives up its lowest (E1.8)
+    let kit = kit_item.units.pick(1, Pick::default()).ok_or(PlacementError::KitNotFound)?;
+    let kit_quality = kit.min().unwrap_or(kit_item.quality);
 
     let nearby: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM stations
@@ -193,7 +198,7 @@ pub async fn place_station(
     .bind(x as f32)
     .bind(y as f32)
     .bind(plot_id)
-    .bind(kit_item.quality)
+    .bind(kit_quality)
     .execute(db)
     .await?;
 
@@ -214,14 +219,8 @@ pub async fn place_station(
     .execute(db)
     .await?;
 
-    if kit_item.quantity <= 1 {
-        sqlx::query("DELETE FROM items WHERE id = $1").bind(kit_item_id).execute(db).await?;
-    } else {
-        sqlx::query("UPDATE items SET quantity = quantity - 1 WHERE id = $1")
-            .bind(kit_item_id)
-            .execute(db)
-            .await?;
-    }
+    let mut conn = db.acquire().await?;
+    super::units::take_units(&mut conn, kit_item_id, &kit).await?;
 
     Ok(Placed {
         info: StationInfo {
@@ -235,7 +234,7 @@ pub async fn place_station(
             owner_id: player_id,
             container_id: Some(container_id),
             interaction_range: st.interaction_range,
-            quality: kit_item.quality,
+            quality: kit_quality,
             tool: None,
         },
         plot_id,

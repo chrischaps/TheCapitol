@@ -13,11 +13,9 @@
 
 use std::collections::HashMap;
 
-use capitol_protocol::rules::stacking::{auto_stacks_with, Lot};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use super::slot_moves::write_lot;
 
 /// What a removal changed, so the caller can update the game state and tell clients.
 #[derive(Debug, Clone)]
@@ -222,8 +220,8 @@ pub struct ReturnedStations {
 struct Inventory {
     id: Uuid,
     free: Vec<i32>,
-    /// The stacks of each stackable item type, in slot order
-    stacks: HashMap<String, Vec<(Uuid, Lot)>>,
+    /// The stacks of each stackable item type, in slot order, with how many units each holds
+    stacks: HashMap<String, Vec<(Uuid, i64)>>,
 }
 
 /// Empty every station on `plot_id` into inventories, before a foreclosure
@@ -257,8 +255,8 @@ pub async fn return_plot_stations(
     let station_ids: Vec<Uuid> = stations.iter().map(|s| s.0).collect();
     let station_owner: HashMap<Uuid, Uuid> = stations.iter().map(|s| (s.0, s.2)).collect();
     // The boxes are locked too, so a deposit racing this waits (see `remove_in`)
-    let contents: Vec<(Uuid, String, i32, i32, i32, Option<Uuid>, Uuid, bool)> = sqlx::query_as(
-        "SELECT i.id, i.item_type, i.quality, i.quantity, i.min_quality, i.owner_id, c.station_id, it.stackable
+    let contents: Vec<(Uuid, String, i32, Option<Uuid>, Uuid, bool)> = sqlx::query_as(
+        "SELECT i.id, i.item_type, i.quantity, i.owner_id, c.station_id, it.stackable
          FROM items i
          JOIN containers c ON i.container_id = c.id
          JOIN item_types it ON it.id = i.item_type
@@ -320,30 +318,25 @@ pub async fn return_plot_stations(
         took(&mut returned, player, inventory_id);
     }
 
-    for (item_id, item_type, quality, quantity, min_quality, item_owner, station_id, stackable) in contents {
+    for (item_id, item_type, quantity, item_owner, station_id, stackable) in contents {
         let player = item_owner.unwrap_or(station_owner[&station_id]);
         let Some(inv) = inventory(tx, &mut inventories, player).await? else {
             returned.lost.push((item_type, quantity));
             continue;
         };
         let inventory_id = inv.id;
-        let lot = Lot { quantity, quality, min_quality };
+        // Onto the first stack of its type with room, whatever its grade: every
+        // unit keeps its quality (D2, E1.8)
         let joins = inv.stacks.get_mut(&item_type).filter(|_| stackable).and_then(|stacks| {
-            stacks.iter_mut().find(|(_, stack)| {
-                auto_stacks_with(&item_type, stack, &item_type, &lot) && stack.merge(lot).is_some()
-            })
+            stacks.iter_mut().find(|(_, held)| *held + quantity as i64 <= i32::MAX as i64)
         });
-        if let Some((stack_id, stack)) = joins {
-            *stack = stack.merge(lot).expect("checked above");
-            write_lot(&mut *tx, *stack_id, stack).await?;
-            sqlx::query("DELETE FROM items WHERE id = $1")
-                .bind(item_id)
-                .execute(&mut *tx)
-                .await?;
+        if let Some((stack_id, held)) = joins {
+            *held += quantity as i64;
+            super::units::merge_into(&mut *tx, item_id, *stack_id).await?;
         } else if !inv.free.is_empty() {
             let slot = inv.free.remove(0);
             if stackable {
-                inv.stacks.entry(item_type).or_default().push((item_id, lot));
+                inv.stacks.entry(item_type).or_default().push((item_id, quantity as i64));
             }
             sqlx::query(
                 "UPDATE items SET container_id = $1, slot_index = $2, owner_id = $3 WHERE id = $4",
@@ -389,8 +382,8 @@ async fn inventory<'a>(
         let loaded = match found {
             None => None,
             Some((id, slot_count)) => {
-                let held: Vec<(Uuid, String, i32, i32, i32, Option<i32>, bool)> = sqlx::query_as(
-                    "SELECT i.id, i.item_type, i.quantity, i.quality, i.min_quality, i.slot_index, it.stackable
+                let held: Vec<(Uuid, String, i32, Option<i32>, bool)> = sqlx::query_as(
+                    "SELECT i.id, i.item_type, i.quantity, i.slot_index, it.stackable
                      FROM items i JOIN item_types it ON it.id = i.item_type
                      WHERE i.container_id = $1 ORDER BY i.slot_index NULLS LAST, i.id
                      FOR UPDATE OF i",
@@ -398,11 +391,11 @@ async fn inventory<'a>(
                 .bind(id)
                 .fetch_all(&mut *tx)
                 .await?;
-                let used: Vec<i32> = held.iter().filter_map(|h| h.5).collect();
-                let mut stacks: HashMap<String, Vec<(Uuid, Lot)>> = HashMap::new();
-                for (item, kind, quantity, quality, min_quality, _, stackable) in held {
+                let used: Vec<i32> = held.iter().filter_map(|h| h.3).collect();
+                let mut stacks: HashMap<String, Vec<(Uuid, i64)>> = HashMap::new();
+                for (item, kind, quantity, _, stackable) in held {
                     if stackable {
-                        stacks.entry(kind).or_default().push((item, Lot { quantity, quality, min_quality }));
+                        stacks.entry(kind).or_default().push((item, quantity as i64));
                     }
                 }
                 let free = (0..slot_count).filter(|s| !used.contains(s)).collect();
@@ -677,12 +670,13 @@ mod tests {
         assert_eq!(items, 0);
     }
 
-    /// A foreclosure's returns join only stacks of their own grade and min
-    /// grade, and a returned blend stays a blend (D2)
+    /// A foreclosure's returns join the first stack of their type, whatever its
+    /// grade, and every unit keeps its quality (D2, E1.8)
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
-    async fn returns_join_only_their_own_grade_and_keep_their_min(db: PgPool) {
-        use crate::engine::slot_moves::test_stacks::{lot_in, stacks_in};
+    async fn returns_join_the_first_stack_and_keep_every_unit(db: PgPool) {
+        use crate::engine::units::test_units::{all_held, stack_of, units};
+        use capitol_protocol::rules::stacking::Units;
         let ada = player(&db, "ada").await;
         let plot: Uuid = sqlx::query_scalar(
             "INSERT INTO plots (zone_id, grid_x, grid_y, world_x, world_y, bounds_min_x,
@@ -701,22 +695,24 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        lot_in(&db, ada.id, ada.inventory, 0, "fiber", 95, 95, 5).await;
-        lot_in(&db, ada.id, ada.inventory, 1, "fiber", 60, 60, 4).await;
-        lot_in(&db, ada.id, chest_box, 0, "fiber", 92, 40, 2).await;
-        lot_in(&db, ada.id, chest_box, 1, "fiber", 65, 65, 3).await;
-        lot_in(&db, ada.id, chest_box, 2, "fiber", 93, 93, 1).await;
+        let first = stack_of(&db, ada.id, ada.inventory, 0, "fiber", &Units::uniform(5, 95)).await;
+        let second = stack_of(&db, ada.id, ada.inventory, 1, "fiber", &Units::uniform(4, 60)).await;
+        stack_of(&db, ada.id, chest_box, 0, "fiber", &Units::from_pairs([(40, 1), (92, 1)])).await;
+        stack_of(&db, ada.id, chest_box, 1, "fiber", &Units::uniform(3, 65)).await;
+        stack_of(&db, ada.id, chest_box, 2, "fiber", &Units::uniform(1, 93)).await;
+        let before = all_held(&db, ada.id, "fiber").await;
 
         let mut tx = db.begin().await.unwrap();
         let returned = return_plot_stations(&mut tx, plot).await.unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(returned.lost, vec![]);
-        // The kit took slot 2. The blended A found no blended A, so it has a
-        // slot of its own; the C joined the C and the A the A.
+        // Everything joined the first stack; the second is as it was
         assert_eq!(
-            stacks_in(&db, ada.inventory, "fiber").await,
-            vec![(0, 6, 94, 93), (1, 7, 62, 60), (3, 2, 92, 40)],
+            units(&db, first).await,
+            Units::from_pairs([(40, 1), (65, 3), (92, 1), (93, 1), (95, 5)]),
         );
+        assert_eq!(units(&db, second).await, Units::uniform(4, 60));
+        assert_eq!(all_held(&db, ada.id, "fiber").await, before, "no unit lost its quality");
     }
 }

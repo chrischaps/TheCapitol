@@ -9,7 +9,7 @@ use super::craft_completion::{finish_craft, FinishedCraft};
 use super::crafting::{cancel_crafting, process_crafting, start_crafting, CraftingOperation};
 use super::events::GameEvent;
 use super::extraction::{cancel_extraction, process_extractions, start_extraction, PendingItem};
-use super::slot_moves::{auto_stack, write_lot};
+use super::units;
 use super::tools::{self, HeldTool, Wear};
 use super::movement::process_movement;
 use super::regeneration::process_regeneration;
@@ -19,7 +19,7 @@ use crate::state::AppState;
 
 use capitol_protocol::rest::CatalogResponse;
 use capitol_protocol::rules::quality;
-use capitol_protocol::rules::stacking::Lot;
+use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
 
 /// Ticks between sweeps for unanswered trade requests (once a second)
@@ -515,7 +515,7 @@ impl GameState {
                     }
                 }
                 Command::UpdateTradeOffer { player_id, items, strands } => {
-                    let offer = items.iter().map(|item| (item.item_id, item.quantity)).collect();
+                    let offer = items.iter().map(|item| (item.item_id, item.units.clone())).collect();
                     if let Err(e) = self.trade_manager.update_offer(player_id, offer, strands) {
                         self.trade_failed(player_id, "trade_offer", e);
                         continue;
@@ -861,8 +861,9 @@ async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broad
     }
 }
 
-/// Put a gathered item in its gatherer's inventory: onto a stack of its type,
-/// grade and min grade (`slot_moves::auto_stack`), or into the first free slot. Returns the
+/// Put a gathered item in its gatherer's inventory: onto the first stack of its
+/// type, whatever its grade (`units::join_first_stack`: every unit keeps its
+/// quality), or into the first free slot. Returns the
 /// container, or `None` if there's no room (the item is lost, as before).
 async fn place_gathered(conn: &mut sqlx::PgConnection, item: &PendingItem) -> Result<Option<Uuid>, sqlx::Error> {
     let container: Option<(Uuid, i32)> = sqlx::query_as(
@@ -879,17 +880,13 @@ async fn place_gathered(conn: &mut sqlx::PgConnection, item: &PendingItem) -> Re
         return Ok(None);
     };
 
-    // Only onto a stack of the same grade and min grade (plan D2)
-    let lot = Lot::fresh(item.quantity, item.quality);
-    if let Some((stack_id, stack)) = auto_stack(conn, container_id, &item.item_type, &lot).await? {
-        if let Some(merged) = stack.merge(lot) {
-            write_lot(conn, stack_id, &merged).await?;
-            tracing::info!(
-                "Merged {} x{} (quality {}) into existing stack for player {}",
-                item.item_type, item.quantity, item.quality, item.player_id
-            );
-            return Ok(Some(container_id));
-        }
+    let gathered = Units::uniform(item.quantity, item.quality);
+    if units::join_first_stack(conn, container_id, &item.item_type, &gathered).await? {
+        tracing::info!(
+            "Merged {} x{} (quality {}) into existing stack for player {}",
+            item.item_type, item.quantity, item.quality, item.player_id
+        );
+        return Ok(Some(container_id));
     }
 
     // Find first empty slot
@@ -1265,6 +1262,7 @@ mod tests {
             item_name: "Rope".into(),
             quantity: 2,
             quality: 77,
+            units: Units::uniform(2, 77),
         };
         game.queue_command(Command::UpdateTradeOffer { player_id: a, items: vec![rope.clone()], strands: 5 });
         game.process_commands();
@@ -1276,7 +1274,7 @@ mod tests {
             "{events:?}"
         );
         let trade = game.trade_manager.get_player_trade(a).unwrap();
-        assert_eq!(trade.offer_a.items, vec![(rope.item_id, 2)]);
+        assert_eq!(trade.offer_a.items, vec![(rope.item_id, Units::uniform(2, 77))]);
     }
 
     #[test]
@@ -1538,15 +1536,14 @@ mod tests {
         assert_eq!(left, 10, "a tool that wasn't used doesn't wear");
     }
 
-    /// Gathered fiber joins only a stack of its own grade and min grade (D2)
+    /// Gathered fiber joins the first fiber stack, whatever its grade, and keeps its quality (D2, E1.8)
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
-    async fn a_gather_never_blends_into_another_grade(db: sqlx::PgPool) {
-        use crate::engine::slot_moves::test_stacks::{lot_in, stacks_in};
+    async fn a_gather_joins_the_first_stack_and_keeps_its_quality(db: sqlx::PgPool) {
+        use crate::engine::units::test_units::{all_in, stack_of, units};
         let (ada, inventory, _) = gatherer(&db, 10).await; // the sickle is in slot 0
-        lot_in(&db, ada, inventory, 1, "fiber", 95, 95, 5).await; // A
-        lot_in(&db, ada, inventory, 2, "fiber", 50, 20, 5).await; // D, blended from F
-        lot_in(&db, ada, inventory, 3, "fiber", 40, 40, 5).await; // D
+        let first = stack_of(&db, ada, inventory, 1, "fiber", &Units::uniform(5, 95)).await;
+        stack_of(&db, ada, inventory, 2, "fiber", &Units::uniform(5, 40)).await;
         let gathered = |quality| PendingItem {
             player_id: ada,
             node_id: Uuid::new_v4(),
@@ -1558,14 +1555,15 @@ mod tests {
         };
         let mut conn = db.acquire().await.unwrap();
 
-        // A D joins the unblended D, not the blend in the lower slot
         place_gathered(&mut conn, &gathered(50)).await.unwrap();
-        // A C has nothing to join
         place_gathered(&mut conn, &gathered(60)).await.unwrap();
+        drop(conn);
 
+        assert_eq!(units(&db, first).await, Units::from_pairs([(50, 5), (60, 5), (95, 5)]));
         assert_eq!(
-            stacks_in(&db, inventory, "fiber").await,
-            vec![(1, 5, 95, 95), (2, 5, 50, 20), (3, 10, 45, 40), (4, 5, 60, 60)],
+            all_in(&db, inventory, "fiber").await,
+            Units::from_pairs([(40, 5), (50, 5), (60, 5), (95, 5)]),
+            "every unit kept its quality"
         );
     }
 }

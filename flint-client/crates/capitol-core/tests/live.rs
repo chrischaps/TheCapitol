@@ -758,6 +758,7 @@ fn trade_refusals_come_back_as_errors() {
             vec![TradeOfferItem {
                 item_id: uuid::Uuid::from_u128(0xdead_beef).to_string(),
                 quantity: 1,
+                qualities: None,
             }],
             0,
         )

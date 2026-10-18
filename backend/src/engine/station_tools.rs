@@ -469,7 +469,7 @@ mod tests {
         FinishedCraft {
             player_id: player.id,
             operation_id: Uuid::new_v4(),
-            inputs: vec![(fiber, 2)],
+            inputs: vec![(fiber, capitol_protocol::rules::stacking::Units::uniform(2, 50))],
             outputs: vec![CraftOutput {
                 item_type: "rope".into(),
                 item_name: "Rope".into(),

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::rules;
+use crate::rules::stacking::Units;
 
 // ---------------------------------------------------------------------------
 // Shared bodies
@@ -484,10 +485,12 @@ pub struct SlotItem {
     pub quality_grade: String,
     /// Stack quantity
     pub quantity: i32,
-    /// The lowest quality blended into the stack (E1.2). Equal to `quality`
-    /// for a stack that was never blended; its grade below `quality_grade`
-    /// marks a blend ("A, blended from D").
+    /// The lowest quality of any unit in the stack (E1.2, E1.8): the least of
+    /// `units`. Its grade below `quality_grade` marks a stack that spans grades.
     pub min_quality: i32,
+    /// Every unit, as `[quality, count]` pairs (E1.8). `quality` is their
+    /// mean, rounded down, and `quantity` their count.
+    pub units: Units,
     /// Slot index within the container
     pub slot_index: i32,
     /// A tool's durability left, and its most (E1.4). Absent for anything else.
@@ -515,25 +518,25 @@ impl SlotItem {
             quality_grade: rules::quality_grade(quality).to_string(),
             quantity,
             min_quality: quality,
+            units: Units::uniform(quantity, quality),
             slot_index,
             durability: None,
             max_durability: None,
         }
     }
 
-    /// This slot item with `min_quality` blended into it.
-    pub fn with_min_quality(mut self, min_quality: i32) -> Self {
-        self.min_quality = min_quality;
+    /// This slot item holding `units`: its quantity, quality, grade and min
+    /// follow from them. Empty units change nothing.
+    pub fn with_units(mut self, units: Units) -> Self {
+        let (Some(quality), Some(min)) = (units.mean(), units.min()) else {
+            return self;
+        };
+        self.quantity = units.count().min(i32::MAX as i64) as i32;
+        self.quality = quality;
+        self.quality_grade = rules::quality_grade(quality).to_string();
+        self.min_quality = min;
+        self.units = units;
         self
-    }
-
-    /// This stack as a [`rules::stacking::Lot`].
-    pub fn lot(&self) -> rules::stacking::Lot {
-        rules::stacking::Lot {
-            quantity: self.quantity,
-            quality: self.quality,
-            min_quality: self.min_quality,
-        }
     }
 
     /// This slot item as a tool with `durability` of `max_durability` left.
@@ -545,12 +548,16 @@ impl SlotItem {
 }
 
 /// `POST /items/{id}/split`: split `quantity` off the stack into the empty
-/// slot `to_slot` of the same container (E1.2).
+/// slot `to_slot` of the same container (E1.2). `qualities` names which units
+/// (E1.8), as `[quality, count]` pairs that add up to `quantity`; without it
+/// the lowest go first.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct SplitStackRequest {
     pub quantity: i32,
     pub to_slot: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualities: Option<Units>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

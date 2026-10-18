@@ -678,6 +678,7 @@ mod tests {
                 item_name: "Rope".into(),
                 quantity: 3,
                 quality: 72,
+                units: capitol_protocol::rules::stacking::Units::uniform(3, 72),
             }],
             strands: 0,
         };

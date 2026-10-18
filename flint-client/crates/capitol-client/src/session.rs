@@ -517,6 +517,7 @@ impl Session {
                 request: SplitStackRequest {
                     quantity,
                     to_slot: m.target_slot,
+                    qualities: m.qualities,
                 },
             },
             None => RestRequest::MoveItem(MoveItemRequest {
@@ -546,6 +547,7 @@ impl Session {
                 target_container_id,
                 target_slot,
                 split: None,
+                qualities: None,
             });
         }
     }
@@ -1724,12 +1726,13 @@ mod tests {
             target_container_id: inventory.id,
             target_slot: to,
             split: None,
+            qualities: None,
         };
-        session.move_item(there);
+        session.move_item(there.clone());
         wait(&mut session, "the move", &in_slot(to, item.item_id));
         session.move_item(Move {
             target_slot: item.slot_index,
-            ..there
+            ..there.clone()
         });
         wait(
             &mut session,
@@ -1739,7 +1742,7 @@ mod tests {
 
         session.move_item(Move {
             target_slot: 999,
-            ..there
+            ..there.clone()
         });
         wait(&mut session, "the refusal", &|s| {
             s.move_refused(Instant::now()).is_some()
@@ -1749,7 +1752,7 @@ mod tests {
 
         session.move_item(Move {
             target_container_id: uuid::Uuid::from_u128(1), // nobody's
-            ..there
+            ..there.clone()
         });
         wait(&mut session, "the second refusal", &|s| {
             s.move_refused(Instant::now())
@@ -2282,6 +2285,7 @@ mod tests {
             target_container_id: chest_box.id,
             target_slot: chest_box.first_empty().expect("room in the chest") as i32,
             split: None,
+            qualities: None,
         });
         wait(&mut session, "the kit in the chest", &|s| {
             station_box(s).is_some_and(|b| b.find(kit.item_id).is_some())
@@ -2292,6 +2296,7 @@ mod tests {
             target_container_id: inventory.id,
             target_slot: inventory.first_empty().unwrap() as i32,
             split: None,
+            qualities: None,
         });
         wait(&mut session, "the kit back out", &|s| {
             s.state().inventory().unwrap().find(kit.item_id).is_some()
@@ -2405,6 +2410,7 @@ Bea: {}",
                     target_container_id: inv.id,
                     target_slot: slot as i32,
                     split: None,
+                    qualities: None,
                 })
                 .collect();
             for m in moves {

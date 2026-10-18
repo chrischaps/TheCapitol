@@ -96,6 +96,7 @@ impl TradeOffer {
             .map(|i| capitol_protocol::ws::TradeOfferItem {
                 item_id: i.item_id.to_string(),
                 quantity: i.quantity,
+                qualities: None,
             })
             .collect()
     }

@@ -1028,6 +1028,8 @@ struct QualityDistribution {
 }
 ```
 
+**As built (E1.8, [#192](https://github.com/chrischaps/TheCapitol/issues/192)).** A stack is one `items` row, and its distribution is exact rather than bucketed: `item_units (item_id, quality 0..=100, count)` holds a count per quality, since two units of a type at one quality are interchangeable. That's `rules::stacking::Units` on the wire (`SlotItem.units`, `[[quality, count], ...]`). `items.quantity`, `items.quality` (the mean, rounded down) and `items.min_quality` are summaries a trigger keeps in step with it, and a direct write to them is refused. Merges add counts; every take names its units (crafting takes the best first, everything else the lowest). See economy plan D2.
+
 #### ItemType (Definition)
 
 Static data defining item types.

@@ -279,8 +279,8 @@ Create static data for:
 #### Backend - Item Stack Aggregation
 - [x] Stack view: items of same type in same location grouped
 - [x] Stack quality = average of constituent items
-- [x] `POST /items/{id}/split` - Split stack by quantity *(E1.2, #154: into an empty slot of the same container, and WS `split_stack`. No quality threshold: a stack is one quality.)*
-- [x] `POST /items/{id}/merge` - Merge compatible stacks *(a drop via `/inventory/move` merges and blends any grades, keeping the lower `min_quality`; server-side merges join only the same grade, E1.2 #154)*
+- [x] `POST /items/{id}/split` - Split stack by quantity *(E1.2, #154: into an empty slot of the same container, and WS `split_stack`. E1.8, #192: by chosen qualities, or the lowest.)*
+- [x] `POST /items/{id}/merge` - Merge compatible stacks *(a drop via `/inventory/move` merges any grades; every unit keeps its quality, E1.8 #192)*
 
 #### Client - Crafting UI
 - [x] Crafting panel showing available recipes

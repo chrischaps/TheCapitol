@@ -4,7 +4,7 @@
 //! content. The Flint client's offline fallback is the same file
 //! (`capitol-core/src/catalog_fallback.json`), and a test there keeps them equal.
 //! `fixtures/rest/stations_nearby.json` is `GET /stations/nearby`.
-//! `fixtures/rest/split_stack.json` is `POST /items/{id}/split` on a blended stack.
+//! `fixtures/rest/split_stack.json` is `POST /items/{id}/split` taking named qualities (E1.8).
 
 use std::fs;
 use std::path::Path;
@@ -39,10 +39,11 @@ fn nearby_stations_round_trip_with_their_quality() {
 }
 
 #[test]
-fn a_split_round_trips_with_its_min_quality() {
+fn a_split_round_trips_with_its_units() {
     let json = fixture("split_stack.json");
     let split: SplitStackResponse = serde_json::from_str(&json).unwrap();
-    assert_eq!((split.item.quality_grade.as_str(), split.item.min_quality), ("A", 40));
-    assert!(split.item.lot().is_blended());
+    assert_eq!((split.item.quality_grade.as_str(), split.item.min_quality), ("A", 88));
+    assert_eq!(split.item.units.mean(), Some(split.item.quality));
+    assert!(split.item.units.spans_grades());
     assert_eq!(serde_json::to_string(&split).unwrap(), json);
 }

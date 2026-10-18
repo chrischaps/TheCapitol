@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use capitol_protocol::rules::stacking::{Pick, Units};
 use capitol_protocol::rules::{quality, tools};
 use rand::Rng;
 use tokio::sync::broadcast;
@@ -15,8 +16,8 @@ pub struct CraftingOperation {
     pub operation_id: Uuid,
     pub player_id: Uuid,
     pub recipe_id: String,
-    /// Items to consume: (item_id, quantity_to_consume)
-    pub input_items_to_consume: Vec<(Uuid, i32)>,
+    /// Items to consume: (item_id, the very units to take from it)
+    pub input_items_to_consume: Vec<(Uuid, Units)>,
     /// The units taken, by type, for each input's mean quality.
     pub inputs: quality::Inputs,
     /// The quality of the station it's made at, as it was at the start
@@ -146,17 +147,21 @@ pub fn start_crafting(
         remaining_requirements.insert(input.item_type.clone(), input.quantity);
     }
 
-    let mut items_to_consume: Vec<(Uuid, i32)> = Vec::new();
+    let mut items_to_consume: Vec<(Uuid, Units)> = Vec::new();
     let mut inputs = quality::Inputs::default();
 
-    // In the order the client sent them, so its range matches what is taken
+    // In the order the client sent them, and the best units of each stack
+    // first (E1.8), so its range matches what is taken
     for item in input_items {
         if let Some(required) = remaining_requirements.get_mut(&item.item_type) {
             if *required > 0 {
                 let use_quantity = (*required).min(item.quantity);
+                let Some(taken) = item.units.pick(use_quantity, Pick::Best) else {
+                    continue;
+                };
                 *required -= use_quantity;
-                items_to_consume.push((item.id, use_quantity));
-                inputs.add(&item.item_type, use_quantity, item.quality);
+                inputs.add_units(&item.item_type, &taken);
+                items_to_consume.push((item.id, taken));
             }
         }
     }
@@ -281,26 +286,38 @@ mod tests {
         }
     }
 
+    /// A stack of `kind` with up to three qualities in it (E1.8)
     fn stack(rng: &mut StdRng, kind: &str) -> Item {
-        let quality = rng.gen_range(0..=100);
+        let units = Units::from_pairs((0..rng.gen_range(1..=3)).map(|_| (rng.gen_range(0..=100), rng.gen_range(1..=3))));
         Item {
             id: Uuid::new_v4(),
             item_type: kind.into(),
-            quality,
-            quantity: rng.gen_range(1..=5),
+            quality: units.mean().unwrap(),
+            quantity: units.count() as i32,
             owner_id: None,
             container_id: None,
             slot_index: None,
             created_at: chrono::Utc::now(),
             durability: None,
-            min_quality: quality,
+            min_quality: units.min().unwrap(),
+            units,
         }
     }
 
+    /// `n` of `kind`, all at one quality
+    fn uniform(rng: &mut StdRng, kind: &str, n: i32) -> Item {
+        let mut item = stack(rng, kind);
+        let quality = rng.gen_range(0..=100);
+        item.units = Units::uniform(n, quality);
+        (item.quantity, item.quality, item.min_quality) = (n, quality, quality);
+        item
+    }
+
     /// What a client sends and expects (`capitol-core` `craft::check`): for
-    /// each input in recipe order, stacks in slot order until it's met, and
-    /// the range over the units that takes, at a station of `station`.
-    fn client_side(recipe: &Recipe, slots: &[Item], station: i32) -> (Vec<Item>, Vec<(Uuid, i32)>, (i32, i32)) {
+    /// each input in recipe order, stacks in slot order until it's met, the
+    /// best units of each first, and the range over the units that takes, at
+    /// a station of `station`.
+    fn client_side(recipe: &Recipe, slots: &[Item], station: i32) -> (Vec<Item>, Vec<(Uuid, Units)>, (i32, i32)) {
         let (mut sent, mut taken, mut units) = (Vec::new(), Vec::new(), quality::Inputs::default());
         for need in &recipe.inputs {
             let mut left = need.quantity;
@@ -308,9 +325,9 @@ mod tests {
                 if left <= 0 {
                     break;
                 }
-                let used = left.min(item.quantity);
-                left -= used;
-                units.add(&item.item_type, used, item.quality);
+                let used = item.units.pick(left.min(item.quantity), Pick::Best).unwrap();
+                left -= used.count() as i32;
+                units.add_units(&item.item_type, &used);
                 sent.push(item.clone());
                 taken.push((item.id, used));
             }
@@ -370,9 +387,7 @@ mod tests {
             process_crafting(&mut players, &recipes, &mut ops, &HashMap::new(), &events)[0].outputs[0].quality
         };
         for _ in 0..200 {
-            let mut items = vec![stack(&mut rng, "rope"), stack(&mut rng, "fiber")];
-            items[0].quantity = 4;
-            items[1].quantity = 6;
+            let items = vec![uniform(&mut rng, "rope", 4), uniform(&mut rng, "fiber", 6)];
             let (a, d) = (craft(&items, 95), craft(&items, 40));
             assert!(a > d, "an A station made {a}, a D station {d}");
         }
@@ -407,9 +422,7 @@ mod tests {
         let recipe = hammered();
         let (events, _rx) = broadcast::channel(64);
         let mut rng = StdRng::seed_from_u64(157);
-        let mut items = vec![stack(&mut rng, "rope"), stack(&mut rng, "fiber")];
-        items[0].quantity = 4;
-        items[1].quantity = 6;
+        let items = vec![uniform(&mut rng, "rope", 4), uniform(&mut rng, "fiber", 6)];
         let mut ada = player();
         let mut ops = HashMap::new();
         let refusal = start_crafting(&mut ada, &recipe, &items, 50, None, &mut ops, &events).unwrap_err();
@@ -434,9 +447,7 @@ mod tests {
             process_crafting(&mut players, &recipes, &mut ops, &HashMap::new(), &events).remove(0)
         };
         for _ in 0..200 {
-            let mut items = vec![stack(&mut rng, "rope"), stack(&mut rng, "fiber")];
-            items[0].quantity = 4;
-            items[1].quantity = 6;
+            let items = vec![uniform(&mut rng, "rope", 4), uniform(&mut rng, "fiber", 6)];
             let fine = hammer(95, 60);
             let done = craft(&items, fine.clone());
             assert_eq!(done.tool.as_ref().map(|t| t.item_id), Some(fine.item_id));

@@ -205,7 +205,9 @@ pub fn may_move_item(player_id: Uuid, item_owner: Option<Uuid>, station_owner: O
 pub async fn movable_item(db: &PgPool, player_id: Uuid, item_id: Uuid) -> Result<Item, AccessError> {
     let row = sqlx::query_as::<_, ItemWithStationOwner>(
         "SELECT i.id, i.item_type, i.quality, i.quantity, i.owner_id, i.container_id,
-                i.slot_index, i.created_at, i.durability, i.min_quality, s.owner_id AS station_owner
+                i.slot_index, i.created_at, i.durability, i.min_quality, s.owner_id AS station_owner,
+                COALESCE((SELECT json_agg(json_build_array(u.quality, u.count) ORDER BY u.quality)
+                          FROM item_units u WHERE u.item_id = i.id), '[]'::json) AS units
          FROM items i
          LEFT JOIN containers c ON c.id = i.container_id
          LEFT JOIN stations s ON s.id = c.station_id

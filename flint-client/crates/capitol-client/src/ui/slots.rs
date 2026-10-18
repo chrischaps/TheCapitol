@@ -3,23 +3,28 @@
 //! any two grids on screen.
 //!
 //! A slot shows its item's icon (36 in 48, P5.2), the quantity bottom right
-//! and a quality pip top right in the grade's colour (plan §4.7). A blend,
-//! a stack whose min grade isn't its grade, rings its pip in the min's
-//! colour (E1.2). Hovering one shows the name, the quality and the grade,
-//! and what a blend was blended from.
+//! and a quality pip top right in the grade's colour (plan §4.7). The pip
+//! and the number are the mean of the stack's units, and every unit keeps
+//! its own quality (plan D2, E1.8). A stack that spans more than one grade
+//! rings its pip in its lowest unit's colour. Hovering one shows the name,
+//! the mean and its grade, and the makeup: "6 × 92 A, 3 × 81 B, 1 × 44 D",
+//! or a bar of grade colours when there are more qualities than that.
 //!
 //! Dragging uses egui's drag-and-drop payload, so a drag can start in one
 //! panel and end in another without either knowing about the other. A drop
 //! on another slot comes back from [`SlotGrid::show`] as a [`Move`]. The
 //! caller sends it (`Session::move_item`), and the server decides whether
-//! it moves, merges or swaps. A drop onto a stack of the same type blends
-//! the two whatever their grades: that's the player's call (plan D2).
+//! it moves, merges or swaps. A drop onto a stack of the same type joins
+//! the two whatever their grades, and nothing is diluted (plan D2).
 //! Nothing changes here until the refetch that follows (`poll.rs`), so the
 //! grid never shows a state the server didn't.
 //!
-//! **Splitting (E1.2).** A shift-drag onto an empty slot of the same grid
-//! opens a count field under the slot, set to half the stack. Enter or
-//! Split sends the move with [`Move::split`]; Escape or ✕ lets it go.
+//! **Splitting (E1.2, E1.8).** A shift-drag onto an empty slot of the same
+//! grid opens a count field under the slot, set to half the stack: the
+//! lowest units go. A stack of more than one quality also gets a row per
+//! quality, each with its own count, to take out exactly those
+//! ([`Move::qualities`]). Enter or Split sends the move with
+//! [`Move::split`]; Escape or ✕ lets it go.
 //! Anywhere else, a shift-drag is a plain drag: the server splits only
 //! within a container ([#190](https://github.com/chrischaps/TheCapitol/issues/190)).
 //! A capture can't hold Shift for egui (#189), so the rig below checks it.
@@ -33,6 +38,7 @@ use super::theme::{self, size, CRAFT, SLOT, SLOT_EDGE, SLOT_EDGE_FULL, SLOT_GAP,
 use capitol_core::catalog::Catalog;
 use capitol_core::protocol::rest::SlotItem;
 use capitol_core::protocol::rules::quality_grade;
+use capitol_core::protocol::rules::stacking::Units;
 use capitol_core::state::Container;
 use egui::epaint::Shadow;
 use egui::{Color32, CursorIcon, Id, Painter, Pos2, Rect, Sense, Stroke, Ui};
@@ -40,7 +46,7 @@ use uuid::Uuid;
 
 /// A drop: put `item_id` in `target_slot` of `target_container_id`. The
 /// body of `move_item`, REST or WebSocket.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Move {
     pub item_id: Uuid,
     pub target_container_id: Uuid,
@@ -48,6 +54,9 @@ pub struct Move {
     /// Split this many off into the slot, an empty one of the same
     /// container, rather than moving the whole stack (`split_stack`, E1.2).
     pub split: Option<i32>,
+    /// Which units the split takes, adding up to `split` (E1.8). `None`
+    /// takes the lowest.
+    pub qualities: Option<Units>,
 }
 
 impl Move {
@@ -58,6 +67,7 @@ impl Move {
             target_container_id,
             target_slot,
             split: None,
+            qualities: None,
         }
     }
 }
@@ -80,6 +90,9 @@ struct PendingSplit {
     container_id: Uuid,
     slot: usize,
     quantity: i32,
+    /// A row per quality in the stack, high first, when there's more than
+    /// one: (quality, how many to take)
+    picks: Vec<(i32, i32)>,
     /// The target slot, to stand the field under
     at: Rect,
 }
@@ -104,6 +117,21 @@ impl PendingSplit {
 /// What a split starts at: half, rounded down, and at least one.
 pub fn half(quantity: i32) -> i32 {
     (quantity / 2).max(1)
+}
+
+/// A split field's quality rows for `units`, high first, all at nought; none
+/// for a stack of one quality, which a count says all about.
+fn pick_rows(units: &Units) -> Vec<(i32, i32)> {
+    if units.pairs().nth(1).is_none() {
+        return Vec::new();
+    }
+    units.pairs().rev().map(|(q, _)| (q, 0)).collect()
+}
+
+/// The units the quality rows pick, if any row picks one.
+fn picked(picks: &[(i32, i32)]) -> Option<Units> {
+    let units = Units::from_pairs(picks.iter().copied());
+    (!units.is_empty()).then_some(units)
 }
 
 /// What a grid's slots were asked this frame.
@@ -172,7 +200,7 @@ impl<'a> SlotGrid<'a> {
                             enabled: self.enabled,
                         };
                         let (moved, right) = slot.show_inner(ui, icons, self.placing);
-                        clicks.moved = clicks.moved.or(moved);
+                        clicks.moved = clicks.moved.take().or(moved);
                         if let Some(catalog) = self.placing.filter(|_| right) {
                             clicks.place = item.clone().filter(|i| is_kit(catalog, i));
                         }
@@ -181,7 +209,7 @@ impl<'a> SlotGrid<'a> {
             }
         });
         if self.enabled {
-            clicks.moved = clicks.moved.or(split_field(ui.ctx(), self.container.id));
+            clicks.moved = clicks.moved.take().or(split_field(ui.ctx(), self.container.id));
         }
         clicks
     }
@@ -198,36 +226,60 @@ fn split_field(ctx: &egui::Context, container_id: Uuid) -> Option<Move> {
         .fixed_pos(pending.at.left_bottom() + egui::vec2(0.0, 4.0))
         .show(ctx, |ui| {
             theme::panel().inner_margin(6.0).show(ui, |ui| {
+                let by_quality = picked(&pending.picks).is_some();
                 ui.horizontal(|ui| {
                     ui.label(theme::dim("Split"));
-                    let field = ui.add(
+                    // Picked by quality, the count is theirs to add up
+                    let field = ui.add_enabled(
+                        !by_quality,
                         egui::DragValue::new(&mut pending.quantity)
                             .range(1..=most)
                             .speed(0.1),
                     );
-                    if !field.has_focus() && !field.lost_focus() && !field.dragged() {
+                    if !by_quality && !field.has_focus() && !field.lost_focus() && !field.dragged() {
                         field.request_focus();
                     }
                     ui.label(theme::dim(format!("of {}", pending.item.quantity)));
-                    confirmed = theme::button(ui, "Split", true).clicked();
+                    let fits = (1..=most).contains(&pending.quantity);
+                    confirmed = theme::button(ui, "Split", true).clicked() && fits;
                     dropped = ui.small_button("✕").clicked();
                 });
+                if !pending.picks.is_empty() {
+                    ui.label(theme::dim(if by_quality { "Taking these" } else { "The lowest go, or pick" }));
+                    for (quality, take) in pending.picks.iter_mut() {
+                        let have = pending.item.units.count_at(*quality);
+                        ui.horizontal(|ui| {
+                            theme::quality_badge(ui, *quality);
+                            ui.add(egui::DragValue::new(take).range(0..=have).speed(0.1));
+                            ui.label(theme::dim(format!("of {have}")));
+                        });
+                    }
+                }
             });
         });
+    if let Some(units) = picked(&pending.picks) {
+        pending.quantity = units.count() as i32;
+    }
     let (enter, escape) = ctx.input(|i| {
         (
             i.key_pressed(egui::Key::Enter),
             i.key_pressed(egui::Key::Escape),
         )
     });
-    pending.quantity = pending.quantity.clamp(1, most);
-    if confirmed || enter {
+    let qualities = picked(&pending.picks);
+    if qualities.is_none() {
+        pending.quantity = pending.quantity.clamp(1, most);
+    }
+    // Every unit picked would leave nothing behind: not a split
+    let fits = (1..=most).contains(&pending.quantity);
+    if (confirmed || enter) && fits {
         PendingSplit::set(ctx, None);
         return Some(Move {
             item_id: pending.item.item_id,
             target_container_id: container_id,
             target_slot: pending.slot as i32,
             split: Some(pending.quantity),
+            qualities,
         });
     }
     PendingSplit::set(ctx, (!(dropped || escape)).then_some(pending));
@@ -366,6 +418,7 @@ impl Slot<'_> {
                     ui.ctx(),
                     Some(PendingSplit {
                         quantity: half(held.item.quantity),
+                        picks: pick_rows(&held.item.units),
                         item: held.item.clone(),
                         container_id: self.container_id,
                         slot: self.index,
@@ -466,7 +519,8 @@ pub fn pip_colour(quality: i32) -> Color32 {
 
 /// A grade pip: a 4-point disc, its grade's colour lightening towards the
 /// bottom right (React's 135° gradient), ringed in dark. An A glows. A
-/// blend is ringed again, in its min grade's colour (E1.2).
+/// stack that spans grades is ringed again, in its lowest unit's grade's
+/// colour (E1.2, E1.8).
 fn pip(painter: &Painter, centre: Pos2, item: &SlotItem, fade: f32) {
     let quality = item.quality;
     let letter = quality_grade(quality);
@@ -492,7 +546,7 @@ fn pip(painter: &Painter, centre: Pos2, item: &SlotItem, fade: f32) {
         R,
         Stroke::new(1.0, theme::PIP_EDGE.gamma_multiply(fade)),
     );
-    if item.lot().is_blended() {
+    if item.units.spans_grades() {
         painter.circle_stroke(
             centre,
             R + 1.75,
@@ -599,8 +653,54 @@ fn paint_held(ctx: &egui::Context, icons: &mut ItemIcons, item: &SlotItem, shown
     );
 }
 
-/// What hovering a full slot says: the name, the quality and its grade,
-/// how many, and for a blend what it was blended from.
+/// The most qualities a tooltip lists by name; a stack of more shows a bar.
+const MAKEUP_ROWS: usize = 4;
+
+/// A stack's units by quality, high first: "6 × 92 A, 3 × 81 B, 1 × 44 D".
+pub fn makeup(units: &Units) -> String {
+    units
+        .pairs()
+        .rev()
+        .map(|(q, n)| format!("{n} × {q} {}", quality_grade(q)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A stack's units by grade, high first: "6 A · 3 B · 1 D".
+pub fn makeup_by_grade(units: &Units) -> String {
+    let mut grades: Vec<(&str, i64)> = Vec::new();
+    for (q, n) in units.pairs().rev() {
+        let letter = quality_grade(q);
+        match grades.last_mut() {
+            Some((g, total)) if *g == letter => *total += n as i64,
+            _ => grades.push((letter, n as i64)),
+        }
+    }
+    grades
+        .iter()
+        .map(|(g, n)| format!("{n} {g}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// A bar of the units, high first, each quality's share of the width in
+/// its grade's colour.
+fn makeup_bar(ui: &mut Ui, units: &Units) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(140.0, 6.0), Sense::hover());
+    let painter = ui.painter();
+    let total = units.count().max(1) as f32;
+    let mut x = rect.left();
+    for (q, n) in units.pairs().rev() {
+        let w = rect.width() * n as f32 / total;
+        let part = Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(w, rect.height()));
+        painter.rect_filled(part, 0.0, pip_colour(q));
+        x += w;
+    }
+    painter.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, theme::PIP_EDGE));
+}
+
+/// What hovering a full slot says: the name, the mean quality and its
+/// grade, how many, and for a stack of more than one quality its makeup.
 fn tooltip(ui: &mut Ui, item: &SlotItem) {
     ui.label(
         egui::RichText::new(&item.item_name)
@@ -614,11 +714,12 @@ fn tooltip(ui: &mut Ui, item: &SlotItem) {
             ui.label(theme::dim(format!("× {}", item.quantity)));
         }
     });
-    if item.lot().is_blended() {
-        ui.horizontal(|ui| {
-            ui.label(theme::dim("Blended from"));
-            theme::quality_badge(ui, item.min_quality);
-        });
+    let qualities = item.units.pairs().count();
+    if qualities > MAKEUP_ROWS {
+        makeup_bar(ui, &item.units);
+        ui.label(theme::dim(makeup_by_grade(&item.units)));
+    } else if qualities > 1 {
+        ui.label(theme::dim(makeup(&item.units)));
     }
 }
 
@@ -884,6 +985,66 @@ mod tests {
             }]
         );
         assert!(PendingSplit::get(&rig.ctx).is_none());
+    }
+
+    /// A stack of several qualities gets a row per quality, and a split of
+    /// picked rows names those units (E1.8)
+    #[test]
+    fn a_split_can_take_chosen_qualities() {
+        let mut rig = Rig::new();
+        let inv = rig.inventory.id;
+        let mixed = rig.inventory.slots[0]
+            .take()
+            .unwrap()
+            .with_units(Units::from_pairs([(50, 6), (92, 6)]));
+        let fiber = mixed.item_id;
+        rig.inventory.slots[0] = Some(mixed);
+        rig.shift = true;
+        rig.drag((inv, 0), (inv, 7));
+        rig.shift = false;
+        let mut pending = PendingSplit::get(&rig.ctx).unwrap();
+        assert_eq!(pending.picks, [(92, 0), (50, 0)], "high first, none picked");
+
+        pending.picks[0].1 = 4;
+        PendingSplit::set(&rig.ctx, Some(pending));
+        rig.frame(vec![key(egui::Key::Enter)]);
+        assert_eq!(
+            rig.moves,
+            [Move {
+                split: Some(4),
+                qualities: Some(Units::uniform(4, 92)),
+                ..Move::whole(fiber, inv, 7)
+            }]
+        );
+    }
+
+    /// Picking every unit leaves nothing to split from: Enter does nothing
+    #[test]
+    fn a_split_of_every_unit_waits() {
+        let mut rig = Rig::new();
+        let inv = rig.inventory.id;
+        let mixed = rig.inventory.slots[0].take().unwrap().with_units(Units::from_pairs([(50, 1), (92, 1)]));
+        rig.inventory.slots[0] = Some(mixed);
+        rig.shift = true;
+        rig.drag((inv, 0), (inv, 7));
+        rig.shift = false;
+        let mut pending = PendingSplit::get(&rig.ctx).unwrap();
+        pending.picks = vec![(92, 1), (50, 1)];
+        PendingSplit::set(&rig.ctx, Some(pending));
+        rig.frame(vec![key(egui::Key::Enter)]);
+        assert!(rig.moves.is_empty());
+        assert!(PendingSplit::get(&rig.ctx).is_some());
+    }
+
+    #[test]
+    fn the_makeup_reads_high_first() {
+        let units = Units::from_pairs([(44, 1), (81, 3), (92, 6)]);
+        assert_eq!(makeup(&units), "6 × 92 A, 3 × 81 B, 1 × 44 D");
+        let many = Units::from_pairs([(44, 1), (81, 3), (85, 1), (92, 6), (95, 2)]);
+        assert_eq!(makeup_by_grade(&many), "8 A · 4 B · 1 D");
+        assert!(pick_rows(&Units::uniform(5, 60)).is_empty(), "one quality: a count is enough");
+        assert_eq!(picked(&[(92, 0), (50, 0)]), None);
+        assert_eq!(picked(&[(92, 2), (50, 0)]), Some(Units::uniform(2, 92)));
     }
 
     #[test]

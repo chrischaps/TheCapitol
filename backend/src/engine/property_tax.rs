@@ -711,14 +711,13 @@ mod tests {
             .unwrap();
         assert_eq!(boxes, 0, "the chest went");
         // Its kit and what ada kept in it are ada's again; the guest's fiber is the guest's.
-        // The D fiber doesn't join ada's F: the server never blends grades (D2).
+        // The D fiber joins ada's F as thirty 50s: every unit keeps its quality (D2, E1.8).
         assert_eq!(
             held(&db, ada_bag).await,
             vec![
-                (0, "fiber".to_string(), 20, 10, ada),
+                (0, "fiber".to_string(), 42, 40, ada),
                 (1, "chest_kit".to_string(), 50, 1, ada),
-                (2, "fiber".to_string(), 50, 30, ada),
-                (3, "forge_kit".to_string(), 64, 1, ada),
+                (2, "forge_kit".to_string(), 64, 1, ada),
             ]
         );
         assert_eq!(held(&db, guest_bag).await, vec![(0, "fiber".to_string(), 40, 5, guest)]);

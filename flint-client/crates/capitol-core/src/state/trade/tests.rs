@@ -80,6 +80,7 @@ fn offer_updated(trade_id: Uuid, player_id: Uuid, strands: i64) -> M {
             item_name: "Rope".into(),
             quantity: 1,
             quality: 80,
+            units: capitol_protocol::rules::stacking::Units::uniform(1, 80),
         }],
         strands,
     }
@@ -506,6 +507,7 @@ fn offer_waits_for_its_echo() {
     let items = vec![TradeOfferItem {
         item_id: ITEM.to_string(),
         quantity: 1,
+        qualities: None,
     }];
     assert_eq!(
         state.trade_offer(now, items.clone(), 10),
@@ -898,6 +900,7 @@ fn a_refused_offer_leaves_the_trade_as_it_was() {
             vec![TradeOfferItem {
                 item_id: ITEM.to_string(),
                 quantity: 9,
+                qualities: None,
             }],
             0,
         )

@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::rest::{StationTool, Subscription};
+use crate::rules::stacking::Units;
 
 /// Client to server.
 ///
@@ -48,12 +49,16 @@ pub enum ClientMessage {
         target_slot: i32,
     },
     /// Split `quantity` off the stack `item_id` into the empty slot `to_slot`
-    /// of the same container (E1.2). Both keep the quality and min quality.
+    /// of the same container (E1.2). Each unit keeps its quality (E1.8).
     #[serde(rename = "split_stack")]
     SplitStack {
         item_id: String,
         quantity: i32,
         to_slot: i32,
+        /// Which units, as `[quality, count]` pairs adding up to `quantity`
+        /// (E1.8); without it the lowest go first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        qualities: Option<Units>,
     },
     // M4: Stations
     #[serde(rename = "place_station")]
@@ -137,6 +142,10 @@ impl ClientMessage {
 pub struct TradeOfferItem {
     pub item_id: String,
     pub quantity: i32,
+    /// Which units, as `[quality, count]` pairs adding up to `quantity`
+    /// (E1.8): "my six 92s". Without it the lowest go first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualities: Option<Units>,
 }
 
 /// Server to client.
@@ -468,5 +477,9 @@ pub struct TradeItemInfo {
     pub item_type: String,
     pub item_name: String,
     pub quantity: i32,
+    /// The mean of `units`, rounded down
     pub quality: i32,
+    /// Exactly the units offered (E1.8), which the trade hands over
+    #[serde(default)]
+    pub units: Units,
 }

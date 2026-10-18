@@ -4,12 +4,12 @@ use axum::{
     Extension, Json, Router,
 };
 use capitol_protocol::rest::{DepositRequest, DepositResponse, WithdrawRequest, WithdrawResponse};
-use capitol_protocol::rules::stacking::Lot;
+use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::rules::{deposit_quote, withdraw_quote};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::engine::slot_moves::{auto_stack, write_lot};
+use crate::engine::units;
 use crate::engine::currency::{add_strands_in, announce_balances, subtract_strands_in, TransactionType};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -207,18 +207,10 @@ pub async fn withdraw(db: &PgPool, player_id: Uuid, quantity: i32) -> Result<Wit
     .fetch_one(&mut *tx)
     .await?;
 
-    // The lowest-slot stack of the same grade and min grade, so a client can
-    // tell which one it will be. Fresh fiber is a D, and never blends into
-    // your better fiber unasked (plan D2).
-    let lot = Lot::fresh(quantity, WITHDRAWN_FIBER_QUALITY);
-    let existing_fiber = auto_stack(&mut tx, container_id, "fiber", &lot).await?;
-
-    if let Some((existing_id, existing)) = existing_fiber {
-        let merged = existing
-            .merge(lot)
-            .ok_or_else(|| AppError::BadRequest("Too much fiber for one stack".into()))?;
-        write_lot(&mut tx, existing_id, &merged).await?;
-    } else {
+    // Onto the lowest-slot fiber stack, so a client can tell which one it will
+    // be. Its units keep their quality (plan D2, E1.8), so it may be any grade.
+    let withdrawn = Units::uniform(quantity, WITHDRAWN_FIBER_QUALITY);
+    if !units::join_first_stack(&mut tx, container_id, "fiber", &withdrawn).await? {
         let used: std::collections::HashSet<i32> = sqlx::query_scalar(
             "SELECT slot_index FROM items WHERE container_id = $1 AND slot_index IS NOT NULL"
         )
@@ -381,44 +373,34 @@ mod tests {
         assert_eq!(item(&db, high).await, Some((10, 52)));
     }
 
-    /// Withdrawn fiber is a D: it never joins a better stack, or a blended D (D2)
+    /// Withdrawn fiber is a D, and joins an A stack as ten D units: the A
+    /// units stay A (D2, E1.8)
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
-    async fn a_withdrawal_never_blends_into_another_grade(db: PgPool) {
+    async fn a_withdrawal_joins_any_grade_and_keeps_its_quality(db: PgPool) {
+        use crate::engine::units::test_units::units;
         let ada = player(&db, "ada", 1000).await;
         let inv = inventory(&db, ada).await;
         let a = stack(&db, ada, inv, 0, "fiber", 95, 10).await;
-        let blended = stack(&db, ada, inv, 1, "fiber", 50, 10).await;
-        sqlx::query("UPDATE items SET min_quality = 10 WHERE id = $1")
-            .bind(blended)
-            .execute(&db)
-            .await
-            .unwrap();
 
         withdraw(&db, ada, 10).await.unwrap();
 
-        assert_eq!(fiber_in(&db, inv).await, vec![(0, 10, 95), (1, 10, 50), (2, 10, 50)]);
-        let min: i32 = sqlx::query_scalar("SELECT min_quality FROM items WHERE container_id = $1 AND slot_index = 2")
-            .bind(inv)
-            .fetch_one(&db)
-            .await
-            .unwrap();
-        assert_eq!(min, 50);
-        assert_eq!(item(&db, a).await, Some((10, 95)));
+        assert_eq!(units(&db, a).await, Units::from_pairs([(WITHDRAWN_FIBER_QUALITY, 10), (95, 10)]));
+        assert_eq!(item(&db, a).await, Some((20, 72)));
     }
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
-    async fn a_withdrawal_that_would_overflow_the_stack_keeps_the_strands(db: PgPool) {
+    async fn a_withdrawal_that_would_overflow_the_stack_takes_a_slot_of_its_own(db: PgPool) {
         let ada = player(&db, "ada", i64::MAX / 2).await;
         let inv = inventory(&db, ada).await;
         let full = stack(&db, ada, inv, 0, "fiber", 50, i32::MAX - 5).await;
 
-        let err = withdraw(&db, ada, 10).await.unwrap_err();
+        let done = withdraw(&db, ada, 10).await.unwrap();
 
-        assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
         assert_eq!(item(&db, full).await, Some((i32::MAX - 5, 50)));
-        assert_eq!(balance(&db, ada).await, i64::MAX / 2);
+        assert_eq!(fiber_in(&db, inv).await, vec![(0, i32::MAX - 5, 50), (1, 10, 50)]);
+        assert_eq!(balance(&db, ada).await, i64::MAX / 2 - done.strands_spent);
     }
 
     #[sqlx::test(migrations = "./migrations")]
