@@ -95,7 +95,7 @@ item_units (item_id → items ON DELETE CASCADE, quality SMALLINT 0..=100, count
 
 **As built (E1.2), the first step,** and still in place until E1.8 replaces it:
 - `rules::stacking` (protocol): `Lot { quantity, quality, min_quality }`, `merge` (mean rounded down, lower min), `split`, `is_blended` and `auto_stacks_with` (same type, grade and min grade).
-- `items.min_quality` (migration `20261101_001`), backfilled to `quality`; a trigger fills it on inserts that don't name it and keeps it at or below `quality`.
+- `items.min_quality` (migration `20261102_001`), backfilled to `quality`; a trigger fills it on inserts that don't name it and keeps it at or below `quality`.
 - Server-side merges go through `slot_moves::auto_stack` and `write_lot` and join only the same grade and min grade. A drop blends any grades. A trade's part-stack copies the min.
 - `split_stack` over WS and REST `POST /items/{id}/split`, into an empty slot of the same container (another container is #190).
 - `crafting_output` has one slot, so a craft of another grade is refused until it's emptied (#191; moot once E1.8 lands).
