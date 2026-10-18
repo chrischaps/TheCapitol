@@ -698,6 +698,7 @@ mod tests {
             status: "healthy".into(),
             database: "ok".into(),
             redis: "ok".into(),
+            server_time_ms: 0,
         };
         auth.observe(&NetEvent::Rest(TAG + 1, Ok(RestResponse::Health(health))));
         assert_eq!(auth.reachable(), Some(true));

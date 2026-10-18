@@ -37,6 +37,19 @@ pub const TICK_MS: u64 = 100;
 /// Length of one server tick in seconds.
 pub const TICK_SECS: f64 = TICK_MS as f64 / 1000.0;
 
+/// One in-game day, in real seconds: two hours, so a play session sees dusk
+/// come. A real 24 h day would mean most players only ever saw one phase. It
+/// divides 24 h, so in-game midnight falls on every UTC midnight too.
+pub const DAY_LENGTH_SECS: i64 = 2 * 60 * 60;
+
+/// The time of day at `unix_ms` (the server's clock, Unix milliseconds), from
+/// 0.0 (midnight) through 0.5 (noon) to just under 1.0. Every client works
+/// it out from the same clock, so they all see the same hour.
+pub fn time_of_day(unix_ms: i64) -> f64 {
+    let day_ms = DAY_LENGTH_SECS * 1000;
+    unix_ms.rem_euclid(day_ms) as f64 / day_ms as f64
+}
+
 // ---------------------------------------------------------------------------
 // Speeds and ranges (world units)
 // ---------------------------------------------------------------------------
@@ -422,6 +435,22 @@ pub fn angle_from_center(center: (f64, f64), x: f64, y: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::terrain::Bridge;
+
+    #[test]
+    fn time_of_day_runs_midnight_to_midnight() {
+        let day = DAY_LENGTH_SECS * 1000;
+        assert_eq!(time_of_day(0), 0.0);
+        assert_eq!(time_of_day(day / 4), 0.25);
+        assert_eq!(time_of_day(day / 2), 0.5);
+        // It wraps: the next midnight is 0 again, and just before it is just under 1.
+        assert_eq!(time_of_day(day), 0.0);
+        assert_eq!(time_of_day(7 * day + day / 2), 0.5);
+        assert!(time_of_day(day - 1) < 1.0 && time_of_day(day - 1) > 0.999);
+        // Before 1970 still lands in 0..1.
+        assert_eq!(time_of_day(-day / 4), 0.75);
+        // In-game midnight falls on UTC midnight (2026-10-17T00:00:00Z).
+        assert_eq!(time_of_day(1_792_195_200_000), 0.0);
+    }
 
     #[test]
     fn exchange_quotes() {

@@ -94,11 +94,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         game.connect_player(player)
     };
 
-    // Send auth success
+    // Send auth success, with the server's clock for the time of day
+    let auth_ok = ServerMessage::AuthOk {
+        player_id,
+        server_time_ms: chrono::Utc::now().timestamp_millis(),
+    };
     let _ = sender
-        .send(Message::Text(
-            serde_json::to_string(&ServerMessage::AuthOk { player_id }).unwrap().into(),
-        ))
+        .send(Message::Text(serde_json::to_string(&auth_ok).unwrap().into()))
         .await;
 
     // Subscribe to game events

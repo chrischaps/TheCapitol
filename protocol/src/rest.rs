@@ -99,6 +99,8 @@ pub struct HealthResponse {
     pub database: String,
     /// Redis connection status
     pub redis: String,
+    /// The server's clock, in Unix milliseconds, for `rules::time_of_day`
+    pub server_time_ms: i64,
 }
 
 // ---------------------------------------------------------------------------

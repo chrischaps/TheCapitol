@@ -237,6 +237,8 @@ pub struct GameState {
     connection: ConnectionState,
     ever_connected: bool,
     me: Option<Uuid>,
+    /// The server's clock minus this machine's, in ms, from the last `AuthOk`.
+    clock_offset_ms: Option<i64>,
 
     players: HashMap<Uuid, PlayerPosition>,
     activities: HashMap<Uuid, Activity>,
@@ -277,6 +279,7 @@ impl GameState {
             },
             ever_connected: false,
             me: None,
+            clock_offset_ms: None,
             players: HashMap::new(),
             activities: HashMap::new(),
             zone: None,
@@ -351,7 +354,11 @@ impl GameState {
         use ServerMessage as M;
         let mut out = Vec::new();
         match message {
-            M::AuthOk { player_id } => self.me = Some(*player_id),
+            M::AuthOk { player_id, server_time_ms } => {
+                self.me = Some(*player_id);
+                // Rebased on every AuthOk, so a reconnect corrects any drift.
+                self.clock_offset_ms = Some(server_time_ms - local_unix_ms());
+            }
             // The net layer turns these into connection states.
             M::AuthError { .. } | M::Subscribed { .. } => {}
             M::Error { message, command } => {
@@ -753,6 +760,17 @@ impl GameState {
         self.me
     }
 
+    /// The server's clock now, in Unix ms. `None` until the first `AuthOk`.
+    pub fn server_time_ms(&self) -> Option<i64> {
+        self.clock_offset_ms.map(|offset| local_unix_ms() + offset)
+    }
+
+    /// [`rules::time_of_day`] on the server's clock: 0 midnight, 0.5 noon.
+    /// `None` until the first `AuthOk`; offline has no server clock.
+    pub fn time_of_day(&self) -> Option<f64> {
+        self.server_time_ms().map(capitol_protocol::rules::time_of_day)
+    }
+
     /// The local player's name and server position. Known from `GET
     /// /player/me` in the connect snapshot, or the first `positions` that
     /// includes them, whichever lands first.
@@ -1141,3 +1159,10 @@ fn merge<T: PartialEq>(
 
 #[cfg(test)]
 mod tests;
+
+/// This machine's clock, in Unix ms.
+fn local_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}

@@ -121,8 +121,10 @@ pub struct TradeOfferItem {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
+    /// `server_time_ms` is the server's clock (Unix ms) as it sent this. A
+    /// client keeps its offset from that, for [`crate::rules::time_of_day`].
     #[serde(rename = "auth_ok")]
-    AuthOk { player_id: Uuid },
+    AuthOk { player_id: Uuid, server_time_ms: i64 },
     #[serde(rename = "auth_error")]
     AuthError { message: String },
     #[serde(rename = "subscribed")]

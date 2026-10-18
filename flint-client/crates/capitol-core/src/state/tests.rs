@@ -238,9 +238,27 @@ fn every_variant_has_a_test() {
 fn auth_ok_sets_the_local_player() {
     let mut state = GameState::new();
     assert_eq!(state.me(), None);
-    let events = state.apply_ws(&M::AuthOk { player_id: ME });
+    assert_eq!(state.time_of_day(), None, "no clock before AuthOk");
+    // A server clock an hour ahead of this machine's.
+    let hour = 3_600_000;
+    let ahead = now_ms() + hour;
+    let events = state.apply_ws(&M::AuthOk { player_id: ME, server_time_ms: ahead });
     assert!(events.is_empty());
     assert_eq!(state.me(), Some(ME));
+    let server = state.server_time_ms().unwrap();
+    assert!((server - ahead).abs() < 1000, "keeps the offset: {server} vs {ahead}");
+    assert_eq!(state.time_of_day(), Some(capitol_protocol::rules::time_of_day(server)));
+
+    // A reconnect rebases it.
+    state.apply_ws(&M::AuthOk { player_id: ME, server_time_ms: now_ms() });
+    assert!((state.server_time_ms().unwrap() - now_ms()).abs() < 1000);
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
 }
 
 #[test]

@@ -288,7 +288,7 @@ async fn connection(
                 let mut became_live = None;
                 let mut auth_failed = None;
                 match (&phase, &message) {
-                    (Phase::Authenticating, ServerMessage::AuthOk { player_id }) => {
+                    (Phase::Authenticating, ServerMessage::AuthOk { player_id, .. }) => {
                         let subscribe = ClientMessage::Subscribe { channel: POSITION_CHANNEL.into() };
                         if let Err(e) = sink.send(encode(&subscribe)).await {
                             return End::Dropped(format!("send failed: {e}"));

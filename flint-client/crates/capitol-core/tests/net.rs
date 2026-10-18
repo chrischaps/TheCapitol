@@ -211,7 +211,7 @@ async fn serve_socket(mut socket: WebSocket, mock: Mock) {
                 return;
             }
             Ok(ClientMessage::Auth { token }) if token == GOOD_TOKEN => {
-                send(&mut socket, &ServerMessage::AuthOk { player_id: PLAYER }).await;
+                send(&mut socket, &ServerMessage::AuthOk { player_id: PLAYER, server_time_ms: 0 }).await;
             }
             Ok(ClientMessage::Auth { .. }) => {
                 send(
@@ -356,7 +356,7 @@ fn handshake_authenticates_then_subscribes() {
     );
     // The handshake replies are forwarded too.
     assert!(events.iter().any(
-        |e| matches!(e, NetEvent::Ws(ServerMessage::AuthOk { player_id }) if *player_id == PLAYER)
+        |e| matches!(e, NetEvent::Ws(ServerMessage::AuthOk { player_id, .. }) if *player_id == PLAYER)
     ));
     assert!(events
         .iter()
@@ -696,7 +696,7 @@ fn a_get_on_a_dead_pooled_connection_is_sent_again() {
             counted.fetch_add(1, Ordering::SeqCst);
             true
         };
-        let body = r#"{"status":"healthy","database":"ok","redis":"ok"}"#;
+        let body = r#"{"status":"healthy","database":"ok","redis":"ok","server_time_ms":0}"#;
         let answer = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
             body.len()

@@ -39,5 +39,6 @@ pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse>
         status: overall.to_string(),
         database: db_status,
         redis: redis_status,
+        server_time_ms: chrono::Utc::now().timestamp_millis(),
     })
 }
