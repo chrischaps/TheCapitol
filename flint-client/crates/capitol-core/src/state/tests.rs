@@ -1095,8 +1095,47 @@ fn plot_claimed_is_reported() {
             owner_id: claimed.owner_id,
             claimed_at: claimed.claimed_at,
         }),
-        vec![StateEvent::LotClaimed(claimed)]
+        vec![StateEvent::LotClaimed(claimed.clone())]
     );
+    assert_eq!(state.claimed_lots()["sub_2_0_3_L_4"], claimed);
+}
+
+#[test]
+fn claimed_lots_are_the_list_then_kept_by_ws() {
+    let mut state = connected();
+    let lot = |id: &str, owner_id| ClaimedPlot {
+        terrain_id: id.into(),
+        owner_id,
+        claimed_at: "2026-10-17T18:30:00Z".parse().unwrap(),
+    };
+    let v0 = state.claimed_version();
+    assert_eq!(
+        state.apply_rest(&R::ClaimedPlots(vec![
+            lot("urban_1", ME),
+            lot("rural_2", OTHER)
+        ])),
+        vec![StateEvent::ClaimedLotsUpdated]
+    );
+    assert_eq!(state.claimed_lots().len(), 2);
+    let v1 = state.claimed_version();
+    assert!(v1 > v0);
+
+    state.apply_ws(&M::PlotReleased {
+        terrain_id: "rural_2".into(),
+    });
+    assert!(!state.claimed_lots().contains_key("rural_2"));
+    let v2 = state.claimed_version();
+    assert!(v2 > v1);
+    // A release of a lot nobody held changes nothing.
+    state.apply_ws(&M::PlotReleased {
+        terrain_id: "rural_9".into(),
+    });
+    assert_eq!(state.claimed_version(), v2);
+
+    // A newer list replaces the old one whole.
+    state.apply_rest(&R::ClaimedPlots(vec![lot("sub_3", OTHER)]));
+    let ids: Vec<_> = state.claimed_lots().keys().cloned().collect();
+    assert_eq!(ids, ["sub_3"]);
 }
 
 #[test]

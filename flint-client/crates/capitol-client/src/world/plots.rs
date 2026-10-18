@@ -105,6 +105,9 @@ pub struct Lot {
     pub zone: Zone,
     /// The lot's own colour.
     pub colour: [f32; 4],
+    /// The quad's street-facing edge (`TerrainPlot::street_facing_edge`),
+    /// server units, not inset: where a house on it faces (P8.6b).
+    pub street: [P; 2],
 }
 
 /// Every lot, built: one mesh per sector, and each lot's place in it.
@@ -274,6 +277,17 @@ fn lot(m: &mut MeshBuf, outer: &[P], s: &Style, colour: [f32; 4]) {
     }
 }
 
+/// The ends of `plot`'s street-facing edge. An edge that names no real
+/// side of the quad is taken as its first.
+fn street_edge(plot: &TerrainPlot) -> [P; 2] {
+    let (i, j) = plot.street_facing_edge;
+    let c = plot.corners.map(|(x, y)| [x, y]);
+    match (c.get(i), c.get(j)) {
+        (Some(&a), Some(&b)) if i != j => [a, b],
+        _ => [c[0], c[1]],
+    }
+}
+
 /// Every lot in `plots`.
 pub fn build(plots: &[TerrainPlot]) -> Plots {
     let mut out = Plots::default();
@@ -305,6 +319,7 @@ pub fn build(plots: &[TerrainPlot]) -> Plots {
             outline: outer,
             zone,
             colour,
+            street: street_edge(plot),
         };
         out.lots.insert(plot.id.clone(), lot);
     }

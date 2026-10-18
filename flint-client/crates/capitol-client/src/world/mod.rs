@@ -10,6 +10,7 @@
 pub mod bridges;
 pub mod geom;
 pub mod ground;
+pub mod houses;
 pub mod mesh;
 pub mod palette;
 pub mod plots;

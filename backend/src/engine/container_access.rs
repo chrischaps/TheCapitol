@@ -1,4 +1,9 @@
-//! Who may use a station, and who may put items into, or take them out of, a container.
+//! Who may use a station, who may put items into, or take them out of, a
+//! container, and who may gather the grass on a lot.
+//!
+//! The grass follows the same plot setting as the stations: a node on an
+//! owned lot is the owner's unless its `station_use_level` is public
+//! ([`may_gather`], #102).
 //!
 //! A player's own containers (inventory) carry `owner_id`. Station containers
 //! don't: they carry `station_id`, and access follows the station. The owner
@@ -80,16 +85,18 @@ pub struct StationAccess {
     pub interaction_range: f64,
 }
 
+/// Does a plot's `station_use_level` open what stands on it to everyone?
+/// "friends" and "guild" admit no one beyond the owners until those systems
+/// exist (#80).
+fn open_to_all(station_use_level: Option<&str>) -> bool {
+    matches!(station_use_level.and_then(PermissionLevel::from_str), Some(PermissionLevel::Public))
+}
+
 /// May `player_id` use a station container? Pure, so it can be tested without a database.
 pub fn station_access(player_id: Uuid, s: &StationAccess) -> Result<(), AccessError> {
     let permitted = s.station_owner == player_id
         || s.plot_owner == Some(player_id)
-        || matches!(
-            s.station_use_level.as_deref().and_then(PermissionLevel::from_str),
-            Some(PermissionLevel::Public)
-        );
-    // "friends" and "guild" admit no one beyond the owners until those systems
-    // exist (#80).
+        || open_to_all(s.station_use_level.as_deref());
     if !permitted {
         return Err(AccessError::Forbidden);
     }
@@ -221,6 +228,61 @@ struct ItemWithStationOwner {
     station_owner: Option<Uuid>,
 }
 
+/// May `player_id` gather a node on a lot owned by `plot_owner`, whose
+/// `station_use_level` is `level`? Grass on a lot belongs to the lot (#102):
+/// a node on an unowned lot, or on none, is anyone's, and one on an owned lot
+/// is its owner's, or anyone's if the owner opened the plot to the public. It
+/// shares `station_use_level` with stations, so one setting means the same for
+/// a plot's chests and its grass. Pure, so it can be tested without a database.
+pub fn may_gather(player_id: Uuid, plot_owner: Option<Uuid>, level: Option<&str>) -> bool {
+    plot_owner.map_or(true, |owner| owner == player_id || open_to_all(level))
+}
+
+/// Why `player_id` may not gather `node_id` because of whose lot it stands on,
+/// in words the player can act on. `None` means the lot doesn't stand in the
+/// way (the other reasons are [`super::extraction_refusal`]'s). Call it before
+/// queueing `StartExtraction`, from REST and WS alike.
+pub async fn gathering_refusal(
+    db: &PgPool,
+    game: &RwLock<GameState>,
+    player_id: Uuid,
+    node_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let (lot, resource) = {
+        let game = game.read().await;
+        let Some(node) = game.resource_nodes.get(&node_id) else {
+            return Ok(None); // the tick says the node is gone
+        };
+        let Some(lot) = game.terrain.lot_at(node.x, node.y) else {
+            return Ok(None);
+        };
+        let resource = game
+            .resource_types
+            .get(&node.resource_type)
+            .map_or_else(|| node.resource_type.clone(), |t| t.name.clone());
+        (lot.id.clone(), resource)
+    };
+
+    let row: Option<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT p.owner_id, pp.station_use_level, pl.name
+         FROM plots p
+         LEFT JOIN plot_permissions pp ON pp.plot_id = p.id
+         LEFT JOIN players pl ON pl.id = p.owner_id
+         WHERE p.terrain_id = $1 AND p.owner_id IS NOT NULL",
+    )
+    .bind(&lot)
+    .fetch_optional(db)
+    .await?;
+    let Some((owner, level, owner_name)) = row else {
+        return Ok(None);
+    };
+    if may_gather(player_id, Some(owner), level.as_deref()) {
+        return Ok(None);
+    }
+    let whose = owner_name.map_or_else(|| "someone else's".to_string(), |name| format!("{name}'s"));
+    Ok(Some(format!("This {resource} grows on {whose} lot")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +365,29 @@ mod tests {
         assert!(!may_move_item(me, Some(them), None), "their inventory");
         assert!(!may_move_item(me, Some(them), Some(third)), "a third player's box");
         assert!(!may_move_item(me, None, None));
+    }
+
+    #[test]
+    fn grass_off_any_owned_lot_is_anyones() {
+        let me = Uuid::new_v4();
+        assert!(may_gather(me, None, None), "on no lot, or an unclaimed one");
+    }
+
+    #[test]
+    fn grass_on_an_owned_lot_is_the_owners() {
+        let (me, them) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(may_gather(me, Some(me), Some("owner")));
+        assert!(!may_gather(me, Some(them), Some("owner")));
+        for level in ["friends", "guild", "bogus"] {
+            assert!(!may_gather(me, Some(them), Some(level)), "{level}");
+        }
+        assert!(!may_gather(me, Some(them), None), "no permissions row");
+    }
+
+    #[test]
+    fn a_public_lot_shares_its_grass() {
+        let (me, them) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(may_gather(me, Some(them), Some("public")));
     }
 
     #[test]
@@ -403,6 +488,80 @@ mod db_tests {
         .fetch_one(db)
         .await
         .unwrap()
+    }
+
+    /// A game whose only lot is `test_lot`, 20 square round the origin, with a
+    /// grass node on it and another off it. Returns the game and both nodes.
+    fn game_with_a_lot() -> (RwLock<GameState>, Uuid, Uuid) {
+        use crate::models::{NodeState, ResourceNodeState, TerrainConfig, TerrainPlot, WorldGenParams};
+        let terrain = TerrainConfig {
+            world_size: 8000.0,
+            center_x: 4000.0,
+            center_y: 4000.0,
+            water_rings: Vec::new(),
+            roads: Vec::new(),
+            terrain_plots: vec![TerrainPlot {
+                id: "test_lot".into(),
+                corners: [(-10.0, -10.0), (10.0, -10.0), (10.0, 10.0), (-10.0, 10.0)],
+                street_facing_edge: (0, 1),
+                area: 400.0,
+                adjacent_street_id: String::new(),
+                zone: "rural".into(),
+            }],
+        };
+        let mut game = GameState::with_terrain(WorldGenParams::default(), terrain);
+        let mut node = |x: f64| {
+            let id = Uuid::new_v4();
+            game.resource_nodes.insert(id, ResourceNodeState {
+                id,
+                resource_type: "grass".into(),
+                x,
+                y: 0.0,
+                base_quality: 50,
+                state: NodeState::Available,
+                harvested_by: None,
+                regenerates_at_tick: None,
+            });
+            id
+        };
+        let (on, off) = (node(0.0), node(50.0));
+        (RwLock::new(game), on, off)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn grass_on_a_lot_belongs_to_the_lot(db: PgPool) {
+        let (owner, _) = player(&db, "owner").await;
+        let (guest, _) = player(&db, "guest").await;
+        let (game, on_lot, off_lot) = game_with_a_lot();
+        let plot: Uuid = sqlx::query_scalar(
+            "INSERT INTO plots (zone_id, grid_x, grid_y, world_x, world_y, bounds_min_x,
+                                bounds_min_y, bounds_max_x, bounds_max_y, size_category, terrain_id)
+             VALUES ((SELECT id FROM zones LIMIT 1), 9998, 9998, 0, 0, -10, -10, 10, 10, 'small', 'test_lot')
+             RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO plot_permissions (plot_id) VALUES ($1)").bind(plot).execute(&db).await.unwrap();
+        let refusal = |who| gathering_refusal(&db, &game, who, on_lot);
+
+        // Unclaimed, it's anyone's.
+        assert_eq!(refusal(guest).await.unwrap(), None);
+
+        // Claimed, it's the owner's, and the guest is told whose.
+        sqlx::query("UPDATE plots SET owner_id = $1 WHERE id = $2").bind(owner).bind(plot).execute(&db).await.unwrap();
+        assert_eq!(refusal(owner).await.unwrap(), None);
+        assert_eq!(refusal(guest).await.unwrap().as_deref(), Some("This grass grows on owner's lot"));
+        assert_eq!(gathering_refusal(&db, &game, guest, off_lot).await.unwrap(), None, "off the lot");
+
+        // Opened to the public, it's anyone's again.
+        sqlx::query("UPDATE plot_permissions SET station_use_level = 'public' WHERE plot_id = $1")
+            .bind(plot)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(refusal(guest).await.unwrap(), None);
     }
 
     #[sqlx::test(migrations = "./migrations")]

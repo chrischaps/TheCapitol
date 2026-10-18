@@ -158,6 +158,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 }
                                 ClientMessage::Extract { node_id } => {
                                     if let Ok(node_uuid) = Uuid::parse_str(&node_id) {
+                                        // Grass on someone's lot is theirs (#102)
+                                        let refusal = crate::engine::container_access::gathering_refusal(
+                                            &state.db, &state.game, player_id, node_uuid,
+                                        ).await.unwrap_or_else(|e| Some(format!("Database error: {}", e)));
+                                        if let Some(reason) = refusal {
+                                            let _ = sender.send(Message::Text(
+                                                serde_json::to_string(&ServerMessage::ExtractionFailed {
+                                                    player_id,
+                                                    reason,
+                                                }).unwrap().into()
+                                            )).await;
+                                            continue;
+                                        }
                                         let mut game = state.game.write().await;
                                         game.queue_command(crate::engine::Command::StartExtraction {
                                             player_id,

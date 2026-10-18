@@ -548,6 +548,17 @@ impl TerrainConfig {
         Self::from_params(&WorldGenParams::default())
     }
 
+    /// The lot that `(x, y)` stands on, if any. Lots don't overlap, so there's at most one.
+    pub fn lot_at(&self, x: f64, y: f64) -> Option<&TerrainPlot> {
+        self.terrain_plots.iter().find(|lot| {
+            let c = &lot.corners;
+            let (min_x, max_x) = c.iter().fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.0), hi.max(p.0)));
+            let (min_y, max_y) = c.iter().fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
+            x >= min_x && x <= max_x && y >= min_y && y <= max_y
+                && capitol_protocol::terrain::quad_contains(c, x, y)
+        })
+    }
+
     /// A stable hash of the generated terrain, as 16 hex digits: FNV-1a over its
     /// JSON. It hashes the output rather than the params, so a generator change
     /// also changes it, and clients can key a disk cache on it.

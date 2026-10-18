@@ -293,7 +293,7 @@ The suburban zone (radius 1800-3000 since #117; the radii live in `protocol/src/
 
 **Street-plan invariants** (`models/street_plan.rs`, #62): roads meet only at shared vertices, with no hairpin (a turn over 45°) outside a bulb and no road over itself. A bulb closes on its stem's last vertex. `street_plan::audit` checks it.
 
-**Seeded nodes:** the grass nodes are seeded in migrations against the default world. `engine::node_placement` (#70) moves any that the live terrain's roads or water run over, on startup and on an admin regenerate, and saves the move. Nodes standing on lots are left alone (#102). `the_default_terrain_moves_no_seeded_node` fails if the default world itself would move one. A change that moves the default world on purpose needs a move migration (the ignored test `print_node_moves` prints its rows; see `20261019_001_neighbourhood_suburb.sql`), and owned plots whose lots it removes need releasing with a refund in the same migration.
+**Seeded nodes:** the grass nodes are seeded in migrations against the default world. `engine::node_placement` (#70) moves any that the live terrain's roads or water run over, on startup and on an admin regenerate, and saves the move. Nodes standing on lots are left alone: grass on a lot belongs to the lot, and once it's claimed only those its `station_use_level` admits may gather it (`container_access::gathering_refusal`, #102). `the_default_terrain_moves_no_seeded_node` fails if the default world itself would move one. A change that moves the default world on purpose needs a move migration (the ignored test `print_node_moves` prints its rows; see `20261019_001_neighbourhood_suburb.sql`), and owned plots whose lots it removes need releasing with a refund in the same migration.
 
 ## Database
 

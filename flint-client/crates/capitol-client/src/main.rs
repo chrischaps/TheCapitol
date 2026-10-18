@@ -163,6 +163,14 @@ struct Args {
     /// unless this says otherwise. For captures
     #[arg(long, value_name = "0..1", value_parser = phase)]
     time_of_day: Option<f64>,
+    /// Offline, claim this share of the lots (0 to 1, picked by id), each
+    /// with its house already built (P8.6b). For captures
+    #[arg(long, value_name = "0..1", requires = "offline")]
+    claim_sample: Option<f32>,
+    /// Offline, at this second claim the lots nearest the camera, so their
+    /// houses grow. For captures
+    #[arg(long, value_name = "SECS", requires = "offline")]
+    grow_at: Option<f32>,
 }
 
 /// A time of day for `--time-of-day`: 0 to 1, 1 being midnight again.
@@ -275,6 +283,7 @@ fn main() -> Result<()> {
         .with_mute(args.mute || args.exit_after.is_some())
         .with_juice_sample(args.juice_sample && args.offline.is_some())
         .with_time_of_day(args.time_of_day)
+        .with_claim_sample(args.claim_sample, args.grow_at)
         .with_trade_offer(args.trade_offer.as_deref())
         .with_settings(
             settings::SettingsFile::load(

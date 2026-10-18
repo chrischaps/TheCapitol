@@ -114,6 +114,7 @@ The Capitol Tower is a modern structure arranged like a medieval castle, surroun
 - Owned via deeds (bureaucratic system at Capitol Tower)
 - Confer privacy and building rights
 - Owners control access permissions (private, friends, guild, public)
+- Raw resources on a plot belong to it: once claimed, only the owner may gather them, unless they open the plot's station use to the public (the same setting governs its stations)
 - Can be bought, sold, traded, possibly leased
 
 ---
