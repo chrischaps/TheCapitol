@@ -185,20 +185,16 @@ fn test_for(message: &M) -> fn() {
         M::ExtractionFailed { .. } => extraction_failed_reports_only_mine_and_ends_nothing,
         M::NodeDepleted { .. } => node_depleted_and_regenerated_flip_state,
         M::NodeRegenerated { .. } => node_depleted_and_regenerated_flip_state,
-        M::NearbyNodes { .. } => nearby_nodes_merge,
         M::CraftingStarted { .. } => crafting_started_is_local_only_for_me,
         M::CraftingProgress { .. } => crafting_progress_updates_the_right_player,
         M::CraftingCompleted { .. } => crafting_completed_reports_the_yield,
         M::CraftingCancelled { .. } => crafting_cancelled_and_failed_clear_activity,
         M::CraftingFailed { .. } => crafting_cancelled_and_failed_clear_activity,
         M::InventoryUpdated { .. } => inventory_updated_is_filtered,
-        M::ItemMoved { .. } => item_moved_reports_both_containers,
-        M::ItemsMerged { .. } => items_merged_reports_the_inventory,
         M::StationPlaced { .. } => station_placed_fills_in_from_the_catalog,
         M::StationRemoved { .. } => station_removed_closes_it_if_open,
         M::StationOpened { .. } => station_opened_only_for_me,
         M::StationClosed { .. } => station_closed_only_for_me,
-        M::NearbyStations { .. } => nearby_stations_merge,
         M::TradeRequested { .. } => trade::trade_requested_prompts,
         M::TradeRequestDeclined { .. } => trade::trade_request_declined_ends_our_request,
         M::TradeRequestExpired { .. } => trade::trade_request_expired_ends_the_request_either_way,
@@ -234,7 +230,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 44, "one fixture per ServerMessage variant");
+    assert_eq!(count, 40, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -797,9 +793,9 @@ fn a_node_someone_is_extracting_is_not_available() {
 fn nearby_nodes_merge() {
     let mut state = connected();
     let far = Uuid::from_u128(12);
-    let events = state.apply_ws(&M::NearbyNodes {
+    let events = state.apply_rest(&R::Nearby(NearbyResponse {
         nodes: vec![node(NODE, "available"), node(far, "available")],
-    });
+    }));
     assert_eq!(events.len(), 2);
     assert!(events.contains(&StateEvent::NodeAdded(NODE)));
 
@@ -844,54 +840,6 @@ fn inventory_updated_is_filtered() {
         state.apply_ws(&updated(OTHER, STATION_BOX)),
         vec![StateEvent::InventoryChanged {
             container_id: STATION_BOX
-        }]
-    );
-}
-
-#[test]
-fn item_moved_reports_both_containers() {
-    let mut state = connected();
-    state.apply_rest(&containers());
-    let moved = |player_id, to_container| M::ItemMoved {
-        player_id,
-        item_id: ITEM,
-        from_container: INVENTORY,
-        from_slot: 0,
-        to_container,
-        to_slot: 1,
-    };
-    assert_eq!(
-        state.apply_ws(&moved(ME, CRAFT_IN)),
-        vec![
-            StateEvent::InventoryChanged {
-                container_id: INVENTORY
-            },
-            StateEvent::InventoryChanged {
-                container_id: CRAFT_IN
-            }
-        ]
-    );
-    assert_eq!(state.apply_ws(&moved(ME, INVENTORY)).len(), 1);
-}
-
-#[test]
-fn items_merged_reports_the_inventory() {
-    let mut state = connected();
-    let merged = |player_id| M::ItemsMerged {
-        player_id,
-        source_item_id: ITEM,
-        target_item_id: Uuid::from_u128(71),
-        new_quantity: 4,
-        new_quality: 61,
-    };
-    // No containers fetched yet: nothing to name.
-    assert!(state.apply_ws(&merged(ME)).is_empty());
-    state.apply_rest(&containers());
-    assert!(state.apply_ws(&merged(OTHER)).is_empty());
-    assert_eq!(
-        state.apply_ws(&merged(ME)),
-        vec![StateEvent::InventoryChanged {
-            container_id: INVENTORY
         }]
     );
 }
@@ -1021,9 +969,9 @@ fn station_closed_only_for_me() {
 #[test]
 fn nearby_stations_merge() {
     let mut state = connected();
-    let events = state.apply_ws(&M::NearbyStations {
+    let events = state.apply_rest(&R::NearbyStations(NearbyStationsResponse {
         stations: vec![station(STATION, ME)],
-    });
+    }));
     assert_eq!(events, vec![StateEvent::StationAdded(STATION)]);
     let mut moved = station(STATION, ME);
     moved.name = "Old Bench".into();

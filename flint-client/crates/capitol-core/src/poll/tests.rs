@@ -177,9 +177,6 @@ fn answer_for(fetch: Fetch) -> RestResponse {
         Fetch::NearbyStations => {
             RestResponse::NearbyStations(NearbyStationsResponse { stations: vec![] })
         }
-        Fetch::Currency => RestResponse::Currency(CurrencyResponse {
-            strand_balance: 100,
-        }),
         Fetch::Plots => RestResponse::Plots(ListPlotsResponse {
             plots: vec![],
             total: 0,
@@ -296,19 +293,6 @@ fn rules() -> Vec<(&'static str, Start, Vec<NetEvent>, Vec<Fetch>)> {
             vec![STATION_FETCH],
         ),
         (
-            "item_moved between inventory and station fetches both",
-            AtStation,
-            vec![NetEvent::Ws(M::ItemMoved {
-                player_id: ME,
-                item_id: Uuid::from_u128(70),
-                from_container: INVENTORY,
-                from_slot: 0,
-                to_container: STATION_BOX,
-                to_slot: 0,
-            })],
-            vec![Fetch::Containers, STATION_FETCH],
-        ),
-        (
             "my station_opened fetches its box",
             Settled,
             vec![NetEvent::Ws(M::StationOpened {
@@ -419,10 +403,10 @@ fn rules() -> Vec<(&'static str, Start, Vec<NetEvent>, Vec<Fetch>)> {
             vec![Fetch::Containers],
         ),
         (
-            "our trade_executed fetches containers and currency",
+            "our trade_executed fetches containers (the strands are pushed)",
             Trading,
             vec![NetEvent::Ws(M::TradeExecuted { trade_id: TRADE })],
-            vec![Fetch::Containers, Fetch::Currency],
+            vec![Fetch::Containers],
         ),
         (
             "a stranger's trade_executed fetches nothing",
@@ -442,16 +426,16 @@ fn rules() -> Vec<(&'static str, Start, Vec<NetEvent>, Vec<Fetch>)> {
             vec![],
         ),
         (
-            "a deposit fetches containers and currency",
+            "a deposit fetches containers (it answers with the balance)",
             Settled,
             vec![NetEvent::Rest(GAME_TAG, Ok(deposit()))],
-            vec![Fetch::Containers, Fetch::Currency],
+            vec![Fetch::Containers],
         ),
         (
-            "a withdrawal fetches containers and currency",
+            "a withdrawal fetches containers (it answers with the balance)",
             Settled,
             vec![NetEvent::Rest(GAME_TAG, Ok(withdraw()))],
-            vec![Fetch::Containers, Fetch::Currency],
+            vec![Fetch::Containers],
         ),
         (
             "a failed deposit fetches nothing",
@@ -677,12 +661,18 @@ fn a_failed_answer_still_clears_the_fetch() {
 
 #[test]
 fn different_fetches_go_out_together() {
-    let mut rig = Rig::trading();
+    let mut rig = Rig::settled();
     rig.feed(my_inventory_updated());
     rig.tick();
-    rig.feed(NetEvent::Ws(M::TradeExecuted { trade_id: TRADE }));
-    // Containers is in flight, so only currency goes now.
-    assert_eq!(rig.tick_fetches(), vec![Fetch::Currency]);
+    rig.feed(my_inventory_updated());
+    rig.feed(NetEvent::Ws(M::ZoneChanged {
+        player_id: ME,
+        from_zone: "capitol".into(),
+        to_zone: "trade_district".into(),
+        zone_name: "Trade District".into(),
+    }));
+    // Containers is in flight, so only plots go now.
+    assert_eq!(rig.tick_fetches(), vec![Fetch::Plots]);
 }
 
 #[test]

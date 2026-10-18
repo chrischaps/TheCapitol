@@ -57,6 +57,9 @@ pub struct SyncReport {
     /// The `terrain_id`s of the plots released (`OnOwned::Release`). The
     /// caller tells the clients (`plot_released`, B13).
     pub released: Vec<String>,
+    /// The owners whose deeds were refunded. The caller tells them their
+    /// balance (`currency_changed`, #148).
+    pub refunded: Vec<Uuid>,
 }
 
 #[derive(Debug)]
@@ -192,6 +195,9 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
                 )
                 .await
                 .map_err(|e| SyncError::Refund(format!("Couldn't refund {value} strands to {} for plot {}: {e}", c.owner_id, c.plot_id)))?;
+                if !report.refunded.contains(&c.owner_id) {
+                    report.refunded.push(c.owner_id);
+                }
             }
         }
     }

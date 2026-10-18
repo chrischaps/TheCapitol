@@ -8,7 +8,7 @@ use capitol_protocol::rules::{deposit_quote, withdraw_quote};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::engine::currency::{add_strands_in, subtract_strands_in, TransactionType};
+use crate::engine::currency::{add_strands_in, announce_balances, subtract_strands_in, TransactionType};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
@@ -41,7 +41,9 @@ pub async fn deposit_fiber(
     Json(req): Json<DepositRequest>,
 ) -> Result<Json<DepositResponse>, AppError> {
     let player_id = player_of(&state.db, auth_user.account_id).await?;
-    deposit(&state.db, player_id, &req.item_ids).await.map(Json)
+    let response = deposit(&state.db, player_id, &req.item_ids).await?;
+    tell_balance(&state, player_id, response.new_balance).await;
+    Ok(Json(response))
 }
 
 /// Withdraw Strands to receive fiber items
@@ -62,7 +64,15 @@ pub async fn withdraw_fiber(
     Json(req): Json<WithdrawRequest>,
 ) -> Result<Json<WithdrawResponse>, AppError> {
     let player_id = player_of(&state.db, auth_user.account_id).await?;
-    withdraw(&state.db, player_id, req.quantity).await.map(Json)
+    let response = withdraw(&state.db, player_id, req.quantity).await?;
+    tell_balance(&state, player_id, response.new_balance).await;
+    Ok(Json(response))
+}
+
+/// `currency_changed` to the player, so a client needn't refetch it (#148)
+async fn tell_balance(state: &AppState, player_id: Uuid, new_balance: i64) {
+    let events = state.game.read().await.event_sender.clone();
+    announce_balances(&events, [(player_id, new_balance)]);
 }
 
 async fn player_of(db: &PgPool, account_id: Uuid) -> Result<Uuid, AppError> {

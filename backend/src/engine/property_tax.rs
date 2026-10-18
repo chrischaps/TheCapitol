@@ -24,7 +24,7 @@ use sqlx::PgPool;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use super::currency::{add_strands_in, subtract_strands_in, TransactionType};
+use super::currency::{add_strands_in, announce_balances, balances_of, subtract_strands_in, TransactionType};
 use super::events::GameEvent;
 use super::notices;
 use super::plot_sync::release_plot;
@@ -118,6 +118,9 @@ pub struct Foreclosure {
 pub struct TaxReport {
     pub notices: Vec<TaxNotice>,
     pub foreclosures: Vec<Foreclosure>,
+    /// The new balance of each owner the run charged or refunded, read once
+    /// it's done (`currency_changed`, #148)
+    pub balances: Vec<(Uuid, i64)>,
 }
 
 /// Process hourly property taxes for all owned plots. The tick loop passes
@@ -145,6 +148,7 @@ pub async fn process_property_taxes(db: &PgPool) -> TaxReport {
     }
 
     tracing::info!("Processing taxes for {} owned plots", owned_plots.len());
+    let mut charged: Vec<Uuid> = Vec::new();
 
     for (plot_id, owner_id, assessed_value, tax_owed, carry, terrain_id) in owned_plots {
         let weekly = weekly_tax(assessed_value);
@@ -166,11 +170,13 @@ pub async fn process_property_taxes(db: &PgPool) -> TaxReport {
         // An hour that charges nothing still takes what it can of the debt
         let owed = if hourly_tax == 0 {
             if tax_owed > 0 {
+                charged.push(owner_id);
                 collect_debt(db, plot_id, owner_id).await
             } else {
                 0
             }
         } else if collect_tax_from_player(db, owner_id, hourly_tax).await {
+            charged.push(owner_id);
             // Update last_tax_paid timestamp
             if let Err(e) = sqlx::query(
                 "UPDATE plots SET last_tax_paid = NOW() WHERE id = $1"
@@ -252,12 +258,21 @@ pub async fn process_property_taxes(db: &PgPool) -> TaxReport {
                         "Plot {} foreclosed from player {} for {} strands unpaid tax; refunded {}",
                         plot_id, owner_id, f.tax_owed, f.refund
                     );
+                    if f.refund > 0 {
+                        charged.push(owner_id);
+                    }
                     report.foreclosures.push(f);
                 }
                 Ok(None) => {}
                 Err(e) => tracing::error!("Failed to foreclose plot {}: {}", plot_id, e),
             }
         }
+    }
+    charged.sort();
+    charged.dedup();
+    match balances_of(db, &charged).await {
+        Ok(balances) => report.balances = balances,
+        Err(e) => tracing::error!("Failed to read balances after the tax run: {:?}", e),
     }
     report
 }
@@ -372,9 +387,10 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>
 }
 
 /// Apply a tax run to the game and tell the clients. The owner gets the
-/// notices, `plot_foreclosed` and their balance after the refund if they're
-/// online. The first two were queued, so an offline owner gets them when
-/// they're back (#138); their balance they'll load anyway. Everyone
+/// notices and `plot_foreclosed` if they're online, and last, each owner the
+/// run charged or refunded gets their balance (#148). The first two were
+/// queued, so an offline owner gets them when they're back (#138); their
+/// balance they'll load anyway. Everyone
 /// hears about each removed station, and gets `plot_released`. Each player
 /// whose inventory took something from the stations gets `inventory_updated`.
 pub fn announce(report: TaxReport, stations: &mut HashMap<Uuid, StationState>, events: &broadcast::Sender<GameEvent>) {
@@ -395,9 +411,6 @@ pub fn announce(report: TaxReport, stations: &mut HashMap<Uuid, StationState>, e
         for (player_id, container_id) in f.returned_to {
             let _ = events.send(GameEvent::InventoryUpdated { player_id, container_id, slots: Vec::new() });
         }
-        if f.refund > 0 {
-            let _ = events.send(GameEvent::CurrencyChanged { player_id: f.owner_id, new_balance: f.balance });
-        }
         if let Some(terrain_id) = f.terrain_id {
             let _ = events.send(GameEvent::PlotForeclosed {
                 owner_id: f.owner_id,
@@ -409,6 +422,7 @@ pub fn announce(report: TaxReport, stations: &mut HashMap<Uuid, StationState>, e
             let _ = events.send(GameEvent::PlotReleased { terrain_id });
         }
     }
+    announce_balances(events, report.balances);
 }
 
 /// Attempt to collect tax from a player's strand balance
@@ -723,10 +737,10 @@ mod tests {
             if *player_id == ada && *container_id == ada_bag));
         assert!(matches!(&sent[2], GameEvent::InventoryUpdated { player_id, container_id, .. }
             if *player_id == guest && *container_id == guest_bag));
-        assert!(matches!(&sent[3], GameEvent::CurrencyChanged { player_id, new_balance: 5520 } if *player_id == ada));
-        assert!(matches!(&sent[4], GameEvent::PlotForeclosed { owner_id, terrain_id: t, tax_owed: 480, refund: 5520, notice_id: Some(_) }
+        assert!(matches!(&sent[3], GameEvent::PlotForeclosed { owner_id, terrain_id: t, tax_owed: 480, refund: 5520, notice_id: Some(_) }
             if *owner_id == ada && *t == terrain_id));
-        assert!(matches!(&sent[5], GameEvent::PlotReleased { terrain_id: t } if *t == terrain_id));
+        assert!(matches!(&sent[4], GameEvent::PlotReleased { terrain_id: t } if *t == terrain_id));
+        assert!(matches!(&sent[5], GameEvent::CurrencyChanged { player_id, new_balance: 5520 } if *player_id == ada));
         assert_eq!(sent.len(), 6);
 
         // Away when it happened, ada hears when she's back (#138)
@@ -854,6 +868,7 @@ mod tests {
         assert_eq!(balance(&db, ada).await, 0);
         assert_eq!(owed(&db, lot).await, 379);
         assert_eq!(owner(&db, lot).await, Some(Some(ada)));
+        assert_eq!(report.balances, vec![(ada, 0)], "she hears her balance (#148)");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -880,9 +895,10 @@ mod tests {
         let lot = plot(&db, Some(ada), VALUE).await;
         owe(&db, lot, 30).await;
 
-        process_property_taxes(&db).await;
+        let report = process_property_taxes(&db).await;
 
         assert_eq!(carried(&db, lot).await, 120, "this hour's 120/168 carries");
         assert_eq!((balance(&db, ada).await, owed(&db, lot).await), (20, 0));
+        assert_eq!(report.balances, vec![(ada, 20)]);
     }
 }

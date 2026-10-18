@@ -1,15 +1,11 @@
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // #148 (E0.5) wires up or deletes the variants nothing sends yet
 pub enum Command {
     Move {
         player_id: Uuid,
         dest_x: f64,
         dest_y: f64,
-    },
-    StopMoving {
-        player_id: Uuid,
     },
     StartExtraction {
         player_id: Uuid,
@@ -22,41 +18,18 @@ pub enum Command {
     StartCrafting {
         player_id: Uuid,
         recipe_id: String,
+        #[allow(dead_code)] // crafting picks its own inputs (#183)
         input_item_ids: Vec<Uuid>,
     },
     CancelCrafting {
         player_id: Uuid,
     },
-    // M3.5: Inventory commands
-    MoveItem {
-        player_id: Uuid,
-        item_id: Uuid,
-        target_container_id: Uuid,
-        target_slot: i32,
-    },
-    // M4: Station commands
-    PlaceStation {
-        player_id: Uuid,
-        station_type: String,
-        x: f64,
-        y: f64,
-        kit_item_id: Uuid,
-    },
-    RemoveStation {
-        player_id: Uuid,
-        station_id: Uuid,
-    },
-    OpenStation {
-        player_id: Uuid,
-        station_id: Uuid,
-    },
-    CloseStation {
-        player_id: Uuid,
-    },
+    // M4: Station commands (the rest are handled in the WebSocket handler)
     CraftAtStation {
         player_id: Uuid,
         station_id: Uuid,
         recipe_id: String,
+        #[allow(dead_code)] // crafting picks its own inputs (#183)
         input_item_ids: Vec<Uuid>,
     },
     // M5: Trading commands
@@ -75,9 +48,6 @@ pub enum Command {
         /// Validated against the player's items, with each line's type, name and quality
         items: Vec<capitol_protocol::ws::TradeItemInfo>,
         strands: i64,
-    },
-    AcceptTrade {
-        player_id: Uuid,
     },
     CancelTrade {
         player_id: Uuid,

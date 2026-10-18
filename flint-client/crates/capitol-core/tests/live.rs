@@ -636,7 +636,8 @@ fn two_players_trade() {
         s.open_trade().unwrap().theirs.strands == 10
     });
 
-    // Brin accepts, then Ada; the trade executes and the balances refetch.
+    // Brin accepts, then Ada; the trade executes and the server pushes
+    // both balances (`currency_changed`, #148).
     brin.act(|s, now| s.trade_accept(now));
     ada.pump_until("Brin's accept", |s, _| {
         s.open_trade().unwrap().they_accepted
@@ -647,7 +648,6 @@ fn two_players_trade() {
         s.trade() == &Trade::Idle && s.strands() == Some(start - 10)
     });
     assert!(has(&seen, |t| *t == TradeEvent::Executed { trade_id }));
-    assert!(ada.fetched.contains(&Fetch::Currency), "{:?}", ada.fetched);
     brin.pump_until("Brin's strands", |s, _| {
         s.trade() == &Trade::Idle && s.strands() == Some(brin_start + 10)
     });

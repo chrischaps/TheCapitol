@@ -2,12 +2,11 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::models::{PlayerPosition, ResourceNodeInfo, SlotItem, StationInfo};
+use crate::models::{PlayerPosition, SlotItem};
 use capitol_protocol::ws::TradeItemInfo;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data")]
-#[allow(dead_code)] // #148 (E0.5) wires up or deletes the variants nothing sends yet
 pub enum GameEvent {
     PlayerPositions(Vec<PlayerPosition>),
     PlayerJoined(PlayerPosition),
@@ -45,7 +44,6 @@ pub enum GameEvent {
     NodeRegenerated {
         node_id: Uuid,
     },
-    NearbyNodes(Vec<ResourceNodeInfo>),
     // M3: Crafting events
     CraftingStarted {
         player_id: Uuid,
@@ -82,45 +80,10 @@ pub enum GameEvent {
         container_id: Uuid,
         slots: Vec<SlotUpdate>,
     },
-    ItemMoved {
-        player_id: Uuid,
-        item_id: Uuid,
-        from_container: Uuid,
-        from_slot: i32,
-        to_container: Uuid,
-        to_slot: i32,
-    },
-    ItemsMerged {
-        player_id: Uuid,
-        source_item_id: Uuid,
-        target_item_id: Uuid,
-        new_quantity: i32,
-        new_quality: i32,
-    },
-    // M4: Station events
-    StationPlaced {
-        station_id: Uuid,
-        station_type: String,
-        name: String,
-        owner_id: Uuid,
-        x: f64,
-        y: f64,
-        container_id: Uuid,
-    },
+    // M4: Station events (placing, opening and closing are sent by the connection)
     StationRemoved {
         station_id: Uuid,
     },
-    StationOpened {
-        player_id: Uuid,
-        station_id: Uuid,
-        station_type: String,
-        name: String,
-        container_id: Uuid,
-    },
-    StationClosed {
-        player_id: Uuid,
-    },
-    NearbyStations(Vec<StationInfo>),
     // M5: Trading events
     TradeRequested {
         from_player: Uuid,

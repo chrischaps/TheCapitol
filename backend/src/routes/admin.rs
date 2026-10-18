@@ -10,6 +10,7 @@ use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::{ActionState, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
+use crate::engine::currency::{announce_balances, balances_of};
 use crate::engine::node_placement;
 use crate::engine::plot_sync::{sync_plots, OnOwned, SyncError};
 use crate::engine::GameEvent;
@@ -132,6 +133,12 @@ pub async fn commit_world_params(
         let game = state.game.read().await;
         for terrain_id in report.released {
             let _ = game.event_sender.send(GameEvent::PlotReleased { terrain_id });
+        }
+    }
+    if !report.refunded.is_empty() {
+        match balances_of(&state.db, &report.refunded).await {
+            Ok(balances) => announce_balances(&state.game.read().await.event_sender, balances),
+            Err(e) => tracing::error!("Couldn't read the refunded owners' balances: {:?}", e),
         }
     }
     tracing::info!(

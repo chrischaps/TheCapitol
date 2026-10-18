@@ -1,5 +1,8 @@
 use sqlx::{PgConnection, PgPool};
+use tokio::sync::broadcast;
 use uuid::Uuid;
+
+use super::events::GameEvent;
 
 /// Transaction types for currency audit log
 #[allow(dead_code)] // the ledger API; the market's escrow and fills (#167, #168) post through it
@@ -308,4 +311,25 @@ pub async fn get_balance(pool: &PgPool, player_id: Uuid) -> Result<i64, String> 
     .map_err(|e| format!("Player not found: {}", e))?;
 
     Ok(balance.0)
+}
+
+/// The strand balances of `players`, for telling them after a change made
+/// outside a request of theirs (the tax run, a forced terrain commit).
+/// Read after the change commits, so each is at least as new as it.
+pub async fn balances_of(pool: &PgPool, players: &[Uuid]) -> Result<Vec<(Uuid, i64)>, sqlx::Error> {
+    if players.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as("SELECT id, strand_balance FROM players WHERE id = ANY($1) ORDER BY id")
+        .bind(players)
+        .fetch_all(pool)
+        .await
+}
+
+/// Tell each player their new balance (`currency_changed`, #148). The
+/// connection sends it only to that player.
+pub fn announce_balances(events: &broadcast::Sender<GameEvent>, balances: impl IntoIterator<Item = (Uuid, i64)>) {
+    for (player_id, new_balance) in balances {
+        let _ = events.send(GameEvent::CurrencyChanged { player_id, new_balance });
+    }
 }

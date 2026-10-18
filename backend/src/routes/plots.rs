@@ -13,7 +13,7 @@ use capitol_protocol::rest::{
     ClaimPlotResponse, ClaimedPlot, ListPlotsQuery, ListPlotsResponse, PayTaxRequest, PayTaxResponse, PositionQuery,
 };
 
-use crate::engine::currency::{subtract_strands_in, TransactionType};
+use crate::engine::currency::{announce_balances, subtract_strands_in, TransactionType};
 use crate::engine::property_tax::pay_tax_debt;
 use crate::engine::GameEvent;
 use crate::error::AppError;
@@ -264,6 +264,8 @@ pub async fn pay_tax(
     .await?;
 
     let (_, new_balance) = pay_tax_debt(&state.db, player_id, plot_id, request.amount).await?;
+    let events = state.game.read().await.event_sender.clone();
+    announce_balances(&events, [(player_id, new_balance)]);
     let plot = get_plot(State(state.clone()), Path(plot_id)).await?.0;
     Ok(Json(PayTaxResponse { plot, new_balance }))
 }
@@ -271,7 +273,7 @@ pub async fn pay_tax(
 /// Charge the deed and give the plot to `player_id`, in one transaction. The
 /// plot row is locked first, so two players can't both pay for it, and the
 /// money only moves if the claim commits. Once it has, everyone is told
-/// (`plot_claimed`, B13). Returns the new balance.
+/// (`plot_claimed`, B13), and the player hears their balance. Returns it.
 async fn claim(
     db: &PgPool,
     events: &broadcast::Sender<GameEvent>,
@@ -341,6 +343,7 @@ async fn claim(
     if let Some(terrain_id) = terrain_id {
         let _ = events.send(GameEvent::PlotClaimed { terrain_id, owner_id: player_id, claimed_at });
     }
+    announce_balances(events, [(player_id, new_balance)]);
     Ok(new_balance)
 }
 
@@ -570,6 +573,10 @@ mod tests {
             }
             other => panic!("expected plot_claimed, got {other:?}"),
         }
+        assert!(
+            matches!(rx.try_recv(), Ok(GameEvent::CurrencyChanged { player_id, new_balance: 0 }) if player_id == ada),
+            "then ada hears her balance (#148)"
+        );
     }
 
     /// Only lots are listed: a pre-B7 plot has nothing for a client to draw on

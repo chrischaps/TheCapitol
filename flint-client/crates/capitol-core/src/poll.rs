@@ -1,6 +1,7 @@
-//! The polling scheduler. The server never sends `currency_changed`,
-//! `nearby_nodes`, `nearby_stations`, `item_moved` or `items_merged`, so the
-//! client refetches over REST instead, the way React does. [`Poller`] decides
+//! The polling scheduler. The server doesn't push nearby nodes, stations or
+//! container contents (`inventory_updated` names the container, not what's
+//! in it), so the client refetches over REST instead, the way React does.
+//! The balance is pushed (`currency_changed`, #148), so it isn't polled. [`Poller`] decides
 //! *what* to fetch and *when*; it never touches the network itself.
 //!
 //! ```no_run
@@ -26,13 +27,13 @@
 //! | Trigger | Fetch |
 //! |---|---|
 //! | first `Connected`, every `Resync` | me (name, position, currency), containers, nearby nodes, nearby stations, plots, the catalog (recipes among it), everyone's claimed lots |
-//! | every 5 s while connected | nearby nodes, nearby stations, plots, currency |
+//! | every 5 s while connected | nearby nodes, nearby stations, plots |
 //! | `inventory_updated` (mine, or a container I hold) | containers, or the open station's container |
 //! | `station_opened` (mine) | that station's container |
 //! | `station_placed` (mine: a kit was used) | containers |
 //! | extraction or crafting completed (mine) | containers |
-//! | `trade_executed` (our trade) | containers, currency |
-//! | a deposit or withdrawal answered | containers, currency |
+//! | `trade_executed` (our trade) | containers |
+//! | a deposit or withdrawal answered | containers |
 //! | a REST `move_item` answered | containers, and the open station's container |
 //! | `zone_changed` (mine, a real crossing) | plots |
 //! | `plot_claimed` (mine, not yet in my plots) | plots |
@@ -93,8 +94,6 @@ pub enum Fetch {
     NearbyNodes,
     /// `GET /stations/nearby`
     NearbyStations,
-    /// `GET /player/currency`
-    Currency,
     /// `GET /plots?owner=<you>&limit=100`
     Plots,
     /// `GET /catalog`: the static game data, recipes among it (E0.2)
@@ -107,7 +106,8 @@ pub enum Fetch {
 
 impl Fetch {
     /// Everything the server doesn't push, refetched on connect and resync.
-    /// `Me` comes first and carries the balance, so `Currency` isn't needed here.
+    /// `Me` comes first and carries the balance, which `currency_changed`
+    /// keeps current from then on.
     pub const SNAPSHOT: [Fetch; 7] = [
         Fetch::Me,
         Fetch::Containers,
@@ -118,15 +118,9 @@ impl Fetch {
         Fetch::ClaimedPlots,
     ];
 
-    /// What the timer refetches. Currency is here for what the server
-    /// changes without saying so, such as the hourly property tax (P4.5's
-    /// header shows the balance).
-    pub const POLLED: [Fetch; 4] = [
-        Fetch::NearbyNodes,
-        Fetch::NearbyStations,
-        Fetch::Plots,
-        Fetch::Currency,
-    ];
+    /// What the timer refetches. Not the balance: the server tells us
+    /// whenever it changes, the hourly property tax included (#148).
+    pub const POLLED: [Fetch; 3] = [Fetch::NearbyNodes, Fetch::NearbyStations, Fetch::Plots];
 
     /// The call, for the player `me` (whose plots are listed).
     pub fn request(&self, me: Option<Uuid>) -> RestRequest {
@@ -140,7 +134,6 @@ impl Fetch {
                 radius: Some(NEARBY_NODE_RANGE_MAX),
             }),
             Fetch::NearbyStations => RestRequest::NearbyStations,
-            Fetch::Currency => RestRequest::PlayerCurrency,
             Fetch::Plots => RestRequest::ListPlots(ListPlotsQuery {
                 owner: me,
                 limit: Some(PLOT_LIMIT),
@@ -238,9 +231,9 @@ impl Poller {
         }
         // The game's own calls. These change things the server never reports.
         match result {
+            // The answer carries the new balance, so only the fiber is fetched.
             Ok(RestResponse::Deposit(_) | RestResponse::Withdraw(_)) => {
                 self.request(Fetch::Containers);
-                self.request(Fetch::Currency);
             }
             Ok(RestResponse::MoveItem(_)) => {
                 self.request(Fetch::Containers);
@@ -308,11 +301,9 @@ impl Poller {
                 self.request(Fetch::Containers)
             }
             // Only our own trade: the store drops other players' `trade_executed`.
-            // Nothing is held in escrow, so a cancel changes nothing.
-            StateEvent::Trade(TradeEvent::Executed { .. }) => {
-                self.request(Fetch::Containers);
-                self.request(Fetch::Currency);
-            }
+            // Nothing is held in escrow, so a cancel changes nothing. The
+            // strands come as `currency_changed`.
+            StateEvent::Trade(TradeEvent::Executed { .. }) => self.request(Fetch::Containers),
             // The first zone (`from: None`) arrives with the snapshot, which fetches plots.
             StateEvent::ZoneChanged { from: Some(_), .. } => self.request(Fetch::Plots),
             StateEvent::TerrainUpdated => self.request(Fetch::Terrain),

@@ -12,8 +12,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::rest::{ResourceNodeInfo, StationInfo};
-
 /// Client to server.
 ///
 /// IDs are sent as strings and parsed by the server, which answers a malformed
@@ -178,9 +176,6 @@ pub enum ServerMessage {
     NodeDepleted { node_id: Uuid },
     #[serde(rename = "node_regenerated")]
     NodeRegenerated { node_id: Uuid },
-    /// Defined but never sent; clients poll `GET /world/nearby` instead.
-    #[serde(rename = "nearby_nodes")]
-    NearbyNodes { nodes: Vec<ResourceNodeInfo> },
     // M3: Crafting events
     #[serde(rename = "crafting_started")]
     CraftingStarted {
@@ -213,25 +208,6 @@ pub enum ServerMessage {
     // M3.5: Inventory events
     #[serde(rename = "inventory_updated")]
     InventoryUpdated { player_id: Uuid, container_id: Uuid },
-    /// Defined but never sent.
-    #[serde(rename = "item_moved")]
-    ItemMoved {
-        player_id: Uuid,
-        item_id: Uuid,
-        from_container: Uuid,
-        from_slot: i32,
-        to_container: Uuid,
-        to_slot: i32,
-    },
-    /// Defined but never sent.
-    #[serde(rename = "items_merged")]
-    ItemsMerged {
-        player_id: Uuid,
-        source_item_id: Uuid,
-        target_item_id: Uuid,
-        new_quantity: i32,
-        new_quality: i32,
-    },
     // M4: Station events
     #[serde(rename = "station_placed")]
     StationPlaced {
@@ -255,9 +231,6 @@ pub enum ServerMessage {
     },
     #[serde(rename = "station_closed")]
     StationClosed { player_id: Uuid },
-    /// Defined but never sent; clients poll `GET /stations/nearby` instead.
-    #[serde(rename = "nearby_stations")]
-    NearbyStations { stations: Vec<StationInfo> },
     // M5: Trading events
     #[serde(rename = "trade_requested")]
     TradeRequested {
@@ -294,7 +267,8 @@ pub enum ServerMessage {
     #[serde(rename = "trade_cancelled")]
     TradeCancelled { trade_id: Uuid, reason: String },
     // M5: Currency events
-    /// Defined but never sent; clients refetch `GET /player/currency` instead.
+    /// Your strand balance, after anything changes it: a trade, the exchange,
+    /// a deed, tax or a refund (#148). Only to the player it names.
     #[serde(rename = "currency_changed")]
     CurrencyChanged { new_balance: i64 },
     // M7: Zone events
@@ -384,20 +358,16 @@ impl ServerMessage {
             ServerMessage::ExtractionFailed { .. } => "extraction_failed",
             ServerMessage::NodeDepleted { .. } => "node_depleted",
             ServerMessage::NodeRegenerated { .. } => "node_regenerated",
-            ServerMessage::NearbyNodes { .. } => "nearby_nodes",
             ServerMessage::CraftingStarted { .. } => "crafting_started",
             ServerMessage::CraftingProgress { .. } => "crafting_progress",
             ServerMessage::CraftingCompleted { .. } => "crafting_completed",
             ServerMessage::CraftingCancelled { .. } => "crafting_cancelled",
             ServerMessage::CraftingFailed { .. } => "crafting_failed",
             ServerMessage::InventoryUpdated { .. } => "inventory_updated",
-            ServerMessage::ItemMoved { .. } => "item_moved",
-            ServerMessage::ItemsMerged { .. } => "items_merged",
             ServerMessage::StationPlaced { .. } => "station_placed",
             ServerMessage::StationRemoved { .. } => "station_removed",
             ServerMessage::StationOpened { .. } => "station_opened",
             ServerMessage::StationClosed { .. } => "station_closed",
-            ServerMessage::NearbyStations { .. } => "nearby_stations",
             ServerMessage::TradeRequested { .. } => "trade_requested",
             ServerMessage::TradeRequestDeclined { .. } => "trade_request_declined",
             ServerMessage::TradeRequestExpired { .. } => "trade_request_expired",

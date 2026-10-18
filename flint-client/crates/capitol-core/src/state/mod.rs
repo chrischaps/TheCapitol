@@ -509,7 +509,6 @@ impl GameState {
             }
             M::NodeDepleted { node_id } => self.set_node_state(*node_id, "depleted", &mut out),
             M::NodeRegenerated { node_id } => self.set_node_state(*node_id, "available", &mut out),
-            M::NearbyNodes { nodes } => self.merge_nodes(nodes, &mut out),
 
             M::CraftingStarted {
                 player_id,
@@ -579,26 +578,6 @@ impl GameState {
                 player_id,
                 container_id,
             } => self.inventory_changed(*player_id, *container_id, &mut out),
-            // `item_moved` and `items_merged` are never sent, but mean the same.
-            M::ItemMoved {
-                player_id,
-                from_container,
-                to_container,
-                ..
-            } => {
-                self.inventory_changed(*player_id, *from_container, &mut out);
-                if to_container != from_container {
-                    self.inventory_changed(*player_id, *to_container, &mut out);
-                }
-            }
-            M::ItemsMerged { player_id, .. } => {
-                // It names items, not a container; report it against the inventory.
-                if let (true, Some(inventory)) = (self.is_me(*player_id), self.inventory()) {
-                    out.push(StateEvent::InventoryChanged {
-                        container_id: inventory.id,
-                    });
-                }
-            }
 
             M::StationPlaced {
                 station_id,
@@ -664,7 +643,6 @@ impl GameState {
                     self.close_station(&mut out);
                 }
             }
-            M::NearbyStations { stations } => self.merge_stations(stations, &mut out),
 
             M::TradeRequested { .. }
             | M::TradeRequestDeclined { .. }

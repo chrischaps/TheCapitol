@@ -498,16 +498,6 @@ export function GameProvider({ children }: { children: ReactNode }) {
           })
           break
 
-        case 'nearby_nodes':
-          setNodes((prev) => {
-            const next = new Map(prev)
-            for (const node of msg.nodes) {
-              next.set(node.id, node)
-            }
-            return next
-          })
-          break
-
         // M3: Crafting events
         case 'crafting_started':
           if (msg.player_id === playerId) {
@@ -578,14 +568,6 @@ export function GameProvider({ children }: { children: ReactNode }) {
           }
           break
 
-        case 'item_moved':
-        case 'items_merged':
-          if (msg.player_id === playerId) {
-            // Refresh containers after move/merge
-            refreshContainersInternal()
-          }
-          break
-
         // M4: Station events
         case 'station_placed':
           setStations((prev) => {
@@ -650,16 +632,6 @@ export function GameProvider({ children }: { children: ReactNode }) {
             setOpenStation(null)
             setOpenStationContainer(null)
           }
-          break
-
-        case 'nearby_stations':
-          setStations((prev) => {
-            const next = new Map(prev)
-            for (const station of msg.stations) {
-              next.set(station.id, station)
-            }
-            return next
-          })
           break
 
         // M5: Currency events

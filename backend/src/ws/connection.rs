@@ -19,6 +19,7 @@ use crate::engine::container_access::{
     check_container_access, check_station_access, live_position, movable_item,
 };
 use crate::engine::GameEvent;
+use crate::engine::currency::announce_balances;
 use crate::models::{ItemType, PlayerState};
 use crate::error::SESSIONS_UNAVAILABLE;
 use crate::routes::auth::Claims;
@@ -545,10 +546,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     if should_execute {
                                         // Execute trade with DB access
                                         match execute_trade(&state, player_id).await {
-                                            Ok(trade_id) => {
-                                                // Broadcast trade executed
+                                            Ok((trade_id, balances)) => {
+                                                // Broadcast trade executed, and tell each side its balance
                                                 let game = state.game.read().await;
                                                 let _ = game.event_sender.send(GameEvent::TradeExecuted { trade_id });
+                                                announce_balances(&game.event_sender, balances);
                                             }
                                             Err(e) => {
                                                 tracing::error!("Trade execution failed: {}", e);
@@ -637,10 +639,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::NodeRegenerated { node_id };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
-                    Ok(GameEvent::NearbyNodes(nodes)) => {
-                        let msg = ServerMessage::NearbyNodes { nodes };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
                     // M3: Crafting events
                     Ok(GameEvent::CraftingStarted { player_id: pid, operation_id, recipe_id, recipe_name, duration_ticks }) => {
                         let msg = ServerMessage::CraftingStarted { player_id: pid, operation_id, recipe_id, recipe_name, duration_ticks };
@@ -669,33 +667,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::InventoryUpdated { player_id: pid, container_id };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
-                    Ok(GameEvent::ItemMoved { player_id: pid, item_id, from_container, from_slot, to_container, to_slot }) => {
-                        let msg = ServerMessage::ItemMoved { player_id: pid, item_id, from_container, from_slot, to_container, to_slot };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    Ok(GameEvent::ItemsMerged { player_id: pid, source_item_id, target_item_id, new_quantity, new_quality }) => {
-                        let msg = ServerMessage::ItemsMerged { player_id: pid, source_item_id, target_item_id, new_quantity, new_quality };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
                     // M4: Station events
-                    Ok(GameEvent::StationPlaced { station_id, station_type, name, owner_id, x, y, container_id }) => {
-                        let msg = ServerMessage::StationPlaced { station_id, station_type, name, owner_id, x, y, container_id };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
                     Ok(GameEvent::StationRemoved { station_id }) => {
                         let msg = ServerMessage::StationRemoved { station_id };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    Ok(GameEvent::StationOpened { player_id: pid, station_id, station_type, name, container_id }) => {
-                        let msg = ServerMessage::StationOpened { player_id: pid, station_id, station_type, name, container_id };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    Ok(GameEvent::StationClosed { player_id: pid }) => {
-                        let msg = ServerMessage::StationClosed { player_id: pid };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    }
-                    Ok(GameEvent::NearbyStations(stations)) => {
-                        let msg = ServerMessage::NearbyStations { stations };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
                     // M5: Trading events
@@ -1326,7 +1300,8 @@ async fn handle_open_station(
 
 /// Execute a trade atomically
 /// Transfers items and strands between both players
-async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<Uuid, String> {
+/// Returns the trade's id, and each side's new balance if strands changed hands.
+async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<(Uuid, Vec<(Uuid, i64)>), String> {
     // Get the trade session
     let session = {
         let mut game = state.game.write().await;
@@ -1489,7 +1464,12 @@ async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<Uuid, String
 
     tracing::info!("Trade {} executed successfully between {} and {}", trade_id, player_a, player_b);
 
-    Ok(trade_id)
+    let balances = if net_strands != 0 {
+        vec![(player_a, new_balance_a), (player_b, new_balance_b)]
+    } else {
+        Vec::new()
+    };
+    Ok((trade_id, balances))
 }
 
 /// Gives `qty` of the stack `item_id` to `to`, out of any container: the

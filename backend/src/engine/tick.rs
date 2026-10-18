@@ -254,12 +254,6 @@ impl GameState {
                         player.dest_y = Some(dest_y);
                     }
                 }
-                Command::StopMoving { player_id } => {
-                    if let Some(player) = self.players.get_mut(&player_id) {
-                        player.dest_x = None;
-                        player.dest_y = None;
-                    }
-                }
                 Command::StartExtraction { player_id, node_id } => {
                     let Some(node) = self.resource_nodes.get_mut(&node_id) else {
                         self.extraction_failed(player_id, "That resource is gone");
@@ -330,24 +324,6 @@ impl GameState {
                     if let Some(player) = self.players.get_mut(&player_id) {
                         cancel_crafting(player, &mut self.crafting_operations, &self.event_sender);
                     }
-                }
-                // M3.5: Inventory commands - processed via database, not in-memory
-                Command::MoveItem { .. } => {
-                    // MoveItem is handled directly in WebSocket handler via database
-                    // This command exists for future in-memory container state if needed
-                }
-                // M4: Station commands - most are handled via WebSocket/database
-                Command::PlaceStation { .. } => {
-                    // Handled in WebSocket handler - requires database operations
-                }
-                Command::RemoveStation { .. } => {
-                    // Handled in WebSocket handler - requires database operations
-                }
-                Command::OpenStation { .. } => {
-                    // Handled in WebSocket handler
-                }
-                Command::CloseStation { .. } => {
-                    // Handled in WebSocket handler
                 }
                 Command::CraftAtStation { player_id, station_id, recipe_id, input_item_ids: _ } => {
                     // Validate range and start crafting. Who may use the station was
@@ -506,26 +482,6 @@ impl GameState {
                             items,
                             strands,
                         });
-                    }
-                }
-                Command::AcceptTrade { player_id } => {
-                    match self.trade_manager.set_accepted(player_id, true) {
-                        Ok(both_accepted) => {
-                            if let Some(trade) = self.trade_manager.get_player_trade(player_id) {
-                                let trade_id = trade.id;
-                                let _ = self.event_sender.send(GameEvent::TradeAccepted {
-                                    trade_id,
-                                    player_id,
-                                });
-
-                                // If both accepted, complete the trade
-                                // Note: actual execution happens in WS handler with DB access
-                                if both_accepted {
-                                    tracing::info!("Trade {} ready for execution", trade_id);
-                                }
-                            }
-                        }
-                        Err(e) => self.trade_failed(player_id, "trade_accept", e),
                     }
                 }
                 Command::CancelTrade { player_id } => {
@@ -952,7 +908,6 @@ mod tests {
             Command::AcceptTradeRequest { .. } => "trade_accept_request",
             Command::DeclineTradeRequest { .. } => "trade_decline_request",
             Command::UpdateTradeOffer { .. } => "trade_offer",
-            Command::AcceptTrade { .. } => "trade_accept",
             Command::CancelTrade { .. } => "trade_cancel",
             other => panic!("{other:?} isn't a trade command"),
         };
@@ -1059,13 +1014,6 @@ mod tests {
             Command::UpdateTradeOffer { player_id: a, items: vec![], strands: 5 },
             a,
         );
-        assert!(reason.contains("Not in a trade"), "{reason}");
-    }
-
-    #[test]
-    fn accept_outside_a_trade_tells_the_player() {
-        let (mut game, a, _, mut rx) = two_players(10.0);
-        let reason = refusal(&mut game, &mut rx, Command::AcceptTrade { player_id: a }, a);
         assert!(reason.contains("Not in a trade"), "{reason}");
     }
 
