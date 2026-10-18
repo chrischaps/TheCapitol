@@ -63,6 +63,7 @@ If the work will outlast a day (an engine PR waiting for Chris, say), run `scrip
 Engine changes are made in `flint-client/engine/` and go upstream to Flint (`https://github.com/chrischaps/Flint`, primary branch **`main`**):
 - Push them with `git subtree push --prefix=flint-client/engine flint feature/<name>` and open a PR. Never push to Flint `main` directly.
 - Chris merges Flint PRs. Stop at "PR open", say so in your summary, and leave the issue open until the merge and the follow-up `git subtree pull --prefix=flint-client/engine flint main --squash`. Keep the claim while you wait, and push `issue-<n>` so whichever agent does the follow-up can pick it up. If you stop for good without landing, run `scripts/issue.sh release <n>` and say in an issue comment where the work stands.
+- Don't rebase a branch that holds the subtree pull; merge master in. `land` does this for you (#101), so let it catch up rather than rebasing by hand.
 - Don't run `cargo fmt` on engine files you didn't change.
 - Test crate by crate with `cargo test -p <crate>`. `--workspace` fails on Windows because of `ndk-sys`.
 
@@ -101,7 +102,7 @@ EOF
 scripts/issue.sh land <n> --verify "<the issue's Verify commands>"
 ```
 
-`land` rebases on `origin/master`, re-runs `--verify` if the rebase brought anything in, and pushes `HEAD:master` fast-forward only. If another agent lands first, it loops. Once the push succeeds, it releases the claim and deletes `origin/issue-<n>`. Exit 3 is a rebase conflict: resolve it, `git rebase --continue`, re-verify, then run `land` again. Never force-push master, and never push it any other way.
+`land` catches up with `origin/master`, runs `--verify` (before the first push, and again whenever catching up changed HEAD), and pushes `HEAD:master` fast-forward only. It rebases to catch up, unless the branch holds a merge or a `git subtree` squash; then it merges master in instead, so a subtree pull keeps the merge the next `subtree pull`/`push` needs. If another agent lands first, it loops. Once the push succeeds, it releases the claim and deletes `origin/issue-<n>`. Exit 3 is a conflict: resolve it, `git rebase --continue` (or `git commit`, if it was a merge), then run `land` again; it verifies the result. Never force-push master, and never push it any other way.
 
 The push closes the issue, because of `Closes #<n>`. Post the summary for whoever picks up the next one as a comment. Don't use `gh issue close <n> --comment`: on an issue that's already closed it fails, and the comment is never posted.
 

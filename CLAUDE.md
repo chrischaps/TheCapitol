@@ -40,13 +40,13 @@ scripts/issue.sh list                         # who holds what, on every machine
 scripts/issue.sh claim <n>                    # exit 2: someone else holds it; pick another
 git worktree add ../TheCapitol-<n> -b issue-<n> origin/master
 # ...work, commit with "Closes #<n>"...
-scripts/issue.sh land <n> --verify "<cmd>"    # rebase, re-verify, ff-push to master, release
+scripts/issue.sh land <n> --verify "<cmd>"    # catch up, verify, ff-push to master, release
 ```
 
 - **A claim is the branch `claim/issue-<n>` on origin.** It holds one commit with no files, and the commit message names the agent and the host. Git rejects the second push of a new branch, so only one claimant can win, even when two push in the same second. The `claimed` label and the "Claimed by" comment are only there for people reading GitHub.
 - **Only the checkout that claimed an issue can renew, release or land it.** It keeps a record in `.git/agent-claims/`. Never delete another agent's `claim/*` branch by hand.
 - **Claims go stale after 24 hours** (`CLAIM_TTL_HOURS`). Run `renew <n>` at the start of each session on long work. A claim past the TTL can be taken over with `claim <n> --steal`. Before stealing, check the issue's comments and `origin/issue-<n>` for work in progress, and continue from it.
-- **Master only moves forward, and only through `land`.** It pushes fast-forward only and retries when another agent lands first. Never force-push master. Exit 3 is a rebase conflict: resolve it, `git rebase --continue`, then land again.
+- **Master only moves forward, and only through `land`.** It pushes fast-forward only and retries when another agent lands first. Never force-push master. To catch up it rebases, unless the branch holds a merge or a subtree squash: then it merges master in, so the subtree merge survives. `--verify` runs before the first push and again after any catch-up. Exit 3 is a conflict: resolve it, `git rebase --continue` (or `git commit` for a merge), then land again.
 - **Giving up?** Push `issue-<n>`, comment on the issue where the work stands, then `release <n>`.
 - **Setting up a new machine:** clone the repo, run `gh auth login` as the shared account, and run `gh auth setup-git` so git pushes use the same credentials. The script needs nothing else.
 

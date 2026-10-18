@@ -14,7 +14,7 @@
 #   scripts/issue.sh claim <n> --steal        take over a claim older than the TTL
 #   scripts/issue.sh renew <n>                refresh your claim's timestamp
 #   scripts/issue.sh release <n>              give up your claim
-#   scripts/issue.sh land <n> [--verify CMD]  rebase on master, push to master,
+#   scripts/issue.sh land <n> [--verify CMD]  catch up with master, verify, push,
 #                                             release the claim
 #
 # Environment:
@@ -161,17 +161,34 @@ cmd_land() {
   git log "$REMOTE/master..HEAD" --format=%B | grep -qi "closes #$n\b" \
     || echo "issue.sh: warning: no commit says 'Closes #$n'" >&2
 
+  # The commit --verify last passed on. Verify runs before the first push and
+  # again whenever catching up with master changes HEAD, so a land after a
+  # conflict resolved by hand is still verified.
+  local verified=""
   for attempt in 1 2 3 4 5; do
     if ! git merge-base --is-ancestor "$REMOTE/master" HEAD; then
-      echo "master moved; rebasing (attempt $attempt)"
-      git rebase -q "$REMOTE/master" || {
-        echo "issue.sh: rebase conflict. Resolve it, 'git rebase --continue', re-verify, then land again." >&2
-        exit 3
-      }
-      if [ -n "$verify" ]; then
-        echo "re-verifying: $verify"
-        bash -c "$verify" || die "verify failed after rebase; fix it, commit, land again"
+      # A rebase flattens merges, and a subtree pull's merge is what the next
+      # `git subtree pull`/`push` finds its base by. So a branch holding any
+      # merge, or a squashed subtree commit, merges master in instead.
+      if [ -n "$(git rev-list --merges "$REMOTE/master..HEAD")" ] \
+        || git log "$REMOTE/master..HEAD" --format=%B | grep -q '^git-subtree-dir:'; then
+        echo "master moved; merging it in to keep the branch's merges (attempt $attempt)"
+        git merge -q --no-edit "$REMOTE/master" || {
+          echo "issue.sh: merge conflict. Resolve it, 'git commit', then land again." >&2
+          exit 3
+        }
+      else
+        echo "master moved; rebasing (attempt $attempt)"
+        git rebase -q "$REMOTE/master" || {
+          echo "issue.sh: rebase conflict. Resolve it, 'git rebase --continue', then land again." >&2
+          exit 3
+        }
       fi
+    fi
+    if [ -n "$verify" ] && [ "$verified" != "$(git rev-parse HEAD)" ]; then
+      echo "verifying: $verify"
+      bash -c "$verify" || die "verify failed; fix it, commit, land again"
+      verified=$(git rev-parse HEAD)
     fi
     # Fast-forward only: a rejection means someone landed first, so loop.
     if git push -q "$REMOTE" HEAD:master; then

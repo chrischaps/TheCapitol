@@ -143,7 +143,7 @@ git fetch flint
 git subtree pull --prefix=flint-client/engine flint main --squash
 ```
 
-**Don't rebase across a subtree merge.** A rebase flattens the merge and drops the squash parent that the next `subtree pull` needs. If master moves under a branch with a subtree merge on it, merge master in.
+**Don't rebase across a subtree merge.** A rebase flattens the merge and drops the squash parent that the next `subtree pull` needs. If master moves under a branch with a subtree merge on it, merge master in. `scripts/issue.sh land` does this itself (#101).
 
 **Engine changes go upstream.** Any change under `engine/` is a Flint change. It goes to Flint as a PR, never as a Capitol-only patch:
 
