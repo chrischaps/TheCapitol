@@ -131,7 +131,7 @@ Removing a row is an error unless it's listed under `retired`, so items in playe
 
 ### D5. Content tree v1 (E2.1)
 
-**Status: final draft, waiting for Chris's approval (E2.1, #160).** E2.2 to E2.6 build from these tables. Grass stays the starter and the GDD's universal Fiber, and its hand numbers don't change.
+**Status: approved by Chris, 2026-10-18 (E2.1, #160).** E2.2 to E2.6 build from these tables. The wilds' extra yields (copper and tin, old-growth trees, scree, reeds: `the-capitol-wilds.md` WD8) aren't part of v1. They come in with W6 (#199). Grass stays the starter and the GDD's universal Fiber, and its hand numbers don't change.
 
 v1 has **6 resources, 32 items, 6 stations and 27 recipes**, which is more than the first sketch's 22 items. Most of the extra items are the four iron heads and the four kits that give the new stations a way in. The longest chain is vein → ore → ingot → head → axe, with charcoal from the kiln feeding the forge. Tools and stations both carry quality along it.
 
