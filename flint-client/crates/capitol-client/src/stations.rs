@@ -6,14 +6,21 @@
 //! The models wear the React client's colours (`GameCanvas.tsx`
 //! `drawStation`): a workbench of `#8b5a2b` planks on `#5d3a1a` legs, a
 //! `#4a4a54` stone forge with an `#f97316` mouth and a `#fbbf24` heart,
-//! and a `#8b6914` chest under an `#a67c1a` lid with a `#ffd700` lock. A
-//! type the client doesn't know is React's grey block. React draws each
-//! 20 units (2 m) across, and so do these, give or take.
+//! and a `#8b6914` chest under an `#a67c1a` lid with a `#ffd700` lock.
+//! React draws each 20 units (2 m) across, and so do these, give or take.
+//!
+//! E2.6 added the content's three new stations in the same hand: a
+//! sawbench with its blade standing through the top, a beehive kiln of
+//! brick with a glowing mouth, and an anvil on a stump. A type the client
+//! doesn't know is a plank crate, so it still looks like something built.
 //!
 //! The forge's fire is real: the scene's `particles/forge.particles.toml`
 //! (flames in the mouth, embers and a little smoke out of the chimney) on
 //! its entity, and its mouth glows (`palette::glow`) bright enough to
-//! bloom.
+//! bloom. The kiln has its own (`particles/kiln.particles.toml`: smoke and
+//! a few sparks from its vent). Both fires burn brighter after dark:
+//! [`Stations::fires`] sets their `material.emissive_scale` (H23, Flint
+//! ADR 0090) from the hour, so no mesh is rebuilt.
 //!
 //! A station that was placed just now (`station_placed`) drops into place
 //! and settles. One seen for the first time, walking near it, rises out
@@ -50,10 +57,15 @@ use uuid::Uuid;
 pub const MESH_WORKBENCH: &str = "station_workbench";
 pub const MESH_FORGE: &str = "station_forge";
 pub const MESH_CHEST: &str = "station_chest";
+pub const MESH_SAWBENCH: &str = "station_sawbench";
+pub const MESH_KILN: &str = "station_kiln";
+pub const MESH_ANVIL: &str = "station_anvil";
 pub const MESH_GENERIC: &str = "station_generic";
 
 /// The forge's fire, `particles/forge.particles.toml`.
 const FORGE_EFFECT: &str = "forge";
+/// The kiln's smoke and sparks, `particles/kiln.particles.toml`.
+const KILN_EFFECT: &str = "kiln";
 
 /// Seconds to rise out of the ground, to drop into place, and to sink.
 const RISE: f32 = 0.45;
@@ -81,6 +93,8 @@ struct Station {
     present: bool,
     /// 0 to 1: the ring, eased toward whether you're in reach.
     reach: f32,
+    /// The `emissive_scale` last set on a fired one ([`Stations::fires`]).
+    fire: Option<f32>,
 }
 
 #[derive(Default)]
@@ -169,6 +183,7 @@ impl Stations {
                         shown: 0.0,
                         present: true,
                         reach: 0.0,
+                        fire: None,
                     })
                 }
             };
@@ -264,6 +279,78 @@ impl Stations {
     pub fn ghost_at(&self) -> Option<[f32; 2]> {
         self.ghost.as_ref().map(|g| g.at)
     }
+
+    /// Turn every fired station's glow (the forge's, the kiln's) to
+    /// `scale`, its `material.emissive_scale` ([`fire_light`]).
+    pub fn fires(&mut self, world: &mut flint_ecs::FlintWorld, scale: f32) {
+        for station in self.stations.values_mut() {
+            if !fired(station.kind) || station.fire == Some(scale) {
+                continue;
+            }
+            let mut table = world
+                .get_components(station.entity)
+                .and_then(|c| c.get("material"))
+                .and_then(|m| m.as_table())
+                .cloned()
+                .unwrap_or_default();
+            table.insert("emissive_scale".into(), (scale as f64).into());
+            match world.set_component(station.entity, "material", table.into()) {
+                Ok(()) => station.fire = Some(scale),
+                Err(e) => tracing::warn!("stations: no glow scale: {e}"),
+            }
+        }
+    }
+}
+
+/// `--station-sample`: a store holding one of every station type the
+/// catalog knows, and a `loom` it doesn't, in a row across the view from
+/// `camera` to `target` (world metres, X and Z), [`SAMPLE_SPACING`] apart.
+pub fn sample(target: [f32; 2], camera: [f32; 2]) -> GameState {
+    use capitol_core::protocol::ws::ServerMessage;
+    let mut state = GameState::new();
+    let mut types: Vec<String> = state
+        .catalog()
+        .station_types()
+        .iter()
+        .map(|t| t.id.clone())
+        .collect();
+    types.push("loom".into());
+    let (dx, dz) = (target[0] - camera[0], target[1] - camera[1]);
+    let len = dx.hypot(dz).max(1e-3);
+    let across = [dz / len, -dx / len];
+    let mid = (types.len() as f32 - 1.0) / 2.0;
+    for (i, t) in types.iter().enumerate() {
+        let k = (i as f32 - mid) * SAMPLE_SPACING;
+        let [x, y] = to_server(target[0] + across[0] * k, target[1] + across[1] * k);
+        state.apply_ws(&ServerMessage::StationPlaced {
+            station_id: Uuid::from_u128(i as u128 + 1),
+            station_type: t.clone(),
+            name: t.clone(),
+            owner_id: Uuid::nil(),
+            x,
+            y,
+            container_id: Uuid::nil(),
+            quality: 60,
+        });
+    }
+    state
+}
+
+/// How far apart `--station-sample` stands them, metres.
+const SAMPLE_SPACING: f32 = 3.6;
+
+/// Whether a station of `kind` has a fire in it, whose glow follows the
+/// hour.
+fn fired(kind: &str) -> bool {
+    matches!(kind, "forge" | "kiln")
+}
+
+/// How bright a fire's glow is at `glow`, the light on your plots: as
+/// built by day, and up to 1.8 times that at night, when a lit mouth is
+/// most of what you see of a yard. Stepped like the glow, so the material
+/// is only written when it moves.
+pub fn fire_light(glow: crate::daylight::PlotGlow) -> f32 {
+    1.0 + 0.5 * glow.stepped().radiance
 }
 
 /// A ghost entity wearing `kind`'s tinted mesh.
@@ -317,13 +404,16 @@ fn ghost_mesh(kind: &str, ok: bool) -> String {
     format!("{}_ghost_{}", mesh(kind), if ok { "ok" } else { "bad" })
 }
 
-/// The type's mesh name and look: the three the server seeds, or
-/// anything else.
+/// The type's mesh name and look: the six in the content, or the crate
+/// for anything else.
 pub fn kind_of(station_type: &str) -> &'static str {
     match station_type {
         "workbench" => "workbench",
         "forge" => "forge",
         "storage_chest" => "storage_chest",
+        "sawbench" => "sawbench",
+        "kiln" => "kiln",
+        "anvil" => "anvil",
         _ => "generic",
     }
 }
@@ -333,6 +423,9 @@ fn mesh(kind: &str) -> &'static str {
         "workbench" => MESH_WORKBENCH,
         "forge" => MESH_FORGE,
         "storage_chest" => MESH_CHEST,
+        "sawbench" => MESH_SAWBENCH,
+        "kiln" => MESH_KILN,
+        "anvil" => MESH_ANVIL,
         _ => MESH_GENERIC,
     }
 }
@@ -344,7 +437,10 @@ fn footprint(kind: &str) -> f32 {
         "workbench" => 1.45,
         "forge" => 1.95,
         "storage_chest" => 1.0,
-        _ => 1.2,
+        "sawbench" => 1.35,
+        "kiln" => 1.4,
+        "anvil" => 1.0,
+        _ => 1.0,
     }
 }
 
@@ -378,10 +474,15 @@ fn spawn(ctx: &mut ExtensionCtx, id: Uuid, kind: &'static str) -> Option<EntityI
     if let Err(e) = ctx.attach_mesh(entity, mesh(kind)) {
         tracing::warn!("stations: no mesh for {id}: {e}");
     }
-    if kind == "forge" {
+    let effect = match kind {
+        "forge" => Some(FORGE_EFFECT),
+        "kiln" => Some(KILN_EFFECT),
+        _ => None,
+    };
+    if let Some(effect) = effect {
         let mut fx = toml::Table::new();
-        fx.insert("effect".into(), FORGE_EFFECT.into());
-        // Each forge flickers its own way.
+        fx.insert("effect".into(), effect.into());
+        // Each fire flickers its own way.
         fx.insert(
             "seed".into(),
             ((id.as_u128() % 1_000_000) as i64 + 1).into(),
@@ -454,7 +555,18 @@ const CHEST: u32 = 0x8b6914;
 const LID: u32 = 0xa67c1a;
 const LOCK: u32 = 0xffd700;
 const IRON: u32 = 0x2e2e36;
-const GENERIC: u32 = 0x5a5a6a;
+/// The kiln's brick, fired red, its courses a shade apart.
+const BRICK: u32 = 0x9a4a2c;
+const BRICK_LIGHT: u32 = 0xb5633a;
+const BRICK_DARK: u32 = 0x6b3320;
+/// Bright steel: the saw's blade, the anvil's face.
+const STEEL: u32 = 0x94a3b8;
+/// The Capitol's gold: a touch on each new station, as on the icons.
+const GOLD: u32 = 0xc9a227;
+/// Sawdust, and the pale end grain of a cut.
+const SAWDUST: u32 = 0xd9b98a;
+/// The crate an unknown type is drawn as.
+const CRATE: u32 = 0x8a6a40;
 /// React's placement preview: `#22c55e` where it can go, `#ef4444` where not.
 const GHOST_OK: u32 = 0x22c55e;
 const GHOST_BAD: u32 = 0xef4444;
@@ -467,7 +579,10 @@ fn upload(gpu: &mut ExtensionGpu) {
         ("workbench", workbench(), 0.85),
         ("forge", forge(), 0.9),
         ("storage_chest", chest(), 0.7),
-        ("generic", generic(), 0.8),
+        ("sawbench", sawbench(), 0.8),
+        ("kiln", kiln(), 0.92),
+        ("anvil", anvil(), 0.6),
+        ("generic", generic(), 0.85),
     ];
     for (kind, m, roughness) in models {
         for ok in [true, false] {
@@ -904,10 +1019,494 @@ fn barrel(m: &mut MeshBuf, xs: [f32; 2], y: f32, r: f32, colour: [f32; 4]) {
     }
 }
 
-/// React's grey block, for a type the client doesn't know.
+/// A band round the Y axis through `(cx, cz)`, `sides` faces, from radius
+/// `r0` at `y0` to `r1` at `y1`: a cylinder, a cone's slice or a dome's
+/// course. No caps.
+#[allow(clippy::too_many_arguments)]
+fn band(
+    m: &mut MeshBuf,
+    [cx, cz]: [f32; 2],
+    sides: usize,
+    y0: f32,
+    r0: f32,
+    y1: f32,
+    r1: f32,
+    colour: [f32; 4],
+) {
+    let at = |i: usize, r: f32, y: f32| {
+        let a = i as f32 / sides as f32 * TAU;
+        [cx + a.sin() * r, y, cz + a.cos() * r]
+    };
+    for i in 0..sides {
+        let quad = [
+            at(i, r0, y0),
+            at(i + 1, r0, y0),
+            at(i + 1, r1, y1),
+            at(i, r1, y1),
+        ];
+        let mut n = normalise(cross(sub(quad[1], quad[0]), sub(quad[3], quad[0])));
+        let mid = (i as f32 + 0.5) / sides as f32 * TAU;
+        if n[0] * mid.sin() + n[2] * mid.cos() < 0.0 {
+            n = neg(n);
+        }
+        m.quad(quad, n, colour);
+    }
+}
+
+/// A flat disc of radius `r` facing up at `y`, centred on `(cx, cz)`.
+fn disc(m: &mut MeshBuf, [cx, cz]: [f32; 2], sides: usize, y: f32, r: f32, colour: [f32; 4]) {
+    let rim: Vec<[f32; 3]> = (0..=sides)
+        .map(|i| {
+            let a = i as f32 / sides as f32 * TAU;
+            [cx + a.sin() * r, y, cz + a.cos() * r]
+        })
+        .collect();
+    m.fan([cx, y, cz], &rim, UP, colour);
+}
+
+/// A sawbench, its long side along X: a trestle table of planks, a round
+/// blade standing up through a slot in the middle of the top, a crank on
+/// the right end, a half-sawn log on the left, and sawdust heaped under
+/// the blade. The blade's plane is the cut's, along X.
+fn sawbench() -> MeshBuf {
+    let mut m = MeshBuf::default();
+    let (hx, hz, top) = (0.9, 0.4, 0.78);
+    let wood = hex(WOOD);
+    let light = mix(hex(WOOD), hex(WOOD_LIGHT), 0.5);
+    let dark = hex(WOOD_DARK);
+    // The top in two halves, either side of the blade's slot.
+    cuboid(&mut m, [-hx, top, -hz], [hx, top + 0.06, -0.02], wood);
+    cuboid(&mut m, [-hx, top, 0.02], [hx, top + 0.06, hz], light);
+    // Splayed trestle legs at each end, braced, and a stretcher between.
+    let leg = 0.05;
+    for sx in [-1.0, 1.0] {
+        let x = sx * (hx - 0.15);
+        for sz in [-1.0, 1.0] {
+            let z = sz * (hz - 0.07);
+            cuboid(
+                &mut m,
+                [x - leg, 0.0, z - leg],
+                [x + leg, top, z + leg],
+                dark,
+            );
+        }
+        cuboid(
+            &mut m,
+            [x - 0.04, 0.3, -hz + 0.05],
+            [x + 0.04, 0.36, hz - 0.05],
+            dark,
+        );
+    }
+    cuboid(
+        &mut m,
+        [-hx + 0.15, 0.3, -0.04],
+        [hx - 0.15, 0.36, 0.04],
+        mix(dark, wood, 0.4),
+    );
+    // A housing under the slot, where the arbor turns.
+    cuboid(
+        &mut m,
+        [-0.32, top - 0.2, -0.1],
+        [0.32, top, 0.1],
+        mix(dark, hex(IRON), 0.3),
+    );
+
+    // The blade: a toothed disc standing in the slot, both faces, with a
+    // darker hub and a gold arbor nut.
+    let (bx, by, r) = (0.05, top - 0.04, 0.3);
+    const TEETH: usize = 40;
+    let rim = |z: f32| {
+        (0..=TEETH * 2)
+            .map(|i| {
+                let a = i as f32 / (TEETH * 2) as f32 * TAU;
+                let rr = if i % 2 == 0 { r } else { r - 0.025 };
+                [bx + a.cos() * rr, by + a.sin() * rr, z]
+            })
+            .collect::<Vec<_>>()
+    };
+    let steel = hex(STEEL);
+    for (z, nz) in [(0.006, 1.0), (-0.006, -1.0)] {
+        m.fan([bx, by, z], &rim(z), [0.0, 0.0, nz], steel);
+        let hub: Vec<[f32; 3]> = (0..=12)
+            .map(|i| {
+                let a = i as f32 / 12.0 * TAU;
+                [bx + a.cos() * 0.1, by + a.sin() * 0.1, z + 0.002 * nz]
+            })
+            .collect();
+        m.fan(
+            [bx, by, z + 0.002 * nz],
+            &hub,
+            [0.0, 0.0, nz],
+            mix(steel, hex(IRON), 0.5),
+        );
+    }
+    cuboid(
+        &mut m,
+        [bx - 0.03, by - 0.03, -0.03],
+        [bx + 0.03, by + 0.03, 0.03],
+        hex(GOLD),
+    );
+
+    // A crank on the right end: a spindle out of the housing's end, an
+    // arm and a handle.
+    let iron = hex(IRON);
+    cuboid(
+        &mut m,
+        [0.32, by - 0.02, -0.02],
+        [hx + 0.12, by + 0.02, 0.02],
+        iron,
+    );
+    cuboid(
+        &mut m,
+        [hx + 0.12, by - 0.02, -0.02],
+        [hx + 0.16, by + 0.02, 0.24],
+        iron,
+    );
+    cuboid(
+        &mut m,
+        [hx + 0.12, by - 0.12, 0.2],
+        [hx + 0.2, by + 0.0, 0.26],
+        dark,
+    );
+
+    // A log on the left, half through: bark round, pale ends.
+    let (lx0, lx1) = (-hx + 0.05, -0.32);
+    let (ly, lr) = (top + 0.06 + 0.13, 0.13);
+    let bark = mix(hex(WOOD_DARK), hex(0x3a2a1a), 0.3);
+    const SIDES: usize = 10;
+    let at = |i: usize, x: f32| {
+        let a = i as f32 / SIDES as f32 * TAU;
+        [x, ly + a.sin() * lr, a.cos() * lr]
+    };
+    for i in 0..SIDES {
+        let mid = (i as f32 + 0.5) / SIDES as f32 * TAU;
+        m.quad(
+            [at(i, lx0), at(i + 1, lx0), at(i + 1, lx1), at(i, lx1)],
+            [0.0, mid.sin(), mid.cos()],
+            if i % 2 == 0 {
+                bark
+            } else {
+                mix(bark, wood, 0.25)
+            },
+        );
+    }
+    for (x, nx) in [(lx0, -1.0), (lx1, 1.0)] {
+        let rim: Vec<[f32; 3]> = (0..=SIDES).map(|i| at(i, x)).collect();
+        m.fan([x, ly, 0.0], &rim, [nx, 0.0, 0.0], hex(SAWDUST));
+    }
+    // Two planks already cut, stacked on the right of the top.
+    cuboid(
+        &mut m,
+        [0.38, top + 0.06, -0.3],
+        [0.85, top + 0.1, -0.06],
+        hex(WOOD_LIGHT),
+    );
+    cuboid(
+        &mut m,
+        [0.42, top + 0.1, -0.28],
+        [0.83, top + 0.14, -0.08],
+        light,
+    );
+    // Sawdust heaped on the ground under the blade, and a drift of it.
+    band(
+        &mut m,
+        [0.05, 0.12],
+        10,
+        0.0,
+        0.34,
+        0.09,
+        0.12,
+        hex(SAWDUST),
+    );
+    disc(&mut m, [0.05, 0.12], 10, 0.09, 0.12, hex(SAWDUST));
+    m
+}
+
+/// A beehive kiln: a domed brick oven on a stone plinth, in courses of
+/// two reds, with an arched firebox standing out at the front (+Z), its
+/// mouth glowing, a vent at the crown glowing too, and firewood stacked
+/// at its side.
+fn kiln() -> MeshBuf {
+    let mut m = MeshBuf::default();
+    let o = [0.0, -0.1];
+    const SIDES: usize = 16;
+    let brick = hex(BRICK);
+    let light = hex(BRICK_LIGHT);
+    let dark = hex(BRICK_DARK);
+    let stone = mix(hex(STONE), hex(0x6a6a76), 0.3);
+    // The plinth, and its top.
+    band(&mut m, o, SIDES, 0.0, 0.92, 0.16, 0.88, stone);
+    disc(&mut m, o, SIDES, 0.16, 0.88, stone);
+    // The wall, straight to the spring of the dome.
+    let (r, spring) = (0.76, 0.6);
+    band(&mut m, o, SIDES, 0.16, r, 0.38, r, brick);
+    band(&mut m, o, SIDES, 0.38, r, spring, r, light);
+    // The dome in courses, to a ring round the vent.
+    const COURSES: usize = 6;
+    let (crown, vent) = (1.5, 0.14);
+    let course = |k: usize| {
+        let a = k as f32 / COURSES as f32 * (PI / 2.0);
+        let rr = vent + (r - vent) * a.cos();
+        (spring + (crown - spring) * a.sin(), rr)
+    };
+    for k in 0..COURSES {
+        let ((y0, r0), (y1, r1)) = (course(k), course(k + 1));
+        let c = if k % 2 == 0 { brick } else { light };
+        band(&mut m, o, SIDES, y0, r0, y1, r1, c);
+    }
+    // The vent's collar, standing proud of the crown.
+    band(
+        &mut m,
+        o,
+        10,
+        crown - 0.02,
+        vent + 0.04,
+        crown + 0.12,
+        vent + 0.03,
+        dark,
+    );
+    // A band of gold-washed iron round the wall, where a hoop holds it.
+    band(
+        &mut m,
+        o,
+        SIDES,
+        0.36,
+        r + 0.012,
+        0.42,
+        r + 0.012,
+        hex(GOLD),
+    );
+
+    // The firebox: a brick porch standing out of the front, its arch
+    // dark, then the glow, then the white-hot heart.
+    let (fz0, fz1) = (0.5, 0.92);
+    cuboid(
+        &mut m,
+        [-0.36, 0.16, o[1] + fz0],
+        [0.36, 0.78, o[1] + fz1],
+        dark,
+    );
+    cuboid(
+        &mut m,
+        [-0.4, 0.78, o[1] + fz0 - 0.02],
+        [0.4, 0.85, o[1] + fz1 + 0.03],
+        brick,
+    );
+    let face = o[1] + fz1;
+    let arch = |half: f32, base: f32, rise: f32, proud: f32| {
+        let mut pts = vec![[-half, base], [half, base]];
+        const STEPS: usize = 10;
+        for i in 0..=STEPS {
+            let a = i as f32 / STEPS as f32 * PI;
+            pts.push([half * a.cos(), base + rise + half * a.sin()]);
+        }
+        pts.push([-half, base]);
+        pts.into_iter()
+            .map(|[x, y]| [x, y, face + proud])
+            .collect::<Vec<_>>()
+    };
+    let front = [0.0, 0.0, 1.0];
+    m.fan(
+        [0.0, 0.42, face + 0.01],
+        &arch(0.25, 0.2, 0.18, 0.01),
+        front,
+        mix(dark, hex(0x000000), 0.5),
+    );
+    let mut lit = MeshBuf::default();
+    lit.fan(
+        [0.0, 0.4, face + 0.018],
+        &arch(0.19, 0.22, 0.14, 0.018),
+        front,
+        glow(hex(FIRE), 1.2),
+    );
+    lit.fan(
+        [0.0, 0.3, face + 0.026],
+        &arch(0.1, 0.23, 0.02, 0.026),
+        front,
+        glow(hex(FLAME), 3.2),
+    );
+    // The vent at the crown, hot: the kiln shows it's firing from behind.
+    let vent_rim: Vec<[f32; 3]> = (0..=10)
+        .map(|i| {
+            let a = i as f32 / 10.0 * TAU;
+            [
+                o[0] + a.sin() * (vent + 0.03),
+                crown + 0.121,
+                o[1] + a.cos() * (vent + 0.03),
+            ]
+        })
+        .collect();
+    lit.fan(
+        [o[0], crown + 0.121, o[1]],
+        &vent_rim,
+        UP,
+        glow(mix(hex(FIRE), hex(FLAME), 0.4), 2.8),
+    );
+    m.append(lit);
+
+    // Firewood stacked against the right side: split logs, end on.
+    for (i, (y, z)) in [
+        (0.0, 0.0),
+        (0.0, 0.17),
+        (0.0, 0.34),
+        (0.15, 0.085),
+        (0.15, 0.255),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let c = if i % 2 == 0 {
+            hex(WOOD)
+        } else {
+            hex(WOOD_DARK)
+        };
+        cuboid(&mut m, [0.94, y, -0.35 + z], [1.28, y + 0.14, -0.21 + z], c);
+        cuboid(
+            &mut m,
+            [1.28, y + 0.02, -0.33 + z],
+            [1.285, y + 0.12, -0.23 + z],
+            hex(SAWDUST),
+        );
+    }
+    m
+}
+
+/// An anvil on a stump: a wide round of wood, pale on its cut face, the
+/// anvil on it with its horn to +X and its heel to -X, a hammer laid
+/// across the face, and a hooped quench bucket beside.
+fn anvil() -> MeshBuf {
+    let mut m = MeshBuf::default();
+    let bark = mix(hex(WOOD_DARK), hex(0x3a2a1a), 0.3);
+    // The stump, flaring at its foot, and its end grain with a ring.
+    band(&mut m, [0.0, 0.0], 12, 0.0, 0.36, 0.08, 0.31, bark);
+    band(
+        &mut m,
+        [0.0, 0.0],
+        12,
+        0.08,
+        0.31,
+        0.5,
+        0.29,
+        hex(WOOD_DARK),
+    );
+    disc(&mut m, [0.0, 0.0], 12, 0.5, 0.29, hex(SAWDUST));
+    disc(
+        &mut m,
+        [0.0, 0.0],
+        12,
+        0.501,
+        0.17,
+        mix(hex(SAWDUST), hex(WOOD), 0.35),
+    );
+    // The anvil: a foot, a waist, the body and the face.
+    let iron = hex(IRON);
+    let face = mix(iron, hex(STEEL), 0.55);
+    let y = 0.502;
+    cuboid(&mut m, [-0.22, y, -0.15], [0.22, y + 0.07, 0.15], iron);
+    cuboid(
+        &mut m,
+        [-0.12, y + 0.07, -0.08],
+        [0.12, y + 0.18, 0.08],
+        iron,
+    );
+    cuboid(&mut m, [-0.3, y + 0.18, -0.11], [0.24, y + 0.3, 0.11], iron);
+    cuboid(&mut m, [-0.3, y + 0.3, -0.11], [0.24, y + 0.32, 0.11], face);
+    // The hardy hole, in gold for the Capitol's mark.
+    cuboid(
+        &mut m,
+        [-0.25, y + 0.32, -0.025],
+        [-0.2, y + 0.325, 0.025],
+        hex(GOLD),
+    );
+    // The horn: a cone out to +X, flat on top with the face.
+    let (hx0, hx1) = (0.24, 0.52);
+    let horn = [
+        [hx0, y + 0.2, -0.1],
+        [hx0, y + 0.32, -0.1],
+        [hx0, y + 0.32, 0.1],
+        [hx0, y + 0.2, 0.1],
+    ];
+    let tip = [hx1, y + 0.3, 0.0];
+    for i in 0..4 {
+        let (a, b) = (horn[i], horn[(i + 1) % 4]);
+        let mut n = normalise(cross(sub(b, a), sub(tip, a)));
+        let mid = [
+            (a[0] + b[0]) * 0.5,
+            (a[1] + b[1]) * 0.5,
+            (a[2] + b[2]) * 0.5,
+        ];
+        let out = sub(mid, [hx0, y + 0.26, 0.0]);
+        if n[0] * out[0] + n[1] * out[1] + n[2] * out[2] < 0.0 {
+            n = neg(n);
+        }
+        m.fan(a, &[b, tip], n, if i == 1 { face } else { iron });
+    }
+    // A hammer across the face: haft and head.
+    let top = y + 0.32;
+    cuboid(
+        &mut m,
+        [-0.14, top, 0.02],
+        [0.2, top + 0.03, 0.05],
+        hex(WOOD_LIGHT),
+    );
+    cuboid(&mut m, [-0.2, top, -0.04], [-0.12, top + 0.07, 0.11], iron);
+    // A quench bucket to the left: staves, two hoops, dark water.
+    let b = [-0.6, 0.18];
+    band(&mut m, b, 12, 0.0, 0.17, 0.36, 0.2, hex(WOOD));
+    band(&mut m, b, 12, 0.06, 0.177, 0.1, 0.182, iron);
+    band(&mut m, b, 12, 0.27, 0.193, 0.31, 0.197, iron);
+    disc(&mut m, b, 12, 0.3, 0.19, hex(0x1e3a4a));
+    m
+}
+
+/// A plank crate, for a type the client doesn't know: a box of boards,
+/// framed at every edge, with a gold stencil band, so an unknown station
+/// still looks like something built rather than a hole in the world.
 fn generic() -> MeshBuf {
     let mut m = MeshBuf::default();
-    cuboid(&mut m, [-0.7, 0.0, -0.7], [0.7, 1.0, 0.7], hex(GENERIC));
+    let h = 0.5;
+    let crate_ = hex(CRATE);
+    cuboid(&mut m, [-h, 0.0, -h], [h, 2.0 * h, h], crate_);
+    // The boards' seams, on each side.
+    let seam = mix(crate_, hex(WOOD_DARK), 0.6);
+    for y in [0.33, 0.66] {
+        for (lo, hi) in [
+            ([-h, y - 0.008, h], [h, y + 0.008, h + 0.004]),
+            ([-h, y - 0.008, -h - 0.004], [h, y + 0.008, -h]),
+            ([h, y - 0.008, -h], [h + 0.004, y + 0.008, h]),
+            ([-h - 0.004, y - 0.008, -h], [-h, y + 0.008, h]),
+        ] {
+            cuboid(&mut m, lo, hi, seam);
+        }
+    }
+    // The frame, on every edge.
+    let f = 0.07;
+    let frame = hex(WOOD_DARK);
+    let e = h + 0.012;
+    for sx in [-1.0, 1.0] {
+        for sz in [-1.0, 1.0] {
+            let (x, z) = (sx * (e - f / 2.0), sz * (e - f / 2.0));
+            cuboid(
+                &mut m,
+                [x - f / 2.0, 0.0, z - f / 2.0],
+                [x + f / 2.0, 2.0 * h + 0.012, z + f / 2.0],
+                frame,
+            );
+        }
+    }
+    for y in [0.0, 2.0 * h - f + 0.012] {
+        cuboid(&mut m, [-e, y, e - f], [e, y + f, e], frame);
+        cuboid(&mut m, [-e, y, -e], [e, y + f, -e + f], frame);
+        cuboid(&mut m, [e - f, y, -e], [e, y + f, e], frame);
+        cuboid(&mut m, [-e, y, -e], [-e + f, y + f, e], frame);
+    }
+    // A gold band stencilled on the front, where a merchant's mark goes.
+    cuboid(
+        &mut m,
+        [-0.2, 0.44, h + 0.012],
+        [0.2, 0.56, h + 0.016],
+        hex(GOLD),
+    );
     m
 }
 
@@ -955,6 +1554,9 @@ mod tests {
             ("workbench", workbench(), 0.9..1.2),
             ("forge", forge(), 2.2..2.6),
             ("storage_chest", chest(), 0.55..0.8),
+            ("sawbench", sawbench(), 0.95..1.2),
+            ("kiln", kiln(), 1.5..1.8),
+            ("anvil", anvil(), 0.8..1.0),
             ("generic", generic(), 0.9..1.1),
         ] {
             let (lo, hi) = bounds(&m);
@@ -976,31 +1578,65 @@ mod tests {
     }
 
     #[test]
-    fn only_the_forge_glows() {
+    fn only_the_fired_stations_glow() {
         let glows = |m: &MeshBuf| m.vertices.iter().any(is_light);
-        assert!(glows(&forge()));
-        assert!(!glows(&workbench()));
-        assert!(!glows(&chest()));
+        for (kind, m) in [
+            ("workbench", workbench()),
+            ("forge", forge()),
+            ("storage_chest", chest()),
+            ("sawbench", sawbench()),
+            ("kiln", kiln()),
+            ("anvil", anvil()),
+            ("generic", generic()),
+        ] {
+            assert_eq!(glows(&m), fired(kind), "{kind}");
+        }
     }
 
     #[test]
-    fn the_forges_heart_is_bright_enough_to_bloom() {
+    fn fires_burn_brighter_at_night() {
+        use crate::daylight::PlotGlow;
+        let day = PlotGlow {
+            surface: 1.0,
+            radiance: 0.0,
+        };
+        let night = PlotGlow {
+            surface: 0.0,
+            radiance: 1.6,
+        };
+        assert_eq!(fire_light(day), 1.0);
+        assert!(fire_light(PlotGlow::EVENING) > 1.0);
+        assert!(fire_light(night) > fire_light(PlotGlow::EVENING));
+    }
+
+    #[test]
+    fn the_fires_hearts_are_bright_enough_to_bloom() {
         // The scene's bloom threshold is 2.5.
-        let brightest = forge()
-            .vertices
-            .iter()
-            .filter(|v| is_light(v))
-            .map(|v| {
-                let [r, g, b, _] = v.color;
-                r.max(g).max(b)
-            })
-            .fold(0.0, f32::max);
-        assert!(brightest > 2.5, "{brightest}");
+        for m in [forge(), kiln()] {
+            let brightest = m
+                .vertices
+                .iter()
+                .filter(|v| is_light(v))
+                .map(|v| {
+                    let [r, g, b, _] = v.color;
+                    r.max(g).max(b)
+                })
+                .fold(0.0, f32::max);
+            assert!(brightest > 2.5, "{brightest}");
+        }
     }
 
     #[test]
     fn every_face_faces_its_normal() {
-        for m in [workbench(), forge(), chest(), generic()] {
+        for m in [
+            workbench(),
+            forge(),
+            chest(),
+            sawbench(),
+            kiln(),
+            anvil(),
+            generic(),
+        ] {
             for t in m.indices.chunks_exact(3) {
                 let v = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]);
                 assert!(crate::world::mesh::facing(
@@ -1032,9 +1668,11 @@ mod tests {
     }
 
     #[test]
-    fn unknown_types_get_the_grey_block() {
-        assert_eq!(mesh(kind_of("workbench")), MESH_WORKBENCH);
-        assert_eq!(mesh(kind_of("storage_chest")), MESH_CHEST);
+    fn every_catalog_station_has_its_own_model_and_unknown_ones_a_crate() {
+        let catalog = capitol_core::catalog::Catalog::fallback();
+        for t in catalog.station_types() {
+            assert_ne!(mesh(kind_of(&t.id)), MESH_GENERIC, "{} has no model", t.id);
+        }
         assert_eq!(mesh(kind_of("loom")), MESH_GENERIC);
     }
 
@@ -1048,6 +1686,15 @@ mod tests {
         // Squashed just after it lands.
         let (_, [_, u]) = drop(0.46);
         assert!(u < 0.9, "{u}");
+    }
+
+    #[test]
+    fn the_kilns_smoke_loads() {
+        let text = include_str!("../../../particles/kiln.particles.toml");
+        let fx = flint_particles::load_effect_from_str(text, "kiln").expect("parses");
+        assert_eq!(fx.name, KILN_EFFECT);
+        let names: Vec<_> = fx.emitters.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["sparks", "smoke"]);
     }
 
     #[test]

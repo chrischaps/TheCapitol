@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Sticks: a bundle of fallen sticks, a twig or two still on them, tied with gold twine. -->
+  <ellipse cx="32" cy="56.5" rx="19" ry="3.2" fill="#000" fill-opacity="0.35"/>
+  <g fill="none">
+    <path d="M12 47 L49 12" stroke="#1b1206" stroke-width="6.0" stroke-linecap="round"/>
+    <path d="M12 47 L49 12" stroke="#8b5a2b" stroke-width="3.4" stroke-linecap="round"/>
+    <circle cx="49" cy="12" r="1.40" fill="#d9b98a"/>
+    <path d="M38 22.5 L45 25" stroke="#1b1206" stroke-width="4.2" stroke-linecap="round"/>
+    <path d="M38 22.5 L45 25" stroke="#8b5a2b" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M10 41 L44 9.5" stroke="#1b1206" stroke-width="6.0" stroke-linecap="round"/>
+    <path d="M10 41 L44 9.5" stroke="#a0742c" stroke-width="3.4" stroke-linecap="round"/>
+    <circle cx="44" cy="9.5" r="1.40" fill="#d9b98a"/>
+    <path d="M15 53 L53 18" stroke="#1b1206" stroke-width="6.0" stroke-linecap="round"/>
+    <path d="M15 53 L53 18" stroke="#b08850" stroke-width="3.4" stroke-linecap="round"/>
+    <circle cx="53" cy="18" r="1.40" fill="#d9b98a"/>
+    <path d="M22 41 L19.5 34" stroke="#1b1206" stroke-width="4.2" stroke-linecap="round"/>
+    <path d="M22 41 L19.5 34" stroke="#b08850" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M26.5 25 L36 35.5" stroke="#3d300a" stroke-width="6" stroke-linecap="round"/>
+    <path d="M26.5 25 L36 35.5" stroke="#c9a227" stroke-width="3.6" stroke-linecap="round"/>
+    <path d="M27.4 25.4 L30 28.2" stroke="#fde68a" stroke-opacity="0.7" stroke-width="1" stroke-linecap="round"/>
+  </g>
+</svg>

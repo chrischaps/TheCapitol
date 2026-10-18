@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Log: a felled length of trunk, bark on, its sawn end showing rings, tagged with a gold strap. -->
+  <ellipse cx="32" cy="56.5" rx="22" ry="3.2" fill="#000" fill-opacity="0.35"/>
+
+  <g transform="rotate(-14 32 36)">
+    <path d="M12 25 L46 25 L46 47 L12 47 C7 47 7 25 12 25 Z" fill="#6b4a1a" stroke="#1b1206" stroke-width="1.5" stroke-linejoin="round"/>
+    <path d="M10 39 C11 43 11.5 47 12 47 L46 47 L46 39 Z" fill="#553912"/>
+    <g fill="none" stroke="#3e290c" stroke-width="1" stroke-linecap="round">
+      <path d="M15 30 L26 30"/><path d="M30 34 L41 34"/><path d="M14 42 L22 42"/><path d="M28 43 L38 43"/><path d="M34 28.5 L43 28.5"/>
+    </g>
+    <path d="M13 27.2 L44 27.2" stroke="#d9a868" stroke-opacity="0.35" stroke-width="1" stroke-linecap="round"/>
+    <rect x="21" y="24" width="4.5" height="24" fill="#c9a227" stroke="#3d300a" stroke-width="1.2"/>
+    <ellipse cx="46" cy="36" rx="7" ry="11" fill="#d9b98a" stroke="#1b1206" stroke-width="1.5"/>
+    <ellipse cx="46" cy="36" rx="4.6" ry="7.4" fill="none" stroke="#b08850" stroke-width="1"/>
+    <ellipse cx="46" cy="36" rx="2.4" ry="3.8" fill="none" stroke="#b08850" stroke-width="1"/>
+    <circle cx="46" cy="36" r="0.9" fill="#8b5a2b"/>
+  </g>
+</svg>

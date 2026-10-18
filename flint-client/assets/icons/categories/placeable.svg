@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Station kit, not drawn yet: a plain crate, as an unknown station stands in the world. -->
+  <ellipse cx="32" cy="56.5" rx="22" ry="3.2" fill="#000" fill-opacity="0.35"/>
+
+  <g stroke="#15151c" stroke-width="1.5" stroke-linejoin="round">
+    <path d="M10 24 L20 16 L54 16 L44 24 Z" fill="#7a7a8a"/>
+    <path d="M44 24 L54 16 L54 46 L44 54 Z" fill="#5a5a68"/>
+    <rect x="10" y="24" width="34" height="30" fill="#6b6b7a"/>
+  </g>
+  <g fill="none" stroke="#15151c" stroke-width="1">
+    <rect x="13" y="27" width="28" height="24"/>
+    <path d="M13 51 L41 27"/>
+  </g>
+  <path d="M13 19.5 L18.5 18" stroke="#c8c8d8" stroke-opacity="0.45" stroke-width="1" stroke-linecap="round"/>
+
+  <circle cx="15" cy="47" r="6.4" fill="#c9a227" stroke="#3d300a" stroke-width="1.2"/>
+  <path d="M12.9 45.4 C12.9 42.6 17.1 42.6 17.1 45.4 C17.1 47.1 15 47.1 15 49.2" fill="none" stroke="#3d300a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="15" cy="51.4" r="0.95" fill="#3d300a"/>
+</svg>

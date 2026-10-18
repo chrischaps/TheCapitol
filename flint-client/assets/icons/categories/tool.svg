@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Tool, not drawn yet: a plain hammer. -->
+  <ellipse cx="32" cy="56.5" rx="17" ry="3.2" fill="#000" fill-opacity="0.35"/>
+
+  <g transform="rotate(38 32 32)">
+    <rect x="29.5" y="7" width="5" height="49" rx="2" fill="#7a7a8a" stroke="#15151c" stroke-width="1.5"/>
+    <ellipse cx="32" cy="56" rx="3.8" ry="2.4" fill="#5a5a68" stroke="#15151c" stroke-width="1.5"/>
+    <rect x="20" y="7" width="24" height="13" rx="2" fill="#6b6b7a" stroke="#15151c" stroke-width="1.5"/>
+    <path d="M23 10.4 L41 10.4" stroke="#c8c8d8" stroke-opacity="0.45" stroke-width="1" stroke-linecap="round"/>
+  </g>
+
+  <circle cx="15" cy="47" r="6.4" fill="#c9a227" stroke="#3d300a" stroke-width="1.2"/>
+  <path d="M12.9 45.4 C12.9 42.6 17.1 42.6 17.1 45.4 C17.1 47.1 15 47.1 15 49.2" fill="none" stroke="#3d300a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="15" cy="51.4" r="0.95" fill="#3d300a"/>
+</svg>

@@ -198,8 +198,8 @@ pub struct NodeMark {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StationMark {
     pub id: String,
-    /// "workbench", "forge", "storage_chest", or "generic" for a type the
-    /// client has no model for.
+    /// "workbench", "forge", "storage_chest", "sawbench", "kiln", "anvil",
+    /// or "generic" (a crate) for a type the client has no model for.
     pub kind: &'static str,
     /// Where it stands, world metres (X, Z).
     pub at: [f32; 2],

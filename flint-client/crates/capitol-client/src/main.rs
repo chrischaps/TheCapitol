@@ -171,6 +171,11 @@ struct Args {
     /// houses grow. For captures
     #[arg(long, value_name = "SECS", requires = "offline")]
     grow_at: Option<f32>,
+    /// Offline, stand one of every station the catalog knows in a row
+    /// where the camera looks, and a crate for a type it doesn't (E2.6).
+    /// For captures
+    #[arg(long, requires = "offline")]
+    station_sample: bool,
 }
 
 /// A time of day for `--time-of-day`: 0 to 1, 1 being midnight again.
@@ -284,6 +289,7 @@ fn main() -> Result<()> {
         .with_juice_sample(args.juice_sample && args.offline.is_some())
         .with_time_of_day(args.time_of_day)
         .with_claim_sample(args.claim_sample, args.grow_at)
+        .with_station_sample(args.station_sample)
         .with_trade_offer(args.trade_offer.as_deref())
         .with_settings(
             settings::SettingsFile::load(

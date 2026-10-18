@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Iron Ore: a lump of dark rock rusted red, glinting where it broke, flecked with gold. -->
+  <ellipse cx="32" cy="56.5" rx="20" ry="3.2" fill="#000" fill-opacity="0.35"/>
+
+  <path d="M11 50 C8 41 13 31 22 28 C25 20 36 17 43 22 C52 23 57 33 54 42 C55 50 49 54 40 54 L18 54 C14 54 12 53 11 50 Z" fill="#57534e" stroke="#1c1917" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M12 49 C12 44 16 42 20 44 C26 48 34 48 42 45 C48 43 53 43 54.6 44 C54 50 49 54 40 54 L18 54 C14 54 12 53 12 49 Z" fill="#44403c"/>
+  <path d="M11 50 C8 41 13 31 22 28 C25 20 36 17 43 22 C52 23 57 33 54 42 C55 50 49 54 40 54 L18 54 C14 54 12 53 11 50 Z" fill="none" stroke="#1c1917" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M18 33 C22 30 27 31 28 36 C29 41 23 43 19 41 C16 39 15 35 18 33 Z" fill="#9a3412" fill-opacity="0.85"/>
+  <path d="M37 26 C42 24 47 27 47 32 C47 36 42 37 39 35 C36 33 35 28 37 26 Z" fill="#b45309" fill-opacity="0.75"/>
+  <path d="M33 41 C36 39 40 40 40 43 C40 46 36 47 34 45.5 C32.5 44.4 32 42 33 41 Z" fill="#9a3412" fill-opacity="0.7"/>
+  <path d="M30 28 L33 26 L35 29 L32 31 Z" fill="#cbd5e1" stroke="#1c1917" stroke-width="0.8"/>
+  <path d="M43 39 L46 37.5 L47 40.5 L44 41.5 Z" fill="#cbd5e1" stroke="#1c1917" stroke-width="0.8"/>
+  <circle cx="24" cy="46" r="1.3" fill="#c9a227"/><circle cx="27" cy="44.2" r="0.8" fill="#c9a227"/><circle cx="21.5" cy="44.5" r="0.7" fill="#c9a227"/>
+  <path d="M15 37 C16 32 19 30 22.5 29" fill="none" stroke="#e7e5e4" stroke-opacity="0.4" stroke-width="1" stroke-linecap="round"/>
+</svg>

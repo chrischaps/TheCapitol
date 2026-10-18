@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Stone Pickaxe: a flint crescent lashed across a haft in gold cord. -->
+  <ellipse cx="32" cy="56.5" rx="17" ry="3.2" fill="#000" fill-opacity="0.35"/>
+  <g transform="rotate(38 32 32)">
+
+    <rect x="29.5" y="7" width="5" height="49" rx="2" fill="#a0742c" stroke="#1b1206" stroke-width="1.5"/>
+    <rect x="32.2" y="9" width="1.6" height="45" fill="#8b5a2b"/>
+    <path d="M30.8 28 L30.8 50" stroke="#ffe7b0" stroke-opacity="0.4" stroke-width="1" stroke-linecap="round"/>
+    <ellipse cx="32" cy="56" rx="3.8" ry="2.4" fill="#6b4a1a" stroke="#1b1206" stroke-width="1.5"/>
+
+    <g stroke="#1c1917" stroke-width="1.5" stroke-linejoin="round">
+      <path d="M16 16 C22 8 42 8 48 16 L46.5 18.5 C40 12.5 24 12.5 17.5 18.5 Z" fill="#a8a29e"/>
+      <path d="M17.5 18.5 C24 12.5 40 12.5 46.5 18.5 L45 16.4 C39 11.6 25 11.6 19 16.4 Z" fill="#78716c" stroke="none"/>
+    </g>
+    <g fill="none" stroke="#57534e" stroke-width="1" stroke-linecap="round">
+      <path d="M21 12.5 L23 15"/><path d="M41 12.5 L39.5 15"/>
+    </g>
+    <path d="M18.5 14.2 C23 10 28 9.2 31 9.2" fill="none" stroke="#f5f5f4" stroke-opacity="0.55" stroke-width="1" stroke-linecap="round"/>
+
+    <rect x="28.2" y="9.5" width="7.6" height="7.5" rx="1.2" fill="#c9a227" stroke="#3d300a" stroke-width="1.2"/>
+    <path d="M28.6 13.2 L35.4 13.2" stroke="#3d300a" stroke-opacity="0.5" stroke-width="0.8"/>
+    <path d="M29.4 10.8 L34.6 10.8" stroke="#fde68a" stroke-opacity="0.6" stroke-width="0.9" stroke-linecap="round"/>
+  </g>
+</svg>

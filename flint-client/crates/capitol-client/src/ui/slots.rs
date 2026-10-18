@@ -131,7 +131,7 @@ pub fn know_catalog(ctx: &egui::Context, catalog: &Catalog) {
     ctx.data_mut(|d| d.insert_temp(Id::new("capitol_slot_catalog"), catalog.clone()));
 }
 
-fn catalog(ctx: &egui::Context) -> Option<Catalog> {
+pub(super) fn catalog(ctx: &egui::Context) -> Option<Catalog> {
     ctx.data(|d| d.get_temp(Id::new("capitol_slot_catalog")))
 }
 

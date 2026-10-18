@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Kiln Kit: a beehive kiln of brick, its mouth aglow, a gold hoop round it. -->
+  <ellipse cx="32" cy="56.5" rx="22" ry="3.2" fill="#000" fill-opacity="0.35"/>
+
+  <defs>
+    <radialGradient id="heat" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#f97316" stop-opacity="0.6"/>
+      <stop offset="1" stop-color="#f97316" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="dome"><path d="M12 54 L12 40 C12 22 20 11 32 11 C44 11 52 22 52 40 L52 54 Z"/></clipPath>
+  </defs>
+  <path d="M12 54 L12 40 C12 22 20 11 32 11 C44 11 52 22 52 40 L52 54 Z" fill="#9a4a2c"/>
+  <g clip-path="url(#dome)" fill="none" stroke="#6b3320" stroke-width="1">
+    <path d="M10 47 L54 47"/><path d="M10 33 C20 30 44 30 54 33"/><path d="M10 26 C22 21 42 21 54 26"/><path d="M14 19 C24 14 40 14 50 19"/>
+    <path d="M22 47 L22 54 M42 47 L42 54 M32 40 L32 47 M18 33 L18 40 M46 33 L46 40 M26 26 L26 31 M38 26 L38 31 M32 19 L32 23"/>
+  </g>
+  <path d="M12 40 L52 40" stroke="#c9a227" stroke-width="3"/>
+  <path d="M12 38.5 L52 38.5" stroke="#3d300a" stroke-width="0.8" stroke-opacity="0.6"/>
+  <path d="M12 54 L12 40 C12 22 20 11 32 11 C44 11 52 22 52 40 L52 54 Z" fill="none" stroke="#2a0f06" stroke-width="1.5" stroke-linejoin="round"/>
+  <rect x="28" y="6" width="8" height="6" rx="1" fill="#6b3320" stroke="#2a0f06" stroke-width="1.5"/>
+  <rect x="29.5" y="6.8" width="5" height="2" fill="#fbbf24"/>
+  <path d="M17 27 C19 20 24 15.5 29 13.8" fill="none" stroke="#f3c4a0" stroke-opacity="0.45" stroke-width="1.2" stroke-linecap="round"/>
+  <circle cx="32" cy="48" r="13" fill="url(#heat)"/>
+  <path d="M23 54 L23 48 C23 42 27 39 32 39 C37 39 41 42 41 48 L41 54 Z" fill="#f97316" stroke="#2a0f06" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M27 54 L27 50 C27 46.5 29 45 32 45 C35 45 37 46.5 37 50 L37 54 Z" fill="#fbbf24"/>
+</svg>

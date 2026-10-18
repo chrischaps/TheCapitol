@@ -1,0 +1,54 @@
+# The kiln's firing (E2.6): a slow column of smoke and a few sparks out of
+# the vent at its crown. The mouth's glow is the mesh's own (stations.rs).
+# Spawned on each kiln by `stations.rs` as a `particle_effect`; the
+# offsets are in the kiln model's own space, so `local_axes` turns them
+# with it. A cousin of `forge.particles.toml`, lazier: a kiln fires for
+# hours, where a forge roars.
+
+name = "kiln"
+
+[[emitters]]
+name = "sparks"
+emission_rate = 2.5
+max_particles = 24
+lifetime = [0.8, 1.8]
+speed = [0.5, 1.1]
+direction = [0, 1, 0]
+spread = 25.0
+gravity = [0, 0.4, 0]
+damping = 0.6
+blend_mode = "additive"
+shape_offset = [0, 1.66, -0.1]
+local_axes = true
+size = { start = [0.04, 0.04], end = [0.0, 0.0] }
+color = { start = [1.0, 0.65, 0.25, 1.0], end = [1.0, 0.2, 0.0, 0.0] }
+
+[emitters.shape]
+kind = "sphere"
+radius = 0.1
+
+[[emitters.forces]]
+kind = "noise"
+strength = 0.8
+frequency = 0.6
+speed = 0.5
+
+[[emitters]]
+name = "smoke"
+emission_rate = 4.0
+max_particles = 48
+lifetime = [3.0, 5.0]
+speed = [0.25, 0.5]
+direction = [0, 1, 0]
+spread = 10.0
+gravity = [0.12, 0.22, 0.04]
+damping = 0.3
+blend_mode = "alpha"
+shape_offset = [0, 1.7, -0.1]
+local_axes = true
+size = { keys = [ { t = 0.0, v = [0.16, 0.16] }, { t = 1.0, v = [0.8, 0.8] } ], interp = "smooth" }
+color = { keys = [ { t = 0.0, v = [0.34, 0.3, 0.3, 0.0] }, { t = 0.15, v = [0.34, 0.3, 0.3, 0.26] }, { t = 1.0, v = [0.44, 0.42, 0.44, 0.0] } ] }
+
+[emitters.shape]
+kind = "sphere"
+radius = 0.1

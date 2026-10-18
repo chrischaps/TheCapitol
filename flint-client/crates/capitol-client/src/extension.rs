@@ -82,6 +82,9 @@ pub struct CapitolExtension {
     houses: world::houses::Houses,
     /// `--claim-sample`: offline, claims to build houses on.
     claim_sample: Option<world::houses::Sample>,
+    /// Offline, one of every station, placed once the camera settles
+    /// (`--station-sample`).
+    station_sample: Option<Option<capitol_core::state::GameState>>,
     /// The grass fields over the rural ring and the wilderness (P8.6c).
     grass: world::grass::Grass,
     plot_panel: ui::plot::PlotPanel,
@@ -149,6 +152,7 @@ impl CapitolExtension {
             owned_drawn: None,
             houses: world::houses::Houses::default(),
             claim_sample: None,
+            station_sample: None,
             grass: world::grass::Grass::default(),
             plot_panel: ui::plot::PlotPanel::default(),
             atmosphere: Atmosphere::default(),
@@ -219,6 +223,15 @@ impl CapitolExtension {
     pub fn with_claim_sample(mut self, share: Option<f32>, grow_at: Option<f32>) -> Self {
         if self.session.is_none() && (share.is_some() || grow_at.is_some()) {
             self.claim_sample = Some(world::houses::Sample::new(share.unwrap_or(0.0), grow_at));
+        }
+        self
+    }
+
+    /// Offline, one of every station in a row before the camera
+    /// (`--station-sample`).
+    pub fn with_station_sample(mut self, on: bool) -> Self {
+        if self.session.is_none() && on {
+            self.station_sample = Some(None);
         }
         self
     }
@@ -468,6 +481,18 @@ impl PlayerExtension for CapitolExtension {
                 now,
                 dt,
             );
+        } else if let Some(sample) = &mut self.station_sample {
+            // Placed once the camera has settled on its shot.
+            if sample.is_none() && ctx.clock.total_time > 0.5 {
+                let (t, c) = (ctx.camera.target, ctx.camera.position);
+                *sample = Some(crate::stations::sample([t.x, t.z], [c.x, c.z]));
+            }
+            if let Some(state) = sample {
+                let none = std::collections::HashSet::new();
+                let dt = ctx.clock.delta_time.min(0.1) as f32;
+                self.stations
+                    .update(ctx, state, None, &none, dt, &self.shared);
+            }
         }
         self.shared
             .at_login
@@ -545,6 +570,9 @@ impl PlayerExtension for CapitolExtension {
         for name in world::houses::lamp_meshes() {
             set_emissive_scale(ctx.world, &name, lamps);
         }
+        // So do the fires in the forges and kilns.
+        self.stations
+            .fires(ctx.world, crate::stations::fire_light(glow));
         // The grass, cleared round every node the server has shown us.
         if let Some(session) = &self.session {
             let nodes = session.state().nodes().values();
