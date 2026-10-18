@@ -69,7 +69,7 @@ impl GameState {
     }
 
     /// A game on terrain already generated from `params`
-    fn with_terrain(params: WorldGenParams, terrain: TerrainConfig) -> Self {
+    pub(crate) fn with_terrain(params: WorldGenParams, terrain: TerrainConfig) -> Self {
         let (event_sender, _) = broadcast::channel(1024);
         let terrain_version = terrain.version();
         Self {

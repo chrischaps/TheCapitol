@@ -15,10 +15,11 @@
 //! again. A node that isn't in the way never moves, so on an unchanged
 //! terrain this does nothing.
 //!
-//! Standing on a lot doesn't put a node in the way. 27 of the 156 seeds stand
-//! on unclaimed lots in the default world (grass in a rural field, mostly),
-//! and whether a lot's owner gets the grass on it is still open (#102). A
-//! moved node does keep off lots, as the #62 migration's moves did.
+//! Standing on a lot doesn't put a node in the way. Some seeds stand on lots
+//! in the default world (grass in a rural field, mostly), and grass on a lot
+//! belongs to the lot: once claimed, only those the plot's `station_use_level`
+//! admits may gather it (`container_access::may_gather`, #102). A moved node
+//! does keep off lots, as the #62 migration's moves did.
 
 use std::collections::HashMap;
 
