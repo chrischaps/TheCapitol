@@ -1,134 +1,127 @@
-//! Static game data the server has no endpoint for yet: item types, station
-//! types, resource types and container types. Copied from the seed rows in
-//! `backend/migrations/` (m2 resources, m3 crafting, slot inventory, stations).
-//! When the backend grows endpoints for these, fetch them instead.
+//! The static game data: item, station, resource and container types, and
+//! recipes (E0.2).
 //!
-//! IDs and category strings are the wire values. The station-to-kit mapping
-//! lives in [`crate::protocol::rules`] because the backend uses it too.
+//! Online it's `GET /catalog`, fetched with every snapshot and again
+//! whenever `/health` reports a version the client doesn't have. The last
+//! answer is kept on disk per server ([`CatalogCache`]), so the game starts
+//! with the server's names before the first fetch lands. [`Catalog::fallback`]
+//! is a copy of the server's seed content, for `--offline` and for a server
+//! that hasn't answered yet and was never cached.
+//!
+//! The fallback is `catalog_fallback.json`, the same bytes as the protocol's
+//! fixture (`protocol/tests/fixtures/rest/catalog.json`); a test keeps them
+//! equal. Refresh both from a live server when the seed content changes.
+//!
+//! IDs and category strings are the wire values.
 
-/// An item type (`item_types`).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ItemType {
-    pub id: &'static str,
-    pub name: &'static str,
-    /// `raw_material`, `processed_material` or `placeable`
-    pub category: &'static str,
-    /// Stackable items merge into one slot; kits don't.
-    pub stackable: bool,
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+
+use capitol_protocol::rest::{
+    CatalogContainerType, CatalogItemType, CatalogResourceType, CatalogResponse,
+    CatalogStationType, RecipeInfo,
+};
+
+const FALLBACK_JSON: &str = include_str!("catalog_fallback.json");
+
+/// One server's static game data. Cheap to clone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Catalog {
+    data: Arc<CatalogResponse>,
 }
 
-pub const ITEM_TYPES: &[ItemType] = &[
-    ItemType {
-        id: "fiber",
-        name: "Plant Fiber",
-        category: "raw_material",
-        stackable: true,
-    },
-    ItemType {
-        id: "rope",
-        name: "Rope",
-        category: "processed_material",
-        stackable: true,
-    },
-    ItemType {
-        id: "workbench_kit",
-        name: "Workbench Kit",
-        category: "placeable",
-        stackable: false,
-    },
-    ItemType {
-        id: "forge_kit",
-        name: "Forge Kit",
-        category: "placeable",
-        stackable: false,
-    },
-    ItemType {
-        id: "chest_kit",
-        name: "Storage Chest Kit",
-        category: "placeable",
-        stackable: false,
-    },
-];
-
-pub fn item_type(id: &str) -> Option<&'static ItemType> {
-    ITEM_TYPES.iter().find(|t| t.id == id)
+impl Default for Catalog {
+    fn default() -> Self {
+        Self::fallback()
+    }
 }
 
-/// A station type (`station_types`).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct StationType {
-    pub id: &'static str,
-    pub name: &'static str,
-    /// `crafting` or `storage`
-    pub category: &'static str,
-    pub slot_count: i32,
-    pub layout_columns: i32,
-    pub icon: &'static str,
-    pub description: &'static str,
-    /// Every seeded type uses the column default, 75.
-    pub interaction_range: f32,
+impl Catalog {
+    pub fn new(data: CatalogResponse) -> Self {
+        Self {
+            data: Arc::new(data),
+        }
+    }
+
+    /// The seed content the client was built with.
+    pub fn fallback() -> Self {
+        static FALLBACK: OnceLock<Catalog> = OnceLock::new();
+        FALLBACK
+            .get_or_init(|| {
+                Catalog::new(
+                    serde_json::from_str(FALLBACK_JSON).expect("catalog_fallback.json parses"),
+                )
+            })
+            .clone()
+    }
+
+    /// The server's hash of this content.
+    pub fn version(&self) -> &str {
+        &self.data.version
+    }
+
+    pub fn data(&self) -> &CatalogResponse {
+        &self.data
+    }
+
+    pub fn item_types(&self) -> &[CatalogItemType] {
+        &self.data.item_types
+    }
+
+    pub fn item_type(&self, id: &str) -> Option<&CatalogItemType> {
+        self.data.item_types.iter().find(|t| t.id == id)
+    }
+
+    /// The item's display name. One the catalog doesn't know is named from
+    /// its id, `lantern_oil` as "Lantern Oil", rather than shown as a blank.
+    pub fn item_name(&self, id: &str) -> String {
+        match self.item_type(id) {
+            Some(t) => t.name.clone(),
+            None => title_case(id),
+        }
+    }
+
+    pub fn station_types(&self) -> &[CatalogStationType] {
+        &self.data.station_types
+    }
+
+    pub fn station_type(&self, id: &str) -> Option<&CatalogStationType> {
+        self.data.station_types.iter().find(|t| t.id == id)
+    }
+
+    pub fn resource_types(&self) -> &[CatalogResourceType] {
+        &self.data.resource_types
+    }
+
+    pub fn resource_type(&self, id: &str) -> Option<&CatalogResourceType> {
+        self.data.resource_types.iter().find(|t| t.id == id)
+    }
+
+    pub fn container_type(&self, id: &str) -> Option<&CatalogContainerType> {
+        self.data.container_types.iter().find(|t| t.id == id)
+    }
+
+    /// Every recipe, hand and station alike.
+    pub fn recipes(&self) -> &[RecipeInfo] {
+        &self.data.recipes
+    }
 }
 
-pub const STATION_TYPES: &[StationType] = &[
-    StationType {
-        id: "workbench",
-        name: "Workbench",
-        category: "crafting",
-        slot_count: 16,
-        layout_columns: 4,
-        icon: "workbench",
-        description: "Craft wooden items and tools",
-        interaction_range: 75.0,
-    },
-    StationType {
-        id: "forge",
-        name: "Forge",
-        category: "crafting",
-        slot_count: 12,
-        layout_columns: 4,
-        icon: "forge",
-        description: "Smelt ores and craft metal equipment",
-        interaction_range: 75.0,
-    },
-    StationType {
-        id: "storage_chest",
-        name: "Storage Chest",
-        category: "storage",
-        slot_count: 16,
-        layout_columns: 4,
-        icon: "chest",
-        description: "Store items safely",
-        interaction_range: 75.0,
-    },
-];
-
-pub fn station_type(id: &str) -> Option<&'static StationType> {
-    STATION_TYPES.iter().find(|t| t.id == id)
-}
-
-/// A resource type (`resource_types`): what a node yields and how fast.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ResourceType {
-    pub id: &'static str,
-    pub name: &'static str,
-    /// The item type an extraction yields.
-    pub yields_item: &'static str,
-    pub yield_quantity: (i32, i32),
-    pub extraction_duration_ticks: u32,
-    pub regeneration_ticks: u32,
-}
-
-pub const RESOURCE_TYPES: &[ResourceType] = &[ResourceType {
-    id: "grass",
-    name: "Wild Grass",
-    yields_item: "fiber",
-    yield_quantity: (1, 3),
-    extraction_duration_ticks: 30,
-    regeneration_ticks: 600,
-}];
-
-pub fn resource_type(id: &str) -> Option<&'static ResourceType> {
-    RESOURCE_TYPES.iter().find(|t| t.id == id)
+/// `snake_case` as "Snake Case".
+fn title_case(id: &str) -> String {
+    id.split('_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Container type IDs (`container_types`). `/inventory/containers` returns one
@@ -140,25 +133,125 @@ pub mod container_type {
     pub const STATION_INVENTORY: &str = "station_inventory";
 }
 
+/// One server's last `/catalog` on disk, beside its terrain.
+#[derive(Debug, Clone)]
+pub struct CatalogCache {
+    path: PathBuf,
+}
+
+impl CatalogCache {
+    /// The cache for the server at `base_url`, as a file in `dir`.
+    pub fn new(dir: impl Into<PathBuf>, base_url: &str) -> Self {
+        Self {
+            path: crate::terrain::server_file(dir.into(), "catalog", base_url),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The cached catalog. A missing file is `None`; so is an unreadable
+    /// one, which is logged and then replaced by the next store.
+    pub fn load(&self) -> Option<Catalog> {
+        let read = || -> io::Result<CatalogResponse> {
+            let bytes = fs::read(&self.path)?;
+            serde_json::from_slice(&bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        };
+        match read() {
+            Ok(data) => Some(Catalog::new(data)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => {
+                tracing::warn!(
+                    "catalog cache {} unreadable, ignoring it: {e}",
+                    self.path.display()
+                );
+                None
+            }
+        }
+    }
+
+    /// Writes `catalog` through a temporary file and a rename.
+    pub fn store(&self, catalog: &Catalog) -> io::Result<()> {
+        if let Some(dir) = self.path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let bytes = serde_json::to_vec(catalog.data()).map_err(io::Error::other)?;
+        let tmp = self.path.with_extension("json.tmp");
+        fs::write(&tmp, bytes)?;
+        fs::rename(&tmp, &self.path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::rules;
 
     #[test]
+    fn the_fallback_is_the_protocol_fixture() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../protocol/tests/fixtures/rest/catalog.json");
+        let fixture = fs::read_to_string(&fixture).expect("the protocol's catalog fixture");
+        assert_eq!(FALLBACK_JSON.trim_end(), fixture.trim_end());
+    }
+
+    #[test]
     fn every_kit_places_a_known_station() {
-        for item in ITEM_TYPES.iter().filter(|t| t.category == "placeable") {
-            let station = rules::station_type_for_kit(item.id).expect(item.id);
-            assert!(station_type(station).is_some(), "{station}");
+        let catalog = Catalog::fallback();
+        let placeable = catalog
+            .item_types()
+            .iter()
+            .filter(|t| t.category == "placeable");
+        for item in placeable {
+            let station = rules::station_type_for_kit(&item.id).expect(&item.id);
+            let kind = catalog.station_type(station).expect(station);
+            assert_eq!(kind.kit.as_deref(), Some(item.id.as_str()));
             assert!(!item.stackable);
         }
     }
 
     #[test]
-    fn resources_yield_known_items() {
-        for resource in RESOURCE_TYPES {
-            assert!(item_type(resource.yields_item).is_some());
+    fn resources_and_recipes_name_known_items() {
+        let catalog = Catalog::fallback();
+        for resource in catalog.resource_types() {
+            assert!(catalog.item_type(&resource.yields_item).is_some());
         }
-        assert_eq!(resource_type("grass").unwrap().name, "Wild Grass");
+        for recipe in catalog.recipes() {
+            for item in recipe.inputs.iter().map(|i| &i.item_type) {
+                assert!(catalog.item_type(item).is_some(), "{item}");
+            }
+            for item in recipe.outputs.iter().map(|o| &o.item_type) {
+                assert!(catalog.item_type(item).is_some(), "{item}");
+            }
+        }
+        assert_eq!(catalog.resource_type("grass").unwrap().name, "Wild Grass");
+        assert!(catalog
+            .container_type(container_type::CRAFTING_OUTPUT)
+            .is_some());
+    }
+
+    #[test]
+    fn an_unknown_item_is_named_from_its_id() {
+        let catalog = Catalog::fallback();
+        assert_eq!(catalog.item_name("fiber"), "Plant Fiber");
+        assert_eq!(catalog.item_name("lantern_oil"), "Lantern Oil");
+    }
+
+    #[test]
+    fn the_cache_round_trips_and_ignores_junk() {
+        let dir = std::env::temp_dir().join(format!("capitol-catalog-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let cache = CatalogCache::new(&dir, "http://localhost:3000");
+        assert!(cache.path().ends_with("catalog-localhost_3000.json"));
+        assert_eq!(cache.load(), None);
+        let mut data = Catalog::fallback().data().clone();
+        data.version = "abc".into();
+        cache.store(&Catalog::new(data.clone())).unwrap();
+        assert_eq!(cache.load().unwrap().data(), &data);
+        fs::write(cache.path(), b"{ not json").unwrap();
+        assert_eq!(cache.load(), None);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -4,7 +4,8 @@ use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
 use capitol_protocol::rest::{
-    AccountInfo, AuthResponse, Bounds, ClaimPlotResponse, ClaimedPlot, ContainerResponse, ContainersResponse,
+    AccountInfo, AuthResponse, Bounds, CatalogContainerType, CatalogItemType, CatalogResourceType,
+    CatalogResponse, CatalogStationType, ClaimPlotResponse, ClaimedPlot, ContainerResponse, ContainersResponse,
     CurrencyResponse, DeedPrice, DeedPricesResponse, DepositRequest, DepositResponse,
     ExtractRequest, ExtractResponse, HealthResponse, InventoryItem, InventoryResponse,
     ListPlotsResponse, LoginRequest, LogoutRequest, MoveItemRequest, MoveItemResponse,
@@ -57,6 +58,7 @@ then include it in the `Authorization: Bearer <token>` header.",
         (name = "World", description = "World state, resource nodes, and extraction"),
         (name = "Inventory", description = "Container and item management"),
         (name = "Recipes", description = "Crafting recipe information"),
+        (name = "Catalog", description = "Static game data: item, station, resource and container types, and recipes"),
         (name = "Stations", description = "Crafting and storage stations"),
         (name = "Exchange", description = "Currency exchange operations"),
         (name = "Plots", description = "Land plot ownership and permissions"),
@@ -70,6 +72,8 @@ then include it in the `Authorization: Bearer <token>` header.",
         crate::routes::auth::logout,
         // Health
         crate::routes::health::health_check,
+        // Catalog
+        crate::routes::catalog::get_catalog,
         // Player
         crate::routes::player::get_me,
         crate::routes::player::move_player,
@@ -134,6 +138,11 @@ then include it in the `Authorization: Bearer <token>` header.",
         MoveItemResponse,
         // Recipes
         RecipesResponse,
+        CatalogResponse,
+        CatalogItemType,
+        CatalogStationType,
+        CatalogResourceType,
+        CatalogContainerType,
         RecipeInfo,
         RecipeInputInfo,
         RecipeOutputInfo,

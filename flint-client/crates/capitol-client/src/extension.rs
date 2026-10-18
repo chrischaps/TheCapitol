@@ -398,8 +398,12 @@ impl PlayerExtension for CapitolExtension {
             let made = crafted(ctx, session, &self.shared, &mut self.sound);
             // The hints follow whoever is signed in (nobody, signed out).
             let state = session.state();
-            self.hints
-                .follow(session.server(), state.me(), state.inventory());
+            self.hints.follow(
+                session.server(),
+                state.me(),
+                state.inventory(),
+                state.catalog(),
+            );
             if session.destination().is_some() {
                 self.hints.saw(Did::Walked);
             }

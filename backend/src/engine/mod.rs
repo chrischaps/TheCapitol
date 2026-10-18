@@ -1,3 +1,4 @@
+pub mod catalog;
 mod commands;
 pub mod container_access;
 mod craft_completion;

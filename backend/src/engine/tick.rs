@@ -12,9 +12,10 @@ use super::extraction::{cancel_extraction, process_extractions, start_extraction
 use super::movement::process_movement;
 use super::regeneration::process_regeneration;
 use super::trading::{TradeManager, TRADE_RANGE};
-use crate::models::{ActionState, Item, ItemType, PlayerPosition, PlayerState, Recipe, ResourceNodeState, ResourceType, StationState, StationType, TerrainConfig, WorldGenParams};
+use crate::models::{ActionState, ContainerType, Item, ItemType, PlayerPosition, PlayerState, Recipe, ResourceNodeState, ResourceType, StationState, StationType, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
 
+use capitol_protocol::rest::CatalogResponse;
 use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
 
 /// The WebSocket connection currently serving a player
@@ -34,6 +35,10 @@ pub struct GameState {
     pub resource_types: HashMap<String, ResourceType>,
     pub recipes: HashMap<String, Recipe>,
     pub item_types: HashMap<String, ItemType>,
+    pub container_types: HashMap<String, ContainerType>,
+    /// `/catalog`'s answer for the static tables above, built by
+    /// [`GameState::refresh_catalog`] once they're loaded
+    pub catalog: Arc<CatalogResponse>,
     pub crafting_operations: HashMap<Uuid, CraftingOperation>,
     pub pending_craft_items: HashMap<Uuid, Vec<Item>>, // player_id -> validated items for crafting
     pub command_queue: Vec<Command>,
@@ -76,6 +81,15 @@ impl GameState {
             resource_types: HashMap::new(),
             recipes: HashMap::new(),
             item_types: HashMap::new(),
+            container_types: HashMap::new(),
+            catalog: Arc::new(CatalogResponse {
+                version: String::new(),
+                item_types: Vec::new(),
+                station_types: Vec::new(),
+                resource_types: Vec::new(),
+                container_types: Vec::new(),
+                recipes: Vec::new(),
+            }),
             crafting_operations: HashMap::new(),
             pending_craft_items: HashMap::new(),
             command_queue: Vec::new(),
@@ -92,6 +106,12 @@ impl GameState {
             last_tps: 0.0,
             uptime_seconds: 0.0,
         }
+    }
+
+    /// Rebuild `/catalog`'s answer from the static tables. Call it after
+    /// loading or changing them.
+    pub fn refresh_catalog(&mut self) {
+        self.catalog = Arc::new(super::catalog::build(self));
     }
 
     /// Replace the terrain, and its version with it

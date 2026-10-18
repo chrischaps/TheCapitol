@@ -23,7 +23,7 @@ mod state;
 mod ws;
 
 use config::Config;
-use models::{ItemType, Recipe, RecipeRow, ResourceNode, ResourceNodeState, ResourceType, Station, StationState, StationType};
+use models::{ContainerType, ItemType, Recipe, RecipeRow, ResourceNode, ResourceNodeState, ResourceType, Station, StationState, StationType};
 use state::AppState;
 
 #[tokio::main]
@@ -214,6 +214,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Load container types into game state
+    let container_types: Vec<ContainerType> = sqlx::query_as(
+        "SELECT id, name, slot_count, layout_columns FROM container_types"
+    )
+    .fetch_all(&db_pool)
+    .await?;
+
+    {
+        let mut game = game_state.write().await;
+        for ct in container_types {
+            game.container_types.insert(ct.id.clone(), ct);
+        }
+        // Every static table is in: build what `/catalog` serves (E0.2)
+        game.refresh_catalog();
+        tracing::info!("Catalog version {}", game.catalog.version);
+    }
+
     // Load stations into game state
     let stations: Vec<Station> = sqlx::query_as(
         "SELECT id, station_type, owner_id, position_x, position_y, plot_id, placed_at FROM stations"
@@ -264,6 +281,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest("/player", routes::player::router(app_state.clone()))
         .nest("/world", routes::world::router(app_state.clone()))
         .nest("/recipes", routes::recipes::router(app_state.clone()))
+        .route("/catalog", get(routes::catalog::get_catalog))
         .nest("/inventory", routes::inventory::router(app_state.clone()))
         .nest("/stations", routes::stations::router(app_state.clone()))
         .nest("/exchange", routes::exchange::router(app_state.clone()))

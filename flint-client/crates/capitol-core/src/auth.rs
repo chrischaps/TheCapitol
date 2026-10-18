@@ -699,6 +699,7 @@ mod tests {
             database: "ok".into(),
             redis: "ok".into(),
             server_time_ms: 0,
+            catalog_version: None,
         };
         auth.observe(&NetEvent::Rest(TAG + 1, Ok(RestResponse::Health(health))));
         assert_eq!(auth.reachable(), Some(true));

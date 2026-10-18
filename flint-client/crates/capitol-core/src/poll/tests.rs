@@ -184,7 +184,9 @@ fn answer_for(fetch: Fetch) -> RestResponse {
             plots: vec![],
             total: 0,
         }),
-        Fetch::Recipes => RestResponse::Recipes(RecipesResponse { recipes: vec![] }),
+        Fetch::Catalog => {
+            RestResponse::Catalog(Box::new(crate::catalog::Catalog::fallback().data().clone()))
+        }
         Fetch::ClaimedPlots => RestResponse::ClaimedPlots(vec![]),
         Fetch::Terrain => panic!("terrain is answered by hand in its test"),
     }
@@ -888,9 +890,9 @@ fn an_answer_from_before_a_drop_still_resolves() {
 #[test]
 fn manual_requests_go_out_on_the_next_tick() {
     let mut rig = Rig::settled();
-    rig.poller.request(Fetch::Recipes);
-    rig.poller.request(Fetch::Recipes);
-    assert_eq!(rig.tick_fetches(), vec![Fetch::Recipes]);
+    rig.poller.request(Fetch::Catalog);
+    rig.poller.request(Fetch::Catalog);
+    assert_eq!(rig.tick_fetches(), vec![Fetch::Catalog]);
 }
 
 #[test]
@@ -919,4 +921,28 @@ fn a_claim_while_the_list_is_out_asks_for_it_again() {
     rig.feed(NetEvent::Ws(plot_claimed(OTHER)));
     assert_eq!(rig.answer(tag), Some(Fetch::ClaimedPlots));
     assert_eq!(rig.tick_fetches(), vec![Fetch::ClaimedPlots]);
+}
+
+fn health(catalog_version: Option<&str>) -> NetEvent {
+    NetEvent::Rest(
+        1,
+        Ok(RestResponse::Health(HealthResponse {
+            status: "healthy".into(),
+            database: "healthy".into(),
+            redis: "healthy".into(),
+            server_time_ms: 0,
+            catalog_version: catalog_version.map(str::to_owned),
+        })),
+    )
+}
+
+#[test]
+fn health_with_a_new_catalog_version_refetches_the_catalog() {
+    let mut rig = Rig::settled();
+    let current = rig.state.catalog().version().to_owned();
+    rig.feed(health(Some(&current)));
+    rig.feed(health(None)); // an older server
+    assert_eq!(rig.tick_fetches(), vec![]);
+    rig.feed(health(Some("0123456789abcdef")));
+    assert_eq!(rig.tick_fetches(), vec![Fetch::Catalog]);
 }

@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use capitol_core::auth::{Auth, Effect, Phase, Remembered};
+use capitol_core::catalog::{Catalog, CatalogCache};
 use capitol_core::craft::{self, Crafting};
 use capitol_core::exchange::{Asked, DepositQuote, Receipt, WithdrawQuote};
 use capitol_core::harvest::{Harvest, Note, Step};
@@ -40,7 +41,7 @@ use capitol_core::trading::{self, Approach, Draft};
 use flint_runtime::PersistentStore;
 use uuid::Uuid;
 
-use crate::terrain::TerrainSource;
+use crate::terrain::{TerrainSource, CACHE_DIR};
 use crate::ui::slots::Move;
 
 /// The auth machine's tags: sign-in, then health, then logout. Below
@@ -60,6 +61,11 @@ const PAY_TAX_TAG: Tag = 32;
 /// The tag on the exchange panel's deposits and withdrawals (P7.2). The
 /// poller refetches the containers and the balance on either answer.
 const EXCHANGE_TAG: Tag = 40;
+
+/// The tag on the login screen's `/catalog`, asked for when `/health`
+/// reports a version the client doesn't have (E0.2). In the world the
+/// poller fetches it instead.
+const CATALOG_TAG: Tag = 50;
 
 /// How long the exchange's receipt stays up.
 const RECEIPT_FOR: Duration = Duration::from_secs(6);
@@ -124,6 +130,8 @@ pub struct Session {
     exchange_refused: Option<(String, Instant)>,
     /// What the last one did, and when.
     receipt: Option<(Receipt, Instant)>,
+    /// The login screen's `/catalog` is out.
+    catalog_asked: bool,
     /// Placing a station from a kit (P6.2), while it lasts.
     placing: Option<Placing>,
     /// What placing has to tell the player since the extension last took it.
@@ -225,11 +233,26 @@ impl Session {
             tracing::info!("session: returning to {server} with the stored token");
         }
         let (auth, effects) = Auth::new(remembered, AUTH_TAG);
+        // The server's names and slot counts from last time, until `/catalog`
+        // answers with the snapshot (E0.2). With no cache, the built-in seed copy.
+        let mut state = GameState::new();
+        let cache = CatalogCache::new(CACHE_DIR, server);
+        match cache.load() {
+            Some(catalog) => {
+                tracing::info!(
+                    "catalog: read cache {} (version {})",
+                    cache.path().display(),
+                    catalog.version()
+                );
+                state.set_catalog(catalog);
+            }
+            None => tracing::info!("catalog: no cache yet; using the built-in copy"),
+        }
         let mut session = Session {
             server: server.to_owned(),
             net,
             auth,
-            state: GameState::new(),
+            state,
             poller: Poller::new(),
             motion: Motion::new(),
             link: Link::default(),
@@ -254,6 +277,7 @@ impl Session {
             exchanging: None,
             exchange_refused: None,
             receipt: None,
+            catalog_asked: false,
             placing: None,
             placing_notes: Vec::new(),
             visit: Visit::default(),
@@ -1013,6 +1037,7 @@ impl Session {
             terrain.observe(event, now);
             let effects = self.auth.observe(event);
             self.apply(effects);
+            self.refresh_catalog(event);
             if !self.in_session() {
                 self.reset_world();
                 continue;
@@ -1152,6 +1177,7 @@ impl Session {
                         self.yields.push((*node_id, item.clone()));
                     }
                     StateEvent::CraftingCompleted { item } => self.crafted.push(item.clone()),
+                    StateEvent::CatalogUpdated => self.cache_catalog(),
                     StateEvent::StationPlaced { station_id, .. } => {
                         self.placed.insert(*station_id);
                     }
@@ -1220,6 +1246,55 @@ impl Session {
         }
     }
 
+    /// Before sign-in the store is idle, so the login screen's `/health`
+    /// asks for a newer catalog here, and its answer is kept. Once in the
+    /// world, the store and the poller do both.
+    fn refresh_catalog(&mut self, event: &NetEvent) {
+        let NetEvent::Rest(tag, result) = event else {
+            return;
+        };
+        match result {
+            Ok(RestResponse::Health(health)) if !self.in_session() && !self.catalog_asked => {
+                let current = self.state.catalog().version();
+                if health
+                    .catalog_version
+                    .as_deref()
+                    .is_some_and(|v| v != current)
+                {
+                    self.net.rest(RestRequest::Catalog, CATALOG_TAG);
+                    self.catalog_asked = true;
+                }
+            }
+            Ok(RestResponse::Catalog(catalog)) if *tag == CATALOG_TAG => {
+                self.catalog_asked = false;
+                // In the world the store takes it, and caches it, by itself.
+                if !self.in_session() {
+                    self.state.set_catalog(Catalog::new((**catalog).clone()));
+                    self.cache_catalog();
+                }
+            }
+            Err(e) if *tag == CATALOG_TAG => {
+                tracing::warn!("catalog: fetch failed ({e}); the next health check asks again");
+                self.catalog_asked = false;
+            }
+            _ => {}
+        }
+    }
+
+    /// Keeps the catalog just fetched for the next start.
+    fn cache_catalog(&self) {
+        let cache = CatalogCache::new(CACHE_DIR, &self.server);
+        let catalog = self.state.catalog();
+        match cache.store(catalog) {
+            Ok(()) => tracing::info!(
+                "catalog: version {} cached at {}",
+                catalog.version(),
+                cache.path().display()
+            ),
+            Err(e) => tracing::warn!("catalog: couldn't write {}: {e}", cache.path().display()),
+        }
+    }
+
     /// Between a sign-in and a sign-out: the store's events are this player's.
     fn in_session(&self) -> bool {
         matches!(self.auth.phase(), Phase::Entering { .. } | Phase::InWorld)
@@ -1227,7 +1302,10 @@ impl Session {
 
     fn reset_world(&mut self) {
         if std::mem::take(&mut self.used) {
+            // The catalog is the server's, not the player's: it outlives a sign-out.
+            let catalog = self.state.catalog().clone();
             self.state = GameState::new();
+            self.state.set_catalog(catalog);
             self.poller = Poller::new();
             self.motion = Motion::new();
             self.last_move = None;

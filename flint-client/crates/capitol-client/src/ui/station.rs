@@ -131,7 +131,7 @@ impl StationPanel {
                     let storage = view
                         .state
                         .open_station()
-                        .is_some_and(|o| station::is_storage(&o.station_type));
+                        .is_some_and(|o| station::is_storage(view.state.catalog(), &o.station_type));
                     ui.set_width(if storage {
                         BOX_WIDTH
                     } else {
@@ -152,7 +152,7 @@ impl StationPanel {
     ) -> Option<Action> {
         let state = view.state;
         let open = state.open_station()?;
-        let storage = station::is_storage(&open.station_type);
+        let storage = station::is_storage(state.catalog(), &open.station_type);
         let running = crafting.is_some();
         let mut action = None;
 

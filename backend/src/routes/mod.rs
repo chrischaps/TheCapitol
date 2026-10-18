@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod auth;
 pub mod bureaucracy;
+pub mod catalog;
 pub mod exchange;
 pub mod health;
 pub mod inventory;

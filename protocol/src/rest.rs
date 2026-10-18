@@ -1,7 +1,7 @@
 //! Request and response bodies for the REST API, grouped by route.
 //!
 //! Paths are relative to the server root (`http://localhost:3000` locally).
-//! Endpoints other than auth, health, terrain and bureaucracy need an
+//! Endpoints other than auth, health, terrain, catalog and bureaucracy need an
 //! `Authorization: Bearer <token>` header.
 
 use chrono::{DateTime, Utc};
@@ -101,6 +101,11 @@ pub struct HealthResponse {
     pub redis: String,
     /// The server's clock, in Unix milliseconds, for `rules::time_of_day`
     pub server_time_ms: i64,
+    /// The `version` `GET /catalog` answers with now, so a client can tell
+    /// its copy is stale without fetching it (E0.2). Absent from a server
+    /// older than the catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_version: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +406,84 @@ pub struct RecipeOutputInfo {
     pub quantity_min: i32,
     /// Maximum output quantity
     pub quantity_max: i32,
+}
+
+// ---------------------------------------------------------------------------
+// /catalog
+// ---------------------------------------------------------------------------
+
+/// `GET /catalog` (no auth): the static game data, as the server loaded it at
+/// startup. Every list is sorted by `id`, so the same content always gives
+/// the same bytes and the same `version`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CatalogResponse {
+    /// A hash of everything below. It changes exactly when the content does,
+    /// and `GET /health` reports it as `catalog_version`.
+    pub version: String,
+    pub item_types: Vec<CatalogItemType>,
+    pub station_types: Vec<CatalogStationType>,
+    pub resource_types: Vec<CatalogResourceType>,
+    pub container_types: Vec<CatalogContainerType>,
+    /// Every recipe, hand and station alike.
+    pub recipes: Vec<RecipeInfo>,
+}
+
+/// An item type (`item_types`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CatalogItemType {
+    pub id: String,
+    pub name: String,
+    /// `raw_material`, `processed_material` or `placeable`
+    pub category: String,
+    /// Stackable items merge into one slot; kits don't.
+    pub stackable: bool,
+    pub weight: f32,
+}
+
+/// A station type (`station_types`), with the kit that places it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CatalogStationType {
+    pub id: String,
+    pub name: String,
+    /// `crafting` or `storage`
+    pub category: String,
+    pub slot_count: i32,
+    pub layout_columns: i32,
+    pub interaction_range: f32,
+    pub icon: Option<String>,
+    pub description: Option<String>,
+    /// The item type a placement consumes (`rules::station_kit_item`).
+    pub kit: Option<String>,
+}
+
+/// A resource type (`resource_types`): what a node yields and how fast.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CatalogResourceType {
+    pub id: String,
+    pub name: String,
+    /// The item type an extraction yields
+    pub yields_item: String,
+    pub yield_quantity_min: i32,
+    pub yield_quantity_max: i32,
+    pub base_quality_min: i32,
+    pub base_quality_max: i32,
+    pub required_tool: Option<String>,
+    pub extraction_duration_ticks: i32,
+    pub regeneration_ticks: i32,
+}
+
+/// A container type (`container_types`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CatalogContainerType {
+    pub id: String,
+    pub name: String,
+    pub slot_count: i32,
+    pub layout_columns: i32,
 }
 
 // ---------------------------------------------------------------------------

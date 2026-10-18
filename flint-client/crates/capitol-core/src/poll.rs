@@ -25,7 +25,7 @@
 //!
 //! | Trigger | Fetch |
 //! |---|---|
-//! | first `Connected`, every `Resync` | me (name, position, currency), containers, nearby nodes, nearby stations, plots, recipes, everyone's claimed lots |
+//! | first `Connected`, every `Resync` | me (name, position, currency), containers, nearby nodes, nearby stations, plots, the catalog (recipes among it), everyone's claimed lots |
 //! | every 5 s while connected | nearby nodes, nearby stations, plots, currency |
 //! | `inventory_updated` (mine, or a container I hold) | containers, or the open station's container |
 //! | `station_opened` (mine) | that station's container |
@@ -38,6 +38,7 @@
 //! | `plot_claimed` (mine, not yet in my plots) | plots |
 //! | `plot_claimed` or `plot_released` while the claimed lots are in flight | claimed lots, again |
 //! | `terrain_updated` | terrain |
+//! | `/health` reports a catalog version the store doesn't have | the catalog |
 //!
 //! **Plots are your own** (`/plots?owner=<you>`, P6.4), as React lists
 //! them since B7: placement tests against them and the map edges them in
@@ -96,8 +97,8 @@ pub enum Fetch {
     Currency,
     /// `GET /plots?owner=<you>&limit=100`
     Plots,
-    /// `GET /recipes`
-    Recipes,
+    /// `GET /catalog`: the static game data, recipes among it (E0.2)
+    Catalog,
     /// `GET /plots/claimed`
     ClaimedPlots,
     /// `GET /terrain`
@@ -113,7 +114,7 @@ impl Fetch {
         Fetch::NearbyNodes,
         Fetch::NearbyStations,
         Fetch::Plots,
-        Fetch::Recipes,
+        Fetch::Catalog,
         Fetch::ClaimedPlots,
     ];
 
@@ -145,7 +146,7 @@ impl Fetch {
                 limit: Some(PLOT_LIMIT),
                 ..Default::default()
             }),
-            Fetch::Recipes => RestRequest::Recipes,
+            Fetch::Catalog => RestRequest::Catalog,
             Fetch::ClaimedPlots => RestRequest::ClaimedPlots,
             // `terrain_updated` means it changed, so there's nothing to revalidate.
             Fetch::Terrain => RestRequest::Terrain {
@@ -315,6 +316,7 @@ impl Poller {
             // The first zone (`from: None`) arrives with the snapshot, which fetches plots.
             StateEvent::ZoneChanged { from: Some(_), .. } => self.request(Fetch::Plots),
             StateEvent::TerrainUpdated => self.request(Fetch::Terrain),
+            StateEvent::CatalogStale => self.request(Fetch::Catalog),
             // A claim of yours we didn't make through this client's REST
             // (another client, say). A release of yours the store applies itself.
             StateEvent::LotClaimed(lot)

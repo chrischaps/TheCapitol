@@ -74,6 +74,39 @@ fn rest(net: &Net, request: RestRequest, tag: Tag) -> Result<RestResponse, RestE
 
 #[test]
 #[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn the_catalog_is_public_and_health_names_its_version() {
+    let _server = shared();
+    let net = net();
+    let catalog = match rest(&net, RestRequest::Catalog, 1) {
+        Ok(RestResponse::Catalog(catalog)) => catalog,
+        other => panic!("/catalog: {other:?}"),
+    };
+    assert_eq!(catalog.version.len(), 16);
+    assert!(catalog.item_types.iter().any(|t| t.id == "fiber"));
+    assert!(catalog.recipes.iter().any(|r| r.id == "rope_basic"));
+    let health = match rest(&net, RestRequest::Health, 2) {
+        Ok(RestResponse::Health(health)) => health,
+        other => panic!("/health: {other:?}"),
+    };
+    assert_eq!(
+        health.catalog_version.as_deref(),
+        Some(catalog.version.as_str())
+    );
+
+    // The store takes it whole, and a matching health asks for nothing more.
+    let mut state = GameState::new();
+    let changes = state.apply(&NetEvent::Rest(
+        1,
+        Ok(RestResponse::Catalog(catalog.clone())),
+    ));
+    assert!(changes.contains(&StateEvent::CatalogUpdated));
+    assert_eq!(state.catalog().data(), &*catalog);
+    let changes = state.apply(&NetEvent::Rest(2, Ok(RestResponse::Health(health))));
+    assert!(!changes.contains(&StateEvent::CatalogStale));
+}
+
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
 fn terrain_is_fetched_gzipped_then_revalidated() {
     let _server = shared();
     let net = net();
@@ -691,7 +724,9 @@ fn trade_refusals_come_back_as_errors() {
     // Ada and Brin open a trade.
     ada.pump_until("Brin in the world", |s, _| s.player(brin_id).is_some());
     ada.act(|s, now| s.trade_initiate(now, brin_id));
-    brin.pump_until("Ada's request", |s, _| matches!(s.trade(), Trade::Incoming { .. }));
+    brin.pump_until("Ada's request", |s, _| {
+        matches!(s.trade(), Trade::Incoming { .. })
+    });
     brin.act(|s, now| s.trade_accept_request(now));
     ada.pump_until("the trade to open", |s, _| s.open_trade().is_some());
 

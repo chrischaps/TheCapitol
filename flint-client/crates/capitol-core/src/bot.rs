@@ -30,7 +30,7 @@ use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
 
-use crate::catalog::{self, container_type};
+use crate::catalog::container_type;
 use crate::net::{
     ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
 };
@@ -447,7 +447,10 @@ impl Bot {
                         .is_none_or(|at| at.elapsed() > REFUSAL_MEMORY)
             })
             .filter(|n| {
-                catalog::resource_type(&n.resource_type).is_some_and(|t| t.yields_item == item_type)
+                self.state
+                    .catalog()
+                    .resource_type(&n.resource_type)
+                    .is_some_and(|t| t.yields_item == item_type)
             })
             .min_by(|a, b| {
                 (a.x - x)
@@ -552,8 +555,11 @@ impl Bot {
                 reason,
             });
         }
-        let duration =
-            catalog::resource_type(&node.resource_type).map_or(30, |t| t.extraction_duration_ticks);
+        let duration = self
+            .state
+            .catalog()
+            .resource_type(&node.resource_type)
+            .map_or(30, |t| t.extraction_duration_ticks);
         let timeout = Duration::from_millis(duration as u64 * rules::TICK_MS) + REFETCH_TIMEOUT;
         let seen = self.until("the extraction to finish", timeout, |_, seen| {
             seen.iter().any(|e| {

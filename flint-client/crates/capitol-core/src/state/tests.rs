@@ -1613,3 +1613,54 @@ fn auth_failed_is_reported_as_a_connection_state() {
     assert_eq!(state.connection(), &failed);
     assert!(!state.is_connected());
 }
+
+#[test]
+fn a_catalog_replaces_the_fallback_and_brings_the_recipes() {
+    let mut state = connected();
+    assert_eq!(state.catalog(), &crate::catalog::Catalog::fallback());
+    assert!(state.recipes().is_empty(), "recipes wait for the server");
+
+    let mut catalog = crate::catalog::Catalog::fallback().data().clone();
+    catalog.version = "fedcba9876543210".into();
+    catalog.item_types.push(CatalogItemType {
+        id: "lantern_oil".into(),
+        name: "Lantern Oil".into(),
+        category: "processed_material".into(),
+        stackable: true,
+        weight: 0.5,
+    });
+    assert_eq!(
+        state.apply_rest(&R::Catalog(Box::new(catalog))),
+        vec![StateEvent::CatalogUpdated, StateEvent::RecipesUpdated]
+    );
+    assert_eq!(state.catalog().version(), "fedcba9876543210");
+    assert_eq!(state.catalog().item_name("lantern_oil"), "Lantern Oil");
+    assert!(state.recipe("rope_basic").is_some());
+}
+
+#[test]
+fn a_placed_station_takes_its_kind_from_the_catalog() {
+    let mut state = connected();
+    let mut catalog = crate::catalog::Catalog::fallback().data().clone();
+    let chest = catalog
+        .station_types
+        .iter_mut()
+        .find(|t| t.id == "storage_chest")
+        .unwrap();
+    chest.interaction_range = 120.0;
+    state.set_catalog(crate::catalog::Catalog::new(catalog));
+    let station = Uuid::from_u128(77);
+    state.apply_ws(&M::StationPlaced {
+        station_id: station,
+        station_type: "storage_chest".into(),
+        name: "Storage Chest".into(),
+        owner_id: ME,
+        x: 4000.0,
+        y: 4000.0,
+        container_id: Uuid::from_u128(78),
+    });
+    let placed = &state.stations()[&station];
+    assert_eq!(placed.category, "storage");
+    assert_eq!(placed.icon.as_deref(), Some("chest"));
+    assert_eq!(placed.interaction_range, 120.0);
+}

@@ -35,12 +35,14 @@ mod trade;
 
 use std::collections::HashMap;
 
-use capitol_protocol::rest::{ClaimedPlot, PlotInfo, RecipeInfo, ResourceNodeInfo, StationInfo};
+use capitol_protocol::rest::{
+    CatalogResponse, ClaimedPlot, PlotInfo, RecipeInfo, ResourceNodeInfo, StationInfo,
+};
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::ws::{PlayerPosition, ServerMessage};
 use uuid::Uuid;
 
-use crate::catalog::{self, container_type};
+use crate::catalog::{container_type, Catalog};
 use crate::net::{ConnectionState, NetEvent, RestResponse};
 
 pub use container::Container;
@@ -211,6 +213,10 @@ pub enum StateEvent {
     /// New contents for the open station's container.
     StationContainerUpdated,
     RecipesUpdated,
+    /// A new `/catalog`: names, slot counts, station kinds. Worth caching.
+    CatalogUpdated,
+    /// `/health` reports a catalog version other than the store's.
+    CatalogStale,
     CurrencyChanged {
         balance: i64,
     },
@@ -280,6 +286,9 @@ pub struct GameState {
     open_station: Option<OpenStation>,
     station_container: Option<Container>,
 
+    /// The static game data: the fallback until a cache or `/catalog` replaces it.
+    catalog: Catalog,
+    /// From `/catalog` (or an old `/recipes`); empty until the server answers.
     recipes: Vec<RecipeInfo>,
     strands: Option<i64>,
     /// Your own plots: the poller lists them by owner (P6.4).
@@ -320,6 +329,7 @@ impl GameState {
             containers: HashMap::new(),
             open_station: None,
             station_container: None,
+            catalog: Catalog::fallback(),
             recipes: Vec::new(),
             strands: None,
             plots: Vec::new(),
@@ -599,13 +609,13 @@ impl GameState {
                 y,
                 container_id,
             } => {
-                let kind = catalog::station_type(station_type);
+                let kind = self.catalog.station_type(station_type);
                 let station = StationInfo {
                     id: *station_id,
                     station_type: station_type.clone(),
                     name: name.clone(),
-                    category: kind.map_or("crafting", |k| k.category).to_string(),
-                    icon: kind.map(|k| k.icon.to_string()),
+                    category: kind.map_or("crafting", |k| k.category.as_str()).to_string(),
+                    icon: kind.and_then(|k| k.icon.clone()),
                     x: *x,
                     y: *y,
                     owner_id: *owner_id,
@@ -771,6 +781,21 @@ impl GameState {
                 self.recipes = response.recipes.clone();
                 out.push(StateEvent::RecipesUpdated);
             }
+            R::Catalog(response) => {
+                self.recipes = response.recipes.clone();
+                self.catalog = Catalog::new(CatalogResponse::clone(response));
+                out.push(StateEvent::CatalogUpdated);
+                out.push(StateEvent::RecipesUpdated);
+            }
+            R::Health(health) => {
+                if health
+                    .catalog_version
+                    .as_deref()
+                    .is_some_and(|v| v != self.catalog.version())
+                {
+                    out.push(StateEvent::CatalogStale);
+                }
+            }
             R::Currency(c) => self.set_strands(c.strand_balance, &mut out),
             R::Deposit(d) => self.set_strands(d.new_balance, &mut out),
             R::Withdraw(w) => self.set_strands(w.new_balance, &mut out),
@@ -825,7 +850,6 @@ impl GameState {
             }
             R::Success(_)
             | R::DeedPrices(_)
-            | R::Health(_)
             | R::Terrain(_)
             | R::TerrainUnchanged
             | R::Move(_)
@@ -987,6 +1011,17 @@ impl GameState {
     /// The open station's container, once fetched.
     pub fn station_container(&self) -> Option<&Container> {
         self.station_container.as_ref()
+    }
+
+    /// The static game data.
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    /// Starts from a catalog the game had already: the disk cache, or the
+    /// one from before a sign-out. `/catalog` replaces it with the snapshot.
+    pub fn set_catalog(&mut self, catalog: Catalog) {
+        self.catalog = catalog;
     }
 
     pub fn recipes(&self) -> &[RecipeInfo] {

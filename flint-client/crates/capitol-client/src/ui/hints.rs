@@ -13,6 +13,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use capitol_core::catalog::Catalog;
 use capitol_core::onboarding::{Did, Step, Tour};
 use capitol_core::state::Container;
 use egui::{Align2, Id, RichText};
@@ -108,7 +109,13 @@ impl Hints {
     /// Follow whoever is signed in on `server`: `me` once the server has
     /// said who, and their inventory once it's arrived. Nothing shows until
     /// both are known, so an old account never flashes a hint.
-    pub fn follow(&mut self, server: &str, me: Option<Uuid>, inventory: Option<&Container>) {
+    pub fn follow(
+        &mut self,
+        server: &str,
+        me: Option<Uuid>,
+        inventory: Option<&Container>,
+        catalog: &Catalog,
+    ) {
         let account = me.map(|me| (server.to_owned(), me));
         if account != self.account {
             self.tour = account
@@ -126,7 +133,9 @@ impl Hints {
         };
         self.judged = true;
         let raw = |t: &str| {
-            capitol_core::catalog::item_type(t).is_some_and(|t| t.category == "raw_material")
+            catalog
+                .item_type(t)
+                .is_some_and(|t| t.category == "raw_material")
         };
         if self
             .tour

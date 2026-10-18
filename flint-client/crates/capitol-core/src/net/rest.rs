@@ -48,6 +48,8 @@ pub enum RestRequest {
 
     /// `GET /recipes`
     Recipes,
+    /// `GET /catalog`: the static game data (E0.2)
+    Catalog,
 
     /// `GET /stations/nearby`
     NearbyStations,
@@ -113,6 +115,7 @@ pub enum RestResponse {
     Containers(ContainersResponse),
     MoveItem(MoveItemResponse),
     Recipes(RecipesResponse),
+    Catalog(Box<CatalogResponse>),
     NearbyStations(NearbyStationsResponse),
     PlaceStation(PlaceStationResponse),
     StationContainer(StationContainerResponse),
@@ -187,6 +190,7 @@ impl RestRequest {
             | WorldNearby(_)
             | Containers
             | Recipes
+            | Catalog
             | NearbyStations
             | StationContainer { .. }
             | ListPlots(_)
@@ -217,6 +221,7 @@ impl RestRequest {
             Containers => "/inventory/containers".into(),
             MoveItem(_) => "/inventory/move".into(),
             Recipes => "/recipes".into(),
+            Catalog => "/catalog".into(),
             NearbyStations => "/stations/nearby".into(),
             PlaceStation(_) => "/stations/place".into(),
             RemoveStation { station_id } => format!("/stations/{station_id}"),
@@ -282,6 +287,7 @@ impl RestRequest {
             Q::Containers => A::Containers(de(body)?),
             Q::MoveItem(_) => A::MoveItem(de(body)?),
             Q::Recipes => A::Recipes(de(body)?),
+            Q::Catalog => A::Catalog(Box::new(de(body)?)),
             Q::NearbyStations => A::NearbyStations(de(body)?),
             Q::PlaceStation(_) => A::PlaceStation(de(body)?),
             Q::StationContainer { .. } => A::StationContainer(de(body)?),
@@ -399,6 +405,7 @@ mod tests {
         let cases = [
             (RestRequest::Health, "GET", "/health".to_string()),
             (RestRequest::Recipes, "GET", "/recipes".into()),
+            (RestRequest::Catalog, "GET", "/catalog".into()),
             (RestRequest::PlayerMe, "GET", "/player/me".into()),
             (
                 RestRequest::ListPlots(Default::default()),

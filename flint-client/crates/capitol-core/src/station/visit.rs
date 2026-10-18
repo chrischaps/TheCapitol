@@ -18,7 +18,7 @@ use capitol_protocol::rest::{RecipeInfo, StationInfo};
 use uuid::Uuid;
 
 use super::in_reach;
-use crate::catalog;
+use crate::catalog::Catalog;
 use crate::state::{answers, GameState, StateEvent};
 
 /// How long an `open_station` may go unanswered. The server answers at
@@ -52,8 +52,10 @@ pub fn recipes_at<'a>(
 }
 
 /// A station type that only stores and crafts nothing (the chest).
-pub fn is_storage(station_type: &str) -> bool {
-    catalog::station_type(station_type).is_some_and(|t| t.category == "storage")
+pub fn is_storage(catalog: &Catalog, station_type: &str) -> bool {
+    catalog
+        .station_type(station_type)
+        .is_some_and(|t| t.category == "storage")
 }
 
 /// What the game should do for a click, an arrival or a walk away.
@@ -415,8 +417,9 @@ mod tests {
             .map(|r| r.id.as_str())
             .collect();
         assert_eq!(ids, ["craft_forge"]);
-        assert!(is_storage("storage_chest"));
-        assert!(!is_storage("workbench"));
-        assert!(!is_storage("unknown"));
+        let catalog = Catalog::fallback();
+        assert!(is_storage(&catalog, "storage_chest"));
+        assert!(!is_storage(&catalog, "workbench"));
+        assert!(!is_storage(&catalog, "unknown"));
     }
 }

@@ -45,6 +45,27 @@ pub fn read_terrain_file(path: &Path) -> io::Result<TerrainResponse> {
     serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// `dir/<stem>-<server>.json`: one file per server, so a local and a
+/// remote server don't evict each other. The terrain and catalog caches
+/// share it.
+pub(crate) fn server_file(dir: PathBuf, stem: &str, base_url: &str) -> PathBuf {
+    let server: String = base_url
+        .trim_end_matches('/')
+        .split("://")
+        .last()
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    dir.join(format!("{stem}-{server}.json"))
+}
+
 /// One server's terrain on disk.
 #[derive(Debug, Clone)]
 pub struct TerrainCache {
@@ -55,22 +76,8 @@ impl TerrainCache {
     /// The cache for the server at `base_url`, as a file in `dir`. Each server
     /// gets its own file, so a local and a remote server don't evict each other.
     pub fn new(dir: impl Into<PathBuf>, base_url: &str) -> Self {
-        let server: String = base_url
-            .trim_end_matches('/')
-            .split("://")
-            .last()
-            .unwrap_or_default()
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '.' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
         Self {
-            path: dir.into().join(format!("terrain-{server}.json")),
+            path: server_file(dir.into(), "terrain", base_url),
         }
     }
 
