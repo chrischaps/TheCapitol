@@ -13,6 +13,7 @@ pub mod plot_sync;
 pub mod property_tax;
 mod regeneration;
 pub mod slot_moves;
+pub mod station_placement;
 pub mod station_removal;
 pub mod station_tools;
 mod stations;

@@ -34,6 +34,7 @@ use capitol_core::protocol::rest::{
     DepositRequest, MoveItemRequest, PayTaxRequest, PositionQuery, SlotItem, WithdrawRequest,
 };
 use capitol_core::protocol::rules::Zone;
+use capitol_core::protocol::terrain::TerrainResponse;
 use capitol_core::protocol::ws::ClientMessage;
 use capitol_core::state::{GameState, StateEvent, Trade, TradeAction, TradeEvent, Yield};
 use capitol_core::station::{self, Kit, Placing, Visit};
@@ -769,12 +770,12 @@ impl Session {
     }
 
     /// A click at `(x, y)` server units while placing: put the station there,
-    /// if it can go there.
-    pub fn place(&mut self, now: Instant, x: f64, y: f64) {
+    /// if it can go there. `terrain` tells open ground from a lot (#187).
+    pub fn place(&mut self, now: Instant, x: f64, y: f64, terrain: Option<&TerrainResponse>) {
         let Some(placing) = &mut self.placing else {
             return;
         };
-        if let Some(message) = placing.place([x, y], &self.state, now) {
+        if let Some(message) = placing.place([x, y], &self.state, terrain, now) {
             tracing::info!("place: {} at ({x:.0}, {y:.0})", placing.kit().station_type);
             self.net.ws(message);
         }

@@ -103,6 +103,9 @@ pub struct StationDef {
     pub interaction_range: f32,
     pub icon: Option<String>,
     pub description: Option<String>,
+    /// May it stand off a plot, on dry ground no lot covers (#187)?
+    #[serde(default)]
+    pub off_plot: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -656,12 +659,13 @@ async fn upsert(tx: &mut Transaction<'_, Postgres>, content: &Content) -> Result
     for s in &content.stations {
         sqlx::query(
             "INSERT INTO station_types (id, name, category, slot_count, layout_columns,
-                 interaction_range, icon, description, kit_item)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 interaction_range, icon, description, kit_item, off_plot)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, category = EXCLUDED.category,
                  slot_count = EXCLUDED.slot_count, layout_columns = EXCLUDED.layout_columns,
                  interaction_range = EXCLUDED.interaction_range, icon = EXCLUDED.icon,
-                 description = EXCLUDED.description, kit_item = EXCLUDED.kit_item",
+                 description = EXCLUDED.description, kit_item = EXCLUDED.kit_item,
+                 off_plot = EXCLUDED.off_plot",
         )
         .bind(&s.id)
         .bind(&s.name)
@@ -672,6 +676,7 @@ async fn upsert(tx: &mut Transaction<'_, Postgres>, content: &Content) -> Result
         .bind(&s.icon)
         .bind(&s.description)
         .bind(&s.kit)
+        .bind(s.off_plot)
         .execute(&mut **tx)
         .await?;
         n += 1;

@@ -43,6 +43,7 @@ pub fn build(game: &GameState) -> CatalogResponse {
             icon: t.icon.clone(),
             description: t.description.clone(),
             kit: t.kit_item.clone(),
+            off_plot: t.off_plot,
         })
         .collect();
     station_types.sort_by(|a, b| a.id.cmp(&b.id));
@@ -145,6 +146,7 @@ mod tests {
                 icon: Some("workbench".into()),
                 description: None,
                 kit_item: Some("workbench_kit".into()),
+                off_plot: true,
             },
         );
         game.container_types.insert(
@@ -165,6 +167,7 @@ mod tests {
         let ids: Vec<_> = catalog.item_types.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["fiber", "rope"]);
         assert_eq!(catalog.station_types[0].kit.as_deref(), Some("workbench_kit"));
+        assert!(catalog.station_types[0].off_plot);
         assert_eq!(catalog.container_types[0].slot_count, 1);
     }
 

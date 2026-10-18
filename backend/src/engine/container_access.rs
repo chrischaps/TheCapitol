@@ -311,6 +311,14 @@ mod tests {
     }
 
     #[test]
+    fn a_bench_off_plot_is_its_owners_alone() {
+        // No plot, so no plot owner and no setting to open it (#187).
+        let (me, them) = (Uuid::new_v4(), Uuid::new_v4());
+        let s = StationAccess { plot_owner: None, station_use_level: None, ..chest(them) };
+        assert!(matches!(station_access(me, &s), Err(AccessError::Forbidden)));
+    }
+
+    #[test]
     fn someone_elses_chest_is_refused() {
         let (me, them) = (Uuid::new_v4(), Uuid::new_v4());
         assert!(matches!(station_access(me, &chest(them)), Err(AccessError::Forbidden)));

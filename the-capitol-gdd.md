@@ -115,6 +115,7 @@ The Capitol Tower is a modern structure arranged like a medieval castle, surroun
 - Confer privacy and building rights
 - Owners control access permissions (private, friends, guild, public)
 - Raw resources on a plot belong to it: once claimed, only the owner may gather them, unless they open the plot's station use to the public (the same setting governs its stations)
+- A workbench needs no plot: it can go down on any dry ground no lot covers (a verge, a park, a field, the wilderness), and only its owner may use it. Every other station needs a plot you own. A lot, even an unclaimed one, takes stations only from its owner (#187)
 - Can be bought, sold, traded, possibly leased
 
 ---

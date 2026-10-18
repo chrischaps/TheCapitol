@@ -395,7 +395,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                     };
 
-                                    match handle_place_station(&state, player_id, &station_type, x, y, kit_uuid).await {
+                                    match crate::engine::station_placement::place_station(&state, player_id, &station_type, x, y, kit_uuid).await {
                                         Ok(result) => {
                                             let station_info = result.info;
                                             // Add to game state
@@ -429,7 +429,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                         Err(e) => {
                                             let _ = sender.send(Message::Text(
-                                                serde_json::to_string(&ServerMessage::Error { message: e, command: command.into() }).unwrap().into()
+                                                serde_json::to_string(&ServerMessage::Error { message: e.message(), command: command.into() }).unwrap().into()
                                             )).await;
                                         }
                                     }
@@ -1250,179 +1250,6 @@ fn moved_containers(source: Option<Uuid>, target: Uuid) -> Vec<Uuid> {
     let mut changed = vec![target];
     changed.extend(source.filter(|&s| s != target));
     changed
-}
-
-/// Handle place station request
-/// Result of placing a station (includes plot_id for game state)
-struct PlaceStationResult {
-    info: crate::models::StationInfo,
-    plot_id: Option<Uuid>,
-}
-
-async fn handle_place_station(
-    state: &AppState,
-    player_id: Uuid,
-    station_type: &str,
-    x: f64,
-    y: f64,
-    kit_item_id: Uuid,
-) -> Result<PlaceStationResult, String> {
-    // Where the player stands now. The players row lags by up to 10 s, so
-    // it's only the fallback.
-    let (player_x, player_y): (f64, f64) = match live_position(&state.game, player_id).await {
-        Some(at) => at,
-        None => sqlx::query_as("SELECT position_x, position_y FROM players WHERE id = $1")
-            .bind(player_id)
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| format!("Database error: {}", e))?,
-    };
-
-    // Verify station type exists
-    let st: crate::models::StationType = sqlx::query_as(
-        "SELECT id, name, category, slot_count, layout_columns, interaction_range, icon, description, kit_item
-         FROM station_types WHERE id = $1"
-    )
-    .bind(station_type)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?
-    .ok_or_else(|| format!("Unknown station type: {}", station_type))?;
-
-    // Check range from player
-    let dx = x - player_x;
-    let dy = y - player_y;
-    let distance = (dx * dx + dy * dy).sqrt();
-    if distance > st.interaction_range as f64 {
-        return Err("Too far to place station".into());
-    }
-
-    // M7: Find plot at placement position
-    let plot = crate::routes::plots::find_plot_at_position(&state.db, x, y)
-        .await
-        .map_err(|e| format!("Database error: {}", e))?
-        .ok_or_else(|| "Must place station on a plot".to_string())?;
-
-    // M7: Verify player owns the plot
-    if plot.owner_id != Some(player_id) {
-        return Err("You don't own this plot".into());
-    }
-
-    // M7: Check plot capacity
-    let (station_count, station_capacity): (i32, i32) = sqlx::query_as(
-        "SELECT p.station_count, psc.station_capacity
-         FROM plots p
-         JOIN plot_size_categories psc ON p.size_category = psc.id
-         WHERE p.id = $1"
-    )
-    .bind(plot.id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?;
-
-    if station_count >= station_capacity {
-        return Err(format!("Plot is at capacity ({}/{})", station_count, station_capacity));
-    }
-
-    // Verify player owns the kit item and it's the right type
-    let expected_kit = st.kit_item.as_deref().ok_or("Invalid station type")?;
-
-    let kit_item: crate::models::Item = sqlx::query_as(&format!("SELECT {} FROM items WHERE id = $1 AND owner_id = $2", crate::models::ITEM_COLUMNS))
-        .bind(kit_item_id)
-        .bind(player_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| format!("Database error: {}", e))?
-        .ok_or_else(|| "Kit item not found".to_string())?;
-
-    if kit_item.item_type != expected_kit {
-        return Err(format!("Wrong item type: expected {}, got {}", expected_kit, kit_item.item_type));
-    }
-
-    // Check minimum distance from other stations (50 units)
-    let nearby: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM stations
-         WHERE (position_x - $1)^2 + (position_y - $2)^2 < $3"
-    )
-    .bind(x)
-    .bind(y)
-    .bind(capitol_protocol::rules::STATION_MIN_SPACING * capitol_protocol::rules::STATION_MIN_SPACING)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?;
-
-    if nearby.is_some() {
-        return Err("Too close to another station".into());
-    }
-
-    // Create station with plot_id
-    let station_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id, kit_quality)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)"
-    )
-    .bind(station_id)
-    .bind(station_type)
-    .bind(player_id)
-    .bind(x as f32)
-    .bind(y as f32)
-    .bind(plot.id)
-    .bind(kit_item.quality)
-    .execute(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?;
-
-    // M7: Increment plot station count
-    sqlx::query("UPDATE plots SET station_count = station_count + 1 WHERE id = $1")
-        .bind(plot.id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| format!("Database error: {}", e))?;
-
-    // Create container for station
-    let container_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO containers (id, container_type, station_id)
-         VALUES ($1, 'station_inventory', $2)"
-    )
-    .bind(container_id)
-    .bind(station_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?;
-
-    // Consume the kit item
-    if kit_item.quantity <= 1 {
-        sqlx::query("DELETE FROM items WHERE id = $1")
-            .bind(kit_item_id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| format!("Database error: {}", e))?;
-    } else {
-        sqlx::query("UPDATE items SET quantity = quantity - 1 WHERE id = $1")
-            .bind(kit_item_id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| format!("Database error: {}", e))?;
-    }
-
-    Ok(PlaceStationResult {
-        info: crate::models::StationInfo {
-            id: station_id,
-            station_type: station_type.to_string(),
-            name: st.name,
-            category: st.category,
-            icon: st.icon,
-            x,
-            y,
-            owner_id: player_id,
-            container_id: Some(container_id),
-            interaction_range: st.interaction_range,
-            quality: kit_item.quality,
-            tool: None,
-        },
-        plot_id: Some(plot.id),
-    })
 }
 
 /// Answer `install_tool` or `remove_tool` (E1.6): everyone hears what the

@@ -1,4 +1,4 @@
-# Station types: what a player can place on a plot.
+# Station types: what a player can place on a plot, or off one.
 #
 # Upserted into `station_types` at startup (E0.3, see backend/src/content/).
 # One [[station]] table per type:
@@ -12,6 +12,9 @@
 #   layout_columns     how many columns the client lays them out in
 #   interaction_range  how close a player must stand to use it
 #   icon, description  optional, for the client
+#   off_plot           optional, false if left out. True lets it stand off a
+#                      plot, on dry ground no lot covers, for its owner alone
+#                      (#187). On a lot it still needs the lot to be yours.
 #
 # Every crafting station should be some recipe's required_station_type.
 
@@ -25,6 +28,7 @@ layout_columns = 4
 interaction_range = 75.0
 icon = "workbench"
 description = "Craft wooden items and tools"
+off_plot = true
 
 [[station]]
 id = "forge"

@@ -332,6 +332,15 @@ pub fn check_water_crossing(
     })
 }
 
+/// The ring whose water `at` stands in, if any. A bridge is over the water,
+/// so a point on one is in it too: nothing is built on a bridge.
+pub fn in_water(center: (f64, f64), rings: &[WaterRing], at: (f64, f64)) -> Option<&WaterRing> {
+    let d = distance(center, at);
+    rings
+        .iter()
+        .find(|ring| d > ring.inner_radius() && d < ring.outer_radius())
+}
+
 /// Test a straight move against one ring. Returns the stopping point if it's blocked.
 pub fn ring_crossing(
     center: (f64, f64),
@@ -585,6 +594,17 @@ mod tests {
         assert!((block.x - 4000.0).abs() < 1e-9);
         // Inner edge is at radius 190; the mover stops 2 units short.
         assert!((block.y - 4188.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_water_is_between_a_rings_edges_bridges_and_all() {
+        let rings = [moat()];
+        let at = |x: f64, y: f64| in_water((CENTER_X, CENTER_Y), &rings, (CENTER_X + x, CENTER_Y + y)).map(|r| r.id.as_str());
+        // The moat's edges are at radius 190 and 210.
+        assert_eq!(at(0.0, 189.0), None, "the inner bank");
+        assert_eq!(at(0.0, 200.0), Some("moat"));
+        assert_eq!(at(0.0, 211.0), None, "the outer bank");
+        assert_eq!(at(200.0, 0.0), Some("moat"), "on the east bridge");
     }
 
     #[test]

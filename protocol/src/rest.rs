@@ -683,6 +683,10 @@ pub struct CatalogStationType {
     pub description: Option<String>,
     /// The item type a placement consumes (`rules::station_kit_item`).
     pub kit: Option<String>,
+    /// Whether it may stand off a plot, on dry ground no lot covers (#187).
+    /// Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub off_plot: bool,
 }
 
 /// A resource type (`resource_types`): what a node yields and how fast.

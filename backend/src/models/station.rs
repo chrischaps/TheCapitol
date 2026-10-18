@@ -18,7 +18,13 @@ pub struct StationType {
     pub description: Option<String>,
     /// The item that places it, and that taking it down gives back (E0.3)
     pub kit_item: Option<String>,
+    /// May it stand off a plot, on dry ground no lot covers (#187)?
+    pub off_plot: bool,
 }
+
+/// The columns of [`StationType`], for `SELECT {STATION_TYPE_COLUMNS} FROM station_types`.
+pub const STATION_TYPE_COLUMNS: &str =
+    "id, name, category, slot_count, layout_columns, interaction_range, icon, description, kit_item, off_plot";
 
 /// Station instance in the world (from database)
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

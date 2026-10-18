@@ -459,7 +459,15 @@ impl PlayerExtension for CapitolExtension {
             if std::mem::take(&mut self.cancel_placing) {
                 session.cancel_placing();
             }
-            placing(ctx, session, &self.shared, &mut self.stations, now, dt);
+            placing(
+                ctx,
+                session,
+                &self.shared,
+                &mut self.stations,
+                self.built.as_ref(),
+                now,
+                dt,
+            );
         }
         self.shared
             .at_login
@@ -1415,6 +1423,7 @@ fn placing(
     session: &mut Session,
     shared: &Shared,
     stations: &mut Stations,
+    terrain: Option<&TerrainResponse>,
     now: Instant,
     dt: f32,
 ) {
@@ -1422,7 +1431,7 @@ fn placing(
     let click = shared.place_at.lock().ok().and_then(|mut p| p.take());
     if let Some([x, z]) = click {
         let [x, y] = to_server(x, z);
-        session.place(now, x, y);
+        session.place(now, x, y, terrain);
     }
     for note in session.take_placing_notes() {
         let (title, body) = match note {
@@ -1449,7 +1458,7 @@ fn placing(
         };
         // Asking, the ghost holds where the click was; otherwise it's the cursor.
         let target = asking.or_else(|| hover.map(|[x, z]| to_server(x, z)));
-        let check = target.map(|at| p.check(at, state));
+        let check = target.map(|at| p.check(at, state, terrain));
         let ok = matches!(check, Some(Ok(_)));
         let station_type = p.kit().station_type;
         let crowding = target.map_or_else(Vec::new, |[x, y]| {

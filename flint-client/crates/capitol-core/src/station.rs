@@ -13,9 +13,14 @@
 //! tests in the server's order (`handle_place_station` in
 //! `backend/src/ws/connection.rs`):
 //! - within 75 of you
-//! - on a plot you own (the terrain lot, B7)
-//! - with room on that plot
+//! - on a lot: one you own (the terrain lot, B7), with room on it
+//! - on no lot: a type that may stand off a plot (the catalog's
+//!   `off_plot`, only the workbench), on dry ground (#187)
 //! - at least 50 from every other station
+//!
+//! Your own plots come from the store; whether any lot covers the spot, and
+//! whether it's water, come from `/terrain`. Without a terrain, every spot
+//! off your plots is refused as [`Refusal::NotYourPlot`].
 //!
 //! A click where they all pass sends `place_station` over the socket. The
 //! REST route places the station in the database but not in the game
@@ -26,6 +31,7 @@ use std::time::{Duration, Instant};
 
 use capitol_protocol::rest::{PlotInfo, SlotItem, StationInfo};
 use capitol_protocol::rules::{self, STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
+use capitol_protocol::terrain::{quad_contains, TerrainResponse};
 use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
 
@@ -51,10 +57,14 @@ pub fn in_reach(at: [f64; 2], station: &StationInfo) -> bool {
 pub enum Refusal {
     /// More than 75 units from where you stand.
     TooFar,
-    /// Not on a plot of yours: someone else's, nobody's, or none at all.
+    /// On a lot that isn't yours: someone else's, or nobody's.
     NotYourPlot,
     /// On your plot, but it holds all the stations it can.
     PlotFull { capacity: i32 },
+    /// On no lot, and this station only goes on a plot.
+    NeedsAPlot,
+    /// On no lot, but in the water.
+    InWater,
     /// Under 50 units from another station.
     TooClose,
 }
@@ -66,6 +76,8 @@ impl Refusal {
             Refusal::TooFar => "Too far from you".into(),
             Refusal::NotYourPlot => "Not on a plot you own".into(),
             Refusal::PlotFull { capacity } => format!("This plot is full ({capacity}/{capacity})"),
+            Refusal::NeedsAPlot => "This only goes on a plot you own".into(),
+            Refusal::InWater => "Not on the water".into(),
             Refusal::TooClose => "Too close to another station".into(),
         }
     }
@@ -73,35 +85,59 @@ impl Refusal {
 
 /// Whether a station can go down at `at` (server units), for the player
 /// `me` standing at `you`. `plots` may hold anyone's; only `me`'s count.
-/// `Ok` names the plot the station would stand on.
+/// `off_plot` is whether the station type may stand off a plot, and
+/// `terrain` tells open ground from a lot and from water.
+/// `Ok` names the plot the station would stand on, `None` for open ground.
 pub fn check<'a>(
     at: [f64; 2],
     you: [f64; 2],
     me: Uuid,
+    off_plot: bool,
     stations: impl IntoIterator<Item = &'a StationInfo>,
     plots: &[PlotInfo],
-) -> Result<Uuid, Refusal> {
+    terrain: Option<&TerrainResponse>,
+) -> Result<Option<Uuid>, Refusal> {
     let [x, y] = at;
     // Every seeded type's range is 75; the server tests the type's own.
     if (x - you[0]).hypot(y - you[1]) > STATION_INTERACTION_RANGE {
         return Err(Refusal::TooFar);
     }
-    let plot = plots
+    let plot = match plots
         .iter()
         .find(|p| p.owner_id == Some(me) && p.contains(x, y))
-        .ok_or(Refusal::NotYourPlot)?;
-    if plot.station_count >= plot.station_capacity {
-        return Err(Refusal::PlotFull {
-            capacity: plot.station_capacity,
-        });
-    }
+    {
+        Some(plot) if plot.station_count >= plot.station_capacity => {
+            return Err(Refusal::PlotFull {
+                capacity: plot.station_capacity,
+            });
+        }
+        Some(plot) => Some(plot.id),
+        None => {
+            let terrain = terrain.ok_or(Refusal::NotYourPlot)?;
+            if terrain
+                .terrain_plots
+                .iter()
+                .any(|lot| quad_contains(&lot.corners, x, y))
+            {
+                return Err(Refusal::NotYourPlot);
+            }
+            if !off_plot {
+                return Err(Refusal::NeedsAPlot);
+            }
+            let center = (terrain.center_x, terrain.center_y);
+            if rules::in_water(center, &terrain.water_rings, (x, y)).is_some() {
+                return Err(Refusal::InWater);
+            }
+            None
+        }
+    };
     if stations
         .into_iter()
         .any(|s| (s.x - x).hypot(s.y - y) < STATION_MIN_SPACING)
     {
         return Err(Refusal::TooClose);
     }
-    Ok(plot.id)
+    Ok(plot)
 }
 
 /// The kit being placed.
@@ -180,18 +216,29 @@ impl Placing {
         self.done
     }
 
-    /// Whether the station can go down at `at` now, by the store. Until the
-    /// server has placed you, it can't go anywhere.
-    pub fn check(&self, at: [f64; 2], state: &GameState) -> Result<Uuid, Refusal> {
+    /// Whether the station can go down at `at` now, by the store and
+    /// `terrain`. Until the server has placed you, it can't go anywhere.
+    pub fn check(
+        &self,
+        at: [f64; 2],
+        state: &GameState,
+        terrain: Option<&TerrainResponse>,
+    ) -> Result<Option<Uuid>, Refusal> {
         let (Some(me), Some(you)) = (state.me(), state.local_player()) else {
             return Err(Refusal::TooFar);
         };
+        let off_plot = state
+            .catalog()
+            .station_type(self.kit.station_type)
+            .is_some_and(|t| t.off_plot);
         check(
             at,
             [you.x, you.y],
             me,
+            off_plot,
             state.stations().values(),
             state.plots(),
+            terrain,
         )
     }
 
@@ -201,12 +248,13 @@ impl Placing {
         &mut self,
         at: [f64; 2],
         state: &GameState,
+        terrain: Option<&TerrainResponse>,
         now: Instant,
     ) -> Option<ClientMessage> {
         if self.phase != Phase::Aiming || self.done {
             return None;
         }
-        if let Err(why) = self.check(at, state) {
+        if let Err(why) = self.check(at, state, terrain) {
             self.notes.push(Note::Refused(why));
             return None;
         }
@@ -347,18 +395,56 @@ mod tests {
         assert!(in_reach([100.0, 0.0], &s));
     }
 
+    /// The terrain under `plots`: their lots, and a moat of radius 200 and
+    /// width 20 round (4000, 4000).
+    fn terrain(plots: &[PlotInfo]) -> TerrainResponse {
+        use capitol_protocol::terrain::{TerrainPlot, WaterRing};
+        TerrainResponse {
+            world_size: 8000.0,
+            center_x: 4000.0,
+            center_y: 4000.0,
+            water_rings: vec![WaterRing {
+                id: "moat".into(),
+                radius: 200.0,
+                width: 20.0,
+                bridges: vec![],
+            }],
+            roads: vec![],
+            terrain_plots: plots
+                .iter()
+                .map(|p| TerrainPlot {
+                    id: p.terrain_id.clone().unwrap(),
+                    corners: p.corners.unwrap(),
+                    street_facing_edge: (0, 1),
+                    area: 40_000.0,
+                    adjacent_street_id: "street".into(),
+                    zone: "suburban".into(),
+                })
+                .collect(),
+            parks: vec![],
+            version: None,
+        }
+    }
+
     #[test]
     fn a_station_goes_on_your_plot_near_you_and_clear_of_others() {
         let mine = plot(10, 1000.0, 1000.0, Some(ME), 0);
         let theirs = plot(11, 1200.0, 1000.0, Some(THEM), 0);
         let free = plot(12, 1000.0, 1200.0, None, 0);
         let plots = [mine.clone(), theirs, free];
+        let ground = terrain(&plots);
         let you = [1150.0, 1150.0];
         let none: [StationInfo; 0] = [];
-        let at = |x, y, stations: &[StationInfo]| check([x, y], you, ME, stations, &plots);
+        let at = |x, y, stations: &[StationInfo]| {
+            check([x, y], you, ME, true, stations, &plots, Some(&ground))
+        };
 
-        assert_eq!(at(1100.0, 1100.0, &none), Ok(mine.id));
-        assert_eq!(at(1199.0, 1100.0, &none), Ok(mine.id), "near the edge");
+        assert_eq!(at(1100.0, 1100.0, &none), Ok(Some(mine.id)));
+        assert_eq!(
+            at(1199.0, 1100.0, &none),
+            Ok(Some(mine.id)),
+            "near the edge"
+        );
         assert_eq!(
             at(1210.0, 1150.0, &none),
             Err(Refusal::NotYourPlot),
@@ -378,13 +464,73 @@ mod tests {
 
         let near = [station(1100.0, 1149.0)];
         assert_eq!(at(1100.0, 1100.0, &near), Err(Refusal::TooClose), "49 away");
-        assert_eq!(at(1100.0, 1099.0, &near), Ok(mine.id), "50 is clear");
+        assert_eq!(at(1100.0, 1099.0, &near), Ok(Some(mine.id)), "50 is clear");
+    }
+
+    #[test]
+    fn a_workbench_goes_on_open_ground_but_not_on_the_water() {
+        // Your plot sits in the far corner; the spots below are on no lot.
+        let mine = plot(10, 1000.0, 1000.0, Some(ME), 0);
+        let plots = [mine];
+        let ground = terrain(&plots);
+        let at = |off_plot, x: f64, y: f64, ground| {
+            check([x, y], [x, y - 10.0], ME, off_plot, [], &plots, ground)
+        };
+
+        assert_eq!(
+            at(true, 4000.0, 4100.0, Some(&ground)),
+            Ok(None),
+            "inside the moat"
+        );
+        assert_eq!(
+            at(true, 4000.0, 4300.0, Some(&ground)),
+            Ok(None),
+            "outside it"
+        );
+        assert_eq!(
+            at(true, 4000.0, 4200.0, Some(&ground)),
+            Err(Refusal::InWater)
+        );
+        assert_eq!(
+            at(false, 4000.0, 4300.0, Some(&ground)),
+            Err(Refusal::NeedsAPlot),
+            "a forge in a field"
+        );
+        assert_eq!(
+            at(false, 4000.0, 4200.0, Some(&ground)),
+            Err(Refusal::NeedsAPlot),
+            "the type before the water, as the server"
+        );
+        assert_eq!(
+            at(true, 4000.0, 4300.0, None),
+            Err(Refusal::NotYourPlot),
+            "no terrain, no telling it's open"
+        );
+        let crowded = [station(4000.0, 4320.0)];
+        let r = check(
+            [4000.0, 4300.0],
+            [4000.0, 4290.0],
+            ME,
+            true,
+            &crowded,
+            &plots,
+            Some(&ground),
+        );
+        assert_eq!(r, Err(Refusal::TooClose));
     }
 
     #[test]
     fn a_full_plot_takes_no_more() {
         let full = plot(10, 1000.0, 1000.0, Some(ME), 16);
-        let r = check([1100.0, 1100.0], [1100.0, 1100.0], ME, [], &[full]);
+        let r = check(
+            [1100.0, 1100.0],
+            [1100.0, 1100.0],
+            ME,
+            true,
+            [],
+            &[full],
+            None,
+        );
         assert_eq!(r, Err(Refusal::PlotFull { capacity: 16 }));
         assert_eq!(r.unwrap_err().words(), "This plot is full (16/16)");
     }
@@ -393,11 +539,19 @@ mod tests {
     fn the_checks_run_in_the_servers_order() {
         // Far, off-plot and crowded all at once: the server says "too far".
         let crowded = [station(5000.0, 5001.0)];
-        let r = check([5000.0, 5000.0], [0.0, 0.0], ME, &crowded, &[]);
+        let r = check([5000.0, 5000.0], [0.0, 0.0], ME, true, &crowded, &[], None);
         assert_eq!(r, Err(Refusal::TooFar));
         // On a full plot and crowded: the server says "full".
         let full = plot(10, 4900.0, 4900.0, Some(ME), 16);
-        let r = check([5000.0, 5000.0], [5000.0, 5050.0], ME, &crowded, &[full]);
+        let r = check(
+            [5000.0, 5000.0],
+            [5000.0, 5050.0],
+            ME,
+            true,
+            &crowded,
+            &[full],
+            None,
+        );
         assert_eq!(r, Err(Refusal::PlotFull { capacity: 16 }));
     }
 
@@ -482,7 +636,7 @@ mod tests {
             let state = world();
             let t0 = Instant::now();
             let mut p = placing();
-            let sent = p.place([1120.0, 1040.0], &state, t0);
+            let sent = p.place([1120.0, 1040.0], &state, None, t0);
             assert_eq!(
                 sent,
                 Some(ClientMessage::PlaceStation {
@@ -493,7 +647,7 @@ mod tests {
                 })
             );
             assert!(
-                p.place([1120.0, 1040.0], &state, t0).is_none(),
+                p.place([1120.0, 1040.0], &state, None, t0).is_none(),
                 "one at a time"
             );
             // Someone else's station going down isn't the answer.
@@ -513,8 +667,12 @@ mod tests {
         fn a_bad_click_is_refused_and_sends_nothing() {
             let state = world();
             let mut p = placing();
-            assert!(p.place([1100.0, 990.0], &state, Instant::now()).is_none());
-            assert!(p.place([1300.0, 1100.0], &state, Instant::now()).is_none());
+            assert!(p
+                .place([1100.0, 990.0], &state, None, Instant::now())
+                .is_none());
+            assert!(p
+                .place([1300.0, 1100.0], &state, None, Instant::now())
+                .is_none());
             assert_eq!(
                 p.take_notes(),
                 vec![
@@ -530,7 +688,7 @@ mod tests {
             let state = world();
             let t0 = Instant::now();
             let mut p = placing();
-            p.place([1120.0, 1040.0], &state, t0).unwrap();
+            p.place([1120.0, 1040.0], &state, None, t0).unwrap();
             // A trade refused meanwhile isn't the placement's answer (#89).
             let other = StateEvent::ServerError {
                 message: "That player is offline".into(),
@@ -551,7 +709,7 @@ mod tests {
                 vec![Note::Failed("Too far to place station".into())]
             );
 
-            p.place([1120.0, 1040.0], &state, t0).unwrap();
+            p.place([1120.0, 1040.0], &state, None, t0).unwrap();
             p.tick(t0 + UNANSWERED - Duration::from_millis(1));
             assert!(matches!(p.phase(), Phase::Asking { .. }));
             p.tick(t0 + UNANSWERED);
@@ -576,11 +734,17 @@ mod tests {
         fn the_ghost_reads_the_store() {
             let state = world();
             let p = placing();
-            assert_eq!(p.check([1120.0, 1100.0], &state), Ok(Uuid::from_u128(10)));
-            assert_eq!(p.check([1120.0, 1190.0], &state), Err(Refusal::TooFar));
+            assert_eq!(
+                p.check([1120.0, 1100.0], &state, None),
+                Ok(Some(Uuid::from_u128(10)))
+            );
+            assert_eq!(
+                p.check([1120.0, 1190.0], &state, None),
+                Err(Refusal::TooFar)
+            );
             // Signed out, it can't go anywhere.
             assert_eq!(
-                p.check([1120.0, 1100.0], &GameState::new()),
+                p.check([1120.0, 1100.0], &GameState::new(), None),
                 Err(Refusal::TooFar)
             );
         }

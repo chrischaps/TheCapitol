@@ -191,6 +191,15 @@ The proposal is many **sessions** but one **presence**:
 
 Chris decides whether that's wanted, or whether one session stays a rule.
 
+### D10. Workbenches on unclaimed land (#187) [decided 2026-10-18]
+
+A workbench can go down without a plot, so a new player can craft before they can afford a deed.
+- **Where:** dry ground that no lot covers: streets, verges, parks, fields, the wilderness. A lot keeps its rule (yours, with room), even an unclaimed one, so claiming a lot never has to deal with a stranger's bench. Water, bridges included, is refused (`rules::in_water`).
+- **Which:** a station type's `off_plot` (in `stations.toml`, through `station_types.off_plot` to `/catalog`). Only the workbench has it. A chest off a plot would be storage with no tax, and a forge belongs on property.
+- **Who:** the owner alone. A station with no plot has no `station_use_level` to open it (`container_access::station_access`).
+- **As built:** `engine::station_placement` holds the placement tests for WS and REST alike (they were two copies). A bench off a plot has `plot_id` NULL. It pays no tax, no plot counts it, and a foreclosure never takes it down.
+- **Open ([#188](https://github.com/chrischaps/TheCapitol/issues/188)):** a terrain change can lay a new lot under a bench. The bench stays its owner's, and the lot's owner can't use it or count it. Nothing handles that yet.
+
 ## 5. Architecture notes
 
 - **Shared rules first.** Every formula a client previews goes in `protocol/src/rules.rs` with a test that the server uses it:
