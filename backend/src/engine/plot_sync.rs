@@ -120,7 +120,7 @@ pub async fn release_plot(tx: &mut PgConnection, plot_id: Uuid) -> Result<Vec<Uu
         .await?;
     sqlx::query(
         "UPDATE plots SET owner_id = NULL, claimed_at = NULL, assessed_value = 0,
-                tax_owed = 0, last_tax_paid = NULL, station_count = 0
+                tax_owed = 0, tax_carry = 0, last_tax_paid = NULL, station_count = 0
          WHERE id = $1",
     )
     .bind(plot_id)

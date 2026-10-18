@@ -1,11 +1,14 @@
 //! Hourly property tax (M7), and foreclosure for unpaid tax (#131).
 //!
 //! Each hour a plot owes 1/168th of its weekly tax (2% of `assessed_value`).
+//! The part that isn't a whole strand carries to the next hour on
+//! `plots.tax_carry` (#136), so a week charges exactly the weekly tax: a deed
+//! of 1000 pays 1 strand in about every eighth hour, 20 a week.
 //! An hour its owner can't pay goes on `plots.tax_owed`. The next hour they
 //! can, the debt comes out of their strands, as much as their balance covers.
 //! The owner hears about the debt (`tax_delinquent`) as it passes each whole
-//! week of tax, and again an hour before it reaches [`FORECLOSE_AFTER_WEEKS`]
-//! weeks. Then the plot is foreclosed. It's released the same way a forced
+//! week of tax, and again when one more hour's charge would bring it to
+//! [`FORECLOSE_AFTER_WEEKS`] weeks. Then the plot is foreclosed. It's released the same way a forced
 //! terrain commit releases one: its stations go, and their contents with
 //! them. The deed is refunded, less the debt.
 
@@ -23,8 +26,8 @@ use crate::models::StationState;
 /// Weekly tax rate as a fraction (2% = 0.02)
 const TAX_RATE: f64 = 0.02;
 
-/// Hours per week
-const HOURS_PER_WEEK: f64 = 168.0;
+/// Hours per week. `tax_carry` counts in 168ths of a strand.
+const HOURS_PER_WEEK: i64 = 168;
 
 /// How many weeks of tax a plot may owe before it's foreclosed (#131)
 pub const FORECLOSE_AFTER_WEEKS: i64 = 4;
@@ -40,31 +43,31 @@ pub fn weekly_tax(assessed_value: i32) -> i64 {
     (assessed_value as f64 * TAX_RATE).round() as i64
 }
 
-/// An hour's tax: a week's over 168, rounded up
-pub fn hourly_tax(assessed_value: i32) -> i64 {
-    ((weekly_tax(assessed_value) as f64) / HOURS_PER_WEEK).ceil() as i64
+/// An hour's tax on a plot with `weekly` tax and `carry` 168ths of a strand
+/// left from the hours before: the whole strands due, and the new carry
+pub fn charge_hour(weekly: i64, carry: i32) -> (i64, i32) {
+    let due = carry as i64 + weekly;
+    (due / HOURS_PER_WEEK, (due % HOURS_PER_WEEK) as i32)
 }
 
-/// A week of tax as it's charged: 168 hours of [`hourly_tax`]. Rounding each
-/// hour up makes this more than [`weekly_tax`] on a cheap plot (an urban deed
-/// of 1000 is charged 168 a week, not 20). Notices and foreclosure count
-/// in these weeks, so a plot goes after about four weeks unpaid whatever
-/// its value. Charging the exact fraction instead is #136.
-pub fn week_charged(assessed_value: i32) -> i64 {
-    hourly_tax(assessed_value) * HOURS_PER_WEEK as i64
+/// The most one hour can charge: a week's tax over 168, rounded up
+pub fn largest_hourly_tax(assessed_value: i32) -> i64 {
+    (weekly_tax(assessed_value) + HOURS_PER_WEEK - 1) / HOURS_PER_WEEK
 }
 
-/// The debt at which a plot is foreclosed: four weeks of tax as charged
+/// The debt at which a plot is foreclosed: four weeks of tax
 pub fn foreclosure_threshold(assessed_value: i32) -> i64 {
-    week_charged(assessed_value) * FORECLOSE_AFTER_WEEKS
+    weekly_tax(assessed_value) * FORECLOSE_AFTER_WEEKS
 }
 
 /// Whether debt going from `before` to `after` in one unpaid hour earns the
-/// owner a notice: it passed a whole week of tax, or one more hour forecloses.
-/// A debt that has reached the threshold is foreclosed, not warned.
+/// owner a notice: it passed a whole week of tax, or one more hour's charge
+/// could foreclose. On a cheap plot that last warning comes days ahead: a
+/// wilderness deed is charged 1 strand every 84 hours. A debt that has
+/// reached the threshold is foreclosed, not warned.
 pub fn notice_due(before: i64, after: i64, assessed_value: i32) -> bool {
-    let weekly = week_charged(assessed_value);
-    let hourly = hourly_tax(assessed_value);
+    let weekly = weekly_tax(assessed_value);
+    let hourly = largest_hourly_tax(assessed_value);
     let threshold = foreclosure_threshold(assessed_value);
     if after >= threshold || after <= before || weekly <= 0 {
         return false;
@@ -112,8 +115,8 @@ pub async fn process_property_taxes(db: &PgPool) -> TaxReport {
     let mut report = TaxReport::default();
 
     // Get all owned plots with their owners
-    let owned_plots: Vec<(Uuid, Uuid, i32, i32, Option<String>)> = match sqlx::query_as(
-        "SELECT id, owner_id, assessed_value, tax_owed, terrain_id FROM plots WHERE owner_id IS NOT NULL",
+    let owned_plots: Vec<(Uuid, Uuid, i32, i32, i32, Option<String>)> = match sqlx::query_as(
+        "SELECT id, owner_id, assessed_value, tax_owed, tax_carry, terrain_id FROM plots WHERE owner_id IS NOT NULL",
     )
     .fetch_all(db)
     .await
@@ -131,17 +134,31 @@ pub async fn process_property_taxes(db: &PgPool) -> TaxReport {
 
     tracing::info!("Processing taxes for {} owned plots", owned_plots.len());
 
-    for (plot_id, owner_id, assessed_value, tax_owed, terrain_id) in owned_plots {
-        let hourly_tax = hourly_tax(assessed_value);
-
-        if hourly_tax <= 0 {
+    for (plot_id, owner_id, assessed_value, tax_owed, carry, terrain_id) in owned_plots {
+        let weekly = weekly_tax(assessed_value);
+        if weekly <= 0 {
             continue;
         }
 
-        // Try to collect from player's balance
-        let collected = collect_tax_from_player(db, owner_id, hourly_tax).await;
+        let (hourly_tax, carry) = charge_hour(weekly, carry);
+        if let Err(e) = sqlx::query("UPDATE plots SET tax_carry = $1 WHERE id = $2")
+            .bind(carry)
+            .bind(plot_id)
+            .execute(db)
+            .await
+        {
+            tracing::error!("Failed to carry tax for plot {}: {:?}", plot_id, e);
+            continue;
+        }
 
-        let owed = if collected {
+        // An hour that charges nothing still takes what it can of the debt
+        let owed = if hourly_tax == 0 {
+            if tax_owed > 0 {
+                collect_debt(db, plot_id, owner_id).await
+            } else {
+                0
+            }
+        } else if collect_tax_from_player(db, owner_id, hourly_tax).await {
             // Update last_tax_paid timestamp
             if let Err(e) = sqlx::query(
                 "UPDATE plots SET last_tax_paid = NOW() WHERE id = $1"
@@ -499,31 +516,52 @@ mod tests {
     use super::*;
     use crate::engine::plot_sync::tests::{balance, ledger, owner, player, plot};
 
-    /// 6000 assessed: 120 a week at 2%, but 1 an hour is 168 a week as
-    /// charged, so it's foreclosed at 672 owed
+    /// 6000 assessed: 120 a week at 2%, charged 1 in 120 of every 168 hours,
+    /// so it's foreclosed at 480 owed
     const VALUE: i32 = 6000;
 
+    /// A carry from which this hour charges [`VALUE`]'s plot 1 strand
+    const CARRY_DUE: i32 = 48;
+
     #[test]
-    fn the_threshold_is_four_weeks_of_tax_as_charged() {
+    fn the_threshold_is_four_weeks_of_tax() {
         assert_eq!(weekly_tax(VALUE), 120);
-        assert_eq!(hourly_tax(VALUE), 1);
-        assert_eq!(week_charged(VALUE), 168);
-        assert_eq!(foreclosure_threshold(VALUE), 672);
-        // The cheapest deed still takes four weeks unpaid to lose.
-        assert_eq!(foreclosure_threshold(100) / hourly_tax(100), 4 * 168);
+        assert_eq!(largest_hourly_tax(VALUE), 1);
+        assert_eq!(foreclosure_threshold(VALUE), 480);
+        assert_eq!(foreclosure_threshold(100), 8);
+        assert_eq!(charge_hour(weekly_tax(VALUE), CARRY_DUE), (1, 0));
     }
 
     #[test]
-    fn notices_come_at_each_week_and_an_hour_before() {
-        let due: Vec<i64> = (1..=672).filter(|&after| notice_due(after - 1, after, VALUE)).collect();
-        assert_eq!(due, vec![168, 336, 504, 671]);
+    fn a_week_charges_exactly_the_weekly_tax() {
+        // wilderness and urban deeds, one just under the old 1-an-hour floor,
+        // one a whole strand an hour, and one with a remainder
+        for value in [100, 1000, 8350, 8400, 9000, 168_000] {
+            let weekly = weekly_tax(value);
+            let mut carry = 0;
+            let mut paid = 0;
+            for _ in 0..HOURS_PER_WEEK {
+                let (charge, next) = charge_hour(weekly, carry);
+                assert!(charge <= largest_hourly_tax(value));
+                assert!((0..HOURS_PER_WEEK as i32).contains(&next));
+                paid += charge;
+                carry = next;
+            }
+            assert_eq!((paid, carry), (weekly, 0), "a deed of {value}");
+        }
+    }
+
+    #[test]
+    fn notices_come_at_each_week_and_a_charge_before() {
+        let due: Vec<i64> = (1..=480).filter(|&after| notice_due(after - 1, after, VALUE)).collect();
+        assert_eq!(due, vec![120, 240, 360, 479]);
     }
 
     #[test]
     fn a_big_hour_still_warns_once() {
         // 168000 assessed: 3360 a week, 20 an hour, foreclosed at 13440
         let v = 168_000;
-        assert_eq!(hourly_tax(v), 20);
+        assert_eq!(largest_hourly_tax(v), 20);
         let due: Vec<i64> = (1..=13_440 / 20).map(|h| h * 20).filter(|&a| notice_due(a - 20, a, v)).collect();
         assert_eq!(due, vec![3360, 6720, 10080, 13420]);
     }
@@ -535,6 +573,19 @@ mod tests {
             .execute(db)
             .await
             .unwrap();
+    }
+
+    async fn carry(db: &PgPool, lot: Uuid, carry: i32) {
+        sqlx::query("UPDATE plots SET tax_carry = $1 WHERE id = $2")
+            .bind(carry)
+            .bind(lot)
+            .execute(db)
+            .await
+            .unwrap();
+    }
+
+    async fn carried(db: &PgPool, lot: Uuid) -> i32 {
+        sqlx::query_scalar("SELECT tax_carry FROM plots WHERE id = $1").bind(lot).fetch_one(db).await.unwrap()
     }
 
     async fn owed(db: &PgPool, lot: Uuid) -> i32 {
@@ -569,7 +620,8 @@ mod tests {
     async fn the_last_unpaid_hour_forecloses_and_says_so(db: PgPool) {
         let ada = player(&db, "ada", 0).await;
         let lot = plot(&db, Some(ada), VALUE).await;
-        owe(&db, lot, 671).await;
+        owe(&db, lot, 479).await;
+        carry(&db, lot, CARRY_DUE).await;
         let (chest, chest_box) = station(&db, ada, lot).await;
 
         let report = process_property_taxes(&db).await;
@@ -577,12 +629,12 @@ mod tests {
         assert!(report.notices.is_empty(), "foreclosed, not warned");
         assert_eq!(report.foreclosures.len(), 1);
         let f = &report.foreclosures[0];
-        assert_eq!((f.owner_id, f.tax_owed, f.refund, f.balance), (ada, 672, 5328, 5328));
+        assert_eq!((f.owner_id, f.tax_owed, f.refund, f.balance), (ada, 480, 5520, 5520));
         assert_eq!(f.removed_stations, vec![chest]);
         assert_eq!(owner(&db, lot).await, Some(None), "the lot is unclaimed again");
-        assert_eq!(owed(&db, lot).await, 0);
-        assert_eq!(balance(&db, ada).await, 5328);
-        assert_eq!(ledger(&db, ada).await, vec![(5328, "foreclosure_refund".to_string())]);
+        assert_eq!((owed(&db, lot).await, carried(&db, lot).await), (0, 0));
+        assert_eq!(balance(&db, ada).await, 5520);
+        assert_eq!(ledger(&db, ada).await, vec![(5520, "foreclosure_refund".to_string())]);
         let boxes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM containers WHERE id = $1")
             .bind(chest_box)
             .fetch_one(&db)
@@ -600,8 +652,8 @@ mod tests {
         }
         let terrain_id = format!("test-{lot}");
         assert!(matches!(&sent[0], GameEvent::StationRemoved { station_id } if *station_id == chest));
-        assert!(matches!(&sent[1], GameEvent::CurrencyChanged { player_id, new_balance: 5328 } if *player_id == ada));
-        assert!(matches!(&sent[2], GameEvent::PlotForeclosed { owner_id, terrain_id: t, tax_owed: 672, refund: 5328 }
+        assert!(matches!(&sent[1], GameEvent::CurrencyChanged { player_id, new_balance: 5520 } if *player_id == ada));
+        assert!(matches!(&sent[2], GameEvent::PlotForeclosed { owner_id, terrain_id: t, tax_owed: 480, refund: 5520 }
             if *owner_id == ada && *t == terrain_id));
         assert!(matches!(&sent[3], GameEvent::PlotReleased { terrain_id: t } if *t == terrain_id));
         assert_eq!(sent.len(), 4);
@@ -626,14 +678,15 @@ mod tests {
     async fn passing_a_week_owed_warns_the_owner(db: PgPool) {
         let ada = player(&db, "ada", 0).await;
         let lot = plot(&db, Some(ada), VALUE).await;
-        owe(&db, lot, 167).await;
+        owe(&db, lot, 119).await;
+        carry(&db, lot, CARRY_DUE).await;
 
         let report = process_property_taxes(&db).await;
 
         assert!(report.foreclosures.is_empty());
         assert_eq!(
             report.notices,
-            vec![TaxNotice { owner_id: ada, terrain_id: format!("test-{lot}"), tax_owed: 168, forecloses_at: 672 }]
+            vec![TaxNotice { owner_id: ada, terrain_id: format!("test-{lot}"), tax_owed: 120, forecloses_at: 480 }]
         );
         assert_eq!(owner(&db, lot).await, Some(Some(ada)));
     }
@@ -643,14 +696,45 @@ mod tests {
     async fn strands_pay_off_the_debt_as_far_as_they_reach(db: PgPool) {
         let ada = player(&db, "ada", 101).await;
         let lot = plot(&db, Some(ada), VALUE).await;
-        owe(&db, lot, 671).await;
+        owe(&db, lot, 479).await;
+        carry(&db, lot, CARRY_DUE).await;
 
         let report = process_property_taxes(&db).await;
 
         // 1 for the hour, then the other 100 off the debt
         assert!(report.foreclosures.is_empty() && report.notices.is_empty());
         assert_eq!(balance(&db, ada).await, 0);
-        assert_eq!(owed(&db, lot).await, 571);
+        assert_eq!(owed(&db, lot).await, 379);
         assert_eq!(owner(&db, lot).await, Some(Some(ada)));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_week_of_hours_charges_a_weeks_tax(db: PgPool) {
+        let ada = player(&db, "ada", 1000).await;
+        let urban = plot(&db, Some(ada), 1000).await;
+        let wild = plot(&db, Some(ada), 100).await;
+
+        for _ in 0..HOURS_PER_WEEK {
+            process_property_taxes(&db).await;
+        }
+
+        // 20 and 2, where rounding each hour up took 168 each
+        assert_eq!(balance(&db, ada).await, 1000 - 20 - 2);
+        assert_eq!((owed(&db, urban).await, carried(&db, urban).await), (0, 0));
+        assert_eq!((owed(&db, wild).await, carried(&db, wild).await), (0, 0));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn an_hour_that_charges_nothing_still_pays_down_debt(db: PgPool) {
+        let ada = player(&db, "ada", 50).await;
+        let lot = plot(&db, Some(ada), VALUE).await;
+        owe(&db, lot, 30).await;
+
+        process_property_taxes(&db).await;
+
+        assert_eq!(carried(&db, lot).await, 120, "this hour's 120/168 carries");
+        assert_eq!((balance(&db, ada).await, owed(&db, lot).await), (20, 0));
     }
 }

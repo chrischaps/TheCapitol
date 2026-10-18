@@ -714,13 +714,13 @@ Issues and manages property rights.
 | Initial deed claim (Rural) | 250 Strands | One-time |
 | Initial deed claim (Suburban) | 500 Strands | One-time |
 | Initial deed claim (Urban) | 1,000 Strands | One-time |
-| Property tax | 2% of assessed plot value | Weekly |
+| Property tax | 2% of assessed plot value | Weekly, charged hourly in exact fractions |
 | Deed transfer | 2% of sale price | Per transaction |
 | Plot upgrade permit | 500-2,000 Strands | One-time |
 
 *Property tax is the primary recurring sink, scaling with economy size.*
 
-**Unpaid tax and foreclosure:** tax is charged hourly. An hour the owner can't pay is added to the plot's debt, and the debt comes out of their Strands as soon as they have them. Owners are warned as the debt passes each week of tax, and again an hour before the end. A plot that owes four weeks of tax is foreclosed: it goes back on the market, its stations and their contents are lost, and the deed's value is refunded less the debt.
+**Unpaid tax and foreclosure:** tax is charged hourly, a 168th of the week's tax at a time. Whole Strands are charged and the fraction carries to the next hour, so a week costs exactly 2%: an urban deed of 1000 pays 1 Strand about every eighth hour, 20 a week, and a wilderness deed of 100 pays 1 every 84 hours. (Until #136 each hour rounded up, so every deed under 8400 paid at least 168 a week.) An hour the owner can't pay is added to the plot's debt, and the debt comes out of their Strands as soon as they have them. Owners are warned as the debt passes each week of tax, and again when one more charge would end it. A plot that owes four weeks of tax is foreclosed: it goes back on the market, its stations and their contents are lost, and the deed's value is refunded less the debt.
 
 #### Guild Registry
 
