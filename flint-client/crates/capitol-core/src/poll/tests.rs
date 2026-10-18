@@ -185,6 +185,7 @@ fn answer_for(fetch: Fetch) -> RestResponse {
             total: 0,
         }),
         Fetch::Recipes => RestResponse::Recipes(RecipesResponse { recipes: vec![] }),
+        Fetch::ClaimedPlots => RestResponse::ClaimedPlots(vec![]),
         Fetch::Terrain => panic!("terrain is answered by hand in its test"),
     }
 }
@@ -875,7 +876,7 @@ fn an_answer_from_before_a_drop_still_resolves() {
         player_id: ME,
     }));
     rig.feed(NetEvent::Resync);
-    // Containers was still out, so the snapshot sends the other five now...
+    // Containers was still out, so the snapshot sends the other six now...
     let mut expected = Fetch::SNAPSHOT.to_vec();
     expected.retain(|f| *f != Fetch::Containers);
     assert_eq!(rig.tick_fetches(), expected);
@@ -890,4 +891,32 @@ fn manual_requests_go_out_on_the_next_tick() {
     rig.poller.request(Fetch::Recipes);
     rig.poller.request(Fetch::Recipes);
     assert_eq!(rig.tick_fetches(), vec![Fetch::Recipes]);
+}
+
+#[test]
+fn claimed_lots_come_with_the_snapshot_and_are_never_polled() {
+    let mut rig = Rig::settled();
+    rig.advance(POLL_INTERVAL);
+    assert!(!rig.tick_fetches().contains(&Fetch::ClaimedPlots));
+    // Kept current by WS alone.
+    rig.feed(NetEvent::Ws(plot_claimed(OTHER)));
+    rig.feed(NetEvent::Ws(M::PlotReleased {
+        terrain_id: "sub_2_0_3_L_4".into(),
+    }));
+    assert_eq!(rig.tick_fetches(), vec![]);
+}
+
+#[test]
+fn a_claim_while_the_list_is_out_asks_for_it_again() {
+    let mut rig = Rig::settled();
+    rig.feed(NetEvent::Resync);
+    let sent = rig.tick();
+    let (_, tag) = *sent
+        .iter()
+        .find(|(_, t)| rig.poller.in_flight(*t) == Some(Fetch::ClaimedPlots))
+        .unwrap();
+    // The answer may have been read before this claim committed.
+    rig.feed(NetEvent::Ws(plot_claimed(OTHER)));
+    assert_eq!(rig.answer(tag), Some(Fetch::ClaimedPlots));
+    assert_eq!(rig.tick_fetches(), vec![Fetch::ClaimedPlots]);
 }

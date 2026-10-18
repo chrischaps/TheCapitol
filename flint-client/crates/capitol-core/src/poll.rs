@@ -25,7 +25,7 @@
 //!
 //! | Trigger | Fetch |
 //! |---|---|
-//! | first `Connected`, every `Resync` | me (name, position, currency), containers, nearby nodes, nearby stations, plots, recipes |
+//! | first `Connected`, every `Resync` | me (name, position, currency), containers, nearby nodes, nearby stations, plots, recipes, everyone's claimed lots |
 //! | every 5 s while connected | nearby nodes, nearby stations, plots, currency |
 //! | `inventory_updated` (mine, or a container I hold) | containers, or the open station's container |
 //! | `station_opened` (mine) | that station's container |
@@ -36,12 +36,17 @@
 //! | a REST `move_item` answered | containers, and the open station's container |
 //! | `zone_changed` (mine, a real crossing) | plots |
 //! | `plot_claimed` (mine, not yet in my plots) | plots |
+//! | `plot_claimed` or `plot_released` while the claimed lots are in flight | claimed lots, again |
 //! | `terrain_updated` | terrain |
 //!
 //! **Plots are your own** (`/plots?owner=<you>`, P6.4), as React lists
 //! them since B7: placement tests against them and the map edges them in
 //! gold. Any other plot is one `/plots/at`, which the plot panel asks for.
-//! Everyone's claimed lots (`/plots/claimed`, B13) aren't fetched here.
+//! Everyone's claimed lots (`/plots/claimed`, B13) are fetched with the
+//! snapshot only, never polled: WS `plot_claimed` and `plot_released` keep
+//! the store's set current (P8.6b), and a resync fetches it whole again.
+//! An event that lands while the list is in flight may predate the answer,
+//! so it's sent once more.
 //!
 //! **One in flight per fetch.** Asking for something already queued does
 //! nothing. Asking for something already *in flight* marks it to be sent once
@@ -93,6 +98,8 @@ pub enum Fetch {
     Plots,
     /// `GET /recipes`
     Recipes,
+    /// `GET /plots/claimed`
+    ClaimedPlots,
     /// `GET /terrain`
     Terrain,
 }
@@ -100,13 +107,14 @@ pub enum Fetch {
 impl Fetch {
     /// Everything the server doesn't push, refetched on connect and resync.
     /// `Me` comes first and carries the balance, so `Currency` isn't needed here.
-    pub const SNAPSHOT: [Fetch; 6] = [
+    pub const SNAPSHOT: [Fetch; 7] = [
         Fetch::Me,
         Fetch::Containers,
         Fetch::NearbyNodes,
         Fetch::NearbyStations,
         Fetch::Plots,
         Fetch::Recipes,
+        Fetch::ClaimedPlots,
     ];
 
     /// What the timer refetches. Currency is here for what the server
@@ -138,6 +146,7 @@ impl Fetch {
                 ..Default::default()
             }),
             Fetch::Recipes => RestRequest::Recipes,
+            Fetch::ClaimedPlots => RestRequest::ClaimedPlots,
             // `terrain_updated` means it changed, so there's nothing to revalidate.
             Fetch::Terrain => RestRequest::Terrain {
                 cached_version: None,
@@ -318,6 +327,15 @@ impl Poller {
                 self.request(Fetch::Plots)
             }
             _ => {}
+        }
+        // Not `request`: with nothing in flight, the store already has it.
+        if matches!(
+            change,
+            StateEvent::LotClaimed(_) | StateEvent::LotReleased { .. }
+        ) && self.in_flight.values().any(|f| *f == Fetch::ClaimedPlots)
+            && !self.again.contains(&Fetch::ClaimedPlots)
+        {
+            self.again.push(Fetch::ClaimedPlots);
         }
     }
 
