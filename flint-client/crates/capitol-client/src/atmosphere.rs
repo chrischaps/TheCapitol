@@ -251,7 +251,7 @@ fn floats<const N: usize>(v: &toml::Value) -> Option<[f32; N]> {
     values.get(..N)?.try_into().ok()
 }
 
-fn number(v: Option<&toml::Value>) -> Option<f32> {
+pub(crate) fn number(v: Option<&toml::Value>) -> Option<f32> {
     match v? {
         toml::Value::Float(f) => Some(*f as f32),
         toml::Value::Integer(i) => Some(*i as f32),

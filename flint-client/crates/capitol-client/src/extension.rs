@@ -82,6 +82,8 @@ pub struct CapitolExtension {
     houses: world::houses::Houses,
     /// `--claim-sample`: offline, claims to build houses on.
     claim_sample: Option<world::houses::Sample>,
+    /// The grass fields over the rural ring and the wilderness (P8.6c).
+    grass: world::grass::Grass,
     plot_panel: ui::plot::PlotPanel,
     atmosphere: Atmosphere,
     /// `--time-of-day`: the hour pinned, 0..1 from midnight, in place of
@@ -147,6 +149,7 @@ impl CapitolExtension {
             owned_drawn: None,
             houses: world::houses::Houses::default(),
             claim_sample: None,
+            grass: world::grass::Grass::default(),
             plot_panel: ui::plot::PlotPanel::default(),
             atmosphere: Atmosphere::default(),
             time_of_day: None,
@@ -523,6 +526,14 @@ impl PlayerExtension for CapitolExtension {
             let uploaded = self.houses.upload(gpu, &self.lots, glow);
             attach_each(ctx, uploaded.iter());
         }
+        // The grass, cleared round every node the server has shown us.
+        if let Some(session) = &self.session {
+            let nodes = session.state().nodes().values();
+            self.grass.nodes(nodes.map(|n| [n.x, n.y]));
+        }
+        if let Some(gpu) = ctx.gpu.as_mut() {
+            self.grass.flush(gpu, ctx.world, Instant::now());
+        }
         let Some(gpu) = ctx.gpu.as_mut() else {
             return;
         };
@@ -557,6 +568,9 @@ impl PlayerExtension for CapitolExtension {
             // The lots moved, so the gold and the houses are built again.
             self.owned_drawn = None;
             self.houses.lots_changed();
+        }
+        if rebuild.ground || rebuild.roads || rebuild.plots {
+            self.grass.terrain(terrain);
         }
         if self.built.is_some() {
             tracing::info!(

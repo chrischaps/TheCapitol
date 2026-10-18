@@ -50,6 +50,12 @@ pub const CHIMNEY: u32 = 0x6e4a3c;
 pub const GLASS: u32 = 0x27313d;
 pub const LAMP: u32 = 0xffb766;
 
+/// The grass fields (P8.6c): a deep olive at the root, a muted take on the
+/// rural zone's lime at the tip, and straw for the dry blades.
+pub const GRASS_ROOT: u32 = 0x3e5a2a;
+pub const GRASS_TIP: u32 = 0x93ae48;
+pub const GRASS_DRY: u32 = 0xa8955a;
+
 /// `c` darker (`k` < 1) or lighter, alpha kept.
 pub fn shade(c: [f32; 4], k: f32) -> [f32; 4] {
     [c[0] * k, c[1] * k, c[2] * k, c[3]]

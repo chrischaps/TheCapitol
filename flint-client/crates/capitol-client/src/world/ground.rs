@@ -120,7 +120,7 @@ fn lattice(ix: i32, iz: i32) -> f32 {
 }
 
 /// Smooth value noise in [0, 1) with a lattice spacing of one unit.
-fn value_noise(x: f32, z: f32) -> f32 {
+pub(crate) fn value_noise(x: f32, z: f32) -> f32 {
     let (fx, fz) = (x.floor(), z.floor());
     let (ix, iz) = (fx as i32, fz as i32);
     let ease = |t: f32| t * t * (3.0 - 2.0 * t);
