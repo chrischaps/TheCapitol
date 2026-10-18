@@ -49,7 +49,7 @@ use capitol_core::catalog::Catalog;
 use capitol_core::protocol::rest::SlotItem;
 use capitol_core::protocol::rules::quality_grade;
 use capitol_core::protocol::rules::stacking::Units;
-use capitol_core::protocol::rules::tools;
+use capitol_core::protocol::rules::{resources, tools};
 use capitol_core::state::Container;
 use egui::epaint::Shadow;
 use egui::{Color32, CursorIcon, Id, Painter, Pos2, Rect, Sense, Stroke, Ui};
@@ -992,13 +992,16 @@ pub fn tool_lines(
         .iter()
         .filter(|r| r.tool_type.as_deref() == Some(spec.tool_type.as_str()))
     {
-        let difficulty = resource.difficulty.unwrap_or(0.0);
+        let difficulty = resource.difficulty;
         let leverage = tools::leverage(power, difficulty);
+        // The yield is the tier's row of the resource's table (E2.2), not the power's
+        let units = resources::yield_for(&resource.yields, tools::Tier::from_str(&spec.tier))
+            .map(|y| if y.min == y.max { y.min.to_string() } else { format!("{}–{}", y.min, y.max) })
+            .unwrap_or_else(|| "–".into());
         ui.label(
             theme::dim(format!(
-                "{}: ×{:.2} yield, {:.0}% faster, up to −{} quality",
+                "{}: {units} a gather, {:.0}% faster, up to −{} quality",
                 resource.name,
-                1.0 + tools::YIELD_PER_LEVERAGE * leverage,
                 tools::SPEED_PER_LEVERAGE * leverage * 100.0,
                 tools::max_damage(power, difficulty),
             ))
