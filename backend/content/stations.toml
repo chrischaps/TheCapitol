@@ -16,7 +16,7 @@
 #                      plot, on dry ground no lot covers, for its owner alone
 #                      (#187). On a lot it still needs the lot to be yours.
 #
-# Every crafting station should be some recipe's required_station_type.
+# Every crafting station must be some recipe's required_station_type.
 
 [[station]]
 id = "workbench"
@@ -31,6 +31,28 @@ description = "Craft wooden items and tools"
 off_plot = true
 
 [[station]]
+id = "sawbench"
+name = "Sawbench"
+category = "crafting"
+kit = "sawbench_kit"
+slot_count = 8
+layout_columns = 4
+interaction_range = 75.0
+icon = "sawbench"
+description = "Saw logs into planks, and planks into handles"
+
+[[station]]
+id = "kiln"
+name = "Kiln"
+category = "crafting"
+kit = "kiln_kit"
+slot_count = 8
+layout_columns = 4
+interaction_range = 75.0
+icon = "kiln"
+description = "Burn logs to charcoal and fire clay into bricks"
+
+[[station]]
 id = "forge"
 name = "Forge"
 category = "crafting"
@@ -40,6 +62,17 @@ layout_columns = 4
 interaction_range = 75.0
 icon = "forge"
 description = "Smelt ores and craft metal equipment"
+
+[[station]]
+id = "anvil"
+name = "Anvil"
+category = "crafting"
+kit = "anvil_kit"
+slot_count = 8
+layout_columns = 4
+interaction_range = 75.0
+icon = "anvil"
+description = "Hammer iron ingots into tool heads"
 
 [[station]]
 id = "storage_chest"

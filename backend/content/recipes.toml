@@ -60,36 +60,6 @@ outputs = [{ item_type = "chest_kit", quantity_min = 1, quantity_max = 1 }]
 quality_weights = { variance_min = -3, variance_max = 3 }
 crafting_requirements = {}
 
-[[recipe]]
-id = "craft_forge"
-name = "Forge Kit"
-description = "Build a forge kit at a workbench, from rope and fiber."
-category = "station_crafting"
-required_station_type = "workbench"
-base_duration_ticks = 120
-inputs = [
-    { item_type = "rope", quantity = 4, quality_weight = 0.7 },
-    { item_type = "fiber", quantity = 6, quality_weight = 0.3 },
-]
-outputs = [{ item_type = "forge_kit", quantity_min = 1, quantity_max = 1 }]
-quality_weights = { variance_min = -3, variance_max = 3 }
-crafting_requirements = {}
-
-[[recipe]]
-id = "craft_stone_sickle"
-name = "Stone Sickle"
-description = "Bind a sharp edge to a handle at a workbench. A sickle cuts grass faster and cleaner than bare hands."
-category = "station_crafting"
-required_station_type = "workbench"
-base_duration_ticks = 80
-inputs = [
-    { item_type = "rope", quantity = 2, quality_weight = 0.6 },
-    { item_type = "fiber", quantity = 4, quality_weight = 0.4 },
-]
-outputs = [{ item_type = "stone_sickle", quantity_min = 1, quantity_max = 1 }]
-quality_weights = { variance_min = -3, variance_max = 3 }
-crafting_requirements = {}
-
 # The stone axe and pickaxe (D5), so trees and veins can be worked (E2.2).
 # Craft recipes give the station 0.4; assembly leaves the output to its parts.
 
@@ -151,3 +121,294 @@ inputs = [
 outputs = [{ item_type = "stone_pickaxe", quantity_min = 1, quantity_max = 1 }]
 quality_weights = { variance_min = -2, variance_max = 2, station = 0.1 }
 crafting_requirements = {}
+
+# The rest of D5 (E2.4). The sickle keeps the id its recipe had in E1.4.
+[[recipe]]
+id = "craft_stone_sickle"
+name = "Stone Sickle"
+description = "Lash a knapped edge to a handle. A sickle cuts grass faster and cleaner than bare hands."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 100
+inputs = [
+    { item_type = "knapped_stone", quantity = 1, quality_weight = 2.0 },
+    { item_type = "tool_handle", quantity = 1, quality_weight = 1.0 },
+    { item_type = "rope", quantity = 1, quality_weight = 0.3 },
+]
+outputs = [{ item_type = "stone_sickle", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "stone_hammer"
+name = "Stone Hammer"
+description = "Lash two knapped stones to a handle. The anvil and the station kits need a hammer."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 120
+inputs = [
+    { item_type = "knapped_stone", quantity = 2, quality_weight = 2.0 },
+    { item_type = "tool_handle", quantity = 1, quality_weight = 1.0 },
+    { item_type = "rope", quantity = 1, quality_weight = 0.3 },
+]
+outputs = [{ item_type = "stone_hammer", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1 }
+crafting_requirements = {}
+
+# Iron tools: an anvil-made head on a handle, the head counting twice.
+[[recipe]]
+id = "iron_sickle"
+name = "Iron Sickle"
+description = "Haft an iron sickle blade on a handle."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 100
+inputs = [
+    { item_type = "iron_sickle_blade", quantity = 1, quality_weight = 2.0 },
+    { item_type = "tool_handle", quantity = 1, quality_weight = 1.0 },
+]
+outputs = [{ item_type = "iron_sickle", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "iron_axe"
+name = "Iron Axe"
+description = "Haft an iron axe head on a handle."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 100
+inputs = [
+    { item_type = "iron_axe_head", quantity = 1, quality_weight = 2.0 },
+    { item_type = "tool_handle", quantity = 1, quality_weight = 1.0 },
+]
+outputs = [{ item_type = "iron_axe", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "iron_pickaxe"
+name = "Iron Pickaxe"
+description = "Haft an iron pickaxe head on a handle."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 100
+inputs = [
+    { item_type = "iron_pickaxe_head", quantity = 1, quality_weight = 2.0 },
+    { item_type = "tool_handle", quantity = 1, quality_weight = 1.0 },
+]
+outputs = [{ item_type = "iron_pickaxe", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "iron_hammer"
+name = "Iron Hammer"
+description = "Haft an iron hammer head on a handle."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 100
+inputs = [
+    { item_type = "iron_hammer_head", quantity = 1, quality_weight = 2.0 },
+    { item_type = "tool_handle", quantity = 1, quality_weight = 1.0 },
+]
+outputs = [{ item_type = "iron_hammer", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1 }
+crafting_requirements = {}
+
+# The sawbench. Processing keeps the main ingredient's quality; the station has 0.3.
+[[recipe]]
+id = "plank"
+name = "Planks"
+description = "Saw a log into three planks."
+category = "station_crafting"
+required_station_type = "sawbench"
+base_duration_ticks = 60
+inputs = [{ item_type = "log", quantity = 1, quality_weight = 1.0 }]
+outputs = [{ item_type = "plank", quantity_min = 3, quantity_max = 3 }]
+quality_weights = { variance_min = -3, variance_max = 3, station = 0.3 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "sawn_handle"
+name = "Sawn Handles"
+description = "Saw a plank into two handles. Dearer than sticks, and they carry the wood's quality."
+category = "station_crafting"
+required_station_type = "sawbench"
+base_duration_ticks = 60
+inputs = [{ item_type = "plank", quantity = 1, quality_weight = 1.0 }]
+outputs = [{ item_type = "tool_handle", quantity_min = 2, quantity_max = 2 }]
+quality_weights = { variance_min = -5, variance_max = 5, station = 0.4 }
+crafting_requirements = {}
+
+# The kiln.
+[[recipe]]
+id = "charcoal"
+name = "Charcoal"
+description = "Burn a log down to charcoal, for the forge and the kiln."
+category = "station_crafting"
+required_station_type = "kiln"
+base_duration_ticks = 150
+inputs = [{ item_type = "log", quantity = 1, quality_weight = 1.0 }]
+outputs = [{ item_type = "charcoal", quantity_min = 2, quantity_max = 2 }]
+quality_weights = { variance_min = -3, variance_max = 3, station = 0.3 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "brick"
+name = "Bricks"
+description = "Fire clay into bricks, with charcoal for the heat."
+category = "station_crafting"
+required_station_type = "kiln"
+base_duration_ticks = 150
+inputs = [
+    { item_type = "clay", quantity = 2, quality_weight = 0.85 },
+    { item_type = "charcoal", quantity = 1, quality_weight = 0.15 },
+]
+outputs = [{ item_type = "brick", quantity_min = 2, quantity_max = 2 }]
+quality_weights = { variance_min = -3, variance_max = 3, station = 0.3 }
+crafting_requirements = {}
+
+# The forge.
+[[recipe]]
+id = "iron_ingot"
+name = "Iron Ingot"
+description = "Smelt iron ore into an ingot, with charcoal for the heat."
+category = "station_crafting"
+required_station_type = "forge"
+base_duration_ticks = 200
+inputs = [
+    { item_type = "iron_ore", quantity = 2, quality_weight = 0.85 },
+    { item_type = "charcoal", quantity = 1, quality_weight = 0.15 },
+]
+outputs = [{ item_type = "iron_ingot", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -3, variance_max = 3, station = 0.3 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "iron_nails"
+name = "Iron Nails"
+description = "Draw an ingot out into ten nails."
+category = "station_crafting"
+required_station_type = "forge"
+base_duration_ticks = 100
+inputs = [{ item_type = "iron_ingot", quantity = 1, quality_weight = 1.0 }]
+outputs = [{ item_type = "iron_nails", quantity_min = 10, quantity_max = 10 }]
+quality_weights = { variance_min = -3, variance_max = 3, station = 0.3 }
+crafting_requirements = {}
+
+# The anvil, with a hammer: craft recipes, where a good anvil and hammer
+# lift the head above its iron.
+[[recipe]]
+id = "iron_sickle_blade"
+name = "Iron Sickle Blade"
+description = "Hammer an iron ingot into a sickle blade at the anvil."
+category = "station_crafting"
+required_station_type = "anvil"
+base_duration_ticks = 150
+inputs = [{ item_type = "iron_ingot", quantity = 1, quality_weight = 1.0 }]
+outputs = [{ item_type = "iron_sickle_blade", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -5, variance_max = 5, station = 0.4, tool = 0.2 }
+crafting_requirements = { tool_type = "hammer" }
+
+[[recipe]]
+id = "iron_axe_head"
+name = "Iron Axe Head"
+description = "Hammer two iron ingots into an axe head at the anvil."
+category = "station_crafting"
+required_station_type = "anvil"
+base_duration_ticks = 200
+inputs = [{ item_type = "iron_ingot", quantity = 2, quality_weight = 1.0 }]
+outputs = [{ item_type = "iron_axe_head", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -5, variance_max = 5, station = 0.4, tool = 0.2 }
+crafting_requirements = { tool_type = "hammer" }
+
+[[recipe]]
+id = "iron_pickaxe_head"
+name = "Iron Pickaxe Head"
+description = "Hammer two iron ingots into a pickaxe head at the anvil."
+category = "station_crafting"
+required_station_type = "anvil"
+base_duration_ticks = 200
+inputs = [{ item_type = "iron_ingot", quantity = 2, quality_weight = 1.0 }]
+outputs = [{ item_type = "iron_pickaxe_head", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -5, variance_max = 5, station = 0.4, tool = 0.2 }
+crafting_requirements = { tool_type = "hammer" }
+
+[[recipe]]
+id = "iron_hammer_head"
+name = "Iron Hammer Head"
+description = "Hammer two iron ingots into a hammer head at the anvil."
+category = "station_crafting"
+required_station_type = "anvil"
+base_duration_ticks = 200
+inputs = [{ item_type = "iron_ingot", quantity = 2, quality_weight = 1.0 }]
+outputs = [{ item_type = "iron_hammer_head", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -5, variance_max = 5, station = 0.4, tool = 0.2 }
+crafting_requirements = { tool_type = "hammer" }
+
+# Station kits, at a workbench with a hammer. The forge kit moved from rope
+# and fiber to bricks (D5); forge kits already made are unaffected.
+[[recipe]]
+id = "craft_kiln"
+name = "Kiln Kit"
+description = "Build a kiln kit from stone, clay and sticks, with a hammer."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 150
+inputs = [
+    { item_type = "stone", quantity = 10, quality_weight = 0.5 },
+    { item_type = "clay", quantity = 6, quality_weight = 0.4 },
+    { item_type = "sticks", quantity = 4, quality_weight = 0.1 },
+]
+outputs = [{ item_type = "kiln_kit", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1, tool = 0.2 }
+crafting_requirements = { tool_type = "hammer" }
+
+[[recipe]]
+id = "craft_forge"
+name = "Forge Kit"
+description = "Build a forge kit from bricks, stone and rope, with a hammer."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 200
+inputs = [
+    { item_type = "brick", quantity = 12, quality_weight = 0.6 },
+    { item_type = "stone", quantity = 8, quality_weight = 0.3 },
+    { item_type = "rope", quantity = 4, quality_weight = 0.1 },
+]
+outputs = [{ item_type = "forge_kit", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1, tool = 0.2 }
+crafting_requirements = { tool_type = "hammer" }
+
+[[recipe]]
+id = "craft_sawbench"
+name = "Sawbench Kit"
+description = "Build a sawbench kit from logs, an iron blade, nails and rope, with a hammer."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 200
+inputs = [
+    { item_type = "log", quantity = 4, quality_weight = 0.5 },
+    { item_type = "iron_ingot", quantity = 1, quality_weight = 0.3 },
+    { item_type = "iron_nails", quantity = 10, quality_weight = 0.1 },
+    { item_type = "rope", quantity = 2, quality_weight = 0.1 },
+]
+outputs = [{ item_type = "sawbench_kit", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1, tool = 0.2 }
+crafting_requirements = { tool_type = "hammer" }
+
+[[recipe]]
+id = "craft_anvil"
+name = "Anvil Kit"
+description = "Build an anvil kit from iron ingots on a plank block, with a hammer."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 250
+inputs = [
+    { item_type = "iron_ingot", quantity = 6, quality_weight = 0.8 },
+    { item_type = "plank", quantity = 4, quality_weight = 0.2 },
+]
+outputs = [{ item_type = "anvil_kit", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1, tool = 0.2 }
+crafting_requirements = { tool_type = "hammer" }

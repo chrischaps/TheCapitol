@@ -563,6 +563,10 @@ mod tests {
         let kit = |t: &str| Kit::of(&catalog, &item(t)).map(|k| k.station_type);
         assert_eq!(kit("forge_kit").as_deref(), Some("forge"));
         assert_eq!(kit("chest_kit").as_deref(), Some("storage_chest"));
+        // D5's new stations (E2.4)
+        assert_eq!(kit("sawbench_kit").as_deref(), Some("sawbench"));
+        assert_eq!(kit("kiln_kit").as_deref(), Some("kiln"));
+        assert_eq!(kit("anvil_kit").as_deref(), Some("anvil"));
         assert_eq!(kit("rope"), None);
     }
 

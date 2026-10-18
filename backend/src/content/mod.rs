@@ -22,10 +22,6 @@ pub use crate::models::CraftingRequirements;
 use serde::Deserialize;
 use sqlx::{PgPool, Postgres, Transaction};
 
-/// Crafting stations with no recipe that needs them yet. Each one is a gap
-/// in the content, not a rule: E2.4 (#163) gives the forge something to make.
-const NOTHING_TO_MAKE_YET: &[&str] = &["forge"];
-
 const ITEMS: &str = include_str!("../../content/items.toml");
 const RESOURCES: &str = include_str!("../../content/resources.toml");
 const CONTAINERS: &str = include_str!("../../content/containers.toml");
@@ -227,6 +223,66 @@ pub struct RecipeDef {
     pub quality_weights: VarianceDef,
     #[serde(default)]
     pub crafting_requirements: CraftingRequirements,
+}
+
+impl ItemDef {
+    /// As the engine holds it once it's loaded from `item_types`.
+    pub fn to_item_type(&self) -> crate::models::ItemType {
+        crate::models::ItemType {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            category: self.category.clone(),
+            stackable: self.stackable,
+            weight: self.weight,
+            tool_type: self.tool.as_ref().map(|t| t.tool_type.clone()),
+            tier: self.tool.as_ref().map(|t| t.tier.clone()),
+            base_power: self.tool.as_ref().map(|t| t.base_power),
+            max_durability: self.tool.as_ref().map(|t| t.max_durability),
+        }
+    }
+}
+
+impl RecipeDef {
+    /// As the engine holds it once it's loaded from `recipes`, weights filled in.
+    pub fn to_recipe(&self) -> crate::models::Recipe {
+        use crate::models::{QualityWeights, RecipeInput, RecipeOutput, RecipeRow};
+        let q = &self.quality_weights;
+        crate::models::Recipe::from(RecipeRow {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            description: self.description.clone(),
+            category: self.category.clone(),
+            inputs: sqlx::types::Json(
+                self.inputs
+                    .iter()
+                    .map(|i| RecipeInput {
+                        item_type: i.item_type.clone(),
+                        quantity: i.quantity,
+                        quality_weight: i.quality_weight,
+                    })
+                    .collect(),
+            ),
+            outputs: sqlx::types::Json(
+                self.outputs
+                    .iter()
+                    .map(|o| RecipeOutput {
+                        item_type: o.item_type.clone(),
+                        quantity_min: o.quantity_min,
+                        quantity_max: o.quantity_max,
+                    })
+                    .collect(),
+            ),
+            base_duration_ticks: self.base_duration_ticks,
+            quality_weights: sqlx::types::Json(QualityWeights {
+                variance_min: q.variance_min,
+                variance_max: q.variance_max,
+                station: q.station,
+                tool: q.tool,
+            }),
+            crafting_requirements: sqlx::types::Json(self.crafting_requirements.clone()),
+            required_station_type: self.required_station_type.clone(),
+        })
+    }
 }
 
 /// The ids `retired.toml` keeps in the tables, by table.
@@ -530,7 +586,7 @@ pub fn validate(content: &Content) -> Vec<String> {
             problems.push(format!("station '{}': no recipe makes its kit '{}'", s.id, s.kit));
         }
         let needed = content.recipes.iter().any(|r| r.required_station_type.as_deref() == Some(&s.id));
-        if s.category != "storage" && !needed && !NOTHING_TO_MAKE_YET.contains(&s.id.as_str()) {
+        if s.category != "storage" && !needed {
             problems.push(format!("station '{}' has nothing to make: no recipe needs it", s.id));
         }
     }
@@ -1051,13 +1107,22 @@ mod tests {
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
     async fn the_content_keeps_what_the_migrations_seeded(db: PgPool) {
         // E0.3 moved the seeds across unchanged. Content has grown since (the
-        // stone sickle, E1.4), so the sync may add rows, but every seeded row
-        // comes through it as it was, and a second sync changes nothing.
+        // stone sickle, E1.4; D5's tree, E2.4), so the sync may add rows, but
+        // every seeded row comes through it as it was, and a second sync
+        // changes nothing. Rows the content changes on purpose are named here.
+        const CHANGED_ON_PURPOSE: &[&str] = &[
+            // D5: the forge kit is bricks, stone and rope, under a hammer
+            "recipes {\"id\":\"craft_forge\"",
+        ];
         let before = static_tables(&db).await;
         let report = sync(&db, &load().unwrap()).await.unwrap();
         assert_eq!(report.retired, 0);
         let after = static_tables(&db).await;
-        let changed: Vec<_> = before.iter().filter(|row| !after.contains(row)).collect();
+        let changed: Vec<_> = before
+            .iter()
+            .filter(|row| !after.contains(row))
+            .filter(|row| !CHANGED_ON_PURPOSE.iter().any(|p| row.starts_with(p)))
+            .collect();
         assert!(changed.is_empty(), "the sync changed seeded rows:
 {changed:#?}");
         sync(&db, &load().unwrap()).await.unwrap();

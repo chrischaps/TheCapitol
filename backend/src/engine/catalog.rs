@@ -211,4 +211,67 @@ mod tests {
         let tree = wire.resource_types.iter().find(|t| t.id == "tree").unwrap();
         assert_eq!((tree.yield_quantity_min, tree.yield_quantity_max), (1, 2), "a gated resource's least tier");
     }
+
+    /// The protocol's catalog fixture, which is also the Flint client's
+    /// offline fallback, is what a server on this content serves. After a
+    /// content change, run it with `CATALOG_FIXTURE=write` to rewrite both.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_catalog_fixture_is_the_content(db: sqlx::PgPool) {
+        use crate::models::{RecipeRow, ResourceType, ITEM_TYPE_COLUMNS, STATION_TYPE_COLUMNS};
+        crate::content::load_and_sync(&db).await.unwrap();
+        // The tables as `main` loads them
+        let mut game = GameState::with_params(WorldGenParams::default());
+        let resources: Vec<ResourceType> = sqlx::query_as(
+            "SELECT id, name, yields_item, yield_quantity_min, yield_quantity_max,
+             base_quality_min, base_quality_max, required_tool, extraction_duration_ticks, regeneration_ticks,
+             tool_type, difficulty, yields, cluster, spawns
+             FROM resource_types",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        game.resource_types = resources.into_iter().map(|t| (t.id.clone(), t)).collect();
+        let items: Vec<ItemType> = sqlx::query_as(&format!("SELECT {ITEM_TYPE_COLUMNS} FROM item_types"))
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        game.item_types = items.into_iter().map(|t| (t.id.clone(), t)).collect();
+        let recipes: Vec<RecipeRow> = sqlx::query_as(
+            "SELECT id, name, description, category, inputs, outputs, base_duration_ticks, quality_weights,
+             crafting_requirements, required_station_type
+             FROM recipes",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        game.recipes = recipes.into_iter().map(|r| (r.id.clone(), r.into())).collect();
+        let stations: Vec<StationType> = sqlx::query_as(&format!("SELECT {STATION_TYPE_COLUMNS} FROM station_types"))
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        game.station_types = stations.into_iter().map(|t| (t.id.clone(), t)).collect();
+        let containers: Vec<ContainerType> =
+            sqlx::query_as("SELECT id, name, slot_count, layout_columns FROM container_types")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        game.container_types = containers.into_iter().map(|t| (t.id.clone(), t)).collect();
+
+        // Written as captured: no newline at the end
+        let json = serde_json::to_string(&build(&game)).unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let fixture = root.join("protocol/tests/fixtures/rest/catalog.json");
+        let fallback = root.join("flint-client/crates/capitol-core/src/catalog_fallback.json");
+        if std::env::var("CATALOG_FIXTURE").as_deref() == Ok("write") {
+            for path in [&fixture, &fallback] {
+                std::fs::write(path, &json).unwrap();
+            }
+        }
+        let on_disk = std::fs::read_to_string(&fixture).unwrap();
+        assert!(
+            on_disk.trim_end() == json,
+            "the catalog fixture is stale: run this test with CATALOG_FIXTURE=write"
+        );
+    }
 }

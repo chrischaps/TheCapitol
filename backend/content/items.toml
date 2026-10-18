@@ -6,8 +6,8 @@
 #   id         the key. Never rename or delete one: items in players' hands
 #              name it. Move a type you no longer want to retired.toml instead.
 #   name       shown to players
-#   category   raw_material, processed_material, placeable (a station kit)
-#              or tool
+#   category   raw_material, processed_material, component (a tool's part),
+#              tool or placeable (a station kit)
 #   stackable  false for one-per-slot items such as kits and tools
 #   weight     per unit
 #   tool       only for a tool (E1.4): { tool_type, tier, base_power,
@@ -55,15 +55,14 @@ category = "placeable"
 stackable = false
 weight = 8
 
-# The one tool until E2.4 (#163) brings stone and the rest. Its recipe makes
-# do with rope and fiber.
+# The stone tier (D5): a knapped edge, a handle and rope.
 [[item]]
 id = "stone_sickle"
 name = "Stone Sickle"
 category = "tool"
 stackable = false
-weight = 1.5
-tool = { tool_type = "sickle", tier = "stone", base_power = 6.0, max_durability = 60 }
+weight = 0.8
+tool = { tool_type = "sickle", tier = "stone", base_power = 10.0, max_durability = 60 }
 
 # What the D5 resources yield (E2.2). E2.4 (#163) brings the rest of D5's items.
 [[item]]
@@ -132,3 +131,132 @@ category = "tool"
 stackable = false
 weight = 1.6
 tool = { tool_type = "pickaxe", tier = "stone", base_power = 10.0, max_durability = 60 }
+
+# The rest of D5 (E2.4). The stone hammer opens the anvil and the kits.
+[[item]]
+id = "stone_hammer"
+name = "Stone Hammer"
+category = "tool"
+stackable = false
+weight = 1.4
+tool = { tool_type = "hammer", tier = "stone", base_power = 10.0, max_durability = 60 }
+
+# What the sawbench, kiln and forge make from logs, clay and ore.
+[[item]]
+id = "plank"
+name = "Plank"
+category = "processed_material"
+stackable = true
+weight = 1.0
+
+[[item]]
+id = "charcoal"
+name = "Charcoal"
+category = "processed_material"
+stackable = true
+weight = 0.4
+
+[[item]]
+id = "brick"
+name = "Brick"
+category = "processed_material"
+stackable = true
+weight = 1.2
+
+[[item]]
+id = "iron_ingot"
+name = "Iron Ingot"
+category = "processed_material"
+stackable = true
+weight = 1.0
+
+[[item]]
+id = "iron_nails"
+name = "Iron Nails"
+category = "processed_material"
+stackable = true
+weight = 0.05
+
+# Iron heads, forged at the anvil and hafted at the workbench.
+[[item]]
+id = "iron_sickle_blade"
+name = "Iron Sickle Blade"
+category = "component"
+stackable = true
+weight = 0.6
+
+[[item]]
+id = "iron_axe_head"
+name = "Iron Axe Head"
+category = "component"
+stackable = true
+weight = 1.2
+
+[[item]]
+id = "iron_pickaxe_head"
+name = "Iron Pickaxe Head"
+category = "component"
+stackable = true
+weight = 1.4
+
+[[item]]
+id = "iron_hammer_head"
+name = "Iron Hammer Head"
+category = "component"
+stackable = true
+weight = 1.2
+
+# The iron tier: more yield, cleaner quality, and over three times the life.
+[[item]]
+id = "iron_sickle"
+name = "Iron Sickle"
+category = "tool"
+stackable = false
+weight = 1.0
+tool = { tool_type = "sickle", tier = "iron", base_power = 18.0, max_durability = 200 }
+
+[[item]]
+id = "iron_axe"
+name = "Iron Axe"
+category = "tool"
+stackable = false
+weight = 1.6
+tool = { tool_type = "axe", tier = "iron", base_power = 18.0, max_durability = 200 }
+
+[[item]]
+id = "iron_pickaxe"
+name = "Iron Pickaxe"
+category = "tool"
+stackable = false
+weight = 1.8
+tool = { tool_type = "pickaxe", tier = "iron", base_power = 18.0, max_durability = 200 }
+
+[[item]]
+id = "iron_hammer"
+name = "Iron Hammer"
+category = "tool"
+stackable = false
+weight = 1.6
+tool = { tool_type = "hammer", tier = "iron", base_power = 18.0, max_durability = 200 }
+
+# The new stations' kits, made at a workbench with a hammer.
+[[item]]
+id = "kiln_kit"
+name = "Kiln Kit"
+category = "placeable"
+stackable = false
+weight = 14
+
+[[item]]
+id = "sawbench_kit"
+name = "Sawbench Kit"
+category = "placeable"
+stackable = false
+weight = 12
+
+[[item]]
+id = "anvil_kit"
+name = "Anvil Kit"
+category = "placeable"
+stackable = false
+weight = 20

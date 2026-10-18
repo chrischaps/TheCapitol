@@ -460,4 +460,132 @@ mod tests {
             assert!(good > worn, "a fresh hammer made {good}, a spent one {worn}");
         }
     }
+
+    /// The content as it ships (`backend/content/`), ready to craft from.
+    struct Shipped {
+        recipes: HashMap<String, Recipe>,
+        kinds: HashMap<String, ItemType>,
+    }
+
+    impl Shipped {
+        fn load() -> Self {
+            let content = crate::content::load().unwrap();
+            Shipped {
+                recipes: content.recipes.iter().map(|r| (r.id.clone(), r.to_recipe())).collect(),
+                kinds: content.items.iter().map(|i| (i.id.clone(), i.to_item_type())).collect(),
+            }
+        }
+
+        /// `n` of `kind` at `quality`, a tool at its full durability
+        fn have(&self, kind: &str, n: i32, quality: i32) -> Item {
+            let units = Units::uniform(n, quality);
+            Item {
+                id: Uuid::new_v4(),
+                item_type: kind.into(),
+                quality,
+                quantity: n,
+                owner_id: None,
+                container_id: None,
+                slot_index: None,
+                created_at: chrono::Utc::now(),
+                durability: self.kinds[kind].durability_at(quality),
+                min_quality: quality,
+                units,
+            }
+        }
+
+        /// A tool as the crafter holds it
+        fn held(&self, tool: &Item) -> HeldTool {
+            let kind = &self.kinds[&tool.item_type];
+            let base = kind.max_durability.unwrap();
+            HeldTool {
+                item_id: tool.id,
+                item_type: tool.item_type.clone(),
+                tool: tools::Tool {
+                    base_power: kind.base_power.unwrap(),
+                    quality: tool.quality,
+                    durability: tool.durability.unwrap(),
+                    max_durability: tools::max_durability(base, tool.quality),
+                },
+                tier: kind.tier.as_deref().and_then(tools::Tier::from_str),
+                station_id: None,
+            }
+        }
+
+        /// Craft `recipe` from `have` at a station of `station`, through the
+        /// tick, and check the output lands in the range the cascade gives.
+        fn make(&self, recipe: &str, have: &[Item], station: i32, tool: Option<&Item>) -> Item {
+            let recipe = &self.recipes[recipe];
+            let station = if recipe.required_station_type.is_some() { station } else { quality::NO_STATION };
+            let tool = tool.map(|t| self.held(t));
+            let tool_quality = tool.as_ref().map_or(0, |t| tools::term_quality(&t.tool));
+            let (events, _rx) = broadcast::channel(64);
+            let mut ada = player();
+            let mut ops = HashMap::new();
+            start_crafting(&mut ada, recipe, have, station, tool, &mut ops, &events)
+                .unwrap_or_else(|e| panic!("{}: {e}", recipe.id));
+            let (low, high) = quality::output_range(&ops.values().next().unwrap().inputs, station, tool_quality, &recipe.quality_weights);
+            let mut players: HashMap<_, _> = [(ada.id, ada)].into();
+            let recipes: HashMap<_, _> = [(recipe.id.clone(), recipe.clone())].into();
+            let mut done = Vec::new();
+            for _ in 0..recipe.base_duration_ticks {
+                done = process_crafting(&mut players, &recipes, &mut ops, &self.kinds, &events);
+                if !done.is_empty() {
+                    break;
+                }
+            }
+            let out = done.pop().unwrap_or_else(|| panic!("{} never finished", recipe.id)).outputs.remove(0);
+            assert!(low <= out.quality && out.quality <= high, "{}: {} outside {low}..={high}", recipe.id, out.quality);
+            let mut item = self.have(&out.item_type, out.quantity, out.quality);
+            item.durability = out.durability;
+            item
+        }
+
+        /// D5's longest chain at stations of `station`, from raw stuff all at
+        /// `raw`: rope and handles, knapped stone and a stone hammer at the
+        /// workbench, charcoal at the kiln, ingots at the forge, the axe head
+        /// at the anvil under the hammer, and the iron axe back at the
+        /// workbench. Every step but the first is a station recipe.
+        fn iron_axe(&self, raw: i32, station: i32) -> Item {
+            let make = |recipe: &str, have: &[Item]| self.make(recipe, have, station, None);
+            let rope = || make("rope_basic", &[self.have("fiber", 2, raw)]);
+            let handle = || make("tool_handle", &[self.have("sticks", 2, raw), rope()]);
+            let knapped = || make("knapped_stone", &[self.have("stone", 2, raw)]);
+            let hammer = make("stone_hammer", &[knapped(), knapped(), handle(), rope()]);
+            let charcoal = make("charcoal", &[self.have("log", 1, raw)]);
+            assert_eq!(charcoal.quantity, 2, "a log burns to two");
+            let ingot = |charcoal: Item| make("iron_ingot", &[self.have("iron_ore", 2, raw), charcoal]);
+            let (one, two) = (charcoal.units.pick(1, Pick::Best).unwrap(), charcoal.units.pick(1, Pick::Lowest).unwrap());
+            let ingots = [ingot(self.have("charcoal", 1, one.mean().unwrap())), ingot(self.have("charcoal", 1, two.mean().unwrap()))];
+            let head = self.make("iron_axe_head", &ingots, station, Some(&hammer));
+            make("iron_axe", &[head, handle()])
+        }
+    }
+
+    /// E2.4: vein to ore to ingot to head to axe, made through the engine from
+    /// the shipped recipes. Quality flows the length of it: fine ore, wood and
+    /// stone make a finer axe than poor ones at the same stations, and a finer
+    /// axe lasts longer.
+    #[test]
+    fn the_longest_chain_carries_quality_from_the_ore_to_the_axe() {
+        let shipped = Shipped::load();
+        let at = |id: &str| shipped.recipes[id].required_station_type.clone();
+        assert_eq!(at("charcoal").as_deref(), Some("kiln"));
+        assert_eq!(at("iron_ingot").as_deref(), Some("forge"));
+        assert_eq!(at("iron_axe_head").as_deref(), Some("anvil"));
+        assert_eq!(shipped.recipes["iron_axe_head"].tool_type, Some(tools::ToolType::Hammer));
+        assert_eq!(at("iron_axe").as_deref(), Some("workbench"));
+
+        for _ in 0..20 {
+            let (fine, poor) = (shipped.iron_axe(90, 60), shipped.iron_axe(20, 60));
+            assert_eq!(fine.item_type, "iron_axe");
+            assert!(fine.quality > poor.quality + 10, "fine stuff made Q{}, poor Q{}", fine.quality, poor.quality);
+            assert_eq!(fine.durability, Some(tools::max_durability(200, fine.quality)), "a new axe is whole");
+            assert!(fine.durability > poor.durability);
+            // The stations count too: the same raw stuff at A-grade stations
+            // against D-grade ones.
+            let (a, d) = (shipped.iron_axe(50, 95), shipped.iron_axe(50, 40));
+            assert!(a.quality > d.quality, "A stations made Q{}, D stations Q{}", a.quality, d.quality);
+        }
+    }
 }

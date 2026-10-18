@@ -2172,15 +2172,17 @@ mod tests {
     }
 
     /// Against the local stack, the station panel's rules end to end (P6.3):
-    /// walk to a workbench and open it, Fill its box, craft a forge kit
-    /// there, put the box back, open a chest and move the kit into it and
+    /// walk to a workbench and open it, Fill its box, craft a tool handle
+    /// there, put the box back, open a chest and move the handle into it and
     /// out, walk out of reach and see it close, and take the chest down.
     ///
     /// Needs a workbench and a storage chest owned by `Station1`, each with
     /// its `station_inventory` container, inserted before the server started
     /// (the tick only learns stations at startup or from `place_station`).
-    /// The SQL is under Stations in `flint-client/CLAUDE.md`. A bot gathers
-    /// the fiber and twists the rope first. The chest is gone afterwards.
+    /// The SQL is under Stations in `flint-client/CLAUDE.md`, with the two
+    /// sticks the handle takes: fallen branches have no nodes until E2.3
+    /// (#162). A bot gathers the fiber and twists the rope first. The chest is
+    /// gone afterwards.
     #[test]
     #[ignore = "needs the local stack, a workbench and chest for Station1; takes a minute or two"]
     fn a_station_opens_crafts_stores_closes_and_comes_down() {
@@ -2197,11 +2199,12 @@ mod tests {
             let rope = |bot: &Bot| {
                 bot.count("player_inventory", "rope") + bot.count("crafting_output", "rope")
             };
-            while rope(&bot) < 4 {
+            while rope(&bot) < 1 {
                 bot.gather("fiber", 2).unwrap();
                 bot.craft("rope_basic").unwrap();
             }
-            bot.gather("fiber", 6).unwrap();
+            // Already held, from the SQL, until branches grow (E2.3)
+            bot.gather("sticks", 2).unwrap();
             // Back by the stations: the gathering may have wandered.
             bot.walk_to(4006.0, 7350.0).unwrap();
         }
@@ -2255,7 +2258,7 @@ mod tests {
             session.move_items(&shifts);
         };
 
-        // A clear output, so the kit has somewhere to go.
+        // A clear output, so the handle has somewhere to go.
         let shifts = craft::empty_into(&output(&session), session.state().inventory().unwrap());
         session.move_items(&shifts);
         wait(&mut session, "a clear output", &|s| {
@@ -2271,39 +2274,39 @@ mod tests {
         wait(&mut session, "an empty workbench", &|s| {
             station_box(s).is_some_and(|b| b.used_slots() == 0)
         });
-        let forge = session
+        let handle = session
             .state()
-            .recipe("craft_forge")
-            .expect("the craft_forge migration")
+            .recipe("tool_handle")
+            .expect("the tool_handle content")
             .clone();
-        assert_eq!(forge.required_station_type.as_deref(), Some("workbench"));
+        assert_eq!(handle.required_station_type.as_deref(), Some("workbench"));
         let shifts = craft::fill(
-            &forge,
+            &handle,
             session.state().inventory().unwrap(),
             &station_box(&session).unwrap(),
         );
         session.move_items(&shifts);
         let ready = |s: &Session| {
             let st = s.state();
-            let r = st.recipe("craft_forge").unwrap();
+            let r = st.recipe("tool_handle").unwrap();
             station_box(s).is_some_and(|b| craft::check(r, &b, st.crafting_output(), None).ready())
         };
-        wait(&mut session, "rope and fiber on the workbench", &ready);
+        wait(&mut session, "sticks and rope on the workbench", &ready);
 
-        session.craft_at_station(Instant::now(), "craft_forge");
-        wait(&mut session, "the forge kit to start", &|s| {
+        session.craft_at_station(Instant::now(), "tool_handle");
+        wait(&mut session, "the handle to start", &|s| {
             s.state().is_crafting()
         });
-        wait(&mut session, "the forge kit", &|s| {
+        wait(&mut session, "the handle", &|s| {
             *s.crafting().phase() == Phase::Idle && !s.state().is_crafting()
         });
-        assert_eq!(craft::count(&output(&session), "forge_kit"), 1);
+        assert_eq!(craft::count(&output(&session), "tool_handle"), 1);
         assert_eq!(session.take_crafted().len(), 1);
         let left = |s: &Session, t: &str| station_box(s).map_or(0, |b| craft::count(&b, t));
         eprintln!(
-            "after the craft the workbench holds {} rope, {} fiber",
+            "after the craft the workbench holds {} rope, {} sticks",
             left(&session, "rope"),
-            left(&session, "fiber")
+            left(&session, "sticks")
         );
 
         // Put the workbench's box back, so nothing is left on it.

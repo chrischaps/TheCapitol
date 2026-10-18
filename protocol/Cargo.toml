@@ -22,4 +22,6 @@ utoipa = { version = "5", features = ["uuid", "chrono"], optional = true }
 sqlx = { version = "0.8", default-features = false, features = ["derive"], optional = true }
 
 [dev-dependencies]
-serde_json = "1"
+# Exact float parsing, so a fixture's 0.13999999999999999 reads back as itself
+# and round-trips byte for byte (the default parser can be an ulp out)
+serde_json = { version = "1", features = ["float_roundtrip"] }

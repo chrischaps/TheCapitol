@@ -274,7 +274,8 @@ mod tests {
         let ada = setup(&db).await;
         tool(&db, ada.id, ada.inventory, 0, "steel_sickle_test", 20, 60).await;
         let bronze = tool(&db, ada.id, ada.inventory, 1, "bronze_sickle_test", 90, 140).await;
-        tool(&db, ada.id, ada.inventory, 2, "stone_sickle", 100, 90).await;
+        // A fair stone one (power 10 at Q50) is beaten by both bronze (14) and steel (12.6)
+        tool(&db, ada.id, ada.inventory, 2, "stone_sickle", 50, 60).await;
 
         let best = best_tool(&db, ada.id, ToolType::Sickle).await.unwrap().unwrap();
 
