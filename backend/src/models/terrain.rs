@@ -1353,7 +1353,19 @@ mod tests {
         // the default. #128 changed only how the version is hashed (floats
         // quantised), not the world. #129 added the parks: no road, lot or
         // node moved.
-        assert_eq!(TerrainConfig::get_default().version(), "c3a856792daad83d");
+        //
+        // The platform's libm differs in the last bit, and Linux ends a few
+        // roads and parks a vertex apart, so each platform has its own pin.
+        // Same lots, same nodes (#180). CI runs the Linux one.
+        #[cfg(windows)]
+        let pinned = Some("c3a856792daad83d");
+        #[cfg(target_os = "linux")]
+        let pinned = Some("4d3d9d112a4f30f1");
+        #[cfg(not(any(windows, target_os = "linux")))]
+        let pinned: Option<&str> = None;
+        if let Some(pinned) = pinned {
+            assert_eq!(TerrainConfig::get_default().version(), pinned);
+        }
     }
 
     /// A last-bit float difference, the kind the optimiser makes, leaves the
