@@ -22,9 +22,11 @@
 //!   turns into the field thinning toward the edge rather than stopping.
 //!
 //! The terrain part is painted when the roads, the lots, the parks or the
-//! rings change. Nodes arrive as you walk (the server lists those within 80 m),
-//! so their clearings are stamped onto a copy of it, at most once a
-//! second, whenever the set of nodes seen changes.
+//! rings change, and handed to the engine whole. Nodes arrive as you walk
+//! (the server lists those within 80 m), so when one comes or goes only the
+//! texels round it are worked out again, from the terrain's part and every
+//! node near, and written into the engine's mask in place (Flint ADR 0093,
+//! #135): about 17 texels square, 300 bytes against the whole mask's 4 MB.
 //!
 //! The colours are `palette` tokens. The grass is lit by the scene's `sun`
 //! like everything else, so it warms at dusk and goes blue under the moon
@@ -40,7 +42,7 @@ use capitol_protocol::rules::{CENTER_X, CENTER_Y, SUBURBAN_OUTER_RADIUS};
 use capitol_protocol::terrain::{TerrainPark, TerrainResponse};
 use flint_ecs::FlintWorld;
 use flint_player::{ExtensionGpu, GrassConfig, GrassGround, GrassHeight};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Texels along each side of the mask. Over the 800 m world that's about
 /// 0.39 m a texel: finer than the narrowest trail (0.6 m) and its verge.
@@ -81,11 +83,6 @@ const WATER_SOFT: f64 = 8.0;
 /// short ground round it.
 const NODE_CLEAR: f64 = 16.0;
 const NODE_SOFT: f64 = 14.0;
-
-/// Repaint the node clearings no more often than this. Each repaint
-/// uploads the whole mask and reinstalls the grass; a sub-rectangle write
-/// would remove the throttle (#135).
-const REPAINT_EVERY: Duration = Duration::from_secs(1);
 
 fn smoothstep(lo: f64, hi: f64, x: f64) -> f32 {
     let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
@@ -133,21 +130,72 @@ impl Mask {
         self.texels[j as usize * self.size + i as usize]
     }
 
-    /// Lowers each texel within `reach` of the box `lo`..`hi` (server) to
-    /// `clear(p)` of itself, `clear` running 0 (bare) to 1 (untouched).
-    fn clear_near(&mut self, lo: P, hi: P, reach: f64, clear: impl Fn(P) -> f32) {
+    /// The whole mask as a [`Window`].
+    fn all(&self) -> Window {
+        Window {
+            i0: 0,
+            j0: 0,
+            w: self.size,
+            h: self.size,
+        }
+    }
+
+    /// The texels within `reach` of the box `lo`..`hi` (server), clipped to
+    /// the mask; `None` when that's off it.
+    fn window_near(&self, lo: P, hi: P, reach: f64) -> Option<Window> {
         let n = self.size as i64;
         let [i0, j0] = self.texel_of([lo[0] - reach, lo[1] - reach]);
         let [i1, j1] = self.texel_of([hi[0] + reach, hi[1] + reach]);
-        for j in j0.max(0)..=j1.min(n - 1) {
-            for i in i0.max(0)..=i1.min(n - 1) {
-                let k = j as usize * self.size + i as usize;
-                if self.texels[k] == 0 {
+        let (i0, j0, i1, j1) = (i0.max(0), j0.max(0), i1.min(n - 1), j1.min(n - 1));
+        (i0 <= i1 && j0 <= j1).then(|| Window {
+            i0: i0 as usize,
+            j0: j0 as usize,
+            w: (i1 - i0 + 1) as usize,
+            h: (j1 - j0 + 1) as usize,
+        })
+    }
+
+    /// The texels of `win`, row by row.
+    fn cut(&self, win: Window) -> Vec<u8> {
+        (win.j0..win.j0 + win.h)
+            .flat_map(|j| {
+                let row = j * self.size + win.i0;
+                self.texels[row..row + win.w].iter().copied()
+            })
+            .collect()
+    }
+
+    /// Lowers each texel within `reach` of the box `lo`..`hi` (server) to
+    /// `clear(p)` of itself, `clear` running 0 (bare) to 1 (untouched).
+    fn clear_near(&mut self, lo: P, hi: P, reach: f64, clear: impl Fn(P) -> f32) {
+        let mut texels = std::mem::take(&mut self.texels);
+        self.clear_near_in(&mut texels, self.all(), lo, hi, reach, clear);
+        self.texels = texels;
+    }
+
+    /// As [`clear_near`](Self::clear_near), on `texels`, which hold this
+    /// mask's window `win` row by row. Texels outside `win` are left be.
+    fn clear_near_in(
+        &self,
+        texels: &mut [u8],
+        win: Window,
+        lo: P,
+        hi: P,
+        reach: f64,
+        clear: impl Fn(P) -> f32,
+    ) {
+        let Some(near) = self.window_near(lo, hi, reach) else {
+            return;
+        };
+        for j in near.j0.max(win.j0)..(near.j0 + near.h).min(win.j0 + win.h) {
+            for i in near.i0.max(win.i0)..(near.i0 + near.w).min(win.i0 + win.w) {
+                let k = (j - win.j0) * win.w + (i - win.i0);
+                if texels[k] == 0 {
                     continue;
                 }
-                let keep = clear(self.at(i as usize, j as usize));
+                let keep = clear(self.at(i, j));
                 if keep < 1.0 {
-                    self.texels[k] = (self.texels[k] as f32 * keep).round() as u8;
+                    texels[k] = (texels[k] as f32 * keep).round() as u8;
                 }
             }
         }
@@ -191,11 +239,25 @@ impl Mask {
         });
     }
 
-    /// Clears a disc round `c`.
-    fn clear_disc(&mut self, c: P, bare: f64, soft: f64) {
-        let bare = bare + self.slack();
-        self.clear_near(c, c, bare + soft, |p| {
-            smoothstep(bare, bare + soft, (p[0] - c[0]).hypot(p[1] - c[1]))
+    /// The texels a node's clearing round `c` can touch.
+    fn node_window(&self, c: P) -> Option<Window> {
+        self.window_near(c, c, NODE_CLEAR + self.slack() + NODE_SOFT)
+    }
+
+    /// Clears a node's disc round `c`.
+    #[cfg(test)]
+    fn clear_node(&mut self, c: P) {
+        let mut texels = std::mem::take(&mut self.texels);
+        self.clear_node_in(&mut texels, self.all(), c);
+        self.texels = texels;
+    }
+
+    /// Clears a node's disc round `c` from `texels`, this mask's window
+    /// `win`.
+    fn clear_node_in(&self, texels: &mut [u8], win: Window, c: P) {
+        let bare = NODE_CLEAR + self.slack();
+        self.clear_near_in(texels, win, c, c, bare + NODE_SOFT, |p| {
+            smoothstep(bare, bare + NODE_SOFT, (p[0] - c[0]).hypot(p[1] - c[1]))
         });
     }
 
@@ -205,6 +267,51 @@ impl Mask {
         let side = (self.side as f32) * S;
         (to_world(self.corner[0], self.corner[1]), [side, side])
     }
+}
+
+/// A rectangle of a mask's texels: its first column and row, and its size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Window {
+    i0: usize,
+    j0: usize,
+    w: usize,
+    h: usize,
+}
+
+fn node_at([x, y]: [i64; 2]) -> P {
+    [x as f64, y as f64]
+}
+
+/// The whole mask the engine is given: the terrain's part, `base`, with a
+/// clearing round each of `nodes`.
+fn with_nodes(base: &Mask, nodes: &[[i64; 2]]) -> Mask {
+    let mut mask = base.clone();
+    let mut texels = std::mem::take(&mut mask.texels);
+    for &n in nodes {
+        mask.clear_node_in(&mut texels, mask.all(), node_at(n));
+    }
+    mask.texels = texels;
+    mask
+}
+
+/// What to write into the engine's mask when the nodes seen go from `old`
+/// to `new` (both sorted): for each node come or gone, the texels round it,
+/// worked out again from `base` and the nodes of `new` near it. Each window
+/// comes out as [`with_nodes`] would paint it, so the mask stays exactly
+/// that whatever order the nodes came in.
+fn patches(base: &Mask, old: &[[i64; 2]], new: &[[i64; 2]]) -> Vec<(Window, Vec<u8>)> {
+    let gone = old.iter().filter(|n| new.binary_search(n).is_err());
+    let came = new.iter().filter(|n| old.binary_search(n).is_err());
+    gone.chain(came)
+        .filter_map(|&n| base.node_window(node_at(n)))
+        .map(|win| {
+            let mut texels = base.cut(win);
+            for &n in new {
+                base.clear_node_in(&mut texels, win, node_at(n));
+            }
+            (win, texels)
+        })
+        .collect()
 }
 
 /// Whether `p` is inside the polygon `poly` (even-odd).
@@ -432,7 +539,6 @@ pub struct Grass {
     nodes: Vec<[i64; 2]>,
     /// The nodes in the mask the engine has, or `None` to upload again.
     painted: Option<Vec<[i64; 2]>>,
-    last: Option<Instant>,
     wind: Option<Wind>,
 }
 
@@ -443,7 +549,6 @@ impl Grass {
         let started = Instant::now();
         self.base = Some(paint(terrain, MASK_SIZE));
         self.painted = None;
-        self.last = None;
         tracing::debug!(
             "grass: painted the mask in {} ms",
             started.elapsed().as_millis()
@@ -460,24 +565,34 @@ impl Grass {
         self.nodes = nodes;
     }
 
-    /// Hands the mask to the engine if it changed, the terrain at once and
-    /// the nodes at most once every `REPAINT_EVERY`.
-    pub fn flush(&mut self, gpu: &mut ExtensionGpu, world: &FlintWorld, now: Instant) {
+    /// Hands the engine what changed: a new terrain's whole mask, or the
+    /// texels round each node come or gone.
+    pub fn flush(&mut self, gpu: &mut ExtensionGpu, world: &FlintWorld) {
         let Some(base) = &self.base else {
             return;
         };
-        if self.painted.as_ref() == Some(&self.nodes) {
-            return;
-        }
-        let terrain_new = self.painted.is_none();
-        if !terrain_new && self.last.is_some_and(|t| now - t < REPAINT_EVERY) {
+        if let Some(painted) = &self.painted {
+            if *painted == self.nodes {
+                return;
+            }
+            let patches = patches(base, painted, &self.nodes);
+            tracing::debug!("grass: {} node clearings written in place", patches.len());
+            for (win, texels) in patches {
+                let at = |v: usize| v as u32;
+                if let Err(e) =
+                    gpu.update_grass_mask(at(win.i0), at(win.j0), at(win.w), at(win.h), &texels)
+                {
+                    // Start again from the whole mask next frame.
+                    tracing::warn!("grass: {e}");
+                    self.painted = None;
+                    return;
+                }
+            }
+            self.painted = Some(self.nodes.clone());
             return;
         }
         let wind = *self.wind.get_or_insert_with(|| Wind::of_scene(world));
-        let mut mask = base.clone();
-        for &[x, y] in &self.nodes {
-            mask.clear_disc([x as f64, y as f64], NODE_CLEAR, NODE_SOFT);
-        }
+        let mask = with_nodes(base, &self.nodes);
         let (origin, size) = mask.world_rect();
         let ground = GrassGround {
             origin,
@@ -492,7 +607,6 @@ impl Grass {
             tracing::warn!("grass: {e}");
         }
         self.painted = Some(self.nodes.clone());
-        self.last = Some(now);
     }
 }
 
@@ -653,7 +767,7 @@ mod tests {
             .find(|&p| m.value_at(p) > 200)
             .expect("a full spot");
         let before = m.texels.clone();
-        m.clear_disc(c, NODE_CLEAR, NODE_SOFT);
+        m.clear_node(c);
         assert_eq!(m.value_at(c), 0);
         assert_eq!(m.value_at([c[0] + NODE_CLEAR * 0.7, c[1]]), 0);
         let reach = NODE_CLEAR + NODE_SOFT + m.side / SIZE as f64;
@@ -665,6 +779,51 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn patching_the_nodes_in_and_out_matches_a_whole_repaint() {
+        let base = mask();
+        let c = (0..360)
+            .map(|k| {
+                let a = (k as f64).to_radians();
+                [CENTER_X + 3600.0 * a.cos(), CENTER_Y + 3600.0 * a.sin()]
+            })
+            .find(|&p| base.value_at(p) > 200)
+            .expect("a full spot");
+        let at = |dx: i64, dy: i64| [c[0] as i64 + dx, c[1] as i64 + dy];
+        // Overlapping clearings, one on the mask's corner (its window
+        // clipped) and one off the mask altogether.
+        let corner = [
+            (CENTER_X - 4000.0) as i64 + 5,
+            (CENTER_Y - 4000.0) as i64 + 5,
+        ];
+        let sorted = |mut v: Vec<[i64; 2]>| {
+            v.sort_unstable();
+            v
+        };
+        let sets = [
+            sorted(vec![at(0, 0), at(20, 0), [-1_000_000, 0]]),
+            sorted(vec![at(20, 0), at(10, 12), at(-25, 5), corner]),
+            vec![],
+            sorted(vec![at(0, 0), at(3, -2), corner]),
+        ];
+        let mut live = with_nodes(base, &sets[0]);
+        for pair in sets.windows(2) {
+            let (old, new) = (&pair[0], &pair[1]);
+            for (win, texels) in patches(base, old, new) {
+                assert!(win.w <= 32 && win.h <= 32, "{win:?}");
+                for r in 0..win.h {
+                    let row = (win.j0 + r) * live.size + win.i0;
+                    live.texels[row..row + win.w]
+                        .copy_from_slice(&texels[r * win.w..(r + 1) * win.w]);
+                }
+            }
+            let want = with_nodes(base, new);
+            assert!(live.texels == want.texels, "{old:?} -> {new:?}");
+        }
+        // Nothing changed, nothing written.
+        assert!(patches(base, &sets[1], &sets[1]).is_empty());
     }
 
     #[test]

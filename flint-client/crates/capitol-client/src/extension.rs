@@ -539,7 +539,7 @@ impl PlayerExtension for CapitolExtension {
             self.grass.nodes(nodes.map(|n| [n.x, n.y]));
         }
         if let Some(gpu) = ctx.gpu.as_mut() {
-            self.grass.flush(gpu, ctx.world, Instant::now());
+            self.grass.flush(gpu, ctx.world);
         }
         let Some(gpu) = ctx.gpu.as_mut() else {
             return;
