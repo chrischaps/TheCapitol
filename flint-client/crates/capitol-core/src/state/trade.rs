@@ -26,7 +26,11 @@
 //! reports [`TradeEvent::NoReply`] when nothing comes. A request is a special
 //! case: the server never confirms a delivered one, so `NoReply(Initiate)`
 //! means it most likely arrived, and the request stays [`Trade::Requested`]
-//! until it's answered.
+//! until it's answered or expires.
+//!
+//! **Expiry.** The server drops a request nobody answers within
+//! [`rules::TRADE_REQUEST_TTL_SECS`] and sends both players
+//! `trade_request_expired` (#147): [`TradeEvent::Expired`].
 //!
 //! **Whose message is it.** `trade_requested`, `trade_request_declined` and
 //! `trade_started` reach only the players involved. `trade_offer_updated` and
@@ -69,8 +73,8 @@ pub const CANCEL_UNCONFIRMED: &str = "The server has no open trade";
 pub enum Trade {
     #[default]
     Idle,
-    /// We asked `to`. The server keeps a request until it's answered or either
-    /// player leaves; it has no expiry and no way to withdraw one.
+    /// We asked `to`. The server keeps a request until it's answered, either
+    /// player leaves, or it expires; there's no way to withdraw one.
     Requested {
         to: Uuid,
         name: String,
@@ -151,6 +155,11 @@ pub enum TradeEvent {
     /// `by` declined our request.
     Declined {
         by: Uuid,
+    },
+    /// A request between us and `player_id` went unanswered, and the server
+    /// dropped it.
+    Expired {
+        player_id: Uuid,
     },
     /// A request to or from `player_id` is gone, because one of us left.
     RequestGone {
@@ -453,6 +462,21 @@ impl GameState {
                 }
                 // Sent only to the asker, so it's ours even after a withdraw.
                 out.push(StateEvent::Trade(TradeEvent::Declined { by: *by_player }));
+            }
+            // Sent only to the two players. Only the request we're showing
+            // counts: a newer one may have replaced it.
+            M::TradeRequestExpired {
+                from_player,
+                to_player,
+            } => {
+                let other = match &book.trade {
+                    Trade::Requested { to, .. } if to == to_player => *to,
+                    Trade::Incoming { from, .. } if from == from_player => *from,
+                    _ => return,
+                };
+                book.trade = Trade::Idle;
+                book.waiting = None;
+                out.push(StateEvent::Trade(TradeEvent::Expired { player_id: other }));
             }
             // Sent only to the two players, so it's ours whatever we thought
             // was happening: a request we'd withdrawn can still be accepted.

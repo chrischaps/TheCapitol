@@ -72,7 +72,8 @@ pub enum Command {
     },
     UpdateTradeOffer {
         player_id: Uuid,
-        items: Vec<(Uuid, i32)>,
+        /// Validated against the player's items, with each line's type, name and quality
+        items: Vec<capitol_protocol::ws::TradeItemInfo>,
         strands: i64,
     },
     AcceptTrade {

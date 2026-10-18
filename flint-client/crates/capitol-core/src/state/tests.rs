@@ -201,6 +201,7 @@ fn test_for(message: &M) -> fn() {
         M::NearbyStations { .. } => nearby_stations_merge,
         M::TradeRequested { .. } => trade::trade_requested_prompts,
         M::TradeRequestDeclined { .. } => trade::trade_request_declined_ends_our_request,
+        M::TradeRequestExpired { .. } => trade::trade_request_expired_ends_the_request_either_way,
         M::TradeStarted { .. } => trade::trade_started_opens_from_any_state,
         M::TradeOfferUpdated { .. } => trade::offers_update_their_side_and_reset_accepts,
         M::TradeAccepted { .. } => trade::trade_accepted_marks_the_right_side,
@@ -233,7 +234,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 43, "one fixture per ServerMessage variant");
+    assert_eq!(count, 44, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------

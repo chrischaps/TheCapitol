@@ -43,6 +43,7 @@ const SERVER_TYPES: &[&str] = &[
     "nearby_stations",
     "trade_requested",
     "trade_request_declined",
+    "trade_request_expired",
     "trade_started",
     "trade_offer_updated",
     "trade_accepted",

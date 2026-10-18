@@ -65,6 +65,9 @@ pub const EXTRACTION_RANGE: f64 = 50.0;
 pub const STATION_INTERACTION_RANGE: f64 = 75.0;
 /// Maximum distance between two players to trade.
 pub const TRADE_RANGE: f64 = 75.0;
+/// Seconds a trade request waits for an answer before the server drops it and
+/// sends both players `trade_request_expired`.
+pub const TRADE_REQUEST_TTL_SECS: u64 = 30;
 /// Minimum distance between two placed stations.
 pub const STATION_MIN_SPACING: f64 = 50.0;
 /// `GET /world/nearby` returns resource nodes within this radius of the player,

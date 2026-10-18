@@ -1,6 +1,11 @@
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+use capitol_protocol::rules::TRADE_REQUEST_TTL_SECS;
+
+/// How long a trade request waits for an answer before the tick drops it
+pub const TRADE_REQUEST_TTL: Duration = Duration::from_secs(TRADE_REQUEST_TTL_SECS);
 
 /// Trade session between two players
 #[derive(Debug, Clone)]
@@ -12,8 +17,6 @@ pub struct TradeSession {
     pub offer_b: TradeOffer,
     pub accepted_a: bool,
     pub accepted_b: bool,
-#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
-    pub created_at: Instant,
 }
 
 /// A player's offer in a trade
@@ -32,12 +35,6 @@ impl TradeOffer {
             strands: 0,
         }
     }
-
-#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
-    pub fn clear(&mut self) {
-        self.items.clear();
-        self.strands = 0;
-    }
 }
 
 impl TradeSession {
@@ -50,7 +47,6 @@ impl TradeSession {
             offer_b: TradeOffer::new(),
             accepted_a: false,
             accepted_b: false,
-            created_at: Instant::now(),
         }
     }
 
@@ -65,36 +61,12 @@ impl TradeSession {
         }
     }
 
-    /// Get a player's offer
-#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
-    pub fn get_offer(&self, player_id: Uuid) -> Option<&TradeOffer> {
-        if player_id == self.player_a {
-            Some(&self.offer_a)
-        } else if player_id == self.player_b {
-            Some(&self.offer_b)
-        } else {
-            None
-        }
-    }
-
     /// Set a player's accepted status
     pub fn set_accepted(&mut self, player_id: Uuid, accepted: bool) {
         if player_id == self.player_a {
             self.accepted_a = accepted;
         } else if player_id == self.player_b {
             self.accepted_b = accepted;
-        }
-    }
-
-    /// Check if a player has accepted
-#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
-    pub fn has_accepted(&self, player_id: Uuid) -> bool {
-        if player_id == self.player_a {
-            self.accepted_a
-        } else if player_id == self.player_b {
-            self.accepted_b
-        } else {
-            false
         }
     }
 
@@ -110,7 +82,6 @@ impl TradeSession {
     }
 
     /// Get the other player in the trade
-#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
     pub fn other_player(&self, player_id: Uuid) -> Option<Uuid> {
         if player_id == self.player_a {
             Some(self.player_b)
@@ -119,12 +90,6 @@ impl TradeSession {
         } else {
             None
         }
-    }
-
-    /// Check if a player is part of this trade
-#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
-    pub fn has_player(&self, player_id: Uuid) -> bool {
-        player_id == self.player_a || player_id == self.player_b
     }
 }
 
@@ -165,7 +130,7 @@ impl TradeManager {
         }
 
         // Check if target has already requested to trade with us (auto-accept)
-        if let Some((pending_initiator, _)) = self.pending_requests.remove(&initiator) {
+        if let Some((pending_initiator, asked_at)) = self.pending_requests.remove(&initiator) {
             if pending_initiator == target {
                 // Both players want to trade - start immediately
                 let session = TradeSession::new(target, initiator);
@@ -175,11 +140,12 @@ impl TradeManager {
                 self.player_trades.insert(target, trade_id);
                 return Ok(());
             }
-            // Put it back
-            self.pending_requests.insert(initiator, (pending_initiator, Instant::now()));
+            // Put it back, keeping its age so it still expires on time
+            self.pending_requests.insert(initiator, (pending_initiator, asked_at));
         }
 
-        // Add pending request
+        // Add pending request. It replaces any other request to `target`, whose asker
+        // isn't told (#182)
         self.pending_requests.insert(target, (initiator, Instant::now()));
         Ok(())
     }
@@ -291,33 +257,24 @@ impl TradeManager {
         Ok(session)
     }
 
-    /// Check if a player has a pending trade request
-#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
-    pub fn has_pending_request(&self, player_id: Uuid) -> Option<Uuid> {
-        self.pending_requests.get(&player_id).map(|(initiator, _)| *initiator)
-    }
-
     /// Check if a player is in an active trade
     #[cfg(test)]
     pub fn is_in_trade(&self, player_id: Uuid) -> bool {
         self.player_trades.contains_key(&player_id)
     }
 
-    /// Clean up stale pending requests (older than 30 seconds)
-#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
-    pub fn cleanup_stale_requests(&mut self) -> Vec<(Uuid, Uuid)> {
+    /// Drop the requests nobody answered within [`TRADE_REQUEST_TTL`] of `now`, and return
+    /// each as `(initiator, target)` so both can be told
+    pub fn expire_requests(&mut self, now: Instant) -> Vec<(Uuid, Uuid)> {
         let mut expired = Vec::new();
-        let now = Instant::now();
-
-        self.pending_requests.retain(|target, (initiator, created_at)| {
-            if now.duration_since(*created_at).as_secs() > 30 {
+        self.pending_requests.retain(|target, (initiator, asked_at)| {
+            if now.saturating_duration_since(*asked_at) >= TRADE_REQUEST_TTL {
                 expired.push((*initiator, *target));
                 false
             } else {
                 true
             }
         });
-
         expired
     }
 }
@@ -330,3 +287,53 @@ impl Default for TradeManager {
 
 /// Trade proximity range (same as station interaction range)
 pub use capitol_protocol::rules::TRADE_RANGE;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_request_expires_after_its_ttl_and_not_before() {
+        let mut trades = TradeManager::new();
+        let (ada, bram) = (Uuid::new_v4(), Uuid::new_v4());
+        trades.request_trade(ada, bram).unwrap();
+        let asked_at = trades.pending_requests[&bram].1;
+
+        let just_before = asked_at + TRADE_REQUEST_TTL - Duration::from_millis(1);
+        assert!(trades.expire_requests(just_before).is_empty());
+        assert!(trades.pending_requests.contains_key(&bram));
+
+        assert_eq!(trades.expire_requests(asked_at + TRADE_REQUEST_TTL), vec![(ada, bram)]);
+        assert!(trades.pending_requests.is_empty());
+        assert!(trades.accept_request(bram).is_err(), "an expired request can't be accepted");
+    }
+
+    #[test]
+    fn expiring_leaves_trades_and_fresh_requests_alone() {
+        let mut trades = TradeManager::new();
+        let (ada, bram, cato, dara) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        trades.request_trade(ada, bram).unwrap();
+        trades.accept_request(bram).unwrap();
+        trades.request_trade(cato, dara).unwrap();
+        let fresh = trades.pending_requests[&dara].1;
+        trades.pending_requests.get_mut(&dara).unwrap().1 = fresh - TRADE_REQUEST_TTL;
+        let (eli, fay) = (Uuid::new_v4(), Uuid::new_v4());
+        trades.request_trade(eli, fay).unwrap();
+
+        assert_eq!(trades.expire_requests(fresh), vec![(cato, dara)]);
+        assert!(trades.is_in_trade(ada) && trades.is_in_trade(bram));
+        assert_eq!(trades.pending_requests[&fay].0, eli);
+    }
+
+    #[test]
+    fn asking_a_third_player_keeps_the_age_of_the_request_you_hold() {
+        let mut trades = TradeManager::new();
+        let (ada, bram, cato) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        trades.request_trade(bram, ada).unwrap();
+        let asked_at = trades.pending_requests[&ada].1;
+
+        // Ada, asked by Bram, asks Cato instead: Bram's request stays, as old as it was
+        trades.request_trade(ada, cato).unwrap();
+        assert_eq!(trades.pending_requests[&ada], (bram, asked_at));
+    }
+}

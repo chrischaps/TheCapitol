@@ -18,6 +18,9 @@ use crate::state::AppState;
 use capitol_protocol::rest::CatalogResponse;
 use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
 
+/// Ticks between sweeps for unanswered trade requests (once a second)
+const TRADE_EXPIRY_TICKS: u64 = 10;
+
 /// The WebSocket connection currently serving a player
 pub struct PlayerConnection {
     pub id: u64,
@@ -192,14 +195,15 @@ impl GameState {
 
     pub fn remove_player(&mut self, player_id: Uuid) {
         // Cancel any active trade when player disconnects
-        if let Some(trade_id) = self.trade_manager.get_player_trade(player_id).map(|t| t.id) {
-            if let Ok((player_a, player_b)) = self.trade_manager.cancel_trade(player_id) {
+        if let Some((trade_id, other)) = self.trade_manager.get_player_trade(player_id)
+            .and_then(|t| Some((t.id, t.other_player(player_id)?)))
+        {
+            if self.trade_manager.cancel_trade(player_id).is_ok() {
+                // The other player needs to know the trade was cancelled
                 let _ = self.event_sender.send(GameEvent::TradeCancelled {
                     trade_id,
                     reason: "Player disconnected".to_string(),
                 });
-                // The other player needs to know the trade was cancelled
-                let other = if player_a == player_id { player_b } else { player_a };
                 tracing::info!("Trade cancelled due to player {} disconnect, notified {}", player_id, other);
             }
         }
@@ -489,29 +493,17 @@ impl GameState {
                     }
                 }
                 Command::UpdateTradeOffer { player_id, items, strands } => {
-                    if let Err(e) = self.trade_manager.update_offer(player_id, items.clone(), strands) {
+                    let offer = items.iter().map(|item| (item.item_id, item.quantity)).collect();
+                    if let Err(e) = self.trade_manager.update_offer(player_id, offer, strands) {
                         self.trade_failed(player_id, "trade_offer", e);
                         continue;
                     }
 
-                    // Get trade for event
                     if let Some(trade) = self.trade_manager.get_player_trade(player_id) {
-                        // Convert items to TradeItem for event (we'll need item info from DB later)
-                        // For now, send basic info
-                        let trade_items: Vec<super::events::TradeItem> = items.iter()
-                            .map(|(item_id, qty)| super::events::TradeItem {
-                                item_id: *item_id,
-                                item_type: String::new(), // Will be filled by WS handler
-                                item_name: String::new(),
-                                quantity: *qty,
-                                quality: 0,
-                            })
-                            .collect();
-
                         let _ = self.event_sender.send(GameEvent::TradeOfferUpdated {
                             trade_id: trade.id,
                             player_id,
-                            items: trade_items,
+                            items,
                             strands,
                         });
                     }
@@ -610,7 +602,18 @@ impl GameState {
         self.process_extractions();
         self.process_crafting();
         self.process_regeneration();
+        if self.tick_count.is_multiple_of(TRADE_EXPIRY_TICKS) {
+            self.expire_trade_requests(Instant::now());
+        }
         self.broadcast_positions();
+    }
+
+    /// Drop the trade requests nobody answered in time, and tell both players of each
+    fn expire_trade_requests(&mut self, now: Instant) {
+        for (initiator, target) in self.trade_manager.expire_requests(now) {
+            tracing::debug!("Trade request from {} to {} expired", initiator, target);
+            let _ = self.event_sender.send(GameEvent::TradeRequestExpired { initiator, target });
+        }
     }
 
     fn process_extractions(&mut self) {
@@ -1150,6 +1153,71 @@ mod tests {
         assert!(game.disconnect_player(id, conn), "it's still the player's connection");
         assert!(!game.players.contains_key(&id));
         assert_eq!(leaves(&mut rx, id), 1);
+    }
+
+    // #147: an unanswered request expires, and both players hear of it
+
+    #[test]
+    fn trading_expires_an_unanswered_request_and_tells_both_players() {
+        let (mut game, a, b, mut rx) = two_players(10.0);
+        game.queue_command(Command::InitiateTrade { player_id: a, target_player_id: b });
+        game.process_commands();
+        let asked_at = game.trade_manager.pending_requests[&b].1;
+        while rx.try_recv().is_ok() {}
+
+        game.expire_trade_requests(asked_at + super::super::trading::TRADE_REQUEST_TTL / 2);
+        assert!(rx.try_recv().is_err(), "a fresh request expired");
+
+        game.expire_trade_requests(asked_at + super::super::trading::TRADE_REQUEST_TTL);
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(&events[..], [GameEvent::TradeRequestExpired { initiator, target }] if *initiator == a && *target == b),
+            "{events:?}"
+        );
+        let reason = refusal(&mut game, &mut rx, Command::AcceptTradeRequest { player_id: b }, b);
+        assert!(reason.contains("No pending trade request"), "{reason}");
+    }
+
+    #[test]
+    fn trading_requests_are_swept_by_the_tick() {
+        let (mut game, a, b, mut rx) = two_players(10.0);
+        game.trade_manager.request_trade(a, b).unwrap();
+        // Make the request old enough to expire on the next sweep
+        game.trade_manager.pending_requests.get_mut(&b).unwrap().1 -= super::super::trading::TRADE_REQUEST_TTL;
+        for _ in 0..TRADE_EXPIRY_TICKS {
+            game.tick();
+        }
+        let expired = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|e| matches!(e, GameEvent::TradeRequestExpired { .. }))
+            .count();
+        assert_eq!(expired, 1);
+        assert!(game.trade_manager.pending_requests.is_empty());
+    }
+
+    #[test]
+    fn trading_offer_events_carry_the_lines_they_were_given() {
+        use capitol_protocol::ws::TradeItemInfo;
+        let (mut game, a, b, mut rx) = two_players(10.0);
+        game.trade_manager.request_trade(a, b).unwrap();
+        let trade_id = game.trade_manager.accept_request(b).unwrap().id;
+        let rope = TradeItemInfo {
+            item_id: Uuid::new_v4(),
+            item_type: "rope".into(),
+            item_name: "Rope".into(),
+            quantity: 2,
+            quality: 77,
+        };
+        game.queue_command(Command::UpdateTradeOffer { player_id: a, items: vec![rope.clone()], strands: 5 });
+        game.process_commands();
+
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(&events[..], [GameEvent::TradeOfferUpdated { trade_id: id, player_id, items, strands: 5 }]
+                if *id == trade_id && *player_id == a && *items == vec![rope.clone()]),
+            "{events:?}"
+        );
+        let trade = game.trade_manager.get_player_trade(a).unwrap();
+        assert_eq!(trade.offer_a.items, vec![(rope.item_id, 2)]);
     }
 
     #[test]

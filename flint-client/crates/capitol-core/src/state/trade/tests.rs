@@ -411,6 +411,39 @@ pub(in crate::state) fn trade_request_declined_ends_our_request() {
 }
 
 #[test]
+pub(in crate::state) fn trade_request_expired_ends_the_request_either_way() {
+    let now = Instant::now();
+    let expired = |from, to| M::TradeRequestExpired {
+        from_player: from,
+        to_player: to,
+    };
+
+    // Ours to Brin
+    let mut state = world();
+    state.trade_initiate(now, BRIN).unwrap();
+    assert_eq!(
+        ws(&mut state, expired(ME, BRIN)),
+        vec![TradeEvent::Expired { player_id: BRIN }]
+    );
+    assert_eq!(state.trade(), &Trade::Idle);
+    assert!(state.tick(now + REPLY_TIMEOUT).is_empty());
+
+    // Brin's to us
+    ws(&mut state, requested_by(BRIN, "Brin"));
+    assert_eq!(
+        ws(&mut state, expired(BRIN, ME)),
+        vec![TradeEvent::Expired { player_id: BRIN }]
+    );
+    assert_eq!(state.trade(), &Trade::Idle);
+
+    // Cato's request replaced Brin's, so Brin's expiring leaves it be
+    ws(&mut state, requested_by(BRIN, "Brin"));
+    ws(&mut state, requested_by(CATO, "Cato"));
+    assert!(ws(&mut state, expired(BRIN, ME)).is_empty());
+    assert!(matches!(state.trade(), Trade::Incoming { from: CATO, .. }));
+}
+
+#[test]
 fn requests_end_when_either_side_leaves() {
     let now = Instant::now();
     let mut state = world();

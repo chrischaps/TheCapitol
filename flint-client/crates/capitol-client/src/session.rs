@@ -942,6 +942,16 @@ impl Session {
                     "Declined",
                     format!("{them} won't trade just now"),
                 )),
+                TradeEvent::Expired { .. } => Some(match before {
+                    Trade::Incoming { .. } => TradeNote::new(
+                        "Request expired",
+                        format!("{them}'s request timed out"),
+                    ),
+                    _ => TradeNote::new(
+                        "No answer",
+                        format!("{them} didn't answer in time"),
+                    ),
+                }),
                 TradeEvent::RequestGone { .. } => {
                     Some(TradeNote::new("Request gone", format!("{them} has gone")))
                 }

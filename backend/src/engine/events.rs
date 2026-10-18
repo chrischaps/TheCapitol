@@ -3,6 +3,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::models::{PlayerPosition, ResourceNodeInfo, SlotItem, StationInfo};
+use capitol_protocol::ws::TradeItemInfo;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data")]
@@ -130,6 +131,11 @@ pub enum GameEvent {
         by_player: Uuid,
         initiator: Uuid,
     },
+    /// Nobody answered `initiator`'s request to `target` in time. Goes to both (#147).
+    TradeRequestExpired {
+        initiator: Uuid,
+        target: Uuid,
+    },
     TradeStarted {
         trade_id: Uuid,
         player_a: Uuid,
@@ -138,7 +144,8 @@ pub enum GameEvent {
     TradeOfferUpdated {
         trade_id: Uuid,
         player_id: Uuid,
-        items: Vec<TradeItem>,
+        /// Filled in when the offer is validated, so the event is what the wire carries
+        items: Vec<TradeItemInfo>,
         strands: i64,
     },
     TradeAccepted {
@@ -206,16 +213,6 @@ pub enum GameEvent {
         refund: i64,
         notice_id: Option<Uuid>,
     },
-}
-
-/// Item in a trade offer (for events)
-#[derive(Debug, Clone, Serialize)]
-pub struct TradeItem {
-    pub item_id: Uuid,
-    pub item_type: String,
-    pub item_name: String,
-    pub quantity: i32,
-    pub quality: i32,
 }
 
 /// Slot update for inventory events

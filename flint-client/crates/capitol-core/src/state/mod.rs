@@ -668,6 +668,7 @@ impl GameState {
 
             M::TradeRequested { .. }
             | M::TradeRequestDeclined { .. }
+            | M::TradeRequestExpired { .. }
             | M::TradeStarted { .. }
             | M::TradeOfferUpdated { .. }
             | M::TradeAccepted { .. }

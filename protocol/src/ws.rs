@@ -266,6 +266,11 @@ pub enum ServerMessage {
     },
     #[serde(rename = "trade_request_declined")]
     TradeRequestDeclined { by_player: Uuid },
+    /// A request nobody answered within `rules::TRADE_REQUEST_TTL_SECS` is
+    /// gone. Sent to both players, the asker (`from_player`) and the one asked
+    /// (`to_player`), so neither waits on it (#147).
+    #[serde(rename = "trade_request_expired")]
+    TradeRequestExpired { from_player: Uuid, to_player: Uuid },
     #[serde(rename = "trade_started")]
     TradeStarted {
         trade_id: Uuid,
@@ -395,6 +400,7 @@ impl ServerMessage {
             ServerMessage::NearbyStations { .. } => "nearby_stations",
             ServerMessage::TradeRequested { .. } => "trade_requested",
             ServerMessage::TradeRequestDeclined { .. } => "trade_request_declined",
+            ServerMessage::TradeRequestExpired { .. } => "trade_request_expired",
             ServerMessage::TradeStarted { .. } => "trade_started",
             ServerMessage::TradeOfferUpdated { .. } => "trade_offer_updated",
             ServerMessage::TradeAccepted { .. } => "trade_accepted",

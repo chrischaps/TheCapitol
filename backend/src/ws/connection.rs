@@ -19,7 +19,7 @@ use crate::engine::container_access::{
     check_container_access, check_station_access, live_position, movable_item,
 };
 use crate::engine::GameEvent;
-use crate::models::PlayerState;
+use crate::models::{ItemType, PlayerState};
 use crate::error::SESSIONS_UNAVAILABLE;
 use crate::routes::auth::Claims;
 use crate::state::AppState;
@@ -497,8 +497,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     });
                                 }
                                 ClientMessage::TradeOffer { items, strands } => {
-                                    let item_tuples = match validate_trade_offer(&state, player_id, &items, strands).await {
-                                        Ok(tuples) => tuples,
+                                    let offer_lines = match validate_trade_offer(&state, player_id, &items, strands).await {
+                                        Ok(lines) => lines,
                                         Err(message) => {
                                             let _ = sender.send(Message::Text(
                                                 serde_json::to_string(&ServerMessage::Error { message, command: command.into() }).unwrap().into()
@@ -510,7 +510,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     let mut game = state.game.write().await;
                                     game.queue_command(crate::engine::Command::UpdateTradeOffer {
                                         player_id,
-                                        items: item_tuples,
+                                        items: offer_lines,
                                         strands,
                                     });
                                 }
@@ -713,6 +713,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
+                    Ok(GameEvent::TradeRequestExpired { initiator, target }) => {
+                        // To both: the asker stops waiting, the one asked loses the prompt
+                        if player_id == initiator || player_id == target {
+                            let msg = ServerMessage::TradeRequestExpired { from_player: initiator, to_player: target };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
                     Ok(GameEvent::TradeStarted { trade_id, player_a, player_b }) => {
                         // Send to both players
                         if player_id == player_a || player_id == player_b {
@@ -727,67 +734,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         }
                     }
                     Ok(GameEvent::TradeOfferUpdated { trade_id, player_id: offering_player, items, strands }) => {
-                        // Get trade participants
-                        let participants = {
+                        let ours = {
                             let game = state.game.read().await;
                             game.trade_manager.active_trades.get(&trade_id)
-                                .map(|t| (t.player_a, t.player_b))
+                                .is_some_and(|t| player_id == t.player_a || player_id == t.player_b)
                         };
-
-                        if let Some((player_a, player_b)) = participants {
-                            if player_id == player_a || player_id == player_b {
-                                // Fetch item details from database
-                                let item_ids: Vec<Uuid> = items.iter().map(|i| i.item_id).collect();
-                                let trade_items = if !item_ids.is_empty() {
-                                    let db_items: Vec<(Uuid, String, i32, i32)> = sqlx::query_as(
-                                        "SELECT i.id, i.item_type, i.quality, i.quantity FROM items i WHERE i.id = ANY($1)"
-                                    )
-                                    .bind(&item_ids)
-                                    .fetch_all(&state.db)
-                                    .await
-                                    .unwrap_or_default();
-
-                                    // Get item type names
-                                    let type_ids: Vec<String> = db_items.iter().map(|(_, t, _, _)| t.clone()).collect();
-                                    let type_names: std::collections::HashMap<String, String> = if !type_ids.is_empty() {
-                                        sqlx::query_as::<_, (String, String)>(
-                                            "SELECT id, name FROM item_types WHERE id = ANY($1)"
-                                        )
-                                        .bind(&type_ids)
-                                        .fetch_all(&state.db)
-                                        .await
-                                        .unwrap_or_default()
-                                        .into_iter()
-                                        .collect()
-                                    } else {
-                                        std::collections::HashMap::new()
-                                    };
-
-                                    // Match up with offer quantities
-                                    items.iter().filter_map(|offer_item| {
-                                        db_items.iter().find(|(id, _, _, _)| *id == offer_item.item_id).map(|(id, item_type, quality, _)| {
-                                            let item_name = type_names.get(item_type).cloned().unwrap_or_else(|| item_type.clone());
-                                            TradeItemInfo {
-                                                item_id: *id,
-                                                item_type: item_type.clone(),
-                                                item_name,
-                                                quantity: offer_item.quantity,
-                                                quality: *quality,
-                                            }
-                                        })
-                                    }).collect()
-                                } else {
-                                    Vec::new()
-                                };
-
-                                let msg = ServerMessage::TradeOfferUpdated {
-                                    trade_id,
-                                    player_id: offering_player,
-                                    items: trade_items,
-                                    strands,
-                                };
-                                let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                            }
+                        if ours {
+                            let msg = ServerMessage::TradeOfferUpdated {
+                                trade_id,
+                                player_id: offering_player,
+                                items,
+                                strands,
+                            };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
                     Ok(GameEvent::TradeAccepted { trade_id, player_id: accepting_player }) => {
@@ -969,14 +928,14 @@ async fn validate_trade_offer(
     player_id: Uuid,
     items: &[TradeOfferItem],
     strands: i64,
-) -> Result<Vec<(Uuid, i32)>, String> {
+) -> Result<Vec<TradeItemInfo>, String> {
     let offer = parse_trade_offer(items, strands)?;
 
     let item_ids: Vec<Uuid> = offer.iter().map(|(id, _)| *id).collect();
-    let owned: Vec<(Uuid, i32)> = if item_ids.is_empty() {
+    let owned: Vec<OwnedItem> = if item_ids.is_empty() {
         Vec::new()
     } else {
-        sqlx::query_as("SELECT id, quantity FROM items WHERE id = ANY($1) AND owner_id = $2")
+        sqlx::query_as("SELECT id, quantity, item_type, quality FROM items WHERE id = ANY($1) AND owner_id = $2")
             .bind(&item_ids)
             .bind(player_id)
             .fetch_all(&state.db)
@@ -986,7 +945,8 @@ async fn validate_trade_offer(
                 "Couldn't check your items; try again".to_string()
             })?
     };
-    let owned: HashMap<Uuid, i32> = owned.into_iter().collect();
+    let owned: HashMap<Uuid, OwnedItem> = owned.into_iter().map(|item| (item.0, item)).collect();
+    let quantities: HashMap<Uuid, i32> = owned.iter().map(|(id, item)| (*id, item.1)).collect();
 
     let balance: Option<(i64,)> = if strands > 0 {
         sqlx::query_as("SELECT strand_balance FROM players WHERE id = $1")
@@ -1001,8 +961,35 @@ async fn validate_trade_offer(
         None
     };
 
-    check_trade_offer_holdings(&offer, &owned, strands, balance.map(|(b,)| b).unwrap_or(0))?;
-    Ok(offer)
+    check_trade_offer_holdings(&offer, &quantities, strands, balance.map(|(b,)| b).unwrap_or(0))?;
+    let game = state.game.read().await;
+    Ok(trade_offer_lines(&offer, &owned, &game.item_types))
+}
+
+/// An item a trade offer names, as the player holds it: `(id, quantity, item_type, quality)`
+type OwnedItem = (Uuid, i32, String, i32);
+
+/// The offer as `trade_offer_updated` reports it: each line with the item's type, name and
+/// quality, and the quantity offered. Run it after [`check_trade_offer_holdings`], which makes
+/// sure every item is in `owned`. A type missing from `item_types` shows its id as its name.
+fn trade_offer_lines(
+    offer: &[(Uuid, i32)],
+    owned: &HashMap<Uuid, OwnedItem>,
+    item_types: &HashMap<String, ItemType>,
+) -> Vec<TradeItemInfo> {
+    offer
+        .iter()
+        .filter_map(|(id, quantity)| {
+            let (_, _, item_type, quality) = owned.get(id)?;
+            Some(TradeItemInfo {
+                item_id: *id,
+                item_type: item_type.clone(),
+                item_name: item_types.get(item_type).map_or_else(|| item_type.clone(), |t| t.name.clone()),
+                quantity: *quantity,
+                quality: *quality,
+            })
+        })
+        .collect()
 }
 
 /// The parts of a `trade_offer` that need no database: ids parse, quantities and strands make
@@ -1682,5 +1669,25 @@ mod tests {
         let id = Uuid::new_v4();
         let owned = HashMap::from([(id, 5)]);
         assert!(check_trade_offer_holdings(&[(id, 5)], &owned, 20, 20).is_ok());
+    }
+
+    #[test]
+    fn trading_offer_lines_carry_type_name_and_quality() {
+        let (rope, mystery) = (Uuid::new_v4(), Uuid::new_v4());
+        let owned = HashMap::from([
+            (rope, (rope, 7, "rope".to_string(), 82)),
+            (mystery, (mystery, 1, "relic".to_string(), 40)),
+        ]);
+        let item_types = HashMap::from([(
+            "rope".to_string(),
+            ItemType { id: "rope".into(), name: "Rope".into(), category: "material".into(), stackable: true, weight: 1.0 },
+        )]);
+
+        let lines = trade_offer_lines(&[(rope, 3), (mystery, 1)], &owned, &item_types);
+        assert_eq!(lines, vec![
+            TradeItemInfo { item_id: rope, item_type: "rope".into(), item_name: "Rope".into(), quantity: 3, quality: 82 },
+            // An unknown type keeps its id as its name
+            TradeItemInfo { item_id: mystery, item_type: "relic".into(), item_name: "relic".into(), quantity: 1, quality: 40 },
+        ]);
     }
 }
