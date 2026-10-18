@@ -9,6 +9,7 @@ use super::craft_completion::{finish_craft, FinishedCraft};
 use super::crafting::{cancel_crafting, process_crafting, start_crafting, CraftingOperation};
 use super::events::GameEvent;
 use super::extraction::{cancel_extraction, process_extractions, start_extraction, PendingItem};
+use super::slot_moves::{auto_stack, write_lot};
 use super::tools::{self, HeldTool, Wear};
 use super::movement::process_movement;
 use super::regeneration::process_regeneration;
@@ -18,6 +19,7 @@ use crate::state::AppState;
 
 use capitol_protocol::rest::CatalogResponse;
 use capitol_protocol::rules::quality;
+use capitol_protocol::rules::stacking::Lot;
 use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
 
 /// Ticks between sweeps for unanswered trade requests (once a second)
@@ -851,8 +853,8 @@ async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broad
     }
 }
 
-/// Put a gathered item in its gatherer's inventory: onto a stack of its type
-/// (quality averaged by quantity), or into the first free slot. Returns the
+/// Put a gathered item in its gatherer's inventory: onto a stack of its type,
+/// grade and min grade (`slot_moves::auto_stack`), or into the first free slot. Returns the
 /// container, or `None` if there's no room (the item is lost, as before).
 async fn place_gathered(conn: &mut sqlx::PgConnection, item: &PendingItem) -> Result<Option<Uuid>, sqlx::Error> {
     let container: Option<(Uuid, i32)> = sqlx::query_as(
@@ -869,32 +871,17 @@ async fn place_gathered(conn: &mut sqlx::PgConnection, item: &PendingItem) -> Re
         return Ok(None);
     };
 
-    // Check if there's an existing stack of same type to merge with
-    let existing: Option<(Uuid, i32, i32)> = sqlx::query_as(
-        "SELECT id, quantity, quality FROM items
-         WHERE container_id = $1 AND item_type = $2
-         LIMIT 1 FOR UPDATE"
-    )
-    .bind(container_id)
-    .bind(&item.item_type)
-    .fetch_optional(&mut *conn)
-    .await?;
-
-    if let Some((existing_id, existing_qty, existing_quality)) = existing {
-        // Merge with existing stack (weighted average quality)
-        let new_qty = existing_qty + item.quantity;
-        let new_quality = (existing_quality * existing_qty + item.quality * item.quantity) / new_qty;
-        sqlx::query("UPDATE items SET quantity = $1, quality = $2 WHERE id = $3")
-            .bind(new_qty)
-            .bind(new_quality)
-            .bind(existing_id)
-            .execute(&mut *conn)
-            .await?;
-        tracing::info!(
-            "Merged {} x{} (quality {}) into existing stack for player {}",
-            item.item_type, item.quantity, item.quality, item.player_id
-        );
-        return Ok(Some(container_id));
+    // Only onto a stack of the same grade and min grade (plan D2)
+    let lot = Lot::fresh(item.quantity, item.quality);
+    if let Some((stack_id, stack)) = auto_stack(conn, container_id, &item.item_type, &lot).await? {
+        if let Some(merged) = stack.merge(lot) {
+            write_lot(conn, stack_id, &merged).await?;
+            tracing::info!(
+                "Merged {} x{} (quality {}) into existing stack for player {}",
+                item.item_type, item.quantity, item.quality, item.player_id
+            );
+            return Ok(Some(container_id));
+        }
     }
 
     // Find first empty slot
@@ -1514,5 +1501,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, 10, "a tool that wasn't used doesn't wear");
+    }
+
+    /// Gathered fiber joins only a stack of its own grade and min grade (D2)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_gather_never_blends_into_another_grade(db: sqlx::PgPool) {
+        use crate::engine::slot_moves::test_stacks::{lot_in, stacks_in};
+        let (ada, inventory, _) = gatherer(&db, 10).await; // the sickle is in slot 0
+        lot_in(&db, ada, inventory, 1, "fiber", 95, 95, 5).await; // A
+        lot_in(&db, ada, inventory, 2, "fiber", 50, 20, 5).await; // D, blended from F
+        lot_in(&db, ada, inventory, 3, "fiber", 40, 40, 5).await; // D
+        let gathered = |quality| PendingItem {
+            player_id: ada,
+            node_id: Uuid::new_v4(),
+            item_type: "fiber".into(),
+            item_name: "Plant Fiber".into(),
+            quantity: 5,
+            quality,
+            tool: None,
+        };
+        let mut conn = db.acquire().await.unwrap();
+
+        // A D joins the unblended D, not the blend in the lower slot
+        place_gathered(&mut conn, &gathered(50)).await.unwrap();
+        // A C has nothing to join
+        place_gathered(&mut conn, &gathered(60)).await.unwrap();
+
+        assert_eq!(
+            stacks_in(&db, inventory, "fiber").await,
+            vec![(1, 5, 95, 95), (2, 5, 50, 20), (3, 10, 45, 40), (4, 5, 60, 60)],
+        );
     }
 }

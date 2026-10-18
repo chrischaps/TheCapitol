@@ -13,8 +13,11 @@
 
 use std::collections::HashMap;
 
+use capitol_protocol::rules::stacking::{auto_stacks_with, Lot};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
+
+use super::slot_moves::write_lot;
 
 /// What a removal changed, so the caller can update the game state and tell clients.
 #[derive(Debug, Clone)]
@@ -219,8 +222,8 @@ pub struct ReturnedStations {
 struct Inventory {
     id: Uuid,
     free: Vec<i32>,
-    /// The first stack of each stackable item type, as `(item, quantity, quality)`
-    stacks: HashMap<String, (Uuid, i32, i32)>,
+    /// The stacks of each stackable item type, in slot order
+    stacks: HashMap<String, Vec<(Uuid, Lot)>>,
 }
 
 /// Empty every station on `plot_id` into inventories, before a foreclosure
@@ -228,12 +231,12 @@ struct Inventory {
 /// owner at the quality it was placed with, as [`remove_station`] does. Each
 /// item in its boxes goes back to whoever owns the item: a guest's deposit is
 /// the guest's (#80), and an item with no owner is the station owner's. A
-/// stackable item joins the first stack of its type, at the two stacks' quality
-/// averaged by quantity; anything else takes
-/// the first free slot. A tool in a station's tool slot goes back to whoever
-/// put it there (E1.6), or the station owner if they're gone. Kits go first,
-/// so a station is the last thing lost, then tools. A tool that finds no room
-/// goes with its station.
+/// stackable item joins the first stack of its type, grade and min grade
+/// (`rules::stacking::auto_stacks_with`, plan D2), at the two stacks' quality
+/// averaged by quantity; anything else takes the first free slot. A tool in a
+/// station's tool slot goes back to whoever put it there (E1.6), or the
+/// station owner if they're gone. Kits go first, so a station is the last
+/// thing lost, then tools. A tool that finds no room goes with its station.
 /// The stations are left, empty or holding only what didn't fit, for
 /// `release_plot` to delete.
 pub async fn return_plot_stations(
@@ -254,8 +257,8 @@ pub async fn return_plot_stations(
     let station_ids: Vec<Uuid> = stations.iter().map(|s| s.0).collect();
     let station_owner: HashMap<Uuid, Uuid> = stations.iter().map(|s| (s.0, s.2)).collect();
     // The boxes are locked too, so a deposit racing this waits (see `remove_in`)
-    let contents: Vec<(Uuid, String, i32, i32, Option<Uuid>, Uuid, bool)> = sqlx::query_as(
-        "SELECT i.id, i.item_type, i.quality, i.quantity, i.owner_id, c.station_id, it.stackable
+    let contents: Vec<(Uuid, String, i32, i32, i32, Option<Uuid>, Uuid, bool)> = sqlx::query_as(
+        "SELECT i.id, i.item_type, i.quality, i.quantity, i.min_quality, i.owner_id, c.station_id, it.stackable
          FROM items i
          JOIN containers c ON i.container_id = c.id
          JOIN item_types it ON it.id = i.item_type
@@ -317,23 +320,22 @@ pub async fn return_plot_stations(
         took(&mut returned, player, inventory_id);
     }
 
-    for (item_id, item_type, quality, quantity, item_owner, station_id, stackable) in contents {
+    for (item_id, item_type, quality, quantity, min_quality, item_owner, station_id, stackable) in contents {
         let player = item_owner.unwrap_or(station_owner[&station_id]);
         let Some(inv) = inventory(tx, &mut inventories, player).await? else {
             returned.lost.push((item_type, quantity));
             continue;
         };
         let inventory_id = inv.id;
-        if let Some((stack_id, qty, q)) = inv.stacks.get_mut(&item_type).filter(|_| stackable) {
-            let total = *qty + quantity;
-            *q = (*q * *qty + quality * quantity) / total;
-            *qty = total;
-            sqlx::query("UPDATE items SET quantity = $1, quality = $2 WHERE id = $3")
-                .bind(*qty)
-                .bind(*q)
-                .bind(*stack_id)
-                .execute(&mut *tx)
-                .await?;
+        let lot = Lot { quantity, quality, min_quality };
+        let joins = inv.stacks.get_mut(&item_type).filter(|_| stackable).and_then(|stacks| {
+            stacks.iter_mut().find(|(_, stack)| {
+                auto_stacks_with(&item_type, stack, &item_type, &lot) && stack.merge(lot).is_some()
+            })
+        });
+        if let Some((stack_id, stack)) = joins {
+            *stack = stack.merge(lot).expect("checked above");
+            write_lot(&mut *tx, *stack_id, stack).await?;
             sqlx::query("DELETE FROM items WHERE id = $1")
                 .bind(item_id)
                 .execute(&mut *tx)
@@ -341,7 +343,7 @@ pub async fn return_plot_stations(
         } else if !inv.free.is_empty() {
             let slot = inv.free.remove(0);
             if stackable {
-                inv.stacks.insert(item_type, (item_id, quantity, quality));
+                inv.stacks.entry(item_type).or_default().push((item_id, lot));
             }
             sqlx::query(
                 "UPDATE items SET container_id = $1, slot_index = $2, owner_id = $3 WHERE id = $4",
@@ -387,8 +389,8 @@ async fn inventory<'a>(
         let loaded = match found {
             None => None,
             Some((id, slot_count)) => {
-                let held: Vec<(Uuid, String, i32, i32, Option<i32>, bool)> = sqlx::query_as(
-                    "SELECT i.id, i.item_type, i.quantity, i.quality, i.slot_index, it.stackable
+                let held: Vec<(Uuid, String, i32, i32, i32, Option<i32>, bool)> = sqlx::query_as(
+                    "SELECT i.id, i.item_type, i.quantity, i.quality, i.min_quality, i.slot_index, it.stackable
                      FROM items i JOIN item_types it ON it.id = i.item_type
                      WHERE i.container_id = $1 ORDER BY i.slot_index NULLS LAST, i.id
                      FOR UPDATE OF i",
@@ -396,11 +398,11 @@ async fn inventory<'a>(
                 .bind(id)
                 .fetch_all(&mut *tx)
                 .await?;
-                let used: Vec<i32> = held.iter().filter_map(|h| h.4).collect();
-                let mut stacks = HashMap::new();
-                for (item, kind, qty, quality, _, stackable) in held {
+                let used: Vec<i32> = held.iter().filter_map(|h| h.5).collect();
+                let mut stacks: HashMap<String, Vec<(Uuid, Lot)>> = HashMap::new();
+                for (item, kind, quantity, quality, min_quality, _, stackable) in held {
                     if stackable {
-                        stacks.entry(kind).or_insert((item, qty, quality));
+                        stacks.entry(kind).or_default().push((item, Lot { quantity, quality, min_quality }));
                     }
                 }
                 let free = (0..slot_count).filter(|s| !used.contains(s)).collect();
@@ -673,5 +675,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(items, 0);
+    }
+
+    /// A foreclosure's returns join only stacks of their own grade and min
+    /// grade, and a returned blend stays a blend (D2)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn returns_join_only_their_own_grade_and_keep_their_min(db: PgPool) {
+        use crate::engine::slot_moves::test_stacks::{lot_in, stacks_in};
+        let ada = player(&db, "ada").await;
+        let plot: Uuid = sqlx::query_scalar(
+            "INSERT INTO plots (zone_id, grid_x, grid_y, world_x, world_y, bounds_min_x,
+                                bounds_min_y, bounds_max_x, bounds_max_y, size_category, owner_id)
+             VALUES ((SELECT id FROM zones LIMIT 1), 9999, 9999, 0, 0, -10, -10, 10, 10, 'small', $1)
+             RETURNING id",
+        )
+        .bind(ada.id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let (station, chest_box) = chest(&db, ada.id, 50).await;
+        sqlx::query("UPDATE stations SET plot_id = $1 WHERE id = $2")
+            .bind(plot)
+            .bind(station)
+            .execute(&db)
+            .await
+            .unwrap();
+        lot_in(&db, ada.id, ada.inventory, 0, "fiber", 95, 95, 5).await;
+        lot_in(&db, ada.id, ada.inventory, 1, "fiber", 60, 60, 4).await;
+        lot_in(&db, ada.id, chest_box, 0, "fiber", 92, 40, 2).await;
+        lot_in(&db, ada.id, chest_box, 1, "fiber", 65, 65, 3).await;
+        lot_in(&db, ada.id, chest_box, 2, "fiber", 93, 93, 1).await;
+
+        let mut tx = db.begin().await.unwrap();
+        let returned = return_plot_stations(&mut tx, plot).await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(returned.lost, vec![]);
+        // The kit took slot 2. The blended A found no blended A, so it has a
+        // slot of its own; the C joined the C and the A the A.
+        assert_eq!(
+            stacks_in(&db, ada.inventory, "fiber").await,
+            vec![(0, 6, 94, 93), (1, 7, 62, 60), (3, 2, 92, 40)],
+        );
     }
 }

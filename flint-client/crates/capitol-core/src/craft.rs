@@ -24,9 +24,13 @@
 //!   rolls only the variance (E1.1). The server takes units from the stacks
 //!   in the order they're sent, as [`check`] counts them.
 //! - **Output with nowhere to go.** The server puts the output in the
-//!   output box: onto a stack of the same type, else into a free slot, and
-//!   if there's neither it's lost (`persist_items` in `engine/tick.rs`).
-//!   [`Check::blocked`] names what's in the way, and the craft isn't sent.
+//!   output box: onto a stack of the same type, grade and min grade
+//!   (`rules::stacking::auto_stacks_with`, E1.2), else into a free slot,
+//!   and if there's neither it refuses the craft. The output can land
+//!   anywhere in [`Check::range`], so a stack it joins must take every grade
+//!   in it. [`Check::blocked`] names what's in the way, and the craft isn't
+//!   sent. The output box has one slot, so near a grade line that's often
+//!   ([#191](https://github.com/chrischaps/TheCapitol/issues/191)).
 //! - **A finished craft settles in two refetches.** The tick writes the
 //!   output, then deletes the inputs, each with its own `inventory_updated`.
 //!   A refetch between them shows the output with the inputs still there,
@@ -35,8 +39,9 @@
 
 use std::time::{Duration, Instant};
 
-use capitol_protocol::rest::RecipeInfo;
+use capitol_protocol::rest::{RecipeInfo, SlotItem};
 use capitol_protocol::rules::quality;
+use capitol_protocol::rules::stacking::{self, Lot};
 use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
 
@@ -227,17 +232,27 @@ pub fn check_at<'a>(
         inputs,
         taken,
         range,
-        blocked: output.and_then(|o| blocked(recipe, o)),
+        blocked: output.and_then(|o| blocked(recipe, o, range)),
         station,
     }
 }
 
 /// What in `output` would leave one of the recipe's outputs nowhere to go:
-/// a type already there merges, anything else takes a free slot.
-fn blocked(recipe: &RecipeInfo, output: &Container) -> Option<Blocked> {
+/// a stack the output joins whatever its quality in `range` takes it,
+/// anything else needs a free slot. Until the inputs are met there's no
+/// range, and any stack of the type counts.
+fn blocked(recipe: &RecipeInfo, output: &Container, range: Option<(i32, i32)>) -> Option<Blocked> {
     let mut free = output.slot_count() - output.used_slots();
     for out in &recipe.outputs {
-        if output.items().any(|i| i.item_type == out.item_type) {
+        let joins = |i: &SlotItem| {
+            i.item_type == out.item_type
+                && range.is_none_or(|(lo, hi)| {
+                    [lo, hi].iter().all(|&q| {
+                        stacking::auto_stacks_with(&i.item_type, &i.lot(), &out.item_type, &Lot::fresh(1, q))
+                    })
+                })
+        };
+        if output.items().any(joins) {
             continue;
         }
         if free == 0 {
@@ -284,14 +299,20 @@ pub fn fill(recipe: &RecipeInfo, from: &Container, input: &Container) -> Vec<Shi
 }
 
 /// The moves that put everything in `from` back into `to`: onto a stack of
-/// the same type where there is one, else into an empty slot. Each target
-/// is used once, so moves sent together can't race for a slot.
+/// the same type, grade and min grade where there is one, else into an
+/// empty slot. It never blends grades for the player (E1.2). Each target is
+/// used once, so moves sent together can't race for a slot.
 pub fn empty_into(from: &Container, to: &Container) -> Vec<Shift> {
     let mut taken = vec![false; to.slot_count()];
     let mut shifts = Vec::new();
     for item in from.items() {
         let onto = (0..to.slot_count())
-            .find(|&s| !taken[s] && to.slot(s).is_some_and(|t| t.item_type == item.item_type))
+            .find(|&s| {
+                !taken[s]
+                    && to.slot(s).is_some_and(|t| {
+                        stacking::auto_stacks_with(&t.item_type, &t.lot(), &item.item_type, &item.lot())
+                    })
+            })
             .or_else(|| (0..to.slot_count()).find(|&s| !taken[s] && to.slot(s).is_none()));
         let Some(slot) = onto else {
             break;
@@ -629,8 +650,21 @@ mod tests {
 
         // Empty: fine.
         assert!(check(&r[0], &inp, Some(&out(&[]))).ready());
-        // Rope on rope merges.
-        assert!(check(&r[0], &inp, Some(&out(&[item(9, 0, "rope", 70, 1)]))).ready());
+        // Rope on rope of the grade it will be merges (E1.2): this rope is a D.
+        let (lo, hi) = check(&r[0], &inp, None).range.unwrap();
+        assert!(lo >= 35 && hi <= 54, "a D whatever the roll: {lo}..{hi}");
+        assert!(check(&r[0], &inp, Some(&out(&[item(9, 0, "rope", 40, 1)]))).ready());
+        // Not onto another grade, or onto a blend: the server would refuse.
+        assert!(!check(&r[0], &inp, Some(&out(&[item(9, 0, "rope", 70, 1)]))).ready());
+        let blend = item(9, 0, "rope", 40, 1).with_min_quality(20);
+        assert!(!check(&r[0], &inp, Some(&out(&[blend]))).ready());
+        // A range across a grade line could land either side: not onto either.
+        let edge = input(&[item(1, 0, "fiber", 55, 2)]);
+        let (lo, hi) = check(&r[0], &edge, None).range.unwrap();
+        assert!(lo < 55 && hi >= 55, "straddles D and C: {lo}..{hi}");
+        for q in [50, 60] {
+            assert!(!check(&r[0], &edge, Some(&out(&[item(9, 0, "rope", q, 1)]))).ready());
+        }
         // A kit in the way: the rope would be lost.
         let c = check(&r[0], &inp, Some(&out(&[item(9, 0, "chest_kit", 70, 1)])));
         assert!(c.satisfied() && !c.ready());
@@ -685,22 +719,31 @@ mod tests {
         let inv = boxed(
             INV,
             "player_inventory",
-            4,
+            6,
             &[item(1, 0, "fiber", 40, 4), item(2, 2, "rope", 80, 1)],
         );
         let inp = input(&[
-            item(5, 0, "fiber", 90, 3),
-            item(6, 1, "fiber", 70, 2),
-            item(7, 2, "chest_kit", 70, 1),
+            item(5, 0, "fiber", 45, 3),
+            item(6, 1, "fiber", 50, 2),
+            item(7, 2, "fiber", 90, 1),
+            item(8, 3, "chest_kit", 70, 1),
         ]);
         assert_eq!(
             empty_into(&inp, &inv),
             [
-                (Uuid::from_u128(5), INV, 0), // onto the fiber
+                (Uuid::from_u128(5), INV, 0), // onto the fiber, a D as it is
                 (Uuid::from_u128(6), INV, 1), // that one's taken: an empty slot
-                (Uuid::from_u128(7), INV, 3),
+                (Uuid::from_u128(7), INV, 3), // an A never joins a D (E1.2)
+                (Uuid::from_u128(8), INV, 4),
             ]
         );
+    }
+
+    #[test]
+    fn emptying_never_blends_into_a_blend() {
+        let inv = boxed(INV, "player_inventory", 4, &[item(1, 0, "fiber", 40, 4).with_min_quality(10)]);
+        let inp = input(&[item(5, 0, "fiber", 45, 3)]);
+        assert_eq!(empty_into(&inp, &inv), [(Uuid::from_u128(5), INV, 1)]);
     }
 
     /// Connected, with an inventory, the input box holding `items`, and an

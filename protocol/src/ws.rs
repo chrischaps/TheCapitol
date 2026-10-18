@@ -47,6 +47,14 @@ pub enum ClientMessage {
         target_container_id: String,
         target_slot: i32,
     },
+    /// Split `quantity` off the stack `item_id` into the empty slot `to_slot`
+    /// of the same container (E1.2). Both keep the quality and min quality.
+    #[serde(rename = "split_stack")]
+    SplitStack {
+        item_id: String,
+        quantity: i32,
+        to_slot: i32,
+    },
     // M4: Stations
     #[serde(rename = "place_station")]
     PlaceStation {
@@ -106,6 +114,7 @@ impl ClientMessage {
             ClientMessage::Craft { .. } => "craft",
             ClientMessage::CancelCrafting => "cancel_crafting",
             ClientMessage::MoveItem { .. } => "move_item",
+            ClientMessage::SplitStack { .. } => "split_stack",
             ClientMessage::PlaceStation { .. } => "place_station",
             ClientMessage::RemoveStation { .. } => "remove_station",
             ClientMessage::OpenStation { .. } => "open_station",

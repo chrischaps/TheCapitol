@@ -50,7 +50,8 @@ impl Default for Sample {
                     6,
                     &[
                         item(1, 0, "fiber", "Plant Fiber", 92, 12),
-                        item(2, 1, "fiber", "Plant Fiber", 78, 9),
+                        // A B blended from a D: its pip is ringed (E1.2)
+                        item(2, 1, "fiber", "Plant Fiber", 78, 9).with_min_quality(41),
                         item(3, 2, "rope", "Rope", 64, 3),
                         item(4, 6, "fiber", "Plant Fiber", 41, 4),
                         item(5, 7, "workbench_kit", "Workbench Kit", 70, 1),
@@ -204,10 +205,16 @@ impl Sample {
     }
 }
 
-/// A move as the server makes it (`backend/src/routes/inventory.rs`): into
+/// A move as the server makes it (`backend/src/engine/slot_moves.rs`): into
 /// an empty slot it moves, onto the same type it merges, with the quality
-/// averaged by quantity, and onto anything else the two swap.
+/// averaged by quantity and the lower min (any grades: it's a drop), and
+/// onto anything else the two swap. A split takes part of a stack into an
+/// empty slot of its own container, keeping its quality and min.
 fn apply(containers: &mut [Container; 3], m: Move) {
+    if let Some(quantity) = m.split {
+        split(containers, m, quantity);
+        return;
+    }
     let from = containers.iter().enumerate().find_map(|(c, con)| {
         con.slots
             .iter()
@@ -231,11 +238,15 @@ fn apply(containers: &mut [Container; 3], m: Move) {
     match containers[tc].slots[ts].take() {
         None => {}
         Some(mut target) if target.item_type == source.item_type => {
-            let quantity = source.quantity + target.quantity;
-            target.quality =
-                (source.quality * source.quantity + target.quality * target.quantity) / quantity;
+            let Some(merged) = target.lot().merge(source.lot()) else {
+                containers[fc].slots[fs] = Some(source);
+                containers[tc].slots[ts] = Some(target);
+                return;
+            };
+            target.quality = merged.quality;
+            target.min_quality = merged.min_quality;
             target.quality_grade = quality_grade(target.quality).into();
-            target.quantity = quantity;
+            target.quantity = merged.quantity;
             containers[tc].slots[ts] = Some(target);
             return;
         }
@@ -246,6 +257,33 @@ fn apply(containers: &mut [Container; 3], m: Move) {
     }
     source.slot_index = ts as i32;
     containers[tc].slots[ts] = Some(source);
+}
+
+/// `quantity` of `m.item_id` into the empty `m.target_slot` of its own container.
+fn split(containers: &mut [Container; 3], m: Move, quantity: i32) {
+    let Some(c) = containers
+        .iter_mut()
+        .find(|c| c.id == m.target_container_id)
+    else {
+        return;
+    };
+    let ts = m.target_slot as usize;
+    if c.slots.get(ts).is_none_or(|s| s.is_some()) {
+        return;
+    }
+    let Some(source) = c.slots.iter_mut().flatten().find(|i| i.item_id == m.item_id) else {
+        return;
+    };
+    if quantity < 1 || quantity >= source.quantity {
+        return;
+    }
+    source.quantity -= quantity;
+    let mut new = source.clone();
+    // A new id the sample won't have used: the source's, marked with the slot
+    new.item_id = Uuid::from_u128(source.item_id.as_u128() | ((ts as u128 + 1) << 64));
+    new.quantity = quantity;
+    new.slot_index = ts as i32;
+    c.slots[ts] = Some(new);
 }
 
 #[cfg(test)]
@@ -263,6 +301,7 @@ mod tests {
             item_id: s.containers[from.0].slot(from.1).unwrap().item_id,
             target_container_id: s.containers[to.0].id,
             target_slot: to.1 as i32,
+            split: None,
         }
     }
 
@@ -280,11 +319,38 @@ mod tests {
         assert_eq!(at(&s, 0, 0), None);
         assert_eq!(at(&s, 0, 1), Some(("fiber", 86, 21)));
         assert_eq!(s.containers[0].slot(1).unwrap().quality_grade, "B");
+        assert_eq!(s.containers[0].slot(1).unwrap().min_quality, 41, "the lower min");
 
         let m = mv(&s, (0, 3), (1, 0));
         apply(&mut s.containers, m);
         assert_eq!(at(&s, 1, 0), Some(("rope", 64, 3)));
         assert_eq!(at(&s, 0, 3), Some(("fiber", 81, 3)));
         assert_eq!(s.containers[0].slot(3).unwrap().slot_index, 3);
+    }
+
+    #[test]
+    fn the_sample_splits_like_the_server() {
+        let mut s = Sample::default();
+        let m = Move {
+            split: Some(4),
+            ..mv(&s, (0, 1), (0, 3))
+        };
+        apply(&mut s.containers, m);
+        assert_eq!(at(&s, 0, 1), Some(("fiber", 78, 5)));
+        assert_eq!(at(&s, 0, 3), Some(("fiber", 78, 4)));
+        let new = s.containers[0].slot(3).unwrap();
+        assert_eq!((new.min_quality, new.slot_index), (41, 3), "a blend stays a blend");
+        assert_ne!(new.item_id, s.containers[0].slot(1).unwrap().item_id);
+
+        // Not into a full slot, and never the whole stack
+        for (to, quantity) in [((0, 2), 1), ((0, 4), 5)] {
+            let m = Move {
+                split: Some(quantity),
+                ..mv(&s, (0, 1), to)
+            };
+            apply(&mut s.containers, m);
+        }
+        assert_eq!(at(&s, 0, 1), Some(("fiber", 78, 5)));
+        assert_eq!(at(&s, 0, 4), None);
     }
 }

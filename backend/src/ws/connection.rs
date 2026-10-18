@@ -380,6 +380,22 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                     }
                                 }
+                                ClientMessage::SplitStack { item_id, quantity, to_slot } => {
+                                    let Ok(item_uuid) = Uuid::parse_str(&item_id) else {
+                                        let _ = sender.send(Message::Text(
+                                            serde_json::to_string(&ServerMessage::Error {
+                                                message: "Invalid item ID".to_string(),
+                                                command: command.into(),
+                                            }).unwrap().into()
+                                        )).await;
+                                        continue;
+                                    };
+                                    let msg = match handle_split_stack(&state, player_id, item_uuid, quantity, to_slot).await {
+                                        Ok(container_id) => ServerMessage::InventoryUpdated { player_id, container_id },
+                                        Err(message) => ServerMessage::Error { message, command: command.into() },
+                                    };
+                                    let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                }
                                 // M4: Stations
                                 ClientMessage::PlaceStation { station_type, x, y, kit_item_id } => {
                                     let kit_uuid = match Uuid::parse_str(&kit_item_id) {
@@ -1243,6 +1259,32 @@ async fn handle_move_item(
     Ok(source_item.container_id)
 }
 
+/// Split `quantity` off a stack into the empty `to_slot` of its container
+/// (E1.2). Returns the container, which is the only one that changed.
+async fn handle_split_stack(
+    state: &AppState,
+    player_id: Uuid,
+    item_id: Uuid,
+    quantity: i32,
+    to_slot: i32,
+) -> Result<Uuid, String> {
+    let source = movable_item(&state.db, player_id, item_id)
+        .await
+        .map_err(|e| e.message())?;
+    let container_id = source
+        .container_id
+        .ok_or_else(|| "That item isn't in a container".to_string())?;
+    let at = live_position(&state.game, player_id).await;
+    check_container_access(&state.db, player_id, container_id, at)
+        .await
+        .map_err(|e| e.message())?;
+    crate::engine::slot_moves::split(&state.db, player_id, &source, quantity, to_slot)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?
+        .map_err(|e| e.message().to_string())?;
+    Ok(container_id)
+}
+
 /// The containers a move changed, each once: the target, then the source if
 /// it's a different one. A move, merge or swap empties or fills the source
 /// slot, so a client refetching by `container_id` needs both.
@@ -1500,8 +1542,8 @@ async fn hand_over(
     qty: i32,
     to: Uuid,
 ) -> Result<Uuid, String> {
-    let (item_type, quality, current_qty): (String, i32, i32) =
-        sqlx::query_as("SELECT item_type, quality, quantity FROM items WHERE id = $1")
+    let (item_type, quality, min_quality, current_qty): (String, i32, i32, i32) =
+        sqlx::query_as("SELECT item_type, quality, min_quality, quantity FROM items WHERE id = $1")
             .bind(item_id)
             .fetch_one(&mut **tx)
             .await
@@ -1523,15 +1565,18 @@ async fn hand_over(
         .execute(&mut **tx)
         .await
         .map_err(|e| format!("DB error: {}", e))?;
+    // The split keeps the min: a blend handed over is still a blend (D2)
     let new_item_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO items (id, item_type, quality, quantity, owner_id) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO items (id, item_type, quality, quantity, owner_id, min_quality)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(new_item_id)
     .bind(&item_type)
     .bind(quality)
     .bind(qty)
     .bind(to)
+    .bind(min_quality)
     .execute(&mut **tx)
     .await
     .map_err(|e| format!("DB error: {}", e))?;
@@ -1688,5 +1733,63 @@ mod tests {
             // An unknown type keeps its id as its name
             TradeItemInfo { item_id: mystery, item_type: "relic".into(), item_name: "relic".into(), quantity: 1, quality: 40 },
         ]);
+    }
+
+    /// A traded blend is still a blend, whether the whole stack goes or part (D2)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_trade_hands_over_the_min_quality(db: sqlx::PgPool) {
+        use crate::engine::slot_moves::test_stacks::lot_in;
+        let mut players = Vec::new();
+        for name in ["ada", "bob"] {
+            let account = Uuid::new_v4();
+            sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'x')")
+                .bind(account)
+                .bind(format!("{name}@test"))
+                .execute(&db)
+                .await
+                .unwrap();
+            let id = Uuid::new_v4();
+            sqlx::query("INSERT INTO players (id, account_id, name) VALUES ($1, $2, $3)")
+                .bind(id)
+                .bind(account)
+                .bind(name)
+                .execute(&db)
+                .await
+                .unwrap();
+            players.push(id);
+        }
+        let (ada, bob) = (players[0], players[1]);
+        let inventory = Uuid::new_v4();
+        sqlx::query("INSERT INTO containers (id, container_type, owner_id) VALUES ($1, 'player_inventory', $2)")
+            .bind(inventory)
+            .bind(ada)
+            .execute(&db)
+            .await
+            .unwrap();
+        let blend = lot_in(&db, ada, inventory, 0, "fiber", 91, 40, 10).await;
+        let rope = lot_in(&db, ada, inventory, 1, "rope", 80, 55, 2).await;
+
+        let mut tx = db.begin().await.unwrap();
+        let part = hand_over(&mut tx, blend, 4, bob).await.unwrap();
+        let whole = hand_over(&mut tx, rope, 2, bob).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let lots = |id: Uuid| {
+            let db = db.clone();
+            async move {
+                sqlx::query_as::<_, (Uuid, i32, i32, i32)>(
+                    "SELECT owner_id, quantity, quality, min_quality FROM items WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(lots(part).await, (bob, 4, 91, 40));
+        assert_eq!(lots(blend).await, (ada, 6, 91, 40));
+        assert_eq!(whole, rope);
+        assert_eq!(lots(rope).await, (bob, 2, 80, 55));
     }
 }

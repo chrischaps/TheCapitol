@@ -3,15 +3,26 @@
 //! any two grids on screen.
 //!
 //! A slot shows its item's icon (36 in 48, P5.2), the quantity bottom right
-//! and a quality pip top right in the grade's colour (plan §4.7). Hovering
-//! one shows the name, the quality and the grade.
+//! and a quality pip top right in the grade's colour (plan §4.7). A blend,
+//! a stack whose min grade isn't its grade, rings its pip in the min's
+//! colour (E1.2). Hovering one shows the name, the quality and the grade,
+//! and what a blend was blended from.
 //!
 //! Dragging uses egui's drag-and-drop payload, so a drag can start in one
 //! panel and end in another without either knowing about the other. A drop
 //! on another slot comes back from [`SlotGrid::show`] as a [`Move`]. The
 //! caller sends it (`Session::move_item`), and the server decides whether
-//! it moves, merges or swaps. Nothing changes here until the refetch that
-//! follows (`poll.rs`), so the grid never shows a state the server didn't.
+//! it moves, merges or swaps. A drop onto a stack of the same type blends
+//! the two whatever their grades: that's the player's call (plan D2).
+//! Nothing changes here until the refetch that follows (`poll.rs`), so the
+//! grid never shows a state the server didn't.
+//!
+//! **Splitting (E1.2).** A shift-drag onto an empty slot of the same grid
+//! opens a count field under the slot, set to half the stack. Enter or
+//! Split sends the move with [`Move::split`]; Escape or ✕ lets it go.
+//! Anywhere else, a shift-drag is a plain drag: the server splits only
+//! within a container ([#190](https://github.com/chrischaps/TheCapitol/issues/190)).
+//! A capture can't hold Shift for egui (#189), so the rig below checks it.
 //!
 //! A grid made [`SlotGrid::placing`] also reports a right click on a
 //! `*_kit` ([`SlotGrid::show_clicks`]), and its tooltip says so. That's
@@ -33,14 +44,65 @@ pub struct Move {
     pub item_id: Uuid,
     pub target_container_id: Uuid,
     pub target_slot: i32,
+    /// Split this many off into the slot, an empty one of the same
+    /// container, rather than moving the whole stack (`split_stack`, E1.2).
+    pub split: Option<i32>,
 }
 
-/// What a drag carries: the item, and where it came from.
+impl Move {
+    /// The whole stack `item_id` into `target_slot` of `target_container_id`.
+    pub fn whole(item_id: Uuid, target_container_id: Uuid, target_slot: i32) -> Self {
+        Self {
+            item_id,
+            target_container_id,
+            target_slot,
+            split: None,
+        }
+    }
+}
+
+/// What a drag carries: the item, where it came from, and whether shift
+/// was down as it started (a split).
 #[derive(Debug, Clone)]
 struct Held {
     item: SlotItem,
     container_id: Uuid,
     slot: usize,
+    split: bool,
+}
+
+/// A split waiting on its count: the stack, where it goes, and how many.
+/// One at a time, in egui's memory, drawn by the grid it's for.
+#[derive(Debug, Clone)]
+struct PendingSplit {
+    item: SlotItem,
+    container_id: Uuid,
+    slot: usize,
+    quantity: i32,
+    /// The target slot, to stand the field under
+    at: Rect,
+}
+
+impl PendingSplit {
+    fn id() -> Id {
+        Id::new("capitol_pending_split")
+    }
+
+    fn get(ctx: &egui::Context) -> Option<Self> {
+        ctx.data(|d| d.get_temp(Self::id()))
+    }
+
+    fn set(ctx: &egui::Context, pending: Option<Self>) {
+        ctx.data_mut(|d| match pending {
+            Some(p) => d.insert_temp(Self::id(), p),
+            None => d.remove::<Self>(Self::id()),
+        });
+    }
+}
+
+/// What a split starts at: half, rounded down, and at least one.
+pub fn half(quantity: i32) -> i32 {
+    (quantity / 2).max(1)
 }
 
 /// What a grid's slots were asked this frame.
@@ -115,8 +177,58 @@ impl<'a> SlotGrid<'a> {
                 });
             }
         });
+        if self.enabled {
+            clicks.moved = clicks.moved.or(split_field(ui.ctx(), self.container.id));
+        }
         clicks
     }
+}
+
+/// The count field of a split waiting on this container, if there is one.
+/// Returns the split once it's confirmed.
+fn split_field(ctx: &egui::Context, container_id: Uuid) -> Option<Move> {
+    let mut pending = PendingSplit::get(ctx).filter(|p| p.container_id == container_id)?;
+    let most = pending.item.quantity - 1;
+    let (mut confirmed, mut dropped) = (false, false);
+    egui::Area::new(Id::new(("capitol_split_field", container_id)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pending.at.left_bottom() + egui::vec2(0.0, 4.0))
+        .show(ctx, |ui| {
+            theme::panel().inner_margin(6.0).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(theme::dim("Split"));
+                    let field = ui.add(
+                        egui::DragValue::new(&mut pending.quantity)
+                            .range(1..=most)
+                            .speed(0.1),
+                    );
+                    if !field.has_focus() && !field.lost_focus() && !field.dragged() {
+                        field.request_focus();
+                    }
+                    ui.label(theme::dim(format!("of {}", pending.item.quantity)));
+                    confirmed = theme::button(ui, "Split", true).clicked();
+                    dropped = ui.small_button("✕").clicked();
+                });
+            });
+        });
+    let (enter, escape) = ctx.input(|i| {
+        (
+            i.key_pressed(egui::Key::Enter),
+            i.key_pressed(egui::Key::Escape),
+        )
+    });
+    pending.quantity = pending.quantity.clamp(1, most);
+    if confirmed || enter {
+        PendingSplit::set(ctx, None);
+        return Some(Move {
+            item_id: pending.item.item_id,
+            target_container_id: container_id,
+            target_slot: pending.slot as i32,
+            split: Some(pending.quantity),
+        });
+    }
+    PendingSplit::set(ctx, (!(dropped || escape)).then_some(pending));
+    None
 }
 
 /// The item a slot's drag let go of over `response` this frame, if any:
@@ -170,10 +282,13 @@ impl Slot<'_> {
         let response = ui.interact(rect, id, sense);
 
         if let (true, Some(item)) = (draggable, self.item) {
+            // Read as the drag starts: egui keeps the payload it's given then.
+            let shift = ui.input(|i| i.modifiers.shift);
             response.dnd_set_drag_payload(Held {
                 item: item.clone(),
                 container_id: self.container_id,
                 slot: self.index,
+                split: shift && item.quantity > 1,
             });
         }
         let held = egui::DragAndDrop::payload::<Held>(ui.ctx());
@@ -195,6 +310,15 @@ impl Slot<'_> {
             Look::Plain
         };
         paint_slot(ui.painter(), icons, rect, self.item, look);
+        let waiting = PendingSplit::get(ui.ctx())
+            .is_some_and(|p| p.container_id == self.container_id && p.slot == self.index);
+        if waiting {
+            dashed_edge(
+                ui.painter(),
+                rect.shrink(1.0),
+                Stroke::new(2.0, CRAFT.gamma_multiply(0.8)),
+            );
+        }
 
         if let Some(item) = self.item {
             if held.is_none() {
@@ -208,6 +332,9 @@ impl Slot<'_> {
                     if placing && is_kit(item) {
                         ui.label(theme::dim("Right-click to place"));
                     }
+                    if draggable && item.quantity > 1 {
+                        ui.label(theme::dim("Shift-drag to an empty slot to split"));
+                    }
                 });
             }
         }
@@ -215,17 +342,35 @@ impl Slot<'_> {
         if is_source && response.dragged() {
             ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
             if let (Some(item), Some(at)) = (self.item, ui.ctx().pointer_interact_pos()) {
-                paint_held(ui.ctx(), icons, item, at);
+                let splitting = held.as_ref().is_some_and(|h| h.split);
+                let shown = if splitting { half(item.quantity) } else { item.quantity };
+                paint_held(ui.ctx(), icons, item, shown, at);
             }
         }
 
         if !accepts {
             return (None, right);
         }
-        let moved = response.dnd_release_payload::<Held>().map(|held| Move {
-            item_id: held.item.item_id,
-            target_container_id: self.container_id,
-            target_slot: self.index as i32,
+        let moved = response.dnd_release_payload::<Held>().and_then(|held| {
+            if held.split && held.container_id == self.container_id && self.item.is_none() {
+                // Ask how many first: the grid draws the field (`split_field`)
+                PendingSplit::set(
+                    ui.ctx(),
+                    Some(PendingSplit {
+                        quantity: half(held.item.quantity),
+                        item: held.item.clone(),
+                        container_id: self.container_id,
+                        slot: self.index,
+                        at: rect,
+                    }),
+                );
+                return None;
+            }
+            Some(Move::whole(
+                held.item.item_id,
+                self.container_id,
+                self.index as i32,
+            ))
         });
         (moved, right)
     }
@@ -295,12 +440,7 @@ fn paint_slot(
         glint(painter, icon, item.item_id.as_u128(), time, fade);
     }
     // React's pip: 8 px, 3 px in from the inside of the 2 px edge.
-    pip(
-        painter,
-        rect.right_top() + egui::vec2(-9.0, 9.0),
-        item.quality,
-        fade,
-    );
+    pip(painter, rect.right_top() + egui::vec2(-9.0, 9.0), item, fade);
     quantity(
         painter,
         rect.right_bottom() + egui::vec2(-6.0, -3.0),
@@ -317,8 +457,10 @@ pub fn pip_colour(quality: i32) -> Color32 {
 }
 
 /// A grade pip: a 4-point disc, its grade's colour lightening towards the
-/// bottom right (React's 135° gradient), ringed in dark. An A glows.
-fn pip(painter: &Painter, centre: Pos2, quality: i32, fade: f32) {
+/// bottom right (React's 135° gradient), ringed in dark. An A glows. A
+/// blend is ringed again, in its min grade's colour (E1.2).
+fn pip(painter: &Painter, centre: Pos2, item: &SlotItem, fade: f32) {
+    let quality = item.quality;
     let letter = quality_grade(quality);
     let (dark, light) = (pip_colour(quality), theme::grade_light(letter));
     const R: f32 = 4.0;
@@ -342,6 +484,13 @@ fn pip(painter: &Painter, centre: Pos2, quality: i32, fade: f32) {
         R,
         Stroke::new(1.0, theme::PIP_EDGE.gamma_multiply(fade)),
     );
+    if item.lot().is_blended() {
+        painter.circle_stroke(
+            centre,
+            R + 1.75,
+            Stroke::new(1.5, pip_colour(item.min_quality).gamma_multiply(fade)),
+        );
+    }
 }
 
 /// How often an A's slot glints, and how long a glint lasts (s).
@@ -425,7 +574,7 @@ fn dashed_edge(painter: &Painter, rect: Rect, stroke: Stroke) {
 }
 
 /// The item under the pointer while it's dragged, over everything.
-fn paint_held(ctx: &egui::Context, icons: &mut ItemIcons, item: &SlotItem, at: Pos2) {
+fn paint_held(ctx: &egui::Context, icons: &mut ItemIcons, item: &SlotItem, shown: i32, at: Pos2) {
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Tooltip,
         Id::new("capitol_slot_held"),
@@ -433,22 +582,17 @@ fn paint_held(ctx: &egui::Context, icons: &mut ItemIcons, item: &SlotItem, at: P
     let rect = Rect::from_center_size(at, egui::vec2(SLOT_SIZE, SLOT_SIZE));
     let icon = Rect::from_center_size(at, egui::vec2(theme::SLOT_ICON, theme::SLOT_ICON));
     icons.paint_on(&painter, icon, &item.item_type, 0.9);
-    pip(
-        &painter,
-        rect.right_top() + egui::vec2(-9.0, 9.0),
-        item.quality,
-        0.9,
-    );
+    pip(&painter, rect.right_top() + egui::vec2(-9.0, 9.0), item, 0.9);
     quantity(
         &painter,
         rect.right_bottom() + egui::vec2(-6.0, -3.0),
-        item.quantity,
+        shown,
         0.9,
     );
 }
 
 /// What hovering a full slot says: the name, the quality and its grade,
-/// and how many.
+/// how many, and for a blend what it was blended from.
 fn tooltip(ui: &mut Ui, item: &SlotItem) {
     ui.label(
         egui::RichText::new(&item.item_name)
@@ -462,6 +606,12 @@ fn tooltip(ui: &mut Ui, item: &SlotItem) {
             ui.label(theme::dim(format!("× {}", item.quantity)));
         }
     });
+    if item.lot().is_blended() {
+        ui.horizontal(|ui| {
+            ui.label(theme::dim("Blended from"));
+            theme::quality_badge(ui, item.min_quality);
+        });
+    }
 }
 
 #[cfg(test)]
@@ -545,6 +695,8 @@ mod tests {
         places: Vec<SlotItem>,
         /// Inventory disabled: nothing goes in or out.
         inventory_enabled: bool,
+        /// Shift held, for every frame until it's let go.
+        shift: bool,
     }
 
     impl Rig {
@@ -559,6 +711,7 @@ mod tests {
                 moves: Vec::new(),
                 places: Vec::new(),
                 inventory_enabled: true,
+                shift: false,
             };
             rig.frame(vec![]);
             rig.frame(vec![]); // settle the layout before the first click
@@ -569,6 +722,10 @@ mod tests {
             let input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1000.0, 700.0))),
                 events,
+                modifiers: egui::Modifiers {
+                    shift: self.shift,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let Rig {
@@ -580,6 +737,7 @@ mod tests {
                 moves,
                 places,
                 inventory_enabled,
+                ..
             } = self;
             let _ = ctx.run(input, |ctx| {
                 theme::install(ctx);
@@ -681,14 +839,71 @@ mod tests {
         let inv = rig.inventory.id;
         let fiber = rig.inventory.slot(0).unwrap().item_id;
         rig.drag((inv, 0), (inv, 7));
+        assert_eq!(rig.moves, [Move::whole(fiber, inv, 7)]);
+    }
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// A shift-drag to an empty slot asks how many, starting at half, and
+    /// Enter sends the split (E1.2)
+    #[test]
+    fn a_shift_drag_to_an_empty_slot_splits_half() {
+        let mut rig = Rig::new();
+        let inv = rig.inventory.id;
+        let fiber = rig.inventory.slot(0).unwrap().item_id;
+        rig.shift = true;
+        rig.drag((inv, 0), (inv, 7));
+        rig.shift = false;
+        assert!(rig.moves.is_empty(), "it waits on the count");
+        assert!(PendingSplit::get(&rig.ctx).is_some());
+
+        rig.frame(vec![key(egui::Key::Enter)]);
         assert_eq!(
             rig.moves,
             [Move {
-                item_id: fiber,
-                target_container_id: inv,
-                target_slot: 7
+                split: Some(6),
+                ..Move::whole(fiber, inv, 7)
             }]
         );
+        assert!(PendingSplit::get(&rig.ctx).is_none());
+    }
+
+    #[test]
+    fn escape_lets_a_split_go() {
+        let mut rig = Rig::new();
+        let inv = rig.inventory.id;
+        rig.shift = true;
+        rig.drag((inv, 0), (inv, 7));
+        rig.shift = false;
+        rig.frame(vec![key(egui::Key::Escape)]);
+        rig.frame(vec![key(egui::Key::Enter)]);
+        assert!(rig.moves.is_empty());
+    }
+
+    /// Onto a stack, into another grid, or of a single item: a plain drag
+    #[test]
+    fn a_shift_drag_that_cant_split_moves() {
+        let mut rig = Rig::new();
+        let (inv, input) = (rig.inventory.id, rig.input.id);
+        let fiber = rig.inventory.slot(0).unwrap().item_id;
+        let rope = rig.inventory.slot(3).unwrap().item_id;
+        rig.shift = true;
+        rig.drag((inv, 0), (input, 0)); // another grid
+        rig.drag((inv, 3), (inv, 8)); // one rope
+        rig.shift = false;
+        assert_eq!(
+            rig.moves,
+            [Move::whole(fiber, input, 0), Move::whole(rope, inv, 8)]
+        );
+        assert!(PendingSplit::get(&rig.ctx).is_none());
     }
 
     #[test]
@@ -701,18 +916,7 @@ mod tests {
         rig.drag((input, 1), (inv, 0)); // fiber onto fiber: the server merges
         assert_eq!(
             rig.moves,
-            [
-                Move {
-                    item_id: rope,
-                    target_container_id: input,
-                    target_slot: 1
-                },
-                Move {
-                    item_id: fiber,
-                    target_container_id: inv,
-                    target_slot: 0
-                },
-            ]
+            [Move::whole(rope, input, 1), Move::whole(fiber, inv, 0)]
         );
     }
 

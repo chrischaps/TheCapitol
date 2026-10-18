@@ -235,7 +235,7 @@ impl Poller {
             Ok(RestResponse::Deposit(_) | RestResponse::Withdraw(_)) => {
                 self.request(Fetch::Containers);
             }
-            Ok(RestResponse::MoveItem(_)) => {
+            Ok(RestResponse::MoveItem(_) | RestResponse::SplitStack(_)) => {
                 self.request(Fetch::Containers);
                 if let Some(open) = state.open_station() {
                     self.request(Fetch::StationContainer {

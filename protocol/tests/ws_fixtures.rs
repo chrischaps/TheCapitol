@@ -67,6 +67,7 @@ const CLIENT_TYPES: &[&str] = &[
     "craft",
     "cancel_crafting",
     "move_item",
+    "split_stack",
     "place_station",
     "remove_station",
     "open_station",

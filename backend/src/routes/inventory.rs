@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Path, State},
     routing::{get, post},
     Extension, Json, Router,
 };
@@ -7,11 +7,12 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use capitol_protocol::rest::{
-    ContainerResponse, ContainersResponse, MoveItemRequest, MoveItemResponse,
+    ContainerResponse, ContainersResponse, MoveItemRequest, MoveItemResponse, SplitStackRequest,
+    SplitStackResponse,
 };
 
 use crate::engine::container_access::{check_container_access, live_position, movable_item};
-use crate::engine::slot_moves::{apply_move, SlotMove};
+use crate::engine::slot_moves::{self, apply_move, SlotMove};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::{Container, ContainerType, Item, ItemType, SlotItem, ITEM_COLUMNS, ITEM_TYPE_COLUMNS};
@@ -21,6 +22,16 @@ pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/containers", get(get_containers))
         .route("/move", post(move_item))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::middleware::auth::auth_middleware,
+        ))
+}
+
+/// `/items`: what can be done to one stack.
+pub fn items_router(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/{id}/split", post(split_stack))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
@@ -192,7 +203,7 @@ pub async fn move_item(
     .await?;
     let (action, merged_quantity, merged_quality) = match done {
         SlotMove::Moved => ("moved", None, None),
-        SlotMove::Merged { quantity, quality } => ("merged", Some(quantity), Some(quality)),
+        SlotMove::Merged { quantity, quality, .. } => ("merged", Some(quantity), Some(quality)),
         SlotMove::Swapped => ("swapped", None, None),
     };
     let response = MoveItemResponse {
@@ -203,4 +214,53 @@ pub async fn move_item(
     };
 
     Ok(Json(response))
+}
+
+/// Split part of a stack into an empty slot of the same container (E1.2).
+/// Both stacks keep the quality and the min quality.
+#[utoipa::path(
+    post,
+    path = "/items/{id}/split",
+    params(("id" = Uuid, Path, description = "The stack to split")),
+    request_body = SplitStackRequest,
+    responses(
+        (status = 200, description = "The new stack", body = SplitStackResponse),
+        (status = 400, description = "Bad quantity, or the slot is taken or doesn't exist"),
+        (status = 404, description = "Item not found")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Inventory"
+)]
+pub async fn split_stack(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(item_id): Path<Uuid>,
+    Json(req): Json<SplitStackRequest>,
+) -> Result<Json<SplitStackResponse>, AppError> {
+    let player_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM players WHERE account_id = $1 LIMIT 1"
+    )
+    .bind(auth_user.account_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    let source = movable_item(&state.db, player_id, item_id).await?;
+    let container_id = source
+        .container_id
+        .ok_or_else(|| AppError::BadRequest("That item isn't in a container".into()))?;
+    let at = live_position(&state.game, player_id).await;
+    check_container_access(&state.db, player_id, container_id, at).await?;
+
+    let new = slot_moves::split(&state.db, player_id, &source, req.quantity, req.to_slot)
+        .await?
+        .map_err(|e| AppError::BadRequest(e.message().into()))?;
+    let item_type: Option<ItemType> =
+        sqlx::query_as(&format!("SELECT {ITEM_TYPE_COLUMNS} FROM item_types WHERE id = $1"))
+            .bind(&new.item_type)
+            .fetch_optional(&state.db)
+            .await?;
+    let item = new
+        .to_slot_item(item_type.as_ref())
+        .ok_or_else(|| AppError::Internal("A split stack has no slot".into()))?;
+    Ok(Json(SplitStackResponse { item, container_id }))
 }

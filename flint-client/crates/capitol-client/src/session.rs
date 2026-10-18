@@ -31,7 +31,8 @@ use capitol_core::net::{
 };
 use capitol_core::poll::{Fetch, Poller};
 use capitol_core::protocol::rest::{
-    DepositRequest, MoveItemRequest, PayTaxRequest, PositionQuery, SlotItem, WithdrawRequest,
+    DepositRequest, MoveItemRequest, PayTaxRequest, PositionQuery, SlotItem, SplitStackRequest,
+    WithdrawRequest,
 };
 use capitol_core::protocol::rules::Zone;
 use capitol_core::protocol::terrain::TerrainResponse;
@@ -509,14 +510,22 @@ impl Session {
     /// both containers (#77), but a refused move comes back on the request's
     /// own tag over REST, not as an anonymous socket `error` (#89).
     pub fn move_item(&mut self, m: Move) {
-        self.net.rest(
-            RestRequest::MoveItem(MoveItemRequest {
+        let request = match m.split {
+            // A split goes into the same container: the server knows which
+            Some(quantity) => RestRequest::SplitStack {
+                item_id: m.item_id,
+                request: SplitStackRequest {
+                    quantity,
+                    to_slot: m.target_slot,
+                },
+            },
+            None => RestRequest::MoveItem(MoveItemRequest {
                 item_id: m.item_id,
                 target_container_id: m.target_container_id,
                 target_slot: m.target_slot,
             }),
-            MOVE_TAG,
-        );
+        };
+        self.net.rest(request, MOVE_TAG);
     }
 
     /// Why the server refused the last move, for a few seconds after: "Too
@@ -536,6 +545,7 @@ impl Session {
                 item_id,
                 target_container_id,
                 target_slot,
+                split: None,
             });
         }
     }
@@ -1713,6 +1723,7 @@ mod tests {
             item_id: item.item_id,
             target_container_id: inventory.id,
             target_slot: to,
+            split: None,
         };
         session.move_item(there);
         wait(&mut session, "the move", &in_slot(to, item.item_id));
@@ -2270,6 +2281,7 @@ mod tests {
             item_id: kit.item_id,
             target_container_id: chest_box.id,
             target_slot: chest_box.first_empty().expect("room in the chest") as i32,
+            split: None,
         });
         wait(&mut session, "the kit in the chest", &|s| {
             station_box(s).is_some_and(|b| b.find(kit.item_id).is_some())
@@ -2279,6 +2291,7 @@ mod tests {
             item_id: kit.item_id,
             target_container_id: inventory.id,
             target_slot: inventory.first_empty().unwrap() as i32,
+            split: None,
         });
         wait(&mut session, "the kit back out", &|s| {
             s.state().inventory().unwrap().find(kit.item_id).is_some()
@@ -2391,6 +2404,7 @@ Bea: {}",
                     item_id: item.item_id,
                     target_container_id: inv.id,
                     target_slot: slot as i32,
+                    split: None,
                 })
                 .collect();
             for m in moves {

@@ -282,16 +282,18 @@ mod tests {
     }
 
     fn stack(rng: &mut StdRng, kind: &str) -> Item {
+        let quality = rng.gen_range(0..=100);
         Item {
             id: Uuid::new_v4(),
             item_type: kind.into(),
-            quality: rng.gen_range(0..=100),
+            quality,
             quantity: rng.gen_range(1..=5),
             owner_id: None,
             container_id: None,
             slot_index: None,
             created_at: chrono::Utc::now(),
             durability: None,
+            min_quality: quality,
         }
     }
 

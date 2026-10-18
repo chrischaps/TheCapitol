@@ -484,6 +484,10 @@ pub struct SlotItem {
     pub quality_grade: String,
     /// Stack quantity
     pub quantity: i32,
+    /// The lowest quality blended into the stack (E1.2). Equal to `quality`
+    /// for a stack that was never blended; its grade below `quality_grade`
+    /// marks a blend ("A, blended from D").
+    pub min_quality: i32,
     /// Slot index within the container
     pub slot_index: i32,
     /// A tool's durability left, and its most (E1.4). Absent for anything else.
@@ -510,9 +514,25 @@ impl SlotItem {
             quality,
             quality_grade: rules::quality_grade(quality).to_string(),
             quantity,
+            min_quality: quality,
             slot_index,
             durability: None,
             max_durability: None,
+        }
+    }
+
+    /// This slot item with `min_quality` blended into it.
+    pub fn with_min_quality(mut self, min_quality: i32) -> Self {
+        self.min_quality = min_quality;
+        self
+    }
+
+    /// This stack as a [`rules::stacking::Lot`].
+    pub fn lot(&self) -> rules::stacking::Lot {
+        rules::stacking::Lot {
+            quantity: self.quantity,
+            quality: self.quality,
+            min_quality: self.min_quality,
         }
     }
 
@@ -522,6 +542,24 @@ impl SlotItem {
         self.max_durability = Some(max_durability);
         self
     }
+}
+
+/// `POST /items/{id}/split`: split `quantity` off the stack into the empty
+/// slot `to_slot` of the same container (E1.2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct SplitStackRequest {
+    pub quantity: i32,
+    pub to_slot: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct SplitStackResponse {
+    /// The new stack, in `to_slot`
+    pub item: SlotItem,
+    /// The container both stacks are in
+    pub container_id: Uuid,
 }
 
 /// `POST /inventory/move`

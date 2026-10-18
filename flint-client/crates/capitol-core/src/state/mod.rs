@@ -889,6 +889,7 @@ impl GameState {
             | R::Inventory(_)
             | R::Extract(_)
             | R::MoveItem(_)
+            | R::SplitStack(_)
             | R::PlotPermissions(_)
             | R::Zones(_)
             | R::CreatedApiKey(_)

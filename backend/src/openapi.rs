@@ -11,7 +11,7 @@ use capitol_protocol::rest::{
     ListPlotsResponse, LoginRequest, LogoutRequest, RefreshRequest, MoveItemRequest, MoveItemResponse,
     MoveRequest, NearbyResponse, NearbyStationsResponse, PlaceStationRequest,
     PayTaxRequest, PayTaxResponse, PlaceStationResponse, PlayerMeResponse, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
-    RecipeOutputInfo, RecipesResponse, RegisterRequest, ResourceNodeInfo, SlotItem,
+    RecipeOutputInfo, RecipesResponse, RegisterRequest, ResourceNodeInfo, SlotItem, SplitStackRequest, SplitStackResponse,
     StationContainerResponse, StationInfo, StationTool, SubscribeRequest, Subscription, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
     ZonesResponse,
 };
@@ -93,6 +93,7 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         // Inventory
         crate::routes::inventory::get_containers,
         crate::routes::inventory::move_item,
+        crate::routes::inventory::split_stack,
         // Recipes
         crate::routes::recipes::list_recipes,
         // Stations
@@ -153,6 +154,8 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         SlotItem,
         MoveItemRequest,
         MoveItemResponse,
+        SplitStackRequest,
+        SplitStackResponse,
         // Recipes
         RecipesResponse,
         CatalogResponse,

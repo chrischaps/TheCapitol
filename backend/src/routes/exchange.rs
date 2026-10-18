@@ -4,10 +4,12 @@ use axum::{
     Extension, Json, Router,
 };
 use capitol_protocol::rest::{DepositRequest, DepositResponse, WithdrawRequest, WithdrawResponse};
+use capitol_protocol::rules::stacking::Lot;
 use capitol_protocol::rules::{deposit_quote, withdraw_quote};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::engine::slot_moves::{auto_stack, write_lot};
 use crate::engine::currency::{add_strands_in, announce_balances, subtract_strands_in, TransactionType};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -159,6 +161,9 @@ pub async fn deposit(db: &PgPool, player_id: Uuid, item_ids: &[Uuid]) -> Result<
     })
 }
 
+/// The quality of fiber withdrawn from the exchange
+const WITHDRAWN_FIBER_QUALITY: i32 = 50;
+
 /// Swap Strands for `quantity` quality-50 fiber, the fee on top. The fiber
 /// joins the inventory's lowest-slot fiber stack, else takes its first empty
 /// slot. The debit and the fiber are one transaction, so with nowhere to put
@@ -202,31 +207,17 @@ pub async fn withdraw(db: &PgPool, player_id: Uuid, quantity: i32) -> Result<Wit
     .fetch_one(&mut *tx)
     .await?;
 
-    // The lowest-slot stack, so a client can tell which one it will be
-    let existing_fiber: Option<(Uuid, i32, i32)> = sqlx::query_as(
-        "SELECT id, quantity, quality FROM items
-         WHERE container_id = $1 AND item_type = 'fiber'
-         ORDER BY slot_index NULLS LAST LIMIT 1
-         FOR UPDATE"
-    )
-    .bind(container_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    // The lowest-slot stack of the same grade and min grade, so a client can
+    // tell which one it will be. Fresh fiber is a D, and never blends into
+    // your better fiber unasked (plan D2).
+    let lot = Lot::fresh(quantity, WITHDRAWN_FIBER_QUALITY);
+    let existing_fiber = auto_stack(&mut tx, container_id, "fiber", &lot).await?;
 
-    if let Some((existing_id, existing_qty, existing_quality)) = existing_fiber {
-        let new_qty = existing_qty
-            .checked_add(quantity)
+    if let Some((existing_id, existing)) = existing_fiber {
+        let merged = existing
+            .merge(lot)
             .ok_or_else(|| AppError::BadRequest("Too much fiber for one stack".into()))?;
-        // The weighted mean with the incoming quality-50 units, rounded down
-        let new_quality = ((existing_quality as i64 * existing_qty as i64 + 50 * quantity as i64)
-            / new_qty as i64) as i32;
-
-        sqlx::query("UPDATE items SET quantity = $1, quality = $2 WHERE id = $3")
-            .bind(new_qty)
-            .bind(new_quality)
-            .bind(existing_id)
-            .execute(&mut *tx)
-            .await?;
+        write_lot(&mut tx, existing_id, &merged).await?;
     } else {
         let used: std::collections::HashSet<i32> = sqlx::query_scalar(
             "SELECT slot_index FROM items WHERE container_id = $1 AND slot_index IS NOT NULL"
@@ -242,16 +233,16 @@ pub async fn withdraw(db: &PgPool, player_id: Uuid, quantity: i32) -> Result<Wit
             return Err(AppError::BadRequest("Inventory full".into()));
         };
 
-        // Create new fiber item with standard quality (50)
         sqlx::query(
             "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
-             VALUES ($1, 'fiber', 50, $2, $3, $4, $5)"
+             VALUES ($1, 'fiber', $6, $2, $3, $4, $5)"
         )
         .bind(Uuid::new_v4())
         .bind(quantity)
         .bind(player_id)
         .bind(container_id)
         .bind(slot_index)
+        .bind(WITHDRAWN_FIBER_QUALITY)
         .execute(&mut *tx)
         .await?;
     }
@@ -379,14 +370,41 @@ mod tests {
     async fn a_withdrawal_joins_the_lowest_slot_fiber_stack(db: PgPool) {
         let ada = player(&db, "ada", 1000).await;
         let inv = inventory(&db, ada).await;
-        // Inserted high slot first, so insertion order can't be what picks
-        let high = stack(&db, ada, inv, 7, "fiber", 90, 10).await;
-        let low = stack(&db, ada, inv, 2, "fiber", 90, 10).await;
+        // Inserted high slot first, so insertion order can't be what picks.
+        // Both are D, as withdrawn fiber is.
+        let high = stack(&db, ada, inv, 7, "fiber", 52, 10).await;
+        let low = stack(&db, ada, inv, 2, "fiber", 52, 10).await;
 
         withdraw(&db, ada, 10).await.unwrap();
 
-        assert_eq!(item(&db, low).await, Some((20, 70)));
-        assert_eq!(item(&db, high).await, Some((10, 90)));
+        assert_eq!(item(&db, low).await, Some((20, 51)));
+        assert_eq!(item(&db, high).await, Some((10, 52)));
+    }
+
+    /// Withdrawn fiber is a D: it never joins a better stack, or a blended D (D2)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_withdrawal_never_blends_into_another_grade(db: PgPool) {
+        let ada = player(&db, "ada", 1000).await;
+        let inv = inventory(&db, ada).await;
+        let a = stack(&db, ada, inv, 0, "fiber", 95, 10).await;
+        let blended = stack(&db, ada, inv, 1, "fiber", 50, 10).await;
+        sqlx::query("UPDATE items SET min_quality = 10 WHERE id = $1")
+            .bind(blended)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        withdraw(&db, ada, 10).await.unwrap();
+
+        assert_eq!(fiber_in(&db, inv).await, vec![(0, 10, 95), (1, 10, 50), (2, 10, 50)]);
+        let min: i32 = sqlx::query_scalar("SELECT min_quality FROM items WHERE container_id = $1 AND slot_index = 2")
+            .bind(inv)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(min, 50);
+        assert_eq!(item(&db, a).await, Some((10, 95)));
     }
 
     #[sqlx::test(migrations = "./migrations")]

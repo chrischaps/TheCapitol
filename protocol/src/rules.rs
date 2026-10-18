@@ -110,6 +110,9 @@ pub mod quality;
 /// Hand tools: effective power, durability and the wear curve.
 pub mod tools;
 
+/// Stacks: blending, `min_quality`, and which merges the server makes unasked.
+pub mod stacking;
+
 /// Letter grade for an item quality (0-100): A >= 90, B >= 75, C >= 55, D >= 35,
 /// otherwise F. WebSocket events carry only the number, so clients grade it here.
 pub fn quality_grade(quality: i32) -> &'static str {

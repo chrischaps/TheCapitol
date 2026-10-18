@@ -132,6 +132,7 @@ pub fn ws_scope(message: &ClientMessage) -> ApiKeyScope {
         | ClientMessage::Craft { .. }
         | ClientMessage::CancelCrafting
         | ClientMessage::MoveItem { .. }
+        | ClientMessage::SplitStack { .. }
         | ClientMessage::PlaceStation { .. }
         | ClientMessage::RemoveStation { .. }
         | ClientMessage::OpenStation { .. }

@@ -57,6 +57,11 @@ pub enum RestRequest {
     Containers,
     /// `POST /inventory/move`
     MoveItem(MoveItemRequest),
+    /// `POST /items/{id}/split` (E1.2)
+    SplitStack {
+        item_id: Uuid,
+        request: SplitStackRequest,
+    },
 
     /// `GET /recipes`
     Recipes,
@@ -132,6 +137,7 @@ pub enum RestResponse {
     Extract(ExtractResponse),
     Containers(ContainersResponse),
     MoveItem(MoveItemResponse),
+    SplitStack(SplitStackResponse),
     Recipes(RecipesResponse),
     Catalog(Box<CatalogResponse>),
     NearbyStations(NearbyStationsResponse),
@@ -209,6 +215,7 @@ impl RestRequest {
             | PlayerMove(_)
             | Extract(_)
             | MoveItem(_)
+            | SplitStack { .. }
             | PlaceStation(_)
             | Deposit(_)
             | Withdraw(_)
@@ -259,6 +266,7 @@ impl RestRequest {
             Extract(_) => "/world/extract".into(),
             Containers => "/inventory/containers".into(),
             MoveItem(_) => "/inventory/move".into(),
+            SplitStack { item_id, .. } => format!("/items/{item_id}/split"),
             Recipes => "/recipes".into(),
             Catalog => "/catalog".into(),
             NearbyStations => "/stations/nearby".into(),
@@ -294,6 +302,7 @@ impl RestRequest {
             PlayerMove(b) => req.json(b),
             Extract(b) => req.json(b),
             MoveItem(b) => req.json(b),
+            SplitStack { request, .. } => req.json(request),
             PlaceStation(b) => req.json(b),
             Deposit(b) => req.json(b),
             Withdraw(b) => req.json(b),
@@ -333,6 +342,7 @@ impl RestRequest {
             Q::Extract(_) => A::Extract(de(body)?),
             Q::Containers => A::Containers(de(body)?),
             Q::MoveItem(_) => A::MoveItem(de(body)?),
+            Q::SplitStack { .. } => A::SplitStack(de(body)?),
             Q::Recipes => A::Recipes(de(body)?),
             Q::Catalog => A::Catalog(Box::new(de(body)?)),
             Q::NearbyStations => A::NearbyStations(de(body)?),

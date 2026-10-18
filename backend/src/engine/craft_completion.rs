@@ -7,11 +7,13 @@
 //! fails and nothing changes.
 
 use capitol_protocol::rest::StationTool;
+use capitol_protocol::rules::stacking::Lot;
 use capitol_protocol::ws::ToolUse;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::station_tools;
+use super::slot_moves::{auto_stack, write_lot};
 use super::tools::{self, BrokenTool, HeldTool, Wear};
 
 /// A craft that has run its time, waiting to be written
@@ -167,8 +169,9 @@ async fn consume_inputs(
     Ok(())
 }
 
-/// Put `output` in the crafter's output container: onto a stack of the same type (quality
-/// averaged by quantity) if it stacks, or into the first free slot. Returns the container.
+/// Put `output` in the crafter's output container: onto a stack of the same type, grade
+/// and min grade (`slot_moves::auto_stack`) if it stacks, or into the first free slot.
+/// Returns the container.
 async fn place_output(
     tx: &mut Transaction<'_, Postgres>,
     player_id: Uuid,
@@ -189,32 +192,19 @@ async fn place_output(
         "You have no crafting output".to_string()
     })?;
 
-    let existing: Option<(Uuid, i32, i32)> = if output.stackable {
-        sqlx::query_as(
-            "SELECT id, quantity, quality FROM items
-             WHERE container_id = $1 AND item_type = $2
-             LIMIT 1 FOR UPDATE",
-        )
-        .bind(container_id)
-        .bind(&output.item_type)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(db_error)?
-    } else {
-        None
-    };
-
-    if let Some((id, qty, quality)) = existing {
-        let new_qty = qty + output.quantity;
-        let new_quality = (quality * qty + output.quality * output.quantity) / new_qty;
-        sqlx::query("UPDATE items SET quantity = $1, quality = $2 WHERE id = $3")
-            .bind(new_qty)
-            .bind(new_quality)
-            .bind(id)
-            .execute(&mut **tx)
+    // Only onto a stack of the same grade and min grade: the server doesn't
+    // blend your stacks for you (plan D2). With one output slot, a craft of
+    // another grade waits for it to be emptied (#191).
+    if output.stackable {
+        let lot = Lot::fresh(output.quantity, output.quality);
+        if let Some((id, stack)) = auto_stack(tx, container_id, &output.item_type, &lot)
             .await
-            .map_err(db_error)?;
-        return Ok(container_id);
+            .map_err(db_error)?
+        {
+            let merged = stack.merge(lot).ok_or_else(|| OUTPUT_FULL.to_string())?;
+            write_lot(tx, id, &merged).await.map_err(db_error)?;
+            return Ok(container_id);
+        }
     }
 
     let used: Vec<(i32,)> = sqlx::query_as(
@@ -516,6 +506,38 @@ mod tests {
         finish_craft(&db, &rope(&ada, fiber)).await.unwrap();
 
         assert_eq!(rope_made(&db, &ada).await, 4);
+    }
+
+    /// Output joins only a stack of its own grade and min grade (D2). The
+    /// output box has one slot, so rope of another grade, or onto a blend, has
+    /// nowhere to go and the craft is refused with its inputs kept.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn output_joins_only_its_own_grade_and_min_grade(db: PgPool) {
+        use crate::engine::slot_moves::test_stacks::{lot_in, stacks_in};
+        let ada = crafter(&db, "ada").await;
+        let fiber = stack(&db, ada.id, ada.input, 0, "fiber", 2).await;
+        let held = lot_in(&db, ada.id, ada.output, 0, "rope", 92, 92, 2).await;
+        let set = |quality: i32, min_quality: i32| {
+            sqlx::query("UPDATE items SET quality = $1, min_quality = $2 WHERE id = $3")
+                .bind(quality)
+                .bind(min_quality)
+                .bind(held)
+                .execute(&db)
+        };
+
+        // Rope at 60 is a C: not onto an A...
+        assert_eq!(finish_craft(&db, &rope(&ada, fiber)).await.unwrap_err(), OUTPUT_FULL);
+        // ...nor onto a C blended from F
+        set(62, 30).await.unwrap();
+        assert_eq!(finish_craft(&db, &rope(&ada, fiber)).await.unwrap_err(), OUTPUT_FULL);
+        assert_eq!(stacks_in(&db, ada.output, "rope").await, vec![(0, 2, 62, 30)]);
+        assert_eq!(item(&db, fiber).await.map(|i| i.2), Some(2), "the inputs are kept");
+
+        // A plain C takes it
+        set(70, 70).await.unwrap();
+        finish_craft(&db, &rope(&ada, fiber)).await.unwrap();
+        assert_eq!(stacks_in(&db, ada.output, "rope").await, vec![(0, 3, 66, 60)]);
     }
 
     /// A stone sickle in `player`'s inventory with `durability` left, as `best_tool` would find it

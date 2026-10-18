@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use capitol_protocol::rest::{CatalogTool, SlotItem};
 pub use capitol_protocol::rest::InventoryItem;
+use capitol_protocol::rules::stacking::Lot;
 use capitol_protocol::rules::tools;
 
 /// The `item_types` columns an [`ItemType`] reads, for `SELECT`s.
@@ -13,7 +14,7 @@ pub const ITEM_TYPE_COLUMNS: &str =
 
 /// The `items` columns an [`Item`] reads, for `SELECT`s.
 pub const ITEM_COLUMNS: &str =
-    "id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at, durability";
+    "id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at, durability, min_quality";
 
 /// Static item type definition (from database)
 #[derive(Debug, Clone, Default, Serialize, Deserialize, FromRow)]
@@ -64,6 +65,8 @@ pub struct Item {
     pub created_at: DateTime<Utc>,
     /// Uses left, for a tool (E1.4); `None` for anything else.
     pub durability: Option<i32>,
+    /// The lowest quality blended into this stack (E1.2)
+    pub min_quality: i32,
 }
 
 impl Item {
@@ -91,11 +94,17 @@ impl Item {
             self.quality,
             self.quantity,
             self.slot_index?,
-        );
+        )
+        .with_min_quality(self.min_quality);
         Some(match (self.durability, self.max_durability(item_type)) {
             (Some(left), Some(max)) => slot.with_durability(left, max),
             _ => slot,
         })
+    }
+
+    /// This stack as a lot, for `rules::stacking`.
+    pub fn lot(&self) -> Lot {
+        Lot { quantity: self.quantity, quality: self.quality, min_quality: self.min_quality }
     }
 
     /// This tool's most durability, from its type and its own quality. `None` for

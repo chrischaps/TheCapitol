@@ -279,8 +279,8 @@ Create static data for:
 #### Backend - Item Stack Aggregation
 - [x] Stack view: items of same type in same location grouped
 - [x] Stack quality = average of constituent items
-- [ ] `POST /items/{id}/split` - Split stack by quantity or quality threshold
-- [ ] `POST /items/{id}/merge` - Merge compatible stacks *(merge only happens implicitly via `/inventory/move`)*
+- [x] `POST /items/{id}/split` - Split stack by quantity *(E1.2, #154: into an empty slot of the same container, and WS `split_stack`. No quality threshold: a stack is one quality.)*
+- [x] `POST /items/{id}/merge` - Merge compatible stacks *(a drop via `/inventory/move` merges and blends any grades, keeping the lower `min_quality`; server-side merges join only the same grade, E1.2 #154)*
 
 #### Client - Crafting UI
 - [x] Crafting panel showing available recipes
@@ -294,7 +294,7 @@ Create static data for:
 - [x] Items displayed as stacks (grouped by type)
 - [x] Stack shows: type, quantity, average quality
 - [ ] Click stack to expand/see distribution (optional for M3)
-- [ ] Stack splitting UI (optional for M3)
+- [x] Stack splitting UI (optional for M3) *(Flint: shift-drag with a count field, E1.2 #154)*
 
 ### Acceptance Criteria
 - Can craft rope from fiber (2 fiber → 1 rope)
