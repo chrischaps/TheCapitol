@@ -359,6 +359,11 @@ pub struct InventoryItem {
     pub quality_grade: String,
     /// Stack quantity
     pub quantity: i32,
+    /// A tool's durability left, and its most (E1.4). Absent for anything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_durability: Option<i32>,
 }
 
 /// `GET /player/currency`
@@ -481,6 +486,11 @@ pub struct SlotItem {
     pub quantity: i32,
     /// Slot index within the container
     pub slot_index: i32,
+    /// A tool's durability left, and its most (E1.4). Absent for anything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_durability: Option<i32>,
 }
 
 impl SlotItem {
@@ -501,7 +511,16 @@ impl SlotItem {
             quality_grade: rules::quality_grade(quality).to_string(),
             quantity,
             slot_index,
+            durability: None,
+            max_durability: None,
         }
+    }
+
+    /// This slot item as a tool with `durability` of `max_durability` left.
+    pub fn with_durability(mut self, durability: i32, max_durability: i32) -> Self {
+        self.durability = Some(durability);
+        self.max_durability = Some(max_durability);
+        self
     }
 }
 
@@ -622,9 +641,27 @@ pub struct CatalogItemType {
     pub name: String,
     /// `raw_material`, `processed_material` or `placeable`
     pub category: String,
-    /// Stackable items merge into one slot; kits don't.
+    /// Stackable items merge into one slot; kits and tools don't.
     pub stackable: bool,
     pub weight: f32,
+    /// Set when the item is a tool (E1.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<CatalogTool>,
+}
+
+/// What makes an item type a tool (`item_types.tool_type` and the rest).
+/// `rules::tools` turns these into a tool's power and lifespan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CatalogTool {
+    /// `sickle`, `axe`, `pickaxe`, `hammer` or `saw` (`rules::tools::ToolType`)
+    pub tool_type: String,
+    /// The material: `stone`, `bronze`, `iron` or `steel` (`rules::tools::Tier`)
+    pub tier: String,
+    /// Power at Q50; quality scales it from half to one and a half times.
+    pub base_power: f64,
+    /// Uses at Q50; quality scales it the same way.
+    pub max_durability: i32,
 }
 
 /// A station type (`station_types`), with the kit that places it.

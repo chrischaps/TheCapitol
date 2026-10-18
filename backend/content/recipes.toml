@@ -71,3 +71,18 @@ inputs = [
 outputs = [{ item_type = "forge_kit", quantity_min = 1, quantity_max = 1 }]
 quality_weights = { variance_min = -3, variance_max = 3 }
 crafting_requirements = {}
+
+[[recipe]]
+id = "craft_stone_sickle"
+name = "Stone Sickle"
+description = "Bind a sharp edge to a handle at a workbench. A sickle cuts grass faster and cleaner than bare hands."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 80
+inputs = [
+    { item_type = "rope", quantity = 2, quality_weight = 0.6 },
+    { item_type = "fiber", quantity = 4, quality_weight = 0.4 },
+]
+outputs = [{ item_type = "stone_sickle", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -3, variance_max = 3 }
+crafting_requirements = {}

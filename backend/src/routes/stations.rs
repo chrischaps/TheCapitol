@@ -15,7 +15,7 @@ use crate::engine::container_access::{check_station_access, live_position};
 use crate::engine::GameEvent;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
-use crate::models::{Container, ContainerType, Item, ItemType, SlotItem, Station, StationInfo, StationType, STATION_COLUMNS};
+use crate::models::{Container, ContainerType, Item, ItemType, SlotItem, Station, StationInfo, StationType, ITEM_COLUMNS, ITEM_TYPE_COLUMNS, STATION_COLUMNS};
 use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router<AppState> {
@@ -195,15 +195,12 @@ pub async fn place_station(
         .as_deref()
         .ok_or_else(|| AppError::BadRequest("Invalid station type".into()))?;
 
-    let kit_item: Item = sqlx::query_as(
-        "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at
-         FROM items WHERE id = $1 AND owner_id = $2"
-    )
-    .bind(req.kit_item_id)
-    .bind(player_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Kit item not found".into()))?;
+    let kit_item: Item = sqlx::query_as(&format!("SELECT {ITEM_COLUMNS} FROM items WHERE id = $1 AND owner_id = $2"))
+        .bind(req.kit_item_id)
+        .bind(player_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Kit item not found".into()))?;
 
     if kit_item.item_type != expected_kit {
         return Err(AppError::BadRequest(format!(
@@ -386,45 +383,22 @@ pub async fn get_station_container(
     .fetch_one(&state.db)
     .await?;
 
-    // Get item types for names
-    let item_types: Vec<ItemType> = sqlx::query_as(
-        "SELECT id, name, category, stackable, weight FROM item_types"
-    )
-    .fetch_all(&state.db)
-    .await?;
-
-    let item_type_names: HashMap<String, String> = item_types
-        .into_iter()
-        .map(|it| (it.id, it.name))
-        .collect();
+    // Item types, for names and tools' durability
+    let item_types: Vec<ItemType> = sqlx::query_as(&format!("SELECT {ITEM_TYPE_COLUMNS} FROM item_types"))
+        .fetch_all(&state.db)
+        .await?;
+    let item_types: HashMap<String, ItemType> =
+        item_types.into_iter().map(|it| (it.id.clone(), it)).collect();
 
     // Get items in container
-    let items: Vec<Item> = sqlx::query_as(
-        "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at
-         FROM items WHERE container_id = $1"
-    )
-    .bind(container.id)
-    .fetch_all(&state.db)
-    .await?;
+    let items: Vec<Item> = sqlx::query_as(&format!("SELECT {ITEM_COLUMNS} FROM items WHERE container_id = $1"))
+        .bind(container.id)
+        .fetch_all(&state.db)
+        .await?;
 
     let slots: Vec<SlotItem> = items
         .into_iter()
-        .filter_map(|item| {
-            let slot_index = item.slot_index?;
-            let item_name = item_type_names
-                .get(&item.item_type)
-                .cloned()
-                .unwrap_or_else(|| item.item_type.clone());
-
-            Some(SlotItem::new(
-                item.id,
-                item.item_type,
-                item_name,
-                item.quality,
-                item.quantity,
-                slot_index,
-            ))
-        })
+        .filter_map(|item| item.to_slot_item(item_types.get(&item.item_type)))
         .collect();
 
     Ok(Json(StationContainerResponse {

@@ -1,5 +1,6 @@
 //! Writing a slot move to the database: a move into an empty slot, a merge
-//! onto a stack of the same type, or a swap with a stack of another type.
+//! onto a stack of the same type, or a swap with a stack of another type (or
+//! with one of the same type that doesn't stack, such as a tool or a kit).
 //! REST `/inventory/move` and WS `move_item` both check access, bounds and
 //! ownership first, then call [`apply_move`].
 //!
@@ -36,6 +37,16 @@ pub async fn apply_move(
     target: Option<&Item>,
 ) -> Result<SlotMove, sqlx::Error> {
     let mut tx = db.begin().await?;
+    let stacks = match target {
+        Some(target) if target.item_type == source.item_type => {
+            sqlx::query_scalar::<_, bool>("SELECT stackable FROM item_types WHERE id = $1")
+                .bind(&source.item_type)
+                .fetch_optional(&mut *tx)
+                .await?
+                .unwrap_or(true)
+        }
+        _ => false,
+    };
     let done = match target {
         None => {
             sqlx::query(
@@ -49,7 +60,7 @@ pub async fn apply_move(
             .await?;
             SlotMove::Moved
         }
-        Some(target) if target.item_type == source.item_type => {
+        Some(target) if stacks => {
             let quantity = source.quantity + target.quantity;
             let quality =
                 (source.quality * source.quantity + target.quality * target.quantity) / quantity;
@@ -147,7 +158,7 @@ mod tests {
         sqlx::query_as(
             "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
              VALUES ($1, $2, 60, $3, $4, $5, $6)
-             RETURNING id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at",
+             RETURNING id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at, durability",
         )
         .bind(Uuid::new_v4())
         .bind(item_type)
@@ -229,6 +240,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, 1);
+    }
+
+    /// Kits and tools don't stack: dropping one on another of its kind swaps them
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn two_of_an_unstackable_kind_swap_rather_than_merge(db: PgPool) {
+        let ada = player(&db).await;
+        let a = stack(&db, ada.id, ada.inventory, 0, "workbench_kit", 1).await;
+        let b = stack(&db, ada.id, ada.inventory, 1, "workbench_kit", 1).await;
+
+        let done = apply_move(&db, ada.id, &a, ada.inventory, 1, Some(&b)).await.unwrap();
+
+        assert_eq!(done, SlotMove::Swapped);
+        assert_eq!(place(&db, a.id).await, (ada.inventory, 1));
+        assert_eq!(place(&db, b.id).await, (ada.inventory, 0));
     }
 
     #[sqlx::test(migrations = "./migrations")]

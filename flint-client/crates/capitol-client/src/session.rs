@@ -124,6 +124,8 @@ pub struct Session {
     /// What's worth telling the player about picking a plot, since the
     /// frame last took them.
     plot_notes: Vec<PlotNote>,
+    /// The names of tools that broke, for a toast each.
+    broken_tools: Vec<String>,
     /// The deposit or withdrawal the server is answering (P7.2).
     exchanging: Option<Asked>,
     /// Why the last one was refused, and when.
@@ -279,6 +281,7 @@ impl Session {
             pay_refused: None,
             claimed: Vec::new(),
             plot_notes: Vec::new(),
+            broken_tools: Vec::new(),
             exchanging: None,
             exchange_refused: None,
             receipt: None,
@@ -664,6 +667,11 @@ impl Session {
     /// The plots you claimed since the last call.
     pub fn take_claimed(&mut self) -> Vec<Uuid> {
         std::mem::take(&mut self.claimed)
+    }
+
+    /// The names of the tools that broke since the last call.
+    pub fn take_broken_tools(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.broken_tools)
     }
 
     /// What to tell the player about picking plots, since the last call.
@@ -1213,6 +1221,9 @@ impl Session {
                     StateEvent::SubscriptionLapsed { until } => self
                         .plot_notes
                         .push(PlotNote::SubscriptionLapsed { until: *until }),
+                    StateEvent::ToolBroke { item_name, .. } => {
+                        self.broken_tools.push(item_name.clone())
+                    }
                     _ => {}
                 }
             }

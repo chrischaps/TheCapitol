@@ -25,6 +25,10 @@ pub struct CraftOutput {
     pub item_name: String,
     pub quantity: i32,
     pub quality: i32,
+    /// An unstackable output (a kit, a tool) takes a slot of its own.
+    pub stackable: bool,
+    /// A tool's durability when new (`ItemType::durability_at`); `None` otherwise.
+    pub durability: Option<i32>,
 }
 
 /// The reason shown when an input moved, split or changed hands while the craft ran
@@ -112,7 +116,7 @@ async fn consume_inputs(
 }
 
 /// Put `output` in the crafter's output container: onto a stack of the same type (quality
-/// averaged by quantity), or into the first free slot. Returns the container.
+/// averaged by quantity) if it stacks, or into the first free slot. Returns the container.
 async fn place_output(
     tx: &mut Transaction<'_, Postgres>,
     player_id: Uuid,
@@ -133,16 +137,20 @@ async fn place_output(
         "You have no crafting output".to_string()
     })?;
 
-    let existing: Option<(Uuid, i32, i32)> = sqlx::query_as(
-        "SELECT id, quantity, quality FROM items
-         WHERE container_id = $1 AND item_type = $2
-         LIMIT 1 FOR UPDATE",
-    )
-    .bind(container_id)
-    .bind(&output.item_type)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(db_error)?;
+    let existing: Option<(Uuid, i32, i32)> = if output.stackable {
+        sqlx::query_as(
+            "SELECT id, quantity, quality FROM items
+             WHERE container_id = $1 AND item_type = $2
+             LIMIT 1 FOR UPDATE",
+        )
+        .bind(container_id)
+        .bind(&output.item_type)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_error)?
+    } else {
+        None
+    };
 
     if let Some((id, qty, quality)) = existing {
         let new_qty = qty + output.quantity;
@@ -169,8 +177,8 @@ async fn place_output(
         .ok_or_else(|| OUTPUT_FULL.to_string())?;
 
     sqlx::query(
-        "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index, durability)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(Uuid::new_v4())
     .bind(&output.item_type)
@@ -179,6 +187,7 @@ async fn place_output(
     .bind(player_id)
     .bind(container_id)
     .bind(slot)
+    .bind(output.durability)
     .execute(&mut **tx)
     .await
     .map_err(db_error)?;
@@ -264,6 +273,8 @@ mod tests {
                 item_name: "Rope".into(),
                 quantity: 1,
                 quality: 60,
+                stackable: true,
+                durability: None,
             }],
         }
     }
@@ -393,6 +404,53 @@ mod tests {
         assert_eq!(result, Err(OUTPUT_FULL.to_string()));
         assert_eq!(item(&db, fiber).await.map(|i| i.2), Some(2), "inputs rolled back");
         assert_eq!(rope_made(&db, &ada).await, 0);
+    }
+
+    fn sickle(player: &Crafter, fiber: Uuid) -> FinishedCraft {
+        let mut craft = rope(player, fiber);
+        craft.outputs[0] = CraftOutput {
+            item_type: "stone_sickle".into(),
+            item_name: "Stone Sickle".into(),
+            quantity: 1,
+            quality: 80,
+            stackable: false,
+            durability: Some(78),
+        };
+        craft
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_tool_comes_out_with_its_durability(db: PgPool) {
+        crate::content::sync(&db, &crate::content::load().unwrap()).await.unwrap();
+        let ada = crafter(&db, "ada").await;
+        let fiber = stack(&db, ada.id, ada.input, 0, "fiber", 4).await;
+
+        finish_craft(&db, &sickle(&ada, fiber)).await.unwrap();
+
+        let made: (i32, i32, Option<i32>) = sqlx::query_as(
+            "SELECT quality, quantity, durability FROM items WHERE container_id = $1",
+        )
+        .bind(ada.output)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(made, (80, 1, Some(78)));
+    }
+
+    /// A tool doesn't stack, so a sickle left in the output fills it
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_tool_never_stacks_onto_another(db: PgPool) {
+        crate::content::sync(&db, &crate::content::load().unwrap()).await.unwrap();
+        let ada = crafter(&db, "ada").await;
+        let fiber = stack(&db, ada.id, ada.input, 0, "fiber", 4).await;
+        let worn = stack(&db, ada.id, ada.output, 0, "stone_sickle", 1).await;
+
+        let result = finish_craft(&db, &sickle(&ada, fiber)).await;
+
+        assert_eq!(result, Err(OUTPUT_FULL.to_string()));
+        assert_eq!(item(&db, worn).await.map(|i| i.2), Some(1), "the old sickle alone");
     }
 
     #[sqlx::test(migrations = "./migrations")]

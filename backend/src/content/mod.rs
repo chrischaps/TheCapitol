@@ -16,6 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use capitol_protocol::rules::tools;
 use serde::Deserialize;
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -38,6 +39,18 @@ pub struct ItemDef {
     pub category: String,
     pub stackable: bool,
     pub weight: f32,
+    /// Set for a tool (E1.4)
+    pub tool: Option<ToolDef>,
+}
+
+/// What makes an item a tool: `rules::tools` reads these.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolDef {
+    pub tool_type: String,
+    pub tier: String,
+    pub base_power: f64,
+    pub max_durability: i32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -299,12 +312,32 @@ pub fn validate(content: &Content) -> Vec<String> {
     for s in &content.stations {
         item(&mut problems, format!("station '{}' (its kit)", s.id), &s.kit);
     }
+    for i in &content.items {
+        let Some(tool) = &i.tool else { continue };
+        if tools::ToolType::from_str(&tool.tool_type).is_none() {
+            problems.push(format!("item '{}' is a tool of unknown type '{}'", i.id, tool.tool_type));
+        }
+        if tools::Tier::from_str(&tool.tier).is_none() {
+            problems.push(format!("item '{}' is a tool of unknown tier '{}'", i.id, tool.tier));
+        }
+        if !(tool.base_power.is_finite() && tool.base_power > 0.0) || tool.max_durability <= 0 {
+            problems.push(format!("item '{}' is a tool with no power or no durability", i.id));
+        }
+        if i.stackable {
+            problems.push(format!("item '{}' is a tool, and tools don't stack", i.id));
+        }
+    }
+    let is_tool: HashSet<&str> =
+        content.items.iter().filter(|i| i.tool.is_some()).map(|i| i.id.as_str()).collect();
     for r in &content.recipes {
         for i in &r.inputs {
             item(&mut problems, format!("recipe '{}'", r.id), &i.item_type);
         }
         for o in &r.outputs {
             item(&mut problems, format!("recipe '{}'", r.id), &o.item_type);
+            if is_tool.contains(o.item_type.as_str()) && (o.quantity_min != 1 || o.quantity_max != 1) {
+                problems.push(format!("recipe '{}' makes tool '{}' other than one at a time", r.id, o.item_type));
+            }
         }
         if r.outputs.is_empty() {
             problems.push(format!("recipe '{}' makes nothing", r.id));
@@ -508,16 +541,23 @@ async fn upsert(tx: &mut Transaction<'_, Postgres>, content: &Content) -> Result
     let mut n = 0;
     for i in &content.items {
         sqlx::query(
-            "INSERT INTO item_types (id, name, category, stackable, weight)
-             VALUES ($1, $2, $3, $4, $5)
+            "INSERT INTO item_types (id, name, category, stackable, weight,
+                 tool_type, tier, base_power, max_durability)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, category = EXCLUDED.category,
-                 stackable = EXCLUDED.stackable, weight = EXCLUDED.weight",
+                 stackable = EXCLUDED.stackable, weight = EXCLUDED.weight,
+                 tool_type = EXCLUDED.tool_type, tier = EXCLUDED.tier,
+                 base_power = EXCLUDED.base_power, max_durability = EXCLUDED.max_durability",
         )
         .bind(&i.id)
         .bind(&i.name)
         .bind(&i.category)
         .bind(i.stackable)
         .bind(i.weight)
+        .bind(i.tool.as_ref().map(|t| &t.tool_type))
+        .bind(i.tool.as_ref().map(|t| &t.tier))
+        .bind(i.tool.as_ref().map(|t| t.base_power))
+        .bind(i.tool.as_ref().map(|t| t.max_durability))
         .execute(&mut **tx)
         .await?;
         n += 1;
@@ -667,6 +707,26 @@ mod tests {
     }
 
     #[test]
+    fn the_validator_checks_tools() {
+        let mut content = load().unwrap();
+        let sickle = content.items.iter_mut().find(|i| i.id == "stone_sickle").unwrap();
+        sickle.stackable = true;
+        let tool = sickle.tool.as_mut().unwrap();
+        tool.tool_type = "spoon".into();
+        tool.tier = "mithril".into();
+        tool.max_durability = 0;
+        let recipe = content.recipes.iter_mut().find(|r| r.id == "craft_stone_sickle").unwrap();
+        recipe.outputs[0].quantity_max = 2;
+        let problems = validate(&content).join("
+");
+        assert!(problems.contains("unknown type 'spoon'"), "{problems}");
+        assert!(problems.contains("unknown tier 'mithril'"), "{problems}");
+        assert!(problems.contains("no power or no durability"), "{problems}");
+        assert!(problems.contains("tools don't stack"), "{problems}");
+        assert!(problems.contains("other than one at a time"), "{problems}");
+    }
+
+    #[test]
     fn a_circle_of_recipes_is_found() {
         let mut content = load().unwrap();
         // Rope back into fiber: fiber -> rope -> fiber.
@@ -682,7 +742,7 @@ mod tests {
     #[test]
     fn a_station_needs_a_kit_recipe_and_something_to_make() {
         let mut content = load().unwrap();
-        content.recipes.retain(|r| r.id != "craft_chest" && r.id != "craft_forge");
+        content.recipes.retain(|r| !["craft_chest", "craft_forge", "craft_stone_sickle"].contains(&r.id.as_str()));
         let problems = validate(&content).join("\n");
         assert!(problems.contains("no recipe makes its kit 'chest_kit'"), "{problems}");
         assert!(problems.contains("station 'workbench' has nothing to make"), "{problems}");
@@ -705,11 +765,19 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
-    async fn the_content_is_what_the_migrations_seeded(db: PgPool) {
+    async fn the_content_keeps_what_the_migrations_seeded(db: PgPool) {
+        // E0.3 moved the seeds across unchanged. Content has grown since (the
+        // stone sickle, E1.4), so the sync may add rows, but every seeded row
+        // comes through it as it was, and a second sync changes nothing.
         let before = static_tables(&db).await;
         let report = sync(&db, &load().unwrap()).await.unwrap();
         assert_eq!(report.retired, 0);
-        assert_eq!(static_tables(&db).await, before);
+        let after = static_tables(&db).await;
+        let changed: Vec<_> = before.iter().filter(|row| !after.contains(row)).collect();
+        assert!(changed.is_empty(), "the sync changed seeded rows:
+{changed:#?}");
+        sync(&db, &load().unwrap()).await.unwrap();
+        assert_eq!(static_tables(&db).await, after);
     }
 
     #[sqlx::test(migrations = "./migrations")]

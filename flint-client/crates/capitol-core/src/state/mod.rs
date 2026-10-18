@@ -264,6 +264,14 @@ pub enum StateEvent {
         until: DateTime<Utc>,
     },
 
+    /// One of your tools used its last durability and is gone (`tool_broke`,
+    /// E1.4). An `inventory_updated` for its container comes with it.
+    ToolBroke {
+        item_id: Uuid,
+        item_type: String,
+        item_name: String,
+    },
+
     /// The local player's trading changed. See [`GameState::trade`].
     Trade(TradeEvent),
 }
@@ -673,6 +681,16 @@ impl GameState {
 
             // Only ever sent to the player whose balance it is.
             M::CurrencyChanged { new_balance } => self.set_strands(*new_balance, &mut out),
+            // Only ever sent to the tool's owner.
+            M::ToolBroke {
+                item_id,
+                item_type,
+                item_name,
+            } => out.push(StateEvent::ToolBroke {
+                item_id: *item_id,
+                item_type: item_type.clone(),
+                item_name: item_name.clone(),
+            }),
             M::TerrainUpdated => out.push(StateEvent::TerrainUpdated),
             M::PlotClaimed {
                 terrain_id,

@@ -205,6 +205,7 @@ fn test_for(message: &M) -> fn() {
         M::TradeExecuted { .. } => trade::trade_executed_counts_only_ours,
         M::TradeCancelled { .. } => trade::trade_cancelled_counts_only_ours,
         M::CurrencyChanged { .. } => currency_changed_sets_the_balance,
+        M::ToolBroke { .. } => tool_broke_is_reported,
         M::ZoneChanged { .. } => zone_changed_updates_my_zone,
         M::MovementBlocked { .. } => movement_blocked_moves_me_back,
         M::TerrainUpdated => terrain_updated_is_reported,
@@ -232,7 +233,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 41, "one fixture per ServerMessage variant");
+    assert_eq!(count, 42, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1086,6 +1087,24 @@ fn currency_changed_sets_the_balance() {
 }
 
 #[test]
+fn tool_broke_is_reported() {
+    let mut state = connected();
+    let sickle = Uuid::from_u128(0xa1);
+    assert_eq!(
+        state.apply_ws(&M::ToolBroke {
+            item_id: sickle,
+            item_type: "stone_sickle".into(),
+            item_name: "Stone Sickle".into(),
+        }),
+        vec![StateEvent::ToolBroke {
+            item_id: sickle,
+            item_type: "stone_sickle".into(),
+            item_name: "Stone Sickle".into(),
+        }]
+    );
+}
+
+#[test]
 fn terrain_updated_is_reported() {
     let mut state = connected();
     assert_eq!(
@@ -1642,6 +1661,7 @@ fn a_catalog_replaces_the_fallback_and_brings_the_recipes() {
         category: "processed_material".into(),
         stackable: true,
         weight: 0.5,
+        tool: None,
     });
     assert_eq!(
         state.apply_rest(&R::Catalog(Box::new(catalog))),

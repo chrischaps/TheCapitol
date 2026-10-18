@@ -1358,6 +1358,12 @@ fn plots(
         data.insert("body".into(), body.into());
         ctx.fire_event("plot_note", data);
     }
+    for name in session.take_broken_tools() {
+        let mut data = toml::Table::new();
+        data.insert("title".into(), format!("Your {name} broke").into());
+        data.insert("body".into(), "Worn out. Make or buy another".into());
+        ctx.fire_event("tool_note", data);
+    }
 }
 
 /// A plot's edge in world metres: the lot as drawn if the terrain has it,

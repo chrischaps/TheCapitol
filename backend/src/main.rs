@@ -186,11 +186,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Load item types into game state
-    let item_types: Vec<ItemType> = sqlx::query_as(
-        "SELECT id, name, category, stackable, weight FROM item_types"
-    )
-    .fetch_all(&db_pool)
-    .await?;
+    let item_types: Vec<ItemType> =
+        sqlx::query_as(&format!("SELECT {} FROM item_types", models::ITEM_TYPE_COLUMNS))
+            .fetch_all(&db_pool)
+            .await?;
 
     {
         let mut game = game_state.write().await;

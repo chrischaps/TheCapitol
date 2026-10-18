@@ -835,6 +835,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
+                    Ok(GameEvent::ToolBroke { player_id: pid, item_id, item_type, item_name }) => {
+                        if pid == player_id {
+                            let msg = ServerMessage::ToolBroke { item_id, item_type, item_name };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
                     // M7: Zone events
                     Ok(GameEvent::ZoneChanged { player_id: pid, from_zone, to_zone, zone_name }) => {
                         // Only send to the player who changed zones
@@ -984,15 +990,12 @@ async fn fetch_player_items(state: &AppState, player_id: Uuid, item_ids: &[Uuid]
     }
 
     // Fetch items owned by this player from the provided IDs
-    let mut items: Vec<crate::models::Item> = sqlx::query_as(
-        "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at
-         FROM items WHERE id = ANY($1) AND owner_id = $2"
-    )
-    .bind(item_ids)
-    .bind(player_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    let mut items: Vec<crate::models::Item> = sqlx::query_as(&format!("SELECT {} FROM items WHERE id = ANY($1) AND owner_id = $2", crate::models::ITEM_COLUMNS))
+        .bind(item_ids)
+        .bind(player_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
 
     // In the order asked for: a craft takes its units from the stacks in that
     // order, as the client's quality range assumes (`capitol-core` `craft::check`).
@@ -1156,15 +1159,12 @@ async fn handle_move_item(
     }
 
     // Check if target slot is occupied
-    let target_item: Option<crate::models::Item> = sqlx::query_as(
-        "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at
-         FROM items WHERE container_id = $1 AND slot_index = $2"
-    )
-    .bind(target_container_id)
-    .bind(target_slot)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?;
+    let target_item: Option<crate::models::Item> = sqlx::query_as(&format!("SELECT {} FROM items WHERE container_id = $1 AND slot_index = $2", crate::models::ITEM_COLUMNS))
+        .bind(target_container_id)
+        .bind(target_slot)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?;
 
     // A shared station can hold other players' items. Merging into or swapping
     // with one would hand it over, so only empty slots or your own items.
@@ -1269,16 +1269,13 @@ async fn handle_place_station(
     // Verify player owns the kit item and it's the right type
     let expected_kit = st.kit_item.as_deref().ok_or("Invalid station type")?;
 
-    let kit_item: crate::models::Item = sqlx::query_as(
-        "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at
-         FROM items WHERE id = $1 AND owner_id = $2"
-    )
-    .bind(kit_item_id)
-    .bind(player_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?
-    .ok_or_else(|| "Kit item not found".to_string())?;
+    let kit_item: crate::models::Item = sqlx::query_as(&format!("SELECT {} FROM items WHERE id = $1 AND owner_id = $2", crate::models::ITEM_COLUMNS))
+        .bind(kit_item_id)
+        .bind(player_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?
+        .ok_or_else(|| "Kit item not found".to_string())?;
 
     if kit_item.item_type != expected_kit {
         return Err(format!("Wrong item type: expected {}, got {}", expected_kit, kit_item.item_type));
@@ -1768,7 +1765,7 @@ mod tests {
         ]);
         let item_types = HashMap::from([(
             "rope".to_string(),
-            ItemType { id: "rope".into(), name: "Rope".into(), category: "material".into(), stackable: true, weight: 1.0 },
+            ItemType { id: "rope".into(), name: "Rope".into(), category: "material".into(), stackable: true, weight: 1.0, ..Default::default() },
         )]);
 
         let lines = trade_offer_lines(&[(rope, 3), (mystery, 1)], &owned, &item_types);

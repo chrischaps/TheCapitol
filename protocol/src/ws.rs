@@ -282,6 +282,10 @@ pub enum ServerMessage {
     /// a deed, tax or a refund (#148). Only to the player it names.
     #[serde(rename = "currency_changed")]
     CurrencyChanged { new_balance: i64 },
+    /// A tool used its last durability and is gone (E1.4). Only to its owner,
+    /// alongside the `inventory_updated` for the container it left.
+    #[serde(rename = "tool_broke")]
+    ToolBroke { item_id: Uuid, item_type: String, item_name: String },
     // M7: Zone events
     #[serde(rename = "zone_changed")]
     ZoneChanged {
@@ -392,6 +396,7 @@ impl ServerMessage {
             ServerMessage::TradeExecuted { .. } => "trade_executed",
             ServerMessage::TradeCancelled { .. } => "trade_cancelled",
             ServerMessage::CurrencyChanged { .. } => "currency_changed",
+            ServerMessage::ToolBroke { .. } => "tool_broke",
             ServerMessage::ZoneChanged { .. } => "zone_changed",
             ServerMessage::MovementBlocked { .. } => "movement_blocked",
             ServerMessage::TerrainUpdated => "terrain_updated",

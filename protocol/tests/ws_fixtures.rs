@@ -46,6 +46,7 @@ const SERVER_TYPES: &[&str] = &[
     "trade_executed",
     "trade_cancelled",
     "currency_changed",
+    "tool_broke",
     "zone_changed",
     "movement_blocked",
     "terrain_updated",

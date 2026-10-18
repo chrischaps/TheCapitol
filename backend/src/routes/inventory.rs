@@ -14,7 +14,7 @@ use crate::engine::container_access::{check_container_access, live_position, mov
 use crate::engine::slot_moves::{apply_move, SlotMove};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
-use crate::models::{Container, ContainerType, Item, ItemType, SlotItem};
+use crate::models::{Container, ContainerType, Item, ItemType, SlotItem, ITEM_COLUMNS, ITEM_TYPE_COLUMNS};
 use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router<AppState> {
@@ -70,17 +70,12 @@ pub async fn get_containers(
     .fetch_all(&state.db)
     .await?;
 
-    // Get item types for names
-    let item_types: Vec<ItemType> = sqlx::query_as(
-        "SELECT id, name, category, stackable, weight FROM item_types"
-    )
-    .fetch_all(&state.db)
-    .await?;
-
-    let item_type_names: HashMap<String, String> = item_types
-        .into_iter()
-        .map(|it| (it.id, it.name))
-        .collect();
+    // Item types, for names and tools' durability
+    let item_types: Vec<ItemType> = sqlx::query_as(&format!("SELECT {ITEM_TYPE_COLUMNS} FROM item_types"))
+        .fetch_all(&state.db)
+        .await?;
+    let item_types: HashMap<String, ItemType> =
+        item_types.into_iter().map(|it| (it.id.clone(), it)).collect();
 
     // Build response for each container
     let mut response_containers = Vec::new();
@@ -94,32 +89,14 @@ pub async fn get_containers(
         })?;
 
         // Get items in this container
-        let items: Vec<Item> = sqlx::query_as(
-            "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at
-             FROM items WHERE container_id = $1"
-        )
-        .bind(container.id)
-        .fetch_all(&state.db)
-        .await?;
+        let items: Vec<Item> = sqlx::query_as(&format!("SELECT {ITEM_COLUMNS} FROM items WHERE container_id = $1"))
+            .bind(container.id)
+            .fetch_all(&state.db)
+            .await?;
 
         let slots: Vec<SlotItem> = items
             .into_iter()
-            .filter_map(|item| {
-                let slot_index = item.slot_index?;
-                let item_name = item_type_names
-                    .get(&item.item_type)
-                    .cloned()
-                    .unwrap_or_else(|| item.item_type.clone());
-
-                Some(SlotItem::new(
-                    item.id,
-                    item.item_type,
-                    item_name,
-                    item.quality,
-                    item.quantity,
-                    slot_index,
-                ))
-            })
+            .filter_map(|item| item.to_slot_item(item_types.get(&item.item_type)))
             .collect();
 
         response_containers.push(ContainerResponse {
@@ -192,14 +169,11 @@ pub async fn move_item(
     }
 
     // Check if target slot is occupied
-    let target_item: Option<Item> = sqlx::query_as(
-        "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at
-         FROM items WHERE container_id = $1 AND slot_index = $2"
-    )
-    .bind(req.target_container_id)
-    .bind(req.target_slot)
-    .fetch_optional(&state.db)
-    .await?;
+    let target_item: Option<Item> = sqlx::query_as(&format!("SELECT {ITEM_COLUMNS} FROM items WHERE container_id = $1 AND slot_index = $2"))
+        .bind(req.target_container_id)
+        .bind(req.target_slot)
+        .fetch_optional(&state.db)
+        .await?;
 
     // A shared station can hold other players' items. Merging into or swapping
     // with one would hand it over, so only empty slots or your own items.

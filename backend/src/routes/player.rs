@@ -14,7 +14,7 @@ use capitol_protocol::rules::{Zone, WORLD_SIZE};
 use crate::engine::Command;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
-use crate::models::{InventoryItem, Item, ItemType};
+use crate::models::{InventoryItem, Item, ItemType, ITEM_COLUMNS, ITEM_TYPE_COLUMNS};
 use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router<AppState> {
@@ -178,36 +178,21 @@ pub async fn get_inventory(
     .fetch_one(&state.db)
     .await?;
 
-    // Get items with their type names
-    let items: Vec<Item> = sqlx::query_as(
-        "SELECT id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at
-         FROM items WHERE owner_id = $1"
-    )
-    .bind(player_id)
-    .fetch_all(&state.db)
-    .await?;
+    // Get items with their types
+    let items: Vec<Item> = sqlx::query_as(&format!("SELECT {ITEM_COLUMNS} FROM items WHERE owner_id = $1"))
+        .bind(player_id)
+        .fetch_all(&state.db)
+        .await?;
 
-    // Get item type names
-    let item_types: Vec<ItemType> = sqlx::query_as(
-        "SELECT id, name, category, stackable, weight FROM item_types"
-    )
-    .fetch_all(&state.db)
-    .await?;
-
-    let type_names: std::collections::HashMap<String, String> = item_types
-        .into_iter()
-        .map(|t| (t.id, t.name))
-        .collect();
+    let item_types: Vec<ItemType> = sqlx::query_as(&format!("SELECT {ITEM_TYPE_COLUMNS} FROM item_types"))
+        .fetch_all(&state.db)
+        .await?;
+    let item_types: std::collections::HashMap<String, ItemType> =
+        item_types.into_iter().map(|t| (t.id.clone(), t)).collect();
 
     let inventory_items: Vec<InventoryItem> = items
         .iter()
-        .map(|item| {
-            let name = type_names
-                .get(&item.item_type)
-                .cloned()
-                .unwrap_or_else(|| item.item_type.clone());
-            item.to_inventory_item(&name)
-        })
+        .map(|item| item.to_inventory_item(item_types.get(&item.item_type)))
         .collect();
 
     Ok(Json(InventoryResponse { items: inventory_items }))

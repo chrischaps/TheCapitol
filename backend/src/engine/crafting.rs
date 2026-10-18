@@ -72,14 +72,16 @@ pub fn process_crafting(
 
                 // Roll the outputs; they're written, and announced, by the tick loop
                 let mut rng = rand::thread_rng();
-                let outputs = recipe.outputs.iter().map(|output| CraftOutput {
-                    item_type: output.item_type.clone(),
-                    item_name: item_types
-                        .get(&output.item_type)
-                        .map(|t| t.name.clone())
-                        .unwrap_or_else(|| output.item_type.clone()),
-                    quantity: rng.gen_range(output.quantity_min..=output.quantity_max),
-                    quality: output_quality,
+                let outputs = recipe.outputs.iter().map(|output| {
+                    let kind = item_types.get(&output.item_type);
+                    CraftOutput {
+                        item_type: output.item_type.clone(),
+                        item_name: kind.map_or_else(|| output.item_type.clone(), |t| t.name.clone()),
+                        quantity: rng.gen_range(output.quantity_min..=output.quantity_max),
+                        quality: output_quality,
+                        stackable: kind.is_none_or(|t| t.stackable),
+                        durability: kind.and_then(|t| t.durability_at(output_quality)),
+                    }
                 }).collect();
 
                 finished.push(FinishedCraft {
@@ -272,6 +274,7 @@ mod tests {
             container_id: None,
             slot_index: None,
             created_at: chrono::Utc::now(),
+            durability: None,
         }
     }
 

@@ -134,6 +134,14 @@ pub enum GameEvent {
         player_id: Uuid,
         new_balance: i64,
     },
+    /// A tool of `player_id`'s used its last durability (E1.4). To them only.
+    #[allow(dead_code)] // E1.5 (#157) wears tools at work; only the tests break one yet
+    ToolBroke {
+        player_id: Uuid,
+        item_id: Uuid,
+        item_type: String,
+        item_name: String,
+    },
     // M7: Zone events
     ZoneChanged {
         player_id: Uuid,

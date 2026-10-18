@@ -6,9 +6,17 @@
 #   id         the key. Never rename or delete one: items in players' hands
 #              name it. Move a type you no longer want to retired.toml instead.
 #   name       shown to players
-#   category   raw_material, processed_material or placeable (a station kit)
-#   stackable  false for one-per-slot items such as kits
+#   category   raw_material, processed_material, placeable (a station kit)
+#              or tool
+#   stackable  false for one-per-slot items such as kits and tools
 #   weight     per unit
+#   tool       only for a tool (E1.4): { tool_type, tier, base_power,
+#              max_durability }. tool_type is sickle, axe, pickaxe, hammer
+#              or saw; tier is the material, stone, bronze, iron or steel.
+#              base_power and max_durability are its power and uses at Q50:
+#              quality scales both, from half at Q0 to one and a half at
+#              Q100 (protocol/src/rules/tools.rs). Tools don't stack, and
+#              a recipe makes them one at a time.
 #
 # Every item must be obtainable: a resource yields it, or a recipe makes it.
 
@@ -46,3 +54,13 @@ name = "Storage Chest Kit"
 category = "placeable"
 stackable = false
 weight = 8
+
+# The one tool until E2.4 (#163) brings stone and the rest. Its recipe makes
+# do with rope and fiber.
+[[item]]
+id = "stone_sickle"
+name = "Stone Sickle"
+category = "tool"
+stackable = false
+weight = 1.5
+tool = { tool_type = "sickle", tier = "stone", base_power = 6.0, max_durability = 60 }

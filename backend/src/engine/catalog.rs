@@ -25,6 +25,7 @@ pub fn build(game: &GameState) -> CatalogResponse {
             category: t.category.clone(),
             stackable: t.stackable,
             weight: t.weight,
+            tool: t.tool(),
         })
         .collect();
     item_types.sort_by(|a, b| a.id.cmp(&b.id));
@@ -126,6 +127,7 @@ mod tests {
                     category: "raw_material".into(),
                     stackable: true,
                     weight: 0.1,
+                    ..Default::default()
                 },
             );
         }
