@@ -375,7 +375,7 @@ impl Ctx<'_> {
         let step = span / count;
         let rails: Vec<Vec<f64>> = (0..n - 1)
             .map(|gap| {
-                let offset = if (gap + phase) % 2 == 0 { 0.25 } else { 0.75 };
+                let offset = if (gap + phase).is_multiple_of(2) { 0.25 } else { 0.75 };
                 (0..count as usize).map(|j| lo + (j as f64 + offset) * step).collect()
             })
             .collect();
@@ -418,12 +418,12 @@ fn warped_parallels(n: &mut Neighbourhood, p: &NeighbourhoodParams) -> Laid {
     // arterial every row sits off by the same warp difference, so a side's
     // ramps nearly always agree. `allocate_entrances` moves a side's
     // entrances together; one it couldn't move keeps its row straight.
-    for side in 0..2 {
+    for (side, entrances) in at_side.iter().enumerate() {
         let at = cx.u(side, 0.0);
         let first = cx.rows.iter().flat_map(|r| &r.ramps).find(|r| r.at == at).copied();
         let Some(ramp) = first else { continue };
         for (k, row) in cx.rows.iter_mut().enumerate() {
-            if at_side[side][k].is_none() && !row.ramps.iter().any(|r| r.at == at) {
+            if entrances[k].is_none() && !row.ramps.iter().any(|r| r.at == at) {
                 row.ramps.push(ramp);
             }
         }

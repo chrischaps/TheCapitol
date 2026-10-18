@@ -321,13 +321,12 @@ fn allocate_entrances(all: &mut [Neighbourhood], candidates: Vec<(Vec<Entrance>,
                 mine.push(m);
             }
         }
-        for i in 0..mine.len() {
-            let e = &mine[i];
+        for e in mine.iter_mut() {
             let Some(&(_, by)) = moves.iter().find(|&&(a, _)| a == e.arterial) else { continue };
             if is_foot(e, n.frame.center) {
                 let m = shifted(e, e.along + by, n.frame.center);
                 if !placed.iter().any(|q| clash(q, &m)) {
-                    mine[i] = m;
+                    *e = m;
                 }
             }
         }

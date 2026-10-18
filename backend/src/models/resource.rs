@@ -230,8 +230,7 @@ mod tests {
     /// ends clear of them, and fitting again moves nothing.
     #[test]
     fn a_regenerated_terrain_moves_the_nodes_it_runs_over() {
-        let mut params = WorldGenParams::default();
-        params.seed = 7;
+        let mut params = WorldGenParams { seed: 7, ..WorldGenParams::default() };
         params.suburban.neighbourhood.local_width *= 2.0;
         params.suburban.neighbourhood.collector_width *= 2.0;
         params.arterial_width *= 1.5;

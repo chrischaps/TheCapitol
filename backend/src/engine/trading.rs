@@ -12,6 +12,7 @@ pub struct TradeSession {
     pub offer_b: TradeOffer,
     pub accepted_a: bool,
     pub accepted_b: bool,
+#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
     pub created_at: Instant,
 }
 
@@ -32,6 +33,7 @@ impl TradeOffer {
         }
     }
 
+#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
     pub fn clear(&mut self) {
         self.items.clear();
         self.strands = 0;
@@ -64,6 +66,7 @@ impl TradeSession {
     }
 
     /// Get a player's offer
+#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
     pub fn get_offer(&self, player_id: Uuid) -> Option<&TradeOffer> {
         if player_id == self.player_a {
             Some(&self.offer_a)
@@ -84,6 +87,7 @@ impl TradeSession {
     }
 
     /// Check if a player has accepted
+#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
     pub fn has_accepted(&self, player_id: Uuid) -> bool {
         if player_id == self.player_a {
             self.accepted_a
@@ -106,6 +110,7 @@ impl TradeSession {
     }
 
     /// Get the other player in the trade
+#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
     pub fn other_player(&self, player_id: Uuid) -> Option<Uuid> {
         if player_id == self.player_a {
             Some(self.player_b)
@@ -117,6 +122,7 @@ impl TradeSession {
     }
 
     /// Check if a player is part of this trade
+#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
     pub fn has_player(&self, player_id: Uuid) -> bool {
         player_id == self.player_a || player_id == self.player_b
     }
@@ -286,16 +292,19 @@ impl TradeManager {
     }
 
     /// Check if a player has a pending trade request
+#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
     pub fn has_pending_request(&self, player_id: Uuid) -> Option<Uuid> {
         self.pending_requests.get(&player_id).map(|(initiator, _)| *initiator)
     }
 
     /// Check if a player is in an active trade
+    #[cfg(test)]
     pub fn is_in_trade(&self, player_id: Uuid) -> bool {
         self.player_trades.contains_key(&player_id)
     }
 
     /// Clean up stale pending requests (older than 30 seconds)
+#[allow(dead_code)] // #147 (E0.4) expires stale requests and finishes the trade leftovers
     pub fn cleanup_stale_requests(&mut self) -> Vec<(Uuid, Uuid)> {
         let mut expired = Vec::new();
         let now = Instant::now();

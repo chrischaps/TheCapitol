@@ -201,7 +201,7 @@ pub async fn get_currency(
     // Get strand balance
     let balance = crate::engine::currency::get_balance(&state.db, player_id)
         .await
-        .map_err(|e| AppError::NotFound(e))?;
+        .map_err(AppError::NotFound)?;
 
     Ok(Json(CurrencyResponse { strand_balance: balance }))
 }

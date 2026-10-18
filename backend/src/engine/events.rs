@@ -2,10 +2,11 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::models::{PlayerPosition, ResourceNodeInfo, SlotItem, StationInfo, ZoneTransition};
+use crate::models::{PlayerPosition, ResourceNodeInfo, SlotItem, StationInfo};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data")]
+#[allow(dead_code)] // #148 (E0.5) wires up or deletes the variants nothing sends yet
 pub enum GameEvent {
     PlayerPositions(Vec<PlayerPosition>),
     PlayerJoined(PlayerPosition),

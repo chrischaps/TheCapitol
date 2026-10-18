@@ -51,6 +51,7 @@ pub struct RecipeRow {
     pub outputs: sqlx::types::Json<Vec<RecipeOutput>>,
     pub base_duration_ticks: i32,
     pub quality_weights: sqlx::types::Json<QualityWeights>,
+#[allow(dead_code)] // tool gating in crafting (#157, E1.5) reads it
     pub crafting_requirements: sqlx::types::Json<serde_json::Value>,
     pub required_station_type: Option<String>,
 }

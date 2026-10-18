@@ -68,25 +68,6 @@ impl Plot {
         }
     }
 
-    /// Check if this plot is owned
-    pub fn is_owned(&self) -> bool {
-        self.owner_id.is_some()
-    }
-
-    /// Check if a specific player owns this plot
-    pub fn is_owned_by(&self, player_id: Uuid) -> bool {
-        self.owner_id == Some(player_id)
-    }
-}
-
-/// Plot size category from the database
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct PlotSizeCategory {
-    pub id: String,
-    pub name: String,
-    pub width: f32,
-    pub height: f32,
-    pub station_capacity: i32,
 }
 
 /// Permission level enum for validation
@@ -100,15 +81,6 @@ pub enum PermissionLevel {
 }
 
 impl PermissionLevel {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            PermissionLevel::Public => "public",
-            PermissionLevel::Friends => "friends",
-            PermissionLevel::Guild => "guild",
-            PermissionLevel::Owner => "owner",
-        }
-    }
-
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "public" => Some(PermissionLevel::Public),
@@ -127,50 +99,11 @@ fn forecloses_at(owner_id: Option<Uuid>, assessed_value: i32) -> Option<i64> {
     (owner_id.is_some() && threshold > 0).then_some(threshold)
 }
 
-impl Plot {
-    /// The client-facing view of this plot
-    pub fn to_info(
-        &self,
-        owner_name: Option<String>,
-        station_capacity: i32,
-        deed_cost: Option<i32>,
-    ) -> PlotInfo {
-        PlotInfo {
-            id: self.id,
-            zone_id: self.zone_id.clone(),
-            world_x: self.world_x as f64,
-            world_y: self.world_y as f64,
-            bounds: self.bounds(),
-            size_category: self.size_category.clone(),
-            plot_type: self.plot_type.clone(),
-            owner_id: self.owner_id,
-            owner_name,
-            claimed_at: self.claimed_at,
-            assessed_value: self.assessed_value,
-            tax_owed: self.tax_owed as i64,
-            forecloses_at: forecloses_at(self.owner_id, self.assessed_value),
-            deed_cost,
-            station_count: self.station_count,
-            station_capacity,
-            terrain_id: self.terrain_id.clone(),
-            corners: self.quad(),
-        }
-    }
-}
-
-/// Request to claim a plot
-#[derive(Debug, Deserialize)]
-pub struct ClaimPlotRequest {
-    // No additional fields needed - plot ID comes from path
-}
-
 /// Row returned from plot queries with joins (for sqlx::query_as)
 #[derive(Debug, Clone, FromRow)]
 pub struct PlotWithJoins {
     pub id: Uuid,
     pub zone_id: String,
-    pub grid_x: i32,
-    pub grid_y: i32,
     pub world_x: f32,
     pub world_y: f32,
     pub bounds_min_x: f32,
@@ -182,7 +115,6 @@ pub struct PlotWithJoins {
     pub owner_id: Option<Uuid>,
     pub claimed_at: Option<DateTime<Utc>>,
     pub assessed_value: i32,
-    pub last_tax_paid: Option<DateTime<Utc>>,
     pub tax_owed: i32,
     pub station_count: i32,
     pub terrain_id: Option<String>,

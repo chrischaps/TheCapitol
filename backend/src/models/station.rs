@@ -55,35 +55,3 @@ impl StationState {
         }
     }
 }
-
-impl StationState {
-    /// The client-facing view of this station
-    pub fn to_info(&self, station_type: &StationType) -> StationInfo {
-        StationInfo {
-            id: self.id,
-            station_type: self.station_type.clone(),
-            name: station_type.name.clone(),
-            category: station_type.category.clone(),
-            icon: station_type.icon.clone(),
-            x: self.x,
-            y: self.y,
-            owner_id: self.owner_id,
-            container_id: self.container_id,
-            interaction_range: station_type.interaction_range,
-        }
-    }
-}
-
-/// Request to place a station
-#[derive(Debug, Clone, Deserialize)]
-pub struct PlaceStationRequest {
-    pub station_type: String,
-    pub x: f64,
-    pub y: f64,
-}
-
-/// Response after placing a station
-#[derive(Debug, Clone, Serialize)]
-pub struct PlaceStationResponse {
-    pub station: StationInfo,
-}

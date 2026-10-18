@@ -22,7 +22,9 @@ pub struct Player {
 
 /// Player action state for the game engine
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum ActionState {
+    #[default]
     Idle,
     Extracting {
         node_id: Uuid,
@@ -37,11 +39,6 @@ pub enum ActionState {
     },
 }
 
-impl Default for ActionState {
-    fn default() -> Self {
-        ActionState::Idle
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerState {

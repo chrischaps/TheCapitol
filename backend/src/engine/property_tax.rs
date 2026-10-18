@@ -42,12 +42,6 @@ const HOURS_PER_WEEK: i64 = 168;
 /// How many weeks of tax a plot may owe before it's foreclosed (#131)
 pub const FORECLOSE_AFTER_WEEKS: i64 = 4;
 
-/// Property tax transaction type for currency system
-pub enum PropertyTaxType {
-    Collection,
-    Delinquent,
-}
-
 /// A week's tax on a plot assessed at `assessed_value`
 pub fn weekly_tax(assessed_value: i32) -> i64 {
     (assessed_value as f64 * TAX_RATE).round() as i64
@@ -437,11 +431,7 @@ async fn collect_tax_from_player(db: &PgPool, player_id: Uuid, amount: i64) -> b
 
     match result {
         Ok(result) if result.rows_affected() > 0 => {
-            if tx.commit().await.is_ok() {
-                true
-            } else {
-                false
-            }
+            tx.commit().await.is_ok()
         }
         _ => false,
     }
@@ -476,18 +466,6 @@ async fn log_tax_transaction(
         }
     }
     // For delinquent taxes, we just update tax_owed on the plot, no separate log entry
-}
-
-/// Get a player's total outstanding tax debt across all plots
-pub async fn get_player_tax_debt(db: &PgPool, player_id: Uuid) -> Result<i64, sqlx::Error> {
-    let debt: (i64,) = sqlx::query_as(
-        "SELECT COALESCE(SUM(tax_owed), 0) FROM plots WHERE owner_id = $1"
-    )
-    .bind(player_id)
-    .fetch_one(db)
-    .await?;
-
-    Ok(debt.0)
 }
 
 /// Pay `amount` strands (all of it if `None`) off the tax `player_id` owes

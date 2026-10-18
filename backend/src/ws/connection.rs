@@ -161,7 +161,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 }
                                 ClientMessage::Move { x, y } => {
                                     // M7: World expanded to 8000x8000
-                                    if x >= 0.0 && x <= 8000.0 && y >= 0.0 && y <= 8000.0 {
+                                    if (0.0..=8000.0).contains(&x) && (0.0..=8000.0).contains(&y) {
                                         let mut game = state.game.write().await;
                                         game.queue_command(crate::engine::Command::Move {
                                             player_id,
@@ -1425,10 +1425,10 @@ async fn execute_trade(state: &AppState, player_id: Uuid) -> Result<Uuid, String
         .map_err(|e| format!("DB error: {}", e))?;
 
     if balance_a.0 < session.offer_a.strands {
-        return Err(format!("Player A has insufficient strands"));
+        return Err("Player A has insufficient strands".to_string());
     }
     if balance_b.0 < session.offer_b.strands {
-        return Err(format!("Player B has insufficient strands"));
+        return Err("Player B has insufficient strands".to_string());
     }
 
     // Hand the items over. Each stack leaves its container first (a split

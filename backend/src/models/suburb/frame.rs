@@ -145,6 +145,7 @@ impl Frame {
         (self.center.0 + r * a.cos(), self.center.1 + r * a.sin())
     }
 
+    #[allow(clippy::wrong_self_convention)] // the inverse of `to_world`, in this frame
     pub(crate) fn from_world(&self, p: P) -> (f64, f64) {
         let (dx, dy) = (p.0 - self.center.0, p.1 - self.center.1);
         let r = dx.hypot(dy);

@@ -29,6 +29,7 @@ pub(crate) const MIN_STEP: f64 = 1.0;
 pub(crate) const SNAP: f64 = 4.0;
 
 /// The sharpest turn allowed at a vertex, in degrees off straight ahead.
+#[cfg(test)]
 pub(crate) const MAX_TURN_DEG: f64 = 45.0;
 
 /// How far past another road's edge a street end may stop and still be
@@ -50,6 +51,7 @@ fn lerp(a: P, b: P, t: f64) -> P {
 /// a span. Unlike the uniform kind it can't form a cusp or a loop within a
 /// span, whatever the spacing of the controls. The end tangents come from
 /// reflected phantom points, so the curve leaves and arrives head on.
+#[cfg(test)]
 pub(crate) fn centripetal_spline(controls: &[P], per_span: usize) -> Vec<P> {
     let controls = dedupe(controls);
     let n = controls.len();
@@ -135,6 +137,7 @@ pub(crate) fn resample(points: &[P], spacing: f64) -> Vec<P> {
 
 /// The turn at each interior vertex, in degrees off straight ahead, as
 /// (vertex index, degrees).
+#[cfg(test)]
 pub(crate) fn turns(points: &[P]) -> impl Iterator<Item = (usize, f64)> + '_ {
     (1..points.len().saturating_sub(1)).map(move |i| {
         let (a, b, c) = (points[i - 1], points[i], points[i + 1]);
@@ -152,6 +155,7 @@ fn self_junction(points: &[P], i: usize) -> bool {
 }
 
 /// The sharpest turn in `points`, leaving out its junctions with itself.
+#[cfg(test)]
 pub(crate) fn sharpest_turn(points: &[P]) -> f64 {
     turns(points)
         .filter(|&(i, _)| !self_junction(points, i))
@@ -185,6 +189,7 @@ fn at_shared_vertex(x: P, a: [P; 2], b: [P; 2]) -> bool {
 }
 
 /// Whether `points` crosses itself anywhere but at a vertex it visits twice.
+#[cfg(test)]
 pub(crate) fn self_crosses(points: &[P]) -> bool {
     let n = points.len();
     for i in 0..n.saturating_sub(1) {
@@ -223,6 +228,7 @@ fn segments_in(road: &[P], (lo, hi): (P, P)) -> Vec<(usize, [P; 2])> {
 
 /// Whether every point of `street` stays `clearance` from `road`, except
 /// within `exempt` of one of the `ends` (where the street joins it).
+#[cfg(test)]
 pub(crate) fn keeps_clear(street: &[P], road: &[P], clearance: f64, ends: &[P], exempt: f64) -> bool {
     street.iter().all(|&p| {
         ends.iter().any(|&e| dist(e, p) <= exempt)

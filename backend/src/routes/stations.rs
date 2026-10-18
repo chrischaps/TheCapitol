@@ -15,7 +15,7 @@ use crate::engine::container_access::{check_station_access, live_position};
 use crate::engine::GameEvent;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
-use crate::models::{quality_to_grade, Container, ContainerType, Item, ItemType, SlotItem, Station, StationInfo, StationType};
+use crate::models::{Container, ContainerType, Item, ItemType, SlotItem, Station, StationInfo, StationType};
 use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router<AppState> {
@@ -52,7 +52,7 @@ pub async fn get_nearby_stations(
     .fetch_one(&state.db)
     .await?;
 
-    let (player_id, player_x, player_y) = player;
+    let (_player_id, player_x, player_y) = player;
 
     // Get station types for metadata
     let station_types: Vec<StationType> = sqlx::query_as(

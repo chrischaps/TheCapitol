@@ -128,7 +128,6 @@ engine/
   movement.rs    - Player movement with terrain collision (water ring blocking)
   extraction.rs  - Resource gathering logic
   crafting.rs    - Recipe processing, quality cascade
-  inventory.rs   - Inventory slot operations (move, merge, find)
   stations.rs    - Station placement and interaction
   regeneration.rs - Resource node regeneration
   trading.rs     - P2P trade sessions and trade manager

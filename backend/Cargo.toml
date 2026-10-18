@@ -47,3 +47,8 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 [dev-dependencies]
 # Thread CPU time, so a timing test isn't failed by other tests or builds sharing the CPU (#91)
 cpu-time = "1"
+
+[lints.clippy]
+# Query rows are read as tuples (`query_as::<_, (Uuid, String, i32, ...)>`),
+# which this lint flags; naming each one wouldn't make them clearer.
+type_complexity = "allow"

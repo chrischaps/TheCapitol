@@ -349,7 +349,7 @@ pub(crate) fn lay(n: &mut Neighbourhood, p: &NeighbourhoodParams) -> Laid {
     let corner = |c: usize| {
         let (side, top) = CORNERS[c % 4];
         let mut pts = t.corner(side, top);
-        if c % 2 == 0 {
+        if c.is_multiple_of(2) {
             pts.reverse();
         }
         pts

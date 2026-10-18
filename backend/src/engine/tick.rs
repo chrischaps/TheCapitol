@@ -59,10 +59,6 @@ pub struct GameState {
 }
 
 impl GameState {
-    pub fn new() -> Self {
-        Self::with_params(WorldGenParams::default())
-    }
-
     pub fn with_params(params: WorldGenParams) -> Self {
         let terrain = TerrainConfig::from_params(&params);
         Self::with_terrain(params, terrain)
@@ -110,10 +106,6 @@ impl GameState {
 
     pub fn take_finished_crafts(&mut self) -> Vec<FinishedCraft> {
         std::mem::take(&mut self.finished_crafts)
-    }
-
-    pub fn get_tick_count(&self) -> u64 {
-        self.tick_count
     }
 
     pub fn queue_command(&mut self, command: Command) {
@@ -218,7 +210,7 @@ impl GameState {
     }
 
     fn process_commands(&mut self) {
-        let commands: Vec<Command> = self.command_queue.drain(..).collect();
+        let commands: Vec<Command> = std::mem::take(&mut self.command_queue);
 
         for command in commands {
             match command {
@@ -340,7 +332,7 @@ impl GameState {
                     let station_valid = self.stations.get(&station_id)
                         .map(|s| {
                             let player = self.players.get(&player_id);
-                            player.map_or(false, |p| {
+                            player.is_some_and(|p| {
                                 super::stations::is_player_near_station_type(p, s, &self.station_types)
                             })
                         })
@@ -527,7 +519,7 @@ impl GameState {
                 Command::CancelTrade { player_id } => {
                     if let Some(trade) = self.trade_manager.get_player_trade(player_id) {
                         let trade_id = trade.id;
-                        if let Ok(_) = self.trade_manager.cancel_trade(player_id) {
+                        if self.trade_manager.cancel_trade(player_id).is_ok() {
                             let _ = self.event_sender.send(GameEvent::TradeCancelled {
                                 trade_id,
                                 reason: "Cancelled by player".to_string(),
@@ -717,7 +709,7 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
         }
 
         // Periodically persist player positions (every 10 seconds)
-        if tick_count % 100 == 0 {
+        if tick_count.is_multiple_of(100) {
             persist_positions(&game_state, &app_state).await;
         }
 

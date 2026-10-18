@@ -14,7 +14,7 @@ use crate::engine::container_access::{check_container_access, live_position, mov
 use crate::engine::slot_moves::{apply_move, SlotMove};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
-use crate::models::{quality_to_grade, Container, ContainerType, Item, ItemType, SlotItem};
+use crate::models::{Container, ContainerType, Item, ItemType, SlotItem};
 use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router<AppState> {

@@ -153,7 +153,6 @@ struct World<'a> {
     segs: Vec<Seg>,
     grid: SpatialGrid,
     max_half: f64,
-    fronted: Vec<bool>,
     /// Which sides of each road have lots, left and right along its points.
     /// Pattern (c)'s loop has lots only inside (#110).
     sides: Vec<(bool, bool)>,
@@ -188,7 +187,7 @@ impl<'a> World<'a> {
                 vertices.entry(key(q)).or_default().push((road, i));
             }
         }
-        Self { roads, segs, grid, max_half, fronted, sides, vertices, center, outer }
+        Self { roads, segs, grid, max_half, sides, vertices, center, outer }
     }
 
     fn near(&self, lo: P, hi: P) -> impl Iterator<Item = &Seg> {
@@ -635,7 +634,7 @@ impl Street<'_> {
             .map(|s| (dist_to_seg(front, s.a, s.b) - s.half, s))
             .filter(|&(gap, _)| gap < HUG_REACH)
             .min_by(|a, b| a.0.total_cmp(&b.0));
-        let Some((gap, s)) = beside else { return None };
+        let (gap, s) = beside?;
         let len = dist(s.a, s.b);
         if len <= 0.0 {
             return None;

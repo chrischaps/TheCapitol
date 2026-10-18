@@ -17,6 +17,7 @@ use crate::state::AppState;
 #[derive(Clone, Debug)]
 pub struct AuthUser {
     pub account_id: Uuid,
+#[allow(dead_code)] // the subscription tier; #176 (E4.1) gates on it
     pub tier: String,
     pub is_admin: bool,
 }

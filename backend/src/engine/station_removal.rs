@@ -20,6 +20,7 @@ use uuid::Uuid;
 pub struct RemovedStation {
     /// The owner's inventory container, which now holds the kit.
     pub inventory_id: Uuid,
+#[cfg_attr(not(test), allow(dead_code))] // the tests read it; callers only need the inventory
     pub kit_item_id: Uuid,
 }
 
@@ -201,8 +202,8 @@ struct Inventory {
 /// owner at the quality it was placed with, as [`remove_station`] does. Each
 /// item in its boxes goes back to whoever owns the item: a guest's deposit is
 /// the guest's (#80), and an item with no owner is the station owner's. A
-/// stackable item joins the first stack of its type, at the weighted quality
-/// [`merge_items`](super::inventory::merge_items) gives; anything else takes
+/// stackable item joins the first stack of its type, at the two stacks' quality
+/// averaged by quantity; anything else takes
 /// the first free slot. Kits go first, so a station is the last thing lost.
 /// The stations are left, empty or holding only what didn't fit, for
 /// `release_plot` to delete.
@@ -324,7 +325,7 @@ async fn inventory<'a>(
     cache: &'a mut HashMap<Uuid, Option<Inventory>>,
     player: Uuid,
 ) -> Result<Option<&'a mut Inventory>, sqlx::Error> {
-    if !cache.contains_key(&player) {
+    if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(player) {
         let found: Option<(Uuid, i32)> = sqlx::query_as(
             "SELECT c.id, ct.slot_count FROM containers c
              JOIN container_types ct ON c.container_type = ct.id
@@ -357,7 +358,7 @@ async fn inventory<'a>(
                 Some(Inventory { id, free, stacks })
             }
         };
-        cache.insert(player, loaded);
+        e.insert(loaded);
     }
     Ok(cache.get_mut(&player).and_then(Option::as_mut))
 }

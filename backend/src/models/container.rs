@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use std::collections::HashMap;
 use uuid::Uuid;
 
 pub use capitol_protocol::rest::SlotItem;
@@ -25,82 +24,3 @@ pub struct Container {
     pub created_at: DateTime<Utc>,
 }
 
-/// Container state with all its slots (for API responses)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerState {
-    pub id: Uuid,
-    pub container_type: String,
-    pub slot_count: i32,
-    pub layout_columns: i32,
-    pub slots: HashMap<i32, SlotItem>,
-}
-
-impl ContainerState {
-    pub fn new(container: &Container, container_type: &ContainerType) -> Self {
-        Self {
-            id: container.id,
-            container_type: container.container_type.clone(),
-            slot_count: container_type.slot_count,
-            layout_columns: container_type.layout_columns,
-            slots: HashMap::new(),
-        }
-    }
-
-    /// Add an item to a slot
-    pub fn set_slot(&mut self, slot_index: i32, item: SlotItem) {
-        self.slots.insert(slot_index, item);
-    }
-
-    /// Get an item from a slot
-    pub fn get_slot(&self, slot_index: i32) -> Option<&SlotItem> {
-        self.slots.get(&slot_index)
-    }
-
-    /// Find first empty slot
-    pub fn find_empty_slot(&self) -> Option<i32> {
-        for i in 0..self.slot_count {
-            if !self.slots.contains_key(&i) {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    /// Find slot containing item type
-    pub fn find_slot_with_type(&self, item_type: &str) -> Option<i32> {
-        for (slot_idx, item) in &self.slots {
-            if item.item_type == item_type {
-                return Some(*slot_idx);
-            }
-        }
-        None
-    }
-}
-
-/// Slot update for events (what changed)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SlotUpdate {
-    pub slot_index: i32,
-    pub item: Option<SlotItem>, // None means slot is now empty
-}
-
-/// Result of a move operation
-#[derive(Debug, Clone)]
-pub enum MoveResult {
-    Moved {
-        item_id: Uuid,
-        to_slot: i32,
-    },
-    Swapped {
-        item1_id: Uuid,
-        item1_to_slot: i32,
-        item2_id: Uuid,
-        item2_to_slot: i32,
-    },
-    Merged {
-        source_item_id: Uuid,
-        target_item_id: Uuid,
-        new_quantity: i32,
-        new_quality: i32,
-    },
-}

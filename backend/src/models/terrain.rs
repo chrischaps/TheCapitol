@@ -435,7 +435,7 @@ fn segments_intersect(
     let t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
     let u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom;
 
-    if t >= 0.0 && t <= 1.0 && u >= 0.0 && u <= 1.0 {
+    if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
         let ix = x1 + t * (x2 - x1);
         let iy = y1 + t * (y2 - y1);
         Some((ix, iy))
@@ -701,12 +701,10 @@ impl TerrainConfig {
 
     /// Generate circular ring roads within districts
     fn generate_ring_roads_with_params(&self, params: &WorldGenParams) -> Vec<RoadSegment> {
-        let mut roads = Vec::new();
-
-        roads.push(self.generate_circular_road("guild_ring", params.guild_ring_radius, params.guild_ring_width));
-        roads.push(self.generate_circular_road("trade_ring", params.trade_ring_radius, params.trade_ring_width));
-
-        roads
+        vec![
+            self.generate_circular_road("guild_ring", params.guild_ring_radius, params.guild_ring_width),
+            self.generate_circular_road("trade_ring", params.trade_ring_radius, params.trade_ring_width),
+        ]
     }
 
     /// Generate a circular road at a given radius
@@ -1561,7 +1559,7 @@ mod tests {
             .filter(|r| r.id.starts_with("culdesac_"))
             .collect();
         // Should have some cul-de-sacs
-        assert!(culdesacs.len() > 0, "Expected at least 1 cul-de-sac road");
+        assert!(!culdesacs.is_empty(), "Expected at least 1 cul-de-sac road");
     }
 
     #[test]
@@ -1838,9 +1836,11 @@ mod tests {
     #[test]
     fn guild_halls_fill_the_guild_district_untrimmed() {
         // The defaults and the wider canals the dev DB commits (#83).
-        let mut wide = WorldGenParams::default();
-        wide.canal_inner_width = 50.0;
-        wide.canal_outer_width = 50.0;
+        let wide = WorldGenParams {
+            canal_inner_width: 50.0,
+            canal_outer_width: 50.0,
+            ..WorldGenParams::default()
+        };
         for params in [WorldGenParams::default(), wide] {
             let config = TerrainConfig::from_params(&params);
             let generated = config.generate_guild_plots(&params);

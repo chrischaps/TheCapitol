@@ -163,6 +163,7 @@ impl SpatialGrid {
 
     /// Query for all segment indices near a point within `radius`.
     /// Returns deduplicated indices.
+    #[cfg(test)]
     pub(crate) fn query_point(&self, x: f64, y: f64, radius: f64) -> Vec<usize> {
         let cx0 = self.cell_x(x - radius);
         let cy0 = self.cell_y(y - radius);

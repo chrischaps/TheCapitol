@@ -235,7 +235,7 @@ struct ItemWithStationOwner {
 /// shares `station_use_level` with stations, so one setting means the same for
 /// a plot's chests and its grass. Pure, so it can be tested without a database.
 pub fn may_gather(player_id: Uuid, plot_owner: Option<Uuid>, level: Option<&str>) -> bool {
-    plot_owner.map_or(true, |owner| owner == player_id || open_to_all(level))
+    plot_owner.is_none_or(|owner| owner == player_id || open_to_all(level))
 }
 
 /// Why `player_id` may not gather `node_id` because of whose lot it stands on,

@@ -1,6 +1,7 @@
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // #148 (E0.5) wires up or deletes the variants nothing sends yet
 pub enum Command {
     Move {
         player_id: Uuid,

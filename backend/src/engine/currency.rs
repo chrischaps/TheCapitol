@@ -2,6 +2,7 @@ use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 /// Transaction types for currency audit log
+#[allow(dead_code)] // the ledger API; the market's escrow and fills (#167, #168) post through it
 pub enum TransactionType {
     ExchangeDeposit,
     ExchangeWithdraw,
@@ -34,6 +35,7 @@ impl TransactionType {
 
 /// Add strands to a player's balance with audit logging, in its own transaction.
 /// Returns the new balance.
+#[allow(dead_code)] // the ledger API; the market's escrow and fills (#167, #168) post through it
 pub async fn add_strands(
     pool: &PgPool,
     player_id: Uuid,
@@ -57,6 +59,7 @@ pub async fn add_strands(
 
 /// Subtract strands from a player's balance with audit logging, in its own transaction.
 /// Returns the new balance, or error if insufficient funds.
+#[allow(dead_code)] // the ledger API; the market's escrow and fills (#167, #168) post through it
 pub async fn subtract_strands(
     pool: &PgPool,
     player_id: Uuid,
@@ -173,6 +176,7 @@ async fn apply(
 
 /// Transfer strands from one player to another atomically.
 /// Both players are locked in consistent order to prevent deadlocks.
+#[allow(dead_code)] // the ledger API; the market's escrow and fills (#167, #168) post through it
 pub async fn transfer_strands(
     pool: &PgPool,
     from_id: Uuid,

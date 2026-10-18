@@ -4,6 +4,7 @@ use capitol_protocol::rules::{water_name, ARRIVAL_EPSILON, TICK_SECS as TICK_DUR
 
 /// Result of processing movement
 pub struct MovementResult {
+#[cfg_attr(not(test), allow(dead_code))] // the tests read it; the tick goes by the zone and the block
     pub moved: bool,
     pub zone_transition: Option<ZoneTransition>,
     pub blocked: Option<MovementBlocked>,

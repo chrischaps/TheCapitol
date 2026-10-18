@@ -476,20 +476,6 @@ pub async fn find_plot_at_position(
     Ok(candidates.into_iter().find(|p| p.contains(x, y)))
 }
 
-pub async fn get_plot_capacity(db: &sqlx::PgPool, plot_id: Uuid) -> Result<(i32, i32), sqlx::Error> {
-    let row: (i32, i32) = sqlx::query_as(
-        "SELECT p.station_count, psc.station_capacity
-         FROM plots p
-         JOIN plot_size_categories psc ON p.size_category = psc.id
-         WHERE p.id = $1"
-    )
-    .bind(plot_id)
-    .fetch_one(db)
-    .await?;
-
-    Ok(row)
-}
-
 /// These need the local Postgres (`docker-compose up -d`). Run them with
 /// `cargo test routes::plots -- --ignored`.
 #[cfg(test)]
