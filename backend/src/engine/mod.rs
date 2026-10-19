@@ -1,4 +1,5 @@
 pub mod automation;
+pub mod automation_tick;
 pub mod catalog;
 mod commands;
 pub mod container_access;

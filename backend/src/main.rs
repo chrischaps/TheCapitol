@@ -319,6 +319,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine::market_matcher::run_market_loop(market, market_db, market_events).await;
     });
 
+    // E4.3: the stations that work on their own, each second, in a task of
+    // their own like the market
+    let works = engine::automation_tick::Works::load(&app_state.db)
+        .await
+        .expect("Failed to load the stations' automation");
+    game_state.write().await.works = Arc::new(works);
+    let automation_game = game_state.clone();
+    let automation_db = app_state.db.clone();
+    let automation_scale = config.sim_tick_scale;
+    tokio::spawn(async move {
+        engine::automation_tick::run_automation_loop(automation_game, automation_db, automation_scale).await;
+    });
+
     // Build router
     let app = Router::new()
         .route("/health", get(routes::health::health_check))

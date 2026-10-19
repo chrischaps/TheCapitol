@@ -76,6 +76,7 @@ fn station(id: Uuid, owner: Uuid) -> StationInfo {
         quality: 50,
         tool: None,
         automation: None,
+        production: Vec::new(),
     }
 }
 
@@ -200,6 +201,8 @@ fn test_for(message: &M) -> fn() {
         M::StationClosed { .. } => station_closed_only_for_me,
         M::StationToolChanged { .. } => station_tool_changed_updates_the_station,
         M::StationAutomationChanged { .. } => station_automation_changed_updates_the_station,
+        M::AutomationProduced { .. } => automation_produced_logs_on_the_station,
+        M::AutomationPaused { .. } => automation_paused_is_reported,
         M::TradeRequested { .. } => trade::trade_requested_prompts,
         M::TradeRequestDeclined { .. } => trade::trade_request_declined_ends_our_request,
         M::TradeRequestExpired { .. } => trade::trade_request_expired_ends_the_request_either_way,
@@ -242,7 +245,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 49, "one fixture per ServerMessage variant");
+    assert_eq!(count, 51, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,6 +1029,74 @@ fn station_automation_changed_updates_the_station() {
     // A station we don't know of is ignored
     state.apply_ws(&M::StationAutomationChanged { station_id: CHEST, automation });
     assert!(state.station(CHEST).is_none());
+}
+
+#[test]
+fn automation_produced_logs_on_the_station() {
+    use capitol_protocol::rest::{
+        AutomationMode, AutomationState, Produced, StationAutomation, PRODUCTION_LOG_LEN,
+    };
+    let mut state = connected();
+    let mut bench = station(STATION, ME);
+    bench.automation = Some(StationAutomation {
+        recipe_id: "tool_handle".into(),
+        mode: AutomationMode::Forever,
+        state: AutomationState::Running,
+        done: 0,
+    });
+    state.apply_rest(&R::NearbyStations(NearbyStationsResponse {
+        stations: vec![bench],
+    }));
+    let made = |quality| Produced {
+        item_type: "tool_handle".into(),
+        quantity: 1,
+        quality,
+        at: chrono::DateTime::from_timestamp_millis(now_ms()).unwrap(),
+    };
+    for done in 1..=60 {
+        let events = state.apply_ws(&M::AutomationProduced {
+            station_id: STATION,
+            produced: made(done as i32),
+            done,
+        });
+        assert!(events.is_empty());
+    }
+    let station = state.station(STATION).unwrap();
+    assert_eq!(station.automation.as_ref().map(|a| a.done), Some(60));
+    assert_eq!(station.production.len(), PRODUCTION_LOG_LEN);
+    assert_eq!(
+        (station.production[0].quality, station.production[49].quality),
+        (11, 60),
+        "the newest last, the oldest gone"
+    );
+    // A station we don't know of is ignored
+    state.apply_ws(&M::AutomationProduced {
+        station_id: CHEST,
+        produced: made(1),
+        done: 1,
+    });
+    assert!(state.station(CHEST).is_none());
+}
+
+#[test]
+fn automation_paused_is_reported() {
+    use capitol_protocol::rest::PauseReason;
+    let mut state = connected();
+    let reason = PauseReason::MissingInput {
+        item_type: "iron_ore".into(),
+    };
+    assert_eq!(
+        state.apply_ws(&M::AutomationPaused {
+            station_id: STATION,
+            station_type: "forge".into(),
+            reason: reason.clone(),
+        }),
+        vec![StateEvent::AutomationPaused {
+            station_id: STATION,
+            station_type: "forge".into(),
+            reason,
+        }]
+    );
 }
 
 #[test]

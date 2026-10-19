@@ -99,6 +99,22 @@ pub enum GameEvent {
         station_id: Uuid,
         automation: capitol_protocol::rest::StationAutomation,
     },
+    /// `owner_id`'s station made `produced` on its own (E4.3)
+    AutomationProduced {
+        owner_id: Uuid,
+        station_id: Uuid,
+        produced: capitol_protocol::rest::Produced,
+        done: u32,
+    },
+    /// `owner_id`'s station paused (E4.3). Queued as `notice_id`, as the tax
+    /// notices are.
+    AutomationPaused {
+        owner_id: Uuid,
+        station_id: Uuid,
+        station_type: String,
+        reason: capitol_protocol::rest::PauseReason,
+        notice_id: Option<Uuid>,
+    },
     // M5: Trading events
     TradeRequested {
         from_player: Uuid,

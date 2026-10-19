@@ -76,18 +76,7 @@ pub fn process_crafting(
                 let output_quality = output_quality(&operation.inputs, operation.station_quality, tool_quality, recipe);
 
                 // Roll the outputs; they're written, and announced, by the tick loop
-                let mut rng = rand::thread_rng();
-                let outputs = recipe.outputs.iter().map(|output| {
-                    let kind = item_types.get(&output.item_type);
-                    CraftOutput {
-                        item_type: output.item_type.clone(),
-                        item_name: kind.map_or_else(|| output.item_type.clone(), |t| t.name.clone()),
-                        quantity: rng.gen_range(output.quantity_min..=output.quantity_max),
-                        quality: output_quality,
-                        stackable: kind.is_none_or(|t| t.stackable),
-                        durability: kind.and_then(|t| t.durability_at(output_quality)),
-                    }
-                }).collect();
+                let outputs = roll_outputs(recipe, item_types, output_quality);
 
                 finished.push(FinishedCraft {
                     player_id: operation.player_id,
@@ -115,6 +104,22 @@ pub fn output_quality(inputs: &quality::Inputs, station_quality: i32, tool_quali
     let weights = &recipe.quality_weights;
     let variance = rand::thread_rng().gen_range(weights.variance_min..=weights.variance_max);
     quality::output(inputs, station_quality, tool_quality, weights, variance)
+}
+
+/// What one craft of `recipe` makes at `quality`, each output's quantity rolled
+pub fn roll_outputs(recipe: &Recipe, item_types: &HashMap<String, ItemType>, quality: i32) -> Vec<CraftOutput> {
+    let mut rng = rand::thread_rng();
+    recipe.outputs.iter().map(|output| {
+        let kind = item_types.get(&output.item_type);
+        CraftOutput {
+            item_type: output.item_type.clone(),
+            item_name: kind.map_or_else(|| output.item_type.clone(), |t| t.name.clone()),
+            quantity: rng.gen_range(output.quantity_min..=output.quantity_max),
+            quality,
+            stackable: kind.is_none_or(|t| t.stackable),
+            durability: kind.and_then(|t| t.durability_at(quality)),
+        }
+    }).collect()
 }
 
 /// Start crafting for a player, at a station of `station_quality`

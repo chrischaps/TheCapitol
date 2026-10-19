@@ -629,17 +629,17 @@ Create static data for:
 - [ ] `POST /stations/{id}/stop` - Stop automation
 
 #### Backend - Automated Processing
-- [ ] Automation tick processing (1s interval)
-- [ ] Check subscription status
-- [ ] Pull inputs from connected containers
-- [ ] Run recipe (same quality cascade)
-- [ ] Push outputs to output containers
-- [ ] Handle pause conditions (missing input, full output, broken tool)
+- [x] Automation tick processing (1s interval) (#178)
+- [x] Check subscription status (#178)
+- [x] Pull inputs from connected containers: the station's own box in v1 (#178)
+- [x] Run recipe (same quality cascade) (#178)
+- [x] Push outputs to output containers: the same box (#178)
+- [x] Handle pause conditions (missing input, full output, broken tool), and a missing tool (#178)
 
 #### Backend - Offline Continuity
-- [ ] Automation runs regardless of connection (for subscribers)
-- [ ] Free players: automation pauses on disconnect
-- [ ] State persisted so automation resumes on reconnect
+- [x] Automation runs regardless of connection (for subscribers) (#178)
+- [x] Free players: automation pauses on disconnect (#178)
+- [x] State persisted so automation resumes on reconnect, and after a restart (#178)
 
 #### Client - Container UI
 - [ ] Container interaction (click to open)

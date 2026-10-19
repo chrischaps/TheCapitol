@@ -12,7 +12,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::rest::{
-    AutomationMode, DepthLevel, MarketOrder, MarketTrade, StationAutomation, StationTool, Subscription,
+    AutomationMode, DepthLevel, MarketOrder, MarketTrade, PauseReason, Produced, StationAutomation, StationTool,
+    Subscription,
 };
 use crate::rules::stacking::Units;
 
@@ -316,6 +317,16 @@ pub enum ServerMessage {
     /// `station_tool_changed`.
     #[serde(rename = "station_automation_changed")]
     StationAutomationChanged { station_id: Uuid, automation: StationAutomation },
+    /// Your station made `produced` on its own (E4.3), its `done`th craft
+    /// since the start. To the owner only; everyone else hears only when it
+    /// starts, pauses or stops (`station_automation_changed`).
+    #[serde(rename = "automation_produced")]
+    AutomationProduced { station_id: Uuid, produced: Produced, done: u32 },
+    /// Your station paused for `reason` (E4.3), and resumes on its own once
+    /// that clears. One that paused while you were away is sent as you come
+    /// back. `station_automation_changed` goes to everyone alongside.
+    #[serde(rename = "automation_paused")]
+    AutomationPaused { station_id: Uuid, station_type: String, reason: PauseReason },
     // M5: Trading events
     #[serde(rename = "trade_requested")]
     TradeRequested {
@@ -493,6 +504,8 @@ impl ServerMessage {
             ServerMessage::StationClosed { .. } => "station_closed",
             ServerMessage::StationToolChanged { .. } => "station_tool_changed",
             ServerMessage::StationAutomationChanged { .. } => "station_automation_changed",
+            ServerMessage::AutomationProduced { .. } => "automation_produced",
+            ServerMessage::AutomationPaused { .. } => "automation_paused",
             ServerMessage::TradeRequested { .. } => "trade_requested",
             ServerMessage::TradeRequestDeclined { .. } => "trade_request_declined",
             ServerMessage::TradeRequestExpired { .. } => "trade_request_expired",

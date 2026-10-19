@@ -348,6 +348,7 @@ mod tests {
             quality: 50,
             tool: None,
             automation: None,
+            production: Vec::new(),
         }
     }
 

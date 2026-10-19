@@ -836,6 +836,24 @@ pub struct StationInfo {
     /// (E4.2). Left out when it was never configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automation: Option<StationAutomation>,
+    /// The station's last crafts on its own, newest last (E4.3): up to
+    /// [`PRODUCTION_LOG_LEN`], kept in the server's memory, so a restart
+    /// starts it again. Left out when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub production: Vec<Produced>,
+}
+
+/// How many crafts a station's production log keeps (E4.3).
+pub const PRODUCTION_LOG_LEN: usize = 50;
+
+/// One craft a station made on its own (E4.3), for its production log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Produced {
+    pub item_type: String,
+    pub quantity: i32,
+    pub quality: i32,
+    pub at: DateTime<Utc>,
 }
 
 /// A station's automation (E4.2, TDD §4.3): one recipe, made again and again

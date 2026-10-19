@@ -555,7 +555,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     match result {
                                         Ok(automation) => {
                                             let game = state.game.read().await;
-                                            crate::engine::automation::announce(&game.event_sender, station_uuid, automation);
+                                            crate::engine::automation::announce(&game, station_uuid, automation);
                                         }
                                         Err(e) => {
                                             let msg = ServerMessage::Error { message: e.message(), command: command.into() };
@@ -876,6 +876,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     Ok(GameEvent::StationAutomationChanged { station_id, automation }) => {
                         let msg = ServerMessage::StationAutomationChanged { station_id, automation };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                    }
+                    // E4.3: a station working on its own, to its owner
+                    Ok(GameEvent::AutomationProduced { owner_id, station_id, produced, done }) => {
+                        if owner_id == player_id {
+                            let msg = ServerMessage::AutomationProduced { station_id, produced, done };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
+                    Ok(GameEvent::AutomationPaused { owner_id, station_id, station_type, reason, notice_id }) => {
+                        if owner_id == player_id && take_notice(&state.db, notice_id).await {
+                            let msg = ServerMessage::AutomationPaused { station_id, station_type, reason };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
                     }
                     // M5: Trading events
                     Ok(GameEvent::TradeRequested { from_player, from_player_name, to_player }) => {

@@ -4,8 +4,8 @@
 //! ([`configure`]), a count of crafts or forever, and starts or stops it
 //! ([`start`], [`stop`]). The station's own box is the input and the output
 //! (v1), so anyone the station rule admits (`container_access`) may load it,
-//! but only the owner may set it going. Nothing makes anything yet: E4.3's
-//! tick runs the stations that are `running`, and pauses them with a reason.
+//! but only the owner may set it going. E4.3's tick (`automation_tick`) runs
+//! the stations that are `running`, and pauses them with a reason.
 //!
 //! The setting lives in `stations.automation` (JSON), so it outlasts a
 //! restart. [`check_config`] is the one validation, at configuring and again
@@ -17,11 +17,10 @@ use capitol_protocol::rest::{AutomationMode, AutomationState, StationAutomation}
 use capitol_protocol::rules::tools::ToolType;
 use sqlx::types::Json;
 use sqlx::{PgConnection, PgPool};
-use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::container_access::AccessError;
-use super::GameEvent;
+use super::{GameEvent, GameState};
 use crate::models::Recipe;
 
 /// The most crafts a `count` run may ask for. Longer than that is `forever`.
@@ -193,9 +192,11 @@ pub async fn automation_at(db: &PgPool, station_ids: &[Uuid]) -> Result<HashMap<
     Ok(rows.into_iter().map(|(id, a)| (id, a.0)).collect())
 }
 
-/// Tell everyone what `station_id` is set to now.
-pub fn announce(events: &broadcast::Sender<GameEvent>, station_id: Uuid, automation: StationAutomation) {
-    let _ = events.send(GameEvent::StationAutomationChanged { station_id, automation });
+/// Tell everyone what `station_id` is set to now, and the automation tick
+/// (`automation_tick::Works`, E4.3), which runs it.
+pub fn announce(game: &GameState, station_id: Uuid, automation: StationAutomation) {
+    game.works.set(station_id, &automation);
+    let _ = game.event_sender.send(GameEvent::StationAutomationChanged { station_id, automation });
 }
 
 /// Lock `station_id`, check `player_id` owns it, and read what a setting is

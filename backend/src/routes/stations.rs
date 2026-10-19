@@ -96,6 +96,7 @@ pub async fn get_nearby_stations(
     let container_map: HashMap<Uuid, Uuid> = containers.into_iter().collect();
     let tools = crate::engine::station_tools::tools_at(&state.db, &station_ids).await?;
     let automation = crate::engine::automation::automation_at(&state.db, &station_ids).await?;
+    let mut production = state.game.read().await.works.production(&station_ids);
 
     // Build response
     let station_infos: Vec<StationInfo> = stations
@@ -116,6 +117,7 @@ pub async fn get_nearby_stations(
                 quality: station.quality,
                 tool: tools.get(&station.id).cloned(),
                 automation: automation.get(&station.id).cloned(),
+                production: production.remove(&station.id).unwrap_or_default(),
             })
         })
         .collect();
@@ -381,7 +383,7 @@ async fn announce_automation(
 ) -> Result<Json<StationAutomation>, AppError> {
     let automation = result.map_err(automation_refusal)?;
     let game = state.game.read().await;
-    crate::engine::automation::announce(&game.event_sender, station_id, automation.clone());
+    crate::engine::automation::announce(&game, station_id, automation.clone());
     Ok(Json(automation))
 }
 

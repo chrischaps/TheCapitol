@@ -214,7 +214,7 @@ pub(crate) async fn give_back(
 }
 
 /// The tool in `station_id`'s slot, if it's a `tool_type` with uses left.
-pub async fn installed_tool(db: &PgPool, station_id: Uuid, tool_type: ToolType) -> Result<Option<HeldTool>, sqlx::Error> {
+pub async fn installed_tool(db: impl sqlx::PgExecutor<'_>, station_id: Uuid, tool_type: ToolType) -> Result<Option<HeldTool>, sqlx::Error> {
     let row: Option<(Uuid, String, i32, i32, f64, i32, Option<String>)> = sqlx::query_as(
         "SELECT i.id, i.item_type, i.quality, i.durability, it.base_power, it.max_durability, it.tier
          FROM stations s

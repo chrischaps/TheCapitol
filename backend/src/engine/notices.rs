@@ -18,9 +18,10 @@ use uuid::Uuid;
 
 use super::property_tax::foreclosure_threshold;
 
-/// Queue `message` for `player_id`, about the lot `terrain_id`. Any unsent
-/// `tax_delinquent` about the same lot is dropped: this says more. Returns
-/// the notice's id, for the live event to carry.
+/// Queue `message` for `player_id`, about the lot `terrain_id` (or, for
+/// `automation_paused`, the station's id). Any unsent `tax_delinquent` or
+/// `automation_paused` about the same thing is dropped: this says more.
+/// Returns the notice's id, for the live event to carry.
 pub async fn queue<'e>(
     db: impl PgExecutor<'e>,
     player_id: Uuid,
@@ -31,7 +32,7 @@ pub async fn queue<'e>(
     sqlx::query(
         "WITH superseded AS (
              DELETE FROM player_notices
-             WHERE player_id = $2 AND terrain_id = $3 AND kind = 'tax_delinquent'
+             WHERE player_id = $2 AND terrain_id = $3 AND kind IN ('tax_delinquent', 'automation_paused')
          )
          INSERT INTO player_notices (id, player_id, kind, terrain_id, message)
          VALUES ($1, $2, $4, $3, $5)",

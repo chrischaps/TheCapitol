@@ -12,7 +12,7 @@ use capitol_protocol::rest::{
     MoveRequest, NearbyResponse, NearbyStationsResponse, PlaceStationRequest,
     PayTaxRequest, PayTaxResponse, PlaceStationResponse, PlayerMeResponse, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
     RecipeOutputInfo, RecipesResponse, RegisterRequest, ResourceNodeInfo, SlotItem, SplitStackRequest, SplitStackResponse,
-    StationContainerResponse, StationInfo, StationTool, StationAutomation, AutomationMode, AutomationState, PauseReason, ConfigureAutomation, SubscribeRequest, Subscription, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
+    StationContainerResponse, StationInfo, StationTool, StationAutomation, Produced, AutomationMode, AutomationState, PauseReason, ConfigureAutomation, SubscribeRequest, Subscription, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
     ZonesResponse,
 };
 use capitol_protocol::rest::{
@@ -190,6 +190,7 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         NearbyStationsResponse,
         StationInfo,
         StationAutomation,
+        Produced,
         AutomationMode,
         AutomationState,
         PauseReason,

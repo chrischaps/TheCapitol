@@ -39,6 +39,8 @@ const SERVER_TYPES: &[&str] = &[
     "station_closed",
     "station_tool_changed",
     "station_automation_changed",
+    "automation_produced",
+    "automation_paused",
     "trade_requested",
     "trade_request_declined",
     "trade_request_expired",

@@ -257,6 +257,7 @@ pub async fn place_station(
             quality: kit_quality,
             tool: None,
             automation: None,
+            production: Vec::new(),
         },
         plot_id,
     })

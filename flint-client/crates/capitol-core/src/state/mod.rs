@@ -36,8 +36,8 @@ mod trade;
 use std::collections::HashMap;
 
 use capitol_protocol::rest::{
-    CatalogResponse, ClaimedPlot, PlotInfo, RecipeInfo, ResourceNodeInfo, StationInfo,
-    Subscription, SubscriptionStatus,
+    CatalogResponse, ClaimedPlot, PauseReason, PlotInfo, RecipeInfo, ResourceNodeInfo,
+    StationInfo, Subscription, SubscriptionStatus, PRODUCTION_LOG_LEN,
 };
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::ws::{PlayerPosition, ServerMessage};
@@ -263,6 +263,13 @@ pub enum StateEvent {
     /// Your subscription ran out at `until` (`subscription_lapsed`, E4.1).
     SubscriptionLapsed {
         until: DateTime<Utc>,
+    },
+    /// Your station paused for `reason`, and goes on by itself once that
+    /// clears (`automation_paused`, E4.3).
+    AutomationPaused {
+        station_id: Uuid,
+        station_type: String,
+        reason: PauseReason,
     },
 
     /// One of your tools used its last durability and is gone (`tool_broke`,
@@ -641,6 +648,7 @@ impl GameState {
                     quality: *quality,
                     tool: None,
                     automation: None,
+                    production: Vec::new(),
                 };
                 self.upsert_station(station, &mut out);
                 out.push(StateEvent::StationPlaced {
@@ -782,6 +790,34 @@ impl GameState {
             | M::MarketTrade { .. } => {
                 out.extend(self.market.apply_ws(message).into_iter().map(|e| StateEvent::Market(Box::new(e))));
             }
+            // E4.3: your station made something on its own. Kept on the
+            // station for E4.4's production log, the newest last.
+            M::AutomationProduced {
+                station_id,
+                produced,
+                done,
+            } => {
+                if let Some(station) = self.stations.get_mut(station_id) {
+                    if let Some(automation) = station.automation.as_mut() {
+                        automation.done = *done;
+                    }
+                    if station.production.len() == PRODUCTION_LOG_LEN {
+                        station.production.remove(0);
+                    }
+                    station.production.push(produced.clone());
+                }
+            }
+            // Its state comes in `station_automation_changed`; this is the
+            // owner's notice of why, live or on coming back
+            M::AutomationPaused {
+                station_id,
+                station_type,
+                reason,
+            } => out.push(StateEvent::AutomationPaused {
+                station_id: *station_id,
+                station_type: station_type.clone(),
+                reason: reason.clone(),
+            }),
         }
         out
     }

@@ -68,6 +68,8 @@ pub struct GameState {
     pub terrain_version: String,
     // World generation parameters (for admin tweaking)
     pub world_gen_params: WorldGenParams,
+    /// The stations working on their own (E4.3), run by their own task
+    pub works: Arc<super::automation_tick::Works>,
     // Performance tracking
     pub last_tps: f64,
     pub uptime_seconds: f64,
@@ -114,6 +116,7 @@ impl GameState {
             terrain,
             terrain_version,
             world_gen_params: params,
+            works: Arc::default(),
             last_tps: 0.0,
             uptime_seconds: 0.0,
         }

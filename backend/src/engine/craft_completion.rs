@@ -159,9 +159,7 @@ async fn consume_inputs(
     Ok(())
 }
 
-/// Put `output` in the crafter's output container: onto the first stack of its type if it
-/// stacks (`units::join_first_stack`: every unit keeps its quality, so any grade may join),
-/// or into the first free slot. Returns the container.
+/// Put `output` in the crafter's output container ([`place_in`]). Returns the container.
 async fn place_output(
     tx: &mut Transaction<'_, Postgres>,
     player_id: Uuid,
@@ -181,11 +179,26 @@ async fn place_output(
         tracing::error!("No crafting_output container for player {}", player_id);
         "You have no crafting output".to_string()
     })?;
+    place_in(tx, container_id, slot_count, player_id, output).await?;
+    Ok(container_id)
+}
 
+/// Put `output`, owned by `owner_id`, in `container_id` of `slot_count` slots:
+/// onto the first stack of its type if it stacks (`units::join_first_stack`:
+/// every unit keeps its quality, so any grade may join), or into the first free
+/// slot. [`OUTPUT_FULL`] when there's neither. A station's automation (E4.3)
+/// puts its output in the station's box this way.
+pub async fn place_in(
+    tx: &mut Transaction<'_, Postgres>,
+    container_id: Uuid,
+    slot_count: i32,
+    owner_id: Uuid,
+    output: &CraftOutput,
+) -> Result<(), String> {
     if output.stackable {
         let made = Units::uniform(output.quantity, output.quality);
         if units::join_first_stack(tx, container_id, &output.item_type, &made).await.map_err(db_error)? {
-            return Ok(container_id);
+            return Ok(());
         }
     }
 
@@ -208,14 +221,14 @@ async fn place_output(
     .bind(&output.item_type)
     .bind(output.quality)
     .bind(output.quantity)
-    .bind(player_id)
+    .bind(owner_id)
     .bind(container_id)
     .bind(slot)
     .bind(output.durability)
     .execute(&mut **tx)
     .await
     .map_err(db_error)?;
-    Ok(container_id)
+    Ok(())
 }
 
 fn db_error(e: sqlx::Error) -> String {
