@@ -63,11 +63,14 @@ pub enum Cluster {
     AlongWater,
     /// Scattered, but near trees
     UnderTrees,
+    /// Standing in the shallows, just inside a lake's shore or a slow
+    /// river's bank, gathered from the land beside it (reeds, #225)
+    Shallows,
 }
 
 impl Cluster {
-    pub const ALL: [Cluster; 5] =
-        [Self::Scattered, Self::Clumped, Self::Woods, Self::AlongWater, Self::UnderTrees];
+    pub const ALL: [Cluster; 6] =
+        [Self::Scattered, Self::Clumped, Self::Woods, Self::AlongWater, Self::UnderTrees, Self::Shallows];
 
     /// The id content and the wire use, e.g. `"along_water"`.
     pub fn as_str(&self) -> &'static str {
@@ -77,6 +80,7 @@ impl Cluster {
             Self::Woods => "woods",
             Self::AlongWater => "along_water",
             Self::UnderTrees => "under_trees",
+            Self::Shallows => "shallows",
         }
     }
 

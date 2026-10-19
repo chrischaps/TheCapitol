@@ -239,6 +239,97 @@ stackable = false
 weight = 1.6
 tool = { tool_type = "hammer", tier = "iron", base_power = 18.0, max_durability = 200 }
 
+# The wilds' yields (#225): bronze's two ores, and reeds for a better rope.
+[[item]]
+id = "copper_ore"
+name = "Copper Ore"
+category = "raw_material"
+stackable = true
+weight = 1.5
+
+[[item]]
+id = "tin_ore"
+name = "Tin Ore"
+category = "raw_material"
+stackable = true
+weight = 1.5
+
+[[item]]
+id = "reeds"
+name = "Reeds"
+category = "raw_material"
+stackable = true
+weight = 0.2
+
+# The bronze tier (#225), between stone and iron: an alloy of two ores that
+# grow on different ranges. Heads forged at the anvil, hafted at the workbench.
+[[item]]
+id = "bronze_ingot"
+name = "Bronze Ingot"
+category = "processed_material"
+stackable = true
+weight = 1.0
+
+[[item]]
+id = "bronze_sickle_blade"
+name = "Bronze Sickle Blade"
+category = "component"
+stackable = true
+weight = 0.6
+
+[[item]]
+id = "bronze_axe_head"
+name = "Bronze Axe Head"
+category = "component"
+stackable = true
+weight = 1.2
+
+[[item]]
+id = "bronze_pickaxe_head"
+name = "Bronze Pickaxe Head"
+category = "component"
+stackable = true
+weight = 1.4
+
+[[item]]
+id = "bronze_hammer_head"
+name = "Bronze Hammer Head"
+category = "component"
+stackable = true
+weight = 1.2
+
+[[item]]
+id = "bronze_sickle"
+name = "Bronze Sickle"
+category = "tool"
+stackable = false
+weight = 1.0
+tool = { tool_type = "sickle", tier = "bronze", base_power = 14.0, max_durability = 120 }
+
+[[item]]
+id = "bronze_axe"
+name = "Bronze Axe"
+category = "tool"
+stackable = false
+weight = 1.6
+tool = { tool_type = "axe", tier = "bronze", base_power = 14.0, max_durability = 120 }
+
+[[item]]
+id = "bronze_pickaxe"
+name = "Bronze Pickaxe"
+category = "tool"
+stackable = false
+weight = 1.8
+tool = { tool_type = "pickaxe", tier = "bronze", base_power = 14.0, max_durability = 120 }
+
+[[item]]
+id = "bronze_hammer"
+name = "Bronze Hammer"
+category = "tool"
+stackable = false
+weight = 1.6
+tool = { tool_type = "hammer", tier = "bronze", base_power = 14.0, max_durability = 120 }
+
 # The new stations' kits, made at a workbench with a hammer.
 [[item]]
 id = "kiln_kit"

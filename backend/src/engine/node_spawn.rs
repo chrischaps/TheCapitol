@@ -371,8 +371,9 @@ fn pattern(cluster: Cluster, zone: Zone, ground: &Ground, trees: &[(f64, f64)]) 
         Cluster::Woods => Pattern::Woods,
         Cluster::UnderTrees if trees.is_empty() => fallback(),
         Cluster::UnderTrees => Pattern::UnderTrees,
-        Cluster::AlongWater if ground.banks_in(zone).is_empty() => fallback(),
-        Cluster::AlongWater => Pattern::AlongWater,
+        // Shallows only grow in the wilds' water; the city's banks stand in.
+        Cluster::AlongWater | Cluster::Shallows if ground.banks_in(zone).is_empty() => fallback(),
+        Cluster::AlongWater | Cluster::Shallows => Pattern::AlongWater,
         Cluster::Clumped => Pattern::Clumped,
         Cluster::Scattered => Pattern::Scattered,
     }

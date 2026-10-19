@@ -28,12 +28,15 @@ const WORKER: Uuid = Uuid::from_u128(0x5a3d_1e);
 
 /// The kinds in rows, by resource id, with how far apart they stand
 /// (server units). The last is one the client doesn't know.
-const ROWS: [(&str, f64); 6] = [
+const ROWS: [(&str, f64); 9] = [
     ("grass", 30.0),
     ("fallen_branches", 34.0),
     ("rock_outcrop", 40.0),
     ("iron_vein", 40.0),
+    ("copper_vein", 40.0),
+    ("tin_vein", 40.0),
     ("clay_bank", 44.0),
+    ("reed_bed", 30.0),
     ("moonstone", 30.0),
 ];
 const PER_ROW: usize = 5;

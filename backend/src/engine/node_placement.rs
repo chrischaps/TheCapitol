@@ -17,6 +17,10 @@
 //! again. A node that isn't in the way never moves, so on an unchanged
 //! terrain this does nothing.
 //!
+//! Nodes that grow in the water (the `shallows` cluster: reeds, #225) aren't
+//! fitted: they stand in it on purpose, and an admin's regenerate re-plans
+//! them with the rest of the wilds.
+//!
 //! Standing on a lot doesn't put a node in the way. Some seeds stand on lots
 //! in the default world (grass in a rural field, mostly), and grass on a lot
 //! belongs to the lot: once claimed, only those the plot's `station_use_level`
@@ -26,6 +30,7 @@
 use capitol_protocol::fmath::StableMath;
 use std::collections::HashMap;
 
+use capitol_protocol::rules::resources::Cluster;
 use capitol_protocol::rules::{Zone, CENTER_X, CENTER_Y};
 use capitol_protocol::terrain::{quad_contains, Lake, Landmark, TerrainPlot};
 use sqlx::PgPool;
@@ -33,7 +38,7 @@ use uuid::Uuid;
 
 use crate::models::lot_clearance::WATER_KERB;
 use crate::models::terrain::{point_to_segment_distance, TerrainConfig};
-use crate::models::ResourceNodeState;
+use crate::models::{ResourceNodeState, ResourceType};
 
 /// A node closer than this to a road's edge or the water's kerb is in the way.
 pub const KEEP_CLEAR: f64 = 15.0;
@@ -246,10 +251,17 @@ fn round_tenth(v: f64) -> f64 {
     (v * 10.0).round() / 10.0
 }
 
-/// Moves the game's nodes off `terrain`'s roads and water, in memory.
+/// Moves the game's nodes off `terrain`'s roads and water, in memory, all
+/// but those that grow in the water.
 /// The caller persists the moves with [`save_moves`] when the terrain is saved.
-pub fn fit_to_terrain(terrain: &TerrainConfig, nodes: &mut HashMap<Uuid, ResourceNodeState>) -> PlacementReport {
-    let positions: Vec<(Uuid, (f64, f64))> = nodes.values().map(|n| (n.id, (n.x, n.y))).collect();
+pub fn fit_to_terrain(
+    terrain: &TerrainConfig,
+    nodes: &mut HashMap<Uuid, ResourceNodeState>,
+    resource_types: &HashMap<String, ResourceType>,
+) -> PlacementReport {
+    let wet = |t: &str| resource_types.get(t).is_some_and(|r| r.cluster == Cluster::Shallows.as_str());
+    let positions: Vec<(Uuid, (f64, f64))> =
+        nodes.values().filter(|n| !wet(&n.resource_type)).map(|n| (n.id, (n.x, n.y))).collect();
     let report = place_nodes(terrain, &positions);
     for m in &report.moves {
         if let Some(node) = nodes.get_mut(&m.id) {

@@ -32,7 +32,8 @@
 #                              one that needs a tool has none. Tier rows need a
 #                              tool type.
 #   cluster                    how its nodes group: scattered, clumped, woods,
-#                              along_water or under_trees
+#                              along_water, under_trees or shallows (standing
+#                              in the water, gathered from the bank)
 #   spawns                     [{ zone, density, quality_floor? }]: the zones its
 #                              nodes grow in (protocol rules::Zone ids), in nodes
 #                              per km² of the zone's open ground, and the least
@@ -125,10 +126,23 @@ extraction_duration_ticks = 60
 regeneration_ticks = 3000
 yields = { stone = { min = 1, max = 2 }, iron = { min = 2, max = 3 } }
 cluster = "woods"
-spawns = [
-    { zone = "rural", density = 25.0 },
-    { zone = "wilderness", density = 60.0, quality_floor = 50 },
-]
+spawns = [{ zone = "rural", density = 25.0 }]
+
+# The wilds' trees (#225): the same log, but harder to fell and slow to come
+# back, so a good axe pays off out here and a grove is worth a route.
+[[resource]]
+id = "old_growth"
+name = "Old Growth"
+yields_item = "log"
+base_quality_min = 50
+base_quality_max = 95
+required_tool = "axe"
+difficulty = 16.0
+extraction_duration_ticks = 80
+regeneration_ticks = 6000
+yields = { stone = { min = 1, max = 1 }, iron = { min = 2, max = 4 } }
+cluster = "woods"
+spawns = [{ zone = "wilderness", density = 60.0, quality_floor = 50 }]
 
 # Rare in the country, commoner past r3800, where they're high on the bare
 # rock of the ranges (content/wilds.toml, W6 #199).
@@ -148,3 +162,50 @@ spawns = [
     { zone = "rural", density = 0.5 },
     { zone = "wilderness", density = 8.0, quality_floor = 47 },
 ]
+
+# Bronze's ores (#225), on the ranges' flanks below the iron: copper on the
+# even massifs and tin on the odd (content/wilds.toml), so an alloy takes a
+# long walk round the ring or a trade. Tin is the scarce one.
+[[resource]]
+id = "copper_vein"
+name = "Copper Vein"
+yields_item = "copper_ore"
+base_quality_min = 30
+base_quality_max = 85
+required_tool = "pickaxe"
+difficulty = 14.0
+extraction_duration_ticks = 70
+regeneration_ticks = 4800
+yields = { stone = { min = 1, max = 1 }, iron = { min = 1, max = 2 } }
+cluster = "clumped"
+spawns = [{ zone = "wilderness", density = 10.0, quality_floor = 45 }]
+
+[[resource]]
+id = "tin_vein"
+name = "Tin Vein"
+yields_item = "tin_ore"
+base_quality_min = 30
+base_quality_max = 85
+required_tool = "pickaxe"
+difficulty = 14.0
+extraction_duration_ticks = 70
+regeneration_ticks = 4800
+yields = { stone = { min = 1, max = 1 }, iron = { min = 1, max = 2 } }
+cluster = "clumped"
+spawns = [{ zone = "wilderness", density = 4.0, quality_floor = 45 }]
+
+# In the lakes' shallows and the slow rivers' margins (#225), cut with a
+# sickle from the bank. Reed rope runs higher than grass's.
+[[resource]]
+id = "reed_bed"
+name = "Reed Bed"
+yields_item = "reeds"
+base_quality_min = 40
+base_quality_max = 85
+required_tool = "sickle"
+difficulty = 6.0
+extraction_duration_ticks = 30
+regeneration_ticks = 900
+yields = { stone = { min = 2, max = 4 }, iron = { min = 3, max = 6 } }
+cluster = "shallows"
+spawns = [{ zone = "wilderness", density = 6.0, quality_floor = 50 }]

@@ -412,3 +412,141 @@ inputs = [
 outputs = [{ item_type = "anvil_kit", quantity_min = 1, quantity_max = 1 }]
 quality_weights = { variance_min = -2, variance_max = 2, station = 0.1, tool = 0.2 }
 crafting_requirements = { tool_type = "hammer" }
+
+# The bronze tier (#225), mirroring iron's recipes and weights. The ingot
+# needs both ores, and they grow on different ranges.
+[[recipe]]
+id = "bronze_ingot"
+name = "Bronze Ingot"
+description = "Smelt copper and tin ore into bronze, with charcoal for the heat."
+category = "station_crafting"
+required_station_type = "forge"
+base_duration_ticks = 200
+inputs = [
+    { item_type = "copper_ore", quantity = 3, quality_weight = 0.55 },
+    { item_type = "tin_ore", quantity = 1, quality_weight = 0.3 },
+    { item_type = "charcoal", quantity = 1, quality_weight = 0.15 },
+]
+outputs = [{ item_type = "bronze_ingot", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -3, variance_max = 3, station = 0.3 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "bronze_sickle_blade"
+name = "Bronze Sickle Blade"
+description = "Hammer a bronze ingot into a sickle blade at the anvil."
+category = "station_crafting"
+required_station_type = "anvil"
+base_duration_ticks = 150
+inputs = [{ item_type = "bronze_ingot", quantity = 1, quality_weight = 1.0 }]
+outputs = [{ item_type = "bronze_sickle_blade", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -5, variance_max = 5, station = 0.4, tool = 0.2 }
+crafting_requirements = { tool_type = "hammer" }
+
+[[recipe]]
+id = "bronze_axe_head"
+name = "Bronze Axe Head"
+description = "Hammer two bronze ingots into an axe head at the anvil."
+category = "station_crafting"
+required_station_type = "anvil"
+base_duration_ticks = 200
+inputs = [{ item_type = "bronze_ingot", quantity = 2, quality_weight = 1.0 }]
+outputs = [{ item_type = "bronze_axe_head", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -5, variance_max = 5, station = 0.4, tool = 0.2 }
+crafting_requirements = { tool_type = "hammer" }
+
+[[recipe]]
+id = "bronze_pickaxe_head"
+name = "Bronze Pickaxe Head"
+description = "Hammer two bronze ingots into a pickaxe head at the anvil."
+category = "station_crafting"
+required_station_type = "anvil"
+base_duration_ticks = 200
+inputs = [{ item_type = "bronze_ingot", quantity = 2, quality_weight = 1.0 }]
+outputs = [{ item_type = "bronze_pickaxe_head", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -5, variance_max = 5, station = 0.4, tool = 0.2 }
+crafting_requirements = { tool_type = "hammer" }
+
+[[recipe]]
+id = "bronze_hammer_head"
+name = "Bronze Hammer Head"
+description = "Hammer two bronze ingots into a hammer head at the anvil."
+category = "station_crafting"
+required_station_type = "anvil"
+base_duration_ticks = 200
+inputs = [{ item_type = "bronze_ingot", quantity = 2, quality_weight = 1.0 }]
+outputs = [{ item_type = "bronze_hammer_head", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -5, variance_max = 5, station = 0.4, tool = 0.2 }
+crafting_requirements = { tool_type = "hammer" }
+
+[[recipe]]
+id = "bronze_sickle"
+name = "Bronze Sickle"
+description = "Haft a bronze sickle blade on a handle."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 100
+inputs = [
+    { item_type = "bronze_sickle_blade", quantity = 1, quality_weight = 2.0 },
+    { item_type = "tool_handle", quantity = 1, quality_weight = 1.0 },
+]
+outputs = [{ item_type = "bronze_sickle", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "bronze_axe"
+name = "Bronze Axe"
+description = "Haft a bronze axe head on a handle."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 100
+inputs = [
+    { item_type = "bronze_axe_head", quantity = 1, quality_weight = 2.0 },
+    { item_type = "tool_handle", quantity = 1, quality_weight = 1.0 },
+]
+outputs = [{ item_type = "bronze_axe", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "bronze_pickaxe"
+name = "Bronze Pickaxe"
+description = "Haft a bronze pickaxe head on a handle."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 100
+inputs = [
+    { item_type = "bronze_pickaxe_head", quantity = 1, quality_weight = 2.0 },
+    { item_type = "tool_handle", quantity = 1, quality_weight = 1.0 },
+]
+outputs = [{ item_type = "bronze_pickaxe", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1 }
+crafting_requirements = {}
+
+[[recipe]]
+id = "bronze_hammer"
+name = "Bronze Hammer"
+description = "Haft a bronze hammer head on a handle."
+category = "station_crafting"
+required_station_type = "workbench"
+base_duration_ticks = 100
+inputs = [
+    { item_type = "bronze_hammer_head", quantity = 1, quality_weight = 2.0 },
+    { item_type = "tool_handle", quantity = 1, quality_weight = 1.0 },
+]
+outputs = [{ item_type = "bronze_hammer", quantity_min = 1, quantity_max = 1 }]
+quality_weights = { variance_min = -2, variance_max = 2, station = 0.1 }
+crafting_requirements = {}
+
+# Reed rope (#225): reeds twist into more rope than fiber does, and better.
+[[recipe]]
+id = "rope_reed"
+name = "Reed Rope"
+description = "Twist reeds into rope, stronger than grass's."
+category = "hand_crafting"
+base_duration_ticks = 50
+inputs = [{ item_type = "reeds", quantity = 3, quality_weight = 0.5 }]
+outputs = [{ item_type = "rope", quantity_min = 2, quantity_max = 2 }]
+quality_weights = { variance_min = -3, variance_max = 3 }
+crafting_requirements = {}

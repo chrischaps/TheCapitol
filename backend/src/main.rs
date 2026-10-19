@@ -184,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let placement = {
         let mut game = game_state.write().await;
         let game = &mut *game;
-        engine::node_placement::fit_to_terrain(&game.terrain, &mut game.resource_nodes)
+        engine::node_placement::fit_to_terrain(&game.terrain, &mut game.resource_nodes, &game.resource_types)
     };
     engine::node_placement::save_moves(&db_pool, &placement.moves).await?;
     tracing::info!(

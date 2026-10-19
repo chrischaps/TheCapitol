@@ -348,6 +348,21 @@ pub struct HabitatDef {
     pub depth: Option<[f64; 2]>,
     /// For woods: the share of the habitat that's woods
     pub cover: Option<f64>,
+    /// For woods: the resource whose woods' noise field these grow in, so
+    /// they run on from its woods (old growth from the rural trees, #225).
+    /// Left out, its own.
+    pub woods_of: Option<String>,
+    /// Only on the even or the odd massifs (`land::massif_at`), so copper
+    /// and tin keep to different ranges (#225).
+    pub massifs: Option<Massifs>,
+}
+
+/// Which of the ranges' massifs a habitat keeps to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Massifs {
+    Even,
+    Odd,
 }
 
 impl HabitatDef {
@@ -355,6 +370,16 @@ impl HabitatDef {
     pub fn suits(&self, r: f64, h: f64, s: f64) -> bool {
         let within = |b: Option<[f64; 2]>, v: f64| b.is_none_or(|[lo, hi]| (lo..=hi).contains(&v));
         within(self.depth, r) && within(self.height, h) && within(self.slope, s)
+    }
+
+    /// Whether massif `massif` (`land::massif_at`) is one it keeps to. With
+    /// no massifs on the land, any is.
+    pub fn on_massif(&self, massif: Option<u32>) -> bool {
+        match (self.massifs, massif) {
+            (Some(Massifs::Even), Some(m)) => m % 2 == 0,
+            (Some(Massifs::Odd), Some(m)) => m % 2 == 1,
+            _ => true,
+        }
     }
 }
 
@@ -762,6 +787,9 @@ fn validate_habitat(r: &ResourceDef, wilds: &WildsDef, problems: &mut Vec<String
         if h.cover.is_some() != (r.cluster == "woods") {
             problems.push(format!("the habitat of '{}' has a cover exactly when it's woods", r.id));
         }
+        if h.woods_of.is_some() && r.cluster != "woods" {
+            problems.push(format!("the habitat of '{}' grows in another's woods but isn't woods", r.id));
+        }
     }
 }
 
@@ -770,6 +798,11 @@ fn validate_wilds(wilds: &WildsDef, resources: &[ResourceDef], problems: &mut Ve
     for h in &wilds.habitat {
         if !resources.iter().any(|r| r.id == h.resource) {
             problems.push(format!("wilds.toml gives a habitat to unknown resource '{}'", h.resource));
+        }
+        if let Some(of) = &h.woods_of {
+            if !resources.iter().any(|r| &r.id == of && r.cluster == "woods") {
+                problems.push(format!("the habitat of '{}' grows in the woods of '{of}', which isn't a woods resource", h.resource));
+            }
         }
     }
     for (name, rows) in [("depth", &wilds.quality.depth), ("height", &wilds.quality.height)] {
@@ -1126,6 +1159,11 @@ mod tests {
             ("rock_outcrop", "stone", None, Some("pickaxe"), 8.0),
             ("tree", "log", Some("axe"), Some("axe"), 12.0),
             ("iron_vein", "iron_ore", Some("pickaxe"), Some("pickaxe"), 20.0),
+            // The wilds' own (#225)
+            ("old_growth", "log", Some("axe"), Some("axe"), 16.0),
+            ("copper_vein", "copper_ore", Some("pickaxe"), Some("pickaxe"), 14.0),
+            ("tin_vein", "tin_ore", Some("pickaxe"), Some("pickaxe"), 14.0),
+            ("reed_bed", "reeds", Some("sickle"), Some("sickle"), 6.0),
         ];
         assert_eq!(content.resources.len(), d5.len());
         for (id, item, required, tool, difficulty) in d5 {
@@ -1182,23 +1220,37 @@ mod tests {
         let vein = content.wilds.habitat.iter_mut().find(|h| h.resource == "iron_vein").unwrap();
         vein.height = Some([900.0, 380.0]);
         vein.slope = Some([0.5, 2.0]);
-        let tree = content.wilds.habitat.iter_mut().find(|h| h.resource == "tree").unwrap();
+        let tree = content.wilds.habitat.iter_mut().find(|h| h.resource == "old_growth").unwrap();
         tree.cover = None;
+        let copper = content.wilds.habitat.iter_mut().find(|h| h.resource == "copper_vein").unwrap();
+        copper.woods_of = Some("rock_outcrop".into());
         content.wilds.habitat.push(HabitatDef {
             resource: "grass".into(),
             height: None,
             slope: None,
             depth: None,
             cover: None,
+            woods_of: None,
+            massifs: None,
         });
-        content.wilds.habitat.push(HabitatDef { resource: "moss".into(), height: None, slope: None, depth: None, cover: None });
+        content.wilds.habitat.push(HabitatDef {
+            resource: "moss".into(),
+            height: None,
+            slope: None,
+            depth: None,
+            cover: None,
+            woods_of: None,
+            massifs: None,
+        });
         content.wilds.quality.depth = vec![[4000.0, 0.0], [3800.0, 5.0]];
         let problems = validate(&content).join("\n");
         for expected in [
             "'clay_bank' grows in the wilderness but wilds.toml gives it no habitat",
             "the habitat of 'iron_vein' has a height that isn't low to high",
             "the habitat of 'iron_vein' runs steeper than anyone can climb",
-            "the habitat of 'tree' has a cover exactly when it's woods",
+            "the habitat of 'old_growth' has a cover exactly when it's woods",
+            "the habitat of 'copper_vein' grows in another's woods but isn't woods",
+            "the habitat of 'copper_vein' grows in the woods of 'rock_outcrop', which isn't a woods resource",
             "wilds.toml gives 'grass' a habitat but it doesn't grow in the wilderness",
             "wilds.toml gives a habitat to unknown resource 'moss'",
             "wilds.toml's quality depth rows aren't a rising list",

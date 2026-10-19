@@ -86,7 +86,7 @@ pub async fn update_world_params(
     game.world_gen_params = params.clone();
     // In memory only, like the terrain. The commit saves where the nodes are (#70).
     let game = &mut *game;
-    node_placement::fit_to_terrain(&game.terrain, &mut game.resource_nodes);
+    node_placement::fit_to_terrain(&game.terrain, &mut game.resource_nodes, &game.resource_types);
     // The woods, outcrops, veins and clay grow from the terrain, so they're
     // planned afresh (E2.3). Also in memory only until the commit.
     let replan = node_spawn::replan(&game.terrain, &game.resource_types, &mut game.resource_nodes, params.seed);

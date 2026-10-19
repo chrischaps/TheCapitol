@@ -13,6 +13,10 @@
 //!   faces that look up. Taken, a low broken rock in its rubble.
 //! - **Iron veins**: darker rock with rust streaks that give off a little
 //!   light, so they catch the dusk. Taken, the streaks dug out.
+//! - **Copper and tin veins** (#225): the same, copper's streaks verdigris
+//!   and bright metal in a warmer rock, tin's pale silver in a dark one.
+//! - **Reed beds** (#225): tall strap leaves and cattails standing in the
+//!   shallows. Taken, cut stems and a few leaves lying on the water.
 //! - **Clay banks**: a low wet mound with a spade-cut face. Taken, a
 //!   dug-out hollow inside its lip.
 //!
@@ -35,6 +39,9 @@ pub enum Kind {
     Outcrop,
     Vein,
     Clay,
+    Copper,
+    Tin,
+    Reeds,
     /// A resource the client has no model for.
     Other,
 }
@@ -47,13 +54,16 @@ pub enum Look {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] = [
+    pub const ALL: [Kind; 10] = [
         Kind::Grass,
         Kind::Tree,
         Kind::Branches,
         Kind::Outcrop,
         Kind::Vein,
         Kind::Clay,
+        Kind::Copper,
+        Kind::Tin,
+        Kind::Reeds,
         Kind::Other,
     ];
 
@@ -61,11 +71,15 @@ impl Kind {
     pub fn of(resource_type: &str) -> Kind {
         match resource_type {
             "grass" => Kind::Grass,
-            "tree" => Kind::Tree,
+            // The wilds' old growth is trees too: pine and birch out there.
+            "tree" | "old_growth" => Kind::Tree,
             "fallen_branches" => Kind::Branches,
             "rock_outcrop" => Kind::Outcrop,
             "iron_vein" => Kind::Vein,
             "clay_bank" => Kind::Clay,
+            "copper_vein" => Kind::Copper,
+            "tin_vein" => Kind::Tin,
+            "reed_bed" => Kind::Reeds,
             _ => Kind::Other,
         }
     }
@@ -79,6 +93,9 @@ impl Kind {
             Kind::Outcrop => "outcrop",
             Kind::Vein => "vein",
             Kind::Clay => "clay",
+            Kind::Copper => "copper",
+            Kind::Tin => "tin",
+            Kind::Reeds => "reeds",
             Kind::Other => "other",
         }
     }
@@ -89,7 +106,8 @@ impl Kind {
             Kind::Grass | Kind::Other => 1,
             Kind::Tree => 8,
             Kind::Outcrop => 4,
-            Kind::Branches | Kind::Vein | Kind::Clay => 3,
+            Kind::Branches | Kind::Vein | Kind::Clay | Kind::Copper | Kind::Tin => 3,
+            Kind::Reeds => 2,
         }
     }
 
@@ -124,9 +142,10 @@ impl Kind {
         match self {
             Kind::Grass => (0.88, 1.12),
             Kind::Tree => (0.82, 1.2),
-            Kind::Outcrop | Kind::Vein => (0.8, 1.25),
+            Kind::Outcrop | Kind::Vein | Kind::Copper | Kind::Tin => (0.8, 1.25),
             Kind::Branches => (0.85, 1.15),
             Kind::Clay => (0.85, 1.2),
+            Kind::Reeds => (0.85, 1.15),
             Kind::Other => (0.9, 1.1),
         }
     }
@@ -138,8 +157,9 @@ impl Kind {
             Kind::Grass => 1.0,
             Kind::Tree => 1.1,
             Kind::Branches => 1.2,
-            Kind::Outcrop | Kind::Vein => 1.5,
+            Kind::Outcrop | Kind::Vein | Kind::Copper | Kind::Tin => 1.5,
             Kind::Clay => 1.6,
+            Kind::Reeds => 1.3,
             Kind::Other => 1.0,
         }
     }
@@ -155,8 +175,9 @@ impl Kind {
             ),
             Kind::Tree => (14.0, 26.0),
             Kind::Branches => (9.0, 12.0),
-            Kind::Outcrop | Kind::Vein => (17.0, 12.0),
+            Kind::Outcrop | Kind::Vein | Kind::Copper | Kind::Tin => (17.0, 12.0),
             Kind::Clay => (20.0, 14.0),
+            Kind::Reeds => (8.0, 8.0),
             Kind::Other => (12.0, 10.0),
         }
     }
@@ -165,9 +186,9 @@ impl Kind {
     pub fn effect(self) -> Option<&'static str> {
         match self {
             Kind::Tree | Kind::Branches => Some("gather_wood"),
-            Kind::Outcrop | Kind::Vein | Kind::Other => Some("gather_stone"),
+            Kind::Outcrop | Kind::Vein | Kind::Copper | Kind::Tin | Kind::Other => Some("gather_stone"),
             Kind::Clay => Some("gather_clay"),
-            Kind::Grass => None,
+            Kind::Grass | Kind::Reeds => None,
         }
     }
 
@@ -178,7 +199,10 @@ impl Kind {
             Kind::Tree | Kind::Branches => [0.80, 0.66, 0.45],
             Kind::Outcrop | Kind::Other => [0.62, 0.60, 0.56],
             Kind::Vein => [0.70, 0.40, 0.22],
+            Kind::Copper => [0.38, 0.62, 0.52],
+            Kind::Tin => [0.72, 0.74, 0.77],
             Kind::Clay => [0.55, 0.36, 0.24],
+            Kind::Reeds => [0.62, 0.58, 0.40],
         }
     }
 
@@ -187,7 +211,7 @@ impl Kind {
         match self {
             Kind::Grass => 0.28,
             Kind::Tree => 1.2,
-            Kind::Outcrop | Kind::Vein => 0.55,
+            Kind::Outcrop | Kind::Vein | Kind::Copper | Kind::Tin => 0.55,
             _ => 0.4,
         }
     }
@@ -195,9 +219,9 @@ impl Kind {
     /// Seconds to come back. Regrowth eases: a tree takes its time.
     pub fn regrow_secs(self) -> f32 {
         match self {
-            Kind::Grass => 1.3,
+            Kind::Grass | Kind::Reeds => 1.3,
             Kind::Tree => 3.2,
-            Kind::Outcrop | Kind::Vein => 1.8,
+            Kind::Outcrop | Kind::Vein | Kind::Copper | Kind::Tin => 1.8,
             Kind::Clay => 1.5,
             Kind::Branches | Kind::Other => 1.0,
         }
@@ -207,8 +231,9 @@ impl Kind {
     pub fn sway(self) -> (f32, f32) {
         match self {
             Kind::Grass => (0.11, 1.3),
+            Kind::Reeds => (0.09, 1.6),
             Kind::Tree => (0.035, 2.4),
-            Kind::Outcrop | Kind::Vein | Kind::Other => (0.012, 9.0),
+            Kind::Outcrop | Kind::Vein | Kind::Copper | Kind::Tin | Kind::Other => (0.012, 9.0),
             Kind::Branches => (0.02, 5.0),
             Kind::Clay => (0.0, 0.0),
         }
@@ -236,9 +261,15 @@ pub fn model(kind: Kind, variant: u8, look: Look, lit: bool) -> MeshBuf {
         (Kind::Branches, Look::Full) => branches(&mut Rng(seed)),
         (Kind::Branches, Look::Spent) => litter(&mut Rng(seed), 1),
         (Kind::Outcrop, Look::Full) => outcrop(&mut Rng(seed)),
-        (Kind::Outcrop, Look::Spent) => broken(&mut Rng(seed), false),
-        (Kind::Vein, Look::Full) => vein(&mut Rng(seed)),
-        (Kind::Vein, Look::Spent) => broken(&mut Rng(seed), true),
+        (Kind::Outcrop, Look::Spent) => broken(&mut Rng(seed), None),
+        (Kind::Vein, Look::Full) => vein(&mut Rng(seed), IRONSTONE, RUST),
+        (Kind::Vein, Look::Spent) => broken(&mut Rng(seed), Some((IRONSTONE, RUST[0]))),
+        (Kind::Copper, Look::Full) => vein(&mut Rng(seed), COPPER_STONE, COPPER),
+        (Kind::Copper, Look::Spent) => broken(&mut Rng(seed), Some((COPPER_STONE, COPPER[1]))),
+        (Kind::Tin, Look::Full) => vein(&mut Rng(seed), TIN_STONE, TIN),
+        (Kind::Tin, Look::Spent) => broken(&mut Rng(seed), Some((TIN_STONE, TIN[0]))),
+        (Kind::Reeds, Look::Full) => reeds(&mut Rng(seed)),
+        (Kind::Reeds, Look::Spent) => cut_reeds(&mut Rng(seed)),
         (Kind::Clay, Look::Full) => bank(&mut Rng(seed)),
         (Kind::Clay, Look::Spent) => dug(&mut Rng(seed)),
         (Kind::Other, Look::Full) => cairn(&mut Rng(seed), 3),
@@ -892,6 +923,12 @@ const STONE: [u32; 3] = [0x5f5c56, 0x77736b, 0x8f8a80];
 const LICHEN: [u32; 2] = [0x8d9658, 0xb3ab72];
 const IRONSTONE: [u32; 3] = [0x403c3a, 0x55504c, 0x6a645d];
 const RUST: [u32; 3] = [0x54281a, 0x6a3420, 0x86482a];
+/// Copper's rock is warmer, its streaks verdigris round bright metal.
+const COPPER_STONE: [u32; 3] = [0x4a4038, 0x5e544a, 0x72685c];
+const COPPER: [u32; 3] = [0x2f6b5c, 0x4f9a80, 0xb5703e];
+/// Tin's (cassiterite) rock is dark, its streaks pale silver.
+const TIN_STONE: [u32; 3] = [0x34343a, 0x46464e, 0x5a5a62];
+const TIN: [u32; 3] = [0x8d9298, 0xaeb3b9, 0xd2d5d9];
 const FRESH: u32 = 0x9c968a;
 
 fn stone_paint(
@@ -954,7 +991,8 @@ fn outcrop(rng: &mut Rng) -> MeshBuf {
 
 /// An iron vein: dark rock with rust running through it in streaks, which
 /// give off a little of their colour so they catch the light at dusk.
-fn vein(rng: &mut Rng) -> MeshBuf {
+/// A vein: `stone` rock with `streak`s of ore that catch the light.
+fn vein(rng: &mut Rng, stone: [u32; 3], streak: [u32; 3]) -> MeshBuf {
     let mut m = MeshBuf::default();
     let dir = normalise([
         rng.range(-1.0, 1.0),
@@ -963,8 +1001,8 @@ fn vein(rng: &mut Rng) -> MeshBuf {
     ]);
     // Finer facets than an outcrop's, so a streak can be thin.
     let phase = rng.range(0.0, TAU);
-    let mut stone = stone_paint(rng, IRONSTONE, false);
-    let rust = RUST.map(hex);
+    let mut stone = stone_paint(rng, stone, false);
+    let rust = streak.map(hex);
     let mut r = Rng(rng.0 ^ 0x68e3_1da4);
     let mut paint = move |n: [f32; 3], p: [f32; 3]| {
         let band = (dot(p, dir) * 9.0 + phase).sin();
@@ -1001,15 +1039,17 @@ fn vein(rng: &mut Rng) -> MeshBuf {
         rng,
         &mut paint,
     );
-    pebbles(&mut m, rng, 4, 0.95, RUST[0]);
+    pebbles(&mut m, rng, 4, 0.95, streak[0]);
     m
 }
 
 /// A rock broken down: low, pale where it's freshly split, in its rubble.
-/// A vein's has dark gouges where the ore came out.
-fn broken(rng: &mut Rng, vein: bool) -> MeshBuf {
+/// A vein's (its rock, and its ore's pebbles) has dark gouges where the ore
+/// came out.
+fn broken(rng: &mut Rng, ore: Option<([u32; 3], u32)>) -> MeshBuf {
     let mut m = MeshBuf::default();
-    let tones = if vein { IRONSTONE } else { STONE };
+    let vein = ore.is_some();
+    let tones = ore.map_or(STONE, |(stone, _)| stone);
     let mut stone = stone_paint(rng, tones, false);
     let mut r = Rng(rng.0 ^ 0x1b87_3593);
     let mut paint = move |n: [f32; 3], p: [f32; 3]| {
@@ -1034,7 +1074,7 @@ fn broken(rng: &mut Rng, vein: bool) -> MeshBuf {
         rng,
         &mut paint,
     );
-    pebbles(&mut m, rng, 9, 1.0, if vein { RUST[0] } else { FRESH });
+    pebbles(&mut m, rng, 9, 1.0, ore.map_or(FRESH, |(_, pebble)| pebble));
     m
 }
 
@@ -1056,6 +1096,83 @@ fn pebbles(m: &mut MeshBuf, rng: &mut Rng, n: usize, out: f32, tone: u32) {
             &mut paint,
         );
     }
+}
+
+// ── Reeds ────────────────────────────────────────────────────────────────
+
+const REED_DARK: u32 = 0x2f4430;
+const REED: u32 = 0x5e7a48;
+const REED_TIP: u32 = 0x9a9a62;
+const CATTAIL: u32 = 0x4a3222;
+const REED_CUT: u32 = 0x8a8358;
+
+/// A reed bed, standing in the shallows: two dozen strap leaves, tall and
+/// arching, and a few stems each with a cattail's brown head. About 2 m
+/// tall and 1.6 m across. Its foot is under the water's line, which is
+/// where W10's water will draw (#203).
+fn reeds(rng: &mut Rng) -> MeshBuf {
+    let mut m = MeshBuf::default();
+    let mut tips = MeshBuf::default();
+    for i in 0..26 {
+        let a = i as f32 * 2.399_963 + rng.range(-0.2, 0.2);
+        let r0 = rng.range(0.02, 0.3);
+        let height = rng.range(1.2, 1.85);
+        let lean = rng.range(0.15, 0.5);
+        let shade = rng.next() * 0.5;
+        let colours = [
+            hex(REED_DARK),
+            mix(hex(REED_DARK), hex(REED), 0.5 + shade),
+            hex(REED),
+        ];
+        let tip = mix(hex(REED), hex(REED_TIP), 0.4 + shade);
+        blade(&mut m, &mut tips, a, r0, height, lean, 0.06, colours, tip);
+    }
+    for _ in 0..5 {
+        let a = rng.range(0.0, TAU);
+        let (r0, h) = (rng.range(0.0, 0.22), rng.range(1.75, 2.15));
+        let lean = rng.range(0.02, 0.12);
+        let [dx, dz] = [a.cos(), a.sin()];
+        let base = [r0 * dx, -0.2, r0 * dz];
+        let top = [(r0 + lean) * dx, h, (r0 + lean) * dz];
+        let stem = mix(hex(REED_DARK), hex(REED), 0.6);
+        post(&mut m, base, top, 0.012, 0.008, 4, stem, stem, None);
+        // The head: a fat brown spike a little under the stem's tip.
+        let k = |t: f32| add(base, scale(sub(top, base), t));
+        let head = hex(CATTAIL);
+        let (lo, hi) = (k(0.78), k(0.92));
+        post(&mut m, lo, hi, 0.04, 0.04, 6, head, mix(head, hex(0x6a4a30), 0.4), Some(head));
+    }
+    m.append(tips);
+    m
+}
+
+/// A reed bed cut down: short stems, flat across the top, and a few
+/// leaves lying on the water.
+fn cut_reeds(rng: &mut Rng) -> MeshBuf {
+    let mut m = MeshBuf::default();
+    for i in 0..14 {
+        let a = i as f32 / 14.0 * TAU + rng.range(-0.25, 0.25);
+        let r0 = rng.range(0.03, 0.32);
+        let h = rng.range(0.2, 0.42);
+        let cut = mix(hex(REED_CUT), hex(REED_DARK), rng.next() * 0.5);
+        stalk(&mut m, a, r0, h, 0.03, [hex(REED_DARK), cut, cut]);
+    }
+    for a in [0.6f32, 2.6, 4.7] {
+        let [dx, dz] = [a.cos(), a.sin()];
+        let [sx, sz] = [-dz * 0.05, dx * 0.05];
+        let (r0, r1, y) = (0.2, 1.1, 0.02);
+        m.quad(
+            [
+                [dx * r0 - sx, y, dz * r0 - sz],
+                [dx * r0 + sx, y, dz * r0 + sz],
+                [dx * r1 + sx * 0.4, y, dz * r1 + sz * 0.4],
+                [dx * r1 - sx * 0.4, y, dz * r1 - sz * 0.4],
+            ],
+            UP,
+            mix(hex(REED), hex(REED_CUT), 0.5),
+        );
+    }
+    m
 }
 
 // ── Clay ─────────────────────────────────────────────────────────────────
@@ -1489,8 +1606,9 @@ mod tests {
             Kind::Grass => (1.0, 1.45, 1.7),
             Kind::Tree => (5.0, 8.5, 6.5),
             Kind::Branches => (0.05, 0.4, 2.4),
-            Kind::Outcrop | Kind::Vein => (0.6, 1.3, 2.6),
+            Kind::Outcrop | Kind::Vein | Kind::Copper | Kind::Tin => (0.6, 1.3, 2.6),
             Kind::Clay => (0.15, 0.6, 3.0),
+            Kind::Reeds => (1.6, 2.4, 2.4),
             Kind::Other => (0.6, 1.2, 1.2),
         };
         for kind in Kind::ALL {
@@ -1516,7 +1634,7 @@ mod tests {
             match (kind, look, lit) {
                 (_, Look::Full, true) => assert!(glows(&m), "{kind:?} {v} lit"),
                 // Rust that catches the light, and a wet bank's sheen.
-                (Kind::Vein | Kind::Clay, ..) => {}
+                (Kind::Vein | Kind::Copper | Kind::Tin | Kind::Clay, ..) => {}
                 _ => assert!(!glows(&m), "{kind:?} {v} {look:?}"),
             }
         }
@@ -1565,6 +1683,8 @@ mod tests {
     fn unknown_resources_get_the_cairn_and_trees_lean_on_their_zone() {
         assert_eq!(Kind::of("moonstone"), Kind::Other);
         assert_eq!(Kind::of("tree"), Kind::Tree);
+        assert_eq!(Kind::of("old_growth"), Kind::Tree);
+        assert_eq!(Kind::of("reed_bed"), Kind::Reeds);
         let species = |zone| {
             let mut n = [0; 4];
             for h in 0..4000u64 {

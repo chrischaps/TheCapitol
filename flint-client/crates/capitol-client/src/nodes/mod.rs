@@ -1,6 +1,7 @@
 //! The resource nodes (P4.4, E2.5): every node the server has shown us,
 //! modelled by its resource type (`models`): grass tufts, trees, fallen
-//! branches, rock outcrops, iron veins and clay banks.
+//! branches, rock outcrops, iron, copper and tin veins, clay banks and reed
+//! beds.
 //!
 //! - **Merged per sector**, like the houses: a node at rest is baked into
 //!   its sector's mesh (`nodes_r3w05`), so the woods cost a draw or two a
@@ -343,7 +344,7 @@ impl Nodes {
 fn roughness(kind: Kind) -> f32 {
     match kind {
         Kind::Clay => 0.55,
-        Kind::Vein => 0.7,
+        Kind::Vein | Kind::Copper | Kind::Tin => 0.7,
         Kind::Grass => 0.8,
         _ => 0.9,
     }

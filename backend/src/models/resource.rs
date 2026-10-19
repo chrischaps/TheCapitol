@@ -345,14 +345,24 @@ mod tests {
         node_spawn::plan(&TerrainConfig::get_default(), &content_tables(), &existing, WorldGenParams::default().seed)
     }
 
+    /// Whether a planned node stands in the water on purpose (the reeds).
+    fn grows_in_the_water(s: &NodeSeed) -> bool {
+        static WET: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        let wet = WET.get_or_init(|| {
+            crate::content::load().unwrap().resources.into_iter().filter(|r| r.cluster == "shallows").map(|r| r.id).collect()
+        });
+        wet.contains(&s.resource_type)
+    }
+
     fn content_tables() -> Vec<SpawnTable> {
         crate::content::load().unwrap().resources.iter().map(|r| SpawnTable::from(&r.to_type())).collect()
     }
 
     const NEW_NODES_MIGRATION: &str = include_str!("../../migrations/20261106_001_seeded_nodes_by_zone.sql");
 
-    /// W6's (#199): the wilds' nodes, on the 12000 world.
-    const WILD_NODES_MIGRATION: &str = include_str!("../../migrations/20261113_001_wild_nodes.sql");
+    /// The wilds' nodes, on the 12000 world: W6's (#199), which #225 replaced
+    /// with copper, tin, reeds and old growth.
+    const WILD_NODES_MIGRATION: &str = include_str!("../../migrations/20261114_001_wild_yields.sql");
 
     /// The planned nodes the default world's water moved (#222).
     const PLANNED_MOVES_MIGRATION: &str = include_str!("../../migrations/20261112_001_wild_water_nodes.sql");
@@ -384,7 +394,7 @@ mod tests {
     }
 
     /// The rows of the node seed inserts the migrations make, in order: E2.3's
-    /// (from before W1's shift), then W6's.
+    /// (from before W1's shift), then the wilds' (#225's, which deleted W6's).
     fn migrated_plan() -> Vec<NodeSeed> {
         let mut rows = insert_rows(NEW_NODES_MIGRATION);
         rows.extend(insert_rows_at(WILD_NODES_MIGRATION, |v| v));
@@ -452,7 +462,8 @@ mod tests {
     fn the_default_terrain_moves_no_planned_node() {
         let mut nodes = seeded_positions();
         let n = nodes.len() as u128;
-        nodes.extend(planned_nodes().iter().enumerate().map(|(i, s)| (Uuid::from_u128(n + i as u128), (s.x, s.y))));
+        let dry = planned_nodes().into_iter().filter(|s| !grows_in_the_water(s));
+        nodes.extend(dry.enumerate().map(|(i, s)| (Uuid::from_u128(n + i as u128), (s.x, s.y))));
         let report = place_nodes(&TerrainConfig::get_default(), &nodes);
         assert!(report.moves.is_empty(), "{} nodes moved: {:?}", report.moves.len(), report.moves);
     }
@@ -490,11 +501,11 @@ mod tests {
 
     /// No node stands in the wild water (W3, #196; on the rural plain since
     /// #222): not the seeded grass, nor E2.3's nodes where the migrations
-    /// leave them.
+    /// leave them. Only the reeds, which grow there (#225).
     #[test]
     fn no_node_stands_in_the_wild_water() {
         let terrain = TerrainConfig::get_default();
-        let planned = planned_nodes();
+        let planned: Vec<NodeSeed> = planned_nodes().into_iter().filter(|s| !grows_in_the_water(s)).collect();
         let nodes = seeded_positions().into_iter().map(|(_, p)| p).chain(planned.iter().map(|s| (s.x, s.y)));
         let mut wet = Vec::new();
         for (x, y) in nodes {
@@ -558,7 +569,7 @@ mod tests {
             let got = wild.iter().filter(|s| s.resource_type == table.id).count();
             assert!(got as f64 >= 0.95 * want, "{} in the wilds: {got} of {want}", table.id);
         }
-        for s in &wild {
+        for s in wild.iter().filter(|s| s.resource_type != "reed_bed") {
             let (h, slope) = (height_at(s.x, s.y, &terrain.land), slope_at(s.x, s.y, &terrain.land));
             let at = format!("{} at ({}, {}), height {h:.0}, slope {slope:.2}", s.resource_type, s.x, s.y);
             let habitat = tables.iter().find(|t| t.id == s.resource_type).unwrap().habitat.as_ref().unwrap();
@@ -573,7 +584,8 @@ mod tests {
             assert!(water >= clear, "{at} is {water:.1} from the water");
             match s.resource_type.as_str() {
                 "iron_vein" => assert!(h >= 300.0 && slope >= 0.4, "{at} isn't in the ranges"),
-                "tree" => assert!(h <= 250.0 && slope <= 0.4, "{at} isn't on a valley floor"),
+                "old_growth" => assert!(h <= 250.0 && slope <= 0.4, "{at} isn't on a valley floor"),
+                "copper_vein" | "tin_vein" => assert!((150.0..=500.0).contains(&h), "{at} isn't on the flanks"),
                 _ => {}
             }
         }
@@ -600,6 +612,40 @@ mod tests {
         for s in clay {
             assert!(on_a_bank(s.x, s.y), "clay at ({}, {}) is off the banks", s.x, s.y);
         }
+        // Reeds (#225): in the water, with dry ground a walker can reach
+        // within gathering range of them.
+        let reeds: Vec<&&NodeSeed> = wild.iter().filter(|s| s.resource_type == "reed_bed").collect();
+        assert!(!reeds.is_empty());
+        for s in reeds {
+            let at = format!("reeds at ({}, {})", s.x, s.y);
+            assert!(land.in_the_water((s.x, s.y)), "{at} aren't in the water");
+            assert!(road_clearance(&terrain, s.x, s.y) >= MOVE_CLEAR, "{at} are by a road or trail");
+            let reach = capitol_protocol::rules::EXTRACTION_RANGE - 1.0;
+            let bank = (0..72).any(|k| {
+                let a = k as f64 * std::f64::consts::TAU / 72.0;
+                (2..=(reach as i32)).any(|d| {
+                    let p = (s.x + d as f64 * a.stable_cos(), s.y + d as f64 * a.stable_sin());
+                    !land.in_the_water(p) && land.reached(p)
+                })
+            });
+            assert!(bank, "{at} have no bank to gather them from");
+        }
+    }
+
+    /// #225: copper and tin keep to different massifs, so bronze needs both
+    /// ranges, or a trade.
+    #[test]
+    fn copper_and_tin_grow_on_different_massifs() {
+        use capitol_protocol::land::massif_at;
+        let terrain = TerrainConfig::get_default();
+        let plan = default_plan();
+        let massifs = |ore: &str| -> std::collections::BTreeSet<u32> {
+            plan.iter().filter(|s| s.resource_type == ore).filter_map(|s| massif_at(s.x, s.y, &terrain.land)).collect()
+        };
+        let (copper, tin) = (massifs("copper_vein"), massifs("tin_vein"));
+        assert!(copper.len() >= 3 && tin.len() >= 3, "copper on {copper:?}, tin on {tin:?}");
+        assert!(copper.iter().all(|m| m % 2 == 0), "copper on {copper:?}");
+        assert!(tin.iter().all(|m| m % 2 == 1), "tin on {tin:?}");
     }
 
     /// W6 (#199): the base quality rises from the rural edge to the ranges,
@@ -614,7 +660,7 @@ mod tests {
         let ranges: Vec<&NodeSeed> = wild.iter().copied().filter(|s| r(s) > 5000.0).collect();
         let (near, far) = (mean(&edge), mean(&ranges));
         assert!(far > near + 5.0, "the wilds: {near:.1} by the rural edge, {far:.1} in the ranges");
-        for kind in ["tree", "fallen_branches", "rock_outcrop", "clay_bank"] {
+        for kind in ["old_growth", "fallen_branches", "rock_outcrop", "clay_bank"] {
             let near: Vec<&NodeSeed> = edge.iter().copied().filter(|s| s.resource_type == kind).collect();
             let far: Vec<&NodeSeed> = ranges.iter().copied().filter(|s| s.resource_type == kind).collect();
             if near.len() < 20 || far.len() < 20 {

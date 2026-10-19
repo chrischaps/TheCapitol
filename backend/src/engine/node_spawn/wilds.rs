@@ -10,6 +10,11 @@
 //! - **under trees**: a short way from a wild tree
 //! - **clumped** (veins, stone): knots on the rock the habitat names
 //! - **along water** (clay): a bank strip beside a river, a stream or a lake
+//! - **shallows** (reeds): in the water, just inside a lake's shore or a slow
+//!   river's bank, with a bank a walker can reach beside it to gather from
+//!
+//! A habitat can keep to the even or the odd massifs (`land::massif_at`), so
+//! copper and tin grow on different ranges (#225).
 //!
 //! On top of [`Ground::open`] (roads and trails, lots, parks), every wild node
 //! is [`MOVE_CLEAR`] from the wild water (clay [`BANK_CLEAR`]) and from the
@@ -23,10 +28,12 @@
 use std::collections::VecDeque;
 
 use capitol_protocol::fmath::StableMath;
-use capitol_protocol::land::{height_at, slope_at};
+use capitol_protocol::land::{height_at, massif_at, slope_at};
 use capitol_protocol::rules::ground::{self, Footing, CLIFF_SLOPE};
 use capitol_protocol::rules::resources::Cluster;
-use capitol_protocol::rules::{Zone, CENTER_X, CENTER_Y, RURAL_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS, WORLD_SIZE};
+use capitol_protocol::rules::{
+    Zone, CENTER_X, CENTER_Y, EXTRACTION_RANGE, RURAL_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS, WORLD_SIZE,
+};
 use capitol_protocol::terrain::Lake;
 
 use super::{
@@ -38,6 +45,21 @@ use crate::models::terrain::TerrainConfig;
 
 /// The land grid's cell, in world units.
 pub const CELL: f64 = 25.0;
+
+/// How far inside a lake's shore its shallows run, from and to.
+pub const LAKE_SHALLOWS: (f64, f64) = (4.0, 14.0);
+
+/// How far inside a river's bank its margin runs, at most; never past a
+/// third of the way to the middle.
+pub const RIVER_MARGIN: f64 = 4.0;
+
+/// The steepest a river's surface falls (rise over run) where it's slow
+/// enough for reeds.
+pub const SLOW_RIVER: f64 = 0.02;
+
+/// How far out of the water, past the edge, a shallows node's bank is: where
+/// a walker stands to gather it.
+pub const SHALLOWS_BANK: f64 = 6.0;
 
 /// The wilds' area, in km².
 fn wild_km2() -> f64 {
@@ -234,6 +256,11 @@ impl<'a> Land<'a> {
         if on_lake { -1.0 } else { self.water.clearance(at, MOVE_CLEAR) }
     }
 
+    /// Whether `at` is in the wild water: a lake, a river or a stream.
+    pub fn in_the_water(&self, at: (f64, f64)) -> bool {
+        self.water_clearance(at) < 0.0
+    }
+
     /// The reached cells whose sampled land suits `habitat`, by centre.
     fn suited(&self, habitat: &HabitatDef) -> Vec<(f64, f64)> {
         (0..self.cells.len())
@@ -243,6 +270,7 @@ impl<'a> Land<'a> {
                 let r = (x - CENTER_X).stable_hypot(y - CENTER_Y);
                 Zone::from_position(x, y) == Zone::Wilderness
                     && habitat.suits(r, self.cells[k].height as f64, self.cells[k].slope as f64)
+                    && (habitat.massifs.is_none() || habitat.on_massif(massif_at(x, y, &self.terrain.land)))
             })
             .map(|(_, p)| p)
             .collect()
@@ -288,12 +316,14 @@ pub(super) fn plan(
             Cluster::Woods => {
                 let suited = land.suited(habitat);
                 let cover = habitat.cover.unwrap_or(1.0);
-                let woods = Woods::over(seed, &table.id, suited.iter().copied(), cover);
+                let field = habitat.woods_of.as_deref().unwrap_or(&table.id);
+                let woods = Woods::over(seed, field, suited.iter().copied(), cover);
                 let wooded: Vec<(f64, f64)> = suited.into_iter().filter(|&p| woods.covers(p)).collect();
                 place.scatter(&mut rng, count, &wooded)
             }
             Cluster::UnderTrees if !trees.is_empty() => place.near(&mut rng, count, &trees),
             Cluster::AlongWater => place.banks(&mut rng, count),
+            Cluster::Shallows => place.shallows(&mut rng, count),
             Cluster::Clumped => place.clumps(&mut rng, count, &land.suited(habitat)),
             _ => place.scatter(&mut rng, count, &land.suited(habitat)),
         };
@@ -349,6 +379,33 @@ impl Placing<'_, '_> {
                 let slope = slope_at(at.0, at.1, land);
                 slope <= CLIFF_SLOPE && self.habitat.suits(r, height_at(at.0, at.1, land), slope)
             }
+            && (self.habitat.massifs.is_none() || self.habitat.on_massif(massif_at(at.0, at.1, land)))
+            && (self.land_test)(self.table, Zone::Wilderness, at);
+        fits.then(|| {
+            self.taken.insert(at);
+            at
+        })
+    }
+
+    /// Takes `at`, in the water, if it fits: open ground but for the water,
+    /// clear of the world's edge and every other node, suited to the
+    /// habitat, and with `bank` beside it on ground a walker can reach and
+    /// stand on, out of the water and within gathering range.
+    fn try_take_wet(&mut self, at: (f64, f64), bank: (f64, f64)) -> Option<(f64, f64)> {
+        let at = (round_tenth(at.0), round_tenth(at.1));
+        let r = (at.0 - CENTER_X).stable_hypot(at.1 - CENTER_Y);
+        let land = &self.land.terrain.land;
+        let fits = r <= WILDERNESS_OUTER_RADIUS - MOVE_CLEAR
+            && Zone::from_position(at.0, at.1) == Zone::Wilderness
+            && Zone::from_position(bank.0, bank.1) == Zone::Wilderness
+            && (at.0 - bank.0).stable_hypot(at.1 - bank.1) <= EXTRACTION_RANGE
+            && self.land.in_the_water(at)
+            && !self.land.in_the_water(bank)
+            && self.land.reached(bank)
+            && slope_at(bank.0, bank.1, land) <= CLIFF_SLOPE
+            && self.ground.open(at, MOVE_CLEAR, false)
+            && self.taken.clear_of(at, MIN_GAP)
+            && self.habitat.suits(r, height_at(at.0, at.1, land), slope_at(at.0, at.1, land))
             && (self.land_test)(self.table, Zone::Wilderness, at);
         fits.then(|| {
             self.taken.insert(at);
@@ -450,6 +507,66 @@ impl Placing<'_, '_> {
     }
 }
 
+impl Placing<'_, '_> {
+    /// In the shallows: [`LAKE_SHALLOWS`] inside a lake's shore, or up to
+    /// [`RIVER_MARGIN`] inside a river's bank where it's wide and slow (its
+    /// surface falls no faster than [`SLOW_RIVER`]). Each with its bank
+    /// [`SHALLOWS_BANK`] out of the water. Stretches are picked by length.
+    fn shallows(&mut self, rng: &mut SplitMix64, count: usize) -> Vec<(f64, f64)> {
+        let terrain = self.land.terrain;
+        // (a, b, half-width, inset range). A lake's shore has no width, and
+        // which side is the water is found by looking.
+        let mut edges: Vec<((f64, f64), (f64, f64), f64, (f64, f64))> = Vec::new();
+        for river in &terrain.rivers {
+            for w in river.points.windows(2) {
+                let len = (w[1].x - w[0].x).stable_hypot(w[1].y - w[0].y);
+                let half = w[0].width.min(w[1].width) / 2.0;
+                let fall = (w[0].surface - w[1].surface).abs() / len.max(1e-9);
+                let inset = RIVER_MARGIN.min(half / 3.0);
+                if fall <= SLOW_RIVER && inset >= 1.0 {
+                    edges.push(((w[0].x, w[0].y), (w[1].x, w[1].y), half, (0.5, inset)));
+                }
+            }
+        }
+        for lake in &terrain.lakes {
+            for ring in &lake.rings {
+                for i in 0..ring.len() {
+                    edges.push((ring[i], ring[(i + 1) % ring.len()], 0.0, LAKE_SHALLOWS));
+                }
+            }
+        }
+        let lengths: Vec<f64> = edges.iter().map(|(a, b, ..)| (b.0 - a.0).stable_hypot(b.1 - a.1)).collect();
+        let total: f64 = lengths.iter().sum();
+        if total <= 0.0 {
+            return Vec::new();
+        }
+        self.each(count, |p| {
+            let mut pick = rng.range(0.0, total);
+            let k = lengths.iter().position(|&l| {
+                pick -= l;
+                pick < 0.0
+            });
+            let (a, b, half, (lo, hi)) = edges[k.unwrap_or(edges.len() - 1)];
+            let t = rng.range(0.0, 1.0);
+            let len = (b.0 - a.0).stable_hypot(b.1 - a.1).max(1e-9);
+            let side = if rng.below(2) == 0 { 1.0 } else { -1.0 };
+            let inset = rng.range(lo, hi);
+            let on = (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1));
+            // `d` out from `on`, square to the stretch, on `side`.
+            let out = |side: f64, d: f64| (on.0 - side * (b.1 - a.1) / len * d, on.1 + side * (b.0 - a.0) / len * d);
+            let (at, bank) = if half > 0.0 {
+                // From the river's middle out towards one bank.
+                (out(side, half - inset), out(side, half + SHALLOWS_BANK))
+            } else {
+                // From a lake's shore in, whichever side the water is.
+                let side = if p.land.in_the_water(out(side, inset)) { side } else { -side };
+                (out(side, inset), out(side, -SHALLOWS_BANK))
+            };
+            p.try_take_wet(at, bank)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,5 +630,14 @@ mod tests {
             sectors[((a + 22.5) / 45.0) as usize % 8] += 1;
         }
         println!("iron veins by sector from east, clockwise: {sectors:?}");
+        for ore in ["copper_vein", "tin_vein"] {
+            let mut by = [0; 8];
+            for s in plan.iter().filter(|s| s.resource_type == ore) {
+                by[massif_at(s.x, s.y, &terrain.land).unwrap_or(0) as usize % 8] += 1;
+            }
+            println!("{ore} by massif: {by:?}");
+        }
+        let in_lakes = plan.iter().filter(|s| s.resource_type == "reed_bed" && terrain.lakes.iter().any(|l| l.contains(s.x, s.y))).count();
+        println!("reed beds in lakes: {in_lakes}, the rest in rivers");
     }
 }

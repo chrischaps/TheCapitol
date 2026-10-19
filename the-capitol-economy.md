@@ -131,7 +131,7 @@ Removing a row is an error unless it's listed under `retired`, so items in playe
 
 ### D5. Content tree v1 (E2.1)
 
-**Status: approved by Chris, 2026-10-18 (E2.1, #160).** E2.2 to E2.6 build from these tables. The wilds' extra yields (copper and tin, old-growth trees, scree, reeds: `the-capitol-wilds.md` WD8) aren't part of v1. W6 (#199) placed v1's own resources in the wilds, from the land. Copper, tin and reeds wait on this tree in [#225](https://github.com/chrischaps/TheCapitol/issues/225). Grass stays the starter and the GDD's universal Fiber, and its hand numbers don't change.
+**Status: approved by Chris, 2026-10-18 (E2.1, #160).** E2.2 to E2.6 build from these tables. The wilds' extra yields (copper and tin, old-growth trees, scree, reeds: `the-capitol-wilds.md` WD8) weren't part of v1. W6 (#199) placed v1's own resources in the wilds, from the land. Chris approved the rest on 2026-10-19 ([#225](https://github.com/chrischaps/TheCapitol/issues/225)): a bronze tier, reeds and old growth, under **The wilds' yields** at the end of D5. Grass stays the starter and the GDD's universal Fiber, and its hand numbers don't change.
 
 v1 has **6 resources, 32 items, 6 stations and 27 recipes**, which is more than the first sketch's 22 items. Most of the extra items are the four iron heads and the four kits that give the new stations a way in. The longest chain is vein → ore → ingot → head → axe, with charcoal from the kiln feeding the forge. Tools and stations both carry quality along it.
 
@@ -183,6 +183,7 @@ The tool types are **sickle, axe, pickaxe and hammer**. D3's `saw` is dropped fr
 |---|---|---|---|
 | hand (no tool) | 4 | – | grass, branches and clay at today's numbers. Stone by hand is slow and poor. |
 | stone | 10 | 60 uses | the bootstrap: the first logs, ore and anvil work. Weak against veins. |
+| bronze (#225) | 14 | 120 uses | the middle: an alloy of copper and tin from the wilds' flanks, on different ranges |
 | iron | 18 | 200 uses | the upgrade: more yield, fewer failures, cleaner quality and a longer life |
 
 `quality_multiplier` is 0.5× at Q0, 1× at Q50 and 1.5× at Q100, so an excellent stone pick (Q100, power 15) beats a poor iron one (Q10, power 10.8). That's the GDD's bronze-against-steel example at our two tiers. `max_durability(base, q)` scales the Q50 figure by the same curve, so a Q100 iron axe lasts 300 uses. E1.4 owns the exact formula.
@@ -204,7 +205,7 @@ The tool types are **sickle, axe, pickaxe and hammer**. D3's `saw` is dropped fr
 | `fallen_branches` | Fallen Branches → `sticks` | Suburban parks 4 (~70), Rural 15 (~250), Wilderness 30 (~150) | under trees, scattered | hand, axe | 0 | 1–2 / 2–3 / 2–4 | 30–65 | 30 (axe 20) | 900 |
 | `clay_bank` | Clay Bank → `clay` | Urban 6 (~40), Suburban 2 (~35), along canals and moats (as built, E2.3: the urban bank is lots to the kerb, so urban clay is on the open ground nearest the canal; suburban clay is in the parks) | linear along water | hand | 2 | 1–2 / – / – | 40–80 | 40 | 1200 |
 | `rock_outcrop` | Rock Outcrop → `stone` | Rural 6 (~100), Wilderness 20 (~100) | clumped | hand, pickaxe | 8 | 1 at 80 ticks / 1–2 / 2–3 | 30–75 | 50 | 1800 |
-| `tree` | Tree → `log` | Rural woods 25 (~400), Wilderness 60 (~300) | woods (noise patches) | axe, required | 12 | – / 1–2 / 2–3 | 35–80 | 60 | 3000 |
+| `tree` | Tree → `log` | Rural woods 25 (~400); the Wilderness's are `old_growth` since #225 | woods (noise patches) | axe, required | 12 | – / 1–2 / 2–3 | 35–80 | 60 | 3000 |
 | `iron_vein` | Iron Vein → `iron_ore` | Rural 0.5 (~8, rare), Wilderness 8 (~40) | clumped, on rough ground | pickaxe, required | 20 | – / 1 / 1–2 | 25–90 | 80 | 6000 |
 
 Regional tendency: Wilderness nodes draw base quality from the top two-thirds of the range (so 50–90 for a vein), and Rural from the whole range. That is the reason to walk out. E2.2 holds it as a per-zone quality floor in the spawn table.
@@ -316,7 +317,34 @@ At this anchor, a Suburban deed (500 Strands) is about half an hour of grass, an
   - stone from scree
   - clay and reeds on the riverbanks
 - Here "Wilderness" in the zone column means placed by the land (altitude, slope, water). That placement is W6 ([#199](https://github.com/chrischaps/TheCapitol/issues/199)), not E2.3.
-- **As built (W6):** veins high on the rock, stone on the scree, trees (the old growth) on the valley floors with branches under them, and clay on the wild banks. Clay gained a wilderness row (4/km², floor 53). A wild node's quality ceiling rises past its type's `base_quality_max` with depth and height, by `backend/content/wilds.toml`. Copper and tin, reeds, and old growth as a type of its own are [#225](https://github.com/chrischaps/TheCapitol/issues/225).
+- **As built (W6):** veins high on the rock, stone on the scree, trees (the old growth) on the valley floors with branches under them, and clay on the wild banks. Clay gained a wilderness row (4/km², floor 53). A wild node's quality ceiling rises past its type's `base_quality_max` with depth and height, by `backend/content/wilds.toml`. Copper and tin, reeds, and old growth as a type of its own are [#225](https://github.com/chrischaps/TheCapitol/issues/225), below.
+
+#### The wilds' yields (#225)
+
+Approved by Chris on 2026-10-19: the bronze tier with copper and tin on different massifs, reeds, and old growth as its own type. With them the content is **10 resources, 44 items, 6 stations and 37 recipes**.
+
+| id | Name → item | Where (density) | Cluster | Tool | Difficulty | Yield (hand / stone / iron) | Base quality | Duration | Regen |
+|---|---|---|---|---|---|---|---|---|---|
+| `old_growth` | Old Growth → `log` | Wilderness 60, valley floors, in the rural trees' woods field (`woods_of = "tree"`), so the woods run on over the edge | woods | axe, required | 16 | – / 1 / 2–4 | 50–95 | 80 | 6000 |
+| `copper_vein` | Copper Vein → `copper_ore` | Wilderness 10, the flanks (height 200–450, slope 0.45–1.1), **even massifs** | clumped | pickaxe, required | 14 | – / 1 / 1–2 | 30–85 | 70 | 4800 |
+| `tin_vein` | Tin Vein → `tin_ore` | Wilderness 4, the same flanks, **odd massifs** | clumped | pickaxe, required | 14 | – / 1 / 1–2 | 30–85 | 70 | 4800 |
+| `reed_bed` | Reed Bed → `reeds` | Wilderness 6, in the shallows: 4–14 inside a lake's shore, or a slow river's margin | shallows (new) | sickle, required | 6 | – / 2–4 / 3–6 | 40–85 | 30 | 900 |
+
+- **Old growth** yields the same `log`, so logs stay one market. Difficulty 16 makes a stone axe slow there and a bronze or iron one pay off, and the slow regrowth makes a grove worth a route.
+- **Bronze.** Items: `copper_ore` (1.5), `tin_ore` (1.5), `reeds` (0.2), `bronze_ingot` (1.0), the four `bronze_*` heads and the four tools (the iron ones' weights; power 14, 120 uses). A bronze tool reads its resource's stone yield row (no resource has a bronze row), so bronze is faster, cleaner and longer-lived than stone, not more productive.
+- **Recipes (+10):**
+
+| id | Station (+tool) | Inputs | Output | Type | Duration |
+|---|---|---|---|---|---|
+| `bronze_ingot` | forge | 3 copper ore (0.55), 1 tin ore (0.3), 1 charcoal (0.15) | 1 bronze ingot | processing | 200 |
+| `bronze_sickle_blade` | anvil + hammer | 1 bronze ingot | 1 blade | craft | 150 |
+| `bronze_axe_head`, `_pickaxe_head`, `_hammer_head` | anvil + hammer | 2 bronze ingot | 1 head | craft | 200 |
+| `bronze_sickle`, `_axe`, `_pickaxe`, `_hammer` | workbench | 1 blade or head (2), 1 handle (1) | the tool | assembly | 100 |
+| `rope_reed` | hand | 3 reeds | 2 rope | hand | 50 |
+
+- **Reed rope** goes into every stone tool and three kits, and can run to 85 where grass's stops at 70.
+- **The trade.** Copper grows only on the even massifs and tin only on the odd (`land::massif_at`), so an ingot needs a walk round the ring or a trade.
+- **The migration** (`20261114_001_wild_yields.sql`) deletes W6's wild rows and stages the new plan. New types move every wild node placed after them, so it replaces rather than appends. Nothing in the wilds can be owned, so nothing is refunded.
 
 ### D6. Where the market is (E3.4) [decided 2026-10-18]
 

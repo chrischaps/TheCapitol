@@ -133,6 +133,22 @@ fn massif(land: &LandParams, dx: f64, dy: f64) -> f64 {
     stature * (floor + (1.0 - floor) * lobe)
 }
 
+/// Which massif a position's ranges belong to, numbered from 0 round the
+/// ring in the bearings' sense: massif `k` stands between valley `k` and
+/// valley `k + 1`. It follows the same wander as the ranges' height, so a
+/// massif's number changes where its ground falls to a valley. `None` when
+/// the land has no massifs (#225: copper and tin keep to their own).
+pub fn massif_at(x: f64, y: f64, land: &LandParams) -> Option<u32> {
+    if land.ridge_count == 0 {
+        return None;
+    }
+    let (dx, dy) = (x - rules::CENTER_X, y - rules::CENTER_Y);
+    let bearing = dy.stable_atan2(dx) + land.massif_wander * fbm(land.seed, WANDER, dx, dy, 2400.0, 2);
+    let k = land.ridge_count as f64;
+    let turns = (bearing - land.valley_bearing_degrees.to_radians()) / std::f64::consts::TAU;
+    Some(((turns * k).floor().rem_euclid(k)) as u32)
+}
+
 /// The steepness of the ground: rise over run, so 1.0 is 45°.
 pub fn slope_at(x: f64, y: f64, land: &LandParams) -> f64 {
     let (gx, gy) = gradient_at(x, y, land);
@@ -557,6 +573,21 @@ mod tests {
         let b = LandParams { seed: 7, ..LandParams::default() };
         let (x, y) = at(5400.0, 100.0);
         assert_ne!(height_at(x, y, &a), height_at(x, y, &b));
+    }
+
+    /// #225: with no wander, massif `k` is the arc between valley `k` and
+    /// valley `k + 1`, and every massif round the ring is met.
+    #[test]
+    fn massifs_are_numbered_between_the_valleys() {
+        let land = LandParams { massif_wander: 0.0, ..LandParams::default() };
+        let k = land.ridge_count;
+        for i in 0..k {
+            let mid = (land.valley_bearing_degrees + (i as f64 + 0.5) * 360.0 / k as f64).to_radians();
+            let (x, y) = (CENTER_X + 5000.0 * mid.stable_cos(), CENTER_Y + 5000.0 * mid.stable_sin());
+            assert_eq!(massif_at(x, y, &land), Some(i), "the middle of arc {i}");
+        }
+        let flat = LandParams { ridge_count: 0, ..LandParams::default() };
+        assert_eq!(massif_at(CENTER_X + 5000.0, CENTER_Y, &flat), None);
     }
 
     /// The same bits on every platform: CI runs this on Linux, and it was

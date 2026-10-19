@@ -22,17 +22,23 @@
 #   slope     rise over run; at most rules::ground::CLIFF_SLOPE (1.2)
 #   depth     radius from the centre
 #   cover     woods only: the share of the habitat that's woods
+#   woods_of  woods only: grow in this resource's woods' noise field rather
+#             than one of its own, so the woods run on from its (#225)
+#   massifs   "even" or "odd": only on those of the ranges' massifs
+#             (protocol `land::massif_at`), so copper and tin keep apart
 
 [quality]
 depth = [[3800, -15], [4400, 0], [5600, 10]]
 height = [[0, 0], [250, 3], [550, 8]]
 
-# Old growth, on the valley floors and the low ground between the ranges.
+# Old growth, on the valley floors and the low ground between the ranges,
+# in the rural trees' woods, so they run on over the rural edge.
 [[habitat]]
-resource = "tree"
+resource = "old_growth"
 height = [0, 220]
 slope = [0, 0.35]
 cover = 0.35
+woods_of = "tree"
 
 [[habitat]]
 resource = "fallen_branches"
@@ -53,4 +59,24 @@ slope = [0.55, 1.15]
 # The banks of the rivers, streams and lakes.
 [[habitat]]
 resource = "clay_bank"
+slope = [0, 0.4]
+
+# Bronze's ores, on the ranges' flanks below the iron: copper on the even
+# massifs, tin on the odd (#225).
+[[habitat]]
+resource = "copper_vein"
+height = [200, 450]
+slope = [0.45, 1.1]
+massifs = "even"
+
+[[habitat]]
+resource = "tin_vein"
+height = [200, 450]
+slope = [0.45, 1.1]
+massifs = "odd"
+
+# Reeds, in the lakes' shallows and the slow rivers' margins, standing in
+# the water (#225).
+[[habitat]]
+resource = "reed_bed"
 slope = [0, 0.4]
