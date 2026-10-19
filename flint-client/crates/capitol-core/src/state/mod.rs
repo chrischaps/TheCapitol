@@ -1114,6 +1114,12 @@ impl GameState {
         self.container_of_type(container_type::CRAFTING_OUTPUT)
     }
 
+    /// Your market box (E3.1), once fetched: what you bought, and what came
+    /// back from a cancel or an expiry.
+    pub fn market_box(&self) -> Option<&Container> {
+        self.container_of_type(container_type::MARKET_BOX)
+    }
+
     pub fn open_station(&self) -> Option<&OpenStation> {
         self.open_station.as_ref()
     }

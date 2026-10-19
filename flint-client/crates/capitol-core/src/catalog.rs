@@ -144,6 +144,8 @@ pub mod container_type {
     pub const CRAFTING_INPUT: &str = "crafting_input";
     pub const CRAFTING_OUTPUT: &str = "crafting_output";
     pub const STATION_INVENTORY: &str = "station_inventory";
+    /// Where bought goods and returned units wait (E3.1)
+    pub const MARKET_BOX: &str = "market_box";
 }
 
 /// One server's last `/catalog` on disk, beside its terrain.

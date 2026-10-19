@@ -10,6 +10,8 @@
 //! - [`plot`]: the plot panel, opened by alt-clicking a plot (P6.4).
 //! - [`settings`]: the settings panel, toggled with F10 (P8.4).
 //! - [`trade`]: a trade request's card, and the two-sided trade window (P7.3).
+//! - [`market`]: the market panel, toggled with M: items, the ladder, the
+//!   order form and your orders (E3.5).
 //! - [`station`]: the open station's panel: its box, and its recipes at a
 //!   crafting station (P6.3).
 //! - [`containers`]: `--containers`, any container no panel shows, as grids.
@@ -36,6 +38,7 @@ pub mod hud;
 pub mod icons;
 pub mod inventory;
 pub mod login;
+pub mod market;
 pub mod plot;
 pub mod sample;
 pub mod settings;

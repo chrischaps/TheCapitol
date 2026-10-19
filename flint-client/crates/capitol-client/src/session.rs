@@ -25,15 +25,17 @@ use capitol_core::catalog::{Catalog, CatalogCache};
 use capitol_core::craft::{self, Crafting};
 use capitol_core::exchange::{Asked, DepositQuote, Receipt, WithdrawQuote};
 use capitol_core::harvest::{Harvest, Note, Step};
+use capitol_core::market::MarketEvent;
 use capitol_core::motion::{Motion, Pose};
 use capitol_core::net::{
     ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
 };
 use capitol_core::poll::{Fetch, Poller};
 use capitol_core::protocol::rest::{
-    DepositRequest, MoveItemRequest, PayTaxRequest, PositionQuery, SlotItem, SplitStackRequest,
-    WithdrawRequest,
+    CollectRequest, DepositRequest, MarketSummaryResponse, MoveItemRequest, MyOrdersQuery,
+    PayTaxRequest, PlaceOrder, PositionQuery, SlotItem, SplitStackRequest, WithdrawRequest,
 };
+use capitol_core::protocol::rules::market::{OrderSide, OrderStatus};
 use capitol_core::protocol::rules::Zone;
 use capitol_core::protocol::terrain::TerrainResponse;
 use capitol_core::protocol::ws::ClientMessage;
@@ -68,6 +70,15 @@ const EXCHANGE_TAG: Tag = 40;
 /// reports a version the client doesn't have (E0.2). In the world the
 /// poller fetches it instead.
 const CATALOG_TAG: Tag = 50;
+
+/// The tags on the market panel's calls (E3.5): placing, cancelling and
+/// collecting share one; the summary, your orders and the market box another.
+const MARKET_TAG: Tag = 60;
+const MARKET_READ_TAG: Tag = 61;
+
+/// How often the open market panel asks again for the summary and your
+/// orders. The books themselves come over the WS as they change.
+const MARKET_REFRESH: Duration = Duration::from_secs(20);
 
 /// How long the exchange's receipt stays up.
 const RECEIPT_FOR: Duration = Duration::from_secs(6);
@@ -136,6 +147,20 @@ pub struct Session {
     receipt: Option<(Receipt, Instant)>,
     /// The login screen's `/catalog` is out.
     catalog_asked: bool,
+    /// The market panel is open (E3.5): the summary and your orders are
+    /// fetched while it is.
+    market_open: bool,
+    /// When they were last asked for; `None` asks at the next frame.
+    market_asked: Option<Instant>,
+    /// Every item with activity, from `/market/summary`.
+    market_summary: Option<MarketSummaryResponse>,
+    /// A place, cancel or collect is out.
+    market_busy: bool,
+    /// Why the last one was refused, and when.
+    market_refused: Option<(String, Instant)>,
+    /// What's worth a toast about your orders, since the extension last
+    /// took it.
+    market_notes: Vec<TradeNote>,
     /// Placing a station from a kit (P6.2), while it lasts.
     placing: Option<Placing>,
     /// What placing has to tell the player since the extension last took it.
@@ -288,6 +313,12 @@ impl Session {
             exchange_refused: None,
             receipt: None,
             catalog_asked: false,
+            market_open: false,
+            market_asked: None,
+            market_summary: None,
+            market_busy: false,
+            market_refused: None,
+            market_notes: Vec::new(),
             placing: None,
             placing_notes: Vec::new(),
             visit: Visit::default(),
@@ -787,6 +818,164 @@ impl Session {
             .filter(|(_, age)| *age < RECEIPT_FOR)
     }
 
+    /// The market panel opened or closed. While it's open the summary and
+    /// your orders are kept fresh.
+    pub fn set_market_open(&mut self, open: bool) {
+        if open && !self.market_open {
+            self.market_asked = None;
+        }
+        self.market_open = open;
+    }
+
+    /// Watch `item_type`'s book, and only it: the panel shows one at a time.
+    /// `None` watches nothing.
+    pub fn watch_market(&mut self, item_type: Option<&str>) {
+        let market = self.state.market_mut();
+        let others: Vec<String> = market
+            .watched()
+            .filter(|w| Some(*w) != item_type)
+            .map(str::to_owned)
+            .collect();
+        for other in others {
+            market.unwatch(&other);
+        }
+        if let Some(item) = item_type {
+            if !market.is_watching(item) {
+                market.watch(item);
+            }
+        }
+    }
+
+    /// Places `order` (`POST /market/orders`), unless a market call is out.
+    pub fn place_order(&mut self, order: PlaceOrder) {
+        if self.auth.phase() != Phase::InWorld || self.market_busy {
+            return;
+        }
+        tracing::info!(
+            "market: {} {} {} at {} each",
+            order.side.as_str(),
+            order.quantity,
+            order.item_type,
+            order.price
+        );
+        self.ask_market(RestRequest::PlaceOrder(order));
+    }
+
+    /// Cancels one of your open orders.
+    pub fn cancel_order(&mut self, order_id: Uuid) {
+        if self.auth.phase() != Phase::InWorld || self.market_busy {
+            return;
+        }
+        tracing::info!("market: cancelling {order_id}");
+        self.ask_market(RestRequest::CancelOrder { order_id });
+    }
+
+    /// Takes everything in the market box to the inventory, as far as it fits.
+    pub fn collect_market_box(&mut self) {
+        if self.auth.phase() != Phase::InWorld || self.market_busy {
+            return;
+        }
+        tracing::info!("market: collecting the market box");
+        self.ask_market(RestRequest::CollectMarketBox(CollectRequest::default()));
+    }
+
+    fn ask_market(&mut self, request: RestRequest) {
+        self.market_busy = true;
+        self.market_refused = None;
+        self.net.rest(request, MARKET_TAG);
+    }
+
+    /// A place, cancel or collect is out.
+    pub fn market_busy(&self) -> bool {
+        self.market_busy
+    }
+
+    /// Why the server refused the last one, for a few seconds after.
+    pub fn market_refused(&self, now: Instant) -> Option<&str> {
+        self.market_refused
+            .as_ref()
+            .filter(|(_, at)| now.duration_since(*at) < NOTICE_FOR)
+            .map(|(why, _)| why.as_str())
+    }
+
+    /// Every item with activity, once fetched.
+    pub fn market_summary(&self) -> Option<&MarketSummaryResponse> {
+        self.market_summary.as_ref()
+    }
+
+    /// What's worth a toast about your orders since the last call.
+    pub fn take_market_notes(&mut self) -> Vec<TradeNote> {
+        std::mem::take(&mut self.market_notes)
+    }
+
+    /// Sends what the market store wants said (watching, and asking again),
+    /// and while the panel is open asks again for the summary, your orders
+    /// and the market box every [`MARKET_REFRESH`].
+    fn tend_market(&mut self, now: Instant) {
+        for message in self.state.market_mut().take_outgoing() {
+            self.net.ws(message);
+        }
+        if self.auth.phase() != Phase::InWorld || !self.market_open {
+            return;
+        }
+        if self
+            .market_asked
+            .is_some_and(|at| now.duration_since(at) < MARKET_REFRESH)
+        {
+            return;
+        }
+        self.market_asked = Some(now);
+        self.net.rest(RestRequest::MarketSummary, MARKET_READ_TAG);
+        self.net
+            .rest(RestRequest::MyOrders(MyOrdersQuery::default()), MARKET_READ_TAG);
+        self.net.rest(RestRequest::MarketBox, MARKET_READ_TAG);
+    }
+
+    /// Turns your orders' fills and expiries into toasts.
+    fn note_market(&mut self, event: &MarketEvent) {
+        let catalog = self.state.catalog();
+        let note = match event {
+            MarketEvent::OrderFilled { order, trade } => {
+                let name = catalog.item_name(&trade.item_type);
+                let (verb, end) = match order.side {
+                    OrderSide::Buy => ("Bought", "It waits in your market box."),
+                    OrderSide::Sell => ("Sold", "The Strands are yours."),
+                };
+                let left = if order.quantity_remaining > 0 {
+                    format!(", {} still on the book", order.quantity_remaining)
+                } else {
+                    String::new()
+                };
+                Some(TradeNote::new(
+                    "Order filled",
+                    format!(
+                        "{verb} {} {name} ({}) at {} each{left}. {end}",
+                        trade.quantity, trade.grade, trade.price
+                    ),
+                ))
+            }
+            MarketEvent::OrderClosed(order) if order.status == OrderStatus::Expired => {
+                Some(TradeNote::new(
+                    "Order expired",
+                    format!(
+                        "Your {} order for {} ran its seven days. What was left came back.",
+                        order.side.as_str(),
+                        catalog.item_name(&order.item_type)
+                    ),
+                ))
+            }
+            _ => None,
+        };
+        if let Some(note) = note {
+            tracing::info!("market: {}: {}", note.title, note.body);
+            self.market_notes.push(note);
+        }
+        // A fill moves the last price, and fills the box
+        if matches!(event, MarketEvent::OrderFilled { .. }) {
+            self.market_asked = None;
+        }
+    }
+
     /// Starts placing the station `item` makes, if it's a kit: the ghost
     /// follows the cursor until a click puts it down or it's cancelled.
     /// Another kit's placement gives way to this one.
@@ -1169,6 +1358,32 @@ impl Session {
                         }
                     }
                 }
+                NetEvent::Rest(MARKET_TAG, result) => {
+                    self.market_busy = false;
+                    match result {
+                        Ok(RestResponse::Order(order)) => tracing::info!(
+                            "market: {} order {} is {}",
+                            order.side.as_str(),
+                            order.id,
+                            order.status.as_str()
+                        ),
+                        Ok(RestResponse::Collected(_)) => {
+                            self.net.rest(RestRequest::MarketBox, MARKET_READ_TAG);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            let why = refusal(e);
+                            tracing::info!("market: refused: {why}");
+                            self.market_refused = Some((why, now));
+                        }
+                    }
+                }
+                NetEvent::Rest(MARKET_READ_TAG, Ok(RestResponse::MarketSummary(summary))) => {
+                    self.market_summary = Some(summary.clone());
+                }
+                NetEvent::Rest(MARKET_READ_TAG, Err(e)) => {
+                    tracing::warn!("market: a refresh failed: {e}");
+                }
                 NetEvent::Rest(PAY_TAX_TAG, Ok(RestResponse::PayTax(paid))) => {
                     tracing::info!(
                         "plot: paid tax on {}, {} still owed, {} Strands left",
@@ -1269,6 +1484,7 @@ impl Session {
                     StateEvent::ToolBroke {
                         item_id, item_name, ..
                     } => self.broken_tools.push((*item_id, item_name.clone())),
+                    StateEvent::Market(event) => self.note_market(event),
                     // A tool slot refused: shown where a refused move is
                     StateEvent::ServerError {
                         message,
@@ -1322,6 +1538,7 @@ impl Session {
             let changes = self.state.tick(now);
             self.note_trades(&trade_before, &changes, now);
             self.send_draft(now);
+            self.tend_market(now);
             for (request, tag) in self.poller.tick(now) {
                 self.net.rest(request, tag);
             }
@@ -1409,6 +1626,11 @@ impl Session {
             self.exchanging = None;
             self.exchange_refused = None;
             self.receipt = None;
+            self.market_asked = None;
+            self.market_summary = None;
+            self.market_busy = false;
+            self.market_refused = None;
+            self.market_notes.clear();
             self.placing = None;
             self.placing_notes.clear();
             self.visit = Visit::default();
@@ -2030,6 +2252,165 @@ mod tests {
     /// panel's preview to the Strand, and the balance and inventory must
     /// follow. The account is `exchange1@bots.capitol.local`; stock it with
     /// `capitol-bot --prefix exchange --gather 12`.
+    /// The market panel's calls, end to end (E3.5): a bot lists fiber, the
+    /// session buys it at the price the preview quoted, hears the fill,
+    /// collects it from the market box, then rests a bid and cancels it.
+    /// Every fee is checked against the preview's.
+    #[test]
+    #[ignore = "needs the local stack"]
+    fn a_market_order_is_placed_filled_collected_and_cancelled() {
+        use capitol_core::bot::{Account, Bot};
+        use capitol_core::market::{self, Draft};
+        use capitol_core::net::NetConfig;
+        use capitol_core::protocol::rest::PlaceOrder;
+        use capitol_core::protocol::rules::market::{GradeRule, OrderSide, OrderStatus};
+
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            % 100_000_000;
+        // A price nobody else on a local stack quotes
+        let price = 5 + (stamp as i64 % 15);
+
+        // The seller: a bot with four of the exchange's fiber, three listed
+        let mut seller = Bot::sign_in(
+            NetConfig::with_base_url(&server),
+            &Account::numbered(&format!("mseller{stamp}"), 1),
+        )
+        .expect("seller signed in");
+        seller.withdraw_fiber(4).expect("withdrew fiber");
+        let stack = seller
+            .state()
+            .inventory()
+            .and_then(|inv| inv.items().find(|i| i.item_type == "fiber").map(|i| i.item_id))
+            .expect("fiber in the inventory");
+        let ask = seller
+            .place_order(PlaceOrder {
+                side: OrderSide::Sell,
+                item_type: "fiber".into(),
+                price,
+                quantity: 3,
+                item_id: Some(stack),
+                qualities: None,
+                min_grade: None,
+                grade_rule: None,
+            })
+            .expect("placed the sell");
+
+        // The buyer: registered by a bot, then signed in through the session
+        let buyer = Account::numbered(&format!("mbuyer{stamp}"), 1);
+        drop(Bot::sign_in(NetConfig::with_base_url(&server), &buyer).expect("buyer registered"));
+        let dir = std::env::temp_dir().join(format!("capitol-market-{}", std::process::id()));
+        let mut session = Session::start(&server, SessionFile::load(dir.join("s.toml"))).unwrap();
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let mut terrain = TerrainSource::offline(&fixture).unwrap();
+        session.log_in(&buyer.email, &buyer.password);
+        let mut wait = |session: &mut Session, what: &str, done: &dyn Fn(&Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !done(session) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                session.update(Instant::now(), &mut terrain);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait(&mut session, "the inventory and the balance", &|s| {
+            s.state().inventory().is_some() && s.state().strands().is_some()
+        });
+
+        // Open the panel on fiber: the summary comes, and the book shows the ask
+        session.set_market_open(true);
+        session.watch_market(Some("fiber"));
+        wait(&mut session, "the summary and the ask", &|s| {
+            s.market_summary().is_some()
+                && s.state().market().book("fiber").is_some_and(|b| {
+                    b.side(OrderSide::Sell).any(|l| l.price == price)
+                })
+        });
+
+        // Buy the three at the ask's price: the preview says they fill now
+        let draft = Draft {
+            side: OrderSide::Buy,
+            item_type: "fiber".into(),
+            price,
+            quantity: 3,
+            min_grade: "F".into(),
+            grade_rule: GradeRule::Average,
+        };
+        let st = session.state();
+        let mine = st.market().open_orders();
+        let quote = market::quote(&draft, None, st.market().book("fiber"), &mine, st.strands())
+            .expect("a buy the buyer can afford");
+        eprintln!("buy preview: {quote:?}");
+        assert!(quote.fills.quantity >= 3, "{quote:?}");
+        session.place_order(draft.to_place(None));
+        assert!(session.market_busy());
+        wait(&mut session, "the buy's answer", &|s| !s.market_busy());
+        assert_eq!(session.market_refused(Instant::now()), None);
+        wait(&mut session, "the fill", &|s| {
+            s.state()
+                .market()
+                .open_orders()
+                .is_empty()
+        });
+        let notes = session.take_market_notes();
+        eprintln!("toasts: {notes:?}");
+        assert!(notes.iter().any(|n| n.title == "Order filled"), "{notes:?}");
+        let bought = session
+            .state()
+            .market()
+            .trades("fiber")
+            .find(|t| t.sell_order_id == ask.id)
+            .map(|t| t.buy_order_id)
+            .expect("the trade on the channel");
+        let order = session.state().market().order(bought).cloned().unwrap();
+        assert_eq!((order.status, order.fee), (OrderStatus::Filled, quote.fee));
+        wait(&mut session, "the balance the preview said", &|s| {
+            s.state().strands() == quote.balance_after
+        });
+
+        // Collect it from the market box
+        wait(&mut session, "the fiber in the box", &|s| {
+            s.state().market_box().is_some_and(|b| b.items().any(|i| i.item_type == "fiber"))
+        });
+        session.collect_market_box();
+        wait(&mut session, "the collect", &|s| !s.market_busy());
+        assert_eq!(session.market_refused(Instant::now()), None);
+        wait(&mut session, "the fiber in the inventory", &|s| {
+            s.state()
+                .inventory()
+                .is_some_and(|inv| inv.items().any(|i| i.item_type == "fiber" && i.quantity >= 3))
+        });
+
+        // Rest a bid under every ask, see it on the book, cancel it
+        let low = Draft {
+            price: 1,
+            quantity: 2,
+            ..draft
+        };
+        let st = session.state();
+        let before = st.strands().unwrap();
+        let rest = market::quote(&low, None, st.market().book("fiber"), &[], st.strands()).unwrap();
+        assert_eq!(rest.fills.quantity, 0);
+        session.place_order(low.to_place(None));
+        wait(&mut session, "the bid on the book", &|s| {
+            !s.market_busy() && s.state().market().open_orders().len() == 1
+        });
+        let id = session.state().market().open_orders()[0].id;
+        assert_eq!(session.state().market().order(id).unwrap().fee, rest.fee);
+        session.cancel_order(id);
+        wait(&mut session, "the cancel", &|s| {
+            !s.market_busy() && s.state().market().open_orders().is_empty()
+        });
+        wait(&mut session, "the escrow back, less the fee", &|s| {
+            s.state().strands() == Some(before - rest.fee)
+        });
+        session.log_out();
+        drop(seller);
+    }
+
     #[test]
     #[ignore = "needs the local stack and Exchange1 holding fiber"]
     fn an_exchange_charges_what_it_previews() {

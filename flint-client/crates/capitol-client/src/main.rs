@@ -129,6 +129,15 @@ struct Args {
     /// type into egui (issue #76)
     #[arg(long, value_name = "TAB[:N]")]
     exchange: Option<String>,
+    /// Open the market panel on an item, with the form filled in:
+    /// "plank", or "plank:buy:10@41:B" for a buy of 10 at 41, B or better.
+    /// For captures, which can't type into egui
+    #[arg(long, value_name = "ITEM[:SIDE:N@PRICE[:GRADE]]")]
+    market: Option<String>,
+    /// Offline, open the market panel on a sample market: a plank book with
+    /// blended lots and both grade rules, and a few orders of yours
+    #[arg(long)]
+    market_sample: bool,
     /// No sound. Captures (--exit-after) are silent anyway
     #[arg(long)]
     mute: bool,
@@ -290,6 +299,7 @@ fn main() -> Result<()> {
         .with_containers(args.containers)
         .with_place(args.place)
         .with_exchange(args.exchange.as_deref())
+        .with_market(args.market.as_deref(), args.market_sample)
         .with_mute(args.mute || args.exit_after.is_some())
         .with_juice_sample(args.juice_sample && args.offline.is_some())
         .with_time_of_day(args.time_of_day)

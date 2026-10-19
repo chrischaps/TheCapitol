@@ -113,6 +113,9 @@ pub struct CapitolExtension {
     stations: Stations,
     crafting: ui::crafting::CraftingPanel,
     exchange: ui::exchange::ExchangePanel,
+    market: ui::market::MarketPanel,
+    /// `--market-sample`: a market to show offline (E3.5).
+    market_sample: Option<ui::market::Sample>,
     station: ui::station::StationPanel,
     /// Enter (the `craft` action) was pressed since `ui` last looked.
     craft_key: bool,
@@ -176,6 +179,8 @@ impl CapitolExtension {
             stations: Stations::default(),
             crafting: ui::crafting::CraftingPanel::default(),
             exchange: ui::exchange::ExchangePanel::default(),
+            market: ui::market::MarketPanel::default(),
+            market_sample: None,
             station: ui::station::StationPanel::default(),
             craft_key: false,
             cancel_placing: false,
@@ -286,6 +291,21 @@ impl CapitolExtension {
     pub fn with_exchange(mut self, spec: Option<&str>) -> Self {
         if let Some(spec) = spec {
             self.exchange.preset(spec);
+        }
+        self
+    }
+
+    /// Open the market panel preset (`--market ITEM[:SIDE:N@PRICE[:GRADE]]`),
+    /// and offline, on a sample market (`--market-sample`).
+    pub fn with_market(mut self, spec: Option<&str>, sample: bool) -> Self {
+        if let Some(spec) = spec {
+            self.market.preset(spec);
+        }
+        if sample && self.session.is_none() {
+            self.market_sample = Some(ui::market::Sample::new());
+            if spec.is_none() {
+                self.market.preset("plank:buy:12@42:C");
+            }
         }
         self
     }
@@ -403,6 +423,9 @@ impl PlayerExtension for CapitolExtension {
         if !self.at_login() && ctx.input.is_action_just_pressed("exchange") {
             self.exchange.toggle();
         }
+        if !self.at_login() && ctx.input.is_action_just_pressed("market") {
+            self.market.toggle();
+        }
         if ctx.input.is_action_just_pressed("settings") {
             self.settings_panel.toggle();
         }
@@ -446,6 +469,12 @@ impl PlayerExtension for CapitolExtension {
             let dt = ctx.clock.delta_time.min(0.1) as f32;
             self.players.update(ctx, poses, state, dt, &self.shared);
             trade(ctx, session, &self.shared, now);
+            for note in session.take_market_notes() {
+                let mut data = toml::Table::new();
+                data.insert("title".into(), note.title.into());
+                data.insert("body".into(), note.body.into());
+                ctx.fire_event("market_note", data);
+            }
             if let Some((item, strands)) = &self.trade_offer {
                 offer_preset(session, item, *strands, &mut self.trade_offered, now);
             }
@@ -779,6 +808,7 @@ impl PlayerExtension for CapitolExtension {
                     inventory_open: self.inventory.open,
                     crafting_open: self.crafting.open,
                     exchange_open: self.exchange.open,
+                    market_open: self.market.open,
                     help_open: self.shortcuts.open,
                     settings_open: self.settings_panel.open,
                     inventory_pulse: pulse,
@@ -798,6 +828,9 @@ impl PlayerExtension for CapitolExtension {
                 }
                 if clicks.exchange {
                     self.exchange.toggle();
+                }
+                if clicks.market {
+                    self.market.toggle();
                 }
                 if clicks.help {
                     self.shortcuts.toggle();
@@ -885,6 +918,29 @@ impl PlayerExtension for CapitolExtension {
                     Some(ui::exchange::Action::Close) => self.exchange.open = false,
                     None => {}
                 }
+                // The market (E3.5): watch the item it shows while it's open
+                session.set_market_open(self.market.open);
+                session.watch_market(self.market.watching());
+                let state = session.state();
+                let market = state.market();
+                let view = ui::market::View {
+                    catalog: state.catalog(),
+                    summary: session.market_summary().map(|s| s.items.as_slice()),
+                    book: self.market.selected.as_deref().and_then(|i| market.book(i)),
+                    orders: market.open_orders(),
+                    inventory: state.inventory(),
+                    market_box: state.market_box(),
+                    strands: state.strands(),
+                    busy: session.market_busy(),
+                    refused: session.market_refused(now),
+                };
+                match self.market.show(ctx, &mut self.icons, &view) {
+                    Some(ui::market::Action::Place(order)) => session.place_order(order),
+                    Some(ui::market::Action::Cancel(id)) => session.cancel_order(id),
+                    Some(ui::market::Action::Collect) => session.collect_market_box(),
+                    Some(ui::market::Action::Close) => self.market.open = false,
+                    None => {}
+                }
                 // The settings panel takes the hint card's corner; the card
                 // waits behind it rather than showing through.
                 if self.settings_panel.open {
@@ -892,7 +948,7 @@ impl PlayerExtension for CapitolExtension {
                 } else {
                     // The inventory's rect is last frame's: it's drawn after.
                     let panels: Vec<_> =
-                        [self.inventory.rect, self.crafting.rect, self.exchange.rect]
+                        [self.inventory.rect, self.crafting.rect, self.exchange.rect, self.market.rect]
                             .into_iter()
                             .flatten()
                             .collect();
@@ -1033,7 +1089,7 @@ impl PlayerExtension for CapitolExtension {
                 ui::inscription(ctx, &self.shared, &self.terrain.status());
             }
         } else if !at_login {
-            let clear_of = self.plot_panel.rect.or(self.crafting.rect);
+            let clear_of = self.plot_panel.rect.or(self.market.rect).or(self.crafting.rect);
             ui::controls(ctx, &self.terrain.status(), clear_of);
         }
         if self.icon_sheet {
@@ -1041,6 +1097,12 @@ impl PlayerExtension for CapitolExtension {
         }
         if let Some(sample) = &mut self.sample {
             sample.show(ctx, &mut self.icons);
+        }
+        if let Some(sample) = &self.market_sample {
+            let view = sample.view(self.market.selected.as_deref());
+            if let Some(ui::market::Action::Close) = self.market.show(ctx, &mut self.icons, &view) {
+                self.market.open = false;
+            }
         }
         if let Some(juice) = &mut self.juice {
             juice.ui(ctx, &mut self.icons, &self.shared);

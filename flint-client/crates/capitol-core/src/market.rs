@@ -1,5 +1,7 @@
 //! The market (E3.3), as the client holds it: the books of the items it
-//! watches, your orders, and the latest trades. No UI yet: the panel is E3.5.
+//! watches, your orders, and the latest trades; and the order form's rules
+//! (E3.5): [`quote`] says what an order costs, what of it would fill now
+//! against the visible book, and what you'd hold afterwards.
 //!
 //! - **Watching an item.** [`MarketStore::watch`] queues `subscribe_market`.
 //!   The server answers with the whole book (`market_depth`, `full`), then
@@ -16,8 +18,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use capitol_protocol::rest::{DepthLevel, MarketDepthResponse, MarketOrder, MarketTrade};
-use capitol_protocol::rules::market::{apply_depth_diff, OrderSide, OrderStatus};
+use capitol_protocol::rest::{DepthLevel, MarketDepthResponse, MarketOrder, MarketTrade, PlaceOrder};
+use capitol_protocol::rules::market::{
+    apply_depth_diff, buy_debit, fill_units, grade_floor, listing_fee, order_value, validate, GradeRule, OrderError,
+    OrderSide, OrderStatus,
+};
+use capitol_protocol::rules::quality_grade;
+use capitol_protocol::rules::stacking::{Pick, Units};
 use capitol_protocol::ws::{ClientMessage, ServerMessage};
 use uuid::Uuid;
 
@@ -278,10 +285,244 @@ impl MarketStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The order form (E3.5): what an order costs, what of it would fill now
+// against the visible book, and what you'd hold afterwards
+// ---------------------------------------------------------------------------
+
+/// An order as the form has it, before it's sent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Draft {
+    pub side: OrderSide,
+    pub item_type: String,
+    /// Strands per unit
+    pub price: i64,
+    pub quantity: i32,
+    /// Buy: the lowest grade it takes, A to F
+    pub min_grade: String,
+    /// Buy: how `min_grade` reads the units sold
+    pub grade_rule: GradeRule,
+}
+
+impl Draft {
+    /// What to send for it. A sell names `stack`, the stack its units come
+    /// from; the server takes the lowest of them, as [`quote`] does.
+    pub fn to_place(&self, stack: Option<Uuid>) -> PlaceOrder {
+        let buy = self.side == OrderSide::Buy;
+        PlaceOrder {
+            side: self.side,
+            item_type: self.item_type.clone(),
+            price: self.price,
+            quantity: self.quantity,
+            item_id: if buy { None } else { stack },
+            qualities: None,
+            min_grade: buy.then(|| self.min_grade.clone()),
+            grade_rule: buy.then_some(self.grade_rule),
+        }
+    }
+}
+
+/// What of an order would trade the moment it reached the book.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Fills {
+    /// Units that would trade
+    pub quantity: i64,
+    /// Strands they'd trade for, each at the resting order's price
+    pub value: i64,
+    /// A buy on `average`: lower-grade units at a crossing price might ride
+    /// along in a blend, and the book can't say which orders hold them. So
+    /// more may fill than `quantity`.
+    pub maybe_more: bool,
+}
+
+impl Fills {
+    /// The mean price of what would fill, rounded to the nearest Strand.
+    pub fn mean_price(&self) -> Option<i64> {
+        (self.quantity > 0).then(|| (self.value + self.quantity / 2) / self.quantity)
+    }
+}
+
+/// An order, previewed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderQuote {
+    /// `price × quantity`
+    pub value: i64,
+    /// The listing fee: [`listing_fee`], what the server charges
+    pub fee: i64,
+    /// What placing takes from your balance: a buy's value and fee, a
+    /// sell's fee
+    pub debit: i64,
+    /// What would trade at once
+    pub fills: Fills,
+    /// Your balance once it's placed and those fills are done, once your
+    /// balance is known. A buy filled under its price gets the difference
+    /// back; a sell is paid for what fills.
+    pub balance_after: Option<i64>,
+    /// Sell: the units that go, the lowest of the stack
+    pub units: Option<Units>,
+    /// Sell: what's left in the stack afterwards
+    pub left_in_stack: Option<i64>,
+}
+
+/// Why the form can't place its order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FormRefusal {
+    /// No price or no quantity yet: nothing to say
+    Incomplete,
+    /// Out of the server's bounds
+    Bad(OrderError),
+    /// A sell with no stack of the item to sell from
+    NoStack,
+    /// A sell for more than the stack holds
+    NotHeld { held: i64 },
+    /// Not Strands enough for the debit
+    Short { debit: i64, short: i64 },
+}
+
+/// Previews `draft`. `stack` is a sell's stack's units, `book` the item's
+/// book as the client holds it, `mine` your open orders (the matcher walks
+/// past them, so they don't fill yours), `strands` your balance.
+pub fn quote(
+    draft: &Draft,
+    stack: Option<&Units>,
+    book: Option<&Book>,
+    mine: &[&MarketOrder],
+    strands: Option<i64>,
+) -> Result<OrderQuote, FormRefusal> {
+    if draft.price < 1 || draft.quantity < 1 {
+        return Err(FormRefusal::Incomplete);
+    }
+    validate(draft.price, draft.quantity).map_err(FormRefusal::Bad)?;
+    let value = order_value(draft.price, draft.quantity);
+    let fee = listing_fee(value);
+    let others = book.map(|b| others_levels(&draft.item_type, b, mine)).unwrap_or_default();
+    match draft.side {
+        OrderSide::Buy => {
+            if grade_floor(&draft.min_grade).is_none() {
+                return Err(FormRefusal::Bad(OrderError::BadGrade));
+            }
+            let debit = buy_debit(draft.price, draft.quantity);
+            short_of(debit, strands)?;
+            let fills = buy_fills(draft, &others);
+            // Escrow is the price for every unit; a fill under it refunds the rest
+            let refund = draft.price * fills.quantity - fills.value;
+            Ok(OrderQuote {
+                value,
+                fee,
+                debit,
+                balance_after: strands.map(|s| s - debit + refund),
+                fills,
+                units: None,
+                left_in_stack: None,
+            })
+        }
+        OrderSide::Sell => {
+            let held = stack.ok_or(FormRefusal::NoStack)?;
+            let units = held
+                .pick(draft.quantity, Pick::Lowest)
+                .ok_or(FormRefusal::NotHeld { held: held.count() })?;
+            short_of(fee, strands)?;
+            let fills = sell_fills(draft, &units, &others);
+            Ok(OrderQuote {
+                value,
+                fee,
+                debit: fee,
+                balance_after: strands.map(|s| s - fee + fills.value),
+                fills,
+                left_in_stack: Some(held.count() - units.count()),
+                units: Some(units),
+            })
+        }
+    }
+}
+
+fn short_of(debit: i64, strands: Option<i64>) -> Result<(), FormRefusal> {
+    match strands {
+        Some(s) if s < debit => Err(FormRefusal::Short { debit, short: debit - s }),
+        _ => Ok(()),
+    }
+}
+
+/// The book less your own orders, which yours can't trade with.
+fn others_levels(item_type: &str, book: &Book, mine: &[&MarketOrder]) -> Vec<DepthLevel> {
+    let mut levels = book.levels.clone();
+    for order in mine.iter().filter(|o| o.item_type == item_type && o.status == OrderStatus::Open) {
+        let mut less = |side: OrderSide, grade: &str, rule: Option<GradeRule>, n: i64| {
+            if let Some(l) = levels
+                .iter_mut()
+                .find(|l| l.side == side && l.price == order.price && l.grade == grade && l.grade_rule == rule)
+            {
+                l.quantity -= n;
+            }
+        };
+        match order.side {
+            OrderSide::Buy => less(
+                OrderSide::Buy,
+                order.min_grade.as_deref().unwrap_or("F"),
+                Some(order.grade_rule.unwrap_or_default()),
+                order.quantity_remaining as i64,
+            ),
+            OrderSide::Sell => {
+                for (q, c) in order.units.pairs() {
+                    less(OrderSide::Sell, quality_grade(q), None, c as i64);
+                }
+            }
+        }
+    }
+    levels.retain(|l| l.quantity > 0);
+    levels
+}
+
+/// A buy walks the asks at or under its price, cheapest first, taking the
+/// units whose grade meets its own.
+fn buy_fills(draft: &Draft, levels: &[DepthLevel]) -> Fills {
+    let floor = grade_floor(&draft.min_grade).unwrap_or(0);
+    let mut fills = Fills::default();
+    let mut left = draft.quantity as i64;
+    for level in levels.iter().filter(|l| l.side == OrderSide::Sell && l.price <= draft.price) {
+        if grade_floor(&level.grade).unwrap_or(0) < floor {
+            fills.maybe_more |= draft.grade_rule == GradeRule::Average;
+            continue;
+        }
+        let n = left.min(level.quantity);
+        fills.quantity += n;
+        fills.value += n * level.price;
+        left -= n;
+        if left == 0 {
+            break;
+        }
+    }
+    if left == 0 {
+        fills.maybe_more = false;
+    }
+    fills
+}
+
+/// A sell walks the bids at or over its price, best first; each takes what
+/// of the units meets its grade, as the matcher's [`fill_units`] does.
+fn sell_fills(draft: &Draft, units: &Units, levels: &[DepthLevel]) -> Fills {
+    let mut fills = Fills::default();
+    let mut left = units.clone();
+    for level in levels.iter().filter(|l| l.side == OrderSide::Buy && l.price >= draft.price) {
+        let want = level.quantity.min(i32::MAX as i64) as i32;
+        let rule = level.grade_rule.unwrap_or_default();
+        let Some(taken) = fill_units(&left, want, &level.grade, rule) else {
+            continue;
+        };
+        left.take_units(&taken);
+        fills.quantity += taken.count();
+        fills.value += taken.count() * level.price;
+        if left.is_empty() {
+            break;
+        }
+    }
+    fills
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capitol_protocol::rules::market::{depth_diff, GradeRule};
+    use capitol_protocol::rules::market::depth_diff;
 
     fn level(side: OrderSide, price: i64, grade: &str, quantity: i64) -> DepthLevel {
         DepthLevel {
@@ -355,6 +596,123 @@ mod tests {
                 item_type: "plank".into()
             }]
         );
+    }
+
+    fn draft(side: OrderSide, price: i64, quantity: i32, min_grade: &str, rule: GradeRule) -> Draft {
+        Draft {
+            side,
+            item_type: "plank".into(),
+            price,
+            quantity,
+            min_grade: min_grade.into(),
+            grade_rule: rule,
+        }
+    }
+
+    fn my_order(side: OrderSide, price: i64, remaining: i32, units: Units) -> MarketOrder {
+        let at = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
+        MarketOrder {
+            id: Uuid::from_u128(price as u128),
+            player_id: Uuid::nil(),
+            side,
+            item_type: "plank".into(),
+            price,
+            quantity_total: remaining,
+            quantity_remaining: remaining,
+            status: OrderStatus::Open,
+            min_grade: (side == OrderSide::Buy).then(|| "F".into()),
+            grade_rule: (side == OrderSide::Buy).then_some(GradeRule::Average),
+            units,
+            escrow_strands: 0,
+            fee: 1,
+            created_at: at,
+            expires_at: at,
+        }
+    }
+
+    fn book(levels: Vec<DepthLevel>) -> Book {
+        Book { seq: 1, levels }
+    }
+
+    #[test]
+    fn the_fee_and_debit_are_the_servers() {
+        for (price, quantity) in [(1, 1), (7, 3), (41, 10), (250, 40), (1_000_000_000, 10_000)] {
+            let buy = quote(&draft(OrderSide::Buy, price, quantity, "F", GradeRule::Average), None, None, &[], None)
+                .unwrap();
+            assert_eq!(buy.fee, listing_fee(price * quantity as i64));
+            assert_eq!(buy.debit, buy_debit(price, quantity));
+            let stack = Units::uniform(quantity, 60);
+            let sell = quote(&draft(OrderSide::Sell, price, quantity, "F", GradeRule::Average), Some(&stack), None, &[], None)
+                .unwrap();
+            assert_eq!((sell.fee, sell.debit), (buy.fee, buy.fee));
+        }
+        let incomplete = draft(OrderSide::Buy, 0, 3, "F", GradeRule::Average);
+        assert_eq!(quote(&incomplete, None, None, &[], None), Err(FormRefusal::Incomplete));
+        let huge = draft(OrderSide::Buy, 5, 10_001, "F", GradeRule::Average);
+        assert_eq!(quote(&huge, None, None, &[], None), Err(FormRefusal::Bad(OrderError::BadQuantity)));
+        // 10 at 41 is 410, and its fee is 5
+        let poor = draft(OrderSide::Buy, 41, 10, "F", GradeRule::Average);
+        assert_eq!(quote(&poor, None, None, &[], Some(400)), Err(FormRefusal::Short { debit: 415, short: 15 }));
+    }
+
+    #[test]
+    fn a_buy_fills_against_cheaper_asks_of_its_grade_and_gets_the_difference_back() {
+        let asks = book(vec![
+            level(OrderSide::Buy, 38, "C", 9),
+            level(OrderSide::Sell, 40, "B", 3),
+            level(OrderSide::Sell, 40, "D", 5),
+            level(OrderSide::Sell, 42, "A", 4),
+            level(OrderSide::Sell, 45, "B", 8),
+        ]);
+        // C or better at up to 42: 3 at 40, 4 at 42; the D's might ride in a blend
+        let q = quote(&draft(OrderSide::Buy, 42, 10, "C", GradeRule::Average), None, Some(&asks), &[], Some(1000)).unwrap();
+        assert_eq!(q.fills, Fills { quantity: 7, value: 288, maybe_more: true });
+        assert_eq!(q.fills.mean_price(), Some(41));
+        // 420 + 5 fee out, then 2 back on each of the three filled at 40
+        assert_eq!(q.balance_after, Some(1000 - 425 + 6));
+        // Every unit: the D's never come
+        let strict = quote(&draft(OrderSide::Buy, 42, 10, "C", GradeRule::EveryUnit), None, Some(&asks), &[], None).unwrap();
+        assert!(!strict.fills.maybe_more);
+        // Your own ask doesn't fill your bid
+        let mine = my_order(OrderSide::Sell, 40, 3, Units::uniform(3, 80));
+        let q = quote(&draft(OrderSide::Buy, 40, 5, "F", GradeRule::Average), None, Some(&asks), &[&mine], None).unwrap();
+        assert_eq!(q.fills, Fills { quantity: 5, value: 200, maybe_more: false });
+        let q = quote(&draft(OrderSide::Buy, 40, 9, "F", GradeRule::Average), None, Some(&asks), &[&mine], None).unwrap();
+        assert_eq!(q.fills.quantity, 5);
+        // Under every ask, nothing fills
+        let q = quote(&draft(OrderSide::Buy, 39, 9, "F", GradeRule::Average), None, Some(&asks), &[], None).unwrap();
+        assert_eq!(q.fills, Fills::default());
+    }
+
+    #[test]
+    fn a_sell_fills_the_bids_its_units_meet_and_says_whats_left() {
+        let bids = book(vec![
+            DepthLevel { grade_rule: Some(GradeRule::EveryUnit), ..level(OrderSide::Buy, 50, "A", 2) },
+            level(OrderSide::Buy, 47, "C", 4),
+            level(OrderSide::Buy, 44, "F", 10),
+            level(OrderSide::Sell, 52, "B", 1),
+        ]);
+        let stack = Units::from_pairs([(40, 3), (70, 3), (92, 2)]);
+        // Six go, the lowest: three 40s and three 70s. None meets A at every
+        // unit; the C at 47 takes four that average 55; the two left go at 44
+        let q = quote(&draft(OrderSide::Sell, 44, 6, "F", GradeRule::Average), Some(&stack), Some(&bids), &[], Some(100)).unwrap();
+        assert_eq!(q.units, Some(Units::from_pairs([(40, 3), (70, 3)])));
+        assert_eq!(q.left_in_stack, Some(2));
+        assert_eq!(q.fills, Fills { quantity: 6, value: 4 * 47 + 2 * 44, maybe_more: false });
+        assert_eq!(q.balance_after, Some(100 - q.fee + 276));
+        // Priced over every bid, it rests
+        let q = quote(&draft(OrderSide::Sell, 51, 2, "F", GradeRule::Average), Some(&stack), Some(&bids), &[], None).unwrap();
+        assert_eq!(q.fills.quantity, 0);
+        assert_eq!(
+            quote(&draft(OrderSide::Sell, 44, 9, "F", GradeRule::Average), Some(&stack), None, &[], None),
+            Err(FormRefusal::NotHeld { held: 8 })
+        );
+        assert_eq!(quote(&draft(OrderSide::Sell, 44, 1, "F", GradeRule::Average), None, None, &[], None), Err(FormRefusal::NoStack));
+        // A buy and a sell ask for what they need
+        let buy = draft(OrderSide::Buy, 44, 3, "B", GradeRule::EveryUnit).to_place(Some(Uuid::nil()));
+        assert_eq!((buy.item_id, buy.min_grade.as_deref(), buy.grade_rule), (None, Some("B"), Some(GradeRule::EveryUnit)));
+        let sell = draft(OrderSide::Sell, 44, 3, "B", GradeRule::EveryUnit).to_place(Some(Uuid::nil()));
+        assert_eq!((sell.item_id, sell.min_grade, sell.grade_rule), (Some(Uuid::nil()), None, None));
     }
 
     #[test]

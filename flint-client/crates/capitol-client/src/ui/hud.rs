@@ -50,6 +50,8 @@ pub struct HeaderView<'a> {
     pub crafting_open: bool,
     /// The same for the exchange panel.
     pub exchange_open: bool,
+    /// The same for the market panel.
+    pub market_open: bool,
     /// The same for the shortcut overlay (P8.3).
     pub help_open: bool,
     /// The same for the settings panel.
@@ -66,6 +68,7 @@ pub struct HeaderClicks {
     pub inventory: bool,
     pub crafting: bool,
     pub exchange: bool,
+    pub market: bool,
     pub help: bool,
     pub settings: bool,
     /// Where the Inventory button was drawn, for pickups to fly to.
@@ -92,7 +95,6 @@ pub fn header(
         .resizable(false)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(theme::title("The Capitol", size::LARGE + 3.0));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
                     clicks.sign_out = theme::link(ui, "Sign out", size::SMALL).clicked();
@@ -134,6 +136,9 @@ pub fn header(
                         zone_chip(ui, zone);
                     }
                     ui.add_space(4.0);
+                    clicks.market = theme::toggle_chip(ui, "Market", view.market_open)
+                        .on_hover_text("The market (M)")
+                        .clicked();
                     clicks.exchange = theme::toggle_chip(ui, "Exchange", view.exchange_open)
                         .on_hover_text("Fiber exchange (X)")
                         .clicked();
@@ -148,6 +153,18 @@ pub fn header(
                     clicks.help = theme::toggle_chip(ui, "?", view.help_open)
                         .on_hover_text("Every control (? or F1)")
                         .clicked();
+                    // The name takes what's left, and gives way in a
+                    // narrow window rather than sit under the chips
+                    let title = theme::title("The Capitol", size::LARGE + 3.0);
+                    let wide = egui::WidgetText::from(title.clone())
+                        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
+                        .size()
+                        .x;
+                    if ui.available_width() >= wide + 16.0 {
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            ui.label(title);
+                        });
+                    }
                 });
             });
         });

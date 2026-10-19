@@ -74,6 +74,11 @@ bindings = [{ type = "key", code = "KeyC" }]
 kind = "button"
 bindings = [{ type = "key", code = "KeyX" }]
 
+# The market panel (E3.5); the header's Market button does the same.
+[actions.market]
+kind = "button"
+bindings = [{ type = "key", code = "KeyM" }]
+
 # The shortcut overlay (P8.3). `?` opens it too, read off the typed
 # character, so it's `?` on any layout. Binding Slash here as well would
 # fire on the same keypress and toggle the overlay twice.
