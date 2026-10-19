@@ -189,6 +189,8 @@ pub struct WorldGenParams {
     // Rural
     pub rural_trail_width: f64,
     pub rural_trail_count: u32,
+    // The wild trails past the rural edge (W5, #198).
+    pub wild_trail_width: f64,
     // Rural plots
     pub rural_plot_frontage: f64,
     pub rural_plot_depth: f64,
@@ -247,6 +249,7 @@ impl Default for WorldGenParams {
             urban_plot_depth: 50.0,
             rural_trail_width: 6.0,
             rural_trail_count: 12,
+            wild_trail_width: 8.0,
             rural_plot_frontage: 200.0,
             rural_plot_depth: 150.0,
             guild_plot_frontage: 150.0,
@@ -694,6 +697,11 @@ impl TerrainConfig {
             &config.water_rings,
             (config.center_x, config.center_y),
         );
+        // The wild trails run on from the arterials, round the water, and
+        // after the lots, which keep off them anyway: none stand past the
+        // rural edge. The water was laid before them, so it doesn't skirt them.
+        let trails = super::trails::lay(&params.land, &water, &config.roads, &config.terrain_plots, params.wild_trail_width);
+        config.roads.extend(trails);
         (config.rivers, config.streams, config.lakes, config.fords) =
             (water.rivers, water.streams, water.lakes, water.fords);
 
@@ -1475,7 +1483,12 @@ mod tests {
         // in the new water, and startup's `fit_to_terrain` moves them
         // (`no_node_stands_in_the_wild_water`). The rural lots don't know the
         // water yet (#223).
-        assert_eq!(TerrainConfig::get_default().version(), "b4c60461ef8cc4c4");
+        //
+        // W5 (#198) ran the arterials on past r3800 as wild trails, round the
+        // water: the `wild_*` trail roads. Nothing else moved, and no seeded
+        // or planned node stands on one
+        // (`the_default_terrain_moves_no_planned_node`).
+        assert_eq!(TerrainConfig::get_default().version(), "6e466ea51dc0951e");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one

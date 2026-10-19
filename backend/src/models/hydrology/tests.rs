@@ -4,10 +4,15 @@ use super::*;
 use capitol_protocol::fmath::StableMath;
 use capitol_protocol::land::{carve, ground_at, relief, Water};
 
-/// The default world's roads, which the water skirts.
+/// The default world's roads, which the water skirts: all but the wild
+/// trails, which are laid round the water after it (W5).
 fn roads() -> &'static [RoadSegment] {
     static ROADS: OnceLock<Vec<RoadSegment>> = OnceLock::new();
-    ROADS.get_or_init(|| crate::models::TerrainConfig::get_default().roads)
+    ROADS.get_or_init(|| {
+        let mut roads = crate::models::TerrainConfig::get_default().roads;
+        roads.retain(|r| !r.id.starts_with("wild_"));
+        roads
+    })
 }
 
 /// The default land's water, generated once for the tests that only read it.
@@ -303,7 +308,17 @@ fn water_plan() {
     let seed = std::env::var("LAND_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(42);
     let size: usize = std::env::var("LAND_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(1200);
     let land = LandParams { seed, ..LandParams::default() };
-    let w = generate(&land, roads());
+    // The whole world for that land, so the wild trails (W5) are drawn too.
+    let world = crate::models::TerrainConfig::from_params(&crate::models::WorldGenParams {
+        land: land.clone(),
+        ..crate::models::WorldGenParams::default()
+    });
+    let w = Hydrology {
+        rivers: world.rivers.clone(),
+        streams: world.streams.clone(),
+        lakes: world.lakes.clone(),
+        fords: world.fords.clone(),
+    };
     let water = Water::new(courses(&w), &w.lakes);
     let (mut rgb, mut heights) = relief::draw(&land, size, |x, y| ground_at(x, y, &land, &water));
     let scale = WORLD_SIZE / size as f64;
@@ -318,24 +333,33 @@ fn water_plan() {
     const STREAM: [u8; 3] = [92, 150, 206];
     const FORD: [u8; 3] = [232, 150, 40];
     const ROAD: [u8; 3] = [150, 132, 104];
-    // The roads past the suburb, under the water.
-    for road in roads() {
+    const TRAIL: [u8; 3] = [150, 40, 30];
+    // The pixels of a road `half` pixels either side of its line.
+    let stroke = |road: &RoadSegment, half: i64| {
+        let mut px = Vec::new();
         for s in road.points.windows(2) {
             let (a, b) = (s[0], s[1]);
             if radius(a.0, a.1).max(radius(b.0, b.1)) < SUBURBAN_OUTER_RADIUS {
                 continue;
             }
             let steps = ((b.0 - a.0).abs().max((b.1 - a.1).abs()) / scale).ceil().max(1.0) as i64;
-            let half = ((road.width / 2.0) / scale).floor() as i64;
             for k in 0..=steps {
                 let t = k as f64 / steps as f64;
-                let (px, py) = (((a.0 + t * (b.0 - a.0)) / scale) as i64, ((a.1 + t * (b.1 - a.1)) / scale) as i64);
+                let (x, y) = (((a.0 + t * (b.0 - a.0)) / scale) as i64, ((a.1 + t * (b.1 - a.1)) / scale) as i64);
                 for dy in -half..=half {
                     for dx in -half..=half {
-                        put(px + dx, py + dy, ROAD);
+                        px.push((x + dx, y + dy));
                     }
                 }
             }
+        }
+        px
+    };
+    let wild = |road: &&RoadSegment| road.id.starts_with("wild_");
+    // The roads past the suburb, under the water.
+    for road in world.roads.iter().filter(|r| !wild(r)) {
+        for (x, y) in stroke(road, ((road.width / 2.0) / scale).floor() as i64) {
+            put(x, y, ROAD);
         }
     }
     for lake in &w.lakes {
@@ -371,6 +395,12 @@ fn water_plan() {
                     }
                 }
             }
+        }
+    }
+    // The wild trails (W5) over the water, so their bridges show.
+    for road in world.roads.iter().filter(wild) {
+        for (x, y) in stroke(road, ((road.width / 2.0) / scale).round().max(1.0) as i64) {
+            put(x, y, TRAIL);
         }
     }
     for f in &w.fords {

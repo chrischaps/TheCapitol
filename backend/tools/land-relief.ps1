@@ -9,7 +9,8 @@
   tinted by height (meadow, forest, rock, snow) under a hillshade lit from
   the north-west, with the city's zone rings faint in the middle. The ground
   is carved (land::carve), and the lakes, rivers (dark), streams (light) and
-  fords (orange dots) are drawn over it. It prints the wild heights' median,
+  fords (orange dots) are drawn over it, and the wild trails (W5, red) over
+  that, so their bridges show. It prints the wild heights' median,
   p90, p99 and max and the water's counts beside each one.
   With -Bare it draws the land alone, from capitol-protocol's land_relief,
   and adds p99.9.
