@@ -57,6 +57,22 @@ Chris decided the shape on 2026-10-18: grow the world, use a real height field, 
 - **The carve.** A pure `land::carve` in protocol cuts the beds and banks into the height field, so the server and the clients agree.
 - **Fords** go where a river is wide and shallow. Bridges come with the trails (WD5).
 - **On the wire:** `/terrain` gains `rivers`, `streams`, `lakes` and `fords`.
+- **As built (W3):**
+  - **Where it's made:** `backend/src/models/hydrology.rs`. It samples the height on a 30-unit grid from r3880 to the edge.
+  - **The flood:** a priority-flood runs in from two rims, the world's edge and the foot of the hills. Each cell drains down its steepest fall on the filled ground, or along the flood where the ground is flat.
+  - **Lakes:** a pit of 20 cells or more, at least 4 deep, is a lake. Its shore is traced by marching squares.
+  - **Meres:** the foot of the hills runs flat to the city, and the valleys drain down towards it, so water can't run on. Water that comes down there ends in a **mere**: an oval dug at level 0 along the ring, its inner shore 25 out from r3800. Meres that would overlap become one. Most of the big rivers end in one, where a valley meets an arterial.
+  - **Courses:** streams drain 120 cells or more, rivers 800 or more. Each course follows its largest inflow upstream, and every other inflow is a course of its own.
+    - A course ends at the edge, in a lake (`mouth: lake`), or on a point of the course it joins (`mouth: joins`). A course out of a lake names it as its `source`.
+    - A course that grows into a river is cut there: the stream part joins the river part.
+  - **Shape and surface:** courses are smoothed, then meander in proportion to how flat the ground is. Each point has a `width`, a `depth` and a `surface`.
+    - The surface never rises downstream. Through a pit too small to be a lake, the carve cuts a gorge.
+    - Wide and shallow where the fall is gentle, narrow and deep where it's steep.
+  - **Fords:** the shallowest points of each river, 1.5 deep at most and at least 600 apart along it.
+  - **The carve:** `land::carve` takes `land::Water`, an index built once from `/terrain` (`Water::from_terrain`). `land::ground_at` is the carved ground.
+    - A bed is rounded to the surface at the banks, the banks rise at `BANK_SLOPE` (0.6), and a lake's bed shelves to 2 below its level.
+    - It only cuts, and it fades out over 30 past the banks, so the ground stays continuous.
+  - **The default world:** 21 rivers, 151 streams, 78 lakes (pits and meres) and 18 fords.
 
 ### WD4. Moving on the land ([W4 #197](https://github.com/chrischaps/TheCapitol/issues/197))
 
@@ -103,7 +119,7 @@ Chris decided the shape on 2026-10-18: grow the world, use a real height field, 
 | W0 | [#193](https://github.com/chrischaps/TheCapitol/issues/193) | This plan, and the GDD, economy, Flint and milestones docs reconciled with it | S | – |
 | W1 | [#194](https://github.com/chrischaps/TheCapitol/issues/194) | The world grows to 12000: shift migration, radii, bounds, spawn, and `has_plots` on the claim path. **Done.** As built: migration `20261107_001_world_grows.sql`; `rules::in_world` (the r6000 disc) guards both move paths, and Flint's `cap_move` pulls a click past the edge onto it; `claim` checks `has_plots` for the plot's zone and for where it stands. The woods' noise is laid round the tower (`node_spawn::WOODS_ORIGIN`), so E2.3's trees stayed put. The Flint grass mask stays r4000 (`GRASS_EDGE`) until W9. #118: option 1, radii aren't tunable at runtime | M | – |
 | W2 | [#195](https://github.com/chrischaps/TheCapitol/issues/195) | `capitol_protocol::land`: the height field. **Done.** As built: Perlin fBm (rolling ground, 70 high) plus squared ridged noise (the ranges, crests near `peak_height` 640, a few summits to about 830), each octave's domain turned by a 3-4-5 rotation so the lattice never shows. The ranges stand in `ridge_count` (8) massifs whose valleys open on the arterials' bearings, ready for W5; they rise from r3900 to full height at r5600. Keyed on the offset from the centre. `LandParams` is on `TerrainConfig` and `/terrain` as `land`, and in `WorldGenParams`, with a seed of its own. `land::tests::sample_heights_are_pinned` pins the bits (checked on Linux too). The relief: `backend/tools/land-relief.ps1` | M | W1 |
-| W3 | [#196](https://github.com/chrischaps/TheCapitol/issues/196) | Hydrology: lakes, rivers, streams, fords and the carve, on `/terrain` | L | W2 |
+| W3 | [#196](https://github.com/chrischaps/TheCapitol/issues/196) | Hydrology: lakes, rivers, streams, fords and the carve, on `/terrain`. **Done.** As built: `models::hydrology` (see WD3's as-built notes): priority-flood from the edge and the foot of the hills, steepest-descent drainage, pits as lakes, and **meres** at the foot where valleys drain towards the city (r3825 and out). `/terrain` has `rivers`/`streams` (`WaterCourse`: points with width, depth and surface; `source`; `mouth` edge/lake/joins), `lakes` (`Lake`: level, even-odd rings) and `fords`. `land::carve`/`ground_at` with the `land::Water` index. Default version `5c38bf6ff1ffa2a0` (with E3.4's landmarks). `land-relief.ps1` now draws the water over the carved relief (`-Bare` for the land alone) | L | W2 |
 | W4 | [#197](https://github.com/chrischaps/TheCapitol/issues/197) | Movement on the land | M | W3 |
 | W5 | [#198](https://github.com/chrischaps/TheCapitol/issues/198) | Wild trails | M | W3 |
 | W6 | [#199](https://github.com/chrischaps/TheCapitol/issues/199) | Wild nodes from the land | L | W3, E2.3 (#162) |
@@ -146,5 +162,5 @@ W7 and W8 can start at once. W1 can run alongside the economy queue.
 
 ## 7. Verification
 
-- **Server (W1 to W6):** `cargo test -p capitol-protocol -p capitol-backend`, plus the plan PNG from `backend/tools/suburb-plan.ps1`, extended to draw the relief, the water, the trails and the nodes. Chris judges the PNGs.
+- **Server (W1 to W6):** `cargo test -p capitol-protocol -p capitol-backend`, plus the plan PNGs. `backend/tools/land-relief.ps1` draws the relief and the water (since W3); the trails and the nodes come later. Chris judges the PNGs.
 - **Client (W9 to W11):** from `flint-client/`, `cargo test -p capitol-core && cargo build --release -p capitol-client`, then captures in `flint-client/renders/` and a live walk from the spawn into the ranges.

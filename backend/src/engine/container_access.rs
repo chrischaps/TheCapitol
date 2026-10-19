@@ -521,6 +521,10 @@ mod db_tests {
             parks: Vec::new(),
             landmarks: Vec::new(),
             land: Default::default(),
+            rivers: Vec::new(),
+            streams: Vec::new(),
+            lakes: Vec::new(),
+            fords: Vec::new(),
         };
         let mut game = GameState::with_terrain(WorldGenParams::default(), terrain);
         let mut node = |x: f64| {

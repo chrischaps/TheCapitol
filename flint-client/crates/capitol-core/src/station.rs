@@ -427,6 +427,10 @@ mod tests {
             parks: vec![],
             landmarks: vec![],
             land: Default::default(),
+            rivers: vec![],
+            streams: vec![],
+            lakes: vec![],
+            fords: vec![],
             version: None,
         }
     }

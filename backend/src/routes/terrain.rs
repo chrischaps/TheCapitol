@@ -26,6 +26,10 @@ impl From<&TerrainConfig> for TerrainResponse {
             parks: config.parks.clone(),
             landmarks: config.landmarks.clone(),
             land: config.land.clone(),
+            rivers: config.rivers.clone(),
+            streams: config.streams.clone(),
+            lakes: config.lakes.clone(),
+            fords: config.fords.clone(),
             version: None,
         }
     }
@@ -94,6 +98,21 @@ pub fn router(state: AppState) -> Router<AppState> {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    /// Writes the default world's `/terrain` body, as a server would serve
+    /// it, to `$TERRAIN_FIXTURE`: the Flint client's offline fixture, with no
+    /// server running. From `backend/`:
+    /// `TERRAIN_FIXTURE=../flint-client/fixtures/terrain.json cargo test capture_terrain_fixture -- --ignored`
+    #[test]
+    #[ignore]
+    fn capture_terrain_fixture() {
+        let path = std::env::var("TERRAIN_FIXTURE").expect("set TERRAIN_FIXTURE to the output path");
+        let terrain = TerrainConfig::get_default();
+        let mut response: TerrainResponse = (&terrain).into();
+        response.version = Some(terrain.version());
+        std::fs::write(&path, serde_json::to_string(&response).unwrap()).unwrap();
+        println!("{} -> {path}", terrain.version());
+    }
 
     fn if_none_match(values: &[&str]) -> HeaderMap {
         let mut headers = HeaderMap::new();

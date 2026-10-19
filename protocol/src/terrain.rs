@@ -1,6 +1,6 @@
 //! The `GET /terrain` response: water rings with their bridges, the road network,
-//! the terrain-level plots, the suburb's parks, the landmarks and the params of
-//! the land's height.
+//! the terrain-level plots, the suburb's parks, the landmarks, the params of the
+//! land's height and the wilds' water (rivers, streams, lakes and fords).
 //!
 //! The backend's generator builds these types directly, so the response is the
 //! generated terrain as-is.
@@ -37,6 +37,20 @@ pub struct TerrainResponse {
     /// wire. Defaults to the default land, so payloads from before it parse.
     #[serde(default)]
     pub land: crate::land::LandParams,
+    /// The wilds' rivers (W3, #196): they block, except at fords. Each runs
+    /// downhill to the world's edge, into a lake, or into another river.
+    #[serde(default)]
+    pub rivers: Vec<WaterCourse>,
+    /// The wilds' streams: smaller water that can be waded. Each ends where
+    /// a river or a lake takes it, or at the edge.
+    #[serde(default)]
+    pub streams: Vec<WaterCourse>,
+    /// The wilds' lakes, each with its own level.
+    #[serde(default)]
+    pub lakes: Vec<Lake>,
+    /// Where a river is wide and shallow enough to wade.
+    #[serde(default)]
+    pub fords: Vec<Ford>,
     /// A stable hash of this terrain, which changes whenever the terrain does.
     /// Also sent as the response's ETag. Optional so older payloads still parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,6 +121,102 @@ pub fn normalize_angle_diff(a: f64, b: f64) -> f64 {
         diff += 360.0;
     }
     diff
+}
+
+/// A river or a stream (W3, #196): a polyline from its source downhill to
+/// its mouth. Clients draw its surface and cut its bed with `land::carve`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct WaterCourse {
+    /// `river_{k}` or `stream_{k}`
+    pub id: String,
+    /// The lake it flows out of, if it rises from one; its first point is in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Where it ends: its last point is there.
+    pub mouth: Mouth,
+    /// From source to mouth. The surface never rises downstream.
+    pub points: Vec<WaterPoint>,
+}
+
+/// One vertex of a river or stream.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct WaterPoint {
+    pub x: f64,
+    pub y: f64,
+    /// From bank to bank.
+    pub width: f64,
+    /// From the surface to the deepest part of the bed.
+    pub depth: f64,
+    /// The height of the water's surface.
+    pub surface: f64,
+}
+
+/// Where a river or stream ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum Mouth {
+    /// It runs off the world's edge (r6000).
+    Edge,
+    /// It runs into this lake.
+    Lake(String),
+    /// It joins this river or stream, at one of that one's points.
+    Joins(String),
+}
+
+/// A lake: water standing at one level inside its outline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Lake {
+    /// `lake_{k}`
+    pub id: String,
+    /// The height of its surface.
+    pub level: f64,
+    /// Its shore as closed rings (the last point doesn't repeat the first),
+    /// filled even-odd as the parks are: a ring inside another is an island.
+    pub rings: Vec<Vec<(f64, f64)>>,
+    /// Its area in square units, islands taken out.
+    pub area: f64,
+}
+
+impl Lake {
+    /// Whether `(x, y)` is on the water (even-odd over all its rings).
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        rings_contain(&self.rings, x, y)
+    }
+}
+
+/// A ford: a stretch of a river shallow enough to wade across.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Ford {
+    /// `ford_{k}`
+    pub id: String,
+    /// The river it crosses.
+    pub river_id: String,
+    pub x: f64,
+    pub y: f64,
+    /// How long a stretch of the river it covers, centred on (x, y).
+    pub width: f64,
+    /// The water's depth there.
+    pub depth: f64,
+}
+
+/// Even-odd over closed rings: inside an odd number of them.
+fn rings_contain(rings: &[Vec<(f64, f64)>], x: f64, y: f64) -> bool {
+    let mut inside = false;
+    for ring in rings {
+        let n = ring.len();
+        for i in 0..n {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            if (a.1 > y) != (b.1 > y) && x < a.0 + (y - a.1) * (b.0 - a.0) / (b.1 - a.1) {
+                inside = !inside;
+            }
+        }
+    }
+    inside
 }
 
 /// A road segment
@@ -189,17 +299,7 @@ pub struct TerrainPark {
 impl TerrainPark {
     /// Whether `(x, y)` is in the park (even-odd over all its rings).
     pub fn contains(&self, x: f64, y: f64) -> bool {
-        let mut inside = false;
-        for ring in &self.rings {
-            let n = ring.len();
-            for i in 0..n {
-                let (a, b) = (ring[i], ring[(i + 1) % n]);
-                if (a.1 > y) != (b.1 > y) && x < a.0 + (y - a.1) * (b.0 - a.0) / (b.1 - a.1) {
-                    inside = !inside;
-                }
-            }
-        }
-        inside
+        rings_contain(&self.rings, x, y)
     }
 
     /// The signed shoelace area of a ring: positive one way round, negative
@@ -335,5 +435,18 @@ mod tests {
     fn shoelace_area() {
         let square = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
         assert_eq!(TerrainPlot::calculate_area(&square), 100.0);
+    }
+
+    /// A mouth goes on the wire as `{"kind": ..., "id": ...}`, and a payload
+    /// from before the water (W3) still parses, with none.
+    #[test]
+    fn the_water_on_the_wire() {
+        assert_eq!(serde_json::to_string(&Mouth::Edge).unwrap(), r#"{"kind":"edge"}"#);
+        assert_eq!(serde_json::to_string(&Mouth::Lake("lake_3".into())).unwrap(), r#"{"kind":"lake","id":"lake_3"}"#);
+        let joins: Mouth = serde_json::from_str(r#"{"kind":"joins","id":"river_0"}"#).unwrap();
+        assert_eq!(joins, Mouth::Joins("river_0".into()));
+        let old = r#"{"world_size":12000.0,"center_x":6000.0,"center_y":6000.0,"water_rings":[],"roads":[],"terrain_plots":[]}"#;
+        let t: TerrainResponse = serde_json::from_str(old).unwrap();
+        assert!(t.rivers.is_empty() && t.streams.is_empty() && t.lakes.is_empty() && t.fords.is_empty());
     }
 }

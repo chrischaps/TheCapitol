@@ -11,7 +11,8 @@ use super::street_plan;
 // The terrain types the client sees are shared through capitol-protocol, so
 // GET /terrain serves the generated terrain as-is.
 pub use capitol_protocol::terrain::{
-    Bridge, Landmark, LandmarkKind, RoadSegment, RoadType, TerrainPark, TerrainPlot, WaterRing,
+    Bridge, Ford, Lake, Landmark, LandmarkKind, RoadSegment, RoadType, TerrainPark, TerrainPlot, WaterCourse,
+    WaterRing,
 };
 
 /// Configuration for suburban street generation
@@ -278,6 +279,15 @@ pub struct TerrainConfig {
     /// The params of the land's height (W2, #195), which `/terrain` carries.
     #[serde(default)]
     pub land: LandParams,
+    /// The wilds' water, from the land (W3, #196): see `hydrology`.
+    #[serde(default)]
+    pub rivers: Vec<WaterCourse>,
+    #[serde(default)]
+    pub streams: Vec<WaterCourse>,
+    #[serde(default)]
+    pub lakes: Vec<Lake>,
+    #[serde(default)]
+    pub fords: Vec<Ford>,
 }
 
 /// Catmull-Rom spline interpolation for smooth curves
@@ -657,7 +667,16 @@ impl TerrainConfig {
             parks: Vec::new(),
             landmarks: Vec::new(),
             land: params.land.clone(),
+            rivers: Vec::new(),
+            streams: Vec::new(),
+            lakes: Vec::new(),
+            fords: Vec::new(),
         };
+
+        // The wilds' water comes from the land alone.
+        let water = super::hydrology::generate(&params.land);
+        (config.rivers, config.streams, config.lakes, config.fords) =
+            (water.rivers, water.streams, water.lakes, water.fords);
 
         // Generate roads using params
         config.roads = config.generate_all_roads_with_params(params);
@@ -1423,9 +1442,14 @@ mod tests {
         // W2 (#195) put the land's params on the terrain (`land`), so the
         // hash covers them. No road, lot, park or node moved.
         //
-        // E3.4 (#170) added the Exchange hall to `landmarks`. No road, lot,
-        // park or node moved.
-        assert_eq!(TerrainConfig::get_default().version(), "b31da8eabe0cb864");
+        // E3.4 (#170) added the Exchange hall to `landmarks`
+        // (`b31da8eabe0cb864`). No road, lot, park or node moved.
+        //
+        // W3 (#196) put the wilds' water on the terrain: rivers, streams,
+        // lakes and fords, all past r3800. No road, lot, park or node moved,
+        // and no seeded node stands in the water
+        // (`no_seeded_node_stands_in_the_wild_water`).
+        assert_eq!(TerrainConfig::get_default().version(), "5c38bf6ff1ffa2a0");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one

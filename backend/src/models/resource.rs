@@ -427,6 +427,28 @@ mod tests {
         }
     }
 
+    /// No seeded or planned node stands in the wilds' water (W3, #196).
+    /// `node_placement` doesn't know the wild water yet; until it does (W6,
+    /// #199), this says the default world needs no move.
+    #[test]
+    fn no_seeded_node_stands_in_the_wild_water() {
+        let terrain = TerrainConfig::get_default();
+        let plan = default_plan();
+        let nodes = seeded_positions().into_iter().map(|(_, p)| p).chain(plan.iter().map(|s| (s.x, s.y)));
+        for (x, y) in nodes {
+            assert!(!terrain.lakes.iter().any(|l| l.contains(x, y)), "a node in a lake at ({x}, {y})");
+            for c in terrain.rivers.iter().chain(&terrain.streams) {
+                for w in c.points.windows(2) {
+                    let (a, b) = (w[0], w[1]);
+                    let (dx, dy) = (b.x - a.x, b.y - a.y);
+                    let t = (((x - a.x) * dx + (y - a.y) * dy) / (dx * dx + dy * dy).max(1e-9)).clamp(0.0, 1.0);
+                    let d = ((a.x + t * dx - x).powi(2) + (a.y + t * dy - y).powi(2)).sqrt();
+                    assert!(d > a.width.max(b.width) / 2.0, "a node in {} at ({x}, {y})", c.id);
+                }
+            }
+        }
+    }
+
     /// Prints the VALUES rows of E2.3's node insert for the default world:
     /// `cargo test print_new_nodes -- --ignored --nocapture`.
     #[test]

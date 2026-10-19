@@ -1,0 +1,284 @@
+use std::sync::OnceLock;
+
+use super::*;
+use capitol_protocol::fmath::StableMath;
+use capitol_protocol::land::{carve, ground_at, relief, Water};
+
+/// The default land's water, generated once for the tests that only read it.
+fn default_water() -> &'static Hydrology {
+    static WATER: OnceLock<Hydrology> = OnceLock::new();
+    WATER.get_or_init(|| generate(&LandParams::default()))
+}
+
+fn courses(w: &Hydrology) -> impl Iterator<Item = &WaterCourse> {
+    w.rivers.iter().chain(&w.streams)
+}
+
+fn bearing(x: f64, y: f64) -> f64 {
+    (y - CENTER_Y).stable_atan2(x - CENTER_X).to_degrees().rem_euclid(360.0)
+}
+
+/// Every river and stream runs downhill, from its source to its mouth, and
+/// its mouth is where it says: the edge, a lake, or a point of the course it
+/// joins. Following the joins always reaches the edge or a lake.
+#[test]
+fn every_course_runs_downhill_to_the_edge_or_a_lake() {
+    for seed in [42, 7, 1234] {
+        let w = if seed == 42 { default_water().clone() } else { generate(&LandParams { seed, ..LandParams::default() }) };
+        let by_id: HashMap<&str, &WaterCourse> = courses(&w).map(|c| (c.id.as_str(), c)).collect();
+        let lakes: HashMap<&str, &Lake> = w.lakes.iter().map(|l| (l.id.as_str(), l)).collect();
+        assert_eq!(by_id.len(), w.rivers.len() + w.streams.len(), "course ids are unique");
+        for c in courses(&w) {
+            assert!(c.points.len() >= 2, "{} has {} points", c.id, c.points.len());
+            for p in c.points.windows(2) {
+                assert!(p[1].surface <= p[0].surface, "{} rises: {} to {}", c.id, p[0].surface, p[1].surface);
+            }
+            let last = c.points.last().unwrap();
+            match &c.mouth {
+                // On the edge, to the 0.01 the points are rounded to.
+                Mouth::Edge => assert!(radius(last.x, last.y) >= WILDERNESS_OUTER_RADIUS - 0.02, "{}", c.id),
+                Mouth::Lake(id) => {
+                    let lake = lakes[id.as_str()];
+                    assert!(lake.contains(last.x, last.y), "{} ends outside {id}", c.id);
+                    assert!((last.surface - lake.level).abs() < 0.01, "{} meets {id} at its level", c.id);
+                }
+                Mouth::Joins(id) => {
+                    let main = by_id[id.as_str()];
+                    let on = main.points.iter().find(|p| p.x == last.x && p.y == last.y);
+                    let on = on.unwrap_or_else(|| panic!("{} ends off {id}", c.id));
+                    assert_eq!(on.surface, last.surface, "{} meets {id} at its surface", c.id);
+                }
+            }
+            if let Some(id) = &c.source {
+                let lake = lakes[id.as_str()];
+                let first = c.points[0];
+                assert!(lake.contains(first.x, first.y), "{} rises outside {id}", c.id);
+                assert!((first.surface - lake.level).abs() < 0.01);
+            }
+            // Down the joins to the edge or a lake, with no loop.
+            let mut at = c;
+            for _ in 0..=by_id.len() {
+                match &at.mouth {
+                    Mouth::Joins(id) => at = by_id[id.as_str()],
+                    _ => break,
+                }
+            }
+            assert!(!matches!(at.mouth, Mouth::Joins(_)), "{} never reaches the edge or a lake", c.id);
+        }
+        for r in &w.rivers {
+            assert!(!matches!(&r.mouth, Mouth::Joins(id) if id.starts_with("stream")), "{} joins a stream", r.id);
+        }
+    }
+}
+
+/// Nothing wet inside the rural edge: no course, bank or lake, and the
+/// carve leaves the ground there alone.
+#[test]
+fn there_is_no_water_inside_the_rural_edge() {
+    let w = default_water();
+    for c in courses(w) {
+        for p in &c.points {
+            let r = radius(p.x, p.y);
+            assert!(r - p.width / 2.0 > RURAL_OUTER_RADIUS, "{} at r{r:.0}", c.id);
+        }
+    }
+    for lake in &w.lakes {
+        for &(x, y) in lake.rings.iter().flatten() {
+            assert!(radius(x, y) > RURAL_OUTER_RADIUS + 10.0, "{} at r{:.0}", lake.id, radius(x, y));
+        }
+    }
+    let water = Water::new(courses(w), &w.lakes);
+    for step in 0..=380 {
+        let r = step as f64 * 10.0;
+        for d in 0..360 {
+            let a = (d as f64).to_radians();
+            let (x, y) = (CENTER_X + r * a.stable_cos(), CENTER_Y + r * a.stable_sin());
+            assert_eq!(ground_at(x, y, &LandParams::default(), &water), 0.0, "r{r} at {d}°");
+        }
+    }
+}
+
+/// The default wilds have lakes, rivers and streams all round: in each of
+/// the eight sectors between the arterials, a lake, two rivers and a handful
+/// of streams.
+#[test]
+fn the_default_wilds_have_water_in_every_sector() {
+    let w = default_water();
+    let sector = |x: f64, y: f64| (bearing(x, y) / 45.0) as usize % 8;
+    for s in 0..8 {
+        let in_sector = |c: &&WaterCourse| c.points.iter().any(|p| sector(p.x, p.y) == s);
+        let rivers = w.rivers.iter().filter(in_sector).count();
+        let streams = w.streams.iter().filter(in_sector).count();
+        let lakes = w.lakes.iter().filter(|l| l.rings.iter().flatten().any(|&(x, y)| sector(x, y) == s)).count();
+        println!("sector {s}: {lakes} lakes, {rivers} rivers, {streams} streams");
+        assert!(lakes >= 1 && rivers >= 2 && streams >= 5, "sector {s}: {lakes} lakes, {rivers} rivers, {streams} streams");
+    }
+    assert!(!w.fords.is_empty());
+}
+
+/// Each lake has a shore, a level and an area, and no two lakes overlap.
+#[test]
+fn lakes_are_whole_and_apart() {
+    let w = default_water();
+    for (k, lake) in w.lakes.iter().enumerate() {
+        assert_eq!(lake.id, format!("lake_{k}"));
+        assert!(!lake.rings.is_empty() && lake.area > 0.0, "{}", lake.id);
+        for other in &w.lakes[k + 1..] {
+            for &(x, y) in &other.rings[0] {
+                assert!(!lake.contains(x, y), "{} overlaps {}", other.id, lake.id);
+            }
+        }
+    }
+}
+
+/// A ford is on its river, where it's shallow, and fords on one river are
+/// spaced apart.
+#[test]
+fn fords_are_on_shallow_stretches_of_their_rivers() {
+    let w = default_water();
+    for f in &w.fords {
+        let river = w.rivers.iter().find(|r| r.id == f.river_id).expect("its river");
+        let at = river.points.iter().find(|p| p.x == f.x && p.y == f.y).expect("on a point of its river");
+        assert!(f.depth <= FORD_DEPTH && at.depth == f.depth, "{}", f.id);
+        assert!(f.width >= at.width, "{} spans its river", f.id);
+    }
+}
+
+/// The carve only ever cuts, puts every bed under its water, and leaves no
+/// step in the ground.
+#[test]
+fn the_carve_cuts_beds_under_the_water() {
+    let land = LandParams::default();
+    let w = default_water();
+    let water = Water::new(courses(w), &w.lakes);
+    for c in courses(w).step_by(3) {
+        for p in c.points.iter().step_by(4) {
+            let g = ground_at(p.x, p.y, &land, &water);
+            assert!(g <= p.surface - p.depth * 0.99, "{} bed {g} under surface {} depth {}", c.id, p.surface, p.depth);
+        }
+    }
+    for lake in &w.lakes {
+        // Points a little in from the shore, clear of it all round.
+        let mut found = false;
+        for &(x, y) in &lake.rings[0] {
+            for (dx, dy) in [(8.0, 0.0), (-8.0, 0.0), (0.0, 8.0), (0.0, -8.0)] {
+                let (px, py) = (x + dx, y + dy);
+                let probes = [(4.0, 0.0), (-4.0, 0.0), (0.0, 4.0), (0.0, -4.0)];
+                if probes.iter().all(|&(ox, oy)| lake.contains(px + ox, py + oy)) {
+                    assert!(ground_at(px, py, &land, &water) < lake.level, "{} has ground above its level", lake.id);
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "{} has no inside", lake.id);
+    }
+    // Only cuts, and continuous: a fine walk across the wilds.
+    for i in 0..40000 {
+        let a = (i as f64 * 0.0007).to_radians() * 9.0;
+        let r = 3880.0 + (i % 2000) as f64 * 1.06;
+        let (x, y) = (CENTER_X + r * a.stable_cos(), CENTER_Y + r * a.stable_sin());
+        let h = height_at(x, y, &land);
+        let g = carve(h, x, y, &water);
+        assert!(g <= h);
+        let g2 = ground_at(x + 0.01, y, &land, &water);
+        assert!((g - g2).abs() < 0.3, "a step at ({x}, {y}): {g} vs {g2}");
+    }
+}
+
+/// Generation is a pure function of the land.
+#[test]
+fn the_same_land_makes_the_same_water() {
+    let again = generate(&LandParams::default());
+    let w = default_water();
+    assert_eq!(again.rivers, w.rivers);
+    assert_eq!(again.streams, w.streams);
+    assert_eq!(again.lakes, w.lakes);
+    assert_eq!(again.fords, w.fords);
+}
+
+/// Draws the water over the carved relief, for review:
+/// `WATER_PLAN=water.png cargo test --release water_plan -- --ignored`
+/// (`backend/tools/land-relief.ps1` does this for some seeds).
+#[test]
+#[ignore]
+fn water_plan() {
+    let path = std::env::var("WATER_PLAN").unwrap_or_else(|_| "water-plan.png".into());
+    let seed = std::env::var("LAND_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(42);
+    let size: usize = std::env::var("LAND_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(1200);
+    let land = LandParams { seed, ..LandParams::default() };
+    let w = generate(&land);
+    let water = Water::new(courses(&w), &w.lakes);
+    let (mut rgb, mut heights) = relief::draw(&land, size, |x, y| ground_at(x, y, &land, &water));
+    let scale = WORLD_SIZE / size as f64;
+    let mut put = |px: i64, py: i64, c: [u8; 3]| {
+        if (0..size as i64).contains(&px) && (0..size as i64).contains(&py) {
+            let i = (py as usize * size + px as usize) * 3;
+            rgb[i..i + 3].copy_from_slice(&c);
+        }
+    };
+    const LAKE: [u8; 3] = [70, 120, 176];
+    const RIVER: [u8; 3] = [40, 86, 160];
+    const STREAM: [u8; 3] = [92, 150, 206];
+    const FORD: [u8; 3] = [232, 150, 40];
+    for lake in &w.lakes {
+        let pts = lake.rings.iter().flatten();
+        let (x0, y0) = pts.clone().fold((f64::MAX, f64::MAX), |m, p| (m.0.min(p.0), m.1.min(p.1)));
+        let (x1, y1) = pts.fold((f64::MIN, f64::MIN), |m, p| (m.0.max(p.0), m.1.max(p.1)));
+        for py in (y0 / scale) as i64..=(y1 / scale) as i64 + 1 {
+            for px in (x0 / scale) as i64..=(x1 / scale) as i64 + 1 {
+                let (x, y) = ((px as f64 + 0.5) * scale, (py as f64 + 0.5) * scale);
+                if lake.contains(x, y) {
+                    put(px, py, LAKE);
+                }
+            }
+        }
+    }
+    for (list, colour) in [(&w.streams, STREAM), (&w.rivers, RIVER)] {
+        for c in list {
+            for s in c.points.windows(2) {
+                let (a, b) = (s[0], s[1]);
+                let half = (0.5 * a.width.max(b.width)).max(0.6 * scale);
+                let (x0, x1) = (a.x.min(b.x) - half, a.x.max(b.x) + half);
+                let (y0, y1) = (a.y.min(b.y) - half, a.y.max(b.y) + half);
+                for py in (y0 / scale) as i64..=(y1 / scale) as i64 {
+                    for px in (x0 / scale) as i64..=(x1 / scale) as i64 {
+                        let (x, y) = ((px as f64 + 0.5) * scale, (py as f64 + 0.5) * scale);
+                        let (dx, dy) = (b.x - a.x, b.y - a.y);
+                        let len2 = (dx * dx + dy * dy).max(1e-9);
+                        let t = (((x - a.x) * dx + (y - a.y) * dy) / len2).clamp(0.0, 1.0);
+                        let (ex, ey) = (a.x + t * dx - x, a.y + t * dy - y);
+                        if (ex * ex + ey * ey).sqrt() <= half {
+                            put(px, py, colour);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for f in &w.fords {
+        let (cx, cy) = ((f.x / scale) as i64, (f.y / scale) as i64);
+        for dy in -3..=3i64 {
+            for dx in -3..=3i64 {
+                if dx * dx + dy * dy <= 9 {
+                    put(cx + dx, cy + dy, FORD);
+                }
+            }
+        }
+    }
+    std::fs::write(&path, relief::png(size, size, &rgb)).expect("write the plan");
+    heights.sort_by(f64::total_cmp);
+    let pct = |p: f64| heights[((heights.len() - 1) as f64 * p) as usize];
+    println!(
+        "relief: {path} (seed {seed}, {size}px). Wild heights: median {:.0}, p90 {:.0}, p99 {:.0}, max {:.0}. \
+         Water: {} rivers, {} streams, {} lakes, {} fords",
+        pct(0.5),
+        pct(0.9),
+        pct(0.99),
+        pct(1.0),
+        w.rivers.len(),
+        w.streams.len(),
+        w.lakes.len(),
+        w.fords.len()
+    );
+}
+

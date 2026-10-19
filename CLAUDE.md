@@ -108,7 +108,7 @@ Copy `backend/.env.example` to `backend/.env`. Default config:
 
 ### Shared Protocol (`protocol/`)
 
-Crate `capitol-protocol`, a root-workspace member that both the backend and the Flint client depend on. It contains `ws.rs` (`ClientMessage`/`ServerMessage`), `rest.rs` (request and response DTOs), `terrain.rs` (`/terrain` types, which the generator also uses) and `rules.rs` (ranges, speeds, `Zone` and the one table of zone radii, quality grades, the water-crossing test) and `land.rs` (the wilds' height field, a pure function of `LandParams`, W2). The backend re-exports these from `models/`. Server-only derives (utoipa, sqlx) sit behind its `backend` feature. Any wire change goes here. `tests/fixtures/` holds one JSON fixture per WS message type, and they must round-trip byte for byte.
+Crate `capitol-protocol`, a root-workspace member that both the backend and the Flint client depend on. It contains `ws.rs` (`ClientMessage`/`ServerMessage`), `rest.rs` (request and response DTOs), `terrain.rs` (`/terrain` types, which the generator also uses) and `rules.rs` (ranges, speeds, `Zone` and the one table of zone radii, quality grades, the water-crossing test) and `land.rs` (the wilds' height field, a pure function of `LandParams`, W2, and `carve`, which cuts the wild water's beds into it, W3). The backend re-exports these from `models/`. Server-only derives (utoipa, sqlx) sit behind its `backend` feature. Any wire change goes here. `tests/fixtures/` holds one JSON fixture per WS message type, and they must round-trip byte for byte.
 
 ### Backend Structure (`backend/src/`)
 
@@ -146,6 +146,7 @@ models/          - Database types and game state structs
   recipe.rs      - Recipe with quality weights
   zone.rs        - Zone enum (Capitol, Trade, Urban, Rural, etc.)
   terrain.rs     - TerrainConfig, procedural road generation, water rings, bridges
+  hydrology.rs   - The wilds' rivers, streams, lakes and fords, from the height field (W3)
   plot.rs        - Plot ownership, permissions, property tax
   suburb/        - The suburb's neighbourhoods, streets, lots and parks (suburb v2)
 
@@ -279,7 +280,7 @@ Recipe weights are defined in `recipes` table. See GDD Section 6 for details.
 Concentric zones from center outward:
 Capitol → Bailey → Trade District → Guild District → Urban → Suburban → Rural → Wilderness
 
-The Wilderness is "the wilds" (`the-capitol-wilds.md`): planned as r3800 to r6000 once the world grows to 12000 (#194), with a shared height field (`capitol_protocol::land`), rivers and lakes that block, streams you wade, wild trails, and no plots. Since W1 (#194) the world is 12000 across, centred on (6000, 6000), and the Wilderness runs r3800 to r6000, the edge of the world disc (`rules::in_world`). Since W2 (#195) the land rises there: `land::height_at` is 0 out to r3900, then foothills and eight massifs whose valleys open on the arterials (`backend/tools/land-relief.ps1` draws it). Until W3 there's no wild water, and the clients still draw it flat until W9.
+The Wilderness is "the wilds" (`the-capitol-wilds.md`): planned as r3800 to r6000 once the world grows to 12000 (#194), with a shared height field (`capitol_protocol::land`), rivers and lakes that block, streams you wade, wild trails, and no plots. Since W1 (#194) the world is 12000 across, centred on (6000, 6000), and the Wilderness runs r3800 to r6000, the edge of the world disc (`rules::in_world`). Since W2 (#195) the land rises there: `land::height_at` is 0 out to r3900, then foothills and eight massifs whose valleys open on the arterials. Since W3 (#196) it has water: `models::hydrology` makes rivers, streams, lakes and fords from the height, on `/terrain`. Water that drains to the foot of the hills ends in a mere just past r3800. Nothing is wet inside r3800. `land::carve` (with the `land::Water` index) cuts the beds into the ground, the same on the server and the clients. `backend/tools/land-relief.ps1` draws the relief with the water. Movement ignores the wild water until W4, and the clients draw the wilds flat until W9.
 
 Moats and canals are water barriers. Players can only cross at bridges. Movement is blocked by water unless at a crossing point.
 

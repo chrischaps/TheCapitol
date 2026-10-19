@@ -1,13 +1,18 @@
 <#
 .SYNOPSIS
-  Draws the land's height as a shaded relief, for some seeds (W2, #195).
+  Draws the land's height as a shaded relief, with the wilds' water over it,
+  for some seeds (W2 #195, W3 #196).
 
 .DESCRIPTION
-  Runs the ignored test land::tests::land_relief in capitol-protocol, in
-  release. For each seed it writes relief-<seed>.png: the whole world disc,
+  Runs the ignored test models::hydrology::tests::water_plan in the backend,
+  in release. For each seed it writes relief-<seed>.png: the whole world disc,
   tinted by height (meadow, forest, rock, snow) under a hillshade lit from
-  the north-west, with the city's zone rings faint in the middle. It prints
-  the wild heights' median, p90, p99, p99.9 and max beside each one.
+  the north-west, with the city's zone rings faint in the middle. The ground
+  is carved (land::carve), and the lakes, rivers (dark), streams (light) and
+  fords (orange dots) are drawn over it. It prints the wild heights' median,
+  p90, p99 and max and the water's counts beside each one.
+  With -Bare it draws the land alone, from capitol-protocol's land_relief,
+  and adds p99.9.
   The sibling of suburb-plan.ps1; the PNGs need no browser.
 
 .PARAMETER Seeds
@@ -19,14 +24,19 @@
 .PARAMETER Out
   Output folder. Default: target/land-relief at the repo root.
 
+.PARAMETER Bare
+  The land alone, with no water.
+
 .EXAMPLE
   powershell -File backend/tools/land-relief.ps1
   powershell -File backend/tools/land-relief.ps1 -Seeds 42 -Size 2400
+  powershell -File backend/tools/land-relief.ps1 -Bare
 #>
 param(
     [string]$Seeds = "42,7,1234",
     [int]$Size = 1200,
-    [string]$Out = ""
+    [string]$Out = "",
+    [switch]$Bare
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,16 +47,23 @@ if (-not [System.IO.Path]::IsPathRooted($Out)) { $Out = Join-Path (Get-Location)
 New-Item -ItemType Directory -Force $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
 
-Push-Location (Join-Path $repo "protocol")
+Push-Location (Join-Path $repo $(if ($Bare) { "protocol" } else { "backend" }))
 try {
     foreach ($seed in $Seeds -split ",") {
         $seed = $seed.Trim()
+        $png = Join-Path $Out "relief-$seed.png"
         $env:LAND_SEED = $seed
         $env:LAND_SIZE = "$Size"
-        $env:LAND_RELIEF = Join-Path $Out "relief-$seed.png"
-        cargo test --release -p capitol-protocol --lib land_relief -- --ignored --nocapture --quiet |
-            Select-String "^relief:"
-        if ($LASTEXITCODE -ne 0) { throw "land_relief failed for seed $seed ($LASTEXITCODE)" }
+        $env:LAND_RELIEF = $png
+        $env:WATER_PLAN = $png
+        if ($Bare) {
+            cargo test --release -p capitol-protocol --lib land_relief -- --ignored --nocapture --quiet |
+                Select-String "^relief:"
+        } else {
+            cargo test --release --bin capitol-backend water_plan -- --ignored --nocapture --quiet |
+                Select-String "^relief:"
+        }
+        if ($LASTEXITCODE -ne 0) { throw "the relief failed for seed $seed ($LASTEXITCODE)" }
     }
 } finally {
     Pop-Location
