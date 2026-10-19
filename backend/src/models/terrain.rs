@@ -2099,9 +2099,10 @@ mod tests {
         let elapsed = start.elapsed();
 
         println!("Terrain generation took: {:?} of CPU", elapsed);
-        // Typical: ~2.4s debug since #129 added the parks (~1.4s before). Pre-optimization was ~115s debug.
-        assert!(elapsed.as_millis() < 5000,
-            "Terrain generation took too long: {:?} of CPU (expected <5000ms)", elapsed);
+        // Typical: ~3.7s debug since W3's hydrology (~1.9s before; #221), ~5.4s on a CI
+        // runner. Pre-optimization was ~115s debug, which is what this guards against.
+        assert!(elapsed.as_millis() < 10000,
+            "Terrain generation took too long: {:?} of CPU (expected <10000ms)", elapsed);
     }
 
     #[test]

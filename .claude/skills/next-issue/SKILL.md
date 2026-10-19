@@ -75,6 +75,7 @@ Engine changes are made in `flint-client/engine/` and go upstream to Flint (`htt
 ## 4. Verify
 
 - Run the commands under the issue's **Verify** heading.
+- Run `scripts/ci.sh`: what CI runs after you land (clippy with `-D warnings`, the tests, the database tests, and the Flint client when you touched `flint-client/` or `protocol/`). An issue's Verify is usually narrower. `cargo test` passing doesn't mean clippy does: master was red for 31 pushes on dead code that only tests used (#216).
 - Tick off every **Acceptance** item, and be honest about any you couldn't do.
 - Visual work: capture screenshots into `flint-client/renders/` (gitignored) and look at them yourself before calling it done. `flint render` can't show the runtime world, so use the client's `--offline fixtures/terrain.json` capture mode.
 - Mark anything only a human can judge with **[H]**, saying what "pass" looks like.
@@ -104,7 +105,7 @@ Closes #<n>
 Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
 )"
-scripts/issue.sh land <n> --verify "<the issue's Verify commands>"
+scripts/issue.sh land <n> --verify "scripts/ci.sh && <the issue's Verify commands>"
 ```
 
 `land` catches up with `origin/master`, runs `--verify` (before the first push, and again whenever catching up changed HEAD), and pushes `HEAD:master` fast-forward only. It rebases to catch up, unless the branch holds a merge or a `git subtree` squash; then it merges master in instead, so a subtree pull keeps the merge the next `subtree pull`/`push` needs. If another agent lands first, it loops. Once the push succeeds, it releases the claim and deletes `origin/issue-<n>`. Exit 3 is a conflict: resolve it, `git rebase --continue` (or `git commit`, if it was a merge), then run `land` again; it verifies the result. Never force-push master, and never push it any other way.

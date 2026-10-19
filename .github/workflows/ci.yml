@@ -55,20 +55,16 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # The steps live in scripts/ci.sh, which agents run before they land.
       - name: Clippy
-        run: cargo clippy --all-targets -p capitol-protocol -p capitol-backend -- -D warnings
+        run: scripts/ci.sh clippy
       - name: Tests
-        run: cargo test -p capitol-protocol -p capitol-backend
+        run: scripts/ci.sh test
       # The database tests are `#[ignore]`d so a plain `cargo test` passes
-      # without the docker stack. Here the stack is up, so run them. The four
-      # skipped are tools, not tests: one prints migration rows, one renders
-      # suburb plans, and two write the default world to a path from an env
-      # var ($TERRAIN_DUMP, $TERRAIN_FIXTURE). A new ignored tool goes here.
+      # without the docker stack. Here the stack is up, so run them, less the
+      # tools ci.sh skips.
       - name: Database tests
-        run: >-
-          cargo test -p capitol-backend -- --ignored
-          --skip print_node_moves --skip suburb_plan_report
-          --skip dump_default_terrain --skip capture_terrain_fixture
+        run: scripts/ci.sh db
 
   flint-client:
     name: Flint client
@@ -87,9 +83,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: flint-client
-      # Per crate, never --workspace: the engine's flint-android needs ndk-sys.
-      # capitol-core's live.rs tests need a server and stay #[ignore]d.
-      - name: capitol-core tests
-        run: cargo test -p capitol-core
-      - name: Check capitol-client
-        run: cargo check -p capitol-client --all-targets
+      # In flint-client/: capitol-core's tests, then check capitol-client.
+      - name: Flint client
+        working-directory: .
+        run: scripts/ci.sh flint
