@@ -63,6 +63,36 @@ pub fn time_of_day(unix_ms: i64) -> f64 {
     unix_ms.rem_euclid(day_ms) as f64 / day_ms as f64
 }
 
+/// The in-game day `unix_ms` falls in: whole days since the Unix epoch. The
+/// Gazette (E3.9) is filed by it.
+pub fn day_number(unix_ms: i64) -> i64 {
+    unix_ms.div_euclid(DAY_LENGTH_SECS * 1000)
+}
+
+/// The Unix milliseconds of day `day`'s midnight.
+pub fn day_start_ms(day: i64) -> i64 {
+    day * DAY_LENGTH_SECS * 1000
+}
+
+/// The day of the Gazette's first edition, No. 1: 2026-10-19's first in-game
+/// day (UTC midnight).
+pub const GAZETTE_FIRST_DAY: i64 = 248_940;
+
+/// The Gazette's number for the edition about day `day`.
+pub fn gazette_number(day: i64) -> i64 {
+    day - GAZETTE_FIRST_DAY + 1
+}
+
+/// The Capitol's week, named for the city from the tower outward. An
+/// in-game day is two real hours, so a week is fourteen of them.
+pub const WEEKDAYS: [&str; 7] =
+    ["Towerday", "Moatday", "Canalday", "Guildday", "Marketday", "Fieldday", "Wildday"];
+
+/// The name of day `day`'s weekday.
+pub fn weekday(day: i64) -> &'static str {
+    WEEKDAYS[(day - GAZETTE_FIRST_DAY).rem_euclid(7) as usize]
+}
+
 // ---------------------------------------------------------------------------
 // Speeds and ranges (world units)
 // ---------------------------------------------------------------------------
@@ -473,6 +503,22 @@ mod tests {
         assert_eq!(time_of_day(-day / 4), 0.75);
         // In-game midnight falls on UTC midnight (2026-10-17T00:00:00Z).
         assert_eq!(time_of_day(1_792_195_200_000), 0.0);
+    }
+
+    #[test]
+    fn days_are_numbered_from_midnight() {
+        let day = DAY_LENGTH_SECS * 1000;
+        assert_eq!(day_number(0), 0);
+        assert_eq!(day_number(day - 1), 0);
+        assert_eq!(day_number(day), 1);
+        assert_eq!(day_number(-1), -1);
+        assert_eq!(day_start_ms(day_number(5 * day + 17)), 5 * day);
+        // 2026-10-19T00:00:00Z is the Gazette's first day, a Towerday
+        assert_eq!(day_number(1_792_368_000_000), GAZETTE_FIRST_DAY);
+        assert_eq!(gazette_number(GAZETTE_FIRST_DAY), 1);
+        assert_eq!(weekday(GAZETTE_FIRST_DAY), "Towerday");
+        assert_eq!(weekday(GAZETTE_FIRST_DAY + 4), "Marketday");
+        assert_eq!(weekday(GAZETTE_FIRST_DAY - 1), "Wildday");
     }
 
     #[test]

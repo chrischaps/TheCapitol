@@ -846,6 +846,10 @@ async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broad
             return;
         }
     };
+    if let Err(e) = super::gazette::tally(&mut tx, item.player_id, &item.item_type, item.quantity).await {
+        tracing::error!("Failed to tally a gather for the Gazette: {:?}", e);
+        return;
+    }
     if let Err(e) = tx.commit().await {
         tracing::error!("Failed to save a gather: {:?}", e);
         return;

@@ -226,6 +226,7 @@ fn test_for(message: &M) -> fn() {
         M::OrderCancelled { .. } => market_messages_reach_the_market_store,
         M::MarketDepth { .. } => market_messages_reach_the_market_store,
         M::MarketTrade { .. } => market_messages_reach_the_market_store,
+        M::GazettePublished { .. } => gazette_published_is_reported,
     }
 }
 
@@ -245,7 +246,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 51, "one fixture per ServerMessage variant");
+    assert_eq!(count, 52, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1265,6 +1266,16 @@ fn market_messages_reach_the_market_store() {
     let changes = state.apply_ws(&fixture("market_trade"));
     assert!(matches!(changes.as_slice(), [StateEvent::Market(e)] if matches!(**e, crate::market::MarketEvent::Traded(_))));
     assert_eq!(state.market().trades("plank").count(), 1);
+}
+
+#[test]
+fn gazette_published_is_reported() {
+    let mut state = connected();
+    let headline = "Planks Climb a Third".to_string();
+    assert_eq!(
+        state.apply_ws(&M::GazettePublished { day: 248_952, number: 13, headline: headline.clone() }),
+        vec![StateEvent::GazettePublished { day: 248_952, number: 13, headline }]
+    );
 }
 
 #[test]

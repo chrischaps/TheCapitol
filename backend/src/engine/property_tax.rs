@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use super::currency::{add_strands_in, announce_balances, balances_of, subtract_strands_in, TransactionType};
 use super::events::GameEvent;
+use super::gazette::{self, DeedEvent};
 use super::notices;
 use super::plot_sync::release_plot;
 use super::station_removal::return_plot_stations;
@@ -327,14 +328,14 @@ async fn collect_debt(db: &PgPool, plot_id: Uuid, owner_id: Uuid) -> i64 {
 /// once the row is locked, the plot is no longer owned or owes less.
 pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>, String> {
     let mut tx = db.begin().await.map_err(|e| e.to_string())?;
-    let row: Option<(Option<Uuid>, i32, i32, Option<String>)> = sqlx::query_as(
-        "SELECT owner_id, assessed_value, tax_owed, terrain_id FROM plots WHERE id = $1 FOR UPDATE",
+    let row: Option<(Option<Uuid>, i32, i32, Option<String>, String)> = sqlx::query_as(
+        "SELECT owner_id, assessed_value, tax_owed, terrain_id, zone_id FROM plots WHERE id = $1 FOR UPDATE",
     )
     .bind(plot_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
-    let Some((Some(owner_id), assessed_value, tax_owed, terrain_id)) = row else {
+    let Some((Some(owner_id), assessed_value, tax_owed, terrain_id, zone_id)) = row else {
         return Ok(None);
     };
     let tax_owed = tax_owed as i64;
@@ -346,6 +347,9 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>
         tracing::warn!("Foreclosing plot {}: no room for {:?}, lost with its stations", plot_id, returned.lost);
     }
     let removed_stations = release_plot(&mut tx, plot_id).await.map_err(|e| e.to_string())?;
+    gazette::record_deed(&mut tx, plot_id, &zone_id, DeedEvent::Foreclosed, owner_id)
+        .await
+        .map_err(|e| e.to_string())?;
     let refund = (assessed_value as i64 - tax_owed).max(0);
     let balance = if refund > 0 {
         add_strands_in(

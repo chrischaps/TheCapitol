@@ -319,6 +319,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine::market_matcher::run_market_loop(market, market_db, market_events).await;
     });
 
+    // E3.9: the Gazette, an edition at each in-game midnight
+    let gazette_events = game_state.read().await.event_sender.clone();
+    let gazette_db = app_state.db.clone();
+    tokio::spawn(async move {
+        engine::gazette::run_gazette_loop(gazette_db, gazette_events).await;
+    });
+
     // E4.3: the stations that work on their own, each second, in a task of
     // their own like the market
     let works = engine::automation_tick::Works::load(&app_state.db)
@@ -350,6 +357,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest("/stations", routes::stations::router(app_state.clone()))
         .nest("/exchange", routes::exchange::router(app_state.clone()))
         .nest("/market", routes::market::router(app_state.clone()))
+        .nest("/gazette", routes::gazette::router(app_state.clone()))
         .nest("/plots", routes::plots::router(app_state.clone()))
         .nest("/bureaucracy", routes::bureaucracy::router(app_state.clone()))
         .nest("/terrain", routes::terrain::router(app_state.clone()))

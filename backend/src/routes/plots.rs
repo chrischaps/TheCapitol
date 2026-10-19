@@ -15,6 +15,7 @@ use capitol_protocol::rest::{
 };
 
 use crate::engine::currency::{announce_balances, subtract_strands_in, TransactionType};
+use crate::engine::gazette::{self, DeedEvent};
 use crate::engine::property_tax::pay_tax_debt;
 use crate::engine::GameEvent;
 use crate::error::AppError;
@@ -340,6 +341,7 @@ async fn claim(
     .bind(plot_id)
     .fetch_one(&mut *tx)
     .await?;
+    gazette::record_deed(&mut tx, plot_id, &zone_id, DeedEvent::Claimed, player_id).await?;
 
     // Create default permissions if not exists
     sqlx::query(

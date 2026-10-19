@@ -79,6 +79,9 @@ const MARKET_READ_TAG: Tag = 61;
 /// latest ask's answer is shown (`MarketStore::set_history`).
 const CHART_TAG: Tag = 1 << 32;
 
+/// The tag on the Gazette's calls (E3.9).
+const GAZETTE_TAG: Tag = 70;
+
 /// How often the open market panel asks again for the summary and your
 /// orders. The books themselves come over the WS as they change.
 const MARKET_REFRESH: Duration = Duration::from_secs(20);
@@ -164,6 +167,10 @@ pub struct Session {
     /// What's worth a toast about your orders, since the extension last
     /// took it.
     market_notes: Vec<TradeNote>,
+    /// The Capitol Gazette (E3.9): the editions, what you've read, your byline.
+    gazette: capitol_core::gazette::Reader,
+    /// The Gazette's call that's out.
+    gazette_asked: Option<capitol_core::gazette::Ask>,
     /// Placing a station from a kit (P6.2), while it lasts.
     placing: Option<Placing>,
     /// What placing has to tell the player since the extension last took it.
@@ -325,6 +332,8 @@ impl Session {
             market_busy: false,
             market_refused: None,
             market_notes: Vec::new(),
+            gazette: capitol_core::gazette::Reader::new(None),
+            gazette_asked: None,
             placing: None,
             placing_notes: Vec::new(),
             visit: Visit::default(),
@@ -986,6 +995,47 @@ impl Session {
         }
     }
 
+    /// Sends the Gazette's next call, if it wants one and none is out.
+    fn tend_gazette(&mut self) {
+        if self.auth.phase() != Phase::InWorld || self.gazette_asked.is_some() {
+            return;
+        }
+        if let Some(ask) = self.gazette.wants() {
+            self.send_gazette(ask);
+        }
+    }
+
+    fn send_gazette(&mut self, ask: capitol_core::gazette::Ask) {
+        use capitol_core::gazette::Ask;
+        let request = match ask {
+            Ask::Latest => RestRequest::Gazette { day: None },
+            Ask::Day(day) => RestRequest::Gazette { day: Some(day) },
+            Ask::Byline(named) => RestRequest::SetByline(capitol_core::protocol::rest::GazetteByline { named }),
+        };
+        self.gazette.sent(ask);
+        self.gazette_asked = Some(ask);
+        self.net.rest(request, GAZETTE_TAG);
+    }
+
+    /// The Gazette as the client knows it.
+    pub fn gazette(&self) -> &capitol_core::gazette::Reader {
+        &self.gazette
+    }
+
+    pub fn gazette_mut(&mut self) -> &mut capitol_core::gazette::Reader {
+        &mut self.gazette
+    }
+
+    /// Ask the Gazette to print your name, or not.
+    pub fn set_byline(&mut self, named: bool) {
+        if self.auth.phase() != Phase::InWorld || self.gazette_asked.is_some() {
+            return;
+        }
+        if let Some(ask) = self.gazette.set_named(named) {
+            self.send_gazette(ask);
+        }
+    }
+
     /// Turns your orders' fills and expiries into toasts.
     fn note_market(&mut self, event: &MarketEvent) {
         let catalog = self.state.catalog();
@@ -1434,6 +1484,22 @@ impl Session {
                         }
                     }
                 }
+                NetEvent::Rest(GAZETTE_TAG, result) => {
+                    let ask = self.gazette_asked.take();
+                    match (ask, result) {
+                        (Some(ask), Ok(RestResponse::Gazette(answer))) => {
+                            self.gazette.answered(ask, (**answer).clone())
+                        }
+                        (Some(_), Ok(RestResponse::Byline(byline))) => self.gazette.byline(byline.named),
+                        (Some(ask), result) => {
+                            if let Err(e) = result {
+                                tracing::warn!("gazette: {ask:?} failed: {e}");
+                            }
+                            self.gazette.failed(ask);
+                        }
+                        (None, _) => {}
+                    }
+                }
                 NetEvent::Rest(MARKET_READ_TAG, Ok(RestResponse::MarketSummary(summary))) => {
                     self.market_summary = Some(summary.clone());
                 }
@@ -1482,6 +1548,10 @@ impl Session {
             }
             if let NetEvent::Connection(connection) = event {
                 self.link.observe(connection, now);
+                // An edition may have come out while the link was down
+                if matches!(connection, ConnectionState::Connected { .. }) {
+                    self.gazette.connected();
+                }
             }
             let trade_before = self.state.trade().clone();
             let changes = self.state.apply(event);
@@ -1547,6 +1617,9 @@ impl Session {
                         item_id, item_name, ..
                     } => self.broken_tools.push((*item_id, item_name.clone())),
                     StateEvent::Market(event) => self.note_market(event),
+                    StateEvent::GazettePublished { day, headline, .. } => {
+                        self.gazette.published(*day, headline)
+                    }
                     // A tool slot refused: shown where a refused move is
                     StateEvent::ServerError {
                         message,
@@ -1603,6 +1676,7 @@ impl Session {
             self.note_trades(&trade_before, &changes, now);
             self.send_draft(now);
             self.tend_market(now);
+            self.tend_gazette();
             for (request, tag) in self.poller.tick(now) {
                 self.net.rest(request, tag);
             }
@@ -1695,6 +1769,8 @@ impl Session {
             self.market_busy = false;
             self.market_refused = None;
             self.market_notes.clear();
+            self.gazette = capitol_core::gazette::Reader::new(None);
+            self.gazette_asked = None;
             self.placing = None;
             self.placing_notes.clear();
             self.visit = Visit::default();

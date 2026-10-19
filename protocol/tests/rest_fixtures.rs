@@ -9,12 +9,14 @@
 //! `fixtures/rest/market_depth.json`, `market_history.json` and
 //! `market_summary.json` are `GET /market/orders`, `/market/history` and
 //! `/market/summary` (E3.3).
+//! `fixtures/rest/gazette.json` is `GET /gazette/latest` (E3.9), written by the
+//! backend's `write_the_gazette_fixture` from a busy day's records.
 
 use std::fs;
 use std::path::Path;
 
 use capitol_protocol::rest::{
-    AutomationMode, AutomationState, CatalogResponse, MarketDepthResponse, MarketHistoryResponse,
+    AutomationMode, AutomationState, CatalogResponse, GazetteResponse, MarketDepthResponse, MarketHistoryResponse,
     MarketSummaryResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
 };
 use capitol_protocol::rules::market::{sort_levels, GradeRule, OrderSide};
@@ -97,4 +99,15 @@ fn history_and_the_summary_round_trip() {
     let summary: MarketSummaryResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(summary.items[1].last_price, None);
     assert_eq!(serde_json::to_string(&summary).unwrap(), json);
+}
+
+#[test]
+fn a_gazette_round_trips_with_every_section() {
+    let json = fixture("gazette.json");
+    let response: GazetteResponse = serde_json::from_str(&json).unwrap();
+    let edition = response.edition.as_ref().unwrap();
+    assert_eq!(edition.number, capitol_protocol::rules::gazette_number(edition.day));
+    assert!(!edition.movers.is_empty() && !edition.prices.is_empty() && !edition.deeds.is_empty());
+    assert!(edition.best_sale.is_some() && !edition.producers.is_empty());
+    assert_eq!(serde_json::to_string(&response).unwrap(), json);
 }

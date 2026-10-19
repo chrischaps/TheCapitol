@@ -14,8 +14,11 @@
 //!   deep blue; at dusk it lights (H23, `material.emissive_scale` on
 //!   [`LAMPS_MESH`], by the hour, as the houses' windows do), so from the
 //!   map the hall is a blue gem on the avenue;
-//! - **four market stalls** in the forecourt, two either side of the steps,
-//!   under striped awnings, their counters stacked with goods.
+//! - **three market stalls** in the forecourt under striped awnings, their
+//!   counters stacked with goods, and in the fourth's place, on the side
+//!   nearer the tower, the **Gazette's notice board** (E3.9): a green
+//!   board under a little roof, the day's pages pinned to it and a lamp
+//!   over them that lights at dusk.
 //!
 //! The design is drawn for an 8 × 10 m footprint (80 × 100 server units)
 //! and scaled to the one given, so a moved or resized hall still fits it.
@@ -80,6 +83,17 @@ const TIMBER: u32 = crate::world::palette::TIMBER;
 const CLOTH: u32 = 0xe9e1cf;
 /// The awnings' stripes, one per stall, with the cloth between.
 const AWNINGS: [u32; 4] = [TRADE, 0xc9a227, 0x2f7f6f, 0x9b3b3b];
+/// The notice board's green, and its pages' paper and ink.
+const BOARD: u32 = 0x2d3b30;
+const PAGE: u32 = 0xf0e6cf;
+const PAGE_INK: u32 = 0x3a332a;
+/// The stalls' slots, along the front either side of the steps. The board
+/// takes the outer one on the tower's side.
+const SLOTS: [(f32, f32); 4] = [(-4.65, -3.7), (-3.45, -2.5), (2.5, 3.45), (3.7, 4.65)];
+/// How far in from the entrance edge the stalls and the board stand.
+const STALL_U: f32 = 0.55;
+/// The board's top, its roof's.
+const BOARD_TOP: f32 = PAVE + 2.25;
 /// What's for sale on the counters: fiber, timber, ore, brick, rope.
 const GOODS: [u32; 5] = [0x93ae48, 0xb08a5c, 0x6b6f78, 0x9b4a32, 0xd8c08a];
 
@@ -168,6 +182,28 @@ impl Site {
     pub fn door(&self) -> V2 {
         self.door
     }
+
+    /// The slot the Gazette's board takes: the outer one on the side
+    /// nearer the tower, at the world's centre.
+    fn board_slot(&self) -> usize {
+        let c = self.at(STALL_U, 0.0);
+        let toward = -(self.a[0] * c[0] + self.a[1] * c[1]);
+        if toward >= 0.0 {
+            3
+        } else {
+            0
+        }
+    }
+
+    /// The Gazette's notice board (E3.9): where a click picks it, round
+    /// its slot, and the middle of its roof, world (X, Y, Z), where its
+    /// prompt hangs.
+    pub fn board(&self) -> ([V2; 4], [f32; 3]) {
+        let (v0, v1) = SLOTS[self.board_slot()];
+        let r = self.rect(STALL_U - 0.45, STALL_U + 0.45, v0, v1);
+        let [x, z] = self.at(STALL_U, (v0 + v1) * 0.5);
+        ([r[0], r[1], r[2], r[3]], [x, BOARD_TOP, z])
+    }
 }
 
 /// The hall, built: one buffer per material, plus the light.
@@ -189,13 +225,58 @@ pub fn build(site: &Site, phase: f64) -> Hall {
     cella(&mut h, site);
     lantern(&mut h, site);
     clock(&mut h, site, phase);
-    for (k, &(v0, v1)) in [(-4.65, -3.7), (-3.45, -2.5), (2.5, 3.45), (3.7, 4.65)]
-        .iter()
-        .enumerate()
-    {
-        stall(&mut h, site, 0.55, v0, v1, k);
+    let board = site.board_slot();
+    for (k, &(v0, v1)) in SLOTS.iter().enumerate() {
+        if k == board {
+            notice_board(&mut h, site, STALL_U, v0, v1);
+        } else {
+            stall(&mut h, site, STALL_U, v0, v1, k);
+        }
     }
     h
+}
+
+/// The Gazette's notice board (E3.9): two posts, a green board between
+/// them under a little roof, the edition's pages pinned to its front, and a
+/// lamp over them.
+fn notice_board(h: &mut Hall, s: &Site, uc: f32, v0: f32, v1: f32) {
+    let timber = hex(TIMBER);
+    for v in [v0 + 0.08, v1 - 0.08] {
+        prism(&mut h.stone, &square(s, uc, v, 0.05), PAVE, BOARD_TOP - 0.05, timber, true);
+    }
+    let (b0, b1) = (PAVE + 0.75, PAVE + 1.9);
+    prism(&mut h.stone, &s.rect(uc - 0.04, uc + 0.04, v0 + 0.13, v1 - 0.13), b0, b1, hex(BOARD), true);
+    prism(&mut h.stone, &s.rect(uc - 0.2, uc + 0.2, v0 - 0.02, v1 + 0.02), BOARD_TOP - 0.05, BOARD_TOP, timber, true);
+    // The pages: the front page, tall, with its headline, and two smaller
+    // sheets beside it, standing a hair proud of the board's face.
+    let n = s.front();
+    let face = uc - 0.05;
+    let sheet = |h: &mut Hall, a: f32, b: f32, y0: f32, y1: f32, colour: u32| {
+        let (p, q) = (s.at(face, a), s.at(face, b));
+        h.stone.quad([lift(p, y0), lift(q, y0), lift(q, y1), lift(p, y1)], n, hex(colour));
+    };
+    let mid = (v0 + v1) * 0.5;
+    sheet(h, mid - 0.2, mid + 0.12, b0 + 0.12, b1 - 0.1, PAGE);
+    // The headline and the columns under it, as lines of ink
+    let ink = |h: &mut Hall, a: f32, b: f32, y: f32, t: f32| {
+        let (p, q) = (s.at(face - 0.005, a), s.at(face - 0.005, b));
+        h.stone.quad([lift(p, y), lift(q, y), lift(q, y + t), lift(p, y + t)], n, hex(PAGE_INK));
+    };
+    ink(h, mid - 0.16, mid + 0.08, b1 - 0.24, 0.07);
+    for k in 0..5 {
+        let y = b1 - 0.36 - 0.12 * k as f32;
+        ink(h, mid - 0.16, mid - 0.05, y, 0.025);
+        ink(h, mid - 0.02, mid + 0.08, y, 0.025);
+    }
+    let (left, right) = if v1 > 0.0 { (v0 + 0.17, mid - 0.24) } else { (mid + 0.16, v1 - 0.17) };
+    sheet(h, left, right, b0 + 0.45, b1 - 0.25, PAGE);
+    sheet(h, left, right, b0 + 0.12, b0 + 0.38, 0xe6d9b8);
+    // The lamp, out on a bracket over the pages: it lights at dusk with
+    // the hall's gold.
+    let [x, z] = s.at(uc - 0.2, mid);
+    let lamp = [[x - 0.06, z - 0.06], [x + 0.06, z - 0.06], [x + 0.06, z + 0.06], [x - 0.06, z + 0.06]];
+    prism(&mut h.light, &lamp, BOARD_TOP - 0.22, BOARD_TOP - 0.1, glow(hex(CLOCK_FACE), 1.3), true);
+    prism(&mut h.gold, &s.rect(uc - 0.2, uc - 0.04, mid - 0.015, mid + 0.015), BOARD_TOP - 0.1, BOARD_TOP - 0.08, hex(BRONZE), true);
 }
 
 /// The paving over the whole footprint, the podium and its steps.

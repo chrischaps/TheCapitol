@@ -161,6 +161,19 @@ pub const KEYCAP_SIDE: Color32 = rgba(10, 10, 16, 0.9);
 /// The narrowest cap, so a lone letter isn't a sliver.
 pub const KEYCAP_MIN_WIDTH: f32 = 22.0;
 
+/// The Gazette's newsprint (E3.9): a warm paper, its deckle edge, and the
+/// inks. The one light page in a dark game, so it reads as a thing you hold.
+pub const PAPER: Color32 = rgb(0xf0e6cf);
+pub const PAPER_EDGE: Color32 = rgb(0xc9b893);
+pub const INK: Color32 = rgb(0x231e17);
+pub const INK_DIM: Color32 = rgb(0x6b6150);
+/// The column rules and the masthead's lines
+pub const INK_RULE: Color32 = rgba(35, 30, 23, 0.55);
+/// A price that rose, and one that fell: the inks a printer has, green and red
+/// gone dark enough to read on paper
+pub const INK_UP: Color32 = rgb(0x2f6b3a);
+pub const INK_DOWN: Color32 = rgb(0x9b2f25);
+
 // ---------------------------------------------------------------------------
 // Type
 // ---------------------------------------------------------------------------

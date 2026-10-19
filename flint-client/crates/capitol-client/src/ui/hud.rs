@@ -52,6 +52,10 @@ pub struct HeaderView<'a> {
     pub exchange_open: bool,
     /// The same for the market panel.
     pub market_open: bool,
+    /// The same for the Gazette (E3.9).
+    pub gazette_open: bool,
+    /// An edition is out you haven't read: its headline, for the hint.
+    pub gazette_news: Option<String>,
     /// The same for the shortcut overlay (P8.3).
     pub help_open: bool,
     /// The same for the settings panel.
@@ -73,6 +77,7 @@ pub struct HeaderClicks {
     pub crafting: bool,
     pub exchange: bool,
     pub market: bool,
+    pub gazette: bool,
     /// The hall hint: go to the hall.
     pub hall: bool,
     pub help: bool,
@@ -145,6 +150,12 @@ pub fn header(
                     if let Some(angle) = view.hall_hint {
                         clicks.hall = hall_chip(ui, angle).clicked();
                     }
+                    clicks.gazette = match &view.gazette_news {
+                        Some(headline) => news_chip(ui, headline).clicked(),
+                        None => theme::toggle_chip(ui, "Gazette", view.gazette_open)
+                            .on_hover_text("The Capitol Gazette (G)")
+                            .clicked(),
+                    };
                     clicks.market = theme::toggle_chip(ui, "Market", view.market_open)
                         .on_hover_text("The market (M)")
                         .clicked();
@@ -272,6 +283,27 @@ fn hall_chip(ui: &mut egui::Ui, angle: f32) -> egui::Response {
         .interact(egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Your market box holds goods. Collect them at the Exchange hall: click to walk there")
+}
+
+/// A new edition of the Gazette is out (E3.9): a gold-edged chip that
+/// breathes, with the headline on hover. A click opens it.
+fn news_chip(ui: &mut egui::Ui, headline: &str) -> egui::Response {
+    let t = ui.input(|i| i.time) as f32;
+    let k = 0.5 + 0.5 * (t * 2.2).sin();
+    let shown = theme::chip(theme::GOLD.gamma_multiply(0.55 + 0.45 * k), theme::GOLD_WASH)
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new("The Gazette is out")
+                    .font(theme::strong(size::SMALL))
+                    .color(theme::GOLD_LIGHT),
+            );
+        });
+    ui.ctx().request_repaint();
+    shown
+        .response
+        .interact(egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(format!("“{headline}”: read it (G)"))
 }
 
 /// Which way `at` lies on screen for a camera at `eye` looking at `look`

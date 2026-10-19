@@ -64,6 +64,7 @@ const SERVER_TYPES: &[&str] = &[
     "order_cancelled",
     "market_depth",
     "market_trade",
+    "gazette_published",
 ];
 
 const CLIENT_TYPES: &[&str] = &[

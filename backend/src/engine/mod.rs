@@ -8,6 +8,7 @@ mod crafting;
 pub mod currency;
 mod events;
 mod extraction;
+pub mod gazette;
 pub mod grants;
 pub mod market;
 pub mod market_book;

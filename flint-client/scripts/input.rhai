@@ -8,6 +8,7 @@
 //   1. placing a station: put it here              (P6.2)
 //   2. shift-click a player: trade, or walk closer  (P7.3)
 //   3. a station: open it, or walk closer           (P6.3)
+//      the Gazette's notice board: read it         (E3.9, here)
 //      the Exchange hall: the market, or walk there (E3.7, here)
 //   4. alt-click a plot: select it                  (P6.4, here)
 //   5. an available resource node: extract          (P4.4, here)
@@ -69,6 +70,12 @@
 // and a prompt hangs over it: what a click will do, unless the market is
 // open already. While goods wait in your market box, gold motes rise from
 // its lantern, a slow fountain you can find from across the city.
+//
+// The Gazette's notice board (E3.9) stands in the hall's forecourt, on the
+// side nearer the tower. A click on it (cap_board_at, tried up its posts)
+// opens the paper (cap_read_gazette) wherever you are: reading needs no
+// walk. Hovering it names it, and while an edition is out you haven't
+// read, a gold glint breathes over its lamp.
 //
 // Placing a station (P6.2): a right click on a kit in the inventory starts
 // it. Rust draws the ghost, the station itself, tinted and translucent,
@@ -192,6 +199,7 @@ fn on_update() {
     if place_station(click) { return; }
     if trade_with(click) { return; }
     if open_station(click) { return; }
+    if read_gazette() { return; }
     if visit_hall() { return; }
     if select_plot(click) { return; }
     if extract(click) { return; }
@@ -222,6 +230,25 @@ fn visit_hall() {                   // E3.7
     if !hall_under_cursor() { return false; }
     cap_visit_hall();
     true
+}
+
+// The Gazette's notice board under the cursor: open the paper.
+fn read_gazette() {                 // E3.9
+    if !board_under_cursor() { return false; }
+    cap_read_gazette();
+    true
+}
+
+// Whether the cursor's ray meets the board: its point at each height up
+// its posts, on its slot.
+fn board_under_cursor() {
+    if cap_hall() == () { return false; }
+    let y = cap_ground_y();
+    for k in 0..10 {
+        let p = screen_to_ground(mouse_x(), mouse_y(), y + 0.25 * k.to_float());
+        if p != () && cap_board_at(p[0], p[1]) { return true; }
+    }
+    false
 }
 
 // Whether the cursor's ray meets the hall: its point at each height up to
@@ -413,10 +440,15 @@ fn on_draw_ui() {
     for s in splashes { draw_splash(s, now); }
 
     let hall = cap_hall();
-    let over_hall = hall != () && placing == () && over == () && hall_under_cursor();
-    if hall != () { draw_hall(hall, over_hall, now); }
+    let free = hall != () && placing == () && over == ();
+    let over_board = free && board_under_cursor();
+    let over_hall = free && !over_board && hall_under_cursor();
+    if hall != () {
+        draw_hall(hall, over_hall, now);
+        draw_board(hall, over_board, now);
+    }
 
-    if hover != () && placing == () && over == () && !over_hall {
+    if hover != () && placing == () && over == () && !over_hall && !over_board {
         let n = cap_node_at(hover[0], hover[1]);
         if n != () && n.state == "available" && !n.targeted { draw_reticle_on(n, now); }
         else { draw_reticle(hover, now); }
@@ -842,6 +874,51 @@ fn draw_hall_prompt(h, over) {
     draw_text_opts(at.x - lm.width / 2.0, ly, line, 13.0, #{
         font: "strong", color: [ink[0], ink[1], ink[2], if over || h.near { 0.9 } else { 0.7 }],
     });
+}
+
+// ── The Gazette's notice board (E3.9) ────────────────────────────────────
+
+// Its name and what a click does, over it while you hover it; and while an
+// edition waits unread, a gold glint breathing over its lamp.
+fn draw_board(h, over, now) {
+    if h.news && !h.reading { draw_news_glint(h, now); }
+    if !over || h.reading { return; }
+    let at = world_to_screen(h.board_x, h.board_y + 0.6, h.board_z);
+    if !at.visible { return; }
+    let title = "The Capitol Gazette";
+    let line = if h.news { "A new edition · click to read" } else { "Click to read · G" };
+    let size = 16.0;
+    let m = measure_text_ex(title, size, "display", 0.0);
+    let top = (at.y - 40.0).max(64.0);
+    draw_text_opts(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{
+        font: "display", color: [0.0, 0.0, 0.0, 0.6],
+    });
+    draw_text_opts(at.x - m.width / 2.0, top, title, size, #{
+        font: "display", color: [0.96, 0.92, 0.82, 0.97],
+    });
+    let lm = measure_text_ex(line, 13.0, "strong", 0.0);
+    let ly = top + m.height + 5.0;
+    let ink = if h.news { [0.95, 0.83, 0.46] } else { [0.92, 0.92, 0.92] };
+    draw_text_opts(at.x - lm.width / 2.0 + 1.0, ly + 1.0, line, 13.0, #{
+        font: "strong", color: [0.0, 0.0, 0.0, 0.55],
+    });
+    draw_text_opts(at.x - lm.width / 2.0, ly, line, 13.0, #{
+        font: "strong", color: [ink[0], ink[1], ink[2], 0.92],
+    });
+}
+
+// A four-pointed glint over the board's lamp, swelling and fading slowly,
+// as the hall's motes do: a few points wide however far away you stand.
+fn draw_news_glint(h, now) {
+    let p = world_to_screen(h.board_x, h.board_y + 0.35, h.board_z);
+    if !p.visible { return; }
+    let swell = 0.55 + 0.45 * (now * 1.8).sin();
+    let r = 7.0 * swell + 3.0;
+    let w = 1.6;
+    let a = 0.85;
+    draw_polygon([[p.x, p.y - r], [p.x + w, p.y], [p.x, p.y + r], [p.x - w, p.y]], 1.0, 0.92, 0.6, a, 2);
+    draw_polygon([[p.x - r, p.y], [p.x, p.y - w], [p.x + r, p.y], [p.x, p.y + w]], 1.0, 0.92, 0.6, a, 2);
+    draw_circle(p.x, p.y, 2.2, 1.0, 0.97, 0.85, a);
 }
 
 // Goods in your box: gold motes rising one after another from the hall's

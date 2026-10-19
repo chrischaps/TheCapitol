@@ -19,6 +19,9 @@ use capitol_protocol::rest::{
     Candle, CollectRequest, CollectResponse, DepthLevel, MarketDepthResponse, MarketHistoryResponse,
     MarketItemSummary, MarketOrder, MarketSummaryResponse, MarketTrade, MyFill, PlaceOrder,
 };
+use capitol_protocol::rest::{
+    Gazette, GazetteByline, GazetteDeeds, GazetteMover, GazettePrice, GazetteProducer, GazetteResponse, GazetteSale,
+};
 use capitol_protocol::rules::market::{GradeRule, OrderSide, OrderStatus};
 use capitol_protocol::terrain::{
     Bridge, Landmark, LandmarkKind, RoadSegment, RoadType, TerrainPark, TerrainPlot, TerrainResponse, WaterRing,
@@ -71,6 +74,7 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         (name = "Stations", description = "Crafting and storage stations"),
         (name = "Exchange", description = "Currency exchange operations"),
         (name = "Market", description = "Orders, books, price history and the market box"),
+        (name = "Gazette", description = "The Capitol Gazette: a daily digest of the economy"),
         (name = "Plots", description = "Land plot ownership and permissions"),
         (name = "Bureaucracy", description = "Zone information and deed prices"),
         (name = "Terrain", description = "World terrain data (roads, water)")
@@ -126,6 +130,11 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         crate::routes::market::summary,
         crate::routes::market::get_box,
         crate::routes::market::collect,
+        // Gazette
+        crate::routes::gazette::latest,
+        crate::routes::gazette::by_date,
+        crate::routes::gazette::get_byline,
+        crate::routes::gazette::set_byline,
         // Plots
         crate::routes::plots::list_plots,
         crate::routes::plots::list_claimed_plots,
@@ -226,6 +235,15 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         MarketSummaryResponse,
         CollectRequest,
         CollectResponse,
+        // Gazette
+        Gazette,
+        GazettePrice,
+        GazetteMover,
+        GazetteSale,
+        GazetteDeeds,
+        GazetteProducer,
+        GazetteResponse,
+        GazetteByline,
         // Plots
         ListPlotsResponse,
         PlotInfo,

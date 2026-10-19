@@ -15,6 +15,7 @@ use capitol_protocol::ws::ToolUse;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use super::gazette;
 use super::station_tools;
 use super::units;
 use super::tools::{self, BrokenTool, HeldTool, Wear};
@@ -106,6 +107,7 @@ pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Finished
         if !changed.contains(&container) {
             changed.push(container);
         }
+        gazette::tally(&mut tx, craft.player_id, &output.item_type, output.quantity).await.map_err(db_error)?;
     }
 
     tx.commit().await.map_err(db_error)?;

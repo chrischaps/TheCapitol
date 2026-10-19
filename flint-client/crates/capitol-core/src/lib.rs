@@ -43,6 +43,7 @@ pub mod bot;
 pub mod catalog;
 pub mod craft;
 pub mod exchange;
+pub mod gazette;
 pub mod hall;
 pub mod harvest;
 pub mod market;
@@ -63,3 +64,5 @@ pub mod trading;
 pub use capitol_protocol as protocol;
 /// The clock and the dates in subscriptions (E4.1), for the client to format.
 pub use chrono;
+/// JSON, for the client's offline samples (the Gazette's, E3.9).
+pub use serde_json;

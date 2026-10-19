@@ -1302,6 +1302,142 @@ pub struct GrantResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /gazette (E3.9)
+// ---------------------------------------------------------------------------
+
+/// One edition of the Capitol Gazette: the story of one in-game day, composed
+/// at its end (the next midnight) from the day's trades, deeds and work.
+/// Every section has its prose, even on a quiet day.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Gazette {
+    /// The day it's about (`rules::day_number`)
+    pub day: i64,
+    /// Its number on the masthead (`rules::gazette_number`)
+    pub number: i64,
+    pub headline: String,
+    /// The line under the headline
+    pub dek: String,
+    /// The front-page story
+    pub lead: String,
+    pub weather: String,
+    /// From the Exchange: what moved, and how the day went there
+    pub markets: String,
+    /// The biggest movers by price, the biggest first
+    pub movers: Vec<GazetteMover>,
+    /// Every item that traded, by name: the small price table
+    pub prices: Vec<GazettePrice>,
+    /// The highest-quality sale of the day
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_sale: Option<GazetteSale>,
+    pub best_sale_story: String,
+    /// Deeds and foreclosures by zone, from the centre out
+    pub deeds: Vec<GazetteDeeds>,
+    pub deeds_story: String,
+    /// Who made the most, by units gathered and crafted
+    pub producers: Vec<GazetteProducer>,
+    pub producers_story: String,
+}
+
+/// A day's price for one item at the Exchange: its trades' range and their
+/// volume-weighted mean, against the day before's.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazettePrice {
+    pub item_type: String,
+    pub item_name: String,
+    pub low: i64,
+    pub high: i64,
+    /// Strands a unit, weighted by volume
+    pub mean: i64,
+    /// Units traded
+    pub volume: i64,
+    /// The day before's mean, if it traded then
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<i64>,
+}
+
+/// A mover: an item whose mean price changed most from the day before.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteMover {
+    pub item_type: String,
+    pub item_name: String,
+    pub previous: i64,
+    pub mean: i64,
+    /// The change in whole percent, rounded toward zero
+    pub change_pct: i64,
+}
+
+/// The day's finest sale.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteSale {
+    pub item_type: String,
+    pub item_name: String,
+    /// The mean quality of the units sold, and its grade
+    pub quality: i32,
+    pub grade: String,
+    pub price: i64,
+    pub quantity: i32,
+    /// Who sold it, if they let the Gazette print their name. Units don't
+    /// remember who made them yet, so it's the seller, not the maker (#231).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seller: Option<String>,
+}
+
+/// One zone's deeds for the day.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteDeeds {
+    pub zone: String,
+    pub zone_name: String,
+    pub claimed: i64,
+    pub foreclosed: i64,
+}
+
+/// One of the day's top producers.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteProducer {
+    /// Their name, if they let the Gazette print it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Every unit they gathered or crafted
+    pub units: i64,
+    /// What they made most of, and how much
+    pub item_type: String,
+    pub item_name: String,
+    pub item_units: i64,
+}
+
+/// `GET /gazette/latest` and `GET /gazette?date=`: the edition, if there is
+/// one yet, and whether the Gazette prints your name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edition: Option<Gazette>,
+    pub named: bool,
+}
+
+/// `GET /gazette` query string.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::IntoParams))]
+pub struct GazetteQuery {
+    /// The day (`rules::day_number`) whose edition you want
+    pub date: i64,
+}
+
+/// `PUT /gazette/byline`, and its answer: whether the Gazette may print your
+/// name. It applies from the next edition; printed ones stay as they are.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteByline {
+    pub named: bool,
+}
+
+// ---------------------------------------------------------------------------
 // /plots
 // ---------------------------------------------------------------------------
 

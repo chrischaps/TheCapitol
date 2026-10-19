@@ -1065,6 +1065,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
+                    // E3.9: the Gazette, to everyone
+                    Ok(GameEvent::GazettePublished { day, number, headline }) => {
+                        let msg = ServerMessage::GazettePublished { day, number, headline };
+                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                    }
                     Err(_) => {
                         // Channel closed
                         break;

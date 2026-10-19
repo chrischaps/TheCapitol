@@ -71,6 +71,9 @@ pub struct Shared {
     /// A script asked to go to the hall (`cap_visit_hall`). The extension
     /// takes it next frame.
     pub visit_hall: Arc<AtomicBool>,
+    /// A script asked to open the Gazette (`cap_read_gazette`, E3.9). The
+    /// extension takes it next frame.
+    pub read_gazette: Arc<AtomicBool>,
     /// Where the egui UI's landmarks were drawn last frame (P8.2), by name,
     /// for scripts to fly things to. Only "inventory" so far.
     pub anchors: Arc<Mutex<HashMap<&'static str, UiAnchor>>>,
@@ -120,31 +123,49 @@ pub struct HallMark {
     pub goods: bool,
     /// The market panel is open.
     pub open: bool,
+    /// The Gazette's notice board in its forecourt (E3.9): round its
+    /// slot, and the middle of its roof (X, Y, Z), where its prompt hangs.
+    pub board: [[f32; 2]; 4],
+    pub board_top: [f32; 3],
+    /// An edition is out that you haven't read.
+    pub news: bool,
+    /// The Gazette is open.
+    pub reading: bool,
 }
 
 impl HallMark {
     /// Whether the ground point (x, z) is on the footprint, or within `pad`
     /// metres of it.
     pub fn covers(&self, x: f32, z: f32, pad: f32) -> bool {
-        let c = &self.corners;
-        // Inside a convex quad: the same side of every edge.
-        let side = |i: usize| {
-            let (a, b) = (c[i], c[(i + 1) % 4]);
-            (b[0] - a[0]) * (z - a[1]) - (b[1] - a[1]) * (x - a[0])
-        };
-        let sides = [side(0), side(1), side(2), side(3)];
-        if sides.iter().all(|&s| s >= 0.0) || sides.iter().all(|&s| s <= 0.0) {
-            return true;
-        }
-        (0..4).any(|i| {
-            let (a, b) = (c[i], c[(i + 1) % 4]);
-            let ab = [b[0] - a[0], b[1] - a[1]];
-            let t = (((x - a[0]) * ab[0] + (z - a[1]) * ab[1]) / (ab[0] * ab[0] + ab[1] * ab[1]).max(1e-9))
-                .clamp(0.0, 1.0);
-            let p = [a[0] + ab[0] * t, a[1] + ab[1] * t];
-            (x - p[0]).hypot(z - p[1]) <= pad
-        })
+        quad_covers(&self.corners, x, z, pad)
     }
+
+    /// Whether the ground point (x, z) is on the notice board's slot.
+    pub fn board_covers(&self, x: f32, z: f32) -> bool {
+        quad_covers(&self.board, x, z, 0.1)
+    }
+}
+
+/// Whether the ground point (x, z) is in the convex quad `c`, or within
+/// `pad` metres of it.
+fn quad_covers(c: &[[f32; 2]; 4], x: f32, z: f32, pad: f32) -> bool {
+    // Inside a convex quad: the same side of every edge.
+    let side = |i: usize| {
+        let (a, b) = (c[i], c[(i + 1) % 4]);
+        (b[0] - a[0]) * (z - a[1]) - (b[1] - a[1]) * (x - a[0])
+    };
+    let sides = [side(0), side(1), side(2), side(3)];
+    if sides.iter().all(|&s| s >= 0.0) || sides.iter().all(|&s| s <= 0.0) {
+        return true;
+    }
+    (0..4).any(|i| {
+        let (a, b) = (c[i], c[(i + 1) % 4]);
+        let ab = [b[0] - a[0], b[1] - a[1]];
+        let t = (((x - a[0]) * ab[0] + (z - a[1]) * ab[1]) / (ab[0] * ab[0] + ab[1] * ab[1]).max(1e-9))
+            .clamp(0.0, 1.0);
+        let p = [a[0] + ab[0] * t, a[1] + ab[1] * t];
+        (x - p[0]).hypot(z - p[1]) <= pad
+    })
 }
 
 /// One of the UI's landmarks as scripts see it: a rect in logical points,
@@ -571,8 +592,11 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             *o = Some(id.to_owned());
         }
     });
-    // `cap_hall() -> #{ corners, door_x, door_z, x, y, z, near, goods, open }
-    // or ()`: the Exchange hall (E3.7), world metres. `corners` is
+    // `cap_hall() -> #{ corners, door_x, door_z, x, y, z, near, goods, open,
+    // board_x, board_y, board_z, news, reading } or ()`: the Exchange hall
+    // (E3.7), world metres. `board_*` is the top of the Gazette's notice
+    // board in its forecourt (E3.9), `news` an edition you haven't read,
+    // and `reading` the Gazette open. `corners` is
     // [[x, z], ...] round its footprint, `door_*` the middle of its entrance
     // side, and `x, y, z` the middle of its roof. `near` when you're in range
     // to trade there, `goods` when your market box holds anything, `open`
@@ -597,8 +621,25 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         m.insert("near".into(), h.near.into());
         m.insert("goods".into(), h.goods.into());
         m.insert("open".into(), h.open.into());
+        m.insert("board_x".into(), (h.board_top[0] as f64).into());
+        m.insert("board_y".into(), (h.board_top[1] as f64).into());
+        m.insert("board_z".into(), (h.board_top[2] as f64).into());
+        m.insert("news".into(), h.news.into());
+        m.insert("reading".into(), h.reading.into());
         m.into()
     });
+    // `cap_board_at(x, z) -> bool`: whether the ground point (x, z), world
+    // metres, is on the Gazette's notice board (E3.9).
+    let hall = shared.hall.clone();
+    engine.register_fn("cap_board_at", move |x: f64, z: f64| -> bool {
+        hall.lock()
+            .ok()
+            .and_then(|h| h.as_ref().map(|h| h.board_covers(x as f32, z as f32)))
+            .unwrap_or(false)
+    });
+    // `cap_read_gazette()`: open the Gazette. Sent next frame.
+    let read = shared.read_gazette.clone();
+    engine.register_fn("cap_read_gazette", move || read.store(true, Ordering::Relaxed));
     // `cap_hall_at(x, z) -> bool`: whether the ground point (x, z), world
     // metres, is on the hall's footprint (or a hand's width off it).
     let hall = shared.hall.clone();

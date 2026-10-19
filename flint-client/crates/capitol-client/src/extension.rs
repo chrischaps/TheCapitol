@@ -122,6 +122,10 @@ pub struct CapitolExtension {
     market: ui::market::MarketPanel,
     /// `--market-sample`: a market to show offline (E3.5).
     market_sample: Option<ui::market::Sample>,
+    /// The Capitol Gazette (E3.9), and `--gazette-sample`: an edition to
+    /// read offline.
+    gazette: ui::gazette::GazettePanel,
+    gazette_sample: Option<capitol_core::gazette::Reader>,
     /// The Exchange hall (E3.7), and `--hall-sample`: offline, goods waiting
     /// and you where the camera looks.
     hall: world::hall::HallLayer,
@@ -197,6 +201,8 @@ impl CapitolExtension {
             exchange: ui::exchange::ExchangePanel::default(),
             market: ui::market::MarketPanel::default(),
             market_sample: None,
+            gazette: ui::gazette::GazettePanel::default(),
+            gazette_sample: None,
             hall: world::hall::HallLayer::default(),
             hall_sample: false,
             hall_hint: None,
@@ -314,6 +320,16 @@ impl CapitolExtension {
         self
     }
 
+    /// Offline, open the Gazette on the protocol's sample edition
+    /// (`--gazette-sample`).
+    pub fn with_gazette_sample(mut self, on: bool) -> Self {
+        if on && self.session.is_none() {
+            self.gazette_sample = Some(ui::gazette::sample());
+            self.gazette.open = true;
+        }
+        self
+    }
+
     /// Offline, show the hall as if goods waited (`--hall-sample`).
     pub fn with_hall_sample(mut self, on: bool) -> Self {
         self.hall_sample = on;
@@ -373,6 +389,12 @@ impl CapitolExtension {
             None => (None, false),
         };
         let world = |p: (f64, f64)| crate::coords::to_world(p.0, p.1);
+        let (board, board_top) = site.board();
+        let news = match (&self.session, &self.gazette_sample) {
+            (Some(session), _) => session.gazette().unread(),
+            (None, Some(reader)) => reader.unread(),
+            _ => false,
+        };
         Some(script_api::HallMark {
             corners: hall.corners.map(world),
             door: site.door(),
@@ -380,6 +402,10 @@ impl CapitolExtension {
             near: you.is_some_and(|[x, y]| rules::market::at_the_hall(hall, x, y)),
             goods,
             open: self.market.open,
+            board,
+            board_top,
+            news,
+            reading: self.gazette.open,
         })
     }
 
@@ -514,6 +540,13 @@ impl PlayerExtension for CapitolExtension {
         if !self.at_login() && ctx.input.is_action_just_pressed("market") {
             self.market.toggle();
         }
+        // The Gazette (E3.9): G, or a click on its notice board
+        if !self.at_login() && ctx.input.is_action_just_pressed("gazette") {
+            self.gazette.toggle();
+        }
+        if self.shared.read_gazette.swap(false, Ordering::Relaxed) {
+            self.gazette.open = true;
+        }
         if ctx.input.is_action_just_pressed("settings") {
             self.settings_panel.toggle();
         }
@@ -541,6 +574,11 @@ impl PlayerExtension for CapitolExtension {
                     self.market.open = true;
                 }
             }
+            // The Gazette follows whoever is signed in, and counts what's
+            // opened as read
+            let (server, me) = (session.server().to_owned(), session.state().me());
+            self.gazette.follow(&server, me, session.gazette_mut());
+            self.gazette.reading(session.gazette_mut());
             let made = crafted(ctx, session, &self.shared, &mut self.sound);
             // The hints follow whoever is signed in (nobody, signed out).
             let state = session.state();
@@ -943,6 +981,11 @@ impl PlayerExtension for CapitolExtension {
                     crafting_open: self.crafting.open,
                     exchange_open: self.exchange.open,
                     market_open: self.market.open,
+                    gazette_open: self.gazette.open,
+                    gazette_news: session
+                        .gazette()
+                        .unread()
+                        .then(|| session.gazette().latest_headline().unwrap_or_default().to_owned()),
                     help_open: self.shortcuts.open,
                     settings_open: self.settings_panel.open,
                     inventory_pulse: pulse,
@@ -966,6 +1009,9 @@ impl PlayerExtension for CapitolExtension {
                 }
                 if clicks.market {
                     self.market.toggle();
+                }
+                if clicks.gazette {
+                    self.gazette.toggle();
                 }
                 if clicks.hall {
                     self.shared.visit_hall.store(true, Ordering::Relaxed);
@@ -1089,9 +1135,17 @@ impl PlayerExtension for CapitolExtension {
                     Some(ui::market::Action::Close) => self.market.open = false,
                     None => {}
                 }
-                // The settings panel takes the hint card's corner; the card
-                // waits behind it rather than showing through.
-                if self.settings_panel.open {
+                // The Gazette (E3.9)
+                let view = ui::gazette::View { reader: session.gazette(), online: true };
+                match self.gazette.show(ctx, &view) {
+                    Some(ui::gazette::Action::Turn(by)) => session.gazette_mut().turn(by),
+                    Some(ui::gazette::Action::Byline(named)) => session.set_byline(named),
+                    None => {}
+                }
+                // The settings panel takes the hint card's corner, and the
+                // Gazette the middle of the screen; the card waits behind
+                // them rather than showing through.
+                if self.settings_panel.open || self.gazette.open {
                     self.hints.rect = None;
                 } else {
                     // The inventory's rect is last frame's: it's drawn after.
@@ -1251,6 +1305,14 @@ impl PlayerExtension for CapitolExtension {
             let view = sample.view_with(self.market.selected.as_deref(), history.as_ref());
             if let Some(ui::market::Action::Close) = self.market.show(ctx, &mut self.icons, &view) {
                 self.market.open = false;
+            }
+        }
+        if let Some(reader) = &mut self.gazette_sample {
+            self.gazette.reading(reader);
+            if let Some(ui::gazette::Action::Turn(by)) =
+                self.gazette.show(ctx, &ui::gazette::View { reader, online: false })
+            {
+                reader.turn(by);
             }
         }
         if let Some(juice) = &mut self.juice {

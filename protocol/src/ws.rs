@@ -474,6 +474,10 @@ pub enum ServerMessage {
     /// A trade in the item, anyone's
     #[serde(rename = "market_trade")]
     MarketTrade { trade: MarketTrade },
+    // E3.9: to everyone
+    /// The Gazette's edition about `day` is out (`GET /gazette/latest`)
+    #[serde(rename = "gazette_published")]
+    GazettePublished { day: i64, number: i64, headline: String },
 }
 
 impl ServerMessage {
@@ -532,6 +536,7 @@ impl ServerMessage {
             ServerMessage::OrderCancelled { .. } => "order_cancelled",
             ServerMessage::MarketDepth { .. } => "market_depth",
             ServerMessage::MarketTrade { .. } => "market_trade",
+            ServerMessage::GazettePublished { .. } => "gazette_published",
         }
     }
 }

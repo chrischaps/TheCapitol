@@ -138,6 +138,9 @@ struct Args {
     /// blended lots and both grade rules, and a few orders of yours
     #[arg(long)]
     market_sample: bool,
+    /// Offline, open the Capitol Gazette on a sample edition (E3.9)
+    #[arg(long)]
+    gazette_sample: bool,
     /// Offline, the Exchange hall as if you stood where the camera looks
     /// with goods in your market box: the gold mote, the header's hint and,
     /// in range, the prompt (E3.7)
@@ -306,6 +309,7 @@ fn main() -> Result<()> {
         .with_exchange(args.exchange.as_deref())
         .with_market(args.market.as_deref(), args.market_sample)
         .with_hall_sample(args.hall_sample && args.offline.is_some())
+        .with_gazette_sample(args.gazette_sample && args.offline.is_some())
         .with_mute(args.mute || args.exit_after.is_some())
         .with_juice_sample(args.juice_sample && args.offline.is_some())
         .with_time_of_day(args.time_of_day)

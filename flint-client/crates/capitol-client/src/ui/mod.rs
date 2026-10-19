@@ -10,6 +10,8 @@
 //! - [`plot`]: the plot panel, opened by alt-clicking a plot (P6.4).
 //! - [`settings`]: the settings panel, toggled with F10 (P8.4).
 //! - [`trade`]: a trade request's card, and the two-sided trade window (P7.3).
+//! - [`gazette`]: the Capitol Gazette, toggled with G or its notice board
+//!   (E3.9): the day's edition as a page of newsprint.
 //! - [`market`]: the market panel, toggled with M: items, the ladder, the
 //!   order form and your orders (E3.5).
 //! - [`station`]: the open station's panel: its box, and its recipes at a
@@ -33,6 +35,7 @@
 pub mod containers;
 pub mod crafting;
 pub mod exchange;
+pub mod gazette;
 pub mod hints;
 pub mod hud;
 pub mod icons;

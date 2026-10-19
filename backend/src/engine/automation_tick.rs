@@ -52,7 +52,7 @@ use super::craft_completion::{self, OUTPUT_FULL};
 use super::crafting::{output_quality, roll_outputs};
 use super::events::GameEvent;
 use super::tools::{BrokenTool, Wear};
-use super::{notices, station_tools, units, GameState};
+use super::{gazette, notices, station_tools, units, GameState};
 use crate::models::{ItemType, Recipe};
 
 /// How often the automation tick runs: the tick's 10-tick cadence (TDD §3.2).
@@ -656,6 +656,8 @@ pub async fn craft_once(
             Err(reason) if reason == OUTPUT_FULL => return Ok(Attempt::Blocked(PauseReason::OutputFull)),
             Err(reason) => return Err(sqlx::Error::Protocol(reason)),
         }
+        // The station's owner made it, for the Gazette (E3.9)
+        gazette::tally(&mut tx, station.owner_id, &output.item_type, output.quantity).await?;
     }
 
     automation.done += 1;

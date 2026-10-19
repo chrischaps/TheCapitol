@@ -234,6 +234,8 @@ pub enum GameEvent {
     OrderClosed { player_id: Uuid, order: MarketOrder },
     /// A fill, for the item's market channel
     MarketTrade { trade: MarketTrade },
+    /// E3.9: the Gazette's edition about `day` is out (to everyone)
+    GazettePublished { day: i64, number: i64, headline: String },
     // E3.3: the market API
     /// `player_id`'s order is on the book
     OrderPlaced { player_id: Uuid, order: MarketOrder },

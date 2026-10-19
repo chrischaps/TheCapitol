@@ -235,6 +235,12 @@ pub enum StateEvent {
     },
     /// Refetch `/terrain`.
     TerrainUpdated,
+    /// The Gazette's edition about `day` is out (`gazette_published`, E3.9)
+    GazettePublished {
+        day: i64,
+        number: i64,
+        headline: String,
+    },
     /// Someone, maybe you, claimed a lot (`plot_claimed`, B13). It's in
     /// [`GameState::claimed_lots`] now.
     LotClaimed(ClaimedPlot),
@@ -725,6 +731,12 @@ impl GameState {
                 item_name: item_name.clone(),
             }),
             M::TerrainUpdated => out.push(StateEvent::TerrainUpdated),
+            // E3.9: to everyone. The session asks for the edition.
+            M::GazettePublished { day, number, headline } => out.push(StateEvent::GazettePublished {
+                day: *day,
+                number: *number,
+                headline: headline.clone(),
+            }),
             M::PlotClaimed {
                 terrain_id,
                 owner_id,
@@ -967,6 +979,8 @@ impl GameState {
             | R::MarketHistory(_)
             | R::MarketSummary(_)
             | R::Collected(_)
+            | R::Gazette(_)
+            | R::Byline(_)
             | R::CreatedApiKey(_)
             | R::ApiKeys(_) => {}
         }

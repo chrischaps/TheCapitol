@@ -79,6 +79,12 @@ bindings = [{ type = "key", code = "KeyX" }]
 kind = "button"
 bindings = [{ type = "key", code = "KeyM" }]
 
+# The Capitol Gazette (E3.9); the header's Gazette chip and a click on the
+# notice board in the Exchange hall's forecourt do the same.
+[actions.gazette]
+kind = "button"
+bindings = [{ type = "key", code = "KeyG" }]
+
 # The shortcut overlay (P8.3). `?` opens it too, read off the typed
 # character, so it's `?` on any layout. Binding Slash here as well would
 # fire on the same keypress and toggle the overlay twice.

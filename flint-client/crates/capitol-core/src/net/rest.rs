@@ -135,6 +135,11 @@ pub enum RestRequest {
     MarketBox,
     /// `POST /market/box/collect`
     CollectMarketBox(CollectRequest),
+
+    /// `GET /gazette/latest`, or with a day `GET /gazette?date=` (E3.9)
+    Gazette { day: Option<i64> },
+    /// `PUT /gazette/byline`
+    SetByline(GazetteByline),
 }
 
 /// A decoded REST response. Each [`RestRequest`] decodes to exactly one variant.
@@ -190,6 +195,10 @@ pub enum RestResponse {
     MarketSummary(MarketSummaryResponse),
     MarketBox(ContainerResponse),
     Collected(CollectResponse),
+    /// An edition, if there is one, and your byline
+    Gazette(Box<GazetteResponse>),
+    /// Your byline as it now stands
+    Byline(GazetteByline),
 }
 
 /// Why a REST call failed.
@@ -258,7 +267,7 @@ impl RestRequest {
             | Grant(_)
             | PlaceOrder(_)
             | CollectMarketBox(_) => Method::POST,
-            UpdatePlotPermissions { .. } => Method::PUT,
+            UpdatePlotPermissions { .. } | SetByline(_) => Method::PUT,
             RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } => Method::DELETE,
             ApiKeys
             | Health
@@ -284,7 +293,8 @@ impl RestRequest {
             | MyOrders(_)
             | MarketHistory(_)
             | MarketSummary
-            | MarketBox => Method::GET,
+            | MarketBox
+            | Gazette { .. } => Method::GET,
         }
     }
 
@@ -338,6 +348,9 @@ impl RestRequest {
             MarketSummary => "/market/summary".into(),
             MarketBox => "/market/box".into(),
             CollectMarketBox(_) => "/market/box/collect".into(),
+            Gazette { day: None } => "/gazette/latest".into(),
+            Gazette { day: Some(_) } => "/gazette".into(),
+            SetByline(_) => "/gazette/byline".into(),
         }
     }
 
@@ -361,6 +374,8 @@ impl RestRequest {
             Grant(b) => req.json(b),
             PlaceOrder(b) => req.json(b),
             CollectMarketBox(b) => req.json(b),
+            SetByline(b) => req.json(b),
+            Gazette { day: Some(date) } => req.query(&GazetteQuery { date: *date }),
             MarketDepth(q) => req.query(q),
             MyOrders(q) => req.query(q),
             MarketHistory(q) => req.query(q),
@@ -428,6 +443,8 @@ impl RestRequest {
             Q::MarketSummary => A::MarketSummary(de(body)?),
             Q::MarketBox => A::MarketBox(de(body)?),
             Q::CollectMarketBox(_) => A::Collected(de(body)?),
+            Q::Gazette { .. } => A::Gazette(Box::new(de(body)?)),
+            Q::SetByline(_) => A::Byline(de(body)?),
         })
     }
 }
@@ -656,6 +673,13 @@ mod tests {
                 RestRequest::CollectMarketBox(Default::default()),
                 "POST",
                 "/market/box/collect".into(),
+            ),
+            (RestRequest::Gazette { day: None }, "GET", "/gazette/latest".into()),
+            (RestRequest::Gazette { day: Some(248_952) }, "GET", "/gazette".into()),
+            (
+                RestRequest::SetByline(GazetteByline { named: false }),
+                "PUT",
+                "/gazette/byline".into(),
             ),
         ];
         for (request, method, path) in cases {
