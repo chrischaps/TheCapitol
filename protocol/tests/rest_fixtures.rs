@@ -91,6 +91,7 @@ fn history_and_the_summary_round_trip() {
     let json = fixture("market_history.json");
     let history: MarketHistoryResponse = serde_json::from_str(&json).unwrap();
     assert!(history.candles.iter().all(|c| c.low <= c.open.min(c.close) && c.high >= c.open.max(c.close)));
+    assert_eq!(history.mine[0].trade, history.recent[0]);
     assert_eq!(serde_json::to_string(&history).unwrap(), json);
     let json = fixture("market_summary.json");
     let summary: MarketSummaryResponse = serde_json::from_str(&json).unwrap();

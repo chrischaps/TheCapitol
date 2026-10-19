@@ -22,6 +22,9 @@ flint-runtime = { workspace = true }
 flint-scene = { workspace = true }
 flint-schema = { workspace = true }
 egui = { workspace = true }
+egui_plot = { workspace = true }
+# Local time for the market chart's axis and trades (E3.6)
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 rhai = { workspace = true }
 resvg = { workspace = true }
 serde = { version = "1", features = ["derive"] }

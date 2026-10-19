@@ -39,6 +39,7 @@ pub mod icons;
 pub mod inventory;
 pub mod login;
 pub mod market;
+pub mod market_chart;
 pub mod plot;
 pub mod sample;
 pub mod settings;

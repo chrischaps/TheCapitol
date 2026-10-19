@@ -12,13 +12,21 @@
 //! - **Your orders** come from `/market/orders/mine`, the answers to placing
 //!   and cancelling, and `order_placed`, `order_filled` and `order_cancelled`,
 //!   which arrive whether or not you watch the item.
+//! - **The chart** (E3.6) is one item's [`History`] at a time: candles by
+//!   [`Bucket`], perhaps of one grade, the latest trades and your own fills,
+//!   from `/market/history`. [`MarketStore::chart`] says which; while it
+//!   holds, each `market_trade` and `order_filled` is folded in, so the last
+//!   candle moves as trades land.
 //!
 //! The game sends what [`MarketStore::take_outgoing`] gives it each frame:
 //! the store never touches the network itself.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use capitol_protocol::rest::{DepthLevel, MarketDepthResponse, MarketOrder, MarketTrade, PlaceOrder};
+use capitol_protocol::rest::{
+    Candle, DepthLevel, MarketDepthResponse, MarketHistoryQuery, MarketHistoryResponse, MarketOrder, MarketTrade,
+    MyFill, PlaceOrder,
+};
 use capitol_protocol::rules::market::{
     apply_depth_diff, buy_debit, fill_units, grade_floor, listing_fee, order_value, validate, GradeRule, OrderError,
     OrderSide, OrderStatus,
@@ -30,6 +38,161 @@ use uuid::Uuid;
 
 /// How many of an item's latest trades the store keeps.
 pub const RECENT_TRADES: usize = 50;
+/// How many of your fills a chart keeps.
+pub const MY_FILLS: usize = 200;
+
+/// A chart's candle length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum Bucket {
+    #[default]
+    Hour,
+    Day,
+}
+
+impl Bucket {
+    pub const ALL: [Bucket; 2] = [Bucket::Hour, Bucket::Day];
+
+    /// What `/market/history` calls it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Bucket::Hour => "1h",
+            Bucket::Day => "1d",
+        }
+    }
+
+    pub fn secs(self) -> i64 {
+        match self {
+            Bucket::Hour => 3600,
+            Bucket::Day => 86_400,
+        }
+    }
+
+    /// How far back a chart of it looks: a week of hours, four months of
+    /// days. Both are well under the server's 500 candles.
+    pub fn span(self) -> chrono::Duration {
+        match self {
+            Bucket::Hour => chrono::Duration::days(7),
+            Bucket::Day => chrono::Duration::days(120),
+        }
+    }
+}
+
+/// Which chart: an item, a bucket and perhaps one grade.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChartKey {
+    pub item_type: String,
+    pub bucket: Bucket,
+    /// Only trades of this grade (by their mean); every grade without one
+    pub grade: Option<String>,
+}
+
+impl ChartKey {
+    /// Whether `trade` belongs on this chart.
+    pub fn takes(&self, trade: &MarketTrade) -> bool {
+        trade.item_type == self.item_type && self.grade.as_ref().is_none_or(|g| *g == trade.grade)
+    }
+}
+
+/// One chart's data, as the server sent it and trades since have added to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct History {
+    pub key: ChartKey,
+    /// Oldest first; buckets with no trades aren't there
+    pub candles: Vec<Candle>,
+    /// The latest trades, newest first: at most [`RECENT_TRADES`]
+    pub recent: VecDeque<MarketTrade>,
+    /// Your fills, newest first: at most [`MY_FILLS`]
+    pub mine: VecDeque<MyFill>,
+}
+
+impl History {
+    pub fn from_response(key: ChartKey, response: &MarketHistoryResponse) -> History {
+        History {
+            key,
+            candles: response.candles.clone(),
+            recent: response.recent.iter().take(RECENT_TRADES).cloned().collect(),
+            mine: response.mine.iter().take(MY_FILLS).cloned().collect(),
+        }
+    }
+
+    /// Adds a trade that arrived since: into its candle, and the list. One
+    /// already held changes nothing, so the `market_trade` and the
+    /// `order_filled` of one fill count once.
+    pub fn add_trade(&mut self, trade: &MarketTrade) -> bool {
+        if !self.key.takes(trade) || self.recent.iter().any(|t| t.id == trade.id) {
+            return false;
+        }
+        fold_trade(&mut self.candles, self.key.bucket.secs(), trade);
+        let at = self.recent.iter().position(|t| (t.at, t.id) < (trade.at, trade.id));
+        self.recent.insert(at.unwrap_or(self.recent.len()), trade.clone());
+        self.recent.truncate(RECENT_TRADES);
+        true
+    }
+
+    /// Adds one of your fills.
+    pub fn add_mine(&mut self, side: OrderSide, trade: &MarketTrade) -> bool {
+        if !self.key.takes(trade) || self.mine.iter().any(|f| f.trade.id == trade.id) {
+            return false;
+        }
+        self.mine.push_front(MyFill {
+            side,
+            trade: trade.clone(),
+        });
+        self.mine.truncate(MY_FILLS);
+        true
+    }
+
+    /// Your side of `trade`, if it was one of your fills.
+    pub fn is_mine(&self, trade: &MarketTrade) -> Option<OrderSide> {
+        self.mine.iter().find(|f| f.trade.id == trade.id).map(|f| f.side)
+    }
+
+    /// The candle whose bucket holds `secs` (seconds since the epoch).
+    pub fn candle_at(&self, secs: f64) -> Option<&Candle> {
+        let width = self.key.bucket.secs() as f64;
+        self.candles.iter().find(|c| {
+            let from = c.at.timestamp() as f64;
+            secs >= from && secs < from + width
+        })
+    }
+}
+
+/// Folds `trade` into `candles` (oldest first) of `bucket_secs`, bucketed as
+/// the server does: from the epoch. A trade after the last candle opens a
+/// new one; one inside a candle moves its high, low and volume, and the last
+/// candle's close.
+pub fn fold_trade(candles: &mut Vec<Candle>, bucket_secs: i64, trade: &MarketTrade) {
+    let t = trade.at.timestamp();
+    let start = t - t.rem_euclid(bucket_secs);
+    let at = chrono::DateTime::from_timestamp(start, 0).unwrap_or(trade.at);
+    let i = candles.partition_point(|c| c.at < at);
+    let last = i + 1 == candles.len();
+    match candles.get_mut(i) {
+        Some(c) if c.at == at => {
+            c.high = c.high.max(trade.price);
+            c.low = c.low.min(trade.price);
+            c.volume += trade.quantity as i64;
+            c.trades += 1;
+            // Trades arrive in order, so a new one closes the last candle;
+            // an earlier candle keeps the close the server gave it
+            if last {
+                c.close = trade.price;
+            }
+        }
+        _ => candles.insert(
+            i,
+            Candle {
+                at,
+                open: trade.price,
+                high: trade.price,
+                low: trade.price,
+                close: trade.price,
+                volume: trade.quantity as i64,
+                trades: 1,
+            },
+        ),
+    }
+}
 
 /// One item's book, as the server last said it.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -72,6 +235,8 @@ pub enum MarketEvent {
     OrderClosed(MarketOrder),
     /// Your orders were refetched
     OrdersUpdated,
+    /// The chart's history arrived, or a trade moved it
+    HistoryChanged,
 }
 
 /// The market as the client holds it.
@@ -84,6 +249,11 @@ pub struct MarketStore {
     orders: BTreeMap<Uuid, MarketOrder>,
     trades: HashMap<String, VecDeque<MarketTrade>>,
     outgoing: Vec<ClientMessage>,
+    /// The chart wanted, and how many times one has been asked for: an
+    /// answer to an older ask is dropped
+    chart: Option<ChartKey>,
+    chart_asks: u64,
+    history: Option<History>,
 }
 
 impl MarketStore {
@@ -184,6 +354,9 @@ impl MarketStore {
                     recent.truncate(RECENT_TRADES);
                     out.push(MarketEvent::Traded(trade.clone()));
                 }
+                if self.history.as_mut().is_some_and(|h| h.add_trade(trade)) {
+                    out.push(MarketEvent::HistoryChanged);
+                }
             }
             ServerMessage::OrderPlaced { order } => {
                 self.orders.insert(order.id, order.clone());
@@ -191,6 +364,12 @@ impl MarketStore {
             }
             ServerMessage::OrderFilled { order, trade } => {
                 self.orders.insert(order.id, order.clone());
+                if let Some(history) = self.history.as_mut() {
+                    let mine = history.add_mine(order.side, trade);
+                    if history.add_trade(trade) || mine {
+                        out.push(MarketEvent::HistoryChanged);
+                    }
+                }
                 out.push(MarketEvent::OrderFilled {
                     order: order.clone(),
                     trade: trade.clone(),
@@ -282,6 +461,63 @@ impl MarketStore {
     /// `item_type`'s latest trades, newest first.
     pub fn trades(&self, item_type: &str) -> impl Iterator<Item = &MarketTrade> {
         self.trades.get(item_type).into_iter().flatten()
+    }
+
+    /// Show `key`'s chart, or none. A new one drops the old one's history
+    /// and returns the ask to send, with its number for
+    /// [`set_history`](Self::set_history); the same one again returns
+    /// nothing.
+    pub fn chart(
+        &mut self,
+        key: Option<ChartKey>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<(u64, MarketHistoryQuery)> {
+        if key == self.chart {
+            return None;
+        }
+        self.chart = key;
+        self.history = None;
+        self.refresh_chart(now)
+    }
+
+    /// Asks again for the chart there is, keeping what's shown until the
+    /// answer comes.
+    pub fn refresh_chart(&mut self, now: chrono::DateTime<chrono::Utc>) -> Option<(u64, MarketHistoryQuery)> {
+        let key = self.chart.as_ref()?;
+        self.chart_asks += 1;
+        Some((
+            self.chart_asks,
+            MarketHistoryQuery {
+                item: key.item_type.clone(),
+                bucket: Some(key.bucket.as_str().to_owned()),
+                since: Some(now - key.bucket.span()),
+                grade: key.grade.clone(),
+            },
+        ))
+    }
+
+    /// The answer to ask number `ask`. Only the latest ask's is taken.
+    pub fn set_history(&mut self, ask: u64, response: &MarketHistoryResponse) -> Vec<MarketEvent> {
+        let Some(key) = self.chart.clone() else {
+            return Vec::new();
+        };
+        if ask != self.chart_asks
+            || response.item_type != key.item_type
+            || response.bucket_secs != key.bucket.secs()
+        {
+            return Vec::new();
+        }
+        self.history = Some(History::from_response(key, response));
+        vec![MarketEvent::HistoryChanged]
+    }
+
+    /// The chart asked for, once its history has arrived.
+    pub fn history(&self) -> Option<&History> {
+        self.history.as_ref()
+    }
+
+    pub fn chart_key(&self) -> Option<&ChartKey> {
+        self.chart.as_ref()
     }
 }
 
@@ -713,6 +949,92 @@ mod tests {
         assert_eq!((buy.item_id, buy.min_grade.as_deref(), buy.grade_rule), (None, Some("B"), Some(GradeRule::EveryUnit)));
         let sell = draft(OrderSide::Sell, 44, 3, "B", GradeRule::EveryUnit).to_place(Some(Uuid::nil()));
         assert_eq!((sell.item_id, sell.min_grade, sell.grade_rule), (Some(Uuid::nil()), None, None));
+    }
+
+    fn trade(id: u128, secs: i64, price: i64, quantity: i32, grade: &str) -> MarketTrade {
+        MarketTrade {
+            id: Uuid::from_u128(id),
+            buy_order_id: Uuid::from_u128(1000 + id),
+            sell_order_id: Uuid::from_u128(2000 + id),
+            item_type: "plank".into(),
+            grade: grade.into(),
+            quality: 70,
+            min_quality: 70,
+            price,
+            quantity,
+            at: chrono::DateTime::from_timestamp(secs, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn trades_fold_into_their_buckets() {
+        let mut candles = Vec::new();
+        // 10:00:05, 10:30 and 10:59, then 12:01, then one late for 11:00
+        fold_trade(&mut candles, 3600, &trade(1, 36_005, 10, 2, "B"));
+        fold_trade(&mut candles, 3600, &trade(2, 37_800, 14, 3, "B"));
+        fold_trade(&mut candles, 3600, &trade(3, 39_540, 8, 1, "B"));
+        fold_trade(&mut candles, 3600, &trade(4, 43_260, 12, 4, "B"));
+        fold_trade(&mut candles, 3600, &trade(5, 39_700, 11, 1, "B"));
+        let ohlc: Vec<_> = candles
+            .iter()
+            .map(|c| (c.at.timestamp(), c.open, c.high, c.low, c.close, c.volume, c.trades))
+            .collect();
+        assert_eq!(
+            ohlc,
+            [
+                (36_000, 10, 14, 8, 8, 6, 3),
+                (39_600, 11, 11, 11, 11, 1, 1),
+                (43_200, 12, 12, 12, 12, 4, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_chart_takes_only_its_latest_answer_and_folds_trades_in_once() {
+        let mut market = MarketStore::new();
+        let now = chrono::DateTime::from_timestamp(50_000, 0).unwrap();
+        let key = ChartKey {
+            item_type: "plank".into(),
+            bucket: Bucket::Hour,
+            grade: Some("B".into()),
+        };
+        let (first, query) = market.chart(Some(key.clone()), now).unwrap();
+        assert_eq!((query.bucket.as_deref(), query.grade.as_deref()), (Some("1h"), Some("B")));
+        assert_eq!(query.since, Some(now - chrono::Duration::days(7)));
+        assert!(market.chart(Some(key.clone()), now).is_none());
+        let (second, _) = market.refresh_chart(now).unwrap();
+        let response = MarketHistoryResponse {
+            item_type: "plank".into(),
+            bucket_secs: 3600,
+            candles: Vec::new(),
+            recent: vec![trade(1, 36_005, 10, 2, "B")],
+            mine: Vec::new(),
+        };
+        // The first ask's answer is stale
+        assert!(market.set_history(first, &response).is_empty());
+        assert_eq!(market.set_history(second, &response), [MarketEvent::HistoryChanged]);
+
+        // A C trade isn't this chart's. A B is, once, though both its
+        // market_trade and your order_filled tell of it
+        let c = trade(2, 39_000, 9, 1, "C");
+        let b = trade(3, 39_100, 12, 5, "B");
+        let heard = market.apply_ws(&ServerMessage::MarketTrade { trade: c });
+        assert!(!heard.contains(&MarketEvent::HistoryChanged));
+        market.apply_ws(&ServerMessage::MarketTrade { trade: b.clone() });
+        let order = my_order(OrderSide::Sell, 12, 0, Units::new());
+        market.apply_ws(&ServerMessage::OrderFilled { order, trade: b.clone() });
+        let history = market.history().unwrap();
+        assert_eq!(history.recent.iter().map(|t| t.id.as_u128()).collect::<Vec<_>>(), [3, 1]);
+        assert_eq!(history.candles.len(), 1);
+        assert_eq!(history.candles[0].volume, 5);
+        assert_eq!(history.is_mine(&b), Some(OrderSide::Sell));
+        assert_eq!(history.candle_at(39_599.0).map(|c| c.close), Some(12));
+        assert!(history.candle_at(39_600.0).is_none());
+
+        // Another bucket drops it until its own answer comes
+        let day = ChartKey { bucket: Bucket::Day, ..key };
+        assert!(market.chart(Some(day), now).is_some());
+        assert!(market.history().is_none());
     }
 
     #[test]

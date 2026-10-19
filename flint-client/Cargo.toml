@@ -35,6 +35,8 @@ capitol-protocol = { path = "../protocol" }
 # toml 0.8), or two copies get linked and types stop lining up across the
 # boundary.
 egui = "0.30.0"
+# The market chart (E3.6); its version follows egui's.
+egui_plot = "0.30.0"
 rhai = { version = "1", features = ["sync"] }
 toml = "0.8"
 winit = "0.30"

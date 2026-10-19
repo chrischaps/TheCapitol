@@ -921,6 +921,7 @@ impl PlayerExtension for CapitolExtension {
                 // The market (E3.5): watch the item it shows while it's open
                 session.set_market_open(self.market.open);
                 session.watch_market(self.market.watching());
+                session.chart_market(self.market.charting());
                 let state = session.state();
                 let market = state.market();
                 // D6: placing and collecting need the Exchange hall
@@ -934,6 +935,7 @@ impl PlayerExtension for CapitolExtension {
                     catalog: state.catalog(),
                     summary: session.market_summary().map(|s| s.items.as_slice()),
                     book: self.market.selected.as_deref().and_then(|i| market.book(i)),
+                    history: market.history(),
                     orders: market.open_orders(),
                     inventory: state.inventory(),
                     market_box: state.market_box(),
@@ -1107,7 +1109,8 @@ impl PlayerExtension for CapitolExtension {
             sample.show(ctx, &mut self.icons);
         }
         if let Some(sample) = &self.market_sample {
-            let view = sample.view(self.market.selected.as_deref());
+            let history = self.market.charting().map(|key| sample.history(&key));
+            let view = sample.view_with(self.market.selected.as_deref(), history.as_ref());
             if let Some(ui::market::Action::Close) = self.market.show(ctx, &mut self.icons, &view) {
                 self.market.open = false;
             }

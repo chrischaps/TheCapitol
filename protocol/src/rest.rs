@@ -1188,13 +1188,31 @@ pub struct Candle {
     pub trades: i32,
 }
 
-/// `GET /market/history`: an item's trades, in buckets, oldest first.
+/// `GET /market/history`: an item's trades, in buckets, oldest first, then
+/// the latest of them one by one, and yours (E3.6).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct MarketHistoryResponse {
     pub item_type: String,
     pub bucket_secs: i64,
     pub candles: Vec<Candle>,
+    /// The latest trades since `since`, of the grade if one was asked for,
+    /// newest first: at most 50
+    #[serde(default)]
+    pub recent: Vec<MarketTrade>,
+    /// Your fills since `since`, of the grade if one was asked for, newest
+    /// first: at most 200
+    #[serde(default)]
+    pub mine: Vec<MyFill>,
+}
+
+/// One of your fills: the trade, and which side of it was yours. The matcher
+/// never trades you with yourself, so only one is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MyFill {
+    pub side: rules::market::OrderSide,
+    pub trade: MarketTrade,
 }
 
 /// One item with activity: traded in the last 7 days, or on the book now.

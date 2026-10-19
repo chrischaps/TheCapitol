@@ -20,14 +20,19 @@
 //!   now" walks the visible book less your own orders, as the matcher would.
 //! - **Your orders**, with a cancel on each, and the market box: what you
 //!   bought waits there, and Collect brings it to your inventory.
+//! - **Book or Chart** (E3.6), beside the item's name: the chart takes the
+//!   ladder's and the form's room for the price history, its volume, your
+//!   fills in gold and the latest trades (`market_chart`). A trade clicked
+//!   there goes back to the book with its price in the form.
 //!
 //! It's edged in gold, as the exchange is: Strands are money. Fills arrive
 //! as toasts (`market_note`) whether the panel is open or not.
 
 use capitol_core::catalog::Catalog;
-use capitol_core::market::{self, Book, Draft, FormRefusal, OrderQuote};
+use capitol_core::market::{self, Book, ChartKey, Draft, FormRefusal, History, OrderQuote};
 use capitol_core::protocol::rest::{
-    DepthLevel, MarketItemSummary, MarketOrder, PlaceOrder, SlotItem,
+    DepthLevel, MarketHistoryResponse, MarketItemSummary, MarketOrder, MarketTrade, MyFill, PlaceOrder,
+    SlotItem,
 };
 use capitol_core::protocol::rules::market::{GradeRule, OrderSide};
 use capitol_core::state::Container;
@@ -36,6 +41,7 @@ use uuid::Uuid;
 
 use super::hud::grouped;
 use super::icons::ItemIcons;
+use super::market_chart::{self as chart, ChartState};
 use super::theme::{self, size, DIM, ENOUGH, GOLD, GOLD_DIM, GOLD_WASH, SHORT, TEXT};
 
 /// The columns' widths inside the frame.
@@ -76,6 +82,9 @@ pub struct View<'a> {
     pub summary: Option<&'a [MarketItemSummary]>,
     /// The selected item's book, once its whole book has arrived
     pub book: Option<&'a Book>,
+    /// The chart's history, once it has arrived. It's shown only while its
+    /// key is the panel's [`MarketPanel::charting`].
+    pub history: Option<&'a History>,
     /// Your open orders, newest first
     pub orders: Vec<&'a MarketOrder>,
     pub inventory: Option<&'a Container>,
@@ -123,6 +132,16 @@ pub enum Tab {
     Orders,
 }
 
+/// What the right of the panel shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pane {
+    /// The ladder and the order form
+    #[default]
+    Book,
+    /// The price history and the tape (E3.6)
+    Chart,
+}
+
 /// What the panel keeps between frames.
 #[derive(Default)]
 pub struct MarketPanel {
@@ -130,6 +149,10 @@ pub struct MarketPanel {
     /// The item whose book is shown
     pub selected: Option<String>,
     pub tab: Tab,
+    pub pane: Pane,
+    /// The chart's bucket, grade and style, kept across items
+    pub chart: chart::Settings,
+    chart_state: ChartState,
     pub form: Form,
     tab_rects: Vec<egui::Rect>,
     /// The item list's search
@@ -155,6 +178,16 @@ impl MarketPanel {
         self.open.then_some(self.selected.as_deref()).flatten()
     }
 
+    /// The chart to fetch: the selected item's, while the chart is shown.
+    pub fn charting(&self) -> Option<ChartKey> {
+        let item = self.watching().filter(|_| self.pane == Pane::Chart)?;
+        Some(ChartKey {
+            item_type: item.to_owned(),
+            bucket: self.chart.bucket,
+            grade: self.chart.grade.map(str::to_owned),
+        })
+    }
+
     /// Show `item_type`'s book, keeping the form's numbers.
     pub fn select(&mut self, item_type: &str) {
         if self.selected.as_deref() != Some(item_type) {
@@ -165,10 +198,27 @@ impl MarketPanel {
 
     /// Opens the panel on `item_type` with the form filled in, for captures
     /// (`--market-sample`, `--market`): "plank" opens its book, and
-    /// "plank:buy:10@41:B" fills a buy of 10 at 41, B or better.
+    /// "plank:buy:10@41:B" fills a buy of 10 at 41, B or better. Anywhere
+    /// after the item, "chart" shows the chart, and "1d", "line" or
+    /// "grade-B" (or "grade-all") set it up.
     pub fn preset(&mut self, spec: &str) {
         self.open = true;
-        let mut parts = spec.split(':');
+        let mut kept = Vec::new();
+        for part in spec.split(':') {
+            match part {
+                "chart" => self.pane = Pane::Chart,
+                "1h" => self.chart.bucket = market::Bucket::Hour,
+                "1d" => self.chart.bucket = market::Bucket::Day,
+                "line" => self.chart.style = chart::Style::Line,
+                "candles" => self.chart.style = chart::Style::Candles,
+                _ => match part.strip_prefix("grade-") {
+                    // "grade-all" finds none, so it's every grade
+                    Some(g) => self.chart.grade = GRADES.iter().find(|x| **x == g).copied(),
+                    None => kept.push(part),
+                },
+            }
+        }
+        let mut parts = kept.into_iter();
         if let Some(item) = parts.next().filter(|s| !s.is_empty()) {
             self.select(item);
         }
@@ -262,16 +312,26 @@ impl MarketPanel {
                     }
                 }
             });
-            ui.vertical(|ui| {
-                ui.set_width(LADDER_WIDTH);
-                self.ladder(ui, icons, view);
-            });
-            ui.vertical(|ui| {
-                ui.set_width(FORM_WIDTH);
-                if let Some(placed) = self.form_column(ui, view) {
-                    action = Some(placed);
+            match self.pane {
+                Pane::Book => {
+                    ui.vertical(|ui| {
+                        ui.set_width(LADDER_WIDTH);
+                        self.ladder(ui, icons, view);
+                    });
+                    ui.vertical(|ui| {
+                        ui.set_width(FORM_WIDTH);
+                        if let Some(placed) = self.form_column(ui, view) {
+                            action = Some(placed);
+                        }
+                    });
                 }
-            });
+                Pane::Chart => {
+                    ui.vertical(|ui| {
+                        ui.set_width(LADDER_WIDTH + GUTTER + FORM_WIDTH);
+                        self.chart_pane(ui, icons, view);
+                    });
+                }
+            }
         });
         ui.add_space(6.0);
         if let Some(collect) = market_box(ui, view) {
@@ -478,19 +538,16 @@ impl MarketPanel {
 
     // -- The ladder ----------------------------------------------------------
 
-    fn ladder(&mut self, ui: &mut egui::Ui, icons: &mut ItemIcons, view: &View) {
-        self.level_rows.clear();
-        let Some(item) = self.selected.clone() else {
-            ui.label(theme::dim("Choose an item"));
-            return;
-        };
+    /// The item's icon, name and last price, with Book and Chart at the
+    /// right.
+    fn item_head(&mut self, ui: &mut egui::Ui, icons: &mut ItemIcons, view: &View, item: &str) {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::hover());
-            icons.paint(ui, rect, &item);
+            icons.paint(ui, rect, item);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.label(
-                    theme::text(view.catalog.item_name(&item)).font(theme::strong(size::LARGE)),
+                    theme::text(view.catalog.item_name(item)).font(theme::strong(size::LARGE)),
                 );
                 let line = match view
                     .summary
@@ -508,8 +565,37 @@ impl MarketPanel {
                 };
                 ui.label(line.size(size::SMALL));
             });
+            // Book and Chart against the right edge, in reading order: a
+            // right-to-left layout would turn them round
+            const PANES: [(Pane, &str); 2] = [(Pane::Book, "Book"), (Pane::Chart, "Chart")];
+            let pad = ui.spacing().button_padding.x * 2.0;
+            let width: f32 = PANES
+                .iter()
+                .map(|(_, name)| {
+                    let galley = ui.painter().layout_no_wrap(
+                        (*name).to_owned(),
+                        egui::FontId::proportional(size::SMALL),
+                        TEXT,
+                    );
+                    (galley.size().x + pad).max(36.0)
+                })
+                .sum();
+            let gap = ui.spacing().item_spacing.x;
+            ui.add_space((ui.available_width() - width - gap - 1.0).max(0.0));
+            ui.scope(|ui| {
+                theme::segmented(ui, &mut self.pane, &PANES);
+            });
         });
         ui.add_space(4.0);
+    }
+
+    fn ladder(&mut self, ui: &mut egui::Ui, icons: &mut ItemIcons, view: &View) {
+        self.level_rows.clear();
+        let Some(item) = self.selected.clone() else {
+            ui.label(theme::dim("Choose an item"));
+            return;
+        };
+        self.item_head(ui, icons, view, &item);
         let Some(book) = view.book else {
             theme::well().show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -666,6 +752,58 @@ impl MarketPanel {
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(hover);
         response.clicked().then(|| level.clone())
+    }
+
+    // -- The chart (E3.6) ----------------------------------------------------
+
+    /// The price history beside the tape, under the chart's controls.
+    fn chart_pane(&mut self, ui: &mut egui::Ui, icons: &mut ItemIcons, view: &View) {
+        self.chart_state.tape_rows.clear();
+        let Some(item) = self.selected.clone() else {
+            ui.label(theme::dim("Choose an item"));
+            return;
+        };
+        self.item_head(ui, icons, view, &item);
+        chart::controls(ui, &mut self.chart);
+        ui.add_space(6.0);
+        let key = self.charting();
+        let history = view.history.filter(|h| key.as_ref() == Some(&h.key));
+        let mut taken = None;
+        theme::well().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let tape_width = 150.0;
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width() - tape_width - 10.0);
+                    match history {
+                        Some(h) if !h.candles.is_empty() => {
+                            chart::plots(ui, &mut self.chart_state, h, &self.chart, chrono::Utc::now());
+                        }
+                        Some(_) => {
+                            let grade = self.chart.grade.map(|g| format!(" of grade {g}")).unwrap_or_default();
+                            let when = match self.chart.bucket {
+                                market::Bucket::Hour => "this week",
+                                market::Bucket::Day => "in four months",
+                            };
+                            chart::empty(ui, &format!("No trades{grade} {when}"), chart::HEIGHT);
+                        }
+                        None => chart::empty(ui, "Fetching the history…", chart::HEIGHT),
+                    }
+                });
+                ui.vertical(|ui| {
+                    ui.set_width(tape_width);
+                    if let Some(h) = history {
+                        taken = chart::tape(ui, &mut self.chart_state, h, chart::HEIGHT);
+                    }
+                });
+            });
+        });
+        // A trade clicked: back to the book with its price
+        if let Some(trade) = taken {
+            self.form.price = trade.price.to_string();
+            self.pane = Pane::Book;
+        }
     }
 
     /// A level clicked: take the other side of it at its price.
@@ -1386,6 +1524,10 @@ pub struct Sample {
     pub inventory: Container,
     pub market_box: Container,
     pub strands: i64,
+    /// Four months of plank trades, the last week busiest, some of them
+    /// yours: what the chart draws from
+    pub trades: Vec<MarketTrade>,
+    pub mine: Vec<MyFill>,
 }
 
 impl Sample {
@@ -1479,6 +1621,7 @@ impl Sample {
                 0,
             )],
         );
+        let (trades, mine) = sample_trades(capitol_core::chrono::Utc::now());
         Sample {
             catalog: Catalog::fallback(),
             summary: vec![
@@ -1527,15 +1670,47 @@ impl Sample {
             inventory,
             market_box,
             strands: 1250,
+            trades,
+            mine,
         }
+    }
+
+    /// The chart `key` asks for, from [`Sample::trades`], as the server
+    /// would answer it.
+    pub fn history(&self, key: &ChartKey) -> History {
+        let mut candles = Vec::new();
+        let since = capitol_core::chrono::Utc::now() - key.bucket.span();
+        let shown: Vec<&MarketTrade> = self.trades.iter().filter(|t| key.takes(t) && t.at >= since).collect();
+        for trade in &shown {
+            market::fold_trade(&mut candles, key.bucket.secs(), trade);
+        }
+        let response = MarketHistoryResponse {
+            item_type: key.item_type.clone(),
+            bucket_secs: key.bucket.secs(),
+            candles,
+            recent: shown.iter().rev().take(market::RECENT_TRADES).map(|t| (*t).clone()).collect(),
+            mine: self
+                .mine
+                .iter()
+                .filter(|f| key.takes(&f.trade) && f.trade.at >= since)
+                .cloned()
+                .collect(),
+        };
+        History::from_response(key.clone(), &response)
     }
 
     /// The panel's view of it, with the plank book when `selected` is plank.
     pub fn view(&self, selected: Option<&str>) -> View<'_> {
+        self.view_with(selected, None)
+    }
+
+    /// The panel's view, with a chart's history.
+    pub fn view_with<'a>(&'a self, selected: Option<&str>, history: Option<&'a History>) -> View<'a> {
         View {
             catalog: &self.catalog,
             summary: Some(&self.summary),
             book: (selected == Some("plank")).then_some(&self.book),
+            history,
             orders: self.orders.iter().collect(),
             inventory: Some(&self.inventory),
             market_box: Some(&self.market_box),
@@ -1545,6 +1720,61 @@ impl Sample {
             away_from_hall: None,
         }
     }
+}
+
+/// Plank trading for four months, about one an hour and then three an hour in the
+/// last week, its price walking up from about 30 to the summary's 41: a
+/// seeded walk, the same every run, moved to end on 41. Every 131st trade
+/// is yours.
+fn sample_trades(now: capitol_core::chrono::DateTime<capitol_core::chrono::Utc>) -> (Vec<MarketTrade>, Vec<MyFill>) {
+    let mut seed: u64 = 0x5eed_cafe;
+    let mut next = move || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 33) as f64 / (1u64 << 31) as f64
+    };
+    let day = 86_400i64;
+    let end = now.timestamp();
+    let mut t = end - 120 * day;
+    let mut price = 30.0f64;
+    let (mut trades, mut mine) = (Vec::new(), Vec::new());
+    let mut n = 0u128;
+    while t < end {
+        let age = (end - t) as f64 / day as f64;
+        let target = 30.0 + 11.0 * (1.0 - age / 120.0) + 2.5 * (age * 0.9).sin();
+        price += (target - price) * 0.08 + (next() - 0.5) * 2.4;
+        let quality = (40.0 + next() * 55.0) as i32;
+        let grade = capitol_core::protocol::rules::quality_grade(quality);
+        // Better grades fetch more
+        let premium = (quality as f64 - 65.0) * 0.06;
+        n += 1;
+        let trade = MarketTrade {
+            id: Uuid::from_u128(0x7000_0000 + n),
+            buy_order_id: Uuid::from_u128(0x8000_0000 + n),
+            sell_order_id: Uuid::from_u128(0x9000_0000 + n),
+            item_type: "plank".into(),
+            grade: grade.into(),
+            quality,
+            min_quality: (quality - (next() * 6.0) as i32).max(0),
+            price: (price + premium).round().max(1.0) as i64,
+            quantity: 1 + (next() * next() * 24.0) as i32,
+            at: capitol_core::chrono::DateTime::from_timestamp(t, 0).unwrap_or(now),
+        };
+        if n.is_multiple_of(131) {
+            let side = if n.is_multiple_of(2) { OrderSide::Buy } else { OrderSide::Sell };
+            mine.push(MyFill { side, trade: trade.clone() });
+        }
+        trades.push(trade);
+        // A few a day, then a few an hour
+        let gap = if age > 7.0 { 3600.0 } else { 3600.0 / 3.0 };
+        t += (gap * (0.3 + next() * 1.4)) as i64;
+    }
+    // End on the summary's last price
+    let shift = trades.last().map_or(0, |t| 41 - t.price);
+    for t in trades.iter_mut().map(Some).chain(mine.iter_mut().map(|f| Some(&mut f.trade))).flatten() {
+        t.price = (t.price + shift).max(1);
+    }
+    mine.reverse();
+    (trades, mine)
 }
 
 impl Default for Sample {
@@ -1706,6 +1936,45 @@ mod tests {
             None
         );
         assert_eq!(panel.selected.as_deref(), Some("rope"));
+    }
+
+    #[test]
+    fn the_chart_marks_your_fills_and_a_trade_clicked_takes_its_price() {
+        let sample = Sample::new();
+        let mut panel = open();
+        panel.preset("plank:chart:grade-B");
+        let key = panel.charting().unwrap();
+        assert_eq!((key.item_type.as_str(), key.grade.as_deref()), ("plank", Some("B")));
+        // A week of hourly candles, only B trades
+        let bs = sample.history(&key);
+        assert!(bs.candles.len() > 50, "{}", bs.candles.len());
+        assert!(bs.recent.iter().all(|t| t.grade == "B"));
+        panel.preset("plank:chart:grade-all");
+        let history = sample.history(&panel.charting().unwrap());
+        assert!(history.recent.len() == market::RECENT_TRADES && !history.mine.is_empty());
+        run(&mut panel, &sample.view_with(Some("plank"), Some(&history)), None);
+        let rect = panel.rect.unwrap();
+        assert!(rect.width() < 1280.0 - 32.0 && rect.bottom() < 720.0, "{rect:?}");
+        let (id, at) = panel.chart_state.tape_rows[2];
+        let price = history.recent.iter().find(|t| t.id == id).unwrap().price;
+        run(&mut panel, &sample.view_with(Some("plank"), Some(&history)), Some(at.center()));
+        assert_eq!((panel.pane, panel.form.price.clone()), (Pane::Book, price.to_string()));
+        // On the book, nothing is charted
+        assert_eq!(panel.charting(), None);
+    }
+
+    #[test]
+    fn a_chart_for_another_key_is_not_drawn() {
+        let sample = Sample::new();
+        let mut panel = open();
+        panel.preset("plank:chart");
+        let day = ChartKey {
+            bucket: market::Bucket::Day,
+            ..panel.charting().unwrap()
+        };
+        let history = sample.history(&day);
+        run(&mut panel, &sample.view_with(Some("plank"), Some(&history)), None);
+        assert!(panel.chart_state.tape_rows.is_empty());
     }
 
     #[test]

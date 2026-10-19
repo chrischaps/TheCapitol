@@ -75,6 +75,9 @@ const CATALOG_TAG: Tag = 50;
 /// collecting share one; the summary, your orders and the market box another.
 const MARKET_TAG: Tag = 60;
 const MARKET_READ_TAG: Tag = 61;
+/// The chart's history (E3.6): this, plus the ask's number, so only the
+/// latest ask's answer is shown (`MarketStore::set_history`).
+const CHART_TAG: Tag = 1 << 32;
 
 /// How often the open market panel asks again for the summary and your
 /// orders. The books themselves come over the WS as they change.
@@ -846,6 +849,17 @@ impl Session {
         }
     }
 
+    /// Show `key`'s chart, or none: a new one is fetched at once, and again
+    /// with the panel's other refreshes. Trades fold in as they land.
+    pub fn chart_market(&mut self, key: Option<capitol_core::market::ChartKey>) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        if let Some((ask, query)) = self.state.market_mut().chart(key, capitol_core::chrono::Utc::now()) {
+            self.net.rest(RestRequest::MarketHistory(query), CHART_TAG + ask);
+        }
+    }
+
     /// Places `order` (`POST /market/orders`), unless a market call is out.
     pub fn place_order(&mut self, order: PlaceOrder) {
         if self.auth.phase() != Phase::InWorld || self.market_busy {
@@ -929,6 +943,9 @@ impl Session {
         self.net
             .rest(RestRequest::MyOrders(MyOrdersQuery::default()), MARKET_READ_TAG);
         self.net.rest(RestRequest::MarketBox, MARKET_READ_TAG);
+        if let Some((ask, query)) = self.state.market_mut().refresh_chart(capitol_core::chrono::Utc::now()) {
+            self.net.rest(RestRequest::MarketHistory(query), CHART_TAG + ask);
+        }
     }
 
     /// Turns your orders' fills and expiries into toasts.
@@ -1383,6 +1400,12 @@ impl Session {
                 }
                 NetEvent::Rest(MARKET_READ_TAG, Err(e)) => {
                     tracing::warn!("market: a refresh failed: {e}");
+                }
+                NetEvent::Rest(tag, Ok(RestResponse::MarketHistory(history))) if *tag > CHART_TAG => {
+                    self.state.market_mut().set_history(tag - CHART_TAG, history);
+                }
+                NetEvent::Rest(tag, Err(e)) if *tag > CHART_TAG => {
+                    tracing::warn!("market: the chart's history failed: {e}");
                 }
                 NetEvent::Rest(PAY_TAX_TAG, Ok(RestResponse::PayTax(paid))) => {
                     tracing::info!(
@@ -2409,6 +2432,138 @@ mod tests {
         });
         session.log_out();
         drop(seller);
+    }
+
+    /// E3.6 against the local stack: two bots trade fiber twice, then the
+    /// buyer signs in through the session and opens the fiber chart. Its
+    /// history holds both trades, marked as the buyer's, and a third trade,
+    /// between the seller and another bot, folds in live.
+    #[test]
+    #[ignore = "needs the local stack"]
+    fn the_chart_shows_the_trades_and_marks_yours() {
+        use capitol_core::bot::{Account, Bot};
+        use capitol_core::market::{Bucket, ChartKey};
+        use capitol_core::net::NetConfig;
+        use capitol_core::protocol::rest::PlaceOrder;
+        use capitol_core::protocol::rules::market::{GradeRule, OrderSide};
+
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            % 100_000_000;
+        let price = 5 + (stamp as i64 % 15);
+        let bot = |name: &str| {
+            let mut b = Bot::sign_in(
+                NetConfig::with_base_url(&server),
+                &Account::numbered(&format!("{name}{stamp}"), 1),
+            )
+            .expect("signed in");
+            b.go_to_exchange().expect("at the Exchange hall");
+            b
+        };
+        let buy = |b: &mut Bot, quantity: i32| {
+            b.place_order(PlaceOrder {
+                side: OrderSide::Buy,
+                item_type: "fiber".into(),
+                price,
+                quantity,
+                item_id: None,
+                qualities: None,
+                min_grade: Some("F".into()),
+                grade_rule: Some(GradeRule::Average),
+            })
+            .expect("placed a buy");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !b.my_orders().expect("orders").is_empty() {
+                assert!(Instant::now() < deadline, "timed out waiting for a fill");
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        };
+
+        // The seller lists six; the buyer takes two, then three
+        let mut seller = bot("cseller");
+        seller.withdraw_fiber(6).expect("withdrew fiber");
+        let stack = seller
+            .state()
+            .inventory()
+            .and_then(|inv| inv.items().find(|i| i.item_type == "fiber").map(|i| i.item_id))
+            .expect("fiber in the inventory");
+        seller
+            .place_order(PlaceOrder {
+                side: OrderSide::Sell,
+                item_type: "fiber".into(),
+                price,
+                quantity: 6,
+                item_id: Some(stack),
+                qualities: None,
+                min_grade: None,
+                grade_rule: None,
+            })
+            .expect("placed the sell");
+        let buyer = Account::numbered(&format!("cbuyer{stamp}"), 1);
+        let mut buying = Bot::sign_in(NetConfig::with_base_url(&server), &buyer).expect("buyer");
+        buying.go_to_exchange().expect("at the hall");
+        buy(&mut buying, 2);
+        buy(&mut buying, 3);
+        drop(buying);
+
+        // The buyer, through the session, opens the chart
+        let dir = std::env::temp_dir().join(format!("capitol-chart-{}", std::process::id()));
+        let mut session = Session::start(&server, SessionFile::load(dir.join("s.toml"))).unwrap();
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let mut terrain = TerrainSource::offline(&fixture).unwrap();
+        session.log_in(&buyer.email, &buyer.password);
+        let mut wait = |session: &mut Session, what: &str, done: &dyn Fn(&Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !done(session) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                session.update(Instant::now(), &mut terrain);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait(&mut session, "the world", &|s| s.state().inventory().is_some());
+        session.set_market_open(true);
+        session.watch_market(Some("fiber"));
+        let key = ChartKey {
+            item_type: "fiber".into(),
+            bucket: Bucket::Hour,
+            grade: None,
+        };
+        session.chart_market(Some(key.clone()));
+        wait(&mut session, "the history", &|s| s.state().market().history().is_some());
+        let history = session.state().market().history().unwrap().clone();
+        assert_eq!(history.key, key);
+        let ours: Vec<i32> = history
+            .recent
+            .iter()
+            .filter(|t| t.price == price && history.is_mine(t) == Some(OrderSide::Buy))
+            .map(|t| t.quantity)
+            .collect();
+        assert_eq!(ours, [3, 2], "both fills, newest first, marked yours");
+        let candle = history.candles.last().expect("this hour's candle").clone();
+        eprintln!("last candle: {candle:?}");
+        assert!(candle.volume >= 5);
+
+        // Wait for the book, so the trade channel is open, then another bot
+        // takes one more: it folds into the chart, not as yours
+        wait(&mut session, "the fiber book", &|s| s.state().market().book("fiber").is_some());
+        let mut other = bot("cother");
+        buy(&mut other, 1);
+        wait(&mut session, "the third trade", &|s| {
+            s.state().market().history().is_some_and(|h| h.recent.len() == history.recent.len() + 1)
+        });
+        let now = session.state().market().history().unwrap();
+        let third = &now.recent[0];
+        assert_eq!((third.quantity, now.is_mine(third)), (1, None));
+        let last = now.candles.last().unwrap();
+        if last.at == candle.at {
+            assert_eq!((last.volume, last.close), (candle.volume + 1, price));
+        }
+        session.log_out();
+        drop((seller, other));
     }
 
     #[test]

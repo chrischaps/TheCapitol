@@ -726,7 +726,7 @@ Sizes: **S** is about 1 focused session, **M** 2–3, **L** 4 or more. Each phas
 *Since 2026-10-18 the M6 markets and M8 automation items below are planned in [`the-capitol-economy.md`](the-capitol-economy.md) (E3 and E4, issues labelled `economy`).*
 
 - **Admin tools.** F1 debug camera, F2 world tweaker and F3 perf panel slot in as egui panels gated on `is_admin`. Flint's own debug panels sit alongside them.
-- **M6 markets.** A market browser and order book as egui panels, plus a price chart (`egui_plot`). Real-time updates arrive through the same `on_event` path.
+- **M6 markets.** A market browser and order book as egui panels, plus a price chart (`egui_plot`). Real-time updates arrive through the same `on_event` path. *Built in Economy v1: the panel in E3.5, the chart in E3.6 (`ui/market_chart.rs`).*
 - **M7 leftovers.** The map view (P3.9's map mode is most of it), an ownership overlay and a permissions editor.
 - **M8 automation and M9 social.** More panels on the same patterns. Automated stations get animated states in the world: a forge glows while it runs and dims when it's paused.
 

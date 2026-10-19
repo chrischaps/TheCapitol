@@ -17,7 +17,7 @@ use capitol_protocol::rest::{
 };
 use capitol_protocol::rest::{
     Candle, CollectRequest, CollectResponse, DepthLevel, MarketDepthResponse, MarketHistoryResponse,
-    MarketItemSummary, MarketOrder, MarketSummaryResponse, MarketTrade, PlaceOrder,
+    MarketItemSummary, MarketOrder, MarketSummaryResponse, MarketTrade, MyFill, PlaceOrder,
 };
 use capitol_protocol::rules::market::{GradeRule, OrderSide, OrderStatus};
 use capitol_protocol::terrain::{
@@ -221,6 +221,7 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         MarketDepthResponse,
         Candle,
         MarketHistoryResponse,
+        MyFill,
         MarketItemSummary,
         MarketSummaryResponse,
         CollectRequest,

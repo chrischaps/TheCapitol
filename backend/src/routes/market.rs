@@ -22,7 +22,7 @@ use axum::{
 use capitol_protocol::rest::{
     Candle, CollectRequest, CollectResponse, ContainerResponse, MarketDepthQuery, MarketDepthResponse,
     MarketHistoryQuery, MarketHistoryResponse, MarketItemSummary, MarketOrder, MarketSummaryResponse,
-    MyOrdersQuery, PlaceOrder,
+    MarketTrade, MyFill, MyOrdersQuery, PlaceOrder,
 };
 use capitol_protocol::rules::market::{at_the_hall, grade_floor, OrderSide, HALL_RANGE};
 use chrono::{DateTime, Duration, Utc};
@@ -48,6 +48,10 @@ const DEFAULT_HISTORY_DAYS: i64 = 7;
 const SUMMARY_DAYS: i64 = 7;
 /// How many closed orders `/market/orders/mine?closed=true` adds.
 const CLOSED_ORDERS: i64 = 100;
+/// How many of the latest trades `/market/history` lists one by one.
+const RECENT_TRADES: i64 = 50;
+/// And how many of your own fills, for the chart to mark.
+const MY_FILLS: i64 = 200;
 
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
@@ -217,7 +221,8 @@ pub async fn orders_of(db: &PgPool, player_id: Uuid, closed: bool) -> Result<Vec
     Ok(orders)
 }
 
-/// An item's trades in buckets (OHLC and volume), oldest first
+/// An item's trades in buckets (OHLC and volume), oldest first, then the
+/// latest of them one by one and your own fills among them
 #[utoipa::path(
     get,
     path = "/market/history",
@@ -231,6 +236,7 @@ pub async fn orders_of(db: &PgPool, player_id: Uuid, closed: bool) -> Result<Vec
 )]
 pub async fn history(
     State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
     Query(query): Query<MarketHistoryQuery>,
 ) -> Result<Json<MarketHistoryResponse>, AppError> {
     let bucket = query.bucket.as_deref().unwrap_or("1h");
@@ -242,12 +248,94 @@ pub async fn history(
         }
     }
     let since = query.since.unwrap_or_else(|| Utc::now() - Duration::days(DEFAULT_HISTORY_DAYS));
-    let candles = candles(&state.db, &query.item, bucket_secs, since, query.grade.as_deref()).await?;
+    let grade = query.grade.as_deref();
+    let candles = candles(&state.db, &query.item, bucket_secs, since, grade).await?;
+    let recent = recent_trades(&state.db, &query.item, since, grade).await?;
+    let player_id = player_of(&state.db, auth_user.account_id).await?;
+    let mine = fills_of(&state.db, player_id, &query.item, since, grade).await?;
     Ok(Json(MarketHistoryResponse {
         item_type: query.item,
         bucket_secs,
         candles,
+        recent,
+        mine,
     }))
+}
+
+type TradeRow = (Uuid, Uuid, Uuid, String, String, i32, i32, i64, i32, DateTime<Utc>);
+
+const TRADE_COLUMNS: &str =
+    "t.id, t.buy_order_id, t.sell_order_id, t.item_type, t.grade, t.quality, t.min_quality, t.price, t.quantity, t.at";
+
+fn trade_of(row: TradeRow) -> MarketTrade {
+    let (id, buy_order_id, sell_order_id, item_type, grade, quality, min_quality, price, quantity, at) = row;
+    MarketTrade {
+        id,
+        buy_order_id,
+        sell_order_id,
+        item_type,
+        grade,
+        quality,
+        min_quality,
+        price,
+        quantity,
+        at,
+    }
+}
+
+/// `item_type`'s latest [`RECENT_TRADES`] trades since `since`, newest first.
+pub async fn recent_trades(
+    db: &PgPool,
+    item_type: &str,
+    since: DateTime<Utc>,
+    grade: Option<&str>,
+) -> Result<Vec<MarketTrade>, sqlx::Error> {
+    let rows: Vec<TradeRow> = sqlx::query_as(&format!(
+        "SELECT {TRADE_COLUMNS} FROM market_trades t
+         WHERE t.item_type = $1 AND t.at >= $2 AND ($3::TEXT IS NULL OR t.grade = $3)
+         ORDER BY t.at DESC, t.id DESC
+         LIMIT $4"
+    ))
+    .bind(item_type)
+    .bind(since)
+    .bind(grade)
+    .bind(RECENT_TRADES)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(trade_of).collect())
+}
+
+/// `player_id`'s latest [`MY_FILLS`] fills in `item_type` since `since`,
+/// newest first, each with the side that was theirs.
+pub async fn fills_of(
+    db: &PgPool,
+    player_id: Uuid,
+    item_type: &str,
+    since: DateTime<Utc>,
+    grade: Option<&str>,
+) -> Result<Vec<MyFill>, sqlx::Error> {
+    let rows: Vec<(String, Uuid, Uuid, Uuid, String, String, i32, i32, i64, i32, DateTime<Utc>)> =
+        sqlx::query_as(&format!(
+            "SELECT o.side, {TRADE_COLUMNS} FROM market_trades t
+             JOIN market_orders o ON o.id IN (t.buy_order_id, t.sell_order_id) AND o.player_id = $1
+             WHERE t.item_type = $2 AND t.at >= $3 AND ($4::TEXT IS NULL OR t.grade = $4)
+             ORDER BY t.at DESC, t.id DESC
+             LIMIT $5"
+        ))
+        .bind(player_id)
+        .bind(item_type)
+        .bind(since)
+        .bind(grade)
+        .bind(MY_FILLS)
+        .fetch_all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(side, id, buy, sell, item, grade, quality, min_quality, price, quantity, at)| MyFill {
+            side: if side == "buy" { OrderSide::Buy } else { OrderSide::Sell },
+            trade: trade_of((id, buy, sell, item, grade, quality, min_quality, price, quantity, at)),
+        })
+        .collect())
 }
 
 /// A bucket's length in seconds.
@@ -603,6 +691,18 @@ mod tests {
         assert_eq!((c.open, c.high, c.low, c.close, c.volume, c.trades), (10, 10, 10, 10, 6, 2));
         assert!(candles(&db, "rope", 3600, Utc::now() - Duration::hours(2), Some("A")).await.unwrap().is_empty());
         assert_eq!(candles(&db, "rope", 60, Utc::now() - Duration::hours(2), Some("B")).await.unwrap().len(), 1);
+
+        // Both fills one by one, newest first; each is Bea's buy and Ada's sell
+        let since = Utc::now() - Duration::hours(2);
+        let recent = recent_trades(&db, "rope", since, None).await.unwrap();
+        assert_eq!(recent.iter().map(|t| t.quantity).sum::<i32>(), 6);
+        assert!(recent.windows(2).all(|w| w[0].at >= w[1].at));
+        let bea_fills = fills_of(&db, bea.id, "rope", since, None).await.unwrap();
+        assert_eq!(bea_fills.iter().map(|f| &f.trade).collect::<Vec<_>>(), recent.iter().collect::<Vec<_>>());
+        assert!(bea_fills.iter().all(|f| f.side == OrderSide::Buy));
+        let ada_fills = fills_of(&db, ada.id, "rope", since, None).await.unwrap();
+        assert!(ada_fills.len() == 2 && ada_fills.iter().all(|f| f.side == OrderSide::Sell));
+        assert!(fills_of(&db, ada.id, "rope", since, Some("A")).await.unwrap().is_empty());
 
         // Bea's orders are filled; Ada's sell is all gone too
         assert!(orders_of(&db, bea.id, false).await.unwrap().is_empty());
