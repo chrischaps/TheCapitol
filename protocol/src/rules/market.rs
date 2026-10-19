@@ -14,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::stacking::{Pick, Units};
+use crate::rest::DepthLevel;
 
 /// The listing fee, in hundredths of the order value (1%).
 pub const LISTING_FEE_PERCENT: i64 = 1;
@@ -279,6 +280,87 @@ fn largest(lo: i64, hi: i64, ok: impl Fn(i64) -> bool) -> Option<i64> {
     Some(good)
 }
 
+// ---------------------------------------------------------------------------
+// Depth (E3.3): an item's book, aggregated, and the diffs that keep a copy of
+// it the same as the server's
+// ---------------------------------------------------------------------------
+
+/// Where a level sits in a book: bids best first (price high to low), then
+/// asks best first (low to high). At one price the better grade comes first,
+/// then `average` before `every_unit`.
+fn level_key(level: &DepthLevel) -> (u8, i64, &str, u8) {
+    let (side, price) = match level.side {
+        OrderSide::Buy => (0, -level.price),
+        OrderSide::Sell => (1, level.price),
+    };
+    let rule = match level.grade_rule {
+        None => 0,
+        Some(GradeRule::Average) => 1,
+        Some(GradeRule::EveryUnit) => 2,
+    };
+    (side, price, level.grade.as_str(), rule)
+}
+
+/// Put `levels` in book order.
+pub fn sort_levels(levels: &mut [DepthLevel]) {
+    levels.sort_by(|a, b| level_key(a).cmp(&level_key(b)));
+}
+
+/// The changes that take the book `old` to `new` (both in book order): every
+/// level that's new or changed, as it is in `new`, and every level that's
+/// gone, with `quantity` and `orders` 0. Empty when nothing changed.
+pub fn depth_diff(old: &[DepthLevel], new: &[DepthLevel]) -> Vec<DepthLevel> {
+    let mut diff = Vec::new();
+    let (mut o, mut n) = (old.iter().peekable(), new.iter().peekable());
+    loop {
+        match (o.peek(), n.peek()) {
+            (None, None) => break,
+            (Some(&gone), None) => {
+                diff.push(DepthLevel { quantity: 0, orders: 0, ..gone.clone() });
+                o.next();
+            }
+            (None, Some(&added)) => {
+                diff.push(added.clone());
+                n.next();
+            }
+            (Some(&a), Some(&b)) => match level_key(a).cmp(&level_key(b)) {
+                std::cmp::Ordering::Less => {
+                    diff.push(DepthLevel { quantity: 0, orders: 0, ..a.clone() });
+                    o.next();
+                }
+                std::cmp::Ordering::Greater => {
+                    diff.push(b.clone());
+                    n.next();
+                }
+                std::cmp::Ordering::Equal => {
+                    if a != b {
+                        diff.push(b.clone());
+                    }
+                    o.next();
+                    n.next();
+                }
+            },
+        }
+    }
+    diff
+}
+
+/// Apply a [`depth_diff`] to `levels`, keeping them in book order: a level
+/// with `quantity` 0 goes, any other takes its place or joins.
+pub fn apply_depth_diff(levels: &mut Vec<DepthLevel>, diff: &[DepthLevel]) {
+    for change in diff {
+        let at = levels.binary_search_by(|l| level_key(l).cmp(&level_key(change)));
+        match (at, change.quantity > 0) {
+            (Ok(i), true) => levels[i] = change.clone(),
+            (Ok(i), false) => {
+                levels.remove(i);
+            }
+            (Err(i), true) => levels.insert(i, change.clone()),
+            (Err(_), false) => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::quality_grade;
@@ -425,6 +507,71 @@ mod tests {
         for status in [OrderStatus::Open, OrderStatus::Filled, OrderStatus::Cancelled, OrderStatus::Expired] {
             assert_eq!(OrderStatus::parse(status.as_str()), Some(status));
             assert_eq!(serde_json::to_string(&status).unwrap(), format!("\"{}\"", status.as_str()));
+        }
+    }
+
+    fn level(side: OrderSide, price: i64, grade: &str, rule: Option<GradeRule>, quantity: i64) -> DepthLevel {
+        DepthLevel { side, price, grade: grade.into(), grade_rule: rule, quantity, orders: 1 }
+    }
+
+    #[test]
+    fn levels_sort_bids_then_asks_best_first() {
+        let mut levels = vec![
+            level(OrderSide::Sell, 12, "A", None, 1),
+            level(OrderSide::Buy, 9, "B", Some(GradeRule::Average), 1),
+            level(OrderSide::Sell, 11, "C", None, 1),
+            level(OrderSide::Buy, 10, "C", Some(GradeRule::EveryUnit), 1),
+            level(OrderSide::Buy, 10, "C", Some(GradeRule::Average), 1),
+            level(OrderSide::Sell, 11, "A", None, 1),
+        ];
+        sort_levels(&mut levels);
+        let order: Vec<_> = levels.iter().map(|l| (l.side, l.price, l.grade.as_str(), l.grade_rule)).collect();
+        assert_eq!(
+            order,
+            [
+                (OrderSide::Buy, 10, "C", Some(GradeRule::Average)),
+                (OrderSide::Buy, 10, "C", Some(GradeRule::EveryUnit)),
+                (OrderSide::Buy, 9, "B", Some(GradeRule::Average)),
+                (OrderSide::Sell, 11, "A", None),
+                (OrderSide::Sell, 11, "C", None),
+                (OrderSide::Sell, 12, "A", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_diff_applied_to_the_old_book_makes_the_new() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let random_book = |next: &mut dyn FnMut(u64) -> u64| {
+            let mut levels: Vec<DepthLevel> = Vec::new();
+            for _ in 0..next(12) {
+                let side = if next(2) == 0 { OrderSide::Buy } else { OrderSide::Sell };
+                let rule = match side {
+                    OrderSide::Buy => Some(if next(2) == 0 { GradeRule::Average } else { GradeRule::EveryUnit }),
+                    OrderSide::Sell => None,
+                };
+                let l = level(side, 8 + next(5) as i64, ["A", "B", "F"][next(3) as usize], rule, 1 + next(4) as i64);
+                if !levels.iter().any(|x| level_key(x) == level_key(&l)) {
+                    levels.push(l);
+                }
+            }
+            sort_levels(&mut levels);
+            levels
+        };
+        for _ in 0..2000 {
+            let old = random_book(&mut next);
+            let new = random_book(&mut next);
+            let diff = depth_diff(&old, &new);
+            let mut copy = old.clone();
+            apply_depth_diff(&mut copy, &diff);
+            assert_eq!(copy, new);
+            assert_eq!(depth_diff(&new, &new), Vec::new());
         }
     }
 }

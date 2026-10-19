@@ -1082,6 +1082,150 @@ pub struct MarketTrade {
     pub at: DateTime<Utc>,
 }
 
+/// One level of an item's book (E3.3): the orders on one side at one price
+/// and grade, added up.
+///
+/// A buy's level is its `min_grade` and `grade_rule`. A sell's units can span
+/// grades, so a sell counts at the grade of each of its units: a lot of six
+/// 92s and four 70s is 6 at A and 4 at C. Units keep their own quality (D2),
+/// and the ladder shows them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct DepthLevel {
+    pub side: rules::market::OrderSide,
+    /// Strands per unit
+    pub price: i64,
+    /// A to F
+    pub grade: String,
+    /// Buy: how its orders read the grade
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade_rule: Option<rules::market::GradeRule>,
+    /// Units at this level. In a diff, 0 means the level is gone.
+    pub quantity: i64,
+    /// Orders with units at this level
+    pub orders: i32,
+}
+
+/// `GET /market/orders` query string: an item's book.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::IntoParams))]
+pub struct MarketDepthQuery {
+    /// The item type
+    pub item: String,
+    /// Only this side; both without it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<rules::market::OrderSide>,
+}
+
+/// An item's book, aggregated by price and grade: bids best first, then asks
+/// best first. `seq` counts its changes, as the `market_depth` diffs do.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MarketDepthResponse {
+    pub item_type: String,
+    pub seq: u64,
+    pub levels: Vec<DepthLevel>,
+}
+
+/// `GET /market/orders/mine` query string.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::IntoParams))]
+pub struct MyOrdersQuery {
+    /// With closed orders too (filled, cancelled, expired): the latest 100.
+    /// Without it, only the open ones.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closed: bool,
+}
+
+/// `GET /market/history` query string.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::IntoParams))]
+pub struct MarketHistoryQuery {
+    /// The item type
+    pub item: String,
+    /// `1m`, `5m`, `15m`, `1h` (the default), `4h` or `1d`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
+    /// From when; without it, 7 days ago. At most 500 buckets come back, the
+    /// latest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<DateTime<Utc>>,
+    /// Only trades of this grade (by their mean)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade: Option<String>,
+}
+
+/// One bucket of trades. Buckets with no trades aren't sent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Candle {
+    /// The bucket's start
+    pub at: DateTime<Utc>,
+    pub open: i64,
+    pub high: i64,
+    pub low: i64,
+    pub close: i64,
+    /// Units traded
+    pub volume: i64,
+    pub trades: i32,
+}
+
+/// `GET /market/history`: an item's trades, in buckets, oldest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MarketHistoryResponse {
+    pub item_type: String,
+    pub bucket_secs: i64,
+    pub candles: Vec<Candle>,
+}
+
+/// One item with activity: traded in the last 7 days, or on the book now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MarketItemSummary {
+    pub item_type: String,
+    /// The latest trade's price
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_price: Option<i64>,
+    /// `last_price` less the last price 24 h ago (or the first since, if it
+    /// first traded within the day)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_24h: Option<i64>,
+    /// Units traded in the last 24 h
+    pub volume_24h: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_bid: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_ask: Option<i64>,
+}
+
+/// `GET /market/summary`: every item with activity, by item type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MarketSummaryResponse {
+    pub items: Vec<MarketItemSummary>,
+}
+
+/// `POST /market/box/collect`: what to take from the market box to the
+/// inventory.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CollectRequest {
+    /// These stacks; every stack without it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_ids: Option<Vec<Uuid>>,
+}
+
+/// What a collect moved. It stops when the inventory is full.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CollectResponse {
+    /// The stacks moved (one that joined a stack in the inventory is gone)
+    pub collected: Vec<Uuid>,
+    /// Stacks still in the market box
+    pub remaining: i32,
+}
+
 // ---------------------------------------------------------------------------
 // /plots
 // ---------------------------------------------------------------------------

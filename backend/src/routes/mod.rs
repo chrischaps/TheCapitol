@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod exchange;
 pub mod health;
 pub mod inventory;
+pub mod market;
 pub mod player;
 pub mod plots;
 pub mod recipes;

@@ -115,6 +115,23 @@ pub enum RestRequest {
     /// `POST /player/subscription`: mock activation, on a server with
     /// `MOCK_SUBSCRIPTIONS` on (E4.1)
     Subscribe(SubscribeRequest),
+
+    /// `POST /market/orders` (E3.3)
+    PlaceOrder(PlaceOrder),
+    /// `DELETE /market/orders/{id}`
+    CancelOrder { order_id: Uuid },
+    /// `GET /market/orders?item=&side=`: an item's book
+    MarketDepth(MarketDepthQuery),
+    /// `GET /market/orders/mine`
+    MyOrders(MyOrdersQuery),
+    /// `GET /market/history?item=&bucket=&since=&grade=`
+    MarketHistory(MarketHistoryQuery),
+    /// `GET /market/summary`
+    MarketSummary,
+    /// `GET /market/box`
+    MarketBox,
+    /// `POST /market/box/collect`
+    CollectMarketBox(CollectRequest),
 }
 
 /// A decoded REST response. Each [`RestRequest`] decodes to exactly one variant.
@@ -161,6 +178,14 @@ pub enum RestResponse {
     Zones(ZonesResponse),
     DeedPrices(DeedPricesResponse),
     Subscription(Subscription),
+    /// An order as placed, or as cancelled
+    Order(MarketOrder),
+    MarketDepth(MarketDepthResponse),
+    MyOrders(Vec<MarketOrder>),
+    MarketHistory(MarketHistoryResponse),
+    MarketSummary(MarketSummaryResponse),
+    MarketBox(ContainerResponse),
+    Collected(CollectResponse),
 }
 
 /// Why a REST call failed.
@@ -225,9 +250,11 @@ impl RestRequest {
             | Withdraw(_)
             | ClaimPlot { .. }
             | PayTax { .. }
-            | Subscribe(_) => Method::POST,
+            | Subscribe(_)
+            | PlaceOrder(_)
+            | CollectMarketBox(_) => Method::POST,
             UpdatePlotPermissions { .. } => Method::PUT,
-            RemoveStation { .. } | RevokeApiKey { .. } => Method::DELETE,
+            RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } => Method::DELETE,
             ApiKeys
             | Health
             | Terrain { .. }
@@ -247,7 +274,12 @@ impl RestRequest {
             | PlotAt(_)
             | PlotPermissions { .. }
             | Zones
-            | DeedPrices => Method::GET,
+            | DeedPrices
+            | MarketDepth(_)
+            | MyOrders(_)
+            | MarketHistory(_)
+            | MarketSummary
+            | MarketBox => Method::GET,
         }
     }
 
@@ -293,6 +325,13 @@ impl RestRequest {
             Zones => "/bureaucracy/zones".into(),
             DeedPrices => "/bureaucracy/deed-prices".into(),
             Subscribe(_) => "/player/subscription".into(),
+            PlaceOrder(_) | MarketDepth(_) => "/market/orders".into(),
+            CancelOrder { order_id } => format!("/market/orders/{order_id}"),
+            MyOrders(_) => "/market/orders/mine".into(),
+            MarketHistory(_) => "/market/history".into(),
+            MarketSummary => "/market/summary".into(),
+            MarketBox => "/market/box".into(),
+            CollectMarketBox(_) => "/market/box/collect".into(),
         }
     }
 
@@ -313,6 +352,11 @@ impl RestRequest {
             Deposit(b) => req.json(b),
             Withdraw(b) => req.json(b),
             Subscribe(b) => req.json(b),
+            PlaceOrder(b) => req.json(b),
+            CollectMarketBox(b) => req.json(b),
+            MarketDepth(q) => req.query(q),
+            MyOrders(q) => req.query(q),
+            MarketHistory(q) => req.query(q),
             UpdatePlotPermissions { update, .. } => req.json(update),
             PayTax { request, .. } => req.json(request),
             WorldNearby(q) => req.query(q),
@@ -369,6 +413,13 @@ impl RestRequest {
             Q::Zones => A::Zones(de(body)?),
             Q::DeedPrices => A::DeedPrices(de(body)?),
             Q::Subscribe(_) => A::Subscription(de(body)?),
+            Q::PlaceOrder(_) | Q::CancelOrder { .. } => A::Order(de(body)?),
+            Q::MarketDepth(_) => A::MarketDepth(de(body)?),
+            Q::MyOrders(_) => A::MyOrders(de(body)?),
+            Q::MarketHistory(_) => A::MarketHistory(de(body)?),
+            Q::MarketSummary => A::MarketSummary(de(body)?),
+            Q::MarketBox => A::MarketBox(de(body)?),
+            Q::CollectMarketBox(_) => A::Collected(de(body)?),
         })
     }
 }
@@ -565,6 +616,33 @@ mod tests {
                 RestRequest::Subscribe(SubscribeRequest { days: 30 }),
                 "POST",
                 "/player/subscription".into(),
+            ),
+            (
+                RestRequest::MarketDepth(Default::default()),
+                "GET",
+                "/market/orders".into(),
+            ),
+            (
+                RestRequest::CancelOrder { order_id: id },
+                "DELETE",
+                format!("/market/orders/{id}"),
+            ),
+            (
+                RestRequest::MyOrders(Default::default()),
+                "GET",
+                "/market/orders/mine".into(),
+            ),
+            (
+                RestRequest::MarketHistory(Default::default()),
+                "GET",
+                "/market/history".into(),
+            ),
+            (RestRequest::MarketSummary, "GET", "/market/summary".into()),
+            (RestRequest::MarketBox, "GET", "/market/box".into()),
+            (
+                RestRequest::CollectMarketBox(Default::default()),
+                "POST",
+                "/market/box/collect".into(),
             ),
         ];
         for (request, method, path) in cases {

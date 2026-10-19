@@ -50,8 +50,8 @@ pub struct AppState {
     pub config: Config,
     pub game: Arc<RwLock<GameState>>,
     pub limiter: Arc<RateLimiter>,
-    /// The market's order book (E3.2), matched by its own task
-    #[allow(dead_code)] // the market routes (#169) place and cancel through it
+    /// The market's order book (E3.2), matched by its own task, and each
+    /// item's published depth (E3.3)
     pub market: Arc<Market>,
 }
 

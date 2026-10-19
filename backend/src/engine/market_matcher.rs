@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use capitol_protocol::rest::{MarketOrder, MarketTrade};
+use capitol_protocol::rest::{DepthLevel, MarketOrder, MarketTrade};
 use capitol_protocol::rules::market::{self, GradeRule, OrderSide, OrderStatus};
 use capitol_protocol::rules::quality_grade;
 use capitol_protocol::rules::stacking::Units;
@@ -47,10 +47,22 @@ use super::units::{self, NewStack};
 pub const CYCLE_MS: u64 = 1000;
 
 /// The market: the book, shared by the matcher and the routes that place and
-/// cancel (E3.3).
+/// cancel (E3.3), and each item's depth as last published.
 #[derive(Debug, Default)]
 pub struct Market {
     book: Mutex<Book>,
+    /// What each item's `market:<item>` channel was last told. The routes and
+    /// subscribers read depth from here, not the book, so a snapshot and the
+    /// diffs after it always line up by `seq`.
+    published: Mutex<HashMap<String, Published>>,
+}
+
+/// One item's depth as last published.
+#[derive(Debug, Default, Clone)]
+pub struct Published {
+    /// Counts the item's published changes
+    pub seq: u64,
+    pub levels: Vec<DepthLevel>,
 }
 
 /// What one cycle did.
@@ -66,7 +78,82 @@ impl Market {
     /// The market with every open order on its book.
     pub async fn load(db: &PgPool) -> Result<Market, sqlx::Error> {
         let orders = open_orders(db).await?;
-        Ok(Market { book: Mutex::new(Book::load(orders)) })
+        Ok(Market::from_book(Book::load(orders)))
+    }
+
+    /// The market over `book`, its depth published (to nobody yet) at seq 0.
+    pub fn from_book(mut book: Book) -> Market {
+        let published = book
+            .take_dirty()
+            .into_iter()
+            .map(|item| {
+                let levels = book.depth(&item);
+                (item, Published { seq: 0, levels })
+            })
+            .collect();
+        Market {
+            book: Mutex::new(book),
+            published: Mutex::new(published),
+        }
+    }
+
+    fn published(&self) -> MutexGuard<'_, HashMap<String, Published>> {
+        self.published.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Tell each changed item's channel what changed: a `MarketDepth` diff
+    /// per item whose depth moved, its `seq` one up. The routes call it after
+    /// placing or cancelling, and the matcher after each cycle.
+    ///
+    /// The published map is locked first and held while the book is read and
+    /// the diffs are sent, so two publishers can't send an older depth after
+    /// a newer one, and the channel carries each item's diffs in `seq` order.
+    pub fn publish(&self, events: &broadcast::Sender<GameEvent>) {
+        let mut published = self.published();
+        let changed: Vec<(String, Vec<DepthLevel>)> = {
+            let mut book = self.book();
+            book.take_dirty()
+                .into_iter()
+                .map(|item| {
+                    let levels = book.depth(&item);
+                    (item, levels)
+                })
+                .collect()
+        };
+        for (item_type, levels) in changed {
+            let entry = published.entry(item_type.clone()).or_default();
+            let diff = market::depth_diff(&entry.levels, &levels);
+            if diff.is_empty() {
+                continue;
+            }
+            entry.seq += 1;
+            entry.levels = levels;
+            let _ = events.send(GameEvent::MarketDepth {
+                item_type,
+                seq: entry.seq,
+                levels: diff,
+            });
+        }
+    }
+
+    /// `item_type`'s depth as last published: what a new subscriber starts from.
+    pub fn depth(&self, item_type: &str) -> Published {
+        self.published().get(item_type).cloned().unwrap_or_default()
+    }
+
+    /// Every item on the book as last published, with its best bid and ask.
+    pub fn best_prices(&self) -> Vec<(String, Option<i64>, Option<i64>)> {
+        let published = self.published();
+        let mut out: Vec<_> = published
+            .iter()
+            .filter(|(_, p)| !p.levels.is_empty())
+            .map(|(item, p)| {
+                let best = |side: OrderSide| p.levels.iter().find(|l| l.side == side).map(|l| l.price);
+                (item.clone(), best(OrderSide::Buy), best(OrderSide::Sell))
+            })
+            .collect();
+        out.sort();
+        out
     }
 
     fn book(&self) -> MutexGuard<'_, Book> {
@@ -76,7 +163,6 @@ impl Market {
     }
 
     /// `order` was placed: put it on the book to match next cycle.
-    #[allow(dead_code)] // the routes (#169) call it
     pub fn placed(&self, order: &MarketOrder) {
         if let Some(order) = BookOrder::from_order(order) {
             self.book().insert(order);
@@ -84,13 +170,11 @@ impl Market {
     }
 
     /// Order `order_id` was cancelled: take it off the book.
-    #[allow(dead_code)] // the routes (#169) call it
     pub fn cancelled(&self, order_id: Uuid) {
         self.book().remove(order_id);
     }
 
-    /// Read the book: the depth E3.3 serves.
-    #[allow(dead_code)] // the routes (#169) call it
+    /// Read the book.
     pub fn with_book<R>(&self, f: impl FnOnce(&Book) -> R) -> R {
         f(&self.book())
     }
@@ -193,8 +277,15 @@ pub async fn run_market_loop(market: Arc<Market>, db: PgPool, events: broadcast:
     }
 }
 
-/// One cycle at `now`: expire what's due, then fill until nothing crosses.
+/// One cycle at `now`: expire what's due, fill until nothing crosses, then
+/// publish what changed to the items' channels.
 pub async fn run_cycle(market: &Market, db: &PgPool, events: &broadcast::Sender<GameEvent>, now: DateTime<Utc>) -> Cycle {
+    let cycle = match_cycle(market, db, events, now).await;
+    market.publish(events);
+    cycle
+}
+
+async fn match_cycle(market: &Market, db: &PgPool, events: &broadcast::Sender<GameEvent>, now: DateTime<Utc>) -> Cycle {
     let mut cycle = Cycle::default();
 
     let due = market.book().expired(now);
@@ -777,5 +868,198 @@ mod tests {
         let mut expected = vec![ada.id, bea.id];
         expected.sort();
         assert_eq!(closed, expected);
+    }
+}
+
+/// The depth channels (E3.3), without the DB: a subscriber that starts from a
+/// snapshot and applies the diffs holds the server's book.
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+    use crate::engine::market_book::tests::{run, t0, Orders};
+    use capitol_protocol::rules::market::apply_depth_diff;
+    use chrono::Duration;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use std::collections::BTreeMap;
+
+    const ITEMS: [&str; 3] = ["rope", "plank", "ingot"];
+
+    /// A client watching some items: what it holds of each, by the protocol's
+    /// rules (the doc of `ServerMessage::MarketDepth`).
+    #[derive(Default)]
+    struct Subscriber {
+        books: BTreeMap<String, (u64, Vec<DepthLevel>)>,
+    }
+
+    impl Subscriber {
+        fn subscribe(&mut self, market: &Market, item: &str) {
+            let snapshot = market.depth(item);
+            self.books.insert(item.to_string(), (snapshot.seq, snapshot.levels));
+        }
+
+        fn hear(&mut self, event: GameEvent) {
+            let GameEvent::MarketDepth { item_type, seq, levels } = event else { return };
+            let Some((held, book)) = self.books.get_mut(&item_type) else { return };
+            if seq <= *held {
+                return;
+            }
+            assert_eq!(seq, *held + 1, "{item_type}: a gap in the diffs");
+            apply_depth_diff(book, &levels);
+            *held = seq;
+        }
+    }
+
+    fn deliver(heard: &mut broadcast::Receiver<GameEvent>, subscribers: &mut [Subscriber]) {
+        while let Ok(event) = heard.try_recv() {
+            for s in subscribers.iter_mut() {
+                s.hear(event.clone());
+            }
+        }
+    }
+
+    #[test]
+    fn diffs_keep_a_subscribers_book_identical_to_the_servers() {
+        for seed in 0..30 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut orders = Orders::new();
+            let market = Market::default();
+            let (events, mut heard) = broadcast::channel(4096);
+            let mut subscribers: Vec<Subscriber> = (0..3).map(|_| Subscriber::default()).collect();
+            let now = t0() + Duration::days(1);
+
+            for step in 0..200 {
+                match rng.gen_range(0..10) {
+                    // Someone watches an item: from now on they get its diffs
+                    0 => {
+                        let item = ITEMS[rng.gen_range(0..ITEMS.len())];
+                        let who = rng.gen_range(0..subscribers.len());
+                        subscribers[who].subscribe(&market, item);
+                    }
+                    // A cancel
+                    1 | 2 => {
+                        let ids: Vec<Uuid> = market.with_book(|b| {
+                            ITEMS
+                                .iter()
+                                .flat_map(|i| [b.side(i, OrderSide::Buy), b.side(i, OrderSide::Sell)])
+                                .flatten()
+                                .map(|o| o.id)
+                                .collect()
+                        });
+                        if !ids.is_empty() {
+                            market.cancelled(ids[rng.gen_range(0..ids.len())]);
+                        }
+                    }
+                    // A matching cycle
+                    3 => {
+                        run(&mut market.book(), now);
+                    }
+                    // A new order
+                    _ => {
+                        let item = ITEMS[rng.gen_range(0..ITEMS.len())].to_string();
+                        let player = rng.gen_range(0..4u128);
+                        let price = rng.gen_range(8..14);
+                        let order = if rng.gen_bool(0.5) {
+                            let lots = rng.gen_range(1..4);
+                            let units = Units::from_pairs(
+                                (0..lots).map(|_| (rng.gen_range(30..100), rng.gen_range(1..5))),
+                            );
+                            orders.sell(player, price, units)
+                        } else {
+                            let grade = ["A", "B", "C", "F"][rng.gen_range(0..4)];
+                            let rule = if rng.gen_bool(0.5) { GradeRule::Average } else { GradeRule::EveryUnit };
+                            orders.buy(player, price, rng.gen_range(1..8), grade, rule)
+                        };
+                        market.book().insert(BookOrder { item_type: item, ..order });
+                    }
+                }
+                // Not every change is published at once: a route publishes
+                // after its order, the matcher after a cycle
+                if rng.gen_bool(0.6) {
+                    market.publish(&events);
+                }
+                deliver(&mut heard, &mut subscribers);
+                for (n, s) in subscribers.iter().enumerate() {
+                    for (item, (seq, book)) in &s.books {
+                        let published = market.depth(item);
+                        assert_eq!(*seq, published.seq, "seed {seed} step {step}: subscriber {n} behind on {item}");
+                        assert_eq!(book, &published.levels, "seed {seed} step {step}: subscriber {n}'s {item}");
+                    }
+                }
+            }
+            // Once published, what they hold is the book itself
+            market.publish(&events);
+            deliver(&mut heard, &mut subscribers);
+            for s in &subscribers {
+                for (item, (_, book)) in &s.books {
+                    assert_eq!(book, &market.with_book(|b| b.depth(item)), "seed {seed}: {item}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn depth_counts_a_sell_at_each_units_grade_and_a_buy_at_its_own() {
+        let mut orders = Orders::new();
+        let mut book = Book::new();
+        book.insert(orders.sell(1, 11, Units::from_pairs([(92, 6), (70, 4)])));
+        book.insert(orders.sell(2, 11, Units::from_pairs([(95, 1)])));
+        book.insert(orders.buy(3, 9, 5, "B", GradeRule::EveryUnit));
+        book.insert(orders.buy(4, 9, 2, "B", GradeRule::EveryUnit));
+        book.insert(orders.buy(5, 10, 3, "F", GradeRule::Average));
+        let levels: Vec<_> = book
+            .depth("rope")
+            .into_iter()
+            .map(|l| (l.side, l.price, l.grade, l.grade_rule, l.quantity, l.orders))
+            .collect();
+        assert_eq!(
+            levels,
+            [
+                (OrderSide::Buy, 10, "F".to_string(), Some(GradeRule::Average), 3, 1),
+                (OrderSide::Buy, 9, "B".to_string(), Some(GradeRule::EveryUnit), 7, 2),
+                (OrderSide::Sell, 11, "A".to_string(), None, 7, 2),
+                (OrderSide::Sell, 11, "C".to_string(), None, 4, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_market_publishes_its_book_at_seq_zero_and_counts_from_there() {
+        let mut orders = Orders::new();
+        let mut book = Book::new();
+        book.insert(orders.buy(1, 9, 5, "C", GradeRule::Average));
+        let market = Market::from_book(book);
+        let (events, mut heard) = broadcast::channel(16);
+        assert_eq!(market.depth("rope").seq, 0);
+        assert_eq!(market.depth("rope").levels.len(), 1);
+        // Nothing changed, so nothing is said
+        market.publish(&events);
+        assert!(heard.try_recv().is_err());
+        market.placed(&MarketOrder {
+            id: Uuid::new_v4(),
+            player_id: Uuid::from_u128(2),
+            side: OrderSide::Buy,
+            item_type: "rope".into(),
+            price: 9,
+            quantity_total: 2,
+            quantity_remaining: 2,
+            status: OrderStatus::Open,
+            min_grade: Some("C".into()),
+            grade_rule: Some(GradeRule::Average),
+            units: Units::new(),
+            escrow_strands: 18,
+            fee: 1,
+            created_at: t0(),
+            expires_at: t0() + Duration::days(7),
+        });
+        market.publish(&events);
+        match heard.try_recv() {
+            Ok(GameEvent::MarketDepth { item_type, seq, levels }) => {
+                assert_eq!((item_type.as_str(), seq), ("rope", 1));
+                assert_eq!((levels.len(), levels[0].quantity, levels[0].orders), (1, 7, 2));
+            }
+            other => panic!("expected a depth diff, got {other:?}"),
+        }
+        assert_eq!(market.best_prices(), [("rope".to_string(), Some(9), None)]);
     }
 }

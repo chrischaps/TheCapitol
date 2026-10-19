@@ -1,6 +1,6 @@
 //! The market's escrow (E3.1, economy plan D7): placing and cancelling orders.
 //! Matching them is `market_book` and `market_matcher` (E3.2), and the routes
-//! that call these are E3.3.
+//! that call these are `routes::market` (E3.3).
 //!
 //! Each operation is one transaction, and every Strand it moves goes through
 //! the currency audit log:
@@ -16,7 +16,6 @@
 //! So for any run of these, the Strands and units held plus those in escrow
 //! plus the fees are what there were at the start (the conservation test).
 //! The fee and bounds are `rules::market`, shared with the clients.
-#![allow(dead_code)] // the market's model; the routes (#169) call place and cancel
 
 use capitol_protocol::rest::{MarketOrder, PlaceOrder};
 use capitol_protocol::rules::market::{self, GradeRule, OrderError, OrderSide, OrderStatus};
@@ -310,6 +309,14 @@ pub(super) async fn close(conn: &mut PgConnection, order_id: Uuid, status: Order
 /// the first stack of its type there, if it stacks (D2: nothing is diluted),
 /// or into the first free slot. Returns its units.
 pub(super) async fn return_to_box(conn: &mut PgConnection, player_id: Uuid, stack: Uuid, into: Uuid) -> Result<Units, MarketError> {
+    stow(conn, player_id, stack, into).await?.ok_or(MarketError::MarketBoxFull)
+}
+
+/// Move the stack `stack` into `player_id`'s container `into`: onto the first
+/// stack of its type there, if it stacks and has room (D2: nothing is
+/// diluted), or into the first free slot. Returns its units, or `None`, and
+/// nothing moved, if there's no room.
+pub async fn stow(conn: &mut PgConnection, player_id: Uuid, stack: Uuid, into: Uuid) -> Result<Option<Units>, sqlx::Error> {
     let units = units::units_of(conn, stack).await?;
     let (item_type, stackable): (String, bool) = sqlx::query_as(
         "SELECT i.item_type, t.stackable FROM items i JOIN item_types t ON t.id = i.item_type WHERE i.id = $1",
@@ -320,21 +327,26 @@ pub(super) async fn return_to_box(conn: &mut PgConnection, player_id: Uuid, stac
     if stackable {
         if let Some(target) = units::first_stack(conn, into, &item_type).await? {
             let mut held = units::units_of(conn, target).await?;
-            if held.merge(&units) {
+            if target != stack && held.merge(&units) {
                 units::merge_into(conn, stack, target).await?;
-                return Ok(units);
+                return Ok(Some(units));
             }
         }
     }
-    let (slot_count,): (i32,) = sqlx::query_as("SELECT slot_count FROM container_types WHERE id = 'market_box'")
-        .fetch_one(&mut *conn)
-        .await?;
+    let (slot_count,): (i32,) = sqlx::query_as(
+        "SELECT t.slot_count FROM containers c JOIN container_types t ON t.id = c.container_type WHERE c.id = $1",
+    )
+    .bind(into)
+    .fetch_one(&mut *conn)
+    .await?;
     let used: Vec<i32> =
         sqlx::query_scalar("SELECT slot_index FROM items WHERE container_id = $1 AND slot_index IS NOT NULL")
             .bind(into)
             .fetch_all(&mut *conn)
             .await?;
-    let slot = (0..slot_count).find(|s| !used.contains(s)).ok_or(MarketError::MarketBoxFull)?;
+    let Some(slot) = (0..slot_count).find(|s| !used.contains(s)) else {
+        return Ok(None);
+    };
     sqlx::query("UPDATE items SET container_id = $2, slot_index = $3, owner_id = $4 WHERE id = $1")
         .bind(stack)
         .bind(into)
@@ -342,7 +354,7 @@ pub(super) async fn return_to_box(conn: &mut PgConnection, player_id: Uuid, stac
         .bind(player_id)
         .execute(&mut *conn)
         .await?;
-    Ok(units)
+    Ok(Some(units))
 }
 
 /// `player_id`'s market box, made the first time it's needed, and locked for

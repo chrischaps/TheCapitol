@@ -26,9 +26,10 @@ use std::fmt;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use capitol_protocol::rest::{
-    DepositRequest, DepositResponse, HealthResponse, ListPlotsQuery, LoginRequest,
-    MoveItemRequest, PlaceStationRequest, PlotInfo, RegisterRequest, ResourceNodeInfo,
-    StationInfo, SubscribeRequest, Subscription,
+    CollectRequest, CollectResponse, DepositRequest, DepositResponse, HealthResponse, ListPlotsQuery, LoginRequest, MarketOrder,
+    MoveItemRequest, MyOrdersQuery, PlaceOrder, PlaceStationRequest, PlotInfo, RegisterRequest,
+    ResourceNodeInfo, StationInfo, SubscribeRequest, Subscription, WithdrawRequest,
+    WithdrawResponse,
 };
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::ws::ClientMessage;
@@ -369,6 +370,10 @@ impl Bot {
         }
         if let Some(journal) = &mut self.journal {
             journal.extend(changes.iter().filter(|c| journaled(c)).cloned());
+        }
+        // What the market store wants said: watching, and asking again
+        for message in self.state.market_mut().take_outgoing() {
+            self.net.ws(message);
         }
         let now = Instant::now();
         changes.extend(self.state.tick(now));
@@ -876,6 +881,78 @@ impl Bot {
                 Ok(deposit)
             }
             other => Err(unexpected("depositing fiber", &other)),
+        }
+    }
+
+    /// Watches `item_type`'s market channel and waits for its whole book.
+    pub fn watch_market(&mut self, item_type: &str) -> Result<(), BotError> {
+        self.state.market_mut().watch(item_type);
+        let item = item_type.to_string();
+        self.until(&format!("{item_type}'s book"), CALL_TIMEOUT, |s, _| s.market().book(&item).is_some())?;
+        Ok(())
+    }
+
+    /// Places an order (E3.3) and returns it as placed.
+    pub fn place_order(&mut self, order: PlaceOrder) -> Result<MarketOrder, BotError> {
+        match self.call("placing an order", RestRequest::PlaceOrder(order))? {
+            RestResponse::Order(order) => {
+                self.say(format!(
+                    "{} {} {} at {} each",
+                    order.side.as_str(),
+                    order.quantity_total,
+                    order.item_type,
+                    order.price
+                ));
+                Ok(order)
+            }
+            other => Err(unexpected("placing an order", &other)),
+        }
+    }
+
+    /// Cancels one of the bot's open orders and returns it as cancelled.
+    pub fn cancel_order(&mut self, order_id: Uuid) -> Result<MarketOrder, BotError> {
+        match self.call("cancelling an order", RestRequest::CancelOrder { order_id })? {
+            RestResponse::Order(order) => {
+                self.say(format!("cancelled {} {}", order.side.as_str(), order.item_type));
+                Ok(order)
+            }
+            other => Err(unexpected("cancelling an order", &other)),
+        }
+    }
+
+    /// The bot's open orders, from the server, into the store.
+    pub fn my_orders(&mut self) -> Result<Vec<MarketOrder>, BotError> {
+        match self.call("listing my orders", RestRequest::MyOrders(MyOrdersQuery::default()))? {
+            RestResponse::MyOrders(orders) => Ok(orders),
+            other => Err(unexpected("listing my orders", &other)),
+        }
+    }
+
+    /// Takes everything in the market box to the inventory, as far as it fits.
+    pub fn collect_market_box(&mut self) -> Result<CollectResponse, BotError> {
+        match self.call(
+            "collecting from the market box",
+            RestRequest::CollectMarketBox(CollectRequest::default()),
+        )? {
+            RestResponse::Collected(collected) => {
+                self.settle()?;
+                Ok(collected)
+            }
+            other => Err(unexpected("collecting from the market box", &other)),
+        }
+    }
+
+    /// Buys `quantity` fiber from the exchange with Strands.
+    pub fn withdraw_fiber(&mut self, quantity: i32) -> Result<WithdrawResponse, BotError> {
+        match self.call(
+            "withdrawing fiber",
+            RestRequest::Withdraw(WithdrawRequest { quantity }),
+        )? {
+            RestResponse::Withdraw(withdrawn) => {
+                self.settle()?;
+                Ok(withdrawn)
+            }
+            other => Err(unexpected("withdrawing fiber", &other)),
         }
     }
 

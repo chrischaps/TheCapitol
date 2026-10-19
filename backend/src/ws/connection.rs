@@ -155,6 +155,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Handle messages and events
     let mut subscribed_position = false;
+    // The items whose market channel this connection watches (E3.3)
+    let mut market_items: std::collections::HashSet<String> = std::collections::HashSet::new();
     // This connection's command allowance (E0.7)
     let limit_key = state.limiter.connection();
 
@@ -235,6 +237,38 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                     }
                                 }
+                                ClientMessage::SubscribeMarket { item_type } => {
+                                    let refusal = if market_items.len() >= MARKET_CHANNELS && !market_items.contains(&item_type) {
+                                        Some(format!("Watch at most {MARKET_CHANNELS} items at once"))
+                                    } else {
+                                        match sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM item_types WHERE id = $1)")
+                                            .bind(&item_type)
+                                            .fetch_one(&state.db)
+                                            .await
+                                        {
+                                            Ok(true) => None,
+                                            Ok(false) => Some("There's no such item".to_string()),
+                                            Err(e) => Some(format!("Database error: {e}")),
+                                        }
+                                    };
+                                    let msg = match refusal {
+                                        Some(message) => ServerMessage::Error { message, command: command.into() },
+                                        None => {
+                                            market_items.insert(item_type.clone());
+                                            // The depth as last published: the diffs already on
+                                            // `event_rx` are at or below its `seq`, and the client skips them
+                                            let depth = state.market.depth(&item_type);
+                                            ServerMessage::MarketDepth { item_type, seq: depth.seq, full: true, levels: depth.levels }
+                                        }
+                                    };
+                                    let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                }
+                                ClientMessage::UnsubscribeMarket { item_type } => match item_type {
+                                    Some(item_type) => {
+                                        market_items.remove(&item_type);
+                                    }
+                                    None => market_items.clear(),
+                                },
                                 ClientMessage::Move { x, y } => {
                                     // Only a destination on the world disc (W1, #194)
                                     if capitol_protocol::rules::in_world(x, y) {
@@ -999,8 +1033,25 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
-                    // The item's market channel is E3.3's (#169)
-                    Ok(GameEvent::MarketTrade { .. }) => {}
+                    // E3.3: placing, and the items' market channels
+                    Ok(GameEvent::OrderPlaced { player_id: whose, order }) => {
+                        if whose == player_id {
+                            let msg = ServerMessage::OrderPlaced { order };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
+                    Ok(GameEvent::MarketDepth { item_type, seq, levels }) => {
+                        if market_items.contains(&item_type) {
+                            let msg = ServerMessage::MarketDepth { item_type, seq, full: false, levels };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
+                    Ok(GameEvent::MarketTrade { trade }) => {
+                        if market_items.contains(&trade.item_type) {
+                            let msg = ServerMessage::MarketTrade { trade };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
                     Err(_) => {
                         // Channel closed
                         break;
@@ -1022,6 +1073,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         tracing::info!("Player {}'s superseded connection {} ended", player_id, connection_id);
     }
 }
+
+/// The most items one connection may watch the market channels of (E3.3)
+const MARKET_CHANNELS: usize = 32;
 
 /// Take a queued notice to send it live (#138). An event with no notice
 /// (queuing it failed) is sent as it is.

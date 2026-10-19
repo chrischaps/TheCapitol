@@ -27,8 +27,9 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-use capitol_protocol::rest::MarketOrder;
-use capitol_protocol::rules::market::{fill_units, GradeRule, OrderSide, OrderStatus};
+use capitol_protocol::rest::{DepthLevel, MarketOrder};
+use capitol_protocol::rules::market::{self, fill_units, GradeRule, OrderSide, OrderStatus};
+use capitol_protocol::rules::quality_grade;
 use capitol_protocol::rules::stacking::Units;
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
@@ -142,6 +143,8 @@ pub struct Book {
     /// Stalled orders back in the queue: they match every order, since newer
     /// ones walked past them while they sat out
     woken: HashSet<Uuid>,
+    /// Item types whose depth may have changed since [`Book::take_dirty`]
+    dirty: HashSet<String>,
 }
 
 impl Book {
@@ -176,7 +179,9 @@ impl Book {
                 sides.bids.remove(&old.key());
                 sides.asks.remove(&old.key());
             }
+            self.dirty.insert(old.item_type);
         }
+        self.dirty.insert(order.item_type.clone());
         let sides = self.sides.entry(order.item_type.clone()).or_default();
         match order.side {
             OrderSide::Buy => sides.bids.insert(order.key()),
@@ -201,6 +206,7 @@ impl Book {
                 OrderSide::Sell => sides.asks.remove(&order.key()),
             };
         }
+        self.dirty.insert(order.item_type.clone());
         self.stalled.remove(&id);
         self.arrived.remove(&id);
         self.woken.remove(&id);
@@ -318,6 +324,7 @@ impl Book {
     /// Record `fill`, now that it's written: both orders lose its quantity,
     /// the sell its units, and an order with none left leaves the book.
     pub fn apply(&mut self, fill: &Fill) {
+        self.dirty.insert(fill.item_type.clone());
         for id in [fill.buy, fill.sell] {
             let Some(order) = self.orders.get_mut(&id) else { continue };
             order.remaining -= fill.quantity;
@@ -338,6 +345,70 @@ impl Book {
             OrderSide::Sell => &sides.asks,
         };
         keys.iter().map(|k| &self.orders[&k.id]).collect()
+    }
+
+    /// The item types whose depth may have changed since the last call.
+    pub fn take_dirty(&mut self) -> Vec<String> {
+        let mut items: Vec<String> = self.dirty.drain().collect();
+        items.sort();
+        items
+    }
+
+    /// Every item type with an order on the book.
+    pub fn item_types(&self) -> Vec<String> {
+        let mut items: Vec<String> = self
+            .sides
+            .iter()
+            .filter(|(_, s)| !s.bids.is_empty() || !s.asks.is_empty())
+            .map(|(item, _)| item.clone())
+            .collect();
+        items.sort();
+        items
+    }
+
+    /// `item_type`'s book, aggregated by price and grade, in book order
+    /// (`rules::market::sort_levels`): a buy at its `min_grade` and rule, a
+    /// sell at the grade of each of its units. Expired and stalled orders
+    /// count until they leave the book.
+    pub fn depth(&self, item_type: &str) -> Vec<DepthLevel> {
+        type LevelKey = (OrderSide, i64, &'static str, Option<GradeRule>);
+        let mut levels: HashMap<LevelKey, (i64, i32)> = HashMap::new();
+        for side in [OrderSide::Buy, OrderSide::Sell] {
+            for order in self.side(item_type, side) {
+                match &order.grade {
+                    Some((grade, rule)) => {
+                        let Some(grade) = market::grade_floor(grade).map(quality_grade) else { continue };
+                        let level = levels.entry((side, order.price, grade, Some(*rule))).or_default();
+                        level.0 += order.remaining as i64;
+                        level.1 += 1;
+                    }
+                    None => {
+                        let mut grades: HashMap<&'static str, i64> = HashMap::new();
+                        for (quality, count) in order.units.pairs() {
+                            *grades.entry(quality_grade(quality)).or_default() += count as i64;
+                        }
+                        for (grade, count) in grades {
+                            let level = levels.entry((side, order.price, grade, None)).or_default();
+                            level.0 += count;
+                            level.1 += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let mut out: Vec<DepthLevel> = levels
+            .into_iter()
+            .map(|((side, price, grade, grade_rule), (quantity, orders))| DepthLevel {
+                side,
+                price,
+                grade: grade.to_string(),
+                grade_rule,
+                quantity,
+                orders,
+            })
+            .collect();
+        market::sort_levels(&mut out);
+        out
     }
 }
 

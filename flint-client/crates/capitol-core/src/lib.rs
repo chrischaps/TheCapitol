@@ -15,6 +15,8 @@
 //!   the ask to the settled inventory.
 //! - [`exchange`]: the fiber exchange: a deposit's or withdrawal's
 //!   numbers before you confirm, the server's own rule.
+//! - [`market`]: the market (E3.3): the books you watch, kept by their
+//!   diffs, your orders and the latest trades.
 //! - [`onboarding`]: the first-session hints: which to show, and what
 //!   counts as done (P8.3).
 //! - [`poll`]: the polling scheduler. [`poll::Poller`] turns those events, and
@@ -40,6 +42,7 @@ pub mod catalog;
 pub mod craft;
 pub mod exchange;
 pub mod harvest;
+pub mod market;
 pub mod motion;
 pub mod net;
 pub mod onboarding;

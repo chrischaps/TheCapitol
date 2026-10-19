@@ -49,6 +49,9 @@ pub enum Category {
     World,
     /// `/inventory/*` and `/player/inventory`, read or write.
     Inventory,
+    /// Market writes (E3.3): placing and cancelling orders, collecting from
+    /// the market box. Market reads are [`Category::Read`].
+    Market,
     /// WebSocket commands, per connection.
     Ws,
 }
@@ -60,6 +63,8 @@ impl Category {
             Category::Inventory
         } else if method == Method::GET || method == Method::HEAD {
             Category::Read
+        } else if path.starts_with("/market") {
+            Category::Market
         } else {
             Category::World
         }
@@ -93,13 +98,15 @@ pub struct RateLimitConfig {
     pub read_per_min: u32,
     pub world_per_min: u32,
     pub inventory_per_min: u32,
+    pub market_per_min: u32,
     pub ws_per_min: u32,
 }
 
 impl Default for RateLimitConfig {
     /// TDD §2.6. Reads aren't in its table: they're the client's polls
     /// (three every 5 s, `capitol_core::poll`), with room for a bot scouting
-    /// `/world/nearby` every second. Market read and write join with E3.3.
+    /// `/world/nearby` every second. Market reads share `read`; market writes
+    /// are the table's 30.
     fn default() -> Self {
         Self {
             enabled: true,
@@ -107,6 +114,7 @@ impl Default for RateLimitConfig {
             read_per_min: 120,
             world_per_min: 60,
             inventory_per_min: 120,
+            market_per_min: 30,
             ws_per_min: 60,
         }
     }
@@ -115,7 +123,7 @@ impl Default for RateLimitConfig {
 impl RateLimitConfig {
     /// `RATE_LIMITS=off` (or `0`, `false`) turns limiting off. Each limit
     /// can be set on its own: `RATE_LIMIT_AUTH_PER_MIN`, `_READ_`, `_WORLD_`,
-    /// `_INVENTORY_` and `_WS_PER_MIN`.
+    /// `_INVENTORY_`, `_MARKET_` and `_WS_PER_MIN`.
     pub fn from_env() -> Self {
         Self::from_vars(|name| std::env::var(name).ok())
     }
@@ -140,6 +148,7 @@ impl RateLimitConfig {
             read_per_min: limit("RATE_LIMIT_READ_PER_MIN", d.read_per_min),
             world_per_min: limit("RATE_LIMIT_WORLD_PER_MIN", d.world_per_min),
             inventory_per_min: limit("RATE_LIMIT_INVENTORY_PER_MIN", d.inventory_per_min),
+            market_per_min: limit("RATE_LIMIT_MARKET_PER_MIN", d.market_per_min),
             ws_per_min: limit("RATE_LIMIT_WS_PER_MIN", d.ws_per_min),
         }
     }
@@ -150,6 +159,7 @@ impl RateLimitConfig {
             Category::Read => self.read_per_min,
             Category::World => self.world_per_min,
             Category::Inventory => self.inventory_per_min,
+            Category::Market => self.market_per_min,
             Category::Ws => self.ws_per_min,
         }
     }
@@ -378,6 +388,9 @@ mod tests {
         assert_eq!(Category::of(&Method::GET, "/world/nearby"), Read);
         assert_eq!(Category::of(&Method::POST, "/world/extract"), World);
         assert_eq!(Category::of(&Method::DELETE, "/stations/x"), World);
+        assert_eq!(Category::of(&Method::GET, "/market/orders"), Read);
+        assert_eq!(Category::of(&Method::POST, "/market/orders"), Market);
+        assert_eq!(Category::of(&Method::DELETE, "/market/orders/x"), Market);
     }
 
     #[test]

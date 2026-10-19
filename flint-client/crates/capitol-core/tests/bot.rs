@@ -221,3 +221,144 @@ fn wanderers_gather_around_a_player() {
         println!("{FLEET} wanderers gathered around {watcher_name}");
     });
 }
+
+/// E3.3 through capitol-core: one bot sells fiber, another watches fiber's
+/// book, buys it, hears the fill and collects it; then places an order and
+/// cancels it. Each step is checked in the watcher's book as the diffs keep it.
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn bots_place_watch_fill_and_cancel_orders() {
+    use capitol_core::market::MarketEvent;
+    use capitol_core::protocol::rest::PlaceOrder;
+    use capitol_core::protocol::rules::market::{GradeRule, OrderSide, OrderStatus};
+
+    let config = || {
+        NetConfig::with_base_url(
+            std::env::var("CAPITOL_SERVER").unwrap_or_else(|_| "http://localhost:3000".into()),
+        )
+    };
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        % 100_000_000;
+    let mut seller = Bot::sign_in(config(), &Account::numbered(&format!("seller{stamp}"), 1)).expect("seller signed in");
+    let mut buyer = Bot::sign_in(config(), &Account::numbered(&format!("buyer{stamp}"), 1)).expect("buyer signed in");
+    buyer.watch_market("fiber").expect("fiber's book arrived");
+    // How much rests at a level now, by the buyer's copy of the book
+    let at = |bot: &Bot, side: OrderSide, price: i64| -> i64 {
+        bot.state()
+            .market()
+            .book("fiber")
+            .map(|b| b.side(side).filter(|l| l.price == price).map(|l| l.quantity).sum())
+            .unwrap_or(0)
+    };
+    // A price nobody else on a local stack quotes
+    let price = 7 + (stamp as i64 % 20);
+    let asks_before = at(&buyer, OrderSide::Sell, price);
+
+    // The seller lists three of the exchange's fiber
+    seller.withdraw_fiber(4).expect("withdrew fiber");
+    let stack = seller
+        .state()
+        .inventory()
+        .and_then(|inv| inv.items().find(|i| i.item_type == "fiber").map(|i| i.item_id))
+        .expect("fiber in the inventory");
+    let ask = seller
+        .place_order(PlaceOrder {
+            side: OrderSide::Sell,
+            item_type: "fiber".into(),
+            price,
+            quantity: 3,
+            item_id: Some(stack),
+            qualities: None,
+            min_grade: None,
+            grade_rule: None,
+        })
+        .expect("placed the sell");
+    assert_eq!(ask.status, OrderStatus::Open);
+    buyer
+        .until("the ask in the book", Duration::from_secs(10), |s, _| {
+            s.market()
+                .book("fiber")
+                .is_some_and(|b| b.side(OrderSide::Sell).any(|l| l.price == price && l.quantity >= asks_before + 3))
+        })
+        .expect("the buyer's book shows the ask");
+
+    // The buyer takes it: the fill, the trade on the channel, the ask gone
+    let bid = buyer
+        .place_order(PlaceOrder {
+            side: OrderSide::Buy,
+            item_type: "fiber".into(),
+            price,
+            quantity: 3,
+            item_id: None,
+            qualities: None,
+            min_grade: Some("F".into()),
+            grade_rule: Some(GradeRule::Average),
+        })
+        .expect("placed the buy");
+    let seen = buyer
+        .until("the fill", Duration::from_secs(10), |s, _| {
+            s.market().order(bid.id).is_some_and(|o| o.status == OrderStatus::Filled)
+                && s.market().trades("fiber").any(|t| t.buy_order_id == bid.id)
+        })
+        .expect("the buy filled");
+    assert!(seen
+        .iter()
+        .any(|e| matches!(e, StateEvent::Market(m) if matches!(&**m, MarketEvent::OrderFilled { order, .. } if order.id == bid.id))));
+    // The depth diff follows the fill, at the end of the matcher's cycle
+    buyer
+        .until("the ask gone from the book", Duration::from_secs(5), |s, _| {
+            s.market().book("fiber").is_some_and(|b| {
+                b.side(OrderSide::Sell).filter(|l| l.price == price).map(|l| l.quantity).sum::<i64>() == asks_before
+            })
+        })
+        .expect("the filled ask left the book");
+    seller
+        .until("the seller hears it", Duration::from_secs(10), |s, _| {
+            s.market().order(ask.id).is_some_and(|o| o.status == OrderStatus::Filled)
+        })
+        .expect("the sell filled");
+
+    // The fiber waits in the buyer's market box until collected
+    let fiber_before = buyer.count(container_type::PLAYER_INVENTORY, "fiber");
+    let collected = buyer.collect_market_box().expect("collected");
+    assert!(!collected.collected.is_empty());
+    assert_eq!(buyer.count(container_type::PLAYER_INVENTORY, "fiber"), fiber_before + 3);
+
+    // Place and cancel: the level comes and goes in the watcher's book
+    let low = 1;
+    let bids_before = at(&buyer, OrderSide::Buy, low);
+    let resting = buyer
+        .place_order(PlaceOrder {
+            side: OrderSide::Buy,
+            item_type: "fiber".into(),
+            price: low,
+            quantity: 2,
+            item_id: None,
+            qualities: None,
+            min_grade: Some("A".into()),
+            grade_rule: Some(GradeRule::EveryUnit),
+        })
+        .expect("placed a resting buy");
+    buyer
+        .until("the bid in the book", Duration::from_secs(10), |s, _| {
+            s.market().book("fiber").is_some_and(|b| {
+                b.side(OrderSide::Buy).any(|l| l.price == low && l.quantity >= bids_before + 2)
+            })
+        })
+        .expect("the bid shows");
+    assert!(buyer.my_orders().expect("my orders").iter().any(|o| o.id == resting.id));
+    let cancelled = buyer.cancel_order(resting.id).expect("cancelled");
+    assert_eq!(cancelled.status, OrderStatus::Cancelled);
+    buyer
+        .until("the bid gone", Duration::from_secs(10), |s, _| {
+            s.market().order(resting.id).is_some_and(|o| o.status == OrderStatus::Cancelled)
+                && s.market().book("fiber").is_some_and(|b| {
+                    b.side(OrderSide::Buy).filter(|l| l.price == low).map(|l| l.quantity).sum::<i64>() == bids_before
+                })
+        })
+        .expect("the cancel shows");
+    assert!(buyer.state().market().open_orders().is_empty());
+}

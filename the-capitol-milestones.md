@@ -473,9 +473,9 @@ Create static data for:
 - [x] `market_orders` table and model (E3.1)
 - [x] Order types: Buy, Sell (E3.1)
 - [x] Order status: Open, Filled, Cancelled, Expired (E3.1; a partly filled order is open with `quantity_remaining` under `quantity_total`)
-- [ ] `POST /market/orders` - Create order
-- [ ] `DELETE /market/orders/{id}` - Cancel order
-- [ ] `GET /market/orders` - List orders (with filters)
+- [x] `POST /market/orders` - Create order (E3.3)
+- [x] `DELETE /market/orders/{id}` - Cancel order (E3.3)
+- [x] `GET /market/orders` - List orders (with filters) (E3.3: an item's book by price and grade, `?side=`; your own are `/market/orders/mine`)
 
 #### Backend - Order Matching
 - [x] Match engine runs on tick (1s interval) (E3.2: a task of its own on the 1 s cadence)
@@ -492,9 +492,9 @@ Create static data for:
 - [x] Emit events for trade execution (E3.2)
 
 #### Backend - Market Data
-- [ ] `GET /market/history` - Price history for item type
-- [ ] Best bid/ask cached in Redis
-- [ ] WebSocket updates for market changes
+- [x] `GET /market/history` - Price history for item type (E3.3: OHLC and volume in buckets, by grade if asked)
+- [x] Best bid/ask cached ~~in Redis~~ in memory (E3.3: nothing else reads it, so not in Redis; it's in `/market/summary`)
+- [x] WebSocket updates for market changes (E3.3: `subscribe_market`, then `market_depth` diffs and `market_trade`)
 
 #### Client - Market UI
 - [ ] Market browser (list item types with activity)

@@ -60,6 +60,8 @@ const SERVER_TYPES: &[&str] = &[
     "order_placed",
     "order_filled",
     "order_cancelled",
+    "market_depth",
+    "market_trade",
 ];
 
 const CLIENT_TYPES: &[&str] = &[
@@ -88,6 +90,8 @@ const CLIENT_TYPES: &[&str] = &[
     "trade_offer",
     "trade_accept",
     "trade_cancel",
+    "subscribe_market",
+    "unsubscribe_market",
 ];
 
 fn fixtures(dir: &str) -> Vec<(String, String)> {

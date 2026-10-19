@@ -15,6 +15,11 @@ use capitol_protocol::rest::{
     StationContainerResponse, StationInfo, StationTool, StationAutomation, AutomationMode, AutomationState, PauseReason, ConfigureAutomation, SubscribeRequest, Subscription, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
     ZonesResponse,
 };
+use capitol_protocol::rest::{
+    Candle, CollectRequest, CollectResponse, DepthLevel, MarketDepthResponse, MarketHistoryResponse,
+    MarketItemSummary, MarketOrder, MarketSummaryResponse, MarketTrade, PlaceOrder,
+};
+use capitol_protocol::rules::market::{GradeRule, OrderSide, OrderStatus};
 use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPark, TerrainPlot, TerrainResponse, WaterRing};
 
 /// Security scheme modifier for JWT Bearer authentication
@@ -63,6 +68,7 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         (name = "Catalog", description = "Static game data: item, station, resource and container types, and recipes"),
         (name = "Stations", description = "Crafting and storage stations"),
         (name = "Exchange", description = "Currency exchange operations"),
+        (name = "Market", description = "Orders, books, price history and the market box"),
         (name = "Plots", description = "Land plot ownership and permissions"),
         (name = "Bureaucracy", description = "Zone information and deed prices"),
         (name = "Terrain", description = "World terrain data (roads, water)")
@@ -108,6 +114,15 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         // Exchange
         crate::routes::exchange::deposit_fiber,
         crate::routes::exchange::withdraw_fiber,
+        // Market
+        crate::routes::market::place_order,
+        crate::routes::market::cancel_order,
+        crate::routes::market::get_depth,
+        crate::routes::market::my_orders,
+        crate::routes::market::history,
+        crate::routes::market::summary,
+        crate::routes::market::get_box,
+        crate::routes::market::collect,
         // Plots
         crate::routes::plots::list_plots,
         crate::routes::plots::list_claimed_plots,
@@ -188,6 +203,21 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         DepositResponse,
         WithdrawRequest,
         WithdrawResponse,
+        // Market
+        PlaceOrder,
+        MarketOrder,
+        MarketTrade,
+        OrderSide,
+        GradeRule,
+        OrderStatus,
+        DepthLevel,
+        MarketDepthResponse,
+        Candle,
+        MarketHistoryResponse,
+        MarketItemSummary,
+        MarketSummaryResponse,
+        CollectRequest,
+        CollectResponse,
         // Plots
         ListPlotsResponse,
         PlotInfo,

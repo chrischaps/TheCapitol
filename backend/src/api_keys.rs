@@ -118,6 +118,8 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         | ("PUT", "stations", [_, "automation"])
         | ("POST", "stations", [_, "automation", "start" | "stop"]) => Some(ApiKeyScope::Play),
         ("POST", "exchange", ["deposit" | "withdraw"])
+        | ("POST", "market", ["orders"] | ["box", "collect"])
+        | ("DELETE", "market", ["orders", _])
         | ("POST", "plots", [_, "claim" | "pay-tax"])
         | ("PUT", "plots", [_, "permissions"]) => Some(ApiKeyScope::Trade),
         _ => None,
@@ -127,7 +129,10 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
 /// The scope a WebSocket command needs.
 pub fn ws_scope(message: &ClientMessage) -> ApiKeyScope {
     match message {
-        ClientMessage::Auth { .. } | ClientMessage::Subscribe { .. } => ApiKeyScope::Read,
+        ClientMessage::Auth { .. }
+        | ClientMessage::Subscribe { .. }
+        | ClientMessage::SubscribeMarket { .. }
+        | ClientMessage::UnsubscribeMarket { .. } => ApiKeyScope::Read,
         ClientMessage::Move { .. }
         | ClientMessage::Extract { .. }
         | ClientMessage::CancelExtraction
@@ -230,6 +235,11 @@ mod tests {
         assert_eq!(rest(Method::POST, "/plots/abc/claim"), Some(Trade));
         assert_eq!(rest(Method::POST, "/plots/abc/pay-tax"), Some(Trade));
         assert_eq!(rest(Method::PUT, "/plots/abc/permissions"), Some(Trade));
+        assert_eq!(rest(Method::GET, "/market/orders"), Some(Read));
+        assert_eq!(rest(Method::POST, "/market/orders"), Some(Trade));
+        assert_eq!(rest(Method::DELETE, "/market/orders/abc"), Some(Trade));
+        assert_eq!(rest(Method::POST, "/market/box/collect"), Some(Trade));
+        assert_eq!(rest(Method::POST, "/market/box"), None);
     }
 
     #[test]

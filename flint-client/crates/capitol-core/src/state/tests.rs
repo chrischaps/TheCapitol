@@ -218,9 +218,11 @@ fn test_for(message: &M) -> fn() {
         M::TaxDelinquent { .. } => tax_messages_are_reported,
         M::PlotForeclosed { .. } => tax_messages_are_reported,
         M::SubscriptionLapsed { .. } => subscription_follows_auth_ok_me_and_the_lapse,
-        M::OrderPlaced { .. } => market_messages_change_nothing_yet,
-        M::OrderFilled { .. } => market_messages_change_nothing_yet,
-        M::OrderCancelled { .. } => market_messages_change_nothing_yet,
+        M::OrderPlaced { .. } => market_messages_reach_the_market_store,
+        M::OrderFilled { .. } => market_messages_reach_the_market_store,
+        M::OrderCancelled { .. } => market_messages_reach_the_market_store,
+        M::MarketDepth { .. } => market_messages_reach_the_market_store,
+        M::MarketTrade { .. } => market_messages_reach_the_market_store,
     }
 }
 
@@ -240,7 +242,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 47, "one fixture per ServerMessage variant");
+    assert_eq!(count, 49, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1164,18 +1166,34 @@ fn tool_broke_is_reported() {
     );
 }
 
-/// Orders have no panel until E3.5 (#171), so the store ignores them.
+/// Your orders reach the market store (E3.3) whatever you watch; an item's
+/// book and trades only once you watch it. The rules of the book are
+/// `market`'s own tests.
 #[test]
-fn market_messages_change_nothing_yet() {
+fn market_messages_reach_the_market_store() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../protocol/tests/fixtures/server");
-    let mut state = with_players();
-    let before = format!("{state:?}");
-    for name in ["order_placed", "order_filled", "order_cancelled"] {
+    let fixture = |name: &str| -> M {
         let json = std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap();
-        let message: M = serde_json::from_str(&json).unwrap();
-        assert!(state.apply_ws(&message).is_empty(), "{name}");
+        serde_json::from_str(&json).unwrap()
+    };
+    let mut state = with_players();
+    for name in ["order_placed", "order_filled", "order_cancelled"] {
+        let message = fixture(name);
+        let changes = state.apply_ws(&message);
+        assert!(matches!(changes.as_slice(), [StateEvent::Market(_)]), "{name}: {changes:?}");
+        let order = match &message {
+            M::OrderPlaced { order } | M::OrderFilled { order, .. } | M::OrderCancelled { order } => order,
+            _ => unreachable!(),
+        };
+        assert_eq!(state.market().order(order.id), Some(order), "{name}");
     }
-    assert_eq!(format!("{state:?}"), before);
+    // Plank isn't watched, so its channel says nothing
+    assert!(state.apply_ws(&fixture("market_depth")).is_empty());
+    assert!(state.apply_ws(&fixture("market_trade")).is_empty());
+    state.market_mut().watch("plank");
+    let changes = state.apply_ws(&fixture("market_trade"));
+    assert!(matches!(changes.as_slice(), [StateEvent::Market(e)] if matches!(**e, crate::market::MarketEvent::Traded(_))));
+    assert_eq!(state.market().trades("plank").count(), 1);
 }
 
 #[test]

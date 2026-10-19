@@ -45,6 +45,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::catalog::{container_type, Catalog};
+use crate::market::{MarketEvent, MarketStore};
 use crate::net::{ConnectionState, NetEvent, RestResponse};
 
 pub use container::Container;
@@ -274,6 +275,10 @@ pub enum StateEvent {
 
     /// The local player's trading changed. See [`GameState::trade`].
     Trade(TradeEvent),
+
+    /// The market changed: a book, a trade, your orders (E3.3). See
+    /// [`GameState::market`]. Boxed: an order and its trade are big.
+    Market(Box<MarketEvent>),
 }
 
 /// The client's mirror of the world.
@@ -319,6 +324,8 @@ pub struct GameState {
     claimed_version: u64,
 
     trade: trade::TradeBook,
+    /// The books you watch and your orders (E3.3)
+    market: MarketStore,
 }
 
 impl Default for GameState {
@@ -354,6 +361,7 @@ impl GameState {
             claimed: HashMap::new(),
             claimed_version: 0,
             trade: trade::TradeBook::default(),
+            market: MarketStore::new(),
         }
     }
 
@@ -384,6 +392,8 @@ impl GameState {
         }
         if let ConnectionState::Connected { player_id } = state {
             self.me = Some(*player_id);
+            // A new session watches no market channel until asked again
+            self.market.connected();
             if !self.ever_connected {
                 self.ever_connected = true;
                 out.push(StateEvent::SnapshotStale);
@@ -764,9 +774,14 @@ impl GameState {
                 });
                 out.push(StateEvent::SubscriptionLapsed { until: *until });
             }
-            // The market panel (E3.5, #171) is where these land; until then
-            // the client has nothing that shows an order
-            M::OrderPlaced { .. } | M::OrderFilled { .. } | M::OrderCancelled { .. } => {}
+            // E3.3: the market store holds these; the panel is E3.5 (#171)
+            M::OrderPlaced { .. }
+            | M::OrderFilled { .. }
+            | M::OrderCancelled { .. }
+            | M::MarketDepth { .. }
+            | M::MarketTrade { .. } => {
+                out.extend(self.market.apply_ws(message).into_iter().map(|e| StateEvent::Market(Box::new(e))));
+            }
         }
         out
     }
@@ -840,6 +855,13 @@ impl GameState {
             }
             R::Currency(c) => self.set_strands(c.strand_balance, &mut out),
             R::Subscription(s) => self.subscription = Some(*s),
+            R::Order(order) => out.extend(self.market.answered(order).into_iter().map(|e| StateEvent::Market(Box::new(e)))),
+            R::MyOrders(orders) => out.extend(self.market.set_orders(orders).into_iter().map(|e| StateEvent::Market(Box::new(e)))),
+            R::MarketDepth(depth) => out.extend(self.market.set_depth(depth).into_iter().map(|e| StateEvent::Market(Box::new(e)))),
+            R::MarketBox(container) => {
+                self.containers.insert(container.id, Container::from(container));
+                out.push(StateEvent::ContainersUpdated);
+            }
             R::Deposit(d) => self.set_strands(d.new_balance, &mut out),
             R::Withdraw(w) => self.set_strands(w.new_balance, &mut out),
             // The poller lists your own plots. Another listing (a bot looking
@@ -905,6 +927,9 @@ impl GameState {
             | R::SplitStack(_)
             | R::PlotPermissions(_)
             | R::Zones(_)
+            | R::MarketHistory(_)
+            | R::MarketSummary(_)
+            | R::Collected(_)
             | R::CreatedApiKey(_)
             | R::ApiKeys(_) => {}
         }
@@ -1104,6 +1129,16 @@ impl GameState {
     }
 
     /// Whether you're a subscriber now: the header's Patron chip (E4.1).
+    /// The market: the books you watch and your orders (E3.3).
+    pub fn market(&self) -> &MarketStore {
+        &self.market
+    }
+
+    /// To watch an item, or take the messages the market wants sent.
+    pub fn market_mut(&mut self) -> &mut MarketStore {
+        &mut self.market
+    }
+
     pub fn is_patron(&self) -> bool {
         self.subscription
             .is_some_and(|s| s.is_active_at(self.utc_now()))

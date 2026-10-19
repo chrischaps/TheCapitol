@@ -3,7 +3,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::models::{PlayerPosition, SlotItem};
-use capitol_protocol::rest::{MarketOrder, MarketTrade};
+use capitol_protocol::rest::{DepthLevel, MarketOrder, MarketTrade};
 use capitol_protocol::ws::{ToolUse, TradeItemInfo};
 
 #[derive(Debug, Clone, Serialize)]
@@ -213,10 +213,21 @@ pub enum GameEvent {
         order: MarketOrder,
         trade: MarketTrade,
     },
-    /// `player_id`'s order left the book, expired (its `status` says so)
+    /// `player_id`'s order left the book, cancelled or expired (its `status`
+    /// says which)
     OrderClosed { player_id: Uuid, order: MarketOrder },
-    /// A fill, for the item's market channel (E3.3 subscribes)
+    /// A fill, for the item's market channel
     MarketTrade { trade: MarketTrade },
+    // E3.3: the market API
+    /// `player_id`'s order is on the book
+    OrderPlaced { player_id: Uuid, order: MarketOrder },
+    /// An item's depth changed: the changed levels, for its market channel
+    /// (`Market::publish`)
+    MarketDepth {
+        item_type: String,
+        seq: u64,
+        levels: Vec<DepthLevel>,
+    },
 }
 
 /// Slot update for inventory events

@@ -11,7 +11,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::rest::{AutomationMode, MarketOrder, MarketTrade, StationAutomation, StationTool, Subscription};
+use crate::rest::{
+    AutomationMode, DepthLevel, MarketOrder, MarketTrade, StationAutomation, StationTool, Subscription,
+};
 use crate::rules::stacking::Units;
 
 /// Client to server.
@@ -116,6 +118,17 @@ pub enum ClientMessage {
     TradeAccept,
     #[serde(rename = "trade_cancel")]
     TradeCancel,
+    // E3.3: Market channels
+    /// Watch an item's book: answered by a full `market_depth`, then its
+    /// diffs and `market_trade`s. Ask again to start over from a full one.
+    #[serde(rename = "subscribe_market")]
+    SubscribeMarket { item_type: String },
+    /// Stop watching an item, or every item without one
+    #[serde(rename = "unsubscribe_market")]
+    UnsubscribeMarket {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_type: Option<String>,
+    },
 }
 
 impl ClientMessage {
@@ -147,6 +160,8 @@ impl ClientMessage {
             ClientMessage::TradeOffer { .. } => "trade_offer",
             ClientMessage::TradeAccept => "trade_accept",
             ClientMessage::TradeCancel => "trade_cancel",
+            ClientMessage::SubscribeMarket { .. } => "subscribe_market",
+            ClientMessage::UnsubscribeMarket { .. } => "unsubscribe_market",
         }
     }
 }
@@ -428,6 +443,23 @@ pub enum ServerMessage {
     /// which), and what was left went back to your market box or balance
     #[serde(rename = "order_cancelled")]
     OrderCancelled { order: MarketOrder },
+    // E3.3: an item's market channel, to those who `subscribe_market` it
+    /// The item's book changed. `full` is the whole book (the answer to
+    /// `subscribe_market`); otherwise `levels` are the changes, a level with
+    /// `quantity` 0 gone (`rules::market::apply_depth_diff`). `seq` goes up
+    /// by one a change: skip a diff at or below the book's, and on a gap ask
+    /// for a full one again.
+    #[serde(rename = "market_depth")]
+    MarketDepth {
+        item_type: String,
+        seq: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        full: bool,
+        levels: Vec<DepthLevel>,
+    },
+    /// A trade in the item, anyone's
+    #[serde(rename = "market_trade")]
+    MarketTrade { trade: MarketTrade },
 }
 
 impl ServerMessage {
@@ -482,6 +514,8 @@ impl ServerMessage {
             ServerMessage::OrderPlaced { .. } => "order_placed",
             ServerMessage::OrderFilled { .. } => "order_filled",
             ServerMessage::OrderCancelled { .. } => "order_cancelled",
+            ServerMessage::MarketDepth { .. } => "market_depth",
+            ServerMessage::MarketTrade { .. } => "market_trade",
         }
     }
 }

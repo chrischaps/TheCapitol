@@ -1,0 +1,1 @@
+{"item_type":"plank","seq":42,"levels":[{"side":"buy","price":10,"grade":"B","grade_rule":"every_unit","quantity":7,"orders":2},{"side":"buy","price":9,"grade":"F","grade_rule":"average","quantity":20,"orders":1},{"side":"sell","price":11,"grade":"A","quantity":4,"orders":1},{"side":"sell","price":11,"grade":"C","quantity":6,"orders":2}]}

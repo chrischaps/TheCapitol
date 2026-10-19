@@ -6,12 +6,18 @@
 //! `fixtures/rest/stations_nearby.json` is `GET /stations/nearby`, a station running (E4.2).
 //! `fixtures/rest/split_stack.json` is `POST /items/{id}/split` taking named qualities (E1.8).
 //! `fixtures/rest/place_order.json` is a sell order naming its units (E3.1).
+//! `fixtures/rest/market_depth.json`, `market_history.json` and
+//! `market_summary.json` are `GET /market/orders`, `/market/history` and
+//! `/market/summary` (E3.3).
 
 use std::fs;
 use std::path::Path;
 
-use capitol_protocol::rest::{AutomationMode, AutomationState, CatalogResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse};
-use capitol_protocol::rules::market::{GradeRule, OrderSide};
+use capitol_protocol::rest::{
+    AutomationMode, AutomationState, CatalogResponse, MarketDepthResponse, MarketHistoryResponse,
+    MarketSummaryResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
+};
+use capitol_protocol::rules::market::{sort_levels, GradeRule, OrderSide};
 
 fn fixture(name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -68,4 +74,26 @@ fn a_bare_buy_order_takes_the_defaults() {
         serde_json::from_str(r#"{"side":"buy","item_type":"plank","price":12,"quantity":20}"#).unwrap();
     assert_eq!((order.item_id, order.qualities, order.min_grade, order.grade_rule), (None, None, None, None));
     assert_eq!(GradeRule::default(), GradeRule::Average);
+}
+
+#[test]
+fn a_book_round_trips_in_book_order() {
+    let json = fixture("market_depth.json");
+    let depth: MarketDepthResponse = serde_json::from_str(&json).unwrap();
+    let mut sorted = depth.levels.clone();
+    sort_levels(&mut sorted);
+    assert_eq!(sorted, depth.levels);
+    assert_eq!(serde_json::to_string(&depth).unwrap(), json);
+}
+
+#[test]
+fn history_and_the_summary_round_trip() {
+    let json = fixture("market_history.json");
+    let history: MarketHistoryResponse = serde_json::from_str(&json).unwrap();
+    assert!(history.candles.iter().all(|c| c.low <= c.open.min(c.close) && c.high >= c.open.max(c.close)));
+    assert_eq!(serde_json::to_string(&history).unwrap(), json);
+    let json = fixture("market_summary.json");
+    let summary: MarketSummaryResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(summary.items[1].last_price, None);
+    assert_eq!(serde_json::to_string(&summary).unwrap(), json);
 }
