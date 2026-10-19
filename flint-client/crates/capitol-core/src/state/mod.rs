@@ -891,6 +891,7 @@ impl GameState {
             }
             R::Currency(c) => self.set_strands(c.strand_balance, &mut out),
             R::Subscription(s) => self.subscription = Some(*s),
+            R::Granted(g) => self.set_strands(g.strands, &mut out),
             R::Order(order) => out.extend(self.market.answered(order).into_iter().map(|e| StateEvent::Market(Box::new(e)))),
             R::MyOrders(orders) => out.extend(self.market.set_orders(orders).into_iter().map(|e| StateEvent::Market(Box::new(e)))),
             R::MarketDepth(depth) => out.extend(self.market.set_depth(depth).into_iter().map(|e| StateEvent::Market(Box::new(e)))),

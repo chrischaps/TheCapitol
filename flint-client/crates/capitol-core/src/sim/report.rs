@@ -29,6 +29,17 @@ pub enum Entry {
     Deposited { fiber: i32, strands: i64 },
     /// A deed was bought.
     Claimed { cost: i64 },
+    /// One of the bot's orders filled (E3.8): `sold` units, or bought them,
+    /// at `price` each.
+    Traded {
+        item: String,
+        sold: bool,
+        quantity: i32,
+        price: i64,
+        at: f64,
+    },
+    /// An order's listing fee.
+    Fee { strands: i64 },
 }
 
 /// One bot's run, as the report needs it.
@@ -46,14 +57,21 @@ pub struct BotRun {
 
 impl BotRun {
     /// What the hourly tax took: whatever the balance lost that the bot's own
-    /// deposits and deeds don't explain. Bots don't trade, so nothing else
-    /// moves it.
+    /// deposits, deeds and trades don't explain. A bot ends with no order
+    /// open, so no Strands sit in escrow.
     pub fn tax(&self) -> i64 {
         let mut expected = self.strands_start;
         for entry in &self.entries {
             match entry {
                 Entry::Deposited { strands, .. } => expected += strands,
                 Entry::Claimed { cost } => expected -= cost,
+                Entry::Traded {
+                    sold, quantity, price, ..
+                } => {
+                    let value = price * *quantity as i64;
+                    expected += if *sold { value } else { -value };
+                }
+                Entry::Fee { strands } => expected -= strands,
                 _ => {}
             }
         }
@@ -88,6 +106,14 @@ pub struct ItemLine {
     /// Game seconds of `gather <item>` per unit gathered.
     pub labour_secs: Option<f64>,
     pub d5_labour_secs: Option<f64>,
+    /// Units that changed hands on the market, and at what prices
+    pub traded: i64,
+    pub price_low: Option<i64>,
+    /// The mean price a unit, weighted by quantity
+    pub price_mean: Option<f64>,
+    pub price_high: Option<i64>,
+    /// D5's value, where the makers' prices started
+    pub d5_price: Option<i64>,
 }
 
 /// Time spent under one step label.
@@ -120,7 +146,14 @@ pub struct Report {
     pub failures: Vec<(String, usize)>,
     /// Bots that stopped before the end, and why.
     pub errors: Vec<(String, String)>,
+    /// Market fees paid, all bots together
+    pub fees: i64,
+    /// The market makers' Strands, at the start and at the end
+    pub makers: Option<(i64, i64)>,
 }
+
+/// What a market maker's [`BotRun::role`] says.
+pub const MAKER_ROLE: &str = "market maker";
 
 impl Report {
     pub fn build(runs: &[BotRun], hours: f64, scale: f64, wall_secs: f64) -> Report {
@@ -132,6 +165,9 @@ impl Report {
         let mut stuck: BTreeMap<String, usize> = BTreeMap::new();
         let mut failures: BTreeMap<String, usize> = BTreeMap::new();
         let (mut deeds, mut deed_strands, mut fiber_deposited) = (0, 0, 0);
+        // Each trade counted once, from its seller: (quantity, price)
+        let mut sales: BTreeMap<String, Vec<(i64, i64)>> = BTreeMap::new();
+        let mut fees = 0;
         for run in runs {
             *roles.entry(run.role.clone()).or_insert(0) += 1;
             for entry in &run.entries {
@@ -173,13 +209,28 @@ impl Report {
                         deeds += 1;
                         deed_strands += cost;
                     }
+                    Entry::Traded {
+                        item,
+                        sold: true,
+                        quantity,
+                        price,
+                        ..
+                    } => sales.entry(item.clone()).or_default().push((*quantity as i64, *price)),
+                    Entry::Traded { .. } => {}
+                    Entry::Fee { strands } => fees += strands,
                 }
             }
+        }
+        // An item only traded (a maker's stock) still gets a line
+        for item in sales.keys() {
+            made.entry(item.clone()).or_default();
         }
         let items = made
             .into_iter()
             .map(|(item, mut units)| {
-                let (gathered, crafted, first_at) = counts[&item];
+                let (gathered, crafted, first_at) = counts.get(&item).copied().unwrap_or((0, 0, f64::NAN));
+                let fills = sales.get(&item).map(Vec::as_slice).unwrap_or_default();
+                let traded: i64 = fills.iter().map(|(q, _)| q).sum();
                 units.sort_unstable();
                 let labour_secs = time
                     .get(&format!("gather {item}"))
@@ -196,6 +247,12 @@ impl Report {
                         .iter()
                         .find(|(i, _)| *i == item)
                         .map(|(_, s)| *s),
+                    traded,
+                    price_low: fills.iter().map(|(_, p)| *p).min(),
+                    price_mean: (traded > 0)
+                        .then(|| fills.iter().map(|(q, p)| q * p).sum::<i64>() as f64 / traded as f64),
+                    price_high: fills.iter().map(|(_, p)| *p).max(),
+                    d5_price: crate::market_maker::seed_price(&item),
                     item,
                     gathered,
                     crafted,
@@ -227,6 +284,12 @@ impl Report {
                 .iter()
                 .filter_map(|r| r.error.clone().map(|e| (r.name.clone(), e)))
                 .collect(),
+            fees,
+            makers: runs
+                .iter()
+                .filter(|r| r.role == MAKER_ROLE)
+                .map(|r| (r.strands_start, r.strands_end))
+                .reduce(|a, b| (a.0 + b.0, a.1 + b.1)),
         }
     }
 
@@ -321,19 +384,38 @@ impl Report {
         let _ = writeln!(md, "\n## Production\n");
         let _ = writeln!(
             md,
-            "| Item | Gathered | Crafted | Per game hour | p10 | p50 | p90 | First at (h) | s a unit (D5) |"
+            "| Item | Gathered | Crafted | Per game hour | p10 | p50 | p90 | First at (h) | s a unit (D5) | Traded | Low | Mean price (D5) | High |"
         );
-        let _ = writeln!(md, "|---|---:|---:|---:|---:|---:|---:|---:|---:|");
+        let _ = writeln!(md, "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
         for i in &self.items {
             let labour = match (i.labour_secs, i.d5_labour_secs) {
                 (Some(a), Some(b)) => format!("{a:.0} ({b:.0})"),
                 (Some(a), None) => format!("{a:.0}"),
                 _ => String::new(),
             };
+            let num = |v: Option<i64>| v.map(|v| v.to_string()).unwrap_or_default();
+            let mean = match (i.price_mean, i.d5_price) {
+                (Some(m), Some(d)) => format!("{m:.1} ({d})"),
+                (Some(m), None) => format!("{m:.1}"),
+                _ => String::new(),
+            };
+            let made = i.gathered + i.crafted > 0;
             let _ = writeln!(
                 md,
-                "| {} | {} | {} | {:.1} | {} | {} | {} | {:.2} | {} |",
-                i.item, i.gathered, i.crafted, i.per_hour, i.p10, i.p50, i.p90, i.first_at, labour
+                "| {} | {} | {} | {:.1} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                i.item,
+                i.gathered,
+                i.crafted,
+                i.per_hour,
+                if made { i.p10.to_string() } else { String::new() },
+                if made { i.p50.to_string() } else { String::new() },
+                if made { i.p90.to_string() } else { String::new() },
+                if made { format!("{:.2}", i.first_at) } else { String::new() },
+                labour,
+                if i.traded > 0 { i.traded.to_string() } else { String::new() },
+                num(i.price_low),
+                mean,
+                num(i.price_high)
             );
         }
         let _ = writeln!(md, "\n## Tools worn out\n");
@@ -346,9 +428,12 @@ impl Report {
         let _ = writeln!(md, "\n## Strands\n");
         let _ = writeln!(
             md,
-            "- Fiber deposited: {}\n- Deeds bought: {} for {} Strands\n- Spent on tax: {} Strands",
-            self.fiber_deposited, self.deeds, self.deed_strands, self.tax
+            "- Fiber deposited: {}\n- Deeds bought: {} for {} Strands\n- Spent on tax: {} Strands\n- Market fees: {} Strands",
+            self.fiber_deposited, self.deeds, self.deed_strands, self.tax, self.fees
         );
+        if let Some((start, end)) = self.makers {
+            let _ = writeln!(md, "- Market makers: {start} Strands at the start, {end} at the end");
+        }
         for (zone, cost) in [("Rural", 250), ("Suburban", 500)] {
             if let Some(h) = self.deed_hours(cost) {
                 let _ = writeln!(md, "- A {zone} deed ({cost}) is {h:.2} hours of grass");
@@ -380,13 +465,14 @@ impl Report {
     /// One row per item, for a spreadsheet.
     pub fn to_csv(&self) -> String {
         let mut csv = String::from(
-            "item,gathered,crafted,per_game_hour,p10,p50,p90,first_at_hours,secs_per_unit,d5_secs_per_unit,tools_broke\n",
+            "item,gathered,crafted,per_game_hour,p10,p50,p90,first_at_hours,secs_per_unit,d5_secs_per_unit,tools_broke,traded,price_low,price_mean,price_high,d5_price\n",
         );
         for i in &self.items {
             let opt = |v: Option<f64>| v.map(|v| format!("{v:.1}")).unwrap_or_default();
+            let int = |v: Option<i64>| v.map(|v| v.to_string()).unwrap_or_default();
             let _ = writeln!(
                 csv,
-                "{},{},{},{:.2},{},{},{},{:.3},{},{},{}",
+                "{},{},{},{:.2},{},{},{},{:.3},{},{},{},{},{},{},{},{}",
                 i.item,
                 i.gathered,
                 i.crafted,
@@ -397,7 +483,12 @@ impl Report {
                 i.first_at,
                 opt(i.labour_secs),
                 opt(i.d5_labour_secs),
-                self.tools_broke.get(&i.item).copied().unwrap_or(0)
+                self.tools_broke.get(&i.item).copied().unwrap_or(0),
+                i.traded,
+                int(i.price_low),
+                opt(i.price_mean),
+                int(i.price_high),
+                int(i.d5_price)
             );
         }
         csv
@@ -505,6 +596,65 @@ mod tests {
         assert_eq!(r.tax(), 9);
     }
 
+    fn traded(item: &str, sold: bool, quantity: i32, price: i64) -> Entry {
+        Entry::Traded {
+            item: item.into(),
+            sold,
+            quantity,
+            price,
+            at: 0.5,
+        }
+    }
+
+    #[test]
+    fn trades_and_fees_are_not_tax() {
+        let r = run(
+            "gatherer (wood)",
+            vec![
+                traded("log", true, 10, 7),
+                traded("plank", false, 4, 6),
+                Entry::Fee { strands: 1 },
+            ],
+            100,
+            100 + 70 - 24 - 1 - 5,
+        );
+        assert_eq!(r.tax(), 5);
+    }
+
+    #[test]
+    fn prices_count_each_trade_once_from_its_seller() {
+        let mut maker = run(
+            MAKER_ROLE,
+            vec![traded("plank", true, 10, 6), traded("plank", false, 10, 4), Entry::Fee { strands: 2 }],
+            20_000,
+            20_018,
+        );
+        maker.name = "Maker1".into();
+        let runs = vec![
+            run(
+                "crafter (planks)",
+                vec![made("plank", 30, 55, false, 0.2), traded("plank", true, 10, 4), Entry::Fee { strands: 1 }],
+                100,
+                139,
+            ),
+            run("crafter (ingots)", vec![traded("plank", false, 10, 6)], 100, 40),
+            maker,
+        ];
+        let report = Report::build(&runs, 1.0, 10.0, 360.0);
+        let plank = report.item("plank").unwrap();
+        assert_eq!(plank.traded, 20);
+        assert_eq!((plank.price_low, plank.price_high), (Some(4), Some(6)));
+        assert_eq!(plank.price_mean, Some(5.0));
+        assert_eq!(plank.d5_price, Some(5));
+        assert_eq!(report.fees, 3);
+        assert_eq!(report.makers, Some((20_000, 20_018)));
+        assert_eq!(report.tax, 0);
+        let md = report.to_markdown();
+        assert!(md.contains("| 20 | 4 | 5.0 (5) | 6 |"), "{md}");
+        assert!(md.contains("- Market makers: 20000 Strands at the start, 20018 at the end"), "{md}");
+        assert!(report.to_csv().contains(",20,4,5.0,6,5\n"));
+    }
+
     #[test]
     fn the_report_adds_up_the_swarm() {
         let runs = vec![
@@ -558,11 +708,11 @@ mod tests {
         assert!(bottlenecks.contains("stuck 1×: the plot has no room"), "{bottlenecks}");
         assert!(bottlenecks.contains("never made: iron_ingot"), "{bottlenecks}");
         let md = report.to_markdown();
-        assert!(md.contains("| fiber | 5 | 0 | 2.5 | 50 | 60 | 60 | 0.01 | 14 (4) |"), "{md}");
+        assert!(md.contains("| fiber | 5 | 0 | 2.5 | 50 | 60 | 60 | 0.01 | 14 (4) |  |  |  |  |"), "{md}");
         assert!(md.contains("- stone_axe: 1"));
         let csv = report.to_csv();
         assert_eq!(csv.lines().count(), 3);
-        assert!(csv.contains("\nfiber,5,0,2.50,50,60,60,0.010,14.4,4.0,0\n"), "{csv}");
+        assert!(csv.contains("\nfiber,5,0,2.50,50,60,60,0.010,14.4,4.0,0,0,,,,1\n"), "{csv}");
         // 251.3 fiber at 14.4 s
         assert!((report.deed_hours(250).unwrap() - 1.005).abs() < 0.01);
     }

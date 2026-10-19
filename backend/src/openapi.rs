@@ -12,7 +12,7 @@ use capitol_protocol::rest::{
     MoveRequest, NearbyResponse, NearbyStationsResponse, PlaceStationRequest,
     PayTaxRequest, PayTaxResponse, PlaceStationResponse, PlayerMeResponse, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
     RecipeOutputInfo, RecipesResponse, RegisterRequest, ResourceNodeInfo, SlotItem, SplitStackRequest, SplitStackResponse,
-    StationContainerResponse, StationInfo, StationTool, StationAutomation, Produced, AutomationMode, AutomationState, PauseReason, ConfigureAutomation, SubscribeRequest, Subscription, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
+    StationContainerResponse, StationInfo, StationTool, StationAutomation, Produced, AutomationMode, AutomationState, PauseReason, ConfigureAutomation, SubscribeRequest, Subscription, GrantRequest, GrantItem, GrantResponse, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
     ZonesResponse,
 };
 use capitol_protocol::rest::{
@@ -95,6 +95,7 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         crate::routes::player::get_inventory,
         crate::routes::player::get_currency,
         crate::routes::player::mock_subscribe,
+        crate::routes::player::dev_grant,
         // World
         crate::routes::world::get_nearby,
         crate::routes::world::get_all_nodes,
@@ -164,6 +165,9 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         Subscription,
         SubscriptionStatus,
         SubscribeRequest,
+        GrantRequest,
+        GrantItem,
+        GrantResponse,
         // World
         NearbyResponse,
         ResourceNodeInfo,

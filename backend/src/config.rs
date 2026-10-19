@@ -18,6 +18,10 @@ pub struct Config {
     /// `POST /player/subscription`, standing in for payments (E4.1).
     /// `MOCK_SUBSCRIPTIONS=on` or `off`; on by default in debug builds only.
     pub mock_subscriptions: bool,
+    /// Whether players may grant themselves Strands and goods with
+    /// `POST /player/grant`, to fund a market maker on a local stack (E3.8).
+    /// `DEV_GRANTS=on`; off unless set, in every build, since it prints money.
+    pub dev_grants: bool,
     /// How many times faster than real time the tick runs (E2.7), so the
     /// economy sim's hours take minutes. `SIM_TICK_SCALE`, 1 to 100; debug
     /// builds only, and 1 (real time) unless set. Everything counted in
@@ -46,6 +50,7 @@ impl Config {
                 Ok("off") => false,
                 _ => cfg!(debug_assertions),
             },
+            dev_grants: env::var("DEV_GRANTS").as_deref() == Ok("on"),
             sim_tick_scale: match tick_scale(
                 env::var("SIM_TICK_SCALE").ok().as_deref(),
                 cfg!(debug_assertions),

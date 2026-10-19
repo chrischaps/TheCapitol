@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use capitol_protocol::rest::{
     CurrencyResponse, Destination, InventoryResponse, MoveRequest, MoveResponse,
-    PlayerMeResponse, SubscribeRequest, Subscription,
+    GrantRequest, GrantResponse, PlayerMeResponse, SubscribeRequest, Subscription,
 };
 use capitol_protocol::rules::{in_world, Zone};
 
@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/inventory", get(get_inventory))
         .route("/currency", get(get_currency))
         .route("/subscription", post(mock_subscribe))
+        .route("/grant", post(dev_grant))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
@@ -110,6 +111,54 @@ pub async fn mock_subscribe(
         .ok_or_else(|| AppError::NotFound("Account not found".into()))?;
     tracing::info!("Account {} mock-subscribed for {} days", auth_user.account_id, req.days);
     Ok(Json(subscription))
+}
+
+/// Grant yourself Strands and goods, to fund a market maker (E3.8)
+///
+/// For local runs of `capitol-bot --market` and the sim's market makers. The
+/// Strands go through the ledger as an `admin_adjustment`, the goods to your
+/// market box. Refused unless the server has `DEV_GRANTS=on`, which no build
+/// turns on by itself.
+#[utoipa::path(
+    post,
+    path = "/player/grant",
+    request_body = GrantRequest,
+    responses(
+        (status = 200, description = "The balance after, and the market box the goods went to", body = GrantResponse),
+        (status = 400, description = "Out of bounds, an unknown item type, or the market box is full"),
+        (status = 403, description = "Grants are off on this server")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Player"
+)]
+pub async fn dev_grant(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Json(req): Json<GrantRequest>,
+) -> Result<Json<GrantResponse>, AppError> {
+    use crate::engine::grants::{grant, GrantError};
+    if !state.config.dev_grants {
+        return Err(AppError::Forbidden("Grants are off on this server (DEV_GRANTS)".into()));
+    }
+    let player_id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM players WHERE account_id = $1 LIMIT 1")
+        .bind(auth_user.account_id)
+        .fetch_one(&state.db)
+        .await?;
+    let granted = grant(&state.db, player_id, &req).await.map_err(|e| match e {
+        GrantError::Db(e) => AppError::Internal(e),
+        e => AppError::BadRequest(e.to_string()),
+    })?;
+    let events = state.game.read().await.event_sender.clone();
+    crate::engine::currency::announce_balances(&events, [(player_id, granted.strands)]);
+    let _ = events.send(crate::engine::GameEvent::InventoryUpdated {
+        player_id,
+        container_id: granted.market_box,
+        slots: Vec::new(),
+    });
+    Ok(Json(GrantResponse {
+        strands: granted.strands,
+        market_box: granted.market_box,
+    }))
 }
 
 /// Set player movement destination

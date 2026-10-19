@@ -115,6 +115,9 @@ pub enum RestRequest {
     /// `POST /player/subscription`: mock activation, on a server with
     /// `MOCK_SUBSCRIPTIONS` on (E4.1)
     Subscribe(SubscribeRequest),
+    /// `POST /player/grant`: Strands and goods for a market maker, on a
+    /// server with `DEV_GRANTS` on (E3.8)
+    Grant(GrantRequest),
 
     /// `POST /market/orders` (E3.3)
     PlaceOrder(PlaceOrder),
@@ -178,6 +181,7 @@ pub enum RestResponse {
     Zones(ZonesResponse),
     DeedPrices(DeedPricesResponse),
     Subscription(Subscription),
+    Granted(GrantResponse),
     /// An order as placed, or as cancelled
     Order(MarketOrder),
     MarketDepth(MarketDepthResponse),
@@ -251,6 +255,7 @@ impl RestRequest {
             | ClaimPlot { .. }
             | PayTax { .. }
             | Subscribe(_)
+            | Grant(_)
             | PlaceOrder(_)
             | CollectMarketBox(_) => Method::POST,
             UpdatePlotPermissions { .. } => Method::PUT,
@@ -325,6 +330,7 @@ impl RestRequest {
             Zones => "/bureaucracy/zones".into(),
             DeedPrices => "/bureaucracy/deed-prices".into(),
             Subscribe(_) => "/player/subscription".into(),
+            Grant(_) => "/player/grant".into(),
             PlaceOrder(_) | MarketDepth(_) => "/market/orders".into(),
             CancelOrder { order_id } => format!("/market/orders/{order_id}"),
             MyOrders(_) => "/market/orders/mine".into(),
@@ -352,6 +358,7 @@ impl RestRequest {
             Deposit(b) => req.json(b),
             Withdraw(b) => req.json(b),
             Subscribe(b) => req.json(b),
+            Grant(b) => req.json(b),
             PlaceOrder(b) => req.json(b),
             CollectMarketBox(b) => req.json(b),
             MarketDepth(q) => req.query(q),
@@ -413,6 +420,7 @@ impl RestRequest {
             Q::Zones => A::Zones(de(body)?),
             Q::DeedPrices => A::DeedPrices(de(body)?),
             Q::Subscribe(_) => A::Subscription(de(body)?),
+            Q::Grant(_) => A::Granted(de(body)?),
             Q::PlaceOrder(_) | Q::CancelOrder { .. } => A::Order(de(body)?),
             Q::MarketDepth(_) => A::MarketDepth(de(body)?),
             Q::MyOrders(_) => A::MyOrders(de(body)?),
@@ -616,6 +624,11 @@ mod tests {
                 RestRequest::Subscribe(SubscribeRequest { days: 30 }),
                 "POST",
                 "/player/subscription".into(),
+            ),
+            (
+                RestRequest::Grant(GrantRequest::default()),
+                "POST",
+                "/player/grant".into(),
             ),
             (
                 RestRequest::MarketDepth(Default::default()),

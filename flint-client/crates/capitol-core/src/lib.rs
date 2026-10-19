@@ -43,6 +43,7 @@ pub mod craft;
 pub mod exchange;
 pub mod harvest;
 pub mod market;
+pub mod market_maker;
 pub mod motion;
 pub mod net;
 pub mod onboarding;

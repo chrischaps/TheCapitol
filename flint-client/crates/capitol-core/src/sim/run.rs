@@ -1,5 +1,6 @@
 //! The swarm: one thread a bot, each signing in, waiting for the others, then
-//! playing its [`Role`] until the game hours are up.
+//! playing its [`Role`] until the game hours are up. The market makers run
+//! alongside, one thread each, from a grant.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -7,14 +8,17 @@ use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use capitol_protocol::rest::{ResourceNodeInfo, StationInfo};
-use capitol_protocol::rules::Zone;
+use capitol_protocol::rest::{PlaceOrder, ResourceNodeInfo, StationInfo};
+use capitol_protocol::rules::market::{OrderSide, OrderStatus};
+use capitol_protocol::rules::{self, Zone};
 use uuid::Uuid;
 
 use super::plan::{self, Holdings, Step};
-use super::report::{BotRun, Entry, Report};
-use super::Role;
+use super::report::{BotRun, Entry, Report, MAKER_ROLE};
+use super::{Role, Trade, MARKET_ITEMS};
 use crate::bot::{Account, Bot, BotError};
+use crate::market::MarketEvent;
+use crate::market_maker::{self, Maker, MakerConfig};
 use crate::net::NetConfig;
 use crate::poll::Fetch;
 use crate::state::StateEvent;
@@ -29,6 +33,12 @@ const SPOT_SPACING: f64 = 55.0;
 const MAX_EXPLORES: usize = 6;
 /// Failures in a row before a bot sits out a game minute.
 const FAILURES_BEFORE_REST: u32 = 5;
+/// How long a bot's order waits for a fill before it's taken down. Matching
+/// runs on the wall clock (1 s), not the game's.
+const FILL_WAIT: Duration = Duration::from_secs(3);
+/// What a sim maker is granted: Strands, and units of each item at Q50.
+const MAKER_STRANDS: i64 = 50_000;
+const MAKER_QUALITY: i32 = 50;
 
 /// How a sim is run.
 #[derive(Debug, Clone)]
@@ -41,6 +51,17 @@ pub struct SimConfig {
     pub prefix: String,
     /// Where `sim-<stamp>.md` and `.csv` go.
     pub out_dir: PathBuf,
+    /// Market makers, on accounts `<prefix>maker1@…` and up. With none,
+    /// nobody trades.
+    pub makers: usize,
+}
+
+/// How the sim's makers quote: [`MARKET_ITEMS`], a 10% spread, two levels.
+fn maker_config() -> MakerConfig {
+    MakerConfig {
+        items: MARKET_ITEMS.iter().map(|i| i.to_string()).collect(),
+        ..MakerConfig::default()
+    }
 }
 
 /// Runs the swarm and writes the report. Returns it, with the paths written.
@@ -50,9 +71,45 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
     // The scale, from the first bot's health check (all share one server).
     let scale = Arc::new(OnceLock::<f64>::new());
     let start = Arc::new(OnceLock::<Instant>::new());
-    let ready = Arc::new(Barrier::new(config.bots));
+    let ready = Arc::new(Barrier::new(config.bots + config.makers));
+    let trading = config.makers > 0;
     let runs: Vec<BotRun> = thread::scope(|scope| {
-        let handles: Vec<_> = roles
+        let mut handles: Vec<_> = (1..=config.makers)
+            .map(|n| {
+                let (scale, start, ready) = (scale.clone(), start.clone(), ready.clone());
+                let account = Account::numbered(&format!("{}maker", config.prefix), n);
+                thread::sleep(Duration::from_millis(150));
+                scope.spawn(move || {
+                    let hours = config.hours;
+                    let funded = Bot::sign_in(net(), &account).and_then(|bot| {
+                        let mut bot = bot.quiet();
+                        market_maker::fund(&mut bot, &maker_config(), MAKER_STRANDS, MAKER_QUALITY)?;
+                        let mut maker = Maker::new(maker_config());
+                        bot.go_to_exchange()?;
+                        maker.start(&mut bot)?;
+                        Ok((bot, maker))
+                    });
+                    ready.wait();
+                    let started = *start.get_or_init(Instant::now);
+                    match funded {
+                        Ok((bot, maker)) => {
+                            // The swarm's first bot sets the scale before the barrier
+                            let scale = scale.get().copied().unwrap_or(1.0);
+                            make_market(bot, maker, started + Duration::from_secs_f64(hours * 3600.0 / scale), started, scale)
+                        }
+                        Err(e) => BotRun {
+                            name: account.name.clone(),
+                            role: MAKER_ROLE.into(),
+                            entries: Vec::new(),
+                            strands_start: 0,
+                            strands_end: 0,
+                            error: Some(format!("starting (does the server have DEV_GRANTS=on?): {e}")),
+                        },
+                    }
+                })
+            })
+            .collect();
+        handles.extend(roles
             .iter()
             .enumerate()
             .map(|(i, &role)| {
@@ -64,13 +121,18 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
                     let signed_in = Bot::sign_in(net(), &account).and_then(|mut bot| {
                         let health = bot.health()?;
                         let _ = scale.set(health.sim_tick_scale.unwrap_or(1.0));
+                        if trading {
+                            for item in MARKET_ITEMS {
+                                bot.watch_market(item)?;
+                            }
+                        }
                         Ok(bot.quiet())
                     });
                     ready.wait();
                     let started = *start.get_or_init(Instant::now);
                     let scale = scale.get().copied().unwrap_or(1.0);
                     match signed_in {
-                        Ok(bot) => SimBot::new(bot, role, i as u64, scale, started).play(config.hours),
+                        Ok(bot) => SimBot::new(bot, role, i as u64, scale, started, trading).play(config.hours),
                         Err(e) => BotRun {
                             name: account.name.clone(),
                             role: role.to_string(),
@@ -81,8 +143,7 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
                         },
                     }
                 })
-            })
-            .collect();
+            }));
         handles
             .into_iter()
             .map(|h| h.join().expect("a sim bot panicked"))
@@ -93,6 +154,44 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
     let report = Report::build(&runs, config.hours, scale, wall);
     let (md, csv) = write(&report, &config.out_dir).map_err(|e| format!("writing the report: {e}"))?;
     Ok((report, md, csv))
+}
+
+/// A maker's run: quote until `deadline`, take the orders down, and count
+/// what filled.
+fn make_market(mut bot: Bot, mut maker: Maker, deadline: Instant, started: Instant, scale: f64) -> BotRun {
+    bot.record();
+    let strands_start = bot.state().strands().unwrap_or(0);
+    let result = maker.run(&mut bot, Some(deadline)).and_then(|()| maker.withdraw(&mut bot));
+    // Let the last balance change land
+    let _ = bot.idle(Duration::from_millis(500));
+    let at = started.elapsed().as_secs_f64() * scale / 3600.0;
+    let entries = bot.take_journal().into_iter().filter_map(|e| market_entry(e, at)).collect();
+    BotRun {
+        name: bot.name().to_string(),
+        role: MAKER_ROLE.into(),
+        entries,
+        strands_start,
+        strands_end: bot.state().strands().unwrap_or(0),
+        error: result.err().map(|e| e.to_string()),
+    }
+}
+
+/// The report's entry for a market event in the journal: a fill, or a fee.
+fn market_entry(change: StateEvent, at: f64) -> Option<Entry> {
+    let StateEvent::Market(event) = change else {
+        return None;
+    };
+    match *event {
+        MarketEvent::OrderFilled { order, trade } => Some(Entry::Traded {
+            item: trade.item_type,
+            sold: order.side == OrderSide::Sell,
+            quantity: trade.quantity,
+            price: trade.price,
+            at,
+        }),
+        MarketEvent::OrderPlaced(order) => Some(Entry::Fee { strands: order.fee }),
+        _ => None,
+    }
 }
 
 fn write(report: &Report, dir: &Path) -> std::io::Result<(PathBuf, PathBuf)> {
@@ -132,10 +231,12 @@ struct SimBot {
     stations: HashMap<String, StationInfo>,
     deed_cost: i64,
     rng: u64,
+    /// Whether there are makers to trade with
+    trading: bool,
 }
 
 impl SimBot {
-    fn new(mut bot: Bot, role: Role, n: u64, scale: f64, start: Instant) -> SimBot {
+    fn new(mut bot: Bot, role: Role, n: u64, scale: f64, start: Instant, trading: bool) -> SimBot {
         bot.record();
         let me = bot.state().me();
         // Stations kept from an earlier run on the same accounts.
@@ -156,6 +257,7 @@ impl SimBot {
             stations,
             deed_cost: DEFAULT_DEED,
             rng: 0x9E37_79B9_7F4A_7C15 ^ (n + 1).wrapping_mul(0xBF58_476D_1CE4_E5B9),
+            trading,
         }
     }
 
@@ -182,11 +284,24 @@ impl SimBot {
             } else {
                 plan::next(&catalog, &holdings, &self.role.goal(&catalog, &holdings))
             };
+            let trade = match &step {
+                Ok(Some(step)) if self.trading => self.role.trade(&catalog, &holdings, step, |item, side| {
+                    let book = self.bot.state().market().book(item)?;
+                    match side {
+                        OrderSide::Buy => book.best_bid(),
+                        OrderSide::Sell => book.best_ask(),
+                    }
+                }),
+                _ => None,
+            };
             match step {
                 Ok(Some(step)) => {
-                    let label = step.label(&catalog);
+                    let label = trade.as_ref().map_or_else(|| step.label(&catalog), Trade::label);
                     let began = self.now();
-                    let result = self.take(&step);
+                    let result = match &trade {
+                        Some(trade) => self.trade(trade),
+                        None => self.take(&step),
+                    };
                     self.journal();
                     let ok = result.is_ok();
                     self.entries.push(Entry::Spent {
@@ -261,7 +376,7 @@ impl SimBot {
                 StateEvent::ToolBroke { item_type, .. } => {
                     self.entries.push(Entry::ToolBroke { item: item_type, at })
                 }
-                _ => {}
+                change => self.entries.extend(market_entry(change, at)),
             }
         }
     }
@@ -331,6 +446,70 @@ impl SimBot {
                 Ok(())
             }
         }
+    }
+
+    /// Walks to the Exchange hall, puts the trade's order on the book, waits
+    /// [`FILL_WAIT`] for it to fill, takes down what's left, collects what it
+    /// bought, and walks back out.
+    ///
+    /// The way in is the one bots arrive by: back to the spawn on the south
+    /// arterial, then up it to the hall's door, so the canals are crossed on
+    /// its bridges. A straight line from the fields would meet water (#211).
+    fn trade(&mut self, trade: &Trade) -> Result<(), BotError> {
+        self.bot.walk_to(rules::SPAWN_X, rules::SPAWN_Y)?;
+        self.bot.go_to_exchange()?;
+        let traded = self.trade_at_the_hall(trade);
+        // Out the way it came, whatever happened inside
+        let out = self.bot.walk_to(rules::SPAWN_X, rules::SPAWN_Y);
+        traded.and(out)
+    }
+
+    fn trade_at_the_hall(&mut self, trade: &Trade) -> Result<(), BotError> {
+        let order = match trade {
+            Trade::Sell { item, quantity, price } => {
+                let (item_id, held) = self
+                    .bot
+                    .state()
+                    .inventory()
+                    .and_then(|inv| inv.items().filter(|i| &i.item_type == item).max_by_key(|i| i.quantity))
+                    .map(|i| (i.item_id, i.quantity))
+                    .ok_or_else(|| BotError::Failed(format!("no {item} to sell")))?;
+                PlaceOrder {
+                    side: OrderSide::Sell,
+                    item_type: item.clone(),
+                    price: *price,
+                    quantity: (*quantity).min(held),
+                    item_id: Some(item_id),
+                    qualities: None,
+                    min_grade: None,
+                    grade_rule: None,
+                }
+            }
+            Trade::Buy { item, quantity, price } => PlaceOrder {
+                side: OrderSide::Buy,
+                item_type: item.clone(),
+                price: *price,
+                quantity: *quantity,
+                item_id: None,
+                qualities: None,
+                min_grade: None,
+                grade_rule: None,
+            },
+        };
+        let placed = self.bot.place_order(order)?;
+        let id = placed.id;
+        let closed = |s: &crate::state::GameState| s.market().order(id).is_some_and(|o| o.status != OrderStatus::Open);
+        if self.bot.until("a fill", FILL_WAIT, |s, _| closed(s)).is_err() {
+            match self.bot.cancel_order(id) {
+                Ok(_) => {}
+                // It filled as we asked
+                Err(BotError::Rest { source, .. }) if source.status().is_some_and(|s| s < 500) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        // Bought units, or an unsold remainder, are in the market box
+        self.bot.collect_market_box()?;
+        Ok(())
     }
 
     /// One pull from a node of `resource`, finding one first.

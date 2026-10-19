@@ -26,8 +26,8 @@ use std::fmt;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use capitol_protocol::rest::{
-    CollectRequest, CollectResponse, DepositRequest, DepositResponse, HealthResponse, ListPlotsQuery, LoginRequest, MarketOrder,
-    MoveItemRequest, MyOrdersQuery, PlaceOrder, PlaceStationRequest, PlotInfo, RegisterRequest,
+    CollectRequest, CollectResponse, DepositRequest, DepositResponse, GrantRequest, GrantResponse, HealthResponse, ListPlotsQuery, LoginRequest, MarketOrder,
+    MarketSummaryResponse, MoveItemRequest, MyOrdersQuery, PlaceOrder, PlaceStationRequest, PlotInfo, RegisterRequest,
     ResourceNodeInfo, StationInfo, SubscribeRequest, Subscription, WithdrawRequest,
     WithdrawResponse,
 };
@@ -40,6 +40,7 @@ use crate::catalog::container_type;
 use crate::net::{
     ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
 };
+use crate::market::MarketEvent;
 use crate::poll::{Fetch, Poller};
 use crate::state::{GameState, StateEvent, Yield};
 
@@ -964,6 +965,31 @@ impl Bot {
         }
     }
 
+    /// Fetches the market box into the store.
+    pub fn fetch_market_box(&mut self) -> Result<(), BotError> {
+        match self.call("fetching the market box", RestRequest::MarketBox)? {
+            RestResponse::MarketBox(_) => Ok(()),
+            other => Err(unexpected("fetching the market box", &other)),
+        }
+    }
+
+    /// Every item on the market: last price, best bid and ask.
+    pub fn market_summary(&mut self) -> Result<MarketSummaryResponse, BotError> {
+        match self.call("asking the market's summary", RestRequest::MarketSummary)? {
+            RestResponse::MarketSummary(summary) => Ok(summary),
+            other => Err(unexpected("asking the market's summary", &other)),
+        }
+    }
+
+    /// Strands and goods from nowhere, on a server with `DEV_GRANTS` on (E3.8).
+    /// The goods land in the market box.
+    pub fn grant(&mut self, request: GrantRequest) -> Result<GrantResponse, BotError> {
+        match self.call("asking for a grant", RestRequest::Grant(request))? {
+            RestResponse::Granted(granted) => Ok(granted),
+            other => Err(unexpected("asking for a grant", &other)),
+        }
+    }
+
     /// Buys `quantity` fiber from the exchange with Strands.
     pub fn withdraw_fiber(&mut self, quantity: i32) -> Result<WithdrawResponse, BotError> {
         match self.call(
@@ -986,8 +1012,8 @@ impl Bot {
         }
     }
 
-    /// Keeps the finishes, tool breakages and balance changes every frame
-    /// sees from now on, for [`take_journal`](Self::take_journal). The
+    /// Keeps the finishes, tool breakages, balance changes, and the bot's
+    /// orders placed and filled, that every frame sees from now on, for [`take_journal`](Self::take_journal). The
     /// economy sim counts from them.
     pub fn record(&mut self) {
         self.journal.get_or_insert_with(Vec::new);
@@ -1277,6 +1303,9 @@ fn journaled(change: &StateEvent) -> bool {
             | StateEvent::CraftingCompleted { .. }
             | StateEvent::ToolBroke { .. }
             | StateEvent::CurrencyChanged { .. }
+    ) || matches!(
+        change,
+        StateEvent::Market(m) if matches!(**m, MarketEvent::OrderPlaced(_) | MarketEvent::OrderFilled { .. })
     )
 }
 

@@ -1244,6 +1244,45 @@ pub struct CollectResponse {
     pub remaining: i32,
 }
 
+/// `POST /player/grant` (E3.8): Strands and goods from nowhere, to fund a
+/// market maker on a local stack. The server refuses it unless `DEV_GRANTS`
+/// is on.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GrantRequest {
+    /// Added to the balance, 0 to [`MAX_GRANT_STRANDS`]
+    #[serde(default)]
+    pub strands: i64,
+    /// Put in the market box, at most [`MAX_GRANT_LINES`] lines
+    #[serde(default)]
+    pub items: Vec<GrantItem>,
+}
+
+/// The most Strands one grant gives.
+pub const MAX_GRANT_STRANDS: i64 = 1_000_000;
+/// The most lines one grant has.
+pub const MAX_GRANT_LINES: usize = 32;
+
+/// Units of one item type, all at one quality, for [`GrantRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GrantItem {
+    pub item_type: String,
+    /// 1 to 10,000
+    pub quantity: i32,
+    /// 0 to 100
+    pub quality: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GrantResponse {
+    /// The balance after the grant
+    pub strands: i64,
+    /// Where the goods went
+    pub market_box: Uuid,
+}
+
 // ---------------------------------------------------------------------------
 // /plots
 // ---------------------------------------------------------------------------

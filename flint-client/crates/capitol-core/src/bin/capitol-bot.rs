@@ -8,6 +8,7 @@
 //! capitol-bot --api-key cap_…          # the script, as the key's own player
 //! capitol-bot --subscribe 30 --wander             # a subscriber, for a month
 //! capitol-bot --sim 20 --hours 2               # the economy sim (E2.7), with a report
+//! capitol-bot --prefix maker --market fiber,plank,iron_ingot --fund   # a market maker (E3.8)
 //! ```
 //!
 //! Run it from `flint-client/` with `cargo run -p capitol-core --bin capitol-bot -- <flags>`.
@@ -17,6 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use capitol_core::bot::{Account, Bot, BotError, TradeOffer};
+use capitol_core::market_maker::{self, Maker, MakerConfig};
 use capitol_core::net::NetConfig;
 use capitol_core::sim::run::{self as sim, SimConfig};
 
@@ -38,7 +40,8 @@ FLAGS:
     --wander            Stroll around instead of running the script
     --near <player>     Wander around this player, and follow them
     --radius <units>    How far a wanderer strays from where it started [default: 120]
-    --seconds <s>       Stop wandering after this long [default: never]
+    --seconds <s>       Stop wandering, or making a market, after this long
+                        [default: never]
     --gather <n>        Instead of the script, gather until the inventory holds
                         n fiber, and stop (to stock an account for a test)
     --trade <player>    Stay beside this player and trade with them: answer
@@ -49,6 +52,22 @@ FLAGS:
     --subscribe <days>  Subscribe each bot for this many days first, with the
                         server's mock activation (MOCK_SUBSCRIPTIONS, on by
                         default in a debug build of the backend)
+    --market <items>    Make a market in these items (comma-separated): quote
+                        both sides round the last trade, or D5's value before
+                        one, and re-quote as orders fill. Stops after --seconds,
+                        if given, and takes its orders down; Ctrl-C leaves them
+                        up, and the next run picks them up again.
+    --spread <pct>      With --market, the whole spread in percent [default: 10]
+    --depth <n>         With --market, price levels a side [default: 2]
+    --size <n>          With --market, units a level, at least; a cheap item's
+                        levels are bigger, so each order is worth 100 Strands
+                        [default: 10]
+    --target <n>        With --market, units of each item to hold: it bids up
+                        to twice this, and leans its prices to get back to it
+                        [default: 40]
+    --fund              With --market, top up to 20000 Strands and --target
+                        units of each item first, as a grant. Only a server
+                        with DEV_GRANTS=on gives one: never a shared server.
     --sim <bots>        Run the economy sim: this many bots, each with a role
                         (gatherer, crafter or builder), gather, craft and build
                         for --hours game hours, then write a report to --out.
@@ -59,6 +78,10 @@ FLAGS:
                         --prefix says otherwise.
     --hours <h>         With --sim, game hours to run [default: 2]
     --out <dir>         With --sim, where the report goes [default: renders/sim]
+    --makers <n>        With --sim, market makers to join the swarm, on
+                        accounts <prefix>maker1 and up. The swarm sells to them
+                        and buys from them. They need DEV_GRANTS=on for their
+                        stock; 0 runs the swarm with no market [default: 2]
     -h, --help          Print this
 
 The script logs in (or registers), scouts for fiber, walks to the nearest
@@ -85,6 +108,9 @@ struct Options {
     sim: Option<usize>,
     hours: f64,
     out: String,
+    makers: usize,
+    market: Option<MakerConfig>,
+    fund: bool,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
@@ -108,7 +134,12 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         sim: None,
         hours: 2.0,
         out: "renders/sim".into(),
+        makers: 2,
+        market: None,
+        fund: false,
     };
+    let mut maker = MakerConfig::default();
+    let mut maker_tuned = false;
     let mut prefix_given = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
@@ -159,9 +190,65 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                 }
             }
             "--out" => options.out = value()?,
+            "--makers" => options.makers = number(&flag, &value()?)?,
+            "--market" => {
+                let items: Vec<String> = value()?
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|i| !i.is_empty())
+                    .map(String::from)
+                    .collect();
+                if items.is_empty() {
+                    return Err("--market needs at least one item".into());
+                }
+                maker.items = items;
+            }
+            "--spread" => {
+                let pct: f64 = number(&flag, &value()?)?;
+                if !(pct > 0.0 && pct <= 100.0) {
+                    return Err("--spread takes more than 0 and at most 100 percent".into());
+                }
+                maker.spread = pct / 100.0;
+                maker_tuned = true;
+            }
+            "--depth" => {
+                maker.depth = number(&flag, &value()?)?;
+                if !(1..=10).contains(&maker.depth) {
+                    return Err("--depth takes 1 to 10".into());
+                }
+                maker_tuned = true;
+            }
+            "--size" => {
+                maker.size = number(&flag, &value()?)?;
+                if maker.size < 1 {
+                    return Err("--size must be at least 1".into());
+                }
+                maker_tuned = true;
+            }
+            "--target" => {
+                maker.target = number(&flag, &value()?)?;
+                if maker.target < 1 {
+                    return Err("--target must be at least 1".into());
+                }
+                maker_tuned = true;
+            }
+            "--fund" => {
+                options.fund = true;
+                maker_tuned = true;
+            }
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown flag {other}")),
         }
+    }
+    if !maker.items.is_empty() {
+        options.market = Some(maker);
+    } else if maker_tuned {
+        return Err("--spread, --depth, --size, --target and --fund go with --market".into());
+    }
+    if options.market.is_some()
+        && (options.sim.is_some() || options.wander || options.gather.is_some() || options.trade.is_some())
+    {
+        return Err("--market is a bot of its own: not with --sim, --wander, --gather or --trade".into());
     }
     if options.sim.is_some() {
         if options.api_key.is_some()
@@ -171,13 +258,13 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             || options.trade.is_some()
             || options.subscribe.is_some()
         {
-            return Err("--sim runs its own bots; it only goes with --server, --prefix, --hours and --out".into());
+            return Err("--sim runs its own bots; it only goes with --server, --prefix, --hours, --out and --makers".into());
         }
         if !prefix_given {
             options.prefix = "sim".into();
         }
-    } else if options.hours != 2.0 || options.out != "renders/sim" {
-        return Err("--hours and --out go with --sim".into());
+    } else if options.hours != 2.0 || options.out != "renders/sim" || options.makers != 2 {
+        return Err("--hours, --out and --makers go with --sim".into());
     }
     if options.api_key.is_some() && options.accounts != 1 {
         return Err("--api-key plays one account; it doesn't go with --accounts".into());
@@ -214,6 +301,9 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
     let deadline = options
         .seconds
         .map(|s| Instant::now() + Duration::from_secs_f64(s));
+    if let Some(config) = &options.market {
+        return make_market(&mut bot, config, options.fund, deadline);
+    }
     if let Some(name) = &options.trade {
         bot.trade_with(name, &options.offer, options.ask, deadline)
     } else if options.wander {
@@ -228,6 +318,35 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
     }
 }
 
+/// Strands a funded maker starts with.
+const FUND_STRANDS: i64 = 20_000;
+/// The quality of a funded maker's stock: Q50 (grade D), ordinary stuff.
+const FUND_QUALITY: i32 = 50;
+
+fn make_market(bot: &mut Bot, config: &MakerConfig, fund: bool, deadline: Option<Instant>) -> Result<(), BotError> {
+    if fund {
+        match market_maker::fund(bot, config, FUND_STRANDS, FUND_QUALITY)? {
+            Some(granted) => bot.say(format!("funded: {} Strands, stock in the market box", granted.strands)),
+            None => bot.say("already funded"),
+        }
+    }
+    let mut maker = Maker::new(config.clone());
+    // Orders are placed at the Exchange hall (D6)
+    bot.go_to_exchange()?;
+    maker.start(bot)?;
+    for item in &config.items {
+        bot.say(format!("{item} round {}", maker.reference(item).unwrap_or(0)));
+    }
+    maker.run(bot, deadline)?;
+    maker.withdraw(bot)?;
+    let s = &maker.stats;
+    bot.say(format!(
+        "done: {} orders placed, {} cancelled, {} units bought, {} sold",
+        s.placed, s.cancelled, s.bought, s.sold
+    ));
+    Ok(())
+}
+
 fn run_sim(options: &Options, bots: usize) -> ExitCode {
     let config = SimConfig {
         server: options.server.clone(),
@@ -235,6 +354,7 @@ fn run_sim(options: &Options, bots: usize) -> ExitCode {
         hours: options.hours,
         prefix: options.prefix.clone(),
         out_dir: options.out.clone().into(),
+        makers: options.makers,
     };
     println!(
         "capitol-bot: {bots} bots for {} game hours against {}",
@@ -363,6 +483,25 @@ mod tests {
         assert!(parse(args("--sim 2 --wander")).is_err());
         assert!(parse(args("--sim 2 --accounts 4")).is_err());
         assert!(parse(args("--hours 3")).is_err(), "--hours without --sim");
+    }
+
+    #[test]
+    fn market_flags_parse() {
+        let o = parse(args("--market fiber,plank,iron_ingot --spread 20 --depth 3 --fund"))
+            .unwrap()
+            .unwrap();
+        let m = o.market.unwrap();
+        assert_eq!(m.items, ["fiber", "plank", "iron_ingot"]);
+        assert_eq!((m.spread, m.depth), (0.2, 3));
+        assert!(o.fund);
+        assert!(parse(args("--spread 20")).is_err(), "--spread without --market");
+        assert!(parse(args("--fund")).is_err(), "--fund without --market");
+        assert!(parse(args("--market ,")).is_err());
+        assert!(parse(args("--market plank --spread 0")).is_err());
+        assert!(parse(args("--market plank --depth 0")).is_err());
+        assert!(parse(args("--market plank --wander")).is_err());
+        assert_eq!(parse(args("--sim 4 --makers 0")).unwrap().unwrap().makers, 0);
+        assert!(parse(args("--makers 3")).is_err(), "--makers without --sim");
     }
 
     #[test]
