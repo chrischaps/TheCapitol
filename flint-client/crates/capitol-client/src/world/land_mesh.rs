@@ -2,7 +2,7 @@
 //! each at the detail its distance from the camera needs.
 //!
 //! - **Chunks.** The field (`land`) is cut into [`CHUNKS`]² squares of
-//!   [`CHUNK`] quads (64 m). Those with no land (inside the rural edge, or
+//!   [`CHUNK`] quads (64 m). Those with no land (inside `land::FROM`, or
 //!   out past where the ranges settle) have no mesh: the flat disc
 //!   (`ground`) is there.
 //! - **Detail.** Each chunk has one runtime mesh, `land_<row>_<col>`, built
@@ -17,7 +17,9 @@
 //!   fight for the same pixels.
 //! - **The tint** follows the slope and the height: the disc's hill meadow
 //!   at the foot, bare rock on the steeps, scree on the high slopes and snow
-//!   on the tops, all mottled as the disc is.
+//!   on the tops, all mottled as the disc is. By the water (W10) the banks
+//!   are dark with moss, the beds silt, and the fords pale gravel
+//!   ([`Shore`]).
 
 use crate::coords::{layer, to_world, S};
 use crate::world::ground::{self, mottle};
@@ -38,11 +40,21 @@ const LOD_DISTANCE: [f32; LODS - 1] = [110.0, 230.0, 460.0];
 const HYSTERESIS: f32 = 0.9;
 /// Chunks built a frame, after the first.
 pub const BUDGET: usize = 10;
-/// How far a vertex off the land (inside the rural edge, past the settling)
+/// How far a vertex off the land (inside `land::FROM`, past the settling)
 /// dips under the flat disc, in metres.
 const DIP: f32 = 0.03;
 /// A skirt's depth in metres at stride 1; it doubles with the stride.
 const SKIRT: f32 = 0.6;
+/// How much deeper than the carve the beds are drawn: this many times
+/// its cut again. The carve is in server units, so a big river's bed is
+/// 30 cm deep in metres and a stream's a few: the water's shore foam
+/// (14 cm of depth) would cover all of it, and there'd be nothing under
+/// the surface to see. Drawn three times as deep, the foam keeps to the
+/// banks and the water has depth. Only the drawing: what stands in the
+/// water stands on the carve (`land::rise`), a little higher. A
+/// workaround: a per-body shore foam, or a deeper carve, removes it
+/// (#230).
+pub const DEEPEN: f32 = 2.0;
 
 /// How strongly each wild colour shows, like `ground`'s zones.
 const ROCK_STRENGTH: f32 = 0.2;
@@ -56,6 +68,15 @@ const ROCK_SLOPE: (f32, f32) = (0.55, 0.95);
 const SCREE_HEIGHT: (f32, f32) = (26.0, 40.0);
 const SNOW_HEIGHT: (f32, f32) = (46.0, 58.0);
 const SNOW_SLOPE: (f32, f32) = (0.6, 1.0);
+/// How wet (m, `land::Sampled::wet`) the bank must be to read as moss,
+/// and how deep a cut (m) reads as the bed's silt.
+const MOSS_WET: (f32, f32) = (0.03, 0.45);
+const SILT_CUT: (f32, f32) = (0.01, 0.08);
+const MOSS_STRENGTH: f32 = 0.3;
+const SILT_STRENGTH: f32 = 0.45;
+const GRAVEL_STRENGTH: f32 = 0.3;
+/// How much darker the wettest bank is than dry ground.
+const WET_DARKEN: f32 = 0.22;
 
 fn smoothstep((lo, hi): (f32, f32), x: f32) -> f32 {
     let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
@@ -78,6 +99,47 @@ pub fn tint(r: f64, rise: f32, slope: f32, at: [f32; 2]) -> [f32; 4] {
     c = mix(c, pulled(palette::WILD_SNOW, SNOW_STRENGTH), snow);
     let m = mottle(at);
     [c[0] * m, c[1] * m, c[2] * m, 1.0]
+}
+
+/// The water's mark on the ground: how deep it cut each sample and how wet
+/// each is (`land::Sampled`), and where the fords run shallow over gravel.
+#[derive(Debug, Clone, Default)]
+pub struct Shore {
+    pub cut: Vec<f32>,
+    pub wet: Vec<f32>,
+    /// Each ford's centre (world X, Z) and radius in metres.
+    pub fords: Vec<([f32; 2], f32)>,
+}
+
+impl Shore {
+    /// The cut and the wetness at sample (i, j), in metres.
+    fn at(&self, i: usize, j: usize) -> (f32, f32) {
+        let k = j * SAMPLES + i;
+        (
+            self.cut.get(k).copied().unwrap_or(0.0),
+            self.wet.get(k).copied().unwrap_or(0.0),
+        )
+    }
+
+    /// How much of a ford's gravel shows at world (X, Z), 0 to 1.
+    fn gravel(&self, [x, z]: [f32; 2]) -> f32 {
+        self.fords
+            .iter()
+            .map(|&([fx, fz], r)| 1.0 - smoothstep((0.6 * r, 1.1 * r), (x - fx).hypot(z - fz)))
+            .fold(0.0, f32::max)
+    }
+}
+
+/// The tint `c` (before mottling) by the water: moss up the wet banks,
+/// silt in the beds, gravel at a ford.
+pub fn shore_tint(c: [f32; 4], cut: f32, wet: f32, gravel: f32) -> [f32; 4] {
+    let moss = smoothstep(MOSS_WET, wet);
+    let silt = smoothstep(SILT_CUT, cut);
+    let mut c = mix(c, pulled(palette::WILD_MOSS, MOSS_STRENGTH), 0.6 * moss);
+    c = mix(c, pulled(palette::WILD_SILT, SILT_STRENGTH), silt);
+    c = mix(c, pulled(palette::WILD_GRAVEL, GRAVEL_STRENGTH), gravel * moss);
+    let dark = 1.0 - WET_DARKEN * moss * (1.0 - gravel);
+    [c[0] * dark, c[1] * dark, c[2] * dark, c[3]]
 }
 
 /// A chunk by its row (along +Z) and column (along +X).
@@ -131,7 +193,7 @@ fn radius_at(i: usize, j: usize) -> f64 {
 
 /// `chunk` at stride `1 << lod`: its quads on the land, and a skirt down
 /// from every edge of them that's on the chunk's rim.
-pub fn build(field: &GroundField, chunk: Chunk, lod: usize) -> MeshBuf {
+pub fn build(field: &GroundField, shore: &Shore, chunk: Chunk, lod: usize) -> MeshBuf {
     let step = 1usize << lod;
     let n = CHUNK / step + 1;
     let texel = (crate::world::land::TEXEL as f32) * S;
@@ -161,8 +223,17 @@ pub fn build(field: &GroundField, chunk: Chunk, lod: usize) -> MeshBuf {
             let slope = gx.hypot(gz);
             let rise = h - layer::GROUND;
             let off = !(FROM..=OUTER).contains(&r);
-            let y = if off { h - DIP } else { h };
-            mesh.vertex([at[0], y, at[1]], normal, tint(r, rise, slope, at));
+            let (cut, wet) = shore.at(i, j);
+            let y = if off { h - DIP } else { h - DEEPEN * cut };
+            let dry = tint(r, rise, slope, at);
+            let colour = if wet > 0.0 || cut > 0.0 {
+                let m = mottle(at);
+                let c = shore_tint([dry[0] / m, dry[1] / m, dry[2] / m, 1.0], cut, wet, shore.gravel(at));
+                [c[0] * m, c[1] * m, c[2] * m, 1.0]
+            } else {
+                dry
+            };
+            mesh.vertex([at[0], y, at[1]], normal, colour);
         }
     }
     let v = |a: usize, b: usize| (b * n + a) as u32;
@@ -247,15 +318,17 @@ pub fn lod_for(distance: f32, had: Option<usize>) -> usize {
 #[derive(Default)]
 pub struct LandMeshes {
     field: Option<Arc<GroundField>>,
+    shore: Arc<Shore>,
     /// Each chunk with land, and the stride it's drawn at (`None` before
     /// it's first built).
     chunks: Vec<(Chunk, Option<usize>)>,
 }
 
 impl LandMeshes {
-    /// A new field: every chunk is built again.
-    pub fn set_field(&mut self, field: Arc<GroundField>) {
+    /// A new field, and the water's mark on it: every chunk is built again.
+    pub fn set_field(&mut self, field: Arc<GroundField>, shore: Arc<Shore>) {
         self.field = Some(field);
+        self.shore = shore;
         self.chunks = Chunk::all().map(|c| (c, None)).collect();
     }
 
@@ -285,7 +358,7 @@ impl LandMeshes {
         let mut new = Vec::new();
         for (_, k, lod) in wanted {
             let (chunk, had) = &mut self.chunks[k];
-            build(&field, *chunk, lod).upload(gpu, &chunk.mesh_name(), ground::ROUGHNESS);
+            build(&field, &self.shore, *chunk, lod).upload(gpu, &chunk.mesh_name(), ground::ROUGHNESS);
             if had.is_none() {
                 new.push(chunk.mesh_name());
             }
@@ -342,7 +415,7 @@ mod tests {
         for chunk in [Chunk { row: 2, col: 12 }, Chunk { row: 12, col: 4 }, Chunk { row: 20, col: 19 }] {
             assert!(chunk.has_land());
             for lod in 0..LODS {
-                let m = build(field, chunk, lod);
+                let m = build(field, &Shore::default(), chunk, lod);
                 assert!(!m.indices.is_empty(), "{chunk:?} at {lod}");
                 let n = CHUNK / (1 << lod) + 1;
                 for tri in m.indices.chunks_exact(3) {
@@ -359,7 +432,7 @@ mod tests {
     fn the_finest_stride_lies_on_the_field() {
         let field = fixture_field();
         let chunk = Chunk { row: 2, col: 12 };
-        let m = build(field, chunk, 0);
+        let m = build(field, &Shore::default(), chunk, 0);
         for v in m.vertices.iter().step_by(37) {
             let [x, y, z] = v.position;
             let want = field.height_at(x, z).unwrap();
@@ -417,7 +490,7 @@ mod tests {
         let chunk = Chunk { row: 2, col: 12 };
         let started = std::time::Instant::now();
         for _ in 0..4 {
-            build(field, chunk, 0);
+            build(field, &Shore::default(), chunk, 0);
         }
         let each = started.elapsed().as_secs_f64() * 1000.0 / 4.0;
         // Debug builds are several times slower than release.

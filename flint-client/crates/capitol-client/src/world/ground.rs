@@ -6,10 +6,11 @@
 //! runs on far past the world's corners so its rim is lost in the fog,
 //! never seen against the sky.
 //!
-//! Once the land is in (W9), the disc is open over the wilds, from the
-//! rural edge out to where the ranges have settled past the world's edge
-//! (`land::FROM` to `land::OUTER`): the land's own meshes (`land_mesh`)
-//! lie there, starting from this colour.
+//! Once the land is in (W9), the disc is open over the wilds, from just
+//! inside where the rural ring's water starts (W10) out to where the
+//! ranges have settled past the world's edge (`land::FROM` to
+//! `land::OUTER`): the land's own meshes (`land_mesh`) lie there,
+//! starting from this colour.
 //!
 //! A faint, slow mottling breaks up the flat tints, the way real ground is
 //! never one colour.

@@ -8,10 +8,11 @@
 //!   node, station and mark is stood at ([`rise`]).
 //! - **Off the main thread.** [`Builder`] samples it on worker threads, so a
 //!   new terrain never stalls a frame. Until it's in, the world is flat.
-//! - **The city doesn't move.** The land is exactly flat inside the rural
-//!   edge (r3800, `land::height_at` is 0 out to r3900), and the carve fades
-//!   in over [`SEAM`] past it. The rivers that run on into the rural ring
-//!   (#222) are W10's to draw: the flat disc there is uncut.
+//! - **The city doesn't move.** `land::height_at` is 0 out to r3900, so
+//!   the land rises only in the wilds. But the water runs on into the rural
+//!   ring (#222), as far in as r3150, so the field starts at [`FROM`], just
+//!   inside that, and the carve fades in over [`SEAM`] from there (W10). On
+//!   the plain the field is flat but for the beds.
 //! - **Past the world's edge** (r6000) the ranges run on and settle to flat
 //!   by [`OUTER`], where the flat disc takes over again, so the horizon is
 //!   hills, not a wall.
@@ -20,7 +21,7 @@
 
 use crate::coords::{layer, to_world, S};
 use capitol_protocol::land::{self, LandParams, Water};
-use capitol_protocol::rules::{CENTER_X, CENTER_Y, RURAL_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS};
+use capitol_protocol::rules::{CENTER_X, CENTER_Y, WILDERNESS_OUTER_RADIUS};
 use capitol_protocol::terrain::TerrainResponse;
 use flint_player::{GroundField, Heightmap};
 use std::sync::mpsc::{channel, Receiver};
@@ -36,8 +37,15 @@ pub const SAMPLES: usize = CHUNK * CHUNKS + 1;
 /// Half the field's side, in server units: 7680, past [`OUTER`].
 pub const HALF: f64 = (CHUNK * CHUNKS) as f64 * TEXEL * 0.5;
 
-/// Where the land starts: the rural edge.
-pub const FROM: f64 = RURAL_OUTER_RADIUS;
+/// Where the land starts: [`SEAM`] inside r3150, where the wild water's
+/// courses stop (the hydrology's inner rim), so the carve is fully in
+/// before the first bed. Everything between here and the rural edge is
+/// flat but for the water.
+pub const FROM: f64 = 3100.0;
+/// How far the water's banks read wet: the carve of the ground raised by
+/// this much (server units) reaches about `WET_RISE / BANK_SLOPE` past
+/// the bank.
+const WET_RISE: f64 = 6.0;
 /// How far past [`FROM`] the carve takes to come in.
 pub const SEAM: f64 = 50.0;
 /// Where the ranges start to settle, past the world's edge, and where
@@ -58,16 +66,21 @@ pub fn height(x: f64, y: f64, params: &LandParams, water: &Water) -> f64 {
     carved(x, y, params, water).0
 }
 
-/// [`height`], and how deep the water cut into the land there.
-fn carved(x: f64, y: f64, params: &LandParams, water: &Water) -> (f64, f64) {
+/// [`height`], how deep the water cut into the land there, and how wet
+/// the ground is (the cut of the ground raised by [`WET_RISE`]: deep in a
+/// bed, fading out a metre or so up the banks).
+fn carved(x: f64, y: f64, params: &LandParams, water: &Water) -> (f64, f64, f64) {
     let r = (x - CENTER_X).hypot(y - CENTER_Y);
     if r <= FROM || r >= OUTER {
-        return (0.0, 0.0);
+        return (0.0, 0.0, 0.0);
     }
     let raw = land::height_at(x, y, params);
-    let cut = (raw - land::carve(raw, x, y, water)) * smoothstep(FROM, FROM + SEAM, r);
+    let seam = smoothstep(FROM, FROM + SEAM, r);
+    let cut = (raw - land::carve(raw, x, y, water)) * seam;
+    let raised = raw + WET_RISE;
+    let wet = (raised - land::carve(raised, x, y, water)) * seam;
     let settle = 1.0 - smoothstep(SETTLE_FROM, OUTER, r);
-    (raw * settle - cut, cut)
+    (raw * settle - cut, cut, wet)
 }
 
 /// Server (x, y) of sample (i, j): column i runs along +x, row j along +y.
@@ -78,43 +91,53 @@ pub fn sample_at(i: usize, j: usize) -> [f64; 2] {
     ]
 }
 
+/// One sample's height, cut and wetness, in metres (`carved`'s, scaled).
+#[derive(Debug, Clone, Copy, Default)]
+struct Sample {
+    y: f32,
+    cut: f32,
+    wet: f32,
+}
+
 /// The world y of every sample, row by row (`layer::GROUND` plus the
-/// land's height in metres), and how deep in metres the water cut each
-/// (the grass keeps off the beds until W10 fills them). Rows are shared
-/// out over `threads`.
-pub fn sample(params: &LandParams, water: &Water, threads: usize) -> (Vec<f32>, Vec<f32>) {
-    let mut heights = vec![layer::GROUND; SAMPLES * SAMPLES];
-    let mut cuts = vec![0.0; SAMPLES * SAMPLES];
+/// land's height in metres), how deep in metres the water cut each (the
+/// grass keeps off the beds), and how wet each is (the banks' tint, W10).
+/// Rows are shared out over `threads`.
+pub fn sample(params: &LandParams, water: &Water, threads: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut samples = vec![Sample { y: layer::GROUND, ..Sample::default() }; SAMPLES * SAMPLES];
     let rows_each = SAMPLES.div_ceil(threads.max(1));
     std::thread::scope(|scope| {
-        let chunks = heights
-            .chunks_mut(rows_each * SAMPLES)
-            .zip(cuts.chunks_mut(rows_each * SAMPLES));
-        for (k, (rows, cut_rows)) in chunks.enumerate() {
+        for (k, rows) in samples.chunks_mut(rows_each * SAMPLES).enumerate() {
             scope.spawn(move || {
-                for (dj, (row, cut_row)) in rows
-                    .chunks_mut(SAMPLES)
-                    .zip(cut_rows.chunks_mut(SAMPLES))
-                    .enumerate()
-                {
+                for (dj, row) in rows.chunks_mut(SAMPLES).enumerate() {
                     let j = k * rows_each + dj;
-                    for (i, (h, c)) in row.iter_mut().zip(cut_row.iter_mut()).enumerate() {
+                    for (i, s) in row.iter_mut().enumerate() {
                         let [x, y] = sample_at(i, j);
-                        let (height, cut) = carved(x, y, params, water);
-                        *h = layer::GROUND + (height as f32) * S;
-                        *c = (cut as f32) * S;
+                        let (height, cut, wet) = carved(x, y, params, water);
+                        *s = Sample {
+                            y: layer::GROUND + (height as f32) * S,
+                            cut: (cut as f32) * S,
+                            wet: (wet as f32) * S,
+                        };
                     }
                 }
             });
         }
     });
-    (heights, cuts)
+    (
+        samples.iter().map(|s| s.y).collect(),
+        samples.iter().map(|s| s.cut).collect(),
+        samples.iter().map(|s| s.wet).collect(),
+    )
 }
 
-/// A sampled land: the field, and the depth the water cut at each sample.
+/// A sampled land: the field, and the depth the water cut at each sample
+/// and how wet it is there, both in metres; and the water on it (W10).
 pub struct Sampled {
     pub field: GroundField,
     pub cut: Vec<f32>,
+    pub wet: Vec<f32>,
+    pub water: crate::world::wild_water::Bodies,
 }
 
 /// The cut, in metres, at the sample of `cut` (a [`Sampled::cut`]) nearest
@@ -153,6 +176,8 @@ pub struct Inputs {
         Vec<capitol_protocol::terrain::WaterCourse>,
         Vec<capitol_protocol::terrain::Lake>,
     ),
+    /// Only the water's look reads them (`wild_water`, `land_mesh::Shore`).
+    pub fords: Vec<capitol_protocol::terrain::Ford>,
 }
 
 impl Inputs {
@@ -164,11 +189,25 @@ impl Inputs {
                 terrain.streams.clone(),
                 terrain.lakes.clone(),
             ),
+            fords: terrain.fords.clone(),
         }
     }
 
     fn water(&self) -> Water {
         Water::new(self.water.0.iter().chain(&self.water.1), &self.water.2)
+    }
+
+    /// The water bodies on `field` (W10).
+    fn bodies(&self, field: &GroundField) -> crate::world::wild_water::Bodies {
+        crate::world::wild_water::build(
+            crate::world::wild_water::Water {
+                rivers: &self.water.0,
+                streams: &self.water.1,
+                lakes: &self.water.2,
+                fords: &self.fords,
+            },
+            field,
+        )
     }
 }
 
@@ -195,14 +234,19 @@ impl Builder {
             .spawn(move || {
                 let started = std::time::Instant::now();
                 let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-                let (heights, cut) = sample(&job.params, &job.water(), threads);
+                let (heights, cut, wet) = sample(&job.params, &job.water(), threads);
+                let field = field(heights);
+                let sampled_in = started.elapsed().as_millis();
+                let water = job.bodies(&field);
                 tracing::info!(
-                    "land: sampled {SAMPLES}x{SAMPLES} on {threads} threads in {} ms",
-                    started.elapsed().as_millis()
+                    "land: sampled {SAMPLES}x{SAMPLES} on {threads} threads in {sampled_in} ms, its water in {} ms",
+                    started.elapsed().as_millis() - sampled_in
                 );
                 let _ = send.send(Sampled {
-                    field: field(heights),
+                    field,
                     cut,
+                    wet,
+                    water,
                 });
             });
         if let Err(e) = spawned {
@@ -282,11 +326,15 @@ pub(crate) mod tests {
             let inputs = Inputs::of(fixture());
             let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
             let started = std::time::Instant::now();
-            let (heights, cut) = sample(&inputs.params, &inputs.water(), threads);
+            let (heights, cut, wet) = sample(&inputs.params, &inputs.water(), threads);
             eprintln!("land: sampled in {} ms", started.elapsed().as_millis());
+            let field = field(heights);
+            let water = inputs.bodies(&field);
             Sampled {
-                field: field(heights),
+                field,
                 cut,
+                wet,
+                water,
             }
         })
     }

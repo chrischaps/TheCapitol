@@ -89,6 +89,11 @@ impl Players {
         self.decks = Decks::new(rings);
     }
 
+    /// The land is in, with the trails' bridges on it (W10).
+    pub fn set_trail_decks(&mut self, spans: Vec<crate::world::bridges::Span>) {
+        self.decks.set_trails(spans);
+    }
+
     /// Place every avatar for this frame. `poses` are this frame's, the
     /// local player's first. Writes the names to draw, and the point the
     /// camera follows, into `shared`.

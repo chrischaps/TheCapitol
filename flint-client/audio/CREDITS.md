@@ -13,7 +13,8 @@ under [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/).
 | `amb_city.wav` | City hum at the core | Brown-noise traffic rumble, a band-passed pink-noise crowd murmur, faint air, and a drone on A (55 Hz, its octave and fifth) |
 | `amb_breeze.wav` | Suburbs and fields | Low-passed pink-noise air, leaf crackle that rises with the gusts, a low hush |
 | `amb_wind.wav` | Wilderness, and high over the map | Pink noise through two resonant bands that ride the gusts, over a brown-noise buffet |
-| `amb_water.wav` | Water lapping at the rings | A brown-noise wash, laps that open a low-pass as they break, sparse bubbles |
+| `amb_water.wav` | Water lapping at the rings, and at the wilds' lakes | A brown-noise wash, laps that open a low-pass as they break, sparse bubbles |
+| `amb_stream.wav` | Running water by the wilds' rivers and streams | Band-passed pink noise fluttering fast, a low brown-noise burble, and dense rising bubble plinks |
 | `ui_click.wav`, `ui_drop.wav` | Buttons, and an item set down in a slot | Short damped sines with a noise transient |
 | `rustle_1..3.wav` | Grass being gathered | Band-passed noise grains |
 | `pluck.wav` | A gather lands | Two Karplus-Strong plucks, G5 then D6 |

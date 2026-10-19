@@ -64,6 +64,11 @@ pub const WILD_MEADOW: u32 = 0x5c7a34;
 pub const WILD_ROCK: u32 = 0x6e6c74;
 pub const WILD_SCREE: u32 = 0x8c806c;
 pub const WILD_SNOW: u32 = 0xe6ebf2;
+/// The water's ground (W10): dark silt in the beds, moss on the wet banks
+/// and pale gravel where a ford runs shallow.
+pub const WILD_SILT: u32 = 0x3a3428;
+pub const WILD_MOSS: u32 = 0x2f4a26;
+pub const WILD_GRAVEL: u32 = 0xa49a84;
 
 /// `c` darker (`k` < 1) or lighter, alpha kept.
 pub fn shade(c: [f32; 4], k: f32) -> [f32; 4] {

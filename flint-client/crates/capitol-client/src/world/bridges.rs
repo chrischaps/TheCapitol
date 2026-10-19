@@ -16,22 +16,34 @@
 //! the sea shows through it from the quay. The deck is the 2D clients'
 //! bridge colour; the rails, posts and the faces of the arch are its edge
 //! colour, and each rail ends at a newel post capped in the Capitol's gold.
+//!
+//! **Trail bridges (W10).** Where a wild trail crosses a river with no
+//! ford, the same bridge, narrower and plainer, spans the river bank to
+//! bank ([`trail_spans`]): its ramps land on the trail on either bank, at
+//! the land's height there, and its arch springs from the banks just under
+//! the river's surface. Its deck is weathered and its newels are capped in
+//! timber, not gold. They're their own mesh ([`WILD_MESH`]), built once
+//! the land is in.
 
 use crate::coords::{layer, to_world, S};
 use crate::world::mesh::{facing, MeshBuf};
 use crate::world::palette::{self, hex, mix};
 use crate::world::water;
 use capitol_protocol::rules::{CENTER_X, CENTER_Y};
-use capitol_protocol::terrain::{RoadType, WaterRing};
+use capitol_protocol::terrain::{RoadType, TerrainResponse, WaterRing};
 use flint_player::ExtensionGpu;
 use std::f64::consts::PI;
 
 /// The runtime mesh's name, as the scene's bridges entity names it.
 pub const MESH: &str = "bridges";
+/// The trail bridges' runtime mesh (W10).
+pub const WILD_MESH: &str = "bridges_wild";
 
 /// The 2D clients' bridge fill and edge.
 const DECK: u32 = 0x8b6914;
 const EDGE: u32 = 0x5d4612;
+/// A trail bridge's deck: timber left to the weather.
+const WEATHERED: u32 = 0x6b5a40;
 
 /// How far each ramp reaches past the kerb onto the road, in server units.
 const RAMP: f64 = 20.0;
@@ -59,10 +71,27 @@ const NEWEL_HEIGHT: f32 = 1.1;
 const INSET: f32 = 0.12;
 const POST_GAP: f64 = 12.0;
 
-/// One bridge in its own frame: `s` runs out from the world centre along
-/// its axis and `o` across it, both in server units.
+/// A trail bridge: its deck's least width, how far past the banks its
+/// ramps reach and its abutments stand (server units), how high its crown
+/// stands over the toes and over the water, and how far its arch springs
+/// under the surface (metres).
+const TRAIL_DECK: f64 = 14.0;
+const TRAIL_RAMP: f64 = 25.0;
+const TRAIL_ABUTMENT: f64 = 3.0;
+const TRAIL_HUMP: f32 = 0.35;
+const TRAIL_CLEARANCE: f32 = 0.9;
+const TRAIL_SPRING: f32 = 0.2;
+/// How far a trail lies over the land (`roads`' drape), and its bridge's
+/// toes a step over that.
+const TRAIL_TOE: f32 = 0.12;
+
+/// One bridge in its own frame: `s` runs from its origin along its axis
+/// and `o` across it, both in server units. A canal's bridge runs out from
+/// the world centre; a trail's from where it crosses its river.
 #[derive(Debug, Clone, Copy)]
-struct Span {
+pub struct Span {
+    /// Server (x, y) of `s` = 0.
+    origin: [f64; 2],
     /// The axis and the across direction, in server (x, y).
     axis: [f64; 2],
     across: [f64; 2],
@@ -74,6 +103,15 @@ struct Span {
     /// Where the channel's walls meet the deck's sides: the arch's springs.
     spring_in: f64,
     spring_out: f64,
+    /// Heights in metres: the deck's top at each toe and at its crown,
+    /// where the arch springs, and the foot the sides stand on.
+    toes: (f32, f32),
+    crown: f32,
+    spring_y: f32,
+    foot: f32,
+    /// The deck, and the newels' caps.
+    deck: u32,
+    cap: u32,
 }
 
 impl Span {
@@ -90,15 +128,64 @@ impl Span {
             end: ring.outer_radius() + kerb + RAMP,
             spring_in: side(ring.inner_radius()),
             spring_out: side(ring.outer_radius()),
+            origin: [CENTER_X, CENTER_Y],
+            toes: (toe(), toe()),
+            crown: layer::DECK,
+            spring_y: layer::ARCH_SPRING,
+            foot: layer::GROUND,
+            deck: DECK,
+            cap: palette::GOLD,
         }
+    }
+
+    /// A trail's bridge over a river: centred on `crossing` (server), along
+    /// `axis` (a unit server vector), over water `water_width` wide whose
+    /// surface is `surface` m up, `width` wide. `ground` is the land's world
+    /// y under world (X, Z).
+    fn over(
+        crossing: [f64; 2],
+        axis: [f64; 2],
+        water_width: f64,
+        surface: f32,
+        width: f64,
+        ground: impl Fn([f32; 2]) -> f32,
+    ) -> Self {
+        let bank = water_width * 0.5;
+        let mut span = Self {
+            origin: crossing,
+            axis,
+            across: [-axis[1], axis[0]],
+            half: width.max(TRAIL_DECK) * 0.5,
+            start: -(bank + TRAIL_RAMP),
+            end: bank + TRAIL_RAMP,
+            spring_in: -(bank + TRAIL_ABUTMENT),
+            spring_out: bank + TRAIL_ABUTMENT,
+            toes: (0.0, 0.0),
+            crown: 0.0,
+            spring_y: surface - TRAIL_SPRING,
+            foot: 0.0,
+            deck: WEATHERED,
+            cap: EDGE,
+        };
+        let (g0, g1) = (ground(span.at(span.start, 0.0)), ground(span.at(span.end, 0.0)));
+        span.toes = (g0 + TRAIL_TOE, g1 + TRAIL_TOE);
+        span.crown = (g0.max(g1) + TRAIL_TOE + TRAIL_HUMP).max(surface + TRAIL_CLEARANCE);
+        span.foot = g0.min(g1).min(surface) - 0.6;
+        span
+    }
+
+    /// Server (x, y) at `s` along the axis and `o` across it.
+    fn server(&self, s: f64, o: f64) -> [f64; 2] {
+        [
+            self.origin[0] + self.axis[0] * s + self.across[0] * o,
+            self.origin[1] + self.axis[1] * s + self.across[1] * o,
+        ]
     }
 
     /// World (X, Z) at `s` along the axis and `o` across it.
     fn at(&self, s: f64, o: f64) -> [f32; 2] {
-        to_world(
-            CENTER_X + self.axis[0] * s + self.across[0] * o,
-            CENTER_Y + self.axis[1] * s + self.across[1] * o,
-        )
+        let [x, y] = self.server(s, o);
+        to_world(x, y)
     }
 
     fn point(&self, s: f64, o: f64, y: f32) -> [f32; 3] {
@@ -114,17 +201,24 @@ impl Span {
         [self.across[0] as f32, 0.0, self.across[1] as f32]
     }
 
+    /// How far the crown stands over the line between the toes.
+    fn hump(&self) -> f32 {
+        self.crown - 0.5 * (self.toes.0 + self.toes.1)
+    }
+
     /// The deck's top at `s`: one hump from toe to toe.
     fn top(&self, s: f64) -> f32 {
         let u = ((s - self.start) / (self.end - self.start)).clamp(0.0, 1.0);
-        toe() + (layer::DECK - toe()) * (PI * u).sin() as f32
+        let line = self.toes.0 + (self.toes.1 - self.toes.0) * u as f32;
+        line + self.hump() * (PI * u).sin() as f32
     }
 
     /// The slope of the top at `s`, in metres per metre.
     fn top_slope(&self, s: f64) -> f32 {
         let len = self.end - self.start;
         let u = ((s - self.start) / len).clamp(0.0, 1.0);
-        let dy_ds = (layer::DECK - toe()) as f64 * PI / len * (PI * u).cos();
+        let dy_ds = (self.toes.1 - self.toes.0) as f64 / len
+            + self.hump() as f64 * PI / len * (PI * u).cos();
         (dy_ds / S as f64) as f32
     }
 
@@ -144,7 +238,7 @@ impl Span {
         let s = mid - half * phi.cos();
         (
             s,
-            layer::ARCH_SPRING + (crown - layer::ARCH_SPRING) * phi.sin() as f32,
+            self.spring_y + (crown - self.spring_y) * phi.sin() as f32,
         )
     }
 
@@ -297,11 +391,11 @@ fn rail(m: &mut MeshBuf, span: &Span, o: f64, (s0, s1): (f64, f64), height: f32,
 
 /// One bridge: deck, arch, sides, ramps' ends and rails.
 fn bridge(m: &mut MeshBuf, span: &Span) {
-    let deck = hex(DECK);
+    let deck = hex(span.deck);
     let edge = hex(EDGE);
     // The vault is in its own shadow.
     let vault = mix(edge, hex(palette::BACKGROUND), 0.35);
-    let gold = hex(palette::GOLD);
+    let cap = hex(span.cap);
     let (ax, ac) = (span.axis_w(), span.across_w());
     let h = span.half;
     let (land_in, arch, land_out) = span.samples();
@@ -334,7 +428,7 @@ fn bridge(m: &mut MeshBuf, span: &Span) {
             // The soffit's tangent in (along, up), in metres per radian,
             // turned to point down into the opening.
             let (mid, half) = span.arch();
-            let rise = span.top(mid) - CROWN_THICKNESS - layer::ARCH_SPRING;
+            let rise = span.top(mid) - CROWN_THICKNESS - span.spring_y;
             let (ds, dy) = (
                 (half as f32) * S * phi.sin() as f32,
                 rise * phi.cos() as f32,
@@ -349,7 +443,7 @@ fn bridge(m: &mut MeshBuf, span: &Span) {
     for (o, n) in [(h, ac), (-h, scale(ac, -1.0))] {
         let side =
             |s: f64, bottom: f32| (span.point(s, o, bottom), span.point(s, o, span.top(s)), n);
-        let ground: Vec<_> = land_in.iter().map(|&s| side(s, layer::GROUND)).collect();
+        let ground: Vec<_> = land_in.iter().map(|&s| side(s, span.foot)).collect();
         sheet(m, &ground, edge);
         let over: Vec<_> = (0..=ARCH_STEPS)
             .map(|i| {
@@ -358,7 +452,7 @@ fn bridge(m: &mut MeshBuf, span: &Span) {
             })
             .collect();
         sheet(m, &over, edge);
-        let ground: Vec<_> = land_out.iter().map(|&s| side(s, layer::GROUND)).collect();
+        let ground: Vec<_> = land_out.iter().map(|&s| side(s, span.foot)).collect();
         sheet(m, &ground, edge);
     }
 
@@ -366,8 +460,8 @@ fn bridge(m: &mut MeshBuf, span: &Span) {
     for (s, n) in [(span.start, scale(ax, -1.0)), (span.end, ax)] {
         m.quad(
             [
-                span.point(s, -h, layer::GROUND),
-                span.point(s, h, layer::GROUND),
+                span.point(s, -h, span.foot),
+                span.point(s, h, span.foot),
                 span.point(s, h, span.top(s)),
                 span.point(s, -h, span.top(s)),
             ],
@@ -390,7 +484,7 @@ fn bridge(m: &mut MeshBuf, span: &Span) {
                 NEWEL * 0.5,
                 (foot(s), span.top(s) + NEWEL_HEIGHT),
                 edge,
-                gold,
+                cap,
             );
         }
         let posts = ((r1 - r0) / POST_GAP).round().max(1.0) as usize;
@@ -425,22 +519,100 @@ pub fn upload(gpu: &mut ExtensionGpu, rings: &[WaterRing]) {
     build(rings).upload(gpu, MESH, 0.8);
 }
 
+/// Where a trail crosses a river with no ford there, a bridge (W10): one
+/// for each crossing of a `wild_` trail's centre line over a river's, more
+/// than its ford's half-width from any ford on that river. `ground` is the
+/// land's world y under world (X, Z).
+pub fn trail_spans(terrain: &TerrainResponse, ground: impl Fn([f32; 2]) -> f32) -> Vec<Span> {
+    let mut spans = Vec::new();
+    let trails = terrain
+        .roads
+        .iter()
+        .filter(|r| r.road_type == RoadType::Trail && r.id.starts_with("wild_"));
+    for trail in trails {
+        for t in trail.points.windows(2) {
+            let (a, b) = (t[0], t[1]);
+            for river in &terrain.rivers {
+                for w in river.points.windows(2) {
+                    let (p, q) = (&w[0], &w[1]);
+                    let Some((u, v)) = cross((a.0, a.1), (b.0, b.1), (p.x, p.y), (q.x, q.y)) else {
+                        continue;
+                    };
+                    let at = [a.0 + (b.0 - a.0) * u, a.1 + (b.1 - a.1) * u];
+                    let forded = terrain.fords.iter().any(|f| {
+                        f.river_id == river.id && (f.x - at[0]).hypot(f.y - at[1]) < 0.5 * f.width + 5.0
+                    });
+                    if forded {
+                        continue;
+                    }
+                    let len = (b.0 - a.0).hypot(b.1 - a.1).max(1e-9);
+                    let axis = [(b.0 - a.0) / len, (b.1 - a.1) / len];
+                    // Bank to bank along the trail, which may cross aslant.
+                    let (rx, ry) = (q.x - p.x, q.y - p.y);
+                    let rl = rx.hypot(ry).max(1e-9);
+                    let sin = ((axis[0] * ry - axis[1] * rx) / rl).abs().max(0.35);
+                    let width = (p.width + (q.width - p.width) * v) / sin;
+                    let surface = layer::GROUND + (p.surface + (q.surface - p.surface) * v) as f32 * S;
+                    spans.push(Span::over(at, axis, width, surface, trail.width, &ground));
+                }
+            }
+        }
+    }
+    spans
+}
+
+/// Where segments `ab` and `pq` cross: how far along each, if they do.
+fn cross(a: (f64, f64), b: (f64, f64), p: (f64, f64), q: (f64, f64)) -> Option<(f64, f64)> {
+    let (r, s) = ((b.0 - a.0, b.1 - a.1), (q.0 - p.0, q.1 - p.1));
+    let d = r.0 * s.1 - r.1 * s.0;
+    if d.abs() < 1e-12 {
+        return None;
+    }
+    let (ex, ey) = (p.0 - a.0, p.1 - a.1);
+    let u = (ex * s.1 - ey * s.0) / d;
+    let v = (ex * r.1 - ey * r.0) / d;
+    ((0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v)).then_some((u, v))
+}
+
+/// Upload the trail bridges (once the land is in). Returns the mesh's
+/// name, which needs an entity.
+pub fn upload_trails(gpu: &mut ExtensionGpu, spans: &[Span]) -> String {
+    let mut m = MeshBuf::default();
+    for span in spans {
+        bridge(&mut m, span);
+    }
+    m.upload(gpu, WILD_MESH, 0.8);
+    WILD_MESH.to_owned()
+}
+
 /// Every deck's footprint, for standing on it (P4.2): an avatar on a
 /// bridge stands on the hump, not at the road's height under it. Built
-/// once per terrain, so a lookup doesn't allocate.
+/// once per terrain, so a lookup doesn't allocate. The canals' decks come
+/// with the rings, the trails' once the land is in.
 #[derive(Debug, Clone, Default)]
-pub struct Decks(Vec<Span>);
+pub struct Decks {
+    rings: Vec<Span>,
+    trails: Vec<Span>,
+}
 
 impl Decks {
     pub fn new(rings: &[WaterRing]) -> Self {
-        Self(spans(rings))
+        Self {
+            rings: spans(rings),
+            trails: Vec::new(),
+        }
+    }
+
+    /// The trails' bridges (`trail_spans`).
+    pub fn set_trails(&mut self, spans: Vec<Span>) {
+        self.trails = spans;
     }
 
     /// The deck's top in metres under server (x, y), if a deck is there:
     /// across the bridge's width, from ramp toe to ramp toe.
     pub fn top(&self, x: f64, y: f64) -> Option<f32> {
-        let (dx, dy) = (x - CENTER_X, y - CENTER_Y);
-        self.0.iter().find_map(|span| {
+        self.rings.iter().chain(&self.trails).find_map(|span| {
+            let (dx, dy) = (x - span.origin[0], y - span.origin[1]);
             let s = dx * span.axis[0] + dy * span.axis[1];
             let o = dx * span.across[0] + dy * span.across[1];
             (o.abs() <= span.half && (span.start..=span.end).contains(&s)).then(|| span.top(s))
@@ -632,6 +804,39 @@ mod tests {
         assert_eq!(decks.top(x, y), None);
         let (x, y) = at(ring.radius, span.half + 1.0);
         assert_eq!(decks.top(x, y), None);
+    }
+
+    #[test]
+    fn a_trail_crosses_each_unforded_river_on_a_bridge_over_the_water() {
+        use crate::world::land::{rise_on, tests::{fixture, fixture_field}};
+        let field = fixture_field();
+        let ground = |at: [f32; 2]| layer::GROUND + rise_on(field, at);
+        let spans = trail_spans(fixture(), ground);
+        // The default world's trails cross a river away from its fords
+        // three times (W5 routes them to the fords where it can).
+        assert_eq!(spans.len(), 3);
+        for span in &spans {
+            // The toes sit on the trail on either bank.
+            for (s, toe) in [(span.start, span.toes.0), (span.end, span.toes.1)] {
+                let g = ground(span.at(s, 0.0));
+                assert!((toe - g - TRAIL_TOE).abs() < 1e-4, "toe {toe} over {g}");
+            }
+            // The deck clears the water, and the arch springs under it.
+            let water = span.spring_y + TRAIL_SPRING;
+            assert!(span.top(0.0) >= water + TRAIL_CLEARANCE - 1e-4);
+            assert!(span.soffit(PI * 0.5).1 > water + 0.3);
+            let mut m = MeshBuf::default();
+            bridge(&mut m, span);
+            for v in triangles(&m) {
+                let n = normalise(add(add(v[0].normal, v[1].normal), v[2].normal));
+                assert!(facing(v[0].position, v[1].position, v[2].position, n));
+            }
+        }
+        // And a walker on one stands on its deck.
+        let mut decks = Decks::new(&[]);
+        decks.set_trails(spans.clone());
+        let [x, y] = spans[0].server(0.0, 0.0);
+        assert!((decks.top(x, y).unwrap() - spans[0].top(0.0)).abs() < 1e-5);
     }
 
     #[test]

@@ -338,7 +338,8 @@ impl CapitolExtension {
 
     /// The land (W9). Once a field is sampled, everything stands on it:
     /// the disc opens over the wilds, and the chunks, the click's and the
-    /// rig's ground, the grass, the trails and the nodes take it up. Then,
+    /// rig's ground, the grass, the trails and the nodes take it up, and
+    /// the water lies in its beds with bridges over it (W10). Then,
     /// every frame, the chunks the camera has come nearer to or gone
     /// further from are built again.
     fn land_in_place(&mut self, ctx: &mut ExtensionCtx) {
@@ -353,13 +354,30 @@ impl CapitolExtension {
             if let Some(projector) = &self.shared.projector {
                 projector.set_ground(Some(field.clone()));
             }
-            self.land_meshes.set_field(field.clone());
+            let fords = self.built.iter().flat_map(|t| &t.fords).map(|f| {
+                (crate::coords::to_world(f.x, f.y), (0.5 * f.width) as f32 * crate::coords::S)
+            });
+            let shore = world::land_mesh::Shore {
+                cut: sampled.cut.clone(),
+                wet: sampled.wet.clone(),
+                fords: fords.collect(),
+            };
+            self.land_meshes.set_field(field.clone(), std::sync::Arc::new(shore));
+            // The wilds' water lies in its beds (W10), with bridges where
+            // a trail crosses a river with no ford.
+            world::wild_water::upload(gpu, &sampled.water);
+            if let Some(terrain) = &self.built {
+                let ground = |at: [f32; 2]| crate::coords::layer::GROUND + world::land::rise_on(&field, at);
+                let spans = world::bridges::trail_spans(terrain, ground);
+                names.push(world::bridges::upload_trails(gpu, &spans));
+                self.players.set_trail_decks(spans);
+            }
             if let Some(terrain) = &self.built {
                 let rings = &terrain.water_rings;
                 world::ground::upload(gpu, terrain.world_size, &world::water::holes(rings), true);
                 // The wild trails lie on the land.
                 names.extend(world::roads::upload(gpu, &terrain.roads, rings));
-                self.grass.land(field.clone(), sampled.cut, terrain);
+                self.grass.land(field.clone(), sampled.cut, sampled.wet, terrain);
             }
             self.land_in = true;
             self.nodes.land_changed();
@@ -848,6 +866,7 @@ impl PlayerExtension for CapitolExtension {
         // The land is sampled off this thread, and comes in on a later
         // frame (`land_in_place`); until then the world stands as it was.
         self.land.ask(terrain);
+        self.sound.set_wild_water(crate::sound::WildWater::new(terrain));
         if rebuild.rings {
             self.players.set_rings(rings);
             self.sound.set_rings(rings);
@@ -1355,7 +1374,8 @@ fn listen(ctx: &mut ExtensionCtx, shared: &script_api::Shared, sound: &mut Sound
     let ears = Ears {
         focus,
         camera: [cam.position.x, cam.position.y, cam.position.z],
-        height: cam.position.y - crate::coords::layer::GROUND,
+        // Over the land under the camera, so a hillside isn't a height.
+        height: cam.position.y - crate::world::land::ground_y([cam.position.x, cam.position.z]),
     };
     let working: Vec<Rustling> = shared
         .nodes

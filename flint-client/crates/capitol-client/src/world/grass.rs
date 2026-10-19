@@ -66,10 +66,15 @@ pub const HEIGHTS: usize = 2048;
 
 /// Where the grass gives way in the wilds: the slopes (rise over run) over
 /// which it thins out, the heights (m) over which the scree takes it, and
-/// the depth (m) of a water's cut over which its bed is bare.
+/// the depth (m) of a water's cut over which its bed is bare: since W10
+/// the water lies in the beds, so even a shallow one keeps it off.
 const STEEP: (f64, f64) = (0.45, 0.8);
 const HIGH: (f64, f64) = (22.0, 38.0);
-const WET: (f64, f64) = (0.03, 0.3);
+const WET: (f64, f64) = (0.002, 0.02);
+/// How wet (m, `land::Sampled::wet`) the ground must be to be bare: the
+/// shallows, where the land already lay under the water and the carve cut
+/// nothing (a pit lake's floor), and a margin along each bank.
+const SODDEN: (f64, f64) = (0.15, 0.3);
 
 /// Where the grass starts easing in, and where it's full, in server units
 /// from the centre: across the suburb's outer edge (3000).
@@ -263,6 +268,45 @@ impl Mask {
         });
     }
 
+    /// Clears every texel whose centre is on the water inside `rings`
+    /// (filled even-odd, so an island keeps its grass), row by row.
+    fn clear_rings(&mut self, rings: &[Vec<(f64, f64)>]) {
+        let n = self.size as i64;
+        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+        for &(_, y) in rings.iter().flatten() {
+            lo = lo.min(y);
+            hi = hi.max(y);
+        }
+        if lo > hi {
+            return;
+        }
+        let (j0, j1) = (self.texel_of([0.0, lo])[1].max(0), self.texel_of([0.0, hi])[1].min(n - 1));
+        let mut xs = Vec::new();
+        for j in j0..=j1 {
+            let y = self.at(0, j as usize)[1];
+            xs.clear();
+            for ring in rings {
+                for k in 0..ring.len() {
+                    let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
+                    if (a.1 > y) != (b.1 > y) {
+                        xs.push(a.0 + (y - a.1) * (b.0 - a.0) / (b.1 - a.1));
+                    }
+                }
+            }
+            xs.sort_by(f64::total_cmp);
+            for span in xs.chunks_exact(2) {
+                let i0 = self.texel_of([span[0], y])[0].max(0);
+                let i1 = self.texel_of([span[1], y])[0].min(n - 1);
+                for i in i0..=i1 {
+                    let x = self.at(i as usize, 0)[0];
+                    if (span[0]..=span[1]).contains(&x) {
+                        self.texels[(j * n + i) as usize] = 0;
+                    }
+                }
+            }
+        }
+    }
+
     /// The texels the clearing of node `n` can touch.
     fn node_window(&self, n: Node) -> Option<Window> {
         let c = node_at(n);
@@ -363,8 +407,10 @@ fn inside(p: P, poly: &[P]) -> bool {
 /// The land the grass grows on in the wilds (W9).
 pub struct GrassLand {
     pub field: Arc<GroundField>,
-    /// How deep the water cut, a sample of the field each (`land::Sampled`).
+    /// How deep the water cut, and how wet the ground is, a sample of the
+    /// field each (`land::Sampled`).
     pub cut: Vec<f32>,
+    pub wet: Vec<f32>,
 }
 
 impl GrassLand {
@@ -384,9 +430,11 @@ impl GrassLand {
         let slope = ((h(d, 0.0) - h(-d, 0.0)).hypot(h(0.0, d) - h(0.0, -d)) / (2.0 * d)) as f64;
         let rise = (h(0.0, 0.0) - layer::GROUND) as f64;
         let cut = land::cut_at(&self.cut, [x, z]) as f64;
+        let wet = land::cut_at(&self.wet, [x, z]) as f64;
         (1.0 - smoothstep(STEEP.0, STEEP.1, slope))
             * (1.0 - smoothstep(HIGH.0, HIGH.1, rise))
             * (1.0 - smoothstep(WET.0, WET.1, cut))
+            * (1.0 - smoothstep(SODDEN.0, SODDEN.1, wet))
     }
 
     /// The blades' ground: [`HEIGHTS`]² world heights over `mask`'s square,
@@ -507,6 +555,11 @@ pub fn paint(terrain: &TerrainResponse, size: usize, land: Option<&GrassLand>) -
         if corners.iter().any(|&c| grows(c, c)) {
             mask.clear_polygon(&corners, LOT_MARGIN, LOT_SOFT);
         }
+    }
+    // Nothing grows on a lake's floor (W10): where the land already lay
+    // under its level the carve cut nothing, so the land can't say.
+    for lake in &terrain.lakes {
+        mask.clear_rings(&lake.rings);
     }
     mask
 }
@@ -656,8 +709,8 @@ impl Grass {
     }
 
     /// The land is in (W9): paint again on it, and stand the blades on it.
-    pub fn land(&mut self, field: Arc<GroundField>, cut: Vec<f32>, terrain: &TerrainResponse) {
-        self.land = Some(GrassLand { field, cut });
+    pub fn land(&mut self, field: Arc<GroundField>, cut: Vec<f32>, wet: Vec<f32>, terrain: &TerrainResponse) {
+        self.land = Some(GrassLand { field, cut, wet });
         self.terrain(terrain);
     }
 
@@ -751,6 +804,43 @@ mod tests {
     fn mask() -> &'static Mask {
         static M: OnceLock<Mask> = OnceLock::new();
         M.get_or_init(|| paint(fixture(), SIZE, None))
+    }
+
+    #[test]
+    fn nothing_grows_on_a_lake_floor() {
+        let t = fixture();
+        let m = paint(t, SIZE, None);
+        const SIDE_TEXEL: f64 = capitol_protocol::rules::WORLD_SIZE / SIZE as f64;
+        let (mut wet, mut grows_round) = (0, 0);
+        for lake in &t.lakes {
+            let (cx, cy) = lake.rings[0].iter().fold((0.0, 0.0), |s, p| (s.0 + p.0, s.1 + p.1));
+            let n = lake.rings[0].len() as f64;
+            for k in 0..64 {
+                let a = k as f64 * std::f64::consts::TAU / 64.0;
+                for reach in [10.0, 30.0, 60.0] {
+                    let p = [cx / n + reach * a.cos(), cy / n + reach * a.sin()];
+                    // A texel clear of the shore: one that straddles it is
+                    // the bank's, by its centre.
+                    let d = SIDE_TEXEL * std::f64::consts::SQRT_2;
+                    let clear = [(d, 0.0), (-d, 0.0), (0.0, d), (0.0, -d), (d, d), (-d, -d), (d, -d), (-d, d)]
+                        .iter()
+                        .all(|&(dx, dy)| lake.contains(p[0] + dx, p[1] + dy));
+                    if clear {
+                        assert_eq!(m.value_at(p), 0, "{} at {p:?}", lake.id);
+                        wet += 1;
+                    }
+                }
+            }
+            // Its shores still grow, somewhere.
+            let (x, y) = lake.rings[0][0];
+            grows_round += (0..16).any(|k| {
+                let a = k as f64 * std::f64::consts::TAU / 16.0;
+                let p = [x + 40.0 * a.cos(), y + 40.0 * a.sin()];
+                !lake.contains(p[0], p[1]) && m.value_at(p) > 0
+            }) as usize;
+        }
+        assert!(wet > 500, "{wet}");
+        assert!(grows_round > t.lakes.len() / 2, "{grows_round}");
     }
 
     #[test]
@@ -956,6 +1046,7 @@ mod tests {
         let land = GrassLand {
             field: Arc::new(crate::world::land::field(sampled.field.heightmap().clone_heights())),
             cut: sampled.cut.clone(),
+            wet: sampled.wet.clone(),
         };
         let m = paint(fixture(), SIZE, Some(&land));
         let (mut high, mut wet, mut low, mut low_grows) = (0, 0, 0, 0);

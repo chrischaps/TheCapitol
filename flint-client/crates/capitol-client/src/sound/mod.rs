@@ -1,6 +1,6 @@
 //! What you hear (P8.1). The sounds are made in [`library`] at start, off
 //! the main thread, and handed to Flint from memory (`ctx.audio`, Flint
-//! ADR 0084). [`Soundscape`] plays them: four looping beds whose levels
+//! ADR 0084). [`Soundscape`] plays them: five looping beds whose levels
 //! follow where you are, and one-shots it plays itself.
 //!
 //! **The beds** are `audio_source` entities on the music bus, spawned once
@@ -13,6 +13,13 @@
 //! - wind takes over past the Rural edge,
 //! - water laps within 25 m of a ring's edge, wherever that is,
 //! - and climbing to the map lifts you out of all of it into a thin wind.
+//!
+//! **The wilds (W10)** shape it further ([`wild`], from [`WildWater`]):
+//! - running water rises within a few metres of a stream and a few tens
+//!   of a big river (the fifth bed), and louder at a ford's riffle,
+//! - the wind blows full on the ridges and the tops and drops away in the
+//!   valleys, by how far you stand over the ground round you,
+//! - and by a lake it goes still: the wind hushes and the water laps softly.
 //!
 //! The zone beds share one constant power, so a crossfade never dips or
 //! swells, and their levels ease toward the mix over about a second so a
@@ -44,11 +51,12 @@ const AMBIENCE: f32 = 0.8;
 const EFFECTS: f32 = 1.0;
 
 /// Each bed's level at full weight, by ear.
-const BEDS: [(&str, &str, f32); 4] = [
+const BEDS: [(&str, &str, f32); 5] = [
     ("ambience_city", "amb_city", 0.55),
     ("ambience_breeze", "amb_breeze", 0.50),
     ("ambience_wind", "amb_wind", 0.50),
     ("ambience_water", "amb_water", 0.45),
+    ("ambience_stream", "amb_stream", 0.50),
 ];
 
 /// How fast a bed's level follows the mix: a time constant, seconds.
@@ -72,6 +80,8 @@ pub struct Mix {
     pub breeze: f32,
     pub wind: f32,
     pub water: f32,
+    /// Running water in the wilds (W10).
+    pub stream: f32,
     /// How often birds call, 0 to 1. Not a bed: the soundscape scatters
     /// one-shots at this rate.
     pub birds: f32,
@@ -79,7 +89,7 @@ pub struct Mix {
 
 impl Mix {
     fn bed(&self, i: usize) -> f32 {
-        [self.city, self.breeze, self.wind, self.water][i]
+        [self.city, self.breeze, self.wind, self.water, self.stream][i]
     }
 }
 
@@ -101,8 +111,159 @@ pub fn mix(r: f32, shore: f32, height: f32) -> Mix {
         // High over the map, a thin wind wherever you are.
         wind: ((wind / sum).sqrt() * ground).max(0.45 * air),
         water: (1.0 - smoothstep(0.0, 250.0, shore.max(0.0))) * ground,
+        stream: 0.0,
         birds: birds * ground,
     }
+}
+
+/// Where you stand among the wilds' water and land (W10). Each 0 to 1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Wild {
+    /// How open to the wind: 1 on a ridge or a top, 0 down in a valley.
+    pub exposure: f32,
+    /// How loud the running water near you is.
+    pub running: f32,
+    /// How near still water: 1 on a lake's shore.
+    pub lake: f32,
+}
+
+impl Default for Wild {
+    /// Away from the wilds' water, in the open.
+    fn default() -> Self {
+        Self {
+            exposure: 1.0,
+            running: 0.0,
+            lake: 0.0,
+        }
+    }
+}
+
+/// `m`, the mix at `r` server units out with the camera `height` metres
+/// over the ground, shaped by where you stand in the wilds: running water
+/// near a stream, the wind by how exposed you are (only past the rural
+/// edge, where the land rises), and quiet by a lake.
+pub fn wild(m: Mix, r: f32, height: f32, w: Wild) -> Mix {
+    let ground = 1.0 - smoothstep(80.0, 450.0, height);
+    let wilds = smoothstep(3800.0, 4000.0, r);
+    let shelter = 1.0 - wilds * (1.0 - (0.3 + 0.7 * w.exposure));
+    let hush = 1.0 - 0.65 * w.lake * ground;
+    Mix {
+        wind: m.wind * (1.0 - ground * (1.0 - shelter)) * hush,
+        breeze: m.breeze * hush,
+        water: m.water.max(0.4 * w.lake * ground),
+        stream: w.running * ground,
+        ..m
+    }
+}
+
+/// The wilds' water as the ears need it: each stretch of river or stream
+/// with how far it carries, each ford, and each lake's shores, all in
+/// world metres (X, Z).
+#[derive(Debug, Clone, Default)]
+pub struct WildWater {
+    /// (from, to, half its width, how loud it runs).
+    courses: Vec<([f32; 2], [f32; 2], f32, f32)>,
+    fords: Vec<([f32; 2], f32)>,
+    lakes: Vec<Vec<[f32; 2]>>,
+}
+
+/// How far past its bank running water is heard, per metre of its width,
+/// and at least; and how far from a lake's shore it's still.
+const RUN_REACH: f32 = 5.0;
+const RUN_REACH_MIN: f32 = 10.0;
+const LAKE_REACH: f32 = 50.0;
+/// How loud a stream runs beside a river, and a ford's riffle.
+const STREAM_LOUD: f32 = 0.7;
+const FORD_LOUD: f32 = 0.35;
+
+impl WildWater {
+    pub fn new(terrain: &capitol_core::protocol::terrain::TerrainResponse) -> Self {
+        use crate::coords::{to_world, S};
+        let mut courses = Vec::new();
+        for (list, loud) in [(&terrain.rivers, 1.0), (&terrain.streams, STREAM_LOUD)] {
+            for course in list {
+                for w in course.points.windows(2) {
+                    let half = 0.25 * (w[0].width + w[1].width) as f32 * S;
+                    courses.push((to_world(w[0].x, w[0].y), to_world(w[1].x, w[1].y), half, loud));
+                }
+            }
+        }
+        Self {
+            courses,
+            fords: terrain
+                .fords
+                .iter()
+                .map(|f| (to_world(f.x, f.y), (0.5 * f.width) as f32 * S))
+                .collect(),
+            lakes: terrain
+                .lakes
+                .iter()
+                .flat_map(|l| &l.rings)
+                .map(|ring| ring.iter().map(|&(x, y)| to_world(x, y)).collect())
+                .collect(),
+        }
+    }
+
+    /// How loud the running water is at world (X, Z), and how near still
+    /// water.
+    pub fn at(&self, p: [f32; 2]) -> (f32, f32) {
+        let mut running: f32 = 0.0;
+        for &(a, b, half, loud) in &self.courses {
+            let reach = (RUN_REACH * 2.0 * half).max(RUN_REACH_MIN);
+            let far = half + reach;
+            let (lo, hi) = ([a[0].min(b[0]), a[1].min(b[1])], [a[0].max(b[0]), a[1].max(b[1])]);
+            if p[0] < lo[0] - far || p[0] > hi[0] + far || p[1] < lo[1] - far || p[1] > hi[1] + far {
+                continue;
+            }
+            let d = (segment_distance(p, a, b) - half).max(0.0);
+            running = running.max(loud * (1.0 - smoothstep(0.0, reach, d)));
+        }
+        for &(f, r) in &self.fords {
+            let d = (p[0] - f[0]).hypot(p[1] - f[1]);
+            running = (running + FORD_LOUD * (1.0 - smoothstep(r, r + 3.0 * RUN_REACH_MIN, d))).min(1.0);
+        }
+        let mut shore = f32::INFINITY;
+        let mut inside = false;
+        for ring in &self.lakes {
+            let n = ring.len();
+            for k in 0..n {
+                let (a, b) = (ring[k], ring[(k + 1) % n]);
+                if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < a[0] + (p[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1]) {
+                    inside = !inside;
+                }
+                shore = shore.min(segment_distance(p, a, b));
+            }
+        }
+        let lake = if inside { 1.0 } else { 1.0 - smoothstep(0.0, LAKE_REACH, shore) };
+        (running, lake)
+    }
+}
+
+fn segment_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
+    let len2 = dx * dx + dz * dz;
+    let t = if len2 > 0.0 {
+        (((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (a[0] + t * dx - p[0]).hypot(a[1] + t * dz - p[1])
+}
+
+/// How open to the wind world (X, Z) is, 0 to 1, from the land
+/// (`land::rise`): how far it stands over the ground round it, and how
+/// high it is.
+pub fn exposure(at: [f32; 2]) -> f32 {
+    let rise = |dx: f32, dz: f32| crate::world::land::rise([at[0] + dx, at[1] + dz]);
+    let here = rise(0.0, 0.0);
+    let round: f32 = (0..8)
+        .map(|k| {
+            let a = k as f32 * std::f32::consts::TAU / 8.0;
+            rise(40.0 * a.cos(), 40.0 * a.sin())
+        })
+        .sum::<f32>()
+        / 8.0;
+    (0.6 * smoothstep(-6.0, 6.0, here - round) + 0.4 * smoothstep(5.0, 45.0, here)).clamp(0.0, 1.0)
 }
 
 /// A one-shot to play.
@@ -184,13 +345,15 @@ pub struct Soundscape {
     /// The library is in Flint's cache, so the soundscape can play.
     loaded: bool,
     /// The bed entities, spawned on the first update.
-    beds: Option<[EntityId; 4]>,
+    beds: Option<[EntityId; 5]>,
     /// Each bed's level now, easing toward the mix.
-    levels: [f32; 4],
+    levels: [f32; 5],
     /// What was last written to each bed's `audio_source.volume`.
-    written: [f32; 4],
+    written: [f32; 5],
     /// The rings, server units: (radius, width).
     rings: Vec<(f32, f32)>,
+    /// The wilds' water (W10).
+    wild_water: WildWater,
     rng: Rng,
     /// Game time, seconds.
     now: f64,
@@ -212,9 +375,10 @@ impl Soundscape {
             making: None,
             loaded: false,
             beds: None,
-            levels: [0.0; 4],
-            written: [-1.0; 4],
+            levels: [0.0; 5],
+            written: [-1.0; 5],
             rings: Vec::new(),
+            wild_water: WildWater::default(),
             rng: Rng::new(0xC0FFEE),
             now: 0.0,
             next_bird: 2.0,
@@ -231,6 +395,11 @@ impl Soundscape {
             .iter()
             .map(|r| (r.radius as f32, r.width as f32))
             .collect();
+    }
+
+    /// The wilds' rivers, streams and lakes (W10).
+    pub fn set_wild_water(&mut self, water: WildWater) {
+        self.wild_water = water;
     }
 
     /// Set the player's volumes: the buses take them on the next `apply`.
@@ -286,7 +455,13 @@ impl Soundscape {
             .iter()
             .map(|(radius, width)| (r - radius).abs() - width / 2.0)
             .fold(f32::INFINITY, f32::min);
-        self.mix = mix(r, shore, ears.height);
+        let (running, lake) = self.wild_water.at(ears.focus);
+        let w = Wild {
+            exposure: if r > 3800.0 { exposure(ears.focus) } else { 1.0 },
+            running,
+            lake,
+        };
+        self.mix = wild(mix(r, shore, ears.height), r, ears.height, w);
         let k = 1.0 - (-dt / EASE).exp();
         for (i, level) in self.levels.iter_mut().enumerate() {
             let target = if self.muted {
@@ -360,7 +535,7 @@ impl Soundscape {
                     }
                     ids.push(id);
                 }
-                let beds = [ids[0], ids[1], ids[2], ids[3]];
+                let beds = [ids[0], ids[1], ids[2], ids[3], ids[4]];
                 self.beds = Some(beds);
                 beds
             }
@@ -547,6 +722,50 @@ mod tests {
     }
 
     #[test]
+    fn the_wind_drops_in_a_valley_and_blows_on_a_ridge() {
+        let r = zone_middle(Zone::Wilderness);
+        let base = mix(r, DRY, STREET);
+        let ridge = wild(base, r, STREET, Wild { exposure: 1.0, ..Wild::default() });
+        let valley = wild(base, r, STREET, Wild { exposure: 0.0, ..Wild::default() });
+        assert_eq!(ridge, base);
+        assert!(valley.wind < 0.4 * ridge.wind, "{valley:?}");
+        // In the city there's no land to shelter you.
+        let suburb = mix(zone_middle(Zone::Suburban), DRY, STREET);
+        assert_eq!(wild(suburb, zone_middle(Zone::Suburban), STREET, Wild { exposure: 0.0, ..Wild::default() }), suburb);
+    }
+
+    #[test]
+    fn a_lake_is_still_and_a_stream_runs() {
+        let r = zone_middle(Zone::Wilderness);
+        let base = mix(r, DRY, STREET);
+        let lake = wild(base, r, STREET, Wild { lake: 1.0, ..Wild::default() });
+        assert!(lake.wind < 0.4 * base.wind && lake.water > 0.3 && lake.stream == 0.0, "{lake:?}");
+        let stream = wild(base, r, STREET, Wild { running: 0.8, ..Wild::default() });
+        assert!((stream.stream - 0.8).abs() < 1e-6);
+        // From the map, nothing runs.
+        let high = wild(mix(r, DRY, 620.0), r, 620.0, Wild { running: 1.0, lake: 1.0, exposure: 0.0 });
+        assert_eq!((high.stream, high.water), (0.0, 0.0));
+    }
+
+    #[test]
+    fn running_water_is_heard_by_the_water_and_not_far_off() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let terrain = capitol_core::terrain::read_terrain_file(&path).unwrap();
+        let water = WildWater::new(&terrain);
+        let river = &terrain.rivers[0];
+        let p = &river.points[river.points.len() / 2];
+        let at = crate::coords::to_world(p.x, p.y);
+        assert!(water.at(at).0 > 0.95, "{:?}", water.at(at));
+        // A long way off any water: silence, and no lake.
+        let far = crate::coords::to_world(capitol_core::protocol::rules::CENTER_X, capitol_core::protocol::rules::CENTER_Y);
+        assert_eq!(water.at(far), (0.0, 0.0));
+        // On a lake, still water.
+        let lake = &terrain.lakes[0];
+        let (x, y) = lake.rings[0][0];
+        assert!(water.at(crate::coords::to_world(x, y)).1 > 0.99);
+    }
+
+    #[test]
     fn the_map_view_hears_only_a_thin_wind() {
         let m = mix(zone_middle(Zone::Suburban), 0.0, 620.0);
         assert_eq!((m.city, m.breeze, m.water, m.birds), (0.0, 0.0, 0.0, 0.0));
@@ -624,7 +843,7 @@ mod tests {
         let ears = ears_at(2000.0);
         let mine = Rustling { id: "a".into(), at: ears.focus, mine: true };
         assert!(run(&mut s, ears, &[mine], 30.0).is_empty());
-        assert_eq!(s.levels, [0.0; 4]);
+        assert_eq!(s.levels, [0.0; 5]);
     }
 
     #[test]

@@ -8,7 +8,8 @@
 //!
 //! The beds loop: four ambiences the soundscape crossfades by zone, city
 //! hum at the core, a breeze through the suburbs and fields, wind past the
-//! edge, and water lapping at the rings. The rest are one-shots.
+//! edge, and water lapping at the rings (and the wilds' lakes), and a fifth
+//! that rises by the wilds' running water (W10). The rest are one-shots.
 
 use super::dsp::*;
 use std::f32::consts::TAU;
@@ -28,6 +29,7 @@ pub const RECIPES: &[(&str, Recipe)] = &[
     ("amb_breeze", breeze),
     ("amb_wind", wind),
     ("amb_water", water),
+    ("amb_stream", stream),
     ("ui_click", || vec![ui_click()]),
     ("ui_drop", || vec![ui_drop()]),
     ("rustle_1", || vec![rustle(1)]),
@@ -312,6 +314,45 @@ fn water() -> Vec<Vec<f32>> {
         }
         to_rms(&mut bubbles, 1.0);
         weigh(&[(wash, 0.6), (lapping, 1.0), (bubbles, 0.06)])
+    })
+}
+
+/// By a river or stream in the wilds (W10): water running over stones.
+/// A bright rush of noise that never settles, fluttering fast as the
+/// surface breaks, a low burble under it, and many small plinks, each a
+/// bubble's chirp rising as it closes, thick enough that they blur into
+/// the babble of a brook.
+fn stream() -> Vec<Vec<f32>> {
+    bed(9.0, 1.0, |seed, n, total| {
+        let mut pink = Pink::new(seed);
+        let mut band = Biquad::bandpass(1600.0, 0.7);
+        let mut soft = Biquad::lowpass(4500.0, 0.7);
+        let mut flutter_noise = Rng::new(seed + 1);
+        let mut flutter = Biquad::lowpass(14.0, 0.7);
+        let rush = part(total, |i| {
+            let f = 0.6 + flutter.run(flutter_noise.white()).abs() * 5.0;
+            soft.run(band.run(pink.next())) * f.min(1.6) * (0.9 + 0.1 * lfo(i, n, 3.0, 0.2))
+        });
+        let mut brown = Brown::new(seed + 2);
+        let mut lp = Biquad::lowpass(260.0, 0.8);
+        let burble = part(total, |i| lp.run(brown.next()) * (0.85 + 0.15 * lfo(i, n, 5.0, 1.7)));
+
+        let mut rng = Rng::new(seed + 3);
+        let mut plinks = vec![0.0f32; total];
+        let mut t = rng.range(0.0, 0.02);
+        while samples(t) < total {
+            let f0 = rng.range(700.0, 2600.0);
+            let len = rng.range(0.025, 0.06);
+            let blip = voice(
+                len + 0.01,
+                |s| f0 * (1.0 + 0.9 * s / len),
+                |s| strike(s, 0.0015, len * 0.35),
+            );
+            mix_into(&mut plinks, &blip, samples(t), rng.range(0.2, 1.0));
+            t += rng.range(0.008, 0.05);
+        }
+        to_rms(&mut plinks, 1.0);
+        weigh(&[(rush, 1.0), (burble, 0.35), (plinks, 0.45)])
     })
 }
 
