@@ -3,7 +3,7 @@
 //! background, so the ground reads as tinted dark rather than as a flat
 //! fill, and neighbouring zones blend softly across their boundary. Past
 //! the rural ring the colour thins into the wilderness and fades to the
-//! background at the world's edge (radius 4000), and the disc runs on far
+//! background at the world's edge (radius 6000), and the disc runs on far
 //! past the world's corners so its rim is lost in the fog, never seen
 //! against the sky.
 //!

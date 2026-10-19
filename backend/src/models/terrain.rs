@@ -572,7 +572,7 @@ impl TerrainConfig {
     /// count, and debug and release servers agree on the world (#128). The grid
     /// is coarse on purpose: a value within an ulp of a grid boundary still
     /// flips, and the odds of that grow as the grid gets finer. At 1e-3, on a
-    /// world 8000 across, they're about 1e-8 a float.
+    /// world 12000 across, they're about 1e-8 a float.
     pub fn version(&self) -> String {
         fn quantise(value: &mut serde_json::Value) {
             match value {
@@ -597,9 +597,9 @@ impl TerrainConfig {
     /// Build terrain from explicit world generation parameters
     pub fn from_params(params: &WorldGenParams) -> Self {
         let mut config = TerrainConfig {
-            world_size: 8000.0,
-            center_x: 4000.0,
-            center_y: 4000.0,
+            world_size: capitol_protocol::rules::WORLD_SIZE,
+            center_x: capitol_protocol::rules::CENTER_X,
+            center_y: capitol_protocol::rules::CENTER_Y,
             water_rings: vec![
                 // Moat: Capitol/Trade boundary
                 WaterRing {
@@ -1326,7 +1326,7 @@ mod tests {
     #[test]
     fn test_terrain_config_default() {
         let config = TerrainConfig::get_default();
-        assert_eq!(config.world_size, 8000.0);
+        assert_eq!(config.world_size, 12000.0);
         assert_eq!(config.water_rings.len(), 3);
     }
 
@@ -1360,7 +1360,14 @@ mod tests {
         // world (`c3a856792daad83d`) onto the one Linux already built: three
         // suburban roads and some park rings gained or lost a vertex near a
         // junction. No lot or node moved.
-        assert_eq!(TerrainConfig::get_default().version(), "4d3d9d112a4f30f1");
+        //
+        // W1 (#194) grew the world to 12000 and moved the centre to (6000,
+        // 6000), so every coordinate moved by +2000. The generator didn't
+        // change: against `4d3d9d112a4f30f1` moved by +2000, the lots and
+        // their ids are the same, no corner is off by more than 0.015, and 11
+        // roads gained or lost a collinear vertex without moving. The seeded
+        // nodes moved with the migration, and none needs fitting.
+        assert_eq!(TerrainConfig::get_default().version(), "b3df08b1b90c847f");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one
@@ -1501,7 +1508,7 @@ mod tests {
     fn test_movement_allowed_no_water() {
         let config = TerrainConfig::get_default();
         // Movement within Capitol (inside moat)
-        let result = config.validate_movement(4000.0, 4000.0, 4050.0, 4050.0);
+        let result = config.validate_movement(6000.0, 6000.0, 6050.0, 6050.0);
         assert!(result.allowed);
     }
 
@@ -1509,7 +1516,7 @@ mod tests {
     fn test_movement_blocked_by_moat() {
         let config = TerrainConfig::get_default();
         // Try to cross moat going East (no bridge there)
-        let result = config.validate_movement(4150.0, 4000.0, 4250.0, 4000.0);
+        let result = config.validate_movement(6150.0, 6000.0, 6250.0, 6000.0);
         assert!(!result.allowed);
         assert_eq!(result.blocked_by, Some("moat".to_string()));
     }
@@ -1518,7 +1525,7 @@ mod tests {
     fn test_movement_allowed_on_bridge() {
         let config = TerrainConfig::get_default();
         // Cross moat going South (bridge at 90° in screen coords where Y+ is south)
-        let result = config.validate_movement(4000.0, 4150.0, 4000.0, 4250.0);
+        let result = config.validate_movement(6000.0, 6150.0, 6000.0, 6250.0);
         assert!(result.allowed);
     }
 

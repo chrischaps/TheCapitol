@@ -1,7 +1,7 @@
 //! Server space <-> Flint world space (plan §4.6). Every conversion goes
 //! through here.
 //!
-//! Server space runs 0..8000 on both axes, centre (4000, 4000), y pointing
+//! Server space runs 0..12000 on both axes, centre (6000, 6000), y pointing
 //! down the screen (south), angle 0 = east and 90 = south.
 //!
 //! Flint is right-handed and Y-up: its look-at builds `right = forward × up`,
@@ -13,7 +13,7 @@
 
 use capitol_protocol::rules::{CENTER_X, CENTER_Y};
 
-/// World metres per server unit. The world is 800 m across, a player
+/// World metres per server unit. The world is 1200 m across, a player
 /// (radius 8) is about 1.6 m wide, and a 60-unit arterial is 6 m.
 pub const S: f32 = 0.1;
 
@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn centre_is_origin() {
-        assert!(close(to_world(4000.0, 4000.0), [0.0, 0.0]));
+        assert!(close(to_world(CENTER_X, CENTER_Y), [0.0, 0.0]));
     }
 
     #[test]
@@ -116,19 +116,19 @@ mod tests {
 
     #[test]
     fn a_server_step_south_or_east_is_a_world_step_along_plus_z_or_plus_x() {
-        let [x0, z0] = to_world(4000.0, 4000.0);
-        let [x1, z1] = to_world(4010.0, 4000.0); // east
-        let [x2, z2] = to_world(4000.0, 4010.0); // south (server y down)
+        let [x0, z0] = to_world(CENTER_X, CENTER_Y);
+        let [x1, z1] = to_world(CENTER_X + 10.0, CENTER_Y); // east
+        let [x2, z2] = to_world(CENTER_X, CENTER_Y + 10.0); // south (server y down)
         assert!(close([x1 - x0, z1 - z0], [10.0 * S, 0.0]));
         assert!(close([x2 - x0, z2 - z0], [0.0, 10.0 * S]));
         // And back: +X is east, -Z is north.
         let [x, y] = to_server(5.0, -5.0);
-        assert!(x > 4000.0 && y < 4000.0);
+        assert!(x > CENTER_X && y < CENTER_Y);
     }
 
     #[test]
     fn polar_round_trips_through_server_space() {
-        for (r, deg) in [(0.0, 0.0), (600.0, 45.0), (2400.0, 200.0), (3999.0, 359.0)] {
+        for (r, deg) in [(0.0, 0.0), (600.0, 45.0), (2400.0, 200.0), (5999.0, 359.0)] {
             let [wx, wz] = polar_to_world(r, deg);
             let [x, y] = to_server(wx, wz);
             let (dx, dy) = (x - CENTER_X, y - CENTER_Y);

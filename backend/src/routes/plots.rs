@@ -9,6 +9,7 @@ use tokio::sync::broadcast;
 use tower_http::compression::CompressionLayer;
 use uuid::Uuid;
 
+use capitol_protocol::rules::Zone;
 use capitol_protocol::rest::{
     ClaimPlotResponse, ClaimedPlot, ListPlotsQuery, ListPlotsResponse, PayTaxRequest, PayTaxResponse, PositionQuery,
 };
@@ -274,6 +275,14 @@ pub async fn pay_tax(
 /// plot row is locked first, so two players can't both pay for it, and the
 /// money only moves if the claim commits. Once it has, everyone is told
 /// (`plot_claimed`, B13), and the player hears their balance. Returns it.
+const NOT_CLAIMABLE: &str = "This zone does not allow plot ownership";
+
+/// Whether a plot can be owned: its zone has plots, and so does the ground it
+/// stands on. Nothing in the wilds is claimed (WD6, #194), whatever its row says.
+fn claimable(zone_id: &str, x: f64, y: f64) -> bool {
+    Zone::from_str(zone_id).is_some_and(|zone| zone.has_plots()) && Zone::from_position(x, y).has_plots()
+}
+
 async fn claim(
     db: &PgPool,
     events: &broadcast::Sender<GameEvent>,
@@ -283,8 +292,8 @@ async fn claim(
     let mut tx = db.begin().await?;
 
     // Get plot with zone info
-    let plot_row: Option<(String, Option<Uuid>, Option<i32>)> = sqlx::query_as(
-        "SELECT p.zone_id, p.owner_id, z.deed_cost
+    let plot_row: Option<(String, Option<Uuid>, Option<i32>, f32, f32)> = sqlx::query_as(
+        "SELECT p.zone_id, p.owner_id, z.deed_cost, p.world_x, p.world_y
          FROM plots p
          JOIN zones z ON p.zone_id = z.id
          WHERE p.id = $1
@@ -294,7 +303,7 @@ async fn claim(
     .fetch_optional(&mut *tx)
     .await?;
 
-    let (zone_id, owner_id, deed_cost) = plot_row
+    let (zone_id, owner_id, deed_cost, world_x, world_y) = plot_row
         .ok_or_else(|| AppError::NotFound("Plot not found".into()))?;
 
     // Verify plot is unclaimed
@@ -302,9 +311,12 @@ async fn claim(
         return Err(AppError::BadRequest("Plot is already claimed".into()));
     }
 
-    // Verify zone has plots for sale
-    let deed_cost = deed_cost
-        .ok_or_else(|| AppError::BadRequest("This zone does not allow plot ownership".into()))?;
+    // Verify zone has plots for sale: by its zone and where it stands (WD6),
+    // and by its deed
+    if !claimable(&zone_id, world_x as f64, world_y as f64) {
+        return Err(AppError::BadRequest(NOT_CLAIMABLE.into()));
+    }
+    let deed_cost = deed_cost.ok_or_else(|| AppError::BadRequest(NOT_CLAIMABLE.into()))?;
 
     // Deduct Strands
     let new_balance = subtract_strands_in(
@@ -577,6 +589,35 @@ mod tests {
             matches!(rx.try_recv(), Ok(GameEvent::CurrencyChanged { player_id, new_balance: 0 }) if player_id == ada),
             "then ada hears her balance (#148)"
         );
+    }
+
+    /// The wilds can't be owned (WD6): not a wilderness plot, not a plot whose
+    /// row says rural but stands past r3800, and not one off the world.
+    #[test]
+    fn nothing_in_the_wilds_is_claimable() {
+        use capitol_protocol::rules::{CENTER_X, CENTER_Y, RURAL_OUTER_RADIUS};
+        assert!(claimable("urban", CENTER_X + 1200.0, CENTER_Y));
+        assert!(claimable("rural", CENTER_X, CENTER_Y + RURAL_OUTER_RADIUS - 1.0));
+        assert!(!claimable("wilderness", CENTER_X, CENTER_Y + 4500.0));
+        assert!(!claimable("rural", CENTER_X, CENTER_Y + 4500.0));
+        assert!(!claimable("wilderness", CENTER_X + 1200.0, CENTER_Y));
+        assert!(!claimable("capitol", CENTER_X, CENTER_Y));
+        assert!(!claimable("atlantis", CENTER_X + 1200.0, CENTER_Y));
+    }
+
+    /// A claim on a wilderness position is refused before it charges anything
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_claim_in_the_wilds_is_refused(db: PgPool) {
+        let ada = player(&db, "ada", 1_000_000).await;
+        let lot = plot(&db, None, 0).await;
+        sqlx::query("UPDATE plots SET world_y = world_y + 4500 WHERE id = $1").bind(lot).execute(&db).await.unwrap();
+        let (tx, mut rx) = events();
+
+        assert!(matches!(claim(&db, &tx, ada, lot).await, Err(AppError::BadRequest(m)) if m == NOT_CLAIMABLE));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(owner(&db, lot).await, Some(None));
+        assert_eq!(balance(&db, ada).await, 1_000_000);
     }
 
     /// Only lots are listed: a pre-B7 plot has nothing for a client to draw on

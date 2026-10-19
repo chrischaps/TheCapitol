@@ -67,6 +67,11 @@ pub const WOODS_COVER: f64 = 0.08;
 
 /// The value-noise lattice the woods are drawn from, in units (metres).
 const WOODS_SCALE: f64 = 260.0;
+/// Where the woods' noise field has its origin, from the tower. The field is
+/// laid out round the tower, so moving the world's centre doesn't move the
+/// woods. This is the 8000 world's corner, where E2.3 planted them, so the
+/// default world's trees stayed put when it grew to 12000 (W1, #194).
+const WOODS_ORIGIN: (f64, f64) = (-4000.0, -4000.0);
 
 /// How far from its tree a node under trees lies.
 const UNDER_TREES: (f64, f64) = (12.0, 45.0);
@@ -539,6 +544,7 @@ impl Woods {
 
     /// Two octaves of smoothed value noise, in [0, 1).
     fn level(&self, (x, y): (f64, f64)) -> f64 {
+        let (x, y) = (x - CENTER_X - WOODS_ORIGIN.0, y - CENTER_Y - WOODS_ORIGIN.1);
         0.7 * self.octave(x / WOODS_SCALE, y / WOODS_SCALE, 1) + 0.3 * self.octave(x / (WOODS_SCALE / 2.5), y / (WOODS_SCALE / 2.5), 2)
     }
 

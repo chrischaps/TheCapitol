@@ -279,7 +279,7 @@ Recipe weights are defined in `recipes` table. See GDD Section 6 for details.
 Concentric zones from center outward:
 Capitol → Bailey → Trade District → Guild District → Urban → Suburban → Rural → Wilderness
 
-The Wilderness is "the wilds" (`the-capitol-wilds.md`): planned as r3800 to r6000 once the world grows to 12000 (#194), with a shared height field (`capitol_protocol::land`), rivers and lakes that block, streams you wade, wild trails, and no plots. Until W1 lands it is still the r3800 to r4000 rim.
+The Wilderness is "the wilds" (`the-capitol-wilds.md`): planned as r3800 to r6000 once the world grows to 12000 (#194), with a shared height field (`capitol_protocol::land`), rivers and lakes that block, streams you wade, wild trails, and no plots. Since W1 (#194) the world is 12000 across, centred on (6000, 6000), and the Wilderness runs r3800 to r6000, the edge of the world disc (`rules::in_world`). Until W2 and W3 land it's flat and empty.
 
 Moats and canals are water barriers. Players can only cross at bridges. Movement is blocked by water unless at a crossing point.
 

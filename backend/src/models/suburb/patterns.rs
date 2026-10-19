@@ -674,7 +674,7 @@ pub(crate) mod tests {
     #[test]
     fn every_neighbourhood_gets_rows_rails_and_its_entrances() {
         let params = parallels_world(42).suburban_params();
-        let plan = crate::models::suburb::plan(&params, (4000.0, 4000.0));
+        let plan = crate::models::suburb::plan(&params, (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y));
         assert_eq!(plan.roads.len(), plan.meta.len());
         for n in &plan.neighbourhoods {
             let mine: Vec<_> = plan.meta.iter().filter(|m| (m.sector, m.nbhd) == (n.sector, n.index)).collect();
@@ -696,7 +696,7 @@ pub(crate) mod tests {
     #[test]
     fn rails_meet_rows_on_their_vertices_and_never_line_up() {
         let params = parallels_world(7).suburban_params();
-        let plan = crate::models::suburb::plan(&params, (4000.0, 4000.0));
+        let plan = crate::models::suburb::plan(&params, (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y));
         let g = Graph::build(&plan.roads);
         for r in plan.roads.iter().filter(|r| r.id.starts_with("link_")) {
             for end in [r.points[0], *r.points.last().unwrap()] {
@@ -710,7 +710,7 @@ pub(crate) mod tests {
     #[test]
     fn a_u_turn_is_smooth_and_meets_both_rows() {
         let params = parallels_world(1234).suburban_params();
-        let mut ns = crate::models::suburb::neighbourhood::neighbourhoods(&params, (4000.0, 4000.0));
+        let mut ns = crate::models::suburb::neighbourhood::neighbourhoods(&params, (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y));
         let n = &mut ns[0];
         let f = n.frame.clone();
         let p = &params.neighbourhood;

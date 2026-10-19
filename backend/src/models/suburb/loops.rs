@@ -475,7 +475,7 @@ pub(crate) mod tests {
     fn whole_sectors_fit_and_a_shallow_frame_does_not() {
         let params = loops_world(42).suburban_params();
         let p = &params.neighbourhood;
-        let all = crate::models::suburb::neighbourhood::neighbourhoods(&params, (4000.0, 4000.0));
+        let all = crate::models::suburb::neighbourhood::neighbourhoods(&params, (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y));
         for n in all.iter().filter(|n| n.index == 0 && all.iter().filter(|m| m.sector == n.sector).count() == 1) {
             assert!(fits(&n.frame, p), "whole sector {} doesn't fit (b)", n.sector);
         }
@@ -528,7 +528,7 @@ pub(crate) mod tests {
     fn every_entrance_is_reached_and_no_track_ends_on_itself() {
         for seed in 0..30 {
             let params = loops_world(seed).suburban_params();
-            let plan = crate::models::suburb::plan(&params, (4000.0, 4000.0));
+            let plan = crate::models::suburb::plan(&params, (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y));
             assert_eq!(plan.roads.len(), plan.meta.len());
             for n in &plan.neighbourhoods {
                 for e in &n.entrances {

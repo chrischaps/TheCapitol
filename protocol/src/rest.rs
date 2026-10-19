@@ -301,9 +301,9 @@ pub struct HealthResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct MoveRequest {
-    /// Destination X coordinate (0-8000)
+    /// Destination X coordinate (0-12000, on the world disc)
     pub x: f64,
-    /// Destination Y coordinate (0-8000)
+    /// Destination Y coordinate (0-12000, on the world disc)
     pub y: f64,
 }
 
@@ -325,9 +325,9 @@ pub struct Destination {
 pub struct PlayerMeResponse {
     pub player_id: Uuid,
     pub name: String,
-    /// Live X while `online`, otherwise the last saved one (0-8000)
+    /// Live X while `online`, otherwise the last saved one (0-12000)
     pub x: f64,
-    /// Live Y while `online`, otherwise the last saved one (0-8000)
+    /// Live Y while `online`, otherwise the last saved one (0-12000)
     pub y: f64,
     /// Zone ID at that position, as in `zone_changed` (e.g. "rural")
     pub zone: String,

@@ -1055,7 +1055,7 @@ fn a_read_key_watches_cant_move_and_revoking_it_drops_its_socket() {
         rest(&watcher, RestRequest::PlayerMe, 3),
         Ok(RestResponse::Me(_))
     ));
-    watcher.ws(ClientMessage::Move { x: 4000.0, y: 4000.0 });
+    watcher.ws(ClientMessage::Move { x: rules::CENTER_X, y: rules::CENTER_Y });
     let NetEvent::Ws(ServerMessage::Error { message, command }) =
         wait_for(&watcher, "the move refused", |e| {
             matches!(e, NetEvent::Ws(ServerMessage::Error { .. }))

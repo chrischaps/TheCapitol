@@ -9,7 +9,7 @@ use capitol_protocol::rest::{
     CurrencyResponse, Destination, InventoryResponse, MoveRequest, MoveResponse,
     PlayerMeResponse, SubscribeRequest, Subscription,
 };
-use capitol_protocol::rules::{Zone, WORLD_SIZE};
+use capitol_protocol::rules::{in_world, Zone};
 
 use crate::engine::Command;
 use crate::error::AppError;
@@ -129,8 +129,8 @@ pub async fn move_player(
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<MoveRequest>,
 ) -> Result<Json<MoveResponse>, AppError> {
-    // Validate coordinates
-    if !(0.0..=WORLD_SIZE).contains(&req.x) || !(0.0..=WORLD_SIZE).contains(&req.y) {
+    // Only a destination on the world disc: the square's corners are off it (W1, #194)
+    if !in_world(req.x, req.y) {
         return Err(AppError::BadRequest("Coordinates out of bounds".into()));
     }
 

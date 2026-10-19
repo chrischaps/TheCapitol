@@ -373,11 +373,11 @@ H1–H5 are needed for the vertical slice. H6 belongs to P8, as do H21, H22, H23
 
 ### 4.6 Coordinates and scale
 
-Server space runs 0–8000 on both axes with the centre at (4000, 4000), y pointing down, and angle 0 = East, 90 = South (`models/terrain.rs:3165`). Flint is Y-up. All conversion goes through one module, `coords.rs`:
+Server space runs 0–12000 on both axes with the centre at (6000, 6000) (0–8000 round (4000, 4000) until W1, #194), y pointing down, and angle 0 = East, 90 = South (`models/terrain.rs:3165`). Flint is Y-up. All conversion goes through one module, `coords.rs`:
 
 ```
-world.x =  (x - 4000) * S
-world.z =  (y - 4000) * S        // server "down" = +Z = south; north is -Z
+world.x =  (x - CENTER_X) * S
+world.z =  (y - CENTER_Y) * S        // server "down" = +Z = south; north is -Z
 world.y =  height layer
 ```
 
@@ -648,7 +648,7 @@ Sizes: **S** is about 1 focused session, **M** 2–3, **L** 4 or more. Each phas
 
 **How P4.3 built it:**
 - **Clicks are `scripts/input.rhai`.** A left click is picked off the ground with `screen_to_ground` and offered to each intent in React's order: place a station (P6.2), shift-click a player (P7.3), a station (P6.3), alt-click a plot (P6.4), a node (P4.4), then walk. Each issue filled its own (P6.2 filled 1, P7.3 2, P6.3 3, P6.4 4). A shift-click on no one falls through, as React's does. Shift and Alt are the actions `with_shift` and `with_alt` (`config/input.toml`), because scripts can only read keys through actions. The right button stays the camera's. The spike's click ripple and cursor reticle moved here from `spike.rhai`.
-- **`cap_move(x, z)`** takes world metres, converts them with `coords::to_server` and clamps to 0–8000. The extension sends it next frame through `Session::move_to`, which starts the prediction (`Motion::move_to`) and sends `ClientMessage::Move`. Offline, and outside the world, it does nothing. **`cap_destination()`** is `Motion::destination()` in world metres.
+- **`cap_move(x, z)`** takes world metres, converts them with `coords::to_server` and clamps to the world disc, r6000 (0–8000 on both axes before W1, #194). The extension sends it next frame through `Session::move_to`, which starts the prediction (`Motion::move_to`) and sends `ClientMessage::Move`. Offline, and outside the world, it does nothing. **`cap_destination()`** is `Motion::destination()` in world metres.
 - **The marks.** The click drops the spike's two gold ripples. The destination is a gold ring with a halo, settling in from wide, and a faint dashed line marches to it from your feet, its dashes longer on long walks. On arrival the ring closes to a point.
 - **`movement_blocked`.** The session pairs each block with the last click, and the extension fires `movement_blocked` at the scripts with `x`, `z` (where you stand), `dir_x`, `dir_z` (which way you were going) and `water` ("the outer canal"). `input.rhai` throws a splash 1.1 m on toward the water: three quick rings and fourteen drops. A toast on the panels' glass says "Find a bridge / The outer canal has no crossing here". `camera.rhai` nudges the view along the walk, a damped swing sized to the camera's distance, so it reads the same at every zoom. The message carries the ring's id as `water_id` ([#74](https://github.com/chrischaps/TheCapitol/issues/74)), and `capitol_protocol::rules::water_name` names it. The server's `reason` uses the same name ("Cannot cross the outer canal without a bridge").
 - **Checked live** in the real client against the local server. The clicks were posted to its window, since input scripts can't click ([#73](https://github.com/chrischaps/TheCapitol/issues/73)): a walk with its marker and path, and two walks into the outer canal that came back blocked with the splash and toast.

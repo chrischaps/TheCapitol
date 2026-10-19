@@ -436,7 +436,7 @@ pub(crate) mod tests {
     fn split_halves_fit_and_whole_sectors_do_not() {
         let params = central_world(42).suburban_params();
         let p = &params.neighbourhood;
-        let all = crate::models::suburb::neighbourhood::neighbourhoods(&params, (4000.0, 4000.0));
+        let all = crate::models::suburb::neighbourhood::neighbourhoods(&params, (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y));
         let whole = |n: &Neighbourhood| all.iter().filter(|m| m.sector == n.sector).count() == 1;
         assert!(all.iter().any(|n| !whole(n)), "seed 42 splits a sector");
         for n in &all {
@@ -447,7 +447,7 @@ pub(crate) mod tests {
     #[test]
     fn the_ring_is_closed_anticlockwise_and_keeps_its_band() {
         let params = central_world(42).suburban_params();
-        let all = crate::models::suburb::neighbourhood::neighbourhoods(&params, (4000.0, 4000.0));
+        let all = crate::models::suburb::neighbourhood::neighbourhoods(&params, (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y));
         for n in all.iter().filter(|n| fits(&n.frame, &params.neighbourhood)) {
             let f = &n.frame;
             let track = Racetrack::of(f, &params.neighbourhood).unwrap();
@@ -510,7 +510,7 @@ pub(crate) mod tests {
     fn every_entrance_is_reached() {
         for seed in 0..30 {
             let params = central_world(seed).suburban_params();
-            let plan = crate::models::suburb::plan(&params, (4000.0, 4000.0));
+            let plan = crate::models::suburb::plan(&params, (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y));
             assert_eq!(plan.roads.len(), plan.meta.len());
             for n in &plan.neighbourhoods {
                 for e in &n.entrances {

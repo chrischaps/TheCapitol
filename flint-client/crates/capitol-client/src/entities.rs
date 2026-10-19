@@ -507,7 +507,7 @@ mod tests {
             (-std::f64::consts::FRAC_PI_2, [0.0, -1.0]),
         ] {
             let got = front(yaw_of(facing));
-            let [wx, wz] = to_world(4000.0 + step[0] * 10.0, 4000.0 + step[1] * 10.0);
+            let [wx, wz] = to_world(capitol_core::protocol::rules::CENTER_X + step[0] * 10.0, capitol_core::protocol::rules::CENTER_Y + step[1] * 10.0);
             let want = [wx, wz].map(|v| v / 1.0f32.max((wx * wx + wz * wz).sqrt()));
             assert!(
                 (got[0] - want[0]).abs() < 1e-4 && (got[1] - want[1]).abs() < 1e-4,

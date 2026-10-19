@@ -236,8 +236,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     }
                                 }
                                 ClientMessage::Move { x, y } => {
-                                    // M7: World expanded to 8000x8000
-                                    if (0.0..=8000.0).contains(&x) && (0.0..=8000.0).contains(&y) {
+                                    // Only a destination on the world disc (W1, #194)
+                                    if capitol_protocol::rules::in_world(x, y) {
                                         let mut game = state.game.write().await;
                                         game.queue_command(crate::engine::Command::Move {
                                             player_id,

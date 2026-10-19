@@ -7,9 +7,9 @@ import { plotContains } from '../api/plots'
 import { getZones } from '../api/bureaucracy'
 import './GameCanvas.css'
 
-// M7: World expanded to 8000x8000, centered at (4000, 4000)
-const WORLD_SIZE = 8000
-const WORLD_CENTER = 4000
+// The world is 12000 across, centred at (6000, 6000), since W1 (#194)
+const WORLD_SIZE = 12000
+const WORLD_CENTER = 6000
 const PLAYER_RADIUS = 8
 const NODE_RADIUS = 12
 const EXTRACTION_RANGE = 50

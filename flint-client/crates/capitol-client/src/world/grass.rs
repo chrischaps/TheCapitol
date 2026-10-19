@@ -7,8 +7,8 @@
 //! The mask is painted here, on the CPU, from the terrain:
 //!
 //! - **the rings**: none inside the suburb, easing in across its outer edge,
-//!   full through the rural ring and the wilderness, then thinning out
-//!   just past the world's edge, where the ground fades to the background;
+//!   full through the rural ring, then thinning out round r4000, the
+//!   world's edge before it grew ([`GRASS_EDGE`]);
 //! - **parks** (#129): the suburb's parks are mown lawns, shorter and more
 //!   even than the meadows, easing in from their edges where the lots and
 //!   the streets stand;
@@ -44,9 +44,15 @@ use flint_ecs::FlintWorld;
 use flint_player::{ExtensionGpu, GrassConfig, GrassGround, GrassHeight};
 use std::time::Instant;
 
-/// Texels along each side of the mask. Over the 800 m world that's about
+/// Texels along each side of the mask. Over its 800 m that's about
 /// 0.39 m a texel: finer than the narrowest trail (0.6 m) and its verge.
 pub const MASK_SIZE: usize = 2048;
+
+/// How far the grass reaches from the centre, in server units: r4000, where
+/// the world's edge was before it grew to 12000 (W1, #194). The mask is the
+/// square round that circle, so the grass is what it was. The wilds get their
+/// own ground in W9 (#202).
+const GRASS_EDGE: f64 = 4000.0;
 
 /// Where the grass starts easing in, and where it's full, in server units
 /// from the centre: across the suburb's outer edge (3000).
@@ -360,8 +366,8 @@ fn field(p: P, edge: f64) -> f32 {
 /// Paints the terrain's part of the mask, `size` texels a side: the rings
 /// and meadows, cleared of the canals, the roads and the lots.
 pub fn paint(terrain: &TerrainResponse, size: usize) -> Mask {
-    let side = terrain.world_size;
-    let edge = side * 0.5;
+    let edge = GRASS_EDGE.min(terrain.world_size * 0.5);
+    let side = edge * 2.0;
     let mut mask = Mask {
         texels: vec![0; size * size],
         size,
@@ -691,13 +697,13 @@ mod tests {
     }
 
     #[test]
-    fn the_rural_ring_and_the_wilderness_are_mostly_grass() {
+    fn the_rural_ring_and_the_wilds_edge_are_mostly_grass() {
         // Sample both rings on a fine polar grid: most of the open ground
         // has grass, and some of it is full.
         let m = mask();
         for (lo, hi) in [
             (Zone::Rural.radii().0 + 200.0, Zone::Rural.radii().1),
-            (Zone::Rural.radii().1, Zone::Wilderness.radii().1 - EDGE_IN),
+            (Zone::Rural.radii().1, GRASS_EDGE - EDGE_IN),
         ] {
             let (mut any, mut full, mut n) = (0, 0, 0);
             for k in 0..720 {
@@ -809,8 +815,8 @@ mod tests {
         // Overlapping clearings, one on the mask's corner (its window
         // clipped) and one off the mask altogether.
         let corner = [
-            (CENTER_X - 4000.0) as i64 + 5,
-            (CENTER_Y - 4000.0) as i64 + 5,
+            (CENTER_X - GRASS_EDGE) as i64 + 5,
+            (CENTER_Y - GRASS_EDGE) as i64 + 5,
             tuft[0],
             tuft[1],
         ];
@@ -843,10 +849,10 @@ mod tests {
     }
 
     #[test]
-    fn the_mask_covers_the_world_square() {
+    fn the_mask_covers_the_grass_square() {
         let m = mask();
         let (origin, size) = m.world_rect();
-        let half = (fixture().world_size * 0.5) as f32 * S;
+        let half = GRASS_EDGE as f32 * S;
         assert_eq!(origin, [-half, -half]);
         assert_eq!(size, [half * 2.0, half * 2.0]);
     }

@@ -190,7 +190,7 @@ async fn terrain(headers: HeaderMap) -> Response {
         return StatusCode::NOT_MODIFIED.into_response();
     }
     Json(serde_json::json!({
-        "world_size": 8000.0, "center_x": 4000.0, "center_y": 4000.0,
+        "world_size": 12000.0, "center_x": 6000.0, "center_y": 6000.0,
         "water_rings": [], "roads": [], "terrain_plots": [], "version": "v1"
     }))
     .into_response()

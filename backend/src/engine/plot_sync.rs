@@ -388,7 +388,7 @@ pub(crate) mod tests {
             "INSERT INTO plots (id, terrain_id, zone_id, grid_x, grid_y, world_x, world_y,
                                 bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y,
                                 size_category, owner_id, assessed_value)
-             VALUES ($1, $2, 'urban', 0, 0, 1200, 0, 1190, -10, 1210, 10, 'medium', $3, $4)",
+             VALUES ($1, $2, 'urban', 0, 0, 7200, 6000, 7190, 5990, 7210, 6010, 'medium', $3, $4)",
         )
         .bind(id)
         .bind(format!("test-{id}"))

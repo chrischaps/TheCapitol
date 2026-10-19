@@ -208,7 +208,7 @@ mod tests {
 
     use super::*;
 
-    const C: P = (4000.0, 4000.0);
+    const C: P = (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y);
 
     fn frame(sector: f64, phase_seed: u64) -> Frame {
         let lo = Side { angle: sector * FRAC_PI_4, inset: 50.0 };

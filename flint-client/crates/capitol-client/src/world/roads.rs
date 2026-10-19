@@ -398,15 +398,15 @@ mod tests {
 
     #[test]
     fn a_straight_road_is_one_quad_and_two_round_caps() {
-        let m = draw(&[(4300.0, 4000.0), (4500.0, 4000.0)], 10.0);
+        let m = draw(&[(6300.0, 6000.0), (6500.0, 6000.0)], 10.0);
         // A quad, then two half-circle fans, each a centre and a rim.
         assert_eq!(m.vertices.len(), 4 + 2 * (1 + CAP_SEGMENTS + 1));
         assert_eq!(m.indices.len() / 3, 2 + 2 * CAP_SEGMENTS);
         assert_faces_up(&m);
         // The caps reach a half-width past each end.
-        assert!(covered(&m, to_world(4291.0, 4000.0)));
-        assert!(!covered(&m, to_world(4289.0, 4000.0)));
-        assert!(covered(&m, to_world(4509.0, 4000.0)));
+        assert!(covered(&m, to_world(6291.0, 6000.0)));
+        assert!(!covered(&m, to_world(6289.0, 6000.0)));
+        assert!(covered(&m, to_world(6509.0, 6000.0)));
     }
 
     #[test]
@@ -414,7 +414,7 @@ mod tests {
         let arc: Vec<(f64, f64)> = (0..=16)
             .map(|k| {
                 let a = (k as f64 * 4.0).to_radians();
-                (4000.0 + 500.0 * a.cos(), 4000.0 + 500.0 * a.sin())
+                (6000.0 + 500.0 * a.cos(), 6000.0 + 500.0 * a.sin())
             })
             .collect();
         let s = stretches(&arc, &[], [End::Round; 2]);
@@ -430,34 +430,34 @@ mod tests {
         let half = 12.0;
         let shapes: [&[(f64, f64)]; 6] = [
             // A right angle (mitred), crossing a sector edge.
-            &[(4500.0, 4000.0), (4600.0, 4000.0), (4600.0, 4150.0)],
+            &[(6500.0, 6000.0), (6600.0, 6000.0), (6600.0, 6150.0)],
             // A hairpin (rounded).
-            &[(4500.0, 4050.0), (4650.0, 4080.0), (4510.0, 4110.0)],
+            &[(6500.0, 6050.0), (6650.0, 6080.0), (6510.0, 6110.0)],
             // A dead reversal.
-            &[(4500.0, 4050.0), (4620.0, 4050.0), (4540.0, 4050.0)],
+            &[(6500.0, 6050.0), (6620.0, 6050.0), (6540.0, 6050.0)],
             // A zigzag of short steps, each too short to mitre.
             &[
-                (4500.0, 4000.0),
-                (4506.0, 4012.0),
-                (4512.0, 4000.0),
-                (4518.0, 4012.0),
-                (4524.0, 4000.0),
+                (6500.0, 6000.0),
+                (6506.0, 6012.0),
+                (6512.0, 6000.0),
+                (6518.0, 6012.0),
+                (6524.0, 6000.0),
             ],
             // A curve that runs across a ring edge and two wedges.
             &[
-                (4950.0, 4100.0),
-                (4990.0, 4180.0),
-                (5020.0, 4260.0),
-                (5030.0, 4360.0),
-                (5000.0, 4460.0),
+                (6950.0, 6100.0),
+                (6990.0, 6180.0),
+                (7020.0, 6260.0),
+                (7030.0, 6360.0),
+                (7000.0, 6460.0),
             ],
             // Repeated points and a near repeat.
             &[
-                (4500.0, 4000.0),
-                (4500.0, 4000.0),
-                (4560.0, 4030.0),
-                (4560.1, 4030.0),
-                (4600.0, 4100.0),
+                (6500.0, 6000.0),
+                (6500.0, 6000.0),
+                (6560.0, 6030.0),
+                (6560.1, 6030.0),
+                (6600.0, 6100.0),
             ],
         ];
         for shape in shapes {
@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(m.vertices.len(), 4 * s[0].points.len());
         for k in 0..360 {
             let a = (k as f64 + 0.5).to_radians();
-            let p = to_world(4000.0 + 400.0 * a.cos(), 4000.0 + 400.0 * a.sin());
+            let p = to_world(6000.0 + 400.0 * a.cos(), 6000.0 + 400.0 * a.sin());
             assert!(covered(&m, p), "{k}°");
         }
     }
@@ -530,11 +530,11 @@ mod tests {
         let ring_inside = 400.0 - 15.0;
         assert!(covered(
             &arterials,
-            to_world(4000.0 + ring_inside + 2.0, 4000.0)
+            to_world(6000.0 + ring_inside + 2.0, 6000.0)
         ));
         assert!(!covered(
             &arterials,
-            to_world(4000.0 + ring_inside - 2.0, 4000.0)
+            to_world(6000.0 + ring_inside - 2.0, 6000.0)
         ));
         // A road that stops on its own still gets a round end: the
         // arterials' far ends in the wilderness.
@@ -606,7 +606,7 @@ mod tests {
         for ring in &terrain.water_rings {
             for bridge in &ring.bridges {
                 let a = bridge.angle_degrees.to_radians();
-                let at = |r: f64| to_world(4000.0 + r * a.cos(), 4000.0 + r * a.sin());
+                let at = |r: f64| to_world(6000.0 + r * a.cos(), 6000.0 + r * a.sin());
                 let outside = ring.outer_radius() + kerb + 2.0;
                 assert!(
                     covered(&all, at(outside)),
@@ -652,9 +652,9 @@ mod tests {
     fn degenerate_roads_draw_nothing_or_something_finite() {
         for points in [
             vec![],
-            vec![(4500.0, 4000.0)],
-            vec![(4500.0, 4000.0), (4500.0, 4000.0)],
-            vec![(4500.0, 4000.0), (4500.2, 4000.1)],
+            vec![(6500.0, 6000.0)],
+            vec![(6500.0, 6000.0), (6500.0, 6000.0)],
+            vec![(6500.0, 6000.0), (6500.2, 6000.1)],
         ] {
             assert!(draw(&points, 5.0).indices.is_empty(), "{points:?}");
         }

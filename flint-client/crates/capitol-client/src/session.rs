@@ -2015,7 +2015,7 @@ mod tests {
         );
 
         // The moat, at the centre: no plot there closes the panel.
-        session.pick_plot(4000.0, 4000.0);
+        session.pick_plot(capitol_core::protocol::rules::CENTER_X, capitol_core::protocol::rules::CENTER_Y);
         wait(&mut session, "nothing there", &|s| {
             s.state().picked_plot().is_none()
         });

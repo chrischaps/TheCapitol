@@ -554,7 +554,7 @@ mod tests {
     }
 
     fn ears_at(r: f32) -> Ears {
-        let [x, z] = crate::coords::to_world(4000.0 + r as f64, 4000.0);
+        let [x, z] = crate::coords::to_world(capitol_core::protocol::rules::CENTER_X + r as f64, capitol_core::protocol::rules::CENTER_Y);
         Ears {
             focus: [x, z],
             camera: [x, 25.0, z + 20.0],

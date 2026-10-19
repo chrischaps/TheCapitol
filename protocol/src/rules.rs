@@ -14,12 +14,23 @@ use crate::terrain::WaterRing;
 // World and timing
 // ---------------------------------------------------------------------------
 
-/// The world is a square, 0..WORLD_SIZE on both axes. y points down (south).
-pub const WORLD_SIZE: f64 = 8000.0;
+/// Coordinates run 0..WORLD_SIZE on both axes, and y points down (south). The
+/// world itself is the disc of radius `WILDERNESS_OUTER_RADIUS` inside that
+/// square ([`in_world`]); the corners are out of it. It grew from 8000 to
+/// 12000 for the wilds (W1, #194), and every stored position moved by +2000.
+pub const WORLD_SIZE: f64 = 12000.0;
 /// World centre X; the Capitol tower stands here.
-pub const CENTER_X: f64 = 4000.0;
+pub const CENTER_X: f64 = WORLD_SIZE / 2.0;
 /// World centre Y.
-pub const CENTER_Y: f64 = 4000.0;
+pub const CENTER_Y: f64 = WORLD_SIZE / 2.0;
+
+/// Whether a position is in the world: on the disc of radius
+/// `WILDERNESS_OUTER_RADIUS` round the centre, edge included. A move to a
+/// destination off it is refused.
+pub fn in_world(x: f64, y: f64) -> bool {
+    let (dx, dy) = (x - CENTER_X, y - CENTER_Y);
+    dx * dx + dy * dy <= WILDERNESS_OUTER_RADIUS * WILDERNESS_OUTER_RADIUS
+}
 
 /// Where new players arrive: on the south arterial, out in the rural zone. The
 /// road runs straight north to the moat's one bridge, so the first thing a
@@ -153,7 +164,8 @@ pub const URBAN_OUTER_RADIUS: f64 = 1800.0;
 pub const SUBURBAN_OUTER_RADIUS: f64 = 3000.0;
 /// Outer radius of the Rural zone.
 pub const RURAL_OUTER_RADIUS: f64 = 3800.0;
-/// Outer radius of the Wilderness: the edge of the world disc.
+/// Outer radius of the Wilderness, "the wilds": the edge of the world disc,
+/// 2200 past the rural edge (W1, #194).
 pub const WILDERNESS_OUTER_RADIUS: f64 = WORLD_SIZE / 2.0;
 
 /// Each zone's outer radius, in `Zone::ALL` order.
@@ -521,6 +533,21 @@ mod tests {
         assert_eq!(Zone::from_position(SPAWN_X, SPAWN_Y), Zone::Rural);
     }
 
+    /// The world is the r6000 disc: the wilds run 2200 past the rural edge,
+    /// and the square's corners are out of it.
+    #[test]
+    fn the_world_is_the_disc() {
+        assert_eq!((WORLD_SIZE, CENTER_X, CENTER_Y), (12000.0, 6000.0, 6000.0));
+        assert_eq!(Zone::Wilderness.radii(), (3800.0, 6000.0));
+        assert!(!Zone::Wilderness.has_plots());
+        assert!(in_world(CENTER_X, CENTER_Y));
+        assert!(in_world(CENTER_X, CENTER_Y + WILDERNESS_OUTER_RADIUS));
+        assert!(in_world(SPAWN_X, SPAWN_Y));
+        assert!(!in_world(CENTER_X + 4300.0, CENTER_Y + 4300.0), "a corner");
+        assert!(!in_world(0.0, 0.0));
+        assert!(!in_world(CENTER_X - WILDERNESS_OUTER_RADIUS - 0.01, CENTER_Y));
+    }
+
     #[test]
     fn zone_ids_round_trip() {
         for zone in Zone::ALL {
@@ -549,8 +576,8 @@ mod tests {
         let block = check_water_crossing(
             (CENTER_X, CENTER_Y),
             &rings,
-            (4150.0, 4000.0),
-            (4250.0, 4000.0),
+            (6150.0, 6000.0),
+            (6250.0, 6000.0),
         );
         assert_eq!(block, None);
     }
@@ -562,14 +589,14 @@ mod tests {
         let block = check_water_crossing(
             (CENTER_X, CENTER_Y),
             &rings,
-            (4000.0, 4150.0),
-            (4000.0, 4250.0),
+            (6000.0, 6150.0),
+            (6000.0, 6250.0),
         )
         .expect("blocked");
         assert_eq!(block.ring_id, "moat");
-        assert!((block.x - 4000.0).abs() < 1e-9);
+        assert!((block.x - 6000.0).abs() < 1e-9);
         // Inner edge is at radius 190; the mover stops 2 units short.
-        assert!((block.y - 4188.0).abs() < 1e-9);
+        assert!((block.y - 6188.0).abs() < 1e-9);
     }
 
     #[test]
@@ -589,8 +616,8 @@ mod tests {
         let block = check_water_crossing(
             (CENTER_X, CENTER_Y),
             &rings,
-            (4000.0, 4000.0),
-            (4050.0, 4050.0),
+            (6000.0, 6000.0),
+            (6050.0, 6050.0),
         );
         assert_eq!(block, None);
     }

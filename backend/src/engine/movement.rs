@@ -129,22 +129,22 @@ mod tests {
     fn test_movement_toward_destination() {
         let terrain = get_terrain();
         // Start inside Capitol, move within Capitol
-        let mut player = make_player(4000.0, 4000.0, Some(4050.0), Some(4000.0));
+        let mut player = make_player(6000.0, 6000.0, Some(6050.0), Some(6000.0));
         let result = process_movement(&mut player, &terrain);
 
         assert!(result.moved);
-        assert!(player.x > 4000.0);
-        assert_eq!(player.y, 4000.0);
+        assert!(player.x > 6000.0);
+        assert_eq!(player.y, 6000.0);
     }
 
     #[test]
     fn test_arrival_at_destination() {
         let terrain = get_terrain();
-        let mut player = make_player(4049.9, 4000.0, Some(4050.0), Some(4000.0));
+        let mut player = make_player(6049.9, 6000.0, Some(6050.0), Some(6000.0));
         let result = process_movement(&mut player, &terrain);
 
         assert!(result.moved);
-        assert!((player.x - 4050.0).abs() < 1.0);
+        assert!((player.x - 6050.0).abs() < 1.0);
         assert!(player.dest_x.is_none());
     }
 
@@ -152,7 +152,7 @@ mod tests {
     fn test_zone_transition() {
         let terrain = get_terrain();
         // Start at center (Capitol)
-        let mut player = make_player(4000.0, 4000.0, Some(4000.0), Some(4150.0));
+        let mut player = make_player(6000.0, 6000.0, Some(6000.0), Some(6150.0));
         player.current_zone = Some("capitol".to_string());
 
         // Move south toward the moat bridge at 270° (south)
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn test_no_movement_without_destination() {
         let terrain = get_terrain();
-        let mut player = make_player(4000.0, 4000.0, None, None);
+        let mut player = make_player(6000.0, 6000.0, None, None);
         let result = process_movement(&mut player, &terrain);
 
         assert!(!result.moved);
@@ -186,7 +186,7 @@ mod tests {
     fn test_movement_blocked_by_water() {
         let terrain = get_terrain();
         // Try to cross moat going east (no bridge at 0° for moat)
-        let mut player = make_player(4180.0, 4000.0, Some(4250.0), Some(4000.0));
+        let mut player = make_player(6180.0, 6000.0, Some(6250.0), Some(6000.0));
 
         // Move until blocked
         for _ in 0..50 {

@@ -148,7 +148,7 @@ mod tests {
             assert_eq!(ring(edge - 1.0), i as u8, "inside {edge}");
             assert_eq!(ring(edge + 1.0), i as u8 + 1, "outside {edge}");
         }
-        assert_eq!([ring(0.0), ring(3999.0)], [0, RINGS - 1]);
+        assert_eq!([ring(0.0), ring(5999.0)], [0, RINGS - 1]);
     }
 
     #[test]

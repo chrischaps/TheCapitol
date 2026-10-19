@@ -355,7 +355,7 @@ mod tests {
     use super::*;
     use crate::models::terrain::WorldGenParams;
 
-    const C: P = (4000.0, 4000.0);
+    const C: P = (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y);
 
     fn params(seed: u64) -> SuburbanGenParams {
         WorldGenParams { seed, ..Default::default() }.suburban_params()

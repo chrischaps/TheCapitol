@@ -505,9 +505,9 @@ mod db_tests {
     fn game_with_a_lot() -> (RwLock<GameState>, Uuid, Uuid) {
         use crate::models::{NodeState, ResourceNodeState, TerrainConfig, TerrainPlot, WorldGenParams};
         let terrain = TerrainConfig {
-            world_size: 8000.0,
-            center_x: 4000.0,
-            center_y: 4000.0,
+            world_size: capitol_protocol::rules::WORLD_SIZE,
+            center_x: capitol_protocol::rules::CENTER_X,
+            center_y: capitol_protocol::rules::CENTER_Y,
             water_rings: Vec::new(),
             roads: Vec::new(),
             terrain_plots: vec![TerrainPlot {

@@ -2,8 +2,8 @@
 local config = {}
 
 -- World dimensions
-config.WORLD_SIZE = 8000
-config.WORLD_CENTER = 4000
+config.WORLD_SIZE = 12000  -- W1 (#194): the world grew for the wilds
+config.WORLD_CENTER = 6000
 config.GRID_SIZE = 100
 
 -- Entity sizes

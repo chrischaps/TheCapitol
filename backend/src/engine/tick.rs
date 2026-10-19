@@ -930,6 +930,7 @@ mod tests {
     use super::*;
     use super::super::extraction::EXTRACTION_RANGE;
     use crate::models::{ActionState, NodeState};
+    use capitol_protocol::rules::{CENTER_X, CENTER_Y};
 
     fn player(name: &str, x: f64, y: f64) -> PlayerState {
         PlayerState {
@@ -959,8 +960,8 @@ mod tests {
     /// A game with two players `gap` units apart, and a receiver subscribed after they joined
     fn two_players(gap: f64) -> (GameState, Uuid, Uuid, broadcast::Receiver<GameEvent>) {
         let mut game = game();
-        let a = player("Ada", 4000.0, 4000.0);
-        let b = player("Bram", 4000.0 + gap, 4000.0);
+        let a = player("Ada", CENTER_X, CENTER_Y);
+        let b = player("Bram", CENTER_X + gap, CENTER_Y);
         let (a_id, b_id) = (a.id, b.id);
         game.add_player(a);
         game.add_player(b);
@@ -1023,7 +1024,7 @@ mod tests {
     #[test]
     fn initiate_while_the_target_is_trading_tells_the_asker() {
         let (mut game, a, b, mut rx) = two_players(10.0);
-        let c = player("Cato", 4010.0, 4010.0);
+        let c = player("Cato", CENTER_X + 10.0, CENTER_Y + 10.0);
         let c_id = c.id;
         game.add_player(c);
         game.trade_manager.request_trade(b, c_id).unwrap();
@@ -1037,7 +1038,7 @@ mod tests {
     #[test]
     fn initiate_while_already_trading_tells_the_asker() {
         let (mut game, a, b, mut rx) = two_players(10.0);
-        let c = player("Cato", 4010.0, 4010.0);
+        let c = player("Cato", CENTER_X + 10.0, CENTER_Y + 10.0);
         let c_id = c.id;
         game.add_player(c);
         game.trade_manager.request_trade(a, c_id).unwrap();
@@ -1134,7 +1135,7 @@ mod tests {
     #[test]
     fn a_stale_connection_ending_leaves_the_newer_ones_player() {
         let mut game = game();
-        let ada = player("Ada", 4000.0, 4000.0);
+        let ada = player("Ada", CENTER_X, CENTER_Y);
         let id = ada.id;
         let (conn_a, mut superseded_a) = game.connect_player(ada.clone());
         let (conn_b, mut superseded_b) = game.connect_player(ada);
@@ -1172,7 +1173,7 @@ mod tests {
     #[test]
     fn an_ended_session_closes_the_connection_and_its_disconnect_removes_the_player() {
         let mut game = game();
-        let ada = player("Ada", 4000.0, 4000.0);
+        let ada = player("Ada", CENTER_X, CENTER_Y);
         let id = ada.id;
         assert!(!game.end_session(id), "no connection to tell");
         let (conn, mut ended) = game.connect_player(ada);
@@ -1213,7 +1214,7 @@ mod tests {
     #[test]
     fn trading_a_replaced_request_tells_its_asker() {
         let (mut game, a, b, mut rx) = two_players(10.0);
-        let c = player("Cato", 4010.0, 4010.0);
+        let c = player("Cato", CENTER_X + 10.0, CENTER_Y + 10.0);
         let c_id = c.id;
         game.add_player(c);
         game.queue_command(Command::InitiateTrade { player_id: b, target_player_id: a });
@@ -1331,7 +1332,7 @@ mod tests {
         reasons.pop().unwrap()
     }
 
-    const AT: (f64, f64) = (4000.0, 4000.0);
+    const AT: (f64, f64) = (CENTER_X, CENTER_Y);
 
     #[test]
     fn extract_an_unknown_node_tells_the_player() {
@@ -1601,7 +1602,7 @@ mod tests {
         let mut game = game();
         let recipe = rope_recipe();
         game.recipes.insert(recipe.id.clone(), recipe.clone());
-        let ada = player("Ada", 4000.0, 4000.0);
+        let ada = player("Ada", CENTER_X, CENTER_Y);
         let a = ada.id;
         game.add_player(ada);
         let mut rx = game.subscribe();

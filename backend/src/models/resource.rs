@@ -141,7 +141,7 @@ mod tests {
     use capitol_protocol::fmath::StableMath;
     use capitol_protocol::rules::{
         check_water_crossing, Zone, CENTER_X, CENTER_Y, NEARBY_NODE_RANGE, SPAWN_SCATTER,
-        SPAWN_X, SPAWN_Y,
+        SPAWN_X, SPAWN_Y, WORLD_SIZE,
     };
 
     use capitol_protocol::terrain::quad_contains;
@@ -156,12 +156,32 @@ mod tests {
 
     /// Moves for seeded nodes, in the order the migrations run: the ones a later
     /// street plan ran over (#62), the ones the deeper suburb moved (#117),
-    /// then the ones the Neighbourhood suburb's streets ran over (#112).
+    /// then the ones the Neighbourhood suburb's streets ran over (#112). All
+    /// three are on the 8000 world, before W1's shift; a move migration
+    /// written after it (from `print_node_moves`) is on the 12000 world, and
+    /// applies after `shifted`.
     const NODE_MOVES_MIGRATIONS: [&str; 3] = [
         include_str!("../../migrations/20260215_001_suburban_street_nodes.sql"),
         include_str!("../../migrations/20261018_001_deeper_suburb_nodes.sql"),
         include_str!("../../migrations/20261019_001_neighbourhood_suburb.sql"),
     ];
+
+    /// How far W1's migration moved every stored position on both axes, when
+    /// the world grew to 12000 (#194). The earlier migrations' rows are on the
+    /// 8000 world.
+    const WORLD_SHIFT: f64 = 2000.0;
+    const WORLD_GROWS_MIGRATION: &str = include_str!("../../migrations/20261107_001_world_grows.sql");
+
+    /// A row from before the world grew, where W1's migration put it.
+    fn shifted(x: f64) -> f64 {
+        ((x + WORLD_SHIFT) * 10.0).round() / 10.0
+    }
+
+    #[test]
+    fn the_world_grows_by_the_shift() {
+        assert_eq!(WORLD_SHIFT, CENTER_X - 4000.0);
+        assert!(WORLD_GROWS_MIGRATION.contains("position_x = position_x + 2000"));
+    }
 
     /// The numbers in each `(a, b, ...)` row of a migration's VALUES list.
     fn value_rows(sql: &str) -> Vec<Vec<f64>> {
@@ -175,7 +195,8 @@ mod tests {
     }
 
     /// The `(x, y, quality)` rows the world-scale migration seeds, where the
-    /// later migrations leave them.
+    /// later migrations leave them: moved by the node move migrations, then
+    /// by the world's growth.
     fn seeded_nodes() -> Vec<(f64, f64, i32)> {
         let migrations: Vec<Vec<Vec<f64>>> = NODE_MOVES_MIGRATIONS.iter().map(|sql| value_rows(sql)).collect();
         value_rows(WORLD_SCALE_MIGRATION)
@@ -185,7 +206,7 @@ mod tests {
                 let (x, y) = migrations.iter().fold((row[0], row[1]), |(x, y), moves| {
                     moves.iter().find(|m| m[0] == x && m[1] == y).map_or((x, y), |m| (m[2], m[3]))
                 });
-                (x, y, row[2] as i32)
+                (shifted(x), shifted(y), row[2] as i32)
             })
             .collect()
     }
@@ -330,7 +351,8 @@ mod tests {
 
     const NEW_NODES_MIGRATION: &str = include_str!("../../migrations/20261106_001_seeded_nodes_by_zone.sql");
 
-    /// The `('id', 'type', x, y, quality)` rows of a node seed insert.
+    /// The `('id', 'type', x, y, quality)` rows of a node seed insert, where
+    /// W1's migration moved them.
     fn insert_rows(sql: &str) -> Vec<NodeSeed> {
         sql.lines()
             .filter_map(|line| {
@@ -339,8 +361,8 @@ mod tests {
                 Some(NodeSeed {
                     id: f[0].parse().ok()?,
                     resource_type: f[1].to_string(),
-                    x: f[2].parse().ok()?,
-                    y: f[3].parse().ok()?,
+                    x: shifted(f[2].parse().ok()?),
+                    y: shifted(f[3].parse().ok()?),
                     base_quality: f[4].parse().ok()?,
                 })
             })
@@ -446,7 +468,7 @@ mod tests {
             ("", "", ""),
         ];
         let views = [
-            ("nodes-world", (CENTER_X - 4000.0, CENTER_Y - 4000.0, 8000.0), 1600.0, 3.0),
+            ("nodes-world", (CENTER_X - WORLD_SIZE / 2.0, CENTER_Y - WORLD_SIZE / 2.0, WORLD_SIZE), 2400.0, 3.0),
             ("nodes-rural-east", (CENTER_X + 2850.0, CENTER_Y - 600.0, 1100.0), 1100.0, 5.0),
             ("nodes-urban-north", (CENTER_X - 550.0, CENTER_Y - 1850.0, 1100.0), 1100.0, 5.0),
         ];

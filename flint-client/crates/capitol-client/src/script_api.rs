@@ -745,12 +745,20 @@ pub fn station_at(stations: &[StationMark], x: f32, z: f32) -> Option<&StationMa
         .map(|(s, _)| s)
 }
 
-/// World (X, Z) in metres to the server point a move goes to: inside the
-/// world, 0 to `WORLD_SIZE` on both axes, as the React client clamps it.
+/// World (X, Z) in metres to the server point a move goes to: on the world
+/// disc, since the server refuses a destination off it (W1, #194). A point
+/// past the edge is pulled in along its line from the centre.
 pub fn clamp_to_world(wx: f32, wz: f32) -> [f64; 2] {
-    use capitol_protocol::rules::WORLD_SIZE;
+    use capitol_protocol::rules::{CENTER_X, CENTER_Y, WILDERNESS_OUTER_RADIUS};
     let [x, y] = crate::coords::to_server(wx, wz);
-    [x.clamp(0.0, WORLD_SIZE), y.clamp(0.0, WORLD_SIZE)]
+    let (dx, dy) = (x - CENTER_X, y - CENTER_Y);
+    let r = dx.hypot(dy);
+    // A hair inside, so rounding never lands it just off the disc.
+    let edge = WILDERNESS_OUTER_RADIUS - 0.01;
+    if r <= edge {
+        return [x, y];
+    }
+    [CENTER_X + dx * edge / r, CENTER_Y + dy * edge / r]
 }
 
 #[cfg(test)]
@@ -839,9 +847,13 @@ mod tests {
         engine
             .run("cap_move(5.0, -2.5); cap_move(1000.0, -1000.0);")
             .unwrap();
-        assert_eq!(*shared.move_to.lock().unwrap(), Some([8000.0, 0.0]));
+        let [x, y] = shared.move_to.lock().unwrap().unwrap();
+        assert!(capitol_protocol::rules::in_world(x, y), "({x}, {y}) is off the disc");
+        // Pulled in toward the centre: north-east, on the edge.
+        let (dx, dy) = (x - 6000.0, y - 6000.0);
+        assert!((dx.hypot(dy) - 6000.0).abs() < 0.1 && (dx + dy).abs() < 1e-6);
         let [x, y] = clamp_to_world(5.0, -2.5);
-        assert!((x - 4050.0).abs() < 1e-3 && (y - 3975.0).abs() < 1e-3);
+        assert!((x - 6050.0).abs() < 1e-3 && (y - 5975.0).abs() < 1e-3);
     }
 
     #[test]
@@ -883,7 +895,7 @@ mod tests {
         assert!(engine.eval::<()>("cap_picked_plot()").is_ok());
         engine.run("cap_pick_plot(5.0, -2.5)").unwrap();
         let [x, y] = shared.pick_plot.lock().unwrap().unwrap();
-        assert!((x - 4050.0).abs() < 1e-3 && (y - 3975.0).abs() < 1e-3);
+        assert!((x - 6050.0).abs() < 1e-3 && (y - 5975.0).abs() < 1e-3);
         *shared.picked_plot.lock().unwrap() = Some(PlotMark {
             outline: vec![[0.0, 0.0], [2.0, 0.0], [2.0, 3.0]],
             y: 0.7,
