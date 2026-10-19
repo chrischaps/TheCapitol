@@ -1,8 +1,8 @@
 // Input to intents (plan §4.2): what a left click on the world means, and
 // the marks it leaves. P4.3 is click to move, P4.4 gathering, P6.3 stations.
 //
-// A click is picked off the ground with screen_to_ground and offered to
-// each intent in the React client's order (GameCanvas.tsx handleClick).
+// A click is picked off the ground (`pick`: the land where it has risen,
+// W9, else the flat ground) and offered to each intent in the React client's order (GameCanvas.tsx handleClick).
 // The first that takes it wins:
 //
 //   1. placing a station: put it here              (P6.2)
@@ -176,13 +176,13 @@ fn on_update() {
     if cap_at_login() { return; }
     // The ghost follows the ground under the cursor.
     if cap_placing() != () {
-        let h = screen_to_ground(mouse_x(), mouse_y(), cap_ground_y());
+        let h = pick();
         if h == () { cap_place_off(); } else { cap_place_hover(h[0], h[1]); }
     }
     if !is_mouse_just_pressed(0) { return; }
 
     // The ground under the cursor, or () over the sky.
-    let g = screen_to_ground(mouse_x(), mouse_y(), cap_ground_y());
+    let g = pick();
     if g == () { return; }
     let click = #{
         x: g[0], z: g[1],
@@ -267,7 +267,7 @@ fn on_event(name, data) {
     let t = total_time();
     if name == "extraction_completed" {
         yields.push(#{
-            x: data.x, z: data.z, born: t, base: cap_ground_y() + 1.3, up: 0.0,
+            x: data.x, z: data.z, born: t, base: cap_ground_at(data.x, data.z) + 1.3, up: 0.0,
             text: "+" + data.quantity + " " + data.item_name,
             grade: data.grade, colour: data.colour,
         });
@@ -275,13 +275,13 @@ fn on_event(name, data) {
     }
     if name == "crafting_completed" {
         let you = cap_follow();
-        let feet = if you != () { you[1] } else { cap_ground_y() };
+        let feet = if you != () { you[1] } else { cap_ground_at(data.x, data.z) };
         yields.push(#{
             x: data.x, z: data.z, born: t, base: feet + name_height(), up: craft_lift(),
             text: "+" + data.quantity + " " + data.item_name,
             grade: data.grade, colour: data.colour,
         });
-        blooms.push(#{ x: data.x, z: data.z, y: feet + 0.03, born: t });
+        blooms.push(#{ x: data.x, z: data.z, y: feet_mark(data.x, data.z, feet), born: t });
         return;
     }
     if name == "plot_claimed" {
@@ -357,7 +357,7 @@ fn on_draw_ui() {
     }
     // Picked here rather than in on_update: on_draw_ui sees the camera this
     // frame renders with, so the reticle can't trail the ground under it.
-    let hover = screen_to_ground(mouse_x(), mouse_y(), cap_ground_y());
+    let hover = pick();
     let placing = cap_placing();
     if placing != () { draw_placement(placing, now); }
     // While placing, a station under the cursor is in the ghost's way, not
@@ -478,7 +478,7 @@ fn draw_placement(p, now) {
         ring(p.x, p.z, y, r + 0.35, c, 0.2, 1.0, 52);
     }
     // Under it: the kit, and what a click will do or why it can't.
-    let at = world_to_screen(p.x, y, p.z);
+    let at = world_to_screen(p.x, y + cap_rise(p.x, p.z), p.z);
     if !at.visible { return; }
     let line = if p.asking { "Placing…" }
                else if p.why != () { p.why }
@@ -507,11 +507,28 @@ fn dist(ax, az, bx, bz) {
 }
 
 // Marks on the ground are world lines (#86): drawn in the 3D frame, so
-// whatever stands in front of them hides them. Lay them at cap_mark_y().
+// whatever stands in front of them hides them. Lay them at cap_mark_y(),
+// through mark_line, which lifts each end onto the land (W9).
+
+// The ground under the cursor as [x, z], or () over the sky: the land's
+// height field where it's in (W8, W9), else the flat ground.
+fn pick() {
+    let h = screen_to_heightfield(mouse_x(), mouse_y());
+    if h != () { return [h[0], h[2]]; }
+    screen_to_ground(mouse_x(), mouse_y(), cap_ground_y())
+}
+
+// A world line from (ax, ay, az) to (bx, by, bz), each end lifted by the
+// land under it, so a mark at cap_mark_y() lies on a hill as on the street.
+// Keep its segments short (a metre or two) where the land is steep.
+fn mark_line(ax, ay, az, bx, by, bz, c, alpha, width) {
+    draw_world_line(ax, ay + cap_rise(ax, az), az, bx, by + cap_rise(bx, bz), bz,
+                    c[0], c[1], c[2], alpha, width);
+}
 
 // A straight line along the ground from (ax, az) to (bx, bz).
 fn ground_line(ax, az, bx, bz, y, c, alpha, width) {
-    draw_world_line(ax, y, az, bx, y, bz, c[0], c[1], c[2], alpha, width);
+    mark_line(ax, y, az, bx, y, bz, c, alpha, width);
 }
 
 // A ring of `dashes` dashes, turned by `turn` radians.
@@ -552,7 +569,7 @@ fn arc_steps(cx, cz, y, r, a0, a1, c, alpha, width, steps) {
         let a = a0 + (a1 - a0) * i.to_float() / steps.to_float();
         let qx = cx + r * a.cos();
         let qz = cz + r * a.sin();
-        draw_world_line(px, y, pz, qx, y, qz, c[0], c[1], c[2], alpha, width);
+        mark_line(px, y, pz, qx, y, qz, c, alpha, width);
         px = qx;
         pz = qz;
     }
@@ -580,8 +597,8 @@ fn draw_path(x0, z0, x1, z1, now, strength) {
         let b = (s + dash).min(end);
         if b > a {
             let fade = ((a - 0.8) / 2.5).min(1.0);
-            draw_world_line(x0 + ux * a, y, z0 + uz * a, x0 + ux * b, y, z0 + uz * b,
-                            c[0], c[1], c[2], strength * fade, 1.5);
+            mark_line(x0 + ux * a, y, z0 + uz * a, x0 + ux * b, y, z0 + uz * b,
+                      c, strength * fade, 1.5);
         }
         s += step;
     }
@@ -717,8 +734,9 @@ fn draw_cutting(c, now) {
     let green = c.colour;
     for b in c.bits {
         let t = age * 0.9;
-        let y = cap_ground_y() + 0.3 + b.vy * t - 4.9 * t * t;
-        if y < cap_ground_y() { continue; }
+        let g = cap_ground_at(c.x, c.z);
+        let y = g + 0.3 + b.vy * t - 4.9 * t * t;
+        if y < g { continue; }
         let p = world_to_screen(c.x + b.vx * t, y, c.z + b.vz * t);
         if !p.visible { continue; }
         let a = b.turn + b.spin * t;
@@ -737,7 +755,7 @@ fn lilac() { [0.80, 0.72, 1.0] }
 // clockwise from north, a bead at its leading edge, and two strands
 // winding round outside it opposite ways.
 fn draw_craft(p, now) {
-    let y = feet_mark(p.feet_y);
+    let y = feet_mark(p.x, p.z, p.feet_y);
     let r = craft_ring();
     let c = craft_purple();
     let a = p.alpha * (if p.me { 1.0 } else { 0.6 });
@@ -879,16 +897,17 @@ fn mote_glint(x, y, r, turn, a) {
 // Someone shift would ask: a blue ring at their feet, closing in a little
 // as it breathes, with a fainter one outside.
 fn draw_trade_ring(p, now) {
-    let y = feet_mark(p.feet_y);
+    let y = feet_mark(p.x, p.z, p.feet_y);
     let c = trade_blue();
     let r = 0.85 + 0.05 * (now * 3.0).sin();
     ring(p.x, p.z, y, r, c, 0.85, 2.0, 40);
     ring(p.x, p.z, y, r * 1.45, c, 0.25, 1.0, 48);
 }
 
-// Under a player's feet: a little over them, and never under the marks'
-// layer, so a lot or a road doesn't hide the ring.
-fn feet_mark(feet_y) { (feet_y + 0.03).max(cap_mark_y()) }
+// Under a player's feet at (x, z): a little over them, and never under
+// the marks' layer, so a lot or a road doesn't hide the ring. As the
+// marks' own height, less the land's rise, which mark_line adds back.
+fn feet_mark(x, z, feet_y) { (feet_y - cap_rise(x, z) + 0.03).max(cap_mark_y()) }
 
 // A point on the strand between you (a) and them (b), t from 0 to 1, at
 // hand height with a little sag, lifted by `lift` metres, in the world.
@@ -959,10 +978,10 @@ fn draw_strand(you, trade, now) {
 fn draw_traded(d, you, now) {
     let k = (now - d.born) / trade_life();
     let g = gold();
-    let feet = if you != () { you[1] } else { cap_ground_y() };
+    let feet = if you != () { you[1] } else { cap_ground_at(d.x, d.z) };
     let ease = 1.0 - (1.0 - k) * (1.0 - k);
     for end in [[d.x, d.z], [d.tx, d.tz]] {
-        ring(end[0], end[1], feet_mark(feet), 0.5 + 1.8 * ease, g, 0.85 * (1.0 - k), 2.0, 44);
+        ring(end[0], end[1], feet_mark(end[0], end[1], feet), 0.5 + 1.8 * ease, g, 0.85 * (1.0 - k), 2.0, 44);
     }
     if k > 0.5 { return; }
     let a = [d.x, feet, d.z];
@@ -1013,9 +1032,9 @@ fn draw_plot_edge(p, now, flare) {
             let mid = along + lens[i] * (t0 + t1) / 2.0;
             let behind = (head - mid + total) % total;
             let lit = if behind < run { 1.0 - behind / run } else { 0.0 };
-            draw_world_line(a[0] + (b[0] - a[0]) * t0, p.y, a[1] + (b[1] - a[1]) * t0,
-                            a[0] + (b[0] - a[0]) * t1, p.y, a[1] + (b[1] - a[1]) * t1,
-                            c[0], c[1], c[2], (base + 0.5 * lit).min(1.0), width + lit);
+            mark_line(a[0] + (b[0] - a[0]) * t0, p.y, a[1] + (b[1] - a[1]) * t0,
+                      a[0] + (b[0] - a[0]) * t1, p.y, a[1] + (b[1] - a[1]) * t1,
+                      c, (base + 0.5 * lit).min(1.0), width + lit);
         }
         along += lens[i];
     }
@@ -1088,9 +1107,9 @@ fn draw_reticle(g, now) {
     ring(g[0], g[1], y, r, c, 0.9, 1.5, 40);
     ring(g[0], g[1], y, r * 1.9, c, 0.25, 1.0, 56);
     for a in [0.0, 0.5 * PI(), PI(), 1.5 * PI()] {
-        draw_world_line(g[0] + r * 1.25 * a.cos(), y, g[1] + r * 1.25 * a.sin(),
-                        g[0] + r * 1.7 * a.cos(), y, g[1] + r * 1.7 * a.sin(),
-                        c[0], c[1], c[2], 0.7, 1.5);
+        mark_line(g[0] + r * 1.25 * a.cos(), y, g[1] + r * 1.25 * a.sin(),
+                  g[0] + r * 1.7 * a.cos(), y, g[1] + r * 1.7 * a.sin(),
+                  c, 0.7, 1.5);
     }
 }
 

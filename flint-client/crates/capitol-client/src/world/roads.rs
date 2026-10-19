@@ -18,6 +18,11 @@
 //!   suburban < grid < arterial, so where two meet, the greater road is on
 //!   top. Two roads of one type overlap at the same height in the same
 //!   colour, so where they cross nothing shows.
+//! - **On the land.** Past the rural edge the wild trails (W5) lie on the
+//!   wilds' height field (W9), a little over it so the land's own triangles
+//!   don't show through; their points are under 2.5 m apart, so a quad
+//!   follows the ground. Until the land is in they lie flat, and they're
+//!   built again when it comes (`extension::land_in_place`).
 //! - **One mesh per type per sector** (`sector`), so each culls on its own.
 //!   Segments are split where they cross a sector's edge, and every
 //!   segment's quad goes to the sector it lies in. The split points are on
@@ -35,7 +40,7 @@ use crate::world::sector::{self, Sector};
 use crate::world::water;
 use capitol_protocol::terrain::{RoadSegment, RoadType, WaterRing};
 use flint_import::ImportedMaterial;
-use flint_player::ExtensionGpu;
+use flint_player::{ExtensionGpu, GroundField};
 
 /// Every road type, lowest layer first.
 pub const TYPES: [RoadType; 4] = [
@@ -185,9 +190,20 @@ fn natural_ends(roads: &[RoadSegment], i: usize) -> [End; 2] {
 /// The ribbon's (left, right) edge points at a place on the road.
 type Pair = [P; 2];
 
+/// How far over the land a road lies where the land has risen, in metres.
+const DRAPE: f32 = 0.1;
+
 /// Draws `s` as a ribbon `half` server units either side of its line, at
-/// height `y`, into the mesh of each sector it passes through.
-fn ribbon(out: &mut HashMap<Sector, MeshBuf>, s: &Stretch, half: f64, y: f32, colour: [f32; 4]) {
+/// height `y` over the land, into the mesh of each sector it passes
+/// through.
+fn ribbon(
+    out: &mut HashMap<Sector, MeshBuf>,
+    s: &Stretch,
+    half: f64,
+    y: f32,
+    colour: [f32; 4],
+    land: Option<&GroundField>,
+) {
     let pts = &s.points;
     let n = pts.len();
     let segs = if s.closed { n } else { n - 1 };
@@ -199,7 +215,9 @@ fn ribbon(out: &mut HashMap<Sector, MeshBuf>, s: &Stretch, half: f64, y: f32, co
         .collect();
     let lift = |p: P| {
         let [x, z] = to_world(p[0], p[1]);
-        [x, y, z]
+        let rise = land.map_or(0.0, |f| crate::world::land::rise_on(f, [x, z]));
+        let drape = if rise > 0.0 { DRAPE } else { 0.0 };
+        [x, y + rise + drape, z]
     };
     let pair = |p: P, off: P| -> Pair { [add(p, off), sub(p, off)] };
     // A fan round `p` from `p + from`, turning through `radians`.
@@ -277,6 +295,7 @@ fn ribbon(out: &mut HashMap<Sector, MeshBuf>, s: &Stretch, half: f64, y: f32, co
 /// with something in them are present.
 pub fn build(roads: &[RoadSegment], rings: &[WaterRing]) -> HashMap<(RoadType, Sector), MeshBuf> {
     let keep_out = water::kerbed(rings);
+    let land = crate::world::land::current();
     let mut by_type: HashMap<RoadType, HashMap<Sector, MeshBuf>> = HashMap::new();
     for (i, road) in roads.iter().enumerate() {
         let sink = by_type.entry(road.road_type).or_default();
@@ -285,7 +304,7 @@ pub fn build(roads: &[RoadSegment], rings: &[WaterRing]) -> HashMap<(RoadType, S
             hex(palette::road(road.road_type)),
         );
         for s in stretches(&road.points, &keep_out, natural_ends(roads, i)) {
-            ribbon(sink, &s, road.width * 0.5, y, colour);
+            ribbon(sink, &s, road.width * 0.5, y, colour, land.as_deref());
         }
     }
     by_type
@@ -365,7 +384,7 @@ mod tests {
     fn draw(points: &[(f64, f64)], half: f64) -> MeshBuf {
         let mut sectors = HashMap::new();
         for s in stretches(points, &[], [End::Round; 2]) {
-            ribbon(&mut sectors, &s, half, 0.0, [1.0; 4]);
+            ribbon(&mut sectors, &s, half, 0.0, [1.0; 4], None);
         }
         let mut m = MeshBuf::default();
         for (_, part) in sectors {
@@ -502,7 +521,7 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert!(s[0].closed);
         let mut sectors = HashMap::new();
-        ribbon(&mut sectors, &s[0], ring.width * 0.5, 0.0, [1.0; 4]);
+        ribbon(&mut sectors, &s[0], ring.width * 0.5, 0.0, [1.0; 4], None);
         let mut m = MeshBuf::default();
         sectors.into_values().for_each(|part| m.append(part));
         // Every segment a quad, every join mitred: no fans anywhere.
@@ -536,11 +555,15 @@ mod tests {
             &arterials,
             to_world(6000.0 + ring_inside - 2.0, 6000.0)
         ));
-        // A road that stops on its own still gets a round end: the
-        // arterials' far ends in the wilderness.
+        // Since W5 the arterials run on into the wild trails, so they end
+        // flat on them; a trail that stops on its own (a spur to a top or a
+        // lake) still gets a round end.
         let roads = &terrain.roads;
         let i = roads.iter().position(|r| r.id == "arterial_2").unwrap();
-        assert_eq!(natural_ends(roads, i), [End::Flat, End::Round]);
+        assert_eq!(natural_ends(roads, i), [End::Flat, End::Flat]);
+        assert!((0..roads.len())
+            .filter(|&i| roads[i].id.starts_with("wild_"))
+            .any(|i| natural_ends(roads, i)[1] == End::Round));
     }
 
     #[test]

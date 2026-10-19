@@ -6,8 +6,13 @@
 //     street with the sky in the top third of the frame, and from the
 //     outer zones the tower on the horizon;
 //   - street (32 m): about 50° down, where the camera rests;
-//   - map (640 m): straight down, north at the top, the light flattened
-//     into the 2D client's palette (atmosphere.rs keys that on height).
+//   - map (880 m): straight down, north at the top, the whole r6000
+//     world in frame, the light flattened into the 2D client's palette
+//     (atmosphere.rs keys that on height).
+//
+// In the wilds (W9) the rig follows the land: it looks at the ground under
+// the point (cap_ground_at), keeps above the land under itself, and rises
+// so that no hill stands between it and the point.
 //
 // On the way to the map the view drifts to the Capitol and turns north up,
 // so the furthest zoom is always the same map.
@@ -60,13 +65,16 @@
 // Camera distance from the point it looks at (m) at zoom 0 and zoom 1.
 // Zoom is linear in the log of distance, so each wheel notch feels alike.
 fn near_distance() { 11.0 }
-fn far_distance() { 640.0 }
+fn far_distance() { 880.0 }
 // Where the camera rests: 32 m off, 50° down, about 25 m up.
 fn street_distance() { 32.0 }
 fn street_zoom() {
     (street_distance() / near_distance()).ln() / (far_distance() / near_distance()).ln()
 }
-fn district_zoom() { 0.75 }
+// The district view stands 232 m off, as it did when the map was 640 m
+// up (before W9 grew it to the whole world).
+fn district_distance() { 232.0 }
+fn district_zoom() { zoom_at(district_distance()) }
 // Tilt (degrees below level) at zoom 0, at street and at the map. Just
 // short of 90 at the map, so the look-at keeps a heading.
 fn closest_pitch() { 15.0 }
@@ -76,8 +84,8 @@ fn map_pitch() { 89.9 }
 // turns north up over the second one.
 fn centre_from() { 0.62 }
 fn north_from() { 0.80 }
-// Keep the free point on the world (its ground fades out by r400).
-fn world_radius() { 420.0 }
+// Keep the free point on the world (r6000, 600 m).
+fn world_radius() { 600.0 }
 // How fast things settle: 1/e in 1/k seconds.
 fn follow_k() { 6.0 }
 // The nudge when a canal stops you (P4.3): how long it rings, and how far
@@ -508,7 +516,7 @@ fn view_shot(view) {
 fn on_draw_ui() {
     if cap_follow() != () || cap_at_login() || cap_clean() { return; }
     if rig.shot != () && rig.release >= 1.0 { return; }
-    let p = world_to_screen(rig.target_x, cap_ground_y(), rig.target_z);
+    let p = world_to_screen(rig.target_x, cap_ground_at(rig.target_x, rig.target_z), rig.target_z);
     if !p.visible { return; }
     let breathe = 1.0 + 0.08 * (total_time() * 2.0).sin();
     draw_circle_outline(p.x, p.y, 9.0 * breathe, 0.788, 0.635, 0.153, 0.85, 2.0);
@@ -520,11 +528,12 @@ fn on_draw_ui() {
 // The camera for a focus point (fx, fz) on the ground, a zoom and a yaw:
 // #{ px, py, pz } where it stands and #{ tx, ty, tz } what it looks at.
 fn rig_pose(fx, fz, zoom, yaw) {
-    let g = cap_ground_y();
     // Toward the map, look at the Capitol, north up.
     let c = smooth((zoom - centre_from()) / (1.0 - centre_from()));
     let lx = fx * (1.0 - c);
     let lz = fz * (1.0 - c);
+    // The ground under what it looks at: the land in the wilds.
+    let g = cap_ground_at(lx, lz);
     let n = smooth((zoom - north_from()) / (1.0 - north_from()));
     let heading = yaw - wrap_angle(yaw) * n;
 
@@ -544,8 +553,25 @@ fn rig_pose(fx, fz, zoom, yaw) {
         r = keep_radius();
     }
     // Rise over the curtain wall, and never touch the land.
-    py = py.max(g + rig_floor(r));
+    py = py.max(cap_ground_at(px, pz) + rig_floor(r));
+    py = over_the_land(px, py, pz, lx, g, lz);
     #{ px: px, py: py, pz: pz, tx: lx, ty: g, tz: lz }
+}
+
+// The least height, from `py` up, at which the camera at (px, pz) sees the
+// point (tx, ty, tz) over the land: its line clears the ground under it by
+// ground_clear() every few metres along the way (at most 64 places).
+fn over_the_land(px, py, pz, tx, ty, tz) {
+    let len = ((px - tx) * (px - tx) + (pz - tz) * (pz - tz)).sqrt();
+    let steps = (len / 2.5).ceiling().to_int().max(4).min(64);
+    for k in 1..steps {
+        let t = k.to_float() / steps.to_float();
+        let h = cap_ground_at(tx + (px - tx) * t, tz + (pz - tz) * t) + ground_clear();
+        // The line is at ty + (py - ty) t there.
+        let need = ty + (h - ty) / t;
+        if need > py { py = need; }
+    }
+    py
 }
 
 // Distance from the focus (m) at a zoom.

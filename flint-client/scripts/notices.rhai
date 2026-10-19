@@ -89,7 +89,7 @@ fn on_event(name, data) {
         let n = if data.quantity > pickup_most() { pickup_most() } else { data.quantity };
         for i in 0..n {
             flights.push(#{
-                x: data.x, y: cap_ground_y() + 1.3, z: data.z, born: t,
+                x: data.x, y: cap_ground_at(data.x, data.z) + 1.3, z: data.z, born: t,
                 wait: pickup_wait() + i.to_float() * pickup_stagger(),
                 colour: data.colour, a: data.grade == "A",
                 // Each pip bows its own way, so a handful fans out.

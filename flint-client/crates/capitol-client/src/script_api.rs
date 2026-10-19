@@ -724,6 +724,18 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     // `cap_ground_y() -> float`: the land's height in metres, for picking.
     // The sea is at 0.
     engine.register_fn("cap_ground_y", || crate::coords::layer::GROUND as f64);
+    // `cap_ground_at(x, z) -> float`: the ground's height under world
+    // (x, z), metres: `cap_ground_y()` in the city, the land in the wilds
+    // once it's in (W9).
+    engine.register_fn("cap_ground_at", |x: f64, z: f64| {
+        crate::world::land::ground_y([x as f32, z as f32]) as f64
+    });
+    // `cap_rise(x, z) -> float`: how far the land under (x, z) stands over
+    // the flat ground, metres; 0 in the city. Marks laid at `cap_mark_y()`
+    // add it to lie on the land.
+    engine.register_fn("cap_rise", |x: f64, z: f64| {
+        crate::world::land::rise([x as f32, z as f32]) as f64
+    });
     // `cap_mark_y() -> float`: where marks on the ground are drawn with
     // `draw_world_line`, above every road and lot and under the curbs (#86).
     engine.register_fn("cap_mark_y", || crate::coords::layer::MARK as f64);

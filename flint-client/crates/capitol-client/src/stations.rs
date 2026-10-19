@@ -41,7 +41,7 @@
 //! holds still and breathes until the server answers. When the station
 //! lands, the ghost is gone and the real one drops into its place.
 
-use crate::coords::{layer, to_server, to_world};
+use crate::coords::{to_server, to_world};
 use crate::script_api::{Shared, StationMark};
 use crate::world::mesh::{MeshBuf, UP};
 use crate::world::palette::{glow, hex, mix};
@@ -378,7 +378,7 @@ fn place_ghost(world: &mut flint_ecs::FlintWorld, g: &Ghost, asking: bool) {
     let mut t = toml::Table::new();
     t.insert(
         "position".into(),
-        vec3([x, layer::GROUND + GHOST_HOVER * k + bob, z]),
+        vec3([x, crate::world::land::ground_y([x, z]) + GHOST_HOVER * k + bob, z]),
     );
     let (sin, cos) = (facing_plain([x, z]) * 0.5).sin_cos();
     t.insert("rotation_quat".into(), vec4([0.0, sin, 0.0, cos]));
@@ -506,7 +506,8 @@ fn place(world: &mut flint_ecs::FlintWorld, s: &Station) {
         Arrival::Drop => drop(k),
     };
     let mut t = toml::Table::new();
-    t.insert("position".into(), vec3([x, layer::GROUND + lift, z]));
+    let ground = crate::world::land::ground_y([x, z]);
+    t.insert("position".into(), vec3([x, ground + lift, z]));
     let (sin, cos) = (s.yaw * 0.5).sin_cos();
     t.insert("rotation_quat".into(), vec4([0.0, sin, 0.0, cos]));
     // Never quite zero: a zero scale has no inverse for the normals.

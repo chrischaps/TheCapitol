@@ -2,10 +2,14 @@
 //! vertex. Each zone is its §4.7 colour pulled most of the way toward the
 //! background, so the ground reads as tinted dark rather than as a flat
 //! fill, and neighbouring zones blend softly across their boundary. Past
-//! the rural ring the colour thins into the wilderness and fades to the
-//! background at the world's edge (radius 6000), and the disc runs on far
-//! past the world's corners so its rim is lost in the fog, never seen
-//! against the sky.
+//! the rural ring the colour turns to the wilds' hill meadow, and the disc
+//! runs on far past the world's corners so its rim is lost in the fog,
+//! never seen against the sky.
+//!
+//! Once the land is in (W9), the disc is open over the wilds, from the
+//! rural edge out to where the ranges have settled past the world's edge
+//! (`land::FROM` to `land::OUTER`): the land's own meshes (`land_mesh`)
+//! lie there, starting from this colour.
 //!
 //! A faint, slow mottling breaks up the flat tints, the way real ground is
 //! never one colour.
@@ -47,17 +51,18 @@ fn strength(zone: Zone) -> f32 {
         Zone::Urban => 0.20,
         Zone::Suburban => 0.10,
         Zone::Rural => 0.085,
-        Zone::Wilderness => 1.0,
+        Zone::Wilderness => 0.13,
     }
 }
 
-/// A zone's ground colour (linear).
+/// A zone's ground colour (linear). The wilds are hill meadow, not the
+/// 2D clients' near-black.
 fn tint(zone: Zone) -> [f32; 4] {
-    mix(
-        hex(palette::BACKGROUND),
-        hex(palette::zone(zone)),
-        strength(zone),
-    )
+    let token = match zone {
+        Zone::Wilderness => palette::WILD_MEADOW,
+        zone => palette::zone(zone),
+    };
+    mix(hex(palette::BACKGROUND), hex(token), strength(zone))
 }
 
 /// The half-width of the blend between `ALL[i]` and `ALL[i + 1]`.
@@ -75,8 +80,8 @@ fn smoothstep(lo: f64, hi: f64, x: f64) -> f32 {
 }
 
 /// The ground's colour at `r` server units from the centre, before
-/// mottling, with the world's edge at `edge`.
-fn shade(r: f64, edge: f64) -> [f32; 4] {
+/// mottling.
+pub(crate) fn shade(r: f64) -> [f32; 4] {
     let zones = Zone::ALL;
     let i = zones
         .iter()
@@ -84,7 +89,7 @@ fn shade(r: f64, edge: f64) -> [f32; 4] {
         .unwrap_or(zones.len() - 1);
     let (lo, hi) = zones[i].radii();
     // The bands are narrower than any zone, so at most one boundary is near.
-    let zoned = if i + 1 < zones.len() && r > hi - blend_after(i) {
+    if i + 1 < zones.len() && r > hi - blend_after(i) {
         let h = blend_after(i);
         mix(
             tint(zones[i]),
@@ -100,14 +105,7 @@ fn shade(r: f64, edge: f64) -> [f32; 4] {
         )
     } else {
         tint(zones[i])
-    };
-    // The wilderness fades out to the world's edge.
-    let wild_from = Zone::Rural.radii().1;
-    mix(
-        zoned,
-        hex(palette::BACKGROUND),
-        smoothstep(wild_from, edge, r),
-    )
+    }
 }
 
 /// A hash of a lattice point to [0, 1).
@@ -131,7 +129,7 @@ pub(crate) fn value_noise(x: f32, z: f32) -> f32 {
 }
 
 /// The mottling at world (X, Z): a brightness factor within ±`MOTTLE`.
-fn mottle([x, z]: [f32; 2]) -> f32 {
+pub(crate) fn mottle([x, z]: [f32; 2]) -> f32 {
     let broad = value_noise(x / MOTTLE_SCALE, z / MOTTLE_SCALE);
     let fine = value_noise(
         x / (MOTTLE_SCALE * 0.37) + 17.0,
@@ -182,7 +180,7 @@ pub fn build(world_size: f64, holes: &[(f64, f64)]) -> MeshBuf {
     let vertex = |mesh: &mut MeshBuf, r: f64, deg: f64| {
         let p = polar_to_world(r, deg);
         let m = mottle(p);
-        let c = shade(r, edge);
+        let c = shade(r);
         mesh.flat_vertex(p, layer::GROUND, [c[0] * m, c[1] * m, c[2] * m, 1.0])
     };
     let angle = |j: usize| j as f64 * 360.0 / SEGMENTS as f64;
@@ -216,14 +214,23 @@ pub fn build(world_size: f64, holes: &[(f64, f64)]) -> MeshBuf {
     mesh
 }
 
-/// Builds and uploads the ground.
-pub fn upload(gpu: &mut ExtensionGpu, world_size: f64, holes: &[(f64, f64)]) {
-    build(world_size, holes).upload(gpu, MESH, 0.92);
+/// Builds and uploads the ground, open over the wilds once the land is
+/// in.
+pub fn upload(gpu: &mut ExtensionGpu, world_size: f64, holes: &[(f64, f64)], land: bool) {
+    let mut holes = holes.to_vec();
+    if land {
+        holes.push((crate::world::land::FROM, crate::world::land::OUTER));
+    }
+    build(world_size, &holes).upload(gpu, MESH, ROUGHNESS);
 }
+
+/// The ground's roughness, which the land's meshes share.
+pub const ROUGHNESS: f32 = 0.92;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::mesh;
     use capitol_protocol::rules::WORLD_SIZE;
 
     const EDGE: f64 = WORLD_SIZE * 0.5;
@@ -237,7 +244,7 @@ mod tests {
         for zone in Zone::ALL.into_iter().filter(|z| *z != Zone::Wilderness) {
             let (lo, hi) = zone.radii();
             let mid = (lo + hi) * 0.5;
-            assert!(near(shade(mid, EDGE), tint(zone), 1e-6), "{zone}");
+            assert!(near(shade(mid), tint(zone), 1e-6), "{zone}");
         }
     }
 
@@ -246,10 +253,10 @@ mod tests {
         // One server unit apart, no channel moves more than a sliver. The
         // steepest blend (gold into blue) moves about 0.004 a unit; a hard
         // edge would jump by 0.2.
-        let mut prev = shade(0.0, EDGE);
+        let mut prev = shade(0.0);
         let mut r = 1.0;
         while r < EDGE * 1.5 {
-            let c = shade(r, EDGE);
+            let c = shade(r);
             assert!(near(c, prev, 0.005), "jump at r = {r}: {prev:?} -> {c:?}");
             prev = c;
             r += 1.0;
@@ -260,15 +267,28 @@ mod tests {
     fn a_boundary_is_halfway_between_its_zones() {
         let b = Zone::Urban.radii().1;
         let half = mix(tint(Zone::Urban), tint(Zone::Suburban), 0.5);
-        assert!(near(shade(b, EDGE), half, 1e-6));
+        assert!(near(shade(b), half, 1e-6));
     }
 
     #[test]
-    fn the_world_fades_to_the_background_at_its_edge() {
+    fn the_wilds_are_meadow_out_past_the_edge_not_the_background() {
+        // W9 took away the fade to the background: the ranges stand there.
         let bg = hex(palette::BACKGROUND);
-        assert!(near(shade(EDGE, EDGE), bg, 1e-6));
-        assert!(near(shade(EDGE * 2.0, EDGE), bg, 1e-6));
-        assert!(!near(shade(Zone::Rural.radii().0, EDGE), bg, 1e-3));
+        for r in [Zone::Rural.radii().1 + 300.0, EDGE, EDGE * 2.0] {
+            assert!(near(shade(r), tint(Zone::Wilderness), 1e-6), "r {r}");
+            assert!(!near(shade(r), bg, 1e-2), "r {r}");
+        }
+    }
+
+    #[test]
+    fn with_the_land_in_the_disc_is_open_over_the_wilds() {
+        use crate::world::land::{FROM, OUTER};
+        let mesh = build(WORLD_SIZE, &[(FROM, OUTER)]);
+        let at = |r: f64| crate::coords::polar_to_world(r, 10.0);
+        assert!(mesh::probe::covered(&mesh, at(FROM - 20.0)));
+        assert!(!mesh::probe::covered(&mesh, at(FROM + 20.0)));
+        assert!(!mesh::probe::covered(&mesh, at(OUTER - 20.0)));
+        assert!(mesh::probe::covered(&mesh, at(OUTER + 20.0)));
     }
 
     #[test]

@@ -54,10 +54,10 @@ const SETTLE: f64 = 3.0;
 /// Below this a node has stopped swaying.
 const STILL: f32 = 0.01;
 
-/// The land's height under world (X, Z), metres. Flat today; the wilds'
-/// height field lifts it (W9, #202).
-pub fn ground_at(_at: [f32; 2]) -> f32 {
-    layer::GROUND
+/// The land's height under world (X, Z), metres: flat in the city, the
+/// wilds' height field past it once it's in (W9, #202).
+pub fn ground_at(at: [f32; 2]) -> f32 {
+    crate::world::land::ground_y(at)
 }
 
 /// The runtime mesh for one sector's nodes at rest.
@@ -295,6 +295,11 @@ impl Nodes {
                 }
             }
         }
+    }
+
+    /// The land under the nodes moved (W9): every sector is baked again.
+    pub fn land_changed(&mut self) {
+        self.dirty.extend(self.nodes.values().map(|n| n.sector));
     }
 
     /// One sector's nodes at rest, as one mesh.

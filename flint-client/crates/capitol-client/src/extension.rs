@@ -92,6 +92,12 @@ pub struct CapitolExtension {
     node_sampled: Option<nodes::sample::Sample>,
     /// The grass fields over the rural ring and the wilderness (P8.6c).
     grass: world::grass::Grass,
+    /// The wilds' height field, sampled off the main thread (W9), its
+    /// meshes, and whether it's in (the flat disc is open over the wilds
+    /// once it is).
+    land: world::land::Builder,
+    land_meshes: world::land_mesh::LandMeshes,
+    land_in: bool,
     plot_panel: ui::plot::PlotPanel,
     atmosphere: Atmosphere,
     /// `--time-of-day`: the hour pinned, 0..1 from midnight, in place of
@@ -171,6 +177,9 @@ impl CapitolExtension {
             node_sample: false,
             node_sampled: None,
             grass: world::grass::Grass::default(),
+            land: world::land::Builder::default(),
+            land_meshes: world::land_mesh::LandMeshes::default(),
+            land_in: false,
             plot_panel: ui::plot::PlotPanel::default(),
             atmosphere: Atmosphere::default(),
             time_of_day: None,
@@ -309,6 +318,38 @@ impl CapitolExtension {
     pub fn with_hall_sample(mut self, on: bool) -> Self {
         self.hall_sample = on;
         self
+    }
+
+    /// The land (W9). Once a field is sampled, everything stands on it:
+    /// the disc opens over the wilds, and the chunks, the click's and the
+    /// rig's ground, the grass, the trails and the nodes take it up. Then,
+    /// every frame, the chunks the camera has come nearer to or gone
+    /// further from are built again.
+    fn land_in_place(&mut self, ctx: &mut ExtensionCtx) {
+        let eye = ctx.camera.position.to_array();
+        let Some(gpu) = ctx.gpu.as_mut() else {
+            return;
+        };
+        let mut names = Vec::new();
+        if let Some(sampled) = self.land.take() {
+            let field = std::sync::Arc::new(sampled.field);
+            world::land::set(Some(field.clone()));
+            if let Some(projector) = &self.shared.projector {
+                projector.set_ground(Some(field.clone()));
+            }
+            self.land_meshes.set_field(field.clone());
+            if let Some(terrain) = &self.built {
+                let rings = &terrain.water_rings;
+                world::ground::upload(gpu, terrain.world_size, &world::water::holes(rings), true);
+                // The wild trails lie on the land.
+                names.extend(world::roads::upload(gpu, &terrain.roads, rings));
+                self.grass.land(field.clone(), sampled.cut, terrain);
+            }
+            self.land_in = true;
+            self.nodes.land_changed();
+        }
+        names.extend(self.land_meshes.update(gpu, eye));
+        attach_each(ctx, names.iter());
     }
 
     /// The Exchange hall as scripts see it. Offline with `--hall-sample`,
@@ -745,6 +786,7 @@ impl PlayerExtension for CapitolExtension {
                 ([n.x, n.y], kind.clearing())
             }));
         }
+        self.land_in_place(ctx);
         if let Some(gpu) = ctx.gpu.as_mut() {
             self.grass.flush(gpu, ctx.world);
         }
@@ -762,8 +804,12 @@ impl PlayerExtension for CapitolExtension {
         let started = Instant::now();
         let rings = &terrain.water_rings;
         if rebuild.ground {
-            world::ground::upload(gpu, terrain.world_size, &world::water::holes(rings));
+            let holes = world::water::holes(rings);
+            world::ground::upload(gpu, terrain.world_size, &holes, self.land_in);
         }
+        // The land is sampled off this thread, and comes in on a later
+        // frame (`land_in_place`); until then the world stands as it was.
+        self.land.ask(terrain);
         if rebuild.rings {
             self.players.set_rings(rings);
             self.sound.set_rings(rings);

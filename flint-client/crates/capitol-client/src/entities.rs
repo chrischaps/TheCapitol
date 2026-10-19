@@ -18,6 +18,7 @@ use crate::coords::{layer, to_world};
 use crate::script_api::{PlayerLabel, Shared};
 use crate::ui::crafting::Fill;
 use crate::world::bridges::Decks;
+use crate::world::land;
 use crate::world::mesh::{MeshBuf, UP};
 use crate::world::palette::{glow, hex, mix};
 use capitol_core::motion::Pose;
@@ -193,7 +194,8 @@ impl Players {
             .or_else(|| {
                 state.local_player().map(|p| {
                     let [x, z] = to_world(p.x, p.y);
-                    [x, self.decks.top(p.x, p.y).unwrap_or_else(stand), z]
+                    let y = self.decks.top(p.x, p.y);
+                    [x, y.unwrap_or_else(|| stand() + land::rise([x, z])), z]
                 })
             });
         if let Ok(mut f) = shared.follow.lock() {
@@ -205,7 +207,10 @@ impl Players {
 impl Avatar {
     fn step(&mut self, pose: &Pose, decks: &Decks, dt: f32) {
         let [x, z] = to_world(pose.x, pose.y);
-        let y = decks.top(pose.x, pose.y).unwrap_or_else(stand);
+        // On a bridge, its deck; on the land, the land.
+        let y = decks
+            .top(pose.x, pose.y)
+            .unwrap_or_else(|| stand() + land::rise([x, z]));
         self.at = [x, y, z];
 
         let turn = wrap(yaw_of(pose.facing) - self.yaw);

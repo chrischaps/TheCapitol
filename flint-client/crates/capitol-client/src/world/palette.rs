@@ -56,6 +56,15 @@ pub const GRASS_ROOT: u32 = 0x3e5a2a;
 pub const GRASS_TIP: u32 = 0x93ae48;
 pub const GRASS_DRY: u32 = 0xa8955a;
 
+/// The wilds' ground (W9): hill meadow, bare rock on the steeps, scree
+/// on the high slopes and snow on the tops. Like the zones' tokens, each
+/// is pulled most of the way toward the background on the ground
+/// (`world::land_mesh`), so the ranges stand in the same dusk as the city.
+pub const WILD_MEADOW: u32 = 0x5c7a34;
+pub const WILD_ROCK: u32 = 0x6e6c74;
+pub const WILD_SCREE: u32 = 0x8c806c;
+pub const WILD_SNOW: u32 = 0xe6ebf2;
+
 /// `c` darker (`k` < 1) or lighter, alpha kept.
 pub fn shade(c: [f32; 4], k: f32) -> [f32; 4] {
     [c[0] * k, c[1] * k, c[2] * k, c[3]]

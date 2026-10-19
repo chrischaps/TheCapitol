@@ -7,8 +7,12 @@
 //! The mask is painted here, on the CPU, from the terrain:
 //!
 //! - **the rings**: none inside the suburb, easing in across its outer edge,
-//!   full through the rural ring, then thinning out round r4000, the
-//!   world's edge before it grew ([`GRASS_EDGE`]);
+//!   full through the rural ring and on into the wilds, thinning out at the
+//!   world's edge ([`GRASS_EDGE`]);
+//! - **the land** (W9): in the wilds the grass grows on the hill meadows,
+//!   thinning off the steeps and the high scree, and out of the beds the
+//!   water cut (`land::Sampled::cut`). The blades stand on the land, on a
+//!   grid of [`HEIGHTS`] a side;
 //! - **parks** (#129): the suburb's parks are mown lawns, shorter and more
 //!   even than the meadows, easing in from their edges where the lots and
 //!   the streets stand;
@@ -37,22 +41,35 @@ use crate::coords::{layer, to_world, S};
 use crate::world::geom::{distance_to_segment, radius, P};
 use crate::world::ground::value_noise;
 use crate::world::palette::{hex, GRASS_DRY, GRASS_ROOT, GRASS_TIP};
+use crate::world::land;
 use crate::world::water;
-use capitol_protocol::rules::{CENTER_X, CENTER_Y, SUBURBAN_OUTER_RADIUS};
+use capitol_protocol::rules::{CENTER_X, CENTER_Y, SUBURBAN_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS};
 use capitol_protocol::terrain::{TerrainPark, TerrainResponse};
 use flint_ecs::FlintWorld;
-use flint_player::{ExtensionGpu, GrassConfig, GrassGround, GrassHeight};
+use flint_player::{ExtensionGpu, GrassConfig, GrassGround, GrassHeight, GroundField};
+use std::sync::Arc;
 use std::time::Instant;
 
-/// Texels along each side of the mask. Over its 800 m that's about
+/// Texels along each side of the mask. Over its 1200 m that's about
 /// 0.39 m a texel: finer than the narrowest trail (0.6 m) and its verge.
-pub const MASK_SIZE: usize = 2048;
+pub const MASK_SIZE: usize = 3072;
 
-/// How far the grass reaches from the centre, in server units: r4000, where
-/// the world's edge was before it grew to 12000 (W1, #194). The mask is the
-/// square round that circle, so the grass is what it was. The wilds get their
-/// own ground in W9 (#202).
-const GRASS_EDGE: f64 = 4000.0;
+/// How far the grass reaches from the centre, in server units: the world's
+/// edge. The mask is the square round it.
+const GRASS_EDGE: f64 = WILDERNESS_OUTER_RADIUS;
+
+/// Heights along each side of the grid the blades stand on, over the
+/// mask's square: about 0.59 m apart. The engine reads the nearest one,
+/// not a blend (#228), so the grid is finer than the land's own metre,
+/// which keeps a blade within about 0.15 m of the ground on a meadow.
+pub const HEIGHTS: usize = 2048;
+
+/// Where the grass gives way in the wilds: the slopes (rise over run) over
+/// which it thins out, the heights (m) over which the scree takes it, and
+/// the depth (m) of a water's cut over which its bed is bare.
+const STEEP: (f64, f64) = (0.45, 0.8);
+const HIGH: (f64, f64) = (22.0, 38.0);
+const WET: (f64, f64) = (0.03, 0.3);
 
 /// Where the grass starts easing in, and where it's full, in server units
 /// from the centre: across the suburb's outer edge (3000).
@@ -343,12 +360,64 @@ fn inside(p: P, poly: &[P]) -> bool {
     odd
 }
 
+/// The land the grass grows on in the wilds (W9).
+pub struct GrassLand {
+    pub field: Arc<GroundField>,
+    /// How deep the water cut, a sample of the field each (`land::Sampled`).
+    pub cut: Vec<f32>,
+}
+
+impl GrassLand {
+    /// How much of the meadow the land at `p` keeps, 0 to 1: none on the
+    /// steeps, the high ground or in the water's beds.
+    fn meadow(&self, p: P) -> f32 {
+        if radius(p) <= land::FROM {
+            return 1.0;
+        }
+        let [x, z] = to_world(p[0], p[1]);
+        let h = |dx: f32, dz: f32| {
+            self.field
+                .height_at(x + dx, z + dz)
+                .unwrap_or(layer::GROUND)
+        };
+        let d = 0.5;
+        let slope = ((h(d, 0.0) - h(-d, 0.0)).hypot(h(0.0, d) - h(0.0, -d)) / (2.0 * d)) as f64;
+        let rise = (h(0.0, 0.0) - layer::GROUND) as f64;
+        let cut = land::cut_at(&self.cut, [x, z]) as f64;
+        (1.0 - smoothstep(STEEP.0, STEEP.1, slope))
+            * (1.0 - smoothstep(HIGH.0, HIGH.1, rise))
+            * (1.0 - smoothstep(WET.0, WET.1, cut))
+    }
+
+    /// The blades' ground: [`HEIGHTS`]² world heights over `mask`'s square,
+    /// one at the middle of each cell (as the engine reads them), row by
+    /// row toward +Z.
+    fn heights(&self, mask: &Mask) -> Vec<f32> {
+        let (origin, size) = mask.world_rect();
+        let cell = size[0] / HEIGHTS as f32;
+        let mut out = vec![layer::GROUND; HEIGHTS * HEIGHTS];
+        for (j, row) in out.chunks_mut(HEIGHTS).enumerate() {
+            let z = origin[1] + (j as f32 + 0.5) * cell;
+            for (i, h) in row.iter_mut().enumerate() {
+                let x = origin[0] + (i as f32 + 0.5) * cell;
+                *h = self.field.height_at(x, z).unwrap_or(layer::GROUND);
+            }
+        }
+        out
+    }
+}
+
 /// How much grass the open ground at `p` holds, 0 to 1, before anything is
-/// cleared from it: the rings, then the meadows.
-fn field(p: P, edge: f64) -> f32 {
+/// cleared from it: the rings, then the meadows, on the land once it's in.
+fn field(p: P, edge: f64, land: Option<&GrassLand>) -> f32 {
     let r = radius(p);
-    let rings =
+    let mut rings =
         smoothstep(EASE_FROM, EASE_TO, r) * (1.0 - smoothstep(edge - EDGE_IN, edge + EDGE_OUT, r));
+    if let Some(land) = land {
+        if rings > 0.0 {
+            rings *= land.meadow(p);
+        }
+    }
     if rings <= 0.0 {
         return 0.0;
     }
@@ -364,8 +433,9 @@ fn field(p: P, edge: f64) -> f32 {
 }
 
 /// Paints the terrain's part of the mask, `size` texels a side: the rings
-/// and meadows, cleared of the canals, the roads and the lots.
-pub fn paint(terrain: &TerrainResponse, size: usize) -> Mask {
+/// and meadows on the land (once it's in), cleared of the canals, the roads
+/// and the lots. The open ground is shared out by rows over the cores.
+pub fn paint(terrain: &TerrainResponse, size: usize, land: Option<&GrassLand>) -> Mask {
     let edge = GRASS_EDGE.min(terrain.world_size * 0.5);
     let side = edge * 2.0;
     let mut mask = Mask {
@@ -376,20 +446,32 @@ pub fn paint(terrain: &TerrainResponse, size: usize) -> Mask {
     };
     let kerbed = water::kerbed(&terrain.water_rings);
     let slack = mask.slack();
-    for j in 0..size {
-        for i in 0..size {
-            let p = mask.at(i, j);
-            let mut v = field(p, edge);
-            if v <= 0.0 {
-                continue;
-            }
-            let r = radius(p);
-            for &(lo, hi) in &kerbed {
-                v *= smoothstep(slack, slack + WATER_SOFT, (lo - r).max(r - hi));
-            }
-            mask.texels[j * size + i] = (v * 255.0).round() as u8;
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let rows_each = size.div_ceil(threads);
+    let mut texels = std::mem::take(&mut mask.texels);
+    std::thread::scope(|scope| {
+        let (mask, kerbed) = (&mask, &kerbed);
+        for (k, rows) in texels.chunks_mut(rows_each * size).enumerate() {
+            scope.spawn(move || {
+                for (dj, row) in rows.chunks_mut(size).enumerate() {
+                    let j = k * rows_each + dj;
+                    for (i, texel) in row.iter_mut().enumerate() {
+                        let p = mask.at(i, j);
+                        let mut v = field(p, edge, land);
+                        if v <= 0.0 {
+                            continue;
+                        }
+                        let r = radius(p);
+                        for &(lo, hi) in kerbed {
+                            v *= smoothstep(slack, slack + WATER_SOFT, (lo - r).max(r - hi));
+                        }
+                        *texel = (v * 255.0).round() as u8;
+                    }
+                }
+            });
         }
-    }
+    });
+    mask.texels = texels;
     let mut lawns = Vec::new();
     for park in &terrain.parks {
         lawns.extend(paint_park(&mut mask, park));
@@ -553,6 +635,9 @@ pub struct Grass {
     /// The nodes in the mask the engine has, or `None` to upload again.
     painted: Option<Vec<Node>>,
     wind: Option<Wind>,
+    /// The land, once it's in, and the blades' heights on it.
+    land: Option<GrassLand>,
+    heights: Option<Vec<f32>>,
 }
 
 impl Grass {
@@ -560,12 +645,20 @@ impl Grass {
     /// rings changed).
     pub fn terrain(&mut self, terrain: &TerrainResponse) {
         let started = Instant::now();
-        self.base = Some(paint(terrain, MASK_SIZE));
+        let base = paint(terrain, MASK_SIZE, self.land.as_ref());
+        self.heights = self.land.as_ref().map(|land| land.heights(&base));
+        self.base = Some(base);
         self.painted = None;
         tracing::debug!(
             "grass: painted the mask in {} ms",
             started.elapsed().as_millis()
         );
+    }
+
+    /// The land is in (W9): paint again on it, and stand the blades on it.
+    pub fn land(&mut self, field: Arc<GroundField>, cut: Vec<f32>, terrain: &TerrainResponse) {
+        self.land = Some(GrassLand { field, cut });
+        self.terrain(terrain);
     }
 
     /// The nodes the server has shown us, in server units, each with its
@@ -618,7 +711,14 @@ impl Grass {
             mask_width: mask.size as u32,
             mask_height: mask.size as u32,
             scale_by_mask: true,
-            height: GrassHeight::Flat(layer::GROUND),
+            height: match &self.heights {
+                Some(heights) => GrassHeight::Map {
+                    heights,
+                    width: HEIGHTS as u32,
+                    depth: HEIGHTS as u32,
+                },
+                None => GrassHeight::Flat(layer::GROUND),
+            },
         };
         if let Err(e) = gpu.set_grass_ground(&config(wind), &ground) {
             tracing::warn!("grass: {e}");
@@ -638,7 +738,7 @@ mod tests {
 
     /// Coarser than the game's, to keep the tests quick; still under a
     /// metre a texel.
-    const SIZE: usize = 1024;
+    const SIZE: usize = 1536;
 
     fn fixture() -> &'static TerrainResponse {
         static T: OnceLock<TerrainResponse> = OnceLock::new();
@@ -650,7 +750,7 @@ mod tests {
 
     fn mask() -> &'static Mask {
         static M: OnceLock<Mask> = OnceLock::new();
-        M.get_or_init(|| paint(fixture(), SIZE))
+        M.get_or_init(|| paint(fixture(), SIZE, None))
     }
 
     #[test]
@@ -764,7 +864,7 @@ mod tests {
             width: 30.0,
             bridges: vec![],
         });
-        let m = paint(&t, SIZE);
+        let m = paint(&t, SIZE, None);
         let at = |r: f64| m.value_at([CENTER_X + r, CENTER_Y]);
         assert_eq!(at(3400.0), 0);
         let (_, hi) = water::kerbed(&t.water_rings)[3];
@@ -846,6 +946,55 @@ mod tests {
         }
         // Nothing changed, nothing written.
         assert!(patches(base, &sets[1], &sets[1]).is_empty());
+    }
+
+    #[test]
+    fn in_the_wilds_the_grass_keeps_to_the_meadows() {
+        // W9: on the land, nothing grows on the high ground or in the
+        // water's beds, and the low hills are still meadow.
+        let sampled = crate::world::land::tests::fixture_land();
+        let land = GrassLand {
+            field: Arc::new(crate::world::land::field(sampled.field.heightmap().clone_heights())),
+            cut: sampled.cut.clone(),
+        };
+        let m = paint(fixture(), SIZE, Some(&land));
+        let (mut high, mut wet, mut low, mut low_grows) = (0, 0, 0, 0);
+        for k in 0..720 {
+            let a = (k as f64).to_radians() * 0.5;
+            for s in 0..40 {
+                let r = land::FROM + 100.0 + s as f64 * 50.0;
+                if r > GRASS_EDGE - EDGE_IN {
+                    break;
+                }
+                // The middle of the texel there, where it was painted.
+                let [i, j] = m.texel_of([CENTER_X + r * a.cos(), CENTER_Y + r * a.sin()]);
+                let p = m.at(i as usize, j as usize);
+                let at = to_world(p[0], p[1]);
+                let rise = land.field.height_at(at[0], at[1]).unwrap() - layer::GROUND;
+                let v = m.value_at(p);
+                if rise > HIGH.1 as f32 {
+                    high += 1;
+                    assert_eq!(v, 0, "grass {v} {rise} m up at {p:?}");
+                } else if land::cut_at(&land.cut, at) > WET.1 as f32 {
+                    wet += 1;
+                    assert_eq!(v, 0, "grass {v} in a bed at {p:?}");
+                } else if rise < 8.0 && land.meadow(p) > 0.9 {
+                    low += 1;
+                    low_grows += (v > 0) as usize;
+                }
+            }
+        }
+        assert!(high > 100 && wet > 10 && low > 1000, "{high} high, {wet} wet, {low} low");
+        assert!(low_grows * 10 > low * 8, "{low_grows} of {low} low meadows grow");
+        // The blades stand on the land.
+        let heights = land.heights(&m);
+        let (origin, size) = m.world_rect();
+        let cell = size[0] / HEIGHTS as f32;
+        for (i, j) in [(300, 1700), (1900, 1000), (1024, 100)] {
+            let (x, z) = (origin[0] + (i as f32 + 0.5) * cell, origin[1] + (j as f32 + 0.5) * cell);
+            let want = land.field.height_at(x, z).unwrap();
+            assert!((heights[j * HEIGHTS + i] - want).abs() < 1e-4);
+        }
     }
 
     #[test]

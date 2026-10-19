@@ -20,8 +20,8 @@ const VFOV: f64 = 70.0;
 /// The camera's near plane (scene `[camera] near`): geometry nearer than
 /// this is cut away, so the camera keeps at least this far from anything.
 const NEAR: f32 = 1.0;
-/// The world's ground fades out by here (P3.2), in metres.
-const WORLD_R: f64 = 400.0;
+/// The world's edge (r6000), in metres.
+const WORLD_R: f64 = 600.0;
 
 struct Rig {
     engine: Engine,
@@ -35,11 +35,23 @@ struct Pose {
 
 impl Rig {
     fn load() -> Self {
+        Self::load_on(None)
+    }
+
+    /// The rig on the fixture's land (W9): `cap_ground_at` reads `field`
+    /// rather than the game's land, which tests leave unset.
+    fn load_on(field: Option<&'static flint_player::GroundField>) -> Self {
         let mut engine = Engine::new();
         // As flint-script sets it (engine.rs), or the deeper expressions
         // here fail to parse.
         engine.set_max_expr_depths(128, 128);
         script_api::register(&mut engine, &Shared::default());
+        if let Some(field) = field {
+            engine.register_fn("cap_ground_at", move |x: f64, z: f64| {
+                let rise = crate::world::land::rise_on(field, [x as f32, z as f32]);
+                (GROUND + rise) as f64
+            });
+        }
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/camera.rhai");
         let ast = engine.compile_file(path).expect("camera.rhai compiles");
         Self { engine, ast }
@@ -205,6 +217,45 @@ fn the_camera_never_goes_into_the_land_or_the_tower() {
             }
         }
     }
+}
+
+#[test]
+fn in_the_wilds_the_camera_keeps_over_the_land_and_sees_the_point() {
+    // W9: across the ranges, at every zoom up to the district and every
+    // yaw, the camera stands clear of the ground under it, looks at the
+    // ground under the point, and no hill stands in the way.
+    let field = crate::world::land::tests::fixture_field();
+    let rig = Rig::load_on(Some(field));
+    let ground = |x: f32, z: f32| GROUND + crate::world::land::rise_on(field, [x, z]);
+    let mut checked = 0;
+    let mut risen = 0;
+    for r in [420.0, 470.0, 520.0, 560.0, 590.0] {
+        for k in 0..24 {
+            let a = k as f64 * std::f64::consts::TAU / 24.0;
+            let (fx, fz) = (r * a.cos(), r * a.sin());
+            for zoom in zooms().take_while(|&z| z <= 0.6).step_by(10) {
+                for yaw in yaws().step_by(4) {
+                    let pose = rig.pose(fx, fz, zoom, yaw);
+                    let ([px, py, pz], [tx, ty, tz]) = (pose.p, pose.t);
+                    assert!((ty - ground(tx, tz)).abs() < 1e-3, "looks at the ground");
+                    assert!(py >= ground(px, pz) + 1.4, "into the land at {:?}", pose.p);
+                    // The line from the camera to the point, a metre at a time.
+                    let len = ((px - tx).powi(2) + (pz - tz).powi(2)).sqrt();
+                    let n = (len as usize).max(2);
+                    for i in 1..n {
+                        let t = i as f32 / n as f32;
+                        let (x, z) = (tx + (px - tx) * t, tz + (pz - tz) * t);
+                        let y = ty + (py - ty) * t;
+                        // Between the dozen places the rig checks, a little slack.
+                        assert!(y >= ground(x, z) - 0.5, "a hill in the way from {:?}", pose.p);
+                    }
+                    checked += 1;
+                    risen += (ty > GROUND + 5.0) as usize;
+                }
+            }
+        }
+    }
+    assert!(risen * 3 > checked, "{risen} of {checked} on the hills");
 }
 
 #[test]
