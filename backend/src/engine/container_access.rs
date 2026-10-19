@@ -519,6 +519,7 @@ mod db_tests {
                 zone: "rural".into(),
             }],
             parks: Vec::new(),
+            land: Default::default(),
         };
         let mut game = GameState::with_terrain(WorldGenParams::default(), terrain);
         let mut node = |x: f64| {

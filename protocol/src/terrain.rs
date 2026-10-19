@@ -1,5 +1,5 @@
 //! The `GET /terrain` response: water rings with their bridges, the road network,
-//! the terrain-level plots and the suburb's parks.
+//! the terrain-level plots, the suburb's parks and the params of the land's height.
 //!
 //! The backend's generator builds these types directly, so the response is the
 //! generated terrain as-is.
@@ -27,6 +27,11 @@ pub struct TerrainResponse {
     /// Defaults to none, so payloads from before them still parse.
     #[serde(default)]
     pub parks: Vec<TerrainPark>,
+    /// What shapes the height of the land (W2, #195). Clients compute the
+    /// height from these with `land::height_at`; the heights never go on the
+    /// wire. Defaults to the default land, so payloads from before it parse.
+    #[serde(default)]
+    pub land: crate::land::LandParams,
     /// A stable hash of this terrain, which changes whenever the terrain does.
     /// Also sent as the response's ETag. Optional so older payloads still parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]

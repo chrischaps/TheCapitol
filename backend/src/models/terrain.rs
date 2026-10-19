@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
 
 use capitol_protocol::rules;
+use capitol_protocol::land::LandParams;
 
 use super::geom::polyline_length;
 use super::street_plan;
@@ -192,6 +193,9 @@ pub struct WorldGenParams {
     pub guild_plot_frontage: f64,
     // Seeds
     pub seed: u64,
+    // The height of the wilds (W2, #195). Its own seed, so reseeding the
+    // suburb leaves the ranges standing.
+    pub land: LandParams,
 }
 
 impl WorldGenParams {
@@ -244,6 +248,7 @@ impl Default for WorldGenParams {
             rural_plot_depth: 150.0,
             guild_plot_frontage: 150.0,
             seed: 42,
+            land: LandParams::default(),
         }
     }
 }
@@ -265,6 +270,9 @@ pub struct TerrainConfig {
     /// The suburb's parks, from the open ground its lots leave (#129).
     #[serde(default)]
     pub parks: Vec<TerrainPark>,
+    /// The params of the land's height (W2, #195), which `/terrain` carries.
+    #[serde(default)]
+    pub land: LandParams,
 }
 
 /// Catmull-Rom spline interpolation for smooth curves
@@ -642,6 +650,7 @@ impl TerrainConfig {
             roads: Vec::new(),
             terrain_plots: Vec::new(),
             parks: Vec::new(),
+            land: params.land.clone(),
         };
 
         // Generate roads using params
@@ -1367,7 +1376,10 @@ mod tests {
         // their ids are the same, no corner is off by more than 0.015, and 11
         // roads gained or lost a collinear vertex without moving. The seeded
         // nodes moved with the migration, and none needs fitting.
-        assert_eq!(TerrainConfig::get_default().version(), "b3df08b1b90c847f");
+        //
+        // W2 (#195) put the land's params on the terrain (`land`), so the
+        // hash covers them. No road, lot, park or node moved.
+        assert_eq!(TerrainConfig::get_default().version(), "cdd82ff6a9f2f150");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one

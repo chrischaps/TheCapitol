@@ -259,6 +259,7 @@ mod tests {
             roads: vec![],
             terrain_plots: vec![],
             parks: vec![],
+            land: Default::default(),
             version: Some(version.into()),
         }
     }

@@ -424,6 +424,7 @@ mod tests {
                 })
                 .collect(),
             parks: vec![],
+            land: Default::default(),
             version: None,
         }
     }

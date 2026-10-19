@@ -1,0 +1,546 @@
+//! The height of the land (W2, #195).
+//!
+//! The wilds rise from the rural edge into ranges. The height is a pure
+//! function of a position and [`LandParams`], so the server and every client
+//! compute the same ground from the params alone: only the params go on the
+//! wire (`/terrain`'s `land`), never the heights.
+//!
+//! - Inside the rural edge (r3800) the height is exactly 0, so nothing in the
+//!   city moves. The foothills rise from [`LandParams::foothill_radius`].
+//! - Rolling ground is fBm over seeded gradient noise. The ranges are ridged
+//!   noise, gathered into [`LandParams::ridge_count`] massifs round the ring.
+//!   With eight, the valleys between them open where the eight arterials leave
+//!   the city, so the wild trails (W5) can climb them to passes.
+//! - The noise is keyed on the offset from the world centre, never on raw
+//!   coordinates, so moving the world (as W1 did) doesn't move the land.
+//! - Everything is `+ - * /`, `floor`, `sqrt` and [`StableMath`]: the same bits
+//!   on every platform (#180). `land::tests` pins a table of them.
+
+use serde::{Deserialize, Serialize};
+
+use crate::fmath::StableMath;
+use crate::rules;
+
+/// What shapes the land. Lengths are world units.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(default)]
+pub struct LandParams {
+    /// Seeds every noise field.
+    pub seed: u64,
+    /// How many massifs stand round the ring, with a valley between each pair.
+    pub ridge_count: u32,
+    /// The bearing of the first valley, in degrees (0 = east, 90 = south, as
+    /// the bridges'). The others follow every 360 / `ridge_count`.
+    pub valley_bearing_degrees: f64,
+    /// How far, in radians, the massifs wander off their even spacing.
+    pub massif_wander: f64,
+    /// How much of a massif's height its valleys keep, 0 to 1.
+    pub valley_floor: f64,
+    /// Where the ground starts to rise. Never inside the rural edge: the
+    /// height is 0 to `max(foothill_radius, RURAL_OUTER_RADIUS)`.
+    pub foothill_radius: f64,
+    /// Where the ranges reach their full height.
+    pub range_radius: f64,
+    /// About the height of the highest crests (one in a thousand points of the
+    /// wilds); a few summits stand a little over it.
+    pub peak_height: f64,
+    /// The height of the rolling ground under the ranges.
+    pub rolling_height: f64,
+    /// The longest wavelength of the rolling ground.
+    pub rolling_wavelength: f64,
+    /// Octaves of rolling ground; each halves the wavelength and the height.
+    pub rolling_octaves: u32,
+    /// The longest wavelength of the ridges.
+    pub ridge_wavelength: f64,
+    /// Octaves of ridges.
+    pub ridge_octaves: u32,
+}
+
+impl Default for LandParams {
+    fn default() -> Self {
+        Self {
+            seed: 42,
+            ridge_count: 8,
+            valley_bearing_degrees: 0.0,
+            massif_wander: 0.3,
+            valley_floor: 0.2,
+            foothill_radius: 3900.0,
+            range_radius: 5600.0,
+            peak_height: 640.0,
+            rolling_height: 70.0,
+            rolling_wavelength: 1100.0,
+            rolling_octaves: 5,
+            ridge_wavelength: 2200.0,
+            ridge_octaves: 5,
+        }
+    }
+}
+
+// Each noise field draws from its own stream of the seed.
+const ROLLING: u64 = 1;
+const RIDGES: u64 = 2;
+const WANDER: u64 = 3;
+const MASSIF: u64 = 4;
+
+/// How deep the foothills are, from where they start to full rolling ground.
+const FOOTHILL_DEPTH: f64 = 700.0;
+
+/// Scales the squared ridges so the highest crests come near `peak_height`
+/// (the ridged noise seldom nears 1). Measured with `land_relief`.
+const RIDGE_GAIN: f64 = 1.6;
+
+/// About a massif's width at the ranges, so each stands its own height.
+const MASSIF_WAVELENGTH: f64 = 3600.0;
+
+/// The height of the ground at a world position.
+pub fn height_at(x: f64, y: f64, land: &LandParams) -> f64 {
+    let (dx, dy) = (x - rules::CENTER_X, y - rules::CENTER_Y);
+    let r = (dx * dx + dy * dy).sqrt();
+    let foothill = land.foothill_radius.max(rules::RURAL_OUTER_RADIUS);
+    if r <= foothill {
+        return 0.0;
+    }
+    // The rolling ground comes up first, over the foothills; the ranges keep
+    // rising until `range_radius`.
+    let hills = smoothstep((r - foothill) / FOOTHILL_DEPTH);
+    let ranges = smoothstep((r - foothill) / (land.range_radius - foothill).max(1.0));
+
+    let rolling = 0.5 + 0.5 * fbm(land.seed, ROLLING, dx, dy, land.rolling_wavelength, land.rolling_octaves);
+    let crest = ridged(land.seed, RIDGES, dx, dy, land.ridge_wavelength, land.ridge_octaves);
+    hills * land.rolling_height * rolling
+        + ranges * land.peak_height * massif(land, dx, dy) * RIDGE_GAIN * crest * crest
+}
+
+/// How much of the ranges' height stands here, 0 to 1: the massifs round the
+/// ring, with valleys between them and some higher than others.
+fn massif(land: &LandParams, dx: f64, dy: f64) -> f64 {
+    if land.ridge_count == 0 {
+        return 1.0;
+    }
+    let bearing = dy.stable_atan2(dx) + land.massif_wander * fbm(land.seed, WANDER, dx, dy, 2400.0, 2);
+    let k = land.ridge_count as f64;
+    // 0 on a valley's line, 1 midway between two. Integer k keeps it seamless
+    // where atan2 wraps.
+    let lobe = 0.5 - 0.5 * (k * (bearing - land.valley_bearing_degrees.to_radians())).stable_cos();
+    // Some massifs stand higher than others: noise at about a massif's width.
+    let stature = 0.75 + 0.25 * fbm(land.seed, MASSIF, dx, dy, MASSIF_WAVELENGTH, 1);
+    let floor = land.valley_floor.clamp(0.0, 1.0);
+    stature * (floor + (1.0 - floor) * lobe)
+}
+
+/// The steepness of the ground: rise over run, so 1.0 is 45°.
+pub fn slope_at(x: f64, y: f64, land: &LandParams) -> f64 {
+    let (gx, gy) = gradient_at(x, y, land);
+    (gx * gx + gy * gy).sqrt()
+}
+
+/// The ground's unit normal, as (x, y, up): world x and y, and up the third.
+pub fn normal_at(x: f64, y: f64, land: &LandParams) -> (f64, f64, f64) {
+    let (gx, gy) = gradient_at(x, y, land);
+    let len = (gx * gx + gy * gy + 1.0).sqrt();
+    (-gx / len, -gy / len, 1.0 / len)
+}
+
+/// How far either side `gradient_at` samples.
+const GRADIENT_STEP: f64 = 0.5;
+
+/// The height's rate of change along x and along y, by central differences.
+pub fn gradient_at(x: f64, y: f64, land: &LandParams) -> (f64, f64) {
+    let h = GRADIENT_STEP;
+    let gx = (height_at(x + h, y, land) - height_at(x - h, y, land)) / (2.0 * h);
+    let gy = (height_at(x, y + h, land) - height_at(x, y - h, land)) / (2.0 * h);
+    (gx, gy)
+}
+
+fn smoothstep(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Fractal noise in about [-1, 1]: `octaves` layers of gradient noise, each
+/// at half the wavelength and half the weight of the one before.
+fn fbm(seed: u64, field: u64, dx: f64, dy: f64, wavelength: f64, octaves: u32) -> f64 {
+    let (mut sum, mut weight, mut total) = (0.0, 1.0, 0.0);
+    let (mut x, mut y) = rotate(dx / wavelength, dy / wavelength);
+    for octave in 0..octaves.max(1) {
+        let s = octave_seed(seed, field, octave);
+        let (ox, oy) = offset(s);
+        sum += weight * gradient_noise(s, x + ox, y + oy);
+        total += weight;
+        weight *= 0.5;
+        (x, y) = rotate(x * 2.0, y * 2.0);
+    }
+    sum / total
+}
+
+/// Ridged fractal noise in [0, 1]: sharp crests where the noise crosses zero.
+/// Each octave is weighted by the crest under it, so the detail gathers on
+/// the ridgelines and the valleys stay smooth.
+fn ridged(seed: u64, field: u64, dx: f64, dy: f64, wavelength: f64, octaves: u32) -> f64 {
+    let (mut sum, mut weight, mut total, mut crest) = (0.0, 1.0, 0.0, 1.0);
+    let (mut x, mut y) = rotate(dx / wavelength, dy / wavelength);
+    for octave in 0..octaves.max(1) {
+        let s = octave_seed(seed, field, octave);
+        let (ox, oy) = offset(s);
+        let signal = 1.0 - gradient_noise(s, x + ox, y + oy).abs();
+        let signal = signal * signal * crest;
+        crest = (signal * 2.0).clamp(0.0, 1.0);
+        sum += weight * signal;
+        total += weight;
+        weight *= 0.5;
+        (x, y) = rotate(x * 2.0, y * 2.0);
+    }
+    sum / total
+}
+
+/// Turns the domain by about 36.87° (a 3-4-5 triangle, so exact without
+/// trig). Each octave turns again, so no two share a lattice direction: the
+/// lattice's axes otherwise show as straight creases in the ridges.
+fn rotate(x: f64, y: f64) -> (f64, f64) {
+    (0.8 * x - 0.6 * y, 0.6 * x + 0.8 * y)
+}
+
+fn octave_seed(seed: u64, field: u64, octave: u32) -> u64 {
+    splitmix64(splitmix64(seed ^ field.wrapping_mul(0x9E37_79B9_7F4A_7C15)) ^ octave as u64)
+}
+
+/// A seeded shift of the lattice, so no two octaves share a grid point (and
+/// none sits on the world centre).
+fn offset(seed: u64) -> (f64, f64) {
+    let h = splitmix64(seed);
+    let unit = |bits: u64| (bits >> 11) as f64 / (1u64 << 53) as f64;
+    (unit(h) * 1024.0, unit(splitmix64(h)) * 1024.0)
+}
+
+/// The eight gradient directions, so no lattice point needs trig.
+const GRADIENTS: [(f64, f64); 8] = {
+    const D: f64 = core::f64::consts::FRAC_1_SQRT_2;
+    [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (D, D), (-D, D), (D, -D), (-D, -D)]
+};
+
+/// 2D gradient (Perlin) noise in about [-1, 1].
+fn gradient_noise(seed: u64, x: f64, y: f64) -> f64 {
+    let (x0, y0) = (x.floor(), y.floor());
+    let (fx, fy) = (x - x0, y - y0);
+    let (ix, iy) = (x0 as i64, y0 as i64);
+    let dot = |i: i64, j: i64, dx: f64, dy: f64| {
+        let (gx, gy) = GRADIENTS[(lattice_hash(seed, i, j) >> 61) as usize];
+        gx * dx + gy * dy
+    };
+    let n00 = dot(ix, iy, fx, fy);
+    let n10 = dot(ix + 1, iy, fx - 1.0, fy);
+    let n01 = dot(ix, iy + 1, fx, fy - 1.0);
+    let n11 = dot(ix + 1, iy + 1, fx - 1.0, fy - 1.0);
+    let (u, v) = (fade(fx), fade(fy));
+    let bottom = n00 + u * (n10 - n00);
+    let top = n01 + u * (n11 - n01);
+    (bottom + v * (top - bottom)) * core::f64::consts::SQRT_2
+}
+
+/// Perlin's quintic fade, 6t⁵ − 15t⁴ + 10t³.
+fn fade(t: f64) -> f64 {
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+fn lattice_hash(seed: u64, i: i64, j: i64) -> u64 {
+    splitmix64(seed ^ splitmix64(i as u64 ^ splitmix64(j as u64)))
+}
+
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fmath::StableMath;
+    use crate::rules::{CENTER_X, CENTER_Y, RURAL_OUTER_RADIUS};
+
+    fn at(r: f64, degrees: f64) -> (f64, f64) {
+        let a = degrees.to_radians();
+        (CENTER_X + r * a.stable_cos(), CENTER_Y + r * a.stable_sin())
+    }
+
+    #[test]
+    fn nothing_inside_the_rural_edge_rises() {
+        let land = LandParams::default();
+        for step in 0..=380 {
+            let r = step as f64 * 10.0;
+            for d in 0..72 {
+                let (x, y) = at(r, d as f64 * 5.0);
+                assert_eq!(height_at(x, y, &land), 0.0, "r{r} at {}°", d * 5);
+            }
+        }
+        // Even when the params ask for foothills inside it
+        let low = LandParams { foothill_radius: 2000.0, ..LandParams::default() };
+        let (x, y) = at(RURAL_OUTER_RADIUS, 30.0);
+        assert_eq!(height_at(x, y, &low), 0.0);
+    }
+
+    #[test]
+    fn the_wilds_rise_into_ranges() {
+        let land = LandParams::default();
+        let (mut peak, mut deep_sum, mut n) = (0.0f64, 0.0, 0);
+        for step in 0..200 {
+            let r = 5000.0 + step as f64 * 5.0;
+            for d in 0..360 {
+                let (x, y) = at(r, d as f64);
+                let h = height_at(x, y, &land);
+                assert!(h >= 0.0 && h.is_finite());
+                peak = peak.max(h);
+                deep_sum += h;
+                n += 1;
+            }
+        }
+        let (x, y) = at(3950.0, 10.0);
+        let foothill = height_at(x, y, &land);
+        assert!(foothill > 0.0 && foothill < 10.0, "foothills start gently: {foothill}");
+        assert!(peak > land.peak_height * 0.5, "the ranges stand up: {peak}");
+        assert!(peak < land.peak_height * RIDGE_GAIN + land.rolling_height);
+        assert!(deep_sum / n as f64 > 50.0, "the deep wilds aren't flat");
+    }
+
+    #[test]
+    fn valleys_open_on_the_arterials() {
+        // Averaged across the deep wilds, a bearing on an arterial stands
+        // lower than one between two.
+        let land = LandParams { massif_wander: 0.0, ..LandParams::default() };
+        let mean = |deg: f64| {
+            (0..400).map(|i| {
+                let (x, y) = at(4900.0 + i as f64 * 2.5, deg);
+                height_at(x, y, &land)
+            }).sum::<f64>() / 400.0
+        };
+        let valleys: f64 = (0..8).map(|k| mean(k as f64 * 45.0)).sum();
+        let crests: f64 = (0..8).map(|k| mean(k as f64 * 45.0 + 22.5)).sum();
+        assert!(valleys < crests * 0.6, "valleys {valleys} vs crests {crests}");
+    }
+
+    #[test]
+    fn the_land_is_continuous() {
+        let land = LandParams::default();
+        for i in 0..2000 {
+            let (x, y) = at(3850.0 + i as f64 * 1.07, i as f64 * 0.37);
+            let a = height_at(x, y, &land);
+            let b = height_at(x + 0.01, y, &land);
+            assert!((a - b).abs() < 0.2, "a step at ({x}, {y}): {a} vs {b}");
+        }
+        // No seam where atan2 wraps (due west)
+        let (x, y) = at(5200.0, 180.0);
+        let (a, b) = (height_at(x, y - 0.001, &land), height_at(x, y + 0.001, &land));
+        assert!((a - b).abs() < 0.01);
+    }
+
+    #[test]
+    fn slope_and_normal_agree() {
+        let land = LandParams::default();
+        let (x, y) = at(5300.0, 70.0);
+        let s = slope_at(x, y, &land);
+        let (nx, ny, nz) = normal_at(x, y, &land);
+        assert!(((nx * nx + ny * ny + nz * nz) - 1.0).abs() < 1e-12);
+        assert!(((nx * nx + ny * ny).sqrt() / nz - s).abs() < 1e-9);
+        let (cx, cy) = (CENTER_X + 100.0, CENTER_Y);
+        assert_eq!(slope_at(cx, cy, &land), 0.0);
+        assert_eq!(normal_at(cx, cy, &land), (0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn the_land_moves_with_the_centre() {
+        // Keyed on the offset from the centre: one height per offset,
+        // whatever the world's size. (W1's trap, #194.)
+        let land = LandParams::default();
+        let (x, y) = at(5000.0, 33.0);
+        let h = height_at(x, y, &land);
+        let (dx, dy) = (x - CENTER_X, y - CENTER_Y);
+        assert_eq!(height_at(CENTER_X + dx, CENTER_Y + dy, &land), h);
+    }
+
+    #[test]
+    fn seeds_make_different_ranges() {
+        let a = LandParams::default();
+        let b = LandParams { seed: 7, ..LandParams::default() };
+        let (x, y) = at(5400.0, 100.0);
+        assert_ne!(height_at(x, y, &a), height_at(x, y, &b));
+    }
+
+    /// The same bits on every platform: CI runs this on Linux, and it was
+    /// pinned on Windows. A change here means the land moved; say why.
+    #[test]
+    fn sample_heights_are_pinned() {
+        let land = LandParams::default();
+        let samples: Vec<u64> = SAMPLES
+            .iter()
+            .map(|&(x, y)| height_at(x, y, &land).to_bits() ^ slope_at(x, y, &land).to_bits().rotate_left(17))
+            .collect();
+        let shown: Vec<String> = samples.iter().map(|b| format!("0x{b:016X}")).collect();
+        assert_eq!(samples, PINNED, "now: [{}]", shown.join(", "));
+    }
+
+    const SAMPLES: [(f64, f64); 10] = [
+        (6000.0, 6000.0),
+        (9900.5, 6000.0),
+        (10123.25, 7311.75),
+        (1500.0, 3000.0),
+        (6200.0, 625.5),
+        (2117.0, 8890.0),
+        (11100.0, 4800.0),
+        (3333.3, 1444.4),
+        (8400.0, 10800.0),
+        (6000.0, 11999.0),
+    ];
+
+    const PINNED: [u64; 10] = [
+        0x0000000000000000, 0x9F9ADB4E9D9282B7, 0x7540528897F64368, 0x223FD30ADDFCB52B, 0x968D9C6476492A30,
+        0x583003B549F44063, 0xCCB1A1CD316166BC, 0xE70669B1C7404027, 0x42889123215AAF2C, 0x2E05CBD1961BECD9,
+    ];
+
+    /// Draws the land as a shaded relief, for review:
+    /// `LAND_RELIEF=relief.png cargo test -p capitol-protocol --release land_relief -- --ignored`
+    /// (`backend/tools/land-relief.ps1` does this for some seeds).
+    #[test]
+    #[ignore]
+    fn land_relief() {
+        let path = std::env::var("LAND_RELIEF").unwrap_or_else(|_| "land-relief.png".into());
+        let seed = std::env::var("LAND_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(42);
+        let size: usize = std::env::var("LAND_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(1200);
+        let land = LandParams { seed, ..LandParams::default() };
+        let (png, mut heights) = relief::draw(&land, size);
+        std::fs::write(&path, png).expect("write the relief");
+        heights.sort_by(f64::total_cmp);
+        let pct = |p: f64| heights[((heights.len() - 1) as f64 * p) as usize];
+        println!(
+            "relief: {path} (seed {seed}, {size}px). Wild heights: median {:.0}, p90 {:.0}, p99 {:.0}, p99.9 {:.0}, max {:.0}",
+            pct(0.5), pct(0.9), pct(0.99), pct(0.999), pct(1.0)
+        );
+    }
+
+    mod relief {
+        use super::super::*;
+        use crate::rules::{
+            CAPITOL_RADIUS, CENTER_X, CENTER_Y, GUILD_OUTER_RADIUS, RURAL_OUTER_RADIUS, SUBURBAN_OUTER_RADIUS,
+            TRADE_OUTER_RADIUS, URBAN_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS, WORLD_SIZE,
+        };
+
+        /// A hypsometric tint under a hillshade lit from the north-west, with
+        /// the city's zone rings faint in the middle and the arterials' bearings
+        /// ticked in the wilds.
+        /// The PNG, and the heights it drew past the rural edge.
+        pub fn draw(land: &LandParams, size: usize) -> (Vec<u8>, Vec<f64>) {
+            let mut wild = Vec::new();
+            let scale = WORLD_SIZE / size as f64;
+            let light = {
+                let (x, y, z) = (-1.0f64, -1.0f64, 1.6f64);
+                let l = (x * x + y * y + z * z).sqrt();
+                (x / l, y / l, z / l)
+            };
+            let mut rgb = vec![0u8; size * size * 3];
+            for py in 0..size {
+                for px in 0..size {
+                    let (x, y) = ((px as f64 + 0.5) * scale, (py as f64 + 0.5) * scale);
+                    let (dx, dy) = (x - CENTER_X, y - CENTER_Y);
+                    let r = (dx * dx + dy * dy).sqrt();
+                    let colour = if r > WILDERNESS_OUTER_RADIUS {
+                        [236.0, 230.0, 216.0]
+                    } else {
+                        let h = height_at(x, y, land);
+                        if r > RURAL_OUTER_RADIUS {
+                            wild.push(h);
+                        }
+                        let (nx, ny, nz) = normal_at(x, y, land);
+                        let shade = (nx * light.0 + ny * light.1 + nz * light.2).max(0.0) / light.2;
+                        let mut c = tint(h / land.peak_height);
+                        let mut s = 0.55 + 0.45 * shade.min(1.6);
+                        if r <= RURAL_OUTER_RADIUS {
+                            s = 1.0;
+                            let rings = [CAPITOL_RADIUS, TRADE_OUTER_RADIUS, GUILD_OUTER_RADIUS,
+                                URBAN_OUTER_RADIUS, SUBURBAN_OUTER_RADIUS, RURAL_OUTER_RADIUS];
+                            if rings.iter().any(|&ring| (r - ring).abs() < scale * 0.8) {
+                                c = [150.0, 140.0, 118.0];
+                            }
+                        }
+                        c.map(|v| v * s)
+                    };
+                    let i = (py * size + px) * 3;
+                    for k in 0..3 {
+                        rgb[i + k] = colour[k].round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+            (png(size, size, &rgb), wild)
+        }
+
+        /// Meadow to forest to bare rock to snow, by height over the peak.
+        fn tint(t: f64) -> [f64; 3] {
+            const STOPS: [(f64, [f64; 3]); 7] = [
+                (0.0, [196.0, 203.0, 158.0]),
+                (0.06, [160.0, 180.0, 120.0]),
+                (0.18, [104.0, 140.0, 92.0]),
+                (0.36, [128.0, 128.0, 96.0]),
+                (0.55, [150.0, 132.0, 112.0]),
+                (0.75, [178.0, 172.0, 166.0]),
+                (0.9, [246.0, 246.0, 244.0]),
+            ];
+            let t = t.clamp(0.0, 1.0);
+            for w in STOPS.windows(2) {
+                let ((a, ca), (b, cb)) = (w[0], w[1]);
+                if t <= b {
+                    let f = (t - a) / (b - a);
+                    return [0, 1, 2].map(|k| ca[k] + f * (cb[k] - ca[k]));
+                }
+            }
+            STOPS[STOPS.len() - 1].1
+        }
+
+        /// A PNG with stored (uncompressed) deflate blocks: no crate needed.
+        fn png(w: usize, h: usize, rgb: &[u8]) -> Vec<u8> {
+            let mut raw = Vec::with_capacity(h * (w * 3 + 1));
+            for row in rgb.chunks(w * 3) {
+                raw.push(0);
+                raw.extend_from_slice(row);
+            }
+            let mut z = vec![0x78, 0x01];
+            let blocks: Vec<&[u8]> = raw.chunks(65535).collect();
+            for (i, block) in blocks.iter().enumerate() {
+                z.push((i + 1 == blocks.len()) as u8);
+                let len = block.len() as u16;
+                z.extend_from_slice(&len.to_le_bytes());
+                z.extend_from_slice(&(!len).to_le_bytes());
+                z.extend_from_slice(block);
+            }
+            let (mut a, mut b) = (1u32, 0u32);
+            for &byte in &raw {
+                a = (a + byte as u32) % 65521;
+                b = (b + a) % 65521;
+            }
+            z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+
+            let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+            let mut ihdr = Vec::new();
+            ihdr.extend_from_slice(&(w as u32).to_be_bytes());
+            ihdr.extend_from_slice(&(h as u32).to_be_bytes());
+            ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+            chunk(&mut out, b"IHDR", &ihdr);
+            chunk(&mut out, b"IDAT", &z);
+            chunk(&mut out, b"IEND", &[]);
+            out
+        }
+
+        fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            out.extend_from_slice(kind);
+            out.extend_from_slice(data);
+            let mut crc = !0u32;
+            for &byte in kind.iter().chain(data) {
+                crc ^= byte as u32;
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 { 0xEDB8_8320 ^ (crc >> 1) } else { crc >> 1 };
+                }
+            }
+            out.extend_from_slice(&(!crc).to_be_bytes());
+        }
+    }
+}

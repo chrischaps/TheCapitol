@@ -8,11 +8,13 @@
 //! - [`terrain`]: the `/terrain` response
 //! - [`rules`]: speeds, ranges, zones, quality grades and the water-crossing test
 //! - [`fmath`]: trig that gives the same bits on every platform
+//! - [`land`]: the height of the ground, a pure function of `LandParams`
 //!
 //! The `backend` feature adds the server-only derives (utoipa schemas, sqlx rows).
 //! Clients leave it off.
 
 pub mod fmath;
+pub mod land;
 pub mod rest;
 pub mod rules;
 pub mod terrain;

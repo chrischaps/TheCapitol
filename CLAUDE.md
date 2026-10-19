@@ -108,7 +108,7 @@ Copy `backend/.env.example` to `backend/.env`. Default config:
 
 ### Shared Protocol (`protocol/`)
 
-Crate `capitol-protocol`, a root-workspace member that both the backend and the Flint client depend on. It contains `ws.rs` (`ClientMessage`/`ServerMessage`), `rest.rs` (request and response DTOs), `terrain.rs` (`/terrain` types, which the generator also uses) and `rules.rs` (ranges, speeds, `Zone` and the one table of zone radii, quality grades, the water-crossing test). The backend re-exports these from `models/`. Server-only derives (utoipa, sqlx) sit behind its `backend` feature. Any wire change goes here. `tests/fixtures/` holds one JSON fixture per WS message type, and they must round-trip byte for byte.
+Crate `capitol-protocol`, a root-workspace member that both the backend and the Flint client depend on. It contains `ws.rs` (`ClientMessage`/`ServerMessage`), `rest.rs` (request and response DTOs), `terrain.rs` (`/terrain` types, which the generator also uses) and `rules.rs` (ranges, speeds, `Zone` and the one table of zone radii, quality grades, the water-crossing test) and `land.rs` (the wilds' height field, a pure function of `LandParams`, W2). The backend re-exports these from `models/`. Server-only derives (utoipa, sqlx) sit behind its `backend` feature. Any wire change goes here. `tests/fixtures/` holds one JSON fixture per WS message type, and they must round-trip byte for byte.
 
 ### Backend Structure (`backend/src/`)
 
@@ -279,7 +279,7 @@ Recipe weights are defined in `recipes` table. See GDD Section 6 for details.
 Concentric zones from center outward:
 Capitol → Bailey → Trade District → Guild District → Urban → Suburban → Rural → Wilderness
 
-The Wilderness is "the wilds" (`the-capitol-wilds.md`): planned as r3800 to r6000 once the world grows to 12000 (#194), with a shared height field (`capitol_protocol::land`), rivers and lakes that block, streams you wade, wild trails, and no plots. Since W1 (#194) the world is 12000 across, centred on (6000, 6000), and the Wilderness runs r3800 to r6000, the edge of the world disc (`rules::in_world`). Until W2 and W3 land it's flat and empty.
+The Wilderness is "the wilds" (`the-capitol-wilds.md`): planned as r3800 to r6000 once the world grows to 12000 (#194), with a shared height field (`capitol_protocol::land`), rivers and lakes that block, streams you wade, wild trails, and no plots. Since W1 (#194) the world is 12000 across, centred on (6000, 6000), and the Wilderness runs r3800 to r6000, the edge of the world disc (`rules::in_world`). Since W2 (#195) the land rises there: `land::height_at` is 0 out to r3900, then foothills and eight massifs whose valleys open on the arterials (`backend/tools/land-relief.ps1` draws it). Until W3 there's no wild water, and the clients still draw it flat until W9.
 
 Moats and canals are water barriers. Players can only cross at bridges. Movement is blocked by water unless at a crossing point.
 

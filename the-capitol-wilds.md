@@ -46,6 +46,7 @@ Chris decided the shape on 2026-10-18: grow the world, use a real height field, 
 - **How it's made:** seeded fBm for the rolling ground, plus ridged noise for the ranges. It goes through `fmath::StableMath`, so it's identical on every platform (#180).
 - **Nothing inside the rural edge moves:** the height is exactly 0 inside r3800, and the foothills rise from about r3900.
 - **What's on the wire:** only `LandParams`, on `/terrain`. Clients compute the height and build their own mesh, so the heights never cross the wire and can never disagree.
+- **The valleys line up with the arterials.** The ranges gather into `ridge_count` massifs round the ring, and with eight the valleys between them lie on the arterials' bearings, so W5's trails have valleys to climb. `normal_at` returns (x, y, up); a client maps it to its own axes.
 
 ### WD3. Water comes from the land ([W3 #196](https://github.com/chrischaps/TheCapitol/issues/196))
 
@@ -101,7 +102,7 @@ Chris decided the shape on 2026-10-18: grow the world, use a real height field, 
 |---|---|---|---|---|
 | W0 | [#193](https://github.com/chrischaps/TheCapitol/issues/193) | This plan, and the GDD, economy, Flint and milestones docs reconciled with it | S | – |
 | W1 | [#194](https://github.com/chrischaps/TheCapitol/issues/194) | The world grows to 12000: shift migration, radii, bounds, spawn, and `has_plots` on the claim path. **Done.** As built: migration `20261107_001_world_grows.sql`; `rules::in_world` (the r6000 disc) guards both move paths, and Flint's `cap_move` pulls a click past the edge onto it; `claim` checks `has_plots` for the plot's zone and for where it stands. The woods' noise is laid round the tower (`node_spawn::WOODS_ORIGIN`), so E2.3's trees stayed put. The Flint grass mask stays r4000 (`GRASS_EDGE`) until W9. #118: option 1, radii aren't tunable at runtime | M | – |
-| W2 | [#195](https://github.com/chrischaps/TheCapitol/issues/195) | `capitol_protocol::land`: the height field | M | W1 |
+| W2 | [#195](https://github.com/chrischaps/TheCapitol/issues/195) | `capitol_protocol::land`: the height field. **Done.** As built: Perlin fBm (rolling ground, 70 high) plus squared ridged noise (the ranges, crests near `peak_height` 640, a few summits to about 830), each octave's domain turned by a 3-4-5 rotation so the lattice never shows. The ranges stand in `ridge_count` (8) massifs whose valleys open on the arterials' bearings, ready for W5; they rise from r3900 to full height at r5600. Keyed on the offset from the centre. `LandParams` is on `TerrainConfig` and `/terrain` as `land`, and in `WorldGenParams`, with a seed of its own. `land::tests::sample_heights_are_pinned` pins the bits (checked on Linux too). The relief: `backend/tools/land-relief.ps1` | M | W1 |
 | W3 | [#196](https://github.com/chrischaps/TheCapitol/issues/196) | Hydrology: lakes, rivers, streams, fords and the carve, on `/terrain` | L | W2 |
 | W4 | [#197](https://github.com/chrischaps/TheCapitol/issues/197) | Movement on the land | M | W3 |
 | W5 | [#198](https://github.com/chrischaps/TheCapitol/issues/198) | Wild trails | M | W3 |
