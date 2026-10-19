@@ -13,7 +13,9 @@
 //! The rules (the mean, the default pick) are `rules::stacking::Units`, shared
 //! with the clients.
 
-use capitol_protocol::rules::stacking::{Pick, Units};
+#[cfg(test)]
+use capitol_protocol::rules::stacking::Pick;
+use capitol_protocol::rules::stacking::Units;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -83,6 +85,7 @@ pub async fn take_units(
 
 /// Take `n` units off the stack `item_id`, chosen by `pick`, deleting it if
 /// that's every unit. `None`, and nothing changed, if it holds fewer.
+#[cfg(test)]
 pub async fn take(
     conn: &mut PgConnection,
     item_id: Uuid,

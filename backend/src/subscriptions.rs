@@ -147,6 +147,7 @@ async fn lapse(db: &PgPool, account_id: Uuid) -> Result<Option<Lapse>, sqlx::Err
 }
 
 /// Why a subscriber-only request was refused, for the client to show.
+#[allow(dead_code)] // reached only through Subscriber, which no route uses yet (#217)
 pub fn refusal(subscription: &Subscription) -> String {
     match subscription.status {
         SubscriptionStatus::Lapsed => match subscription.until {
@@ -164,7 +165,7 @@ pub fn refusal(subscription: &Subscription) -> String {
 /// request from an account without a running subscription is refused with a
 /// `403` and [`refusal`]'s reason.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // E4.3 (#178) is the first route behind it
+#[allow(dead_code)] // no route behind it yet (#217)
 pub struct Subscriber {
     pub account_id: Uuid,
     pub subscription: Subscription,

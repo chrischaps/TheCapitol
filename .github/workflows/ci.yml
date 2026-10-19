@@ -60,11 +60,15 @@ jobs:
       - name: Tests
         run: cargo test -p capitol-protocol -p capitol-backend
       # The database tests are `#[ignore]`d so a plain `cargo test` passes
-      # without the docker stack. Here the stack is up, so run them. The two
+      # without the docker stack. Here the stack is up, so run them. The four
       # skipped are tools, not tests: one prints migration rows, one renders
-      # suburb plans.
+      # suburb plans, and two write the default world to a path from an env
+      # var ($TERRAIN_DUMP, $TERRAIN_FIXTURE). A new ignored tool goes here.
       - name: Database tests
-        run: cargo test -p capitol-backend -- --ignored --skip print_node_moves --skip suburb_plan_report
+        run: >-
+          cargo test -p capitol-backend -- --ignored
+          --skip print_node_moves --skip suburb_plan_report
+          --skip dump_default_terrain --skip capture_terrain_fixture
 
   flint-client:
     name: Flint client

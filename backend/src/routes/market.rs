@@ -656,6 +656,7 @@ mod tests {
     /// door they're allowed; and an online player's live position counts, not
     /// the saved one.
     #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
     async fn placing_and_collecting_happen_at_the_exchange_hall(db: PgPool) {
         use crate::models::{ActionState, PlayerState, TerrainConfig, WorldGenParams};
         use capitol_protocol::rules::{SPAWN_X, SPAWN_Y};

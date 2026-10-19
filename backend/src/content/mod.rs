@@ -227,6 +227,7 @@ pub struct RecipeDef {
 
 impl ItemDef {
     /// As the engine holds it once it's loaded from `item_types`.
+    #[cfg(test)]
     pub fn to_item_type(&self) -> crate::models::ItemType {
         crate::models::ItemType {
             id: self.id.clone(),
@@ -244,6 +245,7 @@ impl ItemDef {
 
 impl RecipeDef {
     /// As the engine holds it once it's loaded from `recipes`, weights filled in.
+    #[cfg(test)]
     pub fn to_recipe(&self) -> crate::models::Recipe {
         use crate::models::{QualityWeights, RecipeInput, RecipeOutput, RecipeRow};
         let q = &self.quality_weights;
