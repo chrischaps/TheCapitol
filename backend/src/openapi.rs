@@ -20,7 +20,9 @@ use capitol_protocol::rest::{
     MarketItemSummary, MarketOrder, MarketSummaryResponse, MarketTrade, PlaceOrder,
 };
 use capitol_protocol::rules::market::{GradeRule, OrderSide, OrderStatus};
-use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPark, TerrainPlot, TerrainResponse, WaterRing};
+use capitol_protocol::terrain::{
+    Bridge, Landmark, LandmarkKind, RoadSegment, RoadType, TerrainPark, TerrainPlot, TerrainResponse, WaterRing,
+};
 
 /// Security scheme modifier for JWT Bearer authentication
 struct SecurityAddon;
@@ -241,6 +243,8 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         RoadType,
         TerrainPlot,
         TerrainPark,
+        Landmark,
+        LandmarkKind,
     ))
 )]
 pub struct ApiDoc;

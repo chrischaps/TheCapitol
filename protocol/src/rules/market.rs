@@ -26,6 +26,16 @@ pub const MAX_PRICE: i64 = 1_000_000_000;
 pub const MAX_ORDER_QUANTITY: i32 = 10_000;
 /// How long an order rests before it expires and its escrow comes back: 7 days.
 pub const ORDER_LIFETIME_SECS: i64 = 7 * 24 * 60 * 60;
+/// How close to the Exchange hall's footprint you must stand to place an
+/// order or collect from your market box (D6, E3.4). Browsing, the chart and
+/// cancelling work from anywhere. It's the station range, so standing on the
+/// avenue outside is enough.
+pub const HALL_RANGE: f64 = super::STATION_INTERACTION_RANGE;
+
+/// Whether `(x, y)` is close enough to `hall` to place or collect.
+pub fn at_the_hall(hall: &crate::terrain::Landmark, x: f64, y: f64) -> bool {
+    hall.distance_to(x, y) <= HALL_RANGE
+}
 
 /// Which side of the book an order is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

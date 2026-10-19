@@ -42,8 +42,8 @@ use capitol_core::harvest::Note;
 use capitol_core::net::ConnectionState;
 use capitol_core::onboarding::Did;
 use capitol_core::plot::Offer;
-use capitol_core::protocol::rules::{water_name, STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
-use capitol_core::protocol::terrain::TerrainResponse;
+use capitol_core::protocol::rules::{self, water_name, STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
+use capitol_core::protocol::terrain::{LandmarkKind, TerrainResponse};
 use capitol_core::state::Activity;
 use capitol_core::station::{Note as PlaceNote, Phase as PlacePhase};
 use flint_player::{ExtensionCtx, PlayerExtension};
@@ -923,6 +923,13 @@ impl PlayerExtension for CapitolExtension {
                 session.watch_market(self.market.watching());
                 let state = session.state();
                 let market = state.market();
+                // D6: placing and collecting need the Exchange hall
+                let away_from_hall = self
+                    .terrain
+                    .landmark(LandmarkKind::ExchangeHall)
+                    .zip(state.local_player())
+                    .filter(|(hall, me)| !rules::market::at_the_hall(hall, me.x, me.y))
+                    .map(|(hall, me)| hall.distance_to(me.x, me.y));
                 let view = ui::market::View {
                     catalog: state.catalog(),
                     summary: session.market_summary().map(|s| s.items.as_slice()),
@@ -933,6 +940,7 @@ impl PlayerExtension for CapitolExtension {
                     strands: state.strands(),
                     busy: session.market_busy(),
                     refused: session.market_refused(now),
+                    away_from_hall,
                 };
                 match self.market.show(ctx, &mut self.icons, &view) {
                     Some(ui::market::Action::Place(order)) => session.place_order(order),

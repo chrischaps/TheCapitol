@@ -85,6 +85,9 @@ pub struct View<'a> {
     pub busy: bool,
     /// Why the last one was refused, while it's fresh
     pub refused: Option<&'a str>,
+    /// How far you are from the Exchange hall, when that's further than
+    /// `HALL_RANGE`: placing and collecting happen only there (D6, E3.4)
+    pub away_from_hall: Option<f64>,
 }
 
 /// The order form, as typed.
@@ -819,8 +822,19 @@ impl MarketPanel {
             OrderSide::Buy => "buy",
             OrderSide::Sell => "sell",
         };
+        if let Some(away) = view.away_from_hall {
+            ui.add_space(4.0);
+            ui.label(
+                theme::dim(format!(
+                    "Orders are placed at the Exchange hall, on the Capitol avenue. You're {} away.",
+                    grouped(away.round() as i64)
+                ))
+                .size(size::SMALL),
+            );
+        }
         let (text, enabled) = match &quote {
             _ if view.busy => ("Sending…".to_owned(), false),
+            _ if view.away_from_hall.is_some() => ("At the Exchange hall".to_owned(), false),
             Ok(q) => (
                 format!(
                     "Place {side}: {} for {}",
@@ -1031,9 +1045,13 @@ fn market_box(ui: &mut egui::Ui, view: &View) -> Option<Action> {
                 .color(GOLD),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let collect = theme::button(ui, "Collect", true)
-                .on_hover_text("Bring it all to your inventory, as far as it fits");
-            if collect.clicked() && !view.busy {
+            let at_hall = view.away_from_hall.is_none();
+            let collect = theme::button(ui, "Collect", at_hall).on_hover_text(if at_hall {
+                "Bring it all to your inventory, as far as it fits"
+            } else {
+                "Collect it at the Exchange hall, on the Capitol avenue"
+            });
+            if collect.clicked() && at_hall && !view.busy {
                 action = Some(Action::Collect);
             }
         });
@@ -1524,6 +1542,7 @@ impl Sample {
             strands: Some(self.strands),
             busy: false,
             refused: None,
+            away_from_hall: None,
         }
     }
 }

@@ -32,6 +32,7 @@ use capitol_protocol::rest::{
     WithdrawResponse,
 };
 use capitol_protocol::rules::{self, Zone};
+use capitol_protocol::terrain::LandmarkKind;
 use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
 
@@ -892,7 +893,27 @@ impl Bot {
         Ok(())
     }
 
-    /// Places an order (E3.3) and returns it as placed.
+    /// Walks to the Exchange hall (D6, E3.4), where orders are placed and the
+    /// market box collected: onto the south arterial's crown, then north up
+    /// it to the avenue outside the hall's door. That's the way in from where
+    /// bots arrive; from elsewhere the first leg may meet water. A world
+    /// without a hall needs no walk.
+    pub fn go_to_exchange(&mut self) -> Result<(), BotError> {
+        let what = "fetching the terrain";
+        let hall = match self.call(what, RestRequest::Terrain { cached_version: None })? {
+            RestResponse::Terrain(terrain) => {
+                terrain.landmarks.into_iter().find(|l| l.kind == LandmarkKind::ExchangeHall)
+            }
+            other => return Err(unexpected(what, &other)),
+        };
+        let Some(hall) = hall else { return Ok(()) };
+        let (_, y) = self.position();
+        self.walk_to(rules::CENTER_X, y)?;
+        self.walk_to(rules::CENTER_X, hall.door.1)
+    }
+
+    /// Places an order (E3.3) and returns it as placed. The bot must be at the
+    /// Exchange hall ([`Bot::go_to_exchange`]).
     pub fn place_order(&mut self, order: PlaceOrder) -> Result<MarketOrder, BotError> {
         match self.call("placing an order", RestRequest::PlaceOrder(order))? {
             RestResponse::Order(order) => {
@@ -929,6 +950,7 @@ impl Bot {
     }
 
     /// Takes everything in the market box to the inventory, as far as it fits.
+    /// The bot must be at the Exchange hall ([`Bot::go_to_exchange`]).
     pub fn collect_market_box(&mut self) -> Result<CollectResponse, BotError> {
         match self.call(
             "collecting from the market box",

@@ -1,5 +1,6 @@
 //! The `GET /terrain` response: water rings with their bridges, the road network,
-//! the terrain-level plots, the suburb's parks and the params of the land's height.
+//! the terrain-level plots, the suburb's parks, the landmarks and the params of
+//! the land's height.
 //!
 //! The backend's generator builds these types directly, so the response is the
 //! generated terrain as-is.
@@ -27,6 +28,10 @@ pub struct TerrainResponse {
     /// Defaults to none, so payloads from before them still parse.
     #[serde(default)]
     pub parks: Vec<TerrainPark>,
+    /// The city's public buildings, such as the Exchange hall (E3.4). Defaults
+    /// to none, so payloads from before them still parse.
+    #[serde(default)]
+    pub landmarks: Vec<Landmark>,
     /// What shapes the height of the land (W2, #195). Clients compute the
     /// height from these with `land::height_at`; the heights never go on the
     /// wire. Defaults to the default land, so payloads from before it parse.
@@ -203,6 +208,57 @@ impl TerrainPark {
         let n = ring.len();
         (0..n).map(|i| ring[i].0 * ring[(i + 1) % n].1 - ring[(i + 1) % n].0 * ring[i].1).sum::<f64>() / 2.0
     }
+}
+
+/// A public building with a place in the world, such as the Exchange hall
+/// (E3.4). It isn't a lot: nobody can claim it or build on it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Landmark {
+    /// Stable id, such as `exchange_hall`
+    pub id: String,
+    pub kind: LandmarkKind,
+    /// The middle of its footprint
+    pub position: (f64, f64),
+    /// Its footprint, a convex quad
+    pub corners: [(f64, f64); 4],
+    /// Indices of the corners on the side its entrance faces, the road side
+    pub entrance_edge: (usize, usize),
+    /// The middle of the entrance side: where you walk to go in
+    pub door: (f64, f64),
+}
+
+impl Landmark {
+    /// How far `(x, y)` is from the footprint: 0 on or inside it.
+    pub fn distance_to(&self, x: f64, y: f64) -> f64 {
+        if quad_contains(&self.corners, x, y) {
+            return 0.0;
+        }
+        (0..4)
+            .map(|i| segment_distance((x, y), self.corners[i], self.corners[(i + 1) % 4]))
+            .fold(f64::MAX, f64::min)
+    }
+}
+
+/// What a landmark is. A kind this build doesn't know reads as `Other`, so an
+/// older client still loads a world with newer buildings in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum LandmarkKind {
+    /// Where the market's orders are placed and its box collected (D6)
+    ExchangeHall,
+    #[serde(other)]
+    Other,
+}
+
+/// The distance from `p` to the segment `a`–`b`.
+fn segment_distance(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 == 0.0 { 0.0 } else { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0) };
+    let (cx, cy) = (a.0 + t * dx - p.0, a.1 + t * dy - p.1);
+    (cx * cx + cy * cy).sqrt()
 }
 
 /// Whether a point is inside a lot's quad, or on its edge. The quad may wind

@@ -425,6 +425,7 @@ mod tests {
                 })
                 .collect(),
             parks: vec![],
+            landmarks: vec![],
             land: Default::default(),
             version: None,
         }

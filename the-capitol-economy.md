@@ -31,7 +31,7 @@ This plan gives a player reasons to care about what they hold:
 
 **Non-goals for this plan** (see §8, Later)
 - M9: guilds, contracts, reputation.
-- Bazaar stalls, farm stands, canal tolls, licensing, certification.
+- Farm stands, canal tolls, licensing, certification. (Bazaar stalls joined the plan with D6: E3.10, E3.11.)
 - Buffs, consumables, attributes, minigames.
 - Conveyors, power and fuel networks, NPC workers.
 - UI in the React and Love2D clients. They're frozen and only need to keep compiling.
@@ -317,13 +317,23 @@ At this anchor, a Suburban deed (500 Strands) is about half an hour of grass, an
   - clay and reeds on the riverbanks
 - Here "Wilderness" in the zone column means placed by the land (altitude, slope, water). That placement is W6 ([#199](https://github.com/chrischaps/TheCapitol/issues/199)), not E2.3.
 
-### D6. Where the market is (E3.4) [Chris]
+### D6. Where the market is (E3.4) [decided 2026-10-18]
+
+Chris chose the hall, and added a second place: "the exchange hall as described, and the bazaar -- individual merchants can have their own 'shop' in the bazaar." So trading happens in two places on the Capitol avenue: the order book at the Exchange hall (E3.4, below), and merchants' own shops at stalls in the bazaar (E3.10 [#213](https://github.com/chrischaps/TheCapitol/issues/213), E3.11 [#214](https://github.com/chrischaps/TheCapitol/issues/214)).
 
 There's **one global order book** (as M6 and the TDD specify). Placing or collecting an order needs you to be within range of the **Exchange hall** in the Trade District:
 - Sold items and bought goods wait in your **market box** at the hall until you come.
 - Browsing, the chart and cancelling work from anywhere.
 
 This keeps the liquidity of a single book while making the journey inward the logistics of trade, as GDD §3.1 intends. The alternative, trading from anywhere, is simpler and makes the world decorative.
+
+**As built (E3.4, [#170](https://github.com/chrischaps/TheCapitol/issues/170)):**
+- **Where:** on the east side of the Capitol avenue, the south arterial's last stretch between the trade ring and the moat's one bridge (`TerrainConfig::exchange_hall_site`). New players arrive on that road, so the way in passes the hall's door on the walk to the tower. It's 80 across and 100 along the avenue: 15 back from the kerb, midway between the moat (r210) and the ring's inner edge (r385). At the defaults the corners are (6045–6125, 6247.5–6347.5) and the door is (6045, 6297.5). The west side across the avenue is left for the bazaar.
+- **On the wire:** `TerrainResponse.landmarks` (`#[serde(default)]`), a `Landmark {id, kind, position, corners, entrance_edge, door}`, the same shape as a lot. `LandmarkKind` is `exchange_hall` for now, and an unknown kind reads as `other`, so an older client still loads a world with newer buildings. `Landmark::distance_to` is 0 on the footprint. The terrain version moved (`b31da8eabe0cb864`). No road, lot, park or node moved.
+- **Range:** `rules::market::HALL_RANGE` is the station range (75) **from the footprint**, not the centre, so the avenue's crown outside the door is in range. `at_the_hall(hall, x, y)` is shared. `POST /market/orders` and `POST /market/box/collect` refuse from further away: "You're too far from the Exchange hall to place an order (3003 units; it needs 75)". They use the live position when the player is online, else the saved one. Depth, history, summary, my orders, `GET /market/box` and cancel work from anywhere. A world with no hall (an admin's custom one) refuses nothing.
+- `node_placement` keeps nodes off landmarks as it does off roads.
+- **Flint:** the market panel says how far away the hall is, and turns Place into a disabled "At the Exchange hall" button and Collect into a disabled button with a hint, until you're in range (`View.away_from_hall`). E3.7 adds the building and the walk-up.
+- **Bots:** `Bot::go_to_exchange()` walks onto the south arterial and north up it to the door. A bot must call it before placing or collecting (E3.8).
 
 ### D7. Market mechanics (E3.1–E3.3)
 
@@ -480,12 +490,14 @@ Sizes: S is about one session, M is 1–2, L is 2–4.
 | E3.1 [#167](https://github.com/chrischaps/TheCapitol/issues/167) | **Market model (D7).** `market_orders`, `market_trades`, the escrow container and market boxes; DTOs and fixtures in `protocol`; the fee in `rules`. *Built: see D7's E3.1 as-built.* | M | E1.2 |
 | E3.2 [#168](https://github.com/chrischaps/TheCapitol/issues/168) | **Matching engine.** On the 1 s cadence, with price-time priority, partial fills, `min_grade`, expiry, one transaction per fill, and exhaustive tests. *Built: see D7's E3.2 as-built.* | L | E3.1 |
 | E3.3 [#169](https://github.com/chrischaps/TheCapitol/issues/169) | **Market API.** REST create, cancel, list (book depth), my orders and history (OHLC); a WS `market:<item>` channel; fill notices. *Built: see D7's E3.3 as-built.* | M | E3.2 |
-| E3.4 [#170](https://github.com/chrischaps/TheCapitol/issues/170) | **Where trading happens (D6) [Chris].** The Exchange hall's position in the Trade District on `/terrain`, the range check on place and collect, and collecting from the market box. | S | E3.3 |
+| E3.4 [#170](https://github.com/chrischaps/TheCapitol/issues/170) | **Where trading happens (D6).** The Exchange hall's position in the Trade District on `/terrain`, the range check on place and collect, and collecting from the market box. **Done**: the hall is a `landmark` on the Capitol avenue; see D6's as-built. | S | E3.3 |
 | E3.5 [#171](https://github.com/chrischaps/TheCapitol/issues/171) | **Flint: market panel.** Browse items with activity, a bid/ask ladder, the order form with fee preview, my orders, fill toasts. **Done**: see D7's as-built. | L | E3.3 |
 | E3.6 [#172](https://github.com/chrischaps/TheCapitol/issues/172) | **Flint: price chart and history.** `egui_plot` candles or line with volume, by grade. | M | E3.5 |
 | E3.7 [#173](https://github.com/chrischaps/TheCapitol/issues/173) | **Flint: the Exchange hall.** A procedural building in the Trade District that opens the panel in range and lights up at dusk. The market box shows when goods wait. | M | E3.4, E3.5 |
 | E3.8 [#174](https://github.com/chrischaps/TheCapitol/issues/174) | **Market-maker bots.** `capitol-bot --market` quotes both sides around a reference price, for liquidity on a local stack and in E2.7's sim. | S | E3.3, E2.7 |
 | E3.9 [#175](https://github.com/chrischaps/TheCapitol/issues/175) | **The Capitol Gazette.** A daily digest built from the day's trades, deeds and records (biggest movers, best-quality sale, new deeds, top producers), served by REST and posted on a notice board by the tower. It gives the economy a story. | M | E3.3 |
+| E3.10 [#213](https://github.com/chrischaps/TheCapitol/issues/213) | **The bazaar (D6).** Stalls across the avenue from the hall that merchants rent (20 Strands/day, GDD §8.4), name and stock at fixed prices. Buying and stocking happen at the stall, browsing from anywhere, and lapsed rent sends the goods to the market box. Its defaults need Chris's confirmation. | M | E3.4 |
+| E3.11 [#214](https://github.com/chrischaps/TheCapitol/issues/214) | **Flint: the bazaar.** The covered market and its stalls in the world, a shop panel, a directory in the market panel, and sale toasts. | M | E3.10, E3.7 |
 
 ### E4: Automation (M8)
 
@@ -516,16 +528,16 @@ Health              E0.1   E0.2   E0.4   E0.5   E0.7   E0.6 ─┬─ E0.8
 | E0 | 9–13 |
 | E1 | 9–13 |
 | E2 | 10–15 |
-| E3 | 12–17 |
+| E3 | 16–23 (E3.10 and E3.11 joined with D6) |
 | E4 | 5–8 |
-| **Total** | **about 45–66** |
+| **Total** | **about 49–72** |
 
 E0 and E1 can run in parallel worktrees from the start. E2.1 and E1.2 are the first decision points for Chris (E1.2 decided 2026-10-18, and revised the same day into E1.8: see D2).
 
 ## 8. Later (outside this plan, but planned for)
 
 - **M9 social:** guilds (registry, roles, treasury, dues), contracts with escrow, and reputation. The market's escrow and the notices log are their foundations.
-- **Shops:** bazaar stalls and farm stands (GDD §3.4), sold from a plot or a rented stall, which the market box generalises to.
+- **Shops:** farm stands (GDD §3.4), sold from a plot, which the bazaar's stalls (E3.10) and the market box generalise to.
 - **The bureaucracy's other fees** (GDD §8.4): deed transfer, canal tolls, certification, licensing.
 - **Buffs, consumables, minigames** (GDD §6.3, §7), and NPC workers and conveyors for automation (GDD §3.7).
 - **M7 leftovers:** deed items and transfers, enforcing plot permissions on entry, the map, the ownership overlay, the permissions editor.

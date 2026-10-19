@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use capitol_core::net::{NetEvent, RestRequest, Tag};
-use capitol_core::protocol::terrain::TerrainResponse;
+use capitol_core::protocol::terrain::{Landmark, LandmarkKind, TerrainResponse};
 use capitol_core::terrain::{read_terrain_file, TerrainCache, TerrainFetch};
 
 /// The game's REST tags sit below `poll::FIRST_TAG`. The session's start at
@@ -128,6 +128,11 @@ impl TerrainSource {
             return None;
         }
         self.current.as_ref()
+    }
+
+    /// The current terrain's landmark of `kind`, such as the Exchange hall.
+    pub fn landmark(&self, kind: LandmarkKind) -> Option<&Landmark> {
+        self.current.as_ref()?.landmarks.iter().find(|l| l.kind == kind)
     }
 
     /// One line for the HUD: where the terrain came from, and its version.

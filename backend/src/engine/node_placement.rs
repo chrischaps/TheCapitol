@@ -1,4 +1,4 @@
-//! Keeps the resource nodes off the live terrain's roads and water (#70).
+//! Keeps the resource nodes off the live terrain's roads and water (#70), and off the landmarks (E3.4).
 //!
 //! The nodes are seeded as fixed positions in migrations, chosen against the
 //! default world. The admin terrain tools can regenerate the world with other
@@ -25,7 +25,7 @@ use capitol_protocol::fmath::StableMath;
 use std::collections::HashMap;
 
 use capitol_protocol::rules::{Zone, CENTER_X, CENTER_Y};
-use capitol_protocol::terrain::{quad_contains, TerrainPlot};
+use capitol_protocol::terrain::{quad_contains, Landmark, TerrainPlot};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -73,6 +73,9 @@ struct Surroundings<'a> {
     /// Each water ring as (inner, outer) radius, widened by the kerb.
     bands: Vec<(f64, f64)>,
     lots: Vec<&'a TerrainPlot>,
+    /// The landmarks' footprints (the Exchange hall): a node stays off them
+    /// as it does off a road.
+    landmarks: Vec<&'a Landmark>,
 }
 
 impl<'a> Surroundings<'a> {
@@ -108,10 +111,12 @@ impl<'a> Surroundings<'a> {
                 near_box(min, max, reach + LOT_MARGIN)
             })
             .collect();
-        Self { segments, bands, lots }
+        let landmarks = terrain.landmarks.iter().collect();
+        Self { segments, bands, lots, landmarks }
     }
 
-    /// How far a point is from the nearest road edge or water kerb; negative inside one.
+    /// How far a point is from the nearest road edge, water kerb or landmark;
+    /// negative inside a road or the water, zero on a landmark.
     fn clearance(&self, (x, y): (f64, f64)) -> f64 {
         let r = (x - CENTER_X).stable_hypot(y - CENTER_Y);
         let water = self
@@ -123,6 +128,7 @@ impl<'a> Surroundings<'a> {
             .iter()
             .map(|&(a, b, half)| point_to_segment_distance(x, y, a.0, a.1, b.0, b.1) - half)
             .fold(water, f64::min)
+            .min(self.landmarks.iter().map(|l| l.distance_to(x, y)).fold(f64::MAX, f64::min))
     }
 
     /// How far a point is outside the nearest lot; zero or less on one.

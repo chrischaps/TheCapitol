@@ -24,6 +24,7 @@ impl From<&TerrainConfig> for TerrainResponse {
             roads: config.roads.clone(),
             terrain_plots: config.terrain_plots.clone(),
             parks: config.parks.clone(),
+            landmarks: config.landmarks.clone(),
             land: config.land.clone(),
             version: None,
         }

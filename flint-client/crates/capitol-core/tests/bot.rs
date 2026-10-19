@@ -244,6 +244,9 @@ fn bots_place_watch_fill_and_cancel_orders() {
         % 100_000_000;
     let mut seller = Bot::sign_in(config(), &Account::numbered(&format!("seller{stamp}"), 1)).expect("seller signed in");
     let mut buyer = Bot::sign_in(config(), &Account::numbered(&format!("buyer{stamp}"), 1)).expect("buyer signed in");
+    // Orders are placed and collected at the Exchange hall (E3.4)
+    seller.go_to_exchange().expect("the seller reached the hall");
+    buyer.go_to_exchange().expect("the buyer reached the hall");
     buyer.watch_market("fiber").expect("fiber's book arrived");
     // How much rests at a level now, by the buyer's copy of the book
     let at = |bot: &Bot, side: OrderSide, price: i64| -> i64 {

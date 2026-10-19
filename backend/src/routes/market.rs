@@ -8,6 +8,11 @@
 //! last published, so `GET /market/orders` and a `subscribe_market` snapshot
 //! agree with the diffs by `seq`. The best bid and ask are read from there
 //! too, in memory: nothing else reads them, so they aren't in Redis.
+//!
+//! Placing an order and collecting from the market box happen at the Exchange
+//! hall (D6, E3.4): from further than `HALL_RANGE` off its footprint they're
+//! refused. Browsing, history, the box's contents and cancelling work from
+//! anywhere.
 
 use axum::{
     extract::{Path, Query, State},
@@ -19,19 +24,19 @@ use capitol_protocol::rest::{
     MarketHistoryQuery, MarketHistoryResponse, MarketItemSummary, MarketOrder, MarketSummaryResponse,
     MyOrdersQuery, PlaceOrder,
 };
-use capitol_protocol::rules::market::{grade_floor, OrderSide};
+use capitol_protocol::rules::market::{at_the_hall, grade_floor, OrderSide, HALL_RANGE};
 use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 use std::collections::{BTreeMap, HashMap};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
 use crate::engine::currency::announce_balances;
-use crate::engine::GameEvent;
+use crate::engine::{GameEvent, GameState};
 use crate::engine::market::{self, MarketError};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
-use crate::models::{Item, ItemType, SlotItem, ITEM_COLUMNS, ITEM_TYPE_COLUMNS};
+use crate::models::{Item, ItemType, LandmarkKind, SlotItem, ITEM_COLUMNS, ITEM_TYPE_COLUMNS};
 use crate::state::AppState;
 
 /// The most candles one `/market/history` answers with: the latest.
@@ -67,7 +72,7 @@ pub fn router(state: AppState) -> Router<AppState> {
     request_body = PlaceOrder,
     responses(
         (status = 200, description = "On the book", body = MarketOrder),
-        (status = 400, description = "Out of bounds, not your stack, or not enough Strands")
+        (status = 400, description = "Away from the Exchange hall, out of bounds, not your stack, or not enough Strands")
     ),
     security(("bearer_auth" = [])),
     tag = "Market"
@@ -78,6 +83,7 @@ pub async fn place_order(
     Json(req): Json<PlaceOrder>,
 ) -> Result<Json<MarketOrder>, AppError> {
     let player_id = player_of(&state.db, auth_user.account_id).await?;
+    at_the_exchange(&state.game, &state.db, player_id, "place an order").await?;
     // Where a sell's units come from, to say that container changed
     let source: Option<Uuid> = match (req.side, req.item_id) {
         (OrderSide::Sell, Some(item_id)) => {
@@ -429,7 +435,7 @@ async fn container(db: &PgPool, id: Uuid) -> Result<ContainerResponse, AppError>
     request_body = CollectRequest,
     responses(
         (status = 200, description = "What moved, and what's left", body = CollectResponse),
-        (status = 400, description = "A stack named isn't in your market box")
+        (status = 400, description = "Away from the Exchange hall, or a stack named isn't in your market box")
     ),
     security(("bearer_auth" = [])),
     tag = "Market"
@@ -440,6 +446,7 @@ pub async fn collect(
     Json(req): Json<CollectRequest>,
 ) -> Result<Json<CollectResponse>, AppError> {
     let player_id = player_of(&state.db, auth_user.account_id).await?;
+    at_the_exchange(&state.game, &state.db, player_id, "collect from the market box").await?;
     let (response, box_id, inventory) = collect_from_box(&state.db, player_id, req.item_ids.as_deref()).await?;
     if !response.collected.is_empty() {
         let events = events(&state).await;
@@ -498,6 +505,36 @@ pub async fn collect_from_box(
         box_id,
         inventory,
     ))
+}
+
+/// Refuses `doing` unless the player stands within `HALL_RANGE` of the
+/// Exchange hall: where they are now if they're online, else their saved
+/// position. A world without a hall (an admin's custom one) refuses nothing.
+async fn at_the_exchange(
+    game: &RwLock<GameState>,
+    db: &PgPool,
+    player_id: Uuid,
+    doing: &str,
+) -> Result<(), AppError> {
+    let (hall, live) = {
+        let game = game.read().await;
+        (game.terrain.landmark(LandmarkKind::ExchangeHall).cloned(), game.players.get(&player_id).map(|p| (p.x, p.y)))
+    };
+    let Some(hall) = hall else { return Ok(()) };
+    let (x, y) = match live {
+        Some(at) => at,
+        None => sqlx::query_as("SELECT position_x, position_y FROM players WHERE id = $1")
+            .bind(player_id)
+            .fetch_one(db)
+            .await?,
+    };
+    if at_the_hall(&hall, x, y) {
+        return Ok(());
+    }
+    Err(AppError::BadRequest(format!(
+        "You're too far from the Exchange hall to {doing} ({:.0} units; it needs {HALL_RANGE:.0})",
+        hall.distance_to(x, y)
+    )))
 }
 
 /// What the market refused, as the API says it.
@@ -612,6 +649,57 @@ mod tests {
         assert!(matches!(collect_from_box(&db, ada.id, Some(&[stranger])).await, Err(AppError::BadRequest(_))));
         let (none, ..) = collect_from_box(&db, ada.id, Some(&[second])).await.unwrap();
         assert!(none.collected.is_empty(), "the inventory is full");
+    }
+
+    /// D6: placing and collecting need the Exchange hall. From where a new
+    /// player arrives they're refused with a reason; on the avenue outside the
+    /// door they're allowed; and an online player's live position counts, not
+    /// the saved one.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn placing_and_collecting_happen_at_the_exchange_hall(db: PgPool) {
+        use crate::models::{ActionState, PlayerState, TerrainConfig, WorldGenParams};
+        use capitol_protocol::rules::{SPAWN_X, SPAWN_Y};
+
+        let terrain = TerrainConfig::get_default();
+        let door = terrain.landmark(LandmarkKind::ExchangeHall).expect("the default world has a hall").door;
+        let game = RwLock::new(GameState::with_terrain(WorldGenParams::default(), terrain));
+        let ada = player(&db, "ada", 100).await;
+        let save = |(x, y): (f64, f64)| {
+            sqlx::query("UPDATE players SET position_x = $1, position_y = $2 WHERE id = $3")
+                .bind(x)
+                .bind(y)
+                .bind(ada.id)
+                .execute(&db)
+        };
+
+        save((SPAWN_X, SPAWN_Y)).await.unwrap();
+        let refused = at_the_exchange(&game, &db, ada.id, "place an order").await;
+        assert!(
+            matches!(&refused, Err(AppError::BadRequest(m)) if m.contains("too far from the Exchange hall to place an order")),
+            "{refused:?}"
+        );
+
+        // On the avenue's crown, across the kerb from the door
+        let outside = (SPAWN_X, door.1);
+        save(outside).await.unwrap();
+        assert!(at_the_exchange(&game, &db, ada.id, "place an order").await.is_ok());
+        assert!(at_the_exchange(&game, &db, ada.id, "collect from the market box").await.is_ok());
+
+        // Online and walked away: the saved position is stale, the live one counts
+        game.write().await.add_player(PlayerState {
+            id: ada.id,
+            account_id: Uuid::new_v4(),
+            name: "ada".into(),
+            x: SPAWN_X,
+            y: SPAWN_Y,
+            dest_x: None,
+            dest_y: None,
+            speed: 50.0,
+            strand_balance: 100,
+            current_zone: None,
+            action_state: ActionState::Idle,
+        });
+        assert!(at_the_exchange(&game, &db, ada.id, "collect from the market box").await.is_err());
     }
 
     #[test]

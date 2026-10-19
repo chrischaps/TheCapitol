@@ -10,7 +10,9 @@ use super::street_plan;
 
 // The terrain types the client sees are shared through capitol-protocol, so
 // GET /terrain serves the generated terrain as-is.
-pub use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPark, TerrainPlot, WaterRing};
+pub use capitol_protocol::terrain::{
+    Bridge, Landmark, LandmarkKind, RoadSegment, RoadType, TerrainPark, TerrainPlot, WaterRing,
+};
 
 /// Configuration for suburban street generation
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,6 +272,9 @@ pub struct TerrainConfig {
     /// The suburb's parks, from the open ground its lots leave (#129).
     #[serde(default)]
     pub parks: Vec<TerrainPark>,
+    /// The city's public buildings: the Exchange hall (E3.4).
+    #[serde(default)]
+    pub landmarks: Vec<Landmark>,
     /// The params of the land's height (W2, #195), which `/terrain` carries.
     #[serde(default)]
     pub land: LandParams,
@@ -650,6 +655,7 @@ impl TerrainConfig {
             roads: Vec::new(),
             terrain_plots: Vec::new(),
             parks: Vec::new(),
+            landmarks: Vec::new(),
             land: params.land.clone(),
         };
 
@@ -671,8 +677,45 @@ impl TerrainConfig {
         );
         // The parks are the ground the cleared lots leave.
         config.parks = config.generate_parks(&params.suburban_params());
+        config.landmarks = vec![config.exchange_hall_site(params)];
 
         config
+    }
+
+    /// The landmark of `kind`, if the world has one.
+    pub fn landmark(&self, kind: LandmarkKind) -> Option<&Landmark> {
+        self.landmarks.iter().find(|l| l.kind == kind)
+    }
+
+    /// The Exchange hall (E3.4, plan D6): on the east side of the Capitol
+    /// avenue, the stretch of the south arterial between the trade ring and the
+    /// moat's one bridge. New players arrive on that same road, so the way in
+    /// passes the hall's door on the last walk to the tower. It's 80 across
+    /// and 100 along the avenue, set back from the kerb, the moat and the ring.
+    fn exchange_hall_site(&self, params: &WorldGenParams) -> Landmark {
+        const SETBACK: f64 = 15.0;
+        const DEPTH: f64 = 80.0;
+        const LENGTH: f64 = 100.0;
+        let bearing = 90.0_f64.to_radians();
+        let out = (bearing.stable_cos(), bearing.stable_sin());
+        // At 90° that's east: the avenue's right, walking in.
+        let side = (out.1, -out.0);
+        let moat_edge = params.capitol_radius + params.moat_width / 2.0;
+        let ring_edge = params.trade_ring_radius - params.trade_ring_width / 2.0;
+        let mid_r = (moat_edge + ring_edge) / 2.0;
+        let near = params.arterial_width / 2.0 + SETBACK;
+        let at = |lateral: f64, r: f64| {
+            (self.center_x + out.0 * r + side.0 * lateral, self.center_y + out.1 * r + side.1 * lateral)
+        };
+        let (inner_r, outer_r) = (mid_r - LENGTH / 2.0, mid_r + LENGTH / 2.0);
+        Landmark {
+            id: "exchange_hall".to_string(),
+            kind: LandmarkKind::ExchangeHall,
+            position: at(near + DEPTH / 2.0, mid_r),
+            corners: [at(near, outer_r), at(near, inner_r), at(near + DEPTH, inner_r), at(near + DEPTH, outer_r)],
+            entrance_edge: (0, 1),
+            door: at(near, mid_r),
+        }
     }
 
     /// The suburb's parks, for the roads and lots already in `self`.
@@ -1379,7 +1422,10 @@ mod tests {
         //
         // W2 (#195) put the land's params on the terrain (`land`), so the
         // hash covers them. No road, lot, park or node moved.
-        assert_eq!(TerrainConfig::get_default().version(), "cdd82ff6a9f2f150");
+        //
+        // E3.4 (#170) added the Exchange hall to `landmarks`. No road, lot,
+        // park or node moved.
+        assert_eq!(TerrainConfig::get_default().version(), "b31da8eabe0cb864");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one
@@ -1869,6 +1915,54 @@ mod tests {
             problematic_roads.len(),
             problematic_roads.iter().map(|(id, _, _, _)| id.clone()).collect::<Vec<_>>()
         );
+    }
+
+    /// D6: the Exchange hall stands in the Trade District beside the Capitol
+    /// avenue, its entrance on the avenue, clear of every road and the water.
+    #[test]
+    fn the_exchange_hall_stands_on_the_capitol_avenue() {
+        let params = WorldGenParams::default();
+        let config = TerrainConfig::get_default();
+        let hall = config.landmark(LandmarkKind::ExchangeHall).expect("a hall");
+        let center = (config.center_x, config.center_y);
+        let r = |(x, y): (f64, f64)| (x - center.0).stable_hypot(y - center.1);
+        for &corner in &hall.corners {
+            assert_eq!(rules::Zone::from_position(corner.0, corner.1), rules::Zone::TradeDistrict, "{corner:?}");
+        }
+        assert!(TerrainPlot::calculate_area(&hall.corners) >= 8000.0);
+        assert!(capitol_protocol::terrain::quad_contains(&hall.corners, hall.position.0, hall.position.1));
+
+        // Clear of the water and every road, kerbs and all
+        let edges = |i: usize| (hall.corners[i], hall.corners[(i + 1) % 4]);
+        for ring in &config.water_rings {
+            for &c in &hall.corners {
+                assert!(r(c) > ring.outer_radius() + 10.0 || r(c) < ring.inner_radius() - 10.0, "{} at {c:?}", ring.id);
+            }
+        }
+        for road in &config.roads {
+            for w in road.points.windows(2) {
+                for i in 0..4 {
+                    let (a, b) = edges(i);
+                    // Sample the hall's edge against the road's centre line
+                    for k in 0..=20 {
+                        let t = k as f64 / 20.0;
+                        let p = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                        let d = point_to_segment_distance(p.0, p.1, w[0].0, w[0].1, w[1].0, w[1].1);
+                        assert!(d >= road.width / 2.0 + 10.0, "{} comes within {d} of the hall", road.id);
+                    }
+                }
+            }
+        }
+        assert!(config.lot_at(hall.position.0, hall.position.1).is_none());
+
+        // The door is on the avenue's kerb side, and the avenue's crown in
+        // front of it is within range
+        let avenue = config.roads.iter().find(|r| r.id == "arterial_capitol").expect("the avenue");
+        let (a, b) = (avenue.points[0], avenue.points[1]);
+        let to_crown = point_to_segment_distance(hall.door.0, hall.door.1, a.0, a.1, b.0, b.1);
+        assert!((to_crown - (params.arterial_width / 2.0 + 15.0)).abs() < 1e-6, "{to_crown}");
+        assert!(capitol_protocol::rules::market::at_the_hall(hall, center.0, hall.door.1));
+        assert!(!capitol_protocol::rules::market::at_the_hall(hall, center.0, center.1 + 600.0));
     }
 
     #[test]
