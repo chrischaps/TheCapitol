@@ -38,6 +38,8 @@
 #                              per km² of the zone's open ground, and the least
 #                              base quality they're drawn at there. E2.3 places
 #                              them; grass is seeded by migrations already.
+#                              Where in the Wilderness, and how good a node
+#                              is there, is content/wilds.toml (W6).
 
 # The starter, and the GDD's universal fiber. Its hand numbers are what they
 # have always been; the spawn densities are today's seeded grass.
@@ -90,6 +92,7 @@ cluster = "along_water"
 spawns = [
     { zone = "urban", density = 6.0 },
     { zone = "suburban", density = 2.0 },
+    { zone = "wilderness", density = 4.0, quality_floor = 53 },
 ]
 
 # By hand it's slow and gives one stone; a pick is the way.
@@ -127,8 +130,8 @@ spawns = [
     { zone = "wilderness", density = 60.0, quality_floor = 50 },
 ]
 
-# Rare in the country, commoner past r3800. W6 (#199) moves the Wilderness's
-# onto bare rock once the wilds have a height field.
+# Rare in the country, commoner past r3800, where they're high on the bare
+# rock of the ranges (content/wilds.toml, W6 #199).
 [[resource]]
 id = "iron_vein"
 name = "Iron Vein"

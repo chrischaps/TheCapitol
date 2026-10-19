@@ -28,6 +28,7 @@ const CONTAINERS: &str = include_str!("../../content/containers.toml");
 const STATIONS: &str = include_str!("../../content/stations.toml");
 const RECIPES: &str = include_str!("../../content/recipes.toml");
 const RETIRED: &str = include_str!("../../content/retired.toml");
+const WILDS: &str = include_str!("../../content/wilds.toml");
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -287,6 +288,82 @@ impl RecipeDef {
     }
 }
 
+/// Where the wilds' nodes grow, and how good they are there (W6, #199):
+/// `wilds.toml`. Only the node planner reads it (`engine::node_spawn`); it
+/// isn't synced to a table.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WildsDef {
+    pub quality: WildQualityDef,
+    #[serde(default)]
+    pub habitat: Vec<HabitatDef>,
+}
+
+/// How a wild node's base-quality ceiling rises: points added to its
+/// resource's `base_quality_max`, interpolated between `[at, add]` rows by
+/// radius (`depth`) and by the land's height (`height`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WildQualityDef {
+    pub depth: Vec<[f64; 2]>,
+    pub height: Vec<[f64; 2]>,
+}
+
+impl WildQualityDef {
+    /// The ceiling for a resource whose own is `max`, at radius `r` and
+    /// height `h`: never over 100, nor under `floor`.
+    pub fn ceiling(&self, max: i32, floor: i32, r: f64, h: f64) -> i32 {
+        let add = interpolate(&self.depth, r) + interpolate(&self.height, h);
+        ((max as f64 + add).round() as i32).min(100).max(floor)
+    }
+}
+
+/// Piecewise-linear through `rows` (sorted by their first value), held flat
+/// past either end.
+fn interpolate(rows: &[[f64; 2]], x: f64) -> f64 {
+    let Some(first) = rows.first() else { return 0.0 };
+    if x <= first[0] {
+        return first[1];
+    }
+    for w in rows.windows(2) {
+        let ([x0, y0], [x1, y1]) = (w[0], w[1]);
+        if x <= x1 {
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0);
+        }
+    }
+    rows[rows.len() - 1][1]
+}
+
+/// Where in the wilds one resource grows. Every bound is optional, and each
+/// is `[lo, hi]`, inclusive.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HabitatDef {
+    pub resource: String,
+    /// The land's height (`land::height_at`)
+    pub height: Option<[f64; 2]>,
+    /// Rise over run (`land::slope_at`)
+    pub slope: Option<[f64; 2]>,
+    /// Radius from the centre
+    pub depth: Option<[f64; 2]>,
+    /// For woods: the share of the habitat that's woods
+    pub cover: Option<f64>,
+}
+
+impl HabitatDef {
+    /// Whether the land at radius `r`, height `h` and slope `s` suits it.
+    pub fn suits(&self, r: f64, h: f64, s: f64) -> bool {
+        let within = |b: Option<[f64; 2]>, v: f64| b.is_none_or(|[lo, hi]| (lo..=hi).contains(&v));
+        within(self.depth, r) && within(self.height, h) && within(self.slope, s)
+    }
+}
+
+/// The wilds' content, parsed once: `validate` has checked it at startup.
+pub fn wilds() -> &'static WildsDef {
+    static WILDS_DEF: std::sync::OnceLock<WildsDef> = std::sync::OnceLock::new();
+    WILDS_DEF.get_or_init(|| parse("wilds.toml", WILDS).expect("content/wilds.toml parses"))
+}
+
 /// The ids `retired.toml` keeps in the tables, by table.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -312,6 +389,7 @@ pub struct Content {
     pub stations: Vec<StationDef>,
     pub recipes: Vec<RecipeDef>,
     pub retired: Retired,
+    pub wilds: WildsDef,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -407,6 +485,7 @@ pub fn load() -> Result<Content, ContentError> {
         stations: parse::<StationsFile>("stations.toml", STATIONS)?.station,
         recipes: parse::<RecipesFile>("recipes.toml", RECIPES)?.recipe,
         retired: parse("retired.toml", RETIRED)?,
+        wilds: parse("wilds.toml", WILDS)?,
     })
 }
 
@@ -466,7 +545,9 @@ pub fn validate(content: &Content) -> Vec<String> {
         }
         validate_yields(r, &mut problems);
         validate_spawns(r, &mut problems);
+        validate_habitat(r, &content.wilds, &mut problems);
     }
+    validate_wilds(&content.wilds, &content.resources, &mut problems);
     for s in &content.stations {
         item(&mut problems, format!("station '{}' (its kit)", s.id), &s.kit);
     }
@@ -652,6 +733,48 @@ fn validate_spawns(r: &ResourceDef, problems: &mut Vec<String>) {
                     r.id, s.zone, r.base_quality_min, r.base_quality_max
                 ));
             }
+        }
+    }
+}
+
+/// A resource that grows in the wilds has one habitat there, with sound bounds.
+fn validate_habitat(r: &ResourceDef, wilds: &WildsDef, problems: &mut Vec<String>) {
+    let wild = r.spawns.iter().any(|s| s.zone == Zone::Wilderness.as_str());
+    let habitats: Vec<&HabitatDef> = wilds.habitat.iter().filter(|h| h.resource == r.id).collect();
+    match (wild, habitats.len()) {
+        (true, 0) => problems.push(format!("resource '{}' grows in the wilderness but wilds.toml gives it no habitat", r.id)),
+        (false, n) if n > 0 => problems.push(format!("wilds.toml gives '{}' a habitat but it doesn't grow in the wilderness", r.id)),
+        (_, n) if n > 1 => problems.push(format!("wilds.toml gives '{}' {n} habitats", r.id)),
+        _ => {}
+    }
+    for h in habitats {
+        for (name, bound) in [("height", h.height), ("slope", h.slope), ("depth", h.depth)] {
+            if bound.is_some_and(|[lo, hi]| !lo.is_finite() || !hi.is_finite() || lo > hi) {
+                problems.push(format!("the habitat of '{}' has a {name} that isn't low to high", r.id));
+            }
+        }
+        if h.slope.is_some_and(|[_, hi]| hi > capitol_protocol::rules::ground::CLIFF_SLOPE) {
+            problems.push(format!("the habitat of '{}' runs steeper than anyone can climb", r.id));
+        }
+        if h.cover.is_some_and(|c| !(c.is_finite() && c > 0.0) || c > 1.0) {
+            problems.push(format!("the habitat of '{}' has a cover outside 0..1", r.id));
+        }
+        if h.cover.is_some() != (r.cluster == "woods") {
+            problems.push(format!("the habitat of '{}' has a cover exactly when it's woods", r.id));
+        }
+    }
+}
+
+/// Every habitat names a resource, and the quality rows run in order.
+fn validate_wilds(wilds: &WildsDef, resources: &[ResourceDef], problems: &mut Vec<String>) {
+    for h in &wilds.habitat {
+        if !resources.iter().any(|r| r.id == h.resource) {
+            problems.push(format!("wilds.toml gives a habitat to unknown resource '{}'", h.resource));
+        }
+    }
+    for (name, rows) in [("depth", &wilds.quality.depth), ("height", &wilds.quality.height)] {
+        if rows.is_empty() || rows.windows(2).any(|w| w[0][0] >= w[1][0]) || rows.iter().flatten().any(|v| !v.is_finite()) {
+            problems.push(format!("wilds.toml's quality {name} rows aren't a rising list"));
         }
     }
 }
@@ -1048,6 +1171,55 @@ mod tests {
         ] {
             assert!(problems.contains(expected), "missing {expected:?} in:\n{problems}");
         }
+    }
+
+    /// W6 (#199): every resource that grows in the wilds has one habitat
+    /// there, with bounds low to high, never steeper than a walker climbs.
+    #[test]
+    fn the_validator_checks_the_wilds() {
+        let mut content = load().unwrap();
+        content.wilds.habitat.retain(|h| h.resource != "clay_bank");
+        let vein = content.wilds.habitat.iter_mut().find(|h| h.resource == "iron_vein").unwrap();
+        vein.height = Some([900.0, 380.0]);
+        vein.slope = Some([0.5, 2.0]);
+        let tree = content.wilds.habitat.iter_mut().find(|h| h.resource == "tree").unwrap();
+        tree.cover = None;
+        content.wilds.habitat.push(HabitatDef {
+            resource: "grass".into(),
+            height: None,
+            slope: None,
+            depth: None,
+            cover: None,
+        });
+        content.wilds.habitat.push(HabitatDef { resource: "moss".into(), height: None, slope: None, depth: None, cover: None });
+        content.wilds.quality.depth = vec![[4000.0, 0.0], [3800.0, 5.0]];
+        let problems = validate(&content).join("\n");
+        for expected in [
+            "'clay_bank' grows in the wilderness but wilds.toml gives it no habitat",
+            "the habitat of 'iron_vein' has a height that isn't low to high",
+            "the habitat of 'iron_vein' runs steeper than anyone can climb",
+            "the habitat of 'tree' has a cover exactly when it's woods",
+            "wilds.toml gives 'grass' a habitat but it doesn't grow in the wilderness",
+            "wilds.toml gives a habitat to unknown resource 'moss'",
+            "wilds.toml's quality depth rows aren't a rising list",
+        ] {
+            assert!(problems.contains(expected), "missing {expected:?} in:\n{problems}");
+        }
+        assert!(validate(&load().unwrap()).is_empty());
+    }
+
+    /// The ceiling follows the rows, holds flat past their ends, and stays
+    /// between the floor and 100.
+    #[test]
+    fn a_wild_ceiling_rises_with_depth_and_height() {
+        let q = WildQualityDef { depth: vec![[3800.0, -10.0], [4800.0, 10.0]], height: vec![[0.0, 0.0], [500.0, 5.0]] };
+        assert_eq!(q.ceiling(80, 50, 3000.0, 0.0), 70);
+        assert_eq!(q.ceiling(80, 50, 4300.0, 0.0), 80);
+        assert_eq!(q.ceiling(80, 50, 4300.0, 250.0), 83);
+        assert_eq!(q.ceiling(80, 50, 6000.0, 900.0), 95);
+        assert_eq!(q.ceiling(95, 50, 6000.0, 900.0), 100);
+        assert_eq!(q.ceiling(55, 50, 3800.0, 0.0), 50);
+        assert!(q.ceiling(80, 50, 4000.0, 0.0) < q.ceiling(80, 50, 4600.0, 0.0));
     }
 
     /// A gated resource, or a recipe that needs a tool, can only be had once a

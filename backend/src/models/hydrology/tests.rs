@@ -413,12 +413,46 @@ fn water_plan() {
             }
         }
     }
+    // With WILD_NODES set, the planned nodes past the suburb (W6), as dots.
+    let mut node_counts = String::new();
+    if std::env::var_os("WILD_NODES").is_some() {
+        let tables: Vec<crate::engine::node_spawn::SpawnTable> = crate::content::load()
+            .unwrap()
+            .resources
+            .iter()
+            .map(|r| crate::engine::node_spawn::SpawnTable::from(&r.to_type()))
+            .collect();
+        let plan = crate::engine::node_spawn::plan(&world, &tables, &[], crate::models::WorldGenParams::default().seed);
+        const KINDS: [(&str, [u8; 3]); 5] = [
+            ("tree", [22, 70, 34]),
+            ("fallen_branches", [140, 96, 50]),
+            ("rock_outcrop", [240, 240, 244]),
+            ("clay_bank", [196, 84, 200]),
+            ("iron_vein", [255, 205, 0]),
+        ];
+        let dot = ((12.0 / scale).round() as i64).max(1);
+        for (kind, colour) in KINDS {
+            let mut n = 0;
+            for s in plan.iter().filter(|s| s.resource_type == kind && radius(s.x, s.y) >= SUBURBAN_OUTER_RADIUS) {
+                n += 1;
+                let (cx, cy) = ((s.x / scale) as i64, (s.y / scale) as i64);
+                for dy in -dot..=dot {
+                    for dx in -dot..=dot {
+                        if dx * dx + dy * dy <= dot * dot {
+                            put(cx + dx, cy + dy, colour);
+                        }
+                    }
+                }
+            }
+            node_counts.push_str(&format!(", {kind} {n}"));
+        }
+    }
     std::fs::write(&path, relief::png(size, size, &rgb)).expect("write the plan");
     heights.sort_by(f64::total_cmp);
     let pct = |p: f64| heights[((heights.len() - 1) as f64 * p) as usize];
     println!(
         "relief: {path} (seed {seed}, {size}px). Wild heights: median {:.0}, p90 {:.0}, p99 {:.0}, max {:.0}. \
-         Water: {} rivers, {} streams, {} lakes, {} fords",
+         Water: {} rivers, {} streams, {} lakes, {} fords{node_counts}",
         pct(0.5),
         pct(0.9),
         pct(0.99),

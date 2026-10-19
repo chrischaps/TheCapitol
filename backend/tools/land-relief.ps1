@@ -12,6 +12,8 @@
   fords (orange dots) are drawn over it, and the wild trails (W5, red) over
   that, so their bridges show. It prints the wild heights' median,
   p90, p99 and max and the water's counts beside each one.
+  With -Nodes it draws the planned nodes past the suburb over it all (W6):
+  trees dark green, branches brown, stone white, clay orchid, iron veins gold.
   With -Bare it draws the land alone, from capitol-protocol's land_relief,
   and adds p99.9.
   The sibling of suburb-plan.ps1; the PNGs need no browser.
@@ -28,16 +30,21 @@
 .PARAMETER Bare
   The land alone, with no water.
 
+.PARAMETER Nodes
+  The planned resource nodes too (best at -Size 2400 or more).
+
 .EXAMPLE
   powershell -File backend/tools/land-relief.ps1
   powershell -File backend/tools/land-relief.ps1 -Seeds 42 -Size 2400
   powershell -File backend/tools/land-relief.ps1 -Bare
+  powershell -File backend/tools/land-relief.ps1 -Seeds 42 -Size 3000 -Nodes
 #>
 param(
     [string]$Seeds = "42,7,1234",
     [int]$Size = 1200,
     [string]$Out = "",
-    [switch]$Bare
+    [switch]$Bare,
+    [switch]$Nodes
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,6 +64,7 @@ try {
         $env:LAND_SIZE = "$Size"
         $env:LAND_RELIEF = $png
         $env:WATER_PLAN = $png
+        if ($Nodes) { $env:WILD_NODES = "1" } else { Remove-Item Env:WILD_NODES -ErrorAction SilentlyContinue }
         if ($Bare) {
             cargo test --release -p capitol-protocol --lib land_relief -- --ignored --nocapture --quiet |
                 Select-String "^relief:"

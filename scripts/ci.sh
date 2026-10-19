@@ -30,9 +30,10 @@ ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 
 # Ignored tests that are tools, not tests: one prints migration rows, one
-# renders suburb plans, one draws the wilds (water_plan), and two write the default world to a path from an
+# renders suburb plans, one draws the wilds (water_plan), one reports the wild
+# nodes (wild_node_report), and two write the default world to a path from an
 # env var ($TERRAIN_DUMP, $TERRAIN_FIXTURE). A new ignored tool goes here.
-DB_SKIP=(print_node_moves suburb_plan_report water_plan dump_default_terrain capture_terrain_fixture)
+DB_SKIP=(print_node_moves suburb_plan_report water_plan wild_node_report dump_default_terrain capture_terrain_fixture)
 
 # KEY's value in the main checkout's backend/.env, if it has one.
 main_env() {

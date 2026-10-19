@@ -131,7 +131,7 @@ Removing a row is an error unless it's listed under `retired`, so items in playe
 
 ### D5. Content tree v1 (E2.1)
 
-**Status: approved by Chris, 2026-10-18 (E2.1, #160).** E2.2 to E2.6 build from these tables. The wilds' extra yields (copper and tin, old-growth trees, scree, reeds: `the-capitol-wilds.md` WD8) aren't part of v1. They come in with W6 (#199). Grass stays the starter and the GDD's universal Fiber, and its hand numbers don't change.
+**Status: approved by Chris, 2026-10-18 (E2.1, #160).** E2.2 to E2.6 build from these tables. The wilds' extra yields (copper and tin, old-growth trees, scree, reeds: `the-capitol-wilds.md` WD8) aren't part of v1. W6 (#199) placed v1's own resources in the wilds, from the land. Copper, tin and reeds wait on this tree in [#225](https://github.com/chrischaps/TheCapitol/issues/225). Grass stays the starter and the GDD's universal Fiber, and its hand numbers don't change.
 
 v1 has **6 resources, 32 items, 6 stations and 27 recipes**, which is more than the first sketch's 22 items. Most of the extra items are the four iron heads and the four kits that give the new stations a way in. The longest chain is vein → ore → ingot → head → axe, with charcoal from the kiln feeding the forge. Tools and stations both carry quality along it.
 
@@ -316,6 +316,7 @@ At this anchor, a Suburban deed (500 Strands) is about half an hour of grass, an
   - stone from scree
   - clay and reeds on the riverbanks
 - Here "Wilderness" in the zone column means placed by the land (altitude, slope, water). That placement is W6 ([#199](https://github.com/chrischaps/TheCapitol/issues/199)), not E2.3.
+- **As built (W6):** veins high on the rock, stone on the scree, trees (the old growth) on the valley floors with branches under them, and clay on the wild banks. Clay gained a wilderness row (4/km², floor 53). A wild node's quality ceiling rises past its type's `base_quality_max` with depth and height, by `backend/content/wilds.toml`. Copper and tin, reeds, and old growth as a type of its own are [#225](https://github.com/chrischaps/TheCapitol/issues/225).
 
 ### D6. Where the market is (E3.4) [decided 2026-10-18]
 

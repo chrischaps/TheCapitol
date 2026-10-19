@@ -351,6 +351,9 @@ mod tests {
 
     const NEW_NODES_MIGRATION: &str = include_str!("../../migrations/20261106_001_seeded_nodes_by_zone.sql");
 
+    /// W6's (#199): the wilds' nodes, on the 12000 world.
+    const WILD_NODES_MIGRATION: &str = include_str!("../../migrations/20261113_001_wild_nodes.sql");
+
     /// The planned nodes the default world's water moved (#222).
     const PLANNED_MOVES_MIGRATION: &str = include_str!("../../migrations/20261112_001_wild_water_nodes.sql");
 
@@ -377,6 +380,20 @@ mod tests {
     /// The `('id', 'type', x, y, quality)` rows of a node seed insert, where
     /// W1's migration moved them.
     fn insert_rows(sql: &str) -> Vec<NodeSeed> {
+        insert_rows_at(sql, shifted)
+    }
+
+    /// The rows of the node seed inserts the migrations make, in order: E2.3's
+    /// (from before W1's shift), then W6's.
+    fn migrated_plan() -> Vec<NodeSeed> {
+        let mut rows = insert_rows(NEW_NODES_MIGRATION);
+        rows.extend(insert_rows_at(WILD_NODES_MIGRATION, |v| v));
+        rows
+    }
+
+    /// The `('id', 'type', x, y, quality)` rows of a node seed insert, each
+    /// coordinate through `at`.
+    fn insert_rows_at(sql: &str, at: fn(f64) -> f64) -> Vec<NodeSeed> {
         sql.lines()
             .filter_map(|line| {
                 let row = line.trim().strip_prefix("('")?.trim_end_matches(',').strip_suffix(')')?;
@@ -384,8 +401,8 @@ mod tests {
                 Some(NodeSeed {
                     id: f[0].parse().ok()?,
                     resource_type: f[1].to_string(),
-                    x: shifted(f[2].parse().ok()?),
-                    y: shifted(f[3].parse().ok()?),
+                    x: at(f[2].parse().ok()?),
+                    y: at(f[3].parse().ok()?),
                     base_quality: f[4].parse().ok()?,
                 })
             })
@@ -419,7 +436,9 @@ mod tests {
             let r = (s.x - CENTER_X).stable_hypot(s.y - CENTER_Y);
             assert!(terrain.water_rings.iter().all(|w| r < w.inner_radius() - KEEP_CLEAR || r > w.outer_radius() + KEEP_CLEAR));
             let table = tables.iter().find(|t| t.id == s.resource_type).unwrap();
-            assert!((table.quality.0..=table.quality.1).contains(&s.base_quality));
+            // A wild node's ceiling rises past its type's (W6, `wilds.toml`).
+            let top = if Zone::from_position(s.x, s.y) == Zone::Wilderness { 100 } else { table.quality.1 };
+            assert!((table.quality.0..=top).contains(&s.base_quality));
         }
         let suburb_branches = plan.iter().filter(|s| s.resource_type == "fallen_branches" && Zone::from_position(s.x, s.y) == Zone::Suburban);
         for s in suburb_branches {
@@ -456,12 +475,12 @@ mod tests {
         println!("{} moved, {} stuck: {:?}", report.moves.len(), report.stuck.len(), report.stuck);
     }
 
-    /// The migration writes exactly the default world's plan. After a change to
+    /// The migrations write exactly the default world's plan. After a change to
     /// the placer, the content's spawn tables or the default world, write a new
     /// migration from `print_new_nodes`.
     #[test]
     fn the_migration_writes_the_default_plan() {
-        let rows = insert_rows(NEW_NODES_MIGRATION);
+        let rows = migrated_plan();
         let plan = default_plan();
         assert_eq!(rows.len(), plan.len());
         for (row, seed) in rows.iter().zip(&plan) {
@@ -494,12 +513,14 @@ mod tests {
         assert!(wet.is_empty(), "{} wet: {:?}", wet.len(), wet);
     }
 
-    /// Prints the VALUES rows of E2.3's node insert for the default world:
+    /// Prints the VALUES rows of a node insert for the default world's planned
+    /// nodes that no migration writes yet:
     /// `cargo test print_new_nodes -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn print_new_nodes() {
-        let plan = default_plan();
+        let migrated: std::collections::HashSet<Uuid> = migrated_plan().iter().map(|s| s.id).collect();
+        let plan: Vec<NodeSeed> = default_plan().into_iter().filter(|s| !migrated.contains(&s.id)).collect();
         for s in &plan {
             println!("    ('{}', '{}', {:.1}, {:.1}, {}),", s.id, s.resource_type, s.x, s.y, s.base_quality);
         }
@@ -510,6 +531,98 @@ mod tests {
         for ((t, z), n) in counts {
             println!("-- {t} in {z}: {n}");
         }
+    }
+
+    /// W6 (#199): the wilds grow from the land. Each resource at about its
+    /// density, where its habitat in `wilds.toml` says: veins high on the
+    /// rock of the ranges, clay on the banks, old growth on the valley floors.
+    /// None stands in the water, on a trail, on a cliff, or where a walker
+    /// from the rural edge can't get to.
+    #[test]
+    fn the_wilds_grow_from_the_land() {
+        use crate::engine::node_placement::MOVE_CLEAR;
+        use crate::engine::node_spawn::{wilds::Land, BANK_CLEAR};
+        use capitol_protocol::land::{height_at, slope_at};
+        use capitol_protocol::rules::ground::CLIFF_SLOPE;
+
+        let terrain = TerrainConfig::get_default();
+        let land = Land::new(&terrain);
+        let plan = default_plan();
+        let wild: Vec<&NodeSeed> = plan.iter().filter(|s| Zone::from_position(s.x, s.y) == Zone::Wilderness).collect();
+        let tables = content_tables();
+        let (inner, outer) = Zone::Wilderness.radii();
+        let km2 = std::f64::consts::PI * (outer * outer - inner * inner) / 1e6;
+        for table in &tables {
+            let Some(spawn) = table.spawns.iter().find(|s| s.zone == Zone::Wilderness.as_str()) else { continue };
+            let want = (spawn.density * km2).round();
+            let got = wild.iter().filter(|s| s.resource_type == table.id).count();
+            assert!(got as f64 >= 0.95 * want, "{} in the wilds: {got} of {want}", table.id);
+        }
+        for s in &wild {
+            let (h, slope) = (height_at(s.x, s.y, &terrain.land), slope_at(s.x, s.y, &terrain.land));
+            let at = format!("{} at ({}, {}), height {h:.0}, slope {slope:.2}", s.resource_type, s.x, s.y);
+            let habitat = tables.iter().find(|t| t.id == s.resource_type).unwrap().habitat.as_ref().unwrap();
+            let r = (s.x - CENTER_X).stable_hypot(s.y - CENTER_Y);
+            assert!(habitat.suits(r, h, slope), "{at} isn't in its habitat");
+            assert!(slope <= CLIFF_SLOPE, "{at} is on a cliff");
+            assert!(land.reached((s.x, s.y)), "{at} can't be reached");
+            let road = road_clearance(&terrain, s.x, s.y);
+            assert!(road >= MOVE_CLEAR, "{at} is {road:.1} from a road or trail");
+            let water = land.water_clearance((s.x, s.y));
+            let clear = if s.resource_type == "clay_bank" { BANK_CLEAR } else { MOVE_CLEAR };
+            assert!(water >= clear, "{at} is {water:.1} from the water");
+            match s.resource_type.as_str() {
+                "iron_vein" => assert!(h >= 300.0 && slope >= 0.4, "{at} isn't in the ranges"),
+                "tree" => assert!(h <= 250.0 && slope <= 0.4, "{at} isn't on a valley floor"),
+                _ => {}
+            }
+        }
+        // Clay on the banks: within the bank strip of some water.
+        let on_a_bank = |x: f64, y: f64| {
+            let course = terrain.rivers.iter().chain(&terrain.streams).any(|c| {
+                c.points.windows(2).any(|w| {
+                    let half = w[0].width.max(w[1].width) / 2.0;
+                    point_to_segment_distance(x, y, w[0].x, w[0].y, w[1].x, w[1].y) <= half + 50.0
+                })
+            });
+            let shore = terrain.lakes.iter().any(|l| {
+                l.rings.iter().any(|ring| {
+                    (0..ring.len()).any(|i| {
+                        let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                        point_to_segment_distance(x, y, a.0, a.1, b.0, b.1) <= 50.0
+                    })
+                })
+            });
+            course || shore
+        };
+        let clay: Vec<&&NodeSeed> = wild.iter().filter(|s| s.resource_type == "clay_bank").collect();
+        assert!(!clay.is_empty());
+        for s in clay {
+            assert!(on_a_bank(s.x, s.y), "clay at ({}, {}) is off the banks", s.x, s.y);
+        }
+    }
+
+    /// W6 (#199): the base quality rises from the rural edge to the ranges,
+    /// for each wild resource found at both, and for the wilds as a whole.
+    #[test]
+    fn wild_quality_rises_into_the_ranges() {
+        let plan = default_plan();
+        let r = |s: &NodeSeed| (s.x - CENTER_X).stable_hypot(s.y - CENTER_Y);
+        let mean = |v: &[&NodeSeed]| v.iter().map(|s| s.base_quality as f64).sum::<f64>() / v.len() as f64;
+        let wild: Vec<&NodeSeed> = plan.iter().filter(|s| Zone::from_position(s.x, s.y) == Zone::Wilderness).collect();
+        let edge: Vec<&NodeSeed> = wild.iter().copied().filter(|s| r(s) < 4300.0).collect();
+        let ranges: Vec<&NodeSeed> = wild.iter().copied().filter(|s| r(s) > 5000.0).collect();
+        let (near, far) = (mean(&edge), mean(&ranges));
+        assert!(far > near + 5.0, "the wilds: {near:.1} by the rural edge, {far:.1} in the ranges");
+        for kind in ["tree", "fallen_branches", "rock_outcrop", "clay_bank"] {
+            let near: Vec<&NodeSeed> = edge.iter().copied().filter(|s| s.resource_type == kind).collect();
+            let far: Vec<&NodeSeed> = ranges.iter().copied().filter(|s| s.resource_type == kind).collect();
+            if near.len() < 20 || far.len() < 20 {
+                continue;
+            }
+            assert!(mean(&far) > mean(&near), "{kind}: {:.1} by the rural edge, {:.1} in the ranges", mean(&near), mean(&far));
+        }
+        assert!(wild.iter().all(|s| (0..=100).contains(&s.base_quality)));
     }
 
     /// Draws the default world's nodes by type over its rings, roads, lots and

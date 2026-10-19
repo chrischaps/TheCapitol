@@ -1,0 +1,56 @@
+# Where the wilds' nodes grow, and how good they are there (W6, #199).
+#
+# The Wilderness runs from r3800 to the world's edge at r6000. The land is 0
+# out to r3900, then rises through the foothills into eight massifs whose
+# crests stand near 640 (protocol `land`). Only the node planner reads this
+# file (backend/src/engine/node_spawn/wilds.rs); nothing is synced to a table.
+#
+# [quality]   a wild node's base quality is drawn from its spawn row's
+#             quality_floor (resources.toml) up to a ceiling: its resource's
+#             base_quality_max plus the `depth` and `height` points here,
+#             never over 100. Each is a list of [at, add] rows, rising by
+#             `at`, interpolated between them and held flat past either end.
+#   depth     at: radius from the centre
+#   height    at: the land's height there
+#
+# [[habitat]] one per resource with a wilderness spawn row: where in the
+#             wilds its nodes grow. Each bound is [lo, hi], inclusive, and
+#             optional. The planner also keeps every node off the trails and
+#             the water, and on ground a walker can reach.
+#   resource  an id from resources.toml
+#   height    the land's height
+#   slope     rise over run; at most rules::ground::CLIFF_SLOPE (1.2)
+#   depth     radius from the centre
+#   cover     woods only: the share of the habitat that's woods
+
+[quality]
+depth = [[3800, -15], [4400, 0], [5600, 10]]
+height = [[0, 0], [250, 3], [550, 8]]
+
+# Old growth, on the valley floors and the low ground between the ranges.
+[[habitat]]
+resource = "tree"
+height = [0, 220]
+slope = [0, 0.35]
+cover = 0.35
+
+[[habitat]]
+resource = "fallen_branches"
+slope = [0, 0.5]
+
+# Scree: the broken ground below the crags.
+[[habitat]]
+resource = "rock_outcrop"
+height = [80, 500]
+slope = [0.45, 1.0]
+
+# High on the bare, steep rock of the ranges.
+[[habitat]]
+resource = "iron_vein"
+height = [380, 900]
+slope = [0.55, 1.15]
+
+# The banks of the rivers, streams and lakes.
+[[habitat]]
+resource = "clay_bank"
+slope = [0, 0.4]

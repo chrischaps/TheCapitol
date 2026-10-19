@@ -24,10 +24,13 @@
 //! parks unless it was put there, and [`MIN_GAP`] from every other node. Those
 //! are `node_placement`'s clearances, so a planned node is never in the way.
 //!
+//! **The wilds** ([`PLACED_BY_THE_LAND`]) are placed after every other zone,
+//! from the land: each resource where its habitat in `content/wilds.toml`
+//! says, on ground a walker can reach (W6, #199; see [`wilds`]). Placing them
+//! last leaves the other zones' nodes, ids and all, as E2.3 planned them.
+//!
 //! **Not placed here.** Grass is seeded by migrations already
-//! ([`SEEDED_BY_MIGRATIONS`]). Wilderness rows ([`PLACED_BY_THE_LAND`]) wait
-//! for W6 (#199), which places them from the wilds' height field and water.
-//! It plugs its predicates in through [`plan_with`].
+//! ([`SEEDED_BY_MIGRATIONS`]).
 
 use std::collections::HashMap;
 use std::f64::consts::TAU;
@@ -39,6 +42,7 @@ use capitol_protocol::terrain::{quad_contains, TerrainPark, TerrainPlot};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::content::HabitatDef;
 use crate::engine::node_placement::{LOT_MARGIN, MOVE_CLEAR};
 use crate::models::geom::SplitMix64;
 use crate::models::lot_clearance::WATER_KERB;
@@ -49,7 +53,10 @@ use crate::models::{NodeState, ResourceNodeState, ResourceType};
 /// there, so the planner leaves them be.
 pub const SEEDED_BY_MIGRATIONS: [&str; 1] = ["grass"];
 
-/// Zones whose nodes come from the land (altitude, slope, water) in W6 (#199).
+pub mod wilds;
+
+/// Zones whose nodes come from the land (altitude, slope, water) in W6 (#199),
+/// placed by [`wilds`] after the rest.
 pub const PLACED_BY_THE_LAND: [Zone; 1] = [Zone::Wilderness];
 
 /// The least distance between any two nodes, planned or not.
@@ -92,6 +99,8 @@ pub struct SpawnTable {
     pub cluster: Cluster,
     pub quality: (i32, i32),
     pub spawns: Vec<Spawn>,
+    /// Where it grows in the wilds (`content/wilds.toml`), if it does.
+    pub habitat: Option<HabitatDef>,
 }
 
 impl From<&ResourceType> for SpawnTable {
@@ -101,6 +110,7 @@ impl From<&ResourceType> for SpawnTable {
             cluster: Cluster::from_str(&r.cluster).unwrap_or(Cluster::Scattered),
             quality: (r.base_quality_min, r.base_quality_max),
             spawns: r.spawns.0.clone(),
+            habitat: crate::content::wilds().habitat.iter().find(|h| h.resource == r.id).cloned(),
         }
     }
 }
@@ -116,9 +126,17 @@ impl SpawnTable {
             .filter(|(z, s)| !PLACED_BY_THE_LAND.contains(z) && s.density > 0.0)
     }
 
+    /// Whether [`wilds`] places this resource's nodes in the wilds.
+    fn grows_wild(&self) -> bool {
+        let wild = Zone::Wilderness.as_str();
+        !SEEDED_BY_MIGRATIONS.contains(&self.id.as_str())
+            && self.habitat.is_some()
+            && self.spawns.iter().any(|s| s.zone == wild && s.density > 0.0)
+    }
+
     /// Whether [`plan`] places any of this resource's nodes.
     pub fn is_planned(&self) -> bool {
-        self.planned_rows().next().is_some()
+        self.planned_rows().next().is_some() || self.grows_wild()
     }
 }
 
@@ -161,7 +179,7 @@ pub fn plan_with(
     order.sort_by(|a, b| (a.cluster != Cluster::Woods, &a.id).cmp(&(b.cluster != Cluster::Woods, &b.id)));
     let mut trees: Vec<(Zone, (f64, f64))> = Vec::new();
 
-    for table in order {
+    for &table in &order {
         for (zone, spawn) in table.planned_rows() {
             let (inner, outer) = zone.radii();
             let km2 = std::f64::consts::PI * (outer * outer - inner * inner) / 1e6;
@@ -208,6 +226,8 @@ pub fn plan_with(
             }
         }
     }
+    let wild: Vec<&SpawnTable> = order.into_iter().filter(|t| t.grows_wild()).collect();
+    wilds::plan(terrain, &ground, &wild, &mut taken, seed, land, &mut seeds);
     seeds
 }
 
@@ -538,6 +558,19 @@ impl Woods {
         woods
     }
 
+    /// The field for one resource over `points`, with its threshold set so
+    /// the woods cover `cover` of them: the wilds' valley woods.
+    fn over(seed: u64, id: &str, points: impl Iterator<Item = (f64, f64)>, cover: f64) -> Self {
+        let mut woods = Self { seed: SplitMix64::stream(seed, &[key(id), 0x600d5]).next_u64(), threshold: 0.0 };
+        let mut levels: Vec<f64> = points.map(|p| woods.level(p)).collect();
+        levels.sort_by(f64::total_cmp);
+        if !levels.is_empty() {
+            let at = ((1.0 - cover) * levels.len() as f64) as usize;
+            woods.threshold = levels[at.min(levels.len() - 1)];
+        }
+        woods
+    }
+
     fn covers(&self, at: (f64, f64)) -> bool {
         self.level(at) >= self.threshold
     }
@@ -755,13 +788,17 @@ mod tests {
     }
 
     #[test]
-    fn grass_and_the_wilderness_are_left_alone() {
+    fn grass_is_left_alone_and_the_wilds_come_last() {
         let tables = content_tables();
         let seeds = plan(&small_world(), &tables, &[], 1);
         assert!(!seeds.is_empty());
         assert!(seeds.iter().all(|s| s.resource_type != "grass"));
-        assert!(seeds.iter().all(|s| Zone::from_position(s.x, s.y) != Zone::Wilderness));
         assert!(!tables.iter().find(|t| t.id == "grass").unwrap().is_planned());
+        // Every wild node after every other, so the wilds can't move E2.3's.
+        let first_wild = seeds.iter().position(|s| Zone::from_position(s.x, s.y) == Zone::Wilderness).unwrap();
+        assert!(seeds[first_wild..].iter().all(|s| Zone::from_position(s.x, s.y) == Zone::Wilderness));
+        let without: Vec<SpawnTable> = tables.iter().cloned().map(|t| SpawnTable { habitat: None, ..t }).collect();
+        assert_eq!(plan(&small_world(), &without, &[], 1), seeds[..first_wild]);
     }
 
     #[test]
