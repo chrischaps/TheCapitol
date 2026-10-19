@@ -1,5 +1,6 @@
 //! Game rules both sides need to agree on: world geometry, speeds, ranges, zones,
-//! quality grades, the quality cascade and the water-crossing test.
+//! quality grades, the quality cascade, the water-crossing test and moving
+//! on the land ([`ground`]).
 //!
 //! The server is authoritative. Clients use these to predict (move the local player,
 //! grey out an out-of-range node, grade an item from its numeric quality) without
@@ -129,6 +130,9 @@ pub mod market;
 
 /// Resource types: yield by tool tier, spawn tables and cluster shapes.
 pub mod resources;
+
+/// Moving on the land: slope, cliffs, and the wild water (W4).
+pub mod ground;
 
 /// Letter grade for an item quality (0-100): A >= 90, B >= 75, C >= 55, D >= 35,
 /// otherwise F. WebSocket events carry only the number, so clients grade it here.
@@ -292,16 +296,19 @@ pub struct WaterBlock {
     pub ring_id: String,
 }
 
-/// A water ring's name, for people: `canal_outer` is "the outer canal".
-/// An id it doesn't know reads as itself, underscores as spaces. The
-/// server's `movement_blocked` reason says it, and a client can say it
-/// from the message's `water_id`.
+/// A water's name, for people: `canal_outer` is "the outer canal", and the
+/// wilds' `river_3` is "the river" (W4). An id it doesn't know reads as
+/// itself, underscores as spaces. The server's `movement_blocked` reason
+/// says it, and a client can say it from the message's `water_id`.
 pub fn water_name(ring_id: &str) -> String {
     match ring_id {
         "moat" => "the moat".into(),
         "canal_inner" => "the inner canal".into(),
         "canal_outer" => "the outer canal".into(),
         "" => "the water".into(),
+        wild if wild.starts_with("river_") => "the river".into(),
+        wild if wild.starts_with("stream_") => "the stream".into(),
+        wild if wild.starts_with("lake_") => "the lake".into(),
         other => format!("the {}", other.replace('_', " ")),
     }
 }
@@ -491,6 +498,9 @@ mod tests {
         assert_eq!(water_name("moat"), "the moat");
         assert_eq!(water_name("canal_far"), "the canal far");
         assert_eq!(water_name(""), "the water");
+        assert_eq!(water_name("river_12"), "the river");
+        assert_eq!(water_name("stream_0"), "the stream");
+        assert_eq!(water_name("lake_3"), "the lake");
     }
 
     #[test]

@@ -1308,6 +1308,8 @@ fn walk(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Shar
         data.insert("dir_x".into(), (dx as f64).into());
         data.insert("dir_z".into(), (dz as f64).into());
         data.insert("water".into(), water_name(&blocked.water).into());
+        // The slope stopped you, not water (W4): no splash, no bridge to find.
+        data.insert("steep".into(), (blocked.reason == rules::ground::TOO_STEEP).into());
         data.insert("reason".into(), blocked.reason.into());
         ctx.fire_event("movement_blocked", data);
     }

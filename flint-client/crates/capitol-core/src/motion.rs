@@ -61,11 +61,19 @@
 //! prediction stands (it resumed a stored destination on reconnect) is
 //! followed, a step ahead on its heading, until it stops.
 //!
+//! **On the land** (W4, #197), once [`Motion::set_ground`] has the terrain's
+//! [`Ground`], the prediction walks as the server does: slower up and down
+//! hills and through streams, and stopped by a cliff, a river or a lake. So
+//! the avatar doesn't rubber-band on a hill. Without it, the walk is flat.
+//!
 //! [`Motion::sample`] fills a buffer the `Motion` owns and returns it, so it
 //! doesn't allocate once the buffer has grown to the number of players.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use capitol_protocol::rules::ground::Ground;
 
 use capitol_protocol::rules::{ARRIVAL_EPSILON, PLAYER_SPEED, TICK_MS};
 use uuid::Uuid;
@@ -157,6 +165,8 @@ pub struct Motion {
     tracks: HashMap<Uuid, Track>,
     local: Option<Local>,
     poses: Vec<Pose>,
+    /// The land the local player walks on, once the terrain is known.
+    ground: Option<Arc<Ground>>,
 }
 
 impl Default for Motion {
@@ -177,6 +187,20 @@ impl Motion {
             tracks: HashMap::new(),
             local: None,
             poses: Vec::new(),
+            ground: None,
+        }
+    }
+
+    /// The land to predict the local player's walk on: the terrain's
+    /// [`Ground`]. Cheap to call every frame with the same one.
+    pub fn set_ground(&mut self, ground: Option<Arc<Ground>>) {
+        let same = match (&self.ground, &ground) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.ground = ground;
         }
     }
 
@@ -201,7 +225,7 @@ impl Motion {
                 }
                 StateEvent::ExtractionStarted { .. } | StateEvent::CraftingStarted { .. } => {
                     if let Some(local) = &mut self.local {
-                        local.advance(now, &self.config);
+                        local.advance(now, &self.config, self.ground.as_deref());
                         local.stop();
                     }
                 }
@@ -216,7 +240,7 @@ impl Motion {
     pub fn move_to(&mut self, now: Instant, x: f64, y: f64) {
         if let Some(local) = &mut self.local {
             if local.synced {
-                local.advance(now, &self.config);
+                local.advance(now, &self.config, self.ground.as_deref());
                 local.following = false;
                 local.dest = Some((x, y));
             }
@@ -238,7 +262,7 @@ impl Motion {
         self.poses.clear();
         if let Some(local) = &mut self.local {
             if local.synced {
-                local.advance(now, &self.config);
+                local.advance(now, &self.config, self.ground.as_deref());
                 self.poses.push(local.pose());
             }
         }
@@ -291,7 +315,7 @@ impl Motion {
         for (id, player) in state.players() {
             if Some(*id) == me {
                 if let Some(local) = &mut self.local {
-                    local.reconcile(now, player.x, player.y, &self.config);
+                    local.reconcile(now, player.x, player.y, &self.config, self.ground.as_deref());
                 }
                 continue;
             }
@@ -556,7 +580,7 @@ impl Local {
 
     /// Walks toward the destination up to `now`, decays the blend and records
     /// the trail.
-    fn advance(&mut self, now: Instant, config: &MotionConfig) {
+    fn advance(&mut self, now: Instant, config: &MotionConfig, ground: Option<&Ground>) {
         if !self.synced || now <= self.advanced {
             return;
         }
@@ -567,7 +591,18 @@ impl Local {
             let (ex, ey) = (dx - self.x, dy - self.y);
             let remaining = ex.hypot(ey);
             let step = config.speed * dt;
-            if remaining < ARRIVAL_EPSILON || step >= remaining {
+            if remaining < ARRIVAL_EPSILON {
+                self.x = dx;
+                self.y = dy;
+                self.dest = None;
+            } else if let Some(ground) = ground {
+                let walked = ground.step((self.x, self.y), (dx, dy), step);
+                (self.x, self.y) = (walked.x, walked.y);
+                // Stopped: the server's `movement_blocked` will say where.
+                if walked.blocked.is_some() || (walked.x, walked.y) == (dx, dy) {
+                    self.dest = None;
+                }
+            } else if step >= remaining {
                 self.x = dx;
                 self.y = dy;
                 self.dest = None;
@@ -597,12 +632,12 @@ impl Local {
 
     /// Checks the server's position against the trail and corrects the
     /// prediction if it has strayed. See the module docs.
-    fn reconcile(&mut self, now: Instant, sx: f64, sy: f64, config: &MotionConfig) {
+    fn reconcile(&mut self, now: Instant, sx: f64, sy: f64, config: &MotionConfig, ground: Option<&Ground>) {
         if !self.synced {
             self.snap(now, sx, sy);
             return;
         }
-        self.advance(now, config);
+        self.advance(now, config, ground);
         let (mx, my) = (sx - self.server.0, sy - self.server.1);
         let moved = mx.hypot(my);
         let server_moved = moved > 1e-6;
@@ -614,8 +649,10 @@ impl Local {
         self.server = (sx, sy);
         // Where the server will be by now, if it walks on the way it went.
         let ahead = |lag: f64| {
-            let step = config.speed * lag;
-            (sx + mx / moved * step, sy + my / moved * step)
+            let heading = (mx / moved, my / moved);
+            let pace = ground.map_or(1.0, |g| g.speed_at(sx, sy, heading));
+            let step = config.speed * pace * lag;
+            (sx + heading.0 * step, sy + heading.1 * step)
         };
 
         if self.following {
@@ -662,7 +699,13 @@ impl Local {
         // by now. If it has stopped, it isn't following us: stop too. If it's
         // walking on its own, follow it.
         let target = match (self.dest, server_moved) {
-            (Some((dx, dy)), true) => toward(sx, sy, dx, dy, config.speed * self.lag),
+            (Some((dx, dy)), true) => match ground {
+                Some(ground) => {
+                    let walked = ground.step((sx, sy), (dx, dy), config.speed * self.lag);
+                    (walked.x, walked.y)
+                }
+                None => toward(sx, sy, dx, dy, config.speed * self.lag),
+            },
             (_, false) => {
                 self.stop();
                 (sx, sy)

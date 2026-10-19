@@ -6,7 +6,8 @@
 //! - [`ws`]: WebSocket messages (`ClientMessage`, `ServerMessage`)
 //! - [`rest`]: request and response bodies for the REST API
 //! - [`terrain`]: the `/terrain` response
-//! - [`rules`]: speeds, ranges, zones, quality grades and the water-crossing test
+//! - [`rules`]: speeds, ranges, zones, quality grades, the water-crossing test
+//!   and moving on the land (`rules::ground`)
 //! - [`fmath`]: trig that gives the same bits on every platform
 //! - [`land`]: the height of the ground, a pure function of `LandParams`
 //!

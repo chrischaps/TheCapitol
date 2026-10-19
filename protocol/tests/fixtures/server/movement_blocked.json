@@ -1,1 +1,1 @@
-{"type":"movement_blocked","player_id":"6a1f0c2e-4b7d-4e19-9c3a-000000000001","reason":"Cannot cross the inner canal without a bridge","water_id":"canal_inner","stopped_x":6590.25,"stopped_y":6000.0}
+{"type":"movement_blocked","player_id":"6a1f0c2e-4b7d-4e19-9c3a-000000000001","reason":"Cannot cross the river without a ford or a bridge","water_id":"river_12","stopped_x":10184.5,"stopped_y":7311.25}

@@ -556,3 +556,88 @@ fn a_reconnect_snaps_everyone_to_the_next_snapshot() {
     let poses = rig.sample(2100);
     assert_eq!((poses[0].x, poses[1].x), (4010.0, 4040.0));
 }
+
+// ---------------------------------------------------------------------------
+// On the land (W4)
+// ---------------------------------------------------------------------------
+
+mod on_the_land {
+    use super::*;
+    use capitol_protocol::fmath::StableMath;
+    use capitol_protocol::land::{self, LandParams};
+    use capitol_protocol::terrain::{Mouth, WaterCourse, WaterPoint};
+
+    /// A river 20 wide running north to south at x = 4050, on flat land.
+    fn river() -> Arc<Ground> {
+        let flat = LandParams { foothill_radius: 1.0e9, ..LandParams::default() };
+        let point = |y| WaterPoint { x: 4050.0, y, width: 20.0, depth: 2.0, surface: 0.0 };
+        let river = WaterCourse {
+            id: "river_0".into(),
+            source: None,
+            mouth: Mouth::Edge,
+            points: vec![point(3000.0), point(5000.0)],
+        };
+        Arc::new(Ground::new(&flat, &[river], &[], &[], &[], &[]))
+    }
+
+    #[test]
+    fn a_river_stops_the_prediction_at_its_bank() {
+        let mut rig = Rig::new();
+        rig.motion.set_ground(Some(river()));
+        rig.snapshot(0, &[(ME, 4000.0, 4000.0)]);
+        rig.move_to(0, 4100.0, 4000.0);
+        let me = rig.pose(2000, ME);
+        assert!((4039.0..=4040.0).contains(&me.x), "stopped at {}", me.x);
+        assert!(!me.moving);
+        assert_eq!(rig.motion.destination(), None);
+    }
+
+    /// Somewhere in the wilds that rises about 1 in 2, and the way up it.
+    fn hillside(land: &LandParams) -> ((f64, f64), (f64, f64)) {
+        let at = (0..3600)
+            .map(|i| {
+                let a = (i as f64 * 0.1).to_radians();
+                (6000.0 + 4600.0 * a.stable_cos(), 6000.0 + 4600.0 * a.stable_sin())
+            })
+            .find(|&(x, y)| (0.45..0.55).contains(&land::slope_at(x, y, land)))
+            .expect("a hillside");
+        let (gx, gy) = land::gradient_at(at.0, at.1, land);
+        let len = gx.stable_hypot(gy);
+        (at, (at.0 + gx / len * 60.0, at.1 + gy / len * 60.0))
+    }
+
+    /// The local player walks up a hill for 2 s while a server a round trip
+    /// behind walks the same `Ground`. How many times the prediction was
+    /// corrected.
+    fn climb(predict: bool) -> u32 {
+        let land = LandParams::default();
+        let ground = Arc::new(Ground::new(&land, &[], &[], &[], &[], &[]));
+        let (from, to) = hillside(&land);
+        let mut rig = Rig::new();
+        if predict {
+            rig.motion.set_ground(Some(ground.clone()));
+        }
+        rig.snapshot(0, &[(ME, from.0, from.1)]);
+        rig.move_to(0, to.0, to.1);
+        // The server: 5 units of walking per tick, starting 120 ms late.
+        let mut server = from;
+        for ms in (10..=2000).step_by(10) {
+            if ms % 100 == 0 {
+                if ms > 120 {
+                    let step = ground.step(server, to, 5.0);
+                    server = (step.x, step.y);
+                }
+                rig.snapshot(ms, &[(ME, server.0, server.1)]);
+            }
+            rig.sample(ms);
+        }
+        rig.motion.corrections()
+    }
+
+    #[test]
+    fn a_climb_predicted_on_the_ground_matches_the_server() {
+        assert_eq!(climb(true), 0, "the prediction rubber-banded on the hill");
+        // Without the ground, the flat prediction runs ahead and is pulled back.
+        assert!(climb(false) > 0);
+    }
+}

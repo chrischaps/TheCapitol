@@ -1368,6 +1368,19 @@ pub struct MovementValidation {
 }
 
 impl TerrainConfig {
+    /// The land and the wild water, indexed for walking on (W4, #197).
+    /// Build it once per terrain: `GameState` keeps it beside the terrain.
+    pub fn ground(&self) -> capitol_protocol::rules::ground::Ground {
+        capitol_protocol::rules::ground::Ground::new(
+            &self.land,
+            &self.rivers,
+            &self.streams,
+            &self.lakes,
+            &self.fords,
+            &self.roads,
+        )
+    }
+
     /// Validate if movement from one point to another crosses water without a bridge
     pub fn validate_movement(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64) -> MovementValidation {
         match rules::check_water_crossing(

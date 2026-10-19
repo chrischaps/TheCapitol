@@ -194,3 +194,22 @@ fn an_error_from_an_older_server_names_no_command() {
         }
     );
 }
+
+#[test]
+fn movement_blocked_names_the_river_or_says_too_steep() {
+    use capitol_protocol::rules::ground::Blocked;
+    // The fixture is a river's block (W4), in the server's own words.
+    let (_, json) = fixtures("server").into_iter().find(|(stem, _)| stem == "movement_blocked").unwrap();
+    let ServerMessage::MovementBlocked { reason, water_id, .. } = serde_json::from_str(&json).unwrap() else {
+        panic!("not a movement_blocked");
+    };
+    assert_eq!(water_id, "river_12");
+    assert_eq!(reason, Blocked::Water(water_id.clone()).reason());
+
+    // A slope names no water.
+    let steep = r#"{"type":"movement_blocked","player_id":"6a1f0c2e-4b7d-4e19-9c3a-000000000001","reason":"Too steep","water_id":"","stopped_x":10650.0,"stopped_y":6020.5}"#;
+    let msg: ServerMessage = serde_json::from_str(steep).unwrap();
+    assert_eq!(serde_json::to_string(&msg).unwrap(), steep);
+    let ServerMessage::MovementBlocked { reason, water_id, .. } = msg else { unreachable!() };
+    assert_eq!((reason.as_str(), water_id.as_str()), (Blocked::Steep.reason().as_str(), Blocked::Steep.water_id()));
+}

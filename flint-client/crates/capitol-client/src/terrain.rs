@@ -14,10 +14,12 @@
 //! rebuilt while the game runs.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use capitol_core::net::{NetEvent, RestRequest, Tag};
+use capitol_core::protocol::rules::ground::Ground;
 use capitol_core::protocol::terrain::{Landmark, LandmarkKind, TerrainResponse};
 use capitol_core::terrain::{read_terrain_file, TerrainCache, TerrainFetch};
 
@@ -35,6 +37,8 @@ pub struct TerrainSource {
     current: Option<TerrainResponse>,
     /// `current` changed since the world was last built from it.
     changed: bool,
+    /// `current`'s land and wild water, indexed for walking on (W4).
+    ground: Option<Arc<Ground>>,
     origin: Origin,
 }
 
@@ -62,6 +66,7 @@ impl TerrainSource {
         );
         Ok(Self {
             fetch: None,
+            ground: Some(Arc::new(Ground::from_terrain(&terrain))),
             current: Some(terrain),
             changed: true,
             origin: Origin::File,
@@ -83,6 +88,7 @@ impl TerrainSource {
                 Origin::Waiting
             },
             changed: cached.is_some(),
+            ground: cached.as_ref().map(|t| Arc::new(Ground::from_terrain(t))),
             current: cached,
         }
     }
@@ -117,6 +123,7 @@ impl TerrainSource {
     }
 
     fn replace(&mut self, terrain: TerrainResponse, origin: Origin) {
+        self.ground = Some(Arc::new(Ground::from_terrain(&terrain)));
         self.current = Some(terrain);
         self.changed = true;
         self.origin = origin;
@@ -128,6 +135,11 @@ impl TerrainSource {
             return None;
         }
         self.current.as_ref()
+    }
+
+    /// The current terrain's ground, for the local player's prediction.
+    pub fn ground(&self) -> Option<&Arc<Ground>> {
+        self.ground.as_ref()
     }
 
     /// The current terrain's landmark of `kind`, such as the Exchange hall.

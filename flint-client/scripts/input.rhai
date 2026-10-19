@@ -21,11 +21,12 @@
 // A gold ring lies there, with a faint dashed line marching to it from
 // your feet. The click itself drops a ripple, as the spike's did (P0.4).
 //
-// The server stops a walk at a canal's edge with `movement_blocked`. Rust
-// fires it here with where you stand and which way you were going. The
-// water splashes just ahead of you, the camera rig gives a small nudge
-// (camera.rhai), and a toast says to find a bridge (notices.rhai, which
-// holds every toast).
+// The server stops a walk at the water's edge, or below a cliff (W4), with
+// `movement_blocked`. Rust fires it here with where you stand, which way
+// you were going, and `steep` for a cliff. The water splashes just ahead
+// of you, the camera rig gives a small nudge (camera.rhai), and a toast
+// says to find a bridge or a ford, or a gentler way up (notices.rhai,
+// which holds every toast).
 //
 // Gathering: a click on a grass tuft (cap_node_at) asks Rust to extract it
 // (cap_extract). Within 50 units (5 m) that's at once; further, you walk
@@ -312,6 +313,11 @@ fn on_event(name, data) {
         return;
     }
     if name != "movement_blocked" { return; }
+    // A cliff stops you dry: only the destination marker goes.
+    if data.steep == true {
+        if marker != () && marker.gone == () { marker.gone = t; }
+        return;
+    }
     let x = data.x + data.dir_x * splash_ahead();
     let z = data.z + data.dir_z * splash_ahead();
     // Droplets thrown up and on over the water, fixed at the splash.

@@ -118,9 +118,16 @@ fn on_event(name, data) {
         return;
     }
     if name == "movement_blocked" {
+        if data.steep == true {
+            toasts = add_toast(toasts, "Too steep", "Find a gentler way up", "note", t);
+            return;
+        }
         let water = data.water;
         let body = water.sub_string(0, 1).to_upper() + water.sub_string(1) + " has no crossing here";
-        toasts = add_toast(toasts, "Find a bridge", body, "water", t);
+        let title = if water == "the river" { "Find a ford or a bridge" }
+                    else if water == "the lake" { "Go round" }
+                    else { "Find a bridge" };
+        toasts = add_toast(toasts, title, body, "water", t);
     }
 }
 

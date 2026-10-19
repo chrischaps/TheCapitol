@@ -1586,6 +1586,8 @@ impl Session {
                 _ => {}
             }
         }
+        // The prediction walks on the land the server does (W4)
+        self.motion.set_ground(terrain.ground().cloned());
         if self.in_session() {
             self.harvest.tick(now);
             self.visit.tick(now);

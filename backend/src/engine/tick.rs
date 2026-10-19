@@ -18,6 +18,7 @@ use crate::models::{ActionState, ContainerType, ItemType, PlayerPosition, Player
 use crate::state::AppState;
 
 use capitol_protocol::rest::CatalogResponse;
+use capitol_protocol::rules::ground::Ground;
 use capitol_protocol::rules::quality;
 use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
@@ -66,6 +67,8 @@ pub struct GameState {
     pub terrain: TerrainConfig,
     // `terrain.version()`, kept beside it so `/terrain` doesn't rehash on every request
     pub terrain_version: String,
+    /// The terrain's land and wild water, indexed for walking on (W4)
+    pub ground: Arc<Ground>,
     // World generation parameters (for admin tweaking)
     pub world_gen_params: WorldGenParams,
     /// The stations working on their own (E4.3), run by their own task
@@ -85,6 +88,7 @@ impl GameState {
     pub(crate) fn with_terrain(params: WorldGenParams, terrain: TerrainConfig) -> Self {
         let (event_sender, _) = broadcast::channel(1024);
         let terrain_version = terrain.version();
+        let ground = Arc::new(terrain.ground());
         Self {
             players: HashMap::new(),
             connections: HashMap::new(),
@@ -115,6 +119,7 @@ impl GameState {
             trade_manager: TradeManager::new(),
             terrain,
             terrain_version,
+            ground,
             world_gen_params: params,
             works: Arc::default(),
             last_tps: 0.0,
@@ -131,6 +136,7 @@ impl GameState {
     /// Replace the terrain, and its version with it
     pub fn set_terrain(&mut self, terrain: TerrainConfig) {
         self.terrain_version = terrain.version();
+        self.ground = Arc::new(terrain.ground());
         self.terrain = terrain;
     }
 
@@ -544,11 +550,8 @@ impl GameState {
     fn process_movement(&mut self) {
         use crate::models::Zone;
 
-        // Clone terrain reference to avoid borrow issues
-        let terrain = self.terrain.clone();
-
         for player in self.players.values_mut() {
-            let result = process_movement(player, &terrain);
+            let result = process_movement(player, &self.terrain, &self.ground);
 
             // Broadcast zone transition if player changed zones
             if let Some(transition) = result.zone_transition {

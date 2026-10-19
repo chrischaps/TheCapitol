@@ -175,7 +175,10 @@ pub async fn place_station(
     let water = {
         let game = state.game.read().await;
         let terrain = &game.terrain;
-        in_water((terrain.center_x, terrain.center_y), &terrain.water_rings, (x, y)).map(|r| r.id.clone())
+        in_water((terrain.center_x, terrain.center_y), &terrain.water_rings, (x, y))
+            .map(|r| r.id.clone())
+            // The wilds' rivers, streams and lakes too (W4)
+            .or_else(|| game.ground.water_at(x, y).map(String::from))
     };
     let plot_id = site(player_id, st.off_plot, lot.as_ref(), water.as_deref())?;
 

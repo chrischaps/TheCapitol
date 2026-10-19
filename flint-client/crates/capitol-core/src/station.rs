@@ -126,7 +126,9 @@ pub fn check<'a>(
                 return Err(Refusal::NeedsAPlot);
             }
             let center = (terrain.center_x, terrain.center_y);
-            if rules::in_water(center, &terrain.water_rings, (x, y)).is_some() {
+            if rules::in_water(center, &terrain.water_rings, (x, y)).is_some()
+                || rules::ground::water_at(terrain, x, y).is_some()
+            {
                 return Err(Refusal::InWater);
             }
             None

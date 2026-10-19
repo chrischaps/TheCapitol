@@ -384,11 +384,14 @@ pub enum ServerMessage {
     #[serde(rename = "movement_blocked")]
     MovementBlocked {
         player_id: Uuid,
-        /// For people: "Cannot cross the outer canal without a bridge".
+        /// For people: "Cannot cross the outer canal without a bridge",
+        /// "Cannot cross the river without a ford or a bridge", or "Too
+        /// steep" (`rules::ground::Blocked::reason`).
         reason: String,
-        /// The water ring that stopped you (`moat`, `canal_inner`, ...), as
-        /// in `/terrain`'s `water_rings`. `rules::water_name` names it.
-        /// Empty from a server older than #74.
+        /// The water that stopped you: a ring (`moat`, `canal_inner`, ...),
+        /// as in `/terrain`'s `water_rings`, or a wild river or lake
+        /// (`river_3`, `lake_1`, W4). `rules::water_name` names it. Empty
+        /// when the slope stopped you, and from a server older than #74.
         #[serde(default)]
         water_id: String,
         stopped_x: f64,
