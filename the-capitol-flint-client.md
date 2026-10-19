@@ -166,7 +166,7 @@ World-attached HUD (name labels, extraction and crafting rings, the targeting li
 
 ### 4.4 Engine hooks (upstream to Flint)
 
-These go to Flint on a `feature/*` branch and PR, following the subtree conventions (vault: *Git Subtree Branch Conventions*). Each one gets an ADR and a page in the Flint book. H1–H5 are ADRs 0071–0075, H7 is 0076, H10 is 0078, H11 is 0079 and H16 is 0082 (0080 and 0081 are taken by open PRs #48 and #49). Flint's ADRs live in `C:\Users\chris\dev\Starchild\docs\adr\`, not in the Flint repo. H13 is 0080, H15 is 0081, H16 is 0082, H17 is 0083, H18 is 0084, H19 (#96) is 0085, H20 is 0086, H14 is 0087, H22 is 0088, H21 is 0089, H23 is 0090, the shoreline search (#132) is 0091, H24 is 0092 and H25 is 0093; the next free number is 0094. Each is general enough that any Flint game could use it.
+These go to Flint on a `feature/*` branch and PR, following the subtree conventions (vault: *Git Subtree Branch Conventions*). Each one gets an ADR and a page in the Flint book. H1–H5 are ADRs 0071–0075, H7 is 0076, H10 is 0078, H11 is 0079 and H16 is 0082 (0080 and 0081 are taken by open PRs #48 and #49). Flint's ADRs live in `C:\Users\chris\dev\Starchild\docs\adr\`, not in the Flint repo. H13 is 0080, H15 is 0081, H16 is 0082, H17 is 0083, H18 is 0084, H19 (#96) is 0085, H20 is 0086, H14 is 0087, H22 is 0088, H21 is 0089, H23 is 0090, the shoreline search (#132) is 0091, H24 is 0092 and H25 is 0093. W7's H6 (#200) takes 0094 and W8's height-field ray (#201, Flint PR #67) is 0095; the next free number is 0096. Each is general enough that any Flint game could use it.
 
 | ID | Hook | Shape | Size |
 |---|---|---|---|
