@@ -3,3 +3,14 @@ resolver = "2"
 members = ["backend", "protocol"]
 # The Flint client is its own workspace (see flint-client/CLAUDE.md).
 exclude = ["flint-client"]
+
+# World generation spends most of its time in `capitol_protocol::land`'s noise
+# and libm's trig. Optimising just those in debug builds makes every debug
+# server start, admin regenerate and terrain test several times quicker
+# (#221). Float maths is never reordered at any opt-level, so the world is
+# the same bits as unoptimised (`default_terrain_version_is_pinned`).
+[profile.dev.package.capitol-protocol]
+opt-level = 3
+
+[profile.dev.package.libm]
+opt-level = 3
