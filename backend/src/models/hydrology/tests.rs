@@ -4,10 +4,24 @@ use super::*;
 use capitol_protocol::fmath::StableMath;
 use capitol_protocol::land::{carve, ground_at, relief, Water};
 
+/// The default world's roads, which the water skirts.
+fn roads() -> &'static [RoadSegment] {
+    static ROADS: OnceLock<Vec<RoadSegment>> = OnceLock::new();
+    ROADS.get_or_init(|| crate::models::TerrainConfig::get_default().roads)
+}
+
 /// The default land's water, generated once for the tests that only read it.
 fn default_water() -> &'static Hydrology {
     static WATER: OnceLock<Hydrology> = OnceLock::new();
-    WATER.get_or_init(|| generate(&LandParams::default()))
+    WATER.get_or_init(|| generate(&LandParams::default(), roads()))
+}
+
+/// Another seed's land, round the default roads.
+fn water_for(seed: u64) -> Hydrology {
+    if seed == 42 {
+        return default_water().clone();
+    }
+    generate(&LandParams { seed, ..LandParams::default() }, roads())
 }
 
 fn courses(w: &Hydrology) -> impl Iterator<Item = &WaterCourse> {
@@ -19,12 +33,13 @@ fn bearing(x: f64, y: f64) -> f64 {
 }
 
 /// Every river and stream runs downhill, from its source to its mouth, and
-/// its mouth is where it says: the edge, a lake, or a point of the course it
-/// joins. Following the joins always reaches the edge or a lake.
+/// its mouth is where it says: the edge, a lake, a point of the course it
+/// joins, or petering out on the plain. Following the joins always reaches
+/// one of the others.
 #[test]
-fn every_course_runs_downhill_to_the_edge_or_a_lake() {
+fn every_course_runs_downhill_to_its_end() {
     for seed in [42, 7, 1234] {
-        let w = if seed == 42 { default_water().clone() } else { generate(&LandParams { seed, ..LandParams::default() }) };
+        let w = water_for(seed);
         let by_id: HashMap<&str, &WaterCourse> = courses(&w).map(|c| (c.id.as_str(), c)).collect();
         let lakes: HashMap<&str, &Lake> = w.lakes.iter().map(|l| (l.id.as_str(), l)).collect();
         assert_eq!(by_id.len(), w.rivers.len() + w.streams.len(), "course ids are unique");
@@ -48,6 +63,11 @@ fn every_course_runs_downhill_to_the_edge_or_a_lake() {
                     let on = on.unwrap_or_else(|| panic!("{} ends off {id}", c.id));
                     assert_eq!(on.surface, last.surface, "{} meets {id} at its surface", c.id);
                 }
+                Mouth::PetersOut => {
+                    let r = radius(last.x, last.y);
+                    assert!(r < PLAIN_EDGE, "{} peters out in the hills, at r{r:.0}", c.id);
+                    assert!(last.width < c.points[0].width.max(4.0), "{} narrows as it peters out", c.id);
+                }
             }
             if let Some(id) = &c.source {
                 let lake = lakes[id.as_str()];
@@ -63,10 +83,17 @@ fn every_course_runs_downhill_to_the_edge_or_a_lake() {
                     _ => break,
                 }
             }
-            assert!(!matches!(at.mouth, Mouth::Joins(_)), "{} never reaches the edge or a lake", c.id);
+            assert!(!matches!(at.mouth, Mouth::Joins(_)), "{} never ends", c.id);
         }
+        // A river joins a stream only where it soaks away into one on the plain.
         for r in &w.rivers {
-            assert!(!matches!(&r.mouth, Mouth::Joins(id) if id.starts_with("stream")), "{} joins a stream", r.id);
+            if let Mouth::Joins(id) = &r.mouth {
+                if id.starts_with("stream") {
+                    let (last, next) = (r.points.last().unwrap(), by_id[id.as_str()].points[0]);
+                    assert!(last.x == next.x && last.y == next.y, "{} joins {id} other than by soaking away", r.id);
+                    assert!(radius(last.x, last.y) < PLAIN_EDGE + PLAIN_BLEND, "{} soaks away in the hills", r.id);
+                }
+            }
         }
     }
 }
@@ -80,7 +107,7 @@ fn courses_meet_only_where_one_joins_another() {
         o(a, b, c) * o(a, b, d) < 0.0 && o(c, d, a) * o(c, d, b) < 0.0
     }
     for seed in [42, 7, 1234] {
-        let w = if seed == 42 { default_water().clone() } else { generate(&LandParams { seed, ..LandParams::default() }) };
+        let w = water_for(seed);
         let all: Vec<&WaterCourse> = courses(&w).collect();
         let mut crossings = Vec::new();
         for (i, a) in all.iter().enumerate() {
@@ -100,24 +127,24 @@ fn courses_meet_only_where_one_joins_another() {
     }
 }
 
-/// Nothing wet inside the rural edge: no course, bank or lake, and the
-/// carve leaves the ground there alone.
+/// Nothing wet in the suburb or near it: no course, bank or lake inside the
+/// inner rim, and the carve leaves the ground inside the suburb alone.
 #[test]
-fn there_is_no_water_inside_the_rural_edge() {
+fn the_suburb_stays_dry() {
     let w = default_water();
     for c in courses(w) {
         for p in &c.points {
             let r = radius(p.x, p.y);
-            assert!(r - p.width / 2.0 > RURAL_OUTER_RADIUS, "{} at r{r:.0}", c.id);
+            assert!(r - p.width / 2.0 > INNER_RADIUS - CELL, "{} at r{r:.0}", c.id);
         }
     }
     for lake in &w.lakes {
         for &(x, y) in lake.rings.iter().flatten() {
-            assert!(radius(x, y) > RURAL_OUTER_RADIUS + 10.0, "{} at r{:.0}", lake.id, radius(x, y));
+            assert!(radius(x, y) > INNER_RADIUS, "{} at r{:.0}", lake.id, radius(x, y));
         }
     }
     let water = Water::new(courses(w), &w.lakes);
-    for step in 0..=380 {
+    for step in 0..=300 {
         let r = step as f64 * 10.0;
         for d in 0..360 {
             let a = (d as f64).to_radians();
@@ -143,6 +170,47 @@ fn the_default_wilds_have_water_in_every_sector() {
         assert!(lakes >= 1 && rivers >= 2 && streams >= 5, "sector {s}: {lakes} lakes, {rivers} rivers, {streams} streams");
     }
     assert!(!w.fords.is_empty());
+}
+
+/// The water comes onto the rural plain, and where it ends there is spread
+/// across it, not on one circle (#222). Ponds keep clear of the roads.
+#[test]
+fn the_plain_soaks_the_water_up_all_across_it() {
+    for seed in [42, 7, 1234] {
+        let w = water_for(seed);
+        let lakes: HashMap<&str, &Lake> = w.lakes.iter().map(|l| (l.id.as_str(), l)).collect();
+        let mut ends = Vec::new();
+        let (mut ponds, mut peter) = (0, 0);
+        for c in courses(&w) {
+            let last = c.points.last().unwrap();
+            let r = radius(last.x, last.y);
+            match &c.mouth {
+                Mouth::PetersOut => peter += 1,
+                Mouth::Lake(id) if r < PLAIN_EDGE => {
+                    ponds += 1;
+                    for &(x, y) in lakes[id.as_str()].rings.iter().flatten() {
+                        let clear = Roads::near(roads()).clearance((x, y), POND_KERB);
+                        assert!(clear >= POND_KERB - 1e-6, "{id} is {clear:.1} from a road");
+                    }
+                }
+                _ => continue,
+            }
+            ends.push(r);
+        }
+        ends.sort_by(f64::total_cmp);
+        let (lo, hi) = (ends[0], ends[ends.len() - 1]);
+        let busiest = (0..ends.len())
+            .map(|i| ends[i..].iter().take_while(|&&r| r < ends[i] + 100.0).count())
+            .max()
+            .unwrap();
+        println!(
+            "seed {seed}: {} ends on the plain ({ponds} ponds, {peter} peter out), r{lo:.0} to r{hi:.0}, at most {busiest} within 100",
+            ends.len()
+        );
+        assert!(ponds >= 3 && peter >= 3, "seed {seed}: {ponds} ponds, {peter} peter out");
+        assert!(hi - lo >= 300.0, "seed {seed}: the ends span only r{lo:.0} to r{hi:.0}");
+        assert!(busiest * 2 <= ends.len(), "seed {seed}: {busiest} of {} ends within 100 of each other", ends.len());
+    }
 }
 
 /// Each lake has a shore, a level and an area, and no two lakes overlap.
@@ -217,7 +285,7 @@ fn the_carve_cuts_beds_under_the_water() {
 /// Generation is a pure function of the land.
 #[test]
 fn the_same_land_makes_the_same_water() {
-    let again = generate(&LandParams::default());
+    let again = generate(&LandParams::default(), roads());
     let w = default_water();
     assert_eq!(again.rivers, w.rivers);
     assert_eq!(again.streams, w.streams);
@@ -235,7 +303,7 @@ fn water_plan() {
     let seed = std::env::var("LAND_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(42);
     let size: usize = std::env::var("LAND_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(1200);
     let land = LandParams { seed, ..LandParams::default() };
-    let w = generate(&land);
+    let w = generate(&land, roads());
     let water = Water::new(courses(&w), &w.lakes);
     let (mut rgb, mut heights) = relief::draw(&land, size, |x, y| ground_at(x, y, &land, &water));
     let scale = WORLD_SIZE / size as f64;
@@ -249,6 +317,27 @@ fn water_plan() {
     const RIVER: [u8; 3] = [40, 86, 160];
     const STREAM: [u8; 3] = [92, 150, 206];
     const FORD: [u8; 3] = [232, 150, 40];
+    const ROAD: [u8; 3] = [150, 132, 104];
+    // The roads past the suburb, under the water.
+    for road in roads() {
+        for s in road.points.windows(2) {
+            let (a, b) = (s[0], s[1]);
+            if radius(a.0, a.1).max(radius(b.0, b.1)) < SUBURBAN_OUTER_RADIUS {
+                continue;
+            }
+            let steps = ((b.0 - a.0).abs().max((b.1 - a.1).abs()) / scale).ceil().max(1.0) as i64;
+            let half = ((road.width / 2.0) / scale).floor() as i64;
+            for k in 0..=steps {
+                let t = k as f64 / steps as f64;
+                let (px, py) = (((a.0 + t * (b.0 - a.0)) / scale) as i64, ((a.1 + t * (b.1 - a.1)) / scale) as i64);
+                for dy in -half..=half {
+                    for dx in -half..=half {
+                        put(px + dx, py + dy, ROAD);
+                    }
+                }
+            }
+        }
+    }
     for lake in &w.lakes {
         let pts = lake.rings.iter().flatten();
         let (x0, y0) = pts.clone().fold((f64::MAX, f64::MAX), |m, p| (m.0.min(p.0), m.1.min(p.1)));

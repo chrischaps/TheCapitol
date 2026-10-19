@@ -53,19 +53,25 @@ Chris decided the shape on 2026-10-18: grow the world, use a real height field, 
 - **Lakes.** The generator fills depressions in a coarse grid of the height field (priority-flood). Each filled depression becomes a lake with its own level.
 - **Rivers and streams.** Flow accumulation traces them: streams where the flow is lower, rivers where it's higher.
   - Each is a polyline with a width and a surface height at every vertex.
-  - Water runs to the world's edge or ends in a lake.
+  - Water runs to the world's edge, ends in a lake, or soaks away on the rural plain (#222).
 - **The carve.** A pure `land::carve` in protocol cuts the beds and banks into the height field, so the server and the clients agree.
 - **Fords** go where a river is wide and shallow. Bridges come with the trails (WD5).
 - **On the wire:** `/terrain` gains `rivers`, `streams`, `lakes` and `fords`.
 - **As built (W3):**
-  - **Where it's made:** `backend/src/models/hydrology.rs`. It samples the height on a 30-unit grid from r3880 to the edge.
-  - **The flood:** a priority-flood runs in from two rims, the world's edge and the foot of the hills. Each cell drains down its steepest fall on the filled ground, or along the flood where the ground is flat.
-  - **Lakes:** a pit of 20 cells or more, at least 4 deep, is a lake. Its shore is traced by marching squares.
-  - **Meres:** the foot of the hills runs flat to the city, and the valleys drain down towards it, so water can't run on. Water that comes down there ends in a **mere**: an oval dug at level 0 along the ring, its inner shore 25 out from r3800. Meres that would overlap become one. Most of the big rivers end in one, where a valley meets an arterial.
+  - **Where it's made:** `backend/src/models/hydrology.rs`, from the land and the roads. It samples the height on a 30-unit grid from r3150 (`INNER_RADIUS`, 150 out from the suburb) to the edge.
+  - **The plain (#222):** the valleys drain towards the city, onto the flat rural ring. Chris's call: water runs on into it, rather than stopping at one radius.
+    - **Steering:** water there follows a routing field, never the ground. It falls gently towards the city (0.01) and has noise 4 high at a 450 wavelength. Every road is a 3-high berm, so water skirts the roads and crosses them only where it must. A road is the crossing (W4 treats it as a bridge).
+    - **Soaking away:** the plain soaks the flow away. Each cell loses `SOAK` (12) × √flow, at a rate that varies by place, and where the soaking starts varies by up to 400. So a stream gives out soon, a big river runs well in, and the ends spread across the ring (`the_plain_soaks_the_water_up_all_across_it`).
+    - **Endings:** a course that soaks away ends in a **pond** or **peters out** (`mouth: peters_out`, narrowing to nothing over its last 6 points). The pond chance is 0.6 × (flow − 0.4), clamped to 0.05 to 0.8, so a big river usually ponds. A pond is an oval along the course's last stretch, sized by its flow. It's made smaller to keep 8 off every road's kerb and clear of other water, or it's given up.
+    - **Rivers into streams:** a river that soaks away runs on as a stream, which joins it at its last point.
+    - **Nodes and lots:** `node_placement` keeps nodes off the wild water too. 40 of E2.3's planned nodes were in its way. Migration `20261112_001_wild_water_nodes.sql` moves them (rows from `print_planned_node_moves`), and the plan itself is unchanged. No seeded grass needed a move. The rural lots don't know the water yet (#223); they come with Chris's rural rework.
+  - **The flood:** a priority-flood runs in from two rims, the world's edge and the inner rim. Each cell drains down its steepest fall on the filled routing field, or along the flood where it's flat.
+  - **Lakes:** a pit in the hills (not on the plain, where the routing field isn't the ground) of 20 cells or more, at least 4 deep, is a lake. Its shore is traced by marching squares.
+  - *Superseded:* W3 first ended the water in **meres** at level 0, all on the r3825 circle. Chris found that read as an invisible wall, so #222 replaced them.
   - **Courses:** streams drain 120 cells or more, rivers 600 or more. Each course follows its largest inflow upstream, and every other inflow is a course of its own.
     - On a smooth slope, steepest descent sends channels down side by side. So a channel beside a bigger one (one cell) drains into it, and two drains that cross on a square's diagonals become one (`gather`). No two courses cross (`courses_meet_only_where_one_joins_another`).
-    - A course ends at the edge, in a lake (`mouth: lake`), or on a point of the course it joins (`mouth: joins`). A course out of a lake names it as its `source`.
-    - A course that grows into a river is cut there: the stream part joins the river part.
+    - A course ends at the edge, in a lake or pond (`mouth: lake`), on a point of the course it joins (`mouth: joins`), or petering out (`mouth: peters_out`). A course out of a lake names it as its `source`.
+    - A course is cut wherever it passes the river threshold, either way: each part joins the next at its first point.
   - **Shape and surface:** courses are smoothed, then meander in proportion to how flat the ground is, but never more than 0.3 of the way to other water. Each point has a `width`, a `depth` and a `surface`.
     - The surface never rises downstream. Through a pit too small to be a lake, the carve cuts a gorge.
     - Wide and shallow where the fall is gentle, narrow and deep where it's steep.
@@ -73,7 +79,7 @@ Chris decided the shape on 2026-10-18: grow the world, use a real height field, 
   - **The carve:** `land::carve` takes `land::Water`, an index built once from `/terrain` (`Water::from_terrain`). `land::ground_at` is the carved ground.
     - A bed is rounded to the surface at the banks, the banks rise at `BANK_SLOPE` (0.6), and a lake's bed shelves to 2 below its level.
     - It only cuts, and it fades out over 30 past the banks, so the ground stays continuous.
-  - **The default world:** 32 rivers, 148 streams, 78 lakes (pits and meres) and 20 fords.
+  - **The default world:** 41 rivers, 193 streams, 47 lakes (pits and ponds) and 38 fords. Version `b4c60461ef8cc4c4`.
 
 ### WD4. Moving on the land ([W4 #197](https://github.com/chrischaps/TheCapitol/issues/197))
 
@@ -120,7 +126,7 @@ Chris decided the shape on 2026-10-18: grow the world, use a real height field, 
 | W0 | [#193](https://github.com/chrischaps/TheCapitol/issues/193) | This plan, and the GDD, economy, Flint and milestones docs reconciled with it | S | – |
 | W1 | [#194](https://github.com/chrischaps/TheCapitol/issues/194) | The world grows to 12000: shift migration, radii, bounds, spawn, and `has_plots` on the claim path. **Done.** As built: migration `20261107_001_world_grows.sql`; `rules::in_world` (the r6000 disc) guards both move paths, and Flint's `cap_move` pulls a click past the edge onto it; `claim` checks `has_plots` for the plot's zone and for where it stands. The woods' noise is laid round the tower (`node_spawn::WOODS_ORIGIN`), so E2.3's trees stayed put. The Flint grass mask stays r4000 (`GRASS_EDGE`) until W9. #118: option 1, radii aren't tunable at runtime | M | – |
 | W2 | [#195](https://github.com/chrischaps/TheCapitol/issues/195) | `capitol_protocol::land`: the height field. **Done.** As built: Perlin fBm (rolling ground, 70 high) plus squared ridged noise (the ranges, crests near `peak_height` 640, a few summits to about 830), each octave's domain turned by a 3-4-5 rotation so the lattice never shows. The ranges stand in `ridge_count` (8) massifs whose valleys open on the arterials' bearings, ready for W5; they rise from r3900 to full height at r5600. Keyed on the offset from the centre. `LandParams` is on `TerrainConfig` and `/terrain` as `land`, and in `WorldGenParams`, with a seed of its own. `land::tests::sample_heights_are_pinned` pins the bits (checked on Linux too). The relief: `backend/tools/land-relief.ps1` | M | W1 |
-| W3 | [#196](https://github.com/chrischaps/TheCapitol/issues/196) | Hydrology: lakes, rivers, streams, fords and the carve, on `/terrain`. **Done.** As built: `models::hydrology` (see WD3's as-built notes): priority-flood from the edge and the foot of the hills, steepest-descent drainage, pits as lakes, and **meres** at the foot where valleys drain towards the city (r3825 and out). `/terrain` has `rivers`/`streams` (`WaterCourse`: points with width, depth and surface; `source`; `mouth` edge/lake/joins), `lakes` (`Lake`: level, even-odd rings) and `fords`. `land::carve`/`ground_at` with the `land::Water` index. Default version `dbb6436950a157b5` (with E3.4's landmarks). `land-relief.ps1` now draws the water over the carved relief (`-Bare` for the land alone) | L | W2 |
+| W3 | [#196](https://github.com/chrischaps/TheCapitol/issues/196) | Hydrology: lakes, rivers, streams, fords and the carve, on `/terrain`. **Done.** As built: `models::hydrology` (see WD3's as-built notes): priority-flood from the edge and the foot of the hills, steepest-descent drainage, pits as lakes, and **meres** at the foot where valleys drain towards the city (r3825 and out). `/terrain` has `rivers`/`streams` (`WaterCourse`: points with width, depth and surface; `source`; `mouth` edge/lake/joins), `lakes` (`Lake`: level, even-odd rings) and `fords`. `land::carve`/`ground_at` with the `land::Water` index. Default version `b4c60461ef8cc4c4` (with E3.4's landmarks; #222 ran the water on into the rural ring). `land-relief.ps1` now draws the water over the carved relief (`-Bare` for the land alone) | L | W2 |
 | W4 | [#197](https://github.com/chrischaps/TheCapitol/issues/197) | Movement on the land | M | W3 |
 | W5 | [#198](https://github.com/chrischaps/TheCapitol/issues/198) | Wild trails | M | W3 |
 | W6 | [#199](https://github.com/chrischaps/TheCapitol/issues/199) | Wild nodes from the land | L | W3, E2.3 (#162) |

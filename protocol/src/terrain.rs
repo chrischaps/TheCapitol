@@ -38,11 +38,12 @@ pub struct TerrainResponse {
     #[serde(default)]
     pub land: crate::land::LandParams,
     /// The wilds' rivers (W3, #196): they block, except at fords. Each runs
-    /// downhill to the world's edge, into a lake, or into another river.
+    /// downhill to the world's edge, into a lake or pond, or into another
+    /// course; on the rural plain it may soak away into a stream (#222).
     #[serde(default)]
     pub rivers: Vec<WaterCourse>,
     /// The wilds' streams: smaller water that can be waded. Each ends where
-    /// a river or a lake takes it, or at the edge.
+    /// a river or a lake takes it, at the edge, or petering out on the plain.
     #[serde(default)]
     pub streams: Vec<WaterCourse>,
     /// The wilds' lakes, each with its own level.
@@ -164,6 +165,8 @@ pub enum Mouth {
     Lake(String),
     /// It joins this river or stream, at one of that one's points.
     Joins(String),
+    /// The rural plain soaks it up: it narrows to nothing at its last point.
+    PetersOut,
 }
 
 /// A lake: water standing at one level inside its outline.
@@ -445,6 +448,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&Mouth::Lake("lake_3".into())).unwrap(), r#"{"kind":"lake","id":"lake_3"}"#);
         let joins: Mouth = serde_json::from_str(r#"{"kind":"joins","id":"river_0"}"#).unwrap();
         assert_eq!(joins, Mouth::Joins("river_0".into()));
+        assert_eq!(serde_json::to_string(&Mouth::PetersOut).unwrap(), r#"{"kind":"peters_out"}"#);
         let old = r#"{"world_size":12000.0,"center_x":6000.0,"center_y":6000.0,"water_rings":[],"roads":[],"terrain_plots":[]}"#;
         let t: TerrainResponse = serde_json::from_str(old).unwrap();
         assert!(t.rivers.is_empty() && t.streams.is_empty() && t.lakes.is_empty() && t.fords.is_empty());

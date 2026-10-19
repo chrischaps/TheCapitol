@@ -1,45 +1,63 @@
-//! The wilds' water, from the height of the land (W3, #196).
+//! The water of the wilds and the rural plain, from the height of the land
+//! (W3: #196, #220, #222).
 //!
-//! A pure function of [`LandParams`], so the default world's water is pinned
-//! with the rest of it (`default_terrain_version_is_pinned`).
+//! A pure function of [`LandParams`] and the roads, so the default world's
+//! water is pinned with the rest of it (`default_terrain_version_is_pinned`).
 //!
-//! 1. **Sample** `land::height_at` on a grid of [`CELL`] over the wilds: from
-//!    [`FOOT_RADIUS`], just past the rural edge, out to the world's edge.
-//! 2. **Priority-flood** in from the grid's two rims: the world's edge, and
-//!    the foot of the hills, where the ground runs flat to the city. Each cell
-//!    drains to the cell that flooded it, so the drainage runs through every
-//!    pit and flat to a rim, and each pit fills to the level it spills at.
-//! 3. **Lakes** are the pits deep and wide enough, each with its level and a
-//!    shore traced by marching squares. Water that comes down to the foot of
-//!    the hills can't run on into the city, so it ends in a **mere** there,
-//!    dug into the flat ground at level 0.
-//! 4. **Flow** accumulates down the drainage. Streams are where it passes
-//!    [`STREAM_CELLS`] and rivers where it passes [`RIVER_CELLS`]. Each course
+//! 1. **Sample** `land::height_at` on a grid of [`CELL`] from [`INNER_RADIUS`],
+//!    just out from the suburb, to the world's edge. Water is steered by a
+//!    routing field: the height, plus, on the flat rural plain, a gentle fall
+//!    towards the city with some noise, and a berm along every road. The
+//!    ground itself stays as it is.
+//! 2. **Priority-flood** in from the grid's two rims, the world's edge and the
+//!    inner rim. Each cell drains down its steepest fall on the filled field,
+//!    or along the flood across a flat.
+//! 3. **Lakes** are the pits in the hills deep and wide enough, each with its
+//!    level and a shore traced by marching squares.
+//! 4. **Flow** accumulates down the drainage, and on the plain it soaks away
+//!    ([`soak`]): a stream gives out soon, a big river runs on further. Streams
+//!    are where the flow passes [`STREAM_CELLS`] and rivers where it passes
+//!    [`RIVER_CELLS`], so a river soaking away runs on as a stream. Each course
 //!    follows its largest inflow up, and every other inflow is a course of its
-//!    own that joins it. A channel running beside a bigger one joins it
-//!    there ([`gather`]). Courses are smoothed and meander on flat ground,
-//!    then their surfaces are made to fall downstream: the carve
-//!    (`land::carve`) cuts them through what's left.
-//! 5. **Fords** are the shallowest stretches of each river, spaced apart.
+//!    own that joins it. A channel running beside a bigger one joins it there
+//!    ([`gather`]). Courses are smoothed and meander on flat ground, then their
+//!    surfaces are made to fall downstream: the carve (`land::carve`) cuts them
+//!    through what's left.
+//! 5. **Where the plain soaks a course up** it ends in a pond, more often the
+//!    more it carried, or it peters out.
+//! 6. **Fords** are the shallowest stretches of each river, spaced apart.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
 use capitol_protocol::fmath::StableMath;
 use capitol_protocol::land::{height_at, LandParams};
-use capitol_protocol::rules::{CENTER_X, CENTER_Y, RURAL_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS, WORLD_SIZE};
-use capitol_protocol::terrain::{Ford, Lake, Mouth, WaterCourse, WaterPoint};
+use capitol_protocol::rules::{
+    CENTER_X, CENTER_Y, RURAL_OUTER_RADIUS, SUBURBAN_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS, WORLD_SIZE,
+};
+use capitol_protocol::terrain::{Ford, Lake, Mouth, RoadSegment, WaterCourse, WaterPoint};
 
 /// The grid's cell, in world units.
 pub const CELL: f64 = 30.0;
-/// The grid's inner rim: the foot of the hills. Water reaching it ends in a mere.
-pub const FOOT_RADIUS: f64 = RURAL_OUTER_RADIUS + 80.0;
-/// How far a mere's inner shore stays out from the rural edge.
-const MERE_CLEAR: f64 = 25.0;
+/// The grid's inner rim. No water comes in past it, so the suburb stays dry.
+pub const INNER_RADIUS: f64 = SUBURBAN_OUTER_RADIUS + 150.0;
+/// Where the plain ends and the land starts to rise (`land::height_at` is 0
+/// inside it).
+const PLAIN_EDGE: f64 = RURAL_OUTER_RADIUS + 100.0;
+/// How far past the plain's edge its routing field fades out.
+const PLAIN_BLEND: f64 = 200.0;
+/// The plain's fall towards the city, in the routing field.
+const PLAIN_FALL: f64 = 0.01;
+/// How high the routing field's noise on the plain stands.
+const PLAIN_NOISE: f64 = 4.0;
+/// How high a road stands in the routing field, so water skirts it.
+const BERM: f64 = 3.0;
+/// How fast the plain soaks up a course's flow: see [`soak`].
+const SOAK: f64 = 12.0;
 /// Upstream cells a stream drains, at least.
-pub const STREAM_CELLS: u32 = 120;
+pub const STREAM_CELLS: f64 = 120.0;
 /// Upstream cells a river drains, at least.
-pub const RIVER_CELLS: u32 = 600;
+pub const RIVER_CELLS: f64 = 600.0;
 /// A pit becomes a lake when it covers this many cells...
 const LAKE_MIN_CELLS: usize = 20;
 /// ...and is this deep somewhere.
@@ -58,14 +76,75 @@ pub struct Hydrology {
     pub fords: Vec<Ford>,
 }
 
-/// The wilds' water for this land.
-pub fn generate(land: &LandParams) -> Hydrology {
-    let grid = Grid::sample(land);
+/// The water for this land, round these roads (those past the suburb steer
+/// it; the rest are ignored).
+pub fn generate(land: &LandParams, roads: &[RoadSegment]) -> Hydrology {
+    let roads = Roads::near(roads);
+    let grid = Grid::sample(land, &roads);
     let mut flood = grid.flood();
     let pits = grid.pits(&flood);
     gather(&grid, &mut flood, &pits);
-    let network = Network::trace(&grid, &flood, &pits);
-    network.finish(&grid, land, &pits)
+    let network = Network::trace(&grid, &flood, &pits, land.seed);
+    network.finish(&grid, land, &pits, &roads)
+}
+
+/// The distance from `p` to segment `ab`.
+fn point_segment(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    let (ex, ey) = (a.0 + t * dx - p.0, a.1 + t * dy - p.1);
+    (ex * ex + ey * ey).sqrt()
+}
+
+/// The roads' segments past the suburb, as (a, b, half width), bucketed.
+struct Roads {
+    segments: Vec<((f64, f64), (f64, f64), f64)>,
+    buckets: HashMap<(i64, i64), Vec<usize>>,
+}
+
+/// The side of a [`Roads`] bucket.
+const ROAD_BUCKET: f64 = 120.0;
+
+impl Roads {
+    fn near(roads: &[RoadSegment]) -> Self {
+        let mut segments = Vec::new();
+        let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+        let key = |v: f64| (v / ROAD_BUCKET).floor() as i64;
+        for road in roads {
+            for w in road.points.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                if radius(a.0, a.1).max(radius(b.0, b.1)) < INNER_RADIUS - 100.0 {
+                    continue;
+                }
+                let half = road.width / 2.0;
+                let k = segments.len();
+                segments.push((a, b, half));
+                for j in key(a.1.min(b.1) - half)..=key(a.1.max(b.1) + half) {
+                    for i in key(a.0.min(b.0) - half)..=key(a.0.max(b.0) + half) {
+                        buckets.entry((i, j)).or_default().push(k);
+                    }
+                }
+            }
+        }
+        Roads { segments, buckets }
+    }
+
+    /// How far `p` is from the kerb of the nearest road, up to `reach` (a
+    /// point on a road is 0).
+    fn clearance(&self, p: (f64, f64), reach: f64) -> f64 {
+        let key = |v: f64| (v / ROAD_BUCKET).floor() as i64;
+        let mut best = reach;
+        for j in key(p.1 - reach)..=key(p.1 + reach) {
+            for i in key(p.0 - reach)..=key(p.0 + reach) {
+                for &k in self.buckets.get(&(i, j)).map(Vec::as_slice).unwrap_or(&[]) {
+                    let (a, b, half) = self.segments[k];
+                    best = best.min((point_segment(p, a, b) - half).max(0.0));
+                }
+            }
+        }
+        best
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -75,9 +154,45 @@ const OUT: u32 = u32::MAX;
 
 struct Grid {
     n: usize,
-    /// The height at each cell's centre; NaN outside the wilds.
+    /// The height at each cell's centre; NaN outside the grid's ring.
     h: Vec<f64>,
+    /// What steers the water: the height, and on the plain its fall, noise
+    /// and the roads' berms.
+    route: Vec<f64>,
 }
+
+/// How much of the plain's routing field stands at radius `r`: all of it on
+/// the plain, none once the land has risen.
+fn plain_weight(r: f64) -> f64 {
+    1.0 - smoothstep((r - PLAIN_EDGE) / PLAIN_BLEND)
+}
+
+/// Smooth value noise in [0, 1] at about `wavelength`.
+fn value_noise(seed: u64, x: f64, y: f64, wavelength: f64) -> f64 {
+    let (u, v) = (x / wavelength, y / wavelength);
+    let (i, j) = (u.floor(), v.floor());
+    let (fu, fv) = (u - i, v - j);
+    let corner = |di: i64, dj: i64| {
+        let h = splitmix64(seed ^ splitmix64((i as i64 + di) as u64 ^ splitmix64((j as i64 + dj) as u64)));
+        (h >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let (su, sv) = (smoothstep(fu), smoothstep(fv));
+    let bottom = corner(0, 0) + su * (corner(1, 0) - corner(0, 0));
+    let top = corner(0, 1) + su * (corner(1, 1) - corner(0, 1));
+    bottom + sv * (top - bottom)
+}
+
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+// Each of hydrology's noise fields draws from its own stream of the land's seed.
+const PLAIN_FIELD: u64 = 0x504C_4149_4E00_0001;
+const SOAK_FIELD: u64 = 0x534F_414B_0000_0002;
+const POND_FIELD: u64 = 0x504F_4E44_0000_0003;
 
 /// The eight neighbours, as (di, dj).
 const NEIGHBOURS: [(i64, i64); 8] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1)];
@@ -86,8 +201,8 @@ const NEIGHBOURS: [(i64, i64); 8] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (
 enum Rim {
     /// The world's edge.
     Edge,
-    /// The foot of the hills, where the ground runs flat to the city.
-    Foot,
+    /// The inner rim, just out from the suburb.
+    Inner,
 }
 
 struct Flood {
@@ -103,19 +218,29 @@ struct Flood {
 }
 
 impl Grid {
-    fn sample(land: &LandParams) -> Self {
+    fn sample(land: &LandParams, roads: &Roads) -> Self {
         let n = (WORLD_SIZE / CELL).round() as usize;
         let mut h = vec![f64::NAN; n * n];
+        let mut route = vec![f64::NAN; n * n];
         for j in 0..n {
             for i in 0..n {
                 let (x, y) = centre(i, j);
                 let r = radius(x, y);
-                if (FOOT_RADIUS..=WILDERNESS_OUTER_RADIUS).contains(&r) {
-                    h[j * n + i] = height_at(x, y, land);
+                if !(INNER_RADIUS..=WILDERNESS_OUTER_RADIUS).contains(&r) {
+                    continue;
+                }
+                let c = j * n + i;
+                h[c] = height_at(x, y, land);
+                route[c] = h[c];
+                let w = plain_weight(r);
+                if w > 0.0 {
+                    let noise = value_noise(land.seed ^ PLAIN_FIELD, x, y, 450.0) - 0.5;
+                    let berm = if roads.clearance((x, y), CELL) < CELL { BERM } else { 0.0 };
+                    route[c] += w * (PLAIN_FALL * (r - INNER_RADIUS) + PLAIN_NOISE * noise + berm);
                 }
             }
         }
-        Grid { n, h }
+        Grid { n, h, route }
     }
 
     fn inside(&self, c: usize) -> bool {
@@ -146,20 +271,18 @@ impl Grid {
         let mut heap = BinaryHeap::new();
         let mut seq = 0u64;
         for c in 0..cells {
-            // A rim cell has a neighbour outside the wilds: past the edge, or
-            // inside the foot.
+            // A rim cell has a neighbour outside the ring: past the edge, or
+            // inside the inner rim.
             if !self.inside(c) || self.neighbours(c).count() == 8 && self.neighbours(c).all(|m| self.inside(m)) {
                 continue;
             }
             let (x, y) = self.point(c);
-            let edge = radius(x, y) > 0.5 * (FOOT_RADIUS + WILDERNESS_OUTER_RADIUS);
-            rim.insert(c as u32, if edge { Rim::Edge } else { Rim::Foot });
-            {
-                filled[c] = self.h[c];
-                queued[c] = true;
-                heap.push(Entry { level: self.h[c], seq, cell: c as u32 });
-                seq += 1;
-            }
+            let edge = radius(x, y) > 0.5 * (INNER_RADIUS + WILDERNESS_OUTER_RADIUS);
+            rim.insert(c as u32, if edge { Rim::Edge } else { Rim::Inner });
+            filled[c] = self.route[c];
+            queued[c] = true;
+            heap.push(Entry { level: self.route[c], seq, cell: c as u32 });
+            seq += 1;
         }
         let mut order = Vec::with_capacity(cells);
         while let Some(Entry { level, cell, .. }) = heap.pop() {
@@ -169,7 +292,7 @@ impl Grid {
                     continue;
                 }
                 queued[m] = true;
-                filled[m] = self.h[m].max(level);
+                filled[m] = self.route[m].max(level);
                 down[m] = cell;
                 heap.push(Entry { level: filled[m], seq, cell: m as u32 });
                 seq += 1;
@@ -201,16 +324,16 @@ impl Grid {
         Flood { filled, down, rim, order }
     }
 
-    /// The pits that hold lakes, and the mere each foot cell drains into is
-    /// made later. A pit is a connected run of cells filled above their height
-    /// to one level.
+    /// The pits that hold lakes. A pit is a connected run of cells filled
+    /// above their height to one level. Only the hills' pits are lakes: on the
+    /// plain the routing field isn't the ground, so its pits hold no water.
     fn pits(&self, flood: &Flood) -> Pits {
         let cells = self.h.len();
         let mut lake_of = vec![OUT; cells];
         let mut pits = Vec::new();
         let mut seen = vec![false; cells];
         for start in 0..cells {
-            if seen[start] || !self.inside(start) || flood.filled[start] - self.h[start] <= 1e-9 {
+            if seen[start] || !self.inside(start) || flood.filled[start] - self.route[start] <= 1e-9 {
                 continue;
             }
             let level = flood.filled[start];
@@ -221,14 +344,18 @@ impl Grid {
                 let c = group[k];
                 k += 1;
                 for m in self.neighbours(c) {
-                    if !seen[m] && self.inside(m) && flood.filled[m] == level && level - self.h[m] > 1e-9 {
+                    if !seen[m] && self.inside(m) && flood.filled[m] == level && level - self.route[m] > 1e-9 {
                         seen[m] = true;
                         group.push(m);
                     }
                 }
             }
             let depth = group.iter().map(|&c| level - self.h[c]).fold(0.0, f64::max);
-            if group.len() >= LAKE_MIN_CELLS && depth >= LAKE_MIN_DEPTH {
+            let in_hills = group.iter().all(|&c| {
+                let (x, y) = self.point(c);
+                plain_weight(radius(x, y)) == 0.0
+            });
+            if in_hills && group.len() >= LAKE_MIN_CELLS && depth >= LAKE_MIN_DEPTH {
                 let id = pits.len() as u32;
                 for &c in &group {
                     lake_of[c] = id;
@@ -291,7 +418,10 @@ impl Ord for Entry {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum End {
     Edge,
-    Foot,
+    /// It reached the inner rim.
+    Inner,
+    /// The plain soaked it up.
+    Soaked,
     Pit(u32),
     /// Joins course `k` at grid cell `c`.
     Joins { course: usize, cell: usize },
@@ -306,8 +436,40 @@ struct Traced {
 }
 
 struct Network {
-    acc: Vec<u32>,
+    /// The flow through each cell, after the plain's soaking.
+    acc: Vec<f64>,
     courses: Vec<Traced>,
+}
+
+/// How far in from the plain's edge the soaking may start, at most.
+const SOAK_ONSET: f64 = 400.0;
+
+/// The flow through each cell, as on the plain the ground soaks it up.
+///
+/// Each cell adds one, as [`accumulate`] counts, but on the plain each loses
+/// `SOAK × √flow`, at a rate that varies from place to place. So a stream
+/// gives out soon after it comes down and a big river runs on, and where the
+/// soaking starts varies too, so the courses don't all end on one circle.
+fn soak(grid: &Grid, flood: &Flood, seed: u64) -> Vec<f64> {
+    let mut flow = vec![0.0f64; flood.down.len()];
+    for &c in &flood.order {
+        flow[c as usize] = 1.0;
+    }
+    for &c in flood.order.iter().rev() {
+        let c = c as usize;
+        let (x, y) = grid.point(c);
+        let onset = PLAIN_EDGE - SOAK_ONSET * value_noise(seed ^ SOAK_FIELD, x, y, 900.0);
+        let w = smoothstep((onset - radius(x, y)) / 100.0);
+        if w > 0.0 {
+            let rate = SOAK * w * (0.3 + 1.4 * value_noise(seed ^ SOAK_FIELD ^ 1, x, y, 350.0));
+            flow[c] = (flow[c] - rate * flow[c].sqrt()).max(0.0);
+        }
+        let d = flood.down[c];
+        if d != OUT {
+            flow[d as usize] += flow[c];
+        }
+    }
+    flow
 }
 
 /// How many cells drain through each, itself included.
@@ -344,7 +506,7 @@ fn gather(grid: &Grid, flood: &mut Flood, pits: &Pits) {
     // The drainage as the flood left it: the walks follow it, not drains
     // this pass has already moved.
     let was = flood.down.clone();
-    let channel = |c: usize| acc[c] >= STREAM_CELLS && pits.lake_of[c] == OUT;
+    let channel = |c: usize| acc[c] as f64 >= STREAM_CELLS && pits.lake_of[c] == OUT;
     let n = grid.n as i64;
     for &c in &flood.order {
         let c = c as usize;
@@ -415,9 +577,9 @@ fn gather(grid: &Grid, flood: &mut Flood, pits: &Pits) {
 const GATHER_CLIMB: f64 = 2.0;
 
 impl Network {
-    fn trace(grid: &Grid, flood: &Flood, pits: &Pits) -> Self {
+    fn trace(grid: &Grid, flood: &Flood, pits: &Pits, seed: u64) -> Self {
         let cells = grid.h.len();
-        let acc = accumulate(flood);
+        let acc = soak(grid, flood, seed);
         let lake = |c: usize| pits.lake_of[c] != OUT;
         let channel = |c: usize| grid.inside(c) && acc[c] >= STREAM_CELLS && !lake(c);
         // What flows into each channel cell: channel cells and lake cells.
@@ -433,7 +595,7 @@ impl Network {
                 if channel(c) {
                     let end = match flood.rim[&(c as u32)] {
                         Rim::Edge => End::Edge,
-                        Rim::Foot => End::Foot,
+                        Rim::Inner => End::Inner,
                     };
                     mouths.push((c, end));
                 }
@@ -441,10 +603,12 @@ impl Network {
                 ups[d as usize].push(c as u32);
             } else if channel(c) && lake(d as usize) {
                 mouths.push((c, End::Pit(pits.lake_of[d as usize])));
+            } else if channel(c) {
+                mouths.push((c, End::Soaked));
             }
         }
         // Largest mouths first, so the ids run from the biggest water down.
-        mouths.sort_by(|a, b| acc[b.0].cmp(&acc[a.0]).then(a.0.cmp(&b.0)));
+        mouths.sort_by(|a, b| acc[b.0].total_cmp(&acc[a.0]).then(a.0.cmp(&b.0)));
 
         let mut courses = Vec::new();
         let mut tasks: std::collections::VecDeque<(usize, End)> = mouths.into_iter().collect();
@@ -458,7 +622,7 @@ impl Network {
                 if inflow.is_empty() {
                     break;
                 }
-                inflow.sort_by(|&a, &b| acc[b].cmp(&acc[a]).then(a.cmp(&b)));
+                inflow.sort_by(|&a, &b| acc[b].total_cmp(&acc[a]).then(a.cmp(&b)));
                 for &other in &inflow[1..] {
                     if channel(other) {
                         tasks.push_back((other, End::Joins { course: k, cell: cur }));
@@ -474,6 +638,11 @@ impl Network {
                 cur = best;
             }
             path.reverse();
+            if end == End::Soaked && path.len() < 2 {
+                // A channel that soaked away the moment it formed. Nothing
+                // joins it, as nothing ran into it.
+                continue;
+            }
             if let End::Pit(p) = end {
                 // End on the water: the cell the course spills into.
                 path.push(flood.down[start] as usize);
@@ -489,9 +658,9 @@ impl Network {
 
     /// What each course drains at each of its cells. A course out of a lake
     /// carries what the lake spills from its first point, not the lake cell's own.
-    /// It splits from a stream into a river where this passes [`RIVER_CELLS`].
-    fn course_acc(&self, c: &Traced) -> Vec<u32> {
-        let mut acc: Vec<u32> = c.cells.iter().map(|&cell| self.acc[cell]).collect();
+    /// It's a river where this passes [`RIVER_CELLS`], and a stream elsewhere.
+    fn course_acc(&self, c: &Traced) -> Vec<f64> {
+        let mut acc: Vec<f64> = c.cells.iter().map(|&cell| self.acc[cell]).collect();
         let n = acc.len();
         if c.from_pit.is_some() && n > 1 {
             acc[0] = acc[1];
@@ -503,13 +672,13 @@ impl Network {
         acc
     }
 
-    fn finish(self, grid: &Grid, land: &LandParams, pits: &Pits) -> Hydrology {
-        // Lakes are numbered pits first, then the meres.
+    fn finish(self, grid: &Grid, land: &LandParams, pits: &Pits, roads: &Roads) -> Hydrology {
+        // Lakes are numbered pits first, then the ponds.
         let mut lakes: Vec<Lake> = pits.pits.iter().map(|pit| pit_lake(grid, pit)).collect();
 
         // Each course's points, smoothed, with the cell each stands for.
         let smoothed: Vec<Vec<(f64, f64)>> = self.courses.iter().map(|c| smooth(grid, &c.cells)).collect();
-        let room = clearances(&smoothed);
+        let room = clearances(&smoothed, roads);
         let mut shapes: Vec<Vec<(f64, f64)>> = smoothed
             .into_iter()
             .zip(&room)
@@ -525,33 +694,38 @@ impl Network {
             }
         }
 
-        // Meres where water comes down to the foot of the hills.
-        let mut mere_of = vec![None; self.courses.len()];
-        let mut meres: Vec<(f64, f64, f64, Vec<usize>)> = Vec::new();
+        // Where the plain soaks a course up: a pond, or it peters out.
+        let mut pond_of = vec![None; self.courses.len()];
         for (k, c) in self.courses.iter().enumerate() {
-            if c.end == End::Foot {
-                let (x, y) = *shapes[k].last().unwrap();
-                let q = flow(self.acc[c.cells[c.cells.len() - 1]]);
-                meres.push((x, y, q, vec![k]));
+            if !matches!(c.end, End::Soaked | End::Inner) {
+                continue;
             }
-        }
-        let meres = merge_meres(meres);
-        for (cells, mere) in meres {
-            let id = lakes.len();
-            for &k in &cells {
-                mere_of[k] = Some(id);
+            let peak = self.course_acc(c).into_iter().fold(0.0, f64::max);
+            let last = *c.cells.last().unwrap();
+            let roll = (splitmix64(land.seed ^ POND_FIELD ^ last as u64) >> 11) as f64 / (1u64 << 53) as f64;
+            let chance = if c.end == End::Inner { 1.0 } else { (POND_CHANCE * (flow(peak) - 0.4)).clamp(0.05, 0.8) };
+            if roll >= chance {
+                continue;
             }
-            lakes.push(mere);
+            // Its own tributaries may run to the pond's shore.
+            let others = shapes.iter().enumerate().filter(|&(m, _)| {
+                m != k && !matches!(self.courses[m].end, End::Joins { course, .. } if course == k)
+            });
+            let others = others.map(|(_, s)| s.as_slice());
+            if let Some(pond) = pond(&shapes[k], flow(peak), roll, &lakes, others, roads) {
+                pond_of[k] = Some(lakes.len());
+                lakes.push(pond);
+            }
         }
 
         // Width, depth and surface at every point, mains before what joins them.
         let mut points: Vec<Vec<WaterPoint>> = Vec::with_capacity(self.courses.len());
+        let mut accs: Vec<Vec<f64>> = Vec::with_capacity(self.courses.len());
         for (k, c) in self.courses.iter().enumerate() {
             let shape = &mut shapes[k];
-            if let Some(m) = mere_of[k] {
-                // On into the mere, to its middle.
-                let (cx, cy) = mere_centre(&lakes[m]);
-                shape.push((cx, cy));
+            if let Some(p) = pond_of[k] {
+                // On into the pond, to its middle.
+                shape.push(lake_centre(&lakes[p]));
             }
             if c.end == End::Edge {
                 // On to the edge itself.
@@ -573,12 +747,15 @@ impl Network {
             }
             let floor = match c.end {
                 End::Pit(p) => Some(pits.pits[p as usize].level),
-                End::Foot => Some(0.0),
                 End::Joins { course, cell } => {
                     let at = self.courses[course].cells.iter().position(|&x| x == cell).unwrap();
                     Some(points[course][at].surface)
                 }
-                End::Edge => None,
+                // A pond stands at the course's last surface.
+                _ => pond_of[k].map(|p| {
+                    lakes[p].level = round2(*surface.last().unwrap());
+                    lakes[p].level
+                }),
             };
             if let Some(floor) = floor {
                 for s in surface.iter_mut() {
@@ -587,62 +764,92 @@ impl Network {
                 *surface.last_mut().unwrap() = floor;
             }
             let fall = falls(shape, &surface);
-            let course: Vec<WaterPoint> = (0..shape.len())
+            let n = shape.len();
+            let peters_out = matches!(c.end, End::Soaked | End::Inner) && pond_of[k].is_none();
+            let course: Vec<WaterPoint> = (0..n)
                 .map(|i| {
-                    let (width, depth) = section(flow(acc[i]), fall[i]);
+                    let (mut width, mut depth) = section(flow(acc[i]), fall[i]);
+                    if peters_out {
+                        // It narrows to nothing over its last few points.
+                        let left = (n - 1 - i) as f64 / PETER_OUT_POINTS;
+                        let t = 0.15 + 0.85 * left.min(1.0);
+                        (width, depth) = (round2(width * t), round2(depth * t));
+                    }
                     WaterPoint { x: round2(shape[i].0), y: round2(shape[i].1), width, depth, surface: round2(surface[i]) }
                 })
                 .collect();
             points.push(course);
+            accs.push(acc);
         }
 
-        // Split each course where it becomes a river; give out the ids.
-        let mut rivers = Vec::new();
-        let mut streams = Vec::new();
-        // For each course: (stream id, river id, the index its river part starts at).
-        let mut parts: Vec<(Option<String>, Option<String>, usize)> = Vec::new();
+        // Cut each course into runs of river and stream, and give out the ids.
+        // A course grows into a river in the hills, and may soak back into a
+        // stream on the plain. Each run starts on the last point of the one
+        // before, and joins it there.
         let (mut n_rivers, mut n_streams) = (0, 0);
-        for (k, c) in self.courses.iter().enumerate() {
-            // Flow only grows downstream, so a course is a stream, then a river.
-            let split = self.course_acc(c).iter().position(|&a| a >= RIVER_CELLS);
-            let river_id = split.map(|_| {
-                n_rivers += 1;
-                format!("river_{}", n_rivers - 1)
-            });
-            let stream_id = (split != Some(0)).then(|| {
-                n_streams += 1;
-                format!("stream_{}", n_streams - 1)
-            });
-            parts.push((stream_id, river_id, split.unwrap_or(points[k].len())));
-        }
+        // For each course, each run's id and first point.
+        let parts: Vec<Vec<(String, usize)>> = accs
+            .iter()
+            .map(|acc| {
+                let mut runs = Vec::new();
+                for i in 0..acc.len() {
+                    let river = acc[i] >= RIVER_CELLS;
+                    if i == 0 || river != (acc[i - 1] >= RIVER_CELLS) {
+                        let id = if river {
+                            n_rivers += 1;
+                            format!("river_{}", n_rivers - 1)
+                        } else {
+                            n_streams += 1;
+                            format!("stream_{}", n_streams - 1)
+                        };
+                        runs.push((id, i.saturating_sub(1)));
+                    }
+                }
+                // A run of one point (the flow crossed over at once) folds
+                // into the next.
+                let starts: Vec<usize> = runs.iter().map(|r| r.1).collect();
+                let mut r = 0;
+                runs.retain(|_| {
+                    r += 1;
+                    starts.get(r) != Some(&starts[r - 1])
+                });
+                runs
+            })
+            .collect();
         let lake_id = |p: usize| format!("lake_{p}");
+        let (mut rivers, mut streams) = (Vec::new(), Vec::new());
         for (k, c) in self.courses.iter().enumerate() {
-            let (stream_id, river_id, split) = &parts[k];
             let mouth = match c.end {
                 End::Edge => Mouth::Edge,
-                End::Foot => Mouth::Lake(lake_id(mere_of[k].unwrap())),
                 End::Pit(p) => Mouth::Lake(lake_id(p as usize)),
                 End::Joins { course, cell } => {
                     let at = self.courses[course].cells.iter().position(|&x| x == cell).unwrap();
-                    let (s, r, from) = &parts[course];
-                    Mouth::Joins(if at >= *from { r.clone().unwrap() } else { s.clone().unwrap() })
+                    let run = parts[course].iter().rev().find(|(_, from)| *from <= at).unwrap();
+                    Mouth::Joins(run.0.clone())
                 }
+                End::Soaked | End::Inner => match pond_of[k] {
+                    Some(p) => Mouth::Lake(lake_id(p)),
+                    None => Mouth::PetersOut,
+                },
             };
-            let source = c.from_pit.map(|p| lake_id(p as usize));
             let pts = &points[k];
-            match (stream_id, river_id) {
-                (Some(s), Some(r)) => {
-                    streams.push(WaterCourse {
-                        id: s.clone(),
-                        source,
-                        mouth: Mouth::Joins(r.clone()),
-                        points: pts[..=*split].to_vec(),
-                    });
-                    rivers.push(WaterCourse { id: r.clone(), source: None, mouth, points: pts[*split..].to_vec() });
+            let runs = &parts[k];
+            for (r, (id, from)) in runs.iter().enumerate() {
+                let to = runs.get(r + 1).map(|next| next.1).unwrap_or(pts.len() - 1);
+                let course = WaterCourse {
+                    id: id.clone(),
+                    source: if r == 0 { c.from_pit.map(|p| lake_id(p as usize)) } else { None },
+                    mouth: match runs.get(r + 1) {
+                        Some(next) => Mouth::Joins(next.0.clone()),
+                        None => mouth.clone(),
+                    },
+                    points: pts[*from..=to].to_vec(),
+                };
+                if id.starts_with("river") {
+                    rivers.push(course);
+                } else {
+                    streams.push(course);
                 }
-                (Some(s), None) => streams.push(WaterCourse { id: s.clone(), source, mouth, points: pts.clone() }),
-                (None, Some(r)) => rivers.push(WaterCourse { id: r.clone(), source, mouth, points: pts.clone() }),
-                (None, None) => unreachable!(),
             }
         }
         rivers.sort_by_key(|c| id_number(&c.id));
@@ -689,8 +896,8 @@ fn smooth(grid: &Grid, cells: &[usize]) -> Vec<(f64, f64)> {
 }
 
 /// How far each point of each course is from the nearest point of another,
-/// up to as far as a meander could use.
-fn clearances(shapes: &[Vec<(f64, f64)>]) -> Vec<Vec<f64>> {
+/// or from a road's kerb, up to as far as a meander could use.
+fn clearances(shapes: &[Vec<(f64, f64)>], roads: &Roads) -> Vec<Vec<f64>> {
     let reach = MEANDER / MEANDER_SHARE + CELL;
     let key = |p: (f64, f64)| ((p.0 / reach).floor() as i64, (p.1 / reach).floor() as i64);
     let mut buckets: HashMap<(i64, i64), Vec<(usize, (f64, f64))>> = HashMap::new();
@@ -707,7 +914,9 @@ fn clearances(shapes: &[Vec<(f64, f64)>]) -> Vec<Vec<f64>> {
                 .iter()
                 .map(|&p| {
                     let (bi, bj) = key(p);
-                    let mut best = reach;
+                    // A road counts as other water: a course crosses it
+                    // straight, and doesn't swing onto it.
+                    let mut best = roads.clearance(p, reach);
                     for bj in bj - 1..=bj + 1 {
                         for bi in bi - 1..=bi + 1 {
                             for &(other, q) in buckets.get(&(bi, bj)).map(Vec::as_slice).unwrap_or(&[]) {
@@ -764,8 +973,8 @@ fn smoothstep(t: f64) -> f64 {
 
 /// How much water a course carries, from the cells it drains: about 1 where
 /// it becomes a river.
-fn flow(cells: u32) -> f64 {
-    (cells as f64 / RIVER_CELLS as f64).sqrt()
+fn flow(cells: f64) -> f64 {
+    (cells / RIVER_CELLS).sqrt()
 }
 
 /// The surface's fall per unit length round each point, over about 150 units.
@@ -985,66 +1194,64 @@ fn marching_squares(f: &[f64], w: usize, h: usize, at: impl Fn(usize, usize) -> 
     rings
 }
 
-/// The meres at the foot of the hills: one where each course comes down,
-/// lying along the ring, and any that would overlap made one.
-/// Each is (x, y, flow, courses) in; (courses, lake) out.
-fn merge_meres(mut meres: Vec<(f64, f64, f64, Vec<usize>)>) -> Vec<(Vec<usize>, Lake)> {
-    let half_length = |q: f64| (30.0 + 40.0 * q).min(160.0);
-    // Merge any two whose lengths along the ring overlap, until none do.
-    loop {
-        let mut merged = false;
-        'outer: for a in 0..meres.len() {
-            for b in a + 1..meres.len() {
-                let (ax, ay, aq, _) = meres[a];
-                let (bx, by, bq, _) = meres[b];
-                let d = ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt();
-                if d < half_length(aq) + half_length(bq) + 20.0 {
-                    let (_, _, _, cb) = meres.remove(b);
-                    let q = (aq * aq + bq * bq).sqrt();
-                    let wa = aq * aq / (aq * aq + bq * bq);
-                    let m = &mut meres[a];
-                    m.0 = ax * wa + bx * (1.0 - wa);
-                    m.1 = ay * wa + by * (1.0 - wa);
-                    m.2 = q;
-                    m.3.extend(cb);
-                    merged = true;
-                    break 'outer;
-                }
-            }
-        }
-        if !merged {
-            break;
+/// How strongly a course's flow makes for a pond where it soaks away.
+const POND_CHANCE: f64 = 0.6;
+/// Over how many points a course that peters out narrows to nothing.
+const PETER_OUT_POINTS: f64 = 6.0;
+/// How far a pond's shore keeps from a road's kerb.
+const POND_KERB: f64 = 8.0;
+
+/// A pond where a course soaks away, lying along its last stretch, sized by
+/// its flow `q`. It's made smaller to fit, and given up (the course peters
+/// out instead) if even small it would reach a road, another lake or
+/// another course, or come in past [`INNER_RADIUS`].
+fn pond<'a>(
+    shape: &[(f64, f64)],
+    q: f64,
+    roll: f64,
+    lakes: &[Lake],
+    others: impl Iterator<Item = &'a [(f64, f64)]>,
+    roads: &Roads,
+) -> Option<Lake> {
+    let n = shape.len();
+    let end = shape[n - 1];
+    let back = shape[n.saturating_sub(4)];
+    let (dx, dy) = (end.0 - back.0, end.1 - back.1);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len == 0.0 {
+        return None;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let others: Vec<&[(f64, f64)]> = others.collect();
+    let phase = roll * 37.0;
+    for scale in [1.0, 0.75, 0.55] {
+        let a = (28.0 + 40.0 * q).min(150.0) * scale;
+        let b = (0.55 * a).max(16.0);
+        let (cx, cy) = (end.0 + ux * 0.6 * a, end.1 + uy * 0.6 * a);
+        // An oval along the course, its shore wobbling a little.
+        let ring: Vec<(f64, f64)> = (0..36)
+            .map(|k| {
+                let t = k as f64 / 36.0 * std::f64::consts::TAU;
+                let wobble = 1.0 + 0.1 * (3.0 * t + phase).stable_sin() + 0.06 * (5.0 * t - phase).stable_cos();
+                let (along, across) = (a * t.stable_cos() * wobble, b * t.stable_sin() * wobble);
+                (cx + ux * along - uy * across, cy + uy * along + ux * across)
+            })
+            .collect();
+        let fits = ring.iter().chain([&(cx, cy)]).all(|&p| {
+            radius(p.0, p.1) >= INNER_RADIUS + 10.0
+                && roads.clearance(p, POND_KERB) >= POND_KERB
+                && !lakes.iter().any(|l| l.contains(p.0, p.1))
+        }) && !lakes.iter().any(|l| l.rings.iter().flatten().any(|&(x, y)| contains(&ring, x, y)))
+            && !others.iter().any(|o| o.iter().any(|&(x, y)| contains(&ring, x, y)));
+        if fits {
+            return Some(lake_from_rings(0.0, vec![ring]));
         }
     }
-    meres
-        .into_iter()
-        .map(|(x, y, q, courses)| {
-            let a = half_length(q);
-            let b = (0.45 * a).clamp(20.0, 45.0);
-            let (dx, dy) = (x - CENTER_X, y - CENTER_Y);
-            let r = (dx * dx + dy * dy).sqrt();
-            let (ux, uy) = (dx / r, dy / r);
-            let rc = RURAL_OUTER_RADIUS + MERE_CLEAR + b;
-            let (cx, cy) = (CENTER_X + ux * rc, CENTER_Y + uy * rc);
-            // An ellipse along the ring, its shore wobbling a little.
-            let phase = (x * 0.013 + y * 0.007).stable_sin() * 3.0;
-            let ring: Vec<(f64, f64)> = (0..36)
-                .map(|k| {
-                    let t = k as f64 / 36.0 * std::f64::consts::TAU;
-                    let wobble = 1.0 + 0.08 * (3.0 * t + phase).stable_sin() + 0.05 * (5.0 * t - phase).stable_cos();
-                    let (s, c) = (t.stable_sin(), t.stable_cos());
-                    // Along the ring is (-uy, ux); out from the centre is (ux, uy).
-                    let (along, out) = (a * c * wobble, b * s * wobble.min(1.0));
-                    (cx - uy * along + ux * out, cy + ux * along + uy * out)
-                })
-                .collect();
-            (courses, lake_from_rings(0.0, vec![ring]))
-        })
-        .collect()
+    None
 }
 
-/// A mere's middle: the mean of its shore.
-fn mere_centre(lake: &Lake) -> (f64, f64) {
+/// A lake's middle: the mean of its first shore.
+fn lake_centre(lake: &Lake) -> (f64, f64) {
     let ring = &lake.rings[0];
     let n = ring.len() as f64;
     (ring.iter().map(|p| p.0).sum::<f64>() / n, ring.iter().map(|p| p.1).sum::<f64>() / n)

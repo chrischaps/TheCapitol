@@ -351,6 +351,29 @@ mod tests {
 
     const NEW_NODES_MIGRATION: &str = include_str!("../../migrations/20261106_001_seeded_nodes_by_zone.sql");
 
+    /// The planned nodes the default world's water moved (#222).
+    const PLANNED_MOVES_MIGRATION: &str = include_str!("../../migrations/20261112_001_wild_water_nodes.sql");
+
+    /// The plan, where the migrations leave its nodes: as planned, then moved
+    /// by [`PLANNED_MOVES_MIGRATION`] (its `('id', x, y)` rows).
+    fn planned_nodes() -> Vec<NodeSeed> {
+        let moves: std::collections::HashMap<Uuid, (f64, f64)> = PLANNED_MOVES_MIGRATION
+            .lines()
+            .filter_map(|line| {
+                let row = line.trim().strip_prefix("('")?.trim_end_matches([',', ';']).strip_suffix(')')?;
+                let f: Vec<&str> = row.split(',').map(|f| f.trim().trim_matches('\'')).collect();
+                Some((f[0].parse().ok()?, (f[1].parse().ok()?, f[2].parse().ok()?)))
+            })
+            .collect();
+        default_plan()
+            .into_iter()
+            .map(|s| match moves.get(&s.id) {
+                Some(&(x, y)) => NodeSeed { x, y, ..s },
+                None => s,
+            })
+            .collect()
+    }
+
     /// The `('id', 'type', x, y, quality)` rows of a node seed insert, where
     /// W1's migration moved them.
     fn insert_rows(sql: &str) -> Vec<NodeSeed> {
@@ -404,14 +427,33 @@ mod tests {
         }
     }
 
-    /// The new nodes are where startup's fit leaves them, as the seeds are.
+    /// The new nodes are where startup's fit leaves them, as the seeds are:
+    /// where the plan put them, or where the water's migration moved them.
     #[test]
     fn the_default_terrain_moves_no_planned_node() {
         let mut nodes = seeded_positions();
         let n = nodes.len() as u128;
-        nodes.extend(default_plan().iter().enumerate().map(|(i, s)| (Uuid::from_u128(n + i as u128), (s.x, s.y))));
+        nodes.extend(planned_nodes().iter().enumerate().map(|(i, s)| (Uuid::from_u128(n + i as u128), (s.x, s.y))));
         let report = place_nodes(&TerrainConfig::get_default(), &nodes);
         assert!(report.moves.is_empty(), "{} nodes moved: {:?}", report.moves.len(), report.moves);
+    }
+
+    /// Prints the `('id', x, y)` rows of a planned node move migration: E2.3's
+    /// nodes that a change to the default world puts in the way, where
+    /// startup's fit would move them (#222). Paste them into a new migration
+    /// and point [`PLANNED_MOVES_MIGRATION`] at it:
+    /// `cargo test print_planned_node_moves -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn print_planned_node_moves() {
+        let planned = planned_nodes();
+        let nodes: Vec<(Uuid, (f64, f64))> =
+            seeded_positions().into_iter().chain(planned.iter().map(|s| (s.id, (s.x, s.y)))).collect();
+        let report = place_nodes(&TerrainConfig::get_default(), &nodes);
+        for m in &report.moves {
+            println!("    ('{}', {:.1}, {:.1}),", m.id, m.to.0, m.to.1);
+        }
+        println!("{} moved, {} stuck: {:?}", report.moves.len(), report.stuck.len(), report.stuck);
     }
 
     /// The migration writes exactly the default world's plan. After a change to
@@ -427,26 +469,29 @@ mod tests {
         }
     }
 
-    /// No seeded or planned node stands in the wilds' water (W3, #196).
-    /// `node_placement` doesn't know the wild water yet; until it does (W6,
-    /// #199), this says the default world needs no move.
+    /// No node stands in the wild water (W3, #196; on the rural plain since
+    /// #222): not the seeded grass, nor E2.3's nodes where the migrations
+    /// leave them.
     #[test]
-    fn no_seeded_node_stands_in_the_wild_water() {
+    fn no_node_stands_in_the_wild_water() {
         let terrain = TerrainConfig::get_default();
-        let plan = default_plan();
-        let nodes = seeded_positions().into_iter().map(|(_, p)| p).chain(plan.iter().map(|s| (s.x, s.y)));
+        let planned = planned_nodes();
+        let nodes = seeded_positions().into_iter().map(|(_, p)| p).chain(planned.iter().map(|s| (s.x, s.y)));
+        let mut wet = Vec::new();
         for (x, y) in nodes {
-            assert!(!terrain.lakes.iter().any(|l| l.contains(x, y)), "a node in a lake at ({x}, {y})");
+            if terrain.lakes.iter().any(|l| l.contains(x, y)) {
+                wet.push(format!("a lake at ({x}, {y})"));
+            }
             for c in terrain.rivers.iter().chain(&terrain.streams) {
                 for w in c.points.windows(2) {
                     let (a, b) = (w[0], w[1]);
-                    let (dx, dy) = (b.x - a.x, b.y - a.y);
-                    let t = (((x - a.x) * dx + (y - a.y) * dy) / (dx * dx + dy * dy).max(1e-9)).clamp(0.0, 1.0);
-                    let d = ((a.x + t * dx - x).powi(2) + (a.y + t * dy - y).powi(2)).sqrt();
-                    assert!(d > a.width.max(b.width) / 2.0, "a node in {} at ({x}, {y})", c.id);
+                    if point_to_segment_distance(x, y, a.x, a.y, b.x, b.y) <= a.width.max(b.width) / 2.0 {
+                        wet.push(format!("{} at ({x}, {y})", c.id));
+                    }
                 }
             }
         }
+        assert!(wet.is_empty(), "{} wet: {:?}", wet.len(), wet);
     }
 
     /// Prints the VALUES rows of E2.3's node insert for the default world:

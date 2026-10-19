@@ -673,13 +673,13 @@ impl TerrainConfig {
             fords: Vec::new(),
         };
 
-        // The wilds' water comes from the land alone.
-        let water = super::hydrology::generate(&params.land);
-        (config.rivers, config.streams, config.lakes, config.fords) =
-            (water.rivers, water.streams, water.lakes, water.fords);
 
         // Generate roads using params
         config.roads = config.generate_all_roads_with_params(params);
+
+        // The water comes from the land, and skirts the roads. The rural lots
+        // don't know it yet (#223).
+        let water = super::hydrology::generate(&params.land, &config.roads);
 
         // Generate terrain plots for all zones
         config.terrain_plots = config.generate_suburban_plots_internal(&params.suburban_params());
@@ -694,6 +694,9 @@ impl TerrainConfig {
             &config.water_rings,
             (config.center_x, config.center_y),
         );
+        (config.rivers, config.streams, config.lakes, config.fords) =
+            (water.rivers, water.streams, water.lakes, water.fords);
+
         // The parks are the ground the cleared lots leave.
         config.parks = config.generate_parks(&params.suburban_params());
         config.landmarks = vec![config.exchange_hall_site(params)];
@@ -1450,8 +1453,16 @@ mod tests {
         // and no seeded node stands in the water
         // (`no_seeded_node_stands_in_the_wild_water`). It landed as
         // `5c38bf6ff1ffa2a0`; then channels side by side were gathered and
-        // the meanders kept apart, so no two courses cross.
-        assert_eq!(TerrainConfig::get_default().version(), "dbb6436950a157b5");
+        // the meanders kept apart, so no two courses cross (#220,
+        // `dbb6436950a157b5`).
+        //
+        // #222 let the water run on into the rural ring, round the roads, to
+        // end in ponds or peter out, instead of meres on one circle. No road,
+        // lot, park or seeded node moved. Some of E2.3's planned nodes stand
+        // in the new water, and startup's `fit_to_terrain` moves them
+        // (`no_node_stands_in_the_wild_water`). The rural lots don't know the
+        // water yet (#223).
+        assert_eq!(TerrainConfig::get_default().version(), "b4c60461ef8cc4c4");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one

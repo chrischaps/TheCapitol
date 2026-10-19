@@ -1,4 +1,6 @@
 //! Keeps the resource nodes off the live terrain's roads and water (#70), and off the landmarks (E3.4).
+//! The water is the moat and canals, and the wild water: rivers, streams and
+//! lakes, which since #222 run on into the rural ring.
 //!
 //! The nodes are seeded as fixed positions in migrations, chosen against the
 //! default world. The admin terrain tools can regenerate the world with other
@@ -25,7 +27,7 @@ use capitol_protocol::fmath::StableMath;
 use std::collections::HashMap;
 
 use capitol_protocol::rules::{Zone, CENTER_X, CENTER_Y};
-use capitol_protocol::terrain::{quad_contains, Landmark, TerrainPlot};
+use capitol_protocol::terrain::{quad_contains, Lake, Landmark, TerrainPlot};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -72,6 +74,9 @@ struct Surroundings<'a> {
     segments: Vec<((f64, f64), (f64, f64), f64)>,
     /// Each water ring as (inner, outer) radius, widened by the kerb.
     bands: Vec<(f64, f64)>,
+    /// Each stretch of river or stream with its half width.
+    courses: Vec<((f64, f64), (f64, f64), f64)>,
+    lakes: Vec<&'a Lake>,
     lots: Vec<&'a TerrainPlot>,
     /// The landmarks' footprints (the Exchange hall): a node stays off them
     /// as it does off a road.
@@ -111,12 +116,31 @@ impl<'a> Surroundings<'a> {
                 near_box(min, max, reach + LOT_MARGIN)
             })
             .collect();
+        let courses = terrain
+            .rivers
+            .iter()
+            .chain(&terrain.streams)
+            .flat_map(|c| c.points.windows(2).map(|w| ((w[0].x, w[0].y), (w[1].x, w[1].y), w[0].width.max(w[1].width) / 2.0)))
+            .filter(|&(a, b, half)| {
+                near_box((a.0.min(b.0), a.1.min(b.1)), (a.0.max(b.0), a.1.max(b.1)), reach + half)
+            })
+            .collect();
+        let lakes = terrain
+            .lakes
+            .iter()
+            .filter(|lake| {
+                let points = lake.rings.iter().flatten();
+                let min = points.clone().fold((f64::MAX, f64::MAX), |m, p| (m.0.min(p.0), m.1.min(p.1)));
+                let max = points.fold((f64::MIN, f64::MIN), |m, p| (m.0.max(p.0), m.1.max(p.1)));
+                near_box(min, max, reach)
+            })
+            .collect();
         let landmarks = terrain.landmarks.iter().collect();
-        Self { segments, bands, lots, landmarks }
+        Self { segments, bands, courses, lakes, lots, landmarks }
     }
 
-    /// How far a point is from the nearest road edge, water kerb or landmark;
-    /// negative inside a road or the water, zero on a landmark.
+    /// How far a point is from the nearest road edge, water kerb, bank, shore
+    /// or landmark; negative inside a road or the water, zero on a landmark.
     fn clearance(&self, (x, y): (f64, f64)) -> f64 {
         let r = (x - CENTER_X).stable_hypot(y - CENTER_Y);
         let water = self
@@ -124,9 +148,20 @@ impl<'a> Surroundings<'a> {
             .iter()
             .map(|&(inner, outer)| (inner - r).max(r - outer))
             .fold(f64::MAX, f64::min);
+        let lakes = self.lakes.iter().map(|lake| {
+            let shore = lake
+                .rings
+                .iter()
+                .flat_map(|ring| (0..ring.len()).map(move |i| (ring[i], ring[(i + 1) % ring.len()])))
+                .map(|(a, b)| point_to_segment_distance(x, y, a.0, a.1, b.0, b.1))
+                .fold(f64::MAX, f64::min);
+            if lake.contains(x, y) { -shore } else { shore }
+        });
         self.segments
             .iter()
+            .chain(&self.courses)
             .map(|&(a, b, half)| point_to_segment_distance(x, y, a.0, a.1, b.0, b.1) - half)
+            .chain(lakes)
             .fold(water, f64::min)
             .min(self.landmarks.iter().map(|l| l.distance_to(x, y)).fold(f64::MAX, f64::min))
     }
