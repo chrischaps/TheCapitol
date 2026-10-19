@@ -2136,10 +2136,13 @@ mod tests {
         let elapsed = start.elapsed();
 
         println!("Terrain generation took: {:?} of CPU", elapsed);
-        // Typical: ~3.7s debug since W3's hydrology (~1.9s before; #221), ~5.4s on a CI
-        // runner. Pre-optimization was ~115s debug, which is what this guards against.
-        assert!(elapsed.as_millis() < 10000,
-            "Terrain generation took too long: {:?} of CPU (expected <10000ms)", elapsed);
+        // Typical: ~2.7s debug, with `capitol_protocol` and libm optimised even in
+        // debug (the root Cargo.toml, #221). Of that, the water is ~0.25s and the wild
+        // trails ~0.65s, mostly `land::height_at`. Unoptimised, the noise made it ~3.7s,
+        // and ~5.4s on a CI runner. Pre-optimization was ~115s debug, which is what
+        // this guards against.
+        assert!(elapsed.as_millis() < 6000,
+            "Terrain generation took too long: {:?} of CPU (expected <6000ms)", elapsed);
     }
 
     #[test]
