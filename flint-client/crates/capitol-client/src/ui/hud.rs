@@ -59,6 +59,10 @@ pub struct HeaderView<'a> {
     /// How brightly the Inventory button glows, 0 to 1, as a pickup lands
     /// on it (P8.2).
     pub inventory_pulse: f32,
+    /// Goods wait in your market box and you're away from the Exchange
+    /// hall (E3.7): the hint, its arrow pointing this way on screen
+    /// ([`bearing`]). `None` hides it.
+    pub hall_hint: Option<f32>,
 }
 
 /// What was clicked in the header.
@@ -69,6 +73,8 @@ pub struct HeaderClicks {
     pub crafting: bool,
     pub exchange: bool,
     pub market: bool,
+    /// The hall hint: go to the hall.
+    pub hall: bool,
     pub help: bool,
     pub settings: bool,
     /// Where the Inventory button was drawn, for pickups to fly to.
@@ -136,6 +142,9 @@ pub fn header(
                         zone_chip(ui, zone);
                     }
                     ui.add_space(4.0);
+                    if let Some(angle) = view.hall_hint {
+                        clicks.hall = hall_chip(ui, angle).clicked();
+                    }
                     clicks.market = theme::toggle_chip(ui, "Market", view.market_open)
                         .on_hover_text("The market (M)")
                         .clicked();
@@ -230,6 +239,59 @@ fn patron_chip(ui: &mut egui::Ui, hover: &str) {
         })
         .response
         .on_hover_text(hover);
+}
+
+/// Goods waiting at the Exchange hall (E3.7): a gold chip with an arrow
+/// that points to the hall on screen, its edge breathing. A click walks you
+/// there.
+fn hall_chip(ui: &mut egui::Ui, angle: f32) -> egui::Response {
+    let t = ui.input(|i| i.time) as f32;
+    let breath = 0.5 + 0.5 * (t * 2.4).sin();
+    let shown = theme::chip(lerp(theme::GOLD_DIM, theme::GOLD_LIGHT, breath), theme::GOLD_WASH).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+            let c = rect.center();
+            let (s, k) = angle.sin_cos();
+            let at = |along: f32, across: f32| c + egui::vec2(k * along - s * across, s * along + k * across);
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![at(5.5, 0.0), at(-4.0, 4.0), at(-1.5, 0.0), at(-4.0, -4.0)],
+                theme::GOLD,
+                Stroke::NONE,
+            ));
+            ui.label(
+                RichText::new("Goods at the hall")
+                    .font(theme::strong(size::SMALL))
+                    .color(theme::GOLD_LIGHT),
+            );
+        });
+    });
+    ui.ctx().request_repaint();
+    shown
+        .response
+        .interact(egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Your market box holds goods. Collect them at the Exchange hall: click to walk there")
+}
+
+/// Which way `at` lies on screen for a camera at `eye` looking at `look`
+/// (world metres), seen from above: radians, 0 to the right and clockwise,
+/// as egui's y runs down. Straight ahead is up the screen.
+pub fn bearing(eye: [f32; 3], look: [f32; 3], at: [f32; 3]) -> f32 {
+    let mut f = [look[0] - eye[0], look[2] - eye[2]];
+    let len = f[0].hypot(f[1]);
+    if len < 1e-6 {
+        // Looking straight down: the screen's up is the camera's -Z.
+        f = [0.0, -1.0];
+    } else {
+        f = [f[0] / len, f[1] / len];
+    }
+    // Flint's right is forward × up: (-f.z, f.x) on the ground.
+    let right = [-f[1], f[0]];
+    let d = [at[0] - eye[0], at[2] - eye[2]];
+    let x = d[0] * right[0] + d[1] * right[1];
+    let ahead = d[0] * f[0] + d[1] * f[1];
+    (-ahead).atan2(x)
 }
 
 /// The strand balance, gold on a gold wash. A dash until it's known.
@@ -672,5 +734,20 @@ mod tests {
         );
         assert_eq!(plain_reason(""), "The connection was lost.");
         assert_eq!(plain_reason("something new"), "something new");
+    }
+
+    #[test]
+    fn the_hall_hint_points_where_the_hall_is_on_screen() {
+        use std::f32::consts::FRAC_PI_2;
+        // Looking north (-Z) from above and behind: ahead is up the screen,
+        // east (+X) to the right, south down.
+        let (eye, look) = ([0.0, 30.0, 20.0], [0.0, 0.0, 0.0]);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert!(close(bearing(eye, look, [0.0, 0.0, -50.0]), -FRAC_PI_2));
+        assert!(close(bearing(eye, look, [50.0, 0.0, 20.0]), 0.0));
+        assert!(close(bearing(eye, look, [0.0, 0.0, 80.0]), FRAC_PI_2));
+        // Turned to look east, north is to the left.
+        let look_east = [10.0, 0.0, 20.0];
+        assert!(close(bearing(eye, look_east, [0.0, 0.0, -50.0]).abs(), std::f32::consts::PI));
     }
 }

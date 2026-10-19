@@ -65,6 +65,12 @@ pub struct Shared {
     /// The station a script last asked to open (`cap_open_station`, P6.3).
     /// The extension takes it next frame.
     pub open_station: Arc<Mutex<Option<String>>>,
+    /// The Exchange hall (E3.7) as the extension left it this frame. `None`
+    /// when the terrain has none.
+    pub hall: Arc<Mutex<Option<HallMark>>>,
+    /// A script asked to go to the hall (`cap_visit_hall`). The extension
+    /// takes it next frame.
+    pub visit_hall: Arc<AtomicBool>,
     /// Where the egui UI's landmarks were drawn last frame (P8.2), by name,
     /// for scripts to fly things to. Only "inventory" so far.
     pub anchors: Arc<Mutex<HashMap<&'static str, UiAnchor>>>,
@@ -97,6 +103,48 @@ pub struct TradeMark {
     /// In an open trade, who has accepted.
     pub mine: bool,
     pub theirs: bool,
+}
+
+/// The Exchange hall as scripts see it, in world metres.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HallMark {
+    /// Its footprint, in order round it.
+    pub corners: [[f32; 2]; 4],
+    /// The middle of its entrance side.
+    pub door: [f32; 2],
+    /// The middle of its roof (X, Y, Z), where the mote rises from.
+    pub roof: [f32; 3],
+    /// You're in range to trade there.
+    pub near: bool,
+    /// Goods wait in your market box.
+    pub goods: bool,
+    /// The market panel is open.
+    pub open: bool,
+}
+
+impl HallMark {
+    /// Whether the ground point (x, z) is on the footprint, or within `pad`
+    /// metres of it.
+    pub fn covers(&self, x: f32, z: f32, pad: f32) -> bool {
+        let c = &self.corners;
+        // Inside a convex quad: the same side of every edge.
+        let side = |i: usize| {
+            let (a, b) = (c[i], c[(i + 1) % 4]);
+            (b[0] - a[0]) * (z - a[1]) - (b[1] - a[1]) * (x - a[0])
+        };
+        let sides = [side(0), side(1), side(2), side(3)];
+        if sides.iter().all(|&s| s >= 0.0) || sides.iter().all(|&s| s <= 0.0) {
+            return true;
+        }
+        (0..4).any(|i| {
+            let (a, b) = (c[i], c[(i + 1) % 4]);
+            let ab = [b[0] - a[0], b[1] - a[1]];
+            let t = (((x - a[0]) * ab[0] + (z - a[1]) * ab[1]) / (ab[0] * ab[0] + ab[1] * ab[1]).max(1e-9))
+                .clamp(0.0, 1.0);
+            let p = [a[0] + ab[0] * t, a[1] + ab[1] * t];
+            (x - p[0]).hypot(z - p[1]) <= pad
+        })
+    }
 }
 
 /// One of the UI's landmarks as scripts see it: a rect in logical points,
@@ -222,6 +270,10 @@ pub const PLAYER_PICK: f32 = 1.2;
 /// How near a click must land to a node to pick it, in metres. A node's
 /// tuft is about 1.2 m across; React picks within 16 server units.
 pub const NODE_PICK: f32 = 1.8;
+
+/// How far off the Exchange hall's footprint a click still picks it, in
+/// metres: the eaves and the stalls' awnings reach about this far.
+pub const HALL_PICK: f32 = 0.3;
 
 /// One avatar's name tag, as `entities::Players` placed it this frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -519,6 +571,47 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             *o = Some(id.to_owned());
         }
     });
+    // `cap_hall() -> #{ corners, door_x, door_z, x, y, z, near, goods, open }
+    // or ()`: the Exchange hall (E3.7), world metres. `corners` is
+    // [[x, z], ...] round its footprint, `door_*` the middle of its entrance
+    // side, and `x, y, z` the middle of its roof. `near` when you're in range
+    // to trade there, `goods` when your market box holds anything, `open`
+    // when the market panel is.
+    let hall = shared.hall.clone();
+    engine.register_fn("cap_hall", move || -> rhai::Dynamic {
+        let Some(h) = hall.lock().ok().and_then(|h| h.clone()) else {
+            return rhai::Dynamic::UNIT;
+        };
+        let mut m = rhai::Map::new();
+        let corners: rhai::Array = h
+            .corners
+            .iter()
+            .map(|p| rhai::Dynamic::from_array(vec![(p[0] as f64).into(), (p[1] as f64).into()]))
+            .collect();
+        m.insert("corners".into(), corners.into());
+        m.insert("door_x".into(), (h.door[0] as f64).into());
+        m.insert("door_z".into(), (h.door[1] as f64).into());
+        m.insert("x".into(), (h.roof[0] as f64).into());
+        m.insert("y".into(), (h.roof[1] as f64).into());
+        m.insert("z".into(), (h.roof[2] as f64).into());
+        m.insert("near".into(), h.near.into());
+        m.insert("goods".into(), h.goods.into());
+        m.insert("open".into(), h.open.into());
+        m.into()
+    });
+    // `cap_hall_at(x, z) -> bool`: whether the ground point (x, z), world
+    // metres, is on the hall's footprint (or a hand's width off it).
+    let hall = shared.hall.clone();
+    engine.register_fn("cap_hall_at", move |x: f64, z: f64| -> bool {
+        hall.lock()
+            .ok()
+            .and_then(|h| h.as_ref().map(|h| h.covers(x as f32, z as f32, HALL_PICK)))
+            .unwrap_or(false)
+    });
+    // `cap_visit_hall()`: open the market at the hall, or walk to its door
+    // and open it there. Sent next frame.
+    let visit = shared.visit_hall.clone();
+    engine.register_fn("cap_visit_hall", move || visit.store(true, Ordering::Relaxed));
     // `cap_node_at(x, z) -> #{ ... } or ()`: the node nearest the ground
     // point (x, z), within NODE_PICK metres, as in `cap_nodes`.
     let nodes = shared.nodes.clone();

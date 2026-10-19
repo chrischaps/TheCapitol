@@ -42,7 +42,7 @@ pub const GOLD_MESH: &str = "capitol_gold";
 
 /// A point on the ground in world metres (X, Z), the tower's centre at the
 /// origin.
-type V2 = [f32; 2];
+pub(crate) type V2 = [f32; 2];
 
 /// The land the tower stands on.
 const G: f32 = layer::GROUND;
@@ -214,7 +214,7 @@ impl Frame {
     }
 }
 
-fn lift([x, z]: V2, y: f32) -> [f32; 3] {
+pub(crate) fn lift([x, z]: V2, y: f32) -> [f32; 3] {
     [x, y, z]
 }
 
@@ -249,7 +249,7 @@ fn ngon(centre: V2, r: f32, sides: usize) -> Vec<V2> {
 /// The sides of a solid from the convex outline `bottom` at `y0` up to
 /// `top` at `y1` (the same corners in the same order, so a taper works),
 /// each face flat and facing out, with a flat roof when `roof`.
-fn loft(
+pub(crate) fn loft(
     m: &mut MeshBuf,
     bottom: &[V2],
     y0: f32,
@@ -288,7 +288,7 @@ fn loft(
 }
 
 /// A straight-sided solid over `outline` from `y0` to `y1`.
-fn prism(m: &mut MeshBuf, outline: &[V2], y0: f32, y1: f32, colour: [f32; 4], roof: bool) {
+pub(crate) fn prism(m: &mut MeshBuf, outline: &[V2], y0: f32, y1: f32, colour: [f32; 4], roof: bool) {
     loft(m, outline, y0, outline, y1, colour, roof);
 }
 
@@ -770,7 +770,7 @@ fn windows(light: &mut MeshBuf, outline: &[V2], y0: f32, y1: f32, seed: u32) {
 }
 
 /// A well-mixed hash of three numbers, for picking which windows are lit.
-fn hash(a: u32, b: u32, c: u32) -> u32 {
+pub(crate) fn hash(a: u32, b: u32, c: u32) -> u32 {
     let mut h =
         a.wrapping_mul(0x9e37_79b9) ^ b.wrapping_mul(0x85eb_ca6b) ^ c.wrapping_mul(0xc2b2_ae35);
     h ^= h >> 16;

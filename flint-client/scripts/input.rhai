@@ -8,6 +8,7 @@
 //   1. placing a station: put it here              (P6.2)
 //   2. shift-click a player: trade, or walk closer  (P7.3)
 //   3. a station: open it, or walk closer           (P6.3)
+//      the Exchange hall: the market, or walk there (E3.7, here)
 //   4. alt-click a plot: select it                  (P6.4, here)
 //   5. an available resource node: extract          (P4.4, here)
 //   6. anywhere else: walk there                    (P4.3, here)
@@ -58,6 +59,15 @@
 // to its near side and it opens as you arrive (capitol_core::station). The
 // panel is Rust's (ui/station.rs). Walking out of reach closes it, and a
 // refusal ("Not your station") comes back as a `station_note` toast.
+//
+// The Exchange hall (E3.7). A click anywhere on it (cap_hall_at, tried at
+// heights up its walls, so the clock and the roof take the click as well as
+// the ground) opens the market panel there, or walks you to its door and
+// opens it as you arrive (cap_visit_hall; capitol_core::hall). Hovering it,
+// or standing in range, traces its footprint in the Trade District's blue,
+// and a prompt hangs over it: what a click will do, unless the market is
+// open already. While goods wait in your market box, gold motes rise from
+// its lantern, a slow fountain you can find from across the city.
 //
 // Placing a station (P6.2): a right click on a kit in the inventory starts
 // it. Rust draws the ghost, the station itself, tinted and translucent,
@@ -181,6 +191,7 @@ fn on_update() {
     if place_station(click) { return; }
     if trade_with(click) { return; }
     if open_station(click) { return; }
+    if visit_hall() { return; }
     if select_plot(click) { return; }
     if extract(click) { return; }
     cap_move(click.x, click.z);
@@ -203,6 +214,25 @@ fn open_station(click) {           // P6.3
     if s == () { return false; }
     cap_open_station(s.id);
     true
+}
+
+// The Exchange hall under the cursor: the market, there or after a walk.
+fn visit_hall() {                   // E3.7
+    if !hall_under_cursor() { return false; }
+    cap_visit_hall();
+    true
+}
+
+// Whether the cursor's ray meets the hall: its point at each height up to
+// the roof, on the footprint. That's the hall's box, near enough.
+fn hall_under_cursor() {
+    if cap_hall() == () { return false; }
+    let y = cap_ground_y();
+    for k in 0..9 {
+        let p = screen_to_ground(mouse_x(), mouse_y(), y + k.to_float());
+        if p != () && cap_hall_at(p[0], p[1]) { return true; }
+    }
+    false
 }
 
 // Alt-click: the plot here, in the panel. Over a road or open ground the
@@ -376,7 +406,11 @@ fn on_draw_ui() {
     for rip in ripples { draw_ripple(rip, now); }
     for s in splashes { draw_splash(s, now); }
 
-    if hover != () && placing == () && over == () {
+    let hall = cap_hall();
+    let over_hall = hall != () && placing == () && over == () && hall_under_cursor();
+    if hall != () { draw_hall(hall, over_hall, now); }
+
+    if hover != () && placing == () && over == () && !over_hall {
         let n = cap_node_at(hover[0], hover[1]);
         if n != () && n.state == "available" && !n.targeted { draw_reticle_on(n, now); }
         else { draw_reticle(hover, now); }
@@ -730,6 +764,111 @@ fn draw_bloom(b, now) {
 
 // The Trade District's blue, #3b82f6, and the trade window's edge.
 fn trade_blue() { [0.231, 0.510, 0.965] }
+
+// ── The Exchange hall ────────────────────────────────────────────────────
+
+// How often a mote rises from the hall while goods wait (s), how long each
+// takes, and how high it goes over the roof (m).
+fn mote_every() { 0.8 }
+fn mote_life() { 3.2 }
+fn mote_rise() { 11.0 }
+
+// The hall's marks: its footprint traced while you hover it or stand in
+// range, the prompt over it, and the motes while goods wait.
+fn draw_hall(h, over, now) {
+    let c = trade_blue();
+    if over || h.near {
+        let a = if over { 0.8 } else { 0.42 + 0.12 * (now * 2.0).sin() };
+        let y = cap_mark_y();
+        for i in 0..4 {
+            let p = h.corners[i];
+            let q = h.corners[(i + 1) % 4];
+            ground_line(p[0], p[1], q[0], q[1], y, c, a, 2.0);
+        }
+    }
+    if h.goods { draw_motes(h, now); }
+    if (over || h.near) && !h.open { draw_hall_prompt(h, over); }
+}
+
+// "Exchange hall", and under it what a click will do, over the clock.
+fn draw_hall_prompt(h, over) {
+    let at = world_to_screen(h.door_x, h.y + 2.2, h.door_z);
+    if !at.visible { return; }
+    let title = "Exchange hall";
+    let line = if !h.near { "Click to walk there" }
+               else if h.goods { "Goods wait in your box · click to collect" }
+               else { "Click to trade · M" };
+    let size = 18.0;
+    let m = measure_text_ex(title, size, "display", 0.0);
+    // Close up the clock is near the top of the screen: keep the prompt
+    // under the header.
+    let top = (at.y - 44.0).max(64.0);
+    draw_text_opts(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{
+        font: "display", color: [0.0, 0.0, 0.0, 0.6],
+    });
+    draw_text_opts(at.x - m.width / 2.0, top, title, size, #{
+        font: "display", color: [0.86, 0.92, 1.0, 0.97],
+    });
+    let lm = measure_text_ex(line, 13.0, "strong", 0.0);
+    let ly = top + m.height + 5.0;
+    let ink = if h.goods && h.near { [0.95, 0.83, 0.46] } else { [0.92, 0.92, 0.92] };
+    draw_text_opts(at.x - lm.width / 2.0 + 1.0, ly + 1.0, line, 13.0, #{
+        font: "strong", color: [0.0, 0.0, 0.0, 0.55],
+    });
+    draw_text_opts(at.x - lm.width / 2.0, ly, line, 13.0, #{
+        font: "strong", color: [ink[0], ink[1], ink[2], if over || h.near { 0.9 } else { 0.7 }],
+    });
+}
+
+// Goods in your box: gold motes rising one after another from the hall's
+// lantern, swaying as they climb, swelling then fading, with a faint
+// thread of gold under them. Each is a glint on the screen, so it stays a
+// few points wide however far away you are.
+fn draw_motes(h, now) {
+    let c = gold();
+    let n = (mote_life() / mote_every()).ceiling().to_int();
+    let first = (now / mote_every()).floor().to_int();
+    for j in 0..n {
+        let i = first - j;
+        let age = now - i.to_float() * mote_every();
+        let k = age / mote_life();
+        if k < 0.0 || k >= 1.0 { continue; }
+        // Each mote its own sway, from its number.
+        let phase = (i * 37 % 100).to_float() / 100.0 * 2.0 * PI();
+        let up = mote_rise() * (1.0 - (1.0 - k) * (1.0 - k));
+        let sway = 0.45 * (phase + age * 1.7).sin() * k;
+        let p = world_to_screen(h.x + sway, h.y + 0.4 + up, h.z + 0.3 * (phase + age).cos() * k);
+        if !p.visible { continue; }
+        let a = (k / 0.15).min(1.0) * (1.0 - k);
+        let r = 4.0 + 5.0 * (1.0 - (2.0 * k - 1.0).abs());
+        draw_circle(p.x, p.y, r * 1.9, c[0], c[1], c[2], 0.18 * a);
+        mote_glint(p.x, p.y, r, age * 1.3 + phase, a);
+    }
+    // The thread: depth-tested, so the hall hides its foot as it should.
+    let base = h.y + 0.6;
+    let steps = 8;
+    for s in 0..steps {
+        let y0 = base + mote_rise() * s.to_float() / steps.to_float();
+        let y1 = base + mote_rise() * (s + 1).to_float() / steps.to_float();
+        let fade = 0.28 * (1.0 - s.to_float() / steps.to_float());
+        draw_world_line(h.x, y0, h.z, h.x, y1, h.z, c[0], c[1], c[2], fade, 1.5);
+    }
+}
+
+// A four-pointed glint, gold-white, `r` points to a tip, turned by `turn`.
+fn mote_glint(x, y, r, turn, a) {
+    let w = r * 0.24;
+    for k in 0..2 {
+        let t = turn + k.to_float() * 0.5 * PI();
+        let ux = t.cos();
+        let uy = t.sin();
+        draw_polygon([
+            [x + ux * r, y + uy * r], [x - uy * w, y + ux * w],
+            [x - ux * r, y - uy * r], [x + uy * w, y - ux * w],
+        ], 1.0, 0.92, 0.6, a, 2);
+    }
+    draw_circle(x, y, w * 1.3, 1.0, 0.98, 0.9, a);
+}
 
 // Someone shift would ask: a blue ring at their feet, closing in a little
 // as it breathes, with a fainter one outside.

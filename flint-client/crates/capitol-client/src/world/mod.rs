@@ -1,8 +1,9 @@
 //! The world built from `/terrain` (plan P3): each piece is a runtime mesh
 //! (H4) rebuilt when the terrain changes. So far that's the ground (P3.2),
-//! the water (P3.3), the roads (P3.4), the bridges (P3.5) and the plots
-//! (P3.6) and the Capitol tower (P3.7). A layer with thousands of pieces is
-//! split into `sector`s, one mesh each, so each part culls on its own.
+//! the water (P3.3), the roads (P3.4), the bridges (P3.5), the plots
+//! (P3.6), the Capitol tower (P3.7) and the Exchange hall (E3.7). A layer
+//! with thousands of pieces is split into `sector`s, one mesh each, so each
+//! part culls on its own.
 //!
 //! When the terrain changes while the game runs (P3.10), [`Rebuild`] says
 //! which layers to build again: only those whose inputs changed.
@@ -11,6 +12,7 @@ pub mod bridges;
 pub mod geom;
 pub mod grass;
 pub mod ground;
+pub mod hall;
 pub mod houses;
 pub mod mesh;
 pub mod palette;
@@ -31,6 +33,7 @@ use capitol_core::protocol::terrain::TerrainResponse;
 /// | roads | roads, water rings (they stop at the kerbs) |
 /// | plots | plots (the server clears them of roads and water, B7) |
 /// | parks | parks (only the grass reads them, #129) |
+/// | hall | landmarks (the Exchange hall, E3.7) |
 ///
 /// The centre isn't an input: `coords` places the world on the protocol's
 /// fixed `CENTER_X`/`CENTER_Y`.
@@ -42,6 +45,7 @@ pub struct Rebuild {
     pub roads: bool,
     pub plots: bool,
     pub parks: bool,
+    pub hall: bool,
 }
 
 impl Rebuild {
@@ -51,6 +55,7 @@ impl Rebuild {
         roads: true,
         plots: true,
         parks: true,
+        hall: true,
     };
 
     /// What to build for `new`, when the world was last built from `old`.
@@ -66,6 +71,7 @@ impl Rebuild {
             roads,
             plots: old.terrain_plots != new.terrain_plots,
             parks: old.parks != new.parks,
+            hall: old.landmarks != new.landmarks,
         }
     }
 }
@@ -78,6 +84,7 @@ impl std::fmt::Display for Rebuild {
             (self.roads, "roads"),
             (self.plots, "plots"),
             (self.parks, "parks"),
+            (self.hall, "hall"),
         ];
         let names: Vec<_> = layers
             .iter()
@@ -109,6 +116,7 @@ mod tests {
         roads: false,
         plots: false,
         parks: false,
+        hall: false,
     };
 
     #[test]
@@ -160,6 +168,7 @@ mod tests {
         let rings = Rebuild {
             plots: false,
             parks: false,
+            hall: false,
             ..Rebuild::ALL
         };
         assert_eq!(Rebuild::between(Some(&old), &new), rings);
@@ -172,5 +181,13 @@ mod tests {
         };
         assert_eq!(Rebuild::between(Some(&old), &new), parks);
         assert_eq!(parks.to_string(), "parks");
+
+        let mut new = old.clone();
+        new.landmarks[0].position.0 += 10.0;
+        let hall = Rebuild {
+            hall: true,
+            ..NONE
+        };
+        assert_eq!(Rebuild::between(Some(&old), &new), hall);
     }
 }

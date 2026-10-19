@@ -138,6 +138,11 @@ struct Args {
     /// blended lots and both grade rules, and a few orders of yours
     #[arg(long)]
     market_sample: bool,
+    /// Offline, the Exchange hall as if you stood where the camera looks
+    /// with goods in your market box: the gold mote, the header's hint and,
+    /// in range, the prompt (E3.7)
+    #[arg(long)]
+    hall_sample: bool,
     /// No sound. Captures (--exit-after) are silent anyway
     #[arg(long)]
     mute: bool,
@@ -300,6 +305,7 @@ fn main() -> Result<()> {
         .with_place(args.place)
         .with_exchange(args.exchange.as_deref())
         .with_market(args.market.as_deref(), args.market_sample)
+        .with_hall_sample(args.hall_sample && args.offline.is_some())
         .with_mute(args.mute || args.exit_after.is_some())
         .with_juice_sample(args.juice_sample && args.offline.is_some())
         .with_time_of_day(args.time_of_day)

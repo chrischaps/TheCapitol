@@ -37,7 +37,7 @@ use capitol_core::protocol::rest::{
 };
 use capitol_core::protocol::rules::market::{OrderSide, OrderStatus};
 use capitol_core::protocol::rules::Zone;
-use capitol_core::protocol::terrain::TerrainResponse;
+use capitol_core::protocol::terrain::{Landmark, TerrainResponse};
 use capitol_core::protocol::ws::ClientMessage;
 use capitol_core::state::{GameState, StateEvent, Trade, TradeAction, TradeEvent, Yield};
 use capitol_core::station::{self, Kit, Placing, Visit};
@@ -175,6 +175,9 @@ pub struct Session {
     station_notes: Vec<station::visit::Note>,
     /// Shift-clicking a player: ask, or walk closer and ask (P7.3).
     approach: Approach,
+    /// Clicking the Exchange hall: open the market, or walk to its door
+    /// and open it there (E3.7).
+    hall: capitol_core::hall::Visit,
     /// Your side of the open trade as you build it.
     draft: Draft,
     /// What's worth telling the player about trading, since the extension
@@ -327,6 +330,7 @@ impl Session {
             visit: Visit::default(),
             station_notes: Vec::new(),
             approach: Approach::default(),
+            hall: capitol_core::hall::Visit::default(),
             draft: Draft::default(),
             trade_notes: Vec::new(),
             traded: Vec::new(),
@@ -380,6 +384,7 @@ impl Session {
         self.harvest.walked();
         self.visit.walked();
         self.approach.walked();
+        self.hall.walked();
         self.walk(now, x, y);
     }
 
@@ -430,9 +435,42 @@ impl Session {
         // A click on a station is a click elsewhere for the node you were after.
         self.harvest.walked();
         self.approach.walked();
+        self.hall.walked();
         if let Some(step) = self.visit.click(station, &self.state, now) {
             self.station_step(now, step);
         }
+    }
+
+    /// You clicked the Exchange hall: true if you're at it, so the market
+    /// opens now. Otherwise you walk to its door, and [`Self::at_hall`]
+    /// says when you get there (`capitol_core::hall`).
+    pub fn visit_hall(&mut self, now: Instant, hall: &Landmark) -> bool {
+        if self.auth.phase() != Phase::InWorld {
+            return false;
+        }
+        let Some(me) = self.state.local_player() else {
+            return false;
+        };
+        let at = [me.x, me.y];
+        self.harvest.walked();
+        self.visit.walked();
+        self.approach.walked();
+        match self.hall.click(hall, at) {
+            capitol_core::hall::Step::Open => true,
+            capitol_core::hall::Step::WalkTo { x, y } => {
+                self.walk(now, x, y);
+                false
+            }
+        }
+    }
+
+    /// True once, as a walk to the hall (`visit_hall`) comes into range.
+    pub fn at_hall(&mut self, hall: &Landmark) -> bool {
+        let Some(me) = self.state.local_player() else {
+            return false;
+        };
+        let at = [me.x, me.y];
+        self.hall.arrived(hall, at)
     }
 
     /// Opens the station nearest you, as a click on it would (the O key).
@@ -1049,6 +1087,7 @@ impl Session {
         };
         self.harvest.walked();
         self.visit.walked();
+        self.hall.walked();
         self.trade_step(now, step);
         self.note_approach();
         true

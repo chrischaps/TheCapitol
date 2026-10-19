@@ -116,6 +116,13 @@ pub struct CapitolExtension {
     market: ui::market::MarketPanel,
     /// `--market-sample`: a market to show offline (E3.5).
     market_sample: Option<ui::market::Sample>,
+    /// The Exchange hall (E3.7), and `--hall-sample`: offline, goods waiting
+    /// and you where the camera looks.
+    hall: world::hall::HallLayer,
+    hall_sample: bool,
+    /// Where the hall is on screen, as the header's hint points (radians,
+    /// 0 to the right, clockwise), while goods wait and you're not there.
+    hall_hint: Option<f32>,
     station: ui::station::StationPanel,
     /// Enter (the `craft` action) was pressed since `ui` last looked.
     craft_key: bool,
@@ -181,6 +188,9 @@ impl CapitolExtension {
             exchange: ui::exchange::ExchangePanel::default(),
             market: ui::market::MarketPanel::default(),
             market_sample: None,
+            hall: world::hall::HallLayer::default(),
+            hall_sample: false,
+            hall_hint: None,
             station: ui::station::StationPanel::default(),
             craft_key: false,
             cancel_placing: false,
@@ -293,6 +303,43 @@ impl CapitolExtension {
             self.exchange.preset(spec);
         }
         self
+    }
+
+    /// Offline, show the hall as if goods waited (`--hall-sample`).
+    pub fn with_hall_sample(mut self, on: bool) -> Self {
+        self.hall_sample = on;
+        self
+    }
+
+    /// The Exchange hall as scripts see it. Offline with `--hall-sample`,
+    /// you stand at `camera_target` (world metres). `None` until the terrain
+    /// brings a hall.
+    fn hall_mark(&self, camera_target: [f32; 2]) -> Option<script_api::HallMark> {
+        let site = self.hall.site()?;
+        let hall = self.terrain.landmark(LandmarkKind::ExchangeHall)?;
+        let (you, goods) = match &self.session {
+            Some(session) => {
+                let state = session.state();
+                (
+                    state.local_player().map(|p| [p.x, p.y]),
+                    capitol_core::hall::goods_waiting(state.market_box()),
+                )
+            }
+            None if self.hall_sample => (
+                Some(crate::coords::to_server(camera_target[0], camera_target[1])),
+                true,
+            ),
+            None => (None, false),
+        };
+        let world = |p: (f64, f64)| crate::coords::to_world(p.0, p.1);
+        Some(script_api::HallMark {
+            corners: hall.corners.map(world),
+            door: site.door(),
+            roof: site.roof(),
+            near: you.is_some_and(|[x, y]| rules::market::at_the_hall(hall, x, y)),
+            goods,
+            open: self.market.open,
+        })
     }
 
     /// Open the market panel preset (`--market ITEM[:SIDE:N@PRICE[:GRADE]]`),
@@ -445,6 +492,14 @@ impl PlayerExtension for CapitolExtension {
             walk(ctx, session, &self.shared, now);
             let gathered = gather(ctx, session, &self.shared, &mut self.sound, now);
             visit(ctx, session, &self.shared, now);
+            // The Exchange hall (E3.7): a click on it opens the market there,
+            // or walks you to its door and opens it as you come into range.
+            if let Some(hall) = self.terrain.landmark(LandmarkKind::ExchangeHall) {
+                let clicked = self.shared.visit_hall.swap(false, Ordering::Relaxed);
+                if (clicked && session.visit_hall(now, hall)) || session.at_hall(hall) {
+                    self.market.open = true;
+                }
+            }
             let made = crafted(ctx, session, &self.shared, &mut self.sound);
             // The hints follow whoever is signed in (nobody, signed out).
             let state = session.state();
@@ -551,6 +606,9 @@ impl PlayerExtension for CapitolExtension {
                     .update(ctx, state, None, &none, dt, &self.shared);
             }
         }
+        if self.session.is_none() && self.shared.visit_hall.swap(false, Ordering::Relaxed) {
+            self.market.open = true;
+        }
         if self.session.is_none() && self.node_sample && ctx.clock.total_time > 0.5 {
             // Offline, every kind of node round where the camera looks
             // half a second in (`--node-sample`), once a `--view` or a
@@ -652,6 +710,28 @@ impl PlayerExtension for CapitolExtension {
         // So do the fires in the forges and kilns.
         self.stations
             .fires(ctx.world, crate::stations::fire_light(glow));
+        // And the Exchange hall's glass (E3.7). Its clock keeps the hour,
+        // and the scripts hear where it is, for the prompt and the mote.
+        set_emissive_scale(
+            ctx.world,
+            world::hall::LAMPS_MESH,
+            world::hall::glass_light(glow),
+        );
+        if let Some(gpu) = ctx.gpu.as_mut() {
+            self.hall.tick(gpu, phase);
+        }
+        let camera = ctx.camera;
+        let mark = self.hall_mark([camera.target.x, camera.target.z]);
+        self.hall_hint = mark.as_ref().filter(|h| h.goods && !h.near).map(|h| {
+            ui::hud::bearing(
+                camera.position.to_array(),
+                camera.target.to_array(),
+                h.roof,
+            )
+        });
+        if let Ok(mut shared) = self.shared.hall.lock() {
+            *shared = mark;
+        }
         // The grass, cleared round every node the server has shown us, as
         // wide as its kind needs.
         let shown = match (&self.session, &self.node_sampled) {
@@ -702,6 +782,14 @@ impl PlayerExtension for CapitolExtension {
             // The lots moved, so the gold and the houses are built again.
             self.owned_drawn = None;
             self.houses.lots_changed();
+        }
+        if rebuild.hall {
+            let hall = terrain
+                .landmarks
+                .iter()
+                .find(|l| l.kind == LandmarkKind::ExchangeHall);
+            self.hall.terrain(gpu, hall, phase);
+            sectors.extend(world::hall::meshes());
         }
         if rebuild.ground || rebuild.roads || rebuild.plots || rebuild.parks {
             self.grass.terrain(terrain);
@@ -812,6 +900,7 @@ impl PlayerExtension for CapitolExtension {
                     help_open: self.shortcuts.open,
                     settings_open: self.settings_panel.open,
                     inventory_pulse: pulse,
+                    hall_hint: self.hall_hint,
                 };
                 let clicks = ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
                 sign_out |= clicks.sign_out;
@@ -831,6 +920,9 @@ impl PlayerExtension for CapitolExtension {
                 }
                 if clicks.market {
                     self.market.toggle();
+                }
+                if clicks.hall {
+                    self.shared.visit_hall.store(true, Ordering::Relaxed);
                 }
                 if clicks.help {
                     self.shortcuts.toggle();

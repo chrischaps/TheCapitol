@@ -17,6 +17,8 @@
 //!   numbers before you confirm, the server's own rule.
 //! - [`market`]: the market (E3.3): the books you watch, kept by their
 //!   diffs, your orders and the latest trades.
+//! - [`hall`]: going to the Exchange hall (E3.7): open the market there, or
+//!   walk to its door and open it on arrival; and goods waiting in the box.
 //! - [`onboarding`]: the first-session hints: which to show, and what
 //!   counts as done (P8.3).
 //! - [`poll`]: the polling scheduler. [`poll::Poller`] turns those events, and
@@ -41,6 +43,7 @@ pub mod bot;
 pub mod catalog;
 pub mod craft;
 pub mod exchange;
+pub mod hall;
 pub mod harvest;
 pub mod market;
 pub mod market_maker;
