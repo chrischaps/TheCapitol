@@ -1448,8 +1448,10 @@ mod tests {
         // W3 (#196) put the wilds' water on the terrain: rivers, streams,
         // lakes and fords, all past r3800. No road, lot, park or node moved,
         // and no seeded node stands in the water
-        // (`no_seeded_node_stands_in_the_wild_water`).
-        assert_eq!(TerrainConfig::get_default().version(), "5c38bf6ff1ffa2a0");
+        // (`no_seeded_node_stands_in_the_wild_water`). It landed as
+        // `5c38bf6ff1ffa2a0`; then channels side by side were gathered and
+        // the meanders kept apart, so no two courses cross.
+        assert_eq!(TerrainConfig::get_default().version(), "dbb6436950a157b5");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one

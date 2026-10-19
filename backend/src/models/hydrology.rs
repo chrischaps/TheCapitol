@@ -16,8 +16,10 @@
 //! 4. **Flow** accumulates down the drainage. Streams are where it passes
 //!    [`STREAM_CELLS`] and rivers where it passes [`RIVER_CELLS`]. Each course
 //!    follows its largest inflow up, and every other inflow is a course of its
-//!    own that joins it. Courses are smoothed, then their surfaces are made to
-//!    fall downstream: the carve (`land::carve`) cuts them through what's left.
+//!    own that joins it. A channel running beside a bigger one joins it
+//!    there ([`gather`]). Courses are smoothed and meander on flat ground,
+//!    then their surfaces are made to fall downstream: the carve
+//!    (`land::carve`) cuts them through what's left.
 //! 5. **Fords** are the shallowest stretches of each river, spaced apart.
 
 use std::cmp::Ordering;
@@ -37,7 +39,7 @@ const MERE_CLEAR: f64 = 25.0;
 /// Upstream cells a stream drains, at least.
 pub const STREAM_CELLS: u32 = 120;
 /// Upstream cells a river drains, at least.
-pub const RIVER_CELLS: u32 = 800;
+pub const RIVER_CELLS: u32 = 600;
 /// A pit becomes a lake when it covers this many cells...
 const LAKE_MIN_CELLS: usize = 20;
 /// ...and is this deep somewhere.
@@ -59,8 +61,9 @@ pub struct Hydrology {
 /// The wilds' water for this land.
 pub fn generate(land: &LandParams) -> Hydrology {
     let grid = Grid::sample(land);
-    let flood = grid.flood();
+    let mut flood = grid.flood();
     let pits = grid.pits(&flood);
+    gather(&grid, &mut flood, &pits);
     let network = Network::trace(&grid, &flood, &pits);
     network.finish(&grid, land, &pits)
 }
@@ -307,19 +310,114 @@ struct Network {
     courses: Vec<Traced>,
 }
 
+/// How many cells drain through each, itself included.
+fn accumulate(flood: &Flood) -> Vec<u32> {
+    let mut acc = vec![0u32; flood.down.len()];
+    for &c in &flood.order {
+        acc[c as usize] = 1;
+    }
+    for &c in flood.order.iter().rev() {
+        let d = flood.down[c as usize];
+        if d != OUT {
+            acc[d as usize] += acc[c as usize];
+        }
+    }
+    acc
+}
+
+/// How near, in cells, a channel runs to a bigger one before it joins it.
+const GATHER: i64 = 1;
+
+/// Joins each channel to a bigger one it runs beside. On a smooth slope,
+/// steepest descent sends neighbouring channels down side by side to the
+/// rim, and smoothed they'd cross. Here a channel within [`GATHER`] cells of
+/// a bigger one drains into it instead, unless it would climb to get there.
+///
+/// Then where two channels' drains cross on the diagonals of a square of
+/// cells, the smaller drains into the bigger's cell.
+///
+/// Flow only grows downstream, so every drain, old or new, runs to a cell
+/// that drained more before: the drainage stays a tree, and ordering the
+/// cells by that flow, most first, keeps `order` upstream-last.
+fn gather(grid: &Grid, flood: &mut Flood, pits: &Pits) {
+    let acc = accumulate(flood);
+    // The drainage as the flood left it: the walks follow it, not drains
+    // this pass has already moved.
+    let was = flood.down.clone();
+    let channel = |c: usize| acc[c] >= STREAM_CELLS && pits.lake_of[c] == OUT;
+    let n = grid.n as i64;
+    for &c in &flood.order {
+        let c = c as usize;
+        if !channel(c) {
+            continue;
+        }
+        let (i, j) = ((c % grid.n) as i64, (c / grid.n) as i64);
+        let mut best: Option<usize> = None;
+        // The biggest channel near, other than itself.
+        for dj in -GATHER..=GATHER {
+            for di in -GATHER..=GATHER {
+                let (a, b) = (i + di, j + dj);
+                if a < 0 || b < 0 || a >= n || b >= n {
+                    continue;
+                }
+                let m = (b * n + a) as usize;
+                if m == c || !channel(m) || acc[m] <= acc[c] || flood.filled[m] > flood.filled[c] + GATHER_CLIMB {
+                    continue;
+                }
+                if best.is_none_or(|b| acc[m] > acc[b] || acc[m] == acc[b] && m < b) {
+                    best = Some(m);
+                }
+            }
+        }
+        // Already on its way there, or into something as big: leave it be.
+        // Flow only grows downstream, so the walk stops by the size of `m`.
+        let Some(m) = best else { continue };
+        let mut d = was[c];
+        let mut on_its_way = false;
+        while d != OUT && acc[d as usize] <= acc[m] {
+            if d as usize == m {
+                on_its_way = true;
+                break;
+            }
+            d = was[d as usize];
+        }
+        let now = flood.down[c];
+        if !on_its_way && (now == OUT || acc[now as usize] < acc[m]) {
+            flood.down[c] = m as u32;
+        }
+    }
+    // Two drains across the diagonals of one square of cells cross: turn the
+    // smaller into the bigger's cell instead.
+    for c in 0..flood.down.len() {
+        let d = flood.down[c];
+        if d == OUT || !channel(c) {
+            continue;
+        }
+        let (i, j) = ((c % grid.n) as i64, (c / grid.n) as i64);
+        let (di, dj) = ((d as usize % grid.n) as i64 - i, (d as usize / grid.n) as i64 - j);
+        if di.abs() != 1 || dj.abs() != 1 {
+            continue;
+        }
+        let (a, b) = ((j * n + i + di) as usize, ((j + dj) * n + i) as usize);
+        for (from, to) in [(a, b), (b, a)] {
+            if flood.down[from] == to as u32 && channel(from) {
+                let (small, big) = if acc[from] < acc[c] { (from, c) } else { (c, from) };
+                if acc[small] < acc[big] {
+                    flood.down[small] = big as u32;
+                }
+            }
+        }
+    }
+    flood.order.sort_by(|&a, &b| acc[b as usize].cmp(&acc[a as usize]).then(a.cmp(&b)));
+}
+
+/// How far a channel may climb to join a bigger one beside it.
+const GATHER_CLIMB: f64 = 2.0;
+
 impl Network {
     fn trace(grid: &Grid, flood: &Flood, pits: &Pits) -> Self {
         let cells = grid.h.len();
-        let mut acc = vec![0u32; cells];
-        for &c in &flood.order {
-            acc[c as usize] = 1;
-        }
-        for &c in flood.order.iter().rev() {
-            let d = flood.down[c as usize];
-            if d != OUT {
-                acc[d as usize] += acc[c as usize];
-            }
-        }
+        let acc = accumulate(flood);
         let lake = |c: usize| pits.lake_of[c] != OUT;
         let channel = |c: usize| grid.inside(c) && acc[c] >= STREAM_CELLS && !lake(c);
         // What flows into each channel cell: channel cells and lake cells.
@@ -410,7 +508,14 @@ impl Network {
         let mut lakes: Vec<Lake> = pits.pits.iter().map(|pit| pit_lake(grid, pit)).collect();
 
         // Each course's points, smoothed, with the cell each stands for.
-        let mut shapes: Vec<Vec<(f64, f64)>> = self.courses.iter().map(|c| smooth(grid, land, &c.cells)).collect();
+        let smoothed: Vec<Vec<(f64, f64)>> = self.courses.iter().map(|c| smooth(grid, &c.cells)).collect();
+        let room = clearances(&smoothed);
+        let mut shapes: Vec<Vec<(f64, f64)>> = smoothed
+            .into_iter()
+            .zip(&room)
+            .zip(&self.courses)
+            .map(|((shape, room), c)| meander(land, &c.cells, shape, room))
+            .collect();
         // A course that joins another ends on that one's point for the cell.
         for k in 0..self.courses.len() {
             if let End::Joins { course, cell } = self.courses[k].end {
@@ -563,11 +668,13 @@ const MEANDER: f64 = 55.0;
 /// The slope at which the meander has halved.
 const MEANDER_SLOPE: f64 = 0.15;
 
+/// How much of the way to the nearest other water a course may swing. Two
+/// courses each swinging less than half can't cross.
+const MEANDER_SHARE: f64 = 0.3;
+
 /// A course's points: the cells' centres, smoothed so the grid's 45° steps
-/// don't show. Then it meanders: steepest descent runs dead straight down a
-/// smooth slope, so on gentle ground it's swung from side to side, the more
-/// the flatter. On steep ground it keeps to the valley floor. The ends stay put.
-fn smooth(grid: &Grid, land: &LandParams, cells: &[usize]) -> Vec<(f64, f64)> {
+/// don't show. The ends stay put.
+fn smooth(grid: &Grid, cells: &[usize]) -> Vec<(f64, f64)> {
     let mut p: Vec<(f64, f64)> = cells.iter().map(|&c| grid.point(c)).collect();
     for _ in 0..3 {
         let q = p.clone();
@@ -578,6 +685,51 @@ fn smooth(grid: &Grid, land: &LandParams, cells: &[usize]) -> Vec<(f64, f64)> {
             );
         }
     }
+    p
+}
+
+/// How far each point of each course is from the nearest point of another,
+/// up to as far as a meander could use.
+fn clearances(shapes: &[Vec<(f64, f64)>]) -> Vec<Vec<f64>> {
+    let reach = MEANDER / MEANDER_SHARE + CELL;
+    let key = |p: (f64, f64)| ((p.0 / reach).floor() as i64, (p.1 / reach).floor() as i64);
+    let mut buckets: HashMap<(i64, i64), Vec<(usize, (f64, f64))>> = HashMap::new();
+    for (k, shape) in shapes.iter().enumerate() {
+        for &p in shape {
+            buckets.entry(key(p)).or_default().push((k, p));
+        }
+    }
+    shapes
+        .iter()
+        .enumerate()
+        .map(|(k, shape)| {
+            shape
+                .iter()
+                .map(|&p| {
+                    let (bi, bj) = key(p);
+                    let mut best = reach;
+                    for bj in bj - 1..=bj + 1 {
+                        for bi in bi - 1..=bi + 1 {
+                            for &(other, q) in buckets.get(&(bi, bj)).map(Vec::as_slice).unwrap_or(&[]) {
+                                if other != k {
+                                    best = best.min(((p.0 - q.0).powi(2) + (p.1 - q.1).powi(2)).sqrt());
+                                }
+                            }
+                        }
+                    }
+                    best
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Swings a smoothed course from side to side. Steepest descent runs dead
+/// straight down a smooth slope, so on gentle ground it meanders, the more
+/// the flatter. On steep ground it keeps to the valley floor, and it never
+/// swings more than [`MEANDER_SHARE`] of the way to other water. The ends
+/// stay put.
+fn meander(land: &LandParams, cells: &[usize], mut p: Vec<(f64, f64)>, clearance: &[f64]) -> Vec<(f64, f64)> {
     let n = p.len();
     let mut along = vec![0.0; n];
     for i in 1..n {
@@ -598,7 +750,8 @@ fn smooth(grid: &Grid, land: &LandParams, cells: &[usize]) -> Vec<(f64, f64)> {
         let slope = capitol_protocol::land::slope_at(q[i].0, q[i].1, land) / MEANDER_SLOPE;
         let swing = 0.65 * (s / 420.0 * std::f64::consts::TAU + phase).stable_sin()
             + 0.35 * (s / 170.0 * std::f64::consts::TAU + 2.0 * phase).stable_sin();
-        let off = MEANDER * taper * swing / (1.0 + slope * slope);
+        let room = MEANDER_SHARE * (clearance[i] - CELL / 2.0).max(0.0);
+        let off = (MEANDER / (1.0 + slope * slope)).min(room) * taper * swing;
         p[i] = (q[i].0 - dy / len * off, q[i].1 + dx / len * off);
     }
     p

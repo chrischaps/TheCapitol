@@ -71,6 +71,35 @@ fn every_course_runs_downhill_to_the_edge_or_a_lake() {
     }
 }
 
+/// No two courses cross: where one meets another, it ends there, on one of
+/// that one's points.
+#[test]
+fn courses_meet_only_where_one_joins_another() {
+    fn cross(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64)) -> bool {
+        let o = |p: (f64, f64), q: (f64, f64), r: (f64, f64)| (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0);
+        o(a, b, c) * o(a, b, d) < 0.0 && o(c, d, a) * o(c, d, b) < 0.0
+    }
+    for seed in [42, 7, 1234] {
+        let w = if seed == 42 { default_water().clone() } else { generate(&LandParams { seed, ..LandParams::default() }) };
+        let all: Vec<&WaterCourse> = courses(&w).collect();
+        let mut crossings = Vec::new();
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                for s in a.points.windows(2) {
+                    for t in b.points.windows(2) {
+                        let (p, q) = ((s[0].x, s[0].y), (s[1].x, s[1].y));
+                        let (r, u) = ((t[0].x, t[0].y), (t[1].x, t[1].y));
+                        if cross(p, q, r, u) {
+                            crossings.push(format!("{} x {} near ({:.0}, {:.0})", a.id, b.id, p.0, p.1));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(crossings.is_empty(), "seed {seed}: {} crossings: {:?}", crossings.len(), &crossings[..crossings.len().min(8)]);
+    }
+}
+
 /// Nothing wet inside the rural edge: no course, bank or lake, and the
 /// carve leaves the ground there alone.
 #[test]
@@ -281,4 +310,5 @@ fn water_plan() {
         w.fords.len()
     );
 }
+
 
