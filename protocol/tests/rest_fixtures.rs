@@ -3,14 +3,14 @@
 //! `fixtures/rest/catalog.json` is `GET /catalog` from a server on the seed
 //! content. The Flint client's offline fallback is the same file
 //! (`capitol-core/src/catalog_fallback.json`), and a test there keeps them equal.
-//! `fixtures/rest/stations_nearby.json` is `GET /stations/nearby`.
+//! `fixtures/rest/stations_nearby.json` is `GET /stations/nearby`, a station running (E4.2).
 //! `fixtures/rest/split_stack.json` is `POST /items/{id}/split` taking named qualities (E1.8).
 //! `fixtures/rest/place_order.json` is a sell order naming its units (E3.1).
 
 use std::fs;
 use std::path::Path;
 
-use capitol_protocol::rest::{CatalogResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse};
+use capitol_protocol::rest::{AutomationMode, AutomationState, CatalogResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse};
 use capitol_protocol::rules::market::{GradeRule, OrderSide};
 
 fn fixture(name: &str) -> String {
@@ -37,6 +37,9 @@ fn nearby_stations_round_trip_with_their_quality() {
     let json = fixture("stations_nearby.json");
     let nearby: NearbyStationsResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(nearby.stations[0].quality, 82);
+    let automation = nearby.stations[0].automation.as_ref().unwrap();
+    assert_eq!((automation.mode, &automation.state), (AutomationMode::Count(20), &AutomationState::Running));
+    assert!(!automation.is_finished());
     assert_eq!(serde_json::to_string(&nearby).unwrap(), json);
 }
 

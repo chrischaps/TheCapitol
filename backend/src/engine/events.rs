@@ -94,6 +94,11 @@ pub enum GameEvent {
         station_id: Uuid,
         tool: Option<capitol_protocol::rest::StationTool>,
     },
+    /// A station's automation changed: configured, started or stopped (E4.2)
+    StationAutomationChanged {
+        station_id: Uuid,
+        automation: capitol_protocol::rest::StationAutomation,
+    },
     // M5: Trading events
     TradeRequested {
         from_player: Uuid,

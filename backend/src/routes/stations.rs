@@ -1,17 +1,18 @@
 use axum::{
     extract::{Path, State},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Extension, Json, Router,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
 
 use capitol_protocol::rest::{
-    NearbyStationsResponse, PlaceStationRequest, PlaceStationResponse, StationContainerResponse,
+    ConfigureAutomation, NearbyStationsResponse, StationAutomation, PlaceStationRequest, PlaceStationResponse, StationContainerResponse,
     SuccessResponse,
 };
 
-use crate::engine::container_access::{check_station_access, live_position};
+use crate::engine::automation::AutomationError;
+use crate::engine::container_access::{check_station_access, live_position, AccessError};
 use crate::engine::GameEvent;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -24,6 +25,9 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/place", post(place_station))
         .route("/{id}", delete(remove_station))
         .route("/{id}/container", get(get_station_container))
+        .route("/{id}/automation", put(configure_automation))
+        .route("/{id}/automation/start", post(start_automation))
+        .route("/{id}/automation/stop", post(stop_automation))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
@@ -91,6 +95,7 @@ pub async fn get_nearby_stations(
 
     let container_map: HashMap<Uuid, Uuid> = containers.into_iter().collect();
     let tools = crate::engine::station_tools::tools_at(&state.db, &station_ids).await?;
+    let automation = crate::engine::automation::automation_at(&state.db, &station_ids).await?;
 
     // Build response
     let station_infos: Vec<StationInfo> = stations
@@ -110,6 +115,7 @@ pub async fn get_nearby_stations(
                 interaction_range: st.interaction_range,
                 quality: station.quality,
                 tool: tools.get(&station.id).cloned(),
+                automation: automation.get(&station.id).cloned(),
             })
         })
         .collect();
@@ -273,4 +279,117 @@ pub async fn get_station_container(
         layout_columns: container_type.layout_columns,
         slots,
     }))
+}
+
+/// Set what your station makes on its own (E4.2): a recipe at this station's
+/// type, a count or forever, from and into the station's own box. It stops the
+/// station if it was running. Everyone hears `station_automation_changed`.
+#[utoipa::path(
+    put,
+    path = "/stations/{id}/automation",
+    params(
+        ("id" = Uuid, Path, description = "Station ID")
+    ),
+    request_body = ConfigureAutomation,
+    responses(
+        (status = 200, description = "Set, and stopped", body = StationAutomation),
+        (status = 400, description = "The recipe isn't made here, needs a tool the slot doesn't hold, or the count is out of range"),
+        (status = 403, description = "Not your station"),
+        (status = 404, description = "Station not found")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Stations"
+)]
+pub async fn configure_automation(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(station_id): Path<Uuid>,
+    Json(req): Json<ConfigureAutomation>,
+) -> Result<Json<StationAutomation>, AppError> {
+    let player_id = player_of(&state, &auth_user).await?;
+    let recipes = state.game.read().await.recipes.clone();
+    let result =
+        crate::engine::automation::configure(&state.db, &recipes, player_id, station_id, &req.recipe_id, req.mode).await;
+    announce_automation(&state, station_id, result).await
+}
+
+/// Set your configured station running (E4.2)
+#[utoipa::path(
+    post,
+    path = "/stations/{id}/automation/start",
+    params(
+        ("id" = Uuid, Path, description = "Station ID")
+    ),
+    responses(
+        (status = 200, description = "Running", body = StationAutomation),
+        (status = 400, description = "Not configured, or its setting no longer holds (a tool taken out)"),
+        (status = 403, description = "Not your station"),
+        (status = 404, description = "Station not found")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Stations"
+)]
+pub async fn start_automation(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(station_id): Path<Uuid>,
+) -> Result<Json<StationAutomation>, AppError> {
+    let player_id = player_of(&state, &auth_user).await?;
+    let recipes = state.game.read().await.recipes.clone();
+    let result = crate::engine::automation::start(&state.db, &recipes, player_id, station_id).await;
+    announce_automation(&state, station_id, result).await
+}
+
+/// Stop your station (E4.2). It keeps its setting and its count.
+#[utoipa::path(
+    post,
+    path = "/stations/{id}/automation/stop",
+    params(
+        ("id" = Uuid, Path, description = "Station ID")
+    ),
+    responses(
+        (status = 200, description = "Stopped", body = StationAutomation),
+        (status = 400, description = "Not configured"),
+        (status = 403, description = "Not your station"),
+        (status = 404, description = "Station not found")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Stations"
+)]
+pub async fn stop_automation(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(station_id): Path<Uuid>,
+) -> Result<Json<StationAutomation>, AppError> {
+    let player_id = player_of(&state, &auth_user).await?;
+    let result = crate::engine::automation::stop(&state.db, player_id, station_id).await;
+    announce_automation(&state, station_id, result).await
+}
+
+async fn player_of(state: &AppState, auth_user: &AuthUser) -> Result<Uuid, AppError> {
+    Ok(sqlx::query_scalar::<_, Uuid>("SELECT id FROM players WHERE account_id = $1 LIMIT 1")
+        .bind(auth_user.account_id)
+        .fetch_one(&state.db)
+        .await?)
+}
+
+/// Everyone hears what the station is set to now, as over WS
+async fn announce_automation(
+    state: &AppState,
+    station_id: Uuid,
+    result: Result<StationAutomation, AutomationError>,
+) -> Result<Json<StationAutomation>, AppError> {
+    let automation = result.map_err(automation_refusal)?;
+    let game = state.game.read().await;
+    crate::engine::automation::announce(&game.event_sender, station_id, automation.clone());
+    Ok(Json(automation))
+}
+
+fn automation_refusal(e: AutomationError) -> AppError {
+    match e {
+        AutomationError::Access(AccessError::StationNotFound) => AppError::NotFound(e.message()),
+        AutomationError::Access(AccessError::Database(db)) => AppError::Database(db),
+        AutomationError::NotYourStation => AppError::Forbidden(e.message()),
+        _ => AppError::BadRequest(e.message()),
+    }
 }

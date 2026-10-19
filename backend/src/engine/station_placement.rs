@@ -256,6 +256,7 @@ pub async fn place_station(
             interaction_range: st.interaction_range,
             quality: kit_quality,
             tool: None,
+            automation: None,
         },
         plot_id,
     })

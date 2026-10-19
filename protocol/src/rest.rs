@@ -832,6 +832,78 @@ pub struct StationInfo {
     /// term for crafts made here, and wears with each one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<StationTool>,
+    /// What the station is set to make on its own, and how far it's got
+    /// (E4.2). Left out when it was never configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<StationAutomation>,
+}
+
+/// A station's automation (E4.2, TDD §4.3): one recipe, made again and again
+/// from the station's own box, into the same box (v1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct StationAutomation {
+    pub recipe_id: String,
+    pub mode: AutomationMode,
+    /// `"state"`, with `"reason"` when it's paused
+    #[serde(flatten)]
+    pub state: AutomationState,
+    /// Crafts finished since the last start
+    pub done: u32,
+}
+
+impl StationAutomation {
+    /// Has a `count` run made all it was asked for?
+    pub fn is_finished(&self) -> bool {
+        matches!(self.mode, AutomationMode::Count(n) if self.done >= n)
+    }
+}
+
+/// How long it runs: `{"count": n}` crafts, or `"forever"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationMode {
+    Count(u32),
+    Forever,
+}
+
+/// Whether it's working. `stopped` is the owner's doing, `paused` the
+/// station's: it means to run, but can't yet (E4.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum AutomationState {
+    Stopped,
+    Running,
+    Paused { reason: PauseReason },
+}
+
+/// Why a running station waits (TDD §4.3). Stopping it by hand is `stopped`,
+/// not a pause.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PauseReason {
+    /// Its box lacks an input
+    MissingInput { item_type: String },
+    /// No room in its box for the output
+    OutputFull,
+    /// Its tool broke on the last craft
+    ToolBroken,
+    /// The recipe needs a tool and the slot holds none of its type
+    ToolMissing,
+    /// The owner left and isn't a subscriber (D8)
+    OwnerOffline,
+}
+
+/// `PUT /stations/{id}/automation`. Setting it stops the station and starts
+/// the count again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ConfigureAutomation {
+    pub recipe_id: String,
+    pub mode: AutomationMode,
 }
 
 /// A tool installed in a station (E1.6)

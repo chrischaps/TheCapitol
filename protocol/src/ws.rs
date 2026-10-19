@@ -11,7 +11,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::rest::{MarketOrder, MarketTrade, StationTool, Subscription};
+use crate::rest::{AutomationMode, MarketOrder, MarketTrade, StationAutomation, StationTool, Subscription};
 use crate::rules::stacking::Units;
 
 /// Client to server.
@@ -89,6 +89,17 @@ pub enum ClientMessage {
     /// from your own station. Answered by `station_tool_changed`, or `error`.
     #[serde(rename = "remove_tool")]
     RemoveTool { station_id: String },
+    /// Set what your station makes on its own (E4.2): `recipe_id` at this
+    /// station's type, from and into its own box. Stops it if it was running.
+    /// Owner only. Answered by `station_automation_changed`, or `error`.
+    #[serde(rename = "configure_automation")]
+    ConfigureAutomation { station_id: String, recipe_id: String, mode: AutomationMode },
+    /// Set your configured station running (E4.2). Owner only.
+    #[serde(rename = "start_automation")]
+    StartAutomation { station_id: String },
+    /// Stop your station (E4.2). Owner only.
+    #[serde(rename = "stop_automation")]
+    StopAutomation { station_id: String },
     // M5: Trading
     #[serde(rename = "trade_initiate")]
     TradeInitiate { target_player_id: String },
@@ -127,6 +138,9 @@ impl ClientMessage {
             ClientMessage::CraftAtStation { .. } => "craft_at_station",
             ClientMessage::InstallTool { .. } => "install_tool",
             ClientMessage::RemoveTool { .. } => "remove_tool",
+            ClientMessage::ConfigureAutomation { .. } => "configure_automation",
+            ClientMessage::StartAutomation { .. } => "start_automation",
+            ClientMessage::StopAutomation { .. } => "stop_automation",
             ClientMessage::TradeInitiate { .. } => "trade_initiate",
             ClientMessage::TradeAcceptRequest => "trade_accept_request",
             ClientMessage::TradeDeclineRequest => "trade_decline_request",
@@ -282,6 +296,11 @@ pub enum ServerMessage {
     /// only a station you're showing is yours to update.
     #[serde(rename = "station_tool_changed")]
     StationToolChanged { station_id: Uuid, tool: Option<StationTool> },
+    /// A station's automation changed (E4.2): configured, started, stopped,
+    /// and from E4.3 paused or a craft further on. Broadcast, like
+    /// `station_tool_changed`.
+    #[serde(rename = "station_automation_changed")]
+    StationAutomationChanged { station_id: Uuid, automation: StationAutomation },
     // M5: Trading events
     #[serde(rename = "trade_requested")]
     TradeRequested {
@@ -441,6 +460,7 @@ impl ServerMessage {
             ServerMessage::StationOpened { .. } => "station_opened",
             ServerMessage::StationClosed { .. } => "station_closed",
             ServerMessage::StationToolChanged { .. } => "station_tool_changed",
+            ServerMessage::StationAutomationChanged { .. } => "station_automation_changed",
             ServerMessage::TradeRequested { .. } => "trade_requested",
             ServerMessage::TradeRequestDeclined { .. } => "trade_request_declined",
             ServerMessage::TradeRequestExpired { .. } => "trade_request_expired",

@@ -630,6 +630,7 @@ impl GameState {
                     }),
                     quality: *quality,
                     tool: None,
+                    automation: None,
                 };
                 self.upsert_station(station, &mut out);
                 out.push(StateEvent::StationPlaced {
@@ -670,6 +671,12 @@ impl GameState {
             M::StationToolChanged { station_id, tool } => {
                 if let Some(station) = self.stations.get_mut(station_id) {
                     station.tool = tool.clone();
+                }
+            }
+            // Kept on the station for E4.4's automation panel
+            M::StationAutomationChanged { station_id, automation } => {
+                if let Some(station) = self.stations.get_mut(station_id) {
+                    station.automation = Some(automation.clone());
                 }
             }
             M::StationClosed { player_id } => {

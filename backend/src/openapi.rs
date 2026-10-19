@@ -12,7 +12,7 @@ use capitol_protocol::rest::{
     MoveRequest, NearbyResponse, NearbyStationsResponse, PlaceStationRequest,
     PayTaxRequest, PayTaxResponse, PlaceStationResponse, PlayerMeResponse, PlotInfo, PlotPermissions, RecipeInfo, RecipeInputInfo,
     RecipeOutputInfo, RecipesResponse, RegisterRequest, ResourceNodeInfo, SlotItem, SplitStackRequest, SplitStackResponse,
-    StationContainerResponse, StationInfo, StationTool, SubscribeRequest, Subscription, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
+    StationContainerResponse, StationInfo, StationTool, StationAutomation, AutomationMode, AutomationState, PauseReason, ConfigureAutomation, SubscribeRequest, Subscription, SubscriptionStatus, WithdrawRequest, WithdrawResponse, ZoneInfo,
     ZonesResponse,
 };
 use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType, TerrainPark, TerrainPlot, TerrainResponse, WaterRing};
@@ -102,6 +102,9 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         crate::routes::stations::place_station,
         crate::routes::stations::remove_station,
         crate::routes::stations::get_station_container,
+        crate::routes::stations::configure_automation,
+        crate::routes::stations::start_automation,
+        crate::routes::stations::stop_automation,
         // Exchange
         crate::routes::exchange::deposit_fiber,
         crate::routes::exchange::withdraw_fiber,
@@ -171,6 +174,11 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         // Stations
         NearbyStationsResponse,
         StationInfo,
+        StationAutomation,
+        AutomationMode,
+        AutomationState,
+        PauseReason,
+        ConfigureAutomation,
         StationTool,
         PlaceStationRequest,
         PlaceStationResponse,

@@ -75,6 +75,7 @@ fn station(id: Uuid, owner: Uuid) -> StationInfo {
         interaction_range: 75.0,
         quality: 50,
         tool: None,
+        automation: None,
     }
 }
 
@@ -198,6 +199,7 @@ fn test_for(message: &M) -> fn() {
         M::StationOpened { .. } => station_opened_only_for_me,
         M::StationClosed { .. } => station_closed_only_for_me,
         M::StationToolChanged { .. } => station_tool_changed_updates_the_station,
+        M::StationAutomationChanged { .. } => station_automation_changed_updates_the_station,
         M::TradeRequested { .. } => trade::trade_requested_prompts,
         M::TradeRequestDeclined { .. } => trade::trade_request_declined_ends_our_request,
         M::TradeRequestExpired { .. } => trade::trade_request_expired_ends_the_request_either_way,
@@ -238,7 +240,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 46, "one fixture per ServerMessage variant");
+    assert_eq!(count, 47, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -997,6 +999,31 @@ fn station_tool_changed_updates_the_station() {
     assert_eq!(state.station(STATION).and_then(|s| s.tool.clone()), None);
     // A station we don't know of is ignored
     state.apply_ws(&M::StationToolChanged { station_id: CHEST, tool: None });
+}
+
+#[test]
+fn station_automation_changed_updates_the_station() {
+    use capitol_protocol::rest::{AutomationMode, AutomationState, StationAutomation};
+    let mut state = connected();
+    state.apply_rest(&R::NearbyStations(NearbyStationsResponse {
+        stations: vec![station(STATION, ME)],
+    }));
+    let mut automation = StationAutomation {
+        recipe_id: "tool_handle".into(),
+        mode: AutomationMode::Count(20),
+        state: AutomationState::Running,
+        done: 0,
+    };
+
+    state.apply_ws(&M::StationAutomationChanged { station_id: STATION, automation: automation.clone() });
+    assert_eq!(state.station(STATION).and_then(|s| s.automation.clone()), Some(automation.clone()));
+
+    automation.state = AutomationState::Stopped;
+    state.apply_ws(&M::StationAutomationChanged { station_id: STATION, automation: automation.clone() });
+    assert_eq!(state.station(STATION).and_then(|s| s.automation.clone()), Some(automation.clone()));
+    // A station we don't know of is ignored
+    state.apply_ws(&M::StationAutomationChanged { station_id: CHEST, automation });
+    assert!(state.station(CHEST).is_none());
 }
 
 #[test]

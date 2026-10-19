@@ -347,6 +347,7 @@ mod tests {
             interaction_range: 75.0,
             quality: 50,
             tool: None,
+            automation: None,
         }
     }
 

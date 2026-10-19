@@ -114,7 +114,9 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         | ("POST", "world", ["extract"])
         | ("POST", "inventory", ["move"])
         | ("POST", "stations", ["place"])
-        | ("DELETE", "stations", [_]) => Some(ApiKeyScope::Play),
+        | ("DELETE", "stations", [_])
+        | ("PUT", "stations", [_, "automation"])
+        | ("POST", "stations", [_, "automation", "start" | "stop"]) => Some(ApiKeyScope::Play),
         ("POST", "exchange", ["deposit" | "withdraw"])
         | ("POST", "plots", [_, "claim" | "pay-tax"])
         | ("PUT", "plots", [_, "permissions"]) => Some(ApiKeyScope::Trade),
@@ -139,7 +141,10 @@ pub fn ws_scope(message: &ClientMessage) -> ApiKeyScope {
         | ClientMessage::CloseStation
         | ClientMessage::CraftAtStation { .. }
         | ClientMessage::InstallTool { .. }
-        | ClientMessage::RemoveTool { .. } => ApiKeyScope::Play,
+        | ClientMessage::RemoveTool { .. }
+        | ClientMessage::ConfigureAutomation { .. }
+        | ClientMessage::StartAutomation { .. }
+        | ClientMessage::StopAutomation { .. } => ApiKeyScope::Play,
         ClientMessage::TradeInitiate { .. }
         | ClientMessage::TradeAcceptRequest
         | ClientMessage::TradeDeclineRequest
@@ -216,6 +221,10 @@ mod tests {
         assert_eq!(rest(Method::POST, "/inventory/move"), Some(Play));
         assert_eq!(rest(Method::POST, "/stations/place"), Some(Play));
         assert_eq!(rest(Method::DELETE, "/stations/abc"), Some(Play));
+        assert_eq!(rest(Method::PUT, "/stations/abc/automation"), Some(Play));
+        assert_eq!(rest(Method::POST, "/stations/abc/automation/start"), Some(Play));
+        assert_eq!(rest(Method::POST, "/stations/abc/automation/stop"), Some(Play));
+        assert_eq!(rest(Method::POST, "/stations/abc/automation/pause"), None);
         assert_eq!(rest(Method::POST, "/exchange/deposit"), Some(Trade));
         assert_eq!(rest(Method::POST, "/exchange/withdraw"), Some(Trade));
         assert_eq!(rest(Method::POST, "/plots/abc/claim"), Some(Trade));

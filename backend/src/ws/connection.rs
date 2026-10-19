@@ -496,6 +496,39 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     let result = crate::engine::station_tools::remove_tool(&state.db, player_id, station_uuid, at).await;
                                     announce_tool_slot(&state, &mut sender, player_id, station_uuid, command, result).await;
                                 }
+                                ClientMessage::ConfigureAutomation { ref station_id, .. }
+                                | ClientMessage::StartAutomation { ref station_id }
+                                | ClientMessage::StopAutomation { ref station_id } => {
+                                    let Ok(station_uuid) = Uuid::parse_str(station_id) else {
+                                        let _ = sender.send(Message::Text(
+                                            serde_json::to_string(&ServerMessage::Error {
+                                                message: "Invalid station ID".to_string(),
+                                                command: command.into(),
+                                            }).unwrap().into()
+                                        )).await;
+                                        continue;
+                                    };
+                                    let recipes = state.game.read().await.recipes.clone();
+                                    let result = match &client_msg {
+                                        ClientMessage::ConfigureAutomation { recipe_id, mode, .. } => {
+                                            crate::engine::automation::configure(&state.db, &recipes, player_id, station_uuid, recipe_id, *mode).await
+                                        }
+                                        ClientMessage::StartAutomation { .. } => {
+                                            crate::engine::automation::start(&state.db, &recipes, player_id, station_uuid).await
+                                        }
+                                        _ => crate::engine::automation::stop(&state.db, player_id, station_uuid).await,
+                                    };
+                                    match result {
+                                        Ok(automation) => {
+                                            let game = state.game.read().await;
+                                            crate::engine::automation::announce(&game.event_sender, station_uuid, automation);
+                                        }
+                                        Err(e) => {
+                                            let msg = ServerMessage::Error { message: e.message(), command: command.into() };
+                                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                        }
+                                    }
+                                }
                                 ClientMessage::OpenStation { station_id } => {
                                     let station_uuid = match Uuid::parse_str(&station_id) {
                                         Ok(id) => id,
@@ -804,6 +837,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                     Ok(GameEvent::StationToolChanged { station_id, tool }) => {
                         let msg = ServerMessage::StationToolChanged { station_id, tool };
+                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                    }
+                    Ok(GameEvent::StationAutomationChanged { station_id, automation }) => {
+                        let msg = ServerMessage::StationAutomationChanged { station_id, automation };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
                     // M5: Trading events
