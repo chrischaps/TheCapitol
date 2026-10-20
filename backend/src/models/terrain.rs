@@ -708,6 +708,7 @@ impl TerrainConfig {
         // The parks are the ground the cleared lots leave.
         config.parks = config.generate_parks(&params.suburban_params());
         config.landmarks = vec![config.exchange_hall_site(params)];
+        config.landmarks.extend(config.bazaar_site(params));
 
         config
     }
@@ -746,6 +747,72 @@ impl TerrainConfig {
             entrance_edge: (0, 1),
             door: at(near, mid_r),
         }
+    }
+
+    /// The bazaar (E3.10, plan D6): the hall's mirror across the Capitol
+    /// avenue, the same 80 by 100 on the west side, so the last walk to the
+    /// tower passes the order book on one hand and the merchants on the other.
+    ///
+    /// Inside, an inner lane 30 wide runs along the avenue, with a row of
+    /// stalls either side of it, 25 deep, every one facing the lane. The back
+    /// row has seven; the front row, on the avenue, six, three each side of a
+    /// gate 16 wide that is the bazaar's door. Returns the bazaar, then its
+    /// stalls: `bazaar_stall_1` to `_6` along the front, inward from the
+    /// trade ring, and `_7` to `_13` along the back.
+    fn bazaar_site(&self, params: &WorldGenParams) -> Vec<Landmark> {
+        const SETBACK: f64 = 15.0;
+        const DEPTH: f64 = 80.0;
+        const LENGTH: f64 = 100.0;
+        const ROW: f64 = 25.0;
+        const GATE: f64 = 16.0;
+        let bearing = 90.0_f64.to_radians();
+        let out = (bearing.stable_cos(), bearing.stable_sin());
+        // At 90° that's west: the avenue's left, walking in.
+        let side = (-out.1, out.0);
+        let moat_edge = params.capitol_radius + params.moat_width / 2.0;
+        let ring_edge = params.trade_ring_radius - params.trade_ring_width / 2.0;
+        let mid_r = (moat_edge + ring_edge) / 2.0;
+        let near = params.arterial_width / 2.0 + SETBACK;
+        let at = |lateral: f64, r: f64| {
+            (self.center_x + out.0 * r + side.0 * lateral, self.center_y + out.1 * r + side.1 * lateral)
+        };
+        // A quad from `face` (the entrance side) back to `back`, between radii
+        // `r0` and `r1`, as the hall's corners go
+        let quad = |id: String, kind: LandmarkKind, face: f64, back: f64, r0: f64, r1: f64| {
+            let mid = (r0 + r1) / 2.0;
+            Landmark {
+                id,
+                kind,
+                position: at((face + back) / 2.0, mid),
+                corners: [at(face, r1), at(face, r0), at(back, r0), at(back, r1)],
+                entrance_edge: (0, 1),
+                door: at(face, mid),
+            }
+        };
+        let (inner_r, outer_r) = (mid_r - LENGTH / 2.0, mid_r + LENGTH / 2.0);
+        let mut landmarks = vec![quad("bazaar".into(), LandmarkKind::Bazaar, near, near + DEPTH, inner_r, outer_r)];
+
+        // The front row, inward from the ring: three, the gate, three
+        let front = (LENGTH - GATE) / 2.0 / 3.0;
+        let mut spans: Vec<(f64, f64)> = (0..3).map(|k| (outer_r - front * (k + 1) as f64, outer_r - front * k as f64)).collect();
+        spans.extend((0..3).map(|k| (inner_r + front * (2 - k) as f64, inner_r + front * (3 - k) as f64)));
+        for (k, &(r0, r1)) in spans.iter().enumerate() {
+            landmarks.push(quad(format!("bazaar_stall_{}", k + 1), LandmarkKind::Stall, near + ROW, near, r0, r1));
+        }
+        // The back row, seven along the whole length
+        let back = LENGTH / 7.0;
+        for k in 0..7 {
+            let (r0, r1) = (outer_r - back * (k + 1) as f64, outer_r - back * k as f64);
+            landmarks.push(quad(
+                format!("bazaar_stall_{}", k + 7),
+                LandmarkKind::Stall,
+                near + DEPTH - ROW,
+                near + DEPTH,
+                r0,
+                r1,
+            ));
+        }
+        landmarks
     }
 
     /// The suburb's parks, for the roads and lots already in `self`.
@@ -1488,7 +1555,10 @@ mod tests {
         // water: the `wild_*` trail roads. Nothing else moved, and no seeded
         // or planned node stands on one
         // (`the_default_terrain_moves_no_planned_node`).
-        assert_eq!(TerrainConfig::get_default().version(), "6e466ea51dc0951e");
+        //
+        // E3.10 (#213) added the bazaar and its 13 stalls to `landmarks`,
+        // across the avenue from the hall. No road, lot, park or node moved.
+        assert_eq!(TerrainConfig::get_default().version(), "cfd97f22f0dc1023");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one
@@ -2026,6 +2096,74 @@ mod tests {
         assert!((to_crown - (params.arterial_width / 2.0 + 15.0)).abs() < 1e-6, "{to_crown}");
         assert!(capitol_protocol::rules::market::at_the_hall(hall, center.0, hall.door.1));
         assert!(!capitol_protocol::rules::market::at_the_hall(hall, center.0, center.1 + 600.0));
+    }
+
+    /// D6 (E3.10): the bazaar mirrors the hall across the avenue, clear of
+    /// every road and the water, and its 13 stalls stand inside it without
+    /// overlapping, each facing the inner lane.
+    #[test]
+    fn the_bazaar_faces_the_hall_across_the_avenue() {
+        let config = TerrainConfig::get_default();
+        let hall = config.landmark(LandmarkKind::ExchangeHall).expect("a hall");
+        let bazaar = config.landmark(LandmarkKind::Bazaar).expect("a bazaar");
+        let center = (config.center_x, config.center_y);
+
+        // The mirror: the same radius, the other side of the avenue's line
+        assert!((bazaar.position.1 - hall.position.1).abs() < 1e-6);
+        assert!((bazaar.position.0 + hall.position.0 - 2.0 * center.0).abs() < 1e-6);
+        for &corner in &bazaar.corners {
+            assert_eq!(rules::Zone::from_position(corner.0, corner.1), rules::Zone::TradeDistrict, "{corner:?}");
+        }
+        for ring in &config.water_rings {
+            for &c in &bazaar.corners {
+                let r = (c.0 - center.0).stable_hypot(c.1 - center.1);
+                assert!(r > ring.outer_radius() + 10.0 || r < ring.inner_radius() - 10.0, "{} at {c:?}", ring.id);
+            }
+        }
+        for road in &config.roads {
+            for w in road.points.windows(2) {
+                for i in 0..4 {
+                    let (a, b) = (bazaar.corners[i], bazaar.corners[(i + 1) % 4]);
+                    for k in 0..=20 {
+                        let t = k as f64 / 20.0;
+                        let p = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                        let d = point_to_segment_distance(p.0, p.1, w[0].0, w[0].1, w[1].0, w[1].1);
+                        assert!(d >= road.width / 2.0 + 10.0, "{} comes within {d} of the bazaar", road.id);
+                    }
+                }
+            }
+        }
+        assert!(config.lot_at(bazaar.position.0, bazaar.position.1).is_none());
+
+        let stalls: Vec<&Landmark> = config.landmarks.iter().filter(|l| l.kind == LandmarkKind::Stall).collect();
+        assert_eq!(stalls.len(), 13);
+        let ids: std::collections::BTreeSet<&str> = stalls.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids.len(), 13, "unique ids");
+        let lane_x = center.0 - (WorldGenParams::default().arterial_width / 2.0 + 15.0 + 40.0);
+        for stall in &stalls {
+            for &c in &stall.corners {
+                assert!(bazaar.distance_to(c.0, c.1) < 1e-6, "{} sticks out at {c:?}", stall.id);
+            }
+            assert!(TerrainPlot::calculate_area(&stall.corners) > 300.0, "{}", stall.id);
+            // Its door is on the lane, and the lane's crown is in range
+            assert!((stall.door.0 - lane_x).abs() == 15.0, "{} door {:?}", stall.id, stall.door);
+            assert!(capitol_protocol::rules::bazaar::at_the_stall(stall, lane_x, stall.door.1));
+            for other in &stalls {
+                if other.id != stall.id {
+                    assert!(
+                        !capitol_protocol::terrain::quad_contains(&other.corners, stall.position.0, stall.position.1),
+                        "{} overlaps {}",
+                        stall.id,
+                        other.id
+                    );
+                }
+            }
+        }
+        // The gate on the avenue opens on the lane, with no stall in it
+        assert!(stalls.iter().all(|s| s.distance_to(bazaar.door.0 - 5.0, bazaar.door.1) > 0.0));
+        // And you can't shop the far end of the bazaar from the gate
+        let far = stalls.iter().map(|s| s.distance_to(bazaar.door.0, bazaar.door.1)).fold(0.0, f64::max);
+        assert!(far > capitol_protocol::rules::bazaar::STALL_RANGE, "{far}");
     }
 
     #[test]

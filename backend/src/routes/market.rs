@@ -604,18 +604,9 @@ async fn at_the_exchange(
     player_id: Uuid,
     doing: &str,
 ) -> Result<(), AppError> {
-    let (hall, live) = {
-        let game = game.read().await;
-        (game.terrain.landmark(LandmarkKind::ExchangeHall).cloned(), game.players.get(&player_id).map(|p| (p.x, p.y)))
-    };
+    let hall = game.read().await.terrain.landmark(LandmarkKind::ExchangeHall).cloned();
     let Some(hall) = hall else { return Ok(()) };
-    let (x, y) = match live {
-        Some(at) => at,
-        None => sqlx::query_as("SELECT position_x, position_y FROM players WHERE id = $1")
-            .bind(player_id)
-            .fetch_one(db)
-            .await?,
-    };
+    let (x, y) = position_of(game, db, player_id).await?;
     if at_the_hall(&hall, x, y) {
         return Ok(());
     }
@@ -623,6 +614,18 @@ async fn at_the_exchange(
         "You're too far from the Exchange hall to {doing} ({:.0} units; it needs {HALL_RANGE:.0})",
         hall.distance_to(x, y)
     )))
+}
+
+/// Where the player stands: now if they're online, else their saved position.
+pub(crate) async fn position_of(game: &RwLock<GameState>, db: &PgPool, player_id: Uuid) -> Result<(f64, f64), AppError> {
+    let live = game.read().await.players.get(&player_id).map(|p| (p.x, p.y));
+    match live {
+        Some(at) => Ok(at),
+        None => Ok(sqlx::query_as("SELECT position_x, position_y FROM players WHERE id = $1")
+            .bind(player_id)
+            .fetch_one(db)
+            .await?),
+    }
 }
 
 /// What the market refused, as the API says it.
@@ -639,7 +642,7 @@ async fn events(state: &AppState) -> broadcast::Sender<GameEvent> {
 }
 
 /// `currency_changed` to the player, so a client needn't refetch it
-async fn tell_balance(db: &PgPool, events: &broadcast::Sender<GameEvent>, player_id: Uuid) {
+pub(crate) async fn tell_balance(db: &PgPool, events: &broadcast::Sender<GameEvent>, player_id: Uuid) {
     let balance: Result<i64, _> = sqlx::query_scalar("SELECT strand_balance FROM players WHERE id = $1")
         .bind(player_id)
         .fetch_one(db)
@@ -649,7 +652,7 @@ async fn tell_balance(db: &PgPool, events: &broadcast::Sender<GameEvent>, player
     }
 }
 
-async fn player_of(db: &PgPool, account_id: Uuid) -> Result<Uuid, AppError> {
+pub(crate) async fn player_of(db: &PgPool, account_id: Uuid) -> Result<Uuid, AppError> {
     Ok(sqlx::query_scalar("SELECT id FROM players WHERE account_id = $1 LIMIT 1")
         .bind(account_id)
         .fetch_one(db)

@@ -9,6 +9,8 @@
 //! `fixtures/rest/market_depth.json`, `market_history.json` and
 //! `market_summary.json` are `GET /market/orders`, `/market/history` and
 //! `/market/summary` (E3.3).
+//! `fixtures/rest/bazaar_directory.json` and `bazaar_shop.json` are
+//! `GET /bazaar` and `GET /bazaar/stalls/{id}` (E3.10).
 //! `fixtures/rest/gazette.json` is `GET /gazette/latest` (E3.9), written by the
 //! backend's `write_the_gazette_fixture` from a busy day's records.
 
@@ -16,6 +18,7 @@ use std::fs;
 use std::path::Path;
 
 use capitol_protocol::rest::{
+    BazaarDirectory, BazaarShop,
     AutomationMode, AutomationState, CatalogResponse, GazetteResponse, MarketDepthResponse, MarketHistoryResponse,
     MarketSummaryResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
 };
@@ -110,4 +113,26 @@ fn a_gazette_round_trips_with_every_section() {
     assert!(!edition.movers.is_empty() && !edition.prices.is_empty() && !edition.deeds.is_empty());
     assert!(edition.best_sale.is_some() && !edition.producers.is_empty());
     assert_eq!(serde_json::to_string(&response).unwrap(), json);
+}
+
+#[test]
+fn the_bazaar_directory_round_trips_without_prices() {
+    let json = fixture("bazaar_directory.json");
+    let directory: BazaarDirectory = serde_json::from_str(&json).unwrap();
+    assert_eq!(directory.stalls[0].shop, None);
+    assert_eq!(directory.stalls[1].shop.as_ref().unwrap().item_types, ["fiber", "rope"]);
+    for hidden in ["price", "units", "quantity", "grade"] {
+        assert!(!json.contains(hidden), "{hidden}");
+    }
+    assert_eq!(serde_json::to_string(&directory).unwrap(), json);
+}
+
+#[test]
+fn a_shop_round_trips_with_each_listings_units() {
+    let json = fixture("bazaar_shop.json");
+    let shop: BazaarShop = serde_json::from_str(&json).unwrap();
+    assert_eq!(shop.listings[0].units.count(), 10);
+    assert!(shop.listings[0].units.spans_grades());
+    assert_eq!((shop.listings[0].durability, shop.listings[1].durability), (None, Some(31)));
+    assert_eq!(serde_json::to_string(&shop).unwrap(), json);
 }

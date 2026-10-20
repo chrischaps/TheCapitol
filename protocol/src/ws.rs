@@ -501,6 +501,24 @@ pub enum ServerMessage {
     /// A trade in the item, anyone's
     #[serde(rename = "market_trade")]
     MarketTrade { trade: MarketTrade },
+    // E3.10: the bazaar, each to the merchant. One that happened while
+    // they were away is sent as they come back.
+    /// `buyer_name` bought `units` of your listing at your stall, for `paid`
+    #[serde(rename = "bazaar_sale")]
+    BazaarSale {
+        stall_id: String,
+        listing_id: Uuid,
+        item_type: String,
+        buyer_name: String,
+        units: Units,
+        price: i64,
+        paid: i64,
+    },
+    /// Your stall's rent ran out and the shop closed. Its unsold stacks went
+    /// to your market box, at the Exchange hall; `waiting` of them are held
+    /// until the box has room.
+    #[serde(rename = "stall_lapsed")]
+    StallLapsed { stall_id: String, name: String, returned: u32, waiting: u32 },
     // E3.9: to everyone
     /// The Gazette's edition about `day` is out (`GET /gazette/latest`)
     #[serde(rename = "gazette_published")]
@@ -576,6 +594,8 @@ impl ServerMessage {
             ServerMessage::OrderCancelled { .. } => "order_cancelled",
             ServerMessage::MarketDepth { .. } => "market_depth",
             ServerMessage::MarketTrade { .. } => "market_trade",
+            ServerMessage::BazaarSale { .. } => "bazaar_sale",
+            ServerMessage::StallLapsed { .. } => "stall_lapsed",
             ServerMessage::GazettePublished { .. } => "gazette_published",
             ServerMessage::Presence { .. } => "presence",
         }

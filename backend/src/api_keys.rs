@@ -120,6 +120,8 @@ pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
         ("POST", "exchange", ["deposit" | "withdraw"])
         | ("POST", "market", ["orders"] | ["box", "collect"])
         | ("DELETE", "market", ["orders", _])
+        | ("POST", "bazaar", ["stalls", _, "rent"] | ["mine", "listings"] | ["listings", _, "buy"])
+        | ("DELETE", "bazaar", ["listings", _])
         | ("POST", "plots", [_, "claim" | "pay-tax"])
         | ("PUT", "plots", [_, "permissions"]) => Some(ApiKeyScope::Trade),
         _ => None,
@@ -242,6 +244,11 @@ mod tests {
         assert_eq!(rest(Method::DELETE, "/market/orders/abc"), Some(Trade));
         assert_eq!(rest(Method::POST, "/market/box/collect"), Some(Trade));
         assert_eq!(rest(Method::POST, "/market/box"), None);
+        assert_eq!(rest(Method::GET, "/bazaar"), Some(Read));
+        assert_eq!(rest(Method::POST, "/bazaar/stalls/bazaar_stall_1/rent"), Some(Trade));
+        assert_eq!(rest(Method::POST, "/bazaar/mine/listings"), Some(Trade));
+        assert_eq!(rest(Method::POST, "/bazaar/listings/abc/buy"), Some(Trade));
+        assert_eq!(rest(Method::DELETE, "/bazaar/listings/abc"), Some(Trade));
     }
 
     #[test]

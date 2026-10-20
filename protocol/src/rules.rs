@@ -158,6 +158,9 @@ pub mod stacking;
 /// The market: the listing fee, order bounds and the grade test (E3.1).
 pub mod market;
 
+/// The bazaar: stall rent, the stall's range, shop names and listings (E3.10).
+pub mod bazaar;
+
 /// Resource types: yield by tool tier, spawn tables and cluster shapes.
 pub mod resources;
 

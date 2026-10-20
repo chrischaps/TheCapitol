@@ -46,3 +46,11 @@ id = "market_box"
 name = "Market Box"
 slot_count = 48
 layout_columns = 8
+
+# The bazaar's shared stock (E3.10, plan D6): each listing's units wait here
+# as a stack with no slot and no owner, as a sell order's do in the escrow
+[[container]]
+id = "bazaar_stock"
+name = "Bazaar Stock"
+slot_count = 0
+layout_columns = 1

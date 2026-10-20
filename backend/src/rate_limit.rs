@@ -50,7 +50,8 @@ pub enum Category {
     /// `/inventory/*` and `/player/inventory`, read or write.
     Inventory,
     /// Market writes (E3.3): placing and cancelling orders, collecting from
-    /// the market box. Market reads are [`Category::Read`].
+    /// the market box; and the bazaar's (E3.10): renting, stocking, buying.
+    /// Their reads are [`Category::Read`].
     Market,
     /// WebSocket commands, per connection.
     Ws,
@@ -63,7 +64,7 @@ impl Category {
             Category::Inventory
         } else if method == Method::GET || method == Method::HEAD {
             Category::Read
-        } else if path.starts_with("/market") {
+        } else if path.starts_with("/market") || path.starts_with("/bazaar") {
             Category::Market
         } else {
             Category::World
@@ -391,6 +392,8 @@ mod tests {
         assert_eq!(Category::of(&Method::GET, "/market/orders"), Read);
         assert_eq!(Category::of(&Method::POST, "/market/orders"), Market);
         assert_eq!(Category::of(&Method::DELETE, "/market/orders/x"), Market);
+        assert_eq!(Category::of(&Method::POST, "/bazaar/listings/x/buy"), Market);
+        assert_eq!(Category::of(&Method::GET, "/bazaar"), Read);
     }
 
     #[test]

@@ -27,6 +27,12 @@ pub enum TransactionType {
     MarketRefund,
     /// A fill's proceeds to the seller: the fill's price × its quantity (E3.2)
     MarketSale,
+    /// A bazaar stall's rent, paid ahead: the bazaar's sink (E3.10)
+    BazaarRent,
+    /// A bazaar purchase, from the buyer (E3.10)
+    BazaarPurchase,
+    /// A bazaar purchase, to the merchant (E3.10)
+    BazaarSale,
 }
 
 impl TransactionType {
@@ -45,6 +51,9 @@ impl TransactionType {
             TransactionType::MarketFee => "market_fee",
             TransactionType::MarketRefund => "market_refund",
             TransactionType::MarketSale => "market_sale",
+            TransactionType::BazaarRent => "bazaar_rent",
+            TransactionType::BazaarPurchase => "bazaar_purchase",
+            TransactionType::BazaarSale => "bazaar_sale",
         }
     }
 }

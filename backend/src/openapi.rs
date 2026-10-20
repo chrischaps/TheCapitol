@@ -20,6 +20,10 @@ use capitol_protocol::rest::{
     MarketItemSummary, MarketOrder, MarketSummaryResponse, MarketTrade, MyFill, PlaceOrder,
 };
 use capitol_protocol::rest::{
+    BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BazaarStall, BuyListing, MyStallResponse, RentStall,
+    ShopSign, StockListing,
+};
+use capitol_protocol::rest::{
     Gazette, GazetteByline, GazetteDeeds, GazetteMover, GazettePrice, GazetteProducer, GazetteResponse, GazetteSale,
 };
 use capitol_protocol::rules::market::{GradeRule, OrderSide, OrderStatus};
@@ -74,6 +78,7 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         (name = "Stations", description = "Crafting and storage stations"),
         (name = "Exchange", description = "Currency exchange operations"),
         (name = "Market", description = "Orders, books, price history and the market box"),
+        (name = "Bazaar", description = "Stalls, the shops merchants keep in them, and buying from them"),
         (name = "Gazette", description = "The Capitol Gazette: a daily digest of the economy"),
         (name = "Plots", description = "Land plot ownership and permissions"),
         (name = "Bureaucracy", description = "Zone information and deed prices"),
@@ -130,6 +135,14 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         crate::routes::market::summary,
         crate::routes::market::get_box,
         crate::routes::market::collect,
+        // Bazaar
+        crate::routes::bazaar::get_directory,
+        crate::routes::bazaar::my_stall,
+        crate::routes::bazaar::get_shop,
+        crate::routes::bazaar::rent,
+        crate::routes::bazaar::stock,
+        crate::routes::bazaar::unlist,
+        crate::routes::bazaar::buy,
         // Gazette
         crate::routes::gazette::latest,
         crate::routes::gazette::by_date,
@@ -235,6 +248,16 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         MarketSummaryResponse,
         CollectRequest,
         CollectResponse,
+        BazaarDirectory,
+        BazaarStall,
+        ShopSign,
+        BazaarShop,
+        BazaarListing,
+        MyStallResponse,
+        RentStall,
+        StockListing,
+        BuyListing,
+        BazaarPurchase,
         // Gazette
         Gazette,
         GazettePrice,

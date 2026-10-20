@@ -140,6 +140,7 @@ engine/
   regeneration.rs - Resource node regeneration
   trading.rs     - P2P trade sessions and trade manager
   market.rs      - Market escrow: placing and cancelling orders (E3.1)
+  bazaar.rs      - The bazaar: stall rent, shops, buying, lapse sweep (E3.10)
   gazette.rs     - The Capitol Gazette: the day's records, the edition, the midnight loop (E3.9)
   currency.rs    - Strand/Fiber exchange operations
   property_tax.rs - Hourly tax processing
@@ -170,6 +171,7 @@ routes/          - Axum REST handlers
   plots.rs       - Property system
   terrain.rs     - Terrain data endpoint (roads, water, plots)
   bureaucracy.rs - Government/bureaucracy endpoints
+  bazaar.rs      - The bazaar's directory, stalls, listings and buying (E3.10)
   gazette.rs     - The Gazette's editions and your byline (E3.9)
 
 ws/              - WebSocket handlers

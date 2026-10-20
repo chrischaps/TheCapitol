@@ -115,6 +115,13 @@ pub enum GameEvent {
         reason: capitol_protocol::rest::PauseReason,
         notice_id: Option<Uuid>,
     },
+    /// A bazaar notice for `player_id` (E3.10): a sale at their stall, or
+    /// the stall closing. Queued as `notice_id`, as the tax notices are.
+    BazaarNotice {
+        player_id: Uuid,
+        notice_id: Uuid,
+        message: capitol_protocol::ws::ServerMessage,
+    },
     // M5: Trading events
     TradeRequested {
         from_player: Uuid,

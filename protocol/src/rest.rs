@@ -1270,6 +1270,143 @@ pub struct CollectResponse {
     pub remaining: i32,
 }
 
+// ---------------------------------------------------------------------------
+// The bazaar (E3.10, plan D6)
+// ---------------------------------------------------------------------------
+
+/// `GET /bazaar`: every stall, and the shop in it if one's rented. It works
+/// from anywhere, so it says which shop is worth the walk, but not prices,
+/// quantities or grades: those are seen at the stall ([`BazaarShop`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct BazaarDirectory {
+    /// In the order of the stalls' ids
+    pub stalls: Vec<BazaarStall>,
+}
+
+/// A stall as the directory shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct BazaarStall {
+    /// The stall's landmark id on `/terrain`, such as `bazaar_stall_3`
+    pub stall_id: String,
+    /// The shop in it, or none if it's free to rent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shop: Option<ShopSign>,
+}
+
+/// What a shop shows from across the city: its name, its merchant and the
+/// kinds of goods it has.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ShopSign {
+    pub name: String,
+    pub owner_id: Uuid,
+    pub owner_name: String,
+    /// The item types it lists, sorted, each once
+    pub item_types: Vec<String>,
+}
+
+/// A shop as you see it at its stall (`GET /bazaar/stalls/{id}`), or your own
+/// from anywhere (`GET /bazaar/mine`): every listing with its price and units.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct BazaarShop {
+    pub stall_id: String,
+    pub name: String,
+    pub owner_id: Uuid,
+    pub owner_name: String,
+    /// When the rent runs out. The shop closes then and its goods go to the
+    /// merchant's market box.
+    pub paid_until: DateTime<Utc>,
+    /// Oldest first
+    pub listings: Vec<BazaarListing>,
+}
+
+/// One listing: a stack at a fixed price per unit. Its units keep their own
+/// quality (D2); the shop shows each, never an average.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct BazaarListing {
+    pub id: Uuid,
+    pub item_type: String,
+    /// Strands per unit
+    pub price: i64,
+    pub units: Units,
+    /// A tool's wear, if it's one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<i32>,
+    pub listed_at: DateTime<Utc>,
+}
+
+/// `GET /bazaar/mine`: your stall, if you rent one, and goods from a lapsed
+/// stall still waiting for room in your market box.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MyStallResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shop: Option<BazaarShop>,
+    /// Unsold goods from a stall whose rent ran out while your market box was
+    /// full. They move there as soon as it has room.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returning: Vec<BazaarListing>,
+}
+
+/// `POST /bazaar/stalls/{id}/rent`: rent a free stall, or pay more on your own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct RentStall {
+    /// Days paid ahead, 1 to 7 (`rules::bazaar::MAX_RENT_DAYS`). On your own
+    /// stall they're added, up to 7 days from now.
+    pub days: i64,
+    /// The shop's name: needed to rent, optional to extend (it renames)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// `POST /bazaar/mine/listings`: stock your shop with units from a stack in
+/// your inventory, at a price per unit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct StockListing {
+    pub item_id: Uuid,
+    pub quantity: i32,
+    /// Strands per unit
+    pub price: i64,
+    /// Exactly which units, adding up to `quantity`. Without them it's the
+    /// stack's default pick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualities: Option<Units>,
+}
+
+/// `POST /bazaar/listings/{id}/buy`: buy units of a listing at its price.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct BuyListing {
+    pub quantity: i32,
+    /// Exactly which units, adding up to `quantity`. Without them it's the
+    /// best the listing has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualities: Option<Units>,
+}
+
+/// What a bazaar purchase moved.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct BazaarPurchase {
+    /// The units bought
+    pub units: Units,
+    /// Strands paid to the merchant
+    pub paid: i64,
+    /// The stack they're in now
+    pub item_id: Uuid,
+    /// Where it is: `player_inventory`, or `market_box` if the inventory was full
+    pub into: String,
+    /// The listing as it stands now, or none if that sold it out
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listing: Option<BazaarListing>,
+}
+
 /// `POST /player/grant` (E3.8): Strands and goods from nowhere, to fund a
 /// market maker on a local stack. The server refuses it unless `DEV_GRANTS`
 /// is on.

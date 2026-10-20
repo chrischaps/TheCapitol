@@ -957,6 +957,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
+                    Ok(GameEvent::BazaarNotice { player_id: to, notice_id, message }) => {
+                        if to == player_id && take_notice(&state.db, Some(notice_id)).await {
+                            let _ = sender.send(Message::Text(serde_json::to_string(&message).unwrap().into())).await;
+                        }
+                    }
                     // M5: Trading events
                     Ok(GameEvent::TradeRequested { from_player, from_player_name, to_player }) => {
                         // Only send to the target player

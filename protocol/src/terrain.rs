@@ -351,6 +351,12 @@ impl Landmark {
 pub enum LandmarkKind {
     /// Where the market's orders are placed and its box collected (D6)
     ExchangeHall,
+    /// The covered market across the avenue from the hall (D6, E3.10): the
+    /// footprint its stalls stand in, its door the gate on the avenue
+    Bazaar,
+    /// One stall in the bazaar, which a merchant rents for their shop. Its
+    /// entrance faces the bazaar's inner lane.
+    Stall,
     #[serde(other)]
     Other,
 }
