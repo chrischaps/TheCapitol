@@ -243,6 +243,24 @@ pub enum StateEvent {
         number: i64,
         headline: String,
     },
+    /// Someone bought from your bazaar stall (`bazaar_sale`, E3.10). The
+    /// shop panel and its toast are E3.11.
+    BazaarSale {
+        stall_id: String,
+        item_type: String,
+        buyer_name: String,
+        quantity: i64,
+        paid: i64,
+    },
+    /// Your stall's rent ran out and the shop closed (`stall_lapsed`,
+    /// E3.10): `returned` stacks went to your market box, `waiting` wait for
+    /// room there.
+    StallLapsed {
+        stall_id: String,
+        name: String,
+        returned: u32,
+        waiting: u32,
+    },
     /// Someone, maybe you, claimed a lot (`plot_claimed`, B13). It's in
     /// [`GameState::claimed_lots`] now.
     LotClaimed(ClaimedPlot),
@@ -772,6 +790,20 @@ impl GameState {
                 day: *day,
                 number: *number,
                 headline: headline.clone(),
+            }),
+            // E3.10: to the merchant
+            M::BazaarSale { stall_id, item_type, buyer_name, units, paid, .. } => out.push(StateEvent::BazaarSale {
+                stall_id: stall_id.clone(),
+                item_type: item_type.clone(),
+                buyer_name: buyer_name.clone(),
+                quantity: units.count(),
+                paid: *paid,
+            }),
+            M::StallLapsed { stall_id, name, returned, waiting } => out.push(StateEvent::StallLapsed {
+                stall_id: stall_id.clone(),
+                name: name.clone(),
+                returned: *returned,
+                waiting: *waiting,
             }),
             M::PlotClaimed {
                 terrain_id,

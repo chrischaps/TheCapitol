@@ -229,6 +229,8 @@ fn test_for(message: &M) -> fn() {
         M::MarketDepth { .. } => market_messages_reach_the_market_store,
         M::MarketTrade { .. } => market_messages_reach_the_market_store,
         M::GazettePublished { .. } => gazette_published_is_reported,
+        M::BazaarSale { .. } => bazaar_notices_are_reported,
+        M::StallLapsed { .. } => bazaar_notices_are_reported,
     }
 }
 
@@ -248,7 +250,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 54, "one fixture per ServerMessage variant");
+    assert_eq!(count, 56, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1307,6 +1309,30 @@ fn market_messages_reach_the_market_store() {
     let changes = state.apply_ws(&fixture("market_trade"));
     assert!(matches!(changes.as_slice(), [StateEvent::Market(e)] if matches!(**e, crate::market::MarketEvent::Traded(_))));
     assert_eq!(state.market().trades("plank").count(), 1);
+}
+
+#[test]
+fn bazaar_notices_are_reported() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../protocol/tests/fixtures/server");
+    let fixture = |name: &str| -> M {
+        let json = std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap();
+        serde_json::from_str(&json).unwrap()
+    };
+    let mut state = connected();
+    assert_eq!(
+        state.apply_ws(&fixture("bazaar_sale")),
+        vec![StateEvent::BazaarSale {
+            stall_id: "bazaar_stall_4".into(),
+            item_type: "rope".into(),
+            buyer_name: "bram".into(),
+            quantity: 3,
+            paid: 42,
+        }]
+    );
+    assert_eq!(
+        state.apply_ws(&fixture("stall_lapsed")),
+        vec![StateEvent::StallLapsed { stall_id: "bazaar_stall_4".into(), name: "Ada's Ropes".into(), returned: 3, waiting: 0 }]
+    );
 }
 
 #[test]
