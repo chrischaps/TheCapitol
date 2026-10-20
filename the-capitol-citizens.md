@@ -203,6 +203,7 @@ The first citizens walk after C0.1, C0.6 and C1.1, about three sessions. The who
 ## 8. Later (outside this plan)
 
 - **Chat and the citizens' voice.** M9's chat (local and global) first. Then a model layer can give citizens lines: greetings, haggling, letters to the Gazette, all under the same budget as D4.
+- **Human hours** ([#276](https://github.com/chrischaps/TheCapitol/issues/276)). C1.2's citizens play every game day. People play a few real hours, some days. The idea: a habit on the real clock beside the game-clock schedule, and a pool big enough that some are always on. Chris leans that way; it waits on his call about game night inside a session.
 - **Distillation.** New rules learned from the decision log.
 - **Guilds and contracts** (M9), which citizens join and keep.
 - **The Capitol's public works** (GDD's infrastructure bounties and price floors), if the soak shows demand is too thin.
