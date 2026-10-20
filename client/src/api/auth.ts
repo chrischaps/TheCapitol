@@ -1,5 +1,10 @@
 const API_BASE = '/api'
 
+// This client is frozen and never calls POST /auth/refresh. Since #185 the
+// server only issues 15-minute access tokens (plus a refresh token this
+// client ignores), so it's signed out about 15 minutes after logging in.
+// That's expected: teach it to refresh before relying on it again.
+
 export interface AuthResponse {
   token: string
   account: {

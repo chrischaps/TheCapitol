@@ -612,7 +612,6 @@ fn rest_login_and_errors() {
         RestRequest::Login(LoginRequest {
             email: "t@example.com".into(),
             password: password.into(),
-            refresh: false,
         })
     };
     net.rest(login("pw"), 1);
@@ -1130,7 +1129,6 @@ fn a_rate_limited_request_waits_and_goes_again() {
     let login = RestRequest::Login(LoginRequest {
         email: "a@b.c".into(),
         password: "pw".into(),
-        refresh: false,
     });
     let start = Instant::now();
     net.rest(login, 1);

@@ -6,7 +6,7 @@
 //! [`Effect`]s it returns: REST calls, connecting the WebSocket, and writing
 //! the remembered email and refresh token to disk.
 //!
-//! - **A stored session is tried first.** The login asks for a refresh token
+//! - **A stored session is tried first.** The login answers a refresh token
 //!   (E0.6), and that's what's kept. [`Auth::new`] connects with it at once,
 //!   and the IO thread swaps it for an access token. The server refusing it
 //!   (unused for 30 days, or replaced by a login elsewhere) returns to the

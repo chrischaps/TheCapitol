@@ -264,7 +264,6 @@ impl Bot {
         let login = RestRequest::Login(LoginRequest {
             email: account.email.clone(),
             password: account.password.clone(),
-            refresh: true,
         });
         let auth = match bot.call("login", login) {
             Ok(RestResponse::Auth(auth)) => auth,
@@ -273,7 +272,6 @@ impl Bot {
                     email: account.email.clone(),
                     password: account.password.clone(),
                     player_name: account.name.clone(),
-                    refresh: true,
                 });
                 match bot.call("register", register)? {
                     RestResponse::Auth(auth) => {

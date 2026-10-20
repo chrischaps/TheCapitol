@@ -165,7 +165,6 @@ fn register_login_connect_and_move() {
             email: email.clone(),
             password: password.clone(),
             player_name: format!("Net{}", stamp % 100_000),
-            refresh: false,
         }),
         1,
     ) {
@@ -178,7 +177,6 @@ fn register_login_connect_and_move() {
         email: email.clone(),
         password: password.clone(),
         player_name: "Dup".into(),
-        refresh: false,
     });
     assert_eq!(
         rest(&net, again, 2).unwrap_err(),
@@ -191,7 +189,6 @@ fn register_login_connect_and_move() {
     let wrong = RestRequest::Login(LoginRequest {
         email: email.clone(),
         password: "nope".into(),
-        refresh: false,
     });
     assert!(rest(&net, wrong, 3).unwrap_err().is_unauthorized());
 
@@ -200,7 +197,6 @@ fn register_login_connect_and_move() {
         RestRequest::Login(LoginRequest {
             email,
             password,
-            refresh: false,
         }),
         4,
     ) {
@@ -351,7 +347,6 @@ fn the_store_mirrors_a_real_session() {
             email: format!("flint-state-{stamp}@test.local"),
             password: "correct horse battery staple".into(),
             player_name: name.clone(),
-            refresh: false,
         }),
         1,
     ) {
@@ -455,7 +450,6 @@ fn the_prediction_agrees_with_a_real_walk() {
             email: format!("flint-motion-{stamp}@test.local"),
             password: "correct horse battery staple".into(),
             player_name: format!("Walker{}", stamp % 100_000),
-            refresh: false,
         }),
         1,
     ) {
@@ -577,7 +571,6 @@ impl Mirror {
                 email: format!("flint-{label}-{stamp}@test.local"),
                 password: "correct horse battery staple".into(),
                 player_name: format!("{label}{}", stamp % 100_000),
-                refresh: false,
             }),
             1,
         ) {
@@ -1023,7 +1016,6 @@ fn a_read_key_watches_cant_move_and_revoking_it_drops_its_socket() {
             email: format!("flint-key-{stamp}@test.local"),
             password: "correct horse battery staple".into(),
             player_name: format!("Key{}", stamp % 100_000),
-            refresh: true,
         }),
         1,
     ) {
@@ -1156,7 +1148,6 @@ fn two_clients_on_one_account_share_one_avatar() {
             email: email.clone(),
             password: password.clone(),
             player_name: format!("Two{}", stamp % 100_000),
-            refresh: true,
         }),
         1,
     ) else {
@@ -1171,7 +1162,6 @@ fn two_clients_on_one_account_share_one_avatar() {
         RestRequest::Login(LoginRequest {
             email,
             password,
-            refresh: true,
         }),
         1,
     ) else {

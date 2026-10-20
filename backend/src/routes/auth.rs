@@ -19,7 +19,7 @@ use capitol_protocol::rules::{SPAWN_SCATTER, SPAWN_X, SPAWN_Y};
 
 use crate::error::AppError;
 use crate::models::{AccountInfo, AccountKind};
-use crate::sessions::{self, Refused, RotateError, LEGACY_TTL_SECS};
+use crate::sessions::{self, Refused, RotateError};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -82,7 +82,7 @@ pub async fn register(
         // Registration only ever makes a person (C0.1)
         kind: AccountKind::Human,
     };
-    let auth = start_session(&state, account, player_id, req.refresh).await?;
+    let auth = start_session(&state, account, player_id).await?;
     Ok(Json(auth))
 }
 
@@ -201,33 +201,32 @@ pub async fn login(
 
     // A login sits beside the account's other sessions (E0.8): their
     // sockets stay, and this one's socket takes the avatar when it connects.
-    let auth = start_session(&state, account.into(), player_id, req.refresh).await?;
+    let auth = start_session(&state, account.into(), player_id).await?;
 
     Ok(Json(auth))
 }
 
 /// Starts a new session for the account, beside any it has, and issues its
-/// tokens: a short access token and a refresh token when `refresh`, else a
-/// legacy 24 h access token. Sessions it pushes past the cap end, and their
+/// tokens: a short access token and a refresh token. There's no 24 h token
+/// any more, so a client that never refreshes is signed out when its access
+/// token expires (#185). Sessions it pushes past the cap end, and their
 /// sockets with them.
 async fn start_session(
     state: &AppState,
     account: AccountInfo,
     player_id: Uuid,
-    refresh: bool,
 ) -> Result<AuthResponse, AppError> {
     let mut redis = state.redis.clone();
-    let refresh_ttl = refresh.then_some(state.config.refresh_ttl_secs);
-    let started = sessions::start(&mut redis, account.id, refresh_ttl).await?;
+    let started = sessions::start(&mut redis, account.id, state.config.refresh_ttl_secs).await?;
     if !started.evicted.is_empty() {
         state.game.write().await.end_sessions(player_id, &started.evicted);
     }
-    let expires_in = if refresh { state.config.access_ttl_secs } else { LEGACY_TTL_SECS };
+    let expires_in = state.config.access_ttl_secs;
     let token = generate_token(state, &account, &started.sid, expires_in)?;
     Ok(AuthResponse {
         token,
         expires_in,
-        refresh_token: started.refresh_token,
+        refresh_token: Some(started.refresh_token),
         account,
         player_id,
     })

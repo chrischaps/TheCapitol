@@ -31,11 +31,6 @@ use redis::AsyncCommands;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// A legacy session's lifetime, and its access token's: the React and Love2D
-/// clients log in without asking for a refresh token and keep the 24 h
-/// tokens they always had (until #185).
-pub const LEGACY_TTL_SECS: u64 = 24 * 60 * 60;
-
 /// How long after a refresh token's first use presenting it again returns
 /// the same successor instead of revoking the family (#184).
 pub const REUSE_GRACE_MS: u64 = 30_000;
@@ -47,8 +42,8 @@ pub const MAX_SESSIONS: usize = 10;
 #[derive(Debug)]
 pub struct Started {
     pub sid: String,
-    /// `None` for a legacy session.
-    pub refresh_token: Option<String>,
+    /// The family's first refresh token.
+    pub refresh_token: String,
     /// Older sessions this one pushed past [`MAX_SESSIONS`], now ended.
     pub evicted: Vec<String>,
 }
@@ -118,16 +113,16 @@ pub(crate) fn random_token() -> String {
 }
 
 /// Starts a new session for the account, beside any it has, and ends the
-/// oldest past [`MAX_SESSIONS`]. With `refresh_ttl`, it's a refresh family
-/// whose first token is returned, and the session lives as long as its
-/// refresh tokens do; without, it's a legacy session.
+/// oldest past [`MAX_SESSIONS`]. It's a refresh family whose first token is
+/// returned, and the session lives as long as its refresh tokens do, `ttl`
+/// at first. Every session is one since #185: the 24 h legacy sessions the
+/// React and Love2D clients had are gone.
 pub async fn start(
     redis: &mut ConnectionManager,
     account_id: Uuid,
-    refresh_ttl: Option<u64>,
+    ttl: u64,
 ) -> redis::RedisResult<Started> {
     let sid = random_token();
-    let ttl = refresh_ttl.unwrap_or(LEGACY_TTL_SECS);
     let index = index_key(account_id);
     redis.set_ex::<_, _, ()>(session_key(account_id, &sid), 1, ttl).await?;
     redis
@@ -152,10 +147,7 @@ pub async fn start(
         }
     }
 
-    let refresh_token = match refresh_ttl {
-        Some(ttl) => Some(issue(redis, account_id, &sid, ttl).await?),
-        None => None,
-    };
+    let refresh_token = issue(redis, account_id, &sid, ttl).await?;
     Ok(Started { sid, refresh_token, evicted })
 }
 
@@ -336,8 +328,8 @@ mod tests {
     async fn a_refresh_rotates_the_token_and_keeps_the_session() {
         let mut redis = redis().await;
         let account = Uuid::new_v4();
-        let started = start(&mut redis, account, Some(TTL)).await.unwrap();
-        let first = started.refresh_token.unwrap();
+        let started = start(&mut redis, account, TTL).await.unwrap();
+        let first = started.refresh_token;
 
         let rotated = rotate(&mut redis, &first, TTL).await.unwrap();
         assert_eq!(rotated.account_id, account);
@@ -355,8 +347,8 @@ mod tests {
     async fn a_replay_within_the_grace_gets_the_same_successor() {
         let mut redis = redis().await;
         let account = Uuid::new_v4();
-        let started = start(&mut redis, account, Some(TTL)).await.unwrap();
-        let first = started.refresh_token.unwrap();
+        let started = start(&mut redis, account, TTL).await.unwrap();
+        let first = started.refresh_token;
         let rotated = rotate(&mut redis, &first, TTL).await.unwrap();
 
         // The answer was lost, so the client sends the old token again.
@@ -372,8 +364,8 @@ mod tests {
     async fn a_replay_after_the_grace_is_refused_and_revokes_the_family() {
         let mut redis = redis().await;
         let account = Uuid::new_v4();
-        let started = start(&mut redis, account, Some(TTL)).await.unwrap();
-        let first = started.refresh_token.unwrap();
+        let started = start(&mut redis, account, TTL).await.unwrap();
+        let first = started.refresh_token;
         let second = rotate_with_grace(&mut redis, &first, TTL, 200).await.unwrap().refresh_token;
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
@@ -391,8 +383,8 @@ mod tests {
     async fn a_replay_once_the_successor_is_used_revokes_the_family() {
         let mut redis = redis().await;
         let account = Uuid::new_v4();
-        let started = start(&mut redis, account, Some(TTL)).await.unwrap();
-        let first = started.refresh_token.unwrap();
+        let started = start(&mut redis, account, TTL).await.unwrap();
+        let first = started.refresh_token;
         let second = rotate(&mut redis, &first, TTL).await.unwrap().refresh_token;
         rotate(&mut redis, &second, TTL).await.unwrap();
 
@@ -409,7 +401,7 @@ mod tests {
     async fn two_uses_at_once_get_the_same_successor() {
         let mut redis = redis().await;
         let account = Uuid::new_v4();
-        let token = start(&mut redis, account, Some(TTL)).await.unwrap().refresh_token.unwrap();
+        let token = start(&mut redis, account, TTL).await.unwrap().refresh_token;
         let (mut a, mut b) = (redis.clone(), redis.clone());
         let (x, y) = tokio::join!(rotate(&mut a, &token, TTL), rotate(&mut b, &token, TTL));
         assert_eq!(x.unwrap(), y.unwrap(), "one rotation, answered twice");
@@ -420,11 +412,11 @@ mod tests {
     async fn a_second_login_leaves_the_first_alone_and_a_logout_ends_only_its_own() {
         let mut redis = redis().await;
         let account = Uuid::new_v4();
-        let old = start(&mut redis, account, Some(TTL)).await.unwrap();
-        let new = start(&mut redis, account, Some(TTL)).await.unwrap();
+        let old = start(&mut redis, account, TTL).await.unwrap();
+        let new = start(&mut redis, account, TTL).await.unwrap();
         assert!(new.evicted.is_empty());
         // Both are live, and both refresh (E0.8).
-        let old_token = rotate(&mut redis, old.refresh_token.as_ref().unwrap(), TTL)
+        let old_token = rotate(&mut redis, &old.refresh_token, TTL)
             .await
             .unwrap()
             .refresh_token;
@@ -436,7 +428,7 @@ mod tests {
         assert_eq!(refused(rotate(&mut redis, &old_token, TTL).await), Refused::Ended);
         assert!(is_current(&mut redis, account, &new.sid).await.unwrap());
 
-        let token = new.refresh_token.unwrap();
+        let token = new.refresh_token;
         assert_eq!(end_by_refresh(&mut redis, &token).await.unwrap(), Some((account, new.sid)));
         assert_eq!(refused(rotate(&mut redis, &token, TTL).await), Refused::Ended);
         assert_eq!(refused(rotate(&mut redis, "nonsense", TTL).await), Refused::Unknown);
@@ -447,9 +439,9 @@ mod tests {
     async fn a_reuse_revokes_only_its_own_family() {
         let mut redis = redis().await;
         let account = Uuid::new_v4();
-        let phone = start(&mut redis, account, Some(TTL)).await.unwrap();
-        let desk = start(&mut redis, account, Some(TTL)).await.unwrap();
-        let first = phone.refresh_token.unwrap();
+        let phone = start(&mut redis, account, TTL).await.unwrap();
+        let desk = start(&mut redis, account, TTL).await.unwrap();
+        let first = phone.refresh_token;
         let second = rotate(&mut redis, &first, TTL).await.unwrap().refresh_token;
         rotate(&mut redis, &second, TTL).await.unwrap();
         assert_eq!(
@@ -470,13 +462,13 @@ mod tests {
         let account = Uuid::new_v4();
         let mut sids = Vec::new();
         for _ in 0..MAX_SESSIONS {
-            let started = start(&mut redis, account, Some(TTL)).await.unwrap();
+            let started = start(&mut redis, account, TTL).await.unwrap();
             assert!(started.evicted.is_empty());
             sids.push(started.sid);
             // Distinct start times, so the oldest is plain.
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
-        let newest = start(&mut redis, account, Some(TTL)).await.unwrap();
+        let newest = start(&mut redis, account, TTL).await.unwrap();
         assert_eq!(newest.evicted, vec![sids[0].clone()]);
         assert!(!is_current(&mut redis, account, &sids[0]).await.unwrap());
         assert!(is_current(&mut redis, account, &sids[1]).await.unwrap());
@@ -488,8 +480,8 @@ mod tests {
     async fn logging_out_everywhere_ends_every_session() {
         let mut redis = redis().await;
         let account = Uuid::new_v4();
-        let a = start(&mut redis, account, Some(TTL)).await.unwrap();
-        let b = start(&mut redis, account, None).await.unwrap();
+        let a = start(&mut redis, account, TTL).await.unwrap();
+        let b = start(&mut redis, account, TTL).await.unwrap();
         let mut ended = end_all(&mut redis, account).await.unwrap();
         ended.sort();
         let mut expected = vec![a.sid.clone(), b.sid.clone()];
@@ -498,18 +490,17 @@ mod tests {
         assert!(!is_current(&mut redis, account, &a.sid).await.unwrap());
         assert!(!is_current(&mut redis, account, &b.sid).await.unwrap());
         assert_eq!(
-            refused(rotate(&mut redis, a.refresh_token.as_ref().unwrap(), TTL).await),
+            refused(rotate(&mut redis, &a.refresh_token, TTL).await),
             Refused::Ended
         );
     }
 
     #[tokio::test]
     #[ignore = "needs the local Redis (docker-compose up -d)"]
-    async fn a_legacy_session_has_no_refresh_token() {
+    async fn a_token_without_a_sid_is_never_current() {
         let mut redis = redis().await;
         let account = Uuid::new_v4();
-        let started = start(&mut redis, account, None).await.unwrap();
-        assert!(started.refresh_token.is_none());
+        let started = start(&mut redis, account, TTL).await.unwrap();
         assert!(is_current(&mut redis, account, &started.sid).await.unwrap());
         assert!(!is_current(&mut redis, account, "").await.unwrap());
     }

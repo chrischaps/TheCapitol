@@ -73,7 +73,6 @@ impl SignIn {
             email: account.email,
             password: account.password,
             player_name: account.name,
-            refresh: true,
         });
         (sign_in, request)
     }
@@ -81,12 +80,11 @@ impl SignIn {
     /// Logs in only. A 401 is a failure: a person who mistyped their password
     /// must not get a new account.
     pub fn log_in(email: &str, password: &str, tag: Tag) -> (SignIn, RestRequest) {
-        // Every sign-in asks for a refresh token, so the IO thread can keep
+        // Every sign-in gets a refresh token (#185), so the IO thread can keep
         // the session going past the access token's 15 minutes (E0.6).
         let request = RestRequest::Login(LoginRequest {
             email: email.to_owned(),
             password: password.to_owned(),
-            refresh: true,
         });
         let sign_in = SignIn {
             email: email.to_owned(),
@@ -109,7 +107,6 @@ impl SignIn {
             email: account.email,
             password: account.password,
             player_name: account.name,
-            refresh: true,
         });
         (sign_in, request)
     }

@@ -7,7 +7,7 @@
 //! # use capitol_core::net::*;
 //! # use capitol_core::protocol::rest::LoginRequest;
 //! let net = Net::spawn(NetConfig::default()).unwrap();
-//! net.rest(RestRequest::Login(LoginRequest { email: "a@b.c".into(), password: "pw".into(), refresh: true }), 1);
+//! net.rest(RestRequest::Login(LoginRequest { email: "a@b.c".into(), password: "pw".into() }), 1);
 //! // once per frame:
 //! for event in net.drain() {
 //!     if let NetEvent::Rest(1, Ok(RestResponse::Auth(auth))) = event {

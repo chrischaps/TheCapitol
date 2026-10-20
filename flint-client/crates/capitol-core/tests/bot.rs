@@ -119,7 +119,6 @@ fn play_key(what: &str) -> (Net, AuthResponse, String) {
             email: account.email.replace("live", what),
             password: account.password,
             player_name: account.name.replace("Live", what),
-            refresh: true,
         }),
         1,
     ) else {

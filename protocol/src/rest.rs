@@ -42,12 +42,13 @@ pub struct RegisterRequest {
     pub password: String,
     /// Display name for the player character
     pub player_name: String,
-    /// Ask for a short access token and a refresh token, as [`LoginRequest::refresh`]
-    #[serde(default)]
-    pub refresh: bool,
 }
 
-/// `POST /auth/login`
+/// `POST /auth/login`. Login and register answer a short access token
+/// (`ACCESS_TTL_SECS`, 15 min by default) and a refresh token to renew it
+/// with (E0.6). The `refresh` flag that once chose this over a 24 h token is
+/// gone (#185). A client that still sends it is understood, since unknown
+/// fields are ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct LoginRequest {
@@ -55,11 +56,6 @@ pub struct LoginRequest {
     pub email: String,
     /// Account password
     pub password: String,
-    /// Ask for a short access token (`ACCESS_TTL_SECS`, 15 min by default)
-    /// and a refresh token to renew it with (E0.6). Without it, a 24 h access
-    /// token and no refresh token, as the React and Love2D clients expect.
-    #[serde(default)]
-    pub refresh: bool,
 }
 
 /// `POST /auth/refresh`; responds with a new [`AuthResponse`] pair. The
@@ -95,8 +91,9 @@ pub struct AuthResponse {
     /// Seconds until `token` expires
     #[serde(default)]
     pub expires_in: u64,
-    /// Opaque, single-use token for `POST /auth/refresh`; only when the
-    /// login asked for one
+    /// Opaque, single-use token for `POST /auth/refresh`. This server always
+    /// sends one (#185). It stays optional so a client copes with an answer
+    /// that has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
     /// Account information
