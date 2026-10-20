@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Reeds: a bundle of cut strap leaves and cattails, tied with gold twine. -->
+  <ellipse cx="32" cy="56.5" rx="14" ry="3.2" fill="#000" fill-opacity="0.35"/>
+  <g stroke="#14240a" stroke-width="1.5" stroke-linejoin="round">
+    <path d="M27 55 C25 44 20 32 12 23 C21 29 27 41 31 55 Z" fill="#2f4430"/>
+    <path d="M37 55 C39 44 45 33 53 25 C45 30 37 41 33 55 Z" fill="#2f4430"/>
+    <path d="M29 55 L22.5 14 L25 13.5 L33 55 Z" fill="#5e7a48"/>
+    <path d="M35 55 L42.5 15 L45 15.6 L31.5 55 Z" fill="#5e7a48"/>
+    <path d="M30.5 55 L31 9 L33.4 9 L34 55 Z" fill="#7a9459"/>
+    <rect x="20.5" y="5" width="5" height="12" rx="2.5" fill="#6b4423" transform="rotate(-9 23 11)"/>
+    <rect x="41" y="7" width="5" height="12" rx="2.5" fill="#6b4423" transform="rotate(11 43.5 13)"/>
+    <rect x="29.8" y="2.5" width="4.6" height="9.5" rx="2.3" fill="#7c5230"/>
+  </g>
+  <path d="M22.4 7.4 L21.9 12.6" stroke="#c9a27a" stroke-opacity="0.55" stroke-width="1" stroke-linecap="round"/>
+  <path d="M31.4 4.4 L31.4 9.6" stroke="#c9a27a" stroke-opacity="0.55" stroke-width="1" stroke-linecap="round"/>
+  <path d="M32.2 15 L32.6 38" fill="none" stroke="#ecfccb" stroke-opacity="0.45" stroke-width="1" stroke-linecap="round"/>
+  <path d="M24.5 40.5 Q32 43.5 39.5 40.5 L39.5 46.5 Q32 49.5 24.5 46.5 Z" fill="#c9a227" stroke="#3d300a" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M26 42.4 Q32 44.8 38 42.4" fill="none" stroke="#fde68a" stroke-opacity="0.6" stroke-width="1" stroke-linecap="round"/>
+</svg>

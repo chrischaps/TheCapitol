@@ -12,7 +12,7 @@
 #   clippy   clippy over the backend and protocol, all targets, -D warnings
 #   test     cargo test, backend and protocol
 #   db       the #[ignore]d database tests; needs Postgres (docker-compose up -d)
-#   flint    in flint-client/: capitol-core's tests, check capitol-client
+#   flint    in flint-client/: capitol-core's and capitol-client's tests
 #
 # The db step needs DATABASE_URL. A TheCapitol-<n> worktree has no
 # backend/.env, so when it's unset this borrows DATABASE_URL and REDIS_URL
@@ -66,8 +66,9 @@ step() {
         flint)
             # Per crate, never --workspace: the engine's flint-android needs
             # ndk-sys. capitol-core's live.rs tests need a server and stay
-            # #[ignore]d.
-            (cd flint-client && cargo test -p capitol-core && cargo check -p capitol-client --all-targets) ;;
+            # #[ignore]d. The client's tests need no GPU or window; until
+            # #234 it was only checked, and #225's items went without icons.
+            (cd flint-client && cargo test -p capitol-core && cargo test -p capitol-client --all-targets) ;;
         *)
             usage ;;
     esac

@@ -344,9 +344,9 @@ mod tests {
     fn a_type_without_an_icon_takes_its_categorys() {
         let icons = ItemIcons::load(&dir());
         assert_eq!(icons.key("rope", Some("processed_material")), "rope");
-        assert_eq!(icons.key("bronze_axe", Some("tool")), "categories/tool");
-        assert_eq!(icons.key("bronze_axe", Some("weapon")), FALLBACK);
-        assert_eq!(icons.key("bronze_axe", None), FALLBACK);
+        assert_eq!(icons.key("steel_axe", Some("tool")), "categories/tool");
+        assert_eq!(icons.key("steel_axe", Some("weapon")), FALLBACK);
+        assert_eq!(icons.key("steel_axe", None), FALLBACK);
         // Each key names a tree.
         icons.tree("categories/tool");
         icons.tree(FALLBACK);

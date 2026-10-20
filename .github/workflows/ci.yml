@@ -83,7 +83,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: flint-client
-      # In flint-client/: capitol-core's tests, then check capitol-client.
+      # In flint-client/: capitol-core's tests, then capitol-client's.
       - name: Flint client
         working-directory: .
         run: scripts/ci.sh flint
