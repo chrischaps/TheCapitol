@@ -293,7 +293,7 @@ pub async fn stock(
             slot_index: None,
             durability,
         },
-        &taken.units,
+        &taken.marked,
     )
     .await?;
     let id = Uuid::new_v4();
@@ -403,11 +403,12 @@ pub async fn buy(
         sqlx::query("DELETE FROM bazaar_listings WHERE id = $1").bind(listing_id).execute(&mut *tx).await?;
         stack
     } else {
-        units::write_take(&mut tx, stack, &units, &left).await?;
+        // The units go with their makers' marks
+        let moved = units::write_take(&mut tx, stack, &units, &left).await?;
         units::insert_stack(
             &mut tx,
             NewStack { item_type: &item_type, owner_id: None, container_id: None, slot_index: None, durability },
-            &units,
+            &moved,
         )
         .await?
     };
