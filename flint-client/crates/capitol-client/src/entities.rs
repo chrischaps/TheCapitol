@@ -13,6 +13,13 @@
 //! A player who joins fades in; one who leaves fades out where they last
 //! stood, and only then is despawned. The fade is the entity's
 //! `material.opacity`.
+//!
+//! A citizen (C0.2, Citizens D3) wears the same green but carries another
+//! light. A person's lantern is an amber candle that gutters a little
+//! ([`flicker`], through `material.emissive_scale`); a citizen's burns pale
+//! and steady, like an oil lamp turned low, and a small lozenge stands by
+//! their name (`labels.rs`). Both are there to be seen if you look, and
+//! quiet enough that the city still feels lived in.
 
 use crate::coords::{layer, to_world};
 use crate::script_api::{PlayerLabel, Shared};
@@ -30,9 +37,12 @@ use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
 use uuid::Uuid;
 
-/// The runtime meshes: everyone else, and you.
+/// The runtime meshes: everyone else, a citizen, and you. Your gold ring
+/// is a mesh of its own, so your lantern's flicker leaves it be.
 pub const MESH_OTHER: &str = "avatar";
+pub const MESH_CITIZEN: &str = "avatar_citizen";
 pub const MESH_SELF: &str = "avatar_self";
+pub const MESH_RING: &str = "avatar_ring";
 
 /// Where feet stand off a bridge: level with the arterials and the bailey,
 /// a hair under the lots' pavement, so nobody floats over a road or sinks
@@ -55,7 +65,14 @@ pub const LABEL_Y: f32 = 2.25;
 
 struct Avatar {
     entity: EntityId,
+    /// Your gold ring, for you alone.
+    ring: Option<EntityId>,
     name: String,
+    /// An AI player (C0.1): a steady lantern and a glyph by the name.
+    citizen: bool,
+    /// Where in its flicker this lantern starts, so a crowd's candles
+    /// don't gutter together.
+    seed: f32,
     /// 0 to 1: how far faded in.
     shown: f32,
     /// In this frame's poses. An avatar that isn't is fading out.
@@ -81,6 +98,8 @@ pub struct Players {
     /// Counts spawns, so a returning player's entity never clashes by name
     /// with the one still fading out.
     spawned: u64,
+    /// Seconds since the first frame: the candles' clock.
+    time: f32,
 }
 
 impl Players {
@@ -113,6 +132,7 @@ impl Players {
             self.meshes = true;
         }
         let me = state.me();
+        self.time += dt;
         for avatar in self.avatars.values_mut() {
             avatar.present = false;
         }
@@ -123,7 +143,13 @@ impl Players {
                 None => {
                     self.spawned += 1;
                     let name = format!("player_{}_{}", pose.id.simple(), self.spawned);
-                    let mesh = if mine { MESH_SELF } else { MESH_OTHER };
+                    // A player's kind never changes (C0.1), so it's read once.
+                    let citizen = state.player(pose.id).is_some_and(|p| p.citizen);
+                    let mesh = match (mine, citizen) {
+                        (true, _) => MESH_SELF,
+                        (false, true) => MESH_CITIZEN,
+                        (false, false) => MESH_OTHER,
+                    };
                     let entity = match ctx.world.spawn(name.as_str()) {
                         Ok(id) => id,
                         Err(e) => {
@@ -134,9 +160,22 @@ impl Players {
                     if let Err(e) = ctx.attach_mesh(entity, mesh) {
                         tracing::warn!("players: no mesh for {}: {e}", pose.id);
                     }
+                    let ring = if mine {
+                        ctx.world.spawn(format!("{name}_ring").as_str()).ok()
+                    } else {
+                        None
+                    };
+                    if let Some(ring) = ring {
+                        if let Err(e) = ctx.attach_mesh(ring, MESH_RING) {
+                            tracing::warn!("players: no ring for {}: {e}", pose.id);
+                        }
+                    }
                     self.avatars.entry(pose.id).or_insert(Avatar {
                         entity,
+                        ring,
                         name: String::new(),
+                        citizen,
+                        seed: (pose.id.as_u128() % 9973) as f32 * 0.37,
                         shown: 0.0,
                         present: true,
                         at: [0.0; 3],
@@ -163,6 +202,7 @@ impl Players {
             labels.clear();
         }
         let world = &mut *ctx.world;
+        let time = self.time;
         self.avatars.retain(|id, avatar| {
             let fade = dt / FADE;
             avatar.shown = if avatar.present {
@@ -172,9 +212,12 @@ impl Players {
             };
             if !avatar.present && avatar.shown <= 0.0 {
                 let _ = world.despawn(avatar.entity);
+                if let Some(ring) = avatar.ring {
+                    let _ = world.despawn(ring);
+                }
                 return false;
             }
-            place(world, avatar);
+            place(world, avatar, time);
             if let Some(labels) = labels.as_deref_mut() {
                 let [x, y, z] = avatar.at;
                 let crafting = matches!(state.activity(*id), Some(Activity::Crafting { .. }));
@@ -185,6 +228,7 @@ impl Players {
                     feet_y: y,
                     alpha: smooth(avatar.shown),
                     me: Some(*id) == me,
+                    citizen: avatar.citizen,
                     craft: crafting.then_some(avatar.craft.shown),
                 });
             }
@@ -234,12 +278,30 @@ impl Avatar {
     }
 }
 
-/// Write the avatar's transform and opacity onto its entity.
-fn place(world: &mut flint_ecs::FlintWorld, avatar: &Avatar) {
+/// Write the avatar's transform, opacity and lantern onto its entity, and
+/// its ring's onto the ring's.
+fn place(world: &mut flint_ecs::FlintWorld, avatar: &Avatar, time: f32) {
     let [x, y, z] = avatar.at;
     let bob = BOB * avatar.stride.sin().abs() * avatar.walk;
     // Rising out of the ground a little as it fades in.
     let rise = (1.0 - smooth(avatar.shown)) * -0.25;
+    let opacity = toml::Value::Float(smooth(avatar.shown) as f64);
+    // A citizen's lamp is steady, so it's never written.
+    if !avatar.citizen {
+        let _ = world.set_field(
+            avatar.entity,
+            "material",
+            "emissive_scale",
+            toml::Value::Float(flicker(time, avatar.seed) as f64),
+        );
+    }
+    if let Some(ring) = avatar.ring {
+        // On the ground: the ring doesn't bob with the stride.
+        let mut t = toml::Table::new();
+        t.insert("position".into(), vec3(x, y + rise, z));
+        let _ = world.set_component(ring, "transform", toml::Value::Table(t));
+        let _ = world.set_field(ring, "material", "opacity", opacity.clone());
+    }
     let mut t = toml::Table::new();
     t.insert("position".into(), vec3(x, y + bob + rise, z));
     let q = yaw_quat(avatar.yaw);
@@ -248,12 +310,19 @@ fn place(world: &mut flint_ecs::FlintWorld, avatar: &Avatar) {
         toml::Value::Array(q.iter().map(|v| toml::Value::Float(*v as f64)).collect()),
     );
     let _ = world.set_component(avatar.entity, "transform", toml::Value::Table(t));
-    let _ = world.set_field(
-        avatar.entity,
-        "material",
-        "opacity",
-        toml::Value::Float(smooth(avatar.shown) as f64),
-    );
+    let _ = world.set_field(avatar.entity, "material", "opacity", opacity);
+}
+
+/// A person's candle at `time` seconds: about 1, guttering a little. Three
+/// unrelated waves, so it never visibly repeats, and now and then a dip
+/// where a slow draught takes the flame.
+pub fn flicker(time: f32, seed: f32) -> f32 {
+    let t = time + seed;
+    let waver =
+        0.07 * (5.3 * t).sin() + 0.05 * (8.9 * t + 1.7).sin() + 0.03 * (15.1 * t + 0.4).sin();
+    // Mostly nothing; now and then the two slow waves meet in a dip.
+    let draught = ((0.71 * t).sin() * (0.29 * t + 2.0).sin()).max(0.0).powi(3) * 0.35;
+    (1.0 + waver - draught).clamp(0.55, 1.2)
 }
 
 fn vec3(x: f32, y: f32, z: f32) -> toml::Value {
@@ -292,33 +361,97 @@ fn smooth(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// `--citizen-sample` (C0.2): people and citizens side by side, in a row
+/// across the view where the camera looks, turned a little toward it,
+/// with you in the middle, for captures of the mark.
+pub fn sample(target: [f32; 2], camera: [f32; 2]) -> (GameState, Vec<Pose>) {
+    use capitol_core::net::ConnectionState;
+    use capitol_core::protocol::ws::{PlayerPosition, ServerMessage};
+    const ROW: [(&str, bool); 5] = [
+        ("Wren Ashby", false),
+        ("Corin", true),
+        ("You", false),
+        ("Tam Hollis", false),
+        ("Elsbeth", true),
+    ];
+    const SPACING: f32 = 1.6;
+    let me = Uuid::from_u128(0xc0_02_00 + 2);
+    let mut state = GameState::new();
+    state.apply_connection(&ConnectionState::Connected { player_id: me });
+    let mut poses = Vec::new();
+    let (dx, dz) = (camera[0] - target[0], camera[1] - target[1]);
+    let len = dx.hypot(dz).max(1e-3);
+    let across = [dz / len, -dx / len];
+    // The server's heading toward the camera: east 0, south (+Z) π/2.
+    let toward = f64::from(dz).atan2(f64::from(dx));
+    let mid = (ROW.len() as f32 - 1.0) / 2.0;
+    for (i, (name, citizen)) in ROW.into_iter().enumerate() {
+        let k = (i as f32 - mid) * SPACING;
+        let [x, y] = crate::coords::to_server(target[0] + across[0] * k, target[1] + across[1] * k);
+        let id = Uuid::from_u128(0xc0_02_00 + i as u128);
+        state.apply_ws(&ServerMessage::PlayerJoined {
+            player: PlayerPosition {
+                id,
+                name: name.into(),
+                x,
+                y,
+                citizen,
+            },
+        });
+        // Each turned a little toward the middle of the row.
+        let facing = toward + f64::from(k) * 0.25;
+        poses.push(Pose {
+            id,
+            x,
+            y,
+            facing,
+            moving: false,
+        });
+    }
+    (state, poses)
+}
+
 // ── The figure ───────────────────────────────────────────────────────────
 
 /// The colours of one figure.
 struct Livery {
     cloak: u32,
     trim: u32,
-    /// The gold ring you stand in.
-    ring: bool,
+    /// The lantern's light, and how bright it burns.
+    lantern: u32,
+    radiance: f32,
 }
 
 const OTHER: Livery = Livery {
     cloak: 0x4a7c59,
     trim: 0x2d4e36,
-    ring: false,
+    lantern: LANTERN,
+    radiance: 1.1,
+};
+/// A citizen: the same cloak as anyone else's, and a cooler, steadier lamp.
+const CITIZEN: Livery = Livery {
+    lantern: CITIZEN_LANTERN,
+    ..OTHER
 };
 const SELF: Livery = Livery {
     cloak: 0xc9a227,
     trim: 0xf2ead2,
-    ring: true,
+    ..OTHER
 };
 
-/// The lantern's light: warm, like the windows of the Capitol at dusk.
+/// A person's lantern: warm, like the windows of the Capitol at dusk.
 const LANTERN: u32 = 0xffa94a;
+/// A citizen's: as strong, but the pale of lamp oil a little toward the
+/// moon, so beside the amber it reads as another flame and not a cold one.
+/// (A neutral pale, #e8e4d4, read as paper at dusk, not light.) The glyph
+/// by their name (`hud.rhai`) is the same colour.
+pub const CITIZEN_LANTERN: u32 = 0xd6e4ea;
 
 fn upload(gpu: &mut ExtensionGpu) {
     figure(&OTHER).upload(gpu, MESH_OTHER, 0.85);
+    figure(&CITIZEN).upload(gpu, MESH_CITIZEN, 0.85);
     figure(&SELF).upload(gpu, MESH_SELF, 0.6);
+    ring().upload(gpu, MESH_RING, 0.6);
 }
 
 /// Sides round the cloak and the head.
@@ -358,16 +491,17 @@ fn figure(livery: &Livery) -> MeshBuf {
         &mut light,
         at,
         [0.075, 0.095, 0.075],
-        glow(hex(LANTERN), 1.1),
+        glow(hex(livery.lantern), livery.radiance),
     );
     m.append(light);
-
-    if livery.ring {
-        let mut ring = MeshBuf::default();
-        annulus(&mut ring, 0.62, 0.72, 0.03, glow(hex(0xc9a227), 1.4));
-        m.append(ring);
-    }
     m
+}
+
+/// The gold ring you stand in, about your feet.
+fn ring() -> MeshBuf {
+    let mut ring = MeshBuf::default();
+    annulus(&mut ring, 0.62, 0.72, 0.03, glow(hex(0xc9a227), 1.4));
+    ring
 }
 
 /// The point on a ring of `SIDES` at index `i`, radius `r`, height `y`.
@@ -517,7 +651,10 @@ mod tests {
             (-std::f64::consts::FRAC_PI_2, [0.0, -1.0]),
         ] {
             let got = front(yaw_of(facing));
-            let [wx, wz] = to_world(capitol_core::protocol::rules::CENTER_X + step[0] * 10.0, capitol_core::protocol::rules::CENTER_Y + step[1] * 10.0);
+            let [wx, wz] = to_world(
+                capitol_core::protocol::rules::CENTER_X + step[0] * 10.0,
+                capitol_core::protocol::rules::CENTER_Y + step[1] * 10.0,
+            );
             let want = [wx, wz].map(|v| v / 1.0f32.max((wx * wx + wz * wz).sqrt()));
             assert!(
                 (got[0] - want[0]).abs() < 1e-4 && (got[1] - want[1]).abs() < 1e-4,
@@ -535,8 +672,11 @@ mod tests {
 
     #[test]
     fn every_face_of_the_figure_faces_out() {
-        for livery in [&OTHER, &SELF] {
-            let m = figure(livery);
+        for m in [&OTHER, &CITIZEN, &SELF]
+            .map(figure)
+            .into_iter()
+            .chain([ring()])
+        {
             assert!(!m.indices.is_empty());
             for t in m.indices.chunks_exact(3) {
                 let v = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]);
@@ -546,6 +686,80 @@ mod tests {
                     v.map(|v| v.position)
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_persons_candle_gutters_and_stays_lit() {
+        let samples: Vec<f32> = (0..2000).map(|i| flicker(i as f32 / 60.0, 3.1)).collect();
+        let (lo, hi) = samples
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        assert!(lo >= 0.55 && hi <= 1.2, "{lo}..{hi}");
+        // It moves, but gently: never darker than a draught, never a strobe.
+        assert!(hi - lo > 0.2, "barely moves: {lo}..{hi}");
+        let jump = samples
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(jump < 0.05, "jumps {jump} in a frame");
+        // Two candles side by side don't keep time.
+        assert_ne!(flicker(1.0, 0.0), flicker(1.0, 5.0));
+    }
+
+    /// The light given off by a figure's lantern: its emissive vertices.
+    fn lantern_light(livery: &Livery) -> [f32; 3] {
+        let m = figure(livery);
+        let v = m
+            .vertices
+            .iter()
+            .find(|v| v.color[3] == 0.0)
+            .expect("a lantern");
+        [v.color[0], v.color[1], v.color[2]]
+    }
+
+    #[test]
+    fn a_citizens_lantern_is_cooler_and_only_the_lantern_differs() {
+        let [r, g, b] = lantern_light(&OTHER);
+        let [cr, cg, cb] = lantern_light(&CITIZEN);
+        // Bluer for its red: cooler.
+        assert!(
+            cb / cr > 2.0 * (b / r),
+            "{:?} against {:?}",
+            [cr, cg, cb],
+            [r, g, b]
+        );
+        // As strong a flame, and so not much brighter to the eye: quiet.
+        let luma = |r: f32, g: f32, b: f32| 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        assert!(luma(cr, cg, cb) <= 1.6 * luma(r, g, b));
+        let (a, c) = (figure(&OTHER), figure(&CITIZEN));
+        assert_eq!(a.vertices.len(), c.vertices.len());
+        for (a, c) in a.vertices.iter().zip(&c.vertices) {
+            assert_eq!(a.position, c.position);
+            if a.color[3] != 0.0 {
+                assert_eq!(a.color, c.color, "the cloak is the same");
+            }
+        }
+    }
+
+    #[test]
+    fn the_sample_stands_people_and_citizens_where_the_camera_looks() {
+        let (state, poses) = sample([10.0, 20.0], [10.0, 40.0]);
+        assert_eq!(poses.len(), 5);
+        assert!(state
+            .me()
+            .is_some_and(|me| poses.iter().any(|p| p.id == me)));
+        let citizens = poses
+            .iter()
+            .filter(|p| state.player(p.id).is_some_and(|p| p.citizen))
+            .count();
+        assert_eq!(citizens, 2);
+        for p in &poses {
+            let [x, z] = to_world(p.x, p.y);
+            assert!(
+                (z - 20.0).abs() < 1e-3 && (x - 10.0).abs() < 4.0,
+                "{x}, {z}"
+            );
         }
     }
 

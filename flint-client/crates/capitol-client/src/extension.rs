@@ -93,6 +93,9 @@ pub struct CapitolExtension {
     /// the camera first looks once it's there.
     node_sample: bool,
     node_sampled: Option<nodes::sample::Sample>,
+    /// `--citizen-sample` (C0.2): offline, people and citizens in a row
+    /// where the camera looks, stood there once it's settled.
+    citizen_sample: Option<Option<(capitol_core::state::GameState, Vec<capitol_core::motion::Pose>)>>,
     /// The grass fields over the rural ring and the wilderness (P8.6c).
     grass: world::grass::Grass,
     /// The wilds' height field, sampled off the main thread (W9), its
@@ -190,6 +193,7 @@ impl CapitolExtension {
             automation_sample: None,
             node_sample: false,
             node_sampled: None,
+            citizen_sample: None,
             grass: world::grass::Grass::default(),
             land: world::land::Builder::default(),
             land_meshes: world::land_mesh::LandMeshes::default(),
@@ -298,6 +302,15 @@ impl CapitolExtension {
 
     /// Offline, scatter every kind of node round the camera and take some
     /// through a day's work (`--node-sample`).
+    /// Offline, people and citizens side by side before the camera
+    /// (`--citizen-sample`, C0.2).
+    pub fn with_citizen_sample(mut self, on: bool) -> Self {
+        if self.session.is_none() && on {
+            self.citizen_sample = Some(None);
+        }
+        self
+    }
+
     pub fn with_node_sample(mut self, on: bool) -> Self {
         self.node_sample = on && self.session.is_none();
         self
@@ -771,6 +784,17 @@ impl PlayerExtension for CapitolExtension {
                 };
                 self.stations
                     .update(ctx, state, None, &none, &produced, dt, &self.shared);
+            }
+        }
+        if let Some(sample) = &mut self.citizen_sample {
+            // Stood once the camera has settled on its shot.
+            if sample.is_none() && ctx.clock.total_time > 0.5 {
+                let (t, c) = (ctx.camera.target, ctx.camera.position);
+                *sample = Some(crate::entities::sample([t.x, t.z], [c.x, c.z]));
+            }
+            if let Some((state, poses)) = sample {
+                let dt = ctx.clock.delta_time.min(0.1) as f32;
+                self.players.update(ctx, poses, state, dt, &self.shared);
             }
         }
         if self.session.is_none() && self.shared.visit_hall.swap(false, Ordering::Relaxed) {

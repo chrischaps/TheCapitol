@@ -313,6 +313,8 @@ pub struct PlayerLabel {
     pub alpha: f32,
     /// You.
     pub me: bool,
+    /// A citizen (C0.1): their name carries the glyph (C0.2).
+    pub citizen: bool,
     /// How far their craft has got, 0 to 1, while they craft (P5.5).
     pub craft: Option<f32>,
 }
@@ -404,9 +406,11 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             })
             .collect()
     });
-    // `cap_name_tags() -> [#{ name, x, y, size, a, me }]`: the names to
-    // draw, in order, projected with the camera this frame renders with.
-    // Each tag's x, y is its top left. See `labels::place`.
+    // `cap_name_tags() -> [#{ name, x, y, size, a, me, glyph }]`: the names
+    // to draw, in order, projected with the camera this frame renders with.
+    // Each tag's x, y is its name's top left. A citizen's `glyph` is
+    // `#{ x, y, r }`, the lozenge's centre and half-height; anyone else's
+    // is `()`. See `labels::place`.
     let players = shared.players.clone();
     let egui = shared.egui.clone();
     let projector = shared.projector.clone();
@@ -448,6 +452,14 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
                     m.insert("size".into(), (t.size as f64).into());
                     m.insert("a".into(), (t.alpha as f64).into());
                     m.insert("me".into(), t.me.into());
+                    let glyph = t.glyph.map_or(rhai::Dynamic::UNIT, |[x, y, r]| {
+                        let mut g = rhai::Map::new();
+                        g.insert("x".into(), (x as f64).into());
+                        g.insert("y".into(), (y as f64).into());
+                        g.insert("r".into(), (r as f64).into());
+                        g.into()
+                    });
+                    m.insert("glyph".into(), glyph);
                     m.into()
                 })
                 .collect()
@@ -944,6 +956,7 @@ mod tests {
             feet_y: 0.65,
             alpha: 0.5,
             me: true,
+            citizen: false,
             craft: Some(0.25),
         });
         let z: f64 = engine.eval("cap_follow()[2]").unwrap();
@@ -1138,6 +1151,7 @@ mod tests {
             feet_y: 0.65,
             alpha: 1.0,
             me,
+            citizen: false,
             craft: None,
         };
         shared
