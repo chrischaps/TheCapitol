@@ -26,6 +26,8 @@
 //! - [`trading`]: trading as a player does it: shift-click someone to
 //!   ask, or walk closer and ask, and your offer as you build it.
 //! - [`station`]: stations in the world: whether one is in reach.
+//! - [`automation`]: a station working on its own (E4.4): where it
+//!   stands, a pause in plain words, and the form that sets it up.
 //! - [`plot`]: what the plot panel offers for a plot: yours, someone
 //!   else's, or for sale at its zone's deed price.
 //! - [`signin`]: log in, or register, one event at a time.
@@ -39,6 +41,7 @@
 //!   builds, then reports what the economy produced.
 
 pub mod auth;
+pub mod automation;
 pub mod bot;
 pub mod catalog;
 pub mod craft;

@@ -1060,7 +1060,11 @@ fn automation_produced_logs_on_the_station() {
             produced: made(done as i32),
             done,
         });
-        assert!(events.is_empty());
+        assert_eq!(
+            events,
+            vec![StateEvent::AutomationProduced { station_id: STATION }],
+            "for the world's puff"
+        );
     }
     let station = state.station(STATION).unwrap();
     assert_eq!(station.automation.as_ref().map(|a| a.done), Some(60));

@@ -22,6 +22,17 @@
 //! [`Stations::fires`] sets their `material.emissive_scale` (H23, Flint
 //! ADR 0090) from the hour, so no mesh is rebuilt.
 //!
+//! **At work (E4.4).** A station working on its own shows it. Running, its
+//! light comes up: the forge's mouth and the kiln's door burn brighter, and
+//! the workbench, the sawbench, the anvil and the crate each have a lantern
+//! that's dark until then. The light swells as each craft comes due, and
+//! when it's made a puff goes up (`particles/craft_sparks.particles.toml`
+//! from the hot ones, `craft_wisp` from the rest) and the swell starts
+//! again. A paused one sinks to embers, and over your own an ember floats
+//! (`draw_station_ember` in `input.rhai`) with the reason on hover. It all
+//! follows `station_automation_changed` and `automation_produced`, through
+//! the same `material.emissive_scale` as the hour.
+//!
 //! A station that was placed just now (`station_placed`) drops into place
 //! and settles. One seen for the first time, walking near it, rises out
 //! of the ground instead, quickly, so it doesn't pop. One the server stops
@@ -44,7 +55,10 @@
 use crate::coords::{to_server, to_world};
 use crate::script_api::{Shared, StationMark};
 use crate::world::mesh::{MeshBuf, UP};
-use crate::world::palette::{glow, hex, mix};
+use crate::world::palette::{glow, hex, lit_glow, mix};
+use capitol_core::automation::{pause_words, Work};
+use capitol_core::protocol::rest::AutomationState;
+use capitol_core::protocol::rules::TICK_MS;
 use capitol_core::state::GameState;
 use capitol_core::station::in_reach;
 use flint_core::EntityId;
@@ -66,6 +80,15 @@ pub const MESH_GENERIC: &str = "station_generic";
 const FORGE_EFFECT: &str = "forge";
 /// The kiln's smoke and sparks, `particles/kiln.particles.toml`.
 const KILN_EFFECT: &str = "kiln";
+/// A craft made on its own (E4.4): sparks off a hot station, a wisp of
+/// dust and smoke off the others.
+const SPARKS_EFFECT: &str = "craft_sparks";
+const WISP_EFFECT: &str = "craft_wisp";
+/// How long a craft's puff lasts, s, and how hard it blows.
+const PUFF: f32 = 0.5;
+const PUFF_SCALE: f32 = 4.0;
+/// How fast a station's light follows its work, per second.
+const LIGHT_RATE: f32 = 3.0;
 
 /// Seconds to rise out of the ground, to drop into place, and to sink.
 const RISE: f32 = 0.45;
@@ -93,8 +116,23 @@ struct Station {
     present: bool,
     /// 0 to 1: the ring, eased toward whether you're in reach.
     reach: f32,
-    /// The `emissive_scale` last set on a fired one ([`Stations::fires`]).
+    /// The `emissive_scale` last set on its light ([`Stations::fires`]).
     fire: Option<f32>,
+    /// What it's doing on its own (E4.4), and seconds since it began the
+    /// craft under way.
+    work: Work,
+    since: f32,
+    /// Its recipe's time, s, while it works.
+    duration: f32,
+    /// Its light's strength over the hour's: eased toward [`work_light`].
+    light: f32,
+    /// The fire's `emission_scale` last set ([`fire_rate`]).
+    flame: Option<f32>,
+    /// The craft's puff: an entity of its own, once it has made something,
+    /// and 1 to 0 as the last one blows.
+    puff: Option<EntityId>,
+    blow: f32,
+    blown: Option<f32>,
 }
 
 #[derive(Default)]
@@ -140,12 +178,16 @@ impl Stations {
     /// Place every station for this frame from `state`. `me` is where you
     /// stand in world metres, `placed` the stations placed since last
     /// frame. Writes the stations for the scripts into `shared`.
+    /// `produced` are the stations that made something on their own since
+    /// last frame.
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         ctx: &mut ExtensionCtx,
         state: &GameState,
         me: Option<[f32; 3]>,
         placed: &HashSet<Uuid>,
+        produced: &[Uuid],
         dt: f32,
         shared: &Shared,
     ) {
@@ -184,10 +226,45 @@ impl Stations {
                         present: true,
                         reach: 0.0,
                         fire: None,
+                        work: Work::Idle,
+                        since: 0.0,
+                        duration: 0.0,
+                        light: work_light(kind, Work::Idle, 0.0),
+                        flame: None,
+                        puff: None,
+                        blow: 0.0,
+                        blown: None,
                     })
                 }
             };
             station.present = true;
+            let set = info.automation.as_ref();
+            let work = Work::of(set);
+            if work != station.work {
+                station.work = work;
+                station.since = 0.0;
+            }
+            station.since += dt;
+            station.duration = set
+                .and_then(|a| state.recipe(&a.recipe_id))
+                .map_or(0.0, |r| r.duration_ticks.max(1) as f32 * TICK_MS as f32 / 1000.0);
+            if produced.contains(id) {
+                station.since = 0.0;
+                station.blow = 1.0;
+            }
+            station.blow = (station.blow - dt / PUFF).max(0.0);
+            let want = work_light(station.kind, station.work, station.progress());
+            station.light += (want - station.light) * (1.0 - (-LIGHT_RATE * dt).exp());
+            // An ember over your own while it waits, with why on hover
+            let paused = match set.map(|a| &a.state) {
+                Some(AutomationState::Paused { reason })
+                    if state.me().is_some() && state.me() == Some(info.owner_id) =>
+                {
+                    let recipe = set.and_then(|a| state.recipe(&a.recipe_id));
+                    Some(pause_words(reason, state.catalog(), recipe).what)
+                }
+                _ => None,
+            };
             let near = me.is_some_and(|at| in_reach(at, info));
             let time = match station.arrival {
                 Arrival::Rise => RISE,
@@ -203,6 +280,8 @@ impl Stations {
                 radius: footprint(station.kind),
                 in_reach: near,
                 reach: station.reach * smooth(station.shown),
+                top: height(station.kind) * smooth(station.shown),
+                paused,
             });
         }
 
@@ -213,12 +292,19 @@ impl Stations {
                 station.shown -= dt / SINK;
                 if station.shown <= 0.0 {
                     let _ = world.despawn(station.entity);
+                    if let Some(puff) = station.puff {
+                        let _ = world.despawn(puff);
+                    }
                     return false;
                 }
             }
             place(world, station);
             true
         });
+        for (id, station) in &mut self.stations {
+            station.flames(ctx.world, *id);
+            station.puffs(ctx, *id);
+        }
         if let Ok(mut shared) = shared.stations.lock() {
             *shared = marks;
         }
@@ -280,11 +366,17 @@ impl Stations {
         self.ghost.as_ref().map(|g| g.at)
     }
 
-    /// Turn every fired station's glow (the forge's, the kiln's) to
-    /// `scale`, its `material.emissive_scale` ([`fire_light`]).
+    /// Set every station's light for the hour's `scale` ([`fire_light`])
+    /// and its work: the forge's and kiln's fires, and the lanterns, through
+    /// their `material.emissive_scale`.
     pub fn fires(&mut self, world: &mut flint_ecs::FlintWorld, scale: f32) {
         for station in self.stations.values_mut() {
-            if !fired(station.kind) || station.fire == Some(scale) {
+            if station.kind == "storage_chest" {
+                continue;
+            }
+            // Stepped, so the material is only written when it moves
+            let scale = (scale * station.light * 64.0).round() / 64.0;
+            if station.fire == Some(scale) {
                 continue;
             }
             let mut table = world
@@ -299,6 +391,144 @@ impl Stations {
                 Err(e) => tracing::warn!("stations: no glow scale: {e}"),
             }
         }
+    }
+}
+
+impl Station {
+    /// 0 to 1: how near its craft is to done, while it runs.
+    fn progress(&self) -> f32 {
+        if self.work != Work::Running || self.duration <= 0.0 {
+            return 0.0;
+        }
+        (self.since / self.duration).min(1.0)
+    }
+
+    /// The forge's flames and the kiln's smoke, harder while it works and
+    /// low while it waits. Written only when the work changes.
+    fn flames(&mut self, world: &mut flint_ecs::FlintWorld, id: Uuid) {
+        let Some(effect) = fire_effect(self.kind) else {
+            return;
+        };
+        let rate = fire_rate(self.work);
+        if self.flame == Some(rate) || (self.flame.is_none() && rate == 1.0) {
+            return;
+        }
+        let mut fx = toml::Table::new();
+        fx.insert("effect".into(), effect.into());
+        fx.insert("seed".into(), seed(id).into());
+        fx.insert("emission_scale".into(), (rate as f64).into());
+        let _ = world.set_component(self.entity, "particle_effect", toml::Value::Table(fx));
+        self.flame = Some(rate);
+    }
+
+    /// The puff of a craft made on its own, from an entity of its own over
+    /// the station: made at the first, and kept.
+    fn puffs(&mut self, ctx: &mut ExtensionCtx, id: Uuid) {
+        if self.puff.is_none() && self.blow > 0.0 {
+            match ctx.world.spawn(format!("station_puff_{}", id.simple()).as_str()) {
+                Ok(e) => self.puff = Some(e),
+                Err(e) => tracing::warn!("stations: no puff for {id}: {e}"),
+            }
+        }
+        let Some(entity) = self.puff else {
+            return;
+        };
+        // Where the work shows: out of a fire's mouth, off a bench's top
+        let [ox, oy, oz] = puff_at(self.kind);
+        let (sin, cos) = self.yaw.sin_cos();
+        let [x, z] = [
+            self.at[0] + ox * cos + oz * sin,
+            self.at[1] - ox * sin + oz * cos,
+        ];
+        let mut t = toml::Table::new();
+        let top = crate::world::land::ground_y(self.at) + oy;
+        t.insert("position".into(), vec3([x, top, z]));
+        t.insert("rotation_quat".into(), vec4([0.0, 0.0, 0.0, 1.0]));
+        t.insert("scale".into(), vec3([1.0, 1.0, 1.0]));
+        let _ = ctx.world.set_component(entity, "transform", toml::Value::Table(t));
+        let blow = (PUFF_SCALE * self.blow * 10.0).round() / 10.0;
+        if self.blown == Some(blow) {
+            return;
+        }
+        let mut fx = toml::Table::new();
+        let effect = if hot(self.kind) { SPARKS_EFFECT } else { WISP_EFFECT };
+        fx.insert("effect".into(), effect.into());
+        fx.insert("seed".into(), seed(id).into());
+        fx.insert("emission_scale".into(), (blow as f64).into());
+        let _ = ctx
+            .world
+            .set_component(entity, "particle_effect", toml::Value::Table(fx));
+        self.blown = Some(blow);
+    }
+}
+
+/// How strong a station's light is, over the hour's, for its `work` and how
+/// far its craft has got. A fire burns as built when idle; a lantern is dark.
+/// Running, both come up and swell toward the craft's end; waiting, both sink
+/// to embers.
+pub fn work_light(kind: &str, work: Work, progress: f32) -> f32 {
+    let swell = smooth(progress);
+    match (fired(kind), work) {
+        (true, Work::Idle) => 1.0,
+        (true, Work::Running) => 1.4 + 0.35 * swell,
+        (true, Work::Paused) => 0.12,
+        (false, Work::Idle) => 0.0,
+        (false, Work::Running) => 0.9 + 0.3 * swell,
+        (false, Work::Paused) => 0.22,
+    }
+}
+
+/// The fire's particles for its work: as built when idle.
+fn fire_rate(work: Work) -> f32 {
+    match work {
+        Work::Idle => 1.0,
+        Work::Running => 1.6,
+        Work::Paused => 0.15,
+    }
+}
+
+/// A station that throws sparks when it makes something: the fired ones
+/// and the anvil.
+fn hot(kind: &str) -> bool {
+    fired(kind) || kind == "anvil"
+}
+
+fn fire_effect(kind: &str) -> Option<&'static str> {
+    match kind {
+        "forge" => Some(FORGE_EFFECT),
+        "kiln" => Some(KILN_EFFECT),
+        _ => None,
+    }
+}
+
+/// Each station's particles flicker their own way.
+fn seed(id: Uuid) -> i64 {
+    (id.as_u128() % 1_000_000) as i64 + 1
+}
+
+/// Where a station's puff goes up, in its model's space (m, +Z its front):
+/// just out of a fire's mouth, else over its work.
+fn puff_at(kind: &str) -> [f32; 3] {
+    match kind {
+        "forge" => [0.0, 0.62, 0.78],
+        "kiln" => [0.0, 0.5, 1.0],
+        "anvil" => [0.0, 0.8, 0.0],
+        "workbench" => [0.0, 1.0, 0.0],
+        "sawbench" => [0.0, 0.9, 0.0],
+        _ => [0.0, 1.05, 0.0],
+    }
+}
+
+/// About how tall a station's model is, m: where its ember floats.
+fn height(kind: &str) -> f32 {
+    match kind {
+        "workbench" => 1.05,
+        "forge" => 2.2,
+        "storage_chest" => 0.8,
+        "sawbench" => 1.1,
+        "kiln" => 1.8,
+        "anvil" => 0.85,
+        _ => 1.1,
     }
 }
 
@@ -338,6 +568,112 @@ pub fn sample(target: [f32; 2], camera: [f32; 2]) -> GameState {
 
 /// How far apart `--station-sample` stands them, metres.
 const SAMPLE_SPACING: f32 = 3.6;
+
+/// `--automation-sample` (E4.4): stations at work and waiting, in a row
+/// across the view as `--station-sample` stands them, all yours: a forge
+/// running, one waiting for ore and one idle, then a workbench and an anvil
+/// running and a kiln with its box full. [`automation_tick`] makes their
+/// crafts come due.
+pub fn automation_sample(target: [f32; 2], camera: [f32; 2]) -> GameState {
+    use capitol_core::net::{ConnectionState, RestResponse};
+    use capitol_core::protocol::rest::{AutomationMode, PauseReason, RecipesResponse, StationAutomation};
+    use capitol_core::protocol::ws::ServerMessage;
+    let me = Uuid::from_u128(0xca9);
+    let mut state = GameState::new();
+    state.apply_connection(&ConnectionState::Connected { player_id: me });
+    let recipes = state.catalog().recipes().to_vec();
+    state.apply_rest(&RestResponse::Recipes(RecipesResponse { recipes }));
+    let running = || AutomationState::Running;
+    let rows: [(&str, Option<AutomationState>); 6] = [
+        ("forge", Some(running())),
+        (
+            "forge",
+            Some(AutomationState::Paused {
+                reason: PauseReason::MissingInput {
+                    item_type: "iron_ore".into(),
+                },
+            }),
+        ),
+        ("forge", None),
+        ("workbench", Some(running())),
+        ("anvil", Some(running())),
+        (
+            "kiln",
+            Some(AutomationState::Paused {
+                reason: PauseReason::OutputFull,
+            }),
+        ),
+    ];
+    let (dx, dz) = (target[0] - camera[0], target[1] - camera[1]);
+    let len = dx.hypot(dz).max(1e-3);
+    let across = [dz / len, -dx / len];
+    let mid = (rows.len() as f32 - 1.0) / 2.0;
+    for (i, (kind, work)) in rows.iter().enumerate() {
+        let id = Uuid::from_u128(i as u128 + 1);
+        let k = (i as f32 - mid) * SAMPLE_SPACING;
+        let [x, y] = to_server(target[0] + across[0] * k, target[1] + across[1] * k);
+        state.apply_ws(&ServerMessage::StationPlaced {
+            station_id: id,
+            station_type: (*kind).into(),
+            name: (*kind).into(),
+            owner_id: me,
+            x,
+            y,
+            container_id: Uuid::nil(),
+            quality: 60,
+        });
+        let recipe = capitol_core::station::recipes_at(state.recipes(), kind)
+            .next()
+            .map(|r| r.id.clone());
+        if let (Some(work), Some(recipe_id)) = (work, recipe) {
+            state.apply_ws(&ServerMessage::StationAutomationChanged {
+                station_id: id,
+                automation: StationAutomation {
+                    recipe_id,
+                    mode: AutomationMode::Forever,
+                    state: work.clone(),
+                    done: 0,
+                },
+            });
+        }
+    }
+    state
+}
+
+/// The sample's crafts: each running station makes one every time its
+/// recipe's duration passes. Returns the ones that did this frame, `t`
+/// seconds into the sample.
+pub fn automation_tick(state: &mut GameState, t: f32, dt: f32) -> Vec<Uuid> {
+    use capitol_core::protocol::rest::Produced;
+    use capitol_core::protocol::ws::ServerMessage;
+    let due: Vec<(Uuid, String, u32)> = state
+        .stations()
+        .iter()
+        .filter_map(|(id, s)| {
+            let a = s.automation.as_ref().filter(|a| a.state == AutomationState::Running)?;
+            let r = state.recipe(&a.recipe_id)?;
+            let every = r.duration_ticks.max(1) as f32 * TICK_MS as f32 / 1000.0;
+            let item = r.outputs.first()?.item_type.clone();
+            ((t / every).floor() > ((t - dt) / every).floor()).then_some((*id, item, a.done + 1))
+        })
+        .collect();
+    let mut made = Vec::new();
+    for (station_id, item_type, done) in due {
+        let produced = Produced {
+            item_type,
+            quantity: 1,
+            quality: 40 + (done as i32 * 7) % 50,
+            at: capitol_core::chrono::Utc::now(),
+        };
+        state.apply_ws(&ServerMessage::AutomationProduced {
+            station_id,
+            produced,
+            done,
+        });
+        made.push(station_id);
+    }
+    made
+}
 
 /// Whether a station of `kind` has a fire in it, whose glow follows the
 /// hour.
@@ -474,19 +810,10 @@ fn spawn(ctx: &mut ExtensionCtx, id: Uuid, kind: &'static str) -> Option<EntityI
     if let Err(e) = ctx.attach_mesh(entity, mesh(kind)) {
         tracing::warn!("stations: no mesh for {id}: {e}");
     }
-    let effect = match kind {
-        "forge" => Some(FORGE_EFFECT),
-        "kiln" => Some(KILN_EFFECT),
-        _ => None,
-    };
-    if let Some(effect) = effect {
+    if let Some(effect) = fire_effect(kind) {
         let mut fx = toml::Table::new();
         fx.insert("effect".into(), effect.into());
-        // Each fire flickers its own way.
-        fx.insert(
-            "seed".into(),
-            ((id.as_u128() % 1_000_000) as i64 + 1).into(),
-        );
+        fx.insert("seed".into(), seed(id).into());
         if let Err(e) = ctx
             .world
             .set_component(entity, "particle_effect", toml::Value::Table(fx))
@@ -783,8 +1110,48 @@ fn workbench() -> MeshBuf {
         [0.26, y + 0.1, 0.15],
         hex(WOOD_DARK),
     );
+    // A lantern at the back corner, dark until it works on its own (E4.4).
+    lantern(&mut m, [-hx + 0.16, y, -hz + 0.14], 0.8);
     m
 }
+
+/// A small iron lantern standing at `base`, `s` times its full 0.255 m: a
+/// foot, a pane of warm glass, corner posts, a cap and a ring. The glass is
+/// part lit surface, part light, so it reads as glass when dark and glows
+/// when its `emissive_scale` comes up.
+fn lantern(m: &mut MeshBuf, [x, y, z]: [f32; 3], s: f32) {
+    let iron = hex(IRON);
+    let (w, g, post) = (0.075 * s, 0.055 * s, 0.008 * s);
+    let at = |h: f32| y + h * s;
+    cuboid(m, [x - w, y, z - w], [x + w, at(0.025), z + w], iron);
+    cuboid(
+        m,
+        [x - g, at(0.025), z - g],
+        [x + g, at(0.17), z + g],
+        lit_glow(hex(FLAME), 0.45, LANTERN_GLOW),
+    );
+    for (sx, sz) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let (cx, cz) = (x + sx * g, z + sz * g);
+        cuboid(
+            m,
+            [cx - post, at(0.025), cz - post],
+            [cx + post, at(0.17), cz + post],
+            iron,
+        );
+    }
+    let knob = 0.02 * s;
+    frustum_at(m, [x, z], at(0.17), [w, w], at(0.215), [knob, knob], iron);
+    cuboid(
+        m,
+        [x - 0.006 * s, at(0.215), z - 0.025 * s],
+        [x + 0.006 * s, at(0.255), z + 0.025 * s],
+        iron,
+    );
+}
+
+/// How bright a lantern's glass is at full, before its `emissive_scale`:
+/// past the scene's bloom threshold (2.5), so a working one blooms at dusk.
+const LANTERN_GLOW: f32 = 3.2;
 
 /// A forge: a stone hearth narrowing as it rises from a plinth, three
 /// courses of it, an arched mouth glowing at the front (+Z), a chimney,
@@ -1220,6 +1587,8 @@ fn sawbench() -> MeshBuf {
         hex(SAWDUST),
     );
     disc(&mut m, [0.05, 0.12], 10, 0.09, 0.12, hex(SAWDUST));
+    // A lantern on the far end of the top, dark until it works on its own.
+    lantern(&mut m, [hx - 0.14, top + 0.06, -hz + 0.12], 0.8);
     m
 }
 
@@ -1457,6 +1826,8 @@ fn anvil() -> MeshBuf {
     band(&mut m, b, 12, 0.06, 0.177, 0.1, 0.182, iron);
     band(&mut m, b, 12, 0.27, 0.193, 0.31, 0.197, iron);
     disc(&mut m, b, 12, 0.3, 0.19, hex(0x1e3a4a));
+    // A lantern on the ground by the stump, dark until it works on its own.
+    lantern(&mut m, [0.42, 0.0, 0.22], 1.0);
     m
 }
 
@@ -1508,6 +1879,8 @@ fn generic() -> MeshBuf {
         [0.2, 0.56, h + 0.016],
         hex(GOLD),
     );
+    // A lantern on the ground at its corner, dark until it works on its own.
+    lantern(&mut m, [h + 0.14, 0.0, h - 0.12], 1.0);
     m
 }
 
@@ -1579,7 +1952,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_fired_stations_glow() {
+    fn every_crafting_station_has_a_light_and_the_chest_none() {
         let glows = |m: &MeshBuf| m.vertices.iter().any(is_light);
         for (kind, m) in [
             ("workbench", workbench()),
@@ -1590,7 +1963,25 @@ mod tests {
             ("anvil", anvil()),
             ("generic", generic()),
         ] {
-            assert_eq!(glows(&m), fired(kind), "{kind}");
+            assert_eq!(glows(&m), kind != "storage_chest", "{kind}");
+        }
+    }
+
+    #[test]
+    fn work_lights_a_station_and_a_wait_dims_it() {
+        for kind in ["forge", "kiln", "workbench", "sawbench", "anvil", "generic"] {
+            let idle = work_light(kind, Work::Idle, 0.0);
+            let start = work_light(kind, Work::Running, 0.0);
+            let due = work_light(kind, Work::Running, 1.0);
+            let paused = work_light(kind, Work::Paused, 0.0);
+            assert!(start > idle, "{kind}: running is brighter than idle");
+            assert!(due > start, "{kind}: it swells as the craft comes due");
+            assert!(paused < start, "{kind}: a wait dims it");
+            if fired(kind) {
+                assert!(paused < idle, "{kind}: a waiting fire sinks below a banked one");
+            } else {
+                assert_eq!(idle, 0.0, "{kind}: an idle lantern is dark");
+            }
         }
     }
 
@@ -1705,5 +2096,26 @@ mod tests {
         assert_eq!(fx.name, FORGE_EFFECT);
         let names: Vec<_> = fx.emitters.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["flames", "embers", "smoke"]);
+    }
+
+    #[test]
+    fn the_crafts_puffs_load() {
+        for (text, name, emitters) in [
+            (
+                include_str!("../../../particles/craft_sparks.particles.toml"),
+                SPARKS_EFFECT,
+                ["sparks", "breath"],
+            ),
+            (
+                include_str!("../../../particles/craft_wisp.particles.toml"),
+                WISP_EFFECT,
+                ["dust", "wisp"],
+            ),
+        ] {
+            let fx = flint_particles::load_effect_from_str(text, name).expect("parses");
+            assert_eq!(fx.name, name);
+            let names: Vec<_> = fx.emitters.iter().map(|e| e.name.as_str()).collect();
+            assert_eq!(names, emitters);
+        }
     }
 }

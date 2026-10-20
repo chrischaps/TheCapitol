@@ -1,0 +1,45 @@
+# A craft made on its own at a hot station (E4.4): a spray of sparks and a
+# breath of smoke over the forge, the kiln or the anvil. `stations.rs`
+# spawns it on an entity of its own over the station and blows it, through
+# `emission_scale`, for a moment at each `automation_produced`; at rest the
+# scale is 0 and it's silent.
+
+name = "craft_sparks"
+
+[[emitters]]
+name = "sparks"
+emission_rate = 22.0
+max_particles = 48
+lifetime = [0.45, 0.9]
+speed = [1.4, 2.6]
+direction = [0, 1, 0]
+spread = 40.0
+gravity = [0, -3.5, 0]
+damping = 0.8
+world_space = true
+blend_mode = "additive"
+size = { start = [0.06, 0.06], end = [0.0, 0.0] }
+color = { start = [1.0, 0.78, 0.38, 1.0], end = [1.0, 0.25, 0.02, 0.0] }
+
+[emitters.shape]
+kind = "sphere"
+radius = 0.12
+
+[[emitters]]
+name = "breath"
+emission_rate = 6.0
+max_particles = 16
+lifetime = [1.4, 2.2]
+speed = [0.3, 0.55]
+direction = [0, 1, 0]
+spread = 15.0
+gravity = [0.08, 0.25, 0.03]
+damping = 0.4
+world_space = true
+blend_mode = "alpha"
+size = { keys = [ { t = 0.0, v = [0.22, 0.22] }, { t = 1.0, v = [0.9, 0.9] } ], interp = "smooth" }
+color = { keys = [ { t = 0.0, v = [0.36, 0.32, 0.31, 0.0] }, { t = 0.2, v = [0.36, 0.32, 0.31, 0.3] }, { t = 1.0, v = [0.46, 0.44, 0.46, 0.0] } ] }
+
+[emitters.shape]
+kind = "sphere"
+radius = 0.1

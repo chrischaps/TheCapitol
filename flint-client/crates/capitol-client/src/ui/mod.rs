@@ -16,6 +16,8 @@
 //!   order form and your orders (E3.5).
 //! - [`station`]: the open station's panel: its box, and its recipes at a
 //!   crafting station (P6.3).
+//! - [`automation`]: the station panel's Automation tab, for its owner
+//!   (E4.4).
 //! - [`containers`]: `--containers`, any container no panel shows, as grids.
 //! - [`sample`]: a panel showing the theme's parts, for reviewing the theme
 //!   against the React client (`--ui-sample`).
@@ -32,6 +34,7 @@
 //! - [`hints`]: the first-session hints, once per account (P8.3).
 //! - [`shortcuts`]: every control on one card, on `?` or F1 (P8.3).
 
+pub mod automation;
 pub mod containers;
 pub mod crafting;
 pub mod exchange;

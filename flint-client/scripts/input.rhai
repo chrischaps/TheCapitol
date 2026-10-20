@@ -394,6 +394,7 @@ fn on_draw_ui() {
         // One under the cursor shows its ring, faintly if it's out of reach.
         if over != () && over.id == s.id && s.reach < hover_reach() { s.reach = hover_reach(); }
         if s.reach > 0.01 { draw_station_ring(s, now); }
+        if s.paused != () { draw_station_ember(s, over != () && over.id == s.id, now); }
     }
     // The tuft you're going to gather, if any. While you walk to it, the
     // sight round it stands in for the ring at your destination.
@@ -586,6 +587,36 @@ fn draw_station_ring(s, now) {
         let a = spin + i.to_float() * 0.5 * PI();
         arc(s.x, s.z, y, r + 0.22, a - 0.16, a + 0.16, c, 0.4 * k, 1.5);
     }
+}
+
+// An ember floating over a station of yours that's waiting (E4.4): a
+// small flame-shaped mote that bobs and flickers, a few points wide however
+// far away you stand, and on hover the reason under it. Its light is the
+// world's (stations.rs); this only says "this one needs you".
+fn draw_station_ember(s, over, now) {
+    let seed = s.x * 1.7 + s.z * 0.9;
+    let bob = 0.08 * (now * 1.3 + seed).sin();
+    let p = world_to_screen(s.x, cap_ground_at(s.x, s.z) + s.top + 0.55 + bob, s.z);
+    if !p.visible { return; }
+    let flicker = 0.8 + 0.2 * (now * 7.3 + seed).sin() * (now * 3.1).cos();
+    let r = 4.2 * flicker;
+    let hot = station_orange();
+    // A soft halo, then the flame: a drop with its point up, and a pale heart
+    draw_circle(p.x, p.y - r * 0.4, r * 2.4, hot[0], hot[1], hot[2], 0.07 * flicker);
+    draw_polygon([[p.x, p.y - r * 2.0], [p.x + r, p.y], [p.x, p.y + r * 0.9], [p.x - r, p.y]],
+        hot[0], hot[1], hot[2], 0.92, 2);
+    draw_circle(p.x, p.y + r * 0.1, r * 0.45, 1.0, 0.85, 0.5, 0.95);
+    if !over { return; }
+    let line = s.paused;
+    let size = 13.0;
+    let m = measure_text_ex(line, size, "strong", 0.0);
+    let y = p.y + r * 2.0 + 6.0;
+    draw_text_opts(p.x - m.width / 2.0 + 1.0, y + 1.0, line, size, #{
+        font: "strong", color: [0.0, 0.0, 0.0, 0.6],
+    });
+    draw_text_opts(p.x - m.width / 2.0, y, line, size, #{
+        font: "strong", color: [1.0, 0.77, 0.42, 0.95],
+    });
 }
 
 // A ring of radius r (m) on the ground at (cx, cz), in `steps` segments.

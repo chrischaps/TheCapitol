@@ -194,6 +194,11 @@ struct Args {
     /// For captures
     #[arg(long, requires = "offline")]
     station_sample: bool,
+    /// Offline, stand stations at work and waiting in a row where the
+    /// camera looks: forges running, waiting and idle, a workbench and an
+    /// anvil running, a kiln with its box full (E4.4). For captures
+    #[arg(long, requires = "offline")]
+    automation_sample: bool,
     /// Offline, scatter every kind of resource node round where the camera
     /// first looks, and take every other one through being worked, taken
     /// and growing back on a loop (E2.5). For captures
@@ -316,6 +321,7 @@ fn main() -> Result<()> {
         .with_time_of_day(args.time_of_day)
         .with_claim_sample(args.claim_sample, args.grow_at)
         .with_station_sample(args.station_sample)
+        .with_automation_sample(args.automation_sample)
         .with_node_sample(args.node_sample)
         .with_trade_offer(args.trade_offer.as_deref())
         .with_settings(

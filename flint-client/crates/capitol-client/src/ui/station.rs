@@ -21,14 +21,20 @@
 //!   inventory). Taking it out is for whoever put it in and the station's
 //!   owner. While it's there, a recipe of its type uses it before yours, and
 //!   it wears here.
+//! - **Automation (E4.4)**, for the owner of a crafting station: a second
+//!   tab beside Craft (`ui::automation`), set to make one recipe from the
+//!   box, a count of times or forever. The header says when it's running
+//!   or paused, for anyone who opens it.
 //! - **Remove**, for the owner, once the box is empty. The server refuses
 //!   while it holds anything and puts the kit back in your inventory (#88),
 //!   so taking a station down is how you move it, and it doesn't ask twice.
 
+use super::automation::{self, Ask};
 use super::crafting::{blocked_box, craft_label, needs, preview, under_way, Fill};
 use super::icons::ItemIcons;
 use super::slots::{Move, Slot, SlotGrid};
-use super::theme::{self, size, DIM, STATION};
+use super::theme::{self, size, DIM, EMBER, STATION};
+use capitol_core::automation::{Draft, Status};
 use capitol_core::craft::{self, Check, Phase};
 use capitol_core::protocol::rules::quality;
 use capitol_core::protocol::rest::{RecipeInfo, SlotItem};
@@ -62,6 +68,17 @@ pub enum Action {
     InstallTool { station_id: Uuid, item_id: Uuid },
     /// Take the station's tool out, into your inventory.
     RemoveTool(Uuid),
+    /// Set the station to make this on its own, and start it (E4.4).
+    StartAutomation { station_id: Uuid, draft: Draft },
+    StopAutomation(Uuid),
+}
+
+/// The right-hand column's two tabs at a station of yours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Craft,
+    Automation,
 }
 
 /// The tool slot's stand-in container id: a drop onto it is an install.
@@ -78,6 +95,10 @@ pub struct StationPanel {
     /// The recipe picked by hand. `None` lets the box choose.
     picked: Option<String>,
     bar: Fill,
+    /// The tab shown, at a crafting station of yours.
+    pub tab: Tab,
+    /// The Automation tab's form.
+    draft: Draft,
 }
 
 /// What the panel draws from.
@@ -88,6 +109,8 @@ pub struct View<'a> {
     pub refused: Option<&'a str>,
     /// Where the inventory panel is, if it's open: the panel sits to its left.
     pub beside: Option<egui::Rect>,
+    /// Why the last automation command was refused, if it was just now.
+    pub automation_refused: Option<&'a str>,
 }
 
 impl StationPanel {
@@ -131,6 +154,21 @@ impl StationPanel {
         if open != self.showing {
             self.showing = open;
             self.picked = None;
+            let info = view.state.open_station_info();
+            let detected = self.recipe(view.state).map(|r| r.id.clone());
+            self.draft = Draft::from(info.and_then(|i| i.automation.as_ref()), detected.as_deref());
+            // A station of yours at work opens on that work.
+            let working = info.is_some_and(|i| {
+                matches!(
+                    Status::of(i.automation.as_ref()),
+                    Status::Running | Status::Paused(_)
+                )
+            });
+            self.tab = if working && mine(view.state) {
+                Tab::Automation
+            } else {
+                Tab::Craft
+            };
         }
         let shown =
             ctx.animate_bool_with_time(Id::new("capitol_station_fade"), open.is_some(), FADE);
@@ -177,6 +215,7 @@ impl StationPanel {
         let running = crafting.is_some();
         let mut action = None;
 
+        let status = Status::of(state.open_station_info().and_then(|i| i.automation.as_ref()));
         let badge = if running {
             let t = ui.input(|i| i.time) as f32;
             ui.ctx().request_repaint();
@@ -184,6 +223,12 @@ impl StationPanel {
                 "In progress",
                 STATION.gamma_multiply(0.45 + 0.15 * (t * 4.2).sin()),
             ))
+        } else if status == Status::Running {
+            let t = ui.input(|i| i.time) as f32;
+            ui.ctx().request_repaint();
+            Some(("Running", STATION.gamma_multiply(0.4 + 0.12 * (t * 2.4).sin())))
+        } else if matches!(status, Status::Paused(_)) {
+            Some(("Paused", EMBER.gamma_multiply(0.35)))
         } else if storage {
             Some(("Storage", theme::PILL))
         } else {
@@ -231,7 +276,22 @@ impl StationPanel {
                 ui.add_space(COLUMN_GAP);
                 ui.vertical(|ui| {
                     ui.set_width(WIDTH);
-                    if let Some(a) = self.crafting(ui, icons, view, crafting) {
+                    let mine = mine(state);
+                    if mine {
+                        ui.horizontal(|ui| {
+                            theme::segmented(
+                                ui,
+                                &mut self.tab,
+                                &[(Tab::Craft, "Craft"), (Tab::Automation, "Automation")],
+                            );
+                        });
+                        ui.add_space(6.0);
+                    }
+                    let a = match if mine { self.tab } else { Tab::Craft } {
+                        Tab::Craft => self.crafting(ui, icons, view, crafting),
+                        Tab::Automation => self.automation(ui, icons, view),
+                    };
+                    if let Some(a) = a {
                         action = Some(a);
                     }
                 });
@@ -377,6 +437,31 @@ impl StationPanel {
         action
     }
 
+    /// The Automation tab, at a station of yours.
+    fn automation(
+        &mut self,
+        ui: &mut egui::Ui,
+        icons: &mut ItemIcons,
+        view: &View,
+    ) -> Option<Action> {
+        let info = view.state.open_station_info()?;
+        let station_id = info.id;
+        match automation::show(
+            ui,
+            icons,
+            view.state,
+            info,
+            &mut self.draft,
+            view.automation_refused,
+        )? {
+            Ask::Start => Some(Action::StartAutomation {
+                station_id,
+                draft: self.draft.clone(),
+            }),
+            Ask::Stop => Some(Action::StopAutomation(station_id)),
+        }
+    }
+
     /// The recipe list: "Auto: …" first, then the station's recipes.
     fn picker(&mut self, ui: &mut egui::Ui, state: &GameState, station_type: &str) {
         let detected = state
@@ -444,6 +529,13 @@ impl StationPanel {
         });
         action
     }
+}
+
+/// The open station is yours.
+fn mine(state: &GameState) -> bool {
+    state
+        .open_station_info()
+        .is_some_and(|s| state.me().is_some() && Some(s.owner_id) == state.me())
 }
 
 /// A crafting station's tool slot: the tool in it, as a slot you can drag

@@ -32,7 +32,7 @@ use capitol_core::net::{
 };
 use capitol_core::poll::{Fetch, Poller};
 use capitol_core::protocol::rest::{
-    CollectRequest, DepositRequest, MarketSummaryResponse, MoveItemRequest, MyOrdersQuery,
+    CollectRequest, DepositRequest, MarketSummaryResponse, MoveItemRequest, MyOrdersQuery, PauseReason,
     PayTaxRequest, PlaceOrder, PositionQuery, SlotItem, SplitStackRequest, WithdrawRequest,
 };
 use capitol_core::protocol::rules::market::{OrderSide, OrderStatus};
@@ -145,6 +145,14 @@ pub struct Session {
     plot_notes: Vec<PlotNote>,
     /// The names of tools that broke, for a toast each.
     broken_tools: Vec<(Uuid, String)>,
+    /// Your stations that paused, live or on coming back (E4.4), for a
+    /// toast each: the station, its type and why.
+    automation_notes: Vec<(Uuid, String, PauseReason)>,
+    /// Stations that finished a craft on their own since the frame last
+    /// took them, for the world's puff.
+    produced: Vec<Uuid>,
+    /// Why the last automation command was refused, and when.
+    automation_refused: Option<(String, Instant)>,
     /// The deposit or withdrawal the server is answering (P7.2).
     exchanging: Option<Asked>,
     /// Why the last one was refused, and when.
@@ -322,6 +330,9 @@ impl Session {
             claimed: Vec::new(),
             plot_notes: Vec::new(),
             broken_tools: Vec::new(),
+            automation_notes: Vec::new(),
+            produced: Vec::new(),
+            automation_refused: None,
             exchanging: None,
             exchange_refused: None,
             receipt: None,
@@ -537,6 +548,35 @@ impl Session {
         self.net.ws(ClientMessage::RemoveTool {
             station_id: station.to_string(),
         });
+    }
+
+    /// Sets a station to make `draft`'s recipe on its own and starts it
+    /// (E4.4). Owner only: the server answers `station_automation_changed`,
+    /// or an `error` that [`Session::automation_refused`] shows.
+    pub fn start_automation(&mut self, station: Uuid, draft: &capitol_core::automation::Draft) {
+        let set = self.state.station(station).and_then(|s| s.automation.as_ref());
+        for message in draft.start(station, set) {
+            tracing::info!("station: automation {} for {station}", message.type_name());
+            self.net.ws(message);
+        }
+        self.automation_refused = None;
+    }
+
+    /// Stops a station working on its own. It keeps its setting and count.
+    pub fn stop_automation(&mut self, station: Uuid) {
+        tracing::info!("station: stopping automation at {station}");
+        self.net.ws(ClientMessage::StopAutomation {
+            station_id: station.to_string(),
+        });
+        self.automation_refused = None;
+    }
+
+    /// Why the last automation command was refused, if it was just now.
+    pub fn automation_refused(&self, now: Instant) -> Option<&str> {
+        self.automation_refused
+            .as_ref()
+            .filter(|(_, at)| now.duration_since(*at) < NOTICE_FOR)
+            .map(|(why, _)| why.as_str())
     }
 
     /// Takes a station down. The server refuses unless it's yours.
@@ -798,6 +838,17 @@ impl Session {
     /// The tools that broke since the last call, and their names.
     pub fn take_broken_tools(&mut self) -> Vec<(Uuid, String)> {
         std::mem::take(&mut self.broken_tools)
+    }
+
+    /// Your stations that paused since the frame last asked: the station,
+    /// its type and why.
+    pub fn take_automation_notes(&mut self) -> Vec<(Uuid, String, PauseReason)> {
+        std::mem::take(&mut self.automation_notes)
+    }
+
+    /// Stations that finished a craft on their own since the frame last asked.
+    pub fn take_produced(&mut self) -> Vec<Uuid> {
+        std::mem::take(&mut self.produced)
     }
 
     /// What to tell the player about picking plots, since the last call.
@@ -1616,11 +1667,26 @@ impl Session {
                     StateEvent::ToolBroke {
                         item_id, item_name, ..
                     } => self.broken_tools.push((*item_id, item_name.clone())),
+                    StateEvent::AutomationPaused {
+                        station_id,
+                        station_type,
+                        reason,
+                    } => self
+                        .automation_notes
+                        .push((*station_id, station_type.clone(), reason.clone())),
+                    StateEvent::AutomationProduced { station_id } => self.produced.push(*station_id),
                     StateEvent::Market(event) => self.note_market(event),
                     StateEvent::GazettePublished { day, headline, .. } => {
                         self.gazette.published(*day, headline)
                     }
                     // A tool slot refused: shown where a refused move is
+                    StateEvent::ServerError {
+                        message,
+                        command,
+                    } if capitol_core::automation::is_automation_command(command) => {
+                        tracing::info!("station: {command} refused: {message}");
+                        self.automation_refused = Some((message.clone(), now));
+                    }
                     StateEvent::ServerError {
                         message,
                         command,
@@ -1761,6 +1827,9 @@ impl Session {
             self.pay_refused = None;
             self.claimed.clear();
             self.plot_notes.clear();
+            self.automation_notes.clear();
+            self.produced.clear();
+            self.automation_refused = None;
             self.exchanging = None;
             self.exchange_refused = None;
             self.receipt = None;
@@ -3016,6 +3085,118 @@ mod tests {
         wait(&mut session, "the chest to come down", &|s| {
             s.state().station(chest).is_none() && open(s).is_none()
         });
+        session.log_out();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A station works on its own, set up as the Automation tab sets it up
+    /// (E4.4): two tool handles, made and logged, the run finished; then
+    /// forever, until the box runs dry and it pauses with a notice; then
+    /// Stop. Set up `Automate1` (`capitol-bot --prefix automate --gather 0`)
+    /// with a workbench of its own by the spawn and 4 sticks and 2 rope in
+    /// its box, then restart the backend so the tick knows the station:
+    ///
+    /// ```sql
+    /// with s as (insert into stations (id, station_type, owner_id, position_x, position_y)
+    ///   select gen_random_uuid(), 'workbench', id, 6000, 9330 from players where name = 'Automate1'
+    ///   returning id),
+    /// c as (insert into containers (id, container_type, owner_id, station_id)
+    ///   select gen_random_uuid(), 'station_inventory', null, id from s returning id)
+    /// insert into items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
+    ///   select gen_random_uuid(), t, 50, q, null, c.id, k from c,
+    ///   (values ('sticks', 4, 0), ('rope', 2, 1)) v(t, q, k);
+    /// ```
+    #[test]
+    #[ignore = "needs the local stack and Automate1's stocked workbench; takes a minute"]
+    fn a_station_runs_on_its_own_then_waits() {
+        use capitol_core::automation::{Draft, Status};
+        use capitol_core::bot::Account;
+        use capitol_core::craft;
+        use capitol_core::protocol::rest::PauseReason;
+
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let account = Account::numbered("automate", 1);
+        let dir = std::env::temp_dir().join(format!("capitol-automate-{}", std::process::id()));
+        let mut session = Session::start(&server, SessionFile::load(dir.join("s.toml"))).unwrap();
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let mut terrain = TerrainSource::offline(&fixture).unwrap();
+        session.log_in(&account.email, &account.password);
+        let mut wait = |session: &mut Session, what: &str, done: &dyn Fn(&Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !done(session) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                session.update(Instant::now(), &mut terrain);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait(&mut session, "the recipes and stations", &|s| {
+            let st = s.state();
+            !st.recipes().is_empty() && st.local_player().is_some() && !st.stations().is_empty()
+        });
+        let bench = {
+            let st = session.state();
+            st.stations()
+                .values()
+                .find(|x| x.station_type == "workbench" && Some(x.owner_id) == st.me())
+                .map(|x| x.id)
+                .expect("no workbench of Automate1's nearby: see the doc comment")
+        };
+        let status = |s: &Session| {
+            Status::of(s.state().station(bench).and_then(|b| b.automation.as_ref()))
+        };
+        let logged = |s: &Session| s.state().station(bench).map_or(0, |b| b.production.len());
+
+        // Open, as the panel is: its box is where it works.
+        session.open_station(Instant::now(), bench);
+        wait(&mut session, "the workbench to open", &|s| {
+            s.state().open_station().map(|o| o.station_id) == Some(bench)
+                && s.state().station_container().is_some()
+        });
+        let held = |s: &Session, t: &str| s.state().station_container().map_or(0, |b| craft::count(b, t));
+        assert!(
+            held(&session, "sticks") >= 4 && held(&session, "rope") >= 2,
+            "stock the workbench's box: see the doc comment"
+        );
+
+        // Two handles, as the tab's Count sets it.
+        let before = logged(&session);
+        let draft = Draft {
+            recipe_id: Some("tool_handle".into()),
+            forever: false,
+            count: 2,
+        };
+        session.start_automation(bench, &draft);
+        wait(&mut session, "it to start", &|s| {
+            matches!(status(s), Status::Running | Status::Finished)
+        });
+        wait(&mut session, "two handles and the run finished", &|s| {
+            status(s) == Status::Finished && logged(s) >= before + 2
+        });
+        assert_eq!(session.take_produced().iter().filter(|&&id| id == bench).count(), 2);
+        let made = session.state().station(bench).unwrap().production.clone();
+        assert!(made.iter().rev().take(2).all(|p| p.item_type == "tool_handle"));
+        // The box's update follows each craft's notice
+        wait(&mut session, "both handles in its own box", &|s| held(s, "tool_handle") == 2);
+
+        // Forever: it makes what it can, then waits for more and says so.
+        let forever = Draft {
+            forever: true,
+            ..draft
+        };
+        session.start_automation(bench, &forever);
+        wait(&mut session, "it to run dry", &|s| {
+            matches!(status(s), Status::Paused(PauseReason::MissingInput { .. }))
+        });
+        wait(&mut session, "the pause's notice", &|s| !s.automation_notes.is_empty());
+        let notes = session.take_automation_notes();
+        assert!(notes.iter().any(|(id, t, r)| *id == bench
+            && t == "workbench"
+            && matches!(r, PauseReason::MissingInput { .. })));
+
+        session.stop_automation(bench);
+        wait(&mut session, "it to stop", &|s| status(s) == Status::Stopped);
+        assert!(session.automation_refused(Instant::now()).is_none());
         session.log_out();
         let _ = std::fs::remove_dir_all(dir);
     }

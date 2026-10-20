@@ -282,6 +282,10 @@ pub struct StationMark {
     pub in_reach: bool,
     /// 0 to 1: the ring, eased toward `in_reach`.
     pub reach: f32,
+    /// How far over the ground its top is, m: where its ember floats.
+    pub top: f32,
+    /// Yours, and waiting (E4.4): why, in a few words ("Out of iron ore").
+    pub paused: Option<String>,
 }
 
 /// How near a click must land to a player's feet to pick them, in metres.
@@ -856,6 +860,11 @@ fn station_map(s: &StationMark) -> rhai::Map {
     m.insert("radius".into(), (s.radius as f64).into());
     m.insert("in_reach".into(), s.in_reach.into());
     m.insert("reach".into(), (s.reach as f64).into());
+    m.insert("top".into(), (s.top as f64).into());
+    match &s.paused {
+        Some(why) => m.insert("paused".into(), why.clone().into()),
+        None => m.insert("paused".into(), rhai::Dynamic::UNIT),
+    };
     m
 }
 
@@ -1100,6 +1109,8 @@ mod tests {
             radius: 1.5,
             in_reach: false,
             reach: 0.0,
+            top: 1.0,
+            paused: None,
         };
         *shared.stations.lock().unwrap() = vec![mark("bench", 0.0), mark("chest", 2.5)];
         let mut engine = rhai::Engine::new();

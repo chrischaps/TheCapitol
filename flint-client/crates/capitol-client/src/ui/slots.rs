@@ -721,10 +721,25 @@ pub fn pip_colour(quality: i32) -> Color32 {
 /// stack that spans grades is ringed again, in its lowest unit's grade's
 /// colour (E1.2, E1.8).
 fn pip(painter: &Painter, centre: Pos2, item: &SlotItem, fade: f32) {
-    let quality = item.quality;
+    grade_pip(painter, centre, item.quality, fade);
+    if item.units.spans_grades() {
+        painter.circle_stroke(
+            centre,
+            PIP_R + 1.75,
+            Stroke::new(1.5, pip_colour(item.min_quality).gamma_multiply(fade)),
+        );
+    }
+}
+
+/// A grade pip's radius, in points.
+const PIP_R: f32 = 4.0;
+
+/// One quality's pip, as a slot draws it, for anywhere else a quality is
+/// shown as a dot (the production log, E4.4).
+pub fn grade_pip(painter: &Painter, centre: Pos2, quality: i32, fade: f32) {
     let letter = quality_grade(quality);
     let (dark, light) = (pip_colour(quality), theme::grade_light(letter));
-    const R: f32 = 4.0;
+    const R: f32 = PIP_R;
     if letter == "A" {
         painter.circle_filled(centre, R + 2.0, dark.gamma_multiply(0.3 * fade));
     }
@@ -745,13 +760,6 @@ fn pip(painter: &Painter, centre: Pos2, item: &SlotItem, fade: f32) {
         R,
         Stroke::new(1.0, theme::PIP_EDGE.gamma_multiply(fade)),
     );
-    if item.units.spans_grades() {
-        painter.circle_stroke(
-            centre,
-            R + 1.75,
-            Stroke::new(1.5, pip_colour(item.min_quality).gamma_multiply(fade)),
-        );
-    }
 }
 
 /// How often an A's slot glints, and how long a glint lasts (s).

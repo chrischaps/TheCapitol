@@ -277,6 +277,11 @@ pub enum StateEvent {
         station_type: String,
         reason: PauseReason,
     },
+    /// Your station made something on its own (`automation_produced`,
+    /// E4.3). It's on the station's production log already.
+    AutomationProduced {
+        station_id: Uuid,
+    },
 
     /// One of your tools used its last durability and is gone (`tool_broke`,
     /// E1.4). An `inventory_updated` for its container comes with it.
@@ -817,6 +822,9 @@ impl GameState {
                         station.production.remove(0);
                     }
                     station.production.push(produced.clone());
+                    out.push(StateEvent::AutomationProduced {
+                        station_id: *station_id,
+                    });
                 }
             }
             // Its state comes in `station_automation_changed`; this is the

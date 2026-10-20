@@ -86,6 +86,9 @@ pub struct CapitolExtension {
     /// Offline, one of every station, placed once the camera settles
     /// (`--station-sample`).
     station_sample: Option<Option<capitol_core::state::GameState>>,
+    /// The station sample is `--automation-sample`'s (E4.4), and how long
+    /// it has run.
+    automation_sample: Option<f32>,
     /// `--node-sample`: offline, every kind of node, laid out round where
     /// the camera first looks once it's there.
     node_sample: bool,
@@ -180,6 +183,7 @@ impl CapitolExtension {
             houses: world::houses::Houses::default(),
             claim_sample: None,
             station_sample: None,
+            automation_sample: None,
             node_sample: false,
             node_sampled: None,
             grass: world::grass::Grass::default(),
@@ -272,6 +276,16 @@ impl CapitolExtension {
     pub fn with_station_sample(mut self, on: bool) -> Self {
         if self.session.is_none() && on {
             self.station_sample = Some(None);
+        }
+        self
+    }
+
+    /// Offline, stations at work and waiting in a row before the camera
+    /// (`--automation-sample`).
+    pub fn with_automation_sample(mut self, on: bool) -> Self {
+        if self.session.is_none() && on {
+            self.station_sample = Some(None);
+            self.automation_sample = Some(0.0);
         }
         self
     }
@@ -696,8 +710,9 @@ impl PlayerExtension for CapitolExtension {
             fire_node_changes(ctx, changes);
             let placed = session.take_placed();
             let me = self.shared.follow.lock().ok().and_then(|f| *f);
+            let produced = session.take_produced();
             self.stations
-                .update(ctx, session.state(), me, &placed, dt, &self.shared);
+                .update(ctx, session.state(), me, &placed, &produced, dt, &self.shared);
             if let Some(kind) = &self.place_on_arrival {
                 let kit = session
                     .state()
@@ -724,13 +739,23 @@ impl PlayerExtension for CapitolExtension {
             // Placed once the camera has settled on its shot.
             if sample.is_none() && ctx.clock.total_time > 0.5 {
                 let (t, c) = (ctx.camera.target, ctx.camera.position);
-                *sample = Some(crate::stations::sample([t.x, t.z], [c.x, c.z]));
+                *sample = Some(match self.automation_sample {
+                    Some(_) => crate::stations::automation_sample([t.x, t.z], [c.x, c.z]),
+                    None => crate::stations::sample([t.x, t.z], [c.x, c.z]),
+                });
             }
             if let Some(state) = sample {
                 let none = std::collections::HashSet::new();
                 let dt = ctx.clock.delta_time.min(0.1) as f32;
+                let produced = match &mut self.automation_sample {
+                    Some(t) => {
+                        *t += dt;
+                        crate::stations::automation_tick(state, *t, dt)
+                    }
+                    None => Vec::new(),
+                };
                 self.stations
-                    .update(ctx, state, None, &none, dt, &self.shared);
+                    .update(ctx, state, None, &none, &produced, dt, &self.shared);
             }
         }
         if self.session.is_none() && self.shared.visit_hall.swap(false, Ordering::Relaxed) {
@@ -1233,6 +1258,7 @@ impl PlayerExtension for CapitolExtension {
                         .craft_refused(now)
                         .or_else(|| session.move_refused(now)),
                     beside: self.inventory.rect,
+                    automation_refused: session.automation_refused(now),
                 };
                 match self
                     .station
@@ -1255,6 +1281,10 @@ impl PlayerExtension for CapitolExtension {
                         item_id,
                     }) => session.install_tool(station_id, item_id),
                     Some(StationAction::RemoveTool(id)) => session.remove_tool(id),
+                    Some(StationAction::StartAutomation { station_id, draft }) => {
+                        session.start_automation(station_id, &draft)
+                    }
+                    Some(StationAction::StopAutomation(id)) => session.stop_automation(id),
                     None => {}
                 }
                 let state = session.state();
@@ -1821,6 +1851,25 @@ fn plots(
         data.insert("title".into(), format!("Your {name} broke").into());
         data.insert("body".into(), "Worn out. Make or buy another".into());
         ctx.fire_event("tool_note", data);
+    }
+    // A station of yours waiting (E4.4), live or from the notices that
+    // waited for you to come back (#138)
+    for (station_id, station_type, reason) in session.take_automation_notes() {
+        let state = session.state();
+        let recipe = state
+            .station(station_id)
+            .and_then(|s| s.automation.as_ref())
+            .and_then(|a| state.recipe(&a.recipe_id));
+        let words = capitol_core::automation::pause_words(&reason, state.catalog(), recipe);
+        let name = state
+            .catalog()
+            .station_type(&station_type)
+            .map_or_else(|| station_type.replace('_', " "), |t| t.name.to_lowercase());
+        let mut data = toml::Table::new();
+        data.insert("title".into(), format!("Your {name} paused").into());
+        data.insert("body".into(), format!("{}. {}", words.what, words.fix).into());
+        tracing::info!("automation: your {name} paused: {}", words.what);
+        ctx.fire_event("automation_note", data);
     }
 }
 
