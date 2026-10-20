@@ -177,7 +177,7 @@ They work in daylight, go to the hall or the bazaar during their market hours, w
 | WP | What | Size | Depends |
 |---|---|---|---|
 | C2.1 [#258](https://github.com/chrischaps/TheCapitol/issues/258) | **Idle life.** The hall steps, the parks, the bridges at dusk, their own stall. | S | C1.2, C1.3 |
-| C2.2 [#259](https://github.com/chrischaps/TheCapitol/issues/259) | **The Gazette names citizens** and counts them apart from people. | S | C0.1 |
+| C2.2 [#259](https://github.com/chrischaps/TheCapitol/issues/259) | **The Gazette names citizens** and counts them apart from people. *As built:* in the prose a citizen is "Citizen Cy" (unnamed, "a citizen who keeps out of the papers"); in the lists they carry `citizen` (producers) and `seller_citizen`/`maker_citizen` (the finest sale), and Flint draws the HUD's lozenge before the name, in ink, with a key. Each edition now lists what the city made most of (`made`, top six, with `by_people`). On a day a citizen made, sold or claimed anything it also carries `shares` (`GazetteShares`: units made, Exchange Strands to sellers and deeds claimed, each whole and people's part), and the markets, deeds and work stories each end with the split ("Of the 6,300 Strands, 5,100 went to people and 1,200 to citizens"). On a day without citizens the edition reads as before. Bazaar sales aren't in the Gazette at all yet (#240), so not in the split either. | S | C0.1 |
 
 ### C3: The cascade grows
 

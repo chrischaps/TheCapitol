@@ -8,7 +8,9 @@
 //! day's busiest hands. Narrower than a broadsheet, the columns stack.
 //!
 //! Its numbers are the edition's own, as the server composed it
-//! (`engine::gazette`). This only lays them out. The day you last opened is
+//! (`engine::gazette`). This only lays them out. A citizen's name in the
+//! lists carries their mark (C2.2), the lozenge the HUD draws by their name
+//! in the world, here in ink; the prose already calls them "Citizen Cy". The day you last opened is
 //! kept in `save/gazette.toml`, by server and player, so the header's hint
 //! for a new edition doesn't come back each time you sign in.
 
@@ -373,7 +375,7 @@ fn sale_and_land(ui: &mut egui::Ui, g: &Gazette) {
     }
 }
 
-/// The day's busiest hands.
+/// The day's busiest hands, then what the city made of what.
 fn hands(ui: &mut egui::Ui, g: &Gazette) {
     section(ui, "Busy Hands");
     ui.label(ink(&g.producers_story, size::BODY));
@@ -382,12 +384,70 @@ fn hands(ui: &mut egui::Ui, g: &Gazette) {
         for (k, p) in g.producers.iter().enumerate() {
             ui.horizontal_wrapped(|ui| {
                 ui.label(dim(&format!("{}.", k + 1), size::SMALL));
+                if p.citizen {
+                    citizen_mark(ui, size::SMALL);
+                }
                 let name = p.name.as_deref().unwrap_or("Name withheld");
                 ui.label(ink(name, size::SMALL).strong());
                 ui.label(dim(&format!("{} units, chiefly {}", p.units, p.item_name), size::SMALL));
             });
         }
+        if g.producers.iter().any(|p| p.citizen) {
+            ui.horizontal(|ui| {
+                citizen_mark(ui, size::LABEL);
+                ui.label(dim("marks a citizen", size::LABEL).italics());
+            });
+        }
     }
+    if !g.made.is_empty() {
+        ui.add_space(8.0);
+        section(ui, "What the City Made");
+        made_table(ui, g);
+    }
+}
+
+/// The goods made most, with people's part of each on a day citizens worked
+/// too. On a day they didn't, people made it all, so the column is left off.
+fn made_table(ui: &mut egui::Ui, g: &Gazette) {
+    let split = g.shares.is_some();
+    egui::Grid::new("gazette_made")
+        .num_columns(if split { 3 } else { 2 })
+        .spacing([8.0, 2.0])
+        .show(ui, |ui| {
+            let heads: &[&str] = if split { &["", "Made", "By people"] } else { &["", "Made"] };
+            for head in heads {
+                ui.label(dim(head, size::LABEL).strong());
+            }
+            ui.end_row();
+            for m in &g.made {
+                ui.label(ink(&m.item_name, size::SMALL));
+                ui.label(ink(&m.units.to_string(), size::SMALL).strong());
+                if split {
+                    ui.label(dim(&m.by_people.to_string(), size::SMALL));
+                }
+                ui.end_row();
+            }
+        });
+}
+
+/// A citizen's mark (C0.2) before their name: the slender lozenge, a lamp's
+/// pane, that the HUD draws in their lantern's pale (`hud.rhai`), here as an
+/// ink outline so it reads on the paper, and a little fuller, as a thin line
+/// of ink is fainter than a lamp. `text` is the name's size.
+fn citizen_mark(ui: &mut egui::Ui, text: f32) {
+    let r = crate::labels::GLYPH_R * 1.3 * text;
+    let w = r * 0.72;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(w * 2.0 + 2.0, text), Sense::hover());
+    // Level with the middle of the lower-case letters, as in the world
+    let c = rect.center() + egui::vec2(0.0, text * 0.06);
+    let points = vec![
+        c + egui::vec2(0.0, -r),
+        c + egui::vec2(w, 0.0),
+        c + egui::vec2(0.0, r),
+        c + egui::vec2(-w, 0.0),
+    ];
+    ui.painter().add(egui::Shape::convex_polygon(points, Color32::TRANSPARENT, Stroke::new(1.2, theme::INK)));
+    response.on_hover_text("A citizen: an AI who lives, works and trades in the city, by the same rules as anyone");
 }
 
 /// Whether the Gazette prints your name, and the switch.

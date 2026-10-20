@@ -1560,6 +1560,14 @@ pub struct Gazette {
     /// Who made the most, by units gathered and crafted
     pub producers: Vec<GazetteProducer>,
     pub producers_story: String,
+    /// What the city made most of, with how much of it people made (C2.2)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub made: Vec<GazetteMade>,
+    /// How much of the day was people's and how much citizens' (C2.2).
+    /// `None` on a day no citizen made, sold or claimed anything, which
+    /// reads as it did before there were citizens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares: Option<GazetteShares>,
 }
 
 /// A day's price for one item at the Exchange: its trades' range and their
@@ -1613,6 +1621,12 @@ pub struct GazetteSale {
     /// The seller made most of the units sold themselves
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub own_work: bool,
+    /// The seller is a citizen (C0.1), named or not
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seller_citizen: bool,
+    /// The credited maker is a citizen
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub maker_citizen: bool,
 }
 
 /// One zone's deeds for the day.
@@ -1638,6 +1652,38 @@ pub struct GazetteProducer {
     pub item_type: String,
     pub item_name: String,
     pub item_units: i64,
+    /// A citizen (C0.1), named or not
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
+}
+
+/// One of the things the city made most of in a day (C2.2).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteMade {
+    pub item_type: String,
+    pub item_name: String,
+    /// Units gathered or crafted, by everyone
+    pub units: i64,
+    /// How many of them people made; citizens made the rest
+    pub by_people: i64,
+}
+
+/// A day's figures split between people and citizens (C2.2), so a reader
+/// can see how much of the economy is theirs. Each pair is the whole and
+/// people's part of it; citizens' part is the difference.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteShares {
+    /// Units gathered and crafted
+    pub made: i64,
+    pub made_by_people: i64,
+    /// Strands paid at the Exchange, and how many went to sellers who are people
+    pub sold: i64,
+    pub sold_by_people: i64,
+    /// Deeds claimed
+    pub claimed: i64,
+    pub claimed_by_people: i64,
 }
 
 /// `GET /gazette/latest` and `GET /gazette?date=`: the edition, if there is

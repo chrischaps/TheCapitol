@@ -24,7 +24,8 @@ use capitol_protocol::rest::{
     ShopSign, StockListing,
 };
 use capitol_protocol::rest::{
-    Gazette, GazetteByline, GazetteDeeds, GazetteMover, GazettePrice, GazetteProducer, GazetteResponse, GazetteSale,
+    Gazette, GazetteByline, GazetteDeeds, GazetteMade, GazetteMover, GazettePrice, GazetteProducer, GazetteResponse,
+    GazetteSale, GazetteShares,
 };
 use capitol_protocol::rules::market::{GradeRule, OrderSide, OrderStatus};
 use capitol_protocol::terrain::{
@@ -268,6 +269,8 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         GazetteSale,
         GazetteDeeds,
         GazetteProducer,
+        GazetteMade,
+        GazetteShares,
         GazetteResponse,
         GazetteByline,
         // Plots
