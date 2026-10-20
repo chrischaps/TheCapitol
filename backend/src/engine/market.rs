@@ -333,18 +333,7 @@ pub async fn stow(conn: &mut PgConnection, player_id: Uuid, stack: Uuid, into: U
             }
         }
     }
-    let (slot_count,): (i32,) = sqlx::query_as(
-        "SELECT t.slot_count FROM containers c JOIN container_types t ON t.id = c.container_type WHERE c.id = $1",
-    )
-    .bind(into)
-    .fetch_one(&mut *conn)
-    .await?;
-    let used: Vec<i32> =
-        sqlx::query_scalar("SELECT slot_index FROM items WHERE container_id = $1 AND slot_index IS NOT NULL")
-            .bind(into)
-            .fetch_all(&mut *conn)
-            .await?;
-    let Some(slot) = (0..slot_count).find(|s| !used.contains(s)) else {
+    let Some(slot) = free_slot(conn, into).await? else {
         return Ok(None);
     };
     sqlx::query("UPDATE items SET container_id = $2, slot_index = $3, owner_id = $4 WHERE id = $1")
@@ -357,9 +346,34 @@ pub async fn stow(conn: &mut PgConnection, player_id: Uuid, stack: Uuid, into: U
     Ok(Some(units))
 }
 
+/// The first free slot of container `into`, if it has one.
+pub(super) async fn free_slot(conn: &mut PgConnection, into: Uuid) -> Result<Option<i32>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT s FROM containers c
+         JOIN container_types t ON t.id = c.container_type
+         CROSS JOIN LATERAL generate_series(0, t.slot_count - 1) AS s
+         WHERE c.id = $1
+           AND NOT EXISTS (SELECT 1 FROM items i WHERE i.container_id = $1 AND i.slot_index = s)
+         ORDER BY s
+         LIMIT 1",
+    )
+    .bind(into)
+    .fetch_optional(&mut *conn)
+    .await
+}
+
 /// `player_id`'s market box, made the first time it's needed, and locked for
 /// the caller's transaction.
 pub async fn market_box(conn: &mut PgConnection, player_id: Uuid) -> Result<Uuid, sqlx::Error> {
+    // Nearly always it's there already: one round trip (#208)
+    let held: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'market_box' FOR UPDATE")
+            .bind(player_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if let Some(id) = held {
+        return Ok(id);
+    }
     sqlx::query(
         "INSERT INTO containers (id, container_type, owner_id) VALUES ($1, 'market_box', $2)
          ON CONFLICT (owner_id) WHERE container_type = 'market_box' DO NOTHING",
@@ -374,7 +388,8 @@ pub async fn market_box(conn: &mut PgConnection, player_id: Uuid) -> Result<Uuid
         .await
 }
 
-type OrderRow = (
+/// A `market_orders` row as [`ORDER_COLUMNS`] selects it
+pub(super) type OrderRow = (
     Uuid,
     Uuid,
     String,
@@ -392,17 +407,29 @@ type OrderRow = (
     DateTime<Utc>,
 );
 
+/// The columns of an [`OrderRow`], in order
+pub(super) const ORDER_COLUMNS: &str = "id, player_id, side, item_type, min_grade, grade_rule, price, quantity_total,
+     quantity_remaining, status, escrow_item_id, escrow_strands, fee, created_at, expires_at";
+
 /// The order `order_id`, with the units still in its escrow.
 pub async fn load(conn: &mut PgConnection, order_id: Uuid) -> Result<Option<MarketOrder>, sqlx::Error> {
-    let row: Option<OrderRow> = sqlx::query_as(
-        "SELECT id, player_id, side, item_type, min_grade, grade_rule, price, quantity_total,
-                quantity_remaining, status, escrow_item_id, escrow_strands, fee, created_at, expires_at
-         FROM market_orders WHERE id = $1",
-    )
-    .bind(order_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some((
+    let row: Option<OrderRow> = sqlx::query_as(&format!("SELECT {ORDER_COLUMNS} FROM market_orders WHERE id = $1"))
+        .bind(order_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let units = match row.10 {
+        Some(stack) => units::units_of(conn, stack).await?,
+        None => Units::new(),
+    };
+    order_from_row(row, units).map(Some)
+}
+
+/// The order `row` holds, with `units` in its escrow.
+pub(super) fn order_from_row(row: OrderRow, units: Units) -> Result<MarketOrder, sqlx::Error> {
+    let (
         id,
         player_id,
         side,
@@ -413,21 +440,14 @@ pub async fn load(conn: &mut PgConnection, order_id: Uuid) -> Result<Option<Mark
         quantity_total,
         quantity_remaining,
         status,
-        escrow_item_id,
+        _escrow_item_id,
         escrow_strands,
         fee,
         created_at,
         expires_at,
-    )) = row
-    else {
-        return Ok(None);
-    };
-    let units = match escrow_item_id {
-        Some(stack) => units::units_of(conn, stack).await?,
-        None => Units::new(),
-    };
+    ) = row;
     let bad = |what: &str, value: &str| sqlx::Error::Decode(format!("market_orders.{what} is {value:?}").into());
-    Ok(Some(MarketOrder {
+    Ok(MarketOrder {
         id,
         player_id,
         side: OrderSide::parse(&side).ok_or_else(|| bad("side", &side))?,
@@ -443,7 +463,7 @@ pub async fn load(conn: &mut PgConnection, order_id: Uuid) -> Result<Option<Mark
         fee,
         created_at,
         expires_at,
-    }))
+    })
 }
 
 /// These need the local Postgres (`docker-compose up -d`). Run them with

@@ -128,8 +128,8 @@ pub async fn subtract_strands_in(
 }
 
 /// Add `amount` to the player's balance, or take it off if `subtract`, and
-/// write the audit record. Locks the player row with SELECT FOR UPDATE until the
-/// transaction ends. Returns the balance before and after.
+/// write the audit record, in one statement (#208). The update locks the
+/// player row until the transaction ends. Returns the balance before and after.
 async fn apply(
     conn: &mut PgConnection,
     player_id: Uuid,
@@ -143,51 +143,47 @@ async fn apply(
         return Err("Amount must be positive".to_string());
     }
     let amount = if subtract { -amount } else { amount };
+    // The balances the move works from: it neither goes below 0 nor
+    // overflows. The bounds are in the WHERE, so a refusal changes nothing
+    // and leaves the caller's transaction usable.
+    let (lowest, highest) = (-amount, if subtract { i64::MAX } else { i64::MAX - amount });
 
-    // Lock row and get current balance
-    let current_balance: (i64,) = sqlx::query_as(
-        "SELECT strand_balance FROM players WHERE id = $1 FOR UPDATE"
-    )
-    .bind(player_id)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(|e| format!("Player not found: {}", e))?;
-
-    let balance_before = current_balance.0;
-
-    let balance_after = balance_before
-        .checked_add(amount)
-        .ok_or_else(|| format!("Balance would overflow: {} + {}", balance_before, amount))?;
-
-    if balance_after < 0 {
-        return Err(format!("Insufficient strands: have {}, need {}", balance_before, -amount));
-    }
-
-    // Update balance
-    sqlx::query("UPDATE players SET strand_balance = $1 WHERE id = $2")
-        .bind(balance_after)
-        .bind(player_id)
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| format!("Failed to update balance: {}", e))?;
-
-    // Insert audit record (negative amount for subtraction)
-    sqlx::query(
-        "INSERT INTO currency_transactions (player_id, amount, balance_before, balance_after, transaction_type, reference_id, description)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)"
+    // Update balance and insert audit record (negative amount for subtraction)
+    let moved: Option<i64> = sqlx::query_scalar(
+        "WITH moved AS (
+             UPDATE players SET strand_balance = strand_balance + $2
+             WHERE id = $1 AND strand_balance BETWEEN $3 AND $4
+             RETURNING strand_balance
+         )
+         INSERT INTO currency_transactions (player_id, amount, balance_before, balance_after, transaction_type, reference_id, description)
+         SELECT $1, $2, strand_balance - $2, strand_balance, $5, $6, $7 FROM moved
+         RETURNING balance_after",
     )
     .bind(player_id)
     .bind(amount)
-    .bind(balance_before)
-    .bind(balance_after)
+    .bind(lowest)
+    .bind(highest)
     .bind(tx_type.as_str())
     .bind(reference_id)
     .bind(description)
-    .execute(&mut *conn)
+    .fetch_optional(&mut *conn)
     .await
-    .map_err(|e| format!("Failed to insert audit record: {}", e))?;
+    .map_err(|e| format!("Failed to update balance: {}", e))?;
+    if let Some(balance_after) = moved {
+        return Ok((balance_after - amount, balance_after));
+    }
 
-    Ok((balance_before, balance_after))
+    // Refused: say why
+    let balance_before: i64 = sqlx::query_scalar("SELECT strand_balance FROM players WHERE id = $1")
+        .bind(player_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| format!("Player not found: {}", e))?
+        .ok_or_else(|| "Player not found".to_string())?;
+    if balance_before < lowest {
+        return Err(format!("Insufficient strands: have {}, need {}", balance_before, -amount));
+    }
+    Err(format!("Balance would overflow: {} + {}", balance_before, amount))
 }
 
 /// Transfer strands from one player to another atomically.
@@ -344,5 +340,44 @@ pub async fn balances_of(pool: &PgPool, players: &[Uuid]) -> Result<Vec<(Uuid, i
 pub fn announce_balances(events: &broadcast::Sender<GameEvent>, balances: impl IntoIterator<Item = (Uuid, i64)>) {
     for (player_id, new_balance) in balances {
         let _ = events.send(GameEvent::CurrencyChanged { player_id, new_balance });
+    }
+}
+
+/// These need the local Postgres (`docker-compose up -d`). Run them with
+/// `cargo test currency -- --ignored`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::market::tests::{balance, player};
+
+    /// A move is one statement (#208): the balance and its audit row together,
+    /// and a refusal writes neither and leaves the caller's transaction usable.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_move_writes_balance_and_audit_and_a_refusal_writes_nothing(db: PgPool) {
+        let ada = player(&db, "ada", 100).await;
+        let mut tx = db.begin().await.unwrap();
+        let refused = subtract_strands_in(&mut tx, ada.id, 101, TransactionType::MarketEscrow, None, None).await;
+        assert_eq!(refused, Err("Insufficient strands: have 100, need 101".to_string()));
+        let overflow = add_strands_in(&mut tx, ada.id, i64::MAX, TransactionType::AdminAdjustment, None, None).await;
+        assert!(overflow.unwrap_err().starts_with("Balance would overflow"));
+        let missing = add_strands_in(&mut tx, Uuid::new_v4(), 5, TransactionType::AdminAdjustment, None, None).await;
+        assert_eq!(missing, Err("Player not found".to_string()));
+        // The transaction goes on
+        let after = subtract_strands_in(&mut tx, ada.id, 30, TransactionType::MarketEscrow, Some("bid"), None).await;
+        assert_eq!(after, Ok(70));
+        assert_eq!(add_strands_in(&mut tx, ada.id, 5, TransactionType::MarketRefund, None, None).await, Ok(75));
+        tx.commit().await.unwrap();
+
+        assert_eq!(balance(&db, ada.id).await, 75);
+        let audit: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "SELECT amount, balance_before, balance_after, transaction_type
+             FROM currency_transactions WHERE player_id = $1 ORDER BY balance_after",
+        )
+        .bind(ada.id)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(audit, vec![(-30, 100, 70, "market_escrow".into()), (5, 70, 75, "market_refund".into())]);
     }
 }

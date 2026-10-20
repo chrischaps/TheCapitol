@@ -30,19 +30,25 @@ pub async fn units_of(conn: &mut PgConnection, item_id: Uuid) -> Result<Units, s
     Ok(Units::from_pairs(rows.into_iter().map(|(q, c)| (q as i32, c))))
 }
 
+/// `units` as two arrays, qualities and counts, for `unnest`: one statement
+/// for every quality, not a round trip each (#208).
+fn columns(units: &Units) -> (Vec<i16>, Vec<i32>) {
+    units.pairs().map(|(quality, count)| (quality as i16, count)).unzip()
+}
+
 /// Put `units` onto the stack `item_id`. Fails rather than overflow a count.
 pub async fn add(conn: &mut PgConnection, item_id: Uuid, units: &Units) -> Result<(), sqlx::Error> {
-    for (quality, count) in units.pairs() {
-        sqlx::query(
-            "INSERT INTO item_units (item_id, quality, count) VALUES ($1, $2, $3)
-             ON CONFLICT (item_id, quality) DO UPDATE SET count = item_units.count + EXCLUDED.count",
-        )
-        .bind(item_id)
-        .bind(quality as i16)
-        .bind(count)
-        .execute(&mut *conn)
-        .await?;
-    }
+    let (qualities, counts) = columns(units);
+    sqlx::query(
+        "INSERT INTO item_units (item_id, quality, count)
+         SELECT $1, q, c FROM unnest($2::smallint[], $3::integer[]) AS t(q, c)
+         ON CONFLICT (item_id, quality) DO UPDATE SET count = item_units.count + EXCLUDED.count",
+    )
+    .bind(item_id)
+    .bind(qualities)
+    .bind(counts)
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
@@ -99,28 +105,30 @@ pub async fn take(
     }
 }
 
-async fn write_take(conn: &mut PgConnection, item_id: Uuid, taken: &Units, left: &Units) -> Result<(), sqlx::Error> {
+/// Write a take the caller has already worked out: `taken` off the stack
+/// `item_id`, whose units (locked) less `taken` are `left`. Deletes the stack
+/// when `left` is empty.
+pub async fn write_take(conn: &mut PgConnection, item_id: Uuid, taken: &Units, left: &Units) -> Result<(), sqlx::Error> {
     if left.is_empty() {
         sqlx::query("DELETE FROM items WHERE id = $1").bind(item_id).execute(&mut *conn).await?;
         return Ok(());
     }
-    for (quality, count) in taken.pairs() {
-        sqlx::query(
-            "UPDATE item_units SET count = count - $3 WHERE item_id = $1 AND quality = $2 AND count > $3",
-        )
-        .bind(item_id)
-        .bind(quality as i16)
-        .bind(count)
-        .execute(&mut *conn)
-        .await?;
-        if left.count_at(quality) == 0 {
-            sqlx::query("DELETE FROM item_units WHERE item_id = $1 AND quality = $2")
-                .bind(item_id)
-                .bind(quality as i16)
-                .execute(&mut *conn)
-                .await?;
-        }
-    }
+    // A quality taken whole goes and the rest go down, in one statement. The
+    // rows are disjoint, and the summaries' trigger runs after both.
+    let (qualities, counts) = columns(taken);
+    sqlx::query(
+        "WITH t(q, c) AS (SELECT * FROM unnest($2::smallint[], $3::integer[])),
+         gone AS (
+             DELETE FROM item_units u USING t WHERE u.item_id = $1 AND u.quality = t.q AND u.count = t.c
+         )
+         UPDATE item_units u SET count = u.count - t.c
+         FROM t WHERE u.item_id = $1 AND u.quality = t.q AND u.count > t.c",
+    )
+    .bind(item_id)
+    .bind(qualities)
+    .bind(counts)
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
