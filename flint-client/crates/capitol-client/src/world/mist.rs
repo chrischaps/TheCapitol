@@ -18,11 +18,11 @@
 //! The mist is lit like any surface, so the low sun warms it and the night
 //! leaves it grey.
 //!
+//! The mist casts no shadow (`material.cast_shadows = false`, #232), so it
+//! leaves no shade on the ground at noon when it can't be seen.
+//!
 //! Sheets are a workaround: Flint's height fog does nothing (#233), and
 //! with it the mist would be the hour's `fog_height_*` and fill the air.
-//! They also cast shadows, as every transparent mesh does in Flint
-//! (#232), even at noon when they can't be seen. The shadow falls nearly
-//! under them, since they hang close over the ground.
 
 use crate::coords::{layer, to_world};
 use crate::world::ground::value_noise;

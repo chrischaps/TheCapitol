@@ -469,7 +469,7 @@ impl CapitolExtension {
 
     /// The valleys' mist as thick as the hour and the camera's height say
     /// (`Atmosphere::mist`), written to its entity's opacity when it moves
-    /// a step.
+    /// a step. It casts no shadow, however thick (#232).
     fn mist_in_place(&mut self, ctx: &mut ExtensionCtx) {
         let mist = (self.atmosphere.mist() * 100.0).round() / 100.0;
         if self.mist_shown == Some(mist) {
@@ -480,6 +480,7 @@ impl CapitolExtension {
         };
         let mut table = toml::Table::new();
         table.insert("opacity".into(), f64::from(mist).into());
+        table.insert("cast_shadows".into(), false.into());
         match ctx.world.merge_component(id, "material", table.into()) {
             Ok(()) => self.mist_shown = Some(mist),
             Err(e) => tracing::warn!("mist: can't write its opacity: {e}"),
