@@ -52,12 +52,17 @@ pub enum ClientMessage {
         target_slot: i32,
     },
     /// Split `quantity` off the stack `item_id` into the empty slot `to_slot`
-    /// of the same container (E1.2). Each unit keeps its quality (E1.8).
+    /// of `to_container_id`, or of its own container without one (E1.2,
+    /// #190). Each unit keeps its quality (E1.8).
     #[serde(rename = "split_stack")]
     SplitStack {
         item_id: String,
         quantity: i32,
         to_slot: i32,
+        /// Another container to split into, checked as `move_item` checks its
+        /// target (#190)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_container_id: Option<String>,
         /// Which units, as `[quality, count]` pairs adding up to `quantity`
         /// (E1.8); without it the lowest go first.
         #[serde(default, skip_serializing_if = "Option::is_none")]

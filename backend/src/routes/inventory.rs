@@ -216,7 +216,8 @@ pub async fn move_item(
     Ok(Json(response))
 }
 
-/// Split part of a stack into an empty slot of the same container (E1.2).
+/// Split part of a stack into an empty slot of its own container, or of
+/// `to_container_id` (E1.2, #190). Both are checked as a move's are.
 /// `qualities` names which units, as `[quality, count]` pairs adding up to
 /// `quantity`; without it the lowest go. Every unit keeps its quality (E1.8).
 #[utoipa::path(
@@ -251,8 +252,20 @@ pub async fn split_stack(
         .ok_or_else(|| AppError::BadRequest("That item isn't in a container".into()))?;
     let at = live_position(&state.game, player_id).await;
     check_container_access(&state.db, player_id, container_id, at).await?;
+    let to_container = req.to_container_id.unwrap_or(container_id);
+    if to_container != container_id {
+        check_container_access(&state.db, player_id, to_container, at).await?;
+    }
 
-    let new = slot_moves::split(&state.db, player_id, &source, req.quantity, req.to_slot, req.qualities.as_ref())
+    let new = slot_moves::split(
+        &state.db,
+        player_id,
+        &source,
+        req.quantity,
+        to_container,
+        req.to_slot,
+        req.qualities.as_ref(),
+    )
         .await?
         .map_err(|e| AppError::BadRequest(e.message().into()))?;
     let item_type: Option<ItemType> =
@@ -263,5 +276,5 @@ pub async fn split_stack(
     let item = new
         .to_slot_item(item_type.as_ref())
         .ok_or_else(|| AppError::Internal("A split stack has no slot".into()))?;
-    Ok(Json(SplitStackResponse { item, container_id }))
+    Ok(Json(SplitStackResponse { item, container_id: to_container }))
 }

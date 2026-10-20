@@ -553,7 +553,8 @@ impl SlotItem {
 }
 
 /// `POST /items/{id}/split`: split `quantity` off the stack into the empty
-/// slot `to_slot` of the same container (E1.2). `qualities` names which units
+/// slot `to_slot` of `to_container_id`, or of the stack's own container
+/// without one (E1.2, #190). A split never merges. `qualities` names which units
 /// (E1.8), as `[quality, count]` pairs that add up to `quantity`; without it
 /// the lowest go first.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -561,6 +562,9 @@ impl SlotItem {
 pub struct SplitStackRequest {
     pub quantity: i32,
     pub to_slot: i32,
+    /// Another container to split into, checked as a move's target is (#190)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_container_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qualities: Option<Units>,
 }
@@ -570,7 +574,8 @@ pub struct SplitStackRequest {
 pub struct SplitStackResponse {
     /// The new stack, in `to_slot`
     pub item: SlotItem,
-    /// The container both stacks are in
+    /// The container the new stack is in: the request's `to_container_id`,
+    /// or the source's own
     pub container_id: Uuid,
 }
 

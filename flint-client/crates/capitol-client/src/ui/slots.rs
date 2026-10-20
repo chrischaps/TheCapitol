@@ -19,14 +19,14 @@
 //! Nothing changes here until the refetch that follows (`poll.rs`), so the
 //! grid never shows a state the server didn't.
 //!
-//! **Splitting (E1.2, E1.8).** A shift-drag onto an empty slot of the same
-//! grid opens a count field under the slot, set to half the stack: the
+//! **Splitting (E1.2, E1.8).** A shift-drag onto an empty slot of any grid,
+//! its own or another (#190: 2 of 12 fiber into the crafting input, 5 into
+//! a chest), opens a count field under the slot, set to half the stack: the
 //! lowest units go. A stack of more than one quality also gets a row per
 //! quality, each with its own count, to take out exactly those
 //! ([`Move::qualities`]). Enter or Split sends the move with
 //! [`Move::split`]; Escape or ✕ lets it go.
-//! Anywhere else, a shift-drag is a plain drag: the server splits only
-//! within a container ([#190](https://github.com/chrischaps/TheCapitol/issues/190)).
+//! Onto a stack, a shift-drag is a plain drag: a split never merges.
 //! A capture can't hold Shift for egui (#189), so the rig below checks it.
 //!
 //! **Tools (E1.7)** don't stack, so in place of the quantity they carry a
@@ -62,8 +62,8 @@ pub struct Move {
     pub item_id: Uuid,
     pub target_container_id: Uuid,
     pub target_slot: i32,
-    /// Split this many off into the slot, an empty one of the same
-    /// container, rather than moving the whole stack (`split_stack`, E1.2).
+    /// Split this many off into the slot, an empty one of any container,
+    /// rather than moving the whole stack (`split_stack`, E1.2, #190).
     pub split: Option<i32>,
     /// Which units the split takes, adding up to `split` (E1.8). `None`
     /// takes the lowest.
@@ -436,7 +436,7 @@ impl Slot<'_> {
             return (None, right);
         }
         let moved = response.dnd_release_payload::<Held>().and_then(|held| {
-            if held.split && held.container_id == self.container_id && self.item.is_none() {
+            if held.split && self.item.is_none() {
                 // Ask how many first: the grid draws the field (`split_field`)
                 PendingSplit::set(
                     ui.ctx(),
@@ -1411,7 +1411,7 @@ mod tests {
         assert!(rig.moves.is_empty());
     }
 
-    /// Onto a stack, into another grid, or of a single item: a plain drag
+    /// Onto a stack, or of a single item: a plain drag
     #[test]
     fn a_shift_drag_that_cant_split_moves() {
         let mut rig = Rig::new();
@@ -1419,14 +1419,38 @@ mod tests {
         let fiber = rig.inventory.slot(0).unwrap().item_id;
         let rope = rig.inventory.slot(3).unwrap().item_id;
         rig.shift = true;
-        rig.drag((inv, 0), (input, 0)); // another grid
+        rig.drag((inv, 0), (input, 1)); // onto the input's fiber
         rig.drag((inv, 3), (inv, 8)); // one rope
         rig.shift = false;
         assert_eq!(
             rig.moves,
-            [Move::whole(fiber, input, 0), Move::whole(rope, inv, 8)]
+            [Move::whole(fiber, input, 1), Move::whole(rope, inv, 8)]
         );
         assert!(PendingSplit::get(&rig.ctx).is_none());
+    }
+
+    /// A shift-drag to an empty slot of another grid splits into it: the
+    /// field opens under that grid's slot and names its container (#190)
+    #[test]
+    fn a_shift_drag_into_another_grid_splits() {
+        let mut rig = Rig::new();
+        let (inv, input) = (rig.inventory.id, rig.input.id);
+        let fiber = rig.inventory.slot(0).unwrap().item_id;
+        rig.shift = true;
+        rig.drag((inv, 0), (input, 0));
+        rig.shift = false;
+        assert!(rig.moves.is_empty(), "it waits on the count");
+        let pending = PendingSplit::get(&rig.ctx).unwrap();
+        assert_eq!((pending.container_id, pending.slot), (input, 0));
+
+        rig.frame(vec![key(egui::Key::Enter)]);
+        assert_eq!(
+            rig.moves,
+            [Move {
+                split: Some(6),
+                ..Move::whole(fiber, input, 0)
+            }]
+        );
     }
 
     #[test]

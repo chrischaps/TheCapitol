@@ -666,12 +666,13 @@ impl Session {
             return;
         }
         let request = match m.split {
-            // A split goes into the same container: the server knows which
+            // A split goes into any grid's empty slot, its own or another (#190)
             Some(quantity) => RestRequest::SplitStack {
                 item_id: m.item_id,
                 request: SplitStackRequest {
                     quantity,
                     to_slot: m.target_slot,
+                    to_container_id: Some(m.target_container_id),
                     qualities: m.qualities,
                 },
             },

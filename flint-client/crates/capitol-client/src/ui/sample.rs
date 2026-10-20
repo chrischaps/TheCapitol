@@ -331,20 +331,25 @@ fn apply(containers: &mut [Container; 3], m: Move) {
     containers[tc].slots[ts] = Some(source);
 }
 
-/// `quantity` of `m.item_id` into the empty `m.target_slot` of its own
-/// container: `m.qualities`, or the lowest.
+/// `quantity` of `m.item_id` into the empty `m.target_slot` of
+/// `m.target_container_id`, its own container or another (#190):
+/// `m.qualities`, or the lowest.
 fn split(containers: &mut [Container; 3], m: &Move, quantity: i32) {
-    let Some(c) = containers
-        .iter_mut()
-        .find(|c| c.id == m.target_container_id)
+    let Some(tc) = containers
+        .iter()
+        .position(|c| c.id == m.target_container_id)
     else {
         return;
     };
     let ts = m.target_slot as usize;
-    if c.slots.get(ts).is_none_or(|s| s.is_some()) {
+    if containers[tc].slots.get(ts).is_none_or(|s| s.is_some()) {
         return;
     }
-    let Some(source) = c.slots.iter_mut().flatten().find(|i| i.item_id == m.item_id) else {
+    let Some(source) = containers
+        .iter_mut()
+        .flat_map(|c| c.slots.iter_mut().flatten())
+        .find(|i| i.item_id == m.item_id)
+    else {
         return;
     };
     if quantity < 1 || quantity >= source.quantity {
@@ -364,7 +369,7 @@ fn split(containers: &mut [Container; 3], m: &Move, quantity: i32) {
     // A new id the sample won't have used: the source's, marked with the slot
     new.item_id = Uuid::from_u128(source.item_id.as_u128() | ((ts as u128 + 1) << 64));
     new.slot_index = ts as i32;
-    c.slots[ts] = Some(new);
+    containers[tc].slots[ts] = Some(new);
 }
 
 #[cfg(test)]
@@ -454,5 +459,14 @@ mod tests {
         }
         assert_eq!(at(&s, 0, 1).map(|(k, q, n)| (k.to_string(), q, n)), before);
         assert_eq!(at(&s, 0, 5), None);
+
+        // Into another container: the lowest one goes to the crafting input (#190)
+        let m = Move {
+            split: Some(1),
+            ..mv(&s, (0, 1), (1, 2))
+        };
+        apply(&mut s.containers, m);
+        assert_eq!(at(&s, 1, 2), Some(("fiber", 81, 1)));
+        assert_eq!(s.containers[0].slot(1).unwrap().units, Units::uniform(2, 92));
     }
 }

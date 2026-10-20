@@ -413,21 +413,39 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                     }
                                 }
-                                ClientMessage::SplitStack { item_id, quantity, to_slot, qualities } => {
-                                    let Ok(item_uuid) = Uuid::parse_str(&item_id) else {
-                                        let _ = sender.send(Message::Text(
-                                            serde_json::to_string(&ServerMessage::Error {
-                                                message: "Invalid item ID".to_string(),
-                                                command: command.into(),
-                                            }).unwrap().into()
-                                        )).await;
-                                        continue;
+                                ClientMessage::SplitStack { item_id, quantity, to_slot, to_container_id, qualities } => {
+                                    let parsed = Uuid::parse_str(&item_id)
+                                        .map_err(|_| "Invalid item ID")
+                                        .and_then(|item| match to_container_id.as_deref().map(Uuid::parse_str) {
+                                            None => Ok((item, None)),
+                                            Some(Ok(to)) => Ok((item, Some(to))),
+                                            Some(Err(_)) => Err("Invalid container ID"),
+                                        });
+                                    let (item_uuid, to_container) = match parsed {
+                                        Ok(ids) => ids,
+                                        Err(message) => {
+                                            let _ = sender.send(Message::Text(
+                                                serde_json::to_string(&ServerMessage::Error {
+                                                    message: message.to_string(),
+                                                    command: command.into(),
+                                                }).unwrap().into()
+                                            )).await;
+                                            continue;
+                                        }
                                     };
-                                    let msg = match handle_split_stack(&state, player_id, item_uuid, quantity, to_slot, qualities.as_ref()).await {
-                                        Ok(container_id) => ServerMessage::InventoryUpdated { player_id, container_id },
-                                        Err(message) => ServerMessage::Error { message, command: command.into() },
-                                    };
-                                    let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                    match handle_split_stack(&state, player_id, item_uuid, quantity, to_container, to_slot, qualities.as_ref()).await {
+                                        // Into another container, both changed (#190)
+                                        Ok((source, target)) => {
+                                            for container_id in moved_containers(Some(source), target) {
+                                                let msg = ServerMessage::InventoryUpdated { player_id, container_id };
+                                                let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                            }
+                                        }
+                                        Err(message) => {
+                                            let msg = ServerMessage::Error { message, command: command.into() };
+                                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                        }
+                                    }
                                 }
                                 // M4: Stations
                                 ClientMessage::PlaceStation { station_type, x, y, kit_item_id } => {
@@ -1388,17 +1406,19 @@ async fn handle_move_item(
     Ok(source_item.container_id)
 }
 
-/// Split `quantity` off a stack into the empty `to_slot` of its container
-/// (E1.2): the units `qualities` names, or the lowest (E1.8). Returns the
-/// container, which is the only one that changed.
+/// Split `quantity` off a stack into the empty `to_slot` of its container,
+/// or of `to_container` (E1.2, #190): the units `qualities` names, or the
+/// lowest (E1.8). Both containers are checked as a move's are. Returns the
+/// source's container and the target's, which may be the same.
 async fn handle_split_stack(
     state: &AppState,
     player_id: Uuid,
     item_id: Uuid,
     quantity: i32,
+    to_container: Option<Uuid>,
     to_slot: i32,
     qualities: Option<&Units>,
-) -> Result<Uuid, String> {
+) -> Result<(Uuid, Uuid), String> {
     let source = movable_item(&state.db, player_id, item_id)
         .await
         .map_err(|e| e.message())?;
@@ -1409,11 +1429,17 @@ async fn handle_split_stack(
     check_container_access(&state.db, player_id, container_id, at)
         .await
         .map_err(|e| e.message())?;
-    crate::engine::slot_moves::split(&state.db, player_id, &source, quantity, to_slot, qualities)
+    let to_container = to_container.unwrap_or(container_id);
+    if to_container != container_id {
+        check_container_access(&state.db, player_id, to_container, at)
+            .await
+            .map_err(|e| e.message())?;
+    }
+    crate::engine::slot_moves::split(&state.db, player_id, &source, quantity, to_container, to_slot, qualities)
         .await
         .map_err(|e| format!("Database error: {}", e))?
         .map_err(|e| e.message().to_string())?;
-    Ok(container_id)
+    Ok((container_id, to_container))
 }
 
 /// The containers a move changed, each once: the target, then the source if

@@ -127,16 +127,18 @@ impl SplitError {
     }
 }
 
-/// Split `quantity` off `source` into the empty slot `to_slot` of its own
-/// container, as a new stack the mover owns. `qualities` names the units,
+/// Split `quantity` off `source` into the empty slot `to_slot` of
+/// `to_container`, its own or another (#190), as a new stack the mover owns.
+/// It goes only into an empty slot, so a split never merges. `qualities` names the units,
 /// adding up to `quantity`; without it the lowest go (`Pick::default`). Every
 /// unit keeps its quality (D2). Returns the new stack. The callers check the
-/// mover may use the source first, as for a move.
+/// mover may use both containers first, as for a move.
 pub async fn split(
     db: &PgPool,
     mover: Uuid,
     source: &Item,
     quantity: i32,
+    to_container: Uuid,
     to_slot: i32,
     qualities: Option<&Units>,
 ) -> Result<Result<Item, SplitError>, sqlx::Error> {
@@ -170,16 +172,17 @@ pub async fn split(
         "SELECT ct.slot_count FROM containers c
          JOIN container_types ct ON ct.id = c.container_type WHERE c.id = $1",
     )
-    .bind(container_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    .bind(to_container)
+    .fetch_optional(&mut *tx)
+    .await?
+    .unwrap_or(0);
     if to_slot < 0 || to_slot >= slot_count {
         return Ok(Err(SplitError::BadSlot));
     }
     let taken: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM items WHERE container_id = $1 AND slot_index = $2)",
     )
-    .bind(container_id)
+    .bind(to_container)
     .bind(to_slot)
     .fetch_one(&mut *tx)
     .await?;
@@ -195,7 +198,7 @@ pub async fn split(
         NewStack {
             item_type: &item_type,
             owner_id: Some(mover),
-            container_id: Some(container_id),
+            container_id: Some(to_container),
             slot_index: Some(to_slot),
             durability: None,
         },
@@ -416,14 +419,14 @@ mod tests {
         let stack = item(&db, stack_of(&db, ada.id, ada.inventory, 0, "fiber", &mixed).await).await;
         assert_eq!(stack.quality, 70);
 
-        let ninety = split(&db, ada.id, &stack, 1, 5, Some(&Units::uniform(1, 90))).await.unwrap().unwrap();
+        let ninety = split(&db, ada.id, &stack, 1, ada.inventory, 5, Some(&Units::uniform(1, 90))).await.unwrap().unwrap();
         assert_eq!((ninety.quantity, ninety.quality, ninety.slot_index), (1, 90, Some(5)));
         assert_eq!(ninety.units, Units::uniform(1, 90));
         assert_eq!(ninety.owner_id, Some(ada.id));
         let left = units(&db, stack.id).await;
         assert_eq!((left.count(), left.mean()), (3, Some(63)));
 
-        let lowest = split(&db, ada.id, &stack, 2, 6, None).await.unwrap().unwrap();
+        let lowest = split(&db, ada.id, &stack, 2, ada.inventory, 6, None).await.unwrap().unwrap();
         assert_eq!(lowest.units, Units::uniform(2, 50));
         assert_eq!(units(&db, stack.id).await, Units::uniform(1, 90));
         assert_eq!(all_in(&db, ada.inventory, "fiber").await, mixed, "no unit lost its quality");
@@ -436,7 +439,7 @@ mod tests {
         let fiber = stack(&db, ada.id, ada.inventory, 0, "fiber", 5).await;
         stack(&db, ada.id, ada.inventory, 1, "rope", 1).await;
 
-        let refused = |q, slot| split(&db, ada.id, &fiber, q, slot, None);
+        let refused = |q, slot| split(&db, ada.id, &fiber, q, ada.inventory, slot, None);
         assert_eq!(refused(0, 2).await.unwrap().unwrap_err(), SplitError::BadQuantity);
         assert_eq!(refused(5, 2).await.unwrap().unwrap_err(), SplitError::BadQuantity);
         assert_eq!(refused(2, 1).await.unwrap().unwrap_err(), SplitError::SlotTaken);
@@ -444,8 +447,43 @@ mod tests {
         assert_eq!(refused(2, 10_000).await.unwrap().unwrap_err(), SplitError::BadSlot);
         let nineties = Units::uniform(2, 90);
         let short = Units::uniform(2, 60);
-        assert_eq!(split(&db, ada.id, &fiber, 2, 2, Some(&nineties)).await.unwrap().unwrap_err(), SplitError::NotHeld);
-        assert_eq!(split(&db, ada.id, &fiber, 3, 2, Some(&short)).await.unwrap().unwrap_err(), SplitError::BadQuantity);
+        assert_eq!(split(&db, ada.id, &fiber, 2, ada.inventory, 2, Some(&nineties)).await.unwrap().unwrap_err(), SplitError::NotHeld);
+        assert_eq!(split(&db, ada.id, &fiber, 3, ada.inventory, 2, Some(&short)).await.unwrap().unwrap_err(), SplitError::BadQuantity);
+        assert_eq!(units(&db, fiber.id).await, Units::uniform(5, 60));
+    }
+
+    /// A split into another container: the new stack is there, the rest stays
+    /// put, and every unit keeps its quality (#190)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_split_can_go_into_another_container(db: PgPool) {
+        let ada = player(&db).await;
+        let mixed = Units::from_pairs([(50, 3), (90, 2)]);
+        let stack = item(&db, stack_of(&db, ada.id, ada.inventory, 0, "fiber", &mixed).await).await;
+
+        let two = split(&db, ada.id, &stack, 2, ada.input, 3, None).await.unwrap().unwrap();
+
+        assert_eq!((two.container_id, two.slot_index), (Some(ada.input), Some(3)));
+        assert_eq!(two.units, Units::uniform(2, 50));
+        assert_eq!(place(&db, stack.id).await, (ada.inventory, 0));
+        assert_eq!(units(&db, stack.id).await, Units::from_pairs([(50, 1), (90, 2)]));
+        assert_eq!(all_in(&db, ada.input, "fiber").await, Units::uniform(2, 50));
+    }
+
+    /// Into another container a split still wants an empty slot inside it:
+    /// onto a stack it never merges
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_split_into_another_container_wants_an_empty_slot(db: PgPool) {
+        let ada = player(&db).await;
+        let fiber = stack(&db, ada.id, ada.inventory, 0, "fiber", 5).await;
+        stack(&db, ada.id, ada.input, 0, "fiber", 1).await;
+
+        let refused = |slot| split(&db, ada.id, &fiber, 2, ada.input, slot, None);
+        assert_eq!(refused(0).await.unwrap().unwrap_err(), SplitError::SlotTaken);
+        assert_eq!(refused(10_000).await.unwrap().unwrap_err(), SplitError::BadSlot);
+        let nowhere = split(&db, ada.id, &fiber, 2, Uuid::new_v4(), 0, None).await.unwrap();
+        assert_eq!(nowhere.unwrap_err(), SplitError::BadSlot);
         assert_eq!(units(&db, fiber.id).await, Units::uniform(5, 60));
     }
 }
