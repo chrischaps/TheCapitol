@@ -15,7 +15,7 @@
 //! markers.
 
 use crate::atmosphere::Atmosphere;
-use crate::daylight::{self, PlotGlow};
+use crate::daylight;
 use crate::entities::Players;
 use crate::juice_sample::JuiceSample;
 use crate::nodes::{self, Nodes};
@@ -76,9 +76,9 @@ pub struct CapitolExtension {
     /// `TerrainPlot::id`, which a claimable plot names as
     /// `PlotInfo::terrain_id` (B7).
     lots: HashMap<String, Lot>,
-    /// The lots `world::plots::OWNED_MESH` was last built over, and how
-    /// their gold was lit then, or `None` to build it again.
-    owned_drawn: Option<(Vec<String>, PlotGlow)>,
+    /// The lots `world::plots::OWNED_MESH` was last built over, or `None`
+    /// to build it again.
+    owned_drawn: Option<Vec<String>>,
     /// The houses on everyone's claimed lots (P8.6b).
     houses: world::houses::Houses,
     /// `--claim-sample`: offline, claims to build houses on.
@@ -817,27 +817,24 @@ impl PlayerExtension for CapitolExtension {
             spike_world::upload_static(gpu);
             self.world_built = true;
         }
-        // Your plots in gold, rebuilt when they change or the light on them
-        // does (P8.6a). Not `emissive_scale` (H23, #130) like the windows:
-        // the gold also slides from lit surface to light, which a strength
-        // can't (#139), and the mesh is a few dozen quads. Offline, none.
+        // Your plots in gold, rebuilt when they change. The light on them
+        // follows the day (P8.6a) on their entity's material, sliding the
+        // curb from lit gold to light (#139, Flint ADR 0096). Offline, none.
         let owned = self
             .session
             .as_ref()
             .map_or_else(Vec::new, |s| owned_lots(s.state().plots(), &self.lots));
         let glow = self.atmosphere.plots();
-        let drawn = self.owned_drawn.as_ref();
-        if drawn.map(|(lots, _)| lots) != Some(&owned)
-            || drawn.is_some_and(|(lots, was)| !lots.is_empty() && *was != glow)
-        {
+        if self.owned_drawn.as_ref() != Some(&owned) {
             let lit = owned.iter().filter_map(|id| self.lots.get(id));
-            lots::upload_owned(gpu, lit, glow);
+            lots::upload_owned(gpu, lit);
             let any = !owned.is_empty();
-            self.owned_drawn = Some((owned, glow));
+            self.owned_drawn = Some(owned);
             if any {
                 attach_each(ctx, std::iter::once(&lots::OWNED_MESH.to_owned()));
             }
         }
+        set_material(ctx.world, lots::OWNED_MESH, &lots::owned_glow(glow));
         // Houses on everyone's claimed lots (P8.6b): online the store's set,
         // offline `--claim-sample`'s.
         let dt = ctx.clock.delta_time.min(0.1) as f32;
@@ -870,19 +867,19 @@ impl PlayerExtension for CapitolExtension {
         }
         // The lamps in the windows glow with the hour, set on their
         // entities, so no mesh is rebuilt (H23, Flint ADR 0090).
-        let lamps = world::houses::lamp_light(glow);
+        let lamps = [("emissive_scale", world::houses::lamp_light(glow))];
         for name in world::houses::lamp_meshes() {
-            set_emissive_scale(ctx.world, &name, lamps);
+            set_material(ctx.world, &name, &lamps);
         }
         // So do the fires in the forges and kilns.
         self.stations
             .fires(ctx.world, crate::stations::fire_light(glow));
         // And the Exchange hall's glass (E3.7). Its clock keeps the hour,
         // and the scripts hear where it is, for the prompt and the mote.
-        set_emissive_scale(
+        set_material(
             ctx.world,
             world::hall::LAMPS_MESH,
-            world::hall::glass_light(glow),
+            &[("emissive_scale", world::hall::glass_light(glow))],
         );
         if let Some(gpu) = ctx.gpu.as_mut() {
             self.hall.tick(gpu, phase);
@@ -2144,26 +2141,29 @@ fn note_words(note: &Note) -> (&'static str, String) {
     }
 }
 
-/// Sets `name`'s `material.emissive_scale` (Flint ADR 0090), if it has an
-/// entity and the scale has moved, so its glow changes with no upload.
-fn set_emissive_scale(world: &mut flint_ecs::FlintWorld, name: &str, scale: f32) {
+/// Sets numbers in `name`'s `material`, such as `emissive_scale` (Flint
+/// ADR 0090) and `glow_surface` (ADR 0096), if it has an entity and one of
+/// them has moved, so its glow changes with no upload.
+fn set_material(world: &mut flint_ecs::FlintWorld, name: &str, fields: &[(&str, f32)]) {
     let Some(id) = world.get_id(name) else {
         return;
     };
     let material = world.get_components(id).and_then(|c| c.get("material"));
-    let was = material
-        .and_then(|m| m.get("emissive_scale"))
-        .and_then(|v| v.as_float());
-    if was == Some(scale as f64) {
+    let unmoved = fields.iter().all(|&(key, value)| {
+        material.and_then(|m| m.get(key)).and_then(|v| v.as_float()) == Some(value as f64)
+    });
+    if unmoved {
         return;
     }
     let mut table = material
         .and_then(|m| m.as_table())
         .cloned()
         .unwrap_or_default();
-    table.insert("emissive_scale".into(), (scale as f64).into());
+    for &(key, value) in fields {
+        table.insert(key.into(), (value as f64).into());
+    }
     if let Err(e) = world.set_component(id, "material", table.into()) {
-        tracing::warn!("world: no emissive scale on {name}: {e}");
+        tracing::warn!("world: no material on {name}: {e}");
     }
 }
 

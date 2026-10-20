@@ -1065,7 +1065,9 @@ pub fn lamp_light(glow: PlotGlow) -> f32 {
 
 /// How much light a lit pane's surface share stands for: about what the
 /// low sun of dawn and dusk lit it with (matched against captures). An
-/// approximation until the engine can move the share itself (#139).
+/// approximation: `glow_surface` (Flint ADR 0096) can move the share now,
+/// but the old pane's colour moved from glass to lamp with the hour too,
+/// which needs a per-entity tint of vertex colour (#269).
 const SURFACE_AS_LIGHT: f32 = 0.4;
 
 /// The windows' light against the plots' gold.

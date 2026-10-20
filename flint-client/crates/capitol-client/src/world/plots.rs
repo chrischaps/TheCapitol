@@ -29,7 +29,9 @@
 //!   `plots_owned`, rebuilt when your plots change, so the sector meshes
 //!   are never touched. `Lot` keeps the drawn outline for it. The curb's
 //!   top follows the day (P8.6a, [`PlotGlow`]): plain gold in the sun,
-//!   light at dusk, and brighter light at night.
+//!   light at dusk, and brighter light at night. It's uploaded once as
+//!   gold light, and its entity's material slides it between the two
+//!   ([`owned_glow`]; Flint ADR 0096, #139), so the hour never rebuilds it.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -370,11 +372,11 @@ fn band(m: &mut MeshBuf, outer: &[P], inner: &[P], y: f32, colours: ([f32; 4], [
     }
 }
 
-/// The gold over each of `lots`, its curb's top lit as `glow` says: see
-/// the module docs.
-pub fn owned<'a>(lots: impl IntoIterator<Item = &'a Lot>, glow: PlotGlow) -> MeshBuf {
+/// The gold over each of `lots`: see the module docs. The curb's top is
+/// gold light at radiance 1, for [`owned_glow`] to light by the hour.
+pub fn owned<'a>(lots: impl IntoIterator<Item = &'a Lot>) -> MeshBuf {
     let gold = hex(palette::GOLD);
-    let glow = palette::lit_glow(gold, glow.surface, glow.radiance);
+    let glow = palette::glow(gold, 1.0);
     let mut lit = MeshBuf::default();
     let mut light = MeshBuf::default();
     for lot in lots {
@@ -424,20 +426,28 @@ pub fn owned<'a>(lots: impl IntoIterator<Item = &'a Lot>, glow: PlotGlow) -> Mes
     lit
 }
 
-/// Builds and uploads the gold over `lots` as [`OWNED_MESH`], lit as `glow`
-/// says. With no lots, the mesh is removed.
-pub fn upload_owned<'a>(
-    gpu: &mut ExtensionGpu,
-    lots: impl IntoIterator<Item = &'a Lot>,
-    glow: PlotGlow,
-) {
-    owned(lots, glow).upload_material(
+/// Builds and uploads the gold over `lots` as [`OWNED_MESH`]. With no
+/// lots, the mesh is removed.
+pub fn upload_owned<'a>(gpu: &mut ExtensionGpu, lots: impl IntoIterator<Item = &'a Lot>) {
+    owned(lots).upload_material(
         gpu,
         ImportedMaterial {
             roughness: 0.9,
             ..ImportedMaterial::vertex_colored(OWNED_MESH)
         },
     );
+}
+
+/// The [`OWNED_MESH`] entity's material at `glow`: how much of the curb's
+/// gold light is lit gold surface (`glow_surface`), and how much light it
+/// gives off (`emissive_scale`; Flint ADRs 0096 and 0090). The engine
+/// lights `surface` of the gold and gives off `radiance` of it, as a
+/// rebuilt [`palette::lit_glow`] vertex did.
+pub fn owned_glow(glow: PlotGlow) -> [(&'static str, f32); 2] {
+    [
+        ("glow_surface", glow.surface.clamp(0.0, 1.0)),
+        ("emissive_scale", glow.radiance.max(0.0)),
+    ]
 }
 
 /// The runtime mesh for `sector`'s lots.
@@ -792,7 +802,7 @@ mod tests {
             .values()
             .find(|l| l.zone == Zone::Suburban)
             .unwrap();
-        let m = owned([lot], PlotGlow::EVENING);
+        let m = owned([lot]);
         assert!(!m.indices.is_empty());
         let s = style(lot.zone);
         // On the drawn lot (the gold face just outside its curb), and just
@@ -832,13 +842,62 @@ mod tests {
             .min_by(|a, b| near(a).total_cmp(&near(b)))
             .unwrap();
         assert_eq!(middle.color, lot.colour);
-        assert!(owned([], PlotGlow::EVENING).indices.is_empty());
-        // By day the curb is plain lit gold, with no light of its own.
+        assert!(owned([]).indices.is_empty());
+        // The curb's top is gold light, uploaded once for every hour.
+        let gold = palette::glow(hex(palette::GOLD), 1.0);
+        assert!(glows.iter().all(|v| v.color == gold));
+    }
+
+    /// What the engine draws of a per-vertex light `colour`: the lit
+    /// surface and the light given off (Flint ADRs 0076, 0090, 0096).
+    fn drawn(colour: [f32; 4], glow_surface: f32, emissive_scale: f32) -> ([f32; 3], [f32; 3]) {
+        let light = 1.0 - colour[3];
+        let surface = colour[3] + light * glow_surface;
+        let [r, g, b, _] = colour;
+        let shine = light * emissive_scale;
+        (
+            [r * surface, g * surface, b * surface],
+            [r * shine, g * shine, b * shine],
+        )
+    }
+
+    #[test]
+    fn the_owned_gold_follows_the_day_as_a_rebuild_did() {
+        let gold = hex(palette::GOLD);
+        let uploaded = palette::glow(gold, 1.0);
+        let close = |a: [f32; 3], b: [f32; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-5);
+        // Night, dawn and dusk, noon, evening, and between them.
+        for (surface, radiance) in [
+            (0.0, 1.6),
+            (0.6, 0.25),
+            (1.0, 0.0),
+            (0.0, 0.5),
+            (0.8, 0.125),
+            (0.3, 0.925),
+        ] {
+            let glow = PlotGlow { surface, radiance };
+            let [(_, s), (_, k)] = owned_glow(glow);
+            let (paint, light) = drawn(uploaded, s, k);
+            let (want_paint, want_light) =
+                drawn(palette::lit_glow(gold, surface, radiance), 0.0, 1.0);
+            assert!(
+                close(paint, want_paint),
+                "{glow:?}: paint {paint:?} vs {want_paint:?}"
+            );
+            assert!(
+                close(light, want_light),
+                "{glow:?}: light {light:?} vs {want_light:?}"
+            );
+        }
+        // By day it's plain gold paint, giving off nothing.
         let noon = PlotGlow {
             surface: 1.0,
             radiance: 0.0,
         };
-        assert!(!owned([lot], noon).vertices.iter().any(is_light));
+        assert_eq!(
+            owned_glow(noon),
+            [("glow_surface", 1.0), ("emissive_scale", 0.0)]
+        );
     }
 
     #[test]
