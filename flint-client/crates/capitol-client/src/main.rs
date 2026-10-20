@@ -208,6 +208,11 @@ struct Args {
     /// and growing back on a loop (E2.5). For captures
     #[arg(long, requires = "offline")]
     node_sample: bool,
+    /// Offline, stand people and citizens side by side where the camera
+    /// first looks, so their lanterns and names can be compared (C0.2).
+    /// For captures
+    #[arg(long, requires = "offline")]
+    citizen_sample: bool,
 }
 
 /// A time of day for `--time-of-day`: 0 to 1, 1 being midnight again.
@@ -328,6 +333,7 @@ fn main() -> Result<()> {
         .with_station_sample(args.station_sample)
         .with_automation_sample(args.automation_sample)
         .with_node_sample(args.node_sample)
+        .with_citizen_sample(args.citizen_sample)
         .with_trade_offer(args.trade_offer.as_deref())
         .with_settings(
             settings::SettingsFile::load(

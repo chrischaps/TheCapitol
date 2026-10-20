@@ -17,6 +17,10 @@
 //! 49 players it took about 2 ms a frame. Here it's microseconds. Until
 //! H14 ([#97](https://github.com/chrischaps/TheCapitol/issues/97)) the
 //! script projected, and handed a map per player across and back.
+//!
+//! A citizen's name has a small lozenge before it (C0.2, Citizens D3), in
+//! their lantern's pale. The name and the glyph are centred together over
+//! the head, and clash as one box.
 
 use crate::script_api::PlayerLabel;
 
@@ -35,12 +39,16 @@ pub const GAP: f32 = 3.0;
 pub const MAX_NAMES: usize = 24;
 /// Fainter than this isn't drawn.
 const MIN_ALPHA: f32 = 0.02;
+/// A citizen's glyph: its half-height, and the room from its right point
+/// to the name, as shares of the text size.
+pub const GLYPH_R: f32 = 0.24;
+pub const GLYPH_GAP: f32 = 0.3;
 
 /// Where an anchor landed on the screen: logical points, and its depth
 /// (distance along the view) in metres. `None` behind the camera.
 pub type Screen = Option<[f32; 3]>;
 
-/// A name to draw: its box's top left, in logical points.
+/// A name to draw: the name's top left, in logical points.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tag {
     pub name: String,
@@ -49,6 +57,8 @@ pub struct Tag {
     pub size: f32,
     pub alpha: f32,
     pub me: bool,
+    /// A citizen's lozenge, left of the name: its centre and half-height.
+    pub glyph: Option<[f32; 3]>,
 }
 
 /// The names to draw, in drawing order (yours, then nearest you first).
@@ -101,7 +111,14 @@ pub fn place(
             break;
         }
         let size = lerp(SIZE_NEAR, SIZE_FAR, smooth((c.depth - 20.0) / (FAR - 20.0)));
-        let (w, h) = measure(&c.p.name, size);
+        let (name_w, h) = measure(&c.p.name, size);
+        // The glyph's width and the gap after it, ahead of the name.
+        let lead = if c.p.citizen {
+            (2.0 * GLYPH_R + GLYPH_GAP) * size
+        } else {
+            0.0
+        };
+        let w = lead + name_w;
         let (x, y) = (c.at[0] - w / 2.0, c.at[1] - h);
         if x + w < 0.0 || x > view[0] || y + h < 0.0 || y > view[1] {
             continue;
@@ -114,13 +131,17 @@ pub fn place(
         }
         others += usize::from(!c.p.me);
         boxes.push([x, y, w, h]);
+        // Level with the middle of the lower-case letters.
+        let r = GLYPH_R * size;
+        let glyph = c.p.citizen.then_some([x + r, y + h * 0.55, r]);
         placed.push(Tag {
             name: c.p.name.clone(),
-            x,
+            x: x + lead,
             y,
             size,
             alpha: c.alpha,
             me: c.p.me,
+            glyph,
         });
     }
     placed
@@ -149,7 +170,15 @@ mod tests {
             feet_y: 0.0,
             alpha: 1.0,
             me,
+            citizen: false,
             craft: None,
+        }
+    }
+
+    fn citizen(name: &str) -> PlayerLabel {
+        PlayerLabel {
+            citizen: true,
+            ..player(name, false)
         }
     }
 
@@ -181,6 +210,48 @@ mod tests {
         let (w, h) = measure("Ada", t.size);
         assert_eq!((t.x + w / 2.0, t.y + h), (500.0, 300.0));
         assert_eq!(t.alpha, 1.0);
+    }
+
+    #[test]
+    fn a_citizens_name_and_glyph_hang_centred_together_and_clash_as_one() {
+        let tags = place(
+            &[citizen("Corin")],
+            &[Some([500.0, 300.0, 30.0])],
+            VIEW,
+            measure,
+        );
+        let t = &tags[0];
+        let [gx, gy, r] = t.glyph.expect("a glyph");
+        let (w, h) = measure("Corin", t.size);
+        // The glyph, the gap, then the name, centred as one over the anchor.
+        assert!(
+            (gx - r + (t.x + w) - 1000.0).abs() < 1e-3,
+            "{gx} {r} {}",
+            t.x
+        );
+        assert!(t.x - (gx + r) > 0.0, "a gap before the name");
+        assert!(gy > t.y && gy < t.y + h, "beside the letters");
+        // A person's name has none.
+        let tags = place(
+            &[player("Wren", false)],
+            &[Some([500.0, 300.0, 30.0])],
+            VIEW,
+            measure,
+        );
+        assert_eq!(tags[0].glyph, None);
+        // The glyph is part of the name's box: a name just clear of the
+        // citizen's text but over its glyph loses.
+        let lead = (2.0 * GLYPH_R + GLYPH_GAP) * t.size;
+        let (bw, _) = measure("Bo", t.size);
+        let left = gx - r - GAP - 1.0 - bw / 2.0;
+        let players = [citizen("Corin"), player("Bo", false)];
+        let screens = [
+            Some([500.0, 300.0, 30.0]),
+            Some([left + lead / 2.0, 300.0, 30.0]),
+        ];
+        assert_eq!(place(&players, &screens, VIEW, measure).len(), 1);
+        let screens = [Some([500.0, 300.0, 30.0]), Some([left, 300.0, 30.0])];
+        assert_eq!(place(&players, &screens, VIEW, measure).len(), 2);
     }
 
     #[test]

@@ -89,6 +89,7 @@ fn zone_banner() {
 
 fn names() {
     for t in cap_name_tags() {
+        if t.glyph != () { citizen_glyph(t.glyph, t.a); }
         draw_text(t.x + 1.0, t.y + 1.0, t.name, t.size, 0.0, 0.0, 0.0, 0.65 * t.a);
         if t.me {
             // The Capitol's gold, #c9a227.
@@ -98,6 +99,20 @@ fn names() {
             draw_text(t.x, t.y, t.name, t.size, 0.878, 0.878, 0.878, t.a);
         }
     }
+}
+
+// A citizen's mark (C0.2): a slender lozenge, a lamp's pane, before the
+// name, in their lantern's pale (#d6e4ea, entities.rs CITIZEN_LANTERN).
+// Shadowed like the name, so it reads over a bright sky.
+fn citizen_glyph(g, a) {
+    // Layer 0, with the names.
+    draw_polygon(lozenge(g.x + 1.0, g.y + 1.0, g.r), 0.0, 0.0, 0.0, 0.65 * a, 0);
+    draw_polygon(lozenge(g.x, g.y, g.r), 0.839, 0.894, 0.918, 0.9 * a, 0);
+}
+
+fn lozenge(x, y, r) {
+    let w = r * 0.72;
+    [[x, y - r], [x + w, y], [x, y + r], [x - w, y]]
 }
 
 fn smooth(t) {
