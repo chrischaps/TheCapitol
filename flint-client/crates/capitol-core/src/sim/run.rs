@@ -573,6 +573,8 @@ impl SimBot {
                     Err(e) if e.is_final() => return Err(e),
                     _ => {}
                 },
+                // From a steep pocket in the wilds, or beside a rural lake,
+                // the walk graph can find no way home (#280)
                 Err(e) => {
                     town.health(|h| h.failed(format!("going home: {e}")));
                     break;
