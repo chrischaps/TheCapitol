@@ -80,7 +80,7 @@ Engine changes are made in `flint-client/engine/` and go upstream to Flint (`htt
 - Visual work: capture screenshots into `flint-client/renders/` (gitignored) and look at them yourself before calling it done. `flint render` can't show the runtime world, so use the client's `--offline fixtures/terrain.json` capture mode.
 - Mark anything only a human can judge with **[H]**, saying what "pass" looks like.
 
-The local stack is `docker-compose up -d`, then `cargo run` from `backend/`. It's one login session per account, so a Flint and React two-client test needs two accounts.
+The local stack is `docker-compose up -d`, then `cargo run` from `backend/`. An account can sign in from several clients at once (E0.8), but only the newest plays the avatar; the others watch. So a two-player test still needs two accounts.
 
 ## 5. Keep the plan honest
 

@@ -6,6 +6,10 @@
 //! ```
 //!
 //! `CAPITOL_SERVER` overrides the default `http://localhost:3000`.
+//!
+//! The whole suite signs in more than the server's 10 a minute per IP
+//! (`RATE_LIMIT_AUTH_PER_MIN`), so start the backend with
+//! `RATE_LIMIT_AUTH_PER_MIN=100` for it, or a later test times out (#239).
 
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,7 +19,7 @@ use capitol_core::net::*;
 use capitol_core::poll::{Fetch, Poller};
 use capitol_core::protocol::rest::{LoginRequest, RegisterRequest};
 use capitol_core::protocol::rules;
-use capitol_core::protocol::ws::{ClientMessage, ServerMessage};
+use capitol_core::protocol::ws::{ClientMessage, PresenceHolder, ServerMessage};
 use capitol_core::state::{GameState, StateEvent, Trade, TradeEvent, PARTNER_LEFT};
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -274,6 +278,7 @@ fn register_login_connect_and_move() {
         RestRequest::Logout(capitol_core::protocol::rest::LogoutRequest {
             token: Some(auth.token),
             refresh_token: None,
+            ..Default::default()
         }),
         7,
     );
@@ -1097,4 +1102,157 @@ fn a_read_key_watches_cant_move_and_revoking_it_drops_its_socket() {
         other => panic!("list: {other:?}"),
     };
     assert!(keys[0].revoked_at.is_some() && keys[0].last_used_at.is_some());
+}
+
+/// The `presence` a socket was told next.
+fn presence(net: &Net) -> (bool, Option<PresenceHolder>) {
+    match wait_for(net, "presence", |e| {
+        matches!(e, NetEvent::Ws(ServerMessage::Presence { .. }))
+    }) {
+        NetEvent::Ws(ServerMessage::Presence { yours, held_by }) => (yours, held_by),
+        _ => unreachable!(),
+    }
+}
+
+/// Waits for the handshake to finish and returns the socket's first
+/// `presence`, which the server sends just after `auth_ok`, so usually before
+/// `subscribed` makes the connection live.
+fn connected(net: &Net) -> (bool, Option<PresenceHolder>) {
+    let (mut live, mut first) = (false, None);
+    while !live || first.is_none() {
+        match wait_for(net, "Connected and presence", |e| {
+            matches!(
+                e,
+                NetEvent::Connection(ConnectionState::Connected { .. })
+                    | NetEvent::Connection(ConnectionState::AuthFailed { .. })
+                    | NetEvent::Ws(ServerMessage::Presence { .. })
+            )
+        }) {
+            NetEvent::Connection(ConnectionState::Connected { .. }) => live = true,
+            NetEvent::Ws(ServerMessage::Presence { yours, held_by }) => first = Some((yours, held_by)),
+            other => panic!("handshake: {other:?}"),
+        }
+    }
+    first.unwrap()
+}
+
+/// E0.8 (D9): two clients on one account. The newer plays and the older
+/// watches, can still reach the market, and can take the avatar back. A bot's
+/// key can't take it from a connected client. Signing out everywhere ends both.
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn two_clients_on_one_account_share_one_avatar() {
+    let _server = shared();
+    let (desk, phone, bot) = (net(), net(), net());
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let email = format!("flint-presence-{stamp}@test.local");
+    let password = "correct horse battery staple".to_string();
+    let Ok(RestResponse::Auth(first)) = rest(
+        &desk,
+        RestRequest::Register(RegisterRequest {
+            email: email.clone(),
+            password: password.clone(),
+            player_name: format!("Two{}", stamp % 100_000),
+            refresh: true,
+        }),
+        1,
+    ) else {
+        panic!("register");
+    };
+    desk.connect(first.token.clone());
+    assert_eq!(connected(&desk), (true, None));
+
+    // A second login leaves the first signed in, and takes the avatar.
+    let Ok(RestResponse::Auth(second)) = rest(
+        &phone,
+        RestRequest::Login(LoginRequest {
+            email,
+            password,
+            refresh: true,
+        }),
+        1,
+    ) else {
+        panic!("login");
+    };
+    phone.connect(second.token.clone());
+    assert_eq!(connected(&phone), (true, None));
+    assert_eq!(presence(&desk), (false, Some(PresenceHolder::Client)));
+
+    // The desk watches: it can't walk, over WS or REST, but the market answers.
+    desk.ws(ClientMessage::Move { x: 6000.0, y: 6400.0 });
+    match wait_for(&desk, "the move refused", |e| {
+        matches!(e, NetEvent::Ws(ServerMessage::Error { command, .. }) if command == "move")
+    }) {
+        NetEvent::Ws(ServerMessage::Error { message, .. }) => {
+            assert!(message.contains("another device"), "{message}")
+        }
+        _ => unreachable!(),
+    }
+    let walk = RestRequest::PlayerMove(capitol_core::protocol::rest::MoveRequest { x: 6000.0, y: 6400.0 });
+    assert!(matches!(
+        rest(&desk, walk, 2),
+        Err(RestError::Http { status: 409, .. })
+    ));
+    assert!(matches!(rest(&desk, RestRequest::MarketBox, 3), Ok(_)));
+
+    // A bot on a play key watches, and can't take it while a client is connected.
+    let Ok(RestResponse::CreatedApiKey(key)) = rest(
+        &desk,
+        RestRequest::CreateApiKey(capitol_core::protocol::rest::CreateApiKeyRequest {
+            name: "presence".into(),
+            scopes: vec![capitol_core::protocol::rest::ApiKeyScope::Play],
+        }),
+        4,
+    ) else {
+        panic!("create a key");
+    };
+    bot.connect(key.secret.clone());
+    assert_eq!(connected(&bot), (false, Some(PresenceHolder::Client)));
+    bot.ws(ClientMessage::ClaimPresence);
+    wait_for(&bot, "the bot's claim refused", |e| {
+        matches!(e, NetEvent::Ws(ServerMessage::Error { command, .. }) if command == "claim_presence")
+    });
+
+    // Play here: the desk takes it back.
+    desk.ws(ClientMessage::ClaimPresence);
+    assert_eq!(presence(&desk), (true, None));
+    assert_eq!(presence(&phone), (false, Some(PresenceHolder::Client)));
+
+    // Signing out everywhere ends both sessions; the bot's key stays.
+    rest(
+        &phone,
+        RestRequest::Logout(capitol_core::protocol::rest::LogoutRequest {
+            token: Some(second.token),
+            everywhere: true,
+            ..Default::default()
+        }),
+        5,
+    )
+    .unwrap();
+    for net in [&desk, &phone] {
+        wait_for(net, "signed out", |e| {
+            matches!(e, NetEvent::Connection(ConnectionState::AuthFailed { .. }))
+        });
+    }
+    // With no client left, the bot hears nobody holds it, and may take it.
+    // The second client's socket may still be closing, so ask until it may.
+    assert_eq!(presence(&bot), (false, None));
+    let start = Instant::now();
+    loop {
+        bot.ws(ClientMessage::ClaimPresence);
+        let answer = wait_for(&bot, "the bot's claim answered", |e| {
+            matches!(
+                e,
+                NetEvent::Ws(ServerMessage::Presence { yours: true, .. })
+            ) || matches!(e, NetEvent::Ws(ServerMessage::Error { command, .. }) if command == "claim_presence")
+        });
+        if matches!(answer, NetEvent::Ws(ServerMessage::Presence { .. })) {
+            break;
+        }
+        assert!(start.elapsed() < WAIT, "the bot never got the avatar: {answer:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

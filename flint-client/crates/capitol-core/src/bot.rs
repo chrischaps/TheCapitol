@@ -373,6 +373,16 @@ impl Bot {
         if let Some(journal) = &mut self.journal {
             journal.extend(changes.iter().filter(|c| journaled(c)).cloned());
         }
+        // Nobody plays the avatar: pick it up (E0.8). A bot on a key is
+        // refused while one of the player's own clients is connected, and
+        // hears `held_by: None` again when the last one goes.
+        let free = changes.iter().any(|c| {
+            matches!(c, StateEvent::Presence(p) if !p.yours && p.held_by.is_none())
+        });
+        if free {
+            self.say("nobody is playing the avatar; taking it");
+            self.net.ws(ClientMessage::ClaimPresence);
+        }
         // What the market store wants said: watching, and asking again
         for message in self.state.market_mut().take_outgoing() {
             self.net.ws(message);

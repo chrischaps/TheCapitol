@@ -156,7 +156,7 @@ Bots log in as `bot1@bots.capitol.local` and up, registering the first time. `--
 
 **Market makers (E3.8)**: `capitol-bot --prefix maker --accounts 2 --market fiber,plank,iron_ingot --fund` runs two. Each quotes both sides of each item's book round its last trade, or round D5's value before the first one (`market_maker::SEED_PRICES`), and re-quotes as orders fill. `--spread`, `--depth`, `--size` and `--target` tune it. A maker walks to the Exchange hall first, since orders are placed there (E3.4). `--fund` tops a maker up to 20000 Strands and `--target` units of each item through `POST /player/grant`. The server serves that only with `DEV_GRANTS=on`, which no build turns on by itself. With `--seconds` a maker takes its orders down when it stops. On Ctrl-C they stay up, and the next run picks them up again. A bot resumes wherever it last stood, so use `--near` to bring a fleet to you.
 
-The server allows **one session per account**. A second login kicks the first one, so a two-client test (Flint + React, or two Flint) needs two accounts. Clients on this machine can share the local server. A client on another device can't reach it, because the backend listens on `127.0.0.1` (see "Environment Setup" in the root `CLAUDE.md`).
+An account can be signed in on **several clients at once** (E0.8), but **only one plays the avatar**: the newest. The others show a "Playing on another device" banner with Play here, and can still use the market and automation. So two clients on one account test presence, and a two-player test needs two accounts. Clients on this machine can share the local server. A client on another device can't reach it, because the backend listens on `127.0.0.1` (see "Environment Setup" in the root `CLAUDE.md`).
 
 ## The engine subtree
 

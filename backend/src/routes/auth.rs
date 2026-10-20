@@ -197,17 +197,17 @@ pub async fn login(
     .fetch_one(&state.db)
     .await?;
 
+    // A login sits beside the account's other sessions (E0.8): their
+    // sockets stay, and this one's socket takes the avatar when it connects.
     let auth = start_session(&state, account.into(), player_id, req.refresh).await?;
-
-    // This login replaced any older session, so close that session's socket (#78)
-    state.game.write().await.end_session(player_id);
 
     Ok(Json(auth))
 }
 
-/// Starts the account's one session, replacing any it had, and issues its
+/// Starts a new session for the account, beside any it has, and issues its
 /// tokens: a short access token and a refresh token when `refresh`, else a
-/// legacy 24 h access token.
+/// legacy 24 h access token. Sessions it pushes past the cap end, and their
+/// sockets with them.
 async fn start_session(
     state: &AppState,
     account: AccountInfo,
@@ -217,6 +217,9 @@ async fn start_session(
     let mut redis = state.redis.clone();
     let refresh_ttl = refresh.then_some(state.config.refresh_ttl_secs);
     let started = sessions::start(&mut redis, account.id, refresh_ttl).await?;
+    if !started.evicted.is_empty() {
+        state.game.write().await.end_sessions(player_id, &started.evicted);
+    }
     let expires_in = if refresh { state.config.access_ttl_secs } else { LEGACY_TTL_SECS };
     let token = generate_token(state, &account, &started.sid, expires_in)?;
     Ok(AuthResponse {
@@ -248,10 +251,10 @@ pub async fn refresh(
         Ok(rotated) => rotated,
         Err(RotateError::Redis(e)) => return Err(e.into()),
         Err(RotateError::Refused(why)) => {
-            if let Refused::Reused { account_id } = why {
-                // Someone else holds a copy, so the socket goes too.
+            if let Refused::Reused { account_id, sid } = &why {
+                // Someone else holds a copy, so the session's socket goes too.
                 tracing::warn!("Refresh token reused for account {}; revoking its session", account_id);
-                end_player_session(&state, account_id).await?;
+                end_player_sessions(&state, *account_id, std::slice::from_ref(sid)).await?;
             }
             return Err(AppError::Unauthorized(why.to_string()));
         }
@@ -286,7 +289,7 @@ pub async fn refresh(
 #[utoipa::path(
     post,
     path = "/auth/logout",
-    request_body(content = LogoutRequest, description = "The access or refresh token of the session to end", content_type = "application/json"),
+    request_body(content = LogoutRequest, description = "The access or refresh token of the session to end, with `everywhere` to end all the account's sessions", content_type = "application/json"),
     responses(
         (status = 200, description = "Logout successful")
     ),
@@ -297,7 +300,7 @@ pub async fn logout(
     Json(req): Json<LogoutRequest>,
 ) -> Result<Json<SuccessResponse>, AppError> {
     let mut redis = state.redis.clone();
-    let ended = match (&req.token, &req.refresh_token) {
+    let ended: Option<(Uuid, Vec<String>)> = match (&req.token, &req.refresh_token) {
         (Some(token), _) => {
             // An expired token can still log out; its signature must hold.
             let mut validation = jsonwebtoken::Validation::default();
@@ -308,30 +311,43 @@ pub async fn logout(
                 &validation,
             )?
             .claims;
-            sessions::end(&mut redis, claims.sub, &claims.sid)
-                .await?
-                .then_some(claims.sub)
+            if req.everywhere {
+                Some((claims.sub, sessions::end_all(&mut redis, claims.sub).await?))
+            } else {
+                sessions::end(&mut redis, claims.sub, &claims.sid)
+                    .await?
+                    .then(|| (claims.sub, vec![claims.sid]))
+            }
         }
-        (None, Some(refresh_token)) => sessions::end_by_refresh(&mut redis, refresh_token).await?,
+        (None, Some(refresh_token)) => match sessions::end_by_refresh(&mut redis, refresh_token).await? {
+            Some((account_id, sid)) if req.everywhere => {
+                let mut all = sessions::end_all(&mut redis, account_id).await?;
+                all.push(sid);
+                Some((account_id, all))
+            }
+            Some((account_id, sid)) => Some((account_id, vec![sid])),
+            None => None,
+        },
         (None, None) => return Err(AppError::BadRequest("Give a token or a refresh_token".into())),
     };
 
-    // The session is gone, so its socket goes too (#78)
-    if let Some(account_id) = ended {
-        end_player_session(&state, account_id).await?;
+    // The sessions are gone, so their sockets go too (#78)
+    if let Some((account_id, sids)) = ended {
+        end_player_sessions(&state, account_id, &sids).await?;
     }
 
     Ok(Json(SuccessResponse::ok()))
 }
 
-/// Closes the account's player's socket, its session having ended.
-async fn end_player_session(state: &AppState, account_id: Uuid) -> Result<(), AppError> {
+/// Closes the sockets of the account's sessions `sids`, which have ended.
+/// Its other sessions' sockets stay.
+async fn end_player_sessions(state: &AppState, account_id: Uuid, sids: &[String]) -> Result<(), AppError> {
     let player_id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM players WHERE account_id = $1 LIMIT 1")
         .bind(account_id)
         .fetch_optional(&state.db)
         .await?;
     if let Some(player_id) = player_id {
-        state.game.write().await.end_session(player_id);
+        state.game.write().await.end_sessions(player_id, sids);
     }
     Ok(())
 }

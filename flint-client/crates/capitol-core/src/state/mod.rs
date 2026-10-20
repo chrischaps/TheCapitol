@@ -40,7 +40,7 @@ use capitol_protocol::rest::{
     StationInfo, Subscription, SubscriptionStatus, PRODUCTION_LOG_LEN,
 };
 use capitol_protocol::rules::{self, Zone};
-use capitol_protocol::ws::{PlayerPosition, ServerMessage};
+use capitol_protocol::ws::{PlayerPosition, PresenceHolder, ServerMessage};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -307,6 +307,21 @@ pub enum StateEvent {
     /// The market changed: a book, a trade, your orders (E3.3). See
     /// [`GameState::market`]. Boxed: an order and its trade are big.
     Market(Box<MarketEvent>),
+
+    /// This client took the avatar, or another took it from it (E0.8).
+    /// See [`GameState::presence`].
+    Presence(Presence),
+}
+
+/// Whether this client drives the avatar (`presence`, E0.8, D9). An account
+/// can be signed in on several devices, but only one plays; the others watch
+/// and can still use the market and automation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Presence {
+    pub yours: bool,
+    /// Who plays when it isn't you: another of your clients, or a bot.
+    /// `None`: nobody, and your avatar is out of the world.
+    pub held_by: Option<PresenceHolder>,
 }
 
 /// The client's mirror of the world.
@@ -341,6 +356,9 @@ pub struct GameState {
     strands: Option<i64>,
     /// Your account's subscription, from `auth_ok` and `/player/me` (E4.1).
     subscription: Option<Subscription>,
+    /// Whether this client plays the avatar, as the server last said (E0.8).
+    /// `None` while not connected, or from a server too old to say.
+    presence: Option<Presence>,
     /// Your own plots: the poller lists them by owner (P6.4).
     plots: Vec<PlotInfo>,
     /// The plot the plot panel shows, picked with `/plots/at`.
@@ -384,6 +402,7 @@ impl GameState {
             recipes: Vec::new(),
             strands: None,
             subscription: None,
+            presence: None,
             plots: Vec::new(),
             picked_plot: None,
             claimed: HashMap::new(),
@@ -417,6 +436,8 @@ impl GameState {
         out.push(StateEvent::Connection(state.clone()));
         if !matches!(state, ConnectionState::Connected { .. }) {
             self.trade_connection_lost(&mut out);
+            // A new connection hears its own.
+            self.presence = None;
         }
         if let ConnectionState::Connected { player_id } = state {
             self.me = Some(*player_id);
@@ -811,6 +832,14 @@ impl GameState {
                 station_type: station_type.clone(),
                 terrain_id: terrain_id.clone(),
             }),
+            M::Presence { yours, held_by } => {
+                let presence = Presence {
+                    yours: *yours,
+                    held_by: *held_by,
+                };
+                self.presence = Some(presence);
+                out.push(StateEvent::Presence(presence));
+            }
             M::SubscriptionLapsed { until } => {
                 self.subscription = Some(Subscription {
                     status: SubscriptionStatus::Lapsed,
@@ -1198,6 +1227,18 @@ impl GameState {
     /// The Strand balance, once fetched.
     pub fn strands(&self) -> Option<i64> {
         self.strands
+    }
+
+    /// Whether this client plays the avatar, as the server last said (E0.8).
+    /// `None` until it says.
+    pub fn presence(&self) -> Option<Presence> {
+        self.presence
+    }
+
+    /// Whether this client drives the avatar: it holds it, or the server
+    /// hasn't said otherwise (an older server always lets it).
+    pub fn plays_here(&self) -> bool {
+        self.presence.is_none_or(|p| p.yours)
     }
 
     /// Your account's subscription, as of now. `None` until the server says.

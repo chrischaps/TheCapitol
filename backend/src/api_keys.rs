@@ -133,6 +133,8 @@ pub fn ws_scope(message: &ClientMessage) -> ApiKeyScope {
         | ClientMessage::Subscribe { .. }
         | ClientMessage::SubscribeMarket { .. }
         | ClientMessage::UnsubscribeMarket { .. } => ApiKeyScope::Read,
+        // A `read` key may ask, but `engine::presence` refuses it: it only watches.
+        ClientMessage::ClaimPresence => ApiKeyScope::Read,
         ClientMessage::Move { .. }
         | ClientMessage::Extract { .. }
         | ClientMessage::CancelExtraction

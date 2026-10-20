@@ -39,8 +39,10 @@ use crate::signin::{Failure, SignIn, Step};
 /// How often to ask whether the server is up, while signed out.
 pub const HEALTH_EVERY: Duration = Duration::from_secs(5);
 
-/// The server's `auth_error` when another login took the account's one
-/// session (`middleware/auth.rs`).
+/// The server's `auth_error` when this session was ended from elsewhere: a
+/// "sign out everywhere", a revoked refresh family, or more logins than the
+/// server keeps (`sessions.rs`). Since E0.8 another login alone no longer
+/// ends it: that only takes the avatar (`presence`).
 const REPLACED: &str = "Session expired";
 
 /// Player names the form accepts, as the React client's form does. The
@@ -114,7 +116,7 @@ impl fmt::Display for Notice {
             Notice::Unreachable => f.write_str("Can't reach the server."),
             Notice::Server(message) => f.write_str(message),
             Notice::SessionEnded { elsewhere: true } => {
-                f.write_str("This account signed in somewhere else.")
+                f.write_str("This session was signed out from elsewhere.")
             }
             Notice::SessionEnded { elsewhere: false } => {
                 f.write_str("Your session has ended. Sign in again.")
@@ -710,6 +712,7 @@ mod tests {
                     RestRequest::Logout(LogoutRequest {
                         refresh_token: Some("t0ken".into()),
                         token: None,
+                        everywhere: false,
                     }),
                     TAG + 2
                 ),

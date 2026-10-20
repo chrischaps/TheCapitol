@@ -17,7 +17,7 @@ The Capitol is an MMO economic simulation where the economy is the primary gamep
 
 ## Current Focus: Economy v1
 
-P0 to P8 of the Flint client are built. Active work is **Economy v1**: making the economy the game. The plan is `the-capitol-economy.md`. The work queue is the GitHub issues labelled `economy` (#144 to #179): one issue per work package, created in dependency order. The phase labels run `ec:E0-foundations` to `ec:E4-automation`. Client work also carries `flint-client`. New gameplay UI goes in the Flint client only; the React and Love2D clients are frozen and only need to keep compiling. A few issues say they need Chris's decision first (E0.8, E1.2, E2.1, E3.4).
+P0 to P8 of the Flint client are built. Active work is **Economy v1**: making the economy the game. The plan is `the-capitol-economy.md`. The work queue is the GitHub issues labelled `economy` (#144 to #179): one issue per work package, created in dependency order. The phase labels run `ec:E0-foundations` to `ec:E4-automation`. Client work also carries `flint-client`. New gameplay UI goes in the Flint client only; the React and Love2D clients are frozen and only need to keep compiling. A few issues said they needed Chris's decision first (E0.8, E1.2, E2.1, E3.4); all four are decided.
 
 ### The Flint client
 

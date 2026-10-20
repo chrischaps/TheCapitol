@@ -135,6 +135,12 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item_type: Option<String>,
     },
+    // E0.8: Presence
+    /// Take the avatar over from whichever socket holds it, or pick it up
+    /// when nobody does. Answered by [`ServerMessage::Presence`]. A bot's
+    /// key is refused while one of the player's own clients is connected.
+    #[serde(rename = "claim_presence")]
+    ClaimPresence,
 }
 
 impl ClientMessage {
@@ -168,6 +174,7 @@ impl ClientMessage {
             ClientMessage::TradeCancel => "trade_cancel",
             ClientMessage::SubscribeMarket { .. } => "subscribe_market",
             ClientMessage::UnsubscribeMarket { .. } => "unsubscribe_market",
+            ClientMessage::ClaimPresence => "claim_presence",
         }
     }
 }
@@ -498,6 +505,18 @@ pub enum ServerMessage {
     /// The Gazette's edition about `day` is out (`GET /gazette/latest`)
     #[serde(rename = "gazette_published")]
     GazettePublished { day: i64, number: i64, headline: String },
+    // E0.8: Presence, to the socket it's about
+    /// Whether this socket drives the avatar (D9). An account can have many
+    /// sessions, but only one socket holds the avatar: the others watch, and
+    /// may still use the market and automation. Sent after `auth_ok`, and
+    /// again whenever it changes. `held_by` says who holds it when this
+    /// socket doesn't; `None` means nobody does, and the avatar is offline.
+    #[serde(rename = "presence")]
+    Presence {
+        yours: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        held_by: Option<PresenceHolder>,
+    },
 }
 
 impl ServerMessage {
@@ -558,6 +577,7 @@ impl ServerMessage {
             ServerMessage::MarketDepth { .. } => "market_depth",
             ServerMessage::MarketTrade { .. } => "market_trade",
             ServerMessage::GazettePublished { .. } => "gazette_published",
+            ServerMessage::Presence { .. } => "presence",
         }
     }
 }
@@ -570,6 +590,16 @@ pub struct ToolUse {
     pub item_type: String,
     pub durability: i32,
     pub max_durability: i32,
+}
+
+/// Who holds a player's avatar, in [`ServerMessage::Presence`] (E0.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceHolder {
+    /// One of the player's own clients, signed in with a session
+    Client,
+    /// A bot, on one of the player's API keys
+    Bot,
 }
 
 /// A player's position, as broadcast in `positions` and `player_joined`.

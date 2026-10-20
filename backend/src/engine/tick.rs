@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, oneshot, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 use uuid::Uuid;
+
+use super::presence::{self, Holder, PresenceEvent, Sockets};
 
 use super::commands::Command;
 use super::craft_completion::{finish_craft, FinishedCraft};
@@ -26,18 +28,11 @@ use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
 /// Ticks between sweeps for unanswered trade requests (once a second)
 const TRADE_EXPIRY_TICKS: u64 = 10;
 
-/// The WebSocket connection currently serving a player
-pub struct PlayerConnection {
-    pub id: u64,
-    /// Fired when a newer connection takes the player over, or their session ends (#78).
-    /// `None` once fired
-    superseded: Option<oneshot::Sender<()>>,
-}
-
 pub struct GameState {
     pub players: HashMap<Uuid, PlayerState>,
-    /// player_id -> the connection serving them. Only that connection may remove them (B8, #59)
-    pub connections: HashMap<Uuid, PlayerConnection>,
+    /// player_id -> their open sockets, and which holds the avatar (E0.8). Only the holder's
+    /// close removes the player (B8, #59)
+    pub connections: HashMap<Uuid, Sockets>,
     next_connection_id: u64,
     /// API key id -> what fires to close each socket open on it (E0.9)
     key_sockets: HashMap<Uuid, Vec<oneshot::Sender<()>>>,
@@ -163,37 +158,63 @@ impl GameState {
         let _ = self.event_sender.send(GameEvent::PlayerJoined(position));
     }
 
-    /// Add `player` for a new connection. Any older connection serving the same player is
-    /// superseded: its receiver fires, and it can no longer remove the player. Returns this
-    /// connection's id and the receiver that fires when a newer connection supersedes it.
-    pub fn connect_player(&mut self, player: PlayerState) -> (u64, oneshot::Receiver<()>) {
+    /// A socket opened for player `player_id`, holding nothing yet (E0.8). `may_hold` is false
+    /// for a `read` key. Returns its id and what it hears about its presence.
+    pub fn open_socket(
+        &mut self,
+        player_id: Uuid,
+        holder: Holder,
+        may_hold: bool,
+    ) -> (u64, mpsc::UnboundedReceiver<PresenceEvent>) {
         self.next_connection_id += 1;
         let id = self.next_connection_id;
-        let (superseded, rx) = oneshot::channel();
-        let current = PlayerConnection { id, superseded: Some(superseded) };
-        if let Some(old) = self.connections.insert(player.id, current) {
-            tracing::info!("Connection {} supersedes {} for player {}", id, old.id, player.id);
-            if let Some(tx) = old.superseded {
-                let _ = tx.send(());
-            }
-        }
-        self.add_player(player);
+        let rx = self.connections.entry(player_id).or_default().open(id, holder, may_hold);
         (id, rx)
     }
 
-    /// The player's session ended over REST: a login elsewhere replaced it, or it logged out.
-    /// Their connection's receiver fires, so it says `auth_error` and hangs up (#78). It stays
-    /// their current connection, so its own disconnect still removes the player. Returns
-    /// whether there was a connection to tell.
-    pub fn end_session(&mut self, player_id: Uuid) -> bool {
-        match self.connections.get_mut(&player_id).and_then(|c| c.superseded.take()) {
-            Some(tx) => {
-                tracing::info!("Session ended for player {}: closing their connection", player_id);
-                let _ = tx.send(());
-                true
-            }
-            None => false,
+    /// Hand `player`'s avatar to socket `socket`, from whichever held it. If nobody did, the
+    /// avatar comes into the world as `player` (just read from the database); otherwise the one
+    /// already in the world carries on. A refused claim tells nobody anything.
+    pub fn claim_presence(&mut self, player: PlayerState, socket: u64) -> Result<(), presence::Refused> {
+        let player_id = player.id;
+        let sockets = self.connections.get_mut(&player_id).ok_or(presence::Refused::Closed)?;
+        sockets.claim(socket)?;
+        tracing::info!("Connection {} holds player {}", socket, player_id);
+        if !self.players.contains_key(&player_id) {
+            self.add_player(player);
         }
+        Ok(())
+    }
+
+    /// Tell socket `socket` who holds the player's avatar, when it doesn't itself.
+    pub fn tell_watcher(&self, player_id: Uuid, socket: u64) {
+        if let Some(sockets) = self.connections.get(&player_id) {
+            sockets.tell_watcher(socket);
+        }
+    }
+
+    /// Whether socket `socket` holds the player's avatar.
+    pub fn holds_presence(&self, player_id: Uuid, socket: u64) -> bool {
+        self.connections.get(&player_id).is_some_and(|s| s.holds(socket))
+    }
+
+    /// Who holds the account's avatar, if anyone does: for REST calls that drive it.
+    pub fn presence_of_account(&self, account_id: Uuid) -> Option<&Holder> {
+        self.connections
+            .iter()
+            .find(|(player_id, _)| self.players.get(player_id).is_some_and(|p| p.account_id == account_id))
+            .and_then(|(_, sockets)| sockets.holder())
+    }
+
+    /// The account's sessions `sids` ended over REST (a logout, a revoked refresh family, or
+    /// sessions past the cap): their sockets say `auth_error` and hang up. Their own close then
+    /// gives up the avatar, if one held it. Returns how many were told.
+    pub fn end_sessions(&mut self, player_id: Uuid, sids: &[String]) -> usize {
+        let told = self.connections.get(&player_id).map_or(0, |s| s.end_sessions(sids));
+        if told > 0 {
+            tracing::info!("Sessions ended for player {}: closing {} connection(s)", player_id, told);
+        }
+        told
     }
 
     /// A socket opened on API key `key_id`. The receiver fires when the key is revoked.
@@ -216,18 +237,21 @@ impl GameState {
             .count()
     }
 
-    /// End connection `connection_id`. The player is removed only if it is still their current
-    /// connection; a stale one (a half-open socket, or a client signed in elsewhere) leaves the
-    /// newer connection's player alone. Returns whether the player was removed.
+    /// End connection `connection_id`. The player leaves the world only if it held their
+    /// avatar; a watcher (a client playing elsewhere, a half-open socket a reconnect took over
+    /// from, a bot) leaves the holder's player alone. Returns whether the player was removed.
     pub fn disconnect_player(&mut self, player_id: Uuid, connection_id: u64) -> bool {
-        match self.connections.get(&player_id) {
-            Some(current) if current.id == connection_id => {
-                self.connections.remove(&player_id);
-                self.remove_player(player_id);
-                true
-            }
-            _ => false,
+        let Some(sockets) = self.connections.get_mut(&player_id) else {
+            return false;
+        };
+        let held = sockets.close(connection_id);
+        if sockets.is_empty() {
+            self.connections.remove(&player_id);
         }
+        if held {
+            self.remove_player(player_id);
+        }
+        held
     }
 
     pub fn remove_player(&mut self, player_id: Uuid) {
@@ -962,6 +986,7 @@ mod tests {
     use super::super::extraction::EXTRACTION_RANGE;
     use crate::models::{ActionState, NodeState};
     use capitol_protocol::rules::{CENTER_X, CENTER_Y};
+    use capitol_protocol::ws::PresenceHolder;
 
     fn player(name: &str, x: f64, y: f64) -> PlayerState {
         PlayerState {
@@ -1163,16 +1188,38 @@ mod tests {
             .count()
     }
 
+    /// Open a client socket on session `sid` for `player` and take the avatar, as the WS
+    /// handler does for a client.
+    fn connect(
+        game: &mut GameState,
+        player: PlayerState,
+        sid: &str,
+    ) -> (u64, mpsc::UnboundedReceiver<PresenceEvent>) {
+        let (id, rx) = game.open_socket(player.id, Holder::Session(sid.into()), true);
+        game.claim_presence(player, id).unwrap();
+        (id, rx)
+    }
+
+    fn presence_told(rx: &mut mpsc::UnboundedReceiver<PresenceEvent>) -> Vec<PresenceEvent> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
     #[test]
     fn a_stale_connection_ending_leaves_the_newer_ones_player() {
         let mut game = game();
         let ada = player("Ada", CENTER_X, CENTER_Y);
         let id = ada.id;
-        let (conn_a, mut superseded_a) = game.connect_player(ada.clone());
-        let (conn_b, mut superseded_b) = game.connect_player(ada);
+        let (conn_a, mut told_a) = connect(&mut game, ada.clone(), "desk");
+        let (conn_b, mut told_b) = connect(&mut game, ada, "phone");
         assert_ne!(conn_a, conn_b);
-        assert!(superseded_a.try_recv().is_ok(), "A should be told B took over");
-        assert!(superseded_b.try_recv().is_err(), "B is current");
+        assert_eq!(
+            presence_told(&mut told_a).last(),
+            Some(&PresenceEvent::Changed { yours: false, held_by: Some(PresenceHolder::Client) }),
+            "A should be told B took over"
+        );
+        assert_eq!(presence_told(&mut told_b), [PresenceEvent::Changed { yours: true, held_by: None }]);
+        assert!(game.holds_presence(id, conn_b) && !game.holds_presence(id, conn_a));
+        assert_eq!(game.presence_of_account(game.players[&id].account_id), Some(&Holder::Session("phone".into())));
 
         let mut rx = game.subscribe();
         assert!(!game.disconnect_player(id, conn_a));
@@ -1183,6 +1230,44 @@ mod tests {
         assert!(!game.players.contains_key(&id));
         assert!(!game.connections.contains_key(&id));
         assert_eq!(leaves(&mut rx, id), 1);
+    }
+
+    #[test]
+    fn taking_the_avatar_back_keeps_the_player_where_they_stand() {
+        let mut game = game();
+        let ada = player("Ada", CENTER_X, CENTER_Y);
+        let id = ada.id;
+        let (desk, _) = connect(&mut game, ada.clone(), "desk");
+        let (_phone, _) = connect(&mut game, ada.clone(), "phone");
+        game.players.get_mut(&id).unwrap().x += 40.0;
+
+        let mut rx = game.subscribe();
+        // The desk claims with the row it read, which is older than the world.
+        game.claim_presence(ada, desk).unwrap();
+        assert!(game.holds_presence(id, desk));
+        assert_eq!(game.players[&id].x, CENTER_X + 40.0, "the avatar didn't jump back");
+        assert!(rx.try_recv().is_err(), "nobody joined or left");
+    }
+
+    #[test]
+    fn when_the_holder_leaves_a_watcher_is_told_and_its_claim_brings_the_avatar_back() {
+        let mut game = game();
+        let ada = player("Ada", CENTER_X, CENTER_Y);
+        let id = ada.id;
+        let (bot, mut told_bot) = game.open_socket(id, Holder::Key(Uuid::new_v4()), true);
+        let (desk, _) = connect(&mut game, ada.clone(), "desk");
+        assert_eq!(game.claim_presence(ada.clone(), bot), Err(presence::Refused::ClientConnected));
+        presence_told(&mut told_bot);
+
+        assert!(game.disconnect_player(id, desk), "the desk held it");
+        assert!(!game.players.contains_key(&id));
+        assert_eq!(presence_told(&mut told_bot), [PresenceEvent::Changed { yours: false, held_by: None }]);
+        assert_eq!(game.presence_of_account(ada.account_id), None);
+
+        game.claim_presence(ada, bot).unwrap();
+        assert!(game.players.contains_key(&id), "the bot brought the avatar back");
+        assert!(game.disconnect_player(id, bot));
+        assert!(!game.connections.contains_key(&id));
     }
 
     #[test]
@@ -1202,19 +1287,22 @@ mod tests {
     }
 
     #[test]
-    fn an_ended_session_closes_the_connection_and_its_disconnect_removes_the_player() {
+    fn an_ended_session_closes_its_connection_and_its_disconnect_removes_the_player() {
         let mut game = game();
         let ada = player("Ada", CENTER_X, CENTER_Y);
         let id = ada.id;
-        assert!(!game.end_session(id), "no connection to tell");
-        let (conn, mut ended) = game.connect_player(ada);
+        let ended = ["desk".to_string()];
+        assert_eq!(game.end_sessions(id, &ended), 0, "no connection to tell");
+        let (conn, mut told) = connect(&mut game, ada.clone(), "desk");
+        let (_phone, mut told_phone) = game.open_socket(id, Holder::Session("phone".into()), true);
+        presence_told(&mut told);
 
-        assert!(game.end_session(id));
-        assert!(ended.try_recv().is_ok(), "the connection should be told to hang up");
-        assert!(!game.end_session(id), "told once only");
+        assert_eq!(game.end_sessions(id, &ended), 1);
+        assert_eq!(presence_told(&mut told), [PresenceEvent::Ended], "the connection should be told to hang up");
+        assert!(presence_told(&mut told_phone).is_empty(), "the other session's socket stays");
 
         let mut rx = game.subscribe();
-        assert!(game.disconnect_player(id, conn), "it's still the player's connection");
+        assert!(game.disconnect_player(id, conn), "it held the avatar");
         assert!(!game.players.contains_key(&id));
         assert_eq!(leaves(&mut rx, id), 1);
     }
@@ -1316,8 +1404,8 @@ mod tests {
     fn a_stale_connection_leaves_the_players_trade_open() {
         let (mut game, a, b, _) = two_players(10.0);
         let ada = game.players[&a].clone();
-        let (stale, _) = game.connect_player(ada.clone());
-        let (_current, _) = game.connect_player(ada);
+        let (stale, _) = connect(&mut game, ada.clone(), "desk");
+        let (_current, _) = connect(&mut game, ada, "phone");
         game.trade_manager.request_trade(a, b).unwrap();
         game.trade_manager.accept_request(b).unwrap();
 

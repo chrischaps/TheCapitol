@@ -20,6 +20,7 @@ use crate::engine::container_access::{
 };
 use crate::api_keys::{self, KeyGrant};
 use crate::engine::GameEvent;
+use crate::engine::presence::{self, Holder, PresenceEvent};
 use crate::engine::currency::announce_balances;
 use crate::models::{ItemType, PlayerState};
 use crate::error::SESSIONS_UNAVAILABLE;
@@ -92,19 +93,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     let player_id = player.id;
     let key = authed.key;
-    // A key with only `read` watches: it leaves the player, and any client
-    // serving them, alone (`api_keys`).
-    let presence = key.is_none_or(|key| key.scopes.takes_presence());
+    // A key with only `read` watches: it never holds the avatar (`api_keys`).
+    let may_hold = key.is_none_or(|key| key.scopes.takes_presence());
 
-    // Add player to game state, superseding any older connection for them. A
-    // watcher's never fires: it has no connection to be superseded, and 0
-    // matches none, so its disconnect removes nobody.
-    let (_never, never) = tokio::sync::oneshot::channel::<()>();
-    let (connection_id, mut superseded) = if presence {
+    // One of the player's sockets, holding nothing yet (E0.8). It takes the
+    // avatar, or learns who holds it, once `auth_ok` is out.
+    let (connection_id, mut presence_events) = {
         let mut game = state.game.write().await;
-        game.connect_player(player)
-    } else {
-        (0, never)
+        game.open_socket(player_id, authed.holder, may_hold)
     };
     // Fires when the socket's API key is revoked
     let (_unrevokable, unrevokable) = tokio::sync::oneshot::channel::<()>();
@@ -147,6 +143,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         .send(Message::Text(serde_json::to_string(&auth_ok).unwrap().into()))
         .await;
 
+    // Take the avatar (D9): a client always does, so the newest client holds
+    // it, and a bot only while none of the player's clients is connected.
+    // A socket that doesn't hold it hears who does. Either way its
+    // `presence` follows `auth_ok`.
+    {
+        let mut game = state.game.write().await;
+        if !may_hold || game.claim_presence(player, connection_id).is_err() {
+            game.tell_watcher(player_id, connection_id);
+        }
+    }
+
     // Subscribe to game events
     let mut event_rx = {
         let game = state.game.read().await;
@@ -162,17 +169,24 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     loop {
         tokio::select! {
-            // A newer connection took this player over (the account signed in elsewhere, or
-            // this socket is half-open and the client already reconnected past it), or a login
-            // or logout over REST ended this session (#78)
-            _ = &mut superseded => {
-                let msg = ServerMessage::AuthError { message: "Session expired".into() };
-                let _ = timeout(Duration::from_secs(2), async {
-                    let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
-                    let _ = sender.send(Message::Close(None)).await;
-                })
-                .await;
-                break;
+            // This socket took the avatar or lost it (E0.8), or a logout over REST ended
+            // its session (#78)
+            event = presence_events.recv() => {
+                match event {
+                    Some(PresenceEvent::Changed { yours, held_by }) => {
+                        let msg = ServerMessage::Presence { yours, held_by };
+                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                    }
+                    Some(PresenceEvent::Ended) | None => {
+                        let msg = ServerMessage::AuthError { message: "Session expired".into() };
+                        let _ = timeout(Duration::from_secs(2), async {
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                            let _ = sender.send(Message::Close(None)).await;
+                        })
+                        .await;
+                        break;
+                    }
+                }
             }
 
             // The API key this socket opened with was revoked
@@ -214,6 +228,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     continue;
                                 }
                             }
+                            // Only the socket holding the avatar drives it. A watcher may
+                            // still use the market and automation (E0.8).
+                            if presence::drives_avatar_ws(&client_msg)
+                                && !state.game.read().await.holds_presence(player_id, connection_id)
+                            {
+                                let msg = ServerMessage::Error {
+                                    message: presence::NOT_HOLDING.into(),
+                                    command: command.to_string(),
+                                };
+                                let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                continue;
+                            }
                             match client_msg {
                                 ClientMessage::Subscribe { channel } => {
                                     if channel == "position" {
@@ -225,7 +251,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         // What waited while they were away (#138). Events since
                                         // auth are already on `event_rx`; whichever path takes a
                                         // notice first sends it. A watcher takes none.
-                                        if first && presence {
+                                        if first && state.game.read().await.holds_presence(player_id, connection_id) {
                                             match crate::engine::notices::take_all(&state.db, player_id).await {
                                                 Ok(waiting) => {
                                                     for msg in waiting {
@@ -262,6 +288,23 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                     };
                                     let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                }
+                                ClientMessage::ClaimPresence => {
+                                    // A fresh row, for when the avatar has to come back into
+                                    // the world; one already there carries on as it is.
+                                    let claimed = match load_player(&state, authed.account_id).await {
+                                        Ok(player) => state
+                                            .game
+                                            .write()
+                                            .await
+                                            .claim_presence(player, connection_id)
+                                            .map_err(|why| why.to_string()),
+                                        Err(msg) => Err(msg),
+                                    };
+                                    if let Err(message) = claimed {
+                                        let msg = ServerMessage::Error { message, command: command.into() };
+                                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                    }
                                 }
                                 ClientMessage::UnsubscribeMarket { item_type } => match item_type {
                                     Some(item_type) => {
@@ -1038,15 +1081,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
                     // #131: Property tax, to the plot's owner only, if they take its notice (#138).
-                    // A watcher sends it without taking it, leaving it for the player.
+                    // A watcher sends it without taking it, leaving it for the holder.
                     Ok(GameEvent::TaxDelinquent { owner_id, terrain_id, tax_owed, forecloses_at, notice_id }) => {
-                        if owner_id == player_id && (!presence || take_notice(&state.db, notice_id).await) {
+                        if owner_id == player_id && (!holds(&state, player_id, connection_id).await || take_notice(&state.db, notice_id).await) {
                             let msg = ServerMessage::TaxDelinquent { terrain_id, tax_owed, forecloses_at };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
                     Ok(GameEvent::PlotForeclosed { owner_id, terrain_id, tax_owed, refund, notice_id }) => {
-                        if owner_id == player_id && (!presence || take_notice(&state.db, notice_id).await) {
+                        if owner_id == player_id && (!holds(&state, player_id, connection_id).await || take_notice(&state.db, notice_id).await) {
                             let msg = ServerMessage::PlotForeclosed { terrain_id, tax_owed, refund };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
@@ -1103,7 +1146,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
-    // Remove player from game state, unless a newer connection now serves them
+    // Remove the player from the world, if this socket held their avatar
     let removed = {
         let mut game = state.game.write().await;
         game.disconnect_player(player_id, connection_id)
@@ -1112,8 +1155,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     if removed {
         tracing::info!("Player {} disconnected", player_id);
     } else {
-        tracing::info!("Player {}'s superseded connection {} ended", player_id, connection_id);
+        tracing::info!("Player {}'s watching connection {} ended", player_id, connection_id);
     }
+}
+
+/// Whether socket `connection_id` holds the player's avatar (E0.8).
+async fn holds(state: &AppState, player_id: Uuid, connection_id: u64) -> bool {
+    state.game.read().await.holds_presence(player_id, connection_id)
 }
 
 /// The most items one connection may watch the market channels of (E3.3)
@@ -1136,15 +1184,21 @@ struct Authed {
     account_id: Uuid,
     /// The API key it signed in with, if it did
     key: Option<KeyGrant>,
+    /// Its session, or its key, for presence (E0.8)
+    holder: Holder,
 }
 
 async fn authenticate(token: &str, state: &AppState) -> Result<Authed, String> {
     if !api_keys::is_secret(token) {
         let claims = validate_token(token, state).await?;
-        return Ok(Authed { account_id: claims.sub, key: None });
+        return Ok(Authed { account_id: claims.sub, key: None, holder: Holder::Session(claims.sid) });
     }
     match api_keys::authenticate(&state.db, token).await {
-        Ok(Some(user)) => Ok(Authed { account_id: user.account_id, key: Some(user.grant) }),
+        Ok(Some(user)) => Ok(Authed {
+            account_id: user.account_id,
+            key: Some(user.grant),
+            holder: Holder::Key(user.grant.id),
+        }),
         Ok(None) => Err("Invalid or revoked API key".into()),
         // Retried by capitol-core, like any other database error (`auth_error_is_final`)
         Err(e) => Err(format!("Database error: {}", e)),

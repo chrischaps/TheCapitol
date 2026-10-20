@@ -177,6 +177,7 @@ fn test_for(message: &M) -> fn() {
     match message {
         M::AuthOk { .. } => auth_ok_sets_the_local_player,
         M::AuthError { .. } => auth_error_and_subscribed_change_nothing,
+        M::Presence { .. } => presence_follows_the_server_and_resets_on_a_drop,
         M::Subscribed { .. } => auth_error_and_subscribed_change_nothing,
         M::Positions { .. } => positions_replace_the_player_set,
         M::PlayerJoined { .. } => player_joined_adds_once,
@@ -247,12 +248,47 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 53, "one fixture per ServerMessage variant");
+    assert_eq!(count, 54, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
 // Handshake and players
 // ---------------------------------------------------------------------------
+
+#[test]
+fn presence_follows_the_server_and_resets_on_a_drop() {
+    use capitol_protocol::ws::PresenceHolder;
+    let mut state = GameState::new();
+    assert_eq!(state.presence(), None);
+    assert!(state.plays_here(), "an older server never says, and lets you play");
+
+    let lost = Presence {
+        yours: false,
+        held_by: Some(PresenceHolder::Client),
+    };
+    let events = state.apply_ws(&M::Presence {
+        yours: false,
+        held_by: Some(PresenceHolder::Client),
+    });
+    assert_eq!(events, vec![StateEvent::Presence(lost)]);
+    assert_eq!(state.presence(), Some(lost));
+    assert!(!state.plays_here());
+
+    state.apply_ws(&M::Presence {
+        yours: true,
+        held_by: None,
+    });
+    assert!(state.plays_here());
+
+    state.apply_ws(&M::Presence {
+        yours: false,
+        held_by: None,
+    });
+    state.apply_connection(&ConnectionState::Disconnected {
+        reason: "closed".into(),
+    });
+    assert_eq!(state.presence(), None, "the next connection hears its own");
+}
 
 #[test]
 fn subscription_follows_auth_ok_me_and_the_lapse() {

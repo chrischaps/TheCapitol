@@ -412,12 +412,22 @@ impl Session {
     }
 
     fn walk(&mut self, now: Instant, x: f64, y: f64) {
-        if self.auth.phase() != Phase::InWorld {
+        // Another device plays the avatar (E0.8): nothing to predict, and the
+        // server would refuse the move.
+        if self.auth.phase() != Phase::InWorld || !self.state.plays_here() {
             return;
         }
         self.motion.move_to(now, x, y);
         self.net.ws(ClientMessage::Move { x, y });
         self.last_move = Some((x, y));
+    }
+
+    /// Play the avatar here, taking it from whichever device or bot has it
+    /// (`claim_presence`, E0.8). The server answers with `presence`.
+    pub fn claim_presence(&mut self) {
+        if self.auth.phase() == Phase::InWorld {
+            self.net.ws(ClientMessage::ClaimPresence);
+        }
     }
 
     /// You clicked a resource node: extract from it if it's in range, or
@@ -439,6 +449,9 @@ impl Session {
     }
 
     fn step(&mut self, now: Instant, step: Step) {
+        if !self.state.plays_here() {
+            return;
+        }
         match step {
             Step::Extract(node) => self.net.ws(ClientMessage::Extract {
                 node_id: node.to_string(),

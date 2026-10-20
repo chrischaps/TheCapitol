@@ -1097,6 +1097,10 @@ impl PlayerExtension for CapitolExtension {
                 if clicks.settings {
                     self.settings_panel.toggle();
                 }
+                // Another device or a bot plays the avatar (E0.8)
+                if ui::hud::presence_banner(ctx, session.state().presence()) {
+                    session.claim_presence();
+                }
             }
             let outage = if at_login {
                 None

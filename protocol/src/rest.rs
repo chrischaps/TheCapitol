@@ -81,6 +81,9 @@ pub struct LogoutRequest {
     /// Refresh token of the session to end
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
+    /// End every session the account has, not just this one (E0.8)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub everywhere: bool,
 }
 
 /// Response to register, login and refresh

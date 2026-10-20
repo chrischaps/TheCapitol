@@ -1,11 +1,17 @@
 //! Sessions and refresh tokens, in Redis (E0.6).
 //!
-//! An account has at most one session (#78), named by a random session id
-//! (`sid`) at `session:{account}`. Every access token carries its session's
-//! id, and a token is good while its id is still the account's session. So a
-//! new login, a logout or a revoked family ends every token of the old
-//! session at once, while a refresh, which keeps the id, leaves tokens
-//! already in flight working until they expire.
+//! An account can have several sessions at once (E0.8, D9): one per login,
+//! each named by a random session id (`sid`) and alive while
+//! `session:{account}:{sid}` is. `sessions:{account}` indexes them by when
+//! they started, so a login past [`MAX_SESSIONS`] ends the oldest and a "log
+//! out everywhere" finds them all. Every access token carries its session's
+//! id, and a token is good while its session is. So a logout or a revoked
+//! family ends every token of that session at once and leaves the account's
+//! others alone, while a refresh, which keeps the id, leaves tokens already
+//! in flight working until they expire.
+//!
+//! Which session drives the avatar isn't decided here: that's presence,
+//! which one socket holds (`engine::presence`).
 //!
 //! A session started with a refresh token is a refresh **family**:
 //! - `refresh:{sha256(token)}` holds `{account}:{sid}`. Only the hash is kept.
@@ -34,12 +40,17 @@ pub const LEGACY_TTL_SECS: u64 = 24 * 60 * 60;
 /// the same successor instead of revoking the family (#184).
 pub const REUSE_GRACE_MS: u64 = 30_000;
 
+/// The most sessions an account keeps. A login past it ends the oldest.
+pub const MAX_SESSIONS: usize = 10;
+
 /// A session just started.
 #[derive(Debug)]
 pub struct Started {
     pub sid: String,
     /// `None` for a legacy session.
     pub refresh_token: Option<String>,
+    /// Older sessions this one pushed past [`MAX_SESSIONS`], now ended.
+    pub evicted: Vec<String>,
 }
 
 /// A refresh token swapped for the next.
@@ -61,7 +72,7 @@ pub enum Refused {
     Ended,
     /// Already used once. Its family has now been revoked.
     #[error("Refresh token reused")]
-    Reused { account_id: Uuid },
+    Reused { account_id: Uuid, sid: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -72,8 +83,13 @@ pub enum RotateError {
     Redis(#[from] redis::RedisError),
 }
 
-fn session_key(account_id: Uuid) -> String {
-    format!("session:{account_id}")
+fn session_key(account_id: Uuid, sid: &str) -> String {
+    format!("session:{account_id}:{sid}")
+}
+
+/// The account's sessions, each scored by when it started (Unix ms).
+fn index_key(account_id: Uuid) -> String {
+    format!("sessions:{account_id}")
 }
 
 fn refresh_key(hash: &str) -> String {
@@ -101,9 +117,10 @@ pub(crate) fn random_token() -> String {
     hex(&rand::random::<[u8; 32]>())
 }
 
-/// Starts the account's session, replacing any it had. With `refresh_ttl`,
-/// it's a refresh family whose first token is returned, and the session
-/// lives as long as its refresh tokens do; without, it's a legacy session.
+/// Starts a new session for the account, beside any it has, and ends the
+/// oldest past [`MAX_SESSIONS`]. With `refresh_ttl`, it's a refresh family
+/// whose first token is returned, and the session lives as long as its
+/// refresh tokens do; without, it's a legacy session.
 pub async fn start(
     redis: &mut ConnectionManager,
     account_id: Uuid,
@@ -111,12 +128,46 @@ pub async fn start(
 ) -> redis::RedisResult<Started> {
     let sid = random_token();
     let ttl = refresh_ttl.unwrap_or(LEGACY_TTL_SECS);
-    redis.set_ex::<_, _, ()>(session_key(account_id), &sid, ttl).await?;
+    let index = index_key(account_id);
+    redis.set_ex::<_, _, ()>(session_key(account_id, &sid), 1, ttl).await?;
+    redis
+        .zadd::<_, _, _, ()>(&index, &sid, chrono::Utc::now().timestamp_millis())
+        .await?;
+    keep_index(redis, account_id, ttl).await?;
+
+    // Sessions that expired on their own still sit in the index. Drop them
+    // before counting, so they don't push out a live one.
+    let mut live = Vec::new();
+    for other in redis.zrange::<_, Vec<String>>(&index, 0, -1).await? {
+        if redis.exists(session_key(account_id, &other)).await? {
+            live.push(other);
+        } else {
+            redis.zrem::<_, _, ()>(&index, &other).await?;
+        }
+    }
+    let mut evicted = Vec::new();
+    for old in &live[..live.len().saturating_sub(MAX_SESSIONS)] {
+        if end(redis, account_id, old).await? {
+            evicted.push(old.clone());
+        }
+    }
+
     let refresh_token = match refresh_ttl {
         Some(ttl) => Some(issue(redis, account_id, &sid, ttl).await?),
         None => None,
     };
-    Ok(Started { sid, refresh_token })
+    Ok(Started { sid, refresh_token, evicted })
+}
+
+/// Keeps the account's index alive at least as long as a session just
+/// started or renewed.
+async fn keep_index(redis: &mut ConnectionManager, account_id: Uuid, ttl: u64) -> redis::RedisResult<()> {
+    let index = index_key(account_id);
+    let left: i64 = redis.ttl(&index).await?;
+    if left < ttl as i64 {
+        redis.expire::<_, ()>(&index, ttl as i64).await?;
+    }
+    Ok(())
 }
 
 async fn issue(
@@ -141,10 +192,12 @@ async fn lookup(redis: &mut ConnectionManager, token: &str) -> redis::RedisResul
     }))
 }
 
-/// Whether `sid` is still the account's session.
+/// Whether `sid` is still one of the account's sessions.
 pub async fn is_current(redis: &mut ConnectionManager, account_id: Uuid, sid: &str) -> redis::RedisResult<bool> {
-    let current: Option<String> = redis.get(session_key(account_id)).await?;
-    Ok(!sid.is_empty() && current.as_deref() == Some(sid))
+    if sid.is_empty() {
+        return Ok(false);
+    }
+    redis.exists(session_key(account_id, sid)).await
 }
 
 /// Swaps a refresh token for the next one in its family, and keeps the
@@ -205,9 +258,10 @@ async fn rotate_with_grace(
         .await?;
     let Some(refresh_token) = successor else {
         end(redis, account_id, &sid).await?;
-        return Err(Refused::Reused { account_id }.into());
+        return Err(Refused::Reused { account_id, sid }.into());
     };
-    redis.expire::<_, ()>(session_key(account_id), ttl as i64).await?;
+    redis.expire::<_, ()>(session_key(account_id, &sid), ttl as i64).await?;
+    keep_index(redis, account_id, ttl).await?;
     Ok(Rotated {
         account_id,
         sid,
@@ -215,22 +269,37 @@ async fn rotate_with_grace(
     })
 }
 
-/// Ends the account's session if it's still `sid`, so an old client's logout
-/// can't end a newer login's session. Returns whether it ended one.
+/// Ends the account's session `sid`, leaving its others alone. Returns
+/// whether it was still live.
 pub async fn end(redis: &mut ConnectionManager, account_id: Uuid, sid: &str) -> redis::RedisResult<bool> {
-    if !is_current(redis, account_id, sid).await? {
+    if sid.is_empty() {
         return Ok(false);
     }
-    redis.del::<_, ()>(session_key(account_id)).await?;
-    Ok(true)
+    let ended: i64 = redis.del(session_key(account_id, sid)).await?;
+    redis.zrem::<_, _, ()>(index_key(account_id), sid).await?;
+    Ok(ended > 0)
 }
 
-/// Ends the session a refresh token belongs to, used or not.
-pub async fn end_by_refresh(redis: &mut ConnectionManager, token: &str) -> redis::RedisResult<Option<Uuid>> {
+/// Ends every session the account has: "log out everywhere". Returns the
+/// ones that were live.
+pub async fn end_all(redis: &mut ConnectionManager, account_id: Uuid) -> redis::RedisResult<Vec<String>> {
+    let mut ended = Vec::new();
+    for sid in redis.zrange::<_, Vec<String>>(index_key(account_id), 0, -1).await? {
+        if end(redis, account_id, &sid).await? {
+            ended.push(sid);
+        }
+    }
+    redis.del::<_, ()>(index_key(account_id)).await?;
+    Ok(ended)
+}
+
+/// Ends the session a refresh token belongs to, used or not. Returns its
+/// account and id, if it was live.
+pub async fn end_by_refresh(redis: &mut ConnectionManager, token: &str) -> redis::RedisResult<Option<(Uuid, String)>> {
     let Some((account_id, sid)) = lookup(redis, token).await? else {
         return Ok(None);
     };
-    Ok(end(redis, account_id, &sid).await?.then_some(account_id))
+    Ok(end(redis, account_id, &sid).await?.then_some((account_id, sid)))
 }
 
 /// The `#[ignore]`d tests need the local Redis (`docker-compose up -d`), or
@@ -310,7 +379,7 @@ mod tests {
 
         assert_eq!(
             refused(rotate(&mut redis, &first, TTL).await),
-            Refused::Reused { account_id: account }
+            Refused::Reused { account_id: account, sid: started.sid.clone() }
         );
         assert!(!is_current(&mut redis, account, &started.sid).await.unwrap());
         // The thief's token is gone with the family, and so is the owner's.
@@ -330,7 +399,7 @@ mod tests {
         // Still within the grace, but the client got its answer: this is a copy.
         assert_eq!(
             refused(rotate(&mut redis, &first, TTL).await),
-            Refused::Reused { account_id: account }
+            Refused::Reused { account_id: account, sid: started.sid.clone() }
         );
         assert!(!is_current(&mut redis, account, &started.sid).await.unwrap());
     }
@@ -348,23 +417,90 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs the local Redis (docker-compose up -d)"]
-    async fn a_new_login_or_a_logout_ends_the_family() {
+    async fn a_second_login_leaves_the_first_alone_and_a_logout_ends_only_its_own() {
         let mut redis = redis().await;
         let account = Uuid::new_v4();
         let old = start(&mut redis, account, Some(TTL)).await.unwrap();
         let new = start(&mut redis, account, Some(TTL)).await.unwrap();
-        assert_eq!(
-            refused(rotate(&mut redis, old.refresh_token.as_ref().unwrap(), TTL).await),
-            Refused::Ended
-        );
+        assert!(new.evicted.is_empty());
+        // Both are live, and both refresh (E0.8).
+        let old_token = rotate(&mut redis, old.refresh_token.as_ref().unwrap(), TTL)
+            .await
+            .unwrap()
+            .refresh_token;
+        assert!(is_current(&mut redis, account, &new.sid).await.unwrap());
+
         // The old session's logout leaves the new one alone.
-        assert!(!end(&mut redis, account, &old.sid).await.unwrap());
+        assert!(end(&mut redis, account, &old.sid).await.unwrap());
+        assert!(!end(&mut redis, account, &old.sid).await.unwrap(), "ended once only");
+        assert_eq!(refused(rotate(&mut redis, &old_token, TTL).await), Refused::Ended);
         assert!(is_current(&mut redis, account, &new.sid).await.unwrap());
 
         let token = new.refresh_token.unwrap();
-        assert_eq!(end_by_refresh(&mut redis, &token).await.unwrap(), Some(account));
+        assert_eq!(end_by_refresh(&mut redis, &token).await.unwrap(), Some((account, new.sid)));
         assert_eq!(refused(rotate(&mut redis, &token, TTL).await), Refused::Ended);
         assert_eq!(refused(rotate(&mut redis, "nonsense", TTL).await), Refused::Unknown);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the local Redis (docker-compose up -d)"]
+    async fn a_reuse_revokes_only_its_own_family() {
+        let mut redis = redis().await;
+        let account = Uuid::new_v4();
+        let phone = start(&mut redis, account, Some(TTL)).await.unwrap();
+        let desk = start(&mut redis, account, Some(TTL)).await.unwrap();
+        let first = phone.refresh_token.unwrap();
+        let second = rotate(&mut redis, &first, TTL).await.unwrap().refresh_token;
+        rotate(&mut redis, &second, TTL).await.unwrap();
+        assert_eq!(
+            refused(rotate(&mut redis, &first, TTL).await),
+            Refused::Reused { account_id: account, sid: phone.sid.clone() }
+        );
+        assert!(!is_current(&mut redis, account, &phone.sid).await.unwrap());
+        assert!(
+            is_current(&mut redis, account, &desk.sid).await.unwrap(),
+            "the other device stays signed in"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the local Redis (docker-compose up -d)"]
+    async fn a_login_past_the_cap_ends_the_oldest() {
+        let mut redis = redis().await;
+        let account = Uuid::new_v4();
+        let mut sids = Vec::new();
+        for _ in 0..MAX_SESSIONS {
+            let started = start(&mut redis, account, Some(TTL)).await.unwrap();
+            assert!(started.evicted.is_empty());
+            sids.push(started.sid);
+            // Distinct start times, so the oldest is plain.
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        let newest = start(&mut redis, account, Some(TTL)).await.unwrap();
+        assert_eq!(newest.evicted, vec![sids[0].clone()]);
+        assert!(!is_current(&mut redis, account, &sids[0]).await.unwrap());
+        assert!(is_current(&mut redis, account, &sids[1]).await.unwrap());
+        assert!(is_current(&mut redis, account, &newest.sid).await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the local Redis (docker-compose up -d)"]
+    async fn logging_out_everywhere_ends_every_session() {
+        let mut redis = redis().await;
+        let account = Uuid::new_v4();
+        let a = start(&mut redis, account, Some(TTL)).await.unwrap();
+        let b = start(&mut redis, account, None).await.unwrap();
+        let mut ended = end_all(&mut redis, account).await.unwrap();
+        ended.sort();
+        let mut expected = vec![a.sid.clone(), b.sid.clone()];
+        expected.sort();
+        assert_eq!(ended, expected);
+        assert!(!is_current(&mut redis, account, &a.sid).await.unwrap());
+        assert!(!is_current(&mut redis, account, &b.sid).await.unwrap());
+        assert_eq!(
+            refused(rotate(&mut redis, a.refresh_token.as_ref().unwrap(), TTL).await),
+            Refused::Ended
+        );
     }
 
     #[tokio::test]

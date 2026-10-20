@@ -18,6 +18,7 @@ pub mod node_placement;
 pub mod node_spawn;
 pub mod notices;
 pub mod plot_sync;
+pub mod presence;
 pub mod property_tax;
 mod regeneration;
 pub mod slot_moves;

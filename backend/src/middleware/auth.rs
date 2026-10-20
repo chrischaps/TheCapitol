@@ -10,6 +10,7 @@ use jsonwebtoken::{decode, DecodingKey, Validation};
 use uuid::Uuid;
 
 use crate::api_keys::{self, KeyGrant};
+use crate::engine::presence::{self, Holder};
 use crate::error::SESSIONS_UNAVAILABLE;
 use crate::routes::auth::Claims;
 use crate::state::AppState;
@@ -57,8 +58,10 @@ pub async fn auth_middleware(
         .extensions()
         .get::<OriginalUri>()
         .map_or_else(|| request.uri().path().to_owned(), |uri| uri.path().to_owned());
-    let user = if api_keys::is_secret(&token) {
-        key_user(&state, request.method().clone(), &path, &token).await?
+    let (user, holder) = if api_keys::is_secret(&token) {
+        let user = key_user(&state, request.method().clone(), &path, &token).await?;
+        let key = user.key.expect("a key's user carries its key").id;
+        (user, Holder::Key(key))
     } else {
         token_user(&state, &token).await?
     };
@@ -72,12 +75,21 @@ pub async fn auth_middleware(
         return Ok(crate::rate_limit::too_many(wait));
     }
 
+    // Driving the avatar is for whoever holds it, while someone does (E0.8).
+    // Everything else works from any of the account's sessions.
+    if presence::drives_avatar_rest(request.method(), &path) {
+        let game = state.game.read().await;
+        if game.presence_of_account(user.account_id).is_some_and(|held| *held != holder) {
+            return Err(refuse(StatusCode::CONFLICT, presence::NOT_HOLDING));
+        }
+    }
+
     // Insert auth user into request extensions
     request.extensions_mut().insert(user);
     Ok(next.run(request).await)
 }
 
-async fn token_user(state: &AppState, token: &str) -> Result<AuthUser, Refusal> {
+async fn token_user(state: &AppState, token: &str) -> Result<(AuthUser, Holder), Refusal> {
     // Decode and validate JWT
     let token_data = decode::<Claims>(
         token,
@@ -101,11 +113,12 @@ async fn token_user(state: &AppState, token: &str) -> Result<AuthUser, Refusal> 
         return Err(refuse(StatusCode::UNAUTHORIZED, "Session expired"));
     }
 
-    Ok(AuthUser {
+    let user = AuthUser {
         account_id: token_data.claims.sub,
         is_admin: token_data.claims.is_admin,
         key: None,
-    })
+    };
+    Ok((user, Holder::Session(token_data.claims.sid)))
 }
 
 async fn key_user(state: &AppState, method: Method, path: &str, secret: &str) -> Result<AuthUser, Refusal> {

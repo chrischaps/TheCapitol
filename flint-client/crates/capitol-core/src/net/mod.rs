@@ -223,8 +223,8 @@ pub enum ConnectionState {
     Disconnected {
         reason: String,
     },
-    /// The server rejected the token: it expired, or the account logged in
-    /// somewhere else. Nothing is retried: log in again.
+    /// The server rejected the token: it expired, or its session was signed
+    /// out from elsewhere. Nothing is retried: log in again.
     AuthFailed {
         message: String,
     },

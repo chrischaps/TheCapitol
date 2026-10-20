@@ -15,10 +15,15 @@
 //!   to the next. A drop shorter than [`GRACE`] shows nothing, so a blip
 //!   doesn't flash. On the way back it says so as it fades. A token refused
 //!   while away isn't an outage: the login form takes over, with its notice.
+//! - **The presence banner** hangs under the header while another device or
+//!   a bot plays your avatar (E0.8): who has it, that the market and your
+//!   stations still work from here, and Play here to take it back.
 
 use std::time::{Duration, Instant};
 
 use capitol_core::net::ConnectionState;
+use capitol_core::protocol::ws::PresenceHolder;
+use capitol_core::state::Presence;
 use capitol_core::protocol::rules::Zone;
 use egui::{Align, Align2, Color32, Id, Layout, Margin, Order, RichText, Stroke};
 
@@ -31,6 +36,75 @@ pub const GRACE: Duration = Duration::from_millis(400);
 const FADE: f32 = 0.35;
 /// The overlay panel's width, in points.
 const OVERLAY_WIDTH: f32 = 320.0;
+
+/// The presence banner's width, in points.
+const BANNER_WIDTH: f32 = 360.0;
+
+/// What the presence banner says, for who plays the avatar instead.
+fn presence_lines(held_by: Option<PresenceHolder>) -> (&'static str, &'static str) {
+    match held_by {
+        Some(PresenceHolder::Client) => (
+            "You're playing on another device",
+            "From here you can trade and run your stations.",
+        ),
+        Some(PresenceHolder::Bot) => (
+            "A bot is playing as you",
+            "From here you can trade and run your stations.",
+        ),
+        None => (
+            "Your avatar is away",
+            "Nobody is playing it. Step back in from here.",
+        ),
+    }
+}
+
+/// While another device or a bot plays your avatar (E0.8), a banner under the
+/// header says so, with Play here. Returns whether Play here was clicked.
+/// Fades in and out with `presence`; draw it after the header.
+pub fn presence_banner(ctx: &egui::Context, presence: Option<Presence>) -> bool {
+    let watching = presence.is_some_and(|p| !p.yours);
+    let fade = ctx.animate_bool_with_time(Id::new("capitol_presence"), watching, FADE);
+    if fade <= 0.0 {
+        return false;
+    }
+    // Keep the last words up while it fades out.
+    let id = Id::new("capitol_presence_held_by");
+    let held_by = match presence {
+        Some(p) if !p.yours => {
+            ctx.data_mut(|d| d.insert_temp(id, p.held_by));
+            p.held_by
+        }
+        _ => ctx.data(|d| d.get_temp(id)).flatten(),
+    };
+    let (title, line) = presence_lines(held_by);
+    let mut play_here = false;
+    egui::Area::new(Id::new("capitol_presence_banner"))
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_TOP, [0.0, 52.0])
+        .interactable(watching && fade > 0.5)
+        .show(ctx, |ui| {
+            ui.multiply_opacity(fade);
+            theme::panel_edged(theme::GOLD_DIM)
+                .inner_margin(Margin::symmetric(18.0, 12.0))
+                .show(ui, |ui| {
+                    ui.set_width(BANNER_WIDTH);
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(title)
+                                    .font(theme::strong(size::BODY))
+                                    .color(theme::GOLD),
+                            );
+                            ui.label(RichText::new(line).size(size::SMALL).color(theme::DIM));
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            play_here = theme::button(ui, "Play here", true).clicked();
+                        });
+                    });
+                });
+        });
+    play_here
+}
 
 /// What the header shows.
 pub struct HeaderView<'a> {
@@ -691,6 +765,26 @@ fn plain_reason(reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_presence_banner_says_who_plays_and_offers_to_play_here() {
+        assert_eq!(presence_lines(Some(PresenceHolder::Client)).0, "You're playing on another device");
+        assert_eq!(presence_lines(Some(PresenceHolder::Bot)).0, "A bot is playing as you");
+        assert_eq!(presence_lines(None).0, "Your avatar is away");
+
+        let ctx = theme::test_context();
+        let watching = Presence {
+            yours: false,
+            held_by: Some(PresenceHolder::Client),
+        };
+        // Drawn while watching, and nothing to click once it's yours.
+        let _ = ctx.run(Default::default(), |ctx| {
+            assert!(!presence_banner(ctx, Some(watching)));
+        });
+        let _ = ctx.run(Default::default(), |ctx| {
+            assert!(!presence_banner(ctx, Some(Presence { yours: true, held_by: None })));
+        });
+    }
 
     #[test]
     fn balances_are_grouped_by_thousands() {

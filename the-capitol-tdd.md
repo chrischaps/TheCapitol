@@ -2598,9 +2598,10 @@ Players can be logged in from multiple clients simultaneously:
 
 **Constraints:**
 - All sessions share the same game state
-- Commands from any session are processed
 - Events broadcast to all sessions
-- Only one "active control" at a time for movement (last input wins)
+- One socket holds the avatar at a time (**presence**). Since E0.8 (Economy plan D9) it's the newest client to connect, until another claims it, rather than "last input wins". The others watch: they may still use the market, automation, the exchange and plots, but commands that drive the avatar (moving, gathering, crafting, inventory moves, stations, P2P trades) are refused from them.
+- A bot on an API key holds the avatar only while none of the player's own clients is connected.
+- Up to 10 sessions per account; a login past that ends the oldest. `POST /auth/logout {"everywhere": true}` ends them all.
 
 **Session Awareness:**
 

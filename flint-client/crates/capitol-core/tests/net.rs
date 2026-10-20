@@ -782,6 +782,7 @@ fn a_get_on_a_dead_pooled_connection_is_sent_again() {
     let logout = RestRequest::Logout(capitol_core::protocol::rest::LogoutRequest {
         token: Some("t".into()),
         refresh_token: None,
+        ..Default::default()
     });
     assert!(matches!(call(logout, 3), Err(RestError::Transport(_))));
     assert_eq!(requests.load(Ordering::SeqCst), 4);
