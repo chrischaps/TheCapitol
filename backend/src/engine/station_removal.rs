@@ -141,6 +141,8 @@ async fn remove_in(
         super::station_tools::give_back(tx, station_id, tool, player_id, inventory_id, slots[1]).await?;
     }
 
+    // The station keeps the kit's quality but not its maker, so the kit
+    // comes back unmarked (#241)
     let kit_item_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
@@ -298,6 +300,7 @@ pub async fn return_stations(
             returned.lost.push((kit.to_string(), 1));
             continue;
         };
+        // Unmarked, as at a take-down: the station didn't keep the maker (#241)
         sqlx::query(
             "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
              VALUES ($1, $2, $3, 1, $4, $5, $6)",

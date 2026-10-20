@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use super::gazette;
 use super::station_tools;
-use super::units;
+use super::units::{self, Marked, NewStack};
 use super::tools::{self, BrokenTool, HeldTool, Wear};
 
 /// A craft that has run its time, waiting to be written
@@ -188,8 +188,8 @@ async fn place_output(
 /// Put `output`, owned by `owner_id`, in `container_id` of `slot_count` slots:
 /// onto the first stack of its type if it stacks (`units::join_first_stack`:
 /// every unit keeps its quality, so any grade may join), or into the first free
-/// slot. [`OUTPUT_FULL`] when there's neither. A station's automation (E4.3)
-/// puts its output in the station's box this way.
+/// slot. [`OUTPUT_FULL`] when there's neither. Its units carry `owner_id`'s
+/// mark: they made it (#231).
 pub async fn place_in(
     tx: &mut Transaction<'_, Postgres>,
     container_id: Uuid,
@@ -197,11 +197,9 @@ pub async fn place_in(
     owner_id: Uuid,
     output: &CraftOutput,
 ) -> Result<(), String> {
-    if output.stackable {
-        let made = Units::uniform(output.quantity, output.quality);
-        if units::join_first_stack(tx, container_id, &output.item_type, &made).await.map_err(db_error)? {
-            return Ok(());
-        }
+    let made = Marked::by(Some(owner_id), &Units::uniform(output.quantity, output.quality));
+    if output.stackable && units::join_first_stack(tx, container_id, &output.item_type, &made).await.map_err(db_error)? {
+        return Ok(());
     }
 
     let used: Vec<(i32,)> = sqlx::query_as(
@@ -215,21 +213,14 @@ pub async fn place_in(
         .find(|s| !used.iter().any(|(u,)| u == s))
         .ok_or_else(|| OUTPUT_FULL.to_string())?;
 
-    sqlx::query(
-        "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index, durability)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(&output.item_type)
-    .bind(output.quality)
-    .bind(output.quantity)
-    .bind(owner_id)
-    .bind(container_id)
-    .bind(slot)
-    .bind(output.durability)
-    .execute(&mut **tx)
-    .await
-    .map_err(db_error)?;
+    let stack = NewStack {
+        item_type: &output.item_type,
+        owner_id: Some(owner_id),
+        container_id: Some(container_id),
+        slot_index: Some(slot),
+        durability: output.durability,
+    };
+    units::insert_stack(tx, stack, &made).await.map_err(db_error)?;
     Ok(())
 }
 
@@ -479,6 +470,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(made, (80, 1, Some(78)));
+        // A slot of its own, and the crafter's mark on it (#231)
+        let sickle = crate::engine::units::test_units::all_marked(&db, ada.id, "stone_sickle").await;
+        assert_eq!(sickle, Marked::by(Some(ada.id), &Units::uniform(1, 80)));
     }
 
     /// A tool doesn't stack, so a sickle left in the output fills it
@@ -525,6 +519,9 @@ mod tests {
         let made = units(&db, held).await;
         assert_eq!(made, Units::from_pairs([(60, 1), (92, 2)]));
         assert_eq!(made.mean(), Some(81));
+        // The new rope carries its crafter's mark (#231); the two held before had none
+        let marks = crate::engine::units::test_units::marked(&db, held).await;
+        assert_eq!(marks, Marked::from_rows([(60, Some(ada.id), 1), (92, None, 2)]));
         // The craft took exactly the two 60s it named, and left the 95
         let mut used = fiber_before.clone();
         used.take_units(&Units::uniform(2, 60)).unwrap();

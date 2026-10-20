@@ -930,7 +930,8 @@ async fn inventory_of(conn: &mut sqlx::PgConnection, player_id: Uuid) -> Result<
 
 /// Put a gathered item in its gatherer's inventory: onto the first stack of its
 /// type, whatever its grade (`units::join_first_stack`: every unit keeps its
-/// quality), or into the first free slot. Returns the
+/// quality), or into the first free slot. Its units carry the gatherer's mark
+/// (#231). Returns the
 /// container, or `None` if there's no room (the item is lost, as before).
 async fn place_gathered(conn: &mut sqlx::PgConnection, item: &PendingItem) -> Result<Option<Uuid>, sqlx::Error> {
     let Some((container_id, slot_count)) = inventory_of(conn, item.player_id).await? else {
@@ -938,7 +939,7 @@ async fn place_gathered(conn: &mut sqlx::PgConnection, item: &PendingItem) -> Re
         return Ok(None);
     };
 
-    let gathered = Units::uniform(item.quantity, item.quality);
+    let gathered = units::Marked::by(Some(item.player_id), &Units::uniform(item.quantity, item.quality));
     if units::join_first_stack(conn, container_id, &item.item_type, &gathered).await? {
         tracing::info!(
             "Merged {} x{} (quality {}) into existing stack for player {}",
@@ -959,19 +960,14 @@ async fn place_gathered(conn: &mut sqlx::PgConnection, item: &PendingItem) -> Re
         return Ok(None);
     };
 
-    sqlx::query(
-        "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)"
-    )
-    .bind(Uuid::new_v4())
-    .bind(&item.item_type)
-    .bind(item.quality)
-    .bind(item.quantity)
-    .bind(item.player_id)
-    .bind(container_id)
-    .bind(slot_index)
-    .execute(&mut *conn)
-    .await?;
+    let stack = units::NewStack {
+        item_type: &item.item_type,
+        owner_id: Some(item.player_id),
+        container_id: Some(container_id),
+        slot_index: Some(slot_index),
+        durability: None,
+    };
+    units::insert_stack(conn, stack, &gathered).await?;
     tracing::info!(
         "Created {} x{} (quality {}) in slot {} for player {}",
         item.item_type, item.quantity, item.quality, slot_index, item.player_id
@@ -1709,6 +1705,20 @@ mod tests {
             Units::from_pairs([(40, 5), (50, 5), (60, 5), (95, 5)]),
             "every unit kept its quality"
         );
+
+        // Gathered units carry the gatherer's mark (#231), joined or in a slot
+        // of their own
+        use crate::engine::units::{test_units::all_marked, Marked};
+        let mut conn = db.acquire().await.unwrap();
+        sqlx::query("DELETE FROM items WHERE container_id = $1 AND item_type = 'fiber'")
+            .bind(inventory)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        place_gathered(&mut conn, &gathered(70)).await.unwrap();
+        place_gathered(&mut conn, &gathered(70)).await.unwrap();
+        drop(conn);
+        assert_eq!(all_marked(&db, ada, "fiber").await, Marked::by(Some(ada), &Units::uniform(10, 70)));
     }
 
     /// Rope from fiber, by hand

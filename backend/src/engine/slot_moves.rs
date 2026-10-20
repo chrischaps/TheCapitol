@@ -202,7 +202,7 @@ pub async fn split(
             slot_index: Some(to_slot),
             durability: None,
         },
-        &taken.units,
+        &taken.marked,
     )
     .await?;
     let new: Item = sqlx::query_as(&format!("SELECT {} FROM items WHERE id = $1", crate::models::ITEM_COLUMNS))

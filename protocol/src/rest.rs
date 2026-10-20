@@ -1388,10 +1388,16 @@ pub struct GazetteSale {
     pub grade: String,
     pub price: i64,
     pub quantity: i32,
-    /// Who sold it, if they let the Gazette print their name. Units don't
-    /// remember who made them yet, so it's the seller, not the maker (#231).
+    /// Who sold it, if they let the Gazette print their name
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seller: Option<String>,
+    /// Who made it (#231): the maker of most of the units sold, when that's
+    /// someone other than the seller who lets the Gazette print their name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker: Option<String>,
+    /// The seller made most of the units sold themselves
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own_work: bool,
 }
 
 /// One zone's deeds for the day.

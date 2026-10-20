@@ -209,7 +209,8 @@ pub async fn withdraw(db: &PgPool, player_id: Uuid, quantity: i32) -> Result<Wit
 
     // Onto the lowest-slot fiber stack, so a client can tell which one it will
     // be. Its units keep their quality (plan D2, E1.8), so it may be any grade.
-    let withdrawn = Units::uniform(quantity, WITHDRAWN_FIBER_QUALITY);
+    // The Exchange's fiber carries no maker's mark (#231)
+    let withdrawn = units::Marked::by(None, &Units::uniform(quantity, WITHDRAWN_FIBER_QUALITY));
     if !units::join_first_stack(&mut tx, container_id, "fiber", &withdrawn).await? {
         let used: std::collections::HashSet<i32> = sqlx::query_scalar(
             "SELECT slot_index FROM items WHERE container_id = $1 AND slot_index IS NOT NULL"

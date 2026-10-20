@@ -1757,7 +1757,7 @@ async fn hand_over(
         .map_err(|e| format!("DB error: {}", e))?;
         return Ok(item_id);
     }
-    crate::engine::units::take_units(tx, item_id, units)
+    let taken = crate::engine::units::take_units(tx, item_id, units)
         .await
         .map_err(db_error)?
         .ok_or_else(|| "Item no longer available".to_string())?;
@@ -1770,7 +1770,7 @@ async fn hand_over(
             slot_index: None,
             durability: None,
         },
-        units,
+        &taken.marked,
     )
     .await
     .map_err(db_error)
@@ -1958,7 +1958,8 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
     async fn a_trade_hands_over_exactly_the_units_offered(db: sqlx::PgPool) {
-        use crate::engine::units::test_units::{all_held, stack_of, units};
+        use crate::engine::units::test_units::{all_held, marked, marked_stack_of, stack_of, units};
+        use crate::engine::units::Marked;
         let mut players = Vec::new();
         for name in ["ada", "bob"] {
             let account = Uuid::new_v4();
@@ -1987,7 +1988,9 @@ mod tests {
             .await
             .unwrap();
         let mixed = Units::from_pairs([(40, 2), (92, 6)]);
-        let fiber = stack_of(&db, ada, inventory, 0, "fiber", &mixed).await;
+        // Ada gathered all but the two 40s herself (#231)
+        let marks = Marked::from_rows([(40, None, 2), (92, Some(ada), 6)]);
+        let fiber = marked_stack_of(&db, ada, inventory, 0, "fiber", &marks).await;
         let rope = stack_of(&db, ada, inventory, 1, "rope", &Units::from_pairs([(55, 1), (80, 1)])).await;
 
         let mut tx = db.begin().await.unwrap();
@@ -2012,5 +2015,6 @@ mod tests {
         let mut all = all_held(&db, ada, "fiber").await;
         all.merge(&all_held(&db, bob, "fiber").await);
         assert_eq!(all, mixed, "no unit lost its quality");
+        assert_eq!(marked(&db, part).await, Marked::by(Some(ada), &Units::uniform(4, 92)), "nor its maker's mark");
     }
 }

@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use super::currency::{add_strands_in, TransactionType};
 use super::market::{market_box, stow};
-use super::units::{insert_stack, NewStack};
+use super::units::{insert_stack, Marked, NewStack};
 use crate::models::{ItemType, ITEM_TYPE_COLUMNS};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -101,7 +101,8 @@ pub async fn grant(db: &PgPool, player_id: Uuid, request: &GrantRequest) -> Resu
                 slot_index: None,
                 durability: item_type.durability_at(line.quality),
             };
-            let id = insert_stack(&mut tx, stack, &Units::uniform(per_stack, line.quality)).await?;
+            // Granted goods carry no mark (#231): no one made them
+            let id = insert_stack(&mut tx, stack, &Marked::by(None, &Units::uniform(per_stack, line.quality))).await?;
             // Returning drops `tx`, which rolls the whole grant back
             if stow(&mut tx, player_id, id, into).await?.is_none() {
                 return Err(GrantError::MarketBoxFull);

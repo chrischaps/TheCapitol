@@ -63,7 +63,7 @@ use super::crafting::{output_quality, roll_outputs};
 use super::events::GameEvent;
 use super::station_tools::SlotTool;
 use super::tools::{BrokenTool, HeldTool, Wear};
-use super::units::NewStack;
+use super::units::{Marked, NewStack};
 use super::{gazette, notices, station_tools, units, GameState};
 use crate::models::{ItemType, Recipe};
 
@@ -870,10 +870,13 @@ pub async fn craft_once(
 
     for output in &outputs {
         let made = Units::uniform(output.quantity, output.quality);
+        // The station's owner made it (#231), as a craft by hand marks it
+        // with the crafter
+        let marked = Marked::by(Some(station.owner_id), &made);
         match place(&stacks, found.slot_count, output) {
             None => return Ok(Attempt::Blocked(PauseReason::OutputFull)),
             Some(Place::Onto(id)) => {
-                units::add(&mut tx, id, &made).await?;
+                units::add(&mut tx, id, &marked).await?;
                 if let Some(stack) = stacks.iter_mut().find(|s| s.id == id) {
                     stack.units.merge(&made);
                 }
@@ -886,7 +889,7 @@ pub async fn craft_once(
                     slot_index: Some(slot),
                     durability: output.durability,
                 };
-                let id = units::insert_stack(&mut tx, stack, &made).await?;
+                let id = units::insert_stack(&mut tx, stack, &marked).await?;
                 stacks.push(BoxStack { id, item_type: output.item_type.clone(), slot: Some(slot), units: made });
             }
         }

@@ -10,10 +10,15 @@
 //!   when its last unit goes.
 //! - [`insert_stack`] makes a new stack holding given units.
 //!
-//! The rules (the mean, the default pick) are `rules::stacking::Units`, shared
-//! with the clients.
+//! Units remember who made them (#231): each count is per quality and maker,
+//! so a stack can hold Ada's 92s and Bo's 92s apart. The rules (the mean, the
+//! default pick) are `rules::stacking::Units`, shared with the clients, and
+//! they don't see makers: a take names qualities, and the database chooses
+//! whose units at each quality go (unmarked first, then by maker id). The
+//! take hands back the [`Marked`] units it took, and a put writes them, so a
+//! split, a trade or the market keeps the marks.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[cfg(test)]
 use capitol_protocol::rules::stacking::Pick;
@@ -21,15 +26,84 @@ use capitol_protocol::rules::stacking::Units;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
+/// Units with their makers' marks (#231): a count per quality and maker,
+/// `None` for no mark. What a take hands on and a put writes. The picks and
+/// the mean stay on [`Units`], [`Marked::units`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Marked(BTreeMap<(i32, Option<Uuid>), i32>);
+
+impl Marked {
+    /// Every one of `units` made by `maker`
+    pub fn by(maker: Option<Uuid>, units: &Units) -> Self {
+        Self(units.pairs().map(|(quality, count)| ((quality, maker), count)).collect())
+    }
+
+    /// From `(quality, maker, count)` rows; a key given twice adds up
+    pub fn from_rows(rows: impl IntoIterator<Item = (i32, Option<Uuid>, i32)>) -> Self {
+        let mut marked = Self::default();
+        for (quality, maker, count) in rows.into_iter().filter(|(.., count)| *count > 0) {
+            *marked.0.entry((quality, maker)).or_default() += count;
+        }
+        marked
+    }
+
+    /// `(quality, maker, count)`, lowest quality first, unmarked first within it
+    pub fn rows(&self) -> impl Iterator<Item = (i32, Option<Uuid>, i32)> + '_ {
+        self.0.iter().map(|(&(quality, maker), &count)| (quality, maker, count))
+    }
+
+    /// The units, without their marks
+    pub fn units(&self) -> Units {
+        Units::from_pairs(self.rows().map(|(quality, _, count)| (quality, count)))
+    }
+
+    /// The maker of most of them, the one whose best unit is better breaking
+    /// a tie. `None` when there are more unmarked units than any maker's.
+    pub fn lead_maker(&self) -> Option<Uuid> {
+        let mut makers: BTreeMap<Option<Uuid>, (i64, i32)> = BTreeMap::new();
+        for (quality, maker, count) in self.rows() {
+            let entry = makers.entry(maker).or_default();
+            entry.0 += count as i64;
+            entry.1 = entry.1.max(quality);
+        }
+        makers.into_iter().max_by_key(|&(maker, (count, best))| (count, best, maker.is_none())).and_then(|(maker, _)| maker)
+    }
+
+    /// As three arrays, qualities, makers and counts, for `unnest`
+    fn columns(&self) -> (Vec<i16>, Vec<Option<Uuid>>, Vec<i32>) {
+        let mut columns = (Vec::new(), Vec::new(), Vec::new());
+        for (quality, maker, count) in self.rows() {
+            columns.0.push(quality as i16);
+            columns.1.push(maker);
+            columns.2.push(count);
+        }
+        columns
+    }
+}
+
 /// The units of stack `item_id`, locked for the caller's transaction. Empty if
 /// it's gone.
 pub async fn units_of(conn: &mut PgConnection, item_id: Uuid) -> Result<Units, sqlx::Error> {
+    // A row a quality and maker: from_pairs adds a quality's up
     let rows: Vec<(i16, i32)> =
         sqlx::query_as("SELECT quality, count FROM item_units WHERE item_id = $1 ORDER BY quality FOR UPDATE")
             .bind(item_id)
             .fetch_all(&mut *conn)
             .await?;
     Ok(Units::from_pairs(rows.into_iter().map(|(q, c)| (q as i32, c))))
+}
+
+/// The units of stack `item_id` with their marks, locked for the caller's
+/// transaction. Empty if it's gone.
+#[cfg(test)]
+pub async fn marked_of(conn: &mut PgConnection, item_id: Uuid) -> Result<Marked, sqlx::Error> {
+    let rows: Vec<(i16, Option<Uuid>, i32)> = sqlx::query_as(
+        "SELECT quality, maker_id, count FROM item_units WHERE item_id = $1 ORDER BY quality, maker_id FOR UPDATE",
+    )
+    .bind(item_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(Marked::from_rows(rows.into_iter().map(|(q, m, c)| (q as i32, m, c))))
 }
 
 /// [`units_of`] for several stacks in one round trip (#212). A stack that's
@@ -60,31 +134,42 @@ fn columns(units: &Units) -> (Vec<i16>, Vec<i32>) {
     units.pairs().map(|(quality, count)| (quality as i16, count)).unzip()
 }
 
-/// Put `units` onto the stack `item_id`. Fails rather than overflow a count.
-pub async fn add(conn: &mut PgConnection, item_id: Uuid, units: &Units) -> Result<(), sqlx::Error> {
-    let (qualities, counts) = columns(units);
+/// Put `units` onto the stack `item_id`, each onto its quality and maker's
+/// count. Fails rather than overflow a count.
+pub async fn add(conn: &mut PgConnection, item_id: Uuid, units: &Marked) -> Result<(), sqlx::Error> {
+    let (qualities, makers, counts) = units.columns();
     sqlx::query(
-        "INSERT INTO item_units (item_id, quality, count)
-         SELECT $1, q, c FROM unnest($2::smallint[], $3::integer[]) AS t(q, c)
-         ON CONFLICT (item_id, quality) DO UPDATE SET count = item_units.count + EXCLUDED.count",
+        "INSERT INTO item_units (item_id, quality, maker_id, count)
+         SELECT $1, q, m, c FROM unnest($2::smallint[], $3::uuid[], $4::integer[]) AS t(q, m, c)
+         ON CONFLICT ON CONSTRAINT item_units_key DO UPDATE SET count = item_units.count + EXCLUDED.count",
     )
     .bind(item_id)
     .bind(qualities)
+    .bind(makers)
     .bind(counts)
     .execute(&mut *conn)
     .await?;
     Ok(())
 }
 
-/// Move every unit of stack `from` onto stack `into`, and delete `from`.
-/// Returns what `into` holds now.
+/// Move every unit of stack `from` onto stack `into`, marks and all, and
+/// delete `from`. Returns what `into` holds now.
 pub async fn merge_into(conn: &mut PgConnection, from: Uuid, into: Uuid) -> Result<Units, sqlx::Error> {
     let moving = units_of(conn, from).await?;
     let mut merged = units_of(conn, into).await?;
     if !merged.merge(&moving) {
         return Err(sqlx::Error::Protocol("Too many for one stack".into()));
     }
-    add(conn, into, &moving).await?;
+    sqlx::query(
+        "WITH moved AS (DELETE FROM item_units WHERE item_id = $1 RETURNING quality, maker_id, count)
+         INSERT INTO item_units (item_id, quality, maker_id, count)
+         SELECT $2, quality, maker_id, count FROM moved
+         ON CONFLICT ON CONSTRAINT item_units_key DO UPDATE SET count = item_units.count + EXCLUDED.count",
+    )
+    .bind(from)
+    .bind(into)
+    .execute(&mut *conn)
+    .await?;
     sqlx::query("DELETE FROM items WHERE id = $1").bind(from).execute(&mut *conn).await?;
     Ok(merged)
 }
@@ -94,6 +179,8 @@ pub async fn merge_into(conn: &mut PgConnection, from: Uuid, into: Uuid) -> Resu
 pub struct Taken {
     /// The units taken
     pub units: Units,
+    /// The same, with their makers' marks, to put down elsewhere
+    pub marked: Marked,
     /// The units left; empty when the stack was used up and deleted
     pub left: Units,
 }
@@ -109,8 +196,8 @@ pub async fn take_units(
     let Some(units) = held.take_units(wanted) else {
         return Ok(None);
     };
-    write_take(conn, item_id, &units, &held).await?;
-    Ok(Some(Taken { units, left: held }))
+    let marked = write_take(conn, item_id, &units, &held).await?;
+    Ok(Some(Taken { units, marked, left: held }))
 }
 
 /// Take `n` units off the stack `item_id`, chosen by `pick`, deleting it if
@@ -129,36 +216,65 @@ pub async fn take(
     }
 }
 
+/// Which rows a take of `t(i, q, c)` (stack, quality, count) lowers, and by
+/// how many (`n`): at each quality, the unmarked units first, then by maker
+/// id, until `c` are taken. The caller has the units locked and knows the
+/// stack holds them.
+const TAKE_PLAN: &str = "plan AS (
+         SELECT u.item_id, u.quality, u.maker_id, u.count,
+                LEAST(u.count, t.c - (SUM(u.count) OVER w - u.count))::INTEGER AS n
+         FROM item_units u JOIN t ON t.i = u.item_id AND t.q = u.quality
+         WINDOW w AS (PARTITION BY u.item_id, u.quality ORDER BY u.maker_id NULLS FIRST)
+     ),
+     taking AS (SELECT * FROM plan WHERE n > 0),
+     gone AS (
+         DELETE FROM item_units u USING taking k
+         WHERE u.item_id = k.item_id AND u.quality = k.quality
+           AND u.maker_id IS NOT DISTINCT FROM k.maker_id AND k.n = k.count
+     ),
+     cut AS (
+         UPDATE item_units u SET count = u.count - k.n FROM taking k
+         WHERE u.item_id = k.item_id AND u.quality = k.quality
+           AND u.maker_id IS NOT DISTINCT FROM k.maker_id AND k.n < k.count
+     )";
+
 /// Write a take the caller has already worked out: `taken` off the stack
 /// `item_id`, whose units (locked) less `taken` are `left`. Deletes the stack
-/// when `left` is empty.
-pub async fn write_take(conn: &mut PgConnection, item_id: Uuid, taken: &Units, left: &Units) -> Result<(), sqlx::Error> {
-    if left.is_empty() {
-        sqlx::query("DELETE FROM items WHERE id = $1").bind(item_id).execute(&mut *conn).await?;
-        return Ok(());
-    }
-    // A quality taken whole goes and the rest go down, in one statement. The
-    // rows are disjoint, and the summaries' trigger runs after both.
-    let (qualities, counts) = columns(taken);
-    sqlx::query(
-        "WITH t(q, c) AS (SELECT * FROM unnest($2::smallint[], $3::integer[])),
-         gone AS (
-             DELETE FROM item_units u USING t WHERE u.item_id = $1 AND u.quality = t.q AND u.count = t.c
-         )
-         UPDATE item_units u SET count = u.count - t.c
-         FROM t WHERE u.item_id = $1 AND u.quality = t.q AND u.count > t.c",
-    )
-    .bind(item_id)
-    .bind(qualities)
-    .bind(counts)
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
+/// when `left` is empty. Returns the units taken with their marks.
+pub async fn write_take(conn: &mut PgConnection, item_id: Uuid, taken: &Units, left: &Units) -> Result<Marked, sqlx::Error> {
+    let rows: Vec<(i16, Option<Uuid>, i32)> = if left.is_empty() {
+        // Every unit goes, and the stack with them. The cascade at the end of
+        // the statement finds them gone already.
+        sqlx::query_as(
+            "WITH gone AS (DELETE FROM item_units WHERE item_id = $1 RETURNING quality, maker_id, count),
+             stack AS (DELETE FROM items WHERE id = $1)
+             SELECT quality, maker_id, count FROM gone",
+        )
+        .bind(item_id)
+        .fetch_all(&mut *conn)
+        .await?
+    } else {
+        // A row taken whole goes and the rest go down, in one statement. The
+        // rows are disjoint, and the summaries' trigger runs after both.
+        let (qualities, counts) = columns(taken);
+        sqlx::query_as(&format!(
+            "WITH t(i, q, c) AS (SELECT $1::uuid, * FROM unnest($2::smallint[], $3::integer[])),
+             {TAKE_PLAN}
+             SELECT quality, maker_id, n FROM taking"
+        ))
+        .bind(item_id)
+        .bind(qualities)
+        .bind(counts)
+        .fetch_all(&mut *conn)
+        .await?
+    };
+    Ok(Marked::from_rows(rows.into_iter().map(|(q, m, c)| (q as i32, m, c))))
 }
 
 /// [`write_take`] for several stacks in one statement (#212): each of `takes`
 /// is (stack, taken, left), the stack's units locked. A stack whose `left` is
-/// empty is deleted, and its units with it.
+/// empty is deleted, and its units with it. Nothing is handed on, so the
+/// marks taken aren't returned: this is for using units up.
 pub async fn write_takes(conn: &mut PgConnection, takes: &[(Uuid, &Units, &Units)]) -> Result<(), sqlx::Error> {
     let emptied: Vec<Uuid> = takes.iter().filter(|(_, _, left)| left.is_empty()).map(|(id, ..)| *id).collect();
     let (mut ids, mut qualities, mut counts) = (Vec::new(), Vec::new(), Vec::new());
@@ -171,15 +287,12 @@ pub async fn write_takes(conn: &mut PgConnection, takes: &[(Uuid, &Units, &Units
     }
     // As write_take, over disjoint rows: an emptied stack's units go with its
     // item (the cascade), and none of them is in t
-    sqlx::query(
+    sqlx::query(&format!(
         "WITH t(i, q, c) AS (SELECT * FROM unnest($1::uuid[], $2::smallint[], $3::integer[])),
          emptied AS (DELETE FROM items WHERE id = ANY($4)),
-         gone AS (
-             DELETE FROM item_units u USING t WHERE u.item_id = t.i AND u.quality = t.q AND u.count = t.c
-         )
-         UPDATE item_units u SET count = u.count - t.c
-         FROM t WHERE u.item_id = t.i AND u.quality = t.q AND u.count > t.c",
-    )
+         {TAKE_PLAN}
+         SELECT 1"
+    ))
     .bind(ids)
     .bind(qualities)
     .bind(counts)
@@ -199,31 +312,38 @@ pub struct NewStack<'a> {
     pub durability: Option<i32>,
 }
 
-/// Make a new stack holding `units` (which mustn't be empty). Returns its id.
-pub async fn insert_stack(conn: &mut PgConnection, stack: NewStack<'_>, units: &Units) -> Result<Uuid, sqlx::Error> {
-    let (Some(quality), Ok(quantity)) = (units.mean(), i32::try_from(units.count())) else {
+/// Make a new stack holding `units` (which mustn't be empty), marks and all.
+/// Returns its id.
+pub async fn insert_stack(conn: &mut PgConnection, stack: NewStack<'_>, units: &Marked) -> Result<Uuid, sqlx::Error> {
+    let plain = units.units();
+    let (Some(quality), Ok(_)) = (plain.mean(), i32::try_from(plain.count())) else {
         return Err(sqlx::Error::Protocol("A new stack needs at least one unit".into()));
     };
     let id = Uuid::new_v4();
-    // The insert seeds one uniform row at the mean; the real units replace it
+    // The stack and its units in one statement. At quantity 0 the insert
+    // seeds no units of its own, and the summaries' trigger, which runs at
+    // the end of the statement, sets the quantity from the units written.
+    let (qualities, makers, counts) = units.columns();
     sqlx::query(
-        "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index, durability)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "WITH stack AS (
+             INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index, durability)
+             VALUES ($1, $2, $3, 0, $4, $5, $6, $7)
+         )
+         INSERT INTO item_units (item_id, quality, maker_id, count)
+         SELECT $1, q, m, c FROM unnest($8::smallint[], $9::uuid[], $10::integer[]) AS t(q, m, c)",
     )
     .bind(id)
     .bind(stack.item_type)
     .bind(quality)
-    .bind(quantity)
     .bind(stack.owner_id)
     .bind(stack.container_id)
     .bind(stack.slot_index)
     .bind(stack.durability)
+    .bind(qualities)
+    .bind(makers)
+    .bind(counts)
     .execute(&mut *conn)
     .await?;
-    if *units != Units::uniform(quantity, quality) {
-        sqlx::query("DELETE FROM item_units WHERE item_id = $1").bind(id).execute(&mut *conn).await?;
-        add(conn, id, units).await?;
-    }
     Ok(id)
 }
 
@@ -251,13 +371,13 @@ pub async fn join_first_stack(
     conn: &mut PgConnection,
     container_id: Uuid,
     item_type: &str,
-    units: &Units,
+    units: &Marked,
 ) -> Result<bool, sqlx::Error> {
     let Some(id) = first_stack(conn, container_id, item_type).await? else {
         return Ok(false);
     };
     let mut held = units_of(conn, id).await?;
-    if !held.merge(units) {
+    if !held.merge(&units.units()) {
         return Ok(false);
     }
     add(conn, id, units).await?;
@@ -268,12 +388,18 @@ pub async fn join_first_stack(
 /// multiset is conserved and the summaries match the units.
 #[cfg(test)]
 pub mod test_units {
+    use super::Marked;
     use capitol_protocol::rules::stacking::Units;
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    /// A stack of `units` of `item_type` in `slot` of `container`
+    /// A stack of `units` of `item_type` in `slot` of `container`, unmarked
     pub async fn stack_of(db: &PgPool, owner: Uuid, container: Uuid, slot: i32, item_type: &str, units: &Units) -> Uuid {
+        marked_stack_of(db, owner, container, slot, item_type, &Marked::by(None, units)).await
+    }
+
+    /// [`stack_of`] with makers' marks
+    pub async fn marked_stack_of(db: &PgPool, owner: Uuid, container: Uuid, slot: i32, item_type: &str, units: &Marked) -> Uuid {
         let mut conn = db.acquire().await.unwrap();
         super::insert_stack(
             &mut conn,
@@ -288,6 +414,27 @@ pub mod test_units {
         )
         .await
         .unwrap()
+    }
+
+    /// The units of `item_id` with their marks, after checking its summaries
+    pub async fn marked(db: &PgPool, item_id: Uuid) -> Marked {
+        units(db, item_id).await;
+        let mut conn = db.acquire().await.unwrap();
+        super::marked_of(&mut conn, item_id).await.unwrap()
+    }
+
+    /// Every unit of `item_type` that `owner` holds, in any stack, with marks
+    pub async fn all_marked(db: &PgPool, owner: Uuid, item_type: &str) -> Marked {
+        let rows: Vec<(i16, Option<Uuid>, i32)> = sqlx::query_as(
+            "SELECT u.quality, u.maker_id, u.count FROM item_units u JOIN items i ON i.id = u.item_id
+             WHERE i.owner_id = $1 AND i.item_type = $2",
+        )
+        .bind(owner)
+        .bind(item_type)
+        .fetch_all(db)
+        .await
+        .unwrap();
+        Marked::from_rows(rows.into_iter().map(|(q, m, c)| (q as i32, m, c)))
     }
 
     /// The units of `item_id`, after checking its summaries match them
@@ -348,16 +495,22 @@ mod tests {
     use sqlx::PgPool;
 
     async fn owner_and_box(db: &PgPool) -> (Uuid, Uuid) {
+        owner_and_box_named(db, "ada").await
+    }
+
+    async fn owner_and_box_named(db: &PgPool, name: &str) -> (Uuid, Uuid) {
         let account = Uuid::new_v4();
-        sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, 'ada@test', 'x')")
+        sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'x')")
             .bind(account)
+            .bind(format!("{name}@test"))
             .execute(db)
             .await
             .unwrap();
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO players (id, account_id, name) VALUES ($1, $2, 'ada')")
+        sqlx::query("INSERT INTO players (id, account_id, name) VALUES ($1, $2, $3)")
             .bind(id)
             .bind(account)
+            .bind(name)
             .execute(db)
             .await
             .unwrap();
@@ -514,5 +667,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(gone, 0, "the emptied stack is deleted");
+    }
+
+    /// Units remember who made them (#231): a take at a quality takes the
+    /// unmarked units first, then by maker, and hands back whose they were;
+    /// a merge and a new stack keep every mark
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn marks_go_where_the_units_go(db: PgPool) {
+        let (ada, inventory) = owner_and_box(&db).await;
+        let (bo, _) = owner_and_box_named(&db, "bo").await;
+        let (low, high) = if ada < bo { (ada, bo) } else { (bo, ada) };
+        let held = Marked::from_rows([(92, None, 1), (92, Some(high), 2), (92, Some(low), 2), (60, Some(ada), 3)]);
+        let id = marked_stack_of(&db, ada, inventory, 0, "fiber", &held).await;
+        assert_eq!(marked(&db, id).await, held);
+        assert_eq!(units(&db, id).await, Units::from_pairs([(60, 3), (92, 5)]));
+
+        let mut conn = db.acquire().await.unwrap();
+        let taken = take_units(&mut conn, id, &Units::from_pairs([(92, 2), (60, 1)])).await.unwrap().unwrap();
+        assert_eq!(taken.marked, Marked::from_rows([(92, None, 1), (92, Some(low), 1), (60, Some(ada), 1)]));
+        assert_eq!(taken.marked.units(), taken.units);
+
+        // Put down as a stack of its own, then merged back: nothing lost, no mark moved
+        let split = insert_stack(
+            &mut conn,
+            NewStack { item_type: "fiber", owner_id: Some(ada), container_id: Some(inventory), slot_index: Some(1), durability: None },
+            &taken.marked,
+        )
+        .await
+        .unwrap();
+        merge_into(&mut conn, split, id).await.unwrap();
+        // Every unit of the stack, the stack deleted with them
+        let rest = take_units(&mut conn, id, &Units::from_pairs([(60, 3), (92, 5)])).await.unwrap().unwrap();
+        drop(conn);
+        assert_eq!(rest.marked, held);
+        assert!(rest.left.is_empty());
+    }
+
+    #[test]
+    fn the_lead_maker_made_most_of_them() {
+        let (ada, bo) = (Some(Uuid::from_u128(1)), Some(Uuid::from_u128(2)));
+        assert_eq!(Marked::by(ada, &Units::uniform(3, 50)).lead_maker(), ada);
+        assert_eq!(Marked::from_rows([(50, ada, 2), (40, bo, 3)]).lead_maker(), bo);
+        // A tie goes to the better work
+        assert_eq!(Marked::from_rows([(50, ada, 2), (90, bo, 2)]).lead_maker(), bo);
+        // More unmarked than anyone's: no one made it, as far as anyone knows
+        assert_eq!(Marked::from_rows([(50, ada, 2), (90, None, 3)]).lead_maker(), None);
+        assert_eq!(Marked::from_rows([(90, ada, 2), (90, None, 2)]).lead_maker(), None, "a tie with the unmarked goes to the seller");
+        assert_eq!(Marked::default().lead_maker(), None);
     }
 }

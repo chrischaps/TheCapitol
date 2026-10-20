@@ -6,8 +6,9 @@
 //!
 //! - the Exchange's trades (`market_trades`): each item's range, its mean
 //!   weighted by volume, and the day before's mean, for the movers
-//! - the highest-quality sale, and who sold it. Units don't remember who made
-//!   them, so the seller is the one the Gazette can name (#231).
+//! - the highest-quality sale, who sold it and who made it: the maker of
+//!   most of the units sold, from their mark (`market_trades.maker_id`,
+//!   #231). Unmarked units credit the seller alone.
 //! - deeds claimed and foreclosed, by zone (`deed_events`, written by
 //!   [`record_deed`] beside the claim and the foreclosure)
 //! - what each player gathered and crafted (`production_tally`, added to by
@@ -42,6 +43,17 @@ const FRONT_PAGE_MOVE: i64 = 15;
 
 /// How the Gazette refers to someone who keeps their name out of it
 const UNNAMED: &str = "a trader who keeps out of the papers";
+
+/// Who to thank for a sale: "made and sold by Ada", "made by Ada and sold by
+/// Bo", or "sold by Bo" when the units carry no mark the Gazette may print
+fn credit(sale: &GazetteSale) -> String {
+    let seller = sale.seller.as_deref().unwrap_or(UNNAMED);
+    match (&sale.maker, sale.own_work) {
+        (_, true) => format!("made and sold by {seller}"),
+        (Some(maker), false) => format!("made by {maker} and sold by {seller}"),
+        (None, false) => format!("sold by {seller}"),
+    }
+}
 
 /// Add `quantity` of `item_type` to what `player_id` made today. Call it in
 /// the transaction that writes the work, so the tally never counts a gather
@@ -187,13 +199,15 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
         .collect();
     prices.sort_by(|a, b| a.item_name.cmp(&b.item_name).then_with(|| a.item_type.cmp(&b.item_type)));
 
-    type SaleRow = (String, String, i32, String, i64, i32, String, bool);
+    type SaleRow = (String, String, i32, String, i64, i32, String, bool, bool, Option<String>, Option<bool>);
     let best: Option<SaleRow> = sqlx::query_as(
-        "SELECT t.item_type, it.name, t.quality, t.grade, t.price, t.quantity, p.name, p.gazette_named
+        "SELECT t.item_type, it.name, t.quality, t.grade, t.price, t.quantity, p.name, p.gazette_named,
+                t.maker_id IS NOT DISTINCT FROM o.player_id, m.name, m.gazette_named
          FROM market_trades t
          JOIN item_types it ON it.id = t.item_type
          JOIN market_orders o ON o.id = t.sell_order_id
          JOIN players p ON p.id = o.player_id
+         LEFT JOIN players m ON m.id = t.maker_id
          WHERE t.at >= $1 AND t.at < $2
          ORDER BY t.quality DESC, t.price DESC, t.at, t.id
          LIMIT 1",
@@ -202,15 +216,20 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
     .bind(end)
     .fetch_optional(db)
     .await?;
-    let best_sale = best.map(|(item_type, item_name, quality, grade, price, quantity, seller, named)| GazetteSale {
-        item_type,
-        item_name,
-        quality,
-        grade,
-        price,
-        quantity,
-        seller: named.then_some(seller),
-    });
+    let best_sale = best.map(
+        |(item_type, item_name, quality, grade, price, quantity, seller, named, own_work, maker, maker_named)| GazetteSale {
+            item_type,
+            item_name,
+            quality,
+            grade,
+            price,
+            quantity,
+            seller: named.then_some(seller),
+            // A maker who keeps out of the papers isn't credited at all
+            maker: maker.filter(|_| !own_work && maker_named == Some(true)),
+            own_work,
+        },
+    );
 
     let deed_rows: Vec<(String, String, i64)> = sqlx::query_as(
         "SELECT zone_id, kind, COUNT(*) FROM deed_events WHERE at >= $1 AND at < $2 GROUP BY zone_id, kind",
@@ -425,6 +444,11 @@ impl Pen {
 
     fn sale_story(&self, sale: &GazetteSale) -> (String, String, String) {
         let who = sale.seller.clone().unwrap_or_else(|| UNNAMED.to_string());
+        let made = match (&sale.maker, sale.own_work) {
+            (_, true) => " The work was their own.".to_string(),
+            (Some(maker), false) => format!(" The work was {maker}'s."),
+            (None, false) => String::new(),
+        };
         let headline = self
             .pick(4, &["A-Grade {item} Fetches {price}", "Fine {item} Sells for {price} a Unit", "Quality Tells: {item} at {price}"])
             .replace("{item}", &sale.item_name)
@@ -434,15 +458,16 @@ impl Pen {
             .replace("{quality}", &sale.quality.to_string());
         let lead = self
             .pick(6, &[
-                "The best goods sold at the Exchange today were {quantity} {item} of quality {quality}, sold by {who} at {price} Strands each. Good work is noticed in the Capitol, and paid for.",
-                "{Who} brought {quantity} {item} of quality {quality} to the Exchange and sold at {price} Strands a unit. No better goods traded all day.",
+                "The best goods sold at the Exchange today were {quantity} {item} of quality {quality}, {credit}, at {price} Strands each. Good work is noticed in the Capitol, and paid for.",
+                "{Who} brought {quantity} {item} of quality {quality} to the Exchange and sold at {price} Strands a unit.{made} No better goods traded all day.",
             ])
             .replace("{quantity}", &sale.quantity.to_string())
             .replace("{item}", &sale.item_name)
             .replace("{quality}", &sale.quality.to_string())
             .replace("{price}", &sale.price.to_string())
-            .replace("{Who}", &capitalise(&who))
-            .replace("{who}", &who);
+            .replace("{credit}", &credit(sale))
+            .replace("{made}", &made)
+            .replace("{Who}", &capitalise(&who));
         (headline, dek, lead)
     }
 
@@ -549,13 +574,10 @@ impl Pen {
     fn best_sale(&self, sale: Option<&GazetteSale>) -> String {
         match sale {
             None => "With nothing sold, the prize for the day's finest goods goes unclaimed.".to_string(),
-            Some(s) => {
-                let who = s.seller.clone().unwrap_or_else(|| UNNAMED.to_string());
-                format!(
-                    "The finest goods sold today: {} {} of quality {} (grade {}), at {} Strands each, sold by {}.",
-                    count_word(s.quantity as i64, false), s.item_name, s.quality, s.grade, s.price, who
-                )
-            }
+            Some(s) => format!(
+                "The finest goods sold today: {} {} of quality {} (grade {}), at {} Strands each, {}.",
+                count_word(s.quantity as i64, false), s.item_name, s.quality, s.grade, s.price, credit(s)
+            ),
         }
     }
 
@@ -790,6 +812,8 @@ mod tests {
                 price: 410,
                 quantity: 1,
                 seller: Some("Ada".into()),
+                maker: Some("Cy".into()),
+                own_work: false,
             }),
             deeds: vec![("rural".into(), 3, 0), ("suburban".into(), 1, 1)],
             work: vec![
@@ -824,6 +848,38 @@ mod tests {
         assert_eq!(g.movers[0].item_type, "plank");
         assert_eq!(g.movers[0].change_pct, 36);
         assert!(g.headline.contains("Plank") && g.headline.contains("36"), "{}", g.headline);
+    }
+
+    /// The finest sale thanks its maker as well as its seller (#231), and
+    /// whichever template the day picks has no holes
+    #[test]
+    fn the_finest_sale_credits_its_maker() {
+        let sale = |seller: Option<&str>, maker: Option<&str>, own_work| GazetteSale {
+            item_type: "rope".into(),
+            item_name: "Rope".into(),
+            quality: 93,
+            grade: "A".into(),
+            price: 30,
+            quantity: 4,
+            seller: seller.map(Into::into),
+            maker: maker.map(Into::into),
+            own_work,
+        };
+        let cases = [
+            (sale(Some("Ada"), None, true), "made and sold by Ada", " The work was their own."),
+            (sale(Some("Bo"), Some("Ada"), false), "made by Ada and sold by Bo", " The work was Ada's."),
+            (sale(None, Some("Ada"), false), "made by Ada and sold by a trader who keeps out of the papers", " The work was Ada's."),
+            (sale(Some("Bo"), None, false), "sold by Bo", " No better"),
+        ];
+        for (sale, credited, made) in cases {
+            assert_eq!(credit(&sale), credited);
+            for day in DAY..DAY + 6 {
+                let g = compose(&DayRecords { day, best_sale: Some(sale.clone()), ..Default::default() });
+                assert!(g.best_sale_story.ends_with(&format!("{credited}.")), "{}", g.best_sale_story);
+                assert!(!g.lead.contains('{'), "{}", g.lead);
+                assert!(g.lead.contains(credited) || g.lead.contains(made), "{}", g.lead);
+            }
+        }
     }
 
     #[test]
@@ -965,6 +1021,8 @@ mod tests {
             trade(&db, (ada.id, bo.id), "fiber", 60, 3, 100, at(day, 3)).await;
             trade(&db, (bo.id, ada.id), "rope", 92, 9, 5, at(day, 5)).await;
             trade(&db, (ada.id, bo.id), "rope", 40, 4, 5, at(day + 1, 5)).await; // the next day: not in it
+            // Bo sold rope Ada made (#231)
+            sqlx::query("UPDATE market_trades SET maker_id = $1 WHERE quality = 92").bind(ada.id).execute(&db).await.unwrap();
 
             let plots: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, zone_id FROM plots LIMIT 2").fetch_all(&db).await.unwrap();
             if plots.len() == 2 {
@@ -991,6 +1049,8 @@ mod tests {
             assert_eq!(g.movers[0].change_pct, 50);
             let sale = g.best_sale.as_ref().unwrap();
             assert_eq!((sale.item_type.as_str(), sale.quality, sale.seller.as_deref()), ("rope", 92, None));
+            assert_eq!((sale.maker.as_deref(), sale.own_work), (Some("Ada"), false));
+            assert!(g.best_sale_story.contains("made by Ada and sold by a trader"), "{}", g.best_sale_story);
             assert_eq!(g.producers[0].name.as_deref(), Some("Ada"));
             assert_eq!((g.producers[0].units, g.producers[1].name.as_deref()), (320, None));
             if plots.len() == 2 {

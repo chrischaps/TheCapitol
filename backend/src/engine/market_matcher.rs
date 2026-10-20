@@ -47,7 +47,7 @@ use super::currency::{add_strands_in, TransactionType};
 use super::events::GameEvent;
 use super::market::{self as escrow, order_from_row, Cancelled, MarketError, OrderRow, ORDER_COLUMNS};
 use super::market_book::{Book, BookOrder, Fill};
-use super::units::{self, NewStack};
+use super::units::{self, Marked, NewStack};
 
 /// How often matching runs: the tick's 10-tick cadence (TDD §3.2).
 pub const CYCLE_MS: u64 = 1000;
@@ -380,14 +380,14 @@ pub async fn execute_fill(conn: &mut PgConnection, fill: &Fill) -> Result<Execut
     let (buy, sell) = lock_pair(&mut tx, fill).await?;
 
     // What the sell's escrow keeps
-    let mut left = sell.units;
+    let mut left = sell.marked.units();
     if left.take_units(&fill.units).is_none() {
         return Err(MarketError::Changed);
     }
     let whole = left.is_empty();
 
     let market_box = escrow::market_box(&mut tx, fill.buyer).await?;
-    deliver(&mut tx, fill, sell.escrow_item, &left, market_box).await?;
+    let moved = deliver(&mut tx, fill, sell.escrow_item, &sell.marked, &left, market_box).await?;
 
     // The Strands: the escrow at the buy's price pays the seller at the
     // fill's, and the buyer gets the difference
@@ -411,8 +411,8 @@ pub async fn execute_fill(conn: &mut PgConnection, fill: &Fill) -> Result<Execut
     let rows: Vec<OrderRow> = sqlx::query_as(&format!(
         "WITH trade AS (
              INSERT INTO market_trades
-                 (id, buy_order_id, sell_order_id, item_type, grade, quality, min_quality, price, quantity, at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 (id, buy_order_id, sell_order_id, item_type, grade, quality, min_quality, price, quantity, at, maker_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $13)
          )
          UPDATE market_orders SET
              quantity_remaining = quantity_remaining - $9,
@@ -437,6 +437,8 @@ pub async fn execute_fill(conn: &mut PgConnection, fill: &Fill) -> Result<Execut
     .bind(trade.at)
     .bind(escrowed)
     .bind(whole)
+    // Whose work it was, for the Gazette (#231)
+    .bind(moved.lead_maker())
     .fetch_all(&mut *tx)
     .await?;
     let (mut buy_now, mut sell_now) = (None, None);
@@ -496,7 +498,8 @@ pub async fn execute_fill(conn: &mut PgConnection, fill: &Fill) -> Result<Execut
 /// type there if it stacks and has room (D2: nothing is diluted), or into the
 /// first free slot, as the escrow stack itself if it's all of them (a tool
 /// keeps its wear) or a stack split off it. `MarketBoxFull`, and nothing
-/// moved, if there's no room.
+/// moved, if there's no room. Returns the units moved with their makers'
+/// marks (#231); `escrowed` is everything the escrow stack holds.
 ///
 /// This is `escrow::stow` for a fill, which knows the units already: some
 /// four round trips where splitting a stack off into the escrow and stowing
@@ -505,9 +508,10 @@ async fn deliver(
     conn: &mut PgConnection,
     fill: &Fill,
     escrow_item: Uuid,
+    escrowed: &Marked,
     left: &Units,
     market_box: Uuid,
-) -> Result<(), MarketError> {
+) -> Result<Marked, MarketError> {
     // The first stack of the type in the box, if the type stacks, with its
     // units, both locked
     let target: Vec<(Uuid, i16, i32)> = sqlx::query_as(
@@ -529,9 +533,9 @@ async fn deliver(
     if let Some(&(stack, ..)) = target.first() {
         let mut held = Units::from_pairs(target.iter().map(|&(_, q, c)| (q as i32, c)));
         if held.merge(&fill.units) {
-            units::add(conn, stack, &fill.units).await?;
-            units::write_take(conn, escrow_item, &fill.units, left).await?;
-            return Ok(());
+            let moved = units::write_take(conn, escrow_item, &fill.units, left).await?;
+            units::add(conn, stack, &moved).await?;
+            return Ok(moved);
         }
     }
 
@@ -544,13 +548,13 @@ async fn deliver(
             .bind(fill.buyer)
             .execute(&mut *conn)
             .await?;
-        return Ok(());
+        return Ok(escrowed.clone());
     }
     let durability: Option<i32> = sqlx::query_scalar("SELECT durability FROM items WHERE id = $1")
         .bind(escrow_item)
         .fetch_one(&mut *conn)
         .await?;
-    units::write_take(conn, escrow_item, &fill.units, left).await?;
+    let moved = units::write_take(conn, escrow_item, &fill.units, left).await?;
     units::insert_stack(
         conn,
         NewStack {
@@ -560,10 +564,10 @@ async fn deliver(
             slot_index: Some(slot),
             durability,
         },
-        &fill.units,
+        &moved,
     )
     .await?;
-    Ok(())
+    Ok(moved)
 }
 
 /// An order as a fill finds it, locked.
@@ -572,14 +576,14 @@ struct Locked {
     remaining: i32,
     escrow_strands: i64,
     escrow_item: Uuid,
-    /// What a sell's escrow stack holds
-    units: Units,
+    /// What a sell's escrow stack holds, with its makers' marks
+    marked: Marked,
 }
 
 /// Lock both of `fill`'s orders (by id, so two fills never lock in opposite
 /// orders) and check each is open, as the book had it, and can carry it.
 ///
-/// The sell's escrow units come with it, unlocked: nothing writes an escrow
+/// The sell's escrow units (and their marks) come with it, unlocked: nothing writes an escrow
 /// stack without first locking its order (a fill, or `escrow::close`), so the
 /// order's lock holds them too, and that's a round trip saved (#208).
 async fn lock_pair(conn: &mut PgConnection, fill: &Fill) -> Result<(Locked, Locked), MarketError> {
@@ -596,13 +600,15 @@ async fn lock_pair(conn: &mut PgConnection, fill: &Fill) -> Result<(Locked, Lock
         Option<Uuid>,
         i64,
         Vec<i16>,
+        Vec<Option<Uuid>>,
         Vec<i32>,
     );
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT o.id, o.player_id, o.side, o.status, o.item_type, o.min_grade, o.grade_rule, o.price,
                 o.quantity_remaining, o.escrow_item_id, o.escrow_strands,
-                ARRAY(SELECT u.quality FROM item_units u WHERE u.item_id = o.escrow_item_id ORDER BY u.quality),
-                ARRAY(SELECT u.count FROM item_units u WHERE u.item_id = o.escrow_item_id ORDER BY u.quality)
+                ARRAY(SELECT u.quality FROM item_units u WHERE u.item_id = o.escrow_item_id ORDER BY u.quality, u.maker_id),
+                ARRAY(SELECT u.maker_id FROM item_units u WHERE u.item_id = o.escrow_item_id ORDER BY u.quality, u.maker_id),
+                ARRAY(SELECT u.count FROM item_units u WHERE u.item_id = o.escrow_item_id ORDER BY u.quality, u.maker_id)
          FROM market_orders o WHERE o.id = ANY($1) ORDER BY o.id FOR UPDATE",
     )
     .bind(vec![fill.buy, fill.sell])
@@ -639,7 +645,7 @@ async fn lock_pair(conn: &mut PgConnection, fill: &Fill) -> Result<(Locked, Lock
         remaining: r.8,
         escrow_strands: r.10,
         escrow_item,
-        units: Units::from_pairs(r.11.iter().zip(&r.12).map(|(&q, &c)| (q as i32, c))),
+        marked: Marked::from_rows(r.11.iter().zip(&r.12).zip(&r.13).map(|((&q, &m), &c)| (q as i32, m, c))),
     };
     Ok((locked(b, Uuid::nil()), locked(s, escrow_item)))
 }
@@ -750,6 +756,38 @@ mod tests {
 
     fn every_unit_buy(item_type: &str, price: i64, quantity: i32, grade: &str) -> PlaceOrder {
         PlaceOrder { grade_rule: Some(GradeRule::EveryUnit), ..buy(item_type, price, quantity, Some(grade)) }
+    }
+
+    /// A fill hands on whose work the units were (#231), and records the
+    /// maker of most of them for the Gazette
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_fill_keeps_the_makers_marks_and_records_the_maker(db: PgPool) {
+        use crate::engine::units::test_units::{all_marked, marked_stack_of};
+        use crate::engine::units::Marked;
+        let (events, _heard) = broadcast::channel(64);
+        let market = Market::default();
+        let ada = player(&db, "ada", 100).await;
+        let bea = player(&db, "bea", 1000).await;
+        let cy = player(&db, "cy", 0).await;
+        let rope = Marked::from_rows([(80, None, 2), (80, Some(cy.id), 4), (50, Some(ada.id), 3)]);
+        let stack = marked_stack_of(&db, ada.id, ada.inventory, 0, "rope", &rope).await;
+        placed(&db, &market, ada.id, &sell("rope", stack, 10, 9, None)).await;
+
+        // The six 80s, most of them Cy's; then the rest, Ada's own, the escrow stack whole
+        placed(&db, &market, bea.id, &every_unit_buy("rope", 12, 6, "B")).await;
+        assert_eq!(run_cycle(&market, &db, &events, Utc::now()).await.fills, 1);
+        assert_eq!(all_marked(&db, bea.id, "rope").await, Marked::from_rows([(80, None, 2), (80, Some(cy.id), 4)]));
+        placed(&db, &market, bea.id, &buy("rope", 12, 3, Some("F"))).await;
+        assert_eq!(run_cycle(&market, &db, &events, Utc::now()).await.fills, 1);
+        assert_eq!(all_marked(&db, bea.id, "rope").await, rope);
+
+        let makers: Vec<(i32, Option<Uuid>)> =
+            sqlx::query_as("SELECT quantity, maker_id FROM market_trades ORDER BY quality DESC")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(makers, vec![(6, Some(cy.id)), (3, Some(ada.id))]);
     }
 
     #[sqlx::test(migrations = "./migrations")]

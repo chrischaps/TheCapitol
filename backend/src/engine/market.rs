@@ -217,7 +217,7 @@ async fn escrow_units(
             slot_index: None,
             durability,
         },
-        &taken.units,
+        &taken.marked,
     )
     .await?;
     Ok(escrowed)
