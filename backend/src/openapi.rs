@@ -143,6 +143,8 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         crate::routes::bazaar::stock,
         crate::routes::bazaar::unlist,
         crate::routes::bazaar::buy,
+        crate::routes::inventory::get_impound,
+        crate::routes::inventory::collect_impound,
         // Gazette
         crate::routes::gazette::latest,
         crate::routes::gazette::by_date,

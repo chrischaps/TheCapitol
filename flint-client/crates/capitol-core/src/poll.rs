@@ -241,6 +241,8 @@ impl Poller {
             Ok(RestResponse::Deposit(_) | RestResponse::Withdraw(_)) => {
                 self.request(Fetch::Containers);
             }
+            // What came out of the impound (#141) or the market box
+            Ok(RestResponse::Collected(_)) => self.request(Fetch::Containers),
             Ok(RestResponse::MoveItem(_) | RestResponse::SplitStack(_)) => {
                 self.request(Fetch::Containers);
                 if let Some(open) = state.open_station() {

@@ -446,8 +446,10 @@ pub enum ServerMessage {
     },
     /// Your plot `terrain_id` was foreclosed for `tax_owed` strands of unpaid
     /// tax. Its stations are gone: their kits came back to your inventory, and
-    /// what was in them to whoever owns it, as far as inventories had room
-    /// (`inventory_updated` comes first). `refund` strands
+    /// what was in them to whoever owns it (`inventory_updated` comes first).
+    /// What of yours found no room went to your impound (#141): `impounded`,
+    /// collected with `POST /inventory/impound/collect`. `lost` is what found no room
+    /// even there, and went with the stations. `refund` strands
     /// (the deed, less the debt) were paid back. `plot_released` follows,
     /// to everyone.
     #[serde(rename = "plot_foreclosed")]
@@ -455,6 +457,10 @@ pub enum ServerMessage {
         terrain_id: String,
         tax_owed: i64,
         refund: i64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        impounded: Vec<ItemCount>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        lost: Vec<ItemCount>,
     },
     /// Your workbench `station_id` stood off a plot (D10) where a terrain
     /// change has laid the lot `terrain_id` (#188), so it was taken down.
@@ -610,6 +616,14 @@ pub struct ToolUse {
     pub item_type: String,
     pub durability: i32,
     pub max_durability: i32,
+}
+
+/// So many of an item type, as `plot_foreclosed` counts what went to the
+/// impound (#141).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemCount {
+    pub item_type: String,
+    pub quantity: i32,
 }
 
 /// Who holds a player's avatar, in [`ServerMessage::Presence`] (E0.8).

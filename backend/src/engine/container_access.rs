@@ -22,6 +22,7 @@ use sqlx::PgPool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use super::impound::IMPOUND;
 use super::tick::GameState;
 use crate::models::{Container, Item, PermissionLevel};
 
@@ -190,6 +191,22 @@ pub async fn check_container_access(
     Ok(container)
 }
 
+/// Why a move or a split may not touch the impound (#141), if it may not.
+/// Nothing goes into it, so its stacks are only ever taken out. From it a
+/// stack goes only to an empty slot, since a swap would put the other stack
+/// back in. `source` and `target` are container types, and `target_held`
+/// whether the target slot holds something. Pure, so it can be tested
+/// without a database.
+pub fn impound_refusal(source: Option<&str>, target: &str, target_held: bool) -> Option<&'static str> {
+    if target == IMPOUND {
+        Some("Nothing goes into the impound: things only come out")
+    } else if source == Some(IMPOUND) && target_held {
+        Some("Take it out of the impound to an empty slot")
+    } else {
+        None
+    }
+}
+
 /// May `player_id` move an item owned by `item_owner`, held in a container
 /// whose station (if any) is owned by `station_owner`? Their own items, yes.
 /// Someone else's only when it sits in the player's own station's box: that's
@@ -288,6 +305,17 @@ pub async fn gathering_refusal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_impound_only_lets_things_out_to_an_empty_slot() {
+        let refused = |source, target, held| impound_refusal(source, target, held).is_some();
+        assert!(refused(Some("player_inventory"), IMPOUND, false), "no deposit");
+        assert!(refused(Some(IMPOUND), IMPOUND, false), "no shuffling inside either");
+        assert!(refused(Some(IMPOUND), "player_inventory", true), "a swap would put the other back");
+        assert!(!refused(Some(IMPOUND), "player_inventory", false));
+        assert!(!refused(Some(IMPOUND), "station_inventory", false));
+        assert!(!refused(Some("player_inventory"), "market_box", true));
+    }
 
     fn chest(owner: Uuid) -> StationAccess {
         StationAccess {

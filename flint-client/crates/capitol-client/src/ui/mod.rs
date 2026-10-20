@@ -12,6 +12,8 @@
 //! - [`trade`]: a trade request's card, and the two-sided trade window (P7.3).
 //! - [`gazette`]: the Capitol Gazette, toggled with G or its notice board
 //!   (E3.9): the day's edition as a page of newsprint.
+//! - [`impound`]: what a foreclosure kept for you when your pack was
+//!   full, opened from the header's Impound chip (#141).
 //! - [`market`]: the market panel, toggled with M: items, the ladder, the
 //!   order form and your orders (E3.5).
 //! - [`station`]: the open station's panel: its box, and its recipes at a
@@ -42,6 +44,7 @@ pub mod gazette;
 pub mod hints;
 pub mod hud;
 pub mod icons;
+pub mod impound;
 pub mod inventory;
 pub mod login;
 pub mod market;

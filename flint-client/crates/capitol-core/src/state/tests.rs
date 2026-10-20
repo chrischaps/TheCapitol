@@ -1431,13 +1431,25 @@ fn tax_messages_are_reported() {
             terrain_id: "sub_2_0_3_L_4".into(),
             tax_owed: 672,
             refund: 5328,
+            impounded: vec![plank()],
+            lost: Vec::new(),
         }),
         vec![StateEvent::PlotForeclosed {
             terrain_id: "sub_2_0_3_L_4".into(),
             tax_owed: 672,
             refund: 5328,
+            impounded: vec![plank()],
+            lost: Vec::new(),
         }]
     );
+}
+
+/// What a foreclosure impounded (#141)
+fn plank() -> capitol_protocol::ws::ItemCount {
+    capitol_protocol::ws::ItemCount {
+        item_type: "plank".into(),
+        quantity: 140,
+    }
 }
 
 #[test]

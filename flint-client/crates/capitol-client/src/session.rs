@@ -38,7 +38,7 @@ use capitol_core::protocol::rest::{
 use capitol_core::protocol::rules::market::{OrderSide, OrderStatus};
 use capitol_core::protocol::rules::Zone;
 use capitol_core::protocol::terrain::{Landmark, TerrainResponse};
-use capitol_core::protocol::ws::ClientMessage;
+use capitol_core::protocol::ws::{ClientMessage, ItemCount};
 use capitol_core::state::{GameState, StateEvent, Trade, TradeAction, TradeEvent, Yield};
 use capitol_core::station::{self, Kit, Placing, Visit};
 use capitol_core::trading::{self, Approach, Draft};
@@ -81,6 +81,10 @@ const CHART_TAG: Tag = 1 << 32;
 
 /// The tag on the Gazette's calls (E3.9).
 const GAZETTE_TAG: Tag = 70;
+
+/// The tag on taking things out of the impound (#141). The poller
+/// refetches the containers on its answer.
+const IMPOUND_TAG: Tag = 80;
 
 /// How often the open market panel asks again for the summary and your
 /// orders. The books themselves come over the WS as they change.
@@ -172,6 +176,10 @@ pub struct Session {
     market_busy: bool,
     /// Why the last one was refused, and when.
     market_refused: Option<(String, Instant)>,
+    /// A take from the impound is out (#141).
+    impound_busy: bool,
+    /// Why the last one was refused, and when.
+    impound_refused: Option<(String, Instant)>,
     /// What's worth a toast about your orders, since the extension last
     /// took it.
     market_notes: Vec<TradeNote>,
@@ -238,8 +246,15 @@ pub enum PlotNote {
     Unanswered,
     /// One of your plots owes `tax_owed` in tax, and goes at `forecloses_at` (#131).
     TaxOwed { tax_owed: i64, forecloses_at: i64 },
-    /// One of your plots was foreclosed for `tax_owed`, and `refund` came back.
-    Foreclosed { tax_owed: i64, refund: i64 },
+    /// One of your plots was foreclosed for `tax_owed`, and `refund` came
+    /// back. What your pack had no room for waits in your impound
+    /// (`impounded`, #141); `lost` found no room even there.
+    Foreclosed {
+        tax_owed: i64,
+        refund: i64,
+        impounded: Vec<ItemCount>,
+        lost: Vec<ItemCount>,
+    },
     /// Not about a plot, but a notice like the tax ones, and shown the same
     /// way: your subscription ran out at `until` (E4.1).
     SubscriptionLapsed {
@@ -345,6 +360,8 @@ impl Session {
             market_summary: None,
             market_busy: false,
             market_refused: None,
+            impound_busy: false,
+            impound_refused: None,
             market_notes: Vec::new(),
             gazette: capitol_core::gazette::Reader::new(None),
             gazette_asked: None,
@@ -1008,6 +1025,32 @@ impl Session {
         self.ask_market(RestRequest::CollectMarketBox(CollectRequest::default()));
     }
 
+    /// Takes everything in the impound to the inventory, as far as it fits
+    /// (#141).
+    pub fn collect_impound(&mut self) {
+        if self.auth.phase() != Phase::InWorld || self.impound_busy {
+            return;
+        }
+        tracing::info!("impound: taking everything out");
+        self.impound_busy = true;
+        self.impound_refused = None;
+        self.net.rest(RestRequest::CollectImpound(CollectRequest::default()), IMPOUND_TAG);
+    }
+
+    /// A take from the impound is out.
+    pub fn impound_busy(&self) -> bool {
+        self.impound_busy
+    }
+
+    /// Why the server refused the last take from the impound, or a move out
+    /// of it, for a few seconds after.
+    pub fn impound_refused(&self, now: Instant) -> Option<&str> {
+        self.impound_refused
+            .as_ref()
+            .filter(|(_, at)| now.duration_since(*at) < NOTICE_FOR)
+            .map(|(why, _)| why.as_str())
+    }
+
     fn ask_market(&mut self, request: RestRequest) {
         self.market_busy = true;
         self.market_refused = None;
@@ -1552,6 +1595,22 @@ impl Session {
                         }
                     }
                 }
+                NetEvent::Rest(IMPOUND_TAG, result) => {
+                    self.impound_busy = false;
+                    match result {
+                        Ok(RestResponse::Collected(done)) => tracing::info!(
+                            "impound: took {} stacks out, {} left",
+                            done.collected.len(),
+                            done.remaining
+                        ),
+                        Ok(_) => {}
+                        Err(e) => {
+                            let why = refusal(e);
+                            tracing::info!("impound: refused: {why}");
+                            self.impound_refused = Some((why, now));
+                        }
+                    }
+                }
                 NetEvent::Rest(GAZETTE_TAG, result) => {
                     let ask = self.gazette_asked.take();
                     match (ask, result) {
@@ -1673,10 +1732,16 @@ impl Session {
                         forecloses_at: *forecloses_at,
                     }),
                     StateEvent::PlotForeclosed {
-                        tax_owed, refund, ..
+                        tax_owed,
+                        refund,
+                        impounded,
+                        lost,
+                        ..
                     } => self.plot_notes.push(PlotNote::Foreclosed {
                         tax_owed: *tax_owed,
                         refund: *refund,
+                        impounded: impounded.clone(),
+                        lost: lost.clone(),
                     }),
                     StateEvent::StationDisplaced { station_type, .. } => self
                         .plot_notes

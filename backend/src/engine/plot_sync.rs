@@ -41,8 +41,8 @@ pub enum OnOwned {
     /// Covered workbenches are still taken down.
     Keep,
     /// Release them, refund the deed and remove their stations, their contents
-    /// going back as a foreclosure's do (`force`). Covered workbenches are
-    /// taken down.
+    /// going back as a foreclosure's do, to inventories or impounds (`force`).
+    /// Covered workbenches are taken down.
     Release,
 }
 
@@ -79,8 +79,9 @@ pub struct SyncReport {
     /// The covered workbenches taken down (#188), each with the
     /// `station_displaced` notice queued for its owner. The caller tells them.
     pub displaced: Vec<(CoveredStation, Uuid)>,
-    /// `(player, inventory)` for each inventory that took a kit, tool or
-    /// box's contents back. The caller sends `inventory_updated`.
+    /// `(player, container)` for each inventory, or impound (#141), that
+    /// took a kit, tool or box's contents back. The caller sends
+    /// `inventory_updated`.
     pub returned_to: Vec<(Uuid, Uuid)>,
     /// The `terrain_id`s of the plots released (`OnOwned::Release`). The
     /// caller tells the clients (`plot_released`, B13).
@@ -229,7 +230,7 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
             if !returned.lost.is_empty() {
                 tracing::warn!("Releasing plot {}: no room for {:?}, lost with its stations", c.plot_id, returned.lost);
             }
-            took(&mut report.returned_to, returned.inventories);
+            took(&mut report.returned_to, returned.containers);
             report.removed_stations.extend(release_plot(&mut tx, c.plot_id).await?);
             // The refund is in this transaction, so a plot is never released
             // without its owner getting the deed back.
@@ -310,7 +311,7 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
         if !returned.lost.is_empty() {
             tracing::warn!("Taking down workbenches under new lots: no room for {:?}, lost with them", returned.lost);
         }
-        took(&mut report.returned_to, returned.inventories);
+        took(&mut report.returned_to, returned.containers);
         sqlx::query("DELETE FROM stations WHERE id = ANY($1)").bind(&ids).execute(&mut *tx).await?;
         for c in covered {
             let message = ServerMessage::StationDisplaced {
@@ -350,10 +351,10 @@ fn covered<'a>(off_plot: &[OffPlot], lots: impl Iterator<Item = &'a TerrainPlot>
         .collect()
 }
 
-fn took(into: &mut Vec<(Uuid, Uuid)>, inventories: Vec<(Uuid, Uuid)>) {
-    for inv in inventories {
-        if !into.contains(&inv) {
-            into.push(inv);
+fn took(into: &mut Vec<(Uuid, Uuid)>, containers: Vec<(Uuid, Uuid)>) {
+    for c in containers {
+        if !into.contains(&c) {
+            into.push(c);
         }
     }
 }

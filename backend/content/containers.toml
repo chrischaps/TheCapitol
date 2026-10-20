@@ -54,3 +54,12 @@ id = "bazaar_stock"
 name = "Bazaar Stock"
 slot_count = 0
 layout_columns = 1
+
+# What a foreclosure took down and the owner's inventory had no room for
+# (#141). Things only come out of it. 480 slots: an estate's 25 stations
+# with full boxes, their kits and their tools.
+[[container]]
+id = "impound"
+name = "Impound"
+slot_count = 480
+layout_columns = 8

@@ -117,7 +117,7 @@ mod tests {
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
     async fn a_notice_sent_live_isnt_sent_again(db: PgPool) {
         let ada = player(&db, "ada", 0).await;
-        let gone = ServerMessage::PlotForeclosed { terrain_id: "lot".into(), tax_owed: 80, refund: 20 };
+        let gone = ServerMessage::PlotForeclosed { terrain_id: "lot".into(), tax_owed: 80, refund: 20, impounded: vec![], lost: vec![] };
         let id = queue(&db, ada, "lot", &gone).await.unwrap();
 
         assert!(take(&db, id).await.unwrap());
@@ -130,7 +130,7 @@ mod tests {
     async fn what_waited_is_sent_on_return_and_only_once(db: PgPool) {
         let ada = player(&db, "ada", 0).await;
         let bram = player(&db, "bram", 0).await;
-        let gone = ServerMessage::PlotForeclosed { terrain_id: "lot".into(), tax_owed: 80, refund: 20 };
+        let gone = ServerMessage::PlotForeclosed { terrain_id: "lot".into(), tax_owed: 80, refund: 20, impounded: vec![], lost: vec![] };
         queue(&db, ada, "lot", &gone).await.unwrap();
 
         assert!(take_all(&db, bram).await.unwrap().is_empty(), "only to its player");
@@ -148,7 +148,7 @@ mod tests {
         let first = queue(&db, ada, &terrain_id, &delinquent(&terrain_id, 20)).await.unwrap();
         queue(&db, ada, &terrain_id, &delinquent(&terrain_id, 40)).await.unwrap();
         queue(&db, ada, "elsewhere", &delinquent("elsewhere", 20)).await.unwrap();
-        let gone = ServerMessage::PlotForeclosed { terrain_id: terrain_id.clone(), tax_owed: 80, refund: 920 };
+        let gone = ServerMessage::PlotForeclosed { terrain_id: terrain_id.clone(), tax_owed: 80, refund: 920, impounded: vec![], lost: vec![] };
         queue(&db, ada, &terrain_id, &gone).await.unwrap();
 
         assert!(!take(&db, first).await.unwrap(), "replaced");

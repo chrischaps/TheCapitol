@@ -135,6 +135,8 @@ pub enum RestRequest {
     MarketBox,
     /// `POST /market/box/collect`
     CollectMarketBox(CollectRequest),
+    /// `POST /inventory/impound/collect` (#141)
+    CollectImpound(CollectRequest),
 
     /// `GET /gazette/latest`, or with a day `GET /gazette?date=` (E3.9)
     Gazette { day: Option<i64> },
@@ -266,7 +268,8 @@ impl RestRequest {
             | Subscribe(_)
             | Grant(_)
             | PlaceOrder(_)
-            | CollectMarketBox(_) => Method::POST,
+            | CollectMarketBox(_)
+            | CollectImpound(_) => Method::POST,
             UpdatePlotPermissions { .. } | SetByline(_) => Method::PUT,
             RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } => Method::DELETE,
             ApiKeys
@@ -348,6 +351,7 @@ impl RestRequest {
             MarketSummary => "/market/summary".into(),
             MarketBox => "/market/box".into(),
             CollectMarketBox(_) => "/market/box/collect".into(),
+            CollectImpound(_) => "/inventory/impound/collect".into(),
             Gazette { day: None } => "/gazette/latest".into(),
             Gazette { day: Some(_) } => "/gazette".into(),
             SetByline(_) => "/gazette/byline".into(),
@@ -373,7 +377,7 @@ impl RestRequest {
             Subscribe(b) => req.json(b),
             Grant(b) => req.json(b),
             PlaceOrder(b) => req.json(b),
-            CollectMarketBox(b) => req.json(b),
+            CollectMarketBox(b) | CollectImpound(b) => req.json(b),
             SetByline(b) => req.json(b),
             Gazette { day: Some(date) } => req.query(&GazetteQuery { date: *date }),
             MarketDepth(q) => req.query(q),
@@ -442,7 +446,7 @@ impl RestRequest {
             Q::MarketHistory(_) => A::MarketHistory(de(body)?),
             Q::MarketSummary => A::MarketSummary(de(body)?),
             Q::MarketBox => A::MarketBox(de(body)?),
-            Q::CollectMarketBox(_) => A::Collected(de(body)?),
+            Q::CollectMarketBox(_) | Q::CollectImpound(_) => A::Collected(de(body)?),
             Q::Gazette { .. } => A::Gazette(Box::new(de(body)?)),
             Q::SetByline(_) => A::Byline(de(body)?),
         })
@@ -673,6 +677,11 @@ mod tests {
                 RestRequest::CollectMarketBox(Default::default()),
                 "POST",
                 "/market/box/collect".into(),
+            ),
+            (
+                RestRequest::CollectImpound(Default::default()),
+                "POST",
+                "/inventory/impound/collect".into(),
             ),
             (RestRequest::Gazette { day: None }, "GET", "/gazette/latest".into()),
             (RestRequest::Gazette { day: Some(248_952) }, "GET", "/gazette".into()),

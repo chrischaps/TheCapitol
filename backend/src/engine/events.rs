@@ -220,6 +220,9 @@ pub enum GameEvent {
         terrain_id: String,
         tax_owed: i64,
         refund: i64,
+        /// What went to the owner's impound (#141), and what found no room even there
+        impounded: Vec<capitol_protocol::ws::ItemCount>,
+        lost: Vec<capitol_protocol::ws::ItemCount>,
         notice_id: Option<Uuid>,
     },
     /// #188: `owner_id`'s workbench stood off a plot where a terrain change

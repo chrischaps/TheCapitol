@@ -141,6 +141,11 @@ pub struct HeaderView<'a> {
     /// hall (E3.7): the hint, its arrow pointing this way on screen
     /// ([`bearing`]). `None` hides it.
     pub hall_hint: Option<f32>,
+    /// How many stacks your impound holds (#141). `None`, or none, hides
+    /// its chip.
+    pub impound: Option<usize>,
+    /// Whether the impound panel is open, to light its chip.
+    pub impound_open: bool,
 }
 
 /// What was clicked in the header.
@@ -154,6 +159,8 @@ pub struct HeaderClicks {
     pub gazette: bool,
     /// The hall hint: go to the hall.
     pub hall: bool,
+    /// The impound's chip: open or close its panel.
+    pub impound: bool,
     pub help: bool,
     pub settings: bool,
     /// Where the Inventory button was drawn, for pickups to fly to.
@@ -223,6 +230,9 @@ pub fn header(
                     ui.add_space(4.0);
                     if let Some(angle) = view.hall_hint {
                         clicks.hall = hall_chip(ui, angle).clicked();
+                    }
+                    if let Some(stacks) = view.impound.filter(|n| *n > 0) {
+                        clicks.impound = impound_chip(ui, stacks, view.impound_open).clicked();
                     }
                     clicks.gazette = match &view.gazette_news {
                         Some(headline) => news_chip(ui, headline).clicked(),
@@ -357,6 +367,40 @@ fn hall_chip(ui: &mut egui::Ui, angle: f32) -> egui::Response {
         .interact(egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Your market box holds goods. Collect them at the Exchange hall: click to walk there")
+}
+
+/// Goods held in your impound (#141): a parchment-edged chip with a
+/// red-brown seal, as on a clerk's docket, and how many stacks wait. Open
+/// or close its panel with a click.
+pub fn impound_chip(ui: &mut egui::Ui, stacks: usize, open: bool) -> egui::Response {
+    let edge = if open { theme::PAPER } else { theme::PAPER_EDGE };
+    let shown = theme::chip(edge, theme::CHIP).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(
+                RichText::new(format!("Impound · {stacks}"))
+                    .font(theme::strong(size::SMALL))
+                    .color(theme::PAPER),
+            );
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+            let c = rect.center();
+            // A wax seal: a red-brown disc, its rim pressed into points
+            let rim: Vec<egui::Pos2> = (0..16)
+                .map(|i| {
+                    let a = i as f32 * std::f32::consts::TAU / 16.0;
+                    let r = if i % 2 == 0 { 5.8 } else { 5.0 };
+                    c + egui::vec2(a.cos() * r, a.sin() * r)
+                })
+                .collect();
+            ui.painter().add(egui::Shape::convex_polygon(rim, theme::INK_DOWN, Stroke::NONE));
+            ui.painter().circle_stroke(c, 3.0, Stroke::new(0.8, theme::PAPER_EDGE.gamma_multiply(0.7)));
+        });
+    });
+    shown
+        .response
+        .interact(egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Held for you after a foreclosure: click to take it back")
 }
 
 /// A new edition of the Gazette is out (E3.9): a gold-edged chip that

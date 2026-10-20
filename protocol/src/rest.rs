@@ -1266,7 +1266,7 @@ pub struct CollectRequest {
 pub struct CollectResponse {
     /// The stacks moved (one that joined a stack in the inventory is gone)
     pub collected: Vec<Uuid>,
-    /// Stacks still in the market box
+    /// Stacks still in the market box, or the impound (#141)
     pub remaining: i32,
 }
 

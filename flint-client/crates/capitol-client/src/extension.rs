@@ -131,6 +131,10 @@ pub struct CapitolExtension {
     /// read offline.
     gazette: ui::gazette::GazettePanel,
     gazette_sample: Option<capitol_core::gazette::Reader>,
+    /// What a foreclosure kept for you (#141), and `--impound-sample`: an
+    /// impound and a pack to show offline.
+    impound: ui::impound::ImpoundPanel,
+    impound_sample: Option<(capitol_core::state::Container, capitol_core::state::Container)>,
     /// The Exchange hall (E3.7), and `--hall-sample`: offline, goods waiting
     /// and you where the camera looks.
     hall: world::hall::HallLayer,
@@ -210,6 +214,8 @@ impl CapitolExtension {
             market_sample: None,
             gazette: ui::gazette::GazettePanel::default(),
             gazette_sample: None,
+            impound: ui::impound::ImpoundPanel::default(),
+            impound_sample: None,
             hall: world::hall::HallLayer::default(),
             hall_sample: false,
             hall_hint: None,
@@ -343,6 +349,15 @@ impl CapitolExtension {
         if on && self.session.is_none() {
             self.gazette_sample = Some(ui::gazette::sample());
             self.gazette.open = true;
+        }
+        self
+    }
+
+    /// Offline, open the impound on a sample (`--impound-sample`, #141).
+    pub fn with_impound_sample(mut self, on: bool) -> Self {
+        if on && self.session.is_none() {
+            self.impound_sample = Some(ui::impound::sample());
+            self.impound.open = true;
         }
         self
     }
@@ -1065,6 +1080,8 @@ impl PlayerExtension for CapitolExtension {
                     settings_open: self.settings_panel.open,
                     inventory_pulse: pulse,
                     hall_hint: self.hall_hint,
+                    impound: state.impound().map(|c| c.used_slots()),
+                    impound_open: self.impound.open,
                 };
                 let clicks = ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
                 sign_out |= clicks.sign_out;
@@ -1090,6 +1107,11 @@ impl PlayerExtension for CapitolExtension {
                 }
                 if clicks.hall {
                     self.shared.visit_hall.store(true, Ordering::Relaxed);
+                }
+                if clicks.impound {
+                    self.impound.toggle();
+                    // Somewhere to drag it to
+                    self.inventory.open |= self.impound.open;
                 }
                 if clicks.help {
                     self.shortcuts.toggle();
@@ -1214,6 +1236,19 @@ impl PlayerExtension for CapitolExtension {
                     Some(ui::market::Action::Close) => self.market.open = false,
                     None => {}
                 }
+                // What a foreclosure kept for you (#141)
+                let state = session.state();
+                let view = ui::impound::View {
+                    impound: state.impound(),
+                    inventory: state.inventory(),
+                    busy: session.impound_busy(),
+                    refused: session.impound_refused(now),
+                };
+                match self.impound.show(ctx, &mut self.icons, &view, self.inventory.rect) {
+                    Some(ui::impound::Action::TakeAll) => session.collect_impound(),
+                    Some(ui::impound::Action::Close) => self.impound.open = false,
+                    None => {}
+                }
                 // The Gazette (E3.9)
                 let view = ui::gazette::View { reader: session.gazette(), online: true };
                 match self.gazette.show(ctx, &view) {
@@ -1229,7 +1264,7 @@ impl PlayerExtension for CapitolExtension {
                 } else {
                     // The inventory's rect is last frame's: it's drawn after.
                     let panels: Vec<_> =
-                        [self.inventory.rect, self.crafting.rect, self.exchange.rect, self.market.rect]
+                        [self.inventory.rect, self.crafting.rect, self.exchange.rect, self.market.rect, self.impound.rect]
                             .into_iter()
                             .flatten()
                             .collect();
@@ -1389,6 +1424,17 @@ impl PlayerExtension for CapitolExtension {
             let view = sample.view_with(self.market.selected.as_deref(), history.as_ref());
             if let Some(ui::market::Action::Close) = self.market.show(ctx, &mut self.icons, &view) {
                 self.market.open = false;
+            }
+        }
+        if let Some((impound, inventory)) = &self.impound_sample {
+            let view = ui::impound::View {
+                impound: Some(impound),
+                inventory: Some(inventory),
+                busy: false,
+                refused: None,
+            };
+            if let Some(ui::impound::Action::Close) = self.impound.show(ctx, &mut self.icons, &view, None) {
+                self.impound.open = false;
             }
         }
         if let Some(reader) = &mut self.gazette_sample {
@@ -1837,7 +1883,7 @@ fn plots(
                     .map_or_else(|| station_type.replace('_', " "), |t| t.name.to_lowercase());
                 (
                     format!("Your {name} was taken down"),
-                    "A new lot was laid where it stood. Its kit and what it held are back in your pack".into(),
+                    "A new lot was laid where it stood. Its kit and what it held are back in your pack, or your impound if it was full".into(),
                 )
             }
             PlotNote::NoneThere => ("No plot here".into(), "Alt-click a lot to see its deed".into()),
@@ -1856,14 +1902,28 @@ fn plots(
                     until.format("%-d %B")
                 ),
             ),
-            PlotNote::Foreclosed { tax_owed, refund } => (
-                "Plot foreclosed".into(),
-                if refund > 0 {
+            PlotNote::Foreclosed {
+                tax_owed,
+                refund,
+                impounded,
+                lost,
+            } => {
+                let catalog = session.state().catalog();
+                let mut body = if refund > 0 {
                     format!("{tax_owed} Strands of tax unpaid. {refund} of the deed came back")
                 } else {
                     format!("{tax_owed} Strands of tax unpaid took the whole deed")
-                },
-            ),
+                };
+                if !impounded.is_empty() {
+                    let held = ui::impound::counted(catalog, &impounded);
+                    body.push_str(&format!(". Your pack was full: {held} wait in your impound"));
+                }
+                if !lost.is_empty() {
+                    let gone = ui::impound::counted(catalog, &lost);
+                    body.push_str(&format!(". No room even there for {gone}"));
+                }
+                ("Plot foreclosed".into(), body)
+            }
         };
         let mut data = toml::Table::new();
         data.insert("title".into(), title.into());

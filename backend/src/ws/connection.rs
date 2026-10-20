@@ -16,7 +16,7 @@ use capitol_protocol::rules::stacking::{Pick, Units};
 use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo, TradeOfferItem};
 
 use crate::engine::container_access::{
-    check_container_access, check_station_access, live_position, movable_item,
+    check_container_access, check_station_access, impound_refusal, live_position, movable_item,
 };
 use crate::api_keys::{self, KeyGrant};
 use crate::engine::GameEvent;
@@ -1093,9 +1093,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
-                    Ok(GameEvent::PlotForeclosed { owner_id, terrain_id, tax_owed, refund, notice_id }) => {
+                    Ok(GameEvent::PlotForeclosed { owner_id, terrain_id, tax_owed, refund, impounded, lost, notice_id }) => {
                         if owner_id == player_id && (!holds(&state, player_id, connection_id).await || take_notice(&state.db, notice_id).await) {
-                            let msg = ServerMessage::PlotForeclosed { terrain_id, tax_owed, refund };
+                            let msg = ServerMessage::PlotForeclosed { terrain_id, tax_owed, refund, impounded, lost };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
@@ -1419,11 +1419,10 @@ async fn handle_move_item(
     // Both ends must be usable: the player's own containers, or a station's
     // within reach (B4). The source matters too, since a swap fills it.
     let at = live_position(&state.game, player_id).await;
-    if let Some(source_container_id) = source_item.container_id {
-        check_container_access(&state.db, player_id, source_container_id, at)
-            .await
-            .map_err(|e| e.message())?;
-    }
+    let source_container = match source_item.container_id {
+        Some(id) => Some(check_container_access(&state.db, player_id, id, at).await.map_err(|e| e.message())?),
+        None => None,
+    };
     let target_container = check_container_access(&state.db, player_id, target_container_id, at)
         .await
         .map_err(|e| e.message())?;
@@ -1450,6 +1449,11 @@ async fn handle_move_item(
     // with one would hand it over, so only empty slots or your own items.
     if target_item.as_ref().is_some_and(|t| t.owner_id != Some(player_id)) {
         return Err("That slot holds someone else's item".into());
+    }
+    // Things only come out of the impound (#141)
+    let source_type = source_container.as_ref().map(|c| c.container_type.as_str());
+    if let Some(why) = impound_refusal(source_type, &target_container.container_type, target_item.is_some()) {
+        return Err(why.into());
     }
 
     crate::engine::slot_moves::apply_move(
@@ -1485,14 +1489,20 @@ async fn handle_split_stack(
         .container_id
         .ok_or_else(|| "That item isn't in a container".to_string())?;
     let at = live_position(&state.game, player_id).await;
-    check_container_access(&state.db, player_id, container_id, at)
+    let from = check_container_access(&state.db, player_id, container_id, at)
         .await
         .map_err(|e| e.message())?;
     let to_container = to_container.unwrap_or(container_id);
-    if to_container != container_id {
+    let to = if to_container != container_id {
         check_container_access(&state.db, player_id, to_container, at)
             .await
-            .map_err(|e| e.message())?;
+            .map_err(|e| e.message())?
+    } else {
+        from.clone()
+    };
+    // Things only come out of the impound (#141); a split goes only to an empty slot
+    if let Some(why) = impound_refusal(Some(&from.container_type), &to.container_type, false) {
+        return Err(why.into());
     }
     crate::engine::slot_moves::split(&state.db, player_id, &source, quantity, to_container, to_slot, qualities)
         .await

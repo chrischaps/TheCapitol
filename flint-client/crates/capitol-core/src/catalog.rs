@@ -146,6 +146,8 @@ pub mod container_type {
     pub const STATION_INVENTORY: &str = "station_inventory";
     /// Where bought goods and returned units wait (E3.1)
     pub const MARKET_BOX: &str = "market_box";
+    /// What a foreclosure gave back that the inventory had no room for (#141)
+    pub const IMPOUND: &str = "impound";
 }
 
 /// One server's last `/catalog` on disk, beside its terrain.

@@ -40,7 +40,7 @@ use capitol_protocol::rest::{
     StationInfo, Subscription, SubscriptionStatus, PRODUCTION_LOG_LEN,
 };
 use capitol_protocol::rules::{self, Zone};
-use capitol_protocol::ws::{PlayerPosition, PresenceHolder, ServerMessage};
+use capitol_protocol::ws::{ItemCount, PlayerPosition, PresenceHolder, ServerMessage};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -280,11 +280,15 @@ pub enum StateEvent {
         forecloses_at: i64,
     },
     /// Your plot `terrain_id` was foreclosed for unpaid tax, and `refund`
-    /// of the deed came back (`plot_foreclosed`, #131). `LotReleased` follows.
+    /// of the deed came back (`plot_foreclosed`, #131). `impounded` is what
+    /// your inventory had no room for, waiting in your impound (#141), and
+    /// `lost` what found no room even there. `LotReleased` follows.
     PlotForeclosed {
         terrain_id: String,
         tax_owed: i64,
         refund: i64,
+        impounded: Vec<ItemCount>,
+        lost: Vec<ItemCount>,
     },
     /// Your workbench stood off a plot where a terrain change laid the lot
     /// `terrain_id`, so the server took it down and gave back what it held
@@ -850,10 +854,14 @@ impl GameState {
                 terrain_id,
                 tax_owed,
                 refund,
+                impounded,
+                lost,
             } => out.push(StateEvent::PlotForeclosed {
                 terrain_id: terrain_id.clone(),
                 tax_owed: *tax_owed,
                 refund: *refund,
+                impounded: impounded.clone(),
+                lost: lost.clone(),
             }),
             M::StationDisplaced {
                 station_id,
@@ -1221,6 +1229,12 @@ impl GameState {
     /// back from a cancel or an expiry.
     pub fn market_box(&self) -> Option<&Container> {
         self.container_of_type(container_type::MARKET_BOX)
+    }
+
+    /// Your impound (#141), if you have one: what a foreclosure, or a lot
+    /// laid under your workbench, gave back when your inventory was full.
+    pub fn impound(&self) -> Option<&Container> {
+        self.container_of_type(container_type::IMPOUND)
     }
 
     pub fn open_station(&self) -> Option<&OpenStation> {

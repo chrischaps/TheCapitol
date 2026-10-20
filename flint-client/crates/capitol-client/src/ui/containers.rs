@@ -44,6 +44,7 @@ pub fn bench(
                     container_type::PLAYER_INVENTORY,
                     container_type::CRAFTING_INPUT,
                     container_type::CRAFTING_OUTPUT,
+                    container_type::IMPOUND,
                 ];
                 let mut others: Vec<_> = state
                     .containers()

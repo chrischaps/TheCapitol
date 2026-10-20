@@ -10,9 +10,9 @@
 //! week of tax, and again when one more hour's charge would bring it to
 //! [`FORECLOSE_AFTER_WEEKS`] weeks. Then the plot is foreclosed. Its stations
 //! come down: each kit goes back to the station's owner, and what was in the
-//! boxes to whoever owns it (#137). What doesn't fit an inventory is lost
-//! (#141). Then it's released the same way a forced terrain commit releases
-//! one, and the deed is refunded, less the debt.
+//! boxes to whoever owns it (#137). What doesn't fit an inventory goes to its
+//! player's impound (#141). Then it's released the same way a forced terrain
+//! commit releases one, and the deed is refunded, less the debt.
 //!
 //! Both kinds of word to the owner are queued as notices (#138), so an owner
 //! who's offline hears on their return. The owner can pay the debt off
@@ -32,7 +32,7 @@ use super::plot_sync::release_plot;
 use super::station_removal::return_plot_stations;
 use crate::error::AppError;
 use crate::models::StationState;
-use capitol_protocol::ws::ServerMessage;
+use capitol_protocol::ws::{ItemCount, ServerMessage};
 
 /// Weekly tax rate as a fraction (2% = 0.02)
 const TAX_RATE: f64 = 0.02;
@@ -106,10 +106,14 @@ pub struct Foreclosure {
     /// The owner's strands after the refund
     pub balance: i64,
     pub removed_stations: Vec<Uuid>,
-    /// `(player, inventory)` for each inventory the stations were emptied into
+    /// `(player, container)` for each inventory or impound the stations were
+    /// emptied into
     pub returned_to: Vec<(Uuid, Uuid)>,
-    /// What didn't fit, as `(item_type, quantity)`
-    pub lost: Vec<(String, i32)>,
+    /// What of the owner's found no room in their inventory and went to their
+    /// impound (#141)
+    pub impounded: Vec<ItemCount>,
+    /// What of the owner's found no room even there
+    pub lost: Vec<ItemCount>,
     /// The queued `plot_foreclosed` notice (#138), if there's a lot to name
     pub notice_id: Option<Uuid>,
 }
@@ -346,6 +350,8 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>
     if !returned.lost.is_empty() {
         tracing::warn!("Foreclosing plot {}: no room for {:?}, lost with its stations", plot_id, returned.lost);
     }
+    let impounded = returned.impounded_for(owner_id);
+    let lost = returned.lost_for(owner_id);
     let removed_stations = release_plot(&mut tx, plot_id).await.map_err(|e| e.to_string())?;
     gazette::record_deed(&mut tx, plot_id, &zone_id, DeedEvent::Foreclosed, owner_id)
         .await
@@ -370,7 +376,13 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>
     };
     let notice_id = match &terrain_id {
         Some(terrain_id) => {
-            let message = ServerMessage::PlotForeclosed { terrain_id: terrain_id.clone(), tax_owed, refund };
+            let message = ServerMessage::PlotForeclosed {
+                terrain_id: terrain_id.clone(),
+                tax_owed,
+                refund,
+                impounded: impounded.clone(),
+                lost: lost.clone(),
+            };
             Some(notices::queue(&mut *tx, owner_id, terrain_id, &message).await.map_err(|e| e.to_string())?)
         }
         None => None,
@@ -384,8 +396,9 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>
         refund,
         balance,
         removed_stations,
-        returned_to: returned.inventories,
-        lost: returned.lost,
+        returned_to: returned.containers,
+        impounded,
+        lost,
         notice_id,
     }))
 }
@@ -421,6 +434,8 @@ pub fn announce(report: TaxReport, stations: &mut HashMap<Uuid, StationState>, e
                 terrain_id: terrain_id.clone(),
                 tax_owed: f.tax_owed,
                 refund: f.refund,
+                impounded: f.impounded,
+                lost: f.lost,
                 notice_id: f.notice_id,
             });
             let _ = events.send(GameEvent::PlotReleased { terrain_id });
@@ -742,7 +757,7 @@ mod tests {
             if *player_id == ada && *container_id == ada_bag));
         assert!(matches!(&sent[2], GameEvent::InventoryUpdated { player_id, container_id, .. }
             if *player_id == guest && *container_id == guest_bag));
-        assert!(matches!(&sent[3], GameEvent::PlotForeclosed { owner_id, terrain_id: t, tax_owed: 480, refund: 5520, notice_id: Some(_) }
+        assert!(matches!(&sent[3], GameEvent::PlotForeclosed { owner_id, terrain_id: t, tax_owed: 480, refund: 5520, notice_id: Some(_), .. }
             if *owner_id == ada && *t == terrain_id));
         assert!(matches!(&sent[4], GameEvent::PlotReleased { terrain_id: t } if *t == terrain_id));
         assert!(matches!(&sent[5], GameEvent::CurrencyChanged { player_id, new_balance: 5520 } if *player_id == ada));
@@ -751,15 +766,18 @@ mod tests {
         // Away when it happened, ada hears when she's back (#138)
         assert_eq!(
             notices::take_all(&db, ada).await.unwrap(),
-            vec![ServerMessage::PlotForeclosed { terrain_id, tax_owed: 480, refund: 5520 }]
+            vec![ServerMessage::PlotForeclosed { terrain_id, tax_owed: 480, refund: 5520, impounded: vec![], lost: vec![] }]
         );
     }
 
+    /// What finds no room in an inventory waits in its player's impound (#141)
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
-    async fn what_finds_no_room_is_lost_and_the_plot_still_forecloses(db: PgPool) {
+    async fn what_finds_no_room_goes_to_the_impound_and_the_plot_still_forecloses(db: PgPool) {
         let ada = player(&db, "ada", 0).await;
         let bag = inventory(&db, ada).await;
+        // A guest with no inventory at all: their fiber goes to their own impound
+        let guest = player(&db, "guest", 0).await;
         let lot = plot(&db, Some(ada), VALUE).await;
         owe(&db, lot, 480).await;
         let (_, chest_box) = station(&db, ada, lot).await;
@@ -768,20 +786,51 @@ mod tests {
             put(&db, ada, bag, slot, "forge_kit", 50, 1).await;
         }
         put(&db, ada, chest_box, 0, "fiber", 50, 30).await;
+        put(&db, ada, chest_box, 1, "rope", 60, 4).await;
+        put(&db, ada, chest_box, 2, "fiber", 70, 2).await;
+        put(&db, guest, chest_box, 3, "fiber", 40, 5).await;
 
         let report = process_property_taxes(&db).await;
 
-        // The kit takes the last slot; the fiber goes with the chest.
+        // The kit takes the last slot; the rest waits in the impounds
         let f = &report.foreclosures[0];
-        assert_eq!(f.lost, vec![("fiber".to_string(), 30)]);
-        assert_eq!(f.returned_to, vec![(ada, bag)]);
-        assert_eq!(held(&db, bag).await[23], (23, "chest_kit".to_string(), 50, 1, ada));
-        assert_eq!(owner(&db, lot).await, Some(None));
-        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE item_type = 'fiber'")
+        let pound: Uuid = sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'impound'")
+            .bind(ada)
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(left, 0);
+        let guest_pound: Uuid =
+            sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'impound'")
+                .bind(guest)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(held(&db, bag).await[23], (23, "chest_kit".to_string(), 50, 1, ada));
+        // The two fiber stacks are one there, and every unit keeps its quality (D2)
+        assert_eq!(
+            held(&db, pound).await,
+            vec![(0, "fiber".to_string(), 51, 32, ada), (1, "rope".to_string(), 60, 4, ada)]
+        );
+        assert_eq!(held(&db, guest_pound).await, vec![(0, "fiber".to_string(), 40, 5, guest)]);
+        let fiber = |quantity| ItemCount { item_type: "fiber".into(), quantity };
+        let rope = ItemCount { item_type: "rope".into(), quantity: 4 };
+        assert_eq!(f.impounded, vec![fiber(32), rope.clone()], "the owner's, not the guest's");
+        assert!(f.lost.is_empty());
+        assert_eq!(f.returned_to, vec![(ada, bag), (ada, pound), (guest, guest_pound)]);
+        assert_eq!(owner(&db, lot).await, Some(None));
+
+        // Ada hears what's waiting for her
+        let terrain_id = format!("test-{lot}");
+        assert_eq!(
+            notices::take_all(&db, ada).await.unwrap(),
+            vec![ServerMessage::PlotForeclosed {
+                terrain_id,
+                tax_owed: 480,
+                refund: 5520,
+                impounded: vec![fiber(32), rope],
+                lost: vec![],
+            }]
+        );
     }
 
     /// A tool in a station's tool slot goes back to whoever put it there (E1.6)

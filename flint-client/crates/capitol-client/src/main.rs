@@ -147,6 +147,10 @@ struct Args {
     /// in range, the prompt (E3.7)
     #[arg(long)]
     hall_sample: bool,
+    /// Offline, open the impound (#141) on a sample: what a foreclosed
+    /// workshop leaves when your pack is full
+    #[arg(long)]
+    impound_sample: bool,
     /// No sound. Captures (--exit-after) are silent anyway
     #[arg(long)]
     mute: bool,
@@ -316,6 +320,7 @@ fn main() -> Result<()> {
         .with_market(args.market.as_deref(), args.market_sample)
         .with_hall_sample(args.hall_sample && args.offline.is_some())
         .with_gazette_sample(args.gazette_sample && args.offline.is_some())
+        .with_impound_sample(args.impound_sample && args.offline.is_some())
         .with_mute(args.mute || args.exit_after.is_some())
         .with_juice_sample(args.juice_sample && args.offline.is_some())
         .with_time_of_day(args.time_of_day)

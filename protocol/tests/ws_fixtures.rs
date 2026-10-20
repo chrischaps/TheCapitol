@@ -219,3 +219,20 @@ fn movement_blocked_names_the_river_or_says_too_steep() {
     let ServerMessage::MovementBlocked { reason, water_id, .. } = msg else { unreachable!() };
     assert_eq!((reason.as_str(), water_id.as_str()), (Blocked::Steep.reason().as_str(), Blocked::Steep.water_id()));
 }
+
+#[test]
+fn a_foreclosure_from_an_older_server_impounded_nothing() {
+    // Before #141, `plot_foreclosed` didn't say what went to the impound.
+    let msg: ServerMessage =
+        serde_json::from_str(r#"{"type":"plot_foreclosed","terrain_id":"lot","tax_owed":80,"refund":20}"#).unwrap();
+    assert_eq!(
+        msg,
+        ServerMessage::PlotForeclosed {
+            terrain_id: "lot".into(),
+            tax_owed: 80,
+            refund: 20,
+            impounded: Vec::new(),
+            lost: Vec::new(),
+        }
+    );
+}

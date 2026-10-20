@@ -481,7 +481,7 @@ pub async fn get_box(
 }
 
 /// The container `id` and its stacks.
-async fn container(db: &PgPool, id: Uuid) -> Result<ContainerResponse, AppError> {
+pub(crate) async fn container(db: &PgPool, id: Uuid) -> Result<ContainerResponse, AppError> {
     let (container_type, slot_count, layout_columns): (String, i32, i32) = sqlx::query_as(
         "SELECT c.container_type, t.slot_count, t.layout_columns
          FROM containers c JOIN container_types t ON t.id = c.container_type WHERE c.id = $1",
@@ -554,6 +554,22 @@ pub async fn collect_from_box(
 ) -> Result<(CollectResponse, Uuid, Uuid), AppError> {
     let mut tx = db.begin().await?;
     let box_id = market::market_box(&mut tx, player_id).await?;
+    let (response, inventory) = collect_from(&mut tx, player_id, box_id, "market box", only).await?;
+    tx.commit().await?;
+    Ok((response, box_id, inventory))
+}
+
+/// Move the stacks of `player_id`'s container `from` (or just `only`), called
+/// `name` in a refusal, to their inventory in slot order, until it's full: the
+/// market box's collect, and the impound's (#141). Returns what moved and the
+/// inventory.
+pub(crate) async fn collect_from(
+    tx: &mut sqlx::PgConnection,
+    player_id: Uuid,
+    from: Uuid,
+    name: &str,
+    only: Option<&[Uuid]>,
+) -> Result<(CollectResponse, Uuid), AppError> {
     let inventory: Uuid = sqlx::query_scalar(
         "SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'player_inventory' LIMIT 1 FOR UPDATE",
     )
@@ -563,34 +579,32 @@ pub async fn collect_from_box(
     let mut stacks: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM items WHERE container_id = $1 ORDER BY slot_index NULLS LAST, id FOR UPDATE",
     )
-    .bind(box_id)
+    .bind(from)
     .fetch_all(&mut *tx)
     .await?;
     if let Some(only) = only {
         if let Some(missing) = only.iter().find(|id| !stacks.contains(id)) {
-            return Err(AppError::BadRequest(format!("{missing} isn't in your market box")));
+            return Err(AppError::BadRequest(format!("{missing} isn't in your {name}")));
         }
         stacks.retain(|id| only.contains(id));
     }
 
     let mut collected = Vec::new();
     for stack in stacks {
-        if market::stow(&mut tx, player_id, stack, inventory).await?.is_none() {
+        if market::stow(tx, player_id, stack, inventory).await?.is_none() {
             break;
         }
         collected.push(stack);
     }
     let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE container_id = $1")
-        .bind(box_id)
+        .bind(from)
         .fetch_one(&mut *tx)
         .await?;
-    tx.commit().await?;
     Ok((
         CollectResponse {
             collected,
             remaining: remaining as i32,
         },
-        box_id,
         inventory,
     ))
 }

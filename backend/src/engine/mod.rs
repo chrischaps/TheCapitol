@@ -11,6 +11,7 @@ mod events;
 mod extraction;
 pub mod gazette;
 pub mod grants;
+pub mod impound;
 pub mod market;
 pub mod market_book;
 pub mod market_matcher;

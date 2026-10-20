@@ -9,10 +9,11 @@
 //!
 //! A foreclosed plot's stations come down here too ([`return_plot_stations`],
 //! #137), boxes and tools and all: what's in them goes back to the inventories
-//! of whoever owns it.
+//! of whoever owns it, or to their impound when an inventory is full (#141).
 
 use std::collections::HashMap;
 
+use capitol_protocol::ws::ItemCount;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -211,33 +212,110 @@ pub(crate) async fn free_slots(
 /// What giving a plot's stations back did (#137).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ReturnedStations {
-    /// `(player, inventory)` for each inventory that took something, in the order they first did
-    pub inventories: Vec<(Uuid, Uuid)>,
-    /// What found no room, as `(item_type, quantity)`. It's still in the
-    /// stations, and goes when they do. Keeping it somewhere is #141.
-    pub lost: Vec<(String, i32)>,
+    /// `(player, container)` for each inventory or impound that took
+    /// something, in the order they first did
+    pub containers: Vec<(Uuid, Uuid)>,
+    /// What found no room in its owner's inventory and went to their impound
+    /// (#141), as `(player, item_type, quantity)`
+    pub impounded: Vec<(Uuid, String, i32)>,
+    /// What found no room even in the impound, as `(player, item_type,
+    /// quantity)`. It's still in the stations, and goes when they do.
+    pub lost: Vec<(Uuid, String, i32)>,
 }
 
-/// A player's inventory, locked, as things are put into it
-struct Inventory {
+impl ReturnedStations {
+    /// What of `player`'s went to their impound, a count per item type in
+    /// the order each first went
+    pub fn impounded_for(&self, player: Uuid) -> Vec<ItemCount> {
+        counts(&self.impounded, player)
+    }
+
+    /// What of `player`'s found no room anywhere
+    pub fn lost_for(&self, player: Uuid) -> Vec<ItemCount> {
+        counts(&self.lost, player)
+    }
+}
+
+fn counts(of: &[(Uuid, String, i32)], player: Uuid) -> Vec<ItemCount> {
+    let mut out: Vec<ItemCount> = Vec::new();
+    for (_, item_type, quantity) in of.iter().filter(|o| o.0 == player) {
+        match out.iter_mut().find(|c| &c.item_type == item_type) {
+            Some(c) => c.quantity = c.quantity.saturating_add(*quantity),
+            None => out.push(ItemCount { item_type: item_type.clone(), quantity: *quantity }),
+        }
+    }
+    out
+}
+
+/// Where a returned thing goes: its owner's inventory, or their impound when
+/// that's full (#141)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Kind {
+    Inventory,
+    Impound,
+}
+
+/// A player's inventory or impound, locked, as things are put into it
+struct Store {
     id: Uuid,
     free: Vec<i32>,
     /// The stacks of each stackable item type, in slot order, with how many units each holds
     stacks: HashMap<String, Vec<(Uuid, i64)>>,
 }
 
+/// Where a store takes a thing
+enum Room {
+    /// Onto this stack
+    Join(Uuid),
+    /// Into this free slot
+    Slot(i32),
+}
+
+impl Store {
+    /// Room for the stack `item` of `quantity` `item_type`: on the first
+    /// stack of its type with room, whatever its grade, as every unit keeps
+    /// its quality (D2, E1.8), if it stacks; else the first free slot, where
+    /// the next of its type can join it.
+    fn room(&mut self, item: Uuid, item_type: &str, quantity: i32, stackable: bool) -> Option<Room> {
+        if stackable {
+            let joins = self.stacks.get_mut(item_type).and_then(|stacks| {
+                stacks.iter_mut().find(|(_, held)| *held + quantity as i64 <= i32::MAX as i64)
+            });
+            if let Some((stack, held)) = joins {
+                *held += quantity as i64;
+                return Some(Room::Join(*stack));
+            }
+        }
+        let slot = self.slot()?;
+        if stackable {
+            self.stacks.entry(item_type.to_string()).or_default().push((item, quantity as i64));
+        }
+        Some(Room::Slot(slot))
+    }
+
+    /// The first free slot, taken
+    fn slot(&mut self) -> Option<i32> {
+        (!self.free.is_empty()).then(|| self.free.remove(0))
+    }
+}
+
+/// The stores loaded so far, by player and kind. `None` for a player with no
+/// inventory.
+type Stores = HashMap<(Uuid, Kind), Option<Store>>;
+
 /// Empty every station on `plot_id` into inventories, before a foreclosure
 /// releases the plot (#137). Each station's kit goes back to the station's
 /// owner at the quality it was placed with, as [`remove_station`] does. Each
 /// item in its boxes goes back to whoever owns the item: a guest's deposit is
 /// the guest's (#80), and an item with no owner is the station owner's. A
-/// stackable item joins the first stack of its type, grade and min grade
-/// (`rules::stacking::auto_stacks_with`, plan D2), at the two stacks' quality
-/// averaged by quantity; anything else takes the first free slot. A tool in a
-/// station's tool slot goes back to whoever put it there (E1.6), or the
-/// station owner if they're gone. Kits go first, so a station is the last
-/// thing lost, then tools. A tool that finds no room goes with its station.
-/// The stations are left, empty or holding only what didn't fit, for
+/// stackable item joins the first stack of its type, whatever its grade
+/// (plan D2, E1.8), and every unit keeps its quality; anything else takes the
+/// first free slot. A tool in a station's tool slot goes back to whoever put
+/// it there (E1.6), or the station owner if they're gone. What finds no room
+/// in an inventory goes to its player's impound (#141) the same way. Kits go
+/// first, then tools, so they take the inventory's room before the boxes'
+/// contents do. Only what finds no room in the impound either goes with its
+/// station. The stations are left, empty or holding only that, for
 /// `release_plot` to delete.
 pub async fn return_plot_stations(
     tx: &mut PgConnection,
@@ -285,19 +363,15 @@ pub async fn return_stations(
     .await?;
 
     let mut returned = ReturnedStations::default();
-    let mut inventories: HashMap<Uuid, Option<Inventory>> = HashMap::new();
+    let mut stores = Stores::new();
 
     for (station_id, station_type, owner_id, kit_quality, kit, _, _) in &stations {
         let Some(kit) = kit else {
             tracing::error!("Station {} has type {} with no kit", station_id, station_type);
             continue;
         };
-        let slot = match inventory(tx, &mut inventories, *owner_id).await? {
-            Some(inv) if !inv.free.is_empty() => Some((inv.id, inv.free.remove(0))),
-            _ => None,
-        };
-        let Some((inventory_id, slot)) = slot else {
-            returned.lost.push((kit.to_string(), 1));
+        let Some((container, kind, slot)) = free_slot(tx, &mut stores, *owner_id).await? else {
+            returned.lost.push((*owner_id, kit.to_string(), 1));
             continue;
         };
         // Unmarked, as at a take-down: the station didn't keep the maker (#241)
@@ -309,119 +383,147 @@ pub async fn return_stations(
         .bind(kit)
         .bind(kit_quality)
         .bind(owner_id)
-        .bind(inventory_id)
+        .bind(container)
         .bind(slot)
         .execute(&mut *tx)
         .await?;
-        took(&mut returned, *owner_id, inventory_id);
+        took(&mut returned, *owner_id, container, kind, kit, 1);
     }
 
     for (station_id, _, owner_id, _, _, tool, tool_owner) in &stations {
         let Some(tool) = tool else { continue };
         let player = tool_owner.unwrap_or(*owner_id);
-        let slot = match inventory(tx, &mut inventories, player).await? {
-            Some(inv) if !inv.free.is_empty() => Some((inv.id, inv.free.remove(0))),
-            _ => None,
-        };
-        let Some((inventory_id, slot)) = slot else {
-            let item_type: String = sqlx::query_scalar("SELECT item_type FROM items WHERE id = $1")
-                .bind(tool)
-                .fetch_one(&mut *tx)
-                .await?;
-            returned.lost.push((item_type, 1));
+        let item_type: String = sqlx::query_scalar("SELECT item_type FROM items WHERE id = $1")
+            .bind(tool)
+            .fetch_one(&mut *tx)
+            .await?;
+        let Some((container, kind, slot)) = free_slot(tx, &mut stores, player).await? else {
+            returned.lost.push((player, item_type, 1));
             continue;
         };
-        super::station_tools::give_back(tx, *station_id, *tool, player, inventory_id, slot).await?;
-        took(&mut returned, player, inventory_id);
+        super::station_tools::give_back(tx, *station_id, *tool, player, container, slot).await?;
+        took(&mut returned, player, container, kind, &item_type, 1);
     }
 
     for (item_id, item_type, quantity, item_owner, station_id, stackable) in contents {
         let player = item_owner.unwrap_or(station_owner[&station_id]);
-        let Some(inv) = inventory(tx, &mut inventories, player).await? else {
-            returned.lost.push((item_type, quantity));
+        let mut found = None;
+        for kind in [Kind::Inventory, Kind::Impound] {
+            if let Some(store) = store(tx, &mut stores, player, kind).await? {
+                if let Some(room) = store.room(item_id, &item_type, quantity, stackable) {
+                    found = Some((store.id, kind, room));
+                    break;
+                }
+            }
+        }
+        let Some((container, kind, room)) = found else {
+            returned.lost.push((player, item_type, quantity));
             continue;
         };
-        let inventory_id = inv.id;
-        // Onto the first stack of its type with room, whatever its grade: every
-        // unit keeps its quality (D2, E1.8)
-        let joins = inv.stacks.get_mut(&item_type).filter(|_| stackable).and_then(|stacks| {
-            stacks.iter_mut().find(|(_, held)| *held + quantity as i64 <= i32::MAX as i64)
-        });
-        if let Some((stack_id, held)) = joins {
-            *held += quantity as i64;
-            super::units::merge_into(&mut *tx, item_id, *stack_id).await?;
-        } else if !inv.free.is_empty() {
-            let slot = inv.free.remove(0);
-            if stackable {
-                inv.stacks.entry(item_type).or_default().push((item_id, quantity as i64));
+        match room {
+            Room::Join(stack) => {
+                super::units::merge_into(&mut *tx, item_id, stack).await?;
             }
-            sqlx::query(
-                "UPDATE items SET container_id = $1, slot_index = $2, owner_id = $3 WHERE id = $4",
-            )
-            .bind(inventory_id)
-            .bind(slot)
-            .bind(player)
-            .bind(item_id)
-            .execute(&mut *tx)
-            .await?;
-        } else {
-            returned.lost.push((item_type, quantity));
-            continue;
+            Room::Slot(slot) => {
+                sqlx::query(
+                    "UPDATE items SET container_id = $1, slot_index = $2, owner_id = $3 WHERE id = $4",
+                )
+                .bind(container)
+                .bind(slot)
+                .bind(player)
+                .bind(item_id)
+                .execute(&mut *tx)
+                .await?;
+            }
         }
-        took(&mut returned, player, inventory_id);
+        took(&mut returned, player, container, kind, &item_type, quantity);
     }
     Ok(returned)
 }
 
-fn took(returned: &mut ReturnedStations, player: Uuid, inventory: Uuid) {
-    if !returned.inventories.contains(&(player, inventory)) {
-        returned.inventories.push((player, inventory));
+fn took(returned: &mut ReturnedStations, player: Uuid, container: Uuid, kind: Kind, item_type: &str, quantity: i32) {
+    if !returned.containers.contains(&(player, container)) {
+        returned.containers.push((player, container));
+    }
+    if kind == Kind::Impound {
+        returned.impounded.push((player, item_type.to_string(), quantity));
     }
 }
 
-/// `player`'s inventory, locked and loaded the first time it's asked for.
-/// `None` if they have none.
-async fn inventory<'a>(
+/// A free slot of `player`'s inventory, or else of their impound
+async fn free_slot(
     tx: &mut PgConnection,
-    cache: &'a mut HashMap<Uuid, Option<Inventory>>,
+    stores: &mut Stores,
     player: Uuid,
-) -> Result<Option<&'a mut Inventory>, sqlx::Error> {
-    if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(player) {
-        let found: Option<(Uuid, i32)> = sqlx::query_as(
-            "SELECT c.id, ct.slot_count FROM containers c
-             JOIN container_types ct ON c.container_type = ct.id
-             WHERE c.owner_id = $1 AND c.container_type = 'player_inventory'
-             LIMIT 1 FOR UPDATE OF c",
-        )
-        .bind(player)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let loaded = match found {
-            None => None,
-            Some((id, slot_count)) => {
-                let held: Vec<(Uuid, String, i32, Option<i32>, bool)> = sqlx::query_as(
-                    "SELECT i.id, i.item_type, i.quantity, i.slot_index, it.stackable
-                     FROM items i JOIN item_types it ON it.id = i.item_type
-                     WHERE i.container_id = $1 ORDER BY i.slot_index NULLS LAST, i.id
-                     FOR UPDATE OF i",
-                )
-                .bind(id)
-                .fetch_all(&mut *tx)
-                .await?;
-                let used: Vec<i32> = held.iter().filter_map(|h| h.3).collect();
-                let mut stacks: HashMap<String, Vec<(Uuid, i64)>> = HashMap::new();
-                for (item, kind, quantity, _, stackable) in held {
-                    if stackable {
-                        stacks.entry(kind).or_default().push((item, quantity as i64));
-                    }
-                }
-                let free = (0..slot_count).filter(|s| !used.contains(s)).collect();
-                Some(Inventory { id, free, stacks })
+) -> Result<Option<(Uuid, Kind, i32)>, sqlx::Error> {
+    for kind in [Kind::Inventory, Kind::Impound] {
+        if let Some(store) = store(tx, stores, player, kind).await? {
+            if let Some(slot) = store.slot() {
+                return Ok(Some((store.id, kind, slot)));
             }
+        }
+    }
+    Ok(None)
+}
+
+/// `player`'s inventory or impound, locked and loaded the first time it's
+/// asked for. Their impound is made then if they have none yet. `None` for a
+/// player with no inventory.
+async fn store<'a>(
+    tx: &mut PgConnection,
+    stores: &'a mut Stores,
+    player: Uuid,
+    kind: Kind,
+) -> Result<Option<&'a mut Store>, sqlx::Error> {
+    if let std::collections::hash_map::Entry::Vacant(e) = stores.entry((player, kind)) {
+        let id = match kind {
+            Kind::Inventory => {
+                sqlx::query_scalar(
+                    "SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'player_inventory'
+                     LIMIT 1 FOR UPDATE",
+                )
+                .bind(player)
+                .fetch_optional(&mut *tx)
+                .await?
+            }
+            Kind::Impound => Some(super::impound::impound(tx, player).await?),
+        };
+        let loaded = match id {
+            None => None,
+            Some(id) => Some(load(tx, id).await?),
         };
         e.insert(loaded);
     }
-    Ok(cache.get_mut(&player).and_then(Option::as_mut))
+    Ok(stores.get_mut(&(player, kind)).and_then(Option::as_mut))
+}
+
+/// The container `id` as a [`Store`], its items locked
+async fn load(tx: &mut PgConnection, id: Uuid) -> Result<Store, sqlx::Error> {
+    let slot_count: i32 = sqlx::query_scalar(
+        "SELECT ct.slot_count FROM containers c JOIN container_types ct ON ct.id = c.container_type
+         WHERE c.id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let held: Vec<(Uuid, String, i32, Option<i32>, bool)> = sqlx::query_as(
+        "SELECT i.id, i.item_type, i.quantity, i.slot_index, it.stackable
+         FROM items i JOIN item_types it ON it.id = i.item_type
+         WHERE i.container_id = $1 ORDER BY i.slot_index NULLS LAST, i.id
+         FOR UPDATE OF i",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let used: Vec<i32> = held.iter().filter_map(|h| h.3).collect();
+    let mut stacks: HashMap<String, Vec<(Uuid, i64)>> = HashMap::new();
+    for (item, kind, quantity, _, stackable) in held {
+        if stackable {
+            stacks.entry(kind).or_default().push((item, quantity as i64));
+        }
+    }
+    let free = (0..slot_count).filter(|s| !used.contains(s)).collect();
+    Ok(Store { id, free, stacks })
 }
 
 /// These need the local Postgres (`docker-compose up -d`). Each runs in a fresh database that
@@ -687,6 +789,50 @@ mod tests {
         assert_eq!(items, 0);
     }
 
+    /// With the inventory full, a returned station's kit and its tool wait in
+    /// the impound (#141), the tool's wear and all
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_full_inventory_sends_the_kit_and_its_tool_to_the_impound(db: PgPool) {
+        let me = player(&db, "builder").await;
+        let slots: i32 = sqlx::query_scalar("SELECT slot_count FROM container_types WHERE id = 'player_inventory'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        for slot in 0..slots {
+            put(&db, me.id, me.inventory, slot).await;
+        }
+        let (station, sickle) = bench_with_tool(&db, me.id, me.id).await;
+
+        let mut tx = db.begin().await.unwrap();
+        let returned = return_stations(&mut tx, &[station]).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let pound: Uuid = sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'impound'")
+            .bind(me.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let held: Vec<(Uuid, String, i32, Option<i32>)> = sqlx::query_as(
+            "SELECT id, item_type, slot_index, durability FROM items WHERE container_id = $1 ORDER BY slot_index",
+        )
+        .bind(pound)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!((held[0].1.as_str(), held[0].2), ("workbench_kit", 0));
+        assert_eq!(held[1], (sickle, "stone_sickle".to_string(), 1, Some(7)));
+        assert_eq!(returned.containers, vec![(me.id, pound)]);
+        assert_eq!(
+            returned.impounded_for(me.id),
+            vec![
+                ItemCount { item_type: "workbench_kit".into(), quantity: 1 },
+                ItemCount { item_type: "stone_sickle".into(), quantity: 1 },
+            ]
+        );
+        assert!(returned.lost.is_empty());
+    }
+
     /// A foreclosure's returns join the first stack of their type, whatever its
     /// grade, and every unit keeps its quality (D2, E1.8)
     #[sqlx::test(migrations = "./migrations")]
@@ -723,7 +869,7 @@ mod tests {
         let returned = return_plot_stations(&mut tx, plot).await.unwrap();
         tx.commit().await.unwrap();
 
-        assert_eq!(returned.lost, vec![]);
+        assert!(returned.lost.is_empty());
         // Everything joined the first stack; the second is as it was
         assert_eq!(
             units(&db, first).await,
