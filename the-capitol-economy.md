@@ -57,7 +57,7 @@ This plan gives a player reasons to care about what they hold:
 - [#115](https://github.com/chrischaps/TheCapitol/issues/115), [#118](https://github.com/chrischaps/TheCapitol/issues/118) and [#119](https://github.com/chrischaps/TheCapitol/issues/119): suburb.
 - [#139](https://github.com/chrischaps/TheCapitol/issues/139): Flint emission mix. **Built** as H26 in the Flint plan (`material.glow_surface`, ADR 0096); the windows' hue is [#269](https://github.com/chrischaps/TheCapitol/issues/269).
 - [#141](https://github.com/chrischaps/TheCapitol/issues/141): foreclosure overflow. **Done**: the impound (the GDD's foreclosure paragraph, and B13 in the Flint plan).
-- [#142](https://github.com/chrischaps/TheCapitol/issues/142): spike hairlines.
+- [#142](https://github.com/chrischaps/TheCapitol/issues/142): spike hairlines. **Done**: removed, with the P key.
 - [#138](https://github.com/chrischaps/TheCapitol/issues/138), the tax-debt notices log, is a prerequisite for E4.3. Automation's pause notices use the same log.
 
 ## 4. Design decisions

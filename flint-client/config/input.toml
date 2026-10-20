@@ -116,11 +116,6 @@ bindings = [{ type = "key", code = "KeyO" }]
 kind = "button"
 bindings = [{ type = "key", code = "KeyT" }]
 
-# The spike's plan hairlines (scripts/spike.rhai), on P now that E orbits.
-[actions.plan]
-kind = "button"
-bindings = [{ type = "key", code = "KeyP" }]
-
 # Modifiers for a left click on the world (scripts/input.rhai, P4.3):
 # shift-click a player to trade (P7.3), alt-click a plot to select it (P6.4).
 [actions.with_shift]
