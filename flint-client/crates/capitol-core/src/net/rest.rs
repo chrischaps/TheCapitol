@@ -1,6 +1,6 @@
 //! The REST half of the client: one [`RestRequest`] variant per backend route
-//! (admin routes aside), each paired with the [`RestResponse`] variant it
-//! decodes to.
+//! (admin routes aside, but for the citizens `capitol-town` mints), each
+//! paired with the [`RestResponse`] variant it decodes to.
 //!
 //! The bearer token (or a bot's API key, E0.9) is attached whenever the IO
 //! thread has one, so callers never handle headers. Errors arrive as `{"error": msg}` from the server
@@ -166,6 +166,12 @@ pub enum RestRequest {
     Unlist { listing_id: Uuid },
     /// `POST /bazaar/listings/{id}/buy`
     Buy { listing_id: Uuid, request: BuyListing },
+
+    /// `POST /admin/citizens`: make a citizen and its key (C0.1). Needs an
+    /// admin's token.
+    CreateCitizen(CreateCitizenRequest),
+    /// `GET /admin/citizens`
+    Citizens,
 }
 
 /// A decoded REST response. Each [`RestRequest`] decodes to exactly one variant.
@@ -242,6 +248,9 @@ pub enum RestResponse {
         listing_id: Uuid,
         purchase: BazaarPurchase,
     },
+    /// A citizen as made, with its key's secret
+    Citizen(Box<CreatedCitizen>),
+    Citizens(Vec<CitizenInfo>),
 }
 
 /// Why a REST call failed.
@@ -315,7 +324,8 @@ impl RestRequest {
             | StopAutomation { .. }
             | RentStall { .. }
             | Stock(_)
-            | Buy { .. } => Method::POST,
+            | Buy { .. }
+            | CreateCitizen(_) => Method::POST,
             UpdatePlotPermissions { .. } | SetByline(_) | ConfigureAutomation { .. } => Method::PUT,
             RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } | Unlist { .. } => Method::DELETE,
             ApiKeys
@@ -346,7 +356,8 @@ impl RestRequest {
             | Gazette { .. }
             | Bazaar
             | MyStall
-            | Shop { .. } => Method::GET,
+            | Shop { .. }
+            | Citizens => Method::GET,
         }
     }
 
@@ -414,6 +425,7 @@ impl RestRequest {
             Stock(_) => "/bazaar/mine/listings".into(),
             Unlist { listing_id } => format!("/bazaar/listings/{listing_id}"),
             Buy { listing_id, .. } => format!("/bazaar/listings/{listing_id}/buy"),
+            CreateCitizen(_) | Citizens => "/admin/citizens".into(),
         }
     }
 
@@ -442,6 +454,7 @@ impl RestRequest {
             RentStall { request, .. } => req.json(request),
             Stock(b) => req.json(b),
             Buy { request, .. } => req.json(request),
+            CreateCitizen(b) => req.json(b),
             Gazette { day: Some(date) } => req.query(&GazetteQuery { date: *date }),
             MarketDepth(q) => req.query(q),
             MyOrders(q) => req.query(q),
@@ -528,6 +541,8 @@ impl RestRequest {
                 listing_id: *listing_id,
                 purchase: de(body)?,
             },
+            Q::CreateCitizen(_) => A::Citizen(Box::new(de(body)?)),
+            Q::Citizens => A::Citizens(de(body)?),
         })
     }
 }
@@ -788,6 +803,12 @@ mod tests {
                 format!("/stations/{id}/automation/stop"),
             ),
             (RestRequest::Bazaar, "GET", "/bazaar".into()),
+            (
+                RestRequest::CreateCitizen(CreateCitizenRequest { name: "Ada Reeder".into() }),
+                "POST",
+                "/admin/citizens".into(),
+            ),
+            (RestRequest::Citizens, "GET", "/admin/citizens".into()),
             (RestRequest::MyStall, "GET", "/bazaar/mine".into()),
             (
                 RestRequest::Shop { stall_id: "bazaar_stall_3".into() },

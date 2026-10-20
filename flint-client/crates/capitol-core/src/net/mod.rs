@@ -33,7 +33,7 @@ use uuid::Uuid;
 use keyring::Keyring;
 
 pub use rest::{RestError, RestRequest, RestResponse};
-pub(crate) use ws::auth_error_is_final;
+pub(crate) use ws::{auth_error_is_final, backoff, jitter};
 
 /// Matches a [`NetEvent::Rest`] result to the request that caused it.
 /// The game chooses the values.
@@ -242,6 +242,22 @@ pub struct Net {
     commands: tmpsc::UnboundedSender<Control>,
     events: mpsc::Receiver<NetEvent>,
     thread: Option<thread::JoinHandle<()>>,
+}
+
+/// One REST call, made on the calling thread with `token` and no session:
+/// no socket, so it takes nobody's avatar. For an admin's one-off calls, as
+/// `capitol-town mint` makes (C1.1); the game goes through [`Net`].
+pub fn call_once(config: &NetConfig, token: Option<&str>, request: &RestRequest) -> Result<RestResponse, RestError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| RestError::Transport(e.to_string()))?;
+    let http = reqwest::Client::builder()
+        .timeout(config.rest_timeout)
+        .user_agent(concat!("capitol-client/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| RestError::Transport(e.to_string()))?;
+    runtime.block_on(rest::execute(&http, &config.rest_base(), token, request))
 }
 
 impl Net {

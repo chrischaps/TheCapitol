@@ -227,6 +227,24 @@ impl Role {
     pub fn banks(&self, holdings: &Holdings) -> bool {
         *self == Role::Gatherer(Gather::Fiber) && holdings.count("fiber") >= BANK_FIBER_AT
     }
+
+    /// The role as a roster names it (C1.1): `gatherer-fiber`, `builder`.
+    pub fn slug(&self) -> &'static str {
+        match self {
+            Role::Gatherer(Gather::Fiber) => "gatherer-fiber",
+            Role::Gatherer(Gather::Wood) => "gatherer-wood",
+            Role::Gatherer(Gather::Ore) => "gatherer-ore",
+            Role::Crafter(Craft::Planks) => "crafter-planks",
+            Role::Crafter(Craft::Ingots) => "crafter-ingots",
+            Role::Crafter(Craft::Tools) => "crafter-tools",
+            Role::Builder => "builder",
+        }
+    }
+
+    /// The role a [`slug`](Self::slug) names.
+    pub fn from_slug(slug: &str) -> Option<Role> {
+        MIX.iter().map(|(role, _)| *role).find(|role| role.slug() == slug)
+    }
 }
 
 impl fmt::Display for Role {
@@ -246,6 +264,14 @@ impl fmt::Display for Role {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_role_has_a_slug_that_names_it_again() {
+        for (role, _) in MIX {
+            assert_eq!(Role::from_slug(role.slug()), Some(role));
+        }
+        assert_eq!(Role::from_slug("gatherer"), None);
+    }
 
     #[test]
     fn twenty_bots_follow_the_mix_and_the_first_seven_cover_it() {

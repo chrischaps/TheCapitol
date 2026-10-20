@@ -1,0 +1,22 @@
+# capitol-town's roster (C1.1). Copy it to town.toml, which is git-ignored
+# because it holds keys, or let `capitol-town mint --count <n>` write it.
+#
+# Each citizen is an account an admin minted (POST /admin/citizens, C0.1),
+# signed in by its key. A key is `key = "cap_..."` here, or `key_file`, a
+# path from this file's directory holding the key alone.
+#
+# A role is one of the sim's: gatherer-fiber, gatherer-wood, gatherer-ore,
+# crafter-planks, crafter-ingots, crafter-tools, builder.
+
+# The server, unless --server or $CAPITOL_SERVER says otherwise.
+server = "http://localhost:3000"
+
+[[citizen]]
+name = "Ada Reeder"
+role = "gatherer-fiber"
+key = "cap_replace_with_the_minted_secret"
+
+[[citizen]]
+name = "Percy Sawyer"
+role = "crafter-planks"
+key_file = "keys/percy-sawyer.key"

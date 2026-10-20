@@ -43,12 +43,15 @@
 //!   and the live tests.
 //! - [`sim`]: the economy sim (E2.7), a swarm of bots that gathers, crafts and
 //!   builds, then reports what the economy produced.
+//! - [`citizen`]: AI players who live in the world, run by `capitol-town`
+//!   (C1.1).
 
 pub mod auth;
 pub mod automation;
 pub mod bazaar;
 pub mod bot;
 pub mod catalog;
+pub mod citizen;
 pub mod craft;
 pub mod exchange;
 pub mod gazette;

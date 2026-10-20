@@ -1,6 +1,9 @@
 //! The swarm: one thread a bot, each signing in, waiting for the others, then
 //! playing its [`Role`] until the game hours are up. The market makers run
 //! alongside, one thread each, from a grant.
+//!
+//! `capitol-town`'s citizens (C1.1) play the same loop, one at a time
+//! through [`live`], for as long as their town runs.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,6 +20,7 @@ use super::plan::{self, Holdings, Step};
 use super::report::{BotRun, Entry, Report, MAKER_ROLE};
 use super::{Role, Trade, MARKET_ITEMS};
 use crate::bot::{Account, Bot, BotError};
+use crate::citizen::town::{Standing, Tether};
 use crate::market::MarketEvent;
 use crate::market_maker::{self, Maker, MakerConfig};
 use crate::net::NetConfig;
@@ -39,6 +43,8 @@ const FILL_WAIT: Duration = Duration::from_secs(3);
 /// What a sim maker is granted: Strands, and units of each item at Q50.
 const MAKER_STRANDS: i64 = 50_000;
 const MAKER_QUALITY: i32 = 50;
+/// How long a citizen waits, at most, before it notices its town saying stop.
+const STOP_CHECK: Duration = Duration::from_secs(1);
 
 /// How a sim is run.
 #[derive(Debug, Clone)]
@@ -154,6 +160,25 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
     let report = Report::build(&runs, config.hours, scale, wall);
     let (md, csv) = write(&report, &config.out_dir).map_err(|e| format!("writing the report: {e}"))?;
     Ok((report, md, csv))
+}
+
+/// A citizen's life (C1.1): `bot` plays `role` until its town says stop.
+/// It trades with whatever is on the book, at the hall, as the swarm does
+/// with its makers; the town grants nobody anything (D2), so the book holds
+/// only what players and citizens put there. `Ok` once stopped; `Err` when
+/// the bot couldn't start, or the server won't have it back.
+pub(crate) fn live(mut bot: Bot, role: Role, seed: u64, town: &Tether) -> Result<(), BotError> {
+    let scale = bot.health()?.sim_tick_scale.unwrap_or(1.0);
+    for item in MARKET_ITEMS {
+        bot.watch_market(item)?;
+    }
+    let strands = bot.state().strands();
+    town.health(|h| h.strands = strands);
+    let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true);
+    match citizen.work(None, Some(town)) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// A maker's run: quote until `deadline`, take the orders down, and count
@@ -276,9 +301,27 @@ impl SimBot {
     fn play(mut self, hours: f64) -> BotRun {
         let strands_start = self.bot.state().strands().unwrap_or(0);
         let deadline = self.start + self.wall(hours * 3600.0);
+        let error = self.work(Some(deadline), None).map(|e| e.to_string());
+        // Let the last balance change land.
+        let _ = self.bot.idle(Duration::from_millis(500));
+        self.journal();
+        BotRun {
+            name: self.bot.name().to_string(),
+            role: self.role.to_string(),
+            strands_start,
+            strands_end: self.bot.state().strands().unwrap_or(0),
+            entries: self.entries,
+            error,
+        }
+    }
+
+    /// Plays the role until `deadline`, or for a citizen (C1.1) until its
+    /// town says stop. Returns what ended it early: the server won't have
+    /// the bot back.
+    fn work(&mut self, deadline: Option<Instant>, town: Option<&Tether>) -> Option<BotError> {
+        let stopped = || town.is_some_and(Tether::stopped);
         let mut failures = 0;
-        let mut error = None;
-        while Instant::now() < deadline {
+        while deadline.is_none_or(|d| Instant::now() < d) && !stopped() {
             let catalog = self.bot.state().catalog().clone();
             let holdings = self.holdings();
             let step = if self.role.banks(&holdings) {
@@ -299,6 +342,9 @@ impl SimBot {
             match step {
                 Ok(Some(step)) => {
                     let label = trade.as_ref().map_or_else(|| step.label(&catalog), Trade::label);
+                    if let Some(town) = town {
+                        town.health(|h| h.doing(Standing::Working, &label));
+                    }
                     let began = self.now();
                     let result = match &trade {
                         Some(trade) => self.trade(trade),
@@ -311,12 +357,12 @@ impl SimBot {
                         hours: self.now() - began,
                         ok,
                     });
+                    if let (Some(town), Err(e)) = (town, &result) {
+                        town.health(|h| h.failed(format!("{label}: {e}")));
+                    }
                     match result {
                         Ok(()) => failures = 0,
-                        Err(e) if e.is_final() => {
-                            error = Some(e.to_string());
-                            break;
-                        }
+                        Err(e) if e.is_final() => return Some(e),
                         // The step went with the connection (C0.6): wait for
                         // the server and plan again from what it says we hold.
                         Err(e @ BotError::Offline(_)) => {
@@ -324,13 +370,13 @@ impl SimBot {
                                 label: label.clone(),
                                 why: e.to_string(),
                             });
-                            match self.bot.recover(Some(deadline)) {
+                            if let Some(town) = town {
+                                town.health(|h| h.doing(Standing::Offline, "waiting for the server"));
+                            }
+                            match self.recover(deadline, town) {
                                 Ok(()) => {}
-                                Err(e) if e.is_final() => {
-                                    error = Some(e.to_string());
-                                    break;
-                                }
-                                // Out of time
+                                Err(e) if e.is_final() => return Some(e),
+                                // Out of time, or told to stop
                                 Err(_) => break,
                             }
                         }
@@ -339,38 +385,64 @@ impl SimBot {
                                 label: label.clone(),
                                 why: e.to_string(),
                             });
-                            eprintln!("{}: {label} failed: {e}", self.bot.name());
+                            // A citizen's last failure is on its health line
+                            if town.is_none() {
+                                eprintln!("{}: {label} failed: {e}", self.bot.name());
+                            }
                             failures += 1;
                             if failures >= FAILURES_BEFORE_REST {
                                 failures = 0;
-                                self.rest();
+                                self.rest(town);
                             }
                         }
                     }
                 }
-                Ok(None) => self.rest(),
+                Ok(None) => self.rest(town),
                 Err(stuck) => {
                     self.entries.push(Entry::Stuck { reason: stuck.0 });
-                    self.rest();
+                    self.rest(town);
                 }
             }
+            if let Some(town) = town {
+                // The report's entries are the sim's; a citizen lives on
+                // and would only pile them up. C1.7's ledger is their place.
+                self.journal();
+                self.entries.clear();
+                let strands = self.bot.state().strands();
+                town.health(|h| h.strands = strands);
+            }
         }
-        // Let the last balance change land.
-        let _ = self.bot.idle(Duration::from_millis(500));
-        self.journal();
-        BotRun {
-            name: self.bot.name().to_string(),
-            role: self.role.to_string(),
-            strands_start,
-            strands_end: self.bot.state().strands().unwrap_or(0),
-            entries: self.entries,
-            error,
+        None
+    }
+
+    /// Waits for the server after a drop: until `deadline`, or for a citizen
+    /// until it's back or its town says stop.
+    fn recover(&mut self, deadline: Option<Instant>, town: Option<&Tether>) -> Result<(), BotError> {
+        let Some(town) = town else {
+            return self.bot.recover(deadline);
+        };
+        loop {
+            match self.bot.recover(Some(Instant::now() + STOP_CHECK)) {
+                Err(BotError::Timeout { .. }) if !town.stopped() => continue,
+                result => return result,
+            }
         }
     }
 
-    /// Sits out a game minute.
-    fn rest(&mut self) {
-        let _ = self.bot.idle(self.wall(60.0));
+    /// Sits out a game minute, or less if the town says stop.
+    fn rest(&mut self, town: Option<&Tether>) {
+        let Some(town) = town else {
+            let _ = self.bot.idle(self.wall(60.0));
+            return;
+        };
+        town.health(|h| h.doing(Standing::Resting, "resting"));
+        let end = Instant::now() + self.wall(60.0);
+        while !town.stopped() {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() || self.bot.idle(left.min(STOP_CHECK)).is_err() {
+                return;
+            }
+        }
     }
 
     /// Turns what the bot saw into entries.

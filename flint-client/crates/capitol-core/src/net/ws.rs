@@ -215,7 +215,7 @@ pub(crate) fn backoff(attempt: u32, initial: Duration, max: Duration, jitter: f6
 
 /// A number in [0, 1). `RandomState` is seeded randomly, which is plenty for
 /// spreading out reconnects and saves a dependency.
-fn jitter() -> f64 {
+pub(crate) fn jitter() -> f64 {
     let bits = RandomState::new().build_hasher().finish();
     (bits >> 11) as f64 / (1u64 << 53) as f64
 }

@@ -1129,7 +1129,9 @@ impl GameState {
             | R::Gazette(_)
             | R::Byline(_)
             | R::CreatedApiKey(_)
-            | R::ApiKeys(_) => {}
+            | R::ApiKeys(_)
+            | R::Citizen(_)
+            | R::Citizens(_) => {}
         }
         out
     }
