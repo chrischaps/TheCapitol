@@ -235,7 +235,7 @@ async fn start_session(
     request_body(content = RefreshRequest, description = "The session's current refresh token", content_type = "application/json"),
     responses(
         (status = 200, description = "A new token pair", body = AuthResponse),
-        (status = 401, description = "Unknown or expired refresh token, an ended session, or a reused token (which revokes the session)")
+        (status = 401, description = "Unknown or expired refresh token, an ended session, or a token reused after its 30 s grace (which revokes the session)")
     ),
     tag = "Authentication"
 )]

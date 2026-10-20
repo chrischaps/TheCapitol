@@ -13,8 +13,12 @@
 //!   `NX`, so of two concurrent uses only one wins) and issues the next.
 //! - A refresh token used twice was copied. The second use ends the family:
 //!   the session goes, and with it every access and refresh token it issued.
-//!   There's no grace, so a client that never got a refresh's answer is
-//!   signed out by its next one (#184).
+//! - Except within a short grace (#184): for `REUSE_GRACE_MS` after a token's
+//!   first use, presenting it again returns the same successor, so a client
+//!   whose refresh answer was lost (or that sent two at once) isn't signed
+//!   out. The successor is kept in plain at `refresh_grace:{hash}` for that
+//!   window only. Once the successor has been used itself, the client plainly
+//!   got it, and the old token's grace is over.
 
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
@@ -25,6 +29,10 @@ use uuid::Uuid;
 /// clients log in without asking for a refresh token and keep the 24 h
 /// tokens they always had (until #185).
 pub const LEGACY_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// How long after a refresh token's first use presenting it again returns
+/// the same successor instead of revoking the family (#184).
+pub const REUSE_GRACE_MS: u64 = 30_000;
 
 /// A session just started.
 #[derive(Debug)]
@@ -74,6 +82,10 @@ fn refresh_key(hash: &str) -> String {
 
 fn used_key(hash: &str) -> String {
     format!("refresh_used:{hash}")
+}
+
+fn grace_key(hash: &str) -> String {
+    format!("refresh_grace:{hash}")
 }
 
 pub(crate) fn hash(token: &str) -> String {
@@ -138,27 +150,64 @@ pub async fn is_current(redis: &mut ConnectionManager, account_id: Uuid, sid: &s
 /// Swaps a refresh token for the next one in its family, and keeps the
 /// session alive for another `ttl`.
 pub async fn rotate(redis: &mut ConnectionManager, token: &str, ttl: u64) -> Result<Rotated, RotateError> {
+    rotate_with_grace(redis, token, ttl, REUSE_GRACE_MS).await
+}
+
+/// Marks a token used and issues its successor, or, for a token already
+/// used, answers the successor it got while the grace lasts. All in one
+/// script, so of two uses at once the second always finds the first's
+/// successor. A nil answer is a reuse.
+///
+/// KEYS: the token's used marker, its grace entry, the successor's
+/// `refresh:` key. ARGV: ttl (s), grace (ms), the successor's hash, the
+/// successor, `{account}:{sid}`.
+const ROTATE: &str = r"
+if redis.call('SET', KEYS[1], 1, 'NX', 'EX', ARGV[1]) then
+    redis.call('SET', KEYS[3], ARGV[5], 'EX', ARGV[1])
+    redis.call('SET', KEYS[2], ARGV[3] .. ':' .. ARGV[4], 'PX', ARGV[2])
+    return ARGV[4]
+end
+local grace = redis.call('GET', KEYS[2])
+if not grace then
+    return false
+end
+local hash, successor = string.match(grace, '^(%x+):(%x+)$')
+if redis.call('EXISTS', 'refresh_used:' .. hash) == 1 then
+    return false
+end
+return successor
+";
+
+async fn rotate_with_grace(
+    redis: &mut ConnectionManager,
+    token: &str,
+    ttl: u64,
+    grace_ms: u64,
+) -> Result<Rotated, RotateError> {
     let Some((account_id, sid)) = lookup(redis, token).await? else {
         return Err(Refused::Unknown.into());
     };
     if !is_current(redis, account_id, &sid).await? {
         return Err(Refused::Ended.into());
     }
-    // SET NX answers OK for the first use only.
-    let first: Option<String> = redis::cmd("SET")
-        .arg(used_key(&hash(token)))
-        .arg(1)
-        .arg("NX")
-        .arg("EX")
+    let (token_hash, next) = (hash(token), random_token());
+    let next_hash = hash(&next);
+    let successor: Option<String> = redis::Script::new(ROTATE)
+        .key(used_key(&token_hash))
+        .key(grace_key(&token_hash))
+        .key(refresh_key(&next_hash))
         .arg(ttl)
-        .query_async(redis)
+        .arg(grace_ms)
+        .arg(&next_hash)
+        .arg(&next)
+        .arg(format!("{account_id}:{sid}"))
+        .invoke_async(redis)
         .await?;
-    if first.is_none() {
+    let Some(refresh_token) = successor else {
         end(redis, account_id, &sid).await?;
         return Err(Refused::Reused { account_id }.into());
-    }
+    };
     redis.expire::<_, ()>(session_key(account_id), ttl as i64).await?;
-    let refresh_token = issue(redis, account_id, &sid, ttl).await?;
     Ok(Rotated {
         account_id,
         sid,
@@ -234,12 +283,30 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs the local Redis (docker-compose up -d)"]
-    async fn a_replayed_token_is_refused_and_revokes_the_family() {
+    async fn a_replay_within_the_grace_gets_the_same_successor() {
         let mut redis = redis().await;
         let account = Uuid::new_v4();
         let started = start(&mut redis, account, Some(TTL)).await.unwrap();
         let first = started.refresh_token.unwrap();
-        let second = rotate(&mut redis, &first, TTL).await.unwrap().refresh_token;
+        let rotated = rotate(&mut redis, &first, TTL).await.unwrap();
+
+        // The answer was lost, so the client sends the old token again.
+        let replayed = rotate(&mut redis, &first, TTL).await.unwrap();
+        assert_eq!(replayed, rotated, "the same successor, the same session");
+        assert!(is_current(&mut redis, account, &started.sid).await.unwrap());
+        // And the successor rotates as usual.
+        rotate(&mut redis, &rotated.refresh_token, TTL).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the local Redis (docker-compose up -d)"]
+    async fn a_replay_after_the_grace_is_refused_and_revokes_the_family() {
+        let mut redis = redis().await;
+        let account = Uuid::new_v4();
+        let started = start(&mut redis, account, Some(TTL)).await.unwrap();
+        let first = started.refresh_token.unwrap();
+        let second = rotate_with_grace(&mut redis, &first, TTL, 200).await.unwrap().refresh_token;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
         assert_eq!(
             refused(rotate(&mut redis, &first, TTL).await),
@@ -252,13 +319,31 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs the local Redis (docker-compose up -d)"]
-    async fn two_uses_at_once_let_only_one_through() {
+    async fn a_replay_once_the_successor_is_used_revokes_the_family() {
+        let mut redis = redis().await;
+        let account = Uuid::new_v4();
+        let started = start(&mut redis, account, Some(TTL)).await.unwrap();
+        let first = started.refresh_token.unwrap();
+        let second = rotate(&mut redis, &first, TTL).await.unwrap().refresh_token;
+        rotate(&mut redis, &second, TTL).await.unwrap();
+
+        // Still within the grace, but the client got its answer: this is a copy.
+        assert_eq!(
+            refused(rotate(&mut redis, &first, TTL).await),
+            Refused::Reused { account_id: account }
+        );
+        assert!(!is_current(&mut redis, account, &started.sid).await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the local Redis (docker-compose up -d)"]
+    async fn two_uses_at_once_get_the_same_successor() {
         let mut redis = redis().await;
         let account = Uuid::new_v4();
         let token = start(&mut redis, account, Some(TTL)).await.unwrap().refresh_token.unwrap();
         let (mut a, mut b) = (redis.clone(), redis.clone());
         let (x, y) = tokio::join!(rotate(&mut a, &token, TTL), rotate(&mut b, &token, TTL));
-        assert_eq!(x.is_ok() as u8 + y.is_ok() as u8, 1, "{x:?} {y:?}");
+        assert_eq!(x.unwrap(), y.unwrap(), "one rotation, answered twice");
     }
 
     #[tokio::test]
