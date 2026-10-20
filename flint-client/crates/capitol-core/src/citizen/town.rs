@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use capitol_protocol::rest::{CreateCitizenRequest, LoginRequest};
 use serde::Deserialize;
 
+use super::decide::{self, Cascade, Mind, Temperament};
 use super::persona;
 use crate::bot::{Bot, BotError};
 use crate::net::{self, NetConfig, RestRequest, RestResponse};
@@ -53,6 +54,8 @@ const NAME_TRIES: u64 = 24;
 #[serde(deny_unknown_fields)]
 struct RosterFile {
     server: Option<String>,
+    /// The decision layers every citizen has, bottom first (C1.3).
+    layers: Option<Vec<String>>,
     #[serde(default, rename = "citizen")]
     citizens: Vec<CitizenFile>,
 }
@@ -64,6 +67,8 @@ struct CitizenFile {
     role: String,
     key: Option<String>,
     key_file: Option<PathBuf>,
+    /// This citizen's layers, in place of the town's.
+    layers: Option<Vec<String>>,
 }
 
 /// The town's citizens, and the server they live on.
@@ -72,6 +77,8 @@ pub struct Roster {
     pub path: PathBuf,
     /// The server named in the roster, if it names one.
     pub server: Option<String>,
+    /// The town's decision layers, bottom first: `["rules"]` unless it says.
+    pub layers: Vec<String>,
     pub citizens: Vec<Citizen>,
 }
 
@@ -80,6 +87,8 @@ pub struct Roster {
 pub struct Citizen {
     pub name: String,
     pub role: Role,
+    /// Its decision layers (C1.3): its own, or the town's.
+    pub layers: Vec<String>,
     key: Key,
 }
 
@@ -119,6 +128,7 @@ impl Roster {
             Ok(Roster {
                 path: path.to_path_buf(),
                 server: None,
+                layers: default_layers(),
                 citizens: Vec::new(),
             })
         }
@@ -128,6 +138,8 @@ impl Roster {
     pub fn parse(text: &str, path: &Path) -> Result<Roster, String> {
         let file: RosterFile = toml::from_str(text).map_err(|e| format!("{}: {e}", path.display()))?;
         let dir = path.parent().unwrap_or(Path::new("."));
+        let layers = file.layers.unwrap_or_else(default_layers);
+        decide::check_layers(&layers).map_err(|e| format!("{}: layers: {e}", path.display()))?;
         let mut citizens = Vec::with_capacity(file.citizens.len());
         for c in file.citizens {
             let what = |problem: &str| format!("{}: citizen {:?} {problem}", path.display(), c.name);
@@ -143,11 +155,19 @@ impl Roster {
             if citizens.iter().any(|other: &Citizen| other.name.eq_ignore_ascii_case(&c.name)) {
                 return Err(what("is on the roster twice"));
             }
-            citizens.push(Citizen { name: c.name, role, key });
+            let own = c.layers.unwrap_or_else(|| layers.clone());
+            decide::check_layers(&own).map_err(|e| what(&format!("has layers that won't do: {e}")))?;
+            citizens.push(Citizen {
+                name: c.name,
+                role,
+                layers: own,
+                key,
+            });
         }
         Ok(Roster {
             path: path.to_path_buf(),
             server: file.server,
+            layers,
             citizens,
         })
     }
@@ -161,10 +181,15 @@ impl Roster {
         self.citizens.push(Citizen {
             name: name.to_string(),
             role,
+            layers: self.layers.clone(),
             key: Key::Inline(secret.to_string()),
         });
         Ok(())
     }
+}
+
+fn default_layers() -> Vec<String> {
+    decide::DEFAULT_LAYERS.iter().map(|l| l.to_string()).collect()
 }
 
 /// A citizen's `[[citizen]]` table.
@@ -494,7 +519,10 @@ fn live(citizen: &Citizen, server: &str, turn: Duration, stop: &AtomicBool, heal
 fn one_life(citizen: &Citizen, server: &str, tether: &Tether) -> Result<(), BotError> {
     let key = citizen.key().map_err(BotError::Failed)?;
     let bot = Bot::with_api_key(NetConfig::with_base_url(server), &key)?.quiet();
-    sim::run::live(bot, citizen.role, seed(&citizen.name), tether)
+    // The roster checked the layers; C1.2 (#250) gives each its temperament
+    let cascade = Cascade::from_names(&citizen.layers).map_err(BotError::Failed)?;
+    let mind = Mind::new(cascade, Temperament::default());
+    sim::run::live(bot, citizen.role, seed(&citizen.name), mind, tether)
 }
 
 /// Sleeps for `how_long`, or until `stop`.
@@ -541,6 +569,7 @@ key = "cap_ada"
 name = "Percy Sawyer"
 role = "crafter-planks"
 key_file = "keys/percy.key"
+layers = ["rules"]
 "#;
 
     #[test]
@@ -552,6 +581,9 @@ key_file = "keys/percy.key"
         assert_eq!(roster.citizens[0].role, Role::Gatherer(Gather::Fiber));
         assert_eq!(roster.citizens[0].key(), Ok("cap_ada".into()));
         assert_eq!(roster.citizens[1].role, Role::Crafter(Craft::Planks));
+        // The town's layers, which Percy changes
+        assert_eq!(roster.layers, ["rules"]);
+        assert_eq!(roster.citizens[0].layers, ["rules"]);
         // From the roster's own directory
         assert_eq!(roster.citizens[1].key, Key::File(Path::new("town").join("keys/percy.key")));
     }
@@ -569,6 +601,13 @@ key_file = "keys/percy.key"
         .contains("twice"));
         assert!(err("[[citizen]]\nname = \"A\"\nrole = \"builder\"\nkey = \"k\"\nhat = 1").contains("hat"));
         assert!(Roster::parse("", path).unwrap().citizens.is_empty());
+        assert!(err("layers = [\"rules\", \"oracle\"]").contains("\"oracle\" is no layer"));
+        assert!(err("layers = []").contains("at least one"));
+        assert!(err("[[citizen]]
+name = \"A\"
+role = \"builder\"
+key = \"k\"
+layers = [\"x\"]").contains("citizen \"A\""));
     }
 
     #[test]

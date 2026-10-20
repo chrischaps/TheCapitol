@@ -5,6 +5,9 @@
 //! - [`town`]: `capitol-town`'s roster, its supervisor and each citizen's
 //!   health (C1.1).
 //! - [`persona`]: who a citizen is. For now, a name to mint it under.
+//! - [`decide`]: how it makes up its mind (C1.3): the situation, the menu,
+//!   and a cascade of layers that picks from it.
 
+pub mod decide;
 pub mod persona;
 pub mod town;
