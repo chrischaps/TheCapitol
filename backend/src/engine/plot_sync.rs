@@ -8,7 +8,9 @@
 //! - an unowned lot that changed shape is updated
 //! - an unowned row whose lot is gone is deleted
 //! - an **owned** row whose lot is gone or changed shape is a conflict. What
-//!   happens then is the caller's [`OnOwned`] choice.
+//!   happens then is the caller's [`OnOwned`] choice. A plot kept as it was
+//!   holds back the lots that overlap it (#119): they aren't laid until it's
+//!   released, so nobody can claim ground that's still someone's.
 //! - a workbench standing off a plot (D10) that a lot now covers is a
 //!   conflict too (#188). It's taken down, as a foreclosure takes a plot's
 //!   stations down, unless the caller refuses. Left standing it would be its
@@ -30,6 +32,7 @@ use crate::engine::currency::{add_strands_in, TransactionType};
 use crate::engine::notices;
 use crate::engine::station_removal::{return_plot_stations, return_stations};
 use crate::models::corners_from_column;
+use crate::models::geom::quads_overlap_strict;
 
 /// What to do with an owned plot whose lot is gone or has changed shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +76,9 @@ pub struct SyncReport {
     pub deleted: usize,
     /// Owned plots this sync left alone (`OnOwned::Keep`) or released (`OnOwned::Release`).
     pub conflicts: Vec<OwnedConflict>,
+    /// The `terrain_id`s of the lots not laid because they overlap a plot
+    /// kept as it was (`OnOwned::Keep`, #119). They're laid once it's released.
+    pub held_back: Vec<String>,
     /// Stations removed from released plots, and covered workbenches taken
     /// down. The caller drops them from the game state and tells the clients.
     pub removed_stations: Vec<Uuid>,
@@ -207,6 +213,11 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
         Vec::new()
     };
 
+    // A kept plot keeps its old ground, so no lot may be laid over it (#119).
+    // The lots it overlaps are held back, an unowned row of one deleted, until
+    // it's released and a later sync lays them.
+    let held = held_back(lots, &existing, &kept);
+
     // A kept plot keeps its old shape, and nothing could stand off a plot
     // inside that, so only the other lots can cover a workbench.
     let off_plot: Vec<OffPlot> = sqlx::query_as(
@@ -214,7 +225,7 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
     )
     .fetch_all(db)
     .await?;
-    let covered = covered(&off_plot, lots.iter().filter(|l| !kept.contains(&l.id.as_str())));
+    let covered = covered(&off_plot, lots.iter().filter(|l| !kept.contains(&l.id.as_str()) && !held.contains(&l.id.as_str())));
 
     if on_owned == OnOwned::Refuse && !(conflicts.is_empty() && covered.is_empty()) {
         return Err(SyncError::Conflicts { plots: conflicts, stations: covered });
@@ -252,11 +263,12 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
             }
         }
     }
-    // Rows whose lot is gone. Released plots are unowned by now, so they go too.
+    // Rows whose lot is gone or held back. Released plots are unowned by now,
+    // so they go too.
     let gone: Vec<Uuid> = existing
         .iter()
         .filter(|(tid, row)| {
-            !wanted.contains_key(tid.as_str())
+            (!wanted.contains_key(tid.as_str()) || held.contains(&tid.as_str()))
                 && !kept.contains(&tid.as_str())
                 && (row.owner_id.is_none() || on_owned == OnOwned::Release)
         })
@@ -274,7 +286,7 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
     // when they were just released, which made them unowned.
     let mut columns = Columns::default();
     for (index, lot) in lots.iter().enumerate() {
-        if kept.contains(&lot.id.as_str()) {
+        if kept.contains(&lot.id.as_str()) || held.contains(&lot.id.as_str()) {
             continue;
         }
         let size = size_category(&lot.zone, lot.area);
@@ -327,7 +339,27 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
     tx.commit().await?;
 
     report.conflicts = conflicts;
+    report.held_back = held.into_iter().map(String::from).collect();
     Ok(report)
+}
+
+/// The lots that overlap one of the `kept` owned plots, by id, sorted. A lot
+/// with an owned row of its own is never one: that row isn't touched anyway.
+/// A kept row without corners can't be tested, and holds nothing back.
+fn held_back<'a>(lots: &'a [TerrainPlot], existing: &HashMap<String, Existing>, kept: &[&str]) -> Vec<&'a str> {
+    let grounds: Vec<&[(f64, f64); 4]> = kept.iter().filter_map(|tid| existing[*tid].corners.as_ref()).collect();
+    if grounds.is_empty() {
+        return Vec::new();
+    }
+    let mut held: Vec<&str> = lots
+        .iter()
+        .filter(|l| !kept.contains(&l.id.as_str()))
+        .filter(|l| existing.get(&l.id).is_none_or(|row| row.owner_id.is_none()))
+        .filter(|l| grounds.iter().any(|g| quads_overlap_strict(g, &l.corners)))
+        .map(|l| l.id.as_str())
+        .collect();
+    held.sort_unstable();
+    held
 }
 
 /// A station off a plot, as `(id, station_type, owner_id, x, y)`
@@ -729,6 +761,52 @@ pub(crate) mod tests {
         assert!(report.displaced.is_empty(), "it stood on a plot");
         assert_eq!(report.returned_to, vec![(ada, pack)]);
         assert_eq!(held(&db, pack).await, vec![("workbench_kit".to_string(), 1), ("fiber".to_string(), 3)]);
+    }
+
+    /// Gives a plot the corners of `lot`
+    async fn shape(db: &PgPool, plot: Uuid, lot: &TerrainPlot) {
+        let corners: Vec<f64> = lot.corners.iter().flat_map(|&(x, y)| [x, y]).collect();
+        sqlx::query("UPDATE plots SET corners = $2 WHERE id = $1").bind(plot).bind(corners).execute(db).await.unwrap();
+    }
+
+    async fn terrain_ids(db: &PgPool) -> Vec<String> {
+        sqlx::query_scalar("SELECT terrain_id FROM plots WHERE terrain_id IS NOT NULL ORDER BY terrain_id")
+            .fetch_all(db)
+            .await
+            .unwrap()
+    }
+
+    /// #119: a plot kept as it was holds back the lots over it until it's released
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_kept_plot_holds_back_the_lots_over_it(db: PgPool) {
+        let ada = player(&db, "ada", 0).await;
+        let hers = plot(&db, Some(ada), 1000).await;
+        shape(&db, hers, &lot("old", 7200.0, 6000.0)).await;
+        // An unowned lot elsewhere that the new terrain moves onto her ground
+        let moving = plot(&db, None, 0).await;
+        shape(&db, moving, &lot("elsewhere", 7500.0, 6000.0)).await;
+        let moved = format!("test-{moving}");
+        let lots = [
+            lot("over", 7205.0, 6003.0),
+            lot(&moved, 7195.0, 5995.0),
+            lot("beside", 7220.0, 6000.0), // shares her edge, no more
+            lot("far", 7400.0, 6000.0),
+        ];
+
+        let report = sync_plots(&db, &lots, OnOwned::Keep).await.unwrap();
+
+        assert_eq!(report.held_back, vec!["over".to_string(), moved.clone()]);
+        assert_eq!((report.inserted, report.deleted), (2, 1), "beside and far laid, the moved row gone");
+        assert_eq!(terrain_ids(&db).await, vec!["beside".to_string(), "far".into(), format!("test-{hers}")]);
+        assert_eq!(owner(&db, hers).await, Some(Some(ada)), "still hers, as it was");
+
+        // Once she lets it go, the next sync lays them
+        sqlx::query("UPDATE plots SET owner_id = NULL WHERE id = $1").bind(hers).execute(&db).await.unwrap();
+        let report = sync_plots(&db, &lots, OnOwned::Keep).await.unwrap();
+
+        assert!(report.held_back.is_empty());
+        assert_eq!(terrain_ids(&db).await, vec!["beside".to_string(), "far".into(), "over".into(), moved]);
     }
 
     #[test]

@@ -143,6 +143,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             c.plot_id, c.terrain_id, if c.removed { "lot gone" } else { "lot reshaped" }
         );
     }
+    if !report.held_back.is_empty() {
+        tracing::warn!(
+            "Held back {} lot(s) that overlap a kept plot, until it's released: {}",
+            report.held_back.len(), report.held_back.join(", ")
+        );
+    }
     // Nobody is connected yet, so the owners hear from their queued notices.
     for (c, _) in &report.displaced {
         tracing::warn!(

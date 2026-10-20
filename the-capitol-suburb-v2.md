@@ -85,7 +85,7 @@ At 1600–2400 every neighbourhood frame was 740 deep, so every one fitted exact
   - the Legacy pin;
   - 31 seeded grass nodes, by migration `20261018_001_deeper_suburb_nodes.sql`. The 16 that fell in the grown urban zone stepped out along their radius into the suburb, and the rest moved off the new roads;
   - the urban grid and rural trails, which regenerate at the new radii.
-- **Owned plots:** the dev DB had no owned suburban lots. Its one owned rural plot lost its lot and is kept as it was, but two new rural lots overlap it (#119).
+- **Owned plots:** the dev DB had no owned suburban lots. Its one owned rural plot lost its lot and is kept as it was, and since #119 the two new rural lots that overlap it are held back: startup lays no lot over a kept plot until it is released.
 - `suburb-plan.ps1 -Inner -Outer` (env `SUBURB_INNER`, `SUBURB_OUTER`) draws the plan at other radii.
 
 ## 4. Approach
