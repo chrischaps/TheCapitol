@@ -208,11 +208,17 @@ pub enum ServerMessage {
     AuthError { message: String },
     #[serde(rename = "subscribed")]
     Subscribed { channel: String },
-    /// Every player's position, every tick (100 ms). No velocity.
+    /// The positions of the players near you, yours among them, every tick
+    /// (100 ms). No velocity. Near is your cell of the interest grid and
+    /// the eight round it ([`crate::rules::INTEREST_CELL`], C0.4), so it
+    /// replaces the set you can see: one missing has gone out of sight.
     #[serde(rename = "positions")]
     Positions { players: Vec<PlayerPosition> },
+    /// Someone came into the world near you (or you did).
     #[serde(rename = "player_joined")]
     PlayerJoined { player: PlayerPosition },
+    /// Someone left the world, wherever they were: their trades with you
+    /// are over.
     #[serde(rename = "player_left")]
     PlayerLeft { player_id: Uuid },
     /// A command was refused. Goes to the sender only.

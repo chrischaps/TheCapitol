@@ -111,6 +111,12 @@ pub const TRADE_RANGE: f64 = 75.0;
 /// Seconds a trade request waits for an answer before the server drops it and
 /// sends both players `trade_request_expired`.
 pub const TRADE_REQUEST_TTL_SECS: u64 = 30;
+/// The side of a cell of the interest grid (C0.4). `positions` lists the
+/// players in your cell and the eight round it: everyone within this
+/// distance of you, and nobody further than twice it on either axis. A
+/// player who leaves those cells is out of sight, not gone: only
+/// `player_left` means they've left the world.
+pub const INTEREST_CELL: f64 = 300.0;
 /// Minimum distance between two placed stations.
 pub const STATION_MIN_SPACING: f64 = 50.0;
 /// `GET /world/nearby` returns resource nodes within this radius of the player,

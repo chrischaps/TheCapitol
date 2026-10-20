@@ -322,18 +322,9 @@ impl GameState {
         }
     }
 
-    /// Every player's position, as `positions` sends them each tick
-    pub fn positions(&self) -> Vec<PlayerPosition> {
-        self.players
-            .values()
-            .map(|p| PlayerPosition {
-                id: p.id,
-                name: p.name.clone(),
-                x: p.x,
-                y: p.y,
-                citizen: p.citizen,
-            })
-            .collect()
+    /// Every player's position, by interest cell, as `positions` sends them each tick (C0.4)
+    pub fn positions(&self) -> super::interest::Positions {
+        super::interest::Positions::of(self.players.values())
     }
 
     /// Tell `player_id`, and only them, why their trade `command` (its `ClientMessage` tag) was refused
@@ -662,7 +653,7 @@ impl GameState {
     fn broadcast_positions(&self) {
         let positions = self.positions();
         if !positions.is_empty() {
-            let _ = self.event_sender.send(GameEvent::PlayerPositions(positions));
+            let _ = self.event_sender.send(GameEvent::PlayerPositions(Arc::new(positions)));
         }
     }
 
@@ -1233,6 +1224,7 @@ mod tests {
         }
         assert_eq!(joined, [(ada_id, false), (wren_id, true)]);
         let positions = positions.expect("positions");
+        let positions = positions.near(positions.cell_of(ada_id));
         let marked = |id| positions.iter().find(|p| p.id == id).map(|p| p.citizen);
         assert_eq!((marked(ada_id), marked(wren_id)), (Some(false), Some(true)));
         assert_eq!(requested, Some((wren_id, true)));

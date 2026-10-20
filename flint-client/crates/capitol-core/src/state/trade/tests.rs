@@ -466,15 +466,19 @@ fn requests_end_when_either_side_leaves() {
     ws(&mut state, requested_by(CATO, "Cato"));
     // Someone else leaving changes nothing.
     assert!(ws(&mut state, M::PlayerLeft { player_id: FAR }).is_empty());
-    // Missing from `positions` is a leave.
+    // Missing from `positions` is out of sight, not gone (C0.4)...
     let without_cato: Vec<_> = everyone().into_iter().filter(|p| p.id != CATO).collect();
+    assert!(ws(
+        &mut state,
+        M::Positions {
+            players: without_cato
+        }
+    )
+    .is_empty());
+    assert!(matches!(state.trade(), Trade::Incoming { from: CATO, .. }));
+    // ...and their leave ends it.
     assert_eq!(
-        ws(
-            &mut state,
-            M::Positions {
-                players: without_cato
-            }
-        ),
+        ws(&mut state, M::PlayerLeft { player_id: CATO }),
         vec![TradeEvent::RequestGone { player_id: CATO }]
     );
     assert_eq!(state.trade(), &Trade::Idle);
@@ -778,21 +782,23 @@ fn the_partners_leave_ends_the_trade() {
     assert_eq!(state.trade(), &Trade::Idle);
 }
 
-/// The leave can be lost too (a resync, a lagging client). Missing from
-/// `positions` is the same signal.
+/// `positions` lists only the players near us (C0.4), so a partner missing
+/// from it has walked out of sight, and the trade carries on. (A leave lost
+/// to lag isn't a worry: a socket that lags has its trade cancelled, and
+/// the cancel follows its resync, C0.3.)
 #[test]
-fn a_partner_missing_from_positions_ends_the_trade() {
+fn a_partner_out_of_sight_keeps_the_trade() {
     let mut state = trading();
     let without_brin: Vec<_> = everyone().into_iter().filter(|p| p.id != BRIN).collect();
-    assert_eq!(
-        ws(
-            &mut state,
-            M::Positions {
-                players: without_brin
-            }
-        ),
-        vec![cancelled_event(TRADE, PARTNER_LEFT)]
-    );
+    assert!(ws(
+        &mut state,
+        M::Positions {
+            players: without_brin
+        }
+    )
+    .is_empty());
+    assert_eq!(open(&state).trade_id, TRADE);
+    assert!(state.player(BRIN).is_none());
 }
 
 /// B8 (#59): a stale handler can `remove_player` us while we're connected.

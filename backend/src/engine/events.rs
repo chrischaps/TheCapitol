@@ -9,7 +9,8 @@ use capitol_protocol::ws::{ToolUse, TradeItemInfo};
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
-    PlayerPositions(Vec<PlayerPosition>),
+    /// Everyone's position this tick, by interest cell (C0.4)
+    PlayerPositions(std::sync::Arc<super::interest::Positions>),
     PlayerJoined(PlayerPosition),
     PlayerLeft { player_id: Uuid },
     // M2: Gathering events

@@ -138,8 +138,11 @@ pub enum StateEvent {
         command: String,
     },
 
-    /// A player came online (or into the snapshot after a reconnect).
+    /// A player came into sight: online near us, walked near (C0.4), or
+    /// was in the snapshot after a reconnect.
     PlayerJoined(Uuid),
+    /// A player went out of sight: they left the world, or walked out of
+    /// our interest cells (C0.4).
     PlayerLeft(Uuid),
     /// A `positions` snapshot arrived. Positions are server truth, 100 ms apart.
     PositionsUpdated,
@@ -1433,9 +1436,10 @@ impl GameState {
         }
     }
 
-    /// `positions` lists every online player (`broadcast_positions` in
-    /// `engine/tick.rs`), so it replaces the set. A `player_left` missed during a
-    /// reconnect can't leave a ghost.
+    /// `positions` lists every player near us (C0.4: our cell of the interest
+    /// grid and the eight round it, `rules::INTEREST_CELL`), so it replaces the
+    /// set we can see. One missing has gone out of sight, which isn't leaving:
+    /// a trade with them carries on until a `player_left`.
     fn positions(&mut self, players: &[PlayerPosition], out: &mut Vec<StateEvent>) {
         let gone: Vec<Uuid> = self
             .players
@@ -1444,7 +1448,7 @@ impl GameState {
             .copied()
             .collect();
         for id in gone {
-            self.remove_player(id, out);
+            self.lose_sight(id, out);
         }
         for player in players {
             if self.players.insert(player.id, player.clone()).is_none() {
@@ -1455,11 +1459,24 @@ impl GameState {
         self.learn_zone(out);
     }
 
+    /// They left the world: out of sight, and their trades with us are over
     fn remove_player(&mut self, id: Uuid, out: &mut Vec<StateEvent>) {
         if self.players.remove(&id).is_some() {
             out.push(StateEvent::PlayerLeft(id));
         }
         self.trade_player_left(id, out);
+        self.forget_activity(id, out);
+    }
+
+    /// They walked out of our interest cells (C0.4), or we walked away from them
+    fn lose_sight(&mut self, id: Uuid, out: &mut Vec<StateEvent>) {
+        if self.players.remove(&id).is_some() {
+            out.push(StateEvent::PlayerLeft(id));
+        }
+        self.forget_activity(id, out);
+    }
+
+    fn forget_activity(&mut self, id: Uuid, out: &mut Vec<StateEvent>) {
         if self.activities.remove(&id).is_some() && !self.is_me(id) {
             out.push(StateEvent::ActivityChanged { player_id: id });
         }

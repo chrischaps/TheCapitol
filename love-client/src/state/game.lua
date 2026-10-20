@@ -45,7 +45,9 @@ end
 
 -- Player management
 
+-- Only the players near us (C0.4): the list replaces those we can see
 function game.setPlayers(players)
+    game.players = {}
     for _, player in ipairs(players) do
         game.players[player.id] = player
     end

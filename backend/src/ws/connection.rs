@@ -163,6 +163,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Handle messages and events
     let mut subscribed_position = false;
+    // The interest cell this socket's player was in at the last `positions`, and
+    // whether the last one sent was empty, so one out of the world isn't sent
+    // an empty list ten times a second (C0.4)
+    let mut my_cell: Option<crate::engine::interest::Cell> = None;
+    let mut sent_nobody = false;
     // The items whose market channel this connection watches (E3.3)
     let mut market_items: std::collections::HashSet<String> = std::collections::HashSet::new();
     // This connection's command allowance (E0.7)
@@ -874,16 +879,27 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 };
 
                 match event {
-                    Ok(GameEvent::PlayerPositions(players)) => {
-                        let msg = ServerMessage::Positions { players };
-                        if sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await.is_err() {
+                    // Only the players near this socket's (C0.4), each cell serialised once
+                    // for every socket that sees it. A watcher sees round the avatar.
+                    Ok(GameEvent::PlayerPositions(positions)) => {
+                        my_cell = positions.cell_of(player_id);
+                        if my_cell.is_none() && std::mem::replace(&mut sent_nobody, true) {
+                            continue;
+                        }
+                        sent_nobody = my_cell.is_none();
+                        if sender.send(Message::Text(positions.message(my_cell).into())).await.is_err() {
                             break;
                         }
                     }
+                    // Joining far off isn't news; the positions bring them when they're near
                     Ok(GameEvent::PlayerJoined(player)) => {
-                        let msg = ServerMessage::PlayerJoined { player };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        let cell = crate::engine::interest::cell_at(player.x, player.y);
+                        if player.id == player_id || my_cell.is_none_or(|mine| crate::engine::interest::near(mine, cell)) {
+                            let msg = ServerMessage::PlayerJoined { player };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
                     }
+                    // Leaving goes to everyone, near or far: it ends their trades
                     Ok(GameEvent::PlayerLeft { player_id: left_id }) => {
                         let msg = ServerMessage::PlayerLeft { player_id: left_id };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
@@ -1188,7 +1204,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
 /// What a socket that fell `missed` events behind is sent before it carries on
 /// (C0.3): `resync`, which tells the client to refetch what it fetches over
-/// REST, then afresh what the server only pushes: everyone's position, the
+/// REST, then afresh what the server only pushes: the positions near it, the
 /// player's balance, the depth of each item it watches, and, if it holds the
 /// avatar, the notices waiting. A holder's trade and trade requests end first
 /// ([`GameState::socket_lagged`](crate::engine::GameState::socket_lagged)),
@@ -1205,7 +1221,8 @@ async fn resync(
     let (players, holds) = {
         let mut game = game.write().await;
         game.socket_lagged(player_id, connection_id);
-        (game.positions(), game.holds_presence(player_id, connection_id))
+        let positions = game.positions();
+        (positions.near(positions.cell_of(player_id)), game.holds_presence(player_id, connection_id))
     };
     let mut out = vec![ServerMessage::Resync { missed }, ServerMessage::Positions { players }];
     match sqlx::query_scalar::<_, i64>("SELECT strand_balance FROM players WHERE id = $1")

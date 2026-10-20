@@ -420,7 +420,7 @@ fn positions_replace_the_player_set() {
     assert_eq!(events, vec![StateEvent::PositionsUpdated]);
     assert_eq!(state.player(ME).unwrap().x, 505.0);
 
-    // ...and anyone missing has gone, even without a player_left.
+    // ...and anyone missing has gone out of sight (C0.4), without a player_left.
     let events = state.apply_ws(&M::Positions {
         players: vec![pos(ME, "Ada", 510.0, 500.0)],
     });

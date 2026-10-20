@@ -389,13 +389,8 @@ export function GameProvider({ children }: { children: ReactNode }) {
           break
 
         case 'positions':
-          setPlayers((prev) => {
-            const next = new Map(prev)
-            for (const player of msg.players) {
-              next.set(player.id, player)
-            }
-            return next
-          })
+          // Only the players near us (C0.4): the list replaces those we can see
+          setPlayers(new Map(msg.players.map((player: PlayerPosition) => [player.id, player] as const)))
           break
 
         case 'player_joined':
