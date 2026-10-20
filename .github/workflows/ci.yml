@@ -51,9 +51,10 @@ jobs:
       REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      # The Rust in rust-toolchain.toml, with its clippy (#265). Not @stable:
+      # a floating stable let CI and an agent's verify disagree on clippy.
+      - name: Rust
+        run: rustup toolchain install && rustc --version
       - uses: Swatinem/rust-cache@v2
       # The steps live in scripts/ci.sh, which agents run before they land.
       - name: Clippy
@@ -75,7 +76,8 @@ jobs:
         working-directory: flint-client
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust
+        run: rustup toolchain install && rustc --version
       # cpal (audio) links ALSA and gilrs (gamepads) links udev. winit loads
       # X11 and Wayland at run time, so a check needs no display libraries.
       - name: System libraries

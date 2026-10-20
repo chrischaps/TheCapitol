@@ -1,0 +1,12 @@
+# The one Rust every machine and CI build with (#265). rustup reads this from
+# any directory under the root, so it covers flint-client/ (its own workspace)
+# and the engine subtree too, and installs the version on first use.
+#
+# Bump it on purpose, in a commit of its own: change the version here, run
+# scripts/ci.sh (with flint) and fix whatever the new clippy flags in the same
+# commit. CI installs from this file, so everyone moves at once and nobody
+# needs `rustup update`.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

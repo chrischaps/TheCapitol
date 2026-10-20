@@ -122,6 +122,14 @@ touches_flint() {
     git diff --name-only "$base" HEAD | grep -qE '^(flint-client|protocol)/'
 }
 
+# The Rust is rust-toolchain.toml's, the same as CI's (#265). RUSTUP_TOOLCHAIN
+# beats the file, so say when it's set: a verify on another version can pass
+# what CI fails, or the other way round.
+if [ -n "${RUSTUP_TOOLCHAIN:-}" ]; then
+    echo "== ci.sh: warning: RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN overrides rust-toolchain.toml; CI won't match" >&2
+fi
+echo "== ci.sh: $(rustc --version)" >&2
+
 if [ $# -eq 0 ]; then
     set -- clippy test db
     if touches_flint; then set -- "$@" flint; fi

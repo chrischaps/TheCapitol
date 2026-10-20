@@ -71,6 +71,10 @@ scripts/issue.sh land <n> --verify "scripts/ci.sh"    # catch up, verify, ff-pus
 
 ## Development Commands
 
+### Rust toolchain
+
+`rust-toolchain.toml` at the root pins the Rust version, with clippy and rustfmt, for every machine, for CI and for both workspaces (#265). rustup installs it on first use. Don't `rustup update` to fix a verify, and don't set `RUSTUP_TOOLCHAIN` (`scripts/ci.sh` warns when it's set). A bump is a commit of its own: change the version, run `scripts/ci.sh clippy test db flint`, and fix what the new clippy flags in that same commit.
+
 ### Backend (Rust/Axum)
 ```bash
 # Start PostgreSQL and Redis containers
