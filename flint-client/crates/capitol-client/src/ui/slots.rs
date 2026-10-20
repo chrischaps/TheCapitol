@@ -140,19 +140,43 @@ pub fn half(quantity: i32) -> i32 {
     (quantity / 2).max(1)
 }
 
-/// A split field's quality rows for `units`, high first, all at nought; none
-/// for a stack of one quality, which a count says all about.
-fn pick_rows(units: &Units) -> Vec<(i32, i32)> {
+/// Quality rows for `units`, high first, each at what `picked` takes of it
+/// (nought without); none for a stack of one quality, which a count says
+/// all about. The split field's, and a trade line's (#205).
+pub(super) fn pick_rows(units: &Units, picked: Option<&Units>) -> Vec<(i32, i32)> {
     if units.pairs().nth(1).is_none() {
         return Vec::new();
     }
-    units.pairs().rev().map(|(q, _)| (q, 0)).collect()
+    let take = |q| picked.map_or(0, |p| p.count_at(q));
+    units.pairs().rev().map(|(q, _)| (q, take(q))).collect()
 }
 
 /// The units the quality rows pick, if any row picks one.
-fn picked(picks: &[(i32, i32)]) -> Option<Units> {
+pub(super) fn picked(picks: &[(i32, i32)]) -> Option<Units> {
     let units = Units::from_pairs(picks.iter().copied());
     (!units.is_empty()).then_some(units)
+}
+
+/// Draws [`pick_rows`]: each quality's badge, how many to take of it, and
+/// how many `units` has. Returns each row's field, high first.
+pub(super) fn quality_rows(
+    ui: &mut Ui,
+    picks: &mut [(i32, i32)],
+    units: &Units,
+) -> Vec<egui::Response> {
+    picks
+        .iter_mut()
+        .map(|(quality, take)| {
+            let have = units.count_at(*quality);
+            ui.horizontal(|ui| {
+                theme::quality_badge(ui, *quality);
+                let field = ui.add(egui::DragValue::new(take).range(0..=have).speed(0.1));
+                ui.label(theme::dim(format!("of {have}")));
+                field
+            })
+            .inner
+        })
+        .collect()
 }
 
 /// What a grid's slots were asked this frame.
@@ -267,14 +291,7 @@ fn split_field(ctx: &egui::Context, container_id: Uuid) -> Option<Move> {
                 });
                 if !pending.picks.is_empty() {
                     ui.label(theme::dim(if by_quality { "Taking these" } else { "The lowest go, or pick" }));
-                    for (quality, take) in pending.picks.iter_mut() {
-                        let have = pending.item.units.count_at(*quality);
-                        ui.horizontal(|ui| {
-                            theme::quality_badge(ui, *quality);
-                            ui.add(egui::DragValue::new(take).range(0..=have).speed(0.1));
-                            ui.label(theme::dim(format!("of {have}")));
-                        });
-                    }
+                    quality_rows(ui, &mut pending.picks, &pending.item.units);
                 }
             });
         });
@@ -442,7 +459,7 @@ impl Slot<'_> {
                     ui.ctx(),
                     Some(PendingSplit {
                         quantity: half(held.item.quantity),
-                        picks: pick_rows(&held.item.units),
+                        picks: pick_rows(&held.item.units, None),
                         item: held.item.clone(),
                         container_id: self.container_id,
                         slot: self.index,
@@ -894,6 +911,19 @@ pub fn makeup_by_grade(units: &Units) -> String {
         .join(" · ")
 }
 
+/// The makeup of units of more than one quality, in `size` text: listed by
+/// quality, or past [`MAKEUP_ROWS`] a bar and the count of each grade.
+/// Nothing for units of one quality. The tooltip's, and a trade line's.
+pub(super) fn makeup_lines(ui: &mut Ui, units: &Units, size: f32) {
+    let qualities = units.pairs().count();
+    if qualities > MAKEUP_ROWS {
+        makeup_bar(ui, units);
+        ui.label(theme::dim(makeup_by_grade(units)).size(size));
+    } else if qualities > 1 {
+        ui.label(theme::dim(makeup(units)).size(size));
+    }
+}
+
 /// A bar of the units, high first, each quality's share of the width in
 /// its grade's colour.
 fn makeup_bar(ui: &mut Ui, units: &Units) {
@@ -925,13 +955,7 @@ fn tooltip(ui: &mut Ui, item: &SlotItem) {
             ui.label(theme::dim(format!("× {}", item.quantity)));
         }
     });
-    let qualities = item.units.pairs().count();
-    if qualities > MAKEUP_ROWS {
-        makeup_bar(ui, &item.units);
-        ui.label(theme::dim(makeup_by_grade(&item.units)));
-    } else if qualities > 1 {
-        ui.label(theme::dim(makeup(&item.units)));
-    }
+    makeup_lines(ui, &item.units, size::SMALL);
     if let (Some(left), Some(max)) = (item.durability, item.max_durability) {
         let catalog = catalog(ui.ctx());
         tool_lines(ui, catalog.as_ref(), &item.item_type, item.quality, left, max);
@@ -1394,7 +1418,7 @@ mod tests {
         assert_eq!(makeup(&units), "6 × 92 A, 3 × 81 B, 1 × 44 D");
         let many = Units::from_pairs([(44, 1), (81, 3), (85, 1), (92, 6), (95, 2)]);
         assert_eq!(makeup_by_grade(&many), "8 A · 4 B · 1 D");
-        assert!(pick_rows(&Units::uniform(5, 60)).is_empty(), "one quality: a count is enough");
+        assert!(pick_rows(&Units::uniform(5, 60), None).is_empty(), "one quality: a count is enough");
         assert_eq!(picked(&[(92, 0), (50, 0)]), None);
         assert_eq!(picked(&[(92, 2), (50, 0)]), Some(Units::uniform(2, 92)));
     }

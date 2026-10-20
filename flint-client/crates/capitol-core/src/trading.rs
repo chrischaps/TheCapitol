@@ -8,7 +8,8 @@
 //!   you onto them and you shift-click again. If they wander off while you
 //!   walk, the walk is re-aimed at where they are now.
 //! - **[`Draft`]** is your offer as you're building it: the stacks you've
-//!   dragged in, how many of each, and the Strands. It sends itself
+//!   dragged in, how many of each (or exactly which units, by quality:
+//!   "my six 92s", #205), and the Strands. It sends itself
 //!   ([`Draft::due`]) once you've stopped changing it for [`SETTLE`], so
 //!   there's no Update button, and what your partner sees is what you see.
 //!   Every offer the server takes resets both accepts, as it should: a
@@ -19,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use capitol_protocol::rest::SlotItem;
 use capitol_protocol::rules;
+use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::ws::{ClientMessage, TradeOfferItem};
 use uuid::Uuid;
 
@@ -158,11 +160,43 @@ impl Approach {
     }
 }
 
-/// One stack in a draft: which item, and how many of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One stack in a draft: which item, how many of it, and which of its units
+/// if you picked them. Unpicked, the server settles to the lowest.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     pub item_id: Uuid,
     pub quantity: i32,
+    /// The units picked by quality, adding up to `quantity`.
+    pub qualities: Option<Units>,
+}
+
+impl Line {
+    fn whole(item: &SlotItem) -> Self {
+        Line {
+            item_id: item.item_id,
+            quantity: item.quantity,
+            qualities: None,
+        }
+    }
+
+    /// Holds the line to what `item` has now: a pick to the units still
+    /// there, a count to the stack.
+    fn hold_to(&mut self, item: &SlotItem) {
+        if let Some(picked) = &self.qualities {
+            let held = Units::from_pairs(
+                picked
+                    .pairs()
+                    .map(|(q, n)| (q, n.min(item.units.count_at(q)))),
+            );
+            if held.is_empty() {
+                self.qualities = None;
+            } else {
+                self.quantity = held.count() as i32;
+                self.qualities = Some(held);
+            }
+        }
+        self.quantity = self.quantity.min(item.quantity);
+    }
 }
 
 /// Why a draft can't be sent as it stands.
@@ -202,7 +236,7 @@ impl Draft {
 
     /// Keeps the draft true to the trade and the inventory: emptied when a
     /// trade starts or ends, each stack that left the inventory dropped,
-    /// and each quantity held to what the stack has now.
+    /// and each quantity and pick held to what the stack has now.
     pub fn sync(&mut self, open: Option<&OpenTrade>, inventory: Option<&Container>, now: Instant) {
         let id = open.map(|o| o.trade_id);
         if id != self.trade_id {
@@ -219,7 +253,7 @@ impl Draft {
         self.lines
             .retain_mut(|line| match inventory.find(line.item_id) {
                 Some(item) => {
-                    line.quantity = line.quantity.min(item.quantity);
+                    line.hold_to(item);
                     line.quantity > 0
                 }
                 None => false,
@@ -230,31 +264,48 @@ impl Draft {
     }
 
     /// Offers `item`, the whole stack. A stack already in it goes up to the
-    /// whole stack.
+    /// whole stack, and any pick is let go: all of it is all of them.
     pub fn add(&mut self, item: &SlotItem, now: Instant) {
         if self.trade_id.is_none() || item.quantity < 1 {
             return;
         }
+        let whole = Line::whole(item);
         match self.lines.iter_mut().find(|l| l.item_id == item.item_id) {
-            Some(line) if line.quantity == item.quantity => return,
-            Some(line) => line.quantity = item.quantity,
-            None => self.lines.push(Line {
-                item_id: item.item_id,
-                quantity: item.quantity,
-            }),
+            Some(line) if *line == whole => return,
+            Some(line) => *line = whole,
+            None => self.lines.push(whole),
         }
         self.touch(now);
     }
 
     /// Sets how many of `item_id` are offered, at least one and at most
-    /// `stack`.
+    /// `stack`. A count lets go of any pick: the lowest go.
     pub fn set_quantity(&mut self, item_id: Uuid, quantity: i32, stack: i32, now: Instant) {
         let quantity = quantity.clamp(1, stack.max(1));
         if let Some(line) = self.lines.iter_mut().find(|l| l.item_id == item_id) {
-            if line.quantity != quantity {
+            if line.quantity != quantity || line.qualities.is_some() {
                 line.quantity = quantity;
+                line.qualities = None;
                 self.touch(now);
             }
+        }
+    }
+
+    /// Offers exactly these units of `item` (#205), held to what it has. A
+    /// pick of nothing goes back to a count, the lowest first, of as many
+    /// as were picked.
+    pub fn set_qualities(&mut self, item: &SlotItem, picked: Option<Units>, now: Instant) {
+        let Some(line) = self.lines.iter_mut().find(|l| l.item_id == item.item_id) else {
+            return;
+        };
+        let before = line.clone();
+        line.qualities = picked.filter(|u| !u.is_empty());
+        line.hold_to(item);
+        if line.qualities.is_none() {
+            line.quantity = line.quantity.max(1);
+        }
+        if *line != before {
+            self.touch(now);
         }
     }
 
@@ -290,15 +341,18 @@ impl Draft {
         })
     }
 
-    /// The server's last word on your offer is this draft.
+    /// The server's last word on your offer is this draft: the same counts,
+    /// and for a picked line, the very units picked.
     pub fn confirmed(&self, mine: &Offer) -> bool {
         if mine.strands != self.strands || mine.items.len() != self.lines.len() {
             return false;
         }
         self.lines.iter().all(|l| {
-            mine.items
-                .iter()
-                .any(|i| i.item_id == l.item_id && i.quantity == l.quantity)
+            mine.items.iter().any(|i| {
+                i.item_id == l.item_id
+                    && i.quantity == l.quantity
+                    && l.qualities.as_ref().is_none_or(|q| *q == i.units)
+            })
         })
     }
 
@@ -334,9 +388,8 @@ impl Draft {
             .map(|l| TradeOfferItem {
                 item_id: l.item_id.to_string(),
                 quantity: l.quantity,
-                // The lowest go first; the server settles exactly which.
-                // Choosing qualities here is #205
-                qualities: None,
+                // Unpicked, the lowest go; the server settles exactly which
+                qualities: l.qualities.clone(),
             })
             .collect();
         Some((items, self.strands))
@@ -579,10 +632,102 @@ mod tests {
             d.lines(),
             &[Line {
                 item_id: FIBER,
-                quantity: 4
+                quantity: 4,
+                qualities: None,
             }]
         );
         assert!(d.unsent());
+    }
+
+    fn mixed(quantity_92: i32) -> SlotItem {
+        let units = Units::from_pairs([(50, 3), (81, 2), (92, quantity_92)]);
+        stack(FIBER, 0, 1).with_units(units)
+    }
+
+    #[test]
+    fn picked_units_are_sent_and_confirmed_by_the_very_units() {
+        let t0 = Instant::now();
+        let inv = inventory(&[mixed(6)]);
+        let mut trade = open();
+        let mut d = Draft::default();
+        d.sync(Some(&trade), Some(&inv), t0);
+        let fiber = inv.find(FIBER).unwrap();
+        d.add(fiber, t0);
+        d.set_qualities(fiber, Some(Units::from_pairs([(92, 6), (81, 1)])), t0);
+        assert_eq!(d.lines()[0].quantity, 7);
+        let (items, _) = d.due(t0 + SETTLE, None).expect("sent");
+        assert_eq!(
+            items,
+            vec![TradeOfferItem {
+                item_id: FIBER.to_string(),
+                quantity: 7,
+                qualities: Some(Units::from_pairs([(81, 1), (92, 6)])),
+            }]
+        );
+        // Seven settled, but the lowest: not what was picked.
+        let echo = |units: Units| Offer {
+            items: vec![TradeItemInfo {
+                item_id: FIBER,
+                item_type: "fiber".into(),
+                item_name: "Fiber".into(),
+                quantity: units.count() as i32,
+                quality: units.mean().unwrap_or(0),
+                units,
+            }],
+            strands: 0,
+        };
+        trade.mine = echo(Units::from_pairs([(50, 3), (81, 2), (92, 2)]));
+        assert!(!d.confirmed(&trade.mine));
+        trade.mine = echo(Units::from_pairs([(81, 1), (92, 6)]));
+        assert!(d.confirmed(&trade.mine));
+    }
+
+    #[test]
+    fn a_pick_is_held_to_the_stack_and_a_count_lets_it_go() {
+        let t0 = Instant::now();
+        let trade = open();
+        let inv = inventory(&[mixed(6)]);
+        let mut d = Draft::default();
+        d.sync(Some(&trade), Some(&inv), t0);
+        let fiber = inv.find(FIBER).unwrap();
+        d.add(fiber, t0);
+        // More 92s than the stack holds, and a quality it hasn't got.
+        d.set_qualities(fiber, Some(Units::from_pairs([(92, 9), (70, 2)])), t0);
+        assert_eq!(d.lines()[0].qualities, Some(Units::uniform(6, 92)));
+        assert_eq!(d.lines()[0].quantity, 6);
+        // Two of the 92s went elsewhere.
+        let inv = inventory(&[mixed(4)]);
+        d.sync(Some(&trade), Some(&inv), t0);
+        assert_eq!(d.lines()[0].qualities, Some(Units::uniform(4, 92)));
+        assert_eq!(d.lines()[0].quantity, 4);
+        // Picking nothing is a count of as many, the lowest first.
+        let fiber = inv.find(FIBER).unwrap();
+        d.set_qualities(fiber, None, t0);
+        assert_eq!(
+            (d.lines()[0].quantity, d.lines()[0].qualities.clone()),
+            (4, None)
+        );
+        d.set_qualities(fiber, Some(Units::uniform(1, 50)), t0);
+        d.set_quantity(FIBER, 5, fiber.quantity, t0);
+        assert_eq!(
+            (d.lines()[0].quantity, d.lines()[0].qualities.clone()),
+            (5, None)
+        );
+        // And dragging the whole stack in again offers all of it.
+        d.set_qualities(fiber, Some(Units::uniform(1, 50)), t0);
+        d.add(fiber, t0);
+        assert_eq!(
+            (d.lines()[0].quantity, d.lines()[0].qualities.clone()),
+            (9, None)
+        );
+        // The 92s all leave: the pick goes with them, and a count stays.
+        d.set_qualities(fiber, Some(Units::uniform(2, 92)), t0);
+        let inv = inventory(&[mixed(0)]);
+        d.sync(Some(&trade), Some(&inv), t0);
+        assert_eq!(
+            (d.lines()[0].quantity, d.lines()[0].qualities.clone()),
+            (2, None)
+        );
     }
 
     #[test]

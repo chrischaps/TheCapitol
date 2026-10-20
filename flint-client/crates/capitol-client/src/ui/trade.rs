@@ -8,7 +8,10 @@
 //!   says that.
 //! - **The trade window** is two sides, yours and theirs. Drag stacks in
 //!   from the inventory and type the Strands; set how many of a stack with
-//!   its number, and take it out with ×. Your side is a
+//!   its number, and take it out with ×. A stack of more than one quality
+//!   gets the split field's rows too, to offer exactly which units (#205);
+//!   unpicked, the lowest go, and the line says which. Both sides show
+//!   the makeup of what's offered. Your side is a
 //!   `capitol_core::trading::Draft`, sent once you stop changing it, so
 //!   there's no Update button. Every change the server takes resets both
 //!   accepts, and the window says so. Accept waits until the server has
@@ -25,9 +28,10 @@ use super::icons::ItemIcons;
 use super::slots;
 use super::theme::{self, size, DIM, ENOUGH, GOLD, SHORT, TEXT, TRADE};
 use capitol_core::protocol::rest::SlotItem;
+use capitol_core::protocol::rules::stacking::Units;
 use capitol_core::protocol::ws::TradeItemInfo;
 use capitol_core::state::{Container, OpenTrade, Trade, TradeAction};
-use capitol_core::trading::{Draft, Problem};
+use capitol_core::trading::{Draft, Line, Problem};
 use egui::{Align2, Id, RichText, Stroke};
 use uuid::Uuid;
 
@@ -51,6 +55,9 @@ const CHANGED_FOR: Duration = Duration::from_secs(4);
 const WELL_HEIGHT: f32 = 76.0;
 /// An offered stack's icon, in points.
 const ROW_ICON: f32 = 24.0;
+/// The most a side's list stands before it scrolls, so a stack of many
+/// qualities can't push the window off the screen.
+const WELL_MAX: f32 = 200.0;
 
 /// What the panel asks for this frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +73,11 @@ pub enum Action {
         item_id: Uuid,
         quantity: i32,
         stack: i32,
+    },
+    /// Offer exactly these units of a stack; `None` for a count again.
+    Qualities {
+        item: SlotItem,
+        picked: Option<Units>,
     },
     Remove(Uuid),
     Strands(i64),
@@ -101,6 +113,8 @@ pub struct TradePanel {
     well: Option<egui::Rect>,
     /// The Accept button, this frame, for the tests.
     accept: Option<egui::Rect>,
+    /// Your side's quality rows' fields, this frame, for the tests.
+    picks: Vec<egui::Rect>,
 }
 
 impl TradePanel {
@@ -118,6 +132,7 @@ impl TradePanel {
         self.rect = None;
         self.well = None;
         self.accept = None;
+        self.picks.clear();
         let open = match view.trade {
             Trade::Open(open) => Some(open),
             _ => None,
@@ -273,48 +288,20 @@ impl TradePanel {
                     ui.label(theme::dim("from your inventory").size(size::SMALL));
                 });
             }
-            for line in view.draft.lines() {
-                let Some(item) = view.inventory.and_then(|i| i.find(line.item_id)) else {
-                    continue;
-                };
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    let (rect, _) = ui
-                        .allocate_exact_size(egui::vec2(ROW_ICON, ROW_ICON), egui::Sense::hover());
-                    icons.paint(ui, rect, &item.item_type);
-                    ui.label(theme::text(item.item_name.clone()).size(size::BODY))
-                        .on_hover_text(format!("Quality {}", item.quality));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let remove =
-                            ui.add(egui::Button::new(RichText::new("×").color(DIM)).frame(false));
-                        if remove
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .on_hover_text("Take it out")
-                            .clicked()
-                        {
-                            action = Some(Action::Remove(line.item_id));
+            egui::ScrollArea::vertical()
+                .id_salt("capitol_trade_mine")
+                .auto_shrink([false, true])
+                .max_height(WELL_MAX)
+                .show(ui, |ui| {
+                    for line in view.draft.lines() {
+                        let Some(item) = view.inventory.and_then(|i| i.find(line.item_id)) else {
+                            continue;
+                        };
+                        if let Some(a) = my_line(ui, icons, line, item, open, &mut self.picks) {
+                            action = Some(a);
                         }
-                        if item.quantity > 1 {
-                            ui.label(theme::dim(format!("of {}", item.quantity)).size(size::SMALL));
-                            let mut quantity = line.quantity;
-                            let field = ui.add(
-                                egui::DragValue::new(&mut quantity)
-                                    .range(1..=item.quantity)
-                                    .speed(0.1),
-                            );
-                            if field.changed() {
-                                action = Some(Action::Quantity {
-                                    item_id: line.item_id,
-                                    quantity,
-                                    stack: item.quantity,
-                                });
-                            }
-                        } else {
-                            ui.label(theme::dim("×1").size(size::SMALL));
-                        }
-                    });
+                    }
                 });
-            }
         });
         let well = inner.response.rect;
         self.well = Some(well);
@@ -374,6 +361,107 @@ impl TradePanel {
     }
 }
 
+/// One stack on your side: its icon and name, how many with ×, and for a
+/// stack of more than one quality a row per quality to pick from (#205).
+/// Unpicked, it says which units the server settled: the lowest.
+fn my_line(
+    ui: &mut egui::Ui,
+    icons: &mut ItemIcons,
+    line: &Line,
+    item: &SlotItem,
+    open: &OpenTrade,
+    picks: &mut Vec<egui::Rect>,
+) -> Option<Action> {
+    let mut action = None;
+    let by_quality = line.qualities.is_some();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(ROW_ICON, ROW_ICON), egui::Sense::hover());
+        icons.paint(ui, rect, &item.item_type);
+        ui.label(theme::text(item.item_name.clone()).size(size::BODY))
+            .on_hover_ui(|ui| {
+                ui.label(theme::dim(format!("Quality {}", item.quality)));
+                slots::makeup_lines(ui, &item.units, size::SMALL);
+            });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let remove = ui.add(egui::Button::new(RichText::new("×").color(DIM)).frame(false));
+            if remove
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("Take it out")
+                .clicked()
+            {
+                action = Some(Action::Remove(line.item_id));
+            }
+            if item.quantity > 1 {
+                ui.label(theme::dim(format!("of {}", item.quantity)).size(size::SMALL));
+                let mut quantity = line.quantity;
+                // Picked by quality, the count is the rows' to add up
+                let field = ui.add_enabled(
+                    !by_quality,
+                    egui::DragValue::new(&mut quantity)
+                        .range(1..=item.quantity)
+                        .speed(0.1),
+                );
+                if field.changed() {
+                    action = Some(Action::Quantity {
+                        item_id: line.item_id,
+                        quantity,
+                        stack: item.quantity,
+                    });
+                }
+            } else {
+                ui.label(theme::dim("×1").size(size::SMALL));
+            }
+        });
+    });
+    let mut rows = slots::pick_rows(&item.units, line.qualities.as_ref());
+    if rows.is_empty() {
+        return action;
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(ROW_ICON + 6.0);
+        ui.vertical(|ui| {
+            ui.label(
+                theme::dim(if by_quality {
+                    "Offering these"
+                } else {
+                    "The lowest go, or pick"
+                })
+                .size(size::TINY),
+            );
+            let fields = slots::quality_rows(ui, &mut rows, &item.units);
+            picks.extend(fields.iter().map(|f| f.rect));
+            if fields.iter().any(|f| f.changed()) {
+                action = Some(Action::Qualities {
+                    item: item.clone(),
+                    picked: slots::picked(&rows),
+                });
+            }
+            let settled = open
+                .mine
+                .items
+                .iter()
+                .find(|i| i.item_id == line.item_id && i.quantity == line.quantity);
+            if let Some(settled) = settled.filter(|_| !by_quality) {
+                ui.label(theme::dim(format!("Going: {}", going(&settled.units))).size(size::TINY));
+            }
+        });
+    });
+    ui.add_space(2.0);
+    action
+}
+
+/// Which units an unpicked line settled to, by quality, or by grade when
+/// there are more than a few.
+fn going(units: &Units) -> String {
+    if units.pairs().count() > 4 {
+        slots::makeup_by_grade(units)
+    } else {
+        slots::makeup(units)
+    }
+}
+
 /// Their side: what they offer, as the server last said, and whether
 /// they've accepted.
 fn theirs(ui: &mut egui::Ui, icons: &mut ItemIcons, open: &OpenTrade) {
@@ -391,9 +479,15 @@ fn theirs(ui: &mut egui::Ui, icons: &mut ItemIcons, open: &OpenTrade) {
             ui.add_space(22.0);
             ui.vertical_centered(|ui| ui.label(theme::dim("No items yet").size(size::BODY)));
         }
-        for item in &open.theirs.items {
-            their_row(ui, icons, item);
-        }
+        egui::ScrollArea::vertical()
+            .id_salt("capitol_trade_theirs")
+            .auto_shrink([false, true])
+            .max_height(WELL_MAX)
+            .show(ui, |ui| {
+                for item in &open.theirs.items {
+                    their_row(ui, icons, item);
+                }
+            });
     });
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -431,6 +525,13 @@ fn their_row(ui: &mut egui::Ui, icons: &mut ItemIcons, item: &TradeItemInfo) {
             theme::quality_badge(ui, item.quality);
         });
     });
+    // The badge is the mean; a line of several qualities says which
+    if item.units.pairs().nth(1).is_some() {
+        ui.horizontal(|ui| {
+            ui.add_space(ROW_ICON + 6.0);
+            ui.vertical(|ui| slots::makeup_lines(ui, &item.units, size::SMALL));
+        });
+    }
 }
 
 /// A side's name, and whether it has accepted: a green tick, or a quiet
@@ -586,28 +687,44 @@ mod tests {
     /// Runs a few frames, clicking at `click` on frame 5. Returns every
     /// action asked for.
     fn run(panel: &mut TradePanel, view: &View, click: Option<egui::Pos2>) -> Vec<Action> {
+        run_events(panel, view, |frame| match (click, frame) {
+            (Some(p), 5) => vec![
+                egui::Event::PointerMoved(p),
+                button(p, true),
+                button(p, false),
+            ],
+            _ => vec![],
+        })
+    }
+
+    fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// Runs ten frames, with `events` for each. Returns every action asked
+    /// for.
+    fn run_events(
+        panel: &mut TradePanel,
+        view: &View,
+        events: impl Fn(usize) -> Vec<egui::Event>,
+    ) -> Vec<Action> {
         let ctx = theme::test_context();
         let mut icons = ItemIcons::load(std::path::Path::new("no/icons/needed"));
         let mut out = Vec::new();
         for frame in 0..10 {
-            let mut raw = egui::RawInput {
+            let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
                     egui::vec2(1280.0, 720.0),
                 )),
+                events: events(frame),
                 ..Default::default()
             };
-            if let (Some(p), 5) = (click, frame) {
-                raw.events.push(egui::Event::PointerMoved(p));
-                for pressed in [true, false] {
-                    raw.events.push(egui::Event::PointerButton {
-                        pos: p,
-                        button: egui::PointerButton::Primary,
-                        pressed,
-                        modifiers: Default::default(),
-                    });
-                }
-            }
             let _ = ctx.run(raw, |ctx| {
                 theme::install(ctx);
                 out.extend(panel.show(ctx, &mut icons, view));
@@ -685,6 +802,56 @@ mod tests {
         let trade = Trade::Open(confirmed);
         let v = view(&trade, &draft, &inv);
         assert_eq!(run(&mut panel, &v, Some(at)), vec![Action::Accept]);
+    }
+
+    #[test]
+    fn a_stack_of_several_qualities_offers_picked_units() {
+        const FIBER: Uuid = Uuid::from_u128(61);
+        let rope = SlotItem::new(ROPE, "rope".into(), "Rope".into(), 72, 3, 0);
+        let fiber = SlotItem::new(FIBER, "fiber".into(), "Plant Fiber".into(), 0, 0, 1)
+            .with_units(Units::from_pairs([(50, 3), (81, 2), (92, 6)]));
+        let inv = Container::new(
+            Uuid::from_u128(100),
+            "player_inventory",
+            24,
+            6,
+            &[rope, fiber.clone()],
+        );
+        let trade = Trade::Open(open());
+        let mut draft = Draft::default();
+        let t0 = Instant::now();
+        draft.sync(trade_open(&trade), Some(&inv), t0);
+        draft.add(inv.find(ROPE).unwrap(), t0);
+        draft.add(&fiber, t0);
+        let mut panel = TradePanel::default();
+        let v = view(&trade, &draft, &inv);
+        run(&mut panel, &v, None);
+        // A row for each of the fiber's qualities, and none for the rope's one.
+        assert_eq!(panel.picks.len(), 3, "{:?}", panel.picks);
+        let at = panel.picks[0].center();
+        let moved = egui::pos2(at.x + 60.0, at.y);
+        let asked = run_events(&mut panel, &v, |frame| match frame {
+            5 => vec![egui::Event::PointerMoved(at), button(at, true)],
+            6 => vec![egui::Event::PointerMoved(moved)],
+            7 => vec![button(moved, false)],
+            _ => vec![],
+        });
+        let Some(Action::Qualities { item, picked }) = asked.last() else {
+            panic!("no pick: {asked:?}");
+        };
+        assert_eq!(item.item_id, FIBER);
+        let picked = picked.as_ref().expect("some units picked");
+        assert!(picked.count() > 0);
+        assert!(
+            picked.pairs().all(|(q, _)| q == 92),
+            "the top row is the 92s: {picked:?}"
+        );
+
+        // Picked, the rows show the pick.
+        draft.set_qualities(&fiber, Some(Units::uniform(2, 92)), t0);
+        let v = view(&trade, &draft, &inv);
+        run(&mut panel, &v, None);
+        assert_eq!(panel.picks.len(), 3);
     }
 
     fn trade_open(trade: &Trade) -> Option<&OpenTrade> {

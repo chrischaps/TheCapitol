@@ -1586,6 +1586,9 @@ fn act_on_trade(session: &mut Session, action: ui::trade::Action, now: Instant) 
         } => session
             .draft_mut()
             .set_quantity(item_id, quantity, stack, now),
+        Action::Qualities { item, picked } => {
+            session.draft_mut().set_qualities(&item, picked, now)
+        }
         Action::Remove(id) => session.draft_mut().remove(id, now),
         Action::Strands(n) => session.draft_mut().set_strands(n, now),
         Action::Accept => session.accept_trade(now),
