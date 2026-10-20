@@ -2122,27 +2122,66 @@ mod tests {
         assert!((0.08..=0.18).contains(&share), "parks are {:.1}% of the suburb", share * 100.0);
     }
 
+    /// A fixed workload shaped like generation: libm trig through `StableMath`,
+    /// pushes, a spatial hash and a sort. It never changes, so how long it takes
+    /// measures the machine, not the code. Don't make it faster or slower.
+    fn reference_workload() -> f64 {
+        use std::collections::HashMap;
+        const N: usize = 1_000_000;
+        let mut points: Vec<(f64, f64)> = Vec::with_capacity(N);
+        let mut cells: HashMap<(i32, i32), u32> = HashMap::new();
+        for i in 0..N {
+            let (a, r) = (i as f64 * 0.618_034, (i as f64).sqrt());
+            let p = (r * a.stable_cos(), r * a.stable_sin());
+            *cells.entry(((p.0 / 8.0) as i32, (p.1 / 8.0) as i32)).or_insert(0) += 1;
+            points.push(p);
+        }
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        points.iter().map(|p| p.0.stable_hypot(p.1)).sum::<f64>() + cells.len() as f64
+    }
+
     #[test]
     fn test_terrain_generation_performance() {
         use cpu_time::ThreadTime;
+        use std::hint::black_box;
 
         let params = WorldGenParams::default();
 
         // CPU time on this thread, not wall time: generation is single-threaded, and in a
         // parallel `cargo test` (or beside other agents' builds) the wall clock counts the
         // time other work held the core. Wall time hit 14.5s that way (#91).
+        let reference = || {
+            let start = ThreadTime::now();
+            black_box(reference_workload());
+            start.elapsed()
+        };
+        let before = reference();
         let start = ThreadTime::now();
         let _config = TerrainConfig::from_params(&params);
         let elapsed = start.elapsed();
+        let machine = before.min(reference());
 
-        println!("Terrain generation took: {:?} of CPU", elapsed);
+        // CPU time still varies with the machine and with what shares its cores: a fixed
+        // 6s limit passed at ~5.4s on one CI runner and failed at ~7.4s on another with
+        // the same code, and on a desktop the full parallel suite nearly doubles it
+        // (#236). So the limit is in units of the reference workload, timed on this
+        // thread either side of generation (the faster of the two, to shed a hiccup).
+        let ratio = elapsed.as_secs_f64() / machine.as_secs_f64();
+        println!(
+            "Terrain generation took: {:?} of CPU, {:.1}× the reference ({:?})",
+            elapsed, ratio, machine
+        );
         // Typical: ~2.7s debug, with `capitol_protocol` and libm optimised even in
         // debug (the root Cargo.toml, #221). Of that, the water is ~0.25s and the wild
-        // trails ~0.65s, mostly `land::height_at`. Unoptimised, the noise made it ~3.7s,
-        // and ~5.4s on a CI runner. Pre-optimization was ~115s debug, which is what
-        // this guards against.
-        assert!(elapsed.as_millis() < 6000,
-            "Terrain generation took too long: {:?} of CPU (expected <6000ms)", elapsed);
+        // trails ~0.65s, mostly `land::height_at`. Unoptimised, the noise made it ~3.7s.
+        // As a ratio: 4.5–4.8× on a Windows desktop, quiet or in the full suite, and
+        // 3.7× on a CI runner. The limit leaves CI ~1.9× of headroom and still fails a
+        // doubling like #221's on the desktop, where `land` runs this before it pushes.
+        // Pre-optimization was ~115s debug, about 200×.
+        const LIMIT: f64 = 7.0;
+        assert!(ratio < LIMIT,
+            "Terrain generation took too long: {:?} of CPU, {:.1}× the reference workload's {:?} \
+             (expected under {LIMIT}×)", elapsed, ratio, machine);
     }
 
     #[test]
