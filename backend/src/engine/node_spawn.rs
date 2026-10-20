@@ -327,28 +327,6 @@ pub async fn save_replan(db: &PgPool, replan: &Replan) -> Result<u64, sqlx::Erro
     Ok(deleted)
 }
 
-/// Moves the rows in `resource_node_seeds` whose resource type now exists into
-/// `resource_nodes`. Migrations write a world's new nodes there because they
-/// run before startup syncs the content that defines their types (#207).
-/// A node already there by id stays as it is. Returns the nodes planted.
-pub async fn plant_seeds(db: &PgPool) -> Result<u64, sqlx::Error> {
-    let mut tx = db.begin().await?;
-    let planted = sqlx::query(
-        "INSERT INTO resource_nodes (id, resource_type, position_x, position_y, base_quality)
-         SELECT s.id, s.resource_type, s.position_x, s.position_y, s.base_quality
-         FROM resource_node_seeds s JOIN resource_types t ON t.id = s.resource_type
-         ON CONFLICT (id) DO NOTHING",
-    )
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    sqlx::query("DELETE FROM resource_node_seeds s USING resource_types t WHERE t.id = s.resource_type")
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(planted)
-}
-
 /// A stable key for a resource id (FNV-1a), for its random stream.
 fn key(id: &str) -> u64 {
     id.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))

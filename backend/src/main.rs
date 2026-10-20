@@ -84,10 +84,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         synced.upserted, synced.retired
     );
 
-    // Nodes a migration wrote for resource types the sync has just added (#162).
-    let planted = engine::node_spawn::plant_seeds(&db_pool).await?;
-    if planted > 0 {
-        tracing::info!("Planted {} resource nodes from resource_node_seeds", planted);
+    // Migrations that write world rows naming the content just synced (#207).
+    let applied = migrations::run_post_content(&db_pool).await?;
+    if applied > 0 {
+        tracing::info!("Post-content migrations complete: {} applied", applied);
     }
 
     // Redis connection

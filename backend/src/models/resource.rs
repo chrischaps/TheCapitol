@@ -526,7 +526,9 @@ mod tests {
 
     /// Prints the VALUES rows of a node insert for the default world's planned
     /// nodes that no migration writes yet:
-    /// `cargo test print_new_nodes -- --ignored --nocapture`.
+    /// `cargo test print_new_nodes -- --ignored --nocapture`. They go in a new
+    /// post-content migration (`migrations/post-content/`, #207) as a plain
+    /// `INSERT INTO resource_nodes`, and in [`migrated_plan`].
     #[test]
     #[ignore]
     fn print_new_nodes() {
