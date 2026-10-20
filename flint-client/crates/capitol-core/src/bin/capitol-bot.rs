@@ -304,10 +304,12 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
     if let Some(config) = &options.market {
         return make_market(&mut bot, config, options.fund, deadline);
     }
+    // These loops can start over, so they carry on through a dropped
+    // connection or a server restart (C0.6).
     if let Some(name) = &options.trade {
-        bot.trade_with(name, &options.offer, options.ask, deadline)
+        bot.stay_up(deadline, |bot| bot.trade_with(name, &options.offer, options.ask, deadline))
     } else if options.wander {
-        bot.wander(options.radius, options.near.as_deref(), deadline)
+        bot.stay_up(deadline, |bot| bot.wander(options.radius, options.near.as_deref(), deadline))
     } else if let Some(want) = options.gather {
         bot.gather("fiber", want)?;
         bot.say(format!("holding {want} fiber or more"));
@@ -337,7 +339,7 @@ fn make_market(bot: &mut Bot, config: &MakerConfig, fund: bool, deadline: Option
     for item in &config.items {
         bot.say(format!("{item} round {}", maker.reference(item).unwrap_or(0)));
     }
-    maker.run(bot, deadline)?;
+    bot.stay_up(deadline, |bot| maker.run(bot, deadline))?;
     maker.withdraw(bot)?;
     let s = &maker.stats;
     bot.say(format!(

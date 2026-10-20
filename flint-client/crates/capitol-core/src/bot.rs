@@ -20,6 +20,16 @@
 //! `extraction_failed` and a reason (B9, #60). [`Bot::extract`] stops on it at
 //! once and remembers the node. [`START_TIMEOUT`] stays as a backstop for an
 //! answer that never comes.
+//!
+//! **Staying up** (C0.6). A dropped socket or a server restart doesn't end a
+//! bot. The net layer reconnects by itself, with capped backoff and jitter,
+//! and signs in again with the same key. From the drop until
+//! [`Bot::recover`] has the bot back in the world, every call fails at once
+//! with [`BotError::Offline`], so whatever was in flight is dropped, never
+//! counted: the server cancelled it when the socket went. [`Bot::stay_up`]
+//! runs a loop that can start over (wandering, trading, making a market)
+//! through any number of drops. A revoked key ends the bot with
+//! [`BotError::Revoked`].
 
 use std::collections::HashMap;
 use std::fmt;
@@ -35,13 +45,13 @@ use capitol_protocol::rest::{
 };
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::terrain::{Landmark, LandmarkKind};
-use capitol_protocol::ws::ClientMessage;
+use capitol_protocol::ws::{ClientMessage, ServerMessage};
 use uuid::Uuid;
 
 use crate::bazaar;
 use crate::catalog::container_type;
 use crate::net::{
-    ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
+    auth_error_is_final, ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
 };
 use crate::market::MarketEvent;
 use crate::poll::{Fetch, Poller};
@@ -148,6 +158,14 @@ pub enum BotError {
     Timeout { what: String, waited: Duration },
     #[error("the server ended the session: {0}")]
     AuthFailed(String),
+    /// The server refused the bot's API key: it was revoked, or its account
+    /// is gone. The bot can't come back, so a supervisor should retire it.
+    #[error("the server refused the bot's key: {0}")]
+    Revoked(String),
+    /// The connection dropped, and what was in flight with it. The net layer
+    /// is reconnecting: [`Bot::recover`] waits for it.
+    #[error("lost the server: {0}")]
+    Offline(String),
     #[error("blocked at ({x:.0}, {y:.0}): {reason}")]
     Blocked { reason: String, x: f64, y: f64 },
     /// The server didn't start an `extract`: someone got there first, or the
@@ -156,6 +174,14 @@ pub enum BotError {
     Refused { node_id: Uuid, reason: String },
     #[error("{0}")]
     Failed(String),
+}
+
+impl BotError {
+    /// The server won't have the bot back: its key was revoked, or its
+    /// session ended. Anything else is worth carrying on after.
+    pub fn is_final(&self) -> bool {
+        matches!(self, BotError::Revoked(_) | BotError::AuthFailed(_))
+    }
 }
 
 /// What [`Bot::run_script`] did.
@@ -214,6 +240,17 @@ pub struct Bot {
     /// The world's buildings, from the first `/terrain` a walk needed. They
     /// move only with an admin regenerate.
     landmarks: Option<Vec<Landmark>>,
+    /// Signed in with an API key, so a refused sign-in means the key is no
+    /// good any more.
+    keyed: bool,
+    /// The session has been live once. Before that, a failed attempt isn't
+    /// a drop: the sign-in's own timeout covers a server that isn't up yet.
+    live: bool,
+    /// Why the connection dropped, from the drop until [`Bot::recover`] has
+    /// the bot back.
+    dropped: Option<String>,
+    /// Why the server ended the session for good.
+    ended: Option<String>,
 }
 
 impl Bot {
@@ -258,6 +295,7 @@ impl Bot {
         // Named after its player once the snapshot is in.
         let shown: String = key.chars().take(12).collect();
         let mut bot = Bot::new(config, shown, key)?;
+        bot.keyed = true;
         bot.net.connect(key);
         // A watching key's player isn't in the world, so wait for the rest first.
         bot.until("a snapshot", SNAPSHOT_TIMEOUT, |s, _| {
@@ -289,6 +327,10 @@ impl Bot {
             rng: seed(seeded_by),
             journal: None,
             landmarks: None,
+            keyed: false,
+            live: false,
+            dropped: None,
+            ended: None,
         })
     }
 
@@ -366,6 +408,7 @@ impl Bot {
         let first = self.net.recv_timeout(FRAME);
         let rest: Vec<_> = self.net.drain().collect();
         for event in first.into_iter().chain(rest) {
+            self.watch_link(&event);
             let applied = self.state.apply(&event);
             self.poller.observe(&event, &applied, &self.state);
             changes.extend(applied);
@@ -408,6 +451,127 @@ impl Bot {
         changes
     }
 
+    /// Notes a drop, and the server ending the session, for [`Bot::link`].
+    fn watch_link(&mut self, event: &NetEvent) {
+        match event {
+            NetEvent::Connection(ConnectionState::Connected { .. }) => self.live = true,
+            NetEvent::Connection(ConnectionState::Reconnecting { reason, .. })
+                if self.live && self.dropped.is_none() =>
+            {
+                self.say(format!("lost the server ({reason}); reconnecting"));
+                self.dropped = Some(reason.clone());
+            }
+            NetEvent::Connection(ConnectionState::AuthFailed { message }) => {
+                self.ended.get_or_insert_with(|| message.clone());
+            }
+            // A live socket whose key is revoked hears this before it's
+            // closed (`backend/src/ws/connection.rs`).
+            NetEvent::Ws(ServerMessage::AuthError { message })
+                if self.keyed && auth_error_is_final(message) =>
+            {
+                self.ended.get_or_insert_with(|| message.clone());
+            }
+            _ => {}
+        }
+    }
+
+    /// `Err` once the server has ended the session, or from a drop until
+    /// [`recover`](Self::recover). Every call checks it, so nothing carries on
+    /// over a connection that went away under it.
+    fn link(&self) -> Result<(), BotError> {
+        if let Some(message) = &self.ended {
+            return Err(if self.keyed {
+                BotError::Revoked(message.clone())
+            } else {
+                BotError::AuthFailed(message.clone())
+            });
+        }
+        match &self.dropped {
+            Some(reason) => Err(BotError::Offline(reason.clone())),
+            None => Ok(()),
+        }
+    }
+
+    /// Picks the bot back up after the connection dropped
+    /// ([`BotError::Offline`]). The net layer reconnects and signs in again by
+    /// itself; this waits for that, then for the world: who holds the avatar
+    /// (a bot claims it again if nobody does, in [`frame`](Self::frame)), a
+    /// position, the refetches a reconnect starts (containers, nodes,
+    /// stations, plots, currency), and the bot's orders and shop, whose fills
+    /// and sales the drop may have hidden. The server cancelled any action or trade it had going.
+    ///
+    /// Waits until `deadline`, or for ever. Fails at once with
+    /// [`BotError::Revoked`] (or [`BotError::AuthFailed`]) if the server won't
+    /// have the bot back. With no drop to recover from, it does nothing.
+    pub fn recover(&mut self, deadline: Option<Instant>) -> Result<(), BotError> {
+        let start = Instant::now();
+        let past = |what: &str| BotError::Timeout {
+            what: what.into(),
+            waited: start.elapsed(),
+        };
+        while self.dropped.is_some() {
+            loop {
+                self.frame();
+                if self.ended.is_some() {
+                    return self.link();
+                }
+                if self.state.is_connected() {
+                    break;
+                }
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    return Err(past("the server to come back"));
+                }
+            }
+            self.dropped = None;
+            // Dropped again while resyncing: wait for the next connection.
+            match self.resync() {
+                Err(BotError::Offline(_)) => continue,
+                result => result?,
+            }
+        }
+        self.link()
+    }
+
+    /// After a reconnect: the snapshot again, then the bot's orders, and its
+    /// shop if it keeps one: a sale in the drop sent no `BazaarSale`.
+    fn resync(&mut self) -> Result<(), BotError> {
+        self.until("the world again", SNAPSHOT_TIMEOUT, |s, seen| {
+            s.presence().is_some() && seen.contains(&StateEvent::PositionsUpdated)
+        })?;
+        self.settle()?;
+        self.my_orders()?;
+        if self.state.bazaar().my_shop().is_some() {
+            self.my_stall()?;
+        }
+        self.refused.clear();
+        // The server may have put us back elsewhere; that's no walk.
+        self.last_position = None;
+        let (x, y) = self.position();
+        match self.state.presence() {
+            Some(p) if !p.yours => self.say("back, watching: someone else holds the avatar"),
+            _ => self.say(format!("back in the world at ({x:.0}, {y:.0})")),
+        }
+        Ok(())
+    }
+
+    /// Runs `work`, and whenever the connection drops under it, waits to
+    /// [`recover`](Self::recover) and runs it again from the top. Returns
+    /// what `work` returns otherwise, or why the bot couldn't get back by
+    /// `deadline`. For loops that can start over: wandering, trading,
+    /// making a market.
+    pub fn stay_up<T>(
+        &mut self,
+        deadline: Option<Instant>,
+        mut work: impl FnMut(&mut Bot) -> Result<T, BotError>,
+    ) -> Result<T, BotError> {
+        loop {
+            match work(self) {
+                Err(BotError::Offline(_)) => self.recover(deadline)?,
+                result => return result,
+            }
+        }
+    }
+
     /// Runs frames until `done` holds. It sees the state and every event since
     /// the call began, and the events are returned.
     pub fn until(
@@ -419,12 +583,9 @@ impl Bot {
         let start = Instant::now();
         let mut seen = Vec::new();
         loop {
+            self.link()?;
             let changes = self.frame();
-            for change in &changes {
-                if let StateEvent::Connection(ConnectionState::AuthFailed { message }) = change {
-                    return Err(BotError::AuthFailed(message.clone()));
-                }
-            }
+            self.link()?;
             seen.extend(changes);
             if done(&self.state, &seen) {
                 return Ok(seen);
@@ -457,6 +618,7 @@ impl Bot {
         let start = Instant::now();
         while !self.poller.is_idle() {
             self.frame();
+            self.link()?;
             if start.elapsed() > REFETCH_TIMEOUT {
                 return Err(BotError::Timeout {
                     what: "the refetches to settle".into(),
@@ -469,6 +631,7 @@ impl Bot {
 
     /// A REST call of the bot's own, answered in order with everything else.
     pub(crate) fn call(&mut self, what: &'static str, request: RestRequest) -> Result<RestResponse, BotError> {
+        self.link()?;
         let tag = self.next_tag;
         self.next_tag += 1;
         self.net.rest(request, tag);
@@ -477,7 +640,11 @@ impl Bot {
             self.frame();
             if let Some(i) = self.replies.iter().position(|(t, _)| *t == tag) {
                 let (_, result) = self.replies.swap_remove(i);
-                return result.map_err(|source| BotError::Rest { what, source });
+                return result.map_err(|source| match source {
+                    // A key doesn't expire, so a 401 means it was revoked.
+                    source if self.keyed && source.is_unauthorized() => BotError::Revoked(source.to_string()),
+                    source => BotError::Rest { what, source },
+                });
             }
         }
         Err(BotError::Timeout {
@@ -587,6 +754,7 @@ impl Bot {
         let mut asked = start;
         loop {
             let changes = self.frame();
+            self.link()?;
             if let Some(e) = blocked(&changes) {
                 return Err(e);
             }
@@ -1499,6 +1667,7 @@ impl Bot {
         let mut asked_at: Option<Instant> = None;
         while deadline.is_none_or(|d| Instant::now() < d) {
             let changes = self.frame();
+            self.link()?;
             let now = Instant::now();
             for change in &changes {
                 let StateEvent::Trade(event) = change else {
@@ -1642,6 +1811,7 @@ impl Bot {
         let start = Instant::now();
         while !done(self) {
             self.frame();
+            self.link()?;
             if start.elapsed() > REFETCH_TIMEOUT {
                 return Err(BotError::Timeout {
                     what: what.to_string(),
@@ -1751,6 +1921,112 @@ mod tests {
         );
     }
 
+    /// A bot whose net goes nowhere: what it hears is fed to [`Bot::watch_link`].
+    fn offline_bot(keyed: bool) -> Bot {
+        let mut bot = Bot::new(NetConfig::with_base_url("http://127.0.0.1:9"), "T".into(), "t@x").unwrap();
+        bot.quiet = true;
+        bot.keyed = keyed;
+        bot
+    }
+
+    fn hear(bot: &mut Bot, state: ConnectionState) {
+        bot.watch_link(&NetEvent::Connection(state));
+    }
+
+    fn reconnecting(reason: &str) -> ConnectionState {
+        ConnectionState::Reconnecting {
+            attempt: 1,
+            delay: Duration::from_millis(500),
+            reason: reason.into(),
+        }
+    }
+
+    #[test]
+    fn a_drop_after_the_session_was_live_fails_every_call_until_recovered() {
+        let mut bot = offline_bot(true);
+        // Not up yet: the sign-in's own timeout covers it.
+        hear(&mut bot, reconnecting("could not connect"));
+        assert!(bot.link().is_ok());
+
+        hear(&mut bot, ConnectionState::Connected { player_id: Uuid::nil() });
+        hear(&mut bot, reconnecting("connection closed by server"));
+        hear(&mut bot, reconnecting("could not connect"));
+        let e = bot.link().unwrap_err();
+        assert!(matches!(&e, BotError::Offline(r) if r == "connection closed by server"), "{e:?}");
+        assert!(!e.is_final());
+        assert!(matches!(bot.idle(Duration::from_secs(5)), Err(BotError::Offline(_))));
+        assert!(matches!(bot.health(), Err(BotError::Offline(_))), "a REST call isn't sent");
+
+        // This net never comes back, so recovering runs out of time.
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let e = bot.recover(Some(deadline)).unwrap_err();
+        assert!(matches!(e, BotError::Timeout { .. }), "{e:?}");
+    }
+
+    #[test]
+    fn with_nothing_dropped_recovering_does_nothing() {
+        let mut bot = offline_bot(true);
+        hear(&mut bot, ConnectionState::Connected { player_id: Uuid::nil() });
+        assert!(bot.recover(Some(Instant::now())).is_ok());
+    }
+
+    #[test]
+    fn a_refused_key_is_revoked_and_final() {
+        let mut bot = offline_bot(true);
+        hear(&mut bot, ConnectionState::Connected { player_id: Uuid::nil() });
+        // Not about the key: retried.
+        bot.watch_link(&NetEvent::Ws(ServerMessage::AuthError {
+            message: "Auth timeout".into(),
+        }));
+        assert!(bot.link().is_ok());
+        // A live socket's key revoked: it's told, then closed, then reconnects.
+        bot.watch_link(&NetEvent::Ws(ServerMessage::AuthError {
+            message: "API key revoked".into(),
+        }));
+        hear(&mut bot, reconnecting("connection closed by server"));
+        let e = bot.link().unwrap_err();
+        assert!(matches!(&e, BotError::Revoked(m) if m == "API key revoked"), "{e:?}");
+        assert!(e.is_final());
+        let e = bot.recover(None).unwrap_err();
+        assert!(matches!(e, BotError::Revoked(_)), "recovering doesn't wait: {e:?}");
+    }
+
+    #[test]
+    fn a_password_session_refused_is_auth_failed() {
+        let mut bot = offline_bot(false);
+        hear(&mut bot, ConnectionState::Connected { player_id: Uuid::nil() });
+        hear(&mut bot, ConnectionState::AuthFailed {
+            message: "Session expired".into(),
+        });
+        let e = bot.link().unwrap_err();
+        assert!(matches!(e, BotError::AuthFailed(_)), "{e:?}");
+        assert!(e.is_final());
+    }
+
+    #[test]
+    fn stay_up_runs_the_work_again_after_a_drop_it_recovers_from() {
+        let mut bot = offline_bot(true);
+        let mut runs = 0;
+        let result: Result<u32, BotError> = bot.stay_up(None, |bot| {
+            runs += 1;
+            match runs {
+                // As if the work saw a drop, and the net was back by the time
+                // it was noticed.
+                1 => {
+                    hear(bot, ConnectionState::Connected { player_id: Uuid::nil() });
+                    Err(BotError::Offline("connection lost".into()))
+                }
+                n => Ok(n),
+            }
+        });
+        // The first recover found nothing dropped (the work only said so), so
+        // it went straight back to the work.
+        assert_eq!(result.unwrap(), 2);
+        let mut bot = offline_bot(true);
+        let result: Result<(), BotError> = bot.stay_up(None, |_| Err(BotError::Revoked("gone".into())));
+        assert!(matches!(result, Err(BotError::Revoked(_))));
+    }
+
     #[test]
     fn random_stays_in_the_unit_interval_and_moves() {
         let net = Net::spawn(NetConfig::with_base_url("http://127.0.0.1:9")).unwrap();
@@ -1768,6 +2044,10 @@ mod tests {
             rng: seed("t@x"),
             journal: None,
             landmarks: None,
+            keyed: false,
+            live: false,
+            dropped: None,
+            ended: None,
         };
         let draws: Vec<f64> = (0..1000).map(|_| bot.random()).collect();
         assert!(draws.iter().all(|r| (0.0..1.0).contains(r)));

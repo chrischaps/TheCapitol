@@ -12,19 +12,22 @@ use std::io;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use capitol_core::bot::{Account, Bot};
+use capitol_core::bot::{Account, Bot, BotError};
 use capitol_core::catalog::container_type;
-use capitol_core::net::{ConnectionState, NetConfig};
+use capitol_core::net::{Net, NetConfig, NetEvent, RestRequest, RestResponse};
+use capitol_core::protocol::rest::{ApiKeyScope, AuthResponse, CreateApiKeyRequest, RegisterRequest};
 use capitol_core::state::StateEvent;
 
 /// A TCP relay to the server. [`Proxy::cut`] shuts every open connection at
 /// both ends, which the client sees as a dropped socket and the server as a
-/// closed one, and then the proxy keeps accepting.
+/// closed one, and then the proxy keeps accepting. [`Proxy::outage`] also
+/// turns new connections away for a while, as a restarting server does.
 struct Proxy {
     addr: SocketAddr,
     open: Arc<Mutex<Vec<TcpStream>>>,
+    down_until: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Proxy {
@@ -33,9 +36,15 @@ impl Proxy {
         let addr = listener.local_addr().unwrap();
         let open = Arc::new(Mutex::new(Vec::new()));
         let streams = open.clone();
+        let down_until = Arc::new(Mutex::new(None::<Instant>));
+        let down = down_until.clone();
         thread::spawn(move || {
             for client in listener.incoming() {
                 let Ok(client) = client else { continue };
+                if down.lock().unwrap().is_some_and(|until| Instant::now() < until) {
+                    // Dropped, closing it
+                    continue;
+                }
                 let Ok(server) = TcpStream::connect(upstream) else {
                     continue;
                 };
@@ -55,7 +64,7 @@ impl Proxy {
                 streams.lock().unwrap().extend([client, server]);
             }
         });
-        Proxy { addr, open }
+        Proxy { addr, open, down_until }
     }
 
     fn url(&self) -> String {
@@ -70,6 +79,60 @@ impl Proxy {
         }
         streams.len() / 2
     }
+
+    /// Drops every connection and turns new ones away for `how_long`.
+    fn outage(&self, how_long: Duration) {
+        *self.down_until.lock().unwrap() = Some(Instant::now() + how_long);
+        self.cut();
+    }
+}
+
+fn server_url() -> String {
+    std::env::var("CAPITOL_SERVER").unwrap_or_else(|_| "http://localhost:3000".into())
+}
+
+/// Makes a REST call on `net` and waits for its answer.
+fn rest(net: &Net, request: RestRequest, tag: u64) -> RestResponse {
+    net.rest(request, tag);
+    let end = Instant::now() + Duration::from_secs(10);
+    while let Some(left) = end.checked_duration_since(Instant::now()) {
+        match net.recv_timeout(left) {
+            Some(NetEvent::Rest(t, result)) if t == tag => return result.expect("the call succeeded"),
+            Some(_) => {}
+            None => break,
+        }
+    }
+    panic!("no answer to call {tag}");
+}
+
+/// A fresh account and a `play` key for it, as a citizen's would be. The
+/// owner is signed in over REST only, so the key's bot can hold the avatar;
+/// connect `owner` with `auth` to act as them again.
+fn play_key(what: &str) -> (Net, AuthResponse, String) {
+    let account = fresh_account();
+    let owner = Net::spawn(NetConfig::with_base_url(server_url())).unwrap();
+    let RestResponse::Auth(auth) = rest(
+        &owner,
+        RestRequest::Register(RegisterRequest {
+            email: account.email.replace("live", what),
+            password: account.password,
+            player_name: account.name.replace("Live", what),
+            refresh: true,
+        }),
+        1,
+    ) else {
+        panic!("registered");
+    };
+    owner.connect(&auth);
+    let mint = CreateApiKeyRequest {
+        name: what.into(),
+        scopes: vec![ApiKeyScope::Play],
+    };
+    let RestResponse::CreatedApiKey(key) = rest(&owner, RestRequest::CreateApiKey(mint), 2) else {
+        panic!("minted a key");
+    };
+    owner.disconnect();
+    (owner, auth, key.secret)
 }
 
 /// The server's address from `CAPITOL_SERVER`, IPv4 first: `localhost`
@@ -127,27 +190,13 @@ fn the_bot_crafts_rope_and_survives_a_dropped_connection() {
     // the proxy, and refetch what it might have missed.
     let cut = proxy.cut();
     println!("cut {cut} connections");
-    let seen = bot
-        .until(
-            "a reconnect and resync",
-            Duration::from_secs(20),
-            |s, seen| {
-                let resynced = seen.iter().position(|e| *e == StateEvent::SnapshotStale);
-                s.is_connected()
-                    && resynced.is_some_and(|i| seen[i..].contains(&StateEvent::ContainersUpdated))
-            },
-        )
-        .expect("reconnected");
-    let reconnects = seen
-        .iter()
-        .filter(|e| {
-            matches!(
-                e,
-                StateEvent::Connection(ConnectionState::Reconnecting { .. })
-            )
-        })
-        .count();
-    assert_eq!(reconnects, 1, "one drop, one reconnect");
+    match bot.idle(Duration::from_secs(5)) {
+        Err(BotError::Offline(reason)) => println!("dropped: {reason}"),
+        other => panic!("the bot didn't notice the drop: {other:?}"),
+    }
+    bot.recover(Some(Instant::now() + Duration::from_secs(20)))
+        .expect("reconnected and resynced");
+    assert!(bot.state().is_connected());
 
     // The refetched inventory agrees with the one from before the drop.
     assert_eq!(bot.count(container_type::CRAFTING_OUTPUT, "rope"), rope);
@@ -579,4 +628,73 @@ fn bots_split_stacks_and_set_tools_and_automation() {
     assert!(bot.state().station(bench).is_some_and(|s| s.tool.is_none()));
 
     bot.remove_station(bench).expect("took the bench down");
+}
+
+/// C0.6: a bot on a key outlives the server going away. The proxy turns
+/// every connection away for a while, as a restart does; the bot notices,
+/// drops what it was doing, and is back in the world, holding the avatar
+/// and walking, within 30 s of the server's return.
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn a_key_bot_is_working_again_within_30_s_of_a_restart() {
+    const OUTAGE: Duration = Duration::from_secs(8);
+    let proxy = Proxy::start(upstream());
+    let (_owner, _auth, key) = play_key("restart");
+    let mut bot = Bot::with_api_key(NetConfig::with_base_url(proxy.url()), &key).expect("in the world");
+    let (x, y) = bot.position();
+    bot.walk_to(x + 10.0, y).expect("walked before");
+    let inventory = bot.state().inventory().map(|c| c.used_slots());
+
+    proxy.outage(OUTAGE);
+    let back = Instant::now() + OUTAGE;
+    let (x, y) = bot.position();
+    match bot.walk_to(x - 10.0, y) {
+        Err(BotError::Offline(reason)) => println!("dropped mid-walk: {reason}"),
+        other => panic!("the walk didn't stop at the drop: {other:?}"),
+    }
+    bot.recover(Some(back + Duration::from_secs(30)))
+        .expect("back in the world");
+    let took = Instant::now().saturating_duration_since(back);
+    println!("back {:.1} s after the server", took.as_secs_f64());
+    assert!(took < Duration::from_secs(30), "took {took:?}");
+    assert!(bot.state().plays_here(), "it holds the avatar again");
+    assert_eq!(bot.state().inventory().map(|c| c.used_slots()), inventory);
+
+    let (x, y) = bot.position();
+    bot.walk_to(x + 10.0, y).expect("walks again");
+}
+
+/// C0.6: revoking a running bot's key stops it, with `Revoked`, however it
+/// was carrying on.
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn a_revoked_key_stops_the_bot_with_revoked() {
+    let (owner, auth, key) = play_key("revoke");
+    let result = thread::scope(|scope| {
+        let running = scope.spawn(|| {
+            let mut bot = Bot::with_api_key(NetConfig::with_base_url(server_url()), &key)
+                .expect("in the world")
+                .quiet();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            bot.stay_up(Some(deadline), |bot| {
+                while Instant::now() < deadline {
+                    bot.idle(Duration::from_millis(250))?;
+                }
+                Ok(())
+            })
+        });
+        // Give it time to sign in, then revoke its key as its owner.
+        thread::sleep(Duration::from_secs(3));
+        owner.connect(&auth);
+        let RestResponse::ApiKeys(keys) = rest(&owner, RestRequest::ApiKeys, 3) else {
+            panic!("listed the keys");
+        };
+        let key_id = keys.iter().find(|k| k.revoked_at.is_none()).expect("a live key").id;
+        rest(&owner, RestRequest::RevokeApiKey { key_id }, 4);
+        running.join().unwrap()
+    });
+    match result {
+        Err(BotError::Revoked(message)) => assert!(message.contains("revoked"), "{message}"),
+        other => panic!("the bot didn't stop with Revoked: {other:?}"),
+    }
 }

@@ -161,7 +161,9 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
 fn make_market(mut bot: Bot, mut maker: Maker, deadline: Instant, started: Instant, scale: f64) -> BotRun {
     bot.record();
     let strands_start = bot.state().strands().unwrap_or(0);
-    let result = maker.run(&mut bot, Some(deadline)).and_then(|()| maker.withdraw(&mut bot));
+    let result = bot
+        .stay_up(Some(deadline), |bot| maker.run(bot, Some(deadline)))
+        .and_then(|()| maker.withdraw(&mut bot));
     // Let the last balance change land
     let _ = bot.idle(Duration::from_millis(500));
     let at = started.elapsed().as_secs_f64() * scale / 3600.0;
@@ -311,9 +313,26 @@ impl SimBot {
                     });
                     match result {
                         Ok(()) => failures = 0,
-                        Err(BotError::AuthFailed(e)) => {
-                            error = Some(format!("the server ended the session: {e}"));
+                        Err(e) if e.is_final() => {
+                            error = Some(e.to_string());
                             break;
+                        }
+                        // The step went with the connection (C0.6): wait for
+                        // the server and plan again from what it says we hold.
+                        Err(e @ BotError::Offline(_)) => {
+                            self.entries.push(Entry::Failed {
+                                label: label.clone(),
+                                why: e.to_string(),
+                            });
+                            match self.bot.recover(Some(deadline)) {
+                                Ok(()) => {}
+                                Err(e) if e.is_final() => {
+                                    error = Some(e.to_string());
+                                    break;
+                                }
+                                // Out of time
+                                Err(_) => break,
+                            }
                         }
                         Err(e) => {
                             self.entries.push(Entry::Failed {

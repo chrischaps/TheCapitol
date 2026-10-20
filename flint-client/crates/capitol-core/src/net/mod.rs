@@ -33,6 +33,7 @@ use uuid::Uuid;
 use keyring::Keyring;
 
 pub use rest::{RestError, RestRequest, RestResponse};
+pub(crate) use ws::auth_error_is_final;
 
 /// Matches a [`NetEvent::Rest`] result to the request that caused it.
 /// The game chooses the values.
