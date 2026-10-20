@@ -191,16 +191,7 @@ export default function WorldTweakPanel() {
       {params && !loading && (
         <>
           <div className="world-tweak-content">
-            <Section title="Zone Radii" defaultOpen>
-              <ParamSlider label="Capitol" value={params.capitol_radius} min={50} max={500} step={10} onChange={(v) => updateParam('capitol_radius', v)} />
-              <ParamSlider label="Trade Outer" value={params.trade_outer_radius} min={200} max={1000} step={10} onChange={(v) => updateParam('trade_outer_radius', v)} />
-              <ParamSlider label="Guild Outer" value={params.guild_outer_radius} min={400} max={1500} step={10} onChange={(v) => updateParam('guild_outer_radius', v)} />
-              <ParamSlider label="Urban Outer" value={params.urban_outer_radius} min={800} max={2500} step={10} onChange={(v) => updateParam('urban_outer_radius', v)} />
-              <ParamSlider label="Suburban Outer" value={params.suburban_outer_radius} min={1200} max={3500} step={10} onChange={(v) => updateParam('suburban_outer_radius', v)} />
-              <ParamSlider label="Rural Outer" value={params.rural_outer_radius} min={2000} max={5000} step={10} onChange={(v) => updateParam('rural_outer_radius', v)} />
-            </Section>
-
-            <Section title="Water & Canals">
+            <Section title="Water & Canals" defaultOpen>
               <ParamSlider label="Moat Width" value={params.moat_width} min={5} max={80} step={1} onChange={(v) => updateParam('moat_width', v)} />
               <ParamSlider label="Moat Bridge Width" value={params.moat_bridge_width} min={10} max={100} step={1} onChange={(v) => updateParam('moat_bridge_width', v)} />
               <ParamSlider label="Inner Canal Width" value={params.canal_inner_width} min={5} max={60} step={1} onChange={(v) => updateParam('canal_inner_width', v)} />

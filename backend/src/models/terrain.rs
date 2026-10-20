@@ -156,12 +156,22 @@ impl Default for SuburbanGenParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorldGenParams {
-    // Zone radii (concentric from center)
+    // Zone radii (concentric from center). Not tweakable: they're the
+    // protocol's table, which `Zone::from_position`, the `zones` table and
+    // the clients all read, so they stay off the wire and out of the saved
+    // config, and the live world can't disagree with them (#118). Code can
+    // still set them, for a test or `suburb-plan.ps1 -Inner -Outer`.
+    #[serde(skip)]
     pub capitol_radius: f64,
+    #[serde(skip)]
     pub trade_outer_radius: f64,
+    #[serde(skip)]
     pub guild_outer_radius: f64,
+    #[serde(skip)]
     pub urban_outer_radius: f64,
+    #[serde(skip)]
     pub suburban_outer_radius: f64,
+    #[serde(skip)]
     pub rural_outer_radius: f64,
     // Water/Canals
     pub moat_width: f64,
@@ -215,6 +225,23 @@ impl WorldGenParams {
             arterial_width: self.arterial_width,
             ..self.suburban.clone()
         }
+    }
+
+    /// The zone radii a params object names with values off the protocol's
+    /// table. Deserializing ignores them (#118); this is for saying so.
+    pub fn untunable_radii_in(json: &serde_json::Value) -> Vec<(&'static str, f64)> {
+        let table = Self::default();
+        [
+            ("capitol_radius", table.capitol_radius),
+            ("trade_outer_radius", table.trade_outer_radius),
+            ("guild_outer_radius", table.guild_outer_radius),
+            ("urban_outer_radius", table.urban_outer_radius),
+            ("suburban_outer_radius", table.suburban_outer_radius),
+            ("rural_outer_radius", table.rural_outer_radius),
+        ]
+        .into_iter()
+        .filter_map(|(key, radius)| json.get(key)?.as_f64().filter(|&v| v != radius).map(|v| (key, v)))
+        .collect()
     }
 }
 
@@ -1654,6 +1681,34 @@ mod tests {
         stale.suburban.inner_radius = 1.0;
         stale.suburban.outer_radius = 2.0;
         assert_eq!(TerrainConfig::from_params(&stale).version(), TerrainConfig::get_default().version());
+    }
+
+    /// The zone radii aren't tweakable (#118): params sent or saved with
+    /// other radii still build the default world, so the lots' zones agree
+    /// with `Zone::from_position`, and the params never carry them out.
+    #[test]
+    fn zone_radii_stay_the_protocol_table() {
+        let json = serde_json::json!({ "seed": 42, "suburban_outer_radius": 2800.0, "rural_outer_radius": 3800.0 });
+        let params: WorldGenParams = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(
+            [params.capitol_radius, params.trade_outer_radius, params.guild_outer_radius, params.urban_outer_radius, params.suburban_outer_radius, params.rural_outer_radius],
+            rules::ZONE_OUTER_RADII[..6]
+        );
+        assert_eq!(TerrainConfig::from_params(&params).version(), TerrainConfig::get_default().version());
+        // Only the one off the table is named.
+        assert_eq!(WorldGenParams::untunable_radii_in(&json), [("suburban_outer_radius", 2800.0)]);
+        let out = serde_json::to_value(WorldGenParams::default()).unwrap();
+        assert!(WorldGenParams::untunable_radii_in(&out).is_empty());
+        for key in ["capitol_radius", "trade_outer_radius", "guild_outer_radius", "urban_outer_radius", "suburban_outer_radius", "rural_outer_radius"] {
+            assert!(out.get(key).is_none(), "the params carry {key}");
+        }
+
+        // Each lot stands in the zone it was laid for.
+        for lot in &TerrainConfig::from_params(&params).terrain_plots {
+            let x = lot.corners.iter().map(|c| c.0).sum::<f64>() / 4.0;
+            let y = lot.corners.iter().map(|c| c.1).sum::<f64>() / 4.0;
+            assert_eq!(rules::Zone::from_position(x, y).as_str(), lot.zone, "{} at ({x}, {y})", lot.id);
+        }
     }
 
     #[test]

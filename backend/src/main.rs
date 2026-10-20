@@ -104,6 +104,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     let world_gen_params: models::WorldGenParams = if let Some((json,)) = saved_params {
+        let moved = models::WorldGenParams::untunable_radii_in(&json);
+        if !moved.is_empty() {
+            tracing::warn!(
+                "Saved world params set zone radii {:?}; they aren't tweakable (#118), so the world uses the protocol's table",
+                moved
+            );
+        }
         match serde_json::from_value(json) {
             Ok(params) => {
                 tracing::info!("Loaded world gen params from database");

@@ -64,7 +64,8 @@ pub async fn get_world_params(
 }
 
 /// The default world generation parameters, for the admin form's reset. The
-/// client keeps no copy of them, so the zone radii stay in one place (#116).
+/// client keeps no copy of them, so they stay in one place (#116). The zone
+/// radii aren't among them: they aren't tweakable (#118).
 pub async fn get_default_world_params(
     Extension(user): Extension<AuthUser>,
 ) -> Result<Json<WorldGenParams>, AppError> {
@@ -73,12 +74,25 @@ pub async fn get_default_world_params(
 }
 
 /// Regenerate terrain in memory (does NOT persist to database)
+///
+/// The zone radii aren't tweakable (#118), so params that move one are
+/// refused with 400 rather than quietly built at the table's radii.
 pub async fn update_world_params(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
-    Json(params): Json<WorldGenParams>,
+    Json(json): Json<serde_json::Value>,
 ) -> Result<Json<WorldGenParams>, AppError> {
     require_admin(&user)?;
+    let moved = WorldGenParams::untunable_radii_in(&json);
+    if !moved.is_empty() {
+        let list: Vec<String> = moved.iter().map(|(key, v)| format!("{key} {v}")).collect();
+        return Err(AppError::BadRequest(format!(
+            "The zone radii aren't tweakable: they're the protocol's table (capitol_protocol::rules), which zone classification reads. Asked for {}.",
+            list.join(", ")
+        )));
+    }
+    let params: WorldGenParams =
+        serde_json::from_value(json).map_err(|e| AppError::BadRequest(format!("Bad world params: {e}")))?;
 
     let mut game = state.game.write().await;
 

@@ -30,13 +30,7 @@ export interface NeighbourhoodParams {
 }
 
 export interface WorldGenParams {
-  // Zone radii
-  capitol_radius: number
-  trade_outer_radius: number
-  guild_outer_radius: number
-  urban_outer_radius: number
-  suburban_outer_radius: number
-  rural_outer_radius: number
+  // The zone radii aren't here: they're the protocol's table, not tweakable (#118)
   // Water/Canals
   moat_width: number
   moat_bridge_width: number
