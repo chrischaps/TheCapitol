@@ -27,7 +27,8 @@
 //! ([`Move::qualities`]). Enter or Split sends the move with
 //! [`Move::split`]; Escape or ✕ lets it go.
 //! Onto a stack, a shift-drag is a plain drag: a split never merges.
-//! A capture can't hold Shift for egui (#189), so the rig below checks it.
+//! A capture can hold Shift for egui since H27 (#189); the rig below checks
+//! it headless too.
 //!
 //! **Tools (E1.7)** don't stack, so in place of the quantity they carry a
 //! thin wear bar along the bottom: pale steel while sound, ember below 20%
