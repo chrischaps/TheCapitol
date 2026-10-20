@@ -265,8 +265,8 @@ pub async fn wear_installed(
     station_id: Uuid,
     item_id: Uuid,
 ) -> Result<Option<(Wear, Option<StationTool>)>, sqlx::Error> {
-    let found: Option<(Option<Uuid>, String, String)> = sqlx::query_as(
-        "SELECT s.tool_owner, i.item_type, it.name FROM stations s
+    let found: Option<(Option<Uuid>, String, String, i32, Option<i32>)> = sqlx::query_as(
+        "SELECT s.tool_owner, i.item_type, it.name, i.quality, it.max_durability FROM stations s
          JOIN items i ON i.id = s.installed_tool
          JOIN item_types it ON it.id = i.item_type
          WHERE s.id = $1 AND s.installed_tool = $2
@@ -276,16 +276,48 @@ pub async fn wear_installed(
     .bind(item_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((tool_owner, item_type, item_name)) = found else {
+    let Some((owner_id, item_type, item_name, quality, base_durability)) = found else {
         return Ok(None);
     };
-    let Some(wear) = super::tools::wear(conn, item_id).await? else {
+    let max_durability = tools::max_durability(base_durability.unwrap_or(0), quality);
+    let slot = SlotTool { item_id, item_type, item_name, quality, max_durability, owner_id };
+    wear_slot(conn, station_id, slot).await
+}
+
+/// What a station's tool slot holds, as [`wear_slot`] needs it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlotTool {
+    pub item_id: Uuid,
+    pub item_type: String,
+    pub item_name: String,
+    pub quality: i32,
+    pub max_durability: i32,
+    /// Who put it there (`stations.tool_owner`)
+    pub owner_id: Option<Uuid>,
+}
+
+/// [`wear_installed`], for a caller that holds `station_id`'s lock and has
+/// read that its slot holds `slot` (the automation tick, #212): the same
+/// writes, without reading the slot again.
+pub async fn wear_slot(
+    conn: &mut PgConnection,
+    station_id: Uuid,
+    slot: SlotTool,
+) -> Result<Option<(Wear, Option<StationTool>)>, sqlx::Error> {
+    let Some(wear) = super::tools::wear(conn, slot.item_id).await? else {
         return Ok(None);
     };
     match wear {
         Wear::Worn { durability } if durability > 0 => {
-            let now = station_tool(conn, station_id).await?;
-            Ok(Some((wear, now)))
+            let now = StationTool {
+                item_id: slot.item_id,
+                item_type: slot.item_type,
+                quality: slot.quality,
+                durability,
+                max_durability: slot.max_durability,
+                owner_id: slot.owner_id,
+            };
+            Ok(Some((wear, Some(now))))
         }
         // That was its last use: `wear` deleted it, which emptied the slot
         _ => {
@@ -293,7 +325,8 @@ pub async fn wear_installed(
                 .bind(station_id)
                 .execute(&mut *conn)
                 .await?;
-            let wear = match tool_owner {
+            let SlotTool { item_id, item_type, item_name, .. } = slot;
+            let wear = match slot.owner_id {
                 Some(owner_id) => {
                     Wear::Broke(BrokenTool { owner_id, container_id: None, item_id, item_type, item_name })
                 }
@@ -302,15 +335,6 @@ pub async fn wear_installed(
             Ok(Some((wear, None)))
         }
     }
-}
-
-/// What `station_id`'s tool slot holds.
-pub async fn station_tool(conn: &mut PgConnection, station_id: Uuid) -> Result<Option<StationTool>, sqlx::Error> {
-    let row: Option<StationToolRow> = sqlx::query_as(&format!("{TOOL_SELECT} WHERE s.id = $1"))
-        .bind(station_id)
-        .fetch_optional(&mut *conn)
-        .await?;
-    Ok(row.map(|r| r.into_tool().1))
 }
 
 /// The tools installed in any of `station_ids`, by station, for `StationInfo`.

@@ -11,7 +11,8 @@
 //! - deeds claimed and foreclosed, by zone (`deed_events`, written by
 //!   [`record_deed`] beside the claim and the foreclosure)
 //! - what each player gathered and crafted (`production_tally`, added to by
-//!   [`tally`] in the transaction that writes the work)
+//!   [`tally`] in the transaction that writes the work, or for automation by
+//!   [`tally_many`] once its cycle's crafts commit)
 //!
 //! [`compose`] turns them into the edition. It's pure: the headlines come from
 //! templates picked by a hash of the day, never an LLM, so a day always reads
@@ -58,6 +59,41 @@ pub async fn tally(conn: &mut PgConnection, player_id: Uuid, item_type: &str, qu
     .bind(item_type)
     .bind(quantity as i64)
     .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// [`tally`] many at once, on the day of `at`: each of `made` is (player,
+/// item type, quantity). The automation tick calls it once a cycle, after its
+/// crafts commit, not in each craft's transaction: an owner's stations would
+/// all wait on the same row, held through every commit (#212). A crash
+/// between the two loses that cycle's tally; it never counts a craft that
+/// failed.
+pub async fn tally_many(
+    db: impl sqlx::PgExecutor<'_>,
+    at: DateTime<Utc>,
+    made: &[(Uuid, &str, i32)],
+) -> Result<(), sqlx::Error> {
+    // One row a player and item type: an upsert can't touch a row twice
+    let mut totals: BTreeMap<(Uuid, &str), i64> = BTreeMap::new();
+    for (player_id, item_type, quantity) in made.iter().filter(|(.., q)| *q > 0) {
+        *totals.entry((*player_id, *item_type)).or_default() += *quantity as i64;
+    }
+    if totals.is_empty() {
+        return Ok(());
+    }
+    let (keys, quantities): (Vec<_>, Vec<i64>) = totals.into_iter().unzip();
+    let (players, item_types): (Vec<Uuid>, Vec<&str>) = keys.into_iter().unzip();
+    sqlx::query(
+        "INSERT INTO production_tally (day, player_id, item_type, quantity)
+         SELECT $1, p, t, q FROM unnest($2::uuid[], $3::text[], $4::bigint[]) AS u(p, t, q)
+         ON CONFLICT (day, player_id, item_type) DO UPDATE SET quantity = production_tally.quantity + EXCLUDED.quantity",
+    )
+    .bind(rules::day_number(at.timestamp_millis()))
+    .bind(players)
+    .bind(item_types)
+    .bind(quantities)
+    .execute(db)
     .await?;
     Ok(())
 }

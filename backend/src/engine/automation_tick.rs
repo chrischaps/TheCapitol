@@ -8,9 +8,9 @@
 //!   first, as a craft by hand takes them ([`pick_inputs`]);
 //! - the quality is the cascade with the station and its installed tool, and
 //!   no minigame (`crafting::output_quality`);
-//! - the output goes into the same box (`craft_completion::place_in`), owned
-//!   by the station's owner;
-//! - the installed tool wears (`station_tools::wear_installed`);
+//! - the output goes into the same box, owned by the station's owner, as
+//!   `craft_completion::place_in` puts a craft's ([`place`]);
+//! - the installed tool wears (`station_tools::wear_slot`);
 //! - and the setting's `done` goes up, or the run stops once a count is made.
 //!
 //! A craft that can't complete changes nothing, and the station pauses with
@@ -28,9 +28,19 @@
 //! truth: every write locks the station row and checks the setting is still
 //! the one the run was for, so a stop or a new setting that lands mid-cycle
 //! wins. Like the market, it runs in a task of its own, and no lock is held
-//! across an await. A craft is about fifteen round trips, so a burst of
-//! completions in one cycle makes it run long rather than lose anything
-//! (#212: fewer round trips a craft).
+//! across an await.
+//!
+//! A cycle decides what each station does in memory, then writes them
+//! [`WORKERS`] at a time, each worker on a connection of its own for the cycle
+//! (#212). Stations lock different rows, so their crafts don't wait on each
+//! other, and their commits flush together. A craft is about eight round
+//! trips: the station's lock, its box and tool slot, the box's stacks and then
+//! their units, the takes in one statement, the tool's wear, the output and
+//! the setting. The Gazette's tally of what they made is one statement for
+//! the cycle, once they're in (`gazette::tally_many`). A burst of completions
+//! too big for a cycle makes it run long rather than lose anything, and a
+//! restart spreads the stations' first crafts over their durations so they
+//! don't all fall due together ([`Works::load`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Mutex, MutexGuard};
@@ -44,14 +54,16 @@ use capitol_protocol::rules::{quality, tools as tool_rules};
 use capitol_protocol::ws::ServerMessage;
 use chrono::{DateTime, Utc};
 use sqlx::types::Json;
-use sqlx::{PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, PgPool};
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
-use super::craft_completion::{self, OUTPUT_FULL};
+use super::craft_completion::CraftOutput;
 use super::crafting::{output_quality, roll_outputs};
 use super::events::GameEvent;
-use super::tools::{BrokenTool, Wear};
+use super::station_tools::SlotTool;
+use super::tools::{BrokenTool, HeldTool, Wear};
+use super::units::NewStack;
 use super::{gazette, notices, station_tools, units, GameState};
 use crate::models::{ItemType, Recipe};
 
@@ -59,6 +71,9 @@ use crate::models::{ItemType, Recipe};
 pub const CYCLE_MS: u64 = 1000;
 /// Ticks a running station advances each cycle.
 pub const CYCLE_TICKS: i32 = 10;
+/// How many stations' writes a cycle runs side by side, each on a connection
+/// of its own (#212). The server's pool is sized for it (`main.rs`).
+pub const WORKERS: usize = 4;
 
 /// The stations that work on their own, as the automation tick sees them.
 #[derive(Debug, Default)]
@@ -73,10 +88,16 @@ struct Run {
     progress: i32,
     /// The last [`PRODUCTION_LOG_LEN`] crafts, newest last
     log: VecDeque<Produced>,
+    /// Loaded at startup: its first advance starts it part way into its
+    /// craft, so the stations a restart resumes fall due spread out (#212)
+    stagger: bool,
 }
 
 impl Works {
     /// Every station that isn't stopped, as `stations.automation` has it.
+    /// How far each had got isn't kept, so each starts its craft part way in,
+    /// at a point its id picks ([`head_start`]), not all at the start: started
+    /// together, they'd complete together, every craft after.
     pub async fn load(db: &PgPool) -> Result<Works, sqlx::Error> {
         let rows: Vec<(Uuid, Json<StationAutomation>)> = sqlx::query_as(
             "SELECT id, automation FROM stations
@@ -87,6 +108,9 @@ impl Works {
         let works = Works::default();
         for (id, automation) in rows {
             works.set(id, &automation.0);
+            if let Some(run) = works.runs().get_mut(&id) {
+                run.stagger = true;
+            }
         }
         Ok(works)
     }
@@ -104,12 +128,14 @@ impl Works {
             automation: automation.clone(),
             progress: 0,
             log: VecDeque::new(),
+            stagger: false,
         });
         let restarted = run.automation.recipe_id != automation.recipe_id
             || automation.state == AutomationState::Stopped
             || (run.automation.state == AutomationState::Stopped && automation.state != AutomationState::Stopped);
         if restarted {
             run.progress = 0;
+            run.stagger = false;
         }
         run.automation = automation.clone();
     }
@@ -144,6 +170,9 @@ impl Works {
     fn advance(&self, station_id: Uuid, duration: i32) -> bool {
         let mut runs = self.runs();
         let Some(run) = runs.get_mut(&station_id) else { return false };
+        if std::mem::take(&mut run.stagger) {
+            run.progress = head_start(station_id, duration);
+        }
         run.progress = (run.progress + CYCLE_TICKS).min(duration.max(1));
         run.progress >= duration
     }
@@ -161,6 +190,13 @@ impl Works {
             run.log.push_back(p.clone());
         }
     }
+}
+
+/// How far into a craft of `duration` ticks a station resumed by a restart
+/// starts: a point in `0..duration` its id picks, the same on every restart.
+fn head_start(station_id: Uuid, duration: i32) -> i32 {
+    let picked = u32::from_le_bytes(station_id.as_bytes()[..4].try_into().expect("four bytes"));
+    (picked % duration.max(1) as u32) as i32
 }
 
 /// What one cycle did.
@@ -236,6 +272,7 @@ pub async fn run_cycle(
         (online, recipes, item_types)
     };
 
+    let mut jobs = Vec::new();
     for (station_id, automation) in active {
         let Some(owner) = owners.get(&station_id) else {
             // The station's gone
@@ -261,61 +298,131 @@ pub async fn run_cycle(
             (AutomationState::Paused { .. }, true) => Step::Craft,
             (AutomationState::Stopped, _) => continue,
         };
+        jobs.push(Job { station_id, automation, owner_id: owner.player_id, step });
+    }
 
-        let result = match step {
-            Step::Pause(reason) => pause(db, station_id, &automation, reason).await.map(Done::State),
-            Step::Resume => set_running(db, station_id, &automation).await.map(Done::State),
-            Step::Craft => {
-                let Some(recipe) = recipes.get(&automation.recipe_id) else { continue };
-                match craft_once(db, station_id, &automation, recipe, &item_types, now).await {
-                    Ok(Attempt::Made(made)) => Ok(Done::Made(*made)),
-                    Ok(Attempt::Blocked(reason)) => {
-                        if still_says_why(&automation.state, &reason) {
-                            continue;
-                        }
-                        pause(db, station_id, &automation, reason).await.map(Done::State)
-                    }
-                    Ok(Attempt::Changed(now_set)) => Ok(Done::State(Transition::Changed(now_set))),
-                    Err(e) => Err(e),
-                }
-            }
-        };
+    let results = work_all(db, &jobs, &recipes, &item_types, now).await;
+    // What the owners made, for the Gazette (E3.9), once it's in
+    let made: Vec<(Uuid, &str, i32)> = jobs
+        .iter()
+        .zip(&results)
+        .filter_map(|(job, result)| match result {
+            Some(Ok(Some(Done::Made(made)))) => Some((job.owner_id, made)),
+            _ => None,
+        })
+        .flat_map(|(owner_id, made)| made.produced.iter().map(move |p| (owner_id, p.item_type.as_str(), p.quantity)))
+        .collect();
+    if let Err(e) = gazette::tally_many(db, now, &made).await {
+        tracing::warn!("Automation: the Gazette misses this cycle's tally of {} outputs: {e}", made.len());
+    }
 
+    for (job, result) in jobs.into_iter().zip(results) {
+        let Job { station_id, automation, owner_id, .. } = job;
         match result {
-            Ok(Done::Made(made)) => {
+            // Nothing to write, or not reached this cycle
+            Some(Ok(None)) | None => {}
+            Some(Ok(Some(Done::Made(made)))) => {
                 cycle.crafts += 1;
                 if !matches!(automation.state, AutomationState::Running) {
                     cycle.resumed += 1;
                 }
-                announce_made(works, events, station_id, owner.player_id, &automation, made);
+                announce_made(works, events, station_id, owner_id, &automation, made);
             }
-            Ok(Done::State(Transition::Paused { automation: set, station_type, reason, notice_id })) => {
+            Some(Ok(Some(Done::State(Transition::Paused { automation: set, station_type, reason, notice_id })))) => {
                 cycle.paused += 1;
                 works.set(station_id, &set);
-                let _ = events.send(GameEvent::AutomationPaused {
-                    owner_id: owner.player_id,
-                    station_id,
-                    station_type,
-                    reason,
-                    notice_id,
-                });
+                let _ = events.send(GameEvent::AutomationPaused { owner_id, station_id, station_type, reason, notice_id });
                 let _ = events.send(GameEvent::StationAutomationChanged { station_id, automation: set });
             }
-            Ok(Done::State(Transition::Resumed(set))) => {
+            Some(Ok(Some(Done::State(Transition::Resumed(set))))) => {
                 cycle.resumed += 1;
                 works.set(station_id, &set);
                 let _ = events.send(GameEvent::StationAutomationChanged { station_id, automation: set });
             }
-            Ok(Done::State(Transition::Changed(Some(set)))) => works.set(station_id, &set),
-            Ok(Done::State(Transition::Changed(None))) => works.forget(station_id),
-            Err(e) => {
-                // The next cycle tries again
-                tracing::warn!("Automation: station {station_id}: {e}");
-                return cycle;
-            }
+            Some(Ok(Some(Done::State(Transition::Changed(Some(set)))))) => works.set(station_id, &set),
+            Some(Ok(Some(Done::State(Transition::Changed(None))))) => works.forget(station_id),
+            // The next cycle tries again
+            Some(Err(e)) => tracing::warn!("Automation: station {station_id}: {e}"),
         }
     }
     cycle
+}
+
+/// One station's part of a cycle, decided in memory.
+struct Job {
+    station_id: Uuid,
+    /// Its setting as the run has it
+    automation: StationAutomation,
+    owner_id: Uuid,
+    step: Step,
+}
+
+type Outcome = Result<Option<Done>, sqlx::Error>;
+
+/// Write `jobs`, [`WORKERS`] at a time. Each worker holds a connection for the
+/// cycle, not one acquired (and pinged) a craft (#208), and takes the next job
+/// as it finishes one. The results are in `jobs`' order. A worker stops at its
+/// first error, so a lost database costs a few warnings a cycle, not one a
+/// station, and the jobs it didn't reach are `None`: the next cycle tries them.
+async fn work_all(
+    db: &PgPool,
+    jobs: &[Job],
+    recipes: &HashMap<String, Recipe>,
+    item_types: &HashMap<String, ItemType>,
+    now: DateTime<Utc>,
+) -> Vec<Option<Outcome>> {
+    let next = Mutex::new(0..jobs.len());
+    let worker = || async {
+        let mut done = Vec::new();
+        let mut conn = match db.acquire().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::warn!("Automation: no connection: {e}");
+                return done;
+            }
+        };
+        loop {
+            let Some(i) = next.lock().unwrap_or_else(|e| e.into_inner()).next() else { break };
+            let outcome = work(&mut conn, &jobs[i], recipes, item_types, now).await;
+            let failed = outcome.is_err();
+            done.push((i, outcome));
+            if failed {
+                break;
+            }
+        }
+        done
+    };
+    let workers = (0..WORKERS.min(jobs.len())).map(|_| worker());
+    let mut results: Vec<Option<Outcome>> = jobs.iter().map(|_| None).collect();
+    for (i, outcome) in futures::future::join_all(workers).await.into_iter().flatten() {
+        results[i] = Some(outcome);
+    }
+    results
+}
+
+/// Write one station's step. `None`: nothing to write (a craft blocked for
+/// the reason its pause already gives).
+async fn work(
+    conn: &mut PgConnection,
+    job: &Job,
+    recipes: &HashMap<String, Recipe>,
+    item_types: &HashMap<String, ItemType>,
+    now: DateTime<Utc>,
+) -> Outcome {
+    let Job { station_id, automation, .. } = job;
+    match &job.step {
+        Step::Pause(reason) => Ok(Some(Done::State(pause(conn, *station_id, automation, reason.clone()).await?))),
+        Step::Resume => Ok(Some(Done::State(set_running(conn, *station_id, automation).await?))),
+        Step::Craft => {
+            let Some(recipe) = recipes.get(&automation.recipe_id) else { return Ok(None) };
+            Ok(match craft_once(conn, *station_id, automation, recipe, item_types, now).await? {
+                Attempt::Made(made) => Some(Done::Made(*made)),
+                Attempt::Blocked(reason) if still_says_why(&automation.state, &reason) => None,
+                Attempt::Blocked(reason) => Some(Done::State(pause(conn, *station_id, automation, reason).await?)),
+                Attempt::Changed(now_set) => Some(Done::State(Transition::Changed(now_set))),
+            })
+        }
+    }
 }
 
 /// Does a station paused as `state` already say why a craft is `blocked`?
@@ -497,12 +604,12 @@ async fn queue_pause(
 
 /// Pause `station_id` for `reason`, with a notice to its owner.
 async fn pause(
-    db: &PgPool,
+    conn: &mut PgConnection,
     station_id: Uuid,
     expected: &StationAutomation,
     reason: PauseReason,
 ) -> Result<Transition, sqlx::Error> {
-    let mut tx = db.begin().await?;
+    let mut tx = conn.begin().await?;
     let Some(station) = lock_station(&mut tx, station_id).await? else {
         return Ok(Transition::Changed(None));
     };
@@ -518,8 +625,12 @@ async fn pause(
 }
 
 /// Set a paused `station_id` running again: its owner is back.
-async fn set_running(db: &PgPool, station_id: Uuid, expected: &StationAutomation) -> Result<Transition, sqlx::Error> {
-    let mut tx = db.begin().await?;
+async fn set_running(
+    conn: &mut PgConnection,
+    station_id: Uuid,
+    expected: &StationAutomation,
+) -> Result<Transition, sqlx::Error> {
+    let mut tx = conn.begin().await?;
     let Some(station) = lock_station(&mut tx, station_id).await? else {
         return Ok(Transition::Changed(None));
     };
@@ -538,6 +649,7 @@ async fn set_running(db: &PgPool, station_id: Uuid, expected: &StationAutomation
 pub struct BoxStack {
     pub id: Uuid,
     pub item_type: String,
+    pub slot: Option<i32>,
     pub units: Units,
 }
 
@@ -568,33 +680,129 @@ pub fn pick_inputs(recipe: &Recipe, stacks: &[BoxStack]) -> Result<(Vec<(Uuid, U
     Ok((taken, inputs))
 }
 
-/// The stacks in `container_id`, in slot order, locked.
+/// Where an output goes in a station's box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// Onto this stack
+    Onto(Uuid),
+    /// A new stack in this slot
+    Slot(i32),
+}
+
+/// Where `output` goes among `stacks`, a box of `slot_count` slots, as
+/// `craft_completion::place_in` puts a craft's output: onto the first stack of
+/// its type in slot order if it stacks and that stack can hold it, or else
+/// the first free slot. `None`: the box is full.
+fn place(stacks: &[BoxStack], slot_count: i32, output: &CraftOutput) -> Option<Place> {
+    if output.stackable {
+        let first = stacks
+            .iter()
+            .filter(|s| s.item_type == output.item_type)
+            .min_by_key(|s| (s.slot.is_none(), s.slot, s.id));
+        if let Some(first) = first {
+            if first.units.clone().merge(&Units::uniform(output.quantity, output.quality)) {
+                return Some(Place::Onto(first.id));
+            }
+        }
+    }
+    (0..slot_count).find(|slot| !stacks.iter().any(|s| s.slot == Some(*slot))).map(Place::Slot)
+}
+
+/// The stacks in `container_id`, in slot order, locked: the stacks in one
+/// statement and their units in the next ([`units::units_of_many`]).
 async fn box_stacks(conn: &mut PgConnection, container_id: Uuid) -> Result<Vec<BoxStack>, sqlx::Error> {
-    let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, item_type FROM items WHERE container_id = $1 ORDER BY slot_index NULLS LAST, id FOR UPDATE",
+    let rows: Vec<(Uuid, String, Option<i32>)> = sqlx::query_as(
+        "SELECT id, item_type, slot_index FROM items WHERE container_id = $1
+         ORDER BY slot_index NULLS LAST, id FOR UPDATE",
     )
     .bind(container_id)
     .fetch_all(&mut *conn)
     .await?;
-    let mut stacks = Vec::with_capacity(rows.len());
-    for (id, item_type) in rows {
-        let units = units::units_of(conn, id).await?;
-        stacks.push(BoxStack { id, item_type, units });
-    }
-    Ok(stacks)
+    let ids: Vec<Uuid> = rows.iter().map(|(id, ..)| *id).collect();
+    let mut units = units::units_of_many(conn, &ids).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, item_type, slot)| BoxStack { id, item_type, slot, units: units.remove(&id).unwrap_or_default() })
+        .collect())
 }
 
-/// Complete one craft of `recipe` at `station_id`, in one transaction, or
-/// change nothing and say why not.
+/// A station's box and what its tool slot holds, read under the station's
+/// lock in one round trip.
+#[derive(sqlx::FromRow)]
+struct BoxAndSlot {
+    container_id: Uuid,
+    slot_count: i32,
+    tool_owner: Option<Uuid>,
+    item_id: Option<Uuid>,
+    item_type: Option<String>,
+    item_name: Option<String>,
+    quality: Option<i32>,
+    durability: Option<i32>,
+    tool_type: Option<String>,
+    base_power: Option<f64>,
+    base_durability: Option<i32>,
+    tier: Option<String>,
+}
+
+impl BoxAndSlot {
+    /// The slot's tool, if it's a `tool_type` with uses left: what
+    /// `station_tools::installed_tool` finds, and what a wear needs.
+    fn tool(&self, station_id: Uuid, tool_type: tool_rules::ToolType) -> Option<(HeldTool, SlotTool)> {
+        if self.tool_type.as_deref() != Some(tool_type.as_str()) {
+            return None;
+        }
+        let (item_id, item_type, item_name, quality, durability) = (
+            self.item_id?,
+            self.item_type.clone()?,
+            self.item_name.clone()?,
+            self.quality?,
+            self.durability.filter(|d| *d > 0)?,
+        );
+        let max_durability = tool_rules::max_durability(self.base_durability.unwrap_or(0), quality);
+        let held = HeldTool {
+            item_id,
+            item_type: item_type.clone(),
+            tool: tool_rules::Tool { base_power: self.base_power?, quality, durability, max_durability },
+            tier: self.tier.as_deref().and_then(tool_rules::Tier::from_str),
+            station_id: Some(station_id),
+        };
+        let slot = SlotTool { item_id, item_type, item_name, quality, max_durability, owner_id: self.tool_owner };
+        Some((held, slot))
+    }
+}
+
+/// [`BoxAndSlot`] for `station_id`; `None` if it has no box. Read it after
+/// locking the station, in a statement of its own, so it sees any change to
+/// the slot that the lock waited for.
+async fn box_and_slot(conn: &mut PgConnection, station_id: Uuid) -> Result<Option<BoxAndSlot>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT c.id AS container_id, ct.slot_count, s.tool_owner, i.id AS item_id, i.item_type,
+                it.name AS item_name, i.quality, i.durability, it.tool_type, it.base_power,
+                it.max_durability AS base_durability, it.tier
+         FROM stations s
+         JOIN containers c ON c.station_id = s.id
+         JOIN container_types ct ON ct.id = c.container_type
+         LEFT JOIN items i ON i.id = s.installed_tool
+         LEFT JOIN item_types it ON it.id = i.item_type
+         WHERE s.id = $1
+         LIMIT 1",
+    )
+    .bind(station_id)
+    .fetch_optional(&mut *conn)
+    .await
+}
+
+/// Complete one craft of `recipe` at `station_id`, in one transaction on
+/// `conn`, or change nothing and say why not.
 pub async fn craft_once(
-    db: &PgPool,
+    conn: &mut PgConnection,
     station_id: Uuid,
     expected: &StationAutomation,
     recipe: &Recipe,
     item_types: &HashMap<String, ItemType>,
     now: DateTime<Utc>,
 ) -> Result<Attempt, sqlx::Error> {
-    let mut tx = db.begin().await?;
+    let mut tx = conn.begin().await?;
     let Some(station) = lock_station(&mut tx, station_id).await? else {
         return Ok(Attempt::Changed(None));
     };
@@ -602,46 +810,56 @@ pub async fn craft_once(
         return Ok(Attempt::Changed(station.automation));
     }
     let mut automation = station.automation.clone().unwrap_or_else(|| expected.clone());
-    let container: Option<(Uuid, i32)> = sqlx::query_as(
-        "SELECT c.id, ct.slot_count FROM containers c
-         JOIN container_types ct ON ct.id = c.container_type
-         WHERE c.station_id = $1 LIMIT 1",
-    )
-    .bind(station_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some((container_id, slot_count)) = container else {
+    let Some(found) = box_and_slot(&mut tx, station_id).await? else {
         // configure refuses a station with no box, so there's nothing to run
         return Ok(Attempt::Changed(None));
     };
+    let container_id = found.container_id;
 
     let tool = match recipe.tool_type {
-        Some(tool_type) => match station_tools::installed_tool(&mut *tx, station_id, tool_type).await? {
+        Some(tool_type) => match found.tool(station_id, tool_type) {
             Some(tool) => Some(tool),
             None => return Ok(Attempt::Blocked(PauseReason::ToolMissing)),
         },
         None => None,
     };
 
-    let stacks = box_stacks(&mut tx, container_id).await?;
+    let mut stacks = box_stacks(&mut tx, container_id).await?;
     let (taken, inputs) = match pick_inputs(recipe, &stacks) {
         Ok(picked) => picked,
         Err(item_type) => return Ok(Attempt::Blocked(PauseReason::MissingInput { item_type })),
     };
+    // Take them in memory, then write every take in one statement:
+    // (stack, taken, left), one entry a stack
+    let mut takes: Vec<(Uuid, Units, Units)> = Vec::new();
     for (item_id, lot) in &taken {
-        if units::take_units(&mut tx, *item_id, lot).await?.is_none() {
-            // Locked above, so it can't have changed; but never make from nothing
+        let stack = stacks.iter_mut().find(|s| s.id == *item_id).expect("picked from the box");
+        let Some(units) = stack.units.take_units(lot) else {
+            // Picked from these very units; but never make from nothing
             return Err(sqlx::Error::Protocol(format!("stack {item_id} no longer holds {lot:?}")));
+        };
+        match takes.iter_mut().find(|(id, ..)| id == item_id) {
+            Some((_, all, left)) => {
+                all.merge(&units);
+                *left = stack.units.clone();
+            }
+            None => takes.push((*item_id, units, stack.units.clone())),
         }
     }
+    if !takes.is_empty() {
+        let writes: Vec<(Uuid, &Units, &Units)> = takes.iter().map(|(id, taken, left)| (*id, taken, left)).collect();
+        units::write_takes(&mut tx, &writes).await?;
+    }
+    // A stack used up is gone, and its slot free
+    stacks.retain(|s| !takes.iter().any(|(id, _, left)| *id == s.id && left.is_empty()));
 
-    let tool_quality = tool.as_ref().map_or(0, |t| tool_rules::term_quality(&t.tool));
+    let tool_quality = tool.as_ref().map_or(0, |(held, _)| tool_rules::term_quality(&held.tool));
     let quality = output_quality(&inputs, station.quality, tool_quality, recipe);
     let outputs = roll_outputs(recipe, item_types, quality);
 
     let (mut slot_now, mut broken) = (None, None);
-    if let Some(held) = &tool {
-        let Some((wear, now_tool)) = station_tools::wear_installed(&mut tx, station_id, held.item_id).await? else {
+    if let Some((_, slot)) = tool {
+        let Some((wear, now_tool)) = station_tools::wear_slot(&mut tx, station_id, slot).await? else {
             return Ok(Attempt::Blocked(PauseReason::ToolMissing));
         };
         slot_now = Some(now_tool);
@@ -651,13 +869,27 @@ pub async fn craft_once(
     }
 
     for output in &outputs {
-        match craft_completion::place_in(&mut tx, container_id, slot_count, station.owner_id, output).await {
-            Ok(()) => {}
-            Err(reason) if reason == OUTPUT_FULL => return Ok(Attempt::Blocked(PauseReason::OutputFull)),
-            Err(reason) => return Err(sqlx::Error::Protocol(reason)),
+        let made = Units::uniform(output.quantity, output.quality);
+        match place(&stacks, found.slot_count, output) {
+            None => return Ok(Attempt::Blocked(PauseReason::OutputFull)),
+            Some(Place::Onto(id)) => {
+                units::add(&mut tx, id, &made).await?;
+                if let Some(stack) = stacks.iter_mut().find(|s| s.id == id) {
+                    stack.units.merge(&made);
+                }
+            }
+            Some(Place::Slot(slot)) => {
+                let stack = NewStack {
+                    item_type: &output.item_type,
+                    owner_id: Some(station.owner_id),
+                    container_id: Some(container_id),
+                    slot_index: Some(slot),
+                    durability: output.durability,
+                };
+                let id = units::insert_stack(&mut tx, stack, &made).await?;
+                stacks.push(BoxStack { id, item_type: output.item_type.clone(), slot: Some(slot), units: made });
+            }
         }
-        // The station's owner made it, for the Gazette (E3.9)
-        gazette::tally(&mut tx, station.owner_id, &output.item_type, output.quantity).await?;
     }
 
     automation.done += 1;
@@ -783,7 +1015,7 @@ mod tests {
                         let units = Units::from_pairs(
                             (0..rng.gen_range(1..=3)).map(|_| (rng.gen_range(0..=100), rng.gen_range(1..=need.quantity))),
                         );
-                        stacks.push(BoxStack { id: Uuid::new_v4(), item_type: need.item_type.clone(), units });
+                        stacks.push(BoxStack { id: Uuid::new_v4(), item_type: need.item_type.clone(), slot: None, units });
                     }
                 }
                 for i in (1..stacks.len()).rev() {
@@ -838,8 +1070,62 @@ mod tests {
         }
         // Short of an input names it
         let recipe = &recipes["tool_handle"];
-        let sticks = BoxStack { id: Uuid::new_v4(), item_type: "sticks".into(), units: Units::uniform(5, 50) };
+        let sticks = BoxStack { id: Uuid::new_v4(), item_type: "sticks".into(), slot: None, units: Units::uniform(5, 50) };
         assert_eq!(pick_inputs(recipe, &[sticks]).unwrap_err(), "rope");
+    }
+
+    fn output(item_type: &str, quantity: i32, stackable: bool) -> CraftOutput {
+        CraftOutput {
+            item_type: item_type.into(),
+            item_name: item_type.into(),
+            quantity,
+            quality: 60,
+            stackable,
+            durability: None,
+        }
+    }
+
+    fn stack_at(slot: Option<i32>, item_type: &str, units: Units) -> BoxStack {
+        BoxStack { id: Uuid::new_v4(), item_type: item_type.into(), slot, units }
+    }
+
+    /// An output goes where `craft_completion::place_in` would put it
+    #[test]
+    fn an_output_joins_the_first_stack_of_its_kind_or_takes_the_first_free_slot() {
+        let later = stack_at(Some(3), "tool_handle", Units::uniform(1, 40));
+        let first = stack_at(Some(1), "tool_handle", Units::uniform(1, 90));
+        let stacks = vec![stack_at(Some(0), "sticks", Units::uniform(4, 70)), later.clone(), first.clone()];
+        assert_eq!(place(&stacks, 4, &output("tool_handle", 1, true)), Some(Place::Onto(first.id)), "in slot order");
+        assert_eq!(place(&stacks, 4, &output("iron_axe", 1, false)), Some(Place::Slot(2)), "a tool takes a slot");
+        assert_eq!(place(&stacks, 4, &output("rope", 1, true)), Some(Place::Slot(2)));
+        let full = vec![stack_at(Some(0), "tool_handle", Units::uniform(i32::MAX, 50))];
+        assert_eq!(place(&full, 2, &output("tool_handle", 1, true)), Some(Place::Slot(1)), "a stack that can't hold it");
+        assert_eq!(place(&full, 1, &output("rope", 1, true)), None, "no room");
+    }
+
+    /// Stations a restart resumes start part way into their crafts, so they
+    /// don't all complete in one cycle, and none waits longer than a craft
+    #[test]
+    fn a_restart_spreads_the_stations_first_crafts() {
+        let works = Works::default();
+        let ids: Vec<Uuid> = (0..200).map(|_| Uuid::new_v4()).collect();
+        for id in &ids {
+            works.set(*id, &running("tool_handle", AutomationMode::Forever));
+            works.runs().get_mut(id).unwrap().stagger = true;
+        }
+        let duration = 600;
+        let mut due_by_cycle = Vec::new();
+        for _ in 0..duration / CYCLE_TICKS {
+            due_by_cycle.push(ids.iter().filter(|id| works.advance(**id, duration)).count());
+            for id in &ids {
+                if works.runs()[id].progress >= duration {
+                    works.produced(*id, &running("tool_handle", AutomationMode::Forever), &[]);
+                }
+            }
+        }
+        assert_eq!(due_by_cycle.iter().sum::<usize>(), ids.len(), "each once in its first craft's time");
+        assert!(due_by_cycle.iter().all(|n| *n < 20), "spread out: {due_by_cycle:?}");
+        assert_eq!(head_start(ids[0], duration), head_start(ids[0], duration), "the same on every restart");
     }
 
     /// These need the local Postgres (`docker-compose up -d`). Run them with
@@ -1027,6 +1313,14 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(owner, ada, "the output is the owner's");
+            let tallied: i64 = sqlx::query_scalar(
+                "SELECT quantity FROM production_tally WHERE player_id = $1 AND item_type = 'tool_handle'",
+            )
+            .bind(ada)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            assert_eq!(tallied, 1, "the Gazette counts it, once");
 
             let mut produced = 0;
             while let Ok(e) = rx.try_recv() {
@@ -1283,6 +1577,12 @@ mod tests {
             let started = std::time::Instant::now();
             assert_eq!(world.cycle().await.crafts, 500);
             let busy = started.elapsed();
+            let tallied: i64 = sqlx::query_scalar("SELECT quantity FROM production_tally WHERE player_id = $1")
+                .bind(ada)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            assert_eq!(tallied, 500, "one owner's 500 handles, in one row");
             println!("500 stations: a cycle with no craft due {quiet:?}, with all 500 completing {busy:?}");
             assert!(quiet < std::time::Duration::from_millis(100), "the usual cycle took {quiet:?}");
         }

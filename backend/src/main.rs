@@ -48,9 +48,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Starting The Capitol backend server...");
 
-    // Database connection
+    // Database connection. The automation tick holds WORKERS connections
+    // through a busy cycle and the market one through its fills (#212), so
+    // there are enough besides for the tick and the routes
     let db_pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(16)
         .connect(&config.database_url)
         .await?;
 

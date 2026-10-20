@@ -13,6 +13,8 @@
 //! The rules (the mean, the default pick) are `rules::stacking::Units`, shared
 //! with the clients.
 
+use std::collections::HashMap;
+
 #[cfg(test)]
 use capitol_protocol::rules::stacking::Pick;
 use capitol_protocol::rules::stacking::Units;
@@ -28,6 +30,28 @@ pub async fn units_of(conn: &mut PgConnection, item_id: Uuid) -> Result<Units, s
             .fetch_all(&mut *conn)
             .await?;
     Ok(Units::from_pairs(rows.into_iter().map(|(q, c)| (q as i32, c))))
+}
+
+/// [`units_of`] for several stacks in one round trip (#212). A stack that's
+/// gone isn't in it. Lock the stacks' `items` rows first, in a statement of
+/// their own: every change to a stack's units also writes its `items` row
+/// (the summaries' trigger), so then no one else's is half done when this
+/// reads them.
+pub async fn units_of_many(conn: &mut PgConnection, item_ids: &[Uuid]) -> Result<HashMap<Uuid, Units>, sqlx::Error> {
+    if item_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<(Uuid, i16, i32)> = sqlx::query_as(
+        "SELECT item_id, quality, count FROM item_units WHERE item_id = ANY($1) ORDER BY item_id, quality FOR UPDATE",
+    )
+    .bind(item_ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut pairs: HashMap<Uuid, Vec<(i32, i32)>> = HashMap::new();
+    for (item_id, quality, count) in rows {
+        pairs.entry(item_id).or_default().push((quality as i32, count));
+    }
+    Ok(pairs.into_iter().map(|(id, p)| (id, Units::from_pairs(p))).collect())
 }
 
 /// `units` as two arrays, qualities and counts, for `unnest`: one statement
@@ -127,6 +151,39 @@ pub async fn write_take(conn: &mut PgConnection, item_id: Uuid, taken: &Units, l
     .bind(item_id)
     .bind(qualities)
     .bind(counts)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// [`write_take`] for several stacks in one statement (#212): each of `takes`
+/// is (stack, taken, left), the stack's units locked. A stack whose `left` is
+/// empty is deleted, and its units with it.
+pub async fn write_takes(conn: &mut PgConnection, takes: &[(Uuid, &Units, &Units)]) -> Result<(), sqlx::Error> {
+    let emptied: Vec<Uuid> = takes.iter().filter(|(_, _, left)| left.is_empty()).map(|(id, ..)| *id).collect();
+    let (mut ids, mut qualities, mut counts) = (Vec::new(), Vec::new(), Vec::new());
+    for (id, taken, _) in takes.iter().filter(|(_, _, left)| !left.is_empty()) {
+        for (quality, count) in taken.pairs() {
+            ids.push(*id);
+            qualities.push(quality as i16);
+            counts.push(count);
+        }
+    }
+    // As write_take, over disjoint rows: an emptied stack's units go with its
+    // item (the cascade), and none of them is in t
+    sqlx::query(
+        "WITH t(i, q, c) AS (SELECT * FROM unnest($1::uuid[], $2::smallint[], $3::integer[])),
+         emptied AS (DELETE FROM items WHERE id = ANY($4)),
+         gone AS (
+             DELETE FROM item_units u USING t WHERE u.item_id = t.i AND u.quality = t.q AND u.count = t.c
+         )
+         UPDATE item_units u SET count = u.count - t.c
+         FROM t WHERE u.item_id = t.i AND u.quality = t.q AND u.count > t.c",
+    )
+    .bind(ids)
+    .bind(qualities)
+    .bind(counts)
+    .bind(emptied)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -421,5 +478,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(gone, 0);
+    }
+
+    /// Several stacks read and taken from in a statement each (#212): a
+    /// quality taken whole goes, the rest go down, and a stack emptied goes
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn many_stacks_are_read_and_taken_from_at_once(db: PgPool) {
+        let (ada, inventory) = owner_and_box(&db).await;
+        let mixed = stack_of(&db, ada, inventory, 0, "fiber", &Units::from_pairs([(40, 1), (95, 3)])).await;
+        let plain = stack_of(&db, ada, inventory, 1, "fiber", &Units::uniform(4, 60)).await;
+        let spent = stack_of(&db, ada, inventory, 2, "fiber", &Units::uniform(2, 70)).await;
+        let mut conn = db.acquire().await.unwrap();
+        let mut held = units_of_many(&mut conn, &[mixed, plain, spent, Uuid::new_v4()]).await.unwrap();
+        assert_eq!(held.len(), 3, "a stack that isn't there isn't in it");
+        assert_eq!(held[&mixed], Units::from_pairs([(40, 1), (95, 3)]));
+
+        let mut takes = Vec::new();
+        for (id, wanted) in
+            [(mixed, Units::from_pairs([(40, 1), (95, 1)])), (plain, Units::uniform(1, 60)), (spent, Units::uniform(2, 70))]
+        {
+            let stack = held.get_mut(&id).unwrap();
+            let taken = stack.take_units(&wanted).unwrap();
+            takes.push((id, taken, stack.clone()));
+        }
+        let writes: Vec<(Uuid, &Units, &Units)> = takes.iter().map(|(id, t, l)| (*id, t, l)).collect();
+        write_takes(&mut conn, &writes).await.unwrap();
+        drop(conn);
+
+        assert_eq!(units(&db, mixed).await, Units::uniform(2, 95));
+        assert_eq!(units(&db, plain).await, Units::uniform(3, 60));
+        let gone: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE id = $1")
+            .bind(spent)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(gone, 0, "the emptied stack is deleted");
     }
 }
