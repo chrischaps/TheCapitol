@@ -178,9 +178,19 @@ const FORD_LOUD: f32 = 0.35;
 
 impl WildWater {
     pub fn new(terrain: &capitol_core::protocol::terrain::TerrainResponse) -> Self {
+        Self::of(crate::world::wild_water::Water {
+            rivers: &terrain.rivers,
+            streams: &terrain.streams,
+            lakes: &terrain.lakes,
+            fords: &terrain.fords,
+        })
+    }
+
+    /// The same for water as the land draws it, run on past the edge (#229).
+    pub fn of(water: crate::world::wild_water::Water) -> Self {
         use crate::coords::{to_world, S};
         let mut courses = Vec::new();
-        for (list, loud) in [(&terrain.rivers, 1.0), (&terrain.streams, STREAM_LOUD)] {
+        for (list, loud) in [(water.rivers, 1.0), (water.streams, STREAM_LOUD)] {
             for course in list {
                 for w in course.points.windows(2) {
                     let half = 0.25 * (w[0].width + w[1].width) as f32 * S;
@@ -190,12 +200,12 @@ impl WildWater {
         }
         Self {
             courses,
-            fords: terrain
+            fords: water
                 .fords
                 .iter()
                 .map(|f| (to_world(f.x, f.y), (0.5 * f.width) as f32 * S))
                 .collect(),
-            lakes: terrain
+            lakes: water
                 .lakes
                 .iter()
                 .flat_map(|l| &l.rings)

@@ -15,11 +15,13 @@
 //!   the plain the field is flat but for the beds.
 //! - **Past the world's edge** (r6000) the ranges run on and settle to flat
 //!   by [`OUTER`], where the flat disc takes over again, so the horizon is
-//!   hills, not a wall.
+//!   hills, not a wall. The rivers and streams that run off the edge run on
+//!   down them to ponds (`edge_water`, #229), and are carved like the rest.
 //!
 //! The meshes are `land_mesh`.
 
 use crate::coords::{layer, to_world, S};
+use crate::world::edge_water::Valleys;
 use capitol_protocol::land::{self, LandParams, Water};
 use capitol_protocol::rules::{CENTER_X, CENTER_Y, WILDERNESS_OUTER_RADIUS};
 use capitol_protocol::terrain::TerrainResponse;
@@ -59,28 +61,45 @@ fn smoothstep(lo: f64, hi: f64, x: f64) -> f64 {
 }
 
 /// The land's height at server (x, y), in server units above the flat
-/// ground: the protocol's carved ground, flat inside [`FROM`] with the
-/// carve faded in across the seam, and settled to flat by [`OUTER`].
+/// ground, before the water's carve: the protocol's, settled to flat past
+/// the world's edge by [`OUTER`]. It's exactly `land::height_at` inside
+/// [`SETTLE_FROM`].
+pub fn settled(x: f64, y: f64, params: &LandParams) -> f64 {
+    let r = (x - CENTER_X).hypot(y - CENTER_Y);
+    if r >= OUTER {
+        return 0.0;
+    }
+    let raw = land::height_at(x, y, params);
+    if r <= SETTLE_FROM {
+        raw
+    } else {
+        raw * (1.0 - smoothstep(SETTLE_FROM, OUTER, r))
+    }
+}
+
+/// The land's height at server (x, y), in server units above the flat
+/// ground: the [`settled`] ground, lowered into the valleys past the edge,
+/// with the water carved into it, flat inside [`FROM`] with the carve
+/// faded in across the seam.
 #[cfg(test)]
-pub fn height(x: f64, y: f64, params: &LandParams, water: &Water) -> f64 {
-    carved(x, y, params, water).0
+pub fn height(x: f64, y: f64, params: &LandParams, water: &Water, valleys: &Valleys) -> f64 {
+    carved(x, y, params, water, valleys).0
 }
 
 /// [`height`], how deep the water cut into the land there, and how wet
 /// the ground is (the cut of the ground raised by [`WET_RISE`]: deep in a
 /// bed, fading out a metre or so up the banks).
-fn carved(x: f64, y: f64, params: &LandParams, water: &Water) -> (f64, f64, f64) {
+fn carved(x: f64, y: f64, params: &LandParams, water: &Water, valleys: &Valleys) -> (f64, f64, f64) {
     let r = (x - CENTER_X).hypot(y - CENTER_Y);
     if r <= FROM || r >= OUTER {
         return (0.0, 0.0, 0.0);
     }
-    let raw = land::height_at(x, y, params);
+    let ground = valleys.lower(settled(x, y, params), x, y);
     let seam = smoothstep(FROM, FROM + SEAM, r);
-    let cut = (raw - land::carve(raw, x, y, water)) * seam;
-    let raised = raw + WET_RISE;
+    let cut = (ground - land::carve(ground, x, y, water)) * seam;
+    let raised = ground + WET_RISE;
     let wet = (raised - land::carve(raised, x, y, water)) * seam;
-    let settle = 1.0 - smoothstep(SETTLE_FROM, OUTER, r);
-    (raw * settle - cut, cut, wet)
+    (ground - cut, cut, wet)
 }
 
 /// Server (x, y) of sample (i, j): column i runs along +x, row j along +y.
@@ -103,7 +122,7 @@ struct Sample {
 /// land's height in metres), how deep in metres the water cut each (the
 /// grass keeps off the beds), and how wet each is (the banks' tint, W10).
 /// Rows are shared out over `threads`.
-pub fn sample(params: &LandParams, water: &Water, threads: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+pub fn sample(params: &LandParams, water: &Water, valleys: &Valleys, threads: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut samples = vec![Sample { y: layer::GROUND, ..Sample::default() }; SAMPLES * SAMPLES];
     let rows_each = SAMPLES.div_ceil(threads.max(1));
     std::thread::scope(|scope| {
@@ -113,7 +132,7 @@ pub fn sample(params: &LandParams, water: &Water, threads: usize) -> (Vec<f32>, 
                     let j = k * rows_each + dj;
                     for (i, s) in row.iter_mut().enumerate() {
                         let [x, y] = sample_at(i, j);
-                        let (height, cut, wet) = carved(x, y, params, water);
+                        let (height, cut, wet) = carved(x, y, params, water, valleys);
                         *s = Sample {
                             y: layer::GROUND + (height as f32) * S,
                             cut: (cut as f32) * S,
@@ -132,12 +151,14 @@ pub fn sample(params: &LandParams, water: &Water, threads: usize) -> (Vec<f32>, 
 }
 
 /// A sampled land: the field, and the depth the water cut at each sample
-/// and how wet it is there, both in metres; and the water on it (W10).
+/// and how wet it is there, both in metres; and the water on it (W10),
+/// with the courses it was drawn from, run on past the edge (#229).
 pub struct Sampled {
     pub field: GroundField,
     pub cut: Vec<f32>,
     pub wet: Vec<f32>,
     pub water: crate::world::wild_water::Bodies,
+    pub drawn: Inputs,
 }
 
 /// The cut, in metres, at the sample of `cut` (a [`Sampled::cut`]) nearest
@@ -197,17 +218,48 @@ impl Inputs {
         Water::new(self.water.0.iter().chain(&self.water.1), &self.water.2)
     }
 
+    /// The valleys of the courses past the edge (#229).
+    fn valleys(&self) -> Valleys {
+        Valleys::new(self.water.0.iter().chain(&self.water.1))
+    }
+
+    /// The water as `wild_water` and the sound take it.
+    pub fn wild(&self) -> crate::world::wild_water::Water<'_> {
+        crate::world::wild_water::Water {
+            rivers: &self.water.0,
+            streams: &self.water.1,
+            lakes: &self.water.2,
+            fords: &self.fords,
+        }
+    }
+
+    /// These inputs with every course that runs off the world's edge run
+    /// on down the land past it, to a pond or into another (#229).
+    fn beyond_the_edge(mut self, threads: usize) -> Self {
+        let (rivers, streams, lakes) = &mut self.water;
+        crate::world::edge_water::run_on(rivers, streams, lakes, &self.params, threads);
+        self
+    }
+
     /// The water bodies on `field` (W10).
     fn bodies(&self, field: &GroundField) -> crate::world::wild_water::Bodies {
-        crate::world::wild_water::build(
-            crate::world::wild_water::Water {
-                rivers: &self.water.0,
-                streams: &self.water.1,
-                lakes: &self.water.2,
-                fords: &self.fords,
-            },
+        crate::world::wild_water::build(self.wild(), field)
+    }
+
+    /// Samples the land on worker threads, with its water run on past the
+    /// edge.
+    fn sample(self, threads: usize) -> Sampled {
+        let drawn = self.beyond_the_edge(threads);
+        let (heights, cut, wet) = sample(&drawn.params, &drawn.water(), &drawn.valleys(), threads);
+        let field = field(heights);
+        let water = drawn.bodies(&field);
+        Sampled {
             field,
-        )
+            cut,
+            wet,
+            water,
+            drawn,
+        }
     }
 }
 
@@ -234,20 +286,12 @@ impl Builder {
             .spawn(move || {
                 let started = std::time::Instant::now();
                 let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-                let (heights, cut, wet) = sample(&job.params, &job.water(), threads);
-                let field = field(heights);
-                let sampled_in = started.elapsed().as_millis();
-                let water = job.bodies(&field);
+                let sampled = job.sample(threads);
                 tracing::info!(
-                    "land: sampled {SAMPLES}x{SAMPLES} on {threads} threads in {sampled_in} ms, its water in {} ms",
-                    started.elapsed().as_millis() - sampled_in
+                    "land: sampled {SAMPLES}x{SAMPLES} with its water on {threads} threads in {} ms",
+                    started.elapsed().as_millis()
                 );
-                let _ = send.send(Sampled {
-                    field,
-                    cut,
-                    wet,
-                    water,
-                });
+                let _ = send.send(sampled);
             });
         if let Err(e) = spawned {
             tracing::warn!("land: no thread to sample it on: {e}");
@@ -323,19 +367,11 @@ pub(crate) mod tests {
     pub(crate) fn fixture_land() -> &'static Sampled {
         static F: OnceLock<Sampled> = OnceLock::new();
         F.get_or_init(|| {
-            let inputs = Inputs::of(fixture());
             let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
             let started = std::time::Instant::now();
-            let (heights, cut, wet) = sample(&inputs.params, &inputs.water(), threads);
+            let sampled = Inputs::of(fixture()).sample(threads);
             eprintln!("land: sampled in {} ms", started.elapsed().as_millis());
-            let field = field(heights);
-            let water = inputs.bodies(&field);
-            Sampled {
-                field,
-                cut,
-                wet,
-                water,
-            }
+            sampled
         })
     }
 
@@ -369,11 +405,11 @@ pub(crate) mod tests {
     #[test]
     fn the_field_agrees_with_the_protocol_at_its_samples() {
         let f = fixture_field();
-        let inputs = Inputs::of(fixture());
-        let water = inputs.water();
+        let inputs = &fixture_land().drawn;
+        let (water, valleys) = (inputs.water(), inputs.valleys());
         for (i, j) in [(1000, 300), (200, 768), (768, 1400), (1300, 1250), (40, 40)] {
             let [x, y] = sample_at(i, j);
-            let want = height(x, y, &inputs.params, &water) as f32 * S;
+            let want = height(x, y, &inputs.params, &water, &valleys) as f32 * S;
             let got = rise_on(f, to_world(x, y));
             assert!((got - want).abs() < 1e-3, "({i}, {j}): {got} against {want}");
         }
@@ -381,15 +417,15 @@ pub(crate) mod tests {
 
     #[test]
     fn the_land_is_continuous_across_the_seam_and_the_settling() {
-        let inputs = Inputs::of(fixture());
-        let water = inputs.water();
+        let inputs = &fixture_land().drawn;
+        let (water, valleys) = (inputs.water(), inputs.valleys());
         for deg in 0..720 {
             let deg = deg as f64 * 0.5;
             for edge in [FROM, OUTER] {
                 let [x0, y0] = polar(edge - 0.5, deg);
                 let [x1, y1] = polar(edge + 0.5, deg);
-                let a = height(x0, y0, &inputs.params, &water);
-                let b = height(x1, y1, &inputs.params, &water);
+                let a = height(x0, y0, &inputs.params, &water, &valleys);
+                let b = height(x1, y1, &inputs.params, &water, &valleys);
                 assert!((a - b).abs() < 0.5, "at {deg}° r{edge}: {a} to {b}");
             }
         }
@@ -397,8 +433,8 @@ pub(crate) mod tests {
 
     #[test]
     fn the_rivers_are_cut_into_the_wilds() {
-        let inputs = Inputs::of(fixture());
-        let water = inputs.water();
+        let inputs = &fixture_land().drawn;
+        let (water, valleys) = (inputs.water(), inputs.valleys());
         let mut cut = 0;
         let mut checked = 0;
         for river in &fixture().rivers {
@@ -408,7 +444,7 @@ pub(crate) mod tests {
                     continue;
                 }
                 checked += 1;
-                let h = height(p.x, p.y, &inputs.params, &water);
+                let h = height(p.x, p.y, &inputs.params, &water, &valleys);
                 if h <= p.surface - 0.5 * p.depth {
                     cut += 1;
                 }

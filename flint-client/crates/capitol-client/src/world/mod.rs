@@ -3,7 +3,7 @@
 //! the water (P3.3), the roads (P3.4), the bridges (P3.5), the plots
 //! (P3.6), the Capitol tower (P3.7), the Exchange hall (E3.7), the
 //! wilds' land (W9, `land` and `land_mesh`) and its water (W10,
-//! `wild_water`). A layer
+//! `wild_water`, run on past the edge by `edge_water`, #229). A layer
 //! with thousands of pieces is split into `sector`s, one mesh each, so each
 //! part culls on its own.
 //!
@@ -12,6 +12,7 @@
 
 pub mod bazaar;
 pub mod bridges;
+pub mod edge_water;
 pub mod geom;
 pub mod grass;
 pub mod ground;

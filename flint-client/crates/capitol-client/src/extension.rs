@@ -445,6 +445,8 @@ impl CapitolExtension {
             // The wilds' water lies in its beds (W10), with bridges where
             // a trail crosses a river with no ford.
             world::wild_water::upload(gpu, &sampled.water);
+            // Heard as drawn: the courses past the edge run on (#229).
+            self.sound.set_wild_water(crate::sound::WildWater::of(sampled.drawn.wild()));
             if let Some(terrain) = &self.built {
                 let ground = |at: [f32; 2]| crate::coords::layer::GROUND + world::land::rise_on(&field, at);
                 let spans = world::bridges::trail_spans(terrain, ground);

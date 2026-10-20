@@ -258,8 +258,8 @@ fn course_mesh(
                 }
             }
         }
-        // A course to the edge stops dead on r6000, though the land runs
-        // on past it (#229).
+        // The land runs a course to the edge on to a pond (`edge_water`,
+        // #229), so one still ending there is off the field.
         Mouth::Edge | Mouth::PetersOut => {}
     }
     if points.len() < 2 {
@@ -380,19 +380,15 @@ fn smoothstep(lo: f64, hi: f64, x: f64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::land::tests::{fixture, fixture_field};
-    use std::sync::OnceLock;
+    use crate::world::land::tests::{fixture_field, fixture_land};
+
+    /// The fixture's water as the land draws it, run on past the edge.
+    fn fixture() -> Water<'static> {
+        fixture_land().drawn.wild()
+    }
 
     fn bodies() -> &'static Bodies {
-        static B: OnceLock<Bodies> = OnceLock::new();
-        B.get_or_init(|| {
-            let started = std::time::Instant::now();
-            let t = fixture();
-            let water = Water { rivers: &t.rivers, streams: &t.streams, lakes: &t.lakes, fords: &t.fords };
-            let b = build(water, fixture_field());
-            eprintln!("wild water: built in {} ms", started.elapsed().as_millis());
-            b
-        })
+        &fixture_land().water
     }
 
     /// Whether world (X, Z) is under one of `mesh`'s triangles.
@@ -424,7 +420,7 @@ mod tests {
         let b = bodies();
         // The middle of every course, and the middle of every lake's
         // first ring's bounding box nudged onto the water.
-        for (list, mesh) in [(&t.rivers, &b.rivers), (&t.streams, &b.streams)] {
+        for (list, mesh) in [(t.rivers, &b.rivers), (t.streams, &b.streams)] {
             for course in list.iter() {
                 let mid = &course.points[course.points.len() / 2];
                 if course.points.len() < 3 || mid.width < 1.0 {
@@ -435,7 +431,7 @@ mod tests {
                 assert!(covered(mesh, at) || covered(&b.lakes, at), "{} at its middle", course.id);
             }
         }
-        for lake in &t.lakes {
+        for lake in t.lakes {
             let (x, y) = lake.rings[0][0];
             // A point just inside the shore.
             let inside = (0..64)
@@ -522,9 +518,9 @@ mod tests {
     #[test]
     fn a_tributary_stops_inside_the_course_it_joins() {
         let t = fixture();
-        let all: Vec<&WaterCourse> = t.rivers.iter().chain(&t.streams).collect();
+        let all: Vec<&WaterCourse> = t.rivers.iter().chain(t.streams).collect();
         let mut seen = 0;
-        for course in &t.streams {
+        for course in t.streams {
             let Mouth::Joins(id) = &course.mouth else { continue };
             let main = all.iter().find(|c| &c.id == id).unwrap();
             let end = course.points.last().unwrap();

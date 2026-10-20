@@ -190,6 +190,10 @@ const LAKE_SHELF_DEPTH: f64 = 2.0;
 const LAKE_SHELF_SLOPE: f64 = 0.25;
 /// The side of the index's buckets.
 const BUCKET: f64 = 120.0;
+/// How far past the world's square the index reaches. Nothing the server
+/// makes lies out there, but the clients carry the rivers that run off the
+/// edge on over the land past it (#229), and carve them too.
+const BEYOND: f64 = 1800.0;
 
 /// The ground `h` at `(x, y)` with the water's beds and banks cut into it.
 ///
@@ -252,7 +256,8 @@ fn nearest_on_segment(a: (f64, f64), b: (f64, f64), x: f64, y: f64) -> (f64, f64
 pub struct Water {
     segments: Vec<Segment>,
     lakes: Vec<LakeShore>,
-    /// Buckets of [`BUCKET`] over the world, row-major, `cols` across.
+    /// Buckets of [`BUCKET`] over the world and [`BEYOND`] round it,
+    /// row-major, `cols` across.
     buckets: Vec<Bucket>,
     cols: usize,
 }
@@ -305,7 +310,7 @@ impl Water {
     /// Indexes the water. Rivers and streams carve alike, so they can come
     /// chained in one iterator.
     pub fn new<'a>(courses: impl IntoIterator<Item = &'a WaterCourse>, lakes: &[Lake]) -> Self {
-        let cols = (rules::WORLD_SIZE / BUCKET).ceil() as usize;
+        let cols = ((rules::WORLD_SIZE + 2.0 * BEYOND) / BUCKET).ceil() as usize;
         let mut water = Water { buckets: vec![Bucket::default(); cols * cols], cols, ..Water::default() };
         for course in courses {
             for w in course.points.windows(2) {
@@ -345,7 +350,7 @@ impl Water {
 
     fn each_bucket(&mut self, min: (f64, f64), max: (f64, f64), pad: f64, mut add: impl FnMut(&mut Bucket)) {
         let last = self.cols as i64 - 1;
-        let cell = |v: f64| ((v / BUCKET).floor() as i64).clamp(0, last) as usize;
+        let cell = |v: f64| (((v + BEYOND) / BUCKET).floor() as i64).clamp(0, last) as usize;
         for j in cell(min.1 - pad)..=cell(max.1 + pad) {
             for i in cell(min.0 - pad)..=cell(max.0 + pad) {
                 add(&mut self.buckets[j * self.cols + i]);
@@ -354,10 +359,12 @@ impl Water {
     }
 
     fn bucket(&self, x: f64, y: f64) -> Option<&Bucket> {
-        if self.cols == 0 || !(0.0..rules::WORLD_SIZE).contains(&x) || !(0.0..rules::WORLD_SIZE).contains(&y) {
+        let span = -BEYOND..rules::WORLD_SIZE + BEYOND;
+        if self.cols == 0 || !span.contains(&x) || !span.contains(&y) {
             return None;
         }
-        self.buckets.get((y / BUCKET) as usize * self.cols + (x / BUCKET) as usize)
+        let cell = |v: f64| ((v + BEYOND) / BUCKET) as usize;
+        self.buckets.get(cell(y) * self.cols + cell(x))
     }
 }
 
@@ -588,6 +595,23 @@ mod tests {
         }
         let flat = LandParams { ridge_count: 0, ..LandParams::default() };
         assert_eq!(massif_at(CENTER_X + 5000.0, CENTER_Y, &flat), None);
+    }
+
+    #[test]
+    fn water_past_the_worlds_square_carves_too() {
+        use crate::terrain::{Mouth, WaterCourse, WaterPoint};
+        // A client's river on past the edge (#229), off the square's west side.
+        let point = |x: f64| WaterPoint { x, y: CENTER_Y, width: 40.0, depth: 2.0, surface: 50.0 };
+        let course = WaterCourse {
+            id: "river_0".into(),
+            source: None,
+            mouth: Mouth::Edge,
+            points: vec![point(-1500.0), point(-100.0)],
+        };
+        let water = Water::new([&course], &[]);
+        assert_eq!(carve(100.0, -800.0, CENTER_Y, &water), 48.0, "the bed's middle");
+        assert_eq!(carve(100.0, -800.0, CENTER_Y + 200.0, &water), 100.0, "out of reach");
+        assert_eq!(carve(100.0, -BEYOND - 1.0, CENTER_Y, &water), 100.0, "past the index");
     }
 
     /// The same bits on every platform: CI runs this on Linux, and it was
