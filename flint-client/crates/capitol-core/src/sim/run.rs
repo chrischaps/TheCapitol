@@ -16,10 +16,12 @@ use capitol_protocol::rules::market::{OrderSide, OrderStatus};
 use capitol_protocol::rules::Zone;
 use uuid::Uuid;
 
-use super::plan::{self, Holdings, Step};
+use super::plan::{Holdings, Step};
 use super::report::{BotRun, Entry, Report, MAKER_ROLE};
-use super::{Role, Trade, MARKET_ITEMS};
+use super::{Errand, Role, Trade, MARKET_ITEMS};
 use crate::bot::{Account, Bot, BotError};
+use crate::catalog::Catalog;
+use crate::citizen::decide::{Choice, Decision, Mind, Place, Question, Quote, Situation, When, Who};
 use crate::citizen::town::{Standing, Tether};
 use crate::market::MarketEvent;
 use crate::market_maker::{self, Maker, MakerConfig};
@@ -138,7 +140,7 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
                     let started = *start.get_or_init(Instant::now);
                     let scale = scale.get().copied().unwrap_or(1.0);
                     match signed_in {
-                        Ok(bot) => SimBot::new(bot, role, i as u64, scale, started, trading).play(config.hours),
+                        Ok(bot) => SimBot::new(bot, role, i as u64, scale, started, trading, Mind::rules()).play(config.hours),
                         Err(e) => BotRun {
                             name: account.name.clone(),
                             role: role.to_string(),
@@ -162,19 +164,20 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
     Ok((report, md, csv))
 }
 
-/// A citizen's life (C1.1): `bot` plays `role` until its town says stop.
-/// It trades with whatever is on the book, at the hall, as the swarm does
-/// with its makers; the town grants nobody anything (D2), so the book holds
-/// only what players and citizens put there. `Ok` once stopped; `Err` when
-/// the bot couldn't start, or the server won't have it back.
-pub(crate) fn live(mut bot: Bot, role: Role, seed: u64, town: &Tether) -> Result<(), BotError> {
+/// A citizen's life (C1.1): `bot` plays `role` until its town says stop,
+/// with `mind` making its decisions (C1.3). It trades with whatever is on
+/// the book, at the hall, as the swarm does with its makers; the town grants
+/// nobody anything (D2), so the book holds only what players and citizens
+/// put there. `Ok` once stopped; `Err` when the bot couldn't start, or the
+/// server won't have it back.
+pub(crate) fn live(mut bot: Bot, role: Role, seed: u64, mind: Mind, town: &Tether) -> Result<(), BotError> {
     let scale = bot.health()?.sim_tick_scale.unwrap_or(1.0);
     for item in MARKET_ITEMS {
         bot.watch_market(item)?;
     }
     let strands = bot.state().strands();
     town.health(|h| h.strands = strands);
-    let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true);
+    let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true, mind);
     match citizen.work(None, Some(town)) {
         Some(e) => Err(e),
         None => Ok(()),
@@ -260,10 +263,15 @@ struct SimBot {
     rng: u64,
     /// Whether there are makers to trade with
     trading: bool,
+    /// What decides at each decision point (C1.3). The sim's bots have the
+    /// rules alone, middling in everything.
+    mind: Mind,
+    /// The last step's label: what "carry on" means on a work menu.
+    doing: Option<String>,
 }
 
 impl SimBot {
-    fn new(mut bot: Bot, role: Role, n: u64, scale: f64, start: Instant, trading: bool) -> SimBot {
+    fn new(mut bot: Bot, role: Role, n: u64, scale: f64, start: Instant, trading: bool, mind: Mind) -> SimBot {
         bot.record();
         let me = bot.state().me();
         // Stations kept from an earlier run on the same accounts.
@@ -285,6 +293,8 @@ impl SimBot {
             deed_cost: DEFAULT_DEED,
             rng: 0x9E37_79B9_7F4A_7C15 ^ (n + 1).wrapping_mul(0xBF58_476D_1CE4_E5B9),
             trading,
+            mind,
+            doing: None,
         }
     }
 
@@ -324,22 +334,17 @@ impl SimBot {
         while deadline.is_none_or(|d| Instant::now() < d) && !stopped() {
             let catalog = self.bot.state().catalog().clone();
             let holdings = self.holdings();
-            let step = if self.role.banks(&holdings) {
-                Ok(Some(Step::Deposit))
-            } else {
-                plan::next(&catalog, &holdings, &self.role.goal(&catalog, &holdings))
+            // What to work on, then whether to trade first (C1.3)
+            let errand = match self.role.errands(&catalog, &holdings) {
+                Ok(errands) if errands.is_empty() => Ok(None),
+                Ok(errands) => Ok(Some(self.choose_errand(&catalog, &holdings, errands))),
+                Err(stuck) => Err(stuck),
             };
-            let trade = match &step {
-                Ok(Some(step)) if self.trading => self.role.trade(&catalog, &holdings, step, |item, side| {
-                    let book = self.bot.state().market().book(item)?;
-                    match side {
-                        OrderSide::Buy => book.best_bid(),
-                        OrderSide::Sell => book.best_ask(),
-                    }
-                }),
+            let trade = match &errand {
+                Ok(Some(errand)) if self.trading => self.choose_trade(&holdings, errand),
                 _ => None,
             };
-            match step {
+            match errand.map(|e| e.map(|e| e.step)) {
                 Ok(Some(step)) => {
                     let label = trade.as_ref().map_or_else(|| step.label(&catalog), Trade::label);
                     if let Some(town) = town {
@@ -350,6 +355,7 @@ impl SimBot {
                         Some(trade) => self.trade(trade),
                         None => self.take(&step),
                     };
+                    self.doing = Some(step.label(&catalog));
                     self.journal();
                     let ok = result.is_ok();
                     self.entries.push(Entry::Spent {
@@ -392,15 +398,15 @@ impl SimBot {
                             failures += 1;
                             if failures >= FAILURES_BEFORE_REST {
                                 failures = 0;
-                                self.rest(town);
+                                self.rest(town, "resting");
                             }
                         }
                     }
                 }
-                Ok(None) => self.rest(town),
+                Ok(None) => self.free_time(town),
                 Err(stuck) => {
                     self.entries.push(Entry::Stuck { reason: stuck.0 });
-                    self.rest(town);
+                    self.free_time(town);
                 }
             }
             if let Some(town) = town {
@@ -429,13 +435,134 @@ impl SimBot {
         }
     }
 
+    /// Asks the mind what to work on, from the role's errands. While a
+    /// layer thinks, it carries on with the last step's errand.
+    fn choose_errand(&mut self, catalog: &Catalog, holdings: &Holdings, mut errands: Vec<Errand>) -> Errand {
+        let menu: Vec<Choice> = errands.iter().map(|e| e.choice(catalog)).collect();
+        let carry_on = self
+            .doing
+            .as_ref()
+            .and_then(|doing| errands.iter().position(|e| &e.step.label(catalog) == doing))
+            .unwrap_or(0);
+        let pick = self
+            .decide(Question::Work, menu, carry_on, holdings)
+            .map_or(0, |(d, _)| d.pick);
+        errands.swap_remove(pick)
+    }
+
+    /// Asks the mind whether to sell the role's product before `errand`,
+    /// and if not, whether to buy what it would gather. `None`: just do it.
+    fn choose_trade(&mut self, holdings: &Holdings, errand: &Errand) -> Option<Trade> {
+        if let Some(product) = self.role.product() {
+            let (bid, ask) = self.best(product);
+            if let Some(menu) = self.role.sell_menu(holdings, errand.goal.as_ref(), bid, ask) {
+                let question = Question::Sell { item: product.into() };
+                if let Some((d, Choice::Sell { item, .. })) = self.decide(question, menu, 1, holdings) {
+                    return Some(Trade::Sell {
+                        item,
+                        quantity: d.quantity?,
+                        price: d.price?,
+                    });
+                }
+            }
+        }
+        let Step::Gather { item, .. } = &errand.step else {
+            return None;
+        };
+        let (_, ask) = self.best(item);
+        let menu = self.role.buy_menu(holdings, &errand.step, ask)?;
+        let question = Question::Buy { item: item.clone() };
+        match self.decide(question, menu, 1, holdings)? {
+            (d, Choice::Buy { item, .. }) => Some(Trade::Buy {
+                item,
+                quantity: d.quantity?,
+                price: d.price?,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Time on its hands: rest where it is, or pass it at the hall.
+    fn free_time(&mut self, town: Option<&Tether>) {
+        let holdings = self.holdings();
+        let menu = vec![Choice::Rest, Choice::Hall];
+        if let Some((_, Choice::Hall)) = self.decide(Question::FreeTime, menu, 0, &holdings) {
+            if let Some(town) = town {
+                town.health(|h| h.doing(Standing::Working, "walk to the hall"));
+            }
+            // A walk that doesn't get there rests where it got to; a lost
+            // connection shows at the next step.
+            if self.bot.go_to_exchange().is_ok() {
+                return self.rest(town, "resting at the hall");
+            }
+        }
+        self.rest(town, "resting");
+    }
+
+    /// The mind's answer to `question` from `menu`: the decision, and the
+    /// entry it picked. `carry_on` is the entry that means carrying on.
+    fn decide(&mut self, question: Question, menu: Vec<Choice>, carry_on: usize, holdings: &Holdings) -> Option<(Decision, Choice)> {
+        let s = self.situation(question, menu, carry_on, holdings);
+        let d = self.mind.ask(&s).decision?;
+        Some((d, s.choice(&d).clone()))
+    }
+
+    /// What a layer knows at a decision point.
+    fn situation(&self, question: Question, menu: Vec<Choice>, carry_on: usize, holdings: &Holdings) -> Situation {
+        let state = self.bot.state();
+        let (x, y) = self.bot.position();
+        let market = if self.trading {
+            MARKET_ITEMS
+                .iter()
+                .map(|item| {
+                    let (bid, ask) = self.best(item);
+                    Quote {
+                        item: item.to_string(),
+                        bid,
+                        ask,
+                        last: state.market().trades(item).next().map(|t| t.price),
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Situation {
+            who: Who {
+                name: self.bot.name().to_string(),
+                role: self.role.slug().to_string(),
+                temperament: self.mind.temperament,
+            },
+            at: Place {
+                x,
+                y,
+                zone: Zone::from_position(x, y).as_str().to_string(),
+            },
+            when: When {
+                time_of_day: state.time_of_day(),
+                hours: self.now(),
+            },
+            holdings: holdings.into(),
+            market,
+            question,
+            menu,
+            carry_on: Some(carry_on),
+        }
+    }
+
+    /// The best bid and ask on `item`'s book.
+    fn best(&self, item: &str) -> (Option<i64>, Option<i64>) {
+        let book = self.bot.state().market().book(item);
+        (book.and_then(|b| b.best_bid()), book.and_then(|b| b.best_ask()))
+    }
+
     /// Sits out a game minute, or less if the town says stop.
-    fn rest(&mut self, town: Option<&Tether>) {
+    fn rest(&mut self, town: Option<&Tether>, activity: &str) {
         let Some(town) = town else {
             let _ = self.bot.idle(self.wall(60.0));
             return;
         };
-        town.health(|h| h.doing(Standing::Resting, "resting"));
+        town.health(|h| h.doing(Standing::Resting, activity));
         let end = Instant::now() + self.wall(60.0);
         while !town.stopped() {
             let left = end.saturating_duration_since(Instant::now());

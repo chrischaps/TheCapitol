@@ -11,6 +11,11 @@
 # The server, unless --server or $CAPITOL_SERVER says otherwise.
 server = "http://localhost:3000"
 
+# How citizens make up their minds (C1.3): a stack of decision layers,
+# bottom first, each asked in turn until one is sure. "rules" is the only
+# layer so far, and the default. A citizen may name its own `layers`.
+layers = ["rules"]
+
 [[citizen]]
 name = "Ada Reeder"
 role = "gatherer-fiber"

@@ -67,6 +67,14 @@ impl Goal {
             n,
         }
     }
+
+    /// As a citizen's menu names it: `hold 21 plank`, `own a forge`.
+    pub fn label(&self) -> String {
+        match self {
+            Goal::Hold { item, n } => format!("hold {n} {item}"),
+            Goal::Station(station) => format!("own a {station}"),
+        }
+    }
 }
 
 /// One thing to do.
