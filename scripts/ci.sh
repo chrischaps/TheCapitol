@@ -18,6 +18,15 @@
 # backend/.env, so when it's unset this borrows DATABASE_URL and REDIS_URL
 # from the main checkout's.
 #
+# The db step holds a lock on the Postgres it tests against (#227). sqlx names
+# each test's database after the test's path, so two checkouts running the
+# same test on one server share a database, and each drops it under the other
+# (55006, "being accessed by other users"). A database per checkout wouldn't
+# help: database names are global to the server. So the tests build first,
+# then wait their turn. The lock is a directory in the temp dir named after
+# the server's host and port, so every checkout on the machine shares it; a
+# lock whose holder has died is taken over.
+#
 # Use it as land's verify: scripts/issue.sh land <n> --verify "scripts/ci.sh"
 
 set -euo pipefail
@@ -45,6 +54,35 @@ main_env() {
     sed -n "s/^$1=//p" "$env" | tr -d '\r' | tail -1
 }
 
+# The lock for the Postgres at URL, as a directory under the temp dir.
+DB_LOCK=
+db_lock() {
+    local hostport dir owner pid waited=0
+    hostport=$(printf '%s' "$1" | sed -E 's#^[a-z]+://([^@/]*@)?([^/?]*).*#\2#; s#[^A-Za-z0-9]#_#g')
+    dir="${TMPDIR:-/tmp}/capitol-ci-db-${hostport:-default}.lock"
+    until mkdir "$dir" 2>/dev/null; do
+        owner=$(cat "$dir/owner" 2>/dev/null || true)
+        pid=${owner%% *}
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            echo "== ci.sh: db: taking the lock from $owner, which has gone" >&2
+            rm -rf "$dir"
+            continue
+        fi
+        if [ -z "$owner" ] && [ -n "$(find "$dir" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+            rm -rf "$dir"   # made but never written: its holder died at once
+            continue
+        fi
+        if [ $((waited % 60)) -eq 0 ]; then
+            echo "== ci.sh: db: waiting for ${owner:-another run} to finish with the database (${waited}s)" >&2
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    echo "$$ $(basename "$ROOT") $(date '+%H:%M:%S')" > "$dir/owner"
+    DB_LOCK=$dir
+    trap 'rm -rf "$DB_LOCK"' EXIT
+}
+
 step() {
     echo "== ci.sh: $1" >&2
     case $1 in
@@ -62,7 +100,10 @@ step() {
             fi
             local skips=()
             for t in "${DB_SKIP[@]}"; do skips+=(--skip "$t"); done
-            cargo test -p capitol-backend -- --ignored "${skips[@]}" ;;
+            cargo test -p capitol-backend --no-run
+            db_lock "$DATABASE_URL"
+            cargo test -p capitol-backend -- --ignored "${skips[@]}"
+            rm -rf "$DB_LOCK"; DB_LOCK=; trap - EXIT ;;
         flint)
             # Per crate, never --workspace: the engine's flint-android needs
             # ndk-sys. capitol-core's live.rs tests need a server and stay
