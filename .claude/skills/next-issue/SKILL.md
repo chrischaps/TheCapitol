@@ -1,33 +1,50 @@
 ---
 name: next-issue
-description: Pick up and implement the next open issue for The Capitol (the Economy v1 queue, the Flint client queue, or a specific issue number). Use when asked to "tackle the next issue", "do the next one", "work on #N", or to continue the Economy v1 or Flint client work. Finds the next unblocked issue on GitHub, loads the plan context, works in its own worktree, verifies against the issue's acceptance list, then commits, pushes and closes.
+description: Pick up and implement the next open issue for The Capitol (any open issue, ranked bugs first, then the current plan's work packages, then follow-ups; or a specific issue number). Use when asked to "tackle the next issue", "do the next one", "work on #N", or to continue the Economy v1, Flint client, suburb or wilds work. Finds the next unblocked issue on GitHub, loads the plan context, works in its own worktree, verifies against the issue's acceptance list, then commits, pushes and closes.
 ---
 
 # next-issue
 
-There are two work queues on `chrischaps/TheCapitol`, each with its own plan doc at the repo root:
+Every open issue on `chrischaps/TheCapitol` is in the queue, whatever its label. The labels say what an issue is about and what kind it is:
 
-| Label | Plan | Work packages |
-|---|---|---|
-| `economy` (current) | `the-capitol-economy.md` | E0.1 … E4.4 (#144 to #179) |
-| `flint-client` | `the-capitol-flint-client.md` | P0.1 … P8.7, B1 … B13, engine hooks H… |
+| Area label | Plan doc at the repo root |
+|---|---|
+| `economy` (the current plan) | `the-capitol-economy.md`: E0.1 … E4.4 |
+| `flint-client` | `the-capitol-flint-client.md`: P0.1 … P8.7, B1 … B13, engine hooks H… |
+| `wilds` | `the-capitol-wilds.md`: W0 … W11 |
+| `suburb-v2` | `the-capitol-suburb-v2.md` |
+| `infra` | none: CI, `scripts/`, agent tooling, the dev environment |
 
-Each issue is one work package from its plan, and its header line links the plan. Some economy issues also carry `flint-client` because they touch the client; they still belong to the economy plan. Issues were created in dependency order, so **the lowest open number is usually next**. Below, "the plan" means the doc the issue's header links.
+| Kind label | Meaning |
+|---|---|
+| a phase (`ec:E*`, `fc:P*`, `fc:backend-prereq`) | a work package from its plan, whose header line links the plan |
+| `bug` | something broken: a follow-up, a regression, a limitation that costs players or agents |
+| `engine-upstream` | the fix goes to Flint as a PR (see below) |
+| `needs-decision` | waiting on Chris. Write up the options, comment, and stop |
+
+An issue can carry more than one area: economy issues that touch the client carry `flint-client` too, and still belong to the economy plan. Below, "the plan" means the doc the issue's header links, if it has one. A follow-up with no plan link takes its context from the issue it came from.
 
 If the user names an issue number, skip step 1 and use that one.
 
 ## 1. Find the next issue
 
 ```bash
-gh issue list --repo chrischaps/TheCapitol --label economy --state open --limit 100 --json number,title,labels --jq 'sort_by(.number)[] | "#\(.number) \(.title)"'
-gh issue list --repo chrischaps/TheCapitol --label flint-client --state open --limit 100 --json number,title,labels --jq 'sort_by(.number)[] | "#\(.number) \(.title)"'
+gh issue list --repo chrischaps/TheCapitol --state open --limit 200 --json number,title,labels \
+  --jq 'sort_by(.number)[] | "#\(.number) [\([.labels[].name] | join(","))] \(.title)"'
 scripts/issue.sh list      # claims held by every agent, on every machine
 ```
 
-Work the `economy` queue first. Take a leftover `flint-client` follow-up only when nothing in it is free, or when Chris asks for one. Starting from the lowest number, take the first issue that meets all three conditions:
-- **Not claimed.** It isn't in `scripts/issue.sh list`, and no open PR mentions it. A `claimed` label on GitHub is only a display; the claim branch is what counts.
-- **Unblocked.** Every issue under its "Depends on" heading is closed. Check them with `gh issue view <dep> --json state`.
-- **Doesn't need Chris first.** Some issues say they need a decision from Chris, such as B7, E0.8, E1.2, E2.1 or E3.4. Do the write-up part, post it as a comment on the issue, and stop there.
+**Skip** an issue if any of these holds:
+- **It's claimed.** It's in `scripts/issue.sh list`, or an open PR mentions it. A `claimed` label on GitHub is only a display; the claim branch is what counts.
+- **It's blocked.** An issue under its "Depends on" heading is still open. Check with `gh issue view <dep> --json state`.
+- **It waits on Chris.** It's labelled `needs-decision`, or its text says it needs his decision or confirmation first (★ defaults, "[needs Chris's decision]", "Chris approves"). If nobody has written up the options yet, do that, post it as a comment, and stop there. Don't build it. If the comments show Chris has answered, it's free: take the label off (`gh issue edit <n> --remove-label needs-decision`) and go on.
+
+**Rank** what's left in three tiers. Take the lowest number in the highest tier that has one:
+1. **Bugs that hurt.** They lose players' items or Strands, crash the client on a normal path, or break CI or `land` for every agent. Judge by the text, not just the `bug` label.
+2. **The current plan's work packages.** Issues with a phase label of the current plan (`ec:*`, while the root `CLAUDE.md` says Economy v1 is the focus), in dependency order.
+3. **Everything else:** other plans' leftovers, follow-ups, limitations, polish. Lowest number first, whatever the area.
+
+Chris can always name an issue or a tier ("do the next client one"); that wins. If an issue has no area label, or no kind label, add the right ones while you're there (`gh issue edit <n> --add-label ...`).
 
 Then claim it, before reading anything else:
 
@@ -39,12 +56,12 @@ It makes your worktree, `../TheCapitol-<n>` on branch `issue-<n>` (from `origin/
 
 Exit 2 means another agent got there first, perhaps seconds ago on another machine, or in another session on this same checkout. Go back to the list and take the next one. **Don't touch an existing `../TheCapitol-<n>` worktree for an issue you didn't claim**, even when it's on this machine: it's that session's (#134). If `claim` refuses because the worktree or branch already exists, the same goes: it's someone else's until `issue.sh list` shows the claim stale. Never work on an issue you didn't claim. If Chris tells you to take over a claim he knows is dead, use `scripts/issue.sh claim <n> --steal --override "<his reason>"`, and only then. Before stealing, save any work in the old worktree (see "Claims go stale" in the root `CLAUDE.md`). The claim protocol is described under "Several agents, several machines" in the root `CLAUDE.md`.
 
-Tell the user which issue you picked and why any lower-numbered ones were skipped. Then start without waiting.
+Tell the user which issue you picked, its tier, and why any lower-numbered ones were skipped. Then start without waiting.
 
 ## 2. Load the context
 
 1. `gh issue view <n>`. Read the Work, Depends on, Acceptance and Verify sections.
-2. Read every plan section listed under "Read first". The links point into the plan doc (`the-capitol-economy.md` or `the-capitol-flint-client.md`); read the local copy.
+2. Read every plan section listed under "Read first". The links point into the plan doc (see the area table above); read the local copy. A follow-up without them: read the issue it came from, and the plan section that issue named.
 3. If the issue touches `flint-client/`, read `flint-client/CLAUDE.md`. It has the layout, build commands and subtree commands.
 4. Skim the closing comments of the issues this one depends on (`gh issue view <dep> --comments`). They record what was actually built, and that can differ from the plan.
 5. Check Claude's Vault for recent Capitol and Flint notes: `ls ~/OneDrive/Documents/"Claude's Vault" | grep -i -E "capitol|flint" | tail`.

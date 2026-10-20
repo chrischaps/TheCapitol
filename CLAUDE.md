@@ -24,7 +24,7 @@ P0 to P8 of the Flint client are built. Active work is **Economy v1**: making th
 The Flint client is a third client built on Chris's Flint engine (Rust/wgpu). It lives in `flint-client/`, with the engine as a git subtree at `flint-client/engine/`. The plan is `the-capitol-flint-client.md`. Its queue, now mostly done, is the GitHub issues labelled `flint-client`. There's one issue per work package, created in dependency order, with phase labels `fc:P0-…` to `fc:P8-…` and `fc:backend-prereq` for the small server changes the client needs.
 
 **When asked to "tackle the next issue", "do the next one" or "work on #N", use the `next-issue` skill** (`.claude/skills/next-issue/SKILL.md`). It covers:
-- picking the lowest open issue that is unclaimed and unblocked
+- picking the next issue from **every** open issue, whatever its label: skip the claimed, blocked and `needs-decision` ones, then take bugs that hurt first, then the current plan's work packages, then everything else, lowest number first
 - what to read first
 - working in a `../TheCapitol-<n>` worktree on branch `issue-<n>`
 - verification
@@ -35,7 +35,14 @@ Rules that hold across issues:
 - Engine changes go upstream to Flint as a PR on a `feature/*` branch. Chris merges Flint PRs.
 - The plan doc stays true. Update it in the same commit when a decision changes it.
 - Assume another agent may be working at the same time, on this machine or another. Claim the issue first, use your own worktree, stage by path, and never touch changes you didn't make. See the next section.
-- **Cut a ticket for every limitation you hit.** This covers anything you work round instead of fix: an engine gap, a missing hook, a tool that can't do something, a backend quirk. Open a GitHub issue for it in the same session, labelled `flint-client` plus `engine-upstream` or `fc:backend-prereq` where they apply. Say what's missing, what the workaround costs, and what removing the workaround involves. Then link the issue from the workaround's code comment and the plan. A limitation recorded only in a closing comment or a vault note gets lost.
+- **Cut a ticket for every limitation you hit.** This covers anything you work round instead of fix: an engine gap, a missing hook, a tool that can't do something, a backend quirk. Open a GitHub issue for it in the same session. Say what's missing, what the workaround costs, and what removing the workaround involves. Then link the issue from the workaround's code comment and the plan. A limitation recorded only in a closing comment or a vault note gets lost.
+- **Label every issue you open** with:
+  - at least one area: `economy`, `flint-client`, `wilds`, `suburb-v2` or `infra` (CI, scripts, tooling);
+  - its kind: a phase label for a planned work package, `bug` for something broken or a limitation, or `enhancement`;
+  - `engine-upstream` or `fc:backend-prereq` where they apply;
+  - `needs-decision` when only Chris can settle it.
+
+  The `next-issue` skill sees every open issue, but it ranks by these labels. An issue without them is easy to misjudge.
 
 ## Several Agents, Several Machines
 
