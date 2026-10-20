@@ -696,7 +696,7 @@ pub fn table(plans: &[(String, Metrics, Vec<Violation>)]) -> String {
         }
         s.push('\n');
     }
-    let _ = write!(s, "| entrances by sector | |");
+    let _ = write!(s, "| entrances by neighbourhood | |");
     for (_, m, _) in plans {
         let _ = write!(s, " {} |", m.entrances.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(" "));
     }
@@ -905,7 +905,7 @@ mod tests {
         let lots = vec![lot];
         let cleared = vec![Some(lots[0].corners)];
         let scope = Scope { center: (0.0, 0.0), inner: URBAN_OUTER_RADIUS, outer: SUBURBAN_OUTER_RADIUS, sector: Some(0) };
-        let measured = metrics::measure(&metrics::Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope, coverage: true, greens: &[] });
+        let measured = metrics::measure(&metrics::Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope, coverage: true, greens: &[], streets: &[] });
         let viol = metrics::violations(&measured.metrics);
         let view = View {
             title: "Test".into(),

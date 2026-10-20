@@ -8,16 +8,18 @@
 //! What counts as a neighbourhood, a cul-de-sac and green ground works from
 //! the roads alone, so it also holds for the hand-built plans in the tests.
 //! (It was first written for the Legacy plan, which #113 removed.)
-//! - **neighbourhood:** the 45° sector between two arterials;
+//! - **neighbourhood:** the one its streets' [`StreetMeta`] names; a plan
+//!   without them (the hand-built test plans) takes the 45° sector between
+//!   two arterials instead;
 //! - **entrance:** a vertex shared by a suburban road and any other road,
-//!   counted in the sector its suburban street comes from;
+//!   counted in the neighbourhood its suburban street comes from (#115);
 //! - **cul-de-sac:** a suburban road that ends in a bulb or a dead end;
 //! - **green:** the neighbourhoods' buffers, greenways and parks (`parks`,
 //!   #111). A plan without greens counts open ground within `GREEN_STRIP`
 //!   of an arterial's edge instead.
 
 use capitol_protocol::fmath::StableMath;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot};
 use serde::Serialize;
@@ -25,6 +27,7 @@ use serde::Serialize;
 use super::graph::{Graph, JunctionKind};
 use super::neighbourhood::Neighbourhood;
 use super::parks::{self, Ground, Greens};
+use super::patterns::StreetMeta;
 use crate::models::lot_clearance;
 use crate::models::terrain::{TerrainConfig, WorldGenParams};
 use crate::models::geom::{quads_overlap_strict, SpatialGrid};
@@ -116,6 +119,9 @@ pub struct Plan<'a> {
     /// hand-built test plans) counts the strip along the arterials as green
     /// instead.
     pub greens: &'a [Greens],
+    /// Each suburban street's neighbourhood, for counting entrances. A plan
+    /// without them counts entrances per sector instead.
+    pub streets: &'a [StreetMeta],
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -133,7 +139,8 @@ pub struct Metrics {
     pub min_junction_angle: Option<f64>,
     pub t_spacing_min: Option<f64>,
     pub t_spacing_p10: Option<f64>,
-    /// Entrances in each sector measured, in sector order.
+    /// Entrances in each neighbourhood measured, in (sector, neighbourhood)
+    /// order; in each sector for a plan without [`Plan::streets`].
     pub entrances: Vec<usize>,
     pub entrances_min: Option<f64>,
     pub entrances_max: Option<f64>,
@@ -426,7 +433,7 @@ pub fn measure_world(params: &WorldGenParams, sector: Option<u8>) -> Measurement
     let center = (terrain.center_x, terrain.center_y);
     let before = terrain.generate_suburban_plots_internal(&sp);
     let cleared = lot_clearance::clear_each(&before, &terrain.roads, &terrain.water_rings, center);
-    let neighbourhoods = super::plan(&sp, center).neighbourhoods;
+    let super::SuburbPlan { meta, neighbourhoods, .. } = super::plan(&sp, center);
     let greens = parks::lay(&terrain.roads, &terrain.terrain_plots, &neighbourhoods, &sp, center);
     let scope = Scope { center, inner: params.urban_outer_radius, outer: params.suburban_outer_radius, sector };
     let plan = Plan {
@@ -437,6 +444,7 @@ pub fn measure_world(params: &WorldGenParams, sector: Option<u8>) -> Measurement
         scope,
         coverage: true,
         greens: &greens,
+        streets: &meta,
     };
     let mut measured = measure(&plan);
     (measured.metrics.seed, measured.metrics.gen_ms) = (params.seed, gen_ms);
@@ -514,24 +522,37 @@ pub fn measure(plan: &Plan) -> Measured {
     m.t_spacing_min = spacing.iter().copied().reduce(f64::min);
     m.t_spacing_p10 = percentile(&spacing, 0.10);
 
+    // An entrance sits on the arterial's centre line, between two sectors;
+    // it belongs to the neighbourhood its suburban street comes from (#115).
+    // So only its radius decides whether it's in scope, and its street the rest.
     let sectors: Vec<u8> = match scope.sector {
         Some(s) => vec![s],
         None => (0..8).collect(),
     };
-    m.entrances = vec![0; sectors.len()];
+    let nbhd_of: HashMap<&str, (u8, u8)> = plan.streets.iter().map(|s| (s.id.as_str(), (s.sector, s.nbhd))).collect();
+    let nbhds: Vec<(u8, u8)> = if plan.streets.is_empty() {
+        sectors.iter().map(|&s| (s, 0)).collect()
+    } else {
+        let all: BTreeSet<(u8, u8)> = nbhd_of.values().copied().filter(|(s, _)| sectors.contains(s)).collect();
+        all.into_iter().collect()
+    };
+    let annulus = Scope { sector: None, ..scope };
+    m.entrances = vec![0; nbhds.len()];
     for (n, node) in g.nodes.iter().enumerate() {
         let roads_here = g.roads_at(n);
         if !roads_here.iter().any(|&r| suburban(r)) || roads_here.iter().all(|&r| suburban(r)) {
             continue;
         }
-        if scope.contains_padded(node.at, EDGE_PAD) {
-            // An entrance sits on the arterial's centre line, between two
-            // sectors; it belongs to the one its suburban street comes from.
-            let from = node.links.iter().find(|l| suburban(l.road)).map_or(node.at, |l| g.nodes[l.to].at);
-            let s = scope.sector_of(from);
-            if let Some(k) = sectors.iter().position(|&x| x == s) {
-                m.entrances[k] += 1;
-            }
+        if !annulus.contains_padded(node.at, EDGE_PAD) {
+            continue;
+        }
+        let Some(link) = node.links.iter().find(|l| suburban(l.road)) else { continue };
+        let nbhd = match nbhd_of.get(roads[link.road].id.as_str()) {
+            Some(&k) => k,
+            None => (scope.sector_of(g.nodes[link.to].at), 0),
+        };
+        if let Some(k) = nbhds.iter().position(|&x| x == nbhd) {
+            m.entrances[k] += 1;
         }
     }
     m.entrances_min = m.entrances.iter().min().map(|&v| v as f64);
@@ -812,7 +833,7 @@ mod tests {
     fn a_two_by_three_block_has_no_overlap() {
         let (roads, lots) = block();
         let cleared: Vec<_> = lots.iter().map(|l| Some(l.corners)).collect();
-        let plan = Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope: block_scope(), coverage: true, greens: &[] };
+        let plan = Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, scope: block_scope(), coverage: true, greens: &[], streets: &[] };
         let measured = measure(&plan);
         let m = measured.metrics;
         assert_eq!(m.overlaps, 0);

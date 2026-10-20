@@ -249,8 +249,8 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 - **Script options:** `-Seeds`, `-Pattern` (force one pattern wherever it fits, #109), `-Sector n`, `-Inner` and `-Outer` (the suburb's radii, #117) and `-Out`. `-Compare <dir>` writes `compare.html`, with each plan beside the one of the same name in an earlier run.
 - **Reading the SVG:** roads are drawn at true width and coloured by role. Suburban lots are shaded by area, with the street edge darker. Lots `finish_lots` trimmed are edged orange, and lots it dropped are drawn dashed magenta at their generated shape. A red ring marks each place that breaks a target; hover it in a browser for the reason. For the Neighbourhood layout (#106), the view also draws each frame dashed, with its rows dotted, a label giving the row count and lot depth, the green buffers, greenways and edge strips, and each entrance as a stub from its gate to a dot on the arterial.
 - **Definitions that work from the roads alone (`suburb/metrics.rs`).** They were written to work for Legacy too, and still hold for the hand-built test plans:
-  - **neighbourhood:** a 45° sector between arterials;
-  - **entrance:** a vertex shared by a suburban road and any other road, counted in the sector its suburban street comes from (#107; it sits on the arterial's centre line, which rounding used to give to either side);
+  - **neighbourhood:** the one its streets' `StreetMeta` names (`metrics::Plan::streets`, #115). A plan without them (the hand-built test plans) takes a 45° sector between arterials;
+  - **entrance:** a vertex shared by a suburban road and any other road, counted in the neighbourhood its suburban street comes from (#115; per sector in #107). It sits on the arterial's centre line, which rounding gives to either side, so a sector-scoped report admits it by radius alone and lets its street decide the rest;
   - **junction:** three or more links from at least two roads, so the vertex where a bulb closes on its own stem is not a T;
   - **cul-de-sac:** a suburban road ending in a bulb or a dead end, with its stem measured to where the bulb closes;
   - **parallel spacing:** sampled every 25 along each street, as the distance to the nearest street across it, when that street runs within 20°;
@@ -264,7 +264,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 | suburban 4-ways | 0 |
 | junction angle | ≥ 70° |
 | T spacing along a road | min ≥ 40, p10 ≥ 150 |
-| entrances per neighbourhood | 2–4 (`metrics` counts per sector, so a split sector may show up to 8 until it learns about neighbourhoods) |
+| entrances per neighbourhood | 2–4 (counted per neighbourhood since #115; `neighbourhood_suburb_meets_its_targets` asserts each count is what the neighbourhood allocated) |
 | cul-de-sac | ≤ 300 long, ≤ 20 lots |
 | parallel spacing | median 236 ± 20, p5 ≥ 200 |
 | connected to an arterial | 100% |
@@ -281,7 +281,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 *Mixed suburb at #111* (seeds 42, 7, 1234, 99999, 2024): audit clean, no 4-ways, no overlaps, junctions ≥ 74.6°, 1883–1921 lots, area median 6716–6783, lots 70–71%, green 16–18%, gap 2%, generation about 200 ms in release. Soft targets still missed, all left for Chris:
 - **roads 10–11%, not 15–22%.** The roads are drawn at paving width (16 and 20). The target came from a right of way (50 ft with verges). Meeting it would mean wider streets or counting verges as road; neither seems worth it.
 - **T spacing p10 90–140 and parallel spacing p5 down to 25: pattern (c).** Its corner stems fan from the loop, so their roots sit close together along it and run nearly parallel there. That's the fan's shape, not crowding: (a) alone holds p10 ≥ 180 and p5 ≥ 216.
-- **entrances per neighbourhood, most 5–7.** The metric counts per sector, so split sectors read double (#115).
+- ~~**entrances per neighbourhood, most 5–7.**~~ A false miss: the metric counted per sector, so split sectors read double. Since #115 it counts per neighbourhood, and every neighbourhood reads 2–4.
 
 ## 5. Work packages
 

@@ -657,7 +657,7 @@ pub(crate) mod tests {
                 outer: params.suburban_outer_radius,
                 sector: None,
             };
-            let plan = Plan { roads: &t.roads, lots: &[], before: &[], cleared: &[], scope, coverage: false, greens: &[] };
+            let plan = Plan { roads: &t.roads, lots: &[], before: &[], cleared: &[], scope, coverage: false, greens: &[], streets: &[] };
             let m = metrics::measure(&plan).metrics;
             let why = format!("seed {seed}: {m:#?}");
             assert!(m.suburban_roads > 50, "{why}");

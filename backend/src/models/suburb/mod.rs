@@ -101,8 +101,14 @@ mod tests {
     #[test]
     fn neighbourhood_suburb_meets_its_targets() {
         for (name, params) in worlds() {
-            let m: Metrics = metrics::measure_world(&params, None).measured.metrics;
+            let world = metrics::measure_world(&params, None);
+            let m: Metrics = world.measured.metrics;
             let why = format!("{name}: {m:#?}");
+            // Entrances, counted per neighbourhood by the street they come
+            // from (#115): as many as each one allocated.
+            let allocated: Vec<usize> = world.neighbourhoods.iter().map(|n| n.entrances.len()).collect();
+            assert_eq!(m.entrances, allocated, "{why}");
+            assert!(m.entrances_min.unwrap() >= 2.0 && m.entrances_max.unwrap() <= 4.0, "{why}");
             // Streets.
             assert_eq!(m.audit_issues, 0, "{why}");
             assert_eq!(m.four_ways, 0, "{why}");
@@ -130,6 +136,22 @@ mod tests {
             let soft: Vec<String> = metrics::violations(&m).iter().map(|v| format!("{} {}", v.label, metrics::fmt_num(v.value))).collect();
             eprintln!("{name}: {} lots, {} parks, gap {:.3}; soft misses: {soft:?}", m.lots, m.parks, m.cover_gap.unwrap());
         }
+    }
+
+    /// A split sector's entrances are counted in each of its two
+    /// neighbourhoods, not lumped together, and an entrance on the sector's
+    /// edge counts though it sits on the arterial's centre line (#115).
+    #[test]
+    fn a_split_sector_counts_its_neighbourhoods_entrances_apart() {
+        let params = mixed_world(42);
+        let all = metrics::measure_world(&params, None);
+        let split = (0..8u8)
+            .find(|&s| all.neighbourhoods.iter().filter(|n| n.sector == s).count() == 2)
+            .expect("seed 42 splits a sector");
+        let one = metrics::measure_world(&params, Some(split));
+        let allocated: Vec<usize> = one.neighbourhoods.iter().filter(|n| n.sector == split).map(|n| n.entrances.len()).collect();
+        assert_eq!(allocated.len(), 2);
+        assert_eq!(one.measured.metrics.entrances, allocated);
     }
 
     /// Entrances are coordinated across each arterial (plan §4.1.5): as laid,
