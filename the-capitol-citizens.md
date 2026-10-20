@@ -40,7 +40,7 @@ Citizens play the same game humans do, by the same rules and for the same money.
   - `sim/mod.rs::Role` holds the goals and trade rules;
   - `sim/report.rs` writes the reports.
 - **Missing for citizens:**
-  - pathing round water (#211);
+  - pathing round water (#211, done in C0.5);
   - any long-running mode: no supervisor, no reconnect, and `AuthFailed` ends a bot;
   - personas;
   - helpers for the bazaar, automation and tool slots;
@@ -157,7 +157,7 @@ They work in daylight, go to the hall or the bazaar during their market hours, w
 | C0.2 [#249](https://github.com/chrischaps/TheCapitol/issues/249) | **Flint: the citizen's mark.** A cooler lantern and a glyph by the name. | S | C0.1 |
 | C0.3 [#255](https://github.com/chrischaps/TheCapitol/issues/255) | **Bug: a lagging socket is hung up on.** Skip ahead and resync instead. *As built:* the channel holds 4096 events (`GameState::EVENT_CAPACITY`, about 10 s of slack with 200 citizens at work). A lagging socket skips ahead and is sent `resync { missed }` (a new `ServerMessage`), then fresh `positions`, its `currency_changed`, a full `market_depth` per watched item and its waiting notices. If it holds the avatar, its trade and trade requests are cancelled first (`GameState::socket_lagged`), so nobody accepts an offer they never saw. capitol-core treats `resync` as a reconnect's resync. | S | – |
 | C0.4 [#256](https://github.com/chrischaps/TheCapitol/issues/256) | **Positions by interest.** Measure first, then send nearby players only. | M | C1.1 (for load) |
-| C0.5 [#211](https://github.com/chrischaps/TheCapitol/issues/211) | **Walking round water.** A walk graph from `/terrain` (roads, bridges, fords, trails) and A*. | M | – |
+| C0.5 [#211](https://github.com/chrischaps/TheCapitol/issues/211) | **Walking round water.** A walk graph from `/terrain` (roads, bridges, fords, trails) and A*. *As built:* `capitol_core::paths::WalkGraph`. It has a node per road and trail vertex, long segments cut to 40, roads welded within 30, and open ground joining loose ends and stray networks within 600 (the rural `trail_*` lanes touch nothing). Every edge and leg passes `walkable`, the server's own ring, water and cliff test run along the line. A walk goes straight when it can, otherwise it joins the graph (straight, or over a small grid), runs A* by time, then pulls tight within 25 of the way. `Bot::walk_to` sends a `move` a leg, about 430 units a leg, well under the 60-a-minute limit. One graph per terrain version is shared by the process. The detours in `go_to_exchange` and the sim's trade are gone. | M | – |
 | C0.6 [#247](https://github.com/chrischaps/TheCapitol/issues/247) | **Bots that stay up.** Reconnect, re-auth by key, rebuild state, claim presence again. *As built: `Net` already reconnected with capped, jittered backoff and resynced; `Bot` now notices the drop. Every call fails fast with `BotError::Offline` until `Bot::recover` has it back (presence, a position, the resync's refetches, its orders), so work in flight is dropped, never counted. `Bot::stay_up` reruns a loop through drops; the sim, its makers and `capitol-bot`'s wander, trade and market modes use it. A refused key is `BotError::Revoked`; `BotError::is_final` says when to retire a bot.* | M | – |
 
 ### C1: The town

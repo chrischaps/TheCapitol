@@ -33,6 +33,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use capitol_protocol::rest::{
@@ -54,6 +55,7 @@ use crate::net::{
     auth_error_is_final, ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
 };
 use crate::market::MarketEvent;
+use crate::paths::{self, WalkGraph};
 use crate::poll::{Fetch, Poller};
 use crate::state::{answers, GameState, StateEvent, Yield};
 
@@ -237,9 +239,10 @@ pub struct Bot {
     /// What [`Bot::record`] keeps for [`Bot::take_journal`]: the finishes,
     /// breakages and balance changes seen in every frame, whichever call ran it.
     journal: Option<Vec<StateEvent>>,
-    /// The world's buildings, from the first `/terrain` a walk needed. They
-    /// move only with an admin regenerate.
-    landmarks: Option<Vec<Landmark>>,
+    /// The walk graph (#211), once [`Bot::walks`] has fetched the terrain,
+    /// with the world's landmarks. Dropped when the server says the terrain
+    /// changed.
+    walks: Option<Arc<WalkGraph>>,
     /// Signed in with an API key, so a refused sign-in means the key is no
     /// good any more.
     keyed: bool,
@@ -326,7 +329,7 @@ impl Bot {
             quiet: false,
             rng: seed(seeded_by),
             journal: None,
-            landmarks: None,
+            walks: None,
             keyed: false,
             live: false,
             dropped: None,
@@ -419,6 +422,9 @@ impl Bot {
                     self.say(format!("a refetch failed: {e}"));
                 }
             }
+        }
+        if changes.iter().any(|c| matches!(c, StateEvent::TerrainUpdated)) {
+            self.walks = None;
         }
         if let Some(journal) = &mut self.journal {
             journal.extend(changes.iter().filter(|c| journaled(c)).cloned());
@@ -653,15 +659,73 @@ impl Bot {
         })
     }
 
-    /// Walks to `(x, y)` and waits until the server has us there.
+    /// Walks to `(x, y)` and waits until the server has us there. The walk
+    /// goes round the water, by the bridges and fords ([`WalkGraph::route`]),
+    /// a `move` a leg. With no terrain, or no way round, it goes straight and
+    /// stops at whatever is in the way.
     pub fn walk_to(&mut self, x: f64, y: f64) -> Result<(), BotError> {
+        let from = self.position();
+        if (x - from.0).hypot(y - from.1) < ARRIVED {
+            return Ok(());
+        }
+        let walks = match self.walks() {
+            Ok(walks) => Some(walks),
+            // A drop or a refused key stops the walk like any other call
+            Err(e @ (BotError::Offline(_) | BotError::Revoked(_) | BotError::AuthFailed(_))) => return Err(e),
+            Err(e) => {
+                self.say(format!("no terrain to plan the walk on ({e}); going straight"));
+                None
+            }
+        };
+        let legs = match walks.as_ref().map(|w| w.route(from, (x, y))) {
+            Some(Some(legs)) => legs,
+            Some(None) => {
+                self.say(format!("no way round to ({x:.0}, {y:.0}); going straight"));
+                vec![(x, y)]
+            }
+            None => vec![(x, y)],
+        };
+        for (lx, ly) in legs {
+            let secs = walks.as_ref().map(|w| w.walk_secs(self.position(), (lx, ly)));
+            self.walk_straight(lx, ly, secs)?;
+        }
+        Ok(())
+    }
+
+    /// The walk graph of the world's terrain: fetched the first time, then
+    /// kept until the terrain changes. Every bot in the process shares one
+    /// per terrain version ([`paths::shared`]), so a swarm revalidates the
+    /// newest by version rather than each building its own.
+    pub fn walks(&mut self) -> Result<Arc<WalkGraph>, BotError> {
+        if let Some(walks) = &self.walks {
+            return Ok(walks.clone());
+        }
+        let latest = paths::latest();
+        let what = "fetching the terrain";
+        let request = RestRequest::Terrain {
+            cached_version: latest.as_ref().and_then(|w| w.version()).map(String::from),
+        };
+        let walks = match (self.call(what, request)?, latest) {
+            (RestResponse::Terrain(terrain), _) => paths::shared(&terrain),
+            (RestResponse::TerrainUnchanged, Some(latest)) => latest,
+            (other, _) => return Err(unexpected(what, &other)),
+        };
+        self.walks = Some(walks.clone());
+        Ok(walks)
+    }
+
+    /// Walks straight to `(x, y)`, with no planning, and waits until the
+    /// server has us there. `secs` is how long the walk should take, if the
+    /// slope is known; otherwise it's timed as on the flat.
+    pub fn walk_straight(&mut self, x: f64, y: f64, secs: Option<f64>) -> Result<(), BotError> {
         let (from_x, from_y) = self.position();
         let distance = (x - from_x).hypot(y - from_y);
         if distance < ARRIVED {
             return Ok(());
         }
         self.send(ClientMessage::Move { x, y });
-        let timeout = Duration::from_secs_f64(distance / rules::PLAYER_SPEED * 1.5 + 5.0);
+        let secs = secs.unwrap_or(distance / rules::PLAYER_SPEED);
+        let timeout = Duration::from_secs_f64(secs * 1.5 + 5.0);
         let seen = self.until(
             &format!("arriving at ({x:.0}, {y:.0})"),
             timeout,
@@ -1244,37 +1308,28 @@ impl Bot {
         Ok(())
     }
 
-    /// Walks to the Exchange hall (D6, E3.4), where orders are placed and the
-    /// market box collected: onto the south arterial's crown, then north up
-    /// it to the avenue outside the hall's door. That's the way in from where
-    /// bots arrive; from elsewhere the first leg may meet water. A world
-    /// without a hall needs no walk.
+    /// Walks to the Exchange hall's door (D6, E3.4), where orders are placed
+    /// and the market box collected, from wherever the bot is: the walk goes
+    /// round the canals by their bridges (#211). A world without a hall needs
+    /// no walk.
     pub fn go_to_exchange(&mut self) -> Result<(), BotError> {
         let Some(hall) = self.landmark(|l| l.kind == LandmarkKind::ExchangeHall)? else {
             return Ok(());
         };
-        self.down_the_avenue(hall.door.1)
+        self.walk_to(hall.door.0, hall.door.1)
     }
 
-    /// Onto the south arterial's crown, then along it to `y`: the way in to
-    /// the hall and the bazaar, which face each other across it.
+    /// Onto the south arterial's crown at `y`: the way in to the bazaar,
+    /// which faces the hall across it. The walk goes round the water from
+    /// wherever the bot is (#211).
     fn down_the_avenue(&mut self, y: f64) -> Result<(), BotError> {
-        let (_, from) = self.position();
-        self.walk_to(rules::CENTER_X, from)?;
         self.walk_to(rules::CENTER_X, y)
     }
 
-    /// The first landmark `which` picks, from `/terrain`, fetched the first
-    /// time a walk needs it.
+    /// The first landmark `which` picks, from the `/terrain` the walk graph
+    /// was built from.
     fn landmark(&mut self, which: impl Fn(&Landmark) -> bool) -> Result<Option<Landmark>, BotError> {
-        if self.landmarks.is_none() {
-            let what = "fetching the terrain";
-            match self.call(what, RestRequest::Terrain { cached_version: None })? {
-                RestResponse::Terrain(terrain) => self.landmarks = Some(terrain.landmarks),
-                other => return Err(unexpected(what, &other)),
-            }
-        }
-        Ok(self.landmarks.iter().flatten().find(|l| which(l)).cloned())
+        Ok(self.walks()?.landmarks().iter().find(|l| which(l)).cloned())
     }
 
     /// Places an order (E3.3) and returns it as placed. The bot must be at the
@@ -2043,7 +2098,7 @@ mod tests {
             quiet: true,
             rng: seed("t@x"),
             journal: None,
-            landmarks: None,
+            walks: None,
             keyed: false,
             live: false,
             dropped: None,

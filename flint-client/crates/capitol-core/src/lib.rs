@@ -36,6 +36,8 @@
 //! - [`auth`]: the way in for a person: the login form's states, a stored
 //!   token tried first, and the server's health while signed out.
 //! - [`terrain`]: `/terrain` with a disk cache, revalidated by version.
+//! - [`paths`]: walking round the water: a walk graph of the roads and
+//!   trails, and A* over it (C0.5, #211).
 //! - [`catalog`]: item, station and resource types the server has no endpoint for.
 //! - [`bot`]: a headless player built on all of the above, for `capitol-bot`
 //!   and the live tests.
@@ -57,6 +59,7 @@ pub mod market_maker;
 pub mod motion;
 pub mod net;
 pub mod onboarding;
+pub mod paths;
 pub mod plot;
 pub mod poll;
 pub mod signin;

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use capitol_protocol::rest::{PlaceOrder, ResourceNodeInfo, StationInfo};
 use capitol_protocol::rules::market::{OrderSide, OrderStatus};
-use capitol_protocol::rules::{self, Zone};
+use capitol_protocol::rules::Zone;
 use uuid::Uuid;
 
 use super::plan::{self, Holdings, Step};
@@ -472,19 +472,12 @@ impl SimBot {
     }
 
     /// Walks to the Exchange hall, puts the trade's order on the book, waits
-    /// [`FILL_WAIT`] for it to fill, takes down what's left, collects what it
-    /// bought, and walks back out.
-    ///
-    /// The way in is the one bots arrive by: back to the spawn on the south
-    /// arterial, then up it to the hall's door, so the canals are crossed on
-    /// its bridges. A straight line from the fields would meet water (#211).
+    /// [`FILL_WAIT`] for it to fill, takes down what's left, and collects
+    /// what it bought. The walk goes round the canals by their bridges
+    /// (#211), and the next step's walk takes the bot back out.
     fn trade(&mut self, trade: &Trade) -> Result<(), BotError> {
-        self.bot.walk_to(rules::SPAWN_X, rules::SPAWN_Y)?;
         self.bot.go_to_exchange()?;
-        let traded = self.trade_at_the_hall(trade);
-        // Out the way it came, whatever happened inside
-        let out = self.bot.walk_to(rules::SPAWN_X, rules::SPAWN_Y);
-        traded.and(out)
+        self.trade_at_the_hall(trade)
     }
 
     fn trade_at_the_hall(&mut self, trade: &Trade) -> Result<(), BotError> {

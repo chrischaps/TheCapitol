@@ -18,6 +18,8 @@ use capitol_core::bot::{Account, Bot, BotError};
 use capitol_core::catalog::container_type;
 use capitol_core::net::{Net, NetConfig, NetEvent, RestRequest, RestResponse};
 use capitol_core::protocol::rest::{ApiKeyScope, AuthResponse, CreateApiKeyRequest, RegisterRequest};
+use capitol_core::protocol::rules;
+use capitol_core::protocol::terrain::LandmarkKind;
 use capitol_core::state::StateEvent;
 
 /// A TCP relay to the server. [`Proxy::cut`] shuts every open connection at
@@ -697,4 +699,32 @@ fn a_revoked_key_stops_the_bot_with_revoked() {
         Err(BotError::Revoked(message)) => assert!(message.contains("revoked"), "{message}"),
         other => panic!("the bot didn't stop with Revoked: {other:?}"),
     }
+}
+
+/// C0.5 (#211): a walk across the outer canal, away from its bridges, goes
+/// round by one, and the hall is reached from outside the canals. Before
+/// the walk graph, both stopped at the water with `movement_blocked`.
+#[test]
+#[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
+fn the_bot_walks_round_the_canal_by_a_bridge() {
+    let mut bot = Bot::sign_in(live(), &fresh_account()).expect("signed in");
+    let walks = bot.walks().expect("the walk graph");
+    // 0° is east and 90° south. The outer canal is r 1000, bridged every 45°.
+    let polar = |r: f64, degrees: f64| {
+        let a = degrees.to_radians();
+        (rules::CENTER_X + r * a.cos(), rules::CENTER_Y + r * a.sin())
+    };
+    let (outside, inside) = (polar(1100.0, 20.0), polar(900.0, 20.0));
+    assert!(!walks.walkable(outside, inside), "no bridge at 20°");
+
+    for (x, y) in [outside, inside] {
+        bot.walk_to(x, y).unwrap_or_else(|e| panic!("walking to ({x:.0}, {y:.0}): {e}"));
+        let (at_x, at_y) = bot.position();
+        assert!((at_x - x).hypot(at_y - y) < 1.0, "at ({at_x:.0}, {at_y:.0})");
+    }
+    bot.walk_to(outside.0, outside.1).expect("back out");
+    bot.go_to_exchange().expect("at the hall from outside the canal");
+    let door = walks.landmark(LandmarkKind::ExchangeHall).expect("a hall").door;
+    let (x, y) = bot.position();
+    assert!((x - door.0).hypot(y - door.1) < 1.0);
 }
