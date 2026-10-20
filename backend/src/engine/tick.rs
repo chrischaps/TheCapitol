@@ -797,7 +797,7 @@ async fn persist_positions(game_state: &Arc<RwLock<GameState>>, app_state: &AppS
 
 /// Write one finished gather, then tell the gatherer: `extraction_completed` with
 /// what the tool has left, `inventory_updated`, and `tool_broke` if that was its
-/// last use.
+/// last use. A failed pull (quantity 0, D5) writes only the tool's wear.
 ///
 /// The tool wears in the same transaction that writes the item. If it left the
 /// player's inventory while they gathered, the gather is what bare hands would
@@ -838,18 +838,33 @@ async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broad
             }
         }
     }
-    let container_id = match place_gathered(&mut tx, &item).await {
-        Ok(Some(container_id)) => container_id,
-        Ok(None) => return,
-        Err(e) => {
-            tracing::error!("Failed to persist {} for {}: {:?}", item.item_type, item.player_id, e);
+    // The inventory that changed: the one the units went into, or after a
+    // failed pull (D5) the one whose tool wore. A failed pull by hand changed none.
+    let container_id = if item.quantity == 0 && used.is_none() {
+        None
+    } else if item.quantity == 0 {
+        match inventory_of(&mut tx, item.player_id).await {
+            Ok(found) => found.map(|(container_id, _)| container_id),
+            Err(e) => {
+                tracing::error!("Failed to find {}'s inventory: {:?}", item.player_id, e);
+                return;
+            }
+        }
+    } else {
+        let container_id = match place_gathered(&mut tx, &item).await {
+            Ok(Some(container_id)) => container_id,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::error!("Failed to persist {} for {}: {:?}", item.item_type, item.player_id, e);
+                return;
+            }
+        };
+        if let Err(e) = super::gazette::tally(&mut tx, item.player_id, &item.item_type, item.quantity).await {
+            tracing::error!("Failed to tally a gather for the Gazette: {:?}", e);
             return;
         }
+        Some(container_id)
     };
-    if let Err(e) = super::gazette::tally(&mut tx, item.player_id, &item.item_type, item.quantity).await {
-        tracing::error!("Failed to tally a gather for the Gazette: {:?}", e);
-        return;
-    }
     if let Err(e) = tx.commit().await {
         tracing::error!("Failed to save a gather: {:?}", e);
         return;
@@ -864,14 +879,29 @@ async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broad
         quality: item.quality,
         tool: used,
     });
-    let _ = events.send(GameEvent::InventoryUpdated {
-        player_id: item.player_id,
-        container_id,
-        slots: Vec::new(), // Client will refresh all slots
-    });
+    if let Some(container_id) = container_id {
+        let _ = events.send(GameEvent::InventoryUpdated {
+            player_id: item.player_id,
+            container_id,
+            slots: Vec::new(), // Client will refresh all slots
+        });
+    }
     if let Some(broken) = &broken {
         tools::announce_broken(events, broken);
     }
+}
+
+/// `player_id`'s inventory and how many slots it has, if they have one.
+async fn inventory_of(conn: &mut sqlx::PgConnection, player_id: Uuid) -> Result<Option<(Uuid, i32)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT c.id, ct.slot_count FROM containers c
+         JOIN container_types ct ON c.container_type = ct.id
+         WHERE c.owner_id = $1 AND c.container_type = 'player_inventory'
+         LIMIT 1"
+    )
+    .bind(player_id)
+    .fetch_optional(&mut *conn)
+    .await
 }
 
 /// Put a gathered item in its gatherer's inventory: onto the first stack of its
@@ -879,16 +909,7 @@ async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broad
 /// quality), or into the first free slot. Returns the
 /// container, or `None` if there's no room (the item is lost, as before).
 async fn place_gathered(conn: &mut sqlx::PgConnection, item: &PendingItem) -> Result<Option<Uuid>, sqlx::Error> {
-    let container: Option<(Uuid, i32)> = sqlx::query_as(
-        "SELECT c.id, ct.slot_count FROM containers c
-         JOIN container_types ct ON c.container_type = ct.id
-         WHERE c.owner_id = $1 AND c.container_type = 'player_inventory'
-         LIMIT 1"
-    )
-    .bind(item.player_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some((container_id, slot_count)) = container else {
+    let Some((container_id, slot_count)) = inventory_of(conn, item.player_id).await? else {
         tracing::error!("No player_inventory container for player {}", item.player_id);
         return Ok(None);
     };
@@ -1537,6 +1558,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, 10, "a tool that wasn't used doesn't wear");
+    }
+
+    /// A failed pull (D5, #206) writes nothing and tallies nothing, but the tool
+    /// wears and the gatherer hears of it, with the inventory to refetch
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_failed_pull_gives_nothing_and_wears_the_tool(db: sqlx::PgPool) {
+        let (ada, inventory, sickle) = gatherer(&db, 10).await;
+        let (events, mut heard) = broadcast::channel(16);
+
+        let mut failed = sickle_gather(ada, &sickle);
+        (failed.quantity, failed.quality) = (0, 0);
+        failed.tool.as_mut().unwrap().by_hand = Some((0, 0));
+        persist_gather(&db, failed, &events).await;
+        assert_eq!(fiber(&db, inventory).await, None, "nothing gathered");
+        let GameEvent::ExtractionCompleted { quantity: 0, tool: Some(used), .. } = heard.try_recv().unwrap() else {
+            panic!("expected an empty extraction_completed with the sickle");
+        };
+        assert_eq!(used.durability, 9, "the pull wore it");
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::InventoryUpdated { container_id, .. } if container_id == inventory));
+        let tallied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM production_tally")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(tallied, 0, "the Gazette counts no failed pull");
+
+        // By hand there's no tool to wear, so no inventory changed
+        let mut by_hand = sickle_gather(ada, &sickle);
+        (by_hand.quantity, by_hand.quality, by_hand.tool) = (0, 0, None);
+        persist_gather(&db, by_hand, &events).await;
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::ExtractionCompleted { quantity: 0, tool: None, .. }));
+        assert!(heard.try_recv().is_err(), "nothing else");
     }
 
     /// Gathered fiber joins the first fiber stack, whatever its grade, and keeps its quality (D2, E1.8)

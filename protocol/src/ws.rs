@@ -231,6 +231,9 @@ pub enum ServerMessage {
         progress: u32,
         duration: u32,
     },
+    /// A gather finished. `quantity` 0 is a failed pull (D5, #206): hands or a
+    /// tool too weak for the resource got nothing, the tool wore all the same,
+    /// and the node is still there to try again. Its `quality` means nothing.
     #[serde(rename = "extraction_completed")]
     ExtractionCompleted {
         player_id: Uuid,

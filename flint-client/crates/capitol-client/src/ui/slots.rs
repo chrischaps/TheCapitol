@@ -1030,9 +1030,14 @@ pub fn tool_lines(
         let units = resources::yield_for(&resource.yields, tools::Tier::from_str(&spec.tier))
             .map(|y| if y.min == y.max { y.min.to_string() } else { format!("{}–{}", y.min, y.max) })
             .unwrap_or_else(|| "–".into());
+        // Too weak for it, some pulls give nothing (D5, #206)
+        let fails = match tools::fail_chance(power, difficulty) {
+            c if c > 0.0 => format!(", fails {:.0}% of pulls", c * 100.0),
+            _ => String::new(),
+        };
         ui.label(
             theme::dim(format!(
-                "{}: {units} a gather, {:.0}% faster, up to −{} quality",
+                "{}: {units} a gather, {:.0}% faster, up to −{} quality{fails}",
                 resource.name,
                 tools::SPEED_PER_LEVERAGE * leverage * 100.0,
                 tools::max_damage(power, difficulty),

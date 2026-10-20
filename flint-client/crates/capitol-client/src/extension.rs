@@ -1670,8 +1670,18 @@ fn gather(
         }
     }
     let yields = session.take_yields();
-    let any = !yields.is_empty();
+    let any = yields.iter().any(|(_, item)| item.quantity > 0);
     for (node, item) in yields {
+        if item.quantity == 0 {
+            // A failed pull (D5, #206): a note, not a "+0"
+            let (title, body) = missed_words(session.state(), node, &item);
+            tracing::info!("extract: {body}");
+            let mut data = toml::Table::new();
+            data.insert("title".into(), title.into());
+            data.insert("body".into(), body.into());
+            ctx.fire_event("extraction_note", data);
+            continue;
+        }
         let at = session
             .state()
             .node(node)
@@ -2051,6 +2061,16 @@ pub(crate) fn yield_data(item: &capitol_core::state::Yield) -> toml::Table {
 
 /// What to tell the player about an extraction that didn't happen. A
 /// refusal carries the server's own reason (B9, #60).
+/// The note for a pull that came away with nothing: it fails only when hands
+/// or the tool fall short of the resource, so a stronger tool is the answer.
+fn missed_words(state: &capitol_core::state::GameState, node: uuid::Uuid, item: &capitol_core::state::Yield) -> (&'static str, String) {
+    let what = state
+        .node(node)
+        .and_then(|n| state.catalog().resource_type(&n.resource_type))
+        .map_or_else(|| item.item_name.clone(), |r| r.name.clone());
+    ("Nothing this time", format!("The {what} gave nothing. A stronger tool fails less"))
+}
+
 fn note_words(note: &Note) -> (&'static str, String) {
     match note {
         Note::Lost(_) => ("Taken", "Someone else got to that grass first".into()),

@@ -210,6 +210,20 @@ pub fn max_damage(power: f64, difficulty: f64) -> i32 {
     ((DAMAGE_AT_PAR / lev).round() as i32).clamp(0, MAX_DAMAGE)
 }
 
+/// The most pulls a tool too weak for its resource fails (D5).
+pub const MAX_FAIL_CHANCE: f64 = 0.75;
+
+/// The chance a pull gives nothing (D5, GDD §6.2): how far `power` falls short
+/// of `difficulty`, as a share of it, `clamp((difficulty − power) / difficulty,
+/// 0, 0.75)`. Hands count as [`HAND_POWER`]. A tool at or over the difficulty
+/// never fails, and nor does anything on a resource of no difficulty.
+pub fn fail_chance(power: f64, difficulty: f64) -> f64 {
+    if difficulty <= 0.0 {
+        return 0.0;
+    }
+    ((difficulty - power) / difficulty).clamp(0.0, MAX_FAIL_CHANCE)
+}
+
 /// What a gather with a tool comes out at. The node's quality is the ceiling
 /// (GDD §6.2: gathering can't improve it). The tool's [`retention`] scales it,
 /// and `damage` (rolled in `0..=max_damage`) takes some off:
@@ -355,6 +369,21 @@ mod tests {
         assert_eq!(max_damage(2.0, 6.0), 15);
         assert_eq!(max_damage(0.0, 6.0), MAX_DAMAGE);
         assert_eq!(tool_duration(1, 6.0, 6.0), 1, "never under a tick");
+    }
+
+    /// D5's cases at Q50: a stone pick on a vein (10 against 20) fails half its
+    /// pulls, an iron one (18) a tenth, and hands on rock (4 against 8) half
+    #[test]
+    fn a_weak_tool_fails_some_pulls() {
+        assert!(close(fail_chance(10.0, 20.0), 0.5));
+        assert!(close(fail_chance(18.0, 20.0), 0.1));
+        assert!(close(fail_chance(HAND_POWER, 8.0), 0.5));
+        assert!(close(fail_chance(10.0, 12.0), 1.0 / 6.0), "a stone axe on a tree");
+        assert!(close(fail_chance(10.0, 8.0), 0.0), "the right tool never fails");
+        assert!(close(fail_chance(HAND_POWER, 0.0), 0.0), "nor do hands on grass");
+        assert!(close(fail_chance(HAND_POWER, 2.0), 0.0), "or clay");
+        assert!(close(fail_chance(0.0, 20.0), MAX_FAIL_CHANCE), "never past the cap");
+        assert!(close(fail_chance(4.0, 20.0), MAX_FAIL_CHANCE));
     }
 
     #[test]

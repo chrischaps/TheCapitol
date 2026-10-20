@@ -16,6 +16,9 @@ pub enum Entry {
         gathered: bool,
         at: f64,
     },
+    /// A gather came away with nothing: hands or a tool too weak for the
+    /// resource (D5, #206).
+    Missed { item: String, at: f64 },
     /// A tool used its last durability.
     ToolBroke { item: String, at: f64 },
     /// A step and how long it took, in game hours. `ok` is false when it
@@ -103,6 +106,10 @@ pub struct ItemLine {
     pub p90: i32,
     /// When the swarm first had one, in game hours.
     pub first_at: f64,
+    /// Gathers of it, and how many of those came away with nothing (D5's
+    /// failed pulls, #206).
+    pub pulls: i64,
+    pub failed_pulls: i64,
     /// Game seconds of `gather <item>` per unit gathered.
     pub labour_secs: Option<f64>,
     pub d5_labour_secs: Option<f64>,
@@ -160,6 +167,8 @@ impl Report {
         let mut roles = BTreeMap::new();
         let mut made: BTreeMap<String, Vec<(i32, i32)>> = BTreeMap::new();
         let mut counts: BTreeMap<String, (i64, i64, f64)> = BTreeMap::new();
+        // Gathers, and those that failed
+        let mut pulls: BTreeMap<String, (i64, i64)> = BTreeMap::new();
         let mut tools_broke = BTreeMap::new();
         let mut time: BTreeMap<String, TimeLine> = BTreeMap::new();
         let mut stuck: BTreeMap<String, usize> = BTreeMap::new();
@@ -183,10 +192,16 @@ impl Report {
                         let c = counts.entry(item.clone()).or_insert((0, 0, f64::INFINITY));
                         if *gathered {
                             c.0 += *quantity as i64;
+                            pulls.entry(item.clone()).or_default().0 += 1;
                         } else {
                             c.1 += *quantity as i64;
                         }
                         c.2 = c.2.min(*at);
+                    }
+                    Entry::Missed { item, .. } => {
+                        let p = pulls.entry(item.clone()).or_default();
+                        p.0 += 1;
+                        p.1 += 1;
                     }
                     Entry::ToolBroke { item, .. } => *tools_broke.entry(item.clone()).or_insert(0) += 1,
                     Entry::Spent { label, hours, ok } => {
@@ -221,8 +236,8 @@ impl Report {
                 }
             }
         }
-        // An item only traded (a maker's stock) still gets a line
-        for item in sales.keys() {
+        // An item only traded (a maker's stock), or only ever missed, still gets a line
+        for item in sales.keys().chain(pulls.keys()) {
             made.entry(item.clone()).or_default();
         }
         let items = made
@@ -236,7 +251,10 @@ impl Report {
                     .get(&format!("gather {item}"))
                     .filter(|_| gathered > 0)
                     .map(|t| t.hours * 3600.0 / gathered as f64);
+                let (pulls, failed_pulls) = pulls.get(&item).copied().unwrap_or_default();
                 ItemLine {
+                    pulls,
+                    failed_pulls,
                     per_hour: (gathered + crafted) as f64 / hours.max(f64::EPSILON),
                     p10: percentile(&units, 0.1),
                     p50: percentile(&units, 0.5),
@@ -335,6 +353,15 @@ impl Report {
                 i.d5_labour_secs.unwrap()
             ));
         }
+        for i in self.items.iter().filter(|i| i.pulls >= 5 && i.failed_pulls * 4 >= i.pulls) {
+            found.push(format!(
+                "{} failed {}% of its pulls ({} of {})",
+                i.item,
+                i.failed_pulls * 100 / i.pulls,
+                i.failed_pulls,
+                i.pulls
+            ));
+        }
         for (step, failed) in self
             .time
             .iter()
@@ -418,6 +445,18 @@ impl Report {
                 num(i.price_high)
             );
         }
+        let _ = writeln!(md, "\n## Pulls that failed\n");
+        let pulled: Vec<&ItemLine> = self.items.iter().filter(|i| i.pulls > 0).collect();
+        if pulled.is_empty() {
+            let _ = writeln!(md, "Nothing was gathered.");
+        } else {
+            let _ = writeln!(md, "| Item | Pulls | Failed | Share |");
+            let _ = writeln!(md, "|---|---:|---:|---:|");
+        }
+        for i in pulled {
+            let share = 100.0 * i.failed_pulls as f64 / i.pulls as f64;
+            let _ = writeln!(md, "| {} | {} | {} | {share:.0}% |", i.item, i.pulls, i.failed_pulls);
+        }
         let _ = writeln!(md, "\n## Tools worn out\n");
         if self.tools_broke.is_empty() {
             let _ = writeln!(md, "None.");
@@ -465,14 +504,14 @@ impl Report {
     /// One row per item, for a spreadsheet.
     pub fn to_csv(&self) -> String {
         let mut csv = String::from(
-            "item,gathered,crafted,per_game_hour,p10,p50,p90,first_at_hours,secs_per_unit,d5_secs_per_unit,tools_broke,traded,price_low,price_mean,price_high,d5_price\n",
+            "item,gathered,crafted,per_game_hour,p10,p50,p90,first_at_hours,secs_per_unit,d5_secs_per_unit,tools_broke,traded,price_low,price_mean,price_high,d5_price,pulls,failed_pulls\n",
         );
         for i in &self.items {
             let opt = |v: Option<f64>| v.map(|v| format!("{v:.1}")).unwrap_or_default();
             let int = |v: Option<i64>| v.map(|v| v.to_string()).unwrap_or_default();
             let _ = writeln!(
                 csv,
-                "{},{},{},{:.2},{},{},{},{:.3},{},{},{},{},{},{},{},{}",
+                "{},{},{},{:.2},{},{},{},{:.3},{},{},{},{},{},{},{},{},{},{}",
                 i.item,
                 i.gathered,
                 i.crafted,
@@ -488,7 +527,9 @@ impl Report {
                 int(i.price_low),
                 opt(i.price_mean),
                 int(i.price_high),
-                int(i.d5_price)
+                int(i.d5_price),
+                i.pulls,
+                i.failed_pulls
             );
         }
         csv
@@ -652,7 +693,7 @@ mod tests {
         let md = report.to_markdown();
         assert!(md.contains("| 20 | 4 | 5.0 (5) | 6 |"), "{md}");
         assert!(md.contains("- Market makers: 20000 Strands at the start, 20018 at the end"), "{md}");
-        assert!(report.to_csv().contains(",20,4,5.0,6,5\n"));
+        assert!(report.to_csv().contains(",20,4,5.0,6,5,0,0\n"));
     }
 
     #[test]
@@ -712,8 +753,47 @@ mod tests {
         assert!(md.contains("- stone_axe: 1"));
         let csv = report.to_csv();
         assert_eq!(csv.lines().count(), 3);
-        assert!(csv.contains("\nfiber,5,0,2.50,50,60,60,0.010,14.4,4.0,0,0,,,,1\n"), "{csv}");
+        assert!(csv.contains("\nfiber,5,0,2.50,50,60,60,0.010,14.4,4.0,0,0,,,,1,2,0\n"), "{csv}");
         // 251.3 fiber at 14.4 s
         assert!((report.deed_hours(250).unwrap() - 1.005).abs() < 0.01);
+    }
+
+    /// D5's failed pulls (#206): counted against the item, never as units,
+    /// and a share of a quarter or more is a bottleneck
+    #[test]
+    fn failed_pulls_are_counted_not_made() {
+        let missed = |at| Entry::Missed {
+            item: "iron_ore".into(),
+            at,
+        };
+        let runs = vec![run(
+            "gatherer (ore)",
+            vec![
+                made("iron_ore", 1, 70, true, 0.1),
+                missed(0.2),
+                made("iron_ore", 1, 50, true, 0.3),
+                missed(0.4),
+                missed(0.5),
+                made("iron_ore", 1, 60, true, 0.6),
+                Entry::Missed {
+                    item: "stone".into(),
+                    at: 0.7,
+                },
+            ],
+            0,
+            0,
+        )];
+        let report = Report::build(&runs, 1.0, 10.0, 360.0);
+        let ore = report.item("iron_ore").unwrap();
+        assert_eq!((ore.gathered, ore.pulls, ore.failed_pulls), (3, 6, 3));
+        assert_eq!((ore.p10, ore.p50, ore.p90), (50, 60, 70), "a miss has no quality");
+        let stone = report.item("stone").unwrap();
+        assert_eq!((stone.gathered, stone.pulls, stone.failed_pulls), (0, 1, 1), "missed only, still a line");
+        let bottlenecks = report.bottlenecks().join("\n");
+        assert!(bottlenecks.contains("iron_ore failed 50% of its pulls (3 of 6)"), "{bottlenecks}");
+        assert!(!bottlenecks.contains("stone failed"), "too few pulls to say: {bottlenecks}");
+        let md = report.to_markdown();
+        assert!(md.contains("| iron_ore | 6 | 3 | 50% |"), "{md}");
+        assert!(report.to_csv().contains(",6,3\n"));
     }
 }

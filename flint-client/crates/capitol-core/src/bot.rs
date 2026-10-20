@@ -669,6 +669,10 @@ impl Bot {
             }
             let node = self.scout(item_type)?;
             match self.extract(&node) {
+                Ok(item) if item.quantity == 0 => {
+                    self.say(format!("came away from the {} with nothing", node.resource_type));
+                    yields.push(item);
+                }
                 Ok(item) => {
                     self.say(format!(
                         "extracted {} {} (quality {}); holding {}",

@@ -105,6 +105,8 @@ pub struct OpenStation {
 pub struct Yield {
     pub item_type: String,
     pub item_name: String,
+    /// 0 for a failed pull (D5, #206): a gather with hands or a tool too weak
+    /// for the resource can come away with nothing, and the node stays.
     pub quantity: i32,
     /// 0–100. Grade it with [`rules::quality_grade`].
     pub quality: i32,

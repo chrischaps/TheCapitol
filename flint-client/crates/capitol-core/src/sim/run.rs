@@ -359,6 +359,10 @@ impl SimBot {
         let at = self.now();
         for change in self.bot.take_journal() {
             match change {
+                // A failed pull (D5, #206)
+                StateEvent::ExtractionCompleted { item, .. } if item.quantity == 0 => {
+                    self.entries.push(Entry::Missed { item: item.item_type, at })
+                }
                 StateEvent::ExtractionCompleted { item, .. } => self.entries.push(Entry::Made {
                     item: item.item_type,
                     quantity: item.quantity,

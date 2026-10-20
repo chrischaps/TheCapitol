@@ -17,7 +17,7 @@ pub const HAND_VARIANCE: i32 = 5;
 
 /// A gather that has run its time, waiting to be written. The tick loop
 /// (`persist_gathers`) wears the tool, writes the item, and only then sends
-/// `extraction_completed`.
+/// `extraction_completed`. `quantity` 0 is a failed pull ([`roll_gather`]).
 #[derive(Debug, Clone)]
 pub struct PendingItem {
     pub player_id: Uuid,
@@ -103,15 +103,17 @@ pub fn process_extractions(
                     tool,
                 });
 
-                // Mark node as depleted
                 if let Some(node) = nodes.get_mut(&node_id) {
-                    node.state = NodeState::Depleted;
-                    node.harvested_by = Some(player_id);
-                    node.regenerates_at_tick = Some(tick_count + resource_type.regeneration_ticks as u64);
+                    if quantity == 0 {
+                        // A failed pull takes nothing, so the node stands for another try (D5)
+                        node.state = NodeState::Available;
+                    } else {
+                        node.state = NodeState::Depleted;
+                        node.harvested_by = Some(player_id);
+                        node.regenerates_at_tick = Some(tick_count + resource_type.regeneration_ticks as u64);
+                        let _ = event_sender.send(GameEvent::NodeDepleted { node_id });
+                    }
                 }
-
-                // Emit node depleted event
-                let _ = event_sender.send(GameEvent::NodeDepleted { node_id });
             }
         }
 
@@ -132,6 +134,11 @@ pub fn process_extractions(
 ///   E2.2). The node's quality is the ceiling, the tool's wear scales it and a
 ///   tool weak for the resource's difficulty damages it
 ///   (`rules::tools::gathered_quality`).
+///
+/// Hands or a tool short of the resource's difficulty fail some pulls
+/// (`rules::tools::fail_chance`, D5): a failed pull is `(0, 0)`, the tool still
+/// wears, and the node isn't spent. The roll is the pull's, so when the tool
+/// leaves the player's inventory before the finish, its `by_hand` fails too.
 pub fn roll_gather(
     rng: &mut impl Rng,
     node_quality: i32,
@@ -141,14 +148,29 @@ pub fn roll_gather(
     let hand_quality = (node_quality + rng.gen_range(-HAND_VARIANCE..=HAND_VARIANCE)).clamp(0, 100);
     let by_hand = roll_yield(rng, resource_type.yield_for(None));
     let Some(held) = tool else {
+        if fails(rng, tools::HAND_POWER, resource_type.difficulty) {
+            return (0, 0, None);
+        }
         return (by_hand, hand_quality, None);
     };
     let quantity = roll_yield(rng, resource_type.yield_for(held.tier));
     let power = held.tool.effective_power();
     let damage = rng.gen_range(0..=tools::max_damage(power, resource_type.difficulty));
     let quality = tools::gathered_quality(node_quality, held.tool.retention(), damage);
-    let by_hand = resource_type.required().is_none().then_some((by_hand, hand_quality));
+    let (quantity, quality, by_hand) = if fails(rng, power, resource_type.difficulty) {
+        (0, 0, (0, 0))
+    } else {
+        (quantity, quality, (by_hand, hand_quality))
+    };
+    let by_hand = resource_type.required().is_none().then_some(by_hand);
     (quantity, quality, Some(GatherTool { held, by_hand }))
+}
+
+/// Whether a pull at `power` fails (`rules::tools::fail_chance`). Rolls only
+/// when it can fail, so the gathers that never fail roll as they always have.
+fn fails(rng: &mut impl Rng, power: f64, difficulty: f64) -> bool {
+    let chance = tools::fail_chance(power, difficulty);
+    chance > 0.0 && rng.gen_bool(chance)
 }
 
 /// Units from one row of a yield table; none from a table without one.
@@ -330,7 +352,8 @@ mod tests {
 
     /// E2.2's acceptance: each D5 resource gathered by hand and with its tool
     /// gives its own yield row, every value of it and none outside it, and a
-    /// tool makes it quicker. One that needs a tool refuses hands.
+    /// tool makes it quicker. One that needs a tool refuses hands. Hands or a
+    /// tool short of the difficulty also fail about their share of pulls (#206).
     #[test]
     fn every_resource_gathers_with_and_without_its_tool() {
         let (events, _rx) = broadcast::channel(256);
@@ -350,7 +373,12 @@ mod tests {
                 for q in expected.min..=expected.max {
                     assert!(got.contains(&q), "{} at {row} never gave {q}", def.id);
                 }
-                assert!(got.iter().all(|q| (expected.min..=expected.max).contains(q)), "{} at {row}: {got:?}", def.id);
+                let power = tool.as_ref().map_or(tools::HAND_POWER, |t| t.tool.effective_power());
+                let chance = tools::fail_chance(power, def.difficulty);
+                let (failed, pulled): (Vec<i32>, Vec<i32>) = got.into_iter().partition(|q| *q == 0);
+                assert!(pulled.iter().all(|q| (expected.min..=expected.max).contains(q)), "{} at {row}: {pulled:?}", def.id);
+                let rate = failed.len() as f64 / 500.0;
+                assert!((rate - chance).abs() < 0.07, "{} at {row} failed {rate:.2} of pulls, not {chance:.2}", def.id);
 
                 let (mut ada, mut node, mut held) = (player(), node(), HashMap::new());
                 node.resource_type = def.id.clone();
@@ -380,13 +408,99 @@ mod tests {
         assert!(steel.iter().all(|q| (2..=3).contains(q)), "{steel:?}");
     }
 
-    /// Rock gives to hands, but slowly: D5's one stone in 80 ticks
+    /// Rock gives to hands, but slowly: D5's one stone in 80 ticks, and hands
+    /// (4 against 8) fail half their pulls. A stone pick (10) never does.
     #[test]
     fn stone_by_hand_is_slow() {
         let outcrop = crate::content::resource_type("rock_outcrop");
         assert_eq!(gather_duration(&outcrop, None), 80);
         assert_eq!(gather_duration(&outcrop, Some(&fresh("pickaxe", Tier::Stone))), 39);
-        assert_eq!(quantities(&outcrop, None, 100), vec![1; 100]);
+        let by_hand = quantities(&outcrop, None, 1000);
+        assert!(by_hand.iter().all(|q| [0, 1].contains(q)), "{by_hand:?}");
+        let stones = by_hand.iter().sum::<i32>();
+        assert!((440..=560).contains(&stones), "{stones} stones in 1000 pulls by hand");
+        assert!(!quantities(&outcrop, Some(&fresh("pickaxe", Tier::Stone)), 500).contains(&0));
+    }
+
+    /// D5's example: a stone pick on an iron vein (10 against 20) fails about
+    /// half its pulls, an iron one (18) about a tenth, and a fine stone pick
+    /// (Q100, 15) a quarter. A failed pull gives nothing at no quality, and its
+    /// by-hand fallback fails with it.
+    #[test]
+    fn a_weak_pick_fails_some_pulls_on_a_vein() {
+        let vein = crate::content::resource_type("iron_vein");
+        let rate = |tool: HeldTool| {
+            let got = quantities(&vein, Some(&tool), 2000);
+            got.iter().filter(|q| **q == 0).count() as f64 / got.len() as f64
+        };
+        let stone = rate(fresh("pickaxe", Tier::Stone));
+        assert!((0.46..0.54).contains(&stone), "a stone pick failed {stone:.3}");
+        let iron = rate(fresh("pickaxe", Tier::Iron));
+        assert!((0.08..0.12).contains(&iron), "an iron pick failed {iron:.3}");
+        let mut fine = fresh("pickaxe", Tier::Stone);
+        fine.tool.quality = 100;
+        let fine = rate(fine);
+        assert!((0.22..0.28).contains(&fine), "a fine stone pick failed {fine:.3}");
+
+        let mut rng = StdRng::seed_from_u64(206);
+        let outcrop = crate::content::resource_type("rock_outcrop");
+        let mut weak = fresh("pickaxe", Tier::Stone);
+        weak.tool.base_power = 4.0; // 4 against 8: half its pulls fail
+        let (mut failures, mut successes) = (0, 0);
+        for _ in 0..400 {
+            let (quantity, quality, tool) = roll_gather(&mut rng, 60, &outcrop, Some(weak.clone()));
+            let by_hand = tool.unwrap().by_hand.unwrap();
+            if quantity == 0 {
+                failures += 1;
+                assert_eq!((quality, by_hand), (0, (0, 0)), "nothing, by tool or by hand");
+            } else {
+                successes += 1;
+                assert_eq!(by_hand.0, 1, "hands would have had their stone");
+            }
+        }
+        assert!(failures > 100 && successes > 100, "{failures} failed, {successes} didn't");
+    }
+
+    /// A failed pull leaves the node standing for another try, and says
+    /// nothing of it being spent; one that gives spends it as before
+    #[test]
+    fn a_failed_pull_leaves_the_node() {
+        let (events, mut heard) = broadcast::channel(256);
+        let vein = crate::content::resource_type("iron_vein");
+        let types: HashMap<_, _> = [("iron_vein".to_string(), vein.clone())].into();
+        let items = HashMap::new();
+        let (mut failed, mut spent) = (0, 0);
+        for _ in 0..40 {
+            let (mut ada, mut node, mut held) = (player(), node(), HashMap::new());
+            node.resource_type = "iron_vein".into();
+            start_extraction(&mut ada, &mut node, &vein, Some(fresh("pickaxe", Tier::Stone)), &mut held, &events)
+                .unwrap();
+            let ActionState::Extracting { duration, .. } = ada.action_state else { unreachable!() };
+            let (ada_id, node_id) = (ada.id, node.id);
+            let mut players: HashMap<_, _> = [(ada.id, ada)].into();
+            let mut nodes: HashMap<_, _> = [(node.id, node)].into();
+            while heard.try_recv().is_ok() {}
+            let mut done = Vec::new();
+            for tick in 0..duration as u64 {
+                done.extend(process_extractions(&mut players, &mut nodes, &types, &items, &mut held, tick, &events));
+            }
+            assert_eq!(done.len(), 1);
+            assert_eq!(players[&ada_id].action_state, ActionState::Idle);
+            let depleted = std::iter::from_fn(|| heard.try_recv().ok())
+                .any(|e| matches!(e, GameEvent::NodeDepleted { node_id: n } if n == node_id));
+            if done[0].quantity == 0 {
+                failed += 1;
+                assert_eq!(nodes[&node_id].state, NodeState::Available, "still there to try");
+                assert!(nodes[&node_id].regenerates_at_tick.is_none());
+                assert!(!depleted);
+                assert!(done[0].tool.is_some(), "the pick still wears");
+            } else {
+                spent += 1;
+                assert_eq!(nodes[&node_id].state, NodeState::Depleted);
+                assert!(depleted);
+            }
+        }
+        assert!(failed > 0 && spent > 0, "{failed} failed, {spent} spent");
     }
 
     /// Hand gathering is what it was before tools: 1 to 3 fiber at the node's
