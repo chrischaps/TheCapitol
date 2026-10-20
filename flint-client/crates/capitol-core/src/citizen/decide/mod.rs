@@ -44,14 +44,17 @@ pub use rules::RulesDecider;
 
 /// What a citizen is like (D5). Each is 0 to 1, 0.5 being middling. The
 /// rules layer weights its utilities by them, and a model layer's prompt
-/// will be coloured by them. C1.2 (#250) gives each citizen its own.
+/// will be coloured by them. Each citizen's is seeded with its persona
+/// (C1.2, [`persona`](super::persona)).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Temperament {
-    /// Holds out for a fair price, and gathers rather than overpay.
+    /// Holds out for a fair price, and gathers rather than overpay. Keeps
+    /// more back before it buys a home (C1.2).
     pub thrift: f32,
     /// Asks above the bid, hoping someone pays up.
     pub risk: f32,
-    /// Spends its free time among people, at the hall.
+    /// Spends its free time among people, at the hall. Stays longer at
+    /// the market, and likelier keeps the bazaar (C1.2).
     pub sociability: f32,
     /// Sells and banks in bigger lots, less often.
     pub patience: f32,

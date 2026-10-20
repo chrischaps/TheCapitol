@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use capitol_core::citizen::schedule;
 use capitol_core::citizen::town::{self, Admin, Roster, Town};
 use capitol_core::net::NetConfig;
 
@@ -23,13 +24,16 @@ const USAGE: &str = "\
 capitol-town: the citizens of The Capitol
 
 USAGE:
-    capitol-town [run]           Live: every citizen on the roster plays its
-                                 role until Ctrl-C. A citizen whose life ends
-                                 starts again after a backoff; one whose key
-                                 is refused retires.
+    capitol-town [run]           Live: every citizen on the roster lives its
+                                 day until Ctrl-C: up at its wake, its trade,
+                                 its market hours, home at dusk, and logged
+                                 out for the night. A citizen whose life
+                                 ends starts again after a backoff; one
+                                 whose key is refused retires.
     capitol-town mint --count <n>
                                  Make n citizens through the admin endpoint
-                                 and add them, with their keys, to the roster
+                                 and add them, with their keys and their
+                                 seeded personas, to the roster
     capitol-town status          Print the running town's last health
                                  (also --status)
 
@@ -47,7 +51,8 @@ FLAGS:
 
 The roster holds keys, so keep it out of git (flint-client/.gitignore has
 town.toml); town.example.toml shows its shape. Health goes beside it, in
-town.status. Ctrl-C lets each citizen finish its step and stops; any order
+town.status, and who was where in their day is appended to
+town.presence.csv. Ctrl-C lets each citizen finish its step and stops; any order
 it has resting on the book stays up, as a market maker's does. A second
 Ctrl-C stops at once.";
 
@@ -168,7 +173,17 @@ fn mint(options: &Options, count: usize) -> Result<(), String> {
         count,
     );
     for citizen in &roster.citizens[had..] {
-        println!("made {} ({})", citizen.name, citizen.role);
+        let p = &citizen.persona;
+        println!(
+            "made {} ({}), of the {} {} avenue, up at {}, at the {} {}",
+            citizen.name,
+            citizen.role,
+            p.home.zone,
+            p.home.avenue,
+            schedule::clock(p.schedule.wake),
+            p.market,
+            p.schedule.market()
+        );
     }
     println!(
         "{}: {} citizens on the roster",
@@ -211,12 +226,13 @@ fn run(options: &Options) -> Result<(), String> {
     on_ctrl_c(stop.clone());
     let mut town = Town::start(&roster, &server, stop.clone()).map_err(|e| format!("starting the town: {e}"))?;
     println!(
-        "capitol-town: {} citizens on {server}, health every {:.0?} to {}",
+        "capitol-town: {} citizens on {server}, health every {:.0?} to {}, and who's where to {}",
         roster.citizens.len(),
         options.every,
-        town::status_path(&roster.path).display()
+        town::status_path(&roster.path).display(),
+        town::presence_path(&roster.path).display()
     );
-    let status = town::status_path(&roster.path);
+    let status = &roster.path;
     let mut next = Instant::now() + options.every;
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -227,32 +243,63 @@ fn run(options: &Options) -> Result<(), String> {
             break;
         }
         if Instant::now() >= next {
-            report(&town, &server, &status);
+            report(&town, &server, status);
             next += options.every;
         }
         thread::sleep(Duration::from_millis(250));
     }
     println!("capitol-town: stopping; each citizen finishes its step");
     let stuck = town.wait(GRACE);
-    report(&town, &server, &status);
+    report(&town, &server, status);
     if stuck > 0 {
         println!("capitol-town: {stuck} still mid-step after {GRACE:?}; leaving them");
     }
     Ok(())
 }
 
-/// Prints the health and writes it beside the roster.
-fn report(town: &Town, server: &str, path: &Path) {
-    let header = format!("capitol-town · {server} · {} · {}", now_utc(), town.tally());
+/// Prints the health and writes it beside the roster, and appends who was
+/// where in their day to the presence log (C1.2).
+fn report(town: &Town, server: &str, roster: &Path) {
+    let now_ms = unix_ms();
+    let game = schedule::clock(capitol_core::protocol::rules::time_of_day(now_ms));
+    let header = format!("capitol-town · {server} · {} · game {game} · {}", now_utc(), town.tally());
     let lines = town.health_lines();
     println!("── {header}");
     for line in &lines {
         println!("   {line}");
     }
+    let status = town::status_path(roster);
     let text = format!("{header}\n{}\n", lines.join("\n"));
-    if let Err(e) = std::fs::write(path, text) {
-        eprintln!("capitol-town: writing {}: {e}", path.display());
+    if let Err(e) = std::fs::write(&status, text) {
+        eprintln!("capitol-town: writing {}: {e}", status.display());
     }
+    let presence = town::presence_path(roster);
+    if let Err(e) = append_presence(&presence, &town.presence(now_ms)) {
+        eprintln!("capitol-town: writing {}: {e}", presence.display());
+    }
+}
+
+/// Appends `rows` to the presence log, with its header if it's new.
+fn append_presence(path: &Path, rows: &[String]) -> std::io::Result<()> {
+    use std::io::Write;
+    let new = !path.exists();
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut text = String::new();
+    if new {
+        text.push_str(town::PRESENCE_HEADER);
+        text.push('\n');
+    }
+    for row in rows {
+        text.push_str(row);
+        text.push('\n');
+    }
+    file.write_all(text.as_bytes())
+}
+
+fn unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 /// The time now, as `2026-10-20 14:02:31 UTC`.

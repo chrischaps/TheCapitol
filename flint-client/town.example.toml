@@ -7,6 +7,20 @@
 #
 # A role is one of the sim's: gatherer-fiber, gatherer-wood, gatherer-ore,
 # crafter-planks, crafter-ingots, crafter-tools, builder.
+#
+# The persona (C1.2). `mint` writes all of it, drawn from the citizen's
+# name; any of the four lines left out is drawn from the name again, so
+# they're there to read and to change.
+#
+# - home: the zone (rural or suburban) its lot will be in, the avenue it
+#   lives off (a compass point, as "south-west"), and how far out through
+#   the zone, 0 to 1. Until it has saved for a lot it sleeps on the avenue.
+# - market: where it keeps its market hours, "hall" or "bazaar".
+# - schedule: its day on the server's game clock (a game day is two real
+#   hours). Up at wake, at the market for its hours, home at dusk, logged
+#   out at bed until the next wake. Each must come after the one before.
+# - temperament: each 0 to 1. Thrift is how many deeds' worth it saves
+#   before it buys a home; sociability, how long it stays at the market.
 
 # The server, unless --server or $CAPITOL_SERVER says otherwise.
 server = "http://localhost:3000"
@@ -20,6 +34,10 @@ layers = ["rules"]
 name = "Ada Reeder"
 role = "gatherer-fiber"
 key = "cap_replace_with_the_minted_secret"
+home = { zone = "rural", avenue = "south-west", depth = 0.42 }
+market = "bazaar"
+schedule = { wake = "05:40", market = "14:10-16:25", home = "19:05", bed = "20:55" }
+temperament = { thrift = 0.31, risk = 0.58, sociability = 0.66, patience = 0.47 }
 
 [[citizen]]
 name = "Percy Sawyer"

@@ -2,29 +2,38 @@
 //! its own thread, kept alive by a supervisor.
 //!
 //! - **The roster** is `town.toml`: a name, a [`Role`] and a key (or a key
-//!   file) for each citizen. It holds keys, so it's git-ignored;
-//!   `town.example.toml` shows the shape. [`mint`] adds to it.
-//! - **A life** signs in by the key and plays the role's loop
-//!   ([`sim::run::live`]) until the town stops. A dropped connection or a
-//!   server restart is ridden out inside the life (C0.6). A life that ends
-//!   any other way (the server wasn't up to sign in to, a panic) starts
-//!   again after the net layer's backoff. A refused key retires the citizen.
+//!   file) for each citizen, and its [`Persona`] (C1.2). It holds keys, so
+//!   it's git-ignored; `town.example.toml` shows the shape. [`mint`] adds
+//!   to it.
+//! - **A day** (C1.2) is one life: the citizen signs in by its key at its
+//!   [`Schedule`]'s `wake` and plays the role's loop ([`sim::run::live`]),
+//!   keeping its market hours, until it goes home at dusk and logs out. It
+//!   sleeps the night off the server and signs in again in the morning.
+//!   A dropped connection or a server restart is ridden out inside the life
+//!   (C0.6). A life that ends any other way (the server wasn't up to sign
+//!   in to, a panic) starts again after the net layer's backoff. A refused
+//!   key retires the citizen.
 //! - **Health**: each citizen's [`Health`], one line apiece, which the town
-//!   prints and writes beside the roster every minute.
+//!   prints and writes beside the roster every minute, and its presence,
+//!   appended to `town.presence.csv` (C1.2).
+//!
+//! [`Schedule`]: super::schedule::Schedule
 
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use capitol_protocol::rest::{CreateCitizenRequest, LoginRequest};
+use capitol_protocol::rules::{self, Zone};
 use serde::Deserialize;
 
-use super::decide::{self, Cascade, Mind, Temperament};
-use super::persona;
+use super::decide::{self, Cascade, Mind};
+use super::persona::{self, Avenue, Home, Market, Persona, Temperament};
+use super::schedule::{self, Phase, Schedule};
 use crate::bot::{Bot, BotError};
 use crate::net::{self, NetConfig, RestRequest, RestResponse};
 use crate::sim::{self, Role};
@@ -69,6 +78,85 @@ struct CitizenFile {
     key_file: Option<PathBuf>,
     /// This citizen's layers, in place of the town's.
     layers: Option<Vec<String>>,
+    // The persona (C1.2). Any part left out is the one the name seeds.
+    home: Option<HomeFile>,
+    market: Option<String>,
+    schedule: Option<ScheduleFile>,
+    temperament: Option<TemperamentFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HomeFile {
+    zone: String,
+    avenue: String,
+    depth: f64,
+}
+
+/// Game clocks: `"05:30"`, and the market's `"14:05-15:50"`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduleFile {
+    wake: String,
+    market: String,
+    home: String,
+    bed: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TemperamentFile {
+    thrift: f32,
+    risk: f32,
+    sociability: f32,
+    patience: f32,
+}
+
+impl CitizenFile {
+    /// The persona the file gives, the name's seed filling what it leaves
+    /// out.
+    fn persona(&self, role: Role) -> Result<Persona, String> {
+        let mut persona = Persona::seeded(role, seed(&self.name));
+        if let Some(home) = &self.home {
+            persona.home = Home {
+                zone: Zone::from_str(&home.zone).ok_or_else(|| format!("has a home in {:?}, not a zone", home.zone))?,
+                avenue: Avenue::from_str(&home.avenue).ok_or_else(|| {
+                    format!("lives off the {:?} avenue; an avenue is a compass point, as \"south-west\"", home.avenue)
+                })?,
+                depth: home.depth,
+            };
+            persona.home.check()?;
+        }
+        if let Some(market) = &self.market {
+            persona.market = Market::from_str(market)
+                .ok_or_else(|| format!("keeps the {market:?} market; a market is \"hall\" or \"bazaar\""))?;
+        }
+        if let Some(day) = &self.schedule {
+            let at = |what: &str, text: &str| {
+                schedule::parse_clock(text).ok_or_else(|| format!("has {what} {text:?}; a time is a game clock, as \"05:30\""))
+            };
+            let (market_open, market_close) = schedule::parse_hours(&day.market)
+                .ok_or_else(|| format!("has market {:?}; market hours are as \"14:00-15:30\"", day.market))?;
+            persona.schedule = Schedule {
+                wake: at("wake", &day.wake)?,
+                market_open,
+                market_close,
+                home: at("home", &day.home)?,
+                bed: at("bed", &day.bed)?,
+            };
+            persona.schedule.check()?;
+        }
+        if let Some(t) = &self.temperament {
+            persona.temperament = Temperament {
+                thrift: t.thrift,
+                risk: t.risk,
+                sociability: t.sociability,
+                patience: t.patience,
+            };
+            persona.temperament.check()?;
+        }
+        Ok(persona)
+    }
 }
 
 /// The town's citizens, and the server they live on.
@@ -89,6 +177,7 @@ pub struct Citizen {
     pub role: Role,
     /// Its decision layers (C1.3): its own, or the town's.
     pub layers: Vec<String>,
+    pub persona: Persona,
     key: Key,
 }
 
@@ -147,6 +236,7 @@ impl Roster {
                 let known: Vec<&str> = sim::MIX.iter().map(|(r, _)| r.slug()).collect();
                 what(&format!("has role {:?}; a role is one of {}", c.role, known.join(", ")))
             })?;
+            let persona = c.persona(role).map_err(|e| what(&e))?;
             let key = match (c.key, c.key_file) {
                 (Some(secret), None) => Key::Inline(secret),
                 (None, Some(file)) => Key::File(dir.join(file)),
@@ -161,6 +251,7 @@ impl Roster {
                 name: c.name,
                 role,
                 layers: own,
+                persona,
                 key,
             });
         }
@@ -172,18 +263,21 @@ impl Roster {
         })
     }
 
-    /// Adds a citizen to the end of the roster file, leaving what's there
-    /// (and its comments) as it was.
+    /// Adds a citizen to the end of the roster file, with the persona its
+    /// name seeds written out in full, leaving what's there (and its
+    /// comments) as it was.
     fn append(&mut self, name: &str, role: Role, secret: &str) -> std::io::Result<()> {
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
-        file.write_all(entry(name, role, secret).as_bytes())?;
-        self.citizens.push(Citizen {
+        let citizen = Citizen {
             name: name.to_string(),
             role,
             layers: self.layers.clone(),
+            persona: Persona::seeded(role, seed(name)),
             key: Key::Inline(secret.to_string()),
-        });
+        };
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
+        file.write_all(entry(&citizen, secret).as_bytes())?;
+        self.citizens.push(citizen);
         Ok(())
     }
 }
@@ -192,16 +286,50 @@ fn default_layers() -> Vec<String> {
     decide::DEFAULT_LAYERS.iter().map(|l| l.to_string()).collect()
 }
 
-/// A citizen's `[[citizen]]` table.
-fn entry(name: &str, role: Role, secret: &str) -> String {
+/// A citizen's `[[citizen]]` table, persona and all. Its layers are the
+/// town's, so they're left out.
+fn entry(citizen: &Citizen, secret: &str) -> String {
     let quote = |s: &str| toml::Value::String(s.to_string()).to_string();
+    let Persona {
+        temperament: t,
+        home,
+        market,
+        schedule: day,
+    } = &citizen.persona;
     format!(
-        "\n[[citizen]]\nname = {}\nrole = {}\nkey = {}\n",
-        quote(name),
-        quote(role.slug()),
-        quote(secret)
+        "\n[[citizen]]\nname = {}\nrole = {}\nkey = {}\n\
+         home = {{ zone = {}, avenue = {}, depth = {:?} }}\n\
+         market = {}\n\
+         schedule = {{ wake = {}, market = {}, home = {}, bed = {} }}\n\
+         temperament = {{ thrift = {:?}, risk = {:?}, sociability = {:?}, patience = {:?} }}\n",
+        quote(&citizen.name),
+        quote(citizen.role.slug()),
+        quote(secret),
+        quote(home.zone.as_str()),
+        quote(home.avenue.as_str()),
+        home.depth,
+        quote(market.as_str()),
+        quote(&schedule::clock(day.wake)),
+        quote(&day.market()),
+        quote(&schedule::clock(day.home)),
+        quote(&schedule::clock(day.bed)),
+        t.thrift,
+        t.risk,
+        t.sociability,
+        t.patience,
     )
 }
+
+/// Where the town appends who was where in their day: beside the roster,
+/// `town.presence.csv`.
+pub fn presence_path(roster: &Path) -> PathBuf {
+    roster.with_extension("presence.csv")
+}
+
+/// The presence log's columns. `game_time` is the server's clock as this
+/// machine has it; `standing` is [`Standing`], and a citizen is in the
+/// world while it's `working` or `resting`.
+pub const PRESENCE_HEADER: &str = "unix_ms,game_time,name,role,phase,standing";
 
 /// Where the town writes its health: beside the roster, `town.status`.
 pub fn status_path(roster: &Path) -> PathBuf {
@@ -290,6 +418,8 @@ pub enum Standing {
     Offline,
     /// Its life ended; starting again after a backoff.
     Waiting,
+    /// Logged out for the night (C1.2), until its schedule wakes it.
+    Asleep,
     /// The server refused its key. It won't start again.
     Retired,
     Stopped,
@@ -303,6 +433,7 @@ impl fmt::Display for Standing {
             Standing::Resting => "resting",
             Standing::Offline => "offline",
             Standing::Waiting => "waiting",
+            Standing::Asleep => "asleep",
             Standing::Retired => "retired",
             Standing::Stopped => "stopped",
         })
@@ -315,6 +446,8 @@ pub struct Health {
     pub name: String,
     pub role: Role,
     pub standing: Standing,
+    /// Where in its day it is, by the clock (C1.2).
+    pub phase: Option<Phase>,
     pub strands: Option<i64>,
     /// What it's doing: the step's label, as the sim's report files it.
     pub activity: String,
@@ -330,6 +463,7 @@ impl Health {
             name: name.to_string(),
             role,
             standing: Standing::Starting,
+            phase: None,
             strands: None,
             activity: "waiting its turn".into(),
             failure: None,
@@ -346,15 +480,17 @@ impl Health {
         self.failure = Some((Instant::now(), why));
     }
 
-    /// One line: who, what role, where its life stands, Strands, what it's
-    /// doing, and the last failure.
+    /// One line: who, what role, where its life stands and where in its
+    /// day, Strands, what it's doing, and the last failure.
     pub fn line(&self, now: Instant) -> String {
         let strands = self.strands.map_or_else(|| "–".to_string(), |s| format!("{s} S"));
+        let phase = self.phase.map_or("–", |p| p.as_str());
         let mut line = format!(
-            "{:<20} {:<17} {:<8} {:>9}  {}",
+            "{:<20} {:<17} {:<8} {:<6} {:>9}  {}",
             self.name,
             self.role.to_string(),
             self.standing.to_string(),
+            phase,
             strands,
             self.activity
         );
@@ -383,6 +519,9 @@ fn ago(d: Duration) -> String {
 pub(crate) struct Tether<'a> {
     stop: &'a AtomicBool,
     health: &'a Mutex<Health>,
+    /// The server's clock less ours, as the last life saw it, so the town
+    /// wakes the citizen by the server's clock while it's signed out.
+    clock_offset_ms: &'a AtomicI64,
 }
 
 impl Tether<'_> {
@@ -393,6 +532,33 @@ impl Tether<'_> {
     pub(crate) fn health(&self, change: impl FnOnce(&mut Health)) {
         change(&mut self.health.lock().unwrap_or_else(|e| e.into_inner()));
     }
+
+    /// Notes the server's clock, as a life signed in reads it.
+    pub(crate) fn server_time_was(&self, server_ms: Option<i64>) {
+        if let Some(ms) = server_ms {
+            self.clock_offset_ms.store(ms - local_unix_ms(), Ordering::Relaxed);
+        }
+    }
+
+    /// The time of day on the server's clock, as last seen.
+    fn time_of_day(&self) -> f64 {
+        rules::time_of_day(local_unix_ms() + self.clock_offset_ms.load(Ordering::Relaxed))
+    }
+}
+
+/// How a citizen's life ended, when it ended well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ended {
+    /// The town stopped.
+    Stopped,
+    /// It went home and logged out for the night (C1.2).
+    Bedtime,
+}
+
+fn local_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +616,20 @@ impl Town {
         counts.iter().map(|(s, n)| format!("{n} {s}")).collect::<Vec<_>>().join(", ")
     }
 
+    /// Who was where in their day at `unix_ms`, a CSV row a citizen under
+    /// [`PRESENCE_HEADER`]: what C1.2's chart of a day is drawn from.
+    pub fn presence(&self, unix_ms: i64) -> Vec<String> {
+        let time = schedule::clock(rules::time_of_day(unix_ms));
+        self.health
+            .iter()
+            .map(|h| {
+                let h = h.lock().unwrap_or_else(|e| e.into_inner());
+                let phase = h.phase.map_or("", |p| p.as_str());
+                format!("{unix_ms},{time},{},{},{phase},{}", h.name, h.role.slug(), h.standing)
+            })
+            .collect()
+    }
+
     /// Whether every citizen's life is over: stopped or retired.
     pub fn is_empty(&self) -> bool {
         self.lives.iter().all(|l| l.is_finished())
@@ -474,17 +654,35 @@ impl Town {
 }
 
 /// A citizen's lives, one after another, until the town stops or the server
-/// refuses its key.
+/// refuses its key. A life is a day (C1.2): the citizen signs in only
+/// between its `wake` and its `bed`, and sleeps the night through.
 fn live(citizen: &Citizen, server: &str, turn: Duration, stop: &AtomicBool, health: &Mutex<Health>) {
-    let tether = Tether { stop, health };
+    let clock_offset_ms = AtomicI64::new(0);
+    let tether = Tether {
+        stop,
+        health,
+        clock_offset_ms: &clock_offset_ms,
+    };
+    let day = &citizen.persona.schedule;
     pause(stop, turn);
     let mut attempt = 0;
     while !tether.stopped() {
+        let phase = day.phase(tether.time_of_day());
+        tether.health(|h| h.phase = Some(phase));
+        if phase == Phase::Night {
+            sleep(&tether, day);
+            continue;
+        }
         tether.health(|h| h.doing(Standing::Starting, "signing in"));
         let began = Instant::now();
         let life = panic::catch_unwind(AssertUnwindSafe(|| one_life(citizen, server, &tether)));
         let why = match life {
-            Ok(Ok(())) => break,
+            Ok(Ok(Ended::Stopped)) => break,
+            Ok(Ok(Ended::Bedtime)) => {
+                attempt = 0;
+                sleep(&tether, day);
+                continue;
+            }
             Ok(Err(e)) if e.is_final() => {
                 tether.health(|h| {
                     h.failed(e.to_string());
@@ -515,14 +713,28 @@ fn live(citizen: &Citizen, server: &str, turn: Duration, stop: &AtomicBool, heal
     tether.health(|h| h.doing(Standing::Stopped, "stopped"));
 }
 
-/// One life: sign in by the key and play the role until the town stops.
-fn one_life(citizen: &Citizen, server: &str, tether: &Tether) -> Result<(), BotError> {
+/// One life: sign in by the key and play the role through the day, until
+/// bedtime or the town stops. The bot goes with it, so its socket closes
+/// and the avatar leaves the world.
+fn one_life(citizen: &Citizen, server: &str, tether: &Tether) -> Result<Ended, BotError> {
     let key = citizen.key().map_err(BotError::Failed)?;
     let bot = Bot::with_api_key(NetConfig::with_base_url(server), &key)?.quiet();
-    // The roster checked the layers; C1.2 (#250) gives each its temperament
+    tether.server_time_was(bot.state().server_time_ms());
+    // The roster checked the layers
     let cascade = Cascade::from_names(&citizen.layers).map_err(BotError::Failed)?;
-    let mind = Mind::new(cascade, Temperament::default());
-    sim::run::live(bot, citizen.role, seed(&citizen.name), mind, tether)
+    let mind = Mind::new(cascade, citizen.persona.temperament);
+    sim::run::live(bot, citizen.role, &citizen.persona, seed(&citizen.name), mind, tether)
+}
+
+/// Signed out until the morning: until `day`'s `wake` on the server's clock,
+/// or the town stops.
+fn sleep(tether: &Tether, day: &Schedule) {
+    let wait = schedule::real(day.until_wake(tether.time_of_day()));
+    tether.health(|h| {
+        h.phase = Some(Phase::Night);
+        h.doing(Standing::Asleep, &format!("asleep until {}", schedule::clock(day.wake)));
+    });
+    pause(tether.stop, wait);
 }
 
 /// Sleeps for `how_long`, or until `stop`.
@@ -633,6 +845,104 @@ layers = [\"x\"]").contains("citizen \"A\""));
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../town.example.toml");
         let roster = Roster::load(&path).unwrap();
         assert!(!roster.citizens.is_empty());
+        // Ada's persona is written out; Percy's is left to his name's seed
+        let ada = &roster.citizens[0].persona;
+        assert_eq!(ada.home.avenue.as_str(), "south-west");
+        assert_eq!(ada.market, Market::Bazaar);
+        assert_eq!(schedule::clock(ada.schedule.wake), "05:40");
+        let percy = &roster.citizens[1];
+        assert_eq!(percy.persona, Persona::seeded(percy.role, seed(&percy.name)));
+    }
+
+    #[test]
+    fn a_roster_reads_a_persona_and_seeds_what_it_leaves_out() {
+        let text = r#"
+[[citizen]]
+name = "Ada Reeder"
+role = "gatherer-fiber"
+key = "k"
+home = { zone = "suburban", avenue = "north-east", depth = 0.25 }
+schedule = { wake = "06:10", market = "09:30-11:00", home = "18:50", bed = "21:15" }
+"#;
+        let roster = Roster::parse(text, Path::new("town.toml")).unwrap();
+        let ada = &roster.citizens[0].persona;
+        let seeded = Persona::seeded(Role::Gatherer(Gather::Fiber), seed("Ada Reeder"));
+        assert_eq!(ada.home.zone, Zone::Suburban);
+        assert_eq!(ada.home.avenue, Avenue::from_str("north-east").unwrap());
+        assert_eq!(ada.schedule.market(), "09:30-11:00");
+        assert_eq!(schedule::clock(ada.schedule.bed), "21:15");
+        // The market and the temperament come from her name
+        assert_eq!(ada.market, seeded.market);
+        assert_eq!(ada.temperament, seeded.temperament);
+    }
+
+    #[test]
+    fn a_bad_persona_says_what_is_wrong() {
+        let path = Path::new("town.toml");
+        let with = |line: &str| {
+            Roster::parse(&format!("[[citizen]]\nname = \"A\"\nrole = \"builder\"\nkey = \"k\"\n{line}"), path).unwrap_err()
+        };
+        assert!(with("market = \"pub\"").contains("\"hall\" or \"bazaar\""));
+        assert!(with("home = { zone = \"wilderness\", avenue = \"south\", depth = 0.5 }").contains("rural or suburban"));
+        assert!(with("home = { zone = \"rural\", avenue = \"up\", depth = 0.5 }").contains("compass point"));
+        assert!(with("home = { zone = \"rural\", avenue = \"south\", depth = 1.5 }").contains("depth"));
+        assert!(with("schedule = { wake = \"6am\", market = \"09:30-11:00\", home = \"18:50\", bed = \"21:15\" }")
+            .contains("game clock"));
+        assert!(with("schedule = { wake = \"06:00\", market = \"19:30-20:00\", home = \"18:50\", bed = \"21:15\" }")
+            .contains("must run wake < market < home < bed"));
+        assert!(with("temperament = { thrift = 2.0, risk = 0.5, sociability = 0.5, patience = 0.5 }").contains("thrift"));
+        assert!(with("temperament = { thrift = 0.5 }").contains("missing field"));
+    }
+
+    #[test]
+    fn a_minted_entry_reads_back_the_persona_its_name_seeds() {
+        for (role, _) in sim::MIX {
+            for n in 0..30 {
+                let name = persona::name(role, n);
+                let citizen = Citizen {
+                    name: name.clone(),
+                    role,
+                    layers: default_layers(),
+                    persona: Persona::seeded(role, seed(&name)),
+                    key: Key::Inline("k".into()),
+                };
+                let text = entry(&citizen, "k");
+                let back = Roster::parse(&text, Path::new("town.toml")).unwrap();
+                assert_eq!(back.citizens[0], citizen, "{text}");
+            }
+        }
+    }
+
+    /// The acceptance's day, as planned: twenty citizens minted as `mint`
+    /// would, and who of them is where at each game quarter-hour.
+    #[test]
+    fn a_town_of_twenty_works_by_day_trades_in_the_afternoon_and_sleeps_at_night() {
+        let roles = Role::assign(20);
+        let town: Vec<Persona> = roles
+            .iter()
+            .enumerate()
+            .map(|(i, &role)| Persona::seeded(role, seed(&persona::name(role, i as u64))))
+            .collect();
+        let count = |clock: &str, phase: Phase| {
+            let t = schedule::parse_clock(clock).unwrap();
+            town.iter().filter(|p| p.schedule.phase(t) == phase).count()
+        };
+        // Midnight and the small hours: everyone abed
+        for clock in ["00:00", "03:00", "04:30", "22:30"] {
+            assert_eq!(count(clock, Phase::Night), 20, "{clock}");
+        }
+        // Mid-morning and early afternoon, most at work
+        assert!(count("08:00", Phase::Work) >= 18);
+        // The afternoon market draws most of the town; the morning's fewer
+        assert!(count("15:00", Phase::Market) >= 9, "{}", count("15:00", Phase::Market));
+        assert!(count("10:00", Phase::Market) < count("15:00", Phase::Market));
+        // At dusk they're on their way home, and nobody's at work
+        assert!(count("19:45", Phase::Home) >= 15);
+        assert_eq!(count("19:45", Phase::Work) + count("19:45", Phase::Market), 0);
+        // Spread: nobody wakes at once with everyone else
+        let first = town.iter().map(|p| p.schedule.wake).fold(1.0, f64::min);
+        let last = town.iter().map(|p| p.schedule.wake).fold(0.0, f64::max);
+        assert!((last - first) * 24.0 >= 0.75, "the town wakes over three quarters of an hour or more");
     }
 
     #[test]
@@ -640,10 +950,11 @@ layers = [\"x\"]").contains("citizen \"A\""));
         let mut h = Health::new("Ada Reeder", Role::Gatherer(Gather::Fiber));
         h.strands = Some(312);
         h.doing(Standing::Working, "gather fiber");
+        h.phase = Some(Phase::Market);
         let now = Instant::now();
         let line = h.line(now);
         assert!(line.starts_with("Ada Reeder"), "{line}");
-        for part in ["gatherer (fiber)", "working", "312 S", "gather fiber"] {
+        for part in ["gatherer (fiber)", "working", "market", "312 S", "gather fiber"] {
             assert!(line.contains(part), "{line} lacks {part}");
         }
         assert!(!line.contains("failure"));

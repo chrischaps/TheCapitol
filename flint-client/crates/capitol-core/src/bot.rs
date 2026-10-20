@@ -1369,6 +1369,20 @@ impl Bot {
         self.walk_to(hall.door.0, hall.door.1)
     }
 
+    /// Walks to the bazaar's gate (E3.10), on the avenue across from the
+    /// hall, round the water from wherever the bot is (#211). A world
+    /// without a bazaar needs no walk.
+    pub fn go_to_bazaar(&mut self) -> Result<(), BotError> {
+        let Some(bazaar) = self.landmark(|l| l.kind == LandmarkKind::Bazaar)? else {
+            return Ok(());
+        };
+        let (x, y) = self.position();
+        if bazaar.distance_to(x, y) > 0.0 {
+            self.down_the_avenue(bazaar.door.1)?;
+        }
+        self.walk_to(bazaar.door.0, bazaar.door.1)
+    }
+
     /// Onto the south arterial's crown at `y`: the way in to the bazaar,
     /// which faces the hall across it. The walk goes round the water from
     /// wherever the bot is (#211).

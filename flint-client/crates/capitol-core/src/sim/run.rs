@@ -28,7 +28,9 @@ use crate::bot::{Account, Bot, BotError};
 use crate::catalog::Catalog;
 use crate::citizen::decide::{Choice, Decision, Mind, Place, Question, Situation, When, Who};
 use crate::citizen::meet;
-use crate::citizen::town::{Standing, Tether};
+use crate::citizen::persona::{Market, Persona};
+use crate::citizen::schedule::Phase;
+use crate::citizen::town::{Ended, Standing, Tether};
 use crate::market::MarketEvent;
 use crate::market_maker::{self, Maker, MakerConfig};
 use crate::net::NetConfig;
@@ -170,13 +172,18 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
     Ok((report, md, csv))
 }
 
-/// A citizen's life (C1.1): `bot` plays `role` until its town says stop,
-/// with `mind` making its decisions (C1.3). It trades with whatever is on
-/// the book, at the hall, as the swarm does with its makers; the town grants
-/// nobody anything (D2), so the book holds only what players and citizens
-/// put there. `Ok` once stopped; `Err` when the bot couldn't start, or the
-/// server won't have it back.
-pub(crate) fn live(mut bot: Bot, role: Role, seed: u64, mind: Mind, town: &Tether) -> Result<(), BotError> {
+/// A citizen's day (C1.1, C1.2): `bot` plays `role` as `persona` would,
+/// with `mind` making its decisions (C1.3), until bedtime or its town says
+/// stop. It trades with whatever is on the book, at the hall, as the swarm
+/// does with its makers; the town grants nobody anything (D2), so the book
+/// holds only what players and citizens put there.
+///
+/// The day follows the persona's schedule on the server's clock: work, the
+/// market's hours at the hall or the bazaar, work again, and home at dusk,
+/// buying a lot to live on first if it has saved enough. `Ok` once home for
+/// the night or stopped; `Err` when the bot couldn't start, or the server
+/// won't have it back.
+pub(crate) fn live(mut bot: Bot, role: Role, persona: &Persona, seed: u64, mind: Mind, town: &Tether) -> Result<Ended, BotError> {
     let scale = bot.health()?.sim_tick_scale.unwrap_or(1.0);
     for item in MARKET_ITEMS {
         bot.watch_market(item)?;
@@ -189,10 +196,8 @@ pub(crate) fn live(mut bot: Bot, role: Role, seed: u64, mind: Mind, town: &Tethe
     town.health(|h| h.strands = strands);
     let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true, mind);
     citizen.people = true;
-    match citizen.work(None, Some(town)) {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
+    citizen.persona = Some(persona.clone());
+    citizen.work(None, Some(town))
 }
 
 /// A maker's run: quote until `deadline`, take the orders down, and count
@@ -282,6 +287,20 @@ struct SimBot {
     /// A citizen meets people (C1.5): it answers trades, bids for what its
     /// trade needs, and keeps a stall. A swarm bot doesn't.
     people: bool,
+    /// A citizen's persona (C1.2), which gives it a day. A swarm bot works
+    /// round the clock.
+    persona: Option<Persona>,
+    /// At its market this market's hours.
+    at_market: bool,
+}
+
+/// What a bot does next.
+enum Action {
+    Step(Step),
+    Trade(Trade),
+    /// A citizen's market hours with no trade to make: to its market, and
+    /// a game minute there.
+    Market,
 }
 
 impl SimBot {
@@ -310,6 +329,8 @@ impl SimBot {
             mind,
             doing: None,
             people: false,
+            persona: None,
+            at_market: false,
         }
     }
 
@@ -326,7 +347,7 @@ impl SimBot {
     fn play(mut self, hours: f64) -> BotRun {
         let strands_start = self.bot.state().strands().unwrap_or(0);
         let deadline = self.start + self.wall(hours * 3600.0);
-        let error = self.work(Some(deadline), None).map(|e| e.to_string());
+        let error = self.work(Some(deadline), None).err().map(|e| e.to_string());
         // Let the last balance change land.
         let _ = self.bot.idle(Duration::from_millis(500));
         self.journal();
@@ -341,24 +362,36 @@ impl SimBot {
     }
 
     /// Plays the role until `deadline`, or for a citizen (C1.1) until its
-    /// town says stop. Returns what ended it early: the server won't have
-    /// the bot back.
-    fn work(&mut self, deadline: Option<Instant>, town: Option<&Tether>) -> Option<BotError> {
+    /// town says stop or its day ends (C1.2). `Err` is what ended it early:
+    /// the server won't have the bot back.
+    fn work(&mut self, deadline: Option<Instant>, town: Option<&Tether>) -> Result<Ended, BotError> {
         let stopped = || town.is_some_and(Tether::stopped);
         let mut failures = 0;
         while deadline.is_none_or(|d| Instant::now() < d) && !stopped() {
             // Someone asked to trade: that first, where it stands
             if self.people && self.bot.asked_to_trade() {
                 match self.meet(town) {
-                    Err(e) if e.is_final() => return Some(e),
+                    Err(e) if e.is_final() => return Err(e),
                     Err(BotError::Offline(_)) => match self.recover(deadline, town) {
-                        Err(e) if e.is_final() => return Some(e),
+                        Err(e) if e.is_final() => return Err(e),
                         Err(_) => break,
                         Ok(()) => {}
                     },
                     _ => {}
                 }
                 continue;
+            }
+            let phase = self.phase();
+            if let (Some(town), Some(phase)) = (town, phase) {
+                town.health(|h| h.phase = Some(phase));
+                town.server_time_was(self.bot.state().server_time_ms());
+                match phase {
+                    Phase::Home => return self.go_home(town),
+                    // Past bedtime: it sleeps where it stands
+                    Phase::Night => return Ok(Ended::Bedtime),
+                    Phase::Market => {}
+                    Phase::Work => self.at_market = false,
+                }
             }
             let catalog = self.bot.state().catalog().clone();
             let holdings = self.holdings();
@@ -372,18 +405,31 @@ impl SimBot {
                 Ok(Some(errand)) if self.trading => self.choose_trade(&holdings, errand),
                 _ => None,
             };
-            match errand.map(|e| e.map(|e| e.step)) {
-                Ok(Some(step)) => {
-                    let label = trade.as_ref().map_or_else(|| step.label(&catalog), Trade::label);
+            // At market hours a citizen trades what it has, and otherwise
+            // keeps its market rather than its work. The errand stays what
+            // it carries on with after.
+            let step = errand.map(|e| e.map(|e| e.step));
+            let errand_label = step.as_ref().ok().and_then(|s| s.as_ref()).map(|s| s.label(&catalog));
+            let action = match (step, trade) {
+                (_, Some(trade)) => Ok(Some(Action::Trade(trade))),
+                _ if phase == Some(Phase::Market) => Ok(Some(Action::Market)),
+                (step, None) => step.map(|s| s.map(Action::Step)),
+            };
+            match action {
+                Ok(Some(action)) => {
+                    let label = self.label(&action, &catalog);
                     if let Some(town) = town {
                         town.health(|h| h.doing(Standing::Working, &label));
                     }
                     let began = self.now();
-                    let result = match &trade {
-                        Some(trade) => self.trade(trade),
-                        None => self.take(&step),
+                    let result = match &action {
+                        Action::Trade(trade) => self.trade(trade),
+                        Action::Step(step) => self.take(step),
+                        Action::Market => self.keep_market(town),
                     };
-                    self.doing = Some(step.label(&catalog));
+                    if errand_label.is_some() {
+                        self.doing = errand_label;
+                    }
                     self.journal();
                     let ok = result.is_ok();
                     self.entries.push(Entry::Spent {
@@ -399,7 +445,7 @@ impl SimBot {
                     }
                     match result {
                         Ok(()) => failures = 0,
-                        Err(e) if e.is_final() => return Some(e),
+                        Err(e) if e.is_final() => return Err(e),
                         // Someone asked to trade: answered at the top
                         Err(BotError::Interrupted(_)) => {}
                         // The step went with the connection (C0.6): wait for
@@ -414,7 +460,7 @@ impl SimBot {
                             }
                             match self.recover(deadline, town) {
                                 Ok(()) => {}
-                                Err(e) if e.is_final() => return Some(e),
+                                Err(e) if e.is_final() => return Err(e),
                                 // Out of time, or told to stop
                                 Err(_) => break,
                             }
@@ -451,7 +497,113 @@ impl SimBot {
                 town.health(|h| h.strands = strands);
             }
         }
-        None
+        Ok(Ended::Stopped)
+    }
+
+    /// Where in its day a citizen is, by the server's clock. A swarm bot has
+    /// no day.
+    fn phase(&self) -> Option<Phase> {
+        let persona = self.persona.as_ref()?;
+        Some(self.bot.state().time_of_day().map_or(Phase::Work, |t| persona.schedule.phase(t)))
+    }
+
+    /// What the health line and the report call `action`.
+    fn label(&self, action: &Action, catalog: &crate::catalog::Catalog) -> String {
+        match action {
+            Action::Step(step) => step.label(catalog),
+            Action::Trade(trade) => trade.label(),
+            Action::Market => {
+                let place = self.persona.as_ref().map_or(Market::Hall, |p| p.market);
+                let at = if self.at_market { "at" } else { "to" };
+                format!("{at} the {place}")
+            }
+        }
+    }
+
+    /// A citizen's market hours with nothing to trade: to the hall or the
+    /// bazaar, then a game minute there among the others.
+    fn keep_market(&mut self, town: Option<&Tether>) -> Result<(), BotError> {
+        if !self.at_market {
+            match self.persona.as_ref().map(|p| p.market) {
+                Some(Market::Bazaar) => self.bot.go_to_bazaar()?,
+                _ => {
+                    self.bot.go_to_exchange()?;
+                    // As in its free time at the hall (C1.5)
+                    if self.people {
+                        let _ = self.bot.collect_market_box().and_then(|_| self.post_demand());
+                    }
+                }
+            }
+            self.at_market = true;
+            return Ok(());
+        }
+        // Someone asking to trade cuts it short: answered at the top
+        let end = Instant::now() + self.wall(60.0);
+        while !town.is_some_and(Tether::stopped) && !self.bot.asked_to_trade() {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            self.bot.idle(left.min(STOP_CHECK))?;
+        }
+        Ok(())
+    }
+
+    /// Dusk: buys a home if the citizen has saved enough and has none, walks
+    /// home along the avenues, and goes to bed. Something going wrong on the
+    /// way doesn't keep it up: it sleeps where it stands.
+    fn go_home(&mut self, town: &Tether) -> Result<Ended, BotError> {
+        town.health(|h| h.doing(Standing::Working, "going home"));
+        self.at_market = false;
+        if self.bot.state().plots().is_empty() {
+            match self.buy_home() {
+                Ok(()) => {}
+                Err(e) if e.is_final() => return Err(e),
+                Err(e) => town.health(|h| h.failed(format!("buying a home: {e}"))),
+            }
+        }
+        let (x, y) = self.home();
+        while !town.stopped() {
+            match self.bot.walk_to(x, y) {
+                Ok(()) => break,
+                Err(e) if e.is_final() => return Err(e),
+                // Someone asked to trade on the way (C1.5): answered, then
+                // on home
+                Err(BotError::Interrupted(_)) => match self.meet(Some(town)) {
+                    Err(e) if e.is_final() => return Err(e),
+                    _ => {}
+                },
+                Err(e) => {
+                    town.health(|h| h.failed(format!("going home: {e}")));
+                    break;
+                }
+            }
+        }
+        Ok(Ended::Bedtime)
+    }
+
+    /// Where a citizen lives: its lot, once it has one, and until then its
+    /// spot on its avenue.
+    fn home(&self) -> (f64, f64) {
+        match (self.bot.state().plots().first(), &self.persona) {
+            (Some(plot), _) => (plot.world_x, plot.world_y),
+            (None, Some(persona)) => persona.home.spot(),
+            (None, None) => self.bot.position(),
+        }
+    }
+
+    /// Claims a lot to live on, near its spot in its home zone, if it holds
+    /// what its thrift wants in hand for one.
+    fn buy_home(&mut self) -> Result<(), BotError> {
+        let Some(persona) = self.persona.clone() else {
+            return Ok(());
+        };
+        let strands = self.bot.state().strands().unwrap_or(0);
+        let fund = |cost: i64| persona.temperament.home_fund(cost);
+        if strands < fund(self.deed_cost) {
+            return Ok(());
+        }
+        self.claim_near(&[persona.home.zone.as_str()], persona.home.spot(), |cost| fund(cost) <= strands)
     }
 
     /// Waits for the server after a drop: until `deadline`, or for a citizen
@@ -942,17 +1094,34 @@ impl SimBot {
             .any(|s| (s.x - x).hypot(s.y - y) < capitol_protocol::rules::STATION_MIN_SPACING)
     }
 
-    /// Buys the nearest affordable unclaimed plot.
+    /// Buys the nearest affordable unclaimed plot: for a citizen, near its
+    /// home (C1.2), so the lot it builds on is the one it lives on.
     fn claim(&mut self) -> Result<(), BotError> {
-        let (x, y) = self.bot.position();
         let strands = self.bot.state().strands().unwrap_or(0);
-        for zone in PLOT_ZONES {
+        match self.persona.as_ref().map(|p| p.home) {
+            Some(home) => {
+                let mut zones = vec![home.zone.as_str()];
+                zones.extend(PLOT_ZONES.iter().filter(|z| **z != home.zone.as_str()));
+                self.claim_near(&zones, home.spot(), |cost| cost <= strands)
+            }
+            None => {
+                let here = self.bot.position();
+                self.claim_near(&PLOT_ZONES, here, |cost| cost <= strands)
+            }
+        }
+    }
+
+    /// Buys the unclaimed plot nearest `(x, y)` whose deed it can `afford`,
+    /// from the first of `zones` that has one.
+    fn claim_near(&mut self, zones: &[&str], (x, y): (f64, f64), afford: impl Fn(i64) -> bool) -> Result<(), BotError> {
+        let strands = self.bot.state().strands().unwrap_or(0);
+        for &zone in zones {
             let mut plots = self.bot.unclaimed_plots(zone)?;
             plots.retain(|p| p.deed_cost.is_some());
             if let Some(cost) = plots.iter().filter_map(|p| p.deed_cost).min() {
                 self.deed_cost = cost as i64;
             }
-            plots.retain(|p| p.deed_cost.is_some_and(|c| c as i64 <= strands));
+            plots.retain(|p| p.deed_cost.is_some_and(|c| afford(c as i64)));
             plots.sort_by(|a, b| {
                 (a.world_x - x)
                     .hypot(a.world_y - y)
