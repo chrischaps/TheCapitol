@@ -44,6 +44,7 @@ use capitol_protocol::ws::{ItemCount, PlayerPosition, PresenceHolder, ServerMess
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::bazaar::BazaarStore;
 use crate::catalog::{container_type, Catalog};
 use crate::market::{MarketEvent, MarketStore};
 use crate::net::{ConnectionState, NetEvent, RestResponse};
@@ -261,6 +262,9 @@ pub enum StateEvent {
         returned: u32,
         waiting: u32,
     },
+    /// A bazaar answer changed [`GameState::bazaar`]: the directory, a shop
+    /// seen at its stall, or yours.
+    BazaarUpdated,
     /// Someone, maybe you, claimed a lot (`plot_claimed`, B13). It's in
     /// [`GameState::claimed_lots`] now.
     LotClaimed(ClaimedPlot),
@@ -394,6 +398,8 @@ pub struct GameState {
     trade: trade::TradeBook,
     /// The books you watch and your orders (E3.3)
     market: MarketStore,
+    /// The bazaar's directory, the shops seen, and yours (E3.10)
+    bazaar: BazaarStore,
 }
 
 impl Default for GameState {
@@ -431,6 +437,7 @@ impl GameState {
             claimed_version: 0,
             trade: trade::TradeBook::default(),
             market: MarketStore::new(),
+            bazaar: BazaarStore::default(),
         }
     }
 
@@ -797,20 +804,27 @@ impl GameState {
                 number: *number,
                 headline: headline.clone(),
             }),
-            // E3.10: to the merchant
-            M::BazaarSale { stall_id, item_type, buyer_name, units, paid, .. } => out.push(StateEvent::BazaarSale {
-                stall_id: stall_id.clone(),
-                item_type: item_type.clone(),
-                buyer_name: buyer_name.clone(),
-                quantity: units.count(),
-                paid: *paid,
-            }),
-            M::StallLapsed { stall_id, name, returned, waiting } => out.push(StateEvent::StallLapsed {
-                stall_id: stall_id.clone(),
-                name: name.clone(),
-                returned: *returned,
-                waiting: *waiting,
-            }),
+            // E3.10: to the merchant. The store takes the sale off your
+            // listing, or closes your shop.
+            M::BazaarSale { stall_id, item_type, buyer_name, units, paid, .. } => {
+                self.bazaar.apply_ws(message);
+                out.push(StateEvent::BazaarSale {
+                    stall_id: stall_id.clone(),
+                    item_type: item_type.clone(),
+                    buyer_name: buyer_name.clone(),
+                    quantity: units.count(),
+                    paid: *paid,
+                });
+            }
+            M::StallLapsed { stall_id, name, returned, waiting } => {
+                self.bazaar.apply_ws(message);
+                out.push(StateEvent::StallLapsed {
+                    stall_id: stall_id.clone(),
+                    name: name.clone(),
+                    returned: *returned,
+                    waiting: *waiting,
+                });
+            }
             M::PlotClaimed {
                 terrain_id,
                 owner_id,
@@ -1064,6 +1078,36 @@ impl GameState {
                 });
                 self.set_strands(claim.new_balance, &mut out);
             }
+            // `station_automation_changed` says the same to everyone
+            R::Automation { station_id, automation } => {
+                if let Some(station) = self.stations.get_mut(station_id) {
+                    station.automation = Some(automation.clone());
+                }
+            }
+            R::Bazaar(directory) => {
+                self.bazaar.set_directory(directory);
+                out.push(StateEvent::BazaarUpdated);
+            }
+            R::MyStall(mine) => {
+                self.bazaar.set_mine(mine);
+                out.push(StateEvent::BazaarUpdated);
+            }
+            R::Shop(shop) => {
+                self.bazaar.seen(shop, self.me);
+                out.push(StateEvent::BazaarUpdated);
+            }
+            R::Listed(listing) => {
+                self.bazaar.listed(listing);
+                out.push(StateEvent::BazaarUpdated);
+            }
+            R::Unlisted { listing_id } => {
+                self.bazaar.unlisted(*listing_id);
+                out.push(StateEvent::BazaarUpdated);
+            }
+            R::Bought { listing_id, purchase } => {
+                self.bazaar.bought(*listing_id, purchase);
+                out.push(StateEvent::BazaarUpdated);
+            }
             R::Success(_)
             | R::DeedPrices(_)
             | R::Terrain(_)
@@ -1311,6 +1355,12 @@ impl GameState {
     /// To watch an item, or take the messages the market wants sent.
     pub fn market_mut(&mut self) -> &mut MarketStore {
         &mut self.market
+    }
+
+    /// The bazaar: its directory, the shops seen at their stalls, and yours
+    /// (E3.10).
+    pub fn bazaar(&self) -> &BazaarStore {
+        &self.bazaar
     }
 
     pub fn is_patron(&self) -> bool {

@@ -17,6 +17,8 @@
 //!   numbers before you confirm, the server's own rule.
 //! - [`market`]: the market (E3.3): the books you watch, kept by their
 //!   diffs, your orders and the latest trades.
+//! - [`bazaar`]: the bazaar (E3.10): its directory, the shops seen at their
+//!   stalls and yours, and the walk to a stall.
 //! - [`hall`]: going to the Exchange hall (E3.7): open the market there, or
 //!   walk to its door and open it on arrival; and goods waiting in the box.
 //! - [`onboarding`]: the first-session hints: which to show, and what
@@ -42,6 +44,7 @@
 
 pub mod auth;
 pub mod automation;
+pub mod bazaar;
 pub mod bot;
 pub mod catalog;
 pub mod craft;

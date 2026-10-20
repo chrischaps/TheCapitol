@@ -78,6 +78,15 @@ pub enum RestRequest {
     RemoveStation { station_id: Uuid },
     /// `GET /stations/{id}/container`
     StationContainer { station_id: Uuid },
+    /// `PUT /stations/{id}/automation`: what your station makes on its own (E4.2)
+    ConfigureAutomation {
+        station_id: Uuid,
+        request: ConfigureAutomation,
+    },
+    /// `POST /stations/{id}/automation/start`
+    StartAutomation { station_id: Uuid },
+    /// `POST /stations/{id}/automation/stop`
+    StopAutomation { station_id: Uuid },
 
     /// `POST /exchange/deposit`
     Deposit(DepositRequest),
@@ -142,6 +151,21 @@ pub enum RestRequest {
     Gazette { day: Option<i64> },
     /// `PUT /gazette/byline`
     SetByline(GazetteByline),
+
+    /// `GET /bazaar`: the directory of shops (E3.10)
+    Bazaar,
+    /// `GET /bazaar/mine`
+    MyStall,
+    /// `GET /bazaar/stalls/{id}`: a shop's prices and units, at its stall
+    Shop { stall_id: String },
+    /// `POST /bazaar/stalls/{id}/rent`
+    RentStall { stall_id: String, request: RentStall },
+    /// `POST /bazaar/mine/listings`
+    Stock(StockListing),
+    /// `DELETE /bazaar/listings/{id}`
+    Unlist { listing_id: Uuid },
+    /// `POST /bazaar/listings/{id}/buy`
+    Buy { listing_id: Uuid, request: BuyListing },
 }
 
 /// A decoded REST response. Each [`RestRequest`] decodes to exactly one variant.
@@ -201,6 +225,23 @@ pub enum RestResponse {
     Gazette(Box<GazetteResponse>),
     /// Your byline as it now stands
     Byline(GazetteByline),
+    /// A station's automation as configured, started or stopped
+    Automation {
+        station_id: Uuid,
+        automation: StationAutomation,
+    },
+    Bazaar(BazaarDirectory),
+    MyStall(MyStallResponse),
+    /// A shop seen at its stall, or yours as rented
+    Shop(BazaarShop),
+    /// A listing as stocked
+    Listed(BazaarListing),
+    /// A listing taken off your shop
+    Unlisted { listing_id: Uuid },
+    Bought {
+        listing_id: Uuid,
+        purchase: BazaarPurchase,
+    },
 }
 
 /// Why a REST call failed.
@@ -269,9 +310,14 @@ impl RestRequest {
             | Grant(_)
             | PlaceOrder(_)
             | CollectMarketBox(_)
-            | CollectImpound(_) => Method::POST,
-            UpdatePlotPermissions { .. } | SetByline(_) => Method::PUT,
-            RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } => Method::DELETE,
+            | CollectImpound(_)
+            | StartAutomation { .. }
+            | StopAutomation { .. }
+            | RentStall { .. }
+            | Stock(_)
+            | Buy { .. } => Method::POST,
+            UpdatePlotPermissions { .. } | SetByline(_) | ConfigureAutomation { .. } => Method::PUT,
+            RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } | Unlist { .. } => Method::DELETE,
             ApiKeys
             | Health
             | Terrain { .. }
@@ -297,7 +343,10 @@ impl RestRequest {
             | MarketHistory(_)
             | MarketSummary
             | MarketBox
-            | Gazette { .. } => Method::GET,
+            | Gazette { .. }
+            | Bazaar
+            | MyStall
+            | Shop { .. } => Method::GET,
         }
     }
 
@@ -329,6 +378,9 @@ impl RestRequest {
             PlaceStation(_) => "/stations/place".into(),
             RemoveStation { station_id } => format!("/stations/{station_id}"),
             StationContainer { station_id } => format!("/stations/{station_id}/container"),
+            ConfigureAutomation { station_id, .. } => format!("/stations/{station_id}/automation"),
+            StartAutomation { station_id } => format!("/stations/{station_id}/automation/start"),
+            StopAutomation { station_id } => format!("/stations/{station_id}/automation/stop"),
             Deposit(_) => "/exchange/deposit".into(),
             Withdraw(_) => "/exchange/withdraw".into(),
             ListPlots(_) => "/plots".into(),
@@ -355,6 +407,13 @@ impl RestRequest {
             Gazette { day: None } => "/gazette/latest".into(),
             Gazette { day: Some(_) } => "/gazette".into(),
             SetByline(_) => "/gazette/byline".into(),
+            Bazaar => "/bazaar".into(),
+            MyStall => "/bazaar/mine".into(),
+            Shop { stall_id } => format!("/bazaar/stalls/{stall_id}"),
+            RentStall { stall_id, .. } => format!("/bazaar/stalls/{stall_id}/rent"),
+            Stock(_) => "/bazaar/mine/listings".into(),
+            Unlist { listing_id } => format!("/bazaar/listings/{listing_id}"),
+            Buy { listing_id, .. } => format!("/bazaar/listings/{listing_id}/buy"),
         }
     }
 
@@ -379,6 +438,10 @@ impl RestRequest {
             PlaceOrder(b) => req.json(b),
             CollectMarketBox(b) | CollectImpound(b) => req.json(b),
             SetByline(b) => req.json(b),
+            ConfigureAutomation { request, .. } => req.json(request),
+            RentStall { request, .. } => req.json(request),
+            Stock(b) => req.json(b),
+            Buy { request, .. } => req.json(request),
             Gazette { day: Some(date) } => req.query(&GazetteQuery { date: *date }),
             MarketDepth(q) => req.query(q),
             MyOrders(q) => req.query(q),
@@ -449,6 +512,22 @@ impl RestRequest {
             Q::CollectMarketBox(_) | Q::CollectImpound(_) => A::Collected(de(body)?),
             Q::Gazette { .. } => A::Gazette(Box::new(de(body)?)),
             Q::SetByline(_) => A::Byline(de(body)?),
+            Q::ConfigureAutomation { station_id, .. }
+            | Q::StartAutomation { station_id }
+            | Q::StopAutomation { station_id } => A::Automation {
+                station_id: *station_id,
+                automation: de(body)?,
+            },
+            Q::Bazaar => A::Bazaar(de(body)?),
+            Q::MyStall => A::MyStall(de(body)?),
+            Q::Shop { .. } | Q::RentStall { .. } => A::Shop(de(body)?),
+            Q::Stock(_) => A::Listed(de(body)?),
+            // The body is `null`
+            Q::Unlist { listing_id } => A::Unlisted { listing_id: *listing_id },
+            Q::Buy { listing_id, .. } => A::Bought {
+                listing_id: *listing_id,
+                purchase: de(body)?,
+            },
         })
     }
 }
@@ -690,6 +769,57 @@ mod tests {
                 "PUT",
                 "/gazette/byline".into(),
             ),
+            (
+                RestRequest::ConfigureAutomation {
+                    station_id: id,
+                    request: ConfigureAutomation { recipe_id: "plank".into(), mode: AutomationMode::Forever },
+                },
+                "PUT",
+                format!("/stations/{id}/automation"),
+            ),
+            (
+                RestRequest::StartAutomation { station_id: id },
+                "POST",
+                format!("/stations/{id}/automation/start"),
+            ),
+            (
+                RestRequest::StopAutomation { station_id: id },
+                "POST",
+                format!("/stations/{id}/automation/stop"),
+            ),
+            (RestRequest::Bazaar, "GET", "/bazaar".into()),
+            (RestRequest::MyStall, "GET", "/bazaar/mine".into()),
+            (
+                RestRequest::Shop { stall_id: "bazaar_stall_3".into() },
+                "GET",
+                "/bazaar/stalls/bazaar_stall_3".into(),
+            ),
+            (
+                RestRequest::RentStall {
+                    stall_id: "bazaar_stall_3".into(),
+                    request: RentStall { days: 1, name: None },
+                },
+                "POST",
+                "/bazaar/stalls/bazaar_stall_3/rent".into(),
+            ),
+            (
+                RestRequest::Stock(StockListing { item_id: id, quantity: 1, price: 1, qualities: None }),
+                "POST",
+                "/bazaar/mine/listings".into(),
+            ),
+            (
+                RestRequest::Unlist { listing_id: id },
+                "DELETE",
+                format!("/bazaar/listings/{id}"),
+            ),
+            (
+                RestRequest::Buy {
+                    listing_id: id,
+                    request: BuyListing { quantity: 1, qualities: None },
+                },
+                "POST",
+                format!("/bazaar/listings/{id}/buy"),
+            ),
         ];
         for (request, method, path) in cases {
             assert_eq!(request.method().as_str(), method, "{request:?}");
@@ -703,6 +833,13 @@ mod tests {
             .decode(b"null")
             .unwrap();
         assert_eq!(response, RestResponse::PlotAt(None));
+    }
+
+    #[test]
+    fn an_unlist_decodes_its_null_as_the_listing_gone() {
+        let listing_id = Uuid::from_u128(7);
+        let response = RestRequest::Unlist { listing_id }.decode(b"null").unwrap();
+        assert_eq!(response, RestResponse::Unlisted { listing_id });
     }
 
     #[test]

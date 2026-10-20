@@ -91,13 +91,17 @@ fn upstream() -> SocketAddr {
     addrs[0]
 }
 
-/// A fresh account per run, so the script starts from an empty inventory.
+/// A fresh account per call, so the script starts from an empty inventory.
+/// Tests run side by side and start in the same millisecond, so the number
+/// counts calls: two tests on one account share one avatar (E0.8).
 fn fresh_account() -> Account {
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    Account::numbered(&format!("live{}", stamp % 100_000_000), 1)
+    let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Account::numbered(&format!("live{}", stamp % 100_000_000), n)
 }
 
 /// The P2 exit test: the bot logs in, moves, extracts fiber and crafts rope.
@@ -364,4 +368,215 @@ fn bots_place_watch_fill_and_cancel_orders() {
         })
         .expect("the cancel shows");
     assert!(buyer.state().market().open_orders().is_empty());
+}
+
+/// The server the C1.4 tests use: `CAPITOL_SERVER`, or the local default.
+/// They take their goods and Strands from grants, so it needs `DEV_GRANTS=on`.
+fn live() -> NetConfig {
+    NetConfig::with_base_url(std::env::var("CAPITOL_SERVER").unwrap_or_else(|_| "http://localhost:3000".into()))
+}
+
+fn stamp() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() % 100_000_000
+}
+
+/// Grants `items` (type, quantity, quality) into the market box, then walks
+/// to the hall and collects them.
+fn granted(bot: &mut Bot, strands: i64, items: &[(&str, i32, i32)]) {
+    use capitol_core::protocol::rest::{GrantItem, GrantRequest};
+    bot.grant(GrantRequest {
+        strands,
+        items: items
+            .iter()
+            .map(|&(item_type, quantity, quality)| GrantItem { item_type: item_type.into(), quantity, quality })
+            .collect(),
+    })
+    .expect("granted (the server needs DEV_GRANTS=on)");
+    if !items.is_empty() {
+        bot.go_to_exchange().expect("reached the hall");
+        bot.fetch_market_box().expect("fetched the market box");
+        bot.collect_market_box().expect("collected the grant");
+    }
+}
+
+fn stack_of(bot: &Bot, item_type: &str) -> uuid::Uuid {
+    bot.state()
+        .inventory()
+        .and_then(|inv| inv.items().find(|i| i.item_type == item_type).map(|i| i.item_id))
+        .unwrap_or_else(|| panic!("no {item_type} in the inventory"))
+}
+
+/// C1.4, the bazaar through `Bot`: a merchant rents a stall (or keeps the one
+/// it has), stocks rope there, and a customer finds the shop in the
+/// directory, walks to it, browses and buys. The merchant hears the sale,
+/// its store takes the unit off the listing, and it unlists the rest.
+#[test]
+#[ignore = "needs a local stack with DEV_GRANTS=on: docker-compose up -d, then cargo run in backend/"]
+fn bots_keep_a_shop_and_buy_from_one() {
+    use capitol_core::protocol::rest::{BuyListing, StockListing};
+    use chrono::{DateTime, Utc};
+
+    // One merchant every run: thirteen stalls would run out in a day of
+    // fresh ones, since a stall can't be given up early (#268). It pays a
+    // day more while that keeps it within the week.
+    let mut merchant = Bot::sign_in(live(), &Account::numbered("merchant", 1)).expect("merchant signed in");
+    let mut customer =
+        Bot::sign_in(live(), &Account::numbered(&format!("customer{}", stamp()), 1)).expect("customer signed in");
+    granted(&mut merchant, 500, &[("rope", 3, 64)]);
+    granted(&mut customer, 500, &[]);
+
+    let now = || DateTime::<Utc>::from(SystemTime::now());
+    let name = format!("Ropes {}", stamp() % 1000);
+    let stall_id = match merchant.my_stall().expect("our stall").shop {
+        Some(shop) if shop.paid_until > now() + chrono::Duration::days(6) => shop.stall_id,
+        Some(shop) => merchant.rent_stall(&shop.stall_id, 1, Some(&name)).expect("paid a day more").stall_id,
+        None => {
+            let free = merchant
+                .bazaar()
+                .expect("the directory")
+                .stalls
+                .into_iter()
+                .find(|s| s.shop.is_none())
+                .expect("a free stall");
+            let shop = merchant.rent_stall(&free.stall_id, 1, Some(&name)).expect("rented");
+            assert_eq!(Some(shop.owner_id), merchant.state().me());
+            shop.stall_id
+        }
+    };
+    assert_eq!(merchant.state().bazaar().my_shop().map(|s| s.stall_id.as_str()), Some(stall_id.as_str()));
+
+    // Stock two of the three, at a price to tell this run's listing by
+    let price = 50 + (stamp() as i64 % 50);
+    let rope_before = merchant.count(container_type::PLAYER_INVENTORY, "rope");
+    let listing = merchant
+        .stock(StockListing { item_id: stack_of(&merchant, "rope"), quantity: 2, price, qualities: None })
+        .expect("stocked");
+    assert_eq!(listing.units.count(), 2);
+    assert_eq!(merchant.count(container_type::PLAYER_INVENTORY, "rope"), rope_before - 2);
+    assert!(merchant.state().bazaar().my_shop().unwrap().listings.iter().any(|l| l.id == listing.id));
+
+    // The customer reads the directory from the spawn, then walks over and browses
+    let directory = customer.bazaar().expect("the directory");
+    let sign = directory.stalls.iter().find(|s| s.stall_id == stall_id).and_then(|s| s.shop.as_ref()).expect("the shop");
+    assert!(sign.item_types.iter().any(|t| t == "rope"));
+    let seen = customer.browse(&stall_id).expect("browsed");
+    assert!(seen.listings.iter().any(|l| l.id == listing.id && l.price == price));
+    assert!(customer.state().bazaar().shop(&stall_id).is_some(), "the store kept the shop");
+
+    // ...and buys one
+    let rope_held = customer.count(container_type::PLAYER_INVENTORY, "rope");
+    let strands = customer.state().strands().expect("a balance");
+    let bought = customer.buy(listing.id, BuyListing { quantity: 1, qualities: None }).expect("bought");
+    assert_eq!(bought.units.count(), 1);
+    assert_eq!(bought.paid, price);
+    assert_eq!(customer.count(container_type::PLAYER_INVENTORY, "rope"), rope_held + 1);
+    customer
+        .until("the balance", Duration::from_secs(10), |s, _| s.strands() == Some(strands - price))
+        .expect("paid for it");
+    let still = |s: &capitol_core::state::GameState| {
+        s.bazaar().shop(&stall_id).and_then(|shop| shop.listings.iter().find(|l| l.id == listing.id)).map(|l| l.units.count())
+    };
+    assert_eq!(still(customer.state()), Some(1));
+
+    // The merchant hears it, and its shop shows one left
+    merchant
+        .until("the sale", Duration::from_secs(10), |_, seen| {
+            seen.iter().any(|e| matches!(e, StateEvent::BazaarSale { paid, .. } if *paid == price))
+        })
+        .expect("the merchant heard the sale");
+    let left = |m: &Bot| {
+        m.state().bazaar().my_shop().and_then(|s| s.listings.iter().find(|l| l.id == listing.id)).map(|l| l.units.count())
+    };
+    assert_eq!(left(&merchant), Some(1));
+
+    // Unlisting brings the last one home
+    let rope_now = merchant.count(container_type::PLAYER_INVENTORY, "rope");
+    merchant.unlist(listing.id).expect("unlisted");
+    assert_eq!(left(&merchant), None);
+    assert_eq!(merchant.count(container_type::PLAYER_INVENTORY, "rope"), rope_now + 1);
+}
+
+/// C1.4, a station through `Bot`: split a stack, put down a workbench, have a
+/// stack that isn't a tool refused its slot, put a sickle in it, set it to
+/// make knapped stone, start and stop it, take the sickle out, and take the
+/// bench down again.
+#[test]
+#[ignore = "needs a local stack with DEV_GRANTS=on: docker-compose up -d, then cargo run in backend/"]
+fn bots_split_stacks_and_set_tools_and_automation() {
+    use capitol_core::bot::BotError;
+    use capitol_core::protocol::rest::{AutomationMode, AutomationState};
+
+    let mut bot = Bot::sign_in(live(), &Account::numbered(&format!("bench{}", stamp()), 1)).expect("signed in");
+    let home = bot.position();
+    granted(&mut bot, 0, &[("workbench_kit", 1, 60), ("stone_sickle", 1, 70), ("stone", 6, 50)]);
+
+    // Split two stone off the six, into the first empty slot
+    let stone = stack_of(&bot, "stone");
+    let split = bot.split_stack(stone, 2, None).expect("split");
+    let stacks: Vec<i32> = bot
+        .state()
+        .inventory()
+        .unwrap()
+        .items()
+        .filter(|i| i.item_type == "stone")
+        .map(|i| i.quantity)
+        .collect();
+    assert_eq!(split.item.quantity, 2);
+    assert!(stacks.contains(&4) && stacks.contains(&2), "{stacks:?}");
+
+    // A workbench back where we came in, on the first spot that takes it
+    bot.walk_to(home.0, home.1).expect("walked home");
+    let kit = stack_of(&bot, "workbench_kit");
+    let mut bench = None;
+    for k in 0..16 {
+        let a = std::f64::consts::TAU * k as f64 / 8.0;
+        let r = if k < 8 { 30.0 } else { 90.0 };
+        let (x, y) = (home.0 + r * a.cos(), home.1 + r * a.sin());
+        match bot.walk_to(x, y) {
+            Ok(()) => {}
+            Err(BotError::Blocked { .. }) => continue,
+            Err(e) => panic!("{e}"),
+        }
+        match bot.place_station("workbench", kit, x, y) {
+            Ok(placed) => {
+                bench = Some(placed.id);
+                break;
+            }
+            Err(BotError::Rest { .. }) => {}
+            Err(e) => panic!("{e}"),
+        }
+    }
+    let bench = bench.expect("a spot for the workbench");
+
+    // A stack that isn't a tool is refused, with the server's reason
+    let refused = bot.install_tool(bench, stone).expect_err("stone isn't a tool");
+    assert!(matches!(refused, BotError::Failed(_)), "{refused}");
+    println!("refused: {refused}");
+
+    // The sickle goes in, and leaves the inventory
+    let sickle = stack_of(&bot, "stone_sickle");
+    let tool = bot.install_tool(bench, sickle).expect("installed");
+    assert_eq!(tool.item_id, sickle);
+    assert_eq!(bot.count(container_type::PLAYER_INVENTORY, "stone_sickle"), 0);
+
+    // Configure, start, stop: the store's station keeps up
+    let set = bot.configure_automation(bench, "knapped_stone", AutomationMode::Count(1)).expect("configured");
+    assert_eq!(set.state, AutomationState::Stopped);
+    assert_eq!(set.recipe_id, "knapped_stone");
+    let running = bot.start_automation(bench).expect("started");
+    // Its box is empty, so it may already wait for stone
+    assert!(matches!(running.state, AutomationState::Running | AutomationState::Paused { .. }), "{running:?}");
+    let stopped = bot.stop_automation(bench).expect("stopped");
+    assert_eq!(stopped.state, AutomationState::Stopped);
+    bot.until("the station to show it", Duration::from_secs(5), |s, _| {
+        s.station(bench).and_then(|st| st.automation.as_ref()).is_some_and(|a| a.state == AutomationState::Stopped)
+    })
+    .expect("the store's station is stopped");
+
+    // The sickle comes back out
+    bot.remove_tool(bench).expect("removed");
+    assert_eq!(bot.count(container_type::PLAYER_INVENTORY, "stone_sickle"), 1);
+    assert!(bot.state().station(bench).is_some_and(|s| s.tool.is_none()));
+
+    bot.remove_station(bench).expect("took the bench down");
 }

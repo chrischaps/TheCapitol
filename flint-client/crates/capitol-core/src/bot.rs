@@ -26,23 +26,26 @@ use std::fmt;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use capitol_protocol::rest::{
-    CollectRequest, CollectResponse, DepositRequest, DepositResponse, GrantRequest, GrantResponse, HealthResponse, ListPlotsQuery, LoginRequest, MarketOrder,
-    MarketSummaryResponse, MoveItemRequest, MyOrdersQuery, PlaceOrder, PlaceStationRequest, PlotInfo, RegisterRequest,
-    ResourceNodeInfo, StationInfo, SubscribeRequest, Subscription, WithdrawRequest,
-    WithdrawResponse,
+    AutomationMode, BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BuyListing, CollectRequest,
+    CollectResponse, ConfigureAutomation, DepositRequest, DepositResponse, GrantRequest, GrantResponse,
+    HealthResponse, ListPlotsQuery, LoginRequest, MarketOrder, MarketSummaryResponse, MoveItemRequest,
+    MyOrdersQuery, MyStallResponse, PlaceOrder, PlaceStationRequest, PlotInfo, RegisterRequest, RentStall,
+    ResourceNodeInfo, SplitStackRequest, SplitStackResponse, StationAutomation, StationInfo, StationTool,
+    StockListing, SubscribeRequest, Subscription, WithdrawRequest, WithdrawResponse,
 };
 use capitol_protocol::rules::{self, Zone};
-use capitol_protocol::terrain::LandmarkKind;
+use capitol_protocol::terrain::{Landmark, LandmarkKind};
 use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
 
+use crate::bazaar;
 use crate::catalog::container_type;
 use crate::net::{
     ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
 };
 use crate::market::MarketEvent;
 use crate::poll::{Fetch, Poller};
-use crate::state::{GameState, StateEvent, Yield};
+use crate::state::{answers, GameState, StateEvent, Yield};
 
 /// How long one frame waits for the network. The poller and the trade timers
 /// run once per frame, so this is the bot's clock resolution.
@@ -208,6 +211,9 @@ pub struct Bot {
     /// What [`Bot::record`] keeps for [`Bot::take_journal`]: the finishes,
     /// breakages and balance changes seen in every frame, whichever call ran it.
     journal: Option<Vec<StateEvent>>,
+    /// The world's buildings, from the first `/terrain` a walk needed. They
+    /// move only with an admin regenerate.
+    landmarks: Option<Vec<Landmark>>,
 }
 
 impl Bot {
@@ -282,6 +288,7 @@ impl Bot {
             quiet: false,
             rng: seed(seeded_by),
             journal: None,
+            landmarks: None,
         })
     }
 
@@ -509,6 +516,7 @@ impl Bot {
             container_type::PLAYER_INVENTORY => self.state.inventory(),
             container_type::CRAFTING_INPUT => self.state.crafting_input(),
             container_type::CRAFTING_OUTPUT => self.state.crafting_output(),
+            container_type::MARKET_BOX => self.state.market_box(),
             _ => None,
         };
         held.map_or(0, |c| {
@@ -859,6 +867,166 @@ impl Bot {
         }
     }
 
+    /// Takes our station `station_id` down, over REST.
+    pub fn remove_station(&mut self, station_id: Uuid) -> Result<(), BotError> {
+        match self.call("removing a station", RestRequest::RemoveStation { station_id })? {
+            RestResponse::Success(_) => {
+                self.refetch(Fetch::Containers);
+                self.refetch(Fetch::NearbyStations);
+                self.settle()
+            }
+            other => Err(unexpected("removing a station", &other)),
+        }
+    }
+
+    /// Puts the tool `item_id` from the inventory into `station_id`'s empty
+    /// tool slot (E1.6), and waits for the slot to show it and the inventory
+    /// to lose it. Stand within the station's reach first.
+    pub fn install_tool(&mut self, station_id: Uuid, item_id: Uuid) -> Result<StationTool, BotError> {
+        self.know_station(station_id)?;
+        self.send(ClientMessage::InstallTool {
+            station_id: station_id.to_string(),
+            item_id: item_id.to_string(),
+        });
+        let installed = |s: &GameState| {
+            s.station(station_id)
+                .and_then(|st| st.tool.as_ref())
+                .is_some_and(|t| t.item_id == item_id)
+        };
+        self.tool_slot("install_tool", installed)?;
+        // The inventory's `inventory_updated` follows the slot's change
+        self.wait_until("the tool to leave the inventory", |bot| {
+            bot.state.inventory().is_some_and(|inv| inv.find(item_id).is_none())
+        })?;
+        self.settle()?;
+        self.state
+            .station(station_id)
+            .and_then(|s| s.tool.clone())
+            .ok_or_else(|| BotError::Failed("the tool left the slot again".into()))
+    }
+
+    /// Takes `station_id`'s tool into the inventory (E1.6): our own, or
+    /// anyone's from our own station, and waits for it to arrive. Stand
+    /// within its reach first.
+    pub fn remove_tool(&mut self, station_id: Uuid) -> Result<(), BotError> {
+        self.know_station(station_id)?;
+        let tool = self
+            .state
+            .station(station_id)
+            .and_then(|s| s.tool.as_ref())
+            .map(|t| t.item_id)
+            .ok_or_else(|| BotError::Failed("the station's tool slot is empty".into()))?;
+        self.send(ClientMessage::RemoveTool {
+            station_id: station_id.to_string(),
+        });
+        self.tool_slot("remove_tool", |s| s.station(station_id).is_some_and(|st| st.tool.is_none()))?;
+        self.wait_until("the tool to reach the inventory", |bot| {
+            bot.state.inventory().is_some_and(|inv| inv.find(tool).is_some())
+        })?;
+        self.settle()
+    }
+
+    /// Waits for a tool slot's change to show, or for the server to refuse
+    /// `command`.
+    fn tool_slot(&mut self, command: &str, done: impl Fn(&GameState) -> bool) -> Result<(), BotError> {
+        let seen = self.until(&format!("{command} to answer"), CALL_TIMEOUT, |s, seen| {
+            done(s) || refusal(seen, command).is_some()
+        })?;
+        match refusal(&seen, command) {
+            Some(reason) if !done(&self.state) => Err(BotError::Failed(reason)),
+            _ => Ok(()),
+        }
+    }
+
+    /// Fetches the stations nearby unless `station_id` is among those the
+    /// store holds, since a slot's change is kept only on a station it knows.
+    fn know_station(&mut self, station_id: Uuid) -> Result<(), BotError> {
+        if self.state.station(station_id).is_none() {
+            self.refetch(Fetch::NearbyStations);
+            self.settle()?;
+        }
+        match self.state.station(station_id) {
+            Some(_) => Ok(()),
+            None => Err(BotError::Failed(format!("no station {station_id} near here"))),
+        }
+    }
+
+    /// Sets what our station `station_id` makes on its own (E4.2): `recipe_id`
+    /// from and into its own box, `mode` crafts or forever. It stops the
+    /// station if it was running.
+    pub fn configure_automation(
+        &mut self,
+        station_id: Uuid,
+        recipe_id: &str,
+        mode: AutomationMode,
+    ) -> Result<StationAutomation, BotError> {
+        let request = RestRequest::ConfigureAutomation {
+            station_id,
+            request: ConfigureAutomation {
+                recipe_id: recipe_id.to_string(),
+                mode,
+            },
+        };
+        self.automation("configuring automation", request)
+    }
+
+    /// Sets our configured station running (E4.2). It pauses, rather than
+    /// fails, while its box lacks an input.
+    pub fn start_automation(&mut self, station_id: Uuid) -> Result<StationAutomation, BotError> {
+        self.automation("starting automation", RestRequest::StartAutomation { station_id })
+    }
+
+    /// Stops our station (E4.2). It keeps its setting and its count.
+    pub fn stop_automation(&mut self, station_id: Uuid) -> Result<StationAutomation, BotError> {
+        self.automation("stopping automation", RestRequest::StopAutomation { station_id })
+    }
+
+    fn automation(&mut self, what: &'static str, request: RestRequest) -> Result<StationAutomation, BotError> {
+        match self.call(what, request)? {
+            RestResponse::Automation { automation, .. } => Ok(automation),
+            other => Err(unexpected(what, &other)),
+        }
+    }
+
+    /// Splits `quantity` off the stack `item_id` into an empty slot of its
+    /// own container: `to_slot`, or the first empty one. The lowest units go
+    /// (E1.8). Waits for the containers to settle.
+    pub fn split_stack(
+        &mut self,
+        item_id: Uuid,
+        quantity: i32,
+        to_slot: Option<i32>,
+    ) -> Result<SplitStackResponse, BotError> {
+        let container = self
+            .state
+            .containers()
+            .values()
+            .find(|c| c.find(item_id).is_some())
+            .ok_or_else(|| BotError::Failed(format!("no stack {item_id} in our containers")))?;
+        let to_slot = match to_slot {
+            Some(slot) => slot,
+            None => container
+                .first_empty()
+                .ok_or_else(|| BotError::Failed("no empty slot to split into".into()))? as i32,
+        };
+        let request = RestRequest::SplitStack {
+            item_id,
+            request: SplitStackRequest {
+                quantity,
+                to_slot,
+                to_container_id: None,
+                qualities: None,
+            },
+        };
+        match self.call("splitting a stack", request)? {
+            RestResponse::SplitStack(split) => {
+                self.settle()?;
+                Ok(split)
+            }
+            other => Err(unexpected("splitting a stack", &other)),
+        }
+    }
+
     /// Up to 100 unclaimed plots in `zone`.
     pub fn unclaimed_plots(&mut self, zone: &str) -> Result<Vec<PlotInfo>, BotError> {
         let request = RestRequest::ListPlots(ListPlotsQuery {
@@ -914,17 +1082,31 @@ impl Bot {
     /// bots arrive; from elsewhere the first leg may meet water. A world
     /// without a hall needs no walk.
     pub fn go_to_exchange(&mut self) -> Result<(), BotError> {
-        let what = "fetching the terrain";
-        let hall = match self.call(what, RestRequest::Terrain { cached_version: None })? {
-            RestResponse::Terrain(terrain) => {
-                terrain.landmarks.into_iter().find(|l| l.kind == LandmarkKind::ExchangeHall)
-            }
-            other => return Err(unexpected(what, &other)),
+        let Some(hall) = self.landmark(|l| l.kind == LandmarkKind::ExchangeHall)? else {
+            return Ok(());
         };
-        let Some(hall) = hall else { return Ok(()) };
-        let (_, y) = self.position();
-        self.walk_to(rules::CENTER_X, y)?;
-        self.walk_to(rules::CENTER_X, hall.door.1)
+        self.down_the_avenue(hall.door.1)
+    }
+
+    /// Onto the south arterial's crown, then along it to `y`: the way in to
+    /// the hall and the bazaar, which face each other across it.
+    fn down_the_avenue(&mut self, y: f64) -> Result<(), BotError> {
+        let (_, from) = self.position();
+        self.walk_to(rules::CENTER_X, from)?;
+        self.walk_to(rules::CENTER_X, y)
+    }
+
+    /// The first landmark `which` picks, from `/terrain`, fetched the first
+    /// time a walk needs it.
+    fn landmark(&mut self, which: impl Fn(&Landmark) -> bool) -> Result<Option<Landmark>, BotError> {
+        if self.landmarks.is_none() {
+            let what = "fetching the terrain";
+            match self.call(what, RestRequest::Terrain { cached_version: None })? {
+                RestResponse::Terrain(terrain) => self.landmarks = Some(terrain.landmarks),
+                other => return Err(unexpected(what, &other)),
+            }
+        }
+        Ok(self.landmarks.iter().flatten().find(|l| which(l)).cloned())
     }
 
     /// Places an order (E3.3) and returns it as placed. The bot must be at the
@@ -993,6 +1175,187 @@ impl Bot {
             RestResponse::MarketSummary(summary) => Ok(summary),
             other => Err(unexpected("asking the market's summary", &other)),
         }
+    }
+
+    /// The bazaar's directory (E3.10): every stall, and the shop in it, from
+    /// anywhere.
+    pub fn bazaar(&mut self) -> Result<BazaarDirectory, BotError> {
+        match self.call("reading the bazaar's directory", RestRequest::Bazaar)? {
+            RestResponse::Bazaar(directory) => Ok(directory),
+            other => Err(unexpected("reading the bazaar's directory", &other)),
+        }
+    }
+
+    /// Our own shop, if we rent a stall, and goods from a lapsed one, from
+    /// anywhere.
+    pub fn my_stall(&mut self) -> Result<MyStallResponse, BotError> {
+        match self.call("reading our stall", RestRequest::MyStall)? {
+            RestResponse::MyStall(mine) => Ok(mine),
+            other => Err(unexpected("reading our stall", &other)),
+        }
+    }
+
+    /// Walks to the stall `stall_id`, onto the lane's crown in front of it
+    /// ([`bazaar::approach`]): down the avenue, in at the gate, and along
+    /// the lane; or along the lane from inside. Stays put within its range.
+    pub fn go_to_stall(&mut self, stall_id: &str) -> Result<(), BotError> {
+        let stall = self
+            .landmark(|l| l.kind == LandmarkKind::Stall && l.id == stall_id)?
+            .ok_or_else(|| BotError::Failed(format!("no stall {stall_id}")))?;
+        let (x, y) = self.position();
+        if rules::bazaar::at_the_stall(&stall, x, y) {
+            return Ok(());
+        }
+        let hall = self
+            .landmark(|l| l.kind == LandmarkKind::Bazaar)?
+            .ok_or_else(|| BotError::Failed("the world has no bazaar".into()))?;
+        if hall.distance_to(x, y) > 0.0 {
+            self.down_the_avenue(hall.door.1)?;
+        }
+        for (x, y) in bazaar::route(&hall, &stall, self.position()) {
+            self.walk_to(x, y)?;
+        }
+        Ok(())
+    }
+
+    /// Walks to `stall_id` and reads its shop: every listing's price and units.
+    pub fn browse(&mut self, stall_id: &str) -> Result<BazaarShop, BotError> {
+        self.go_to_stall(stall_id)?;
+        let request = RestRequest::Shop {
+            stall_id: stall_id.to_string(),
+        };
+        match self.call("browsing a stall", request)? {
+            RestResponse::Shop(shop) => Ok(shop),
+            other => Err(unexpected("browsing a stall", &other)),
+        }
+    }
+
+    /// Walks to the free stall `stall_id` and rents it for `days` as `name`;
+    /// or, on our own, pays `days` more and renames it if `name` is given.
+    pub fn rent_stall(&mut self, stall_id: &str, days: i64, name: Option<&str>) -> Result<BazaarShop, BotError> {
+        self.go_to_stall(stall_id)?;
+        let request = RestRequest::RentStall {
+            stall_id: stall_id.to_string(),
+            request: RentStall {
+                days,
+                name: name.map(str::to_string),
+            },
+        };
+        match self.call("renting a stall", request)? {
+            RestResponse::Shop(shop) => {
+                self.say(format!("renting {stall_id} as {} for {days} days", shop.name));
+                Ok(shop)
+            }
+            other => Err(unexpected("renting a stall", &other)),
+        }
+    }
+
+    /// Walks to our stall and lists units of an inventory stack there.
+    pub fn stock(&mut self, listing: StockListing) -> Result<BazaarListing, BotError> {
+        self.go_to_my_stall()?;
+        let held = |bot: &Bot, kind: &str| bot.count(container_type::PLAYER_INVENTORY, kind);
+        let kind = self
+            .state
+            .inventory()
+            .and_then(|inv| inv.find(listing.item_id))
+            .map(|i| i.item_type.clone());
+        let before = kind.as_deref().map_or(0, |k| held(self, k));
+        match self.call("stocking our stall", RestRequest::Stock(listing))? {
+            RestResponse::Listed(listing) => {
+                self.say(format!(
+                    "listed {} {} at {} each",
+                    listing.units.count(),
+                    listing.item_type,
+                    listing.price
+                ));
+                // The inventory's `inventory_updated` may come after the answer
+                let want = before as i64 - listing.units.count();
+                self.wait_until("the units to leave the inventory", |bot| {
+                    held(bot, &listing.item_type) as i64 <= want
+                })?;
+                self.settle()?;
+                Ok(listing)
+            }
+            other => Err(unexpected("stocking our stall", &other)),
+        }
+    }
+
+    /// Walks to our stall and takes a listing off it. Its units come back to
+    /// the inventory, or the market box if that's full.
+    pub fn unlist(&mut self, listing_id: Uuid) -> Result<(), BotError> {
+        self.go_to_my_stall()?;
+        let coming = self
+            .state
+            .bazaar()
+            .my_shop()
+            .and_then(|s| s.listings.iter().find(|l| l.id == listing_id))
+            .map(|l| (l.item_type.clone(), l.units.count()));
+        let before = coming.as_ref().map_or(0, |(kind, _)| self.held(kind));
+        match self.call("unlisting", RestRequest::Unlist { listing_id })? {
+            RestResponse::Unlisted { .. } => {
+                if let Some((kind, n)) = coming {
+                    self.wait_until("the units to come back", |bot| bot.held(&kind) >= before + n)?;
+                }
+                self.settle()
+            }
+            other => Err(unexpected("unlisting", &other)),
+        }
+    }
+
+    /// How many of `item_type` the inventory and the market box hold.
+    fn held(&self, item_type: &str) -> i64 {
+        (self.count(container_type::PLAYER_INVENTORY, item_type) + self.count(container_type::MARKET_BOX, item_type))
+            as i64
+    }
+
+    /// Walks to the stall of `listing_id`, which a [`browse`](Self::browse)
+    /// must have seen, and buys from it. The units go to the inventory, or
+    /// the market box if that's full.
+    pub fn buy(&mut self, listing_id: Uuid, request: BuyListing) -> Result<BazaarPurchase, BotError> {
+        let stall_id = self
+            .state
+            .bazaar()
+            .stall_of(listing_id)
+            .map(str::to_string)
+            .ok_or_else(|| BotError::Failed(format!("listing {listing_id} isn't at any stall we've browsed")))?;
+        self.go_to_stall(&stall_id)?;
+        let kind = self
+            .state
+            .bazaar()
+            .shop(&stall_id)
+            .and_then(|s| s.listings.iter().find(|l| l.id == listing_id))
+            .map(|l| l.item_type.clone());
+        let before = kind.as_deref().map_or(0, |k| self.held(k));
+        match self.call("buying at a stall", RestRequest::Buy { listing_id, request })? {
+            RestResponse::Bought { purchase, .. } => {
+                self.say(format!(
+                    "bought {} at {stall_id} for {}",
+                    purchase.units.count(),
+                    purchase.paid
+                ));
+                if let Some(kind) = kind {
+                    let want = before + purchase.units.count();
+                    self.wait_until("the goods to arrive", |bot| bot.held(&kind) >= want)?;
+                }
+                self.settle()?;
+                Ok(purchase)
+            }
+            other => Err(unexpected("buying at a stall", &other)),
+        }
+    }
+
+    /// Walks to the stall we rent, asking the server which if the store
+    /// doesn't know.
+    fn go_to_my_stall(&mut self) -> Result<(), BotError> {
+        let stall_id = match self.state.bazaar().my_shop() {
+            Some(shop) => shop.stall_id.clone(),
+            None => self
+                .my_stall()?
+                .shop
+                .map(|s| s.stall_id)
+                .ok_or_else(|| BotError::Failed("we rent no stall".into()))?,
+        };
+        self.go_to_stall(&stall_id)
     }
 
     /// Strands and goods from nowhere, on a server with `DEV_GRANTS` on (E3.8).
@@ -1298,6 +1661,14 @@ impl Bot {
     }
 }
 
+/// The server's refusal of `command`, if `seen` holds one.
+fn refusal(seen: &[StateEvent], command: &str) -> Option<String> {
+    seen.iter().find_map(|e| match e {
+        StateEvent::ServerError { message, command: c } if answers(c, command) => Some(message.clone()),
+        _ => None,
+    })
+}
+
 fn blocked(seen: &[StateEvent]) -> Option<BotError> {
     seen.iter().find_map(|e| match e {
         StateEvent::MovementBlocked { reason, x, y, .. } => Some(BotError::Blocked {
@@ -1396,6 +1767,7 @@ mod tests {
             quiet: true,
             rng: seed("t@x"),
             journal: None,
+            landmarks: None,
         };
         let draws: Vec<f64> = (0..1000).map(|_| bot.random()).collect();
         assert!(draws.iter().all(|r| (0.0..1.0).contains(r)));
