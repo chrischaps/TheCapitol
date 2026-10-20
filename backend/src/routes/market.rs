@@ -816,6 +816,7 @@ mod tests {
             strand_balance: 100,
             current_zone: None,
             action_state: ActionState::Idle,
+            citizen: false,
         });
         assert!(at_the_exchange(&game, &db, ada.id, "collect from the market box").await.is_err());
     }

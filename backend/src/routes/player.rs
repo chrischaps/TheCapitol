@@ -50,10 +50,11 @@ pub async fn get_me(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> Result<Json<PlayerMeResponse>, AppError> {
-    let (player_id, name, x, y, strand_balance) =
-        sqlx::query_as::<_, (Uuid, String, f64, f64, i64)>(
-            "SELECT id, name, position_x, position_y, strand_balance
-             FROM players WHERE account_id = $1 LIMIT 1"
+    let (player_id, name, x, y, strand_balance, citizen) =
+        sqlx::query_as::<_, (Uuid, String, f64, f64, i64, bool)>(
+            "SELECT p.id, p.name, p.position_x, p.position_y, p.strand_balance, a.kind = 'citizen'
+             FROM players p JOIN accounts a ON a.id = p.account_id
+             WHERE p.account_id = $1 LIMIT 1"
         )
         .bind(auth_user.account_id)
         .fetch_one(&state.db)
@@ -78,6 +79,7 @@ pub async fn get_me(
         strand_balance,
         online,
         subscription,
+        citizen,
     }))
 }
 

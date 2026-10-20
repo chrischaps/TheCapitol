@@ -67,6 +67,7 @@ fn sampling_doesnt_allocate() {
                 name: format!("player {n}"),
                 x: 4000.0 + 5.0 * k as f64,
                 y: 4000.0 + 20.0 * n as f64,
+                citizen: false,
             })
             .collect();
         NetEvent::Ws(ServerMessage::Positions { players })

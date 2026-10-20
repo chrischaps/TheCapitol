@@ -440,15 +440,18 @@ pub async fn buy(
     .await
     .map_err(BazaarError::Funds)?;
 
-    let buyer_name: String = sqlx::query_scalar("SELECT name FROM players WHERE id = $1")
-        .bind(buyer)
-        .fetch_one(&mut *tx)
-        .await?;
+    let (buyer_name, buyer_citizen): (String, bool) = sqlx::query_as(
+        "SELECT p.name, a.kind = 'citizen' FROM players p JOIN accounts a ON a.id = p.account_id WHERE p.id = $1",
+    )
+    .bind(buyer)
+    .fetch_one(&mut *tx)
+    .await?;
     let message = ServerMessage::BazaarSale {
         stall_id: stall_id.to_string(),
         listing_id,
         item_type: item_type.clone(),
         buyer_name,
+        buyer_citizen,
         units: units.clone(),
         price,
         paid,
@@ -625,10 +628,11 @@ pub async fn run_bazaar_loop(db: PgPool, events: tokio::sync::broadcast::Sender<
 /// its rent hasn't run out, with the kinds of goods it lists but no prices,
 /// quantities or grades.
 pub async fn directory(db: &PgPool, stalls: &[String], now: DateTime<Utc>) -> Result<BazaarDirectory, sqlx::Error> {
-    let rows: Vec<(String, String, Uuid, String, Option<String>)> = sqlx::query_as(
-        "SELECT r.stall_id, r.name, r.player_id, p.name, l.item_type
+    let rows: Vec<(String, String, Uuid, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT r.stall_id, r.name, r.player_id, p.name, a.kind = 'citizen', l.item_type
          FROM bazaar_rentals r
          JOIN players p ON p.id = r.player_id
+         JOIN accounts a ON a.id = p.account_id
          LEFT JOIN bazaar_listings l ON l.stall_id = r.stall_id
          WHERE r.paid_until > $1",
     )
@@ -636,10 +640,10 @@ pub async fn directory(db: &PgPool, stalls: &[String], now: DateTime<Utc>) -> Re
     .fetch_all(db)
     .await?;
     let mut shops: BTreeMap<String, (ShopSign, BTreeSet<String>)> = BTreeMap::new();
-    for (stall_id, name, owner_id, owner_name, item_type) in rows {
-        let (_, kinds) = shops
-            .entry(stall_id)
-            .or_insert_with(|| (ShopSign { name, owner_id, owner_name, item_types: Vec::new() }, BTreeSet::new()));
+    for (stall_id, name, owner_id, owner_name, owner_citizen, item_type) in rows {
+        let (_, kinds) = shops.entry(stall_id).or_insert_with(|| {
+            (ShopSign { name, owner_id, owner_name, owner_citizen, item_types: Vec::new() }, BTreeSet::new())
+        });
         kinds.extend(item_type);
     }
     Ok(BazaarDirectory {
@@ -677,18 +681,21 @@ pub async fn mine(db: &PgPool, player_id: Uuid, now: DateTime<Utc>) -> Result<My
 
 /// The shop at `stall_id`, whether or not its rent has run out.
 async fn load_shop(conn: &mut PgConnection, stall_id: &str) -> Result<Option<BazaarShop>, sqlx::Error> {
-    let row: Option<(String, Uuid, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT r.name, r.player_id, p.name, r.paid_until
-         FROM bazaar_rentals r JOIN players p ON p.id = r.player_id WHERE r.stall_id = $1",
+    let row: Option<(String, Uuid, String, bool, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT r.name, r.player_id, p.name, a.kind = 'citizen', r.paid_until
+         FROM bazaar_rentals r
+         JOIN players p ON p.id = r.player_id
+         JOIN accounts a ON a.id = p.account_id
+         WHERE r.stall_id = $1",
     )
     .bind(stall_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((name, owner_id, owner_name, paid_until)) = row else {
+    let Some((name, owner_id, owner_name, owner_citizen, paid_until)) = row else {
         return Ok(None);
     };
     let listings = listings(conn, Listings::At(stall_id)).await?;
-    Ok(Some(BazaarShop { stall_id: stall_id.to_string(), name, owner_id, owner_name, paid_until, listings }))
+    Ok(Some(BazaarShop { stall_id: stall_id.to_string(), name, owner_id, owner_name, owner_citizen, paid_until, listings }))
 }
 
 /// Which listings [`listings`] loads.

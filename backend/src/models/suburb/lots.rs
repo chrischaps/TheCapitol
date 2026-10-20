@@ -585,8 +585,9 @@ impl Street<'_> {
             .drain(..)
             .enumerate()
             .filter(|&(i, r)| {
-                !(i == 0 && hugs[0].is_some())
-                    && !(i == last && hugs[1].is_some())
+                // Named, so every clippy's `nonminimal_bool` accepts it (#266)
+                let hugged = (i == 0 && hugs[0].is_some()) || (i == last && hugs[1].is_some());
+                !hugged
                     && self.deep(&r)
                     && !crosses(&r, &hugs[0])
                     && !crosses(&r, &hugs[1])

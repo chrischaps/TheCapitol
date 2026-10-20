@@ -985,10 +985,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         }
                     }
                     // M5: Trading events
-                    Ok(GameEvent::TradeRequested { from_player, from_player_name, to_player }) => {
+                    Ok(GameEvent::TradeRequested { from_player, from_player_name, from_citizen, to_player }) => {
                         // Only send to the target player
                         if to_player == player_id {
-                            let msg = ServerMessage::TradeRequested { from_player, from_player_name };
+                            let msg = ServerMessage::TradeRequested { from_player, from_player_name, from_citizen };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
@@ -1011,11 +1011,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         if player_id == player_a || player_id == player_b {
                             let partner_id = if player_id == player_a { player_b } else { player_a };
                             // Get partner name from game state
-                            let partner_name = {
+                            let (partner_name, partner_citizen) = {
                                 let game = state.game.read().await;
-                                game.players.get(&partner_id).map(|p| p.name.clone()).unwrap_or_default()
+                                game.players.get(&partner_id).map(|p| (p.name.clone(), p.citizen)).unwrap_or_default()
                             };
-                            let msg = ServerMessage::TradeStarted { trade_id, partner_id, partner_name };
+                            let msg = ServerMessage::TradeStarted { trade_id, partner_id, partner_name, partner_citizen };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
@@ -1301,10 +1301,19 @@ async fn validate_token(token: &str, state: &AppState) -> Result<Claims, String>
     Ok(token_data.claims)
 }
 
-async fn load_player(db: &sqlx::PgPool, account_id: Uuid) -> Result<PlayerState, String> {
-    let player = sqlx::query_as::<_, crate::models::Player>(
-        "SELECT id, account_id, name, position_x, position_y, destination_x, destination_y, speed, strand_balance, current_zone, created_at
-         FROM players WHERE account_id = $1 LIMIT 1"
+/// The account's player as the game holds it, marked if it's a citizen's (C0.1)
+pub(crate) async fn load_player(db: &sqlx::PgPool, account_id: Uuid) -> Result<PlayerState, String> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        #[sqlx(flatten)]
+        player: crate::models::Player,
+        citizen: bool,
+    }
+    let row = sqlx::query_as::<_, Row>(
+        "SELECT p.id, p.account_id, p.name, p.position_x, p.position_y, p.destination_x, p.destination_y,
+                p.speed, p.strand_balance, p.current_zone, p.created_at, a.kind = 'citizen' AS citizen
+         FROM players p JOIN accounts a ON a.id = p.account_id
+         WHERE p.account_id = $1 LIMIT 1"
     )
     .bind(account_id)
     .fetch_optional(db)
@@ -1312,7 +1321,9 @@ async fn load_player(db: &sqlx::PgPool, account_id: Uuid) -> Result<PlayerState,
     .map_err(|e| format!("Database error: {}", e))?
     .ok_or_else(|| "Player not found".to_string())?;
 
-    Ok(player.into())
+    let mut player: PlayerState = row.player.into();
+    player.citizen = row.citizen;
+    Ok(player)
 }
 
 /// Fetch player items by IDs (validates ownership)

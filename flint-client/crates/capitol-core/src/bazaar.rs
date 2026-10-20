@@ -243,6 +243,7 @@ mod tests {
             name: "Ada's Ropes".into(),
             owner_id: owner,
             owner_name: "ada".into(),
+            owner_citizen: false,
             paid_until: when(),
             listings,
         }
@@ -258,6 +259,7 @@ mod tests {
             listing_id: id,
             item_type: "rope".into(),
             buyer_name: "bram".into(),
+            buyer_citizen: false,
             units,
             price: 7,
             paid: 0,

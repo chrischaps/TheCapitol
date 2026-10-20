@@ -60,6 +60,7 @@ impl Rig {
             trade_id: TRADE,
             partner_id: OTHER,
             partner_name: "Brin".into(),
+            partner_citizen: false,
         }));
         rig
     }
@@ -137,6 +138,7 @@ fn pos(id: Uuid, x: f64, y: f64) -> PlayerPosition {
         name: format!("P{id}"),
         x,
         y,
+        citizen: false,
     }
 }
 
@@ -161,6 +163,7 @@ fn answer_for(fetch: Fetch) -> RestResponse {
             strand_balance: 100,
             online: true,
             subscription: Default::default(),
+            citizen: false,
         }),
         Fetch::Containers => RestResponse::Containers(ContainersResponse {
             containers: vec![container(INVENTORY, "player_inventory")],

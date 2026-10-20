@@ -164,6 +164,7 @@ impl GameState {
             name: player.name.clone(),
             x: player.x,
             y: player.y,
+            citizen: player.citizen,
         };
         self.players.insert(player.id, player);
         let _ = self.event_sender.send(GameEvent::PlayerJoined(position));
@@ -330,6 +331,7 @@ impl GameState {
                 name: p.name.clone(),
                 x: p.x,
                 y: p.y,
+                citizen: p.citizen,
             })
             .collect()
     }
@@ -535,8 +537,8 @@ impl GameState {
                     }
 
                     // Get initiator name for the request event
-                    let initiator_name = self.players.get(&player_id)
-                        .map(|p| p.name.clone())
+                    let (initiator_name, initiator_citizen) = self.players.get(&player_id)
+                        .map(|p| (p.name.clone(), p.citizen))
                         .unwrap_or_default();
 
                     match self.trade_manager.request_trade(player_id, target_player_id) {
@@ -561,6 +563,7 @@ impl GameState {
                                 let _ = self.event_sender.send(GameEvent::TradeRequested {
                                     from_player: player_id,
                                     from_player_name: initiator_name,
+                                    from_citizen: initiator_citizen,
                                     to_player: target_player_id,
                                 });
                             }
@@ -1042,6 +1045,7 @@ mod tests {
             strand_balance: 0,
             current_zone: None,
             action_state: ActionState::Idle,
+            citizen: false,
         }
     }
 
@@ -1201,6 +1205,37 @@ mod tests {
             requested |= matches!(event, GameEvent::TradeRequested { to_player, .. } if to_player == b);
         }
         assert!(requested);
+    }
+
+    /// Everyone sees a citizen marked (C0.1): as it joins, in every `positions`, and in
+    /// the trade requests it makes. A person isn't.
+    #[test]
+    fn a_citizen_is_marked_wherever_it_is_named() {
+        let mut game = game();
+        let mut rx = game.subscribe();
+        let ada = player("Ada", CENTER_X, CENTER_Y);
+        let wren = PlayerState { citizen: true, ..player("Wren", CENTER_X + 10.0, CENTER_Y) };
+        let (ada_id, wren_id) = (ada.id, wren.id);
+        game.add_player(ada);
+        game.add_player(wren);
+        game.broadcast_positions();
+        game.queue_command(Command::InitiateTrade { player_id: wren_id, target_player_id: ada_id });
+        game.process_commands();
+
+        let (mut joined, mut positions, mut requested) = (Vec::new(), None, None);
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                GameEvent::PlayerJoined(p) => joined.push((p.id, p.citizen)),
+                GameEvent::PlayerPositions(ps) => positions = Some(ps),
+                GameEvent::TradeRequested { from_player, from_citizen, .. } => requested = Some((from_player, from_citizen)),
+                _ => {}
+            }
+        }
+        assert_eq!(joined, [(ada_id, false), (wren_id, true)]);
+        let positions = positions.expect("positions");
+        let marked = |id| positions.iter().find(|p| p.id == id).map(|p| p.citizen);
+        assert_eq!((marked(ada_id), marked(wren_id)), (Some(false), Some(true)));
+        assert_eq!(requested, Some((wren_id, true)));
     }
 
     #[test]

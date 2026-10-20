@@ -28,6 +28,7 @@ fn pos(id: Uuid, name: &str, x: f64, y: f64) -> PlayerPosition {
         name: name.into(),
         x,
         y,
+        citizen: false,
     }
 }
 
@@ -127,6 +128,7 @@ fn plot(owner: Option<Uuid>) -> PlotInfo {
         station_capacity: 2,
         terrain_id: None,
         corners: None,
+        owner_citizen: false,
     }
 }
 
@@ -460,6 +462,30 @@ fn player_joined_adds_once() {
     );
     assert!(state.apply_ws(&joined).is_empty());
     assert_eq!(state.player(OTHER).unwrap().name, "Brin");
+}
+
+/// A citizen's mark (C0.1) is kept wherever the server names one: on the player
+/// from `positions` and `player_joined`, and on a trade it asks for or opens.
+#[test]
+fn citizens_keep_their_mark() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../protocol/tests/fixtures/server");
+    let fixture = |name: &str| -> M {
+        let json = std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap();
+        serde_json::from_str(&json).unwrap()
+    };
+    let mut state = connected();
+    state.apply_ws(&fixture("positions"));
+    let marked = |state: &GameState, name: &str| state.players().values().find(|p| p.name == name).map(|p| p.citizen);
+    assert_eq!((marked(&state, "Ada"), marked(&state, "Brin")), (Some(false), Some(true)));
+
+    let mut joined = connected();
+    joined.apply_ws(&fixture("player_joined"));
+    assert_eq!(marked(&joined, "Brin"), Some(true));
+
+    state.apply_ws(&fixture("trade_requested"));
+    assert!(matches!(state.trade(), Trade::Incoming { citizen: true, .. }), "{:?}", state.trade());
+    state.apply_ws(&fixture("trade_started"));
+    assert!(matches!(state.trade(), Trade::Open(open) if open.partner_citizen), "{:?}", state.trade());
 }
 
 #[test]
@@ -1326,6 +1352,7 @@ fn bazaar_notices_are_reported() {
             stall_id: "bazaar_stall_4".into(),
             item_type: "rope".into(),
             buyer_name: "bram".into(),
+            buyer_citizen: true,
             quantity: 3,
             paid: 42,
         }]
@@ -1529,6 +1556,7 @@ fn login_sets_the_local_player() {
             email: "a@b.c".into(),
             tier: "free".into(),
             is_admin: false,
+            kind: Default::default(),
         },
         player_id: ME,
     }));
@@ -1545,6 +1573,7 @@ fn me_response(online: bool) -> R {
         strand_balance: 250,
         online,
         subscription: Default::default(),
+        citizen: false,
     })
 }
 

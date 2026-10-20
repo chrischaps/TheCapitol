@@ -681,6 +681,7 @@ mod tests {
             },
             i_accepted: false,
             they_accepted: false,
+            partner_citizen: false,
         }
     }
 
@@ -759,6 +760,7 @@ mod tests {
         let trade = Trade::Incoming {
             from: Uuid::from_u128(2),
             name: "Bram".into(),
+            citizen: false,
         };
         let mut panel = TradePanel::default();
         let v = view(&trade, &draft, &inv);

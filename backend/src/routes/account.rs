@@ -7,7 +7,6 @@ use axum::{
     routing::{delete, get},
     Extension, Json, Router,
 };
-use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use capitol_protocol::rest::{ApiKeyInfo, ApiKeyScope, CreateApiKeyRequest, CreatedApiKey, SuccessResponse};
@@ -28,20 +27,6 @@ pub fn router(state: AppState) -> Router<AppState> {
             state,
             crate::middleware::auth::auth_middleware,
         ))
-}
-
-type KeyRow = (Uuid, String, Vec<String>, String, DateTime<Utc>, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
-
-fn info((id, name, scopes, prefix, created_at, last_used_at, revoked_at): KeyRow) -> ApiKeyInfo {
-    ApiKeyInfo {
-        id,
-        name,
-        scopes: scopes.iter().filter_map(|s| ApiKeyScope::parse(s)).collect(),
-        prefix,
-        created_at,
-        last_used_at,
-        revoked_at,
-    }
 }
 
 /// Belt and braces: the middleware already keeps keys out of `/account`.
@@ -100,21 +85,7 @@ pub async fn create_api_key(
         )));
     }
 
-    let secret = api_keys::new_secret();
-    let row: KeyRow = sqlx::query_as(
-        "INSERT INTO api_keys (id, account_id, name, scopes, secret_hash, prefix)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, name, scopes, prefix, created_at, last_used_at, revoked_at",
-    )
-    .bind(Uuid::new_v4())
-    .bind(user.account_id)
-    .bind(name)
-    .bind(scopes.iter().map(|s| s.as_str()).collect::<Vec<_>>())
-    .bind(crate::sessions::hash(&secret))
-    .bind(api_keys::shown_prefix(&secret))
-    .fetch_one(&state.db)
-    .await?;
-    let key = info(row);
+    let (key, secret) = api_keys::mint(&state.db, user.account_id, name, &scopes).await?;
     tracing::info!("Account {} minted API key {} ({:?})", user.account_id, key.id, key.scopes);
     Ok(Json(CreatedApiKey { key, secret }))
 }
@@ -132,14 +103,14 @@ pub async fn list_api_keys(
     Extension(user): Extension<AuthUser>,
 ) -> Result<Json<Vec<ApiKeyInfo>>, AppError> {
     players_only(&user)?;
-    let rows: Vec<KeyRow> = sqlx::query_as(
-        "SELECT id, name, scopes, prefix, created_at, last_used_at, revoked_at
-         FROM api_keys WHERE account_id = $1 ORDER BY created_at DESC",
-    )
+    let rows: Vec<api_keys::InfoRow> = sqlx::query_as(&format!(
+        "SELECT {} FROM api_keys WHERE account_id = $1 ORDER BY created_at DESC",
+        api_keys::INFO_COLUMNS
+    ))
     .bind(user.account_id)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(rows.into_iter().map(info).collect()))
+    Ok(Json(rows.into_iter().map(api_keys::info).collect()))
 }
 
 /// Revoke a key. It's refused from its next request, and its open sockets close.

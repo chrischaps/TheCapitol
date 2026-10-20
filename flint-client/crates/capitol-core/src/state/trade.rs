@@ -84,6 +84,8 @@ pub enum Trade {
     Incoming {
         from: Uuid,
         name: String,
+        /// The asker is a citizen (C0.1)
+        citizen: bool,
     },
     Open(OpenTrade),
 }
@@ -94,6 +96,8 @@ pub struct OpenTrade {
     pub trade_id: Uuid,
     pub partner_id: Uuid,
     pub partner_name: String,
+    /// The partner is a citizen (C0.1)
+    pub partner_citizen: bool,
     /// What the server last confirmed for each side.
     pub mine: Offer,
     pub theirs: Offer,
@@ -437,6 +441,7 @@ impl GameState {
             M::TradeRequested {
                 from_player,
                 from_player_name,
+                from_citizen,
             } => match &book.trade {
                 // We asked each other at once. Our request starts the trade on
                 // the server, so `trade_started` is on its way: no prompt.
@@ -447,6 +452,7 @@ impl GameState {
                     book.trade = Trade::Incoming {
                         from: *from_player,
                         name: from_player_name.clone(),
+                        citizen: *from_citizen,
                     };
                     book.waiting = None;
                     out.push(StateEvent::Trade(TradeEvent::Requested {
@@ -484,11 +490,13 @@ impl GameState {
                 trade_id,
                 partner_id,
                 partner_name,
+                partner_citizen,
             } => {
                 book.trade = Trade::Open(OpenTrade {
                     trade_id: *trade_id,
                     partner_id: *partner_id,
                     partner_name: partner_name.clone(),
+                    partner_citizen: *partner_citizen,
                     mine: Offer::default(),
                     theirs: Offer::default(),
                     i_accepted: false,

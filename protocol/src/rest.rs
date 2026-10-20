@@ -117,6 +117,40 @@ pub struct AccountInfo {
     pub tier: String,
     /// Whether this account has admin privileges (debug features)
     pub is_admin: bool,
+    /// A person's account or a citizen's (C0.1). Absent from a server older
+    /// than #246, which had only people.
+    #[serde(default)]
+    pub kind: AccountKind,
+}
+
+/// Whose an account is (Citizens D3). Registration makes a `human`; only
+/// `POST /admin/citizens` makes a `citizen`, and an account never changes
+/// kind. Other players see a citizen marked (`citizen` on the wire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AccountKind {
+    #[default]
+    Human,
+    /// An AI player who lives in the world, run by `capitol-town`
+    Citizen,
+}
+
+impl AccountKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AccountKind::Human => "human",
+            AccountKind::Citizen => "citizen",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<AccountKind> {
+        match s {
+            "human" => Some(AccountKind::Human),
+            "citizen" => Some(AccountKind::Citizen),
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +225,41 @@ pub struct ApiKeyInfo {
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct CreatedApiKey {
     pub key: ApiKeyInfo,
+    pub secret: String,
+}
+
+// ---------------------------------------------------------------------------
+// /admin/citizens (C0.1)
+// ---------------------------------------------------------------------------
+
+/// `POST /admin/citizens`: make a citizen, its player and its key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CreateCitizenRequest {
+    /// The player's name, as everyone sees it
+    pub name: String,
+}
+
+/// A citizen, as `GET /admin/citizens` lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CitizenInfo {
+    pub account_id: Uuid,
+    pub player_id: Uuid,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    /// Its newest live key, if it has one. A citizen with none can't sign in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<ApiKeyInfo>,
+}
+
+/// `POST /admin/citizens`'s answer. The key's secret (`play` and `trade`) is
+/// shown this once: it's how `capitol-town` signs the citizen in, since a
+/// citizen has no password.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CreatedCitizen {
+    pub citizen: CitizenInfo,
     pub secret: String,
 }
 
@@ -342,6 +411,9 @@ pub struct PlayerMeResponse {
     /// The account's subscription, as of now (E4.1)
     #[serde(default)]
     pub subscription: Subscription,
+    /// You're a citizen (C0.1), and marked as one to everyone else
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
 }
 
 /// `GET /player/inventory`
@@ -1303,6 +1375,9 @@ pub struct ShopSign {
     pub name: String,
     pub owner_id: Uuid,
     pub owner_name: String,
+    /// The merchant is a citizen (C0.1)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner_citizen: bool,
     /// The item types it lists, sorted, each once
     pub item_types: Vec<String>,
 }
@@ -1316,6 +1391,9 @@ pub struct BazaarShop {
     pub name: String,
     pub owner_id: Uuid,
     pub owner_name: String,
+    /// The merchant is a citizen (C0.1)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner_citizen: bool,
     /// When the rent runs out. The shop closes then and its goods go to the
     /// merchant's market box.
     pub paid_until: DateTime<Utc>,
@@ -1654,6 +1732,9 @@ pub struct PlotInfo {
     pub owner_id: Option<Uuid>,
     /// Owner player name if claimed
     pub owner_name: Option<String>,
+    /// The owner is a citizen (C0.1)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner_citizen: bool,
     /// When the plot was claimed
     pub claimed_at: Option<DateTime<Utc>>,
     /// Current assessed value for taxes. 0 until the plot is first bought.

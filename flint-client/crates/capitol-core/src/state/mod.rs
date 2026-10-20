@@ -250,6 +250,8 @@ pub enum StateEvent {
         stall_id: String,
         item_type: String,
         buyer_name: String,
+        /// The buyer is a citizen (C0.1)
+        buyer_citizen: bool,
         quantity: i64,
         paid: i64,
     },
@@ -806,12 +808,13 @@ impl GameState {
             }),
             // E3.10: to the merchant. The store takes the sale off your
             // listing, or closes your shop.
-            M::BazaarSale { stall_id, item_type, buyer_name, units, paid, .. } => {
+            M::BazaarSale { stall_id, item_type, buyer_name, buyer_citizen, units, paid, .. } => {
                 self.bazaar.apply_ws(message);
                 out.push(StateEvent::BazaarSale {
                     stall_id: stall_id.clone(),
                     item_type: item_type.clone(),
                     buyer_name: buyer_name.clone(),
+                    buyer_citizen: *buyer_citizen,
                     quantity: units.count(),
                     paid: *paid,
                 });
@@ -970,6 +973,7 @@ impl GameState {
                             name: me.name.clone(),
                             x: me.x,
                             y: me.y,
+                            citizen: me.citizen,
                         },
                     );
                     out.push(StateEvent::PlayerJoined(me.player_id));

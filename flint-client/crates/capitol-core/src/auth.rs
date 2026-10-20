@@ -443,6 +443,7 @@ mod tests {
                     email: "ada@capitol.local".into(),
                     tier: "free".into(),
                     is_admin: false,
+                    kind: Default::default(),
                 },
                 player_id: Uuid::nil(),
             })),

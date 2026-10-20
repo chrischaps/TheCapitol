@@ -18,7 +18,7 @@ use capitol_protocol::rest::{
 use capitol_protocol::rules::{SPAWN_SCATTER, SPAWN_X, SPAWN_Y};
 
 use crate::error::AppError;
-use crate::models::AccountInfo;
+use crate::models::{AccountInfo, AccountKind};
 use crate::sessions::{self, Refused, RotateError, LEGACY_TTL_SECS};
 use crate::state::AppState;
 
@@ -67,31 +67,63 @@ pub async fn register(
         return Err(AppError::Conflict("Email already registered".into()));
     }
 
-    // Hash password with Argon2id
-    let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    let password_hash = argon2
-        .hash_password(req.password.as_bytes(), &salt)
-        .map_err(|e| AppError::Internal(format!("Password hashing failed: {}", e)))?
-        .to_string();
+    let password_hash = hash_password(&req.password)?;
+    let mut tx = state.db.begin().await?;
+    let (account_id, player_id) =
+        create_account(&mut tx, &req.email, &password_hash, &req.player_name, AccountKind::Human).await?;
+    tx.commit().await?;
 
-    // Create account
+    // New accounts are not admin by default
+    let account = AccountInfo {
+        id: account_id,
+        email: req.email,
+        tier: "free".into(),
+        is_admin: false,
+        // Registration only ever makes a person (C0.1)
+        kind: AccountKind::Human,
+    };
+    let auth = start_session(&state, account, player_id, req.refresh).await?;
+    Ok(Json(auth))
+}
+
+/// Argon2id, as every account's password is kept
+pub(crate) fn hash_password(password: &str) -> Result<String, AppError> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|e| AppError::Internal(format!("Password hashing failed: {}", e)))
+}
+
+/// Make an account of `kind` and its player at the spawn, with the
+/// containers every player has. Registration and the admin's citizen mint
+/// (C0.1) both come here, so a citizen starts exactly as a person does
+/// (Citizens D2). Returns the account's id and the player's.
+pub(crate) async fn create_account(
+    tx: &mut sqlx::PgConnection,
+    email: &str,
+    password_hash: &str,
+    player_name: &str,
+    kind: AccountKind,
+) -> Result<(Uuid, Uuid), sqlx::Error> {
     let account_id = Uuid::new_v4();
     let now = Utc::now();
-
+    // A person is signing in as they register; a citizen hasn't yet
+    let last_login = (kind == AccountKind::Human).then_some(now);
     sqlx::query(
-        "INSERT INTO accounts (id, email, password_hash, subscription_status, created_at, last_login)
-         VALUES ($1, $2, $3, $4, $5, $5)"
+        "INSERT INTO accounts (id, email, password_hash, subscription_status, kind, created_at, last_login)
+         VALUES ($1, $2, $3, 'free', $4, $5, $6)"
     )
     .bind(account_id)
-    .bind(&req.email)
-    .bind(&password_hash)
-    .bind("free")
+    .bind(email)
+    .bind(password_hash)
+    .bind(kind.as_str())
     .bind(now)
-    .execute(&state.db)
+    .bind(last_login)
+    .execute(&mut *tx)
     .await?;
 
-    // Create player at the spawn, scattered across the road so arrivals don't stack
+    // At the spawn, scattered across the road so arrivals don't stack
     let player_id = Uuid::new_v4();
     let spawn_x = SPAWN_X + (rand::random::<f64>() * 2.0 - 1.0) * SPAWN_SCATTER;
     sqlx::query(
@@ -100,54 +132,24 @@ pub async fn register(
     )
     .bind(player_id)
     .bind(account_id)
-    .bind(&req.player_name)
+    .bind(player_name)
     .bind(spawn_x)
     .bind(SPAWN_Y)
     .bind(capitol_protocol::rules::PLAYER_SPEED as f32)
     .bind(now)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
-    // Create containers for the new player
-    // Player inventory (24 slots, 6 columns)
-    sqlx::query(
-        "INSERT INTO containers (id, container_type, owner_id) VALUES ($1, $2, $3)"
-    )
-    .bind(Uuid::new_v4())
-    .bind("player_inventory")
-    .bind(player_id)
-    .execute(&state.db)
-    .await?;
-
-    // Crafting input (4 slots, 2 columns)
-    sqlx::query(
-        "INSERT INTO containers (id, container_type, owner_id) VALUES ($1, $2, $3)"
-    )
-    .bind(Uuid::new_v4())
-    .bind("crafting_input")
-    .bind(player_id)
-    .execute(&state.db)
-    .await?;
-
-    // Crafting output (1 slot)
-    sqlx::query(
-        "INSERT INTO containers (id, container_type, owner_id) VALUES ($1, $2, $3)"
-    )
-    .bind(Uuid::new_v4())
-    .bind("crafting_output")
-    .bind(player_id)
-    .execute(&state.db)
-    .await?;
-
-    // New accounts are not admin by default
-    let account = AccountInfo {
-        id: account_id,
-        email: req.email,
-        tier: "free".into(),
-        is_admin: false,
-    };
-    let auth = start_session(&state, account, player_id, req.refresh).await?;
-    Ok(Json(auth))
+    // The inventory (24 slots), the crafting input (4) and its output (1)
+    for container_type in ["player_inventory", "crafting_input", "crafting_output"] {
+        sqlx::query("INSERT INTO containers (id, container_type, owner_id) VALUES ($1, $2, $3)")
+            .bind(Uuid::new_v4())
+            .bind(container_type)
+            .bind(player_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    Ok((account_id, player_id))
 }
 
 /// Login to an existing account
@@ -167,7 +169,7 @@ pub async fn login(
 ) -> Result<Json<AuthResponse>, AppError> {
     // Find account
     let account = sqlx::query_as::<_, crate::models::Account>(
-        "SELECT id, email, password_hash, subscription_status AS tier, is_admin, created_at, last_login FROM accounts WHERE email = $1"
+        "SELECT id, email, password_hash, subscription_status AS tier, is_admin, kind, created_at, last_login FROM accounts WHERE email = $1"
     )
     .bind(&req.email)
     .fetch_optional(&state.db)
@@ -262,7 +264,7 @@ pub async fn refresh(
 
     // Read the account again, so a changed tier or admin flag reaches the token.
     let account = sqlx::query_as::<_, crate::models::Account>(
-        "SELECT id, email, password_hash, subscription_status AS tier, is_admin, created_at, last_login FROM accounts WHERE id = $1"
+        "SELECT id, email, password_hash, subscription_status AS tier, is_admin, kind, created_at, last_login FROM accounts WHERE id = $1"
     )
     .bind(rotated.account_id)
     .fetch_optional(&state.db)

@@ -71,6 +71,7 @@ fn pos(id: Uuid, x: f64, y: f64) -> PlayerPosition {
         name: format!("player {}", id.as_u128()),
         x,
         y,
+        citizen: false,
     }
 }
 

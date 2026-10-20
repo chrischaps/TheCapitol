@@ -133,6 +133,7 @@ async fn login(Json(req): Json<LoginRequest>) -> Response {
             email: req.email,
             tier: "free".into(),
             is_admin: false,
+            kind: Default::default(),
         },
         player_id: PLAYER,
     })
@@ -157,6 +158,7 @@ async fn refresh(State(mock): State<Mock>, Json(req): Json<RefreshRequest>) -> R
             email: "t@example.com".into(),
             tier: "free".into(),
             is_admin: false,
+            kind: Default::default(),
         },
         player_id: PLAYER,
     })
@@ -286,6 +288,7 @@ async fn serve_socket(mut socket: WebSocket, mock: Mock) {
                     name: "Tester".into(),
                     x,
                     y,
+                    citizen: false,
                 };
                 send(&mut socket, &ServerMessage::Positions { players: vec![me] }).await;
             }
@@ -1084,6 +1087,7 @@ fn a_rate_limited_request_waits_and_goes_again() {
                 email: "a@b.c".into(),
                 tier: "free".into(),
                 is_admin: false,
+                kind: Default::default(),
             },
             player_id: PLAYER,
         })

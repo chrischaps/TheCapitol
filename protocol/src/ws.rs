@@ -347,6 +347,9 @@ pub enum ServerMessage {
     TradeRequested {
         from_player: Uuid,
         from_player_name: String,
+        /// The asker is a citizen (C0.1)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        from_citizen: bool,
     },
     #[serde(rename = "trade_request_declined")]
     TradeRequestDeclined { by_player: Uuid },
@@ -361,6 +364,9 @@ pub enum ServerMessage {
         trade_id: Uuid,
         partner_id: Uuid,
         partner_name: String,
+        /// The partner is a citizen (C0.1)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        partner_citizen: bool,
     },
     #[serde(rename = "trade_offer_updated")]
     TradeOfferUpdated {
@@ -516,6 +522,9 @@ pub enum ServerMessage {
         listing_id: Uuid,
         item_type: String,
         buyer_name: String,
+        /// The buyer is a citizen (C0.1)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        buyer_citizen: bool,
         units: Units,
         price: i64,
         paid: i64,
@@ -655,6 +664,10 @@ pub struct PlayerPosition {
     pub name: String,
     pub x: f64,
     pub y: f64,
+    /// A citizen, an AI player (C0.1, Citizens D3), not a person. Absent for
+    /// a person, so `positions` grows only by the citizens in it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
 }
 
 /// One line of a trade offer, as the server reports it in `trade_offer_updated`.

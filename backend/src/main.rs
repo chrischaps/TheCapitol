@@ -12,6 +12,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 mod api_keys;
+mod citizens;
 mod config;
 mod content;
 mod engine;

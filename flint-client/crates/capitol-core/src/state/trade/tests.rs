@@ -26,6 +26,7 @@ fn pos(id: Uuid, name: &str, x: f64, y: f64) -> PlayerPosition {
         name: name.into(),
         x,
         y,
+        citizen: false,
     }
 }
 
@@ -53,6 +54,7 @@ fn started(trade_id: Uuid, partner_id: Uuid, partner_name: &str) -> M {
         trade_id,
         partner_id,
         partner_name: partner_name.into(),
+        partner_citizen: false,
     }
 }
 
@@ -67,6 +69,7 @@ fn requested_by(from: Uuid, name: &str) -> M {
     M::TradeRequested {
         from_player: from,
         from_player_name: name.into(),
+        from_citizen: false,
     }
 }
 
@@ -267,7 +270,8 @@ pub(in crate::state) fn trade_requested_prompts() {
         state.trade(),
         &Trade::Incoming {
             from: BRIN,
-            name: "Brin".into()
+            name: "Brin".into(),
+            citizen: false,
         }
     );
 
@@ -277,7 +281,8 @@ pub(in crate::state) fn trade_requested_prompts() {
         state.trade(),
         &Trade::Incoming {
             from: CATO,
-            name: "Cato".into()
+            name: "Cato".into(),
+            citizen: false,
         }
     );
 
@@ -354,6 +359,7 @@ fn accept_request_opens_on_trade_started() {
             theirs: Offer::default(),
             i_accepted: false,
             they_accepted: false,
+            partner_citizen: false,
         }
     );
     assert_eq!(state.trade_waiting(), None);

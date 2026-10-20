@@ -416,12 +416,14 @@ mod tests {
                     name: "Ada".into(),
                     x: me[0],
                     y: me[1],
+                    citizen: false,
                 },
                 PlayerPosition {
                     id: BRAM,
                     name: "Bram".into(),
                     x: bram[0],
                     y: bram[1],
+                    citizen: false,
                 },
             ],
         })
@@ -540,6 +542,7 @@ mod tests {
             theirs: Offer::default(),
             i_accepted: false,
             they_accepted: false,
+            partner_citizen: false,
         }
     }
 

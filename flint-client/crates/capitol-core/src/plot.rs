@@ -95,6 +95,7 @@ mod tests {
             station_capacity: 9,
             terrain_id: None,
             corners: None,
+            owner_citizen: false,
         }
     }
 

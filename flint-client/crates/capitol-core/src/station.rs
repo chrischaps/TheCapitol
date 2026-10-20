@@ -380,6 +380,7 @@ mod tests {
             station_capacity: 16,
             terrain_id: Some(format!("lot_{id}")),
             corners: Some([(x, y), (x1, y), (x1, y1), (x, y1)]),
+            owner_citizen: false,
         }
     }
 
@@ -612,6 +613,7 @@ mod tests {
                     name: "Ada".into(),
                     x: 1100.0,
                     y: 1030.0,
+                    citizen: false,
                 }],
             }));
             s.apply_rest(&RestResponse::Plots(ListPlotsResponse {

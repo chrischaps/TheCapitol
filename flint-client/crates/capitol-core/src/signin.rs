@@ -178,6 +178,7 @@ mod tests {
                 email: "flint1@bots.capitol.local".into(),
                 tier: "free".into(),
                 is_admin: false,
+                kind: Default::default(),
             },
             player_id: Uuid::nil(),
         })

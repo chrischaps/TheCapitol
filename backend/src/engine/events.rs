@@ -126,6 +126,7 @@ pub enum GameEvent {
     TradeRequested {
         from_player: Uuid,
         from_player_name: String,
+        from_citizen: bool,
         to_player: Uuid,
     },
     TradeRequestDeclined {

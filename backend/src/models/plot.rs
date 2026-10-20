@@ -120,6 +120,8 @@ pub struct PlotWithJoins {
     pub terrain_id: Option<String>,
     pub corners: Option<Vec<f64>>,
     pub owner_name: Option<String>,
+    /// The owner is a citizen (C0.1)
+    pub owner_citizen: bool,
     pub station_capacity: i32,
     /// The zone's `deed_cost`, joined from `zones`.
     pub deed_cost: Option<i32>,
@@ -142,6 +144,7 @@ impl PlotWithJoins {
             plot_type: self.plot_type.clone(),
             owner_id: self.owner_id,
             owner_name: self.owner_name.clone(),
+            owner_citizen: self.owner_citizen,
             claimed_at: self.claimed_at,
             assessed_value: self.assessed_value,
             tax_owed: self.tax_owed as i64,

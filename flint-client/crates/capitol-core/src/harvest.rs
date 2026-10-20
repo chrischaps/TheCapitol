@@ -185,6 +185,7 @@ mod tests {
                 name: "Ada".into(),
                 x,
                 y,
+                citizen: false,
             }],
         })
     }

@@ -53,6 +53,9 @@ pub struct PlayerState {
     pub strand_balance: i64,
     pub current_zone: Option<String>,
     pub action_state: ActionState,
+    /// A citizen's, not a person's (C0.1): marked to everyone who sees them
+    #[serde(default)]
+    pub citizen: bool,
 }
 
 impl From<Player> for PlayerState {
@@ -69,6 +72,8 @@ impl From<Player> for PlayerState {
             strand_balance: p.strand_balance,
             current_zone: p.current_zone,
             action_state: ActionState::Idle,
+            // `load_player` reads it from the account
+            citizen: false,
         }
     }
 }

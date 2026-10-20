@@ -127,6 +127,7 @@ mod tests {
             strand_balance: 0,
             current_zone: None,
             action_state: ActionState::Idle,
+            citizen: false,
         }
     }
 

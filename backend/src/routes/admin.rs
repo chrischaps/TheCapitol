@@ -3,9 +3,11 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
+use capitol_protocol::rest::{CitizenInfo, CreateCitizenRequest, CreatedCitizen};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::citizens;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::{ActionState, TerrainConfig, WorldGenParams};
@@ -30,6 +32,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/world-params/commit", post(commit_world_params))
         .route("/stats", get(get_server_stats))
         .route("/accounts/{id}/subscription", post(subscribe_account))
+        .route("/citizens", get(list_citizens).post(create_citizen))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
@@ -50,6 +53,32 @@ pub async fn subscribe_account(
         .ok_or_else(|| AppError::NotFound("Account not found".into()))?;
     tracing::info!("Admin {} subscribed account {} for {} days", user.account_id, account_id, req.days);
     Ok(Json(subscription))
+}
+
+/// Make a citizen (C0.1, `citizens`): an account of kind `citizen`, its
+/// player at the spawn as any new player's, and a `play`+`trade` key, whose
+/// secret is in this answer only.
+pub async fn create_citizen(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(req): Json<CreateCitizenRequest>,
+) -> Result<Json<CreatedCitizen>, AppError> {
+    require_admin(&user)?;
+    let made = citizens::mint(&state.db, &req.name).await?;
+    tracing::info!(
+        "Admin {} made citizen {} ({})",
+        user.account_id, made.citizen.name, made.citizen.account_id
+    );
+    Ok(Json(made))
+}
+
+/// Every citizen, oldest first, each with its newest live key (no secrets).
+pub async fn list_citizens(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<Vec<CitizenInfo>>, AppError> {
+    require_admin(&user)?;
+    Ok(Json(citizens::list(&state.db).await?))
 }
 
 /// Get current world generation parameters

@@ -21,7 +21,7 @@
 //! closed (`GameState::revoke_key`).
 
 use axum::http::Method;
-use capitol_protocol::rest::ApiKeyScope;
+use capitol_protocol::rest::{ApiKeyInfo, ApiKeyScope};
 use capitol_protocol::ws::ClientMessage;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -171,6 +171,49 @@ pub fn refusal(what: &str, needed: Option<ApiKeyScope>) -> String {
     }
 }
 
+/// The columns [`info`] reads, in its order.
+pub const INFO_COLUMNS: &str = "id, name, scopes, prefix, created_at, last_used_at, revoked_at";
+
+pub type InfoRow = (Uuid, String, Vec<String>, String, DateTime<Utc>, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+
+/// A key as its owner's list shows it, from [`INFO_COLUMNS`].
+pub fn info((id, name, scopes, prefix, created_at, last_used_at, revoked_at): InfoRow) -> ApiKeyInfo {
+    ApiKeyInfo {
+        id,
+        name,
+        scopes: scopes.iter().filter_map(|s| ApiKeyScope::parse(s)).collect(),
+        prefix,
+        created_at,
+        last_used_at,
+        revoked_at,
+    }
+}
+
+/// Mint a key for `account_id` with `scopes` (checked by the caller). Returns
+/// it and its secret, which nothing keeps.
+pub async fn mint(
+    db: impl sqlx::PgExecutor<'_>,
+    account_id: Uuid,
+    name: &str,
+    scopes: &[ApiKeyScope],
+) -> Result<(ApiKeyInfo, String), sqlx::Error> {
+    let secret = new_secret();
+    let row: InfoRow = sqlx::query_as(&format!(
+        "INSERT INTO api_keys (id, account_id, name, scopes, secret_hash, prefix)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING {INFO_COLUMNS}"
+    ))
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .bind(name)
+    .bind(scopes.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+    .bind(crate::sessions::hash(&secret))
+    .bind(shown_prefix(&secret))
+    .fetch_one(db)
+    .await?;
+    Ok((info(row), secret))
+}
+
 /// The account a secret belongs to, if it's a live key. Notes the use, at
 /// most once a minute.
 pub async fn authenticate(db: &PgPool, secret: &str) -> Result<Option<KeyUser>, sqlx::Error> {
@@ -258,6 +301,9 @@ mod tests {
         assert_eq!(rest(Method::DELETE, "/account/api-keys/abc"), None);
         assert_eq!(rest(Method::GET, "/admin/stats"), None);
         assert_eq!(rest(Method::PUT, "/admin/world-params"), None);
+        // A key can't mint citizens, nor so much as list them (C0.1)
+        assert_eq!(rest(Method::POST, "/admin/citizens"), None);
+        assert_eq!(rest(Method::GET, "/admin/citizens"), None);
         assert_eq!(rest(Method::POST, "/auth/logout"), None);
         assert_eq!(rest(Method::POST, "/player/teleport"), None);
         // Subscribing is the account's own business, as paying will be
