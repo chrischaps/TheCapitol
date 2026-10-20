@@ -47,7 +47,7 @@ Citizens play the same game humans do, by the same rules and for the same money.
   - a way to tell a citizen from a human, since `PlayerPosition` is `{id, name, x, y}`.
 - **The market makers break the GDD's rule.** They are funded by `POST /player/grant` behind `DEV_GRANTS`. The GDD says there are no NPC faucets (GDD §5, §8) and the Capitol never trades goods.
 - **At scale:**
-  - a socket that falls 1024 events behind the broadcast is hung up on (`ws/connection.rs`, `Lagged` treated as `Closed`);
+  - a socket that falls 1024 events behind the broadcast is hung up on (`ws/connection.rs`, `Lagged` treated as `Closed`). Fixed in C0.3;
   - every position goes to every socket at 10 Hz (`engine/tick.rs`, `broadcast_positions`), which grows as N².
 
 ## 4. Design decisions
@@ -155,7 +155,7 @@ They work in daylight, go to the hall or the bazaar during their market hours, w
 |---|---|---|---|
 | C0.1 [#246](https://github.com/chrischaps/TheCapitol/issues/246) | **Citizen accounts.** `accounts.kind`, `POST /admin/citizens` (an account, its player and a `play`+`trade` key), and `citizen` on `PlayerPosition` and `PlayerJoined`. | M | – |
 | C0.2 [#249](https://github.com/chrischaps/TheCapitol/issues/249) | **Flint: the citizen's mark.** A cooler lantern and a glyph by the name. | S | C0.1 |
-| C0.3 [#255](https://github.com/chrischaps/TheCapitol/issues/255) | **Bug: a lagging socket is hung up on.** Skip ahead and resync instead. | S | – |
+| C0.3 [#255](https://github.com/chrischaps/TheCapitol/issues/255) | **Bug: a lagging socket is hung up on.** Skip ahead and resync instead. *As built:* the channel holds 4096 events (`GameState::EVENT_CAPACITY`, about 10 s of slack with 200 citizens at work). A lagging socket skips ahead and is sent `resync { missed }` (a new `ServerMessage`), then fresh `positions`, its `currency_changed`, a full `market_depth` per watched item and its waiting notices. If it holds the avatar, its trade and trade requests are cancelled first (`GameState::socket_lagged`), so nobody accepts an offer they never saw. capitol-core treats `resync` as a reconnect's resync. | S | – |
 | C0.4 [#256](https://github.com/chrischaps/TheCapitol/issues/256) | **Positions by interest.** Measure first, then send nearby players only. | M | C1.1 (for load) |
 | C0.5 [#211](https://github.com/chrischaps/TheCapitol/issues/211) | **Walking round water.** A walk graph from `/terrain` (roads, bridges, fords, trails) and A*. | M | – |
 | C0.6 [#247](https://github.com/chrischaps/TheCapitol/issues/247) | **Bots that stay up.** Reconnect, re-auth by key, rebuild state, claim presence again. | M | – |

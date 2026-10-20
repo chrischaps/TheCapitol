@@ -475,7 +475,9 @@ impl GameState {
 
     /// The session reconnected. The server dropped the player while it was
     /// away, which cancelled their action and any trade, closed any open
-    /// station, and whatever happened meanwhile was missed.
+    /// station, and whatever happened meanwhile was missed. A socket that fell
+    /// behind the server's events is told `resync` and lands here too (C0.3):
+    /// its trade was cancelled, and it missed events just the same.
     pub fn apply_resync(&mut self) -> Vec<StateEvent> {
         let mut out = Vec::new();
         self.trade_connection_lost(&mut out);
@@ -872,6 +874,7 @@ impl GameState {
                 station_type: station_type.clone(),
                 terrain_id: terrain_id.clone(),
             }),
+            M::Resync { .. } => out.extend(self.apply_resync()),
             M::Presence { yours, held_by } => {
                 let presence = Presence {
                     yours: *yours,

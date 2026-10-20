@@ -28,6 +28,9 @@ use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
 /// Ticks between sweeps for unanswered trade requests (once a second)
 const TRADE_EXPIRY_TICKS: u64 = 10;
 
+/// Why a trade ended when one side's socket fell behind (C0.3)
+pub const TRADE_LAGGED: &str = "Connection fell behind";
+
 pub struct GameState {
     pub players: HashMap<Uuid, PlayerState>,
     /// player_id -> their open sockets, and which holds the avatar (E0.8). Only the holder's
@@ -74,6 +77,14 @@ pub struct GameState {
 }
 
 impl GameState {
+    /// How many events the broadcast keeps for a socket that's behind (C0.3). A
+    /// socket further behind than this skips ahead and resyncs. With 200 citizens
+    /// at work, gathers' and crafts' progress alone is up to 400 events a second,
+    /// so 1024 was under 3 s of slack for a client on a slow link; 4096 is about
+    /// 10 s. Each event is held once, whatever the number of sockets, and the
+    /// biggest, `PlayerPositions`, is 10 of them a second.
+    pub const EVENT_CAPACITY: usize = 4096;
+
     pub fn with_params(params: WorldGenParams) -> Self {
         let terrain = TerrainConfig::from_params(&params);
         Self::with_terrain(params, terrain)
@@ -81,7 +92,7 @@ impl GameState {
 
     /// A game on terrain already generated from `params`
     pub(crate) fn with_terrain(params: WorldGenParams, terrain: TerrainConfig) -> Self {
-        let (event_sender, _) = broadcast::channel(1024);
+        let (event_sender, _) = broadcast::channel(Self::EVENT_CAPACITY);
         let terrain_version = terrain.version();
         let ground = Arc::new(terrain.ground());
         Self {
@@ -279,6 +290,48 @@ impl GameState {
 
     pub fn subscribe(&self) -> broadcast::Receiver<GameEvent> {
         self.event_sender.subscribe()
+    }
+
+    /// Socket `connection_id` fell behind the event stream and lost events
+    /// (C0.3). If it drives the avatar, the player's trade and any trade
+    /// request to or from them end, and both sides hear: the client can't
+    /// know the offer it would be accepting is the one on the table.
+    pub fn socket_lagged(&mut self, player_id: Uuid, connection_id: u64) {
+        if !self.holds_presence(player_id, connection_id) {
+            return;
+        }
+        if let Some(trade_id) = self.trade_manager.get_player_trade(player_id).map(|t| t.id) {
+            if self.trade_manager.cancel_trade(player_id).is_ok() {
+                let _ = self.event_sender.send(GameEvent::TradeCancelled {
+                    trade_id,
+                    reason: TRADE_LAGGED.to_string(),
+                });
+            }
+        }
+        let mut ended = Vec::new();
+        self.trade_manager.pending_requests.retain(|target, (initiator, _)| {
+            let ours = *target == player_id || *initiator == player_id;
+            if ours {
+                ended.push((*initiator, *target));
+            }
+            !ours
+        });
+        for (initiator, target) in ended {
+            let _ = self.event_sender.send(GameEvent::TradeRequestExpired { initiator, target });
+        }
+    }
+
+    /// Every player's position, as `positions` sends them each tick
+    pub fn positions(&self) -> Vec<PlayerPosition> {
+        self.players
+            .values()
+            .map(|p| PlayerPosition {
+                id: p.id,
+                name: p.name.clone(),
+                x: p.x,
+                y: p.y,
+            })
+            .collect()
     }
 
     /// Tell `player_id`, and only them, why their trade `command` (its `ClientMessage` tag) was refused
@@ -604,15 +657,7 @@ impl GameState {
     }
 
     fn broadcast_positions(&self) {
-        let positions: Vec<PlayerPosition> = self.players.values()
-            .map(|p| PlayerPosition {
-                id: p.id,
-                name: p.name.clone(),
-                x: p.x,
-                y: p.y,
-            })
-            .collect();
-
+        let positions = self.positions();
         if !positions.is_empty() {
             let _ = self.event_sender.send(GameEvent::PlayerPositions(positions));
         }
@@ -1198,6 +1243,77 @@ mod tests {
 
     fn presence_told(rx: &mut mpsc::UnboundedReceiver<PresenceEvent>) -> Vec<PresenceEvent> {
         std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    /// Ada and Bram, each on a client holding their avatar, and a receiver
+    fn two_holders() -> (GameState, (Uuid, u64), (Uuid, u64), broadcast::Receiver<GameEvent>) {
+        let mut game = game();
+        let ada = player("Ada", CENTER_X, CENTER_Y);
+        let bram = player("Bram", CENTER_X + 10.0, CENTER_Y);
+        let (a, b) = (ada.id, bram.id);
+        let (conn_a, _) = connect(&mut game, ada, "desk");
+        let (conn_b, _) = connect(&mut game, bram, "laptop");
+        let rx = game.subscribe();
+        (game, (a, conn_a), (b, conn_b), rx)
+    }
+
+    #[test]
+    fn a_holder_that_lags_ends_its_trade_for_both() {
+        let (mut game, (a, conn_a), (b, _), mut rx) = two_holders();
+        game.queue_command(Command::InitiateTrade { player_id: a, target_player_id: b });
+        game.queue_command(Command::AcceptTradeRequest { player_id: b });
+        game.process_commands();
+        let trade_id = game.trade_manager.get_player_trade(a).expect("the trade opened").id;
+        while rx.try_recv().is_ok() {}
+
+        game.socket_lagged(a, conn_a);
+        assert!(!game.trade_manager.is_in_trade(a) && !game.trade_manager.is_in_trade(b));
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(&events[..], [GameEvent::TradeCancelled { trade_id: t, reason }] if *t == trade_id && reason == TRADE_LAGGED),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_holder_that_lags_ends_the_requests_to_and_from_it() {
+        let (mut game, (a, conn_a), (b, _), mut rx) = two_holders();
+        let cato = player("Cato", CENTER_X, CENTER_Y + 10.0);
+        let c = cato.id;
+        connect(&mut game, cato, "tablet");
+        game.queue_command(Command::InitiateTrade { player_id: b, target_player_id: a });
+        game.queue_command(Command::InitiateTrade { player_id: a, target_player_id: c });
+        game.process_commands();
+        assert_eq!(game.trade_manager.pending_requests.len(), 2);
+        while rx.try_recv().is_ok() {}
+
+        game.socket_lagged(a, conn_a);
+        assert!(game.trade_manager.pending_requests.is_empty());
+        let mut ended: Vec<(Uuid, Uuid)> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|e| match e {
+                GameEvent::TradeRequestExpired { initiator, target } => (initiator, target),
+                other => panic!("expected only expiries, got {other:?}"),
+            })
+            .collect();
+        ended.sort();
+        let mut want = vec![(b, a), (a, c)];
+        want.sort();
+        assert_eq!(ended, want);
+    }
+
+    #[test]
+    fn a_watcher_that_lags_leaves_the_holders_trade_alone() {
+        let (mut game, (a, _), (b, _), mut rx) = two_holders();
+        let (watcher, _) = game.open_socket(a, Holder::Session("phone".into()), true);
+        game.tell_watcher(a, watcher);
+        game.queue_command(Command::InitiateTrade { player_id: a, target_player_id: b });
+        game.queue_command(Command::AcceptTradeRequest { player_id: b });
+        game.process_commands();
+        while rx.try_recv().is_ok() {}
+
+        game.socket_lagged(a, watcher);
+        assert!(game.trade_manager.is_in_trade(a), "a watcher's lag ended the trade");
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

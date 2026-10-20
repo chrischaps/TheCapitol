@@ -541,6 +541,17 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         held_by: Option<PresenceHolder>,
     },
+    // C0.3: to the socket it's about
+    /// This socket fell `missed` events behind the server's event stream, and
+    /// they were dropped. Treat it as a reconnect: refetch what the server
+    /// doesn't push (containers, nodes, stations, plots, claimed lots, your
+    /// balance). Your open trade, or a request to or from you, is over: the
+    /// server cancelled it, so nobody accepts an offer they didn't see. What
+    /// the server does push follows straight after: `positions`, your
+    /// `currency_changed`, a full `market_depth` for each item you watch, and
+    /// any notices waiting for you.
+    #[serde(rename = "resync")]
+    Resync { missed: u64 },
 }
 
 impl ServerMessage {
@@ -604,6 +615,7 @@ impl ServerMessage {
             ServerMessage::StallLapsed { .. } => "stall_lapsed",
             ServerMessage::GazettePublished { .. } => "gazette_published",
             ServerMessage::Presence { .. } => "presence",
+            ServerMessage::Resync { .. } => "resync",
         }
     }
 }

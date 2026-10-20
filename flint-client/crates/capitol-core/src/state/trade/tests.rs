@@ -801,6 +801,22 @@ fn our_own_leave_ends_the_trade() {
 }
 
 #[test]
+fn falling_behind_ends_the_trade_and_the_servers_cancel_after_is_quiet() {
+    // C0.3: the server cancels a lagging socket's trade and says `resync`,
+    // which ends it here; the cancel that follows on the event stream is old news.
+    let mut state = trading();
+    assert_eq!(
+        ws(&mut state, M::Resync { missed: 1291 }),
+        vec![cancelled_event(TRADE, CONNECTION_LOST)]
+    );
+    assert!(ws(
+        &mut state,
+        M::TradeCancelled { trade_id: TRADE, reason: "Connection fell behind".into() }
+    )
+    .is_empty());
+}
+
+#[test]
 fn losing_the_connection_ends_everything() {
     let reconnecting = NetEvent::Connection(ConnectionState::Reconnecting {
         attempt: 1,

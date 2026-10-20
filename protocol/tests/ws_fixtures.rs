@@ -69,6 +69,7 @@ const SERVER_TYPES: &[&str] = &[
     "stall_lapsed",
     "gazette_published",
     "presence",
+    "resync",
 ];
 
 const CLIENT_TYPES: &[&str] = &[

@@ -231,6 +231,7 @@ fn test_for(message: &M) -> fn() {
         M::GazettePublished { .. } => gazette_published_is_reported,
         M::BazaarSale { .. } => bazaar_notices_are_reported,
         M::StallLapsed { .. } => bazaar_notices_are_reported,
+        M::Resync { .. } => a_socket_that_fell_behind_resyncs_like_a_reconnect,
     }
 }
 
@@ -250,7 +251,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 56, "one fixture per ServerMessage variant");
+    assert_eq!(count, 57, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1869,6 +1870,21 @@ fn resync_drops_what_the_server_dropped() {
     assert!(state.local_activity().is_none());
     assert!(state.activity(OTHER).is_none());
     assert!(state.open_station().is_none());
+}
+
+#[test]
+fn a_socket_that_fell_behind_resyncs_like_a_reconnect() {
+    let mut state = with_players();
+    state.apply_ws(&extraction_started(ME));
+    state.apply_ws(&station_opened(ME));
+
+    let events = state.apply_ws(&M::Resync { missed: 1291 });
+    assert!(events.contains(&StateEvent::ActivityChanged { player_id: ME }));
+    assert!(events.contains(&StateEvent::StationClosed));
+    assert_eq!(events.last(), Some(&StateEvent::SnapshotStale));
+    assert!(state.local_activity().is_none());
+    assert!(state.open_station().is_none());
+    assert!(state.is_connected(), "a resync isn't a disconnect");
 }
 
 #[test]

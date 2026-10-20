@@ -9,6 +9,7 @@ use futures::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use std::collections::HashMap;
 use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -79,7 +80,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     // Load player into game state
-    let player = match load_player(&state, authed.account_id).await {
+    let player = match load_player(&state.db, authed.account_id).await {
         Ok(player) => player,
         Err(msg) => {
             let _ = sender
@@ -292,7 +293,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 ClientMessage::ClaimPresence => {
                                     // A fresh row, for when the avatar has to come back into
                                     // the world; one already there carries on as it is.
-                                    let claimed = match load_player(&state, authed.account_id).await {
+                                    let claimed = match load_player(&state.db, authed.account_id).await {
                                         Ok(player) => state
                                             .game
                                             .write()
@@ -846,10 +847,31 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
 
             // Handle game events
-            event = event_rx.recv() => {
+            heard = event_rx.recv() => {
                 if !subscribed_position {
                     continue;
                 }
+                let event = match heard {
+                    Ok(event) => Ok(event),
+                    // Too far behind: the missed events are gone, so skip ahead
+                    // and start this socket over from what's true now (C0.3)
+                    Err(RecvError::Lagged(missed)) => {
+                        tracing::warn!("Player {player_id}'s connection {connection_id} fell {missed} events behind; resyncing it");
+                        let messages = resync(&state.db, &state.game, &state.market, player_id, connection_id, missed, &market_items).await;
+                        let mut sent = Ok(());
+                        for msg in messages {
+                            sent = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                            if sent.is_err() {
+                                break;
+                            }
+                        }
+                        if sent.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(RecvError::Closed) => Err(()),
+                };
 
                 match event {
                     Ok(GameEvent::PlayerPositions(players)) => {
@@ -1142,7 +1164,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::GazettePublished { day, number, headline };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
-                    Err(_) => {
+                    Err(()) => {
                         // Channel closed
                         break;
                     }
@@ -1162,6 +1184,51 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     } else {
         tracing::info!("Player {}'s watching connection {} ended", player_id, connection_id);
     }
+}
+
+/// What a socket that fell `missed` events behind is sent before it carries on
+/// (C0.3): `resync`, which tells the client to refetch what it fetches over
+/// REST, then afresh what the server only pushes: everyone's position, the
+/// player's balance, the depth of each item it watches, and, if it holds the
+/// avatar, the notices waiting. A holder's trade and trade requests end first
+/// ([`GameState::socket_lagged`](crate::engine::GameState::socket_lagged)),
+/// and the cancels follow on the event stream.
+async fn resync(
+    db: &sqlx::PgPool,
+    game: &tokio::sync::RwLock<crate::engine::GameState>,
+    market: &crate::engine::market_matcher::Market,
+    player_id: Uuid,
+    connection_id: u64,
+    missed: u64,
+    market_items: &std::collections::HashSet<String>,
+) -> Vec<ServerMessage> {
+    let (players, holds) = {
+        let mut game = game.write().await;
+        game.socket_lagged(player_id, connection_id);
+        (game.positions(), game.holds_presence(player_id, connection_id))
+    };
+    let mut out = vec![ServerMessage::Resync { missed }, ServerMessage::Positions { players }];
+    match sqlx::query_scalar::<_, i64>("SELECT strand_balance FROM players WHERE id = $1")
+        .bind(player_id)
+        .fetch_one(db)
+        .await
+    {
+        Ok(new_balance) => out.push(ServerMessage::CurrencyChanged { new_balance }),
+        Err(e) => tracing::error!("Failed to read {}'s balance to resync: {:?}", player_id, e),
+    }
+    let mut watched: Vec<&String> = market_items.iter().collect();
+    watched.sort();
+    for item_type in watched {
+        let depth = market.depth(item_type);
+        out.push(ServerMessage::MarketDepth { item_type: item_type.clone(), seq: depth.seq, full: true, levels: depth.levels });
+    }
+    if holds {
+        match crate::engine::notices::take_all(db, player_id).await {
+            Ok(waiting) => out.extend(waiting),
+            Err(e) => tracing::error!("Failed to load notices for {}: {:?}", player_id, e),
+        }
+    }
+    out
 }
 
 /// Whether socket `connection_id` holds the player's avatar (E0.8).
@@ -1234,13 +1301,13 @@ async fn validate_token(token: &str, state: &AppState) -> Result<Claims, String>
     Ok(token_data.claims)
 }
 
-async fn load_player(state: &AppState, account_id: Uuid) -> Result<PlayerState, String> {
+async fn load_player(db: &sqlx::PgPool, account_id: Uuid) -> Result<PlayerState, String> {
     let player = sqlx::query_as::<_, crate::models::Player>(
         "SELECT id, account_id, name, position_x, position_y, destination_x, destination_y, speed, strand_balance, current_zone, created_at
          FROM players WHERE account_id = $1 LIMIT 1"
     )
     .bind(account_id)
-    .fetch_optional(&state.db)
+    .fetch_optional(db)
     .await
     .map_err(|e| format!("Database error: {}", e))?
     .ok_or_else(|| "Player not found".to_string())?;
@@ -1967,6 +2034,67 @@ mod tests {
             // An unknown type keeps its id as its name
             TradeItemInfo { item_id: mystery, item_type: "relic".into(), item_name: "relic".into(), quantity: 1, quality: 40, units: Units::uniform(1, 40) },
         ]);
+    }
+
+    /// A socket flooded past the event channel's capacity hears that it lagged,
+    /// not that the channel closed, is sent a resync with what's true now, and
+    /// carries on hearing live events (C0.3)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_socket_flooded_past_the_channel_resyncs_and_stays_up(db: sqlx::PgPool) {
+        use crate::engine::market_matcher::Market;
+        use crate::engine::presence::Holder;
+        use crate::models::{TerrainConfig, WorldGenParams};
+
+        let ada = crate::engine::plot_sync::tests::player(&db, "ada", 1234).await;
+        let gone = ServerMessage::PlotForeclosed { terrain_id: "lot".into(), tax_owed: 80, refund: 20, impounded: vec![], lost: vec![] };
+        crate::engine::notices::queue(&db, ada, "lot", &gone).await.unwrap();
+        let game = tokio::sync::RwLock::new(crate::engine::GameState::with_terrain(
+            WorldGenParams::default(),
+            TerrainConfig::get_default(),
+        ));
+        let account: Uuid = sqlx::query_scalar("SELECT account_id FROM players WHERE id = $1")
+            .bind(ada)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let player = load_player(&db, account).await.unwrap();
+        let (socket, mut rx) = {
+            let mut game = game.write().await;
+            let (socket, _) = game.open_socket(ada, Holder::Session("desk".into()), true);
+            game.claim_presence(player, socket).unwrap();
+            (socket, game.subscribe())
+        };
+        let market = Market::default();
+        let watched: std::collections::HashSet<String> = ["plank".to_string()].into();
+
+        // The game runs on while the socket's sends are stuck
+        let events = game.read().await.event_sender.clone();
+        for _ in 0..crate::engine::GameState::EVENT_CAPACITY + 100 {
+            events.send(GameEvent::TerrainUpdated).unwrap();
+        }
+        let missed = match rx.recv().await {
+            Err(RecvError::Lagged(missed)) => missed,
+            other => panic!("a flooded socket heard {other:?}, not that it lagged"),
+        };
+        assert_eq!(missed, 100);
+
+        let sent = resync(&db, &game, &market, ada, socket, missed, &watched).await;
+        let tags: Vec<&str> = sent.iter().map(ServerMessage::type_name).collect();
+        assert_eq!(tags, ["resync", "positions", "currency_changed", "market_depth", "plot_foreclosed"]);
+        assert_eq!(sent[0], ServerMessage::Resync { missed: 100 });
+        assert!(matches!(&sent[1], ServerMessage::Positions { players } if players.iter().any(|p| p.id == ada)));
+        assert_eq!(sent[2], ServerMessage::CurrencyChanged { new_balance: 1234 });
+        assert!(matches!(&sent[3], ServerMessage::MarketDepth { item_type, full: true, .. } if item_type == "plank"));
+        assert_eq!(sent[4], gone);
+        assert!(crate::engine::notices::take_all(&db, ada).await.unwrap().is_empty(), "the notice was left to go again");
+
+        // Skipped ahead: what the channel still holds, then what comes next
+        for _ in 0..crate::engine::GameState::EVENT_CAPACITY {
+            assert!(matches!(rx.recv().await, Ok(GameEvent::TerrainUpdated)));
+        }
+        events.send(GameEvent::GazettePublished { day: 1, number: 1, headline: "On".into() }).unwrap();
+        assert!(matches!(rx.recv().await, Ok(GameEvent::GazettePublished { .. })));
     }
 
     /// A trade hands over exactly the units offered, part of a stack or all of it (E1.8)
