@@ -243,6 +243,11 @@ impl Poller {
             }
             // What came out of the impound (#141) or the market box
             Ok(RestResponse::Collected(_)) => self.request(Fetch::Containers),
+            // Stock left the inventory or came back to it, or a purchase
+            // landed in it or the market box (E3.11)
+            Ok(RestResponse::Listed(_) | RestResponse::Unlisted { .. } | RestResponse::Bought { .. }) => {
+                self.request(Fetch::Containers)
+            }
             Ok(RestResponse::MoveItem(_) | RestResponse::SplitStack(_)) => {
                 self.request(Fetch::Containers);
                 if let Some(open) = state.open_station() {

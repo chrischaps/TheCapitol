@@ -147,6 +147,11 @@ impl TerrainSource {
         self.current.as_ref()?.landmarks.iter().find(|l| l.kind == kind)
     }
 
+    /// The current terrain's landmark `id`, such as `bazaar_stall_3`.
+    pub fn landmark_by_id(&self, id: &str) -> Option<&Landmark> {
+        self.current.as_ref()?.landmarks.iter().find(|l| l.id == id)
+    }
+
     /// One line for the HUD: where the terrain came from, and its version.
     pub fn status(&self) -> String {
         let version = self

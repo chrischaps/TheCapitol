@@ -62,6 +62,9 @@ pub const IN_RANGE: Color32 = rgb(0xf97316);
 pub const STATION: Color32 = IN_RANGE;
 /// Trading (P7.3): the Trade District's blue, where the market is.
 pub const TRADE: Color32 = rgb(0x3b82f6);
+/// The bazaar (E3.11): its lanterns' amber, warm across the avenue from the
+/// hall's blue. The shop panel's edge and its calls to action.
+pub const BAZAAR: Color32 = rgb(0xe8a24a);
 pub const ERROR: Color32 = rgb(0xdc3545);
 /// The ground of an error box: the error colour at 10%.
 pub const ERROR_WASH: Color32 = rgba(220, 53, 69, 0.1);

@@ -16,6 +16,8 @@
 //!   full, opened from the header's Impound chip (#141).
 //! - [`market`]: the market panel, toggled with M: items, the ladder, the
 //!   order form and your orders (E3.5).
+//! - [`shop`]: a bazaar stall's shop, opened at its stall: its listings
+//!   to buy from, or yours to rent, stock and unlist (E3.11).
 //! - [`station`]: the open station's panel: its box, and its recipes at a
 //!   crafting station (P6.3).
 //! - [`automation`]: the station panel's Automation tab, for its owner
@@ -52,6 +54,7 @@ pub mod market_chart;
 pub mod plot;
 pub mod sample;
 pub mod settings;
+pub mod shop;
 pub mod shortcuts;
 pub mod slots;
 pub mod station;

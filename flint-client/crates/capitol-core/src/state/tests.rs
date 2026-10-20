@@ -1354,6 +1354,7 @@ fn bazaar_notices_are_reported() {
             buyer_name: "bram".into(),
             buyer_citizen: true,
             quantity: 3,
+            units: crate::protocol::rules::stacking::Units::from_pairs([(81, 2), (92, 1)]),
             paid: 42,
         }]
     );

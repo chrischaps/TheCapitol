@@ -145,6 +145,11 @@ pub struct CapitolExtension {
     /// Where the hall is on screen, as the header's hint points (radians,
     /// 0 to the right, clockwise), while goods wait and you're not there.
     hall_hint: Option<f32>,
+    /// The bazaar (E3.11): its building, the open stall's shop panel, and
+    /// `--bazaar-sample`'s shops offline.
+    bazaar: world::bazaar::BazaarLayer,
+    shop: ui::shop::ShopPanel,
+    bazaar_sample: Option<ui::shop::Sample>,
     station: ui::station::StationPanel,
     /// Enter (the `craft` action) was pressed since `ui` last looked.
     craft_key: bool,
@@ -223,6 +228,9 @@ impl CapitolExtension {
             hall: world::hall::HallLayer::default(),
             hall_sample: false,
             hall_hint: None,
+            bazaar: world::bazaar::BazaarLayer::default(),
+            shop: ui::shop::ShopPanel::default(),
+            bazaar_sample: None,
             station: ui::station::StationPanel::default(),
             craft_key: false,
             cancel_placing: false,
@@ -376,6 +384,24 @@ impl CapitolExtension {
     }
 
     /// Offline, show the hall as if goods waited (`--hall-sample`).
+    /// Offline, sample shops in the bazaar's stalls and the shop panel open
+    /// on stall `stall` (a number, or "mine"), as if you stood at it
+    /// (`--bazaar-sample`).
+    pub fn with_bazaar_sample(mut self, stall: Option<&str>) -> Self {
+        if let (Some(stall), None) = (stall, &self.session) {
+            let sample = ui::shop::Sample::new();
+            let id = match stall {
+                "mine" => sample.mine().map_or_else(String::new, |s| s.stall_id.clone()),
+                n => format!("bazaar_stall_{n}"),
+            };
+            if !id.is_empty() && !stall.is_empty() {
+                self.shop.open_on(&id);
+            }
+            self.bazaar_sample = Some(sample);
+        }
+        self
+    }
+
     pub fn with_hall_sample(mut self, on: bool) -> Self {
         self.hall_sample = on;
         self
@@ -497,6 +523,59 @@ impl CapitolExtension {
             news,
             reading: self.gazette.open,
         })
+    }
+
+    /// The bazaar's stalls as scripts see them (E3.11): each one's footprint,
+    /// sign and shop, and whether you're in its range. Offline with
+    /// `--bazaar-sample`, you stand at `camera_target` (world metres).
+    /// `None` until the terrain brings a bazaar.
+    fn bazaar_mark(&self, camera_target: [f32; 2], eye: [f32; 3]) -> Option<script_api::BazaarMark> {
+        let landmarks = &self.built.as_ref()?.landmarks;
+        landmarks.iter().find(|l| l.kind == LandmarkKind::Bazaar)?;
+        let (you, directory, mine, walking) = match (&self.session, &self.bazaar_sample) {
+            (Some(session), _) => {
+                let state = session.state();
+                let store = state.bazaar();
+                (
+                    state.local_player().map(|p| [p.x, p.y]),
+                    store.directory(),
+                    store.my_shop().map(|s| s.stall_id.clone()),
+                    session.walking_to_stall().map(str::to_owned),
+                )
+            }
+            (None, Some(sample)) => (
+                Some(crate::coords::to_server(camera_target[0], camera_target[1])),
+                Some(&sample.directory),
+                sample.mine().map(|s| s.stall_id.clone()),
+                None,
+            ),
+            (None, None) => return None,
+        };
+        let world = |p: (f64, f64)| crate::coords::to_world(p.0, p.1);
+        let stalls = landmarks
+            .iter()
+            .filter(|l| l.kind == LandmarkKind::Stall)
+            .map(|stall| {
+                let shop = directory
+                    .and_then(|d| d.stalls.iter().find(|s| s.stall_id == stall.id))
+                    .and_then(|s| s.shop.as_ref());
+                let sign = self.bazaar.signs().iter().find(|s| s.stall_id == stall.id);
+                script_api::StallMark {
+                    id: stall.id.clone(),
+                    corners: stall.corners.map(world),
+                    sign: sign.map_or_else(|| { let [x, z] = world(stall.position); [x, 1.5, z] }, |s| s.at),
+                    colour: sign.map_or([0.8, 0.78, 0.72], |s| s.colour),
+                    name: shop.map(|s| s.name.clone()),
+                    keeper: shop.map(|s| s.owner_name.clone()),
+                    citizen: shop.is_some_and(|s| s.owner_citizen),
+                    mine: mine.as_deref() == Some(stall.id.as_str()),
+                    near: you.is_some_and(|[x, y]| rules::bazaar::at_the_stall(stall, x, y)),
+                    open: self.shop.stall.as_deref() == Some(stall.id.as_str()),
+                    seen: sign.is_some_and(|s| !self.bazaar.hidden(eye, s.at)),
+                }
+            })
+            .collect();
+        Some(script_api::BazaarMark { stalls, walking })
     }
 
     /// Open the market panel preset (`--market ITEM[:SIDE:N@PRICE[:GRADE]]`),
@@ -664,6 +743,19 @@ impl PlayerExtension for CapitolExtension {
                     self.market.open = true;
                 }
             }
+            // The bazaar (E3.11): a click on a stall walks you there, in at
+            // the gate and up the lane, and its shop opens as you arrive.
+            let clicked = self.shared.visit_stall.lock().ok().and_then(|mut v| v.take());
+            if let Some(id) = clicked {
+                visit_stall(session, &self.terrain, &mut self.shop, &id, now);
+            }
+            if let Some(id) = session.walking_to_stall().map(str::to_owned) {
+                if let Some(stall) = self.terrain.landmark_by_id(&id) {
+                    if session.at_stall(now, stall) {
+                        self.shop.open_on(&id);
+                    }
+                }
+            }
             // The Gazette follows whoever is signed in, and counts what's
             // opened as read
             let (server, me) = (session.server().to_owned(), session.state().me());
@@ -800,6 +892,12 @@ impl PlayerExtension for CapitolExtension {
         if self.session.is_none() && self.shared.visit_hall.swap(false, Ordering::Relaxed) {
             self.market.open = true;
         }
+        if self.session.is_none() {
+            let clicked = self.shared.visit_stall.lock().ok().and_then(|mut v| v.take());
+            if let (Some(id), Some(_)) = (clicked, &self.bazaar_sample) {
+                self.shop.open_on(&id);
+            }
+        }
         if self.session.is_none() && self.node_sample && ctx.clock.total_time > 0.5 {
             // Offline, every kind of node round where the camera looks
             // half a second in (`--node-sample`), once a `--view` or a
@@ -918,6 +1016,33 @@ impl PlayerExtension for CapitolExtension {
             )
         });
         if let Ok(mut shared) = self.shared.hall.lock() {
+            *shared = mark;
+        }
+        // The bazaar (E3.11), across the avenue: built from the terrain and
+        // the directory (which stalls are kept, and what they sell), and its
+        // lanterns lit with the hour
+        if let (Some(gpu), Some(terrain)) = (ctx.gpu.as_mut(), self.built.as_ref()) {
+            let directory = match (&self.session, &self.bazaar_sample) {
+                (Some(session), _) => session.state().bazaar().directory(),
+                (None, Some(sample)) => Some(&sample.directory),
+                (None, None) => None,
+            };
+            let shop = |id: &str| {
+                directory
+                    .and_then(|d| d.stalls.iter().find(|s| s.stall_id == id))
+                    .and_then(|s| s.shop.as_ref())
+            };
+            if self.bazaar.sync(gpu, &terrain.landmarks, shop) {
+                attach_each(ctx, world::bazaar::meshes().iter());
+            }
+        }
+        set_material(
+            ctx.world,
+            world::bazaar::LAMPS_MESH,
+            &[("emissive_scale", world::bazaar::lantern_light(glow))],
+        );
+        let mark = self.bazaar_mark([camera.target.x, camera.target.z], camera.position.to_array());
+        if let Ok(mut shared) = self.shared.bazaar.lock() {
             *shared = mark;
         }
         // The grass, cleared round every node the server has shown us, as
@@ -1249,12 +1374,66 @@ impl PlayerExtension for CapitolExtension {
                     busy: session.market_busy(),
                     refused: session.market_refused(now),
                     away_from_hall,
+                    bazaar: state.bazaar().directory(),
+                    my_stall: state.bazaar().my_shop().map(|s| s.stall_id.as_str()),
+                    walking_to: session.walking_to_stall(),
                 };
                 match self.market.show(ctx, &mut self.icons, &view) {
                     Some(ui::market::Action::Place(order)) => session.place_order(order),
                     Some(ui::market::Action::Cancel(id)) => session.cancel_order(id),
                     Some(ui::market::Action::Collect) => session.collect_market_box(),
+                    Some(ui::market::Action::VisitStall(id)) => {
+                        // Out of the way, so you see the walk
+                        self.market.open = false;
+                        visit_stall(session, &self.terrain, &mut self.shop, &id, now);
+                    }
                     Some(ui::market::Action::Close) => self.market.open = false,
+                    None => {}
+                }
+                // The shop at the stall you're at (E3.11)
+                session.watch_shop(self.shop.stall.as_deref());
+                let state = session.state();
+                let store = state.bazaar();
+                let action = match self.shop.stall.clone() {
+                    Some(stall_id) => {
+                        let away = self
+                            .terrain
+                            .landmark_by_id(&stall_id)
+                            .zip(state.local_player())
+                            .filter(|(stall, me)| !rules::bazaar::at_the_stall(stall, me.x, me.y))
+                            .map(|(stall, me)| stall.distance_to(me.x, me.y));
+                        let view = ui::shop::View {
+                            stall_id: &stall_id,
+                            shop: store.shop(&stall_id),
+                            sign: store
+                                .directory()
+                                .and_then(|d| d.stalls.iter().find(|s| s.stall_id == stall_id))
+                                .and_then(|s| s.shop.as_ref()),
+                            listed: store.directory().is_some(),
+                            mine: store.my_shop(),
+                            me: state.me(),
+                            away,
+                            inventory: state.inventory(),
+                            strands: state.strands(),
+                            catalog: state.catalog(),
+                            busy: session.bazaar_busy(),
+                            refused: session.bazaar_refused(now),
+                            now: state
+                                .server_time_ms()
+                                .and_then(capitol_core::chrono::DateTime::from_timestamp_millis)
+                                .unwrap_or_else(capitol_core::chrono::Utc::now),
+                        };
+                        self.shop.show(ctx, &mut self.icons, Some(&view), self.crafting.rect)
+                    }
+                    None => self.shop.show(ctx, &mut self.icons, None, self.crafting.rect),
+                };
+                match action {
+                    Some(ui::shop::Action::Buy { listing_id, request }) => session.buy_listing(listing_id, request),
+                    Some(ui::shop::Action::Rent { stall_id, request }) => session.rent_stall(&stall_id, request),
+                    Some(ui::shop::Action::Stock(request)) => session.stock_shop(request),
+                    Some(ui::shop::Action::Unlist(id)) => session.unlist(id),
+                    Some(ui::shop::Action::GoTo(id)) => visit_stall(session, &self.terrain, &mut self.shop, &id, now),
+                    Some(ui::shop::Action::Close) => self.shop.close(),
                     None => {}
                 }
                 // What a foreclosure kept for you (#141)
@@ -1285,7 +1464,7 @@ impl PlayerExtension for CapitolExtension {
                 } else {
                     // The inventory's rect is last frame's: it's drawn after.
                     let panels: Vec<_> =
-                        [self.inventory.rect, self.crafting.rect, self.exchange.rect, self.market.rect, self.impound.rect]
+                        [self.inventory.rect, self.crafting.rect, self.exchange.rect, self.market.rect, self.impound.rect, self.shop.rect]
                             .into_iter()
                             .flatten()
                             .collect();
@@ -1442,9 +1621,24 @@ impl PlayerExtension for CapitolExtension {
         }
         if let Some(sample) = &self.market_sample {
             let history = self.market.charting().map(|key| sample.history(&key));
-            let view = sample.view_with(self.market.selected.as_deref(), history.as_ref());
-            if let Some(ui::market::Action::Close) = self.market.show(ctx, &mut self.icons, &view) {
-                self.market.open = false;
+            let mut view = sample.view_with(self.market.selected.as_deref(), history.as_ref());
+            view.bazaar = self.bazaar_sample.as_ref().map(|b| &b.directory);
+            view.my_stall = self.bazaar_sample.as_ref().and_then(|b| b.mine()).map(|s| s.stall_id.as_str());
+            match self.market.show(ctx, &mut self.icons, &view) {
+                Some(ui::market::Action::Close) => self.market.open = false,
+                Some(ui::market::Action::VisitStall(id)) if self.bazaar_sample.is_some() => {
+                    self.market.open = false;
+                    self.shop.open_on(&id);
+                }
+                _ => {}
+            }
+        }
+        if let (Some(sample), None) = (&self.bazaar_sample, &self.session) {
+            let catalog = capitol_core::catalog::Catalog::fallback();
+            let stall = self.shop.stall.clone();
+            let view = stall.as_deref().map(|id| sample.view(id, &catalog));
+            if let Some(ui::shop::Action::Close) = self.shop.show(ctx, &mut self.icons, view.as_ref(), None) {
+                self.shop.close();
             }
         }
         if let Some((impound, inventory)) = &self.impound_sample {
@@ -1489,6 +1683,23 @@ impl PlayerExtension for CapitolExtension {
         if dropped {
             self.sound.drop_in_slot();
         }
+    }
+}
+
+/// Goes to `stall_id` in the bazaar (E3.11): its shop opens now if you're at
+/// it, or once the walk through the gate brings you there.
+fn visit_stall(
+    session: &mut Session,
+    terrain: &TerrainSource,
+    shop: &mut ui::shop::ShopPanel,
+    stall_id: &str,
+    now: Instant,
+) {
+    let Some(stall) = terrain.landmark_by_id(stall_id) else {
+        return;
+    };
+    if session.visit_stall(now, terrain.landmark(LandmarkKind::Bazaar), stall) {
+        shop.open_on(stall_id);
     }
 }
 

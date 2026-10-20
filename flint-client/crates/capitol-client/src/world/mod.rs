@@ -10,6 +10,7 @@
 //! When the terrain changes while the game runs (P3.10), [`Rebuild`] says
 //! which layers to build again: only those whose inputs changed.
 
+pub mod bazaar;
 pub mod bridges;
 pub mod geom;
 pub mod grass;

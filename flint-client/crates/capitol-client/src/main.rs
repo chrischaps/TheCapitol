@@ -147,6 +147,11 @@ struct Args {
     /// in range, the prompt (E3.7)
     #[arg(long)]
     hall_sample: bool,
+    /// Offline, the bazaar with sample shops in its stalls (E3.11), you
+    /// where the camera looks, and the shop panel open on stall N ("mine"
+    /// for your own, stall 6)
+    #[arg(long, value_name = "STALL")]
+    bazaar_sample: Option<String>,
     /// Offline, open the impound (#141) on a sample: what a foreclosed
     /// workshop leaves when your pack is full
     #[arg(long)]
@@ -324,6 +329,7 @@ fn main() -> Result<()> {
         .with_exchange(args.exchange.as_deref())
         .with_market(args.market.as_deref(), args.market_sample)
         .with_hall_sample(args.hall_sample && args.offline.is_some())
+        .with_bazaar_sample(args.bazaar_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_gazette_sample(args.gazette_sample && args.offline.is_some())
         .with_impound_sample(args.impound_sample && args.offline.is_some())
         .with_mute(args.mute || args.exit_after.is_some())

@@ -32,8 +32,8 @@ use capitol_core::net::{
 };
 use capitol_core::poll::{Fetch, Poller};
 use capitol_core::protocol::rest::{
-    CollectRequest, DepositRequest, MarketSummaryResponse, MoveItemRequest, MyOrdersQuery, PauseReason,
-    PayTaxRequest, PlaceOrder, PositionQuery, SlotItem, SplitStackRequest, WithdrawRequest,
+    BuyListing, CollectRequest, DepositRequest, MarketSummaryResponse, MoveItemRequest, MyOrdersQuery, PauseReason,
+    PayTaxRequest, PlaceOrder, PositionQuery, RentStall, SlotItem, SplitStackRequest, StockListing, WithdrawRequest,
 };
 use capitol_core::protocol::rules::market::{OrderSide, OrderStatus};
 use capitol_core::protocol::rules::Zone;
@@ -85,6 +85,19 @@ const GAZETTE_TAG: Tag = 70;
 /// The tag on taking things out of the impound (#141). The poller
 /// refetches the containers on its answer.
 const IMPOUND_TAG: Tag = 80;
+
+/// The tags on the bazaar's calls (E3.11): renting, stocking, unlisting
+/// and buying share one; the directory, your stall and the shop you're at
+/// another. The poller refetches the containers after a stock, an unlist or
+/// a purchase.
+const BAZAAR_TAG: Tag = 90;
+const BAZAAR_READ_TAG: Tag = 91;
+
+/// How often the directory and your stall are asked for again, while in the
+/// world: they change only when a merchant rents, stocks or sells out.
+const BAZAAR_REFRESH: Duration = Duration::from_secs(60);
+/// And the shop you're at, while its panel is open: buyers come and go.
+const SHOP_REFRESH: Duration = Duration::from_secs(10);
 
 /// How often the open market panel asks again for the summary and your
 /// orders. The books themselves come over the WS as they change.
@@ -201,6 +214,15 @@ pub struct Session {
     /// Clicking the Exchange hall: open the market, or walk to its door
     /// and open it there (E3.7).
     hall: capitol_core::hall::Visit,
+    /// A walk to a bazaar stall, through the gate (E3.11)
+    stall: capitol_core::bazaar::Visit,
+    /// When the directory and your stall were last asked for
+    bazaar_asked: Option<Instant>,
+    /// The stall whose shop is open, and when it was last asked for
+    shop: Option<(String, Option<Instant>)>,
+    /// A rent, stock, unlist or buy is out
+    bazaar_busy: bool,
+    bazaar_refused: Option<(String, Instant)>,
     /// Your side of the open trade as you build it.
     draft: Draft,
     /// What's worth telling the player about trading, since the extension
@@ -371,6 +393,11 @@ impl Session {
             station_notes: Vec::new(),
             approach: Approach::default(),
             hall: capitol_core::hall::Visit::default(),
+            stall: capitol_core::bazaar::Visit::default(),
+            bazaar_asked: None,
+            shop: None,
+            bazaar_busy: false,
+            bazaar_refused: None,
             draft: Draft::default(),
             trade_notes: Vec::new(),
             traded: Vec::new(),
@@ -425,6 +452,7 @@ impl Session {
         self.visit.walked();
         self.approach.walked();
         self.hall.walked();
+        self.stall.walked();
         self.walk(now, x, y);
     }
 
@@ -489,6 +517,7 @@ impl Session {
         self.harvest.walked();
         self.approach.walked();
         self.hall.walked();
+        self.stall.walked();
         if let Some(step) = self.visit.click(station, &self.state, now) {
             self.station_step(now, step);
         }
@@ -508,6 +537,7 @@ impl Session {
         self.harvest.walked();
         self.visit.walked();
         self.approach.walked();
+        self.stall.walked();
         match self.hall.click(hall, at) {
             capitol_core::hall::Step::Open => true,
             capitol_core::hall::Step::WalkTo { x, y } => {
@@ -524,6 +554,171 @@ impl Session {
         };
         let at = [me.x, me.y];
         self.hall.arrived(hall, at)
+    }
+
+    /// You clicked a stall in the bazaar, or its row in the directory: true
+    /// if you're at it, so its shop opens now. Otherwise you walk there, in
+    /// at the gate and up the lane, and [`Self::at_stall`] says when you
+    /// arrive (`capitol_core::bazaar::Visit`).
+    pub fn visit_stall(&mut self, now: Instant, bazaar: Option<&Landmark>, stall: &Landmark) -> bool {
+        if self.auth.phase() != Phase::InWorld {
+            return false;
+        }
+        let Some(me) = self.state.local_player() else {
+            return false;
+        };
+        let at = (me.x, me.y);
+        self.harvest.walked();
+        self.visit.walked();
+        self.approach.walked();
+        self.hall.walked();
+        match self.stall.click(bazaar, stall, at) {
+            capitol_core::bazaar::Step::Open => true,
+            capitol_core::bazaar::Step::WalkTo { x, y } => {
+                self.walk(now, x, y);
+                false
+            }
+        }
+    }
+
+    /// Each frame while a walk to `stall` is under way: walks its next leg,
+    /// and is true once, as you come to its counter.
+    pub fn at_stall(&mut self, now: Instant, stall: &Landmark) -> bool {
+        let Some(me) = self.state.local_player() else {
+            return false;
+        };
+        match self.stall.tick(stall, (me.x, me.y)) {
+            Some(capitol_core::bazaar::Step::Open) => true,
+            Some(capitol_core::bazaar::Step::WalkTo { x, y }) => {
+                self.walk(now, x, y);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// The stall being walked to, if any.
+    pub fn walking_to_stall(&self) -> Option<&str> {
+        self.stall.walking()
+    }
+
+    /// The shop panel is open on `stall_id`, or closed: while it's open the
+    /// shop is asked for now and every [`SHOP_REFRESH`].
+    pub fn watch_shop(&mut self, stall_id: Option<&str>) {
+        if self.shop.as_ref().map(|(id, _)| id.as_str()) != stall_id {
+            self.shop = stall_id.map(|id| (id.to_owned(), None));
+        }
+    }
+
+    /// Rents `stall_id`, or pays more on your own.
+    pub fn rent_stall(&mut self, stall_id: &str, request: RentStall) {
+        tracing::info!("bazaar: renting {stall_id} for {} days", request.days);
+        self.ask_bazaar(RestRequest::RentStall { stall_id: stall_id.to_owned(), request });
+    }
+
+    /// Stocks your shop from a stack in your inventory.
+    pub fn stock_shop(&mut self, request: StockListing) {
+        tracing::info!("bazaar: stocking {} at {} each", request.quantity, request.price);
+        self.ask_bazaar(RestRequest::Stock(request));
+    }
+
+    /// Takes a listing off your shop, back to your inventory.
+    pub fn unlist(&mut self, listing_id: Uuid) {
+        tracing::info!("bazaar: unlisting {listing_id}");
+        self.ask_bazaar(RestRequest::Unlist { listing_id });
+    }
+
+    /// Buys from a listing at the stall you're at.
+    pub fn buy_listing(&mut self, listing_id: Uuid, request: BuyListing) {
+        tracing::info!("bazaar: buying {} of {listing_id}", request.quantity);
+        self.ask_bazaar(RestRequest::Buy { listing_id, request });
+    }
+
+    fn ask_bazaar(&mut self, request: RestRequest) {
+        if self.auth.phase() != Phase::InWorld || self.bazaar_busy {
+            return;
+        }
+        self.bazaar_busy = true;
+        self.bazaar_refused = None;
+        self.net.rest(request, BAZAAR_TAG);
+    }
+
+    /// A rent, stock, unlist or buy is out.
+    pub fn bazaar_busy(&self) -> bool {
+        self.bazaar_busy
+    }
+
+    /// Why the server refused the last one, for a few seconds after.
+    pub fn bazaar_refused(&self, now: Instant) -> Option<&str> {
+        self.bazaar_refused
+            .as_ref()
+            .filter(|(_, at)| now.duration_since(*at) < NOTICE_FOR)
+            .map(|(why, _)| why.as_str())
+    }
+
+    /// Asks for the directory and your stall every [`BAZAAR_REFRESH`], and
+    /// the open shop every [`SHOP_REFRESH`]: from its stall, since the
+    /// server shows prices only there; your own, from anywhere.
+    fn tend_bazaar(&mut self, now: Instant) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        if self.bazaar_asked.is_none_or(|at| now.duration_since(at) >= BAZAAR_REFRESH) {
+            self.bazaar_asked = Some(now);
+            self.net.rest(RestRequest::Bazaar, BAZAAR_READ_TAG);
+            self.net.rest(RestRequest::MyStall, BAZAAR_READ_TAG);
+        }
+        let mine = self.state.bazaar().my_shop().map(|s| s.stall_id.clone());
+        let Some((stall_id, asked)) = &mut self.shop else {
+            return;
+        };
+        if asked.is_some_and(|at| now.duration_since(at) < SHOP_REFRESH) {
+            return;
+        }
+        *asked = Some(now);
+        let request = if mine.as_ref() == Some(stall_id) {
+            RestRequest::MyStall
+        } else {
+            RestRequest::Shop { stall_id: stall_id.clone() }
+        };
+        self.net.rest(request, BAZAAR_READ_TAG);
+    }
+
+    /// Turns a sale at your stall, or its closing, into a toast, as the
+    /// market's fills are (`market_note`).
+    fn note_bazaar(&mut self, change: &StateEvent) {
+        let catalog = self.state.catalog();
+        let note = match change {
+            StateEvent::BazaarSale { item_type, buyer_name, buyer_citizen, units, paid, .. } => {
+                let who = if *buyer_citizen { format!("{buyer_name}, a citizen,") } else { buyer_name.clone() };
+                TradeNote::new(
+                    "Sold at your stall",
+                    format!(
+                        "{who} bought {} {} ({}) for {paid} Strands.",
+                        units.count(),
+                        catalog.item_name(item_type),
+                        grade_words(units)
+                    ),
+                )
+            }
+            StateEvent::StallLapsed { name, returned, waiting, .. } => {
+                let went = match returned {
+                    0 => String::new(),
+                    1 => " One stack went to your market box at the Exchange hall.".to_owned(),
+                    n => format!(" {n} stacks went to your market box at the Exchange hall."),
+                };
+                let wait = match waiting {
+                    0 => String::new(),
+                    n => format!(" {n} more wait for room there."),
+                };
+                TradeNote::new("Your stall closed", format!("The rent on {name} ran out.{went}{wait}"))
+            }
+            _ => return,
+        };
+        tracing::info!("bazaar: {}: {}", note.title, note.body);
+        self.market_notes.push(note);
+        // The directory and your shop changed
+        self.bazaar_asked = None;
     }
 
     /// Opens the station nearest you, as a click on it would (the O key).
@@ -1249,6 +1444,7 @@ impl Session {
         self.harvest.walked();
         self.visit.walked();
         self.hall.walked();
+        self.stall.walked();
         self.trade_step(now, step);
         self.note_approach();
         true
@@ -1595,6 +1791,50 @@ impl Session {
                         }
                     }
                 }
+                NetEvent::Rest(BAZAAR_TAG, result) => {
+                    self.bazaar_busy = false;
+                    match result {
+                        Ok(RestResponse::Bought { listing_id, purchase }) => {
+                            let bazaar = self.state.bazaar();
+                            let item = bazaar
+                                .stall_of(*listing_id)
+                                .and_then(|stall| bazaar.shop(stall))
+                                .and_then(|shop| shop.listings.iter().find(|l| l.id == *listing_id))
+                                .or(purchase.listing.as_ref())
+                                .map(|l| self.state.catalog().item_name(&l.item_type));
+                            let into = if purchase.into == "market_box" {
+                                "Your pack was full, so it waits in your market box at the Exchange hall."
+                            } else {
+                                "It's in your pack."
+                            };
+                            self.market_notes.push(TradeNote::new(
+                                "Bought at the bazaar",
+                                format!(
+                                    "{} {}({}) for {} Strands. {into}",
+                                    purchase.units.count(),
+                                    item.map(|name| format!("{name} ")).unwrap_or_default(),
+                                    grade_words(&purchase.units),
+                                    purchase.paid
+                                ),
+                            ));
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            let why = refusal(e);
+                            tracing::info!("bazaar: refused: {why}");
+                            self.bazaar_refused = Some((why, now));
+                        }
+                    }
+                    // A rent, a new kind of goods, or a sell-out changes the
+                    // directory and your stall, and the shop you're at
+                    self.bazaar_asked = None;
+                    if let Some((_, asked)) = &mut self.shop {
+                        *asked = None;
+                    }
+                }
+                NetEvent::Rest(BAZAAR_READ_TAG, Err(e)) => {
+                    tracing::warn!("bazaar: a refresh failed: {e}");
+                }
                 NetEvent::Rest(IMPOUND_TAG, result) => {
                     self.impound_busy = false;
                     match result {
@@ -1763,6 +2003,7 @@ impl Session {
                         .push((*station_id, station_type.clone(), reason.clone())),
                     StateEvent::AutomationProduced { station_id } => self.produced.push(*station_id),
                     StateEvent::Market(event) => self.note_market(event),
+                    StateEvent::BazaarSale { .. } | StateEvent::StallLapsed { .. } => self.note_bazaar(change),
                     StateEvent::GazettePublished { day, headline, .. } => {
                         self.gazette.published(*day, headline)
                     }
@@ -1829,6 +2070,7 @@ impl Session {
             self.note_trades(&trade_before, &changes, now);
             self.send_draft(now);
             self.tend_market(now);
+            self.tend_bazaar(now);
             self.tend_gazette();
             for (request, tag) in self.poller.tick(now) {
                 self.net.rest(request, tag);
@@ -1932,6 +2174,12 @@ impl Session {
             self.visit = Visit::default();
             self.station_notes.clear();
             self.approach = Approach::default();
+            self.hall = capitol_core::hall::Visit::default();
+            self.stall = capitol_core::bazaar::Visit::default();
+            self.bazaar_asked = None;
+            self.shop = None;
+            self.bazaar_busy = false;
+            self.bazaar_refused = None;
             self.draft = Draft::default();
             self.trade_notes.clear();
             self.traded.clear();
@@ -1979,6 +2227,15 @@ impl Session {
 
 /// A refused request's reason, as a player should read it: the server's own
 /// words when it gave some.
+/// Units by grade, best first, never their average (D2): "B 2, C 1".
+fn grade_words(units: &capitol_core::protocol::rules::stacking::Units) -> String {
+    capitol_core::bazaar::grades(units)
+        .iter()
+        .map(|(g, n)| format!("{g} {n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn refusal(e: &RestError) -> String {
     match e {
         RestError::Http { message, .. } if !message.is_empty() => message.clone(),
@@ -2705,6 +2962,165 @@ mod tests {
         });
         session.log_out();
         drop(seller);
+    }
+
+    /// The fixture's stalls.
+    fn terrain_stalls(terrain: &TerrainSource) -> Vec<Landmark> {
+        (1..=13).filter_map(|k| terrain.landmark_by_id(&format!("bazaar_stall_{k}")).cloned()).collect()
+    }
+
+    /// The bazaar (E3.11) through two sessions, as the panels drive them: a
+    /// merchant walks in at the gate to a free stall, rents and names it and
+    /// stocks rope from the pack; a buyer walks up the lane to it, sees the
+    /// prices there and buys two, best first. Each hears a toast. Needs the
+    /// local stack with `DEV_GRANTS=on` (the bots fund both accounts), and
+    /// a free stall.
+    #[test]
+    #[ignore = "needs the local stack with DEV_GRANTS=on"]
+    fn a_stall_is_rented_stocked_and_bought_from() {
+        use capitol_core::bazaar;
+        use capitol_core::bot::{Account, Bot};
+        use capitol_core::net::NetConfig;
+        use capitol_core::protocol::rest::{GrantItem, GrantRequest};
+        use capitol_core::protocol::terrain::LandmarkKind;
+
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            % 100_000_000;
+        let config = || NetConfig::with_base_url(&server);
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let mut terrain = TerrainSource::offline(&fixture).unwrap();
+        let bazaar_site = terrain.landmark(LandmarkKind::Bazaar).cloned().expect("the fixture has the bazaar");
+
+        // Both funded by a bot and walked to the avenue, where the bazaar
+        // faces the hall; the merchant's rope collected into the pack
+        let merchant = Account::numbered(&format!("bzm{stamp}"), 1);
+        let buyer = Account::numbered(&format!("bzb{stamp}"), 1);
+        let mut bot = Bot::sign_in(config(), &merchant).expect("merchant signed in");
+        bot.grant(GrantRequest {
+            strands: 200,
+            items: vec![GrantItem { item_type: "rope".into(), quantity: 5, quality: 80 }],
+        })
+        .expect("a grant: is DEV_GRANTS on?");
+        bot.go_to_exchange().expect("at the hall");
+        bot.collect_market_box().expect("the rope collected");
+        let free = bot
+            .bazaar()
+            .expect("the directory")
+            .stalls
+            .into_iter()
+            .find(|s| s.shop.is_none())
+            .map(|s| s.stall_id)
+            .expect("a free stall");
+        drop(bot);
+        let mut bot = Bot::sign_in(config(), &buyer).expect("buyer signed in");
+        bot.grant(GrantRequest { strands: 100, items: Vec::new() }).expect("a grant");
+        bot.go_to_exchange().expect("at the hall");
+        drop(bot);
+
+        let dir = std::env::temp_dir().join(format!("capitol-bazaar-{}", std::process::id()));
+        let start = |account: &Account, name: &str| {
+            let mut s = Session::start(&server, SessionFile::load(dir.join(format!("{name}.toml")))).unwrap();
+            s.log_in(&account.email, &account.password);
+            s
+        };
+        let mut seller = start(&merchant, "merchant");
+        let mut buying = start(&buyer, "buyer");
+        let stall = terrain.landmark_by_id(&free).cloned().unwrap();
+        let stalls: Vec<_> = terrain_stalls(&terrain);
+        // Each frame as the extension runs it: the walk's next leg, and the
+        // shop opening on arrival (the walk ends as it opens)
+        let mut wait = |session: &mut Session, what: &str, done: &dyn Fn(&Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(90);
+            while !done(session) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                session.update(Instant::now(), &mut terrain);
+                if let Some(id) = session.walking_to_stall().map(str::to_owned) {
+                    let to = stalls.iter().find(|l| l.id == id).unwrap();
+                    session.at_stall(Instant::now(), to);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        for s in [&mut seller, &mut buying] {
+            wait(s, "the pack and the balance", &|s| {
+                s.state().inventory().is_some() && s.state().strands().is_some() && s.state().local_player().is_some()
+            });
+        }
+
+        // The merchant walks in at the gate and up the lane to the free stall
+        assert!(!seller.visit_stall(Instant::now(), Some(&bazaar_site), &stall), "a walk, from the hall");
+        wait(&mut seller, "the walk to the stall", &|s| s.walking_to_stall().is_none());
+        let me = seller.state().local_player().map(|p| (p.x, p.y)).unwrap();
+        assert!(capitol_core::protocol::rules::bazaar::at_the_stall(&stall, me.0, me.1), "at the counter: {me:?}");
+        eprintln!("merchant at {free}, {me:?}");
+
+        // Rent and name it, then stock three rope at 9
+        let name = format!("Rope {stamp}");
+        let now = capitol_core::chrono::Utc::now();
+        let rent = bazaar::rent(2, &name, None, seller.state().strands(), now).expect("a rent the merchant can pay");
+        seller.rent_stall(&free, rent);
+        wait(&mut seller, "the rent's answer", &|s| !s.bazaar_busy());
+        assert_eq!(seller.bazaar_refused(Instant::now()), None);
+        wait(&mut seller, "the shop, yours", &|s| {
+            s.state().bazaar().my_shop().is_some_and(|m| m.stall_id == free && m.name == name)
+        });
+        let rope = seller
+            .state()
+            .inventory()
+            .and_then(|c| c.items().find(|i| i.item_type == "rope").cloned())
+            .expect("rope in the pack");
+        seller.stock_shop(bazaar::stock(&rope, 3, 9, 0).unwrap());
+        wait(&mut seller, "the stock's answer", &|s| !s.bazaar_busy());
+        assert_eq!(seller.bazaar_refused(Instant::now()), None);
+        wait(&mut seller, "the listing and the directory", &|s| {
+            let store = s.state().bazaar();
+            store.my_shop().is_some_and(|m| m.listings.len() == 1)
+                && store.directory().is_some_and(|d| {
+                    d.stalls
+                        .iter()
+                        .any(|st| st.stall_id == free && st.shop.as_ref().is_some_and(|sh| sh.item_types == ["rope"]))
+                })
+        });
+
+        // The buyer walks to it, sees its prices there, and buys two
+        assert!(!buying.visit_stall(Instant::now(), Some(&bazaar_site), &stall));
+        buying.watch_shop(Some(&free));
+        wait(&mut buying, "the walk and the shop's prices", &|s| {
+            s.walking_to_stall().is_none() && s.state().bazaar().shop(&free).is_some_and(|sh| !sh.listings.is_empty())
+        });
+        let state = buying.state();
+        let shop = state.bazaar().shop(&free).unwrap().clone();
+        let purchase = bazaar::buy(&shop.listings[0], 2, None, shop.owner_id, state.me(), state.strands())
+            .expect("a purchase the buyer can make");
+        assert_eq!(purchase.cost, 18);
+        let before = state.strands().unwrap();
+        buying.buy_listing(shop.listings[0].id, purchase.request.clone());
+        wait(&mut buying, "the buy's answer", &|s| !s.bazaar_busy());
+        assert_eq!(buying.bazaar_refused(Instant::now()), None);
+        wait(&mut buying, "the rope and the balance", &|s| {
+            s.state().strands() == Some(before - 18)
+                && s.state().inventory().is_some_and(|c| c.items().any(|i| i.item_type == "rope" && i.quantity == 2))
+        });
+        let notes = buying.take_market_notes();
+        eprintln!("buyer's toasts: {notes:?}");
+        assert!(notes.iter().any(|n| n.title == "Bought at the bazaar" && n.body.contains("(B 2)")), "{notes:?}");
+        wait(&mut seller, "the sale's toast", &|s| s.market_notes.iter().any(|n| n.title == "Sold at your stall"));
+        let notes = seller.take_market_notes();
+        eprintln!("merchant's toasts: {notes:?}");
+        assert!(seller.state().bazaar().my_shop().is_some_and(|m| m.listings[0].units.count() == 1));
+
+        // Back to the pack, so the stall is bare until its rent lapses
+        let left = seller.state().bazaar().my_shop().unwrap().listings[0].id;
+        seller.unlist(left);
+        wait(&mut seller, "the unlist", &|s| !s.bazaar_busy());
+        assert_eq!(seller.bazaar_refused(Instant::now()), None);
+        seller.log_out();
+        buying.log_out();
     }
 
     /// E3.6 against the local stack: two bots trade fiber twice, then the

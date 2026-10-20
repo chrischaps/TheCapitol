@@ -25,13 +25,20 @@
 //!   fills in gold and the latest trades (`market_chart`). A trade clicked
 //!   there goes back to the book with its price in the form.
 //!
+//! - **The bazaar** (E3.11), the third tab: the directory of the bazaar's
+//!   stalls across the avenue (`GET /bazaar`), from anywhere: each shop's
+//!   name, its keeper and the kinds of goods it has, and which stalls are
+//!   to let. No prices, quantities or grades: those are seen at the stall
+//!   (D6). The search finds shops by name, keeper or goods. A click on a
+//!   row walks you to the stall and opens its shop (`ui::shop`).
+//!
 //! It's edged in gold, as the exchange is: Strands are money. Fills arrive
 //! as toasts (`market_note`) whether the panel is open or not.
 
 use capitol_core::catalog::Catalog;
 use capitol_core::market::{self, Book, ChartKey, Draft, FormRefusal, History, OrderQuote};
 use capitol_core::protocol::rest::{
-    DepthLevel, MarketHistoryResponse, MarketItemSummary, MarketOrder, MarketTrade, MyFill, PlaceOrder,
+    BazaarDirectory, DepthLevel, MarketHistoryResponse, MarketItemSummary, MarketOrder, MarketTrade, MyFill, PlaceOrder,
     SlotItem,
 };
 use capitol_core::protocol::rules::market::{GradeRule, OrderSide};
@@ -72,6 +79,8 @@ pub enum Action {
     Cancel(Uuid),
     /// Bring the market box to the inventory
     Collect,
+    /// Walk to a bazaar stall and open its shop (E3.11)
+    VisitStall(String),
     Close,
 }
 
@@ -97,6 +106,11 @@ pub struct View<'a> {
     /// How far you are from the Exchange hall, when that's further than
     /// `HALL_RANGE`: placing and collecting happen only there (D6, E3.4)
     pub away_from_hall: Option<f64>,
+    /// The bazaar's directory, once fetched (E3.11)
+    pub bazaar: Option<&'a BazaarDirectory>,
+    /// Your stall, if you keep one, and the one you're walking to
+    pub my_stall: Option<&'a str>,
+    pub walking_to: Option<&'a str>,
 }
 
 /// The order form, as typed.
@@ -130,6 +144,8 @@ pub enum Tab {
     #[default]
     Items,
     Orders,
+    /// The bazaar's directory (E3.11)
+    Bazaar,
 }
 
 /// What the right of the panel shows.
@@ -161,6 +177,7 @@ pub struct MarketPanel {
     item_rows: Vec<(String, egui::Rect)>,
     level_rows: Vec<(DepthLevel, egui::Rect)>,
     cancels: Vec<(Uuid, egui::Rect)>,
+    stall_rows: Vec<(String, egui::Rect)>,
     place: Option<egui::Rect>,
     /// Where the panel was drawn this frame. `None` while it's closed.
     pub rect: Option<egui::Rect>,
@@ -200,13 +217,15 @@ impl MarketPanel {
     /// (`--market-sample`, `--market`): "plank" opens its book, and
     /// "plank:buy:10@41:B" fills a buy of 10 at 41, B or better. Anywhere
     /// after the item, "chart" shows the chart, and "1d", "line" or
-    /// "grade-B" (or "grade-all") set it up.
+    /// "grade-B" (or "grade-all") set it up; "bazaar" opens the bazaar's
+    /// directory (E3.11).
     pub fn preset(&mut self, spec: &str) {
         self.open = true;
         let mut kept = Vec::new();
         for part in spec.split(':') {
             match part {
                 "chart" => self.pane = Pane::Chart,
+                "bazaar" => self.tab = Tab::Bazaar,
                 "1h" => self.chart.bucket = market::Bucket::Hour,
                 "1d" => self.chart.bucket = market::Bucket::Day,
                 "line" => self.chart.style = chart::Style::Line,
@@ -297,6 +316,18 @@ impl MarketPanel {
             });
         });
         ui.add_space(4.0);
+        if self.tab == Tab::Bazaar {
+            self.tabs(ui, view.orders.len());
+            ui.add_space(6.0);
+            if let Some(asked) = self.bazaar(ui, icons, view) {
+                action = Some(asked);
+            }
+            ui.add_space(6.0);
+            if let Some(collect) = market_box(ui, view) {
+                action = Some(collect);
+            }
+            return action;
+        }
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = GUTTER;
             ui.vertical(|ui| {
@@ -310,6 +341,7 @@ impl MarketPanel {
                             action = Some(asked);
                         }
                     }
+                    Tab::Bazaar => {}
                 }
             });
             match self.pane {
@@ -340,7 +372,7 @@ impl MarketPanel {
         action
     }
 
-    /// Items and Your orders, the open one gold and underlined.
+    /// Items, Orders and Bazaar, the open one gold and underlined.
     fn tabs(&mut self, ui: &mut egui::Ui, orders: usize) {
         let (row, _) = ui.allocate_exact_size(egui::vec2(ITEMS_WIDTH, 26.0), Sense::hover());
         ui.painter().hline(
@@ -348,9 +380,9 @@ impl MarketPanel {
             row.bottom() - 0.5,
             Stroke::new(1.0, GOLD_DIM.gamma_multiply(0.5)),
         );
-        let width = row.width() / 2.0;
-        let mine = format!("Your orders · {orders}");
-        for (i, (tab, name)) in [(Tab::Items, "Items"), (Tab::Orders, mine.as_str())]
+        let width = row.width() / 3.0;
+        let mine = format!("Orders · {orders}");
+        for (i, (tab, name)) in [(Tab::Items, "Items"), (Tab::Orders, mine.as_str()), (Tab::Bazaar, "Bazaar")]
             .into_iter()
             .enumerate()
         {
@@ -386,6 +418,160 @@ impl MarketPanel {
                 self.tab = tab;
             }
         }
+    }
+
+    // -- The bazaar (E3.11) ---------------------------------------------------
+
+    /// The bazaar's directory across the panel: each kept stall's shop, its
+    /// keeper and its kinds of goods, then the stalls to let. A click walks
+    /// you there.
+    fn bazaar(&mut self, ui: &mut egui::Ui, icons: &mut ItemIcons, view: &View) -> Option<Action> {
+        let width = ITEMS_WIDTH + LADDER_WIDTH + FORM_WIDTH + 2.0 * GUTTER;
+        let mut action = None;
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.search)
+                    .hint_text("Find a shop, a keeper or goods…")
+                    .desired_width(ITEMS_WIDTH + 60.0)
+                    .char_limit(24),
+            );
+            ui.label(
+                theme::dim("Across the avenue from the hall. Prices are seen at the stalls.")
+                    .size(size::SMALL),
+            );
+        });
+        ui.add_space(6.0);
+        let needle = self.search.trim().to_lowercase();
+        self.stall_rows.clear();
+        theme::well().show(ui, |ui| {
+            ui.set_width(width - 16.0);
+            egui::ScrollArea::vertical()
+                .id_salt("capitol_market_bazaar")
+                .max_height(COLUMN_HEIGHT - 32.0)
+                .min_scrolled_height(COLUMN_HEIGHT - 32.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let Some(directory) = view.bazaar else {
+                        ui.label(theme::dim("Asking the bazaar…").size(size::SMALL));
+                        return;
+                    };
+                    let matches = |stall: &capitol_core::protocol::rest::BazaarStall| {
+                        let Some(shop) = &stall.shop else { return needle.is_empty() };
+                        needle.is_empty()
+                            || shop.name.to_lowercase().contains(&needle)
+                            || shop.owner_name.to_lowercase().contains(&needle)
+                            || shop
+                                .item_types
+                                .iter()
+                                .any(|t| view.catalog.item_name(t).to_lowercase().contains(&needle))
+                    };
+                    let kept: Vec<_> = directory.stalls.iter().filter(|s| s.shop.is_some() && matches(s)).collect();
+                    if kept.is_empty() {
+                        let line = if needle.is_empty() { "No one keeps a stall yet." } else { "No shop has that." };
+                        ui.label(theme::dim(line).size(size::SMALL));
+                    }
+                    for stall in kept {
+                        if self.stall_row(ui, icons, view, stall) {
+                            action = Some(Action::VisitStall(stall.stall_id.clone()));
+                        }
+                    }
+                    let free: Vec<&str> = directory
+                        .stalls
+                        .iter()
+                        .filter(|s| s.shop.is_none() && needle.is_empty())
+                        .map(|s| s.stall_id.as_str())
+                        .collect();
+                    if !free.is_empty() {
+                        ui.add_space(8.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(theme::label("To let"));
+                            ui.label(
+                                theme::dim(format!(
+                                    "{} Strands a day ·",
+                                    capitol_core::protocol::rules::bazaar::RENT_PER_DAY
+                                ))
+                                .size(size::SMALL),
+                            );
+                            for id in free {
+                                let n = super::shop::stall_number(id);
+                                if chip(ui, &format!("Stall {n}")).on_hover_text("Walk there to rent it").clicked() {
+                                    action = Some(Action::VisitStall(id.to_owned()));
+                                }
+                            }
+                        });
+                    }
+                });
+        });
+        action
+    }
+
+    /// One kept stall: its number, the shop's name, its keeper, and its
+    /// kinds of goods as icons. True if it was clicked.
+    fn stall_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        icons: &mut ItemIcons,
+        view: &View,
+        stall: &capitol_core::protocol::rest::BazaarStall,
+    ) -> bool {
+        let Some(shop) = &stall.shop else { return false };
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), Sense::click());
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(
+            if view.walking_to == Some(stall.stall_id.as_str()) { "On your way" } else { "Walk there and browse" },
+        );
+        self.stall_rows.push((stall.stall_id.clone(), rect));
+        let painter = ui.painter();
+        let mine = view.my_stall == Some(stall.stall_id.as_str());
+        if response.hovered() || mine {
+            painter.rect_filled(rect, 4.0, if mine { GOLD_WASH } else { theme::WELL });
+        }
+        let y = rect.center().y;
+        painter.text(
+            egui::pos2(rect.left() + 6.0, y),
+            Align2::LEFT_CENTER,
+            super::shop::stall_number(&stall.stall_id),
+            theme::strong(size::SMALL),
+            DIM,
+        );
+        painter.text(
+            egui::pos2(rect.left() + 32.0, y),
+            Align2::LEFT_CENTER,
+            &shop.name,
+            theme::strong(size::BODY),
+            if mine { GOLD } else { TEXT },
+        );
+        let keeper = match (mine, shop.owner_citizen) {
+            (true, _) => "yours".to_owned(),
+            (false, true) => format!("◆ {}", shop.owner_name),
+            (false, false) => shop.owner_name.clone(),
+        };
+        painter.text(
+            egui::pos2(rect.left() + 250.0, y),
+            Align2::LEFT_CENTER,
+            keeper,
+            theme::body(size::SMALL),
+            DIM,
+        );
+        let mut x = rect.left() + 380.0;
+        for t in shop.item_types.iter().take(12) {
+            let r = egui::Rect::from_center_size(egui::pos2(x + 10.0, y), egui::vec2(20.0, 20.0));
+            icons.paint_on(painter, r, t, 1.0);
+            x += 23.0;
+        }
+        if shop.item_types.is_empty() {
+            painter.text(egui::pos2(x, y), Align2::LEFT_CENTER, "nothing out yet", theme::body(size::SMALL), DIM);
+        }
+        let arrow = if view.walking_to == Some(stall.stall_id.as_str()) { "walking…" } else { "›" };
+        painter.text(
+            egui::pos2(rect.right() - 8.0, y),
+            Align2::RIGHT_CENTER,
+            arrow,
+            theme::strong(size::BODY),
+            if response.hovered() { GOLD } else { DIM },
+        );
+        response.clicked()
     }
 
     // -- Items ---------------------------------------------------------------
@@ -1718,6 +1904,9 @@ impl Sample {
             busy: false,
             refused: None,
             away_from_hall: None,
+            bazaar: None,
+            my_stall: None,
+            walking_to: None,
         }
     }
 }

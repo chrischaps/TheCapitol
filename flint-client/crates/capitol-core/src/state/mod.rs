@@ -244,8 +244,8 @@ pub enum StateEvent {
         number: i64,
         headline: String,
     },
-    /// Someone bought from your bazaar stall (`bazaar_sale`, E3.10). The
-    /// shop panel and its toast are E3.11.
+    /// Someone bought from your bazaar stall (`bazaar_sale`, E3.10). Flint
+    /// toasts it (E3.11).
     BazaarSale {
         stall_id: String,
         item_type: String,
@@ -253,6 +253,8 @@ pub enum StateEvent {
         /// The buyer is a citizen (C0.1)
         buyer_citizen: bool,
         quantity: i64,
+        /// Which units went, each at its quality (D2)
+        units: crate::protocol::rules::stacking::Units,
         paid: i64,
     },
     /// Your stall's rent ran out and the shop closed (`stall_lapsed`,
@@ -816,6 +818,7 @@ impl GameState {
                     buyer_name: buyer_name.clone(),
                     buyer_citizen: *buyer_citizen,
                     quantity: units.count(),
+                    units: units.clone(),
                     paid: *paid,
                 });
             }

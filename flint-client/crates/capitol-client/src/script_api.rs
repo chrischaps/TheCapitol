@@ -74,6 +74,12 @@ pub struct Shared {
     /// A script asked to open the Gazette (`cap_read_gazette`, E3.9). The
     /// extension takes it next frame.
     pub read_gazette: Arc<AtomicBool>,
+    /// The bazaar's stalls (E3.11) as the extension left them this frame.
+    /// `None` when the terrain has no bazaar.
+    pub bazaar: Arc<Mutex<Option<BazaarMark>>>,
+    /// The stall a script last asked to go to (`cap_visit_stall`). The
+    /// extension takes it next frame.
+    pub visit_stall: Arc<Mutex<Option<String>>>,
     /// Where the egui UI's landmarks were drawn last frame (P8.2), by name,
     /// for scripts to fly things to. Only "inventory" so far.
     pub anchors: Arc<Mutex<HashMap<&'static str, UiAnchor>>>,
@@ -131,6 +137,47 @@ pub struct HallMark {
     pub news: bool,
     /// The Gazette is open.
     pub reading: bool,
+}
+
+/// The bazaar (E3.11) as scripts see it: its stalls, in world metres.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BazaarMark {
+    pub stalls: Vec<StallMark>,
+    /// The stall you're walking to, if any.
+    pub walking: Option<String>,
+}
+
+/// One stall in the bazaar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StallMark {
+    pub id: String,
+    /// Its footprint, in order round it.
+    pub corners: [[f32; 2]; 4],
+    /// Where its name hangs: the middle of its sign, or over an empty
+    /// counter (X, Y, Z).
+    pub sign: [f32; 3],
+    /// Its shop's colour, linear RGB.
+    pub colour: [f32; 3],
+    /// Its shop's name and keeper, if it's kept.
+    pub name: Option<String>,
+    pub keeper: Option<String>,
+    pub citizen: bool,
+    /// It's yours.
+    pub mine: bool,
+    /// You're in range to buy or stock there.
+    pub near: bool,
+    /// Its shop panel is open.
+    pub open: bool,
+    /// No roof stands between the camera and its sign, so its name may be
+    /// drawn there (#274).
+    pub seen: bool,
+}
+
+impl BazaarMark {
+    /// The stall whose footprint holds the ground point (x, z), if any.
+    pub fn stall_at(&self, x: f32, z: f32) -> Option<&StallMark> {
+        self.stalls.iter().find(|s| quad_covers(&s.corners, x, z, 0.0))
+    }
 }
 
 impl HallMark {
@@ -669,6 +716,72 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     // and open it there. Sent next frame.
     let visit = shared.visit_hall.clone();
     engine.register_fn("cap_visit_hall", move || visit.store(true, Ordering::Relaxed));
+    // `cap_bazaar() -> #{ stalls, walking } or ()`: the bazaar (E3.11), world
+    // metres. Each of `stalls` is #{ id, number, corners, x, y, z, r, g, b, name,
+    // keeper, citizen, mine, near, open, seen }: `corners` round its footprint,
+    // `x, y, z` where its name hangs, `r, g, b` its shop's colour, `name`
+    // and `keeper` () while it's to let, `near` when you're in its range,
+    // `open` when its shop panel is, `seen` when no roof hides its sign from
+    // the camera (#274). `walking` is the id of the stall
+    // you're walking to, or ().
+    let bazaar = shared.bazaar.clone();
+    engine.register_fn("cap_bazaar", move || -> rhai::Dynamic {
+        let Some(b) = bazaar.lock().ok().and_then(|b| b.clone()) else {
+            return rhai::Dynamic::UNIT;
+        };
+        let opt = |s: &Option<String>| s.clone().map_or(rhai::Dynamic::UNIT, rhai::Dynamic::from);
+        let stalls: rhai::Array = b
+            .stalls
+            .iter()
+            .map(|s| {
+                let mut m = rhai::Map::new();
+                let corners: rhai::Array = s
+                    .corners
+                    .iter()
+                    .map(|p| rhai::Dynamic::from_array(vec![(p[0] as f64).into(), (p[1] as f64).into()]))
+                    .collect();
+                m.insert("id".into(), s.id.clone().into());
+                m.insert("number".into(), crate::ui::shop::stall_number(&s.id).to_owned().into());
+                m.insert("corners".into(), corners.into());
+                m.insert("x".into(), (s.sign[0] as f64).into());
+                m.insert("y".into(), (s.sign[1] as f64).into());
+                m.insert("z".into(), (s.sign[2] as f64).into());
+                m.insert("r".into(), (s.colour[0] as f64).into());
+                m.insert("g".into(), (s.colour[1] as f64).into());
+                m.insert("b".into(), (s.colour[2] as f64).into());
+                m.insert("name".into(), opt(&s.name));
+                m.insert("keeper".into(), opt(&s.keeper));
+                m.insert("citizen".into(), s.citizen.into());
+                m.insert("mine".into(), s.mine.into());
+                m.insert("near".into(), s.near.into());
+                m.insert("open".into(), s.open.into());
+                m.insert("seen".into(), s.seen.into());
+                rhai::Dynamic::from_map(m)
+            })
+            .collect();
+        let mut m = rhai::Map::new();
+        m.insert("stalls".into(), stalls.into());
+        m.insert("walking".into(), opt(&b.walking));
+        m.into()
+    });
+    // `cap_stall_at(x, z) -> id or ()`: the stall whose footprint holds the
+    // ground point (x, z), world metres.
+    let bazaar = shared.bazaar.clone();
+    engine.register_fn("cap_stall_at", move |x: f64, z: f64| -> rhai::Dynamic {
+        bazaar
+            .lock()
+            .ok()
+            .and_then(|b| b.as_ref().and_then(|b| b.stall_at(x as f32, z as f32)).map(|s| s.id.clone()))
+            .map_or(rhai::Dynamic::UNIT, rhai::Dynamic::from)
+    });
+    // `cap_visit_stall(id)`: open the stall's shop there, or walk to it
+    // (in at the gate, up the lane) and open it on arrival. Sent next frame.
+    let visit = shared.visit_stall.clone();
+    engine.register_fn("cap_visit_stall", move |id: rhai::ImmutableString| {
+        if let Ok(mut v) = visit.lock() {
+            *v = Some(id.to_string());
+        }
+    });
     // `cap_node_at(x, z) -> #{ ... } or ()`: the node nearest the ground
     // point (x, z), within NODE_PICK metres, as in `cap_nodes`.
     let nodes = shared.nodes.clone();

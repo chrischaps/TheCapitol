@@ -9,6 +9,7 @@
 //   2. shift-click a player: trade, or walk closer  (P7.3)
 //   3. a station: open it, or walk closer           (P6.3)
 //      the Gazette's notice board: read it         (E3.9, here)
+//      a bazaar stall: its shop, or walk there      (E3.11, here)
 //      the Exchange hall: the market, or walk there (E3.7, here)
 //   4. alt-click a plot: select it                  (P6.4, here)
 //   5. an available resource node: extract          (P4.4, here)
@@ -70,6 +71,18 @@
 // and a prompt hangs over it: what a click will do, unless the market is
 // open already. While goods wait in your market box, gold motes rise from
 // its lantern, a slow fountain you can find from across the city.
+//
+// The bazaar (E3.11), across the avenue from the hall. A click on a stall
+// (cap_stall_at, tried down from its eaves, so the roof and the awning take
+// the click; the lane between the rows stays ground to walk on) opens its
+// shop there, or walks you in at the gate and up the lane and opens it as
+// you reach the counter (cap_visit_stall; capitol_core::bazaar). Each kept
+// stall's name is written on the sign hanging from its awning, while the
+// camera is near enough to read it and no roof stands in front of it
+// (`seen`: script text isn't depth-tested, #274). Hovering a stall, or standing in its
+// range, traces its footprint in the lanterns' amber, and the one you're
+// walking to breathes; the one under the cursor says whose it is and what
+// a click does.
 //
 // The Gazette's notice board (E3.9) stands in the hall's forecourt, on the
 // side nearer the tower. A click on it (cap_board_at, tried up its posts)
@@ -200,6 +213,7 @@ fn on_update() {
     if trade_with(click) { return; }
     if open_station(click) { return; }
     if read_gazette() { return; }
+    if visit_stall() { return; }
     if visit_hall() { return; }
     if select_plot(click) { return; }
     if extract(click) { return; }
@@ -230,6 +244,30 @@ fn visit_hall() {                   // E3.7
     if !hall_under_cursor() { return false; }
     cap_visit_hall();
     true
+}
+
+// A stall in the bazaar under the cursor: its shop, there or after a walk.
+fn visit_stall() {                  // E3.11
+    let id = stall_under_cursor();
+    if id == () { return false; }
+    cap_visit_stall(id);
+    true
+}
+
+// The stall the cursor's ray meets first: its point at each height from
+// the eaves down, on a stall's footprint. The camera is above, so the
+// highest hit is the nearest. The lane between the rows is no stall's.
+fn stall_under_cursor() {
+    if cap_bazaar() == () { return (); }
+    let y = cap_ground_y();
+    for k in 0..10 {
+        let p = screen_to_ground(mouse_x(), mouse_y(), y + 2.7 - 0.3 * k.to_float());
+        if p != () {
+            let id = cap_stall_at(p[0], p[1]);
+            if id != () { return id; }
+        }
+    }
+    ()
 }
 
 // The Gazette's notice board under the cursor: open the paper.
@@ -448,8 +486,13 @@ fn on_draw_ui() {
         draw_hall(hall, over_hall, now);
         draw_board(hall, over_board, now);
     }
+    let bazaar = cap_bazaar();
+    let over_stall = if bazaar != () && placing == () && over == () && !over_board && !over_hall {
+        stall_under_cursor()
+    } else { () };
+    if bazaar != () { draw_bazaar(bazaar, over_stall, now); }
 
-    if hover != () && placing == () && over == () && !over_hall && !over_board {
+    if hover != () && placing == () && over == () && !over_hall && !over_board && over_stall == () {
         let n = cap_node_at(hover[0], hover[1]);
         if n != () && n.state == "available" && !n.targeted { draw_reticle_on(n, now); }
         else { draw_reticle(hover, now); }
@@ -905,6 +948,75 @@ fn draw_hall_prompt(h, over) {
     draw_text_opts(at.x - lm.width / 2.0, ly, line, 13.0, #{
         font: "strong", color: [ink[0], ink[1], ink[2], if over || h.near { 0.9 } else { 0.7 }],
     });
+}
+
+// ── The bazaar (E3.11) ───────────────────────────────────────────────────
+
+// The lanterns' amber, #e8a24a.
+fn amber() { [0.910, 0.635, 0.290] }
+
+// Every kept stall's name on its sign, near enough to read; and for the
+// stall under the cursor, the one you stand at and the one you walk to,
+// its footprint traced and a prompt over it.
+fn draw_bazaar(b, over, now) {
+    for s in b.stalls {
+        if s.name != () && s.seen { draw_sign(s); }
+    }
+    for s in b.stalls {
+        let hovered = over != () && over == s.id;
+        let walking = b.walking != () && b.walking == s.id;
+        if hovered || s.near || walking { draw_stall(s, hovered, walking, now); }
+    }
+}
+
+// The shop's name on its sign: sized to the board on the screen, and not
+// drawn once it would be too small to read.
+fn draw_sign(s) {
+    let at = world_to_screen(s.x, s.y, s.z);
+    if !at.visible { return; }
+    let edge = world_to_screen(s.x, s.y + 0.3, s.z);
+    if !edge.visible { return; }
+    // How many points the board's 0.3 m height spans
+    let px = (edge.y - at.y).abs();
+    if px < 9.0 { return; }
+    let size = (px * 0.5).min(15.0).max(9.0);
+    let m = measure_text_ex(s.name, size, "display", 0.0);
+    let x = at.x - m.width / 2.0;
+    let y = at.y - m.height / 2.0;
+    draw_text_opts(x + 1.0, y + 1.0, s.name, size, #{ font: "display", color: [0.0, 0.0, 0.0, 0.7] });
+    draw_text_opts(x, y, s.name, size, #{ font: "display", color: [0.98, 0.93, 0.80, 0.97] });
+}
+
+// A stall's footprint traced in amber, and over it its name (or "Stall n,
+// to let") and what a click does.
+fn draw_stall(s, over, walking, now) {
+    let c = amber();
+    let a = if over { 0.85 } else if walking { 0.35 + 0.3 * (now * 3.0).sin().abs() } else { 0.42 + 0.12 * (now * 2.0).sin() };
+    let y = cap_mark_y();
+    for i in 0..4 {
+        let p = s.corners[i];
+        let q = s.corners[(i + 1) % 4];
+        ground_line(p[0], p[1], q[0], q[1], y, c, a, 2.0);
+    }
+    // Only the stall under the cursor speaks: from the lane's crown four
+    // are in range, and four prompts would bury each other.
+    if s.open || !over { return; }
+    let at = world_to_screen(s.x, s.y + 1.4, s.z);
+    if !at.visible { return; }
+    let title = if s.name != () { s.name } else { "Stall " + s.number + ", to let" };
+    let line = if s.mine { "Your shop · click to tend it" }
+               else if s.name == () { if s.near { "20 Strands a day · click to rent" } else { "20 Strands a day · click to walk there" } }
+               else if s.near { "Kept by " + s.keeper + " · click to browse" }
+               else { "Kept by " + s.keeper + " · click to walk there" };
+    let size = 17.0;
+    let m = measure_text_ex(title, size, "display", 0.0);
+    let top = (at.y - 44.0).max(64.0);
+    draw_text_opts(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{ font: "display", color: [0.0, 0.0, 0.0, 0.6] });
+    draw_text_opts(at.x - m.width / 2.0, top, title, size, #{ font: "display", color: [1.0, 0.92, 0.78, 0.97] });
+    let lm = measure_text_ex(line, 13.0, "strong", 0.0);
+    let ly = top + m.height + 5.0;
+    draw_text_opts(at.x - lm.width / 2.0 + 1.0, ly + 1.0, line, 13.0, #{ font: "strong", color: [0.0, 0.0, 0.0, 0.55] });
+    draw_text_opts(at.x - lm.width / 2.0, ly, line, 13.0, #{ font: "strong", color: [0.95, 0.83, 0.62, 0.92] });
 }
 
 // ── The Gazette's notice board (E3.9) ────────────────────────────────────
