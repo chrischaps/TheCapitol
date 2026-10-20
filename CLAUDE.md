@@ -14,10 +14,15 @@ The Capitol is an MMO economic simulation where the economy is the primary gamep
 - `the-capitol-suburb-v2.md` - Plan for the post-war neighbourhood suburb generator (issues labelled `suburb-v2`, #103 to #113)
 - `the-capitol-economy.md` - Economy v1: quality and tools, content depth, markets (M6), automation (M8), plus CI and auth (issues labelled `economy`, #144 to #179)
 - `the-capitol-wilds.md` - The wilds: the Wilderness grown to r3800 to r6000 (the world to 12000), with a height field, rivers, streams and lakes, and nothing claimable (issues labelled `wilds`, #193 to #204)
+- `the-capitol-citizens.md` - Citizens: AI players who live in the world, run by `capitol-town`, earning everything, marked honestly, with a pluggable decision cascade from rules up to models (issues labelled `citizens`, #246 to #261, plus #211)
 
-## Current Focus: Economy v1
+## Current Focus: Citizens
 
-P0 to P8 of the Flint client are built. Active work is **Economy v1**: making the economy the game. The plan is `the-capitol-economy.md`. The work queue is the GitHub issues labelled `economy` (#144 to #179): one issue per work package, created in dependency order. The phase labels run `ec:E0-foundations` to `ec:E4-automation`. Client work also carries `flint-client`. New gameplay UI goes in the Flint client only; the React and Love2D clients are frozen and only need to keep compiling. A few issues said they needed Chris's decision first (E0.8, E1.2, E2.1, E3.4); all four are decided.
+Economy v1 is built, and so are the wilds and the Flint client. Active work is **Citizens**: AI players who live in the world, so the economy is stress-tested and the city feels inhabited with one human on. The plan is `the-capitol-citizens.md`. The work queue is the GitHub issues labelled `citizens` (#246 to #261, plus #211 as C0.5), created in dependency order. The phase labels run `cz:C0-groundwork` to `cz:C3-cascade`. Citizens run in their own process (`capitol-town`, on capitol-core's `Bot`), get no grants, and carry a visible mark; their decisions all go through one `Decider` cascade (plan D4). C3.2 (a Claude layer) needs Chris's decision on spend.
+
+### Economy v1 (done)
+
+P0 to P8 of the Flint client are built. **Economy v1** made the economy the game. The plan is `the-capitol-economy.md`. The work queue is the GitHub issues labelled `economy` (#144 to #179): one issue per work package, created in dependency order. The phase labels run `ec:E0-foundations` to `ec:E4-automation`. Client work also carries `flint-client`. New gameplay UI goes in the Flint client only; the React and Love2D clients are frozen and only need to keep compiling. A few issues said they needed Chris's decision first (E0.8, E1.2, E2.1, E3.4); all four are decided.
 
 ### The Flint client
 
@@ -37,7 +42,7 @@ Rules that hold across issues:
 - Assume another agent may be working at the same time, on this machine or another. Claim the issue first, use your own worktree, stage by path, and never touch changes you didn't make. See the next section.
 - **Cut a ticket for every limitation you hit.** This covers anything you work round instead of fix: an engine gap, a missing hook, a tool that can't do something, a backend quirk. Open a GitHub issue for it in the same session. Say what's missing, what the workaround costs, and what removing the workaround involves. Then link the issue from the workaround's code comment and the plan. A limitation recorded only in a closing comment or a vault note gets lost.
 - **Label every issue you open** with:
-  - at least one area: `economy`, `flint-client`, `wilds`, `suburb-v2` or `infra` (CI, scripts, tooling);
+  - at least one area: `citizens`, `economy`, `flint-client`, `wilds`, `suburb-v2` or `infra` (CI, scripts, tooling);
   - its kind: a phase label for a planned work package, `bug` for something broken or a limitation, or `enhancement`;
   - `engine-upstream` or `fc:backend-prereq` where they apply;
   - `needs-decision` when only Chris can settle it.
