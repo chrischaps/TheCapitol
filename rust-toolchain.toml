@@ -3,7 +3,7 @@
 # and the engine subtree too, and installs the version on first use.
 #
 # Bump it on purpose, in a commit of its own: change the version here, run
-# scripts/ci.sh (with flint) and fix whatever the new clippy flags in the same
+# scripts/ci.sh full flint and fix whatever the new clippy flags in the same
 # commit. CI installs from this file, so everyone moves at once and nobody
 # needs `rustup update`.
 [toolchain]

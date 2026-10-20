@@ -1,15 +1,18 @@
 # CI for the backend, the shared protocol and the Flint client (E0.1, #144).
 # Two jobs, one per Cargo workspace: the root (backend + protocol) and
 # flint-client/ (its own workspace; the engine is a subtree under it).
+#
+# Nightly and on demand, not on push (#270). Landing runs only the smoke test
+# (`scripts/ci.sh`), so this is where the suites run. Run it on a branch with
+#   gh workflow run ci.yml --ref issue-<n>
+# A nightly that fails opens an issue labelled bug and infra, or comments on
+# the one already open, so the next agent picks it up first.
 name: CI
 
 on:
-  # Every branch, so an agent's `issue-<n>` gets a run before it lands.
-  # Claim branches hold no files, so they'd never run anyway.
-  push:
-    branches-ignore: ["claim/**"]
-  pull_request:
-    branches: [master]
+  schedule:
+    # 09:00 UTC: the small hours in America, after the day's landings.
+    - cron: "0 9 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -56,7 +59,7 @@ jobs:
       - name: Rust
         run: rustup toolchain install && rustc --version
       - uses: Swatinem/rust-cache@v2
-      # The steps live in scripts/ci.sh, which agents run before they land.
+      # The steps live in scripts/ci.sh, which agents run as `ci.sh full`.
       - name: Clippy
         run: scripts/ci.sh clippy
       - name: Tests
@@ -89,3 +92,29 @@ jobs:
       - name: Flint client
         working-directory: .
         run: scripts/ci.sh flint
+
+  # A red nightly becomes an issue, so it's seen: nobody watches the runs.
+  report:
+    name: Report a failed nightly
+    needs: [backend, flint-client]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      TITLE: "Nightly CI failed"
+    steps:
+      - name: Open or update the issue
+        run: |
+          body="The nightly CI run failed on master at ${GITHUB_SHA::7}: $RUN_URL
+
+          Reproduce with \`scripts/ci.sh full\` (and \`scripts/ci.sh flint\` if the Flint job failed). Fix it like any issue, with \`Closes #<n>\`."
+          n=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --body "$body"
+          else
+            gh issue create --title "$TITLE" --label bug --label infra --body "$body"
+          fi

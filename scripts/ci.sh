@@ -1,18 +1,30 @@
 #!/usr/bin/env bash
-# The CI steps, by name, so an agent runs before `land` exactly what
-# .github/workflows/ci.yml runs after it (#219). The workflow calls this
-# script, so the two can't drift. Before it, every issue verified with
-# `cargo test` alone and clippy failed on master for 31 pushes (#216).
+# The CI steps, by name (#219). The workflow calls this script, so the two
+# can't drift. Before it, every issue verified with `cargo test` alone and
+# clippy failed on master for 31 pushes (#216).
 #
-#   scripts/ci.sh                 clippy, test and db, plus flint when the
-#                                 branch touches flint-client/ or protocol/
+#   scripts/ci.sh                 smoke: land's verify (#270)
+#   scripts/ci.sh full            what CI runs: clippy, test and db, plus
+#                                 flint when the branch touches flint-client/
+#                                 or protocol/
 #   scripts/ci.sh <step>...       just these steps, in this order
 #
 # Steps:
+#   smoke    clippy, protocol, and flint-check when the branch touches
+#            flint-client/ or protocol/. A minute or two once target/ is warm
 #   clippy   clippy over the backend and protocol, all targets, -D warnings
+#   protocol the protocol's tests: the wire fixtures round-trip
 #   test     cargo test, backend and protocol
 #   db       the #[ignore]d database tests; needs Postgres (docker-compose up -d)
+#   flint-check  in flint-client/: cargo check of capitol-core and capitol-client
 #   flint    in flint-client/: capitol-core's and capitol-client's tests
+#
+# Landing runs smoke, not the suites (#270). The suites took most of a land:
+# the backend's unit tests alone run over three minutes, the database tests
+# queue machine-wide for one Postgres, and land verifies again after every
+# catch-up. The full CI runs nightly and on demand instead, and a red nightly
+# opens an issue. Run `full` yourself before landing a change that's risky:
+# a migration, terrain or generation, a wide refactor.
 #
 # The db step needs DATABASE_URL. A TheCapitol-<n> worktree has no
 # backend/.env, so when it's unset this borrows DATABASE_URL and REDIS_URL
@@ -27,13 +39,13 @@
 # the server's host and port, so every checkout on the machine shares it; a
 # lock whose holder has died is taken over.
 #
-# Use it as land's verify: scripts/issue.sh land <n> --verify "scripts/ci.sh"
+# Land's verify: scripts/issue.sh land <n> --verify "scripts/ci.sh"
 
 set -euo pipefail
 
 die() { echo "ci.sh: $*" >&2; exit 1; }
 
-usage() { sed -n '7,16p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '6,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
@@ -86,8 +98,19 @@ db_lock() {
 step() {
     echo "== ci.sh: $1" >&2
     case $1 in
+        smoke)
+            step clippy
+            step protocol
+            if touches_flint; then step flint-check; fi ;;
+        full)
+            step clippy
+            step test
+            step db
+            if touches_flint; then step flint; fi ;;
         clippy)
             cargo clippy --all-targets -p capitol-protocol -p capitol-backend -- -D warnings ;;
+        protocol)
+            cargo test -p capitol-protocol ;;
         test)
             cargo test -p capitol-protocol -p capitol-backend ;;
         db)
@@ -104,6 +127,9 @@ step() {
             db_lock "$DATABASE_URL"
             cargo test -p capitol-backend -- --ignored "${skips[@]}"
             rm -rf "$DB_LOCK"; DB_LOCK=; trap - EXIT ;;
+        flint-check)
+            # Per crate, never --workspace: the engine's flint-android needs ndk-sys.
+            (cd flint-client && cargo check -p capitol-core -p capitol-client --all-targets) ;;
         flint)
             # Per crate, never --workspace: the engine's flint-android needs
             # ndk-sys. capitol-core's live.rs tests need a server and stay
@@ -130,9 +156,6 @@ if [ -n "${RUSTUP_TOOLCHAIN:-}" ]; then
 fi
 echo "== ci.sh: $(rustc --version)" >&2
 
-if [ $# -eq 0 ]; then
-    set -- clippy test db
-    if touches_flint; then set -- "$@" flint; fi
-fi
+[ $# -gt 0 ] || set -- smoke
 for s in "$@"; do step "$s"; done
 echo "== ci.sh: passed ($*)" >&2

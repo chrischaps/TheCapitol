@@ -93,7 +93,9 @@ Engine changes are made in `flint-client/engine/` and go upstream to Flint (`htt
 ## 4. Verify
 
 - Run the commands under the issue's **Verify** heading.
-- Run `scripts/ci.sh`: what CI runs after you land (clippy with `-D warnings`, the tests, the database tests, and the Flint client when you touched `flint-client/` or `protocol/`). An issue's Verify is usually narrower. `cargo test` passing doesn't mean clippy does: master was red for 31 pushes on dead code that only tests used (#216).
+- Run the tests for what you changed, by module (`cargo test -p capitol-backend <module>::`), not the whole suite.
+- `scripts/ci.sh` is the smoke test `land` runs: clippy with `-D warnings` over all targets, the protocol's fixture tests, and a check of the Flint client when you touched `flint-client/` or `protocol/`. It runs in a minute or two once `target/` is warm. `cargo test` passing doesn't mean clippy does: master was red for 31 pushes on dead code that only tests used (#216).
+- The full suites (the backend tests, the database tests, the Flint client's tests) run in CI nightly, not when you land (#270). A red nightly opens a `bug` issue, which this skill picks first. Run `scripts/ci.sh full` (or `gh workflow run ci.yml --ref issue-<n>` after pushing the branch) before landing something risky: a migration, terrain or generation, a change to a shared type, a wide refactor.
 - Tick off every **Acceptance** item, and be honest about any you couldn't do.
 - Visual work: capture screenshots into `flint-client/renders/` (gitignored) and look at them yourself before calling it done. `flint render` can't show the runtime world, so use the client's `--offline fixtures/terrain.json` capture mode.
 - Mark anything only a human can judge with **[H]**, saying what "pass" looks like.
@@ -123,10 +125,10 @@ Closes #<n>
 Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
 )"
-scripts/issue.sh land <n> --verify "scripts/ci.sh && <the issue's Verify commands>"
+scripts/issue.sh land <n> --verify "scripts/ci.sh"
 ```
 
-`land` catches up with `origin/master`, runs `--verify` (before the first push, and again whenever catching up changed HEAD), and pushes `HEAD:master` fast-forward only. It rebases to catch up, unless the branch holds a merge or a `git subtree` squash; then it merges master in instead, so a subtree pull keeps the merge the next `subtree pull`/`push` needs. If another agent lands first, it loops. Once the push succeeds, it releases the claim and deletes `origin/issue-<n>`. Exit 3 is a conflict: resolve it, `git rebase --continue` (or `git commit`, if it was a merge), then run `land` again; it verifies the result. Never force-push master, and never push it any other way.
+`land` catches up with `origin/master`, runs `--verify` (before the first push, and again whenever catching up changed HEAD), and pushes `HEAD:master` fast-forward only. Keep `--verify` to the smoke test: it runs again on every catch-up, so a slow verify is paid several times. The issue's Verify commands belong in step 4, run once. It rebases to catch up, unless the branch holds a merge or a `git subtree` squash; then it merges master in instead, so a subtree pull keeps the merge the next `subtree pull`/`push` needs. If another agent lands first, it loops. Once the push succeeds, it releases the claim and deletes `origin/issue-<n>`. Exit 3 is a conflict: resolve it, `git rebase --continue` (or `git commit`, if it was a merge), then run `land` again; it verifies the result. Never force-push master, and never push it any other way.
 
 The push closes the issue, because of `Closes #<n>`. Post the summary for whoever picks up the next one as a comment. Don't use `gh issue close <n> --comment`: on an issue that's already closed it fails, and the comment is never posted.
 
