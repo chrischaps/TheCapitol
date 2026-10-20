@@ -20,6 +20,11 @@
 //!   matcher to close them. A buy whose market box was full is stalled for
 //!   [`STALL_SECS`], then tried again.
 //!
+//! - **Batches.** [`Book::propose`] applies fills before they're written, so
+//!   several can be written side by side, and [`Book::rewind`] takes back
+//!   those after one that fails (#237). Orders placed and cancelled meanwhile
+//!   wait for [`Book::settle`].
+//!
 //! A fill's eligibility doesn't depend on how much is wanted, and taking units
 //! never makes a lot meet a grade it didn't (`fill_units`). So once the queue
 //! is empty no two resting orders can fill, and only new ones are matched.
@@ -126,6 +131,21 @@ pub struct Fill {
     pub units: Units,
 }
 
+/// What one change to the book overwrote, so [`Book::rewind`] can put it back.
+#[derive(Debug)]
+enum Was {
+    /// The queue's front, popped
+    Front(Uuid),
+    /// The queue's back was pushed
+    Back,
+    Queued(Uuid, bool),
+    Woken(Uuid, bool),
+    Stalled(Uuid, Option<DateTime<Utc>>),
+    Arrived(Uuid, Option<u64>),
+    /// The order as it stood, or `None` if it wasn't on the book
+    Order(Uuid, Option<BookOrder>),
+}
+
 /// Every open order, by item type.
 #[derive(Debug, Default)]
 pub struct Book {
@@ -145,6 +165,18 @@ pub struct Book {
     woken: HashSet<Uuid>,
     /// Item types whose depth may have changed since [`Book::take_dirty`]
     dirty: HashSet<String>,
+    /// While the matcher speculates (#237), what each change overwrote
+    journal: Option<Vec<Was>>,
+    /// Orders placed and cancelled while it speculates, for [`Book::settle`]:
+    /// a rewind mustn't undo them, nor theirs a rewind
+    later: Vec<Later>,
+}
+
+/// A change from outside the matcher, held while it speculates.
+#[derive(Debug)]
+enum Later {
+    Insert(BookOrder),
+    Remove(Uuid),
 }
 
 impl Book {
@@ -172,8 +204,13 @@ impl Book {
     }
 
     /// Put `order` on the book and queue it to match. One already there is
-    /// replaced, keeping its place in the queue.
+    /// replaced, keeping its place in the queue. While speculating it's done
+    /// at [`Book::settle`].
     pub fn insert(&mut self, order: BookOrder) {
+        if self.journal.is_some() {
+            self.later.push(Later::Insert(order));
+            return;
+        }
         if let Some(old) = self.orders.remove(&order.id) {
             if let Some(sides) = self.sides.get_mut(&old.item_type) {
                 sides.bids.remove(&old.key());
@@ -198,7 +235,18 @@ impl Book {
     }
 
     /// Take order `id` off the book (cancelled, expired, or found closed).
+    /// While speculating it's done at [`Book::settle`], and this returns the
+    /// order as it stands.
     pub fn remove(&mut self, id: Uuid) -> Option<BookOrder> {
+        if self.journal.is_some() {
+            self.later.push(Later::Remove(id));
+            return self.orders.get(&id).cloned();
+        }
+        self.take(id)
+    }
+
+    fn take(&mut self, id: Uuid) -> Option<BookOrder> {
+        self.note(|b| Was::Order(id, b.orders.get(&id).cloned()));
         let order = self.orders.remove(&id)?;
         if let Some(sides) = self.sides.get_mut(&order.item_type) {
             match order.side {
@@ -207,11 +255,12 @@ impl Book {
             };
         }
         self.dirty.insert(order.item_type.clone());
-        self.stalled.remove(&id);
+        self.set_stalled(id, None);
+        self.note(|b| Was::Arrived(id, b.arrived.get(&id).copied()));
         self.arrived.remove(&id);
-        self.woken.remove(&id);
+        self.set_woken(id, false);
         // Its queue entry is skipped when it comes up
-        self.queued.remove(&id);
+        self.set_queued(id, false);
         Some(order)
     }
 
@@ -219,7 +268,125 @@ impl Book {
     /// is full stays on the book, but doesn't trade until then.
     pub fn stall(&mut self, id: Uuid, now: DateTime<Utc>) {
         if self.orders.contains_key(&id) {
-            self.stalled.insert(id, now + Duration::seconds(STALL_SECS));
+            self.set_stalled(id, Some(now + Duration::seconds(STALL_SECS)));
+        }
+    }
+
+    /// Start remembering every change, so the book can be put back as it was
+    /// at any [`Book::mark`] since (#237). The matcher applies a batch of fills
+    /// before they're written, and rewinds past one that fails.
+    pub fn speculate(&mut self) {
+        self.journal = Some(Vec::new());
+    }
+
+    /// Where the book stands now, to [`Book::rewind`] to.
+    pub fn mark(&self) -> usize {
+        self.journal.as_ref().map_or(0, Vec::len)
+    }
+
+    /// Put the book back as it was at `mark`, undoing every change since.
+    /// Depth may be marked changed when it isn't, which costs an empty diff.
+    pub fn rewind(&mut self, mark: usize) {
+        let Some(mut journal) = self.journal.take() else { return };
+        while journal.len() > mark {
+            let Some(was) = journal.pop() else { break };
+            match was {
+                Was::Front(id) => self.queue.push_front(id),
+                Was::Back => {
+                    self.queue.pop_back();
+                }
+                Was::Queued(id, on) => toggle(&mut self.queued, id, on),
+                Was::Woken(id, on) => toggle(&mut self.woken, id, on),
+                Was::Stalled(id, until) => {
+                    match until {
+                        Some(until) => self.stalled.insert(id, until),
+                        None => self.stalled.remove(&id),
+                    };
+                }
+                Was::Arrived(id, at) => {
+                    match at {
+                        Some(at) => self.arrived.insert(id, at),
+                        None => self.arrived.remove(&id),
+                    };
+                }
+                Was::Order(id, order) => {
+                    if let Some(now) = self.orders.remove(&id) {
+                        if let Some(sides) = self.sides.get_mut(&now.item_type) {
+                            sides.bids.remove(&now.key());
+                            sides.asks.remove(&now.key());
+                        }
+                        self.dirty.insert(now.item_type);
+                    }
+                    if let Some(order) = order {
+                        self.dirty.insert(order.item_type.clone());
+                        let sides = self.sides.entry(order.item_type.clone()).or_default();
+                        match order.side {
+                            OrderSide::Buy => sides.bids.insert(order.key()),
+                            OrderSide::Sell => sides.asks.insert(order.key()),
+                        };
+                        self.orders.insert(id, order);
+                    }
+                }
+            }
+        }
+        self.journal = Some(journal);
+    }
+
+    /// Stop remembering: what's been applied stays, and the orders placed and
+    /// cancelled meanwhile go on and off the book.
+    pub fn settle(&mut self) {
+        self.journal = None;
+        for later in std::mem::take(&mut self.later) {
+            match later {
+                Later::Insert(order) => self.insert(order),
+                Later::Remove(id) => {
+                    self.take(id);
+                }
+            }
+        }
+    }
+
+    /// Remember what a change is about to overwrite, if speculating.
+    fn note(&mut self, was: impl FnOnce(&Self) -> Was) {
+        if self.journal.is_some() {
+            let was = was(self);
+            if let Some(journal) = &mut self.journal {
+                journal.push(was);
+            }
+        }
+    }
+
+    /// Put `id` in the queued set or take it out; whether that changed it.
+    fn set_queued(&mut self, id: Uuid, on: bool) -> bool {
+        self.note(|b| Was::Queued(id, b.queued.contains(&id)));
+        if on {
+            self.queued.insert(id)
+        } else {
+            self.queued.remove(&id)
+        }
+    }
+
+    fn set_woken(&mut self, id: Uuid, on: bool) {
+        self.note(|b| Was::Woken(id, b.woken.contains(&id)));
+        toggle(&mut self.woken, id, on);
+    }
+
+    fn set_stalled(&mut self, id: Uuid, until: Option<DateTime<Utc>>) {
+        self.note(|b| Was::Stalled(id, b.stalled.get(&id).copied()));
+        match until {
+            Some(until) => self.stalled.insert(id, until),
+            None => self.stalled.remove(&id),
+        };
+    }
+
+    fn push_queue(&mut self, id: Uuid) {
+        self.note(|_| Was::Back);
+        self.queue.push_back(id);
+    }
+
+    fn pop_queue(&mut self) {
+        if let Some(id) = self.queue.pop_front() {
+            self.note(|_| Was::Front(id));
         }
     }
 
@@ -232,20 +399,17 @@ impl Book {
 
     /// The stalled orders whose time is up: queue them to match again.
     fn wake(&mut self, now: DateTime<Utc>) {
-        let woken: Vec<Uuid> = self.stalled.iter().filter(|(_, until)| **until <= now).map(|(id, _)| *id).collect();
-        let mut woken: Vec<&BookOrder> = woken
-            .iter()
-            .filter_map(|id| {
-                self.stalled.remove(id);
-                self.orders.get(id)
-            })
-            .collect();
+        let due: Vec<Uuid> = self.stalled.iter().filter(|(_, until)| **until <= now).map(|(id, _)| *id).collect();
+        for &id in &due {
+            self.set_stalled(id, None);
+        }
+        let mut woken: Vec<&BookOrder> = due.iter().filter_map(|id| self.orders.get(id)).collect();
         woken.sort_by_key(|o| o.time());
         let ids: Vec<Uuid> = woken.into_iter().map(|o| o.id).collect();
         for id in ids {
-            self.woken.insert(id);
-            if self.queued.insert(id) {
-                self.queue.push_back(id);
+            self.set_woken(id, true);
+            if self.set_queued(id, true) {
+                self.push_queue(id);
             }
         }
     }
@@ -262,11 +426,42 @@ impl Book {
                     return Some(fill);
                 }
             }
-            self.queue.pop_front();
-            self.queued.remove(&id);
-            self.woken.remove(&id);
+            self.pop_queue();
+            self.set_queued(id, false);
+            self.set_woken(id, false);
         }
         None
+    }
+
+    /// Speculate (see [`Book::speculate`]) and take the next fills, up to
+    /// `width`, that can be written side by side (#237): those
+    /// [`Book::next_fill`] makes one after another, each applied, for as long
+    /// as no player is in two of them. A player's box and balance are theirs
+    /// alone, so fills that share none share no row, and none waits on
+    /// another's lock. Each comes with the mark to rewind to if it isn't
+    /// written: the book as it stood just before it was applied. So a batch is
+    /// exactly what fills one at a time would be, up to the first that fails.
+    ///
+    /// Call [`Book::settle`] once the batch is written, or rewound, before
+    /// asking again. An empty batch leaves the book speculating too.
+    pub fn propose(&mut self, now: DateTime<Utc>, width: usize) -> Vec<(Fill, usize)> {
+        self.speculate();
+        let mut busy = HashSet::new();
+        let mut batch = Vec::new();
+        while batch.len() < width {
+            let mark = self.mark();
+            let Some(fill) = self.next_fill(now) else { break };
+            if busy.contains(&fill.buyer) || busy.contains(&fill.seller) {
+                // Its turn comes in the next batch
+                self.rewind(mark);
+                break;
+            }
+            busy.extend([fill.buyer, fill.seller]);
+            let applied = self.mark();
+            self.apply(&fill);
+            batch.push((fill, applied));
+        }
+        batch
     }
 
     fn can_trade(&self, order: &BookOrder, now: DateTime<Utc>) -> bool {
@@ -326,13 +521,14 @@ impl Book {
     pub fn apply(&mut self, fill: &Fill) {
         self.dirty.insert(fill.item_type.clone());
         for id in [fill.buy, fill.sell] {
+            self.note(|b| Was::Order(id, b.orders.get(&id).cloned()));
             let Some(order) = self.orders.get_mut(&id) else { continue };
             order.remaining -= fill.quantity;
             if order.side == OrderSide::Sell {
                 order.units.take_units(&fill.units);
             }
             if order.remaining <= 0 {
-                self.remove(id);
+                self.take(id);
             }
         }
     }
@@ -409,6 +605,14 @@ impl Book {
             .collect();
         market::sort_levels(&mut out);
         out
+    }
+}
+
+fn toggle(set: &mut HashSet<Uuid>, id: Uuid, on: bool) {
+    if on {
+        set.insert(id);
+    } else {
+        set.remove(&id);
     }
 }
 
@@ -722,6 +926,142 @@ pub(crate) mod tests {
                 }
             }
         }
+    }
+
+    /// What a fill meets when it's written, the same whichever way it's run:
+    /// the buyer's box is full (they're stalled), or the sell was found
+    /// cancelled (it leaves the book), or it's written.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Fate {
+        Written,
+        BoxFull,
+        Cancelled,
+    }
+
+    fn fate(fill: &Fill, full: &HashSet<Uuid>, cancelled: &HashSet<Uuid>) -> Fate {
+        if full.contains(&fill.buyer) {
+            Fate::BoxFull
+        } else if cancelled.contains(&fill.sell) {
+            Fate::Cancelled
+        } else {
+            Fate::Written
+        }
+    }
+
+    fn meet(book: &mut Book, fill: &Fill, fate: Fate, now: DateTime<Utc>) {
+        match fate {
+            Fate::Written => book.apply(fill),
+            Fate::BoxFull => book.stall(fill.buy, now),
+            Fate::Cancelled => {
+                book.remove(fill.sell);
+            }
+        }
+    }
+
+    /// Everything on the book, best first, by item and side
+    fn snapshot(book: &Book) -> Vec<BookOrder> {
+        book.item_types()
+            .iter()
+            .flat_map(|item| [book.side(item, OrderSide::Buy), book.side(item, OrderSide::Sell)])
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    /// Fills proposed in batches, applied before they're written and rewound
+    /// past the first that fails, trade exactly as fills one at a time do
+    /// (#237): the same fills in the same order, and the same book after.
+    #[test]
+    fn batches_rewound_at_a_failure_trade_as_fills_one_at_a_time() {
+        for seed in 0..60 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut o = Orders::new();
+            let players = rng.gen_range(2..12u128);
+            let mut orders = Vec::new();
+            for _ in 0..rng.gen_range(10..60) {
+                let player = rng.gen_range(0..players);
+                let price = rng.gen_range(5..15);
+                orders.push(if rng.gen_bool(0.5) {
+                    o.sell(player, price, Units::from_pairs([(rng.gen_range(0..=100), rng.gen_range(1..6))]))
+                } else {
+                    let grade = ["A", "C", "F"][rng.gen_range(0..3)];
+                    o.buy(player, price, rng.gen_range(1..10), grade, GradeRule::Average)
+                });
+            }
+            let full: HashSet<Uuid> =
+                (0..players).filter(|_| rng.gen_bool(0.15)).map(Uuid::from_u128).collect();
+            let cancelled: HashSet<Uuid> = orders.iter().filter(|_| rng.gen_bool(0.1)).map(|o| o.id).collect();
+            let width = rng.gen_range(1..8);
+
+            let mut one = Book::load(orders.clone());
+            let mut singly = Vec::new();
+            while let Some(fill) = one.next_fill(now()) {
+                let fate = fate(&fill, &full, &cancelled);
+                meet(&mut one, &fill, fate, now());
+                singly.push((fill, fate));
+            }
+
+            let mut batched = Book::load(orders);
+            let mut together = Vec::new();
+            loop {
+                let batch = batched.propose(now(), width);
+                assert!(batch.len() <= width);
+                if batch.is_empty() {
+                    batched.settle();
+                    break;
+                }
+                let mut players = HashSet::new();
+                for (fill, _) in &batch {
+                    assert!(players.insert(fill.buyer) && players.insert(fill.seller), "seed {seed}: a player twice");
+                }
+                let failed = batch.iter().position(|(f, _)| fate(f, &full, &cancelled) != Fate::Written);
+                let written = failed.unwrap_or(batch.len());
+                together.extend(batch[..written].iter().map(|(f, _)| (f.clone(), Fate::Written)));
+                if let Some(k) = failed {
+                    batched.rewind(batch[k].1);
+                    batched.settle();
+                    let fill = &batch[k].0;
+                    let fate = fate(fill, &full, &cancelled);
+                    meet(&mut batched, fill, fate, now());
+                    together.push((fill.clone(), fate));
+                } else {
+                    batched.settle();
+                }
+            }
+            assert_eq!(together, singly, "seed {seed} width {width}");
+            assert_eq!(snapshot(&batched), snapshot(&one), "seed {seed} width {width}");
+        }
+    }
+
+    /// An order placed or cancelled while the matcher speculates waits for
+    /// the settle: a rewind doesn't undo it, and it doesn't upset a rewind.
+    #[test]
+    fn orders_placed_and_cancelled_while_speculating_survive_a_rewind() {
+        let mut o = Orders::new();
+        let mut book = Book::new();
+        let ask = o.sell(1, 10, Units::uniform(4, 50));
+        let gone = o.sell(2, 11, Units::uniform(4, 50));
+        book.insert(ask.clone());
+        book.insert(gone.clone());
+        book.insert(o.buy(3, 12, 2, "F", GradeRule::Average));
+
+        let batch = book.propose(now(), 4);
+        assert_eq!(batch.len(), 1);
+        let late = o.buy(4, 10, 2, "F", GradeRule::Average);
+        book.insert(late.clone());
+        book.remove(gone.id);
+        // Not yet
+        assert!(book.get(late.id).is_none() && book.get(gone.id).is_some());
+        // The fill wasn't written
+        book.rewind(batch[0].1);
+        book.settle();
+        assert_eq!(book.get(ask.id).map(|a| a.remaining), Some(4));
+        assert!(book.get(late.id).is_some() && book.get(gone.id).is_none());
+
+        // The first buy fills, then the late one
+        let fills = run(&mut book, now());
+        assert_eq!(fills.iter().map(|f| (f.sell, f.quantity)).collect::<Vec<_>>(), vec![(ask.id, 2), (ask.id, 2)]);
+        assert_eq!(fills[1].buy, late.id);
     }
 
     /// The benchmark: 10,000 resting orders that don't cross, then 1,000 new

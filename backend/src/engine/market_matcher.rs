@@ -3,12 +3,20 @@
 //! transaction a fill (TDD §5.2, write-through).
 //!
 //! The book is in memory behind a plain mutex that's never held across an
-//! await: take a fill, drop the lock, write it, and only once it's committed
-//! [`Book::apply`] it. A fill that fails changes nothing, in the DB or the book:
+//! await. The book proposes a batch of fills ([`Book::propose`], #237): the
+//! ones it would make one after another, each applied before it's written,
+//! for as long as no player is in two. The lock is dropped, and each fill is
+//! written in a transaction of its own on a connection of its own, side by
+//! side, up to its commit. Those before the first that failed are committed
+//! together, so Postgres flushes them as one; those after it are rolled back,
+//! and the book [`Book::rewind`]s to just before the failed one. So what's
+//! written is exactly what fills one at a time would have written. A fill
+//! that fails changes nothing, in the DB or the book:
 //! - an order no longer as the book had it (cancelled under it, say) is
 //!   reloaded from the DB, and matching goes on;
 //! - a buyer whose market box is full sits out for `STALL_SECS`;
-//! - a DB error ends the cycle, and the next one tries again.
+//! - a DB error ends the cycle, and the next one tries again. A commit that
+//!   fails reloads its orders, since the book had applied it.
 //!
 //! A fill moves:
 //! - the units the book named from the sell's escrow stack to the buyer's
@@ -24,12 +32,12 @@
 //! on them. A burst over what the DB takes makes a cycle run long rather than
 //! lose anything.
 //!
-//! A fill is some ten round trips on one connection the cycle holds (#208):
-//! lock the pair (with the escrow's units), the buyer's box, deliver (three),
-//! both orders and the trade in one statement, a statement per balance moved,
-//! and the commit. That's about 230 fills a second on the local stack, 4.3 ms
-//! each, and the commit's flush is nearly half of it, so fills one after
-//! another can't go much faster. Writing independent fills side by side is #237.
+//! A fill is some ten round trips on its connection (#208): lock the pair
+//! (with the escrow's units), the buyer's box, deliver (three), both orders
+//! and the trade in one statement, a statement per balance moved, and the
+//! commit. One after another that's about 230 fills a second on the local
+//! stack, and the commit's flush is nearly half of it; side by side, the
+//! flushes are shared (#237).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -39,7 +47,9 @@ use capitol_protocol::rules::market::{self, GradeRule, OrderSide, OrderStatus};
 use capitol_protocol::rules::quality_grade;
 use capitol_protocol::rules::stacking::Units;
 use chrono::{DateTime, Utc};
-use sqlx::{Connection, PgConnection, PgPool};
+use futures::future::join_all;
+use sqlx::pool::PoolConnection;
+use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -51,6 +61,15 @@ use super::units::{self, Marked, NewStack};
 
 /// How often matching runs: the tick's 10-tick cadence (TDD §3.2).
 pub const CYCLE_MS: u64 = 1000;
+
+/// The most fills written side by side (#237), each on a connection of its
+/// own: enough for their commits' flushes to share a few, and few enough to
+/// leave most of the pool (16) to the routes and the tick.
+pub const BATCH: usize = 6;
+
+/// How long the matcher waits for a connection past its first: a batch is
+/// only as wide as the connections it can have at once (#237).
+const SPARE_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The market: the book, shared by the matcher and the routes that place and
 /// cancel (E3.3), and each item's depth as last published.
@@ -187,10 +206,8 @@ impl Market {
 
     /// Put the DB's view of `order_id` on the book: as it is if it's open,
     /// gone if it isn't.
-    async fn reload(&self, db: &PgPool, order_id: Uuid) -> Result<(), sqlx::Error> {
-        let mut conn = db.acquire().await?;
-        let order = escrow::load(&mut conn, order_id).await?;
-        drop(conn);
+    async fn reload(&self, conn: &mut PgConnection, order_id: Uuid) -> Result<(), sqlx::Error> {
+        let order = escrow::load(conn, order_id).await?;
         let mut book = self.book();
         match order.as_ref().and_then(BookOrder::from_order) {
             Some(order) => book.insert(order),
@@ -303,7 +320,11 @@ async fn match_cycle(market: &Market, db: &PgPool, events: &broadcast::Sender<Ga
                 announce_closed(db, events, closed).await;
             }
             Ok(None) => {
-                if let Err(e) = market.reload(db, order_id).await {
+                let reloaded = match db.acquire().await {
+                    Ok(mut conn) => market.reload(&mut conn, order_id).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = reloaded {
                     tracing::warn!("Market: reloading order {order_id}: {e}");
                     return cycle;
                 }
@@ -317,41 +338,122 @@ async fn match_cycle(market: &Market, db: &PgPool, events: &broadcast::Sender<Ga
         }
     }
 
-    // One connection for the cycle's fills, each beginning on it, rather than
-    // each acquiring (and checking) one of its own (#208)
-    let mut held = None;
+    // The cycle's connections, one a fill in a batch, each fill beginning on
+    // its own rather than acquiring (and checking) one (#208)
+    let mut held: Vec<PoolConnection<Postgres>> = Vec::new();
+    // As wide as the pool lets it be without waiting
+    let mut width = BATCH;
     loop {
-        let Some(fill) = market.book().next_fill(now) else { break };
-        if held.is_none() {
-            match db.acquire().await {
-                Ok(conn) => held = Some(conn),
-                Err(e) => {
-                    tracing::warn!("Market: no connection to fill on: {e}");
+        let mut batch = market.book().propose(now, width);
+        if batch.is_empty() {
+            market.book().settle();
+            break;
+        }
+        while held.len() < batch.len() {
+            if held.is_empty() {
+                match db.acquire().await {
+                    Ok(conn) => held.push(conn),
+                    Err(e) => {
+                        tracing::warn!("Market: no connection to fill on: {e}");
+                        break;
+                    }
+                }
+                continue;
+            }
+            // Past the first, only a connection that's to hand: the routes
+            // and the tick need the pool more than a batch needs to be wide
+            match tokio::time::timeout(SPARE_WAIT, db.acquire()).await {
+                Ok(Ok(conn)) => held.push(conn),
+                _ => {
+                    width = held.len();
                     break;
                 }
             }
         }
-        let Some(conn) = held.as_deref_mut() else { break };
-        match execute_fill(conn, &fill).await {
-            Ok(done) => {
-                market.book().apply(&fill);
-                cycle.fills += 1;
-                announce_fill(events, &fill, done);
+        if held.len() < batch.len() {
+            // Fewer connections than fills: the rest wait their turn
+            let mut book = market.book();
+            if let Some((_, mark)) = batch.get(held.len()) {
+                book.rewind(*mark);
             }
-            Err(MarketError::MarketBoxFull) => {
+            batch.truncate(held.len());
+            if batch.is_empty() {
+                book.settle();
+                break;
+            }
+        }
+
+        // Each fill up to its commit, side by side: they share no player, so
+        // no row, and none waits on another
+        let prepared = join_all(held.iter_mut().zip(&batch).map(|(conn, (fill, _))| prepare_fill(conn, fill))).await;
+        // Those before the first that failed are what fills one at a time
+        // would have written; those after it were matched as if it hadn't
+        // failed, so they go back
+        let mut ready = Vec::new();
+        let mut failed = None;
+        let mut undone = Vec::new();
+        for (i, result) in prepared.into_iter().enumerate() {
+            match result {
+                Ok(prepared) if failed.is_none() => ready.push(prepared),
+                Ok((tx, _)) => undone.push(tx),
+                Err(e) if failed.is_none() => failed = Some((i, e)),
+                Err(_) => {}
+            }
+        }
+        // Their commits flush together
+        let committed = join_all(ready.into_iter().map(|(tx, done)| async move { tx.commit().await.map(|()| done) })).await;
+        for result in join_all(undone.into_iter().map(|tx| tx.rollback())).await {
+            if let Err(e) = result {
+                tracing::warn!("Market: rolling back a fill after one that failed: {e}");
+            }
+        }
+
+        {
+            let mut book = market.book();
+            if let Some((k, _)) = &failed {
+                book.rewind(batch[*k].1);
+            }
+            book.settle();
+        }
+        let mut lost = false;
+        for ((fill, _), result) in batch.iter().zip(committed) {
+            match result {
+                Ok(done) => {
+                    cycle.fills += 1;
+                    announce_fill(events, fill, done);
+                }
+                // Applied to the book but maybe not written: the DB says
+                Err(e) => {
+                    tracing::warn!("Market: committing {} against {}: {e}", fill.buy, fill.sell);
+                    lost = true;
+                    for id in [fill.buy, fill.sell] {
+                        if let Err(e) = market.reload(&mut held[0], id).await {
+                            tracing::warn!("Market: reloading order {id}: {e}");
+                        }
+                    }
+                }
+            }
+        }
+        if lost {
+            return cycle;
+        }
+        let Some((k, error)) = failed else { continue };
+        let fill = &batch[k].0;
+        match error {
+            MarketError::MarketBoxFull => {
                 cycle.refused += 1;
                 market.book().stall(fill.buy, now);
             }
-            Err(MarketError::Changed) => {
+            MarketError::Changed => {
                 cycle.refused += 1;
                 for id in [fill.buy, fill.sell] {
-                    if let Err(e) = market.reload(db, id).await {
+                    if let Err(e) = market.reload(&mut held[0], id).await {
                         tracing::warn!("Market: reloading order {id}: {e}");
                         return cycle;
                     }
                 }
             }
-            Err(e) => {
+            e => {
                 tracing::warn!("Market: filling {} against {}: {}", fill.buy, fill.sell, e.message());
                 break;
             }
@@ -373,9 +475,14 @@ pub struct Executed {
     pub buyer_balance: Option<i64>,
 }
 
-/// Write `fill` in one transaction, checking first that both orders are as
-/// the book had them. Nothing changes unless all of it does.
-pub async fn execute_fill(conn: &mut PgConnection, fill: &Fill) -> Result<Executed, MarketError> {
+/// Write `fill` in a transaction on `conn`, checking first that both orders
+/// are as the book had them, and hand back the transaction uncommitted: the
+/// matcher commits a batch's fills together, or rolls one back (#237).
+/// Nothing changes unless all of it does, and an error rolls it back.
+async fn prepare_fill<'c>(
+    conn: &'c mut PgConnection,
+    fill: &Fill,
+) -> Result<(Transaction<'c, Postgres>, Executed), MarketError> {
     let mut tx = conn.begin().await?;
     let (buy, sell) = lock_pair(&mut tx, fill).await?;
 
@@ -482,15 +589,17 @@ pub async fn execute_fill(conn: &mut PgConnection, fill: &Fill) -> Result<Execut
     } else {
         None
     };
-    tx.commit().await?;
-    Ok(Executed {
-        buy: buy_now,
-        sell: sell_now,
-        trade,
-        market_box,
-        seller_balance,
-        buyer_balance,
-    })
+    Ok((
+        tx,
+        Executed {
+            buy: buy_now,
+            sell: sell_now,
+            trade,
+            market_box,
+            seller_balance,
+            buyer_balance,
+        },
+    ))
 }
 
 /// Move `fill`'s units from the sell's escrow stack `escrow_item` (locked,
@@ -585,7 +694,12 @@ struct Locked {
 ///
 /// The sell's escrow units (and their marks) come with it, unlocked: nothing writes an escrow
 /// stack without first locking its order (a fill, or `escrow::close`), so the
-/// order's lock holds them too, and that's a round trip saved (#208).
+/// order's lock holds them too, and that's a round trip saved (#208). They're
+/// read from the statement's snapshot, which after a wait on the lock is older
+/// than the row (#238). That's safe while every writer of an open order's
+/// escrow but the matcher closes the order (cancel, expiry), which the status
+/// check catches, and while no order is in two fills at once: a batch never
+/// holds a player twice (#237). An amend or a partial cancel would break it.
 async fn lock_pair(conn: &mut PgConnection, fill: &Fill) -> Result<(Locked, Locked), MarketError> {
     type Row = (
         Uuid,
@@ -885,6 +999,124 @@ mod tests {
             took / cycle.fills.max(1) as u32
         );
         assert!(cycle.fills > 150, "{cycle:?}");
+    }
+
+    /// The same with 30 sellers and 30 buyers, so fills go side by side in
+    /// batches of [`BATCH`] (#237). Run it in release:
+    /// `cargo test --release -p capitol-backend market_fill_throughput -- --ignored --nocapture`
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn market_fill_throughput_many_players(db: PgPool) {
+        let (events, _heard) = broadcast::channel(8192);
+        let market = Market::default();
+        let mut sellers = Vec::new();
+        let mut buyers = Vec::new();
+        for i in 0..30 {
+            let seller = player(&db, &format!("seller{i}"), 1000).await;
+            let stack =
+                stack_of(&db, seller.id, seller.inventory, 0, "rope", &Units::from_pairs([(40, 30), (85, 30)])).await;
+            sellers.push((seller.id, stack));
+            buyers.push(player(&db, &format!("buyer{i}"), 100_000).await.id);
+        }
+        for i in 0..300 {
+            let (seller, stack) = sellers[i % 30];
+            placed(&db, &market, seller, &sell("rope", stack, 10 + (i % 20) as i64, 6, None)).await;
+        }
+        for i in 0..300 {
+            let grade = ["F", "C"][i % 2];
+            placed(&db, &market, buyers[i % 30], &buy("rope", 10 + (i % 20) as i64, 6, Some(grade))).await;
+        }
+        let started = std::time::Instant::now();
+        let cycle = run_cycle(&market, &db, &events, Utc::now()).await;
+        let took = started.elapsed();
+        println!(
+            "{} fills in {took:?}: {:.0} fills a second, {:?} each",
+            cycle.fills,
+            cycle.fills as f64 / took.as_secs_f64(),
+            took / cycle.fills.max(1) as u32
+        );
+        assert!(cycle.fills > 150, "{cycle:?}");
+        // Every unit is still somewhere, and what the trades say was sold is
+        // what the sells say they sold
+        let units: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(u.count), 0)::BIGINT FROM item_units u JOIN items i ON i.id = u.item_id
+             WHERE i.item_type = 'rope'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(units, 30 * 60);
+        let traded: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(quantity), 0)::BIGINT FROM market_trades")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let sold: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(quantity_total - quantity_remaining), 0)::BIGINT FROM market_orders WHERE side = 'sell'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(traded, sold);
+    }
+
+    /// A batch whose second fill finds its buyer's box full writes the first,
+    /// and rolls back those after it to match again without it (#237): the
+    /// next batch trades them as fills one at a time would have.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_batch_writes_the_fills_before_one_that_fails_and_retries_those_after(db: PgPool) {
+        let (events, mut heard) = broadcast::channel(1024);
+        let market = Market::default();
+        // Four asks at 10, 11, 12 and 13, each a seller's own
+        let mut asks = Vec::new();
+        for i in 0..4 {
+            let seller = player(&db, &format!("seller{i}"), 100).await;
+            let stack = stack_of(&db, seller.id, seller.inventory, 0, "rope", &Units::uniform(2, 60)).await;
+            asks.push(placed(&db, &market, seller.id, &sell("rope", stack, 10 + i, 2, None)).await);
+        }
+        let mut bidders = Vec::new();
+        for i in 0..4 {
+            bidders.push(player(&db, &format!("bidder{i}"), 1000).await);
+        }
+        // The second bidder's box is full
+        let full = box_of(&db, bidders[1].id).await;
+        for slot in 0..48 {
+            stack_of(&db, bidders[1].id, full, slot, "fiber", &Units::uniform(1, 10)).await;
+        }
+        let mut bids = Vec::new();
+        for bidder in &bidders {
+            bids.push(placed(&db, &market, bidder.id, &buy("rope", 20, 2, None)).await);
+        }
+
+        let cycle = run_cycle(&market, &db, &events, Utc::now()).await;
+        assert_eq!((cycle.fills, cycle.refused), (3, 1), "{cycle:?}");
+        // Bidder 0 took the 10s. Bidder 1 sat out, so bidder 2 took the 11s
+        // bidder 1 had been matched to, and bidder 3 the 12s
+        let filled: Vec<(Uuid, Uuid, i64)> =
+            sqlx::query_as("SELECT buy_order_id, sell_order_id, price FROM market_trades ORDER BY price")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            filled,
+            vec![(bids[0].id, asks[0].id, 10), (bids[2].id, asks[1].id, 11), (bids[3].id, asks[2].id, 12)]
+        );
+        // The book is the DB's
+        for o in bids.iter().chain(&asks) {
+            let now = order(&db, o.id).await;
+            let open = now.status == OrderStatus::Open;
+            let on_book = market.with_book(|b| b.get(o.id).map(|b| b.remaining));
+            assert_eq!(on_book, open.then_some(now.quantity_remaining), "order {}", o.id);
+        }
+        assert_eq!(order(&db, bids[1].id).await.quantity_remaining, 2);
+        // Each written fill is heard once, and the undone ones not at all
+        let mut trades = 0;
+        while let Ok(event) = heard.try_recv() {
+            if let GameEvent::MarketTrade { .. } = event {
+                trades += 1;
+            }
+        }
+        assert_eq!(trades, 3);
     }
 
     #[sqlx::test(migrations = "./migrations")]
