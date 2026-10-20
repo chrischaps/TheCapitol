@@ -1,6 +1,6 @@
 # The Capitol: Citizens Plan
 
-*2026-10-20. Issues labelled `citizens`, #246 to #261 (plus #211 as C0.5). Phase labels `cz:C0-groundwork` to `cz:C3-cascade`.*
+*2026-10-20. Issues labelled `citizens`, #246 to #262 (plus #211 as C0.5). Phase labels `cz:C0-groundwork` to `cz:C3-cascade`.*
 
 ## 1. Vision
 
@@ -80,7 +80,7 @@ Citizens are marked, honestly and quietly.
 **It's feasible, and C1.3 builds the seam now.** A citizen's brain is a stack of *layers*, any of which can be dropped in or taken out:
 
 ```
-rules  →  (cheaper tiers)  →  small model  →  large model
+rules  →  Jev  →  small model  →  large model
 ```
 
 Rules alone, a model alone, or any stack in between all work behind the same interface.
@@ -112,11 +112,22 @@ struct Cascade { layers: Vec<Layer> }   // Layer = Decider + threshold + time an
 - **Fallback.** The last layer must answer. If it doesn't, the fallback is the best choice any layer offered, then the rules layer's default, then "carry on with what you were doing". A citizen is never stuck waiting on a model.
 - **Async.** A slow layer (a network model) answers `Pending`. The citizen keeps doing its current task and acts on the answer when it arrives, or on the fallback if the answer is late. The world never waits on a model.
 - **Transport-neutral.** `Situation`, `Choice` and `Decision` are serde types, so a layer can be a function, a subprocess or an HTTP call.
-- **Configuration.** In `town.toml`, set `layers = ["rules"]` (and later `["rules", "claude-small", "claude-large"]`) for the whole town or per citizen.
+- **Configuration.** In `town.toml`, set `layers = ["rules"]` (and later `["rules", "jev", "claude-small", "claude-large"]`) for the whole town or per citizen.
 
 **The log** (C3.1) is what makes the cascade grow safely. Every decision is recorded as JSONL: the situation, the menu, each layer's verdict, the decision, and its outcome once known. `capitol-town replay` runs any stack of layers over a log offline. A new layer is therefore measured (agreement, escalation rate, latency, cost) before it ever runs live. The log also allows **distillation**: situations where the model layers keep answering the same way become new rules, so the expensive layers are asked less over time.
 
-**The tier between rules and the small model** that Chris mentioned (the "jev" layer) is not yet defined. The seam doesn't depend on it: any middle tier, whether a learned policy, a local model or a lookup of past decisions, is one more `Decider`.
+**The fast tier: Jev.** Between rules and the language models sits **Jev** (TypeSafe AI, early access since 2026-09-15), a non-generative "System One" decision model. A caller defines the allowed answers, and Jev answers one of three question types:
+- `choice`: pick from a supplied list;
+- `score`: a value on a defined scale;
+- `null`: the probability that a statement is true.
+
+It returns probabilities, not text. Its claimed latency is 70 to 500 ms, at about 4.2 cents per million input tokens with output free; these are vendor figures, and C3.3 measures them. It fits D4's shape exactly:
+- the menu is a `choice` question;
+- prices and quantities come from a `score` over the menu's allowed range;
+- its probabilities are the layer's confidence;
+- it can't answer off the menu.
+
+Reviewers say it is weak on decisions that need broad context or nuanced judgement. That is what the model tiers above it are for, and low confidence escalates to them. So the expected shape is: rules settle the obvious cases, Jev the close calls among a few clear choices, and an LLM the rare open-ended ones. The seam doesn't depend on Jev. Any tier is one more `Decider`, and Jev's availability or price changing costs nothing but a line in `town.toml`.
 
 ### D5. Personas and the day
 
@@ -174,6 +185,7 @@ They work in daylight, go to the hall or the bazaar during their market hours, w
 |---|---|---|---|
 | C3.1 [#260](https://github.com/chrischaps/TheCapitol/issues/260) | **The decision log and replay.** | M | C1.3 |
 | C3.2 [#261](https://github.com/chrischaps/TheCapitol/issues/261) | **Spike: a Claude layer.** Menu-only answers, budgets, cost per citizen-day on replayed logs. *Needs Chris for the spend.* | M | C3.1 |
+| C3.3 [#262](https://github.com/chrischaps/TheCapitol/issues/262) | **Spike: Jev as the fast tier.** Menus as `choice` questions, prices as `score`, probabilities as confidence. Calibration, escalation rate, latency and cost on replayed logs, for `rules`, `rules+jev` and `rules+jev+claude-small`. *Needs Chris for access and spend.* | M | C3.1 |
 
 ## 7. Dependency graph and estimate
 
@@ -181,7 +193,7 @@ They work in daylight, go to the hall or the bazaar during their market hours, w
 C0.1 ─┬─> C1.1 ─┬─> C1.2 ─┬─> C2.1
 C0.6 ─┘         ├─> C1.3 ─┼─> C1.5 ─┐
 C0.5 (#211) ····┘         ├─> C1.6 ─┼─> C1.7
-                          └─> C3.1 ─> C3.2
+                          └─> C3.1 ─> C3.2, C3.3
 C1.4 ───────────────────────> C1.5
 C0.1 ─> C0.2, C2.2      C1.1 ─> C0.4      C0.3 (any time)
 ```
@@ -203,7 +215,7 @@ The first citizens walk after C0.1, C0.6 and C1.1, about three sessions. The who
 | Citizens crowd humans out of the scarce nodes (E2.7: nine rural veins) | Size the roster with the soak. Personas spread over zones. Citizens of a trade back off when a human is working the same node. |
 | The economy can't support citizens without grants | That is a finding for #210, not a reason to add a faucet. |
 | Load: N² positions, one thread per citizen | C0.4 and the soak's numbers. Async citizens if threads bite. |
-| Model layers cost too much or answer too slowly | Menu-only answers, `Pending` plus fallback, per-layer budgets, replay before going live. |
+| Model layers cost too much or answer too slowly (Jev's figures are vendor claims; it is in early access) | Menu-only answers, `Pending` plus fallback, per-layer budgets, replay before going live. |
 | Citizens feel robotic | Personas, schedules, idle life (C2.1). Later, chat. |
 
 ## 10. Verification strategy

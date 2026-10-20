@@ -14,11 +14,11 @@ The Capitol is an MMO economic simulation where the economy is the primary gamep
 - `the-capitol-suburb-v2.md` - Plan for the post-war neighbourhood suburb generator (issues labelled `suburb-v2`, #103 to #113)
 - `the-capitol-economy.md` - Economy v1: quality and tools, content depth, markets (M6), automation (M8), plus CI and auth (issues labelled `economy`, #144 to #179)
 - `the-capitol-wilds.md` - The wilds: the Wilderness grown to r3800 to r6000 (the world to 12000), with a height field, rivers, streams and lakes, and nothing claimable (issues labelled `wilds`, #193 to #204)
-- `the-capitol-citizens.md` - Citizens: AI players who live in the world, run by `capitol-town`, earning everything, marked honestly, with a pluggable decision cascade from rules up to models (issues labelled `citizens`, #246 to #261, plus #211)
+- `the-capitol-citizens.md` - Citizens: AI players who live in the world, run by `capitol-town`, earning everything, marked honestly, with a pluggable decision cascade from rules up to models (issues labelled `citizens`, #246 to #262, plus #211)
 
 ## Current Focus: Citizens
 
-Economy v1 is built, and so are the wilds and the Flint client. Active work is **Citizens**: AI players who live in the world, so the economy is stress-tested and the city feels inhabited with one human on. The plan is `the-capitol-citizens.md`. The work queue is the GitHub issues labelled `citizens` (#246 to #261, plus #211 as C0.5), created in dependency order. The phase labels run `cz:C0-groundwork` to `cz:C3-cascade`. Citizens run in their own process (`capitol-town`, on capitol-core's `Bot`), get no grants, and carry a visible mark; their decisions all go through one `Decider` cascade (plan D4). C3.2 (a Claude layer) needs Chris's decision on spend.
+Economy v1 is built, and so are the wilds and the Flint client. Active work is **Citizens**: AI players who live in the world, so the economy is stress-tested and the city feels inhabited with one human on. The plan is `the-capitol-citizens.md`. The work queue is the GitHub issues labelled `citizens` (#246 to #262, plus #211 as C0.5), created in dependency order. The phase labels run `cz:C0-groundwork` to `cz:C3-cascade`. Citizens run in their own process (`capitol-town`, on capitol-core's `Bot`), get no grants, and carry a visible mark; their decisions all go through one `Decider` cascade (plan D4). C3.2 (a Claude layer) and C3.3 (Jev, a fast choice model, as the tier between rules and the LLMs) need Chris's decision on access and spend.
 
 ### Economy v1 (done)
 

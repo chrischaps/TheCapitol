@@ -9,7 +9,7 @@ Every open issue on `chrischaps/TheCapitol` is in the queue, whatever its label.
 
 | Area label | Plan doc at the repo root |
 |---|---|
-| `citizens` (the current plan) | `the-capitol-citizens.md`: C0.1 … C3.2 |
+| `citizens` (the current plan) | `the-capitol-citizens.md`: C0.1 … C3.3 |
 | `economy` | `the-capitol-economy.md`: E0.1 … E4.4 |
 | `flint-client` | `the-capitol-flint-client.md`: P0.1 … P8.7, B1 … B13, engine hooks H… |
 | `wilds` | `the-capitol-wilds.md`: W0 … W11 |
