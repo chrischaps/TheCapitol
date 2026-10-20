@@ -15,7 +15,7 @@
 //! A station off a plot has no `plot_id`. Only its owner may use it
 //! (`container_access::station_access`), it pays no tax, and no plot's
 //! `station_count` includes it. A terrain change that lays a lot under one
-//! isn't handled yet (#188).
+//! takes it down (`plot_sync`, #188).
 
 use capitol_protocol::rules::stacking::Pick;
 use capitol_protocol::rules::{in_water, water_name, STATION_MIN_SPACING};

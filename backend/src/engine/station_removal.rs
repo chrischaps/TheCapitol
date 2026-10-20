@@ -241,12 +241,26 @@ pub async fn return_plot_stations(
     tx: &mut PgConnection,
     plot_id: Uuid,
 ) -> Result<ReturnedStations, sqlx::Error> {
+    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM stations WHERE plot_id = $1")
+        .bind(plot_id)
+        .fetch_all(&mut *tx)
+        .await?;
+    return_stations(tx, &ids).await
+}
+
+/// Empty `station_ids` into inventories, as [`return_plot_stations`] does for
+/// a plot's. Also used for workbenches a terrain change laid a lot under
+/// (`plot_sync`, #188). The stations are left for the caller to delete.
+pub async fn return_stations(
+    tx: &mut PgConnection,
+    station_ids: &[Uuid],
+) -> Result<ReturnedStations, sqlx::Error> {
     let stations: Vec<(Uuid, String, Uuid, i32, Option<String>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
         "SELECT s.id, s.station_type, s.owner_id, s.kit_quality, st.kit_item, s.installed_tool, s.tool_owner
          FROM stations s LEFT JOIN station_types st ON st.id = s.station_type
-         WHERE s.plot_id = $1 ORDER BY s.placed_at, s.id FOR UPDATE OF s",
+         WHERE s.id = ANY($1) ORDER BY s.placed_at, s.id FOR UPDATE OF s",
     )
-    .bind(plot_id)
+    .bind(station_ids)
     .fetch_all(&mut *tx)
     .await?;
     if stations.is_empty() {

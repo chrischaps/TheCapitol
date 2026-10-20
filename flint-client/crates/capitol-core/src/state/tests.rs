@@ -220,6 +220,7 @@ fn test_for(message: &M) -> fn() {
         M::PlotReleased { .. } => plot_released_drops_it_from_my_plots,
         M::TaxDelinquent { .. } => tax_messages_are_reported,
         M::PlotForeclosed { .. } => tax_messages_are_reported,
+        M::StationDisplaced { .. } => station_displaced_is_reported,
         M::SubscriptionLapsed { .. } => subscription_follows_auth_ok_me_and_the_lapse,
         M::OrderPlaced { .. } => market_messages_reach_the_market_store,
         M::OrderFilled { .. } => market_messages_reach_the_market_store,
@@ -246,7 +247,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 52, "one fixture per ServerMessage variant");
+    assert_eq!(count, 53, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1373,6 +1374,24 @@ fn tax_messages_are_reported() {
             terrain_id: "sub_2_0_3_L_4".into(),
             tax_owed: 672,
             refund: 5328,
+        }]
+    );
+}
+
+#[test]
+fn station_displaced_is_reported() {
+    let mut state = connected();
+    let bench = Uuid::from_u128(40);
+    assert_eq!(
+        state.apply_ws(&M::StationDisplaced {
+            station_id: bench,
+            station_type: "workbench".into(),
+            terrain_id: "sub_2_0_3_L_4".into(),
+        }),
+        vec![StateEvent::StationDisplaced {
+            station_id: bench,
+            station_type: "workbench".into(),
+            terrain_id: "sub_2_0_3_L_4".into(),
         }]
     );
 }

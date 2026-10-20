@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = match engine::plot_sync::sync_plots(&db_pool, &lots, engine::plot_sync::OnOwned::Keep).await {
         Ok(report) => report,
         Err(engine::plot_sync::SyncError::Db(e)) => return Err(e.into()),
-        Err(engine::plot_sync::SyncError::OwnedConflicts(_) | engine::plot_sync::SyncError::Refund(_)) => {
+        Err(engine::plot_sync::SyncError::Conflicts { .. } | engine::plot_sync::SyncError::Refund(_)) => {
             unreachable!("Keep never refuses or refunds")
         }
     };
@@ -139,6 +139,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!(
             "Owned plot {} ({}) no longer matches the terrain ({}); kept as it is",
             c.plot_id, c.terrain_id, if c.removed { "lot gone" } else { "lot reshaped" }
+        );
+    }
+    // Nobody is connected yet, so the owners hear from their queued notices.
+    for (c, _) in &report.displaced {
+        tracing::warn!(
+            "Took down {}'s {} {}: the lot {} now covers it",
+            c.owner_id, c.station_type, c.station_id, c.terrain_id
         );
     }
 

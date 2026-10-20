@@ -215,6 +215,15 @@ pub enum GameEvent {
         refund: i64,
         notice_id: Option<Uuid>,
     },
+    /// #188: `owner_id`'s workbench stood off a plot where a terrain change
+    /// laid the lot `terrain_id`, and was taken down. Queued as `notice_id`.
+    StationDisplaced {
+        owner_id: Uuid,
+        station_id: Uuid,
+        station_type: String,
+        terrain_id: String,
+        notice_id: Option<Uuid>,
+    },
     /// E4.1: the player's subscription ran out. Queued as `notice_id`, as
     /// the tax notices are.
     SubscriptionLapsed {

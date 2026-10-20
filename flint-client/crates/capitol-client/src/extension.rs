@@ -1811,25 +1811,36 @@ fn plots(
     }
     for note in session.take_plot_notes() {
         use crate::session::PlotNote;
-        let (title, body) = match note {
-            PlotNote::NoneThere => ("No plot here", "Alt-click a lot to see its deed".into()),
-            PlotNote::Unanswered => ("Couldn't look", "The server didn't say what's here".into()),
+        let (title, body): (String, String) = match note {
+            PlotNote::Displaced { station_type } => {
+                let name = session
+                    .state()
+                    .catalog()
+                    .station_type(&station_type)
+                    .map_or_else(|| station_type.replace('_', " "), |t| t.name.to_lowercase());
+                (
+                    format!("Your {name} was taken down"),
+                    "A new lot was laid where it stood. Its kit and what it held are back in your pack".into(),
+                )
+            }
+            PlotNote::NoneThere => ("No plot here".into(), "Alt-click a lot to see its deed".into()),
+            PlotNote::Unanswered => ("Couldn't look".into(), "The server didn't say what's here".into()),
             PlotNote::TaxOwed {
                 tax_owed,
                 forecloses_at,
             } => (
-                "Property tax overdue",
+                "Property tax overdue".into(),
                 format!("Your plot owes {tax_owed} Strands. At {forecloses_at} it's foreclosed"),
             ),
             PlotNote::SubscriptionLapsed { until } => (
-                "Subscription lapsed",
+                "Subscription lapsed".into(),
                 format!(
                     "It ran out on {}. Stations stop working while you're away",
                     until.format("%-d %B")
                 ),
             ),
             PlotNote::Foreclosed { tax_owed, refund } => (
-                "Plot foreclosed",
+                "Plot foreclosed".into(),
                 if refund > 0 {
                     format!("{tax_owed} Strands of tax unpaid. {refund} of the deed came back")
                 } else {

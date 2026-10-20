@@ -441,6 +441,18 @@ pub enum ServerMessage {
         tax_owed: i64,
         refund: i64,
     },
+    /// Your workbench `station_id` stood off a plot (D10) where a terrain
+    /// change has laid the lot `terrain_id` (#188), so it was taken down.
+    /// Its kit, its tool and what was in it came back to your inventory, as
+    /// far as it had room (`inventory_updated` comes first), and
+    /// `station_removed` goes to everyone. One taken down while you were
+    /// away is sent as you come back.
+    #[serde(rename = "station_displaced")]
+    StationDisplaced {
+        station_id: Uuid,
+        station_type: String,
+        terrain_id: String,
+    },
     /// Your subscription ran out at `until` (E4.1). What it kept running
     /// stops. One that ran out while you were away is sent as you come back.
     #[serde(rename = "subscription_lapsed")]
@@ -530,6 +542,7 @@ impl ServerMessage {
             ServerMessage::PlotReleased { .. } => "plot_released",
             ServerMessage::TaxDelinquent { .. } => "tax_delinquent",
             ServerMessage::PlotForeclosed { .. } => "plot_foreclosed",
+            ServerMessage::StationDisplaced { .. } => "station_displaced",
             ServerMessage::SubscriptionLapsed { .. } => "subscription_lapsed",
             ServerMessage::OrderPlaced { .. } => "order_placed",
             ServerMessage::OrderFilled { .. } => "order_filled",

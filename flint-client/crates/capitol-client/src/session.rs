@@ -230,7 +230,7 @@ pub struct Traded {
 }
 
 /// Something to tell the player about picking a plot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlotNote {
     /// The alt-click found no plot there.
     NoneThere,
@@ -245,6 +245,9 @@ pub enum PlotNote {
     SubscriptionLapsed {
         until: capitol_core::chrono::DateTime<capitol_core::chrono::Utc>,
     },
+    /// A new lot was laid where your `station_type` stood off a plot, so it
+    /// was taken down and what it held came back (#188).
+    Displaced { station_type: String },
 }
 
 /// The server stopped you at the water's edge (`movement_blocked`).
@@ -1661,6 +1664,11 @@ impl Session {
                         tax_owed: *tax_owed,
                         refund: *refund,
                     }),
+                    StateEvent::StationDisplaced { station_type, .. } => self
+                        .plot_notes
+                        .push(PlotNote::Displaced {
+                            station_type: station_type.clone(),
+                        }),
                     StateEvent::SubscriptionLapsed { until } => self
                         .plot_notes
                         .push(PlotNote::SubscriptionLapsed { until: *until }),

@@ -136,14 +136,16 @@ pub async fn commit_world_params(
         Ok(report) => report,
         Err(SyncError::Db(e)) => return Err(e.into()),
         Err(SyncError::Refund(e)) => return Err(AppError::Internal(format!("{e}. The commit changed nothing."))),
-        Err(SyncError::OwnedConflicts(conflicts)) => {
-            let list: Vec<String> = conflicts
+        Err(SyncError::Conflicts { plots, stations }) => {
+            let mut list: Vec<String> = plots
                 .iter()
-                .map(|c| format!("{} ({}, {})", c.terrain_id, c.plot_id, if c.removed { "gone" } else { "reshaped" }))
+                .map(|c| format!("plot {} ({}, {})", c.terrain_id, c.plot_id, if c.removed { "gone" } else { "reshaped" }))
                 .collect();
+            list.extend(stations.iter().map(|c| format!("{} {} (under lot {})", c.station_type, c.station_id, c.terrain_id)));
             return Err(AppError::Conflict(format!(
-                "The new terrain moves or removes {} owned plot(s): {}. Commit with ?force=true to release them, refund their deeds and remove their stations.",
-                conflicts.len(),
+                "The new terrain moves or removes {} owned plot(s) and lays a lot under {} station(s) off a plot: {}. Commit with ?force=true to release the plots, refund their deeds and take their stations and those down, returning what they hold.",
+                plots.len(),
+                stations.len(),
                 list.join(", ")
             )));
         }
@@ -153,6 +155,18 @@ pub async fn commit_world_params(
         for station_id in &report.removed_stations {
             game.stations.remove(station_id);
             let _ = game.event_sender.send(GameEvent::StationRemoved { station_id: *station_id });
+        }
+        for &(player_id, container_id) in &report.returned_to {
+            let _ = game.event_sender.send(GameEvent::InventoryUpdated { player_id, container_id, slots: Vec::new() });
+        }
+        for (c, notice_id) in &report.displaced {
+            let _ = game.event_sender.send(GameEvent::StationDisplaced {
+                owner_id: c.owner_id,
+                station_id: c.station_id,
+                station_type: c.station_type.clone(),
+                terrain_id: c.terrain_id.clone(),
+                notice_id: Some(*notice_id),
+            });
         }
     }
     if !report.released.is_empty() {
@@ -168,9 +182,10 @@ pub async fn commit_world_params(
         }
     }
     tracing::info!(
-        "Admin {} commit synced plots: {} added, {} updated, {} removed, {} owned released",
+        "Admin {} commit synced plots: {} added, {} updated, {} removed, {} owned released, {} stations off a plot taken down",
         user.account_id, report.inserted, report.updated, report.deleted,
-        if query.force { report.conflicts.len() } else { 0 }
+        if query.force { report.conflicts.len() } else { 0 },
+        report.displaced.len()
     );
 
     let params_json = serde_json::to_value(&params)

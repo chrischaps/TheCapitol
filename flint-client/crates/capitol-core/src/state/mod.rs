@@ -266,6 +266,14 @@ pub enum StateEvent {
         tax_owed: i64,
         refund: i64,
     },
+    /// Your workbench stood off a plot where a terrain change laid the lot
+    /// `terrain_id`, so the server took it down and gave back what it held
+    /// (`station_displaced`, #188). `StationRemoved` comes alongside.
+    StationDisplaced {
+        station_id: Uuid,
+        station_type: String,
+        terrain_id: String,
+    },
     /// Your subscription ran out at `until` (`subscription_lapsed`, E4.1).
     SubscriptionLapsed {
         until: DateTime<Utc>,
@@ -791,6 +799,15 @@ impl GameState {
                 terrain_id: terrain_id.clone(),
                 tax_owed: *tax_owed,
                 refund: *refund,
+            }),
+            M::StationDisplaced {
+                station_id,
+                station_type,
+                terrain_id,
+            } => out.push(StateEvent::StationDisplaced {
+                station_id: *station_id,
+                station_type: station_type.clone(),
+                terrain_id: terrain_id.clone(),
             }),
             M::SubscriptionLapsed { until } => {
                 self.subscription = Some(Subscription {

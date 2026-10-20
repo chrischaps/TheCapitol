@@ -890,6 +890,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
+                    Ok(GameEvent::StationDisplaced { owner_id, station_id, station_type, terrain_id, notice_id }) => {
+                        if owner_id == player_id && take_notice(&state.db, notice_id).await {
+                            let msg = ServerMessage::StationDisplaced { station_id, station_type, terrain_id };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
                     // M5: Trading events
                     Ok(GameEvent::TradeRequested { from_player, from_player_name, to_player }) => {
                         // Only send to the target player

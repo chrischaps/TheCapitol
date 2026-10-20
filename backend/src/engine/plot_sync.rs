@@ -9,6 +9,11 @@
 //! - an unowned row whose lot is gone is deleted
 //! - an **owned** row whose lot is gone or changed shape is a conflict. What
 //!   happens then is the caller's [`OnOwned`] choice.
+//! - a workbench standing off a plot (D10) that a lot now covers is a
+//!   conflict too (#188). It's taken down, as a foreclosure takes a plot's
+//!   stations down, unless the caller refuses. Left standing it would be its
+//!   owner's on someone else's lot, counted by no plot and closed to the
+//!   lot's owner.
 //!
 //! Size and station capacity follow the lot's area ([`size_category`]). The
 //! deed cost stays per zone (`zones.deed_cost`).
@@ -18,19 +23,26 @@ use std::collections::HashMap;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use capitol_protocol::terrain::TerrainPlot;
+use capitol_protocol::terrain::{quad_contains, TerrainPlot};
+use capitol_protocol::ws::ServerMessage;
 
 use crate::engine::currency::{add_strands_in, TransactionType};
+use crate::engine::notices;
+use crate::engine::station_removal::{return_plot_stations, return_stations};
 use crate::models::corners_from_column;
 
 /// What to do with an owned plot whose lot is gone or has changed shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnOwned {
     /// Change nothing and report the conflicts (an admin's commit without `force`).
+    /// Covered workbenches are conflicts as well as owned plots.
     Refuse,
     /// Leave those plots exactly as they are, and sync everything else (startup).
+    /// Covered workbenches are still taken down.
     Keep,
-    /// Release them, refund the deed and remove their stations (`force`).
+    /// Release them, refund the deed and remove their stations, their contents
+    /// going back as a foreclosure's do (`force`). Covered workbenches are
+    /// taken down.
     Release,
 }
 
@@ -44,6 +56,16 @@ pub struct OwnedConflict {
     pub removed: bool,
 }
 
+/// A station off a plot (D10) that a lot of the new terrain covers (#188).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoveredStation {
+    pub station_id: Uuid,
+    pub station_type: String,
+    pub owner_id: Uuid,
+    /// The lot now under it
+    pub terrain_id: String,
+}
+
 #[derive(Debug, Default)]
 pub struct SyncReport {
     pub inserted: usize,
@@ -51,9 +73,15 @@ pub struct SyncReport {
     pub deleted: usize,
     /// Owned plots this sync left alone (`OnOwned::Keep`) or released (`OnOwned::Release`).
     pub conflicts: Vec<OwnedConflict>,
-    /// Stations removed from released plots. The caller drops them from the
-    /// game state and tells the clients.
+    /// Stations removed from released plots, and covered workbenches taken
+    /// down. The caller drops them from the game state and tells the clients.
     pub removed_stations: Vec<Uuid>,
+    /// The covered workbenches taken down (#188), each with the
+    /// `station_displaced` notice queued for its owner. The caller tells them.
+    pub displaced: Vec<(CoveredStation, Uuid)>,
+    /// `(player, inventory)` for each inventory that took a kit, tool or
+    /// box's contents back. The caller sends `inventory_updated`.
+    pub returned_to: Vec<(Uuid, Uuid)>,
     /// The `terrain_id`s of the plots released (`OnOwned::Release`). The
     /// caller tells the clients (`plot_released`, B13).
     pub released: Vec<String>,
@@ -64,8 +92,9 @@ pub struct SyncReport {
 
 #[derive(Debug)]
 pub enum SyncError {
-    /// `OnOwned::Refuse` found owned plots in the way. Nothing was changed.
-    OwnedConflicts(Vec<OwnedConflict>),
+    /// `OnOwned::Refuse` found owned plots, or workbenches off a plot, in
+    /// the way. Nothing was changed.
+    Conflicts { plots: Vec<OwnedConflict>, stations: Vec<CoveredStation> },
     /// A released plot's deed couldn't be refunded. Nothing was changed.
     Refund(String),
     Db(sqlx::Error),
@@ -170,8 +199,24 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
         conflicts.push(OwnedConflict { plot_id: row.id, terrain_id: terrain_id.clone(), owner_id, removed });
     }
     conflicts.sort_by(|a, b| a.terrain_id.cmp(&b.terrain_id));
-    if on_owned == OnOwned::Refuse && !conflicts.is_empty() {
-        return Err(SyncError::OwnedConflicts(conflicts));
+    // Owned plots kept as they are must not be touched below.
+    let kept: Vec<&str> = if on_owned == OnOwned::Keep {
+        conflicts.iter().map(|c| c.terrain_id.as_str()).collect()
+    } else {
+        Vec::new()
+    };
+
+    // A kept plot keeps its old shape, and nothing could stand off a plot
+    // inside that, so only the other lots can cover a workbench.
+    let off_plot: Vec<OffPlot> = sqlx::query_as(
+        "SELECT id, station_type, owner_id, position_x, position_y FROM stations WHERE plot_id IS NULL",
+    )
+    .fetch_all(db)
+    .await?;
+    let covered = covered(&off_plot, lots.iter().filter(|l| !kept.contains(&l.id.as_str())));
+
+    if on_owned == OnOwned::Refuse && !(conflicts.is_empty() && covered.is_empty()) {
+        return Err(SyncError::Conflicts { plots: conflicts, stations: covered });
     }
 
     let mut report = SyncReport::default();
@@ -180,6 +225,11 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
     if on_owned == OnOwned::Release {
         for c in &conflicts {
             report.released.push(c.terrain_id.clone());
+            let returned = return_plot_stations(&mut tx, c.plot_id).await?;
+            if !returned.lost.is_empty() {
+                tracing::warn!("Releasing plot {}: no room for {:?}, lost with its stations", c.plot_id, returned.lost);
+            }
+            took(&mut report.returned_to, returned.inventories);
             report.removed_stations.extend(release_plot(&mut tx, c.plot_id).await?);
             // The refund is in this transaction, so a plot is never released
             // without its owner getting the deed back.
@@ -201,13 +251,6 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
             }
         }
     }
-    // Owned plots kept as they are must not be touched below.
-    let kept: Vec<&str> = if on_owned == OnOwned::Keep {
-        conflicts.iter().map(|c| c.terrain_id.as_str()).collect()
-    } else {
-        Vec::new()
-    };
-
     // Rows whose lot is gone. Released plots are unowned by now, so they go too.
     let gone: Vec<Uuid> = existing
         .iter()
@@ -258,10 +301,61 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
         .execute(&mut *tx)
         .await?;
     }
+
+    // Covered workbenches come down, their kits, tools and contents back to
+    // their owners (`station_removal::return_stations`).
+    if !covered.is_empty() {
+        let ids: Vec<Uuid> = covered.iter().map(|c| c.station_id).collect();
+        let returned = return_stations(&mut tx, &ids).await?;
+        if !returned.lost.is_empty() {
+            tracing::warn!("Taking down workbenches under new lots: no room for {:?}, lost with them", returned.lost);
+        }
+        took(&mut report.returned_to, returned.inventories);
+        sqlx::query("DELETE FROM stations WHERE id = ANY($1)").bind(&ids).execute(&mut *tx).await?;
+        for c in covered {
+            let message = ServerMessage::StationDisplaced {
+                station_id: c.station_id,
+                station_type: c.station_type.clone(),
+                terrain_id: c.terrain_id.clone(),
+            };
+            let notice = notices::queue(&mut *tx, c.owner_id, &c.station_id.to_string(), &message).await?;
+            report.removed_stations.push(c.station_id);
+            report.displaced.push((c, notice));
+        }
+    }
     tx.commit().await?;
 
     report.conflicts = conflicts;
     Ok(report)
+}
+
+/// A station off a plot, as `(id, station_type, owner_id, x, y)`
+type OffPlot = (Uuid, String, Uuid, f32, f32);
+
+/// The stations of `off_plot` that one of `lots` covers, each with the first
+/// lot that does.
+fn covered<'a>(off_plot: &[OffPlot], lots: impl Iterator<Item = &'a TerrainPlot> + Clone) -> Vec<CoveredStation> {
+    off_plot
+        .iter()
+        .filter_map(|(station_id, station_type, owner_id, x, y)| {
+            let (x, y) = (*x as f64, *y as f64);
+            let lot = lots.clone().find(|l| quad_contains(&l.corners, x, y))?;
+            Some(CoveredStation {
+                station_id: *station_id,
+                station_type: station_type.clone(),
+                owner_id: *owner_id,
+                terrain_id: lot.id.clone(),
+            })
+        })
+        .collect()
+}
+
+fn took(into: &mut Vec<(Uuid, Uuid)>, inventories: Vec<(Uuid, Uuid)>) {
+    for inv in inventories {
+        if !into.contains(&inv) {
+            into.push(inv);
+        }
+    }
 }
 
 /// Lots to upsert, column by column, for one `UNNEST` insert.
@@ -461,6 +555,179 @@ pub(crate) mod tests {
         assert_eq!(owner(&db, spare).await, Some(None), "the unowned lot wasn't deleted either");
         assert_eq!(balance(&db, ada).await, i64::MAX - 10);
         assert!(ledger(&db, ada).await.is_empty());
+    }
+
+    /// A square lot `id` of side 20 centred on (`x`, `y`)
+    fn lot(id: &str, x: f64, y: f64) -> TerrainPlot {
+        TerrainPlot {
+            id: id.into(),
+            corners: [(x - 10.0, y - 10.0), (x + 10.0, y - 10.0), (x + 10.0, y + 10.0), (x - 10.0, y + 10.0)],
+            street_facing_edge: (0, 1),
+            area: 400.0,
+            adjacent_street_id: "street".into(),
+            zone: "urban".into(),
+        }
+    }
+
+    /// An inventory for `player`
+    async fn inventory(db: &PgPool, player: Uuid) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO containers (id, container_type, owner_id) VALUES ($1, 'player_inventory', $2) RETURNING id",
+        )
+        .bind(Uuid::new_v4())
+        .bind(player)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    /// A workbench of `owner`'s off any plot at (`x`, `y`), with 3 fiber in its box
+    async fn bench(db: &PgPool, owner: Uuid, x: f32, y: f32) -> Uuid {
+        crate::content::sync(db, &crate::content::load().unwrap()).await.unwrap();
+        let station = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, kit_quality)
+             VALUES ($1, 'workbench', $2, $3, $4, 61)",
+        )
+        .bind(station)
+        .bind(owner)
+        .bind(x)
+        .bind(y)
+        .execute(db)
+        .await
+        .unwrap();
+        let container: Uuid = sqlx::query_scalar(
+            "INSERT INTO containers (id, container_type, station_id) VALUES ($1, 'station_inventory', $2) RETURNING id",
+        )
+        .bind(Uuid::new_v4())
+        .bind(station)
+        .fetch_one(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
+             VALUES ($1, 'fiber', 40, 3, $2, $3, 0)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(owner)
+        .bind(container)
+        .execute(db)
+        .await
+        .unwrap();
+        station
+    }
+
+    async fn station_exists(db: &PgPool, id: Uuid) -> bool {
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM stations WHERE id = $1)")
+            .bind(id)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    /// What's in a container, as (item_type, quantity) by slot
+    async fn held(db: &PgPool, container: Uuid) -> Vec<(String, i32)> {
+        sqlx::query_as("SELECT item_type, quantity FROM items WHERE container_id = $1 ORDER BY slot_index")
+            .bind(container)
+            .fetch_all(db)
+            .await
+            .unwrap()
+    }
+
+    fn displaced(station_id: Uuid, terrain_id: &str) -> ServerMessage {
+        ServerMessage::StationDisplaced { station_id, station_type: "workbench".into(), terrain_id: terrain_id.into() }
+    }
+
+    #[test]
+    fn a_bench_is_covered_by_the_lot_it_stands_in() {
+        let (under, beside, ada) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(9));
+        let off_plot = vec![
+            (under, "workbench".to_string(), ada, 103.0, 98.0),
+            (beside, "workbench".to_string(), ada, 115.0, 100.0),
+        ];
+        let lots = [lot("far", 500.0, 500.0), lot("near", 100.0, 100.0)];
+
+        assert_eq!(
+            covered(&off_plot, lots.iter()),
+            vec![CoveredStation { station_id: under, station_type: "workbench".into(), owner_id: ada, terrain_id: "near".into() }]
+        );
+        assert!(covered(&off_plot, lots[..1].iter()).is_empty());
+    }
+
+    /// #188: a new lot over a bench takes it down, and what it held goes back to its owner
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_new_lot_takes_down_the_bench_under_it(db: PgPool) {
+        let ada = player(&db, "ada", 0).await;
+        let pack = inventory(&db, ada).await;
+        let under = bench(&db, ada, 7203.0, 6001.0).await;
+        let beside = bench(&db, ada, 7300.0, 6000.0).await;
+
+        let report = sync_plots(&db, &[lot("new", 7200.0, 6000.0)], OnOwned::Keep).await.unwrap();
+
+        assert_eq!(report.inserted, 1);
+        assert!(!station_exists(&db, under).await);
+        assert!(station_exists(&db, beside).await, "open ground is still open");
+        assert_eq!(report.removed_stations, vec![under]);
+        assert_eq!(report.returned_to, vec![(ada, pack)]);
+        assert_eq!(held(&db, pack).await, vec![("workbench_kit".to_string(), 1), ("fiber".to_string(), 3)]);
+        let (c, notice) = &report.displaced[0];
+        assert_eq!((c.station_id, c.owner_id, c.terrain_id.as_str()), (under, ada, "new"));
+        assert!(notices::take(&db, *notice).await.unwrap(), "queued for ada");
+    }
+
+    /// The notice waits for an owner who's away
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_owner_hears_when_they_come_back(db: PgPool) {
+        let ada = player(&db, "ada", 0).await;
+        inventory(&db, ada).await;
+        let under = bench(&db, ada, 7200.0, 6000.0).await;
+
+        sync_plots(&db, &[lot("new", 7200.0, 6000.0)], OnOwned::Release).await.unwrap();
+
+        assert_eq!(notices::take_all(&db, ada).await.unwrap(), vec![displaced(under, "new")]);
+    }
+
+    /// An admin's commit without `force` refuses, and changes nothing
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_commit_without_force_refuses_to_cover_a_bench(db: PgPool) {
+        let ada = player(&db, "ada", 0).await;
+        let pack = inventory(&db, ada).await;
+        let under = bench(&db, ada, 7200.0, 6000.0).await;
+
+        let err = sync_plots(&db, &[lot("new", 7200.0, 6000.0)], OnOwned::Refuse).await.unwrap_err();
+
+        match err {
+            SyncError::Conflicts { plots, stations } => {
+                assert!(plots.is_empty());
+                assert_eq!(stations.iter().map(|c| c.station_id).collect::<Vec<_>>(), vec![under]);
+            }
+            e => panic!("{e:?}"),
+        }
+        assert!(station_exists(&db, under).await);
+        assert!(held(&db, pack).await.is_empty());
+        let new: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM plots WHERE terrain_id = 'new'").fetch_one(&db).await.unwrap();
+        assert_eq!(new, 0);
+    }
+
+    /// A forced commit gives a released plot's stations back too, as a foreclosure does
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_released_plot_gives_its_stations_back(db: PgPool) {
+        let ada = player(&db, "ada", 0).await;
+        let pack = inventory(&db, ada).await;
+        let lot_id = plot(&db, Some(ada), 0).await;
+        let on_it = bench(&db, ada, 7200.0, 6000.0).await;
+        sqlx::query("UPDATE stations SET plot_id = $1 WHERE id = $2").bind(lot_id).bind(on_it).execute(&db).await.unwrap();
+
+        let report = sync_plots(&db, &[], OnOwned::Release).await.unwrap();
+
+        assert_eq!(report.removed_stations, vec![on_it]);
+        assert!(report.displaced.is_empty(), "it stood on a plot");
+        assert_eq!(report.returned_to, vec![(ada, pack)]);
+        assert_eq!(held(&db, pack).await, vec![("workbench_kit".to_string(), 1), ("fiber".to_string(), 3)]);
     }
 
     #[test]
