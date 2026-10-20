@@ -19,6 +19,7 @@ pub mod land;
 pub mod land_mesh;
 pub mod houses;
 pub mod mesh;
+pub mod mist;
 pub mod palette;
 pub mod plots;
 pub mod roads;

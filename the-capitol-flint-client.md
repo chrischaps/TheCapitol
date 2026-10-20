@@ -563,7 +563,7 @@ Sizes: **S** is about 1 focused session, **M** 2–3, **L** 4 or more. Each phas
   - the needle's light is the top, over 80 m up
   - with no moat, the wall closes and all eight towers stand
   - the triangle budget
-- **Views.** `--view capitol` looks up at the tower from the quay south of the moat, and `--view crown` is level with the lantern. `--view from-urban|from-suburban|from-rural|from-wilderness` puts the tower on the horizon from each outer zone, each from a different side. The inscription (`--note`) now hangs over the needle at `cap_crown_y()`.
+- **Views.** `--view capitol` looks up at the tower from the quay south of the moat, and `--view crown` is level with the lantern. `--view from-urban|from-suburban|from-rural|from-wilderness` puts the tower on the horizon from each outer zone, each from a different side. *(W11, #204: from-wilderness now stands on a ridge in the ranges, and `--view range` looks along them from a summit.)* The inscription (`--note`) now hangs over the needle at `cap_crown_y()`.
 
 **How P3.6 built it:**
 - **`world/plots.rs`** draws every `/terrain` lot as a slab at `layer::PLOT` (12 cm above the land, 2 cm over the arterials), with a curb lip round it and walls down to the ground. Lots by a road show a dark gutter.

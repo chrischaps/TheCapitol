@@ -6,9 +6,9 @@
 //! key and wrapping at midnight:
 //!
 //! - **The palette**: the sky's colours and stars, the ambient from above,
-//!   the fill light, the fog's colour, the exposure, and how the gold on
-//!   your plots shows. Night holds round midnight, then dawn, a held day,
-//!   evening, and night again.
+//!   the fill light, the fog's colour, the exposure, how the gold on your
+//!   plots shows, and how thick the valleys' mist lies (W11). Night holds
+//!   round midnight, then dawn, a held day, evening, and night again.
 //! - **The key light**: the sun by day and the moon by night, as a compass
 //!   bearing, a height and a colour. The engine draws the sky's disc where
 //!   the first directional light is, so the same light is both. It's put
@@ -27,6 +27,9 @@ use crate::world::palette::mix;
 
 /// The evening key: the scene as authored. Offline captures default here.
 pub const EVENING: f64 = 0.80;
+/// How thick the valleys' mist lies at evening (`world::mist`), as the dusk
+/// cools. The scene doesn't author it.
+pub const EVENING_MIST: f32 = 0.6;
 
 /// How the gold over your own plots shows: `surface` is how much of it is
 /// a lit gold surface (1 by day), and `radiance` how much light it gives
@@ -87,6 +90,9 @@ pub struct Palette {
     pub fog_color: [f32; 3],
     pub exposure: f32,
     pub plots: PlotGlow,
+    /// How thick the valleys' mist lies, 0 to 1 (`world::mist`, W11):
+    /// thickest at dawn, some through the dusk and the night, none by day.
+    pub mist: f32,
 }
 
 /// The key light on its track: a compass bearing (degrees from north,
@@ -166,6 +172,7 @@ fn night() -> Palette {
             surface: 0.0,
             radiance: 1.6,
         },
+        mist: 0.35,
     }
 }
 
@@ -196,6 +203,7 @@ fn dawn() -> Palette {
             surface: 0.6,
             radiance: 0.25,
         },
+        mist: 1.0,
     }
 }
 
@@ -226,6 +234,7 @@ fn day() -> Palette {
             surface: 1.0,
             radiance: 0.0,
         },
+        mist: 0.0,
     }
 }
 
@@ -367,6 +376,7 @@ fn lerp_palette(a: &Palette, b: &Palette, t: f32) -> Palette {
             surface: lerp(a.plots.surface, b.plots.surface, t),
             radiance: lerp(a.plots.radiance, b.plots.radiance, t),
         },
+        mist: lerp(a.mist, b.mist, t),
     }
 }
 
@@ -416,8 +426,19 @@ mod tests {
             fog_color: [0.2225, 0.1123, 0.1380],
             exposure: 1.0,
             plots: PlotGlow::EVENING,
+            mist: EVENING_MIST,
         };
         (key, palette)
+    }
+
+    #[test]
+    fn the_mist_lies_thickest_at_dawn_and_is_gone_by_day() {
+        let (key, palette) = evening();
+        let mist = |phase: f64| at(phase, &key, &palette).palette.mist;
+        assert_eq!(mist(0.25), 1.0);
+        assert_eq!(mist(0.5), 0.0);
+        assert_eq!(mist(EVENING), EVENING_MIST);
+        assert!(mist(0.0) > 0.0 && mist(0.0) < EVENING_MIST, "{}", mist(0.0));
     }
 
     #[test]

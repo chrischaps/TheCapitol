@@ -62,12 +62,13 @@ struct Args {
     /// bridge (close, over the inner canal's south crossing), suburb (low
     /// over the southern suburbs' curving streets), urban (close over the
     /// urban lots by the south arterial), capitol (up at the tower from
-    /// beyond the moat), crown (level with its lantern), or from-urban,
-    /// from-suburban, from-rural and from-wilderness (the tower on the
-    /// horizon from each outer zone)
+    /// beyond the moat), crown (level with its lantern), from-urban,
+    /// from-suburban and from-rural (the tower on the horizon from each
+    /// outer zone), from-wilderness (down from a ridge to the tower) or
+    /// range (out along the ranges from a summit)
     #[arg(long, default_value = "street", value_parser = [
         "street", "district", "map", "bridge", "suburb", "urban", "capitol", "crown",
-        "from-urban", "from-suburban", "from-rural", "from-wilderness",
+        "from-urban", "from-suburban", "from-rural", "from-wilderness", "range",
     ])]
     view: String,
     /// Offline, film a camera move: a file of timed keys, each where the

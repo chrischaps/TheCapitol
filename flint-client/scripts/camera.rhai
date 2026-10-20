@@ -44,8 +44,10 @@
 // south crossing), suburb (low over the southern suburbs' curving streets),
 // urban (close over the lots by the south arterial), capitol (up at the
 // tower from beyond the moat), crown (level with its lantern), and
-// from-urban, from-suburban, from-rural and from-wilderness (the tower on
-// the horizon from each outer zone). A shot holds until the first camera
+// from-urban, from-suburban and from-rural (the tower on the horizon from
+// each outer zone), from-wilderness (down from a ridge over the valleys to
+// the tower, W11) and range (out along the ranges from a summit, W11). The
+// wilds' two stand on the default world's land. A shot holds until the first camera
 // input, then eases into the rig, which takes up what the shot was looking
 // at from about as far off, so the subject stays in frame.
 //
@@ -505,8 +507,15 @@ fn view_shot(view) {
         #{ pos: [141.0, 16.0, 141.0], at: [0.0, 30.0, 0.0] }
     } else if view == "from-rural" {
         #{ pos: [145.0, 22.0, -251.0], at: [0.0, 30.0, 0.0] }
+    } else if view == "range" {
+        // Over the southern massif's summit (59 m), looking east along the
+        // ring: down into the south valley and its trail, and across to
+        // the next massif's tops.
+        #{ pos: [-226.9, 74.0, 486.7], at: [193.3, 30.0, 478.4] }
     } else {
-        #{ pos: [-348.0, 26.0, -127.0], at: [0.0, 30.0, 0.0] }
+        // from-wilderness: on a ridge of the north-west massif (47 m),
+        // over its valleys and the plain to the tower, gold at the centre.
+        #{ pos: [-206.2, 50.5, -463.2], at: [0.0, 22.0, 0.0] }
     }
 }
 

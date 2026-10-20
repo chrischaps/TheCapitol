@@ -36,7 +36,7 @@ $common = @("--offline", "fixtures\terrain.json", "--width", $Width, "--height",
 
 # The shots, in the order a page would show them: the tower, then out
 # through the rings, then the whole map.
-$shots = "capitol", "crown", "bridge", "urban", "suburb", "from-rural", "from-wilderness", "district", "map"
+$shots = "capitol", "crown", "bridge", "urban", "suburb", "from-rural", "from-wilderness", "range", "district", "map"
 foreach ($view in $shots) {
     Write-Host "still: $view"
     & $Exe @common --view $view --screenshot "$out\$view.png" --screenshot-at 4 --exit-after 4.5

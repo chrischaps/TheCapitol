@@ -323,6 +323,7 @@ fn a_shot_lets_go_with_what_it_framed_still_in_frame() {
         "from-suburban",
         "from-rural",
         "from-wilderness",
+        "range",
     ];
     let mut off = Vec::new();
     for view in views {

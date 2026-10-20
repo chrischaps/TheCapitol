@@ -22,6 +22,13 @@
 //! The light is written as the scene's own components (the `sun` and
 //! `fill` lights, the sky), which the renderer reads every frame.
 //!
+//! The heights are the camera's over the land under it (W11), so on a
+//! ridge 50 m up the street view keeps its fog as it does in the city.
+//!
+//! The air also tints the far land blue (`world::land_mesh::View`) and
+//! lays the valleys' mist (`world::mist`), both clearing with the fog as
+//! the camera climbs.
+//!
 //! The camera rig (`scripts/camera.rhai`) sets the heights: above
 //! `CLEAR_FROM` it always looks down past the horizon (its pitch is over
 //! 50° by then), so the thinning fog never shows the dark ground skirt
@@ -70,6 +77,8 @@ pub struct Atmosphere {
     written: Option<(f32, f32, i64)>,
     /// How the gold on your plots shows at the hour shown, in steps.
     plots: Option<PlotGlow>,
+    /// How thick the valleys' mist shows, the hour's times the fog's.
+    mist: f32,
 }
 
 /// What the scene set, before any of it was thinned or flattened: the
@@ -116,6 +125,7 @@ impl Atmosphere {
         let (fog, flat, _) = state;
         let Daylight { key, palette } = daylight::at(shown, &authored.key, &authored.evening);
         self.plots = Some(palette.plots.stepped());
+        self.mist = palette.mist * fog;
 
         let mut config = renderer.post_process_config().clone();
         config.fog_density = authored.fog_density * fog;
@@ -140,6 +150,18 @@ impl Atmosphere {
     pub fn plots(&self) -> PlotGlow {
         self.plots.unwrap_or(PlotGlow::EVENING)
     }
+
+    /// How thick the valleys' mist shows (`world::mist`), 0 to 1: the
+    /// hour's, cleared with the fog. None until the first frame.
+    pub fn mist(&self) -> f32 {
+        self.mist
+    }
+}
+
+/// How high (m) a camera at world `eye` stands over the land under it:
+/// what the fog and the light go by.
+pub fn height_over_land(eye: [f32; 3]) -> f32 {
+    eye[1] - crate::world::land::ground_y([eye[0], eye[2]])
 }
 
 /// `light`, its intensity times `dim`.
@@ -224,6 +246,7 @@ impl Authored {
             fog_color: config.fog_color,
             exposure: config.exposure,
             plots: PlotGlow::EVENING,
+            mist: daylight::EVENING_MIST,
         };
         Self {
             fog_density: config.fog_density,
