@@ -59,9 +59,13 @@ pub const MASK_SIZE: usize = 3072;
 const GRASS_EDGE: f64 = WILDERNESS_OUTER_RADIUS;
 
 /// Heights along each side of the grid the blades stand on, over the
-/// mask's square: about 0.59 m apart. The engine reads the nearest one,
-/// not a blend (#228), so the grid is finer than the land's own metre,
-/// which keeps a blade within about 0.15 m of the ground on a meadow.
+/// mask's square: about 0.59 m apart. The engine stands each blade on the
+/// blend of the four round it (Flint ADR 0098, #228), which keeps 99% of
+/// blades within 2 cm of the land and the worst, on the rough ground high
+/// in the ranges, within 0.22 m (`blades_stand_on_the_land`). A grid at
+/// the land's own metre would cost a third as much (14 ms against 40, once
+/// a terrain), but its points fall between the land's, which smooths the
+/// sharpest ground: 5 cm and 0.48 m.
 pub const HEIGHTS: usize = 2048;
 
 /// Where the grass gives way in the wilds: the slopes (rise over run) over
@@ -1086,6 +1090,58 @@ mod tests {
             let want = land.field.height_at(x, z).unwrap();
             assert!((heights[j * HEIGHTS + i] - want).abs() < 1e-4);
         }
+    }
+
+    #[test]
+    fn blades_stand_on_the_land() {
+        // #228: the engine stands a blade on the blend of the four heights
+        // round it, each at the middle of its cell (Flint ADR 0098). Blended
+        // the same way here at every growing spot along 1440 rays, the grid
+        // keeps blades within a couple of centimetres of the land, and the
+        // worst, on the rough ground high in the ranges, within a few tens.
+        // (Read nearest, as before, the 99th was 0.15 m and the worst 0.41.)
+        let sampled = crate::world::land::tests::fixture_land();
+        let land = GrassLand {
+            field: Arc::new(crate::world::land::field(sampled.field.heightmap().clone_heights())),
+            cut: sampled.cut.clone(),
+            wet: sampled.wet.clone(),
+        };
+        let m = paint(fixture(), SIZE, Some(&land));
+        let heights = land.heights(&m);
+        let (origin, size) = m.world_rect();
+        let n = HEIGHTS as f32;
+        let blend = |x: f32, z: f32| {
+            let at = |c: f32, o: f32, s: f32| ((c - o) / s * n - 0.5).clamp(0.0, n - 1.0);
+            let (fx, fz) = (at(x, origin[0], size[0]), at(z, origin[1], size[1]));
+            let (i, j) = (fx as usize, fz as usize);
+            let (i1, j1) = ((i + 1).min(HEIGHTS - 1), (j + 1).min(HEIGHTS - 1));
+            let (tx, tz) = (fx - i as f32, fz - j as f32);
+            let h = |i: usize, j: usize| heights[j * HEIGHTS + i];
+            let near = h(i, j) + (h(i1, j) - h(i, j)) * tx;
+            let far = h(i, j1) + (h(i1, j1) - h(i, j1)) * tx;
+            near + (far - near) * tz
+        };
+        let mut off = Vec::new();
+        for k in 0..1440 {
+            let a = (k as f64).to_radians() * 0.25;
+            for s in 0..400 {
+                // Off the grid's points, and the land's
+                let r = land::FROM + 100.0 + s as f64 * 5.3;
+                if r > GRASS_EDGE - EDGE_IN {
+                    break;
+                }
+                let p = [CENTER_X + r * a.cos(), CENTER_Y + r * a.sin()];
+                if m.value_at(p) > 0 {
+                    let [x, z] = to_world(p[0], p[1]);
+                    off.push((blend(x, z) - land.field.height_at(x, z).unwrap()).abs());
+                }
+            }
+        }
+        assert!(off.len() > 100_000, "only {} blades", off.len());
+        off.sort_by(f32::total_cmp);
+        let p99 = off[off.len() * 99 / 100];
+        let worst = off[off.len() - 1];
+        assert!(p99 < 0.03 && worst < 0.3, "99% within {p99} m, the worst {worst} m");
     }
 
     #[test]
