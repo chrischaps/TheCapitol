@@ -2,9 +2,12 @@
 // damping. Zoom runs on one dial, from standing over someone's shoulder to
 // the whole world seen from above, and the tilt rides on it:
 //
-//   - closest (11 m off): 15° down and under 3 m up, standing in the
-//     street with the sky in the top third of the frame, and from the
-//     outer zones the tower on the horizon;
+//   - the shoulder (E3.13, 4.5 m off): nearly level, 2 m up, about 3 m
+//     behind you and a little to your right, looking past you at chest
+//     height, so the street ahead fills the frame;
+//   - 11 m off: 15° down and under 3 m up, standing in the street with the
+//     sky in the top third of the frame, and from the outer zones the
+//     tower on the horizon;
 //   - street (32 m): about 50° down, where the camera rests;
 //   - map (880 m): straight down, north at the top, the whole r6000
 //     world in frame, the light flattened into the 2D client's palette
@@ -16,6 +19,17 @@
 //
 // On the way to the map the view drifts to the Capitol and turns north up,
 // so the furthest zoom is always the same map.
+//
+// Close in (E3.13), the camera keeps out of the buildings: when a wall
+// stands between you and it (cap_clear_line, the city's solids), it rises
+// at once, over the roofs behind you, and looks down into the street; if
+// rising isn't enough, it comes in along its line to you. It eases back
+// as the way clears. And while you walk, close in, it swings round behind
+// you, so the street ahead is what you see, unless you've just turned it
+// yourself.
+// Walking into the bazaar (cap_in_bazaar) eases the camera down to the
+// shoulder, so the market street fills the view, and walking out eases it
+// back to where you had it, unless you turned the wheel meanwhile.
 //
 // Controls (config/input.toml): WASD or the arrows pan, R and F, + and -
 // or the wheel zoom, Q and E or a right-drag orbit, H or Home comes home.
@@ -39,8 +53,8 @@
 // doesn't take the zoom: it's on top of the rig, so a wheel turned meanwhile
 // still counts. It fades away toward the map, where there's nothing to open.
 //
-// `--view` (cap_view) frames a capture. street, district and map are rig
-// framings. The rest are fixed shots: bridge (the quay by the inner canal's
+// `--view` (cap_view) frames a capture. street, district, map and bazaar
+// (the free point in the bazaar's lane, E3.13) are rig framings. The rest are fixed shots: bridge (the quay by the inner canal's
 // south crossing), suburb (low over the southern suburbs' curving streets),
 // urban (close over the lots by the south arterial), capitol (up at the
 // tower from beyond the moat), crown (level with its lantern), and
@@ -66,8 +80,34 @@
 
 // Camera distance from the point it looks at (m) at zoom 0 and zoom 1.
 // Zoom is linear in the log of distance, so each wheel notch feels alike.
-fn near_distance() { 11.0 }
+fn near_distance() { 4.5 }
 fn far_distance() { 880.0 }
+// The shoulder view (E3.13) fades in from this distance down to the near
+// end: the look rises to chest height, moves ahead of you and over your
+// right shoulder (m). 11 m is where the dial used to end.
+fn shoulder_distance() { 11.0 }
+fn shoulder_zoom() { zoom_at(shoulder_distance()) }
+fn look_lift() { 1.6 }
+fn look_ahead() { 1.5 }
+fn shoulder_side() { 0.45 }
+// Close in, a wall between you and the camera pulls it in (E3.13): below
+// this distance, never nearer than this to what it looks at (m), easing
+// back out at this rate.
+fn pull_within() { 14.0 }
+fn pull_least() { 1.2 }
+fn pull_k() { 3.0 }
+// How far the camera may rise over the roofs before it pulls in instead,
+// and the steps it tries (m).
+fn rise_most() { 3.0 }
+fn rise_step() { 0.25 }
+// Close in, walking swings the camera round behind you: from this pace up
+// (m/s), at this rate, and not for this long after you've turned it (s).
+fn follow_from() { 0.6 }
+fn follow_k_yaw() { 1.4 }
+fn follow_after_turn() { 1.5 }
+// How fast the zoom eases when the bazaar takes it down or gives it back:
+// slower than a wheel's, an arrival rather than a jump.
+fn arrive_zoom_k() { 1.6 }
 // Where the camera rests: 32 m off, 50° down, about 25 m up.
 fn street_distance() { 32.0 }
 fn street_zoom() {
@@ -77,15 +117,18 @@ fn street_zoom() {
 // up (before W9 grew it to the whole world).
 fn district_distance() { 232.0 }
 fn district_zoom() { zoom_at(district_distance()) }
-// Tilt (degrees below level) at zoom 0, at street and at the map. Just
-// short of 90 at the map, so the look-at keeps a heading.
-fn closest_pitch() { 15.0 }
+// Tilt (degrees below level) at zoom 0, at the shoulder's edge (11 m), at
+// street and at the map. Just short of 90 at the map, so the look-at keeps
+// a heading.
+fn closest_pitch() { 5.0 }
+fn shoulder_pitch() { 15.0 }
 fn street_pitch() { 50.0 }
 fn map_pitch() { 89.9 }
-// The view drifts from the point to the Capitol over this zoom range, and
-// turns north up over the second one.
-fn centre_from() { 0.62 }
-fn north_from() { 0.80 }
+// The view drifts from the point to the Capitol from this far out (m), and
+// turns north up from the second. They're distances, so moving the dial's
+// near end (E3.13) doesn't move them.
+fn centre_from() { zoom_at(166.5) }
+fn north_from() { zoom_at(366.5) }
 // Keep the free point on the world (r6000, 600 m).
 fn world_radius() { 600.0 }
 // How fast things settle: 1/e in 1/k seconds.
@@ -104,8 +147,11 @@ fn arrive_return() { 2.0 }
 fn zoom_k() { 8.0 }
 fn yaw_k() { 10.0 }
 // Input rates.
-fn wheel_step() { 0.045 }   // zoom per wheel notch
-fn key_zoom_rate() { 0.45 } // zoom per second on R/F or +/-
+// A notch of the wheel multiplies the distance by about 1.22, as it did
+// before the dial reached the shoulder (E3.13): the steps are in zoom, so
+// they shrink as the dial grows.
+fn wheel_step() { 0.0374 }   // zoom per wheel notch
+fn key_zoom_rate() { 0.374 } // zoom per second on R/F or +/-
 fn orbit_rate() { 1.6 }     // radians per second on Q/E
 fn drag_rate() { 0.006 }    // radians per point of right-drag
 // How long a fixed shot takes to ease into the rig, in seconds, and how
@@ -137,6 +183,7 @@ fn keep_top() { 86.0 }
 fn wall_outer() { 22.5 }
 fn wall_clear() { 10.0 } // above the land: over the gatehouse (8.8 m) by the near plane
 fn ground_clear() { 1.5 }
+fn clear_ramp() { 6.0 }
 
 // ── State ────────────────────────────────────────────────────────────────
 
@@ -165,6 +212,16 @@ let rig = #{
     bump: (),
     // The zone last seen in the banner, and when you walked into it (P8.2).
     zone: (), arrived: (),
+    // Close in, how far out along its line the camera may stand, 0 to 1:
+    // a wall pulls it in at once, and it eases back (E3.13).
+    pull: 1.0,
+    // How far it has risen over the roofs (m), and the wall clock of your
+    // last turn of the camera, and where you were last frame.
+    rise: 0.0, turned: -100.0, last_you: (),
+    // In the bazaar (E3.13): whether you are, the zoom you had before it
+    // took you down, whether you've zoomed since, and whether the zoom is
+    // easing for it (slower than a wheel).
+    in_bazaar: false, before: (), zoomed: false, arriving: false,
 };
 
 // ── Per frame ────────────────────────────────────────────────────────────
@@ -205,6 +262,19 @@ fn on_update() {
     if you != () && !rig.at_login {
         rig.target_x = you[0] + rig.pan_x;
         rig.target_z = you[2] + rig.pan_z;
+        // Close in, walking swings the camera round behind you (E3.13)
+        if rig.last_you != () && dt > 0.0 {
+            let vx = (you[0] - rig.last_you[0]) / dt;
+            let vz = (you[2] - rig.last_you[2]) / dt;
+            rig.yaw_to = follow_yaw(rig.yaw_to, vx, vz, rig.zoom, total_time() - rig.turned, dt);
+        }
+        rig.last_you = you;
+    }
+    // The bazaar takes the view down to the shoulder (E3.13): you, or
+    // offline the free point, when the rig is driving
+    if !rig.at_login && rig.shot == () {
+        let at = if you != () { [you[0], you[2]] } else { [rig.target_x, rig.target_z] };
+        rig.bazaar_ease(cap_in_bazaar(at[0], at[1]));
     }
     if rig.path {
         if moved {
@@ -223,7 +293,9 @@ fn on_update() {
     let f = 1.0 - (-follow_k() * dt).exp();
     rig.focus_x += (rig.target_x - rig.focus_x) * f;
     rig.focus_z += (rig.target_z - rig.focus_z) * f;
-    rig.zoom += (rig.zoom_to - rig.zoom) * (1.0 - (-zoom_k() * dt).exp());
+    let zk = if rig.arriving { arrive_zoom_k() } else { zoom_k() };
+    rig.zoom += (rig.zoom_to - rig.zoom) * (1.0 - (-zk * dt).exp());
+    if (rig.zoom_to - rig.zoom).abs() < 0.002 { rig.arriving = false; }
     rig.yaw += (rig.yaw_to - rig.yaw) * (1.0 - (-yaw_k() * dt).exp());
 
     let pose = rig_pose(rig.focus_x, rig.focus_z, rig.zoom, rig.yaw);
@@ -244,6 +316,22 @@ fn on_update() {
             pose = #{ px: s.pos[0], py: s.pos[1], pz: s.pos[2],
                       tx: s.at[0], ty: s.at[1], tz: s.at[2] };
         }
+    }
+    // Close in, keep out of the buildings: up (or in) at once, back at an
+    // ease
+    if rig.shot == () && rig_distance(rig.zoom) <= pull_within() {
+        // From your head, so a wall you face isn't taken for one behind
+        let head = [rig.focus_x, cap_ground_at(rig.focus_x, rig.focus_z) + look_lift(), rig.focus_z];
+        let need = rise_needed(pose, head);
+        let ease = 1.0 - (-pull_k() * dt).exp();
+        if need > rig.rise { rig.rise = need; } else { rig.rise += (need - rig.rise) * ease; }
+        pose = lifted(pose, rig.rise);
+        let clear = clear_share(pose, rig_distance(rig.zoom), head);
+        if clear < rig.pull { rig.pull = clear; } else { rig.pull += (clear - rig.pull) * ease; }
+        pose = pulled(pose, rig.pull);
+    } else {
+        rig.pull = 1.0;
+        rig.rise = 0.0;
     }
     rig.watch_zone();
     if rig.shot == () { pose = rig.eased_in(pose); }
@@ -278,6 +366,84 @@ fn nudged(pose) {
        tx: pose.tx + dx, ty: pose.ty + dy, tz: pose.tz + dz }
 }
 
+// The bazaar's ease (E3.13), with `inside` whether you're in it now. Coming
+// in, the zoom eases down to the shoulder, unless it's there already, and
+// what you had is kept; going out, it eases back to that, unless you've
+// zoomed meanwhile, which counts.
+fn bazaar_ease(inside) {
+    if inside && !this.in_bazaar {
+        this.zoomed = false;
+        if this.zoom_to > shoulder_zoom() * 0.5 {
+            this.before = this.zoom_to;
+            this.zoom_to = 0.0;
+            this.arriving = true;
+        } else {
+            this.before = ();
+        }
+    } else if !inside && this.in_bazaar {
+        if this.before != () && !this.zoomed {
+            this.zoom_to = this.before;
+            this.arriving = true;
+        }
+        this.before = ();
+    }
+    this.in_bazaar = inside;
+}
+
+// The yaw to aim for, from `yaw`, while you move at (vx, vz) m/s: close in
+// (by the zoom), eased round toward behind you, the short way, unless you
+// turned the camera within follow_after_turn() (`since` seconds ago).
+fn follow_yaw(yaw, vx, vz, zoom, since, dt) {
+    let k = 1.0 - smooth(zoom / shoulder_zoom());
+    let pace = (vx * vx + vz * vz).sqrt();
+    if k <= 0.0 || pace < follow_from() || since < follow_after_turn() { return yaw; }
+    // Behind you, looking the way you go (as take_over_from_shot reads a
+    // look direction)
+    let behind = atan(-vx, -vz);
+    let turn = wrap_angle(behind - yaw);
+    yaw + turn * k * (1.0 - (-follow_k_yaw() * dt).exp())
+}
+
+// How far the camera must rise for its line to your `head` to clear the
+// buildings, in rise_step()s up to rise_most(); rise_most() if no height
+// clears it (then it pulls in too).
+fn rise_needed(pose, head) {
+    let h = 0.0;
+    while h <= rise_most() {
+        let clear = cap_clear_line(head[0], head[1], head[2], pose.px, pose.py + h, pose.pz);
+        if clear >= 1.0 { return h; }
+        h += rise_step();
+    }
+    rise_most()
+}
+
+// The pose with the camera `h` m higher, looking at the same point.
+fn lifted(pose, h) {
+    if h <= 0.0 { return pose; }
+    #{ px: pose.px, py: pose.py + h, pz: pose.pz, tx: pose.tx, ty: pose.ty, tz: pose.tz }
+}
+
+// What share of the way from your `head` out to the camera is clear of the
+// buildings (cap_clear_line): 1 unless the camera is close in.
+fn clear_share(pose, d, head) {
+    if d > pull_within() { return 1.0; }
+    cap_clear_line(head[0], head[1], head[2], pose.px, pose.py, pose.pz)
+}
+
+// The pose with the camera brought in along its line to what it looks at,
+// to `share` of the way out, but never nearer than pull_least().
+fn pulled(pose, share) {
+    if share >= 1.0 { return pose; }
+    let dx = pose.px - pose.tx;
+    let dy = pose.py - pose.ty;
+    let dz = pose.pz - pose.tz;
+    let len = (dx * dx + dy * dy + dz * dz).sqrt();
+    if len < 0.001 { return pose; }
+    let k = share.max(pull_least() / len).min(1.0);
+    #{ px: pose.tx + dx * k, py: pose.ty + dy * k, pz: pose.tz + dz * k,
+       tx: pose.tx, ty: pose.ty, tz: pose.tz }
+}
+
 // A new zone in the banner: start the ease. The zone you come into the
 // world in only sets where you are; the landing is its ease.
 fn watch_zone() {
@@ -295,7 +461,7 @@ fn eased_in(pose) {
     let age = total_time() - this.arrived;
     if age > arrive_back() + arrive_return() { this.arrived = (); return pose; }
     let e = smooth(age / arrive_out()) * (1.0 - smooth((age - arrive_back()) / arrive_return()));
-    let k = arrive_size() * e * (1.0 - smooth((this.zoom - centre_from()) / 0.15));
+    let k = arrive_size() * e * (1.0 - smooth((this.zoom - centre_from()) / 0.125));
     #{ px: pose.px + (pose.px - pose.tx) * k, py: pose.py + (pose.py - pose.ty) * k,
        pz: pose.pz + (pose.pz - pose.tz) * k, tx: pose.tx, ty: pose.ty, tz: pose.tz }
 }
@@ -339,6 +505,8 @@ fn steer(dt, you) {
     let keys = action_axis("zoom_out", "zoom_in");
     if notches != 0.0 || keys != 0.0 {
         any = true;
+        this.zoomed = true;
+        this.arriving = false;
         this.zoom_to = (this.zoom_to - (notches * wheel_step() - keys * key_zoom_rate() * dt) * feel)
             .max(0.0).min(1.0);
     }
@@ -347,12 +515,14 @@ fn steer(dt, you) {
     let turn = action_axis("orbit_left", "orbit_right");
     if turn != 0.0 {
         any = true;
+        this.turned = total_time();
         this.yaw_to += turn * orbit_rate() * dt * feel * way;
     }
     if is_mouse_pressed(1) {
         let x = mouse_x();
         if this.drag_x != () && x != this.drag_x {
             any = true;
+            this.turned = total_time();
             this.yaw_to -= (x - this.drag_x) * drag_rate() * feel * way;
         }
         this.drag_x = x;
@@ -404,6 +574,12 @@ fn start_view(view) {
         at = [0.0, 30.0];
     } else if view == "street" || view == "" {
         at = [0.0, 48.0];
+    } else if view == "bazaar" {
+        // In the bazaar's lane (E3.12), looking west up it from the mouth:
+        // the bazaar then takes the rig down to the shoulder (E3.13)
+        at = [-6.0, 29.75];
+        this.yaw = PI() / 2.0;
+        this.yaw_to = this.yaw;
     } else {
         this.shot = view_shot(view);
         this.release = 1.0;
@@ -548,10 +724,19 @@ fn rig_pose(fx, fz, zoom, yaw) {
 
     let d = rig_distance(zoom);
     let p = rig_pitch(zoom).to_radians();
+    // Close in (E3.13), the look rises to chest height and moves ahead of
+    // the point and over its right shoulder. Away from you is
+    // (-sin, -cos) in x, z, and right is (cos, -sin).
+    let k = 1.0 - smooth(zoom / shoulder_zoom());
+    let sh = heading.sin();
+    let ch = heading.cos();
+    lx += (-sh * look_ahead() + ch * shoulder_side()) * k;
+    lz += (-ch * look_ahead() - sh * shoulder_side()) * k;
+    let ly = g + look_lift() * k;
     let across = d * p.cos();
-    let px = lx + across * heading.sin();
-    let pz = lz + across * heading.cos();
-    let py = g + d * p.sin();
+    let px = lx + across * sh;
+    let pz = lz + across * ch;
+    let py = ly + d * p.sin();
 
     // Stay out of the keep: slide out round it.
     let r = (px * px + pz * pz).sqrt();
@@ -563,19 +748,29 @@ fn rig_pose(fx, fz, zoom, yaw) {
     }
     // Rise over the curtain wall, and never touch the land.
     py = py.max(cap_ground_at(px, pz) + rig_floor(r));
-    py = over_the_land(px, py, pz, lx, g, lz);
-    #{ px: px, py: py, pz: pz, tx: lx, ty: g, tz: lz }
+    py = over_the_land(px, py, pz, lx, ly, lz);
+    #{ px: px, py: py, pz: pz, tx: lx, ty: ly, tz: lz }
 }
 
 // The least height, from `py` up, at which the camera at (px, pz) sees the
-// point (tx, ty, tz) over the land: its line clears the ground under it by
-// ground_clear() every few metres along the way (at most 64 places).
+// point (tx, ty, tz) over the land: its line clears the ground under it
+// every few metres along the way (at most 64 places), by ground_clear(),
+// eased in over the first clear_ramp() metres from the point, which is on
+// the ground itself. A full clearance right up to it held the near end
+// metres too high (E3.13).
 fn over_the_land(px, py, pz, tx, ty, tz) {
     let len = ((px - tx) * (px - tx) + (pz - tz) * (pz - tz)).sqrt();
+    if len < 0.01 { return py; }
     let steps = (len / 2.5).ceiling().to_int().max(4).min(64);
-    for k in 1..steps {
-        let t = k.to_float() / steps.to_float();
-        let h = cap_ground_at(tx + (px - tx) * t, tz + (pz - tz) * t) + ground_clear();
+    // Every half metre where the clearance eases in, then every few
+    let ts = [];
+    for k in 1..13 {
+        let d = k.to_float() * 0.5;
+        if d < len { ts.push(d / len); }
+    }
+    for k in 1..steps { ts.push(k.to_float() / steps.to_float()); }
+    for t in ts {
+        let h = cap_ground_at(tx + (px - tx) * t, tz + (pz - tz) * t) + ground_clear() * (len * t / clear_ramp()).min(1.0);
         // The line is at ty + (py - ty) t there.
         let need = ty + (h - ty) / t;
         if need > py { py = need; }
@@ -617,12 +812,16 @@ fn zoom_at(d) {
     ((d / near_distance()).ln() / (far_distance() / near_distance()).ln()).max(0.0).min(1.0)
 }
 
-// Tilt in degrees below level at a zoom: up from closest to street, held
-// there, then easing to straight down. Smooth at the join.
+// Tilt in degrees below level at a zoom: nearly level at the shoulder, up
+// to 11 m, on up to street, then easing to straight down. Smooth at the
+// joins.
 fn rig_pitch(zoom) {
     let zs = street_zoom();
-    if zoom <= zs {
-        lerp(closest_pitch(), street_pitch(), smooth(zoom / zs))
+    let zh = shoulder_zoom();
+    if zoom <= zh {
+        lerp(closest_pitch(), shoulder_pitch(), smooth(zoom / zh))
+    } else if zoom <= zs {
+        lerp(shoulder_pitch(), street_pitch(), smooth((zoom - zh) / (zs - zh)))
     } else {
         lerp(street_pitch(), map_pitch(), smooth((zoom - zs) / (1.0 - zs)))
     }

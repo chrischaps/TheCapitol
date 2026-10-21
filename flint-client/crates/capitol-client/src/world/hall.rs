@@ -195,6 +195,14 @@ impl Site {
         }
     }
 
+    /// The hall's bulk, for the camera to keep out of (E3.13): the podium,
+    /// the portico and the hall behind, up to the cornice. The forecourt in
+    /// front of the steps is open.
+    pub fn solid(&self) -> crate::world::solids::Solid {
+        let r = self.rect(1.85, 7.9, -4.85, 4.85);
+        crate::world::solids::Solid { corners: [r[0], r[1], r[2], r[3]], bottom: G - 0.1, top: CORNICE_TOP }
+    }
+
     /// The Gazette's notice board (E3.9): where a click picks it, round
     /// its slot, and the middle of its roof, world (X, Y, Z), where its
     /// prompt hangs.

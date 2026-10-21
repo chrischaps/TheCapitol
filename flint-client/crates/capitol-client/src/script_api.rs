@@ -80,6 +80,12 @@ pub struct Shared {
     /// The stall a script last asked to go to (`cap_visit_stall`). The
     /// extension takes it next frame.
     pub visit_stall: Arc<Mutex<Option<String>>>,
+    /// The city's buildings as solids (E3.13), for `cap_clear_line`: the
+    /// camera pulls in rather than look through one. Set when a layer
+    /// builds.
+    pub solids: Arc<Mutex<Vec<crate::world::solids::Solid>>>,
+    /// The bazaar's stalls' footprints (E3.13), for `cap_in_bazaar`.
+    pub stall_feet: Arc<Mutex<Vec<[[f32; 2]; 4]>>>,
     /// Where the egui UI's landmarks were drawn last frame (P8.2), by name,
     /// for scripts to fly things to. Only "inventory" so far.
     pub anchors: Arc<Mutex<HashMap<&'static str, UiAnchor>>>,
@@ -334,6 +340,10 @@ pub struct StationMark {
     /// Yours, and waiting (E4.4): why, in a few words ("Out of iron ore").
     pub paused: Option<String>,
 }
+
+/// How near a stall you stand to be in the bazaar, in metres: its streets'
+/// crowns are all within it (E3.13).
+pub const IN_BAZAAR: f32 = 2.0;
 
 /// How near a click must land to a player's feet to pick them, in metres.
 /// An avatar is about 0.7 m across.
@@ -781,6 +791,24 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         if let Ok(mut v) = visit.lock() {
             *v = Some(id.to_string());
         }
+    });
+    // `cap_clear_line(ax, ay, az, bx, by, bz) -> f64`: how far, as a share
+    // of the way from a to b (world metres), the line runs before it enters
+    // a building: 1 when it's clear (E3.13, `world::solids`).
+    let solids = shared.solids.clone();
+    engine.register_fn("cap_clear_line", move |ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64| -> f64 {
+        let Ok(solids) = solids.lock() else { return 1.0 };
+        let p = |x: f64, y: f64, z: f64| [x as f32, y as f32, z as f32];
+        crate::world::solids::clear_along(&solids, p(ax, ay, az), p(bx, by, bz)) as f64
+    });
+    // `cap_in_bazaar(x, z) -> bool`: whether the ground point (x, z), world
+    // metres, is in the bazaar: on a stall or within 2 m of one, which takes
+    // in its streets (E3.13).
+    let feet = shared.stall_feet.clone();
+    engine.register_fn("cap_in_bazaar", move |x: f64, z: f64| -> bool {
+        feet.lock()
+            .map(|f| f.iter().any(|q| quad_covers(q, x as f32, z as f32, IN_BAZAAR)))
+            .unwrap_or(false)
     });
     // `cap_node_at(x, z) -> #{ ... } or ()`: the node nearest the ground
     // point (x, z), within NODE_PICK metres, as in `cap_nodes`.

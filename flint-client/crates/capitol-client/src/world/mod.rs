@@ -25,6 +25,7 @@ pub mod mist;
 pub mod palette;
 pub mod plots;
 pub mod roads;
+pub mod solids;
 pub mod sector;
 pub mod tower;
 pub mod water;

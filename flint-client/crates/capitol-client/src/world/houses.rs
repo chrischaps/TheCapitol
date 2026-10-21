@@ -647,6 +647,8 @@ pub struct Pane {
 pub struct House {
     pub body: MeshBuf,
     pub panes: Vec<Pane>,
+    /// Its buildings as solids, for the camera to keep out of (E3.13)
+    pub solids: Vec<crate::world::solids::Solid>,
 }
 
 /// The foot of every wall, sunk into the lot so no seam shows.
@@ -1045,7 +1047,18 @@ fn openings(h: &mut House, b: &Block, a: P, z: P, front: bool, wall_top: f32, li
 /// The house on the lot `id`, `progress` of the way up (1 is built), or
 /// `None` if the lot has no room for one.
 pub fn house(id: &str, lot: &Lot, progress: f32) -> Option<House> {
-    Some(raise(&plan(id, lot)?, Stage::at(progress)))
+    let plan = plan(id, lot)?;
+    let mut house = raise(&plan, Stage::at(progress));
+    house.solids = plan
+        .blocks
+        .iter()
+        .map(|b| crate::world::solids::Solid {
+            corners: b.rect.corners().map(|p| to_world(p[0], p[1])),
+            bottom: FOOT,
+            top: FLOOR + b.storeys as f32 * b.storey,
+        })
+        .collect();
+    Some(house)
 }
 
 /// How bright the lamps in the windows are at `glow`: the
@@ -1161,6 +1174,11 @@ impl Houses {
         self.claimed = now;
         let (up, growing) = self.counts();
         tracing::debug!("houses: {up} up, {growing} growing");
+    }
+
+    /// Every house that's up, as solids for the camera (E3.13).
+    pub fn solids(&self) -> impl Iterator<Item = &crate::world::solids::Solid> {
+        self.built.values().flat_map(|(_, h)| h.solids.iter())
     }
 
     /// Moves time on by `dt`: a house that has finished growing joins its
