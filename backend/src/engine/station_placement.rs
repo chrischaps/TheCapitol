@@ -256,12 +256,15 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
 
     // The kit goes first: with it locked the take can't miss, but if it did
     // there'd be no station from nothing, only an error and a rollback
-    super::units::take_units(tx, kit_item_id, &kit).await?.ok_or(PlacementError::KitNotFound)?;
+    let taken = super::units::take_units(tx, kit_item_id, &kit).await?.ok_or(PlacementError::KitNotFound)?;
+    // The station keeps the kit's maker with its quality, so the kit it
+    // gives back is still their work (#241)
+    let kit_maker = taken.marked.lead_maker();
 
     let station_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id, kit_quality)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id, kit_quality, kit_maker_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(station_id)
     .bind(station_type)
@@ -270,6 +273,7 @@ async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Resul
     .bind(y as f32)
     .bind(plot_id)
     .bind(kit_quality)
+    .bind(kit_maker)
     .execute(&mut *tx)
     .await?;
 
@@ -456,6 +460,36 @@ mod tests {
         assert_eq!(kit_quality, 64);
         let container = placed.info.container_id.unwrap();
         assert_eq!(count(&db, "SELECT COUNT(*) FROM containers WHERE id = $1", container).await, 1);
+    }
+
+    /// A kit Ada made, placed and taken down by Bo, comes back still Ada's
+    /// work (#241)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_kit_keeps_its_makers_mark_through_its_station(db: PgPool) {
+        use crate::engine::units::test_units::{marked, marked_stack_of};
+        use crate::engine::units::Marked;
+        use capitol_protocol::rules::stacking::Units;
+        let (ada, _) = builder(&db, "ada", 50).await;
+        let (bo, plain) = builder(&db, "bo", 50).await;
+        let inventory: Uuid = sqlx::query_scalar("SELECT container_id FROM items WHERE id = $1")
+            .bind(plain)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let made = Marked::by(Some(ada), &Units::uniform(1, 71));
+        let kit = marked_stack_of(&db, bo, inventory, 1, "workbench_kit", &made).await;
+
+        let placed = place(&db, bench(bo, kit, 0.0)).await.unwrap();
+        let kept: Option<Uuid> = sqlx::query_scalar("SELECT kit_maker_id FROM stations WHERE id = $1")
+            .bind(placed.info.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(kept, Some(ada));
+        let removed = crate::engine::station_removal::remove_station(&db, bo, placed.info.id).await.unwrap();
+
+        assert_eq!(marked(&db, removed.kit_item_id).await, made);
     }
 
     /// Places `first` and holds its transaction open while `second` is

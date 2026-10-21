@@ -14,9 +14,12 @@
 use std::collections::HashMap;
 
 use capitol_protocol::ledger::UnitFlow;
+use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::ws::ItemCount;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
+
+use super::units::{Marked, NewStack};
 
 
 /// What a removal changed, so the caller can update the game state and tell clients.
@@ -96,9 +99,9 @@ async fn remove_in(
     player_id: Uuid,
     station_id: Uuid,
 ) -> Result<(RemovedStation, String), RemoveError> {
-    let (station_type, owner_id, plot_id, kit_quality, kit, tool): (String, Uuid, Option<Uuid>, i32, Option<String>, Option<Uuid>) =
+    let (station_type, owner_id, plot_id, kit_quality, kit_maker, kit, tool): (String, Uuid, Option<Uuid>, i32, Option<Uuid>, Option<String>, Option<Uuid>) =
         sqlx::query_as(
-            "SELECT s.station_type, s.owner_id, s.plot_id, s.kit_quality, st.kit_item, s.installed_tool
+            "SELECT s.station_type, s.owner_id, s.plot_id, s.kit_quality, s.kit_maker_id, st.kit_item, s.installed_tool
              FROM stations s LEFT JOIN station_types st ON st.id = s.station_type
              WHERE s.id = $1 FOR UPDATE OF s",
         )
@@ -146,20 +149,18 @@ async fn remove_in(
         super::station_tools::give_back(tx, station_id, tool, player_id, inventory_id, slots[1]).await?;
     }
 
-    // The station keeps the kit's quality but not its maker, so the kit
-    // comes back unmarked (#241)
-    let kit_item_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
-         VALUES ($1, $2, $3, 1, $4, $5, $6)",
+    // The kit comes back as it went in: its quality and its maker's mark (#241)
+    let kit_item_id = super::units::insert_stack(
+        tx,
+        NewStack {
+            item_type: &kit,
+            owner_id: Some(player_id),
+            container_id: Some(inventory_id),
+            slot_index: Some(slot),
+            durability: None,
+        },
+        &kit_units(kit_quality, kit_maker),
     )
-    .bind(kit_item_id)
-    .bind(&kit)
-    .bind(kit_quality)
-    .bind(player_id)
-    .bind(inventory_id)
-    .bind(slot)
-    .execute(&mut **tx)
     .await?;
 
     // The container goes with the station (ON DELETE CASCADE), and it's empty.
@@ -185,6 +186,12 @@ async fn remove_in(
         },
         kit,
     ))
+}
+
+/// The one unit of a kit a station gives back: the quality it was placed at,
+/// made by whoever made it (`None`, unmarked)
+fn kit_units(quality: i32, maker: Option<Uuid>) -> Marked {
+    Marked::by(maker, &Units::from_pairs([(quality, 1)]))
 }
 
 /// The first `n` free slots of `player_id`'s inventory, which is locked, or
@@ -359,8 +366,8 @@ pub async fn return_stations(
     tx: &mut PgConnection,
     station_ids: &[Uuid],
 ) -> Result<ReturnedStations, sqlx::Error> {
-    let stations: Vec<(Uuid, String, Uuid, i32, Option<String>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT s.id, s.station_type, s.owner_id, s.kit_quality, st.kit_item, s.installed_tool, s.tool_owner
+    let stations: Vec<(Uuid, String, Uuid, i32, Option<Uuid>, Option<String>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT s.id, s.station_type, s.owner_id, s.kit_quality, s.kit_maker_id, st.kit_item, s.installed_tool, s.tool_owner
          FROM stations s LEFT JOIN station_types st ON st.id = s.station_type
          WHERE s.id = ANY($1) ORDER BY s.placed_at, s.id FOR UPDATE OF s",
     )
@@ -389,7 +396,7 @@ pub async fn return_stations(
     let mut returned = ReturnedStations::default();
     let mut stores = Stores::new();
 
-    for (station_id, station_type, owner_id, kit_quality, kit, _, _) in &stations {
+    for (station_id, station_type, owner_id, kit_quality, kit_maker, kit, _, _) in &stations {
         let Some(kit) = kit else {
             tracing::error!("Station {} has type {} with no kit", station_id, station_type);
             continue;
@@ -398,24 +405,24 @@ pub async fn return_stations(
             returned.lost.push((*owner_id, kit.to_string(), 1));
             continue;
         };
-        // Unmarked, as at a take-down: the station didn't keep the maker (#241)
-        sqlx::query(
-            "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
-             VALUES ($1, $2, $3, 1, $4, $5, $6)",
+        // Marked, as at a take-down (#241)
+        super::units::insert_stack(
+            tx,
+            NewStack {
+                item_type: kit,
+                owner_id: Some(*owner_id),
+                container_id: Some(container),
+                slot_index: Some(slot),
+                durability: None,
+            },
+            &kit_units(*kit_quality, *kit_maker),
         )
-        .bind(Uuid::new_v4())
-        .bind(kit)
-        .bind(kit_quality)
-        .bind(owner_id)
-        .bind(container)
-        .bind(slot)
-        .execute(&mut *tx)
         .await?;
         returned.kits.push(kit.clone());
         took(&mut returned, *owner_id, container, kind, kit, 1);
     }
 
-    for (station_id, _, owner_id, _, _, tool, tool_owner) in &stations {
+    for (station_id, _, owner_id, _, _, _, tool, tool_owner) in &stations {
         let Some(tool) = tool else { continue };
         let player = tool_owner.unwrap_or(*owner_id);
         let item_type: String = sqlx::query_scalar("SELECT item_type FROM items WHERE id = $1")
@@ -857,6 +864,30 @@ mod tests {
             ]
         );
         assert!(returned.lost.is_empty());
+    }
+
+    /// A foreclosure gives the kit back with its maker's mark, as a take-down
+    /// does (#241)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_returned_kit_keeps_its_makers_mark(db: PgPool) {
+        use crate::engine::units::test_units::all_marked;
+        let me = player(&db, "builder").await;
+        let maker = player(&db, "maker").await;
+        let (station, _) = chest(&db, me.id, 68).await;
+        sqlx::query("UPDATE stations SET kit_maker_id = $2 WHERE id = $1")
+            .bind(station)
+            .bind(maker.id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let mut tx = db.begin().await.unwrap();
+        let returned = return_stations(&mut tx, &[station]).await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(returned.kits, vec!["chest_kit".to_string()]);
+        assert_eq!(all_marked(&db, me.id, "chest_kit").await, kit_units(68, Some(maker.id)));
     }
 
     /// A foreclosure's returns join the first stack of their type, whatever its
