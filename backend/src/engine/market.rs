@@ -362,6 +362,11 @@ pub(super) async fn free_slot(conn: &mut PgConnection, into: Uuid) -> Result<Opt
     .await
 }
 
+/// The market box's container type. Moves and splits use it only at the
+/// Exchange hall, and only to take things out
+/// ([`market_box_refusal`](super::container_access::market_box_refusal), #244).
+pub const MARKET_BOX: &str = "market_box";
+
 /// `player_id`'s market box, made the first time it's needed, and locked for
 /// the caller's transaction.
 pub async fn market_box(conn: &mut PgConnection, player_id: Uuid) -> Result<Uuid, sqlx::Error> {

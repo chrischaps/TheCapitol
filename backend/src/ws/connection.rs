@@ -17,7 +17,7 @@ use capitol_protocol::rules::stacking::{Pick, Units};
 use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo, TradeOfferItem};
 
 use crate::engine::container_access::{
-    check_container_access, check_station_access, impound_refusal, live_position, movable_item,
+    check_container_access, check_station_access, live_position, movable_item, move_refusal,
 };
 use crate::api_keys::{self, KeyGrant};
 use crate::engine::GameEvent;
@@ -1559,9 +1559,14 @@ async fn handle_move_item(
     if target_item.as_ref().is_some_and(|t| t.owner_id != Some(player_id)) {
         return Err("That slot holds someone else's item".into());
     }
-    // Things only come out of the impound (#141)
+    // Things only come out of the impound (#141), and out of the market box
+    // only at the Exchange hall (#244)
     let source_type = source_container.as_ref().map(|c| c.container_type.as_str());
-    if let Some(why) = impound_refusal(source_type, &target_container.container_type, target_item.is_some()) {
+    let types = (source_type, target_container.container_type.as_str());
+    if let Some(why) = move_refusal(&state.game, &state.db, player_id, at, types, target_item.is_some())
+        .await
+        .map_err(|e| format!("Database error: {}", e))?
+    {
         return Err(why.into());
     }
 
@@ -1609,8 +1614,13 @@ async fn handle_split_stack(
     } else {
         from.clone()
     };
-    // Things only come out of the impound (#141); a split goes only to an empty slot
-    if let Some(why) = impound_refusal(Some(&from.container_type), &to.container_type, false) {
+    // Things only come out of the impound (#141), and out of the market box
+    // only at the Exchange hall (#244); a split goes only to an empty slot
+    let types = (Some(from.container_type.as_str()), to.container_type.as_str());
+    if let Some(why) = move_refusal(&state.game, &state.db, player_id, at, types, false)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?
+    {
         return Err(why.into());
     }
     crate::engine::slot_moves::split(&state.db, player_id, &source, quantity, to_container, to_slot, qualities)

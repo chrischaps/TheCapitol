@@ -17,14 +17,21 @@
 //! Items keep their depositor as owner when they go into someone else's box,
 //! so a depositor can take back a mistake. The station's owner may take them
 //! too, and taking one makes it theirs ([`movable_item`], #80).
+//!
+//! Two of a player's own containers have rules of their own for moves and
+//! splits ([`move_refusal`]): nothing goes into the impound (#141), and the
+//! market box is used only at the Exchange hall, and only to take things out
+//! (#244).
 
+use capitol_protocol::rules::market::at_the_hall;
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use super::impound::IMPOUND;
+use super::market::MARKET_BOX;
 use super::tick::GameState;
-use crate::models::{Container, Item, PermissionLevel};
+use crate::models::{Container, Item, LandmarkKind, PermissionLevel};
 
 /// Why a player can't use a station or a container, or move an item.
 #[derive(Debug)]
@@ -207,6 +214,80 @@ pub fn impound_refusal(source: Option<&str>, target: &str, target_held: bool) ->
     }
 }
 
+/// Why a move or a split may not touch the market box (#244), if it may not.
+/// Goods wait in it at the Exchange hall until their owner comes (D6), so
+/// it's used only there, as `POST /market/box/collect` is. Nothing goes into
+/// it, either: it's where the market delivers fills and sends back what's
+/// cancelled, and a box its owner had filled would refuse those
+/// (`MarketBoxFull`). So, as from the impound, a stack leaves it only for an
+/// empty slot, and shuffling within it is fine. `at_the_hall` is whether the
+/// player stands there ([`at_the_market_hall`]). Pure, so it can be tested
+/// without a database.
+pub fn market_box_refusal(
+    source: Option<&str>,
+    target: &str,
+    target_held: bool,
+    at_the_hall: bool,
+) -> Option<&'static str> {
+    let (from_box, into_box) = (source == Some(MARKET_BOX), target == MARKET_BOX);
+    if into_box && !from_box {
+        Some("Nothing goes into the market box: it holds what the market sends you")
+    } else if from_box && !at_the_hall {
+        Some("Your market box is at the Exchange hall: take things out of it there")
+    } else if from_box && !into_box && target_held {
+        Some("Take it out of the market box to an empty slot")
+    } else {
+        None
+    }
+}
+
+/// Whether `player_id` stands close enough to the Exchange hall to use their
+/// market box: at `at` ([`live_position`]) if they're online, else at their
+/// saved position. A world without a hall (an admin's custom one) is the hall
+/// everywhere, as it is for placing orders.
+pub async fn at_the_market_hall(
+    game: &RwLock<GameState>,
+    db: &PgPool,
+    player_id: Uuid,
+    at: Option<(f64, f64)>,
+) -> Result<bool, sqlx::Error> {
+    let hall = game.read().await.terrain.landmark(LandmarkKind::ExchangeHall).cloned();
+    let Some(hall) = hall else { return Ok(true) };
+    let (x, y) = match at {
+        Some(at) => at,
+        None => {
+            sqlx::query_as("SELECT position_x, position_y FROM players WHERE id = $1")
+                .bind(player_id)
+                .fetch_one(db)
+                .await?
+        }
+    };
+    Ok(at_the_hall(&hall, x, y))
+}
+
+/// Why a move or a split from a container of type `source` to one of type
+/// `target` is refused, if it is: the impound's rule ([`impound_refusal`])
+/// and the market box's ([`market_box_refusal`]). `target_held` is whether
+/// the target slot holds something (a split's never does), and `at` is as for
+/// [`at_the_market_hall`], which runs only when the market box is involved.
+pub async fn move_refusal(
+    game: &RwLock<GameState>,
+    db: &PgPool,
+    player_id: Uuid,
+    at: Option<(f64, f64)>,
+    (source, target): (Option<&str>, &str),
+    target_held: bool,
+) -> Result<Option<&'static str>, sqlx::Error> {
+    if let Some(why) = impound_refusal(source, target, target_held) {
+        return Ok(Some(why));
+    }
+    if source != Some(MARKET_BOX) && target != MARKET_BOX {
+        return Ok(None);
+    }
+    let at_the_hall = at_the_market_hall(game, db, player_id, at).await?;
+    Ok(market_box_refusal(source, target, target_held, at_the_hall))
+}
+
 /// May `player_id` move an item owned by `item_owner`, held in a container
 /// whose station (if any) is owned by `station_owner`? Their own items, yes.
 /// Someone else's only when it sits in the player's own station's box: that's
@@ -314,7 +395,68 @@ mod tests {
         assert!(refused(Some(IMPOUND), "player_inventory", true), "a swap would put the other back");
         assert!(!refused(Some(IMPOUND), "player_inventory", false));
         assert!(!refused(Some(IMPOUND), "station_inventory", false));
-        assert!(!refused(Some("player_inventory"), "market_box", true));
+        assert!(!refused(Some("player_inventory"), "station_inventory", true));
+    }
+
+    #[test]
+    fn the_market_box_only_lets_things_out_at_the_hall_to_an_empty_slot() {
+        let refused = |source, target, held, at_hall| market_box_refusal(source, target, held, at_hall).is_some();
+        // Away from the hall, nothing in or out
+        assert!(refused(Some(MARKET_BOX), "player_inventory", false, false), "out, from anywhere");
+        assert!(refused(Some(MARKET_BOX), MARKET_BOX, false, false), "shuffling, from anywhere");
+        assert!(refused(Some("player_inventory"), MARKET_BOX, false, false), "in, from anywhere");
+        // At the hall, out to an empty slot, and shuffling within it
+        assert!(!refused(Some(MARKET_BOX), "player_inventory", false, true));
+        assert!(!refused(Some(MARKET_BOX), MARKET_BOX, true, true));
+        assert!(refused(Some(MARKET_BOX), "player_inventory", true, true), "a swap would put the other in");
+        assert!(refused(Some("player_inventory"), MARKET_BOX, false, true), "no deposit, even there");
+        assert!(refused(None, MARKET_BOX, false, true));
+        // Other containers aren't its business
+        assert!(!refused(Some("player_inventory"), "station_inventory", true, false));
+    }
+
+    /// The refusals as the moves see them (#244): the market box is used at
+    /// the Exchange hall, by the live position when online and the saved one
+    /// when not, and the impound's rule still holds.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn moves_use_the_market_box_only_at_the_exchange_hall(db: PgPool) {
+        use crate::engine::market::tests::player;
+        use crate::models::{TerrainConfig, WorldGenParams};
+        use capitol_protocol::rules::{SPAWN_X, SPAWN_Y};
+
+        let terrain = TerrainConfig::get_default();
+        let door = terrain.landmark(LandmarkKind::ExchangeHall).expect("the default world has a hall").door;
+        let game = RwLock::new(GameState::with_terrain(WorldGenParams::default(), terrain));
+        let ada = player(&db, "ada", 100).await;
+        let save = |(x, y): (f64, f64)| {
+            sqlx::query("UPDATE players SET position_x = $1, position_y = $2 WHERE id = $3")
+                .bind(x)
+                .bind(y)
+                .bind(ada.id)
+                .execute(&db)
+        };
+        let out = (Some(MARKET_BOX), "player_inventory");
+        let outside = (SPAWN_X, door.1); // on the avenue, across the kerb from the door
+
+        // Offline: the saved position counts
+        save((SPAWN_X, SPAWN_Y)).await.unwrap();
+        let why = move_refusal(&game, &db, ada.id, None, out, false).await.unwrap();
+        assert!(why.is_some_and(|w| w.contains("at the Exchange hall")), "{why:?}");
+        save(outside).await.unwrap();
+        assert_eq!(move_refusal(&game, &db, ada.id, None, out, false).await.unwrap(), None);
+
+        // Online: the live position counts, not the saved one
+        assert!(move_refusal(&game, &db, ada.id, Some((SPAWN_X, SPAWN_Y)), out, false).await.unwrap().is_some());
+        assert_eq!(move_refusal(&game, &db, ada.id, Some(outside), out, false).await.unwrap(), None);
+
+        // Nothing goes in, even at the hall; the impound's rule is unchanged
+        let into = (Some("player_inventory"), MARKET_BOX);
+        assert!(move_refusal(&game, &db, ada.id, Some(outside), into, false).await.unwrap().is_some());
+        let impounded = (Some(IMPOUND), "player_inventory");
+        assert_eq!(move_refusal(&game, &db, ada.id, None, impounded, false).await.unwrap(), None);
+        let deposit = (Some("player_inventory"), IMPOUND);
+        assert!(move_refusal(&game, &db, ada.id, None, deposit, false).await.unwrap().is_some());
     }
 
     fn chest(owner: Uuid) -> StationAccess {

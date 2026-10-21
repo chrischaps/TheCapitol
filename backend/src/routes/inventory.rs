@@ -11,7 +11,7 @@ use capitol_protocol::rest::{
     SplitStackRequest, SplitStackResponse,
 };
 
-use crate::engine::container_access::{check_container_access, impound_refusal, live_position, movable_item};
+use crate::engine::container_access::{check_container_access, live_position, movable_item, move_refusal};
 use crate::engine::impound;
 use crate::engine::slot_moves::{self, apply_move, SlotMove};
 use crate::engine::GameEvent;
@@ -258,9 +258,11 @@ pub async fn move_item(
     if target_item.as_ref().is_some_and(|t| t.owner_id != Some(player_id)) {
         return Err(AppError::Forbidden("That slot holds someone else's item".into()));
     }
-    // Things only come out of the impound (#141)
+    // Things only come out of the impound (#141), and out of the market box
+    // only at the Exchange hall (#244)
     let source_type = source_container.as_ref().map(|c| c.container_type.as_str());
-    if let Some(why) = impound_refusal(source_type, &target_container.container_type, target_item.is_some()) {
+    let types = (source_type, target_container.container_type.as_str());
+    if let Some(why) = move_refusal(&state.game, &state.db, player_id, at, types, target_item.is_some()).await? {
         return Err(AppError::BadRequest(why.into()));
     }
 
@@ -330,8 +332,10 @@ pub async fn split_stack(
     } else {
         from.clone()
     };
-    // Things only come out of the impound (#141); a split goes only to an empty slot
-    if let Some(why) = impound_refusal(Some(&from.container_type), &to.container_type, false) {
+    // Things only come out of the impound (#141), and out of the market box
+    // only at the Exchange hall (#244); a split goes only to an empty slot
+    let types = (Some(from.container_type.as_str()), to.container_type.as_str());
+    if let Some(why) = move_refusal(&state.game, &state.db, player_id, at, types, false).await? {
         return Err(AppError::BadRequest(why.into()));
     }
 
