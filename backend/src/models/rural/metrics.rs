@@ -228,11 +228,10 @@ pub fn measure_world(params: &WorldGenParams, sector: Option<u8>) -> Measurement
     let (before, laid_on) = terrain.rural_plots_before(params);
     let cleared = lot_clearance::clear_each(&before, &laid_on, &terrain.water_rings, center);
     let scope = Scope { center, inner: params.suburban_outer_radius, outer: params.rural_outer_radius, sector };
-    // The plan again, for its gates and deck: it's a pure function of the
-    // params and the arterials, which the weld only adds vertices to.
+    // The plan again, for its gates (the balance pass's too) and deck.
     let ring = match params.rural.layout {
         RuralLayout::Trails => rural::Plan::default(),
-        RuralLayout::Farms => rural::plan(params, center, &terrain.roads),
+        RuralLayout::Farms => terrain.generate_roads_and_rural_plan(params).1,
     };
     let plan = Plan {
         roads: &terrain.roads,
@@ -535,10 +534,17 @@ fn cross(o: P, a: P, b: P) -> f64 {
     (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
 }
 
-/// Whether segments `ab` and `cd` cross or touch.
+/// Whether segments `ab` and `cd` cross or touch. Segments on one line
+/// (within rounding) only meet if they overlap, which their ends' distances
+/// tell: two farms' fronts along opposite arterials are on one line, far
+/// apart (#287).
 fn segments_meet(a: P, b: P, c: P, d: P) -> bool {
     let (d1, d2) = (cross(c, d, a), cross(c, d, b));
     let (d3, d4) = (cross(a, b, c), cross(a, b, d));
+    let scale = dist(a, b).powi(2) + dist(c, d).powi(2);
+    if [d1, d2, d3, d4].iter().all(|x| x.abs() <= 1e-9 * scale) {
+        return false;
+    }
     d1 * d2 <= 0.0 && d3 * d4 <= 0.0 && (d1 != 0.0 || d2 != 0.0 || d3 != 0.0 || d4 != 0.0)
 }
 
@@ -602,6 +608,16 @@ mod tests {
     }
 
     const DRY: Waters<'static> = Waters { rivers: &[], streams: &[], lakes: &[] };
+
+    #[test]
+    fn segments_on_one_line_meet_only_where_they_overlap() {
+        // Far apart on one line, with the rounding of a world 13600 across.
+        let y = 6860.000000000001;
+        assert!(!segments_meet((2300.0, y), (2660.0, 6860.0), (11000.0, 6860.0), (11300.0, y)));
+        assert!((seg_seg_distance((2300.0, y), (2660.0, 6860.0), (11000.0, 6860.0), (11300.0, y)) - 8340.0).abs() < 1e-6);
+        assert_eq!(seg_seg_distance((0.0, 0.0), (10.0, 0.0), (5.0, 0.0), (20.0, 0.0)), 0.0);
+        assert!(segments_meet((0.0, 0.0), (10.0, 10.0), (0.0, 10.0), (10.0, 0.0)));
+    }
 
     #[test]
     fn gaps_are_edge_to_edge() {

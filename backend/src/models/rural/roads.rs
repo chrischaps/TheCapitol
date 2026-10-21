@@ -374,6 +374,81 @@ fn spur(sector: &Sector, ring: &Ring, rng: &mut SplitMix64, lanes: [&[P]; 2], cr
     None
 }
 
+/// A spur toward `hole`, the centre of a disc `radius` across that the farms
+/// left open (RD7, #287). It leaves the nearest point of the sector's
+/// `roads` and runs on past the centre by half the radius: straight in a
+/// concession sector, and winding in a winding one, steered for the centre
+/// until it's there and then wandering on. It stops early as [`spur`] does,
+/// and a winding one that stops too soon is drawn again. `None` if none gets
+/// [`SPUR_MIN`] long.
+pub fn spur_to(sector: &Sector, ring: &Ring, rng: &mut SplitMix64, roads: &[&[P]], hole: P, radius: f64) -> Option<Vec<P>> {
+    let c = ring.center;
+    let max_turn = WIND_DRAW_DEG.to_radians();
+    let kerb = ring.arterial_width / 2.0 + ARTERIAL_CLEAR;
+    let near = |p: P, road: &[P]| {
+        road.windows(2).any(|w| point_to_segment_distance(p.0, p.1, w[0].0, w[0].1, w[1].0, w[1].1) < SPUR_CLEAR)
+    };
+    let clear_of_edges = |p: P| {
+        let r = dist(p, c);
+        let a = (p.1 - c.1).stable_atan2(p.0 - c.0);
+        let from_edge = wrap(a - sector.from).abs().min(wrap(sector.to - a).abs());
+        r >= ring.inner + GATE_IN.0 && r <= ring.outer - GATE_IN.0 && r * from_edge.stable_sin() >= kerb
+    };
+    let (from, start) = roads
+        .iter()
+        .enumerate()
+        .flat_map(|(i, road)| road.windows(2).map(move |w| (i, nearest_on(w[0], w[1], hole))))
+        .min_by(|a, b| dist(a.1, hole).total_cmp(&dist(b.1, hole)))?;
+    if !clear_of_edges(start) {
+        return None;
+    }
+    let to_hole = dist(start, hole);
+    let target = to_hole + radius / 2.0;
+    let winding = sector.character == Character::Winding;
+    for _ in 0..if winding { 8 } else { 1 } {
+        let toward = |p: P| (hole.1 - p.1).stable_atan2(hole.0 - p.0);
+        let mut heading = toward(start) + if winding { rng.range(-15.0, 15.0).to_radians() } else { 0.0 };
+        let mut points = vec![start];
+        let mut length = 0.0;
+        while length < target {
+            let last = *points.last().expect("starts with one");
+            if winding && points.len() > 1 {
+                let turn = if length < to_hole {
+                    // Steered for the centre, harder as it nears...
+                    let off = wrap(toward(last) - heading);
+                    let pull = (3.0 * STEP / dist(last, hole).max(STEP)).clamp(0.15, 1.0);
+                    rng.range(-6.0, 6.0).to_radians() * (1.0 - pull) + off * pull
+                } else {
+                    // ...then wandering on.
+                    rng.range(-6.0, 6.0).to_radians()
+                };
+                heading += turn.clamp(-max_turn, max_turn);
+            }
+            let p = (last.0 + STEP * heading.stable_cos(), last.1 + STEP * heading.stable_sin());
+            // Its own road is near its start by right.
+            let left = length > 3.0 * STEP;
+            let blocked = roads.iter().enumerate().any(|(i, road)| (i != from || left) && near(p, road));
+            if !clear_of_edges(p) || blocked {
+                break;
+            }
+            points.push(p);
+            length += STEP;
+        }
+        if length >= SPUR_MIN {
+            return Some(if winding { points } else { vec![start, *points.last().expect("long enough")] });
+        }
+    }
+    None
+}
+
+/// The point of the segment `a`..`b` nearest `q`.
+fn nearest_on(a: P, b: P, q: P) -> P {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 { (((q.0 - a.0) * dx + (q.1 - a.1) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    (a.0 + t * dx, a.1 + t * dy)
+}
+
 /// An angle brought into (-π, π].
 fn wrap(a: f64) -> f64 {
     let a = a.rem_euclid(TAU);

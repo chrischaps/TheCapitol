@@ -6,11 +6,15 @@
 //!   characters (RD1, RD2, #286);
 //! - `roads`: each sector's two concession roads or winding lanes, the roads
 //!   between them, and the roads to farm gates (RD3 to RD5, #286; RD10, #310);
+//! - `farms`: the farms along every lane and the arterials (RD6, #287);
+//! - `balance`: spurs into the ground the farms leave open (RD7, #287);
 //! - `metrics`: the ring's layout numbers and the plan's §5 targets (#284);
 //! - `render`: the plan-view SVG and the `rural_plan_report` test (#284).
 //!
 //! The last two are test-only, as the suburb's are.
 
+pub mod balance;
+pub mod farms;
 #[cfg(test)]
 pub(crate) mod metrics;
 #[cfg(test)]
@@ -36,8 +40,8 @@ pub enum RuralLayout {
     #[default]
     Trails,
     /// Rural v2: two concession roads or winding lanes across every sector,
-    /// and the roads between them (#286, #310). No farms on them until
-    /// R4 (#287).
+    /// the roads between them (#286, #310), and farms along them and the
+    /// arterials, clear of the water (#287).
     Farms,
 }
 
@@ -62,17 +66,22 @@ impl Default for RuralParams {
 pub struct Plan {
     pub sectors: Vec<Sector>,
     /// `lane_{s}_{k}`: each sector's inner main road is `k = 0` and its outer
-    /// one `k = 1`.
+    /// one `k = 1`. The balance pass's spurs come after a sector's own.
     pub roads: Vec<RoadSegment>,
     /// Where the side roads and spurs end. A loose end is allowed only here.
     pub gates: Vec<P>,
 }
 
+/// The ring's sectors, cut by the arterials in `roads`, with their characters.
+pub fn sectors_of(params: &WorldGenParams, center: P, roads: &[RoadSegment]) -> Vec<Sector> {
+    let bearings = sectors::arterial_bearings(roads, center, params.suburban_outer_radius);
+    sectors::sectors(params.seed, &bearings)
+}
+
 /// Plans the ring's roads. `roads` needs only the arterials, which cut the
 /// ring into its sectors.
 pub fn plan(params: &WorldGenParams, center: P, roads: &[RoadSegment]) -> Plan {
-    let bearings = sectors::arterial_bearings(roads, center, params.suburban_outer_radius);
-    let sectors = sectors::sectors(params.seed, &bearings);
+    let sectors = sectors_of(params, center, roads);
     let ring = roads::Ring {
         center,
         inner: params.suburban_outer_radius,
@@ -88,6 +97,17 @@ pub fn plan(params: &WorldGenParams, center: P, roads: &[RoadSegment]) -> Plan {
         plan.gates.extend(laid.gates);
     }
     plan.sectors = sectors;
+    plan
+}
+
+/// [`plan`], then the balance pass's spurs (RD7). `roads` is the world's so
+/// far, without the ring's.
+pub fn plan_balanced(params: &WorldGenParams, center: P, roads: &[RoadSegment]) -> Plan {
+    let mut plan = plan(params, center, roads);
+    let all: Vec<RoadSegment> = roads.iter().chain(&plan.roads).cloned().collect();
+    let (spurs, gates) = balance::spurs(params, center, &all, &plan.sectors);
+    plan.roads.extend(spurs);
+    plan.gates.extend(gates);
     plan
 }
 
@@ -156,14 +176,15 @@ pub(crate) mod tests {
     /// lanes but for loose ends at farm gates. Every sector has two main
     /// roads that meet an arterial at a shared vertex at both ends, and at
     /// least one road between them. Every other road starts on a vertex of a
-    /// main road, and ends on the other's or at a gate.
+    /// main road, and ends on the other's or at a gate, but for the balance
+    /// pass's spurs (#287), which may leave any of the sector's roads.
     #[test]
     fn the_lanes_are_clean_and_join_the_arterials() {
         for seed in SEEDS {
             let params = farms_world(seed);
             let t = TerrainConfig::from_params(&params);
             assert!(t.roads.iter().all(|r| !r.id.starts_with("trail_")), "seed {seed}: the old trails are still there");
-            let gates = plan(&params, center(&t), &t.roads).gates;
+            let gates = t.generate_roads_and_rural_plan(&params).1.gates;
             let audit = street_plan::audit(&t.roads, is_lane);
             let off_gate: Vec<_> = audit.loose_ends.iter().filter(|(_, p)| !gates.iter().any(|&g| same(g, *p))).collect();
             assert!(
@@ -192,9 +213,11 @@ pub(crate) mod tests {
                 for lane in t.roads.iter().filter(|r| r.id.starts_with(&prefix) && mains.iter().all(|m| m.id != r.id)) {
                     let (start, end) = (lane.points[0], *lane.points.last().unwrap());
                     let from = mains.iter().position(|m| on(m, start));
-                    assert!(from.is_some(), "seed {seed}: {} doesn't start on a main road", lane.id);
+                    let at_gate = gates.iter().any(|&g| same(g, end));
+                    let off_another = t.roads.iter().any(|r| r.id.starts_with(&prefix) && r.id != lane.id && on(r, start));
+                    assert!(from.is_some() || (at_gate && off_another), "seed {seed}: {} starts on no road of its sector", lane.id);
                     let joins = from.is_some_and(|i| on(mains[1 - i], end));
-                    assert!(joins || gates.iter().any(|&g| same(g, end)), "seed {seed}: {} ends on neither road nor gate", lane.id);
+                    assert!(joins || at_gate, "seed {seed}: {} ends on neither road nor gate", lane.id);
                 }
                 let counted = metrics::sector_roads(&t.roads, s);
                 assert!(counted.mains == 2 && counted.links >= 1, "seed {seed}: sector {s} has {counted:?}");

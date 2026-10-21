@@ -713,14 +713,15 @@ impl TerrainConfig {
         // Generate roads using params
         config.roads = config.generate_all_roads_with_params(params);
 
-        // The water comes from the land, and skirts the roads. The rural lots
-        // don't know it yet (#223).
+        // The water comes from the land, and skirts the roads. The farms keep
+        // clear of it (#287); the old trails' lots don't know it (#223).
         let water = super::hydrology::generate(&params.land, &config.roads);
 
         // Generate terrain plots for all zones
         config.terrain_plots = config.generate_suburban_plots_internal(&params.suburban_params());
         config.terrain_plots.extend(config.generate_urban_plots(params));
-        config.terrain_plots.extend(config.generate_rural_plots(params));
+        let wet = super::rural::farms::Water { rivers: &water.rivers, streams: &water.streams, lakes: &water.lakes };
+        config.terrain_plots.extend(config.generate_rural_plots(params, wet));
         config.terrain_plots.extend(config.generate_guild_plots(params));
         // Pull every lot clear of the roads and the water, and make the ids unique
         // (B7): a lot is what players claim, so it must be the ground it looks like.
@@ -796,7 +797,14 @@ impl TerrainConfig {
 
     /// Generate all road segments from params
     fn generate_all_roads_with_params(&self, params: &WorldGenParams) -> Vec<RoadSegment> {
+        self.generate_roads_and_rural_plan(params).0
+    }
+
+    /// The roads, and under `Farms` the rural plan they were laid from: its
+    /// sectors, and the farm gates, the balance pass's too.
+    pub(crate) fn generate_roads_and_rural_plan(&self, params: &WorldGenParams) -> (Vec<RoadSegment>, super::rural::Plan) {
         let mut roads = Vec::new();
+        let mut plan = super::rural::Plan::default();
 
         // Ring roads
         roads.extend(self.generate_ring_roads_with_params(params));
@@ -814,9 +822,11 @@ impl TerrainConfig {
         // the arterials cut into sectors.
         match params.rural.layout {
             RuralLayout::Trails => roads.extend(self.generate_rural_paths_with_params(params)),
+            // With the balance pass's spurs (RD7), before the weld and the
+            // water, so the water skirts them.
             RuralLayout::Farms => {
-                let lanes = super::rural::plan(params, (self.center_x, self.center_y), &roads).roads;
-                roads.extend(lanes);
+                plan = super::rural::plan_balanced(params, (self.center_x, self.center_y), &roads);
+                roads.extend(plan.roads.iter().cloned());
             }
         }
 
@@ -829,7 +839,7 @@ impl TerrainConfig {
             street_plan::weld_junctions(&mut roads, super::rural::is_lane);
         }
 
-        roads
+        (roads, plan)
     }
 
     /// Generate circular ring roads within districts
@@ -1304,15 +1314,17 @@ impl TerrainConfig {
     #[cfg(test)]
     pub(crate) fn rural_plots_before(&self, params: &WorldGenParams) -> (Vec<TerrainPlot>, Vec<RoadSegment>) {
         let laid = TerrainConfig { roads: self.generate_all_roads_with_params(params), ..self.clone() };
-        (laid.generate_rural_plots(params), laid.roads)
+        let water = super::rural::farms::Water { rivers: &self.rivers, streams: &self.streams, lakes: &self.lakes };
+        (laid.generate_rural_plots(params, water), laid.roads)
     }
 
-    /// Generate plots along rural trail roads
-    fn generate_rural_plots(&self, params: &WorldGenParams) -> Vec<TerrainPlot> {
-        // The farms come with R4 (#287). Until then the lanes have none,
-        // rather than today's lots laid along them.
+    /// The rural lots: the farms under `Farms` (#287), clear of `water`, or
+    /// the old trails' lots, which don't know it (#223).
+    fn generate_rural_plots(&self, params: &WorldGenParams, water: super::rural::farms::Water) -> Vec<TerrainPlot> {
         if params.rural.layout == RuralLayout::Farms {
-            return Vec::new();
+            let center = (self.center_x, self.center_y);
+            let sectors = super::rural::sectors_of(params, center, &self.roads);
+            return super::rural::farms::lay(params, center, &self.roads, &sectors, Some(water));
         }
         let mut plots = Vec::new();
         let mut placed_plot_corners: Vec<[(f64, f64); 4]> = Vec::new();

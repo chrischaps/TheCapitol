@@ -372,7 +372,13 @@ fn simplify(line: &[P], tolerance: f64) -> Vec<P> {
 /// Each square's distance to the nearest `seed` square, in world units
 /// (a 3×3 chamfer, within 8% of the true distance).
 fn chamfer(cols: usize, rows: usize, seed: impl Fn(usize) -> bool) -> Vec<f64> {
-    let (straight, diagonal) = (CELL, CELL * SQRT_2);
+    chamfer_with(cols, rows, CELL, seed)
+}
+
+/// `chamfer` on squares `cell` across. The farms' balance pass (#287) uses
+/// it on a coarser raster than the parks'.
+pub(crate) fn chamfer_with(cols: usize, rows: usize, cell: f64, seed: impl Fn(usize) -> bool) -> Vec<f64> {
+    let (straight, diagonal) = (cell, cell * SQRT_2);
     let mut d: Vec<f64> = (0..cols * rows).map(|i| if seed(i) { 0.0 } else { f64::INFINITY }).collect();
     for r in 0..rows {
         for c in 0..cols {

@@ -2,7 +2,7 @@
 //!
 //! Lifted out of `suburb/lots.rs`, which keeps its street walker, its bulbs
 //! and its ids, and calls this through a thin adapter. The farms (R4, #287)
-//! will walk their lanes with it too. Here:
+//! walk their lanes with it too (`rural/farms.rs`). Here:
 //! - **`World`.** Every road a lot must stay out of, indexed, with the sides
 //!   of each road that have lots, and the water (below).
 //! - **`Region`.** Where a walker's lots may go: an annulus, cut by
@@ -123,7 +123,6 @@ impl<'a> World<'a> {
 
     /// The same world, with rivers and streams, and lakes, that lots keep
     /// `bank` clear of.
-    #[cfg_attr(not(test), allow(dead_code))] // the farms (R4, #287) lay round the water
     pub(crate) fn with_water<'c>(
         mut self,
         courses: impl IntoIterator<Item = &'c WaterCourse>,
@@ -290,7 +289,6 @@ impl<'a> Water<'a> {
         Self { banks: Vec::new(), grid: SpatialGrid::new(center.0, center.1, reach, 2.0 * reach), max_half: 0.0, lakes: Vec::new() }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // through `World::with_water`
     fn new<'c>(courses: impl IntoIterator<Item = &'c WaterCourse>, lakes: &'a [Lake], bank: f64, center: P, reach: f64) -> Self {
         let mut banks = Vec::new();
         for course in courses {

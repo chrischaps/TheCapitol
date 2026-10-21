@@ -174,7 +174,7 @@ models/          - Database types and game state structs
   lot_geometry.rs - Lot geometry the suburb and the farms share: road index, rays, regions, water, overlap pass (R2)
   plot.rs        - Plot ownership, permissions, property tax
   suburb/        - The suburb's neighbourhoods, streets, lots and parks (suburb v2)
-  rural/         - The rural ring (Rural v2): the plan harness, `backend/tools/rural-plan.ps1` (R1), and the sectors, concession roads and winding lanes behind `RuralParams::layout = Farms` (R3)
+  rural/         - The rural ring (Rural v2): the plan harness, `backend/tools/rural-plan.ps1` (R1), and behind `RuralParams::layout = Farms` the sectors, concession roads and winding lanes (R3), the farms clear of the water (`farms.rs`) and the balance pass's spurs (`balance.rs`) (R4)
 
 routes/          - Axum REST handlers
   auth.rs        - Register, login, JWT (includes is_admin in token)
