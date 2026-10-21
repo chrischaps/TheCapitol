@@ -1,0 +1,4 @@
+# Golden hour over the suburb's warped rows and loops, the city behind
+#  t      px      py      pz      tx    ty    tz
+  0.0  -120.0   70.0   300.0   -50.0   0.0  240.0
+  9.0   -60.0   62.0   320.0   -20.0   0.0  230.0

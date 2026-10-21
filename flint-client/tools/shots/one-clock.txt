@@ -1,0 +1,4 @@
+# One view held, for dissolving the hours together
+#  t      px      py      pz      tx    ty    tz
+  0.0   -30.0   26.0   300.0   -35.0   0.0  232.0
+  0.1   -30.0   26.0   300.0   -35.0   0.0  232.0

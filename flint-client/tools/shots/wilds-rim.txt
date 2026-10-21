@@ -1,0 +1,4 @@
+# A river running off the world's rim to its pond
+#  t      px      py      pz      tx    ty    tz
+  0.0  -371.9   33.9  -438.5  -449.8   3.9 -463.0
+  8.0  -385.0   30.0  -445.0  -449.8   3.9 -463.0

@@ -1,0 +1,3 @@
+# People and citizens side by side, their lanterns compared
+#  t      px      py      pz      tx    ty    tz
+  0.0   -56.2    2.1   334.8   -55.0   1.1  330.0
