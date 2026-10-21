@@ -67,7 +67,7 @@ Citizens are AI players who live in the world: they gather, craft, trade, claim 
 | | The usual world | The town |
 |---|---|---|
 | Citizens | none | 18 of the sim's roles and 2 merchants, to start |
-| Start it | `cd backend && cargo run` | `scripts/town.sh up` (Git Bash, from the repo root) |
+| Start it | `cd backend && cargo run` | `scripts/town.sh up` (Git Bash) or `scripts\town.ps1 up` (PowerShell), from the repo root |
 | Server | `http://localhost:3000` | `http://127.0.0.1:3300` |
 | Database | `capitol` | `capitol_town` |
 | Play in it | `flint-client\play.bat` | `flint-client\play.bat --server http://127.0.0.1:3300` |
@@ -80,7 +80,9 @@ scripts/town.sh status   # is its server up, and what each citizen is doing
 scripts/town.sh reset    # drop the town's database and roster; the next up starts a new town
 ```
 
-- **The first `up`** takes a few minutes: it builds the server and `capitol-town`, creates the database (every migration, every node planted), makes an admin for it and mints the citizens. `up --count <n> --merchants <m>` sets how many. Later runs reuse all of it, and the citizens carry on from where they stood.
+In PowerShell, `scripts\town.ps1` does the same: `up [-Online n] [-Merchants m] [-AlwaysOn]`, `status` and `reset` (`powershell -ExecutionPolicy Bypass -File scripts\town.ps1 up` if scripts are blocked). Both keep the one town, so either can carry on or reset what the other started.
+
+- **The first `up`** takes a few minutes: it builds the server and `capitol-town`, creates the database (every migration, every node planted), makes an admin for it and mints the citizens. `up --online <n> --merchants <m>` sets how many are on at once. Later runs reuse all of it, and the citizens carry on from where they stood.
 - **A new town knows nobody.** Register an account on the client's login form the first time you go in.
 - **Switching worlds asks for your password again,** because the client keeps one server's sign-in ([#338](https://github.com/chrischaps/TheCapitol/issues/338)).
 - **The town fills up.** Its citizens save up and buy deeds, so its land gets taken the longer it runs. `reset` gives a fresh one.

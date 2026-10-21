@@ -107,6 +107,7 @@ The usual backend has no citizens. A **town** is a second one with citizens livi
 scripts/town.sh up      # first time: makes the database, an admin and enough citizens to keep 18 + 2 merchants on (about 640); Ctrl-C stops it
 scripts/town.sh status  # the server, and each citizen's last health
 scripts/town.sh reset   # drop it all, for a new town
+scripts\town.ps1 up     # the same in PowerShell (-Online, -Merchants, -AlwaysOn; status, reset)
 flint-client\play.bat --server http://127.0.0.1:3300   # play in the town (register on the form the first time)
 flint-client\play.bat                                  # play in the usual world
 ```
