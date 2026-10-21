@@ -225,6 +225,11 @@ pub fn label(c: &Choice) -> String {
         Choice::Decline => "decline".into(),
         Choice::Rest => "rest".into(),
         Choice::Hall => "hall".into(),
+        Choice::Lane => "the bazaar lane".into(),
+        Choice::Park { .. } => "the park".into(),
+        Choice::Bridge { .. } => "the bridge".into(),
+        Choice::Stall { .. } => "your stall".into(),
+        Choice::Home => "home".into(),
         Choice::MakeMarket { .. } => "make a market".into(),
     }
 }
@@ -290,7 +295,12 @@ pub fn entry(c: &Choice) -> String {
         Choice::Pay { strands } => format!("Pay {} Strands for the goods they offer", range(strands)),
         Choice::Decline => "Decline the trade".into(),
         Choice::Rest => "Sit out a while where you are".into(),
-        Choice::Hall => "Pass the time at the Exchange hall, among people".into(),
+        Choice::Hall => "Pass the time on the Exchange hall's steps, among people".into(),
+        Choice::Lane => "Stroll the bazaar's lane, among the stalls".into(),
+        Choice::Park { .. } => "Sit a while in the park nearby".into(),
+        Choice::Bridge { .. } => "Stand a while on the bridge nearby, looking down the water at dusk".into(),
+        Choice::Stall { .. } => "Mind your own stall at the bazaar".into(),
+        Choice::Home => "Go straight home".into(),
         Choice::MakeMarket { items, float, making } => format!(
             "Make a market in {} at the hall: quote both sides with your float of {float} Strands{}",
             items.join(", "),

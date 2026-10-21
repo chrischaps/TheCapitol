@@ -85,6 +85,10 @@ const SHIFT: f64 = (40.0 / 60.0) / 24.0;
 const JITTER: f64 = (15.0 / 60.0) / 24.0;
 /// The share of citizens who keep the morning's market.
 const MORNING_SHARE: f64 = 0.3;
+/// The noon break (C2.1) starts this long after waking (about midday) and
+/// lasts half a game hour.
+const NOON_AFTER: f64 = 6.0 / 24.0;
+const NOON_BREAK: f64 = 0.5 / 24.0;
 
 impl Schedule {
     /// A day for a citizen of `temperament`, from its own random stream.
@@ -137,6 +141,17 @@ impl Schedule {
         } else {
             Phase::Work
         }
+    }
+
+    /// The midday break between tasks (C2.1): half a game hour from six
+    /// hours after waking, about noon, spent somewhere worth being. Only
+    /// for a citizen whose market is in the afternoon: one who keeps the
+    /// morning's has had its company already. Derived from the day, so
+    /// the roster doesn't carry it.
+    pub fn noon(&self) -> Option<(f64, f64)> {
+        let start = self.wake + NOON_AFTER;
+        let end = start + NOON_BREAK;
+        (self.market_open >= end && end < self.home).then_some((start, end))
     }
 
     /// From `time` to the next `wake`, as a share of the day: 0 just at it.
@@ -212,6 +227,28 @@ mod tests {
         assert_eq!(at("23:59"), Phase::Night);
         // Any day's time, and a whole day on
         assert_eq!(s.phase(1.0 + parse_clock("14:30").unwrap()), Phase::Market);
+    }
+
+    #[test]
+    fn the_noon_break_comes_before_an_afternoon_market_only() {
+        let s = day();
+        let (start, end) = s.noon().unwrap();
+        assert_eq!((clock(start), clock(end)), ("11:30".to_string(), "12:00".to_string()));
+        // Still the day's work, by the phase: the break is taken from it
+        assert_eq!(s.phase(start), Phase::Work);
+        let morning = Schedule {
+            market_open: parse_clock("09:30").unwrap(),
+            market_close: parse_clock("11:00").unwrap(),
+            ..s
+        };
+        assert_eq!(morning.noon(), None);
+        // Seeded days that keep the afternoon's market all get one
+        let mut rng = Rng::new(11);
+        for _ in 0..200 {
+            let temperament = Temperament::seeded(&mut rng);
+            let s = Schedule::seeded(&mut rng, &temperament);
+            assert_eq!(s.noon().is_some(), s.market_open > 0.5, "{s:?}");
+        }
     }
 
     #[test]

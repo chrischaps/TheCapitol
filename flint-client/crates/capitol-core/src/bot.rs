@@ -89,6 +89,17 @@ const MAX_EXTRACTIONS: usize = 10;
 /// [`crate::poll::FIRST_TAG`].
 const FIRST_TAG: Tag = 1;
 
+/// How close a person comes before a greeting walk stops beside them
+/// (C2.1): about three metres.
+const GREET_RANGE: f64 = 30.0;
+/// How long it stands with them.
+const GREET_MOMENT: Duration = Duration::from_secs(2);
+/// How long before it stops for the same person again.
+const GREET_AGAIN: Duration = Duration::from_secs(120);
+/// The step [`Bot::face`] takes to turn: 15 cm, under a tick's walk, but
+/// enough for a client to see which way it went.
+const FACE_STEP: f64 = 1.5;
+
 /// After a changed offer, how long [`Bot::trade_with`] waits before it
 /// accepts.
 pub const TRADE_THINK: Duration = Duration::from_millis(1500);
@@ -261,6 +272,8 @@ pub struct Bot {
     ended: Option<String>,
     /// Walks stop for a trade request ([`Bot::answer_trades`]).
     answers_trades: bool,
+    /// Walks pause beside a person ([`Bot::greet_people`]): whom, and when.
+    greets: Option<HashMap<Uuid, Instant>>,
 }
 
 impl Bot {
@@ -340,6 +353,7 @@ impl Bot {
             dropped: None,
             ended: None,
             answers_trades: false,
+            greets: None,
         })
     }
 
@@ -408,6 +422,14 @@ impl Bot {
         let message = action(&mut self.state, Instant::now())?;
         self.send(message);
         Ok(())
+    }
+
+    /// From now on a walk that passes a person (not a citizen) stops beside
+    /// them a moment, turned their way, then walks on (C2.1). The same
+    /// person is passed by without a pause for [`GREET_AGAIN`]. Off by
+    /// default.
+    pub fn greet_people(&mut self, on: bool) {
+        self.greets = on.then(HashMap::new);
     }
 
     /// Someone has asked to trade, and the bot answers trades.
@@ -757,34 +779,96 @@ impl Bot {
 
     /// Walks straight to `(x, y)`, with no planning, and waits until the
     /// server has us there. `secs` is how long the walk should take, if the
-    /// slope is known; otherwise it's timed as on the flat.
+    /// slope is known; otherwise it's timed as on the flat. A bot that
+    /// greets people ([`Bot::greet_people`]) pauses beside one it passes,
+    /// then walks on.
     pub fn walk_straight(&mut self, x: f64, y: f64, secs: Option<f64>) -> Result<(), BotError> {
         let (from_x, from_y) = self.position();
-        let distance = (x - from_x).hypot(y - from_y);
-        if distance < ARRIVED {
+        let whole = (x - from_x).hypot(y - from_y);
+        loop {
+            let (from_x, from_y) = self.position();
+            let distance = (x - from_x).hypot(y - from_y);
+            if distance < ARRIVED {
+                return Ok(());
+            }
+            if self.asked_to_trade() {
+                return Err(self.interrupted());
+            }
+            self.send(ClientMessage::Move { x, y });
+            // What's left of the leg, after a pause
+            let secs = secs.map_or(distance / rules::PLAYER_SPEED, |s| s * distance / whole.max(distance));
+            let timeout = Duration::from_secs_f64(secs * 1.5 + 5.0);
+            let answers = self.answers_trades;
+            let passed = self.passed();
+            let seen = self.until(
+                &format!("arriving at ({x:.0}, {y:.0})"),
+                timeout,
+                |s, seen| {
+                    blocked(seen).is_some()
+                        || (answers && asked(s))
+                        || passed.as_ref().is_some_and(|p| passer(s, p).is_some())
+                        || s.local_player()
+                            .is_some_and(|p| (p.x - x).hypot(p.y - y) < ARRIVED)
+                },
+            )?;
+            if let Some(e) = blocked(&seen) {
+                return Err(e);
+            }
+            if self.asked_to_trade() {
+                return Err(self.interrupted());
+            }
+            match passed.and_then(|p| passer(&self.state, &p)) {
+                Some(person) => self.pause_beside(person)?,
+                None => return Ok(()),
+            }
+        }
+    }
+
+    /// Whom a greeting walk passes by without a pause: itself, and everyone
+    /// it greeted in the last [`GREET_AGAIN`]. `None` if it doesn't greet.
+    fn passed(&mut self) -> Option<Vec<Uuid>> {
+        let greets = self.greets.as_mut()?;
+        let now = Instant::now();
+        greets.retain(|_, at| now.duration_since(*at) < GREET_AGAIN);
+        Some(greets.keys().copied().chain(self.state.me()).collect())
+    }
+
+    /// Stops beside `person`, turns to them, and stands a moment. A trade
+    /// request cuts it short; the walk's next leg answers it.
+    fn pause_beside(&mut self, (id, x, y): (Uuid, f64, f64)) -> Result<(), BotError> {
+        if let Some(greets) = self.greets.as_mut() {
+            greets.insert(id, Instant::now());
+        }
+        let (px, py) = self.position();
+        self.send(ClientMessage::Move { x: px, y: py });
+        self.face(x, y)?;
+        let end = Instant::now() + GREET_MOMENT;
+        let answers = self.answers_trades;
+        self.until("a moment", GREET_MOMENT + FRAME * 4, |s, _| {
+            Instant::now() >= end || (answers && asked(s))
+        })?;
+        Ok(())
+    }
+
+    /// Turns toward `(x, y)` where it stands: a step of [`FACE_STEP`] that
+    /// way, since a figure faces the way it last moved. Too close to step
+    /// toward, it stays as it is.
+    pub fn face(&mut self, x: f64, y: f64) -> Result<(), BotError> {
+        let (px, py) = self.position();
+        let (dx, dy) = (x - px, y - py);
+        let d = dx.hypot(dy);
+        if d < 2.0 * FACE_STEP {
             return Ok(());
         }
-        if self.asked_to_trade() {
-            return Err(self.interrupted());
-        }
-        self.send(ClientMessage::Move { x, y });
-        let secs = secs.unwrap_or(distance / rules::PLAYER_SPEED);
-        let timeout = Duration::from_secs_f64(secs * 1.5 + 5.0);
-        let answers = self.answers_trades;
-        let seen = self.until(
-            &format!("arriving at ({x:.0}, {y:.0})"),
-            timeout,
-            |s, seen| {
-                blocked(seen).is_some()
-                    || (answers && asked(s))
-                    || s.local_player()
-                        .is_some_and(|p| (p.x - x).hypot(p.y - y) < ARRIVED)
-            },
-        )?;
-        match blocked(&seen) {
-            Some(e) => Err(e),
-            None if self.asked_to_trade() => Err(self.interrupted()),
-            None => Ok(()),
+        let (tx, ty) = (px + dx / d * FACE_STEP, py + dy / d * FACE_STEP);
+        self.send(ClientMessage::Move { x: tx, y: ty });
+        let seen = self.until("turning", Duration::from_secs(2), |s, seen| {
+            blocked(seen).is_some() || s.local_player().is_some_and(|p| (p.x - tx).hypot(p.y - ty) < ARRIVED)
+        });
+        match seen {
+            // A turn that doesn't land is no matter
+            Ok(_) | Err(BotError::Timeout { .. }) => Ok(()),
+            Err(e) => Err(e),
         }
     }
 
@@ -1960,6 +2044,18 @@ fn asked(state: &GameState) -> bool {
     matches!(state.trade(), crate::state::Trade::Incoming { .. })
 }
 
+/// A person (not a citizen) within [`GREET_RANGE`], other than those in
+/// `passed`: their id and where they stand.
+fn passer(state: &GameState, passed: &[Uuid]) -> Option<(Uuid, f64, f64)> {
+    let me = state.local_player()?;
+    state
+        .players()
+        .values()
+        .filter(|p| !p.citizen && !passed.contains(&p.id))
+        .find(|p| (p.x - me.x).hypot(p.y - me.y) < GREET_RANGE)
+        .map(|p| (p.id, p.x, p.y))
+}
+
 /// The server's refusal of `command`, if `seen` holds one.
 fn refusal(seen: &[StateEvent], command: &str) -> Option<String> {
     seen.iter().find_map(|e| match e {
@@ -2178,6 +2274,7 @@ mod tests {
             dropped: None,
             ended: None,
             answers_trades: false,
+            greets: None,
         };
         let draws: Vec<f64> = (0..1000).map(|_| bot.random()).collect();
         assert!(draws.iter().all(|r| (0.0..1.0).contains(r)));

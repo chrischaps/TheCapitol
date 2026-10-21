@@ -7,8 +7,14 @@
 //! (C1.5, [`people`]): they answer trades, leave standing bids for what
 //! their trade needs, and keep a stall when they make more than the hall
 //! takes. The swarm's bots don't, so the E2.7 sim's numbers stay comparable.
-//! A town's merchants (C1.6, [`merchant`]) earn a float and make a market.
+//! Nor do they have an idle life (C2.1, [`idle`]): a citizen spends its
+//! free time and a noon break somewhere worth being, keeps a spot on the
+//! hall's steps or the bazaar's lane at market hours, drifts toward company,
+//! turns to whoever it trades with, and stops a moment beside a person it
+//! passes. A town's merchants (C1.6, [`merchant`]) earn a float and make a
+//! market.
 
+mod idle;
 mod merchant;
 mod people;
 
@@ -196,6 +202,7 @@ pub(crate) fn live(mut bot: Bot, role: Role, persona: &Persona, seed: u64, mut m
     bot.my_stall()?;
     bot.my_orders()?;
     bot.answer_trades(true);
+    bot.greet_people(true);
     let strands = bot.state().strands();
     town.health(|h| h.strands = strands);
     let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true, mind);
@@ -322,6 +329,10 @@ struct SimBot {
     at_market: bool,
     /// A merchant's goods and its market (C1.6).
     merchant: Option<merchant::Merchant>,
+    /// Where it's lingering, and which way it looks (C2.1).
+    spot: Option<((f64, f64), (f64, f64))>,
+    /// The day it last took its noon break (C2.1).
+    noon_day: Option<i64>,
 }
 
 /// What a bot does next.
@@ -362,6 +373,8 @@ impl SimBot {
             persona: None,
             at_market: false,
             merchant: None,
+            spot: None,
+            noon_day: None,
         }
     }
 
@@ -421,7 +434,15 @@ impl SimBot {
                     // Past bedtime: it sleeps where it stands
                     Phase::Night => return Ok(Ended::Bedtime),
                     Phase::Market => {}
-                    Phase::Work => self.at_market = false,
+                    Phase::Work => {
+                        if self.at_market {
+                            self.at_market = false;
+                            self.spot = None;
+                        }
+                        if self.noon_break(Some(town)) {
+                            continue;
+                        }
+                    }
                 }
             }
             let catalog = self.bot.state().catalog().clone();
@@ -574,18 +595,12 @@ impl SimBot {
                 }
             }
             self.at_market = true;
-            return Ok(());
+            self.spot = None;
         }
-        // Someone asking to trade cuts it short: answered at the top
-        let end = Instant::now() + self.wall(60.0);
-        while !town.is_some_and(Tether::stopped) && !self.bot.asked_to_trade() {
-            let left = end.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                break;
-            }
-            self.bot.idle(left.min(STOP_CHECK))?;
-        }
-        Ok(())
+        // A spot on the steps or along the lane (C2.1), and a game minute
+        // there. Someone asking to trade cuts it short: answered at the top
+        let bazaar = self.persona.as_ref().is_some_and(|p| p.market == Market::Bazaar);
+        self.market_spot(town, bazaar)
     }
 
     /// Dusk: buys a home if the citizen has saved enough and has none, walks
@@ -602,6 +617,8 @@ impl SimBot {
             }
         }
         let (x, y) = self.home();
+        // A while on a bridge first, if one's near the way (C2.1)
+        self.by_the_bridge(town, (x, y));
         while !town.stopped() {
             match self.bot.walk_to(x, y) {
                 Ok(()) => break,
@@ -717,9 +734,13 @@ impl SimBot {
         }
     }
 
-    /// Time on its hands: rest where it is, or pass it at the hall.
+    /// Time on its hands: rest where it is, or pass it at the hall. A
+    /// citizen has more places to be (C2.1, [`idle`]).
     fn free_time(&mut self, town: Option<&Tether>) {
         let holdings = self.holdings();
+        if self.persona.is_some() {
+            return self.idle_time(town, &holdings, None);
+        }
         let menu = vec![Choice::Rest, Choice::Hall];
         if let Some((_, Choice::Hall)) = self.decide(Question::FreeTime, menu, 0, &holdings) {
             if let Some(town) = town {

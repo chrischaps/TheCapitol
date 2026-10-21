@@ -25,6 +25,11 @@
 //!   market keeps at it down to half that, so it doesn't flit between the
 //!   hall and the fields at the line.
 //!
+//! Idle life (C2.1): free time's other places are weighed by temperament
+//! and a whim drawn from the situation ([`whim`]): the bazaar's lane for
+//! the sociable, a park for the rest, and a bridge at dusk or its own stall
+//! for the patient. Going straight home at dusk is a steady 0.75.
+//!
 //! People (C1.5): a standing bid is at the books' price (under it for the
 //! thrifty, who'd sooner gather), a stall's price above it (more for the
 //! bold), and a P2P trade is weighed whole at the books ([`trade`]).
@@ -41,6 +46,8 @@ const GOAL_STEP: f64 = 0.15;
 const CLEAR: f64 = 0.2;
 /// How far a price's fairness can raise or lower a utility.
 const FAIRNESS: (f64, f64) = (0.0, 1.2);
+/// How far a whim moves a place's appeal (C2.1).
+const WHIM: f64 = 0.12;
 
 /// The rules layer. It keeps no state: the same situation gets the same
 /// answer, which is what lets C3.1 replay a log exactly.
@@ -132,11 +139,37 @@ impl Decider for RulesDecider {
                     let enough = lot(MERCHANT_FLOAT as i32, t.patience) * if *making { 0.5 } else { 1.0 };
                     (SURE * *float as f64 / enough, Decision::plain(i))
                 }
+                // Idle life (C2.1): the company of the lane for the sociable,
+                // a park's quiet for the rest, a bridge at dusk and its own
+                // stall for the patient, each as the whim takes it
+                Choice::Lane => (0.5 + 0.35 * t.sociability as f64 + whim(s, i), Decision::plain(i)),
+                Choice::Park { .. } => (0.6 + 0.25 * (1.0 - t.sociability as f64) + whim(s, i), Decision::plain(i)),
+                Choice::Bridge { .. } => (0.65 + 0.2 * t.patience as f64 + whim(s, i), Decision::plain(i)),
+                Choice::Stall { .. } => (0.55 + 0.3 * t.patience as f64 + whim(s, i), Decision::plain(i)),
+                Choice::Home => (0.75, Decision::plain(i)),
             };
             scored.push((i, u, d));
         }
         pick(scored)
     }
+}
+
+/// How much more or less a place appeals today: up to [`WHIM`] either
+/// way, from who's asking, the quarter-hour and the entry. It's drawn from
+/// the situation alone, so a replay of it answers the same (C3.1), but the
+/// same citizen goes somewhere else an hour later.
+fn whim(s: &Situation, entry: usize) -> f64 {
+    let quarter = s.when.time_of_day.map_or((s.when.hours * 4.0) as i64, |t| (t * 96.0) as i64);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.who.name.bytes().chain(quarter.to_le_bytes()).chain((entry as u64).to_le_bytes()) {
+        h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+    }
+    // SplitMix's finish, so neighbouring quarters differ
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h ^= h >> 27;
+    let unit = (h >> 11) as f64 / (1u64 << 53) as f64;
+    (unit * 2.0 - 1.0) * WHIM
 }
 
 /// The best entry, and how sure of it to be.
@@ -456,6 +489,60 @@ mod tests {
         // The impatient start sooner, the patient later
         assert_eq!(pick(MERCHANT_FLOAT * 6 / 10, false, with(|t| t.patience = 0.0)), 0);
         assert_eq!(pick(MERCHANT_FLOAT * 12 / 10, false, with(|t| t.patience = 1.0)), 1);
+    }
+
+    #[test]
+    fn free_time_goes_where_the_temperament_and_the_whim_say() {
+        let menu = || {
+            vec![
+                Choice::Rest,
+                Choice::Hall,
+                Choice::Lane,
+                Choice::Park { park: "park_0_0_2".into() },
+                Choice::Stall { stall: "stall_3".into() },
+            ]
+        };
+        let picks = |t: Temperament| {
+            let mut picks = [0; 5];
+            for quarter in 0..96 {
+                let mut s = situation(Question::FreeTime, menu(), t);
+                s.when.time_of_day = Some(quarter as f64 / 96.0);
+                picks[decide(&s).0.pick] += 1;
+            }
+            picks
+        };
+        // A middling citizen goes about: never always the same place
+        let middling = picks(Temperament::default());
+        assert!(middling.iter().filter(|&&n| n > 0).count() >= 3, "{middling:?}");
+        // The sociable to the lane, the shy to the park, the patient to their stall
+        let lane = picks(with(|t| t.sociability = 1.0));
+        assert!(lane[2] > lane[3] && lane[2] > lane[0], "{lane:?}");
+        let park = picks(with(|t| t.sociability = 0.0));
+        assert!(park[3] > park[2] && park[3] > park[1], "{park:?}");
+        let stall = picks(with(|t| {
+            t.patience = 1.0;
+            t.sociability = 0.3;
+        }));
+        assert!(stall[4] > middling[4], "{stall:?} against {middling:?}");
+        // The same situation always answers the same, for C3.1's replay
+        let s = situation(Question::FreeTime, menu(), Temperament::default());
+        assert_eq!(decide(&s), decide(&s));
+    }
+
+    #[test]
+    fn at_dusk_the_patient_stop_on_the_bridge() {
+        let menu = || vec![Choice::Home, Choice::Bridge { bridge: "canal_inner@90".into() }];
+        let stops = |t: Temperament| {
+            (0..96)
+                .filter(|&q| {
+                    let mut s = situation(Question::FreeTime, menu(), t);
+                    s.when.time_of_day = Some(q as f64 / 96.0);
+                    decide(&s).0.pick == 1
+                })
+                .count()
+        };
+        let (hasty, patient) = (stops(with(|t| t.patience = 0.0)), stops(with(|t| t.patience = 1.0)));
+        assert!(hasty < 48 && patient > 48 && patient > hasty, "{hasty} against {patient}");
     }
 
     fn offer(theirs: i64, ours: i32, t: Temperament) -> Situation {

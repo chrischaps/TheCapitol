@@ -51,6 +51,8 @@ use capitol_protocol::rules::ground::{Footing, Ground, CLIFF_SLOPE};
 use capitol_protocol::rules::{self, PLAYER_SPEED};
 use capitol_protocol::terrain::{Landmark, LandmarkKind, TerrainResponse, WaterRing};
 
+use crate::citizen::idle::Places;
+
 /// The longest stretch of road between two nodes. A street that ends on a
 /// long arterial segment has a node of it within half of this.
 pub const SPAN: f64 = 40.0;
@@ -102,6 +104,8 @@ pub struct WalkGraph {
     landmarks: Vec<Landmark>,
     /// The bazaar quarter's streets (E3.12), for the walk to a stall.
     bazaar_streets: Vec<Vec<Point>>,
+    /// The places worth being, for a citizen's free time (C2.1).
+    places: Places,
     nodes: Vec<Point>,
     /// Each node's neighbours, and the cost of the way there.
     edges: Vec<Vec<(u32, f64)>>,
@@ -144,6 +148,7 @@ impl WalkGraph {
             ground: Ground::from_terrain(terrain),
             landmarks: terrain.landmarks.clone(),
             bazaar_streets: crate::bazaar::streets(&terrain.roads),
+            places: Places::new(terrain),
             nodes: Vec::new(),
             edges: Vec::new(),
             buckets: HashMap::new(),
@@ -265,6 +270,11 @@ impl WalkGraph {
     /// The bazaar quarter's streets (`bazaar::streets`).
     pub fn bazaar_streets(&self) -> &[Vec<Point>] {
         &self.bazaar_streets
+    }
+
+    /// The places worth being (C2.1), from the same `/terrain`.
+    pub fn places(&self) -> &Places {
+        &self.places
     }
 
     /// How many nodes the graph has.

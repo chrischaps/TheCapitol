@@ -10,8 +10,10 @@
 //! - [`decide`]: how it makes up its mind (C1.3): the situation, the menu,
 //!   and a cascade of layers that picks from it.
 //! - [`meet`]: how it answers the trades people ask it to (C1.5).
+//! - [`idle`]: where it spends the time between its tasks (C2.1).
 
 pub mod decide;
+pub mod idle;
 pub mod meet;
 pub mod persona;
 pub mod schedule;

@@ -343,6 +343,13 @@ pub fn answer(bot: &mut Bot, mind: &mut Mind, me: &Answering) -> Result<Met, Bot
         return Ok(ended(&partner, "it never opened"));
     };
     bot.say(format!("trading with {partner}"));
+    // Turned to them, as anyone at a trade stands (C2.1). Before anything
+    // is offered, so the turn's frames carry no news of the trade. Two
+    // citizens would face each other, but no citizen asks another yet (#295)
+    let facing = bot.state().open_trade().and_then(|o| bot.state().player(o.partner_id)).map(|p| (p.x, p.y));
+    if let Some((x, y)) = facing {
+        bot.face(x, y)?;
+    }
     let me_id = bot.state().me();
     // Each fresh look at their offer supersedes the last (C3.1); the
     // caller logs what the last came to

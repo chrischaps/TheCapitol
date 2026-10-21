@@ -201,7 +201,7 @@ pub enum Question {
         ours: Vec<Lot>,
         our_strands: i64,
     },
-    /// What to do with time on its hands.
+    /// What to do with time on its hands: where to spend it (C2.1).
     FreeTime,
     /// Whether a merchant makes a market with its float now, or goes on
     /// earning it (C1.6).
@@ -303,13 +303,25 @@ pub enum Choice {
     Decline,
     /// Sit out a while where it is.
     Rest,
-    /// Pass the time at the Exchange hall, among people.
+    /// Pass the time at the Exchange hall, among people: on its steps
+    /// (C2.1).
     Hall,
     /// Make a market in `items` at the hall (C1.6): quote both sides of
     /// each, sized to what it holds. `float` is what it has to do it with,
     /// in Strands: its Strands, those on its bids included, and its stock
     /// at its books. `making` says it's at it already.
     MakeMarket { items: Vec<String>, float: i64, making: bool },
+    /// Stroll the bazaar's lane, among the stalls (C2.1).
+    Lane,
+    /// Sit a while in the park `park` (C2.1).
+    Park { park: String },
+    /// Stand a while on the bridge `bridge` at dusk, looking down the water
+    /// (C2.1).
+    Bridge { bridge: String },
+    /// Mind its own stall, `stall` (C2.1).
+    Stall { stall: String },
+    /// Go straight home at dusk (C2.1).
+    Home,
 }
 
 impl Choice {
