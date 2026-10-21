@@ -103,12 +103,21 @@ pub const MARKET_ITEMS: [&str; 7] = ["log", "iron_ore", "stone", "charcoal", "pl
 pub const SELL_AT: i32 = 20;
 /// Units a bot buys at a time.
 pub const LOT: i32 = 10;
+/// A citizen keeps a stall once it holds this many of what it makes, with
+/// nobody bidding for them at the hall (C1.5).
+pub const STALL_AT: i32 = 2 * SELL_AT;
+/// Days of rent a citizen pays at a time.
+pub const STALL_DAYS: i64 = 2;
 
 /// A trade a bot makes instead of the planner's step, as its mind decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trade {
     Sell { item: String, quantity: i32, price: i64 },
     Buy { item: String, quantity: i32, price: i64 },
+    /// A standing bid, left at the hall (C1.5).
+    Bid { item: String, quantity: i32, price: i64 },
+    /// Units for its stall at the bazaar, renting one if need be (C1.5).
+    Stock { item: String, quantity: i32, price: i64 },
 }
 
 impl Trade {
@@ -117,6 +126,8 @@ impl Trade {
         match self {
             Trade::Sell { item, .. } => format!("sell {item}"),
             Trade::Buy { item, .. } => format!("buy {item}"),
+            Trade::Bid { item, .. } => format!("bid for {item}"),
+            Trade::Stock { item, .. } => format!("stock {item}"),
         }
     }
 }
@@ -259,12 +270,7 @@ impl Role {
             return None;
         }
         let ask = ask?;
-        let keep = if holdings.plot_room.is_none() { holdings.deed_cost } else { 0 };
-        let budget = holdings.strands - keep;
-        let mut afford = 2 * LOT;
-        while afford > 0 && buy_debit(ask, afford) > budget {
-            afford -= 1;
-        }
+        let afford = affordable(holdings, ask);
         (afford > 0).then(|| {
             vec![
                 Choice::Buy {
@@ -275,6 +281,73 @@ impl Role {
                 Choice::Gather { item: item.clone() },
             ]
         })
+    }
+
+    /// What the role's work takes from the market that it doesn't make
+    /// itself: what a citizen of it bids for (C1.5), so whoever gathers or
+    /// makes it has someone to sell to. From the recipes: planks are sawn
+    /// from logs, ingots smelted from ore with charcoal, tools knapped from
+    /// stone with handles of plank and heads of iron, and a builder's
+    /// stations take stone, logs, iron, planks and charcoal for its bricks.
+    pub fn needs(&self) -> &'static [&'static str] {
+        match self {
+            Role::Gatherer(_) => &[],
+            Role::Crafter(Craft::Planks) => &["log"],
+            Role::Crafter(Craft::Ingots) => &["iron_ore", "charcoal"],
+            Role::Crafter(Craft::Tools) => &["stone", "plank", "iron_ingot"],
+            Role::Builder => &["stone", "log", "iron_ingot", "plank", "charcoal"],
+        }
+    }
+
+    /// The menu for leaving a standing bid for `item` at the hall (C1.5),
+    /// if there's a question to ask: the role needs it, it has no bid up for
+    /// it already, the citizen can put a worth to it (`worth`, from its
+    /// books), and it can afford some, keeping a deed's price back until it
+    /// has a plot. Bid (up to half again the worth, up to two lots), or
+    /// gather it as it would have. In a fresh town the makers spend all
+    /// they have on their deeds, so they can't bid until they sell (#294).
+    pub fn bid_menu(&self, holdings: &Holdings, item: &str, worth: Option<i64>, bidding: bool) -> Option<Vec<Choice>> {
+        if bidding || !self.needs().contains(&item) {
+            return None;
+        }
+        let worth = worth?.max(1);
+        let top = worth + (worth / 2).max(1);
+        let afford = affordable(holdings, top);
+        (afford > 0).then(|| {
+            vec![
+                Choice::Bid {
+                    item: item.to_string(),
+                    price: Span::new((worth / 2).max(1), top),
+                    quantity: Span::new(1, afford),
+                },
+                Choice::Gather { item: item.to_string() },
+            ]
+        })
+    }
+
+    /// The menu for stocking a stall with what the role makes (C1.5), if
+    /// there's a question to ask: it holds half of [`STALL_AT`] or more, can
+    /// put a worth to it, and keeps a stall (`keeps`) or can pay
+    /// [`STALL_DAYS`] of rent for one, keeping a deed's price back until it
+    /// has a plot. Stock (a price round its worth, up to all it holds), or
+    /// keep it.
+    pub fn stall_menu(&self, holdings: &Holdings, worth: Option<i64>, keeps: bool) -> Option<Vec<Choice>> {
+        let product = self.product()?;
+        let held = holdings.count(product);
+        let worth = worth?.max(1);
+        let reserve = if holdings.plot_room.is_none() { holdings.deed_cost } else { 0 };
+        let rent = capitol_protocol::rules::bazaar::rent(STALL_DAYS);
+        if held < STALL_AT / 2 || (!keeps && holdings.strands - reserve < rent) {
+            return None;
+        }
+        Some(vec![
+            Choice::Stock {
+                item: product.to_string(),
+                price: Span::new((worth / 2).max(1), worth * 2 + 1),
+                quantity: Span::new(1, held),
+            },
+            Choice::Keep,
+        ])
     }
 
     /// The role as a roster names it (C1.1): `gatherer-fiber`, `builder`.
@@ -294,6 +367,18 @@ impl Role {
     pub fn from_slug(slug: &str) -> Option<Role> {
         MIX.iter().map(|(role, _)| *role).find(|role| role.slug() == slug)
     }
+}
+
+/// How many, up to two lots, a bot can bid for at `price`, keeping a deed's
+/// price back until it has a plot.
+fn affordable(holdings: &Holdings, price: i64) -> i32 {
+    let keep = if holdings.plot_room.is_none() { holdings.deed_cost } else { 0 };
+    let budget = holdings.strands - keep;
+    let mut afford = 2 * LOT;
+    while afford > 0 && buy_debit(price, afford) > budget {
+        afford -= 1;
+    }
+    afford
 }
 
 impl fmt::Display for Role {
@@ -459,6 +544,68 @@ mod tests {
         assert_eq!(buy(ingots, &h, &gather("log"), Some(8)), bought("log", 3, 8));
         h.strands = 255;
         assert_eq!(ingots.buy_menu(&h, &gather("log"), Some(8)), None);
+    }
+
+    #[test]
+    fn a_crafter_bids_for_what_its_work_takes_once() {
+        let mut h = Holdings {
+            strands: 1000,
+            plot_room: Some(3),
+            deed_cost: 250,
+            ..Holdings::default()
+        };
+        let planks = Role::Crafter(Craft::Planks);
+        let menu = planks.bid_menu(&h, "log", Some(8), false).unwrap();
+        assert_eq!(
+            menu[0],
+            Choice::Bid {
+                item: "log".into(),
+                price: Span::new(4, 12),
+                quantity: Span::new(1, 2 * LOT),
+            }
+        );
+        // Not twice, not what it doesn't use, not without a worth
+        assert_eq!(planks.bid_menu(&h, "log", Some(8), true), None);
+        assert_eq!(planks.bid_menu(&h, "stone", Some(8), false), None);
+        assert_eq!(planks.bid_menu(&h, "log", None, false), None);
+        assert!(Role::Gatherer(Gather::Wood).needs().is_empty());
+        // No plot yet: the deed's price is kept back
+        h.plot_room = None;
+        h.strands = 260;
+        assert_eq!(planks.bid_menu(&h, "log", Some(8), false), None);
+    }
+
+    #[test]
+    fn every_need_is_on_the_market_and_none_is_the_roles_own() {
+        for (role, _) in MIX {
+            for need in role.needs() {
+                assert!(MARKET_ITEMS.contains(need), "{role} needs {need}");
+                assert_ne!(role.product(), Some(*need), "{role}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_surplus_goes_to_a_stall_it_can_rent() {
+        let mut h = Holdings {
+            strands: 300,
+            plot_room: None,
+            deed_cost: 250,
+            ..Holdings::default()
+        };
+        h.items.insert("log".into(), STALL_AT);
+        let wood = Role::Gatherer(Gather::Wood);
+        assert!(wood.stall_menu(&h, Some(10), false).is_some());
+        // Not enough for the rent with a deed kept back, unless it keeps one
+        h.strands = 280;
+        assert_eq!(wood.stall_menu(&h, Some(10), false), None);
+        assert!(wood.stall_menu(&h, Some(10), true).is_some());
+        // Too few, or no worth to price them by
+        h.items.insert("log".into(), STALL_AT / 2 - 1);
+        assert_eq!(wood.stall_menu(&h, Some(10), true), None);
+        h.items.insert("log".into(), STALL_AT);
+        assert_eq!(wood.stall_menu(&h, None, true), None);
+        assert_eq!(Role::Crafter(Craft::Tools).stall_menu(&h, Some(10), true), None);
     }
 
     /// C1.1's choice of step: bank at [`BANK_FIBER_AT`], else the first goal's.

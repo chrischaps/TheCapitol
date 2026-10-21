@@ -3,7 +3,12 @@
 //! alongside, one thread each, from a grant.
 //!
 //! `capitol-town`'s citizens (C1.1) play the same loop, one at a time
-//! through [`live`], for as long as their town runs.
+//! through [`live`], for as long as their town runs. They also meet people
+//! (C1.5, [`people`]): they answer trades, leave standing bids for what
+//! their trade needs, and keep a stall when they make more than the hall
+//! takes. The swarm's bots don't, so the E2.7 sim's numbers stay comparable.
+
+mod people;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +26,8 @@ use super::report::{BotRun, Entry, Report, MAKER_ROLE};
 use super::{Errand, Role, Trade, MARKET_ITEMS};
 use crate::bot::{Account, Bot, BotError};
 use crate::catalog::Catalog;
-use crate::citizen::decide::{Choice, Decision, Mind, Place, Question, Quote, Situation, When, Who};
+use crate::citizen::decide::{Choice, Decision, Mind, Place, Question, Situation, When, Who};
+use crate::citizen::meet;
 use crate::citizen::town::{Standing, Tether};
 use crate::market::MarketEvent;
 use crate::market_maker::{self, Maker, MakerConfig};
@@ -175,9 +181,14 @@ pub(crate) fn live(mut bot: Bot, role: Role, seed: u64, mind: Mind, town: &Tethe
     for item in MARKET_ITEMS {
         bot.watch_market(item)?;
     }
+    // Its stall, if it kept one in an earlier life, and its standing bids
+    bot.my_stall()?;
+    bot.my_orders()?;
+    bot.answer_trades(true);
     let strands = bot.state().strands();
     town.health(|h| h.strands = strands);
     let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true, mind);
+    citizen.people = true;
     match citizen.work(None, Some(town)) {
         Some(e) => Err(e),
         None => Ok(()),
@@ -268,6 +279,9 @@ struct SimBot {
     mind: Mind,
     /// The last step's label: what "carry on" means on a work menu.
     doing: Option<String>,
+    /// A citizen meets people (C1.5): it answers trades, bids for what its
+    /// trade needs, and keeps a stall. A swarm bot doesn't.
+    people: bool,
 }
 
 impl SimBot {
@@ -295,6 +309,7 @@ impl SimBot {
             trading,
             mind,
             doing: None,
+            people: false,
         }
     }
 
@@ -332,6 +347,19 @@ impl SimBot {
         let stopped = || town.is_some_and(Tether::stopped);
         let mut failures = 0;
         while deadline.is_none_or(|d| Instant::now() < d) && !stopped() {
+            // Someone asked to trade: that first, where it stands
+            if self.people && self.bot.asked_to_trade() {
+                match self.meet(town) {
+                    Err(e) if e.is_final() => return Some(e),
+                    Err(BotError::Offline(_)) => match self.recover(deadline, town) {
+                        Err(e) if e.is_final() => return Some(e),
+                        Err(_) => break,
+                        Ok(()) => {}
+                    },
+                    _ => {}
+                }
+                continue;
+            }
             let catalog = self.bot.state().catalog().clone();
             let holdings = self.holdings();
             // What to work on, then whether to trade first (C1.3)
@@ -364,11 +392,16 @@ impl SimBot {
                         ok,
                     });
                     if let (Some(town), Err(e)) = (town, &result) {
-                        town.health(|h| h.failed(format!("{label}: {e}")));
+                        // Being asked to trade is no failure
+                        if !matches!(e, BotError::Interrupted(_)) {
+                            town.health(|h| h.failed(format!("{label}: {e}")));
+                        }
                     }
                     match result {
                         Ok(()) => failures = 0,
                         Err(e) if e.is_final() => return Some(e),
+                        // Someone asked to trade: answered at the top
+                        Err(BotError::Interrupted(_)) => {}
                         // The step went with the connection (C0.6): wait for
                         // the server and plan again from what it says we hold.
                         Err(e @ BotError::Offline(_)) => {
@@ -465,12 +498,18 @@ impl SimBot {
                     });
                 }
             }
+            if let Some(stock) = self.choose_stall(holdings, product) {
+                return Some(stock);
+            }
         }
         let Step::Gather { item, .. } = &errand.step else {
             return None;
         };
         let (_, ask) = self.best(item);
-        let menu = self.role.buy_menu(holdings, &errand.step, ask)?;
+        let Some(menu) = self.role.buy_menu(holdings, &errand.step, ask) else {
+            // Nobody selling: leave a bid for it, if the trade needs it
+            return self.choose_bid(holdings, item);
+        };
         let question = Question::Buy { item: item.clone() };
         match self.decide(question, menu, 1, holdings)? {
             (d, Choice::Buy { item, .. }) => Some(Trade::Buy {
@@ -493,6 +532,9 @@ impl SimBot {
             // A walk that doesn't get there rests where it got to; a lost
             // connection shows at the next step.
             if self.bot.go_to_exchange().is_ok() {
+                if self.people {
+                    let _ = self.bot.collect_market_box().and_then(|_| self.post_demand());
+                }
                 return self.rest(town, "resting at the hall");
             }
         }
@@ -511,22 +553,7 @@ impl SimBot {
     fn situation(&self, question: Question, menu: Vec<Choice>, carry_on: usize, holdings: &Holdings) -> Situation {
         let state = self.bot.state();
         let (x, y) = self.bot.position();
-        let market = if self.trading {
-            MARKET_ITEMS
-                .iter()
-                .map(|item| {
-                    let (bid, ask) = self.best(item);
-                    Quote {
-                        item: item.to_string(),
-                        bid,
-                        ask,
-                        last: state.market().trades(item).next().map(|t| t.price),
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let market = if self.trading { meet::quotes(state) } else { Vec::new() };
         Situation {
             who: Who {
                 name: self.bot.name().to_string(),
@@ -564,7 +591,7 @@ impl SimBot {
         };
         town.health(|h| h.doing(Standing::Resting, activity));
         let end = Instant::now() + self.wall(60.0);
-        while !town.stopped() {
+        while !town.stopped() && !self.bot.asked_to_trade() {
             let left = end.saturating_duration_since(Instant::now());
             if left.is_zero() || self.bot.idle(left.min(STOP_CHECK)).is_err() {
                 return;
@@ -675,8 +702,23 @@ impl SimBot {
     /// what it bought. The walk goes round the canals by their bridges
     /// (#211), and the next step's walk takes the bot back out.
     fn trade(&mut self, trade: &Trade) -> Result<(), BotError> {
-        self.bot.go_to_exchange()?;
-        self.trade_at_the_hall(trade)
+        match trade {
+            Trade::Stock { item, quantity, price } => return self.keep_stall(item, *quantity, *price),
+            Trade::Bid { item, quantity, price } => {
+                self.bot.go_to_exchange()?;
+                self.bid(item, *quantity, *price)?;
+                self.bot.collect_market_box()?;
+            }
+            Trade::Sell { .. } | Trade::Buy { .. } => {
+                self.bot.go_to_exchange()?;
+                self.trade_at_the_hall(trade)?;
+            }
+        }
+        // At the hall anyway: what else its trade wants
+        if self.people {
+            self.post_demand()?;
+        }
+        Ok(())
     }
 
     fn trade_at_the_hall(&mut self, trade: &Trade) -> Result<(), BotError> {
@@ -699,6 +741,9 @@ impl SimBot {
                     min_grade: None,
                     grade_rule: None,
                 }
+            }
+            Trade::Bid { .. } | Trade::Stock { .. } => {
+                return Err(BotError::Failed(format!("{} isn't a trade at the hall", trade.label())))
             }
             Trade::Buy { item, quantity, price } => PlaceOrder {
                 side: OrderSide::Buy,

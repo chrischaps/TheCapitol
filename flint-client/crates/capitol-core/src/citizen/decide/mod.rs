@@ -169,8 +169,9 @@ pub enum Question {
     Sell { item: String },
     /// Whether to buy `item` rather than gather it.
     Buy { item: String },
-    /// Whether to take a P2P trade as it stands, counter it, or decline.
-    /// C1.5 (#253) asks it when citizens answer people's trades.
+    /// Whether to take a P2P trade as it stands, counter it, or decline;
+    /// or, for goods offered, what to pay. Asked when a citizen answers
+    /// someone's trade (C1.5, [`meet`](crate::citizen::meet)).
     Trade {
         partner: String,
         partner_citizen: bool,
@@ -248,14 +249,34 @@ pub enum Choice {
         price: Span<i64>,
         quantity: Span<i32>,
     },
+    /// Leave a standing bid for `item` at the hall, which anyone may sell
+    /// into while the citizen works (C1.5's demand). Needs a price and a
+    /// quantity.
+    Bid {
+        item: String,
+        price: Span<i64>,
+        quantity: Span<i32>,
+    },
+    /// Stock its stall at the bazaar with `item`, renting one first if it
+    /// keeps none (C1.5). Needs a price and a quantity.
+    Stock {
+        item: String,
+        price: Span<i64>,
+        quantity: Span<i32>,
+    },
     /// Don't sell: keep what it holds.
     Keep,
     /// Don't buy: go and gather it.
     Gather { item: String },
     /// Accept the trade as it stands.
     Accept,
-    /// Ask for more Strands on their side. Needs a price: how many more.
+    /// Ask for a deal this many Strands better. Needs a price: how many.
+    /// There's no chat, so a citizen says it with its own side of the
+    /// window (C1.5): it takes that much off what it gives, Strands first,
+    /// then goods at its books. "For that, you get this."
     Counter { strands: Span<i64> },
+    /// Put up this many Strands for the goods they offer. Needs a price.
+    Pay { strands: Span<i64> },
     Decline,
     /// Sit out a while where it is.
     Rest,
@@ -267,8 +288,11 @@ impl Choice {
     /// The parameters it takes: (price, quantity).
     fn takes(&self) -> (Option<Span<i64>>, Option<Span<i32>>) {
         match self {
-            Choice::Sell { price, quantity, .. } | Choice::Buy { price, quantity, .. } => (Some(*price), Some(*quantity)),
-            Choice::Counter { strands } => (Some(*strands), None),
+            Choice::Sell { price, quantity, .. }
+            | Choice::Buy { price, quantity, .. }
+            | Choice::Bid { price, quantity, .. }
+            | Choice::Stock { price, quantity, .. } => (Some(*price), Some(*quantity)),
+            Choice::Counter { strands } | Choice::Pay { strands } => (Some(*strands), None),
             _ => (None, None),
         }
     }

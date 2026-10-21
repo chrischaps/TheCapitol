@@ -727,3 +727,161 @@ fn the_bot_walks_round_the_canal_by_a_bridge() {
     let (x, y) = bot.position();
     assert!((x - door.0).hypot(y - door.1) < 1.0);
 }
+
+/// C1.5: a citizen answers a person's trade where it stands. It lays out its
+/// logs; a short offer is countered ("for that, you get this"), and then a
+/// lowball is declined; a fair offer for the lot is taken, and the trade
+/// goes through. The person plays the trade window as a person would.
+#[test]
+#[ignore = "needs a local stack with DEV_GRANTS=on: docker-compose up -d, then cargo run in backend/"]
+fn a_citizen_counters_a_short_offer_declines_a_lowball_and_takes_a_fair_one() {
+    use capitol_core::citizen::decide::{Mind, Temperament, Who};
+    use capitol_core::citizen::meet::{self, Answering, Met};
+    use capitol_core::state::{Offer, Trade, TradeEvent};
+
+    let logs = |offer: &Offer| -> i32 { offer.items.iter().filter(|i| i.item_type == "log").map(|i| i.quantity).sum() };
+    let mut citizen = Bot::sign_in(live(), &Account::numbered(&format!("citizen{}", stamp()), 1)).expect("citizen signed in");
+    let mut person = Bot::sign_in(live(), &Account::numbered(&format!("person{}", stamp()), 1)).expect("person signed in");
+    granted(&mut citizen, 0, &[("log", 40, 50)]);
+    granted(&mut person, 5000, &[]);
+    // Where the citizen collected its logs
+    person.go_to_exchange().expect("the person reached the hall");
+    citizen.watch_market("log").expect("the log book");
+    person.watch_market("log").expect("the log book");
+    // What the citizen will think a log is worth: the books, or a bid of
+    // the person's if the book is bare
+    if meet::worth(person.state(), "log").is_none() {
+        use capitol_core::protocol::rest::PlaceOrder;
+        use capitol_core::protocol::rules::market::OrderSide;
+        person
+            .place_order(PlaceOrder {
+                side: OrderSide::Buy,
+                item_type: "log".into(),
+                price: 10,
+                quantity: 1,
+                item_id: None,
+                qualities: None,
+                min_grade: None,
+                grade_rule: None,
+            })
+            .expect("a bid to price logs by");
+        citizen.until("the bid", Duration::from_secs(5), |s, _| meet::worth(s, "log").is_some()).expect("a worth");
+    }
+    let worth = meet::worth(citizen.state(), "log").expect("logs have a worth");
+    assert_eq!(meet::worth(person.state(), "log"), Some(worth), "both see the same books");
+
+    // The citizen answers trades until it has answered two
+    let them = citizen.state().me().expect("the citizen's id");
+    citizen.answer_trades(true);
+    let answering = thread::spawn(move || {
+        let me = Answering {
+            who: Who {
+                name: citizen.name().to_string(),
+                role: "gatherer-wood".into(),
+                temperament: Temperament::default(),
+            },
+            product: Some("log"),
+            hours: 0.0,
+        };
+        let mut mind = Mind::rules();
+        let mut met = Vec::new();
+        let end = Instant::now() + Duration::from_secs(150);
+        while met.len() < 2 && Instant::now() < end {
+            if citizen.asked_to_trade() {
+                met.push(meet::answer(&mut citizen, &mut mind, &me).expect("answered"));
+            } else {
+                citizen.idle(Duration::from_millis(100)).expect("idle");
+            }
+        }
+        (citizen, met)
+    });
+    let ask = |person: &mut Bot| {
+        person.until("the citizen in sight", Duration::from_secs(10), |s, _| s.player(them).is_some()).expect("in sight");
+        person.trade_act(|s, now| s.trade_initiate(now, them)).expect("asked");
+        person
+            .until("the citizen's wares", Duration::from_secs(15), |s, _| s.open_trade().is_some_and(|o| logs(&o.theirs) == 40))
+            .expect("its forty logs laid out");
+    };
+    let offer = |person: &mut Bot, strands: i64| {
+        person.trade_act(|s, now| s.trade_offer(now, Vec::new(), strands)).expect("offered");
+    };
+
+    // Short: ten logs' worth for forty. Countered down to ten logs, which
+    // the citizen accepts; then the person comes down to two logs' worth
+    ask(&mut person);
+    offer(&mut person, 10 * worth);
+    person
+        .until("the counter", Duration::from_secs(15), |s, _| {
+            s.open_trade().is_some_and(|o| logs(&o.theirs) == 10 && o.they_accepted)
+        })
+        .expect("countered to ten logs, and accepted");
+    offer(&mut person, 2 * worth);
+    let seen = person
+        .until("the decline", Duration::from_secs(15), |s, _| matches!(s.trade(), Trade::Idle))
+        .expect("declined");
+    assert!(seen.iter().any(|e| matches!(e, StateEvent::Trade(TradeEvent::Cancelled { .. }))));
+
+    // Fair: the whole forty at their worth, taken as it stands
+    let before = person.state().strands().expect("a balance");
+    ask(&mut person);
+    offer(&mut person, 40 * worth);
+    person
+        .until("the citizen's accept", Duration::from_secs(15), |s, _| s.open_trade().is_some_and(|o| o.they_accepted))
+        .expect("accepted");
+    person.trade_act(|s, now| s.trade_accept(now)).expect("accepting");
+    person
+        .until("the trade", Duration::from_secs(15), |s, _| matches!(s.trade(), Trade::Idle))
+        .expect("the trade went through");
+    person.settle().expect("refetched");
+    person
+        .until("the logs", Duration::from_secs(10), |s, _| s.strands() == Some(before - 40 * worth))
+        .expect("paid forty logs' worth");
+    assert_eq!(person.count(container_type::PLAYER_INVENTORY, "log"), 40);
+
+    let (_, met) = answering.join().expect("the citizen's thread");
+    assert!(matches!(&met[0], Met::Declined { .. }), "{met:?}");
+    assert!(matches!(&met[1], Met::Traded { .. }), "{met:?}");
+}
+
+/// C1.5's second check, against a running town (`capitol-town`, a server of
+/// its own with `DEV_GRANTS=on` for the person only): a person sells ten
+/// logs at the market's price, and somebody buys them within a game hour.
+/// The market's price is the citizens' books: the last trade, else the
+/// middle of the book, else whatever side there is; on a bare book, 5.
+/// Prints how many game minutes the fill took.
+#[test]
+#[ignore = "needs a running town: capitol-town against CAPITOL_SERVER, which has DEV_GRANTS=on"]
+fn a_persons_sell_order_fills_in_a_town_within_a_game_hour() {
+    use capitol_core::citizen::meet;
+    use capitol_core::protocol::rest::PlaceOrder;
+    use capitol_core::protocol::rules::market::{OrderSide, OrderStatus};
+
+    let mut person = Bot::sign_in(live(), &Account::numbered(&format!("seller{}", stamp()), 1)).expect("signed in");
+    let scale = person.health().expect("health").sim_tick_scale.unwrap_or(1.0);
+    granted(&mut person, 0, &[("log", 10, 50)]);
+    person.watch_market("log").expect("the log book");
+    let price = meet::worth(person.state(), "log").unwrap_or(5);
+    let placed = person
+        .place_order(PlaceOrder {
+            side: OrderSide::Sell,
+            item_type: "log".into(),
+            price,
+            quantity: 10,
+            item_id: Some(stack_of(&person, "log")),
+            qualities: None,
+            min_grade: None,
+            grade_rule: None,
+        })
+        .expect("the sell order");
+    let hour = Duration::from_secs_f64(3600.0 / scale);
+    let started = Instant::now();
+    let filled = person.until("the fill", hour, |s, _| s.market().order(placed.id).is_some_and(|o| o.status != OrderStatus::Open));
+    let minutes = started.elapsed().as_secs_f64() * scale / 60.0;
+    match filled {
+        Ok(_) => println!("ten logs at {price} filled in {minutes:.0} game minutes"),
+        Err(e) => {
+            let _ = person.cancel_order(placed.id);
+            panic!("ten logs at {price} unfilled after {minutes:.0} game minutes: {e}");
+        }
+    }
+}

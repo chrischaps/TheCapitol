@@ -20,9 +20,13 @@
 //!   hall half as often again, on bids a Strand over a 1-Strand trade;
 //! - **risk** asks above the bid, up to halfway to the ask;
 //! - **sociability** passes free time at the hall rather than resting.
+//!
+//! People (C1.5): a standing bid is at the books' price (under it for the
+//! thrifty, who'd sooner gather), a stall's price above it (more for the
+//! bold), and a P2P trade is weighed whole at the books ([`trade`]).
 
 use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Verdict};
-use crate::sim::{BANK_FIBER_AT, LOT, SELL_AT};
+use crate::sim::{BANK_FIBER_AT, LOT, SELL_AT, STALL_AT};
 
 /// What "what the rules would do" is worth.
 const SURE: f64 = 0.9;
@@ -90,8 +94,34 @@ impl Decider for RulesDecider {
                     };
                     (SURE * fair, d)
                 }
+                Choice::Bid { item, price, quantity } => {
+                    // A standing bid at the books' price, a little under it
+                    // for the thrifty; they'd sooner gather it themselves.
+                    let w = worth(s, item).unwrap_or(price.min) as f64;
+                    let p = (w * (1.15 - 0.3 * t.thrift as f64)).round() as i64;
+                    let want = (LOT as f64 * (1.5 - t.thrift as f64)).round() as i32;
+                    let d = Decision {
+                        pick: i,
+                        price: Some(price.clamp(p.max(1))),
+                        quantity: Some(quantity.clamp(want)),
+                    };
+                    (0.95 - 0.2 * t.thrift as f64, d)
+                }
+                Choice::Stock { item, price, quantity } => {
+                    // A stall's price is the books' and a little more, more
+                    // for the bold: someone who wants it now pays for that.
+                    let w = worth(s, item).unwrap_or(price.max) as f64;
+                    let p = (w * (1.05 + 0.3 * t.risk as f64)).round() as i64;
+                    let held = s.holdings.count(item);
+                    let d = Decision {
+                        pick: i,
+                        price: Some(price.clamp(p.max(1))),
+                        quantity: Some(quantity.clamp(held)),
+                    };
+                    (SURE * held as f64 / lot(STALL_AT, t.patience), d)
+                }
                 Choice::Gather { .. } => (0.5 + 0.4 * t.thrift as f64, Decision::plain(i)),
-                Choice::Accept | Choice::Counter { .. } | Choice::Decline => trade(s, i, choice),
+                Choice::Accept | Choice::Counter { .. } | Choice::Pay { .. } | Choice::Decline => trade(s, i, choice),
                 Choice::Rest => (0.8 - 0.2 * t.sociability as f64, Decision::plain(i)),
                 Choice::Hall => (0.4 + 0.4 * t.sociability as f64, Decision::plain(i)),
             };
@@ -141,9 +171,15 @@ fn fairness(got: i64, paid: i64, thrift: f32) -> f64 {
 }
 
 /// What an item is worth by the citizen's books: the last trade, else the
-/// middle of the book, else either side.
-fn worth(s: &Situation, item: &str) -> Option<i64> {
-    let q = quote(s, item)?;
+/// middle of the book, else either side. `None`: it can't say, and won't
+/// sell it in a P2P trade ([`meet`](crate::citizen::meet)).
+pub(crate) fn worth(s: &Situation, item: &str) -> Option<i64> {
+    worth_in(&s.market, item)
+}
+
+/// [`worth`] from the books alone.
+pub(crate) fn worth_in(market: &[Quote], item: &str) -> Option<i64> {
+    let q = market.iter().find(|q| q.item == item)?;
     q.last.or(match (q.bid, q.ask) {
         (Some(b), Some(a)) => Some((a + b) / 2),
         (b, a) => b.or(a),
@@ -156,9 +192,24 @@ fn value(s: &Situation, lots: &[Lot]) -> f64 {
         .sum()
 }
 
+/// What a citizen wants back for every Strand's worth it gives: about 1,
+/// more if thrifty, a little less if sociable.
+pub(crate) fn wants(t: &super::Temperament) -> f64 {
+    0.9 + 0.2 * t.thrift as f64 - 0.1 * (t.sociability as f64 - 0.5)
+}
+
 /// A P2P trade, valued at the citizen's books: what it gets over what it
-/// gives, against the share a fair deal should be. Thrift wants more,
-/// sociability will take a little less. A counter asks for the shortfall.
+/// gives, against the share a fair deal should be ([`wants`]).
+///
+/// - **Accept** a fair deal, or better.
+/// - **Counter** a short one, asking for the shortfall, when the counter
+///   can close it: its span's top is the most the citizen can take off its
+///   side and still give something. So "30 for my ten logs at 10" is
+///   answered "30 gets you three", however far short it is.
+/// - **Decline** a short one it can't counter: it has countered already,
+///   or the offer buys less than the least it would give.
+/// - **Pay** for goods offered: their worth at its books over what it wants.
+///   Goods it can't put a worth to, it declines.
 fn trade(s: &Situation, i: usize, choice: &Choice) -> (f64, Decision) {
     let Question::Trade {
         theirs,
@@ -171,16 +222,18 @@ fn trade(s: &Situation, i: usize, choice: &Choice) -> (f64, Decision) {
         // A trade's answers on another question's menu fit nothing
         return (0.0, Decision::plain(i));
     };
-    let t = &s.who.temperament;
+    let wants = wants(&s.who.temperament);
     let get = value(s, theirs) + *their_strands as f64;
     let give = value(s, ours) + *our_strands as f64;
-    let wants = 0.9 + 0.2 * t.thrift as f64 - 0.1 * (t.sociability as f64 - 0.5);
     let q = if give <= 0.0 { 2.0 } else { get / (give * wants) };
+    // Less a hair, so 1.1 × 100 is 110 and not 111
+    let short = (give * wants - get - 1e-9).ceil().max(1.0) as i64;
+    // Whether a counter on the menu could close the gap
+    let closes = s.menu.iter().any(|c| matches!(c, Choice::Counter { strands } if short <= strands.max));
     match choice {
         Choice::Accept => (SURE * q.min(1.2).powi(4), Decision::plain(i)),
         Choice::Counter { strands } => {
-            let short = (give * wants - get).ceil().max(1.0) as i64;
-            let u = if (0.6..1.0).contains(&q) { 0.75 } else { 0.1 };
+            let u = if q < 1.0 && short <= strands.max { 0.75 } else { 0.1 };
             let d = Decision {
                 pick: i,
                 price: Some(strands.clamp(short)),
@@ -188,7 +241,17 @@ fn trade(s: &Situation, i: usize, choice: &Choice) -> (f64, Decision) {
             };
             (u, d)
         }
-        _ => (if q < 0.6 { SURE } else { 0.3 }, Decision::plain(i)),
+        Choice::Pay { strands } => {
+            let fair = (value(s, theirs) / wants).floor() as i64;
+            let u = if fair >= strands.min { SURE } else { 0.1 };
+            let d = Decision {
+                pick: i,
+                price: Some(strands.clamp(fair)),
+                quantity: None,
+            };
+            (u, d)
+        }
+        _ => (if q < 0.6 && !closes { SURE } else { 0.3 }, Decision::plain(i)),
     }
 }
 
@@ -372,10 +435,11 @@ mod tests {
             }],
             our_strands: 0,
         };
+        // A counter may take off all but one log's worth
         let menu = vec![
             Choice::Accept,
             Choice::Counter {
-                strands: Span::new(1, 1000),
+                strands: Span::new(1, (ours as i64 - 1).max(1) * 10),
             },
             Choice::Decline,
         ];
@@ -390,16 +454,130 @@ mod tests {
     }
 
     #[test]
-    fn a_fair_offer_is_taken_a_near_one_countered_a_poor_one_declined() {
+    fn a_fair_offer_is_taken_a_short_one_countered_a_poor_one_declined() {
         let t = Temperament::default();
         // Ten logs at the last trade's 10
         assert_eq!(decide(&offer(100, 10, t)).0.pick, 0);
         assert_eq!(decide(&offer(130, 10, t)).0.pick, 0);
         let (d, _) = decide(&offer(80, 10, t));
         assert_eq!(d, Decision { pick: 1, price: Some(20), quantity: None });
-        assert_eq!(decide(&offer(30, 10, t)).0.pick, 2);
+        // However short, a counter that leaves a log to give is made
+        let (d, _) = decide(&offer(30, 10, t));
+        assert_eq!(d, Decision { pick: 1, price: Some(70), quantity: None });
+        // Less than a log's worth can't be countered
+        assert_eq!(decide(&offer(5, 10, t)).0.pick, 2);
         // A gift is always welcome
         assert_eq!(decide(&offer(50, 0, t)).0.pick, 0);
+    }
+
+    #[test]
+    fn with_its_counter_spent_a_short_offer_is_declined_or_taken_if_near() {
+        let t = Temperament::default();
+        let spent = |theirs| {
+            let mut s = offer(theirs, 10, t);
+            s.menu.remove(1);
+            s
+        };
+        assert_eq!(decide(&spent(30)).0.pick, 1, "declined");
+        assert_eq!(decide(&spent(90)).0.pick, 0, "near enough");
+        // The thrifty want more for the same logs
+        let thrifty = with(|t| t.thrift = 1.0);
+        let (d, _) = decide(&offer(100, 10, thrifty));
+        assert_eq!(d, Decision { pick: 1, price: Some(10), quantity: None });
+    }
+
+    fn goods(logs: i32, afford: i64, t: Temperament) -> Situation {
+        let q = Question::Trade {
+            partner: "Someone".into(),
+            partner_citizen: false,
+            theirs: vec![Lot {
+                item: "log".into(),
+                quantity: logs,
+            }],
+            their_strands: 0,
+            ours: Vec::new(),
+            our_strands: 0,
+        };
+        let menu = vec![
+            Choice::Pay {
+                strands: Span::new(1, afford),
+            },
+            Choice::Decline,
+        ];
+        let mut s = situation(q, menu, t);
+        s.market.push(Quote {
+            item: "log".into(),
+            bid: Some(9),
+            ask: Some(11),
+            last: Some(10),
+        });
+        s
+    }
+
+    #[test]
+    fn goods_offered_are_paid_for_at_the_books() {
+        let (d, conf) = decide(&goods(6, 1000, Temperament::default()));
+        assert_eq!(d, Decision { pick: 0, price: Some(60), quantity: None });
+        assert!(conf >= super::super::RULES_THRESHOLD, "{conf}");
+        // As much as it has; the thrifty pay less
+        assert_eq!(decide(&goods(6, 40, Temperament::default())).0.price, Some(40));
+        assert_eq!(decide(&goods(6, 1000, with(|t| t.thrift = 1.0))).0.price, Some(54));
+        // Goods it can put no worth to, it declines
+        let mut s = goods(6, 1000, Temperament::default());
+        s.market.clear();
+        assert_eq!(decide(&s).0.pick, 1);
+    }
+
+    #[test]
+    fn a_standing_bid_is_at_the_books_and_a_stall_above_them() {
+        let bid = |t| {
+            let menu = vec![
+                Choice::Bid {
+                    item: "log".into(),
+                    price: Span::new(1, 40),
+                    quantity: Span::new(1, 30),
+                },
+                Choice::Gather { item: "log".into() },
+            ];
+            let mut s = situation(Question::Buy { item: "log".into() }, menu, t);
+            s.market.push(Quote {
+                item: "log".into(),
+                bid: None,
+                ask: None,
+                last: Some(10),
+            });
+            s
+        };
+        let (d, conf) = decide(&bid(Temperament::default()));
+        assert_eq!(d, Decision { pick: 0, price: Some(10), quantity: Some(LOT) });
+        assert!(conf >= super::super::RULES_THRESHOLD, "{conf}");
+        // The thrifty bid lower, and the thriftiest gather instead
+        assert_eq!(decide(&bid(with(|t| t.thrift = 0.7))).0.price, Some(9));
+        assert_eq!(decide(&bid(with(|t| t.thrift = 1.0))).0.pick, 1);
+
+        let stall = |held, t| {
+            let menu = vec![
+                Choice::Stock {
+                    item: "log".into(),
+                    price: Span::new(1, 100),
+                    quantity: Span::new(1, held),
+                },
+                Choice::Keep,
+            ];
+            let mut s = situation(Question::Sell { item: "log".into() }, menu, t);
+            s.holdings.items.insert("log".into(), held);
+            s.market.push(Quote {
+                item: "log".into(),
+                bid: None,
+                ask: None,
+                last: Some(10),
+            });
+            s
+        };
+        let (d, _) = decide(&stall(2 * STALL_AT, Temperament::default()));
+        assert_eq!(d, Decision { pick: 0, price: Some(12), quantity: Some(2 * STALL_AT) });
+        assert_eq!(decide(&stall(STALL_AT - 1, Temperament::default())).0.pick, 1);
+        assert_eq!(decide(&stall(2 * STALL_AT, with(|t| t.risk = 0.0))).0.price, Some(11));
     }
 
     #[test]
