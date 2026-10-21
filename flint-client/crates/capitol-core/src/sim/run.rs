@@ -211,7 +211,11 @@ pub(crate) fn live(mut bot: Bot, role: Role, persona: &Persona, seed: u64, mut m
     if role == Role::Merchant {
         citizen.merchant = Some(merchant::Merchant::new(seed));
     }
-    citizen.work(None, Some(town))
+    let ended = citizen.work(None, Some(town));
+    // What the day's last steps did: its walk home, and its deed
+    citizen.journal();
+    town.record(std::mem::take(&mut citizen.entries), citizen.mind.take_rulings());
+    ended
 }
 
 /// A maker's run: quote until `deadline`, take the orders down, and count
@@ -549,10 +553,9 @@ impl SimBot {
                 }
             }
             if let Some(town) = town {
-                // The report's entries are the sim's; a citizen lives on
-                // and would only pile them up. C1.7's ledger is their place.
+                // A citizen's entries go to its town's ledger (C1.7)
                 self.journal();
-                self.entries.clear();
+                town.record(std::mem::take(&mut self.entries), self.mind.take_rulings());
                 let strands = self.bot.state().strands();
                 town.health(|h| h.strands = strands);
             }

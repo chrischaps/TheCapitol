@@ -9,6 +9,7 @@
 //! A craft takes the very units its quality was worked out from (E1.8): the start names them
 //! (the best of each stack first), and completion takes exactly those, or fails.
 
+use capitol_protocol::ledger::UnitFlow;
 use capitol_protocol::rest::StationTool;
 use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::ws::ToolUse;
@@ -16,6 +17,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::gazette;
+use super::ledger::{self, Flows};
 use super::station_tools;
 use super::units::{self, Marked, NewStack};
 use super::tools::{self, BrokenTool, HeldTool, Wear};
@@ -72,8 +74,10 @@ pub const OUTPUT_FULL: &str = "Your crafting output is full. Empty it and craft 
 pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Finished, String> {
     let mut tx = db.begin().await.map_err(db_error)?;
     let mut changed: Vec<Uuid> = Vec::new();
+    // What it used up, made and wore out, counted once it's written (C1.7)
+    let mut flows = Flows::new();
 
-    consume_inputs(&mut tx, craft, &mut changed).await?;
+    consume_inputs(&mut tx, craft, &mut changed, &mut flows).await?;
     let (mut tool, mut broken, mut station_tool) = (None, None, None);
     if let Some(held) = &craft.tool {
         let wear = match held.station_id {
@@ -97,6 +101,7 @@ pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Finished
                 wear
             }
         };
+        flows.wore(&held.item_type, &wear);
         tool = Some(held.after(&wear));
         if let Wear::Broke(b) = wear {
             broken = Some(b);
@@ -108,9 +113,10 @@ pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Finished
             changed.push(container);
         }
         gazette::tally(&mut tx, craft.player_id, &output.item_type, output.quantity).await.map_err(db_error)?;
+        flows.add(&output.item_type, UnitFlow::Crafted, output.quantity as i64);
     }
 
-    tx.commit().await.map_err(db_error)?;
+    ledger::commit(tx, flows).await.map_err(db_error)?;
     Ok(Finished { changed, tool, broken, station_tool })
 }
 
@@ -120,6 +126,7 @@ async fn consume_inputs(
     tx: &mut Transaction<'_, Postgres>,
     craft: &FinishedCraft,
     changed: &mut Vec<Uuid>,
+    flows: &mut Flows,
 ) -> Result<(), String> {
     // The same stack listed twice must hold both lots
     let mut wanted: Vec<(Uuid, Units)> = Vec::new();
@@ -133,8 +140,8 @@ async fn consume_inputs(
     }
 
     for (item_id, lot) in wanted {
-        let held: Option<Option<Uuid>> = sqlx::query_scalar(
-            "SELECT container_id FROM items WHERE id = $1 AND owner_id = $2 FOR UPDATE",
+        let held: Option<(Option<Uuid>, String)> = sqlx::query_as(
+            "SELECT container_id, item_type FROM items WHERE id = $1 AND owner_id = $2 FOR UPDATE",
         )
         .bind(item_id)
         .bind(craft.player_id)
@@ -145,13 +152,14 @@ async fn consume_inputs(
             Some(_) => units::take_units(tx, item_id, &lot).await.map_err(db_error)?,
             None => None,
         };
-        let (Some(container_id), Some(_)) = (held, taken) else {
+        let (Some((container_id, item_type)), Some(_)) = (held, taken) else {
             tracing::info!(
                 "Craft {} by {} failed: input {} is gone, or no longer {}'s, or no longer holds {:?}",
                 craft.operation_id, craft.player_id, item_id, craft.player_id, lot
             );
             return Err(INPUTS_MOVED.to_string());
         };
+        flows.add(&item_type, UnitFlow::Consumed, lot.count());
         if let Some(c) = container_id {
             if !changed.contains(&c) {
                 changed.push(c);

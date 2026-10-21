@@ -10,12 +10,15 @@
 //!   and moving on the land (`rules::ground`)
 //! - [`fmath`]: trig that gives the same bits on every platform
 //! - [`land`]: the height of the ground, a pure function of `LandParams`
+//! - [`ledger`]: the world's books, `GET /admin/ledger`, and what two of them
+//!   say about conservation and load (C1.7)
 //!
 //! The `backend` feature adds the server-only derives (utoipa schemas, sqlx rows).
 //! Clients leave it off.
 
 pub mod fmath;
 pub mod land;
+pub mod ledger;
 pub mod rest;
 pub mod rules;
 pub mod terrain;

@@ -3,13 +3,14 @@ use axum::{
     routing::post,
     Extension, Json, Router,
 };
+use capitol_protocol::ledger::UnitFlow;
 use capitol_protocol::rest::{DepositRequest, DepositResponse, WithdrawRequest, WithdrawResponse};
 use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::rules::{deposit_quote, withdraw_quote};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::engine::units;
+use crate::engine::{ledger, units};
 use crate::engine::currency::{add_strands_in, announce_balances, subtract_strands_in, TransactionType};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -146,7 +147,9 @@ pub async fn deposit(db: &PgPool, player_id: Uuid, item_ids: &[Uuid]) -> Result<
     .await
     .map_err(AppError::Internal)?;
 
-    tx.commit().await?;
+    let mut flows = ledger::Flows::new();
+    flows.add("fiber", UnitFlow::Deposited, total_fiber);
+    ledger::commit(tx, flows).await?;
 
     tracing::info!(
         "Player {} deposited {} fiber for {} strands (fee: {})",
@@ -240,7 +243,9 @@ pub async fn withdraw(db: &PgPool, player_id: Uuid, quantity: i32) -> Result<Wit
         .await?;
     }
 
-    tx.commit().await?;
+    let mut flows = ledger::Flows::new();
+    flows.add("fiber", UnitFlow::Withdrawn, quantity as i64);
+    ledger::commit(tx, flows).await?;
 
     tracing::info!(
         "Player {} withdrew {} fiber for {} strands (fee: {})",

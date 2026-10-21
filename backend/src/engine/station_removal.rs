@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 
+use capitol_protocol::ledger::UnitFlow;
 use capitol_protocol::ws::ItemCount;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -82,8 +83,11 @@ pub async fn remove_station(
     station_id: Uuid,
 ) -> Result<RemovedStation, RemoveError> {
     let mut tx = db.begin().await?;
-    let removed = remove_in(&mut tx, player_id, station_id).await?;
-    tx.commit().await?;
+    let (removed, kit) = remove_in(&mut tx, player_id, station_id).await?;
+    // The kit comes back into the world (C1.7)
+    let mut flows = super::ledger::Flows::new();
+    flows.add(&kit, UnitFlow::KitReturned, 1);
+    super::ledger::commit(tx, flows).await?;
     Ok(removed)
 }
 
@@ -91,7 +95,7 @@ async fn remove_in(
     tx: &mut Transaction<'_, Postgres>,
     player_id: Uuid,
     station_id: Uuid,
-) -> Result<RemovedStation, RemoveError> {
+) -> Result<(RemovedStation, String), RemoveError> {
     let (station_type, owner_id, plot_id, kit_quality, kit, tool): (String, Uuid, Option<Uuid>, i32, Option<String>, Option<Uuid>) =
         sqlx::query_as(
             "SELECT s.station_type, s.owner_id, s.plot_id, s.kit_quality, st.kit_item, s.installed_tool
@@ -150,7 +154,7 @@ async fn remove_in(
          VALUES ($1, $2, $3, 1, $4, $5, $6)",
     )
     .bind(kit_item_id)
-    .bind(kit)
+    .bind(&kit)
     .bind(kit_quality)
     .bind(player_id)
     .bind(inventory_id)
@@ -173,11 +177,14 @@ async fn remove_in(
         .await?;
     }
 
-    Ok(RemovedStation {
-        inventory_id,
-        kit_item_id,
-        tool_item_id: tool,
-    })
+    Ok((
+        RemovedStation {
+            inventory_id,
+            kit_item_id,
+            tool_item_id: tool,
+        },
+        kit,
+    ))
 }
 
 /// The first `n` free slots of `player_id`'s inventory, which is locked, or
@@ -221,9 +228,26 @@ pub struct ReturnedStations {
     /// What found no room even in the impound, as `(player, item_type,
     /// quantity)`. It's still in the stations, and goes when they do.
     pub lost: Vec<(Uuid, String, i32)>,
+    /// The kits made again, one a station that found room for it (C1.7)
+    pub kits: Vec<String>,
+    /// What of `lost` was in a station's boxes, and is destroyed with it,
+    /// as `(item_type, quantity)`. A kit with no room was never made, and a
+    /// tool with none stays out of every container, so neither is here.
+    pub dropped: Vec<(String, i32)>,
 }
 
 impl ReturnedStations {
+    /// The units this made and will destroy once the stations are deleted,
+    /// for the caller to count when it commits that (C1.7)
+    pub fn count_into(&self, flows: &mut super::ledger::Flows) {
+        for kit in &self.kits {
+            flows.add(kit, UnitFlow::KitReturned, 1);
+        }
+        for (item_type, quantity) in &self.dropped {
+            flows.add(item_type, UnitFlow::Lost, *quantity as i64);
+        }
+    }
+
     /// What of `player`'s went to their impound, a count per item type in
     /// the order each first went
     pub fn impounded_for(&self, player: Uuid) -> Vec<ItemCount> {
@@ -387,6 +411,7 @@ pub async fn return_stations(
         .bind(slot)
         .execute(&mut *tx)
         .await?;
+        returned.kits.push(kit.clone());
         took(&mut returned, *owner_id, container, kind, kit, 1);
     }
 
@@ -417,6 +442,7 @@ pub async fn return_stations(
             }
         }
         let Some((container, kind, room)) = found else {
+            returned.dropped.push((item_type.clone(), quantity));
             returned.lost.push((player, item_type, quantity));
             continue;
         };

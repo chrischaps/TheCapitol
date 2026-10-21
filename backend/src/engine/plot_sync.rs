@@ -233,11 +233,14 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
 
     let mut report = SyncReport::default();
     let mut tx = db.begin().await?;
+    // Kits back, and what found no room, counted once it commits (C1.7)
+    let mut flows = crate::engine::ledger::Flows::new();
 
     if on_owned == OnOwned::Release {
         for c in &conflicts {
             report.released.push(c.terrain_id.clone());
             let returned = return_plot_stations(&mut tx, c.plot_id).await?;
+            returned.count_into(&mut flows);
             if !returned.lost.is_empty() {
                 tracing::warn!("Releasing plot {}: no room for {:?}, lost with its stations", c.plot_id, returned.lost);
             }
@@ -320,6 +323,7 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
     if !covered.is_empty() {
         let ids: Vec<Uuid> = covered.iter().map(|c| c.station_id).collect();
         let returned = return_stations(&mut tx, &ids).await?;
+        returned.count_into(&mut flows);
         if !returned.lost.is_empty() {
             tracing::warn!("Taking down workbenches under new lots: no room for {:?}, lost with them", returned.lost);
         }
@@ -336,7 +340,7 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
             report.displaced.push((c, notice));
         }
     }
-    tx.commit().await?;
+    crate::engine::ledger::commit(tx, flows).await?;
 
     report.conflicts = conflicts;
     report.held_back = held.into_iter().map(String::from).collect();

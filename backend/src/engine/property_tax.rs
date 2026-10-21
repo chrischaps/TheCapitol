@@ -180,7 +180,7 @@ pub async fn process_property_taxes(db: &PgPool) -> TaxReport {
             } else {
                 0
             }
-        } else if collect_tax_from_player(db, owner_id, hourly_tax).await {
+        } else if collect_tax_from_player(db, owner_id, plot_id, hourly_tax).await {
             charged.push(owner_id);
             // Update last_tax_paid timestamp
             if let Err(e) = sqlx::query(
@@ -299,11 +299,17 @@ async fn collect_debt(db: &PgPool, plot_id: Uuid, owner_id: Uuid) -> i64 {
         if take <= 0 {
             return Ok(owed);
         }
-        sqlx::query("UPDATE players SET strand_balance = strand_balance - $1 WHERE id = $2")
-            .bind(take)
-            .bind(owner_id)
-            .execute(&mut *tx)
-            .await?;
+        // Through the ledger, so the books balance (C1.7)
+        subtract_strands_in(
+            &mut tx,
+            owner_id,
+            take,
+            TransactionType::PropertyTax,
+            Some("Property tax owed"),
+            Some(plot_id),
+        )
+        .await
+        .map_err(sqlx::Error::Protocol)?;
         let left: i32 = sqlx::query_scalar("UPDATE plots SET tax_owed = tax_owed - $1 WHERE id = $2 RETURNING tax_owed")
             .bind(take as i32)
             .bind(plot_id)
@@ -347,6 +353,8 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>
         return Ok(None);
     }
     let returned = return_plot_stations(&mut tx, plot_id).await.map_err(|e| e.to_string())?;
+    let mut flows = super::ledger::Flows::new();
+    returned.count_into(&mut flows);
     if !returned.lost.is_empty() {
         tracing::warn!("Foreclosing plot {}: no room for {:?}, lost with its stations", plot_id, returned.lost);
     }
@@ -387,7 +395,7 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>
         }
         None => None,
     };
-    tx.commit().await.map_err(|e| e.to_string())?;
+    super::ledger::commit(tx, flows).await.map_err(|e| e.to_string())?;
     Ok(Some(Foreclosure {
         plot_id,
         owner_id,
@@ -444,30 +452,23 @@ pub fn announce(report: TaxReport, stations: &mut HashMap<Uuid, StationState>, e
     announce_balances(events, report.balances);
 }
 
-/// Attempt to collect tax from a player's strand balance
-async fn collect_tax_from_player(db: &PgPool, player_id: Uuid, amount: i64) -> bool {
-    // Start transaction for atomic operation
-    let mut tx = match db.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return false,
+/// Take an hour's tax on `plot_id` from `player_id`'s Strands, all of it or
+/// none. It goes through the ledger with its audit row, so the books balance
+/// (C1.7); a balance that's short is refused and nothing changes.
+async fn collect_tax_from_player(db: &PgPool, player_id: Uuid, plot_id: Uuid, amount: i64) -> bool {
+    let Ok(mut tx) = db.begin().await else {
+        return false;
     };
-
-    // Check and deduct balance atomically
-    let result = sqlx::query(
-        "UPDATE players SET strand_balance = strand_balance - $1
-         WHERE id = $2 AND strand_balance >= $1"
+    let taken = subtract_strands_in(
+        &mut tx,
+        player_id,
+        amount,
+        TransactionType::PropertyTax,
+        Some("Property tax"),
+        Some(plot_id),
     )
-    .bind(amount)
-    .bind(player_id)
-    .execute(&mut *tx)
     .await;
-
-    match result {
-        Ok(result) if result.rows_affected() > 0 => {
-            tx.commit().await.is_ok()
-        }
-        _ => false,
-    }
+    taken.is_ok() && tx.commit().await.is_ok()
 }
 
 /// Log a tax transaction for auditing

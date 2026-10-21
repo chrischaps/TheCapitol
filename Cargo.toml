@@ -14,3 +14,11 @@ opt-level = 3
 
 [profile.dev.package.libm]
 opt-level = 3
+
+# The town's soak (C1.7): optimised like release, so its tick times are the
+# server's and not a debug build's, but with debug assertions, which is what
+# lets `SIM_TICK_SCALE` speed the world up (config.rs refuses it in release).
+# `cargo run -p capitol-backend --profile soak`.
+[profile.soak]
+inherits = "release"
+debug-assertions = true

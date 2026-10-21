@@ -45,6 +45,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 
+use capitol_protocol::ledger::UnitFlow;
 use capitol_protocol::rest::{
     AutomationState, PauseReason, Produced, StationAutomation, StationTool, Subscription, SubscriptionStatus,
     PRODUCTION_LOG_LEN,
@@ -64,7 +65,7 @@ use super::events::GameEvent;
 use super::station_tools::SlotTool;
 use super::tools::{BrokenTool, HeldTool, Wear};
 use super::units::{Marked, NewStack};
-use super::{gazette, notices, station_tools, units, GameState};
+use super::{gazette, ledger, notices, station_tools, units, GameState};
 use crate::models::{ItemType, Recipe};
 
 /// How often the automation tick runs: the tick's 10-tick cadence (TDD §3.2).
@@ -829,6 +830,8 @@ pub async fn craft_once(
         Ok(picked) => picked,
         Err(item_type) => return Ok(Attempt::Blocked(PauseReason::MissingInput { item_type })),
     };
+    // What it uses up, makes and wears out, counted once it's written (C1.7)
+    let mut flows = ledger::Flows::new();
     // Take them in memory, then write every take in one statement:
     // (stack, taken, left), one entry a stack
     let mut takes: Vec<(Uuid, Units, Units)> = Vec::new();
@@ -838,6 +841,7 @@ pub async fn craft_once(
             // Picked from these very units; but never make from nothing
             return Err(sqlx::Error::Protocol(format!("stack {item_id} no longer holds {lot:?}")));
         };
+        flows.add(&stack.item_type, UnitFlow::Consumed, units.count());
         match takes.iter_mut().find(|(id, ..)| id == item_id) {
             Some((_, all, left)) => {
                 all.merge(&units);
@@ -859,9 +863,11 @@ pub async fn craft_once(
 
     let (mut slot_now, mut broken) = (None, None);
     if let Some((_, slot)) = tool {
+        let tool_type = slot.item_type.clone();
         let Some((wear, now_tool)) = station_tools::wear_slot(&mut tx, station_id, slot).await? else {
             return Ok(Attempt::Blocked(PauseReason::ToolMissing));
         };
+        flows.wore(&tool_type, &wear);
         slot_now = Some(now_tool);
         if let Wear::Broke(b) = wear {
             broken = Some(b);
@@ -869,6 +875,7 @@ pub async fn craft_once(
     }
 
     for output in &outputs {
+        flows.add(&output.item_type, UnitFlow::Crafted, output.quantity as i64);
         let made = Units::uniform(output.quantity, output.quality);
         // The station's owner made it (#231), as a craft by hand marks it
         // with the crafter
@@ -908,7 +915,7 @@ pub async fn craft_once(
         AutomationState::Running
     };
     save(&mut tx, station_id, &automation).await?;
-    tx.commit().await?;
+    ledger::commit(tx, flows).await?;
 
     let produced = outputs
         .iter()

@@ -1,5 +1,6 @@
 //! The REST half of the client: one [`RestRequest`] variant per backend route
-//! (admin routes aside, but for the citizens `capitol-town` mints), each
+//! (admin routes aside, but for the citizens `capitol-town` mints and the
+//! ledger its soak reads), each
 //! paired with the [`RestResponse`] variant it decodes to.
 //!
 //! The bearer token (or a bot's API key, E0.9) is attached whenever the IO
@@ -172,6 +173,8 @@ pub enum RestRequest {
     CreateCitizen(CreateCitizenRequest),
     /// `GET /admin/citizens`
     Citizens,
+    /// `GET /admin/ledger`: the world's books, for the town's soak (C1.7)
+    Ledger,
 }
 
 /// A decoded REST response. Each [`RestRequest`] decodes to exactly one variant.
@@ -251,6 +254,7 @@ pub enum RestResponse {
     /// A citizen as made, with its key's secret
     Citizen(Box<CreatedCitizen>),
     Citizens(Vec<CitizenInfo>),
+    Ledger(Box<capitol_protocol::ledger::Ledger>),
 }
 
 /// Why a REST call failed.
@@ -357,7 +361,8 @@ impl RestRequest {
             | Bazaar
             | MyStall
             | Shop { .. }
-            | Citizens => Method::GET,
+            | Citizens
+            | Ledger => Method::GET,
         }
     }
 
@@ -426,6 +431,7 @@ impl RestRequest {
             Unlist { listing_id } => format!("/bazaar/listings/{listing_id}"),
             Buy { listing_id, .. } => format!("/bazaar/listings/{listing_id}/buy"),
             CreateCitizen(_) | Citizens => "/admin/citizens".into(),
+            Ledger => "/admin/ledger".into(),
         }
     }
 
@@ -543,6 +549,7 @@ impl RestRequest {
             },
             Q::CreateCitizen(_) => A::Citizen(Box::new(de(body)?)),
             Q::Citizens => A::Citizens(de(body)?),
+            Q::Ledger => A::Ledger(Box::new(de(body)?)),
         })
     }
 }
@@ -809,6 +816,7 @@ mod tests {
                 "/admin/citizens".into(),
             ),
             (RestRequest::Citizens, "GET", "/admin/citizens".into()),
+            (RestRequest::Ledger, "GET", "/admin/ledger".into()),
             (RestRequest::MyStall, "GET", "/bazaar/mine".into()),
             (
                 RestRequest::Shop { stall_id: "bazaar_stall_3".into() },

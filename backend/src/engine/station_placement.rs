@@ -189,8 +189,18 @@ struct Request<'a> {
 /// ([`PLACEMENT_LOCK`]), so they can't both pass the spacing test.
 async fn place(db: &PgPool, req: Request<'_>) -> Result<Placed, PlacementError> {
     let mut tx = db.begin().await?;
+    let station_type = req.station_type;
     let placed = place_in(db, &mut tx, req).await?;
-    tx.commit().await?;
+    // Its kit went into it, counted once it commits (C1.7)
+    let kit: Option<String> = sqlx::query_scalar("SELECT kit_item FROM station_types WHERE id = $1")
+        .bind(station_type)
+        .fetch_one(&mut *tx)
+        .await?;
+    let mut flows = super::ledger::Flows::new();
+    if let Some(kit) = kit {
+        flows.add(&kit, capitol_protocol::ledger::UnitFlow::KitPlaced, 1);
+    }
+    super::ledger::commit(tx, flows).await?;
     Ok(placed)
 }
 

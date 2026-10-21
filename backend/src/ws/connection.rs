@@ -21,6 +21,7 @@ use crate::engine::container_access::{
 };
 use crate::api_keys::{self, KeyGrant};
 use crate::engine::GameEvent;
+use crate::engine::load::{self, SocketEnd};
 use crate::engine::presence::{self, Holder, PresenceEvent};
 use crate::engine::currency::announce_balances;
 use crate::models::{ItemType, PlayerState};
@@ -37,6 +38,8 @@ pub async fn ws_handler(
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
+    // Counted open until this returns, and ended however it last says (C1.7)
+    let mut counted = load::Socket::opened();
 
     // Wait for auth message with timeout
     let auth_result = timeout(Duration::from_secs(10), async {
@@ -122,6 +125,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 .await;
             let mut game = state.game.write().await;
             game.disconnect_player(player_id, connection_id);
+            counted.ends(SocketEnd::KeyRevoked);
             return;
         }
     }
@@ -143,6 +147,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let _ = sender
         .send(Message::Text(serde_json::to_string(&auth_ok).unwrap().into()))
         .await;
+    // Signed in: from here, one that ends without saying why just went
+    counted.ends(SocketEnd::Vanished);
 
     // Take the avatar (D9): a client always does, so the newest client holds
     // it, and a bot only while none of the player's clients is connected.
@@ -190,6 +196,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let _ = sender.send(Message::Close(None)).await;
                         })
                         .await;
+                        counted.ends(SocketEnd::SessionEnded);
                         break;
                     }
                 }
@@ -203,6 +210,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     let _ = sender.send(Message::Close(None)).await;
                 })
                 .await;
+                counted.ends(SocketEnd::KeyRevoked);
                 break;
             }
 
@@ -844,9 +852,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     Some(Ok(Message::Ping(data))) => {
                         let _ = sender.send(Message::Pong(data)).await;
                     }
-                    Some(Ok(Message::Close(_))) | None => {
+                    Some(Ok(Message::Close(_))) => {
+                        counted.ends(SocketEnd::Closed);
                         break;
                     }
+                    None => break,
                     _ => {}
                 }
             }
@@ -862,6 +872,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     // and start this socket over from what's true now (C0.3)
                     Err(RecvError::Lagged(missed)) => {
                         tracing::warn!("Player {player_id}'s connection {connection_id} fell {missed} events behind; resyncing it");
+                        counted.resynced();
                         let messages = resync(&state.db, &state.game, &state.market, player_id, connection_id, missed, &market_items).await;
                         let mut sent = Ok(());
                         for msg in messages {
@@ -871,6 +882,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             }
                         }
                         if sent.is_err() {
+                            counted.ends(SocketEnd::SendFailed);
                             break;
                         }
                         continue;
@@ -888,6 +900,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         }
                         sent_nobody = my_cell.is_none();
                         if sender.send(Message::Text(positions.message(my_cell).into())).await.is_err() {
+                            counted.ends(SocketEnd::SendFailed);
                             break;
                         }
                     }
@@ -1182,6 +1195,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                     Err(()) => {
                         // Channel closed
+                        counted.ends(SocketEnd::ServerStopping);
                         break;
                     }
                 }

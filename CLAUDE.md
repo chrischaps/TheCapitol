@@ -155,6 +155,8 @@ engine/
   gazette.rs     - The Capitol Gazette: the day's records, the edition, the midnight loop (E3.9)
   currency.rs    - Strand/Fiber exchange operations
   property_tax.rs - Hourly tax processing
+  ledger.rs      - The world's books: units made and destroyed, and GET /admin/ledger (C1.7)
+  load.rs        - Tick time and sockets as running totals, for the ledger (C1.7)
 
 models/          - Database types and game state structs
   account.rs     - Account, AccountInfo (includes is_admin flag)

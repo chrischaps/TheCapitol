@@ -5,6 +5,9 @@
 //! capitol-town mint --count 20      # make twenty citizens, onto town.toml
 //! capitol-town mint --count 2 --role merchant   # and two merchants (C1.6)
 //! capitol-town                      # live until Ctrl-C
+//! capitol-town --report             # and write what the town did when it stops (C1.7)
+//! capitol-town soak --hours 24      # a day, then the report, load and conservation (C1.7)
+//! capitol-town books town.soak-….ledgers.jsonl  # a soak's books, even one that was killed
 //! capitol-town --status             # the running town's last health
 //! capitol-town replay --layers rules # the decision logs, replayed (C3.1)
 //! capitol-town corpus               # a made-up town's log to replay (C3.3)
@@ -23,9 +26,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use capitol_core::citizen::decide::{corpus, log};
 use capitol_core::citizen::decide::replay::Replayer;
 use capitol_core::citizen::decide::{self, Cascade};
+use capitol_core::citizen::report::{Soak, TownReport};
 use capitol_core::citizen::schedule;
 use capitol_core::citizen::town::{self, Admin, Logs, Roster, Town};
-use capitol_core::net::NetConfig;
+use capitol_core::net::{self, NetConfig, RestRequest, RestResponse};
+use capitol_core::protocol::ledger::Ledger;
 use capitol_core::sim::Role;
 
 const USAGE: &str = "\
@@ -38,6 +43,21 @@ USAGE:
                                  out for the night. A citizen whose life
                                  ends starts again after a backoff; one
                                  whose key is refused retires.
+    capitol-town soak --hours <h>
+                                 Live as run does for h hours of the day's
+                                 clock (24 is a day, two real hours), then
+                                 stop and write the town's report with the
+                                 server's load, read every --sample, and
+                                 whether every Strand and unit is accounted
+                                 for. It reads the world's books as an admin
+                                 (--admin), so run it on a database of its
+                                 own. Exits 1 if they drifted.
+    capitol-town books <ledgers.jsonl>
+                                 Reconcile the books a soak wrote down as it
+                                 read them, first reading against last, and
+                                 print its conservation and load: for a soak
+                                 that stopped before its report. Exits 1 if
+                                 they drifted.
     capitol-town mint --count <n> [--role <role>]
                                  Make n citizens through the admin endpoint
                                  and add them, with their keys and their
@@ -67,17 +87,24 @@ FLAGS:
                       roster's `server`, else http://localhost:3000]
     --every <secs>    How often a running town prints and writes its health
                       [default: 60]
+    --report          With run, write the town's report beside the roster
+                      when it stops: each citizen's and each trade's
+                      wealth, output, prices and what held it up, and how
+                      its questions were settled
+    --hours <h>       With soak, how long, in hours of the day's clock
+    --sample <secs>   With soak, how often it reads the server's load
+                      [default: 60]
     --count <n>       With mint, how many citizens to make
     --role <role>     With mint, make every one of them this: gatherer-fiber,
                       gatherer-wood, gatherer-ore, crafter-planks,
                       crafter-ingots, crafter-tools, builder or merchant
                       [default: the sim's mix, which has no merchants]
-    --admin <email>   With mint, an admin account to make them as
+    --admin <email>   With mint or soak, an admin account to act as
                       [default: $CAPITOL_ADMIN_EMAIL]. Its password is read
                       from $CAPITOL_ADMIN_PASSWORD only, never a flag.
-    --log-mb <n>      With run, how big a citizen's decision log grows
-                      before it rotates (two old ones are kept); 0 logs
-                      nothing [default: 4]
+    --log-mb <n>      With run or soak, how big a citizen's decision log
+                      grows before it rotates (two old ones are kept); 0
+                      logs nothing [default: 4]
     --layers <a,b>    With replay, the stack to run, bottom first:
                       rules, jev (TypeSafe; $TYPESAFE_API_KEY) or
                       jev-router (OpenRouter; $OPENROUTER_API_KEY). A layer
@@ -90,18 +117,27 @@ The roster holds keys, so keep it out of git (flint-client/.gitignore has
 town.toml); town.example.toml shows its shape. Health goes beside it, in
 town.status, and who was where in their day is appended to
 town.presence.csv. Each citizen logs its decisions, and what came of them,
-to town.decisions/<name>.jsonl. Ctrl-C lets each citizen finish its step and stops; any order
-it has resting on the book stays up, as a market maker's does. A second
-Ctrl-C stops at once.";
+to town.decisions/<name>.jsonl. Reports go beside it too, as
+town.report-<when>.md, and a soak's as town.soak-<when>.md with its load,
+a minute a row, in town.soak-<when>.csv, and every reading of the
+server's books, as it's taken, in town.soak-<when>.ledgers.jsonl. Ctrl-C lets each citizen finish
+its step and stops; any order it has resting on the book stays up, as a
+market maker's does. A second Ctrl-C stops at once.";
 
 /// How long a stopping town waits for its citizens to finish their steps.
 const GRACE: Duration = Duration::from_secs(20);
+/// After a soak's citizens stop, how long it waits before reading the books
+/// at the end, so the market's matching (each second) and the writes under
+/// way land first.
+const SETTLE: Duration = Duration::from_secs(5);
 /// A decision log's size before it rotates, in MB, unless told otherwise.
 const LOG_MB: u64 = log::LOG_LIMIT >> 20;
 
 #[derive(Debug, PartialEq)]
 enum Action {
     Run,
+    Soak { hours: f64 },
+    Books { file: PathBuf },
     Mint { count: usize },
     Status,
     Replay { logs: Vec<PathBuf>, layers: Vec<String>, stride: usize },
@@ -119,17 +155,30 @@ struct Options {
     role: Option<Role>,
     /// 0: no decision logs
     log_mb: u64,
+    /// With run, write the report when it stops
+    report: bool,
+    /// With soak, how often it reads the ledger
+    sample: Duration,
+}
+
+impl Options {
+    /// Whether the town lives: run, or soak.
+    fn lives(&self) -> bool {
+        matches!(self.action, Action::Run | Action::Soak { .. })
+    }
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
     let mut action = None;
     let mut count = None;
+    let mut hours = None;
     let mut logs = Vec::new();
     let mut layers = None;
     let mut stride = None;
     let mut corpus_dir = None;
     let mut rounds = None;
     let mut log_mb_given = false;
+    let mut sample_given = false;
     let mut options = Options {
         action: Action::Run,
         roster: PathBuf::from(town::ROSTER),
@@ -138,6 +187,8 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         admin: std::env::var("CAPITOL_ADMIN_EMAIL").ok().filter(|s| !s.is_empty()),
         role: None,
         log_mb: LOG_MB,
+        report: false,
+        sample: Duration::from_secs(60),
     };
     let mut admin_given = false;
     let mut every_given = false;
@@ -146,12 +197,15 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
         let replaying = matches!(action, Some(Action::Replay { .. }));
         let corpus = matches!(action, Some(Action::Corpus { .. }));
+        let reading_books = matches!(&action, Some(Action::Books { file }) if file.as_os_str().is_empty());
         let mut set = |a: Action| match action.replace(a) {
-            Some(_) => Err("run, mint, status, replay and corpus go one at a time".to_string()),
+            Some(_) => Err("run, soak, books, mint, status, replay and corpus go one at a time".to_string()),
             None => Ok(()),
         };
         match arg.as_str() {
             "run" => set(Action::Run)?,
+            "soak" => set(Action::Soak { hours: 0.0 })?,
+            "books" => set(Action::Books { file: PathBuf::new() })?,
             "mint" => set(Action::Mint { count: 0 })?,
             "status" | "--status" => set(Action::Status)?,
             "replay" => set(Action::Replay {
@@ -183,6 +237,22 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                 options.log_mb = number(&arg, &value()?)?;
                 log_mb_given = true;
             }
+            "--report" => options.report = true,
+            "--hours" => {
+                let h: f64 = number(&arg, &value()?)?;
+                if h.is_nan() || h <= 0.0 {
+                    return Err("--hours must be more than 0".into());
+                }
+                hours = Some(h);
+            }
+            "--sample" => {
+                let secs: f64 = number(&arg, &value()?)?;
+                if secs.is_nan() || secs < 5.0 {
+                    return Err("--sample takes at least 5 seconds".into());
+                }
+                options.sample = Duration::from_secs_f64(secs);
+                sample_given = true;
+            }
             "--roster" => options.roster = value()?.into(),
             "--server" => options.server = Some(value()?),
             "--every" => {
@@ -211,23 +281,30 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             "-h" | "--help" => return Ok(None),
             log if replaying && !log.starts_with('-') => logs.push(PathBuf::from(log)),
             dir if corpus && !dir.starts_with('-') && corpus_dir.is_none() => corpus_dir = Some(PathBuf::from(dir)),
+            file if reading_books && !file.starts_with('-') => action = Some(Action::Books { file: file.into() }),
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    options.action = match (action.unwrap_or(Action::Run), count) {
-        (Action::Mint { .. }, Some(count)) => Action::Mint { count },
-        (Action::Mint { .. }, None) => return Err("mint needs --count".into()),
-        (_, Some(_)) => return Err("--count goes with mint".into()),
-        (Action::Replay { .. }, None) => Action::Replay {
+    options.action = match (action.unwrap_or(Action::Run), count, hours) {
+        (Action::Mint { .. }, Some(count), None) => Action::Mint { count },
+        (Action::Mint { .. }, None, _) => return Err("mint needs --count".into()),
+        (_, Some(_), _) => return Err("--count goes with mint".into()),
+        (Action::Soak { .. }, None, Some(hours)) => Action::Soak { hours },
+        (Action::Soak { .. }, None, None) => return Err("soak needs --hours".into()),
+        (_, None, Some(_)) => return Err("--hours goes with soak".into()),
+        (Action::Books { file }, None, None) if file.as_os_str().is_empty() => {
+            return Err("books needs the file of a soak's books".into())
+        }
+        (Action::Replay { .. }, None, None) => Action::Replay {
             logs,
             layers: layers.take().unwrap_or_else(|| decide::DEFAULT_LAYERS.map(String::from).to_vec()),
             stride: stride.take().unwrap_or(1),
         },
-        (Action::Corpus { .. }, None) => Action::Corpus {
+        (Action::Corpus { .. }, None, None) => Action::Corpus {
             dir: corpus_dir,
             rounds: rounds.take().unwrap_or(1),
         },
-        (action, None) => action,
+        (action, None, None) => action,
     };
     if layers.is_some() {
         return Err("--layers goes with replay".into());
@@ -238,17 +315,23 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
     if stride.is_some() {
         return Err("--stride goes with replay".into());
     }
-    if log_mb_given && options.action != Action::Run {
-        return Err("--log-mb goes with run".into());
+    if log_mb_given && !options.lives() {
+        return Err("--log-mb goes with run or soak".into());
     }
-    if admin_given && !matches!(options.action, Action::Mint { .. }) {
-        return Err("--admin goes with mint".into());
+    if admin_given && !matches!(options.action, Action::Mint { .. } | Action::Soak { .. }) {
+        return Err("--admin goes with mint or soak".into());
     }
     if options.role.is_some() && !matches!(options.action, Action::Mint { .. }) {
         return Err("--role goes with mint".into());
     }
-    if every_given && options.action != Action::Run {
-        return Err("--every goes with run".into());
+    if every_given && !options.lives() {
+        return Err("--every goes with run or soak".into());
+    }
+    if options.report && options.action != Action::Run {
+        return Err("--report goes with run (a soak always reports)".into());
+    }
+    if sample_given && !matches!(options.action, Action::Soak { .. }) {
+        return Err("--sample goes with soak".into());
     }
     Ok(Some(options))
 }
@@ -269,25 +352,26 @@ fn server(options: &Options, roster: &Roster) -> String {
         .unwrap_or_else(|| "http://localhost:3000".into())
 }
 
-fn mint(options: &Options, count: usize) -> Result<(), String> {
+/// The admin to act as: `--admin` or `$CAPITOL_ADMIN_EMAIL`, with
+/// `$CAPITOL_ADMIN_PASSWORD`.
+fn admin(options: &Options, doing: &str) -> Result<Admin, String> {
     let email = options
         .admin
         .clone()
-        .ok_or("mint needs an admin: --admin <email> or $CAPITOL_ADMIN_EMAIL")?;
+        .ok_or_else(|| format!("{doing} needs an admin: --admin <email> or $CAPITOL_ADMIN_EMAIL"))?;
     let password = std::env::var("CAPITOL_ADMIN_PASSWORD")
         .ok()
         .filter(|p| !p.is_empty())
-        .ok_or("mint reads the admin's password from $CAPITOL_ADMIN_PASSWORD")?;
+        .ok_or_else(|| format!("{doing} reads the admin's password from $CAPITOL_ADMIN_PASSWORD"))?;
+    Ok(Admin { email, password })
+}
+
+fn mint(options: &Options, count: usize) -> Result<(), String> {
+    let admin = admin(options, "mint")?;
     let mut roster = Roster::load_or_new(&options.roster)?;
     let server = server(options, &roster);
     let had = roster.citizens.len();
-    let result = town::mint(
-        &NetConfig::with_base_url(&server),
-        &Admin { email, password },
-        &mut roster,
-        count,
-        options.role,
-    );
+    let result = town::mint(&NetConfig::with_base_url(&server), &admin, &mut roster, count, options.role);
     for citizen in &roster.citizens[had..] {
         let p = &citizen.persona;
         println!(
@@ -329,7 +413,8 @@ fn status(options: &Options) -> Result<(), String> {
     Ok(())
 }
 
-fn run(options: &Options) -> Result<(), String> {
+/// The roster, which must have citizens to live.
+fn living_roster(options: &Options) -> Result<Roster, String> {
     let roster = Roster::load(&options.roster)?;
     if roster.citizens.is_empty() {
         return Err(format!(
@@ -337,7 +422,139 @@ fn run(options: &Options) -> Result<(), String> {
             roster.path.display()
         ));
     }
+    Ok(roster)
+}
+
+fn run(options: &Options) -> Result<(), String> {
+    let roster = living_roster(options)?;
     let server = server(options, &roster);
+    let (town, wall) = live(options, &roster, &server, None, || {})?;
+    if options.report {
+        let report = TownReport::build(&town.runs(), wall.as_secs_f64(), tick_scale(&server), None);
+        let path = beside(&roster.path, "report", "md");
+        std::fs::write(&path, report.to_markdown()).map_err(|e| format!("writing {}: {e}", path.display()))?;
+        println!("capitol-town: the report is in {}", path.display());
+    }
+    Ok(())
+}
+
+/// A soak (C1.7): the town lives for `hours` of the day's clock while the
+/// server's books are read every `--sample`, then it stops and reports.
+/// `Ok(false)` when the books drifted.
+fn soak(options: &Options, hours: f64) -> Result<bool, String> {
+    let roster = living_roster(options)?;
+    let server = server(options, &roster);
+    let admin = admin(options, "soak")?;
+    let config = NetConfig::with_base_url(&server);
+    let start = admin.ledger(&config)?;
+    let scale = capitol_core::protocol::rules::TICK_MS as f64 / start.load.tick_period_ms;
+    let length = schedule::real(hours / 24.0);
+    println!(
+        "capitol-town: a soak of {hours} hours of the day's clock ({:.0} real minutes) at {scale}×, from books of {} accounts, {} Strands and {} units",
+        length.as_secs_f64() / 60.0,
+        start.accounts.len(),
+        start.accounts.iter().map(|a| a.strands).sum::<i64>() + start.escrow_strands,
+        start.units.values().sum::<i64>()
+    );
+    // Every reading goes to disk as it's read, so a soak that's killed
+    // still leaves its books for `capitol-town books` to reconcile
+    let md = beside(&roster.path, "soak", "md");
+    let ledgers = md.with_extension("ledgers.jsonl");
+    keep(&ledgers, &start)?;
+    println!("capitol-town: the books, as they're read, to {}", ledgers.display());
+    let mut samples = vec![start.clone()];
+    let until = Instant::now() + length;
+    let (town, wall) = live(options, &roster, &server, Some(until), || match admin.ledger(&config) {
+        Ok(ledger) => {
+            println!("── {}", load_line(samples.last().unwrap_or(&ledger), &ledger));
+            if let Err(e) = keep(&ledgers, &ledger) {
+                eprintln!("capitol-town: {e}");
+            }
+            samples.push(ledger);
+        }
+        Err(e) => eprintln!("capitol-town: {e}"),
+    })?;
+    thread::sleep(SETTLE);
+    let end = admin.ledger(&config)?;
+    keep(&ledgers, &end)?;
+    samples.push(end.clone());
+    let report = TownReport::build(&town.runs(), wall.as_secs_f64(), scale, Some(Soak { start, end, samples }));
+    std::fs::write(&md, report.to_markdown()).map_err(|e| format!("writing {}: {e}", md.display()))?;
+    if let Some(csv) = report.load_csv() {
+        let path = md.with_extension("csv");
+        std::fs::write(&path, csv).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    }
+    let books = report.soak.as_ref().map(Soak::reconciliation);
+    if let Some(books) = &books {
+        println!(
+            "capitol-town: Strands {} (drift {}, {} account{} unexplained); units {}",
+            if books.strands.holds() { "conserved" } else { "DRIFTED" },
+            books.strands.drift,
+            books.strands.accounts.len(),
+            if books.strands.accounts.len() == 1 { "" } else { "s" },
+            if books.units.void {
+                "unchecked: the server restarted".to_string()
+            } else if books.units.holds() {
+                "conserved".to_string()
+            } else {
+                format!("DRIFTED in {}", books.units.drift.iter().map(|(i, n)| format!("{i} {n:+}")).collect::<Vec<_>>().join(", "))
+            }
+        );
+    }
+    println!("capitol-town: the soak's report is in {}", md.display());
+    Ok(report.conserved())
+}
+
+/// Appends `ledger` to a soak's books, a line of JSON.
+fn keep(path: &Path, ledger: &Ledger) -> Result<(), String> {
+    use std::io::Write;
+    let line = capitol_core::serde_json::to_string(ledger).map_err(|e| format!("writing the books: {e}"))?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| writeln!(file, "{line}"))
+        .map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
+/// Reconciles the books a soak kept, first reading against last, and prints
+/// their conservation and load. `Ok(false)` when they drifted.
+fn books(file: &Path) -> Result<bool, String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("reading {}: {e}", file.display()))?;
+    let soak = Soak::from_jsonl(&text)?.ok_or_else(|| format!("{} holds fewer than two readings", file.display()))?;
+    print!("{}", soak.to_markdown());
+    Ok(soak.reconciliation().holds())
+}
+
+/// The load since `before`, in a line.
+fn load_line(before: &Ledger, now: &Ledger) -> String {
+    let secs = (now.at_ms - before.at_ms) as f64 / 1000.0;
+    let w = capitol_core::protocol::ledger::LoadWindow::between(&before.load, &now.load, secs);
+    let p99 = w.tick_p99_ms.map_or("over 1 s".to_string(), |b| format!("≤ {b} ms"));
+    format!(
+        "load: ticks {:.2} ms mean, p99 {p99} of {:.0} ms, {} over; {} in the world, {} sockets, {} dropped; {:.0} DB transactions/s",
+        w.tick_mean_ms, w.tick_period_ms, w.ticks_over, w.players_in_world, w.sockets_open, w.sockets_dropped, w.db_transactions_per_sec
+    )
+}
+
+/// The server's `SIM_TICK_SCALE`, from its health; 1 if it won't say.
+fn tick_scale(server: &str) -> f64 {
+    match net::call_once(&NetConfig::with_base_url(server), None, &RestRequest::Health) {
+        Ok(RestResponse::Health(health)) => health.sim_tick_scale.unwrap_or(1.0),
+        _ => 1.0,
+    }
+}
+
+/// Lives the town until Ctrl-C, `until`, or every citizen retires,
+/// printing its health every `--every` and calling `sample` every
+/// `--sample`. Returns the town, stopped, and how long it lived.
+fn live(
+    options: &Options,
+    roster: &Roster,
+    server: &str,
+    until: Option<Instant>,
+    mut sample: impl FnMut(),
+) -> Result<(Town, Duration), String> {
     let stop = Arc::new(AtomicBool::new(false));
     on_ctrl_c(stop.clone());
     let logs = (options.log_mb > 0).then(|| Logs {
@@ -345,7 +562,7 @@ fn run(options: &Options) -> Result<(), String> {
         limit: options.log_mb << 20,
         keep: log::LOG_KEEP,
     });
-    let mut town = Town::start(&roster, &server, stop.clone(), logs.as_ref()).map_err(|e| format!("starting the town: {e}"))?;
+    let mut town = Town::start(roster, server, stop.clone(), logs.as_ref()).map_err(|e| format!("starting the town: {e}"))?;
     println!(
         "capitol-town: {} citizens on {server}, health every {:.0?} to {}, and who's where to {}",
         roster.citizens.len(),
@@ -357,7 +574,9 @@ fn run(options: &Options) -> Result<(), String> {
         println!("capitol-town: decisions to {}", logs.dir.display());
     }
     let status = &roster.path;
-    let mut next = Instant::now() + options.every;
+    let began = Instant::now();
+    let mut next = began + options.every;
+    let mut next_sample = began + options.sample;
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
@@ -366,19 +585,29 @@ fn run(options: &Options) -> Result<(), String> {
             println!("capitol-town: every citizen has retired");
             break;
         }
-        if Instant::now() >= next {
-            report(&town, &server, status);
+        let now = Instant::now();
+        if until.is_some_and(|until| now >= until) {
+            println!("capitol-town: the soak's hours are up");
+            break;
+        }
+        if now >= next {
+            report(&town, server, status);
             next += options.every;
+        }
+        if until.is_some() && now >= next_sample {
+            sample();
+            next_sample += options.sample;
         }
         thread::sleep(Duration::from_millis(250));
     }
+    stop.store(true, Ordering::Relaxed);
     println!("capitol-town: stopping; each citizen finishes its step");
     let stuck = town.wait(GRACE);
-    report(&town, &server, status);
+    report(&town, server, status);
     if stuck > 0 {
         println!("capitol-town: {stuck} still mid-step after {GRACE:?}; leaving them");
     }
-    Ok(())
+    Ok((town, began.elapsed()))
 }
 
 /// Replays `logs` (the roster's decision logs if none) with the stack
@@ -455,6 +684,14 @@ fn append_presence(path: &Path, rows: &[String]) -> std::io::Result<()> {
     file.write_all(text.as_bytes())
 }
 
+/// A file beside the roster, stamped with the time: `town.soak-20261020-153000.md`.
+fn beside(roster: &Path, what: &str, extension: &str) -> PathBuf {
+    let stamp = capitol_core::chrono::DateTime::from_timestamp(unix_ms() / 1000, 0)
+        .unwrap_or_default()
+        .format("%Y%m%d-%H%M%S");
+    roster.with_extension(format!("{what}-{stamp}.{extension}"))
+}
+
 fn unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -507,6 +744,16 @@ fn main() -> ExitCode {
     };
     let result = match options.action {
         Action::Run => run(&options),
+        Action::Soak { hours } => match soak(&options, hours) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("the soak's books drifted".to_string()),
+            Err(e) => Err(e),
+        },
+        Action::Books { ref file } => match books(file) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("the books drifted".to_string()),
+            Err(e) => Err(e),
+        },
         Action::Mint { count } => mint(&options, count),
         Action::Status => status(&options),
         Action::Replay {
@@ -538,6 +785,7 @@ mod tests {
         let o = parse(args("")).unwrap().unwrap();
         assert_eq!(o.action, Action::Run);
         assert_eq!(o.roster, PathBuf::from("town.toml"));
+        assert!(!o.report);
         let o = parse(args("mint --count 20 --admin chris@example.com --roster t/x.toml"))
             .unwrap()
             .unwrap();
@@ -555,6 +803,31 @@ mod tests {
         assert!(parse(args("--help")).unwrap().is_none());
         assert_eq!(parse(args("run --log-mb 0")).unwrap().unwrap().log_mb, 0);
         assert_eq!(parse(args("")).unwrap().unwrap().log_mb, LOG_MB);
+        assert!(parse(args("--report")).unwrap().unwrap().report);
+    }
+
+    #[test]
+    fn a_soak_takes_its_hours_and_its_sample() {
+        let o = parse(args("soak --hours 24 --log-mb 1 --admin a@b --every 30")).unwrap().unwrap();
+        assert_eq!(o.action, Action::Soak { hours: 24.0 });
+        assert_eq!((o.log_mb, o.sample), (1, Duration::from_secs(60)));
+        assert_eq!(o.admin.as_deref(), Some("a@b"));
+        assert_eq!(parse(args("soak --hours 0.5 --sample 10")).unwrap().unwrap().sample, Duration::from_secs(10));
+        assert!(parse(args("soak")).unwrap_err().contains("--hours"));
+        assert!(parse(args("soak --hours 0")).is_err());
+        assert!(parse(args("run --hours 2")).is_err(), "--hours without soak");
+        assert!(parse(args("run --sample 30")).is_err(), "--sample without soak");
+        assert!(parse(args("soak --hours 2 --sample 1")).is_err());
+        assert!(parse(args("soak --hours 2 --report")).is_err(), "a soak always reports");
+        assert!(parse(args("soak mint --hours 2")).is_err());
+    }
+
+    #[test]
+    fn books_take_a_file() {
+        let o = parse(args("books town.soak-1.ledgers.jsonl")).unwrap().unwrap();
+        assert_eq!(o.action, Action::Books { file: "town.soak-1.ledgers.jsonl".into() });
+        assert!(parse(args("books")).unwrap_err().contains("file"));
+        assert!(parse(args("books a.jsonl b.jsonl")).is_err(), "one file");
     }
 
     #[test]
@@ -614,6 +887,7 @@ mod tests {
         assert!(parse(args("mint --count 2 --role poet")).is_err());
         assert!(parse(args("run --role merchant")).is_err(), "--role without mint");
         assert!(parse(args("status --every 5")).is_err());
+        assert!(parse(args("status --report")).is_err());
         assert!(parse(args("--every 0")).is_err());
         assert!(parse(args("--fly")).is_err());
     }

@@ -1137,7 +1137,8 @@ impl GameState {
             | R::CreatedApiKey(_)
             | R::ApiKeys(_)
             | R::Citizen(_)
-            | R::Citizens(_) => {}
+            | R::Citizens(_)
+            | R::Ledger(_) => {}
         }
         out
     }

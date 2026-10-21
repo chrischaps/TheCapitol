@@ -13,7 +13,7 @@ use crate::middleware::auth::AuthUser;
 use crate::models::{ActionState, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
 use crate::engine::currency::{announce_balances, balances_of};
-use crate::engine::{node_placement, node_spawn};
+use crate::engine::{ledger, node_placement, node_spawn};
 use crate::engine::plot_sync::{sync_plots, OnOwned, SyncError};
 use crate::engine::GameEvent;
 
@@ -31,6 +31,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/world-params/default", get(get_default_world_params))
         .route("/world-params/commit", post(commit_world_params))
         .route("/stats", get(get_server_stats))
+        .route("/ledger", get(get_ledger))
         .route("/accounts/{id}/subscription", post(subscribe_account))
         .route("/citizens", get(list_citizens).post(create_citizen))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -252,6 +253,18 @@ pub async fn commit_world_params(
     );
 
     Ok(Json(params))
+}
+
+/// The world's books (C1.7): every account's Strands and what its audit trail
+/// says moved them, escrow, every unit and the units made and destroyed since
+/// the server started, and its load. `capitol-town soak` reads it at each end
+/// and reconciles the two (`capitol_protocol::ledger::reconcile`).
+pub async fn get_ledger(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<capitol_protocol::ledger::Ledger>, AppError> {
+    require_admin(&user)?;
+    Ok(Json(ledger::snapshot(&state).await?))
 }
 
 #[derive(Serialize)]

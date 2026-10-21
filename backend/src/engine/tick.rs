@@ -11,6 +11,7 @@ use super::craft_completion::{finish_craft, FinishedCraft};
 use super::crafting::{cancel_crafting, process_crafting, start_crafting, CraftingOperation};
 use super::events::GameEvent;
 use super::extraction::{cancel_extraction, process_extractions, start_extraction, PendingItem};
+use super::ledger;
 use super::units;
 use super::tools::{self, HeldTool, Wear};
 use super::movement::process_movement;
@@ -19,6 +20,7 @@ use super::trading::{TradeManager, TRADE_RANGE};
 use crate::models::{ActionState, ContainerType, ItemType, PlayerPosition, PlayerState, Recipe, ResourceNodeState, ResourceType, StationState, StationType, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
 
+use capitol_protocol::ledger::UnitFlow;
 use capitol_protocol::rest::CatalogResponse;
 use capitol_protocol::rules::ground::Ground;
 use capitol_protocol::rules::quality;
@@ -732,6 +734,8 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
 
     loop {
         interval.tick().await;
+        // The tick's work, from here to the loop's end (C1.7)
+        let began = Instant::now();
 
         let pending_items: Vec<PendingItem>;
         let finished_crafts: Vec<FinishedCraft>;
@@ -834,6 +838,8 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
                 });
             }
         }
+
+        super::load::tick_took(began.elapsed());
     }
 }
 
@@ -874,9 +880,12 @@ async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broad
         }
     };
     let (mut used, mut broken) = (None, None);
+    // What it made and wore out, counted once it's written (C1.7)
+    let mut flows = ledger::Flows::new();
     if let Some(gather) = item.tool.take() {
         match tools::wear_held(&mut tx, gather.held.item_id, item.player_id).await {
             Ok(Some(wear)) => {
+                flows.wore(&gather.held.item_type, &wear);
                 used = Some(gather.held.after(&wear));
                 if let Wear::Broke(b) = wear {
                     broken = Some(b);
@@ -926,9 +935,10 @@ async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broad
             tracing::error!("Failed to tally a gather for the Gazette: {:?}", e);
             return;
         }
+        flows.add(&item.item_type, UnitFlow::Gathered, item.quantity as i64);
         Some(container_id)
     };
-    if let Err(e) = tx.commit().await {
+    if let Err(e) = ledger::commit(tx, flows).await {
         tracing::error!("Failed to save a gather: {:?}", e);
         return;
     }

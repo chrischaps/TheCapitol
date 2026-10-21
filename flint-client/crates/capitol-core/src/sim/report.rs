@@ -404,6 +404,15 @@ impl Report {
             self.scale,
             self.wall_secs / 60.0
         );
+        md.push_str(&self.sections());
+        md
+    }
+
+    /// Everything after the title and the line that says who ran: the
+    /// bottlenecks, production, pulls, tools, Strands, time and failures, each
+    /// a `##` section. The town's report (C1.7) puts them under its own.
+    pub fn sections(&self) -> String {
+        let mut md = String::new();
         let _ = writeln!(md, "## Chain bottlenecks\n");
         for b in self.bottlenecks() {
             let _ = writeln!(md, "- {b}");

@@ -505,6 +505,19 @@ pub enum By {
     CarryOn,
 }
 
+impl By {
+    /// For a report: `rules`, `rules, unsure`, `carry on`.
+    pub fn label(&self) -> String {
+        match self {
+            By::Layer { name } => name.clone(),
+            By::Offered { name } => format!("{name}, unsure"),
+            By::Rules => "the rules' own pick".into(),
+            By::Waiting { name } => format!("waiting on {name}"),
+            By::CarryOn => "carry on".into(),
+        }
+    }
+}
+
 /// What happened when a layer was asked, for the log (C3.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -879,6 +892,9 @@ pub struct Mind {
     orders: HashMap<Uuid, u64>,
     /// Stalls stocked, by item, and the decision that last stocked each
     stalls: HashMap<String, u64>,
+    /// How its questions were settled since they were last taken
+    /// ([`By::label`]), for the town's report (C1.7)
+    rulings: BTreeMap<String, u64>,
 }
 
 impl Mind {
@@ -892,6 +908,7 @@ impl Mind {
             last: None,
             orders: HashMap::new(),
             stalls: HashMap::new(),
+            rulings: BTreeMap::new(),
         }
     }
 
@@ -913,6 +930,7 @@ impl Mind {
 
     pub fn ask(&mut self, s: &Situation) -> Ruling {
         let ruling = self.cascade.ask(s, Instant::now());
+        *self.rulings.entry(ruling.by.label()).or_insert(0) += 1;
         if let Some(log) = &self.log {
             let id = lock(log).decision(s, &ruling);
             self.last = Some(id);
@@ -929,6 +947,12 @@ impl Mind {
             }
         }
         ruling
+    }
+
+    /// How its questions were settled since the last call, by
+    /// [`By::label`], and starts counting again.
+    pub fn take_rulings(&mut self) -> BTreeMap<String, u64> {
+        std::mem::take(&mut self.rulings)
     }
 
     /// How many decisions wait on their outcome: a mark to

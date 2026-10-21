@@ -11,10 +11,13 @@
 //!   and a cascade of layers that picks from it.
 //! - [`meet`]: how it answers the trades people ask it to (C1.5).
 //! - [`idle`]: where it spends the time between its tasks (C2.1).
+//! - [`report`]: what the town did, and in a soak whether the server's books
+//!   balanced and how hard it worked (C1.7).
 
 pub mod decide;
 pub mod idle;
 pub mod meet;
 pub mod persona;
+pub mod report;
 pub mod schedule;
 pub mod town;

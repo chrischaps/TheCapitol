@@ -80,6 +80,7 @@ pub async fn grant(db: &PgPool, player_id: Uuid, request: &GrantRequest) -> Resu
             .await?
     };
     let into = market_box(&mut tx, player_id).await?;
+    let mut flows = super::ledger::Flows::new();
     for line in &request.items {
         let item_type: Option<ItemType> =
             sqlx::query_as(&format!("SELECT {ITEM_TYPE_COLUMNS} FROM item_types WHERE id = $1"))
@@ -108,8 +109,9 @@ pub async fn grant(db: &PgPool, player_id: Uuid, request: &GrantRequest) -> Resu
                 return Err(GrantError::MarketBoxFull);
             }
         }
+        flows.add(&item_type.id, capitol_protocol::ledger::UnitFlow::Granted, line.quantity as i64);
     }
-    tx.commit().await?;
+    super::ledger::commit(tx, flows).await?;
     tracing::info!("Player {player_id} granted {} Strands and {} lines", request.strands, request.items.len());
     Ok(Granted { strands, market_box: into })
 }

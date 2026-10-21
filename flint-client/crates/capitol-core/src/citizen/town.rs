@@ -19,9 +19,14 @@
 //! - **Decisions**: each citizen's decision log (C3.1,
 //!   [`decide::log`](super::decide::log)), one JSONL file apiece in
 //!   `town.decisions/` beside the roster, kept across its lives.
+//! - **The ledger** (C1.7): each citizen's [`Book`], what it made, traded,
+//!   spent its time on and got stuck on, as the sim's report entries, and how
+//!   its questions were settled. [`Town::runs`] hands them to the report
+//!   ([`super::report`]).
 //!
 //! [`Schedule`]: super::schedule::Schedule
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -30,6 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use capitol_protocol::ledger::Ledger;
 use capitol_protocol::rest::{CreateCitizenRequest, LoginRequest};
 use capitol_protocol::rules::{self, Zone};
 use serde::Deserialize;
@@ -40,6 +46,7 @@ use super::persona::{self, Avenue, Home, Market, Persona, Temperament};
 use super::schedule::{self, Phase, Schedule};
 use crate::bot::{Bot, BotError};
 use crate::net::{self, NetConfig, RestRequest, RestResponse};
+use crate::sim::report::{BotRun, Entry};
 use crate::sim::{self, Role};
 
 /// The roster, beside wherever the town is run from.
@@ -365,11 +372,40 @@ pub struct Logs {
 // Minting
 // ---------------------------------------------------------------------------
 
-/// An admin's sign-in, to mint citizens with.
+/// An admin's sign-in, to mint citizens with, and to read the world's books
+/// in a soak.
 #[derive(Debug, Clone)]
 pub struct Admin {
     pub email: String,
     pub password: String,
+}
+
+impl Admin {
+    /// Signs in over REST alone, with no socket, so it takes no avatar.
+    /// Returns the access token.
+    pub fn sign_in(&self, config: &NetConfig) -> Result<String, String> {
+        let login = RestRequest::Login(LoginRequest {
+            email: self.email.clone(),
+            password: self.password.clone(),
+        });
+        match net::call_once(config, None, &login) {
+            Ok(RestResponse::Auth(auth)) => Ok(auth.token),
+            Ok(other) => Err(format!("signing in as {}: unexpected {other:?}", self.email)),
+            Err(e) => Err(format!("signing in as {}: {e}", self.email)),
+        }
+    }
+
+    /// The world's books now, `GET /admin/ledger` (C1.7). It signs in each
+    /// time: a soak reads once a minute for hours, longer than a token lasts.
+    pub fn ledger(&self, config: &NetConfig) -> Result<Ledger, String> {
+        let token = self.sign_in(config)?;
+        match net::call_once(config, Some(&token), &RestRequest::Ledger) {
+            Ok(RestResponse::Ledger(ledger)) => Ok(*ledger),
+            Ok(other) => Err(format!("reading the ledger: unexpected {other:?}")),
+            Err(e) if e.status() == Some(403) => Err(format!("reading the ledger: {e}. Is {} an admin?", self.email)),
+            Err(e) => Err(format!("reading the ledger: {e}")),
+        }
+    }
 }
 
 /// Makes `count` citizens through `POST /admin/citizens` (C0.1) and adds each
@@ -386,15 +422,7 @@ pub fn mint(
     count: usize,
     role: Option<Role>,
 ) -> Result<Vec<Citizen>, String> {
-    let login = RestRequest::Login(LoginRequest {
-        email: admin.email.clone(),
-        password: admin.password.clone(),
-    });
-    let token = match net::call_once(config, None, &login) {
-        Ok(RestResponse::Auth(auth)) => auth.token,
-        Ok(other) => return Err(format!("signing in as {}: unexpected {other:?}", admin.email)),
-        Err(e) => return Err(format!("signing in as {}: {e}", admin.email)),
-    };
+    let token = admin.sign_in(config)?;
     let had = roster.citizens.len();
     let roles = match role {
         Some(role) => vec![role; had + count],
@@ -549,11 +577,42 @@ fn ago(d: Duration) -> String {
     }
 }
 
-/// What a citizen's loop answers to: when to stop, and where to say what
-/// it's doing ([`sim::run::live`]).
+/// What a citizen did while the town ran, for its report (C1.7): kept across
+/// its lives.
+#[derive(Debug, Clone, Default)]
+pub struct Book {
+    /// The sim's report entries: what it made, traded, deposited and bought,
+    /// how long each step took, and why steps failed or it was stuck
+    pub entries: Vec<Entry>,
+    /// How its questions were settled ([`By::label`](super::decide::By::label))
+    pub rulings: BTreeMap<String, u64>,
+    /// Its Strands when the town first saw them, and last
+    pub strands_first: Option<i64>,
+    pub strands_last: Option<i64>,
+}
+
+impl Book {
+    fn record(&mut self, entries: Vec<Entry>, rulings: BTreeMap<String, u64>) {
+        self.entries.extend(entries);
+        for (by, n) in rulings {
+            *self.rulings.entry(by).or_insert(0) += n;
+        }
+    }
+
+    fn saw_strands(&mut self, strands: Option<i64>) {
+        if strands.is_some() {
+            self.strands_first = self.strands_first.or(strands);
+            self.strands_last = strands;
+        }
+    }
+}
+
+/// What a citizen's loop answers to: when to stop, where to say what it's
+/// doing, and where to write down what it did ([`sim::run::live`]).
 pub(crate) struct Tether<'a> {
     stop: &'a AtomicBool,
     health: &'a Mutex<Health>,
+    book: &'a Mutex<Book>,
     /// The server's clock less ours, as the last life saw it, so the town
     /// wakes the citizen by the server's clock while it's signed out.
     clock_offset_ms: &'a AtomicI64,
@@ -565,7 +624,16 @@ impl Tether<'_> {
     }
 
     pub(crate) fn health(&self, change: impl FnOnce(&mut Health)) {
-        change(&mut self.health.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        change(&mut health);
+        let strands = health.strands;
+        drop(health);
+        self.book.lock().unwrap_or_else(|e| e.into_inner()).saw_strands(strands);
+    }
+
+    /// Writes down what the citizen did since it last did, for the report.
+    pub(crate) fn record(&self, entries: Vec<Entry>, rulings: BTreeMap<String, u64>) {
+        self.book.lock().unwrap_or_else(|e| e.into_inner()).record(entries, rulings);
     }
 
     /// Notes the server's clock, as a life signed in reads it.
@@ -600,10 +668,11 @@ fn local_unix_ms() -> i64 {
 // The town
 // ---------------------------------------------------------------------------
 
-/// The running town: a thread a citizen, and their health.
+/// The running town: a thread a citizen, their health and their books.
 pub struct Town {
     stop: Arc<AtomicBool>,
     health: Vec<Arc<Mutex<Health>>>,
+    books: Vec<Arc<Mutex<Book>>>,
     lives: Vec<thread::JoinHandle<()>>,
 }
 
@@ -615,20 +684,50 @@ impl Town {
         let mut town = Town {
             stop,
             health: Vec::new(),
+            books: Vec::new(),
             lives: Vec::new(),
         };
         for (n, citizen) in roster.citizens.iter().enumerate() {
             let health = Arc::new(Mutex::new(Health::new(&citizen.name, citizen.role)));
+            let book = Arc::new(Mutex::new(Book::default()));
             let log = logs.and_then(|logs| open_log(citizen, logs));
-            let (citizen, server, stop, h) = (citizen.clone(), server.to_string(), town.stop.clone(), health.clone());
+            let (citizen, server, stop, h, b) =
+                (citizen.clone(), server.to_string(), town.stop.clone(), health.clone(), book.clone());
             let turn = STAGGER * n as u32;
             let life = thread::Builder::new()
                 .name(format!("citizen-{}", citizen.name))
-                .spawn(move || live(&citizen, &server, turn, &stop, &h, log.as_ref()))?;
+                .spawn(move || live(&citizen, &server, turn, &stop, &h, &b, log.as_ref()))?;
             town.health.push(health);
+            town.books.push(book);
             town.lives.push(life);
         }
         Ok(town)
+    }
+
+    /// Each citizen's run so far, as the sim's report reads one, in roster
+    /// order, with how its questions were settled. Its Strands are the
+    /// first and last the town saw.
+    pub fn runs(&self) -> Vec<(BotRun, BTreeMap<String, u64>)> {
+        self.health
+            .iter()
+            .zip(&self.books)
+            .map(|(health, book)| {
+                let (name, role) = {
+                    let h = health.lock().unwrap_or_else(|e| e.into_inner());
+                    (h.name.clone(), h.role)
+                };
+                let book = book.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let run = BotRun {
+                    name,
+                    role: role.to_string(),
+                    entries: book.entries,
+                    strands_start: book.strands_first.unwrap_or(0),
+                    strands_end: book.strands_last.unwrap_or(0),
+                    error: None,
+                };
+                (run, book.rulings)
+            })
+            .collect()
     }
 
     /// A line a citizen, in roster order.
@@ -706,11 +805,20 @@ fn open_log(citizen: &Citizen, logs: &Logs) -> Option<SharedLog> {
 /// A citizen's lives, one after another, until the town stops or the server
 /// refuses its key. A life is a day (C1.2): the citizen signs in only
 /// between its `wake` and its `bed`, and sleeps the night through.
-fn live(citizen: &Citizen, server: &str, turn: Duration, stop: &AtomicBool, health: &Mutex<Health>, log: Option<&SharedLog>) {
+fn live(
+    citizen: &Citizen,
+    server: &str,
+    turn: Duration,
+    stop: &AtomicBool,
+    health: &Mutex<Health>,
+    book: &Mutex<Book>,
+    log: Option<&SharedLog>,
+) {
     let clock_offset_ms = AtomicI64::new(0);
     let tether = Tether {
         stop,
         health,
+        book,
         clock_offset_ms: &clock_offset_ms,
     };
     let day = &citizen.persona.schedule;

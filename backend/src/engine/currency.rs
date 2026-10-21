@@ -18,6 +18,9 @@ pub enum TransactionType {
     ForeclosureRefund,
     /// Property tax owed, paid off by the owner (#138)
     TaxPayment,
+    /// The hourly property tax, and debt it takes back when the owner has
+    /// Strands again (C1.7: before, these wrote no row)
+    PropertyTax,
     /// A buy order's `price × quantity`, into its escrow (E3.1)
     MarketEscrow,
     /// The 1% listing fee on placing an order: a sink, never refunded (E3.1)
@@ -49,6 +52,7 @@ impl TransactionType {
             TransactionType::DeedRefund => "deed_refund",
             TransactionType::ForeclosureRefund => "foreclosure_refund",
             TransactionType::TaxPayment => "tax_payment",
+            TransactionType::PropertyTax => "property_tax",
             TransactionType::MarketEscrow => "market_escrow",
             TransactionType::MarketFee => "market_fee",
             TransactionType::MarketRefund => "market_refund",
