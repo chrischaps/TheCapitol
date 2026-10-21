@@ -5,6 +5,7 @@ pub mod geom;
 pub mod hydrology;
 pub mod item;
 pub mod lot_clearance;
+pub mod lot_geometry;
 pub mod player;
 pub mod plot;
 pub mod recipe;

@@ -93,7 +93,7 @@ The sectors' characters are a seeded shuffle of 4 *concession* and 4 *winding*, 
   - The new prefix lets the flip's migration tell old lots (`rural_plot_%`) from new ones.
 - **The region.** The ring inset by 20 at r3000 and r3800, and the sector's side lines.
 - **Along the arterials** (Chris, 2026-10-20). Each sector owns the side of each arterial that faces it. Farms there stand behind a verge of about 30 past the 60-wide road, clear of the lane junctions. So the spawn road has farms along it.
-- **Reuse, not rewrite.** The lot geometry is `suburb/lots.rs`'s road index, edge rays, overlap pass and shrink-to-fit, lifted to work over any `Region` and a `LotParams` ([R2 #285](https://github.com/chrischaps/TheCapitol/issues/285)).
+- **Reuse, not rewrite.** The lot geometry is `suburb/lots.rs`'s road index, edge rays, overlap pass and shrink-to-fit, lifted to work over any `Region` and a `LotParams` ([R2 #285](https://github.com/chrischaps/TheCapitol/issues/285)). It is `models/lot_geometry.rs` now, and `place` keeps farms `lot_gap` (40) apart.
 
 ### RD7. The balance pass and the water ([R4 #287](https://github.com/chrischaps/TheCapitol/issues/287), closes [#223](https://github.com/chrischaps/TheCapitol/issues/223))
 
@@ -205,7 +205,7 @@ Built share by half-sector, 0 to 15, in %:
 - **Reused.**
   - `geom::stream` (SplitMix64).
   - `street_plan::{weld_junctions, resample, centripetal_spline, audit}`.
-  - `suburb/lots.rs`'s geometry, through R2.
+  - `models/lot_geometry.rs`, the lot geometry R2 lifted out of `suburb/lots.rs`.
   - `suburb/parks.rs`'s raster.
   - `suburb/render.rs`'s SVG approach.
   - `lot_clearance::finish_lots`.
@@ -240,7 +240,7 @@ The flip is one commit, and `scripts/ci.sh full` runs before it lands. It covers
 |---|---|---|---|---|
 | R0 | [#282](https://github.com/chrischaps/TheCapitol/issues/282) | This plan, the issues, and #223 brought in | S | – |
 | R1 | [#284](https://github.com/chrischaps/TheCapitol/issues/284) | Harness: render, metrics, `rural-plan.ps1`, baseline of today's trails. *As built:* `rural/metrics.rs` and `render.rs` (test-only), `rural_plan_report`, and `-Seed`, `-Seeds`, `-Sector`, `-Out` and `-Compare`. It shares `suburb::metrics`'s scope and checks and `suburb::render`'s helpers and page. The baseline is in §2 and §5 | M | – |
-| R2 | [#285](https://github.com/chrischaps/TheCapitol/issues/285) | Shared lot geometry: `lots.rs` over any `Region` + `LotParams`, aware of water. Suburb unchanged under the pin | M | – |
+| R2 | [#285](https://github.com/chrischaps/TheCapitol/issues/285) | Shared lot geometry: `lots.rs` over any `Region` + `LotParams`, aware of water. Suburb unchanged under the pin. *As built:* `models/lot_geometry.rs` holds `World` (roads, fronted sides, and `with_water(courses, lakes, bank)`), `Region` (`ring`, cut by `ccw_of`/`cw_of` side lines, or `polygon`), `Ray`, `push_fronts`, the ray march `back`/`back_from`, `Candidate`, and `place`/`shrink_to_fit`. `LotParams` has the frontage and depths, the front, edge and rear gaps, `lot_gap`, `min_shrink` and `min_area`. A course is a capsule as wide as the wider point of each stretch, as R1 measures it, and a lake its even-odd rings, each plus `bank`. A ray stops at a bank as at a road without lots, so a lot backs onto water, and `place` drops one the water runs through. `suburb/lots.rs` keeps its walker, pies and ids, and calls it through `lot_params` and `region_of`. The pin and `neighbourhood_suburb_meets_its_targets` print the same | M | – |
 | R3 | [#286](https://github.com/chrischaps/TheCapitol/issues/286) | Sectors and roads behind `layout = Farms`: the deck, concession roads, winding lanes, side roads, spurs, weld, audit | L | R1 |
 | R4 | [#287](https://github.com/chrischaps/TheCapitol/issues/287) | Farms on lanes and arterials, field gaps, the balance pass, clear of the water. Closes #223 | L | R2, R3 |
 | R5 | [#288](https://github.com/chrischaps/TheCapitol/issues/288) | Tune to §5's targets over four seeds; the targets test | M | R4 |
