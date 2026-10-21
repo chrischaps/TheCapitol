@@ -1,0 +1,4 @@
+# Down among the farms at noon, the tower on the horizon (re-aim after #290/#291)
+#  t      px      py      pz      tx    ty    tz
+  0.0   190.0   22.0  -329.0     0.0  30.0    0.0
+  8.0   180.0   18.0  -318.0     0.0  30.0    0.0

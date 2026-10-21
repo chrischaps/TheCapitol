@@ -18,7 +18,7 @@
 # saved as UTF-8 with a BOM, or Windows PowerShell reads them as ANSI.
 
 param(
-    [ValidateSet("ig", "yt", "tour")]
+    # ig, yt, tour, or several ("yt,tour": -File passes it as one string)
     [string[]]$Cut = @("ig", "yt", "tour"),
     [string]$Exe,
     # Render only these shots (and cut nothing)
@@ -31,6 +31,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot)
+$Cut = $Cut | ForEach-Object { $_ -split "," } | Where-Object { $_ }
+foreach ($c in $Cut) {
+    if (-not (Test-Path "tools\shots\cuts\$c.psd1")) { throw "no cut $c in tools\shots\cuts" }
+}
 $root = (Get-Location).Path
 
 if (-not $Exe) {
@@ -147,6 +151,15 @@ function Cut-One([string]$name) {
     $total = $t
     Write-Host ("cut: {0}, {1:0.0} s, {2} segments" -f $name, $total, $cut.Segments.Count)
 
+    # YouTube's chapters, from the segments that start one
+    $chapters = for ($i = 0; $i -lt $cut.Segments.Count; $i++) {
+        $c = $cut.Segments[$i].Chapter
+        if ($c) { "{0}:{1:00} {2}" -f [int][math]::Floor($starts[$i] / 60), [int][math]::Floor($starts[$i] % 60), $c }
+    }
+    if ($chapters) {
+        [IO.File]::WriteAllLines((Join-Path $out "$name$suffix-chapters.txt"), [string[]]$chapters, (New-Object Text.UTF8Encoding $false))
+    }
+
     $inputs = @()
     foreach ($c in $clips) { $inputs += @("-i", $c) }
     $n = $clips.Count
@@ -221,9 +234,20 @@ function Cut-One([string]$name) {
     $mix = @()
     for ($j = 0; $j -lt $layers.Count; $j++) {
         $l = $layers[$j]
-        # A negative At counts back from the end
-        $at = if ($l.At -lt 0) { $total + $l.At } elseif ($l.At) { $l.At } else { 0 }
-        $until = if ($l.Until) { [math]::Min($l.Until, $total) } else { $total }
+        # At is from the start of the segment showing Seg, if it names
+        # one, else from the cut's start, or (negative) back from its end.
+        # For is how long it plays, in place of Until
+        $base = 0.0
+        if ($l.Seg) {
+            $i = 0
+            while ($i -lt $n -and $cut.Segments[$i].Shot -ne $l.Seg) { $i++ }
+            if ($i -ge $n) { throw "$name's score names a segment it hasn't got: $($l.Seg)" }
+            $base = $starts[$i]
+        }
+        # ($null -lt 0 holds in PowerShell, so a layer with no At is asked first)
+        $at = if ($null -eq $l.At) { $base } elseif ($l.At -lt 0) { $total + $l.At } else { $base + $l.At }
+        $until = if ($l.For) { $at + $l.For } elseif ($l.Until) { $base + $l.Until } else { $total }
+        $until = [math]::Min($until, $total)
         $len = $until - $at
         $fi = if ($l.FadeIn) { $l.FadeIn } else { 0.01 }
         $fo = if ($l.FadeOut) { $l.FadeOut } else { 0.01 }

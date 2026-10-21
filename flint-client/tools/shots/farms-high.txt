@@ -1,0 +1,4 @@
+# Over the farms on the south arterial, the lanes and fields running in to the city (re-aim after #290/#291)
+#  t      px      py      pz      tx    ty    tz
+  0.0    40.0  120.0   560.0     0.0   0.0  380.0
+  9.0   -20.0  110.0   540.0     0.0   0.0  370.0

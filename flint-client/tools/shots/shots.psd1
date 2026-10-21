@@ -19,7 +19,9 @@
         @{ Name = "wilds-ford";   Path = "wilds-ford.txt";   Time = 0.40; Length = 8; Shapes = "portrait", "landscape" }
         @{ Name = "wilds-lakes";  Path = "wilds-lakes.txt";  Time = 0.66; Length = 8; Shapes = "landscape" }
 
-        # The farms and the grass
+        # The farms and the grass (#290 and #291 lay the farms: re-aim these after)
+        @{ Name = "farms-high";   Path = "farms-high.txt";   Time = 0.46; Length = 9; Shapes = "portrait", "landscape" }
+        @{ Name = "farms-lane";   Path = "farms-lane.txt";   Time = 0.52; Length = 8; Shapes = "landscape" }
         @{ Name = "grass-dawn";   Path = "grass-dawn.txt";   Time = 0.27; Length = 7; Shapes = "portrait", "landscape" }
 
         # The suburbs: building, and the hours over them
@@ -33,7 +35,14 @@
         # Work and trade
         @{ Name = "automation";   Path = "automation.txt";   Time = 0.82; Length = 10; Args = @("--automation-sample"); Shapes = "landscape" }
         @{ Name = "citizens";     Path = "citizens.txt";     Time = 0.86; Length = 5; Args = @("--citizen-sample"); Shapes = "landscape" }
+        @{ Name = "bazaar-street"; Path = "bazaar-street.txt"; Time = 0.84; Length = 8; Shapes = "portrait", "landscape" }
         @{ Name = "hall-night";   Path = "hall-night.txt";   Time = 0.88; Length = 7; Args = "--claim-sample", "0.6"; Shapes = "landscape" }
+
+        # The panels, for the tour: filmed at 2560x1440 so a panel leaves room for a caption
+        @{ Name = "gather-juice"; Path = "panel-rural.txt";  Time = 0.30; Length = 10; Args = @("--juice-sample"); Size = 2560, 1440; Shapes = "landscape" }
+        @{ Name = "craft-panel";  Path = "panel-rural.txt";  Time = 0.75; Length = 6; Args = "--station-panel-sample", "craft"; Size = 2560, 1440; Shapes = "landscape" }
+        @{ Name = "market-panel"; Path = "panel-hall.txt";   Time = 0.88; Length = 6; Args = @("--market-sample"); Size = 2560, 1440; Shapes = "landscape" }
+        @{ Name = "gazette-page"; Path = "panel-gazette.txt"; Time = 0.82; Length = 7; Args = @("--gazette-sample"); Size = 2560, 1440; Shapes = "landscape" }
 
         # The tower and the city by night
         @{ Name = "tower-climb";  Path = "tower-climb.txt";  Time = 0.78; Length = 8; Shapes = "portrait", "landscape" }
