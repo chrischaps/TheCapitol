@@ -558,9 +558,9 @@ impl Session {
 
     /// You clicked a stall in the bazaar, or its row in the directory: true
     /// if you're at it, so its shop opens now. Otherwise you walk there, in
-    /// at the gate and up the lane, and [`Self::at_stall`] says when you
+    /// along the bazaar's `streets`, and [`Self::at_stall`] says when you
     /// arrive (`capitol_core::bazaar::Visit`).
-    pub fn visit_stall(&mut self, now: Instant, bazaar: Option<&Landmark>, stall: &Landmark) -> bool {
+    pub fn visit_stall(&mut self, now: Instant, streets: &[Vec<(f64, f64)>], stall: &Landmark) -> bool {
         if self.auth.phase() != Phase::InWorld {
             return false;
         }
@@ -572,7 +572,7 @@ impl Session {
         self.visit.walked();
         self.approach.walked();
         self.hall.walked();
-        match self.stall.click(bazaar, stall, at) {
+        match self.stall.click(streets, stall, at) {
             capitol_core::bazaar::Step::Open => true,
             capitol_core::bazaar::Step::WalkTo { x, y } => {
                 self.walk(now, x, y);
@@ -2970,7 +2970,7 @@ mod tests {
     }
 
     /// The bazaar (E3.11) through two sessions, as the panels drive them: a
-    /// merchant walks in at the gate to a free stall, rents and names it and
+    /// merchant walks along the streets to a free stall, rents and names it and
     /// stocks rope from the pack; a buyer walks up the lane to it, sees the
     /// prices there and buys two, best first. Each hears a toast. Needs the
     /// local stack with `DEV_GRANTS=on` (the bots fund both accounts), and
@@ -2994,7 +2994,8 @@ mod tests {
         let fixture =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
         let mut terrain = TerrainSource::offline(&fixture).unwrap();
-        let bazaar_site = terrain.landmark(LandmarkKind::Bazaar).cloned().expect("the fixture has the bazaar");
+        let streets = terrain.bazaar_streets();
+        assert!(!streets.is_empty(), "the fixture has the bazaar's streets");
 
         // Both funded by a bot and walked to the avenue, where the bazaar
         // faces the hall; the merchant's rope collected into the pack
@@ -3052,8 +3053,8 @@ mod tests {
             });
         }
 
-        // The merchant walks in at the gate and up the lane to the free stall
-        assert!(!seller.visit_stall(Instant::now(), Some(&bazaar_site), &stall), "a walk, from the hall");
+        // The merchant walks the streets from the hall to the free stall
+        assert!(!seller.visit_stall(Instant::now(), &streets, &stall), "a walk, from the hall");
         wait(&mut seller, "the walk to the stall", &|s| s.walking_to_stall().is_none());
         let me = seller.state().local_player().map(|p| (p.x, p.y)).unwrap();
         assert!(capitol_core::protocol::rules::bazaar::at_the_stall(&stall, me.0, me.1), "at the counter: {me:?}");
@@ -3088,7 +3089,7 @@ mod tests {
         });
 
         // The buyer walks to it, sees its prices there, and buys two
-        assert!(!buying.visit_stall(Instant::now(), Some(&bazaar_site), &stall));
+        assert!(!buying.visit_stall(Instant::now(), &streets, &stall));
         buying.watch_shop(Some(&free));
         wait(&mut buying, "the walk and the shop's prices", &|s| {
             s.walking_to_stall().is_none() && s.state().bazaar().shop(&free).is_some_and(|sh| !sh.listings.is_empty())

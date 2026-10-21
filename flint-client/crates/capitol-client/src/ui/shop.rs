@@ -1,6 +1,6 @@
 //! A bazaar stall's shop (E3.11), opened at its stall: click the stall
 //! (`input.rhai`, `capitol_core::bazaar::Visit`) or its row in the market
-//! panel's Bazaar tab, and you walk there, in at the gate and up the lane,
+//! panel's Bazaar tab, and you walk there along the bazaar's streets,
 //! and it opens as you reach the counter. It stands top left, beside the
 //! crafting panel while that's open (as the exchange does), so the
 //! inventory (bottom right) stays clear for stocking.

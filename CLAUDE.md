@@ -166,6 +166,7 @@ models/          - Database types and game state structs
   recipe.rs      - Recipe with quality weights
   zone.rs        - Zone enum (Capitol, Trade, Urban, Rural, etc.)
   terrain.rs     - TerrainConfig, procedural road generation, water rings, bridges
+  bazaar.rs      - The bazaar quarter: its stalls, lane, alley and square (E3.12)
   hydrology.rs   - The wilds' rivers, streams, lakes and fords, from the height field (W3)
   plot.rs        - Plot ownership, permissions, property tax
   suburb/        - The suburb's neighbourhoods, streets, lots and parks (suburb v2)

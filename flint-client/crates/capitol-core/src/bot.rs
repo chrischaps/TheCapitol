@@ -1416,9 +1416,10 @@ impl Bot {
         }
     }
 
-    /// Walks to the stall `stall_id`, onto the lane's crown in front of it
-    /// ([`bazaar::approach`]): down the avenue, in at the gate, and along
-    /// the lane; or along the lane from inside. Stays put within its range.
+    /// Walks to the stall `stall_id`, onto its street's crown in front of it
+    /// ([`bazaar::approach`]): down the avenue to the bazaar's mouth if it's
+    /// outside the quarter, then along the streets ([`bazaar::route`]).
+    /// Stays put within its range.
     pub fn go_to_stall(&mut self, stall_id: &str) -> Result<(), BotError> {
         let stall = self
             .landmark(|l| l.kind == LandmarkKind::Stall && l.id == stall_id)?
@@ -1427,13 +1428,17 @@ impl Bot {
         if rules::bazaar::at_the_stall(&stall, x, y) {
             return Ok(());
         }
-        let hall = self
+        let mouth = self
             .landmark(|l| l.kind == LandmarkKind::Bazaar)?
             .ok_or_else(|| BotError::Failed("the world has no bazaar".into()))?;
-        if hall.distance_to(x, y) > 0.0 {
-            self.down_the_avenue(hall.door.1)?;
+        let streets = self.walks()?.bazaar_streets().to_vec();
+        // From out in the city, the avenue first: it's the way in over the
+        // water, and the quarter opens off it
+        let r = (x - rules::CENTER_X).hypot(y - rules::CENTER_Y);
+        if r > rules::TRADE_OUTER_RADIUS {
+            self.down_the_avenue(mouth.door.1)?;
         }
-        for (x, y) in bazaar::route(&hall, &stall, self.position()) {
+        for (x, y) in bazaar::route(&streets, &stall, self.position()) {
             self.walk_to(x, y)?;
         }
         Ok(())

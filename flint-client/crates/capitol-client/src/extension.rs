@@ -1700,7 +1700,7 @@ fn visit_stall(
     let Some(stall) = terrain.landmark_by_id(stall_id) else {
         return;
     };
-    if session.visit_stall(now, terrain.landmark(LandmarkKind::Bazaar), stall) {
+    if session.visit_stall(now, &terrain.bazaar_streets(), stall) {
         shop.open_on(stall_id);
     }
 }

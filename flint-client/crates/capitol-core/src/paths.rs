@@ -100,6 +100,8 @@ pub struct WalkGraph {
     rings: Vec<WaterRing>,
     ground: Ground,
     landmarks: Vec<Landmark>,
+    /// The bazaar quarter's streets (E3.12), for the walk to a stall.
+    bazaar_streets: Vec<Vec<Point>>,
     nodes: Vec<Point>,
     /// Each node's neighbours, and the cost of the way there.
     edges: Vec<Vec<(u32, f64)>>,
@@ -141,6 +143,7 @@ impl WalkGraph {
             rings: terrain.water_rings.clone(),
             ground: Ground::from_terrain(terrain),
             landmarks: terrain.landmarks.clone(),
+            bazaar_streets: crate::bazaar::streets(&terrain.roads),
             nodes: Vec::new(),
             edges: Vec::new(),
             buckets: HashMap::new(),
@@ -257,6 +260,11 @@ impl WalkGraph {
     /// The world's landmarks, from the same `/terrain`.
     pub fn landmarks(&self) -> &[Landmark] {
         &self.landmarks
+    }
+
+    /// The bazaar quarter's streets (`bazaar::streets`).
+    pub fn bazaar_streets(&self) -> &[Vec<Point>] {
+        &self.bazaar_streets
     }
 
     /// How many nodes the graph has.

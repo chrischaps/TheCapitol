@@ -33,6 +33,8 @@ pub enum TransactionType {
     BazaarPurchase,
     /// A bazaar purchase, to the merchant (E3.10)
     BazaarSale,
+    /// Rent given back for days a stall didn't stand (E3.12's migration)
+    BazaarRefund,
 }
 
 impl TransactionType {
@@ -54,6 +56,7 @@ impl TransactionType {
             TransactionType::BazaarRent => "bazaar_rent",
             TransactionType::BazaarPurchase => "bazaar_purchase",
             TransactionType::BazaarSale => "bazaar_sale",
+            TransactionType::BazaarRefund => "bazaar_refund",
         }
     }
 }

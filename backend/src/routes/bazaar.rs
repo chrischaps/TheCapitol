@@ -337,7 +337,19 @@ mod tests {
     async fn stocking_and_buying_happen_at_the_stall(db: PgPool) {
         let terrain = TerrainConfig::get_default();
         let stall_of = |id: &str| terrain.landmarks.iter().find(|l| l.id == id).cloned().expect(id);
-        let (front, across, far) = (stall_of("bazaar_stall_2"), stall_of("bazaar_stall_8"), stall_of("bazaar_stall_13"));
+        // A stall on the lane, the one across the lane from it, and one far
+        // round the market street (E3.12)
+        let lane_y = terrain.roads.iter().find(|r| r.id == "bazaar_lane").expect("the lane").points[0].1;
+        let front = stall_of("bazaar_stall_2");
+        let crown = (front.door.0, lane_y);
+        let across = terrain
+            .landmarks
+            .iter()
+            .filter(|l| l.kind == LandmarkKind::Stall && (l.door.1 - lane_y) * (front.door.1 - lane_y) < 0.0)
+            .min_by(|a, b| a.distance_to(crown.0, crown.1).total_cmp(&b.distance_to(crown.0, crown.1)))
+            .cloned()
+            .expect("a stall across the lane");
+        let far = stall_of("bazaar_stall_30");
         let game = RwLock::new(GameState::with_terrain(WorldGenParams::default(), terrain.clone()));
         let ada = player(&db, "ada", 100).await;
         let save = |(x, y): (f64, f64)| {
@@ -356,7 +368,6 @@ mod tests {
         );
 
         // The lane's crown, in front of stall 2
-        let crown = ((front.door.0 + across.door.0) / 2.0, front.door.1);
         save(crown).await.unwrap();
         assert!(at(&game, &db, ada.id, &front, "stock it").await.is_ok());
         assert!(at(&game, &db, ada.id, &across, "buy from it").await.is_ok());

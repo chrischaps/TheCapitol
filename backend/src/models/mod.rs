@@ -1,4 +1,5 @@
 pub mod account;
+pub mod bazaar;
 pub mod container;
 pub mod geom;
 pub mod hydrology;

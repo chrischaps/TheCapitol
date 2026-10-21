@@ -3,10 +3,13 @@
 //!
 //! The directory works from anywhere, but a shop's prices and units are seen
 //! at its stall, and stocking and buying happen there too, within
-//! [`rules::bazaar::STALL_RANGE`] of its footprint. Every stall faces the
-//! bazaar's inner lane, so [`approach`] stands on the lane's crown in front
-//! of it, and [`route`] gets there through the gate. [`Visit`] walks the
-//! route a leg at a time and opens the shop as you come to it (E3.11).
+//! [`rules::bazaar::STALL_RANGE`] of its footprint. Since E3.12 the bazaar is
+//! a quarter of the Trade District: stalls along the trade ring, a lane in
+//! from the avenue and an alley to a square, every stall facing its street.
+//! [`approach`] stands on the street's crown in front of a stall, and
+//! [`route`] gets there along the streets ([`streets`]), so a walk doesn't
+//! cut through the stalls. [`Visit`] walks the route a leg at a time and
+//! opens the shop as you come to it (E3.11).
 //!
 //! The shop's rules, so its panel previews what the server will do:
 //! [`buy`] (the best units first, or one grade's), [`stock`] and [`rent`].
@@ -20,40 +23,170 @@ use capitol_protocol::rest::{
 use capitol_protocol::rules::bazaar::{self as rules, at_the_stall, BazaarError};
 use capitol_protocol::rules::quality_grade;
 use capitol_protocol::rules::stacking::{Pick, Units};
-use capitol_protocol::terrain::Landmark;
+use capitol_protocol::terrain::{Landmark, RoadSegment};
 use capitol_protocol::ws::ServerMessage;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-/// How far out from a stall's door to stand: half the inner lane's 30, so
-/// every stall's approach is on the lane's crown, inside its range.
-pub const APPROACH: f64 = 15.0;
+type Point = (f64, f64);
 
-/// Where to stand to deal at `stall`: on the lane's crown in front of its door.
-pub fn approach(stall: &Landmark) -> (f64, f64) {
-    let (dx, dy) = (stall.door.0 - stall.position.0, stall.door.1 - stall.position.1);
-    let d = dx.hypot(dy).max(1e-6);
-    (stall.door.0 + dx / d * APPROACH, stall.door.1 + dy / d * APPROACH)
+/// The roads a walk in the bazaar keeps to: its market street (the trade
+/// ring), its lane and its alley, and the avenue and the arterials that lead
+/// to them.
+const STREETS: [&str; 7] = [
+    "trade_ring",
+    "bazaar_lane",
+    "bazaar_alley",
+    "arterial_capitol",
+    "arterial_inner_2",
+    "arterial_inner_4",
+    "arterial_inner_6",
+];
+
+/// The bazaar's streets, from `/terrain`'s roads, as polylines.
+pub fn streets(roads: &[RoadSegment]) -> Vec<Vec<Point>> {
+    roads.iter().filter(|r| STREETS.contains(&r.id.as_str())).map(|r| r.points.clone()).collect()
 }
 
-/// The walk from `from` to `stall` in `bazaar`, as waypoints: from outside,
-/// in at the gate, up the lane to the stall; from inside, onto the lane and
-/// along it. The way to the gate is the caller's: it's on the avenue.
-pub fn route(bazaar: &Landmark, stall: &Landmark, from: (f64, f64)) -> Vec<(f64, f64)> {
-    let to = approach(stall);
-    // Inward, from the gate to the bazaar's middle
-    let (nx, ny) = (bazaar.position.0 - bazaar.door.0, bazaar.position.1 - bazaar.door.1);
-    let d = nx.hypot(ny).max(1e-6);
-    let n = (nx / d, ny / d);
-    // The point on the lane's crown level with `p`
-    let on_lane = |p: (f64, f64)| {
-        let across = (to.0 - p.0) * n.0 + (to.1 - p.1) * n.1;
-        (p.0 + n.0 * across, p.1 + n.1 * across)
-    };
-    if bazaar.distance_to(from.0, from.1) == 0.0 {
-        return vec![on_lane(from), to];
+/// The nearest point to `p` on any of `streets`, and how far it is.
+fn on_streets(streets: &[Vec<Point>], p: Point) -> Option<(Point, f64)> {
+    streets
+        .iter()
+        .flat_map(|s| s.windows(2).map(|w| nearest(p, w[0], w[1])))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+fn nearest(p: Point, a: Point, b: Point) -> (Point, f64) {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 == 0.0 { 0.0 } else { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0) };
+    let q = (a.0 + dx * t, a.1 + dy * t);
+    (q, (p.0 - q.0).hypot(p.1 - q.1))
+}
+
+/// Where to stand to deal at `stall`: on its street's crown in front of its
+/// door. With no streets (a world without the quarter), out from its door.
+pub fn approach(stall: &Landmark, streets: &[Vec<Point>]) -> Point {
+    match on_streets(streets, stall.door) {
+        Some((p, _)) => p,
+        None => {
+            let (dx, dy) = (stall.door.0 - stall.position.0, stall.door.1 - stall.position.1);
+            let d = dx.hypot(dy).max(1e-6);
+            (stall.door.0 + dx / d * 15.0, stall.door.1 + dy / d * 15.0)
+        }
     }
-    vec![bazaar.door, on_lane(bazaar.door), to]
+}
+
+/// How near a street's end must come to another street to join it.
+const JOIN: f64 = 25.0;
+
+/// The walk from `from` to `stall`, as waypoints along `streets`: onto the
+/// nearest street, along the streets (the shortest way, junction to
+/// junction), and to the crown in front of the stall.
+pub fn route(streets: &[Vec<Point>], stall: &Landmark, from: Point) -> Vec<Point> {
+    let to = approach(stall, streets);
+    let Some((start, _)) = on_streets(streets, from) else {
+        return vec![to];
+    };
+    // The graph: every street's vertices, and where its ends meet another
+    // street, split in
+    let mut nodes: Vec<Point> = Vec::new();
+    let mut segs: Vec<(usize, usize)> = Vec::new();
+    for s in streets {
+        let base = nodes.len();
+        nodes.extend(s.iter().copied());
+        segs.extend((0..s.len().saturating_sub(1)).map(|k| (base + k, base + k + 1)));
+    }
+    let ends: Vec<usize> = {
+        let mut base = 0;
+        let mut ends = Vec::new();
+        for s in streets {
+            if !s.is_empty() {
+                ends.extend([base, base + s.len() - 1]);
+            }
+            base += s.len();
+        }
+        ends
+    };
+    let split = |nodes: &mut Vec<Point>, segs: &mut Vec<(usize, usize)>, p: Point, skip: Option<usize>| -> usize {
+        // The segment nearest `p` (not one of `skip`'s own), split at its
+        // nearest point
+        let best = segs
+            .iter()
+            .enumerate()
+            .filter(|(_, (a, b))| Some(*a) != skip && Some(*b) != skip)
+            .map(|(k, (a, b))| (k, nearest(p, nodes[*a], nodes[*b])))
+            .min_by(|x, y| x.1 .1.total_cmp(&y.1 .1));
+        let Some((k, (q, _))) = best else { return usize::MAX };
+        let (a, b) = segs[k];
+        if (q.0 - nodes[a].0).hypot(q.1 - nodes[a].1) < 0.5 {
+            return a;
+        }
+        if (q.0 - nodes[b].0).hypot(q.1 - nodes[b].1) < 0.5 {
+            return b;
+        }
+        let n = nodes.len();
+        nodes.push(q);
+        segs[k] = (a, n);
+        segs.push((n, b));
+        n
+    };
+    let mut joins = Vec::new();
+    for &e in &ends {
+        let p = nodes[e];
+        let other = segs
+            .iter()
+            .filter(|(a, b)| *a != e && *b != e)
+            .map(|(a, b)| nearest(p, nodes[*a], nodes[*b]).1)
+            .fold(f64::MAX, f64::min);
+        if other <= JOIN {
+            let j = split(&mut nodes, &mut segs, p, Some(e));
+            joins.push((e, j));
+        }
+    }
+    let s = split(&mut nodes, &mut segs, start, None);
+    let g = split(&mut nodes, &mut segs, to, None);
+    let mut adjacent: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nodes.len()];
+    let dist = |a: Point, b: Point| (a.0 - b.0).hypot(a.1 - b.1);
+    for &(a, b) in segs.iter().chain(joins.iter()) {
+        let d = dist(nodes[a], nodes[b]);
+        adjacent[a].push((b, d));
+        adjacent[b].push((a, d));
+    }
+    // Dijkstra, small enough to scan
+    let mut best = vec![f64::MAX; nodes.len()];
+    let mut prev = vec![usize::MAX; nodes.len()];
+    let mut done = vec![false; nodes.len()];
+    best[s] = 0.0;
+    loop {
+        let Some(u) = (0..nodes.len()).filter(|&i| !done[i] && best[i] < f64::MAX).min_by(|&a, &b| best[a].total_cmp(&best[b])) else {
+            break;
+        };
+        if u == g {
+            break;
+        }
+        done[u] = true;
+        for &(v, d) in &adjacent[u] {
+            if best[u] + d < best[v] {
+                best[v] = best[u] + d;
+                prev[v] = u;
+            }
+        }
+    }
+    if best[g] == f64::MAX {
+        return vec![start, to];
+    }
+    let mut path = vec![g];
+    while let Some(&last) = path.last() {
+        if last == s {
+            break;
+        }
+        path.push(prev[last]);
+    }
+    path.reverse();
+    let mut legs: Vec<Point> = path.into_iter().map(|i| nodes[i]).collect();
+    legs.dedup_by(|a, b| dist(*a, *b) < 1.0);
+    legs
 }
 
 /// How near a leg's end counts as there, in server units: a walk stops on
@@ -69,8 +202,8 @@ pub enum Step {
     WalkTo { x: f64, y: f64 },
 }
 
-/// A walk to a stall, if one is under way: in at the gate, up the lane, and
-/// the shop opens as you reach its counter.
+/// A walk to a stall, if one is under way: along the streets, and the shop
+/// opens as you reach its counter.
 #[derive(Debug, Default)]
 pub struct Visit {
     /// The stall, and the end of the leg being walked
@@ -81,17 +214,13 @@ pub struct Visit {
 
 impl Visit {
     /// `stall` was clicked with you standing at `at`. In range, its shop
-    /// opens now; otherwise the walk starts. With no `bazaar` (a world
-    /// without one) it's straight to the stall.
-    pub fn click(&mut self, bazaar: Option<&Landmark>, stall: &Landmark, at: (f64, f64)) -> Step {
+    /// opens now; otherwise the walk starts, along `streets` ([`route`]).
+    pub fn click(&mut self, streets: &[Vec<Point>], stall: &Landmark, at: Point) -> Step {
         if at_the_stall(stall, at.0, at.1) {
             self.walked();
             return Step::Open;
         }
-        let mut legs = match bazaar {
-            Some(b) => route(b, stall, at),
-            None => vec![approach(stall)],
-        };
+        let mut legs = route(streets, stall, at);
         let first = legs.remove(0);
         self.walking = Some((stall.id.clone(), first));
         self.legs = legs;
@@ -100,8 +229,8 @@ impl Visit {
 
     /// Each frame, with you at `at`: the next leg as one ends, and `Open`
     /// once, as the last leg brings you in range of the stall. A stall
-    /// you pass on the way (a front stall's back is on the avenue) doesn't
-    /// count: you've come to its counter, not its wall.
+    /// you pass on the way doesn't count: the market street passes many in
+    /// range, and you've come to this one's counter.
     pub fn tick(&mut self, stall: &Landmark, at: (f64, f64)) -> Option<Step> {
         let (id, to) = self.walking.as_ref()?;
         if *id != stall.id {
@@ -410,109 +539,128 @@ mod tests {
         DateTime::from_timestamp(1_800_000_000, 0).unwrap()
     }
 
-    /// The default world's bazaar, west of the south avenue: lateral is -x,
-    /// radial is +y. The gate is on the avenue side, at x = 40; the lane's
-    /// crown runs at x = 0, 40 in; front stalls are 25 deep from the gate's
-    /// face, back stalls 25 deep from the far wall at x = -40.
-    fn bazaar() -> Landmark {
-        Landmark {
-            id: "bazaar".into(),
-            kind: LandmarkKind::Bazaar,
-            position: (0.0, 50.0),
-            corners: [(40.0, 100.0), (40.0, 0.0), (-40.0, 0.0), (-40.0, 100.0)],
-            entrance_edge: (0, 1),
-            door: (40.0, 50.0),
-        }
+    /// A small town: an avenue up x = 0, a lane west from it at y = 100, and
+    /// a street down x = -150 that the lane runs into.
+    fn town() -> Vec<Vec<Point>> {
+        vec![
+            vec![(0.0, 0.0), (0.0, 200.0)],
+            vec![(0.0, 100.0), (-150.0, 100.0)],
+            vec![(-150.0, 0.0), (-150.0, 200.0)],
+        ]
     }
 
-    /// A stall from `face` to `back` (x), between `y0` and `y1`.
-    fn stall(id: &str, face: f64, back: f64, y0: f64, y1: f64) -> Landmark {
-        let mid = (y0 + y1) / 2.0;
+    /// A stall whose door is at `door`, `w` wide, going back `d` along
+    /// `inward`.
+    fn stall(id: &str, door: Point, inward: Point, w: f64, d: f64) -> Landmark {
+        let across = (-inward.1, inward.0);
+        let a = (door.0 - across.0 * w / 2.0, door.1 - across.1 * w / 2.0);
+        let b = (door.0 + across.0 * w / 2.0, door.1 + across.1 * w / 2.0);
+        let back = |p: Point| (p.0 + inward.0 * d, p.1 + inward.1 * d);
         Landmark {
             id: id.into(),
             kind: LandmarkKind::Stall,
-            position: ((face + back) / 2.0, mid),
-            corners: [(face, y1), (face, y0), (back, y0), (back, y1)],
+            position: (door.0 + inward.0 * d / 2.0, door.1 + inward.1 * d / 2.0),
+            corners: [b, a, back(a), back(b)],
             entrance_edge: (0, 1),
-            door: (face, mid),
+            door,
+        }
+    }
+
+    /// On the far street, west of it, facing east onto it
+    fn far_stall() -> Landmark {
+        stall("bazaar_stall_9", (-168.0, 40.0), (-1.0, 0.0), 28.0, 28.0)
+    }
+
+    #[test]
+    fn a_stall_is_approached_from_its_streets_crown_within_range() {
+        let s = far_stall();
+        let (x, y) = approach(&s, &town());
+        assert!((x + 150.0).abs() < 1e-9 && (y - 40.0).abs() < 1e-9, "{x}, {y}");
+        assert!(at_the_stall(&s, x, y));
+        // With no streets, out from its door
+        let (x, y) = approach(&s, &[]);
+        assert!((x + 153.0).abs() < 1e-9 && (y - 40.0).abs() < 1e-9, "{x}, {y}");
+    }
+
+    #[test]
+    fn the_route_keeps_to_the_streets_junction_to_junction() {
+        let s = far_stall();
+        let legs = route(&town(), &s, (10.0, 180.0));
+        let at = |p: Point, q: Point| (p.0 - q.0).hypot(p.1 - q.1) < 1e-6;
+        assert!(at(legs[0], (0.0, 180.0)), "onto the avenue first: {legs:?}");
+        assert!(legs.iter().any(|p| at(*p, (0.0, 100.0))), "the lane's mouth: {legs:?}");
+        assert!(legs.iter().any(|p| at(*p, (-150.0, 100.0))), "the lane's end: {legs:?}");
+        assert!(at(*legs.last().unwrap(), approach(&s, &town())));
+        // Every leg runs along a street
+        for w in legs.windows(2) {
+            for k in 0..=10 {
+                let t = k as f64 / 10.0;
+                let p = (w[0].0 + (w[1].0 - w[0].0) * t, w[0].1 + (w[1].1 - w[0].1) * t);
+                assert!(on_streets(&town(), p).unwrap().1 < 1e-6, "{p:?} is off the streets");
+            }
         }
     }
 
     #[test]
-    fn every_stall_is_approached_from_the_lanes_crown_within_range() {
-        let front = stall("bazaar_stall_1", 15.0, 40.0, 86.0, 100.0);
-        let back = stall("bazaar_stall_7", -15.0, -40.0, 0.0, 14.3);
-        for s in [&front, &back] {
-            let (x, y) = approach(s);
-            assert!((x - 0.0).abs() < 1e-9, "{} at {x}", s.id);
-            assert!((y - s.position.1).abs() < 1e-9);
-            assert!(at_the_stall(s, x, y), "{}", s.id);
-        }
-    }
-
-    #[test]
-    fn the_route_comes_in_at_the_gate_and_up_the_lane() {
-        let back = stall("bazaar_stall_7", -15.0, -40.0, 0.0, 14.3);
-        let route = route(&bazaar(), &back, (300.0, 50.0));
-        assert_eq!(route.len(), 3);
-        assert_eq!(route[0], (40.0, 50.0));
-        // Straight in from the gate to the crown, then along it
-        assert!((route[1].0 - 0.0).abs() < 1e-9 && (route[1].1 - 50.0).abs() < 1e-9, "{:?}", route[1]);
-        assert_eq!(route[2], approach(&back));
-    }
-
-    #[test]
-    fn from_inside_the_route_steps_onto_the_lane_and_along_it() {
-        let front = stall("bazaar_stall_1", 15.0, 40.0, 86.0, 100.0);
-        let route = route(&bazaar(), &front, (-30.0, 20.0));
-        assert_eq!(route.len(), 2);
-        assert!((route[0].0 - 0.0).abs() < 1e-9 && (route[0].1 - 20.0).abs() < 1e-9, "{:?}", route[0]);
-        assert_eq!(route[1], approach(&front));
-    }
-
-    #[test]
-    fn a_visit_walks_in_at_the_gate_up_the_lane_and_opens_at_the_counter() {
-        let back = stall("bazaar_stall_7", -15.0, -40.0, 0.0, 14.3);
+    fn a_visit_walks_the_streets_and_opens_at_the_counter_only() {
+        let s = far_stall();
         let mut v = Visit::default();
-        assert_eq!(v.click(Some(&bazaar()), &back, (300.0, 50.0)), Step::WalkTo { x: 40.0, y: 50.0 });
-        assert_eq!(v.walking(), Some("bazaar_stall_7"));
-        assert_eq!(v.tick(&back, (200.0, 50.0)), None, "still on the avenue");
-        match v.tick(&back, (42.0, 51.0)) {
-            Some(Step::WalkTo { x, y }) => assert!(x.abs() < 1e-9 && (y - 50.0).abs() < 1e-9),
-            other => panic!("the lane next, not {other:?}"),
-        }
-        let (ax, ay) = approach(&back);
-        assert_eq!(v.tick(&back, (0.0, 50.0)), Some(Step::WalkTo { x: ax, y: ay }));
-        assert_eq!(v.tick(&back, (0.0, 30.0)), None, "on the lane, not yet in range");
-        assert_eq!(v.tick(&back, (0.0, 12.0)), Some(Step::Open), "in range on the last leg");
-        assert_eq!(v.tick(&back, (ax, ay)), None, "only once");
-        assert_eq!(v.walking(), None);
-    }
-
-    #[test]
-    fn a_front_stalls_back_wall_on_the_way_in_does_not_open_it() {
-        let front = stall("bazaar_stall_1", 15.0, 40.0, 86.0, 100.0);
-        let mut v = Visit::default();
-        v.click(Some(&bazaar()), &front, (300.0, 95.0));
-        // Up the avenue past the stall's back, in range of its wall
-        assert!(at_the_stall(&front, 50.0, 95.0));
-        assert_eq!(v.tick(&front, (50.0, 95.0)), None);
-        // In range from the start, it opens at once
-        assert_eq!(Visit::default().click(Some(&bazaar()), &front, (0.0, 93.0)), Step::Open);
+        let first = v.click(&town(), &s, (10.0, 180.0));
+        assert_eq!(first, Step::WalkTo { x: 0.0, y: 180.0 });
+        assert_eq!(v.walking(), Some("bazaar_stall_9"));
+        assert_eq!(v.tick(&s, (9.0, 180.0)), None, "still on the way to the avenue");
+        let (ax, ay) = approach(&s, &town());
+        // Down the avenue and along the lane: legs, never Open
+        assert_eq!(v.tick(&s, (0.0, 180.0)), Some(Step::WalkTo { x: 0.0, y: 100.0 }));
+        assert_eq!(v.tick(&s, (0.0, 100.0)), Some(Step::WalkTo { x: -150.0, y: 100.0 }));
+        assert_eq!(v.tick(&s, (-150.0, 100.0)), Some(Step::WalkTo { x: ax, y: ay }));
+        assert_eq!(v.tick(&s, (-150.0, 75.0)), None, "on the street, not yet in range");
+        assert_eq!(v.tick(&s, (ax, ay)), Some(Step::Open));
+        assert_eq!(v.tick(&s, (ax, ay)), None, "only once");
+        // In range at the start, it opens at once
+        assert_eq!(Visit::default().click(&town(), &s, (ax, ay)), Step::Open);
     }
 
     #[test]
     fn walking_elsewhere_or_to_another_stall_drops_the_visit() {
-        let back = stall("bazaar_stall_7", -15.0, -40.0, 0.0, 14.3);
-        let other = stall("bazaar_stall_8", -15.0, -40.0, 14.3, 28.6);
+        let s = far_stall();
+        let other = stall("bazaar_stall_8", (-168.0, 70.0), (-1.0, 0.0), 28.0, 28.0);
         let mut v = Visit::default();
-        v.click(Some(&bazaar()), &back, (300.0, 50.0));
-        assert_eq!(v.tick(&other, (40.0, 50.0)), None);
+        v.click(&town(), &s, (10.0, 180.0));
+        assert_eq!(v.tick(&other, (0.0, 180.0)), None);
         v.walked();
-        assert_eq!(v.tick(&back, (40.0, 50.0)), None);
-        // With no bazaar on the map, it's straight to the counter
-        let (ax, ay) = approach(&back);
-        assert_eq!(v.click(None, &back, (300.0, 50.0)), Step::WalkTo { x: ax, y: ay });
+        assert_eq!(v.tick(&s, (0.0, 180.0)), None);
+    }
+
+    /// The default world's quarter (the fixture, E3.12): from the avenue
+    /// opposite the hall, every stall is reached along the streets, through
+    /// no other stall, and the walk ends in its range.
+    #[test]
+    fn every_stall_in_the_quarter_is_reached_along_the_streets() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let terrain = crate::terrain::read_terrain_file(&path).expect("fixture");
+        let streets = streets(&terrain.roads);
+        let stalls: Vec<&Landmark> = terrain.landmarks.iter().filter(|l| l.kind == LandmarkKind::Stall).collect();
+        assert!(stalls.len() >= 34, "{} stalls: refresh the fixture", stalls.len());
+        let mouth = terrain.landmarks.iter().find(|l| l.kind == LandmarkKind::Bazaar).unwrap();
+        for from in [(6000.0, mouth.door.1), (6000.0, 6550.0)] {
+            for s in &stalls {
+                let legs = route(&streets, s, from);
+                let end = *legs.last().unwrap();
+                assert!(at_the_stall(s, end.0, end.1), "{} from {from:?}", s.id);
+                let mut prev = from;
+                for &p in &legs {
+                    for k in 0..=20 {
+                        let t = k as f64 / 20.0;
+                        let q = (prev.0 + (p.0 - prev.0) * t, prev.1 + (p.1 - prev.1) * t);
+                        for o in &stalls {
+                            assert!(o.distance_to(q.0, q.1) > 0.0, "the walk to {} crosses {} at {q:?}", s.id, o.id);
+                        }
+                    }
+                    prev = p;
+                }
+            }
+        }
     }
 
     #[test]
