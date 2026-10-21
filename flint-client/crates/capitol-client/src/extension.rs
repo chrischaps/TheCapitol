@@ -410,8 +410,13 @@ impl CapitolExtension {
     /// Offline, show the hall as if goods waited (`--hall-sample`).
     /// Offline, sample shops in the bazaar's stalls and the shop panel open
     /// on stall `stall` (a number, or "mine"), as if you stood at it
-    /// (`--bazaar-sample`).
+    /// (`--bazaar-sample`). "street" keeps most of the stalls, stands you at
+    /// none and opens nothing, for filming (#345).
     pub fn with_bazaar_sample(mut self, stall: Option<&str>) -> Self {
+        if let (Some("street"), None) = (stall, &self.session) {
+            self.bazaar_sample = Some(ui::shop::Sample::street());
+            return self;
+        }
         if let (Some(stall), None) = (stall, &self.session) {
             let sample = ui::shop::Sample::new();
             let id = match stall {
@@ -578,7 +583,7 @@ impl CapitolExtension {
                 )
             }
             (None, Some(sample)) => (
-                Some(crate::coords::to_server(camera_target[0], camera_target[1])),
+                (!sample.street).then(|| crate::coords::to_server(camera_target[0], camera_target[1])),
                 Some(&sample.directory),
                 sample.mine().map(|s| s.stall_id.clone()),
                 None,
