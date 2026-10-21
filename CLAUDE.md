@@ -15,6 +15,7 @@ The Capitol is an MMO economic simulation where the economy is the primary gamep
 - `the-capitol-economy.md` - Economy v1: quality and tools, content depth, markets (M6), automation (M8), plus CI and auth (issues labelled `economy`, #144 to #179)
 - `the-capitol-wilds.md` - The wilds: the Wilderness grown to r3800 to r6000 (the world to 12000; since #308 r4600 to r6800 and 13600), with a height field, rivers, streams and lakes, and nothing claimable (issues labelled `wilds`, #193 to #204)
 - `the-capitol-citizens.md` - Citizens: AI players who live in the world, run by `capitol-town`, earning everything, marked honestly, with a pluggable decision cascade from rules up to models (issues labelled `citizens`, #246 to #262, plus #211)
+- `the-capitol-controls.md` - Direct control: an over-the-shoulder action camera with WASD and the pad, as a mode switched live against click-to-move (F8) for an A/B, then keep one or both. A `steer` message on the server, one shared walk step (`rules::ground::walk_step`) with a slide, focus and E to act (issues labelled `controls`, #314 to #332)
 - `the-capitol-rural.md` - Rural v2: farms on lanes. The rural ring is relaid as farms of about 120k on straight concession roads and winding lanes, with fields between them, even across all 8 sectors, and clear of the plain's water. Since RW1 (#308) it runs r3000 to r4600, so two roads fit across, which makes about 115 farms, and the world is 13600 so the wilds keep their depth (RD10, #307 to #310) (issues labelled `rural`, #282, #284 to #291, #307 to #310, plus #223)
 
 ## Current Focus: Citizens
@@ -43,7 +44,7 @@ Rules that hold across issues:
 - Assume another agent may be working at the same time, on this machine or another. Claim the issue first, use your own worktree, stage by path, and never touch changes you didn't make. See the next section.
 - **Cut a ticket for every limitation you hit.** This covers anything you work round instead of fix: an engine gap, a missing hook, a tool that can't do something, a backend quirk. Open a GitHub issue for it in the same session. Say what's missing, what the workaround costs, and what removing the workaround involves. Then link the issue from the workaround's code comment and the plan. A limitation recorded only in a closing comment or a vault note gets lost.
 - **Label every issue you open** with:
-  - at least one area: `citizens`, `economy`, `flint-client`, `wilds`, `suburb-v2`, `rural` or `infra` (CI, scripts, tooling);
+  - at least one area: `citizens`, `economy`, `flint-client`, `wilds`, `suburb-v2`, `rural`, `controls` or `infra` (CI, scripts, tooling);
   - its kind: a phase label for a planned work package, `bug` for something broken or a limitation, or `enhancement`;
   - `engine-upstream` or `fc:backend-prereq` where they apply;
   - `needs-decision` when only Chris can settle it.

@@ -109,6 +109,20 @@ The Capitol Tower is a modern structure arranged like a medieval castle, surroun
 - Travel can be optimized (roads, mounts, vehicles, canal barges?) but never eliminated
 - Canals serve as zone dividers and potential transport routes
 
+#### Getting About
+
+There are two ways to move through the city, and both are being played before one is chosen (controls plan, `the-capitol-controls.md`, T3):
+- **Point and walk.** You click the ground or a thing, and you walk there. The camera rides above you, on a dial from the shoulder up to the map. This suits reading the rings and planning a route.
+- **Over the shoulder.** You walk with WASD or a pad, look with the mouse or the stick, and act with E or Ⓐ on whatever is in front of you. This suits being in the place: the bazaar's lane, a stall, a valley in the wilds.
+
+Both modes obey the same rules:
+- the same speed;
+- the same slopes and cliffs;
+- the same water, crossed only at bridges and fords;
+- the same reach.
+
+Neither mode is faster or reaches further. Getting about is part of the economy's friction, and the controls only change how it feels.
+
 #### The Wilds
 
 Past the rural ring the land rises into the wilds: the Wilderness zone, from r3800 to the world's edge at r6000. The plan of record is `the-capitol-wilds.md` (2026-10-18).

@@ -730,6 +730,7 @@ Sizes: **S** is about 1 focused session, **M** 2–3, **L** 4 or more. Each phas
 - **Admin tools.** F1 debug camera, F2 world tweaker and F3 perf panel slot in as egui panels gated on `is_admin`. Flint's own debug panels sit alongside them.
 - **M6 markets.** A market browser and order book as egui panels, plus a price chart (`egui_plot`). Real-time updates arrive through the same `on_event` path. *Built in Economy v1: the panel in E3.5, the chart in E3.6 (`ui/market_chart.rs`).*
 - **M7 leftovers.** The map view (P3.9's map mode is most of it), an ownership overlay and a permissions editor.
+- **Direct control.** An over-the-shoulder action camera with WASD and the pad, switched live against click-to-move for an A/B. It's planned in [`the-capitol-controls.md`](the-capitol-controls.md) (issues labelled `controls`, #314 to #332).
 - **M8 automation and M9 social.** More panels on the same patterns. Automated stations get animated states in the world: a forge glows while it runs and dims when it's paused. *Automation built in Economy v1, E4.4 (#179): the station panel's Automation tab, lanterns and fires that follow the work, a puff per craft, and an ember over your own paused stations.*
 
 ## 7. Dependency graph and estimate
@@ -814,6 +815,7 @@ P2 can run alongside P1 and P3 in a separate worktree, since it has no engine de
 | **Rhai performance with many entities** | Keep per-entity and per-frame work in Rust (`entities.rs`). Rhai handles intents and HUD only. *P8.5: confirmed. The one per-player HUD loop that did real work (name placement) cost 6 ms at 100 players, and moved to Rust. Any per-player loop in a script should do no more than project and draw.* |
 | **One session per account** | Testing always uses two accounts. Document it in `flint-client/CLAUDE.md`. |
 | **World scale** (B1) | Resolved by B1: the spawn, nodes, zones and move bounds are on the 8000 world. DB plots were only scaled. B7 replaced them with the terrain's lots. |
+| **Click-to-move only.** The client walks by destination, and its prediction misses the moat and canals. | Planned in [`the-capitol-controls.md`](the-capitol-controls.md): a `steer` message (D3) and one shared walk step with the rings and a slide (D4), which fixes click mode's prediction too. |
 | **Windows only** | Accepted for now. Android is possible later through `flint-android`, but touch input and UI scale would need their own plan. |
 | **The quality cascade isn't real yet** (`engine/crafting.rs` averages inputs and ignores weights) | Not a client problem, but the quality preview in P5.5 should be computed by the server or labelled as an estimate so it doesn't lock in the current maths. *P5.5: labelled. The panel shows "~52 D est.", with a tooltip saying the server's sums will change. `craft::check` holds the maths in one place.* **Resolved in E1.1 ([#153](https://github.com/chrischaps/TheCapitol/issues/153)):** the cascade is `protocol::rules::quality`, which the server and client both call. The panel shows the exact range ("64–70 C") with no "est.", and a breakdown on hover. |
 
