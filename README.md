@@ -6,7 +6,7 @@
 
 **An online game where the economy is the whole game.** There's no combat. You gather, craft, trade and build in one shared city laid out in rings round a tower. Everyone starts at the edge with nothing and works inward. Every price you pay was set by another player, and every coin in the world was earned by someone's work.
 
-**[Project page](https://chaps.dev/projects/thecapitol/)** · **[Teaser](https://youtu.be/TEASER_ID)** · **[A tour of the game](https://youtu.be/TOUR_ID)**
+**[Project page](https://chaps.dev/projects/thecapitol/)**
 
 The game is in development. A Rust server runs the world, and a 3D client on [Flint](https://github.com/chrischaps/Flint), my own engine, lets you stand in it.
 
@@ -39,7 +39,7 @@ Day and night follow the server's clock, so everyone shares the same hour. At ni
 
 | | |
 |---|---|
-| ![Dawn over the wilds: mist in the valleys and the ranges in blue](.github/media/wilds.jpg) | ![The suburbs at golden hour](.github/media/suburb.jpg) |
+| ![Dawn over the wilds: mist in the valleys and the ranges in blue](.github/media/wilds.jpg) | ![The bazaar's lane at dusk, citizens with pale lanterns walking it](.github/media/bazaar.jpg) |
 | ![The Capitol Gazette](.github/media/gazette.jpg) | ![The market: one order book, by grade](.github/media/market.jpg) |
 
 ## How it's built
@@ -51,7 +51,7 @@ Day and night follow the server's clock, so everyone shares the same hour. At ni
 
 ### Built with Claude
 
-The Capitol is built in close collaboration with Claude, Anthropic's AI model: 369 of its 455 commits are co-authored. I set the direction and make the calls. The work is a queue of GitHub issues, about 300 closed so far. Several Claude sessions on more than one machine work it at once. A session claims an issue by pushing a git branch, which only one of them can win (`scripts/issue.sh`).
+The Capitol is built in close collaboration with Claude, Anthropic's AI model: 380 of its 470 commits are co-authored. I set the direction and make the calls. The work is a queue of GitHub issues, about 300 closed so far. Several Claude sessions on more than one machine work it at once. A session claims an issue by pushing a git branch, which only one of them can win (`scripts/issue.sh`).
 
 ## Running it
 
