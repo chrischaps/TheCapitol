@@ -60,6 +60,35 @@ F1 or `?` in the game lists every control. `flint-client/CLAUDE.md` has the rest
 
 **Showcase.** `powershell -File flint-client/tools/showcase.ps1` captures offline stills of the city and a short crane shot (`capitol.mp4`, needs ffmpeg) into `flint-client/renders/showcase/`.
 
+### Two worlds: with citizens and without
+
+Citizens are AI players who live in the world: they gather, craft, trade, claim lots and keep shops, earning everything as a new player does. The plan is `the-capitol-citizens.md`. There are two local worlds, and you can run either one or both at once:
+
+| | The usual world | The town |
+|---|---|---|
+| Citizens | none | 18 of the sim's roles and 2 merchants, to start |
+| Start it | `cd backend && cargo run` | `scripts/town.sh up` (Git Bash, from the repo root) |
+| Server | `http://localhost:3000` | `http://127.0.0.1:3300` |
+| Database | `capitol` | `capitol_town` |
+| Play in it | `flint-client\play.bat` | `flint-client\play.bat --server http://127.0.0.1:3300` |
+
+The town is the place to see what the city feels like with people in it. The usual world is for work where citizens would get in the way. The two never share anything: what citizens claim, gather or buy in the town stays in the town.
+
+```bash
+scripts/town.sh up       # start the town in this terminal; Ctrl-C stops the citizens and its server
+scripts/town.sh status   # is its server up, and what each citizen is doing
+scripts/town.sh reset    # drop the town's database and roster; the next up starts a new town
+```
+
+- **The first `up`** takes a few minutes: it builds the server and `capitol-town`, creates the database (every migration, every node planted), makes an admin for it and mints the citizens. `up --count <n> --merchants <m>` sets how many. Later runs reuse all of it, and the citizens carry on from where they stood.
+- **A new town knows nobody.** Register an account on the client's login form the first time you go in.
+- **Switching worlds asks for your password again,** because the client keeps one server's sign-in ([#338](https://github.com/chrischaps/TheCapitol/issues/338)).
+- **The town fills up.** Its citizens save up and buy deeds, so its land gets taken the longer it runs. `reset` gives a fresh one.
+- **What it keeps** is in `flint-client/town/` (git-ignored): the roster with the citizens' keys, the admin's password, their health (`town.status`), their decision logs and the server's log (`backend.log`). It runs copies of the binaries, so it never locks the exe that `cargo run` rebuilds.
+- `TOWN_PORT`, `TOWN_DB` and `TOWN_REDIS` move it to another port, database or Redis db.
+
+Docker has to be up (`docker-compose up -d`), and `backend/.env` must exist: the town takes its `JWT_SECRET` from there.
+
 ### Environment Variables
 
 Backend `.env`:
