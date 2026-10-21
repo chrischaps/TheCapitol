@@ -31,7 +31,7 @@ use crate::models::geom::{quads_overlap_strict, SpatialGrid};
 use crate::models::street_plan;
 use crate::models::terrain::{point_to_segment_distance, TerrainConfig, WorldGenParams};
 use crate::models::rural::sectors::{Character, Sector};
-use crate::models::rural::{self as rural, RuralLayout};
+use crate::models::rural;
 use crate::models::suburb::metrics::centroid;
 
 type P = (f64, f64);
@@ -50,10 +50,10 @@ const EDGE_PAD: f64 = 40.0;
 /// Grid cell for the sampling lookups.
 const CELL: f64 = 100.0;
 
-/// Whether `road` is one of the ring's own: today's `trail_*`, and R3's
-/// `lane_*`. The wild trails (`wild_*`) are `Trail` too, but they're the wilds'.
+/// Whether `road` is one of the ring's own, a `lane_*` (R3). The wild trails
+/// (`wild_*`) are `Trail` too, but they're the wilds'.
 pub fn is_rural_road(road: &RoadSegment) -> bool {
-    road.road_type == RoadType::Trail && (road.id.starts_with("trail_") || road.id.starts_with("lane_"))
+    road.road_type == RoadType::Trail && road.id.starts_with("lane_")
 }
 
 /// The half-sector `p` is in, 0 to 15.
@@ -229,10 +229,7 @@ pub fn measure_world(params: &WorldGenParams, sector: Option<u8>) -> Measurement
     let cleared = lot_clearance::clear_each(&before, &laid_on, &terrain.water_rings, center);
     let scope = Scope { center, inner: params.suburban_outer_radius, outer: params.rural_outer_radius, sector };
     // The plan again, for its gates (the balance pass's too) and deck.
-    let ring = match params.rural.layout {
-        RuralLayout::Trails => rural::Plan::default(),
-        RuralLayout::Farms => terrain.generate_roads_and_rural_plan(params).1,
-    };
+    let ring = terrain.generate_roads_and_rural_plan(params).1;
     let plan = Plan {
         roads: &terrain.roads,
         lots: &terrain.terrain_plots,
@@ -580,7 +577,7 @@ mod tests {
             corners,
             street_facing_edge: (0, 1),
             area: TerrainPlot::calculate_area(&corners),
-            adjacent_street_id: "trail_0".into(),
+            adjacent_street_id: "lane_0_0".into(),
             zone: "rural".into(),
         }
     }
@@ -673,9 +670,9 @@ mod tests {
     }
 
     #[test]
-    fn only_the_rings_own_trails_are_rural_roads() {
+    fn only_the_rings_own_lanes_are_rural_roads() {
         let road = |id: &str, road_type| RoadSegment { id: id.into(), road_type, points: vec![], width: 6.0 };
-        assert!(is_rural_road(&road("trail_3", RoadType::Trail)));
+        assert!(!is_rural_road(&road("trail_3", RoadType::Trail)), "the old trails are gone (#291)");
         assert!(is_rural_road(&road("lane_2_0", RoadType::Trail)));
         assert!(!is_rural_road(&road("wild_0_1", RoadType::Trail)));
         assert!(!is_rural_road(&road("arterial_0", RoadType::Arterial)));

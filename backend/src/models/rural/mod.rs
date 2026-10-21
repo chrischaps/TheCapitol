@@ -1,8 +1,7 @@
 //! The rural ring, r3000 to r4600 (`the-capitol-rural.md`, RD10).
 //!
-//! Rural v2's farms on lanes, the default layout since the flip (R7, #290);
-//! `terrain.rs`'s old radial trails stay behind [`RuralLayout::Trails`] until
-//! R8 (#291) removes them. The modules:
+//! Rural v2's farms on lanes, since the flip (R7, #290). R8 (#291) removed
+//! the old radial trails they replaced. The modules:
 //! - `sectors`: the sectors between the arterials and the deck of their
 //!   characters (RD1, RD2, #286);
 //! - `roads`: each sector's two concession roads or winding lanes, the roads
@@ -32,26 +31,15 @@ use sectors::{Sector, RURAL};
 
 type P = (f64, f64);
 
-/// Which rural ring the world builds. `Farms` since the flip (R7, #290); R8
-/// (#291) removes the switch and the trails.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuralLayout {
-    /// The 12 radial trails and their lots (`terrain.rs`).
-    Trails,
-    /// Rural v2: two concession roads or winding lanes across every sector,
-    /// the roads between them (#286, #310), and farms along them and the
-    /// arterials, clear of the water (#287).
-    #[default]
-    Farms,
-}
-
-/// The rural ring's params. Every field has a default, so a saved
-/// `world_config` from before them still loads.
+/// The rural ring's params: two concession roads or winding lanes across
+/// every sector, the roads between them (#286, #310), and farms along them
+/// and the arterials, clear of the water (#287). Every field has a default,
+/// so a saved `world_config` from before them still loads. One that still
+/// names the old switch (`layout`, even `trails`) loads as the farms: serde
+/// skips it (#291).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RuralParams {
-    pub layout: RuralLayout,
     /// The lanes, side roads and spurs (RD5).
     pub lane_width: f64,
     /// A farm's frontage along its road, drawn in this range (RD6)...
@@ -65,7 +53,6 @@ pub struct RuralParams {
 impl Default for RuralParams {
     fn default() -> Self {
         Self {
-            layout: RuralLayout::Farms,
             lane_width: 8.0,
             frontage: (380.0, 500.0),
             field_gap: (240.0, 440.0),
@@ -74,7 +61,7 @@ impl Default for RuralParams {
     }
 }
 
-/// The ring's roads under `Farms`, before the weld.
+/// The ring's roads, before the weld.
 #[derive(Debug, Default)]
 pub struct Plan {
     pub sectors: Vec<Sector>,
@@ -142,9 +129,7 @@ pub(crate) mod tests {
     const SEEDS: [u64; 4] = [42, 7, 1234, 99_999];
 
     pub(crate) fn farms_world(seed: u64) -> WorldGenParams {
-        let mut params = WorldGenParams { seed, ..Default::default() };
-        params.rural.layout = RuralLayout::Farms;
-        params
+        WorldGenParams { seed, ..Default::default() }
     }
 
     fn center(t: &TerrainConfig) -> P {
@@ -160,10 +145,27 @@ pub(crate) mod tests {
         let mut json = serde_json::to_value(WorldGenParams::default()).unwrap();
         json.as_object_mut().unwrap().remove("rural");
         let params: WorldGenParams = serde_json::from_value(json).unwrap();
-        assert_eq!(params.rural.layout, RuralLayout::Farms);
-        let farms: WorldGenParams = serde_json::from_value(serde_json::json!({ "rural": { "layout": "farms" } })).unwrap();
-        assert_eq!(farms.rural.layout, RuralLayout::Farms);
-        assert_eq!(farms.rural.lane_width, 8.0);
+        assert_eq!(params.rural.lane_width, 8.0);
+        assert_eq!(params.rural.frontage, RuralParams::default().frontage);
+    }
+
+    /// A saved `world_config` from before R8 (#291) names the old trails'
+    /// params and the layout switch, even `trails`. It loads as the farms,
+    /// and builds the default world.
+    #[test]
+    fn a_world_config_naming_the_old_trails_loads_as_the_farms() {
+        let default = TerrainConfig::from_params(&WorldGenParams::default()).version();
+        let mut json = serde_json::to_value(WorldGenParams::default()).unwrap();
+        let object = json.as_object_mut().unwrap();
+        for (key, value) in [("rural_trail_width", 6.0), ("rural_trail_count", 12.0), ("rural_plot_frontage", 200.0), ("rural_plot_depth", 150.0)] {
+            object.insert(key.into(), value.into());
+        }
+        json["rural"]["layout"] = "trails".into();
+        let params: WorldGenParams = serde_json::from_value(json).unwrap();
+        let t = TerrainConfig::from_params(&params);
+        assert!(t.roads.iter().all(|r| !r.id.starts_with("trail_")), "the old trails are back");
+        assert!(t.terrain_plots.iter().all(|l| !l.id.starts_with("rural_plot_")), "the old lots are back");
+        assert_eq!(t.version(), default);
     }
 
     #[test]

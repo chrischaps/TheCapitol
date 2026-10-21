@@ -234,10 +234,11 @@ export default function WorldTweakPanel() {
             </Section>
 
             <Section title="Rural">
-              <ParamSlider label="Trail Width" value={params.rural_trail_width} min={2} max={20} step={1} onChange={(v) => updateParam('rural_trail_width', v)} />
-              <ParamSlider label="Trail Count" value={params.rural_trail_count} min={2} max={36} step={1} onChange={(v) => updateParam('rural_trail_count', v)} />
-              <ParamSlider label="Plot Frontage" value={params.rural_plot_frontage} min={100} max={400} step={10} onChange={(v) => updateParam('rural_plot_frontage', v)} />
-              <ParamSlider label="Plot Depth" value={params.rural_plot_depth} min={80} max={300} step={10} onChange={(v) => updateParam('rural_plot_depth', v)} />
+              <ParamSlider label="Lane Width" value={params.rural.lane_width} min={4} max={20} step={1} onChange={(v) => updateParam('rural.lane_width', v)} />
+              <ParamSlider label="Farm Frontage Min" value={params.rural.frontage[0]} min={200} max={params.rural.frontage[1]} step={10} onChange={(v) => updateParam('rural.frontage.0', v)} />
+              <ParamSlider label="Farm Frontage Max" value={params.rural.frontage[1]} min={params.rural.frontage[0]} max={800} step={10} onChange={(v) => updateParam('rural.frontage.1', v)} />
+              <ParamSlider label="Farm Depth Min" value={params.rural.depth[0]} min={150} max={params.rural.depth[1]} step={10} onChange={(v) => updateParam('rural.depth.0', v)} />
+              <ParamSlider label="Farm Depth Max" value={params.rural.depth[1]} min={params.rural.depth[0]} max={600} step={10} onChange={(v) => updateParam('rural.depth.1', v)} />
             </Section>
 
             <Section title="Seed">

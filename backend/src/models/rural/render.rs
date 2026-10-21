@@ -566,9 +566,9 @@ mod tests {
     /// `cargo test --release rural_plan_report -- --ignored --nocapture`.
     ///
     /// Env: `RURAL_SEEDS` (comma-separated, default 42,7,1234,99999),
-    /// `RURAL_LAYOUT` (`trails`, the default, or `farms`), `RURAL_SECTOR`
-    /// (0–7, one sector only) and `RURAL_OUT` (default `target/rural-plan/`
-    /// at the workspace root).
+    /// `RURAL_SECTOR` (0–7, one sector only) and `RURAL_OUT` (default
+    /// `target/rural-plan/` at the workspace root). The plans are still named
+    /// `farms-…`, as they were beside the old trails' (#291).
     #[test]
     #[ignore]
     fn rural_plan_report() {
@@ -576,14 +576,7 @@ mod tests {
             .split(',')
             .map(|s| s.trim().parse().expect("RURAL_SEEDS is a list of numbers"))
             .collect();
-        // `RURAL_LAYOUT`: `trails` (the default, today's world) or `farms`,
-        // Rural v2's lanes (#286). It names the files and the titles too.
-        let layout = env_or("RURAL_LAYOUT", "trails");
-        let rural_layout = match layout.as_str() {
-            "trails" => crate::models::rural::RuralLayout::Trails,
-            "farms" => crate::models::rural::RuralLayout::Farms,
-            other => panic!("RURAL_LAYOUT is trails or farms, not {other}"),
-        };
+        let layout = "farms".to_string();
         let sector: Option<u8> = std::env::var("RURAL_SECTOR")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -593,8 +586,7 @@ mod tests {
 
         let mut plans = Vec::new();
         for seed in seeds {
-            let mut params = WorldGenParams { seed, ..Default::default() };
-            params.rural.layout = rural_layout;
+            let params = WorldGenParams { seed, ..Default::default() };
             let measured = metrics::measure_world(&params, sector);
             let t = &measured.terrain;
             let kept = t.terrain_plots.iter().filter(|l| l.zone == "rural").count();
@@ -645,15 +637,15 @@ mod tests {
         let road = |id: &str, road_type, points: Vec<P>, width| RoadSegment { id: id.into(), road_type, points, width };
         let roads = vec![
             road("arterial_0", RoadType::Arterial, vec![(3000.0, 0.0), (3800.0, 0.0)], 60.0),
-            road("trail_0", RoadType::Trail, vec![(3000.0, 300.0), (3780.0, 330.0)], 6.0),
+            road("lane_0_0", RoadType::Trail, vec![(3000.0, 300.0), (3780.0, 330.0)], 8.0),
         ];
         let corners = [(3200.0, 310.0), (3350.0, 315.0), (3345.0, 465.0), (3195.0, 460.0)];
         let lots = vec![TerrainPlot {
-            id: "rural_plot_trail_0_R_0".into(),
+            id: "farm_0_a0_R_0".into(),
             corners,
             street_facing_edge: (0, 1),
             area: TerrainPlot::calculate_area(&corners),
-            adjacent_street_id: "trail_0".into(),
+            adjacent_street_id: "lane_0_0".into(),
             zone: "rural".into(),
         }];
         let cleared = vec![Some(corners)];
@@ -689,7 +681,7 @@ mod tests {
         };
         let doc = svg(&view);
         assert!(doc.starts_with("<svg") && doc.trim_end().ends_with("</svg>"));
-        assert!(doc.contains("trail_0 · w 6"));
+        assert!(doc.contains("lane_0_0 · w 8"));
         assert!(doc.contains("0 winding") && doc.contains("farm gate"));
         assert!(doc.contains("half-sector 1 · 0.0% built"));
         assert!(doc.contains(ARTERIAL));

@@ -5,8 +5,7 @@ use std::f64::consts::PI;
 use capitol_protocol::rules;
 use capitol_protocol::land::LandParams;
 
-use super::geom::polyline_length;
-use super::rural::{RuralLayout, RuralParams};
+use super::rural::RuralParams;
 use super::street_plan;
 
 // The terrain types the client sees are shared through capitol-protocol, so
@@ -197,16 +196,13 @@ pub struct WorldGenParams {
     // Urban plots
     pub urban_plot_frontage: f64,
     pub urban_plot_depth: f64,
-    // Rural
-    pub rural_trail_width: f64,
-    pub rural_trail_count: u32,
     // The wild trails past the rural edge (W5, #198).
     pub wild_trail_width: f64,
-    // Rural plots
-    pub rural_plot_frontage: f64,
-    pub rural_plot_depth: f64,
-    // Rural v2 (`the-capitol-rural.md`): the layout switch and the farms'
-    // roads. Its own defaults, so a saved config from before it still loads.
+    // Rural v2 (`the-capitol-rural.md`): the farms and their roads. Its own
+    // defaults, so a saved config from before it still loads. A saved config
+    // that still names the old trails' params (`rural_trail_*`,
+    // `rural_plot_*`, `rural.layout`) loads as the farms: serde skips them
+    // (#291).
     pub rural: RuralParams,
     // Guild halls
     pub guild_plot_frontage: f64,
@@ -279,11 +275,7 @@ impl Default for WorldGenParams {
             suburban: SuburbanGenParams::default(),
             urban_plot_frontage: 40.0,
             urban_plot_depth: 50.0,
-            rural_trail_width: 6.0,
-            rural_trail_count: 12,
             wild_trail_width: 8.0,
-            rural_plot_frontage: 200.0,
-            rural_plot_depth: 150.0,
             rural: RuralParams::default(),
             guild_plot_frontage: 150.0,
             seed: 42,
@@ -326,136 +318,6 @@ pub struct TerrainConfig {
     pub fords: Vec<Ford>,
 }
 
-/// Catmull-Rom spline interpolation for smooth curves
-/// Takes control points and returns interpolated points
-fn catmull_rom_spline(control_points: &[(f64, f64)], points_per_segment: usize) -> Vec<(f64, f64)> {
-    if control_points.len() < 2 {
-        return control_points.to_vec();
-    }
-
-    let mut result = Vec::new();
-
-    // Extend control points at ends for proper interpolation
-    let mut extended = Vec::new();
-    // Duplicate first point
-    extended.push(control_points[0]);
-    extended.extend_from_slice(control_points);
-    // Duplicate last point
-    extended.push(control_points[control_points.len() - 1]);
-
-    // Interpolate between each pair of middle points
-    for i in 1..extended.len() - 2 {
-        let p0 = extended[i - 1];
-        let p1 = extended[i];
-        let p2 = extended[i + 1];
-        let p3 = extended[i + 2];
-
-        for j in 0..points_per_segment {
-            let t = j as f64 / points_per_segment as f64;
-
-            // Catmull-Rom spline formula
-            let t2 = t * t;
-            let t3 = t2 * t;
-
-            let x = 0.5 * ((2.0 * p1.0) +
-                         (-p0.0 + p2.0) * t +
-                         (2.0 * p0.0 - 5.0 * p1.0 + 4.0 * p2.0 - p3.0) * t2 +
-                         (-p0.0 + 3.0 * p1.0 - 3.0 * p2.0 + p3.0) * t3);
-
-            let y = 0.5 * ((2.0 * p1.1) +
-                         (-p0.1 + p2.1) * t +
-                         (2.0 * p0.1 - 5.0 * p1.1 + 4.0 * p2.1 - p3.1) * t2 +
-                         (-p0.1 + 3.0 * p1.1 - 3.0 * p2.1 + p3.1) * t3);
-
-            result.push((x, y));
-        }
-    }
-
-    // Add the last point
-    result.push(control_points[control_points.len() - 1]);
-
-    result
-}
-
-/// Get point and tangent angle at parameter t (0-1) along polyline
-fn point_and_tangent_at_t(points: &[(f64, f64)], t: f64) -> Option<(f64, f64, f64)> {
-    if points.len() < 2 {
-        return None;
-    }
-
-    let total_length = polyline_length(points);
-    let target_dist = t * total_length;
-
-    let mut accumulated = 0.0;
-    for i in 1..points.len() {
-        let dx = points[i].0 - points[i - 1].0;
-        let dy = points[i].1 - points[i - 1].1;
-        let segment_len = (dx * dx + dy * dy).sqrt();
-
-        if accumulated + segment_len >= target_dist {
-            let local_t = (target_dist - accumulated) / segment_len;
-            let x = points[i - 1].0 + dx * local_t;
-            let y = points[i - 1].1 + dy * local_t;
-            let angle = dy.stable_atan2(dx);
-            return Some((x, y, angle));
-        }
-
-        accumulated += segment_len;
-    }
-
-    // Return last point
-    let last_idx = points.len() - 1;
-    let dx = points[last_idx].0 - points[last_idx - 1].0;
-    let dy = points[last_idx].1 - points[last_idx - 1].1;
-    Some((points[last_idx].0, points[last_idx].1, dy.stable_atan2(dx)))
-}
-
-/// Get point at specific distance along polyline
-fn point_at_distance(points: &[(f64, f64)], distance: f64) -> Option<(f64, f64, f64)> {
-    if points.len() < 2 {
-        return None;
-    }
-
-    let total_length = polyline_length(points);
-    if total_length == 0.0 {
-        return None;
-    }
-
-    let t = distance / total_length;
-    point_and_tangent_at_t(points, t)
-}
-
-/// Check if a point is near any point on a polyline
-fn point_near_polyline(px: f64, py: f64, polyline: &[(f64, f64)], threshold: f64) -> bool {
-    // point_to_segment_distance already handles endpoints (returns endpoint distance
-    // when projection falls outside the segment), so no separate vertex loop needed.
-    for i in 1..polyline.len() {
-        let (x1, y1) = polyline[i - 1];
-        let (x2, y2) = polyline[i];
-        // Most segments are nowhere near: rule them out by their box first.
-        if px < x1.min(x2) - threshold
-            || px > x1.max(x2) + threshold
-            || py < y1.min(y2) - threshold
-            || py > y1.max(y2) + threshold
-        {
-            continue;
-        }
-
-        let dist = point_to_segment_distance(px, py, x1, y1, x2, y2);
-        if dist < threshold {
-            return true;
-        }
-    }
-
-    // Handle single-point polyline edge case
-    if polyline.len() == 1 {
-        let (lx, ly) = polyline[0];
-        return ((px - lx).powi(2) + (py - ly).powi(2)).sqrt() < threshold;
-    }
-
-    false
-}
-
 /// Calculate distance from point to line segment
 pub(crate) fn point_to_segment_distance(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
     let dx = x2 - x1;
@@ -473,136 +335,6 @@ pub(crate) fn point_to_segment_distance(px: f64, py: f64, x1: f64, y1: f64, x2: 
     let proj_y = y1 + t * dy;
 
     ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
-}
-
-/// Check if two line segments intersect, returns the intersection point if they do
-fn segments_intersect(
-    p1: (f64, f64),
-    p2: (f64, f64),
-    p3: (f64, f64),
-    p4: (f64, f64),
-) -> Option<(f64, f64)> {
-    let (x1, y1) = p1;
-    let (x2, y2) = p2;
-    let (x3, y3) = p3;
-    let (x4, y4) = p4;
-
-    let denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
-    if denom.abs() < 1e-10 {
-        return None; // Parallel lines
-    }
-
-    let t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
-    let u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom;
-
-    if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
-        let ix = x1 + t * (x2 - x1);
-        let iy = y1 + t * (y2 - y1);
-        Some((ix, iy))
-    } else {
-        None
-    }
-}
-
-/// Check if a point is inside a convex polygon using cross product method
-fn point_in_polygon(px: f64, py: f64, polygon: &[(f64, f64)]) -> bool {
-    let n = polygon.len();
-    if n < 3 {
-        return false;
-    }
-
-    let mut sign = None;
-
-    for i in 0..n {
-        let j = (i + 1) % n;
-        let (x1, y1) = polygon[i];
-        let (x2, y2) = polygon[j];
-
-        // Cross product of edge vector and point-to-vertex vector
-        let cross = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1);
-
-        if cross.abs() > 1e-10 {
-            let current_sign = cross > 0.0;
-            match sign {
-                None => sign = Some(current_sign),
-                Some(s) if s != current_sign => return false,
-                _ => {}
-            }
-        }
-    }
-
-    true
-}
-
-/// Check if two convex polygons overlap using SAT (Separating Axis Theorem)
-fn polygons_overlap(poly1: &[(f64, f64)], poly2: &[(f64, f64)]) -> bool {
-    // First check if any vertex of poly1 is inside poly2 or vice versa
-    for &(px, py) in poly1 {
-        if point_in_polygon(px, py, poly2) {
-            return true;
-        }
-    }
-    for &(px, py) in poly2 {
-        if point_in_polygon(px, py, poly1) {
-            return true;
-        }
-    }
-
-    // Check if any edges intersect
-    for i in 0..poly1.len() {
-        let j = (i + 1) % poly1.len();
-        let edge1 = (poly1[i], poly1[j]);
-
-        for k in 0..poly2.len() {
-            let l = (k + 1) % poly2.len();
-            let edge2 = (poly2[k], poly2[l]);
-
-            if segments_intersect(edge1.0, edge1.1, edge2.0, edge2.1).is_some() {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-/// Check if a polygon intersects with a road (polyline with width)
-/// This checks if any edge of the polygon crosses any segment of the road,
-/// or if any corner of the polygon is within the road width
-fn polygon_intersects_road(polygon: &[(f64, f64)], road_points: &[(f64, f64)], road_width: f64) -> bool {
-    let half_width = road_width / 2.0 + 2.0; // Small buffer
-
-    // Check if any polygon vertex is too close to the road
-    for &(px, py) in polygon {
-        if point_near_polyline(px, py, road_points, half_width) {
-            return true;
-        }
-    }
-
-    // Check if any polygon edge intersects any road segment
-    for i in 0..polygon.len() {
-        let j = (i + 1) % polygon.len();
-        let poly_edge_start = polygon[i];
-        let poly_edge_end = polygon[j];
-
-        for k in 0..road_points.len().saturating_sub(1) {
-            let road_seg_start = road_points[k];
-            let road_seg_end = road_points[k + 1];
-
-            if segments_intersect(poly_edge_start, poly_edge_end, road_seg_start, road_seg_end).is_some() {
-                return true;
-            }
-        }
-    }
-
-    // Check if any road point is inside the polygon
-    for &(rx, ry) in road_points {
-        if point_in_polygon(rx, ry, polygon) {
-            return true;
-        }
-    }
-
-    false
 }
 
 impl TerrainConfig {
@@ -714,14 +446,14 @@ impl TerrainConfig {
         config.roads = config.generate_all_roads_with_params(params);
 
         // The water comes from the land, and skirts the roads. The farms keep
-        // clear of it (#287); the old trails' lots don't know it (#223).
+        // clear of it (#287).
         let water = super::hydrology::generate(&params.land, &config.roads);
 
         // Generate terrain plots for all zones
         config.terrain_plots = config.generate_suburban_plots_internal(&params.suburban_params());
         config.terrain_plots.extend(config.generate_urban_plots(params));
         let wet = super::rural::farms::Water { rivers: &water.rivers, streams: &water.streams, lakes: &water.lakes };
-        config.terrain_plots.extend(config.generate_rural_plots(params, wet));
+        config.terrain_plots.extend(config.generate_farms(params, wet));
         config.terrain_plots.extend(config.generate_guild_plots(params));
         // Pull every lot clear of the roads and the water, and make the ids unique
         // (B7): a lot is what players claim, so it must be the ground it looks like.
@@ -800,11 +532,10 @@ impl TerrainConfig {
         self.generate_roads_and_rural_plan(params).0
     }
 
-    /// The roads, and under `Farms` the rural plan they were laid from: its
-    /// sectors, and the farm gates, the balance pass's too.
+    /// The roads, and the rural plan they were laid from: its sectors, and
+    /// the farm gates, the balance pass's too.
     pub(crate) fn generate_roads_and_rural_plan(&self, params: &WorldGenParams) -> (Vec<RoadSegment>, super::rural::Plan) {
         let mut roads = Vec::new();
-        let mut plan = super::rural::Plan::default();
 
         // Ring roads
         roads.extend(self.generate_ring_roads_with_params(params));
@@ -818,26 +549,18 @@ impl TerrainConfig {
         // Suburban streets
         roads.extend(super::suburb::plan(&params.suburban_params(), (self.center_x, self.center_y)).roads);
 
-        // The rural ring: today's trails, or Rural v2's lanes (#286), which
-        // the arterials cut into sectors.
-        match params.rural.layout {
-            RuralLayout::Trails => roads.extend(self.generate_rural_paths_with_params(params)),
-            // With the balance pass's spurs (RD7), before the weld and the
-            // water, so the water skirts them.
-            RuralLayout::Farms => {
-                plan = super::rural::plan_balanced(params, (self.center_x, self.center_y), &roads);
-                roads.extend(plan.roads.iter().cloned());
-            }
-        }
+        // The rural ring: Rural v2's lanes (#286), which the arterials cut
+        // into sectors, with the balance pass's spurs (RD7), before the weld
+        // and the water, so the water skirts them.
+        let plan = super::rural::plan_balanced(params, (self.center_x, self.center_y), &roads);
+        roads.extend(plan.roads.iter().cloned());
 
         // Every suburban junction becomes a vertex both roads share, so
         // clients can see where streets meet (#62).
         street_plan::weld_junctions(&mut roads, |r| r.road_type == RoadType::Suburban);
         // And every lane's: its ends onto the arterial or the main road it
         // stops at (RD5). Only the farm gates stay loose.
-        if params.rural.layout == RuralLayout::Farms {
-            street_plan::weld_junctions(&mut roads, super::rural::is_lane);
-        }
+        street_plan::weld_junctions(&mut roads, super::rural::is_lane);
 
         (roads, plan)
     }
@@ -1001,54 +724,6 @@ impl TerrainConfig {
         // doesn't see it. It's deterministic, and quick beside the lots.
         let center = (self.center_x, self.center_y);
         super::suburb::lots::lay(&self.roads, &super::suburb::plan(params, center), params, center)
-    }
-
-    /// Generate unpaved trails in the rural zone with smooth meandering paths
-    fn generate_rural_paths_with_params(&self, params: &WorldGenParams) -> Vec<RoadSegment> {
-        let mut roads = Vec::new();
-        let inner_radius = params.suburban_outer_radius;
-        let outer_radius = params.rural_outer_radius;
-
-        let mut rng_state = params.seed.wrapping_add(12345);
-        let mut next_rand = || {
-            rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
-            ((rng_state >> 16) & 0x7fff) as f64 / 0x7fff as f64
-        };
-
-        let num_trails = params.rural_trail_count;
-        for i in 0..num_trails {
-            let base_angle = (i as f64 / num_trails as f64) * 2.0 * PI + next_rand() * 0.3;
-
-            // Generate control points for smooth curve
-            let num_control_points = 5;
-            let mut control_points = Vec::new();
-
-            for j in 0..num_control_points {
-                let t = j as f64 / (num_control_points - 1) as f64;
-                let r = inner_radius + (outer_radius - inner_radius) * t;
-
-                // More pronounced wobble for trails (they're more natural/winding)
-                let wobble_amplitude = 0.15 * (1.0 - (2.0 * t - 1.0).abs());
-                let wobble = wobble_amplitude * (next_rand() - 0.5) * 2.0;
-                let a = base_angle + wobble;
-
-                let x = self.center_x + r * a.stable_cos();
-                let y = self.center_y + r * a.stable_sin();
-                control_points.push((x, y));
-            }
-
-            // Interpolate smooth curve
-            let smooth_points = catmull_rom_spline(&control_points, 15);
-
-            roads.push(RoadSegment {
-                id: format!("trail_{}", i),
-                road_type: RoadType::Trail,
-                points: smooth_points,
-                width: params.rural_trail_width,
-            });
-        }
-
-        roads
     }
 
     /// Generate plots filling the urban grid blocks (trapezoids between arcs and spokes)
@@ -1315,131 +990,14 @@ impl TerrainConfig {
     pub(crate) fn rural_plots_before(&self, params: &WorldGenParams) -> (Vec<TerrainPlot>, Vec<RoadSegment>) {
         let laid = TerrainConfig { roads: self.generate_all_roads_with_params(params), ..self.clone() };
         let water = super::rural::farms::Water { rivers: &self.rivers, streams: &self.streams, lakes: &self.lakes };
-        (laid.generate_rural_plots(params, water), laid.roads)
+        (laid.generate_farms(params, water), laid.roads)
     }
 
-    /// The rural lots: the farms under `Farms` (#287), clear of `water`, or
-    /// the old trails' lots, which don't know it (#223).
-    fn generate_rural_plots(&self, params: &WorldGenParams, water: super::rural::farms::Water) -> Vec<TerrainPlot> {
-        if params.rural.layout == RuralLayout::Farms {
-            let center = (self.center_x, self.center_y);
-            let sectors = super::rural::sectors_of(params, center, &self.roads);
-            return super::rural::farms::lay(params, center, &self.roads, &sectors, Some(water));
-        }
-        let mut plots = Vec::new();
-        let mut placed_plot_corners: Vec<[(f64, f64); 4]> = Vec::new();
-        let inner_radius = params.suburban_outer_radius;
-        let outer_radius = params.rural_outer_radius;
-        let frontage = params.rural_plot_frontage;
-        let depth = params.rural_plot_depth;
-
-        // Iterate over trail roads
-        for road in &self.roads {
-            if road.road_type != RoadType::Trail {
-                continue;
-            }
-
-            let points = &road.points;
-            if points.len() < 2 {
-                continue;
-            }
-
-            let total_length = polyline_length(points);
-            if total_length < frontage {
-                continue;
-            }
-
-            let half_trail_w = road.width / 2.0 + 2.0;
-            let mut plot_id = 0u32;
-
-            // Place plots on both sides of the trail
-            for side in [-1.0_f64, 1.0_f64] {
-                let mut current_dist = 10.0; // Start slightly in from trail start
-
-                while current_dist + frontage <= total_length - 10.0 {
-                    let front_start = point_at_distance(points, current_dist);
-                    let front_end = point_at_distance(points, current_dist + frontage);
-
-                    if let (Some((fs_x, fs_y, fs_angle)), Some((fe_x, fe_y, fe_angle))) = (front_start, front_end) {
-                        let perp_angle = (fs_angle + fe_angle) / 2.0 + side * PI / 2.0;
-
-                        // Offset front corners away from trail center
-                        let fs_off_x = fs_x + half_trail_w * perp_angle.stable_cos();
-                        let fs_off_y = fs_y + half_trail_w * perp_angle.stable_sin();
-                        let fe_off_x = fe_x + half_trail_w * perp_angle.stable_cos();
-                        let fe_off_y = fe_y + half_trail_w * perp_angle.stable_sin();
-
-                        // Back corners at depth offset
-                        let bs_x = fs_x + depth * perp_angle.stable_cos();
-                        let bs_y = fs_y + depth * perp_angle.stable_sin();
-                        let be_x = fe_x + depth * perp_angle.stable_cos();
-                        let be_y = fe_y + depth * perp_angle.stable_sin();
-
-                        let corners = [
-                            (fs_off_x, fs_off_y),
-                            (fe_off_x, fe_off_y),
-                            (be_x, be_y),
-                            (bs_x, bs_y),
-                        ];
-
-                        // Validate all corners are within rural zone
-                        let all_in_zone = corners.iter().all(|(x, y)| {
-                            let dist = ((x - self.center_x).powi(2) + (y - self.center_y).powi(2)).sqrt();
-                            dist >= inner_radius && dist <= outer_radius
-                        });
-
-                        if all_in_zone {
-                            let corners_slice: &[(f64, f64)] = &corners;
-
-                            // Check overlap with other roads
-                            let mut intersects_road = false;
-                            for other_road in &self.roads {
-                                if other_road.id == road.id {
-                                    continue;
-                                }
-                                if polygon_intersects_road(corners_slice, &other_road.points, other_road.width) {
-                                    intersects_road = true;
-                                    break;
-                                }
-                            }
-
-                            if !intersects_road {
-                                // Check overlap with already placed plots
-                                let mut overlaps = false;
-                                for existing in &placed_plot_corners {
-                                    let existing_slice: &[(f64, f64)] = existing;
-                                    if polygons_overlap(corners_slice, existing_slice) {
-                                        overlaps = true;
-                                        break;
-                                    }
-                                }
-
-                                if !overlaps {
-                                    let area = TerrainPlot::calculate_area(&corners);
-                                    if area >= 100.0 {
-                                        placed_plot_corners.push(corners);
-                                        plots.push(TerrainPlot {
-                                            id: format!("rural_plot_{}_{}_{}",
-                                                road.id, if side > 0.0 { "R" } else { "L" }, plot_id),
-                                            corners,
-                                            street_facing_edge: (0, 1),
-                                            area,
-                                            adjacent_street_id: road.id.clone(),
-                                            zone: "rural".to_string(),
-                                        });
-                                        plot_id += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    current_dist += frontage;
-                }
-            }
-        }
-
-        plots
+    /// The rural lots: the farms (#287), clear of `water`.
+    fn generate_farms(&self, params: &WorldGenParams, water: super::rural::farms::Water) -> Vec<TerrainPlot> {
+        let center = (self.center_x, self.center_y);
+        let sectors = super::rural::sectors_of(params, center, &self.roads);
+        super::rural::farms::lay(params, center, &self.roads, &sectors, Some(water))
     }
 }
 
@@ -2035,33 +1593,12 @@ mod tests {
 
     #[test]
     fn test_polyline_length() {
+        use crate::models::geom::polyline_length;
         let line = vec![(0.0, 0.0), (100.0, 0.0)];
         assert!((polyline_length(&line) - 100.0).abs() < 0.01);
 
         let square = vec![(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0), (0.0, 0.0)];
         assert!((polyline_length(&square) - 400.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_catmull_rom_spline_smoothness() {
-        let controls = vec![
-            (0.0, 0.0),
-            (100.0, 0.0),
-            (100.0, 100.0),
-            (0.0, 100.0),
-        ];
-        let spline = catmull_rom_spline(&controls, 10);
-
-        // Should have more points than control points
-        assert!(spline.len() > controls.len());
-
-        // Points should be reasonably smooth (no huge jumps)
-        for i in 1..spline.len() {
-            let dx = spline[i].0 - spline[i-1].0;
-            let dy = spline[i].1 - spline[i-1].1;
-            let dist = (dx * dx + dy * dy).sqrt();
-            assert!(dist < 50.0, "Large gap of {} between spline points {} and {}", dist, i-1, i);
-        }
     }
 
     #[test]

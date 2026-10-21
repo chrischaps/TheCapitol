@@ -1,5 +1,13 @@
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000'
 
+/** The rural ring's farms and lanes. Each range is [min, max]. */
+export interface RuralParams {
+  lane_width: number
+  frontage: [number, number]
+  field_gap: [number, number]
+  depth: [number, number]
+}
+
 export interface SuburbanGenParams {
   inner_radius: number
   outer_radius: number
@@ -54,12 +62,8 @@ export interface WorldGenParams {
   urban_plot_depth: number
   // Suburban
   suburban: SuburbanGenParams
-  // Rural
-  rural_trail_width: number
-  rural_trail_count: number
-  // Rural plots
-  rural_plot_frontage: number
-  rural_plot_depth: number
+  // Rural: the farms and their lanes (Rural v2)
+  rural: RuralParams
   // Guild halls
   guild_plot_frontage: number
   // Seeds

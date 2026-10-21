@@ -5,7 +5,7 @@
 .DESCRIPTION
   Runs the ignored test rural::render::tests::rural_plan_report in release.
   For each seed it writes an SVG plan view of the ring r3000 to r4600 (its
-  roads, lots and water, with the 16 half-sectors shaded by built share) and
+  roads, farms and water, with the 16 half-sectors shaded by built share) and
   a metrics JSON, plus index.html and report.md with the targets table of
   the-capitol-rural.md section 5. Then it converts each SVG to a PNG with
   headless Chrome (or Edge).
@@ -15,11 +15,6 @@
 
 .PARAMETER Seed
   One world seed, for a quick look. Overrides -Seeds.
-
-.PARAMETER Layout
-  trails (the default, today's world) or farms, Rural v2's concession roads
-  and winding lanes, two across every sector (#286, #310), and the farms on
-  them and the arterials (#287). The files are named after it.
 
 .PARAMETER Sector
   Draw and measure one 45-degree sector only, 0 to 7. Sector n runs from
@@ -35,14 +30,11 @@
 .EXAMPLE
   powershell -File backend/tools/rural-plan.ps1
   powershell -File backend/tools/rural-plan.ps1 -Seed 42 -Sector 2
-  powershell -File backend/tools/rural-plan.ps1 -Layout farms
   powershell -File backend/tools/rural-plan.ps1 -Out target/rural-new -Compare target/rural-plan
 #>
 param(
     [string]$Seeds = "",
     [long]$Seed = -1,
-    [ValidateSet("trails", "farms")]
-    [string]$Layout = "trails",
     [int]$Sector = -1,
     [string]$Out = "",
     [string]$Compare = ""
@@ -57,7 +49,6 @@ New-Item -ItemType Directory -Force $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
 
 $env:RURAL_SEEDS = if ($Seed -ge 0) { "$Seed" } else { $Seeds }
-$env:RURAL_LAYOUT = $Layout
 $env:RURAL_SECTOR = if ($Sector -ge 0) { "$Sector" } else { "" }
 $env:RURAL_OUT = $Out
 
