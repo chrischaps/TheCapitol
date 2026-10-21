@@ -1,7 +1,7 @@
-use crate::models::{PlayerState, TerrainConfig, Zone, ZoneTransition};
+use crate::models::{PlayerState, Zone, ZoneTransition};
 
 use capitol_protocol::rules::ground::Ground;
-use capitol_protocol::rules::{water_name, ARRIVAL_EPSILON, TICK_SECS as TICK_DURATION_SECS};
+use capitol_protocol::rules::{ARRIVAL_EPSILON, TICK_SECS as TICK_DURATION_SECS};
 
 /// Result of processing movement
 pub struct MovementResult {
@@ -15,16 +15,19 @@ pub struct MovementResult {
 pub struct MovementBlocked {
     pub reason: String,
     /// The water that stopped the move: a ring (`moat`, `canal_inner`, ...),
-    /// a river or a lake (`river_3`, `lake_1`). Empty when it was too steep.
+    /// a river or a lake (`river_3`, `lake_1`). Empty when it was too steep,
+    /// or the edge of the world.
     pub water_id: String,
     pub stopped_x: f64,
     pub stopped_y: f64,
 }
 
-/// One tick of a player's walk: slowed by the slope and the water, stopped
-/// by a cliff, a river or a lake (`Ground::step`, W4), and by the moat and
-/// canals away from their bridges.
-pub fn process_movement(player: &mut PlayerState, terrain: &TerrainConfig, ground: &Ground) -> MovementResult {
+/// One tick of a player's walk, by `Ground::step`: slowed by the slope and
+/// the water, stopped by a cliff, a river or a lake (W4), the moat and the
+/// canals away from their bridges and the edge of the world, and sliding
+/// along what stopped it where it can (T0.1, #315). The Flint client
+/// predicts with the same step.
+pub fn process_movement(player: &mut PlayerState, ground: &Ground) -> MovementResult {
     let (dest_x, dest_y) = match (player.dest_x, player.dest_y) {
         (Some(x), Some(y)) => (x, y),
         _ => return MovementResult { moved: false, zone_transition: None, blocked: None },
@@ -46,30 +49,17 @@ pub fn process_movement(player: &mut PlayerState, terrain: &TerrainConfig, groun
     } else {
         let walk = player.speed as f64 * TICK_DURATION_SECS;
         let step = ground.step((player.x, player.y), (dest_x, dest_y), walk);
+        player.x = step.x;
+        player.y = step.y;
 
-        // The moat and canals, over the step the land allows
-        let validation = terrain.validate_movement(player.x, player.y, step.x, step.y);
-        let blocked = if validation.allowed {
-            player.x = step.x;
-            player.y = step.y;
-            step.blocked.map(|b| (b.reason(), b.water_id().to_string()))
-        } else {
-            if let Some((block_x, block_y)) = validation.blocked_at {
-                player.x = block_x;
-                player.y = block_y;
-            }
-            let water_id = validation.blocked_by.unwrap_or_default();
-            Some((format!("Cannot cross {} without a bridge", water_name(&water_id)), water_id))
-        };
-
-        match blocked {
-            Some((reason, water_id)) => {
+        match step.blocked {
+            Some(blocked) => {
                 // Clear destination - player can't reach it
                 player.dest_x = None;
                 player.dest_y = None;
                 blocked_result = Some(MovementBlocked {
-                    reason,
-                    water_id,
+                    reason: blocked.reason(),
+                    water_id: blocked.water_id().to_string(),
                     stopped_x: player.x,
                     stopped_y: player.y,
                 });
@@ -106,7 +96,7 @@ pub fn process_movement(player: &mut PlayerState, terrain: &TerrainConfig, groun
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ActionState;
+    use crate::models::{ActionState, TerrainConfig};
     use capitol_protocol::fmath::StableMath;
     use capitol_protocol::land::{gradient_at, slope_at};
     use capitol_protocol::rules::ground::{Footing, CLIFF_SLOPE, TOO_STEEP};
@@ -141,16 +131,11 @@ mod tests {
         })
     }
 
-    fn get_terrain() -> TerrainConfig {
-        world().0.clone()
-    }
-
     #[test]
     fn test_movement_toward_destination() {
-        let terrain = get_terrain();
         // Start inside Capitol, move within Capitol
         let mut player = make_player(6800.0, 6800.0, Some(6850.0), Some(6800.0));
-        let result = process_movement(&mut player, &terrain, &world().1);
+        let result = process_movement(&mut player, &world().1);
 
         assert!(result.moved);
         assert!(player.x > 6800.0);
@@ -159,9 +144,8 @@ mod tests {
 
     #[test]
     fn test_arrival_at_destination() {
-        let terrain = get_terrain();
         let mut player = make_player(6849.9, 6800.0, Some(6850.0), Some(6800.0));
-        let result = process_movement(&mut player, &terrain, &world().1);
+        let result = process_movement(&mut player, &world().1);
 
         assert!(result.moved);
         assert!((player.x - 6850.0).abs() < 1.0);
@@ -170,7 +154,6 @@ mod tests {
 
     #[test]
     fn test_zone_transition() {
-        let terrain = get_terrain();
         // Start at center (Capitol)
         let mut player = make_player(6800.0, 6800.0, Some(6800.0), Some(6950.0));
         player.current_zone = Some("capitol".to_string());
@@ -178,7 +161,7 @@ mod tests {
         // Move south toward the moat bridge at 270° (south)
         // Keep moving until we cross the moat using the bridge
         for _ in 0..200 {
-            let result = process_movement(&mut player, &terrain, &world().1);
+            let result = process_movement(&mut player, &world().1);
             if let Some(transition) = result.zone_transition {
                 if transition.to_zone == "trade_district" {
                     return; // Success!
@@ -194,9 +177,8 @@ mod tests {
 
     #[test]
     fn test_no_movement_without_destination() {
-        let terrain = get_terrain();
         let mut player = make_player(6800.0, 6800.0, None, None);
-        let result = process_movement(&mut player, &terrain, &world().1);
+        let result = process_movement(&mut player, &world().1);
 
         assert!(!result.moved);
         assert!(result.zone_transition.is_none());
@@ -204,13 +186,12 @@ mod tests {
 
     #[test]
     fn test_movement_blocked_by_water() {
-        let terrain = get_terrain();
         // Try to cross moat going east (no bridge at 0° for moat)
         let mut player = make_player(6980.0, 6800.0, Some(7050.0), Some(6800.0));
 
         // Move until blocked
         for _ in 0..50 {
-            let result = process_movement(&mut player, &terrain, &world().1);
+            let result = process_movement(&mut player, &world().1);
             if let Some(blocked) = result.blocked {
                 assert_eq!(blocked.water_id, "moat");
                 assert_eq!(blocked.reason, "Cannot cross the moat without a bridge");
@@ -222,9 +203,9 @@ mod tests {
 
     /// Walks `player` until it arrives or is stopped; what stopped it.
     fn walk(player: &mut PlayerState) -> Option<MovementBlocked> {
-        let (terrain, ground) = world();
+        let ground = &world().1;
         for _ in 0..2000 {
-            let result = process_movement(player, terrain, ground);
+            let result = process_movement(player, ground);
             if result.blocked.is_some() {
                 return result.blocked;
             }
@@ -278,7 +259,7 @@ mod tests {
         let land = world().1.land();
         // On the flat in the city, a tick is a whole 5 units.
         let mut flat = make_player(6800.0, 10100.0, Some(6800.0), Some(10200.0));
-        process_movement(&mut flat, &world().0, &world().1);
+        process_movement(&mut flat, &world().1);
         assert!((flat.y - 10105.0).abs() < 1e-9);
 
         // Somewhere in the wilds that rises 1 in 2, dry, heading straight up it.
@@ -295,14 +276,14 @@ mod tests {
         let (gx, gy) = gradient_at(x, y, land);
         let len = (gx * gx + gy * gy).sqrt();
         let mut climber = make_player(x, y, Some(x + gx / len * 100.0), Some(y + gy / len * 100.0));
-        let result = process_movement(&mut climber, &world().0, &world().1);
+        let result = process_movement(&mut climber, &world().1);
         assert!(result.blocked.is_none());
         let up = apart((climber.x, climber.y), (x, y));
         assert!(up > 2.0 && up < 4.0, "a climb at {len:.2} went {up:.2} in a tick");
 
         // Down the same slope is quicker than up, and slower than the flat.
         let mut descender = make_player(x, y, Some(x - gx / len * 100.0), Some(y - gy / len * 100.0));
-        process_movement(&mut descender, &world().0, &world().1);
+        process_movement(&mut descender, &world().1);
         let down = apart((descender.x, descender.y), (x, y));
         assert!(down > up && down < 5.0, "down {down:.2}, up {up:.2}");
     }

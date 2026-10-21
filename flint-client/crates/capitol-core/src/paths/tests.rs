@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use capitol_protocol::rules::{check_water_crossing, ARRIVAL_EPSILON, SPAWN_X, SPAWN_Y, TICK_SECS};
+use capitol_protocol::rules::{ARRIVAL_EPSILON, SPAWN_X, SPAWN_Y, TICK_SECS};
 use capitol_protocol::terrain::{Bridge, RoadSegment, RoadType};
 
 use super::*;
@@ -22,9 +22,10 @@ fn world() -> &'static (TerrainResponse, WalkGraph) {
 }
 
 /// Walks the legs from `from` the way the server does
-/// (`backend/src/engine/movement.rs`): a step a tick, the land's
-/// [`Ground::step`] and then the rings' crossing test over it. Where it ends,
-/// or what stopped it.
+/// (`backend/src/engine/movement.rs`): a step a tick, [`Ground::step`] with
+/// the land, the rings and the edge. Where it ends, or what stopped it. A
+/// step that slid round something counts as stopped: a leg must be walkable
+/// straight.
 fn server_walk(graph: &WalkGraph, from: Point, legs: &[Point]) -> Result<Point, String> {
     let mut at = from;
     for &leg in legs {
@@ -37,11 +38,12 @@ fn server_walk(graph: &WalkGraph, from: Point, legs: &[Point]) -> Result<Point, 
                 return Err(format!("never got from {at:?} to {leg:?}"));
             }
             let step = graph.ground.step(at, leg, PLAYER_SPEED * TICK_SECS);
-            if let Some(block) = check_water_crossing(graph.center, &graph.rings, at, (step.x, step.y)) {
-                return Err(format!("{} stopped the walk at ({:.0}, {:.0}) toward {leg:?}", block.ring_id, block.x, block.y));
-            }
             if let Some(blocked) = step.blocked {
                 return Err(format!("{} at ({:.0}, {:.0}) toward {leg:?}", blocked.reason(), step.x, step.y));
+            }
+            let off = (leg.0 - at.0) * (step.y - at.1) - (leg.1 - at.1) * (step.x - at.0);
+            if off.abs() > 1e-6 * distance(at, leg) {
+                return Err(format!("slid round something at ({:.0}, {:.0}) toward {leg:?}", at.0, at.1));
             }
             at = (step.x, step.y);
         }

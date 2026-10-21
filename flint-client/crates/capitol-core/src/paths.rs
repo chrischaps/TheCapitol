@@ -373,7 +373,8 @@ impl WalkGraph {
     }
 
     /// Every crossing of a ring's edge must be on one of its bridges, as the
-    /// server tests each tick's step ([`rules::check_water_crossing`]).
+    /// server tests each tick's step ([`rules::ring_crossing`], in
+    /// [`Ground::step`]).
     fn rings_let_through(&self, a: Point, b: Point) -> bool {
         self.rings.iter().all(|ring| {
             [ring.inner_radius(), ring.outer_radius()].into_iter().all(|radius| {

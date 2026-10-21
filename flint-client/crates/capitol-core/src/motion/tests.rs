@@ -566,7 +566,8 @@ mod on_the_land {
     use super::*;
     use capitol_protocol::fmath::StableMath;
     use capitol_protocol::land::{self, LandParams};
-    use capitol_protocol::terrain::{Mouth, WaterCourse, WaterPoint};
+    use capitol_protocol::rules::{CENTER_X, CENTER_Y};
+    use capitol_protocol::terrain::{Bridge, Mouth, WaterCourse, WaterPoint, WaterRing};
 
     /// A river 20 wide running north to south at x = 4050, on flat land.
     fn river() -> Arc<Ground> {
@@ -633,6 +634,62 @@ mod on_the_land {
             rig.sample(ms);
         }
         rig.motion.corrections()
+    }
+
+    /// Flat land with a canal 600 round the centre, 30 wide, bridged only
+    /// due south.
+    fn canal() -> Arc<Ground> {
+        let flat = LandParams { foothill_radius: 1.0e9, ..LandParams::default() };
+        let ring = WaterRing {
+            id: "canal_inner".into(),
+            radius: 600.0,
+            width: 30.0,
+            bridges: vec![Bridge { angle_degrees: 90.0, width: 40.0 }],
+        };
+        Arc::new(Ground::new(&flat, &[], &[], &[], &[], &[]).with_rings((CENTER_X, CENTER_Y), &[ring]))
+    }
+
+    /// Click mode, square into a canal (T0.1, #315): the prediction stops
+    /// at the bank on the tick the server does, where the server does, and
+    /// is never pulled back.
+    #[test]
+    fn a_canal_stops_the_prediction_where_it_stops_the_server() {
+        let ground = canal();
+        let mut rig = Rig::new();
+        rig.motion.set_ground(Some(ground.clone()));
+        // East of the centre, outside the canal, walking west across it.
+        let from = (CENTER_X + 660.0, CENTER_Y);
+        let to = (CENTER_X + 500.0, CENTER_Y);
+        rig.snapshot(0, &[(ME, from.0, from.1)]);
+        rig.move_to(0, to.0, to.1);
+        // The server, a round trip behind: 5 a tick, from 120 ms.
+        let mut server = from;
+        let mut server_stopped = None;
+        let mut predicted_stop = None;
+        for ms in (10..=3000).step_by(10) {
+            if ms % 100 == 0 {
+                if ms > 120 && server_stopped.is_none() {
+                    let step = ground.step(server, to, 5.0);
+                    server = (step.x, step.y);
+                    if step.blocked.is_some() {
+                        server_stopped = Some(ms);
+                    }
+                }
+                rig.snapshot(ms, &[(ME, server.0, server.1)]);
+            }
+            let me = rig.pose(ms, ME);
+            if predicted_stop.is_none() && rig.motion.destination().is_none() {
+                predicted_stop = Some((ms, me.x, me.y));
+            }
+        }
+        let server_ms = server_stopped.expect("the canal stopped the server");
+        let (ms, x, y) = predicted_stop.expect("the prediction stopped");
+        // The canal's outer bank is at 615: both stop 2 short of it.
+        assert!((server.0 - (CENTER_X + 617.0)).abs() < 1e-6, "the server stopped at {}", server.0);
+        assert!((x - server.0).abs() < 1e-6 && (y - server.1).abs() < 1e-6, "predicted ({x}, {y}), server {server:?}");
+        // The prediction runs a round trip ahead, so it stops that much sooner.
+        assert!(ms <= server_ms && server_ms - ms <= 200, "predicted at {ms} ms, the server at {server_ms} ms");
+        assert_eq!(rig.motion.corrections(), 0);
     }
 
     #[test]

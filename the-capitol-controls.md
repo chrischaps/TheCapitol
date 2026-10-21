@@ -182,6 +182,12 @@ Both modes have the same speed, ground rules and reach. Bots may steer (`Bot::st
 ### T0: Groundwork (`ct:T0-groundwork`)
 
 - **T0.1 One walk step** (#315, M): `walk_step` with the rings, the edge and the slide; the server and prediction both use it.
+  *As built:* `Ground::with_rings(center, rings)` adds the rings; `Ground::from_terrain` and the server's `TerrainConfig::ground` both carry them, so the client's prediction, its pathfinder's `Ground` and the server walk the same rings. `Blocked` gains `Ring(id)` ("Cannot cross the inner canal without a bridge", as before) and `Edge` ("The world ends here", `water_id` empty). `validate_movement` is gone; `process_movement` is `Ground::step` alone and no longer takes the terrain. Decisions the plan didn't make:
+  - **A ring stops you where it always did**: 2 short of the water along the line (`rules::ring_crossing`). That point doesn't depend on the step's length, so a prediction in frame-long steps stops on the server's point, to the float (`a_canal_stops_the_prediction_where_it_stops_the_server`). A stop that would leave you over the water off a bridge, or a step off a bridge's side, stays where it is.
+  - **The edge** keeps you where you stand when a step would end off the disc and further out than it started. Someone off it already may walk back.
+  - **The stopped step competes with the slide.** A slide wins only when its distance × cos beats how far the stopped step got along the heading. Otherwise a square walk at a bank swerved 60° a step before it got there. So a walk reaches the bank, and slides from the next step. Click mode stops at a block as before (the server clears the destination), so in practice it slides only when a click starts against a bank. Direct mode (T0.2) is where the slide shows.
+  - **A slide may not end within 2 of a ring's water off a bridge, or of the edge, nearer to it than it started.** Without that, a square push into a canal slid 60° into the 2-unit margin, the next stop pushed it back out, and it crept along in a jitter. A river's stop is already at the last dry sample, so it needs no margin.
+  - The old `ground.rs` test fixture lies in the square's corner, off the world's disc. Walks on it must head toward the centre, or the edge stops them.
 - **T0.2 The `steer` message** (#316, M): the wire, the state, the lease, the stop, the clearing.
 - **T0.3 A rate bucket for steering** (#317, S).
 - **T0.4 `Steering`, steer prediction and the loopback** (#318, L).

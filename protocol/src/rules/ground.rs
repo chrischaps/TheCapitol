@@ -8,20 +8,28 @@
 //!   road: a road over water is its bridge (#222).
 //! - **Streams and fords** are waded, at [`WADE_SPEED`].
 //!
-//! [`Ground`] holds the land's params and the wild water, indexed, and
-//! [`Ground::step`] is one step of a walk. The server moves players with it
-//! and the Flint client predicts with it, so a hill doesn't rubber-band.
-//! The slope is the land's own ([`land::height_at`]), not the carved ground:
-//! a bank cut by [`land::carve`] doesn't make a cliff.
+//! - **The moat and the canals** stop you short of their water, except on a
+//!   bridge, as [`super::ring_crossing`] says (T0.1, #315).
+//! - **The edge of the world** ([`super::in_world`]) stops you where you
+//!   stand.
 //!
-//! The water rings (moat and canals) aren't here: [`super::check_water_crossing`]
-//! still tests those.
+//! [`Ground`] holds the land's params, the wild water, indexed, and the
+//! rings. [`Ground::walk_step`] is one step of a walk on a heading, and
+//! [`Ground::step`] one toward a point. The server moves players with them
+//! and the Flint client predicts with them, so a hill or a canal doesn't
+//! rubber-band. The slope is the land's own ([`land::height_at`]), not the
+//! carved ground: a bank cut by [`land::carve`] doesn't make a cliff.
+//!
+//! A blocked step **slides** (controls plan D4): the heading turned 30° and
+//! then 60° either way, each going cos of the turn as far, and the one that
+//! gets furthest on the way you meant to go wins. So a walk into a bank at
+//! a slant runs along it, and a walk square into one stops.
 
 use std::collections::HashMap;
 
 use crate::fmath::StableMath;
 use crate::land::{self, LandParams};
-use crate::terrain::{Ford, Lake, RoadSegment, TerrainResponse, WaterCourse};
+use crate::terrain::{Ford, Lake, RoadSegment, TerrainResponse, WaterCourse, WaterRing};
 
 /// The steepest ground you can walk onto: rise over run, so 1.2 is about
 /// 50°. About one part in twenty of the wilds is steeper: crests and crags.
@@ -32,6 +40,8 @@ pub const CLIFF_SLOPE: f64 = 1.2;
 pub const WADE_SPEED: f64 = 0.5;
 /// What `movement_blocked` says when the slope stopped you.
 pub const TOO_STEEP: &str = "Too steep";
+/// What `movement_blocked` says at the edge of the world.
+pub const WORLD_EDGE: &str = "The world ends here";
 
 /// How much a climb slows you: at a rise of 1 in 2 you go at 1 / 1.75.
 const UPHILL_DRAG: f64 = 1.5;
@@ -42,6 +52,10 @@ const DOWNHILL_DRAG: f64 = 0.5;
 const SAMPLE: f64 = 1.0;
 /// The side of the index's buckets.
 const BUCKET: f64 = 60.0;
+/// cos 30°, which is sin 60°: a constant, so no trig.
+const COS_30: f64 = 0.866_025_403_784_438_6;
+/// The turns a slide tries, nearest first, as (cos, sin): 30° and 60°.
+const SLIDE: [(f64, f64); 2] = [(COS_30, 0.5), (0.5, COS_30)];
 
 /// The share of your speed the slope leaves you. `slope` is the rise over
 /// run along the way you're heading: positive uphill, negative downhill.
@@ -71,14 +85,19 @@ pub enum Blocked {
     Steep,
     /// A river or a lake, by id (`river_3`, `lake_1`).
     Water(String),
+    /// The moat or a canal away from its bridges, by id (`moat`, `canal_inner`).
+    Ring(String),
+    /// The edge of the world.
+    Edge,
 }
 
 impl Blocked {
-    /// For `movement_blocked`'s `water_id`: the water's id, empty for a slope.
+    /// For `movement_blocked`'s `water_id`: the water's id, empty for a
+    /// slope or the edge.
     pub fn water_id(&self) -> &str {
         match self {
-            Blocked::Steep => "",
-            Blocked::Water(id) => id,
+            Blocked::Steep | Blocked::Edge => "",
+            Blocked::Water(id) | Blocked::Ring(id) => id,
         }
     }
 
@@ -90,6 +109,8 @@ impl Blocked {
                 format!("Cannot cross {}: go round it", super::water_name(id))
             }
             Blocked::Water(id) => format!("Cannot cross {} without a ford or a bridge", super::water_name(id)),
+            Blocked::Ring(id) => format!("Cannot cross {} without a bridge", super::water_name(id)),
+            Blocked::Edge => WORLD_EDGE.into(),
         }
     }
 }
@@ -103,10 +124,13 @@ pub struct Step {
     pub blocked: Option<Blocked>,
 }
 
-/// The land and the wild water, indexed for walking on.
+/// The land, the wild water, indexed, and the rings, for walking on.
 #[derive(Debug, Clone, Default)]
 pub struct Ground {
     land: LandParams,
+    /// The moat and the canals, round `center` ([`Self::with_rings`]).
+    rings: Vec<WaterRing>,
+    center: (f64, f64),
     /// Each river's and stream's id, and whether it's a river.
     courses: Vec<(String, bool)>,
     segments: Vec<Segment>,
@@ -237,9 +261,19 @@ impl Ground {
         ground
     }
 
-    /// The ground a `/terrain` response describes.
+    /// The moat and the canals round `center`: a step stops at them away
+    /// from their bridges, as at a river. Without them only the land and
+    /// the wild water stop it.
+    pub fn with_rings(mut self, center: (f64, f64), rings: &[WaterRing]) -> Self {
+        self.center = center;
+        self.rings = rings.to_vec();
+        self
+    }
+
+    /// The ground a `/terrain` response describes, rings and all.
     pub fn from_terrain(terrain: &TerrainResponse) -> Self {
         Self::new(&terrain.land, &terrain.rivers, &terrain.streams, &terrain.lakes, &terrain.fords, &terrain.roads)
+            .with_rings((terrain.center_x, terrain.center_y), &terrain.water_rings)
     }
 
     /// The land's params.
@@ -292,24 +326,90 @@ impl Ground {
         }
     }
 
-    /// One step of a walk from `from` toward `dest`, worth `walk` units on
-    /// the flat (the walker's speed times the time). The step is slowed by
-    /// [`Self::speed_at`] where it starts, never passes `dest`, and stops:
+    /// One step of a walk from `from` along `heading` (a direction, any
+    /// length), worth `walk` units on the flat: the walker's speed times the
+    /// time. The step is slowed by [`Self::speed_at`] where it starts, and
+    /// stopped, in this order, by:
     ///
-    /// - where it stands, if it would end on ground steeper than
-    ///   [`CLIFF_SLOPE`] and steeper than where it starts. Someone already
-    ///   on a crag (put there before W4, or by a regenerate) can climb down.
-    /// - within [`SAMPLE`] of a river's or lake's edge, unless it starts in
-    ///   the water: then it may wade out.
+    /// 1. **the land.** It stays where it stands if it would end on ground
+    ///    steeper than [`CLIFF_SLOPE`] and steeper than where it starts, so
+    ///    someone already on a crag (put there before W4, or by a
+    ///    regenerate) can climb down. It stops within [`SAMPLE`] of a
+    ///    river's or lake's edge, unless it starts in the water: then it may
+    ///    wade out.
+    /// 2. **the moat and the canals** away from their bridges: 2 short of the
+    ///    water along the way, as [`super::ring_crossing`] says. That point
+    ///    is the same however long the step, so a prediction in short steps
+    ///    stops where the server's ticks do. A step off a bridge's side into
+    ///    the water stays where it is.
+    /// 3. **the edge of the world**: it stays where it is.
+    ///
+    /// Then, if it was stopped, it **slides**: the heading turned 30° and 60°
+    /// left and right, each walking cos of its turn as far. Of those not
+    /// stopped, the one that goes furthest times that cos wins, left over
+    /// right on a tie, if that beats how far the stopped step itself got on
+    /// the way. So a walk up to a bank reaches it, and slides from the next
+    /// step, and a walk to a point (click to move, which ends at a stop)
+    /// slides only when it starts against one. Nor may a slide end within 2
+    /// of a ring's water off a
+    /// bridge, or of the edge, nearer to it than it started: a stop there
+    /// pushes you back out or holds you, so a square push would jitter
+    /// along it. If none goes, the straight step's stop stands.
+    pub fn walk_step(&self, from: (f64, f64), heading: (f64, f64), walk: f64) -> Step {
+        let len = heading.0.stable_hypot(heading.1);
+        if len <= 0.0 {
+            return Step { x: from.0, y: from.1, blocked: None };
+        }
+        self.walk(from, (heading.0 / len, heading.1 / len), walk, f64::INFINITY, None)
+    }
+
+    /// One step of a walk from `from` toward `dest`, worth `walk` units on
+    /// the flat: [`Self::walk_step`] on the heading to `dest`, which never
+    /// passes it, and ends on it exactly when it gets there.
     pub fn step(&self, from: (f64, f64), dest: (f64, f64), walk: f64) -> Step {
         let (ex, ey) = (dest.0 - from.0, dest.1 - from.1);
         let remaining = ex.stable_hypot(ey);
         if remaining <= 0.0 {
             return Step { x: dest.0, y: dest.1, blocked: None };
         }
-        let heading = (ex / remaining, ey / remaining);
-        let travel = (walk * self.speed_at(from.0, from.1, heading)).min(remaining);
-        let to = if travel >= remaining { dest } else { (from.0 + heading.0 * travel, from.1 + heading.1 * travel) };
+        self.walk(from, (ex / remaining, ey / remaining), walk, remaining, Some(dest))
+    }
+
+    /// [`Self::walk_step`] on a unit `heading`, going no further than `cap`.
+    /// A straight step that goes all of `cap` ends on `dest`, if there is one.
+    fn walk(&self, from: (f64, f64), heading: (f64, f64), walk: f64, cap: f64, dest: Option<(f64, f64)>) -> Step {
+        let straight = self.straight(from, heading, walk, cap, dest);
+        if straight.blocked.is_none() {
+            return straight;
+        }
+        let (hx, hy) = heading;
+        // How far the stopped step got: back, if a ring pushed it out.
+        let got = (straight.x - from.0) * hx + (straight.y - from.1) * hy;
+        let mut best: Option<(f64, Step)> = None;
+        for (cos, sin) in SLIDE {
+            // Left, then right. y points south, so left is anticlockwise on
+            // the map.
+            for turned in [(hx * cos + hy * sin, hy * cos - hx * sin), (hx * cos - hy * sin, hy * cos + hx * sin)] {
+                let step = self.straight(from, turned, walk * cos, cap * cos, None);
+                if step.blocked.is_some() || self.hugs(from, (step.x, step.y)) {
+                    continue;
+                }
+                let score = (step.x - from.0).stable_hypot(step.y - from.1) * cos;
+                if score > got.max(0.0) && best.as_ref().is_none_or(|(b, _)| score > *b) {
+                    best = Some((score, step));
+                }
+            }
+        }
+        best.map_or(straight, |(_, step)| step)
+    }
+
+    /// One straight step on a unit `heading`, with no slide.
+    fn straight(&self, from: (f64, f64), heading: (f64, f64), walk: f64, cap: f64, dest: Option<(f64, f64)>) -> Step {
+        let travel = (walk * self.speed_at(from.0, from.1, heading)).min(cap);
+        let to = match dest {
+            Some(dest) if travel >= cap => dest,
+            _ => (from.0 + heading.0 * travel, from.1 + heading.1 * travel),
+        };
         let stay = |blocked| Step { x: from.0, y: from.1, blocked: Some(blocked) };
 
         let steep = land::slope_at(to.0, to.1, &self.land);
@@ -317,6 +417,7 @@ impl Ground {
             return stay(Blocked::Steep);
         }
 
+        let mut end = Step { x: to.0, y: to.1, blocked: None };
         if !matches!(self.footing(from.0, from.1), Footing::Blocked(_)) {
             let n = (travel / SAMPLE).ceil().max(1.0) as usize;
             let mut last = from;
@@ -324,12 +425,68 @@ impl Ground {
                 let t = travel * i as f64 / n as f64;
                 let p = if i == n { to } else { (from.0 + heading.0 * t, from.1 + heading.1 * t) };
                 if let Footing::Blocked(id) = self.footing(p.0, p.1) {
-                    return Step { x: last.0, y: last.1, blocked: Some(Blocked::Water(id.to_string())) };
+                    end = Step { x: last.0, y: last.1, blocked: Some(Blocked::Water(id.to_string())) };
+                    break;
                 }
                 last = p;
             }
         }
-        Step { x: to.0, y: to.1, blocked: None }
+
+        let till = (end.x, end.y);
+        let crossing = self.rings.iter().find_map(|ring| {
+            super::ring_crossing(self.center, ring, from, till).map(|(x, y)| (x, y, &ring.id))
+        });
+        if let Some((x, y, id)) = crossing {
+            end = Step { x, y, blocked: Some(Blocked::Ring(id.clone())) };
+        }
+        // Off a bridge's side into the water, or stopped short of an edge
+        // off the bridge but still over the water: stay on the bridge.
+        if self.ring_water_at(from).is_none() {
+            if let Some(ring) = self.ring_water_at((end.x, end.y)) {
+                return stay(Blocked::Ring(ring.id.clone()));
+            }
+        }
+
+        let out = |p: (f64, f64)| (p.0 - super::CENTER_X).stable_hypot(p.1 - super::CENTER_Y);
+        if !super::in_world(end.x, end.y) && out((end.x, end.y)) > out(from) {
+            return stay(Blocked::Edge);
+        }
+        end
+    }
+
+    /// The ring whose water `p` is in, away from its bridges.
+    fn ring_water_at(&self, p: (f64, f64)) -> Option<&WaterRing> {
+        let r = (p.0 - self.center.0).stable_hypot(p.1 - self.center.1);
+        self.rings
+            .iter()
+            .find(|ring| r > ring.inner_radius() && r < ring.outer_radius() && !self.on_bridge(ring, p))
+    }
+
+    fn on_bridge(&self, ring: &WaterRing, p: (f64, f64)) -> bool {
+        let angle = super::angle_from_center(self.center, p.0, p.1);
+        ring.bridges.iter().any(|b| b.contains_angle(angle, ring.radius))
+    }
+
+    /// Whether a slide from `from` to `to` ends within [`super::BLOCK_BACKOFF`]
+    /// of a ring's water away from its bridges, or of the world's edge, and
+    /// nearer to it than it started.
+    fn hugs(&self, from: (f64, f64), to: (f64, f64)) -> bool {
+        let near = super::BLOCK_BACKOFF;
+        let (rf, rt) = (self.radius(from), self.radius(to));
+        let gap = |ring: &WaterRing, r: f64| (ring.inner_radius() - r).max(r - ring.outer_radius());
+        let ring = self.rings.iter().any(|ring| {
+            let g = gap(ring, rt);
+            g < near && g < gap(ring, rf) && !self.on_bridge(ring, to)
+        });
+        let edge = |p: (f64, f64)| {
+            super::WILDERNESS_OUTER_RADIUS - (p.0 - super::CENTER_X).stable_hypot(p.1 - super::CENTER_Y)
+        };
+        ring || (edge(to) < near && edge(to) < edge(from))
+    }
+
+    /// How far `p` is from the rings' centre.
+    fn radius(&self, p: (f64, f64)) -> f64 {
+        (p.0 - self.center.0).stable_hypot(p.1 - self.center.1)
     }
 
     fn wet(&self, x: f64, y: f64) -> Wet {
@@ -462,6 +619,10 @@ mod tests {
     /// A river running north to south at x = 1000, 20 wide, with a ford at
     /// y = 1000; a stream at x = 2000, 6 wide; a square lake round
     /// (3000, 1000); and a road over the river at y = 1500.
+    ///
+    /// It lies in the corner of the square, off the world's disc, so a walk
+    /// on it heads east or south, toward the centre: one heading further out
+    /// is stopped by the edge.
     fn ground() -> Ground {
         let river = course("river_0", 20.0, &[(1000.0, 500.0), (1000.0, 2000.0)]);
         let stream = course("stream_0", 6.0, &[(2000.0, 500.0), (2000.0, 2000.0)]);
@@ -583,7 +744,7 @@ mod tests {
     #[test]
     fn someone_in_the_water_can_wade_out() {
         let g = ground();
-        assert_eq!(walk(&g, (1000.0, 700.0), (950.0, 700.0)).blocked, None);
+        assert_eq!(walk(&g, (1000.0, 700.0), (1050.0, 700.0)).blocked, None);
     }
 
     /// On the real land: a climb is slower than the flat, and a crag stops
@@ -631,5 +792,265 @@ mod tests {
         // From the crag itself, the way down is open.
         let down = g.step(crag, foot, 5.0);
         assert_eq!(down.blocked, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // walk_step: the rings, the edge and the slide (T0.1, #315)
+    // -----------------------------------------------------------------------
+
+    use crate::rules::{angle_from_center, in_world, ring_crossing, CENTER_X, CENTER_Y, WILDERNESS_OUTER_RADIUS};
+    use crate::terrain::Bridge;
+
+    const CENTER: (f64, f64) = (CENTER_X, CENTER_Y);
+
+    /// A canal 600 out and 30 wide, with one bridge 40 wide due south.
+    fn canal() -> WaterRing {
+        WaterRing {
+            id: "canal_inner".into(),
+            radius: 600.0,
+            width: 30.0,
+            bridges: vec![Bridge { angle_degrees: 90.0, width: 40.0 }],
+        }
+    }
+
+    /// Flat land with only `canal` on it.
+    fn ringed() -> Ground {
+        Ground::new(&flat(), &[], &[], &[], &[], &[]).with_rings(CENTER, &[canal()])
+    }
+
+    /// A point `r` from the centre at `degrees` (0 east, 90 south).
+    fn polar(r: f64, degrees: f64) -> (f64, f64) {
+        let a = degrees.to_radians();
+        (CENTER_X + r * a.stable_cos(), CENTER_Y + r * a.stable_sin())
+    }
+
+    /// Steps of 5 on a fixed heading, `ticks` of them: every step.
+    fn steer(ground: &Ground, from: (f64, f64), heading: (f64, f64), ticks: usize) -> Vec<Step> {
+        let mut at = from;
+        (0..ticks)
+            .map(|_| {
+                let step = ground.walk_step(at, heading, 5.0);
+                at = (step.x, step.y);
+                step
+            })
+            .collect()
+    }
+
+    /// xorshift: the same walks every run, with no dependency.
+    struct Dice(u64);
+
+    impl Dice {
+        fn roll(&mut self) -> f64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    #[test]
+    fn a_free_walk_step_goes_its_whole_way() {
+        let g = ground();
+        let step = g.walk_step((1500.0, 700.0), (3.0, 4.0), 5.0);
+        assert_eq!(step.blocked, None);
+        assert!((step.x - 1503.0).abs() < 1e-9 && (step.y - 704.0).abs() < 1e-9);
+        // `step` is the same walk, toward a point on that heading.
+        assert_eq!(g.step((1500.0, 700.0), (1530.0, 740.0), 5.0), step);
+        // No heading, no step.
+        assert_eq!(g.walk_step((1500.0, 700.0), (0.0, 0.0), 5.0).blocked, None);
+    }
+
+    #[test]
+    fn a_slant_into_a_river_slides_along_its_bank() {
+        let g = ground();
+        // South-east from the west bank's side, into the river at x = 1000,
+        // between the ford (y = 1000) and the road (y = 1500).
+        let steps = steer(&g, (900.0, 1050.0), (1.0, 1.0), 100);
+        for s in &steps {
+            assert_eq!(g.footing(s.x, s.y), Footing::Dry, "in the river at ({}, {})", s.x, s.y);
+            assert!(s.x < 990.0);
+        }
+        let end = steps.last().unwrap();
+        // It met the bank about 90 down at x 990, and ran on down it at
+        // better than half a step a tick.
+        assert!(end.x > 980.0, "drifted off the bank to x {}", end.x);
+        assert!(end.y > 1050.0 + 90.0 + 50.0 * 2.5, "only got to y {}", end.y);
+        assert_eq!(end.blocked, None, "a slide isn't a stop");
+    }
+
+    #[test]
+    fn square_into_a_river_stops_dead() {
+        let g = ground();
+        let steps = steer(&g, (950.0, 700.0), (1.0, 0.0), 40);
+        let end = steps.last().unwrap();
+        assert_eq!(end.blocked, Some(Blocked::Water("river_0".into())));
+        assert_eq!(end.y, 700.0, "slid on a square push");
+        assert!((989.0..=990.0).contains(&end.x), "stopped at {}", end.x);
+    }
+
+    #[test]
+    fn a_slant_along_a_canal_slides_to_its_bridge_and_over() {
+        let g = ringed();
+        let ring = canal();
+        // Outside the canal, south-east of its bridge, heading north-west:
+        // a slant into the water that runs along it to the bridge.
+        let from = polar(ring.outer_radius() + 10.0, 70.0);
+        let steps = steer(&g, from, (-1.0, -0.6), 120);
+        let mut at = from;
+        let mut slid = 0;
+        for s in &steps {
+            let to = (s.x, s.y);
+            assert_eq!(ring_crossing(CENTER, &ring, at, to), None, "crossed the water from {at:?} to {to:?}");
+            assert!(g.ring_water_at(to).is_none(), "in the water at {to:?}");
+            if s.blocked.is_none() && ((to.1 - at.1) - (to.0 - at.0) * 0.6).abs() > 1e-9 {
+                slid += 1;
+            }
+            at = to;
+        }
+        let (dx, dy) = (at.0 - CENTER_X, at.1 - CENTER_Y);
+        assert!(dx.stable_hypot(dy) < ring.inner_radius(), "never got over, at {:.1}° {:.1} out", angle_from_center(CENTER, at.0, at.1), dx.stable_hypot(dy));
+        assert!(slid > 5, "it never slid");
+    }
+
+    #[test]
+    fn square_into_a_canal_stops_dead_two_short() {
+        let g = ringed();
+        let ring = canal();
+        let steps = steer(&g, polar(ring.outer_radius() + 30.0, 0.0), (-1.0, 0.0), 20);
+        let end = steps.last().unwrap();
+        assert_eq!(end.blocked, Some(Blocked::Ring("canal_inner".into())));
+        assert_eq!(end.blocked.as_ref().unwrap().reason(), "Cannot cross the inner canal without a bridge");
+        assert!((end.x - (CENTER_X + ring.outer_radius() + 2.0)).abs() < 1e-6, "stopped at {}", end.x);
+        assert_eq!(end.y, CENTER_Y);
+    }
+
+    #[test]
+    fn a_ring_stops_long_and_short_steps_at_the_same_point() {
+        let g = ringed();
+        let ring = canal();
+        // Square to the canal, where nothing slides.
+        let from = polar(ring.outer_radius() + 40.0, 20.0);
+        let dest = polar(ring.inner_radius() - 40.0, 20.0);
+        let stop = |walk: f64| {
+            let mut at = from;
+            loop {
+                let step = g.step(at, dest, walk);
+                if step.blocked.is_some() {
+                    return (step.x, step.y);
+                }
+                at = (step.x, step.y);
+            }
+        };
+        let (a, b) = (stop(5.0), stop(0.37));
+        assert!((a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6, "{a:?} against {b:?}");
+    }
+
+    #[test]
+    fn off_a_bridge_sideways_is_into_the_water() {
+        let g = ringed();
+        let ring = canal();
+        // On the bridge, mid-canal, heading east along the water.
+        let on = polar(ring.radius, 90.0);
+        let mut at = on;
+        for _ in 0..40 {
+            let step = g.walk_step(at, (1.0, 0.0), 5.0);
+            at = (step.x, step.y);
+            assert!(g.ring_water_at(at).is_none(), "off the bridge into the canal at {at:?}");
+        }
+    }
+
+    #[test]
+    fn a_corner_stops_a_walk_dead() {
+        // A river bending round a corner at (1000, 1000): down x = 1000,
+        // then west along y = 1000.
+        let river = course("river_0", 20.0, &[(1000.0, 200.0), (1000.0, 1000.0), (200.0, 1000.0)]);
+        let g = Ground::new(&flat(), &[river], &[], &[], &[], &[]);
+        // Into the corner at a slant: it meets x = 1000 first and slides
+        // down it into the corner, where it stops.
+        let steps = steer(&g, (700.0, 500.0), (1.0, 1.3), 300);
+        let end = steps.last().unwrap();
+        assert!(end.blocked.is_some(), "still going at ({}, {})", end.x, end.y);
+        assert!(end.x > 980.0 && end.y > 980.0, "stopped short of the corner at ({}, {})", end.x, end.y);
+        let before = &steps[steps.len() - 10];
+        assert_eq!((before.x, before.y), (end.x, end.y), "it jitters in the corner");
+        for s in &steps {
+            assert_eq!(g.footing(s.x, s.y), Footing::Dry);
+        }
+    }
+
+    #[test]
+    fn walks_cross_a_ring_only_on_its_bridges() {
+        let g = ringed();
+        let ring = canal();
+        let mut dice = Dice(0x0315_5eed);
+        let mut over = 0;
+        for _ in 0..400 {
+            let from = polar(ring.radius + (dice.roll() - 0.5) * 120.0, 40.0 + dice.roll() * 100.0);
+            if g.ring_water_at(from).is_some() {
+                continue;
+            }
+            let inside = |p: (f64, f64)| (p.0 - CENTER_X).stable_hypot(p.1 - CENTER_Y) < ring.radius;
+            let a = dice.roll() * std::f64::consts::TAU;
+            let mut heading = (a.stable_cos(), a.stable_sin());
+            let mut at = from;
+            for tick in 0..120 {
+                if tick % 20 == 0 {
+                    let turn = (dice.roll() - 0.5) * 2.0;
+                    heading = (heading.0 * turn.stable_cos() - heading.1 * turn.stable_sin(), heading.0 * turn.stable_sin() + heading.1 * turn.stable_cos());
+                }
+                let step = g.walk_step(at, heading, 1.0 + dice.roll() * 6.0);
+                let to = (step.x, step.y);
+                assert_eq!(ring_crossing(CENTER, &ring, at, to), None, "crossed off a bridge from {at:?} to {to:?}");
+                assert!(g.ring_water_at(to).is_none(), "in the canal at {to:?}");
+                if inside(at) != inside(to) {
+                    over += 1;
+                }
+                at = to;
+            }
+        }
+        assert!(over > 0, "nobody crossed: the test proves nothing");
+    }
+
+    #[test]
+    fn walks_never_leave_the_world() {
+        let g = Ground::new(&flat(), &[], &[], &[], &[], &[]);
+        let mut dice = Dice(0xed6e);
+        for _ in 0..200 {
+            let mut at = polar(WILDERNESS_OUTER_RADIUS - dice.roll() * 30.0, dice.roll() * 360.0);
+            let a = dice.roll() * std::f64::consts::TAU;
+            let heading = (a.stable_cos(), a.stable_sin());
+            for _ in 0..40 {
+                let step = g.walk_step(at, heading, 5.0);
+                at = (step.x, step.y);
+                assert!(in_world(at.0, at.1), "off the world at {at:?}");
+                if let Some(blocked) = step.blocked {
+                    assert_eq!(blocked, Blocked::Edge);
+                    assert_eq!(blocked.reason(), WORLD_EDGE);
+                    assert_eq!(blocked.water_id(), "");
+                }
+            }
+        }
+        // Straight out, square to the edge: it stops where it stands.
+        let edge = steer(&g, polar(WILDERNESS_OUTER_RADIUS - 3.0, 0.0), (1.0, 0.0), 3);
+        assert_eq!(edge[0].blocked, Some(Blocked::Edge));
+        assert_eq!((edge[0].x, edge[0].y), polar(WILDERNESS_OUTER_RADIUS - 3.0, 0.0));
+    }
+
+    #[test]
+    fn walks_are_deterministic() {
+        let g = ringed();
+        let walk = || {
+            let mut dice = Dice(42);
+            let mut at = polar(640.0, 60.0);
+            let mut trail = Vec::new();
+            for _ in 0..500 {
+                let a = dice.roll() * std::f64::consts::TAU;
+                let step = g.walk_step(at, (a.stable_cos(), a.stable_sin()), 5.0);
+                at = (step.x, step.y);
+                trail.push((at.0.to_bits(), at.1.to_bits(), step.blocked));
+            }
+            trail
+        };
+        assert_eq!(walk(), walk());
     }
 }

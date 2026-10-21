@@ -652,7 +652,7 @@ impl GameState {
         use crate::models::Zone;
 
         for player in self.players.values_mut() {
-            let result = process_movement(player, &self.terrain, &self.ground);
+            let result = process_movement(player, &self.ground);
 
             // Broadcast zone transition if player changed zones
             if let Some(transition) = result.zone_transition {
