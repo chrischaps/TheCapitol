@@ -43,6 +43,8 @@ pub const GARAGE_DOOR: u32 = 0xb8b2a6;
 pub const BARNS: [u32; 3] = [0x6e3a2e, 0x5e3328, 0x5a4a3a];
 pub const BARN_ROOF: u32 = 0x45474c;
 pub const BARN_DOOR: u32 = 0x3a2a22;
+/// A farm's drive: packed earth up to the farmhouse door (R6).
+pub const FARM_TRACK: u32 = 0x7a6a4e;
 /// New timber, on a house going up.
 pub const TIMBER: u32 = 0xb08a5c;
 pub const CHIMNEY: u32 = 0x6e4a3c;

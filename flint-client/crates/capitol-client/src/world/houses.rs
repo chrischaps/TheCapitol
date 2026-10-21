@@ -8,8 +8,9 @@
 //! - **By zone** ([`style`]): urban terraces fill their narrow lots,
 //!   two or three storeys under slate or a flat roof with a cornice; the
 //!   suburbs are post-war houses, one storey or two, in pale render under
-//!   tile, some with a garage; rural lots get a steep-roofed cottage with a
-//!   chimney, and often a barn behind it; the guild district builds tall
+//!   tile, some with a garage; rural lots get a steep-roofed farmhouse with
+//!   a chimney, set back from the lane on a drive, and often a barn behind
+//!   it (the grass keeps off that [`Farmyard`], R6); the guild district builds tall
 //!   stone workshops. Colours are the house tokens in `palette`.
 //! - **Seeded by the plot id** ([`Seed`]), so every client builds the same
 //!   house on the same lot.
@@ -195,8 +196,9 @@ fn style(zone: Zone) -> Style {
             chimney: 0.45,
             outbuilding: 0.55,
         },
+        // A farmstead stands back from the lane on its drive (R6, #289).
         Zone::Rural => Style {
-            setback: (2.4, 3.8),
+            setback: (6.0, 11.0),
             depth: (3.6, 4.4),
             width: (5.4, 7.0),
             min_width: 3.4,
@@ -341,6 +343,10 @@ enum Door {
 #[derive(Clone, Debug, PartialEq)]
 struct Plan {
     blocks: Vec<Block>,
+    /// A farm's drive, from the lane to the front door (R6).
+    drive: Option<[P; 2]>,
+    /// Its packed earth, drawn on the farm from inside the hedge bank.
+    track: Option<Rect>,
     /// Which of the windows (by a running count) are lit: a seed of its own,
     /// so the count of windows doesn't change the house.
     lights: u64,
@@ -475,6 +481,11 @@ fn plan(id: &str, lot: &Lot) -> Option<Plan> {
     let roof = rng.pick(st.roofs);
     let setback = rng.range(st.setback);
     let (want_depth, want_width) = (rng.range(st.depth), rng.range(st.width));
+    // A farm's barn, drawn first so the house leaves room behind for it:
+    // the gap to it, its width and its depth.
+    let barn = (lot.zone == Zone::Rural && rng.chance(st.outbuilding))
+        .then(|| (rng.range((2.5, 4.5)), rng.range((4.0, 5.2)), rng.range((4.6, 6.0))));
+    let behind = barn.map_or(0.0, |(gap, _, bd)| gap + bd);
     // What stands out past the walls: the eaves, or a flat roof's cornice.
     let flat = roof == Roof::Flat;
     let eaves = if flat { 0.0 } else { st.eave };
@@ -484,7 +495,7 @@ fn plan(id: &str, lot: &Lot) -> Option<Plan> {
         // A shallow lot takes a shorter front garden before a smaller house.
         let lot_depth = (far - near) as f32 * S;
         let setback = setback
-            .min(lot_depth - st.back - overhang - want_depth.max(st.min_depth))
+            .min(lot_depth - st.back - overhang - want_depth.max(st.min_depth) - behind)
             .max(overhang + 0.05);
         // On a wedge (a pie round a bulb) the street end is narrow, so
         // step back to where it widens.
@@ -536,7 +547,8 @@ fn plan(id: &str, lot: &Lot) -> Option<Plan> {
             0.62
         }
     });
-    let door = Door::Front(rng.range((0.25, 0.75)), hex(rng.pick(&palette::DOORS)));
+    let door_at = rng.range((0.25, 0.75));
+    let door = Door::Front(door_at, hex(rng.pick(&palette::DOORS)));
     let mut blocks = vec![Block {
         rect: house_rect,
         storeys,
@@ -589,9 +601,8 @@ fn plan(id: &str, lot: &Lot) -> Option<Plan> {
             });
         }
     }
-    if lot.zone == Zone::Rural && rng.chance(st.outbuilding) {
-        let t1 = t0 + metres(depth + rng.range((2.5, 4.5)));
-        let (bw, bd) = (rng.range((4.0, 5.2)), rng.range((4.6, 6.0)));
+    if let Some((gap, bw, bd)) = barn {
+        let t1 = t0 + metres(depth + gap);
         let fits = (far - t1) as f32 * S - st.back >= bd;
         if let Some(rect) = fits
             .then(|| frame.place(t1, (bw, bd), st.side + 0.3, 0.25, rng.unit()))
@@ -613,9 +624,61 @@ fn plan(id: &str, lot: &Lot) -> Option<Plan> {
             });
         }
     }
+    // The drive runs straight in from the lane to the front door.
+    let drive = (lot.zone == Zone::Rural).then(|| {
+        let door = house_rect.at(house_rect.hx * (2.0 * door_at as f64 - 1.0), -house_rect.hy);
+        let s = dot(sub(door, frame.o), frame.u);
+        [frame.at(s, -DRIVE_OUT), door]
+    });
+    let track = drive.and_then(|[_, door]| {
+        let (s, t1) = (dot(sub(door, frame.o), frame.u), dot(sub(door, frame.o), frame.v));
+        let t0 = near + TRACK_FROM;
+        (t1 > t0).then(|| Rect {
+            c: frame.at(s, (t0 + t1) * 0.5),
+            ax: frame.u,
+            ay: frame.v,
+            hx: TRACK_HALF,
+            hy: (t1 - t0) * 0.5,
+        })
+    });
     Some(Plan {
         blocks,
+        drive,
+        track,
         lights: rng.next(),
+    })
+}
+
+/// How far out past the lot's street edge a drive runs, server units:
+/// across a farm's verge (17 off a lane, 30 off an arterial, less the
+/// road's own bare verge) and onto the road, short of a lane's far side.
+const DRIVE_OUT: f64 = 26.0;
+/// The drawn track: where it starts in from the lot as drawn, past its
+/// hedge bank (`plots.rs`' rural curb, 3.5), and its half-width, inside the
+/// grass's bare 3 (`grass::DRIVE_HALF`). Server units.
+const TRACK_FROM: f64 = 4.0;
+const TRACK_HALF: f64 = 2.2;
+/// How far the track lies over the lot, metres.
+const TRACK_LIFT: f32 = 0.01;
+
+/// A farm's yard (R6, #289), server units: what the grass keeps off.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Farmyard {
+    /// Round the farmhouse and the barn: the hull of their footprints.
+    pub yard: Vec<P>,
+    /// From the lane to the front door.
+    pub drive: [P; 2],
+}
+
+/// The yard of the farmstead that stands, or would stand, on `lot`: the
+/// same plan the house is raised from, so the grass and the buildings
+/// agree. `None` off the farms, or where there's no room for a house.
+pub fn farmyard(id: &str, lot: &Lot) -> Option<Farmyard> {
+    let plan = plan(id, lot)?;
+    let corners: Vec<P> = plan.blocks.iter().flat_map(|b| b.rect.corners()).collect();
+    Some(Farmyard {
+        yard: crate::world::plots::hull(&corners),
+        drive: plan.drive?,
     })
 }
 
@@ -849,6 +912,9 @@ fn raise(plan: &Plan, stage: Stage) -> House {
     let mut lights = Seed(plan.lights);
     for b in &plan.blocks {
         block(&mut h, b, stage, &mut lights);
+    }
+    if let Some(track) = &plan.track {
+        top(&mut h.body, track, FLOOR + TRACK_LIFT, hex(palette::FARM_TRACK));
     }
     h
 }
@@ -1443,6 +1509,80 @@ mod tests {
                     let (a, b) = (lot.outline[i], lot.outline[(i + 1) % n]);
                     let inward = dot(unit(left(sub(b, a))), sub(q, a));
                     assert!(inward >= -0.05, "{id}: {q:?} is {inward} outside");
+                }
+            }
+        }
+    }
+
+    /// The farms of the default world under Rural v2, from the backend's
+    /// `dump_farms_terrain`, until the flip makes them the fixture's (R7):
+    /// `$FARMS_TERRAIN`, or `renders/farms-terrain.json`.
+    fn farm_lots() -> &'static HashMap<String, Lot> {
+        static BUILT: OnceLock<HashMap<String, Lot>> = OnceLock::new();
+        BUILT.get_or_init(|| {
+            let path = std::env::var("FARMS_TERRAIN")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../renders/farms-terrain.json"));
+            let t = capitol_core::terrain::read_terrain_file(&path).expect("the farms dump");
+            let mut lots = plots::build(&t.terrain_plots).lots;
+            lots.retain(|_, l| l.zone == Zone::Rural);
+            lots
+        })
+    }
+
+    /// R6: every farm has a farmstead on a drive from the lane, standing at
+    /// least 5 m back on `back_share` of them, with a barn behind it on more
+    /// than `barn_share`.
+    fn farmsteads_stand_back_on_their_drives(lots: &HashMap<String, Lot>, back_share: f64, barn_share: f64) {
+        let (mut n, mut barns, mut back) = (0, 0, 0);
+        for (id, lot) in lots {
+            let plan = plan(id, lot).unwrap_or_else(|| panic!("{id} has no room for a farmhouse"));
+            let frame = Frame::of(lot).unwrap();
+            let t = |p: P| dot(sub(p, frame.o), frame.v);
+            let [out, door] = plan.drive.expect("a farm has a drive");
+            // In from the lane, to the front wall.
+            assert!(t(out) < 0.0 && t(door) > frame.depth().0, "{id}: {out:?} to {door:?}");
+            assert!((t(door) - t(plan.blocks[0].rect.c) + plan.blocks[0].rect.hy).abs() < 1e-6);
+            for b in &plan.blocks {
+                assert!(inside(&frame, &b.rect, 0.0), "{id}: a building off its lot");
+            }
+            n += 1;
+            barns += (plan.blocks.len() > 1) as usize;
+            back += ((t(door) - frame.depth().0) as f32 * S >= 5.0) as usize;
+        }
+        let share = |k: usize| k as f64 / n as f64;
+        println!("{n} farms: {barns} barns, {back} stand 5 m back or more");
+        assert!(share(barns) > barn_share, "{barns} barns on {n} farms");
+        assert!(share(back) >= back_share, "{back} of {n} stand 5 m back");
+    }
+
+    #[test]
+    fn farmsteads_stand_back_from_the_lane_on_their_drives() {
+        let rural: HashMap<String, Lot> =
+            lots().iter().filter(|(_, l)| l.zone == Zone::Rural).map(|(k, v)| (k.clone(), v.clone())).collect();
+        // Today's lots, about 20 by 14.5 m since RW1, are too shallow for
+        // most barns (none fitted before R6) or a long drive.
+        farmsteads_stand_back_on_their_drives(&rural, 0.25, 0.0);
+    }
+
+    #[test]
+    #[ignore]
+    fn farms_farmsteads_stand_back_from_the_lane_on_their_drives() {
+        // The barn's chance is 0.65.
+        farmsteads_stand_back_on_their_drives(farm_lots(), 0.9, 0.5);
+    }
+
+    #[test]
+    #[ignore]
+    fn farms_a_farmstead_stays_on_its_farm() {
+        for (id, lot) in farm_lots() {
+            let h = house(id, lot, 1.0).expect("a farmhouse");
+            let n = lot.outline.len();
+            for p in vertices(&h) {
+                let q = to_server(p[0], p[2]);
+                for i in 0..n {
+                    let (a, b) = (lot.outline[i], lot.outline[(i + 1) % n]);
+                    assert!(dot(unit(left(sub(b, a))), sub(q, a)) >= -0.05, "{id}: {q:?} off its farm");
                 }
             }
         }
