@@ -155,6 +155,23 @@ fn line_ending_twin(sql: &str) -> String {
 mod tests {
     use super::*;
 
+    /// sqlx keys a migration by the number before its first `_`, so two files
+    /// on the same date are one version, and no database can apply both (#313).
+    #[test]
+    fn every_migration_has_a_version_of_its_own() {
+        for (set, migrator) in [
+            ("migrations", sqlx::migrate!("./migrations")),
+            ("migrations/post-content", sqlx::migrate!("./migrations/post-content")),
+        ] {
+            let mut seen = HashMap::new();
+            for m in migrator.iter() {
+                if let Some(other) = seen.insert(m.version, &m.description) {
+                    panic!("{set}: {} and {} are both version {}", other, m.description, m.version);
+                }
+            }
+        }
+    }
+
     #[test]
     fn twin_flips_line_endings_both_ways() {
         assert_eq!(line_ending_twin("a;\nb;\n"), "a;\r\nb;\r\n");

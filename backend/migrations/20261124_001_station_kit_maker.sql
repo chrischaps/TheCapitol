@@ -4,4 +4,7 @@
 -- before this.
 --
 -- No foreign key, as with item_units.maker_id: a mark outlives its maker.
-ALTER TABLE stations ADD COLUMN kit_maker_id UUID;
+--
+-- It landed as 20261123, the version bazaar_sales already had, so no database
+-- could apply both (#313). IF NOT EXISTS, in case one applied it anyway.
+ALTER TABLE stations ADD COLUMN IF NOT EXISTS kit_maker_id UUID;
