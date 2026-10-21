@@ -18,7 +18,9 @@
 //!   the rural plain, where the bank is level with the water, the ground
 //!   hides the edge. But the land is sampled every metre, and a stream
 //!   narrower than that has no bed in it: wherever the drawn ground is
-//!   higher than the water, the water rides [`LIFT`] over it instead.
+//!   higher than the water, the water rides [`LIFT`] over it instead: over
+//!   the field and over the triangles the land is drawn in close up. From
+//!   afar the land keeps the beds under it (`land_mesh`, #296).
 //! - **Three bodies**, one per kind, because bodies aren't culled (ADR
 //!   0094). Their colours are left to the ocean's, so they follow the hour.
 
@@ -124,7 +126,7 @@ pub struct Water<'a> {
 
 /// Builds every body. `field` is the land (`land::Sampled::field`).
 pub fn build(water: Water, field: &GroundField) -> Bodies {
-    let ground = |[x, z]: [f32; 2]| field.height_at(x, z);
+    let ground = |at| over(field, at);
     let all: Vec<&WaterCourse> = water.rivers.iter().chain(water.streams).collect();
     let courses = |list: &[WaterCourse], base: f32| {
         let mut mesh = WaterBodyMesh::default();
@@ -144,6 +146,15 @@ pub fn build(water: Water, field: &GroundField) -> Bodies {
         streams: courses(water.streams, STREAM_SPEED),
         lakes,
     }
+}
+
+/// The ground the water must ride over at world (X, Z): the field things
+/// stand on, or the land as it's drawn close up, whichever is higher. The
+/// field's bilinear blend can stand a few centimetres under the drawn
+/// triangles where a bed bends, so a bank poked through (#296).
+fn over(field: &GroundField, [x, z]: [f32; 2]) -> Option<f32> {
+    let g = field.height_at(x, z)?;
+    Some(crate::world::land_mesh::drawn_at(field, [x, z]).map_or(g, |d| g.max(d)))
 }
 
 /// Uploads the bodies, replacing any from an earlier terrain.
@@ -497,7 +508,7 @@ mod tests {
                     continue;
                 };
                 let want = layer::GROUND + p.surface as f32 * S - SINK;
-                let g = field.height_at(v.position[0], v.position[2]).unwrap();
+                let g = over(field, [v.position[0], v.position[2]]).unwrap();
                 assert!(v.position[1] >= g + LIFT - TIP - 1e-4, "{}: under the ground", course.id);
                 assert!(
                     (v.position[1] - want).abs() < 0.05 || (v.position[1] - g - LIFT).abs() < TIP + 1e-3,
@@ -612,7 +623,7 @@ mod tests {
         let field = fixture_field();
         let riding = bodies().rivers.vertices.iter().filter(|v| {
             let [x, y, z] = v.position;
-            field.height_at(x, z).is_some_and(|g| (y - g - LIFT).abs() < 1e-4)
+            over(field, [x, z]).is_some_and(|g| (y - g - LIFT).abs() < 1e-4)
         });
         assert!(riding.count() > 1000);
     }

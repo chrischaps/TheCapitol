@@ -9,7 +9,9 @@
 //!   at one of [`LODS`] strides (1, 2, 4 or 8 samples a quad) from how far
 //!   the camera is, and built again when that changes. A mesh is a copy out
 //!   of the field plus a colour a vertex, so it takes well under a
-//!   millisecond; a frame builds at most [`BUDGET`], nearest first.
+//!   millisecond; a frame builds at most [`BUDGET`], nearest first. A
+//!   coarse stride keeps the water's beds in it, so a stream isn't hidden
+//!   under a quad drawn at its banks' height (#296).
 //! - **Seams.** Where two chunks at different strides meet, their edges
 //!   needn't agree. Each chunk hangs a skirt down from its edges, deeper
 //!   at coarser strides, so no crack shows through. Where the land meets
@@ -123,6 +125,12 @@ impl Shore {
         )
     }
 
+    /// Whether the water marks sample (i, j): in a bed, or on a wet bank.
+    /// A stream narrower than a sample has no bed, but its banks are wet.
+    fn marked(&self, i: usize, j: usize) -> bool {
+        self.wet.get(j * SAMPLES + i).is_some_and(|&w| w > 0.0) || self.at(i, j).0 > 0.0
+    }
+
     /// How much of a ford's gravel shows at world (X, Z), 0 to 1.
     fn gravel(&self, [x, z]: [f32; 2]) -> f32 {
         self.fords
@@ -194,6 +202,57 @@ fn y_at(field: &GroundField, i: usize, j: usize) -> f32 {
     field.heightmap().heights()[j * SAMPLES + i]
 }
 
+/// The world y a vertex at sample (i, j) is drawn at, `step` samples a
+/// quad: the field's, unless the water marks a sample within a stride of
+/// it. Then it's the lowest of those, so a coarse quad over a bed never
+/// spans it at the banks' height and hides the water (#296). Every corner
+/// of a quad sees the whole quad, so the land drawn anywhere in it is no
+/// higher than its lowest marked sample. At stride 1 it's the field.
+fn drawn_y(field: &GroundField, shore: &Shore, i: usize, j: usize, step: usize) -> f32 {
+    let h = y_at(field, i, j);
+    if step == 1 {
+        return h;
+    }
+    let last = SAMPLES - 1;
+    let (ia, ib) = (i.saturating_sub(step), (i + step).min(last));
+    let (ja, jb) = (j.saturating_sub(step), (j + step).min(last));
+    (ja..=jb)
+        .flat_map(|jj| (ia..=ib).map(move |ii| (ii, jj)))
+        .filter(|&(ii, jj)| shore.marked(ii, jj))
+        .map(|(ii, jj)| y_at(field, ii, jj))
+        .fold(h, f32::min)
+}
+
+/// The world y of the land as stride 1 draws it at world (X, Z): on its
+/// triangles, cut from p10 to p01 as [`build`] cuts them, not the field's
+/// bilinear blend, which can stand a few centimetres under them where a
+/// bed bends. `None` off the field.
+pub fn drawn_at(field: &GroundField, [x, z]: [f32; 2]) -> Option<f32> {
+    let texel = (crate::world::land::TEXEL as f32) * S;
+    let [x0, z0] = to_world(sample_at(0, 0)[0], sample_at(0, 0)[1]);
+    let (fi, fj) = ((x - x0) / texel, (z - z0) / texel);
+    let last = (SAMPLES - 1) as f32;
+    if !(0.0..=last).contains(&fi) || !(0.0..=last).contains(&fj) {
+        return None;
+    }
+    let (i, j) = ((fi as usize).min(SAMPLES - 2), (fj as usize).min(SAMPLES - 2));
+    Some(on_quad(
+        [y_at(field, i, j), y_at(field, i + 1, j), y_at(field, i, j + 1), y_at(field, i + 1, j + 1)],
+        fi - i as f32,
+        fj - j as f32,
+    ))
+}
+
+/// The height at (u, w) in a quad with corners [p00, p10, p01, p11],
+/// on the triangle [`build`] cuts it into.
+fn on_quad([p00, p10, p01, p11]: [f32; 4], u: f32, w: f32) -> f32 {
+    if u + w <= 1.0 {
+        p00 + u * (p10 - p00) + w * (p01 - p00)
+    } else {
+        p11 + (1.0 - u) * (p01 - p11) + (1.0 - w) * (p10 - p11)
+    }
+}
+
 /// The server radius of sample (i, j).
 fn radius_at(i: usize, j: usize) -> f64 {
     let [x, y] = sample_at(i, j);
@@ -234,8 +293,9 @@ pub fn build(field: &GroundField, shore: &Shore, chunk: Chunk, lod: usize) -> Me
             let off = !(FROM..=OUTER).contains(&r);
             let (cut, wet) = shore.at(i, j);
             // The field is the carve (`land::rise`), beds and all: what
-            // stands in the water stands on the bed you see.
-            let y = if off { h - DIP } else { h };
+            // stands in the water stands on the bed you see. A coarse
+            // stride keeps the beds under the water ([`drawn_y`]).
+            let y = if off { h - DIP } else { drawn_y(field, shore, i, j, step) };
             let dry = tint(r, rise, slope, at);
             let colour = if wet > 0.0 || cut > 0.0 {
                 let m = mottle(at);
@@ -515,6 +575,72 @@ mod tests {
     }
 
     #[test]
+    fn no_bank_pokes_through_a_course_at_any_stride() {
+        // #296: from the map every chunk is at stride 8, and a coarse quad
+        // spanning a stream at the banks' height hid it in dashes.
+        let land = crate::world::land::tests::fixture_land();
+        let field = &land.field;
+        let shore = Shore { cut: land.cut.clone(), wet: land.wet.clone(), ..Shore::default() };
+        let [x0, z0] = to_world(sample_at(0, 0)[0], sample_at(0, 0)[1]);
+        let texel = (TEXEL as f32) * S;
+        // Every ribbon vertex, by the chunk it's over.
+        let mut by_chunk: std::collections::BTreeMap<Chunk, Vec<[f32; 3]>> = Default::default();
+        for v in land.water.rivers.vertices.iter().chain(&land.water.streams.vertices) {
+            let [x, _, z] = v.position;
+            let [sx, sy] = crate::coords::to_server(x, z);
+            let r = (sx - CENTER_X).hypot(sy - CENTER_Y);
+            if !(FROM..OUTER).contains(&r) {
+                continue;
+            }
+            let (fi, fj) = ((x - x0) / texel, (z - z0) / texel);
+            let chunk = Chunk { row: fj as usize / CHUNK, col: fi as usize / CHUNK };
+            by_chunk.entry(chunk).or_default().push(v.position);
+        }
+        assert!(by_chunk.len() > 50, "{} chunks with water", by_chunk.len());
+        for lod in 0..LODS {
+            let step = 1usize << lod;
+            let n = CHUNK / step + 1;
+            let (mut checked, mut over, mut worst) = (0, 0, 0.0f32);
+            for (&chunk, verts) in &by_chunk {
+                let m = build(field, &shore, chunk, lod);
+                let y = |a: usize, b: usize| m.vertices[b * n + a].position[1];
+                let (i0, j0) = (chunk.col * CHUNK, chunk.row * CHUNK);
+                for &[x, wy, z] in verts {
+                    // Where in its quad, and the triangle it's on (the
+                    // quads are cut along p10 to p01).
+                    let qa = ((x - x0) / texel - i0 as f32) / step as f32;
+                    let qb = ((z - z0) / texel - j0 as f32) / step as f32;
+                    let (a, b) = ((qa as usize).min(n - 2), (qb as usize).min(n - 2));
+                    let corners = [y(a, b), y(a + 1, b), y(a, b + 1), y(a + 1, b + 1)];
+                    let ly = on_quad(corners, qa - a as f32, qb - b as f32);
+                    checked += 1;
+                    if ly > wy {
+                        over += 1;
+                        worst = worst.max(ly - wy);
+                    }
+                }
+            }
+            eprintln!("stride {step}: {over} of {checked} ribbon vertices under the land, by up to {worst} m");
+            assert_eq!(over, 0, "stride {step}: {over} of {checked} under the land, by up to {worst} m");
+        }
+    }
+
+    #[test]
+    fn drawn_at_is_the_finest_stride() {
+        let field = fixture_field();
+        let chunk = Chunk { row: 2, col: 12 };
+        let m = build(field, &Shore::default(), chunk, 0);
+        let n = CHUNK + 1;
+        for v in m.vertices[..n * n].iter().step_by(37) {
+            let [x, y, z] = v.position;
+            let [sx, sy] = crate::coords::to_server(x, z);
+            if (FROM..=OUTER).contains(&(sx - CENTER_X).hypot(sy - CENTER_Y)) {
+                assert!((drawn_at(field, [x, z]).unwrap() - y).abs() < 1e-4);
+            }
+        }
+    }
+
+    #[test]
     fn the_land_meets_the_disc_at_the_rural_edge() {
         let field = fixture_field();
         for deg in (0..360).step_by(3) {
@@ -560,15 +686,25 @@ mod tests {
 
     #[test]
     fn a_chunk_builds_fast_enough_to_build_ten_a_frame() {
-        let field = fixture_field();
-        let chunk = Chunk { row: 2, col: 12 };
-        let started = std::time::Instant::now();
-        for _ in 0..4 {
-            build(field, &Shore::default(), chunk, 0);
+        let land = crate::world::land::tests::fixture_land();
+        let shore = Shore { cut: land.cut.clone(), wet: land.wet.clone(), ..Shore::default() };
+        // The chunk with the most water in it: the coarse strides look for
+        // the beds round every vertex (#296).
+        let chunk = Chunk::all()
+            .max_by_key(|c| {
+                let (i0, j0) = (c.col * CHUNK, c.row * CHUNK);
+                (j0..=j0 + CHUNK).flat_map(|j| (i0..=i0 + CHUNK).map(move |i| (i, j))).filter(|&(i, j)| shore.marked(i, j)).count()
+            })
+            .unwrap();
+        for lod in 0..LODS {
+            let started = std::time::Instant::now();
+            for _ in 0..4 {
+                build(&land.field, &shore, chunk, lod);
+            }
+            let each = started.elapsed().as_secs_f64() * 1000.0 / 4.0;
+            // Debug builds are several times slower than release.
+            eprintln!("a chunk at stride {}: {each:.2} ms", 1 << lod);
+            assert!(each < 40.0, "{each} ms at stride {}", 1 << lod);
         }
-        let each = started.elapsed().as_secs_f64() * 1000.0 / 4.0;
-        // Debug builds are several times slower than release.
-        eprintln!("a chunk at stride 1: {each:.2} ms");
-        assert!(each < 40.0, "{each} ms");
     }
 }
