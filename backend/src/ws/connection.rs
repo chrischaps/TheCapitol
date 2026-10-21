@@ -175,6 +175,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // an empty list ten times a second (C0.4)
     let mut my_cell: Option<crate::engine::interest::Cell> = None;
     let mut sent_nobody = false;
+    // The last `positions`, with `my_cell`: only the gathering and crafting of
+    // the players in sight in it reach this socket (#275)
+    let mut seen: Option<std::sync::Arc<crate::engine::interest::Positions>> = None;
+    // Whether everyone in the world was in sight in it, so nothing needs filtering
+    let mut sees_everyone = false;
     // The items whose market channel this connection watches (E3.3)
     let mut market_items: std::collections::HashSet<String> = std::collections::HashSet::new();
     // This connection's command allowance (E0.7)
@@ -876,6 +881,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     Err(RecvError::Lagged(missed)) => {
                         tracing::warn!("Player {player_id}'s connection {connection_id} fell {missed} events behind; resyncing it");
                         counted.resynced();
+                        // The next `positions` tells it again what everyone in sight is doing
+                        seen = None;
+                        sees_everyone = false;
                         let messages = resync(&state.db, &state.game, &state.market, player_id, connection_id, missed, &market_items).await;
                         let mut sent = Ok(());
                         for msg in messages {
@@ -897,12 +905,31 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     // Only the players near this socket's (C0.4), each cell serialised once
                     // for every socket that sees it. A watcher sees round the avatar.
                     Ok(GameEvent::PlayerPositions(positions)) => {
-                        my_cell = positions.cell_of(player_id);
+                        let was_cell = std::mem::replace(&mut my_cell, positions.cell_of(player_id));
+                        let arrived: Vec<Uuid> = positions
+                            .come_into_sight(my_cell, seen.as_deref().map(|before| (before, was_cell)))
+                            .into_iter()
+                            .filter(|id| *id != player_id)
+                            .collect();
+                        sees_everyone = positions.sees_everyone(my_cell);
+                        seen = Some(std::sync::Arc::clone(&positions));
                         if my_cell.is_none() && std::mem::replace(&mut sent_nobody, true) {
                             continue;
                         }
                         sent_nobody = my_cell.is_none();
                         if sender.send(Message::Text(positions.message(my_cell).into())).await.is_err() {
+                            counted.ends(SocketEnd::SendFailed);
+                            break;
+                        }
+                        // Someone come into sight part way through a gather or a craft (#275)
+                        let mut sent = Ok(());
+                        for msg in arrived.into_iter().flat_map(|id| positions.catch_up(id)) {
+                            sent = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                            if sent.is_err() {
+                                break;
+                            }
+                        }
+                        if sent.is_err() {
                             counted.ends(SocketEnd::SendFailed);
                             break;
                         }
@@ -920,22 +947,30 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::PlayerLeft { player_id: left_id };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
-                    // M2: Extraction events
+                    // M2: Extraction events, from the players in sight (#275)
                     Ok(GameEvent::ExtractionStarted { player_id: pid, node_id, duration_ticks }) => {
-                        let msg = ServerMessage::ExtractionStarted { player_id: pid, node_id, duration_ticks };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
+                            let msg = ServerMessage::ExtractionStarted { player_id: pid, node_id, duration_ticks };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
                     }
                     Ok(GameEvent::ExtractionProgress { player_id: pid, progress, duration }) => {
-                        let msg = ServerMessage::ExtractionProgress { player_id: pid, progress, duration };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
+                            let msg = ServerMessage::ExtractionProgress { player_id: pid, progress, duration };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
                     }
                     Ok(GameEvent::ExtractionCompleted { player_id: pid, node_id, item_type, item_name, quantity, quality, tool }) => {
-                        let msg = ServerMessage::ExtractionCompleted { player_id: pid, node_id, item_type, item_name, quantity, quality, tool };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
+                            let msg = ServerMessage::ExtractionCompleted { player_id: pid, node_id, item_type, item_name, quantity, quality, tool };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
                     }
                     Ok(GameEvent::ExtractionCancelled { player_id: pid }) => {
-                        let msg = ServerMessage::ExtractionCancelled { player_id: pid };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
+                            let msg = ServerMessage::ExtractionCancelled { player_id: pid };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
                     }
                     Ok(GameEvent::ExtractionFailed { player_id: pid, reason }) => {
                         if pid == player_id {
@@ -951,22 +986,30 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::NodeRegenerated { node_id };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
-                    // M3: Crafting events
+                    // M3: Crafting events, from the players in sight (#275)
                     Ok(GameEvent::CraftingStarted { player_id: pid, operation_id, recipe_id, recipe_name, duration_ticks }) => {
-                        let msg = ServerMessage::CraftingStarted { player_id: pid, operation_id, recipe_id, recipe_name, duration_ticks };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
+                            let msg = ServerMessage::CraftingStarted { player_id: pid, operation_id, recipe_id, recipe_name, duration_ticks };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
                     }
                     Ok(GameEvent::CraftingProgress { player_id: pid, operation_id, progress, duration }) => {
-                        let msg = ServerMessage::CraftingProgress { player_id: pid, operation_id, progress, duration };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
+                            let msg = ServerMessage::CraftingProgress { player_id: pid, operation_id, progress, duration };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
                     }
                     Ok(GameEvent::CraftingCompleted { player_id: pid, operation_id, item_type, item_name, quantity, quality, tool }) => {
-                        let msg = ServerMessage::CraftingCompleted { player_id: pid, operation_id, item_type, item_name, quantity, quality, tool };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
+                            let msg = ServerMessage::CraftingCompleted { player_id: pid, operation_id, item_type, item_name, quantity, quality, tool };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
                     }
                     Ok(GameEvent::CraftingCancelled { player_id: pid, operation_id }) => {
-                        let msg = ServerMessage::CraftingCancelled { player_id: pid, operation_id };
-                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        if pid == player_id || sees_everyone || seen.as_ref().is_some_and(|p| p.sees(my_cell, pid)) {
+                            let msg = ServerMessage::CraftingCancelled { player_id: pid, operation_id };
+                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
                     }
                     Ok(GameEvent::CraftingFailed { player_id: pid, reason }) => {
                         if pid == player_id {

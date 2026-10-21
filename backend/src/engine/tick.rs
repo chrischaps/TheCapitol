@@ -50,6 +50,8 @@ pub struct GameState {
     /// [`GameState::refresh_catalog`] once they're loaded
     pub catalog: Arc<CatalogResponse>,
     pub crafting_operations: HashMap<Uuid, CraftingOperation>,
+    /// The last tick's positions, so the next can say who changed cell (#275)
+    last_positions: Option<Arc<super::interest::Positions>>,
     pub command_queue: Vec<Command>,
     pub event_sender: broadcast::Sender<GameEvent>,
     pub tick_count: u64,
@@ -116,6 +118,7 @@ impl GameState {
                 recipes: Vec::new(),
             }),
             crafting_operations: HashMap::new(),
+            last_positions: None,
             command_queue: Vec::new(),
             event_sender,
             tick_count: 0,
@@ -333,7 +336,7 @@ impl GameState {
 
     /// Every player's position, by interest cell, as `positions` sends them each tick (C0.4)
     pub fn positions(&self) -> super::interest::Positions {
-        super::interest::Positions::of(self.players.values())
+        super::interest::Positions::of(self.players.values(), &self.recipes)
     }
 
     /// Tell `player_id`, and only them, why their trade `command` (its `ClientMessage` tag) was refused
@@ -659,11 +662,12 @@ impl GameState {
         }
     }
 
-    fn broadcast_positions(&self) {
-        let positions = self.positions();
+    fn broadcast_positions(&mut self) {
+        let positions = Arc::new(self.positions().after(self.last_positions.as_deref()));
         if !positions.is_empty() {
-            let _ = self.event_sender.send(GameEvent::PlayerPositions(Arc::new(positions)));
+            let _ = self.event_sender.send(GameEvent::PlayerPositions(Arc::clone(&positions)));
         }
+        self.last_positions = Some(positions);
     }
 
     fn tick(&mut self) {
