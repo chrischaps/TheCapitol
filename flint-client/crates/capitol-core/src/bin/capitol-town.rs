@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! capitol-town mint --count 20      # make twenty citizens, onto town.toml
+//! capitol-town mint --count 2 --role merchant   # and two merchants (C1.6)
 //! capitol-town                      # live until Ctrl-C
 //! capitol-town --status             # the running town's last health
 //! ```
@@ -19,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use capitol_core::citizen::schedule;
 use capitol_core::citizen::town::{self, Admin, Roster, Town};
 use capitol_core::net::NetConfig;
+use capitol_core::sim::Role;
 
 const USAGE: &str = "\
 capitol-town: the citizens of The Capitol
@@ -30,7 +32,7 @@ USAGE:
                                  out for the night. A citizen whose life
                                  ends starts again after a backoff; one
                                  whose key is refused retires.
-    capitol-town mint --count <n>
+    capitol-town mint --count <n> [--role <role>]
                                  Make n citizens through the admin endpoint
                                  and add them, with their keys and their
                                  seeded personas, to the roster
@@ -44,6 +46,10 @@ FLAGS:
     --every <secs>    How often a running town prints and writes its health
                       [default: 60]
     --count <n>       With mint, how many citizens to make
+    --role <role>     With mint, make every one of them this: gatherer-fiber,
+                      gatherer-wood, gatherer-ore, crafter-planks,
+                      crafter-ingots, crafter-tools, builder or merchant
+                      [default: the sim's mix, which has no merchants]
     --admin <email>   With mint, an admin account to make them as
                       [default: $CAPITOL_ADMIN_EMAIL]. Its password is read
                       from $CAPITOL_ADMIN_PASSWORD only, never a flag.
@@ -73,6 +79,8 @@ struct Options {
     server: Option<String>,
     every: Duration,
     admin: Option<String>,
+    /// With mint, the role to make every citizen
+    role: Option<Role>,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
@@ -84,6 +92,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         server: std::env::var("CAPITOL_SERVER").ok().filter(|s| !s.is_empty()),
         every: Duration::from_secs(60),
         admin: std::env::var("CAPITOL_ADMIN_EMAIL").ok().filter(|s| !s.is_empty()),
+        role: None,
     };
     let mut admin_given = false;
     let mut every_given = false;
@@ -115,6 +124,10 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                 }
                 count = Some(n);
             }
+            "--role" => {
+                let slug = value()?;
+                options.role = Some(Role::from_slug(&slug).ok_or_else(|| format!("--role: {slug:?} is no role"))?);
+            }
             "--admin" => {
                 options.admin = Some(value()?);
                 admin_given = true;
@@ -131,6 +144,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
     };
     if admin_given && !matches!(options.action, Action::Mint { .. }) {
         return Err("--admin goes with mint".into());
+    }
+    if options.role.is_some() && !matches!(options.action, Action::Mint { .. }) {
+        return Err("--role goes with mint".into());
     }
     if every_given && options.action != Action::Run {
         return Err("--every goes with run".into());
@@ -171,6 +187,7 @@ fn mint(options: &Options, count: usize) -> Result<(), String> {
         &Admin { email, password },
         &mut roster,
         count,
+        options.role,
     );
     for citizen in &roster.citizens[had..] {
         let p = &citizen.persona;
@@ -377,8 +394,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(o.action, Action::Mint { count: 20 });
+        assert_eq!(o.role, None);
         assert_eq!(o.admin.as_deref(), Some("chris@example.com"));
         assert_eq!(o.roster, PathBuf::from("t/x.toml"));
+        let o = parse(args("mint --count 2 --role merchant")).unwrap().unwrap();
+        assert_eq!(o.role, Some(Role::Merchant));
         assert_eq!(parse(args("--status")).unwrap().unwrap().action, Action::Status);
         assert_eq!(parse(args("status")).unwrap().unwrap().action, Action::Status);
         let o = parse(args("run --every 5 --server http://x:3001")).unwrap().unwrap();
@@ -394,6 +414,8 @@ mod tests {
         assert!(parse(args("--count 3")).is_err(), "--count without mint");
         assert!(parse(args("run --admin a@b")).is_err());
         assert!(parse(args("mint status --count 2")).is_err());
+        assert!(parse(args("mint --count 2 --role poet")).is_err());
+        assert!(parse(args("run --role merchant")).is_err(), "--role without mint");
         assert!(parse(args("status --every 5")).is_err());
         assert!(parse(args("--every 0")).is_err());
         assert!(parse(args("--fly")).is_err());

@@ -6,7 +6,9 @@
 # path from this file's directory holding the key alone.
 #
 # A role is one of the sim's: gatherer-fiber, gatherer-wood, gatherer-ore,
-# crafter-planks, crafter-ingots, crafter-tools, builder.
+# crafter-planks, crafter-ingots, crafter-tools, builder; or merchant (C1.6),
+# who earns a float banking fiber, then makes a market in three goods at the
+# hall. `mint --count n --role merchant` makes merchants.
 #
 # The persona (C1.2). `mint` writes all of it, drawn from the citizen's
 # name; any of the four lines left out is drawn from the name again, so

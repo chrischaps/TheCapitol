@@ -104,10 +104,11 @@ pub const HOME_ZONES: [Zone; 2] = [Zone::Rural, Zone::Suburban];
 
 impl Home {
     fn seeded(rng: &mut Rng, role: Role) -> Home {
-        // Gatherers live out by the land they work; crafters nearer town
+        // Gatherers live out by the land they work; crafters and merchants
+        // nearer town
         let rural = match role {
             Role::Gatherer(_) => 0.7,
-            Role::Crafter(_) => 0.3,
+            Role::Crafter(_) | Role::Merchant => 0.3,
             Role::Builder => 0.5,
         };
         let zone = if rng.unit() < rural { Zone::Rural } else { Zone::Suburban };
@@ -259,6 +260,7 @@ fn surnames(role: Role) -> &'static [&'static str] {
         Role::Crafter(Craft::Ingots) => &["Smith", "Ironside", "Brazier", "Furness", "Bloom", "Ironmonger"],
         Role::Crafter(Craft::Tools) => &["Wright", "Cutler", "Toller", "Hammond", "Arkwright", "Wainwright"],
         Role::Builder => &["Mason", "Tyler", "Slater", "Bricker", "Thatcher", "Builder"],
+        Role::Merchant => &["Chapman", "Mercer", "Marchant", "Packman", "Spicer", "Draper"],
     }
 }
 
@@ -290,7 +292,7 @@ fn mix(mut x: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::MIX;
+    use crate::sim::ROLES;
     use std::collections::HashSet;
 
     #[test]
@@ -381,7 +383,7 @@ mod tests {
 
     #[test]
     fn names_fit_the_servers_limit_and_mostly_differ() {
-        for (role, _) in MIX {
+        for role in ROLES {
             let names: HashSet<String> = (0..20).map(|n| name(role, n)).collect();
             // 48 × 6 names to draw from: twenty draws seldom meet twice
             assert!(names.len() >= 17, "{role}: {names:?}");

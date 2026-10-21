@@ -19,14 +19,18 @@
 //!   did: the sim showed that weighing it at all sent wood gatherers to the
 //!   hall half as often again, on bids a Strand over a 1-Strand trade;
 //! - **risk** asks above the bid, up to halfway to the ask;
-//! - **sociability** passes free time at the hall rather than resting.
+//! - **sociability** passes free time at the hall rather than resting;
+//! - **patience**, again, earns a bigger float before a merchant makes a
+//!   market (C1.6): `MERCHANT_FLOAT` times 0.5 to 1.5. One already making a
+//!   market keeps at it down to half that, so it doesn't flit between the
+//!   hall and the fields at the line.
 //!
 //! People (C1.5): a standing bid is at the books' price (under it for the
 //! thrifty, who'd sooner gather), a stall's price above it (more for the
 //! bold), and a P2P trade is weighed whole at the books ([`trade`]).
 
 use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Verdict};
-use crate::sim::{BANK_FIBER_AT, LOT, SELL_AT, STALL_AT};
+use crate::sim::{BANK_FIBER_AT, LOT, MERCHANT_FLOAT, SELL_AT, STALL_AT};
 
 /// What "what the rules would do" is worth.
 const SURE: f64 = 0.9;
@@ -124,6 +128,10 @@ impl Decider for RulesDecider {
                 Choice::Accept | Choice::Counter { .. } | Choice::Pay { .. } | Choice::Decline => trade(s, i, choice),
                 Choice::Rest => (0.8 - 0.2 * t.sociability as f64, Decision::plain(i)),
                 Choice::Hall => (0.4 + 0.4 * t.sociability as f64, Decision::plain(i)),
+                Choice::MakeMarket { float, making, .. } => {
+                    let enough = lot(MERCHANT_FLOAT as i32, t.patience) * if *making { 0.5 } else { 1.0 };
+                    (SURE * *float as f64 / enough, Decision::plain(i))
+                }
             };
             scored.push((i, u, d));
         }
@@ -421,6 +429,33 @@ mod tests {
         assert_eq!(decide(&situation(Question::FreeTime, menu(), Temperament::default())).0.pick, 0);
         let social = with(|t| t.sociability = 0.9);
         assert_eq!(decide(&situation(Question::FreeTime, menu(), social)).0.pick, 1);
+    }
+
+    #[test]
+    fn a_merchant_makes_a_market_once_its_float_is_earned_and_keeps_at_it() {
+        let menu = |float: i64, making: bool| {
+            vec![
+                Choice::MakeMarket {
+                    items: vec!["log".into()],
+                    float,
+                    making,
+                },
+                Choice::Work {
+                    goal: "more fiber".into(),
+                    step: "gather fiber".into(),
+                },
+            ]
+        };
+        let pick = |float, making, t| decide(&situation(Question::Market, menu(float, making), t)).0.pick;
+        let middling = Temperament::default();
+        assert_eq!(pick(MERCHANT_FLOAT - 1, false, middling), 1, "still earning");
+        assert_eq!(pick(MERCHANT_FLOAT, false, middling), 0);
+        // At it already, it keeps on down to half the float
+        assert_eq!(pick(MERCHANT_FLOAT / 2 + 1, true, middling), 0);
+        assert_eq!(pick(MERCHANT_FLOAT / 2 - 10, true, middling), 1);
+        // The impatient start sooner, the patient later
+        assert_eq!(pick(MERCHANT_FLOAT * 6 / 10, false, with(|t| t.patience = 0.0)), 0);
+        assert_eq!(pick(MERCHANT_FLOAT * 12 / 10, false, with(|t| t.patience = 1.0)), 1);
     }
 
     fn offer(theirs: i64, ours: i32, t: Temperament) -> Situation {

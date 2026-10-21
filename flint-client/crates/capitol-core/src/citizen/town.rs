@@ -233,7 +233,7 @@ impl Roster {
         for c in file.citizens {
             let what = |problem: &str| format!("{}: citizen {:?} {problem}", path.display(), c.name);
             let role = Role::from_slug(&c.role).ok_or_else(|| {
-                let known: Vec<&str> = sim::MIX.iter().map(|(r, _)| r.slug()).collect();
+                let known: Vec<&str> = sim::ROLES.iter().map(|r| r.slug()).collect();
                 what(&format!("has role {:?}; a role is one of {}", c.role, known.join(", ")))
             })?;
             let persona = c.persona(role).map_err(|e| what(&e))?;
@@ -349,11 +349,18 @@ pub struct Admin {
 
 /// Makes `count` citizens through `POST /admin/citizens` (C0.1) and adds each
 /// to the roster as soon as it's made: its key's secret is shown only once.
-/// Roles continue the sim's mix from the roster's size, so any town is a mix.
-/// Names come from [`persona::name`]; one the server says is taken is passed
+/// Each is of `role`, or, with none given, roles continue the sim's mix from
+/// the roster's size, so any town is a mix. Merchants (C1.6) are made only
+/// by name. Names come from [`persona::name`]; one the server says is taken is passed
 /// over for the next. Returns the citizens made; on an error, those made
 /// before it are on the roster all the same.
-pub fn mint(config: &NetConfig, admin: &Admin, roster: &mut Roster, count: usize) -> Result<Vec<Citizen>, String> {
+pub fn mint(
+    config: &NetConfig,
+    admin: &Admin,
+    roster: &mut Roster,
+    count: usize,
+    role: Option<Role>,
+) -> Result<Vec<Citizen>, String> {
     let login = RestRequest::Login(LoginRequest {
         email: admin.email.clone(),
         password: admin.password.clone(),
@@ -364,7 +371,10 @@ pub fn mint(config: &NetConfig, admin: &Admin, roster: &mut Roster, count: usize
         Err(e) => return Err(format!("signing in as {}: {e}", admin.email)),
     };
     let had = roster.citizens.len();
-    let roles = Role::assign(had + count);
+    let roles = match role {
+        Some(role) => vec![role; had + count],
+        None => Role::assign(had + count),
+    };
     let mut made = Vec::with_capacity(count);
     for (i, &role) in roles.iter().enumerate().skip(had) {
         let mut tries = (0..NAME_TRIES)

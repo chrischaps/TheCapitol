@@ -187,6 +187,9 @@ pub enum Question {
     },
     /// What to do with time on its hands.
     FreeTime,
+    /// Whether a merchant makes a market with its float now, or goes on
+    /// earning it (C1.6).
+    Market,
 }
 
 impl Question {
@@ -199,6 +202,7 @@ impl Question {
             Question::Buy { item } => format!("buy {item}"),
             Question::Trade { partner, .. } => format!("trade {partner}"),
             Question::FreeTime => "free time".into(),
+            Question::Market => "market".into(),
         }
     }
 }
@@ -285,6 +289,11 @@ pub enum Choice {
     Rest,
     /// Pass the time at the Exchange hall, among people.
     Hall,
+    /// Make a market in `items` at the hall (C1.6): quote both sides of
+    /// each, sized to what it holds. `float` is what it has to do it with,
+    /// in Strands: its Strands, those on its bids included, and its stock
+    /// at its books. `making` says it's at it already.
+    MakeMarket { items: Vec<String>, float: i64, making: bool },
 }
 
 impl Choice {

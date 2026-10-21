@@ -7,7 +7,9 @@
 //! (C1.5, [`people`]): they answer trades, leave standing bids for what
 //! their trade needs, and keep a stall when they make more than the hall
 //! takes. The swarm's bots don't, so the E2.7 sim's numbers stay comparable.
+//! A town's merchants (C1.6, [`merchant`]) earn a float and make a market.
 
+mod merchant;
 mod people;
 
 use std::collections::HashMap;
@@ -197,6 +199,9 @@ pub(crate) fn live(mut bot: Bot, role: Role, persona: &Persona, seed: u64, mind:
     let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true, mind);
     citizen.people = true;
     citizen.persona = Some(persona.clone());
+    if role == Role::Merchant {
+        citizen.merchant = Some(merchant::Merchant::new(seed));
+    }
     citizen.work(None, Some(town))
 }
 
@@ -292,6 +297,8 @@ struct SimBot {
     persona: Option<Persona>,
     /// At its market this market's hours.
     at_market: bool,
+    /// A merchant's goods and its market (C1.6).
+    merchant: Option<merchant::Merchant>,
 }
 
 /// What a bot does next.
@@ -331,6 +338,7 @@ impl SimBot {
             people: false,
             persona: None,
             at_market: false,
+            merchant: None,
         }
     }
 
@@ -423,6 +431,7 @@ impl SimBot {
                     }
                     let began = self.now();
                     let result = match &action {
+                        Action::Trade(Trade::MakeMarket) => self.make_market(town),
                         Action::Trade(trade) => self.trade(trade),
                         Action::Step(step) => self.take(step),
                         Action::Market => self.keep_market(town),
@@ -640,6 +649,9 @@ impl SimBot {
     /// Asks the mind whether to sell the role's product before `errand`,
     /// and if not, whether to buy what it would gather. `None`: just do it.
     fn choose_trade(&mut self, holdings: &Holdings, errand: &Errand) -> Option<Trade> {
+        if self.merchant.is_some() {
+            return self.choose_market(holdings, errand);
+        }
         if let Some(product) = self.role.product() {
             let (bid, ask) = self.best(product);
             if let Some(menu) = self.role.sell_menu(holdings, errand.goal.as_ref(), bid, ask) {
@@ -857,6 +869,7 @@ impl SimBot {
     /// (#211), and the next step's walk takes the bot back out.
     fn trade(&mut self, trade: &Trade) -> Result<(), BotError> {
         match trade {
+            Trade::MakeMarket => return self.make_market(None),
             Trade::Stock { item, quantity, price } => return self.keep_stall(item, *quantity, *price),
             Trade::Bid { item, quantity, price } => {
                 self.bot.go_to_exchange()?;
@@ -896,7 +909,7 @@ impl SimBot {
                     grade_rule: None,
                 }
             }
-            Trade::Bid { .. } | Trade::Stock { .. } => {
+            Trade::Bid { .. } | Trade::Stock { .. } | Trade::MakeMarket => {
                 return Err(BotError::Failed(format!("{} isn't a trade at the hall", trade.label())))
             }
             Trade::Buy { item, quantity, price } => PlaceOrder {

@@ -66,6 +66,10 @@ pub enum Role {
     Crafter(Craft),
     /// Buys a deed and puts every station on it.
     Builder,
+    /// Earns a float by gathering fiber and banking it, then makes a market
+    /// in a few goods with it (C1.6). Not in the swarm's [`MIX`]: the town
+    /// mints merchants when asked (`mint --role merchant`).
+    Merchant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -93,8 +97,27 @@ pub const MIX: [(Role, f64); 7] = [
     (Role::Builder, 0.15),
 ];
 
+/// Every role: the swarm's [`MIX`], then the merchant.
+pub const ROLES: [Role; 8] = [
+    Role::Gatherer(Gather::Fiber),
+    Role::Gatherer(Gather::Wood),
+    Role::Gatherer(Gather::Ore),
+    Role::Crafter(Craft::Planks),
+    Role::Crafter(Craft::Ingots),
+    Role::Crafter(Craft::Tools),
+    Role::Builder,
+    Role::Merchant,
+];
+
 /// A fiber gatherer banks its fiber at the exchange once it holds this much.
 pub const BANK_FIBER_AT: i32 = 200;
+/// The Strands a middling merchant earns before it makes a market, its
+/// float (C1.6): two levels of [`MIN_ORDER_VALUE`](crate::market_maker::MIN_ORDER_VALUE)
+/// a side in each of its [`MERCHANT_ITEMS`]' worth, about. Patience scales
+/// it 0.5 to 1.5, as it does a lot.
+pub const MERCHANT_FLOAT: i64 = 600;
+/// How many goods a merchant deals in.
+pub const MERCHANT_ITEMS: usize = 3;
 
 /// What the sim's market makers quote, and the swarm trades through them:
 /// the raw and processed goods the chains pass along.
@@ -118,6 +141,8 @@ pub enum Trade {
     Bid { item: String, quantity: i32, price: i64 },
     /// Units for its stall at the bazaar, renting one if need be (C1.5).
     Stock { item: String, quantity: i32, price: i64 },
+    /// A merchant's spell of making a market in its goods (C1.6).
+    MakeMarket,
 }
 
 impl Trade {
@@ -128,6 +153,7 @@ impl Trade {
             Trade::Buy { item, .. } => format!("buy {item}"),
             Trade::Bid { item, .. } => format!("bid for {item}"),
             Trade::Stock { item, .. } => format!("stock {item}"),
+            Trade::MakeMarket => "make a market".into(),
         }
     }
 }
@@ -186,7 +212,8 @@ impl Role {
         let unmet = |goal: &Goal| plan::next(catalog, holdings, goal) != Ok(None);
         let then = |lacking: Vec<Goal>, more: Goal| -> Vec<Goal> { lacking.into_iter().filter(unmet).chain([more]).collect() };
         match self {
-            Role::Gatherer(Gather::Fiber) => vec![more("fiber")],
+            // A merchant earns its float as a fiber gatherer does
+            Role::Gatherer(Gather::Fiber) | Role::Merchant => vec![more("fiber")],
             Role::Gatherer(Gather::Wood) => vec![more("log")],
             Role::Gatherer(Gather::Ore) => vec![more("iron_ore")],
             Role::Crafter(Craft::Planks) => vec![more("plank")],
@@ -204,17 +231,22 @@ impl Role {
             Role::Crafter(Craft::Planks) => Some("plank"),
             Role::Crafter(Craft::Ingots) => Some("iron_ingot"),
             Role::Builder => Some("brick"),
-            Role::Gatherer(Gather::Fiber) | Role::Crafter(Craft::Tools) => None,
+            Role::Gatherer(Gather::Fiber) | Role::Crafter(Craft::Tools) | Role::Merchant => None,
         }
     }
 
-    /// A citizen's work menu (C1.3): banking, for a fiber gatherer with
-    /// fiber to bank, then each of [`goals`](Self::goals) in order with the
+    /// Whether the role earns by banking fiber at the exchange.
+    pub fn banks(&self) -> bool {
+        matches!(self, Role::Gatherer(Gather::Fiber) | Role::Merchant)
+    }
+
+    /// A citizen's work menu (C1.3): banking, for a role that
+    /// [`banks`](Self::banks) with fiber to bank, then each of [`goals`](Self::goals) in order with the
     /// step it starts with. Goals already met, and goals no step leads to,
     /// are left off. `Err` names why, when every goal is stuck.
     pub fn errands(&self, catalog: &Catalog, holdings: &Holdings) -> Result<Vec<Errand>, plan::Stuck> {
         let mut errands = Vec::new();
-        if *self == Role::Gatherer(Gather::Fiber) && holdings.count(crate::exchange::FIBER) >= BANK_FIBER_AT / 4 {
+        if self.banks() && holdings.count(crate::exchange::FIBER) >= BANK_FIBER_AT / 4 {
             errands.push(Errand {
                 goal: None,
                 step: Step::Deposit,
@@ -289,9 +321,10 @@ impl Role {
     /// from logs, ingots smelted from ore with charcoal, tools knapped from
     /// stone with handles of plank and heads of iron, and a builder's
     /// stations take stone, logs, iron, planks and charcoal for its bricks.
+    /// A merchant's buying is its market's bids.
     pub fn needs(&self) -> &'static [&'static str] {
         match self {
-            Role::Gatherer(_) => &[],
+            Role::Gatherer(_) | Role::Merchant => &[],
             Role::Crafter(Craft::Planks) => &["log"],
             Role::Crafter(Craft::Ingots) => &["iron_ore", "charcoal"],
             Role::Crafter(Craft::Tools) => &["stone", "plank", "iron_ingot"],
@@ -360,13 +393,35 @@ impl Role {
             Role::Crafter(Craft::Ingots) => "crafter-ingots",
             Role::Crafter(Craft::Tools) => "crafter-tools",
             Role::Builder => "builder",
+            Role::Merchant => "merchant",
         }
     }
 
     /// The role a [`slug`](Self::slug) names.
     pub fn from_slug(slug: &str) -> Option<Role> {
-        MIX.iter().map(|(role, _)| *role).find(|role| role.slug() == slug)
+        ROLES.into_iter().find(|role| role.slug() == slug)
     }
+}
+
+/// The goods a merchant deals in (C1.6): [`MERCHANT_ITEMS`] of
+/// [`MARKET_ITEMS`], picked by `seed`, so a town's merchants spread over
+/// the market and each keeps to its own goods from life to life.
+pub fn merchant_items(seed: u64) -> Vec<&'static str> {
+    let mut items = MARKET_ITEMS.to_vec();
+    let mut h = seed;
+    let mut picked = Vec::with_capacity(MERCHANT_ITEMS);
+    while picked.len() < MERCHANT_ITEMS && !items.is_empty() {
+        // SplitMix64's step
+        h = h.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = h;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        picked.push(items.remove((z % items.len() as u64) as usize));
+    }
+    // In the market's own order, so a merchant's report reads the same way
+    picked.sort_by_key(|i| MARKET_ITEMS.iter().position(|m| m == i));
+    picked
 }
 
 /// How many, up to two lots, a bot can bid for at `price`, keeping a deed's
@@ -391,6 +446,7 @@ impl fmt::Display for Role {
             Role::Crafter(Craft::Ingots) => write!(f, "crafter (ingots)"),
             Role::Crafter(Craft::Tools) => write!(f, "crafter (tools)"),
             Role::Builder => write!(f, "builder"),
+            Role::Merchant => write!(f, "merchant"),
         }
     }
 }
@@ -402,10 +458,34 @@ mod tests {
 
     #[test]
     fn every_role_has_a_slug_that_names_it_again() {
-        for (role, _) in MIX {
+        for role in ROLES {
             assert_eq!(Role::from_slug(role.slug()), Some(role));
         }
         assert_eq!(Role::from_slug("gatherer"), None);
+        // Every role of the mix is among them, and the merchant isn't in the mix
+        assert!(MIX.iter().all(|(r, _)| ROLES.contains(r)));
+        assert!(!MIX.iter().any(|(r, _)| *r == Role::Merchant));
+    }
+
+    #[test]
+    fn a_merchant_earns_by_fiber_and_deals_in_three_goods_of_its_own() {
+        let catalog = Catalog::fallback();
+        let mut h = Holdings::default();
+        h.items.insert("fiber".into(), BANK_FIBER_AT / 4);
+        let errands = Role::Merchant.errands(&catalog, &h).unwrap();
+        assert_eq!(errands[0].choice(&catalog), Choice::Bank);
+        assert_eq!(errands[1].goal, Some(Goal::hold("fiber", BANK_FIBER_AT / 4 + 1)));
+        assert_eq!(Role::Merchant.product(), None);
+        assert!(Role::Merchant.needs().is_empty());
+        let items = merchant_items(7);
+        assert_eq!(items, merchant_items(7));
+        assert_eq!(items.len(), MERCHANT_ITEMS);
+        assert!(items.iter().all(|i| MARKET_ITEMS.contains(i)));
+        let distinct: std::collections::HashSet<_> = items.iter().collect();
+        assert_eq!(distinct.len(), MERCHANT_ITEMS);
+        // A town's merchants spread over the market
+        let dealt: std::collections::HashSet<&str> = (0..8).flat_map(merchant_items).collect();
+        assert_eq!(dealt.len(), MARKET_ITEMS.len());
     }
 
     #[test]
