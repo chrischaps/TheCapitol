@@ -29,7 +29,7 @@ use crate::world::land;
 use crate::world::mesh::{MeshBuf, UP};
 use crate::world::palette::{glow, hex, mix};
 use capitol_core::motion::Pose;
-use capitol_core::protocol::terrain::{RoadType, WaterRing};
+use capitol_core::protocol::terrain::{RoadSegment, RoadType, WaterRing};
 use capitol_core::state::{Activity, GameState};
 use flint_core::EntityId;
 use flint_player::{ExtensionCtx, ExtensionGpu};
@@ -361,18 +361,62 @@ fn smooth(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// The street a stroll keeps to (#349), in world metres: a point on its
+/// centreline, the unit way along it, and how far either side of the
+/// centre a walker's middle may go.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Street {
+    pub centre: [f32; 2],
+    pub along: [f32; 2],
+    pub half: f32,
+}
+
+impl Street {
+    /// How far a walker keeps from a street's edge: a figure's half width
+    /// and a little air, so nobody brushes a stall
+    const MARGIN: f32 = 0.5;
+
+    /// The street under `at`: the nearest road segment whose width covers
+    /// it, with `at` brought onto its centreline. `None` off every road.
+    pub fn at(roads: &[RoadSegment], at: [f32; 2]) -> Option<Street> {
+        let mut best: Option<(f32, Street)> = None;
+        for road in roads {
+            let half = road.width as f32 * crate::coords::S / 2.0;
+            for w in road.points.windows(2) {
+                let (a, b) = (to_world(w[0].0, w[0].1), to_world(w[1].0, w[1].1));
+                let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+                if len < 1e-3 {
+                    continue;
+                }
+                let u = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+                let s = ((at[0] - a[0]) * u[0] + (at[1] - a[1]) * u[1]).clamp(0.0, len);
+                let p = [a[0] + u[0] * s, a[1] + u[1] * s];
+                let off = (at[0] - p[0]).hypot(at[1] - p[1]);
+                if off <= half && best.is_none_or(|(d, _)| off < d) {
+                    let street = Street { centre: p, along: u, half: (half - Self::MARGIN).max(0.0) };
+                    best = Some((off, street));
+                }
+            }
+        }
+        best.map(|(_, s)| s)
+    }
+}
+
 /// `--citizen-sample stroll` (#346): people and citizens walking up and
 /// down the way the camera looks, `t` seconds after they set off, as if
 /// along a street through where it looks. Each keeps a lane of its own
 /// across the view, and one lingers. Mostly citizens, since they're what
 /// it's for. Over ten seconds they all stay within fourteen metres of
 /// where it looks; nobody wraps round, so a walker who leaves stays out.
-pub fn stroll(target: [f32; 2], camera: [f32; 2], t: f32) -> (GameState, Vec<Pose>) {
+/// On a `street` they walk along it instead, its lanes squeezed to fit
+/// inside it, so nobody walks through what lines it (#349).
+pub fn stroll(target: [f32; 2], camera: [f32; 2], street: Option<Street>, t: f32) -> (GameState, Vec<Pose>) {
     use capitol_core::net::ConnectionState;
     use capitol_core::protocol::ws::{PlayerPosition, ServerMessage};
-    // Name, citizen, lane across the view (m, + to the right), where along
-    // it they start (m past where the camera looks) and their pace along
-    // it (m/s, negative toward the camera)
+    // Name, citizen, lane across the view (m, + to the right, for a street
+    // LANES either side), where along it they start (m past where the
+    // camera looks) and their pace along it (m/s, negative toward the camera)
+    const LANES: f32 = 2.0;
     const WALKERS: [(&str, bool, f32, f32, f32); 7] = [
         ("Corin", true, -1.6, -3.0, 1.1),
         ("Elsbeth", true, 1.3, 9.0, -1.0),
@@ -386,14 +430,22 @@ pub fn stroll(target: [f32; 2], camera: [f32; 2], t: f32) -> (GameState, Vec<Pos
     state.apply_connection(&ConnectionState::Connected { player_id: Uuid::from_u128(0xc0_03_ff) });
     let (dx, dz) = (target[0] - camera[0], target[1] - camera[1]);
     let len = dx.hypot(dz).max(1e-3);
-    let away = [dx / len, dz / len];
+    let (origin, away, squeeze) = match street {
+        // Along the street, whichever way runs away from the camera
+        Some(s) => {
+            let sign = if s.along[0] * dx + s.along[1] * dz < 0.0 { -1.0 } else { 1.0 };
+            (s.centre, [s.along[0] * sign, s.along[1] * sign], (s.half / LANES).min(1.0))
+        }
+        None => (target, [dx / len, dz / len], 1.0),
+    };
     let right = [-away[1], away[0]];
     let mut poses = Vec::new();
     for (i, (name, citizen, lane, from, pace)) in WALKERS.into_iter().enumerate() {
         let along = from + pace * t;
+        let lane = lane * squeeze;
         let [x, y] = crate::coords::to_server(
-            target[0] + away[0] * along + right[0] * lane,
-            target[1] + away[1] * along + right[1] * lane,
+            origin[0] + away[0] * along + right[0] * lane,
+            origin[1] + away[1] * along + right[1] * lane,
         );
         let id = Uuid::from_u128(0xc0_03_00 + i as u128);
         state.apply_ws(&ServerMessage::PlayerJoined {
@@ -814,9 +866,37 @@ mod tests {
     }
 
     #[test]
+    fn on_a_narrow_street_the_stroll_keeps_inside_it() {
+        // The bazaar's lane: 2.4 m across, running west along z 29.75,
+        // and a camera looking down it a little askew
+        let ends = [crate::coords::to_server(0.0, 29.75), crate::coords::to_server(-26.7, 29.75)];
+        let lane = RoadSegment {
+            id: "bazaar_lane".into(),
+            road_type: RoadType::Grid,
+            points: ends.iter().map(|&[x, y]| (x, y)).collect(),
+            width: 24.0,
+        };
+        let street = Street::at(std::slice::from_ref(&lane), [-16.0, 30.1]).expect("on the lane");
+        assert!((street.centre[1] - 29.75).abs() < 1e-3, "brought onto the centreline");
+        assert!((street.half - 0.7).abs() < 1e-3);
+        assert_eq!(Street::at(std::slice::from_ref(&lane), [-16.0, 32.0]), None, "off it");
+        for t in 0..=10 {
+            let (_, poses) = stroll([-16.0, 30.1], [-3.0, 31.0], Some(street), t as f32);
+            for p in &poses {
+                let [_, z] = to_world(p.x, p.y);
+                assert!((z - 29.75).abs() <= 0.7 + 1e-3, "t {t}: {z} leaves the lane");
+                if p.moving {
+                    // Along the lane: west (π) or east (0), never across it
+                    assert!(p.facing.sin().abs() < 1e-3, "{}", p.facing);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_stroll_walks_up_and_down_the_way_the_camera_looks() {
         // The camera at z 40 looks north (-Z) to z 20: walking away is -Z
-        let at = |t: f32| stroll([10.0, 20.0], [10.0, 40.0], t);
+        let at = |t: f32| stroll([10.0, 20.0], [10.0, 40.0], None, t);
         let (state, start) = at(0.0);
         let (_, later) = at(5.0);
         assert!(start.iter().filter(|p| state.player(p.id).is_some_and(|p| p.citizen)).count() >= 4);

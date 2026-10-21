@@ -61,6 +61,17 @@ const FORM_FADE: f32 = 0.8;
 /// pixels, for it to be a click (cancel placing) rather than an orbit.
 const RIGHT_CLICK_SLOP: f64 = 6.0;
 
+
+/// `--citizen-sample stroll` (#346), once the camera settled: where it
+/// looked, where it stood, the street there (#349) and when.
+#[derive(Clone, Copy)]
+struct Stroll {
+    target: [f32; 2],
+    camera: [f32; 2],
+    street: Option<crate::entities::Street>,
+    from: f64,
+}
+
 pub struct CapitolExtension {
     shared: Shared,
     terrain: TerrainSource,
@@ -97,9 +108,10 @@ pub struct CapitolExtension {
     /// where the camera looks, stood there once it's settled.
     citizen_sample: Option<Option<(capitol_core::state::GameState, Vec<capitol_core::motion::Pose>)>>,
     /// `--citizen-sample stroll` (#346): walk them, from where the camera
-    /// looked, where it stood and when, once it settled
+    /// looked, where it stood, the street there (#349) and when, once it
+    /// settled
     citizen_strolls: bool,
-    citizen_stroll: Option<([f32; 2], [f32; 2], f64)>,
+    citizen_stroll: Option<Stroll>,
     /// The grass fields over the rural ring and the wilderness (P8.6c).
     grass: world::grass::Grass,
     /// The wilds' height field, sampled off the main thread (W9), its
@@ -930,12 +942,14 @@ impl PlayerExtension for CapitolExtension {
                 let (t, c) = (ctx.camera.target, ctx.camera.position);
                 let (t, c) = ([t.x, t.z], [c.x, c.z]);
                 if self.citizen_strolls {
-                    self.citizen_stroll = Some((t, c, ctx.clock.total_time));
+                    // On the street under where it looks, if there is one (#349)
+                    let street = self.built.as_ref().and_then(|b| crate::entities::Street::at(&b.roads, t));
+                    self.citizen_stroll = Some(Stroll { target: t, camera: c, street, from: ctx.clock.total_time });
                 }
                 *sample = Some(crate::entities::sample(t, c));
             }
-            if let Some((t, c, from)) = self.citizen_stroll {
-                *sample = Some(crate::entities::stroll(t, c, (ctx.clock.total_time - from) as f32));
+            if let Some(s) = self.citizen_stroll {
+                *sample = Some(crate::entities::stroll(s.target, s.camera, s.street, (ctx.clock.total_time - s.from) as f32));
             }
             if let Some((state, poses)) = sample {
                 let dt = ctx.clock.delta_time.min(0.1) as f32;
