@@ -33,6 +33,7 @@ use capitol_protocol::ws::TradeOfferItem;
 use uuid::Uuid;
 
 use super::decide::rules::worth_in;
+use super::decide::log::Fate;
 use super::decide::{Choice, Held, Lot, Mind, Place, Question, Quote, Situation, Span, When, Who};
 use crate::bot::{Bot, BotError, TRADE_THINK};
 use crate::sim::MARKET_ITEMS;
@@ -289,13 +290,7 @@ pub struct Answering<'a> {
 pub fn situation(bot: &Bot, me: &Answering, question: Question, menu: Vec<Choice>) -> Situation {
     let state = bot.state();
     let (x, y) = bot.position();
-    let mut holdings = Held {
-        strands: state.strands().unwrap_or(0),
-        ..Held::default()
-    };
-    for item in state.inventory().into_iter().flat_map(|c| c.items()) {
-        *holdings.items.entry(item.item_type.clone()).or_insert(0) += item.quantity;
-    }
+    let holdings = held(state);
     Situation {
         who: me.who.clone(),
         at: Place {
@@ -315,6 +310,18 @@ pub fn situation(bot: &Bot, me: &Answering, question: Question, menu: Vec<Choice
         // with a trade someone is waiting on
         carry_on: None,
     }
+}
+
+/// What a citizen holds when it weighs a trade: its inventory and Strands.
+pub fn held(state: &GameState) -> Held {
+    let mut holdings = Held {
+        strands: state.strands().unwrap_or(0),
+        ..Held::default()
+    };
+    for item in state.inventory().into_iter().flat_map(|c| c.items()) {
+        *holdings.items.entry(item.item_type.clone()).or_insert(0) += item.quantity;
+    }
+    holdings
 }
 
 /// Answers the trade request the bot holds (see the module's docs), and
@@ -337,6 +344,9 @@ pub fn answer(bot: &mut Bot, mind: &mut Mind, me: &Answering) -> Result<Met, Bot
     };
     bot.say(format!("trading with {partner}"));
     let me_id = bot.state().me();
+    // Each fresh look at their offer supersedes the last (C3.1); the
+    // caller logs what the last came to
+    let mark = mind.mark();
     let began = Instant::now();
     let mut changed = Instant::now();
     let mut deal = Deal::default();
@@ -380,6 +390,7 @@ pub fn answer(bot: &mut Bot, mind: &mut Mind, me: &Answering) -> Result<Met, Bot
             let menu = menu(&deal, &open, strands, &market);
             let s = situation(bot, me, question(&open), menu);
             deal.weighed = Some(open.theirs.clone());
+            mind.settle(mark, &s.holdings, |_| Fate::Superseded);
             let ruling = mind.ask(&s);
             let side = match ruling.decision.map(|d| (d, s.choice(&d).clone())) {
                 Some((_, Choice::Accept)) => Side::of(&open.mine),

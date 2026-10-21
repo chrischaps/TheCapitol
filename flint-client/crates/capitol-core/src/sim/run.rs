@@ -28,7 +28,8 @@ use super::report::{BotRun, Entry, Report, MAKER_ROLE};
 use super::{Errand, Role, Trade, MARKET_ITEMS};
 use crate::bot::{Account, Bot, BotError};
 use crate::catalog::Catalog;
-use crate::citizen::decide::{Choice, Decision, Mind, Place, Question, Situation, When, Who};
+use crate::citizen::decide::log::Fate;
+use crate::citizen::decide::{Choice, Decision, Held, Mind, Place, Question, Situation, When, Who};
 use crate::citizen::meet;
 use crate::citizen::persona::{Market, Persona};
 use crate::citizen::schedule::Phase;
@@ -185,8 +186,9 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
 /// buying a lot to live on first if it has saved enough. `Ok` once home for
 /// the night or stopped; `Err` when the bot couldn't start, or the server
 /// won't have it back.
-pub(crate) fn live(mut bot: Bot, role: Role, persona: &Persona, seed: u64, mind: Mind, town: &Tether) -> Result<Ended, BotError> {
+pub(crate) fn live(mut bot: Bot, role: Role, persona: &Persona, seed: u64, mut mind: Mind, town: &Tether) -> Result<Ended, BotError> {
     let scale = bot.health()?.sim_tick_scale.unwrap_or(1.0);
+    mind.set_scale(scale);
     for item in MARKET_ITEMS {
         bot.watch_market(item)?;
     }
@@ -258,6 +260,27 @@ fn write(report: &Report, dir: &Path) -> std::io::Result<(PathBuf, PathBuf)> {
     std::fs::write(&md, report.to_markdown())?;
     std::fs::write(&csv, report.to_csv())?;
     Ok((md, csv))
+}
+
+/// What came of a decision that picked `choice`, when `action` was what the
+/// round did (`None`: free time) and `result` how it went (C3.1).
+fn fate(choice: &Choice, action: Option<&Action>, result: &Result<(), BotError>) -> Fate {
+    let acted = match (choice, action) {
+        (Choice::Work { .. } | Choice::Bank, Some(Action::Step(_)))
+        | (Choice::Sell { .. }, Some(Action::Trade(Trade::Sell { .. })))
+        | (Choice::Buy { .. }, Some(Action::Trade(Trade::Buy { .. })))
+        | (Choice::Bid { .. }, Some(Action::Trade(Trade::Bid { .. })))
+        | (Choice::Stock { .. }, Some(Action::Trade(Trade::Stock { .. })))
+        | (Choice::MakeMarket { .. }, Some(Action::Trade(Trade::MakeMarket)))
+        | (Choice::Rest | Choice::Hall, None) => true,
+        (Choice::Keep | Choice::Gather { .. }, _) => return Fate::Passed,
+        _ => false,
+    };
+    match result {
+        _ if !acted => Fate::Superseded,
+        Ok(()) => Fate::Done,
+        Err(e) => Fate::Failed { why: e.to_string() },
+    }
 }
 
 /// A node the bot has seen, and when.
@@ -403,6 +426,8 @@ impl SimBot {
             }
             let catalog = self.bot.state().catalog().clone();
             let holdings = self.holdings();
+            // The round's decisions, whose outcomes are logged after it (C3.1)
+            let mark = self.mind.mark();
             // What to work on, then whether to trade first (C1.3)
             let errand = match self.role.errands(&catalog, &holdings) {
                 Ok(errands) if errands.is_empty() => Ok(None),
@@ -440,6 +465,7 @@ impl SimBot {
                         self.doing = errand_label;
                     }
                     self.journal();
+                    self.settle(mark, Some(&action), &result);
                     let ok = result.is_ok();
                     self.entries.push(Entry::Spent {
                         label: label.clone(),
@@ -491,10 +517,14 @@ impl SimBot {
                         }
                     }
                 }
-                Ok(None) => self.free_time(town),
+                Ok(None) => {
+                    self.free_time(town);
+                    self.settle(mark, None, &Ok(()));
+                }
                 Err(stuck) => {
                     self.entries.push(Entry::Stuck { reason: stuck.0 });
                     self.free_time(town);
+                    self.settle(mark, None, &Ok(()));
                 }
             }
             if let Some(town) = town {
@@ -707,6 +737,16 @@ impl SimBot {
         self.rest(town, "resting");
     }
 
+    /// Logs what came of the decisions since `mark` (C3.1), when `action`
+    /// was what they came to (`None`: free time) and `result` how it went.
+    fn settle(&mut self, mark: usize, action: Option<&Action>, result: &Result<(), BotError>) {
+        if self.mind.mark() <= mark {
+            return;
+        }
+        let after = Held::from(&self.holdings());
+        self.mind.settle(mark, &after, |choice| fate(choice, action, result));
+    }
+
     /// The mind's answer to `question` from `menu`: the decision, and the
     /// entry it picked. `carry_on` is the entry that means carrying on.
     fn decide(&mut self, question: Question, menu: Vec<Choice>, carry_on: usize, holdings: &Holdings) -> Option<(Decision, Choice)> {
@@ -769,6 +809,24 @@ impl SimBot {
     fn journal(&mut self) {
         let at = self.now();
         for change in self.bot.take_journal() {
+            // A standing bid's fills, and a stall's sales, go in the
+            // decision log against what put them up (C3.1)
+            match &change {
+                StateEvent::Market(event) => match &**event {
+                    MarketEvent::OrderFilled { order, trade } => self.mind.filled(
+                        order.id,
+                        trade.quantity as i64,
+                        trade.price * trade.quantity as i64,
+                        order.status != OrderStatus::Open,
+                    ),
+                    MarketEvent::OrderClosed(order) => self.mind.closed(order.id),
+                    _ => {}
+                },
+                StateEvent::BazaarSale {
+                    item_type, quantity, paid, ..
+                } => self.mind.sold(item_type, *quantity, *paid),
+                _ => {}
+            }
             match change {
                 // A failed pull (D5, #206)
                 StateEvent::ExtractionCompleted { item, .. } if item.quantity == 0 => {

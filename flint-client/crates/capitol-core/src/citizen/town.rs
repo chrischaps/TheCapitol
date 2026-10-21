@@ -16,6 +16,9 @@
 //! - **Health**: each citizen's [`Health`], one line apiece, which the town
 //!   prints and writes beside the roster every minute, and its presence,
 //!   appended to `town.presence.csv` (C1.2).
+//! - **Decisions**: each citizen's decision log (C3.1,
+//!   [`decide::log`](super::decide::log)), one JSONL file apiece in
+//!   `town.decisions/` beside the roster, kept across its lives.
 //!
 //! [`Schedule`]: super::schedule::Schedule
 
@@ -31,7 +34,8 @@ use capitol_protocol::rest::{CreateCitizenRequest, LoginRequest};
 use capitol_protocol::rules::{self, Zone};
 use serde::Deserialize;
 
-use super::decide::{self, Cascade, Mind};
+use super::decide::log::{self, Log};
+use super::decide::{self, Cascade, Mind, SharedLog};
 use super::persona::{self, Avenue, Home, Market, Persona, Temperament};
 use super::schedule::{self, Phase, Schedule};
 use crate::bot::{Bot, BotError};
@@ -336,6 +340,22 @@ pub fn status_path(roster: &Path) -> PathBuf {
     roster.with_extension("status")
 }
 
+/// Where the citizens' decision logs go (C3.1): beside the roster,
+/// `town.decisions/`, a file a citizen.
+pub fn decisions_path(roster: &Path) -> PathBuf {
+    roster.with_extension("decisions")
+}
+
+/// Where and how big the decision logs are (C3.1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Logs {
+    pub dir: PathBuf,
+    /// Bytes a log grows to before it rotates
+    pub limit: u64,
+    /// Rotated files kept
+    pub keep: usize,
+}
+
 // ---------------------------------------------------------------------------
 // Minting
 // ---------------------------------------------------------------------------
@@ -584,8 +604,9 @@ pub struct Town {
 
 impl Town {
     /// Starts every citizen on the roster against `server`, [`STAGGER`]
-    /// apart. Setting `stop` ends them.
-    pub fn start(roster: &Roster, server: &str, stop: Arc<AtomicBool>) -> std::io::Result<Town> {
+    /// apart, each logging its decisions to `logs` if given. Setting `stop`
+    /// ends them.
+    pub fn start(roster: &Roster, server: &str, stop: Arc<AtomicBool>, logs: Option<&Logs>) -> std::io::Result<Town> {
         let mut town = Town {
             stop,
             health: Vec::new(),
@@ -593,11 +614,12 @@ impl Town {
         };
         for (n, citizen) in roster.citizens.iter().enumerate() {
             let health = Arc::new(Mutex::new(Health::new(&citizen.name, citizen.role)));
+            let log = logs.and_then(|logs| open_log(citizen, logs));
             let (citizen, server, stop, h) = (citizen.clone(), server.to_string(), town.stop.clone(), health.clone());
             let turn = STAGGER * n as u32;
             let life = thread::Builder::new()
                 .name(format!("citizen-{}", citizen.name))
-                .spawn(move || live(&citizen, &server, turn, &stop, &h))?;
+                .spawn(move || live(&citizen, &server, turn, &stop, &h, log.as_ref()))?;
             town.health.push(health);
             town.lives.push(life);
         }
@@ -663,10 +685,23 @@ impl Town {
     }
 }
 
+/// A citizen's decision log, opened for this run. A log that won't open is
+/// said and done without: a citizen never stops for its log.
+fn open_log(citizen: &Citizen, logs: &Logs) -> Option<SharedLog> {
+    let path = log::file_for(&logs.dir, &citizen.name);
+    match Log::open(&path, &citizen.name, citizen.role.slug(), &citizen.layers, logs.limit, logs.keep) {
+        Ok(log) => Some(Arc::new(Mutex::new(log))),
+        Err(e) => {
+            eprintln!("{}: no decision log: {}: {e}", citizen.name, path.display());
+            None
+        }
+    }
+}
+
 /// A citizen's lives, one after another, until the town stops or the server
 /// refuses its key. A life is a day (C1.2): the citizen signs in only
 /// between its `wake` and its `bed`, and sleeps the night through.
-fn live(citizen: &Citizen, server: &str, turn: Duration, stop: &AtomicBool, health: &Mutex<Health>) {
+fn live(citizen: &Citizen, server: &str, turn: Duration, stop: &AtomicBool, health: &Mutex<Health>, log: Option<&SharedLog>) {
     let clock_offset_ms = AtomicI64::new(0);
     let tether = Tether {
         stop,
@@ -685,7 +720,7 @@ fn live(citizen: &Citizen, server: &str, turn: Duration, stop: &AtomicBool, heal
         }
         tether.health(|h| h.doing(Standing::Starting, "signing in"));
         let began = Instant::now();
-        let life = panic::catch_unwind(AssertUnwindSafe(|| one_life(citizen, server, &tether)));
+        let life = panic::catch_unwind(AssertUnwindSafe(|| one_life(citizen, server, &tether, log)));
         let why = match life {
             Ok(Ok(Ended::Stopped)) => break,
             Ok(Ok(Ended::Bedtime)) => {
@@ -726,13 +761,16 @@ fn live(citizen: &Citizen, server: &str, turn: Duration, stop: &AtomicBool, heal
 /// One life: sign in by the key and play the role through the day, until
 /// bedtime or the town stops. The bot goes with it, so its socket closes
 /// and the avatar leaves the world.
-fn one_life(citizen: &Citizen, server: &str, tether: &Tether) -> Result<Ended, BotError> {
+fn one_life(citizen: &Citizen, server: &str, tether: &Tether, log: Option<&SharedLog>) -> Result<Ended, BotError> {
     let key = citizen.key().map_err(BotError::Failed)?;
     let bot = Bot::with_api_key(NetConfig::with_base_url(server), &key)?.quiet();
     tether.server_time_was(bot.state().server_time_ms());
     // The roster checked the layers
     let cascade = Cascade::from_names(&citizen.layers).map_err(BotError::Failed)?;
-    let mind = Mind::new(cascade, citizen.persona.temperament);
+    let mut mind = Mind::new(cascade, citizen.persona.temperament);
+    if let Some(log) = log {
+        mind = mind.with_log(log.clone());
+    }
     sim::run::live(bot, citizen.role, &citizen.persona, seed(&citizen.name), mind, tether)
 }
 

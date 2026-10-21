@@ -11,11 +11,12 @@ use capitol_protocol::rules::market::OrderSide;
 
 use super::super::plan::Holdings;
 use super::super::{Trade, STALL_DAYS};
-use super::SimBot;
+use super::{Action, SimBot};
 use crate::bazaar;
 use crate::bot::BotError;
+use crate::citizen::decide::log::Fate;
 use crate::citizen::decide::{Choice, Question, Who};
-use crate::citizen::meet::{self, Answering};
+use crate::citizen::meet::{self, Answering, Met};
 use crate::citizen::town::{Standing, Tether};
 
 /// A standing bid is taken down and thought over again after this many
@@ -38,11 +39,22 @@ impl SimBot {
             let doing = format!("trading with {name}");
             town.health(|h| h.doing(Standing::Working, &doing));
         }
-        let met = meet::answer(&mut self.bot, &mut self.mind, &me)?;
+        let mark = self.mind.mark();
+        let met = meet::answer(&mut self.bot, &mut self.mind, &me);
+        self.journal();
+        // The trade's last decision, which it came to (C3.1)
+        let fate = match &met {
+            Ok(Met::Traded { .. }) => Fate::Traded,
+            Ok(Met::Declined { .. }) => Fate::Declined,
+            Ok(Met::Ended { reason, .. }) => Fate::Ended { reason: reason.clone() },
+            Err(e) => Fate::Failed { why: e.to_string() },
+        };
+        let after = meet::held(self.bot.state());
+        self.mind.settle(mark, &after, |_| fate.clone());
+        let met = met?;
         if let Some(town) = town {
             town.health(|h| h.doing(Standing::Working, &met.label()));
         }
-        self.journal();
         Ok(())
     }
 
@@ -122,10 +134,15 @@ impl SimBot {
         }
         for item in self.role.needs() {
             let holdings = self.holdings();
-            let Some(Trade::Bid { item, quantity, price }) = self.choose_bid(&holdings, item) else {
+            let mark = self.mind.mark();
+            let Some(trade @ Trade::Bid { .. }) = self.choose_bid(&holdings, item) else {
+                self.settle(mark, None, &Ok(()));
                 continue;
             };
-            self.bid(&item, quantity, price)?;
+            let Trade::Bid { item, quantity, price } = &trade else { unreachable!() };
+            let result = self.bid(item, *quantity, *price);
+            self.settle(mark, Some(&Action::Trade(trade)), &result);
+            result?;
         }
         Ok(())
     }
@@ -133,7 +150,7 @@ impl SimBot {
     /// Leaves a bid for `quantity` of `item` at `price` on the book, to
     /// stand until it fills or goes stale. The bot must be at the hall.
     pub(super) fn bid(&mut self, item: &str, quantity: i32, price: i64) -> Result<(), BotError> {
-        self.bot.place_order(PlaceOrder {
+        let order = self.bot.place_order(PlaceOrder {
             side: OrderSide::Buy,
             item_type: item.to_string(),
             price,
@@ -143,6 +160,7 @@ impl SimBot {
             min_grade: None,
             grade_rule: None,
         })?;
+        self.mind.placed(order.id);
         Ok(())
     }
 
@@ -192,6 +210,7 @@ impl SimBot {
             self.bot.stock(listing)?;
             left -= n;
         }
+        self.mind.stocked(item);
         // Give the stall a moment to show on the bazaar's signs
         self.bot.idle(Duration::from_millis(100))?;
         Ok(())

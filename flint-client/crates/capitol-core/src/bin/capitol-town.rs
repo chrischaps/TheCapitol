@@ -6,6 +6,7 @@
 //! capitol-town mint --count 2 --role merchant   # and two merchants (C1.6)
 //! capitol-town                      # live until Ctrl-C
 //! capitol-town --status             # the running town's last health
+//! capitol-town replay --layers rules # the decision logs, replayed (C3.1)
 //! ```
 //!
 //! Run it from `flint-client/` with `cargo run -p capitol-core --bin capitol-town -- <flags>`.
@@ -17,8 +18,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use capitol_core::citizen::decide::log;
+use capitol_core::citizen::decide::replay::Replayer;
+use capitol_core::citizen::decide::{self, Cascade};
 use capitol_core::citizen::schedule;
-use capitol_core::citizen::town::{self, Admin, Roster, Town};
+use capitol_core::citizen::town::{self, Admin, Logs, Roster, Town};
 use capitol_core::net::NetConfig;
 use capitol_core::sim::Role;
 
@@ -38,6 +42,13 @@ USAGE:
                                  seeded personas, to the roster
     capitol-town status          Print the running town's last health
                                  (also --status)
+    capitol-town replay [<log>...] --layers <a,b>
+                                 Run a stack of decision layers over the
+                                 citizens' decision logs, offline, and
+                                 report its agreement with what they chose,
+                                 its escalation rate, latency and cost. A
+                                 log is a file or a directory of them
+                                 [default: town.decisions beside the roster]
 
 FLAGS:
     --roster <path>   The roster [default: town.toml]
@@ -53,23 +64,32 @@ FLAGS:
     --admin <email>   With mint, an admin account to make them as
                       [default: $CAPITOL_ADMIN_EMAIL]. Its password is read
                       from $CAPITOL_ADMIN_PASSWORD only, never a flag.
+    --log-mb <n>      With run, how big a citizen's decision log grows
+                      before it rotates (two old ones are kept); 0 logs
+                      nothing [default: 4]
+    --layers <a,b>    With replay, the stack to run, bottom first
+                      [default: rules]
     -h, --help        Print this
 
 The roster holds keys, so keep it out of git (flint-client/.gitignore has
 town.toml); town.example.toml shows its shape. Health goes beside it, in
 town.status, and who was where in their day is appended to
-town.presence.csv. Ctrl-C lets each citizen finish its step and stops; any order
+town.presence.csv. Each citizen logs its decisions, and what came of them,
+to town.decisions/<name>.jsonl. Ctrl-C lets each citizen finish its step and stops; any order
 it has resting on the book stays up, as a market maker's does. A second
 Ctrl-C stops at once.";
 
 /// How long a stopping town waits for its citizens to finish their steps.
 const GRACE: Duration = Duration::from_secs(20);
+/// A decision log's size before it rotates, in MB, unless told otherwise.
+const LOG_MB: u64 = log::LOG_LIMIT >> 20;
 
 #[derive(Debug, PartialEq)]
 enum Action {
     Run,
     Mint { count: usize },
     Status,
+    Replay { logs: Vec<PathBuf>, layers: Vec<String> },
 }
 
 #[derive(Debug)]
@@ -81,11 +101,16 @@ struct Options {
     admin: Option<String>,
     /// With mint, the role to make every citizen
     role: Option<Role>,
+    /// 0: no decision logs
+    log_mb: u64,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
     let mut action = None;
     let mut count = None;
+    let mut logs = Vec::new();
+    let mut layers = None;
+    let mut log_mb_given = false;
     let mut options = Options {
         action: Action::Run,
         roster: PathBuf::from(town::ROSTER),
@@ -93,20 +118,35 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         every: Duration::from_secs(60),
         admin: std::env::var("CAPITOL_ADMIN_EMAIL").ok().filter(|s| !s.is_empty()),
         role: None,
+        log_mb: LOG_MB,
     };
     let mut admin_given = false;
     let mut every_given = false;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
+        let replaying = matches!(action, Some(Action::Replay { .. }));
         let mut set = |a: Action| match action.replace(a) {
-            Some(_) => Err("run, mint and status go one at a time".to_string()),
+            Some(_) => Err("run, mint, status and replay go one at a time".to_string()),
             None => Ok(()),
         };
         match arg.as_str() {
             "run" => set(Action::Run)?,
             "mint" => set(Action::Mint { count: 0 })?,
             "status" | "--status" => set(Action::Status)?,
+            "replay" => set(Action::Replay {
+                logs: Vec::new(),
+                layers: Vec::new(),
+            })?,
+            "--layers" => {
+                let names: Vec<String> = value()?.split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect();
+                decide::check_layers(&names)?;
+                layers = Some(names);
+            }
+            "--log-mb" => {
+                options.log_mb = number(&arg, &value()?)?;
+                log_mb_given = true;
+            }
             "--roster" => options.roster = value()?.into(),
             "--server" => options.server = Some(value()?),
             "--every" => {
@@ -133,6 +173,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                 admin_given = true;
             }
             "-h" | "--help" => return Ok(None),
+            log if replaying && !log.starts_with('-') => logs.push(PathBuf::from(log)),
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -140,8 +181,18 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         (Action::Mint { .. }, Some(count)) => Action::Mint { count },
         (Action::Mint { .. }, None) => return Err("mint needs --count".into()),
         (_, Some(_)) => return Err("--count goes with mint".into()),
+        (Action::Replay { .. }, None) => Action::Replay {
+            logs,
+            layers: layers.take().unwrap_or_else(|| decide::DEFAULT_LAYERS.map(String::from).to_vec()),
+        },
         (action, None) => action,
     };
+    if layers.is_some() {
+        return Err("--layers goes with replay".into());
+    }
+    if log_mb_given && options.action != Action::Run {
+        return Err("--log-mb goes with run".into());
+    }
     if admin_given && !matches!(options.action, Action::Mint { .. }) {
         return Err("--admin goes with mint".into());
     }
@@ -241,7 +292,12 @@ fn run(options: &Options) -> Result<(), String> {
     let server = server(options, &roster);
     let stop = Arc::new(AtomicBool::new(false));
     on_ctrl_c(stop.clone());
-    let mut town = Town::start(&roster, &server, stop.clone()).map_err(|e| format!("starting the town: {e}"))?;
+    let logs = (options.log_mb > 0).then(|| Logs {
+        dir: town::decisions_path(&roster.path),
+        limit: options.log_mb << 20,
+        keep: log::LOG_KEEP,
+    });
+    let mut town = Town::start(&roster, &server, stop.clone(), logs.as_ref()).map_err(|e| format!("starting the town: {e}"))?;
     println!(
         "capitol-town: {} citizens on {server}, health every {:.0?} to {}, and who's where to {}",
         roster.citizens.len(),
@@ -249,6 +305,9 @@ fn run(options: &Options) -> Result<(), String> {
         town::status_path(&roster.path).display(),
         town::presence_path(&roster.path).display()
     );
+    if let Some(logs) = &logs {
+        println!("capitol-town: decisions to {}", logs.dir.display());
+    }
     let status = &roster.path;
     let mut next = Instant::now() + options.every;
     loop {
@@ -271,6 +330,28 @@ fn run(options: &Options) -> Result<(), String> {
     if stuck > 0 {
         println!("capitol-town: {stuck} still mid-step after {GRACE:?}; leaving them");
     }
+    Ok(())
+}
+
+/// Replays `logs` (the roster's decision logs if none) with the stack
+/// `layers`, and prints the report (C3.1).
+fn replay(options: &Options, logs: &[PathBuf], layers: &[String]) -> Result<(), String> {
+    let logs = match logs {
+        [] => vec![town::decisions_path(&options.roster)],
+        logs => logs.to_vec(),
+    };
+    let files = log::files(&logs).map_err(|e| format!("finding the logs: {e}"))?;
+    if files.is_empty() {
+        return Err(format!("no decision logs in {}", logs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")));
+    }
+    // check_layers passed them when they were parsed
+    let names = layers.to_vec();
+    let mut replayer = Replayer::new(move || Cascade::from_names(&names).expect("checked layers"));
+    for file in &files {
+        let records = log::read(file).map_err(|e| format!("reading {}: {e}", file.display()))?;
+        replayer.log(&file.display().to_string(), records);
+    }
+    print!("{}", replayer.finish());
     Ok(())
 }
 
@@ -367,6 +448,7 @@ fn main() -> ExitCode {
         Action::Run => run(&options),
         Action::Mint { count } => mint(&options, count),
         Action::Status => status(&options),
+        Action::Replay { ref logs, ref layers } => replay(&options, logs, layers),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -405,6 +487,32 @@ mod tests {
         assert_eq!(o.every, Duration::from_secs(5));
         assert_eq!(o.server.as_deref(), Some("http://x:3001"));
         assert!(parse(args("--help")).unwrap().is_none());
+        assert_eq!(parse(args("run --log-mb 0")).unwrap().unwrap().log_mb, 0);
+        assert_eq!(parse(args("")).unwrap().unwrap().log_mb, LOG_MB);
+    }
+
+    #[test]
+    fn replay_takes_logs_and_a_stack() {
+        let o = parse(args("replay")).unwrap().unwrap();
+        assert_eq!(
+            o.action,
+            Action::Replay {
+                logs: Vec::new(),
+                layers: vec!["rules".into()]
+            }
+        );
+        let o = parse(args("replay a.jsonl town.decisions --layers rules")).unwrap().unwrap();
+        assert_eq!(
+            o.action,
+            Action::Replay {
+                logs: vec!["a.jsonl".into(), "town.decisions".into()],
+                layers: vec!["rules".into()]
+            }
+        );
+        assert!(parse(args("replay --layers rules,oracle")).unwrap_err().contains("oracle"));
+        assert!(parse(args("--layers rules")).is_err(), "--layers without replay");
+        assert!(parse(args("a.jsonl replay")).is_err(), "a log before replay");
+        assert!(parse(args("replay --log-mb 2")).is_err());
     }
 
     #[test]
