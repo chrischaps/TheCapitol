@@ -154,8 +154,6 @@ pub struct CapitolExtension {
     bazaar: world::bazaar::BazaarLayer,
     shop: ui::shop::ShopPanel,
     bazaar_sample: Option<ui::shop::Sample>,
-    /// A layer built again, so the camera's solids want gathering (E3.13).
-    solids_stale: bool,
     station: ui::station::StationPanel,
     /// Enter (the `craft` action) was pressed since `ui` last looked.
     craft_key: bool,
@@ -239,7 +237,6 @@ impl CapitolExtension {
             bazaar: world::bazaar::BazaarLayer::default(),
             shop: ui::shop::ShopPanel::default(),
             bazaar_sample: None,
-            solids_stale: false,
             station: ui::station::StationPanel::default(),
             craft_key: false,
             cancel_placing: false,
@@ -1021,7 +1018,6 @@ impl PlayerExtension for CapitolExtension {
         self.houses.advance(dt, &self.lots);
         if let Some(gpu) = ctx.gpu.as_mut() {
             let uploaded = self.houses.upload(gpu, &self.lots);
-            self.solids_stale |= !uploaded.is_empty();
             attach_each(ctx, uploaded.iter());
         }
         // The lamps in the windows glow and change colour with the hour,
@@ -1072,7 +1068,6 @@ impl PlayerExtension for CapitolExtension {
             };
             if self.bazaar.sync(gpu, &terrain.landmarks, shop) {
                 attach_each(ctx, world::bazaar::meshes().iter());
-                self.solids_stale = true;
                 if let Ok(mut feet) = self.shared.stall_feet.lock() {
                     *feet = terrain
                         .landmarks
@@ -1081,15 +1076,6 @@ impl PlayerExtension for CapitolExtension {
                         .map(|l| l.corners.map(|p| crate::coords::to_world(p.0, p.1)))
                         .collect();
                 }
-            }
-        }
-        if std::mem::take(&mut self.solids_stale) {
-            // What the camera keeps out of (E3.13): every building's bulk
-            let mut solids: Vec<world::solids::Solid> = self.bazaar.solids().collect();
-            solids.extend(self.hall.site().map(|s| s.solid()));
-            solids.extend(self.houses.solids().copied());
-            if let Ok(mut shared) = self.shared.solids.lock() {
-                *shared = solids;
             }
         }
         set_material(
@@ -1166,7 +1152,6 @@ impl PlayerExtension for CapitolExtension {
                 .find(|l| l.kind == LandmarkKind::ExchangeHall);
             self.hall.terrain(gpu, hall, phase);
             sectors.extend(world::hall::meshes());
-            self.solids_stale = true;
         }
         if rebuild.ground || rebuild.roads || rebuild.plots || rebuild.parks {
             self.grass.terrain(terrain);

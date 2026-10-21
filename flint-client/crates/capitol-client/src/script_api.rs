@@ -83,10 +83,6 @@ pub struct Shared {
     /// The stall a script last asked to go to (`cap_visit_stall`). The
     /// extension takes it next frame.
     pub visit_stall: Arc<Mutex<Option<String>>>,
-    /// The city's buildings as solids (E3.13), for `cap_clear_line`: the
-    /// camera pulls in rather than look through one. Set when a layer
-    /// builds.
-    pub solids: Arc<Mutex<Vec<crate::world::solids::Solid>>>,
     /// The bazaar's stalls' footprints (E3.13), for `cap_in_bazaar`.
     pub stall_feet: Arc<Mutex<Vec<[[f32; 2]; 4]>>>,
     /// Where the egui UI's landmarks were drawn last frame (P8.2), by name,
@@ -818,15 +814,6 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         if let Ok(mut v) = visit.lock() {
             *v = Some(id.to_string());
         }
-    });
-    // `cap_clear_line(ax, ay, az, bx, by, bz) -> f64`: how far, as a share
-    // of the way from a to b (world metres), the line runs before it enters
-    // a building: 1 when it's clear (E3.13, `world::solids`).
-    let solids = shared.solids.clone();
-    engine.register_fn("cap_clear_line", move |ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64| -> f64 {
-        let Ok(solids) = solids.lock() else { return 1.0 };
-        let p = |x: f64, y: f64, z: f64| [x as f32, y as f32, z as f32];
-        crate::world::solids::clear_along(&solids, p(ax, ay, az), p(bx, by, bz)) as f64
     });
     // `cap_in_bazaar(x, z) -> bool`: whether the ground point (x, z), world
     // metres, is in the bazaar: on a stall or within 2 m of one, which takes

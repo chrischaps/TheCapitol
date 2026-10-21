@@ -3,8 +3,12 @@
 
 use crate::coords::polar_to_world;
 use flint_import::ImportedMaterial;
-use flint_player::ExtensionGpu;
+use flint_player::{ExtensionGpu, MeshOptions};
 use flint_render::Vertex;
+
+/// For a building's walls and roofs: rays meet it, so the camera keeps
+/// out of it and a click can pick it (#293, Flint ADR 0105).
+pub const RAY_TARGET: MeshOptions = MeshOptions { ray_target: true };
 
 /// Straight up, for everything that lies flat on the ground.
 pub const UP: [f32; 3] = [0.0, 1.0, 0.0];
@@ -108,12 +112,18 @@ impl MeshBuf {
     /// removes any earlier one of that name instead (wgpu can't make an
     /// empty buffer), so nothing is drawn until there's something to draw.
     pub fn upload(&self, gpu: &mut ExtensionGpu, name: &str, roughness: f32) {
-        self.upload_material(
+        self.upload_with(gpu, name, roughness, MeshOptions::default());
+    }
+
+    /// [`Self::upload`], with options: [`RAY_TARGET`] for a building.
+    pub fn upload_with(&self, gpu: &mut ExtensionGpu, name: &str, roughness: f32, options: MeshOptions) {
+        self.upload_material_with(
             gpu,
             ImportedMaterial {
                 roughness,
                 ..ImportedMaterial::vertex_colored(name)
             },
+            options,
         );
     }
 
@@ -122,6 +132,11 @@ impl MeshBuf {
     /// alpha 0 (`palette::glow`) gives off its colour, and the rest (alpha
     /// 1) are lit as usual.
     pub fn upload_material(&self, gpu: &mut ExtensionGpu, material: ImportedMaterial) {
+        self.upload_material_with(gpu, material, MeshOptions::default());
+    }
+
+    /// [`Self::upload_material`], with options: [`RAY_TARGET`] for a building.
+    pub fn upload_material_with(&self, gpu: &mut ExtensionGpu, material: ImportedMaterial, options: MeshOptions) {
         let material = ImportedMaterial {
             vertex_emission: true,
             ..material
@@ -131,7 +146,7 @@ impl MeshBuf {
             gpu.remove_mesh(&name);
             return;
         }
-        gpu.upload_mesh(&name, &self.vertices, &self.indices, material);
+        gpu.upload_mesh_with(&name, &self.vertices, &self.indices, material, options);
     }
 }
 

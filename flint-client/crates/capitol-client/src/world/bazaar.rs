@@ -524,23 +524,12 @@ type Drawn = (Landmark, Vec<(Landmark, Option<ShopSign>)>);
 pub struct BazaarLayer {
     drawn: Option<Drawn>,
     signs: Vec<Sign>,
-    /// Each stall's frame, for [`Self::solids`].
-    frames: Vec<Frame>,
 }
 
 impl BazaarLayer {
     /// Where the stalls' names hang.
     pub fn signs(&self) -> &[Sign] {
         &self.signs
-    }
-
-    /// Every stall as a solid, up to its back wall's top, for the camera to
-    /// keep out of (E3.13).
-    pub fn solids(&self) -> impl Iterator<Item = crate::world::solids::Solid> + '_ {
-        self.frames.iter().map(|f| {
-            let r = f.rect(0.0, f.depth, -f.width / 2.0, f.width / 2.0);
-            crate::world::solids::Solid { corners: [r[0], r[1], r[2], r[3]], bottom: PAVE, top: WALL_TOP }
-        })
     }
 
     /// Builds the bazaar if `landmarks` or `shops` (by stall id) differ from
@@ -555,7 +544,6 @@ impl BazaarLayer {
         let Some(bazaar) = landmarks.iter().find(|l| l.kind == LandmarkKind::Bazaar) else {
             if self.drawn.take().is_some() {
                 self.signs.clear();
-                self.frames.clear();
                 upload(gpu, Bazaar::default());
                 return true;
             }
@@ -573,7 +561,6 @@ impl BazaarLayer {
         let looks: Vec<StallLook> = now.1.iter().map(|(stall, shop)| StallLook { stall, shop: shop.as_ref() }).collect();
         let built = build(&now.0, &looks);
         self.signs = built.signs.clone();
-        self.frames = looks.iter().map(|l| Frame::new(l.stall)).collect();
         upload(gpu, built);
         self.drawn = Some(now);
         true
@@ -581,7 +568,8 @@ impl BazaarLayer {
 }
 
 fn upload(gpu: &mut ExtensionGpu, built: Bazaar) {
-    built.stone.upload(gpu, MESH, 0.8);
+    // The stalls are what the camera keeps out of, and what a click meets.
+    built.stone.upload_with(gpu, MESH, 0.8, crate::world::mesh::RAY_TARGET);
     built.lamps.upload_material(gpu, lamps_material());
     built.gold.upload_material(
         gpu,

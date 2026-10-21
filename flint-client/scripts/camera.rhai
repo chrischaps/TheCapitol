@@ -21,7 +21,8 @@
 // so the furthest zoom is always the same map.
 //
 // Close in (E3.13), the camera keeps out of the buildings: when a wall
-// stands between you and it (cap_clear_line, the city's solids), it rises
+// stands between you and it (clear_line: the buildings are drawn as ray
+// targets, and raycast_meshes meets their walls and roofs, #293), it rises
 // at once, over the roofs behind you, and looks down into the street; if
 // rising isn't enough, it comes in along its line to you. It eases back
 // as the way clears. And while you walk, close in, it swings round behind
@@ -412,7 +413,7 @@ fn follow_yaw(yaw, vx, vz, zoom, since, dt) {
 fn rise_needed(pose, head) {
     let h = 0.0;
     while h <= rise_most() {
-        let clear = cap_clear_line(head[0], head[1], head[2], pose.px, pose.py + h, pose.pz);
+        let clear = clear_line(head, [pose.px, pose.py + h, pose.pz]);
         if clear >= 1.0 { return h; }
         h += rise_step();
     }
@@ -426,10 +427,24 @@ fn lifted(pose, h) {
 }
 
 // What share of the way from your `head` out to the camera is clear of the
-// buildings (cap_clear_line): 1 unless the camera is close in.
+// buildings (clear_line): 1 unless the camera is close in.
 fn clear_share(pose, d, head) {
     if d > pull_within() { return 1.0; }
-    cap_clear_line(head[0], head[1], head[2], pose.px, pose.py, pose.pz)
+    clear_line(head, [pose.px, pose.py, pose.pz])
+}
+
+// How far, as a share of the way from `a` to `b` (world points), the line
+// runs before it meets a building's wall or roof: 1 when it's clear. The
+// buildings are the meshes the city draws as ray targets (the stalls, the
+// hall, the houses), where the last frame drew them (Flint ADR 0105).
+fn clear_line(a, b) {
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    let dz = b[2] - a[2];
+    let len = (dx * dx + dy * dy + dz * dz).sqrt();
+    if len <= 0.0 { return 1.0; }
+    let hit = raycast_meshes(a[0], a[1], a[2], dx, dy, dz, len);
+    if hit == () { 1.0 } else { hit.distance / len }
 }
 
 // The pose with the camera brought in along its line to what it looks at,

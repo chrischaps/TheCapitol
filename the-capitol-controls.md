@@ -47,7 +47,7 @@ The question the A/B answers is this: **which way of moving makes the economy fe
 **Prediction misses the rings.** `capitol_core::motion::Motion` predicts with `Ground::step` and reconciles against a 500 ms trail with a 4-unit tolerance (`motion.rs:635`). The moat and canals are tested only by `check_water_crossing` (`rules.rs:367`), which the prediction never runs. The world edge is checked only on `move`'s destination.
 
 **The camera.**
-- `scripts/camera.rhai` is one dial, 4.5 m to 880 m. Since E3.13 its near end stands over your right shoulder, pulls in out of the buildings' solids, and swings behind you as you walk.
+- `scripts/camera.rhai` is one dial, 4.5 m to 880 m. Since E3.13 its near end stands over your right shoulder, pulls in out of the buildings (their walls and roofs, as ray targets since #293), and swings behind you as you walk.
 - WASD pans the camera, Q/E orbit, R/F and the wheel zoom.
 - The view drifts toward the Capitol from 166 m out and turns north up from 366 m.
 
@@ -264,7 +264,7 @@ That's about the size of the wilds' W4 to W6 together.
 | **Reconcile under turning at high latency.** | T0.4's loopback tests at 200 ms gate it, with `at` waypoints on stops and turns. The fallback is a wider tolerance while steering. |
 | **The engine PR (T1.2) blocks the camera.** | T1.3 lands first and is played with the cursor free. Chris merges Flint PRs. |
 | **The latch feels sticky** (you have to let go of W before you can walk after E). | Tune it in T1.5. It clears on neutral input, never on a timer. |
-| **Walking through walls spoils the shoulder view.** | F1 (#330) is the decision. Until then the camera pulls in out of the solids, so at least the view never looks through a wall. |
+| **Walking through walls spoils the shoulder view.** | F1 (#330) is the decision. Until then the camera pulls in out of the buildings' walls, so at least the view never looks through a wall. |
 | **The A/B is one person's taste.** | T3.1's numbers sit beside the feel, and T3.2 asks for sessions with and without the pad. |
 | **Steering costs the server a lock per message.** | At 8 a second per walking player, it's well under the tick's budget at today's scale. Batch per connection if the soak (C1.7) says otherwise. |
 

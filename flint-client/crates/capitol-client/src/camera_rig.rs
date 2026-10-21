@@ -497,6 +497,75 @@ fn a_wall_brings_the_camera_in_along_its_line_but_not_onto_you() {
     assert_eq!((up["py"].as_float().unwrap(), up["ty"].as_float().unwrap()), (3.5, 2.0));
 }
 
+/// The rig with `raycast_meshes` answering from `scene`, as Flint's does
+/// from the meshes drawn as ray targets (ADR 0105).
+fn with_walls(scene: flint_player::RayScene) -> Rig {
+    let mut rig = Rig::load();
+    rig.engine.register_fn(
+        "raycast_meshes",
+        move |ox: f64, oy: f64, oz: f64, dx: f64, dy: f64, dz: f64, max: f64| -> rhai::Dynamic {
+            let p = |x: f64, y: f64, z: f64| [x as f32, y as f32, z as f32];
+            match scene.cast(p(ox, oy, oz), p(dx, dy, dz), max as f32) {
+                Some(hit) => rhai::Dynamic::from_map(Map::from_iter([("distance".into(), (hit.distance as f64).into())])),
+                None => rhai::Dynamic::UNIT,
+            }
+        },
+    );
+    rig
+}
+
+/// A wall 2.2 m high across x = 1..1.5, as a stall's back wall stands.
+fn a_wall() -> flint_player::RayScene {
+    let (lo, hi) = ([1.0f32, 0.0, -5.0], [1.5f32, 2.2, 5.0]);
+    let corner = |k: usize| {
+        [
+            if k & 1 == 0 { lo[0] } else { hi[0] },
+            if k & 2 == 0 { lo[1] } else { hi[1] },
+            if k & 4 == 0 { lo[2] } else { hi[2] },
+        ]
+    };
+    let positions: Vec<[f32; 3]> = (0..8).map(corner).collect();
+    let quads = [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]];
+    let indices: Vec<u32> = quads.iter().flat_map(|q| [q[0], q[1], q[2], q[0], q[2], q[3]]).collect();
+    let mut scene = flint_player::RayScene::new();
+    let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+    let mesh = std::sync::Arc::new(flint_player::RayMesh::new(&positions, &indices));
+    scene.add(flint_core::EntityId::from_raw(1), mesh, identity);
+    scene
+}
+
+#[test]
+fn the_camera_meets_a_wall_by_its_mesh_and_rises_over_it() {
+    let rig = with_walls(a_wall());
+    let point = |x: f64, y: f64, z: f64| -> rhai::Array { vec![x.into(), y.into(), z.into()] };
+    let head = point(0.0, 1.6, 0.0);
+    // Through the wall at its face, a quarter of the way out
+    let share: f64 = rig.call("clear_line", (head.clone(), point(4.0, 1.6, 0.0)));
+    assert!((share - 0.25).abs() < 1e-6, "{share}");
+    // Short of it, over it, or along it, clear
+    for to in [point(0.9, 1.6, 0.0), point(4.0, 6.5, 0.0), point(0.0, 1.6, 4.0)] {
+        let share: f64 = rig.call("clear_line", (head.clone(), to.clone()));
+        assert_eq!(share, 1.0, "{to:?}");
+    }
+    // Behind the wall, the camera rises until its line clears the top
+    let pose = Map::from_iter([
+        ("px".into(), 4.0_f64.into()),
+        ("py".into(), 2.0_f64.into()),
+        ("pz".into(), 0.0_f64.into()),
+        ("tx".into(), 0.0_f64.into()),
+        ("ty".into(), 1.6_f64.into()),
+        ("tz".into(), 0.0_f64.into()),
+    ]);
+    let h: f64 = rig.call("rise_needed", (pose.clone(), head.clone()));
+    let most = rig.num("rise_most");
+    assert!(h > 0.0 && h <= most, "{h}");
+    let cleared: f64 = rig.call("clear_line", (head.clone(), point(4.0, 2.0 + h, 0.0)));
+    assert_eq!(cleared, 1.0, "risen {h} m");
+    // And close in, the share of the way that's clear is the wall's
+    let share: f64 = rig.call("clear_share", (pose, 4.0_f64, head));
+    assert!((share - 0.25).abs() < 0.01, "{share}");
+}
+
 #[test]
 fn walking_swings_the_camera_behind_you_close_in_only() {
     let rig = Rig::load();

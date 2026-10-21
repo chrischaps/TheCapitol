@@ -37,7 +37,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::coords::{layer, to_world, S};
 use crate::daylight::PlotGlow;
 use crate::world::geom::*;
-use crate::world::mesh::{MeshBuf, UP};
+use crate::world::mesh::{MeshBuf, RAY_TARGET, UP};
 use crate::world::palette::{self, hex};
 use crate::world::plots::Lot;
 use crate::world::sector::Sector;
@@ -711,8 +711,6 @@ pub struct Pane {
 pub struct House {
     pub body: MeshBuf,
     pub panes: Vec<Pane>,
-    /// Its buildings as solids, for the camera to keep out of (E3.13)
-    pub solids: Vec<crate::world::solids::Solid>,
 }
 
 /// The foot of every wall, sunk into the lot so no seam shows.
@@ -1115,17 +1113,7 @@ fn openings(h: &mut House, b: &Block, a: P, z: P, front: bool, wall_top: f32, li
 /// `None` if the lot has no room for one.
 pub fn house(id: &str, lot: &Lot, progress: f32) -> Option<House> {
     let plan = plan(id, lot)?;
-    let mut house = raise(&plan, Stage::at(progress));
-    house.solids = plan
-        .blocks
-        .iter()
-        .map(|b| crate::world::solids::Solid {
-            corners: b.rect.corners().map(|p| to_world(p[0], p[1])),
-            bottom: FOOT,
-            top: FLOOR + b.storeys as f32 * b.storey,
-        })
-        .collect();
-    Some(house)
+    Some(raise(&plan, Stage::at(progress)))
 }
 
 /// The material of every [`lamp_meshes`] entity at `glow`, set each frame
@@ -1249,11 +1237,6 @@ impl Houses {
         tracing::debug!("houses: {up} up, {growing} growing");
     }
 
-    /// Every house that's up, as solids for the camera (E3.13).
-    pub fn solids(&self) -> impl Iterator<Item = &crate::world::solids::Solid> {
-        self.built.values().flat_map(|(_, h)| h.solids.iter())
-    }
-
     /// Moves time on by `dt`: a house that has finished growing joins its
     /// sector.
     pub fn advance(&mut self, dt: f32, lots: &HashMap<String, Lot>) {
@@ -1327,7 +1310,8 @@ impl Houses {
             if !m.indices.is_empty() {
                 uploaded.push(name.clone());
             }
-            m.upload_material(gpu, material(&name, 0.85));
+            // The walls and roofs: the camera keeps out of them (#293).
+            m.upload_material_with(gpu, material(&name, 0.85), RAY_TARGET);
         }
         // A quarter's windows with any of its sectors.
         let quarters: BTreeSet<(u8, u8)> = dirty.iter().copied().map(quarter).collect();
@@ -1352,14 +1336,14 @@ impl Houses {
         if !self.growing.is_empty() || self.growing_drawn {
             let (m, lamps) = self.growing_mesh(lots);
             self.growing_drawn = !m.indices.is_empty();
-            for (m, material) in [
-                (m, material(GROWING_MESH, 0.85)),
-                (lamps, lamps_material(GROWING_LAMPS)),
+            for (m, material, options) in [
+                (m, material(GROWING_MESH, 0.85), RAY_TARGET),
+                (lamps, lamps_material(GROWING_LAMPS), Default::default()),
             ] {
                 if !m.indices.is_empty() {
                     uploaded.push(material.name.clone());
                 }
-                m.upload_material(gpu, material);
+                m.upload_material_with(gpu, material, options);
             }
         }
         uploaded

@@ -195,14 +195,6 @@ impl Site {
         }
     }
 
-    /// The hall's bulk, for the camera to keep out of (E3.13): the podium,
-    /// the portico and the hall behind, up to the cornice. The forecourt in
-    /// front of the steps is open.
-    pub fn solid(&self) -> crate::world::solids::Solid {
-        let r = self.rect(1.85, 7.9, -4.85, 4.85);
-        crate::world::solids::Solid { corners: [r[0], r[1], r[2], r[3]], bottom: G - 0.1, top: CORNICE_TOP }
-    }
-
     /// The Gazette's notice board (E3.9): where a click picks it, round
     /// its slot, and the middle of its roof, world (X, Y, Z), where its
     /// prompt hangs.
@@ -803,7 +795,8 @@ impl HallLayer {
     pub fn terrain(&mut self, gpu: &mut ExtensionGpu, hall: Option<&Landmark>, phase: f64) {
         self.site = hall.map(Site::new);
         let built = self.site.map(|s| build(&s, phase)).unwrap_or_default();
-        built.stone.upload(gpu, MESH, 0.75);
+        // The camera keeps out of it, and a click meets it (#293).
+        built.stone.upload_with(gpu, MESH, 0.75, crate::world::mesh::RAY_TARGET);
         built.lamps.upload_material(gpu, lamps_material());
         upload_gold(gpu, built.gold, built.light);
         self.minute = Some(minute(phase));
