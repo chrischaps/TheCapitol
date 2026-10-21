@@ -37,6 +37,9 @@ pub struct Shared {
     /// Where you're walking to (P4.3), in world metres, for the marker.
     /// `None` when standing, and offline.
     pub destination: Arc<Mutex<Option<[f32; 2]>>>,
+    /// The corners your walk has still to pass round the water (#267), in
+    /// world metres, ending at the destination. Empty when standing.
+    pub route: Arc<Mutex<Vec<[f32; 2]>>>,
     /// The zone you last entered (P4.5), for the banner in `hud.rhai`.
     pub banner: Arc<Mutex<Option<ZoneBanner>>>,
     /// Every resource node shown this frame (P4.4), as `nodes::Nodes` left
@@ -589,6 +592,20 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             Some(p) => rhai::Dynamic::from_array(p.iter().map(|v| (*v as f64).into()).collect()),
             None => rhai::Dynamic::UNIT,
         }
+    });
+    // `cap_route() -> [[x, z], ...]`: the corners of your walk still to
+    // pass, round the water by the bridges and fords, in world metres: the
+    // one you're walking to first, the destination last. [] when standing.
+    let route = shared.route.clone();
+    engine.register_fn("cap_route", move || -> rhai::Array {
+        route
+            .lock()
+            .map(|r| {
+                r.iter()
+                    .map(|p| rhai::Dynamic::from_array(p.iter().map(|v| (*v as f64).into()).collect()))
+                    .collect()
+            })
+            .unwrap_or_default()
     });
     // `cap_zone_banner() -> #{ name, r, g, b, age, first } or ()`: the zone
     // you last entered, its colour (sRGB) and how many seconds ago its
@@ -1332,6 +1349,11 @@ mod tests {
         *shared.destination.lock().unwrap() = Some([3.0, -4.0]);
         let z: f64 = engine.eval("cap_destination()[1]").unwrap();
         assert_eq!(z, -4.0);
+        assert_eq!(engine.eval::<i64>("cap_route().len()").unwrap(), 0);
+        *shared.route.lock().unwrap() = vec![[1.0, 2.0], [3.0, -4.0]];
+        let x: f64 = engine.eval("cap_route()[0][0]").unwrap();
+        assert_eq!(x, 1.0);
+        assert_eq!(engine.eval::<i64>("cap_route().len()").unwrap(), 2);
     }
 
     #[test]

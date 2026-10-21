@@ -22,6 +22,10 @@
 // units), and cap_destination() is where you're going until you arrive.
 // A gold ring lies there, with a faint dashed line marching to it from
 // your feet. The click itself drops a ripple, as the spike's did (P0.4).
+// A walk across the water goes round by a bridge or a ford (#267): Rust
+// plans it on the walk graph and sends it a leg at a time, and
+// cap_route() is the corners still to pass, so the dashes run round them,
+// with a faint pip at each turn.
 //
 // The server stops a walk at the water's edge, or below a cliff (W4), with
 // `movement_blocked`. Rust fires it here with where you stand, which way
@@ -463,11 +467,11 @@ fn on_draw_ui() {
         if p != () { draw_trade_ring(p, now); }
     }
     if target != () {
-        if you != () { draw_path(you[0], you[2], target.x, target.z, now, 0.6); }
+        if you != () { draw_route(you[0], you[2], route_to(target.x, target.z), now, 0.6); }
         draw_sight(target, now);
     } else if marker != () {
         if you != () && marker.gone == () {
-            draw_path(you[0], you[2], marker.x, marker.z, now, 0.38);
+            draw_route(you[0], you[2], route_to(marker.x, marker.z), now, 0.38);
         }
         draw_marker(marker, now);
     }
@@ -684,29 +688,68 @@ fn arc_steps(cx, cz, y, r, a0, a1, c, alpha, width, steps) {
 // The way you're walking: dashes from your feet to the ring, marching
 // toward it, faint, and fading in from under you so they don't cross the
 // avatar. Long walks get longer dashes, so the count stays bounded.
-fn draw_path(x0, z0, x1, z1, now, strength) {
-    let dx = x1 - x0;
-    let dz = z1 - z0;
-    let len = (dx * dx + dz * dz).sqrt();
-    if len < 1.5 { return; }
-    let ux = dx / len;
-    let uz = dz / len;
-    let step = (len / 90.0).max(1.4);
+// The corners of the walk to (x, z): cap_route()'s, ending at (x, z)
+// itself, which is what's marked there.
+fn route_to(x, z) {
+    let corners = cap_route();
+    if corners.len() > 0 { corners.pop(); }
+    corners.push([x, z]);
+    corners
+}
+
+// The dashes from your feet through each corner to the end, as one line:
+// they march on round a corner rather than starting again at it.
+fn draw_route(x0, z0, corners, now, strength) {
+    let legs = [];
+    let total = 0.0;
+    let ax = x0;
+    let az = z0;
+    for p in corners {
+        let dx = p[0] - ax;
+        let dz = p[1] - az;
+        let span = (dx * dx + dz * dz).sqrt();
+        if span > 0.001 {
+            legs.push(#{ x: ax, z: az, ux: dx / span, uz: dz / span, at: total, span: span });
+            total += span;
+        }
+        ax = p[0];
+        az = p[1];
+    }
+    if total < 1.5 { return; }
+    let step = (total / 90.0).max(1.4);
     let dash = step * 0.55;
     let y = cap_mark_y();
     let c = gold();
     let s = (now * 1.6 % 1.0) * step;
     // Stop short of the ring, start clear of your feet.
-    let end = len - 1.3;
+    let end = total - 1.3;
+    let i = 0;
     while s < end {
         let a = s.max(0.8);
         let b = (s + dash).min(end);
         if b > a {
             let fade = ((a - 0.8) / 2.5).min(1.0);
-            mark_line(x0 + ux * a, y, z0 + uz * a, x0 + ux * b, y, z0 + uz * b,
-                      c, strength * fade, 1.5);
+            while i < legs.len() - 1 && legs[i].at + legs[i].span <= a { i += 1; }
+            // A dash over a corner is drawn a piece a leg
+            let j = i;
+            let lo = a;
+            while j < legs.len() && lo < b {
+                let l = legs[j];
+                let hi = b.min(l.at + l.span);
+                let t0 = lo - l.at;
+                let t1 = hi - l.at;
+                mark_line(l.x + l.ux * t0, y, l.z + l.uz * t0, l.x + l.ux * t1, y, l.z + l.uz * t1,
+                          c, strength * fade, 1.5);
+                lo = hi;
+                j += 1;
+            }
         }
         s += step;
+    }
+    // A pip at each turn still to come, breathing with the ring.
+    let breathe = 1.0 + 0.08 * (now * 3.0).sin();
+    for k in 1..legs.len() {
+        ring(legs[k].x, legs[k].z, y, 0.35 * breathe, c, strength * 0.8, 1.5, 12);
     }
 }
 

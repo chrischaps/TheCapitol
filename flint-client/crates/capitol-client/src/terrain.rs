@@ -14,11 +14,12 @@
 //! rebuilt while the game runs.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use capitol_core::net::{NetEvent, RestRequest, Tag};
+use capitol_core::paths::WalkGraph;
 use capitol_core::protocol::rules::ground::Ground;
 use capitol_core::protocol::terrain::{Landmark, LandmarkKind, TerrainResponse};
 use capitol_core::terrain::{read_terrain_file, TerrainCache, TerrainFetch};
@@ -39,7 +40,49 @@ pub struct TerrainSource {
     changed: bool,
     /// `current`'s land and wild water, indexed for walking on (W4).
     ground: Option<Arc<Ground>>,
+    /// `current`'s walk graph, for click-to-walk round the water (#267).
+    walks: Walks,
     origin: Origin,
+}
+
+/// A walk graph built on a thread of its own: about 0.3 s in a debug build.
+#[derive(Default)]
+struct Walks {
+    built: Option<Arc<WalkGraph>>,
+    building: Option<mpsc::Receiver<WalkGraph>>,
+}
+
+impl Walks {
+    /// Starts building `terrain`'s graph. The last one's is dropped: until
+    /// this one is in, walks go straight.
+    fn build(terrain: &TerrainResponse) -> Self {
+        let terrain = terrain.clone();
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new().name("walk-graph".into()).spawn(move || {
+            let start = Instant::now();
+            let graph = WalkGraph::new(&terrain);
+            tracing::info!("walk graph: {} nodes in {:.2?}", graph.len(), start.elapsed());
+            let _ = tx.send(graph);
+        });
+        if let Err(e) = spawned {
+            tracing::warn!("walk graph: couldn't start its thread ({e}); walks go straight");
+        }
+        Self { built: None, building: Some(rx) }
+    }
+
+    fn get(&mut self) -> Option<Arc<WalkGraph>> {
+        if let Some(rx) = &self.building {
+            match rx.try_recv() {
+                Ok(graph) => {
+                    self.built = Some(Arc::new(graph));
+                    self.building = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => self.building = None,
+            }
+        }
+        self.built.clone()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -67,6 +110,7 @@ impl TerrainSource {
         Ok(Self {
             fetch: None,
             ground: Some(Arc::new(Ground::from_terrain(&terrain))),
+            walks: Walks::build(&terrain),
             current: Some(terrain),
             changed: true,
             origin: Origin::File,
@@ -89,6 +133,7 @@ impl TerrainSource {
             },
             changed: cached.is_some(),
             ground: cached.as_ref().map(|t| Arc::new(Ground::from_terrain(t))),
+            walks: cached.as_ref().map(Walks::build).unwrap_or_default(),
             current: cached,
         }
     }
@@ -124,6 +169,7 @@ impl TerrainSource {
 
     fn replace(&mut self, terrain: TerrainResponse, origin: Origin) {
         self.ground = Some(Arc::new(Ground::from_terrain(&terrain)));
+        self.walks = Walks::build(&terrain);
         self.current = Some(terrain);
         self.changed = true;
         self.origin = origin;
@@ -140,6 +186,11 @@ impl TerrainSource {
     /// The current terrain's ground, for the local player's prediction.
     pub fn ground(&self) -> Option<&Arc<Ground>> {
         self.ground.as_ref()
+    }
+
+    /// The current terrain's walk graph, once it's built.
+    pub fn walks(&mut self) -> Option<Arc<WalkGraph>> {
+        self.walks.get()
     }
 
     /// The current terrain's landmark of `kind`, such as the Exchange hall.

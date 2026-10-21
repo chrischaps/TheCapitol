@@ -17,6 +17,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -30,6 +31,7 @@ use capitol_core::motion::{Motion, Pose};
 use capitol_core::net::{
     ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
 };
+use capitol_core::paths::{Walk, WalkGraph};
 use capitol_core::poll::{Fetch, Poller};
 use capitol_core::protocol::rest::{
     BuyListing, CollectRequest, DepositRequest, MarketSummaryResponse, MoveItemRequest, MyOrdersQuery, PauseReason,
@@ -129,8 +131,13 @@ pub struct Session {
     /// Why the last move was refused, and when.
     move_refused: Option<(String, Instant)>,
     file: SessionFile,
-    /// Where the last click sent you, in server units (P4.3).
+    /// Where the last leg sent you, in server units (P4.3).
     last_move: Option<(f64, f64)>,
+    /// The walk under way, round the water by the walk graph (#267): a
+    /// `move` a leg.
+    route: Walk,
+    /// The terrain's walk graph, once it's built.
+    walks: Option<Arc<WalkGraph>>,
     /// Water you walked into since the extension last took them (P4.3).
     blocked: Vec<Blocked>,
     /// Clicking nodes: extract, or walk there and extract (P4.4).
@@ -356,6 +363,8 @@ impl Session {
             move_refused: None,
             file,
             last_move: None,
+            route: Walk::default(),
+            walks: None,
             blocked: Vec::new(),
             harvest: Harvest::default(),
             yields: Vec::new(),
@@ -456,15 +465,51 @@ impl Session {
         self.walk(now, x, y);
     }
 
+    /// Every walk goes round the water: by the walk graph, a leg at a time
+    /// ([`Self::tend_route`] sends the rest), or straight while there's no
+    /// graph or no way round.
     fn walk(&mut self, now: Instant, x: f64, y: f64) {
         // Another device plays the avatar (E0.8): nothing to predict, and the
         // server would refuse the move.
         if self.auth.phase() != Phase::InWorld || !self.state.plays_here() {
             return;
         }
+        let Some(me) = self.state.local_player() else {
+            return;
+        };
+        let from = (me.x, me.y);
+        let (lx, ly) = self.route.plan(self.walks.as_deref(), from, (x, y), now);
+        self.leg(now, lx, ly);
+    }
+
+    /// Sends one straight leg: the prediction starts at once and the server
+    /// hears `move`.
+    fn leg(&mut self, now: Instant, x: f64, y: f64) {
         self.motion.move_to(now, x, y);
         self.net.ws(ClientMessage::Move { x, y });
         self.last_move = Some((x, y));
+    }
+
+    /// Each frame: the walk's next leg, as the last one ends.
+    fn tend_route(&mut self, now: Instant) {
+        if !self.route.is_walking() {
+            return;
+        }
+        let Some(me) = self.state.local_player() else {
+            self.route.stop();
+            return;
+        };
+        let server = (me.x, me.y);
+        // Bring the prediction up to now: it may have just reached the corner
+        self.motion.sample(now);
+        let walked = self.motion.destination().is_none();
+        if let Some((x, y)) = self.route.next(self.walks.as_deref(), walked, server, now) {
+            if self.state.plays_here() {
+                self.leg(now, x, y);
+            } else {
+                self.route.stop();
+            }
+        }
     }
 
     /// Play the avatar here, taking it from whichever device or bot has it
@@ -865,7 +910,18 @@ impl Session {
 
     /// Where you're walking to, in server units, for the marker.
     pub fn destination(&self) -> Option<(f64, f64)> {
-        self.motion.destination()
+        self.route.destination().or_else(|| self.motion.destination())
+    }
+
+    /// The corners your walk has still to pass, in server units, the one
+    /// being walked to first and the destination last (#267). Empty when
+    /// standing.
+    pub fn route(&self) -> Vec<(f64, f64)> {
+        if self.route.is_walking() {
+            self.route.corners().collect()
+        } else {
+            self.motion.destination().into_iter().collect()
+        }
     }
 
     /// Every time the water stopped you since the last call.
@@ -1947,6 +2003,7 @@ impl Session {
                         x,
                         y,
                     } => {
+                        self.route.stop();
                         self.blocked.push(Blocked {
                             x: *x,
                             y: *y,
@@ -1959,6 +2016,10 @@ impl Session {
                         self.yields.push((*node_id, item.clone()));
                     }
                     StateEvent::CraftingCompleted { item } => self.crafted.push(item.clone()),
+                    // The server stops you to gather or craft: so does the walk
+                    StateEvent::ExtractionStarted { .. } | StateEvent::CraftingStarted { .. } => {
+                        self.route.stop()
+                    }
                     StateEvent::CatalogUpdated => self.cache_catalog(),
                     StateEvent::StationPlaced { station_id, .. } => {
                         self.placed.insert(*station_id);
@@ -2055,7 +2116,9 @@ impl Session {
         }
         // The prediction walks on the land the server does (W4)
         self.motion.set_ground(terrain.ground().cloned());
+        self.walks = terrain.walks();
         if self.in_session() {
+            self.tend_route(now);
             self.harvest.tick(now);
             self.visit.tick(now);
             self.station_notes.extend(self.visit.take_notes());
@@ -2141,6 +2204,7 @@ impl Session {
             self.poller = Poller::new();
             self.motion = Motion::new();
             self.last_move = None;
+            self.route = Walk::default();
             self.blocked.clear();
             self.move_refused = None;
             self.link = Link::default();
@@ -2490,6 +2554,63 @@ mod tests {
         assert_eq!(normalize_server("http://"), None);
         assert_eq!(normalize_server("local host"), None);
         assert_eq!(server_label("http://localhost:3000"), "localhost:3000");
+    }
+
+    /// Against the local stack (#267): a click across the outer canal, far
+    /// from its bridges, walks round by one, a `move` a leg, and gets there
+    /// with the water never in the way. The walk out to the canal from
+    /// wherever you stand is routed too. Run `capitol-bot --prefix walk
+    /// --gather 0` once first for `Walk1`. Takes a minute or two of walking.
+    #[test]
+    #[ignore = "needs the local stack and the capitol-bot --prefix walk account; walks for a minute or two"]
+    fn a_click_across_the_canal_walks_round_by_a_bridge() {
+        use capitol_core::protocol::rules::{CENTER_X, CENTER_Y};
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let dir = std::env::temp_dir().join(format!("capitol-walk-{}", std::process::id()));
+        let mut session = Session::start(&server, SessionFile::load(dir.join("s.toml"))).unwrap();
+        // The fixture is the default world's terrain, so its graph is the server's
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let mut terrain = TerrainSource::offline(&fixture).unwrap();
+        session.log_in("walk1@bots.capitol.local", "walk-1-capitol-bot");
+
+        let mut wait = |session: &mut Session, what: &str, secs: u64, done: &dyn Fn(&Session) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(secs);
+            while !done(session) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                session.update(Instant::now(), &mut terrain);
+                // The extension samples every frame; the prediction needs it
+                session.sample(Instant::now());
+                std::thread::sleep(Duration::from_millis(16));
+            }
+        };
+        wait(&mut session, "the world and the walk graph", 60, &|s| {
+            s.state().local_player().is_some() && s.walks.is_some()
+        });
+        let polar = |r: f64, degrees: f64| {
+            let a = degrees.to_radians();
+            (CENTER_X + r * a.cos(), CENTER_Y + r * a.sin())
+        };
+        // Outside the outer canal (r 1000) and inside it, at 20°, where it has no bridge
+        for (what, to) in [("the canal's outer bank", polar(1100.0, 20.0)), ("over the canal", polar(900.0, 20.0))] {
+            session.move_to(Instant::now(), to.0, to.1);
+            let corners = session.route();
+            let started = Instant::now();
+            wait(&mut session, what, 300, &|s| {
+                !s.blocked.is_empty()
+                    || s.state().local_player().is_some_and(|p| (p.x - to.0).hypot(p.y - to.1) < 1.0)
+            });
+            eprintln!("{what}: {} corners in {:.0?}: {corners:?}", corners.len(), started.elapsed());
+            let blocked = session.take_blocked();
+            let stops: Vec<_> = blocked.iter().map(|b| (&b.reason, b.x, b.y)).collect();
+            assert!(blocked.is_empty(), "the walk to {what} was stopped: {stops:?}");
+            if what == "over the canal" {
+                assert!(corners.len() >= 2, "a walk over the canal goes round by a bridge: {corners:?}");
+            }
+        }
+        wait(&mut session, "the walk to end", 5, &|s| s.route().is_empty());
+        session.log_out();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Against the local stack: a slot grid's drop goes to the server, the

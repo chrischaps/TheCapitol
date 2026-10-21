@@ -201,7 +201,7 @@ fn nowhere_in_a_lake() {
 
 /// A world of one canal, r 1000 and 15 wide round the centre, with one
 /// bridge at 90° and a road over it.
-fn one_canal() -> TerrainResponse {
+pub(super) fn one_canal() -> TerrainResponse {
     TerrainResponse {
         world_size: 12000.0,
         center_x: 6000.0,

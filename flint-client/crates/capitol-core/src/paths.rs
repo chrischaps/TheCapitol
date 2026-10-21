@@ -53,6 +53,9 @@ use capitol_protocol::terrain::{Landmark, LandmarkKind, TerrainResponse, WaterRi
 
 use crate::citizen::idle::Places;
 
+mod walk;
+pub use walk::Walk;
+
 /// The longest stretch of road between two nodes. A street that ends on a
 /// long arterial segment has a node of it within half of this.
 pub const SPAN: f64 = 40.0;

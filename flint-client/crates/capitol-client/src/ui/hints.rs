@@ -46,7 +46,7 @@ fn words(step: Step) -> (&'static str, &'static str, &'static str) {
     match step {
         Step::Walk => (
             "Find your feet",
-            "Click the ground and you'll walk there. Canals stop you; the bridges cross them.",
+            "Click the ground and you'll walk there, round the water by the bridges and fords.",
             "[Click] walk  ·  [W] [A] [S] [D] pan",
         ),
         Step::Gather => (

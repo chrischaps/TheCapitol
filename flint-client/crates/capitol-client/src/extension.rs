@@ -1802,7 +1802,8 @@ fn listen(ctx: &mut ExtensionCtx, shared: &script_api::Shared, sound: &mut Sound
 }
 
 /// Click to move (P4.3): send the walk a script asked for (`cap_move`),
-/// tell scripts where you're walking to (`cap_destination`), and fire
+/// tell scripts where you're walking to (`cap_destination`) and by which
+/// corners round the water (`cap_route`, #267), and fire
 /// `movement_blocked` at them for each time the water stopped you, with
 /// where you stand (`x`, `z`, world metres), which way you were going
 /// (`dir_x`, `dir_z`, a unit vector, or 0 if unknown), the server's
@@ -1815,6 +1816,10 @@ fn walk(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Shar
         *d = session
             .destination()
             .map(|(x, y)| crate::coords::to_world(x, y));
+    }
+    if let Ok(mut r) = shared.route.lock() {
+        r.clear();
+        r.extend(session.route().into_iter().map(|(x, y)| crate::coords::to_world(x, y)));
     }
     for blocked in session.take_blocked() {
         let [x, z] = crate::coords::to_world(blocked.x, blocked.y);
