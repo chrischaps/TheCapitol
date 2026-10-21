@@ -209,10 +209,10 @@ The first citizens walk after C0.1, C0.6 and C1.1, about three sessions. The who
 
 ## 8. Later (outside this plan)
 
-- **Chat and the citizens' voice.** M9's chat (local and global) first. Then a model layer can give citizens lines: greetings, haggling, letters to the Gazette, all under the same budget as D4.
+- **Chat and the citizens' voice.** Planned in `the-capitol-commons.md` (S1, #381 to #386, with #311). M9's chat (local and global) first. Then a model layer can give citizens lines: greetings, haggling, letters to the Gazette, all under the same budget as D4.
 - **Night by day.** Since #276 game night changes what a citizen does, not whether it's on. Chris's further ideas each want a ticket of their own (`economy`, `needs-decision`) once he wants them: the bazaar kept by day only, a game rule for people too; and night-only resources, say mushrooms, which are content (`backend/content/`, E2's spawn tables).
 - **Distillation.** New rules learned from the decision log.
-- **Guilds and contracts** (M9), which citizens join and keep.
+- **Guilds and contracts** (M9), which citizens join and keep. Planned in `the-capitol-commons.md` D11: citizens answer and post commissions (#391), take wages (#394) and join guilds (#401).
 - **The Capitol's public works** (GDD's infrastructure bounties and price floors), if the soak shows demand is too thin.
 - **M10 operations.** A hosted server, so the town runs 24/7 off Chris's PC.
 

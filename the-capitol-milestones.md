@@ -676,6 +676,8 @@ Create static data for:
 
 **Goal:** Guilds and player contracts.
 
+*Planned as The Commons (`the-capitol-commons.md`, #352, 2026-10-21). It re-orders M9 for a world with one human and many citizens: chat and letters first, then delivery commissions and piece-rate wages in place of the four generic contract types below, then reputation as standing in words, leaderboards, and guilds last. Disputes wait for custom contracts.*
+
 **Duration:** 2-3 weeks
 
 ### Deliverables
