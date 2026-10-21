@@ -20,23 +20,17 @@
 //!   on the tops, all mottled as the disc is. By the water (W10) the banks
 //!   are dark with moss, the beds silt, and the fords pale gravel
 //!   ([`Shore`]).
-//! - **The air** (W11): the further the land from the camera, the more it
-//!   takes the haze's slate blue ([`View::haze`]), so from the city the
-//!   ranges stand blue on the horizon in every direction, and from a ridge
-//!   the far side of the ring does. The haze is baked into the colours, so
-//!   a chunk is built again when the haze it was built with has drifted
-//!   [`HAZE_STEP`] from the camera's. It clears with the fog as the camera
-//!   climbs (`atmosphere::fog_scale`), so the map stays flat. A workaround:
-//!   Flint's fog has one colour, the sky's horizon, so it can't turn far
-//!   things blue itself. Only the land is hazed; what stands on it isn't.
-//!   A distance tint in the fog removes this (#233).
+//! - **The air** isn't baked in: the far land's slate blue is the fog's
+//!   aerial tint (`atmosphere`, Flint ADR 0101, #233), so it reaches the
+//!   trees, the water and the city on it alike, and a chunk is built
+//!   again only when its stride changes.
 
 use crate::coords::{layer, to_world, S};
 use crate::world::ground::{self, mottle};
 use crate::world::land::{sample_at, CHUNK, CHUNKS, FROM, OUTER, SAMPLES};
 use crate::world::mesh::{facing, MeshBuf};
 use crate::world::palette::{self, hex, mix};
-use capitol_protocol::rules::{CENTER_X, CENTER_Y, WILDERNESS_OUTER_RADIUS};
+use capitol_protocol::rules::{CENTER_X, CENTER_Y};
 use flint_player::{ExtensionGpu, GroundField};
 use std::sync::Arc;
 
@@ -76,21 +70,6 @@ const SILT_STRENGTH: f32 = 0.45;
 const GRAVEL_STRENGTH: f32 = 0.3;
 /// How much darker the wettest bank is than dry ground.
 const WET_DARKEN: f32 = 0.22;
-/// How much of the haze the farthest land takes, and the distances (m from
-/// the camera) over which it comes in. The ranges are 320 to 600 m from
-/// the quays, and the far side of the ring 900 m from a ridge.
-const HAZE_MAX: f32 = 0.7;
-const HAZE_DISTANCE: (f32, f32) = (120.0, 800.0);
-/// The server radii over which the haze comes in at the ranges' foot, so
-/// the rural plain's land meets the city's flat disc with no line, and
-/// fades out again as the land settles past the world's edge to meet the
-/// disc there.
-const HAZE_FROM: (f32, f32) = (3800.0, 4200.0);
-const HAZE_OUT: (f32, f32) = (WILDERNESS_OUTER_RADIUS as f32, OUTER as f32);
-/// How far the haze at a chunk may drift from what it was built with
-/// before it's built again: under a step the eye can see.
-pub const HAZE_STEP: f32 = 0.03;
-
 fn smoothstep((lo, hi): (f32, f32), x: f32) -> f32 {
     let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -112,48 +91,6 @@ pub fn tint(r: f64, rise: f32, slope: f32, at: [f32; 2]) -> [f32; 4] {
     c = mix(c, pulled(palette::WILD_SNOW, SNOW_STRENGTH), snow);
     let m = mottle(at);
     [c[0] * m, c[1] * m, c[2] * m, 1.0]
-}
-
-/// Where the land is seen from, for the haze: the camera's eye (world
-/// metres) and how much of the air shows (`atmosphere::fog_scale`: 1 low
-/// down, 0 at the map).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct View {
-    pub eye: [f32; 3],
-    pub air: f32,
-}
-
-impl View {
-    /// No air: the land in its own colours.
-    #[cfg(test)]
-    pub const CLEAR: View = View {
-        eye: [0.0; 3],
-        air: 0.0,
-    };
-
-    /// How much of the haze the land at world `at`, server radius `r`,
-    /// takes: 0 near the camera, up to [`HAZE_MAX`] far off.
-    pub fn haze(&self, at: [f32; 3], r: f64) -> f32 {
-        if self.air <= 0.0 {
-            return 0.0;
-        }
-        let [dx, dy, dz] = [0, 1, 2].map(|k| at[k] - self.eye[k]);
-        let d = (dx * dx + dy * dy + dz * dz).sqrt();
-        let r = r as f32;
-        HAZE_MAX
-            * self.air
-            * smoothstep(HAZE_DISTANCE, d)
-            * smoothstep(HAZE_FROM, r)
-            * (1.0 - smoothstep(HAZE_OUT, r))
-    }
-}
-
-/// `colour` seen through `haze` of the air.
-pub fn hazed(colour: [f32; 4], haze: f32) -> [f32; 4] {
-    if haze <= 0.0 {
-        return colour;
-    }
-    mix(colour, hex(palette::WILD_HAZE), haze)
 }
 
 /// The water's mark on the ground: how deep it cut each sample and how wet
@@ -209,11 +146,6 @@ impl Chunk {
         format!("land_{:02}_{:02}", self.row, self.col)
     }
 
-    /// Its middle sample, (i, j).
-    fn middle(self) -> (usize, usize) {
-        (self.col * CHUNK + CHUNK / 2, self.row * CHUNK + CHUNK / 2)
-    }
-
     /// The server radius range its samples span.
     fn radii(self) -> (f64, f64) {
         let [x0, y0] = sample_at(self.col * CHUNK, self.row * CHUNK);
@@ -251,9 +183,9 @@ fn radius_at(i: usize, j: usize) -> f64 {
     (x - CENTER_X).hypot(y - CENTER_Y)
 }
 
-/// `chunk` at stride `1 << lod`, seen from `view`: its quads on the land,
-/// and a skirt down from every edge of them that's on the chunk's rim.
-pub fn build(field: &GroundField, shore: &Shore, chunk: Chunk, lod: usize, view: &View) -> MeshBuf {
+/// `chunk` at stride `1 << lod`: its quads on the land, and a skirt down
+/// from every edge of them that's on the chunk's rim.
+pub fn build(field: &GroundField, shore: &Shore, chunk: Chunk, lod: usize) -> MeshBuf {
     let step = 1usize << lod;
     let n = CHUNK / step + 1;
     let texel = (crate::world::land::TEXEL as f32) * S;
@@ -295,7 +227,6 @@ pub fn build(field: &GroundField, shore: &Shore, chunk: Chunk, lod: usize, view:
             } else {
                 dry
             };
-            let colour = hazed(colour, view.haze([at[0], h, at[1]], r));
             mesh.vertex([at[0], y, at[1]], normal, colour);
         }
     }
@@ -376,17 +307,15 @@ pub fn lod_for(distance: f32, had: Option<usize>) -> usize {
     }
 }
 
-/// A chunk as drawn: the stride (`None` before it's first built) and the
-/// haze at its middle it was built with.
+/// A chunk as drawn: the stride (`None` before it's first built).
 #[derive(Debug, Clone, Copy)]
 struct Drawn {
     chunk: Chunk,
     lod: Option<usize>,
-    haze: f32,
 }
 
 /// The land's meshes as drawn: the field they're cut from, and each
-/// chunk's stride and haze.
+/// chunk's stride.
 #[derive(Default)]
 pub struct LandMeshes {
     field: Option<Arc<GroundField>>,
@@ -400,35 +329,27 @@ impl LandMeshes {
         self.field = Some(field);
         self.shore = shore;
         self.chunks = Chunk::all()
-            .map(|chunk| Drawn {
-                chunk,
-                lod: None,
-                haze: 0.0,
-            })
+            .map(|chunk| Drawn { chunk, lod: None })
             .collect();
     }
 
-    /// Builds the chunks whose stride the camera changes, or whose haze
-    /// has drifted [`HAZE_STEP`] from what it was built with, nearest
-    /// first: all of them the first time, then at most [`BUDGET`] a frame.
-    /// Returns the mesh names first built, which need an entity.
-    pub fn update(&mut self, gpu: &mut ExtensionGpu, view: View) -> Vec<String> {
+    /// Builds the chunks whose stride a camera at `eye` (world metres)
+    /// changes, nearest first: all of them the first time, then at most
+    /// [`BUDGET`] a frame. Returns the mesh names first built, which need
+    /// an entity.
+    pub fn update(&mut self, gpu: &mut ExtensionGpu, eye: [f32; 3]) -> Vec<String> {
         let Some(field) = self.field.clone() else {
             return Vec::new();
         };
         let first = self.chunks.iter().all(|d| d.lod.is_none());
-        let mut wanted: Vec<(f32, usize, usize, f32)> = self
+        let mut wanted: Vec<(f32, usize, usize)> = self
             .chunks
             .iter()
             .enumerate()
             .filter_map(|(k, drawn)| {
-                let d = distance(&field, drawn.chunk, view.eye);
+                let d = distance(&field, drawn.chunk, eye);
                 let lod = lod_for(d, drawn.lod);
-                let (i, j) = drawn.chunk.middle();
-                let [x, z] = to_world_at(i, j);
-                let haze = view.haze([x, y_at(&field, i, j), z], radius_at(i, j));
-                let stale = (haze - drawn.haze).abs() > HAZE_STEP;
-                (Some(lod) != drawn.lod || stale).then_some((d, k, lod, haze))
+                (Some(lod) != drawn.lod).then_some((d, k, lod))
             })
             .collect();
         wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -436,24 +357,17 @@ impl LandMeshes {
             wanted.truncate(BUDGET);
         }
         let mut new = Vec::new();
-        for (_, k, lod, haze) in wanted {
+        for (_, k, lod) in wanted {
             let drawn = &mut self.chunks[k];
             let name = drawn.chunk.mesh_name();
-            build(&field, &self.shore, drawn.chunk, lod, &view).upload(gpu, &name, ground::ROUGHNESS);
+            build(&field, &self.shore, drawn.chunk, lod).upload(gpu, &name, ground::ROUGHNESS);
             if drawn.lod.is_none() {
                 new.push(name);
             }
             drawn.lod = Some(lod);
-            drawn.haze = haze;
         }
         new
     }
-}
-
-/// World (X, Z) of sample (i, j).
-fn to_world_at(i: usize, j: usize) -> [f32; 2] {
-    let [x, y] = sample_at(i, j);
-    to_world(x, y)
 }
 
 /// From `eye` (world metres) to the nearest point of `chunk`'s box.
@@ -503,7 +417,7 @@ mod tests {
         for chunk in [Chunk { row: 2, col: 12 }, Chunk { row: 12, col: 4 }, Chunk { row: 20, col: 19 }] {
             assert!(chunk.has_land());
             for lod in 0..LODS {
-                let m = build(field, &Shore::default(), chunk, lod, &View::CLEAR);
+                let m = build(field, &Shore::default(), chunk, lod);
                 assert!(!m.indices.is_empty(), "{chunk:?} at {lod}");
                 let n = CHUNK / (1 << lod) + 1;
                 for tri in m.indices.chunks_exact(3) {
@@ -520,7 +434,7 @@ mod tests {
     fn the_finest_stride_lies_on_the_field() {
         let field = fixture_field();
         let chunk = Chunk { row: 2, col: 12 };
-        let m = build(field, &Shore::default(), chunk, 0, &View::CLEAR);
+        let m = build(field, &Shore::default(), chunk, 0);
         for v in m.vertices.iter().step_by(37) {
             let [x, y, z] = v.position;
             let want = field.height_at(x, z).unwrap();
@@ -535,7 +449,7 @@ mod tests {
         let field = fixture_field();
         let chunk = Chunk { row: 2, col: 12 };
         let shore = Shore { cut: vec![0.3; SAMPLES * SAMPLES], ..Shore::default() };
-        let m = build(field, &shore, chunk, 0, &View::CLEAR);
+        let m = build(field, &shore, chunk, 0);
         let n = CHUNK + 1;
         let mut checked = 0;
         for v in m.vertices[..n * n].iter().step_by(37) {
@@ -600,7 +514,7 @@ mod tests {
         let chunk = Chunk { row: 2, col: 12 };
         let started = std::time::Instant::now();
         for _ in 0..4 {
-            build(field, &Shore::default(), chunk, 0, &View::CLEAR);
+            build(field, &Shore::default(), chunk, 0);
         }
         let each = started.elapsed().as_secs_f64() * 1000.0 / 4.0;
         // Debug builds are several times slower than release.

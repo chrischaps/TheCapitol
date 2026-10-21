@@ -6,8 +6,9 @@
 //! key and wrapping at midnight:
 //!
 //! - **The palette**: the sky's colours and stars, the ambient from above,
-//!   the fill light, the fog's colour, the exposure, how the gold on your
-//!   plots shows, and how thick the valleys' mist lies (W11). Night holds
+//!   the fill light, the fog's colour and the far land's blue (#233), the
+//!   exposure, how the gold on your plots shows, and how thick the
+//!   valleys' mist lies (W11). Night holds
 //!   round midnight, then dawn, a held day, evening, and night again.
 //! - **The key light**: the sun by day and the moon by night, as a compass
 //!   bearing, a height and a colour. The engine draws the sky's disc where
@@ -88,6 +89,10 @@ pub struct Palette {
     pub sky: Sky,
     pub fill: Light,
     pub fog_color: [f32; 3],
+    /// The air's blue on far things (linear): the fog's aerial tint (Flint
+    /// ADR 0101, #233). It's light in the air, not a surface, so it goes
+    /// dark with the sky.
+    pub aerial: [f32; 3],
     pub exposure: f32,
     pub plots: PlotGlow,
     /// How thick the valleys' mist lies, 0 to 1 (`world::mist`, W11):
@@ -167,6 +172,7 @@ fn night() -> Palette {
             color: [0.35, 0.42, 0.80],
             intensity: 0.12,
         },
+        aerial: [0.012, 0.017, 0.038],
         exposure: 1.0,
         plots: PlotGlow {
             surface: 0.0,
@@ -198,6 +204,7 @@ fn dawn() -> Palette {
             color: [0.55, 0.60, 0.92],
             intensity: 0.35,
         },
+        aerial: [0.15, 0.15, 0.24],
         exposure: 1.0,
         plots: PlotGlow {
             surface: 0.6,
@@ -229,6 +236,7 @@ fn day() -> Palette {
             color: [0.60, 0.70, 0.95],
             intensity: 0.35,
         },
+        aerial: [0.22, 0.33, 0.55],
         exposure: 0.9,
         plots: PlotGlow {
             surface: 1.0,
@@ -371,6 +379,7 @@ fn lerp_palette(a: &Palette, b: &Palette, t: f32) -> Palette {
         sky: lerp_sky(&a.sky, &b.sky, t),
         fill: lerp_light(&a.fill, &b.fill, t),
         fog_color: lerp3(a.fog_color, b.fog_color, t),
+        aerial: lerp3(a.aerial, b.aerial, t),
         exposure: lerp(a.exposure, b.exposure, t),
         plots: PlotGlow {
             surface: lerp(a.plots.surface, b.plots.surface, t),
@@ -424,6 +433,7 @@ mod tests {
                 intensity: 0.4,
             },
             fog_color: [0.2225, 0.1123, 0.1380],
+            aerial: [0.10, 0.105, 0.20],
             exposure: 1.0,
             plots: PlotGlow::EVENING,
             mist: EVENING_MIST,
@@ -439,6 +449,25 @@ mod tests {
         assert_eq!(mist(0.5), 0.0);
         assert_eq!(mist(EVENING), EVENING_MIST);
         assert!(mist(0.0) > 0.0 && mist(0.0) < EVENING_MIST, "{}", mist(0.0));
+    }
+
+    /// The far land's blue (#233) is light in the air, not a surface: it's
+    /// blue at every hour, and as dark as the sky is at night.
+    #[test]
+    fn the_far_blue_is_blue_and_goes_dark_with_the_sky() {
+        let (key, palette) = evening();
+        let aerial = |phase: f64| at(phase, &key, &palette).palette.aerial;
+        let light = |[r, g, b]: [f32; 3]| 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        for step in 0..48 {
+            let [r, g, b] = aerial(step as f64 / 48.0);
+            assert!(b > g && g >= r, "{step}: {:?}", [r, g, b]);
+        }
+        let (night, dawn, day) = (light(aerial(0.0)), light(aerial(0.25)), light(aerial(0.5)));
+        let dusk = light(aerial(EVENING));
+        assert!(night < dusk && dusk < dawn && dawn < day, "{night} {dusk} {dawn} {day}");
+        // Never brighter than the fog it lies under on the horizon by day.
+        let fog = at(0.5, &key, &palette).palette.fog_color;
+        assert!(day < light(fog), "{day} vs {}", light(fog));
     }
 
     #[test]

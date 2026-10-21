@@ -69,11 +69,6 @@ pub const WILD_SNOW: u32 = 0xe6ebf2;
 pub const WILD_SILT: u32 = 0x3a3428;
 pub const WILD_MOSS: u32 = 0x2f4a26;
 pub const WILD_GRAVEL: u32 = 0xa49a84;
-/// The air over the ranges (W11): far land fades toward this slate blue,
-/// so the ranges stand blue on the horizon at every hour the sun lights
-/// them. A surface colour, not pulled toward the background: it's the
-/// light the air between gives back.
-pub const WILD_HAZE: u32 = 0x6c7fa6;
 /// The valleys' mist at dawn and dusk (W11): a pale, faintly blue white.
 pub const WILD_MIST: u32 = 0xd6dce6;
 

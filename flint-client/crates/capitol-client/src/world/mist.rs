@@ -18,11 +18,14 @@
 //! The mist is lit like any surface, so the low sun warms it and the night
 //! leaves it grey.
 //!
-//! Sheets are a workaround: Flint's height fog does nothing (#233), and
-//! with it the mist would be the hour's `fog_height_*` and fill the air.
-//! They also cast shadows, as every transparent mesh does in Flint
-//! (#232), even at noon when they can't be seen. The shadow falls nearly
-//! under them, since they hang close over the ground.
+//! Sheets are a workaround. Flint's height fog works since ADR 0101
+//! (#233), but it's one level layer over the whole scene: low enough to
+//! fill a high valley, it would bury the city, and at the plain it misses
+//! every valley above it. Fog volumes, or a layer that follows the land,
+//! would let the mist fill the air (#297). The sheets also cast shadows,
+//! as every transparent mesh does in Flint (#232), even at noon when they
+//! can't be seen. The shadow falls nearly under them, since they hang
+//! close over the ground.
 
 use crate::coords::{layer, to_world};
 use crate::world::ground::value_noise;

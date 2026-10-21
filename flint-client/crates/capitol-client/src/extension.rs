@@ -418,10 +418,6 @@ impl CapitolExtension {
     /// further from are built again.
     fn land_in_place(&mut self, ctx: &mut ExtensionCtx) {
         let eye = ctx.camera.position.to_array();
-        let view = world::land_mesh::View {
-            eye,
-            air: crate::atmosphere::fog_scale(crate::atmosphere::height_over_land(eye)),
-        };
         let Some(gpu) = ctx.gpu.as_mut() else {
             return;
         };
@@ -466,7 +462,7 @@ impl CapitolExtension {
             self.land_in = true;
             self.nodes.land_changed();
         }
-        names.extend(self.land_meshes.update(gpu, view));
+        names.extend(self.land_meshes.update(gpu, eye));
         attach_each(ctx, names.iter());
     }
 

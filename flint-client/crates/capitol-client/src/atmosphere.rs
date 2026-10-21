@@ -25,9 +25,12 @@
 //! The heights are the camera's over the land under it (W11), so on a
 //! ridge 50 m up the street view keeps its fog as it does in the city.
 //!
-//! The air also tints the far land blue (`world::land_mesh::View`) and
-//! lays the valleys' mist (`world::mist`), both clearing with the fog as
-//! the camera climbs.
+//! The air also turns far things blue (the fog's aerial tint, Flint ADR
+//! 0101, #233: the ranges stand blue round the city, and from a ridge the
+//! far side of the ring does) and lays the valleys' mist (`world::mist`),
+//! both clearing with the fog as the camera climbs. The tint's colour goes
+//! with the hour (`Palette::aerial`); the scene authors the dusk's, and how
+//! far off it comes in.
 //!
 //! The camera rig (`scripts/camera.rhai`) sets the heights: above
 //! `CLEAR_FROM` it always looks down past the horizon (its pitch is over
@@ -85,6 +88,7 @@ pub struct Atmosphere {
 /// day's evening.
 struct Authored {
     fog_density: f32,
+    fog_tint_strength: f32,
     ssao_intensity: f32,
     key: Light,
     evening: Palette,
@@ -130,6 +134,8 @@ impl Atmosphere {
         let mut config = renderer.post_process_config().clone();
         config.fog_density = authored.fog_density * fog;
         config.fog_color = palette.fog_color;
+        config.fog_tint_color = palette.aerial;
+        config.fog_tint_strength = authored.fog_tint_strength * fog;
         config.exposure = palette.exposure;
         config.ssao_intensity = authored.ssao_intensity * (1.0 - flat);
         renderer.set_post_process_config(config);
@@ -244,12 +250,14 @@ impl Authored {
             },
             fill: fill_light,
             fog_color: config.fog_color,
+            aerial: config.fog_tint_color,
             exposure: config.exposure,
             plots: PlotGlow::EVENING,
             mist: daylight::EVENING_MIST,
         };
         Self {
             fog_density: config.fog_density,
+            fog_tint_strength: config.fog_tint_strength,
             ssao_intensity: config.ssao_intensity,
             key,
             evening,
