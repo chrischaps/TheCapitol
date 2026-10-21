@@ -1,6 +1,6 @@
 # The Capitol: The Observatory (Dev Tooling and Monitoring Plan)
 
-*2026-10-21. Plan issue #351. Work packages #353 to #377 (§7). Issues are labelled `devtools`, with phase labels `dt:D0-groundwork` to `dt:D6-balance-runs`.*
+*2026-10-21. Plan issue #351. The current focus since #402. Work packages #353 to #377 (§7). Issues are labelled `devtools`, with phase labels `dt:D0-groundwork` to `dt:D6-balance-runs`.*
 
 ## 1. Vision
 

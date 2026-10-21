@@ -20,9 +20,18 @@ The Capitol is an MMO economic simulation where the economy is the primary gamep
 - `the-capitol-devtools.md` - The Observatory: dev tooling and monitoring. An admin console the backend serves at `/admin/console` (samples every 10 s, SSE, the economy, the tick by phase, the town reporting in), live server-side tunables marked on every chart, balance runs that compare two presets, and an F7 dev overlay in the Flint client (issues labelled `devtools`, #351, #353 to #377)
 - `the-capitol-commons.md` - The Commons: the city's social half. Local talk and a Capitol channel, letters, delivery commissions with escrow and claims on the hall's board, piece-rate wages, standing in words, weekly leaderboards, and guilds with a treasury, dues and a hall, with citizens in all of it (issues labelled `commons`, #352, #378 to #401, plus #311)
 
-## Current Focus: Citizens
+## Current Focus: The Observatory (devtools)
 
-Economy v1 is built, and so are the wilds and the Flint client. Active work is **Citizens**: AI players who live in the world, so the economy is stress-tested and the city feels inhabited with one human on. The plan is `the-capitol-citizens.md`. The work queue is the GitHub issues labelled `citizens` (#246 to #262, plus #211 as C0.5), created in dependency order. The phase labels run `cz:C0-groundwork` to `cz:C3-cascade`. Citizens run in their own process (`capitol-town`, on capitol-core's `Bot`), get no grants, and carry a visible mark; their decisions all go through one `Decider` cascade (plan D4). C3.3 measured Jev (TypeSafe's fast choice model, `TYPESAFE_API_KEY`) as the tier above the rules: `rules → jev@0.9`, at about 1¢ a citizen-day. C3.2 built a Claude layer (`claude-haiku`, `claude-sonnet`, `ANTHROPIC_API_KEY`) and measured it: it adds nothing on menu decisions, and with Sonnet it costs 58¢ a citizen-day. So decisions stay with rules and Jev, and the LLMs are for what citizens say (#311).
+Citizens live in the town now, and the 200-citizen soak showed what's missing: every balance finding (#294, #335, #304) was dug out of file reports after the run. Active work is **the Observatory**: one place to watch the world while it runs, change a knob and see the effect on the same chart. The plan is `the-capitol-devtools.md`. The work queue is the GitHub issues labelled `devtools` (#353 to #377), created in dependency order. The phase labels run `dt:D0-groundwork` to `dt:D6-balance-runs`. It has three parts:
+- an admin console the backend serves at `/admin/console`, fed by samples every 10 s over SSE;
+- live server-side tunables, each change marked on every chart;
+- an F7 dev overlay in the Flint client.
+
+The first slice is D0.1 to D0.3, D1.1, D1.2 and D2.1: a live chart of the money and the tick, on the town. The console reads like the Gazette's sibling, with a plain sentence over each chart.
+
+### Citizens (built)
+
+**Citizens** are AI players who live in the world, so the economy is stress-tested and the city feels inhabited with one human on. The plan is `the-capitol-citizens.md`. The work queue is the GitHub issues labelled `citizens` (#246 to #262, plus #211 as C0.5), created in dependency order. The phase labels run `cz:C0-groundwork` to `cz:C3-cascade`. Citizens run in their own process (`capitol-town`, on capitol-core's `Bot`), get no grants, and carry a visible mark; their decisions all go through one `Decider` cascade (plan D4). C3.3 measured Jev (TypeSafe's fast choice model, `TYPESAFE_API_KEY`) as the tier above the rules: `rules → jev@0.9`, at about 1¢ a citizen-day. C3.2 built a Claude layer (`claude-haiku`, `claude-sonnet`, `ANTHROPIC_API_KEY`) and measured it: it adds nothing on menu decisions, and with Sonnet it costs 58¢ a citizen-day. So decisions stay with rules and Jev, and the LLMs are for what citizens say (#311).
 
 ### Economy v1 (done)
 
