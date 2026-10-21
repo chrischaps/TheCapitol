@@ -11,7 +11,7 @@
 # hall. `mint --count n --role merchant` makes merchants.
 #
 # The persona (C1.2). `mint` writes all of it, drawn from the citizen's
-# name; any of the four lines left out is drawn from the name again, so
+# name; any of the five lines left out is drawn from the name again, so
 # they're there to read and to change.
 #
 # - home: the zone (rural or suburban) its lot will be in, the avenue it
@@ -19,8 +19,16 @@
 #   the zone, 0 to 1. Until it has saved for a lot it sleeps on the avenue.
 # - market: where it keeps its market hours, "hall" or "bazaar".
 # - schedule: its day on the server's game clock (a game day is two real
-#   hours). Up at wake, at the market for its hours, home at dusk, logged
-#   out at bed until the next wake. Each must come after the one before.
+#   hours): what it does while it's on. Work from wake, at the market for
+#   its hours, home at dusk, and from there the night's work, crafting and
+#   gathering, with night proper at bed. Each must come after the one
+#   before. Game night doesn't log it out; its habit does.
+# - habit (#276): when it plays, on the real clock. Its kind is dedicated
+#   (4 to 8 hours most days), regular (1 to 3 hours, 3 to 5 days a week),
+#   casual (about an hour once or twice a week) or lapsed (away for weeks,
+#   then back for a week or two), and its zone the hours from UTC its
+#   evenings and weekends are in, -12 to 14. `capitol-town habits` shows
+#   who's on when.
 # - temperament: each 0 to 1. Thrift is how many deeds' worth it saves
 #   before it buys a home; sociability, how long it stays at the market.
 
@@ -43,6 +51,14 @@ server = "http://localhost:3000"
 layers = ["rules"]
 # layers = ["rules", "jev"]
 
+# When citizens play (#276): the share of each habit `mint` draws, by
+# weight. A town of this mix is on about 3% of the time, so keeping 20 on
+# takes about 640 citizens: `mint --online 20` makes that many. Changing
+# the mix re-draws only the citizens whose habit the roster leaves out, and
+# only those near a boundary.
+[habits]
+mix = { dedicated = 0.05, regular = 0.30, casual = 0.55, lapsed = 0.10 }
+
 [[citizen]]
 name = "Ada Reeder"
 role = "gatherer-fiber"
@@ -51,6 +67,7 @@ home = { zone = "rural", avenue = "south-west", depth = 0.42 }
 market = "bazaar"
 schedule = { wake = "05:40", market = "14:10-16:25", home = "19:05", bed = "20:55" }
 temperament = { thrift = 0.31, risk = 0.58, sociability = 0.66, patience = 0.47 }
+habit = { kind = "regular", zone = -5 }
 
 [[citizen]]
 name = "Percy Sawyer"

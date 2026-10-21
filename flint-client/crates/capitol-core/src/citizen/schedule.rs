@@ -1,6 +1,8 @@
 //! A citizen's day (D5, C1.2), on the server's clock: work from soon after
 //! dawn, the market for an hour or two, work again, home at dusk with the
-//! lantern lit, and asleep, logged out, through the night.
+//! lantern lit, and the night's work from home. Game night doesn't log a
+//! citizen out (#276): when it's on is its [`Habit`](super::habit::Habit)'s
+//! say, on the real clock, and the schedule says what it does meanwhile.
 //!
 //! Times are the day's fraction, as [`rules::time_of_day`] gives it: 0 is
 //! midnight, 0.5 noon. A game day is two real hours
@@ -25,9 +27,10 @@ pub enum Phase {
     Work,
     /// At the hall or the bazaar, trading what it has and lingering.
     Market,
-    /// Walking home along the avenues, lantern lit.
+    /// Walking home along the avenues, lantern lit: the change of shift.
     Home,
-    /// Asleep: logged out, off the streets.
+    /// The night's work, from home: crafting at its stations and the
+    /// ordinary gathering, with no market and no idling in town (#276).
     Night,
 }
 
@@ -61,13 +64,14 @@ pub struct Schedule {
     pub market_close: f64,
     /// Leaves for home.
     pub home: f64,
-    /// Logs out, home or not.
+    /// Night proper: the streets are dark. Since #276 it no longer logs
+    /// the citizen out; the night's work runs on from `home`.
     pub bed: f64,
 }
 
 /// The town's day, before each citizen's shift: up at 06:00, soon after the
 /// sun (`daylight.rs` has it on the horizon at 0.21, 05:02); home at 19:00,
-/// as the evening comes on and the lanterns show; abed at 21:00, in the
+/// as the evening comes on and the lanterns show; night at 21:00, in the
 /// dark. Market hours are the afternoon's, or for some the morning's.
 const WAKE: f64 = 6.0 / 24.0;
 const MORNING_MARKET: f64 = 9.5 / 24.0;
@@ -152,11 +156,6 @@ impl Schedule {
         let start = self.wake + NOON_AFTER;
         let end = start + NOON_BREAK;
         (self.market_open >= end && end < self.home).then_some((start, end))
-    }
-
-    /// From `time` to the next `wake`, as a share of the day: 0 just at it.
-    pub fn until_wake(&self, time: f64) -> f64 {
-        (self.wake - time).rem_euclid(1.0)
     }
 
     /// The market's hours as the roster writes them: `"14:05-15:50"`.
@@ -252,13 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn waking_is_due_round_midnight() {
-        let s = day();
-        let wake = s.wake;
-        assert_eq!(s.until_wake(wake), 0.0);
-        assert!((s.until_wake(parse_clock("21:00").unwrap()) - 8.5 / 24.0).abs() < 1e-9);
-        assert!((s.until_wake(parse_clock("02:30").unwrap()) - 3.0 / 24.0).abs() < 1e-9);
-        // A game hour is five real minutes
+    fn a_game_hour_is_five_real_minutes() {
         assert_eq!(real(1.0 / 24.0), Duration::from_secs(300));
     }
 

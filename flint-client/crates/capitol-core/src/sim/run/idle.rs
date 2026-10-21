@@ -25,6 +25,8 @@ const DRIFT_EVERY: f64 = 90.0;
 const DRIFT_REACH: f64 = 80.0;
 /// How close it stands to them: about a metre and a quarter.
 const CHAT: f64 = 12.0;
+/// Within this of home is home, for the night (#276): about five metres.
+const HOME_NEAR: f64 = 50.0;
 
 impl SimBot {
     /// Free time for a citizen: where to spend it, from the places near
@@ -72,6 +74,24 @@ impl SimBot {
                 town.health(|h| h.failed(format!("free time: {e}")));
             }
         }
+    }
+
+    /// Free time in the night's work (#276): home, if it isn't, and a game
+    /// minute there with the lantern lit. No hall or park at night.
+    pub(super) fn night_in(&mut self, town: Option<&Tether>) {
+        let (x, y) = self.home();
+        let (px, py) = self.bot.position();
+        if (x - px).hypot(y - py) > HOME_NEAR {
+            if let Some(town) = town {
+                town.health(|h| h.doing(Standing::Working, "going home"));
+            }
+            if let (Some(town), Err(e)) = (town, self.bot.walk_to(x, y)) {
+                if !matches!(e, BotError::Interrupted(_)) {
+                    town.health(|h| h.failed(format!("going home: {e}")));
+                }
+            }
+        }
+        self.rest(town, "at home");
     }
 
     /// The midday break (`Schedule::noon`), once a day, if it's due now:

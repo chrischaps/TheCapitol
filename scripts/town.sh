@@ -6,16 +6,22 @@
 # citizens never claim a lot, take a vein or fill a book in the world you
 # work in, and either can run without the other, or both at once.
 #
-#   scripts/town.sh up [--count n] [--merchants m]
+#   scripts/town.sh up [--online n] [--merchants m] [--always-on]
 #                           make what's missing, then run the town's backend
 #                           and its citizens in this terminal; Ctrl-C stops both
 #   scripts/town.sh status  the town's server, and its citizens' last health
 #   scripts/town.sh reset   drop the town's database and roster, for a new town
 #
 # The first `up` creates the database, an admin for it and a roster of
-# citizens (--count of the sim's mix and --merchants merchants: 18 and 2).
-# Later ones reuse all three, so the town carries on where it stopped. Then
-# play in it with
+# citizens. Citizens keep human hours (#276): each signs in when its habit
+# says, a few real hours some days, in its own evenings, so the roster is
+# sized for how many are on at once: enough of the sim's mix to keep
+# --online on (18) and enough merchants to keep --merchants on (2), on
+# average. That's about 32 citizens for each one on, so about 640 in all.
+# `capitol-town habits --roster flint-client/town/town.toml` shows who's on
+# when. --always-on keeps every citizen on, whatever its habit: all of
+# them, so mind the pool's size. Later ups reuse the database, the admin and
+# the roster, so the town carries on where it stopped. Then play in it with
 #
 #   flint-client\play.bat --server http://127.0.0.1:3300
 #
@@ -160,26 +166,27 @@ ensure_admin() {
   psql_q "$db" "update accounts set is_admin = true where email = '$CAPITOL_ADMIN_EMAIL' and not is_admin" >/dev/null
 }
 
-ensure_citizens() { # ensure_citizens <count> <merchants>
+ensure_citizens() { # ensure_citizens <online> <merchants online>
   if [[ -f "$roster" ]] && grep -q '^\[\[citizen\]\]' "$roster"; then
     say "the roster has $(grep -c '^\[\[citizen\]\]' "$roster") citizens"
     return
   fi
   local town_bin="$root/flint-client/target/town/$(exe capitol-town)"
-  say "minting $1 citizens of the sim's mix and $2 merchants"
-  (cd "$root/flint-client" && "$town_bin" mint --count "$1" --roster "$roster" --server "$server")
-  if (( $2 > 0 )); then
-    (cd "$root/flint-client" && "$town_bin" mint --count "$2" --role merchant --roster "$roster" --server "$server")
+  say "minting enough of the sim's mix to keep $1 on, and enough merchants to keep $2 on"
+  (cd "$root/flint-client" && "$town_bin" mint --online "$1" --roster "$roster" --server "$server" | tail -n 1)
+  if [[ "$2" != 0 ]]; then
+    (cd "$root/flint-client" && "$town_bin" mint --online "$2" --role merchant --roster "$roster" --server "$server" | tail -n 1)
   fi
 }
 
 up() {
-  local count=18 merchants=2
+  local online=18 merchants=2 hours=()
   while (( $# )); do
     case "$1" in
-      --count) count="$2"; shift 2 ;;
+      --online) online="$2"; shift 2 ;;
       --merchants) merchants="$2"; shift 2 ;;
-      *) die "up takes --count <n> and --merchants <m>, not $1" ;;
+      --always-on) hours=(--always-on); shift ;;
+      *) die "up takes --online <n>, --merchants <m> and --always-on, not $1" ;;
     esac
   done
   [[ -f "$root/backend/.env" ]] || die "backend/.env is missing: copy backend/.env.example (the town reads its JWT_SECRET)"
@@ -192,10 +199,10 @@ up() {
   trap stop INT TERM
   start_backend
   ensure_admin
-  ensure_citizens "$count" "$merchants"
+  ensure_citizens "$online" "$merchants"
   say "the town lives. Play in it: flint-client\\play.bat --server $server"
   say "Ctrl-C stops the citizens and the server"
-  (cd "$root/flint-client" && exec "$root/flint-client/target/town/$(exe capitol-town)" run --roster "$roster" --server "$server") &
+  (cd "$root/flint-client" && exec "$root/flint-client/target/town/$(exe capitol-town)" run --roster "$roster" --server "$server" "${hours[@]}") &
   town_pid=$!
   # Wait on the town; if it ends by itself (every key refused, say), stop.
   wait "$town_pid" || true
