@@ -670,7 +670,7 @@ E0 and E1 can run in parallel worktrees from the start. E2.1 and E1.2 are the fi
 
 ## 8. Later (outside this plan, but planned for)
 
-- **M9 social:** guilds (registry, roles, treasury, dues), contracts with escrow, and reputation. The market's escrow and the notices log are their foundations.
+- **M9 social:** planned as The Commons (`the-capitol-commons.md`, #352). Guilds (registry, roles, treasury, dues), contracts with escrow, and reputation. The market's escrow and the notices log are their foundations.
 - **Shops:** farm stands (GDD §3.4), sold from a plot, which the bazaar's stalls (E3.10) and the market box generalise to.
 - **The bureaucracy's other fees** (GDD §8.4): deed transfer, canal tolls, certification, licensing.
 - **Buffs, consumables, minigames** (GDD §6.3, §7), and NPC workers and conveyors for automation (GDD §3.7).

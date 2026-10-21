@@ -1,0 +1,4 @@
+# Stations at work at dusk: forges burning, sparks, a kiln with its box full
+#  t      px      py      pz      tx    ty    tz
+  0.0   -45.5    2.6   339.0   -51.5   1.0  329.5
+ 10.0   -44.0    2.4   337.0   -51.5   1.0  329.5

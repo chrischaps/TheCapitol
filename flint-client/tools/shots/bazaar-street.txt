@@ -1,0 +1,4 @@
+# In through the bazaar's arch at dusk and down the lane, under the bunting, past the painted signs
+#  t      px      py      pz      tx    ty    tz
+  0.0    -1.5    2.6    29.75  -11.0   1.3   29.75
+  8.0    -7.0    2.4    29.75  -17.0   1.3   29.7

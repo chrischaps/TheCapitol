@@ -1,0 +1,4 @@
+# A street fills in: the lots nearest the camera claimed at once, their houses rising
+#  t      px      py      pz      tx    ty    tz
+  0.0   -40.0   24.0   264.0   -50.0   0.0  238.0
+  7.0   -43.0   20.0   259.0   -50.0   0.0  236.0

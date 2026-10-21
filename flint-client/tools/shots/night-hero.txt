@@ -1,0 +1,4 @@
+# The best image of the game: night from a low oblique, half the lots lit
+#  t      px      py      pz      tx    ty    tz
+  0.0   -60.0   70.0   230.0   -10.0   0.0  120.0
+  6.0   -54.0   68.0   228.0   -10.0   0.0  120.0

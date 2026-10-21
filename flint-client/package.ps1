@@ -84,8 +84,10 @@ PLAYING
   To see the city with no server at all, run "Explore offline.bat".
 
 KEYS
-  Click the ground to walk, a resource node to gather.
-  I inventory, C crafting, X exchange, T trade, O nearest station.
+  Click the ground to walk, a resource node to gather, a station to use
+  it, a bazaar stall to see its shop.
+  I inventory, C crafting, X fiber exchange, M the market, G the Gazette,
+  T trade, O nearest station. Alt+click a plot for its deed.
   Wheel or R/F zoom, Q/E or right-drag orbit, H home.
   F1 or ? lists every shortcut. F10 opens the settings.
 

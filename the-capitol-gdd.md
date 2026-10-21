@@ -232,10 +232,13 @@ Past the rural ring the land rises into the wilds: the Wilderness zone, from r38
 - Employment contracts (wages for labor/tasks)
 - Guild-level contracts
 - Enforcement via escrow, reputation system, and Capitol Contract Court
+- *Planned (`the-capitol-commons.md`, 2026-10-21): delivery **commissions** with escrow, posted on the hall's notice board, with claims as promises; then piece-rate **wages**. The server checks both, so neither needs a dispute. Custom and sale contracts come later.*
 
 ---
 
 ### 3.5 Social System
+
+*Planned in `the-capitol-commons.md` (2026-10-21): talk (local, the Capitol and guild channels, letters), commissions and wages, standing, leaderboards, then guilds.*
 
 #### Guilds/Cooperatives
 
@@ -249,6 +252,7 @@ Past the rural ring the land rises into the wilds: the Wilderness zone, from r38
 - Tracked per-player (and per-guild)
 - Influences trust, contract terms, possibly access to certain markets or districts
 - Earned through completed contracts, trade volume, time in good standing
+- *Planned (`the-capitol-commons.md` D8): others see a standing in words from a hidden score (new in town, finding their feet, dependable, well regarded, a pillar of the Capitol); you see your own number. Only a breach's weight fades.*
 
 #### Employment
 
@@ -762,6 +766,8 @@ Registers and maintains guild records.
 
 *Guild costs encourage meaningful organization rather than throwaway guilds.*
 
+*Planned (`the-capitol-commons.md` D10): these fees as listed, with dues charged hourly in carried fractions like property tax, and a guild dissolved at four weeks of debt.*
+
 #### Contract Court
 
 Provides legal infrastructure for player agreements.
@@ -774,6 +780,8 @@ Provides legal infrastructure for player agreements.
 | Arbitration | 10% of disputed value (paid by loser) | Per ruling |
 
 *Enforcement gives contracts teeth; fees scale with stakes.*
+
+*Planned (`the-capitol-commons.md` D5, D7): commissions and wages pay the filing and escrow fees together as one court fee, max(5, 1%) + 0.5% of the value. The server checks every delivery and every unit of piece work, so they need no dispute filing or arbitration; those wait for custom contracts.*
 
 #### Quality Certification Bureau
 

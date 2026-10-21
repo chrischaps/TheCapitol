@@ -1454,6 +1454,8 @@ enum OrderStatus {
 
 #### Contract
 
+*Superseded (planned): `the-capitol-commons.md` replaces this generic model with commissions (D5, D6) and piece-rate wages (D7), which the server checks, so neither carries a dispute. Kept here for the custom contracts that come later.*
+
 ```rust
 struct Contract {
     id: ContractId,                         // contract_xxx
@@ -1509,6 +1511,8 @@ enum ContractStatus {
 ```
 
 #### Guild
+
+*Planned: `the-capitol-commons.md` D10 (S4.1 to S4.3).*
 
 ```rust
 struct Guild {
@@ -2049,6 +2053,8 @@ CREATE INDEX idx_contracts_status ON contracts(status) WHERE status IN ('offered
 
 #### Guilds
 
+*Planned: `the-capitol-commons.md` D10.*
+
 ```sql
 CREATE TABLE guilds (
     id              VARCHAR(32) PRIMARY KEY,
@@ -2264,6 +2270,8 @@ ZADD market_history:{item_type} {timestamp} {price}
 ```
 
 #### Leaderboards
+
+*Planned: `the-capitol-commons.md` D9 computes weekly boards into a `leaderboards` table at the week's first midnight, not live sorted sets.*
 
 ```
 ZADD leaderboard:wealth:global {wealth} {player_id}

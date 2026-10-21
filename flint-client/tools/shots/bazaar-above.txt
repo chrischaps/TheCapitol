@@ -1,0 +1,4 @@
+# The bazaar's quarter at dusk from above, its lanterns against the hall's blue
+#  t      px      py      pz      tx    ty    tz
+  0.0    -8.0   14.0    44.0   -20.0   1.0   28.0
+  8.0   -12.0   11.0    38.0   -20.0   1.0   28.0

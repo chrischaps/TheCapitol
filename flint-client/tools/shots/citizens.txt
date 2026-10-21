@@ -1,0 +1,4 @@
+# Back up the bazaar's lane toward the arch and the hall, citizens strolling it
+#  t      px      py      pz      tx    ty    tz
+  0.0   -20.0    2.3    29.6    -9.0   1.3   29.75
+  6.0   -18.0    2.3    29.6    -8.0   1.3   29.75
