@@ -32,10 +32,13 @@
 //! - [`jev`]: Jev, TypeSafe's choice model, as the fast tier (C3.3).
 //! - [`chat`]: a chat model through an OpenAI-compatible API, such as
 //!   OpenRouter's `jev-router` (C3.3).
+//! - [`claude`]: Claude through Anthropic's API, as the language-model tier
+//!   (C3.2).
 //! - [`remote`]: what the layers that ask over the network share.
 //! - [`corpus`]: a town's worth of situations, made up, to replay (C3.3).
 
 pub mod chat;
+pub mod claude;
 pub mod corpus;
 pub mod jev;
 pub mod log;
@@ -476,6 +479,12 @@ pub const JEV_TIME: Duration = Duration::from_secs(2);
 pub const CHAT_THRESHOLD: f32 = 0.8;
 /// A chat model's time budget.
 pub const CHAT_TIME: Duration = Duration::from_secs(10);
+/// A Claude tier's threshold in a stack: the confidence it gives itself.
+/// Haiku under it goes up to Sonnet. Haiku's answers at 0.7 and over agreed
+/// with the rules nearly always on the corpus (#261), and it rarely says 0.8.
+pub const CLAUDE_THRESHOLD: f32 = 0.7;
+/// A Claude tier's time budget.
+pub const CLAUDE_TIME: Duration = Duration::from_secs(10);
 /// What a remote layer may spend for one citizen (or one replayed log), in
 /// US cents, before it's no longer asked.
 pub const REMOTE_SPEND: f64 = 100.0;
@@ -483,7 +492,7 @@ pub const REMOTE_SPEND: f64 = 100.0;
 pub const DEFAULT_LAYERS: [&str; 1] = ["rules"];
 /// Every layer a roster may name. A name may carry its own threshold:
 /// `jev@0.8`.
-pub const KNOWN_LAYERS: [&str; 3] = ["rules", "jev", "jev-router"];
+pub const KNOWN_LAYERS: [&str; 5] = ["rules", "jev", "jev-router", "claude-haiku", "claude-sonnet"];
 
 // ---------------------------------------------------------------------------
 // The cascade
@@ -626,6 +635,10 @@ impl Cascade {
                     "rules" => Layer::new(RulesDecider, RULES_THRESHOLD, RULES_TIME),
                     "jev" => Layer::new(jev::JevDecider::from_env(), JEV_THRESHOLD, JEV_TIME).spending(REMOTE_SPEND),
                     "jev-router" => Layer::new(chat::ChatDecider::jev_router(), CHAT_THRESHOLD, CHAT_TIME).spending(REMOTE_SPEND),
+                    "claude-haiku" => Layer::new(claude::ClaudeDecider::from_env(claude::Tier::haiku()), CLAUDE_THRESHOLD, CLAUDE_TIME)
+                        .spending(REMOTE_SPEND),
+                    "claude-sonnet" => Layer::new(claude::ClaudeDecider::from_env(claude::Tier::sonnet()), CLAUDE_THRESHOLD, CLAUDE_TIME)
+                        .spending(REMOTE_SPEND),
                     _ => unreachable!("check_layers knows every layer"),
                 };
                 if let Some(threshold) = threshold {

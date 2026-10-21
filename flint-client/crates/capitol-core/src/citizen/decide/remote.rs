@@ -115,21 +115,28 @@ pub fn env(name: &str) -> Option<String> {
 
 /// Posts `body` as JSON with a bearer key, and reads the reply as JSON.
 pub async fn post(url: &str, key: &str, body: &Value) -> Result<Value, String> {
-    let response = client()
-        .post(url)
-        .bearer_auth(key)
+    post_with(client().post(url).bearer_auth(key), body).await.map_err(|(_, e)| e)
+}
+
+/// Posts `body` as JSON on a request whose headers are already set, and
+/// reads the reply as JSON. An error carries the status, if one came back.
+pub async fn post_with(request: reqwest::RequestBuilder, body: &Value) -> Result<Value, (Option<u16>, String)> {
+    let response = request
         .json(body)
         .send()
         .await
-        .map_err(|e| format!("sending: {e}"))?;
+        .map_err(|e| (None, format!("sending: {e}")))?;
     let status = response.status();
-    let text = response.text().await.map_err(|e| format!("reading: {e}"))?;
+    let text = response
+        .text()
+        .await
+        .map_err(|e| (Some(status.as_u16()), format!("reading: {e}")))?;
     if !status.is_success() {
         let mut text = text;
         text.truncate(300);
-        return Err(format!("{status}: {text}"));
+        return Err((Some(status.as_u16()), format!("{status}: {text}")));
     }
-    serde_json::from_str(&text).map_err(|e| format!("not JSON: {e}"))
+    serde_json::from_str(&text).map_err(|e| (Some(status.as_u16()), format!("not JSON: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -158,19 +165,30 @@ pub fn state(s: &Situation) -> Value {
 /// examples give theirs (#303). A middling trait (0.34 to 0.66) is named
 /// as middling, the rest by what they make the citizen do.
 pub fn prose(s: &Situation) -> String {
-    let mut out = format!(
+    format!(
         "The Capitol is a trading game with no combat: citizens gather, craft, trade and bank to grow rich, and prices are in Strands. \
-         You are {}, {}. ",
-        s.who.name,
-        role(&s.who.role)
-    );
-    out.push_str(&character(&s.who.temperament));
-    out.push_str(&format!(
-        " You are in the {} zone{}, {:.1} game hours into this life. ",
+         {} {}",
+        persona(s),
+        circumstances(s)
+    )
+}
+
+/// Who the citizen is: its name, its role and its temperament. It's the
+/// same at every decision a citizen makes, so a model layer can cache it
+/// (C3.2).
+pub fn persona(s: &Situation) -> String {
+    format!("You are {}, {}. {}", s.who.name, role(&s.who.role), character(&s.who.temperament))
+}
+
+/// The rest of [`prose`]: where and when, what the citizen holds, the
+/// books it watches, and the question.
+pub fn circumstances(s: &Situation) -> String {
+    let mut out = format!(
+        "You are in the {} zone{}, {:.1} game hours into this life. ",
         s.at.zone,
         s.when.time_of_day.map_or(String::new(), |d| format!(" and it is {}", clock(d))),
         s.when.hours
-    ));
+    );
     let h = &s.holdings;
     let mut held = vec![format!("{} Strands", h.strands)];
     held.extend(h.items.iter().filter(|(_, &n)| n != 0).map(|(item, n)| format!("{n} {}", item.replace('_', " "))));

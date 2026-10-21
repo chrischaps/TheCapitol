@@ -106,9 +106,11 @@ FLAGS:
                       grows before it rotates (two old ones are kept); 0
                       logs nothing [default: 4]
     --layers <a,b>    With replay, the stack to run, bottom first:
-                      rules, jev (TypeSafe; $TYPESAFE_API_KEY) or
-                      jev-router (OpenRouter; $OPENROUTER_API_KEY). A layer
-                      may set its threshold: jev@0.8 [default: rules]
+                      rules, jev (TypeSafe; $TYPESAFE_API_KEY),
+                      jev-router (OpenRouter; $OPENROUTER_API_KEY),
+                      claude-haiku or claude-sonnet (Anthropic;
+                      $ANTHROPIC_API_KEY). A layer may set its threshold:
+                      jev@0.8 [default: rules]
     --stride <n>      With replay, replay every nth decision only, to
                       sample a slow or costly layer [default: 1]
     -h, --help        Print this

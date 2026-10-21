@@ -32,8 +32,14 @@ server = "http://localhost:3000"
 # default. "jev" (C3.3) asks TypeSafe's Jev about the rules' close calls,
 # for about 1 cent a citizen-day; it reads $TYPESAFE_API_KEY, and with none
 # it passes every question on. "jev-router" (OpenRouter) is there for
-# replay, not for a live town. A layer may set its threshold: "jev@0.8".
-# A citizen may name its own `layers`.
+# replay, not for a live town. "claude-haiku" and "claude-sonnet" (C3.2)
+# ask Claude through $ANTHROPIC_API_KEY. For menu decisions they're for
+# replay too: Jev settles what it's sure of and its own best guess stands
+# for the rest, and the LLMs' job is a citizen's words (#311). If you do
+# stack one, put it above a low Jev threshold so it's asked rarely:
+# ["rules", "jev@0.3", "claude-haiku"] asks Haiku about 6% of the time, for
+# under 1 cent a citizen-day more. A layer may set its threshold:
+# "jev@0.8". A citizen may name its own `layers`.
 layers = ["rules"]
 # layers = ["rules", "jev"]
 
