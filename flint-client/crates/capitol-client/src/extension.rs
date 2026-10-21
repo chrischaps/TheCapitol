@@ -119,8 +119,6 @@ pub struct CapitolExtension {
     /// once it is).
     land: world::land::Builder,
     land_meshes: world::land_mesh::LandMeshes,
-    /// The mist's opacity as last written (`mist_in_place`).
-    mist_shown: Option<f32>,
     land_in: bool,
     plot_panel: ui::plot::PlotPanel,
     atmosphere: Atmosphere,
@@ -224,7 +222,6 @@ impl CapitolExtension {
             grass: world::grass::Grass::default(),
             land: world::land::Builder::default(),
             land_meshes: world::land_mesh::LandMeshes::default(),
-            mist_shown: None,
             land_in: false,
             plot_panel: ui::plot::PlotPanel::default(),
             atmosphere: Atmosphere::default(),
@@ -480,10 +477,11 @@ impl CapitolExtension {
                 fords: fords.collect(),
             };
             self.land_meshes.set_field(field.clone(), std::sync::Arc::new(shore));
-            // The valleys' mist (W11), shown by the hour.
-            world::mist::upload(gpu, &world::mist::build(&field));
-            names.push(world::mist::MESH.to_string());
-            self.mist_shown = None;
+            // The valleys' mist (W11), Flint's ground fog on the ground
+            // (#297), as thick as the hour says (`Atmosphere`).
+            if let Err(e) = gpu.set_ground_fog(&world::mist::build(&field).ground_fog()) {
+                tracing::warn!("mist: can't lay it: {e}");
+            }
             // The wilds' water lies in its beds (W10), with bridges where
             // a trail crosses a river with no ford.
             world::wild_water::upload(gpu, &sampled.water);
@@ -517,26 +515,6 @@ impl CapitolExtension {
             if let Err(e) = ctx.world.merge_component(id, "material", table.into()) {
                 tracing::warn!("land: can't keep {name}'s shadow off: {e}");
             }
-        }
-    }
-
-    /// The valleys' mist as thick as the hour and the camera's height say
-    /// (`Atmosphere::mist`), written to its entity's opacity when it moves
-    /// a step. It casts no shadow, however thick (#232).
-    fn mist_in_place(&mut self, ctx: &mut ExtensionCtx) {
-        let mist = (self.atmosphere.mist() * 100.0).round() / 100.0;
-        if self.mist_shown == Some(mist) {
-            return;
-        }
-        let Some(id) = ctx.world.get_id(world::mist::MESH) else {
-            return;
-        };
-        let mut table = toml::Table::new();
-        table.insert("opacity".into(), f64::from(mist).into());
-        table.insert("cast_shadows".into(), false.into());
-        match ctx.world.merge_component(id, "material", table.into()) {
-            Ok(()) => self.mist_shown = Some(mist),
-            Err(e) => tracing::warn!("mist: can't write its opacity: {e}"),
         }
     }
 
@@ -1135,7 +1113,6 @@ impl PlayerExtension for CapitolExtension {
             }));
         }
         self.land_in_place(ctx);
-        self.mist_in_place(ctx);
         if let Some(gpu) = ctx.gpu.as_mut() {
             self.grass.flush(gpu, ctx.world);
         }

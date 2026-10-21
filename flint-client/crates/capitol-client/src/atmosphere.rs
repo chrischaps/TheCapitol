@@ -42,6 +42,7 @@ use flint_ecs::FlintWorld;
 use flint_render::SceneRenderer;
 
 use crate::daylight::{self, Daylight, Light, Palette, PlotGlow, Sky};
+use crate::world::mist;
 
 /// Up to this height (metres) the fog is the scene's own: every street,
 /// quay and tower view.
@@ -80,8 +81,6 @@ pub struct Atmosphere {
     written: Option<(f32, f32, i64)>,
     /// How the gold on your plots shows at the hour shown, in steps.
     plots: Option<PlotGlow>,
-    /// How thick the valleys' mist shows, the hour's times the fog's.
-    mist: f32,
 }
 
 /// What the scene set, before any of it was thinned or flattened: the
@@ -129,13 +128,18 @@ impl Atmosphere {
         let (fog, flat, _) = state;
         let Daylight { key, palette } = daylight::at(shown, &authored.key, &authored.evening);
         self.plots = Some(palette.plots.stepped());
-        self.mist = palette.mist * fog;
 
         let mut config = renderer.post_process_config().clone();
         config.fog_density = authored.fog_density * fog;
         config.fog_color = palette.fog_color;
         config.fog_tint_color = palette.aerial;
         config.fog_tint_strength = authored.fog_tint_strength * fog;
+        // The valleys' mist (`world::mist`, Flint's ground fog): the hour's,
+        // cleared with the fog.
+        config.ground_fog_density = mist::DENSITY * palette.mist * fog;
+        config.ground_fog_color = mist::colour(palette.fog_color);
+        config.ground_fog_falloff = mist::FALLOFF;
+        config.ground_fog_steps = mist::STEPS;
         config.exposure = palette.exposure;
         config.ssao_intensity = authored.ssao_intensity * (1.0 - flat);
         renderer.set_post_process_config(config);
@@ -155,12 +159,6 @@ impl Atmosphere {
     /// the first frame.
     pub fn plots(&self) -> PlotGlow {
         self.plots.unwrap_or(PlotGlow::EVENING)
-    }
-
-    /// How thick the valleys' mist shows (`world::mist`), 0 to 1: the
-    /// hour's, cleared with the fog. None until the first frame.
-    pub fn mist(&self) -> f32 {
-        self.mist
     }
 }
 
