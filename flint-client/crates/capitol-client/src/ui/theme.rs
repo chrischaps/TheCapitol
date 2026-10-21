@@ -531,6 +531,44 @@ pub fn divider(ui: &mut Ui) {
     rule_in(ui, BORDER);
 }
 
+/// A scrolled column that runs on below its foot (#235): the foot fades
+/// into the panel, and the scroll handle shows at rest, not only on hover.
+/// `add` draws the column; it scrolls in at most `room` points.
+pub fn scrolled<R>(
+    ui: &mut Ui,
+    id: &str,
+    room: f32,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    const FOOT: f32 = 28.0;
+    ui.scope(|ui| {
+        ui.spacing_mut().scroll.dormant_handle_opacity = 0.5;
+        let out = egui::ScrollArea::vertical()
+            .id_salt(id)
+            .max_height(room)
+            // A drag is for the slots; the wheel scrolls.
+            .drag_to_scroll(false)
+            .show(ui, add);
+        let rect = out.inner_rect;
+        if out.state.offset.y + rect.height() < out.content_size.y - 1.0 {
+            let foot = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.bottom() - FOOT),
+                rect.right_bottom(),
+            );
+            let mut mesh = egui::Mesh::default();
+            mesh.colored_vertex(foot.left_top(), Color32::TRANSPARENT);
+            mesh.colored_vertex(foot.right_top(), Color32::TRANSPARENT);
+            mesh.colored_vertex(foot.left_bottom(), PANEL);
+            mesh.colored_vertex(foot.right_bottom(), PANEL);
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(1, 3, 2);
+            ui.painter().add(mesh);
+        }
+        out.inner
+    })
+    .inner
+}
+
 fn rule_in(ui: &mut Ui, colour: Color32) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
