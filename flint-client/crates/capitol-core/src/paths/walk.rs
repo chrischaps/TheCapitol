@@ -171,7 +171,7 @@ mod tests {
         assert!(!walk.is_walking());
 
         let graph = WalkGraph::new(&one_canal());
-        let nowhere = (8300.0, 8300.0);
+        let nowhere = (8800.0, 8800.0);
         assert_eq!(walk.plan(Some(&graph), nowhere, (6800.0, 6900.0), now), (6800.0, 6900.0));
         assert_eq!(walk.corners().count(), 1);
     }

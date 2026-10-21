@@ -55,7 +55,7 @@ use crate::net::{
     auth_error_is_final, ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
 };
 use crate::market::MarketEvent;
-use crate::paths::{self, WalkGraph};
+use crate::paths::{self, NoWay, WalkGraph};
 use crate::poll::{Fetch, Poller};
 use crate::state::{answers, GameState, StateEvent, Yield};
 
@@ -80,6 +80,9 @@ const SCOUT_STOP: f64 = 400.0;
 /// Close enough to call a walk done. The server stops within
 /// [`rules::ARRIVAL_EPSILON`].
 const ARRIVED: f64 = 1.0;
+/// A [`BotError::Blocked`]'s reason when the walk graph can't reach where a
+/// walk was going, so it never set out (#280).
+pub const NO_WAY: &str = "No way there";
 /// How long a node that refused us is skipped: two polls, by which time the
 /// store has the server's word on it.
 const REFUSAL_MEMORY: Duration = Duration::from_secs(10);
@@ -723,9 +726,11 @@ impl Bot {
     }
 
     /// Walks to `(x, y)` and waits until the server has us there. The walk
-    /// goes round the water, by the bridges and fords ([`WalkGraph::route`]),
-    /// a `move` a leg. With no terrain, or no way round, it goes straight and
-    /// stops at whatever is in the way.
+    /// goes round the water, by the bridges and fords ([`WalkGraph::plan`]),
+    /// a `move` a leg. Where the graph can't reach `(x, y)` it doesn't set
+    /// out: it's [`BotError::Blocked`] where it stands (#280). With no
+    /// terrain, or stranded where the graph can't be reached, it goes
+    /// straight and stops at whatever is in the way.
     pub fn walk_to(&mut self, x: f64, y: f64) -> Result<(), BotError> {
         let from = self.position();
         if (x - from.0).hypot(y - from.1) < ARRIVED {
@@ -740,10 +745,18 @@ impl Bot {
                 None
             }
         };
-        let legs = match walks.as_ref().map(|w| w.route(from, (x, y))) {
-            Some(Some(legs)) => legs,
-            Some(None) => {
-                self.say(format!("no way round to ({x:.0}, {y:.0}); going straight"));
+        let legs = match walks.as_ref().map(|w| w.plan(from, (x, y))) {
+            Some(Ok(legs)) => legs,
+            Some(Err(NoWay::Unreachable)) => {
+                self.say(format!("no way to ({x:.0}, {y:.0})"));
+                return Err(BotError::Blocked {
+                    reason: NO_WAY.into(),
+                    x: from.0,
+                    y: from.1,
+                });
+            }
+            Some(Err(NoWay::Stranded)) => {
+                self.say(format!("no way out from ({:.0}, {:.0}); going straight", from.0, from.1));
                 vec![(x, y)]
             }
             None => vec![(x, y)],
