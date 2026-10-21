@@ -7,6 +7,8 @@
 //! capitol-town                      # live until Ctrl-C
 //! capitol-town --status             # the running town's last health
 //! capitol-town replay --layers rules # the decision logs, replayed (C3.1)
+//! capitol-town corpus               # a made-up town's log to replay (C3.3)
+//! capitol-town replay town.corpus --layers rules,jev   # Jev measured on it
 //! ```
 //!
 //! Run it from `flint-client/` with `cargo run -p capitol-core --bin capitol-town -- <flags>`.
@@ -18,7 +20,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use capitol_core::citizen::decide::log;
+use capitol_core::citizen::decide::{corpus, log};
 use capitol_core::citizen::decide::replay::Replayer;
 use capitol_core::citizen::decide::{self, Cascade};
 use capitol_core::citizen::schedule;
@@ -49,6 +51,15 @@ USAGE:
                                  its escalation rate, latency and cost. A
                                  log is a file or a directory of them
                                  [default: town.decisions beside the roster]
+    capitol-town corpus [<dir>] [--rounds <n>]
+                                 Write a log of made-up situations, every
+                                 role's work, sell, buy, bid, stall and
+                                 free-time questions, as the rules decide
+                                 them, to replay a new layer over
+                                 [default: town.corpus beside the roster].
+                                 Each round more varies the temperaments
+                                 and the scale of books and stock
+                                 [default: 1 round, about 100]
 
 FLAGS:
     --roster <path>   The roster [default: town.toml]
@@ -67,8 +78,12 @@ FLAGS:
     --log-mb <n>      With run, how big a citizen's decision log grows
                       before it rotates (two old ones are kept); 0 logs
                       nothing [default: 4]
-    --layers <a,b>    With replay, the stack to run, bottom first
-                      [default: rules]
+    --layers <a,b>    With replay, the stack to run, bottom first:
+                      rules, jev (TypeSafe; $TYPESAFE_API_KEY) or
+                      jev-router (OpenRouter; $OPENROUTER_API_KEY). A layer
+                      may set its threshold: jev@0.8 [default: rules]
+    --stride <n>      With replay, replay every nth decision only, to
+                      sample a slow or costly layer [default: 1]
     -h, --help        Print this
 
 The roster holds keys, so keep it out of git (flint-client/.gitignore has
@@ -89,7 +104,8 @@ enum Action {
     Run,
     Mint { count: usize },
     Status,
-    Replay { logs: Vec<PathBuf>, layers: Vec<String> },
+    Replay { logs: Vec<PathBuf>, layers: Vec<String>, stride: usize },
+    Corpus { dir: Option<PathBuf>, rounds: u32 },
 }
 
 #[derive(Debug)]
@@ -110,6 +126,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
     let mut count = None;
     let mut logs = Vec::new();
     let mut layers = None;
+    let mut stride = None;
+    let mut corpus_dir = None;
+    let mut rounds = None;
     let mut log_mb_given = false;
     let mut options = Options {
         action: Action::Run,
@@ -126,8 +145,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
         let replaying = matches!(action, Some(Action::Replay { .. }));
+        let corpus = matches!(action, Some(Action::Corpus { .. }));
         let mut set = |a: Action| match action.replace(a) {
-            Some(_) => Err("run, mint, status and replay go one at a time".to_string()),
+            Some(_) => Err("run, mint, status, replay and corpus go one at a time".to_string()),
             None => Ok(()),
         };
         match arg.as_str() {
@@ -137,7 +157,23 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             "replay" => set(Action::Replay {
                 logs: Vec::new(),
                 layers: Vec::new(),
+                stride: 1,
             })?,
+            "corpus" => set(Action::Corpus { dir: None, rounds: 1 })?,
+            "--rounds" => {
+                let n: u32 = number(&arg, &value()?)?;
+                if n == 0 {
+                    return Err("--rounds must be at least 1".into());
+                }
+                rounds = Some(n);
+            }
+            "--stride" => {
+                let n: usize = number(&arg, &value()?)?;
+                if n == 0 {
+                    return Err("--stride must be at least 1".into());
+                }
+                stride = Some(n);
+            }
             "--layers" => {
                 let names: Vec<String> = value()?.split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect();
                 decide::check_layers(&names)?;
@@ -174,6 +210,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             }
             "-h" | "--help" => return Ok(None),
             log if replaying && !log.starts_with('-') => logs.push(PathBuf::from(log)),
+            dir if corpus && !dir.starts_with('-') && corpus_dir.is_none() => corpus_dir = Some(PathBuf::from(dir)),
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -184,11 +221,22 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         (Action::Replay { .. }, None) => Action::Replay {
             logs,
             layers: layers.take().unwrap_or_else(|| decide::DEFAULT_LAYERS.map(String::from).to_vec()),
+            stride: stride.take().unwrap_or(1),
+        },
+        (Action::Corpus { .. }, None) => Action::Corpus {
+            dir: corpus_dir,
+            rounds: rounds.take().unwrap_or(1),
         },
         (action, None) => action,
     };
     if layers.is_some() {
         return Err("--layers goes with replay".into());
+    }
+    if rounds.is_some() {
+        return Err("--rounds goes with corpus".into());
+    }
+    if stride.is_some() {
+        return Err("--stride goes with replay".into());
     }
     if log_mb_given && options.action != Action::Run {
         return Err("--log-mb goes with run".into());
@@ -335,7 +383,7 @@ fn run(options: &Options) -> Result<(), String> {
 
 /// Replays `logs` (the roster's decision logs if none) with the stack
 /// `layers`, and prints the report (C3.1).
-fn replay(options: &Options, logs: &[PathBuf], layers: &[String]) -> Result<(), String> {
+fn replay(options: &Options, logs: &[PathBuf], layers: &[String], stride: usize) -> Result<(), String> {
     let logs = match logs {
         [] => vec![town::decisions_path(&options.roster)],
         logs => logs.to_vec(),
@@ -346,12 +394,25 @@ fn replay(options: &Options, logs: &[PathBuf], layers: &[String]) -> Result<(), 
     }
     // check_layers passed them when they were parsed
     let names = layers.to_vec();
-    let mut replayer = Replayer::new(move || Cascade::from_names(&names).expect("checked layers"));
+    let mut replayer = Replayer::new(move || Cascade::from_names(&names).expect("checked layers")).stride(stride);
     for file in &files {
         let records = log::read(file).map_err(|e| format!("reading {}: {e}", file.display()))?;
         replayer.log(&file.display().to_string(), records);
     }
     print!("{}", replayer.finish());
+    Ok(())
+}
+
+/// Writes the made-up town's log (C3.3) to `dir`, a fresh file each time.
+fn corpus(options: &Options, dir: Option<&Path>, rounds: u32) -> Result<(), String> {
+    let dir = dir.map_or_else(|| town::corpus_path(&options.roster), Path::to_path_buf);
+    let path = log::file_for(&dir, corpus::CITIZEN);
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| format!("replacing {}: {e}", path.display()))?;
+    }
+    let situations = corpus::town(rounds);
+    corpus::record(&path, &situations).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    println!("{}: {} decisions, as the rules made them", path.display(), situations.len());
     Ok(())
 }
 
@@ -448,7 +509,12 @@ fn main() -> ExitCode {
         Action::Run => run(&options),
         Action::Mint { count } => mint(&options, count),
         Action::Status => status(&options),
-        Action::Replay { ref logs, ref layers } => replay(&options, logs, layers),
+        Action::Replay {
+            ref logs,
+            ref layers,
+            stride,
+        } => replay(&options, logs, layers, stride),
+        Action::Corpus { ref dir, rounds } => corpus(&options, dir.as_deref(), rounds),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -498,7 +564,8 @@ mod tests {
             o.action,
             Action::Replay {
                 logs: Vec::new(),
-                layers: vec!["rules".into()]
+                layers: vec!["rules".into()],
+                stride: 1
             }
         );
         let o = parse(args("replay a.jsonl town.decisions --layers rules")).unwrap().unwrap();
@@ -506,9 +573,31 @@ mod tests {
             o.action,
             Action::Replay {
                 logs: vec!["a.jsonl".into(), "town.decisions".into()],
-                layers: vec!["rules".into()]
+                layers: vec!["rules".into()],
+                stride: 1
             }
         );
+        let o = parse(args("replay town.corpus --layers rules,jev@0.8 --stride 5")).unwrap().unwrap();
+        assert_eq!(
+            o.action,
+            Action::Replay {
+                logs: vec!["town.corpus".into()],
+                layers: vec!["rules".into(), "jev@0.8".into()],
+                stride: 5
+            }
+        );
+        assert!(parse(args("replay --layers jev@2")).is_err(), "a threshold over 1");
+        assert!(parse(args("replay --stride 0")).is_err());
+        assert!(parse(args("--stride 3")).is_err(), "--stride without replay");
+        assert_eq!(parse(args("corpus")).unwrap().unwrap().action, Action::Corpus { dir: None, rounds: 1 });
+        assert_eq!(
+            parse(args("corpus here --rounds 5")).unwrap().unwrap().action,
+            Action::Corpus {
+                dir: Some("here".into()),
+                rounds: 5
+            }
+        );
+        assert!(parse(args("replay --rounds 5")).is_err(), "--rounds without corpus");
         assert!(parse(args("replay --layers rules,oracle")).unwrap_err().contains("oracle"));
         assert!(parse(args("--layers rules")).is_err(), "--layers without replay");
         assert!(parse(args("a.jsonl replay")).is_err(), "a log before replay");

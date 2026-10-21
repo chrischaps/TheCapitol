@@ -14,6 +14,10 @@
 //!   layer's verdicts;
 //! - **latency** of each layer and of a whole ruling;
 //! - **cost**: what each layer spent, in US cents;
+//! - **calibration** (C3.3): each layer's answers by how sure it was, and
+//!   how many of them picked the entry recorded. The recorded pick is
+//!   mostly the rules', so this says how well a layer's confidence tracks
+//!   agreeing with them, not how often it's right;
 //! - and the outcomes and fills the log recorded, for context.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,12 +25,14 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use super::log::Record;
-use super::{By, Cascade, Decision, Question, Ruling, Situation};
+use super::{Asked, By, Cascade, Decision, Question, Ruling, Situation};
 
 /// How often a pending layer is asked again.
 const POLL: Duration = Duration::from_millis(2);
 /// How many differences a report lists.
 const SHOWN: usize = 12;
+/// How much of an escalation's reason a report keeps.
+const REASON: usize = 80;
 
 /// A decision the replay ruled otherwise.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +56,13 @@ pub struct LayerStats {
     pub verdicts: BTreeMap<&'static str, usize>,
     micros: Vec<u64>,
     pub cents: f64,
+    /// Its answers (settled or unsure) by confidence, in tenths: how many,
+    /// and how many picked the entry recorded
+    pub calibration: BTreeMap<usize, (usize, usize)>,
+    /// Why it escalated, and how often
+    pub reasons: BTreeMap<String, usize>,
+    /// What the layer tallied of itself, such as the models that answered
+    pub tally: BTreeMap<String, usize>,
 }
 
 impl LayerStats {
@@ -121,6 +134,9 @@ pub struct Replayer {
     make: Box<dyn FnMut() -> Cascade>,
     report: Report,
     runs: BTreeSet<(String, i64)>,
+    /// Replay every this many decisions
+    stride: usize,
+    seen: usize,
 }
 
 impl Replayer {
@@ -142,7 +158,17 @@ impl Replayer {
             },
             make,
             runs: BTreeSet::new(),
+            stride: 1,
+            seen: 0,
         }
+    }
+
+    /// Replays only every `n`th decision, to sample a slow or costly layer.
+    /// Replay is sequential, so a network layer replays at its latency
+    /// (#301).
+    pub fn stride(mut self, n: usize) -> Replayer {
+        self.stride = n.max(1);
+        self
     }
 
     /// Replays one log's records, in order. `name` labels its unreadable
@@ -171,6 +197,10 @@ impl Replayer {
                     run_layers = layers;
                 }
                 Record::Decision { id, situation, ruling, .. } => {
+                    self.seen += 1;
+                    if !(self.seen - 1).is_multiple_of(self.stride) {
+                        continue;
+                    }
                     let rules_only = run_layers == ["rules"];
                     replay_one(report, &mut cascade, &citizen, id, &situation, &ruling, rules_only);
                 }
@@ -180,6 +210,11 @@ impl Replayer {
         }
         for (stats, (_, cents)) in report.layers.iter_mut().zip(cascade.spent()) {
             stats.cents += cents;
+        }
+        for (stats, tally) in report.layers.iter_mut().zip(cascade.tallies()) {
+            for (k, n) in tally {
+                *stats.tally.entry(k).or_default() += n;
+            }
         }
     }
 
@@ -193,10 +228,25 @@ fn replay_one(report: &mut Report, cascade: &mut Cascade, citizen: &str, id: u64
     let mut ruling = cascade.ask(s, began);
     let mut turns = ruling.trail.clone();
     let waited = matches!(ruling.by, By::Waiting { .. });
+    // When the layer being waited on was asked
+    let mut pended = began;
     while matches!(ruling.by, By::Waiting { .. }) {
         std::thread::sleep(POLL);
         ruling = cascade.ask(s, Instant::now());
-        turns.extend(ruling.trail.iter().cloned());
+        // Asking again is no new turn. Still thinking, it's the same one;
+        // its answer, or its lateness, took as long as it was waited on,
+        // and the layers above may be asked (and pend) in turn
+        let mut trail = ruling.trail.iter().cloned();
+        let Some(mut answer) = trail.next() else { continue };
+        if answer.asked == Asked::Pending {
+            continue;
+        }
+        if let Some(pending) = turns.iter().rposition(|t| t.asked == Asked::Pending) {
+            answer.micros = pended.elapsed().as_micros() as u64;
+            turns[pending] = answer;
+        }
+        pended = Instant::now();
+        turns.extend(trail);
     }
     report.micros.push(began.elapsed().as_micros() as u64);
     report.decisions += 1;
@@ -206,6 +256,19 @@ fn replay_one(report: &mut Report, cascade: &mut Cascade, citizen: &str, id: u64
             stats.asked += 1;
             *stats.verdicts.entry(turn.asked.as_str()).or_default() += 1;
             stats.micros.push(turn.micros);
+            if let Asked::Escalated { reason } = &turn.asked {
+                let mut reason = reason.clone();
+                if let Some((cut, _)) = reason.char_indices().nth(REASON) {
+                    reason.truncate(cut);
+                }
+                *stats.reasons.entry(reason).or_default() += 1;
+            }
+            if let Asked::Settled { confidence, choice } | Asked::Unsure { confidence, choice } = &turn.asked {
+                let tenth = ((confidence * 10.0).floor().max(0.0) as usize).min(9);
+                let entry = stats.calibration.entry(tenth).or_default();
+                entry.0 += 1;
+                entry.1 += (recorded.decision.map(|d| d.pick) == Some(choice.pick)) as usize;
+            }
         }
     }
     if report.stack.first().is_some_and(|first| ruling.by == By::Layer { name: first.clone() }) {
@@ -360,6 +423,24 @@ impl fmt::Display for Report {
                 micros(layer.latency(1.0)),
                 layer.cents
             )?;
+            if !layer.calibration.is_empty() {
+                let tenths: Vec<String> = layer
+                    .calibration
+                    .iter()
+                    .rev()
+                    .map(|(tenth, (n, same))| format!("{:.1}+ {same}/{n}", *tenth as f64 / 10.0))
+                    .collect();
+                writeln!(f, "  {:<12} as recorded, by confidence: {}", "", tenths.join(" · "))?;
+            }
+            if !layer.tally.is_empty() {
+                let tally: Vec<String> = layer.tally.iter().map(|(k, n)| format!("{k} {n}")).collect();
+                writeln!(f, "  {:<12} tally: {}", "", tally.join(" · "))?;
+            }
+            let mut reasons: Vec<(&String, &usize)> = layer.reasons.iter().collect();
+            reasons.sort_by(|a, b| b.1.cmp(a.1));
+            for (reason, n) in reasons.iter().take(4) {
+                writeln!(f, "  {:<12} escalated {n}×: {reason}", "")?;
+            }
         }
         let known: usize = self.outcomes.values().sum();
         let fates: Vec<String> = self.outcomes.iter().map(|(fate, n)| format!("{n} {fate}")).collect();
@@ -398,11 +479,8 @@ impl fmt::Display for Report {
 #[cfg(test)]
 mod tests {
     use super::super::log::{self, Fate, Log};
-    use super::super::{Choice, Decider, Held, Layer, Mind, Place, Quote, Span, Temperament, Ticket, Verdict, When, Who};
+    use super::super::{corpus, Choice, Decider, Layer, Mind, Span, Temperament, Ticket, Verdict};
     use super::*;
-    use crate::catalog::Catalog;
-    use crate::sim::plan::Holdings;
-    use crate::sim::{Role, MIX};
     use std::sync::{Arc, Mutex};
 
     fn temp(name: &str) -> std::path::PathBuf {
@@ -411,99 +489,12 @@ mod tests {
         dir
     }
 
-    /// Every role's work, sell, buy, bid and stall questions over a spread
-    /// of holdings, books and temperaments: what a town asks in a day.
     fn situations() -> Vec<Situation> {
-        let catalog = Catalog::fallback();
-        let mut out = Vec::new();
-        let mut n = 0u32;
-        for (role, _) in MIX {
-            for (strands, fiber, product, last) in [(0, 0, 0, None), (40, 120, 12, Some(3)), (300, 260, 45, Some(9)), (900, 30, 80, Some(1))] {
-                n += 1;
-                let t = |k: u32| ((n * 37 + k * 11) % 10) as f32 / 9.0;
-                let temperament = Temperament {
-                    thrift: t(1),
-                    risk: t(2),
-                    sociability: t(3),
-                    patience: t(4),
-                };
-                let mut h = Holdings {
-                    strands,
-                    deed_cost: 250,
-                    ..Holdings::default()
-                };
-                h.items.insert("fiber".into(), fiber);
-                if let Some(p) = role.product() {
-                    h.items.insert(p.into(), product);
-                }
-                let quote = |item: &str| Quote {
-                    item: item.into(),
-                    bid: last.map(|l: i64| l - 1),
-                    ask: last.map(|l: i64| l + 2),
-                    last,
-                };
-                let market: Vec<Quote> = ["log", "plank", "iron_ore", "iron_ingot", "brick", "stone"].iter().map(|i| quote(i)).collect();
-                let s = |question, menu: Vec<Choice>, carry_on| Situation {
-                    who: Who {
-                        name: format!("Citizen {n}"),
-                        role: role.slug().into(),
-                        temperament,
-                    },
-                    at: Place {
-                        x: 6000.0 + n as f64 * 13.7,
-                        y: 6000.0 - n as f64 * 3.1,
-                        zone: "urban".into(),
-                    },
-                    when: When {
-                        time_of_day: Some(0.3 + n as f64 * 0.01),
-                        hours: n as f64 * 0.37,
-                    },
-                    holdings: (&h).into(),
-                    market: market.clone(),
-                    question,
-                    menu,
-                    carry_on: Some(carry_on),
-                };
-                let Ok(errands) = role.errands(&catalog, &h) else { continue };
-                out.push(s(Question::Work, errands.iter().map(|e| e.choice(&catalog)).collect(), 0));
-                out.push(s(Question::FreeTime, vec![Choice::Rest, Choice::Hall], 0));
-                if let Some(p) = role.product() {
-                    let goal = errands.first().and_then(|e| e.goal.as_ref());
-                    if let Some(menu) = role.sell_menu(&h, goal, last.map(|l| l - 1), last.map(|l| l + 2)) {
-                        out.push(s(Question::Sell { item: p.into() }, menu, 1));
-                    }
-                    if let Some(menu) = role.stall_menu(&h, last, false) {
-                        out.push(s(Question::Sell { item: p.into() }, menu, 1));
-                    }
-                }
-                for e in &errands {
-                    if let Some(menu) = role.buy_menu(&h, &e.step, last.map(|l| l + 2)) {
-                        let item = menu.iter().find_map(|c| match c {
-                            Choice::Buy { item, .. } => Some(item.clone()),
-                            _ => None,
-                        });
-                        out.push(s(Question::Buy { item: item.unwrap_or_default() }, menu, 1));
-                    }
-                }
-                for item in role.needs() {
-                    if let Some(menu) = role.bid_menu(&h, item, last, false) {
-                        out.push(s(Question::Buy { item: item.to_string() }, menu, 1));
-                    }
-                }
-            }
-        }
-        out
+        corpus::situations()
     }
 
-    /// A log of `situations` as a rules-only citizen decided them.
     fn record(path: &std::path::Path, situations: &[Situation]) {
-        let log = Log::open(path, "Percy Sawyer", Role::Builder.slug(), &["rules".into()], log::LOG_LIMIT, log::LOG_KEEP).unwrap();
-        let mut mind = Mind::new(Cascade::rules(), Temperament::default()).with_log(Arc::new(Mutex::new(log)));
-        for s in situations {
-            let mark = mind.mark();
-            mind.ask(s);
-            mind.settle(mark, &Held::default(), |_| Fate::Done);
-        }
+        corpus::record(path, situations).unwrap();
     }
 
     fn replay(path: &std::path::Path, make: impl FnMut() -> Cascade + 'static) -> Report {
@@ -582,11 +573,22 @@ mod tests {
 
     /// A layer that thinks a while: pending, then the first entry.
     struct Slow {
+        name: &'static str,
+        confidence: f32,
         asked: Option<Instant>,
+    }
+    impl Slow {
+        fn new(name: &'static str, confidence: f32) -> Slow {
+            Slow {
+                name,
+                confidence,
+                asked: None,
+            }
+        }
     }
     impl Decider for Slow {
         fn name(&self) -> &str {
-            "slow"
+            self.name
         }
         fn decide(&mut self, _s: &Situation) -> Verdict {
             self.asked = Some(Instant::now());
@@ -596,9 +598,31 @@ mod tests {
             let ready = self.asked.is_some_and(|a| a.elapsed() >= Duration::from_millis(6));
             ready.then(|| Verdict::Decided {
                 choice: Decision::plain(0),
-                confidence: 1.0,
+                confidence: self.confidence,
             })
         }
+    }
+
+    /// rules → jev → a chat model: the first slow layer is unsure, so the
+    /// second is asked, and pends in its turn.
+    #[test]
+    fn pending_layers_one_above_another_each_get_their_turn() {
+        let dir = temp("slower");
+        let path = log::file_for(&dir, "Percy Sawyer");
+        let s = situations().into_iter().find(|s| s.question == Question::FreeTime).unwrap();
+        record(&path, std::slice::from_ref(&s));
+        let report = replay(&path, || {
+            Cascade::new(vec![
+                Layer::new(Slow::new("unsure", 0.3), 0.5, Duration::from_secs(1)),
+                Layer::new(Slow::new("sure", 1.0), 0.5, Duration::from_secs(1)),
+            ])
+        });
+        let (unsure, sure) = (&report.layers[0], &report.layers[1]);
+        assert_eq!((unsure.asked, unsure.verdicts.get("unsure")), (1, Some(&1)), "{:?}", unsure.verdicts);
+        assert_eq!((sure.asked, sure.verdicts.get("settled")), (1, Some(&1)), "{:?}", sure.verdicts);
+        assert!(unsure.latency(0.5).unwrap() >= 6000 && sure.latency(0.5).unwrap() >= 6000);
+        assert_eq!(unsure.calibration.get(&3), Some(&(1, 1)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -607,12 +631,16 @@ mod tests {
         let path = log::file_for(&dir, "Percy Sawyer");
         let s = situations().into_iter().find(|s| s.question == Question::FreeTime).unwrap();
         record(&path, std::slice::from_ref(&s));
-        let report = replay(&path, || Cascade::new(vec![Layer::new(Slow { asked: None }, 0.5, Duration::from_secs(1))]));
+        let report = replay(&path, || Cascade::new(vec![Layer::new(Slow::new("slow", 1.0), 0.5, Duration::from_secs(1))]));
         assert_eq!(report.waited, 1);
         assert_eq!(report.first_settled, 1);
         let slow = &report.layers[0];
-        assert!(slow.verdicts["pending"] >= 2, "asked, then polled: {:?}", slow.verdicts);
+        // Asked once: the poll that brought its answer is the same turn,
+        // as long as it was waited on
+        assert_eq!(slow.asked, 1, "{:?}", slow.verdicts);
         assert_eq!(slow.verdicts["settled"], 1);
+        assert!(!slow.verdicts.contains_key("pending"));
+        assert!(slow.latency(0.5).unwrap() >= 6000);
         assert!(report.latency(0.5).unwrap() >= 6000);
         let _ = std::fs::remove_dir_all(&dir);
     }

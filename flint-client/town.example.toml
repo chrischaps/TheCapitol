@@ -28,9 +28,14 @@
 server = "http://localhost:3000"
 
 # How citizens make up their minds (C1.3): a stack of decision layers,
-# bottom first, each asked in turn until one is sure. "rules" is the only
-# layer so far, and the default. A citizen may name its own `layers`.
+# bottom first, each asked in turn until one is sure. "rules" is the
+# default. "jev" (C3.3) asks TypeSafe's Jev about the rules' close calls,
+# for about 1 cent a citizen-day; it reads $TYPESAFE_API_KEY, and with none
+# it passes every question on. "jev-router" (OpenRouter) is there for
+# replay, not for a live town. A layer may set its threshold: "jev@0.8".
+# A citizen may name its own `layers`.
 layers = ["rules"]
+# layers = ["rules", "jev"]
 
 [[citizen]]
 name = "Ada Reeder"
