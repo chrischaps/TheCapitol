@@ -37,10 +37,13 @@
 //!   zone banner and the toasts (P4.5; one line since P8.3).
 //! - [`hints`]: the first-session hints, once per account (P8.3).
 //! - [`shortcuts`]: every control on one card, on `?` or F1 (P8.3).
+//! - [`dev_overlay`]: the dev overlay on F7 (D5.2): frame times, the net,
+//!   the prediction, the store's counts and the interest cell.
 
 pub mod automation;
 pub mod containers;
 pub mod crafting;
+pub mod dev_overlay;
 pub mod exchange;
 pub mod gazette;
 pub mod hints;

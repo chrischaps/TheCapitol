@@ -119,6 +119,12 @@ pub const TRADE_REQUEST_TTL_SECS: u64 = 30;
 /// player who leaves those cells is out of sight, not gone: only
 /// `player_left` means they've left the world.
 pub const INTEREST_CELL: f64 = 300.0;
+
+/// The cell of the interest grid a point is in, by column and row: the
+/// server's bucket for it, and what the client's dev overlay shows (D5.2).
+pub fn interest_cell(x: f64, y: f64) -> (i32, i32) {
+    ((x / INTEREST_CELL).floor() as i32, (y / INTEREST_CELL).floor() as i32)
+}
 /// Minimum distance between two placed stations.
 pub const STATION_MIN_SPACING: f64 = 50.0;
 /// `GET /world/nearby` returns resource nodes within this radius of the player,

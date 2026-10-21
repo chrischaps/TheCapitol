@@ -97,6 +97,13 @@ bindings = [{ type = "key", code = "F1" }]
 kind = "button"
 bindings = [{ type = "key", code = "F10" }]
 
+# The dev overlay (D5.2): frame times, the net, the prediction, what the
+# store holds and the interest cell. F2 to F4 are the engine's, F8 the
+# control mode's (#319).
+[actions.dev_overlay]
+kind = "button"
+bindings = [{ type = "key", code = "F7" }]
+
 # Craft what the crafting panel is set to, while it's open (P5.5), or what
 # the open station's panel is set to (P6.3).
 [actions.craft]
