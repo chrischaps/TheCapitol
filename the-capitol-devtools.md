@@ -221,6 +221,7 @@ The first set:
 - **D3.3 The profiler.**
   - The `profile` feature with `tracing-tracy`, documented in `CLAUDE.md`.
   - **Verify:** Tracy shows the tick's phases.
+  - **As built (#367):** `tracing-tracy` 0.11 with `only-localhost` and `ondemand`. It's held at 0.11 because that is tracy-client 0.18, the Flint client's, so both speak Tracy 0.14.0 and one viewer reads them. Each tick is a Tracy frame, and its work a `tick` frame set beside it, so the frame graph shows the work against the 100 ms. The spans are D0.1's `tick.<phase>` and `loop.<name>`, filtered by `RUST_LOG` like the log.
 
 ### D4: The town (`dt:D4-town`)
 - **D4.1 The town reports in.**

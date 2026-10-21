@@ -100,6 +100,9 @@ cargo run
 # Run with verbose logging
 RUST_LOG=debug cargo run
 
+# Run under the profiler: Tracy 0.14 connects on localhost (D3.3)
+cargo run --features profile
+
 # Check for compilation errors
 cargo check
 
@@ -109,6 +112,8 @@ cargo test
 # Run a specific test (terrain generation tests are slow ~2min)
 cargo test test_no_roads_terminate -- --nocapture
 ```
+
+**The profiler** (D3.3, #367) is the backend's `profile` feature: `tracing-tracy` as a layer, off by default, so the usual build has no tracy in it (`cargo tree -i tracy-client-sys` finds nothing). Under it every span `RUST_LOG` lets through is a Tracy zone, `tick.<phase>` and `loop.<name>` among them. Each tick is a frame, and its work the `tick` frame set, so the frame graph shows the work against the 100 ms. It listens on loopback only and keeps nothing until a viewer connects. Open **Tracy 0.14.0** (`tracy-profiler.exe` from [wolfpld/tracy's release](https://github.com/wolfpld/tracy/releases/tag/v0.14.0)) and connect to `127.0.0.1`. The Flint client's `profile` feature is on the same Tracy, so one viewer reads both; they share port 8086, so run one at a time or start the second with `TRACY_PORT`. Headless: `tracy-capture -o tick.tracy -s 20`, then `tracy-csvexport tick.tracy`.
 
 ### A town: the world with citizens in it
 

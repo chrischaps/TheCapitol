@@ -36,13 +36,17 @@ use state::AppState;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
-    tracing_subscriber::registry()
+    let subscriber = tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "capitol_backend=debug,tower_http=debug".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+        .with(tracing_subscriber::fmt::layer());
+    // The profiler (D3.3): every span RUST_LOG lets through is a Tracy zone.
+    // It listens on loopback and keeps nothing until a viewer connects
+    #[cfg(feature = "profile")]
+    let subscriber = subscriber.with(tracing_tracy::TracyLayer::default());
+    subscriber.init();
 
     // Load configuration
     dotenvy::dotenv().ok();

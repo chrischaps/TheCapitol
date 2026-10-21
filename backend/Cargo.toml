@@ -35,6 +35,10 @@ chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The profiler (D3.3), only with `--features profile`. tracing-tracy 0.11 is on
+# tracy-client 0.18, the Flint client's, so one Tracy viewer reads both
+tracing-tracy = { version = "0.11", optional = true, features = ["only-localhost", "ondemand"] }
+tracy-client = { version = "0.18", optional = true }
 thiserror = "2"
 rand = "0.8"
 sha2 = "0.10"
@@ -44,6 +48,11 @@ futures = "0.3"
 utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"] }
 utoipa-axum = "0.2"
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
+
+[features]
+# Tracy (D3.3): every span a zone, each tick a frame. Off by default, so the
+# usual build has no tracy in it at all
+profile = ["dep:tracing-tracy", "dep:tracy-client"]
 
 [dev-dependencies]
 # Thread CPU time, so a timing test isn't failed by other tests or builds sharing the CPU (#91)

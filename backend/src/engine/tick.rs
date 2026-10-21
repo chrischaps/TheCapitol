@@ -764,6 +764,13 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
         interval.tick().await;
         // The tick's work, from here to the loop's end (C1.7)
         let began = Instant::now();
+        // In Tracy (D3.3), each tick is a frame and its work a "tick" frame,
+        // so the frame graph shows the work against the 100 ms
+        #[cfg(feature = "profile")]
+        let _frame = tracy_client::Client::running().map(|tracy| {
+            tracy.frame_mark();
+            tracy.non_continuous_frame(tracy_client::frame_name!("tick"))
+        });
 
         let pending_items: Vec<PendingItem>;
         let finished_crafts: Vec<FinishedCraft>;
