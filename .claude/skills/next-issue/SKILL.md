@@ -14,6 +14,7 @@ Every open issue on `chrischaps/TheCapitol` is in the queue, whatever its label.
 | `flint-client` | `the-capitol-flint-client.md`: P0.1 … P8.7, B1 … B13, engine hooks H… |
 | `wilds` | `the-capitol-wilds.md`: W0 … W11 |
 | `suburb-v2` | `the-capitol-suburb-v2.md` |
+| `devtools` | `the-capitol-devtools.md`: D0.1 … D6.3 |
 | `infra` | none: CI, `scripts/`, agent tooling, the dev environment |
 
 | Kind label | Meaning |
