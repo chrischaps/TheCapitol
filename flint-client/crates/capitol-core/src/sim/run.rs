@@ -30,7 +30,7 @@ use capitol_protocol::rules::market::{OrderSide, OrderStatus};
 use capitol_protocol::rules::Zone;
 use uuid::Uuid;
 
-use super::plan::{Holdings, Step};
+use super::plan::{Holdings, Step, FLOAT};
 use super::report::{BotRun, Entry, Report, MAKER_ROLE};
 use super::{Errand, Role, Trade, MARKET_ITEMS};
 use crate::bot::{Account, Bot, BotError, NO_WAY};
@@ -674,13 +674,13 @@ impl SimBot {
     }
 
     /// Claims a lot to live on, near its spot in its home zone, if it holds
-    /// what its thrift wants in hand for one.
+    /// what its thrift wants in hand for one, and its [`FLOAT`] past the deed.
     fn buy_home(&mut self) -> Result<(), BotError> {
         let Some(persona) = self.persona.clone() else {
             return Ok(());
         };
         let strands = self.bot.state().strands().unwrap_or(0);
-        let fund = |cost: i64| persona.temperament.home_fund(cost);
+        let fund = |cost: i64| persona.temperament.home_fund(cost).max(cost + FLOAT);
         if strands < fund(self.deed_cost) {
             return Ok(());
         }
@@ -1220,10 +1220,11 @@ impl SimBot {
             .any(|s| (s.x - x).hypot(s.y - y) < capitol_protocol::rules::STATION_MIN_SPACING)
     }
 
-    /// Buys the nearest affordable unclaimed plot: for a citizen, near its
-    /// home (C1.2), so the lot it builds on is the one it lives on.
+    /// Buys the nearest unclaimed plot it can afford with its [`FLOAT`] left
+    /// over (#294): for a citizen, near its home (C1.2), so the lot it builds
+    /// on is the one it lives on.
     fn claim(&mut self) -> Result<(), BotError> {
-        let strands = self.bot.state().strands().unwrap_or(0);
+        let strands = self.bot.state().strands().unwrap_or(0) - FLOAT;
         match self.persona.as_ref().map(|p| p.home) {
             Some(home) => {
                 let mut zones = vec![home.zone.as_str()];
