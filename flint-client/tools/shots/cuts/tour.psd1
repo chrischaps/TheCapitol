@@ -58,9 +58,9 @@
            Titles = @(@{ Text = "The Capitol Gazette"; At = 0.8; Until = 5.9; Size = 104; Y = 1660 }
                       @{ Text = "Every game day: the prices that moved, the finest sale and who made it, the deeds, the work."; Font = "Sans"; Color = "0xF2EEE6"; At = 1.4; Until = 5.9; Size = 60; Y = 1810 }) }
 
-        @{ Shot = "citizens"; In = 0.3; Out = 5.3; Chapter = "Citizens and the clock"
-           Titles = @(@{ Text = "Citizens"; At = 0.6; Until = 4.4; Size = 104; Y = 1660 }
-                      @{ Text = "AI players who earn everything a person does, marked by a pale lantern."; Font = "Sans"; Color = "0xF2EEE6"; At = 1.0; Until = 4.4; Size = 60; Y = 1810 }) }
+        @{ Shot = "citizens"; In = 0.3; Out = 6.3; Chapter = "Citizens and the clock"
+           Titles = @(@{ Text = "Citizens"; At = 0.6; Until = 5.4; Size = 104; Y = 1660 }
+                      @{ Text = "AI players who earn everything a person does, marked by a pale lantern."; Font = "Sans"; Color = "0xF2EEE6"; At = 1.0; Until = 5.4; Size = 60; Y = 1810 }) }
         @{ Shot = "clock-dawn"; In = 0; Out = 1.75; Fade = 0.5
            Titles = @(@{ Text = "One city. One clock."; At = 0.5; Until = 5.4; Size = 104; Y = 1660 }
                       @{ Text = "Day and night follow the server, so everyone shares the hour."; Font = "Sans"; Color = "0xF2EEE6"; At = 0.9; Until = 5.4; Size = 60; Y = 1810 }) }
@@ -94,7 +94,11 @@
         @{ Sound = "amb_city"; Loop = $true; Seg = "craft-panel"; For = 70; Volume = 0.7; FadeIn = 3.0; FadeOut = 3.0 }
         @{ Sound = "ui_click"; Seg = "craft-panel"; At = 3.0; Volume = 0.8 }
         @{ Sound = "chime"; Seg = "houses-grow"; At = 2.0; Volume = 0.8 }
-        @{ Sound = "ui_drop"; Seg = "market-panel"; At = 2.0; Volume = 0.8 }
+        @{ Sound = "coins"; Seg = "market-panel"; At = 2.0; Volume = 0.7 }
+        @{ Sound = "amb_market"; Loop = $true; Seg = "bazaar-street"; For = 7; Volume = 0.9; FadeIn = 1.5; FadeOut = 2.0 }
+        @{ Sound = "hawker_1"; Seg = "bazaar-street"; At = 1.5; Volume = 0.7 }
+        @{ Sound = "amb_market"; Loop = $true; Seg = "citizens"; For = 6; Volume = 0.7; FadeIn = 1.0; FadeOut = 2.0 }
+        @{ Sound = "hawker_3"; Seg = "citizens"; At = 2.0; Volume = 0.6 }
         @{ Sound = "amb_wind"; Loop = $true; Seg = "tower-climb"; For = 10; Volume = 0.6; FadeIn = 2.0; FadeOut = 3.0 }
         @{ Sound = "amb_water"; Loop = $true; Seg = "night-arc"; Volume = 0.6; FadeIn = 3.0 }
         @{ Sound = "bell"; At = -9.2; Volume = 2.4 }

@@ -19,9 +19,9 @@
         @{ Name = "wilds-ford";   Path = "wilds-ford.txt";   Time = 0.40; Length = 8; Shapes = "portrait", "landscape" }
         @{ Name = "wilds-lakes";  Path = "wilds-lakes.txt";  Time = 0.66; Length = 8; Shapes = "landscape" }
 
-        # The farms and the grass (#290 and #291 lay the farms: re-aim these after)
-        @{ Name = "farms-high";   Path = "farms-high.txt";   Time = 0.46; Length = 9; Shapes = "portrait", "landscape" }
-        @{ Name = "farms-lane";   Path = "farms-lane.txt";   Time = 0.52; Length = 8; Shapes = "landscape" }
+        # The farms (#290) and the grass; claimed farms grow a farmhouse and a barn
+        @{ Name = "farms-high";   Path = "farms-high.txt";   Time = 0.56; Length = 9; Args = "--claim-sample", "0.6"; Shapes = "portrait", "landscape" }
+        @{ Name = "farms-lane";   Path = "farms-lane.txt";   Time = 0.60; Length = 8; Args = "--claim-sample", "0.6"; Shapes = "landscape" }
         @{ Name = "grass-dawn";   Path = "grass-dawn.txt";   Time = 0.27; Length = 7; Shapes = "portrait", "landscape" }
 
         # The suburbs: building, and the hours over them
@@ -34,8 +34,9 @@
 
         # Work and trade
         @{ Name = "automation";   Path = "automation.txt";   Time = 0.82; Length = 10; Args = @("--automation-sample"); Shapes = "landscape" }
-        @{ Name = "citizens";     Path = "citizens.txt";     Time = 0.86; Length = 5; Args = @("--citizen-sample"); Shapes = "landscape" }
-        @{ Name = "bazaar-street"; Path = "bazaar-street.txt"; Time = 0.84; Length = 8; Shapes = "portrait", "landscape" }
+        @{ Name = "citizens";     Path = "citizens.txt";     Time = 0.86; Length = 7; Args = "--citizen-sample", "stroll", "--bazaar-sample", "street"; Shapes = "portrait", "landscape" }
+        @{ Name = "bazaar-street"; Path = "bazaar-street.txt"; Time = 0.84; Length = 8; Args = "--bazaar-sample", "street", "--citizen-sample", "stroll"; Shapes = "portrait", "landscape" }
+        @{ Name = "bazaar-above"; Path = "bazaar-above.txt"; Time = 0.84; Length = 8; Args = "--bazaar-sample", "street"; Shapes = "landscape" }
         @{ Name = "hall-night";   Path = "hall-night.txt";   Time = 0.88; Length = 7; Args = "--claim-sample", "0.6"; Shapes = "landscape" }
 
         # The panels, for the tour: filmed at 2560x1440 so a panel leaves room for a caption

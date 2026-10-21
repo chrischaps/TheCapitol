@@ -53,6 +53,10 @@
         @{ Sound = "amb_city"; Loop = $true; Seg = "houses-grow"; For = 40; Volume = 0.8; FadeIn = 3.0; FadeOut = 3.0 }
         @{ Sound = "chime"; Seg = "houses-grow"; At = 2.0; Volume = 0.8 }
         @{ Sound = "pluck"; Seg = "automation"; At = 2.5; Volume = 0.6 }
+        # The bazaar: its murmur, a call, coins
+        @{ Sound = "amb_market"; Loop = $true; Seg = "bazaar-street"; For = 8; Volume = 0.9; FadeIn = 1.5; FadeOut = 2.0 }
+        @{ Sound = "hawker_1"; Seg = "bazaar-street"; At = 1.5; Volume = 0.7 }
+        @{ Sound = "coins"; Seg = "bazaar-street"; At = 4.0; Volume = 0.6 }
         # The tower: wind high up, then the water of the moat and the bell
         @{ Sound = "amb_wind"; Loop = $true; Seg = "tower-climb"; For = 10; Volume = 0.6; FadeIn = 2.0; FadeOut = 3.0 }
         @{ Sound = "amb_water"; Loop = $true; Seg = "night-arc"; Volume = 0.6; FadeIn = 3.0 }

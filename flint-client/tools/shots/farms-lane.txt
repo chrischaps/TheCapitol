@@ -1,4 +1,4 @@
-# Down among the farms at noon, the tower on the horizon (re-aim after #290/#291)
+# Low over the east farms, a farmhouse and its barn, the suburbs and the tower beyond
 #  t      px      py      pz      tx    ty    tz
-  0.0   190.0   22.0  -329.0     0.0  30.0    0.0
-  8.0   180.0   18.0  -318.0     0.0  30.0    0.0
+  0.0   330.0   26.0   230.0   250.0   4.0  200.0
+  8.0   322.0   22.0   221.0   250.0   4.0  200.0
