@@ -29,6 +29,10 @@ pub struct Config {
     /// the hourly tax. What runs on the wall clock doesn't: token lifetimes,
     /// rate limits, trade request expiry and the market's matching task.
     pub sim_tick_scale: f64,
+    /// How long a database statement can take before it's logged as slow
+    /// and counted against the phase it ran in (D3.2). `SLOW_STATEMENT_MS`,
+    /// 50 unless set.
+    pub slow_statement: std::time::Duration,
 }
 
 impl Config {
@@ -61,6 +65,7 @@ impl Config {
                     1.0
                 }
             },
+            slow_statement: std::time::Duration::from_millis(secs("SLOW_STATEMENT_MS", 50)),
         })
     }
 }

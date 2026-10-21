@@ -106,6 +106,15 @@ pub struct Load {
     /// `automation`, `market`, `bazaar`. Not in the tick's time.
     #[serde(default)]
     pub loops: BTreeMap<String, PhaseLoad>,
+    /// Statements that took [`slow_statement_ms`](Self::slow_statement_ms)
+    /// or longer outside the tick and the loops: the routes, the sockets,
+    /// startup (D3.2). Each phase and loop counts its own.
+    #[serde(default)]
+    pub slow_statements_elsewhere: u64,
+    /// What counts as a slow statement: `SLOW_STATEMENT_MS`. 0 from a server
+    /// before D3.2.
+    #[serde(default)]
+    pub slow_statement_ms: f64,
 }
 
 /// One phase of the tick, or one loop beside it, as running totals.
@@ -122,6 +131,10 @@ pub struct PhaseLoad {
     /// Runs by how long they took, under [`TICK_BUCKETS_MS`], and one more
     /// for those slower than all of them
     pub buckets: Vec<u64>,
+    /// Its database statements that took [`Load::slow_statement_ms`] or
+    /// longer (D3.2)
+    #[serde(default)]
+    pub slow_statements: u64,
 }
 
 /// How a unit came into the world or left it, as [`Ledger::unit_flows`]
@@ -419,6 +432,8 @@ pub struct LoadWindow {
     /// The tick's phases over the window, and the loops beside it
     pub phases: BTreeMap<String, PhaseWindow>,
     pub loops: BTreeMap<String, PhaseWindow>,
+    /// Slow statements outside the tick and the loops (D3.2)
+    pub slow_statements_elsewhere: u64,
 }
 
 /// One phase, or one loop, between two loads.
@@ -431,6 +446,8 @@ pub struct PhaseWindow {
     pub mean_ms: f64,
     /// The bucket bounds its runs fall under; `None` past the last
     pub p95_ms: Option<f64>,
+    /// Its slow statements over the window (D3.2)
+    pub slow_statements: u64,
 }
 
 impl PhaseWindow {
@@ -443,6 +460,7 @@ impl PhaseWindow {
             secs,
             mean_ms: if runs > 0 { secs * 1000.0 / runs as f64 } else { 0.0 },
             p95_ms: percentile(&buckets, runs, 0.95),
+            slow_statements: b.slow_statements.saturating_sub(a.map_or(0, |a| a.slow_statements)),
         }
     }
 }
@@ -504,6 +522,7 @@ impl LoadWindow {
             db_transactions_per_sec: if secs > 0.0 { (b.db_transactions - a.db_transactions) as f64 / secs } else { 0.0 },
             phases: phase_windows(&a.phases, &b.phases),
             loops: phase_windows(&a.loops, &b.loops),
+            slow_statements_elsewhere: b.slow_statements_elsewhere.saturating_sub(a.slow_statements_elsewhere),
         }
     }
 }

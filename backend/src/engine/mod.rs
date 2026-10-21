@@ -27,6 +27,7 @@ pub mod plot_sync;
 pub mod presence;
 pub mod property_tax;
 mod regeneration;
+pub mod slow_work;
 pub mod slot_moves;
 pub mod station_placement;
 pub mod station_removal;

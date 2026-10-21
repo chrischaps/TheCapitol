@@ -14,7 +14,8 @@
 //! `fixtures/rest/gazette.json` is `GET /gazette/latest` (E3.9), written by the
 //! backend's `write_the_gazette_fixture` from a busy day's records.
 //! `fixtures/rest/ledger.json` is `GET /admin/ledger` (C1.7), its load split
-//! by the tick's phases and the loops beside it (D0.1).
+//! by the tick's phases and the loops beside it (D0.1), each with its slow
+//! statements (D3.2).
 
 use std::fs;
 use std::path::Path;
@@ -173,4 +174,27 @@ fn a_load_from_before_the_phases_still_reads() {
     assert!((gathers.mean_ms - 5.0).abs() < 1e-9);
     assert_eq!(gathers.p95_ms, Some(20.0));
     assert_eq!(window.loops["market"].p95_ms, Some(20.0));
+}
+
+#[test]
+fn a_load_counts_slow_statements_by_phase() {
+    let json = fixture("ledger.json");
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let new: Ledger = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(new.load.slow_statement_ms, 50.0);
+    // A load from before D3.2 reads with none, and a window from it counts
+    // each phase's from nothing
+    let load = value["load"].as_object_mut().unwrap();
+    load.remove("slow_statements_elsewhere");
+    load.remove("slow_statement_ms");
+    for phase in load["phases"].as_object_mut().unwrap().values_mut() {
+        phase.as_object_mut().unwrap().remove("slow_statements");
+    }
+    let old: Load = serde_json::from_value(value["load"].clone()).unwrap();
+    assert!(old.phases.values().all(|p| p.slow_statements == 0));
+    let window = LoadWindow::between(&old, &new.load, 60.0);
+    assert_eq!(window.phases["positions"].slow_statements, 4);
+    assert_eq!(window.phases["movement"].slow_statements, 0);
+    assert_eq!(window.loops["market"].slow_statements, 0, "the old load's loops kept theirs");
+    assert_eq!(window.slow_statements_elsewhere, 1);
 }

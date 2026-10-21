@@ -218,6 +218,7 @@ The first set:
 - **D3.2 Slow work.**
   - sqlx `log_slow_statements`, with slow statements counted per phase.
   - A debug-build warning when a tick phase awaits the database (the #304 class).
+  - *As built (#366):* `engine::slow_work`. The pool logs a statement at `SLOW_STATEMENT_MS` (50 unless set) or over as a warning on `sqlx::query`. The `SlowWork` layer finds the `tick.<phase>` or `loop.<name>` span it ran in, and counts it in `PhaseLoad.slow_statements` for that phase or loop, or in `Load.slow_statements_elsewhere` (routes, sockets, startup). `Load.slow_statement_ms` says what slow was, and `LoadWindow` carries both. The layer has a filter of its own, which takes the engine's spans as well as sqlx's events, so `RUST_LOG` only decides what's printed; the default adds `sqlx::query=warn`. In debug builds it sees every statement, and the tick warns, after its work, the 1st, 10th, 100th… time a phase awaits one, naming the statement (a layer can't log from inside a log event). Today that's gathers, crafts, positions, tax and subscriptions: #304.
 - **D3.3 The profiler.**
   - The `profile` feature with `tracing-tracy`, documented in `CLAUDE.md`.
   - **Verify:** Tracy shows the tick's phases.

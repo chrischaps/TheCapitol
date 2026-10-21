@@ -36,6 +36,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 tracing = "0.1"
+# The level sqlx logs slow statements at takes log's LevelFilter (D3.2)
+log = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # The profiler (D3.3), only with `--features profile`. tracing-tracy 0.11 is on
 # tracy-client 0.18, the Flint client's, so one Tracy viewer reads both

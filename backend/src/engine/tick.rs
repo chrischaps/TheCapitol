@@ -881,6 +881,9 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
         }
 
         super::load::tick_took(began.elapsed());
+        if cfg!(debug_assertions) {
+            super::slow_work::warn_awaits();
+        }
     }
 }
 

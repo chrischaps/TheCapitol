@@ -4,7 +4,8 @@
 //! (`capitol_protocol::ledger::LoadWindow`).
 //!
 //! Since D0.1 the tick's time is also kept by [`Phase`], and the loops
-//! beside it by [`Loop`], each with a histogram like the tick's.
+//! beside it by [`Loop`], each with a histogram like the tick's. Since D3.2
+//! each also counts its slow statements ([`slow_statement`]).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,6 +21,8 @@ struct Timings {
     max_nanos: AtomicU64,
     /// Runs under each of [`TICK_BUCKETS_MS`], and past the last
     buckets: [AtomicU64; TICK_BUCKETS_MS.len() + 1],
+    /// Its statements over the slow threshold (D3.2)
+    slow_statements: AtomicU64,
 }
 
 impl Timings {
@@ -29,6 +32,7 @@ impl Timings {
             nanos: AtomicU64::new(0),
             max_nanos: AtomicU64::new(0),
             buckets: [const { AtomicU64::new(0) }; TICK_BUCKETS_MS.len() + 1],
+            slow_statements: AtomicU64::new(0),
         }
     }
 
@@ -48,6 +52,7 @@ impl Timings {
             secs: self.nanos.load(Ordering::Relaxed) as f64 / 1e9,
             max_ms: self.max_nanos.load(Ordering::Relaxed) as f64 / 1e6,
             buckets: self.buckets.iter().map(|b| b.load(Ordering::Relaxed)).collect(),
+            slow_statements: self.slow_statements.load(Ordering::Relaxed),
         }
     }
 }
@@ -59,6 +64,10 @@ static LOOPS: [Timings; Loop::ALL.len()] = [const { Timings::new() }; Loop::ALL.
 static SOCKETS_OPENED: AtomicU64 = AtomicU64::new(0);
 static SOCKETS_ENDED: [AtomicU64; SocketEnd::ALL.len()] = [const { AtomicU64::new(0) }; SocketEnd::ALL.len()];
 static SOCKET_RESYNCS: AtomicU64 = AtomicU64::new(0);
+
+static SLOW_ELSEWHERE: AtomicU64 = AtomicU64::new(0);
+/// `SLOW_STATEMENT_MS`, as the pool was told it, in µs
+static SLOW_THRESHOLD_MICROS: AtomicU64 = AtomicU64::new(0);
 
 /// A tick's work took `took`: the world's tick and the writes after it,
 /// not the wait for the next.
@@ -133,6 +142,12 @@ impl Phase {
         Phase::ALL.iter().position(|p| p == self).expect("every phase is in ALL")
     }
 
+    /// The phase whose span is `name` (`tick.<phase>`).
+    pub fn of_span(name: &str) -> Option<Phase> {
+        let name = name.strip_prefix("tick.")?;
+        Phase::ALL.into_iter().find(|p| p.as_str() == name)
+    }
+
     /// Times the phase until the returned guard drops.
     pub fn timed(self) -> Timed {
         Timed {
@@ -165,6 +180,12 @@ impl Loop {
         Loop::ALL.iter().position(|l| l == self).expect("every loop is in ALL")
     }
 
+    /// The loop whose span is `name` (`loop.<name>`).
+    pub fn of_span(name: &str) -> Option<Loop> {
+        let name = name.strip_prefix("loop.")?;
+        Loop::ALL.into_iter().find(|l| l.as_str() == name)
+    }
+
     /// Times one cycle until the returned guard drops.
     pub fn timed(self) -> Timed {
         Timed {
@@ -186,6 +207,30 @@ impl Drop for Timed {
     fn drop(&mut self) {
         self.timings.took(self.began.elapsed());
     }
+}
+
+/// Where a statement ran: in a phase of the tick, in a loop beside it, or
+/// anywhere else (a route, a socket, startup).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Work {
+    Phase(Phase),
+    Loop(Loop),
+    Elsewhere,
+}
+
+/// What counts as a slow statement, for the ledger to say (D3.2).
+pub fn slow_threshold(threshold: Duration) {
+    SLOW_THRESHOLD_MICROS.store(threshold.as_micros().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+}
+
+/// A statement took the slow threshold or longer, in `work` (D3.2).
+pub fn slow_statement(work: Work) {
+    let counter = match work {
+        Work::Phase(p) => &PHASES[p.index()].slow_statements,
+        Work::Loop(l) => &LOOPS[l.index()].slow_statements,
+        Work::Elsewhere => &SLOW_ELSEWHERE,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
 }
 
 /// How a WebSocket ended.
@@ -288,6 +333,8 @@ pub fn read(tick_period: Duration) -> Load {
         sockets_opened: opened,
         sockets_ended: ended,
         socket_resyncs: SOCKET_RESYNCS.load(Ordering::Relaxed),
+        slow_statements_elsewhere: SLOW_ELSEWHERE.load(Ordering::Relaxed),
+        slow_statement_ms: SLOW_THRESHOLD_MICROS.load(Ordering::Relaxed) as f64 / 1000.0,
         ..Load::default()
     }
 }

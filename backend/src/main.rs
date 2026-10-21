@@ -2,12 +2,12 @@ use axum::{
     routing::get,
     Router,
 };
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -35,17 +35,19 @@ use state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging
+    // Initialize logging. RUST_LOG filters only what's printed and profiled:
+    // the slow statements are counted by phase whatever it says (D3.2)
+    let log_filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "capitol_backend=debug,tower_http=debug,sqlx::query=warn".into())
+    };
     let subscriber = tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "capitol_backend=debug,tower_http=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer());
+        .with(tracing_subscriber::fmt::layer().with_filter(log_filter()))
+        .with(engine::slow_work::SlowWork.with_filter(engine::slow_work::interest()));
     // The profiler (D3.3): every span RUST_LOG lets through is a Tracy zone.
     // It listens on loopback and keeps nothing until a viewer connects
     #[cfg(feature = "profile")]
-    let subscriber = subscriber.with(tracing_tracy::TracyLayer::default());
+    let subscriber = subscriber.with(tracing_tracy::TracyLayer::default().with_filter(log_filter()));
     subscriber.init();
 
     // Load configuration
@@ -59,7 +61,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // there are enough besides for the tick and the routes
     let db_pool = PgPoolOptions::new()
         .max_connections(16)
-        .connect(&config.database_url)
+        .connect_with(engine::slow_work::statement_logging(
+            config.database_url.parse::<PgConnectOptions>()?,
+            config.slow_statement,
+        ))
         .await?;
 
     tracing::info!("Connected to PostgreSQL");
