@@ -132,7 +132,9 @@ FLAGS:
                       $ANTHROPIC_API_KEY). A layer may set its threshold:
                       jev@0.8 [default: rules]
     --stride <n>      With replay, replay every nth decision only, to
-                      sample a slow or costly layer [default: 1]
+                      sample a costly layer [default: 1]
+    --in-flight <n>   With replay, how many decisions may wait on a slow
+                      layer at once; 1 replays one at a time [default: 8]
     -h, --help        Print this
 
 The roster holds keys, so keep it out of git (flint-client/.gitignore has
@@ -154,6 +156,10 @@ const GRACE: Duration = Duration::from_secs(20);
 const SETTLE: Duration = Duration::from_secs(5);
 /// A decision log's size before it rotates, in MB, unless told otherwise.
 const LOG_MB: u64 = log::LOG_LIMIT >> 20;
+/// How many decisions a replay lets wait on a slow layer at once, unless
+/// told otherwise (#301): a network layer replays this many times as fast,
+/// and stays under its API's rate limits.
+const IN_FLIGHT: usize = 8;
 
 #[derive(Debug, PartialEq)]
 enum Action {
@@ -163,7 +169,12 @@ enum Action {
     Mint { size: Size },
     Habits,
     Status,
-    Replay { logs: Vec<PathBuf>, layers: Vec<String>, stride: usize },
+    Replay {
+        logs: Vec<PathBuf>,
+        layers: Vec<String>,
+        stride: usize,
+        in_flight: usize,
+    },
     Corpus { dir: Option<PathBuf>, rounds: u32 },
 }
 
@@ -209,6 +220,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
     let mut logs = Vec::new();
     let mut layers = None;
     let mut stride = None;
+    let mut in_flight = None;
     let mut corpus_dir = None;
     let mut rounds = None;
     let mut log_mb_given = false;
@@ -256,6 +268,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                 logs: Vec::new(),
                 layers: Vec::new(),
                 stride: 1,
+                in_flight: IN_FLIGHT,
             })?,
             "corpus" => set(Action::Corpus { dir: None, rounds: 1 })?,
             "--rounds" => {
@@ -271,6 +284,13 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                     return Err("--stride must be at least 1".into());
                 }
                 stride = Some(n);
+            }
+            "--in-flight" => {
+                let n: usize = number(&arg, &value()?)?;
+                if n == 0 {
+                    return Err("--in-flight must be at least 1".into());
+                }
+                in_flight = Some(n);
             }
             "--layers" => {
                 let names: Vec<String> = value()?.split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect();
@@ -352,6 +372,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             logs,
             layers: layers.take().unwrap_or_else(|| decide::DEFAULT_LAYERS.map(String::from).to_vec()),
             stride: stride.take().unwrap_or(1),
+            in_flight: in_flight.take().unwrap_or(IN_FLIGHT),
         },
         (Action::Corpus { .. }, None, None) => Action::Corpus {
             dir: corpus_dir,
@@ -367,6 +388,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
     }
     if stride.is_some() {
         return Err("--stride goes with replay".into());
+    }
+    if in_flight.is_some() {
+        return Err("--in-flight goes with replay".into());
     }
     if log_mb_given && !options.lives() {
         return Err("--log-mb goes with run or soak".into());
@@ -739,7 +763,7 @@ fn live(
 
 /// Replays `logs` (the roster's decision logs if none) with the stack
 /// `layers`, and prints the report (C3.1).
-fn replay(options: &Options, logs: &[PathBuf], layers: &[String], stride: usize) -> Result<(), String> {
+fn replay(options: &Options, logs: &[PathBuf], layers: &[String], stride: usize, in_flight: usize) -> Result<(), String> {
     let logs = match logs {
         [] => vec![town::decisions_path(&options.roster)],
         logs => logs.to_vec(),
@@ -750,7 +774,9 @@ fn replay(options: &Options, logs: &[PathBuf], layers: &[String], stride: usize)
     }
     // check_layers passed them when they were parsed
     let names = layers.to_vec();
-    let mut replayer = Replayer::new(move || Cascade::from_names(&names).expect("checked layers")).stride(stride);
+    let mut replayer = Replayer::new(move || Cascade::from_names(&names).expect("checked layers"))
+        .stride(stride)
+        .in_flight(in_flight);
     for file in &files {
         let records = log::read(file).map_err(|e| format!("reading {}: {e}", file.display()))?;
         replayer.log(&file.display().to_string(), records);
@@ -888,7 +914,8 @@ fn main() -> ExitCode {
             ref logs,
             ref layers,
             stride,
-        } => replay(&options, logs, layers, stride),
+            in_flight,
+        } => replay(&options, logs, layers, stride, in_flight),
         Action::Corpus { ref dir, rounds } => corpus(&options, dir.as_deref(), rounds),
     };
     match result {
@@ -972,7 +999,8 @@ mod tests {
             Action::Replay {
                 logs: Vec::new(),
                 layers: vec!["rules".into()],
-                stride: 1
+                stride: 1,
+                in_flight: IN_FLIGHT
             }
         );
         let o = parse(args("replay a.jsonl town.decisions --layers rules")).unwrap().unwrap();
@@ -981,7 +1009,8 @@ mod tests {
             Action::Replay {
                 logs: vec!["a.jsonl".into(), "town.decisions".into()],
                 layers: vec!["rules".into()],
-                stride: 1
+                stride: 1,
+                in_flight: IN_FLIGHT
             }
         );
         let o = parse(args("replay town.corpus --layers rules,jev@0.8 --stride 5")).unwrap().unwrap();
@@ -990,12 +1019,17 @@ mod tests {
             Action::Replay {
                 logs: vec!["town.corpus".into()],
                 layers: vec!["rules".into(), "jev@0.8".into()],
-                stride: 5
+                stride: 5,
+                in_flight: IN_FLIGHT
             }
         );
+        let o = parse(args("replay --layers rules,jev-router --in-flight 32")).unwrap().unwrap();
+        assert!(matches!(o.action, Action::Replay { in_flight: 32, .. }), "{:?}", o.action);
         assert!(parse(args("replay --layers jev@2")).is_err(), "a threshold over 1");
         assert!(parse(args("replay --stride 0")).is_err());
         assert!(parse(args("--stride 3")).is_err(), "--stride without replay");
+        assert!(parse(args("replay --in-flight 0")).is_err());
+        assert!(parse(args("--in-flight 4")).is_err(), "--in-flight without replay");
         assert_eq!(parse(args("corpus")).unwrap().unwrap().action, Action::Corpus { dir: None, rounds: 1 });
         assert_eq!(
             parse(args("corpus here --rounds 5")).unwrap().unwrap().action,

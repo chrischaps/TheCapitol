@@ -4,7 +4,15 @@
 //! Each logged situation is put to a fresh [`Cascade`] (one a log file, as
 //! one a citizen), and its ruling set against the one recorded. A layer
 //! that pends is waited on, as the citizen would have asked again, until
-//! it answers or its time is up. The [`Report`] gives:
+//! it answers or its time is up.
+//!
+//! A network layer would replay at its own latency, one question at a time
+//! (#301), so up to [`in_flight`](Replayer::in_flight) situations are asked
+//! before any is polled, each on a cascade of its own: a cascade waits on
+//! one question of a kind at a time. Each log still lands in its own order,
+//! so the report reads the same however many fly. A situation the first
+//! layer settles lands as it's asked, so a rules-only stack replays one at
+//! a time, exactly as before. The [`Report`] gives:
 //!
 //! - **agreement**: rulings the same as recorded, entry and parameters, in
 //!   all and by question; and of the choices the rules made (under a
@@ -25,7 +33,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use super::log::Record;
-use super::{Asked, By, Cascade, Decision, Question, Ruling, Situation};
+use super::{Asked, By, Cascade, Decision, Question, Ruling, Situation, Turn};
 
 /// How often a pending layer is asked again.
 const POLL: Duration = Duration::from_millis(2);
@@ -137,6 +145,8 @@ pub struct Replayer {
     /// Replay every this many decisions
     stride: usize,
     seen: usize,
+    /// How many situations may wait on a layer at once
+    in_flight: usize,
 }
 
 impl Replayer {
@@ -160,22 +170,30 @@ impl Replayer {
             runs: BTreeSet::new(),
             stride: 1,
             seen: 0,
+            in_flight: 1,
         }
     }
 
-    /// Replays only every `n`th decision, to sample a slow or costly layer.
-    /// Replay is sequential, so a network layer replays at its latency
-    /// (#301).
+    /// Replays only every `n`th decision, to sample a costly layer.
     pub fn stride(mut self, n: usize) -> Replayer {
         self.stride = n.max(1);
+        self
+    }
+
+    /// Lets up to `n` situations wait on a pending layer at once, so a
+    /// network layer replays `n` times as fast as its latency allows
+    /// (#301). Each has a cascade of its own, and so its own spend cap.
+    /// One, the default, is sequential.
+    pub fn in_flight(mut self, n: usize) -> Replayer {
+        self.in_flight = n.max(1);
         self
     }
 
     /// Replays one log's records, in order. `name` labels its unreadable
     /// lines.
     pub fn log(&mut self, name: &str, records: impl IntoIterator<Item = Result<Record, String>>) {
-        let mut cascade = (self.make)();
         let report = &mut self.report;
+        let mut flights = Flights::new(&mut *self.make, self.in_flight);
         report.logs += 1;
         let mut citizen = String::new();
         let mut run_layers: Vec<String> = Vec::new();
@@ -201,19 +219,28 @@ impl Replayer {
                     if !(self.seen - 1).is_multiple_of(self.stride) {
                         continue;
                     }
-                    let rules_only = run_layers == ["rules"];
-                    replay_one(report, &mut cascade, &citizen, id, &situation, &ruling, rules_only);
+                    let flight = Flight {
+                        citizen: citizen.clone(),
+                        id,
+                        situation: *situation,
+                        recorded: *ruling,
+                        rules_only: run_layers == ["rules"],
+                    };
+                    flights.send(report, flight);
                 }
                 Record::Outcome { fate, .. } => *report.outcomes.entry(fate.as_str()).or_default() += 1,
                 Record::Fill { .. } => report.fills += 1,
             }
         }
-        for (stats, (_, cents)) in report.layers.iter_mut().zip(cascade.spent()) {
-            stats.cents += cents;
-        }
-        for (stats, tally) in report.layers.iter_mut().zip(cascade.tallies()) {
-            for (k, n) in tally {
-                *stats.tally.entry(k).or_default() += n;
+        flights.drain(report);
+        for cascade in &flights.cascades {
+            for (stats, (_, cents)) in report.layers.iter_mut().zip(cascade.spent()) {
+                stats.cents += cents;
+            }
+            for (stats, tally) in report.layers.iter_mut().zip(cascade.tallies()) {
+                for (k, n) in tally {
+                    *stats.tally.entry(k).or_default() += n;
+                }
             }
         }
     }
@@ -223,32 +250,171 @@ impl Replayer {
     }
 }
 
-fn replay_one(report: &mut Report, cascade: &mut Cascade, citizen: &str, id: u64, s: &Situation, recorded: &Ruling, rules_only: bool) {
-    let began = Instant::now();
-    let mut ruling = cascade.ask(s, began);
-    let mut turns = ruling.trail.clone();
-    let waited = matches!(ruling.by, By::Waiting { .. });
-    // When the layer being waited on was asked
-    let mut pended = began;
-    while matches!(ruling.by, By::Waiting { .. }) {
-        std::thread::sleep(POLL);
-        ruling = cascade.ask(s, Instant::now());
+/// A logged decision to replay.
+struct Flight {
+    citizen: String,
+    id: u64,
+    situation: Situation,
+    recorded: Ruling,
+    rules_only: bool,
+}
+
+/// A decision being replayed: the ruling so far, and each layer's turn.
+struct Asking {
+    flight: Flight,
+    /// Its place in the log, to land in order
+    seq: usize,
+    /// The cascade it's put to
+    cascade: usize,
+    ruling: Ruling,
+    turns: Vec<Turn>,
+    waited: bool,
+    began: Instant,
+    /// When the layer being waited on was asked
+    pended: Instant,
+    /// How long the whole ruling took
+    took: Duration,
+}
+
+impl Asking {
+    fn start(flight: Flight, seq: usize, cascade: usize, on: &mut Cascade) -> Asking {
+        let began = Instant::now();
+        let ruling = on.ask(&flight.situation, began);
+        Asking {
+            turns: ruling.trail.clone(),
+            waited: matches!(ruling.by, By::Waiting { .. }),
+            ruling,
+            flight,
+            seq,
+            cascade,
+            began,
+            pended: began,
+            took: began.elapsed(),
+        }
+    }
+
+    fn waiting(&self) -> bool {
+        matches!(self.ruling.by, By::Waiting { .. })
+    }
+
+    /// Asks again after a pending layer.
+    fn poll(&mut self, on: &mut Cascade) {
+        self.ruling = on.ask(&self.flight.situation, Instant::now());
+        self.took = self.began.elapsed();
         // Asking again is no new turn. Still thinking, it's the same one;
         // its answer, or its lateness, took as long as it was waited on,
         // and the layers above may be asked (and pend) in turn
-        let mut trail = ruling.trail.iter().cloned();
-        let Some(mut answer) = trail.next() else { continue };
+        let mut trail = self.ruling.trail.iter().cloned();
+        let Some(mut answer) = trail.next() else { return };
         if answer.asked == Asked::Pending {
-            continue;
+            return;
         }
-        if let Some(pending) = turns.iter().rposition(|t| t.asked == Asked::Pending) {
-            answer.micros = pended.elapsed().as_micros() as u64;
-            turns[pending] = answer;
+        if let Some(pending) = self.turns.iter().rposition(|t| t.asked == Asked::Pending) {
+            answer.micros = self.pended.elapsed().as_micros() as u64;
+            self.turns[pending] = answer;
         }
-        pended = Instant::now();
-        turns.extend(trail);
+        self.pended = Instant::now();
+        self.turns.extend(trail);
     }
-    report.micros.push(began.elapsed().as_micros() as u64);
+}
+
+/// One log's decisions in flight, each on a cascade of its own, landing in
+/// the log's order.
+struct Flights<'a> {
+    make: &'a mut dyn FnMut() -> Cascade,
+    most: usize,
+    cascades: Vec<Cascade>,
+    free: Vec<usize>,
+    asking: Vec<Asking>,
+    /// Ruled, waiting for those sent before them to land
+    ruled: BTreeMap<usize, Asking>,
+    sent: usize,
+    landed: usize,
+}
+
+impl<'a> Flights<'a> {
+    fn new(make: &'a mut dyn FnMut() -> Cascade, most: usize) -> Flights<'a> {
+        Flights {
+            make,
+            most,
+            cascades: Vec::new(),
+            free: Vec::new(),
+            asking: Vec::new(),
+            ruled: BTreeMap::new(),
+            sent: 0,
+            landed: 0,
+        }
+    }
+
+    /// Puts `flight` to a free cascade, once one is.
+    fn send(&mut self, report: &mut Report, flight: Flight) {
+        while self.asking.len() >= self.most {
+            self.wait(report);
+        }
+        let cascade = self.free.pop().unwrap_or_else(|| {
+            self.cascades.push((self.make)());
+            self.cascades.len() - 1
+        });
+        let asking = Asking::start(flight, self.sent, cascade, &mut self.cascades[cascade]);
+        self.sent += 1;
+        self.asking.push(asking);
+        self.land(report);
+    }
+
+    /// Waits a moment, then asks each one in flight again.
+    fn wait(&mut self, report: &mut Report) {
+        std::thread::sleep(POLL);
+        for asking in &mut self.asking {
+            asking.poll(&mut self.cascades[asking.cascade]);
+        }
+        self.land(report);
+    }
+
+    /// Waits until every one in flight has landed.
+    fn drain(&mut self, report: &mut Report) {
+        while !self.asking.is_empty() {
+            self.wait(report);
+        }
+    }
+
+    /// Frees the cascades of those ruled, and reports each that's next in
+    /// the log's order.
+    fn land(&mut self, report: &mut Report) {
+        let mut i = 0;
+        while i < self.asking.len() {
+            if self.asking[i].waiting() {
+                i += 1;
+                continue;
+            }
+            let ruled = self.asking.swap_remove(i);
+            self.free.push(ruled.cascade);
+            self.ruled.insert(ruled.seq, ruled);
+        }
+        while let Some(ruled) = self.ruled.remove(&self.landed) {
+            self.landed += 1;
+            fold(report, ruled);
+        }
+    }
+}
+
+/// Adds a ruled decision to the report.
+fn fold(report: &mut Report, asking: Asking) {
+    let Asking {
+        flight,
+        ruling,
+        turns,
+        waited,
+        took,
+        ..
+    } = asking;
+    let Flight {
+        citizen,
+        id,
+        situation: s,
+        recorded,
+        rules_only,
+    } = flight;
+    report.micros.push(took.as_micros() as u64);
     report.decisions += 1;
     report.waited += waited as usize;
     for turn in &turns {
@@ -482,6 +648,7 @@ mod tests {
     use super::super::log::{self, Fate, Log};
     use super::super::{corpus, Choice, Decider, Layer, Mind, Span, Temperament, Ticket, Verdict};
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     fn temp(name: &str) -> std::path::PathBuf {
@@ -643,6 +810,106 @@ mod tests {
         assert!(!slow.verdicts.contains_key("pending"));
         assert!(slow.latency(0.5).unwrap() >= 6000);
         assert!(report.latency(0.5).unwrap() >= 6000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a replay found, but how long it took.
+    fn findings(r: &Report) -> impl PartialEq + fmt::Debug {
+        let layers: Vec<_> = r
+            .layers
+            .iter()
+            .map(|l| (l.name.clone(), l.asked, l.verdicts.clone(), l.calibration.clone(), l.cents))
+            .collect();
+        (
+            (r.decisions, r.same, r.same_pick, r.rules_choices, r.rules_same, r.first_settled, r.waited),
+            r.questions.clone(),
+            r.differences.clone(),
+            r.differ,
+            layers,
+        )
+    }
+
+    #[test]
+    fn the_rules_replay_one_at_a_time_however_many_may_fly() {
+        let dir = temp("rules-flying");
+        let path = log::file_for(&dir, "Percy Sawyer");
+        record(&path, &situations());
+        let made = Arc::new(AtomicUsize::new(0));
+        let counted = made.clone();
+        let mut replayer = Replayer::new(move || {
+            counted.fetch_add(1, Ordering::Relaxed);
+            Cascade::rules()
+        })
+        .in_flight(8);
+        replayer.log("test", log::read(&path).unwrap());
+        let flying = replayer.finish();
+        // One to read the stack's names, one for the log: nothing pends
+        assert_eq!(made.load(Ordering::Relaxed), 2);
+        assert_eq!(flying.same, flying.decisions, "{flying}");
+        assert_eq!(findings(&flying), findings(&replay(&path, Cascade::rules)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A layer that thinks a while, counting how many are out at once
+    /// across every cascade.
+    struct Counted {
+        out: Arc<(AtomicUsize, AtomicUsize)>,
+        asked: Option<Instant>,
+    }
+    impl Decider for Counted {
+        fn name(&self) -> &str {
+            "counted"
+        }
+        fn decide(&mut self, _s: &Situation) -> Verdict {
+            let now = self.out.0.fetch_add(1, Ordering::Relaxed) + 1;
+            self.out.1.fetch_max(now, Ordering::Relaxed);
+            self.asked = Some(Instant::now());
+            Verdict::Pending(Ticket(1))
+        }
+        fn poll(&mut self, _t: Ticket) -> Option<Verdict> {
+            let ready = self.asked.is_some_and(|a| a.elapsed() >= Duration::from_millis(6));
+            ready.then(|| {
+                self.out.0.fetch_sub(1, Ordering::Relaxed);
+                Verdict::Decided {
+                    choice: Decision::plain(0),
+                    confidence: 1.0,
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn a_slow_layer_is_asked_several_at_once_and_lands_in_order() {
+        let dir = temp("flying");
+        let path = log::file_for(&dir, "Percy Sawyer");
+        let situations: Vec<Situation> = situations().into_iter().take(40).collect();
+        record(&path, &situations);
+        let run = |in_flight: usize| {
+            let out = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0)));
+            let counted = out.clone();
+            let mut replayer = Replayer::new(move || {
+                let counted = Counted {
+                    out: counted.clone(),
+                    asked: None,
+                };
+                Cascade::new(vec![Layer::new(counted, 0.5, Duration::from_secs(1))])
+            })
+            .in_flight(in_flight);
+            let began = Instant::now();
+            replayer.log("test", log::read(&path).unwrap());
+            (replayer.finish(), out.1.load(Ordering::Relaxed), began.elapsed())
+        };
+        let (one, most_one, slow) = run(1);
+        let (eight, most_eight, fast) = run(8);
+        assert_eq!((most_one, most_eight), (1, 8));
+        assert_eq!(eight.waited, situations.len());
+        assert!(eight.differ > 0, "the first entry isn't always the rules'");
+        // The same report, differences in the log's order, however many flew
+        assert_eq!(findings(&eight), findings(&one));
+        let counted = &eight.layers[0];
+        assert_eq!(counted.asked, situations.len(), "{:?}", counted.verdicts);
+        assert!(counted.latency(0.5).unwrap() >= 6000, "each answer timed from its own ask");
+        assert!(fast < slow, "{fast:?} with eight out, {slow:?} one at a time");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
