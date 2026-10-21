@@ -110,8 +110,9 @@ function Quote-Text([string]$t) {
     "'" + ($t -replace "\\", "\\\\" -replace "'", "'\\\''" -replace ":", "\:" -replace "%", "\%") + "'"
 }
 
-# A title's drawtext: faded in and out over half a second, its size and
-# height given at the cut's full size
+# A title's drawtext: faded in and out over half a second, its size, its
+# height and, if it has one, its left edge (X; else it's centred) given at
+# the cut's full size
 function Title($t, [double]$at, [double]$until, [int]$h, [double]$k) {
     $fonts = @{ Cinzel = "Cinzel.ttf"; Sans = "SourceSans3-Regular.ttf"; Semibold = "SourceSans3-Semibold.ttf" }
     $font = $fonts[$(if ($t.Font) { $t.Font } else { "Cinzel" })]
@@ -123,7 +124,7 @@ function Title($t, [double]$at, [double]$until, [int]$h, [double]$k) {
     $alpha = "if(lt(t\,$a)\,0\,if(lt(t\,$a+$f)\,(t-$a)/$f\,if(lt(t\,$u-$f)\,1\,if(lt(t\,$u)\,($u-t)/$f\,0))))"
     $sh = [math]::Max(1, [int](3 * $k))
     "drawtext=fontfile=$($font):text=$(Quote-Text $t.Text):fontsize=$($size):fontcolor=$($color):" +
-    "x=(w-text_w)/2:y=$($y):shadowcolor=black@0.75:shadowx=$($sh):shadowy=$($sh):" +
+    "x=$(if ($null -ne $t.X) { [int]($t.X * $k) } else { '(w-text_w)/2' }):y=$($y):shadowcolor=black@0.75:shadowx=$($sh):shadowy=$($sh):" +
     "borderw=$([math]::Max(1, [int](2 * $k))):bordercolor=black@0.45:alpha='$alpha'"
 }
 

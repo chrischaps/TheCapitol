@@ -54,9 +54,15 @@
         @{ Shot = "bazaar-street"; In = 0.3; Out = 7.3; Chapter = "The bazaar and the Gazette"
            Titles = @(@{ Text = "The bazaar"; At = 0.8; Until = 6.2; Size = 104; Y = 1660 }
                       @{ Text = "Forty-one stalls. Rent one by the day, name your shop, set your own prices."; Font = "Sans"; Color = "0xF2EEE6"; At = 1.4; Until = 6.2; Size = 60; Y = 1810 }) }
+        # The page fills the frame's height, so its words sit in the left margin
         @{ Shot = "gazette-page"; In = 0.3; Out = 7.0
-           Titles = @(@{ Text = "The Capitol Gazette"; At = 0.8; Until = 5.9; Size = 104; Y = 1660 }
-                      @{ Text = "Every game day: the prices that moved, the finest sale and who made it, the deeds, the work."; Font = "Sans"; Color = "0xF2EEE6"; At = 1.4; Until = 5.9; Size = 60; Y = 1810 }) }
+           Titles = @(@{ Text = "The Capitol"; At = 0.8; Until = 5.9; Size = 96; Y = 760; X = 150 }
+                      @{ Text = "Gazette"; At = 0.8; Until = 5.9; Size = 96; Y = 880; X = 150 }
+                      @{ Text = "Every game day:"; Font = "Sans"; Color = "0xF2EEE6"; At = 1.4; Until = 5.9; Size = 56; Y = 1060; X = 150 }
+                      @{ Text = "the prices that moved,"; Font = "Sans"; Color = "0xF2EEE6"; At = 1.4; Until = 5.9; Size = 56; Y = 1135; X = 150 }
+                      @{ Text = "the finest sale"; Font = "Sans"; Color = "0xF2EEE6"; At = 1.4; Until = 5.9; Size = 56; Y = 1210; X = 150 }
+                      @{ Text = "and who made it,"; Font = "Sans"; Color = "0xF2EEE6"; At = 1.4; Until = 5.9; Size = 56; Y = 1285; X = 150 }
+                      @{ Text = "the deeds, the work."; Font = "Sans"; Color = "0xF2EEE6"; At = 1.4; Until = 5.9; Size = 56; Y = 1360; X = 150 }) }
 
         @{ Shot = "citizens"; In = 0.3; Out = 6.3; Chapter = "Citizens and the clock"
            Titles = @(@{ Text = "Citizens"; At = 0.6; Until = 5.4; Size = 104; Y = 1660 }
