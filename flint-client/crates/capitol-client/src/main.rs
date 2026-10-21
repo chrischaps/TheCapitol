@@ -156,6 +156,11 @@ struct Args {
     /// workshop leaves when your pack is full
     #[arg(long)]
     impound_sample: bool,
+    /// Offline, open the station panel (#235) on a sample workbench of
+    /// yours, beside the inventory and crafting panels, on its `craft` or
+    /// `automation` tab. Check it at --width 1280 --height 720 at 150%
+    #[arg(long, value_name = "TAB", requires = "offline")]
+    station_panel_sample: Option<String>,
     /// No sound. Captures (--exit-after) are silent anyway
     #[arg(long)]
     mute: bool,
@@ -332,6 +337,7 @@ fn main() -> Result<()> {
         .with_bazaar_sample(args.bazaar_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_gazette_sample(args.gazette_sample && args.offline.is_some())
         .with_impound_sample(args.impound_sample && args.offline.is_some())
+        .with_station_panel_sample(args.station_panel_sample.as_deref())
         .with_mute(args.mute || args.exit_after.is_some())
         .with_juice_sample(args.juice_sample && args.offline.is_some())
         .with_time_of_day(args.time_of_day)

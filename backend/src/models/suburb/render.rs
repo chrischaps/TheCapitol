@@ -26,11 +26,11 @@ const AREA_LO: f64 = 4000.0;
 /// ...to this one, the p5 and p95 targets.
 const AREA_HI: f64 = 11000.0;
 
-const PAPER: &str = "#f3eee2";
-const INK: &str = "#2e2a24";
-const VIOLATION: &str = "#d7263d";
-const TRIMMED: &str = "#e8820c";
-const DROPPED: &str = "#c2189b";
+pub(crate) const PAPER: &str = "#f3eee2";
+pub(crate) const INK: &str = "#2e2a24";
+pub(crate) const VIOLATION: &str = "#d7263d";
+pub(crate) const TRIMMED: &str = "#e8820c";
+pub(crate) const DROPPED: &str = "#c2189b";
 /// The Neighbourhood layout's scaffolding: frames, green buffers, entrances.
 const FRAME: &str = "#8a6d3b";
 const GREEN: &str = "#cfe0b4";
@@ -134,7 +134,7 @@ fn hex(c: &str) -> (f64, f64, f64) {
     (v(1), v(3), v(5))
 }
 
-fn mix(a: &str, b: &str, t: f64) -> String {
+pub(crate) fn mix(a: &str, b: &str, t: f64) -> String {
     let (a, b) = (hex(a), hex(b));
     let t = t.clamp(0.0, 1.0);
     let m = |x: f64, y: f64| (x + (y - x) * t).round() as u8;
@@ -145,15 +145,15 @@ fn lot_fill(area: f64) -> String {
     mix("#e4ebcb", "#4b7a43", (area - AREA_LO) / (AREA_HI - AREA_LO))
 }
 
-fn pt(p: P) -> String {
+pub(crate) fn pt(p: P) -> String {
     format!("{:.1},{:.1}", p.0, p.1)
 }
 
-fn poly(c: &[P]) -> String {
+pub(crate) fn poly(c: &[P]) -> String {
     c.iter().map(|&p| pt(p)).collect::<Vec<_>>().join(" ")
 }
 
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
@@ -706,8 +706,16 @@ pub fn table(plans: &[(String, Metrics, Vec<Violation>)]) -> String {
 
 /// A page with the table and every plan view, in a grid.
 pub fn index_html(plans: &[(String, Metrics, Vec<Violation>)]) -> String {
+    let names: Vec<&str> = plans.iter().map(|(name, ..)| name.as_str()).collect();
+    page("Suburb plan", &table(plans), &names)
+}
+
+/// A page titled `title`, with the markdown table `md` and the plan views
+/// `names` (`{name}.png`, or the SVG where there's no PNG), in a grid. The
+/// rural report (#284) shares it.
+pub(crate) fn page(title: &str, md: &str, names: &[&str]) -> String {
     let mut rows = String::new();
-    for line in table(plans).lines().filter(|l| !l.starts_with("|---")) {
+    for line in md.lines().filter(|l| !l.starts_with("|---")) {
         let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
         let tag = if rows.is_empty() { "th" } else { "td" };
         rows.push_str("<tr>");
@@ -721,7 +729,7 @@ pub fn index_html(plans: &[(String, Metrics, Vec<Violation>)]) -> String {
         rows.push_str("</tr>\n");
     }
     let mut figures = String::new();
-    for (name, ..) in plans {
+    for name in names {
         let _ = write!(
             figures,
             r##"<figure><a href="{name}.svg"><img src="{name}.png" onerror="this.onerror=null;this.src='{name}.svg'" alt="{name}"></a><figcaption>{name}</figcaption></figure>"##
@@ -730,7 +738,7 @@ pub fn index_html(plans: &[(String, Metrics, Vec<Violation>)]) -> String {
     format!(
         r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Suburb plan</title>
+<title>{title}</title>
 <style>
 :root {{ --paper: {PAPER}; --ink: {INK}; --rule: #d8cfbb; --miss: {VIOLATION}; }}
 body {{ margin: 0; padding: 24px 16px 48px; background: var(--paper); color: var(--ink); font: 15px/1.45 Georgia, serif; }}
@@ -746,7 +754,7 @@ img {{ width: 100%; height: auto; display: block; border: 1px solid var(--rule);
 figcaption {{ margin-top: 6px; color: #6b6253; }}
 </style></head>
 <body>
-<h1>Suburb plan</h1>
+<h1>{title}</h1>
 <div class="wrap"><table>
 {rows}</table></div>
 <div class="grid">{figures}</div>

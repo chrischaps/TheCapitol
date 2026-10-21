@@ -138,6 +138,10 @@ pub struct CapitolExtension {
     /// impound and a pack to show offline.
     impound: ui::impound::ImpoundPanel,
     impound_sample: Option<(capitol_core::state::Container, capitol_core::state::Container)>,
+    /// `--station-panel-sample`: a workbench of yours open, offline (#235).
+    station_panel_sample: Option<capitol_core::state::GameState>,
+    /// Its tab, set once the panel has opened (opening picks its own).
+    station_panel_tab: Option<ui::station::Tab>,
     /// The Exchange hall (E3.7), and `--hall-sample`: offline, goods waiting
     /// and you where the camera looks.
     hall: world::hall::HallLayer,
@@ -227,6 +231,8 @@ impl CapitolExtension {
             gazette_sample: None,
             impound: ui::impound::ImpoundPanel::default(),
             impound_sample: None,
+            station_panel_sample: None,
+            station_panel_tab: None,
             hall: world::hall::HallLayer::default(),
             hall_sample: false,
             hall_hint: None,
@@ -386,6 +392,21 @@ impl CapitolExtension {
         self
     }
 
+    /// Offline, open the station panel on a sample workbench, on `tab`
+    /// (`craft` or `automation`), with the inventory and crafting panels
+    /// open beside it (`--station-panel-sample`, #235).
+    pub fn with_station_panel_sample(mut self, tab: Option<&str>) -> Self {
+        if let (Some(tab), None) = (tab, &self.session) {
+            self.station_panel_sample = Some(ui::station::sample());
+            self.station_panel_tab = Some(match tab {
+                "automation" => ui::station::Tab::Automation,
+                _ => ui::station::Tab::Craft,
+            });
+            self.inventory.open = true;
+        }
+        self
+    }
+
     /// Offline, show the hall as if goods waited (`--hall-sample`).
     /// Offline, sample shops in the bazaar's stalls and the shop panel open
     /// on stall `stall` (a number, or "mine"), as if you stood at it
@@ -468,7 +489,7 @@ impl CapitolExtension {
 
     /// The valleys' mist as thick as the hour and the camera's height say
     /// (`Atmosphere::mist`), written to its entity's opacity when it moves
-    /// a step.
+    /// a step. It casts no shadow, however thick (#232).
     fn mist_in_place(&mut self, ctx: &mut ExtensionCtx) {
         let mist = (self.atmosphere.mist() * 100.0).round() / 100.0;
         if self.mist_shown == Some(mist) {
@@ -479,6 +500,7 @@ impl CapitolExtension {
         };
         let mut table = toml::Table::new();
         table.insert("opacity".into(), f64::from(mist).into());
+        table.insert("cast_shadows".into(), false.into());
         match ctx.world.merge_component(id, "material", table.into()) {
             Ok(()) => self.mist_shown = Some(mist),
             Err(e) => tracing::warn!("mist: can't write its opacity: {e}"),
@@ -1483,9 +1505,9 @@ impl PlayerExtension for CapitolExtension {
                 if self.settings_panel.open || self.gazette.open {
                     self.hints.rect = None;
                 } else {
-                    // The inventory's rect is last frame's: it's drawn after.
+                    // The inventory's and the station's rects are last frame's: they're drawn after.
                     let panels: Vec<_> =
-                        [self.inventory.rect, self.crafting.rect, self.exchange.rect, self.market.rect, self.impound.rect, self.shop.rect]
+                        [self.inventory.rect, self.crafting.rect, self.exchange.rect, self.market.rect, self.impound.rect, self.shop.rect, self.station.rect]
                             .into_iter()
                             .flatten()
                             .collect();
@@ -1672,6 +1694,24 @@ impl PlayerExtension for CapitolExtension {
             if let Some(ui::impound::Action::Close) = self.impound.show(ctx, &mut self.icons, &view, None) {
                 self.impound.open = false;
             }
+        }
+        if let Some(state) = &self.station_panel_sample {
+            let phase = capitol_core::craft::Phase::Idle;
+            let view = ui::crafting::View { state, phase: &phase, refused: None };
+            self.crafting.show(ctx, &mut self.icons, &view, 0.0);
+            // The inventory's rect is last frame's: it's drawn after.
+            let view = ui::station::View {
+                state,
+                phase: &phase,
+                refused: None,
+                beside: self.inventory.rect,
+                automation_refused: None,
+            };
+            self.station.show(ctx, &mut self.icons, &view, 0.0);
+            if let Some(tab) = self.station_panel_tab.take() {
+                self.station.tab = tab;
+            }
+            self.inventory.show(ctx, &mut self.icons, state.catalog(), state.inventory(), None, 0.0);
         }
         if let Some(reader) = &mut self.gazette_sample {
             self.gazette.reading(reader);

@@ -38,7 +38,7 @@ pub(crate) mod parks;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod patterns;
 #[cfg(test)]
-mod render;
+pub(crate) mod render;
 
 use neighbourhood::Neighbourhood;
 use patterns::StreetMeta;

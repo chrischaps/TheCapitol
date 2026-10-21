@@ -19,7 +19,7 @@ The rural ring sits between the suburb's packed post-war lots and the open wilds
 - **The lots.** `generate_rural_plots` (`terrain.rs:1346-1461`) drops a 200×150 lot every 200 along each trail, on each side.
   - It keeps a lot if its corners are in the ring, it touches no other road, and it overlaps no earlier lot.
   - Ids are `rural_plot_{road}_{L|R}_{n}`.
-  - After `finish_lots`, the default world has 52, at about 29k each (estates by `plot_sync::size_category`).
+  - After `finish_lots`, the default world has 52 (of 54 laid), at most 29k each and 25k on average (estates by `plot_sync::size_category`): `finish_lots` trims about 60% of them and drops 2.
 - **Why it clumps.** Trails every 30° and arterials every 45° line up every 90°. Because the push only goes one way:
   - trails 0, 3, 6 and 9 always start 0 to 17° past a cardinal arterial;
   - trails 1, 4, 7 and 10 start within about 15° of a diagonal one.
@@ -37,7 +37,12 @@ The rural ring sits between the suburb's packed post-war lots and the open wilds
   - Lot depth is measured from the centreline, and the straight front edge of a lot on a curve bulges into its own trail.
 - **The water.** Since #222 the wilds' water runs onto the plain, down to r3150. The rural lots don't know it, so some have a stream or a pond across them (#223).
 - **The docs** say only "Rural Zone: large plots" (GDD §3, milestones). 200×150 is a code default and nothing more. The deed is a flat 250 (GDD:734).
-- **The baseline metrics** are R1's to measure ([#284](https://github.com/chrischaps/TheCapitol/issues/284)) and record here.
+- **The baseline** (R1, [#284](https://github.com/chrischaps/TheCapitol/issues/284)), over seeds 42, 7, 1234 and 99999. The full table is in §5.
+  - **Lots:** 52, 70, 71 and 60, at 24k to 25k on average. The ring is 8 to 10% built.
+  - **Clumping:** every seed has at least one half-sector with nothing built, and none has one above 22%. The CV of the half-sectors' shares is 0.64 to 0.79.
+  - **Roads:** all 24 trail ends are loose on every seed, and 1 to 4 trails cross an arterial unjoined. The audit counts one per trail and arterial, not one per crossing.
+  - **Water:** 1 to 10 lots have a stream or a pond across them, and the plain carries about 53 courses and 12 lakes in the ring (#223).
+  - **Gaps:** trimmed lots end up almost touching. The least gap is under 0.25 on every seed, and the median gap to the nearest lot is 13 to 20.
 
 ## 3. Decisions
 
@@ -88,7 +93,7 @@ The sectors' characters are a seeded shuffle of 4 *concession* and 4 *winding*, 
   - The new prefix lets the flip's migration tell old lots (`rural_plot_%`) from new ones.
 - **The region.** The ring inset by 20 at r3000 and r3800, and the sector's side lines.
 - **Along the arterials** (Chris, 2026-10-20). Each sector owns the side of each arterial that faces it. Farms there stand behind a verge of about 30 past the 60-wide road, clear of the lane junctions. So the spawn road has farms along it.
-- **Reuse, not rewrite.** The lot geometry is `suburb/lots.rs`'s road index, edge rays, overlap pass and shrink-to-fit, lifted to work over any `Region` and a `LotParams` ([R2 #285](https://github.com/chrischaps/TheCapitol/issues/285)).
+- **Reuse, not rewrite.** The lot geometry is `suburb/lots.rs`'s road index, edge rays, overlap pass and shrink-to-fit, lifted to work over any `Region` and a `LotParams` ([R2 #285](https://github.com/chrischaps/TheCapitol/issues/285)). It is `models/lot_geometry.rs` now, and `place` keeps farms `lot_gap` (40) apart.
 
 ### RD7. The balance pass and the water ([R4 #287](https://github.com/chrischaps/TheCapitol/issues/287), closes [#223](https://github.com/chrischaps/TheCapitol/issues/223))
 
@@ -152,7 +157,37 @@ R1's harness prints these, and R5's test asserts the hard ones over seeds 42, 7,
 | Farms on water | 0 | yes |
 | Gap between farms | ≥ 40 | yes |
 
-The baseline (today's trails) goes here when R1 lands.
+**The baseline** (today's trails, R1, #284). `backend/tools/rural-plan.ps1` prints it. ✗ marks a miss, and hard targets are in bold.
+
+| Metric | Target | 42 | 7 | 1234 | 99999 |
+|---|---|---:|---:|---:|---:|
+| **Farms** (rural lots) | 45 to 65 | 52 | 70 ✗ | 71 ✗ | 60 |
+| Mean farm area | 100k to 140k | 24.9k ✗ | 24.4k ✗ | 24.1k ✗ | 23.9k ✗ |
+| Ring built share | 30 to 40% | 8% ✗ | 10% ✗ | 10% ✗ | 8% ✗ |
+| **Half-sector built share, least** | ≥ 20% | 0 ✗ | 0 ✗ | 0 ✗ | 0 ✗ |
+| **Half-sector built share, most** | ≤ 55% | 16% | 22% | 20% | 22% |
+| CV of the half-sectors' shares | ≤ 0.30 | 0.64 ✗ | 0.73 ✗ | 0.76 ✗ | 0.79 ✗ |
+| **Sectors of each character** | ≥ 3 | – | – | – | – |
+| **Audit issues, but for loose ends** | 0 | 3 ✗ | 4 ✗ | 3 ✗ | 1 ✗ |
+| Loose road ends | farm gates only | 24 | 24 | 24 | 24 |
+| **Farms on water** | 0 | 6 ✗ | 6 ✗ | 10 ✗ | 1 ✗ |
+| **Gap between farms, least** | ≥ 40 | 0.07 ✗ | 0.16 ✗ | 0.10 ✗ | 0.22 ✗ |
+| Lots trimmed by `finish_lots` | | 61% | 56% | 62% | 65% |
+
+Built share by half-sector, 0 to 15, in %:
+- 42: 11 12 3 10 12 0 10 0 5 11 10 4 16 0 9 9
+- 7: 7 12 12 0 21 2 13 1 13 0 22 1 18 15 7 15
+- 1234: 20 0 18 0 12 5 0 11 15 18 0 15 14 12 0 20
+- 99999: 15 1 6 12 15 11 0 12 9 12 13 0 5 0 22 0
+
+**How the harness measures these** (`backend/src/models/rural/metrics.rs`):
+- **Half-sector** `h` runs from `22.5h°`, so sector `s` is half-sectors `2s` and `2s + 1`.
+- **Built share** is the ground a rural lot stands on, sampled every 10.
+- **Gap** is edge to edge.
+- **On water** means a course's capsule (half its width either side) or a lake's rings meet the lot.
+- **The audit** counts `street_plan::audit` on `trail_*` and `lane_*` roads, but for loose ends, which are counted apart until R3 adds the farm-gate exemption.
+- **Sectors of each character** has nothing to measure until R3 deals the deck. R3 fills it in.
+- The report has more rows: road length, trimmed and dropped shares, the least and most lot area, the median nearest gap, the closest a dry lot comes to water, and the courses and lakes in the ring.
 
 ## 6. Architecture notes
 
@@ -170,7 +205,7 @@ The baseline (today's trails) goes here when R1 lands.
 - **Reused.**
   - `geom::stream` (SplitMix64).
   - `street_plan::{weld_junctions, resample, centripetal_spline, audit}`.
-  - `suburb/lots.rs`'s geometry, through R2.
+  - `models/lot_geometry.rs`, the lot geometry R2 lifted out of `suburb/lots.rs`.
   - `suburb/parks.rs`'s raster.
   - `suburb/render.rs`'s SVG approach.
   - `lot_clearance::finish_lots`.
@@ -204,8 +239,8 @@ The flip is one commit, and `scripts/ci.sh full` runs before it lands. It covers
 | WP | Issue | What | Size | Depends on |
 |---|---|---|---|---|
 | R0 | [#282](https://github.com/chrischaps/TheCapitol/issues/282) | This plan, the issues, and #223 brought in | S | – |
-| R1 | [#284](https://github.com/chrischaps/TheCapitol/issues/284) | Harness: render, metrics, `rural-plan.ps1`, baseline of today's trails | M | – |
-| R2 | [#285](https://github.com/chrischaps/TheCapitol/issues/285) | Shared lot geometry: `lots.rs` over any `Region` + `LotParams`, aware of water. Suburb unchanged under the pin | M | – |
+| R1 | [#284](https://github.com/chrischaps/TheCapitol/issues/284) | Harness: render, metrics, `rural-plan.ps1`, baseline of today's trails. *As built:* `rural/metrics.rs` and `render.rs` (test-only), `rural_plan_report`, and `-Seed`, `-Seeds`, `-Sector`, `-Out` and `-Compare`. It shares `suburb::metrics`'s scope and checks and `suburb::render`'s helpers and page. The baseline is in §2 and §5 | M | – |
+| R2 | [#285](https://github.com/chrischaps/TheCapitol/issues/285) | Shared lot geometry: `lots.rs` over any `Region` + `LotParams`, aware of water. Suburb unchanged under the pin. *As built:* `models/lot_geometry.rs` holds `World` (roads, fronted sides, and `with_water(courses, lakes, bank)`), `Region` (`ring`, cut by `ccw_of`/`cw_of` side lines, or `polygon`), `Ray`, `push_fronts`, the ray march `back`/`back_from`, `Candidate`, and `place`/`shrink_to_fit`. `LotParams` has the frontage and depths, the front, edge and rear gaps, `lot_gap`, `min_shrink` and `min_area`. A course is a capsule as wide as the wider point of each stretch, as R1 measures it, and a lake its even-odd rings, each plus `bank`. A ray stops at a bank as at a road without lots, so a lot backs onto water, and `place` drops one the water runs through. `suburb/lots.rs` keeps its walker, pies and ids, and calls it through `lot_params` and `region_of`. The pin and `neighbourhood_suburb_meets_its_targets` print the same | M | – |
 | R3 | [#286](https://github.com/chrischaps/TheCapitol/issues/286) | Sectors and roads behind `layout = Farms`: the deck, concession roads, winding lanes, side roads, spurs, weld, audit | L | R1 |
 | R4 | [#287](https://github.com/chrischaps/TheCapitol/issues/287) | Farms on lanes and arterials, field gaps, the balance pass, clear of the water. Closes #223 | L | R2, R3 |
 | R5 | [#288](https://github.com/chrischaps/TheCapitol/issues/288) | Tune to §5's targets over four seeds; the targets test | M | R4 |

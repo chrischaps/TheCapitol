@@ -28,6 +28,12 @@
 //! - **Remove**, for the owner, once the box is empty. The server refuses
 //!   while it holds anything and puts the kit back in your inventory (#88),
 //!   so taking a station down is how you move it, and it doesn't ask twice.
+//!
+//! **On a small screen (#235)** the panel goes where there's room (`place`):
+//! two columns left of the inventory if they fit there, else one column,
+//! the box above the work. It's never taller than the screen under the
+//! header strip: the header, the tabs and the footer stay put, and the
+//! columns scroll. 1280×720 at 150% (853×480 points) is the case to check.
 
 use super::automation::{self, Ask};
 use super::crafting::{blocked_box, craft_label, needs, preview, under_way, Fill};
@@ -52,8 +58,28 @@ const BOX_WIDTH: f32 = 4.0 * theme::SLOT_SIZE + 3.0 * theme::SLOT_GAP + 16.0;
 const COLUMN_GAP: f32 = 16.0;
 /// The space between the panel and the inventory beside it, in points.
 const GAP: f32 = 12.0;
+/// The space between the panel and the screen's right and bottom edges.
+const EDGE: f32 = 20.0;
+/// The nearest the panel comes to the screen's left edge: the crafting
+/// panel's inset.
+const LEFT: f32 = 16.0;
+/// The space under the header strip, as the panels at the top keep.
+const UNDER_HEADER: f32 = 12.0;
+/// The least the columns get to scroll in, however short the screen.
+const LEAST_ROOM: f32 = 120.0;
+/// The footer's height until it's drawn: its divider and the Close row.
+const FOOTER: f32 = 40.0;
 /// How long the panel takes to open or close, in seconds.
 const FADE: f32 = 0.18;
+
+/// How a crafting station's panel lays out its box and its work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// The box on the left, the recipe's column on the right.
+    Columns,
+    /// One column, the box above the work, where two don't fit (#235).
+    Stacked,
+}
 
 /// What the panel asks for this frame.
 pub enum Action {
@@ -99,6 +125,11 @@ pub struct StationPanel {
     pub tab: Tab,
     /// The Automation tab's form.
     draft: Draft,
+    /// The footer's height as last drawn, so the columns know their room.
+    footer_height: Option<f32>,
+    /// Where the panel was drawn this frame, if it was, so the hint card
+    /// can keep clear of it.
+    pub rect: Option<egui::Rect>,
 }
 
 /// What the panel draws from.
@@ -169,51 +200,68 @@ impl StationPanel {
             } else {
                 Tab::Craft
             };
+            // The panel just opened goes in front of any it lands on.
+            if open.is_some() {
+                ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, Id::new("capitol_station")));
+            }
         }
+        self.rect = None;
         let shown =
             ctx.animate_bool_with_time(Id::new("capitol_station_fade"), open.is_some(), FADE);
         if open.is_none() || shown <= 0.0 {
             return None;
         }
         let ease = 1.0 - (1.0 - shown).powi(3);
-        // Bottom right, to the left of the inventory when it's open.
-        let right = match view.beside {
-            Some(inventory) => ctx.screen_rect().right() - inventory.left() + GAP,
-            None => 20.0,
-        };
+        let storage = view
+            .state
+            .open_station()
+            .is_some_and(|o| station::is_storage(view.state.catalog(), &o.station_type));
+        let gaps = ctx.style().spacing.item_spacing.x;
+        let frame = theme::panel_edged(STATION);
+        let margins = frame.total_margin().sum();
+        let inner = |layout| inner_width(layout, storage, gaps);
+        // Bottom right, to the left of the inventory when it's open, and
+        // never taller than the screen under the header strip.
+        let screen = ctx.screen_rect();
+        let (layout, right) = place(
+            screen,
+            view.beside,
+            inner(Layout::Columns) + margins.x,
+            inner(Layout::Stacked) + margins.x,
+        );
+        let top = ctx.available_rect().top() + UNDER_HEADER;
+        let tallest = screen.bottom() - EDGE - top - margins.y;
         let mut action = None;
-        egui::Area::new(Id::new("capitol_station"))
-            .anchor(Align2::RIGHT_BOTTOM, [-right, -20.0])
+        let area = egui::Area::new(Id::new("capitol_station"))
+            .anchor(Align2::RIGHT_BOTTOM, [-right, -EDGE])
             .show(ctx, |ui| {
                 ui.multiply_opacity(ease);
-                theme::panel_edged(STATION).show(ui, |ui| {
-                    let storage = view
-                        .state
-                        .open_station()
-                        .is_some_and(|o| station::is_storage(view.state.catalog(), &o.station_type));
-                    ui.set_width(if storage {
-                        BOX_WIDTH
-                    } else {
-                        BOX_WIDTH + COLUMN_GAP + WIDTH
-                    });
-                    action = self.body(ui, icons, view, crafting);
+                frame.show(ui, |ui| {
+                    ui.set_width(inner(layout));
+                    action = self.body(ui, icons, view, crafting, layout, tallest);
                 });
             });
+        self.rect = Some(area.response.rect);
         action
     }
 
+    /// The panel's insides, laid out as `layout`, in at most `tallest`
+    /// points: the columns scroll in what the header and footer leave.
     fn body(
         &mut self,
         ui: &mut egui::Ui,
         icons: &mut ItemIcons,
         view: &View,
         crafting: Option<&Activity>,
+        layout: Layout,
+        tallest: f32,
     ) -> Option<Action> {
         let state = view.state;
         let open = state.open_station()?;
         let storage = station::is_storage(state.catalog(), &open.station_type);
         let running = crafting.is_some();
         let mut action = None;
+        let start = ui.cursor().top();
 
         let status = Status::of(state.open_station_info().and_then(|i| i.automation.as_ref()));
         let badge = if running {
@@ -237,74 +285,96 @@ impl StationPanel {
         theme::header(ui, &open.name, Some(STATION), badge);
         ui.add_space(2.0);
 
-        // The box on the left, open to drags only while nothing is out, and
-        // at a crafting station, the recipe's column on the right.
+        // The box, open to drags only while nothing is out, and at a
+        // crafting station, the recipe's column: side by side or stacked.
+        // Each scrolls in the room the header and the footer leave.
         let idle = *view.phase == Phase::Idle && !running;
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(BOX_WIDTH);
-                ui.label(theme::label(if storage {
-                    "Storage"
-                } else {
-                    "Station box"
-                }));
-                match state.station_container() {
-                    Some(c) => {
-                        if let Some(m) = SlotGrid::new(c).enabled(idle).show(ui, icons) {
-                            action = Some(Action::Move(m));
-                        }
-                    }
-                    None => {
-                        ui.label(theme::dim("Loading…"));
-                    }
-                }
-                if storage {
-                    ui.add_space(4.0);
-                    ui.label(
-                        theme::dim("Drag items in to store them, and out to take them")
-                            .size(size::LABEL),
-                    );
-                    if let Some(why) = view.refused {
-                        ui.add_space(6.0);
-                        theme::error_box(ui, why);
-                    }
-                } else if let Some(a) = tool_slot(ui, icons, state, idle) {
-                    action = Some(a);
-                }
+        let footer = self.footer_height.unwrap_or(FOOTER);
+        let room = |ui: &egui::Ui| (tallest - (ui.cursor().top() - start) - footer).max(LEAST_ROOM);
+        let mut put = |a: Option<Action>| {
+            if a.is_some() {
+                action = a;
+            }
+        };
+        if storage {
+            let room = room(ui);
+            theme::scrolled(ui, "capitol_station_box", room, |ui| {
+                put(station_box(ui, icons, view, true, idle));
             });
-            if !storage {
+        } else if layout == Layout::Columns {
+            let room = room(ui);
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(BOX_WIDTH);
+                    theme::scrolled(ui, "capitol_station_box", room, |ui| {
+                        ui.set_width(BOX_WIDTH);
+                        put(station_box(ui, icons, view, false, idle));
+                    });
+                });
                 ui.add_space(COLUMN_GAP);
                 ui.vertical(|ui| {
                     ui.set_width(WIDTH);
-                    let mine = mine(state);
-                    if mine {
-                        ui.horizontal(|ui| {
-                            theme::segmented(
-                                ui,
-                                &mut self.tab,
-                                &[(Tab::Craft, "Craft"), (Tab::Automation, "Automation")],
-                            );
-                        });
-                        ui.add_space(6.0);
-                    }
-                    let a = match if mine { self.tab } else { Tab::Craft } {
-                        Tab::Craft => self.crafting(ui, icons, view, crafting),
-                        Tab::Automation => self.automation(ui, icons, view),
-                    };
-                    if let Some(a) = a {
-                        action = Some(a);
-                    }
+                    let top = ui.cursor().top();
+                    let tab = self.tabs(ui, state);
+                    let room = (room - (ui.cursor().top() - top)).max(LEAST_ROOM);
+                    theme::scrolled(ui, "capitol_station_work", room, |ui| {
+                        ui.set_width(WIDTH);
+                        put(self.work(ui, icons, view, crafting, tab));
+                    });
                 });
-            }
-        });
+            });
+        } else {
+            // The tabs stay put over the box; the box and the work scroll.
+            let tab = self.tabs(ui, state);
+            let room = room(ui);
+            theme::scrolled(ui, "capitol_station_stack", room, |ui| {
+                ui.set_width(WIDTH);
+                put(station_box(ui, icons, view, false, idle));
+                ui.add_space(10.0);
+                put(self.work(ui, icons, view, crafting, tab));
+            });
+        }
 
+        // From the columns' foot, so the spacing after them counts too.
+        let before = ui.min_rect().bottom();
         ui.add_space(6.0);
         theme::divider(ui);
         ui.add_space(2.0);
-        if let Some(a) = self.footer(ui, view) {
-            action = Some(a);
-        }
+        put(self.footer(ui, view));
+        self.footer_height = Some(ui.min_rect().bottom() - before);
         action
+    }
+
+    /// The Craft and Automation tabs, at a crafting station of yours, and
+    /// the tab to show: always Craft at someone else's.
+    fn tabs(&mut self, ui: &mut egui::Ui, state: &GameState) -> Tab {
+        if !mine(state) {
+            return Tab::Craft;
+        }
+        ui.horizontal(|ui| {
+            theme::segmented(
+                ui,
+                &mut self.tab,
+                &[(Tab::Craft, "Craft"), (Tab::Automation, "Automation")],
+            );
+        });
+        ui.add_space(6.0);
+        self.tab
+    }
+
+    /// A crafting station's work: the recipe's column, or its automation.
+    fn work(
+        &mut self,
+        ui: &mut egui::Ui,
+        icons: &mut ItemIcons,
+        view: &View,
+        crafting: Option<&Activity>,
+        tab: Tab,
+    ) -> Option<Action> {
+        match tab {
+            Tab::Craft => self.crafting(ui, icons, view, crafting),
+            Tab::Automation => self.automation(ui, icons, view),
+        }
     }
 
     /// A crafting station's half: the recipe, its needs, Fill and Clear,
@@ -531,6 +601,69 @@ impl StationPanel {
     }
 }
 
+/// The panel's width inside its frame: one column for a chest or when
+/// stacked, else the box and the recipe's column with the gap between them
+/// (`gaps` is egui's item spacing, which comes either side of the gap).
+fn inner_width(layout: Layout, storage: bool, gaps: f32) -> f32 {
+    match (storage, layout) {
+        (true, _) => BOX_WIDTH,
+        (false, Layout::Columns) => BOX_WIDTH + gaps + COLUMN_GAP + gaps + WIDTH,
+        (false, Layout::Stacked) => WIDTH,
+    }
+}
+
+/// Where the panel goes on `screen`, given its width in `columns` and
+/// stacked: the layout, and the panel's inset from the right edge. Left of
+/// the inventory when it's open (`beside`), so a drag across is short: in
+/// columns if they fit there, else stacked. If even that doesn't fit, it's
+/// stacked as far left as it may go, over the inventory's edge.
+fn place(screen: egui::Rect, beside: Option<egui::Rect>, columns: f32, stacked: f32) -> (Layout, f32) {
+    let right = beside.map_or(EDGE, |inventory| screen.right() - inventory.left() + GAP);
+    let fits = |width: f32| screen.right() - right - width >= screen.left() + LEFT;
+    if fits(columns) {
+        (Layout::Columns, right)
+    } else if fits(stacked) {
+        (Layout::Stacked, right)
+    } else {
+        (Layout::Stacked, (screen.width() - stacked - LEFT).max(EDGE))
+    }
+}
+
+/// The station's box, as a slot grid, and under it a chest's note or a
+/// crafting station's tool slot.
+fn station_box(
+    ui: &mut egui::Ui,
+    icons: &mut ItemIcons,
+    view: &View,
+    storage: bool,
+    idle: bool,
+) -> Option<Action> {
+    let state = view.state;
+    let mut action = None;
+    ui.label(theme::label(if storage { "Storage" } else { "Station box" }));
+    match state.station_container() {
+        Some(c) => {
+            if let Some(m) = SlotGrid::new(c).enabled(idle).show(ui, icons) {
+                action = Some(Action::Move(m));
+            }
+        }
+        None => {
+            ui.label(theme::dim("Loading…"));
+        }
+    }
+    if storage {
+        ui.add_space(4.0);
+        ui.label(theme::dim("Drag items in to store them, and out to take them").size(size::LABEL));
+        if let Some(why) = view.refused {
+            ui.add_space(6.0);
+            theme::error_box(ui, why);
+        }
+    } else if let Some(a) = tool_slot(ui, icons, state, idle) {
+        action = Some(a);
+    }
+    action
+}
+
 /// The open station is yours.
 fn mine(state: &GameState) -> bool {
     state
@@ -630,4 +763,202 @@ fn station_quality(ui: &mut egui::Ui, station: i32, check: Option<&Check>) {
             );
         }
     });
+}
+
+/// `--station-panel-sample` (#235), and the tests': you at a workbench of
+/// yours, its box holding a tool handle's sticks and rope so the Craft tab
+/// draws all it has, with your inventory and crafting boxes stocked.
+pub fn sample() -> GameState {
+    use capitol_core::net::{ConnectionState, RestResponse};
+    use capitol_core::protocol::rest::{
+        ContainerResponse, ContainersResponse, RecipesResponse, StationContainerResponse,
+    };
+    use capitol_core::protocol::ws::ServerMessage;
+    const ME: Uuid = Uuid::from_u128(0xca9);
+    const BENCH: Uuid = Uuid::from_u128(0x235);
+    const BOX: Uuid = Uuid::from_u128(0x2350);
+    let mut state = GameState::new();
+    state.apply_connection(&ConnectionState::Connected { player_id: ME });
+    let recipes = state.catalog().recipes().to_vec();
+    state.apply_rest(&RestResponse::Recipes(RecipesResponse { recipes }));
+    state.apply_ws(&ServerMessage::StationPlaced {
+        station_id: BENCH,
+        station_type: "workbench".into(),
+        name: "Workbench".into(),
+        owner_id: ME,
+        x: 0.0,
+        y: 0.0,
+        container_id: BOX,
+        quality: 60,
+    });
+    state.apply_ws(&ServerMessage::StationOpened {
+        player_id: ME,
+        station_id: BENCH,
+        station_type: "workbench".into(),
+        name: "Workbench".into(),
+        container_id: BOX,
+    });
+    let catalog = capitol_core::catalog::Catalog::fallback();
+    let item = |n: u128, slot, kind: &str, quality, quantity| {
+        let name = catalog.item_name(kind);
+        SlotItem::new(Uuid::from_u128(n), kind.into(), name, quality, quantity, slot)
+    };
+    let container = |n: u128, kind: &str, slot_count, layout_columns, slots| ContainerResponse {
+        id: Uuid::from_u128(n),
+        container_type: kind.into(),
+        slot_count,
+        layout_columns,
+        slots,
+    };
+    let containers = vec![
+        container(
+            0x2351,
+            "player_inventory",
+            24,
+            6,
+            vec![
+                item(1, 0, "fiber", 52, 18),
+                item(2, 1, "sticks", 61, 6),
+                item(3, 2, "rope", 58, 3),
+                item(4, 3, "stone", 47, 9),
+                item(5, 5, "log", 66, 4),
+            ],
+        ),
+        container(0x2352, "crafting_input", 4, 2, vec![]),
+        container(0x2353, "crafting_output", 1, 1, vec![]),
+    ];
+    state.apply_rest(&RestResponse::Containers(ContainersResponse { containers }));
+    let slots = vec![item(10, 0, "sticks", 64, 4), item(11, 1, "rope", 70, 2)];
+    state.apply_rest(&RestResponse::StationContainer(StationContainerResponse {
+        id: BOX,
+        container_type: "station_inventory".into(),
+        slot_count: 16,
+        layout_columns: 4,
+        slots,
+    }));
+    state
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Draws the panel for a few frames on a `screen` of points, beside an
+    /// inventory at `beside`, and returns where it went.
+    fn run(panel: &mut StationPanel, state: &GameState, screen: egui::Vec2, beside: Option<egui::Rect>) -> egui::Rect {
+        let ctx = theme::test_context();
+        let mut icons = ItemIcons::load(std::path::Path::new("no/icons/needed"));
+        let view = View {
+            state,
+            phase: &Phase::Idle,
+            refused: None,
+            beside,
+            automation_refused: None,
+        };
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+            ..Default::default()
+        };
+        for _ in 0..30 {
+            let _ = ctx.run(raw.clone(), |ctx| {
+                theme::install(ctx);
+                panel.show(ctx, &mut icons, &view, 0.05);
+            });
+        }
+        ctx.memory(|m| m.area_rect(Id::new("capitol_station"))).expect("drawn")
+    }
+
+    fn rect(l: f32, t: f32, r: f32, b: f32) -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(l, t), egui::pos2(r, b))
+    }
+
+    /// 1280×720 at 150%, in points, and the inventory on it as measured
+    /// from a live capture (as `hints`' tests have it).
+    const SMALL: egui::Vec2 = egui::vec2(853.0, 480.0);
+    fn small_inventory() -> egui::Rect {
+        rect(485.0, 173.0, 834.0, 460.0)
+    }
+
+    /// The panel is on the screen, under the header strip's gap, and off
+    /// its bottom and right edges.
+    fn on_screen(panel: egui::Rect, screen: egui::Vec2) {
+        assert!(panel.top() >= UNDER_HEADER - 0.5, "{panel:?}");
+        assert!(panel.left() >= LEFT - 0.5, "{panel:?}");
+        assert!(panel.bottom() <= screen.y - EDGE + 0.5, "{panel:?}");
+        assert!(panel.right() <= screen.x - EDGE + 0.5, "{panel:?}");
+    }
+
+    fn craft_tab() -> StationPanel {
+        StationPanel {
+            picked: Some("tool_handle".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn on_a_small_screen_it_fits_on_both_tabs() {
+        let state = sample();
+        let mut panel = craft_tab();
+        let alone = run(&mut panel, &state, SMALL, None);
+        on_screen(alone, SMALL);
+        // Two columns fit with the inventory closed.
+        let gaps = theme::test_context().style().spacing.item_spacing.x;
+        assert!(alone.width() > inner_width(Layout::Columns, false, gaps), "{alone:?}");
+        panel.tab = Tab::Automation;
+        on_screen(run(&mut panel, &state, SMALL, None), SMALL);
+    }
+
+    #[test]
+    fn on_a_small_screen_it_stacks_beside_the_inventory() {
+        let state = sample();
+        let inventory = small_inventory();
+        for tab in [Tab::Craft, Tab::Automation] {
+            let mut panel = StationPanel { tab, ..craft_tab() };
+            let beside = run(&mut panel, &state, SMALL, Some(inventory));
+            on_screen(beside, SMALL);
+            assert!(beside.width() < BOX_WIDTH + WIDTH, "stacked: {beside:?}");
+            assert!((inventory.left() - GAP - beside.right()).abs() < 1.0, "{beside:?}");
+        }
+    }
+
+    #[test]
+    fn on_a_large_screen_it_keeps_its_columns_and_its_height() {
+        let state = sample();
+        let big = egui::vec2(1920.0, 1080.0);
+        let inventory = small_inventory().translate(big - SMALL);
+        let mut panel = craft_tab();
+        let beside = run(&mut panel, &state, big, Some(inventory));
+        on_screen(beside, big);
+        assert!((inventory.left() - GAP - beside.right()).abs() < 1.0, "{beside:?}");
+        // Drawn as wide as `place` reckoned it, so it chose by the truth.
+        let gaps = theme::test_context().style().spacing.item_spacing.x;
+        let margins = theme::panel_edged(STATION).total_margin().sum();
+        let columns = inner_width(Layout::Columns, false, gaps) + margins.x;
+        assert!((beside.width() - columns).abs() < 1.5, "{beside:?} against {columns}");
+        // Nothing scrolls: the Craft tab is taller than the small screen.
+        assert!(beside.height() > SMALL.y, "{beside:?}");
+    }
+
+    #[test]
+    fn it_goes_where_there_is_room() {
+        let screen = rect(0.0, 0.0, 853.0, 480.0);
+        let (columns, stacked) = (544.0, 300.0);
+        // Alone: bottom right, in columns.
+        assert_eq!(place(screen, None, columns, stacked), (Layout::Columns, EDGE));
+        // Beside the inventory: stacked, just left of it.
+        let inventory = small_inventory();
+        let right = 853.0 - inventory.left() + GAP;
+        assert_eq!(place(screen, Some(inventory), columns, stacked), (Layout::Stacked, right));
+        // On a wide screen, in columns beside it.
+        let wide = rect(0.0, 0.0, 1280.0, 480.0);
+        let far = inventory.translate(egui::vec2(427.0, 0.0));
+        assert_eq!(place(wide, Some(far), columns, stacked), (Layout::Columns, right));
+        // No room even stacked: as far left as it may go.
+        let narrow = rect(0.0, 0.0, 500.0, 480.0);
+        let squeezed = rect(250.0, 173.0, 480.0, 460.0);
+        assert_eq!(
+            place(narrow, Some(squeezed), columns, stacked),
+            (Layout::Stacked, 500.0 - stacked - LEFT)
+        );
+    }
 }
