@@ -8,8 +8,9 @@
 //!
 //! The beds loop: four ambiences the soundscape crossfades by zone, city
 //! hum at the core, a breeze through the suburbs and fields, wind past the
-//! edge, and water lapping at the rings (and the wilds' lakes), and a fifth
-//! that rises by the wilds' running water (W10). The rest are one-shots.
+//! edge, and water lapping at the rings (and the wilds' lakes), a fifth
+//! that rises by the wilds' running water (W10), and a sixth, the bazaar's
+//! crowd, among its stalls (E3.14). The rest are one-shots.
 
 use super::dsp::*;
 use std::f32::consts::TAU;
@@ -30,6 +31,7 @@ pub const RECIPES: &[(&str, Recipe)] = &[
     ("amb_wind", wind),
     ("amb_water", water),
     ("amb_stream", stream),
+    ("amb_market", market),
     ("ui_click", || vec![ui_click()]),
     ("ui_drop", || vec![ui_drop()]),
     ("rustle_1", || vec![rustle(1)]),
@@ -42,6 +44,10 @@ pub const RECIPES: &[(&str, Recipe)] = &[
     ("bird_2", || vec![bird(2)]),
     ("bird_3", || vec![bird(3)]),
     ("bird_4", || vec![bird(4)]),
+    ("hawker_1", || vec![hawker(1)]),
+    ("hawker_2", || vec![hawker(2)]),
+    ("hawker_3", || vec![hawker(3)]),
+    ("coins", || vec![coins()]),
 ];
 
 /// Make every sound, a thread each (the recipes share nothing).
@@ -546,6 +552,169 @@ fn bird(variant: u32) -> Vec<f32> {
     let mut v = reverb(&v, 0.05, 0.2, 0.3);
     fade_out(&mut v, 0.1);
     to_peak(&mut v, 0.8);
+    v
+}
+
+// ── The bazaar (E3.14) ────────────────────────────────────────────────────
+
+/// A voice's buzz: a sawtooth at `hz`, the vocal folds near enough once
+/// the formants have shaped it.
+struct Buzz(f32);
+
+impl Buzz {
+    fn next(&mut self, hz: f32) -> f32 {
+        self.0 = (self.0 + hz / SR as f32) % 1.0;
+        2.0 * self.0 - 1.0
+    }
+}
+
+/// Five vowels' first three formants, Hz: ah, aw, oo, eh, ee.
+const VOWELS: [(f32, f32, f32); 5] =
+    [(730.0, 1090.0, 2440.0), (570.0, 840.0, 2410.0), (300.0, 870.0, 2240.0), (530.0, 1840.0, 2480.0), (290.0, 2200.0, 2950.0)];
+
+/// The bazaar: many people talking among the stalls, near and far, each in
+/// syllables and phrases and pauses at a pitch of their own; a crowd's
+/// murmur under them; and now and then a crate set down or a coin on a
+/// counter. No word is ever made out.
+fn market() -> Vec<Vec<f32>> {
+    bed(16.0, 2.0, |seed, _n, total| {
+        let mut rng = Rng::new(seed + 7);
+        let mut talk = vec![0.0f32; total];
+        for _ in 0..14 {
+            let f0 = rng.range(95.0, 240.0);
+            let gain = rng.range(0.3, 1.0);
+            let far = rng.unit() < 0.5;
+            // When it speaks: phrases of syllables, then a pause
+            let mut env = vec![0.0f32; total];
+            let mut vowel = vec![0usize; total];
+            let mut i = samples(rng.range(0.0, 2.5));
+            while i < total {
+                for _ in 0..(3 + (rng.unit() * 7.0) as usize) {
+                    let len = samples(rng.range(0.1, 0.24));
+                    let (amp, v) = (rng.range(0.6, 1.0), (rng.unit() * VOWELS.len() as f32) as usize % VOWELS.len());
+                    for k in 0..len.min(total.saturating_sub(i)) {
+                        env[i + k] = amp * hump(k as f32 / len as f32).sqrt();
+                        vowel[i + k] = v;
+                    }
+                    i += len + samples(rng.range(0.01, 0.06));
+                }
+                i += samples(rng.range(0.6, 3.5));
+            }
+            let mut buzz = Buzz(rng.unit());
+            let mut formants: Vec<[Biquad; 3]> = VOWELS
+                .iter()
+                .map(|&(a, b, c)| [Biquad::bandpass(a, 4.0), Biquad::bandpass(b, 5.0), Biquad::bandpass(c, 6.0)])
+                .collect();
+            let mut air = Biquad::lowpass(if far { 1100.0 } else { 3200.0 }, 0.7);
+            let mut breath = Rng::new(seed + 100 + (f0 as u64));
+            let mut lilt = 0.0f32;
+            for k in 0..total {
+                if env[k] == 0.0 {
+                    continue;
+                }
+                lilt += 1.0 / SR as f32;
+                let hz = f0 * (1.0 + 0.07 * (TAU * 0.7 * lilt).sin());
+                let x = buzz.next(hz) + 0.15 * breath.white();
+                let [a, b, c] = &mut formants[vowel[k]];
+                let y = a.run(x) + 0.5 * b.run(x) + 0.2 * c.run(x);
+                talk[k] += air.run(y) * env[k] * gain * if far { 0.5 } else { 1.0 };
+            }
+        }
+        let talk = part(total, |k| talk[k]);
+        let mut pink = Pink::new(seed + 1);
+        let mut band = Biquad::bandpass(650.0, 0.7);
+        let mut flicker_noise = Rng::new(seed + 2);
+        let mut flicker = Biquad::lowpass(4.0, 0.7);
+        let crowd = part(total, |_| band.run(pink.next()) * (0.5 + flicker.run(flicker_noise.white()).abs() * 5.0));
+        // A few crates set down, and coins on counters
+        let mut knocks = vec![0.0f32; total];
+        for _ in 0..5 {
+            let at = (rng.unit() * total as f32) as usize;
+            let mut body = Biquad::bandpass(rng.range(250.0, 420.0), 3.0);
+            let mut hit = Rng::new(seed + at as u64);
+            for k in 0..samples(0.12).min(total - at) {
+                let t = k as f32 / SR as f32;
+                knocks[at + k] += body.run(hit.white()) * (-t / 0.025).exp();
+            }
+        }
+        for _ in 0..3 {
+            let at = (rng.unit() * total as f32) as usize;
+            let ping = coin(rng.range(2400.0, 3200.0), 0.5);
+            mix_into(&mut knocks, &ping, at, 0.4);
+        }
+        let knocks = part(total, |k| knocks[k]);
+        weigh(&[(talk, 1.0), (crowd, 0.5), (knocks, 0.14)])
+    })
+}
+
+/// One coin ringing on a counter: a struck disc's inharmonic partials.
+fn coin(hz: f32, seconds: f32) -> Vec<f32> {
+    let mut v = vec![0.0; samples(seconds)];
+    for (ratio, amp, decay) in [(1.0, 1.0, 0.16), (2.76, 0.5, 0.09), (5.4, 0.25, 0.05)] {
+        let p = voice(seconds, |_| hz * ratio, |t| amp * strike(t, 0.001, decay));
+        mix_into(&mut v, &p, 0, 1.0);
+    }
+    fade_out(&mut v, 0.05);
+    v
+}
+
+/// A handful of coins counted out onto a counter.
+fn coins() -> Vec<f32> {
+    let mut v = vec![0.0; samples(0.9)];
+    for (k, (at, hz)) in [(0.0, 2650.0), (0.09, 3050.0), (0.16, 2480.0), (0.31, 2870.0)].iter().enumerate() {
+        mix_into(&mut v, &coin(*hz, 0.5), samples(*at), 1.0 - 0.12 * k as f32);
+    }
+    let mut v = reverb(&v, 0.12, 0.3, 0.3);
+    fade_out(&mut v, 0.1);
+    to_peak(&mut v, 0.6);
+    v
+}
+
+/// A hawker crying their wares down the street: a few sung syllables,
+/// each a vowel at a pitch, gliding between them, the long last note
+/// wavering, in the street's close air.
+fn hawker(variant: u32) -> Vec<f32> {
+    // (pitch Hz, seconds, vowel)
+    let phrase: &[(f32, f32, usize)] = match variant {
+        // Fresh ro-ope! Up a step, held, then down a fifth
+        1 => &[(233.0, 0.2, 3), (262.0, 0.18, 1), (262.0, 0.5, 1), (175.0, 0.65, 2)],
+        // Fine wa-res here! Two quick and a long fall
+        2 => &[(196.0, 0.16, 0), (220.0, 0.16, 3), (247.0, 0.55, 0), (196.0, 0.25, 4), (165.0, 0.6, 0)],
+        // Co-ome buy! A low call and a lift
+        _ => &[(147.0, 0.35, 1), (131.0, 0.3, 1), (165.0, 0.7, 0)],
+    };
+    let seconds: f32 = phrase.iter().map(|p| p.1).sum::<f32>() + 0.4;
+    let mut v = vec![0.0f32; samples(seconds)];
+    let mut at = 0.0f32;
+    let mut buzz = Buzz(0.0);
+    let mut last = phrase[0].0;
+    for &(hz, len, vowel) in phrase {
+        let (f1, f2, f3) = VOWELS[vowel];
+        let (mut a, mut b, mut c) = (Biquad::bandpass(f1, 5.0), Biquad::bandpass(f2, 6.0), Biquad::bandpass(f3, 8.0));
+        let mut breath = Rng::new((hz * 10.0) as u64);
+        let total = samples(len + 0.08);
+        let from = last;
+        let syllable: Vec<f32> = (0..total)
+            .map(|k| {
+                let t = k as f32 / SR as f32;
+                let glide = from + (hz - from) * smoothstep(0.0, 0.05, t);
+                let waver = 1.0 + 0.018 * smoothstep(0.15, 0.4, t) * (TAU * 5.5 * t).sin();
+                let x = buzz.next(glide * waver) + 0.08 * breath.white();
+                let y = a.run(x) + 0.55 * b.run(x) + 0.25 * c.run(x);
+                let env = smoothstep(0.0, 0.03, t) * (1.0 - smoothstep(len - 0.02, len + 0.08, t));
+                y * env
+            })
+            .collect();
+        mix_into(&mut v, &syllable, samples(at), 1.0);
+        at += len;
+        last = hz;
+    }
+    let mut air = Biquad::lowpass(3400.0, 0.7);
+    let v: Vec<f32> = v.iter().map(|x| air.run(*x)).collect();
+    // The street's air: walls close by, but open to the sky
+    let mut v = reverb(&v, 0.16, 0.35, 0.5);
+    fade_out(&mut v, 0.2);
+    to_peak(&mut v, 0.7);
     v
 }
 

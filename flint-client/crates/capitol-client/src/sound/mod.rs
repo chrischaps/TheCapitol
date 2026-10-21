@@ -1,6 +1,6 @@
 //! What you hear (P8.1). The sounds are made in [`library`] at start, off
 //! the main thread, and handed to Flint from memory (`ctx.audio`, Flint
-//! ADR 0084). [`Soundscape`] plays them: five looping beds whose levels
+//! ADR 0084). [`Soundscape`] plays them: six looping beds whose levels
 //! follow where you are, and one-shots it plays itself.
 //!
 //! **The beds** are `audio_source` entities on the music bus, spawned once
@@ -20,6 +20,10 @@
 //! - the wind blows full on the ridges and the tops and drops away in the
 //!   valleys, by how far you stand over the ground round you,
 //! - and by a lake it goes still: the wind hushes and the water laps softly.
+//!
+//! **The bazaar (E3.14)** has a crowd of its own, the sixth bed, that rises
+//! as you walk in among its stalls ([`Ears::market`]), and hawkers cry
+//! their wares and coins ring on counters round you while you're there.
 //!
 //! The zone beds share one constant power, so a crossfade never dips or
 //! swells, and their levels ease toward the mix over about a second so a
@@ -52,12 +56,13 @@ const AMBIENCE: f32 = 0.8;
 const EFFECTS: f32 = 1.0;
 
 /// Each bed's level at full weight, by ear.
-const BEDS: [(&str, &str, f32); 5] = [
+const BEDS: [(&str, &str, f32); 6] = [
     ("ambience_city", "amb_city", 0.55),
     ("ambience_breeze", "amb_breeze", 0.50),
     ("ambience_wind", "amb_wind", 0.50),
     ("ambience_water", "amb_water", 0.45),
     ("ambience_stream", "amb_stream", 0.50),
+    ("ambience_market", "amb_market", 0.50),
 ];
 
 /// How fast a bed's level follows the mix: a time constant, seconds.
@@ -83,6 +88,8 @@ pub struct Mix {
     pub water: f32,
     /// Running water in the wilds (W10).
     pub stream: f32,
+    /// The bazaar's crowd (E3.14).
+    pub market: f32,
     /// How often birds call, 0 to 1. Not a bed: the soundscape scatters
     /// one-shots at this rate.
     pub birds: f32,
@@ -90,7 +97,7 @@ pub struct Mix {
 
 impl Mix {
     fn bed(&self, i: usize) -> f32 {
-        [self.city, self.breeze, self.wind, self.water, self.stream][i]
+        [self.city, self.breeze, self.wind, self.water, self.stream, self.market][i]
     }
 }
 
@@ -125,6 +132,7 @@ pub fn mix(r: f32, shore: f32, height: f32) -> Mix {
         wind: ((wind / sum).sqrt() * ground).max(0.45 * air),
         water: (1.0 - smoothstep(0.0, 250.0, shore.max(0.0))) * ground,
         stream: 0.0,
+        market: 0.0,
         birds: birds * ground,
     }
 }
@@ -345,6 +353,8 @@ pub struct Ears {
     pub camera: [f32; 3],
     /// The camera's height above the ground, metres.
     pub height: f32,
+    /// How far into the bazaar you are: 1 among its stalls, 0 well away.
+    pub market: f32,
 }
 
 /// One of the things that rustles: a tuft being worked.
@@ -368,11 +378,11 @@ pub struct Soundscape {
     /// The library is in Flint's cache, so the soundscape can play.
     loaded: bool,
     /// The bed entities, spawned on the first update.
-    beds: Option<[EntityId; 5]>,
+    beds: Option<[EntityId; 6]>,
     /// Each bed's level now, easing toward the mix.
-    levels: [f32; 5],
+    levels: [f32; 6],
     /// What was last written to each bed's `audio_source.volume`.
-    written: [f32; 5],
+    written: [f32; 6],
     /// The rings, server units: (radius, width).
     rings: Vec<(f32, f32)>,
     /// The wilds' water (W10).
@@ -383,6 +393,8 @@ pub struct Soundscape {
     next_bird: f64,
     last_bird: usize,
     next_bell: f64,
+    /// When the bazaar next calls out: a hawker, or coins.
+    next_call: f64,
     /// When each worked tuft next rustles.
     rustles: Vec<(String, f64)>,
     cues: Vec<Cue>,
@@ -398,8 +410,8 @@ impl Soundscape {
             making: None,
             loaded: false,
             beds: None,
-            levels: [0.0; 5],
-            written: [-1.0; 5],
+            levels: [0.0; 6],
+            written: [-1.0; 6],
             rings: Vec::new(),
             wild_water: WildWater::default(),
             rng: Rng::new(0xC0FFEE),
@@ -407,6 +419,7 @@ impl Soundscape {
             next_bird: 2.0,
             last_bird: 0,
             next_bell: 25.0,
+            next_call: 1.5,
             rustles: Vec::new(),
             cues: Vec::new(),
             mix: Mix::default(),
@@ -485,6 +498,7 @@ impl Soundscape {
             lake,
         };
         self.mix = wild(mix(r, shore, ears.height), r, ears.height, w);
+        self.mix.market = ears.market.clamp(0.0, 1.0) * (1.0 - smoothstep(80.0, 450.0, ears.height));
         let k = 1.0 - (-dt / EASE).exp();
         for (i, level) in self.levels.iter_mut().enumerate() {
             let target = if self.muted {
@@ -497,6 +511,7 @@ impl Soundscape {
         if !self.muted {
             self.birds(ears);
             self.bells();
+            self.hawkers(ears);
             self.rustle(ears, working);
         }
         let volumes = self.volumes;
@@ -558,7 +573,7 @@ impl Soundscape {
                     }
                     ids.push(id);
                 }
-                let beds = [ids[0], ids[1], ids[2], ids[3], ids[4]];
+                let beds = [ids[0], ids[1], ids[2], ids[3], ids[4], ids[5]];
                 self.beds = Some(beds);
                 beds
             }
@@ -653,6 +668,35 @@ impl Soundscape {
             let v = 0.3 * self.mix.city;
             self.cue(Cue::flat("bell", v));
         }
+    }
+
+    /// In the bazaar, a hawker cries their wares somewhere along the street
+    /// every few seconds, or coins ring on a counter: more often the
+    /// further in you are, and none outside it.
+    fn hawkers(&mut self, ears: Ears) {
+        let w = self.mix.market;
+        if self.now < self.next_call {
+            return;
+        }
+        if w < 0.25 {
+            // Away from it, look again in a second, so walking in hears it soon
+            self.next_call = self.now + 1.0;
+            return;
+        }
+        self.next_call = self.now + self.rng.range(3.0, 9.0) as f64 / w as f64;
+        let (t, d) = (self.rng.range(0.0, std::f32::consts::TAU), self.rng.range(4.0, 12.0));
+        let src = [ears.focus[0] + d * t.cos(), crate::coords::layer::GROUND + 1.6, ears.focus[1] + d * t.sin()];
+        let (sound, volume, pitch) = if self.rng.unit() < 0.3 {
+            ("coins".to_owned(), 0.3, self.rng.range(0.9, 1.1))
+        } else {
+            let k = 1 + (self.rng.unit() * 3.0) as usize % 3;
+            (format!("hawker_{k}"), 0.42, self.rng.range(0.9, 1.12))
+        };
+        let volume = volume * w * self.rng.range(0.7, 1.0);
+        if volume * Self::heard(ears, src) < 0.02 {
+            return;
+        }
+        self.cue(Cue { sound, volume: volume * EFFECTS, at: Some(src), pitch, interface: false });
     }
 
     /// Each tuft being worked rustles every half-second or so, yours
@@ -801,7 +845,25 @@ mod tests {
             focus: [x, z],
             camera: [x, 25.0, z + 20.0],
             height: STREET,
+            market: 0.0,
         }
+    }
+
+    #[test]
+    fn the_bazaar_murmurs_and_its_hawkers_call_only_in_it() {
+        let mut s = Soundscape::new(false);
+        let away = run(&mut s, ears_at(zone_middle(Zone::TradeDistrict)), &[], 60.0);
+        assert_eq!(sounds(&away, "hawker_") + sounds(&away, "coins"), 0);
+        assert_eq!(s.mix.market, 0.0);
+        let inside = Ears { market: 1.0, height: 3.0, ..ears_at(zone_middle(Zone::TradeDistrict)) };
+        let cues = run(&mut s, inside, &[], 60.0);
+        assert!(sounds(&cues, "hawker_") >= 5, "{}", sounds(&cues, "hawker_"));
+        assert!(sounds(&cues, "coins") >= 1);
+        assert!(s.levels[5] > 0.3, "the crowd's bed is up: {}", s.levels[5]);
+        // From the map, nothing of it
+        let high = Ears { height: 600.0, ..inside };
+        let cues = run(&mut s, high, &[], 30.0);
+        assert_eq!(sounds(&cues, "hawker_"), 0);
     }
 
     fn sounds(cues: &[Cue], prefix: &str) -> usize {
@@ -875,7 +937,7 @@ mod tests {
         let ears = ears_at(2000.0);
         let mine = Rustling { id: "a".into(), at: ears.focus, mine: true };
         assert!(run(&mut s, ears, &[mine], 30.0).is_empty());
-        assert_eq!(s.levels, [0.0; 5]);
+        assert_eq!(s.levels, [0.0; 6]);
     }
 
     #[test]
