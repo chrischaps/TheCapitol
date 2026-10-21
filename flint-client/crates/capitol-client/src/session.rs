@@ -29,7 +29,7 @@ use capitol_core::harvest::{Harvest, Note, Step};
 use capitol_core::market::MarketEvent;
 use capitol_core::motion::{Motion, Pose};
 use capitol_core::net::{
-    ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
+    ConnectionState, Net, NetConfig, NetEvent, NetStats, RestError, RestRequest, RestResponse, Tag,
 };
 use capitol_core::paths::{Walk, WalkGraph};
 use capitol_core::poll::{Fetch, Poller};
@@ -438,6 +438,12 @@ impl Session {
     /// The connection's outage while it's down.
     pub fn link(&self) -> &Link {
         &self.link
+    }
+
+    /// The connection's numbers and the prediction's, for the dev overlay
+    /// (D5.1, D5.2). Cheap enough for every frame.
+    pub fn net_stats(&self, now: Instant) -> NetStats {
+        self.net.stats().with_motion(self.motion.stats(now))
     }
 
     /// The zone you last entered, and when.

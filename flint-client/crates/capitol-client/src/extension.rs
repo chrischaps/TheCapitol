@@ -191,6 +191,10 @@ pub struct CapitolExtension {
     /// The first-session hints, and the shortcut overlay (P8.3).
     hints: ui::hints::Hints,
     shortcuts: ui::shortcuts::Shortcuts,
+    /// The dev overlay on F7 (D5.2), and `--dev-sample`: offline, open on
+    /// sample numbers.
+    dev: ui::dev_overlay::DevOverlay,
+    dev_sample: bool,
     /// The player's settings, and the file they're kept in (P8.4).
     settings: SettingsFile,
     settings_panel: ui::settings::SettingsPanel,
@@ -265,6 +269,8 @@ impl CapitolExtension {
             trade_offered: None,
             hints: ui::hints::Hints::default(),
             shortcuts: ui::shortcuts::Shortcuts::default(),
+            dev: ui::dev_overlay::DevOverlay::default(),
+            dev_sample: false,
             settings: SettingsFile::load(crate::settings::Settings::PATH),
             settings_panel: ui::settings::SettingsPanel::default(),
             graphics: None,
@@ -447,6 +453,12 @@ impl CapitolExtension {
 
     pub fn with_hall_sample(mut self, on: bool) -> Self {
         self.hall_sample = on;
+        self
+    }
+
+    pub fn with_dev_sample(mut self, on: bool) -> Self {
+        self.dev_sample = on;
+        self.dev.open |= on;
         self
     }
 
@@ -726,6 +738,10 @@ impl PlayerExtension for CapitolExtension {
 
     fn pre_update(&mut self, ctx: &mut ExtensionCtx) {
         let now = Instant::now();
+        self.dev.record(ctx.clock.delta_time, ctx.world.entity_count());
+        if ctx.input.is_action_just_pressed("dev_overlay") {
+            self.dev.toggle();
+        }
         if let Some(juice) = &mut self.juice {
             juice.update(ctx, &self.shared);
         }
@@ -1739,6 +1755,32 @@ impl PlayerExtension for CapitolExtension {
             juice.ui(ctx, &mut self.icons, &self.shared);
         }
         ui::slots::paint_shatters(ctx);
+        // The dev overlay (D5.2): the store's counts and the net once there's
+        // a server, the frames and the engine's entities always
+        let (session, sample) = (self.session.as_ref(), self.dev_sample);
+        self.dev.show(ctx, || {
+            let Some(session) = session else {
+                return match sample {
+                    true => ui::dev_overlay::sample(),
+                    false => ui::dev_overlay::View::default(),
+                };
+            };
+            let state = session.state();
+            let players = state.players();
+            ui::dev_overlay::View {
+                net: Some(session.net_stats(Instant::now())),
+                world: Some(ui::dev_overlay::World {
+                    people: players.len(),
+                    citizens: players.values().filter(|p| p.citizen).count(),
+                    nodes: state.nodes().len(),
+                    stations: state.stations().len(),
+                    lots: state.claimed_lots().len(),
+                }),
+                interest: state
+                    .local_player()
+                    .map(|me| ui::dev_overlay::Interest::at(me.x, me.y)),
+            }
+        });
         if !self.in_world() {
             self.shortcuts.open = false;
         }

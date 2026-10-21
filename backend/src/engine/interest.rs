@@ -1,6 +1,7 @@
 //! Positions by interest (C0.4).
 //!
-//! Every tick the players are put in a grid of [`INTEREST_CELL`] squares, and
+//! Every tick the players are put in a grid of
+//! [`INTEREST_CELL`](capitol_protocol::rules::INTEREST_CELL) squares, and
 //! each socket is sent the players in its own player's cell and the eight
 //! round it. A cell's players are serialised once, the first time a socket
 //! asks for them, however many sockets see that cell, so the cost per tick
@@ -21,7 +22,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use capitol_protocol::rules::INTEREST_CELL;
+use capitol_protocol::rules::interest_cell;
 use capitol_protocol::ws::ServerMessage;
 use serde::{Serialize, Serializer};
 use uuid::Uuid;
@@ -33,7 +34,7 @@ pub type Cell = (i32, i32);
 
 /// The cell a point is in
 pub fn cell_at(x: f64, y: f64) -> Cell {
-    ((x / INTEREST_CELL).floor() as i32, (y / INTEREST_CELL).floor() as i32)
+    interest_cell(x, y)
 }
 
 /// Whether a player in cell `b` is in sight of one in cell `a`: the same
@@ -243,6 +244,7 @@ impl Serialize for Positions {
 mod tests {
     use super::*;
     use crate::models::ActionState;
+    use capitol_protocol::rules::INTEREST_CELL;
     use capitol_protocol::ws::ServerMessage;
     use std::time::Instant;
 

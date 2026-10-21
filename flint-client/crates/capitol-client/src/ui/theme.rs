@@ -115,6 +115,16 @@ pub const SOURCE_ROLL: Color32 = rgba(240, 240, 255, 0.4);
 pub const BAR_TRACK: Color32 = rgba(0, 0, 0, 0.35);
 pub const GRADE_TICK: Color32 = rgba(255, 255, 255, 0.22);
 
+/// The dev overlay's frame graph (D5.2): a frame within its 60 fps budget
+/// in dim gold, one over it in ember, one over the 30 fps line in red, and
+/// the faint rules at those two lines.
+pub const FRAME_OK: Color32 = GOLD_DIM;
+pub const FRAME_LATE: Color32 = EMBER;
+pub const FRAME_HITCH: Color32 = SHORT;
+pub const GRAPH_GUIDE: Color32 = rgba(255, 255, 255, 0.16);
+/// The well's colour made opaque, behind a guide's label.
+pub const WELL_SOLID: Color32 = rgb(0x1a1a26);
+
 /// A quality grade's pip colour (plan §4.7), for a letter from
 /// `capitol_protocol::rules::quality_grade`.
 pub fn grade(letter: &str) -> Color32 {
