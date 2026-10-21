@@ -142,7 +142,7 @@ impl GazettePanel {
 fn paper() -> egui::Frame {
     egui::Frame::none()
         .fill(theme::PAPER)
-        .stroke(Stroke::new(1.0, theme::PAPER_EDGE))
+        .stroke(Stroke::new(1.0_f32, theme::PAPER_EDGE))
         .rounding(2.0)
         .inner_margin(Margin::symmetric(20.0, 16.0))
         .shadow(egui::epaint::Shadow {
@@ -281,7 +281,7 @@ fn front_page(ui: &mut egui::Ui, g: &Gazette) {
     ui.label(ink(&g.lead, size::LARGE));
     ui.add_space(8.0);
     egui::Frame::none()
-        .stroke(Stroke::new(1.0, theme::INK_RULE))
+        .stroke(Stroke::new(1.0_f32, theme::INK_RULE))
         .inner_margin(Margin::symmetric(10.0, 5.0))
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -482,7 +482,7 @@ fn citizen_mark(ui: &mut egui::Ui, text: f32) {
         c + egui::vec2(0.0, r),
         c + egui::vec2(-w, 0.0),
     ];
-    ui.painter().add(egui::Shape::convex_polygon(points, Color32::TRANSPARENT, Stroke::new(1.2, theme::INK)));
+    ui.painter().add(egui::Shape::convex_polygon(points, Color32::TRANSPARENT, Stroke::new(1.2_f32, theme::INK)));
     response.on_hover_text("A citizen: an AI who lives, works and trades in the city, by the same rules as anyone");
 }
 

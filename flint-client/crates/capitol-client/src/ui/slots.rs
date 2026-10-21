@@ -418,7 +418,7 @@ impl Slot<'_> {
             dashed_edge(
                 ui.painter(),
                 rect.shrink(1.0),
-                Stroke::new(2.0, CRAFT.gamma_multiply(0.8)),
+                Stroke::new(2.0_f32, CRAFT.gamma_multiply(0.8)),
             );
         }
 
@@ -521,13 +521,13 @@ fn paint_slot(
     }
     if look == Look::Source {
         painter.rect_filled(inner, 6.0, SLOT.gamma_multiply(fade));
-        dashed_edge(painter, inner, Stroke::new(2.0, edge.gamma_multiply(fade)));
+        dashed_edge(painter, inner, Stroke::new(2.0_f32, edge.gamma_multiply(fade)));
     } else {
         painter.rect(
             inner,
             6.0,
             fill.gamma_multiply(fade),
-            Stroke::new(2.0, edge.gamma_multiply(fade)),
+            Stroke::new(2.0_f32, edge.gamma_multiply(fade)),
         );
     }
     let Some(item) = item else {
@@ -744,7 +744,7 @@ fn pip(painter: &Painter, centre: Pos2, item: &SlotItem, fade: f32) {
         painter.circle_stroke(
             centre,
             PIP_R + 1.75,
-            Stroke::new(1.5, pip_colour(item.min_quality).gamma_multiply(fade)),
+            Stroke::new(1.5_f32, pip_colour(item.min_quality).gamma_multiply(fade)),
         );
     }
 }
@@ -776,7 +776,7 @@ pub fn grade_pip(painter: &Painter, centre: Pos2, quality: i32, fade: f32) {
     painter.circle_stroke(
         centre,
         R,
-        Stroke::new(1.0, theme::PIP_EDGE.gamma_multiply(fade)),
+        Stroke::new(1.0_f32, theme::PIP_EDGE.gamma_multiply(fade)),
     );
 }
 

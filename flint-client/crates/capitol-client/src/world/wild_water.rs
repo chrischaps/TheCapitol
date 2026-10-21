@@ -408,7 +408,7 @@ mod tests {
 
     /// Whether world (X, Z) is under one of `mesh`'s triangles.
     fn covered(mesh: &WaterBodyMesh, [x, z]: [f32; 2]) -> bool {
-        mesh.indices.chunks_exact(3).any(|t| {
+        mesh.indices.as_chunks::<3>().0.iter().any(|t| {
             let [a, b, c] = [0, 1, 2].map(|k| {
                 let p = mesh.vertices[t[k] as usize].position;
                 [p[0], p[2]]

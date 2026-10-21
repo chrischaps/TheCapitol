@@ -150,7 +150,7 @@ mod tests {
         assert!(roads.windows(2).all(|w| w[0] < w[1]));
         assert!(roads[3] + 0.02 <= layer::PLOT);
         assert_eq!(layer::BAILEY, roads[3]);
-        assert!(layer::PLOT + 0.02 < layer::MARK && layer::MARK < layer::BANK);
+        const { assert!(layer::PLOT + 0.02 < layer::MARK && layer::MARK < layer::BANK) };
         const { assert!(layer::PLOT < layer::BANK && layer::BANK < layer::DECK) };
         const { assert!(layer::CHANNEL_BED < layer::SEA && layer::SEA < layer::GROUND) };
         const { assert!(layer::CHANNEL_BED < layer::ARCH_SPRING && layer::ARCH_SPRING < layer::SEA) };

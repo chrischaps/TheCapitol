@@ -322,7 +322,7 @@ fn visuals() -> egui::Visuals {
 
     v.panel_fill = PANEL;
     v.window_fill = PANEL;
-    v.window_stroke = Stroke::new(1.0, BORDER);
+    v.window_stroke = Stroke::new(1.0_f32, BORDER);
     v.window_rounding = Rounding::same(12.0);
     v.menu_rounding = Rounding::same(8.0);
     v.window_highlight_topmost = false;
@@ -343,35 +343,35 @@ fn visuals() -> egui::Visuals {
     // Selection and focus are gold. A focused widget draws as `active`, so
     // its gold edge is the focus ring.
     v.selection.bg_fill = GOLD.gamma_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0, GOLD);
-    v.text_cursor.stroke = Stroke::new(1.5, GOLD);
+    v.selection.stroke = Stroke::new(1.0_f32, GOLD);
+    v.text_cursor.stroke = Stroke::new(1.5_f32, GOLD);
 
     let round = Rounding::same(4.0);
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = PANEL;
     w.noninteractive.weak_bg_fill = PANEL;
-    w.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
-    w.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
+    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    w.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT);
     w.noninteractive.rounding = round;
 
     w.inactive.bg_fill = FIELD;
     w.inactive.weak_bg_fill = FIELD;
-    w.inactive.bg_stroke = Stroke::new(1.0, BORDER);
-    w.inactive.fg_stroke = Stroke::new(1.0, TEXT);
+    w.inactive.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    w.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT);
     w.inactive.rounding = round;
     w.inactive.expansion = 0.0;
 
     w.hovered.bg_fill = PILL;
     w.hovered.weak_bg_fill = PILL;
-    w.hovered.bg_stroke = Stroke::new(1.0, GOLD_DIM);
-    w.hovered.fg_stroke = Stroke::new(1.0, TEXT);
+    w.hovered.bg_stroke = Stroke::new(1.0_f32, GOLD_DIM);
+    w.hovered.fg_stroke = Stroke::new(1.0_f32, TEXT);
     w.hovered.rounding = round;
     w.hovered.expansion = 0.0;
 
     w.active.bg_fill = PILL;
     w.active.weak_bg_fill = PILL;
-    w.active.bg_stroke = Stroke::new(1.0, GOLD);
-    w.active.fg_stroke = Stroke::new(1.0, GOLD);
+    w.active.bg_stroke = Stroke::new(1.0_f32, GOLD);
+    w.active.fg_stroke = Stroke::new(1.0_f32, GOLD);
     w.active.rounding = round;
     w.active.expansion = 0.0;
 
@@ -387,7 +387,7 @@ fn visuals() -> egui::Visuals {
 pub fn panel() -> egui::Frame {
     egui::Frame::none()
         .fill(PANEL)
-        .stroke(Stroke::new(1.0, BORDER))
+        .stroke(Stroke::new(1.0_f32, BORDER))
         .rounding(12.0)
         .inner_margin(Margin::same(12.0))
         .shadow(Shadow {
@@ -401,7 +401,7 @@ pub fn panel() -> egui::Frame {
 /// A panel edged in its own colour, as the React panels are: crafting and
 /// the inventory in purple, the login form in gold.
 pub fn panel_edged(edge: Color32) -> egui::Frame {
-    panel().stroke(Stroke::new(1.0, edge.gamma_multiply(0.3)))
+    panel().stroke(Stroke::new(1.0_f32, edge.gamma_multiply(0.3)))
 }
 
 /// A recessed section inside a panel.
@@ -425,7 +425,7 @@ pub fn tray() -> egui::Frame {
 pub fn chip(edge: Color32, fill: Color32) -> egui::Frame {
     egui::Frame::none()
         .fill(fill)
-        .stroke(Stroke::new(1.0, edge))
+        .stroke(Stroke::new(1.0_f32, edge))
         .rounding(5.0)
         .inner_margin(Margin::symmetric(10.0, 4.0))
 }
@@ -441,7 +441,7 @@ pub fn toggle_chip(ui: &mut Ui, text: &str, on: bool) -> Response {
     ui.add(
         egui::Button::new(RichText::new(text).size(size::BODY).color(ink))
             .fill(fill)
-            .stroke(Stroke::new(1.0, edge))
+            .stroke(Stroke::new(1.0_f32, edge))
             .rounding(5.0)
             .min_size(egui::vec2(0.0, 26.0)),
     )
@@ -458,12 +458,12 @@ pub fn landed_glow(painter: &egui::Painter, rect: egui::Rect, rounding: f32, k: 
     painter.rect_stroke(
         rect,
         rounding,
-        Stroke::new(1.5, GOLD.gamma_multiply(0.9 * k)),
+        Stroke::new(1.5_f32, GOLD.gamma_multiply(0.9 * k)),
     );
     painter.rect_stroke(
         rect.expand(2.5 + 2.0 * (1.0 - k)),
         rounding + 2.5,
-        Stroke::new(2.0, GOLD.gamma_multiply(0.3 * k)),
+        Stroke::new(2.0_f32, GOLD.gamma_multiply(0.3 * k)),
     );
 }
 
@@ -479,7 +479,7 @@ pub fn hint() -> egui::Frame {
 pub fn error_box(ui: &mut Ui, text: &str) {
     egui::Frame::none()
         .fill(ERROR_WASH)
-        .stroke(Stroke::new(1.0, ERROR))
+        .stroke(Stroke::new(1.0_f32, ERROR))
         .rounding(4.0)
         .inner_margin(Margin::symmetric(12.0, 9.0))
         .show(ui, |ui| {
@@ -573,7 +573,7 @@ fn rule_in(ui: &mut Ui, colour: Color32) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter()
-        .hline(rect.x_range(), rect.center().y, Stroke::new(1.0, colour));
+        .hline(rect.x_range(), rect.center().y, Stroke::new(1.0_f32, colour));
 }
 
 /// Rows of a list: closer together than the rest of a panel, and no
@@ -599,7 +599,7 @@ pub fn gold_rule(ui: &mut Ui) {
         painter.hline(
             a..=b,
             rect.center().y,
-            Stroke::new(1.0, GOLD_DIM.gamma_multiply(fade)),
+            Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(fade)),
         );
     }
 }
@@ -632,7 +632,7 @@ pub fn accent_button(ui: &mut Ui, text: &str, accent: Color32, enabled: bool) ->
             .color(accent),
     )
     .fill(accent.gamma_multiply(0.2))
-    .stroke(Stroke::new(2.0, accent))
+    .stroke(Stroke::new(2.0_f32, accent))
     .rounding(6.0)
     .min_size(egui::vec2(0.0, 38.0));
     ui.scope(|ui| {
@@ -731,7 +731,7 @@ pub fn keycap(ui: &mut Ui, text: &str) -> Response {
     // The cap's side, a shade darker, shows under its face.
     painter.rect_filled(rect, 4.0, KEYCAP_SIDE);
     let face = egui::Rect::from_min_max(rect.min, rect.max - egui::vec2(0.0, 2.0));
-    painter.rect(face, 4.0, KEYCAP, Stroke::new(1.0, KEYCAP_EDGE));
+    painter.rect(face, 4.0, KEYCAP, Stroke::new(1.0_f32, KEYCAP_EDGE));
     painter.galley(face.center() - galley.size() * 0.5, galley, TEXT);
     response
 }
@@ -757,7 +757,7 @@ pub fn step_pips(ui: &mut Ui, steps: usize, at: usize) {
             }
             std::cmp::Ordering::Equal => {
                 painter.circle_filled(c, r, GOLD_WASH);
-                painter.circle_stroke(c, r, Stroke::new(1.5, GOLD));
+                painter.circle_stroke(c, r, Stroke::new(1.5_f32, GOLD));
             }
             std::cmp::Ordering::Greater => {
                 painter.circle_filled(c, r - 1.0, BORDER);
@@ -769,7 +769,7 @@ pub fn step_pips(ui: &mut Ui, steps: usize, at: usize) {
 /// A tick, drawn rather than set in type, in `colour`, filling `rect`.
 pub fn tick(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
     let p = |x: f32, y: f32| rect.min + egui::vec2(rect.width() * x, rect.height() * y);
-    let stroke = Stroke::new(2.0, colour);
+    let stroke = Stroke::new(2.0_f32, colour);
     painter.line_segment([p(0.1, 0.55), p(0.4, 0.85)], stroke);
     painter.line_segment([p(0.4, 0.85), p(0.92, 0.18)], stroke);
 }
@@ -779,8 +779,8 @@ pub fn tick(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
 pub fn gold_fields(ui: &mut Ui) {
     let v = ui.visuals_mut();
     v.extreme_bg_color = BG_DARK;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, GOLD_DIM.gamma_multiply(0.7));
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, GOLD_DIM);
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.7));
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, GOLD_DIM);
 }
 
 // ---------------------------------------------------------------------------
@@ -825,7 +825,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     } else {
         lerp_colour(GOLD_DIM.gamma_multiply(0.6), GOLD, t)
     };
-    painter.rect(rect, 10.0, track, Stroke::new(1.0, edge));
+    painter.rect(rect, 10.0, track, Stroke::new(1.0_f32, edge));
     let r = rect.height() / 2.0 - 3.0;
     let x = egui::lerp(rect.left() + r + 3.0..=rect.right() - r - 3.0, t);
     painter.circle_filled(
@@ -863,7 +863,7 @@ pub fn segmented<T: PartialEq + Copy>(
             .add(
                 egui::Button::new(RichText::new(name).size(size::SMALL).color(ink))
                     .fill(fill)
-                    .stroke(Stroke::new(1.0, edge))
+                    .stroke(Stroke::new(1.0_f32, edge))
                     .rounding(rounding)
                     .min_size(egui::vec2(36.0, 22.0)),
             )
@@ -924,7 +924,7 @@ pub fn level(
         track,
         2.5,
         FIELD,
-        Stroke::new(1.0, GOLD_DIM.gamma_multiply(0.4)),
+        Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.4)),
     );
     let x = egui::lerp(rail.left()..=rail.right(), t);
     let filled = egui::Rect::from_min_max(track.min, egui::pos2(x, track.max.y));
@@ -937,7 +937,7 @@ pub fn level(
         egui::pos2(x, y),
         if hot { 7.0 } else { 6.0 },
         if hot { GOLD_LIGHT } else { GOLD },
-        Stroke::new(1.5, BG_DARK),
+        Stroke::new(1.5_f32, BG_DARK),
     );
     let (readout, _) =
         ui.allocate_exact_size(egui::vec2(READOUT, ROW_HEIGHT), egui::Sense::hover());

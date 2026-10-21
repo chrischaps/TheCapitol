@@ -88,6 +88,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: flint-client
+      # Clippy over capitol-core and capitol-client, -D warnings (#264).
+      - name: Clippy
+        working-directory: .
+        run: scripts/ci.sh flint-check
       # In flint-client/: capitol-core's tests, then capitol-client's.
       - name: Flint client
         working-directory: .

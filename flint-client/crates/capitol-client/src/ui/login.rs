@@ -101,7 +101,7 @@ impl LoginForm {
                 ui.multiply_opacity(opacity);
                 theme::panel()
                     .inner_margin(egui::Margin::same(28.0))
-                    .stroke(Stroke::new(1.0, GOLD_DIM.gamma_multiply(0.6)))
+                    .stroke(Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.6)))
                     .show(ui, |ui| {
                         ui.set_width(WIDTH);
                         theme::gold_fields(ui);
@@ -400,7 +400,7 @@ fn tab_button(ui: &mut egui::Ui, text: &str, active: bool) -> egui::Response {
                 egui::pos2(r.left(), r.bottom() + 3.0),
                 egui::pos2(r.right(), r.bottom() + 3.0),
             ],
-            Stroke::new(2.0, GOLD),
+            Stroke::new(2.0_f32, GOLD),
         );
     }
     response

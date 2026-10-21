@@ -740,7 +740,7 @@ mod tests {
     fn every_face_faces_its_normal_and_the_tops_are_level() {
         let (_, plots) = fixture();
         for m in plots.meshes.values() {
-            for t in m.indices.chunks_exact(3) {
+            for t in m.indices.as_chunks::<3>().0 {
                 let [a, b, c] = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]);
                 let n = a.normal;
                 assert!(facing(a.position, b.position, c.position, n));
@@ -821,7 +821,7 @@ mod tests {
             assert!(v.position[1] <= layer::PLOT + s.lip + OVERLAY + 1e-4);
         }
         // Its tops face up (the glow keeps its winding), and the glow is gold.
-        for t in m.indices.chunks_exact(3) {
+        for t in m.indices.as_chunks::<3>().0 {
             let [a, b, c] = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]);
             if a.normal[1] != 0.0 {
                 assert!(facing(a.position, b.position, c.position, UP));

@@ -280,9 +280,9 @@ impl Report {
         let mut time: Vec<TimeLine> = time.into_values().collect();
         time.sort_by(|a, b| b.hours.total_cmp(&a.hours));
         let mut stuck: Vec<(String, usize)> = stuck.into_iter().collect();
-        stuck.sort_by(|a, b| b.1.cmp(&a.1));
+        stuck.sort_by_key(|s| std::cmp::Reverse(s.1));
         let mut failures: Vec<(String, usize)> = failures.into_iter().collect();
-        failures.sort_by(|a, b| b.1.cmp(&a.1));
+        failures.sort_by_key(|f| std::cmp::Reverse(f.1));
         Report {
             bots: runs.len(),
             roles,

@@ -162,7 +162,7 @@ pub mod probe {
 
     pub fn triangles(m: &MeshBuf) -> impl Iterator<Item = [Vertex; 3]> + '_ {
         m.indices
-            .chunks_exact(3)
+            .as_chunks::<3>().0.iter()
             .map(|t| [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]))
     }
 
@@ -199,7 +199,7 @@ mod tests {
             for normal in [UP, [0.0, -1.0, 0.0]] {
                 let mut m = MeshBuf::default();
                 m.quad(corners, normal, [1.0; 4]);
-                for tri in m.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]) {
+                for tri in m.indices.as_chunks::<3>().0.iter().map(|t| [t[0], t[1], t[2]]) {
                     let p = tri.map(|i| m.vertices[i as usize].position);
                     assert!(facing(p[0], p[1], p[2], normal));
                 }
@@ -211,7 +211,7 @@ mod tests {
     fn the_annulus_faces_up() {
         let mut m = MeshBuf::default();
         m.annulus(10.0, 20.0, 0.0, [1.0; 4], &[]);
-        for tri in m.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]) {
+        for tri in m.indices.as_chunks::<3>().0.iter().map(|t| [t[0], t[1], t[2]]) {
             let p = tri.map(|i| m.vertices[i as usize].position);
             assert!(facing(p[0], p[1], p[2], UP));
         }

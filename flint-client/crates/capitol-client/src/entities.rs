@@ -678,7 +678,7 @@ mod tests {
             .chain([ring()])
         {
             assert!(!m.indices.is_empty());
-            for t in m.indices.chunks_exact(3) {
+            for t in m.indices.as_chunks::<3>().0 {
                 let v = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]);
                 assert!(
                     facing(v[0].position, v[1].position, v[2].position, v[0].normal),

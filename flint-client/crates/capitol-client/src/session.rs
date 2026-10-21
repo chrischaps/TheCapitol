@@ -2982,7 +2982,6 @@ mod tests {
         use capitol_core::bot::{Account, Bot};
         use capitol_core::net::NetConfig;
         use capitol_core::protocol::rest::{GrantItem, GrantRequest};
-        use capitol_core::protocol::terrain::LandmarkKind;
 
         let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
         let stamp = std::time::SystemTime::now()

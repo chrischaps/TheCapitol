@@ -187,7 +187,7 @@ pub fn plots(
                     HLine::new(last.close as f64)
                         .color(DIM.gamma_multiply(0.5))
                         .style(LineStyle::Dashed { length: 4.0 })
-                        .width(1.0)
+                        .width(1.0_f32)
                         .allow_hover(false),
                 );
             }
@@ -206,7 +206,7 @@ pub fn plots(
                             .box_width(bucket.secs() as f64 * BODY)
                             .whisker_width(0.0)
                             .fill(colour.gamma_multiply(0.55))
-                            .stroke(Stroke::new(1.0, colour))
+                            .stroke(Stroke::new(1.0_f32, colour))
                         })
                         .collect();
                     plot.box_plot(BoxPlot::new(boxes).allow_hover(false));
@@ -220,11 +220,11 @@ pub fn plots(
                     plot.line(
                         Line::new(closes)
                             .color(TEXT.gamma_multiply(0.85))
-                            .width(1.5)
+                            .width(1.5_f32)
                             .fill(y0 as f32)
                             // egui_plot scales the fill in linear light, so
                             // a little goes a long way
-                            .fill_alpha(0.012)
+                            .fill_alpha(0.012_f32)
                             .allow_hover(false),
                     );
                 }
@@ -286,7 +286,7 @@ fn base_plot<'a>(id: &str, width: f32, height: f32, secs_per_point: f64) -> Plot
 fn highlight(x: f64) -> VLine {
     VLine::new(x)
         .color(TEXT.gamma_multiply(0.18))
-        .width(1.0)
+        .width(1.0_f32)
         .allow_hover(false)
 }
 
@@ -305,7 +305,7 @@ fn fills(plot: &mut egui_plot::PlotUi, history: &History) {
         plot.points(
             Points::new(at.clone())
                 .shape(shape)
-                .radius(6.5)
+                .radius(6.5_f32)
                 .filled(true)
                 .color(INK_SHADOW)
                 .allow_hover(false),
@@ -313,7 +313,7 @@ fn fills(plot: &mut egui_plot::PlotUi, history: &History) {
         plot.points(
             Points::new(at)
                 .shape(shape)
-                .radius(4.5)
+                .radius(4.5_f32)
                 .filled(true)
                 .color(GOLD)
                 .allow_hover(false),
@@ -628,7 +628,7 @@ pub fn empty(ui: &mut egui::Ui, text: &str, height: f32) {
     ui.painter().hline(
         rect.shrink2(egui::vec2(24.0, 0.0)).x_range(),
         rect.center().y + 14.0,
-        Stroke::new(1.0, GOLD_DIM.gamma_multiply(0.25)),
+        Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.25)),
     );
 }
 

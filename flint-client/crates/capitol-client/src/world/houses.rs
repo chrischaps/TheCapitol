@@ -1497,7 +1497,7 @@ mod tests {
                     let Some(h) = house(id, lot, p) else {
                         continue;
                     };
-                    for t in h.body.indices.chunks_exact(3) {
+                    for t in h.body.indices.as_chunks::<3>().0 {
                         let [a, b, c] = [t[0], t[1], t[2]].map(|i| h.body.vertices[i as usize]);
                         assert!(facing(a.position, b.position, c.position, a.normal), "{id}");
                     }

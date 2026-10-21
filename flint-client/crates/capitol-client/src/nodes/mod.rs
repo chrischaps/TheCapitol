@@ -31,7 +31,7 @@
 pub mod models;
 pub mod sample;
 
-use crate::coords::{layer, to_world};
+use crate::coords::to_world;
 use crate::script_api::{NodeMark, Shared};
 use crate::world::mesh::MeshBuf;
 use crate::world::sector::Sector;
@@ -616,6 +616,7 @@ fn spring(t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coords::layer;
 
     fn info(state: &str, kind: &str) -> ResourceNodeInfo {
         ResourceNodeInfo {
@@ -670,8 +671,8 @@ mod tests {
         for (baked, v) in m.vertices.iter().zip(&model.vertices) {
             let p = rotate(q, v.position.map(|c| c * node.size));
             let want = [p[0] + node.at[0], p[1] + layer::GROUND, p[2] + node.at[1]];
-            for k in 0..3 {
-                assert!((baked.position[k] - want[k]).abs() < 1e-4);
+            for (got, want) in baked.position.iter().zip(want) {
+                assert!((got - want).abs() < 1e-4);
             }
         }
     }

@@ -94,7 +94,7 @@ Engine changes are made in `flint-client/engine/` and go upstream to Flint (`htt
 
 - Run the commands under the issue's **Verify** heading.
 - Run the tests for what you changed, by module (`cargo test -p capitol-backend <module>::`), not the whole suite.
-- `scripts/ci.sh` is the smoke test `land` runs: clippy with `-D warnings` over all targets, the protocol's fixture tests, and a check of the Flint client when you touched `flint-client/` or `protocol/`. It runs in a minute or two once `target/` is warm. `cargo test` passing doesn't mean clippy does: master was red for 31 pushes on dead code that only tests used (#216).
+- `scripts/ci.sh` is the smoke test `land` runs: clippy with `-D warnings` over all targets, the protocol's fixture tests, and clippy over the Flint client (capitol-core and capitol-client, all targets) when you touched `flint-client/` or `protocol/`. It runs in a minute or two once `target/` is warm. `cargo test` passing doesn't mean clippy does: master was red for 31 pushes on dead code that only tests used (#216).
 - The full suites (the backend tests, the database tests, the Flint client's tests) run in CI nightly, not when you land (#270). A red nightly opens a `bug` issue, which this skill picks first. Run `scripts/ci.sh full` (or `gh workflow run ci.yml --ref issue-<n>` after pushing the branch) before landing something risky: a migration, terrain or generation, a change to a shared type, a wide refactor.
 - Tick off every **Acceptance** item, and be honest about any you couldn't do.
 - Visual work: capture screenshots into `flint-client/renders/` (gitignored) and look at them yourself before calling it done. `flint render` can't show the runtime world, so use the client's `--offline fixtures/terrain.json` capture mode.

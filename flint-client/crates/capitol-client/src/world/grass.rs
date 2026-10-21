@@ -300,7 +300,7 @@ impl Mask {
                 }
             }
             xs.sort_by(f64::total_cmp);
-            for span in xs.chunks_exact(2) {
+            for span in xs.as_chunks::<2>().0 {
                 let i0 = self.texel_of([span[0], y])[0].max(0);
                 let i1 = self.texel_of([span[1], y])[0].min(n - 1);
                 for i in i0..=i1 {

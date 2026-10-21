@@ -283,7 +283,7 @@ pub fn header(
         painter.hline(
             rect.left() + rect.width() * t0..=rect.left() + rect.width() * t1,
             rect.bottom() - 0.5,
-            Stroke::new(1.0, theme::GOLD_DIM.gamma_multiply(fade)),
+            Stroke::new(1.0_f32, theme::GOLD_DIM.gamma_multiply(fade)),
         );
     }
     clicks
@@ -328,7 +328,7 @@ fn patron_chip(ui: &mut egui::Ui, hover: &str) {
                 ui.painter().add(egui::Shape::convex_polygon(
                     lozenge,
                     theme::GOLD,
-                    Stroke::new(0.8, theme::GOLD_LIGHT),
+                    Stroke::new(0.8_f32, theme::GOLD_LIGHT),
                 ));
             });
         })
@@ -393,7 +393,7 @@ pub fn impound_chip(ui: &mut egui::Ui, stacks: usize, open: bool) -> egui::Respo
                 })
                 .collect();
             ui.painter().add(egui::Shape::convex_polygon(rim, theme::INK_DOWN, Stroke::NONE));
-            ui.painter().circle_stroke(c, 3.0, Stroke::new(0.8, theme::PAPER_EDGE.gamma_multiply(0.7)));
+            ui.painter().circle_stroke(c, 3.0, Stroke::new(0.8_f32, theme::PAPER_EDGE.gamma_multiply(0.7)));
         });
     });
     shown
@@ -528,7 +528,7 @@ fn sparkle(ctx: &egui::Context, chip: egui::Rect, tick: &Tick) {
         // The bigger ones glint, four-pointed.
         if mote.radius > 1.6 {
             let arm = mote.radius * 2.6;
-            let stroke = Stroke::new(0.8, colour.gamma_multiply(mote.alpha * 0.7));
+            let stroke = Stroke::new(0.8_f32, colour.gamma_multiply(mote.alpha * 0.7));
             painter.hline(at.x - arm..=at.x + arm, at.y, stroke);
             painter.vline(at.x, at.y - arm..=at.y + arm, stroke);
         }

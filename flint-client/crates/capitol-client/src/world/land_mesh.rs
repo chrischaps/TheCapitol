@@ -420,7 +420,7 @@ mod tests {
                 let m = build(field, &Shore::default(), chunk, lod);
                 assert!(!m.indices.is_empty(), "{chunk:?} at {lod}");
                 let n = CHUNK / (1 << lod) + 1;
-                for tri in m.indices.chunks_exact(3) {
+                for tri in m.indices.as_chunks::<3>().0 {
                     let [a, b, c] = [0, 1, 2].map(|k| m.vertices[tri[k] as usize].position);
                     let up = facing(a, b, c, [0.0, 1.0, 0.0]);
                     let ground = tri.iter().all(|&i| (i as usize) < n * n);

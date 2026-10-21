@@ -52,11 +52,12 @@ pub enum Record {
         role: String,
         layers: Vec<String>,
     },
+    /// Boxed, so the other records aren't the size of a decision (#264).
     Decision {
         t: i64,
         id: u64,
-        situation: Situation,
-        ruling: Ruling,
+        situation: Box<Situation>,
+        ruling: Box<Ruling>,
     },
     Outcome {
         t: i64,
@@ -196,8 +197,8 @@ impl Log {
         self.write(&Record::Decision {
             t: now_ms(),
             id,
-            situation: situation.clone(),
-            ruling: ruling.clone(),
+            situation: Box::new(situation.clone()),
+            ruling: Box::new(ruling.clone()),
         });
         id
     }
@@ -377,8 +378,8 @@ mod tests {
             Record::Decision {
                 t: 2,
                 id: 1,
-                situation: s,
-                ruling,
+                situation: Box::new(s),
+                ruling: Box::new(ruling),
             },
             Record::Outcome {
                 t: 3,

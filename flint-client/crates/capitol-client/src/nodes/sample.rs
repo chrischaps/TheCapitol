@@ -24,7 +24,7 @@ const TAKEN_AT: f32 = 7.0;
 const BACK_AT: f32 = 13.0;
 const LOOP: f32 = 18.0;
 /// The sample's worker, nobody in particular.
-const WORKER: Uuid = Uuid::from_u128(0x5a3d_1e);
+const WORKER: Uuid = Uuid::from_u128(0x5a3d1e);
 
 /// The kinds in rows, by resource id, with how far apart they stand
 /// (server units). The last is one the client doesn't know.

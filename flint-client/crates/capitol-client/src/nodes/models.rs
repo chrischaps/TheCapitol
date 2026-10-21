@@ -1650,7 +1650,7 @@ mod tests {
             if (kind, look) == (Kind::Grass, Look::Spent) {
                 continue;
             }
-            for t in m.indices.chunks_exact(3) {
+            for t in m.indices.as_chunks::<3>().0 {
                 let p = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]);
                 assert!(
                     crate::world::mesh::facing(

@@ -222,7 +222,7 @@ impl ExchangePanel {
         ui.painter().hline(
             row.x_range(),
             row.bottom() - 0.5,
-            Stroke::new(1.0, GOLD_DIM.gamma_multiply(0.5)),
+            Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.5)),
         );
         for (i, (tab, name)) in [(Tab::Deposit, "Deposit"), (Tab::Withdraw, "Withdraw")]
             .into_iter()
@@ -255,7 +255,7 @@ impl ExchangePanel {
                 painter.hline(
                     rect.shrink2(egui::vec2(10.0, 0.0)).x_range(),
                     rect.bottom() - 1.0,
-                    Stroke::new(2.0, GOLD),
+                    Stroke::new(2.0_f32, GOLD),
                 );
             }
             if response.clicked() {
@@ -471,7 +471,7 @@ fn receipt(ui: &mut egui::Ui, r: &Receipt, age: Duration) {
         ui.multiply_opacity(fade);
         egui::Frame::none()
             .fill(ENOUGH.gamma_multiply(0.12))
-            .stroke(Stroke::new(1.0, ENOUGH.gamma_multiply(0.6)))
+            .stroke(Stroke::new(1.0_f32, ENOUGH.gamma_multiply(0.6)))
             .rounding(4.0)
             .inner_margin(egui::Margin::symmetric(12.0, 7.0))
             .show(ui, |ui| {
@@ -545,10 +545,10 @@ fn check_box(ui: &egui::Ui, rect: egui::Rect, on: bool) {
         let a = r.left_center() + egui::vec2(3.0, 0.0);
         let b = r.center_bottom() + egui::vec2(-1.0, -4.0);
         let c = r.right_top() + egui::vec2(-3.0, 4.0);
-        painter.line_segment([a, b], Stroke::new(2.0, theme::BG_DARK));
-        painter.line_segment([b, c], Stroke::new(2.0, theme::BG_DARK));
+        painter.line_segment([a, b], Stroke::new(2.0_f32, theme::BG_DARK));
+        painter.line_segment([b, c], Stroke::new(2.0_f32, theme::BG_DARK));
     } else {
-        painter.rect_stroke(r, 3.0, Stroke::new(1.0, GOLD_DIM));
+        painter.rect_stroke(r, 3.0, Stroke::new(1.0_f32, GOLD_DIM));
     }
 }
 
@@ -604,7 +604,7 @@ fn pick_chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
         egui::Button::new(RichText::new(text).size(size::SMALL).color(GOLD))
             .fill(theme::CHIP)
-            .stroke(Stroke::new(1.0, GOLD_DIM.gamma_multiply(0.6)))
+            .stroke(Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.6)))
             .rounding(4.0)
             .min_size(egui::vec2(0.0, 22.0)),
     )

@@ -2029,7 +2029,7 @@ mod tests {
             anvil(),
             generic(),
         ] {
-            for t in m.indices.chunks_exact(3) {
+            for t in m.indices.as_chunks::<3>().0 {
                 let v = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]);
                 assert!(crate::world::mesh::facing(
                     v[0].position,

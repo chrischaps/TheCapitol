@@ -378,7 +378,7 @@ impl MarketPanel {
         ui.painter().hline(
             row.x_range(),
             row.bottom() - 0.5,
-            Stroke::new(1.0, GOLD_DIM.gamma_multiply(0.5)),
+            Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.5)),
         );
         let width = row.width() / 3.0;
         let mine = format!("Orders · {orders}");
@@ -411,7 +411,7 @@ impl MarketPanel {
                 painter.hline(
                     rect.shrink2(egui::vec2(10.0, 0.0)).x_range(),
                     rect.bottom() - 1.0,
-                    Stroke::new(2.0, GOLD),
+                    Stroke::new(2.0_f32, GOLD),
                 );
             }
             if response.clicked() {
@@ -1103,7 +1103,7 @@ impl MarketPanel {
                                 ))
                                 .fill(if on { GOLD_WASH } else { theme::FIELD })
                                 .stroke(Stroke::new(
-                                    1.0,
+                                    1.0_f32,
                                     if on {
                                         GOLD
                                     } else {
@@ -1481,7 +1481,7 @@ fn spread(ui: &mut egui::Ui, book: &Book) {
     let galley = painter.layout_no_wrap(text, theme::body(size::LABEL), GOLD_DIM);
     let w = galley.size().x;
     let gap = w / 2.0 + 8.0;
-    let rule = Stroke::new(1.0, GOLD_DIM.gamma_multiply(0.45));
+    let rule = Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.45));
     painter.hline((rect.left() + 4.0)..=(rect.center().x - gap), y, rule);
     painter.hline((rect.center().x + gap)..=(rect.right() - 4.0), y, rule);
     painter.galley(
@@ -1513,7 +1513,7 @@ fn grade_pill(
             );
         }
         Some(GradeRule::Average) => {
-            painter.rect_stroke(r, 3.0, Stroke::new(1.0, colour.gamma_multiply(0.8)));
+            painter.rect_stroke(r, 3.0, Stroke::new(1.0_f32, colour.gamma_multiply(0.8)));
             painter.text(
                 r.center(),
                 Align2::CENTER_CENTER,
@@ -1554,7 +1554,7 @@ fn grade_picker(ui: &mut egui::Ui, value: &mut &'static str) {
                     colour.gamma_multiply(0.12)
                 })
                 .stroke(Stroke::new(
-                    1.0,
+                    1.0_f32,
                     colour.gamma_multiply(if on { 1.0 } else { 0.5 }),
                 ))
                 .rounding(4.0)
@@ -1613,7 +1613,7 @@ fn preview(ui: &mut egui::Ui, quote: &Result<OrderQuote, FormRefusal>) {
             }
             Ok(q) => {
                 row(ui, "Value", theme::text(grouped(q.value)));
-                row(ui, "Fee (1%)", theme::dim(format!("{}", grouped(q.fee))));
+                row(ui, "Fee (1%)", theme::dim(grouped(q.fee).to_string()));
                 ui.add_space(2.0);
                 theme::divider(ui);
                 ui.add_space(2.0);
@@ -1675,7 +1675,7 @@ fn chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
         egui::Button::new(RichText::new(text).size(size::SMALL).color(GOLD))
             .fill(theme::CHIP)
-            .stroke(Stroke::new(1.0, GOLD_DIM.gamma_multiply(0.6)))
+            .stroke(Stroke::new(1.0_f32, GOLD_DIM.gamma_multiply(0.6)))
             .rounding(4.0)
             .min_size(egui::vec2(0.0, 22.0)),
     )
@@ -1886,6 +1886,7 @@ impl Sample {
     }
 
     /// The panel's view of it, with the plank book when `selected` is plank.
+    #[cfg(test)]
     pub fn view(&self, selected: Option<&str>) -> View<'_> {
         self.view_with(selected, None)
     }

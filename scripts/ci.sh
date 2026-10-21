@@ -5,8 +5,8 @@
 #
 #   scripts/ci.sh                 smoke: land's verify (#270)
 #   scripts/ci.sh full            what CI runs: clippy, test and db, plus
-#                                 flint when the branch touches flint-client/
-#                                 or protocol/
+#                                 flint-check and flint when the branch
+#                                 touches flint-client/ or protocol/
 #   scripts/ci.sh <step>...       just these steps, in this order
 #
 # Steps:
@@ -16,7 +16,8 @@
 #   protocol the protocol's tests: the wire fixtures round-trip
 #   test     cargo test, backend and protocol
 #   db       the #[ignore]d database tests; needs Postgres (docker-compose up -d)
-#   flint-check  in flint-client/: cargo check of capitol-core and capitol-client
+#   flint-check  in flint-client/: clippy over capitol-core and capitol-client,
+#            all targets, -D warnings
 #   flint    in flint-client/: capitol-core's and capitol-client's tests
 #
 # Landing runs smoke, not the suites (#270). The suites took most of a land:
@@ -106,7 +107,7 @@ step() {
             step clippy
             step test
             step db
-            if touches_flint; then step flint; fi ;;
+            if touches_flint; then step flint-check; step flint; fi ;;
         clippy)
             cargo clippy --all-targets -p capitol-protocol -p capitol-backend -- -D warnings ;;
         protocol)
@@ -128,8 +129,10 @@ step() {
             cargo test -p capitol-backend -- --ignored "${skips[@]}"
             rm -rf "$DB_LOCK"; DB_LOCK=; trap - EXIT ;;
         flint-check)
-            # Per crate, never --workspace: the engine's flint-android needs ndk-sys.
-            (cd flint-client && cargo check -p capitol-core -p capitol-client --all-targets) ;;
+            # Per crate, never --workspace: the engine's flint-android needs
+            # ndk-sys. Clippy, not a bare check: it costs about the same, and
+            # until #264 lints in flint-client/ landed unseen.
+            (cd flint-client && cargo clippy -p capitol-core -p capitol-client --all-targets -- -D warnings) ;;
         flint)
             # Per crate, never --workspace: the engine's flint-android needs
             # ndk-sys. capitol-core's live.rs tests need a server and stay

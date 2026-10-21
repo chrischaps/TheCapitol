@@ -314,7 +314,7 @@ impl TradePanel {
                 TRADE.gamma_multiply(0.4)
             };
             ui.painter()
-                .rect_stroke(well, 6.0, Stroke::new(if over { 2.0 } else { 1.0 }, edge));
+                .rect_stroke(well, 6.0, Stroke::new(if over { 2.0 } else { 1.0_f32 }, edge));
             if over {
                 ui.painter()
                     .rect_filled(well, 6.0, TRADE.gamma_multiply(0.08));

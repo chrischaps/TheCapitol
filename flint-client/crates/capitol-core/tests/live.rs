@@ -711,7 +711,7 @@ fn trade_refusals_come_back_as_errors() {
     use capitol_core::state::TradeAction;
     let _server = shared();
 
-    fn refused<'a>(seen: &'a [StateEvent], action: TradeAction) -> Option<&'a str> {
+    fn refused(seen: &[StateEvent], action: TradeAction) -> Option<&str> {
         seen.iter().find_map(|e| match e {
             StateEvent::Trade(TradeEvent::Refused { action: a, reason }) if *a == action => {
                 Some(reason.as_str())
@@ -1188,7 +1188,7 @@ fn two_clients_on_one_account_share_one_avatar() {
         rest(&desk, walk, 2),
         Err(RestError::Http { status: 409, .. })
     ));
-    assert!(matches!(rest(&desk, RestRequest::MarketBox, 3), Ok(_)));
+    assert!(rest(&desk, RestRequest::MarketBox, 3).is_ok());
 
     // A bot on a play key watches, and can't take it while a client is connected.
     let Ok(RestResponse::CreatedApiKey(key)) = rest(

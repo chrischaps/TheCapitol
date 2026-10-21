@@ -203,7 +203,7 @@ fn stamp(ui: &mut egui::Ui, text: &str) {
         turn(egui::vec2(-half.x, half.y)),
     ];
     let ink = INK_DOWN.gamma_multiply(1.6);
-    ui.painter().add(egui::Shape::closed_line(corners.to_vec(), Stroke::new(1.5, ink)));
+    ui.painter().add(egui::Shape::closed_line(corners.to_vec(), Stroke::new(1.5_f32, ink)));
     let at = turn(-galley.size() / 2.0);
     ui.painter()
         .add(egui::epaint::TextShape::new(at, galley, ink).with_angle(STAMP_TILT));
