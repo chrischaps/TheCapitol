@@ -10,8 +10,9 @@
 //! they're next back (`player_notices`, #138).
 //!
 //! [`Subscriber`] gates what GDD §5's access matrix keeps for subscribers.
-//! In this plan that's automation that runs while you're away (E4.3), and
-//! later guild leadership.
+//! In this plan that's minting bot API keys (#217), and later guild
+//! leadership. Automation that runs while you're away (E4.3) is checked in
+//! the tick with [`of`], and a key's sign-in in `api_keys::authenticate`.
 
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
@@ -76,6 +77,9 @@ pub struct Lapse {
     pub until: DateTime<Utc>,
     /// The queued notice, for the live event to take
     pub notice_id: Option<Uuid>,
+    /// The account's live API keys, whose sockets hang up: bots are for
+    /// subscribers (#217)
+    pub key_ids: Vec<Uuid>,
 }
 
 /// Mark every active subscription past its end as lapsed, and queue each
@@ -121,6 +125,7 @@ async fn lapse(db: &PgPool, account_id: Uuid) -> Result<Option<Lapse>, sqlx::Err
         return Ok(None);
     };
     tracing::info!("Account {account_id}'s subscription lapsed (ended {until})");
+    let key_ids = crate::api_keys::live_keys(&mut *tx, account_id).await?;
     let player_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM players WHERE account_id = $1 LIMIT 1")
         .bind(account_id)
         .fetch_optional(&mut *tx)
@@ -143,11 +148,10 @@ async fn lapse(db: &PgPool, account_id: Uuid) -> Result<Option<Lapse>, sqlx::Err
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(Some(Lapse { player_id, until, notice_id: Some(notice_id) }))
+    Ok(Some(Lapse { player_id, until, notice_id: Some(notice_id), key_ids }))
 }
 
 /// Why a subscriber-only request was refused, for the client to show.
-#[allow(dead_code)] // reached only through Subscriber, which no route uses yet (#217)
 pub fn refusal(subscription: &Subscription) -> String {
     match subscription.status {
         SubscriptionStatus::Lapsed => match subscription.until {
@@ -165,7 +169,6 @@ pub fn refusal(subscription: &Subscription) -> String {
 /// request from an account without a running subscription is refused with a
 /// `403` and [`refusal`]'s reason.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // no route behind it yet (#217)
 pub struct Subscriber {
     pub account_id: Uuid,
     pub subscription: Subscription,
@@ -202,6 +205,7 @@ mod tests {
     use super::*;
     use crate::engine::notices;
     use crate::engine::plot_sync::tests::player;
+    use capitol_protocol::rest::ApiKeyScope;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
@@ -321,10 +325,14 @@ mod tests {
         extend(&db, ada, 30).await.unwrap();
         extend(&db, bram, 30).await.unwrap();
         ends_in(&db, ada, -1).await;
+        let (bot, _) = crate::api_keys::mint(&db, ada, "bot", &[ApiKeyScope::Play]).await.unwrap();
+        let (old, _) = crate::api_keys::mint(&db, ada, "old", &[ApiKeyScope::Play]).await.unwrap();
+        sqlx::query("UPDATE api_keys SET revoked_at = NOW() WHERE id = $1").bind(old.id).execute(&db).await.unwrap();
 
         let lapses = lapse_expired(&db).await;
         assert_eq!(lapses.len(), 1);
         assert_eq!(lapses[0].player_id, ada_player);
+        assert_eq!(lapses[0].key_ids, vec![bot.id], "her live bots hang up");
         assert_eq!(of(&db, ada).await.unwrap().unwrap().status, SubscriptionStatus::Lapsed);
         assert_eq!(of(&db, bram).await.unwrap().unwrap().status, SubscriptionStatus::Active);
         assert!(lapse_expired(&db).await.is_empty(), "once");

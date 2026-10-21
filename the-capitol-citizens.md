@@ -61,6 +61,7 @@ All decided with Chris on 2026-10-20.
 Running agents inside the server would mean first moving most of the WebSocket handler's validation and database work into the engine. Only 11 of its ~30 messages become a `Command`. That cost buys nothing citizens need.
 
 - Each citizen is one account with one API key. Keys skip `/auth`, so the auth rate limit (10 a minute per IP) doesn't bite. The per-connection command limit (60 a minute) is plenty.
+- Bots are for subscribers (#217), but a citizen's key needs no subscription. It's the town's own, and a subscription isn't Strands, so D2 holds.
 - Under D9 (E0.8), a citizen's key holds the avatar the way any bot does.
 
 ### D2. Citizens earn everything

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use capitol_core::bot::{Account, Bot, BotError};
 use capitol_core::catalog::container_type;
 use capitol_core::net::{Net, NetConfig, NetEvent, RestRequest, RestResponse};
-use capitol_core::protocol::rest::{ApiKeyScope, AuthResponse, CreateApiKeyRequest, RegisterRequest};
+use capitol_core::protocol::rest::{ApiKeyScope, AuthResponse, CreateApiKeyRequest, RegisterRequest, SubscribeRequest};
 use capitol_core::protocol::rules;
 use capitol_core::protocol::terrain::LandmarkKind;
 use capitol_core::state::StateEvent;
@@ -125,6 +125,10 @@ fn play_key(what: &str) -> (Net, AuthResponse, String) {
         panic!("registered");
     };
     owner.connect(&auth);
+    // Bots are for subscribers (#217): a debug server mocks the payment
+    let RestResponse::Subscription(_) = rest(&owner, RestRequest::Subscribe(SubscribeRequest { days: 1 }), 10) else {
+        panic!("subscribed");
+    };
     let mint = CreateApiKeyRequest {
         name: what.into(),
         scopes: vec![ApiKeyScope::Play],

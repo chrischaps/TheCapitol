@@ -383,6 +383,7 @@ Subscription pays for *persistence* (your systems keep working while you're away
 |---------|---------------|------------|
 | Web / Mobile / Desktop clients | ✓ | ✓ |
 | CLI client | ✗ | ✓ |
+| Bots (API keys) | ✗ | ✓ |
 | Active play | ✓ | ✓ |
 | Server-side automation | ✗ | ✓ |
 | Plot ownership retained | ✓ | ✓ |
@@ -395,7 +396,8 @@ Subscription pays for *persistence* (your systems keep working while you're away
 - **No pay-for-power** - Tools, resources, quality boosts are never sold
 - **No exclusive content** - No subscriber-only recipes or areas
 - **No convenience skips** - No instant travel, instant crafting
-- **Server-side vs client-side** - Free players can run their own always-on clients/bots; subscribers get guaranteed server-side automation
+- **Bots are a subscriber privilege** - Free players play by hand. Subscribers get server-side automation, and API keys to run their own bots (decided 2026-10-21, #217)
+- **Friction, not whack-a-mole** - Bot rules are kept by putting friction in the way, not by hunting: no detection, and nothing that could make play worse for people playing by hand. Someone who works round it isn't worth chasing
 - **CLI as power-user tier** - Technical users who would run persistent bots are naturally segmented into subscription
 
 ---

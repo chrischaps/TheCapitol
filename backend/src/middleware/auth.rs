@@ -9,7 +9,7 @@ use axum::{
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use uuid::Uuid;
 
-use crate::api_keys::{self, KeyGrant};
+use crate::api_keys::{self, KeyAuth, KeyGrant};
 use crate::engine::presence::{self, Holder};
 use crate::error::SESSIONS_UNAVAILABLE;
 use crate::routes::auth::Claims;
@@ -123,8 +123,11 @@ async fn token_user(state: &AppState, token: &str) -> Result<(AuthUser, Holder),
 
 async fn key_user(state: &AppState, method: Method, path: &str, secret: &str) -> Result<AuthUser, Refusal> {
     let user = match api_keys::authenticate(&state.db, secret).await {
-        Ok(Some(user)) => user,
-        Ok(None) => return Err(refuse(StatusCode::UNAUTHORIZED, "Invalid or revoked API key")),
+        Ok(KeyAuth::Live(user)) => user,
+        Ok(KeyAuth::Unknown) => return Err(refuse(StatusCode::UNAUTHORIZED, "Invalid or revoked API key")),
+        Ok(KeyAuth::Unsubscribed(subscription)) => {
+            return Err(refuse(StatusCode::FORBIDDEN, api_keys::unsubscribed(&subscription)))
+        }
         Err(e) => {
             // Not a 401, for the same reason as a Redis error above.
             tracing::error!("Database error checking an API key: {:?}", e);

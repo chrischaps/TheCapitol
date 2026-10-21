@@ -20,7 +20,7 @@ use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo, TradeOff
 use crate::engine::container_access::{
     check_container_access, check_station_access, live_position, movable_item, move_refusal,
 };
-use crate::api_keys::{self, KeyGrant};
+use crate::api_keys::{self, KeyAuth, KeyGrant};
 use crate::engine::GameEvent;
 use crate::engine::load::{self, SocketEnd};
 use crate::engine::presence::{self, Holder, PresenceEvent};
@@ -108,7 +108,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         game.open_socket(player_id, authed.holder, may_hold)
     };
     // Fires when the socket's API key is revoked
-    let (_unrevokable, unrevokable) = tokio::sync::oneshot::channel::<()>();
+    let (_unrevokable, unrevokable) = tokio::sync::oneshot::channel::<String>();
     let mut revoked = match key {
         Some(key) => state.game.write().await.watch_key(key.id),
         None => unrevokable,
@@ -203,9 +203,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
 
-            // The API key this socket opened with was revoked
-            _ = &mut revoked => {
-                let msg = ServerMessage::AuthError { message: "API key revoked".into() };
+            // The API key this socket opened with was revoked, or its
+            // owner's subscription lapsed (#217)
+            why = &mut revoked => {
+                let message = why.unwrap_or_else(|_| "API key revoked".into());
+                let msg = ServerMessage::AuthError { message };
                 let _ = timeout(Duration::from_secs(2), async {
                     let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     let _ = sender.send(Message::Close(None)).await;
@@ -1298,12 +1300,13 @@ async fn authenticate(token: &str, state: &AppState) -> Result<Authed, String> {
         return Ok(Authed { account_id: claims.sub, key: None, holder: Holder::Session(claims.sid) });
     }
     match api_keys::authenticate(&state.db, token).await {
-        Ok(Some(user)) => Ok(Authed {
+        Ok(KeyAuth::Live(user)) => Ok(Authed {
             account_id: user.account_id,
             key: Some(user.grant),
             holder: Holder::Key(user.grant.id),
         }),
-        Ok(None) => Err("Invalid or revoked API key".into()),
+        Ok(KeyAuth::Unknown) => Err("Invalid or revoked API key".into()),
+        Ok(KeyAuth::Unsubscribed(subscription)) => Err(api_keys::unsubscribed(&subscription)),
         // Retried by capitol-core, like any other database error (`auth_error_is_final`)
         Err(e) => Err(format!("Database error: {}", e)),
     }

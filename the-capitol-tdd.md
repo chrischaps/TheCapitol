@@ -2688,6 +2688,8 @@ Deletion process:
 ### 6.9 API Key Authentication (for Bots)
 
 > **As built (E0.9, #152):** three scopes, `read`, `play` and `trade`, in place of the eight permissions below. Keys are sent as `Authorization: ApiKey cap_…`. See the E0.9 row of `the-capitol-economy.md`. The design below is the original sketch.
+>
+> **Subscribers only (#217, decided 2026-10-21):** minting a key takes a running subscription (the `Subscriber` extractor, 403 otherwise). A person's key signs in, over REST or the WebSocket, only while its account's subscription runs; when it lapses, the hourly check hangs up the key's sockets with the reason. The keys aren't revoked, so they work again on renewal. Listing and revoking need no subscription. A citizen's key needs none. This is friction, not enforcement: a bot on its owner's password isn't policed.
 
 Subscribers can generate API keys for bot access:
 

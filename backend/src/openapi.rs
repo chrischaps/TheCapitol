@@ -60,7 +60,8 @@ impl Modify for SecurityAddon {
 
 Most endpoints require JWT authentication. Obtain a token via `/auth/login` or `/auth/register`,
 then include it in the `Authorization: Bearer <token>` header. A bot can use an API key
-from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within its scopes.",
+from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within its scopes.
+Bots are for subscribers: minting a key, and signing in with one, take a running subscription.",
         license(name = "MIT")
     ),
     servers(

@@ -15,6 +15,7 @@ use crate::api_keys::{self, MAX_KEYS};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
+use crate::subscriptions::Subscriber;
 
 /// The longest name a key may have.
 const MAX_NAME_LEN: usize = 64;
@@ -48,7 +49,9 @@ fn checked_scopes(scopes: &[ApiKeyScope]) -> Result<Vec<ApiKeyScope>, AppError> 
     Ok(scopes)
 }
 
-/// Mint an API key. The secret is in this answer only.
+/// Mint an API key. The secret is in this answer only. Bots are for
+/// subscribers (#217), so this takes a running subscription; listing and
+/// revoking don't, so a lapsed player can still revoke a key.
 #[utoipa::path(
     post,
     path = "/account/api-keys",
@@ -56,6 +59,7 @@ fn checked_scopes(scopes: &[ApiKeyScope]) -> Result<Vec<ApiKeyScope>, AppError> 
     responses(
         (status = 200, description = "The new key, with its secret shown this once", body = CreatedApiKey),
         (status = 400, description = "No scopes, or a bad name"),
+        (status = 403, description = "The account has no running subscription"),
         (status = 409, description = "The account already holds the most live keys it may")
     ),
     security(("bearer_auth" = [])),
@@ -64,6 +68,7 @@ fn checked_scopes(scopes: &[ApiKeyScope]) -> Result<Vec<ApiKeyScope>, AppError> 
 pub async fn create_api_key(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
+    subscriber: Subscriber,
     Json(req): Json<CreateApiKeyRequest>,
 ) -> Result<Json<CreatedApiKey>, AppError> {
     players_only(&user)?;
@@ -76,7 +81,7 @@ pub async fn create_api_key(
     let live: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM api_keys WHERE account_id = $1 AND revoked_at IS NULL",
     )
-    .bind(user.account_id)
+    .bind(subscriber.account_id)
     .fetch_one(&state.db)
     .await?;
     if live >= MAX_KEYS {
@@ -85,8 +90,14 @@ pub async fn create_api_key(
         )));
     }
 
-    let (key, secret) = api_keys::mint(&state.db, user.account_id, name, &scopes).await?;
-    tracing::info!("Account {} minted API key {} ({:?})", user.account_id, key.id, key.scopes);
+    let (key, secret) = api_keys::mint(&state.db, subscriber.account_id, name, &scopes).await?;
+    tracing::info!(
+        "Account {} minted API key {} ({:?}), subscribed until {:?}",
+        subscriber.account_id,
+        key.id,
+        key.scopes,
+        subscriber.subscription.until
+    );
     Ok(Json(CreatedApiKey { key, secret }))
 }
 

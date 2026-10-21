@@ -1005,7 +1005,7 @@ fn the_login_form_signs_in_out_and_back() {
 #[test]
 #[ignore = "needs a local stack: docker-compose up -d, then cargo run in backend/"]
 fn a_read_key_watches_cant_move_and_revoking_it_drops_its_socket() {
-    use capitol_core::protocol::rest::{ApiKeyScope, CreateApiKeyRequest};
+    use capitol_core::protocol::rest::{ApiKeyScope, CreateApiKeyRequest, SubscribeRequest};
     let _server = shared();
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1028,6 +1028,11 @@ fn a_read_key_watches_cant_move_and_revoking_it_drops_its_socket() {
     wait_for(&owner, "the owner connected", |e| {
         matches!(e, NetEvent::Connection(ConnectionState::Connected { .. }))
     });
+    // Bots are for subscribers (#217): a debug server mocks the payment
+    match rest(&owner, RestRequest::Subscribe(SubscribeRequest { days: 1 }), 10) {
+        Ok(RestResponse::Subscription(_)) => {}
+        other => panic!("subscribe: {other:?}"),
+    }
     let mint = CreateApiKeyRequest {
         name: "watcher".into(),
         scopes: vec![ApiKeyScope::Read],

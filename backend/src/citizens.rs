@@ -149,7 +149,7 @@ mod tests {
         assert_eq!(kind, "citizen");
         assert_eq!(start_of(&db, wren.player_id).await, start_of(&db, ada).await, "no grants, nothing special");
 
-        let user = api_keys::authenticate(&db, &made.secret).await.unwrap().expect("its key signs it in");
+        let user = api_keys::authenticate(&db, &made.secret).await.unwrap().live().expect("its key signs it in, with no subscription");
         assert_eq!(user.account_id, wren.account_id);
         assert_eq!(user.grant.scopes, Scopes::of(&SCOPES));
 

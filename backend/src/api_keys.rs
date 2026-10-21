@@ -19,9 +19,18 @@
 //! The secret is `cap_` and 64 hex digits, shown once. Only its SHA-256 is
 //! kept. A revoked key is refused from its next request, and its sockets are
 //! closed (`GameState::revoke_key`).
+//!
+//! Bots are for subscribers (#217, GDD §5). Minting a key takes a running
+//! subscription (`subscriptions::Subscriber`), and a person's key signs in
+//! only while its account's subscription runs: when it lapses, the hourly
+//! check hangs up the key's sockets, and the next sign-in is refused. A
+//! citizen's key needs none: citizens are the server's own town, and a
+//! subscription isn't Strands, so they still earn everything (Citizens D2).
+//! It's friction, not a wall: a bot can still sign in with its owner's
+//! password, and nothing hunts for that.
 
 use axum::http::Method;
-use capitol_protocol::rest::{ApiKeyInfo, ApiKeyScope};
+use capitol_protocol::rest::{AccountKind, ApiKeyInfo, ApiKeyScope, Subscription, SubscriptionStatus};
 use capitol_protocol::ws::ClientMessage;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -79,6 +88,37 @@ pub struct KeyGrant {
 pub struct KeyUser {
     pub account_id: Uuid,
     pub grant: KeyGrant,
+}
+
+/// What a secret signs in as.
+#[derive(Debug, Clone)]
+pub enum KeyAuth {
+    /// A live key, for an account that may run a bot
+    Live(KeyUser),
+    /// No live key has this secret: it's unknown or revoked
+    Unknown,
+    /// A person's key whose subscription isn't running (#217)
+    Unsubscribed(Subscription),
+}
+
+#[cfg(test)]
+impl KeyAuth {
+    pub fn live(self) -> Option<KeyUser> {
+        match self {
+            KeyAuth::Live(user) => Some(user),
+            _ => None,
+        }
+    }
+}
+
+/// Why a key whose owner isn't subscribed was refused, for the bot to show.
+pub fn unsubscribed(subscription: &Subscription) -> String {
+    match subscription.status {
+        SubscriptionStatus::Lapsed => {
+            format!("Bots need a subscription. {}", crate::subscriptions::refusal(subscription))
+        }
+        _ => "Bots need a subscription.".into(),
+    }
 }
 
 /// A new secret.
@@ -214,21 +254,28 @@ pub async fn mint(
     Ok((info(row), secret))
 }
 
-/// The account a secret belongs to, if it's a live key. Notes the use, at
-/// most once a minute.
-pub async fn authenticate(db: &PgPool, secret: &str) -> Result<Option<KeyUser>, sqlx::Error> {
-    let row: Option<(Uuid, Uuid, Vec<String>, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT k.id, k.account_id, k.scopes, k.last_used_at
+/// The account a secret belongs to, if it's a live key and the account may
+/// run a bot. Notes the use, at most once a minute.
+pub async fn authenticate(db: &PgPool, secret: &str) -> Result<KeyAuth, sqlx::Error> {
+    type Row = (Uuid, Uuid, Vec<String>, Option<DateTime<Utc>>, String, String, Option<DateTime<Utc>>);
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT k.id, k.account_id, k.scopes, k.last_used_at,
+                a.kind, a.subscription_status, a.subscription_until
          FROM api_keys k
+         JOIN accounts a ON a.id = k.account_id
          WHERE k.secret_hash = $1 AND k.revoked_at IS NULL",
     )
     .bind(crate::sessions::hash(secret))
     .fetch_optional(db)
     .await?;
-    let Some((id, account_id, scopes, last_used_at)) = row else {
-        return Ok(None);
+    let Some((id, account_id, scopes, last_used_at, kind, status, until)) = row else {
+        return Ok(KeyAuth::Unknown);
     };
     let now = Utc::now();
+    let subscription = Subscription { status: SubscriptionStatus::parse(&status), until }.as_of(now);
+    if AccountKind::parse(&kind) != Some(AccountKind::Citizen) && !subscription.is_active_at(now) {
+        return Ok(KeyAuth::Unsubscribed(subscription));
+    }
     if last_used_at.is_none_or(|at| now - at > chrono::Duration::minutes(1)) {
         sqlx::query("UPDATE api_keys SET last_used_at = $2 WHERE id = $1")
             .bind(id)
@@ -237,13 +284,21 @@ pub async fn authenticate(db: &PgPool, secret: &str) -> Result<Option<KeyUser>, 
             .await?;
     }
     let scopes: Vec<ApiKeyScope> = scopes.iter().filter_map(|s| ApiKeyScope::parse(s)).collect();
-    Ok(Some(KeyUser {
+    Ok(KeyAuth::Live(KeyUser {
         account_id,
         grant: KeyGrant {
             id,
             scopes: Scopes::of(&scopes),
         },
     }))
+}
+
+/// The account's unrevoked keys, to hang up when its subscription lapses.
+pub async fn live_keys(db: impl sqlx::PgExecutor<'_>, account_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar("SELECT id FROM api_keys WHERE account_id = $1 AND revoked_at IS NULL")
+        .bind(account_id)
+        .fetch_all(db)
+        .await
 }
 
 /// Whether key `id` is still unrevoked.
@@ -377,9 +432,10 @@ mod tests {
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
     async fn a_live_key_signs_in_as_its_account_until_revoked(db: PgPool) {
         let ada = account(&db).await;
+        crate::subscriptions::extend(&db, ada, 30).await.unwrap();
         let (id, secret) = mint(&db, ada, &["read"]).await;
 
-        let user = authenticate(&db, &secret).await.unwrap().expect("a live key");
+        let user = authenticate(&db, &secret).await.unwrap().live().expect("a live key");
         assert_eq!(user.account_id, ada);
         assert_eq!(user.grant, KeyGrant { id, scopes: Scopes::of(&[Read]) });
         let used: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT last_used_at FROM api_keys WHERE id = $1")
@@ -390,10 +446,53 @@ mod tests {
         assert!(used.is_some(), "the use is noted");
         assert!(is_live(&db, id).await.unwrap());
 
-        assert!(authenticate(&db, &new_secret()).await.unwrap().is_none(), "an unknown secret");
+        assert!(matches!(authenticate(&db, &new_secret()).await.unwrap(), KeyAuth::Unknown), "an unknown secret");
         sqlx::query("UPDATE api_keys SET revoked_at = NOW() WHERE id = $1").bind(id).execute(&db).await.unwrap();
-        assert!(authenticate(&db, &secret).await.unwrap().is_none(), "revoked");
+        assert!(matches!(authenticate(&db, &secret).await.unwrap(), KeyAuth::Unknown), "revoked");
         assert!(!is_live(&db, id).await.unwrap());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_persons_key_signs_in_only_while_they_subscribe(db: PgPool) {
+        let ada = account(&db).await;
+        let (_, secret) = mint(&db, ada, &["play"]).await;
+        let refused = |auth: KeyAuth| match auth {
+            KeyAuth::Unsubscribed(subscription) => unsubscribed(&subscription),
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        assert_eq!(refused(authenticate(&db, &secret).await.unwrap()), "Bots need a subscription.");
+
+        crate::subscriptions::extend(&db, ada, 30).await.unwrap();
+        assert!(authenticate(&db, &secret).await.unwrap().live().is_some(), "subscribed");
+
+        // Past its end it's refused at once, before the hourly check marks it
+        sqlx::query("UPDATE accounts SET subscription_until = NOW() - interval '1 hour' WHERE id = $1")
+            .bind(ada)
+            .execute(&db)
+            .await
+            .unwrap();
+        let reason = refused(authenticate(&db, &secret).await.unwrap());
+        assert!(reason.starts_with("Bots need a subscription. Your subscription lapsed on "), "{reason}");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_citizens_key_needs_no_subscription(db: PgPool) {
+        let made = crate::citizens::mint(&db, "Wren Cooper").await.unwrap();
+        let user = authenticate(&db, &made.secret).await.unwrap().live().expect("a citizen plays unsubscribed");
+        assert_eq!(user.account_id, made.citizen.account_id);
+    }
+
+    #[test]
+    fn a_lapsed_key_says_when() {
+        let until = "2026-11-17T12:00:00Z".parse().unwrap();
+        let lapsed = Subscription { status: SubscriptionStatus::Lapsed, until: Some(until) };
+        assert_eq!(
+            unsubscribed(&lapsed),
+            "Bots need a subscription. Your subscription lapsed on 17 November 2026. Renew it to use this."
+        );
+        assert_eq!(unsubscribed(&Subscription::default()), "Bots need a subscription.");
     }
 
     #[test]

@@ -21,7 +21,7 @@ use crate::models::{ActionState, ContainerType, ItemType, PlayerPosition, Player
 use crate::state::AppState;
 
 use capitol_protocol::ledger::UnitFlow;
-use capitol_protocol::rest::CatalogResponse;
+use capitol_protocol::rest::{CatalogResponse, Subscription, SubscriptionStatus};
 use capitol_protocol::rules::ground::Ground;
 use capitol_protocol::rules::quality;
 use capitol_protocol::rules::stacking::Units;
@@ -39,8 +39,8 @@ pub struct GameState {
     /// close removes the player (B8, #59)
     pub connections: HashMap<Uuid, Sockets>,
     next_connection_id: u64,
-    /// API key id -> what fires to close each socket open on it (E0.9)
-    key_sockets: HashMap<Uuid, Vec<oneshot::Sender<()>>>,
+    /// API key id -> what fires to close each socket open on it, with why (E0.9)
+    key_sockets: HashMap<Uuid, Vec<oneshot::Sender<String>>>,
     pub resource_nodes: HashMap<Uuid, ResourceNodeState>,
     pub resource_types: HashMap<String, ResourceType>,
     pub recipes: HashMap<String, Recipe>,
@@ -231,8 +231,9 @@ impl GameState {
         told
     }
 
-    /// A socket opened on API key `key_id`. The receiver fires when the key is revoked.
-    pub fn watch_key(&mut self, key_id: Uuid) -> oneshot::Receiver<()> {
+    /// A socket opened on API key `key_id`. The receiver fires, with the
+    /// reason, when the key is revoked or its owner's subscription lapses.
+    pub fn watch_key(&mut self, key_id: Uuid) -> oneshot::Receiver<String> {
         let (tx, rx) = oneshot::channel();
         let sockets = self.key_sockets.entry(key_id).or_default();
         // Forget sockets that have closed since.
@@ -243,11 +244,17 @@ impl GameState {
 
     /// API key `key_id` was revoked: every socket open on it hangs up. Returns how many.
     pub fn revoke_key(&mut self, key_id: Uuid) -> usize {
+        self.hang_up_key(key_id, "API key revoked")
+    }
+
+    /// Every socket open on API key `key_id` hangs up, telling its bot `why`.
+    /// Returns how many.
+    pub fn hang_up_key(&mut self, key_id: Uuid, why: &str) -> usize {
         self.key_sockets
             .remove(&key_id)
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|tx| tx.send(()).ok())
+            .filter_map(|tx| tx.send(why.to_string()).ok())
             .count()
     }
 
@@ -825,12 +832,18 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
         }
 
         // E4.1: subscriptions that ran out, hourly with the tax but half an
-        // hour apart from it. The Subscriber extractor refuses them on time
-        // anyway; this marks them lapsed and tells their players.
+        // hour apart from it. The Subscriber extractor and a key's sign-in
+        // refuse them on time anyway; this marks them lapsed, tells their
+        // players and hangs up their bots (#217). The keys aren't revoked:
+        // they sign in again once the player renews.
         if game_tick_count > 0 && game_tick_count % 36000 == 18000 {
             let lapses = crate::subscriptions::lapse_expired(&app_state.db).await;
-            let game = game_state.read().await;
+            let mut game = game_state.write().await;
             for l in lapses {
+                let lapsed = Subscription { status: SubscriptionStatus::Lapsed, until: Some(l.until) };
+                for key in &l.key_ids {
+                    game.hang_up_key(*key, &crate::api_keys::unsubscribed(&lapsed));
+                }
                 let _ = game.event_sender.send(GameEvent::SubscriptionLapsed {
                     player_id: l.player_id,
                     until: l.until,
@@ -1430,7 +1443,8 @@ mod tests {
         let mut c = game.watch_key(other);
 
         assert_eq!(game.revoke_key(key), 2, "the closed socket isn't told");
-        assert!(a.try_recv().is_ok() && b.try_recv().is_ok());
+        assert_eq!(a.try_recv().as_deref(), Ok("API key revoked"));
+        assert!(b.try_recv().is_ok());
         assert!(c.try_recv().is_err(), "another key's socket stays open");
         assert_eq!(game.revoke_key(key), 0, "told once only");
     }
