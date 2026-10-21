@@ -144,11 +144,20 @@ step() {
     esac
 }
 
-# Does this branch change anything the Flint client builds from?
+# Does this branch change anything the Flint client builds from? Committed or
+# not: diffing the base against the working tree counts staged and unstaged
+# edits, and ls-files the new files, so a verify before the commit runs the
+# flint steps too (#272). Says so when it skips them.
 touches_flint() {
-    local base
+    local base changed
     base=$(git merge-base HEAD origin/master 2>/dev/null) || return 0
-    git diff --name-only "$base" HEAD | grep -qE '^(flint-client|protocol)/'
+    # Captured, not piped to grep -q: under pipefail, grep quitting early
+    # can SIGPIPE git and turn a match into a failure.
+    changed=$(git diff --name-only "$base" -- flint-client protocol
+              git ls-files --others --exclude-standard -- flint-client protocol)
+    [ -z "$changed" ] || return 0
+    echo "== ci.sh: skipping flint steps: nothing in flint-client/ or protocol/ differs from origin/master" >&2
+    return 1
 }
 
 # The Rust is rust-toolchain.toml's, the same as CI's (#265). RUSTUP_TOOLCHAIN
