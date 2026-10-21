@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
+use tracing::Instrument;
 use uuid::Uuid;
 
 use super::presence::{self, Holder, PresenceEvent, Sockets};
@@ -12,6 +13,7 @@ use super::crafting::{cancel_crafting, process_crafting, start_crafting, Craftin
 use super::events::GameEvent;
 use super::extraction::{cancel_extraction, process_extractions, start_extraction, PendingItem};
 use super::ledger;
+use super::load::Phase;
 use super::units;
 use super::tools::{self, HeldTool, Wear};
 use super::movement::process_movement;
@@ -26,6 +28,19 @@ use capitol_protocol::rules::ground::Ground;
 use capitol_protocol::rules::quality;
 use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
+
+/// Runs `$body` as one phase of the tick (D0.1): in the span `$span`, and
+/// timed as [`Phase`]`::$phase`. For the phases that await, the loop uses
+/// [`Phase::timed`] with `.instrument` instead: an entered span can't be held
+/// across an `.await`.
+macro_rules! phase {
+    ($phase:ident, $span:literal, $body:expr) => {{
+        // Timed first, so the span's enter and exit count in the phase
+        let _timed = Phase::$phase.timed();
+        let _span = tracing::info_span!($span).entered();
+        $body
+    }};
+}
 
 /// Ticks between sweeps for unanswered trade requests (once a second)
 const TRADE_EXPIRY_TICKS: u64 = 10;
@@ -670,17 +685,19 @@ impl GameState {
         self.last_positions = Some(positions);
     }
 
+    /// The world's tick, phase by phase (D0.1): each in a `tick.<phase>`
+    /// span, and timed into [`load`](super::load).
     fn tick(&mut self) {
         self.tick_count += 1;
-        self.process_commands();
-        self.process_movement();
-        self.process_extractions();
-        self.process_crafting();
-        self.process_regeneration();
+        phase!(Commands, "tick.commands", self.process_commands());
+        phase!(Movement, "tick.movement", self.process_movement());
+        phase!(Extraction, "tick.extraction", self.process_extractions());
+        phase!(Crafting, "tick.crafting", self.process_crafting());
+        phase!(Regeneration, "tick.regeneration", self.process_regeneration());
         if self.tick_count.is_multiple_of(TRADE_EXPIRY_TICKS) {
-            self.expire_trade_requests(Instant::now());
+            phase!(Trades, "tick.trades", self.expire_trade_requests(Instant::now()));
         }
-        self.broadcast_positions();
+        phase!(Broadcast, "tick.broadcast", self.broadcast_positions());
     }
 
     /// Drop the trade requests nobody answered in time, and tell both players of each
@@ -751,57 +768,39 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
         let pending_items: Vec<PendingItem>;
         let finished_crafts: Vec<FinishedCraft>;
         let event_sender;
+        let game_tick_count;
         {
-            let mut game = game_state.write().await;
+            let mut game = {
+                let _timed = Phase::Lock.timed();
+                game_state.write().instrument(tracing::info_span!("tick.lock")).await
+            };
             game.tick();
             pending_items = game.take_pending_items();
             finished_crafts = game.take_finished_crafts();
             event_sender = game.event_sender.clone();
+            game_tick_count = game.tick_count;
         }
 
         // Write the gathers, wearing their tools, and only then tell the gatherers
-        for item in pending_items {
-            persist_gather(&app_state.db, item, &event_sender).await;
+        if !pending_items.is_empty() {
+            let _timed = Phase::Gathers.timed();
+            async {
+                for item in pending_items {
+                    persist_gather(&app_state.db, item, &event_sender).await;
+                }
+            }
+            .instrument(tracing::info_span!("tick.gathers"))
+            .await;
         }
 
         // Finish crafts: inputs re-checked, consumed and the output written in one
         // transaction (B10, #61). Only then is the crafter told, with one
         // `inventory_updated` per container that changed.
-        for craft in finished_crafts {
-            match finish_craft(&app_state.db, &craft).await {
-                Ok(done) => {
-                    for output in &craft.outputs {
-                        let _ = event_sender.send(GameEvent::CraftingCompleted {
-                            player_id: craft.player_id,
-                            operation_id: craft.operation_id,
-                            item_type: output.item_type.clone(),
-                            item_name: output.item_name.clone(),
-                            quantity: output.quantity,
-                            quality: output.quality,
-                            tool: done.tool.clone(),
-                        });
-                    }
-                    if let Some(broken) = &done.broken {
-                        tools::announce_broken(&event_sender, broken);
-                    }
-                    if let Some((station_id, tool)) = done.station_tool {
-                        super::station_tools::announce(&event_sender, station_id, tool);
-                    }
-                    for container_id in done.changed {
-                        let _ = event_sender.send(GameEvent::InventoryUpdated {
-                            player_id: craft.player_id,
-                            container_id,
-                            slots: Vec::new(),
-                        });
-                    }
-                }
-                Err(reason) => {
-                    let _ = event_sender.send(GameEvent::CraftingFailed {
-                        player_id: craft.player_id,
-                        reason,
-                    });
-                }
-            }
+        if !finished_crafts.is_empty() {
+            let _timed = Phase::Crafts.timed();
+            finish_crafts(&app_state.db, finished_crafts, &event_sender)
+                .instrument(tracing::info_span!("tick.crafts"))
+                .await;
         }
 
         tick_count += 1;
@@ -811,7 +810,8 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
             let tps = tick_count as f64 / last_log.elapsed().as_secs_f64();
             tracing::debug!("Tick rate: {:.1} ticks/sec", tps);
             {
-                let mut game = game_state.write().await;
+                let _timed = Phase::Lock.timed();
+                let mut game = game_state.write().instrument(tracing::info_span!("tick.lock")).await;
                 game.last_tps = tps;
                 game.uptime_seconds = loop_start.elapsed().as_secs_f64();
             }
@@ -821,18 +821,25 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
 
         // Periodically persist player positions (every 10 seconds)
         if tick_count.is_multiple_of(100) {
-            persist_positions(&game_state, &app_state).await;
+            let _timed = Phase::Positions.timed();
+            persist_positions(&game_state, &app_state)
+                .instrument(tracing::info_span!("tick.positions"))
+                .await;
         }
 
         // M7: Process property taxes hourly (36000 ticks = 1 hour at 10 ticks/sec)
         // In practice, 10 ticks/sec * 60 sec * 60 min = 36000 ticks per hour
-        let game_tick_count = game_state.read().await.tick_count;
         if game_tick_count > 0 && game_tick_count % 36000 == 0 {
-            tracing::info!("Processing hourly property taxes at tick {}", game_tick_count);
-            let report = super::property_tax::process_property_taxes(&app_state.db).await;
-            let mut game = game_state.write().await;
-            let game = &mut *game;
-            super::property_tax::announce(report, &mut game.stations, &game.event_sender);
+            let _timed = Phase::Tax.timed();
+            async {
+                tracing::info!("Processing hourly property taxes at tick {}", game_tick_count);
+                let report = super::property_tax::process_property_taxes(&app_state.db).await;
+                let mut game = game_state.write().await;
+                let game = &mut *game;
+                super::property_tax::announce(report, &mut game.stations, &game.event_sender);
+            }
+            .instrument(tracing::info_span!("tick.tax"))
+            .await;
         }
 
         // E4.1: subscriptions that ran out, hourly with the tax but half an
@@ -841,22 +848,69 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
         // players and hangs up their bots (#217). The keys aren't revoked:
         // they sign in again once the player renews.
         if game_tick_count > 0 && game_tick_count % 36000 == 18000 {
-            let lapses = crate::subscriptions::lapse_expired(&app_state.db).await;
-            let mut game = game_state.write().await;
-            for l in lapses {
-                let lapsed = Subscription { status: SubscriptionStatus::Lapsed, until: Some(l.until) };
-                for key in &l.key_ids {
-                    game.hang_up_key(*key, &crate::api_keys::unsubscribed(&lapsed));
+            let _timed = Phase::Subscriptions.timed();
+            async {
+                let lapses = crate::subscriptions::lapse_expired(&app_state.db).await;
+                let mut game = game_state.write().await;
+                for l in lapses {
+                    let lapsed = Subscription { status: SubscriptionStatus::Lapsed, until: Some(l.until) };
+                    for key in &l.key_ids {
+                        game.hang_up_key(*key, &crate::api_keys::unsubscribed(&lapsed));
+                    }
+                    let _ = game.event_sender.send(GameEvent::SubscriptionLapsed {
+                        player_id: l.player_id,
+                        until: l.until,
+                        notice_id: l.notice_id,
+                    });
                 }
-                let _ = game.event_sender.send(GameEvent::SubscriptionLapsed {
-                    player_id: l.player_id,
-                    until: l.until,
-                    notice_id: l.notice_id,
-                });
             }
+            .instrument(tracing::info_span!("tick.subscriptions"))
+            .await;
         }
 
         super::load::tick_took(began.elapsed());
+    }
+}
+
+/// Finish crafts: inputs re-checked, consumed and the output written in one
+/// transaction (B10, #61). Only then is the crafter told, with one
+/// `inventory_updated` per container that changed.
+async fn finish_crafts(db: &sqlx::PgPool, finished: Vec<FinishedCraft>, event_sender: &broadcast::Sender<GameEvent>) {
+    for craft in finished {
+        match finish_craft(db, &craft).await {
+            Ok(done) => {
+                for output in &craft.outputs {
+                    let _ = event_sender.send(GameEvent::CraftingCompleted {
+                        player_id: craft.player_id,
+                        operation_id: craft.operation_id,
+                        item_type: output.item_type.clone(),
+                        item_name: output.item_name.clone(),
+                        quantity: output.quantity,
+                        quality: output.quality,
+                        tool: done.tool.clone(),
+                    });
+                }
+                if let Some(broken) = &done.broken {
+                    tools::announce_broken(event_sender, broken);
+                }
+                if let Some((station_id, tool)) = done.station_tool {
+                    super::station_tools::announce(event_sender, station_id, tool);
+                }
+                for container_id in done.changed {
+                    let _ = event_sender.send(GameEvent::InventoryUpdated {
+                        player_id: craft.player_id,
+                        container_id,
+                        slots: Vec::new(),
+                    });
+                }
+            }
+            Err(reason) => {
+                let _ = event_sender.send(GameEvent::CraftingFailed {
+                    player_id: craft.player_id,
+                    reason,
+                });
+            }
+        }
     }
 }
 

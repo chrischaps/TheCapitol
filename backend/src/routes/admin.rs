@@ -3,6 +3,7 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
+use capitol_protocol::annotation::AnnotationKind;
 use capitol_protocol::rest::{CitizenInfo, CreateCitizenRequest, CreatedCitizen};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,7 @@ use crate::middleware::auth::AuthUser;
 use crate::models::{ActionState, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
 use crate::engine::currency::{announce_balances, balances_of};
-use crate::engine::{ledger, node_placement, node_spawn};
+use crate::engine::{annotations, ledger, node_placement, node_spawn};
 use crate::engine::plot_sync::{sync_plots, OnOwned, SyncError};
 use crate::engine::GameEvent;
 
@@ -32,6 +33,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/world-params/commit", post(commit_world_params))
         .route("/stats", get(get_server_stats))
         .route("/ledger", get(get_ledger))
+        .route("/annotations", get(get_annotations))
         .route("/accounts/{id}/subscription", post(subscribe_account))
         .route("/citizens", get(list_citizens).post(create_citizen))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -213,6 +215,7 @@ pub async fn commit_world_params(
             });
         }
     }
+    let released = report.released.len();
     if !report.released.is_empty() {
         let game = state.game.read().await;
         for terrain_id in report.released {
@@ -251,6 +254,11 @@ pub async fn commit_world_params(
         "Admin {} committed world params to database ({} resource nodes saved where the terrain moved them, {} planned ones gone)",
         user.account_id, moved, replanned
     );
+    let text = format!(
+        "Terrain committed: {} lots added, {} reshaped, {} gone, {} owned released; {} nodes moved",
+        report.inserted, report.updated, report.deleted, released, moved
+    );
+    annotations::note(&state.db, AnnotationKind::TerrainCommitted, &text).await;
 
     Ok(Json(params))
 }
@@ -265,6 +273,26 @@ pub async fn get_ledger(
 ) -> Result<Json<capitol_protocol::ledger::Ledger>, AppError> {
     require_admin(&user)?;
     Ok(Json(ledger::snapshot(&state).await?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnnotationsQuery {
+    /// Unix ms; the default is the last 24 hours
+    pub since_ms: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+/// The annotations (D0.4): what explains a bend in a chart, oldest first.
+/// D0.3's `/admin/series` and stream serve them with the samples.
+pub async fn get_annotations(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Query(query): Query<AnnotationsQuery>,
+) -> Result<Json<Vec<capitol_protocol::annotation::Annotation>>, AppError> {
+    require_admin(&user)?;
+    let since_ms = query.since_ms.unwrap_or_else(|| Utc::now().timestamp_millis() - 24 * 3_600_000);
+    let limit = query.limit.unwrap_or(1000).clamp(1, 10_000);
+    Ok(Json(annotations::since(&state.db, since_ms, limit).await?))
 }
 
 #[derive(Serialize)]

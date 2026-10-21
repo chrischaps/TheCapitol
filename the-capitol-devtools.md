@@ -144,16 +144,15 @@ The first set:
 
 ## 5. Architecture notes
 
-- **Tick phases** are named spans (`info_span!("tick.market")`, …) and per-phase histograms in `load.rs`. They go on `Load` as an additive field: the fixture changes, the old field stays. The phases are:
-  - movement
-  - extraction and crafting
-  - automation
-  - market
-  - bazaar
-  - regeneration
-  - tax
-  - persist
-  - broadcast
+- **Tick phases** are named spans (`tick.movement`, …) and per-phase histograms in `engine/load.rs` (`load::Phase`). They go on `Load` as an additive field, `phases`: the fixture (`protocol/tests/fixtures/rest/ledger.json`) changes, the old fields stay, and a load from before reads with no phases. *As built (D0.1, #353):* the phases partition the tick, so they add up to `tick_secs`. Since automation, the market and the bazaar run as loops of their own beside the tick, not in it, they're timed apart, in `Load.loops` (`load::Loop`, spans `loop.<name>`), and "persist" is split three ways, because #304 needs to know which write it is. The phases are:
+  - lock: waiting for the game's lock, which automation and the routes take too
+  - commands, movement, extraction, crafting, regeneration
+  - trades: expiring unanswered trade requests
+  - broadcast: the positions that changed
+  - gathers, crafts, positions: the writes (`persist_gather`, `finish_craft`, `persist_positions`)
+  - tax, subscriptions: the hourly jobs
+
+  The loops are automation, market and bazaar. `LoadWindow` gives each phase and loop its runs, time, mean and p95 over a window.
 - **The tracy feature** is `profile` on the backend: `tracing-tracy` as a layer. It's off by default, at zero cost when off.
 - **The town's report** is `POST /admin/town/report`, as `TownReport`, a protocol type. It holds:
   - a health row per citizen
@@ -178,6 +177,7 @@ The first set:
 - **D0.1 Tick by phase.**
   - Spans and per-phase histograms; `Load.phases`, with its fixture.
   - **Verify:** the phases sum to within 5% of the tick, and the fixture round-trips.
+  - *As built (#353):* `Load.phases` (13 phases that cover the tick) and `Load.loops` (automation, market, bazaar, timed apart since they aren't in the tick). See §5.
 - **D0.2 Sampler and history.**
   - The `Sample` type, the ring, the `metrics_samples` table and pruning.
   - **Verify:** in a 200-citizen town the sampler adds under 0.5 ms to tick p95, and a day's samples reconcile with the ledger.
@@ -187,6 +187,7 @@ The first set:
 - **D0.4 Annotations.**
   - The `admin_events` table and enum, written at boot, terrain commit, gazette and town up/down.
   - **Verify:** they appear in the stream and in `/admin/series`.
+  - **As built (#354):** `capitol_protocol::annotation` (`Annotation`, `AnnotationKind` with all six kinds), the `admin_events` table (`kind` checked against the enum's names, so a new kind needs a migration), and `engine::annotations`: `record`, `note` (logs a failure rather than failing what it marks) and `since`. Written at boot, at the terrain commit and by `gazette::publish` for each new edition. Town up/down waits on D4.1's report, tunables on D6.1 and watches on D2.5; each calls `record`. Read by `GET /admin/annotations?since_ms=&limit=` (24 h by default) until D0.3 serves them in `/admin/series` and the stream, where `record` should also send to the stream.
 
 ### D1: The console (`dt:D1-console`)
 - **D1.1 The page.**
@@ -232,6 +233,7 @@ The first set:
 ### D5: The client (`dt:D5-client`)
 - **D5.1 `NetStats`** in capitol-core.
   - **Verify:** unit tests over a loopback and a bot run's report.
+  - **As built (#371):** `Net::stats()` returns a `NetStats` from a meter the IO thread keeps (`net/stats.rs`). Each Ping carries its number, and the matching Pong gives the round trip, as the last one and an average. A first Ping now goes as soon as the session is live, so the round trip is known within moments, not after 15 s. Traffic is counted by message type each way: totals since the start, and per type over the last whole second (a malformed text frame counts as `malformed`, control frames as `ping` and `pong`). Reconnects are counted too. The prediction's side is `Motion::stats(now)` → `MotionStats`: corrections, the distance they moved the prediction (in total and the last one), the lag, the interpolation depth in seconds (below zero means extrapolating) and the tracks. The game adds it with `NetStats::with_motion`, since a bot has no `Motion`. `NetStats` prints as one line, and `capitol-bot` prints it after its script: `rtt 2 ms (avg 2 ms), in 12 msg/s 1.5 kB/s, out 0 msg/s 0.0 kB/s, 0 reconnects`.
 - **D5.2 The overlay** on F7.
   - A frame-time graph, net, prediction, entities and interest.
   - **Verify:** a capture `--offline fixtures/terrain.json --screenshot-at 3` with it open.

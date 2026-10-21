@@ -2,18 +2,59 @@
 //! running totals since it started. `GET /admin/ledger` reads them
 //! ([`read`]); a soak takes two readings and works out the window between
 //! (`capitol_protocol::ledger::LoadWindow`).
+//!
+//! Since D0.1 the tick's time is also kept by [`Phase`], and the loops
+//! beside it by [`Loop`], each with a histogram like the tick's.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use capitol_protocol::ledger::{Load, TICK_BUCKETS_MS};
+use capitol_protocol::ledger::{Load, PhaseLoad, TICK_BUCKETS_MS};
 
-static TICKS: AtomicU64 = AtomicU64::new(0);
-static TICK_NANOS: AtomicU64 = AtomicU64::new(0);
-static TICK_MAX_NANOS: AtomicU64 = AtomicU64::new(0);
-/// Ticks under each of [`TICK_BUCKETS_MS`], and past the last
-static TICK_BUCKETS: [AtomicU64; TICK_BUCKETS_MS.len() + 1] = [const { AtomicU64::new(0) }; TICK_BUCKETS_MS.len() + 1];
+/// Running totals of something timed: how often, how long, the slowest,
+/// and a histogram over [`TICK_BUCKETS_MS`].
+struct Timings {
+    runs: AtomicU64,
+    nanos: AtomicU64,
+    max_nanos: AtomicU64,
+    /// Runs under each of [`TICK_BUCKETS_MS`], and past the last
+    buckets: [AtomicU64; TICK_BUCKETS_MS.len() + 1],
+}
+
+impl Timings {
+    const fn new() -> Timings {
+        Timings {
+            runs: AtomicU64::new(0),
+            nanos: AtomicU64::new(0),
+            max_nanos: AtomicU64::new(0),
+            buckets: [const { AtomicU64::new(0) }; TICK_BUCKETS_MS.len() + 1],
+        }
+    }
+
+    fn took(&self, took: Duration) {
+        let nanos = took.as_nanos().min(u64::MAX as u128) as u64;
+        self.runs.fetch_add(1, Ordering::Relaxed);
+        self.nanos.fetch_add(nanos, Ordering::Relaxed);
+        self.max_nanos.fetch_max(nanos, Ordering::Relaxed);
+        let ms = nanos as f64 / 1e6;
+        let bucket = TICK_BUCKETS_MS.iter().position(|bound| ms <= *bound).unwrap_or(TICK_BUCKETS_MS.len());
+        self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn read(&self) -> PhaseLoad {
+        PhaseLoad {
+            runs: self.runs.load(Ordering::Relaxed),
+            secs: self.nanos.load(Ordering::Relaxed) as f64 / 1e9,
+            max_ms: self.max_nanos.load(Ordering::Relaxed) as f64 / 1e6,
+            buckets: self.buckets.iter().map(|b| b.load(Ordering::Relaxed)).collect(),
+        }
+    }
+}
+
+static TICK: Timings = Timings::new();
+static PHASES: [Timings; Phase::ALL.len()] = [const { Timings::new() }; Phase::ALL.len()];
+static LOOPS: [Timings; Loop::ALL.len()] = [const { Timings::new() }; Loop::ALL.len()];
 
 static SOCKETS_OPENED: AtomicU64 = AtomicU64::new(0);
 static SOCKETS_ENDED: [AtomicU64; SocketEnd::ALL.len()] = [const { AtomicU64::new(0) }; SocketEnd::ALL.len()];
@@ -22,13 +63,129 @@ static SOCKET_RESYNCS: AtomicU64 = AtomicU64::new(0);
 /// A tick's work took `took`: the world's tick and the writes after it,
 /// not the wait for the next.
 pub fn tick_took(took: Duration) {
-    let nanos = took.as_nanos().min(u64::MAX as u128) as u64;
-    TICKS.fetch_add(1, Ordering::Relaxed);
-    TICK_NANOS.fetch_add(nanos, Ordering::Relaxed);
-    TICK_MAX_NANOS.fetch_max(nanos, Ordering::Relaxed);
-    let ms = nanos as f64 / 1e6;
-    let bucket = TICK_BUCKETS_MS.iter().position(|bound| ms <= *bound).unwrap_or(TICK_BUCKETS_MS.len());
-    TICK_BUCKETS[bucket].fetch_add(1, Ordering::Relaxed);
+    TICK.took(took);
+}
+
+/// A part of the tick's work (D0.1). Between them they cover all of it, so
+/// their times add up to the tick's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Waiting for the game's lock, which the automation loop and the
+    /// routes take too
+    Lock,
+    Commands,
+    Movement,
+    Extraction,
+    Crafting,
+    Regeneration,
+    /// Expiring trade requests nobody answered
+    Trades,
+    /// The positions that changed, to every socket
+    Broadcast,
+    /// Writing finished gathers (`persist_gather`)
+    Gathers,
+    /// Writing finished crafts (`finish_craft`)
+    Crafts,
+    /// Saving every player's position, every 100 ticks
+    Positions,
+    /// The hourly property tax
+    Tax,
+    /// Lapsing subscriptions that ran out, hourly
+    Subscriptions,
+}
+
+impl Phase {
+    pub const ALL: [Phase; 13] = [
+        Phase::Lock,
+        Phase::Commands,
+        Phase::Movement,
+        Phase::Extraction,
+        Phase::Crafting,
+        Phase::Regeneration,
+        Phase::Trades,
+        Phase::Broadcast,
+        Phase::Gathers,
+        Phase::Crafts,
+        Phase::Positions,
+        Phase::Tax,
+        Phase::Subscriptions,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Phase::Lock => "lock",
+            Phase::Commands => "commands",
+            Phase::Movement => "movement",
+            Phase::Extraction => "extraction",
+            Phase::Crafting => "crafting",
+            Phase::Regeneration => "regeneration",
+            Phase::Trades => "trades",
+            Phase::Broadcast => "broadcast",
+            Phase::Gathers => "gathers",
+            Phase::Crafts => "crafts",
+            Phase::Positions => "positions",
+            Phase::Tax => "tax",
+            Phase::Subscriptions => "subscriptions",
+        }
+    }
+
+    fn index(&self) -> usize {
+        Phase::ALL.iter().position(|p| p == self).expect("every phase is in ALL")
+    }
+
+    /// Times the phase until the returned guard drops.
+    pub fn timed(self) -> Timed {
+        Timed {
+            timings: &PHASES[self.index()],
+            began: Instant::now(),
+        }
+    }
+}
+
+/// A loop that runs beside the tick, on its own interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Loop {
+    Automation,
+    Market,
+    Bazaar,
+}
+
+impl Loop {
+    pub const ALL: [Loop; 3] = [Loop::Automation, Loop::Market, Loop::Bazaar];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Loop::Automation => "automation",
+            Loop::Market => "market",
+            Loop::Bazaar => "bazaar",
+        }
+    }
+
+    fn index(&self) -> usize {
+        Loop::ALL.iter().position(|l| l == self).expect("every loop is in ALL")
+    }
+
+    /// Times one cycle until the returned guard drops.
+    pub fn timed(self) -> Timed {
+        Timed {
+            timings: &LOOPS[self.index()],
+            began: Instant::now(),
+        }
+    }
+}
+
+/// A phase or a cycle being timed: it counts when it's dropped. It holds
+/// no span, so it can be held across an `.await`.
+#[must_use = "it times until it's dropped"]
+pub struct Timed {
+    timings: &'static Timings,
+    began: Instant,
+}
+
+impl Drop for Timed {
+    fn drop(&mut self) {
+        self.timings.took(self.began.elapsed());
+    }
 }
 
 /// How a WebSocket ended.
@@ -118,12 +275,15 @@ pub fn read(tick_period: Duration) -> Load {
         .map(|e| (e.as_str().to_string(), SOCKETS_ENDED[e.index()].load(Ordering::Relaxed)))
         .collect();
     let opened = SOCKETS_OPENED.load(Ordering::Relaxed);
+    let tick = TICK.read();
     Load {
         tick_period_ms: tick_period.as_secs_f64() * 1000.0,
-        ticks: TICKS.load(Ordering::Relaxed),
-        tick_secs: TICK_NANOS.load(Ordering::Relaxed) as f64 / 1e9,
-        tick_max_ms: TICK_MAX_NANOS.load(Ordering::Relaxed) as f64 / 1e6,
-        tick_buckets: TICK_BUCKETS.iter().map(|b| b.load(Ordering::Relaxed)).collect(),
+        ticks: tick.runs,
+        tick_secs: tick.secs,
+        tick_max_ms: tick.max_ms,
+        tick_buckets: tick.buckets,
+        phases: Phase::ALL.iter().map(|p| (p.as_str().to_string(), PHASES[p.index()].read())).collect(),
+        loops: Loop::ALL.iter().map(|l| (l.as_str().to_string(), LOOPS[l.index()].read())).collect(),
         sockets_open: opened.saturating_sub(ended.values().sum()),
         sockets_opened: opened,
         sockets_ended: ended,
@@ -159,5 +319,26 @@ mod tests {
         assert!(after.socket_resyncs > before.socket_resyncs);
         assert!(after.sockets_opened >= before.sockets_opened + 2);
         assert_eq!(after.tick_period_ms, 100.0);
+    }
+
+    #[test]
+    fn phases_and_loops_count_when_their_guard_drops() {
+        let before = read(Duration::from_millis(100));
+        assert_eq!(before.phases.len(), Phase::ALL.len());
+        assert_eq!(before.loops.len(), Loop::ALL.len());
+        {
+            let _tax = Phase::Tax.timed();
+            std::thread::sleep(Duration::from_millis(3));
+        }
+        drop(Loop::Bazaar.timed());
+        let after = read(Duration::from_millis(100));
+        let (was, is) = (&before.phases["tax"], &after.phases["tax"]);
+        assert!(is.runs > was.runs);
+        assert!(is.secs - was.secs >= 0.003);
+        assert!(is.max_ms >= 3.0);
+        assert_eq!(is.buckets.len(), TICK_BUCKETS_MS.len() + 1);
+        // 3 ms and more: past the 2 ms bound
+        assert!(is.buckets[2..].iter().sum::<u64>() > was.buckets[2..].iter().sum::<u64>());
+        assert!(after.loops["bazaar"].runs > before.loops["bazaar"].runs);
     }
 }

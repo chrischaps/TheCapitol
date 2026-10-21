@@ -23,6 +23,7 @@
 //! and bounds are `rules::bazaar`, shared with the clients.
 
 use std::collections::{BTreeMap, BTreeSet};
+use tracing::Instrument;
 
 use capitol_protocol::rest::{Maker, 
     BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BazaarStall, BuyListing, MyStallResponse, ShopSign,
@@ -635,7 +636,8 @@ pub async fn run_bazaar_loop(db: PgPool, events: tokio::sync::broadcast::Sender<
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(SWEEP_SECS));
     loop {
         interval.tick().await;
-        match sweep(&db, Utc::now()).await {
+        let _timed = super::load::Loop::Bazaar.timed();
+        match sweep(&db, Utc::now()).instrument(tracing::info_span!("loop.bazaar")).await {
             Ok(swept) => {
                 crate::routes::bazaar::announce_lapsed(&events, &swept.lapsed);
                 for (player_id, container_id) in swept.boxes {

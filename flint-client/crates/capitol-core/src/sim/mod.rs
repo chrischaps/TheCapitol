@@ -2,6 +2,7 @@
 //! against a local stack for a few game hours, then reports what the economy
 //! produced. `capitol-bot --sim <bots> --hours <h>` runs it.
 //!
+//! - [`lot`]: where its stations go on its lot. Pure.
 //! - [`plan`]: what a bot does next toward its goal, from the catalog and
 //!   what it holds. Pure.
 //! - [`report`]: the numbers, as markdown and CSV. Pure.
@@ -24,14 +25,15 @@
 //! every real one, so two game hours take twelve minutes. `/health` says the
 //! scale, and the report counts in game hours.
 
+pub mod lot;
 pub mod plan;
 pub mod report;
 pub mod run;
 
 use std::fmt;
 
-use capitol_protocol::rules::market::buy_debit;
-use plan::{Goal, Holdings, Step};
+use capitol_protocol::rules::market::{buy_debit, listing_fee};
+use plan::{Goal, Holdings, Step, FLOAT, FLOOR};
 
 use crate::catalog::Catalog;
 use crate::citizen::decide::{Choice, Span};
@@ -207,7 +209,21 @@ impl Role {
     /// What the role is after, first things first. A tool crafter's tools
     /// and a builder's stations come in order, those it lacks, then more of
     /// what it makes once it has them all. Never empty.
+    ///
+    /// A role that doesn't [`bank`](Self::banks) and is down to [`FLOOR`]
+    /// earns its [`FLOAT`] back by fiber first (#294): with nothing in hand
+    /// it can't pay a sale's fee, so it can't sell its way out, and it can't
+    /// buy what it would otherwise gather.
     pub fn goals(&self, catalog: &Catalog, holdings: &Holdings) -> Vec<Goal> {
+        let mut goals = self.work(catalog, holdings);
+        if !self.banks() && holdings.strands < FLOOR {
+            goals.insert(0, Goal::Strands(FLOAT));
+        }
+        goals
+    }
+
+    /// What the role works at: [`goals`](Self::goals) less its float.
+    fn work(&self, catalog: &Catalog, holdings: &Holdings) -> Vec<Goal> {
         let more = |item: &str| Goal::hold(item, holdings.count(item) + 1);
         let unmet = |goal: &Goal| plan::next(catalog, holdings, goal) != Ok(None);
         let then = |lacking: Vec<Goal>, more: Goal| -> Vec<Goal> { lacking.into_iter().filter(unmet).chain([more]).collect() };
@@ -271,29 +287,39 @@ impl Role {
     /// The menu for selling the role's product before working toward
     /// `goal`, if there's a question to ask: it holds at least half of
     /// [`SELL_AT`], is only making more of it (a builder still building
-    /// keeps its bricks), and someone bids. Sell (a price round the bid, up
-    /// to all it holds), or keep.
+    /// keeps its bricks) or earning its float, someone bids, and it can pay
+    /// the listing fee on some. Sell (a price round the bid, up to all it
+    /// holds, or as many as it can pay the fee on at the top price), or keep.
     pub fn sell_menu(&self, holdings: &Holdings, goal: Option<&Goal>, bid: Option<i64>, ask: Option<i64>) -> Option<Vec<Choice>> {
         let product = self.product()?;
         let held = holdings.count(product);
-        if held < SELL_AT / 2 || goal != Some(&Goal::hold(product, held + 1)) {
+        let selling = goal == Some(&Goal::hold(product, held + 1)) || matches!(goal, Some(Goal::Strands(_)));
+        if held < SELL_AT / 2 || !selling {
             return None;
         }
         let bid = bid?;
-        Some(vec![
-            Choice::Sell {
-                item: product.to_string(),
-                price: Span::new((bid / 2).max(1), (bid * 2).max(ask.unwrap_or(0))),
-                quantity: Span::new(1, held),
-            },
-            Choice::Keep,
-        ])
+        let price = Span::new((bid / 2).max(1), (bid * 2).max(ask.unwrap_or(0)));
+        // A sell's fee is paid when it's placed (#294)
+        let mut most = held;
+        while most > 0 && listing_fee(price.max * most as i64) > holdings.strands {
+            most -= 1;
+        }
+        (most > 0).then(|| {
+            vec![
+                Choice::Sell {
+                    item: product.to_string(),
+                    price,
+                    quantity: Span::new(1, most),
+                },
+                Choice::Keep,
+            ]
+        })
     }
 
     /// The menu for buying what `step` would gather, if there's a question
     /// to ask: it's on the market, gathering it isn't the role's job, it's
-    /// for sale, and the bot can afford some at the ask (keeping a deed's
-    /// price back until it has a plot). Buy up to two lots, or gather it.
+    /// for sale, and the bot can afford some at the ask, with what it
+    /// [`kept`] back. Buy up to two lots, or gather it.
     pub fn buy_menu(&self, holdings: &Holdings, step: &Step, ask: Option<i64>) -> Option<Vec<Choice>> {
         let Step::Gather { item, .. } = step else {
             return None;
@@ -335,10 +361,10 @@ impl Role {
     /// The menu for leaving a standing bid for `item` at the hall (C1.5),
     /// if there's a question to ask: the role needs it, it has no bid up for
     /// it already, the citizen can put a worth to it (`worth`, from its
-    /// books), and it can afford some, keeping a deed's price back until it
-    /// has a plot. Bid (up to half again the worth, up to two lots), or
-    /// gather it as it would have. In a fresh town the makers spend all
-    /// they have on their deeds, so they can't bid until they sell (#294).
+    /// books), and it can afford some, with what it [`kept`] back. Bid (up
+    /// to half again the worth, up to two lots), or gather it as it would
+    /// have. A maker comes by its deed with its [`FLOAT`] still in hand, so
+    /// it can bid once it has a plot (#294).
     pub fn bid_menu(&self, holdings: &Holdings, item: &str, worth: Option<i64>, bidding: bool) -> Option<Vec<Choice>> {
         if bidding || !self.needs().contains(&item) {
             return None;
@@ -361,16 +387,14 @@ impl Role {
     /// The menu for stocking a stall with what the role makes (C1.5), if
     /// there's a question to ask: it holds half of [`STALL_AT`] or more, can
     /// put a worth to it, and keeps a stall (`keeps`) or can pay
-    /// [`STALL_DAYS`] of rent for one, keeping a deed's price back until it
-    /// has a plot. Stock (a price round its worth, up to all it holds), or
-    /// keep it.
+    /// [`STALL_DAYS`] of rent for one, with what it [`keeps`](kept) back.
+    /// Stock (a price round its worth, up to all it holds), or keep it.
     pub fn stall_menu(&self, holdings: &Holdings, worth: Option<i64>, keeps: bool) -> Option<Vec<Choice>> {
         let product = self.product()?;
         let held = holdings.count(product);
         let worth = worth?.max(1);
-        let reserve = if holdings.plot_room.is_none() { holdings.deed_cost } else { 0 };
         let rent = capitol_protocol::rules::bazaar::rent(STALL_DAYS);
-        if held < STALL_AT / 2 || (!keeps && holdings.strands - reserve < rent) {
+        if held < STALL_AT / 2 || (!keeps && holdings.strands - kept(holdings) < rent) {
             return None;
         }
         Some(vec![
@@ -424,11 +448,16 @@ pub fn merchant_items(seed: u64) -> Vec<&'static str> {
     picked
 }
 
-/// How many, up to two lots, a bot can bid for at `price`, keeping a deed's
-/// price back until it has a plot.
+/// The Strands a bot keeps back from goods and rent: [`FLOOR`] for its
+/// fees, and a deed's price until it has a plot.
+fn kept(holdings: &Holdings) -> i64 {
+    FLOOR + if holdings.plot_room.is_none() { holdings.deed_cost } else { 0 }
+}
+
+/// How many, up to two lots, a bot can bid for at `price`, with what it
+/// [`kept`] back.
 fn affordable(holdings: &Holdings, price: i64) -> i32 {
-    let keep = if holdings.plot_room.is_none() { holdings.deed_cost } else { 0 };
-    let budget = holdings.strands - keep;
+    let budget = holdings.strands - kept(holdings);
     let mut afford = 2 * LOT;
     while afford > 0 && buy_debit(price, afford) > budget {
         afford -= 1;
@@ -507,6 +536,7 @@ mod tests {
     fn a_builder_builds_in_order_then_makes_bricks() {
         let catalog = Catalog::fallback();
         let mut h = Holdings {
+            strands: FLOAT,
             deed_cost: 250,
             ..Holdings::default()
         };
@@ -591,7 +621,10 @@ mod tests {
     #[test]
     fn a_maker_of_something_sells_its_surplus_to_the_best_bid() {
         let catalog = Catalog::fallback();
-        let mut h = Holdings::default();
+        let mut h = Holdings {
+            strands: FLOAT,
+            ..Holdings::default()
+        };
         h.items.insert("log".into(), SELL_AT);
         let wood = Role::Gatherer(Gather::Wood);
         assert_eq!(sell(wood, &catalog, &h, Some(7)), sold("log", SELL_AT, 7));
@@ -618,12 +651,51 @@ mod tests {
         assert_eq!(Role::Gatherer(Gather::Wood).buy_menu(&h, &gather("log"), Some(8)), None);
         // Not on the market: gather it
         assert_eq!(ingots.buy_menu(&h, &gather("fiber"), Some(8)), None);
-        // No plot yet: the deed's price is kept back, which leaves 3 at 8
+        // No plot yet: the deed's price is kept back, and the floor, which
+        // leaves 2 at 8
         h.plot_room = None;
         h.strands = 280;
-        assert_eq!(buy(ingots, &h, &gather("log"), Some(8)), bought("log", 3, 8));
+        assert_eq!(buy(ingots, &h, &gather("log"), Some(8)), bought("log", 2, 8));
         h.strands = 255;
         assert_eq!(ingots.buy_menu(&h, &gather("log"), Some(8)), None);
+    }
+
+    #[test]
+    fn a_maker_down_to_its_floor_earns_its_float_back_and_sells_what_it_can_pay_for() {
+        let catalog = Catalog::fallback();
+        let mut h = Holdings {
+            strands: FLOOR - 1,
+            plot_room: Some(3),
+            deed_cost: 250,
+            ..Holdings::default()
+        };
+        let wood = Role::Gatherer(Gather::Wood);
+        let errands = wood.errands(&catalog, &h).unwrap();
+        assert_eq!(errands[0].goal, Some(Goal::Strands(FLOAT)));
+        assert_eq!(errands[0].step.label(&catalog), "gather fiber");
+        assert_eq!(errands[1].goal, Some(Goal::hold("log", 1)));
+        // At the floor it works as before; a fiber gatherer never tops up
+        h.strands = FLOOR;
+        assert_eq!(wood.goal(&catalog, &h), Goal::hold("log", 1));
+        h.strands = 0;
+        assert_eq!(Role::Gatherer(Gather::Fiber).goal(&catalog, &h), Goal::hold("fiber", 1));
+        // Earning its float, it still sells to a bid, as many as it can pay
+        // the fee on at the top of the span: 1 Strand covers 100 of value
+        h.items.insert("log".into(), SELL_AT);
+        let goal = Goal::Strands(FLOAT);
+        assert_eq!(wood.sell_menu(&h, Some(&goal), Some(7), None), None, "nothing for the fee");
+        h.strands = 1;
+        let menu = wood.sell_menu(&h, Some(&goal), Some(7), None).unwrap();
+        assert_eq!(
+            menu[0],
+            Choice::Sell {
+                item: "log".into(),
+                price: Span::new(3, 14),
+                quantity: Span::new(1, 7),
+            }
+        );
+        h.strands = FLOOR;
+        assert!(matches!(&wood.sell_menu(&h, Some(&goal), Some(7), None).unwrap()[0], Choice::Sell { quantity, .. } if quantity.max == SELL_AT));
     }
 
     #[test]
@@ -749,7 +821,11 @@ mod tests {
         // Only a fiber gatherer banks
         assert!(Role::Builder.errands(&catalog, &h).unwrap().iter().all(|e| e.goal.is_some()));
         // A tool crafter lists every tool it lacks, then handles
-        let tools = Role::Crafter(Craft::Tools).errands(&catalog, &Holdings::default()).unwrap();
+        let h = Holdings {
+            strands: FLOAT,
+            ..Holdings::default()
+        };
+        let tools = Role::Crafter(Craft::Tools).errands(&catalog, &h).unwrap();
         assert_eq!(tools.first().and_then(|e| e.goal.clone()), Some(Goal::hold("stone_axe", 1)));
         assert_eq!(tools.last().and_then(|e| e.goal.clone()), Some(Goal::hold("tool_handle", 1)));
     }

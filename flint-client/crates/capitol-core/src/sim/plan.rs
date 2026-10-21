@@ -12,7 +12,9 @@
 //!   recipe's station and tool, then each input in turn
 //! - a station is placed from its kit. A workbench can stand anywhere
 //!   (D10); every other station needs a plot of the bot's own with room,
-//!   and a plot needs Strands, which come from depositing fiber
+//!   and a plot needs Strands, which come from depositing fiber. A bot
+//!   buys the deed once it holds [`FLOAT`] over its price, so it can still
+//!   buy and sell after (#294)
 //!
 //! Since a step is taken before the next is planned, the inputs a craft uses
 //! up (the rope a handle takes, say) are simply missing next time, and made
@@ -28,6 +30,15 @@ use crate::exchange::FIBER;
 /// How deep the search may go. D5's longest chain (vein to iron axe, with
 /// its stations and their kits) is about a dozen.
 const MAX_DEPTH: usize = 24;
+
+/// The Strands a bot wants in hand past a deed (#294): what its inputs and
+/// the fees on its sales take. It claims a plot once it holds a deed's price
+/// and this much more, and earns it back by fiber when it's down to
+/// [`FLOOR`]. A new player's 100.
+pub const FLOAT: i64 = 100;
+/// The Strands a bot never spends on goods or rent, for its listing fees,
+/// and under which it earns its [`FLOAT`] back.
+pub const FLOOR: i64 = 10;
 
 /// What a bot holds, as the planner needs it.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -58,6 +69,8 @@ pub enum Goal {
     Hold { item: String, n: i32 },
     /// Own a station of this type.
     Station(String),
+    /// Hold at least this many Strands (#294).
+    Strands(i64),
 }
 
 impl Goal {
@@ -73,6 +86,7 @@ impl Goal {
         match self {
             Goal::Hold { item, n } => format!("hold {n} {item}"),
             Goal::Station(station) => format!("own a {station}"),
+            Goal::Strands(n) => format!("hold {n} Strands"),
         }
     }
 }
@@ -136,6 +150,8 @@ pub fn next(catalog: &Catalog, holdings: &Holdings, goal: &Goal) -> Result<Optio
     match goal {
         Goal::Hold { item, n } => planner.obtain(item, *n),
         Goal::Station(station) => planner.station(station),
+        Goal::Strands(n) if holdings.strands >= *n => Ok(None),
+        Goal::Strands(n) => planner.strands(n - holdings.strands).map(Some),
     }
 }
 
@@ -275,8 +291,8 @@ impl<'a> Planner<'a> {
                 on_plot: true,
             })),
             Some(_) => Err(Stuck(format!("the plot has no room for a {station}"))),
-            None if self.holdings.strands >= self.holdings.deed_cost => Ok(Some(Step::Claim)),
-            None => self.strands(self.holdings.deed_cost - self.holdings.strands).map(Some),
+            None if self.holdings.strands >= self.holdings.deed_cost + FLOAT => Ok(Some(Step::Claim)),
+            None => self.strands(self.holdings.deed_cost + FLOAT - self.holdings.strands).map(Some),
         }
     }
 
@@ -399,13 +415,17 @@ mod tests {
         let kit = holding(&[("kiln_kit", 1)]);
         assert_eq!(plan(&kit, Goal::Station("kiln".into())), gather("fiber"));
         let mut rich = kit.clone();
-        rich.items.insert("fiber".into(), 252);
+        rich.items.insert("fiber".into(), 352);
         assert_eq!(
             plan(&rich, Goal::Station("kiln".into())),
             Some(Step::Deposit),
-            "250 Strands is 252 fiber after the fee"
+            "a deed and the float, 350 Strands, is 352 fiber after the fee"
         );
+        // The deed alone isn't enough: it keeps its float past it (#294)
+        rich.items.remove("fiber");
         rich.strands = 250;
+        assert_eq!(plan(&rich, Goal::Station("kiln".into())), gather("fiber"));
+        rich.strands = 250 + FLOAT;
         assert_eq!(plan(&rich, Goal::Station("kiln".into())), Some(Step::Claim));
         let mut owner = kit.clone();
         owner.plot_room = Some(3);
@@ -421,6 +441,18 @@ mod tests {
         assert!(next(&Catalog::fallback(), &owner, &Goal::Station("kiln".into())).is_err());
         owner.stations.insert("kiln".into());
         assert_eq!(plan(&owner, Goal::Station("kiln".into())), None);
+    }
+
+    #[test]
+    fn strands_are_fiber_then_the_exchange() {
+        let mut h = holding(&[]);
+        h.strands = 30;
+        assert_eq!(plan(&h, Goal::Strands(FLOAT)), gather("fiber"));
+        h.items.insert("fiber".into(), 71);
+        assert_eq!(plan(&h, Goal::Strands(FLOAT)), Some(Step::Deposit));
+        h.strands = FLOAT;
+        assert_eq!(plan(&h, Goal::Strands(FLOAT)), None);
+        assert_eq!(Goal::Strands(FLOAT).label(), "hold 100 Strands");
     }
 
     #[test]

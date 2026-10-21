@@ -41,6 +41,7 @@ use capitol_protocol::rest::{
     Gazette, GazetteDeeds, GazetteMade, GazetteMover, GazettePrice, GazetteProducer, GazetteSale, GazetteShares,
     GazetteShop, GazetteStalls,
 };
+use capitol_protocol::annotation::AnnotationKind;
 use capitol_protocol::rules::{self, Zone};
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
@@ -1080,6 +1081,10 @@ pub async fn publish(db: &PgPool, day: i64) -> Result<Option<Gazette>, sqlx::Err
         .execute(db)
         .await?
         .rows_affected();
+    if inserted == 1 {
+        let text = format!("The Gazette, No. {}: {}", edition.number, edition.headline);
+        super::annotations::note(db, AnnotationKind::GazettePublished, &text).await;
+    }
     Ok((inserted == 1).then_some(edition))
 }
 
@@ -1588,6 +1593,11 @@ mod tests {
             }
 
             assert_eq!(publish(&db, day).await.unwrap(), None);
+            // One marker for the console (D0.4), and none for the edition it already had
+            let marks = crate::engine::annotations::since(&db, 0, 10).await.unwrap();
+            assert_eq!(marks.len(), 1);
+            assert_eq!(marks[0].kind, AnnotationKind::GazettePublished);
+            assert!(marks[0].text.ends_with(&g.headline), "{}", marks[0].text);
             assert_eq!(edition(&db, None).await.unwrap(), Some(g.clone()));
             assert_eq!(edition(&db, Some(day)).await.unwrap(), Some(g));
             assert_eq!(edition(&db, Some(day - 5)).await.unwrap(), None);

@@ -44,6 +44,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Mutex, MutexGuard};
+use tracing::Instrument;
 
 use capitol_protocol::ledger::UnitFlow;
 use capitol_protocol::rest::{
@@ -230,7 +231,11 @@ pub async fn run_automation_loop(game: std::sync::Arc<RwLock<GameState>>, db: Pg
     loop {
         interval.tick().await;
         let started = std::time::Instant::now();
-        let cycle = run_cycle(&works, &db, &game, &events, Utc::now()).await;
+        let timed = super::load::Loop::Automation.timed();
+        let cycle = run_cycle(&works, &db, &game, &events, Utc::now())
+            .instrument(tracing::info_span!("loop.automation"))
+            .await;
+        drop(timed);
         if cycle != Cycle::default() {
             tracing::debug!("Automation: {cycle:?} in {:?}", started.elapsed());
         }
