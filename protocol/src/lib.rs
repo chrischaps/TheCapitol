@@ -12,6 +12,8 @@
 //! - [`land`]: the height of the ground, a pure function of `LandParams`
 //! - [`ledger`]: the world's books, `GET /admin/ledger`, and what two of them
 //!   say about conservation and load (C1.7)
+//! - [`metrics`]: the Observatory's samples, the world every ten seconds
+//!   (D0.2)
 //! - [`annotation`]: what explains a bend in the console's charts (the
 //!   Observatory's D0.4)
 //! - [`tunables`]: the economy's live knobs, and the [`tunables::Fees`] a
@@ -24,6 +26,7 @@ pub mod annotation;
 pub mod fmath;
 pub mod land;
 pub mod ledger;
+pub mod metrics;
 pub mod rest;
 pub mod rules;
 pub mod terrain;

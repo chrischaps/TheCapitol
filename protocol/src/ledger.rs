@@ -9,7 +9,8 @@
 //! what its trail explains, and the world's change is the faucets less the
 //! sinks. Units are conserved when each item's change is the units the
 //! server counted in and out. Anything else is drift, and drift fails a soak.
-//! [`LoadWindow`] is the load between two of them.
+//! [`LoadWindow`] is the load between two of them, and goes in each of the
+//! Observatory's samples (`metrics::Sample`).
 
 use std::collections::BTreeMap;
 
@@ -103,7 +104,8 @@ pub struct Load {
     #[serde(default)]
     pub phases: BTreeMap<String, PhaseLoad>,
     /// The loops that run beside the tick, each a cycle at a time:
-    /// `automation`, `market`, `bazaar`. Not in the tick's time.
+    /// `automation`, `market`, `bazaar`, and since D0.2 `sampler`. Not in
+    /// the tick's time.
     #[serde(default)]
     pub loops: BTreeMap<String, PhaseLoad>,
     /// Statements that took [`slow_statement_ms`](Self::slow_statement_ms)
@@ -407,7 +409,8 @@ fn unit_books(start: &Ledger, end: &Ledger) -> UnitBooks {
 }
 
 /// The load between two ledgers.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct LoadWindow {
     pub secs: f64,
     pub ticks: u64,
@@ -437,7 +440,8 @@ pub struct LoadWindow {
 }
 
 /// One phase, or one loop, between two loads.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct PhaseWindow {
     pub runs: u64,
     /// Its time over the window

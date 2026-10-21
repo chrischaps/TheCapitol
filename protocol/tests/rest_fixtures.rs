@@ -16,6 +16,8 @@
 //! `fixtures/rest/ledger.json` is `GET /admin/ledger` (C1.7), its load split
 //! by the tick's phases and the loops beside it (D0.1), each with its slow
 //! statements (D3.2).
+//! `fixtures/rest/sample.json` is one of the Observatory's samples (D0.2): ten
+//! seconds of a 20-citizen town.
 
 use std::fs;
 use std::path::Path;
@@ -26,6 +28,7 @@ use capitol_protocol::rest::{
     MarketSummaryResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
 };
 use capitol_protocol::ledger::{Ledger, Load, LoadWindow};
+use capitol_protocol::metrics::Sample;
 use capitol_protocol::rules::market::{sort_levels, GradeRule, OrderSide};
 
 fn fixture(name: &str) -> String {
@@ -197,4 +200,17 @@ fn a_load_counts_slow_statements_by_phase() {
     assert_eq!(window.phases["movement"].slow_statements, 0);
     assert_eq!(window.loops["market"].slow_statements, 0, "the old load's loops kept theirs");
     assert_eq!(window.slow_statements_elsewhere, 1);
+}
+
+#[test]
+fn a_sample_round_trips_with_its_window() {
+    let json = fixture("sample.json");
+    let sample: Sample = serde_json::from_str(&json).unwrap();
+    assert_eq!(sample.since_ms, 10_000);
+    assert_eq!(sample.load.phases.len(), 12);
+    assert_eq!(sample.load.loops["sampler"].runs, 1);
+    assert_eq!(sample.strands.total(), 61240 + 412 + 50000 + 1836);
+    assert_eq!(sample.market["log"].vwap(), Some(36.0 / 7.0));
+    assert_eq!(sample.players.people + sample.players.citizens, sample.load.players_in_world);
+    assert_eq!(serde_json::to_string(&sample).unwrap(), json);
 }

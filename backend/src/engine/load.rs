@@ -172,10 +172,12 @@ pub enum Loop {
     Tax,
     /// Lapsing subscriptions that ran out, hourly
     Subscriptions,
+    /// The Observatory's sampler (D0.2): a ledger and the window's trades
+    Sampler,
 }
 
 impl Loop {
-    pub const ALL: [Loop; 7] = [
+    pub const ALL: [Loop; 8] = [
         Loop::Automation,
         Loop::Market,
         Loop::Bazaar,
@@ -183,6 +185,7 @@ impl Loop {
         Loop::Positions,
         Loop::Tax,
         Loop::Subscriptions,
+        Loop::Sampler,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -194,6 +197,7 @@ impl Loop {
             Loop::Positions => "positions",
             Loop::Tax => "tax",
             Loop::Subscriptions => "subscriptions",
+            Loop::Sampler => "sampler",
         }
     }
 
