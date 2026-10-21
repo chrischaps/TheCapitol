@@ -4,7 +4,8 @@
 //!
 //! It draws the ring r3000 to r3800 with its half-sectors shaded by built
 //! share, the plain's water, the lots and the roads, and rings the places
-//! that break a target. Server y points down, as SVG's does, so world
+//! that break a target. Under `Farms` it names each sector's character and
+//! marks the farm gates. Server y points down, as SVG's does, so world
 //! coordinates go in as they are.
 
 use std::fmt::Write as _;
@@ -13,6 +14,7 @@ use capitol_protocol::fmath::StableMath;
 use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot};
 
 use super::metrics::{self, half_sectors, is_rural_road, Metrics, Waters, HALF_SECTOR_DEG, TARGETS};
+use super::sectors::{Character, Sector};
 use crate::models::suburb::metrics::{centroid, fmt_num, Marker, Scope, Violation};
 use crate::models::suburb::render::{esc, mix, poly, pt, DROPPED, INK, PAPER, TRIMMED, VIOLATION};
 
@@ -54,6 +56,9 @@ pub struct View<'a> {
     pub cleared: &'a [Option<[P; 4]>],
     pub water: Waters<'a>,
     pub scope: Scope,
+    /// Under `Farms`: the farm gates, and the sectors with their characters.
+    pub gates: &'a [P],
+    pub sectors: &'a [Sector],
     pub metrics: &'a Metrics,
     pub markers: &'a [Marker],
     pub violations: &'a [Violation],
@@ -282,6 +287,40 @@ pub fn svg(v: &View) -> String {
             1.4 * k,
             10.0 * k,
             6.0 * k
+        );
+    }
+
+    // The farm gates: a small open square where each side road or spur ends.
+    let _ = writeln!(s, r##"<g fill="{PAPER}" stroke="{LANE}" stroke-width="{:.2}">"##, 2.0 * k);
+    for &g in v.gates.iter().filter(|&&g| in_view(g)) {
+        let half = 6.0 * k;
+        let _ = writeln!(
+            s,
+            r##"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}"><title>farm gate</title></rect>"##,
+            g.0 - half,
+            g.1 - half,
+            2.0 * half,
+            2.0 * half
+        );
+    }
+    let _ = writeln!(s, "</g>");
+
+    // Each sector's character, outside the ring at its bisector, where no
+    // half-sector's share is written.
+    for sector in v.sectors.iter().filter(|s| scope.sector.is_none_or(|only| only as usize == s.index)) {
+        let at = polar(&scope, scope.outer + 120.0, sector.bearing(0.5).to_degrees());
+        let name = match sector.character {
+            Character::Concession => "concession",
+            Character::Winding => "winding",
+        };
+        let _ = writeln!(
+            labels,
+            r##"<text x="{:.1}" y="{:.1}" font-size="{:.1}" font-style="italic" text-anchor="middle" dominant-baseline="middle" fill="{LANE}" stroke="{PAPER}" stroke-width="{:.1}" paint-order="stroke">{} {name}</text>"##,
+            at.0,
+            at.1,
+            20.0 * k,
+            5.0 * k,
+            sector.index
         );
     }
 
@@ -527,8 +566,9 @@ mod tests {
     /// `cargo test --release rural_plan_report -- --ignored --nocapture`.
     ///
     /// Env: `RURAL_SEEDS` (comma-separated, default 42,7,1234,99999),
-    /// `RURAL_SECTOR` (0–7, one sector only) and `RURAL_OUT` (default
-    /// `target/rural-plan/` at the workspace root).
+    /// `RURAL_LAYOUT` (`trails`, the default, or `farms`), `RURAL_SECTOR`
+    /// (0–7, one sector only) and `RURAL_OUT` (default `target/rural-plan/`
+    /// at the workspace root).
     #[test]
     #[ignore]
     fn rural_plan_report() {
@@ -536,9 +576,14 @@ mod tests {
             .split(',')
             .map(|s| s.trim().parse().expect("RURAL_SEEDS is a list of numbers"))
             .collect();
-        // The layout's name in files and titles. Today's radial trails are the
-        // only one until R3 (#286) adds the farms.
-        let layout = "trails";
+        // `RURAL_LAYOUT`: `trails` (the default, today's world) or `farms`,
+        // Rural v2's lanes (#286). It names the files and the titles too.
+        let layout = env_or("RURAL_LAYOUT", "trails");
+        let rural_layout = match layout.as_str() {
+            "trails" => crate::models::rural::RuralLayout::Trails,
+            "farms" => crate::models::rural::RuralLayout::Farms,
+            other => panic!("RURAL_LAYOUT is trails or farms, not {other}"),
+        };
         let sector: Option<u8> = std::env::var("RURAL_SECTOR")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -548,12 +593,13 @@ mod tests {
 
         let mut plans = Vec::new();
         for seed in seeds {
-            let params = WorldGenParams { seed, ..Default::default() };
+            let mut params = WorldGenParams { seed, ..Default::default() };
+            params.rural.layout = rural_layout;
             let measured = metrics::measure_world(&params, sector);
             let t = &measured.terrain;
             let kept = t.terrain_plots.iter().filter(|l| l.zone == "rural").count();
             assert_eq!(measured.cleared.iter().flatten().count(), kept, "seed {seed}: the lots before finish_lots don't match");
-            let m = Metrics { layout: layout.into(), ..measured.measured.metrics };
+            let m = Metrics { layout: layout.clone(), ..measured.measured.metrics };
             let viol = metrics::violations(&m);
             let (name, title) = match sector {
                 Some(s) => (format!("{layout}-{seed}-s{s}"), format!("Rural {layout} · seed {seed} · sector {s}")),
@@ -567,6 +613,8 @@ mod tests {
                 cleared: &measured.cleared,
                 water: Waters { rivers: &t.rivers, streams: &t.streams, lakes: &t.lakes },
                 scope: measured.scope,
+                gates: &measured.rural.gates,
+                sectors: &measured.rural.sectors,
                 metrics: &m,
                 markers: &measured.measured.markers,
                 violations: &viol,
@@ -611,7 +659,18 @@ mod tests {
         let cleared = vec![Some(corners)];
         let scope = Scope { center: (0.0, 0.0), inner: 3000.0, outer: 3800.0, sector: Some(0) };
         let water = Waters { rivers: &[], streams: &[], lakes: &[] };
-        let plan = metrics::Plan { roads: &roads, lots: &lots, before: &lots, cleared: &cleared, water, scope };
+        let gates = [(3780.0, 330.0)];
+        let sectors = [Sector { index: 0, from: 0.0, to: 45f64.to_radians(), character: Character::Winding }];
+        let plan = metrics::Plan {
+            roads: &roads,
+            lots: &lots,
+            before: &lots,
+            cleared: &cleared,
+            water,
+            scope,
+            gates: &gates,
+            sectors: &sectors,
+        };
         let measured = metrics::measure(&plan);
         let viol = metrics::violations(&measured.metrics);
         let view = View {
@@ -622,6 +681,8 @@ mod tests {
             cleared: &cleared,
             water,
             scope,
+            gates: &gates,
+            sectors: &sectors,
             metrics: &measured.metrics,
             markers: &measured.markers,
             violations: &viol,
@@ -629,6 +690,7 @@ mod tests {
         let doc = svg(&view);
         assert!(doc.starts_with("<svg") && doc.trim_end().ends_with("</svg>"));
         assert!(doc.contains("trail_0 · w 6"));
+        assert!(doc.contains("0 winding") && doc.contains("farm gate"));
         assert!(doc.contains("half-sector 1 · 0.0% built"));
         assert!(doc.contains(ARTERIAL));
         let md = table(&[("t".into(), measured.metrics, viol)]);

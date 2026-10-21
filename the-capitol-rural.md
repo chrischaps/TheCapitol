@@ -81,6 +81,8 @@ The sectors' characters are a seeded shuffle of 4 *concession* and 4 *winding*, 
 
 - **Ids and type.** Rural roads are `lane_{s}_{k}`, `RoadType::Trail` and 8 wide, so there's no wire change.
 - **The weld.** `street_plan::weld_junctions` runs over `lane_*` and the arterials, so every lane meets an arterial at a shared vertex. `street_plan::audit` holds over them. A loose end is allowed only at a farm gate, where a track ends at a farm.
+  - *As built (#286):* the weld picks the lanes only. Their ends land on the arterials, which gain a vertex there, and the side roads and spurs start on a vertex of their main road. Picking the arterials too would also weld their far ends onto the guild ring.
+  - *As built:* a farm gate is the planned end of a side road or spur, and an end counts as at a gate only if it's exactly there. `rural::plan` returns the gates, and the metrics re-plan to find them. R4 can narrow this further, to a gate a farm actually fronts.
 - **The edge.** Lanes stay inside about r3780. The wild trails' weld picks up any road within `trails::CELL` of r3800 (`trails.rs:222-226`).
 
 ### RD6. Farms ([R4 #287](https://github.com/chrischaps/TheCapitol/issues/287))
@@ -154,6 +156,7 @@ R1's harness prints these, and R5's test asserts the hard ones over seeds 42, 7,
 | CV of the half-sectors' built shares | ≤ 0.30 | soft |
 | Sectors of each character | ≥ 3 | yes |
 | `street_plan::audit` on rural roads | clean but for farm-gate ends | yes |
+| Loose road ends off a farm gate | 0 | yes |
 | Farms on water | 0 | yes |
 | Gap between farms | ≥ 40 | yes |
 
@@ -169,7 +172,8 @@ R1's harness prints these, and R5's test asserts the hard ones over seeds 42, 7,
 | CV of the half-sectors' shares | ≤ 0.30 | 0.64 ✗ | 0.73 ✗ | 0.76 ✗ | 0.79 ✗ |
 | **Sectors of each character** | ≥ 3 | – | – | – | – |
 | **Audit issues, but for loose ends** | 0 | 3 ✗ | 4 ✗ | 3 ✗ | 1 ✗ |
-| Loose road ends | farm gates only | 24 | 24 | 24 | 24 |
+| Loose road ends | | 24 | 24 | 24 | 24 |
+| **Loose ends off a farm gate** | 0 | 24 ✗ | 24 ✗ | 24 ✗ | 24 ✗ |
 | **Farms on water** | 0 | 6 ✗ | 6 ✗ | 10 ✗ | 1 ✗ |
 | **Gap between farms, least** | ≥ 40 | 0.07 ✗ | 0.16 ✗ | 0.10 ✗ | 0.22 ✗ |
 | Lots trimmed by `finish_lots` | | 61% | 56% | 62% | 65% |
@@ -185,8 +189,8 @@ Built share by half-sector, 0 to 15, in %:
 - **Built share** is the ground a rural lot stands on, sampled every 10.
 - **Gap** is edge to edge.
 - **On water** means a course's capsule (half its width either side) or a lake's rings meet the lot.
-- **The audit** counts `street_plan::audit` on `trail_*` and `lane_*` roads, but for loose ends, which are counted apart until R3 adds the farm-gate exemption.
-- **Sectors of each character** has nothing to measure until R3 deals the deck. R3 fills it in.
+- **The audit** counts `street_plan::audit` on `trail_*` and `lane_*` roads, but for loose ends, which are counted apart. Since R3, the loose ends that aren't at a farm gate are a hard row of their own. Today's trails have no gates, so all 24 of theirs miss.
+- **Sectors of each character** counts the rarer of the two in the deck, over the whole ring. The trails have no deck, so it's blank for them.
 - The report has more rows: road length, trimmed and dropped shares, the least and most lot area, the median nearest gap, the closest a dry lot comes to water, and the courses and lakes in the ring.
 
 ## 6. Architecture notes
@@ -241,7 +245,7 @@ The flip is one commit, and `scripts/ci.sh full` runs before it lands. It covers
 | R0 | [#282](https://github.com/chrischaps/TheCapitol/issues/282) | This plan, the issues, and #223 brought in | S | – |
 | R1 | [#284](https://github.com/chrischaps/TheCapitol/issues/284) | Harness: render, metrics, `rural-plan.ps1`, baseline of today's trails. *As built:* `rural/metrics.rs` and `render.rs` (test-only), `rural_plan_report`, and `-Seed`, `-Seeds`, `-Sector`, `-Out` and `-Compare`. It shares `suburb::metrics`'s scope and checks and `suburb::render`'s helpers and page. The baseline is in §2 and §5 | M | – |
 | R2 | [#285](https://github.com/chrischaps/TheCapitol/issues/285) | Shared lot geometry: `lots.rs` over any `Region` + `LotParams`, aware of water. Suburb unchanged under the pin. *As built:* `models/lot_geometry.rs` holds `World` (roads, fronted sides, and `with_water(courses, lakes, bank)`), `Region` (`ring`, cut by `ccw_of`/`cw_of` side lines, or `polygon`), `Ray`, `push_fronts`, the ray march `back`/`back_from`, `Candidate`, and `place`/`shrink_to_fit`. `LotParams` has the frontage and depths, the front, edge and rear gaps, `lot_gap`, `min_shrink` and `min_area`. A course is a capsule as wide as the wider point of each stretch, as R1 measures it, and a lake its even-odd rings, each plus `bank`. A ray stops at a bank as at a road without lots, so a lot backs onto water, and `place` drops one the water runs through. `suburb/lots.rs` keeps its walker, pies and ids, and calls it through `lot_params` and `region_of`. The pin and `neighbourhood_suburb_meets_its_targets` print the same | M | – |
-| R3 | [#286](https://github.com/chrischaps/TheCapitol/issues/286) | Sectors and roads behind `layout = Farms`: the deck, concession roads, winding lanes, side roads, spurs, weld, audit | L | R1 |
+| R3 | [#286](https://github.com/chrischaps/TheCapitol/issues/286) | Sectors and roads behind `layout = Farms`: the deck, concession roads, winding lanes, side roads, spurs, weld, audit. *As built:* `rural/{sectors,roads}.rs`, and `RuralParams { layout, lane_width }` as `WorldGenParams::rural`. The sectors are read off the arterials' bearings. Concession: a kink at ρ in [3355, 3445] with ends within 25 of it, a jog half the time (16 to 24° across the road, 110 to 170 long, so the bends are 40° or less), and one side road (both ways at random) or two (opposite ways), to gates 80 to 140 from the ring's edge. Winding: two sines (90 to 150 in all) on 13 controls, wandering a fifth of a step in bearing. The spur turns 8° or less a step, pulled back toward radial, stops clear of the edges, the arterials and its own lane, and is redrawn if it's under 160 long. Under `Farms` there are no rural lots until R4. `rural-plan.ps1 -Layout farms` draws the lanes, the gates and each sector's character. Audit clean and 4 of each character on the four seeds and on seeds 0 to 39 | L | R1 |
 | R4 | [#287](https://github.com/chrischaps/TheCapitol/issues/287) | Farms on lanes and arterials, field gaps, the balance pass, clear of the water. Closes #223 | L | R2, R3 |
 | R5 | [#288](https://github.com/chrischaps/TheCapitol/issues/288) | Tune to §5's targets over four seeds; the targets test | M | R4 |
 | R6 | [#289](https://github.com/chrischaps/TheCapitol/issues/289) | Flint: farms are pasture, the farmstead set back on a drive, `LOT` bound | M | R4 |

@@ -14,7 +14,9 @@
 //! - **gap:** the shortest distance between two rural lots, edge to edge;
 //!   0 where they touch or overlap;
 //! - **on water:** a lot that a river or stream (a capsule as wide as the
-//!   water at each end of the stretch) or a lake (its even-odd rings) runs into.
+//!   water at each end of the stretch) or a lake (its even-odd rings) runs into;
+//! - **farm gate:** where a lane's side road or spur ends (RD5), the one place
+//!   a loose end is allowed. Today's trails have none.
 //!
 //! The scaffolding (the scope, the checks, the violations and the number
 //! format) is the suburb's (`suburb::metrics`, #104).
@@ -28,6 +30,8 @@ use crate::models::lot_clearance;
 use crate::models::geom::{quads_overlap_strict, SpatialGrid};
 use crate::models::street_plan;
 use crate::models::terrain::{point_to_segment_distance, TerrainConfig, WorldGenParams};
+use crate::models::rural::sectors::{Character, Sector};
+use crate::models::rural::{self as rural, RuralLayout};
 use crate::models::suburb::metrics::centroid;
 
 type P = (f64, f64);
@@ -85,6 +89,11 @@ pub struct Plan<'a> {
     pub cleared: &'a [Option<[P; 4]>],
     pub water: Waters<'a>,
     pub scope: Scope,
+    /// The farm gates, where a loose end is allowed (RD5)...
+    pub gates: &'a [P],
+    /// ...and the sectors with their characters (RD2). Both empty for the
+    /// trails.
+    pub sectors: &'a [Sector],
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -99,10 +108,12 @@ pub struct Metrics {
     pub road_length: f64,
     /// `street_plan::audit` on the rural roads, but for loose ends...
     pub audit_issues: usize,
-    /// ...which are counted apart: R3 allows them at a farm gate.
+    /// ...which are counted apart...
     pub loose_ends: usize,
+    /// ...and these are the ones that aren't at a farm gate (RD5).
+    pub loose_ends_off_gate: usize,
     /// How many sectors have the rarer of the two characters (plan RD2).
-    /// Today's trails have none, so it's `None` until R3 deals the deck.
+    /// Today's trails have no deck, so it's `None` for them.
     pub sector_character_min: Option<f64>,
 
     pub lots: usize,
@@ -161,6 +172,7 @@ pub const TARGETS: &[Target] = &[
     soft("half_sector_cv", "CV of half-sector built shares", Check::Max(0.30)),
     hard("sector_character_min", "sectors of each character, fewest", Check::Min(3.0)),
     hard("audit_issues", "street_plan::audit issues, but for loose ends", Check::Max(0.0)),
+    hard("loose_ends_off_gate", "loose road ends off a farm gate", Check::Max(0.0)),
     hard("lots_on_water", "farms on water", Check::Max(0.0)),
     hard("gap_min", "gap between farms, least", Check::Min(MIN_GAP)),
 ];
@@ -194,6 +206,8 @@ pub struct Measurement {
     pub before: Vec<TerrainPlot>,
     pub cleared: Vec<Option<[P; 4]>>,
     pub scope: Scope,
+    /// Under `Farms`, the ring's plan: its sectors and farm gates.
+    pub rural: rural::Plan,
     pub measured: Measured,
 }
 
@@ -207,6 +221,12 @@ pub fn measure_world(params: &WorldGenParams, sector: Option<u8>) -> Measurement
     let (before, laid_on) = terrain.rural_plots_before(params);
     let cleared = lot_clearance::clear_each(&before, &laid_on, &terrain.water_rings, center);
     let scope = Scope { center, inner: params.suburban_outer_radius, outer: params.rural_outer_radius, sector };
+    // The plan again, for its gates and deck: it's a pure function of the
+    // params and the arterials, which the weld only adds vertices to.
+    let ring = match params.rural.layout {
+        RuralLayout::Trails => rural::Plan::default(),
+        RuralLayout::Farms => rural::plan(params, center, &terrain.roads),
+    };
     let plan = Plan {
         roads: &terrain.roads,
         lots: &terrain.terrain_plots,
@@ -214,10 +234,12 @@ pub fn measure_world(params: &WorldGenParams, sector: Option<u8>) -> Measurement
         cleared: &cleared,
         water: Waters { rivers: &terrain.rivers, streams: &terrain.streams, lakes: &terrain.lakes },
         scope,
+        gates: &ring.gates,
+        sectors: &ring.sectors,
     };
     let mut measured = measure(&plan);
     (measured.metrics.seed, measured.metrics.gen_ms) = (params.seed, gen_ms);
-    Measurement { terrain, before, cleared, scope, measured }
+    Measurement { terrain, before, cleared, scope, rural: ring, measured }
 }
 
 pub fn measure(plan: &Plan) -> Measured {
@@ -257,7 +279,19 @@ pub fn measure(plan: &Plan) -> Measured {
             markers.push(Marker { kind: "audit", at, note });
         }
     }
-    m.loose_ends = audit.loose_ends.iter().filter(|(_, p)| scope.contains_padded(*p, EDGE_PAD)).count();
+    let loose: Vec<&(String, P)> = audit.loose_ends.iter().filter(|(_, p)| scope.contains_padded(*p, EDGE_PAD)).collect();
+    m.loose_ends = loose.len();
+    for (id, at) in loose {
+        if !plan.gates.iter().any(|g| dist(*g, *at) < 1e-6) {
+            m.loose_ends_off_gate += 1;
+            markers.push(Marker { kind: "audit", at: *at, note: format!("loose end on {id}") });
+        }
+    }
+    // The deck is the whole ring's, whatever the scope.
+    if !plan.sectors.is_empty() {
+        let count = |c: Character| plan.sectors.iter().filter(|s| s.character == c).count();
+        m.sector_character_min = Some(count(Character::Concession).min(count(Character::Winding)) as f64);
+    }
 
     // Lots.
     let lots: Vec<&TerrainPlot> =
@@ -519,7 +553,7 @@ mod tests {
     }
 
     fn plan<'a>(lots: &'a [TerrainPlot], water: Waters<'a>, cleared: &'a [Option<[P; 4]>]) -> Plan<'a> {
-        Plan { roads: &[], lots, before: lots, cleared, water, scope: ring() }
+        Plan { roads: &[], lots, before: lots, cleared, water, scope: ring(), gates: &[], sectors: &[] }
     }
 
     const DRY: Waters<'static> = Waters { rivers: &[], streams: &[], lakes: &[] };

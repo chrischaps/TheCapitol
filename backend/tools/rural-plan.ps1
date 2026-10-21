@@ -16,6 +16,10 @@
 .PARAMETER Seed
   One world seed, for a quick look. Overrides -Seeds.
 
+.PARAMETER Layout
+  trails (the default, today's world) or farms, Rural v2's concession roads
+  and winding lanes (#286). The files are named after it.
+
 .PARAMETER Sector
   Draw and measure one 45-degree sector only, 0 to 7. Sector n runs from
   the arterial at 45n degrees to the next one.
@@ -30,11 +34,14 @@
 .EXAMPLE
   powershell -File backend/tools/rural-plan.ps1
   powershell -File backend/tools/rural-plan.ps1 -Seed 42 -Sector 2
+  powershell -File backend/tools/rural-plan.ps1 -Layout farms
   powershell -File backend/tools/rural-plan.ps1 -Out target/rural-new -Compare target/rural-plan
 #>
 param(
     [string]$Seeds = "",
     [long]$Seed = -1,
+    [ValidateSet("trails", "farms")]
+    [string]$Layout = "trails",
     [int]$Sector = -1,
     [string]$Out = "",
     [string]$Compare = ""
@@ -49,6 +56,7 @@ New-Item -ItemType Directory -Force $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
 
 $env:RURAL_SEEDS = if ($Seed -ge 0) { "$Seed" } else { $Seeds }
+$env:RURAL_LAYOUT = $Layout
 $env:RURAL_SECTOR = if ($Sector -ge 0) { "$Sector" } else { "" }
 $env:RURAL_OUT = $Out
 

@@ -6,6 +6,7 @@ use capitol_protocol::rules;
 use capitol_protocol::land::LandParams;
 
 use super::geom::polyline_length;
+use super::rural::{RuralLayout, RuralParams};
 use super::street_plan;
 
 // The terrain types the client sees are shared through capitol-protocol, so
@@ -204,6 +205,9 @@ pub struct WorldGenParams {
     // Rural plots
     pub rural_plot_frontage: f64,
     pub rural_plot_depth: f64,
+    // Rural v2 (`the-capitol-rural.md`): the layout switch and the farms'
+    // roads. Its own defaults, so a saved config from before it still loads.
+    pub rural: RuralParams,
     // Guild halls
     pub guild_plot_frontage: f64,
     // Seeds
@@ -279,6 +283,7 @@ impl Default for WorldGenParams {
             wild_trail_width: 8.0,
             rural_plot_frontage: 200.0,
             rural_plot_depth: 150.0,
+            rural: RuralParams::default(),
             guild_plot_frontage: 150.0,
             seed: 42,
             land: LandParams::default(),
@@ -804,12 +809,24 @@ impl TerrainConfig {
         // Suburban streets
         roads.extend(super::suburb::plan(&params.suburban_params(), (self.center_x, self.center_y)).roads);
 
-        // Rural trails
-        roads.extend(self.generate_rural_paths_with_params(params));
+        // The rural ring: today's trails, or Rural v2's lanes (#286), which
+        // the arterials cut into sectors.
+        match params.rural.layout {
+            RuralLayout::Trails => roads.extend(self.generate_rural_paths_with_params(params)),
+            RuralLayout::Farms => {
+                let lanes = super::rural::plan(params, (self.center_x, self.center_y), &roads).roads;
+                roads.extend(lanes);
+            }
+        }
 
         // Every suburban junction becomes a vertex both roads share, so
         // clients can see where streets meet (#62).
         street_plan::weld_junctions(&mut roads, |r| r.road_type == RoadType::Suburban);
+        // And every lane's: its ends onto the arterial or the main road it
+        // stops at (RD5). Only the farm gates stay loose.
+        if params.rural.layout == RuralLayout::Farms {
+            street_plan::weld_junctions(&mut roads, super::rural::is_lane);
+        }
 
         roads
     }
@@ -1291,6 +1308,11 @@ impl TerrainConfig {
 
     /// Generate plots along rural trail roads
     fn generate_rural_plots(&self, params: &WorldGenParams) -> Vec<TerrainPlot> {
+        // The farms come with R4 (#287). Until then the lanes have none,
+        // rather than today's lots laid along them.
+        if params.rural.layout == RuralLayout::Farms {
+            return Vec::new();
+        }
         let mut plots = Vec::new();
         let mut placed_plot_corners: Vec<[(f64, f64); 4]> = Vec::new();
         let inner_radius = params.suburban_outer_radius;

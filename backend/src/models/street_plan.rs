@@ -51,8 +51,8 @@ fn lerp(a: P, b: P, t: f64) -> P {
 /// Centripetal Catmull-Rom (alpha 0.5) through `controls`, `per_span` samples
 /// a span. Unlike the uniform kind it can't form a cusp or a loop within a
 /// span, whatever the spacing of the controls. The end tangents come from
-/// reflected phantom points, so the curve leaves and arrives head on.
-#[cfg(test)]
+/// reflected phantom points, so the curve leaves and arrives head on. The
+/// rural ring's winding lanes are drawn with it (#286).
 pub(crate) fn centripetal_spline(controls: &[P], per_span: usize) -> Vec<P> {
     let controls = dedupe(controls);
     let n = controls.len();
