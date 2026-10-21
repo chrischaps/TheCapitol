@@ -4,7 +4,10 @@
 //! ```text
 //! capitol-town mint --count 20      # make twenty citizens, onto town.toml
 //! capitol-town mint --count 2 --role merchant   # and two merchants (C1.6)
+//! capitol-town mint --online 20     # enough citizens that 20 are on, on average (#276)
+//! capitol-town habits               # who's on when, over the coming weeks (#276)
 //! capitol-town                      # live until Ctrl-C
+//! capitol-town --always-on          # every citizen on, day and night (#276)
 //! capitol-town --report             # and write what the town did when it stops (C1.7)
 //! capitol-town soak --hours 24      # a day, then the report, load and conservation (C1.7)
 //! capitol-town books town.soak-….ledgers.jsonl  # a soak's books, even one that was killed
@@ -26,9 +29,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use capitol_core::citizen::decide::{corpus, log};
 use capitol_core::citizen::decide::replay::Replayer;
 use capitol_core::citizen::decide::{self, Cascade};
+use capitol_core::citizen::habit::{self, Habit, Kind};
 use capitol_core::citizen::report::{Soak, TownReport};
 use capitol_core::citizen::schedule;
-use capitol_core::citizen::town::{self, Admin, Logs, Roster, Town};
+use capitol_core::citizen::town::{self, Admin, Hours, Logs, Roster, Town};
 use capitol_core::net::{self, NetConfig, RestRequest, RestResponse};
 use capitol_core::protocol::ledger::Ledger;
 use capitol_core::sim::Role;
@@ -37,12 +41,16 @@ const USAGE: &str = "\
 capitol-town: the citizens of The Capitol
 
 USAGE:
-    capitol-town [run]           Live: every citizen on the roster lives its
-                                 day until Ctrl-C: up at its wake, its trade,
-                                 its market hours, home at dusk, and logged
-                                 out for the night. A citizen whose life
-                                 ends starts again after a backoff; one
-                                 whose key is refused retires.
+    capitol-town [run]           Live until Ctrl-C: each citizen on the
+                                 roster signs in when its habit says, on
+                                 the real clock (a few hours some days, in
+                                 its own evenings), and plays the game's
+                                 day while it's on: its trade, its market
+                                 hours, home at dusk, and the night's work
+                                 from there. When its session's over it
+                                 logs out until the next. A citizen whose
+                                 life ends starts again after a backoff;
+                                 one whose key is refused retires.
     capitol-town soak --hours <h>
                                  Live as run does for h hours of the day's
                                  clock (24 is a day, two real hours), then
@@ -59,9 +67,16 @@ USAGE:
                                  that stopped before its report. Exits 1 if
                                  they drifted.
     capitol-town mint --count <n> [--role <role>]
-                                 Make n citizens through the admin endpoint
-                                 and add them, with their keys and their
-                                 seeded personas, to the roster
+    capitol-town mint --online <n> [--role <role>]
+                                 Make n citizens through the admin endpoint,
+                                 or with --online enough that n of them are
+                                 on at once on average, by the roster's mix
+                                 of habits, and add them, with their keys
+                                 and their seeded personas, to the roster
+    capitol-town habits          Who on the roster is on when, over the
+                                 next four weeks: its habits, the average
+                                 online, the fewest and most, and the
+                                 average by hour of the day (UTC)
     capitol-town status          Print the running town's last health
                                  (also --status)
     capitol-town replay [<log>...] --layers <a,b>
@@ -95,6 +110,11 @@ FLAGS:
     --sample <secs>   With soak, how often it reads the server's load
                       [default: 60]
     --count <n>       With mint, how many citizens to make
+    --online <n>      With mint, make enough citizens to keep n on, on
+                      average: about 32 for each with the default mix
+    --always-on       With run or soak, every citizen stays on through
+                      day and night, whatever its habit: for a soak of the
+                      whole pool
     --role <role>     With mint, make every one of them this: gatherer-fiber,
                       gatherer-wood, gatherer-ore, crafter-planks,
                       crafter-ingots, crafter-tools, builder or merchant
@@ -140,10 +160,19 @@ enum Action {
     Run,
     Soak { hours: f64 },
     Books { file: PathBuf },
-    Mint { count: usize },
+    Mint { size: Size },
+    Habits,
     Status,
     Replay { logs: Vec<PathBuf>, layers: Vec<String>, stride: usize },
     Corpus { dir: Option<PathBuf>, rounds: u32 },
+}
+
+/// How many citizens a mint makes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Size {
+    Count(usize),
+    /// Enough to keep this many on, on average (#276)
+    Online(f64),
 }
 
 #[derive(Debug)]
@@ -161,6 +190,8 @@ struct Options {
     report: bool,
     /// With soak, how often it reads the ledger
     sample: Duration,
+    /// With run or soak, everyone on all the time, whatever their habits
+    always_on: bool,
 }
 
 impl Options {
@@ -173,6 +204,7 @@ impl Options {
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
     let mut action = None;
     let mut count = None;
+    let mut online = None;
     let mut hours = None;
     let mut logs = Vec::new();
     let mut layers = None;
@@ -191,6 +223,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         log_mb: LOG_MB,
         report: false,
         sample: Duration::from_secs(60),
+        always_on: false,
     };
     let mut admin_given = false;
     let mut every_given = false;
@@ -201,14 +234,23 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         let corpus = matches!(action, Some(Action::Corpus { .. }));
         let reading_books = matches!(&action, Some(Action::Books { file }) if file.as_os_str().is_empty());
         let mut set = |a: Action| match action.replace(a) {
-            Some(_) => Err("run, soak, books, mint, status, replay and corpus go one at a time".to_string()),
+            Some(_) => Err("run, soak, books, mint, habits, status, replay and corpus go one at a time".to_string()),
             None => Ok(()),
         };
         match arg.as_str() {
             "run" => set(Action::Run)?,
             "soak" => set(Action::Soak { hours: 0.0 })?,
             "books" => set(Action::Books { file: PathBuf::new() })?,
-            "mint" => set(Action::Mint { count: 0 })?,
+            "mint" => set(Action::Mint { size: Size::Count(0) })?,
+            "habits" => set(Action::Habits)?,
+            "--always-on" => options.always_on = true,
+            "--online" => {
+                let n: f64 = number(&arg, &value()?)?;
+                if n.is_nan() || n <= 0.0 {
+                    return Err("--online must be more than 0".into());
+                }
+                online = Some(n);
+            }
             "status" | "--status" => set(Action::Status)?,
             "replay" => set(Action::Replay {
                 logs: Vec::new(),
@@ -287,9 +329,18 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    options.action = match (action.unwrap_or(Action::Run), count, hours) {
-        (Action::Mint { .. }, Some(count), None) => Action::Mint { count },
-        (Action::Mint { .. }, None, _) => return Err("mint needs --count".into()),
+    let size = match (count, online) {
+        (Some(_), Some(_)) => return Err("mint takes --count or --online, not both".into()),
+        (Some(n), None) => Some(Size::Count(n)),
+        (None, Some(n)) => Some(Size::Online(n)),
+        (None, None) => None,
+    };
+    if online.is_some() && !matches!(action, Some(Action::Mint { .. })) {
+        return Err("--online goes with mint".into());
+    }
+    options.action = match (action.unwrap_or(Action::Run), size, hours) {
+        (Action::Mint { .. }, Some(size), None) => Action::Mint { size },
+        (Action::Mint { .. }, None, _) => return Err("mint needs --count or --online".into()),
         (_, Some(_), _) => return Err("--count goes with mint".into()),
         (Action::Soak { .. }, None, Some(hours)) => Action::Soak { hours },
         (Action::Soak { .. }, None, None) => return Err("soak needs --hours".into()),
@@ -322,6 +373,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
     }
     if admin_given && !matches!(options.action, Action::Mint { .. } | Action::Soak { .. }) {
         return Err("--admin goes with mint or soak".into());
+    }
+    if options.always_on && !options.lives() {
+        return Err("--always-on goes with run or soak".into());
     }
     if options.role.is_some() && !matches!(options.action, Action::Mint { .. }) {
         return Err("--role goes with mint".into());
@@ -368,31 +422,100 @@ fn admin(options: &Options, doing: &str) -> Result<Admin, String> {
     Ok(Admin { email, password })
 }
 
-fn mint(options: &Options, count: usize) -> Result<(), String> {
+fn mint(options: &Options, size: Size) -> Result<(), String> {
     let admin = admin(options, "mint")?;
     let mut roster = Roster::load_or_new(&options.roster)?;
     let server = server(options, &roster);
     let had = roster.citizens.len();
+    let count = match size {
+        Size::Count(n) => n,
+        // A pool of the mix is on its share of the time
+        Size::Online(n) => (n / roster.mix.share()).ceil().max(1.0) as usize,
+    };
     let result = town::mint(&NetConfig::with_base_url(&server), &admin, &mut roster, count, options.role);
     for citizen in &roster.citizens[had..] {
         let p = &citizen.persona;
         println!(
-            "made {} ({}), of the {} {} avenue, up at {}, at the {} {}",
+            "made {} ({}), of the {} {} avenue, at the {} {}, {} in {}",
             citizen.name,
             citizen.role,
             p.home.zone,
             p.home.avenue,
-            schedule::clock(p.schedule.wake),
             p.market,
-            p.schedule.market()
+            p.schedule.market(),
+            p.habit.kind,
+            p.habit.zone_name()
         );
     }
+    let made: Vec<Habit> = roster.citizens[had..].iter().map(|c| c.persona.habit).collect();
+    let all: Vec<Habit> = roster.citizens.iter().map(|c| c.persona.habit).collect();
+    let (from, hours) = (unix_ms(), HABIT_WEEKS * 7 * 24);
     println!(
-        "{}: {} citizens on the roster",
+        "{}: {} citizens on the roster; the {} made keep {:.1} on, on average, and the roster {:.1}",
         roster.path.display(),
-        roster.citizens.len()
+        roster.citizens.len(),
+        made.len(),
+        habit::expected_online(&made, from, hours),
+        habit::expected_online(&all, from, hours)
     );
     result.map(|_| ())
+}
+
+/// How far ahead `habits` and `mint --online` look.
+const HABIT_WEEKS: usize = 4;
+
+/// Who on the roster is on when (#276): its habits, and how many are on by
+/// hour over the next [`HABIT_WEEKS`].
+fn habits(options: &Options) -> Result<(), String> {
+    let roster = living_roster(options)?;
+    let all: Vec<Habit> = roster.citizens.iter().map(|c| c.persona.habit).collect();
+    let kinds: Vec<String> = Kind::ALL
+        .iter()
+        .map(|&k| format!("{} {k}", all.iter().filter(|h| h.kind == k).count()))
+        .collect();
+    println!("{}: {} citizens: {}", roster.path.display(), all.len(), kinds.join(", "));
+    let mut zones: Vec<(i32, usize)> = Vec::new();
+    for h in &all {
+        match zones.iter_mut().find(|(z, _)| *z == h.zone) {
+            Some((_, n)) => *n += 1,
+            None => zones.push((h.zone, 1)),
+        }
+    }
+    zones.sort();
+    let zones: Vec<String> = zones
+        .iter()
+        .map(|&(z, n)| format!("{n} in {}", Habit::new(Kind::Casual, z, 0).zone_name()))
+        .collect();
+    println!("living {}", zones.join(", "));
+    // From the top of this hour, so each row is a whole hour of the clock
+    let hour_ms = 3_600_000;
+    let from = unix_ms().div_euclid(hour_ms) * hour_ms;
+    let hours = HABIT_WEEKS * 7 * 24;
+    let by_hour = habit::online_by_hour(&all, from, hours);
+    let mean = habit::expected_online(&all, from, hours);
+    let on_now = all.iter().filter(|h| matches!(h.at(unix_ms()), habit::Presence::On { .. })).count();
+    println!(
+        "over the next {HABIT_WEEKS} weeks: {mean:.1} on, on average ({:.1}% of the pool; the mix alone says {:.1}%), fewest {}, most {}; {on_now} on now",
+        100.0 * mean / all.len().max(1) as f64,
+        100.0 * roster.mix.share(),
+        by_hour.iter().min().unwrap_or(&0),
+        by_hour.iter().max().unwrap_or(&0)
+    );
+    // Each hour of the day (UTC), averaged over the weeks
+    let first = (from / hour_ms).rem_euclid(24) as usize;
+    let mut sums = [0usize; 24];
+    for (i, n) in by_hour.iter().enumerate() {
+        sums[(first + i) % 24] += n;
+    }
+    let days = (hours / 24) as f64;
+    let peak = sums.iter().copied().max().unwrap_or(0).max(1) as f64 / days;
+    println!("by the hour (UTC), on average:");
+    for (hour, sum) in sums.iter().enumerate() {
+        let avg = *sum as f64 / days;
+        let bar = "█".repeat((avg / peak * 40.0).round() as usize);
+        println!("  {hour:02}:00  {avg:>6.1}  {bar}");
+    }
+    Ok(())
 }
 
 fn status(options: &Options) -> Result<(), String> {
@@ -564,7 +687,9 @@ fn live(
         limit: options.log_mb << 20,
         keep: log::LOG_KEEP,
     });
-    let mut town = Town::start(roster, server, stop.clone(), logs.as_ref()).map_err(|e| format!("starting the town: {e}"))?;
+    let hours = if options.always_on { Hours::AlwaysOn } else { Hours::Habits };
+    let mut town = Town::start(roster, server, stop.clone(), logs.as_ref(), hours)
+        .map_err(|e| format!("starting the town: {e}"))?;
     println!(
         "capitol-town: {} citizens on {server}, health every {:.0?} to {}, and who's where to {}",
         roster.citizens.len(),
@@ -756,7 +881,8 @@ fn main() -> ExitCode {
             Ok(false) => Err("the books drifted".to_string()),
             Err(e) => Err(e),
         },
-        Action::Mint { count } => mint(&options, count),
+        Action::Mint { size } => mint(&options, size),
+        Action::Habits => habits(&options),
         Action::Status => status(&options),
         Action::Replay {
             ref logs,
@@ -791,12 +917,18 @@ mod tests {
         let o = parse(args("mint --count 20 --admin chris@example.com --roster t/x.toml"))
             .unwrap()
             .unwrap();
-        assert_eq!(o.action, Action::Mint { count: 20 });
+        assert_eq!(o.action, Action::Mint { size: Size::Count(20) });
         assert_eq!(o.role, None);
         assert_eq!(o.admin.as_deref(), Some("chris@example.com"));
         assert_eq!(o.roster, PathBuf::from("t/x.toml"));
         let o = parse(args("mint --count 2 --role merchant")).unwrap().unwrap();
         assert_eq!(o.role, Some(Role::Merchant));
+        let o = parse(args("mint --online 18")).unwrap().unwrap();
+        assert_eq!(o.action, Action::Mint { size: Size::Online(18.0) });
+        assert_eq!(parse(args("habits")).unwrap().unwrap().action, Action::Habits);
+        assert!(!parse(args("run")).unwrap().unwrap().always_on);
+        assert!(parse(args("run --always-on")).unwrap().unwrap().always_on);
+        assert!(parse(args("soak --hours 2 --always-on")).unwrap().unwrap().always_on);
         assert_eq!(parse(args("--status")).unwrap().unwrap().action, Action::Status);
         assert_eq!(parse(args("status")).unwrap().unwrap().action, Action::Status);
         let o = parse(args("run --every 5 --server http://x:3001")).unwrap().unwrap();
@@ -882,6 +1014,10 @@ mod tests {
     #[test]
     fn bad_arguments_are_reported() {
         assert!(parse(args("mint")).is_err(), "mint without --count");
+        assert!(parse(args("mint --count 2 --online 3")).is_err(), "both");
+        assert!(parse(args("mint --online 0")).is_err());
+        assert!(parse(args("run --online 3")).is_err(), "--online without mint");
+        assert!(parse(args("habits --always-on")).is_err(), "--always-on without run or soak");
         assert!(parse(args("mint --count 0")).is_err());
         assert!(parse(args("--count 3")).is_err(), "--count without mint");
         assert!(parse(args("run --admin a@b")).is_err());

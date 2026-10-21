@@ -5,14 +5,16 @@
 //!   file) for each citizen, and its [`Persona`] (C1.2). It holds keys, so
 //!   it's git-ignored; `town.example.toml` shows the shape. [`mint`] adds
 //!   to it.
-//! - **A day** (C1.2) is one life: the citizen signs in by its key at its
-//!   [`Schedule`]'s `wake` and plays the role's loop ([`sim::run::live`]),
-//!   keeping its market hours, until it goes home at dusk and logs out. It
-//!   sleeps the night off the server and signs in again in the morning.
-//!   A dropped connection or a server restart is ridden out inside the life
-//!   (C0.6). A life that ends any other way (the server wasn't up to sign
-//!   in to, a panic) starts again after the net layer's backoff. A refused
-//!   key retires the citizen.
+//! - **A session** (#276) is one life: the citizen signs in by its key when
+//!   its [`Habit`] says, on the real clock, and plays the role's loop
+//!   ([`sim::run::live`]) through its [`Schedule`]'s day (C1.2): work, its
+//!   market hours, home at dusk, and the night's work from home. When the
+//!   session's over it logs out where it stands, and is away until the
+//!   next. `--always-on` ([`Hours::AlwaysOn`]) keeps every citizen on, for
+//!   a soak of the whole pool. A dropped connection or a server restart is
+//!   ridden out inside the life (C0.6). A life that ends any other way (the
+//!   server wasn't up to sign in to, a panic) starts again after the net
+//!   layer's backoff. A refused key retires the citizen.
 //! - **Health**: each citizen's [`Health`], one line apiece, which the town
 //!   prints and writes beside the roster every minute, and its presence,
 //!   appended to `town.presence.csv` (C1.2).
@@ -25,6 +27,7 @@
 //!   ([`super::report`]).
 //!
 //! [`Schedule`]: super::schedule::Schedule
+//! [`Habit`]: super::habit::Habit
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -42,6 +45,7 @@ use serde::Deserialize;
 
 use super::decide::log::{self, Log};
 use super::decide::{self, Cascade, Mind, SharedLog};
+use super::habit::{Habit, Kind, Mix, Presence};
 use super::persona::{self, Avenue, Home, Market, Persona, Temperament};
 use super::schedule::{self, Phase, Schedule};
 use crate::bot::{Bot, BotError};
@@ -76,8 +80,34 @@ struct RosterFile {
     server: Option<String>,
     /// The decision layers every citizen has, bottom first (C1.3).
     layers: Option<Vec<String>>,
+    /// When citizens play (#276): the town's mix of habits.
+    habits: Option<HabitsFile>,
     #[serde(default, rename = "citizen")]
     citizens: Vec<CitizenFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HabitsFile {
+    mix: Option<MixFile>,
+}
+
+/// Each kind's weight: `{ dedicated = 0.05, regular = 0.3, casual = 0.55, lapsed = 0.1 }`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MixFile {
+    dedicated: f64,
+    regular: f64,
+    casual: f64,
+    lapsed: f64,
+}
+
+/// `{ kind = "casual", zone = -5 }`: the zone in hours from UTC.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HabitFile {
+    kind: String,
+    zone: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +124,7 @@ struct CitizenFile {
     market: Option<String>,
     schedule: Option<ScheduleFile>,
     temperament: Option<TemperamentFile>,
+    habit: Option<HabitFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,9 +156,9 @@ struct TemperamentFile {
 
 impl CitizenFile {
     /// The persona the file gives, the name's seed filling what it leaves
-    /// out.
-    fn persona(&self, role: Role) -> Result<Persona, String> {
-        let mut persona = Persona::seeded(role, seed(&self.name));
+    /// out, its habit's kind by the town's `mix`.
+    fn persona(&self, role: Role, mix: &Mix) -> Result<Persona, String> {
+        let mut persona = Persona::seeded_in(role, seed(&self.name), mix);
         if let Some(home) = &self.home {
             persona.home = Home {
                 zone: Zone::from_str(&home.zone).ok_or_else(|| format!("has a home in {:?}, not a zone", home.zone))?,
@@ -166,6 +197,13 @@ impl CitizenFile {
             };
             persona.temperament.check()?;
         }
+        if let Some(habit) = &self.habit {
+            let kind = Kind::from_str(&habit.kind).ok_or_else(|| {
+                format!("has the habit {:?}; a habit is dedicated, regular, casual or lapsed", habit.kind)
+            })?;
+            persona.habit = Habit::new(kind, habit.zone, seed(&self.name));
+            persona.habit.check()?;
+        }
         Ok(persona)
     }
 }
@@ -178,6 +216,8 @@ pub struct Roster {
     pub server: Option<String>,
     /// The town's decision layers, bottom first: `["rules"]` unless it says.
     pub layers: Vec<String>,
+    /// The town's mix of habits (#276), for the citizens it seeds.
+    pub mix: Mix,
     pub citizens: Vec<Citizen>,
 }
 
@@ -229,6 +269,7 @@ impl Roster {
                 path: path.to_path_buf(),
                 server: None,
                 layers: default_layers(),
+                mix: Mix::default(),
                 citizens: Vec::new(),
             })
         }
@@ -240,6 +281,16 @@ impl Roster {
         let dir = path.parent().unwrap_or(Path::new("."));
         let layers = file.layers.unwrap_or_else(default_layers);
         decide::check_layers(&layers).map_err(|e| format!("{}: layers: {e}", path.display()))?;
+        let mix = match file.habits.and_then(|h| h.mix) {
+            Some(m) => Mix {
+                dedicated: m.dedicated,
+                regular: m.regular,
+                casual: m.casual,
+                lapsed: m.lapsed,
+            },
+            None => Mix::default(),
+        };
+        mix.check().map_err(|e| format!("{}: habits: {e}", path.display()))?;
         let mut citizens = Vec::with_capacity(file.citizens.len());
         for c in file.citizens {
             let what = |problem: &str| format!("{}: citizen {:?} {problem}", path.display(), c.name);
@@ -247,7 +298,7 @@ impl Roster {
                 let known: Vec<&str> = sim::ROLES.iter().map(|r| r.slug()).collect();
                 what(&format!("has role {:?}; a role is one of {}", c.role, known.join(", ")))
             })?;
-            let persona = c.persona(role).map_err(|e| what(&e))?;
+            let persona = c.persona(role, &mix).map_err(|e| what(&e))?;
             let key = match (c.key, c.key_file) {
                 (Some(secret), None) => Key::Inline(secret),
                 (None, Some(file)) => Key::File(dir.join(file)),
@@ -270,6 +321,7 @@ impl Roster {
             path: path.to_path_buf(),
             server: file.server,
             layers,
+            mix,
             citizens,
         })
     }
@@ -283,7 +335,7 @@ impl Roster {
             name: name.to_string(),
             role,
             layers: self.layers.clone(),
-            persona: Persona::seeded(role, seed(name)),
+            persona: Persona::seeded_in(role, seed(name), &self.mix),
             key: Key::Inline(secret.to_string()),
         };
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
@@ -306,13 +358,15 @@ fn entry(citizen: &Citizen, secret: &str) -> String {
         home,
         market,
         schedule: day,
+        habit,
     } = &citizen.persona;
     format!(
         "\n[[citizen]]\nname = {}\nrole = {}\nkey = {}\n\
          home = {{ zone = {}, avenue = {}, depth = {:?} }}\n\
          market = {}\n\
          schedule = {{ wake = {}, market = {}, home = {}, bed = {} }}\n\
-         temperament = {{ thrift = {:?}, risk = {:?}, sociability = {:?}, patience = {:?} }}\n",
+         temperament = {{ thrift = {:?}, risk = {:?}, sociability = {:?}, patience = {:?} }}\n\
+         habit = {{ kind = {}, zone = {} }}\n",
         quote(&citizen.name),
         quote(citizen.role.slug()),
         quote(secret),
@@ -328,6 +382,8 @@ fn entry(citizen: &Citizen, secret: &str) -> String {
         t.risk,
         t.sociability,
         t.patience,
+        quote(habit.kind.as_str()),
+        habit.zone,
     )
 }
 
@@ -481,8 +537,8 @@ pub enum Standing {
     Offline,
     /// Its life ended; starting again after a backoff.
     Waiting,
-    /// Logged out for the night (C1.2), until its schedule wakes it.
-    Asleep,
+    /// Logged out by its habit (#276), until its next session.
+    Away,
     /// The server refused its key. It won't start again.
     Retired,
     Stopped,
@@ -496,7 +552,7 @@ impl fmt::Display for Standing {
             Standing::Resting => "resting",
             Standing::Offline => "offline",
             Standing::Waiting => "waiting",
-            Standing::Asleep => "asleep",
+            Standing::Away => "away",
             Standing::Retired => "retired",
             Standing::Stopped => "stopped",
         })
@@ -613,14 +669,32 @@ pub(crate) struct Tether<'a> {
     stop: &'a AtomicBool,
     health: &'a Mutex<Health>,
     book: &'a Mutex<Book>,
-    /// The server's clock less ours, as the last life saw it, so the town
-    /// wakes the citizen by the server's clock while it's signed out.
+    /// The server's clock less ours, as the last life saw it.
     clock_offset_ms: &'a AtomicI64,
+    /// When this session ends (#276), in unix ms on our clock.
+    session_end: &'a AtomicI64,
 }
 
 impl Tether<'_> {
+    /// Whether to stop: the town says so, or the session's over (#276).
+    /// Every loop in a life checks it.
     pub(crate) fn stopped(&self) -> bool {
+        self.town_stopped() || local_unix_ms() >= self.session_end.load(Ordering::Relaxed)
+    }
+
+    /// Whether the town says stop.
+    fn town_stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+
+    /// How a life that stopped ended: the town stopped, or its session's
+    /// over.
+    pub(crate) fn ended(&self) -> Ended {
+        if self.town_stopped() {
+            Ended::Stopped
+        } else {
+            Ended::Away
+        }
     }
 
     pub(crate) fn health(&self, change: impl FnOnce(&mut Health)) {
@@ -654,8 +728,19 @@ impl Tether<'_> {
 pub(crate) enum Ended {
     /// The town stopped.
     Stopped,
-    /// It went home and logged out for the night (C1.2).
-    Bedtime,
+    /// Its session was over (#276): it logged out where it stood.
+    Away,
+}
+
+/// When a town's citizens are on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hours {
+    /// By each one's [`Habit`] (#276): a few hours some days, on the real
+    /// clock.
+    Habits,
+    /// Every citizen, all the time, through day and night: for a soak that
+    /// wants the whole pool at work (`--always-on`).
+    AlwaysOn,
 }
 
 fn local_unix_ms() -> i64 {
@@ -677,26 +762,37 @@ pub struct Town {
 }
 
 impl Town {
-    /// Starts every citizen on the roster against `server`, [`STAGGER`]
-    /// apart, each logging its decisions to `logs` if given. Setting `stop`
-    /// ends them.
-    pub fn start(roster: &Roster, server: &str, stop: Arc<AtomicBool>, logs: Option<&Logs>) -> std::io::Result<Town> {
+    /// Starts every citizen on the roster against `server`, those on now
+    /// [`STAGGER`] apart, each logging its decisions to `logs` if given.
+    /// Setting `stop` ends them.
+    pub fn start(
+        roster: &Roster,
+        server: &str,
+        stop: Arc<AtomicBool>,
+        logs: Option<&Logs>,
+        hours: Hours,
+    ) -> std::io::Result<Town> {
         let mut town = Town {
             stop,
             health: Vec::new(),
             books: Vec::new(),
             lives: Vec::new(),
         };
-        for (n, citizen) in roster.citizens.iter().enumerate() {
+        let now = local_unix_ms();
+        let mut arriving = 0;
+        for citizen in &roster.citizens {
             let health = Arc::new(Mutex::new(Health::new(&citizen.name, citizen.role)));
             let book = Arc::new(Mutex::new(Book::default()));
             let log = logs.and_then(|logs| open_log(citizen, logs));
             let (citizen, server, stop, h, b) =
                 (citizen.clone(), server.to_string(), town.stop.clone(), health.clone(), book.clone());
-            let turn = STAGGER * n as u32;
+            // Only those signing in now wait their turn
+            let on = hours == Hours::AlwaysOn || matches!(citizen.persona.habit.at(now), Presence::On { .. });
+            let turn = if on { STAGGER * arriving } else { Duration::ZERO };
+            arriving += u32::from(on);
             let life = thread::Builder::new()
                 .name(format!("citizen-{}", citizen.name))
-                .spawn(move || live(&citizen, &server, turn, &stop, &h, &b, log.as_ref()))?;
+                .spawn(move || live(&citizen, &server, turn, hours, &stop, &h, &b, log.as_ref()))?;
             town.health.push(health);
             town.books.push(book);
             town.lives.push(life);
@@ -803,42 +899,55 @@ fn open_log(citizen: &Citizen, logs: &Logs) -> Option<SharedLog> {
 }
 
 /// A citizen's lives, one after another, until the town stops or the server
-/// refuses its key. A life is a day (C1.2): the citizen signs in only
-/// between its `wake` and its `bed`, and sleeps the night through.
+/// refuses its key. A life is a session (#276): the citizen signs in when
+/// its habit says, plays through whatever the game's clock has it doing, and
+/// logs out when the session's over. With [`Hours::AlwaysOn`] it never is.
+#[allow(clippy::too_many_arguments)]
 fn live(
     citizen: &Citizen,
     server: &str,
     turn: Duration,
+    hours: Hours,
     stop: &AtomicBool,
     health: &Mutex<Health>,
     book: &Mutex<Book>,
     log: Option<&SharedLog>,
 ) {
     let clock_offset_ms = AtomicI64::new(0);
+    let session_end = AtomicI64::new(i64::MAX);
     let tether = Tether {
         stop,
         health,
         book,
         clock_offset_ms: &clock_offset_ms,
+        session_end: &session_end,
     };
     let day = &citizen.persona.schedule;
+    let habit = &citizen.persona.habit;
     pause(stop, turn);
     let mut attempt = 0;
-    while !tether.stopped() {
-        let phase = day.phase(tether.time_of_day());
-        tether.health(|h| h.phase = Some(phase));
-        if phase == Phase::Night {
-            sleep(&tether, day);
-            continue;
+    while !tether.town_stopped() {
+        if hours == Hours::Habits {
+            match habit.at(local_unix_ms()) {
+                Presence::On { until } => session_end.store(until, Ordering::Relaxed),
+                Presence::Away { until } => {
+                    away(&tether, habit, until);
+                    continue;
+                }
+            }
         }
-        tether.health(|h| h.doing(Standing::Starting, "signing in"));
+        let phase = day.phase(tether.time_of_day());
+        tether.health(|h| {
+            h.phase = Some(phase);
+            h.doing(Standing::Starting, "signing in");
+        });
         let began = Instant::now();
         let life = panic::catch_unwind(AssertUnwindSafe(|| one_life(citizen, server, &tether, log)));
         let why = match life {
             Ok(Ok(Ended::Stopped)) => break,
-            Ok(Ok(Ended::Bedtime)) => {
+            // The presence check at the top has it away
+            Ok(Ok(Ended::Away)) => {
                 attempt = 0;
-                sleep(&tether, day);
                 continue;
             }
             Ok(Err(e)) if e.is_final() => {
@@ -852,7 +961,7 @@ fn live(
             Ok(Err(e)) => e.to_string(),
             Err(panicked) => format!("panicked: {}", panic_message(&*panicked)),
         };
-        if tether.stopped() {
+        if tether.town_stopped() {
             break;
         }
         if began.elapsed() >= LIVED_WELL {
@@ -871,9 +980,9 @@ fn live(
     tether.health(|h| h.doing(Standing::Stopped, "stopped"));
 }
 
-/// One life: sign in by the key and play the role through the day, until
-/// bedtime or the town stops. The bot goes with it, so its socket closes
-/// and the avatar leaves the world.
+/// One life: sign in by the key and play the role through the session,
+/// until it's over or the town stops. The bot goes with it, so its socket
+/// closes and the avatar leaves the world.
 fn one_life(citizen: &Citizen, server: &str, tether: &Tether, log: Option<&SharedLog>) -> Result<Ended, BotError> {
     let key = citizen.key().map_err(BotError::Failed)?;
     let bot = Bot::with_api_key(NetConfig::with_base_url(server), &key)?.quiet();
@@ -887,13 +996,20 @@ fn one_life(citizen: &Citizen, server: &str, tether: &Tether, log: Option<&Share
     sim::run::live(bot, citizen.role, &citizen.persona, seed(&citizen.name), mind, tether)
 }
 
-/// Signed out until the morning: until `day`'s `wake` on the server's clock,
-/// or the town stops.
-fn sleep(tether: &Tether, day: &Schedule) {
-    let wait = schedule::real(day.until_wake(tether.time_of_day()));
+/// Signed out until its next session (`until`, unix ms), or the town stops.
+/// With none in sight, it looks again in a day.
+fn away(tether: &Tether, habit: &Habit, until: Option<i64>) {
+    let now = local_unix_ms();
+    let (wait, back) = match until {
+        Some(at) => (
+            Duration::from_millis((at - now).max(0) as u64),
+            format!("away until {} {}", habit.local_clock(at), habit.zone_name()),
+        ),
+        None => (Duration::from_secs(24 * 3600), "away for weeks".to_string()),
+    };
     tether.health(|h| {
-        h.phase = Some(Phase::Night);
-        h.doing(Standing::Asleep, &format!("asleep until {}", schedule::clock(day.wake)));
+        h.phase = None;
+        h.doing(Standing::Away, &back);
     });
     pause(tether.stop, wait);
 }
@@ -1074,10 +1190,10 @@ schedule = { wake = "06:10", market = "09:30-11:00", home = "18:50", bed = "21:1
         }
     }
 
-    /// The acceptance's day, as planned: twenty citizens minted as `mint`
-    /// would, and who of them is where at each game quarter-hour.
+    /// C1.2's day, as planned: twenty citizens minted as `mint` would, and
+    /// who of them is where at each game quarter-hour, while they're on.
     #[test]
-    fn a_town_of_twenty_works_by_day_trades_in_the_afternoon_and_sleeps_at_night() {
+    fn a_town_of_twenty_works_by_day_trades_in_the_afternoon_and_works_the_night_from_home() {
         let roles = Role::assign(20);
         let town: Vec<Persona> = roles
             .iter()
@@ -1088,7 +1204,7 @@ schedule = { wake = "06:10", market = "09:30-11:00", home = "18:50", bed = "21:1
             let t = schedule::parse_clock(clock).unwrap();
             town.iter().filter(|p| p.schedule.phase(t) == phase).count()
         };
-        // Midnight and the small hours: everyone abed
+        // Midnight and the small hours: everyone at the night's work
         for clock in ["00:00", "03:00", "04:30", "22:30"] {
             assert_eq!(count(clock, Phase::Night), 20, "{clock}");
         }
@@ -1104,6 +1220,68 @@ schedule = { wake = "06:10", market = "09:30-11:00", home = "18:50", bed = "21:1
         let first = town.iter().map(|p| p.schedule.wake).fold(1.0, f64::min);
         let last = town.iter().map(|p| p.schedule.wake).fold(0.0, f64::max);
         assert!((last - first) * 24.0 >= 0.75, "the town wakes over three quarters of an hour or more");
+    }
+
+    #[test]
+    fn a_roster_reads_habits_and_the_towns_mix() {
+        let text = r#"
+[habits]
+mix = { dedicated = 1.0, regular = 0.0, casual = 0.0, lapsed = 0.0 }
+
+[[citizen]]
+name = "Ada Reeder"
+role = "gatherer-fiber"
+key = "k"
+habit = { kind = "lapsed", zone = 10 }
+
+[[citizen]]
+name = "Percy Sawyer"
+role = "crafter-planks"
+key = "j"
+"#;
+        let roster = Roster::parse(text, Path::new("town.toml")).unwrap();
+        let ada = roster.citizens[0].persona.habit;
+        assert_eq!((ada.kind, ada.zone), (Kind::Lapsed, 10));
+        // Her days are her name's, as the seeded habit's would be
+        assert_eq!(ada, Habit::new(Kind::Lapsed, 10, 0).with_seed(seed("Ada Reeder")));
+        assert_eq!(ada.with_seed(0), Habit::new(Kind::Lapsed, 10, 0));
+        // Percy's is drawn from his name, by the town's mix: all dedicated
+        assert_eq!(roster.citizens[1].persona.habit.kind, Kind::Dedicated);
+        assert_eq!(roster.mix.dedicated, 1.0);
+        // The default mix, without one
+        assert_eq!(Roster::parse("", Path::new("t.toml")).unwrap().mix, Mix::default());
+        let path = Path::new("town.toml");
+        let err = |text: &str| Roster::parse(text, path).unwrap_err();
+        assert!(err("[habits]\nmix = { dedicated = -1.0, regular = 0.3, casual = 0.5, lapsed = 0.1 }").contains("0 or more"));
+        assert!(err("[habits]\nmix = { dedicated = 0.1 }").contains("missing field"));
+        let with = |line: &str| err(&format!("[[citizen]]\nname = \"A\"\nrole = \"builder\"\nkey = \"k\"\n{line}"));
+        assert!(with("habit = { kind = \"keen\", zone = 0 }").contains("dedicated, regular, casual or lapsed"));
+        assert!(with("habit = { kind = \"casual\", zone = 20 }").contains("-12 to 14"));
+    }
+
+    #[test]
+    fn a_life_stops_when_its_session_is_over() {
+        let (stop, health, book, offset) = (
+            AtomicBool::new(false),
+            Mutex::new(Health::new("Ada Reeder", Role::Builder)),
+            Mutex::new(Book::default()),
+            AtomicI64::new(0),
+        );
+        let session_end = AtomicI64::new(local_unix_ms() + 60_000);
+        let tether = Tether {
+            stop: &stop,
+            health: &health,
+            book: &book,
+            clock_offset_ms: &offset,
+            session_end: &session_end,
+        };
+        assert!(!tether.stopped());
+        session_end.store(local_unix_ms() - 1, Ordering::Relaxed);
+        assert!(tether.stopped());
+        assert_eq!(tether.ended(), Ended::Away);
+        assert!(!tether.town_stopped(), "the town lives on");
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(tether.ended(), Ended::Stopped);
     }
 
     #[test]

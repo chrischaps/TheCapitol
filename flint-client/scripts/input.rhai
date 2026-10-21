@@ -1000,11 +1000,13 @@ fn amber() { [0.910, 0.635, 0.290] }
 
 // Every kept stall's name on its sign, near enough to read; and for the
 // stall under the cursor, the one you stand at and the one you walk to,
-// its footprint traced and a prompt over it.
+// its footprint traced and a prompt over it. A clean capture (--clean)
+// keeps only the signs: wherever the cursor rests, it isn't anyone's (#345).
 fn draw_bazaar(b, over, now) {
     for s in b.stalls {
         if s.name != () { draw_sign(s); }
     }
+    if cap_clean() { return; }
     for s in b.stalls {
         let hovered = over != () && over == s.id;
         let walking = b.walking != () && b.walking == s.id;

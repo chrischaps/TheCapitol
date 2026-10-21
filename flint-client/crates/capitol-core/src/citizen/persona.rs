@@ -10,7 +10,8 @@
 //! - **a home**: a lot it claims once it can afford one, and until then a
 //!   spot on an avenue in its zone, where it goes at dusk;
 //! - **a market**: the hall or the bazaar, where it spends its market hours;
-//! - **a [`Schedule`]**: its day on the server's clock.
+//! - **a [`Schedule`]**: its day on the server's clock;
+//! - **a [`Habit`]**: when it plays, on the real clock (#276).
 //!
 //! All of it is drawn from the citizen's own stream, seeded by its name, so
 //! a roster that leaves any of it out reads back the persona `mint` wrote.
@@ -20,6 +21,7 @@ use std::fmt;
 
 use capitol_protocol::rules::Zone;
 
+use super::habit::{Habit, Mix};
 use super::schedule::Schedule;
 use crate::sim::{Craft, Gather, Role};
 
@@ -30,22 +32,32 @@ pub struct Persona {
     pub home: Home,
     pub market: Market,
     pub schedule: Schedule,
+    pub habit: Habit,
 }
 
 impl Persona {
-    /// The persona a citizen of `role` with the stream `seed` is born with.
-    /// The same seed always gives the same persona.
+    /// The persona a citizen of `role` with the stream `seed` is born with,
+    /// in a town of the default [`Mix`] of habits. The same seed always
+    /// gives the same persona.
     pub fn seeded(role: Role, seed: u64) -> Persona {
+        Persona::seeded_in(role, seed, &Mix::default())
+    }
+
+    /// As [`seeded`](Persona::seeded), its habit's kind drawn from `mix`.
+    pub fn seeded_in(role: Role, seed: u64, mix: &Mix) -> Persona {
         let mut rng = Rng::new(seed);
         let temperament = Temperament::seeded(&mut rng);
         let home = Home::seeded(&mut rng, role);
         let market = Market::seeded(&mut rng, &temperament);
         let schedule = Schedule::seeded(&mut rng, &temperament);
+        // Drawn last, so the persona C1.2 drew is the same
+        let habit = Habit::seeded(&mut rng, mix, seed);
         Persona {
             temperament,
             home,
             market,
             schedule,
+            habit,
         }
     }
 }
@@ -303,6 +315,7 @@ mod tests {
         assert_eq!(ada.temperament.check(), Ok(()));
         assert_eq!(ada.home.check(), Ok(()));
         assert_eq!(ada.schedule.check(), Ok(()));
+        assert_eq!(ada.habit.check(), Ok(()));
     }
 
     #[test]

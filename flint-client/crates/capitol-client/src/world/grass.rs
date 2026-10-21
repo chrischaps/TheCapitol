@@ -1000,32 +1000,9 @@ mod tests {
         assert!(lawn as f64 > 0.6 * n as f64, "{lawn} of {n} park texels grow");
     }
 
-    /// The default world under Rural v2's farms, from the backend's
-    /// `dump_farms_terrain`, until the flip makes it the fixture (R7):
-    /// `$FARMS_TERRAIN`, or `renders/farms-terrain.json`.
-    fn farms_terrain() -> &'static TerrainResponse {
-        static T: OnceLock<TerrainResponse> = OnceLock::new();
-        T.get_or_init(|| {
-            let path = std::env::var("FARMS_TERRAIN")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../renders/farms-terrain.json"));
-            read_terrain_file(&path).unwrap_or_else(|e| {
-                panic!("{}: {e}; write it with the backend's dump_farms_terrain", path.display())
-            })
-        })
-    }
-
     #[test]
     fn the_rural_ring_and_the_wilds_edge_are_mostly_grass() {
         mostly_grass(mask());
-    }
-
-    /// R6's acceptance on the farms, with the dump in place:
-    /// `cargo test -p capitol-client farms_ -- --ignored`.
-    #[test]
-    #[ignore]
-    fn farms_the_rural_ring_and_the_wilds_edge_are_mostly_grass() {
-        mostly_grass(&paint(farms_terrain(), SIZE, None));
     }
 
     /// Both rings sampled on a fine polar grid: most of the open ground has
@@ -1053,15 +1030,8 @@ mod tests {
     }
 
     #[test]
-    fn no_road_town_lot_or_farmyard_has_grass() {
-        bare_where_it_should_be(fixture(), mask(), false);
-    }
-
-    #[test]
-    #[ignore]
-    fn farms_are_pasture_but_their_yards() {
-        let t = farms_terrain();
-        bare_where_it_should_be(t, &paint(t, SIZE, None), true);
+    fn no_road_town_lot_or_farmyard_has_grass_but_farms_are_pasture() {
+        bare_where_it_should_be(fixture(), mask());
     }
 
     fn centre(poly: &[P]) -> P {
@@ -1073,10 +1043,9 @@ mod tests {
         [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]
     }
 
-    /// Nothing grows on a road, on a lot in town or in a farmyard; and with
-    /// `pasture`, nearly every farm is mostly grass. (On today's small rural
-    /// lots the yard takes most of it.)
-    fn bare_where_it_should_be(t: &TerrainResponse, m: &Mask, pasture_wanted: bool) {
+    /// Nothing grows on a road, on a lot in town or in a farmyard, and nearly
+    /// every farm is mostly grass.
+    fn bare_where_it_should_be(t: &TerrainResponse, m: &Mask) {
         for road in &t.roads {
             for w in road.points.windows(2) {
                 for k in 0..=8 {
@@ -1121,9 +1090,7 @@ mod tests {
             pasture += (grows * 2 > n) as usize;
         }
         let yards = farmyards(t);
-        if pasture_wanted {
-            assert!(pasture * 10 > farms * 9, "{pasture} of {farms} farms are mostly pasture");
-        }
+        assert!(pasture * 10 > farms * 9, "{pasture} of {farms} farms are mostly pasture");
         assert!(yards.len() * 10 > farms * 9, "{} yards on {farms} farms", yards.len());
         for y in &yards {
             assert_eq!(m.value_at(centre(&y.yard)), 0, "a yard grows at {:?}", centre(&y.yard));

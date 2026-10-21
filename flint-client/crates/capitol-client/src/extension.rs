@@ -407,8 +407,13 @@ impl CapitolExtension {
     /// Offline, show the hall as if goods waited (`--hall-sample`).
     /// Offline, sample shops in the bazaar's stalls and the shop panel open
     /// on stall `stall` (a number, or "mine"), as if you stood at it
-    /// (`--bazaar-sample`).
+    /// (`--bazaar-sample`). "street" keeps most of the stalls, stands you at
+    /// none and opens nothing, for filming (#345).
     pub fn with_bazaar_sample(mut self, stall: Option<&str>) -> Self {
+        if let (Some("street"), None) = (stall, &self.session) {
+            self.bazaar_sample = Some(ui::shop::Sample::street());
+            return self;
+        }
         if let (Some(stall), None) = (stall, &self.session) {
             let sample = ui::shop::Sample::new();
             let id = match stall {
@@ -575,7 +580,7 @@ impl CapitolExtension {
                 )
             }
             (None, Some(sample)) => (
-                Some(crate::coords::to_server(camera_target[0], camera_target[1])),
+                (!sample.street).then(|| crate::coords::to_server(camera_target[0], camera_target[1])),
                 Some(&sample.directory),
                 sample.mine().map(|s| s.stall_id.clone()),
                 None,
@@ -1066,7 +1071,7 @@ impl PlayerExtension for CapitolExtension {
                     .and_then(|d| d.stalls.iter().find(|s| s.stall_id == id))
                     .and_then(|s| s.shop.as_ref())
             };
-            if self.bazaar.sync(gpu, &terrain.landmarks, shop) {
+            if self.bazaar.sync(gpu, terrain, shop) {
                 attach_each(ctx, world::bazaar::meshes().iter());
                 if let Ok(mut feet) = self.shared.stall_feet.lock() {
                     *feet = terrain
@@ -1778,11 +1783,23 @@ fn listen(ctx: &mut ExtensionCtx, shared: &script_api::Shared, sound: &mut Sound
         .ok()
         .and_then(|f| *f)
         .map_or([cam.target.x, cam.target.z], |f| [f[0], f[2]]);
+    // The bazaar's crowd (E3.14): full among its stalls, gone 24 m off
+    let market = shared.stall_feet.lock().map_or(0.0, |feet| {
+        let near = feet
+            .iter()
+            .map(|q| {
+                let c = [(q[0][0] + q[2][0]) * 0.5, (q[0][1] + q[2][1]) * 0.5];
+                (c[0] - focus[0]).hypot(c[1] - focus[1])
+            })
+            .fold(f32::MAX, f32::min);
+        1.0 - crate::sound::dsp::smoothstep(4.0, 24.0, near)
+    });
     let ears = Ears {
         focus,
         camera: [cam.position.x, cam.position.y, cam.position.z],
         // Over the land under the camera, so a hillside isn't a height.
         height: cam.position.y - crate::world::land::ground_y([cam.position.x, cam.position.z]),
+        market,
     };
     let working: Vec<Rustling> = shared
         .nodes

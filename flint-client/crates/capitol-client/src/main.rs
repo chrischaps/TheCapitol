@@ -149,7 +149,8 @@ struct Args {
     hall_sample: bool,
     /// Offline, the bazaar with sample shops in its stalls (E3.11), you
     /// where the camera looks, and the shop panel open on stall N ("mine"
-    /// for your own, stall 6)
+    /// for your own, stall 6). "street" keeps most of the stalls and opens
+    /// nothing, for filming the street (#345)
     #[arg(long, value_name = "STALL")]
     bazaar_sample: Option<String>,
     /// Offline, open the impound (#141) on a sample: what a foreclosed

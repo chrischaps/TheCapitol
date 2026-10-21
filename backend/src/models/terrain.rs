@@ -1589,7 +1589,23 @@ mod tests {
         // it, and a trail never crosses itself. The planned nodes are
         // re-planned whole, clear of the wild water
         // (`post-content/20261122_001_rural_widens_nodes.sql`).
-        assert_eq!(TerrainConfig::get_default().version(), "c6d7cc1d08d95958");
+        //
+        // R7 (#290) flipped the rural ring to the farms (rural plan §7):
+        // `RuralParams::layout` defaults to `Farms`. The 12 trails and their
+        // 121 lots give way to each sector's two main roads, the roads between
+        // them and the gate roads, the balance pass's spurs (29 `lane_*`
+        // roads in all) and 117 `farm_*` lots. Each arterial gains the lanes'
+        // junctions as vertices, between r3290 and r4350, and doesn't move.
+        // With the trails gone from the suburb's edge, 136 suburban lots in
+        // seven neighbourhoods there grow or shift by 0.02 to 11.3 and keep
+        // their ids, and 8 parks change. The plain's water runs round the new
+        // roads, so inside r4800 its courses, ponds and fords move (62 lakes,
+        // not 67); past r4800 the water is the same, though some ids shift.
+        // Owned trail lots are released by startup's sync
+        // (`plot_sync::RETIRED_LOTS`). Two seeded grass nodes move
+        // (`20261126_001_rural_farms.sql`), and the planned nodes the farms
+        // move are re-planned (`post-content/20261126_001_rural_farms_nodes.sql`).
+        assert_eq!(TerrainConfig::get_default().version(), "4742a2a314848a25");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one
@@ -2342,7 +2358,12 @@ mod tests {
         // 3.7× on a CI runner. The limit leaves CI ~1.9× of headroom and still fails a
         // doubling like #221's on the desktop, where `land` runs this before it pushes.
         // Pre-optimization was ~115s debug, about 200×.
-        const LIMIT: f64 = 7.0;
+        //
+        // The farms (R7, #290) add about 0.6s, or 18%: the balance pass ~0.25s and the
+        // farms laid round the water ~0.28s. Alone on a loaded desktop that's 5.8–6.9×
+        // against the trails' ~5.4×, and 7.5× in the full parallel suite, so the limit
+        // went from 7× to 8×. A doubling still fails it.
+        const LIMIT: f64 = 8.0;
         assert!(ratio < LIMIT,
             "Terrain generation took too long: {:?} of CPU, {:.1}× the reference workload's {:?} \
              (expected under {LIMIT}×)", elapsed, ratio, machine);

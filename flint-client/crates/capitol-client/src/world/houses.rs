@@ -1498,22 +1498,6 @@ mod tests {
         }
     }
 
-    /// The farms of the default world under Rural v2, from the backend's
-    /// `dump_farms_terrain`, until the flip makes them the fixture's (R7):
-    /// `$FARMS_TERRAIN`, or `renders/farms-terrain.json`.
-    fn farm_lots() -> &'static HashMap<String, Lot> {
-        static BUILT: OnceLock<HashMap<String, Lot>> = OnceLock::new();
-        BUILT.get_or_init(|| {
-            let path = std::env::var("FARMS_TERRAIN")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../renders/farms-terrain.json"));
-            let t = capitol_core::terrain::read_terrain_file(&path).expect("the farms dump");
-            let mut lots = plots::build(&t.terrain_plots).lots;
-            lots.retain(|_, l| l.zone == Zone::Rural);
-            lots
-        })
-    }
-
     /// R6: every farm has a farmstead on a drive from the lane, standing at
     /// least 5 m back on `back_share` of them, with a barn behind it on more
     /// than `barn_share`.
@@ -1540,26 +1524,20 @@ mod tests {
         assert!(share(back) >= back_share, "{back} of {n} stand 5 m back");
     }
 
+    /// The fixture's farms (R7).
+    fn farm_lots() -> HashMap<String, Lot> {
+        lots().iter().filter(|(_, l)| l.zone == Zone::Rural).map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
     #[test]
     fn farmsteads_stand_back_from_the_lane_on_their_drives() {
-        let rural: HashMap<String, Lot> =
-            lots().iter().filter(|(_, l)| l.zone == Zone::Rural).map(|(k, v)| (k.clone(), v.clone())).collect();
-        // Today's lots, about 20 by 14.5 m since RW1, are too shallow for
-        // most barns (none fitted before R6) or a long drive.
-        farmsteads_stand_back_on_their_drives(&rural, 0.25, 0.0);
-    }
-
-    #[test]
-    #[ignore]
-    fn farms_farmsteads_stand_back_from_the_lane_on_their_drives() {
         // The barn's chance is 0.65.
-        farmsteads_stand_back_on_their_drives(farm_lots(), 0.9, 0.5);
+        farmsteads_stand_back_on_their_drives(&farm_lots(), 0.9, 0.5);
     }
 
     #[test]
-    #[ignore]
-    fn farms_a_farmstead_stays_on_its_farm() {
-        for (id, lot) in farm_lots() {
+    fn a_farmstead_stays_on_its_farm() {
+        for (id, lot) in &farm_lots() {
             let h = house(id, lot, 1.0).expect("a farmhouse");
             let n = lot.outline.len();
             for p in vertices(&h) {
@@ -1795,13 +1773,12 @@ mod tests {
         layer.sync(3, [&new], |_| false, lots);
         assert_eq!(layer.counts(), (1, 0));
         assert!(layer.dirty.contains(&lots[&old].sector));
-        assert!(
-            layer.sector_mesh(lots[&old].sector).indices.len() < {
-                let mut l = Houses::default();
-                l.sync(1, [&old], |_| false, lots);
-                l.sector_mesh(lots[&old].sector).indices.len() + 1
-            }
-        );
+        // What's left in its sector is what the other claim alone builds.
+        assert_eq!(layer.sector_mesh(lots[&old].sector).indices.len(), {
+            let mut l = Houses::default();
+            l.sync(1, [&new], |_| false, lots);
+            l.sector_mesh(lots[&old].sector).indices.len()
+        });
         // A new terrain builds everything again.
         layer.lots_changed();
         assert_eq!(layer.counts(), (0, 0));

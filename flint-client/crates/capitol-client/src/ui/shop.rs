@@ -653,6 +653,8 @@ pub struct Sample {
     pub shops: Vec<BazaarShop>,
     pub inventory: Container,
     pub me: Uuid,
+    /// A street to film ([`Sample::street`]): nobody stands at a stall
+    pub street: bool,
 }
 
 impl Sample {
@@ -717,7 +719,57 @@ impl Sample {
             shops,
             inventory: Container::new(Uuid::from_u128(0x3001), "player_inventory", 4, 4, &[rope, plank]),
             me,
+            street: false,
         }
+    }
+
+    /// A busy street to film (`--bazaar-sample street`, #345): the sample's
+    /// shops, and the other stalls kept under names and goods picked by
+    /// their number, about one in four left to let. Its directory runs past
+    /// the default world's 41 stalls; an id with no stall is never drawn.
+    pub fn street() -> Sample {
+        const STALLS: usize = 64;
+        const NAMES: &[&str] = &[
+            "The Gilded Spindle", "Hollis & Sons", "The Copper Kettle", "The Rope Walk",
+            "Nettle & Thread", "Old Quarry Stone", "Fen Reed Baskets", "Brightwater Clay",
+            "The Tinker's Cart", "Ashby Ironworks", "Corin's Charcoal", "The Lantern Stall",
+            "Moss & Timber", "Saltmarsh Goods", "The Last Plank", "Elsbeth's Bricks",
+            "Hearthside Tools", "Riverside Rope", "Tin & Copper", "The Bent Nail",
+            "Greenhollow Fiber", "Juniper Joinery", "Wicker & Wick", "The Honest Axe",
+            "Bellfounder's Bronze", "Market Cross Sundries", "Highfield Sickles", "Dovetail & Daughter",
+            "The Patient Kiln", "Larkspur Lumber", "Ironbridge Supply", "The Ninth Bell",
+            "Thistle & Thatch", "Grey Ridge Ore", "Two Lanterns", "The Narrow Door",
+        ];
+        const KEEPERS: &[&str] = &["Wren", "Tam Hollis", "Corin", "Elsbeth", "Juno", "Ada", "Bram", "Mira", "Oswin", "Hale"];
+        const GOODS: &[&[&str]] = &[
+            &["rope", "fiber"], &["plank", "log"], &["brick", "clay"], &["iron_ingot", "iron_nails"],
+            &["stone", "knapped_stone"], &["charcoal"], &["reeds", "fiber"], &["bronze_ingot", "copper_ore", "tin_ore"],
+            &["iron_axe", "iron_pickaxe"], &["bronze_sickle", "stone_sickle"], &["tool_handle", "sticks"], &["workbench_kit", "chest_kit"],
+        ];
+        let mut sample = Sample::new();
+        let mut name = 0;
+        sample.directory.stalls = (1..=STALLS)
+            .map(|k| {
+                let stall_id = format!("bazaar_stall_{k}");
+                if let Some(kept) = sample.directory.stalls.iter().find(|s| s.stall_id == stall_id && s.shop.is_some()) {
+                    return kept.clone();
+                }
+                if k % 4 == 3 {
+                    return capitol_core::protocol::rest::BazaarStall { stall_id, shop: None };
+                }
+                let shop = ShopSign {
+                    name: NAMES[name % NAMES.len()].to_owned(),
+                    owner_id: Uuid::from_u128(0x100 + k as u128),
+                    owner_name: KEEPERS[k % KEEPERS.len()].to_owned(),
+                    owner_citizen: k % 3 == 0,
+                    item_types: GOODS[k % GOODS.len()].iter().map(|t| (*t).to_owned()).collect(),
+                };
+                name += 1;
+                capitol_core::protocol::rest::BazaarStall { stall_id, shop: Some(shop) }
+            })
+            .collect();
+        sample.street = true;
+        sample
     }
 
     pub fn shop(&self, stall_id: &str) -> Option<&BazaarShop> {
@@ -867,5 +919,23 @@ mod tests {
         assert_eq!(paid_words(h(5), now), "paid 5 h ahead");
         assert_eq!(paid_words(now, now), "the rent has run out");
         assert_eq!(stall_number("bazaar_stall_12"), "12");
+    }
+
+    #[test]
+    fn a_street_keeps_most_stalls_under_names_of_their_own() {
+        let street = Sample::street();
+        assert!(street.street && !Sample::new().street);
+        let sign = |k: usize| street.sign(&format!("bazaar_stall_{k}"));
+        // The sample's own shops stand where they were
+        assert_eq!(sign(4).map(|s| s.name.as_str()), Some("Ada's Ropes"));
+        assert_eq!(sign(6).map(|s| s.name.as_str()), Some("Mira's Mill"));
+        // Across the default world's 41: about three in four kept, no name twice
+        let kept: Vec<&str> = (1..=41).filter_map(sign).map(|s| s.name.as_str()).collect();
+        assert!((28..=34).contains(&kept.len()), "{} of 41 kept", kept.len());
+        let mut names = kept.clone();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), kept.len(), "a name is used twice: {kept:?}");
+        assert!((1..=41).filter_map(sign).all(|s| !s.item_types.is_empty()), "every kept stall sells something");
     }
 }

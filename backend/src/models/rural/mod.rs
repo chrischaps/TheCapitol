@@ -1,7 +1,8 @@
 //! The rural ring, r3000 to r4600 (`the-capitol-rural.md`, RD10).
 //!
-//! Today's layout is still `terrain.rs`'s radial trails. Rural v2 builds the
-//! farms here, a work package at a time, behind [`RuralLayout::Farms`]. So far:
+//! Rural v2's farms on lanes, the default layout since the flip (R7, #290);
+//! `terrain.rs`'s old radial trails stay behind [`RuralLayout::Trails`] until
+//! R8 (#291) removes them. The modules:
 //! - `sectors`: the sectors between the arterials and the deck of their
 //!   characters (RD1, RD2, #286);
 //! - `roads`: each sector's two concession roads or winding lanes, the roads
@@ -31,17 +32,17 @@ use sectors::{Sector, RURAL};
 
 type P = (f64, f64);
 
-/// Which rural ring the world builds. `Trails` until the flip (R7, #290), so
-/// the pin holds while the farms are built; R8 (#291) removes the switch.
+/// Which rural ring the world builds. `Farms` since the flip (R7, #290); R8
+/// (#291) removes the switch and the trails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuralLayout {
     /// The 12 radial trails and their lots (`terrain.rs`).
-    #[default]
     Trails,
     /// Rural v2: two concession roads or winding lanes across every sector,
     /// the roads between them (#286, #310), and farms along them and the
     /// arterials, clear of the water (#287).
+    #[default]
     Farms,
 }
 
@@ -64,7 +65,7 @@ pub struct RuralParams {
 impl Default for RuralParams {
     fn default() -> Self {
         Self {
-            layout: RuralLayout::Trails,
+            layout: RuralLayout::Farms,
             lane_width: 8.0,
             frontage: (380.0, 500.0),
             field_gap: (240.0, 440.0),
@@ -155,11 +156,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_world_config_without_rural_params_loads_as_the_trails() {
+    fn a_world_config_without_rural_params_loads_as_the_farms() {
         let mut json = serde_json::to_value(WorldGenParams::default()).unwrap();
         json.as_object_mut().unwrap().remove("rural");
         let params: WorldGenParams = serde_json::from_value(json).unwrap();
-        assert_eq!(params.rural.layout, RuralLayout::Trails);
+        assert_eq!(params.rural.layout, RuralLayout::Farms);
         let farms: WorldGenParams = serde_json::from_value(serde_json::json!({ "rural": { "layout": "farms" } })).unwrap();
         assert_eq!(farms.rural.layout, RuralLayout::Farms);
         assert_eq!(farms.rural.lane_width, 8.0);
@@ -280,21 +281,5 @@ pub(crate) mod tests {
                 .fold(0.0, f64::max);
             assert!(far < capitol_protocol::rules::RURAL_OUTER_RADIUS - 20.0, "seed {seed}: a lane reaches r{far:.0}");
         }
-    }
-
-    /// Writes the default world under `Farms` as `/terrain` JSON to
-    /// `$TERRAIN_DUMP`, for the Flint client to check itself against before
-    /// the flip (R6, #289):
-    /// `TERRAIN_DUMP=farms.json cargo test dump_farms_terrain -- --ignored`.
-    #[test]
-    #[ignore]
-    fn dump_farms_terrain() {
-        let path = std::env::var("TERRAIN_DUMP").expect("set TERRAIN_DUMP to the output path");
-        let mut params = WorldGenParams::default();
-        params.rural.layout = RuralLayout::Farms;
-        let terrain = TerrainConfig::from_params(&params);
-        let response = capitol_protocol::terrain::TerrainResponse::from(&terrain);
-        std::fs::write(&path, serde_json::to_string(&response).unwrap()).unwrap();
-        println!("{} -> {path}", terrain.version());
     }
 }

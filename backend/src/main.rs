@@ -132,23 +132,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The claimable plots are the terrain's lots (B7). Bring the table up to
     // date with them. An owned plot the terrain no longer matches is left as it
-    // is: only an admin's forced commit releases one.
+    // is: only an admin's forced commit releases one, or the lot being one of a
+    // retired layout (`plot_sync::RETIRED_LOTS`, the old rural trails, #290).
     let lots = game_state.read().await.terrain.terrain_plots.clone();
     let report = match engine::plot_sync::sync_plots(&db_pool, &lots, engine::plot_sync::OnOwned::Keep).await {
         Ok(report) => report,
         Err(engine::plot_sync::SyncError::Db(e)) => return Err(e.into()),
-        Err(engine::plot_sync::SyncError::Conflicts { .. } | engine::plot_sync::SyncError::Refund(_)) => {
-            unreachable!("Keep never refuses or refunds")
-        }
+        // Releasing a retired layout's plot refunds its deed. A refund that
+        // fails rolls the whole sync back, so stop rather than run on stale plots.
+        Err(engine::plot_sync::SyncError::Refund(e)) => return Err(e.into()),
+        Err(engine::plot_sync::SyncError::Conflicts { .. }) => unreachable!("Keep never refuses"),
     };
     tracing::info!(
         "Plots synced with the terrain's {} lots: {} added, {} updated, {} removed",
         lots.len(), report.inserted, report.updated, report.deleted
     );
-    for c in &report.conflicts {
+    for c in report.conflicts.iter().filter(|c| !report.released.contains(&c.terrain_id)) {
         tracing::warn!(
             "Owned plot {} ({}) no longer matches the terrain ({}); kept as it is",
             c.plot_id, c.terrain_id, if c.removed { "lot gone" } else { "lot reshaped" }
+        );
+    }
+    if !report.released.is_empty() {
+        tracing::warn!(
+            "Released {} owned plot(s) of a retired layout, deeds refunded and {} station(s) given back: {}",
+            report.released.len(), report.removed_stations.len() - report.displaced.len(), report.released.join(", ")
         );
     }
     if !report.held_back.is_empty() {

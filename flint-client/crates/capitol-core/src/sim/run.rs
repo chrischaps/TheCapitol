@@ -181,17 +181,17 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
     Ok((report, md, csv))
 }
 
-/// A citizen's day (C1.1, C1.2): `bot` plays `role` as `persona` would,
-/// with `mind` making its decisions (C1.3), until bedtime or its town says
-/// stop. It trades with whatever is on the book, at the hall, as the swarm
+/// A citizen's session (C1.1, C1.2, #276): `bot` plays `role` as `persona`
+/// would, with `mind` making its decisions (C1.3), until its session's over
+/// or its town says stop. It trades with whatever is on the book, at the hall, as the swarm
 /// does with its makers; the town grants nobody anything (D2), so the book
 /// holds only what players and citizens put there.
 ///
 /// The day follows the persona's schedule on the server's clock: work, the
-/// market's hours at the hall or the bazaar, work again, and home at dusk,
-/// buying a lot to live on first if it has saved enough. `Ok` once home for
-/// the night or stopped; `Err` when the bot couldn't start, or the server
-/// won't have it back.
+/// market's hours at the hall or the bazaar, work again, home at dusk,
+/// buying a lot to live on first if it has saved enough, and then the
+/// night's work from home. `Ok` once stopped, or away; `Err` when the bot
+/// couldn't start, or the server won't have it back.
 pub(crate) fn live(mut bot: Bot, role: Role, persona: &Persona, seed: u64, mut mind: Mind, town: &Tether) -> Result<Ended, BotError> {
     let scale = bot.health()?.sim_tick_scale.unwrap_or(1.0);
     mind.set_scale(scale);
@@ -331,6 +331,9 @@ struct SimBot {
     persona: Option<Persona>,
     /// At its market this market's hours.
     at_market: bool,
+    /// Home from the day's work, on the night's (#276): set by the walk
+    /// home at dusk, until the morning's work.
+    night_shift: bool,
     /// A merchant's goods and its market (C1.6).
     merchant: Option<merchant::Merchant>,
     /// Where it's lingering, and which way it looks (C2.1).
@@ -376,6 +379,7 @@ impl SimBot {
             people: false,
             persona: None,
             at_market: false,
+            night_shift: false,
             merchant: None,
             spot: None,
             noon_day: None,
@@ -434,11 +438,17 @@ impl SimBot {
                 town.health(|h| h.phase = Some(phase));
                 town.server_time_was(self.bot.state().server_time_ms());
                 match phase {
-                    Phase::Home => return self.go_home(town),
-                    // Past bedtime: it sleeps where it stands
-                    Phase::Night => return Ok(Ended::Bedtime),
-                    Phase::Market => {}
+                    // Dusk, the change of shift: home, then the night's
+                    // work. A session that starts at night goes home first
+                    // too
+                    Phase::Home | Phase::Night if !self.night_shift => {
+                        self.go_home(town)?;
+                        continue;
+                    }
+                    Phase::Home | Phase::Night => {}
+                    Phase::Market => self.night_shift = false,
                     Phase::Work => {
+                        self.night_shift = false;
                         if self.at_market {
                             self.at_market = false;
                             self.spot = None;
@@ -460,7 +470,8 @@ impl SimBot {
                 Err(stuck) => Err(stuck),
             };
             let trade = match &errand {
-                Ok(Some(errand)) if self.trading => self.choose_trade(&holdings, errand),
+                // No market in the night's work (#276)
+                Ok(Some(errand)) if self.trading && !self.night_shift => self.choose_trade(&holdings, errand),
                 _ => None,
             };
             // At market hours a citizen trades what it has, and otherwise
@@ -560,7 +571,7 @@ impl SimBot {
                 town.health(|h| h.strands = strands);
             }
         }
-        Ok(Ended::Stopped)
+        Ok(town.map_or(Ended::Stopped, Tether::ended))
     }
 
     /// Where in its day a citizen is, by the server's clock. A swarm bot has
@@ -606,12 +617,15 @@ impl SimBot {
         self.market_spot(town, bazaar)
     }
 
-    /// Dusk: buys a home if the citizen has saved enough and has none, walks
-    /// home along the avenues, and goes to bed. Something going wrong on the
-    /// way doesn't keep it up: it sleeps where it stands.
-    fn go_home(&mut self, town: &Tether) -> Result<Ended, BotError> {
+    /// Dusk: buys a home if the citizen has saved enough and has none, and
+    /// walks home along the avenues, for the night's work (#276). Something
+    /// going wrong on the way doesn't keep it from that: it works the night
+    /// from where it stands.
+    fn go_home(&mut self, town: &Tether) -> Result<(), BotError> {
         town.health(|h| h.doing(Standing::Working, "going home"));
         self.at_market = false;
+        self.spot = None;
+        self.night_shift = true;
         if self.bot.state().plots().is_empty() {
             match self.buy_home() {
                 Ok(()) => {}
@@ -640,7 +654,7 @@ impl SimBot {
                 }
             }
         }
-        Ok(Ended::Bedtime)
+        Ok(())
     }
 
     /// Where a citizen lives: its lot, once it has one, and until then its
@@ -741,6 +755,9 @@ impl SimBot {
     /// citizen has more places to be (C2.1, [`idle`]).
     fn free_time(&mut self, town: Option<&Tether>) {
         let holdings = self.holdings();
+        if self.night_shift {
+            return self.night_in(town);
+        }
         if self.persona.is_some() {
             return self.idle_time(town, &holdings, None);
         }
