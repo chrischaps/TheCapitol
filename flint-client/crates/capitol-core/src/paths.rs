@@ -18,10 +18,13 @@
 //!   river is its bridge, so the graph crosses water only where the server
 //!   lets you.
 //! - **A walk** goes straight when it can. [`WalkGraph::walkable`] is the
-//!   server's own test, run along the line. Otherwise it joins the graph at
-//!   the nearest nodes in sight (in a straight line, or over a small grid
-//!   when none is: a vein up a scree), crosses it by A*, and leaves it the
-//!   same way.
+//!   server's own test, run along the line more finely than the server's
+//!   steps, so a leg it lets through the server walks from wherever on it
+//!   the walk begins (#280). Otherwise it joins the graph at the nearest
+//!   nodes in sight (in a straight line, or by A* over a grid when none is:
+//!   a vein up a scree, a valley floor a kilometre from its trail), crosses
+//!   it by A*, and leaves it the same way. Where there's no way,
+//!   [`WalkGraph::plan`] says which end it's at.
 //! - **The waypoints** are pulled tight. A stretch becomes one leg while its
 //!   straight line is walkable, no slower than the way round, and within
 //!   [`DEVIATION`] of it, so walkers keep to the streets and still send few
@@ -74,10 +77,23 @@ const JOIN_ROUNDS: usize = 8;
 const JOIN_SAMPLE: u32 = 8;
 /// The nearest nodes of other networks a join tries.
 const JOIN_TRIES: usize = 3;
-/// How far apart a line's water tests are, as the server's ([`Ground::step`]).
-const WATER_SAMPLE: f64 = 1.0;
-/// How far apart its slope tests are: about half a tick's walk.
-const SLOPE_EVERY: usize = 2;
+/// How far apart a line's water tests are: a quarter of the server's
+/// ([`Ground::step`]), whose tests fall anywhere along the line, so a line
+/// that clips the corner of a lake by half a unit still finds it (#280).
+const WATER_SAMPLE: f64 = 0.25;
+/// How far apart the water is searched where a line goes in or out of it.
+const FINE: f64 = 0.05;
+/// How far apart a line's slope tests are: on gentle ground, and where the
+/// slope is over [`STEEP`]. The server's step can stop anywhere along the
+/// line, and a crest can be steeper than [`CLIFF_SLOPE`] for under a unit
+/// (#280).
+const SLOPE_SAMPLE: f64 = 2.0;
+const STEEP_SAMPLE: f64 = 0.5;
+const STEEP: f64 = 0.8;
+/// How far under [`CLIFF_SLOPE`] a rising slope already stops a line, so a
+/// crest that peaks between two tests can't slip through. Over 20,000 lines
+/// in the ranges, these let none through that a test every 0.05 stops.
+const STEEP_MARGIN: f64 = 0.03;
 /// How far apart a leg's speed is sampled for its cost.
 const COST_SAMPLE: f64 = 10.0;
 /// The side of the node index's buckets.
@@ -89,9 +105,21 @@ const ACCESS_RADII: [f64; 2] = [250.0, 800.0];
 /// [`ACCESS_SECTORS`] directions.
 const ACCESS_NEAREST: usize = 4;
 const ACCESS_SECTORS: usize = 8;
-/// The grid a point with no node in sight crosses to reach one.
+/// The grid a point with no node in sight crosses to reach one: a vein in
+/// the ranges can be 1300 from the nearest trail (#280).
 const GRID_CELL: f64 = 10.0;
-const GRID_REACH: f64 = 300.0;
+const GRID_REACH: f64 = 1600.0;
+/// How far from a cell of that grid a node counts as in sight of it.
+const GRID_SIGHT: f64 = 30.0;
+/// The nearest nodes the grid's search heads for. A weighted A* looks at
+/// fewer cells, but the nearest nodes are often over a ridge, and it spends
+/// them all against the ridge.
+const GRID_TARGETS: usize = 16;
+/// The most cells it looks at before it gives up: a pocket of ground walled
+/// by crests, say (#347). A way out of the ranges takes at most about 9000.
+/// Giving up takes about half a second, on the Flint client's main thread
+/// when it's a click ([#348](https://github.com/chrischaps/TheCapitol/issues/348)).
+const GRID_CELLS: usize = 20_000;
 /// The slowest the cost lets a leg go, as a share of full speed.
 const SLOWEST: f64 = 0.05;
 
@@ -113,6 +141,19 @@ pub struct WalkGraph {
     /// Each node's neighbours, and the cost of the way there.
     edges: Vec<Vec<(u32, f64)>>,
     buckets: HashMap<(i64, i64), Vec<u32>>,
+}
+
+/// Why [`WalkGraph::plan`] found no way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoWay {
+    /// No way from where the walk starts onto the graph: a pocket of ground
+    /// walled by crests, which a walker can't get into, so only a respawn or
+    /// a regenerate puts one there. Nothing walks it out yet (#347).
+    Stranded,
+    /// No way from the graph to where it ends. About one wild node in 25
+    /// stands in such a pocket, where the backend's reach test steps over
+    /// the crests ([#347](https://github.com/chrischaps/TheCapitol/issues/347)).
+    Unreachable,
 }
 
 /// Which way an access leg runs: from a point onto the graph, or off it to one.
@@ -291,22 +332,29 @@ impl WalkGraph {
 
     /// The waypoints of a walk from `from` to `to`, each a straight line the
     /// server lets through, ending at `to`. Just `[to]` when the straight
-    /// line is walkable. `None` when no way is found: `to` is in a lake, say,
-    /// or up a crag, or nothing near either end is in sight of the graph.
+    /// line is walkable. `None` when no way is found ([`Self::plan`] says
+    /// why).
     pub fn route(&self, from: Point, to: Point) -> Option<Vec<Point>> {
+        self.plan(from, to).ok()
+    }
+
+    /// [`Self::route`], or why there's no way: `from` is somewhere the graph
+    /// can't be reached from, or `to` somewhere it can't reach (in a lake,
+    /// up a crag, in a pocket of ground walled by crests).
+    pub fn plan(&self, from: Point, to: Point) -> Result<Vec<Point>, NoWay> {
         if self.walkable(from, to) {
-            return Some(vec![to]);
+            return Ok(vec![to]);
         }
         let ons = self.access(from, Way::On);
         if ons.is_empty() {
-            return None;
+            return Err(NoWay::Stranded);
         }
         let offs = self.access(to, Way::Off);
         if offs.is_empty() {
-            return None;
+            return Err(NoWay::Unreachable);
         }
-        let points = self.search(from, to, &ons, &offs)?;
-        Some(self.pull(&points))
+        let points = self.search(from, to, &ons, &offs).ok_or(NoWay::Unreachable)?;
+        Ok(self.pull(&points))
     }
 
     /// Whether the server lets a straight walk from `a` to `b` through: it
@@ -337,33 +385,69 @@ impl WalkGraph {
         })
     }
 
-    /// The wild water and the slope, sampled along the line as
-    /// [`Ground::step`] does it a step at a time.
+    /// The wild water and the slope along the line.
     fn ground_lets_through(&self, a: Point, b: Point) -> bool {
-        let length = distance(a, b);
-        if length == 0.0 {
-            return true;
-        }
-        let land = self.ground.land();
-        let n = (length / WATER_SAMPLE).ceil() as usize;
+        distance(a, b) == 0.0 || (self.water_lets_through(a, b) && self.slope_lets_through(a, b))
+    }
+
+    /// The wild water, sampled along the line. Where the line goes in or out
+    /// of the water, the gap is searched at [`FINE`] for the river between a
+    /// ford's edge and the bank.
+    fn water_lets_through(&self, a: Point, b: Point) -> bool {
+        let n = (distance(a, b) / WATER_SAMPLE).ceil() as usize;
         let mut leaving = matches!(self.ground.footing(a.0, a.1), Footing::Blocked(_));
-        let mut slope = land::slope_at(a.0, a.1, land);
+        let mut wading = matches!(self.ground.footing(a.0, a.1), Footing::Wading(_));
+        let mut last = a;
         for i in 1..=n {
             let p = lerp(a, b, i as f64 / n as f64);
             match self.ground.footing(p.0, p.1) {
                 Footing::Blocked(_) if !leaving => return false,
                 Footing::Blocked(_) => {}
-                _ => leaving = false,
-            }
-            if i % SLOPE_EVERY == 0 || i == n {
-                let here = land::slope_at(p.0, p.1, land);
-                if here > CLIFF_SLOPE && here > slope {
-                    return false;
+                footing => {
+                    let wet = matches!(footing, Footing::Wading(_));
+                    if wet != wading && !leaving && self.blocked_between(last, p) {
+                        return false;
+                    }
+                    wading = wet;
+                    leaving = false;
                 }
-                slope = here;
             }
+            last = p;
         }
         true
+    }
+
+    /// The slope along the line. [`Ground::step`] stops a step that ends on
+    /// ground steeper than [`CLIFF_SLOPE`] and steeper than where it starts,
+    /// so a line stops where the slope rises past a little under it: the
+    /// server's steps fall between the samples, wherever on the line its
+    /// walk began. A walk that starts on a crag may climb down off it.
+    fn slope_lets_through(&self, a: Point, b: Point) -> bool {
+        let land = self.ground.land();
+        let length = distance(a, b);
+        let mut slope = land::slope_at(a.0, a.1, land);
+        let mut along = 0.0;
+        while along < length {
+            along = (along + if slope > STEEP { STEEP_SAMPLE } else { SLOPE_SAMPLE }).min(length);
+            let p = lerp(a, b, along / length);
+            let here = land::slope_at(p.0, p.1, land);
+            if here > CLIFF_SLOPE - STEEP_MARGIN && here > slope {
+                return false;
+            }
+            slope = here;
+        }
+        true
+    }
+
+    /// Whether the water stops a walk between two samples of a line, `a`
+    /// and `b`, searched every [`FINE`]: a ford can end a quarter short of
+    /// its river's bank (#280).
+    fn blocked_between(&self, a: Point, b: Point) -> bool {
+        let n = (distance(a, b) / FINE).ceil() as usize;
+        (1..n).any(|i| {
+            let p = lerp(a, b, i as f64 / n as f64);
+            matches!(self.ground.footing(p.0, p.1), Footing::Blocked(_))
+        })
     }
 
     /// The straight walk's length on the flat that takes as long: its
@@ -462,27 +546,44 @@ impl WalkGraph {
         picked
     }
 
-    /// A way between `p` and the nearest node it can reach over a grid of
+    /// A way between `p` and a node it can reach over a grid of
     /// [`GRID_CELL`] within [`GRID_REACH`]: round the bend of a lake shore,
-    /// say, or down off a scree.
+    /// say, or down off a scree and along a valley to its trail. The search
+    /// is A*, heading for the nearest nodes, and ends at the first cell with
+    /// a node in sight within [`GRID_SIGHT`].
     fn access_by_grid(&self, p: Point, way: Way) -> Option<Access> {
+        let targets: Vec<Point> = self
+            .near(p, GRID_REACH)
+            .into_iter()
+            .filter(|&k| !self.edges[k as usize].is_empty())
+            .take(GRID_TARGETS)
+            .map(|k| self.nodes[k as usize])
+            .collect();
+        if targets.is_empty() {
+            return None;
+        }
         let reach = (GRID_REACH / GRID_CELL) as i64;
-        let side = (2 * reach + 1) as usize;
-        let index = |i: i64, j: i64| ((j + reach) as usize) * side + (i + reach) as usize;
-        let at = |i: i64, j: i64| (p.0 + i as f64 * GRID_CELL, p.1 + j as f64 * GRID_CELL);
-        let mut cost = vec![f64::INFINITY; side * side];
-        let mut came = vec![usize::MAX; side * side];
+        let at = |(i, j): (i64, i64)| (p.0 + i as f64 * GRID_CELL, p.1 + j as f64 * GRID_CELL);
+        let h = |q: Point| targets.iter().map(|&t| distance(q, t)).fold(f64::INFINITY, f64::min);
+        // The cells reached, and the cells by number, for the open set
+        let mut cells: HashMap<Cell, Reached> = HashMap::new();
+        let mut keys: Vec<Cell> = vec![(0, 0)];
         let mut open = BinaryHeap::new();
-        cost[index(0, 0)] = 0.0;
-        open.push(Open { f: 0.0, node: index(0, 0) as u32 });
+        cells.insert((0, 0), Reached { id: 0, cost: 0.0, from: (0, 0) });
+        open.push(Open { f: h(p), node: 0 });
+        let mut looked = 0;
         while let Some(Open { f, node }) = open.pop() {
-            let cell = node as usize;
-            if f > cost[cell] {
+            let cell = keys[node as usize];
+            let here = at(cell);
+            let g = cells[&cell].cost;
+            if f > g + h(here) + 1e-9 {
                 continue;
             }
-            let (i, j) = ((cell % side) as i64 - reach, (cell / side) as i64 - reach);
-            let here = at(i, j);
-            for k in self.near(here, GRID_CELL * 1.5) {
+            looked += 1;
+            if looked > GRID_CELLS {
+                return None;
+            }
+            for k in self.near(here, GRID_SIGHT) {
                 if self.edges[k as usize].is_empty() {
                     continue;
                 }
@@ -490,33 +591,37 @@ impl WalkGraph {
                 if self.walkable(a, b) {
                     let mut via = Vec::new();
                     let mut c = cell;
-                    while c != index(0, 0) {
-                        let (ci, cj) = ((c % side) as i64 - reach, (c / side) as i64 - reach);
-                        via.push(at(ci, cj));
-                        c = came[c];
+                    while c != (0, 0) {
+                        via.push(at(c));
+                        c = cells[&c].from;
                     }
                     if way == Way::On {
                         via.reverse();
                     }
-                    return Some(Access { node: k, cost: cost[cell] + self.cost(a, b), via });
+                    return Some(Access { node: k, cost: g + self.cost(a, b), via });
                 }
             }
             for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
-                let (ni, nj) = (i + di, j + dj);
-                if ni.abs() > reach || nj.abs() > reach {
+                let next = (cell.0 + di, cell.1 + dj);
+                if next.0.abs() > reach || next.1.abs() > reach {
                     continue;
                 }
-                let next = index(ni, nj);
-                let (a, b) = way.order(here, at(ni, nj));
-                if !self.walkable(a, b) {
+                let there = at(next);
+                let (a, b) = way.order(here, there);
+                let through = g + self.cost(a, b);
+                let known = cells.get(&next).copied();
+                if known.is_some_and(|r| r.cost <= through) || !self.walkable(a, b) {
                     continue;
                 }
-                let g = cost[cell] + self.cost(a, b);
-                if g < cost[next] {
-                    cost[next] = g;
-                    came[next] = cell;
-                    open.push(Open { f: g, node: next as u32 });
-                }
+                let id = known.map_or_else(
+                    || {
+                        keys.push(next);
+                        keys.len() as u32 - 1
+                    },
+                    |r| r.id,
+                );
+                cells.insert(next, Reached { id, cost: through, from: cell });
+                open.push(Open { f: through + h(there), node: id });
             }
         }
         None
@@ -651,6 +756,18 @@ pub fn shared(terrain: &TerrainResponse) -> Arc<WalkGraph> {
 pub fn latest() -> Option<Arc<WalkGraph>> {
     let graphs = SHARED.lock().unwrap_or_else(|e| e.into_inner());
     graphs.last().cloned()
+}
+
+/// A cell of [`WalkGraph::access_by_grid`]'s grid, counted from where it starts.
+type Cell = (i64, i64);
+
+/// A cell the grid's search has reached: its number, its cost from the
+/// start, and the cell it was reached from.
+#[derive(Debug, Clone, Copy)]
+struct Reached {
+    id: u32,
+    cost: f64,
+    from: Cell,
 }
 
 /// An entry in A*'s open set, cheapest first.

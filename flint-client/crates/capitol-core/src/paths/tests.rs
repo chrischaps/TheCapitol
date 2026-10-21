@@ -242,8 +242,8 @@ fn one_bridge_and_its_road() {
     // Over to the road, along it and over the bridge, and off it
     assert!(legs.len() >= 2 && legs.len() <= 3, "{legs:?}");
     assert!(legs.iter().any(|p| (p.0 - 6800.0).abs() < DEVIATION));
-    // Too far from the road to see it: still no way round
-    assert_eq!(graph.route((8300.0, 8300.0), (6800.0, 6900.0)), None);
+    // Too far from the road to reach it (GRID_REACH): still no way round
+    assert_eq!(graph.route((8800.0, 8800.0), (6800.0, 6900.0)), None);
 }
 
 #[test]
@@ -268,3 +268,105 @@ fn crossings_and_distances() {
     assert_eq!(off_line((0.0, 0.0), (10.0, 0.0), (13.0, 4.0)), 5.0);
 }
 
+
+
+/// Short lines in the wilds, from where a walker can stand, half of them on
+/// steep ground: every one the graph calls walkable, the server walks, from
+/// its start or from partway along (#280). Before, one line in a thousand
+/// crossed a crest steeper than the cliff between two of the graph's tests.
+#[test]
+fn what_the_graph_calls_walkable_the_server_walks() {
+    let (_, graph) = world();
+    let land = graph.ground.land().clone();
+    let mut rng = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let (mut tried, mut walkable) = (0, 0);
+    while tried < 4000 {
+        let a = polar(4800.0 + 1950.0 * next(), 360.0 * next());
+        let slope = land::slope_at(a.0, a.1, &land);
+        let steep = tried % 2 == 0;
+        if slope > CLIFF_SLOPE || (steep && slope < 0.9) || graph.ground.footing(a.0, a.1) != Footing::Dry {
+            continue;
+        }
+        let (heading, length) = (std::f64::consts::TAU * next(), 5.0 + 75.0 * next());
+        let b = (a.0 + length * heading.cos(), a.1 + length * heading.sin());
+        tried += 1;
+        if !graph.walkable(a, b) {
+            continue;
+        }
+        walkable += 1;
+        for from in [a, lerp(a, b, 0.37)] {
+            if let Err(e) = server_walk(graph, from, &[b]) {
+                panic!("the graph calls {a:?} to {b:?} walkable, but from {from:?}: {e}");
+            }
+        }
+    }
+    eprintln!("{walkable} of {tried} lines walkable");
+    assert!(walkable * 2 > tried, "only {walkable} of {tried} lines walkable");
+}
+
+#[test]
+fn the_walks_the_server_stopped_go_there_and_back() {
+    // From the Exchange hall to wild nodes (#280): the first four crossed a
+    // crest the graph's tests stepped over, the next a ford that ends a
+    // quarter short of its river's bank, then one clipped a lake's corner on
+    // the way back. The last two had no trail node in sight within 800.
+    let (_, graph) = world();
+    let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
+    for node in [
+        (12803.9, 9775.6),
+        (12847.3, 9445.1),
+        (1825.6, 10172.6),
+        (12217.6, 9420.6),
+        (11878.2, 2714.2),
+        (12152.2, 2837.1),
+        (2403.4, 5223.2),
+        (5215.3, 11587.1),
+    ] {
+        walk(graph, hall, node);
+        walk(graph, node, hall);
+    }
+}
+
+#[test]
+fn a_pocket_walled_by_crests_has_no_way_in_or_out() {
+    // A copper vein the backend planted where the crests wall it in (#280)
+    let (_, graph) = world();
+    let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
+    let vein = (8365.8, 783.3);
+    assert_eq!(graph.plan(hall, vein), Err(NoWay::Unreachable));
+    assert_eq!(graph.plan(vein, hall), Err(NoWay::Stranded));
+}
+
+#[test]
+fn walks_go_round_the_ponds_of_the_rural_ring() {
+    // C1.2's citizen walking home was stopped by a rural lake (#280): from
+    // one side of each pond to the other, both ways.
+    let (terrain, graph) = world();
+    let mut walked = 0;
+    for lake in &terrain.lakes {
+        let ring = &lake.rings[0];
+        let (min, max) = ring.iter().fold(((f64::MAX, f64::MAX), (f64::MIN, f64::MIN)), |(lo, hi), p| {
+            ((lo.0.min(p.0), lo.1.min(p.1)), (hi.0.max(p.0), hi.1.max(p.1)))
+        });
+        let mid = ((min.0 + max.0) / 2.0, (min.1 + max.1) / 2.0);
+        if rules::Zone::from_position(mid.0, mid.1) != rules::Zone::Rural {
+            continue;
+        }
+        let (west, east) = ((min.0 - 25.0, mid.1), (max.0 + 25.0, mid.1));
+        let dry = |p: Point| graph.ground.footing(p.0, p.1) == Footing::Dry && !terrain.roads.is_empty();
+        if !dry(west) || !dry(east) || graph.walkable(west, east) {
+            continue;
+        }
+        walk(graph, west, east);
+        walk(graph, east, west);
+        walked += 1;
+    }
+    eprintln!("round {walked} ponds");
+    assert!(walked > 0, "no pond in the rural ring to walk round");
+}

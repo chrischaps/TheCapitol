@@ -32,7 +32,7 @@ use uuid::Uuid;
 use super::plan::{Holdings, Step};
 use super::report::{BotRun, Entry, Report, MAKER_ROLE};
 use super::{Errand, Role, Trade, MARKET_ITEMS};
-use crate::bot::{Account, Bot, BotError};
+use crate::bot::{Account, Bot, BotError, NO_WAY};
 use crate::catalog::Catalog;
 use crate::citizen::decide::log::Fate;
 use crate::citizen::decide::{Choice, Decision, Held, Mind, Place, Question, Situation, When, Who};
@@ -54,6 +54,8 @@ const PLOT_ZONES: [&str; 2] = ["rural", "suburban"];
 const SPOT_SPACING: f64 = 55.0;
 /// Walks out to look for a resource before the gather gives up.
 const MAX_EXPLORES: usize = 6;
+/// Spots an explore picks before it gives up on ones it has no way to.
+const EXPLORE_TRIES: usize = 4;
 /// Failures in a row before a bot sits out a game minute.
 const FAILURES_BEFORE_REST: u32 = 5;
 /// How long a bot's order waits for a fill before it's taken down. Matching
@@ -1049,8 +1051,9 @@ impl SimBot {
             };
             match self.bot.extract(&node) {
                 Ok(_) => return Ok(()),
-                // A blocked walk is water in the way: bots walk straight lines
-                // (#211), so the node is shunned and another tried.
+                // A blocked walk: the walk graph has no way to the node (one
+                // wild node in 25 is in a pocket walled by crests, #280), or
+                // the server stopped it. The node is shunned and another tried.
                 Err(e @ (BotError::Refused { .. } | BotError::Blocked { .. })) => {
                     let shun = self.wall(120.0);
                     if let Some(seen) = self.atlas.get_mut(&node.id) {
@@ -1137,12 +1140,17 @@ impl SimBot {
             .into_iter()
             .min_by(|a, b| band_gap(*a, r_now).total_cmp(&band_gap(*b, r_now)))
             .unwrap_or((rules_spawn_radius() - 300.0, rules_spawn_radius() + 300.0));
-        let r = inner + 60.0 + (outer - inner - 120.0).max(0.0) * self.random();
-        // Along the ring from here, a little either way.
-        let a = a_now + (self.random() - 0.5) * 0.6;
-        match self.bot.walk_to(cx + r * a.cos(), cy + r * a.sin()) {
-            Ok(()) | Err(BotError::Blocked { .. }) => {}
-            Err(e) => return Err(e),
+        for _ in 0..EXPLORE_TRIES {
+            let r = inner + 60.0 + (outer - inner - 120.0).max(0.0) * self.random();
+            // Along the ring from here, a little either way.
+            let a = a_now + (self.random() - 0.5) * 0.6;
+            match self.bot.walk_to(cx + r * a.cos(), cy + r * a.sin()) {
+                // A spot the walk graph can't reach, in a lake, say: it never
+                // set out, so another is tried (#280)
+                Err(BotError::Blocked { reason, .. }) if reason == NO_WAY => continue,
+                Ok(()) | Err(BotError::Blocked { .. }) => break,
+                Err(e) => return Err(e),
+            }
         }
         self.bot.refetch(Fetch::NearbyNodes);
         self.bot.settle()
