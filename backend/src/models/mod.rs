@@ -9,6 +9,7 @@ pub mod player;
 pub mod plot;
 pub mod recipe;
 pub mod resource;
+pub mod rural;
 pub mod station;
 pub mod street_plan;
 pub mod suburb;

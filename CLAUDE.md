@@ -170,6 +170,7 @@ models/          - Database types and game state structs
   hydrology.rs   - The wilds' rivers, streams, lakes and fords, from the height field (W3)
   plot.rs        - Plot ownership, permissions, property tax
   suburb/        - The suburb's neighbourhoods, streets, lots and parks (suburb v2)
+  rural/         - The rural ring (Rural v2): so far its plan harness, `backend/tools/rural-plan.ps1` (R1)
 
 routes/          - Axum REST handlers
   auth.rs        - Register, login, JWT (includes is_admin in token)
