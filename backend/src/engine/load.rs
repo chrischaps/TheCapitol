@@ -91,20 +91,21 @@ pub enum Phase {
     Trades,
     /// The positions that changed, to every socket
     Broadcast,
-    /// Writing finished gathers (`persist_gather`)
-    Gathers,
-    /// Writing finished crafts (`finish_craft`)
-    Crafts,
-    /// Saving every player's position, every 100 ticks
+    /// Handing the gathers and crafts the tick finished to the writer
+    /// ([`Loop::Writer`]), which saves them off the tick (#304)
+    Writes,
+    /// Reading every player's position, every 100 ticks, for
+    /// [`Loop::Positions`] to save
     Positions,
-    /// The hourly property tax
+    /// Starting the hourly property tax ([`Loop::Tax`])
     Tax,
-    /// Lapsing subscriptions that ran out, hourly
+    /// Starting the hourly lapse of subscriptions that ran out
+    /// ([`Loop::Subscriptions`])
     Subscriptions,
 }
 
 impl Phase {
-    pub const ALL: [Phase; 13] = [
+    pub const ALL: [Phase; 12] = [
         Phase::Lock,
         Phase::Commands,
         Phase::Movement,
@@ -113,8 +114,7 @@ impl Phase {
         Phase::Regeneration,
         Phase::Trades,
         Phase::Broadcast,
-        Phase::Gathers,
-        Phase::Crafts,
+        Phase::Writes,
         Phase::Positions,
         Phase::Tax,
         Phase::Subscriptions,
@@ -130,8 +130,7 @@ impl Phase {
             Phase::Regeneration => "regeneration",
             Phase::Trades => "trades",
             Phase::Broadcast => "broadcast",
-            Phase::Gathers => "gathers",
-            Phase::Crafts => "crafts",
+            Phase::Writes => "writes",
             Phase::Positions => "positions",
             Phase::Tax => "tax",
             Phase::Subscriptions => "subscriptions",
@@ -157,22 +156,44 @@ impl Phase {
     }
 }
 
-/// A loop that runs beside the tick, on its own interval.
+/// Work that runs beside the tick: a loop on its own interval, or a task
+/// the tick hands its writes to so it never awaits them (#304).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Loop {
     Automation,
     Market,
     Bazaar,
+    /// Saving one tick's finished gathers and crafts (`persist_gather`,
+    /// `finish_craft`), in order
+    Writer,
+    /// Saving every player's position in one statement, every 100 ticks
+    Positions,
+    /// The hourly property tax
+    Tax,
+    /// Lapsing subscriptions that ran out, hourly
+    Subscriptions,
 }
 
 impl Loop {
-    pub const ALL: [Loop; 3] = [Loop::Automation, Loop::Market, Loop::Bazaar];
+    pub const ALL: [Loop; 7] = [
+        Loop::Automation,
+        Loop::Market,
+        Loop::Bazaar,
+        Loop::Writer,
+        Loop::Positions,
+        Loop::Tax,
+        Loop::Subscriptions,
+    ];
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Loop::Automation => "automation",
             Loop::Market => "market",
             Loop::Bazaar => "bazaar",
+            Loop::Writer => "writer",
+            Loop::Positions => "positions",
+            Loop::Tax => "tax",
+            Loop::Subscriptions => "subscriptions",
         }
     }
 

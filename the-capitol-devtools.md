@@ -153,6 +153,8 @@ The first set:
   - tax, subscriptions: the hourly jobs
 
   The loops are automation, market and bazaar. `LoadWindow` gives each phase and loop its runs, time, mean and p95 over a window.
+
+  *Since #304* the tick awaits no database. Gathers and crafts go to a writer task, which saves them in order and only then tells the player. Every player's position is read under the tick's own lock and saved in one `UNNEST` statement, in a task of its own. That happens every 100 ticks of the world's count: the loop's own count was reset by the tick-rate log, so positions were being saved about twice as often as intended. The hourly tax and the subscriptions' lapse run as tasks too. So there are now 12 phases. Gathers and crafts are one phase, **writes**: the hand-off to the writer. Positions is the read, and tax and subscriptions are their start. The work itself is timed in four new loops: **writer**, **positions**, **tax** and **subscriptions** (spans `loop.<name>`). At 200 citizens and 10× the tick fell from 8.3 ms on average, 13.9% over budget, to 0.47 ms with none over. The writer is one task and about 40% busy at that load, so its backlog wants a gauge ([#407](https://github.com/chrischaps/TheCapitol/issues/407)).
 - **The tracy feature** is `profile` on the backend: `tracing-tracy` as a layer. It's off by default, at zero cost when off.
 - **The town's report** is `POST /admin/town/report`, as `TownReport`, a protocol type. It holds:
   - a health row per citizen
@@ -177,7 +179,7 @@ The first set:
 - **D0.1 Tick by phase.**
   - Spans and per-phase histograms; `Load.phases`, with its fixture.
   - **Verify:** the phases sum to within 5% of the tick, and the fixture round-trips.
-  - *As built (#353):* `Load.phases` (13 phases that cover the tick) and `Load.loops` (automation, market, bazaar, timed apart since they aren't in the tick). See §5.
+  - *As built (#353):* `Load.phases` (13 phases that cover the tick, 12 since #304) and `Load.loops` (automation, market, bazaar, timed apart since they aren't in the tick, and since #304 the writer, positions, tax and subscriptions). See §5.
 - **D0.2 Sampler and history.**
   - The `Sample` type, the ring, the `metrics_samples` table and pruning.
   - **Verify:** in a 200-citizen town the sampler adds under 0.5 ms to tick p95, and a day's samples reconcile with the ledger.

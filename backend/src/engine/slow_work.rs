@@ -186,8 +186,9 @@ mod tests {
 
     #[test]
     fn spans_name_their_phase_or_loop() {
-        assert_eq!(Phase::of_span("tick.gathers"), Some(Phase::Gathers));
+        assert_eq!(Phase::of_span("tick.writes"), Some(Phase::Writes));
         assert_eq!(Loop::of_span("loop.market"), Some(Loop::Market));
+        assert_eq!(Loop::of_span("loop.writer"), Some(Loop::Writer));
         assert_eq!(Phase::of_span("loop.market"), None);
         assert_eq!(Phase::of_span("tick.nothing"), None);
         // The phases' and loops' spans are made in the engine

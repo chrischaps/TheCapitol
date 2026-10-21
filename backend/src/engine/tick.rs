@@ -13,7 +13,7 @@ use super::crafting::{cancel_crafting, process_crafting, start_crafting, Craftin
 use super::events::GameEvent;
 use super::extraction::{cancel_extraction, process_extractions, start_extraction, PendingItem};
 use super::ledger;
-use super::load::Phase;
+use super::load::{Loop, Phase};
 use super::units;
 use super::tools::{self, HeldTool, Wear};
 use super::movement::process_movement;
@@ -745,6 +745,15 @@ impl GameState {
     }
 }
 
+/// Every player's position is saved each this many ticks: every 10 s at 1x
+const POSITION_SAVE_TICKS: u64 = 100;
+
+/// What one tick finished, for the writer to save (#304)
+struct Finished {
+    gathers: Vec<PendingItem>,
+    crafts: Vec<FinishedCraft>,
+}
+
 pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppState) {
     // The economy sim's time multiplier (E2.7); 1, real time, everywhere else
     let scale = app_state.config.sim_tick_scale;
@@ -758,6 +767,14 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
             scale
         );
     }
+
+    // The tick awaits no database (#304): what it finishes goes to the
+    // writer, which saves it in order, a tick's worth at a time
+    let event_sender = game_state.read().await.event_sender.clone();
+    let (to_writer, from_tick) = mpsc::unbounded_channel();
+    tokio::spawn(run_writer(app_state.db.clone(), event_sender, from_tick));
+    // The position save in flight, so a slow one is never overtaken by the next
+    let mut saving_positions: Option<tokio::task::JoinHandle<()>> = None;
 
     let mut interval = tokio::time::interval(period);
     let mut last_log = Instant::now();
@@ -776,9 +793,9 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
             tracy.non_continuous_frame(tracy_client::frame_name!("tick"))
         });
 
-        let pending_items: Vec<PendingItem>;
-        let finished_crafts: Vec<FinishedCraft>;
-        let event_sender;
+        let gathers: Vec<PendingItem>;
+        let crafts: Vec<FinishedCraft>;
+        let positions: Option<Vec<SavedPosition>>;
         let game_tick_count;
         {
             let mut game = {
@@ -786,32 +803,26 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
                 game_state.write().instrument(tracing::info_span!("tick.lock")).await
             };
             game.tick();
-            pending_items = game.take_pending_items();
-            finished_crafts = game.take_finished_crafts();
-            event_sender = game.event_sender.clone();
+            gathers = game.take_pending_items();
+            crafts = game.take_finished_crafts();
             game_tick_count = game.tick_count;
+            // Read under the tick's own lock, and written once it's let go.
+            // The world's count, never reset, so this comes round every 100
+            // ticks; the loop's own count restarts at each tick-rate log.
+            positions = game_tick_count.is_multiple_of(POSITION_SAVE_TICKS).then(|| {
+                let _timed = Phase::Positions.timed();
+                saved_positions(&game)
+            });
         }
 
-        // Write the gathers, wearing their tools, and only then tell the gatherers
-        if !pending_items.is_empty() {
-            let _timed = Phase::Gathers.timed();
-            async {
-                for item in pending_items {
-                    persist_gather(&app_state.db, item, &event_sender).await;
-                }
+        // Gathers are written wearing their tools, and crafts with their inputs
+        // re-checked and consumed in one transaction (B10, #61). The writer
+        // tells the gatherers and crafters only once each is written.
+        if !gathers.is_empty() || !crafts.is_empty() {
+            let _timed = Phase::Writes.timed();
+            if to_writer.send(Finished { gathers, crafts }).is_err() {
+                tracing::error!("The writer has stopped: this tick's gathers and crafts weren't saved");
             }
-            .instrument(tracing::info_span!("tick.gathers"))
-            .await;
-        }
-
-        // Finish crafts: inputs re-checked, consumed and the output written in one
-        // transaction (B10, #61). Only then is the crafter told, with one
-        // `inventory_updated` per container that changed.
-        if !finished_crafts.is_empty() {
-            let _timed = Phase::Crafts.timed();
-            finish_crafts(&app_state.db, finished_crafts, &event_sender)
-                .instrument(tracing::info_span!("tick.crafts"))
-                .await;
         }
 
         tick_count += 1;
@@ -830,60 +841,98 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
             tick_count = 0;
         }
 
-        // Periodically persist player positions (every 10 seconds)
-        if tick_count.is_multiple_of(100) {
-            let _timed = Phase::Positions.timed();
-            persist_positions(&game_state, &app_state)
-                .instrument(tracing::info_span!("tick.positions"))
-                .await;
+        // Every player's position, in one statement, off the tick
+        if let Some(positions) = positions {
+            if saving_positions.as_ref().is_some_and(|s| !s.is_finished()) {
+                tracing::warn!("The last position save is still running; skipping this one");
+            } else {
+                let db = app_state.db.clone();
+                saving_positions = Some(tokio::spawn(
+                    async move {
+                        let _timed = Loop::Positions.timed();
+                        if let Err(e) = persist_positions(&db, &positions).await {
+                            tracing::error!("Failed to persist player positions: {:?}", e);
+                        }
+                    }
+                    .instrument(tracing::info_span!("loop.positions")),
+                ));
+            }
         }
 
-        // M7: Process property taxes hourly (36000 ticks = 1 hour at 10 ticks/sec)
-        // In practice, 10 ticks/sec * 60 sec * 60 min = 36000 ticks per hour
+        // M7: Process property taxes hourly (36000 ticks = 1 hour at 10 ticks/sec),
+        // in a task of its own
         if game_tick_count > 0 && game_tick_count % 36000 == 0 {
             let _timed = Phase::Tax.timed();
-            async {
-                tracing::info!("Processing hourly property taxes at tick {}", game_tick_count);
-                let rate = app_state.tunables.get().property_tax_rate;
-                let report = super::property_tax::process_property_taxes(&app_state.db, rate).await;
-                let mut game = game_state.write().await;
-                let game = &mut *game;
-                super::property_tax::announce(report, &mut game.stations, &game.event_sender);
-            }
-            .instrument(tracing::info_span!("tick.tax"))
-            .await;
+            let (game_state, db) = (game_state.clone(), app_state.db.clone());
+            // The live rate (D6.1), as it is when the hour strikes
+            let rate = app_state.tunables.get().property_tax_rate;
+            tokio::spawn(
+                async move {
+                    let _timed = Loop::Tax.timed();
+                    tracing::info!("Processing hourly property taxes at tick {}", game_tick_count);
+                    let report = super::property_tax::process_property_taxes(&db, rate).await;
+                    let mut game = game_state.write().await;
+                    let game = &mut *game;
+                    super::property_tax::announce(report, &mut game.stations, &game.event_sender);
+                }
+                .instrument(tracing::info_span!("loop.tax")),
+            );
         }
 
         // E4.1: subscriptions that ran out, hourly with the tax but half an
-        // hour apart from it. The Subscriber extractor and a key's sign-in
-        // refuse them on time anyway; this marks them lapsed, tells their
-        // players and hangs up their bots (#217). The keys aren't revoked:
-        // they sign in again once the player renews.
+        // hour apart from it, in a task of its own. The Subscriber extractor
+        // and a key's sign-in refuse them on time anyway; this marks them
+        // lapsed, tells their players and hangs up their bots (#217). The keys
+        // aren't revoked: they sign in again once the player renews.
         if game_tick_count > 0 && game_tick_count % 36000 == 18000 {
             let _timed = Phase::Subscriptions.timed();
-            async {
-                let lapses = crate::subscriptions::lapse_expired(&app_state.db).await;
-                let mut game = game_state.write().await;
-                for l in lapses {
-                    let lapsed = Subscription { status: SubscriptionStatus::Lapsed, until: Some(l.until) };
-                    for key in &l.key_ids {
-                        game.hang_up_key(*key, &crate::api_keys::unsubscribed(&lapsed));
+            let (game_state, db) = (game_state.clone(), app_state.db.clone());
+            tokio::spawn(
+                async move {
+                    let _timed = Loop::Subscriptions.timed();
+                    let lapses = crate::subscriptions::lapse_expired(&db).await;
+                    let mut game = game_state.write().await;
+                    for l in lapses {
+                        let lapsed = Subscription { status: SubscriptionStatus::Lapsed, until: Some(l.until) };
+                        for key in &l.key_ids {
+                            game.hang_up_key(*key, &crate::api_keys::unsubscribed(&lapsed));
+                        }
+                        let _ = game.event_sender.send(GameEvent::SubscriptionLapsed {
+                            player_id: l.player_id,
+                            until: l.until,
+                            notice_id: l.notice_id,
+                        });
                     }
-                    let _ = game.event_sender.send(GameEvent::SubscriptionLapsed {
-                        player_id: l.player_id,
-                        until: l.until,
-                        notice_id: l.notice_id,
-                    });
                 }
-            }
-            .instrument(tracing::info_span!("tick.subscriptions"))
-            .await;
+                .instrument(tracing::info_span!("loop.subscriptions")),
+            );
         }
 
         super::load::tick_took(began.elapsed());
         if cfg!(debug_assertions) {
             super::slow_work::warn_awaits();
         }
+    }
+}
+
+/// Saves what the ticks finished, a tick at a time and in the order they
+/// finished it, until the tick loop stops (#304). One writer, so two
+/// gathers into one inventory are written one after the other, as they
+/// were when the tick wrote them itself. One writer has a ceiling: about
+/// 40% busy at 200 citizens (#407).
+async fn run_writer(db: sqlx::PgPool, events: broadcast::Sender<GameEvent>, mut from_tick: mpsc::UnboundedReceiver<Finished>) {
+    while let Some(Finished { gathers, crafts }) = from_tick.recv().await {
+        let _timed = Loop::Writer.timed();
+        async {
+            for item in gathers {
+                persist_gather(&db, item, &events).await;
+            }
+            if !crafts.is_empty() {
+                finish_crafts(&db, crafts, &events).await;
+            }
+        }
+        .instrument(tracing::info_span!("loop.writer"))
+        .await;
     }
 }
 
@@ -929,25 +978,47 @@ async fn finish_crafts(db: &sqlx::PgPool, finished: Vec<FinishedCraft>, event_se
     }
 }
 
-async fn persist_positions(game_state: &Arc<RwLock<GameState>>, app_state: &AppState) {
-    let game = game_state.read().await;
+/// A player's position as the tick left it, to be saved
+#[derive(Debug, Clone, PartialEq)]
+struct SavedPosition {
+    id: Uuid,
+    x: f64,
+    y: f64,
+    dest_x: Option<f64>,
+    dest_y: Option<f64>,
+}
 
-    for player in game.players.values() {
-        let result = sqlx::query(
-            "UPDATE players SET position_x = $1, position_y = $2, destination_x = $3, destination_y = $4 WHERE id = $5"
-        )
-        .bind(player.x)
-        .bind(player.y)
-        .bind(player.dest_x)
-        .bind(player.dest_y)
-        .bind(player.id)
-        .execute(&app_state.db)
-        .await;
+fn saved_positions(game: &GameState) -> Vec<SavedPosition> {
+    game.players
+        .values()
+        .map(|p| SavedPosition { id: p.id, x: p.x, y: p.y, dest_x: p.dest_x, dest_y: p.dest_y })
+        .collect()
+}
 
-        if let Err(e) = result {
-            tracing::error!("Failed to persist player position: {:?}", e);
-        }
+/// Every player's position in one statement, not a round trip each (#304)
+async fn persist_positions(db: &sqlx::PgPool, positions: &[SavedPosition]) -> Result<(), sqlx::Error> {
+    if positions.is_empty() {
+        return Ok(());
     }
+    let ids: Vec<Uuid> = positions.iter().map(|p| p.id).collect();
+    let xs: Vec<f64> = positions.iter().map(|p| p.x).collect();
+    let ys: Vec<f64> = positions.iter().map(|p| p.y).collect();
+    let dest_xs: Vec<Option<f64>> = positions.iter().map(|p| p.dest_x).collect();
+    let dest_ys: Vec<Option<f64>> = positions.iter().map(|p| p.dest_y).collect();
+    sqlx::query(
+        "UPDATE players AS p
+         SET position_x = u.x, position_y = u.y, destination_x = u.dest_x, destination_y = u.dest_y
+         FROM UNNEST($1::uuid[], $2::float8[], $3::float8[], $4::float8[], $5::float8[]) AS u(id, x, y, dest_x, dest_y)
+         WHERE p.id = u.id",
+    )
+    .bind(ids)
+    .bind(xs)
+    .bind(ys)
+    .bind(dest_xs)
+    .bind(dest_ys)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 /// Write one finished gather, then tell the gatherer: `extraction_completed` with
@@ -1852,6 +1923,65 @@ mod tests {
         assert!(matches!(heard.try_recv().unwrap(), GameEvent::ExtractionCompleted { tool: Some(ref t), .. } if t.durability == 0));
         assert!(matches!(heard.try_recv().unwrap(), GameEvent::InventoryUpdated { .. }));
         assert!(matches!(heard.try_recv().unwrap(), GameEvent::ToolBroke { item_id, .. } if item_id == sickle.item_id));
+    }
+
+    /// The writer saves the tick's gathers in order, off the tick, and tells the
+    /// gatherer only once each is written (#304)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_writer_saves_gathers_in_order_then_tells(db: sqlx::PgPool) {
+        let (ada, inventory, sickle) = gatherer(&db, 2).await;
+        let (events, mut heard) = broadcast::channel(16);
+        let (to_writer, from_tick) = mpsc::unbounded_channel();
+        let writer = tokio::spawn(run_writer(db.clone(), events, from_tick));
+
+        let both = vec![sickle_gather(ada, &sickle), sickle_gather(ada, &sickle)];
+        to_writer.send(Finished { gathers: both, crafts: Vec::new() }).unwrap();
+        drop(to_writer);
+        writer.await.unwrap();
+
+        assert_eq!(fiber(&db, inventory).await.map(|f| f.0), Some(10), "both written");
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::ExtractionCompleted { tool: Some(ref t), .. } if t.durability == 1));
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::InventoryUpdated { .. }));
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::ExtractionCompleted { tool: Some(ref t), .. } if t.durability == 0));
+    }
+
+    /// Every player's position in one statement, a destination or none (#304)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn positions_are_saved_in_one_statement(db: sqlx::PgPool) {
+        let (ada, _, _) = gatherer(&db, 2).await;
+        let account = Uuid::new_v4();
+        sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, 'bo@test', 'x')")
+            .bind(account)
+            .execute(&db)
+            .await
+            .unwrap();
+        let bo = Uuid::new_v4();
+        sqlx::query("INSERT INTO players (id, account_id, name, destination_x, destination_y) VALUES ($1, $2, 'bo', 1.0, 2.0)")
+            .bind(bo)
+            .bind(account)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let saved = [
+            SavedPosition { id: ada, x: 6810.5, y: 6790.25, dest_x: Some(6900.0), dest_y: Some(6700.0) },
+            SavedPosition { id: bo, x: 7000.0, y: 6000.0, dest_x: None, dest_y: None },
+        ];
+        persist_positions(&db, &saved).await.unwrap();
+        persist_positions(&db, &[]).await.unwrap();
+
+        for want in &saved {
+            let (x, y, dest_x, dest_y): (f64, f64, Option<f64>, Option<f64>) = sqlx::query_as(
+                "SELECT position_x, position_y, destination_x, destination_y FROM players WHERE id = $1",
+            )
+            .bind(want.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            assert_eq!(SavedPosition { id: want.id, x, y, dest_x, dest_y }, *want);
+        }
     }
 
     /// A sickle put down mid-gather: the gather is what hands would have given,
