@@ -15,7 +15,8 @@ use uuid::Uuid;
 pub const IMPOUND: &str = "impound";
 
 /// `player_id`'s impound, made the first time it's needed, and locked for the
-/// caller's transaction.
+/// caller's transaction (`FOR NO KEY UPDATE`, so a foreign-key check on it
+/// doesn't wait: see [`market_box`](super::market::market_box), #333).
 pub async fn impound(conn: &mut PgConnection, player_id: Uuid) -> Result<Uuid, sqlx::Error> {
     if let Some(id) = held(conn, player_id).await? {
         return Ok(id);
@@ -28,7 +29,7 @@ pub async fn impound(conn: &mut PgConnection, player_id: Uuid) -> Result<Uuid, s
     .bind(player_id)
     .execute(&mut *conn)
     .await?;
-    sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'impound' FOR UPDATE")
+    sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'impound' FOR NO KEY UPDATE")
         .bind(player_id)
         .fetch_one(&mut *conn)
         .await
@@ -36,7 +37,7 @@ pub async fn impound(conn: &mut PgConnection, player_id: Uuid) -> Result<Uuid, s
 
 /// `player_id`'s impound, locked, if they have one yet.
 pub async fn held(conn: &mut PgConnection, player_id: Uuid) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'impound' FOR UPDATE")
+    sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'impound' FOR NO KEY UPDATE")
         .bind(player_id)
         .fetch_optional(&mut *conn)
         .await
