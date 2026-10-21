@@ -73,6 +73,8 @@
 // The player's settings (P8.4) scale how fast it turns and zooms
 // (cap_setting("camera_sensitivity")) and can turn the orbit the other way
 // (cap_setting("invert_orbit")). The rates below are the rig as made.
+// Switching back to point and walk (F8, cap_setting("control_mode"), T1.1)
+// drops the pan, so the view comes back onto you.
 //
 // rig_pose and the functions under it are pure, and a Rust test
 // (camera_rig.rs) drives them across every zoom, yaw and position.
@@ -210,6 +212,8 @@ let rig = #{
     at_login: false, waited: 0.0,
     // How far the view is panned from your avatar (m). Unused offline.
     pan_x: 0.0, pan_z: 0.0,
+    // The control mode last frame, "click" or "direct" (T1.1).
+    mode: (),
     // A canal stopped you (P4.3): #{ born, dx, dz }, the way you were
     // going, for a nudge toward the water and back. () when still.
     bump: (),
@@ -236,6 +240,13 @@ fn on_update() {
         rig.started = true;
         rig.start_view(cap_view());
     }
+
+    let mode = cap_setting("control_mode");
+    if rig.mode == "direct" && mode == "click" {
+        rig.pan_x = 0.0;
+        rig.pan_z = 0.0;
+    }
+    rig.mode = mode;
 
     let moved = false;
     let you = cap_follow();

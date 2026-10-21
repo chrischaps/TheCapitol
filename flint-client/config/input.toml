@@ -104,6 +104,12 @@ bindings = [{ type = "key", code = "F10" }]
 kind = "button"
 bindings = [{ type = "key", code = "F7" }]
 
+# The control mode (T1.1): point and walk, or over the shoulder, swapped
+# live for the A/B. Not F9, which is the engine's debug key.
+[actions.control_mode]
+kind = "button"
+bindings = [{ type = "key", code = "F8" }]
+
 # Craft what the crafting panel is set to, while it's open (P5.5), or what
 # the open station's panel is set to (P6.3).
 [actions.craft]

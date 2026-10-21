@@ -271,6 +271,18 @@ impl Motion {
         }
     }
 
+    /// The local player stops where the prediction has them now (T1.1, a
+    /// switch of control mode). Returns where, in server units, for the
+    /// `move` that stops the server there too: it's a step or two behind on
+    /// the same path, so it walks on to the spot and no further. `None`
+    /// before the first snapshot.
+    pub fn stop(&mut self, now: Instant) -> Option<(f64, f64)> {
+        let local = self.local.as_mut().filter(|local| local.synced)?;
+        local.advance(now, &self.config, self.ground.as_deref());
+        local.stop();
+        Some((local.x, local.y))
+    }
+
     /// Where the local player clicked to walk to, for a destination marker.
     /// `None` when standing, or when following a walk the server resumed.
     pub fn destination(&self) -> Option<(f64, f64)> {

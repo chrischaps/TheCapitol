@@ -195,6 +195,7 @@ Both modes have the same speed, ground rules and reach. Bots may steer (`Bot::st
 ### T1: Direct mode on keys and mouse (`ct:T1-direct`)
 
 - **T1.1 Control mode** (#319, M): `[controls]`, F8, `--controls`, captures stay on Click.
+  - *As built:* the mode in play is pinned apart from the file for a run that has `--controls`, or is offline or a capture; F8 and the panel change a pinned mode for that run alone. Every switch stops a click walk where the prediction stands (`Motion::stop`, `Session::stop_walk`), and `camera.rhai` drops its pan on a switch back to Click. The toast is a `controls_note` event. T1.3 turns the Direct-to-Click stop into a steer stop.
 - **T1.2 Flint: capture and focus gates** (#320, M, `engine-upstream`).
 - **T1.3 Direct mode walks** (#321, M): camera-relative WASD, `cap_view_yaw`, `--offline-avatar`.
 - **T1.4 The action camera** (#322, L): capture, mouse-look, the zoom cap, Escape.

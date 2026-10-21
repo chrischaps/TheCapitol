@@ -2,8 +2,8 @@
 //! and how the camera answers. They're kept in `save/settings.toml`
 //! ([`Settings::PATH`]), written a moment after each change, and applied
 //! live: the graphics to Flint's renderer ([`Graphics::apply`]), the
-//! volumes to the soundscape (`sound::Soundscape::set_volumes`) and the
-//! camera to `scripts/camera.rhai` through `cap_setting`.
+//! volumes to the soundscape (`sound::Soundscape::set_volumes`), and the
+//! camera and the controls to `scripts/camera.rhai` through `cap_setting`.
 //!
 //! The server URL isn't here. It belongs with the session, in
 //! `save/session.toml`, because a token is only good on its own server.
@@ -38,6 +38,7 @@ pub struct Settings {
     pub graphics: Graphics,
     pub audio: Volumes,
     pub camera: CameraFeel,
+    pub controls: Controls,
 }
 
 /// How the world is drawn.
@@ -139,6 +140,66 @@ impl Default for CameraFeel {
     }
 }
 
+/// How you walk and look (T1.1, plan D1): point and walk, or over the
+/// shoulder. F8 swaps them live, for the A/B.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Controls {
+    pub mode: ControlMode,
+    /// Mouse-look over the shoulder, as a multiple of the action camera's
+    /// rate (T1.4).
+    pub look_sensitivity: f32,
+    /// Moving the mouse up looks down.
+    pub invert_look_y: bool,
+}
+
+impl Default for Controls {
+    fn default() -> Self {
+        Self {
+            mode: ControlMode::Click,
+            look_sensitivity: 1.0,
+            invert_look_y: false,
+        }
+    }
+}
+
+/// Click the ground to walk there, or walk with WASD over the shoulder.
+/// Click stays the default until the A/B is decided (T3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum ControlMode {
+    #[default]
+    Click,
+    Direct,
+}
+
+impl ControlMode {
+    pub const ALL: [ControlMode; 2] = [ControlMode::Click, ControlMode::Direct];
+
+    /// The other one, for F8.
+    pub fn other(self) -> Self {
+        match self {
+            ControlMode::Click => ControlMode::Direct,
+            ControlMode::Direct => ControlMode::Click,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ControlMode::Click => "Point and walk",
+            ControlMode::Direct => "Over the shoulder",
+        }
+    }
+
+    /// As `cap_setting("control_mode")` gives it, and as the file says it.
+    pub fn name(self) -> &'static str {
+        match self {
+            ControlMode::Click => "click",
+            ControlMode::Direct => "direct",
+        }
+    }
+}
+
 impl Settings {
     pub const PATH: &str = "save/settings.toml";
 
@@ -156,13 +217,15 @@ impl Settings {
         a.ambience = unit(a.ambience);
         a.effects = unit(a.effects);
         a.interface = unit(a.interface);
-        let c = &mut self.camera;
-        c.sensitivity = if c.sensitivity.is_finite() {
-            c.sensitivity
-                .clamp(*SENSITIVITY.start(), *SENSITIVITY.end())
-        } else {
-            1.0
+        let rate = |v: f32| {
+            if v.is_finite() {
+                v.clamp(*SENSITIVITY.start(), *SENSITIVITY.end())
+            } else {
+                1.0
+            }
         };
+        self.camera.sensitivity = rate(self.camera.sensitivity);
+        self.controls.look_sensitivity = rate(self.controls.look_sensitivity);
         self
     }
 
@@ -181,6 +244,7 @@ impl Settings {
             graphics: lenient(section("graphics")),
             audio: lenient(section("audio")),
             camera: lenient(section("camera")),
+            controls: lenient(section("controls")),
         }
         .clamped()
     }
@@ -336,6 +400,11 @@ mod tests {
                 sensitivity: 1.5,
                 invert_orbit: true,
             },
+            controls: Controls {
+                mode: ControlMode::Direct,
+                look_sensitivity: 0.5,
+                invert_look_y: true,
+            },
         };
         assert_eq!(Settings::parse(&s.to_toml()), s);
     }
@@ -344,6 +413,28 @@ mod tests {
     fn a_missing_or_broken_file_is_the_defaults() {
         assert_eq!(Settings::parse(""), Settings::default());
         assert_eq!(Settings::parse("this isn't = = toml"), Settings::default());
+    }
+
+    #[test]
+    fn a_file_from_before_the_controls_is_point_and_walk() {
+        let s = Settings::parse("[graphics]
+ssao = false
+[camera]
+invert_orbit = true
+");
+        assert!(s.camera.invert_orbit);
+        assert_eq!(s.controls, Controls::default());
+        assert_eq!(s.controls.mode, ControlMode::Click);
+        let s = Settings::parse("[controls]
+mode = \"sideways\"
+look_sensitivity = 9.0
+");
+        assert_eq!(s.controls.mode, ControlMode::Click);
+        assert_eq!(s.controls.look_sensitivity, *SENSITIVITY.end());
+        let s = Settings::parse("[controls]
+mode = \"direct\"
+");
+        assert_eq!(s.controls.mode, ControlMode::Direct);
     }
 
     #[test]

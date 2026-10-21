@@ -32,7 +32,7 @@ New-Item -ItemType Directory -Force $out | Out-Null
 $settings = Join-Path $env:TEMP "capitol-showcase-settings.toml"
 Set-Content -Encoding ascii $settings "[graphics]`nshadows = `"high`"`n"
 $common = @("--offline", "fixtures\terrain.json", "--width", $Width, "--height", $Height,
-    "--settings-file", $settings, "--mute", "--clean")
+    "--settings-file", $settings, "--mute", "--clean", "--controls", "click")
 
 # The shots, in the order a page would show them: the tower, then out
 # through the rings, then the whole map.

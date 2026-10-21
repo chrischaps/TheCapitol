@@ -283,6 +283,24 @@ fn the_local_player_walks_at_server_speed_and_snaps_on_arrival() {
 }
 
 #[test]
+fn a_stop_holds_where_it_was_made_while_the_server_catches_up() {
+    let mut rig = Rig::new();
+    rig.snapshot(0, &[(ME, 4000.0, 4000.0)]);
+    rig.move_to(0, 4100.0, 4000.0);
+    let now = rig.at(200);
+    let at = rig.motion.stop(now).expect("placed");
+    assert!(close(at.0, 4010.0, 1e-9) && at.1 == 4000.0, "{at:?}");
+    assert_eq!(rig.motion.destination(), None);
+    // The server, a tick behind, walks on to the spot and stops there.
+    rig.snapshot(200, &[(ME, 4005.0, 4000.0)]);
+    rig.snapshot(300, &[(ME, 4010.0, 4000.0)]);
+    let me = rig.pose(400, ME);
+    assert!(close(me.x, 4010.0, 1e-9), "{}", me.x);
+    assert!(!me.moving);
+    assert_eq!(rig.motion.destination(), None);
+}
+
+#[test]
 fn a_new_click_turns_from_where_the_player_is() {
     let mut rig = Rig::new();
     rig.snapshot(0, &[(ME, 4000.0, 4000.0)]);

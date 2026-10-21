@@ -23,7 +23,7 @@ use crate::script_api::{
     self, PlacementMark, PlotMark, Shared, TradeMark, UiAnchor, ZoneBanner,
 };
 use crate::session::Session;
-use crate::settings::{Graphics, SettingsFile};
+use crate::settings::{ControlMode, Controls, Graphics, SettingsFile};
 use crate::sound::{Ears, Rustling, Soundscape};
 use crate::stations::{GhostView, Stations};
 use crate::terrain::TerrainSource;
@@ -201,6 +201,13 @@ pub struct CapitolExtension {
     /// The graphics last applied to the renderer, or `None` before the
     /// first frame with one.
     graphics: Option<Graphics>,
+    /// The control mode, when this run holds it apart from the settings
+    /// file (T1.1): `--controls`, or Click for captures and offline runs,
+    /// so every capture recipe stays reproducible. F8 and the panel change
+    /// it for the run alone, and the file keeps the player's own.
+    controls_pinned: Option<ControlMode>,
+    /// The mode last applied, to tell a switch. `None` before the first frame.
+    control_mode: Option<ControlMode>,
 }
 
 impl CapitolExtension {
@@ -274,6 +281,8 @@ impl CapitolExtension {
             settings: SettingsFile::load(crate::settings::Settings::PATH),
             settings_panel: ui::settings::SettingsPanel::default(),
             graphics: None,
+            controls_pinned: None,
+            control_mode: None,
         }
     }
 
@@ -284,6 +293,19 @@ impl CapitolExtension {
         self.settings = file;
         self.settings_panel.open = open;
         self
+    }
+
+    /// Hold the control mode at `mode` for this run, apart from the
+    /// settings file (`--controls`, and Click for captures and offline).
+    pub fn with_controls(mut self, mode: Option<ControlMode>) -> Self {
+        self.controls_pinned = mode;
+        self
+    }
+
+    /// The control mode in play: the pinned one, or the settings'.
+    fn control_mode(&self) -> ControlMode {
+        self.controls_pinned
+            .unwrap_or(self.settings.settings.controls.mode)
     }
 
     /// Play no sound (`--mute`, and every capture).
@@ -712,13 +734,24 @@ impl CapitolExtension {
 
 impl CapitolExtension {
     /// Apply the settings live (P8.4): the volumes to the soundscape, the
-    /// camera's feel to `cap_setting`, and the graphics to the renderer
-    /// whenever they change. Then write the file once they settle.
+    /// camera's feel and the controls to `cap_setting`, and the graphics to
+    /// the renderer whenever they change. Then write the file once they
+    /// settle.
     fn apply_settings(&mut self, ctx: &mut ExtensionCtx, now: Instant) {
+        let mode = self.control_mode();
+        if self.control_mode.replace(mode).is_some_and(|was| was != mode) {
+            self.switch_controls(ctx, mode, now);
+        }
         let settings = &self.settings.settings;
         self.sound.set_volumes(settings.audio);
         if let Ok(mut feel) = self.shared.camera_feel.lock() {
             *feel = settings.camera;
+        }
+        if let Ok(mut controls) = self.shared.controls.lock() {
+            *controls = Controls {
+                mode,
+                ..settings.controls
+            };
         }
         if self.graphics != Some(settings.graphics) {
             if let Some(gpu) = ctx.gpu.as_mut() {
@@ -728,6 +761,26 @@ impl CapitolExtension {
             }
         }
         self.settings.update(now);
+    }
+
+    /// The control mode just switched (T1.1, F8 or the panel). Any walk
+    /// stops where you are, so neither mode inherits the other's: a click
+    /// walk's ring goes, and camera.rhai drops its pan when it sees Click
+    /// back. A toast names the new mode. Until #321, Direct walks by click
+    /// as Click does; only the name changes.
+    fn switch_controls(&mut self, ctx: &mut ExtensionCtx, mode: ControlMode, now: Instant) {
+        tracing::info!("controls: {}", mode.name());
+        if let Some(session) = &mut self.session {
+            session.stop_walk(now);
+        }
+        let body = match mode {
+            ControlMode::Click => "Click the ground to walk there. F8 to switch",
+            ControlMode::Direct => "For now it walks by click too. F8 to switch",
+        };
+        let mut data = toml::Table::new();
+        data.insert("title".into(), mode.label().into());
+        data.insert("body".into(), body.into());
+        ctx.fire_event("controls_note", data);
     }
 }
 
@@ -770,6 +823,16 @@ impl PlayerExtension for CapitolExtension {
         }
         if ctx.input.is_action_just_pressed("settings") {
             self.settings_panel.toggle();
+        }
+        // The control mode (T1.1): read here, so input scripts can press it.
+        if !self.at_login() && ctx.input.is_action_just_pressed("control_mode") {
+            match &mut self.controls_pinned {
+                Some(mode) => *mode = mode.other(),
+                None => {
+                    let c = &mut self.settings.settings.controls;
+                    c.mode = c.mode.other();
+                }
+            }
         }
         self.apply_settings(ctx, now);
         // Taken in `ui`, where the panel knows its recipe.
@@ -1673,10 +1736,18 @@ impl PlayerExtension for CapitolExtension {
         let view = ui::settings::View {
             server: self.session.as_ref().map(|s| s.server()),
         };
-        match self
-            .settings_panel
-            .show(ctx, &mut self.settings.settings, &view)
-        {
+        // A pinned mode is what the panel shows and changes, for this run
+        // alone: swapped in for the panel and back out, so the file keeps
+        // the player's own.
+        let settings = &mut self.settings.settings;
+        if let Some(mode) = &mut self.controls_pinned {
+            std::mem::swap(mode, &mut settings.controls.mode);
+        }
+        let asked = self.settings_panel.show(ctx, settings, &view);
+        if let Some(mode) = &mut self.controls_pinned {
+            std::mem::swap(mode, &mut settings.controls.mode);
+        }
+        match asked {
             Some(ui::settings::Action::SetServer(server)) => self.switch_server(&server),
             Some(ui::settings::Action::Close) => self.settings_panel.toggle(),
             None => {}

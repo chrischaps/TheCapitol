@@ -1,5 +1,5 @@
 //! The settings panel (P8.4): the server, how the world is drawn, how loud
-//! it is, and how the camera answers. F10 (the `settings` action) or the
+//! it is, how the camera answers, and how you walk and look (T1.1). F10 (the `settings` action) or the
 //! header's Settings link opens and closes it; offline, where there's no
 //! header, F10 alone does.
 //!
@@ -15,7 +15,7 @@
 
 use super::theme::{self, size, DIM, GOLD};
 use crate::session::{normalize_server, server_label};
-use crate::settings::{Settings, Shadows, SENSITIVITY};
+use crate::settings::{ControlMode, Settings, Shadows, SENSITIVITY};
 use egui::{Align2, Id, RichText};
 
 /// The panel's width inside its frame.
@@ -24,6 +24,13 @@ const WIDTH: f32 = 300.0;
 const FADE: f32 = 0.18;
 /// How far it slides as it opens, in points.
 const RISE: f32 = 12.0;
+/// Under the sections: Restore defaults, its rule and the frame's edge.
+const FOOTER: f32 = 64.0;
+/// The least the sections scroll in, however short the window.
+const LEAST_ROOM: f32 = 160.0;
+/// Kept clear at the sections' right for the scroll bar, which floats
+/// over what's under it.
+const BAR: f32 = 12.0;
 
 /// What the panel asks for this frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,11 +117,39 @@ impl SettingsPanel {
         });
         ui.add_space(2.0);
         theme::gold_rule(ui);
+        // The sections scroll when the window is too short for them all,
+        // under the title and over Restore defaults, which stay put.
+        let room = (ui.ctx().screen_rect().bottom() - ui.cursor().top() - FOOTER).max(LEAST_ROOM);
+        theme::scrolled(ui, "capitol_settings_sections", room, |ui| {
+            let gutter = egui::Margin {
+                right: BAR,
+                ..Default::default()
+            };
+            egui::Frame::none().inner_margin(gutter).show(ui, |ui| {
+                if let Some(a) = self.sections(ui, settings, view) {
+                    action = Some(a);
+                }
+            });
+        });
 
+        ui.add_space(10.0);
+        theme::divider(ui);
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if theme::link(ui, "Restore defaults", size::SMALL).clicked() {
+                *settings = Settings::default();
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(theme::dim("Saved as you change them").size(size::LABEL));
+            });
+        });
+        action
+    }
+
+    /// Every section, from the server down to the controls.
+    fn sections(&mut self, ui: &mut egui::Ui, settings: &mut Settings, view: &View) -> Option<Action> {
         section(ui, "Server");
-        if let Some(a) = self.server(ui, view) {
-            action = Some(a);
-        }
+        let action = self.server(ui, view);
 
         section(ui, "Graphics");
         let g = &mut settings.graphics;
@@ -149,17 +184,24 @@ impl SettingsPanel {
         })
         .on_hover_text("Q/E and a right-drag turn the other way");
 
-        ui.add_space(10.0);
-        theme::divider(ui);
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if theme::link(ui, "Restore defaults", size::SMALL).clicked() {
-                *settings = Settings::default();
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(theme::dim("Saved as you change them").size(size::LABEL));
-            });
-        });
+        section(ui, "Controls");
+        let k = &mut settings.controls;
+        let modes: Vec<(ControlMode, &str)> =
+            ControlMode::ALL.iter().map(|m| (*m, m.label())).collect();
+        // Both names don't fit beside a row's label: the switch has the row.
+        ui.add_space(2.0);
+        ui.horizontal(|ui| theme::segmented(ui, &mut k.mode, &modes)).inner.on_hover_text(
+            "F8 switches live. Over the shoulder is only its name for now: clicks still walk",
+        );
+        ui.add_space(4.0);
+        theme::setting_row(ui, "Mouse-look", |ui| {
+            theme::level(ui, &mut k.look_sensitivity, SENSITIVITY, |v| format!("{v:.2}×"))
+        })
+        .on_hover_text("How fast the mouse turns the view over the shoulder");
+        theme::setting_row(ui, "Invert look", |ui| {
+            theme::switch(ui, &mut k.invert_look_y)
+        })
+        .on_hover_text("Over the shoulder, moving the mouse up looks down");
         action
     }
 
