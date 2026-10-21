@@ -21,7 +21,8 @@ param(
     # ig, yt, tour, or several ("yt,tour": -File passes it as one string)
     [string[]]$Cut = @("ig", "yt", "tour"),
     [string]$Exe,
-    # Render only these shots (and cut nothing)
+    # Render only these shots, in every frame they're for, and cut nothing
+    # (stills from shots no cut uses)
     [string[]]$Only,
     # Render shots even when their clip is already there
     [switch]$Rerender,
@@ -32,6 +33,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot)
 $Cut = $Cut | ForEach-Object { $_ -split "," } | Where-Object { $_ }
+$Only = $Only | ForEach-Object { $_ -split "," } | Where-Object { $_ }
 foreach ($c in $Cut) {
     if (-not (Test-Path "tools\shots\cuts\$c.psd1")) { throw "no cut $c in tools\shots\cuts" }
 }
@@ -160,9 +162,14 @@ function Cut-One([string]$name) {
         [IO.File]::WriteAllLines((Join-Path $out "$name$suffix-chapters.txt"), [string[]]$chapters, (New-Object Text.UTF8Encoding $false))
     }
 
+    # Each clip is opened at its in point and read only as far as its out,
+    # on few threads: a 4K cut holds a decoder per segment open at once
     $inputs = @()
-    foreach ($c in $clips) { $inputs += @("-i", $c) }
     $n = $clips.Count
+    for ($i = 0; $i -lt $n; $i++) {
+        $seg = $cut.Segments[$i]
+        $inputs += @("-threads", "2", "-ss", (Num $seg.In), "-t", (Num ($seg.Out - $seg.In)), "-i", $clips[$i])
+    }
 
     # The shade behind the titles: a gradient made once as a PNG (lavfi's
     # gradients source won't fade its alpha) and looped
@@ -193,7 +200,7 @@ function Cut-One([string]$name) {
     $g = New-Object System.Collections.Generic.List[string]
     for ($i = 0; $i -lt $n; $i++) {
         $seg = $cut.Segments[$i]
-        $g.Add("[$($i):v]trim=$(Num $seg.In):$(Num $seg.Out),setpts=PTS-STARTPTS,fps=$fps,scale=${w}:${h},setsar=1[s$i];")
+        $g.Add("[$($i):v]setpts=PTS-STARTPTS,fps=$fps,scale=${w}:${h},setsar=1[s$i];")
     }
     $prev = "s0"
     for ($i = 1; $i -lt $n; $i++) {
@@ -203,7 +210,8 @@ function Cut-One([string]$name) {
         $prev = "x$i"
     }
     $g.Add("[$prev]format=yuv420p,fade=t=in:st=0:d=0.6,fade=t=out:st=$(Num ($total - 0.8)):d=0.8[plain];")
-    $g.Add("[plain]split[pv][pt];")
+    # The plain version stops there; the titled one goes on from [plain]
+    $plainEnd = $g.Count
 
     # The titled version: the shade, a dimming under the end card, titles
     $titles = @()
@@ -219,7 +227,7 @@ function Cut-One([string]$name) {
         }
     }
     $g.Add("[$($shadeIn):v]format=rgba[shade];")
-    $chain = "[pt][shade]overlay=0:0:shortest=1"
+    $chain = "[plain][shade]overlay=0:0:shortest=1"
     if ($cut.Card) {
         $cardAt = $total + $cut.Card.At
         $g.Add("color=black:s=${w}x${h}:d=$(Num $total):r=$fps,format=rgba,colorchannelmixer=aa=$(Num $cut.Card.Dim)," +
@@ -229,6 +237,8 @@ function Cut-One([string]$name) {
     }
     if ($titles.Count) { $chain += "," + ($titles -join ",") }
     $g.Add("$chain,format=yuv420p[tv];")
+
+    $titledEnd = $g.Count
 
     # The score's mix
     $mix = @()
@@ -259,27 +269,30 @@ function Cut-One([string]$name) {
         $mix += "[a$j]"
     }
     $g.Add("$($mix -join '')amix=inputs=$($layers.Count):normalize=0:duration=longest,atrim=0:$(Num $total)," +
-        "afade=t=out:st=$(Num ($total - 1.5)):d=1.5,alimiter=limit=0.9[score];")
-    $g.Add("[score]asplit[av][at]")
+        "afade=t=out:st=$(Num ($total - 1.5)):d=1.5,alimiter=limit=0.9[score]")
 
-    $script = Join-Path $out "edit-$name$suffix.txt"
-    # UTF-8 with no BOM: the titles may hold a middle dot, and a BOM would
-    # be read as the graph's first character
-    [IO.File]::WriteAllText($script, ($g -join "`n"), (New-Object Text.UTF8Encoding $false))
-
+    # Two runs, one version each, so only one 4K encoder is ever open. The
+    # graphs are UTF-8 with no BOM: the titles may hold a middle dot, and a
+    # BOM would be read as the graph's first character.
+    $audio = $g.GetRange($titledEnd, $g.Count - $titledEnd)
+    $versions = @(
+        @{ Out = Join-Path $out "$name$suffix.mp4"; Graph = $g.GetRange(0, $titledEnd) + $audio; Video = "[tv]"; File = "edit-$name$suffix.txt" }
+        @{ Out = Join-Path $out "$name$suffix-notext.mp4"; Graph = $g.GetRange(0, $plainEnd) + $audio; Video = "[plain]"; File = "edit-$name$suffix-notext.txt" }
+    )
     $crf = if ($shape -eq "landscape") { 16 } else { 18 }
-    $enc = @("-c:v", "libx264", "-crf", $crf, "-preset", "slow", "-r", $fps,
+    $enc = @("-c:v", "libx264", "-crf", $crf, "-preset", "slow", "-x264-params", "rc-lookahead=20", "-r", $fps,
         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart")
-    $titled = Join-Path $out "$name$suffix.mp4"
-    $plain = Join-Path $out "$name$suffix-notext.mp4"
     # drawtext finds the fonts by bare name from the fonts dir
     Push-Location (Join-Path $root "fonts")
     try {
-        ffmpeg -y -loglevel error @inputs -filter_complex_script $script `
-            -map "[tv]" -map "[at]" @enc $titled `
-            -map "[pv]" -map "[av]" @enc $plain
-        if ($LASTEXITCODE -ne 0) { throw "the cut $name failed (graph: $script)" }
+        foreach ($v in $versions) {
+            $script = Join-Path $out $v.File
+            [IO.File]::WriteAllText($script, ($v.Graph -join "`n"), (New-Object Text.UTF8Encoding $false))
+            ffmpeg -y -loglevel error @inputs -filter_complex_script $script -map $v.Video -map "[score]" @enc $v.Out
+            if ($LASTEXITCODE -ne 0) { throw "the cut $name failed (graph: $script)" }
+        }
     } finally { Pop-Location }
+    $titled = $versions[0].Out
 
     $coverAt = if ($cut.Cover) { $cut.Cover } else { $total - 2 }
     ffmpeg -y -loglevel error -ss (Num $coverAt) -i $titled -frames:v 1 -q:v 2 (Join-Path $out "$name$suffix-cover.jpg")
