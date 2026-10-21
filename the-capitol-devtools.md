@@ -233,6 +233,7 @@ The first set:
 ### D5: The client (`dt:D5-client`)
 - **D5.1 `NetStats`** in capitol-core.
   - **Verify:** unit tests over a loopback and a bot run's report.
+  - **As built (#371):** `Net::stats()` returns a `NetStats` from a meter the IO thread keeps (`net/stats.rs`). Each Ping carries its number, and the matching Pong gives the round trip, as the last one and an average. A first Ping now goes as soon as the session is live, so the round trip is known within moments, not after 15 s. Traffic is counted by message type each way: totals since the start, and per type over the last whole second (a malformed text frame counts as `malformed`, control frames as `ping` and `pong`). Reconnects are counted too. The prediction's side is `Motion::stats(now)` → `MotionStats`: corrections, the distance they moved the prediction (in total and the last one), the lag, the interpolation depth in seconds (below zero means extrapolating) and the tracks. The game adds it with `NetStats::with_motion`, since a bot has no `Motion`. `NetStats` prints as one line, and `capitol-bot` prints it after its script: `rtt 2 ms (avg 2 ms), in 12 msg/s 1.5 kB/s, out 0 msg/s 0.0 kB/s, 0 reconnects`.
 - **D5.2 The overlay** on F7.
   - A frame-time graph, net, prediction, entities and interest.
   - **Verify:** a capture `--offline fixtures/terrain.json --screenshot-at 3` with it open.
