@@ -58,6 +58,22 @@ impl PlotGlow {
             radiance: r(self.radiance),
         }
     }
+
+    /// How bright a lamp of fixed colour is at this hour, as the
+    /// `emissive_scale` of a material that gives off its colour at 1: the
+    /// light's share of the glow, of its light and its lit surface both.
+    /// All light at evening and night, none by day. The dawn and dusk
+    /// surface counts as light at 0.4, about what the low sun lights it
+    /// with (matched against captures), and the light at 1.1, the houses'
+    /// windows against the plots' gold before they took the tint (#269).
+    /// The Exchange hall's glass and the bazaar's lanterns scale it.
+    pub fn lamp_light(self) -> f32 {
+        let total = self.surface + self.radiance;
+        if total <= 0.0 {
+            return 0.0;
+        }
+        (self.radiance / total) * (self.radiance * 1.1 + self.surface * 0.4)
+    }
 }
 
 /// A directional light: `direction` points toward the light, as the
@@ -561,6 +577,30 @@ mod tests {
         assert!(night.radiance > PlotGlow::EVENING.radiance);
         assert_eq!(noon.radiance, 0.0);
         assert_eq!(noon.surface, 1.0);
+    }
+
+    #[test]
+    fn a_fixed_lamp_is_dark_by_day_and_brightest_at_night() {
+        let noon = PlotGlow {
+            surface: 1.0,
+            radiance: 0.0,
+        };
+        let night = PlotGlow {
+            surface: 0.0,
+            radiance: 1.6,
+        };
+        let dawn = PlotGlow {
+            surface: 0.6,
+            radiance: 0.25,
+        };
+        assert_eq!(noon.lamp_light(), 0.0);
+        assert_eq!(night.lamp_light(), 1.6 * 1.1);
+        assert!(night.lamp_light() > PlotGlow::EVENING.lamp_light());
+        let d = dawn.lamp_light();
+        assert!(
+            d > 0.0 && d < PlotGlow::EVENING.lamp_light(),
+            "dawn is dimmer: {d}"
+        );
     }
 
     #[test]

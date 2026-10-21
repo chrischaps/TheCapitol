@@ -15,11 +15,12 @@
 //!   house on the same lot.
 //! - **Windows** are meshes of their own, one per quarter of each ring, so
 //!   they cull at street zoom: the dark glass ([`windows_name`]) and the
-//!   windows lit from inside ([`lamps_name`]). A lit window is the same
-//!   glass, and its material gives off the lamp's colour at radiance 1.
-//!   The extension scales that with the hour, as the gold on your plots
-//!   glows ([`lamp_light`]; Flint ADR 0090's `material.emissive_scale`,
-//!   H23, #130), so no window is rebuilt when the light changes.
+//!   windows lit from inside ([`lamps_name`]). A lit window is uploaded
+//!   as white light, and the extension sets its entity's colour, lit
+//!   surface and light with the hour ([`lamp_glow`]: Flint ADRs 0102's
+//!   `vertex_tint_*`, 0096's `glow_surface` and 0090's `emissive_scale`;
+//!   H23, #130, #269): glass by day, lamp-coloured at night. No window is
+//!   rebuilt when the light changes.
 //! - **Growth.** A claim seen as it happens raises its house over
 //!   [`GROW_SECS`]: a timber frame, then the walls, then the roof. While it
 //!   grows it's in [`GROWING_MESH`] and its lit windows in
@@ -73,7 +74,7 @@ pub fn lamps_name((ring, q): (u8, u8)) -> String {
     format!("houses_lamps_r{ring}q{q}")
 }
 
-/// Every mesh of lit windows: their entities take [`lamp_light`].
+/// Every mesh of lit windows: their entities take [`lamp_glow`].
 pub fn lamp_meshes() -> impl Iterator<Item = String> {
     let quarters: BTreeSet<(u8, u8)> = Sector::all().map(quarter).collect();
     quarters
@@ -1061,48 +1062,54 @@ pub fn house(id: &str, lot: &Lot, progress: f32) -> Option<House> {
     Some(house)
 }
 
-/// How bright the lamps in the windows are at `glow`: the
-/// `material.emissive_scale` of every [`lamp_meshes`] entity: the light's
-/// share of the glow, of its light and its lit surface both. All light at
-/// evening and night; none by day, where a lit window is glass like the
-/// rest. Before H23 the pane was part lamp-tinted surface through dawn and
-/// dusk; counting that surface as light at [`SURFACE_AS_LIGHT`] keeps
-/// those hours as bright as they were.
-pub fn lamp_light(glow: PlotGlow) -> f32 {
+/// The material of every [`lamp_meshes`] entity at `glow`, set each frame
+/// on panes uploaded once as white light. The pane's colour is the tint
+/// (`vertex_tint_*`, Flint ADR 0102): glass by day, the lamp's at night,
+/// and between them as the light's share of the glow. `glow_surface` (ADR
+/// 0096) is how much of it the sun lights and `emissive_scale` (ADR 0090)
+/// how much light it gives off, so it draws as the pane rebuilt with the
+/// hour before H23 did: `palette::lit_glow(hue, surface, radiance × 1.1)`.
+/// By day it's plain glass, as the dark windows are.
+pub fn lamp_glow(glow: PlotGlow) -> [(&'static str, f32); 5] {
+    let glass = hex(palette::GLASS);
     let total = glow.surface + glow.radiance;
-    if total <= 0.0 {
-        return 0.0;
-    }
-    (glow.radiance / total) * (glow.radiance * WINDOW_GLOW + glow.surface * SURFACE_AS_LIGHT)
+    let (hue, surface, light) = if glow.radiance <= 0.0 {
+        (glass, 1.0, 0.0)
+    } else {
+        let hue = palette::mix(glass, hex(palette::LAMP), glow.radiance / total);
+        (hue, glow.surface.clamp(0.0, 1.0), glow.radiance * WINDOW_GLOW)
+    };
+    [
+        ("vertex_tint_r", hue[0]),
+        ("vertex_tint_g", hue[1]),
+        ("vertex_tint_b", hue[2]),
+        ("glow_surface", surface),
+        ("emissive_scale", light),
+    ]
 }
-
-/// How much light a lit pane's surface share stands for: about what the
-/// low sun of dawn and dusk lit it with (matched against captures). An
-/// approximation: `glow_surface` (Flint ADR 0096) can move the share now,
-/// but the old pane's colour moved from glass to lamp with the hour too,
-/// which needs a per-entity tint of vertex colour (#269).
-const SURFACE_AS_LIGHT: f32 = 0.4;
 
 /// The windows' light against the plots' gold.
 const WINDOW_GLOW: f32 = 1.1;
 
-/// The panes that are `lit` (or not), as glass. A lit one's light is its
-/// material's ([`lamps_material`]).
+/// The panes that are `lit` (or not). Dark ones are glass; lit ones are
+/// white light, which their entity colours and lights by the hour
+/// ([`lamp_glow`]).
 fn panes(m: &mut MeshBuf, panes: &[Pane], lit: bool) {
-    let glass = hex(palette::GLASS);
+    let colour = if lit {
+        palette::glow([1.0; 4], 1.0)
+    } else {
+        hex(palette::GLASS)
+    };
     for p in panes.iter().filter(|p| p.lit == lit) {
-        m.quad(p.corners, p.normal, glass);
+        m.quad(p.corners, p.normal, colour);
     }
 }
 
-/// Glass that gives off the lamp's colour at radiance 1 over every vertex,
-/// for the entity's `emissive_scale` to set by the hour.
+/// The lit panes' material: glass's, with their light and colour all their
+/// entity's ([`lamp_glow`]).
 fn lamps_material(name: &str) -> ImportedMaterial {
-    let [r, g, b, _] = hex(palette::LAMP);
     ImportedMaterial {
         roughness: 0.25,
-        emissive: [r, g, b],
-        emissive_strength: 1.0,
         ..ImportedMaterial::vertex_colored(name)
     }
 }
@@ -1537,6 +1544,18 @@ mod tests {
         assert!(!h.panes.is_empty());
         let lit = h.panes.iter().filter(|p| p.lit).count();
         assert!(lit > 0 && lit <= h.panes.len());
+        // Dark panes are glass; lit ones are white light, coloured and lit
+        // by their entity, and their material gives off nothing of its own.
+        let (mut dark, mut lamps) = (MeshBuf::default(), MeshBuf::default());
+        panes(&mut dark, &h.panes, false);
+        panes(&mut lamps, &h.panes, true);
+        assert_eq!(lamps.vertices.len(), lit * 4);
+        assert_eq!(dark.vertices.len(), (h.panes.len() - lit) * 4);
+        assert!(!dark.vertices.iter().any(is_light));
+        assert!(lamps.vertices.iter().all(is_light));
+        assert_eq!(lamps_material("x").emissive, [0.0; 3]);
+        // By day a lit window is glass, as a dark one is; at night it's
+        // warm light and no surface.
         let noon = PlotGlow {
             surface: 1.0,
             radiance: 0.0,
@@ -1545,28 +1564,81 @@ mod tests {
             surface: 0.0,
             radiance: 1.6,
         };
-        assert_eq!(lamp_light(noon), 0.0);
-        assert!(lamp_light(night) > lamp_light(PlotGlow::EVENING));
-        assert_eq!(lamp_light(night), 1.6 * WINDOW_GLOW);
-        let dawn = PlotGlow {
-            surface: 0.6,
-            radiance: 0.25,
-        };
-        let d = lamp_light(dawn);
-        assert!(
-            d > 0.0 && d < lamp_light(PlotGlow::EVENING),
-            "dawn is dimmer: {d}"
-        );
-        // Every pane is glass, lit or not: a lamp's light is its mesh's
-        // material, so by day the two look alike.
-        let (mut dark, mut lamps) = (MeshBuf::default(), MeshBuf::default());
-        panes(&mut dark, &h.panes, false);
-        panes(&mut lamps, &h.panes, true);
-        assert_eq!(lamps.vertices.len(), lit * 4);
-        assert_eq!(dark.vertices.len(), (h.panes.len() - lit) * 4);
-        assert!(!dark.vertices.iter().chain(&lamps.vertices).any(is_light));
-        let [r, _, b] = lamps_material("x").emissive;
+        let white = palette::glow([1.0; 4], 1.0);
+        let (paint, light) = drawn(white, lamp_glow(noon));
+        assert_eq!((paint, light), (rgb(hex(palette::GLASS)), [0.0; 3]));
+        let (paint, [r, _, b]) = drawn(white, lamp_glow(night));
+        assert_eq!(paint, [0.0; 3]);
         assert!(r > b, "lamp-light is warm");
+    }
+
+    fn rgb([r, g, b, _]: [f32; 4]) -> [f32; 3] {
+        [r, g, b]
+    }
+
+    /// What the engine draws of a vertex `colour` under an entity's
+    /// `material` fields: the lit surface and the light given off (Flint
+    /// ADRs 0076, 0090, 0096 and 0102). Fields left out are the defaults.
+    fn drawn(colour: [f32; 4], material: [(&str, f32); 5]) -> ([f32; 3], [f32; 3]) {
+        let field = |key: &str, default: f32| {
+            material
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map_or(default, |&(_, v)| v)
+        };
+        let tint = [
+            field("vertex_tint_r", 1.0),
+            field("vertex_tint_g", 1.0),
+            field("vertex_tint_b", 1.0),
+        ];
+        let light = 1.0 - colour[3];
+        let surface = colour[3] + light * field("glow_surface", 0.0);
+        let shine = light * field("emissive_scale", 1.0);
+        let c = |i: usize| colour[i] * tint[i];
+        (
+            [c(0) * surface, c(1) * surface, c(2) * surface],
+            [c(0) * shine, c(1) * shine, c(2) * shine],
+        )
+    }
+
+    /// The lit panes, uploaded once and set by the hour, draw exactly as
+    /// the pane rebuilt each hour before H23 did: a hue from glass to the
+    /// lamp's, lit as `surface` of it and giving off `radiance × 1.1`.
+    #[test]
+    fn lit_windows_follow_the_day_as_a_rebuild_did() {
+        let old_pane = |glow: PlotGlow| {
+            let glass = hex(palette::GLASS);
+            if glow.radiance <= 0.0 {
+                return glass;
+            }
+            let total = glow.surface + glow.radiance;
+            let hue = palette::mix(glass, hex(palette::LAMP), glow.radiance / total);
+            palette::lit_glow(hue, glow.surface, glow.radiance * WINDOW_GLOW)
+        };
+        let unset = [("", 0.0); 5];
+        let white = palette::glow([1.0; 4], 1.0);
+        let close = |a: [f32; 3], b: [f32; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-5);
+        // Night, dawn and dusk, noon, evening, and between them.
+        for (surface, radiance) in [
+            (0.0, 1.6),
+            (0.6, 0.25),
+            (1.0, 0.0),
+            (0.0, 0.5),
+            (0.8, 0.125),
+            (0.3, 0.925),
+        ] {
+            let glow = PlotGlow { surface, radiance };
+            let (paint, light) = drawn(white, lamp_glow(glow));
+            let (want_paint, want_light) = drawn(old_pane(glow), unset);
+            assert!(
+                close(paint, want_paint),
+                "{glow:?}: paint {paint:?} vs {want_paint:?}"
+            );
+            assert!(
+                close(light, want_light),
+                "{glow:?}: light {light:?} vs {want_light:?}"
+            );
+        }
     }
 
     #[test]

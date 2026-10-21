@@ -1011,9 +1011,10 @@ impl PlayerExtension for CapitolExtension {
             self.solids_stale |= !uploaded.is_empty();
             attach_each(ctx, uploaded.iter());
         }
-        // The lamps in the windows glow with the hour, set on their
-        // entities, so no mesh is rebuilt (H23, Flint ADR 0090).
-        let lamps = [("emissive_scale", world::houses::lamp_light(glow))];
+        // The lamps in the windows glow and change colour with the hour,
+        // set on their entities, so no mesh is rebuilt (H23, #269; Flint
+        // ADRs 0090, 0096 and 0102).
+        let lamps = world::houses::lamp_glow(glow);
         for name in world::houses::lamp_meshes() {
             set_material(ctx.world, &name, &lamps);
         }

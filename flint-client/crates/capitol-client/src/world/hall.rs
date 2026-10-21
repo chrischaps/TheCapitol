@@ -836,11 +836,11 @@ fn upload_gold(gpu: &mut ExtensionGpu, mut gold: MeshBuf, light: MeshBuf) {
     );
 }
 
-/// How strongly the glass lights at this hour: the houses' lamps' rule
-/// (`houses::lamp_light`), a little softer, so the blue stays blue under
+/// How strongly the glass lights at this hour: a fixed lamp's rule
+/// (`PlotGlow::lamp_light`), a little softer, so the blue stays blue under
 /// the bloom rather than burning white.
 pub fn glass_light(glow: crate::daylight::PlotGlow) -> f32 {
-    crate::world::houses::lamp_light(glow) * GLASS_GLOW
+    glow.lamp_light() * GLASS_GLOW
 }
 
 const GLASS_GLOW: f32 = 0.8;

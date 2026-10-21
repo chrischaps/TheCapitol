@@ -484,10 +484,10 @@ fn lamps_material() -> ImportedMaterial {
     }
 }
 
-/// How strongly the lanterns light at this hour: the houses' lamps' rule,
-/// as the hall's glass.
+/// How strongly the lanterns light at this hour: a fixed lamp's rule
+/// (`PlotGlow::lamp_light`), as the hall's glass.
 pub fn lantern_light(glow: crate::daylight::PlotGlow) -> f32 {
-    crate::world::houses::lamp_light(glow) * LANTERN_GLOW
+    glow.lamp_light() * LANTERN_GLOW
 }
 
 const LANTERN_GLOW: f32 = 0.9;
