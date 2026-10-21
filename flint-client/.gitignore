@@ -16,6 +16,7 @@
 /town.presence.csv
 /keys/
 /town.decisions/
+/town.corpus/
 # The sounds, written at start by crates/capitol-client/src/sound/library.rs
 /audio/*.wav
 /audio/.synth-version

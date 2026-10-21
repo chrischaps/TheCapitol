@@ -346,6 +346,11 @@ pub fn decisions_path(roster: &Path) -> PathBuf {
     roster.with_extension("decisions")
 }
 
+/// Where `capitol-town corpus` writes its made-up town's log (C3.3).
+pub fn corpus_path(roster: &Path) -> PathBuf {
+    roster.with_extension("corpus")
+}
+
 /// Where and how big the decision logs are (C3.1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Logs {

@@ -29,8 +29,17 @@
 //! - [`rules`]: the rules layer, a utility pick weighted by temperament.
 //! - [`log`]: the decision log, each decision and what came of it (C3.1).
 //! - [`replay`]: any stack of layers run over a log offline (C3.1).
+//! - [`jev`]: Jev, TypeSafe's choice model, as the fast tier (C3.3).
+//! - [`chat`]: a chat model through an OpenAI-compatible API, such as
+//!   OpenRouter's `jev-router` (C3.3).
+//! - [`remote`]: what the layers that ask over the network share.
+//! - [`corpus`]: a town's worth of situations, made up, to replay (C3.3).
 
+pub mod chat;
+pub mod corpus;
+pub mod jev;
 pub mod log;
+pub mod remote;
 pub mod replay;
 pub mod rules;
 
@@ -404,6 +413,12 @@ pub trait Decider: Send {
     fn spent(&self) -> f64 {
         0.0
     }
+
+    /// Whatever it counts of itself, for a replay's report: the models a
+    /// router sent its questions to, say.
+    fn tally(&self) -> BTreeMap<String, usize> {
+        BTreeMap::new()
+    }
 }
 
 /// A [`Decider`] in a cascade, with what it must meet to settle a question.
@@ -427,16 +442,36 @@ impl Layer {
             spend: None,
         }
     }
+
+    /// With a spend budget of `cents`.
+    pub fn spending(mut self, cents: f64) -> Layer {
+        self.spend = Some(cents);
+        self
+    }
 }
 
 /// The rules layer's threshold in a stack: a close call goes up a layer.
 pub const RULES_THRESHOLD: f32 = 0.6;
 /// The rules layer's time budget. It answers in microseconds.
 pub const RULES_TIME: Duration = Duration::from_millis(50);
+/// Jev's threshold in a stack (C3.3): its answers at 0.9 and over agreed
+/// with the rules 94% of the time on the corpus, and those under it about
+/// half (the plan's C3.3 report).
+pub const JEV_THRESHOLD: f32 = 0.9;
+/// Jev's time budget: TypeSafe claims 70 to 500 ms.
+pub const JEV_TIME: Duration = Duration::from_secs(2);
+/// A chat model's threshold in a stack: how sure of its letter it must be.
+pub const CHAT_THRESHOLD: f32 = 0.8;
+/// A chat model's time budget.
+pub const CHAT_TIME: Duration = Duration::from_secs(10);
+/// What a remote layer may spend for one citizen (or one replayed log), in
+/// US cents, before it's no longer asked.
+pub const REMOTE_SPEND: f64 = 100.0;
 /// The layers a town or citizen has unless its roster says otherwise.
 pub const DEFAULT_LAYERS: [&str; 1] = ["rules"];
-/// Every layer a roster may name.
-pub const KNOWN_LAYERS: [&str; 1] = ["rules"];
+/// Every layer a roster may name. A name may carry its own threshold:
+/// `jev@0.8`.
+pub const KNOWN_LAYERS: [&str; 3] = ["rules", "jev", "jev-router"];
 
 // ---------------------------------------------------------------------------
 // The cascade
@@ -554,14 +589,24 @@ impl Cascade {
         Cascade::new(vec![Layer::new(RulesDecider, RULES_THRESHOLD, RULES_TIME)])
     }
 
-    /// The stack a roster names, bottom first: `["rules"]`.
+    /// The stack a roster names, bottom first: `["rules"]`, or
+    /// `["rules", "jev@0.8"]` to set a layer's threshold.
     pub fn from_names(names: &[String]) -> Result<Cascade, String> {
         check_layers(names)?;
         let layers = names
             .iter()
-            .map(|name| match name.as_str() {
-                "rules" => Layer::new(RulesDecider, RULES_THRESHOLD, RULES_TIME),
-                _ => unreachable!("check_layers knows every layer"),
+            .map(|name| {
+                let (name, threshold) = layer_name(name).expect("check_layers read it");
+                let mut layer = match name {
+                    "rules" => Layer::new(RulesDecider, RULES_THRESHOLD, RULES_TIME),
+                    "jev" => Layer::new(jev::JevDecider::from_env(), JEV_THRESHOLD, JEV_TIME).spending(REMOTE_SPEND),
+                    "jev-router" => Layer::new(chat::ChatDecider::jev_router(), CHAT_THRESHOLD, CHAT_TIME).spending(REMOTE_SPEND),
+                    _ => unreachable!("check_layers knows every layer"),
+                };
+                if let Some(threshold) = threshold {
+                    layer.threshold = threshold;
+                }
+                layer
             })
             .collect();
         Ok(Cascade::new(layers))
@@ -658,6 +703,11 @@ impl Cascade {
         self.layers.iter().map(|l| l.decider.name().to_string()).collect()
     }
 
+    /// What each layer has tallied of itself, bottom first.
+    pub fn tallies(&self) -> Vec<BTreeMap<String, usize>> {
+        self.layers.iter().map(|l| l.decider.tally()).collect()
+    }
+
     /// What each layer has cost so far, in US cents, bottom first.
     pub fn spent(&self) -> Vec<(String, f64)> {
         self.layers
@@ -707,10 +757,22 @@ pub fn check_layers(names: &[String]) -> Result<(), String> {
     if names.is_empty() {
         return Err("a citizen needs at least one layer".into());
     }
-    match names.iter().find(|n| !KNOWN_LAYERS.contains(&n.as_str())) {
-        Some(unknown) => Err(format!("{unknown:?} is no layer; a layer is one of {}", KNOWN_LAYERS.join(", "))),
-        None => Ok(()),
+    names.iter().try_for_each(|n| layer_name(n).map(|_| ()))
+}
+
+/// A layer's name, and the threshold it was given, if any: `jev@0.8`.
+fn layer_name(name: &str) -> Result<(&str, Option<f32>), String> {
+    let (layer, threshold) = match name.split_once('@') {
+        None => (name, None),
+        Some((layer, t)) => match t.parse::<f32>() {
+            Ok(t) if (0.0..=1.0).contains(&t) => (layer, Some(t)),
+            _ => return Err(format!("{name:?}: a threshold is a number from 0 to 1")),
+        },
+    };
+    if !KNOWN_LAYERS.contains(&layer) {
+        return Err(format!("{layer:?} is no layer; a layer is one of {}", KNOWN_LAYERS.join(", ")));
     }
+    Ok((layer, threshold))
 }
 
 enum Weighed {
