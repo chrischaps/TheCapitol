@@ -157,9 +157,8 @@ mod tests {
     /// Moves for seeded nodes, in the order the migrations run: the ones a later
     /// street plan ran over (#62), the ones the deeper suburb moved (#117),
     /// then the ones the Neighbourhood suburb's streets ran over (#112). All
-    /// three are on the 8000 world, before W1's shift; a move migration
-    /// written after it (from `print_node_moves`) is on the 12000 world, and
-    /// applies after `shifted`.
+    /// three are on the 8000 world, before W1's shift. A move migration
+    /// written since goes in [`SHIFTED_NODE_MOVES_MIGRATIONS`].
     const NODE_MOVES_MIGRATIONS: [&str; 3] = [
         include_str!("../../migrations/20260215_001_suburban_street_nodes.sql"),
         include_str!("../../migrations/20261018_001_deeper_suburb_nodes.sql"),
@@ -177,6 +176,12 @@ mod tests {
     /// on the 12000 world.
     const RURAL_WIDENS_SHIFT: f64 = 800.0;
     const RURAL_WIDENS_MIGRATION: &str = include_str!("../../migrations/20261122_001_rural_widens.sql");
+
+    /// Moves for seeded nodes written on the 13600 world, after both shifts,
+    /// in the order they run: the farms' lanes ran over two (R7, #290). From
+    /// `print_node_moves`.
+    const SHIFTED_NODE_MOVES_MIGRATIONS: [&str; 1] =
+        [include_str!("../../migrations/20261126_001_rural_farms.sql")];
 
     /// A row from the 8000 world, where both shifts put it.
     fn shifted(x: f64) -> f64 {
@@ -201,19 +206,32 @@ mod tests {
             .collect()
     }
 
+    /// Each move migration's `(x, y, new x, new y)` rows.
+    fn move_rows(migrations: &[&str]) -> Vec<Vec<Vec<f64>>> {
+        migrations.iter().map(|sql| value_rows(sql).into_iter().filter(|row| row.len() == 4).collect()).collect()
+    }
+
+    /// Where `migrations` leave a node at `(x, y)`, each matching on where the
+    /// one before left it.
+    fn moved(migrations: &[Vec<Vec<f64>>], at: (f64, f64)) -> (f64, f64) {
+        migrations.iter().fold(at, |(x, y), moves| {
+            moves.iter().find(|m| m[0] == x && m[1] == y).map_or((x, y), |m| (m[2], m[3]))
+        })
+    }
+
     /// The `(x, y, quality)` rows the world-scale migration seeds, where the
     /// later migrations leave them: moved by the node move migrations, then
-    /// by the world's growth.
+    /// by the world's growth, then by the moves written since.
     fn seeded_nodes() -> Vec<(f64, f64, i32)> {
-        let migrations: Vec<Vec<Vec<f64>>> = NODE_MOVES_MIGRATIONS.iter().map(|sql| value_rows(sql)).collect();
+        let before = move_rows(&NODE_MOVES_MIGRATIONS);
+        let after = move_rows(&SHIFTED_NODE_MOVES_MIGRATIONS);
         value_rows(WORLD_SCALE_MIGRATION)
             .into_iter()
             .filter(|row| row.len() == 3)
             .map(|row| {
-                let (x, y) = migrations.iter().fold((row[0], row[1]), |(x, y), moves| {
-                    moves.iter().find(|m| m[0] == x && m[1] == y).map_or((x, y), |m| (m[2], m[3]))
-                });
-                (shifted(x), shifted(y), row[2] as i32)
+                let (x, y) = moved(&before, (row[0], row[1]));
+                let (x, y) = moved(&after, (shifted(x), shifted(y)));
+                (x, y, row[2] as i32)
             })
             .collect()
     }
@@ -277,7 +295,7 @@ mod tests {
     /// default world's roads run over, from where the migrations leave them
     /// to where `place_nodes` puts them. Run it after a change that moves the
     /// default world (`default_terrain_version_is_pinned`), paste the rows into
-    /// a new migration, and add that to `NODE_MOVES_MIGRATIONS` (#112):
+    /// a new migration, and add that to `SHIFTED_NODE_MOVES_MIGRATIONS` (#290):
     /// `cargo test print_node_moves -- --ignored --nocapture`.
     #[test]
     #[ignore]
@@ -400,8 +418,10 @@ mod tests {
     /// Re-plans of some of the nodes since RW1, in the order they run: each
     /// deletes the planned rows it lists by id (a `'id',` line) and inserts
     /// its own (a `('id', 'type', x, y, quality)` line), from `print_new_nodes`.
-    const REPLAN_MIGRATIONS: [&str; 1] =
-        [include_str!("../../migrations/post-content/20261125_001_rural_iron_veins.sql")];
+    const REPLAN_MIGRATIONS: [&str; 2] = [
+        include_str!("../../migrations/post-content/20261125_001_rural_iron_veins.sql"),
+        include_str!("../../migrations/post-content/20261126_001_rural_farms_nodes.sql"),
+    ];
 
     /// The `('id', 'type', x, y, quality)` rows of the plan's insert: every
     /// planned node, since RW1 re-planned them whole (#308), less what
@@ -563,6 +583,39 @@ mod tests {
         for ((t, z), n) in counts {
             println!("-- {t} in {z}: {n}");
         }
+    }
+
+    /// Prints a re-plan migration's body for the planned nodes the default
+    /// world's plan no longer matches: the ids to delete (a `'id',` line),
+    /// then the rows to insert (`('id', 'type', x, y, quality),`), both by id,
+    /// for [`REPLAN_MIGRATIONS`]. After a change to the default world that
+    /// moves part of the plan, as the flip to the farms did (#290):
+    /// `cargo test print_node_replan -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn print_node_replan() {
+        let migrated: std::collections::HashMap<Uuid, NodeSeed> = migrated_plan().into_iter().map(|s| (s.id, s)).collect();
+        let mut plan = default_plan();
+        plan.sort_by_key(|s| s.id);
+        let wanted: std::collections::HashMap<Uuid, &NodeSeed> = plan.iter().map(|s| (s.id, s)).collect();
+        let mut stale: Vec<&NodeSeed> = migrated.values().filter(|s| wanted.get(&s.id) != Some(s)).collect();
+        stale.sort_by_key(|s| s.id);
+        let fresh: Vec<&NodeSeed> = plan.iter().filter(|s| migrated.get(&s.id) != Some(s)).collect();
+        for s in &stale {
+            println!("    '{}',", s.id);
+        }
+        for s in &fresh {
+            println!("    ('{}', '{}', {:.1}, {:.1}, {}),", s.id, s.resource_type, s.x, s.y, s.base_quality);
+        }
+        let count = |nodes: &[&NodeSeed]| {
+            let mut counts = std::collections::BTreeMap::new();
+            for s in nodes {
+                *counts.entry((s.resource_type.clone(), Zone::from_position(s.x, s.y).as_str())).or_insert(0) += 1;
+            }
+            counts
+        };
+        println!("-- {} deleted: {:?}", stale.len(), count(&stale));
+        println!("-- {} inserted: {:?}", fresh.len(), count(&fresh));
     }
 
     /// W6 (#199): the wilds grow from the land. Each resource at about its

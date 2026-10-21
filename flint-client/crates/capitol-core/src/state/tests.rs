@@ -1517,9 +1517,9 @@ fn plot_released_drops_it_from_my_plots() {
 
     // Someone else's lot: reported, but none of mine changed.
     assert_eq!(
-        state.apply_ws(&released("rural_plot_trail_9")),
+        state.apply_ws(&released("farm_2_a0_L_0")),
         vec![StateEvent::LotReleased {
-            terrain_id: "rural_plot_trail_9".into()
+            terrain_id: "farm_2_a0_L_0".into()
         }]
     );
     assert_eq!(state.plots().len(), 1);

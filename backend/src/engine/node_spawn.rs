@@ -89,6 +89,12 @@ const CLUMP_REACH: f64 = 35.0;
 /// Tries per node before a zone gives up on the rest.
 const TRIES: usize = 80;
 
+/// Tries per tree in the woods, which a uniform draw hits less often: they
+/// cover [`WOODS_COVER`] of the open ground, and since the farms (#290) the
+/// open ground is under two thirds of the rural ring, so about 3% of draws
+/// land and [`TRIES`] left a tenth of D5's trees unplanted.
+const WOODS_TRIES: usize = 4 * TRIES;
+
 /// Points sampled to set the woods' noise threshold.
 const WOODS_SAMPLES: usize = 3000;
 
@@ -389,10 +395,15 @@ impl Placing<'_, '_> {
     }
 
     /// Up to `count` spots, each tried at most [`TRIES`] times.
-    fn each(&mut self, count: usize, mut spot: impl FnMut(&mut Self) -> Option<(f64, f64)>) -> Vec<(f64, f64)> {
+    fn each(&mut self, count: usize, spot: impl FnMut(&mut Self) -> Option<(f64, f64)>) -> Vec<(f64, f64)> {
+        self.each_within(count, TRIES, spot)
+    }
+
+    /// [`each`](Self::each), with `tries` per node.
+    fn each_within(&mut self, count: usize, tries: usize, mut spot: impl FnMut(&mut Self) -> Option<(f64, f64)>) -> Vec<(f64, f64)> {
         let mut out = Vec::with_capacity(count);
         for _ in 0..count {
-            if let Some(p) = (0..TRIES).find_map(|_| spot(self)) {
+            if let Some(p) = (0..tries).find_map(|_| spot(self)) {
                 out.push(p);
             }
         }
@@ -401,7 +412,8 @@ impl Placing<'_, '_> {
 
     fn scatter(&mut self, rng: &mut SplitMix64, count: usize, in_park: bool) -> Vec<(f64, f64)> {
         let zone = self.zone;
-        self.each(count, |p| p.try_take(point_in_ring(rng, zone), in_park, false))
+        let tries = if self.woods.is_some() { WOODS_TRIES } else { TRIES };
+        self.each_within(count, tries, |p| p.try_take(point_in_ring(rng, zone), in_park, false))
     }
 
     fn near(&mut self, rng: &mut SplitMix64, count: usize, anchors: &[(f64, f64)]) -> Vec<(f64, f64)> {

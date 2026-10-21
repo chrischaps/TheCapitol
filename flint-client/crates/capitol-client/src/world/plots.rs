@@ -632,19 +632,6 @@ mod tests {
         sector_bounds_hold(&fixture().1);
     }
 
-    /// On the farms of the default world under Rural v2, from the backend's
-    /// `dump_farms_terrain` (`$FARMS_TERRAIN`, or `renders/farms-terrain.json`),
-    /// until the flip makes them the fixture's (R6).
-    #[test]
-    #[ignore]
-    fn farms_sector_bounds_contain_their_vertices() {
-        let path = std::env::var("FARMS_TERRAIN")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../renders/farms-terrain.json"));
-        let t = capitol_core::terrain::read_terrain_file(&path).expect("the farms dump");
-        sector_bounds_hold(&build(&t.terrain_plots));
-    }
-
     /// A mesh is culled by the box round its vertices, so a sector's lots
     /// must keep to the sector, give or take one lot, or its box spreads
     /// over its neighbours' and stops culling.

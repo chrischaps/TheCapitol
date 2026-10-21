@@ -11,6 +11,9 @@
 //!   happens then is the caller's [`OnOwned`] choice. A plot kept as it was
 //!   holds back the lots that overlap it (#119): they aren't laid until it's
 //!   released, so nobody can claim ground that's still someone's.
+//! - an owned row of a retired layout ([`RETIRED_LOTS`]) whose lot is gone is
+//!   released even by `Keep`, as `Release` would: its layout is never coming
+//!   back, so keeping it would only hold the new lots off its ground.
 //! - a workbench standing off a plot (D10) that a lot now covers is a
 //!   conflict too (#188). It's taken down, as a foreclosure takes a plot's
 //!   stations down, unless the caller refuses. Left standing it would be its
@@ -41,12 +44,25 @@ pub enum OnOwned {
     /// Covered workbenches are conflicts as well as owned plots.
     Refuse,
     /// Leave those plots exactly as they are, and sync everything else (startup).
-    /// Covered workbenches are still taken down.
+    /// Covered workbenches are still taken down, and a gone lot of a retired
+    /// layout ([`RETIRED_LOTS`]) is released.
     Keep,
     /// Release them, refund the deed and remove their stations, their contents
     /// going back as a foreclosure's do, to inventories or impounds (`force`).
     /// Covered workbenches are taken down.
     Release,
+}
+
+/// The id prefixes of lots the world no longer builds. The old rural trails'
+/// lots went at the flip to the farms (R7, #290): startup releases an owned
+/// one, refunding its deed and giving its stations back, as a forced commit
+/// does. Only a lot that's gone is released, so a world whose saved params
+/// still build the trails keeps them until R8 (#291) removes the layout.
+/// Nobody is connected at startup, and no notice tells an owner why (#342).
+pub const RETIRED_LOTS: &[&str] = &["rural_plot_"];
+
+fn retired(terrain_id: &str) -> bool {
+    RETIRED_LOTS.iter().any(|prefix| terrain_id.starts_with(prefix))
 }
 
 /// An owned plot the new terrain would move or remove.
@@ -89,8 +105,9 @@ pub struct SyncReport {
     /// took a kit, tool or box's contents back. The caller sends
     /// `inventory_updated`.
     pub returned_to: Vec<(Uuid, Uuid)>,
-    /// The `terrain_id`s of the plots released (`OnOwned::Release`). The
-    /// caller tells the clients (`plot_released`, B13).
+    /// The `terrain_id`s of the plots released (`OnOwned::Release`, or a
+    /// retired lot under `Keep`). The caller tells the clients
+    /// (`plot_released`, B13).
     pub released: Vec<String>,
     /// The owners whose deeds were refunded. The caller tells them their
     /// balance (`currency_changed`, #148).
@@ -206,12 +223,19 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
         conflicts.push(OwnedConflict { plot_id: row.id, terrain_id: terrain_id.clone(), owner_id, removed });
     }
     conflicts.sort_by(|a, b| a.terrain_id.cmp(&b.terrain_id));
-    // Owned plots kept as they are must not be touched below.
+    // Owned plots kept as they are must not be touched below; the ones to
+    // release are.
+    let releasing = |c: &OwnedConflict| match on_owned {
+        OnOwned::Release => true,
+        OnOwned::Keep => c.removed && retired(&c.terrain_id),
+        OnOwned::Refuse => false,
+    };
     let kept: Vec<&str> = if on_owned == OnOwned::Keep {
-        conflicts.iter().map(|c| c.terrain_id.as_str()).collect()
+        conflicts.iter().filter(|c| !releasing(c)).map(|c| c.terrain_id.as_str()).collect()
     } else {
         Vec::new()
     };
+    let released: Vec<Uuid> = conflicts.iter().filter(|c| releasing(c)).map(|c| c.plot_id).collect();
 
     // A kept plot keeps its old ground, so no lot may be laid over it (#119).
     // The lots it overlaps are held back, an unowned row of one deleted, until
@@ -236,33 +260,31 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
     // Kits back, and what found no room, counted once it commits (C1.7)
     let mut flows = crate::engine::ledger::Flows::new();
 
-    if on_owned == OnOwned::Release {
-        for c in &conflicts {
-            report.released.push(c.terrain_id.clone());
-            let returned = return_plot_stations(&mut tx, c.plot_id).await?;
-            returned.count_into(&mut flows);
-            if !returned.lost.is_empty() {
-                tracing::warn!("Releasing plot {}: no room for {:?}, lost with its stations", c.plot_id, returned.lost);
-            }
-            took(&mut report.returned_to, returned.containers);
-            report.removed_stations.extend(release_plot(&mut tx, c.plot_id).await?);
-            // The refund is in this transaction, so a plot is never released
-            // without its owner getting the deed back.
-            let value = existing[&c.terrain_id].assessed_value;
-            if value > 0 {
-                add_strands_in(
-                    &mut tx,
-                    c.owner_id,
-                    value as i64,
-                    TransactionType::DeedRefund,
-                    Some("Deed refunded: the terrain changed under your plot"),
-                    Some(c.plot_id),
-                )
-                .await
-                .map_err(|e| SyncError::Refund(format!("Couldn't refund {value} strands to {} for plot {}: {e}", c.owner_id, c.plot_id)))?;
-                if !report.refunded.contains(&c.owner_id) {
-                    report.refunded.push(c.owner_id);
-                }
+    for c in conflicts.iter().filter(|c| released.contains(&c.plot_id)) {
+        report.released.push(c.terrain_id.clone());
+        let returned = return_plot_stations(&mut tx, c.plot_id).await?;
+        returned.count_into(&mut flows);
+        if !returned.lost.is_empty() {
+            tracing::warn!("Releasing plot {}: no room for {:?}, lost with its stations", c.plot_id, returned.lost);
+        }
+        took(&mut report.returned_to, returned.containers);
+        report.removed_stations.extend(release_plot(&mut tx, c.plot_id).await?);
+        // The refund is in this transaction, so a plot is never released
+        // without its owner getting the deed back.
+        let value = existing[&c.terrain_id].assessed_value;
+        if value > 0 {
+            add_strands_in(
+                &mut tx,
+                c.owner_id,
+                value as i64,
+                TransactionType::DeedRefund,
+                Some("Deed refunded: the terrain changed under your plot"),
+                Some(c.plot_id),
+            )
+            .await
+            .map_err(|e| SyncError::Refund(format!("Couldn't refund {value} strands to {} for plot {}: {e}", c.owner_id, c.plot_id)))?;
+            if !report.refunded.contains(&c.owner_id) {
+                report.refunded.push(c.owner_id);
             }
         }
     }
@@ -273,7 +295,7 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
         .filter(|(tid, row)| {
             (!wanted.contains_key(tid.as_str()) || held.contains(&tid.as_str()))
                 && !kept.contains(&tid.as_str())
-                && (row.owner_id.is_none() || on_owned == OnOwned::Release)
+                && (row.owner_id.is_none() || released.contains(&row.id))
         })
         .map(|(_, row)| row.id)
         .collect();
@@ -296,9 +318,8 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
         match existing.get(&lot.id) {
             None => report.inserted += 1,
             Some(row) => {
-                let released = on_owned == OnOwned::Release && conflicts.iter().any(|c| c.plot_id == row.id);
                 let unchanged = row.corners.as_ref().is_some_and(|c| same_shape(c, &lot.corners));
-                if (row.owner_id.is_some() && !released) || unchanged {
+                if (row.owner_id.is_some() && !released.contains(&row.id)) || unchanged {
                     continue;
                 }
                 report.updated += 1;
@@ -575,6 +596,31 @@ pub(crate) mod tests {
         assert_eq!(owner(&db, lot).await, None, "the lot is gone, so its row is");
         assert_eq!(balance(&db, ada).await, 1050);
         assert_eq!(ledger(&db, ada).await, vec![(1000, "deed_refund".to_string())]);
+    }
+
+    /// #290: startup keeps an owned plot whose lot is gone, unless the lot is
+    /// one of a retired layout's, which it releases as a forced commit would
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn startup_releases_a_retired_layouts_plot(db: PgPool) {
+        let ada = player(&db, "ada", 50).await;
+        let pack = inventory(&db, ada).await;
+        let trail = plot(&db, Some(ada), 250).await;
+        sqlx::query("UPDATE plots SET terrain_id = 'rural_plot_trail_3_L_1' WHERE id = $1").bind(trail).execute(&db).await.unwrap();
+        let on_it = bench(&db, ada, 8000.0, 6800.0).await;
+        sqlx::query("UPDATE stations SET plot_id = $1 WHERE id = $2").bind(trail).bind(on_it).execute(&db).await.unwrap();
+        let other = plot(&db, Some(ada), 1000).await;
+
+        let report = sync_plots(&db, &[], OnOwned::Keep).await.unwrap();
+
+        assert_eq!(report.released, vec!["rural_plot_trail_3_L_1".to_string()]);
+        assert_eq!(owner(&db, trail).await, None, "released, and its lot is gone, so its row is");
+        assert_eq!(owner(&db, other).await, Some(Some(ada)), "an owned plot of a live layout is kept");
+        assert_eq!(report.removed_stations, vec![on_it]);
+        assert_eq!(held(&db, pack).await, vec![("workbench_kit".to_string(), 1), ("fiber".to_string(), 3)]);
+        assert_eq!(balance(&db, ada).await, 300);
+        assert_eq!(ledger(&db, ada).await, vec![(250, "deed_refund".to_string())]);
+        assert_eq!(report.refunded, vec![ada]);
     }
 
     /// The refund is in the sync's transaction, so a failed one releases nothing

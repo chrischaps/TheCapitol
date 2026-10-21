@@ -97,6 +97,10 @@ const VERTEX_SPACING: f64 = 20.0;
 pub const SHORE_REACH: f64 = 60.0;
 /// A tarn no trail can reach the shore of gets one this near it, if any.
 pub const TARN_REACH: f64 = 800.0;
+/// A spur shorter than this is a step off the trail, which anyone can walk:
+/// it isn't laid. A one-cell stub that the weld then ends on a crossing
+/// turned through 77° (#290, land seed 7 under the farms).
+const SPUR_MIN: f64 = 1.5 * CELL;
 /// A spur that can't be made a trail all the way is cut back this many
 /// cells at a time until it can.
 const TRIM_CELLS: usize = 4;
@@ -325,7 +329,7 @@ fn spurs(grid: &Grid, water: &Hydrology, network: &[RoadSegment], bearings: &[f6
             let mut raw = vec![join];
             raw.extend(cells[1..keep - 1].iter().map(|&c| grid.centre(c)));
             raw.push(stop);
-            if dist(join, stop) < CELL {
+            if dist(join, stop) < SPUR_MIN {
                 break;
             }
             points = grid.shape(&raw);
