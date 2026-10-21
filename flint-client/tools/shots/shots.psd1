@@ -17,11 +17,12 @@
         @{ Name = "wilds-valley"; Path = "wilds-valley.txt"; Time = 0.30; Length = 8; Shapes = "landscape" }
         @{ Name = "wilds-rim";    Path = "wilds-rim.txt";    Time = 0.34; Length = 8; Shapes = "landscape" }
         @{ Name = "wilds-ford";   Path = "wilds-ford.txt";   Time = 0.40; Length = 8; Shapes = "portrait", "landscape" }
-        @{ Name = "wilds-lakes";  Path = "wilds-lakes.txt";  Time = 0.66; Length = 8; Shapes = "landscape" }
+        @{ Name = "wilds-lakes";  Path = "wilds-lakes.txt";  Time = 0.66; Length = 8; Shapes = "portrait", "landscape" }
+        @{ Name = "wilds-ridge-night"; Path = "wilds-ridge-night.txt"; Time = 0.92; Length = 12; Args = "--claim-sample", "0.6"; Shapes = "portrait", "landscape" }
 
         # The farms (#290) and the grass; claimed farms grow a farmhouse and a barn
         @{ Name = "farms-high";   Path = "farms-high.txt";   Time = 0.56; Length = 9; Args = "--claim-sample", "0.6"; Shapes = "portrait", "landscape" }
-        @{ Name = "farms-lane";   Path = "farms-lane.txt";   Time = 0.60; Length = 8; Args = "--claim-sample", "0.6"; Shapes = "landscape" }
+        @{ Name = "farms-lane";   Path = "farms-lane.txt";   Time = 0.60; Length = 8; Args = "--claim-sample", "0.6"; Shapes = "portrait", "landscape" }
         @{ Name = "grass-dawn";   Path = "grass-dawn.txt";   Time = 0.27; Length = 7; Shapes = "portrait", "landscape" }
 
         # The suburbs: building, and the hours over them
