@@ -7,9 +7,11 @@
 //!
 //! `CAPITOL_SERVER` overrides the default `http://localhost:3000`.
 //!
-//! The whole suite signs in more than the server's 10 a minute per IP
-//! (`RATE_LIMIT_AUTH_PER_MIN`), so start the backend with
-//! `RATE_LIMIT_AUTH_PER_MIN=100` for it, or a later test times out (#239).
+//! The whole suite signs in more than the server's 10 a minute per IP. A
+//! debug backend lets loopback sign in far more often (#239), so `cargo run`
+//! is enough. Against a release backend, or from another machine, start it
+//! with `RATE_LIMIT_LOOPBACK_AUTH_PER_MIN=100` (or `RATE_LIMIT_AUTH_PER_MIN`),
+//! or a later test times out.
 
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

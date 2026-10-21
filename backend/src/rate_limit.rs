@@ -17,6 +17,11 @@
 //! the TDD's numbers as defaults. `RATE_LIMITS=off` turns them all off, for a
 //! local `capitol-bot` swarm whose bots all log in from one address.
 //!
+//! A debug build lets loopback sign in [`LOOPBACK_AUTH_PER_MIN_DEBUG`] times a
+//! minute (`RATE_LIMIT_LOOPBACK_AUTH_PER_MIN` sets it), so a local test suite
+//! or a few bots don't trip the 10 a minute meant for strangers (#239). A
+//! release build counts loopback like any other address.
+//!
 //! The buckets live in this process. One backend is all there is; a second
 //! would need them in Redis.
 
@@ -96,6 +101,9 @@ impl Key {
 pub struct RateLimitConfig {
     pub enabled: bool,
     pub auth_per_min: u32,
+    /// `/auth/*` from 127.0.0.1 or ::1. The same as `auth_per_min` unless a
+    /// debug build or `RATE_LIMIT_LOOPBACK_AUTH_PER_MIN` raises it.
+    pub loopback_auth_per_min: u32,
     pub read_per_min: u32,
     pub world_per_min: u32,
     pub inventory_per_min: u32,
@@ -112,6 +120,7 @@ impl Default for RateLimitConfig {
         Self {
             enabled: true,
             auth_per_min: 10,
+            loopback_auth_per_min: 10,
             read_per_min: 120,
             world_per_min: 60,
             inventory_per_min: 120,
@@ -121,15 +130,20 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// Sign-ins a minute from loopback in a debug build, unless
+/// `RATE_LIMIT_LOOPBACK_AUTH_PER_MIN` says otherwise: room for capitol-core's
+/// live suites run whole, and for a small local bot swarm.
+pub const LOOPBACK_AUTH_PER_MIN_DEBUG: u32 = 1000;
+
 impl RateLimitConfig {
     /// `RATE_LIMITS=off` (or `0`, `false`) turns limiting off. Each limit
-    /// can be set on its own: `RATE_LIMIT_AUTH_PER_MIN`, `_READ_`, `_WORLD_`,
-    /// `_INVENTORY_`, `_MARKET_` and `_WS_PER_MIN`.
+    /// can be set on its own: `RATE_LIMIT_AUTH_PER_MIN`, `_LOOPBACK_AUTH_`,
+    /// `_READ_`, `_WORLD_`, `_INVENTORY_`, `_MARKET_` and `_WS_PER_MIN`.
     pub fn from_env() -> Self {
-        Self::from_vars(|name| std::env::var(name).ok())
+        Self::from_vars(|name| std::env::var(name).ok(), cfg!(debug_assertions))
     }
 
-    fn from_vars(var: impl Fn(&str) -> Option<String>) -> Self {
+    fn from_vars(var: impl Fn(&str) -> Option<String>, debug_build: bool) -> Self {
         let d = Self::default();
         let limit = |name: &str, default: u32| {
             var(name)
@@ -143,14 +157,30 @@ impl RateLimitConfig {
                 .as_deref(),
             Some("off" | "0" | "false" | "no")
         );
+        let auth_per_min = limit("RATE_LIMIT_AUTH_PER_MIN", d.auth_per_min);
+        // A release build counts loopback as a stranger unless told otherwise.
+        let loopback_default = if debug_build {
+            auth_per_min.max(LOOPBACK_AUTH_PER_MIN_DEBUG)
+        } else {
+            auth_per_min
+        };
         Self {
             enabled,
-            auth_per_min: limit("RATE_LIMIT_AUTH_PER_MIN", d.auth_per_min),
+            auth_per_min,
+            loopback_auth_per_min: limit("RATE_LIMIT_LOOPBACK_AUTH_PER_MIN", loopback_default),
             read_per_min: limit("RATE_LIMIT_READ_PER_MIN", d.read_per_min),
             world_per_min: limit("RATE_LIMIT_WORLD_PER_MIN", d.world_per_min),
             inventory_per_min: limit("RATE_LIMIT_INVENTORY_PER_MIN", d.inventory_per_min),
             market_per_min: limit("RATE_LIMIT_MARKET_PER_MIN", d.market_per_min),
             ws_per_min: limit("RATE_LIMIT_WS_PER_MIN", d.ws_per_min),
+        }
+    }
+
+    /// The per-minute limit for `key`.
+    fn capacity(&self, key: &Key) -> u32 {
+        match key {
+            Key::Ip(ip) if ip.to_canonical().is_loopback() => self.loopback_auth_per_min,
+            key => self.per_min(key.category()),
         }
     }
 
@@ -209,14 +239,14 @@ impl RateLimiter {
         if !self.config.enabled {
             return Ok(());
         }
-        let capacity = self.config.per_min(key.category()) as f64;
+        let capacity = self.config.capacity(&key) as f64;
         let per_sec = capacity / 60.0;
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         if buckets.len() >= PRUNE_AT {
             // A bucket that has refilled is the same as no bucket.
             let config = &self.config;
             buckets.retain(|k, b| {
-                let cap = config.per_min(k.category()) as f64;
+                let cap = config.capacity(k) as f64;
                 b.tokens + now.saturating_duration_since(b.at).as_secs_f64() * cap / 60.0 < cap
             });
         }
@@ -404,13 +434,46 @@ mod tests {
             ("RATE_LIMIT_READ_PER_MIN", "0"),
         ]
         .into();
-        let c = RateLimitConfig::from_vars(|k| vars.get(k).map(|v| v.to_string()));
+        let c = RateLimitConfig::from_vars(|k| vars.get(k).map(|v| v.to_string()), false);
         assert!(c.enabled);
         assert_eq!(c.auth_per_min, 100);
+        assert_eq!(c.loopback_auth_per_min, 100);
         assert_eq!(c.ws_per_min, 60);
         assert_eq!(c.read_per_min, 120);
-        let off = RateLimitConfig::from_vars(|k| (k == "RATE_LIMITS").then(|| "Off".into()));
+        let off =
+            RateLimitConfig::from_vars(|k| (k == "RATE_LIMITS").then(|| "Off".into()), false);
         assert!(!off.enabled);
+    }
+
+    #[test]
+    fn a_debug_build_lets_loopback_sign_in_freely() {
+        let none = |_: &str| None;
+        let debug = RateLimitConfig::from_vars(none, true);
+        assert_eq!(debug.auth_per_min, 10);
+        assert_eq!(debug.loopback_auth_per_min, LOOPBACK_AUTH_PER_MIN_DEBUG);
+        let release = RateLimitConfig::from_vars(none, false);
+        assert_eq!(release.loopback_auth_per_min, 10, "release counts loopback as anyone");
+        let set = RateLimitConfig::from_vars(
+            |k| (k == "RATE_LIMIT_LOOPBACK_AUTH_PER_MIN").then(|| "50".into()),
+            false,
+        );
+        assert_eq!(set.loopback_auth_per_min, 50);
+
+        let l = limiter(debug);
+        let t = Instant::now();
+        let v4 = Key::Ip(IpAddr::from([127, 0, 0, 1]));
+        let v6 = Key::Ip(IpAddr::from(std::net::Ipv6Addr::LOCALHOST));
+        let mapped = Key::Ip(IpAddr::from(std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped()));
+        for _ in 0..100 {
+            l.check_at(v4, t).unwrap();
+            l.check_at(v6, t).unwrap();
+            l.check_at(mapped, t).unwrap();
+        }
+        // Everyone else still gets ten.
+        for _ in 0..10 {
+            l.check_at(ip(1), t).unwrap();
+        }
+        assert!(l.check_at(ip(1), t).is_err());
     }
 
     #[test]
