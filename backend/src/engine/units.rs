@@ -95,7 +95,6 @@ pub async fn units_of(conn: &mut PgConnection, item_id: Uuid) -> Result<Units, s
 
 /// The units of stack `item_id` with their marks, locked for the caller's
 /// transaction. Empty if it's gone.
-#[cfg(test)]
 pub async fn marked_of(conn: &mut PgConnection, item_id: Uuid) -> Result<Marked, sqlx::Error> {
     let rows: Vec<(i16, Option<Uuid>, i32)> = sqlx::query_as(
         "SELECT quality, maker_id, count FROM item_units WHERE item_id = $1 ORDER BY quality, maker_id FOR UPDATE",

@@ -32,8 +32,8 @@
 //! on them. A burst over what the DB takes makes a cycle run long rather than
 //! lose anything.
 //!
-//! A fill is some ten round trips on its connection (#208): lock the pair
-//! (with the escrow's units), the buyer's box, deliver (three), both orders
+//! A fill is some eleven round trips on its connection (#208): lock the pair,
+//! the escrow's units (#238), the buyer's box, deliver (three), both orders
 //! and the trade in one statement, a statement per balance moved, and the
 //! commit. One after another that's about 230 fills a second on the local
 //! stack, and the commit's flush is nearly half of it; side by side, the
@@ -692,14 +692,15 @@ struct Locked {
 /// Lock both of `fill`'s orders (by id, so two fills never lock in opposite
 /// orders) and check each is open, as the book had it, and can carry it.
 ///
-/// The sell's escrow units (and their marks) come with it, unlocked: nothing writes an escrow
-/// stack without first locking its order (a fill, or `escrow::close`), so the
-/// order's lock holds them too, and that's a round trip saved (#208). They're
-/// read from the statement's snapshot, which after a wait on the lock is older
-/// than the row (#238). That's safe while every writer of an open order's
-/// escrow but the matcher closes the order (cancel, expiry), which the status
-/// check catches, and while no order is in two fills at once: a batch never
-/// holds a player twice (#237). An amend or a partial cancel would break it.
+/// The sell's escrow units (and their marks) are read in a statement of their
+/// own, after the lock (#238). Nothing writes an escrow stack without first
+/// locking its order, so they're as the last holder of the lock left them.
+/// Read in the locking statement they weren't: when `FOR UPDATE` waits,
+/// Postgres re-reads the locked row, but the rest of the statement keeps the
+/// snapshot from before the wait. A fill would then work from units that
+/// were no longer there. That was harmless only while every writer of an
+/// open order's escrow but the matcher closed the order. An amend or a
+/// partial cancel would have let a fill hand the buyer units nobody sold.
 async fn lock_pair(conn: &mut PgConnection, fill: &Fill) -> Result<(Locked, Locked), MarketError> {
     type Row = (
         Uuid,
@@ -713,17 +714,11 @@ async fn lock_pair(conn: &mut PgConnection, fill: &Fill) -> Result<(Locked, Lock
         i32,
         Option<Uuid>,
         i64,
-        Vec<i16>,
-        Vec<Option<Uuid>>,
-        Vec<i32>,
     );
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT o.id, o.player_id, o.side, o.status, o.item_type, o.min_grade, o.grade_rule, o.price,
-                o.quantity_remaining, o.escrow_item_id, o.escrow_strands,
-                ARRAY(SELECT u.quality FROM item_units u WHERE u.item_id = o.escrow_item_id ORDER BY u.quality, u.maker_id),
-                ARRAY(SELECT u.maker_id FROM item_units u WHERE u.item_id = o.escrow_item_id ORDER BY u.quality, u.maker_id),
-                ARRAY(SELECT u.count FROM item_units u WHERE u.item_id = o.escrow_item_id ORDER BY u.quality, u.maker_id)
-         FROM market_orders o WHERE o.id = ANY($1) ORDER BY o.id FOR UPDATE",
+        "SELECT id, player_id, side, status, item_type, min_grade, grade_rule, price,
+                quantity_remaining, escrow_item_id, escrow_strands
+         FROM market_orders WHERE id = ANY($1) ORDER BY id FOR UPDATE",
     )
     .bind(vec![fill.buy, fill.sell])
     .fetch_all(&mut *conn)
@@ -754,14 +749,15 @@ async fn lock_pair(conn: &mut PgConnection, fill: &Fill) -> Result<(Locked, Lock
         return Err(MarketError::Changed);
     }
     let Some(escrow_item) = s.9 else { return Err(MarketError::Changed) };
-    let locked = |r: &Row, escrow_item: Uuid| Locked {
+    let marked = units::marked_of(conn, escrow_item).await?;
+    let locked = |r: &Row, escrow_item: Uuid, marked: Marked| Locked {
         price: r.7,
         remaining: r.8,
         escrow_strands: r.10,
         escrow_item,
-        marked: Marked::from_rows(r.11.iter().zip(&r.12).zip(&r.13).map(|((&q, &m), &c)| (q as i32, m, c))),
+        marked,
     };
-    Ok((locked(b, Uuid::nil()), locked(s, escrow_item)))
+    Ok((locked(b, Uuid::nil(), Marked::default()), locked(s, escrow_item, marked)))
 }
 
 /// Close order `order_id` as expired if it's still open and due at `now`.
@@ -1117,6 +1113,66 @@ mod tests {
             }
         }
         assert_eq!(trades, 3);
+    }
+
+    /// A fill that waits on a sell's lock sees its escrow as the holder left
+    /// it (#238). Here the holder adds two 90s to an open sell, as an amend
+    /// would. Read in the lock's statement, the escrow was the snapshot from
+    /// before the wait, five 60s and nothing left after the fill's five, so
+    /// the whole stack went to the buyer, the 90s with it.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_fill_that_waits_on_the_lock_sees_the_escrow_as_it_was_left(db: PgPool) {
+        use crate::engine::units::Marked;
+        let (events, _heard) = broadcast::channel(64);
+        let market = Arc::new(Market::default());
+        let ada = player(&db, "ada", 100).await;
+        let bea = player(&db, "bea", 1000).await;
+        let stack = stack_of(&db, ada.id, ada.inventory, 0, "rope", &Units::uniform(5, 60)).await;
+        let ask = placed(&db, &market, ada.id, &sell("rope", stack, 10, 5, None)).await;
+        placed(&db, &market, bea.id, &buy("rope", 10, 5, None)).await;
+
+        // Hold the sell's lock and add the 90s, uncommitted
+        let mut holder = db.begin().await.unwrap();
+        let escrow: Uuid = sqlx::query_scalar("SELECT escrow_item_id FROM market_orders WHERE id = $1 FOR UPDATE")
+            .bind(ask.id)
+            .fetch_one(&mut *holder)
+            .await
+            .unwrap();
+        units::add(&mut holder, escrow, &Marked::by(None, &Units::uniform(2, 90))).await.unwrap();
+        sqlx::query("UPDATE market_orders SET quantity_total = quantity_total + 2, quantity_remaining = quantity_remaining + 2 WHERE id = $1")
+            .bind(ask.id)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+
+        // The fill starts, and waits on the lock
+        let cycle = tokio::spawn({
+            let (market, db) = (market.clone(), db.clone());
+            async move { run_cycle(&market, &db, &events, Utc::now()).await }
+        });
+        let waiting = async {
+            loop {
+                let waits: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'",
+                )
+                .fetch_one(&db)
+                .await
+                .unwrap();
+                if waits > 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), waiting).await.expect("the fill never waited");
+        holder.commit().await.unwrap();
+
+        assert_eq!(cycle.await.unwrap().fills, 1);
+        assert_eq!(all_in(&db, box_of(&db, bea.id).await, "rope").await, Units::uniform(5, 60));
+        let ask_now = order(&db, ask.id).await;
+        assert_eq!((ask_now.status, ask_now.quantity_remaining), (OrderStatus::Open, 2));
+        assert_eq!(ask_now.units, Units::uniform(2, 90));
     }
 
     #[sqlx::test(migrations = "./migrations")]
