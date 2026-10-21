@@ -397,12 +397,18 @@ mod tests {
             .collect()
     }
 
+    /// Re-plans of some of the nodes since RW1, in the order they run: each
+    /// deletes the planned rows it lists by id (a `'id',` line) and inserts
+    /// its own (a `('id', 'type', x, y, quality)` line), from `print_new_nodes`.
+    const REPLAN_MIGRATIONS: [&str; 1] =
+        [include_str!("../../migrations/post-content/20261125_001_rural_iron_veins.sql")];
+
     /// The `('id', 'type', x, y, quality)` rows of the plan's insert: every
-    /// planned node, since RW1 re-planned them whole (#308).
+    /// planned node, since RW1 re-planned them whole (#308), less what
+    /// [`REPLAN_MIGRATIONS`] deleted and with what they inserted, by id.
     fn migrated_plan() -> Vec<NodeSeed> {
-        PLAN_MIGRATION
-            .lines()
-            .filter_map(|line| {
+        let inserts = |sql: &'static str| {
+            sql.lines().filter_map(|line| {
                 let row = line.trim().strip_prefix("('")?.trim_end_matches([',', ';']).strip_suffix(')')?;
                 let f: Vec<&str> = row.split(',').map(|f| f.trim().trim_matches('\'')).collect();
                 Some(NodeSeed {
@@ -413,7 +419,18 @@ mod tests {
                     base_quality: f[4].parse().ok()?,
                 })
             })
-            .collect()
+        };
+        let mut rows: Vec<NodeSeed> = inserts(PLAN_MIGRATION).collect();
+        for sql in REPLAN_MIGRATIONS {
+            let deleted: std::collections::HashSet<Uuid> = sql
+                .lines()
+                .filter_map(|line| line.trim().trim_end_matches(',').strip_prefix('\'')?.strip_suffix('\'')?.parse().ok())
+                .collect();
+            rows.retain(|s| !deleted.contains(&s.id));
+            rows.extend(inserts(sql));
+        }
+        rows.sort_by_key(|s| s.id);
+        rows
     }
 
     /// D5: woods, branches, outcrops and veins in the rural ring, clay by the
@@ -489,7 +506,8 @@ mod tests {
     #[test]
     fn the_migration_writes_the_default_plan() {
         let rows = migrated_plan();
-        let plan = default_plan();
+        let mut plan = default_plan();
+        plan.sort_by_key(|s| s.id);
         assert_eq!(rows.len(), plan.len());
         for (row, seed) in rows.iter().zip(&plan) {
             assert_eq!(row, seed);

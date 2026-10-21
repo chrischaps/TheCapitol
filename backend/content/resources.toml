@@ -159,7 +159,7 @@ regeneration_ticks = 6000
 yields = { stone = { min = 1, max = 1 }, iron = { min = 1, max = 2 } }
 cluster = "clumped"
 spawns = [
-    { zone = "rural", density = 0.5 },
+    { zone = "rural", density = 2.0 },
     { zone = "wilderness", density = 8.0, quality_floor = 47 },
 ]
 

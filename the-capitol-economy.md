@@ -208,7 +208,12 @@ The tool types are **sickle, axe, pickaxe and hammer**. D3's `saw` is dropped fr
 | `clay_bank` | Clay Bank → `clay` | Urban 6 (~40), Suburban 2 (~35), along canals and moats (as built, E2.3: the urban bank is lots to the kerb, so urban clay is on the open ground nearest the canal; suburban clay is in the parks) | linear along water | hand | 2 | 1–2 / – / – | 40–80 | 40 | 1200 |
 | `rock_outcrop` | Rock Outcrop → `stone` | Rural 6 (~100), Wilderness 20 (~100) | clumped | hand, pickaxe | 8 | 1 at 80 ticks / 1–2 / 2–3 | 30–75 | 50 | 1800 |
 | `tree` | Tree → `log` | Rural woods 25 (~400); the Wilderness's are `old_growth` since #225 | woods (noise patches) | axe, required | 12 | – / 1–2 / 2–3 | 35–80 | 60 | 3000 |
-| `iron_vein` | Iron Vein → `iron_ore` | Rural 0.5 (~8, rare), Wilderness 8 (~40) | clumped, on rough ground | pickaxe, required | 20 | – / 1 / 1–2 | 25–90 | 80 | 6000 |
+| `iron_vein` | Iron Vein → `iron_ore` | Rural 2 (~76; 0.5 until [#210](https://github.com/chrischaps/TheCapitol/issues/210)), Wilderness 8 (~630 since #308) | clumped, on rough ground | pickaxe, required | 20 | – / 1 / 1–2 | 25–90 | 80 | 6000 |
+
+**Tuning from the soaks ([#210](https://github.com/chrischaps/TheCapitol/issues/210), 2026-10-21).** C1.7b's 24-game-hour soak of 200 citizens (#306) measured the table against the town:
+- **Iron:** a vein gives one pull and grows back in 6000 ticks, so the rural ring's 19 veins capped the whole town at about 115 pulls a game hour, half of them failing with a stone pick. Ore came at 267 s a unit against the table's 90. Rural density went from 0.5 to 2 (76 veins, post-content `20261125_001_rural_iron_veins.sql`). Citizens never search the wilds for it ([#336](https://github.com/chrischaps/TheCapitol/issues/336)), so the rural ring is their only supply. The wilds' veins stay the richer source, higher in quality.
+- **Logs:** with #206's failures a log takes 34 s of labour against the table's 32, so the yields stand. Logs still traded at 1.1 against 8, because the makers who'd buy them are broke after their deeds: that's demand, [#294](https://github.com/chrischaps/TheCapitol/issues/294), not supply.
+- **Property tax** took 1 Strand in 24 game hours. Whether it should bite is Chris's call: [#335](https://github.com/chrischaps/TheCapitol/issues/335).
 
 Regional tendency: Wilderness nodes draw base quality from the top two-thirds of the range (so 50–90 for a vein), and Rural from the whole range. That is the reason to walk out. E2.2 holds it as a per-zone quality floor in the spawn table.
 
