@@ -12,10 +12,13 @@
 //! - [`land`]: the height of the ground, a pure function of `LandParams`
 //! - [`ledger`]: the world's books, `GET /admin/ledger`, and what two of them
 //!   say about conservation and load (C1.7)
+//! - [`annotation`]: what explains a bend in the console's charts (the
+//!   Observatory's D0.4)
 //!
 //! The `backend` feature adds the server-only derives (utoipa schemas, sqlx rows).
 //! Clients leave it off.
 
+pub mod annotation;
 pub mod fmath;
 pub mod land;
 pub mod ledger;

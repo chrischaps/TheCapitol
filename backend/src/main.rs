@@ -28,6 +28,7 @@ mod state;
 mod subscriptions;
 mod ws;
 
+use capitol_protocol::annotation::AnnotationKind;
 use config::Config;
 use models::{ContainerType, ItemType, Recipe, RecipeRow, ResourceNode, ResourceNodeState, ResourceType, Station, StationState, StationType};
 use state::AppState;
@@ -376,6 +377,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         engine::automation_tick::run_automation_loop(automation_game, automation_db, automation_scale).await;
     });
+
+    // D0.4: a marker on the console's charts where the server came up
+    let boot = if config.sim_tick_scale == 1.0 {
+        "The server started".to_string()
+    } else {
+        format!("The server started, at {}× game time", config.sim_tick_scale)
+    };
+    engine::annotations::note(&app_state.db, AnnotationKind::Boot, &boot).await;
 
     // Build router
     let app = Router::new()

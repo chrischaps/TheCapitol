@@ -187,6 +187,7 @@ The first set:
 - **D0.4 Annotations.**
   - The `admin_events` table and enum, written at boot, terrain commit, gazette and town up/down.
   - **Verify:** they appear in the stream and in `/admin/series`.
+  - **As built (#354):** `capitol_protocol::annotation` (`Annotation`, `AnnotationKind` with all six kinds), the `admin_events` table (`kind` checked against the enum's names, so a new kind needs a migration), and `engine::annotations`: `record`, `note` (logs a failure rather than failing what it marks) and `since`. Written at boot, at the terrain commit and by `gazette::publish` for each new edition. Town up/down waits on D4.1's report, tunables on D6.1 and watches on D2.5; each calls `record`. Read by `GET /admin/annotations?since_ms=&limit=` (24 h by default) until D0.3 serves them in `/admin/series` and the stream, where `record` should also send to the stream.
 
 ### D1: The console (`dt:D1-console`)
 - **D1.1 The page.**
