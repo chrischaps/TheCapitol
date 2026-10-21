@@ -55,7 +55,7 @@ pub struct Half {
 /// so far, the lanes in it.
 pub fn spurs(params: &WorldGenParams, center: P, roads: &[RoadSegment], sectors: &[Sector]) -> (Vec<RoadSegment>, Vec<P>) {
     // Only the roads that reach the ring matter to its farms.
-    let reach = params.suburban_outer_radius - farms::DEPTH.1;
+    let reach = params.suburban_outer_radius - params.rural.depth.1;
     let near: Vec<RoadSegment> = roads
         .iter()
         .filter(|r| r.points.iter().any(|p| (p.0 - center.0).stable_hypot(p.1 - center.1) >= reach))

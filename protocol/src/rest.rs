@@ -575,6 +575,22 @@ pub struct SlotItem {
     pub durability: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_durability: Option<i32>,
+    /// Who made it (#242), when every unit carries the same maker's mark and
+    /// their byline is on. Absent for a stack with no mark or mixed marks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker: Option<Maker>,
+}
+
+/// A stack's maker, as its tooltip names them (#242). Set only when every
+/// unit carries this one maker's mark (#231) and their byline is on
+/// (`players.gazette_named`, as in the Gazette).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Maker {
+    pub name: String,
+    /// The maker is a citizen (C0.1)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
 }
 
 impl SlotItem {
@@ -599,6 +615,7 @@ impl SlotItem {
             slot_index,
             durability: None,
             max_durability: None,
+            maker: None,
         }
     }
 
@@ -613,6 +630,12 @@ impl SlotItem {
         self.quality_grade = rules::quality_grade(quality).to_string();
         self.min_quality = min;
         self.units = units;
+        self
+    }
+
+    /// This slot item made by `maker`, if every unit has the one.
+    pub fn with_maker(mut self, maker: Option<Maker>) -> Self {
+        self.maker = maker;
         self
     }
 
@@ -1412,6 +1435,9 @@ pub struct BazaarListing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durability: Option<i32>,
     pub listed_at: DateTime<Utc>,
+    /// Who made it, if every unit has the one maker (#242)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker: Option<Maker>,
 }
 
 /// `GET /bazaar/mine`: your stall, if you rent one, and goods from a lapsed

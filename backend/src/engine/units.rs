@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 
 #[cfg(test)]
 use capitol_protocol::rules::stacking::Pick;
+use capitol_protocol::rest::Maker;
 use capitol_protocol::rules::stacking::Units;
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -103,6 +104,17 @@ pub async fn marked_of(conn: &mut PgConnection, item_id: Uuid) -> Result<Marked,
     .fetch_all(&mut *conn)
     .await?;
     Ok(Marked::from_rows(rows.into_iter().map(|(q, m, c)| (q as i32, m, c))))
+}
+
+/// Who made every unit of stack `item_id`, if one maker did and their byline
+/// is on (#242). `None` for no mark, mixed marks, or a stack that's gone.
+pub async fn stack_maker(conn: &mut PgConnection, item_id: Uuid) -> Result<Option<Maker>, sqlx::Error> {
+    let maker: Option<sqlx::types::Json<Maker>> =
+        sqlx::query_scalar(concat!("SELECT ", crate::models::item::stack_maker_sql!("$1")))
+            .bind(item_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    Ok(maker.map(|m| m.0))
 }
 
 /// [`units_of`] for several stacks in one round trip (#212). A stack that's
@@ -701,6 +713,69 @@ mod tests {
         drop(conn);
         assert_eq!(rest.marked, held);
         assert!(rest.left.is_empty());
+    }
+
+    /// A stack names its maker only when one maker made every unit and their
+    /// byline is on (#242)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_stack_names_its_maker_only_when_one_made_it_all(db: PgPool) {
+        let (ada, inventory) = owner_and_box(&db).await;
+        let (bo, _) = owner_and_box_named(&db, "bo").await;
+        // Cy is a citizen, made one from the start: an account's kind is fixed
+        let account = Uuid::new_v4();
+        sqlx::query("INSERT INTO accounts (id, email, password_hash, kind) VALUES ($1, 'cy@test', 'x', 'citizen')")
+            .bind(account)
+            .execute(&db)
+            .await
+            .unwrap();
+        let cy_citizen = Uuid::new_v4();
+        sqlx::query("INSERT INTO players (id, account_id, name) VALUES ($1, $2, 'cy')")
+            .bind(cy_citizen)
+            .bind(account)
+            .execute(&db)
+            .await
+            .unwrap();
+        let stacks = [
+            Marked::from_rows([(92, Some(ada), 3), (60, Some(ada), 2)]),
+            Marked::from_rows([(92, Some(ada), 3), (92, Some(bo), 1)]),
+            Marked::from_rows([(92, Some(ada), 3), (92, None, 1)]),
+            Marked::from_rows([(50, None, 4)]),
+            Marked::from_rows([(70, Some(bo), 1)]),
+            Marked::from_rows([(80, Some(cy_citizen), 2)]),
+        ];
+        let mut ids = Vec::new();
+        for (slot, held) in stacks.iter().enumerate() {
+            ids.push(marked_stack_of(&db, ada, inventory, slot as i32, "fiber", held).await);
+        }
+        async fn slot_makers(db: &PgPool, ids: &[Uuid]) -> Vec<Option<Maker>> {
+            let mut makers = Vec::new();
+            for id in ids {
+                let item: crate::models::Item =
+                    sqlx::query_as(&format!("SELECT {} FROM items WHERE id = $1", crate::models::ITEM_COLUMNS))
+                        .bind(id)
+                        .fetch_one(db)
+                        .await
+                        .unwrap();
+                makers.push(item.to_slot_item(None).unwrap().maker);
+            }
+            makers
+        }
+        let named = |name: &str, citizen: bool| Some(Maker { name: name.into(), citizen });
+        // One unit is the whole stack; a citizen is marked as one
+        assert_eq!(
+            slot_makers(&db, &ids).await,
+            vec![named("ada", false), None, None, None, named("bo", false), named("cy", true)]
+        );
+
+        // A maker whose byline is off isn't named
+        sqlx::query("UPDATE players SET gazette_named = FALSE WHERE id = $1").bind(ada).execute(&db).await.unwrap();
+        assert_eq!(slot_makers(&db, &ids).await, vec![None, None, None, None, named("bo", false), named("cy", true)]);
+
+        let mut conn = db.acquire().await.unwrap();
+        assert_eq!(stack_maker(&mut conn, ids[5]).await.unwrap(), named("cy", true));
+        assert_eq!(stack_maker(&mut conn, ids[1]).await.unwrap(), None);
+        assert_eq!(stack_maker(&mut conn, Uuid::new_v4()).await.unwrap(), None, "a stack that's gone");
     }
 
     #[test]

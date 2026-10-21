@@ -134,5 +134,8 @@ fn a_shop_round_trips_with_each_listings_units() {
     assert_eq!(shop.listings[0].units.count(), 10);
     assert!(shop.listings[0].units.spans_grades());
     assert_eq!((shop.listings[0].durability, shop.listings[1].durability), (None, Some(31)));
+    // The mixed ropes name no maker; the axe is one unit, so its maker shows (#242)
+    assert_eq!(shop.listings[0].maker, None);
+    assert_eq!(shop.listings[1].maker.as_ref().map(|m| m.name.as_str()), Some("ada"));
     assert_eq!(serde_json::to_string(&shop).unwrap(), json);
 }

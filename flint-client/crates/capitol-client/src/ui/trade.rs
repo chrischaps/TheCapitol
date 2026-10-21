@@ -383,6 +383,7 @@ fn my_line(
             .on_hover_ui(|ui| {
                 ui.label(theme::dim(format!("Quality {}", item.quality)));
                 slots::makeup_lines(ui, &item.units, size::SMALL);
+                slots::maker_line(ui, item.maker.as_ref(), size::SMALL);
             });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let remove = ui.add(egui::Button::new(RichText::new("×").color(DIM)).frame(false));
@@ -525,11 +526,15 @@ fn their_row(ui: &mut egui::Ui, icons: &mut ItemIcons, item: &TradeItemInfo) {
             theme::quality_badge(ui, item.quality);
         });
     });
-    // The badge is the mean; a line of several qualities says which
-    if item.units.pairs().nth(1).is_some() {
+    // The badge is the mean; a line of several qualities says which, and
+    // a stack one maker made all of says whose work it is (#242)
+    if item.units.pairs().nth(1).is_some() || item.maker.is_some() {
         ui.horizontal(|ui| {
             ui.add_space(ROW_ICON + 6.0);
-            ui.vertical(|ui| slots::makeup_lines(ui, &item.units, size::SMALL));
+            ui.vertical(|ui| {
+                slots::makeup_lines(ui, &item.units, size::SMALL);
+                slots::maker_line(ui, item.maker.as_ref(), size::SMALL);
+            });
         });
     }
 }
@@ -798,6 +803,7 @@ mod tests {
                 quantity: 3,
                 quality: 72,
                 units: capitol_protocol::rules::stacking::Units::uniform(3, 72),
+                maker: None,
             }],
             strands: 0,
         };

@@ -1,5 +1,5 @@
 # The showcase clip (tools/showcase.ps1, issue #92): the tower on the
-# horizon from the wilderness, then round the city to the south as the
+# horizon from the farms, then round the city to the south as the
 # camera comes in over the rings and cranes up to the map, north up.
 # One key a line: game time, where the camera stands, what it looks at
 # (world metres; see crates/capitol-client/src/camera_path.rs).
@@ -8,4 +8,4 @@
   1.0  -347.7    26.0  -126.5    0.0  30.0   0.0
   4.5  -208.0    40.0    29.2    0.0  28.0   0.0
   7.5   -63.6   110.0    70.6    0.0  12.0   0.0
- 10.5     0.0   640.0     1.1    0.0   0.6   0.0
+ 10.5     0.0  1000.0     1.1    0.0   0.6   0.0

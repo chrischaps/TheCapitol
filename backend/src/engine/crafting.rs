@@ -307,6 +307,7 @@ mod tests {
             durability: None,
             min_quality: units.min().unwrap(),
             units,
+            maker: None,
         }
     }
 
@@ -497,6 +498,7 @@ mod tests {
                 durability: self.kinds[kind].durability_at(quality),
                 min_quality: quality,
                 units,
+                maker: None,
             }
         }
 

@@ -390,6 +390,11 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     engine.register_fn("cap_view", move || -> String {
         view.lock().map(|s| s.clone()).unwrap_or_default()
     });
+    // `cap_world_radius() -> f64`: the world disc's radius in metres
+    // (`rules::WILDERNESS_OUTER_RADIUS`), where the free point stops.
+    engine.register_fn("cap_world_radius", || -> f64 {
+        capitol_protocol::rules::WILDERNESS_OUTER_RADIUS * f64::from(crate::coords::S)
+    });
     // `cap_camera_path(t) -> #{ pos, at, done }`: the camera move from
     // --camera-path at game time t, `done` once it has reached its last key.
     // () with no path.

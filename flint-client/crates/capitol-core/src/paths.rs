@@ -35,7 +35,7 @@
 //! # let terrain = capitol_core::terrain::read_terrain_file("fixtures/terrain.json".as_ref()).unwrap();
 //! let walks = WalkGraph::new(&terrain);
 //! // From the spawn on the south arterial to inside the outer canal, by its bridge.
-//! if let Some(waypoints) = walks.route((6000.0, 9350.0), (6700.0, 6100.0)) {
+//! if let Some(waypoints) = walks.route((6800.0, 10150.0), (7500.0, 6900.0)) {
 //!     for (x, y) in waypoints {
 //!         // send `move` to (x, y) and wait to arrive
 //!     }

@@ -1055,6 +1055,7 @@ mod tests {
                         durability: None,
                         min_quality: s.units.min().unwrap(),
                         units: s.units.clone(),
+                        maker: None,
                     })
                     .collect();
                 let (events, _rx) = broadcast::channel(64);

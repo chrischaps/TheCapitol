@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn free_time_offers_what_is_near() {
-        let (_, graph) = world();
+        let (terrain, graph) = world();
         let places = graph.places();
         let steps = places.hall_steps.as_ref().unwrap().at;
         let kinds = |menu: Vec<Choice>| menu.into_iter().map(|c| format!("{c:?}")).collect::<Vec<_>>().join(" ");
@@ -451,7 +451,8 @@ mod tests {
         let out = kinds(menu(places, park.at, Some(0.5), Some("stall_3")));
         assert!(out.contains("Park") && !out.contains("Lane") && !out.contains("Stall"), "{out}");
         // Far out in the wilds, only resting or the walk to the hall
-        assert_eq!(menu(places, (6000.0, 10500.0), Some(0.75), None), vec![Choice::Rest, Choice::Hall]);
+        let wilds = (terrain.center_x, terrain.center_y + 5700.0);
+        assert_eq!(menu(places, wilds, Some(0.75), None), vec![Choice::Rest, Choice::Hall]);
     }
 
     #[test]

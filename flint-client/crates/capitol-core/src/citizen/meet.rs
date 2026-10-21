@@ -466,6 +466,7 @@ mod tests {
             quantity,
             quality: 50,
             units: Units::uniform(quantity, 50),
+            maker: None,
         }
     }
 

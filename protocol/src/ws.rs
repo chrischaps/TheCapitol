@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::rest::{
-    AutomationMode, DepthLevel, MarketOrder, MarketTrade, PauseReason, Produced, StationAutomation, StationTool,
+    AutomationMode, DepthLevel, Maker, MarketOrder, MarketTrade, PauseReason, Produced, StationAutomation, StationTool,
     Subscription,
 };
 use crate::rules::stacking::Units;
@@ -688,4 +688,7 @@ pub struct TradeItemInfo {
     /// Exactly the units offered (E1.8), which the trade hands over
     #[serde(default)]
     pub units: Units,
+    /// Who made the stack, if every unit of it has the one maker (#242)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker: Option<Maker>,
 }

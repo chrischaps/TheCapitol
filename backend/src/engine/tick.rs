@@ -1535,6 +1535,7 @@ mod tests {
             quantity: 2,
             quality: 77,
             units: Units::uniform(2, 77),
+            maker: None,
         };
         game.queue_command(Command::UpdateTradeOffer { player_id: a, items: vec![rope.clone()], strands: 5 });
         game.process_commands();
@@ -1904,6 +1905,7 @@ mod tests {
             durability: None,
             min_quality: quality,
             units: Units::uniform(n, quality),
+            maker: None,
         }
     }
 

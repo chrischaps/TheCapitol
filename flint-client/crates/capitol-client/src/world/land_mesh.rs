@@ -20,6 +20,11 @@
 //!   on the tops, all mottled as the disc is. By the water (W10) the banks
 //!   are dark with moss, the beds silt, and the fords pale gravel
 //!   ([`Shore`]).
+//! - **Shadows.** A chunk whose land never stands over the plain (the
+//!   rural ring's, flat but for the water's beds) casts none
+//!   (`material.cast_shadows`, Flint ADR 0100): nothing on it is tall
+//!   enough to throw one, and since the ring grew to r4600 (#308) a hundred
+//!   of them in the low sun's cascades cost the spawn about 0.7 ms (#309).
 //! - **The air** isn't baked in: the far land's slate blue is the fog's
 //!   aerial tint (`atmosphere`, Flint ADR 0101, #233), so it reaches the
 //!   trees, the water and the city on it alike, and a chunk is built
@@ -31,6 +36,8 @@ use crate::world::land::{sample_at, CHUNK, CHUNKS, FROM, OUTER, SAMPLES};
 use crate::world::mesh::{facing, MeshBuf};
 use crate::world::palette::{self, hex, mix};
 use capitol_protocol::rules::{CENTER_X, CENTER_Y};
+#[cfg(test)]
+use capitol_protocol::rules::{RURAL_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS};
 use flint_player::{ExtensionGpu, GroundField};
 use std::sync::Arc;
 
@@ -49,6 +56,9 @@ pub const BUDGET: usize = 10;
 const DIP: f32 = 0.03;
 /// A skirt's depth in metres at stride 1; it doubles with the stride.
 const SKIRT: f32 = 0.6;
+/// How far over the plain (m) a chunk's land must stand somewhere for the
+/// chunk to cast a shadow.
+const CASTS_FROM: f32 = 0.05;
 /// How strongly each wild colour shows, like `ground`'s zones.
 const ROCK_STRENGTH: f32 = 0.2;
 const SCREE_STRENGTH: f32 = 0.2;
@@ -162,6 +172,13 @@ impl Chunk {
     pub fn has_land(self) -> bool {
         let (lo, hi) = self.radii();
         hi >= FROM && lo <= OUTER
+    }
+
+    /// Whether any of its land stands over the plain, so it can throw a
+    /// shadow. The water's beds only fall from it.
+    pub fn rises(self, field: &GroundField) -> bool {
+        let (i0, j0) = (self.col * CHUNK, self.row * CHUNK);
+        (j0..=j0 + CHUNK).any(|j| (i0..=i0 + CHUNK).any(|i| y_at(field, i, j) > layer::GROUND + CASTS_FROM))
     }
 
     /// Every chunk with land on it.
@@ -307,11 +324,13 @@ pub fn lod_for(distance: f32, had: Option<usize>) -> usize {
     }
 }
 
-/// A chunk as drawn: the stride (`None` before it's first built).
+/// A chunk as drawn: the stride (`None` before it's first built), and
+/// whether it casts a shadow ([`Chunk::rises`]).
 #[derive(Debug, Clone, Copy)]
 struct Drawn {
     chunk: Chunk,
     lod: Option<usize>,
+    casts: bool,
 }
 
 /// The land's meshes as drawn: the field they're cut from, and each
@@ -326,18 +345,22 @@ pub struct LandMeshes {
 impl LandMeshes {
     /// A new field, and the water's mark on it: every chunk is built again.
     pub fn set_field(&mut self, field: Arc<GroundField>, shore: Arc<Shore>) {
+        self.chunks = Chunk::all()
+            .map(|chunk| Drawn {
+                chunk,
+                lod: None,
+                casts: chunk.rises(&field),
+            })
+            .collect();
         self.field = Some(field);
         self.shore = shore;
-        self.chunks = Chunk::all()
-            .map(|chunk| Drawn { chunk, lod: None })
-            .collect();
     }
 
     /// Builds the chunks whose stride a camera at `eye` (world metres)
     /// changes, nearest first: all of them the first time, then at most
     /// [`BUDGET`] a frame. Returns the mesh names first built, which need
-    /// an entity.
-    pub fn update(&mut self, gpu: &mut ExtensionGpu, eye: [f32; 3]) -> Vec<String> {
+    /// an entity, each with whether it casts a shadow.
+    pub fn update(&mut self, gpu: &mut ExtensionGpu, eye: [f32; 3]) -> Vec<(String, bool)> {
         let Some(field) = self.field.clone() else {
             return Vec::new();
         };
@@ -362,7 +385,7 @@ impl LandMeshes {
             let name = drawn.chunk.mesh_name();
             build(&field, &self.shore, drawn.chunk, lod).upload(gpu, &name, ground::ROUGHNESS);
             if drawn.lod.is_none() {
-                new.push(name);
+                new.push((name, drawn.casts));
             }
             drawn.lod = Some(lod);
         }
@@ -393,6 +416,33 @@ mod tests {
         crate::coords::polar_to_world(r, deg)
     }
 
+    /// The chunk holding server point (x, y).
+    fn chunk_at([x, y]: [f64; 2]) -> Chunk {
+        let col = ((x - sample_at(0, 0)[0]) / (CHUNK as f64 * TEXEL)) as usize;
+        let row = ((y - sample_at(0, 0)[1]) / (CHUNK as f64 * TEXEL)) as usize;
+        Chunk { row, col }
+    }
+
+    #[test]
+    fn only_the_land_over_the_plain_casts_a_shadow() {
+        // #309: the rural ring's chunks are flat but for the water's beds,
+        // and cast none; the ranges' do.
+        let field = fixture_field();
+        let (inner, outer) = (FROM + CHUNK as f64 * TEXEL * 1.5, RURAL_OUTER_RADIUS - CHUNK as f64 * TEXEL * 1.5);
+        let mut flat = 0;
+        for deg in (0..360).step_by(10) {
+            let a = (deg as f64).to_radians();
+            let at = |r: f64| [CENTER_X + r * a.cos(), CENTER_Y + r * a.sin()];
+            for r in [inner, 0.5 * (inner + outer), outer] {
+                assert!(!chunk_at(at(r)).rises(field), "r {r} at {deg}");
+                flat += 1;
+            }
+            // Where the ranges stand full height.
+            assert!(chunk_at(at(6400.0)).rises(field), "the ranges at {deg}");
+        }
+        assert!(flat > 0);
+    }
+
     #[test]
     fn the_chunks_cover_the_wilds_and_leave_the_city_to_the_disc() {
         let all: Vec<_> = Chunk::all().collect();
@@ -401,7 +451,7 @@ mod tests {
         assert!(!centre.has_land());
         // Every point of the wilds is in a chunk with land.
         for deg in (0..360).step_by(5) {
-            for r in [FROM + 1.0, 5000.0, 6000.0, OUTER - 1.0] {
+            for r in [FROM + 1.0, RURAL_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS - 1.0, OUTER - 1.0] {
                 let [x, z] = polar(r, deg as f64);
                 let [sx, sy] = crate::coords::to_server(x, z);
                 let col = ((sx - sample_at(0, 0)[0]) / (CHUNK as f64 * TEXEL)) as usize;

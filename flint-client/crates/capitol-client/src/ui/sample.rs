@@ -20,7 +20,7 @@ use super::icons::ItemIcons;
 use super::slots::{Move, SlotGrid};
 use super::theme::{self, size, CRAFT, DIM, ENOUGH, SHORT, SLOT_GAP, TEXT};
 use capitol_core::craft;
-use capitol_core::protocol::rest::{RecipeInfo, RecipeInputInfo, RecipeOutputInfo, SlotItem};
+use capitol_core::protocol::rest::{Maker, RecipeInfo, RecipeInputInfo, RecipeOutputInfo, SlotItem};
 use capitol_core::protocol::rules::quality;
 use capitol_core::protocol::rules::stacking::{Pick, Units};
 use capitol_core::state::Container;
@@ -98,7 +98,8 @@ impl Default for Sample {
                         // tooltip lists its units (E1.8)
                         item(2, 1, "fiber", "Plant Fiber", 77, 9)
                             .with_units(Units::from_pairs([(44, 2), (81, 3), (92, 4)])),
-                        item(3, 2, "rope", "Rope", 64, 3),
+                        // Made by Ada, all of it: its tooltip names her (#242)
+                        item(3, 2, "rope", "Rope", 64, 3).with_maker(Some(Maker { name: "Ada".into(), citizen: false })),
                         // Sickles at three wear levels (E1.7): sound, the
                         // ember below 20%, and the cliff below 5%
                         item(10, 14, "stone_sickle", "Stone Sickle", 72, 1).with_durability(70, 73),
@@ -107,7 +108,8 @@ impl Default for Sample {
                         item(4, 6, "fiber", "Plant Fiber", 41, 4),
                         item(5, 7, "workbench_kit", "Workbench Kit", 70, 1),
                         item(6, 8, "chest_kit", "Storage Chest Kit", 22, 1),
-                        item(7, 13, "forge_kit", "Forge Kit", 88, 1),
+                        // A citizen's work, marked as theirs
+                        item(7, 13, "forge_kit", "Forge Kit", 88, 1).with_maker(Some(Maker { name: "Wren".into(), citizen: true })),
                         // Six qualities: its tooltip draws a bar
                         item(9, 9, "fiber", "Plant Fiber", 70, 20).with_units(Units::from_pairs([
                             (38, 2),

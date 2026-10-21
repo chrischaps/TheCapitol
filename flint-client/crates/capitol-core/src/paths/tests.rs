@@ -203,9 +203,9 @@ fn nowhere_in_a_lake() {
 /// bridge at 90° and a road over it.
 pub(super) fn one_canal() -> TerrainResponse {
     TerrainResponse {
-        world_size: 12000.0,
-        center_x: 6000.0,
-        center_y: 6000.0,
+        world_size: 13600.0,
+        center_x: 6800.0,
+        center_y: 6800.0,
         water_rings: vec![WaterRing {
             id: "canal_outer".into(),
             radius: 1000.0,
@@ -215,7 +215,7 @@ pub(super) fn one_canal() -> TerrainResponse {
         roads: vec![RoadSegment {
             id: "arterial_2".into(),
             road_type: RoadType::Arterial,
-            points: vec![(6000.0, 6800.0), (6000.0, 7200.0)],
+            points: vec![(6800.0, 7600.0), (6800.0, 8000.0)],
             width: 20.0,
         }],
         terrain_plots: vec![],
@@ -236,14 +236,14 @@ fn one_bridge_and_its_road() {
     let graph = WalkGraph::new(&terrain);
     // 400 of road in pieces of SPAN: 11 nodes, joined in a line
     assert_eq!(graph.len(), 11);
-    let (from, to) = ((6100.0, 7100.0), (6100.0, 6900.0));
+    let (from, to) = ((6900.0, 7900.0), (6900.0, 7700.0));
     assert!(!graph.walkable(from, to));
     let legs = walk(&graph, from, to);
     // Over to the road, along it and over the bridge, and off it
     assert!(legs.len() >= 2 && legs.len() <= 3, "{legs:?}");
-    assert!(legs.iter().any(|p| (p.0 - 6000.0).abs() < DEVIATION));
+    assert!(legs.iter().any(|p| (p.0 - 6800.0).abs() < DEVIATION));
     // Too far from the road to see it: still no way round
-    assert_eq!(graph.route((7500.0, 7500.0), (6000.0, 6100.0)), None);
+    assert_eq!(graph.route((8300.0, 8300.0), (6800.0, 6900.0)), None);
 }
 
 #[test]

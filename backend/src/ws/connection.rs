@@ -14,6 +14,7 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use capitol_protocol::rules::stacking::{Pick, Units};
+use capitol_protocol::rest::Maker;
 use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo, TradeOfferItem};
 
 use crate::engine::container_access::{
@@ -1405,8 +1406,8 @@ async fn validate_trade_offer(
             })?
     };
     let owned: HashMap<Uuid, OwnedItem> =
-        owned.into_iter().map(|item| (item.id, (item.item_type, item.units))).collect();
-    let held: HashMap<Uuid, Units> = owned.iter().map(|(id, (_, units))| (*id, units.clone())).collect();
+        owned.into_iter().map(|item| (item.id, (item.item_type, item.units, item.maker.map(|m| m.0)))).collect();
+    let held: HashMap<Uuid, Units> = owned.iter().map(|(id, (_, units, _))| (*id, units.clone())).collect();
 
     let balance: Option<(i64,)> = if strands > 0 {
         sqlx::query_as("SELECT strand_balance FROM players WHERE id = $1")
@@ -1426,8 +1427,8 @@ async fn validate_trade_offer(
     Ok(trade_offer_lines(&settled, &owned, &game.item_types))
 }
 
-/// An item a trade offer names, as the player holds it: `(item_type, units)`
-type OwnedItem = (String, Units);
+/// An item a trade offer names, as the player holds it: `(item_type, units, maker)`
+type OwnedItem = (String, Units, Option<Maker>);
 
 /// One line of an offer as parsed: the item, how many, and which units if named
 type OfferLine = (Uuid, i32, Option<Units>);
@@ -1443,7 +1444,7 @@ fn trade_offer_lines(
     offer
         .iter()
         .filter_map(|(id, units)| {
-            let (item_type, _) = owned.get(id)?;
+            let (item_type, _, maker) = owned.get(id)?;
             Some(TradeItemInfo {
                 item_id: *id,
                 item_type: item_type.clone(),
@@ -1451,6 +1452,7 @@ fn trade_offer_lines(
                 quantity: units.count() as i32,
                 quality: units.mean()?,
                 units: units.clone(),
+                maker: maker.clone(),
             })
         })
         .collect()
@@ -2071,8 +2073,8 @@ mod tests {
     fn trading_offer_lines_carry_type_name_and_units() {
         let (rope, mystery) = (Uuid::new_v4(), Uuid::new_v4());
         let owned = HashMap::from([
-            (rope, ("rope".to_string(), Units::from_pairs([(80, 4), (86, 3)]))),
-            (mystery, ("relic".to_string(), Units::uniform(1, 40))),
+            (rope, ("rope".to_string(), Units::from_pairs([(80, 4), (86, 3)]), Some(ada()))),
+            (mystery, ("relic".to_string(), Units::uniform(1, 40), None)),
         ]);
         let item_types = HashMap::from([(
             "rope".to_string(),
@@ -2082,10 +2084,14 @@ mod tests {
 
         let lines = trade_offer_lines(&[(rope, offered.clone()), (mystery, Units::uniform(1, 40))], &owned, &item_types);
         assert_eq!(lines, vec![
-            TradeItemInfo { item_id: rope, item_type: "rope".into(), item_name: "Rope".into(), quantity: 3, quality: 84, units: offered },
+            TradeItemInfo { item_id: rope, item_type: "rope".into(), item_name: "Rope".into(), quantity: 3, quality: 84, units: offered, maker: Some(ada()) },
             // An unknown type keeps its id as its name
-            TradeItemInfo { item_id: mystery, item_type: "relic".into(), item_name: "relic".into(), quantity: 1, quality: 40, units: Units::uniform(1, 40) },
+            TradeItemInfo { item_id: mystery, item_type: "relic".into(), item_name: "relic".into(), quantity: 1, quality: 40, units: Units::uniform(1, 40), maker: None },
         ]);
+    }
+
+    fn ada() -> Maker {
+        Maker { name: "Ada".into(), citizen: false }
     }
 
     /// A socket flooded past the event channel's capacity hears that it lagged,

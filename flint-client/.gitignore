@@ -17,6 +17,8 @@
 /keys/
 /town.decisions/
 /town.corpus/
+# A soak's roster, keys and reports (C1.7b, #306)
+/soak/
 # The sounds, written at start by crates/capitol-client/src/sound/library.rs
 /audio/*.wav
 /audio/.synth-version

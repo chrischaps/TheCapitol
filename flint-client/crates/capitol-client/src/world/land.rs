@@ -13,7 +13,7 @@
 //!   ring (#222), as far in as r3150, so the field starts at [`FROM`], just
 //!   inside that, and the carve fades in over [`SEAM`] from there (W10). On
 //!   the plain the field is flat but for the beds.
-//! - **Past the world's edge** (r6000) the ranges run on and settle to flat
+//! - **Past the world's edge** (r6800 since #308) the ranges run on and settle to flat
 //!   by [`OUTER`], where the flat disc takes over again, so the horizon is
 //!   hills, not a wall. The rivers and streams that run off the edge run on
 //!   down them to ponds (`edge_water`, #229), and are carved like the rest.

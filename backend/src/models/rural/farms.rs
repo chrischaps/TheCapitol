@@ -2,18 +2,19 @@
 //!
 //! - **The walk.** Every lane, side road and spur has farms on both sides,
 //!   and each sector has the side of each arterial that faces it. A side is
-//!   walked from one end with alternating draws: a farm's frontage
-//!   U[300, 420], then a field gap U[120, 260] before the next. Each farm's
-//!   depth is drawn U[280, 380], then clipped by the region and the other
-//!   roads. Where no farm fits (at a junction, or by the region's edge) the
+//!   walked from one end with alternating draws (`RuralParams`, tuned in R5,
+//!   #288): a farm's frontage U[380, 500], then a field gap U[240, 440]
+//!   before the next. Each farm's depth is drawn U[280, 380], then clipped by
+//!   the region and the other roads. Where no farm fits (at a junction, or by the region's edge) the
 //!   frontage is cut down to 240, and then the walk slides on.
 //! - **A farm** is a trapezoid on its road's chord: its front edge runs
 //!   between the two points the frontage spans, a verge off the road, and its
-//!   sides run square to that edge. On a bend's outside the front is pushed
-//!   out until the road clears it. Lots back to back meet half way, short of
+//!   sides run square to that edge. Where the road bows toward it the front
+//!   is pushed out until the road is a verge off all along it. Lots back to back meet half way, short of
 //!   it by half the gap between farms.
-//! - **The verge.** A farm stands back 30 from an arterial's edge and 10
-//!   from a lane's. The region is cut along each arterial at its verge, so
+//! - **The verge.** A farm stands back 30 from an arterial's edge and 17
+//!   from a lane's, so farms facing each other across a lane are 42 apart,
+//!   past the overlap pass's 40. The region is cut along each arterial at its verge, so
 //!   a lane's farms stand clear of where it meets one.
 //! - **The overlap pass** is `lot_geometry::place`, with the farms 40 apart.
 //!   The arterials' farms go first, so the spawn road has farms along it,
@@ -29,6 +30,7 @@ use capitol_protocol::fmath::StableMath;
 use capitol_protocol::terrain::{Lake, RoadSegment, RoadType, TerrainPlot, WaterCourse};
 
 use super::sectors::{Sector, RURAL};
+use super::RuralParams;
 use crate::models::geom::{Polyline, SplitMix64};
 use crate::models::lot_geometry::{
     at, bounds, dist, place, point, seg_seg_dist, shrink_to_fit, tangent, Candidate, LotParams, Region, World,
@@ -37,18 +39,13 @@ use crate::models::terrain::WorldGenParams;
 
 type P = (f64, f64);
 
-/// A farm's frontage along its road...
-pub const FRONTAGE: (f64, f64) = (300.0, 420.0);
-/// ...the field before the next one...
-pub const FIELD_GAP: (f64, f64) = (120.0, 260.0);
-/// ...and its depth, before the region and the other roads clip it.
-pub const DEPTH: (f64, f64) = (280.0, 380.0);
 /// Farms keep this far apart (RD6).
 pub const LOT_GAP: f64 = 40.0;
 /// A farm stands this far back from an arterial's edge...
 pub const ARTERIAL_VERGE: f64 = 30.0;
-/// ...and this far from a lane's.
-pub const LANE_VERGE: f64 = 10.0;
+/// ...and this far from a lane's: two verges and a lane are over
+/// [`LOT_GAP`], so the overlap pass keeps the farms on both sides of it (R5).
+pub const LANE_VERGE: f64 = 17.0;
 /// The farms' ground stops this far inside the ring's edges.
 pub const EDGE_INSET: f64 = 20.0;
 /// Farms keep this far from a river's, a stream's or a lake's edge.
@@ -70,17 +67,20 @@ const FARMS: u64 = 0x46_4152_4d53;
 
 /// The overlap pass's params: `place` takes `min_area` as a share of
 /// `frontage × depth`, so those are the draws' middles.
-pub(crate) const PARAMS: LotParams = LotParams {
-    frontage: 360.0,
-    depth: 330.0,
-    depth_max: 380.0,
-    front_gap: LANE_VERGE,
-    edge_gap: LOT_GAP / 2.0,
-    rear_gap: LOT_GAP / 2.0,
-    lot_gap: LOT_GAP,
-    min_shrink: 0.6,
-    min_area: 0.4,
-};
+pub(crate) fn lot_params(rural: &RuralParams) -> LotParams {
+    let mid = |(lo, hi): (f64, f64)| (lo + hi) / 2.0;
+    LotParams {
+        frontage: mid(rural.frontage),
+        depth: mid(rural.depth),
+        depth_max: rural.depth.1,
+        front_gap: LANE_VERGE,
+        edge_gap: LOT_GAP / 2.0,
+        rear_gap: LOT_GAP / 2.0,
+        lot_gap: LOT_GAP,
+        min_shrink: 0.6,
+        min_area: 0.4,
+    }
+}
 
 /// The water farms keep clear of: rivers, streams and lakes.
 #[derive(Clone, Copy)]
@@ -114,7 +114,7 @@ pub(crate) fn region(params: &WorldGenParams, center: P, sector: &Sector) -> Reg
 /// both sides, and the water if there's some.
 pub(crate) fn world<'a>(params: &WorldGenParams, center: P, roads: &'a [RoadSegment], water: Option<Water<'a>>) -> World<'a> {
     let sides = roads.iter().map(|r| if fronts_farms(r) { (true, true) } else { (false, false) }).collect();
-    let world = World::new(roads, sides, center, params.rural_outer_radius + 2.0 * DEPTH.1);
+    let world = World::new(roads, sides, center, params.rural_outer_radius + 2.0 * params.rural.depth.1);
     match water {
         Some(w) => world.with_water(w.rivers.iter().chain(w.streams), w.lakes, BANK),
         None => world,
@@ -127,7 +127,7 @@ pub fn lay(params: &WorldGenParams, center: P, roads: &[RoadSegment], sectors: &
     let mut candidates: Vec<(u8, Candidate)> = sectors.iter().flat_map(|s| candidates(params, center, &world, s)).collect();
     // Stable, so each class keeps sector and road order.
     candidates.sort_by_key(|&(class, _)| class);
-    place(candidates.into_iter().map(|(_, c)| c), &world, &PARAMS, "rural")
+    place(candidates.into_iter().map(|(_, c)| c), &world, &lot_params(&params.rural), "rural")
 }
 
 /// One sector's farms, after the overlap pass. No farm of one sector comes
@@ -135,7 +135,7 @@ pub fn lay(params: &WorldGenParams, center: P, roads: &[RoadSegment], sectors: &
 pub(crate) fn lay_sector(params: &WorldGenParams, center: P, world: &World, sector: &Sector) -> Vec<TerrainPlot> {
     let mut candidates = candidates(params, center, world, sector);
     candidates.sort_by_key(|&(class, _)| class);
-    place(candidates.into_iter().map(|(_, c)| c), world, &PARAMS, "rural")
+    place(candidates.into_iter().map(|(_, c)| c), world, &lot_params(&params.rural), "rural")
 }
 
 /// A sector's farms before the overlap pass, each with its class: 0 on an
@@ -155,7 +155,7 @@ fn candidates(params: &WorldGenParams, center: P, world: &World, sector: &Sector
         };
         let line = Polyline::new(world.roads[road].points.clone());
         let mid = super::sectors::polar(center, (params.suburban_outer_radius + params.rural_outer_radius) / 2.0, edge);
-        let walk = Walk { world, region: &region, road, verge: ARTERIAL_VERGE };
+        let walk = Walk { world, region: &region, road, verge: ARTERIAL_VERGE, draws: &params.rural };
         for (side, letter) in [(1.0, "L"), (-1.0, "R")] {
             // The side whose verge is in this sector's region.
             let toward = walk.normal(&line, side, line.length() / 2.0);
@@ -173,7 +173,7 @@ fn candidates(params: &WorldGenParams, center: P, world: &World, sector: &Sector
     for (road, r) in world.roads.iter().enumerate() {
         let Some(k) = r.id.strip_prefix(&prefix).and_then(|k| k.parse::<u64>().ok()) else { continue };
         let line = Polyline::new(r.points.clone());
-        let walk = Walk { world, region: &region, road, verge: LANE_VERGE };
+        let walk = Walk { world, region: &region, road, verge: LANE_VERGE, draws: &params.rural };
         let class = if k < 2 { 1 } else { 2 };
         for (side, letter) in [(1.0, "L"), (-1.0, "R")] {
             let mut rng = SplitMix64::stream(params.seed, &[RURAL, s as u64, FARMS, k, side_key(side)]);
@@ -198,6 +198,8 @@ struct Walk<'a> {
     region: &'a Region,
     road: usize,
     verge: f64,
+    /// The frontage, field gap and depth draws.
+    draws: &'a RuralParams,
 }
 
 impl Walk<'_> {
@@ -221,7 +223,7 @@ impl Walk<'_> {
                 s += SLIDE;
                 continue;
             }
-            let (frontage, depth) = (rng.range(FRONTAGE.0, FRONTAGE.1), rng.range(DEPTH.0, DEPTH.1));
+            let (frontage, depth) = (rng.range(self.draws.frontage.0, self.draws.frontage.1), rng.range(self.draws.depth.0, self.draws.depth.1));
             let mut w = frontage.min(length - s);
             let mut laid = None;
             while w >= MIN_FRONTAGE {
@@ -234,7 +236,7 @@ impl Walk<'_> {
             match laid {
                 Some(corners) => {
                     out.push(Candidate { id: id(out.len()), road: self.road, corners });
-                    s += w + rng.range(FIELD_GAP.0, FIELD_GAP.1);
+                    s += w + rng.range(self.draws.field_gap.0, self.draws.field_gap.1);
                 }
                 None => s += SLIDE,
             }
@@ -260,11 +262,12 @@ impl Walk<'_> {
         let e = ((p1.0 - p0.0) / chord, (p1.1 - p0.1) / chord);
         let n = (-e.1 * side, e.0 * side);
         let half = self.half();
-        // Off the bend: the front a verge off its own road, at least half of it
-        // where the road bows out between the two ends.
+        // Off the bend: the front a verge off its own road all along, even
+        // where the road bows toward it between the two ends. Half a verge
+        // there let the farms across a lane come within the gap (R5).
         let own_clear = |a: P, b: P| {
             let (lo, hi) = bounds(&[a, b]);
-            self.world.near(lo, hi).filter(|g| g.road == self.road).all(|g| seg_seg_dist(a, b, g.a, g.b) >= g.half + self.verge / 2.0)
+            self.world.near(lo, hi).filter(|g| g.road == self.road).all(|g| seg_seg_dist(a, b, g.a, g.b) >= g.half + self.verge - 1e-6)
         };
         let mut f = half + self.verge;
         while !own_clear(at(p0, n, f), at(p1, n, f)) {
@@ -279,7 +282,7 @@ impl Walk<'_> {
         }
         // As deep as the draw, or half way to the farms behind, or short of a
         // road without farms, the water, or the region's edge.
-        let p = LotParams { depth, depth_max: depth, ..PARAMS };
+        let p = LotParams { depth, depth_max: depth, ..lot_params(self.draws) };
         let backs = [p0, p1].map(|o| self.world.back_from(self.region, o, n, f, half, depth, &p).min(f + depth));
         let shallow = backs[0].min(backs[1]) - f;
         if shallow < MIN_DEPTH {
@@ -349,7 +352,7 @@ mod tests {
             };
             for q in [farm.corners[0], farm.corners[1]] {
                 // finish_lots may trim a hair off.
-                assert!(off(q) >= road.width / 2.0 + verge / 2.0 - 0.5, "{}'s front is {:.1} off {}", farm.id, off(q), road.id);
+                assert!(off(q) >= road.width / 2.0 + verge - 0.5, "{}'s front is {:.1} off {}", farm.id, off(q), road.id);
             }
         }
         let on_arterials = farms.iter().filter(|f| f.id.split('_').nth(2).is_some_and(|r| r.starts_with('a'))).count();
