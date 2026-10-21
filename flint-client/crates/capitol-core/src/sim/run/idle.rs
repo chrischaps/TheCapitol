@@ -129,6 +129,9 @@ impl SimBot {
         let Some(place) = place else {
             return self.stay(end, town, None);
         };
+        if let (Some(town), Some(_)) = (town, self.spot) {
+            town.health(|h| h.doing(Standing::Resting, place.activity()));
+        }
         let here = self.bot.position();
         match self.spot {
             Some((spot, look)) if (spot.0 - here.0).hypot(spot.1 - here.1) > 3.0 => {
