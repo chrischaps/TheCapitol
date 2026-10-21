@@ -171,7 +171,7 @@ Both modes have the same speed, ground rules and reach. Bots may steer (`Bot::st
 - The reticle, the prompts and the per-mode shortcut tables (T1.6, T2.2).
 - `controls_stats` (T3.1).
 
-**Flint (upstream, T1.2, ADR 0102 or the next free number):**
+**Flint (upstream, T1.2, ADR 0110, [Flint PR #84](https://github.com/chrischaps/Flint/pull/84)):**
 - While the cursor is captured, pointer events don't reach egui and the cursor reads as the window centre.
 - `is_cursor_captured()`.
 - Pads and raw mouse motion obey the text-focus gate. Pads are ignored while the window is unfocused.
@@ -189,7 +189,7 @@ Both modes have the same speed, ground rules and reach. Bots may steer (`Bot::st
 ### T1: Direct mode on keys and mouse (`ct:T1-direct`)
 
 - **T1.1 Control mode** (#319, M): `[controls]`, F8, `--controls`, captures stay on Click.
-- **T1.2 Flint: capture and focus gates** (#320, M, `engine-upstream`).
+- **T1.2 Flint: capture and focus gates** (#320, M, `engine-upstream`). *As built (ADR 0110, Flint PR #84):* while captured, the cursor reads as the window centre, its moves reach no one, and its clicks and wheel skip egui but reach the game. `is_cursor_captured()` (scripts) and `ExtensionCtx::is_cursor_captured()` report it from the frame after a request. `InputState::hold_gamepads` holds the pads while a field has focus. A button held through the hold reads up until it's released, so it never fires a press nobody made. Raw motion is dropped then too. Real pads are released on losing focus, and their sticks are read again on regaining it. The input script's pad plays unfocused. `look dx dy [secs]` feeds raw motion only while captured, so T1.4's captures call `set_cursor_captured(true)` before they `look`.
 - **T1.3 Direct mode walks** (#321, M): camera-relative WASD, `cap_view_yaw`, `--offline-avatar`.
 - **T1.4 The action camera** (#322, L): capture, mouse-look, the zoom cap, Escape.
 - **T1.5 Focus and interact** (#323, M).
