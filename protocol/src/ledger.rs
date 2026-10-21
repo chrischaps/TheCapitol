@@ -95,6 +95,33 @@ pub struct Load {
     /// (`pg_stat_database`), every client's. Each statement outside a
     /// transaction is one, so it's about the statements a second.
     pub db_transactions: i64,
+    /// The tick's work by phase (D0.1): `lock`, `commands`, `movement`,
+    /// `extraction`, `crafting`, `regeneration`, `trades`, `broadcast`,
+    /// `gathers`, `crafts`, `positions`, `tax`, `subscriptions`. Every part of
+    /// a tick is in one of them, so their times add up to
+    /// [`tick_secs`](Self::tick_secs). Empty from a server before D0.1.
+    #[serde(default)]
+    pub phases: BTreeMap<String, PhaseLoad>,
+    /// The loops that run beside the tick, each a cycle at a time:
+    /// `automation`, `market`, `bazaar`. Not in the tick's time.
+    #[serde(default)]
+    pub loops: BTreeMap<String, PhaseLoad>,
+}
+
+/// One phase of the tick, or one loop beside it, as running totals.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct PhaseLoad {
+    /// Times it ran. A phase that runs only some ticks (positions, tax)
+    /// counts only those.
+    pub runs: u64,
+    /// Seconds it took, all told
+    pub secs: f64,
+    /// Its slowest run yet, in ms
+    pub max_ms: f64,
+    /// Runs by how long they took, under [`TICK_BUCKETS_MS`], and one more
+    /// for those slower than all of them
+    pub buckets: Vec<u64>,
 }
 
 /// How a unit came into the world or left it, as [`Ledger::unit_flows`]
@@ -389,28 +416,68 @@ pub struct LoadWindow {
     pub db_pool_size: u32,
     pub db_pool_idle: u32,
     pub db_transactions_per_sec: f64,
+    /// The tick's phases over the window, and the loops beside it
+    pub phases: BTreeMap<String, PhaseWindow>,
+    pub loops: BTreeMap<String, PhaseWindow>,
+}
+
+/// One phase, or one loop, between two loads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhaseWindow {
+    pub runs: u64,
+    /// Its time over the window
+    pub secs: f64,
+    /// The mean of a run, in ms
+    pub mean_ms: f64,
+    /// The bucket bounds its runs fall under; `None` past the last
+    pub p95_ms: Option<f64>,
+}
+
+impl PhaseWindow {
+    fn between(a: Option<&PhaseLoad>, b: &PhaseLoad) -> PhaseWindow {
+        let runs = b.runs.saturating_sub(a.map_or(0, |a| a.runs));
+        let secs = (b.secs - a.map_or(0.0, |a| a.secs)).max(0.0);
+        let buckets = since(a.map_or(&[][..], |a| &a.buckets), &b.buckets);
+        PhaseWindow {
+            runs,
+            secs,
+            mean_ms: if runs > 0 { secs * 1000.0 / runs as f64 } else { 0.0 },
+            p95_ms: percentile(&buckets, runs, 0.95),
+        }
+    }
+}
+
+/// Each bucket's count in `b` less its count in `a`.
+fn since(a: &[u64], b: &[u64]) -> Vec<u64> {
+    b.iter()
+        .enumerate()
+        .map(|(i, n)| n.saturating_sub(a.get(i).copied().unwrap_or(0)))
+        .collect()
+}
+
+/// The bound of the bucket the `q`th of `runs` falls under; `None` past the
+/// last.
+fn percentile(buckets: &[u64], runs: u64, q: f64) -> Option<f64> {
+    let rank = ((runs as f64 * q).ceil() as u64).max(1);
+    let mut seen = 0;
+    for (i, n) in buckets.iter().enumerate() {
+        seen += n;
+        if seen >= rank {
+            return TICK_BUCKETS_MS.get(i).copied();
+        }
+    }
+    None
+}
+
+fn phase_windows(a: &BTreeMap<String, PhaseLoad>, b: &BTreeMap<String, PhaseLoad>) -> BTreeMap<String, PhaseWindow> {
+    b.iter().map(|(name, load)| (name.clone(), PhaseWindow::between(a.get(name), load))).collect()
 }
 
 impl LoadWindow {
     pub fn between(a: &Load, b: &Load, secs: f64) -> LoadWindow {
         let ticks = b.ticks.saturating_sub(a.ticks);
-        let buckets: Vec<u64> = b
-            .tick_buckets
-            .iter()
-            .enumerate()
-            .map(|(i, n)| n.saturating_sub(a.tick_buckets.get(i).copied().unwrap_or(0)))
-            .collect();
-        let percentile = |q: f64| -> Option<f64> {
-            let rank = ((ticks as f64 * q).ceil() as u64).max(1);
-            let mut seen = 0;
-            for (i, n) in buckets.iter().enumerate() {
-                seen += n;
-                if seen >= rank {
-                    return TICK_BUCKETS_MS.get(i).copied();
-                }
-            }
-            None
-        };
+        let buckets = since(&a.tick_buckets, &b.tick_buckets);
+        let percentile = |q: f64| percentile(&buckets, ticks, q);
         // The buckets wholly over the period: those whose lower bound is at
         // or past it. One the period falls inside isn't counted.
         let ticks_over = TICK_BUCKETS_MS
@@ -435,6 +502,8 @@ impl LoadWindow {
             db_pool_size: b.db_pool_size,
             db_pool_idle: b.db_pool_idle,
             db_transactions_per_sec: if secs > 0.0 { (b.db_transactions - a.db_transactions) as f64 / secs } else { 0.0 },
+            phases: phase_windows(&a.phases, &b.phases),
+            loops: phase_windows(&a.loops, &b.loops),
         }
     }
 }

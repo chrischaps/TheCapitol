@@ -41,6 +41,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
+use tracing::Instrument;
 
 use capitol_protocol::rest::{DepthLevel, MarketOrder, MarketTrade};
 use capitol_protocol::rules::market::{self, GradeRule, OrderSide, OrderStatus};
@@ -293,7 +294,11 @@ pub async fn run_market_loop(market: Arc<Market>, db: PgPool, events: broadcast:
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
-        let cycle = run_cycle(&market, &db, &events, Utc::now()).await;
+        let timed = super::load::Loop::Market.timed();
+        let cycle = run_cycle(&market, &db, &events, Utc::now())
+            .instrument(tracing::info_span!("loop.market"))
+            .await;
+        drop(timed);
         if cycle != Cycle::default() {
             tracing::debug!("Market: {cycle:?}");
         }

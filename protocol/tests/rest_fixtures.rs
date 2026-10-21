@@ -13,6 +13,8 @@
 //! `GET /bazaar` and `GET /bazaar/stalls/{id}` (E3.10).
 //! `fixtures/rest/gazette.json` is `GET /gazette/latest` (E3.9), written by the
 //! backend's `write_the_gazette_fixture` from a busy day's records.
+//! `fixtures/rest/ledger.json` is `GET /admin/ledger` (C1.7), its load split
+//! by the tick's phases and the loops beside it (D0.1).
 
 use std::fs;
 use std::path::Path;
@@ -22,6 +24,7 @@ use capitol_protocol::rest::{
     AutomationMode, AutomationState, CatalogResponse, GazetteResponse, MarketDepthResponse, MarketHistoryResponse,
     MarketSummaryResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
 };
+use capitol_protocol::ledger::{Ledger, Load, LoadWindow};
 use capitol_protocol::rules::market::{sort_levels, GradeRule, OrderSide};
 
 fn fixture(name: &str) -> String {
@@ -138,4 +141,36 @@ fn a_shop_round_trips_with_each_listings_units() {
     assert_eq!(shop.listings[0].maker, None);
     assert_eq!(shop.listings[1].maker.as_ref().map(|m| m.name.as_str()), Some("ada"));
     assert_eq!(serde_json::to_string(&shop).unwrap(), json);
+}
+
+#[test]
+fn the_ledger_round_trips_with_its_phases() {
+    let json = fixture("ledger.json");
+    let ledger: Ledger = serde_json::from_str(&json).unwrap();
+    let load = &ledger.load;
+    assert_eq!(load.phases.len(), 13);
+    assert_eq!(load.loops.len(), 3);
+    // The phases cover the whole tick
+    let phases: f64 = load.phases.values().map(|p| p.secs).sum();
+    assert!((phases - load.tick_secs).abs() < 1e-9, "{phases} of {}", load.tick_secs);
+    assert_eq!(serde_json::to_string(&ledger).unwrap(), json);
+}
+
+#[test]
+fn a_load_from_before_the_phases_still_reads() {
+    let json = fixture("ledger.json");
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let load = value["load"].as_object_mut().unwrap();
+    load.remove("phases");
+    load.remove("loops");
+    let old: Load = serde_json::from_value(value["load"].clone()).unwrap();
+    assert!(old.phases.is_empty() && old.loops.is_empty());
+    let new: Ledger = serde_json::from_str(&json).unwrap();
+    // A window from an old load to a new one counts each phase from nothing
+    let window = LoadWindow::between(&old, &new.load, 60.0);
+    let gathers = &window.phases["gathers"];
+    assert_eq!(gathers.runs, 1180);
+    assert!((gathers.mean_ms - 5.0).abs() < 1e-9);
+    assert_eq!(gathers.p95_ms, Some(20.0));
+    assert_eq!(window.loops["market"].p95_ms, Some(20.0));
 }

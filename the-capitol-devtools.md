@@ -144,16 +144,15 @@ The first set:
 
 ## 5. Architecture notes
 
-- **Tick phases** are named spans (`info_span!("tick.market")`, …) and per-phase histograms in `load.rs`. They go on `Load` as an additive field: the fixture changes, the old field stays. The phases are:
-  - movement
-  - extraction and crafting
-  - automation
-  - market
-  - bazaar
-  - regeneration
-  - tax
-  - persist
-  - broadcast
+- **Tick phases** are named spans (`tick.movement`, …) and per-phase histograms in `engine/load.rs` (`load::Phase`). They go on `Load` as an additive field, `phases`: the fixture (`protocol/tests/fixtures/rest/ledger.json`) changes, the old fields stay, and a load from before reads with no phases. *As built (D0.1, #353):* the phases partition the tick, so they add up to `tick_secs`. Since automation, the market and the bazaar run as loops of their own beside the tick, not in it, they're timed apart, in `Load.loops` (`load::Loop`, spans `loop.<name>`), and "persist" is split three ways, because #304 needs to know which write it is. The phases are:
+  - lock: waiting for the game's lock, which automation and the routes take too
+  - commands, movement, extraction, crafting, regeneration
+  - trades: expiring unanswered trade requests
+  - broadcast: the positions that changed
+  - gathers, crafts, positions: the writes (`persist_gather`, `finish_craft`, `persist_positions`)
+  - tax, subscriptions: the hourly jobs
+
+  The loops are automation, market and bazaar. `LoadWindow` gives each phase and loop its runs, time, mean and p95 over a window.
 - **The tracy feature** is `profile` on the backend: `tracing-tracy` as a layer. It's off by default, at zero cost when off.
 - **The town's report** is `POST /admin/town/report`, as `TownReport`, a protocol type. It holds:
   - a health row per citizen
@@ -178,6 +177,7 @@ The first set:
 - **D0.1 Tick by phase.**
   - Spans and per-phase histograms; `Load.phases`, with its fixture.
   - **Verify:** the phases sum to within 5% of the tick, and the fixture round-trips.
+  - *As built (#353):* `Load.phases` (13 phases that cover the tick) and `Load.loops` (automation, market, bazaar, timed apart since they aren't in the tick). See §5.
 - **D0.2 Sampler and history.**
   - The `Sample` type, the ring, the `metrics_samples` table and pruning.
   - **Verify:** in a 200-citizen town the sampler adds under 0.5 ms to tick p95, and a day's samples reconcile with the ledger.
