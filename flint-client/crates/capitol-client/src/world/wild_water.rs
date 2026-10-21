@@ -482,8 +482,8 @@ mod tests {
         let mut checked = 0;
         for course in t.rivers.iter() {
             // A course that joins another is cut short of it, so the water
-            // there is the other's. Past the edge it can meet it lower down
-            // (#312), which this then doesn't see.
+            // there is the other's. That they meet level is
+            // `edge_water::tests::a_tributary_meets_the_course_it_joins_level`.
             let end = course.points.last().unwrap();
             let main = match &course.mouth {
                 Mouth::Joins(id) => t.rivers.iter().chain(t.streams).find(|c| &c.id == id),

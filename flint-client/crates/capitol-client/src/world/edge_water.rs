@@ -8,7 +8,8 @@
 //!   edge, so every cell drains out over the lowest pass it has. A course
 //!   leaves its mouth straight out, then follows that drainage.
 //! - **Where they meet.** The widest go first. A course that reaches one
-//!   already run on joins it there as a tributary.
+//!   already run on joins it there as a tributary, level with it ([`meet`]):
+//!   where it arrives lower, the other comes down to it in rapids.
 //! - **Where they end.** Each trunk ends in a pond on the nearly flat
 //!   ground by the ring, or in a neighbour's pond if it's close.
 //! - **In their valleys.** The surface never rises downstream and keeps
@@ -71,6 +72,11 @@ const POND_MAX: f64 = 140.0;
 const POND_POINTS: usize = 28;
 /// Ponds closer than their radii and this share the nearer.
 const POND_GAP: f64 = 20.0;
+/// How steeply (fall over run) a course lowered to meet a tributary comes
+/// down to it: rapids above the join, not a step.
+const RAPIDS: f64 = 0.1;
+/// The most passes [`meet`] takes to bring every join level.
+const MEETING: usize = 64;
 
 /// Runs every course in `rivers` and `streams` that ends at the edge on
 /// down the land past it, adding the ponds they end in to `lakes`. The
@@ -95,8 +101,12 @@ pub fn run_on(
     let ids: Vec<String> = edge.iter().map(|c| c.id.clone()).collect();
     let grid = Grid::flood(params, threads);
     let mut claims: Vec<Option<(usize, usize)>> = vec![None; grid.n * grid.n];
-    // Each course's points past its mouth, once run on.
+    // Each course's points past its mouth, once run on, the course it joins
+    // and where, how it ends, and the pond it ends in.
     let mut runs: Vec<Vec<WaterPoint>> = Vec::new();
+    let mut meets: Vec<Option<(usize, usize)>> = Vec::new();
+    let mut ends: Vec<Option<Mouth>> = Vec::new();
+    let mut pond_of: Vec<Option<usize>> = Vec::new();
     let mut ponds: Vec<(usize, [f64; 2], f64)> = Vec::new();
     // The valleys of the courses run on so far: each course's water keeps
     // under the ground as they leave it.
@@ -113,12 +123,17 @@ pub fn run_on(
         let mut joins = None;
         let Some(start) = grid.nearest(lead) else {
             runs.push(Vec::new());
+            meets.push(None);
+            ends.push(None);
+            pond_of.push(None);
             continue;
         };
         let mut at = Some(start);
         while let Some(c) = at {
-            if let Some(claim) = claims[c] {
-                joins = Some(claim);
+            if let Some((j, p)) = claims[c] {
+                // Never at the other's lead, whose surface its mouth sets,
+                // so [`meet`] can lower the other to it.
+                joins = Some((j, p.max(1).min(runs[j].len() - 1)));
                 break;
             }
             cells.push(c);
@@ -133,13 +148,9 @@ pub fn run_on(
         smooth(&mut path, clear, mouth.width);
         let ground = |x: f64, y: f64| valleys.lower(settled(x, y, params), x, y);
         let mut points = surfaces(&path, mouth, &ground);
+        let mut in_pond = None;
         let id_joined = match joins {
-            Some((j, p)) => {
-                let to = runs[j][p];
-                let end = points.last_mut().expect("a mouth and a lead");
-                end.surface = end.surface.min(to.surface);
-                Mouth::Joins(ids[j].clone())
-            }
+            Some((j, _)) => Mouth::Joins(ids[j].clone()),
             None => {
                 let end = *points.last().expect("a mouth and a lead");
                 let r = (POND_PER_WIDTH * end.width).clamp(POND_MIN, POND_MAX);
@@ -148,10 +159,12 @@ pub fn run_on(
                     Some(&(lake, centre, _)) => {
                         let level = lakes[lake].level;
                         points.push(WaterPoint { x: centre[0], y: centre[1], surface: end.surface.min(level), ..end });
+                        in_pond = Some(lake);
                         Mouth::Lake(lakes[lake].id.clone())
                     }
                     None => {
                         let pond = pond(&course.id, end, r, &ground);
+                        in_pond = Some(lakes.len());
                         ponds.push((lakes.len(), [end.x, end.y], r));
                         let id = pond.id.clone();
                         lakes.push(pond);
@@ -175,8 +188,64 @@ pub fn run_on(
         }
         valleys.add(&points);
         runs.push(run);
-        course.points.extend_from_slice(&points[1..]);
-        course.mouth = id_joined;
+        meets.push(joins);
+        ends.push(Some(id_joined));
+        pond_of.push(in_pond);
+    }
+    let before: Vec<Option<f64>> = runs.iter().map(|r| r.last().map(|p| p.surface)).collect();
+    meet(&mut runs, &meets);
+    for (k, course) in edge.iter_mut().enumerate() {
+        // A course lowered to meet another keeps over the pond it ends in.
+        if let (Some(lake), Some(end), Some(was)) = (pond_of[k], runs[k].last(), before[k]) {
+            if end.surface < was {
+                lakes[lake].level = lakes[lake].level.min(end.surface - UNDER);
+            }
+        }
+        course.points.extend_from_slice(&runs[k]);
+        if let Some(mouth) = ends[k].take() {
+            course.mouth = mouth;
+        }
+    }
+}
+
+/// Lowers each course that a tributary meets under its surface down to the
+/// tributary, and each tributary that meets a course under its own down to
+/// that, until every one meets the course it joins level, as W3's do at a
+/// join (#312). A tributary can't be lifted instead: one out of a lake
+/// leaves the edge at the lake's level, and its surface can't rise.
+fn meet(runs: &mut [Vec<WaterPoint>], meets: &[Option<(usize, usize)>]) {
+    for _ in 0..MEETING {
+        let mut level = true;
+        for (k, join) in meets.iter().enumerate() {
+            let Some((j, p)) = *join else { continue };
+            let end = runs[k].last().expect("a lead and a join").surface;
+            let main = runs[j][p].surface;
+            if main > end {
+                lower(&mut runs[j], p, end);
+                level = false;
+            } else if end > main {
+                let last = runs[k].len() - 1;
+                lower(&mut runs[k], last, main);
+                level = false;
+            }
+        }
+        if level {
+            return;
+        }
+    }
+}
+
+/// Lowers `run` to `level` from point `at` on, and above it eases it down
+/// as rapids, no more than `level` plus [`RAPIDS`] for every unit upstream.
+/// Its lead (point 0) stays as its mouth set it.
+fn lower(run: &mut [WaterPoint], at: usize, level: f64) {
+    for p in run.iter_mut().skip(at.max(1)) {
+        p.surface = p.surface.min(level);
+    }
+    let mut up = 0.0;
+    for i in (1..at).rev() {
+        up += dist([run[i].x, run[i].y], [run[i + 1].x, run[i + 1].y]);
+        run[i].surface = run[i].surface.min(level + up * RAPIDS);
     }
 }
 
@@ -666,6 +735,38 @@ mod tests {
             }
         }
         assert!(checked > 500, "{checked}");
+    }
+
+    #[test]
+    fn a_tributary_meets_the_course_it_joins_level() {
+        let t = fixture();
+        let (rivers, streams, _) = run();
+        let all: Vec<&WaterCourse> = rivers.iter().chain(streams).collect();
+        let mut seen = 0;
+        for (_, now) in edge_courses() {
+            let Mouth::Joins(id) = &now.mouth else { continue };
+            let main = all.iter().find(|c| &c.id == id).unwrap();
+            let end = now.points.last().unwrap();
+            let at = main.points.iter().position(|p| p.x == end.x && p.y == end.y).unwrap();
+            assert_eq!(end.surface, main.points[at].surface, "{} meets {id}", now.id);
+            let was = t.rivers.iter().chain(&t.streams).find(|c| &c.id == id).unwrap();
+            // Past its lead, which follows its point at the edge.
+            assert!(at > was.points.len(), "{} joins {id} at its lead or in the world", now.id);
+            for w in main.points.windows(2) {
+                assert!(w[1].surface <= w[0].surface, "{id}: the surface rises");
+            }
+            seen += 1;
+        }
+        assert!(seen >= 5, "{seen}");
+        // river_10 leaves lake_4 at 44.53 and before #312 met river_20 where
+        // it stood at 67.22. Now river_20 comes down to it in rapids.
+        let main = all.iter().find(|c| c.id == "river_20").unwrap();
+        let steepest = main
+            .points
+            .windows(2)
+            .map(|w| (w[0].surface - w[1].surface) / (w[1].x - w[0].x).hypot(w[1].y - w[0].y))
+            .fold(0.0, f64::max);
+        eprintln!("{seen} joins; river_20's steepest fall {steepest:.3}");
     }
 
     #[test]
