@@ -52,6 +52,14 @@ const STEP: f64 = 10.0;
 /// A lake's grid cell (server units).
 const CELL: f64 = 20.0;
 
+/// Each kind's shoreline band, as a share of the canals' (the scene's
+/// `shore_foam_width`, 14 cm of depth; Flint ADR 0099). The carve's beds
+/// are shallow in metres, a big river's 30 cm at its deepest and a
+/// stream's a few, so the canals' band would foam them bank to bank.
+pub const RIVER_SHORE: f32 = 0.18;
+pub const STREAM_SHORE: f32 = 0.08;
+pub const LAKE_SHORE: f32 = 0.25;
+
 /// How fast (m/s) water runs on the flat, and how much faster per unit of
 /// fall (surface drop over run), up to [`MAX_SPEED`].
 const RIVER_SPEED: f32 = 0.7;
@@ -69,17 +77,20 @@ pub fn look(id: &str) -> WaterBodyLook {
             wave_scale: 0.2,
             flow_foam: 1.0,
             flow_period: 2.0,
+            shore_foam: RIVER_SHORE,
             ..WaterBodyLook::default()
         },
         STREAMS => WaterBodyLook {
             wave_scale: 0.15,
             flow_foam: 1.2,
             flow_period: 1.5,
+            shore_foam: STREAM_SHORE,
             ..WaterBodyLook::default()
         },
         _ => WaterBodyLook {
             wave_scale: 0.12,
             flow_foam: 0.0,
+            shore_foam: LAKE_SHORE,
             ..WaterBodyLook::default()
         },
     }

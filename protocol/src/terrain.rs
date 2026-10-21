@@ -355,8 +355,10 @@ pub enum LandmarkKind {
     /// footprint its stalls stand in, its door the gate on the avenue
     Bazaar,
     /// One stall in the bazaar, which a merchant rents for their shop. Its
-    /// entrance faces the bazaar's inner lane.
+    /// entrance faces its street (E3.12).
     Stall,
+    /// An open square, such as the bazaar's at the end of its alley (E3.12)
+    Square,
     #[serde(other)]
     Other,
 }

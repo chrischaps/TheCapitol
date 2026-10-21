@@ -152,6 +152,11 @@ impl TerrainSource {
         self.current.as_ref()?.landmarks.iter().find(|l| l.id == id)
     }
 
+    /// The bazaar quarter's streets (E3.12), for the walk to a stall.
+    pub fn bazaar_streets(&self) -> Vec<Vec<(f64, f64)>> {
+        self.current.as_ref().map(|t| capitol_core::bazaar::streets(&t.roads)).unwrap_or_default()
+    }
+
     /// One line for the HUD: where the terrain came from, and its version.
     pub fn status(&self) -> String {
         let version = self

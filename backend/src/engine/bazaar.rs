@@ -977,6 +977,38 @@ mod tests {
         assert_eq!(every_unit(&db, &[&ada, &bram], "fiber").await, Units::uniform(6, 77));
     }
 
+    /// E3.12's migration, when the bazaar became a quarter: an open rental
+    /// gets its unused days back, and the next sweep closes it with its goods
+    /// to the market box. No Strand or unit is made or lost.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_quarter_migration_refunds_rentals_and_returns_their_goods(db: PgPool) {
+        let now = Utc::now();
+        let ada = player(&db, "ada", 1000).await;
+        let rope = stack_of(&db, ada.id, ada.inventory, 0, "rope", &Units::from_pairs([(40, 3), (90, 2)])).await;
+        rent(&db, ada.id, STALL, 3, Some("Ada's"), now).await.unwrap();
+        stock(&db, ada.id, &stock_req(rope, 9, 5, None), now).await.unwrap();
+        assert_eq!(balance(&db, ada.id).await, 940);
+
+        sqlx::raw_sql(include_str!("../../migrations/20261121_001_bazaar_quarter.sql")).execute(&db).await.unwrap();
+        // Three days back, less the moment since the rent (rounded down)
+        let refunded = balance(&db, ada.id).await - 940;
+        assert!((59..=60).contains(&refunded), "refunded {refunded}");
+        let trail = audit(&db, ada.id).await;
+        assert_eq!(trail.last(), Some(&(refunded, "bazaar_refund".to_string())));
+
+        let swept = sweep(&db, Utc::now() + Duration::seconds(1)).await.unwrap();
+        assert_eq!(swept.lapsed.len(), 1);
+        assert!(matches!(&swept.lapsed[0].notice.message, ServerMessage::StallLapsed { returned: 1, waiting: 0, .. }));
+        assert_eq!(all_in(&db, box_of(&db, ada.id).await, "rope").await, Units::from_pairs([(40, 3), (90, 2)]));
+        assert_eq!(every_unit(&db, &[&ada], "rope").await, Units::from_pairs([(40, 3), (90, 2)]));
+        assert_eq!(directory(&db, &[STALL.into()], Utc::now()).await.unwrap().stalls[0].shop, None);
+
+        // Run again, it finds nothing to do
+        sqlx::raw_sql(include_str!("../../migrations/20261121_001_bazaar_quarter.sql")).execute(&db).await.unwrap();
+        assert_eq!(balance(&db, ada.id).await, 940 + refunded);
+    }
+
     /// Renting a stall whose rent ran out, before the sweep came, closes it first
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]

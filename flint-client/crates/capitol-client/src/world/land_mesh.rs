@@ -55,17 +55,6 @@ pub const BUDGET: usize = 10;
 const DIP: f32 = 0.03;
 /// A skirt's depth in metres at stride 1; it doubles with the stride.
 const SKIRT: f32 = 0.6;
-/// How much deeper than the carve the beds are drawn: this many times
-/// its cut again. The carve is in server units, so a big river's bed is
-/// 30 cm deep in metres and a stream's a few: the water's shore foam
-/// (14 cm of depth) would cover all of it, and there'd be nothing under
-/// the surface to see. Drawn three times as deep, the foam keeps to the
-/// banks and the water has depth. Only the drawing: what stands in the
-/// water stands on the carve (`land::rise`), a little higher. A
-/// workaround: a per-body shore foam, or a deeper carve, removes it
-/// (#230).
-pub const DEEPEN: f32 = 2.0;
-
 /// How strongly each wild colour shows, like `ground`'s zones.
 const ROCK_STRENGTH: f32 = 0.2;
 const SCREE_STRENGTH: f32 = 0.2;
@@ -295,7 +284,9 @@ pub fn build(field: &GroundField, shore: &Shore, chunk: Chunk, lod: usize, view:
             let rise = h - layer::GROUND;
             let off = !(FROM..=OUTER).contains(&r);
             let (cut, wet) = shore.at(i, j);
-            let y = if off { h - DIP } else { h - DEEPEN * cut };
+            // The field is the carve (`land::rise`), beds and all: what
+            // stands in the water stands on the bed you see.
+            let y = if off { h - DIP } else { h };
             let dry = tint(r, rise, slope, at);
             let colour = if wet > 0.0 || cut > 0.0 {
                 let m = mottle(at);
@@ -535,6 +526,28 @@ mod tests {
             let want = field.height_at(x, z).unwrap();
             assert!(y <= want + 1e-3 && y >= want - SKIRT - DIP - 1e-3, "{y} against {want}");
         }
+    }
+
+    #[test]
+    fn a_bed_is_drawn_at_the_carve_where_things_stand_in_it() {
+        // The field is the carve already; a cut only tints. Drawn deeper,
+        // a wader or a bank's node would float over the bed you see (#230).
+        let field = fixture_field();
+        let chunk = Chunk { row: 2, col: 12 };
+        let shore = Shore { cut: vec![0.3; SAMPLES * SAMPLES], ..Shore::default() };
+        let m = build(field, &shore, chunk, 0, &View::CLEAR);
+        let n = CHUNK + 1;
+        let mut checked = 0;
+        for v in m.vertices[..n * n].iter().step_by(37) {
+            let [x, y, z] = v.position;
+            let [sx, sy] = crate::coords::to_server(x, z);
+            if (FROM..=OUTER).contains(&(sx - CENTER_X).hypot(sy - CENTER_Y)) {
+                let want = field.height_at(x, z).unwrap();
+                assert!((y - want).abs() < 1e-3, "{y} against {want}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 50, "{checked}");
     }
 
     #[test]

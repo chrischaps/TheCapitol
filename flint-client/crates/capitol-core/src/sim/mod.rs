@@ -13,7 +13,8 @@
 //!
 //! **The market (E3.8).** Market makers (`--makers`, two by default) join the
 //! swarm, funded by a grant, and quote [`MARKET_ITEMS`]. The swarm trades
-//! through them ([`Role::trade`]): a bot sells what its role makes once it
+//! through them ([`Role::sell_menu`], [`Role::buy_menu`], decided since C1.3 by
+//! the rules layer, `citizen::decide`): a bot sells what its role makes once it
 //! holds [`SELL_AT`], and buys what a step would have it gather, if gathering
 //! that isn't its job. Orders are placed at the Exchange hall (D6), so each
 //! trade is a walk in and out, and a seller sells all it holds at once. With no makers (`--makers 0`) nobody trades and each
@@ -29,10 +30,32 @@ pub mod run;
 
 use std::fmt;
 
-use capitol_protocol::rules::market::{buy_debit, OrderSide};
+use capitol_protocol::rules::market::buy_debit;
 use plan::{Goal, Holdings, Step};
 
 use crate::catalog::Catalog;
+use crate::citizen::decide::{Choice, Span};
+
+/// An entry on a citizen's work menu: the goal it's for (none for banking)
+/// and the step it starts with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Errand {
+    pub goal: Option<Goal>,
+    pub step: Step,
+}
+
+impl Errand {
+    /// The menu's entry for it.
+    pub fn choice(&self, catalog: &Catalog) -> Choice {
+        match &self.goal {
+            None => Choice::Bank,
+            Some(goal) => Choice::Work {
+                goal: goal.label(),
+                step: self.step.label(catalog),
+            },
+        }
+    }
+}
 
 /// What a bot is in the swarm for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,7 +94,7 @@ pub const MIX: [(Role, f64); 7] = [
 ];
 
 /// A fiber gatherer banks its fiber at the exchange once it holds this much.
-const BANK_FIBER_AT: i32 = 200;
+pub const BANK_FIBER_AT: i32 = 200;
 
 /// What the sim's market makers quote, and the swarm trades through them:
 /// the raw and processed goods the chains pass along.
@@ -81,8 +104,7 @@ pub const SELL_AT: i32 = 20;
 /// Units a bot buys at a time.
 pub const LOT: i32 = 10;
 
-/// A trade a bot makes instead of the planner's step, at the best price on
-/// the other side of the book.
+/// A trade a bot makes instead of the planner's step, as its mind decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trade {
     Sell { item: String, quantity: i32, price: i64 },
@@ -140,26 +162,26 @@ impl Role {
         roles
     }
 
-    /// What the bot is after now.
+    /// What the bot is after now: the first of [`goals`](Self::goals).
     pub fn goal(&self, catalog: &Catalog, holdings: &Holdings) -> Goal {
+        self.goals(catalog, holdings).remove(0)
+    }
+
+    /// What the role is after, first things first. A tool crafter's tools
+    /// and a builder's stations come in order, those it lacks, then more of
+    /// what it makes once it has them all. Never empty.
+    pub fn goals(&self, catalog: &Catalog, holdings: &Holdings) -> Vec<Goal> {
         let more = |item: &str| Goal::hold(item, holdings.count(item) + 1);
         let unmet = |goal: &Goal| plan::next(catalog, holdings, goal) != Ok(None);
+        let then = |lacking: Vec<Goal>, more: Goal| -> Vec<Goal> { lacking.into_iter().filter(unmet).chain([more]).collect() };
         match self {
-            Role::Gatherer(Gather::Fiber) => more("fiber"),
-            Role::Gatherer(Gather::Wood) => more("log"),
-            Role::Gatherer(Gather::Ore) => more("iron_ore"),
-            Role::Crafter(Craft::Planks) => more("plank"),
-            Role::Crafter(Craft::Ingots) => more("iron_ingot"),
-            Role::Crafter(Craft::Tools) => TOOLS
-                .iter()
-                .map(|t| Goal::hold(t, 1))
-                .find(unmet)
-                .unwrap_or_else(|| more("tool_handle")),
-            Role::Builder => BUILD
-                .iter()
-                .map(|s| Goal::Station(s.to_string()))
-                .find(unmet)
-                .unwrap_or_else(|| more("brick")),
+            Role::Gatherer(Gather::Fiber) => vec![more("fiber")],
+            Role::Gatherer(Gather::Wood) => vec![more("log")],
+            Role::Gatherer(Gather::Ore) => vec![more("iron_ore")],
+            Role::Crafter(Craft::Planks) => vec![more("plank")],
+            Role::Crafter(Craft::Ingots) => vec![more("iron_ingot")],
+            Role::Crafter(Craft::Tools) => then(TOOLS.iter().map(|t| Goal::hold(t, 1)).collect(), more("tool_handle")),
+            Role::Builder => then(BUILD.iter().map(|s| Goal::Station(s.to_string())).collect(), more("brick")),
         }
     }
 
@@ -175,57 +197,84 @@ impl Role {
         }
     }
 
-    /// A trade to make before `step`, if the market offers one. `best` is
-    /// the best price on a side of an item's book.
-    ///
-    /// - **Sell** all the role's product once it holds [`SELL_AT`] and is
-    ///   only making more of it (a builder still building keeps its bricks),
-    ///   to the best bid. Whatever the bid doesn't take comes back.
-    /// - **Buy** a lot of what `step` would gather, at the best ask, if it's
-    ///   on the market and gathering it isn't the role's job. A bot with no
-    ///   plot keeps a deed's price back.
-    pub fn trade(
-        &self,
-        catalog: &Catalog,
-        holdings: &Holdings,
-        step: &Step,
-        best: impl Fn(&str, OrderSide) -> Option<i64>,
-    ) -> Option<Trade> {
-        if let Some(product) = self.product() {
-            let held = holdings.count(product);
-            if held >= SELL_AT && self.goal(catalog, holdings) == Goal::hold(product, held + 1) {
-                if let Some(price) = best(product, OrderSide::Buy) {
-                    return Some(Trade::Sell {
-                        item: product.to_string(),
-                        quantity: held,
-                        price,
-                    });
+    /// A citizen's work menu (C1.3): banking, for a fiber gatherer with
+    /// fiber to bank, then each of [`goals`](Self::goals) in order with the
+    /// step it starts with. Goals already met, and goals no step leads to,
+    /// are left off. `Err` names why, when every goal is stuck.
+    pub fn errands(&self, catalog: &Catalog, holdings: &Holdings) -> Result<Vec<Errand>, plan::Stuck> {
+        let mut errands = Vec::new();
+        if *self == Role::Gatherer(Gather::Fiber) && holdings.count(crate::exchange::FIBER) >= BANK_FIBER_AT / 4 {
+            errands.push(Errand {
+                goal: None,
+                step: Step::Deposit,
+            });
+        }
+        let mut stuck = None;
+        for goal in self.goals(catalog, holdings) {
+            match plan::next(catalog, holdings, &goal) {
+                Ok(Some(step)) => errands.push(Errand { goal: Some(goal), step }),
+                Ok(None) => {}
+                Err(e) => {
+                    stuck.get_or_insert(e);
                 }
             }
         }
+        match stuck {
+            Some(e) if errands.is_empty() => Err(e),
+            _ => Ok(errands),
+        }
+    }
+
+    /// The menu for selling the role's product before working toward
+    /// `goal`, if there's a question to ask: it holds at least half of
+    /// [`SELL_AT`], is only making more of it (a builder still building
+    /// keeps its bricks), and someone bids. Sell (a price round the bid, up
+    /// to all it holds), or keep.
+    pub fn sell_menu(&self, holdings: &Holdings, goal: Option<&Goal>, bid: Option<i64>, ask: Option<i64>) -> Option<Vec<Choice>> {
+        let product = self.product()?;
+        let held = holdings.count(product);
+        if held < SELL_AT / 2 || goal != Some(&Goal::hold(product, held + 1)) {
+            return None;
+        }
+        let bid = bid?;
+        Some(vec![
+            Choice::Sell {
+                item: product.to_string(),
+                price: Span::new((bid / 2).max(1), (bid * 2).max(ask.unwrap_or(0))),
+                quantity: Span::new(1, held),
+            },
+            Choice::Keep,
+        ])
+    }
+
+    /// The menu for buying what `step` would gather, if there's a question
+    /// to ask: it's on the market, gathering it isn't the role's job, it's
+    /// for sale, and the bot can afford some at the ask (keeping a deed's
+    /// price back until it has a plot). Buy up to two lots, or gather it.
+    pub fn buy_menu(&self, holdings: &Holdings, step: &Step, ask: Option<i64>) -> Option<Vec<Choice>> {
         let Step::Gather { item, .. } = step else {
             return None;
         };
         if self.product() == Some(item.as_str()) || !MARKET_ITEMS.contains(&item.as_str()) {
             return None;
         }
-        let price = best(item, OrderSide::Sell)?;
+        let ask = ask?;
         let keep = if holdings.plot_room.is_none() { holdings.deed_cost } else { 0 };
         let budget = holdings.strands - keep;
-        let mut quantity = LOT;
-        while quantity > 0 && buy_debit(price, quantity) > budget {
-            quantity -= 1;
+        let mut afford = 2 * LOT;
+        while afford > 0 && buy_debit(ask, afford) > budget {
+            afford -= 1;
         }
-        (quantity > 0).then(|| Trade::Buy {
-            item: item.clone(),
-            quantity,
-            price,
+        (afford > 0).then(|| {
+            vec![
+                Choice::Buy {
+                    item: item.clone(),
+                    price: Span::new((ask / 2).max(1), ask),
+                    quantity: Span::new(1, afford),
+                },
+                Choice::Gather { item: item.clone() },
+            ]
         })
-    }
-
-    /// Whether it's time to bank fiber at the exchange.
-    pub fn banks(&self, holdings: &Holdings) -> bool {
-        *self == Role::Gatherer(Gather::Fiber) && holdings.count("fiber") >= BANK_FIBER_AT
     }
 
     /// The role as a roster names it (C1.1): `gatherer-fiber`, `builder`.
@@ -264,6 +313,7 @@ impl fmt::Display for Role {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::citizen::decide::{Cascade, Place, Question, Quote, Situation, Temperament, When, Who};
 
     #[test]
     fn every_role_has_a_slug_that_names_it_again() {
@@ -310,77 +360,170 @@ mod tests {
         }
     }
 
+    /// What a middling rules layer picks from `menu`, as the sim's bots
+    /// decide since C1.3: the menu entry, or `None` for the other one.
+    fn rules_pick(question: Question, menu: Vec<Choice>, h: &Holdings, bid: Option<i64>, ask: Option<i64>) -> Option<Choice> {
+        let item = menu.iter().find_map(|c| match c {
+            Choice::Sell { item, .. } | Choice::Buy { item, .. } => Some(item.clone()),
+            _ => None,
+        })?;
+        let s = Situation {
+            who: Who {
+                name: "Bot".into(),
+                role: "builder".into(),
+                temperament: Temperament::default(),
+            },
+            at: Place { x: 0.0, y: 0.0, zone: "rural".into() },
+            when: When { time_of_day: None, hours: 0.0 },
+            holdings: h.into(),
+            market: vec![Quote { item, bid, ask, last: None }],
+            question,
+            menu,
+            carry_on: Some(1),
+        };
+        let ruling = Cascade::rules().ask(&s, std::time::Instant::now());
+        let d = ruling.decision?;
+        let mut choice = s.choice(&d).clone();
+        // The parameters it set, in place of the spans
+        match &mut choice {
+            Choice::Sell { price, quantity, .. } | Choice::Buy { price, quantity, .. } => {
+                *price = Span::new(d.price?, d.price?);
+                *quantity = Span::new(d.quantity?, d.quantity?);
+            }
+            _ => return None,
+        }
+        Some(choice)
+    }
+
+    fn sold(item: &str, quantity: i32, price: i64) -> Option<Choice> {
+        Some(Choice::Sell {
+            item: item.into(),
+            price: Span::new(price, price),
+            quantity: Span::new(quantity, quantity),
+        })
+    }
+
+    fn bought(item: &str, quantity: i32, price: i64) -> Option<Choice> {
+        Some(Choice::Buy {
+            item: item.into(),
+            price: Span::new(price, price),
+            quantity: Span::new(quantity, quantity),
+        })
+    }
+
+    fn sell(role: Role, catalog: &Catalog, h: &Holdings, bid: Option<i64>) -> Option<Choice> {
+        let product = role.product()?;
+        let menu = role.sell_menu(h, Some(&role.goal(catalog, h)), bid, None)?;
+        rules_pick(Question::Sell { item: product.into() }, menu, h, bid, None)
+    }
+
+    fn buy(role: Role, h: &Holdings, step: &Step, ask: Option<i64>) -> Option<Choice> {
+        let menu = role.buy_menu(h, step, ask)?;
+        let Step::Gather { item, .. } = step else { unreachable!() };
+        rules_pick(Question::Buy { item: item.clone() }, menu, h, None, ask)
+    }
+
     #[test]
     fn a_maker_of_something_sells_its_surplus_to_the_best_bid() {
         let catalog = Catalog::fallback();
         let mut h = Holdings::default();
         h.items.insert("log".into(), SELL_AT);
         let wood = Role::Gatherer(Gather::Wood);
-        let bid = |item: &str, side| (item == "log" && side == OrderSide::Buy).then_some(7);
-        let step = gather("log");
-        assert_eq!(
-            wood.trade(&catalog, &h, &step, bid),
-            Some(Trade::Sell {
-                item: "log".into(),
-                quantity: SELL_AT,
-                price: 7
-            })
-        );
+        assert_eq!(sell(wood, &catalog, &h, Some(7)), sold("log", SELL_AT, 7));
         // No bid, no sale; and under SELL_AT it keeps gathering
-        assert_eq!(wood.trade(&catalog, &h, &step, |_, _| None), None);
+        assert_eq!(sell(wood, &catalog, &h, None), None);
         h.items.insert("log".into(), SELL_AT - 1);
-        assert_eq!(wood.trade(&catalog, &h, &step, bid), None);
-        // A builder still building keeps its bricks
+        assert_eq!(sell(wood, &catalog, &h, Some(7)), None);
+        // A builder still building keeps its bricks: there's no question
         h.items.insert("brick".into(), 40);
-        let brick_bid = |_: &str, side| (side == OrderSide::Buy).then_some(9);
-        assert_eq!(Role::Builder.trade(&catalog, &h, &gather("stone"), brick_bid), None);
+        assert_eq!(Role::Builder.sell_menu(&h, Some(&Role::Builder.goal(&catalog, &h)), Some(9), None), None);
     }
 
     #[test]
     fn a_bot_buys_what_it_would_gather_unless_gathering_it_is_its_job() {
-        let catalog = Catalog::fallback();
         let mut h = Holdings {
             strands: 1000,
             plot_room: Some(3),
             deed_cost: 250,
             ..Holdings::default()
         };
-        let ask = |_: &str, side| (side == OrderSide::Sell).then_some(8);
         let ingots = Role::Crafter(Craft::Ingots);
-        assert_eq!(
-            ingots.trade(&catalog, &h, &gather("log"), ask),
-            Some(Trade::Buy {
-                item: "log".into(),
-                quantity: LOT,
-                price: 8
-            })
-        );
+        assert_eq!(buy(ingots, &h, &gather("log"), Some(8)), bought("log", LOT, 8));
         // The wood gatherer gathers its own logs
-        assert_eq!(Role::Gatherer(Gather::Wood).trade(&catalog, &h, &gather("log"), ask), None);
+        assert_eq!(Role::Gatherer(Gather::Wood).buy_menu(&h, &gather("log"), Some(8)), None);
         // Not on the market: gather it
-        assert_eq!(ingots.trade(&catalog, &h, &gather("fiber"), ask), None);
+        assert_eq!(ingots.buy_menu(&h, &gather("fiber"), Some(8)), None);
         // No plot yet: the deed's price is kept back, which leaves 3 at 8
         h.plot_room = None;
         h.strands = 280;
-        assert_eq!(
-            ingots.trade(&catalog, &h, &gather("log"), ask),
-            Some(Trade::Buy {
-                item: "log".into(),
-                quantity: 3,
-                price: 8
-            })
-        );
+        assert_eq!(buy(ingots, &h, &gather("log"), Some(8)), bought("log", 3, 8));
         h.strands = 255;
-        assert_eq!(ingots.trade(&catalog, &h, &gather("log"), ask), None);
+        assert_eq!(ingots.buy_menu(&h, &gather("log"), Some(8)), None);
+    }
+
+    /// C1.1's choice of step: bank at [`BANK_FIBER_AT`], else the first goal's.
+    fn c1_1_step(role: Role, catalog: &Catalog, h: &Holdings) -> Option<Step> {
+        if role == Role::Gatherer(Gather::Fiber) && h.count("fiber") >= BANK_FIBER_AT {
+            return Some(Step::Deposit);
+        }
+        plan::next(catalog, h, &role.goal(catalog, h)).ok().flatten()
     }
 
     #[test]
-    fn only_a_fiber_gatherer_banks() {
+    fn a_middling_rules_mind_works_on_what_c1_1_did() {
+        let catalog = Catalog::fallback();
+        let mut cases = 0;
+        for (role, _) in MIX {
+            for (fiber, strands, stations) in [(0, 0, 0), (49, 0, 0), (199, 0, 1), (200, 0, 2), (450, 300, 3), (60, 900, 6)] {
+                let mut h = Holdings {
+                    strands,
+                    deed_cost: 250,
+                    plot_room: (stations > 1).then_some(4),
+                    ..Holdings::default()
+                };
+                h.items.insert("fiber".into(), fiber);
+                h.stations.extend(BUILD.iter().take(stations).map(|s| s.to_string()));
+                let Some(old) = c1_1_step(role, &catalog, &h) else { continue };
+                let errands = role.errands(&catalog, &h).unwrap();
+                let s = Situation {
+                    who: Who {
+                        name: "Bot".into(),
+                        role: role.slug().into(),
+                        temperament: Temperament::default(),
+                    },
+                    at: Place { x: 0.0, y: 0.0, zone: "rural".into() },
+                    when: When { time_of_day: None, hours: 0.0 },
+                    holdings: (&h).into(),
+                    market: Vec::new(),
+                    question: Question::Work,
+                    menu: errands.iter().map(|e| e.choice(&catalog)).collect(),
+                    carry_on: Some(0),
+                };
+                let pick = Cascade::rules().ask(&s, std::time::Instant::now()).decision.unwrap().pick;
+                assert_eq!(errands[pick].step, old, "{role} with {fiber} fiber, {stations} stations");
+                cases += 1;
+            }
+        }
+        assert!(cases >= 30, "{cases}");
+    }
+
+    #[test]
+    fn the_work_menu_is_banking_then_the_goals_in_order() {
+        let catalog = Catalog::fallback();
         let mut h = Holdings::default();
-        h.items.insert("fiber".into(), BANK_FIBER_AT);
-        assert!(Role::Gatherer(Gather::Fiber).banks(&h));
-        assert!(!Role::Builder.banks(&h));
-        h.items.insert("fiber".into(), BANK_FIBER_AT - 1);
-        assert!(!Role::Gatherer(Gather::Fiber).banks(&h));
+        let fiber = Role::Gatherer(Gather::Fiber);
+        let errands = fiber.errands(&catalog, &h).unwrap();
+        assert_eq!(errands.len(), 1);
+        assert_eq!(errands[0].goal, Some(Goal::hold("fiber", 1)));
+        h.items.insert("fiber".into(), BANK_FIBER_AT / 4);
+        let errands = fiber.errands(&catalog, &h).unwrap();
+        assert_eq!(errands[0], Errand { goal: None, step: Step::Deposit });
+        assert_eq!(errands[0].choice(&catalog), Choice::Bank);
+        // Only a fiber gatherer banks
+        assert!(Role::Builder.errands(&catalog, &h).unwrap().iter().all(|e| e.goal.is_some()));
+        // A tool crafter lists every tool it lacks, then handles
+        let tools = Role::Crafter(Craft::Tools).errands(&catalog, &Holdings::default()).unwrap();
+        assert_eq!(tools.first().and_then(|e| e.goal.clone()), Some(Goal::hold("stone_axe", 1)));
+        assert_eq!(tools.last().and_then(|e| e.goal.clone()), Some(Goal::hold("tool_handle", 1)));
     }
 }

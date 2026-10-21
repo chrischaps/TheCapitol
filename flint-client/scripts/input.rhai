@@ -75,7 +75,7 @@
 // The bazaar (E3.11), across the avenue from the hall. A click on a stall
 // (cap_stall_at, tried down from its eaves, so the roof and the awning take
 // the click; the lane between the rows stays ground to walk on) opens its
-// shop there, or walks you in at the gate and up the lane and opens it as
+// shop there, or walks you along the bazaar's streets and opens it as
 // you reach the counter (cap_visit_stall; capitol_core::bazaar). Each kept
 // stall's name is written on the sign hanging from its awning, while the
 // camera is near enough to read it and no roof stands in front of it
