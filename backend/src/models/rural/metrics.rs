@@ -115,6 +115,11 @@ pub struct Metrics {
     /// How many sectors have the rarer of the two characters (plan RD2).
     /// Today's trails have no deck, so it's `None` for them.
     pub sector_character_min: Option<f64>,
+    /// The fewest main roads, arterial to arterial, in a sector (RD10)...
+    pub sector_mains_min: Option<f64>,
+    /// ...and the fewest roads joining two of them. Both `None` for the
+    /// trails, which have no sectors.
+    pub sector_links_min: Option<f64>,
 
     pub lots: usize,
     pub lots_before: usize,
@@ -164,13 +169,15 @@ const fn soft(metric: &'static str, label: &'static str, check: Check) -> Target
 
 /// The targets table in `the-capitol-rural.md` §5.
 pub const TARGETS: &[Target] = &[
-    hard("lots", "farms", Check::Range(45.0, 65.0)),
+    hard("lots", "farms", Check::Range(95.0, 135.0)),
     soft("lot_area_mean", "mean farm area", Check::Range(100_000.0, 140_000.0)),
     soft("built_share", "ring built share", Check::Range(0.30, 0.40)),
     hard("half_sector_min", "half-sector built share, least", Check::Min(0.20)),
     hard("half_sector_max", "half-sector built share, most", Check::Max(0.55)),
     soft("half_sector_cv", "CV of half-sector built shares", Check::Max(0.30)),
     hard("sector_character_min", "sectors of each character, fewest", Check::Min(3.0)),
+    hard("sector_mains_min", "main roads in a sector, fewest", Check::Min(2.0)),
+    hard("sector_links_min", "roads joining them in a sector, fewest", Check::Min(1.0)),
     hard("audit_issues", "street_plan::audit issues, but for loose ends", Check::Max(0.0)),
     hard("loose_ends_off_gate", "loose road ends off a farm gate", Check::Max(0.0)),
     hard("lots_on_water", "farms on water", Check::Max(0.0)),
@@ -291,6 +298,14 @@ pub fn measure(plan: &Plan) -> Measured {
     if !plan.sectors.is_empty() {
         let count = |c: Character| plan.sectors.iter().filter(|s| s.character == c).count();
         m.sector_character_min = Some(count(Character::Concession).min(count(Character::Winding)) as f64);
+        let counted: Vec<SectorRoads> = plan
+            .sectors
+            .iter()
+            .filter(|s| scope.sector.is_none_or(|k| k as usize == s.index))
+            .map(|s| sector_roads(roads, s.index))
+            .collect();
+        m.sector_mains_min = counted.iter().map(|c| c.mains as f64).reduce(f64::min);
+        m.sector_links_min = counted.iter().map(|c| c.links as f64).reduce(f64::min);
     }
 
     // Lots.
@@ -427,6 +442,36 @@ pub fn measure(plan: &Plan) -> Measured {
     m.half_sector_shares = shares;
 
     Measured { metrics: m, markers }
+}
+
+/// A sector's roads, as the weld left them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SectorRoads {
+    /// Lanes with both ends on an arterial's vertex.
+    pub mains: usize,
+    /// Lanes from a vertex of one main road to a vertex of another.
+    pub links: usize,
+}
+
+/// Counts sector `s`'s roads from where their ends are, not from their ids,
+/// so the weld is checked too.
+pub fn sector_roads(roads: &[RoadSegment], s: usize) -> SectorRoads {
+    let prefix = format!("lane_{s}_");
+    let lanes: Vec<&RoadSegment> = roads.iter().filter(|r| is_rural_road(r) && r.id.starts_with(&prefix)).collect();
+    let arterials: Vec<&RoadSegment> = roads.iter().filter(|r| r.road_type == RoadType::Arterial).collect();
+    let ends = |r: &RoadSegment| [r.points[0], *r.points.last().expect("a road has ends")];
+    let on = |road: &RoadSegment, p: P| road.points.iter().any(|&q| dist(p, q) < 1e-6);
+    let mains: Vec<&RoadSegment> =
+        lanes.iter().copied().filter(|r| ends(r).iter().all(|&e| arterials.iter().any(|a| on(a, e)))).collect();
+    let links = lanes
+        .iter()
+        .filter(|r| {
+            let [a, b] = ends(r);
+            mains.iter().any(|m| m.id != r.id && on(m, a))
+                && mains.iter().any(|m| m.id != r.id && on(m, b) && !on(m, a))
+        })
+        .count();
+    SectorRoads { mains: mains.len(), links }
 }
 
 /// Samples the ring every [`COVER_STEP`] and counts, for each half-sector,

@@ -18,7 +18,8 @@
 
 .PARAMETER Layout
   trails (the default, today's world) or farms, Rural v2's concession roads
-  and winding lanes (#286). The files are named after it.
+  and winding lanes, two across every sector (#286, #310). The files are named
+  after it.
 
 .PARAMETER Sector
   Draw and measure one 45-degree sector only, 0 to 7. Sector n runs from

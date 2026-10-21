@@ -4,8 +4,8 @@
 //! farms here, a work package at a time, behind [`RuralLayout::Farms`]. So far:
 //! - `sectors`: the sectors between the arterials and the deck of their
 //!   characters (RD1, RD2, #286);
-//! - `roads`: each sector's concession roads or winding lanes, to farm gates
-//!   (RD3 to RD5, #286);
+//! - `roads`: each sector's two concession roads or winding lanes, the roads
+//!   between them, and the roads to farm gates (RD3 to RD5, #286; RD10, #310);
 //! - `metrics`: the ring's layout numbers and the plan's §5 targets (#284);
 //! - `render`: the plan-view SVG and the `rural_plan_report` test (#284).
 //!
@@ -35,7 +35,8 @@ pub enum RuralLayout {
     /// The 12 radial trails and their lots (`terrain.rs`).
     #[default]
     Trails,
-    /// Rural v2: concession roads and winding lanes. No farms on them until
+    /// Rural v2: two concession roads or winding lanes across every sector,
+    /// and the roads between them (#286, #310). No farms on them until
     /// R4 (#287).
     Farms,
 }
@@ -60,7 +61,8 @@ impl Default for RuralParams {
 #[derive(Debug, Default)]
 pub struct Plan {
     pub sectors: Vec<Sector>,
-    /// `lane_{s}_{k}`: each sector's main road is `k = 0`.
+    /// `lane_{s}_{k}`: each sector's inner main road is `k = 0` and its outer
+    /// one `k = 1`.
     pub roads: Vec<RoadSegment>,
     /// Where the side roads and spurs end. A loose end is allowed only here.
     pub gates: Vec<P>,
@@ -150,10 +152,11 @@ pub(crate) mod tests {
         }
     }
 
-    /// R3's acceptance: under `Farms`, the audit is clean on the lanes but
-    /// for loose ends at farm gates, every main road meets an arterial at a
-    /// shared vertex at both ends, and every side road and spur starts on a
-    /// vertex of its main road.
+    /// R3's and RW3's acceptance: under `Farms`, the audit is clean on the
+    /// lanes but for loose ends at farm gates. Every sector has two main
+    /// roads that meet an arterial at a shared vertex at both ends, and at
+    /// least one road between them. Every other road starts on a vertex of a
+    /// main road, and ends on the other's or at a gate.
     #[test]
     fn the_lanes_are_clean_and_join_the_arterials() {
         for seed in SEEDS {
@@ -175,22 +178,26 @@ pub(crate) mod tests {
 
             let arterials: Vec<_> =
                 t.roads.iter().filter(|r| r.id.starts_with("arterial_") && !r.id.starts_with("arterial_inner")).collect();
-            for lane in t.roads.iter().filter(|r| is_lane(r)) {
-                let main_id = format!("{}0", lane.id.trim_end_matches(|c: char| c.is_ascii_digit()));
-                if lane.id == main_id {
-                    for end in [lane.points[0], *lane.points.last().unwrap()] {
-                        let on = arterials.iter().any(|a| a.points.iter().any(|&q| same(q, end)));
-                        assert!(on, "seed {seed}: {} ends at {end:?}, not on an arterial's vertex", lane.id);
+            let road = |id: &str| t.roads.iter().find(|r| r.id == id).unwrap_or_else(|| panic!("seed {seed}: no {id}"));
+            let on = |r: &RoadSegment, p: P| r.points.iter().any(|&q| same(q, p));
+            for s in 0..8 {
+                let mains = [road(&format!("lane_{s}_0")), road(&format!("lane_{s}_1"))];
+                for main in mains {
+                    for end in [main.points[0], *main.points.last().unwrap()] {
+                        let on_arterial = arterials.iter().any(|a| on(a, end));
+                        assert!(on_arterial, "seed {seed}: {} ends at {end:?}, not on an arterial's vertex", main.id);
                     }
-                } else {
-                    let main = t.roads.iter().find(|r| r.id == main_id).expect("its main road");
-                    assert!(
-                        main.points.iter().any(|&q| same(q, lane.points[0])),
-                        "seed {seed}: {} doesn't start on {}",
-                        lane.id,
-                        main.id
-                    );
                 }
+                let prefix = format!("lane_{s}_");
+                for lane in t.roads.iter().filter(|r| r.id.starts_with(&prefix) && mains.iter().all(|m| m.id != r.id)) {
+                    let (start, end) = (lane.points[0], *lane.points.last().unwrap());
+                    let from = mains.iter().position(|m| on(m, start));
+                    assert!(from.is_some(), "seed {seed}: {} doesn't start on a main road", lane.id);
+                    let joins = from.is_some_and(|i| on(mains[1 - i], end));
+                    assert!(joins || gates.iter().any(|&g| same(g, end)), "seed {seed}: {} ends on neither road nor gate", lane.id);
+                }
+                let counted = metrics::sector_roads(&t.roads, s);
+                assert!(counted.mains == 2 && counted.links >= 1, "seed {seed}: sector {s} has {counted:?}");
             }
         }
     }

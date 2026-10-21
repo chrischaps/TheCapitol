@@ -1,15 +1,20 @@
-//! The ring's roads, a sector at a time (plan RD3 to RD5).
+//! The ring's roads, a sector at a time (plan RD3 to RD5, and RD10).
 //!
-//! - **Concession** sectors get a straight main road from arterial to
-//!   arterial, two legs kinked at the bisector, sometimes with a
-//!   correction-line jog there, and one or two straight radial side roads.
-//! - **Winding** sectors get a main lane on two low sines through a
-//!   centripetal spline, and one spur that wanders off it.
+//! The ring is 1600 deep, so every sector has two main roads across it from
+//! arterial to arterial: an inner one about r3400 and an outer one about
+//! r4200 (RD10, #310).
+//! - **Concession** sectors' main roads are two straight legs each, kinked at
+//!   the bisector, sometimes with a correction-line jog there. One or two
+//!   straight radial *concession side roads* join them at T junctions, and
+//!   at most one more runs from the outer road out to a farm gate.
+//! - **Winding** sectors' main roads are lanes on two low sines through a
+//!   centripetal spline, kept apart. One winding *cross-lane* joins them, and
+//!   one spur wanders off either of them to a farm gate.
 //!
-//! Every side road and spur ends at a farm gate: the one place a loose end is
-//! allowed. `TerrainConfig::generate_all_roads_with_params` welds the lanes
-//! to the arterials afterwards, so each main road ends on one at a shared
-//! vertex, and each side road and spur on its main road.
+//! A road that ends anywhere but on another road ends at a farm gate: the one
+//! place a loose end is allowed. `TerrainConfig::generate_all_roads_with_params`
+//! welds the lanes afterwards, so each main road ends on an arterial at a
+//! shared vertex, and every other road on the main roads it leaves and meets.
 
 use std::f64::consts::{PI, TAU};
 
@@ -18,20 +23,22 @@ use capitol_protocol::terrain::{RoadSegment, RoadType};
 
 use super::sectors::{polar, Character, Sector};
 use crate::models::geom::SplitMix64;
-use crate::models::street_plan::{centripetal_spline, resample};
+use crate::models::street_plan::{centripetal_spline, resample, MIN_STEP};
 use crate::models::terrain::point_to_segment_distance;
 
 type P = (f64, f64);
 
 /// Lanes are sampled about this often.
 pub const STEP: f64 = 20.0;
-/// The main road runs this far into the ring from its inner edge, at least...
-const MAIN_IN: f64 = 330.0;
-/// ...and at most (RD3: ρ ∈ [3330, 3470] on today's ring).
-const MAIN_OUT: f64 = 470.0;
+/// The inner main road runs this far into the ring from its inner edge, at
+/// least and at most (RD3: ρ ∈ [3330, 3470])...
+const INNER_BAND: (f64, f64) = (330.0, 470.0);
+/// ...and the outer one this far (RD10: ρ ∈ [4130, 4270], the kink in
+/// [4155, 4245]).
+const OUTER_BAND: (f64, f64) = (1130.0, 1270.0);
 /// How far a concession road's ends may sit off its kink's radius.
 const END_DRIFT: f64 = 25.0;
-/// The chance of a correction-line jog at the kink.
+/// The chance of a correction-line jog at the kink, for each main road.
 const JOG_CHANCE: f64 = 0.5;
 /// The jog crosses at this many degrees off the road's mean line. Its two
 /// bends are this plus or minus the legs' half-kink (11.25° in a 45° sector),
@@ -39,21 +46,36 @@ const JOG_CHANCE: f64 = 0.5;
 const JOG_DEG: (f64, f64) = (16.0, 24.0);
 /// The jog's length along its own line.
 const JOG_LEN: (f64, f64) = (110.0, 170.0);
+/// The chance of a second concession side road...
+const TWO_SIDE_ROADS: f64 = 0.5;
+/// ...and of a road from the outer main road out to a gate.
+const GATE_ROAD: f64 = 0.5;
 /// A farm gate stands this far in from the ring's edge it faces.
 const GATE_IN: (f64, f64) = (80.0, 140.0);
 /// The winding lane's two sines, in total amplitude (RD4: 150 or less)...
 const SWAY: (f64, f64) = (90.0, 150.0);
 /// ...and its control points across the sector.
 const CONTROLS: usize = 12;
-/// The spur turns at most this much a step (RD4)...
-const SPUR_TURN_DEG: f64 = 8.0;
-/// ...leaves the lane within this of square...
+/// The two lanes of a winding sector keep at least this far apart (RD10).
+const LANES_APART: f64 = 500.0;
+/// The cross-lane and the spur turn at most this much a step (RD4). They
+/// draw their turns under it, so the last step, cut short where it meets a
+/// road, keeps inside it too.
+const WIND_TURN_DEG: f64 = 8.0;
+const WIND_DRAW_DEG: f64 = WIND_TURN_DEG - 1.0;
+/// The cross-lane leaves the inner lane this far across the sector...
+const CROSS_AT: (f64, f64) = (0.3, 0.7);
+/// ...and steers for the outer lane within this share of the sector of its
+/// own bearing.
+const CROSS_AIM: f64 = 0.08;
+/// The spur leaves its lane within this of square...
 const SPUR_LEAVE_DEG: f64 = 25.0;
 /// ...and runs this long, unless something stops it first...
 const SPUR_LEN: (f64, f64) = (260.0, 380.0);
 /// ...though never shorter than this.
 const SPUR_MIN: f64 = 160.0;
-/// A spur keeps this far from its own lane once it's left it...
+/// A spur keeps this far from the sector's other roads once it's left its
+/// lane...
 const SPUR_CLEAR: f64 = 40.0;
 /// ...and this far past an arterial's kerb.
 const ARTERIAL_CLEAR: f64 = 60.0;
@@ -61,8 +83,11 @@ const ARTERIAL_CLEAR: f64 = 60.0;
 /// What one sector lays.
 #[derive(Debug, Default)]
 pub struct Laid {
+    /// `lane_{s}_0` is the inner main road and `lane_{s}_1` the outer one.
+    /// Then come the roads that join them, and last the road to a gate, if
+    /// there is one.
     pub roads: Vec<RoadSegment>,
-    /// Where the side roads and spurs end, at a farm's gate.
+    /// Where the roads to a gate end.
     pub gates: Vec<P>,
 }
 
@@ -76,43 +101,54 @@ pub struct Ring {
     pub lane_width: f64,
 }
 
+impl Ring {
+    /// The radii a main road keeps to, from a band measured off the inner edge.
+    fn band(&self, band: (f64, f64)) -> (f64, f64) {
+        (self.inner + band.0, self.inner + band.1)
+    }
+}
+
 /// The roads of `sector`, from its own stream.
 pub fn lay(sector: &Sector, ring: &Ring, rng: &mut SplitMix64) -> Laid {
-    let mut out = Laid::default();
-    let road = |k: usize, points: Vec<P>| RoadSegment {
-        id: format!("lane_{}_{k}", sector.index),
-        road_type: RoadType::Trail,
-        points,
-        width: ring.lane_width,
-    };
-    match sector.character {
+    let (mains, links, to_gate) = match sector.character {
         Character::Concession => {
-            let main = concession_main(sector, ring, rng);
-            let sides = side_roads(sector, ring, rng, &main);
-            out.roads.push(road(0, main));
-            for (k, side) in sides.into_iter().enumerate() {
-                out.gates.push(*side.last().expect("a side road has two ends"));
-                out.roads.push(road(k + 1, side));
-            }
+            let inner = concession_main(sector, ring, rng, INNER_BAND);
+            let outer = concession_main(sector, ring, rng, OUTER_BAND);
+            let (links, to_gate) = side_roads(sector, ring, rng, &inner, &outer);
+            ([inner, outer], links, to_gate)
         }
         Character::Winding => {
-            let main = winding_main(sector, ring, rng);
-            let spur = spur(sector, ring, rng, &main);
-            out.roads.push(road(0, main));
-            if let Some(spur) = spur {
-                out.gates.push(*spur.last().expect("a spur has two ends"));
-                out.roads.push(road(1, spur));
-            }
+            let inner = winding_main(sector, ring, rng, INNER_BAND, 1.0);
+            let mut outer = outer_lane(sector, ring, rng, &inner);
+            let cross = cross_lane(sector, ring, rng, &inner, &mut outer);
+            let spur = spur(sector, ring, rng, [&inner, &outer], &cross);
+            ([inner, outer], vec![cross], spur)
         }
+    };
+    let mut out = Laid::default();
+    if let Some(end) = to_gate.as_ref().and_then(|r| r.last()) {
+        out.gates.push(*end);
     }
+    out.roads = mains
+        .into_iter()
+        .chain(links)
+        .chain(to_gate)
+        .enumerate()
+        .map(|(k, points)| RoadSegment {
+            id: format!("lane_{}_{k}", sector.index),
+            road_type: RoadType::Trail,
+            points,
+            width: ring.lane_width,
+        })
+        .collect();
     out
 }
 
 /// Two straight legs from arterial to arterial, kinked at the bisector, or
-/// jogged there (RD3).
-fn concession_main(sector: &Sector, ring: &Ring, rng: &mut SplitMix64) -> Vec<P> {
+/// jogged there (RD3), within `band` of the ring's inner edge.
+fn concession_main(sector: &Sector, ring: &Ring, rng: &mut SplitMix64, band: (f64, f64)) -> Vec<P> {
     let c = ring.center;
-    let (lo, hi) = (ring.inner + MAIN_IN, ring.inner + MAIN_OUT);
+    let (lo, hi) = ring.band(band);
     let rho = rng.range(lo + END_DRIFT, hi - END_DRIFT);
     let r_from = (rho + rng.range(-END_DRIFT, END_DRIFT)).clamp(lo, hi);
     let r_to = (rho + rng.range(-END_DRIFT, END_DRIFT)).clamp(lo, hi);
@@ -140,39 +176,56 @@ fn concession_main(sector: &Sector, ring: &Ring, rng: &mut SplitMix64) -> Vec<P>
     main
 }
 
-/// One or two straight radial roads off the main road at T junctions, each
-/// to a farm gate. Two go opposite ways, so neither half of the sector is
-/// left with nothing.
-fn side_roads(sector: &Sector, ring: &Ring, rng: &mut SplitMix64, main: &[P]) -> Vec<Vec<P>> {
-    let spots = if rng.next_f64() < 0.5 {
-        // Clear of the kink and its jog.
-        let u = rng.range(0.30, 0.58);
-        vec![if u < 0.44 { u } else { u + 0.12 }]
-    } else {
-        vec![rng.range(0.22, 0.40), rng.range(0.60, 0.78)]
+/// The concession side roads: one or two straight radial roads from the
+/// inner main road to the outer one, at T junctions both ends. Then, half
+/// the time, one more from the outer road out to a farm gate (RD10).
+///
+/// The sector's two halves sit either side of the kink and its jogs. Two
+/// side roads take a half each; one takes a half and leaves the other to the
+/// gate road. When both halves have a side road, the gate road shares one,
+/// at the other end of it from the side road.
+fn side_roads(sector: &Sector, ring: &Ring, rng: &mut SplitMix64, inner: &[P], outer: &[P]) -> (Vec<Vec<P>>, Option<Vec<P>>) {
+    // `u` runs across a half, 0 by the arterial and 1 by the kink.
+    let at = |first: bool, u: f64| if first { 0.22 + 0.20 * u } else { 0.78 - 0.20 * u };
+    let two = rng.next_f64() < TWO_SIDE_ROADS;
+    let gate = rng.next_f64() < GATE_ROAD;
+    let first = rng.next_f64() < 0.5;
+    let side_by_arterial = rng.next_f64() < 0.5;
+    let mut u = |mid: f64, spread: f64| mid + rng.range(-spread, spread);
+    let (sides, to_gate) = match (two, gate) {
+        (true, false) => (vec![at(first, u(0.5, 0.1)), at(!first, u(0.5, 0.1))], None),
+        (true, true) => {
+            let (side, gate) = if side_by_arterial { (0.1, 0.9) } else { (0.9, 0.1) };
+            (vec![at(first, u(side, 0.1)), at(!first, u(0.5, 0.1))], Some(at(first, u(gate, 0.1))))
+        }
+        (false, gate) => (vec![at(first, u(0.5, 0.2))], gate.then(|| at(!first, u(0.5, 0.2)))),
     };
-    let first_out = rng.next_f64() < 0.5;
-    spots
+    let c = ring.center;
+    let links = sides
         .into_iter()
-        .enumerate()
-        .filter_map(|(k, t)| {
-            let outward = first_out == (k == 0);
+        .filter_map(|t| {
             let a = sector.bearing(t);
-            let start = ray_hit(main, ring.center, a)?;
-            let r = if outward { ring.outer - rng.range(GATE_IN.0, GATE_IN.1) } else { ring.inner + rng.range(GATE_IN.0, GATE_IN.1) };
-            Some(vec![start, polar(ring.center, r, a)])
+            Some(vec![ray_hit(inner, c, a)?.1, ray_hit(outer, c, a)?.1])
         })
-        .collect()
+        .collect();
+    let to_gate = to_gate.and_then(|t| {
+        let a = sector.bearing(t);
+        let r = ring.outer - rng.range(GATE_IN.0, GATE_IN.1);
+        Some(vec![ray_hit(outer, c, a)?.1, polar(c, r, a)])
+    });
+    (links, to_gate)
 }
 
-/// The main lane: ρ(θ) on two low sines, giving two or three bends across
+/// A winding lane: ρ(θ) on two low sines, giving two or three bends across
 /// the sector, with a gentle wander in bearing, through a centripetal spline
-/// and resampled (RD4).
-fn winding_main(sector: &Sector, ring: &Ring, rng: &mut SplitMix64) -> Vec<P> {
-    let rho0 = rng.range(ring.inner + MAIN_IN, ring.inner + MAIN_OUT);
-    let sway = rng.range(SWAY.0, SWAY.1);
+/// and resampled (RD4). Its mean radius is within `band` of the ring's inner
+/// edge, and `sway` scales its sines.
+fn winding_main(sector: &Sector, ring: &Ring, rng: &mut SplitMix64, band: (f64, f64), sway: f64) -> Vec<P> {
+    let (lo, hi) = ring.band(band);
+    let rho0 = rng.range(lo, hi);
+    let amplitude = rng.range(SWAY.0, SWAY.1) * sway;
     let share = rng.range(0.55, 0.8);
-    let (a1, a2) = (sway * share, sway * (1.0 - share));
+    let (a1, a2) = (amplitude * share, amplitude * (1.0 - share));
     let (f1, f2) = (rng.range(0.9, 1.4), rng.range(1.6, 2.4));
     let (p1, p2) = (rng.range(0.0, TAU), rng.range(0.0, TAU));
     let rho = |t: f64| rho0 + a1 * (TAU * f1 * t + p1).stable_sin() + a2 * (TAU * f2 * t + p2).stable_sin();
@@ -189,16 +242,95 @@ fn winding_main(sector: &Sector, ring: &Ring, rng: &mut SplitMix64) -> Vec<P> {
     resample(&centripetal_spline(&controls, 8), STEP)
 }
 
-/// One spur off the lane, turning a little each step, to a farm gate (RD4).
-/// It stops early rather than run near the ring's edges, an arterial or its
-/// own lane, and a draw that stops too soon is drawn again. `None` if none of
-/// the draws gets far enough.
-fn spur(sector: &Sector, ring: &Ring, rng: &mut SplitMix64, lane: &[P]) -> Option<Vec<P>> {
+/// A winding sector's outer lane, at least [`LANES_APART`] from its inner
+/// one. A draw that comes too close is drawn again, and after every eight
+/// the sines are let out less, down to none: the bands alone keep two lanes
+/// without sway 660 apart.
+fn outer_lane(sector: &Sector, ring: &Ring, rng: &mut SplitMix64, inner: &[P]) -> Vec<P> {
+    let mut sway: f64 = 1.0;
+    loop {
+        for _ in 0..8 {
+            let outer = winding_main(sector, ring, rng, OUTER_BAND, sway);
+            if sway <= 0.0 || closest(&outer, inner) >= LANES_APART {
+                return outer;
+            }
+        }
+        sway = (sway - 0.25).max(0.0);
+    }
+}
+
+/// The winding cross-lane, from a vertex of the inner lane to the outer lane,
+/// at T junctions both ends (RD10). It leaves about square and steers for a
+/// point on the outer lane, wandering as it goes and turning less than
+/// [`WIND_TURN_DEG`] a step, and stops where it meets the outer lane.
+///
+/// Where it meets goes into the outer lane as a vertex. Left to the weld,
+/// which snaps a junction to any vertex within `street_plan::SNAP`, a short
+/// last step would swing through a sharp turn.
+fn cross_lane(sector: &Sector, ring: &Ring, rng: &mut SplitMix64, inner: &[P], outer: &mut Vec<P>) -> Vec<P> {
+    let (mut points, (seg, x)) = walk_across(sector, ring, rng, inner, outer);
+    match [seg, seg + 1].into_iter().find(|&k| dist(outer[k], x) < MIN_STEP) {
+        Some(k) => outer[k] = x,
+        None => outer.insert(seg + 1, x),
+    }
+    if dist(points[points.len() - 1], x) < 2.0 * MIN_STEP && points.len() > 1 {
+        // A step that meets the lane a hair past the last vertex ends there
+        // instead, rather than leave a sliver.
+        points.pop();
+    }
+    points.push(x);
+    points
+}
+
+/// The cross-lane's walk, up to the step that meets the outer lane, and
+/// where it meets it: the lane's segment and the point.
+fn walk_across(sector: &Sector, ring: &Ring, rng: &mut SplitMix64, inner: &[P], outer: &[P]) -> (Vec<P>, (usize, P)) {
     let c = ring.center;
-    let max_turn = SPUR_TURN_DEG.to_radians();
-    let kerb = ring.arterial_width / 2.0 + ARTERIAL_CLEAR;
-    let near_lane = |p: P| lane.windows(2).any(|w| point_to_segment_distance(p.0, p.1, w[0].0, w[0].1, w[1].0, w[1].1) < SPUR_CLEAR);
+    let max_turn = WIND_DRAW_DEG.to_radians();
+    let bearing = |p: P| (p.1 - c.1).stable_atan2(p.0 - c.0);
     for _ in 0..8 {
+        let i = ((inner.len() - 1) as f64 * rng.range(CROSS_AT.0, CROSS_AT.1)).round() as usize;
+        let start = inner[i];
+        let aim = bearing(start) + rng.range(-CROSS_AIM, CROSS_AIM) * sector.span();
+        let Some((_, target)) = ray_hit(outer, c, aim) else { continue };
+        let mut heading = bearing(start) + rng.range(-15.0, 15.0).to_radians();
+        let mut points = vec![start];
+        for _ in 0..200 {
+            let last = *points.last().expect("starts with one");
+            if points.len() > 1 {
+                // A random walk, steered for the target, harder as it nears.
+                let off = wrap((target.1 - last.1).stable_atan2(target.0 - last.0) - heading);
+                let pull = (3.0 * STEP / dist(last, target)).clamp(0.15, 1.0);
+                let turn = rng.range(-6.0, 6.0).to_radians() * (1.0 - pull) + off * pull;
+                heading += turn.clamp(-max_turn, max_turn);
+            }
+            let p = (last.0 + STEP * heading.stable_cos(), last.1 + STEP * heading.stable_sin());
+            if let Some(hit) = first_hit(outer, last, p) {
+                return (points, hit);
+            }
+            points.push(p);
+        }
+    }
+    // Never seen: straight across at the bisector.
+    let a = sector.bearing(0.5);
+    let (_, from) = ray_hit(inner, c, a).expect("the inner lane spans the sector");
+    (vec![from], ray_hit(outer, c, a).expect("so does the outer"))
+}
+
+/// One spur off either lane, turning a little each step, to a farm gate
+/// (RD4). It stops early rather than run near the ring's edges, an arterial
+/// or the sector's other roads, and a draw that stops too soon is drawn
+/// again. `None` if none of the draws gets far enough.
+fn spur(sector: &Sector, ring: &Ring, rng: &mut SplitMix64, lanes: [&[P]; 2], cross: &[P]) -> Option<Vec<P>> {
+    let c = ring.center;
+    let max_turn = WIND_DRAW_DEG.to_radians();
+    let kerb = ring.arterial_width / 2.0 + ARTERIAL_CLEAR;
+    let near = |p: P, road: &[P]| {
+        road.windows(2).any(|w| point_to_segment_distance(p.0, p.1, w[0].0, w[0].1, w[1].0, w[1].1) < SPUR_CLEAR)
+    };
+    for _ in 0..8 {
+        let from = rng.below(2) as usize;
+        let lane = lanes[from];
         let i = ((lane.len() - 1) as f64 * rng.range(0.3, 0.7)).round() as usize;
         let start = lane[i];
         let outward = rng.next_f64() < 0.5;
@@ -217,13 +349,18 @@ fn spur(sector: &Sector, ring: &Ring, rng: &mut SplitMix64, lane: &[P]) -> Optio
                 heading += turn.clamp(-max_turn, max_turn);
             }
             let p = (last.0 + STEP * heading.stable_cos(), last.1 + STEP * heading.stable_sin());
-            let r = ((p.0 - c.0).powi(2) + (p.1 - c.1).powi(2)).sqrt();
+            let r = dist(p, c);
             let a = (p.1 - c.1).stable_atan2(p.0 - c.0);
             let from_edge = wrap(a - sector.from).abs().min(wrap(sector.to - a).abs());
+            // Its own lane, and a cross-lane that leaves the same place,
+            // are near its start by right.
+            let left = length > 3.0 * STEP;
             if r < ring.inner + GATE_IN.0
                 || r > ring.outer - GATE_IN.0
                 || r * from_edge.stable_sin() < kerb
-                || (length > 3.0 * STEP && near_lane(p))
+                || near(p, lanes[1 - from])
+                || (left && near(p, lane))
+                || ((left || !near(start, cross)) && near(p, cross))
             {
                 break;
             }
@@ -243,10 +380,22 @@ fn wrap(a: f64) -> f64 {
     if a > PI { a - TAU } else { a }
 }
 
-/// Where the ray from `center` at bearing `a` first meets `road`.
-fn ray_hit(road: &[P], center: P, a: f64) -> Option<P> {
+fn dist(a: P, b: P) -> f64 {
+    (a.0 - b.0).stable_hypot(a.1 - b.1)
+}
+
+/// The least distance from a point of `a` to the line `b`.
+fn closest(a: &[P], b: &[P]) -> f64 {
+    a.iter()
+        .flat_map(|p| b.windows(2).map(move |w| point_to_segment_distance(p.0, p.1, w[0].0, w[0].1, w[1].0, w[1].1)))
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Where the ray from `center` at bearing `a` first meets `road`: the
+/// road's segment and the point.
+fn ray_hit(road: &[P], center: P, a: f64) -> Option<(usize, P)> {
     let d = (a.stable_cos(), a.stable_sin());
-    road.windows(2).find_map(|w| {
+    road.windows(2).enumerate().find_map(|(i, w)| {
         let (p, q) = (w[0], w[1]);
         let e = (q.0 - p.0, q.1 - p.1);
         let denom = d.0 * e.1 - d.1 * e.0;
@@ -256,8 +405,29 @@ fn ray_hit(road: &[P], center: P, a: f64) -> Option<P> {
         let o = (p.0 - center.0, p.1 - center.1);
         let s = (o.0 * e.1 - o.1 * e.0) / denom;
         let u = (o.0 * d.1 - o.1 * d.0) / denom;
-        (s > 0.0 && (0.0..=1.0).contains(&u)).then_some((p.0 + e.0 * u, p.1 + e.1 * u))
+        (s > 0.0 && (0.0..=1.0).contains(&u)).then_some((i, (p.0 + e.0 * u, p.1 + e.1 * u)))
     })
+}
+
+/// Where the segment from `p` to `q` first meets `road`, nearest `p`: the
+/// road's segment and the point.
+fn first_hit(road: &[P], p: P, q: P) -> Option<(usize, P)> {
+    let d = (q.0 - p.0, q.1 - p.1);
+    road.windows(2)
+        .enumerate()
+        .filter_map(|(i, w)| {
+            let e = (w[1].0 - w[0].0, w[1].1 - w[0].1);
+            let denom = d.0 * e.1 - d.1 * e.0;
+            if denom.abs() < 1e-12 {
+                return None;
+            }
+            let o = (w[0].0 - p.0, w[0].1 - p.1);
+            let s = (o.0 * e.1 - o.1 * e.0) / denom;
+            let u = (o.0 * d.1 - o.1 * d.0) / denom;
+            ((0.0..=1.0).contains(&s) && (0.0..=1.0).contains(&u)).then_some((i, s))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, s)| (i, (p.0 + d.0 * s, p.1 + d.1 * s)))
 }
 
 #[cfg(test)]
@@ -265,10 +435,10 @@ mod tests {
     use super::*;
     use crate::models::street_plan::{sharpest_turn, turns};
 
-    const C: P = (6000.0, 6000.0);
+    const C: P = (6800.0, 6800.0);
 
     fn ring() -> Ring {
-        Ring { center: C, inner: 3000.0, outer: 3800.0, arterial_width: 60.0, lane_width: 8.0 }
+        Ring { center: C, inner: 3000.0, outer: 4600.0, arterial_width: 60.0, lane_width: 8.0 }
     }
 
     fn sector(character: Character) -> Sector {
@@ -276,54 +446,104 @@ mod tests {
     }
 
     fn radius(p: P) -> f64 {
-        ((p.0 - C.0).powi(2) + (p.1 - C.1).powi(2)).sqrt()
+        dist(p, C)
+    }
+
+    fn bearing(p: P) -> f64 {
+        (p.1 - C.1).stable_atan2(p.0 - C.0)
+    }
+
+    fn on(p: P, road: &[P]) -> bool {
+        road.windows(2).any(|w| point_to_segment_distance(p.0, p.1, w[0].0, w[0].1, w[1].0, w[1].1) < 1e-6)
     }
 
     #[test]
-    fn a_concession_road_is_two_straight_legs_and_its_side_roads_are_radial() {
-        for seed in 0..100 {
+    fn a_concession_sector_has_two_straight_roads_joined_by_radial_side_roads() {
+        let (mut ones, mut twos, mut gates) = (0, 0, 0);
+        for seed in 0..200 {
             let mut rng = SplitMix64::stream(seed, &[1]);
             let laid = lay(&sector(Character::Concession), &ring(), &mut rng);
-            let main = &laid.roads[0].points;
-            assert!(main.len() == 3 || main.len() == 4, "seed {seed}: {} points", main.len());
-            assert!(main.iter().all(|&p| (3330.0..=3470.0 + 1e-9).contains(&radius(p))), "seed {seed}: off the band");
-            assert!(sharpest_turn(main) <= 40.0, "seed {seed}: a {:.1}° bend", sharpest_turn(main));
-            assert!((1..=2).contains(&(laid.roads.len() - 1)), "seed {seed}: {} side roads", laid.roads.len() - 1);
-            assert_eq!(laid.gates.len(), laid.roads.len() - 1);
-            for side in &laid.roads[1..] {
-                let (a, b) = (side.points[0], side.points[1]);
-                let (ba, bb) = ((a.1 - C.1).stable_atan2(a.0 - C.0), (b.1 - C.1).stable_atan2(b.0 - C.0));
-                assert!((ba - bb).abs() < 1e-9, "seed {seed}: {} isn't radial", side.id);
-                assert!(main.windows(2).any(|w| point_to_segment_distance(a.0, a.1, w[0].0, w[0].1, w[1].0, w[1].1) < 1e-6));
+            let (inner, outer) = (&laid.roads[0].points, &laid.roads[1].points);
+            for (main, lo, hi) in [(inner, 3330.0, 3470.0), (outer, 4130.0, 4270.0)] {
+                assert!(main.len() == 3 || main.len() == 4, "seed {seed}: {} points", main.len());
+                assert!(main.iter().all(|&p| (lo..=hi + 1e-9).contains(&radius(p))), "seed {seed}: off the band");
+                assert!(sharpest_turn(main) <= 40.0, "seed {seed}: a {:.1}° bend", sharpest_turn(main));
+            }
+            let rest = &laid.roads[2..];
+            let links = rest.len() - laid.gates.len();
+            assert!((1..=2).contains(&links), "seed {seed}: {links} side roads");
+            assert!(laid.gates.len() <= 1, "seed {seed}: at most one road to a gate");
+            (ones, twos, gates) = (ones + (links == 1) as u32, twos + (links == 2) as u32, gates + laid.gates.len());
+            let mut bearings = Vec::new();
+            for (k, road) in rest.iter().enumerate() {
+                let (a, b) = (road.points[0], road.points[1]);
+                assert_eq!(road.points.len(), 2, "seed {seed}: {} is straight", road.id);
+                assert!((bearing(a) - bearing(b)).abs() < 1e-9, "seed {seed}: {} isn't radial", road.id);
+                bearings.push(bearing(a));
+                if k < links {
+                    assert!(on(a, inner) && on(b, outer), "seed {seed}: {} doesn't join the main roads", road.id);
+                } else {
+                    assert!(on(a, outer), "seed {seed}: {} doesn't leave the outer road", road.id);
+                    assert_eq!(b, laid.gates[0]);
+                    assert!((4460.0 - 1e-9..=4520.0 + 1e-9).contains(&radius(b)), "seed {seed}: the gate at r{:.0}", radius(b));
+                }
+            }
+            // No two of them share a bearing, or come within a farm of it.
+            for i in 0..bearings.len() {
+                for k in i + 1..bearings.len() {
+                    let apart = (bearings[i] - bearings[k]).abs() * 4200.0;
+                    assert!(apart > 300.0, "seed {seed}: two roads {apart:.0} apart at r4200");
+                }
             }
         }
+        assert!(ones > 60 && twos > 60 && gates > 60, "{ones} with one side road, {twos} with two, {gates} gates");
     }
 
     #[test]
-    fn a_winding_lane_sways_gently_and_its_spur_turns_slowly() {
+    fn a_winding_sector_has_two_lanes_apart_and_a_cross_lane_between() {
         let mut spurs = 0;
-        for seed in 0..100 {
+        for seed in 0..200 {
             let mut rng = SplitMix64::stream(seed, &[1]);
             let laid = lay(&sector(Character::Winding), &ring(), &mut rng);
-            let lane = &laid.roads[0].points;
-            let (lo, hi) = lane.iter().map(|&p| radius(p)).fold((f64::MAX, f64::MIN), |(l, h), r| (l.min(r), h.max(r)));
-            assert!(lo > 3150.0 && hi < 3650.0, "seed {seed}: the lane runs {lo:.0} to {hi:.0}");
-            assert!(sharpest_turn(lane) < 10.0, "seed {seed}: a {:.1}° bend in the lane", sharpest_turn(lane));
-            if let Some(spur) = laid.roads.get(1) {
+            let (inner, outer) = (&laid.roads[0].points, &laid.roads[1].points);
+            for (lane, lo, hi) in [(inner, 3150.0, 3650.0), (outer, 3950.0, 4450.0)] {
+                let (near, far) = lane.iter().map(|&p| radius(p)).fold((f64::MAX, f64::MIN), |(l, h), r| (l.min(r), h.max(r)));
+                assert!(near > lo && far < hi, "seed {seed}: a lane runs {near:.0} to {far:.0}");
+                assert!(sharpest_turn(lane) < 10.0, "seed {seed}: a {:.1}° bend in a lane", sharpest_turn(lane));
+            }
+            assert!(closest(outer, inner) >= LANES_APART, "seed {seed}: the lanes come {:.0} apart", closest(outer, inner));
+
+            let cross = &laid.roads[2].points;
+            assert!(inner.contains(&cross[0]), "seed {seed}: the cross-lane doesn't leave a vertex of the inner lane");
+            assert!(on(*cross.last().unwrap(), outer), "seed {seed}: the cross-lane doesn't meet the outer lane");
+            let worst = turns(cross).map(|(_, d)| d).fold(0.0, f64::max);
+            assert!(worst <= WIND_TURN_DEG, "seed {seed}: the cross-lane turns {worst:.1}°");
+            assert!(cross.windows(2).all(|w| dist(w[0], w[1]) >= 2.0 * MIN_STEP), "seed {seed}: a sliver on the cross-lane");
+
+            if let Some(spur) = laid.roads.get(3) {
                 spurs += 1;
+                assert_eq!(*spur.points.last().unwrap(), laid.gates[0]);
                 let worst = turns(&spur.points).map(|(_, d)| d).fold(0.0, f64::max);
-                assert!(worst <= SPUR_TURN_DEG + 1e-9, "seed {seed}: the spur turns {worst:.1}°");
-                assert!(spur.points.iter().all(|&p| (3080.0..=3720.0).contains(&radius(p))), "seed {seed}");
+                assert!(worst <= WIND_TURN_DEG, "seed {seed}: the spur turns {worst:.1}°");
+                assert!(spur.points.iter().all(|&p| (3080.0..=4520.0).contains(&radius(p))), "seed {seed}");
             }
         }
-        assert!(spurs >= 95, "only {spurs} of 100 winding sectors got a spur");
+        assert!(spurs >= 190, "only {spurs} of 200 winding sectors got a spur");
     }
 
     #[test]
     fn a_ray_meets_the_road_it_crosses() {
         let road = [(0.0, 10.0), (10.0, 10.0), (20.0, 0.0)];
-        let hit = ray_hit(&road, (5.0, 0.0), PI / 2.0).expect("it crosses");
+        let (seg, hit) = ray_hit(&road, (5.0, 0.0), PI / 2.0).expect("it crosses");
+        assert_eq!(seg, 0);
         assert!((hit.0 - 5.0).abs() < 1e-9 && (hit.1 - 10.0).abs() < 1e-9, "{hit:?}");
         assert_eq!(ray_hit(&road, (5.0, 0.0), -PI / 2.0), None);
+    }
+
+    #[test]
+    fn a_step_meets_the_road_nearest_its_start() {
+        let road = [(0.0, 10.0), (20.0, 10.0), (20.0, 5.0), (0.0, 5.0)];
+        assert_eq!(first_hit(&road, (10.0, 0.0), (10.0, 20.0)), Some((2, (10.0, 5.0))));
+        assert_eq!(first_hit(&road, (10.0, 0.0), (10.0, 4.0)), None);
     }
 }
