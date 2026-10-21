@@ -10,6 +10,11 @@ authors.workspace = true
 name = "capitol"
 path = "src/main.rs"
 
+[features]
+# Flint's frame profiler (ADR 0109): `cargo build --release --features
+# profile`, then Tracy's viewer finds the running client (D5.4, #374).
+profile = ["flint-player/profile"]
+
 [dependencies]
 capitol-core = { workspace = true }
 capitol-protocol = { workspace = true }
