@@ -221,9 +221,11 @@ struct Args {
     node_sample: bool,
     /// Offline, stand people and citizens side by side where the camera
     /// first looks, so their lanterns and names can be compared (C0.2).
-    /// For captures
-    #[arg(long, requires = "offline")]
-    citizen_sample: bool,
+    /// "stroll" walks them instead, up and down the way the camera looks,
+    /// as if along a street (#346). For captures
+    #[arg(long, requires = "offline", value_name = "stroll", num_args = 0..=1,
+        default_missing_value = "row", value_parser = ["row", "stroll"])]
+    citizen_sample: Option<String>,
 }
 
 /// A time of day for `--time-of-day`: 0 to 1, 1 being midnight again.
@@ -346,7 +348,7 @@ fn main() -> Result<()> {
         .with_station_sample(args.station_sample)
         .with_automation_sample(args.automation_sample)
         .with_node_sample(args.node_sample)
-        .with_citizen_sample(args.citizen_sample)
+        .with_citizen_sample(args.citizen_sample.as_deref())
         .with_trade_offer(args.trade_offer.as_deref())
         .with_settings(
             settings::SettingsFile::load(

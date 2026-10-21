@@ -361,6 +361,56 @@ fn smooth(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// `--citizen-sample stroll` (#346): people and citizens walking up and
+/// down the way the camera looks, `t` seconds after they set off, as if
+/// along a street through where it looks. Each keeps a lane of its own
+/// across the view, and one lingers. Mostly citizens, since they're what
+/// it's for. Over ten seconds they all stay within fourteen metres of
+/// where it looks; nobody wraps round, so a walker who leaves stays out.
+pub fn stroll(target: [f32; 2], camera: [f32; 2], t: f32) -> (GameState, Vec<Pose>) {
+    use capitol_core::net::ConnectionState;
+    use capitol_core::protocol::ws::{PlayerPosition, ServerMessage};
+    // Name, citizen, lane across the view (m, + to the right), where along
+    // it they start (m past where the camera looks) and their pace along
+    // it (m/s, negative toward the camera)
+    const WALKERS: [(&str, bool, f32, f32, f32); 7] = [
+        ("Corin", true, -1.6, -3.0, 1.1),
+        ("Elsbeth", true, 1.3, 9.0, -1.0),
+        ("Wren Ashby", false, -0.5, 1.0, 0.9),
+        ("Oswin", true, 1.9, -6.0, 1.2),
+        ("Juno", true, 0.6, 13.0, -1.1),
+        ("Tam Hollis", false, -2.0, 6.0, -0.8),
+        ("Hale", true, 0.2, 3.0, 0.0),
+    ];
+    let mut state = GameState::new();
+    state.apply_connection(&ConnectionState::Connected { player_id: Uuid::from_u128(0xc0_03_ff) });
+    let (dx, dz) = (target[0] - camera[0], target[1] - camera[1]);
+    let len = dx.hypot(dz).max(1e-3);
+    let away = [dx / len, dz / len];
+    let right = [-away[1], away[0]];
+    let mut poses = Vec::new();
+    for (i, (name, citizen, lane, from, pace)) in WALKERS.into_iter().enumerate() {
+        let along = from + pace * t;
+        let [x, y] = crate::coords::to_server(
+            target[0] + away[0] * along + right[0] * lane,
+            target[1] + away[1] * along + right[1] * lane,
+        );
+        let id = Uuid::from_u128(0xc0_03_00 + i as u128);
+        state.apply_ws(&ServerMessage::PlayerJoined {
+            player: PlayerPosition { id, name: name.into(), x, y, citizen },
+        });
+        // The server's heading: east 0, south (+Z) π/2. The one who lingers
+        // looks across the street.
+        let facing = match pace {
+            p if p > 0.0 => f64::from(away[1]).atan2(f64::from(away[0])),
+            p if p < 0.0 => f64::from(-away[1]).atan2(f64::from(-away[0])),
+            _ => f64::from(right[1]).atan2(f64::from(right[0])),
+        };
+        poses.push(Pose { id, x, y, facing, moving: pace != 0.0 });
+    }
+    (state, poses)
+}
+
 /// `--citizen-sample` (C0.2): people and citizens side by side, in a row
 /// across the view where the camera looks, turned a little toward it,
 /// with you in the middle, for captures of the mark.
@@ -760,6 +810,33 @@ mod tests {
                 (z - 20.0).abs() < 1e-3 && (x - 10.0).abs() < 4.0,
                 "{x}, {z}"
             );
+        }
+    }
+
+    #[test]
+    fn the_stroll_walks_up_and_down_the_way_the_camera_looks() {
+        // The camera at z 40 looks north (-Z) to z 20: walking away is -Z
+        let at = |t: f32| stroll([10.0, 20.0], [10.0, 40.0], t);
+        let (state, start) = at(0.0);
+        let (_, later) = at(5.0);
+        assert!(start.iter().filter(|p| state.player(p.id).is_some_and(|p| p.citizen)).count() >= 4);
+        for (i, (a, b)) in start.iter().zip(&later).enumerate() {
+            let ([ax, az], [bx, bz]) = (to_world(a.x, a.y), to_world(b.x, b.y));
+            assert!((ax - bx).abs() < 1e-3, "each keeps its lane");
+            assert!((ax - 10.0).abs() < 3.0, "the lanes run near where it looks");
+            if !b.moving {
+                assert!((az - bz).abs() < 1e-3, "the one who lingers stays put");
+                continue;
+            }
+            // Facing the way it goes: away is -Z, a server heading of -π/2
+            let want = if bz < az { -std::f64::consts::FRAC_PI_2 } else { std::f64::consts::FRAC_PI_2 };
+            assert!((b.facing - want).abs() < 1e-3, "{}", b.facing);
+            // Within fourteen metres of where it looks for a ten-second clip
+            for t in 0..=10 {
+                let p = &at(t as f32).1[i];
+                let [_, z] = to_world(p.x, p.y);
+                assert!((z - 20.0).abs() < 14.0, "t {t}: {z}");
+            }
         }
     }
 

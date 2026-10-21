@@ -96,6 +96,10 @@ pub struct CapitolExtension {
     /// `--citizen-sample` (C0.2): offline, people and citizens in a row
     /// where the camera looks, stood there once it's settled.
     citizen_sample: Option<Option<(capitol_core::state::GameState, Vec<capitol_core::motion::Pose>)>>,
+    /// `--citizen-sample stroll` (#346): walk them, from where the camera
+    /// looked, where it stood and when, once it settled
+    citizen_strolls: bool,
+    citizen_stroll: Option<([f32; 2], [f32; 2], f64)>,
     /// The grass fields over the rural ring and the wilderness (P8.6c).
     grass: world::grass::Grass,
     /// The wilds' height field, sampled off the main thread (W9), its
@@ -203,6 +207,8 @@ impl CapitolExtension {
             node_sample: false,
             node_sampled: None,
             citizen_sample: None,
+            citizen_strolls: false,
+            citizen_stroll: None,
             grass: world::grass::Grass::default(),
             land: world::land::Builder::default(),
             land_meshes: world::land_mesh::LandMeshes::default(),
@@ -317,10 +323,12 @@ impl CapitolExtension {
     /// Offline, scatter every kind of node round the camera and take some
     /// through a day's work (`--node-sample`).
     /// Offline, people and citizens side by side before the camera
-    /// (`--citizen-sample`, C0.2).
-    pub fn with_citizen_sample(mut self, on: bool) -> Self {
-        if self.session.is_none() && on {
+    /// (`--citizen-sample`, C0.2), or with "stroll" walking up and down the
+    /// way it looks (#346).
+    pub fn with_citizen_sample(mut self, mode: Option<&str>) -> Self {
+        if let (Some(mode), None) = (mode, &self.session) {
             self.citizen_sample = Some(None);
+            self.citizen_strolls = mode == "stroll";
         }
         self
     }
@@ -920,7 +928,14 @@ impl PlayerExtension for CapitolExtension {
             // Stood once the camera has settled on its shot.
             if sample.is_none() && ctx.clock.total_time > 0.5 {
                 let (t, c) = (ctx.camera.target, ctx.camera.position);
-                *sample = Some(crate::entities::sample([t.x, t.z], [c.x, c.z]));
+                let (t, c) = ([t.x, t.z], [c.x, c.z]);
+                if self.citizen_strolls {
+                    self.citizen_stroll = Some((t, c, ctx.clock.total_time));
+                }
+                *sample = Some(crate::entities::sample(t, c));
+            }
+            if let Some((t, c, from)) = self.citizen_stroll {
+                *sample = Some(crate::entities::stroll(t, c, (ctx.clock.total_time - from) as f32));
             }
             if let Some((state, poses)) = sample {
                 let dt = ctx.clock.delta_time.min(0.1) as f32;
