@@ -291,13 +291,48 @@ fn front_page(ui: &mut egui::Ui, g: &Gazette) {
         });
 }
 
-/// From the Exchange: the day's trading, the movers and every price.
+/// From the Exchange: the day's trading, the movers and every price. Then the
+/// bazaar's stalls (#240), which print no prices.
 fn exchange(ui: &mut egui::Ui, g: &Gazette) {
     section(ui, "From the Exchange");
     ui.label(ink(&g.markets, size::BODY));
     if !g.prices.is_empty() {
         ui.add_space(6.0);
         price_table(ui, &g.prices);
+    }
+    // An edition from before the Gazette counted the stalls has no story
+    if !g.stalls_story.is_empty() {
+        ui.add_space(10.0);
+        stalls(ui, g);
+    }
+}
+
+/// At the Stalls: what sold at the bazaar and its busiest shops, by name
+/// only where the keeper lets the Gazette print it.
+fn stalls(ui: &mut egui::Ui, g: &Gazette) {
+    section(ui, "At the Stalls");
+    ui.label(ink(&g.stalls_story, size::BODY));
+    let Some(st) = g.stalls.as_ref().filter(|st| !st.shops.is_empty()) else {
+        return;
+    };
+    ui.add_space(4.0);
+    for (k, shop) in st.shops.iter().enumerate() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(dim(&format!("{}.", k + 1), size::SMALL));
+            if shop.citizen {
+                citizen_mark(ui, size::SMALL);
+            }
+            // A shop's name in italics, as a paper sets a title
+            match &shop.name {
+                Some(name) => ui.label(ink(name, size::SMALL).strong().italics()),
+                None => ui.label(ink("Name withheld", size::SMALL).strong()),
+            };
+            if let Some(keeper) = &shop.keeper {
+                ui.label(dim(keeper, size::SMALL));
+            }
+            let sales = if shop.sales == 1 { "1 sale".to_string() } else { format!("{} sales", shop.sales) };
+            ui.label(dim(&format!("· {sales}, chiefly {}", shop.item_name), size::SMALL));
+        });
     }
 }
 
@@ -392,7 +427,8 @@ fn hands(ui: &mut egui::Ui, g: &Gazette) {
                 ui.label(dim(&format!("{} units, chiefly {}", p.units, p.item_name), size::SMALL));
             });
         }
-        if g.producers.iter().any(|p| p.citizen) {
+        let citizen_shop = g.stalls.iter().flat_map(|st| &st.shops).any(|s| s.citizen);
+        if g.producers.iter().any(|p| p.citizen) || citizen_shop {
             ui.horizontal(|ui| {
                 citizen_mark(ui, size::LABEL);
                 ui.label(dim("marks a citizen", size::LABEL).italics());
@@ -573,7 +609,9 @@ mod tests {
     #[test]
     fn the_sample_has_an_edition() {
         let reader = sample();
-        assert!(reader.showing().is_some());
+        let edition = reader.showing().expect("an edition");
+        // With the stalls in it, so the page draws them (#240)
+        assert!(edition.stalls.is_some() && !edition.stalls_story.is_empty());
         assert!(reader.unread());
     }
 

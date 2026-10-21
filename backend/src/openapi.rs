@@ -25,7 +25,7 @@ use capitol_protocol::rest::{
 };
 use capitol_protocol::rest::{
     Gazette, GazetteByline, GazetteDeeds, GazetteMade, GazetteMover, GazettePrice, GazetteProducer, GazetteResponse,
-    GazetteSale, GazetteShares,
+    GazetteSale, GazetteShares, GazetteShop, GazetteStalls,
 };
 use capitol_protocol::rules::market::{GradeRule, OrderSide, OrderStatus};
 use capitol_protocol::terrain::{
@@ -271,6 +271,8 @@ from `/account/api-keys` instead, as `Authorization: ApiKey <secret>`, within it
         GazetteProducer,
         GazetteMade,
         GazetteShares,
+        GazetteStalls,
+        GazetteShop,
         GazetteResponse,
         GazetteByline,
         // Plots

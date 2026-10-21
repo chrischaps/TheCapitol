@@ -1565,6 +1565,51 @@ pub struct Gazette {
     /// reads as it did before there were citizens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shares: Option<GazetteShares>,
+    /// The day at the bazaar's stalls (#240): how much sold and the busiest
+    /// shops, but no prices, which the bazaar keeps between buyer and seller
+    /// (D6). `None` on a day nothing sold there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalls: Option<GazetteStalls>,
+    /// Empty only in editions from before the Gazette counted the stalls
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stalls_story: String,
+}
+
+/// A day's selling at the bazaar's stalls (#240). It has counts, not
+/// prices: what a unit fetched at a stall stays between buyer and seller
+/// (D6), so the walk down the lane is still how you compare.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteStalls {
+    /// Purchases, and the units they took
+    pub sales: i64,
+    pub units: i64,
+    /// Strands spent at every stall together
+    pub strands: i64,
+    /// How many kinds of goods sold
+    pub goods: i64,
+    /// The busiest shops, by what they took, the busiest first
+    pub shops: Vec<GazetteShop>,
+}
+
+/// One of the day's busiest shops at the bazaar.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct GazetteShop {
+    /// The shop's name and its keeper's, both only if the keeper lets the
+    /// Gazette print their name: a shop's sign often says whose it is
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keeper: Option<String>,
+    /// The keeper is a citizen (C0.1), named or not
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
+    pub sales: i64,
+    pub units: i64,
+    /// What it sold most of, by units
+    pub item_type: String,
+    pub item_name: String,
 }
 
 /// A day's price for one item at the Exchange: its trades' range and their
@@ -1675,7 +1720,8 @@ pub struct GazetteShares {
     /// Units gathered and crafted
     pub made: i64,
     pub made_by_people: i64,
-    /// Strands paid at the Exchange, and how many went to sellers who are people
+    /// Strands paid at the Exchange and the bazaar's stalls (#240), and how
+    /// many went to sellers who are people
     pub sold: i64,
     pub sold_by_people: i64,
     /// Deeds claimed

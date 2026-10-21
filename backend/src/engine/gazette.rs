@@ -14,6 +14,10 @@
 //! - what each player gathered and crafted (`production_tally`, added to by
 //!   [`tally`] in the transaction that writes the work, or for automation by
 //!   [`tally_many`] once its cycle's crafts commit)
+//! - what sold at the bazaar's stalls (`bazaar_sales`, written by
+//!   `bazaar::buy`, #240): counts and the busiest shops, never a price,
+//!   since the bazaar keeps its prices between buyer and seller (D6). Its
+//!   Strands count in the day's selling (`GazetteShares::sold`).
 //!
 //! [`compose`] turns them into the edition. It's pure: the headlines come from
 //! templates picked by a hash of the day, never an LLM, so a day always reads
@@ -35,6 +39,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use capitol_protocol::rest::{
     Gazette, GazetteDeeds, GazetteMade, GazetteMover, GazettePrice, GazetteProducer, GazetteSale, GazetteShares,
+    GazetteShop, GazetteStalls,
 };
 use capitol_protocol::rules::{self, Zone};
 use chrono::{DateTime, Utc};
@@ -49,6 +54,8 @@ const MOVERS: usize = 5;
 const PRODUCERS: usize = 5;
 /// How many of the things made most an edition lists
 const MADE: usize = 6;
+/// How many of the bazaar's busiest shops an edition lists
+const SHOPS: usize = 3;
 /// A change in price this big (in percent, either way) makes the front page
 const FRONT_PAGE_MOVE: i64 = 15;
 
@@ -64,6 +71,17 @@ fn name_of(name: Option<&str>, citizen: bool) -> String {
         (Some(name), true) => format!("Citizen {name}"),
         (None, false) => UNNAMED.to_string(),
         (None, true) => UNNAMED_CITIZEN.to_string(),
+    }
+}
+
+/// How the Gazette names a shop: "“The Rope Walk”, kept by Ada". A keeper
+/// who keeps out of the papers keeps their shop out too, as its sign may
+/// say whose it is.
+fn shop_of(shop: &GazetteShop) -> String {
+    match (&shop.name, &shop.keeper) {
+        (Some(name), Some(keeper)) => format!("“{name}”, kept by {}", name_of(Some(keeper), shop.citizen)),
+        _ if shop.citizen => "a shop whose citizen keeper keeps out of the papers".to_string(),
+        _ => "a shop whose keeper keeps out of the papers".to_string(),
     }
 }
 
@@ -175,6 +193,24 @@ pub struct Work {
     pub quantity: i64,
 }
 
+/// One merchant's sales of one good at the bazaar for the day, before
+/// they're ranked
+#[derive(Debug, Clone, PartialEq)]
+pub struct StallTrade {
+    pub merchant_id: Uuid,
+    /// Their shop's name at their last sale of the day
+    pub shop: String,
+    /// `None` if they keep their name out of the papers
+    pub keeper: Option<String>,
+    /// A citizen, named or not
+    pub citizen: bool,
+    pub item_type: String,
+    pub item_name: String,
+    pub sales: i64,
+    pub units: i64,
+    pub strands: i64,
+}
+
 /// Everything an edition is made from: one day's records.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DayRecords {
@@ -192,6 +228,8 @@ pub struct DayRecords {
     /// How many of the deeds claimed went to people
     pub claimed_by_people: i64,
     pub work: Vec<Work>,
+    /// What sold at the bazaar's stalls (#240)
+    pub stalls: Vec<StallTrade>,
 }
 
 /// Read day `day`'s records.
@@ -321,6 +359,26 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
     .fetch_all(db)
     .await?;
 
+    type StallRow = (Uuid, String, String, bool, bool, String, Option<String>, i64, i64, i64);
+    let stalls: Vec<StallRow> = sqlx::query_as(
+        "SELECT s.merchant_id,
+                (SELECT l.shop_name FROM bazaar_sales l
+                 WHERE l.merchant_id = s.merchant_id AND l.at >= $1 AND l.at < $2
+                 ORDER BY l.at DESC, l.id LIMIT 1),
+                p.name, p.gazette_named, COALESCE(a.kind = 'citizen', FALSE),
+                s.item_type, it.name, COUNT(*), SUM(s.quantity)::BIGINT, SUM(s.price * s.quantity)::BIGINT
+         FROM bazaar_sales s
+         JOIN players p ON p.id = s.merchant_id
+         LEFT JOIN accounts a ON a.id = p.account_id
+         LEFT JOIN item_types it ON it.id = s.item_type
+         WHERE s.at >= $1 AND s.at < $2
+         GROUP BY s.merchant_id, p.name, p.gazette_named, a.kind, s.item_type, it.name",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await?;
+
     Ok(DayRecords {
         day,
         prices,
@@ -339,6 +397,20 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
                 item_name: item_name.unwrap_or_else(|| item_type.clone()),
                 item_type,
                 quantity,
+            })
+            .collect(),
+        stalls: stalls
+            .into_iter()
+            .map(|(merchant_id, shop, name, named, citizen, item_type, item_name, sales, units, strands)| StallTrade {
+                merchant_id,
+                shop,
+                keeper: named.then_some(name),
+                citizen,
+                item_name: item_name.unwrap_or_else(|| item_type.clone()),
+                item_type,
+                sales,
+                units,
+                strands,
             })
             .collect(),
     })
@@ -411,17 +483,68 @@ pub fn made(work: &[Work]) -> Vec<GazetteMade> {
     made
 }
 
+/// The day at the bazaar, or `None` if nothing sold there. Shops rank by the
+/// Strands they took, which the edition doesn't print (D6).
+pub fn stalls(trades: &[StallTrade]) -> Option<GazetteStalls> {
+    let trades: Vec<&StallTrade> = trades.iter().filter(|t| t.sales > 0).collect();
+    if trades.is_empty() {
+        return None;
+    }
+    // Each shop's Strands, its record, and its units of each good
+    let mut by_shop: BTreeMap<Uuid, (i64, GazetteShop, BTreeMap<(&str, &str), i64>)> = BTreeMap::new();
+    for t in &trades {
+        let (strands, shop, goods) = by_shop.entry(t.merchant_id).or_insert_with(|| {
+            let shop = GazetteShop {
+                name: t.keeper.as_ref().map(|_| t.shop.clone()),
+                keeper: t.keeper.clone(),
+                citizen: t.citizen,
+                ..Default::default()
+            };
+            (0, shop, BTreeMap::new())
+        });
+        *strands += t.strands;
+        shop.sales += t.sales;
+        shop.units += t.units;
+        *goods.entry((&t.item_name, &t.item_type)).or_default() += t.units;
+    }
+    let mut shops: Vec<(Uuid, i64, GazetteShop)> = by_shop
+        .into_iter()
+        .map(|(id, (strands, mut shop, goods))| {
+            // The most units, and of equals the first by name
+            let chief = goods.into_iter().max_by(|(a, a_units), (b, b_units)| a_units.cmp(b_units).then_with(|| b.cmp(a)));
+            if let Some(((name, item_type), _)) = chief {
+                (shop.item_name, shop.item_type) = (name.to_string(), item_type.to_string());
+            }
+            (id, strands, shop)
+        })
+        .collect();
+    shops.sort_by(|(a_id, a_strands, a), (b_id, b_strands, b)| {
+        b_strands.cmp(a_strands).then_with(|| b.units.cmp(&a.units)).then_with(|| a_id.cmp(b_id))
+    });
+    let goods: std::collections::BTreeSet<&str> = trades.iter().map(|t| t.item_type.as_str()).collect();
+    Some(GazetteStalls {
+        sales: trades.iter().map(|t| t.sales).sum(),
+        units: trades.iter().map(|t| t.units).sum(),
+        strands: trades.iter().map(|t| t.strands).sum(),
+        goods: goods.len() as i64,
+        shops: shops.into_iter().take(SHOPS).map(|(.., shop)| shop).collect(),
+    })
+}
+
 /// The day split between people and citizens, or `None` if citizens made,
 /// sold and claimed nothing
 pub fn shares(records: &DayRecords) -> Option<GazetteShares> {
     let made = |people_only: bool| -> i64 {
         records.work.iter().filter(|w| !(people_only && w.citizen)).map(|w| w.quantity.max(0)).sum()
     };
+    let at_stalls = |people_only: bool| -> i64 {
+        records.stalls.iter().filter(|t| !(people_only && t.citizen)).map(|t| t.strands).sum()
+    };
     let shares = GazetteShares {
         made: made(false),
         made_by_people: made(true),
-        sold: records.strands,
-        sold_by_people: records.strands_to_people,
+        sold: records.strands + at_stalls(false),
+        sold_by_people: records.strands_to_people + at_stalls(true),
         claimed: records.deeds.iter().map(|(_, claimed, _)| claimed).sum(),
         claimed_by_people: records.claimed_by_people,
     };
@@ -440,18 +563,24 @@ pub fn compose(records: &DayRecords) -> Gazette {
     let producers = producers(&records.work);
     let made = made(&records.work);
     let shares = shares(records);
+    let stalls = stalls(&records.stalls);
     let deeds: Vec<GazetteDeeds> = deeds_by_zone(&records.deeds);
     let claimed: i64 = deeds.iter().map(|d| d.claimed).sum();
     let foreclosed: i64 = deeds.iter().map(|d| d.foreclosed).sum();
     let weekday = rules::weekday(day);
 
     let mut markets = pen.markets(records, &movers);
+    let mut stalls_story = pen.stalls(stalls.as_ref());
     let best_sale_story = pen.best_sale(records.best_sale.as_ref());
     let mut deeds_story = pen.deeds(&deeds, claimed, foreclosed);
     let mut producers_story = pen.producers(&producers);
     // People's part of the day, against citizens'
     if let Some(s) = &shares {
-        markets.push_str(&sold_share(s));
+        // The day's selling is summed up after the last place it happened
+        match &stalls {
+            Some(_) => stalls_story.push_str(&sold_share(s, records.strands > 0)),
+            None => markets.push_str(&sold_share(s, false)),
+        }
         deeds_story.push_str(&claimed_share(s));
         producers_story.push_str(&made_share(s, made.first()));
     }
@@ -467,6 +596,8 @@ pub fn compose(records: &DayRecords) -> Gazette {
         pen.foreclosure_story(&deeds, foreclosed)
     } else if claimed > 0 {
         pen.claim_story(&deeds, claimed)
+    } else if let Some(st) = &stalls {
+        pen.stalls_story(st)
     } else if let Some(top) = producers.first() {
         pen.work_story(top)
     } else {
@@ -491,6 +622,8 @@ pub fn compose(records: &DayRecords) -> Gazette {
         producers_story,
         made,
         shares,
+        stalls,
+        stalls_story,
     }
 }
 
@@ -647,6 +780,27 @@ impl Pen {
         (headline, dek, lead)
     }
 
+    fn stalls_story(&self, st: &GazetteStalls) -> (String, String, String) {
+        let headline = self
+            .pick(21, &["Trade at the Stalls", "A Busy Day in the Bazaar", "{N} at the Bazaar's Stalls"])
+            .replace("{N}", &capitalise(&plural(st.sales, "Sale", "Sales")));
+        let dek = self
+            .pick(22, &["What things fetched, only the buyers know", "Prices stay between buyer and seller, as the bazaar likes them"])
+            .to_string();
+        let busiest = st.shops.first().map_or_else(String::new, |shop| {
+            format!(" The busiest shop was {}, selling chiefly {}.", shop_of(shop), shop.item_name)
+        });
+        let lead = self
+            .pick(23, &[
+                "The bazaar's lane was busy today: {sales} across its stalls, {units} in all.{busiest} What anything fetched there stays between buyer and seller; the way to find out is to walk the lane.",
+                "Merchants at the bazaar made {sales} today, {units} changing hands across the counters.{busiest} The Gazette can't print their prices, because the stalls don't post them.",
+            ])
+            .replace("{sales}", &plural(st.sales, "sale", "sales"))
+            .replace("{units}", &plural(st.units, "unit", "units"))
+            .replace("{busiest}", &busiest);
+        (headline, dek, lead)
+    }
+
     fn quiet_story(&self, weekday: &str) -> (String, String, String) {
         let headline = self.pick(14, &["A Quiet {weekday} in the Capitol", "All Calm on {weekday}"]).replace("{weekday}", weekday);
         let dek = self.pick(15, &["No trades, no deeds, no news", "The city sleeps, and so does the market"]).to_string();
@@ -686,6 +840,41 @@ impl Pen {
             None if movers.is_empty() => text.push_str(" Nothing traded on both days, so there's nothing to compare yet."),
             None => text.push_str(" Prices held where they were the day before."),
         }
+        text
+    }
+
+    /// The bazaar's day: what sold and who sold most, never at what price
+    fn stalls(&self, stalls: Option<&GazetteStalls>) -> String {
+        let Some(st) = stalls else {
+            return self
+                .pick(24, &[
+                    "Not a sale at the bazaar's stalls today; the lane was for strolling.",
+                    "The bazaar's counters stood idle: nothing sold at the stalls.",
+                ])
+                .to_string();
+        };
+        let mut text = format!(
+            "{} at the bazaar's stalls today, {} and {} Strands in all, across {}.",
+            capitalise(&plural(st.sales, "sale", "sales")),
+            plural(st.units, "unit", "units"),
+            thousands(st.strands),
+            plural(st.goods, "good", "goods"),
+        );
+        if let Some(top) = st.shops.first() {
+            text.push_str(&format!(" The busiest was {}, chiefly {}.", shop_of(top), top.item_name));
+        }
+        if st.shops.len() > 1 {
+            let rest: i64 = st.shops[1..].iter().map(|s| s.sales).sum();
+            text.push_str(&format!(
+                " The next {} made {} between them.",
+                count_word(st.shops.len() as i64 - 1, false),
+                plural(rest, "sale", "sales")
+            ));
+        }
+        text.push_str(self.pick(25, &[
+            " What anything fetched stays between buyer and seller.",
+            " The stalls keep their prices to themselves: walk the lane to learn them.",
+        ]));
         text
     }
 
@@ -773,14 +962,16 @@ impl Pen {
     }
 }
 
-/// The Exchange's Strands, people's against citizens'
-fn sold_share(s: &GazetteShares) -> String {
+/// The day's Strands from selling, people's against citizens'. `both` when
+/// they were spent at the Exchange and the stalls, so the line says so.
+fn sold_share(s: &GazetteShares, both: bool) -> String {
+    let place = if both { " spent at the Exchange and the stalls" } else { "" };
     match (s.sold, s.sold_by_people) {
         (0, _) => String::new(),
         (all, people) if people == all => " Every Strand went to people.".to_string(),
         (_, 0) => " Every Strand went to citizens.".to_string(),
         (all, people) => format!(
-            " Of the {} Strands, {} went to people and {} to citizens.",
+            " Of the {} Strands{place}, {} went to people and {} to citizens.",
             thousands(all),
             thousands(people),
             thousands(all - people)
@@ -968,6 +1159,22 @@ mod tests {
         Work { citizen: true, ..work(id, name, item, quantity) }
     }
 
+    /// `merchant`'s sales of `item` at their shop `shop`: `(sales, units,
+    /// Strands)`
+    fn stall(merchant: u128, keeper: Option<&str>, shop: &str, item: &str, (sales, units, strands): (i64, i64, i64)) -> StallTrade {
+        StallTrade {
+            merchant_id: Uuid::from_u128(merchant),
+            shop: shop.into(),
+            keeper: keeper.map(Into::into),
+            citizen: false,
+            item_type: item.to_lowercase(),
+            item_name: item.into(),
+            sales,
+            units,
+            strands,
+        }
+    }
+
     /// A day with something in every section, and citizens in it: Cy, and
     /// one who keeps out of the papers
     fn busy_day() -> DayRecords {
@@ -999,6 +1206,12 @@ mod tests {
                 citizen_work(3, Some("Cy"), "Plank", 20),
                 citizen_work(4, None, "Logs", 120),
             ],
+            stalls: vec![
+                stall(1, Some("Ada"), "The Rope Walk", "Rope", (4, 25, 150)),
+                stall(1, Some("Ada"), "The Rope Walk", "Plant Fiber", (1, 20, 20)),
+                StallTrade { citizen: true, ..stall(3, Some("Cy"), "Cy's Planks", "Plank", (3, 6, 240)) },
+                stall(2, None, "Bo's Bits", "Logs", (2, 10, 30)),
+            ],
         }
     }
 
@@ -1015,6 +1228,7 @@ mod tests {
             ("best sale", &g.best_sale_story),
             ("deeds", &g.deeds_story),
             ("producers", &g.producers_story),
+            ("stalls", &g.stalls_story),
         ] {
             assert!(!text.is_empty(), "{section} is empty");
             assert!(!text.contains('{'), "{section} has a hole: {text}");
@@ -1064,10 +1278,74 @@ mod tests {
     #[test]
     fn a_quiet_day_still_fills_every_section() {
         let g = compose(&DayRecords { day: DAY, ..Default::default() });
-        for text in [&g.headline, &g.dek, &g.lead, &g.weather, &g.markets, &g.best_sale_story, &g.deeds_story, &g.producers_story] {
+        for text in [&g.headline, &g.dek, &g.lead, &g.weather, &g.markets, &g.best_sale_story, &g.deeds_story, &g.producers_story, &g.stalls_story] {
             assert!(!text.is_empty() && !text.contains('{'), "{text}");
         }
         assert!(g.headline.contains(rules::weekday(DAY)), "{}", g.headline);
+        assert_eq!(g.stalls, None);
+    }
+
+    /// The bazaar's sales make the paper (#240): counts and the busiest
+    /// shops, ranked by what they took, but never a price (D6)
+    #[test]
+    fn the_stalls_are_counted_but_their_prices_kept() {
+        let g = compose(&busy_day());
+        let st = g.stalls.as_ref().expect("the stalls sold");
+        assert_eq!((st.sales, st.units, st.strands, st.goods), (10, 61, 440, 4));
+        // Cy took the most Strands, Ada sold the most units
+        let shops: Vec<(Option<&str>, Option<&str>, bool, i64, &str)> = st
+            .shops
+            .iter()
+            .map(|s| (s.name.as_deref(), s.keeper.as_deref(), s.citizen, s.units, s.item_name.as_str()))
+            .collect();
+        assert_eq!(
+            shops,
+            [
+                (Some("Cy's Planks"), Some("Cy"), true, 6, "Plank"),
+                (Some("The Rope Walk"), Some("Ada"), false, 45, "Rope"),
+                (None, None, false, 10, "Logs"),
+            ]
+        );
+        assert!(
+            g.stalls_story.starts_with(
+                "Ten sales at the bazaar's stalls today, 61 units and 440 Strands in all, across four goods. \
+                 The busiest was “Cy's Planks”, kept by Citizen Cy, chiefly Plank. The next two made seven sales between them."
+            ),
+            "{}",
+            g.stalls_story
+        );
+        // A keeper who keeps out of the papers keeps their shop's name out too
+        let json = serde_json::to_string(&g).unwrap();
+        assert!(!json.contains("Bo's Bits"), "{json}");
+        // No shop's price or takings
+        let shops = serde_json::to_string(&st.shops).unwrap();
+        assert!(!shops.contains("price") && !shops.contains("strands"), "{shops}");
+    }
+
+    /// On a day the stalls are the biggest story, they lead, and the day's
+    /// selling counts them
+    #[test]
+    fn a_day_at_the_stalls_can_lead() {
+        for day in DAY..DAY + 6 {
+            let records = DayRecords {
+                day,
+                stalls: vec![stall(1, Some("Ada"), "The Rope Walk", "Rope", (3, 12, 90))],
+                ..Default::default()
+            };
+            let g = compose(&records);
+            assert!(!g.headline.contains('{') && !g.dek.contains('{') && !g.lead.contains('{'), "{g:?}");
+            assert!(g.lead.contains("bazaar") && g.lead.contains("“The Rope Walk”, kept by Ada"), "{}", g.lead);
+            assert!(g.markets.contains("No trades at the Exchange") || g.markets.contains("Exchange floor was empty"));
+        }
+        // Citizens at the stalls bring the day's shares, with the stalls in
+        // them, and the line follows the stalls' story
+        let mut records = busy_day();
+        records.strands = 0;
+        records.strands_to_people = 0;
+        let g = compose(&records);
+        let s = g.shares.unwrap();
+        assert_eq!((s.sold, s.sold_by_people), (440, 200));
+        assert!(g.stalls_story.ends_with(" Of the 440 Strands, 200 went to people and 240 to citizens."), "{}", g.stalls_story);
     }
 
     #[test]
@@ -1090,9 +1368,12 @@ mod tests {
         // No foreclosure: the claims
         day.deeds = vec![("rural".into(), 3, 0)];
         assert!(compose(&day).headline.contains("Rural") || compose(&day).headline.contains("Land Office"));
-        // No deeds: the work
+        // No deeds: the stalls
         day.deeds.clear();
         day.best_sale = None;
+        assert!(compose(&day).lead.contains("bazaar"), "{}", compose(&day).lead);
+        // Nothing sold at the stalls: the work
+        day.stalls.clear();
         assert!(compose(&day).dek.contains("units made"), "{}", compose(&day).dek);
     }
 
@@ -1127,8 +1408,8 @@ mod tests {
             Some(GazetteShares {
                 made: 980,
                 made_by_people: 840,
-                sold: 6300,
-                sold_by_people: 5100,
+                sold: 6740,
+                sold_by_people: 5300,
                 claimed: 4,
                 claimed_by_people: 3,
             })
@@ -1136,7 +1417,13 @@ mod tests {
         let logs = &g.made[0];
         assert_eq!((logs.item_name.as_str(), logs.units, logs.by_people), ("Logs", 620, 500));
         assert_eq!(g.made.iter().map(|m| m.units).sum::<i64>(), 980);
-        assert!(g.markets.ends_with(" Of the 6,300 Strands, 5,100 went to people and 1,200 to citizens."), "{}", g.markets);
+        // The Exchange's and the stalls' Strands together, after the stalls
+        assert!(
+            g.stalls_story.ends_with(" Of the 6,740 Strands spent at the Exchange and the stalls, 5,300 went to people and 1,440 to citizens."),
+            "{}",
+            g.stalls_story
+        );
+        assert!(!g.markets.contains("people"), "{}", g.markets);
         assert!(g.deeds_story.ends_with(" People signed for three, citizens for one."), "{}", g.deeds_story);
         assert!(
             g.producers_story.ends_with(" In all the city made 980 units, 840 of them by people. The most made was Logs: 620, 500 of them by people."),
@@ -1161,6 +1448,7 @@ mod tests {
     fn a_day_without_citizens_says_nothing_of_them() {
         let mut records = busy_day();
         records.work.retain(|w| !w.citizen);
+        records.stalls.retain(|t| !t.citizen);
         records.strands_to_people = records.strands;
         records.claimed_by_people = 4;
         records.best_sale.as_mut().unwrap().maker_citizen = false;
@@ -1168,7 +1456,7 @@ mod tests {
         assert_eq!(g.shares, None);
         assert!(g.producers.iter().all(|p| !p.citizen));
         assert!(g.made.iter().all(|m| m.by_people == m.units));
-        for text in [&g.headline, &g.lead, &g.markets, &g.best_sale_story, &g.deeds_story, &g.producers_story] {
+        for text in [&g.headline, &g.lead, &g.markets, &g.best_sale_story, &g.deeds_story, &g.producers_story, &g.stalls_story] {
             assert!(!text.contains("itizen") && !text.contains("people"), "{text}");
         }
     }
@@ -1355,6 +1643,52 @@ mod tests {
             assert!(g.markets.ends_with(" Of the 230 Strands, 200 went to people and 30 to citizens."), "{}", g.markets);
             assert!(g.producers_story.contains("In all the city made 403 units, 300 of them by people."), "{}", g.producers_story);
             // It's kept as served
+            assert_eq!(edition(&db, Some(day)).await.unwrap(), Some(g));
+        }
+
+        /// Real purchases at two stalls (#240): each is recorded, and the
+        /// edition counts them and names the shop whose keeper allows it
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "needs the local Postgres (docker-compose up -d)"]
+        async fn the_stalls_sales_make_the_paper(db: PgPool) {
+            use crate::engine::bazaar;
+            use crate::engine::market::tests::Player;
+            use crate::engine::units::test_units::stack_of;
+            use capitol_protocol::rest::{BuyListing, StockListing};
+            use capitol_protocol::rules::stacking::Units;
+
+            let ada = player(&db, "Ada", 1000).await;
+            let bo = player(&db, "Bo", 1000).await;
+            sqlx::query("UPDATE players SET gazette_named = FALSE WHERE id = $1").bind(bo.id).execute(&db).await.unwrap();
+            let day = rules::day_number(Utc::now().timestamp_millis()) - 1;
+            let now = DateTime::<Utc>::from_timestamp_millis(rules::day_start_ms(day) + 5 * 300_000).unwrap();
+
+            /// `who` rents `stall` as `shop` and lists ten `item` at `price`
+            async fn open(db: &PgPool, who: &Player, (stall, shop): (&str, &str), item: &str, price: i64, now: DateTime<Utc>) -> Uuid {
+                let stack = stack_of(db, who.id, who.inventory, 0, item, &Units::uniform(10, 80)).await;
+                bazaar::rent(db, who.id, stall, 1, Some(shop), now).await.unwrap();
+                let req = StockListing { item_id: stack, quantity: 10, price, qualities: None };
+                bazaar::stock(db, who.id, &req, now).await.unwrap().id
+            }
+            let ropes = open(&db, &ada, ("bazaar_stall_3", "The Rope Walk"), "rope", 7, now).await;
+            let fiber = open(&db, &bo, ("bazaar_stall_5", "Bo's Bits"), "fiber", 2, now).await;
+            let buy = |quantity| BuyListing { quantity, qualities: None };
+            bazaar::buy(&db, bo.id, ropes, "bazaar_stall_3", &buy(3), now).await.unwrap();
+            bazaar::buy(&db, bo.id, ropes, "bazaar_stall_3", &buy(1), now).await.unwrap();
+            bazaar::buy(&db, ada.id, fiber, "bazaar_stall_5", &buy(5), now).await.unwrap();
+            let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bazaar_sales").fetch_one(&db).await.unwrap();
+            assert_eq!(recorded, 3);
+
+            let g = publish(&db, day).await.unwrap().expect("a new edition");
+            let st = g.stalls.as_ref().expect("the stalls sold");
+            assert_eq!((st.sales, st.units, st.strands, st.goods), (3, 9, 38, 2));
+            let shops: Vec<(Option<&str>, Option<&str>, i64, i64, &str)> =
+                st.shops.iter().map(|s| (s.name.as_deref(), s.keeper.as_deref(), s.sales, s.units, s.item_type.as_str())).collect();
+            assert_eq!(shops, [(Some("The Rope Walk"), Some("Ada"), 2, 4, "rope"), (None, None, 1, 5, "fiber")]);
+            assert!(g.stalls_story.contains("“The Rope Walk”, kept by Ada"), "{}", g.stalls_story);
+            assert!(!serde_json::to_string(&g).unwrap().contains("Bo's Bits"));
+            // The bazaar was the day's only story
+            assert!(g.lead.contains("bazaar"), "{}", g.lead);
             assert_eq!(edition(&db, Some(day)).await.unwrap(), Some(g));
         }
 

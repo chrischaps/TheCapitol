@@ -357,7 +357,8 @@ pub struct Bought {
 
 /// `buyer` buys units of `listing_id` at its price, at `stall_id` (where the
 /// route found them standing). The units go to their inventory, or their
-/// market box if it's full; the Strands go to the merchant.
+/// market box if it's full; the Strands go to the merchant. The sale is
+/// recorded in `bazaar_sales` for the Gazette (#240).
 pub async fn buy(
     db: &PgPool,
     buyer: Uuid,
@@ -368,8 +369,8 @@ pub async fn buy(
 ) -> Result<Bought, BazaarError> {
     rules::validate_quantity(req.quantity)?;
     let mut tx = db.begin().await?;
-    let listing: Option<(Uuid, Uuid, String, i64, Option<i32>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT l.player_id, l.item_id, l.item_type, l.price, i.durability, l.listed_at
+    let listing: Option<(Uuid, Uuid, String, i64, Option<i32>, DateTime<Utc>, String)> = sqlx::query_as(
+        "SELECT l.player_id, l.item_id, l.item_type, l.price, i.durability, l.listed_at, r.name
          FROM bazaar_listings l
          JOIN bazaar_rentals r ON r.stall_id = l.stall_id
          JOIN items i ON i.id = l.item_id
@@ -381,7 +382,7 @@ pub async fn buy(
     .bind(now)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((merchant, stack, item_type, price, durability, listed_at)) = listing else {
+    let Some((merchant, stack, item_type, price, durability, listed_at, shop_name)) = listing else {
         return Err(BazaarError::NoListing);
     };
     if merchant == buyer {
@@ -439,6 +440,23 @@ pub async fn buy(
     )
     .await
     .map_err(BazaarError::Funds)?;
+    sqlx::query(
+        "INSERT INTO bazaar_sales (id, listing_id, stall_id, shop_name, merchant_id, buyer_id, item_type, quality, price, quantity, at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(listing_id)
+    .bind(stall_id)
+    .bind(&shop_name)
+    .bind(merchant)
+    .bind(buyer)
+    .bind(&item_type)
+    .bind(units.mean().unwrap_or(0))
+    .bind(price)
+    .bind(req.quantity)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
 
     let (buyer_name, buyer_citizen): (String, bool) = sqlx::query_as(
         "SELECT p.name, a.kind = 'citizen' FROM players p JOIN accounts a ON a.id = p.account_id WHERE p.id = $1",
@@ -854,6 +872,14 @@ mod tests {
         // Strands: what they hold, plus the rent, is what they started with
         assert_eq!(balance(&db, ada.id).await + balance(&db, bram.id).await + 40, 1500);
         assert_eq!(every_unit(&db, &[&ada, &bram], "rope").await, rope);
+        // Each sale is on the record for the Gazette (#240), under her shop
+        let sales: Vec<(String, i32, i32, i64)> =
+            sqlx::query_as("SELECT shop_name, quantity, quality, price FROM bazaar_sales WHERE merchant_id = $1 ORDER BY quantity")
+                .bind(ada.id)
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(sales, [("Ada's Ropes".into(), 2, 81, 7), ("Ada's Ropes".into(), 3, 92, 7), ("Ada's Ropes".into(), 5, 83, 7)]);
         // Ada heard of each sale
         let waiting = notices::take_all(&db, ada.id).await.unwrap();
         assert_eq!(waiting.len(), 3);
