@@ -592,6 +592,7 @@ mod tests {
                 quantity: 2,
                 quality: 70,
                 units: capitol_protocol::rules::stacking::Units::uniform(2, 70),
+                maker: None,
             }],
             strands: 0,
         };
@@ -676,6 +677,7 @@ mod tests {
                 quantity: units.count() as i32,
                 quality: units.mean().unwrap_or(0),
                 units,
+                maker: None,
             }],
             strands: 0,
         };

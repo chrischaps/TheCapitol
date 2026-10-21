@@ -24,7 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use capitol_protocol::rest::{
+use capitol_protocol::rest::{Maker, 
     BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BazaarStall, BuyListing, MyStallResponse, ShopSign,
     StockListing,
 };
@@ -296,6 +296,7 @@ pub async fn stock(
         &taken.marked,
     )
     .await?;
+    let maker = units::stack_maker(&mut tx, stack).await?;
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO bazaar_listings (id, player_id, stall_id, item_id, item_type, price, listed_at)
@@ -318,6 +319,7 @@ pub async fn stock(
         units: taken.units,
         durability,
         listed_at: now,
+        maker,
     })
 }
 
@@ -413,6 +415,8 @@ pub async fn buy(
         )
         .await?
     };
+    // What's left of the listing, and who made it (#242)
+    let maker = if left.is_empty() { None } else { units::stack_maker(&mut tx, stack).await? };
     let (_, into) = deliver(&mut tx, buyer, moving).await?;
     let item_id = stack_in(&mut tx, moving, into, &item_type).await?;
     let into_type: String = sqlx::query_scalar("SELECT container_type FROM containers WHERE id = $1")
@@ -484,6 +488,7 @@ pub async fn buy(
         units: left,
         durability,
         listed_at,
+        maker,
     });
     Ok(Bought {
         purchase: BazaarPurchase { units, paid, item_id, into: into_type, listing },
@@ -730,13 +735,16 @@ async fn listings(conn: &mut PgConnection, which: Listings<'_>) -> Result<Vec<Ba
         Listings::At(stall) => (Some(stall), None),
         Listings::Returning(player) => (None, Some(player)),
     };
-    let rows: Vec<(Uuid, Uuid, String, i64, Option<i32>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT l.id, l.item_id, l.item_type, l.price, i.durability, l.listed_at
+    type Row = (Uuid, Uuid, String, i64, Option<i32>, DateTime<Utc>, Option<sqlx::types::Json<Maker>>);
+    let rows: Vec<Row> = sqlx::query_as(concat!(
+        "SELECT l.id, l.item_id, l.item_type, l.price, i.durability, l.listed_at, ",
+        crate::models::item::stack_maker_sql!("l.item_id"),
+        "
          FROM bazaar_listings l JOIN items i ON i.id = l.item_id
          WHERE ($1::text IS NOT NULL AND l.stall_id = $1)
             OR ($2::uuid IS NOT NULL AND l.player_id = $2 AND l.stall_id IS NULL)
-         ORDER BY l.listed_at, l.id",
-    )
+         ORDER BY l.listed_at, l.id"
+    ))
     .bind(stall)
     .bind(player)
     .fetch_all(&mut *conn)
@@ -755,13 +763,14 @@ async fn listings(conn: &mut PgConnection, which: Listings<'_>) -> Result<Vec<Ba
     });
     Ok(rows
         .into_iter()
-        .map(|(id, stack, item_type, price, durability, listed_at)| BazaarListing {
+        .map(|(id, stack, item_type, price, durability, listed_at, maker)| BazaarListing {
             id,
             item_type,
             price,
             units: Units::from_pairs(units.remove(&stack).unwrap_or_default()),
             durability,
             listed_at,
+            maker: maker.map(|m| m.0),
         })
         .collect())
 }

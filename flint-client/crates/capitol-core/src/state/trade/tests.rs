@@ -84,6 +84,7 @@ fn offer_updated(trade_id: Uuid, player_id: Uuid, strands: i64) -> M {
             quantity: 1,
             quality: 80,
             units: capitol_protocol::rules::stacking::Units::uniform(1, 80),
+            maker: None,
         }],
         strands,
     }

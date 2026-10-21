@@ -311,6 +311,7 @@ impl ShopPanel {
                             ui.label(theme::dim(format!("· wear {d}")).size(size::LABEL));
                         }
                     });
+                    super::slots::maker_line(ui, listing.maker.as_ref(), size::LABEL);
                 });
             });
             let quote = bazaar::buy(listing, pick.n, pick.grade, shop.owner_id, view.me, view.strands);
@@ -667,6 +668,7 @@ impl Sample {
             units,
             durability: None,
             listed_at: now,
+            maker: None,
         };
         let shop = |stall: u32, name: &str, owner: &str, owner_id: u128, citizen: bool, listings: Vec<BazaarListing>| BazaarShop {
             stall_id: format!("bazaar_stall_{stall}"),

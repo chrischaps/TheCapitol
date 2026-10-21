@@ -725,7 +725,7 @@ mod tests {
     }
 
     fn listing(id: Uuid, units: Units) -> BazaarListing {
-        BazaarListing { id, item_type: "rope".into(), price: 7, units, durability: None, listed_at: when() }
+        BazaarListing { id, item_type: "rope".into(), price: 7, units, durability: None, listed_at: when(), maker: None }
     }
 
     fn shop(owner: Uuid, listings: Vec<BazaarListing>) -> BazaarShop {

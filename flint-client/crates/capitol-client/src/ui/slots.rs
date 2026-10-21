@@ -47,7 +47,7 @@
 use super::icons::ItemIcons;
 use super::theme::{self, size, CRAFT, SLOT, SLOT_EDGE, SLOT_EDGE_FULL, SLOT_GAP, SLOT_SIZE};
 use capitol_core::catalog::Catalog;
-use capitol_core::protocol::rest::SlotItem;
+use capitol_core::protocol::rest::{Maker, SlotItem};
 use capitol_core::protocol::rules::quality_grade;
 use capitol_core::protocol::rules::stacking::Units;
 use capitol_core::protocol::rules::{resources, tools};
@@ -925,6 +925,25 @@ pub(super) fn makeup_lines(ui: &mut Ui, units: &Units, size: f32) {
     }
 }
 
+/// Whose work a stack is (#242), in `size` text: "Made by Ada", the name in
+/// a maker's-stamp gold, with a citizen's mark. Nothing when the server names
+/// no one: a stack without a mark, of mixed marks, or a maker who keeps
+/// their name out. The tooltip's, a trade line's and a listing's.
+pub(super) fn maker_line(ui: &mut Ui, maker: Option<&Maker>, size: f32) {
+    let Some(maker) = maker else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(theme::dim("Made by").size(size));
+        ui.label(egui::RichText::new(&maker.name).size(size).italics().color(theme::GOLD_DIM));
+        if maker.citizen {
+            ui.label(egui::RichText::new("◆ citizen").size(size::LABEL).color(theme::DIM))
+                .on_hover_text("A citizen: an AI who lives, works and trades in the city, by the same rules as anyone");
+        }
+    });
+}
+
 /// A bar of the units, high first, each quality's share of the width in
 /// its grade's colour.
 fn makeup_bar(ui: &mut Ui, units: &Units) {
@@ -942,7 +961,8 @@ fn makeup_bar(ui: &mut Ui, units: &Units) {
 }
 
 /// What hovering a full slot says: the name, the mean quality and its
-/// grade, how many, and for a stack of more than one quality its makeup.
+/// grade, how many, for a stack of more than one quality its makeup, and
+/// who made it, if one maker made it all.
 fn tooltip(ui: &mut Ui, item: &SlotItem) {
     ui.label(
         egui::RichText::new(&item.item_name)
@@ -957,6 +977,7 @@ fn tooltip(ui: &mut Ui, item: &SlotItem) {
         }
     });
     makeup_lines(ui, &item.units, size::SMALL);
+    maker_line(ui, item.maker.as_ref(), size::SMALL);
     if let (Some(left), Some(max)) = (item.durability, item.max_durability) {
         let catalog = catalog(ui.ctx());
         tool_lines(ui, catalog.as_ref(), &item.item_type, item.quality, left, max);
@@ -1104,6 +1125,29 @@ mod tests {
         // Where the work starts to suffer is where the bar turns.
         assert_eq!(tools::retention(12, 60), 1.0);
         assert!(tools::retention(11, 60) < 1.0);
+    }
+
+    /// A stack's tooltip has a line for its maker, a person's or a
+    /// citizen's, and none when the server names no maker (#242)
+    #[test]
+    fn a_tooltip_names_the_maker_when_there_is_one() {
+        let ctx = theme::test_context();
+        let makers = [None, Some(Maker { name: "Ada".into(), citizen: false }), Some(Maker { name: "Wren".into(), citizen: true })];
+        let heights: Vec<f32> = makers
+            .into_iter()
+            .map(|maker| {
+                let rope = item(0, "rope", 3).with_maker(maker);
+                let mut height = 0.0;
+                let _ = ctx.run(Default::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        height = ui.vertical(|ui| tooltip(ui, &rope)).response.rect.height();
+                    });
+                });
+                height
+            })
+            .collect();
+        assert!(heights[1] > heights[0], "a maker adds a line: {heights:?}");
+        assert!(heights[2] >= heights[1], "a citizen's too: {heights:?}");
     }
 
     /// A tool's tooltip and a shattered slot draw without panicking, with

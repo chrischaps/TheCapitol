@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use capitol_protocol::rest::{CatalogTool, SlotItem};
+use capitol_protocol::rest::{CatalogTool, Maker, SlotItem};
 pub use capitol_protocol::rest::InventoryItem;
 use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::rules::tools;
@@ -12,11 +12,31 @@ use capitol_protocol::rules::tools;
 pub const ITEM_TYPE_COLUMNS: &str =
     "id, name, category, stackable, weight, tool_type, tier, base_power, max_durability";
 
+/// A stack's maker as SQL (#242): `json` `{name, citizen}` for the player whose
+/// mark every unit of stack `$item` carries, NULL when a unit has none, the
+/// marks are mixed, or the maker's byline is off (`players.gazette_named`).
+macro_rules! stack_maker_sql {
+    ($item:literal) => {
+        concat!(
+            "(SELECT json_build_object('name', p.name, 'citizen', COALESCE(a.kind = 'citizen', FALSE))
+               FROM players p LEFT JOIN accounts a ON a.id = p.account_id
+              WHERE p.gazette_named AND p.id = (
+                    SELECT (array_agg(u.maker_id))[1] FROM item_units u WHERE u.item_id = ",
+            $item,
+            "      HAVING bool_and(u.maker_id IS NOT NULL) AND COUNT(DISTINCT u.maker_id) = 1))"
+        )
+    };
+}
+pub(crate) use stack_maker_sql;
+
 /// The `items` columns an [`Item`] reads, for `SELECT ... FROM items` (not
-/// an alias: the units subquery names `items.id`). Not for `RETURNING`, which
-/// can't see the units an insert's trigger writes.
-pub const ITEM_COLUMNS: &str =
-    "id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at, durability, min_quality,      COALESCE((SELECT json_agg(json_build_array(u.quality, u.count) ORDER BY u.quality)                FROM item_units u WHERE u.item_id = items.id), '[]'::json) AS units";
+/// an alias: the units and maker subqueries name `items.id`). Not for
+/// `RETURNING`, which can't see the units an insert's trigger writes.
+pub const ITEM_COLUMNS: &str = concat!(
+    "id, item_type, quality, quantity, owner_id, container_id, slot_index, created_at, durability, min_quality,      COALESCE((SELECT json_agg(json_build_array(u.quality, u.count) ORDER BY u.quality)                FROM item_units u WHERE u.item_id = items.id), '[]'::json) AS units, ",
+    stack_maker_sql!("items.id"),
+    " AS maker"
+);
 
 /// Static item type definition (from database)
 #[derive(Debug, Clone, Default, Serialize, Deserialize, FromRow)]
@@ -73,6 +93,9 @@ pub struct Item {
     /// `min_quality` summarise these.
     #[sqlx(json)]
     pub units: Units,
+    /// Who made every unit, if one maker did and their byline is on (#242)
+    #[sqlx(default)]
+    pub maker: Option<sqlx::types::Json<Maker>>,
 }
 
 impl Item {
@@ -101,7 +124,8 @@ impl Item {
             self.quantity,
             self.slot_index?,
         )
-        .with_units(self.units.clone());
+        .with_units(self.units.clone())
+        .with_maker(self.maker.as_ref().map(|m| m.0.clone()));
         Some(match (self.durability, self.max_durability(item_type)) {
             (Some(left), Some(max)) => slot.with_durability(left, max),
             _ => slot,
