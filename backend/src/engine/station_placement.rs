@@ -19,11 +19,11 @@
 
 use capitol_protocol::rules::stacking::Pick;
 use capitol_protocol::rules::{in_water, water_name, STATION_MIN_SPACING};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::container_access::live_position;
-use crate::models::{Item, StationInfo, StationType, ITEM_COLUMNS, STATION_TYPE_COLUMNS};
+use crate::models::{StationInfo, StationType, STATION_TYPE_COLUMNS};
 use crate::state::AppState;
 
 /// Why a station can't go down where it was asked for.
@@ -151,27 +151,13 @@ pub async fn place_station(
     y: f64,
     kit_item_id: Uuid,
 ) -> Result<Placed, PlacementError> {
-    let db = &state.db;
-    let (px, py) = match live_position(&state.game, player_id).await {
+    let at = match live_position(&state.game, player_id).await {
         Some(at) => at,
         None => sqlx::query_as("SELECT position_x, position_y FROM players WHERE id = $1")
             .bind(player_id)
-            .fetch_one(db)
+            .fetch_one(&state.db)
             .await?,
     };
-
-    let st: StationType = sqlx::query_as(&format!("SELECT {STATION_TYPE_COLUMNS} FROM station_types WHERE id = $1"))
-        .bind(station_type)
-        .fetch_optional(db)
-        .await?
-        .ok_or_else(|| PlacementError::UnknownType(station_type.to_string()))?;
-
-    let (dx, dy) = (x - px, y - py);
-    if (dx * dx + dy * dy).sqrt() > st.interaction_range as f64 {
-        return Err(PlacementError::TooFar);
-    }
-
-    let lot = lot_at(db, x, y).await?;
     let water = {
         let game = state.game.read().await;
         let terrain = &game.terrain;
@@ -180,22 +166,70 @@ pub async fn place_station(
             // The wilds' rivers, streams and lakes too (W4)
             .or_else(|| game.ground.water_at(x, y).map(String::from))
     };
-    let plot_id = site(player_id, st.off_plot, lot.as_ref(), water.as_deref())?;
+    place(&state.db, Request { player_id, station_type, x, y, kit_item_id, at, water: water.as_deref() }).await
+}
+
+/// A placement, with what the game state knows about it already read
+struct Request<'a> {
+    player_id: Uuid,
+    station_type: &'a str,
+    x: f64,
+    y: f64,
+    kit_item_id: Uuid,
+    /// Where the player stands
+    at: (f64, f64),
+    /// The ring or wild water the spot is in, if any
+    water: Option<&'a str>,
+}
+
+/// Every check and every write of a placement, in one transaction (#300).
+/// The kit, and the lot it goes on, are locked before they're checked, so a
+/// second placement of the same kit, or a trade or split of it in between,
+/// waits and then finds it gone. Two placements at once take turns
+/// ([`PLACEMENT_LOCK`]), so they can't both pass the spacing test.
+async fn place(db: &PgPool, req: Request<'_>) -> Result<Placed, PlacementError> {
+    let mut tx = db.begin().await?;
+    let placed = place_in(db, &mut tx, req).await?;
+    tx.commit().await?;
+    Ok(placed)
+}
+
+/// [`place`] in `tx`, which the caller commits
+async fn place_in(db: &PgPool, tx: &mut PgConnection, req: Request<'_>) -> Result<Placed, PlacementError> {
+    let Request { player_id, station_type, x, y, kit_item_id, at: (px, py), water } = req;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)").bind(PLACEMENT_LOCK).execute(&mut *tx).await?;
+
+    let st: StationType = sqlx::query_as(&format!("SELECT {STATION_TYPE_COLUMNS} FROM station_types WHERE id = $1"))
+        .bind(station_type)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| PlacementError::UnknownType(station_type.to_string()))?;
+
+    let (dx, dy) = (x - px, y - py);
+    if (dx * dx + dy * dy).sqrt() > st.interaction_range as f64 {
+        return Err(PlacementError::TooFar);
+    }
+
+    let lot = lot_at(db, tx, x, y).await?;
+    let plot_id = site(player_id, st.off_plot, lot.as_ref(), water)?;
 
     let expected_kit = st.kit_item.clone().ok_or_else(|| PlacementError::UnknownType(station_type.to_string()))?;
-    let kit_item: Item = sqlx::query_as(&format!("SELECT {ITEM_COLUMNS} FROM items WHERE id = $1 AND owner_id = $2"))
+    let kit_type: String = sqlx::query_scalar("SELECT item_type FROM items WHERE id = $1 AND owner_id = $2 FOR UPDATE")
         .bind(kit_item_id)
         .bind(player_id)
-        .fetch_optional(db)
+        .fetch_optional(&mut *tx)
         .await?
         .ok_or(PlacementError::KitNotFound)?;
-    if kit_item.item_type != expected_kit {
-        return Err(PlacementError::WrongKit { expected: expected_kit, got: kit_item.item_type });
+    if kit_type != expected_kit {
+        return Err(PlacementError::WrongKit { expected: expected_kit, got: kit_type });
     }
     // Kits don't stack, so this is the kit's one unit; an old stack of them
     // gives up its lowest (E1.8)
-    let kit = kit_item.units.pick(1, Pick::default()).ok_or(PlacementError::KitNotFound)?;
-    let kit_quality = kit.min().unwrap_or(kit_item.quality);
+    let held = super::units::units_of(tx, kit_item_id).await?;
+    let kit = held.pick(1, Pick::default()).ok_or(PlacementError::KitNotFound)?;
+    let Some(kit_quality) = kit.min() else {
+        return Err(PlacementError::KitNotFound);
+    };
 
     let nearby: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM stations
@@ -204,11 +238,15 @@ pub async fn place_station(
     .bind(x)
     .bind(y)
     .bind(STATION_MIN_SPACING * STATION_MIN_SPACING)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
     if nearby.is_some() {
         return Err(PlacementError::TooClose);
     }
+
+    // The kit goes first: with it locked the take can't miss, but if it did
+    // there'd be no station from nothing, only an error and a rollback
+    super::units::take_units(tx, kit_item_id, &kit).await?.ok_or(PlacementError::KitNotFound)?;
 
     let station_id = Uuid::new_v4();
     sqlx::query(
@@ -222,13 +260,13 @@ pub async fn place_station(
     .bind(y as f32)
     .bind(plot_id)
     .bind(kit_quality)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
 
     if let Some(plot_id) = plot_id {
         sqlx::query("UPDATE plots SET station_count = station_count + 1 WHERE id = $1")
             .bind(plot_id)
-            .execute(db)
+            .execute(&mut *tx)
             .await?;
     }
 
@@ -239,11 +277,8 @@ pub async fn place_station(
     )
     .bind(container_id)
     .bind(station_id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
-
-    let mut conn = db.acquire().await?;
-    super::units::take_units(&mut conn, kit_item_id, &kit).await?;
 
     Ok(Placed {
         info: StationInfo {
@@ -266,21 +301,29 @@ pub async fn place_station(
     })
 }
 
-/// The lot under (`x`, `y`), with its room for stations.
-async fn lot_at(db: &PgPool, x: f64, y: f64) -> Result<Option<Lot>, sqlx::Error> {
+/// The advisory lock a placement holds until it commits, so placements take
+/// turns. They're rare, and it's what keeps two at once from both passing the
+/// spacing test.
+const PLACEMENT_LOCK: i64 = 0x0300_57a7;
+
+/// The lot under (`x`, `y`), with its room for stations, its row locked in
+/// `tx` until the placement commits. Which lot is under a spot only changes
+/// with the terrain, so finding it needn't be in the transaction.
+async fn lot_at(db: &PgPool, tx: &mut PgConnection, x: f64, y: f64) -> Result<Option<Lot>, sqlx::Error> {
     let Some(plot) = crate::routes::plots::find_plot_at_position(db, x, y).await? else {
         return Ok(None);
     };
-    let (station_count, station_capacity): (i32, i32) = sqlx::query_as(
-        "SELECT p.station_count, psc.station_capacity
+    let (owner_id, station_count, station_capacity): (Option<Uuid>, i32, i32) = sqlx::query_as(
+        "SELECT p.owner_id, p.station_count, psc.station_capacity
          FROM plots p
          JOIN plot_size_categories psc ON p.size_category = psc.id
-         WHERE p.id = $1",
+         WHERE p.id = $1
+         FOR UPDATE OF p",
     )
     .bind(plot.id)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
-    Ok(Some(Lot { id: plot.id, owner_id: plot.owner_id, station_count, station_capacity }))
+    Ok(Some(Lot { id: plot.id, owner_id, station_count, station_capacity }))
 }
 
 #[cfg(test)]
@@ -317,5 +360,154 @@ mod tests {
         let wet = site(me, true, None, Some("canal_outer")).unwrap_err();
         assert_eq!(wet.message(), "Can't build in the outer canal");
         assert!(matches!(site(me, false, None, Some("moat")), Err(PlacementError::NeedsAPlot)), "the type first");
+    }
+
+    // These need the local Postgres (`docker-compose up -d`). Each runs in a
+    // fresh database that `sqlx::test` creates from the migrations and drops
+    // afterwards. Run them with `cargo test station_placement -- --ignored`.
+
+    /// A player standing at the origin, with a workbench kit of `quality` in
+    /// their inventory. Returns them and the kit.
+    async fn builder(db: &PgPool, name: &str, quality: i32) -> (Uuid, Uuid) {
+        let account = Uuid::new_v4();
+        sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'x')")
+            .bind(account)
+            .bind(format!("{name}@test"))
+            .execute(db)
+            .await
+            .unwrap();
+        let player = Uuid::new_v4();
+        sqlx::query("INSERT INTO players (id, account_id, name) VALUES ($1, $2, $3)")
+            .bind(player)
+            .bind(account)
+            .bind(name)
+            .execute(db)
+            .await
+            .unwrap();
+        let inventory = Uuid::new_v4();
+        sqlx::query("INSERT INTO containers (id, container_type, owner_id) VALUES ($1, 'player_inventory', $2)")
+            .bind(inventory)
+            .bind(player)
+            .execute(db)
+            .await
+            .unwrap();
+        (player, kit(db, player, inventory, 0, quality).await)
+    }
+
+    async fn kit(db: &PgPool, owner: Uuid, container: Uuid, slot: i32, quality: i32) -> Uuid {
+        let kit = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
+             VALUES ($1, 'workbench_kit', $2, 1, $3, $4, $5)",
+        )
+        .bind(kit)
+        .bind(quality)
+        .bind(owner)
+        .bind(container)
+        .bind(slot)
+        .execute(db)
+        .await
+        .unwrap();
+        kit
+    }
+
+    /// A workbench on open ground at (`x`, 0), placed by someone standing there
+    fn bench(player_id: Uuid, kit_item_id: Uuid, x: f64) -> Request<'static> {
+        Request { player_id, station_type: "workbench", x, y: 0.0, kit_item_id, at: (x, 0.0), water: None }
+    }
+
+    async fn count(db: &PgPool, sql: &str, id: Uuid) -> i64 {
+        sqlx::query_scalar(sql).bind(id).fetch_one(db).await.unwrap()
+    }
+
+    async fn stations_of(db: &PgPool, owner: Uuid) -> i64 {
+        count(db, "SELECT COUNT(*) FROM stations WHERE owner_id = $1", owner).await
+    }
+
+    async fn kit_exists(db: &PgPool, kit: Uuid) -> bool {
+        count(db, "SELECT COUNT(*) FROM items WHERE id = $1", kit).await == 1
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_kit_becomes_a_station_with_its_box_and_is_gone(db: PgPool) {
+        let (me, kit) = builder(&db, "builder", 64).await;
+
+        let placed = place(&db, bench(me, kit, 0.0)).await.unwrap();
+
+        assert_eq!(placed.info.quality, 64);
+        assert_eq!(placed.plot_id, None);
+        assert!(!kit_exists(&db, kit).await);
+        let kit_quality: i32 = sqlx::query_scalar("SELECT kit_quality FROM stations WHERE id = $1")
+            .bind(placed.info.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(kit_quality, 64);
+        let container = placed.info.container_id.unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM containers WHERE id = $1", container).await, 1);
+    }
+
+    /// Places `first` and holds its transaction open while `second` is
+    /// asked for, then commits it. Returns what `second` came to.
+    async fn race(db: &PgPool, first: Request<'static>, second: Request<'static>) -> Result<Placed, PlacementError> {
+        let mut tx = db.begin().await.unwrap();
+        place_in(db, &mut tx, first).await.unwrap();
+        let second = tokio::spawn({
+            let db = db.clone();
+            async move { place(&db, second).await }
+        });
+        // Long enough for the second to get as far as it can
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(!second.is_finished(), "the second placement waits for the first");
+        tx.commit().await.unwrap();
+        second.await.unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn one_kit_placed_twice_at_once_makes_one_station(db: PgPool) {
+        let (me, kit) = builder(&db, "builder", 50).await;
+
+        // Far enough apart that spacing doesn't decide it
+        let lost = race(&db, bench(me, kit, 0.0), bench(me, kit, 500.0)).await.err();
+
+        assert!(matches!(lost, Some(PlacementError::KitNotFound)), "the second finds the kit gone: {lost:?}");
+        assert_eq!(stations_of(&db, me).await, 1);
+        assert!(!kit_exists(&db, kit).await);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_kit_gone_before_it_is_placed_leaves_nothing_behind(db: PgPool) {
+        let (me, kit) = builder(&db, "builder", 50).await;
+        let (them, _) = builder(&db, "trader", 50).await;
+        // Traded away between the client's look and the placement
+        sqlx::query("UPDATE items SET owner_id = $1 WHERE id = $2").bind(them).bind(kit).execute(&db).await.unwrap();
+
+        let err = place(&db, bench(me, kit, 0.0)).await.err();
+
+        assert!(matches!(err, Some(PlacementError::KitNotFound)), "{err:?}");
+        assert_eq!(stations_of(&db, me).await, 0);
+        assert!(kit_exists(&db, kit).await, "the kit stays with whoever holds it now");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn two_kits_on_one_spot_at_once_make_one_station(db: PgPool) {
+        let (me, first) = builder(&db, "builder", 50).await;
+        let inventory: Uuid = sqlx::query_scalar("SELECT container_id FROM items WHERE id = $1")
+            .bind(first)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let second = kit(&db, me, inventory, 1, 50).await;
+
+        let lost = race(&db, bench(me, first, 0.0), bench(me, second, 0.0)).await.err();
+
+        assert!(matches!(lost, Some(PlacementError::TooClose)), "{lost:?}");
+        assert_eq!(stations_of(&db, me).await, 1);
+        assert!(!kit_exists(&db, first).await);
+        assert!(kit_exists(&db, second).await, "the second kit stays a kit");
     }
 }
