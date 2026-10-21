@@ -55,9 +55,13 @@ const CELL: f64 = 20.0;
 /// Each kind's shoreline band, as a share of the canals' (the scene's
 /// `shore_foam_width`, 14 cm of depth; Flint ADR 0099). The carve's beds
 /// are shallow in metres, a big river's 30 cm at its deepest and a
-/// stream's a few, so the canals' band would foam them bank to bank.
-pub const RIVER_SHORE: f32 = 0.18;
-pub const STREAM_SHORE: f32 = 0.08;
+/// stream's a few, so the canals' band would foam them bank to bank. A
+/// course has none: where its edge would sit under the bank it rides
+/// [`LIFT`] over it, and any band as deep as that foams in teeth along the
+/// banks (#283). Its banks' moss and silt mark the edge instead. A lake
+/// lies flat under its shore, so it keeps a hairline.
+pub const RIVER_SHORE: f32 = 0.0;
+pub const STREAM_SHORE: f32 = 0.0;
 pub const LAKE_SHORE: f32 = 0.25;
 
 /// How fast (m/s) water runs on the flat, and how much faster per unit of
@@ -563,5 +567,40 @@ mod tests {
         if !lake.contains(cx, cy) && shore_distance(lake, cx, cy) > CELL * 1.5 {
             assert!(!covered(&mesh, to_world(cx, cy)));
         }
+    }
+
+    /// The scene's `shore_foam_width`: the canals' band, in metres of depth.
+    fn scene_shore_width() -> f32 {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scenes/capitol.scene.toml");
+        let scene: toml::Value = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        fn find(v: &toml::Value) -> Option<f32> {
+            match v {
+                toml::Value::Table(t) => t
+                    .get("shore_foam_width")
+                    .and_then(|w| w.as_float())
+                    .map(|w| w as f32)
+                    .or_else(|| t.values().find_map(find)),
+                _ => None,
+            }
+        }
+        find(&scene).expect("the scene has a shore band")
+    }
+
+    #[test]
+    fn no_course_foams_where_its_edge_rides_the_bank() {
+        // A course's edge rides LIFT over the bank, and the band swells to
+        // 1.25 of its width (the shader's surge and lap): a band that deep
+        // foams the lifted edges in teeth (#283).
+        let widest = 1.25 * scene_shore_width();
+        for id in [RIVERS, STREAMS] {
+            assert!(look(id).shore_foam * widest < LIFT, "{id}");
+        }
+        // And the courses do ride the bank somewhere, or this proves nothing.
+        let field = fixture_field();
+        let riding = bodies().rivers.vertices.iter().filter(|v| {
+            let [x, y, z] = v.position;
+            field.height_at(x, z).is_some_and(|g| (y - g - LIFT).abs() < 1e-4)
+        });
+        assert!(riding.count() > 1000);
     }
 }
