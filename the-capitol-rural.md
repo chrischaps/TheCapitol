@@ -1,6 +1,6 @@
 # The Capitol: Rural v2, Farms on Lanes
 
-*Plan of record, 2026-10-20. Issues are labelled `rural`. The plan is #282 (R0), and the work runs from #284 to #291. It absorbs #223.*
+*Plan of record, 2026-10-20. Issues are labelled `rural`. The plan is #282 (R0), and the work runs from #284 to #291. It absorbs #223. Widened the same day to r3000 to r4600, with the world grown to 13600 (RD10, #307 to #310).*
 
 This doc is the "Read first" for every `rural` issue. Keep it true: when a decision changes, update it in the same commit.
 
@@ -55,7 +55,7 @@ He picked *farms* over smallholdings and estates, and chose to have farms front 
 
 ### RD1. The sector is the unit ([R3 #286](https://github.com/chrischaps/TheCapitol/issues/286))
 
-The 8 arterials cut the ring into 8 sectors of 45°. At r3400 each is about 2670 of arc, 800 deep, and about 2.1M in area. Every sector gets the same budget and draws from its own SplitMix64 stream, `geom::stream(seed, &[RURAL, s])` (`geom.rs:276`).
+The 8 arterials cut the ring into 8 sectors of 45°. At r3800, the middle of the widened band (RD10), each is about 2980 of arc, 1600 deep, and about 4.8M in area. (Before RD10 it was 2670 of arc at r3400, 800 deep and about 2.1M.) Every sector gets the same budget and draws from its own SplitMix64 stream, `geom::stream(seed, &[RURAL, s])` (`geom.rs:276`).
 - **Even density comes from the structure,** so nothing has to correct for clumps afterwards.
 - **A tweak in one sector never re-ids the farms in another,** which is what suburb v2 learned: lots are owned plots.
 
@@ -83,7 +83,7 @@ The sectors' characters are a seeded shuffle of 4 *concession* and 4 *winding*, 
 - **The weld.** `street_plan::weld_junctions` runs over `lane_*` and the arterials, so every lane meets an arterial at a shared vertex. `street_plan::audit` holds over them. A loose end is allowed only at a farm gate, where a track ends at a farm.
   - *As built (#286):* the weld picks the lanes only. Their ends land on the arterials, which gain a vertex there, and the side roads and spurs start on a vertex of their main road. Picking the arterials too would also weld their far ends onto the guild ring.
   - *As built:* a farm gate is the planned end of a side road or spur, and an end counts as at a gate only if it's exactly there. `rural::plan` returns the gates, and the metrics re-plan to find them. R4 can narrow this further, to a gate a farm actually fronts.
-- **The edge.** Lanes stay inside about r3780. The wild trails' weld picks up any road within `trails::CELL` of r3800 (`trails.rs:222-226`).
+- **The edge.** Lanes stay inside about 20 of the rural edge (r4580 since RD10). The wild trails' weld picks up any road within `trails::CELL` of the rural edge (`trails.rs:222-226`).
 
 ### RD6. Farms ([R4 #287](https://github.com/chrischaps/TheCapitol/issues/287))
 
@@ -93,7 +93,7 @@ The sectors' characters are a seeded shuffle of 4 *concession* and 4 *winding*, 
 - **Size and spacing.** A farm is about 120k, four times today's lot. Farms keep 40 or more apart side to side.
 - **Ids** are `farm_{s}_{road}_{L|R}_{k}`, numbered before the overlap pass, so a dropped farm doesn't re-id the rest.
   - The new prefix lets the flip's migration tell old lots (`rural_plot_%`) from new ones.
-- **The region.** The ring inset by 20 at r3000 and r3800, and the sector's side lines.
+- **The region.** The ring inset by 20 at r3000 and at the rural edge (r4600 since RD10), and the sector's side lines.
 - **Along the arterials** (Chris, 2026-10-20). Each sector owns the side of each arterial that faces it. Farms there stand behind a verge of about 30 past the 60-wide road, clear of the lane junctions. So the spawn road has farms along it.
 - **Reuse, not rewrite.** The lot geometry is `suburb/lots.rs`'s road index, edge rays, overlap pass and shrink-to-fit, lifted to work over any `Region` and a `LotParams` ([R2 #285](https://github.com/chrischaps/TheCapitol/issues/285)). It is `models/lot_geometry.rs` now, and `place` keeps farms `lot_gap` (40) apart.
 
@@ -121,6 +121,20 @@ The sectors' characters are a seeded shuffle of 4 *concession* and 4 *winding*, 
 
 The rural deed is a flat 250, and the tax is flat too. A farm is four times the land, so after the flip 250 buys four times as much. That may be right, since the countryside is the first rung next to the spawn, but it's Chris's call. #292 is `needs-decision`. Nothing in this plan changes prices.
 
+### RD10. The ring is two roads deep, and the world grows (Chris, 2026-10-20; [#307](https://github.com/chrischaps/TheCapitol/issues/307))
+
+**The problem.** At 800 deep, one road with farms on both sides fills the band: two depths of 280 to 380, plus the verges. There's no room for a second road across, so every sector is one line of farms, and the countryside reads as a strip.
+
+**The change.** The rural ring runs **r3000 to r4600, 1600 deep**: two roads across, each with a band about 800 deep.
+- **The world grows; the wilds don't shrink.** Chris picked this over shrinking the wilds to 1400 deep. The wilds keep their 2200 depth and move out to r4600 to r6800. `WORLD_SIZE` goes from 12000 to 13600, and the centre moves to (6800, 6800), as it moved in W1 (WD1 in the wilds plan). One migration moves every stored position by +800 ([RW1 #308](https://github.com/chrischaps/TheCapitol/issues/308)).
+- **The wilds are regenerated.** The height field is keyed on the offset from the centre, and its radii move out with the edge: the foothills start at r4700 and the ranges reach full height at r6400. So the ground, the water, the wild trails and the wild nodes past r4600 are all new. The plain the rivers soak into is twice as deep, and they still never reach inside r3150.
+- **Concession sectors get two main roads.** The inner one stays where R3 put it (kink at ρ ≈ 3400), and an outer one has its kink at ρ ≈ 4200, where the chord sags about 80. *Concession side roads* join the two at T junctions, and at most one more runs out from the outer road to a gate ([RW3 #310](https://github.com/chrischaps/TheCapitol/issues/310)).
+- **Winding sectors get two lanes, linked.** Chris picked this over one lane with more spurs. An inner lane runs about ρ0 3400 and an outer one about ρ0 4200, at least 500 apart, joined by one winding *cross-lane*. The spur stays.
+- **Flint follows the bigger world:** the fixture, the land mesh and `GroundField`, the grass mask, the fog, the views and the edge water ([RW2 #309](https://github.com/chrischaps/TheCapitol/issues/309)).
+- **What doesn't change:** the farm sizes, gaps and verges (RD6), the deck (RD2), the half-sector checks (§5), and the spawn on the south arterial at r3350, which now stands in the inner band.
+
+**The cost.** This is the third time the whole world has moved on purpose (after B1 and W1). Every position in a live database shifts once, so the change can't land in the middle of a citizens' soak (#257, #306). There's also more to walk: the edge of the wilds is 800 further from the tower.
+
 ## 4. The layout, step by step
 
 ### 4.1 Sectors
@@ -130,7 +144,7 @@ The rural deed is a flat 250, and the tax is flat too. A farm is four times the 
 
 ### 4.2 Roads
 
-3. Lay the main road (RD3 or RD4), then its side roads or spur.
+3. Lay the two main roads, inner and outer (RD3 or RD4, and RD10). Then lay the side roads or the cross-lane between them, and the spur.
 4. Weld (RD5).
 
 ### 4.3 Farms
@@ -149,7 +163,7 @@ R1's harness prints these, and R5's test asserts the hard ones over seeds 42, 7,
 
 | Metric | Target | Hard? |
 |---|---|---|
-| Farms | 45 to 65 | yes |
+| Farms | 95 to 135 (45 to 65 before RD10) | yes |
 | Mean farm area | 100k to 140k | soft |
 | Ring built share | 30 to 40% | soft |
 | Built share of each of the 16 half-sectors | 20 to 55% | yes |
@@ -160,7 +174,7 @@ R1's harness prints these, and R5's test asserts the hard ones over seeds 42, 7,
 | Farms on water | 0 | yes |
 | Gap between farms | ≥ 40 | yes |
 
-**The baseline** (today's trails, R1, #284). `backend/tools/rural-plan.ps1` prints it. ✗ marks a miss, and hard targets are in bold.
+**The baseline** (today's trails on the 800-deep ring, R1, #284; RW1 stretches them to r4600, so R5 measures it again). `backend/tools/rural-plan.ps1` prints it. ✗ marks a miss, and hard targets are in bold.
 
 | Metric | Target | 42 | 7 | 1234 | 99999 |
 |---|---|---:|---:|---:|---:|
@@ -246,9 +260,13 @@ The flip is one commit, and `scripts/ci.sh full` runs before it lands. It covers
 | R1 | [#284](https://github.com/chrischaps/TheCapitol/issues/284) | Harness: render, metrics, `rural-plan.ps1`, baseline of today's trails. *As built:* `rural/metrics.rs` and `render.rs` (test-only), `rural_plan_report`, and `-Seed`, `-Seeds`, `-Sector`, `-Out` and `-Compare`. It shares `suburb::metrics`'s scope and checks and `suburb::render`'s helpers and page. The baseline is in §2 and §5 | M | – |
 | R2 | [#285](https://github.com/chrischaps/TheCapitol/issues/285) | Shared lot geometry: `lots.rs` over any `Region` + `LotParams`, aware of water. Suburb unchanged under the pin. *As built:* `models/lot_geometry.rs` holds `World` (roads, fronted sides, and `with_water(courses, lakes, bank)`), `Region` (`ring`, cut by `ccw_of`/`cw_of` side lines, or `polygon`), `Ray`, `push_fronts`, the ray march `back`/`back_from`, `Candidate`, and `place`/`shrink_to_fit`. `LotParams` has the frontage and depths, the front, edge and rear gaps, `lot_gap`, `min_shrink` and `min_area`. A course is a capsule as wide as the wider point of each stretch, as R1 measures it, and a lake its even-odd rings, each plus `bank`. A ray stops at a bank as at a road without lots, so a lot backs onto water, and `place` drops one the water runs through. `suburb/lots.rs` keeps its walker, pies and ids, and calls it through `lot_params` and `region_of`. The pin and `neighbourhood_suburb_meets_its_targets` print the same | M | – |
 | R3 | [#286](https://github.com/chrischaps/TheCapitol/issues/286) | Sectors and roads behind `layout = Farms`: the deck, concession roads, winding lanes, side roads, spurs, weld, audit. *As built:* `rural/{sectors,roads}.rs`, and `RuralParams { layout, lane_width }` as `WorldGenParams::rural`. The sectors are read off the arterials' bearings. Concession: a kink at ρ in [3355, 3445] with ends within 25 of it, a jog half the time (16 to 24° across the road, 110 to 170 long, so the bends are 40° or less), and one side road (both ways at random) or two (opposite ways), to gates 80 to 140 from the ring's edge. Winding: two sines (90 to 150 in all) on 13 controls, wandering a fifth of a step in bearing. The spur turns 8° or less a step, pulled back toward radial, stops clear of the edges, the arterials and its own lane, and is redrawn if it's under 160 long. Under `Farms` there are no rural lots until R4. `rural-plan.ps1 -Layout farms` draws the lanes, the gates and each sector's character. Audit clean and 4 of each character on the four seeds and on seeds 0 to 39 | L | R1 |
-| R4 | [#287](https://github.com/chrischaps/TheCapitol/issues/287) | Farms on lanes and arterials, field gaps, the balance pass, clear of the water. Closes #223 | L | R2, R3 |
+| RW0 | [#307](https://github.com/chrischaps/TheCapitol/issues/307) | RD10 into this plan, the wilds plan and `CLAUDE.md`, and the issues | S | – |
+| RW1 | [#308](https://github.com/chrischaps/TheCapitol/issues/308) | The world grows to 13600: rural to r4600, the +800 shift, the wilds regenerated (land, water, trails, nodes), the pin | L | RW0 |
+| RW2 | [#309](https://github.com/chrischaps/TheCapitol/issues/309) | Flint for the 13600 world: fixture, land mesh, grass, fog, views, edge water, capitol-core | M | RW1 |
+| RW3 | [#310](https://github.com/chrischaps/TheCapitol/issues/310) | Two roads across: concession pairs with side roads between them, winding lanes with a cross-lane, the edge at r4580 | M | RW1, R3 |
+| R4 | [#287](https://github.com/chrischaps/TheCapitol/issues/287) | Farms on lanes and arterials, field gaps, the balance pass, clear of the water. Closes #223 | L | R2, R3, RW3 |
 | R5 | [#288](https://github.com/chrischaps/TheCapitol/issues/288) | Tune to §5's targets over four seeds; the targets test | M | R4 |
-| R6 | [#289](https://github.com/chrischaps/TheCapitol/issues/289) | Flint: farms are pasture, the farmstead set back on a drive, `LOT` bound | M | R4 |
+| R6 | [#289](https://github.com/chrischaps/TheCapitol/issues/289) | Flint: farms are pasture, the farmstead set back on a drive, `LOT` bound | M | R4, RW2 |
 | R7 | [#290](https://github.com/chrischaps/TheCapitol/issues/290) | The flip (§7) | L | R5, R6 |
 | R8 | [#291](https://github.com/chrischaps/TheCapitol/issues/291) | Remove the old trails, their params and the switch | S | R7 |
 
@@ -259,8 +277,11 @@ Follow-up: [#292](https://github.com/chrischaps/TheCapitol/issues/292), the rura
 - **The water depends on the roads.** New lanes move the plain's ponds and streams, which moves the nodes near them. The flip's node tests catch it, and `print_planned_node_moves` writes the rows.
 - **The wild nodes may drift.** The wilds are planned last on the same spacing grid as the rural nodes (`node_spawn.rs:171, 229-230`).
 - **#210** (rural iron veins, `needs-decision`) drifts the same node plan. Settle it before the flip and fold it in, or take a second migration after.
-- **Fewer, bigger plots.** About 55 farms replace 52 lots, so the count holds. Citizens' sim (`sim/run.rs:33`) puts rural first in `PLOT_ZONES`, so check its claims still find land.
+- **Fewer, bigger plots.** About 115 farms replace 52 lots, on twice the land (RD10). Citizens' sim (`sim/run.rs:33`) puts rural first in `PLOT_ZONES`, so check its claims still find land.
 - **Audit dead ends.** `street_plan::audit` flags every loose end. Rural tests need a farm-gate exemption that's narrow: an end inside a farm's frontage reach, not any end.
+
+- **The world shift (RD10) could miss a stored position.** RW1 lists every table that has one, including those added since W1 (citizens, the bazaar, impound), and checks a copy of a live database against the tower.
+- **The regenerated wilds could lose what W2 to W11 tuned.** The relief, the water's soak, the habitats and the far-land fade were all tuned at r3800 to r6000. RW1 and RW2 carry Chris's [H] checks of the relief and the views.
 
 ## 10. Verification
 

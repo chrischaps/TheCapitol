@@ -39,6 +39,7 @@ Chris decided the shape on 2026-10-18: grow the world, use a real height field, 
 - **The shift.** One migration translates every stored position by +2000: players, nodes, plots, stations, and any saved `world_config`.
   - *Why shift rather than allow negative coordinates:* every bounds check, fixture and client assumes 0..WORLD_SIZE, and B1 already did a world rescale this way.
 - **The edge.** The world is the r6000 disc. The square's corners are out of bounds.
+- *Later (2026-10-20, rural plan RD10, #307):* the rural ring widens to r4600, and the world grows again, to 13600 (centre (6800, 6800), a +800 shift). The wilds keep their 2200 depth, at r4600 to r6800, and are regenerated there ([#308](https://github.com/chrischaps/TheCapitol/issues/308)). The radii in this plan are the 12000 world's.
 
 ### WD2. The height field is a shared, pure function ([W2 #195](https://github.com/chrischaps/TheCapitol/issues/195))
 
