@@ -1144,3 +1144,76 @@ fn a_rate_limited_request_waits_and_goes_again() {
         start.elapsed()
     );
 }
+
+/// Polls `net.stats()` until `done` holds.
+fn wait_for_stats(net: &Net, what: &str, done: impl Fn(&NetStats) -> bool) -> NetStats {
+    let start = Instant::now();
+    loop {
+        let stats = net.stats();
+        if done(&stats) {
+            return stats;
+        }
+        assert!(start.elapsed() < WAIT, "stats never showed {what}: {stats:#?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn stats_time_the_round_trip_and_count_both_ways() {
+    let (_mock, addr) = Mock::start(Scenario::Normal);
+    let net = Net::spawn(config(addr)).unwrap();
+    assert_eq!(net.stats(), NetStats::default());
+    net.connect(GOOD_TOKEN);
+    wait_for(&net, "Connected", is_connected);
+    net.ws(ClientMessage::Move {
+        x: 4100.0,
+        y: 3900.0,
+    });
+    wait_for(&net, "positions", |e| {
+        matches!(e, NetEvent::Ws(ServerMessage::Positions { .. }))
+    });
+
+    // A Ping goes as soon as the session is live, not 15 s later.
+    let stats = wait_for_stats(&net, "a round trip", |s| s.rtt.is_some());
+    let rtt = stats.rtt.unwrap();
+    assert!(rtt < Duration::from_secs(1), "{rtt:?} on loopback");
+    assert_eq!(stats.rtt_avg, Some(rtt));
+    // auth, subscribe, the Ping and the move.
+    assert!(stats.outbound.messages >= 4, "{stats:#?}");
+    // auth_ok, subscribed, two malformed frames, player_left, positions, the Pong.
+    let stats = wait_for_stats(&net, "everything in", |s| s.inbound.messages >= 7);
+    assert!(stats.inbound.bytes > stats.outbound.bytes / 4, "{stats:#?}");
+    assert_eq!(stats.reconnects, 0);
+    assert_eq!(stats.motion, None);
+}
+
+#[test]
+fn stats_rate_each_type_over_the_last_second() {
+    let (_mock, addr) = Mock::start(Scenario::Normal);
+    let net = Net::spawn(NetConfig {
+        ping_interval: Duration::from_millis(50),
+        ..config(addr)
+    })
+    .unwrap();
+    net.connect(GOOD_TOKEN);
+    wait_for(&net, "Connected", is_connected);
+
+    // A whole second of pinging every 50 ms.
+    let stats = wait_for_stats(&net, "pings by the second", |s| {
+        s.outbound.rate(PING).is_some_and(|r| r.messages >= 10)
+            && s.inbound.rate(PONG).is_some_and(|r| r.messages >= 10)
+    });
+    let pings = stats.outbound.rate(PING).unwrap();
+    assert_eq!(pings.bytes, 8 * pings.messages as u64, "each Ping carries its number");
+    assert!(pings.messages <= 21, "{pings:?}");
+}
+
+#[test]
+fn stats_count_reconnects() {
+    let (_mock, addr) = Mock::start(Scenario::DropsAfterSubscribe { times: 2 });
+    let net = Net::spawn(quick_reconnect(addr)).unwrap();
+    net.connect(GOOD_TOKEN);
+    wait_for(&net, "Resync", |e| *e == NetEvent::Resync);
+    wait_for(&net, "Resync", |e| *e == NetEvent::Resync);
+    assert_eq!(net.stats().reconnects, 2);
+}

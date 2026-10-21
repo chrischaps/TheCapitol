@@ -155,6 +155,28 @@ pub struct Pose {
     pub moving: bool,
 }
 
+/// How the prediction and the interpolation are doing, for
+/// [`NetStats`](crate::net::NetStats) (D5.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MotionStats {
+    /// Snapshots that disagreed with the local player's prediction this
+    /// session: [`Motion::corrections`].
+    pub corrections: u32,
+    /// How far, in world units, all those corrections moved the prediction.
+    pub corrected: f64,
+    /// How far the last one moved it.
+    pub last_correction: f64,
+    /// How far the server runs behind the prediction: [`Motion::lag`].
+    pub lag: Option<Duration>,
+    /// The snapshot time buffered past the moment other players are drawn
+    /// at, in seconds. About [`MotionConfig::interp_delay`] less half a tick
+    /// when snapshots arrive on time; below zero, they're being extrapolated.
+    /// `None` before the first snapshot.
+    pub interp_depth: Option<f64>,
+    /// Other players being interpolated.
+    pub tracks: usize,
+}
+
 /// Turns 10 Hz snapshots into per-frame poses. See the module docs.
 #[derive(Debug, Clone)]
 pub struct Motion {
@@ -284,6 +306,27 @@ impl Motion {
     /// the prediction and the server don't agree on how players move.
     pub fn corrections(&self) -> u32 {
         self.local.as_ref().map_or(0, |local| local.corrections)
+    }
+
+    /// The numbers for a debug overlay at `now`.
+    pub fn stats(&self, now: Instant) -> MotionStats {
+        let drawn = now.checked_sub(self.config.interp_delay).unwrap_or(now);
+        let interp_depth = self.last_stamp.map(|stamp| {
+            if stamp >= drawn {
+                (stamp - drawn).as_secs_f64()
+            } else {
+                -(drawn - stamp).as_secs_f64()
+            }
+        });
+        let local = self.local.as_ref();
+        MotionStats {
+            corrections: self.corrections(),
+            corrected: local.map_or(0.0, |local| local.corrected),
+            last_correction: local.map_or(0.0, |local| local.last_correction),
+            lag: self.lag(),
+            interp_depth,
+            tracks: self.tracks.len(),
+        }
     }
 
     /// How far the server runs behind the local player's prediction, as
@@ -524,6 +567,9 @@ struct Local {
     server: (f64, f64),
     /// How many snapshots have disagreed with the prediction.
     corrections: u32,
+    /// How far those corrections moved the prediction, and the last one.
+    corrected: f64,
+    last_correction: f64,
 }
 
 impl Local {
@@ -548,6 +594,8 @@ impl Local {
             lag: TICK.as_secs_f64(),
             server: (0.0, 0.0),
             corrections: 0,
+            corrected: 0.0,
+            last_correction: 0.0,
         }
     }
 
@@ -723,8 +771,11 @@ impl Local {
     /// or snapping if it's too far. `(sx, sy)` is the server's report, which
     /// starts the new trail.
     fn correct(&mut self, now: Instant, sx: f64, sy: f64, tx: f64, ty: f64, config: &MotionConfig) {
+        let moved = distance(tx, ty, self.x, self.y);
         self.corrections += 1;
-        if distance(tx, ty, self.x, self.y) > config.teleport_distance {
+        self.corrected += moved;
+        self.last_correction = moved;
+        if moved > config.teleport_distance {
             self.snap(now, tx, ty);
             return;
         }

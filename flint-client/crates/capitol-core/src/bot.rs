@@ -52,7 +52,7 @@ use uuid::Uuid;
 use crate::bazaar;
 use crate::catalog::container_type;
 use crate::net::{
-    auth_error_is_final, ConnectionState, Net, NetConfig, NetEvent, RestError, RestRequest, RestResponse, Tag,
+    auth_error_is_final, ConnectionState, Net, NetConfig, NetEvent, NetStats, RestError, RestRequest, RestResponse, Tag,
 };
 use crate::market::MarketEvent;
 use crate::paths::{self, NoWay, WalkGraph};
@@ -1783,6 +1783,11 @@ impl Bot {
     /// economy sim counts from them.
     pub fn record(&mut self) {
         self.journal.get_or_insert_with(Vec::new);
+    }
+
+    /// The connection's numbers: the round trip, traffic and reconnects (D5.1).
+    pub fn net_stats(&self) -> NetStats {
+        self.net.stats()
     }
 
     /// What [`record`](Self::record) kept since the last call.

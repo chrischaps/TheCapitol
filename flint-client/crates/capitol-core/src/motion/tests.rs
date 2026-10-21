@@ -642,3 +642,33 @@ mod on_the_land {
         assert!(climb(false) > 0);
     }
 }
+
+#[test]
+fn stats_show_the_corrections_and_the_interpolation_depth() {
+    let mut rig = Rig::new();
+    assert_eq!(rig.motion.stats(rig.at(0)), MotionStats::default());
+
+    rig.snapshot(0, &[(ME, 4000.0, 4100.0), (OTHER, 4000.0, 4000.0)]);
+    rig.snapshot(100, &[(ME, 4000.0, 4100.0), (OTHER, 4005.0, 4000.0)]);
+    let stats = rig.motion.stats(rig.at(100));
+    assert_eq!(stats.tracks, 1);
+    // On time, the drawn moment is the delay behind the newest snapshot.
+    assert!(close(stats.interp_depth.unwrap(), 0.150, 1e-6), "{stats:?}");
+    // Late: the drawn moment has passed the newest, and it extrapolates.
+    let late = rig.motion.stats(rig.at(400)).interp_depth.unwrap();
+    assert!(close(late, -0.150, 1e-6), "{late}");
+    assert_eq!(stats.corrections, 0);
+
+    // The move is lost: the server stands while the prediction walks 40
+    // units, and is pulled back.
+    rig.move_to(100, 4100.0, 4100.0);
+    for ms in (110..900).step_by(10) {
+        rig.sample(ms);
+    }
+    rig.snapshot(900, &[(ME, 4000.0, 4100.0), (OTHER, 4005.0, 4000.0)]);
+    let stats = rig.motion.stats(rig.at(900));
+    assert_eq!(stats.corrections, 1);
+    assert!(close(stats.last_correction, 40.0, 1e-6), "{stats:?}");
+    assert_eq!(stats.corrected, stats.last_correction);
+    assert!(stats.lag.is_some());
+}

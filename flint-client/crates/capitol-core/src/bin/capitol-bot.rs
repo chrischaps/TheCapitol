@@ -1,7 +1,7 @@
 //! `capitol-bot`: headless players for The Capitol.
 //!
 //! ```text
-//! capitol-bot                          # Bot1 gathers fiber, crafts rope, reports
+//! capitol-bot                          # Bot1 gathers fiber, crafts rope, reports, with its round trip
 //! capitol-bot --accounts 5 --wander    # five players strolling about, until Ctrl-C
 //! capitol-bot --accounts 5 --wander --near Chris   # ...around Chris, following them
 //! capitol-bot --prefix trader --trade Chris --ask  # a trading partner for Chris
@@ -316,6 +316,7 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
         Ok(())
     } else {
         println!("{}", bot.run_script()?);
+        println!("{}: {}", bot.name(), bot.net_stats());
         Ok(())
     }
 }

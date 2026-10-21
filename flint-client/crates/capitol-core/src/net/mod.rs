@@ -18,11 +18,12 @@
 
 mod keyring;
 mod rest;
+mod stats;
 mod ws;
 
 use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use capitol_protocol::rest::AuthResponse;
 use capitol_protocol::ws::{ClientMessage, ServerMessage};
@@ -31,8 +32,10 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use keyring::Keyring;
+use stats::{Meter, SharedMeter};
 
 pub use rest::{RestError, RestRequest, RestResponse};
+pub use stats::{NetStats, Traffic, TypeRate, MALFORMED, PING, PONG};
 pub(crate) use ws::{auth_error_is_final, backoff, jitter};
 
 /// Matches a [`NetEvent::Rest`] result to the request that caused it.
@@ -241,6 +244,7 @@ enum Control {
 pub struct Net {
     commands: tmpsc::UnboundedSender<Control>,
     events: mpsc::Receiver<NetEvent>,
+    meter: SharedMeter,
     thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -275,12 +279,15 @@ impl Net {
         // IO loop can await it; events go back on std mpsc for a plain `try_recv`.
         let (commands, command_rx) = tmpsc::unbounded_channel();
         let (event_tx, events) = mpsc::channel();
+        let meter = Meter::shared();
+        let io_meter = meter.clone();
         let thread = thread::Builder::new()
             .name("capitol-net".into())
-            .spawn(move || runtime.block_on(io_loop(config, http, command_rx, event_tx)))?;
+            .spawn(move || runtime.block_on(io_loop(config, http, command_rx, event_tx, io_meter)))?;
         Ok(Net {
             commands,
             events,
+            meter,
             thread: Some(thread),
         })
     }
@@ -326,6 +333,12 @@ impl Net {
     pub fn recv_timeout(&self, timeout: Duration) -> Option<NetEvent> {
         self.events.recv_timeout(timeout).ok()
     }
+
+    /// The connection's numbers now: the round trip, traffic and reconnects.
+    /// Cheap enough for every frame of an overlay.
+    pub fn stats(&self) -> NetStats {
+        Meter::lock(&self.meter).snapshot(Instant::now())
+    }
 }
 
 impl Drop for Net {
@@ -342,6 +355,7 @@ async fn io_loop(
     http: reqwest::Client,
     mut commands: tmpsc::UnboundedReceiver<Control>,
     events: mpsc::Sender<NetEvent>,
+    meter: SharedMeter,
 ) {
     let base = config.rest_base();
     let mut keyring: Option<Arc<Keyring>> = None;
@@ -369,6 +383,7 @@ async fn io_loop(
                     new.clone(),
                     config.clone(),
                     events.clone(),
+                    meter.clone(),
                 ));
                 keyring = Some(new);
             }

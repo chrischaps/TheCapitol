@@ -15,7 +15,7 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use capitol_protocol::ws::{ClientMessage, ServerMessage};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc as tmpsc;
 use tokio::task::JoinHandle;
@@ -25,6 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use super::keyring::Keyring;
+use super::stats::{Meter, SharedMeter, MALFORMED, PING, PONG};
 use super::{ConnectionState, NetConfig, NetEvent};
 
 /// The only channel the server knows.
@@ -54,9 +55,10 @@ impl Session {
         keyring: Arc<Keyring>,
         config: NetConfig,
         events: mpsc::Sender<NetEvent>,
+        meter: SharedMeter,
     ) -> Session {
         let (outbound, rx) = tmpsc::unbounded_channel();
-        let task = tokio::spawn(run(url, keyring, config, rx, events));
+        let task = tokio::spawn(run(url, keyring, config, rx, events, meter));
         Session { outbound, task }
     }
 
@@ -109,6 +111,7 @@ async fn run(
     config: NetConfig,
     mut outbound: tmpsc::UnboundedReceiver<Outbound>,
     events: mpsc::Sender<NetEvent>,
+    meter: SharedMeter,
 ) {
     let emit = |state| {
         let _ = events.send(NetEvent::Connection(state));
@@ -146,6 +149,7 @@ async fn run(
             &mut outbound,
             &events,
             &emit,
+            &meter,
             was_live,
             &mut live_since,
         )
@@ -180,6 +184,7 @@ async fn run(
             jitter(),
         );
         tracing::info!("websocket dropped ({reason}); attempt {attempt} in {delay:?}");
+        Meter::lock(&meter).reconnecting();
         emit(ConnectionState::Reconnecting {
             attempt,
             delay,
@@ -243,6 +248,7 @@ async fn connection(
     outbound: &mut tmpsc::UnboundedReceiver<Outbound>,
     events: &mpsc::Sender<NetEvent>,
     emit: &impl Fn(ConnectionState),
+    meter: &SharedMeter,
     resync: bool,
     live_since: &mut Option<Instant>,
 ) -> End {
@@ -263,8 +269,8 @@ async fn connection(
     let auth = ClientMessage::Auth {
         token: token.into(),
     };
-    if let Err(e) = sink.send(encode(&auth)).await {
-        return End::Dropped(format!("send failed: {e}"));
+    if let Err(e) = send(&mut sink, meter, &auth).await {
+        return End::Dropped(e);
     }
 
     let mut phase = Phase::Authenticating;
@@ -284,8 +290,19 @@ async fn connection(
                     None => return End::Dropped("connection closed by server".into()),
                 };
                 last_heard = Instant::now();
+                let heard = last_heard.into_std();
                 let text = match frame {
                     Message::Text(text) => text,
+                    Message::Pong(payload) => {
+                        let mut meter = Meter::lock(meter);
+                        meter.pong(heard, &payload);
+                        meter.received(heard, PONG, payload.len());
+                        continue;
+                    }
+                    Message::Ping(payload) => {
+                        Meter::lock(meter).received(heard, PING, payload.len());
+                        continue;
+                    }
                     Message::Close(frame) => {
                         let reason = frame
                             .map(|f| f.reason.to_string())
@@ -293,10 +310,13 @@ async fn connection(
                             .unwrap_or_else(|| "connection closed by server".into());
                         return End::Dropped(reason);
                     }
-                    // Pongs only refresh `last_heard`; tungstenite answers pings itself.
+                    // tungstenite answers pings itself.
                     _ => continue,
                 };
-                let message = match serde_json::from_str::<ServerMessage>(&text) {
+                let parsed = serde_json::from_str::<ServerMessage>(&text);
+                let kind = parsed.as_ref().map_or(MALFORMED, |m| m.type_name());
+                Meter::lock(meter).received(heard, kind, text.len());
+                let message = match parsed {
                     Ok(message) => message,
                     Err(e) => {
                         let excerpt: String = text.chars().take(120).collect();
@@ -311,8 +331,8 @@ async fn connection(
                 match (&phase, &message) {
                     (Phase::Authenticating, ServerMessage::AuthOk { player_id, .. }) => {
                         let subscribe = ClientMessage::Subscribe { channel: POSITION_CHANNEL.into() };
-                        if let Err(e) = sink.send(encode(&subscribe)).await {
-                            return End::Dropped(format!("send failed: {e}"));
+                        if let Err(e) = send(&mut sink, meter, &subscribe).await {
+                            return End::Dropped(e);
                         }
                         phase = Phase::Subscribing { player_id: *player_id };
                     }
@@ -343,9 +363,13 @@ async fn connection(
                         let _ = events.send(NetEvent::Resync);
                     }
                     while let Some(message) = pending.pop_front() {
-                        if let Err(e) = sink.send(encode(&message)).await {
-                            return End::Dropped(format!("send failed: {e}"));
+                        if let Err(e) = send(&mut sink, meter, &message).await {
+                            return End::Dropped(e);
                         }
+                    }
+                    // A first Ping now, so the round trip is known from the start.
+                    if let Err(e) = send_ping(&mut sink, meter).await {
+                        return End::Dropped(e);
                     }
                 }
             }
@@ -353,8 +377,8 @@ async fn connection(
             out = outbound.recv() => match out {
                 Some(Outbound::Send(message)) => {
                     if matches!(phase, Phase::Live) {
-                        if let Err(e) = sink.send(encode(&message)).await {
-                            return End::Dropped(format!("send failed: {e}"));
+                        if let Err(e) = send(&mut sink, meter, &message).await {
+                            return End::Dropped(e);
                         }
                     } else {
                         if pending.len() == MAX_PENDING {
@@ -381,8 +405,8 @@ async fn connection(
                 if last_heard.elapsed() > config.idle_timeout {
                     return End::Dropped("server stopped responding".into());
                 }
-                if let Err(e) = sink.send(Message::Ping(Default::default())).await {
-                    return End::Dropped(format!("send failed: {e}"));
+                if let Err(e) = send_ping(&mut sink, meter).await {
+                    return End::Dropped(e);
                 }
             }
 
@@ -426,6 +450,37 @@ async fn connect_tcp(url: &str) -> std::io::Result<TcpStream> {
 fn encode(message: &ClientMessage) -> Message {
     // ClientMessage is plain data; serialising it can't fail.
     Message::text(serde_json::to_string(message).expect("ClientMessage serialises"))
+}
+
+/// Sends `message` and counts it.
+async fn send<S>(sink: &mut S, meter: &SharedMeter, message: &ClientMessage) -> Result<(), String>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    let frame = encode(message);
+    let bytes = frame.len();
+    sink.send(frame).await.map_err(|e| format!("send failed: {e}"))?;
+    Meter::lock(meter).sent(std::time::Instant::now(), message.type_name(), bytes);
+    Ok(())
+}
+
+/// Sends a Ping numbered for [`Meter::pong`] to time.
+async fn send_ping<S>(sink: &mut S, meter: &SharedMeter) -> Result<(), String>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    let payload = {
+        let mut meter = Meter::lock(meter);
+        let now = std::time::Instant::now();
+        let payload = meter.ping(now);
+        meter.sent(now, PING, payload.len());
+        payload
+    };
+    sink.send(Message::Ping(payload.to_vec().into()))
+        .await
+        .map_err(|e| format!("send failed: {e}"))
 }
 
 #[cfg(test)]
