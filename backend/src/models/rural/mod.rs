@@ -53,11 +53,23 @@ pub struct RuralParams {
     pub layout: RuralLayout,
     /// The lanes, side roads and spurs (RD5).
     pub lane_width: f64,
+    /// A farm's frontage along its road, drawn in this range (RD6)...
+    pub frontage: (f64, f64),
+    /// ...the field before the next farm...
+    pub field_gap: (f64, f64),
+    /// ...and its depth, before the region and the other roads clip it.
+    pub depth: (f64, f64),
 }
 
 impl Default for RuralParams {
     fn default() -> Self {
-        Self { layout: RuralLayout::Trails, lane_width: 8.0 }
+        Self {
+            layout: RuralLayout::Trails,
+            lane_width: 8.0,
+            frontage: (380.0, 500.0),
+            field_gap: (240.0, 440.0),
+            depth: (280.0, 380.0),
+        }
     }
 }
 
@@ -222,6 +234,35 @@ pub(crate) mod tests {
                 let counted = metrics::sector_roads(&t.roads, s);
                 assert!(counted.mains == 2 && counted.links >= 1, "seed {seed}: sector {s} has {counted:?}");
             }
+        }
+    }
+
+    /// R5's acceptance (plan §5): every hard target holds on the four seeds,
+    /// and the soft ones missed are printed, as the suburb's are.
+    #[test]
+    fn farms_meet_their_targets() {
+        let missed = |v: &[crate::models::suburb::metrics::Violation]| -> Vec<String> {
+            v.iter().map(|v| format!("{} {} (target {})", v.label, crate::models::suburb::metrics::fmt_num(v.value), v.target)).collect()
+        };
+        for seed in SEEDS {
+            let m = metrics::measure_world(&farms_world(seed), None).measured.metrics;
+            // A metric with nothing to measure misses nothing, so the hard
+            // ones must all have been measured.
+            for t in metrics::TARGETS.iter().filter(|t| t.hard) {
+                assert!(m.value(t.metric).is_some(), "seed {seed}: {} wasn't measured", t.label);
+            }
+            let (hard, soft): (Vec<_>, Vec<_>) = metrics::violations(&m).into_iter().partition(|v| v.hard);
+            assert!(hard.is_empty(), "seed {seed} misses {:?}", missed(&hard));
+            eprintln!(
+                "seed {seed}: {} farms of {:.0}k, {:.0}% built, half-sectors {:.0} to {:.0}% (CV {:.2}); soft misses: {:?}",
+                m.lots,
+                m.lot_area_mean.unwrap() / 1000.0,
+                m.built_share.unwrap() * 100.0,
+                m.half_sector_min.unwrap() * 100.0,
+                m.half_sector_max.unwrap() * 100.0,
+                m.half_sector_cv.unwrap(),
+                missed(&soft)
+            );
         }
     }
 
