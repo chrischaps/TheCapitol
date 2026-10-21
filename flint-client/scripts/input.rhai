@@ -81,9 +81,9 @@
 // the click; the lane between the rows stays ground to walk on) opens its
 // shop there, or walks you along the bazaar's streets and opens it as
 // you reach the counter (cap_visit_stall; capitol_core::bazaar). Each kept
-// stall's name is written on the sign hanging from its awning, while the
-// camera is near enough to read it and no roof stands in front of it
-// (`seen`: script text isn't depth-tested, #274). Hovering a stall, or standing in its
+// stall's name is painted on both faces of the sign hanging from its
+// awning, while the camera is near enough to read it. It's world text
+// (draw_world_text, #274), so a roof in front of it hides it. Hovering a stall, or standing in its
 // range, traces its footprint in the lanterns' amber, and the one you're
 // walking to breathes; the one under the cursor says whose it is and what
 // a click does.
@@ -1003,7 +1003,7 @@ fn amber() { [0.910, 0.635, 0.290] }
 // its footprint traced and a prompt over it.
 fn draw_bazaar(b, over, now) {
     for s in b.stalls {
-        if s.name != () && s.seen { draw_sign(s); }
+        if s.name != () { draw_sign(s); }
     }
     for s in b.stalls {
         let hovered = over != () && over == s.id;
@@ -1012,8 +1012,10 @@ fn draw_bazaar(b, over, now) {
     }
 }
 
-// The shop's name on its sign: sized to the board on the screen, and not
-// drawn once it would be too small to read.
+// The shop's name painted on both faces of its sign, cream on the dark
+// board with a sign-writer's shade, as wide as the board lets it run. It's
+// in the world, so whatever stands in front of it hides it. Too far off to
+// read, it fades out.
 fn draw_sign(s) {
     let at = world_to_screen(s.x, s.y, s.z);
     if !at.visible { return; }
@@ -1022,12 +1024,18 @@ fn draw_sign(s) {
     // How many points the board's 0.3 m height spans
     let px = (edge.y - at.y).abs();
     if px < 9.0 { return; }
-    let size = (px * 0.5).min(15.0).max(9.0);
-    let m = measure_text_ex(s.name, size, "display", 0.0);
-    let x = at.x - m.width / 2.0;
-    let y = at.y - m.height / 2.0;
-    draw_text_opts(x + 1.0, y + 1.0, s.name, size, #{ font: "display", color: [0.0, 0.0, 0.0, 0.7] });
-    draw_text_opts(x, y, s.name, size, #{ font: "display", color: [0.98, 0.93, 0.80, 0.97] });
+    let fade = ((px - 9.0) / 6.0).min(1.0);
+    let m = measure_text_ex(s.name, 20.0, "display", 0.0);
+    let size = (s.sign_w * 20.0 / m.width).min(0.13);
+    let d = s.sign_d + 0.004;
+    for side in [1.0, -1.0] {
+        let nx = s.fx * side;
+        let nz = s.fz * side;
+        draw_world_text(s.x + nx * d, s.y, s.z + nz * d, s.name, size, #{
+            font: "display", color: [0.98, 0.93, 0.80, 0.97 * fade], facing: [nx, 0.0, nz],
+            shadow: [size * 0.05, size * 0.05, 0.0, 0.0, 0.0, 0.6 * fade],
+        });
+    }
 }
 
 // A stall's footprint traced in amber, and over it its name (or "Stall n,

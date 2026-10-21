@@ -131,6 +131,7 @@ impl Frame {
     }
 
     /// Where world point `p` falls in the frame, as (u, v).
+    #[cfg(test)]
     fn local(&self, p: V2) -> (f32, f32) {
         let d = [p[0] - self.door[0], p[1] - self.door[1]];
         (d[0] * self.f[0] + d[1] * self.f[1], d[0] * self.a[0] + d[1] * self.a[1])
@@ -172,6 +173,12 @@ pub struct Sign {
     pub at: [f32; 3],
     /// The shop's colour, as linear RGB, for the name's underline.
     pub colour: [f32; 3],
+    /// The way the board's front faces, out over its street.
+    pub facing: [f32; 3],
+    /// How wide the name may run between the board's ends, and how far
+    /// each face stands from `at`: 0 for an empty stall, which has none.
+    pub width: f32,
+    pub depth: f32,
 }
 
 /// The bazaar, built: one buffer per material, and where its signs hang.
@@ -279,7 +286,14 @@ fn stall(h: &mut Bazaar, s: &StallLook) {
         prism(&mut h.stone, &f.rect(-0.16, -0.04, w0 + 0.1, w1 - 0.1), EAVE - 0.2, EAVE - 0.08, mix(hex(CLOTH), hex(STONE), 0.35), true);
         shutters(h, &f);
         let c = f.at(0.27, 0.0);
-        h.signs.push(Sign { stall_id: s.stall.id.clone(), at: [c[0], COUNTER + 0.5, c[1]], colour: [0.8, 0.78, 0.72] });
+        h.signs.push(Sign {
+            stall_id: s.stall.id.clone(),
+            at: [c[0], COUNTER + 0.5, c[1]],
+            colour: [0.8, 0.78, 0.72],
+            facing: f.out(),
+            width: 0.0,
+            depth: 0.0,
+        });
         return;
     };
     let colour = AWNINGS[name_hash(&shop.name) as usize % AWNINGS.len()];
@@ -303,7 +317,15 @@ fn stall(h: &mut Bazaar, s: &StallLook) {
     }
     let c = f.at(u, 0.0);
     let [r, g, bl, _] = hex(colour);
-    h.signs.push(Sign { stall_id: s.stall.id.clone(), at: [c[0], (SIGN.0 + SIGN.1) * 0.5, c[1]], colour: [r, g, bl] });
+    h.signs.push(Sign {
+        stall_id: s.stall.id.clone(),
+        at: [c[0], (SIGN.0 + SIGN.1) * 0.5, c[1]],
+        colour: [r, g, bl],
+        facing: f.out(),
+        // Inside the border's ends, with a margin
+        width: 2.0 * (half - 0.03) - 0.08,
+        depth: 0.025,
+    });
     // A lantern at the awning's corner
     let side = if hash(name_hash(&shop.name), 3, 1).is_multiple_of(2) { w0 + 0.12 } else { w1 - 0.12 };
     lantern(h, f.at(-AWNING_OUT + 0.08, side), AWNING_LOW, 0.07);
@@ -502,7 +524,7 @@ type Drawn = (Landmark, Vec<(Landmark, Option<ShopSign>)>);
 pub struct BazaarLayer {
     drawn: Option<Drawn>,
     signs: Vec<Sign>,
-    /// Each stall's frame, for [`Self::hidden`].
+    /// Each stall's frame, for [`Self::solids`].
     frames: Vec<Frame>,
 }
 
@@ -518,30 +540,6 @@ impl BazaarLayer {
         self.frames.iter().map(|f| {
             let r = f.rect(0.0, f.depth, -f.width / 2.0, f.width / 2.0);
             crate::world::solids::Solid { corners: [r[0], r[1], r[2], r[3]], bottom: PAVE, top: WALL_TOP }
-        })
-    }
-
-    /// Whether a stall stands between `eye` and `at` (world metres), so a
-    /// name written at `at` would show through its roof. Each stall is a
-    /// solid: its floor up to its roof, which slopes from its back wall down
-    /// to the eave over its counter.
-    ///
-    /// A workaround: script text isn't depth-tested, so the HUD can't let
-    /// the roofs hide a sign's name itself (#274).
-    pub fn hidden(&self, eye: [f32; 3], at: [f32; 3]) -> bool {
-        let solid = |p: [f32; 3]| {
-            p[1] >= PAVE
-                && self.frames.iter().any(|f| {
-                    let (u, v) = f.local([p[0], p[2]]);
-                    let roof = EAVE + (WALL_TOP - EAVE) * (u / f.depth).clamp(0.0, 1.0);
-                    (0.0..=f.depth).contains(&u) && v.abs() <= f.width / 2.0 && p[1] <= roof
-                })
-        };
-        // The last stretch is the sign's own: it hangs out over its street
-        const STEPS: usize = 48;
-        (1..STEPS - 2).any(|k| {
-            let t = k as f32 / STEPS as f32;
-            solid(std::array::from_fn(|i| eye[i] + (at[i] - eye[i]) * t))
         })
     }
 
@@ -729,26 +727,6 @@ mod tests {
         assert!((top - TOP_Y).abs() < 1e-4, "{top}");
         // Lower than the hall, the civic one of the pair
         const { assert!(TOP_Y < crate::world::hall::TOP_Y) };
-    }
-
-    #[test]
-    fn a_sign_hides_behind_its_stall_but_not_from_over_its_street() {
-        let (_, stalls, b) = built(&shops());
-        let looks: Vec<StallLook> = stalls.iter().map(|stall| StallLook { stall, shop: None }).collect();
-        let layer = BazaarLayer { frames: looks.iter().map(|l| Frame::new(l.stall)).collect(), ..Default::default() };
-        let stall = &stalls[0];
-        let f = Frame::new(stall);
-        let sign = b.signs.iter().find(|s| s.stall_id == stall.id).unwrap().at;
-        assert!(f.local([sign[0], sign[2]]).0 < 0.0, "out over its street");
-        // From low behind the stall, the stall is in the way
-        let behind = f.at(f.depth + 3.0, 0.0);
-        assert!(layer.hidden([behind[0], G + 1.5, behind[1]], sign));
-        // From high over its street, nothing is
-        let above = f.at(-1.5, 0.0);
-        assert!(!layer.hidden([above[0], G + 30.0, above[1]], sign));
-        // Nor from its street at eye height
-        let crown = f.at(-1.4, 1.0);
-        assert!(!layer.hidden([crown[0], G + 1.7, crown[1]], sign));
     }
 
     #[test]
