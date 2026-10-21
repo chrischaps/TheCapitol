@@ -46,12 +46,12 @@ use capitol_core::protocol::rules::{self, water_name, STATION_INTERACTION_RANGE,
 use capitol_core::protocol::terrain::{LandmarkKind, TerrainResponse};
 use capitol_core::state::Activity;
 use capitol_core::station::{Note as PlaceNote, Phase as PlacePhase};
-use flint_player::{ExtensionCtx, PlayerExtension};
+use flint_player::{ExtensionCtx, KeyInput, PlayerExtension};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::keyboard::{Key, KeyCode, PhysicalKey};
+use winit::keyboard::KeyCode;
 
 /// How long the login form takes to fade out once the player is in, in
 /// seconds. The camera comes down from its circle over about the same time.
@@ -1179,38 +1179,42 @@ impl PlayerExtension for CapitolExtension {
         attach_each(ctx, sectors.iter());
     }
 
-    /// While a station is being placed (P6.2), Esc stops it rather than
-    /// quitting, and so does a right click on the world (not a right-drag,
-    /// which orbits). egui has already kept any click over its panels.
-    ///
-    /// `?` opens and closes the shortcut overlay (P8.3), read off the typed
+    /// `?` opens and closes the shortcut overlay (P8.3), read off the
     /// character so it's `?` on any layout. While it's open, Esc closes it.
+    /// While a station is being placed (P6.2), Esc stops it rather than
+    /// quitting. Keys come here rather than to `on_window_event` so an input
+    /// script can press them too (#273, Flint ADR 0103).
+    fn on_key(&mut self, key: &KeyInput) -> bool {
+        if self.in_world() && key.character == Some("?") {
+            if key.pressed() {
+                self.shortcuts.toggle();
+            }
+            return true;
+        }
+        if key.key != KeyCode::Escape {
+            return false;
+        }
+        if self.shortcuts.open {
+            if key.pressed() {
+                self.shortcuts.open = false;
+            }
+            return true;
+        }
+        if self.session.as_ref().is_some_and(|s| s.placing().is_some()) {
+            if key.state == ElementState::Pressed {
+                self.cancel_placing = true;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// While a station is being placed (P6.2), a right click on the world
+    /// stops it (not a right-drag, which orbits), as Esc does. egui has
+    /// already kept any click over its panels.
     fn on_window_event(&mut self, event: &WindowEvent) -> bool {
         let placing = self.session.as_ref().is_some_and(|s| s.placing().is_some());
-        if let WindowEvent::KeyboardInput { event: key, .. } = event {
-            let pressed = key.state == ElementState::Pressed && !key.repeat;
-            if self.in_world() && key.logical_key == Key::Character("?".into()) {
-                if pressed {
-                    self.shortcuts.toggle();
-                }
-                return true;
-            }
-            if self.shortcuts.open && key.physical_key == PhysicalKey::Code(KeyCode::Escape) {
-                if pressed {
-                    self.shortcuts.open = false;
-                }
-                return true;
-            }
-        }
         match event {
-            WindowEvent::KeyboardInput { event: key, .. }
-                if placing && key.physical_key == PhysicalKey::Code(KeyCode::Escape) =>
-            {
-                if key.state == ElementState::Pressed {
-                    self.cancel_placing = true;
-                }
-                return true;
-            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
             }
