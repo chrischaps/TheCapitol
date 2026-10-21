@@ -1,8 +1,9 @@
 //! The fiber exchange (P7.2): what a deposit gives and what a withdrawal
 //! costs, before you confirm. Pure, so it's tested without a server.
 //!
-//! The numbers are `protocol::rules::deposit_quote` and `withdraw_quote`,
-//! the functions the server charges with, so the preview is its answer.
+//! The numbers are `Fees::deposit_quote` and `withdraw_quote` at the fees the
+//! server sent (`GameState::fees`, D6.1), the functions it charges with, so the
+//! preview is its answer.
 //!
 //! - **Deposit** takes fiber stacks from the inventory, as React's panel
 //!   does. The server would take fiber from any container you own, but a
@@ -16,7 +17,7 @@
 use std::collections::HashSet;
 
 use capitol_protocol::rest::{DepositResponse, SlotItem, WithdrawResponse};
-use capitol_protocol::rules::{deposit_quote, withdraw_quote};
+use capitol_protocol::tunables::Fees;
 use uuid::Uuid;
 
 use crate::state::Container;
@@ -58,6 +59,7 @@ pub fn deposit(
     inventory: &Container,
     selected: &HashSet<Uuid>,
     balance: Option<i64>,
+    fees: &Fees,
 ) -> Result<DepositQuote, DepositRefusal> {
     let fiber: i64 = fiber_stacks(inventory)
         .into_iter()
@@ -67,7 +69,7 @@ pub fn deposit(
     if fiber <= 0 {
         return Err(DepositRefusal::NothingSelected);
     }
-    let (fee, strands) = deposit_quote(fiber);
+    let (fee, strands) = fees.deposit_quote(fiber);
     Ok(DepositQuote {
         fiber,
         fee,
@@ -128,11 +130,12 @@ pub enum WithdrawRefusal {
 const MAX_STACK: i64 = i32::MAX as i64;
 
 /// The withdrawal of `quantity` fiber into `inventory`, holding `balance`
-/// Strands (`None` until known; the server decides then).
+/// Strands (`None` until known; the server decides then), at `fees`.
 pub fn withdraw(
     inventory: Option<&Container>,
     quantity: i64,
     balance: Option<i64>,
+    fees: &Fees,
 ) -> Result<WithdrawQuote, WithdrawRefusal> {
     if quantity <= 0 {
         return Err(WithdrawRefusal::NoQuantity);
@@ -142,7 +145,7 @@ pub fn withdraw(
     if quantity > MAX_STACK - held {
         return Err(WithdrawRefusal::TooMany);
     }
-    let (strands, fee) = withdraw_quote(quantity);
+    let (strands, fee) = fees.withdraw_quote(quantity);
     if let Some(b) = balance {
         if b < strands {
             return Err(WithdrawRefusal::Short {
@@ -181,14 +184,19 @@ fn merged_quality(quality: i32, quantity: i32, added: i64) -> i32 {
     ((quality as i64 * quantity as i64 + WITHDRAWN_QUALITY as i64 * added) / total) as i32
 }
 
-/// The most fiber `balance` Strands can withdraw.
-pub fn max_withdraw(balance: i64) -> i64 {
+/// The most fiber `balance` Strands can withdraw at `fees`.
+pub fn max_withdraw(balance: i64, fees: &Fees) -> i64 {
     if balance <= 0 {
         return 0;
     }
-    // ceil(200q / 199) <= b  <=>  q <= 199b / 200.
-    let q = balance.saturating_mul(199) / 200;
-    debug_assert!(withdraw_quote(q).0 <= balance);
+    // About b × (1 - rate), then onto the exact edge of the server's rounding
+    let mut q = ((balance as f64) * (1.0 - fees.exchange_fee_rate)).floor() as i64;
+    while q > 0 && fees.withdraw_quote(q).0 > balance {
+        q -= 1;
+    }
+    while fees.withdraw_quote(q + 1).0 <= balance {
+        q += 1;
+    }
     q.min(MAX_STACK)
 }
 
@@ -298,7 +306,7 @@ mod tests {
         assert_eq!(ids, [Uuid::from_u128(2), Uuid::from_u128(1)], "slot order");
         let all: HashSet<_> = [1, 2, 3].map(Uuid::from_u128).into();
         assert_eq!(
-            deposit(&inv, &all, Some(10)),
+            deposit(&inv, &all, Some(10), &Fees::default()),
             Ok(DepositQuote {
                 fiber: 450,
                 fee: 2,
@@ -308,10 +316,10 @@ mod tests {
         );
         // Rope isn't fiber, and a gone id is left out of the request.
         let some: HashSet<_> = [1, 3, 99].map(Uuid::from_u128).into();
-        assert_eq!(deposit(&inv, &some, None).unwrap().strands, 150);
+        assert_eq!(deposit(&inv, &some, None, &Fees::default()).unwrap().strands, 150);
         assert_eq!(deposit_ids(&inv, &some), [Uuid::from_u128(1)]);
         assert_eq!(
-            deposit(&inv, &HashSet::new(), None),
+            deposit(&inv, &HashSet::new(), None, &Fees::default()),
             Err(DepositRefusal::NothingSelected)
         );
     }
@@ -320,7 +328,7 @@ mod tests {
     fn withdraw_costs_the_server_rule_and_says_where_it_lands() {
         let one = inventory(24, vec![item(1, "fiber", 70, 10, 4)]);
         assert_eq!(
-            withdraw(Some(&one), 10, Some(100)),
+            withdraw(Some(&one), 10, Some(100), &Fees::default()),
             Ok(WithdrawQuote {
                 fiber: 10,
                 fee: 1,
@@ -335,7 +343,7 @@ mod tests {
         );
         let none = inventory(24, vec![item(1, "rope", 70, 1, 0)]);
         assert_eq!(
-            withdraw(Some(&none), 5, Some(100)).unwrap().lands,
+            withdraw(Some(&none), 5, Some(100), &Fees::default()).unwrap().lands,
             Lands::NewSlot(1)
         );
         // The lowest slot, whatever order the stacks come in: (30 × 1 + 50 × 5) / 6
@@ -344,7 +352,7 @@ mod tests {
             vec![item(1, "fiber", 70, 1, 3), item(2, "fiber", 30, 1, 1)],
         );
         assert_eq!(
-            withdraw(Some(&two), 5, None).unwrap().lands,
+            withdraw(Some(&two), 5, None, &Fees::default()).unwrap().lands,
             Lands::OnStack {
                 slot: Some(1),
                 quality_after: Some(46)
@@ -356,27 +364,27 @@ mod tests {
     fn withdraw_refuses_what_the_server_would() {
         let inv = inventory(24, vec![]);
         assert_eq!(
-            withdraw(Some(&inv), 0, Some(5)),
+            withdraw(Some(&inv), 0, Some(5), &Fees::default()),
             Err(WithdrawRefusal::NoQuantity)
         );
         assert_eq!(
-            withdraw(Some(&inv), 100, Some(100)),
+            withdraw(Some(&inv), 100, Some(100), &Fees::default()),
             Err(WithdrawRefusal::Short {
                 strands: 101,
                 short: 1
             })
         );
         // Unknown balance: the server decides.
-        assert!(withdraw(Some(&inv), 100, None).is_ok());
+        assert!(withdraw(Some(&inv), 100, None, &Fees::default()).is_ok());
         // Full, with no fiber to join: the server would refuse it.
         let full = inventory(2, vec![item(1, "rope", 1, 1, 0), item(2, "rope", 1, 1, 1)]);
         assert_eq!(
-            withdraw(Some(&full), 1, Some(100)),
+            withdraw(Some(&full), 1, Some(100), &Fees::default()),
             Err(WithdrawRefusal::NoRoom)
         );
         let near = inventory(24, vec![item(1, "fiber", 50, i32::MAX - 1, 0)]);
         assert_eq!(
-            withdraw(Some(&near), 2, None),
+            withdraw(Some(&near), 2, None, &Fees::default()),
             Err(WithdrawRefusal::TooMany)
         );
         // Only the stack it would join counts, not the biggest
@@ -384,15 +392,19 @@ mod tests {
             24,
             vec![item(1, "fiber", 50, 1, 0), item(2, "fiber", 50, i32::MAX - 1, 5)],
         );
-        assert!(withdraw(Some(&later), 2, None).is_ok());
+        assert!(withdraw(Some(&later), 2, None, &Fees::default()).is_ok());
     }
 
     #[test]
     fn max_withdraw_is_the_most_you_can_afford() {
-        for b in 0..5000 {
-            let q = max_withdraw(b);
-            assert!(q == 0 || withdraw_quote(q).0 <= b, "{b}: {q} too dear");
-            assert!(withdraw_quote(q + 1).0 > b, "{b}: {} affordable", q + 1);
+        // The default fee, a dearer one and none (D6.1)
+        for rate in [0.005, 0.0375, 0.0] {
+            let fees = Fees { exchange_fee_rate: rate, ..Fees::default() };
+            for b in 0..5000 {
+                let q = max_withdraw(b, &fees);
+                assert!(q == 0 || fees.withdraw_quote(q).0 <= b, "{rate} {b}: {q} too dear");
+                assert!(fees.withdraw_quote(q + 1).0 > b, "{rate} {b}: {} affordable", q + 1);
+            }
         }
     }
 
@@ -415,7 +427,7 @@ mod tests {
         assert!(!Receipt::deposited(&other, Some(&quote)).as_quoted());
         assert!(!Receipt::deposited(&answer, None).as_quoted());
         let inv = inventory(24, vec![]);
-        let quote = withdraw(Some(&inv), 200, Some(500)).unwrap();
+        let quote = withdraw(Some(&inv), 200, Some(500), &Fees::default()).unwrap();
         let answer = WithdrawResponse {
             strands_spent: 202,
             fee: 2,

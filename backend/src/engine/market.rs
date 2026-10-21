@@ -15,8 +15,10 @@
 //!
 //! So for any run of these, the Strands and units held plus those in escrow
 //! plus the fees are what there were at the start (the conservation test).
-//! The fee and bounds are `rules::market`, shared with the clients.
+//! The bounds are `rules::market`, shared with the clients. The fee is the
+//! live one (D6.1, `tunables::Fees::listing_fee`), which clients hear too.
 
+use capitol_protocol::tunables::Fees;
 use capitol_protocol::rest::{MarketOrder, PlaceOrder};
 use capitol_protocol::rules::market::{self, GradeRule, OrderError, OrderSide, OrderStatus};
 use capitol_protocol::rules::stacking::{Pick, Units};
@@ -89,9 +91,10 @@ impl From<OrderError> for MarketError {
     }
 }
 
-/// Place `order` for `player_id`: take its escrow and fee, and put it on the
-/// book. Returns it as placed. Nothing changes unless all of it does.
-pub async fn place(db: &PgPool, player_id: Uuid, order: &PlaceOrder) -> Result<MarketOrder, MarketError> {
+/// Place `order` for `player_id`: take its escrow and the listing fee at
+/// `fees`, and put it on the book. Returns it as placed. Nothing changes
+/// unless all of it does.
+pub async fn place(db: &PgPool, player_id: Uuid, order: &PlaceOrder, fees: &Fees) -> Result<MarketOrder, MarketError> {
     market::validate(order.price, order.quantity)?;
     let known: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM item_types WHERE id = $1)")
         .bind(&order.item_type)
@@ -105,7 +108,7 @@ pub async fn place(db: &PgPool, player_id: Uuid, order: &PlaceOrder) -> Result<M
     let created_at = Utc::now();
     let expires_at = created_at + Duration::seconds(market::ORDER_LIFETIME_SECS);
     let value = market::order_value(order.price, order.quantity);
-    let fee = market::listing_fee(value);
+    let fee = fees.listing_fee(value);
 
     let mut tx = db.begin().await?;
     let (escrow_item_id, escrow_strands, grade) = match order.side {
@@ -482,6 +485,11 @@ pub(super) fn order_from_row(row: OrderRow, units: Units) -> Result<MarketOrder,
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// [`super::place`] at the default fees
+    pub(crate) async fn place(db: &PgPool, player_id: Uuid, order: &PlaceOrder) -> Result<MarketOrder, MarketError> {
+        super::place(db, player_id, order, &Fees::default()).await
+    }
     use crate::engine::market_matcher::{run_cycle, Market};
     use crate::engine::units::test_units::{all_in, stack_of, units};
     use rand::rngs::StdRng;

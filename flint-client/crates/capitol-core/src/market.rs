@@ -28,9 +28,10 @@ use capitol_protocol::rest::{
     MyFill, PlaceOrder,
 };
 use capitol_protocol::rules::market::{
-    apply_depth_diff, buy_debit, fill_units, grade_floor, listing_fee, order_value, validate, GradeRule, OrderError,
+    apply_depth_diff, fill_units, grade_floor, order_value, validate, GradeRule, OrderError,
     OrderSide, OrderStatus,
 };
+use capitol_protocol::tunables::Fees;
 use capitol_protocol::rules::quality_grade;
 use capitol_protocol::rules::stacking::{Pick, Units};
 use capitol_protocol::ws::{ClientMessage, ServerMessage};
@@ -583,7 +584,7 @@ impl Fills {
 pub struct OrderQuote {
     /// `price × quantity`
     pub value: i64,
-    /// The listing fee: [`listing_fee`], what the server charges
+    /// The listing fee: [`Fees::listing_fee`] at the server's fees, what it charges
     pub fee: i64,
     /// What placing takes from your balance: a buy's value and fee, a
     /// sell's fee
@@ -617,27 +618,29 @@ pub enum FormRefusal {
 
 /// Previews `draft`. `stack` is a sell's stack's units, `book` the item's
 /// book as the client holds it, `mine` your open orders (the matcher walks
-/// past them, so they don't fill yours), `strands` your balance.
+/// past them, so they don't fill yours), `strands` your balance, `fees` the
+/// server's (`GameState::fees`, D6.1).
 pub fn quote(
     draft: &Draft,
     stack: Option<&Units>,
     book: Option<&Book>,
     mine: &[&MarketOrder],
     strands: Option<i64>,
+    fees: &Fees,
 ) -> Result<OrderQuote, FormRefusal> {
     if draft.price < 1 || draft.quantity < 1 {
         return Err(FormRefusal::Incomplete);
     }
     validate(draft.price, draft.quantity).map_err(FormRefusal::Bad)?;
     let value = order_value(draft.price, draft.quantity);
-    let fee = listing_fee(value);
+    let fee = fees.listing_fee(value);
     let others = book.map(|b| others_levels(&draft.item_type, b, mine)).unwrap_or_default();
     match draft.side {
         OrderSide::Buy => {
             if grade_floor(&draft.min_grade).is_none() {
                 return Err(FormRefusal::Bad(OrderError::BadGrade));
             }
-            let debit = buy_debit(draft.price, draft.quantity);
+            let debit = fees.buy_debit(draft.price, draft.quantity);
             short_of(debit, strands)?;
             let fills = buy_fills(draft, &others);
             // Escrow is the price for every unit; a fill under it refunds the rest
@@ -873,22 +876,26 @@ mod tests {
     #[test]
     fn the_fee_and_debit_are_the_servers() {
         for (price, quantity) in [(1, 1), (7, 3), (41, 10), (250, 40), (1_000_000_000, 10_000)] {
-            let buy = quote(&draft(OrderSide::Buy, price, quantity, "F", GradeRule::Average), None, None, &[], None)
+            let buy = quote(&draft(OrderSide::Buy, price, quantity, "F", GradeRule::Average), None, None, &[], None, &Fees::default())
                 .unwrap();
-            assert_eq!(buy.fee, listing_fee(price * quantity as i64));
-            assert_eq!(buy.debit, buy_debit(price, quantity));
+            assert_eq!(buy.fee, Fees::default().listing_fee(price * quantity as i64));
+            assert_eq!(buy.debit, Fees::default().buy_debit(price, quantity));
             let stack = Units::uniform(quantity, 60);
-            let sell = quote(&draft(OrderSide::Sell, price, quantity, "F", GradeRule::Average), Some(&stack), None, &[], None)
+            let sell = quote(&draft(OrderSide::Sell, price, quantity, "F", GradeRule::Average), Some(&stack), None, &[], None, &Fees::default())
                 .unwrap();
             assert_eq!((sell.fee, sell.debit), (buy.fee, buy.fee));
         }
         let incomplete = draft(OrderSide::Buy, 0, 3, "F", GradeRule::Average);
-        assert_eq!(quote(&incomplete, None, None, &[], None), Err(FormRefusal::Incomplete));
+        assert_eq!(quote(&incomplete, None, None, &[], None, &Fees::default()), Err(FormRefusal::Incomplete));
         let huge = draft(OrderSide::Buy, 5, 10_001, "F", GradeRule::Average);
-        assert_eq!(quote(&huge, None, None, &[], None), Err(FormRefusal::Bad(OrderError::BadQuantity)));
+        assert_eq!(quote(&huge, None, None, &[], None, &Fees::default()), Err(FormRefusal::Bad(OrderError::BadQuantity)));
         // 10 at 41 is 410, and its fee is 5
         let poor = draft(OrderSide::Buy, 41, 10, "F", GradeRule::Average);
-        assert_eq!(quote(&poor, None, None, &[], Some(400)), Err(FormRefusal::Short { debit: 415, short: 15 }));
+        assert_eq!(quote(&poor, None, None, &[], Some(400), &Fees::default()), Err(FormRefusal::Short { debit: 415, short: 15 }));
+        // At the fee the server sent: 2.5% of 410 is 10.25, so 11 (D6.1)
+        let dear = Fees { listing_fee_percent: 2.5, ..Fees::default() };
+        let q = quote(&poor, None, None, &[], Some(500), &dear).unwrap();
+        assert_eq!((q.fee, q.debit, q.balance_after), (11, 421, Some(79)));
     }
 
     #[test]
@@ -901,22 +908,22 @@ mod tests {
             level(OrderSide::Sell, 45, "B", 8),
         ]);
         // C or better at up to 42: 3 at 40, 4 at 42; the D's might ride in a blend
-        let q = quote(&draft(OrderSide::Buy, 42, 10, "C", GradeRule::Average), None, Some(&asks), &[], Some(1000)).unwrap();
+        let q = quote(&draft(OrderSide::Buy, 42, 10, "C", GradeRule::Average), None, Some(&asks), &[], Some(1000), &Fees::default()).unwrap();
         assert_eq!(q.fills, Fills { quantity: 7, value: 288, maybe_more: true });
         assert_eq!(q.fills.mean_price(), Some(41));
         // 420 + 5 fee out, then 2 back on each of the three filled at 40
         assert_eq!(q.balance_after, Some(1000 - 425 + 6));
         // Every unit: the D's never come
-        let strict = quote(&draft(OrderSide::Buy, 42, 10, "C", GradeRule::EveryUnit), None, Some(&asks), &[], None).unwrap();
+        let strict = quote(&draft(OrderSide::Buy, 42, 10, "C", GradeRule::EveryUnit), None, Some(&asks), &[], None, &Fees::default()).unwrap();
         assert!(!strict.fills.maybe_more);
         // Your own ask doesn't fill your bid
         let mine = my_order(OrderSide::Sell, 40, 3, Units::uniform(3, 80));
-        let q = quote(&draft(OrderSide::Buy, 40, 5, "F", GradeRule::Average), None, Some(&asks), &[&mine], None).unwrap();
+        let q = quote(&draft(OrderSide::Buy, 40, 5, "F", GradeRule::Average), None, Some(&asks), &[&mine], None, &Fees::default()).unwrap();
         assert_eq!(q.fills, Fills { quantity: 5, value: 200, maybe_more: false });
-        let q = quote(&draft(OrderSide::Buy, 40, 9, "F", GradeRule::Average), None, Some(&asks), &[&mine], None).unwrap();
+        let q = quote(&draft(OrderSide::Buy, 40, 9, "F", GradeRule::Average), None, Some(&asks), &[&mine], None, &Fees::default()).unwrap();
         assert_eq!(q.fills.quantity, 5);
         // Under every ask, nothing fills
-        let q = quote(&draft(OrderSide::Buy, 39, 9, "F", GradeRule::Average), None, Some(&asks), &[], None).unwrap();
+        let q = quote(&draft(OrderSide::Buy, 39, 9, "F", GradeRule::Average), None, Some(&asks), &[], None, &Fees::default()).unwrap();
         assert_eq!(q.fills, Fills::default());
     }
 
@@ -931,19 +938,19 @@ mod tests {
         let stack = Units::from_pairs([(40, 3), (70, 3), (92, 2)]);
         // Six go, the lowest: three 40s and three 70s. None meets A at every
         // unit; the C at 47 takes four that average 55; the two left go at 44
-        let q = quote(&draft(OrderSide::Sell, 44, 6, "F", GradeRule::Average), Some(&stack), Some(&bids), &[], Some(100)).unwrap();
+        let q = quote(&draft(OrderSide::Sell, 44, 6, "F", GradeRule::Average), Some(&stack), Some(&bids), &[], Some(100), &Fees::default()).unwrap();
         assert_eq!(q.units, Some(Units::from_pairs([(40, 3), (70, 3)])));
         assert_eq!(q.left_in_stack, Some(2));
         assert_eq!(q.fills, Fills { quantity: 6, value: 4 * 47 + 2 * 44, maybe_more: false });
         assert_eq!(q.balance_after, Some(100 - q.fee + 276));
         // Priced over every bid, it rests
-        let q = quote(&draft(OrderSide::Sell, 51, 2, "F", GradeRule::Average), Some(&stack), Some(&bids), &[], None).unwrap();
+        let q = quote(&draft(OrderSide::Sell, 51, 2, "F", GradeRule::Average), Some(&stack), Some(&bids), &[], None, &Fees::default()).unwrap();
         assert_eq!(q.fills.quantity, 0);
         assert_eq!(
-            quote(&draft(OrderSide::Sell, 44, 9, "F", GradeRule::Average), Some(&stack), None, &[], None),
+            quote(&draft(OrderSide::Sell, 44, 9, "F", GradeRule::Average), Some(&stack), None, &[], None, &Fees::default()),
             Err(FormRefusal::NotHeld { held: 8 })
         );
-        assert_eq!(quote(&draft(OrderSide::Sell, 44, 1, "F", GradeRule::Average), None, None, &[], None), Err(FormRefusal::NoStack));
+        assert_eq!(quote(&draft(OrderSide::Sell, 44, 1, "F", GradeRule::Average), None, None, &[], None, &Fees::default()), Err(FormRefusal::NoStack));
         // A buy and a sell ask for what they need
         let buy = draft(OrderSide::Buy, 44, 3, "B", GradeRule::EveryUnit).to_place(Some(Uuid::nil()));
         assert_eq!((buy.item_id, buy.min_grade.as_deref(), buy.grade_rule), (None, Some("B"), Some(GradeRule::EveryUnit)));

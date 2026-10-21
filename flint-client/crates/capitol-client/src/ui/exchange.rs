@@ -25,6 +25,7 @@ use super::hud::grouped;
 use super::icons::ItemIcons;
 use super::theme::{self, size, DIM, ENOUGH, GOLD, GOLD_DIM, GOLD_WASH, SHORT, TEXT};
 use capitol_core::exchange::{self, DepositQuote, Lands, Receipt, WithdrawQuote, WithdrawRefusal};
+use capitol_core::protocol::tunables::Fees;
 use capitol_core::state::Container;
 use egui::{Align2, Id, RichText, Stroke};
 use uuid::Uuid;
@@ -65,6 +66,8 @@ pub struct View<'a> {
     pub inventory: Option<&'a Container>,
     /// Your balance, once known.
     pub strands: Option<i64>,
+    /// The fees the server charges now (D6.1)
+    pub fees: Fees,
     /// A deposit or withdrawal is out.
     pub busy: bool,
     /// Why the last one was refused, while it's fresh.
@@ -265,7 +268,9 @@ impl ExchangePanel {
     }
 
     fn deposit(&mut self, ui: &mut egui::Ui, icons: &mut ItemIcons, view: &View) -> Option<Action> {
-        ui.label(theme::dim("Fiber for Strands, one for one, less 0.5%.").size(size::SMALL));
+        ui.label(
+            theme::dim(format!("Fiber for Strands, one for one, less {}.", view.fees.exchange_fee_label())).size(size::SMALL),
+        );
         ui.add_space(6.0);
         let Some(inventory) = view.inventory else {
             ui.vertical_centered(|ui| ui.label(theme::dim("Loading your inventory…")));
@@ -316,14 +321,15 @@ impl ExchangePanel {
                 }
             });
         }
-        let quote = exchange::deposit(inventory, &self.selected, view.strands);
+        let quote = exchange::deposit(inventory, &self.selected, view.strands, &view.fees);
         if let Ok(q) = &quote {
             ui.add_space(6.0);
+            let fee = format!("Fee ({})", view.fees.exchange_fee_label());
             summary(
                 ui,
                 &[
                     ("Fiber to deposit", grouped(q.fiber), TEXT),
-                    ("Fee (0.5%)", format!("−{}", grouped(q.fee)), DIM),
+                    (fee.as_str(), format!("−{}", grouped(q.fee)), DIM),
                 ],
                 ("You receive", format!("{} Strands", grouped(q.strands))),
                 q.balance_after,
@@ -348,7 +354,7 @@ impl ExchangePanel {
     }
 
     fn withdraw(&mut self, ui: &mut egui::Ui, view: &View) -> Option<Action> {
-        ui.label(theme::dim("Strands for quality-50 fiber, plus 0.5%.").size(size::SMALL));
+        ui.label(theme::dim(format!("Strands for quality-50 fiber, plus {}.", view.fees.exchange_fee_label())).size(size::SMALL));
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label(theme::text("Fiber").size(size::BODY));
@@ -368,7 +374,7 @@ impl ExchangePanel {
                 }
             }
             if let Some(b) = view.strands {
-                let max = exchange::max_withdraw(b);
+                let max = exchange::max_withdraw(b, &view.fees);
                 if max > 0
                     && pick_chip(ui, "Max")
                         .on_hover_text(format!("{} fiber, all you can afford", grouped(max)))
@@ -379,15 +385,16 @@ impl ExchangePanel {
             }
         });
         let quantity = exchange::parse_quantity(&self.quantity).unwrap_or(0);
-        let quote = exchange::withdraw(view.inventory, quantity, view.strands);
+        let quote = exchange::withdraw(view.inventory, quantity, view.strands, &view.fees);
         ui.add_space(6.0);
         match &quote {
             Ok(q) => {
+                let fee = format!("Fee ({})", view.fees.exchange_fee_label());
                 summary(
                     ui,
                     &[
                         ("Fiber to receive", grouped(q.fiber), TEXT),
-                        ("Fee (0.5%)", format!("+{}", grouped(q.fee)), DIM),
+                        (fee.as_str(), format!("+{}", grouped(q.fee)), DIM),
                     ],
                     ("Total cost", format!("{} Strands", grouped(q.strands))),
                     q.balance_after,
@@ -712,6 +719,7 @@ mod tests {
         View {
             inventory: Some(inventory),
             strands: Some(strands),
+            fees: Fees::default(),
             busy: false,
             refused: None,
             receipt: None,

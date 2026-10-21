@@ -22,6 +22,7 @@
 //! stock, are what there were at the start (the conservation test). The rent
 //! and bounds are `rules::bazaar`, shared with the clients.
 
+use capitol_protocol::tunables::Fees;
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::Instrument;
 
@@ -148,7 +149,8 @@ pub async fn stall_of_listing(db: &PgPool, listing_id: Uuid, now: DateTime<Utc>)
 /// Rent `stall_id` for `player_id`, `days` ahead, naming the shop `name`; or,
 /// if it's theirs already, pay `days` more (no further than 7 days from now)
 /// and rename it if `name` is given. A stall or a rent of theirs that has
-/// run out is closed first. Returns the shop, and any stalls that closed.
+/// run out is closed first. The rent is `fees`' a day, the live one (D6.1).
+/// Returns the shop, and any stalls that closed.
 pub async fn rent(
     db: &PgPool,
     player_id: Uuid,
@@ -156,6 +158,7 @@ pub async fn rent(
     days: i64,
     name: Option<&str>,
     now: DateTime<Utc>,
+    fees: &Fees,
 ) -> Result<(BazaarShop, Vec<Lapsed>), BazaarError> {
     rules::validate_days(days)?;
     let name = name.map(rules::shop_name).transpose()?;
@@ -222,7 +225,7 @@ pub async fn rent(
     subtract_strands_in(
         &mut tx,
         player_id,
-        rules::rent(days),
+        fees.rent(days),
         TransactionType::BazaarRent,
         Some(&format!("Rent of {stall_id}, {days} days, to {}", paid_until.format("%Y-%m-%d %H:%M"))),
         None,
@@ -782,6 +785,18 @@ async fn listings(conn: &mut PgConnection, which: Listings<'_>) -> Result<Vec<Ba
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`super::rent`] at the default fees
+    async fn rent(
+        db: &PgPool,
+        player_id: Uuid,
+        stall_id: &str,
+        days: i64,
+        name: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<(BazaarShop, Vec<Lapsed>), BazaarError> {
+        super::rent(db, player_id, stall_id, days, name, now, &Fees::default()).await
+    }
     use crate::engine::market::tests::{balance, box_of, player, Player};
     use crate::engine::units::test_units::{all_in, stack_of, units};
 
@@ -892,7 +907,7 @@ mod tests {
                 .unwrap();
         assert_eq!(sales, [("Ada's Ropes".into(), 2, 81, 7), ("Ada's Ropes".into(), 3, 92, 7), ("Ada's Ropes".into(), 5, 83, 7)]);
         // Ada heard of each sale
-        let waiting = notices::take_all(&db, ada.id).await.unwrap();
+        let waiting = notices::take_all(&db, ada.id, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap();
         assert_eq!(waiting.len(), 3);
         assert!(matches!(&waiting[0], ServerMessage::BazaarSale { buyer_name, paid: 21, .. } if buyer_name == "bram"));
     }

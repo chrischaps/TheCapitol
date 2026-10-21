@@ -1676,7 +1676,7 @@ mod tests {
             /// `who` rents `stall` as `shop` and lists ten `item` at `price`
             async fn open(db: &PgPool, who: &Player, (stall, shop): (&str, &str), item: &str, price: i64, now: DateTime<Utc>) -> Uuid {
                 let stack = stack_of(db, who.id, who.inventory, 0, item, &Units::uniform(10, 80)).await;
-                bazaar::rent(db, who.id, stall, 1, Some(shop), now).await.unwrap();
+                bazaar::rent(db, who.id, stall, 1, Some(shop), now, &capitol_protocol::tunables::Fees::default()).await.unwrap();
                 let req = StockListing { item_id: stack, quantity: 10, price, qualities: None };
                 bazaar::stock(db, who.id, &req, now).await.unwrap().id
             }

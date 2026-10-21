@@ -843,7 +843,8 @@ async fn announce_closed(db: &PgPool, events: &broadcast::Sender<GameEvent>, clo
 mod tests {
     use super::*;
     use crate::engine::market::tests::{balance, box_of, buy, player, sell};
-    use crate::engine::market::{cancel, place};
+    use crate::engine::market::cancel;
+    use crate::engine::market::tests::place;
     use crate::engine::units::test_units::{all_in, stack_of};
     use capitol_protocol::rest::PlaceOrder;
 

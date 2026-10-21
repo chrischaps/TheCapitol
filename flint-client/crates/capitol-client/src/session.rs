@@ -3021,7 +3021,7 @@ mod tests {
         };
         let st = session.state();
         let mine = st.market().open_orders();
-        let quote = market::quote(&draft, None, st.market().book("fiber"), &mine, st.strands())
+        let quote = market::quote(&draft, None, st.market().book("fiber"), &mine, st.strands(), &st.fees())
             .expect("a buy the buyer can afford");
         eprintln!("buy preview: {quote:?}");
         assert!(quote.fills.quantity >= 3, "{quote:?}");
@@ -3072,7 +3072,7 @@ mod tests {
         };
         let st = session.state();
         let before = st.strands().unwrap();
-        let rest = market::quote(&low, None, st.market().book("fiber"), &[], st.strands()).unwrap();
+        let rest = market::quote(&low, None, st.market().book("fiber"), &[], st.strands(), &st.fees()).unwrap();
         assert_eq!(rest.fills.quantity, 0);
         session.place_order(low.to_place(None));
         wait(&mut session, "the bid on the book", &|s| {
@@ -3189,7 +3189,8 @@ mod tests {
         // Rent and name it, then stock three rope at 9
         let name = format!("Rope {stamp}");
         let now = capitol_core::chrono::Utc::now();
-        let rent = bazaar::rent(2, &name, None, seller.state().strands(), now).expect("a rent the merchant can pay");
+        let rent = bazaar::rent(2, &name, None, seller.state().strands(), now, &seller.state().fees())
+            .expect("a rent the merchant can pay");
         seller.rent_stall(&free, rent);
         wait(&mut seller, "the rent's answer", &|s| !s.bazaar_busy());
         assert_eq!(seller.bazaar_refused(Instant::now()), None);
@@ -3413,7 +3414,7 @@ mod tests {
             .iter()
             .map(|i| i.item_id)
             .collect();
-        let quote = exchange::deposit(inv, &all, st.strands()).expect("stock Exchange1 with fiber");
+        let quote = exchange::deposit(inv, &all, st.strands(), &st.fees()).expect("stock Exchange1 with fiber");
         let ids = exchange::deposit_ids(inv, &all);
         eprintln!("deposit preview: {quote:?}");
         session.deposit(ids, quote);
@@ -3429,9 +3430,9 @@ mod tests {
         assert_eq!(session.state().strands(), quote.balance_after);
 
         // Withdraw some back: it lands in an empty slot at quality 50.
-        let quantity = 5.min(exchange::max_withdraw(quote.balance_after.unwrap()));
         let st = session.state();
-        let quote = exchange::withdraw(st.inventory(), quantity, st.strands()).unwrap();
+        let quantity = 5.min(exchange::max_withdraw(quote.balance_after.unwrap(), &st.fees()));
+        let quote = exchange::withdraw(st.inventory(), quantity, st.strands(), &st.fees()).unwrap();
         eprintln!("withdraw preview: {quote:?}");
         session.withdraw(quote);
         wait(&mut session, "the withdrawal", &|s| !s.exchanging());
@@ -3464,7 +3465,7 @@ mod tests {
         // directly, and keep its reason.
         let balance = session.state().strands().unwrap();
         let fiber = balance + 10;
-        let (strands, fee) = capitol_core::protocol::rules::withdraw_quote(fiber);
+        let (strands, fee) = session.state().fees().withdraw_quote(fiber);
         session.withdraw(WithdrawQuote {
             fiber,
             fee,

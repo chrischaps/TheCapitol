@@ -34,6 +34,11 @@ pub async fn get_zones(
     )
     .fetch_all(&state.db)
     .await?;
+    let tunables = state.tunables.get();
+    let zones = zones
+        .into_iter()
+        .map(|zone| ZoneInfo { deed_cost: zone.deed_cost.map(|base| tunables.deed_cost(&zone.id, base)), ..zone })
+        .collect();
 
     Ok(Json(ZonesResponse { zones }))
 }
@@ -60,12 +65,13 @@ pub async fn get_deed_prices(
     .fetch_all(&state.db)
     .await?;
 
+    let tunables = state.tunables.get();
     let prices: Vec<DeedPrice> = rows
         .into_iter()
         .map(|(zone_id, zone_name, deed_cost, plot_size, station_capacity)| DeedPrice {
+            deed_cost: tunables.deed_cost(&zone_id, deed_cost),
             zone_id,
             zone_name,
-            deed_cost,
             plot_size,
             station_capacity,
         })

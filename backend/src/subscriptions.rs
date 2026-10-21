@@ -338,8 +338,8 @@ mod tests {
         assert!(lapse_expired(&db).await.is_empty(), "once");
 
         // Ada was away: the notice waits for her
-        let waiting = notices::take_all(&db, ada_player).await.unwrap();
+        let waiting = notices::take_all(&db, ada_player, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap();
         assert_eq!(waiting, vec![ServerMessage::SubscriptionLapsed { until: lapses[0].until }]);
-        assert!(notices::take_all(&db, bram_player).await.unwrap().is_empty());
+        assert!(notices::take_all(&db, bram_player, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap().is_empty());
     }
 }

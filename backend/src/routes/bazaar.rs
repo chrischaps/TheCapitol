@@ -135,7 +135,7 @@ pub async fn rent(
     let player_id = player_of(&state.db, auth_user.account_id).await?;
     let stall = stall(&state, &stall_id).await?;
     at(&state.game, &state.db, player_id, &stall, "rent it").await?;
-    let (shop, lapsed) = bazaar::rent(&state.db, player_id, &stall_id, req.days, req.name.as_deref(), Utc::now())
+    let (shop, lapsed) = bazaar::rent(&state.db, player_id, &stall_id, req.days, req.name.as_deref(), Utc::now(), &state.tunables.get().fees)
         .await
         .map_err(refused)?;
     let events = events(&state).await;

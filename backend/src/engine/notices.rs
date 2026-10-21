@@ -58,9 +58,9 @@ pub async fn take(db: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
 }
 
 /// Take every notice waiting for `player_id`, oldest first, as the messages
-/// to send. A `tax_delinquent` is rebuilt from the plot as it is now, and
-/// dropped if the plot isn't theirs any more or owes nothing.
-pub async fn take_all(db: &PgPool, player_id: Uuid) -> Result<Vec<ServerMessage>, sqlx::Error> {
+/// to send. A `tax_delinquent` is rebuilt from the plot as it is now, at the
+/// tax `rate` now, and dropped if the plot isn't theirs any more or owes nothing.
+pub async fn take_all(db: &PgPool, player_id: Uuid, rate: f64) -> Result<Vec<ServerMessage>, sqlx::Error> {
     let rows: Vec<(String, Option<String>, String, Option<i32>, Option<i32>)> = sqlx::query_as(
         "WITH taken AS (
              DELETE FROM player_notices WHERE player_id = $1
@@ -84,7 +84,7 @@ pub async fn take_all(db: &PgPool, player_id: Uuid) -> Result<Vec<ServerMessage>
                     out.push(ServerMessage::TaxDelinquent {
                         terrain_id,
                         tax_owed: owed as i64,
-                        forecloses_at: foreclosure_threshold(value),
+                        forecloses_at: foreclosure_threshold(value, rate),
                     });
                 }
             }
@@ -122,7 +122,7 @@ mod tests {
 
         assert!(take(&db, id).await.unwrap());
         assert!(!take(&db, id).await.unwrap(), "taken once");
-        assert!(take_all(&db, ada).await.unwrap().is_empty());
+        assert!(take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap().is_empty());
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -133,9 +133,9 @@ mod tests {
         let gone = ServerMessage::PlotForeclosed { terrain_id: "lot".into(), tax_owed: 80, refund: 20, impounded: vec![], lost: vec![] };
         queue(&db, ada, "lot", &gone).await.unwrap();
 
-        assert!(take_all(&db, bram).await.unwrap().is_empty(), "only to its player");
-        assert_eq!(take_all(&db, ada).await.unwrap(), vec![gone]);
-        assert!(take_all(&db, ada).await.unwrap().is_empty());
+        assert!(take_all(&db, bram, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap().is_empty(), "only to its player");
+        assert_eq!(take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap(), vec![gone]);
+        assert!(take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap().is_empty());
     }
 
     /// Two weeks' notices and then the foreclosure: only the foreclosure is left
@@ -153,7 +153,7 @@ mod tests {
 
         assert!(!take(&db, first).await.unwrap(), "replaced");
         // "elsewhere" is no plot of hers, so its warning is dropped
-        assert_eq!(take_all(&db, ada).await.unwrap(), vec![gone]);
+        assert_eq!(take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap(), vec![gone]);
     }
 
     /// The warning says what's owed now, and nothing once it's paid
@@ -167,16 +167,16 @@ mod tests {
         queue(&db, ada, &terrain_id, &delinquent(&terrain_id, 20)).await.unwrap();
         owe(&db, lot, 33).await;
         assert_eq!(
-            take_all(&db, ada).await.unwrap(),
+            take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap(),
             vec![ServerMessage::TaxDelinquent {
                 terrain_id: terrain_id.clone(),
                 tax_owed: 33,
-                forecloses_at: foreclosure_threshold(1000),
+                forecloses_at: foreclosure_threshold(1000, capitol_protocol::tunables::PROPERTY_TAX_RATE),
             }]
         );
 
         queue(&db, ada, &terrain_id, &delinquent(&terrain_id, 20)).await.unwrap();
         owe(&db, lot, 0).await;
-        assert!(take_all(&db, ada).await.unwrap().is_empty(), "paid off");
+        assert!(take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap().is_empty(), "paid off");
     }
 }

@@ -20,6 +20,7 @@
 //! up (the rope a handle takes, say) are simply missing next time, and made
 //! again.
 
+use capitol_protocol::tunables::Fees;
 use std::collections::{HashMap, HashSet};
 
 use capitol_protocol::rest::RecipeInfo;
@@ -54,6 +55,9 @@ pub struct Holdings {
     pub strands: i64,
     /// What a deed costs where the bot would buy one.
     pub deed_cost: i64,
+    /// The fees the server charges now (D6.1), for what a sale, a rent or
+    /// the exchange costs.
+    pub fees: Fees,
 }
 
 impl Holdings {
@@ -298,8 +302,8 @@ impl<'a> Planner<'a> {
 
     /// The next step toward `short` more Strands: fiber, then the exchange.
     fn strands(&mut self, short: i64) -> Result<Step, Stuck> {
-        // The exchange keeps half a percent.
-        let fiber = (short as f64 / (1.0 - capitol_protocol::rules::EXCHANGE_FEE_RATE)).ceil() as i32;
+        // The exchange keeps its fee.
+        let fiber = (short as f64 / (1.0 - self.holdings.fees.exchange_fee_rate)).ceil() as i32;
         match self.obtain(FIBER, fiber)? {
             Some(step) => Ok(step),
             None => Ok(Step::Deposit),

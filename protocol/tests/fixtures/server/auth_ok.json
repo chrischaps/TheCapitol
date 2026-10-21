@@ -1,1 +1,1 @@
-{"type":"auth_ok","player_id":"6a1f0c2e-4b7d-4e19-9c3a-000000000001","server_time_ms":1792238400000,"subscription":{"status":"active","until":"2026-11-17T12:00:00Z"}}
+{"type":"auth_ok","player_id":"6a1f0c2e-4b7d-4e19-9c3a-000000000001","server_time_ms":1792238400000,"subscription":{"status":"active","until":"2026-11-17T12:00:00Z"},"fees":{"exchange_fee_rate":0.005,"listing_fee_percent":1.0,"stall_rent_per_day":20}}

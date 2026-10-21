@@ -68,7 +68,8 @@ pub fn router(state: AppState) -> Router<AppState> {
         ))
 }
 
-/// Place an order: its escrow and the 1% fee are taken, and it matches from
+/// Place an order: its escrow and the listing fee (1% by default, a live
+/// tunable) are taken, and it matches from
 /// the next cycle
 #[utoipa::path(
     post,
@@ -100,7 +101,7 @@ pub async fn place_order(
         }
         _ => None,
     };
-    let order = market::place(&state.db, player_id, &req).await.map_err(refused)?;
+    let order = market::place(&state.db, player_id, &req, &state.tunables.get().fees).await.map_err(refused)?;
     state.market.placed(&order);
 
     let events = events(&state).await;
@@ -695,9 +696,9 @@ mod tests {
         let bea = player(&db, "bea", 1000).await;
         let stack = stack_of(&db, ada.id, ada.inventory, 0, "rope", &Units::uniform(10, 80)).await;
         for order in [
-            market::place(&db, ada.id, &sell("rope", stack, 10, 6, None)).await.unwrap(),
-            market::place(&db, bea.id, &buy("rope", 12, 4, None)).await.unwrap(),
-            market::place(&db, bea.id, &buy("rope", 11, 2, None)).await.unwrap(),
+            market::place(&db, ada.id, &sell("rope", stack, 10, 6, None), &capitol_protocol::tunables::Fees::default()).await.unwrap(),
+            market::place(&db, bea.id, &buy("rope", 12, 4, None), &capitol_protocol::tunables::Fees::default()).await.unwrap(),
+            market::place(&db, bea.id, &buy("rope", 11, 2, None), &capitol_protocol::tunables::Fees::default()).await.unwrap(),
         ] {
             market.placed(&order);
         }

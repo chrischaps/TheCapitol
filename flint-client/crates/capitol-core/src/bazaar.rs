@@ -20,6 +20,7 @@ use capitol_protocol::rest::{
     BazaarDirectory, BazaarListing, BazaarPurchase, BazaarShop, BuyListing, MyStallResponse, RentStall, SlotItem,
     StockListing,
 };
+use capitol_protocol::tunables::Fees;
 use capitol_protocol::rules::bazaar::{self as rules, at_the_stall, BazaarError};
 use capitol_protocol::rules::quality_grade;
 use capitol_protocol::rules::stacking::{Pick, Units};
@@ -370,13 +371,14 @@ pub fn days_payable(mine: Option<&BazaarShop>, now: DateTime<Utc>) -> i64 {
 
 /// Renting a stall, or paying more on your own (`mine`), for `days`. A new
 /// rent needs a `name`; on your own stall a name renames it. What it costs
-/// is `rules::bazaar::rent`.
+/// is `fees.rent`, at the server's fees (`GameState::fees`, D6.1).
 pub fn rent(
     days: i64,
     name: &str,
     mine: Option<&BazaarShop>,
     strands: Option<i64>,
     now: DateTime<Utc>,
+    fees: &Fees,
 ) -> Result<RentStall, Refusal> {
     rules::validate_days(days).map_err(Refusal::Rule)?;
     if days > days_payable(mine, now) {
@@ -387,7 +389,7 @@ pub fn rent(
         (typed, Some(shop)) if typed == shop.name => None,
         (typed, _) => Some(rules::shop_name(typed).map_err(Refusal::Rule)?),
     };
-    let cost = rules::rent(days);
+    let cost = fees.rent(days);
     if let Some(have) = strands.filter(|have| *have < cost) {
         return Err(Refusal::Short { cost, have });
     }
@@ -697,22 +699,25 @@ mod tests {
         let now = when();
         let me = Uuid::from_u128(1);
         assert_eq!(days_payable(None, now), 7);
-        assert_eq!(rent(3, " Ada's Ropes ", None, Some(60), now).unwrap(), RentStall {
+        assert_eq!(rent(3, " Ada's Ropes ", None, Some(60), now, &Fees::default()).unwrap(), RentStall {
             days: 3,
             name: Some("Ada's Ropes".into())
         });
-        assert!(matches!(rent(1, "  ", None, Some(60), now), Err(Refusal::Rule(BazaarError::BadName))));
-        assert_eq!(rent(3, "Ada's", None, Some(59), now), Err(Refusal::Short { cost: 60, have: 59 }));
-        assert!(matches!(rent(8, "Ada's", None, None, now), Err(Refusal::Rule(BazaarError::BadDays))));
+        assert!(matches!(rent(1, "  ", None, Some(60), now, &Fees::default()), Err(Refusal::Rule(BazaarError::BadName))));
+        assert_eq!(rent(3, "Ada's", None, Some(59), now, &Fees::default()), Err(Refusal::Short { cost: 60, have: 59 }));
+        // At the rent the server sent (D6.1)
+        let dear = Fees { stall_rent_per_day: 30, ..Fees::default() };
+        assert_eq!(rent(3, "Ada's", None, Some(60), now, &dear), Err(Refusal::Short { cost: 90, have: 60 }));
+        assert!(matches!(rent(8, "Ada's", None, None, now, &Fees::default()), Err(Refusal::Rule(BazaarError::BadDays))));
 
         // Your own, paid two and a half days ahead: four more fit in the week
         let mut own = shop(me, Vec::new());
         own.paid_until = now + chrono::Duration::hours(60);
         assert_eq!(days_payable(Some(&own), now), 4);
-        assert_eq!(rent(4, "", Some(&own), None, now).unwrap(), RentStall { days: 4, name: None });
-        assert_eq!(rent(4, "Ada's Ropes", Some(&own), None, now).unwrap().name, None, "the same name isn't a rename");
-        assert_eq!(rent(1, "Ada's Twine", Some(&own), None, now).unwrap().name, Some("Ada's Twine".into()));
-        assert_eq!(rent(5, "", Some(&own), None, now), Err(Refusal::PaidUp));
+        assert_eq!(rent(4, "", Some(&own), None, now, &Fees::default()).unwrap(), RentStall { days: 4, name: None });
+        assert_eq!(rent(4, "Ada's Ropes", Some(&own), None, now, &Fees::default()).unwrap().name, None, "the same name isn't a rename");
+        assert_eq!(rent(1, "Ada's Twine", Some(&own), None, now, &Fees::default()).unwrap().name, Some("Ada's Twine".into()));
+        assert_eq!(rent(5, "", Some(&own), None, now, &Fees::default()), Err(Refusal::PaidUp));
         own.paid_until = now + chrono::Duration::days(7);
         assert_eq!(days_payable(Some(&own), now), 0);
     }

@@ -9,7 +9,7 @@
 //! - The variance is a whole number in `variance_min..=variance_max`, rolled
 //!   by the server. Everything else is fixed by the inputs, so a client that
 //!   knows them gets the exact `[min, max]` the server will land in
-//!   ([`output_range`]), the same move `deposit_quote` makes for the fee.
+//!   ([`output_range`]), the same move `Fees::deposit_quote` makes for the fee.
 
 use std::collections::BTreeMap;
 

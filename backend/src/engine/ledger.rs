@@ -368,8 +368,9 @@ mod tests {
         };
         super::super::grants::grant(&db, ada, &request).await.unwrap();
         // 10 of her fiber into the Exchange, and 4 back out
-        crate::routes::exchange::deposit(&db, ada, &[ten]).await.unwrap();
-        crate::routes::exchange::withdraw(&db, ada, 4).await.unwrap();
+        let fees = capitol_protocol::tunables::Fees::default();
+        crate::routes::exchange::deposit(&db, ada, &[ten], &fees).await.unwrap();
+        crate::routes::exchange::withdraw(&db, ada, 4, &fees).await.unwrap();
         // Two fiber into rope
         let craft = super::super::craft_completion::FinishedCraft {
             player_id: ada,
@@ -387,7 +388,7 @@ mod tests {
         };
         super::super::craft_completion::finish_craft(&db, &craft).await.unwrap();
         super::super::station_removal::remove_station(&db, ada, ada_chest).await.unwrap();
-        let taxed = super::super::property_tax::process_property_taxes(&db).await;
+        let taxed = super::super::property_tax::process_property_taxes(&db, capitol_protocol::tunables::PROPERTY_TAX_RATE).await;
         assert_eq!(taxed.foreclosures.len(), 1, "Cy's plot");
 
         let end = books(&db).await.unwrap();

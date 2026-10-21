@@ -1863,8 +1863,9 @@ pub struct PlotInfo {
     /// `None` while it's unowned or owes no tax.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forecloses_at: Option<i64>,
-    /// What a deed to this plot costs in Strands: its zone's `deed_cost`,
-    /// which `POST /plots/{id}/claim` charges. `None` where the zone sells
+    /// What a deed to this plot costs in Strands: its zone's `deed_cost`
+    /// times the zone's deed price tunable (D6.1), which
+    /// `POST /plots/{id}/claim` charges. `None` where the zone sells
     /// no deeds. Shown whether or not the plot is owned.
     #[serde(default)]
     pub deed_cost: Option<i32>,
@@ -2055,7 +2056,7 @@ pub struct ZoneInfo {
     pub has_plots: bool,
     /// Plot size category for this zone
     pub plot_size_category: Option<String>,
-    /// Cost to purchase a deed in this zone
+    /// Cost to purchase a deed in this zone, at its deed price tunable (D6.1)
     pub deed_cost: Option<i32>,
     /// Zone description
     pub description: Option<String>,
@@ -2076,7 +2077,7 @@ pub struct DeedPrice {
     pub zone_id: String,
     /// Zone display name
     pub zone_name: String,
-    /// Cost in Strands to purchase a deed
+    /// Cost in Strands to purchase a deed, at its deed price tunable (D6.1)
     pub deed_cost: i32,
     /// Plot size category name
     pub plot_size: String,

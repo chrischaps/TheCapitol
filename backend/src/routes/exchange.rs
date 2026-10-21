@@ -6,7 +6,7 @@ use axum::{
 use capitol_protocol::ledger::UnitFlow;
 use capitol_protocol::rest::{DepositRequest, DepositResponse, WithdrawRequest, WithdrawResponse};
 use capitol_protocol::rules::stacking::Units;
-use capitol_protocol::rules::{deposit_quote, withdraw_quote};
+use capitol_protocol::tunables::Fees;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -44,7 +44,7 @@ pub async fn deposit_fiber(
     Json(req): Json<DepositRequest>,
 ) -> Result<Json<DepositResponse>, AppError> {
     let player_id = player_of(&state.db, auth_user.account_id).await?;
-    let response = deposit(&state.db, player_id, &req.item_ids).await?;
+    let response = deposit(&state.db, player_id, &req.item_ids, &state.tunables.get().fees).await?;
     tell_balance(&state, player_id, response.new_balance).await;
     Ok(Json(response))
 }
@@ -67,7 +67,7 @@ pub async fn withdraw_fiber(
     Json(req): Json<WithdrawRequest>,
 ) -> Result<Json<WithdrawResponse>, AppError> {
     let player_id = player_of(&state.db, auth_user.account_id).await?;
-    let response = withdraw(&state.db, player_id, req.quantity).await?;
+    let response = withdraw(&state.db, player_id, req.quantity, &state.tunables.get().fees).await?;
     tell_balance(&state, player_id, response.new_balance).await;
     Ok(Json(response))
 }
@@ -87,7 +87,7 @@ async fn player_of(db: &PgPool, account_id: Uuid) -> Result<Uuid, AppError> {
 
 /// Swap the fiber stacks `item_ids` for Strands, less the fee. The items go and
 /// the Strands arrive in one transaction, so neither happens without the other.
-pub async fn deposit(db: &PgPool, player_id: Uuid, item_ids: &[Uuid]) -> Result<DepositResponse, AppError> {
+pub async fn deposit(db: &PgPool, player_id: Uuid, item_ids: &[Uuid], fees: &Fees) -> Result<DepositResponse, AppError> {
     if item_ids.is_empty() {
         return Err(AppError::BadRequest("No items specified".into()));
     }
@@ -124,8 +124,8 @@ pub async fn deposit(db: &PgPool, player_id: Uuid, item_ids: &[Uuid]) -> Result<
     let deposited_quantity = i32::try_from(total_fiber)
         .map_err(|_| AppError::BadRequest("Too much fiber for one deposit".into()))?;
 
-    // Strands after the 0.5% fee (the rule clients preview with)
-    let (fee, net_strands) = deposit_quote(total_fiber);
+    // Strands after the fee, the live one (D6.1) that clients preview with
+    let (fee, net_strands) = fees.deposit_quote(total_fiber);
 
     if net_strands <= 0 {
         return Err(AppError::BadRequest("Deposit amount too small after fee".into()));
@@ -171,14 +171,14 @@ const WITHDRAWN_FIBER_QUALITY: i32 = 50;
 /// joins the inventory's lowest-slot fiber stack, else takes its first empty
 /// slot. The debit and the fiber are one transaction, so with nowhere to put
 /// the fiber the Strands stay.
-pub async fn withdraw(db: &PgPool, player_id: Uuid, quantity: i32) -> Result<WithdrawResponse, AppError> {
+pub async fn withdraw(db: &PgPool, player_id: Uuid, quantity: i32, fees: &Fees) -> Result<WithdrawResponse, AppError> {
     if quantity <= 0 {
         return Err(AppError::BadRequest("Quantity must be positive".into()));
     }
 
     // Calculate strands needed (fiber / (1 - fee_rate), rounded up)
     // If you want 100 fiber, you pay 100 / 0.995 = ~100.5 strands
-    let (strands_needed, fee) = withdraw_quote(quantity as i64);
+    let (strands_needed, fee) = fees.withdraw_quote(quantity as i64);
 
     let mut tx = db.begin().await?;
 
@@ -339,7 +339,7 @@ mod tests {
         let inv = inventory(&db, ada).await;
         fill(&db, ada, inv).await;
 
-        let err = withdraw(&db, ada, 100).await.unwrap_err();
+        let err = withdraw(&db, ada, 100, &Fees::default()).await.unwrap_err();
 
         assert!(matches!(&err, AppError::BadRequest(m) if m == "Inventory full"), "{err:?}");
         assert_eq!(balance(&db, ada).await, 1000);
@@ -354,9 +354,9 @@ mod tests {
         let inv = inventory(&db, ada).await;
         stack(&db, ada, inv, 0, "rope", 50, 1).await;
 
-        let done = withdraw(&db, ada, 100).await.unwrap();
+        let done = withdraw(&db, ada, 100, &Fees::default()).await.unwrap();
 
-        let (strands, fee) = withdraw_quote(100);
+        let (strands, fee) = Fees::default().withdraw_quote(100);
         assert_eq!((done.strands_spent, done.fee, done.fiber_received), (strands, fee, 100));
         assert_eq!(done.new_balance, 1000 - strands);
         assert_eq!(balance(&db, ada).await, 1000 - strands);
@@ -373,7 +373,7 @@ mod tests {
         let high = stack(&db, ada, inv, 7, "fiber", 52, 10).await;
         let low = stack(&db, ada, inv, 2, "fiber", 52, 10).await;
 
-        withdraw(&db, ada, 10).await.unwrap();
+        withdraw(&db, ada, 10, &Fees::default()).await.unwrap();
 
         assert_eq!(item(&db, low).await, Some((20, 51)));
         assert_eq!(item(&db, high).await, Some((10, 52)));
@@ -389,7 +389,7 @@ mod tests {
         let inv = inventory(&db, ada).await;
         let a = stack(&db, ada, inv, 0, "fiber", 95, 10).await;
 
-        withdraw(&db, ada, 10).await.unwrap();
+        withdraw(&db, ada, 10, &Fees::default()).await.unwrap();
 
         assert_eq!(units(&db, a).await, Units::from_pairs([(WITHDRAWN_FIBER_QUALITY, 10), (95, 10)]));
         assert_eq!(item(&db, a).await, Some((20, 72)));
@@ -402,7 +402,7 @@ mod tests {
         let inv = inventory(&db, ada).await;
         let full = stack(&db, ada, inv, 0, "fiber", 50, i32::MAX - 5).await;
 
-        let done = withdraw(&db, ada, 10).await.unwrap();
+        let done = withdraw(&db, ada, 10, &Fees::default()).await.unwrap();
 
         assert_eq!(item(&db, full).await, Some((i32::MAX - 5, 50)));
         assert_eq!(fiber_in(&db, inv).await, vec![(0, i32::MAX - 5, 50), (1, 10, 50)]);
@@ -415,7 +415,7 @@ mod tests {
         let ada = player(&db, "ada", 50).await;
         let inv = inventory(&db, ada).await;
 
-        let err = withdraw(&db, ada, 100).await.unwrap_err();
+        let err = withdraw(&db, ada, 100, &Fees::default()).await.unwrap_err();
 
         assert!(matches!(&err, AppError::BadRequest(m) if m.contains("Insufficient")), "{err:?}");
         assert_eq!(balance(&db, ada).await, 50);
@@ -430,9 +430,9 @@ mod tests {
         let a = stack(&db, ada, inv, 0, "fiber", 60, 150).await;
         let b = stack(&db, ada, inv, 1, "fiber", 40, 50).await;
 
-        let done = deposit(&db, ada, &[a, b]).await.unwrap();
+        let done = deposit(&db, ada, &[a, b], &Fees::default()).await.unwrap();
 
-        let (fee, net) = deposit_quote(200);
+        let (fee, net) = Fees::default().deposit_quote(200);
         assert_eq!((done.deposited_quantity, done.fee, done.strands_received), (200, fee, net));
         assert_eq!(balance(&db, ada).await, net);
         assert_eq!(fiber_in(&db, inv).await, vec![]);
@@ -448,7 +448,7 @@ mod tests {
         let inv = inventory(&db, ada).await;
         let a = stack(&db, ada, inv, 0, "fiber", 60, 1000).await;
 
-        let err = deposit(&db, ada, &[a]).await.unwrap_err();
+        let err = deposit(&db, ada, &[a], &Fees::default()).await.unwrap_err();
 
         assert!(matches!(err, AppError::Internal(_)), "{err:?}");
         assert_eq!(item(&db, a).await, Some((1000, 60)));
@@ -463,7 +463,7 @@ mod tests {
         let fiber = stack(&db, ada, inv, 0, "fiber", 60, 100).await;
         let rope = stack(&db, ada, inv, 1, "rope", 60, 1).await;
 
-        let err = deposit(&db, ada, &[fiber, rope]).await.unwrap_err();
+        let err = deposit(&db, ada, &[fiber, rope], &Fees::default()).await.unwrap_err();
 
         assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
         assert_eq!(item(&db, fiber).await, Some((100, 60)));

@@ -137,24 +137,11 @@ pub const NEARBY_NODE_RANGE_MAX: f64 = 800.0;
 /// each axis (a square, not a circle).
 pub const NEARBY_STATION_HALF_EXTENT: f64 = 500.0;
 
-/// Fee on Strand/Fiber exchange, as a fraction (0.5%).
+/// Fee on Strand/Fiber exchange by default, as a fraction (0.5%). It's a
+/// live knob since D6.1: what's charged now is the server's
+/// [`crate::tunables::Fees`], whose `deposit_quote` and `withdraw_quote` are
+/// what `POST /exchange/deposit` and `/withdraw` charge.
 pub const EXCHANGE_FEE_RATE: f64 = 0.005;
-
-/// What depositing `fiber` units at the exchange gives: `(fee, strands)`,
-/// the fee rounded down. `POST /exchange/deposit` charges exactly this, so
-/// a client's preview is the server's answer.
-pub fn deposit_quote(fiber: i64) -> (i64, i64) {
-    let fee = ((fiber as f64) * EXCHANGE_FEE_RATE).floor() as i64;
-    (fee, fiber - fee)
-}
-
-/// What withdrawing `fiber` units costs: `(strands, fee)`, where `strands`
-/// is `ceil(fiber / 0.995)` and includes the fee. `POST /exchange/withdraw`
-/// charges exactly this.
-pub fn withdraw_quote(fiber: i64) -> (i64, i64) {
-    let strands = ((fiber as f64) / (1.0 - EXCHANGE_FEE_RATE)).ceil() as i64;
-    (strands, strands - fiber)
-}
 
 // ---------------------------------------------------------------------------
 // Quality
@@ -542,17 +529,18 @@ mod tests {
 
     #[test]
     fn exchange_quotes() {
-        assert_eq!(deposit_quote(199), (0, 199));
-        assert_eq!(deposit_quote(200), (1, 199));
-        assert_eq!(deposit_quote(450), (2, 448));
-        assert_eq!(withdraw_quote(1), (2, 1));
-        assert_eq!(withdraw_quote(100), (101, 1));
-        assert_eq!(withdraw_quote(199), (200, 1));
-        assert_eq!(withdraw_quote(200), (202, 2));
+        let fees = crate::tunables::Fees::default();
+        assert_eq!(fees.deposit_quote(199), (0, 199));
+        assert_eq!(fees.deposit_quote(200), (1, 199));
+        assert_eq!(fees.deposit_quote(450), (2, 448));
+        assert_eq!(fees.withdraw_quote(1), (2, 1));
+        assert_eq!(fees.withdraw_quote(100), (101, 1));
+        assert_eq!(fees.withdraw_quote(199), (200, 1));
+        assert_eq!(fees.withdraw_quote(200), (202, 2));
         // The float rule is the exact one, with no rounding surprises.
         for n in 1..=200_000i64 {
-            assert_eq!(deposit_quote(n).0, n / 200, "deposit {n}");
-            assert_eq!(withdraw_quote(n).0, (200 * n + 198) / 199, "withdraw {n}");
+            assert_eq!(fees.deposit_quote(n).0, n / 200, "deposit {n}");
+            assert_eq!(fees.withdraw_quote(n).0, (200 * n + 198) / 199, "withdraw {n}");
         }
     }
 

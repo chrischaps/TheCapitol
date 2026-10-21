@@ -256,6 +256,17 @@ The first set:
 - **D6.1 Tunables.**
   - The first set from D5, persisted and validated, with an annotation per change. The client is told any value it shows.
   - Cut a ticket for any knob that can't be made live cheaply.
+  - **As built (#375):** all seven knobs are live; none needed a ticket.
+    - `capitol_protocol::tunables`: `Tunables`, and `KNOBS`, which declares each knob's key, unit, range, step, default and chart. Two knobs are families, one per id: `deed_price.<zone>` and `yield.<resource>`.
+    - `Fees` is the part a client shows: the exchange fee, the listing fee (in percent, to 0.01%) and a stall's rent a day. The protocol's free `deposit_quote`, `withdraw_quote`, `listing_fee`, `buy_debit` and `rent` are gone, so every caller had to choose: the server's live `Fees`, or `Fees::default()` in a test. The constants stay, as the defaults.
+    - The server's `engine::tunables::Live` is an `ArcSwap` on `AppState` and `GameState`. `update` checks every value before it sets any, writes the `tunables` table (only knobs off their defaults, so a default changed in code reaches every world) and one `tunable_changed` annotation per knob, in one transaction. `GET` and `PUT /admin/tunables` serve it. An out-of-range or unknown key is a 400 that changes nothing.
+    - Where each knob is read:
+      - the fees, where they're charged (the exchange, `market::place`, `bazaar::rent`);
+      - the tax rate as each hourly run starts, which also sets the foreclosure threshold. At a rate of 0 nothing is charged or foreclosed. A lower rate lowers the threshold, so a plot in debt can foreclose sooner;
+      - the deed multiplier wherever a deed's price is read (the claim, the plot listing, `/bureaucracy`). A plot is assessed at what was paid, so a change doesn't re-assess deeds already owned;
+      - regrowth when a node is spent, so a node already spent keeps its time;
+      - yield on each gather, rounded at random so that its mean is exact.
+    - The client hears the fees on `auth_ok` (`fees`) and in `fees_changed`, which goes to every socket when a fee moves. `GameState::fees` feeds the exchange, market and shop panels' previews and labels, and the bots' and sim's budgets (`Holdings::fees`, the market makers' `quotes`). The frozen React panel still says 0.5%.
 - **D6.2 The tuning tab.**
   - Each knob with its default, current value and reset, next to its chart. Presets export and import as TOML.
 - **D6.3 Balance runs.**

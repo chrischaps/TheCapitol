@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::engine::market_matcher::Market;
+use crate::engine::tunables::Live;
 use crate::engine::GameState;
 use crate::rate_limit::RateLimiter;
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
@@ -53,6 +54,8 @@ pub struct AppState {
     /// The market's order book (E3.2), matched by its own task, and each
     /// item's published depth (E3.3)
     pub market: Arc<Market>,
+    /// The economy's live knobs (D6.1), the same ones the tick reads
+    pub tunables: Live,
 }
 
 impl AppState {
@@ -62,6 +65,7 @@ impl AppState {
         config: Config,
         game: Arc<RwLock<GameState>>,
         market: Arc<Market>,
+        tunables: Live,
     ) -> Self {
         Self {
             db,
@@ -70,6 +74,7 @@ impl AppState {
             config,
             game,
             market,
+            tunables,
         }
     }
 }

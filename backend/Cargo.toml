@@ -11,6 +11,8 @@ capitol-protocol = { path = "../protocol", features = ["backend"] }
 axum = { version = "0.8", features = ["ws"] }
 axum-extra = { version = "0.10", features = ["typed-header"] }
 tokio = { version = "1", features = ["full"] }
+# The live tunables, read without a lock wherever they're charged (D6.1)
+arc-swap = "1"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
 

@@ -1,6 +1,9 @@
 //! Hourly property tax (M7), and foreclosure for unpaid tax (#131).
 //!
-//! Each hour a plot owes 1/168th of its weekly tax (2% of `assessed_value`).
+//! Each hour a plot owes 1/168th of its weekly tax, by default 2% of
+//! `assessed_value`. The rate is a live tunable since D6.1 (`property_tax_rate`),
+//! so every function here takes it, and the hourly run reads it as it starts.
+//! At a rate of 0 nothing is charged and nothing is foreclosed.
 //! The part that isn't a whole strand carries to the next hour on
 //! `plots.tax_carry` (#136), so a week charges exactly the weekly tax: a deed
 //! of 1000 pays 1 strand in about every eighth hour, 20 a week.
@@ -34,9 +37,6 @@ use crate::error::AppError;
 use crate::models::StationState;
 use capitol_protocol::ws::{ItemCount, ServerMessage};
 
-/// Weekly tax rate as a fraction (2% = 0.02)
-const TAX_RATE: f64 = 0.02;
-
 /// Hours per week. `tax_carry` counts in 168ths of a strand.
 const HOURS_PER_WEEK: i64 = 168;
 
@@ -44,8 +44,8 @@ const HOURS_PER_WEEK: i64 = 168;
 pub const FORECLOSE_AFTER_WEEKS: i64 = 4;
 
 /// A week's tax on a plot assessed at `assessed_value`
-pub fn weekly_tax(assessed_value: i32) -> i64 {
-    (assessed_value as f64 * TAX_RATE).round() as i64
+pub fn weekly_tax(assessed_value: i32, rate: f64) -> i64 {
+    (assessed_value as f64 * rate).round() as i64
 }
 
 /// An hour's tax on a plot with `weekly` tax and `carry` 168ths of a strand
@@ -56,13 +56,13 @@ pub fn charge_hour(weekly: i64, carry: i32) -> (i64, i32) {
 }
 
 /// The most one hour can charge: a week's tax over 168, rounded up
-pub fn largest_hourly_tax(assessed_value: i32) -> i64 {
-    (weekly_tax(assessed_value) + HOURS_PER_WEEK - 1) / HOURS_PER_WEEK
+pub fn largest_hourly_tax(assessed_value: i32, rate: f64) -> i64 {
+    (weekly_tax(assessed_value, rate) + HOURS_PER_WEEK - 1) / HOURS_PER_WEEK
 }
 
 /// The debt at which a plot is foreclosed: four weeks of tax
-pub fn foreclosure_threshold(assessed_value: i32) -> i64 {
-    weekly_tax(assessed_value) * FORECLOSE_AFTER_WEEKS
+pub fn foreclosure_threshold(assessed_value: i32, rate: f64) -> i64 {
+    weekly_tax(assessed_value, rate) * FORECLOSE_AFTER_WEEKS
 }
 
 /// Whether debt going from `before` to `after` in one unpaid hour earns the
@@ -70,10 +70,10 @@ pub fn foreclosure_threshold(assessed_value: i32) -> i64 {
 /// could foreclose. On a cheap plot that last warning comes days ahead: a
 /// wilderness deed is charged 1 strand every 84 hours. A debt that has
 /// reached the threshold is foreclosed, not warned.
-pub fn notice_due(before: i64, after: i64, assessed_value: i32) -> bool {
-    let weekly = weekly_tax(assessed_value);
-    let hourly = largest_hourly_tax(assessed_value);
-    let threshold = foreclosure_threshold(assessed_value);
+pub fn notice_due(before: i64, after: i64, assessed_value: i32, rate: f64) -> bool {
+    let weekly = weekly_tax(assessed_value, rate);
+    let hourly = largest_hourly_tax(assessed_value, rate);
+    let threshold = foreclosure_threshold(assessed_value, rate);
     if after >= threshold || after <= before || weekly <= 0 {
         return false;
     }
@@ -130,7 +130,7 @@ pub struct TaxReport {
 
 /// Process hourly property taxes for all owned plots. The tick loop passes
 /// the report to [`announce`].
-pub async fn process_property_taxes(db: &PgPool) -> TaxReport {
+pub async fn process_property_taxes(db: &PgPool, rate: f64) -> TaxReport {
     tracing::debug!("Processing property taxes...");
     let mut report = TaxReport::default();
 
@@ -156,7 +156,7 @@ pub async fn process_property_taxes(db: &PgPool) -> TaxReport {
     let mut charged: Vec<Uuid> = Vec::new();
 
     for (plot_id, owner_id, assessed_value, tax_owed, carry, terrain_id) in owned_plots {
-        let weekly = weekly_tax(assessed_value);
+        let weekly = weekly_tax(assessed_value, rate);
         if weekly <= 0 {
             continue;
         }
@@ -232,9 +232,9 @@ pub async fn process_property_taxes(db: &PgPool) -> TaxReport {
             );
 
             let after = after as i64;
-            if notice_due(after - hourly_tax, after, assessed_value) {
+            if notice_due(after - hourly_tax, after, assessed_value, rate) {
                 if let Some(terrain_id) = &terrain_id {
-                    let forecloses_at = foreclosure_threshold(assessed_value);
+                    let forecloses_at = foreclosure_threshold(assessed_value, rate);
                     let message = ServerMessage::TaxDelinquent {
                         terrain_id: terrain_id.clone(),
                         tax_owed: after,
@@ -256,8 +256,8 @@ pub async fn process_property_taxes(db: &PgPool) -> TaxReport {
             after
         };
 
-        if owed >= foreclosure_threshold(assessed_value) {
-            match foreclose(db, plot_id).await {
+        if owed >= foreclosure_threshold(assessed_value, rate) {
+            match foreclose(db, plot_id, rate).await {
                 Ok(Some(f)) => {
                     tracing::warn!(
                         "Plot {} foreclosed from player {} for {} strands unpaid tax; refunded {}",
@@ -336,7 +336,7 @@ async fn collect_debt(db: &PgPool, plot_id: Uuid, owner_id: Uuid) -> i64 {
 /// stations into inventories, releasing it and refunding the deed less the
 /// debt happen in one transaction. `None` if,
 /// once the row is locked, the plot is no longer owned or owes less.
-pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>, String> {
+pub async fn foreclose(db: &PgPool, plot_id: Uuid, rate: f64) -> Result<Option<Foreclosure>, String> {
     let mut tx = db.begin().await.map_err(|e| e.to_string())?;
     let row: Option<(Option<Uuid>, i32, i32, Option<String>, String)> = sqlx::query_as(
         "SELECT owner_id, assessed_value, tax_owed, terrain_id, zone_id FROM plots WHERE id = $1 FOR UPDATE",
@@ -349,7 +349,7 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid) -> Result<Option<Foreclosure>
         return Ok(None);
     };
     let tax_owed = tax_owed as i64;
-    if tax_owed <= 0 || tax_owed < foreclosure_threshold(assessed_value) {
+    if tax_owed <= 0 || weekly_tax(assessed_value, rate) <= 0 || tax_owed < foreclosure_threshold(assessed_value, rate) {
         return Ok(None);
     }
     let returned = return_plot_stations(&mut tx, plot_id).await.map_err(|e| e.to_string())?;
@@ -554,6 +554,7 @@ pub async fn pay_tax_debt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capitol_protocol::tunables::PROPERTY_TAX_RATE as RATE;
     use crate::engine::plot_sync::tests::{balance, ledger, owner, player, plot};
 
     /// 6000 assessed: 120 a week at 2%, charged 1 in 120 of every 168 hours,
@@ -565,11 +566,11 @@ mod tests {
 
     #[test]
     fn the_threshold_is_four_weeks_of_tax() {
-        assert_eq!(weekly_tax(VALUE), 120);
-        assert_eq!(largest_hourly_tax(VALUE), 1);
-        assert_eq!(foreclosure_threshold(VALUE), 480);
-        assert_eq!(foreclosure_threshold(100), 8);
-        assert_eq!(charge_hour(weekly_tax(VALUE), CARRY_DUE), (1, 0));
+        assert_eq!(weekly_tax(VALUE, RATE), 120);
+        assert_eq!(largest_hourly_tax(VALUE, RATE), 1);
+        assert_eq!(foreclosure_threshold(VALUE, RATE), 480);
+        assert_eq!(foreclosure_threshold(100, RATE), 8);
+        assert_eq!(charge_hour(weekly_tax(VALUE, RATE), CARRY_DUE), (1, 0));
     }
 
     #[test]
@@ -577,12 +578,12 @@ mod tests {
         // wilderness and urban deeds, one just under the old 1-an-hour floor,
         // one a whole strand an hour, and one with a remainder
         for value in [100, 1000, 8350, 8400, 9000, 168_000] {
-            let weekly = weekly_tax(value);
+            let weekly = weekly_tax(value, RATE);
             let mut carry = 0;
             let mut paid = 0;
             for _ in 0..HOURS_PER_WEEK {
                 let (charge, next) = charge_hour(weekly, carry);
-                assert!(charge <= largest_hourly_tax(value));
+                assert!(charge <= largest_hourly_tax(value, RATE));
                 assert!((0..HOURS_PER_WEEK as i32).contains(&next));
                 paid += charge;
                 carry = next;
@@ -593,7 +594,7 @@ mod tests {
 
     #[test]
     fn notices_come_at_each_week_and_a_charge_before() {
-        let due: Vec<i64> = (1..=480).filter(|&after| notice_due(after - 1, after, VALUE)).collect();
+        let due: Vec<i64> = (1..=480).filter(|&after| notice_due(after - 1, after, VALUE, RATE)).collect();
         assert_eq!(due, vec![120, 240, 360, 479]);
     }
 
@@ -601,8 +602,8 @@ mod tests {
     fn a_big_hour_still_warns_once() {
         // 168000 assessed: 3360 a week, 20 an hour, foreclosed at 13440
         let v = 168_000;
-        assert_eq!(largest_hourly_tax(v), 20);
-        let due: Vec<i64> = (1..=13_440 / 20).map(|h| h * 20).filter(|&a| notice_due(a - 20, a, v)).collect();
+        assert_eq!(largest_hourly_tax(v, RATE), 20);
+        let due: Vec<i64> = (1..=13_440 / 20).map(|h| h * 20).filter(|&a| notice_due(a - 20, a, v, RATE)).collect();
         assert_eq!(due, vec![3360, 6720, 10080, 13420]);
     }
 
@@ -713,7 +714,7 @@ mod tests {
         put(&db, ada, chest_box, 7, "forge_kit", 64, 1).await;
         put(&db, guest, chest_box, 9, "fiber", 40, 5).await;
 
-        let report = process_property_taxes(&db).await;
+        let report = process_property_taxes(&db, RATE).await;
 
         assert!(report.notices.is_empty(), "foreclosed, not warned");
         assert_eq!(report.foreclosures.len(), 1);
@@ -766,7 +767,7 @@ mod tests {
 
         // Away when it happened, ada hears when she's back (#138)
         assert_eq!(
-            notices::take_all(&db, ada).await.unwrap(),
+            notices::take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap(),
             vec![ServerMessage::PlotForeclosed { terrain_id, tax_owed: 480, refund: 5520, impounded: vec![], lost: vec![] }]
         );
     }
@@ -791,7 +792,7 @@ mod tests {
         put(&db, ada, chest_box, 2, "fiber", 70, 2).await;
         put(&db, guest, chest_box, 3, "fiber", 40, 5).await;
 
-        let report = process_property_taxes(&db).await;
+        let report = process_property_taxes(&db, RATE).await;
 
         // The kit takes the last slot; the rest waits in the impounds
         let f = &report.foreclosures[0];
@@ -823,7 +824,7 @@ mod tests {
         // Ada hears what's waiting for her
         let terrain_id = format!("test-{lot}");
         assert_eq!(
-            notices::take_all(&db, ada).await.unwrap(),
+            notices::take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap(),
             vec![ServerMessage::PlotForeclosed {
                 terrain_id,
                 tax_owed: 480,
@@ -867,7 +868,7 @@ mod tests {
             .await
             .unwrap();
 
-        let report = process_property_taxes(&db).await;
+        let report = process_property_taxes(&db, RATE).await;
 
         let f = &report.foreclosures[0];
         assert_eq!(f.removed_stations, vec![bench]);
@@ -884,7 +885,7 @@ mod tests {
         let lot = plot(&db, Some(ada), VALUE).await;
         owe(&db, lot, 7000).await;
 
-        let report = process_property_taxes(&db).await;
+        let report = process_property_taxes(&db, RATE).await;
 
         assert_eq!(report.foreclosures[0].refund, 0);
         assert_eq!(balance(&db, ada).await, 0);
@@ -899,7 +900,7 @@ mod tests {
         owe(&db, lot, 119).await;
         carry(&db, lot, CARRY_DUE).await;
 
-        let report = process_property_taxes(&db).await;
+        let report = process_property_taxes(&db, RATE).await;
 
         assert!(report.foreclosures.is_empty());
         let terrain_id = format!("test-{lot}");
@@ -909,7 +910,7 @@ mod tests {
         assert!(n.notice_id.is_some(), "queued for her return");
         assert_eq!(owner(&db, lot).await, Some(Some(ada)));
         assert_eq!(
-            notices::take_all(&db, ada).await.unwrap(),
+            notices::take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap(),
             vec![ServerMessage::TaxDelinquent { terrain_id, tax_owed: 120, forecloses_at: 480 }]
         );
     }
@@ -959,7 +960,7 @@ mod tests {
         owe(&db, lot, 479).await;
         carry(&db, lot, CARRY_DUE).await;
 
-        let report = process_property_taxes(&db).await;
+        let report = process_property_taxes(&db, RATE).await;
 
         // 1 for the hour, then the other 100 off the debt
         assert!(report.foreclosures.is_empty() && report.notices.is_empty());
@@ -977,13 +978,48 @@ mod tests {
         let wild = plot(&db, Some(ada), 100).await;
 
         for _ in 0..HOURS_PER_WEEK {
-            process_property_taxes(&db).await;
+            process_property_taxes(&db, RATE).await;
         }
 
         // 20 and 2, where rounding each hour up took 168 each
         assert_eq!(balance(&db, ada).await, 1000 - 20 - 2);
         assert_eq!((owed(&db, urban).await, carried(&db, urban).await), (0, 0));
         assert_eq!((owed(&db, wild).await, carried(&db, wild).await), (0, 0));
+    }
+
+    /// The rate is read each run, so a change made between two runs is
+    /// charged by the next (D6.1)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_next_run_charges_the_rate_it_is_given(db: PgPool) {
+        let ada = player(&db, "ada", 1000).await;
+        let lot = plot(&db, Some(ada), 1000).await;
+
+        for _ in 0..HOURS_PER_WEEK / 2 {
+            process_property_taxes(&db, RATE).await;
+        }
+        for _ in 0..HOURS_PER_WEEK / 2 {
+            process_property_taxes(&db, RATE * 5.0).await;
+        }
+
+        // Half a week at 20 a week, half at 100
+        assert_eq!(balance(&db, ada).await, 1000 - 10 - 50);
+        assert_eq!(owed(&db, lot).await, 0);
+    }
+
+    /// At a rate of 0 nothing is charged, and a debt forecloses nobody
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_rate_of_nothing_forecloses_nobody(db: PgPool) {
+        let ada = player(&db, "ada", 0).await;
+        let lot = plot(&db, Some(ada), VALUE).await;
+        owe(&db, lot, 30).await;
+
+        let report = process_property_taxes(&db, 0.0).await;
+
+        assert!(report.foreclosures.is_empty());
+        assert_eq!(foreclose(&db, lot, 0.0).await.unwrap(), None);
+        assert_eq!(owed(&db, lot).await, 30);
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -993,7 +1029,7 @@ mod tests {
         let lot = plot(&db, Some(ada), VALUE).await;
         owe(&db, lot, 30).await;
 
-        let report = process_property_taxes(&db).await;
+        let report = process_property_taxes(&db, RATE).await;
 
         assert_eq!(carried(&db, lot).await, 120, "this hour's 120/168 carries");
         assert_eq!((balance(&db, ada).await, owed(&db, lot).await), (20, 0));

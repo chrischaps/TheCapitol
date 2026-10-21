@@ -257,6 +257,8 @@ pub enum GameEvent {
     MarketTrade { trade: MarketTrade },
     /// E3.9: the Gazette's edition about `day` is out (to everyone)
     GazettePublished { day: i64, number: i64, headline: String },
+    /// D6.1: an admin moved a fee (to everyone)
+    FeesChanged { fees: capitol_protocol::tunables::Fees },
     // E3.3: the market API
     /// `player_id`'s order is on the book
     OrderPlaced { player_id: Uuid, order: MarketOrder },

@@ -40,6 +40,7 @@ use capitol_protocol::rest::{
     StationInfo, Subscription, SubscriptionStatus, PRODUCTION_LOG_LEN,
 };
 use capitol_protocol::rules::{self, Zone};
+use capitol_protocol::tunables::Fees;
 use capitol_protocol::ws::{ItemCount, PlayerPosition, PresenceHolder, ServerMessage};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -389,6 +390,9 @@ pub struct GameState {
     strands: Option<i64>,
     /// Your account's subscription, from `auth_ok` and `/player/me` (E4.1).
     subscription: Option<Subscription>,
+    /// The fees the server charges now, from `auth_ok` and `fees_changed`
+    /// (D6.1). The defaults until it says.
+    fees: Fees,
     /// Whether this client plays the avatar, as the server last said (E0.8).
     /// `None` while not connected, or from a server too old to say.
     presence: Option<Presence>,
@@ -437,6 +441,7 @@ impl GameState {
             recipes: Vec::new(),
             strands: None,
             subscription: None,
+            fees: Fees::default(),
             presence: None,
             plots: Vec::new(),
             picked_plot: None,
@@ -515,9 +520,11 @@ impl GameState {
                 player_id,
                 server_time_ms,
                 subscription,
+                fees,
             } => {
                 self.me = Some(*player_id);
                 self.subscription = Some(*subscription);
+                self.fees = *fees;
                 // Rebased on every AuthOk, so a reconnect corrects any drift.
                 self.clock_offset_ms = Some(server_time_ms - local_unix_ms());
             }
@@ -806,6 +813,8 @@ impl GameState {
             }),
             M::TerrainUpdated => out.push(StateEvent::TerrainUpdated),
             // E3.9: to everyone. The session asks for the edition.
+            // D6.1: read where they're quoted, so nothing more to do
+            M::FeesChanged { fees } => self.fees = *fees,
             M::GazettePublished { day, number, headline } => out.push(StateEvent::GazettePublished {
                 day: *day,
                 number: *number,
@@ -1345,6 +1354,12 @@ impl GameState {
     /// hasn't said otherwise (an older server always lets it).
     pub fn plays_here(&self) -> bool {
         self.presence.is_none_or(|p| p.yours)
+    }
+
+    /// The fees the server charges now (D6.1): quote the exchange, the
+    /// market's listing fee and a stall's rent from these.
+    pub fn fees(&self) -> Fees {
+        self.fees
     }
 
     /// Your account's subscription, as of now. `None` until the server says.

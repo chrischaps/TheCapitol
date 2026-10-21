@@ -231,6 +231,7 @@ fn test_for(message: &M) -> fn() {
         M::MarketDepth { .. } => market_messages_reach_the_market_store,
         M::MarketTrade { .. } => market_messages_reach_the_market_store,
         M::GazettePublished { .. } => gazette_published_is_reported,
+        M::FeesChanged { .. } => the_fees_follow_the_server,
         M::BazaarSale { .. } => bazaar_notices_are_reported,
         M::StallLapsed { .. } => bazaar_notices_are_reported,
         M::Resync { .. } => a_socket_that_fell_behind_resyncs_like_a_reconnect,
@@ -253,7 +254,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 57, "one fixture per ServerMessage variant");
+    assert_eq!(count, 58, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +312,7 @@ fn subscription_follows_auth_ok_me_and_the_lapse() {
         player_id: ME,
         server_time_ms: now_ms(),
         subscription: active(30),
+        fees: Default::default(),
     });
     assert!(state.is_patron());
 
@@ -355,6 +357,7 @@ fn auth_ok_sets_the_local_player() {
         player_id: ME,
         server_time_ms: ahead,
         subscription: Default::default(),
+        fees: Default::default(),
     });
     assert!(events.is_empty());
     assert_eq!(state.me(), Some(ME));
@@ -367,6 +370,7 @@ fn auth_ok_sets_the_local_player() {
         player_id: ME,
         server_time_ms: now_ms(),
         subscription: Default::default(),
+        fees: Default::default(),
     });
     assert!((state.server_time_ms().unwrap() - now_ms()).abs() < 1000);
 }
@@ -1372,6 +1376,20 @@ fn gazette_published_is_reported() {
         state.apply_ws(&M::GazettePublished { day: 248_952, number: 13, headline: headline.clone() }),
         vec![StateEvent::GazettePublished { day: 248_952, number: 13, headline }]
     );
+}
+
+#[test]
+fn the_fees_follow_the_server() {
+    use capitol_protocol::tunables::Fees;
+    let mut state = GameState::new();
+    assert_eq!(state.fees(), Fees::default(), "the defaults before the server says");
+    let dear = Fees { exchange_fee_rate: 0.02, listing_fee_percent: 3.0, stall_rent_per_day: 40 };
+    state.apply_ws(&M::AuthOk { player_id: ME, server_time_ms: now_ms(), subscription: Default::default(), fees: dear });
+    assert_eq!(state.fees(), dear);
+    let cheap = Fees { listing_fee_percent: 0.5, ..dear };
+    assert!(state.apply_ws(&M::FeesChanged { fees: cheap }).is_empty());
+    assert_eq!(state.fees(), cheap);
+    assert_eq!(state.fees().listing_fee(1_000), 5);
 }
 
 #[test]

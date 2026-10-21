@@ -144,6 +144,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         player_id,
         server_time_ms: chrono::Utc::now().timestamp_millis(),
         subscription,
+        fees: state.tunables.get().fees,
     };
     let _ = sender
         .send(Message::Text(serde_json::to_string(&auth_ok).unwrap().into()))
@@ -274,7 +275,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         // auth are already on `event_rx`; whichever path takes a
                                         // notice first sends it. A watcher takes none.
                                         if first && state.game.read().await.holds_presence(player_id, connection_id) {
-                                            match crate::engine::notices::take_all(&state.db, player_id).await {
+                                            let rate = state.tunables.get().property_tax_rate;
+                                            match crate::engine::notices::take_all(&state.db, player_id, rate).await {
                                                 Ok(waiting) => {
                                                     for msg in waiting {
                                                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
@@ -1239,6 +1241,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = ServerMessage::GazettePublished { day, number, headline };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
+                    // D6.1: a fee moved, to everyone, so previews follow
+                    Ok(GameEvent::FeesChanged { fees }) => {
+                        let msg = ServerMessage::FeesChanged { fees };
+                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                    }
                     Err(()) => {
                         // Channel closed
                         counted.ends(SocketEnd::ServerStopping);
@@ -1300,7 +1307,8 @@ async fn resync(
         out.push(ServerMessage::MarketDepth { item_type: item_type.clone(), seq: depth.seq, full: true, levels: depth.levels });
     }
     if holds {
-        match crate::engine::notices::take_all(db, player_id).await {
+        let rate = game.read().await.tunables.get().property_tax_rate;
+        match crate::engine::notices::take_all(db, player_id, rate).await {
             Ok(waiting) => out.extend(waiting),
             Err(e) => tracing::error!("Failed to load notices for {}: {:?}", player_id, e),
         }
@@ -2191,7 +2199,7 @@ mod tests {
         assert_eq!(sent[2], ServerMessage::CurrencyChanged { new_balance: 1234 });
         assert!(matches!(&sent[3], ServerMessage::MarketDepth { item_type, full: true, .. } if item_type == "plank"));
         assert_eq!(sent[4], gone);
-        assert!(crate::engine::notices::take_all(&db, ada).await.unwrap().is_empty(), "the notice was left to go again");
+        assert!(crate::engine::notices::take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap().is_empty(), "the notice was left to go again");
 
         // Skipped ahead: what the channel still holds, then what comes next
         for _ in 0..crate::engine::GameState::EVENT_CAPACITY {

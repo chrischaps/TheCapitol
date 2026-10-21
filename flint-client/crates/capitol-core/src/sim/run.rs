@@ -911,6 +911,7 @@ impl SimBot {
         let mut h = Holdings {
             strands: state.strands().unwrap_or(0),
             deed_cost: self.deed_cost,
+            fees: state.fees(),
             ..Holdings::default()
         };
         for container in [state.inventory(), state.crafting_output()].into_iter().flatten() {

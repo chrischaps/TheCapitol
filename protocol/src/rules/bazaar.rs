@@ -1,8 +1,10 @@
 //! The bazaar's rules (economy plan D6, E3.10): what a stall costs, how close
 //! you must stand to it, and which shops and listings are allowed.
 //!
-//! - A merchant rents one stall at a time, at [`RENT_PER_DAY`] Strands a day,
-//!   paid in advance for 1 to [`MAX_RENT_DAYS`] days ([`rent`]). Paying again
+//! - A merchant rents one stall at a time, at [`RENT_PER_DAY`] Strands a day
+//!   by default (a live knob since D6.1, so what's charged is the server's
+//!   [`crate::tunables::Fees::rent`]), paid in advance for 1 to
+//!   [`MAX_RENT_DAYS`] days. Paying again
 //!   extends it, up to [`MAX_RENT_DAYS`] ahead. The rent is the bazaar's sink:
 //!   there's no listing fee.
 //! - A listing is a stack at a fixed price per unit. Its units keep their own
@@ -15,7 +17,8 @@
 use super::market::{MAX_ORDER_QUANTITY, MAX_PRICE, MIN_PRICE};
 use crate::terrain::Landmark;
 
-/// A stall's rent, in Strands a day (GDD §8.4).
+/// A stall's rent by default, in Strands a day (GDD §8.4). The live one is
+/// [`crate::tunables::Fees`]'s.
 pub const RENT_PER_DAY: i64 = 20;
 /// The most days a rent may be paid ahead.
 pub const MAX_RENT_DAYS: i64 = 7;
@@ -29,11 +32,6 @@ pub const STALL_RANGE: f64 = 20.0;
 pub const MAX_SHOP_NAME: usize = 40;
 /// The most listings one shop may hold.
 pub const MAX_LISTINGS: usize = 24;
-
-/// What `days` of rent cost.
-pub fn rent(days: i64) -> i64 {
-    days * RENT_PER_DAY
-}
 
 /// Whether `(x, y)` is close enough to `stall` to stock, buy or see prices.
 pub fn at_the_stall(stall: &Landmark, x: f64, y: f64) -> bool {
@@ -107,8 +105,9 @@ mod tests {
 
     #[test]
     fn a_week_is_the_most_and_a_day_the_least() {
-        assert_eq!(rent(1), 20);
-        assert_eq!(rent(7), 140);
+        let fees = crate::tunables::Fees::default();
+        assert_eq!(fees.rent(1), 20);
+        assert_eq!(fees.rent(7), 140);
         assert!(validate_days(0).is_err());
         assert!(validate_days(1).is_ok());
         assert!(validate_days(7).is_ok());

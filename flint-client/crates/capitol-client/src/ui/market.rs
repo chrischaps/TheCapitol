@@ -42,6 +42,7 @@ use capitol_core::protocol::rest::{
     SlotItem,
 };
 use capitol_core::protocol::rules::market::{GradeRule, OrderSide};
+use capitol_core::protocol::tunables::Fees;
 use capitol_core::state::Container;
 use egui::{Align, Align2, Color32, Id, Layout, RichText, Sense, Stroke};
 use uuid::Uuid;
@@ -99,6 +100,8 @@ pub struct View<'a> {
     pub inventory: Option<&'a Container>,
     pub market_box: Option<&'a Container>,
     pub strands: Option<i64>,
+    /// The fees the server charges now (D6.1): the listing fee, a stall's rent
+    pub fees: Fees,
     /// A place, cancel or collect is out
     pub busy: bool,
     /// Why the last one was refused, while it's fresh
@@ -487,10 +490,7 @@ impl MarketPanel {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(theme::label("To let"));
                             ui.label(
-                                theme::dim(format!(
-                                    "{} Strands a day ·",
-                                    capitol_core::protocol::rules::bazaar::RENT_PER_DAY
-                                ))
+                                theme::dim(format!("{} Strands a day ·", view.fees.stall_rent_per_day))
                                 .size(size::SMALL),
                             );
                             for id in free {
@@ -1134,9 +1134,10 @@ impl MarketPanel {
             book,
             &view.orders,
             view.strands,
+            &view.fees,
         );
         ui.add_space(6.0);
-        preview(ui, &quote);
+        preview(ui, &quote, &view.fees);
         if let Some(why) = view.refused {
             ui.add_space(4.0);
             theme::error_box(ui, why);
@@ -1599,21 +1600,23 @@ fn field_row(
 }
 
 /// What the order costs and does, before it's placed.
-fn preview(ui: &mut egui::Ui, quote: &Result<OrderQuote, FormRefusal>) {
+fn preview(ui: &mut egui::Ui, quote: &Result<OrderQuote, FormRefusal>, fees: &Fees) {
     theme::well().show(ui, |ui| {
         ui.set_width(ui.available_width());
         theme::list_spacing(ui);
         match quote {
             Err(FormRefusal::Incomplete) => {
                 ui.label(theme::dim("Set a quantity and a price each.").size(size::SMALL));
-                ui.label(theme::dim("Placing costs 1% of the order's value.").size(size::SMALL));
+                ui.label(
+                    theme::dim(format!("Placing costs {} of the order's value.", fees.listing_fee_label())).size(size::SMALL),
+                );
             }
             Err(why) => {
                 ui.label(RichText::new(refusal(why)).color(SHORT).size(size::SMALL));
             }
             Ok(q) => {
                 row(ui, "Value", theme::text(grouped(q.value)));
-                row(ui, "Fee (1%)", theme::dim(grouped(q.fee).to_string()));
+                row(ui, &format!("Fee ({})", fees.listing_fee_label()), theme::dim(grouped(q.fee).to_string()));
                 ui.add_space(2.0);
                 theme::divider(ui);
                 ui.add_space(2.0);
@@ -1902,6 +1905,7 @@ impl Sample {
             inventory: Some(&self.inventory),
             market_box: Some(&self.market_box),
             strands: Some(self.strands),
+            fees: Fees::default(),
             busy: false,
             refused: None,
             away_from_hall: None,

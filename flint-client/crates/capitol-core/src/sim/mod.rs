@@ -32,7 +32,6 @@ pub mod run;
 
 use std::fmt;
 
-use capitol_protocol::rules::market::{buy_debit, listing_fee};
 use plan::{Goal, Holdings, Step, FLOAT, FLOOR};
 
 use crate::catalog::Catalog;
@@ -301,7 +300,7 @@ impl Role {
         let price = Span::new((bid / 2).max(1), (bid * 2).max(ask.unwrap_or(0)));
         // A sell's fee is paid when it's placed (#294)
         let mut most = held;
-        while most > 0 && listing_fee(price.max * most as i64) > holdings.strands {
+        while most > 0 && holdings.fees.listing_fee(price.max * most as i64) > holdings.strands {
             most -= 1;
         }
         (most > 0).then(|| {
@@ -393,7 +392,7 @@ impl Role {
         let product = self.product()?;
         let held = holdings.count(product);
         let worth = worth?.max(1);
-        let rent = capitol_protocol::rules::bazaar::rent(STALL_DAYS);
+        let rent = holdings.fees.rent(STALL_DAYS);
         if held < STALL_AT / 2 || (!keeps && holdings.strands - kept(holdings) < rent) {
             return None;
         }
@@ -459,7 +458,7 @@ fn kept(holdings: &Holdings) -> i64 {
 fn affordable(holdings: &Holdings, price: i64) -> i32 {
     let budget = holdings.strands - kept(holdings);
     let mut afford = 2 * LOT;
-    while afford > 0 && buy_debit(price, afford) > budget {
+    while afford > 0 && holdings.fees.buy_debit(price, afford) > budget {
         afford -= 1;
     }
     afford

@@ -32,7 +32,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
 use capitol_protocol::rest::{GrantItem, GrantRequest, GrantResponse, MarketOrder, PlaceOrder};
-use capitol_protocol::rules::market::{buy_debit, OrderSide, OrderStatus, MIN_PRICE};
+use capitol_protocol::rules::market::{OrderSide, OrderStatus, MIN_PRICE};
+use capitol_protocol::tunables::Fees;
 use uuid::Uuid;
 
 use crate::bot::{Bot, BotError};
@@ -161,8 +162,9 @@ pub fn share(wealth: i64, reference: i64, items: usize) -> Limit {
 
 /// What the maker wants on the book for one item: bids best first, then
 /// asks best first. `position` is every unit it holds, those on its asks
-/// included, and `strands` every Strand, those on its bids included.
-pub fn quotes(config: &MakerConfig, reference: i64, position: i32, strands: i64) -> Vec<Quote> {
+/// included, and `strands` every Strand, those on its bids included. Its bids
+/// pay the listing fee at `fees`, the server's (D6.1).
+pub fn quotes(config: &MakerConfig, reference: i64, position: i32, strands: i64, fees: &Fees) -> Vec<Quote> {
     let target = config.target.max(1);
     let skew = ((position - target) as f64 / target as f64).clamp(-1.0, 1.0);
     let half = (reference as f64 * config.spread / 2.0).max(0.5);
@@ -180,7 +182,7 @@ pub fn quotes(config: &MakerConfig, reference: i64, position: i32, strands: i64)
         }
         let mut quantity = level_size(config.size, price).min(room);
         quantity = quantity.min((budget / price).min(i32::MAX as i64) as i32);
-        while quantity > 0 && buy_debit(price, quantity) > budget {
+        while quantity > 0 && fees.buy_debit(price, quantity) > budget {
             quantity -= 1;
         }
         if quantity <= 0 {
@@ -192,7 +194,7 @@ pub fn quotes(config: &MakerConfig, reference: i64, position: i32, strands: i64)
             quantity,
         });
         room -= quantity;
-        budget -= buy_debit(price, quantity);
+        budget -= fees.buy_debit(price, quantity);
         last = Some(price);
     }
 
@@ -466,8 +468,9 @@ impl Maker {
         let Some(reference) = self.reference(item) else {
             return Ok(());
         };
+        let fees = bot.state().fees();
         let wanted = match self.limits.get(item) {
-            None => quotes(&self.config, reference, position(bot, item), all_strands(bot)),
+            None => quotes(&self.config, reference, position(bot, item), all_strands(bot), &fees),
             Some(limit) => {
                 // Its own bids' Strands, and as many free as the budget allows
                 let escrowed: i64 = open_orders(bot, item)
@@ -481,7 +484,7 @@ impl Maker {
                     target: limit.target,
                     ..self.config.clone()
                 };
-                quotes(&config, reference, position(bot, item), strands)
+                quotes(&config, reference, position(bot, item), strands, &fees)
             }
         };
         let (cancel, place) = plan(&wanted, &open_orders(bot, item));
@@ -623,7 +626,7 @@ mod tests {
 
     #[test]
     fn at_the_target_it_quotes_evenly_round_the_reference() {
-        let q = quotes(&config(), 50, 40, 100_000);
+        let q = quotes(&config(), 50, 40, 100_000, &Fees::default());
         // 20% spread: 5 either side, then another 5
         assert_eq!(prices(&q, OrderSide::Buy), [45, 40]);
         assert_eq!(prices(&q, OrderSide::Sell), [55, 60]);
@@ -632,8 +635,8 @@ mod tests {
 
     #[test]
     fn holding_too_much_leans_down_and_too_little_leans_up() {
-        let long = quotes(&config(), 50, 80, 100_000);
-        let short = quotes(&config(), 50, 0, 100_000);
+        let long = quotes(&config(), 50, 80, 100_000, &Fees::default());
+        let short = quotes(&config(), 50, 0, 100_000, &Fees::default());
         // At twice the target there's no room to bid at all
         assert!(prices(&long, OrderSide::Buy).is_empty());
         assert_eq!(prices(&long, OrderSide::Sell), [50, 55]);
@@ -648,15 +651,15 @@ mod tests {
         c.reserve = 100;
         // 35 units of room and 400 spendable Strands at 44: 9 units and the fee
         // spend it all, so the second level gets nothing
-        let q = quotes(&c, 50, 45, 500);
+        let q = quotes(&c, 50, 45, 500, &Fees::default());
         let bids: Vec<&Quote> = q.iter().filter(|q| q.side == OrderSide::Buy).collect();
         assert_eq!(bids.len(), 1);
         assert_eq!((bids[0].price, bids[0].quantity), (44, 9));
-        assert!(buy_debit(bids[0].price, bids[0].quantity) <= 400);
+        assert!(Fees::default().buy_debit(bids[0].price, bids[0].quantity) <= 400);
         // Asks offer no more than it holds
         let asked: i32 = q.iter().filter(|q| q.side == OrderSide::Sell).map(|q| q.quantity).sum();
         assert_eq!(asked, 20);
-        let thin = quotes(&c, 50, 15, 100_000);
+        let thin = quotes(&c, 50, 15, 100_000, &Fees::default());
         assert_eq!(thin.iter().filter(|q| q.side == OrderSide::Sell).map(|q| q.quantity).sum::<i32>(), 15);
     }
 
@@ -664,7 +667,7 @@ mod tests {
     fn a_cheap_item_quotes_at_the_floor_with_lots_worth_the_fee() {
         let mut c = config();
         c.target = 200;
-        let q = quotes(&c, 1, 200, 100_000);
+        let q = quotes(&c, 1, 200, 100_000, &Fees::default());
         // Fiber at 1: one bid at the floor, asks above it
         assert_eq!(prices(&q, OrderSide::Buy), [1]);
         assert_eq!(prices(&q, OrderSide::Sell), [2, 3]);
@@ -675,7 +678,7 @@ mod tests {
 
     #[test]
     fn a_requote_keeps_what_still_fits_and_tops_up_what_filled() {
-        let wanted = quotes(&config(), 50, 40, 100_000);
+        let wanted = quotes(&config(), 50, 40, 100_000, &Fees::default());
         let kept = order(OrderSide::Buy, 45, 10);
         let filled = order(OrderSide::Sell, 55, 3);
         let stale = order(OrderSide::Sell, 70, 10);
@@ -720,10 +723,10 @@ mod tests {
         c.reserve = 0;
         let limit = share(600, 8, 3);
         c.target = limit.target;
-        let spent: i64 = quotes(&c, 8, 0, limit.budget)
+        let spent: i64 = quotes(&c, 8, 0, limit.budget, &Fees::default())
             .iter()
             .filter(|q| q.side == OrderSide::Buy)
-            .map(|q| buy_debit(q.price, q.quantity))
+            .map(|q| Fees::default().buy_debit(q.price, q.quantity))
             .sum();
         assert!(spent > 0 && spent <= limit.budget, "{spent}");
     }

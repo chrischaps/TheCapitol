@@ -1280,7 +1280,7 @@ mod tests {
 
         /// The `automation_paused` notices waiting for `player_id`, taking them
         async fn pause_notices(db: &PgPool, player_id: Uuid) -> Vec<PauseReason> {
-            notices::take_all(db, player_id)
+            notices::take_all(db, player_id, capitol_protocol::tunables::PROPERTY_TAX_RATE)
                 .await
                 .unwrap()
                 .into_iter()

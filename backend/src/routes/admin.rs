@@ -5,6 +5,7 @@ use axum::{
 };
 use capitol_protocol::annotation::AnnotationKind;
 use capitol_protocol::rest::{CitizenInfo, CreateCitizenRequest, CreatedCitizen};
+use capitol_protocol::tunables::{TunablesResponse, TunablesUpdate};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +15,7 @@ use crate::middleware::auth::AuthUser;
 use crate::models::{ActionState, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
 use crate::engine::currency::{announce_balances, balances_of};
-use crate::engine::{annotations, ledger, node_placement, node_spawn};
+use crate::engine::{annotations, ledger, node_placement, node_spawn, tunables};
 use crate::engine::plot_sync::{sync_plots, OnOwned, SyncError};
 use crate::engine::GameEvent;
 
@@ -34,6 +35,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/stats", get(get_server_stats))
         .route("/ledger", get(get_ledger))
         .route("/annotations", get(get_annotations))
+        .route("/tunables", get(get_tunables).put(put_tunables))
         .route("/accounts/{id}/subscription", post(subscribe_account))
         .route("/citizens", get(list_citizens).post(create_citizen))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -293,6 +295,47 @@ pub async fn get_annotations(
     let since_ms = query.since_ms.unwrap_or_else(|| Utc::now().timestamp_millis() - 24 * 3_600_000);
     let limit = query.limit.unwrap_or(1000).clamp(1, 10_000);
     Ok(Json(annotations::since(&state.db, since_ms, limit).await?))
+}
+
+/// The zones and resources the tunables' families may name, as the world has them now
+async fn known_ids(state: &AppState) -> Result<tunables::Known, AppError> {
+    let resources: Vec<String> = state.game.read().await.resource_types.keys().cloned().collect();
+    Ok(tunables::Known::read(&state.db, resources).await?)
+}
+
+/// Every live tunable (D6.1) with its unit, range, default and value, one per
+/// zone with deeds and per resource for the families.
+pub async fn get_tunables(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<TunablesResponse>, AppError> {
+    require_admin(&user)?;
+    let known = known_ids(&state).await?;
+    Ok(Json(TunablesResponse::list(&state.tunables.get(), &known.zones, &known.resources)))
+}
+
+/// Change tunables, all of them or none: an unknown key or a value out of its
+/// range is a 400 that changes nothing. Each change is saved and marked on
+/// the console's charts, and a fee's is sent to every socket. Answers with
+/// every knob, as `GET` does.
+pub async fn put_tunables(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(update): Json<TunablesUpdate>,
+) -> Result<Json<TunablesResponse>, AppError> {
+    require_admin(&user)?;
+    let known = known_ids(&state).await?;
+    let events = state.game.read().await.event_sender.clone();
+    match tunables::update(&state.db, &state.tunables, &update, &known, &events).await {
+        Ok(changes) => {
+            for change in &changes {
+                tracing::info!("Admin {} set {} to {} (was {})", user.account_id, change.key, change.to, change.from);
+            }
+        }
+        Err(tunables::UpdateError::Db(e)) => return Err(e.into()),
+        Err(e) => return Err(AppError::BadRequest(e.message(&update))),
+    }
+    Ok(Json(TunablesResponse::list(&state.tunables.get(), &known.zones, &known.resources)))
 }
 
 #[derive(Serialize)]

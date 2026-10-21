@@ -1407,6 +1407,7 @@ impl PlayerExtension for CapitolExtension {
                 let view = ui::exchange::View {
                     inventory: state.inventory(),
                     strands: state.strands(),
+                    fees: state.fees(),
                     busy: session.exchanging(),
                     refused: session.exchange_refused(now),
                     receipt: session.receipt(now),
@@ -1443,6 +1444,7 @@ impl PlayerExtension for CapitolExtension {
                     orders: market.open_orders(),
                     inventory: state.inventory(),
                     market_box: state.market_box(),
+                    fees: state.fees(),
                     strands: state.strands(),
                     busy: session.market_busy(),
                     refused: session.market_refused(now),
@@ -1488,6 +1490,7 @@ impl PlayerExtension for CapitolExtension {
                             away,
                             inventory: state.inventory(),
                             strands: state.strands(),
+                            fees: state.fees(),
                             catalog: state.catalog(),
                             busy: session.bazaar_busy(),
                             refused: session.bazaar_refused(now),

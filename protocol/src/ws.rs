@@ -16,6 +16,7 @@ use crate::rest::{
     Subscription,
 };
 use crate::rules::stacking::Units;
+use crate::tunables::Fees;
 
 /// Client to server.
 ///
@@ -196,13 +197,17 @@ pub struct TradeOfferItem {
 pub enum ServerMessage {
     /// `server_time_ms` is the server's clock (Unix ms) as it sent this. A
     /// client keeps its offset from that, for [`crate::rules::time_of_day`].
-    /// `subscription` is the account's, as of now (E4.1).
+    /// `subscription` is the account's, as of now (E4.1). `fees` are the
+    /// ones charged now (D6.1): quote from them, and from each `fees_changed`
+    /// after. A server older than D6.1 sends none, and charges the defaults.
     #[serde(rename = "auth_ok")]
     AuthOk {
         player_id: Uuid,
         server_time_ms: i64,
         #[serde(default)]
         subscription: Subscription,
+        #[serde(default)]
+        fees: Fees,
     },
     #[serde(rename = "auth_error")]
     AuthError { message: String },
@@ -544,6 +549,10 @@ pub enum ServerMessage {
     /// The Gazette's edition about `day` is out (`GET /gazette/latest`)
     #[serde(rename = "gazette_published")]
     GazettePublished { day: i64, number: i64, headline: String },
+    // D6.1: to everyone
+    /// An admin changed a fee (a live tunable). Quote from these from now on.
+    #[serde(rename = "fees_changed")]
+    FeesChanged { fees: Fees },
     // E0.8: Presence, to the socket it's about
     /// Whether this socket drives the avatar (D9). An account can have many
     /// sessions, but only one socket holds the avatar: the others watch, and
@@ -629,6 +638,7 @@ impl ServerMessage {
             ServerMessage::BazaarSale { .. } => "bazaar_sale",
             ServerMessage::StallLapsed { .. } => "stall_lapsed",
             ServerMessage::GazettePublished { .. } => "gazette_published",
+            ServerMessage::FeesChanged { .. } => "fees_changed",
             ServerMessage::Presence { .. } => "presence",
             ServerMessage::Resync { .. } => "resync",
         }

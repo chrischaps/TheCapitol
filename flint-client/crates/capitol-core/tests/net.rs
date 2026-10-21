@@ -253,6 +253,7 @@ async fn serve_socket(mut socket: WebSocket, mock: Mock) {
                         player_id: PLAYER,
                         server_time_ms: 0,
                         subscription: Default::default(),
+                        fees: Default::default(),
                     },
                 )
                 .await;

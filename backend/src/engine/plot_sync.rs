@@ -769,7 +769,7 @@ pub(crate) mod tests {
 
         sync_plots(&db, &[lot("new", 8000.0, 6800.0)], OnOwned::Release).await.unwrap();
 
-        assert_eq!(notices::take_all(&db, ada).await.unwrap(), vec![displaced(under, "new")]);
+        assert_eq!(notices::take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap(), vec![displaced(under, "new")]);
     }
 
     /// An admin's commit without `force` refuses, and changes nothing

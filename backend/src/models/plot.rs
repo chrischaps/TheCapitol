@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use capitol_protocol::tunables::Tunables;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -92,10 +93,10 @@ impl PermissionLevel {
     }
 }
 
-/// `PlotInfo::forecloses_at`: the foreclosure threshold, while it's owned
-/// and taxed
-fn forecloses_at(owner_id: Option<Uuid>, assessed_value: i32) -> Option<i64> {
-    let threshold = crate::engine::property_tax::foreclosure_threshold(assessed_value);
+/// `PlotInfo::forecloses_at`: the foreclosure threshold at the tax `rate`,
+/// while it's owned and taxed
+fn forecloses_at(owner_id: Option<Uuid>, assessed_value: i32, rate: f64) -> Option<i64> {
+    let threshold = crate::engine::property_tax::foreclosure_threshold(assessed_value, rate);
     (owner_id.is_some() && threshold > 0).then_some(threshold)
 }
 
@@ -123,12 +124,15 @@ pub struct PlotWithJoins {
     /// The owner is a citizen (C0.1)
     pub owner_citizen: bool,
     pub station_capacity: i32,
-    /// The zone's `deed_cost`, joined from `zones`.
+    /// The zone's `deed_cost`, joined from `zones`, before the zone's deed
+    /// price tunable (D6.1): [`PlotWithJoins::to_plot_info`] applies it.
     pub deed_cost: Option<i32>,
 }
 
 impl PlotWithJoins {
-    pub fn to_plot_info(&self) -> PlotInfo {
+    /// The plot as the API says it, at the `tunables` now: its deed's price
+    /// and the debt that forecloses it (D6.1)
+    pub fn to_plot_info(&self, tunables: &Tunables) -> PlotInfo {
         PlotInfo {
             id: self.id,
             zone_id: self.zone_id.clone(),
@@ -148,8 +152,8 @@ impl PlotWithJoins {
             claimed_at: self.claimed_at,
             assessed_value: self.assessed_value,
             tax_owed: self.tax_owed as i64,
-            forecloses_at: forecloses_at(self.owner_id, self.assessed_value),
-            deed_cost: self.deed_cost,
+            forecloses_at: forecloses_at(self.owner_id, self.assessed_value, tunables.property_tax_rate),
+            deed_cost: self.deed_cost.map(|base| tunables.deed_cost(&self.zone_id, base)),
             station_count: self.station_count,
             station_capacity: self.station_capacity,
             terrain_id: self.terrain_id.clone(),

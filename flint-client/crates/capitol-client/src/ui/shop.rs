@@ -28,6 +28,7 @@ use capitol_core::catalog::Catalog;
 use capitol_core::chrono::{DateTime, Utc};
 use capitol_core::protocol::rest::{BazaarListing, BazaarShop, BuyListing, RentStall, ShopSign, StockListing};
 use capitol_core::protocol::rules::bazaar as rules;
+use capitol_core::protocol::tunables::Fees;
 use capitol_core::state::Container;
 use egui::{Align, Align2, Id, Layout, RichText, Sense, Stroke};
 use uuid::Uuid;
@@ -72,6 +73,8 @@ pub struct View<'a> {
     pub away: Option<f64>,
     pub inventory: Option<&'a Container>,
     pub strands: Option<i64>,
+    /// The fees the server charges now (D6.1): a stall's rent
+    pub fees: Fees,
     pub catalog: &'a Catalog,
     pub busy: bool,
     pub refused: Option<&'a str>,
@@ -214,7 +217,7 @@ impl ShopPanel {
                 }
             }
             (None, false) => {
-                ui.label(theme::dim(format!("To let · {} Strands a day", rules::RENT_PER_DAY)).size(size::SMALL));
+                ui.label(theme::dim(format!("To let · {} Strands a day", view.fees.stall_rent_per_day)).size(size::SMALL));
                 theme::gold_rule(ui);
                 if let Some(a) = self.free_stall(ui, view) {
                     action = Some(a);
@@ -363,9 +366,9 @@ impl ShopPanel {
             ui.horizontal(|ui| {
                 stepper_days(ui, &mut self.days, most);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let quote = bazaar::rent(self.days, &self.name, Some(shop), view.strands, view.now);
+                    let quote = bazaar::rent(self.days, &self.name, Some(shop), view.strands, view.now, &view.fees);
                     let can = quote.is_ok() && view.away.is_none() && !view.busy;
-                    let b = small_accent(ui, &format!("Pay {} · {}", day_words(self.days), rules::rent(self.days)), can);
+                    let b = small_accent(ui, &format!("Pay {} · {}", day_words(self.days), view.fees.rent(self.days)), can);
                     let b = match (&quote, view.away) {
                         (Err(why), _) => b.on_disabled_hover_text(why.message()),
                         (Ok(_), Some(_)) => b.on_disabled_hover_text("Pay at your stall"),
@@ -500,7 +503,7 @@ impl ShopPanel {
         ui.label(
             theme::text(format!(
                 "{} Strands a day, paid up to a week ahead. Stock it from your pack and set your prices; no fee on a sale. What hasn't sold when the rent runs out goes to your market box.",
-                rules::RENT_PER_DAY
+                view.fees.stall_rent_per_day
             ))
             .size(size::SMALL),
         );
@@ -514,12 +517,12 @@ impl ShopPanel {
         let mut action = None;
         ui.horizontal(|ui| {
             stepper_days(ui, &mut self.days, rules::MAX_RENT_DAYS);
-            let cost = rules::rent(self.days);
+            let cost = view.fees.rent(self.days);
             let short = view.strands.is_some_and(|s| s < cost);
             ui.label(RichText::new(format!("= {cost} Strands")).color(if short { SHORT } else { GOLD }));
         });
         ui.add_space(4.0);
-        let quote = bazaar::rent(self.days, &self.name, None, view.strands, view.now);
+        let quote = bazaar::rent(self.days, &self.name, None, view.strands, view.now, &view.fees);
         let can = quote.is_ok() && view.away.is_none() && !view.busy;
         let b = ui.add_enabled_ui(can, |ui| theme::accent_button(ui, &format!("Rent stall {}", stall_number(view.stall_id)), BAZAAR, can)).inner;
         self.rent_button = Some(b.rect);
@@ -796,6 +799,7 @@ impl Sample {
             away: None,
             inventory: Some(&self.inventory),
             strands: Some(240),
+            fees: Fees::default(),
             catalog,
             busy: false,
             refused: None,

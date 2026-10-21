@@ -90,6 +90,8 @@ pub struct GameState {
     pub world_gen_params: WorldGenParams,
     /// The stations working on their own (E4.3), run by their own task
     pub works: Arc<super::automation_tick::Works>,
+    /// The economy's live knobs (D6.1): a gather's yield and a node's regrowth here
+    pub tunables: super::tunables::Live,
     // Performance tracking
     pub last_tps: f64,
     pub uptime_seconds: f64,
@@ -148,6 +150,7 @@ impl GameState {
             ground,
             world_gen_params: params,
             works: Arc::default(),
+            tunables: Default::default(),
             last_tps: 0.0,
             uptime_seconds: 0.0,
         }
@@ -717,6 +720,7 @@ impl GameState {
             &mut self.gather_tools,
             self.tick_count,
             &self.event_sender,
+            &self.tunables.get(),
         );
         self.pending_items.extend(new_items);
     }
@@ -840,7 +844,8 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
             let _timed = Phase::Tax.timed();
             async {
                 tracing::info!("Processing hourly property taxes at tick {}", game_tick_count);
-                let report = super::property_tax::process_property_taxes(&app_state.db).await;
+                let rate = app_state.tunables.get().property_tax_rate;
+                let report = super::property_tax::process_property_taxes(&app_state.db, rate).await;
                 let mut game = game_state.write().await;
                 let game = &mut *game;
                 super::property_tax::announce(report, &mut game.stations, &game.event_sender);

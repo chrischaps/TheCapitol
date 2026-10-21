@@ -196,6 +196,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // D6.1: the tunables an admin moved off their defaults
+    let tunables = {
+        let resources = game_state.read().await.resource_types.keys().cloned().collect::<Vec<_>>();
+        let known = engine::tunables::Known::read(&db_pool, resources).await?;
+        engine::tunables::Live::new(engine::tunables::load(&db_pool, &known).await?)
+    };
+    game_state.write().await.tunables = tunables.clone();
+
     // Load resource nodes into game state
     let resource_nodes: Vec<ResourceNode> = sqlx::query_as(
         "SELECT id, resource_type, position_x, position_y, base_quality, state,
@@ -333,7 +341,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create app state
-    let app_state = AppState::new(db_pool, redis_conn, config.clone(), game_state.clone(), market.clone());
+    let app_state = AppState::new(db_pool, redis_conn, config.clone(), game_state.clone(), market.clone(), tunables);
     if config.rate_limits.enabled {
         tracing::info!("Rate limits: {:?}", config.rate_limits);
     } else {

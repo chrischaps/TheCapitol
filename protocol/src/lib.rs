@@ -14,6 +14,8 @@
 //!   say about conservation and load (C1.7)
 //! - [`annotation`]: what explains a bend in the console's charts (the
 //!   Observatory's D0.4)
+//! - [`tunables`]: the economy's live knobs, and the [`tunables::Fees`] a
+//!   client quotes (D6.1)
 //!
 //! The `backend` feature adds the server-only derives (utoipa schemas, sqlx rows).
 //! Clients leave it off.
@@ -25,4 +27,5 @@ pub mod ledger;
 pub mod rest;
 pub mod rules;
 pub mod terrain;
+pub mod tunables;
 pub mod ws;

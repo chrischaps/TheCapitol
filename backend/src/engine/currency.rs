@@ -23,7 +23,8 @@ pub enum TransactionType {
     PropertyTax,
     /// A buy order's `price × quantity`, into its escrow (E3.1)
     MarketEscrow,
-    /// The 1% listing fee on placing an order: a sink, never refunded (E3.1)
+    /// The listing fee on placing an order (1% by default, a live tunable
+    /// since D6.1): a sink, never refunded (E3.1)
     MarketFee,
     /// What's left of a buy's escrow, back on a cancel or expiry (E3.1), or
     /// what it paid over a fill's price (E3.2)

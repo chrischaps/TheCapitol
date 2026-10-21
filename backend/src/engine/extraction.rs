@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use capitol_protocol::rules::resources::ResourceYield;
 use capitol_protocol::rules::tools;
+use capitol_protocol::tunables::Tunables;
 use rand::Rng;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -42,7 +43,9 @@ pub struct GatherTool {
 
 /// Process extraction for all players actively extracting.
 /// `tools` holds the tool each gather started with ([`start_extraction`]).
-/// Returns the gathers that finished, for the tick loop to write.
+/// `tunables` scale each resource's yield and how soon its node grows back
+/// (D6.1). Returns the gathers that finished, for the tick loop to write.
+#[allow(clippy::too_many_arguments)]
 pub fn process_extractions(
     players: &mut HashMap<Uuid, PlayerState>,
     nodes: &mut HashMap<Uuid, ResourceNodeState>,
@@ -51,6 +54,7 @@ pub fn process_extractions(
     tools: &mut HashMap<Uuid, HeldTool>,
     tick_count: u64,
     event_sender: &broadcast::Sender<GameEvent>,
+    tunables: &Tunables,
 ) -> Vec<PendingItem> {
     let mut completed_extractions: Vec<(Uuid, Uuid)> = Vec::new();
     let mut progress_updates: Vec<(Uuid, u32, u32)> = Vec::new();
@@ -87,8 +91,13 @@ pub fn process_extractions(
         if let Some(node) = nodes.get(&node_id) {
             if let Some(resource_type) = resource_types.get(&node.resource_type) {
                 let mut rng = rand::thread_rng();
-                let (quantity, quality, tool) =
+                let (quantity, quality, mut tool) =
                     roll_gather(&mut rng, node.base_quality, resource_type, tool);
+                let multiplier = tunables.yield_multiplier(&resource_type.id);
+                let quantity = scale_yield(&mut rng, quantity, multiplier);
+                if let Some((by_hand, _)) = tool.as_mut().and_then(|t| t.by_hand.as_mut()) {
+                    *by_hand = scale_yield(&mut rng, *by_hand, multiplier);
+                }
 
                 // Written, and announced, by the tick loop
                 pending_items.push(PendingItem {
@@ -110,7 +119,8 @@ pub fn process_extractions(
                     } else {
                         node.state = NodeState::Depleted;
                         node.harvested_by = Some(player_id);
-                        node.regenerates_at_tick = Some(tick_count + resource_type.regeneration_ticks as u64);
+                        node.regenerates_at_tick =
+                            Some(tick_count + tunables.regeneration_ticks(resource_type.regeneration_ticks));
                         let _ = event_sender.send(GameEvent::NodeDepleted { node_id });
                     }
                 }
@@ -171,6 +181,19 @@ pub fn roll_gather(
 fn fails(rng: &mut impl Rng, power: f64, difficulty: f64) -> bool {
     let chance = tools::fail_chance(power, difficulty);
     chance > 0.0 && rng.gen_bool(chance)
+}
+
+/// `quantity` times a yield tunable's `multiplier`, rounded up or down at
+/// random so that on average it's exact: ×1.5 on 1 gives 1 or 2 evenly. A
+/// pull that got anything still gets at least 1, since 0 means it failed.
+fn scale_yield(rng: &mut impl Rng, quantity: i32, multiplier: f64) -> i32 {
+    if quantity <= 0 || multiplier == 1.0 {
+        return quantity;
+    }
+    let exact = quantity as f64 * multiplier;
+    let whole = exact.floor();
+    let up = rng.gen_bool((exact - whole).clamp(0.0, 1.0));
+    (whole as i32 + up as i32).max(1)
 }
 
 /// Units from one row of a yield table; none from a table without one.
@@ -482,7 +505,7 @@ mod tests {
             while heard.try_recv().is_ok() {}
             let mut done = Vec::new();
             for tick in 0..duration as u64 {
-                done.extend(process_extractions(&mut players, &mut nodes, &types, &items, &mut held, tick, &events));
+                done.extend(process_extractions(&mut players, &mut nodes, &types, &items, &mut held, tick, &events, &Tunables::default()));
             }
             assert_eq!(done.len(), 1);
             assert_eq!(players[&ada_id].action_state, ActionState::Idle);
@@ -532,6 +555,19 @@ mod tests {
     }
 
     /// A stone sickle reads grass's stone row, 2 to 4 against hands' 1 to 3.
+    /// A yield tunable scales a gather on average, never turns a pull into a
+    /// failure, and leaves a failure failed (D6.1)
+    #[test]
+    fn a_yield_multiplier_scales_on_average() {
+        let mut rng = StdRng::seed_from_u64(7);
+        assert_eq!(scale_yield(&mut rng, 3, 1.0), 3);
+        assert_eq!(scale_yield(&mut rng, 0, 4.0), 0);
+        assert_eq!(scale_yield(&mut rng, 4, 2.0), 8);
+        assert_eq!(scale_yield(&mut rng, 1, 0.1), 1);
+        let total: i32 = (0..10_000).map(|_| scale_yield(&mut rng, 2, 1.25)).sum();
+        assert!((24_500..=25_500).contains(&total), "{total}");
+    }
+
     /// Grass is hands' work (difficulty 0, counted as 4), so a Q50 sickle of
     /// power 6 is leverage 1.5: never over the node's quality, at most 3 under it
     #[test]
@@ -611,7 +647,7 @@ mod tests {
         let items: HashMap<_, _> = [("fiber".to_string(), fiber)].into();
         let mut done = Vec::new();
         for tick in 0..24 {
-            done.extend(process_extractions(&mut players, &mut nodes, &types, &items, &mut held, tick, &events));
+            done.extend(process_extractions(&mut players, &mut nodes, &types, &items, &mut held, tick, &events, &Tunables::default()));
         }
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].item_name, "Plant Fiber", "named from the item types");

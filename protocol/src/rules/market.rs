@@ -4,7 +4,10 @@
 //! - Orders are priced per unit in Strands. A sell escrows its units; a buy
 //!   escrows `price × quantity` Strands ([`order_value`]).
 //! - Placing either charges the listing fee, 1% of the order value rounded up
-//!   ([`listing_fee`]). It's a currency sink and isn't refunded on cancel.
+//!   by default. It's a live knob since D6.1, so the fee charged is the
+//!   server's [`crate::tunables::Fees::listing_fee`], and a buy's debit
+//!   [`crate::tunables::Fees::buy_debit`]. It's a currency sink and isn't
+//!   refunded on cancel.
 //! - A buy names a `min_grade` and a [`GradeRule`]: **average** is met by the
 //!   mean of the units sold, so a blend can carry surplus quality over a grade
 //!   line; **every unit** is met only by their min ([`meets_grade`]).
@@ -16,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use super::stacking::{Pick, Units};
 use crate::rest::DepthLevel;
 
-/// The listing fee, in hundredths of the order value (1%).
+/// The listing fee by default, in hundredths of the order value (1%). The
+/// live one is [`crate::tunables::Fees`]'s.
 pub const LISTING_FEE_PERCENT: i64 = 1;
 /// The lowest price per unit, in Strands.
 pub const MIN_PRICE: i64 = 1;
@@ -167,18 +171,6 @@ pub fn validate(price: i64, quantity: i32) -> Result<(), OrderError> {
 /// bounds it's at most 10¹³, so it never overflows.
 pub fn order_value(price: i64, quantity: i32) -> i64 {
     price.saturating_mul(quantity as i64)
-}
-
-/// The listing fee on an order worth `value`: 1%, rounded up, so every order
-/// pays at least 1 Strand.
-pub fn listing_fee(value: i64) -> i64 {
-    (value.max(0) * LISTING_FEE_PERCENT + 99) / 100
-}
-
-/// What placing a buy debits: the escrow, `price × quantity`, plus the fee.
-pub fn buy_debit(price: i64, quantity: i32) -> i64 {
-    let value = order_value(price, quantity);
-    value + listing_fee(value)
 }
 
 /// The lowest quality of a grade, or `None` if `grade` isn't one. It's the
@@ -378,21 +370,22 @@ mod tests {
 
     #[test]
     fn the_fee_is_one_percent_rounded_up() {
-        assert_eq!(listing_fee(1), 1);
-        assert_eq!(listing_fee(100), 1);
-        assert_eq!(listing_fee(101), 2);
-        assert_eq!(listing_fee(250), 3);
-        assert_eq!(listing_fee(10_000), 100);
-        assert_eq!(listing_fee(0), 0);
+        let fees = crate::tunables::Fees::default();
+        assert_eq!(fees.listing_fee(1), 1);
+        assert_eq!(fees.listing_fee(100), 1);
+        assert_eq!(fees.listing_fee(101), 2);
+        assert_eq!(fees.listing_fee(250), 3);
+        assert_eq!(fees.listing_fee(10_000), 100);
+        assert_eq!(fees.listing_fee(0), 0);
         for value in 1..=100_000i64 {
-            let fee = listing_fee(value);
+            let fee = fees.listing_fee(value);
             assert!(fee * 100 >= value && (fee - 1) * 100 < value, "fee on {value}");
         }
         // The biggest order there is fits
         let most = order_value(MAX_PRICE, MAX_ORDER_QUANTITY);
         assert_eq!(most, 10_000_000_000_000);
-        assert_eq!(buy_debit(MAX_PRICE, MAX_ORDER_QUANTITY), most + most / 100);
-        assert_eq!(buy_debit(7, 3), 22);
+        assert_eq!(fees.buy_debit(MAX_PRICE, MAX_ORDER_QUANTITY), most + most / 100);
+        assert_eq!(fees.buy_debit(7, 3), 22);
     }
 
     #[test]

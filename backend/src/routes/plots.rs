@@ -3,6 +3,7 @@ use axum::{
     routing::{get, post, put},
     Extension, Json, Router,
 };
+use capitol_protocol::tunables::Tunables;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use tokio::sync::broadcast;
@@ -88,7 +89,7 @@ pub async fn list_plots(
         .fetch_all(&state.db)
         .await?;
 
-    let plots: Vec<PlotInfo> = rows.into_iter().map(|row| row.to_plot_info()).collect();
+    let plots: Vec<PlotInfo> = rows.into_iter().map(|row| row.to_plot_info(&state.tunables.get())).collect();
 
     // Get total count
     let count_sql = format!(
@@ -176,7 +177,7 @@ pub async fn get_plot(
 
     let row = row.ok_or_else(|| AppError::NotFound("Plot not found".into()))?;
 
-    Ok(Json(row.to_plot_info()))
+    Ok(Json(row.to_plot_info(&state.tunables.get())))
 }
 
 /// Get the plot at a specific position
@@ -228,7 +229,7 @@ pub async fn claim_plot(
     .await?;
 
     let events = state.game.read().await.event_sender.clone();
-    let new_balance = claim(&state.db, &events, player_id, plot_id).await?;
+    let new_balance = claim(&state.db, &events, player_id, plot_id, &state.tunables.get()).await?;
 
     // Fetch updated plot info
     let plot_info = get_plot(State(state.clone()), Path(plot_id)).await?.0;
@@ -293,6 +294,7 @@ async fn claim(
     events: &broadcast::Sender<GameEvent>,
     player_id: Uuid,
     plot_id: Uuid,
+    tunables: &Tunables,
 ) -> Result<i64, AppError> {
     let mut tx = db.begin().await?;
 
@@ -322,6 +324,8 @@ async fn claim(
         return Err(AppError::BadRequest(NOT_CLAIMABLE.into()));
     }
     let deed_cost = deed_cost.ok_or_else(|| AppError::BadRequest(NOT_CLAIMABLE.into()))?;
+    // The zone's deed price tunable (D6.1). The plot is assessed at what was paid.
+    let deed_cost = tunables.deed_cost(&zone_id, deed_cost);
 
     // Deduct Strands
     let new_balance = subtract_strands_in(
@@ -525,11 +529,34 @@ mod tests {
         let lot = plot(&db, None, 0).await;
         let (tx, _rx) = events();
 
-        assert_eq!(claim(&db, &tx, ada, lot).await.unwrap(), 5);
+        assert_eq!(claim(&db, &tx, ada, lot, &Tunables::default()).await.unwrap(), 5);
 
         assert_eq!(owner(&db, lot).await, Some(Some(ada)));
         assert_eq!(balance(&db, ada).await, 5);
         assert_eq!(ledger(&db, ada).await, vec![(-deed, "deed_purchase".to_string())]);
+    }
+
+    /// The zone's deed price tunable sets what a claim charges, and the plot
+    /// is assessed at it (D6.1)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_claim_charges_the_deed_at_its_tunable(db: PgPool) {
+        let deed = urban_deed(&db).await;
+        let ada = player(&db, "ada", deed * 2 + 5).await;
+        let lot = plot(&db, None, 0).await;
+        let (tx, _rx) = events();
+        let mut tunables = Tunables::default();
+        tunables.set("deed_price.urban", 2.0, |_, _| true).unwrap();
+
+        assert_eq!(claim(&db, &tx, ada, lot, &tunables).await.unwrap(), 5);
+
+        assert_eq!(ledger(&db, ada).await, vec![(-deed * 2, "deed_purchase".to_string())]);
+        let assessed: i32 = sqlx::query_scalar("SELECT assessed_value FROM plots WHERE id = $1")
+            .bind(lot)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(assessed as i64, deed * 2);
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -541,7 +568,7 @@ mod tests {
 
         let (tx, mut rx) = events();
 
-        assert!(matches!(claim(&db, &tx, ada, lot).await, Err(AppError::BadRequest(_))));
+        assert!(matches!(claim(&db, &tx, ada, lot, &Tunables::default()).await, Err(AppError::BadRequest(_))));
         assert!(rx.try_recv().is_err(), "a failed claim tells no one");
 
         assert_eq!(owner(&db, lot).await, Some(None));
@@ -560,7 +587,8 @@ mod tests {
 
         let (tx, _rx) = events();
 
-        let (a, b) = tokio::join!(claim(&db, &tx, ada, lot), claim(&db, &tx, bram, lot));
+        let tunables = Tunables::default();
+        let (a, b) = tokio::join!(claim(&db, &tx, ada, lot, &tunables), claim(&db, &tx, bram, lot, &tunables));
 
         assert!(a.is_ok() != b.is_ok(), "exactly one claim wins");
         let (winner, loser) = if a.is_ok() { (ada, bram) } else { (bram, ada) };
@@ -579,7 +607,7 @@ mod tests {
         let (tx, mut rx) = events();
         assert!(claimed_plots(&db).await.unwrap().is_empty());
 
-        claim(&db, &tx, ada, lot).await.unwrap();
+        claim(&db, &tx, ada, lot, &Tunables::default()).await.unwrap();
 
         let listed = claimed_plots(&db).await.unwrap();
         assert_eq!(listed.len(), 1);
@@ -620,7 +648,7 @@ mod tests {
         sqlx::query("UPDATE plots SET world_y = world_y + 5000 WHERE id = $1").bind(lot).execute(&db).await.unwrap();
         let (tx, mut rx) = events();
 
-        assert!(matches!(claim(&db, &tx, ada, lot).await, Err(AppError::BadRequest(m)) if m == NOT_CLAIMABLE));
+        assert!(matches!(claim(&db, &tx, ada, lot, &Tunables::default()).await, Err(AppError::BadRequest(m)) if m == NOT_CLAIMABLE));
         assert!(rx.try_recv().is_err());
         assert_eq!(owner(&db, lot).await, Some(None));
         assert_eq!(balance(&db, ada).await, 1_000_000);

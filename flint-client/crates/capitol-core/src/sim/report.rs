@@ -397,7 +397,9 @@ impl Report {
     }
 
     /// Hours of grass for one deed of `deed_cost`, at the swarm's own fiber
-    /// rate (D5 asks for it, to tune deeds against the content).
+    /// rate (D5 asks for it, to tune deeds against the content), and the
+    /// default exchange fee: a yardstick for the content, not for a run's
+    /// live fees (D6.1).
     pub fn deed_hours(&self, deed_cost: i64) -> Option<f64> {
         let fiber = self.item("fiber")?;
         let secs = fiber.labour_secs?;
