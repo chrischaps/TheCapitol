@@ -228,6 +228,6 @@ The first citizens walk after C0.1, C0.6 and C1.1, about three sessions. The who
 - `scripts/ci.sh` throughout. Protocol fixtures round-trip byte for byte (C0.1). Unit tests in capitol-core for the walk graph, the cascade, personas and schedules.
 - End to end:
   - a backend on a database of its own (`capitol_sim`, as in the E2.7 note);
-  - `capitol-town` with 20 citizens;
+  - `capitol-town` with 20 citizens (`scripts/town.sh up` runs both of these, and keeps them apart from the usual world, #337);
   - the Flint client: marked lanterns, citizens walking round the water to the hall, a citizen answering your trade, and lanterns going home at dusk.
 - The soak (C1.7, run to its end by C1.7b): 200 citizens for 24 game hours, `capitol-town soak --hours 24`. Tick time stays within budget, no socket is dropped, and Strands and units are conserved (`GET /admin/ledger`, reconciled first reading against last).

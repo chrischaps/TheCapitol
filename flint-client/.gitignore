@@ -19,6 +19,8 @@
 /town.corpus/
 # A soak's roster, keys and reports (C1.7b, #306)
 /soak/
+# scripts/town.sh's town: its roster, keys, admin and the server's log (#337)
+/town/
 # The sounds, written at start by crates/capitol-client/src/sound/library.rs
 /audio/*.wav
 /audio/.synth-version

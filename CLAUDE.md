@@ -99,6 +99,20 @@ cargo test
 cargo test test_no_roads_terminate -- --nocapture
 ```
 
+### A town: the world with citizens in it
+
+The usual backend has no citizens. A **town** is a second one with citizens living in it, on a database (`capitol_town`), port (3300) and Redis db of its own, so its citizens never claim a lot or fill a book in the world you work in (#337). Either runs without the other, or both at once.
+
+```bash
+scripts/town.sh up      # first time: makes the database, an admin and 18 citizens + 2 merchants; Ctrl-C stops it
+scripts/town.sh status  # the server, and each citizen's last health
+scripts/town.sh reset   # drop it all, for a new town
+flint-client\play.bat --server http://127.0.0.1:3300   # play in the town (register on the form the first time)
+flint-client\play.bat                                  # play in the usual world
+```
+
+Its roster, keys, admin and the server's log are in `flint-client/town/` (git-ignored). It runs copies of the binaries, so it never locks `cargo run`'s exe. The client keeps one server's sign-in, so a switch between the two asks for your password again ([#338](https://github.com/chrischaps/TheCapitol/issues/338)).
+
 ### Client (React/TypeScript/Vite)
 ```bash
 cd client
