@@ -30,6 +30,7 @@ use capitol_protocol::rules::market::{OrderSide, OrderStatus};
 use capitol_protocol::rules::Zone;
 use uuid::Uuid;
 
+use super::lot;
 use super::plan::{Holdings, Step, FLOAT};
 use super::report::{BotRun, Entry, Report, MAKER_ROLE};
 use super::{Errand, Role, Trade, MARKET_ITEMS};
@@ -51,8 +52,11 @@ use crate::state::StateEvent;
 const DEFAULT_DEED: i64 = 250;
 /// Where builders look for land, nearest the rural spawn first.
 const PLOT_ZONES: [&str; 2] = ["rural", "suburban"];
-/// How far apart stations go on a plot: just over `STATION_MIN_SPACING`.
-const SPOT_SPACING: f64 = 55.0;
+/// The most spots on its lot a bot walks to before it gives up on placing.
+const PLACE_TRIES: usize = 8;
+/// The stations a builder's lot should take: the kiln, forge, sawbench and
+/// anvil (#305). A lot with less room is bought only when none has more.
+const ROOM_WANTED: i32 = 4;
 /// Walks out to look for a resource before the gather gives up.
 const MAX_EXPLORES: usize = 6;
 /// Spots an explore picks before it gives up on ones it has no way to.
@@ -925,10 +929,10 @@ impl SimBot {
             }
         }
         h.stations.extend(self.stations.keys().cloned());
-        h.plot_room = state
-            .plots()
-            .first()
-            .map(|p| p.station_capacity - p.station_count);
+        // What fits on the lot, not just its capacity: a narrow suburban lot
+        // runs out of ground first (#305). A builder on one too small for its
+        // chain stays stuck there (#405)
+        h.plot_room = state.plots().first().map(|p| lot::room(p, &self.stations_at()));
         h
     }
 
@@ -1175,26 +1179,28 @@ impl SimBot {
                 .first()
                 .cloned()
                 .ok_or_else(|| BotError::Failed("no plot".into()))?;
-            let b = plot.bounds;
-            let inside = |(x, y): &(f64, f64)| {
-                *x > b.min_x + 15.0 && *x < b.max_x - 15.0 && *y > b.min_y + 15.0 && *y < b.max_y - 15.0
-            };
-            ring(plot.world_x, plot.world_y, SPOT_SPACING)
-                .into_iter()
-                .filter(inside)
-                .filter(|s| !self.near_a_station(*s))
-                .collect()
+            // The lot's own shape, not its box, packed round what's on it (#305)
+            let mut spots = lot::spots(&plot, &self.stations_at());
+            spots.truncate(PLACE_TRIES);
+            spots
         } else {
             let (x, y) = self.bot.position();
             let mut spots = ring(x, y, 30.0);
             spots.extend(ring(x, y, 90.0));
             spots
         };
+        if spots.is_empty() {
+            return Err(BotError::Failed(format!("no room on the plot for a {station}")));
+        }
+        // Why each spot was passed over, for the error if none takes (#305)
+        let mut passed: Vec<String> = Vec::new();
+        let tried = spots.len();
         let mut last = None;
         for (x, y) in spots {
             match self.bot.walk_to(x, y) {
                 Ok(()) => {}
                 Err(e @ BotError::Blocked { .. }) => {
+                    passed.push(e.to_string());
                     last = Some(e);
                     continue;
                 }
@@ -1205,19 +1211,34 @@ impl SimBot {
                     self.stations.insert(station.to_string(), placed);
                     return Ok(());
                 }
-                Err(e @ BotError::Rest { .. }) => last = Some(e),
+                Err(e @ BotError::Rest { .. }) => {
+                    passed.push(e.to_string());
+                    last = Some(e);
+                }
                 Err(e) => return Err(e),
             }
         }
-        Err(last.unwrap_or_else(|| BotError::Failed(format!("nowhere to put a {station}"))))
+        passed.sort();
+        passed.dedup();
+        match last {
+            Some(e) if tried == 1 => Err(e),
+            _ => Err(BotError::Failed(format!(
+                "nowhere to put a {station}, {tried} spots tried: {}",
+                passed.join("; ")
+            ))),
+        }
     }
 
-    fn near_a_station(&self, (x, y): (f64, f64)) -> bool {
+    /// Where the stations it knows of stand: its own, and those it has seen
+    /// nearby.
+    fn stations_at(&self) -> Vec<(f64, f64)> {
         self.bot
             .state()
             .stations()
             .values()
-            .any(|s| (s.x - x).hypot(s.y - y) < capitol_protocol::rules::STATION_MIN_SPACING)
+            .map(|s| (s.x, s.y))
+            .chain(self.stations.values().map(|s| (s.x, s.y)))
+            .collect()
     }
 
     /// Buys the nearest unclaimed plot it can afford with its [`FLOAT`] left
@@ -1239,9 +1260,11 @@ impl SimBot {
     }
 
     /// Buys the unclaimed plot nearest `(x, y)` whose deed it can `afford`,
-    /// from the first of `zones` that has one.
+    /// from the first of `zones` that has one with [`ROOM_WANTED`], or failing
+    /// that the first with any (#305).
     fn claim_near(&mut self, zones: &[&str], (x, y): (f64, f64), afford: impl Fn(i64) -> bool) -> Result<(), BotError> {
         let strands = self.bot.state().strands().unwrap_or(0);
+        let mut listed: Vec<Vec<capitol_protocol::rest::PlotInfo>> = Vec::new();
         for &zone in zones {
             let mut plots = self.bot.unclaimed_plots(zone)?;
             plots.retain(|p| p.deed_cost.is_some());
@@ -1249,24 +1272,30 @@ impl SimBot {
                 self.deed_cost = cost as i64;
             }
             plots.retain(|p| p.deed_cost.is_some_and(|c| afford(c as i64)));
-            plots.sort_by(|a, b| {
-                (a.world_x - x)
-                    .hypot(a.world_y - y)
-                    .total_cmp(&(b.world_x - x).hypot(b.world_y - y))
-            });
-            for plot in plots.iter().take(5) {
-                match self.bot.claim_plot(plot.id) {
-                    Ok(_) => {
-                        self.entries.push(Entry::Claimed {
-                            cost: plot.deed_cost.unwrap_or(0) as i64,
-                        });
-                        self.bot.refetch(Fetch::Plots);
-                        self.bot.settle()?;
-                        return Ok(());
+            listed.push(plots);
+        }
+        for wanted in [ROOM_WANTED, 1] {
+            for plots in &listed {
+                let mut plots: Vec<_> = plots.iter().filter(|p| lot::takes(p, wanted)).collect();
+                plots.sort_by(|a, b| {
+                    (a.world_x - x)
+                        .hypot(a.world_y - y)
+                        .total_cmp(&(b.world_x - x).hypot(b.world_y - y))
+                });
+                for plot in plots.iter().take(5) {
+                    match self.bot.claim_plot(plot.id) {
+                        Ok(_) => {
+                            let cost = plot.deed_cost.unwrap_or(0) as i64;
+                            self.deed_cost = cost;
+                            self.entries.push(Entry::Claimed { cost });
+                            self.bot.refetch(Fetch::Plots);
+                            self.bot.settle()?;
+                            return Ok(());
+                        }
+                        // Someone else got it first.
+                        Err(BotError::Rest { .. }) => continue,
+                        Err(e) => return Err(e),
                     }
-                    // Someone else got it first.
-                    Err(BotError::Rest { .. }) => continue,
-                    Err(e) => return Err(e),
                 }
             }
         }
@@ -1317,7 +1346,7 @@ mod tests {
 
     #[test]
     fn a_ring_is_seven_spots_apart_enough_for_stations() {
-        let spots = ring(100.0, 100.0, SPOT_SPACING);
+        let spots = ring(100.0, 100.0, lot::SPOT_SPACING);
         assert_eq!(spots.len(), 7);
         for (i, a) in spots.iter().enumerate() {
             for b in &spots[i + 1..] {

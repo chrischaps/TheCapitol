@@ -2,6 +2,7 @@
 //! against a local stack for a few game hours, then reports what the economy
 //! produced. `capitol-bot --sim <bots> --hours <h>` runs it.
 //!
+//! - [`lot`]: where its stations go on its lot. Pure.
 //! - [`plan`]: what a bot does next toward its goal, from the catalog and
 //!   what it holds. Pure.
 //! - [`report`]: the numbers, as markdown and CSV. Pure.
@@ -24,6 +25,7 @@
 //! every real one, so two game hours take twelve minutes. `/health` says the
 //! scale, and the report counts in game hours.
 
+pub mod lot;
 pub mod plan;
 pub mod report;
 pub mod run;
