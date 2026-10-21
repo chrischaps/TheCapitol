@@ -17,7 +17,8 @@
 #   test     cargo test, backend and protocol
 #   db       the #[ignore]d database tests; needs Postgres (docker-compose up -d)
 #   flint-check  in flint-client/: clippy over capitol-core and capitol-client,
-#            all targets, -D warnings
+#            all targets, -D warnings, and no float literal anywhere in the
+#            build, engine included, that falls back to f32 (#271)
 #   flint    in flint-client/: capitol-core's and capitol-client's tests
 #
 # Landing runs smoke, not the suites (#270). The suites took most of a land:
@@ -132,7 +133,19 @@ step() {
             # Per crate, never --workspace: the engine's flint-android needs
             # ndk-sys. Clippy, not a bare check: it costs about the same, and
             # until #264 lints in flint-client/ landed unseen.
-            (cd flint-client && cargo clippy -p capitol-core -p capitol-client --all-targets -- -D warnings) ;;
+            # -D warnings reaches only the workspace's own crates. The
+            # engine's are path deps outside it: their warnings print, and
+            # cargo replays them on a warm build, but no lint flag fails
+            # them. A float literal that falls back to f32 will be a hard
+            # error on a later rustc (#271), so fail on it from the output.
+            local log
+            log=$(mktemp)
+            (cd flint-client && cargo clippy -p capitol-core -p capitol-client --all-targets -- -D warnings) 2>&1 | tee "$log"
+            if grep -q 'falling back to `f32`' "$log"; then
+                rm -f "$log"
+                die "flint-check: a float literal falls back to f32, which a later rustc rejects (#271): suffix it, 1.0f32"
+            fi
+            rm -f "$log" ;;
         flint)
             # Per crate, never --workspace: the engine's flint-android needs
             # ndk-sys. capitol-core's live.rs tests need a server and stay
@@ -144,11 +157,20 @@ step() {
     esac
 }
 
-# Does this branch change anything the Flint client builds from?
+# Does this branch change anything the Flint client builds from? Committed or
+# not: diffing the base against the working tree counts staged and unstaged
+# edits, and ls-files the new files, so a verify before the commit runs the
+# flint steps too (#272). Says so when it skips them.
 touches_flint() {
-    local base
+    local base changed
     base=$(git merge-base HEAD origin/master 2>/dev/null) || return 0
-    git diff --name-only "$base" HEAD | grep -qE '^(flint-client|protocol)/'
+    # Captured, not piped to grep -q: under pipefail, grep quitting early
+    # can SIGPIPE git and turn a match into a failure.
+    changed=$(git diff --name-only "$base" -- flint-client protocol
+              git ls-files --others --exclude-standard -- flint-client protocol)
+    [ -z "$changed" ] || return 0
+    echo "== ci.sh: skipping flint steps: nothing in flint-client/ or protocol/ differs from origin/master" >&2
+    return 1
 }
 
 # The Rust is rust-toolchain.toml's, the same as CI's (#265). RUSTUP_TOOLCHAIN

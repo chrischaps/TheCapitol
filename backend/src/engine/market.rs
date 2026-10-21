@@ -369,10 +369,16 @@ pub const MARKET_BOX: &str = "market_box";
 
 /// `player_id`'s market box, made the first time it's needed, and locked for
 /// the caller's transaction.
+///
+/// The lock is `FOR NO KEY UPDATE`: it keeps out anyone else who locks the box
+/// this way, but not a foreign-key check on it. A stack written into or within
+/// the box takes a key-share lock on it, and under `FOR UPDATE` a sell from the
+/// box (holding its stack, then checking the box) and a fill delivering to it
+/// (holding the box, then locking that stack) each waited on the other (#333).
 pub async fn market_box(conn: &mut PgConnection, player_id: Uuid) -> Result<Uuid, sqlx::Error> {
     // Nearly always it's there already: one round trip (#208)
     let held: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'market_box' FOR UPDATE")
+        sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'market_box' FOR NO KEY UPDATE")
             .bind(player_id)
             .fetch_optional(&mut *conn)
             .await?;
@@ -387,7 +393,7 @@ pub async fn market_box(conn: &mut PgConnection, player_id: Uuid) -> Result<Uuid
     .bind(player_id)
     .execute(&mut *conn)
     .await?;
-    sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'market_box' FOR UPDATE")
+    sqlx::query_scalar("SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'market_box' FOR NO KEY UPDATE")
         .bind(player_id)
         .fetch_one(&mut *conn)
         .await
@@ -594,6 +600,52 @@ pub(crate) mod tests {
         cancel(&db, ada.id, order.id).await.unwrap();
         // Back onto the stack already waiting there, every unit at its quality
         assert_eq!(units(&db, waiting).await, Units::from_pairs([(40, 3), (70, 1), (95, 1)]));
+    }
+
+    /// Place `order` for `player_id` while another transaction holds a lock,
+    /// and say whether it went through rather than waiting on it (#333).
+    async fn places_past(db: &PgPool, player_id: Uuid, order: &PlaceOrder) -> bool {
+        let placed = tokio::time::timeout(std::time::Duration::from_secs(5), place(db, player_id, order)).await;
+        matches!(placed, Ok(Ok(_)))
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_sell_from_the_market_box_goes_through_while_a_fill_holds_the_box(db: PgPool) {
+        let ada = player(&db, "ada", 1000).await;
+        let the_box = box_of(&db, ada.id).await;
+        let stack = stack_of(&db, ada.id, the_box, 0, "rope", &Units::from_pairs([(40, 3), (60, 5)])).await;
+
+        // A fill delivering to ada holds her box, as the matcher's does, and
+        // goes on to lock the first rope stack there. The sell's foreign-key
+        // check on the box mustn't wait on the fill, or each waits on the other.
+        let mut fill = db.begin().await.unwrap();
+        market_box(&mut fill, ada.id).await.unwrap();
+        let through = places_past(&db, ada.id, &sell("rope", stack, 11, 4, None)).await;
+        let stacks: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM items WHERE container_id = $1 FOR UPDATE")
+            .bind(the_box)
+            .fetch_all(&mut *fill)
+            .await
+            .unwrap();
+        fill.rollback().await.unwrap();
+        assert!(through, "the sell waited on the box a fill holds");
+        assert_eq!(stacks, vec![stack]);
+        assert_eq!(units(&db, stack).await, Units::uniform(4, 60));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_sell_from_the_inventory_goes_through_while_a_collect_holds_it(db: PgPool) {
+        let ada = player(&db, "ada", 1000).await;
+        let stack = stack_of(&db, ada.id, ada.inventory, 0, "rope", &Units::from_pairs([(40, 3), (60, 5)])).await;
+
+        // A collect holds the inventory while it stows onto the stacks there
+        let mut collect = db.begin().await.unwrap();
+        let the_box = market_box(&mut collect, ada.id).await.unwrap();
+        crate::routes::market::collect_from(&mut collect, ada.id, the_box, "market box", None).await.unwrap();
+        let through = places_past(&db, ada.id, &sell("rope", stack, 11, 4, None)).await;
+        collect.rollback().await.unwrap();
+        assert!(through, "the sell waited on the inventory a collect holds");
     }
 
     #[sqlx::test(migrations = "./migrations")]

@@ -19,8 +19,12 @@
 //! - **meadows**: a slow value noise (the ground's own, so the fields and
 //!   its mottling share a grain) thins the grass in broad patches, so it
 //!   reads as fields rather than as a carpet;
-//! - **cleared**: nothing on roads and a verge beside them, on lots (the
-//!   houses stand there, P8.6b), in the canals and on their kerbs, and in a
+//! - **farms** (R6): a farm is pasture, so the grass stays on it, standing
+//!   on its pad a step over the land, right up to its hedge bank. Only its
+//!   yard is bare: round the farmhouse and the barn, and the drive in from
+//!   the lane, where `houses` would build them, claimed or not;
+//! - **cleared**: nothing on roads and a verge beside them, on every other
+//!   lot (the houses stand there, P8.6b), in the canals and on their kerbs, and in a
 //!   small clearing round each gatherable node, so its tuft still reads as
 //!   a thing to take. Every clearing has a soft rim, which `scale_by_mask`
 //!   turns into the field thinning toward the edge rather than stopping.
@@ -40,11 +44,13 @@
 use crate::coords::{layer, to_world, S};
 use crate::world::geom::{distance_to_segment, radius, P};
 use crate::world::ground::value_noise;
-use crate::world::palette::{hex, GRASS_DRY, GRASS_ROOT, GRASS_TIP};
+use crate::world::houses;
 use crate::world::land;
+use crate::world::palette::{hex, GRASS_DRY, GRASS_ROOT, GRASS_TIP};
+use crate::world::plots;
 use crate::world::water;
-use capitol_protocol::rules::{CENTER_X, CENTER_Y, SUBURBAN_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS};
-use capitol_protocol::terrain::{TerrainPark, TerrainResponse};
+use capitol_protocol::rules::{Zone, CENTER_X, CENTER_Y, SUBURBAN_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS};
+use capitol_protocol::terrain::{TerrainPark, TerrainPlot, TerrainResponse};
 use flint_ecs::FlintWorld;
 use flint_player::{ExtensionGpu, GrassConfig, GrassGround, GrassHeight, GroundField};
 use std::sync::Arc;
@@ -110,6 +116,23 @@ const ROAD_SOFT: f64 = 10.0;
 /// Past a lot's edge (its curb): bare, then soft.
 const LOT_MARGIN: f64 = 2.0;
 const LOT_SOFT: f64 = 8.0;
+/// The blades on a farm (R6) stand on its pad, a step over the land at
+/// `layer::PLOT`: every height cell at least this far in from the farm's
+/// edge. The pad starts 4 in (`plots.rs`' inset), and a blade stands on the
+/// blend of the four cells round it, which reach about 8.3 units (a cell is
+/// about 5.9). So no blade off the pad ever stands on a lifted cell, and
+/// floats; those just inside it stand part way down the step, sunk in the
+/// pad and its hedge bank, and read as the headland's shorter grass. That
+/// leaves the pasture growing right up to the hedge, with no bare rim:
+/// one 14 in bared a tenth of the ring round about 120 farms.
+const PAD_IN: f64 = 13.0;
+/// Round a farmstead's buildings: bare, then soft.
+const YARD: f64 = 10.0;
+const YARD_SOFT: f64 = 8.0;
+/// A farm's drive: bare each side of its line, then soft. Narrower than a
+/// lane's 8 and its verges.
+const DRIVE_HALF: f64 = 3.0;
+const DRIVE_SOFT: f64 = 6.0;
 /// Past a canal's kerb.
 const WATER_SOFT: f64 = 8.0;
 /// A tuft's clearing: bare out to this radius, then soft. A tuft and its
@@ -394,6 +417,69 @@ fn patches(base: &Mask, old: &[Node], new: &[Node]) -> Vec<(Window, Vec<u8>)> {
         .collect()
 }
 
+/// How far `p` is from the nearest edge of the polygon `poly`.
+fn edge_distance(p: P, poly: &[P]) -> f64 {
+    (0..poly.len())
+        .map(|k| distance_to_segment(p, poly[k], poly[(k + 1) % poly.len()]))
+        .fold(f64::MAX, f64::min)
+}
+
+/// Whether `plot` is a farm, whose pasture grows on it (R6).
+fn is_farm(plot: &TerrainPlot) -> bool {
+    Zone::from_str(&plot.zone) == Some(Zone::Rural)
+}
+
+/// Every farm's outline, server units: the hull of its corners, which
+/// needn't come in order round it (as `plots` draws it).
+fn farms(terrain: &TerrainResponse) -> Vec<Vec<P>> {
+    terrain
+        .terrain_plots
+        .iter()
+        .filter(|p| is_farm(p))
+        .map(|p| plots::hull(&p.corners.map(|(x, y)| [x, y])))
+        .collect()
+}
+
+/// The yard of every farm with room for a farmstead, in the order of
+/// their ids.
+fn farmyards(terrain: &TerrainResponse) -> Vec<houses::Farmyard> {
+    let plots: Vec<TerrainPlot> = terrain.terrain_plots.iter().filter(|p| is_farm(p)).cloned().collect();
+    let lots = plots::build(&plots).lots;
+    let mut ids: Vec<&String> = lots.keys().collect();
+    ids.sort();
+    ids.into_iter()
+        .filter_map(|id| houses::farmyard(id, &lots[id]))
+        .collect()
+}
+
+/// Stands the blades on each farm in `farms` on its pad: every one of
+/// `heights` (the grid over `mask`'s square, [`HEIGHTS`] a side) whose
+/// cell's middle is [`PAD_IN`] inside a farm is raised to `layer::PLOT`.
+fn lift_onto_farms(heights: &mut [f32], mask: &Mask, farms: &[Vec<P>]) {
+    let cell = mask.side / HEIGHTS as f64;
+    let index = |v: f64, o: f64| ((v - o) / cell - 0.5).floor() as i64;
+    let n = HEIGHTS as i64;
+    for farm in farms {
+        let (lo, hi) = farm.iter().fold(([f64::MAX; 2], [f64::MIN; 2]), |(lo, hi), c| {
+            ([lo[0].min(c[0]), lo[1].min(c[1])], [hi[0].max(c[0]), hi[1].max(c[1])])
+        });
+        let (i0, i1) = (index(lo[0], mask.corner[0]).max(0), (index(hi[0], mask.corner[0]) + 1).min(n - 1));
+        let (j0, j1) = (index(lo[1], mask.corner[1]).max(0), (index(hi[1], mask.corner[1]) + 1).min(n - 1));
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                let p = [
+                    mask.corner[0] + (i as f64 + 0.5) * cell,
+                    mask.corner[1] + (j as f64 + 0.5) * cell,
+                ];
+                if inside(p, farm) && edge_distance(p, farm) >= PAD_IN {
+                    let h = &mut heights[(j * n + i) as usize];
+                    *h = h.max(layer::PLOT);
+                }
+            }
+        }
+    }
+}
+
 /// Whether `p` is inside the polygon `poly` (even-odd).
 fn inside(p: P, poly: &[P]) -> bool {
     let mut odd = false;
@@ -459,6 +545,19 @@ impl GrassLand {
         }
         out
     }
+}
+
+/// The blades' ground over `mask`'s square, [`HEIGHTS`] a side: the land
+/// once it's in, else level, and up on the farms' pads (R6). `None` while
+/// that's all level, the engine's flat ground.
+fn blade_heights(land: Option<&GrassLand>, mask: &Mask, farms: &[Vec<P>]) -> Option<Vec<f32>> {
+    let mut heights = match land {
+        Some(land) => land.heights(mask),
+        None if farms.is_empty() => return None,
+        None => vec![layer::GROUND; HEIGHTS * HEIGHTS],
+    };
+    lift_onto_farms(&mut heights, mask, farms);
+    Some(heights)
 }
 
 /// How much grass the open ground at `p` holds, 0 to 1, before anything is
@@ -558,9 +657,18 @@ pub fn paint(terrain: &TerrainResponse, size: usize, land: Option<&GrassLand>) -
     }
     for plot in &terrain.terrain_plots {
         let corners: Vec<P> = plot.corners.iter().map(|&(x, y)| [x, y]).collect();
-        if corners.iter().any(|&c| grows(c, c)) {
+        // A farm is pasture (R6): its grass stays.
+        if !is_farm(plot) && corners.iter().any(|&c| grows(c, c)) {
             mask.clear_polygon(&corners, LOT_MARGIN, LOT_SOFT);
         }
+    }
+    // A farm is pasture but for its yard: round the farmhouse and the barn,
+    // and the drive in from the lane (R6). Unclaimed farms keep theirs too,
+    // so a claim raises the house on a yard already there.
+    for farmyard in farmyards(terrain) {
+        mask.clear_polygon(&farmyard.yard, YARD, YARD_SOFT);
+        let [a, b] = farmyard.drive;
+        mask.clear_segment(a, b, DRIVE_HALF, DRIVE_SOFT);
     }
     // Nothing grows on a lake's floor (W10): where the land already lay
     // under its level the carve cut nothing, so the land can't say.
@@ -705,7 +813,7 @@ impl Grass {
     pub fn terrain(&mut self, terrain: &TerrainResponse) {
         let started = Instant::now();
         let base = paint(terrain, MASK_SIZE, self.land.as_ref());
-        self.heights = self.land.as_ref().map(|land| land.heights(&base));
+        self.heights = blade_heights(self.land.as_ref(), &base, &farms(terrain));
         self.base = Some(base);
         self.painted = None;
         tracing::debug!(
@@ -892,11 +1000,37 @@ mod tests {
         assert!(lawn as f64 > 0.6 * n as f64, "{lawn} of {n} park texels grow");
     }
 
+    /// The default world under Rural v2's farms, from the backend's
+    /// `dump_farms_terrain`, until the flip makes it the fixture (R7):
+    /// `$FARMS_TERRAIN`, or `renders/farms-terrain.json`.
+    fn farms_terrain() -> &'static TerrainResponse {
+        static T: OnceLock<TerrainResponse> = OnceLock::new();
+        T.get_or_init(|| {
+            let path = std::env::var("FARMS_TERRAIN")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../renders/farms-terrain.json"));
+            read_terrain_file(&path).unwrap_or_else(|e| {
+                panic!("{}: {e}; write it with the backend's dump_farms_terrain", path.display())
+            })
+        })
+    }
+
     #[test]
     fn the_rural_ring_and_the_wilds_edge_are_mostly_grass() {
-        // Sample both rings on a fine polar grid: most of the open ground
-        // has grass, and some of it is full.
-        let m = mask();
+        mostly_grass(mask());
+    }
+
+    /// R6's acceptance on the farms, with the dump in place:
+    /// `cargo test -p capitol-client farms_ -- --ignored`.
+    #[test]
+    #[ignore]
+    fn farms_the_rural_ring_and_the_wilds_edge_are_mostly_grass() {
+        mostly_grass(&paint(farms_terrain(), SIZE, None));
+    }
+
+    /// Both rings sampled on a fine polar grid: most of the open ground has
+    /// grass, and some of it is full.
+    fn mostly_grass(m: &Mask) {
         for (lo, hi) in [
             (Zone::Rural.radii().0 + 200.0, Zone::Rural.radii().1),
             (Zone::Rural.radii().1, GRASS_EDGE - EDGE_IN),
@@ -919,9 +1053,30 @@ mod tests {
     }
 
     #[test]
-    fn no_road_or_lot_has_grass_on_it() {
-        let t = fixture();
-        let m = mask();
+    fn no_road_town_lot_or_farmyard_has_grass() {
+        bare_where_it_should_be(fixture(), mask(), false);
+    }
+
+    #[test]
+    #[ignore]
+    fn farms_are_pasture_but_their_yards() {
+        let t = farms_terrain();
+        bare_where_it_should_be(t, &paint(t, SIZE, None), true);
+    }
+
+    fn centre(poly: &[P]) -> P {
+        let s = poly.iter().fold([0.0, 0.0], |s, p| [s[0] + p[0], s[1] + p[1]]);
+        [s[0] / poly.len() as f64, s[1] / poly.len() as f64]
+    }
+
+    fn between(a: P, b: P, f: f64) -> P {
+        [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]
+    }
+
+    /// Nothing grows on a road, on a lot in town or in a farmyard; and with
+    /// `pasture`, nearly every farm is mostly grass. (On today's small rural
+    /// lots the yard takes most of it.)
+    fn bare_where_it_should_be(t: &TerrainResponse, m: &Mask, pasture_wanted: bool) {
         for road in &t.roads {
             for w in road.points.windows(2) {
                 for k in 0..=8 {
@@ -934,17 +1089,106 @@ mod tests {
                 }
             }
         }
+        let (mut farms, mut pasture) = (0, 0);
         for plot in &t.terrain_plots {
-            let c = plot.corners;
-            let mid = [
-                c.iter().map(|p| p.0).sum::<f64>() / 4.0,
-                c.iter().map(|p| p.1).sum::<f64>() / 4.0,
-            ];
-            assert_eq!(m.value_at(mid), 0, "{}", plot.id);
-            for &(x, y) in &c {
-                assert_eq!(m.value_at([x, y]), 0, "{} corner", plot.id);
+            let poly = plots::hull(&plot.corners.map(|(x, y)| [x, y]));
+            let mid = centre(&poly);
+            if !is_farm(plot) {
+                assert_eq!(m.value_at(mid), 0, "{}", plot.id);
+                for &p in &poly {
+                    assert_eq!(m.value_at(p), 0, "{} corner", plot.id);
+                }
+                continue;
+            }
+            // Over half the field grows.
+            let (lo, hi) = poly.iter().fold(([f64::MAX; 2], [f64::MIN; 2]), |(lo, hi), c| {
+                ([lo[0].min(c[0]), lo[1].min(c[1])], [hi[0].max(c[0]), hi[1].max(c[1])])
+            });
+            let (mut n, mut grows) = (0, 0);
+            for i in 0..24 {
+                for j in 0..24 {
+                    let p = [
+                        lo[0] + (hi[0] - lo[0]) * (i as f64 + 0.5) / 24.0,
+                        lo[1] + (hi[1] - lo[1]) * (j as f64 + 0.5) / 24.0,
+                    ];
+                    if inside(p, &poly) {
+                        n += 1;
+                        grows += (m.value_at(p) > 0) as usize;
+                    }
+                }
+            }
+            farms += 1;
+            pasture += (grows * 2 > n) as usize;
+        }
+        let yards = farmyards(t);
+        if pasture_wanted {
+            assert!(pasture * 10 > farms * 9, "{pasture} of {farms} farms are mostly pasture");
+        }
+        assert!(yards.len() * 10 > farms * 9, "{} yards on {farms} farms", yards.len());
+        for y in &yards {
+            assert_eq!(m.value_at(centre(&y.yard)), 0, "a yard grows at {:?}", centre(&y.yard));
+            for &p in &y.yard {
+                assert_eq!(m.value_at(p), 0, "a farmstead's corner grows at {p:?}");
+            }
+            let [a, b] = y.drive;
+            for k in 0..=8 {
+                let p = between(a, b, k as f64 / 8.0);
+                assert_eq!(m.value_at(p), 0, "a drive grows at {p:?}");
             }
         }
+    }
+
+    #[test]
+    fn blades_on_a_farm_stand_on_its_pad() {
+        // R6: in the middle of a farm the blades stand on its pad at
+        // `layer::PLOT`, and off the pad (4 in from the farm's edge) none
+        // stands above the land, blended as the engine blends them
+        // (`blades_stand_on_the_land`).
+        let t = fixture();
+        let m = mask();
+        let farms = farms(t);
+        let heights = blade_heights(None, m, &farms).expect("the fixture has farms");
+        let (origin, size) = m.world_rect();
+        let n = HEIGHTS as f32;
+        let blend = |p: P| {
+            let [x, z] = to_world(p[0], p[1]);
+            let at = |c: f32, o: f32, s: f32| ((c - o) / s * n - 0.5).clamp(0.0, n - 1.0);
+            let (fx, fz) = (at(x, origin[0], size[0]), at(z, origin[1], size[1]));
+            let (i, j) = (fx as usize, fz as usize);
+            let (i1, j1) = ((i + 1).min(HEIGHTS - 1), (j + 1).min(HEIGHTS - 1));
+            let (tx, tz) = (fx - i as f32, fz - j as f32);
+            let h = |i: usize, j: usize| heights[j * HEIGHTS + i];
+            let near = h(i, j) + (h(i1, j) - h(i, j)) * tx;
+            let far = h(i, j1) + (h(i1, j1) - h(i, j1)) * tx;
+            near + (far - near) * tz
+        };
+        let mut edges = 0;
+        for farm in &farms {
+            let mid = centre(farm);
+            assert_eq!(blend(mid), layer::PLOT);
+            for k in 0..farm.len() {
+                let (a, b) = (farm[k], farm[(k + 1) % farm.len()]);
+                let inward = {
+                    let d = [-(b[1] - a[1]), b[0] - a[0]];
+                    let l = d[0].hypot(d[1]);
+                    let d = [d[0] / l, d[1] / l];
+                    if (mid[0] - a[0]) * d[0] + (mid[1] - a[1]) * d[1] > 0.0 { d } else { [-d[0], -d[1]] }
+                };
+                for f in 1..20 {
+                    let on = between(a, b, f as f64 / 20.0);
+                    for depth in [-6.0, -3.0, 0.0, 2.0, 3.9] {
+                        let p = [on[0] + inward[0] * depth, on[1] + inward[1] * depth];
+                        // Not on the pad of the farm next door.
+                        if farms.iter().any(|f| f != farm && inside(p, f) && edge_distance(p, f) > 4.0) {
+                            continue;
+                        }
+                        assert!(blend(p) <= layer::GROUND + 1e-6, "a blade floats at {p:?}");
+                        edges += 1;
+                    }
+                }
+            }
+        }
+        assert!(edges > 1000);
     }
 
     #[test]
@@ -1166,3 +1410,4 @@ mod tests {
         assert_eq!(Wind::default(), Wind::from_ocean(30.0, 2.5));
     }
 }
+

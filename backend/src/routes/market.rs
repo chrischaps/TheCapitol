@@ -570,8 +570,10 @@ pub(crate) async fn collect_from(
     name: &str,
     only: Option<&[Uuid]>,
 ) -> Result<(CollectResponse, Uuid), AppError> {
+    // Not FOR UPDATE: a sell or a move from a stack here checks the inventory's
+    // key while holding the stack this stows onto (#333)
     let inventory: Uuid = sqlx::query_scalar(
-        "SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'player_inventory' LIMIT 1 FOR UPDATE",
+        "SELECT id FROM containers WHERE owner_id = $1 AND container_type = 'player_inventory' LIMIT 1 FOR NO KEY UPDATE",
     )
     .bind(player_id)
     .fetch_one(&mut *tx)

@@ -281,4 +281,20 @@ pub(crate) mod tests {
             assert!(far < capitol_protocol::rules::RURAL_OUTER_RADIUS - 20.0, "seed {seed}: a lane reaches r{far:.0}");
         }
     }
+
+    /// Writes the default world under `Farms` as `/terrain` JSON to
+    /// `$TERRAIN_DUMP`, for the Flint client to check itself against before
+    /// the flip (R6, #289):
+    /// `TERRAIN_DUMP=farms.json cargo test dump_farms_terrain -- --ignored`.
+    #[test]
+    #[ignore]
+    fn dump_farms_terrain() {
+        let path = std::env::var("TERRAIN_DUMP").expect("set TERRAIN_DUMP to the output path");
+        let mut params = WorldGenParams::default();
+        params.rural.layout = RuralLayout::Farms;
+        let terrain = TerrainConfig::from_params(&params);
+        let response = capitol_protocol::terrain::TerrainResponse::from(&terrain);
+        std::fs::write(&path, serde_json::to_string(&response).unwrap()).unwrap();
+        println!("{} -> {path}", terrain.version());
+    }
 }

@@ -128,7 +128,7 @@ fn centroid(poly: &[P]) -> P {
 
 /// The convex hull of `points`, anticlockwise in maths axes (positive
 /// shoelace area), with near-duplicates merged.
-fn hull(points: &[P]) -> Vec<P> {
+pub(crate) fn hull(points: &[P]) -> Vec<P> {
     let mut pts = points.to_vec();
     pts.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
     pts.dedup_by(|a, b| dist(*a, *b) < MIN_STEP);
@@ -629,11 +629,27 @@ mod tests {
 
     #[test]
     fn sector_bounds_contain_their_vertices() {
-        // A mesh is culled by the box round its vertices, so a sector's
-        // lots must keep to the sector, give or take one lot, or its box
-        // spreads over its neighbours' and stops culling.
-        const LOT: f64 = 260.0; // more than the widest rural lot's diagonal
-        let (_, plots) = fixture();
+        sector_bounds_hold(&fixture().1);
+    }
+
+    /// On the farms of the default world under Rural v2, from the backend's
+    /// `dump_farms_terrain` (`$FARMS_TERRAIN`, or `renders/farms-terrain.json`),
+    /// until the flip makes them the fixture's (R6).
+    #[test]
+    #[ignore]
+    fn farms_sector_bounds_contain_their_vertices() {
+        let path = std::env::var("FARMS_TERRAIN")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../renders/farms-terrain.json"));
+        let t = capitol_core::terrain::read_terrain_file(&path).expect("the farms dump");
+        sector_bounds_hold(&build(&t.terrain_plots));
+    }
+
+    /// A mesh is culled by the box round its vertices, so a sector's lots
+    /// must keep to the sector, give or take one lot, or its box spreads
+    /// over its neighbours' and stops culling.
+    fn sector_bounds_hold(plots: &Plots) {
+        const LOT: f64 = 600.0; // more than the widest farm's diagonal (R6)
         for (s, m) in &plots.meshes {
             let ([lo, hi], [a0, a1]) = s.span();
             for v in &m.vertices {
