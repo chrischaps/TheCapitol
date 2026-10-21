@@ -27,15 +27,22 @@
 //! log can keep them as JSONL.
 //!
 //! - [`rules`]: the rules layer, a utility pick weighted by temperament.
+//! - [`log`]: the decision log, each decision and what came of it (C3.1).
+//! - [`replay`]: any stack of layers run over a log offline (C3.1).
 
+pub mod log;
+pub mod replay;
 pub mod rules;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::sim::plan::Holdings;
+use log::{Fate, Log, Record};
 pub use rules::RulesDecider;
 
 // ---------------------------------------------------------------------------
@@ -44,14 +51,17 @@ pub use rules::RulesDecider;
 
 /// What a citizen is like (D5). Each is 0 to 1, 0.5 being middling. The
 /// rules layer weights its utilities by them, and a model layer's prompt
-/// will be coloured by them. C1.2 (#250) gives each citizen its own.
+/// will be coloured by them. Each citizen's is seeded with its persona
+/// (C1.2, [`persona`](super::persona)).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Temperament {
-    /// Holds out for a fair price, and gathers rather than overpay.
+    /// Holds out for a fair price, and gathers rather than overpay. Keeps
+    /// more back before it buys a home (C1.2).
     pub thrift: f32,
     /// Asks above the bid, hoping someone pays up.
     pub risk: f32,
-    /// Spends its free time among people, at the hall.
+    /// Spends its free time among people, at the hall. Stays longer at
+    /// the market, and likelier keeps the bazaar (C1.2).
     pub sociability: f32,
     /// Sells and banks in bigger lots, less often.
     pub patience: f32,
@@ -169,8 +179,9 @@ pub enum Question {
     Sell { item: String },
     /// Whether to buy `item` rather than gather it.
     Buy { item: String },
-    /// Whether to take a P2P trade as it stands, counter it, or decline.
-    /// C1.5 (#253) asks it when citizens answer people's trades.
+    /// Whether to take a P2P trade as it stands, counter it, or decline;
+    /// or, for goods offered, what to pay. Asked when a citizen answers
+    /// someone's trade (C1.5, [`meet`](crate::citizen::meet)).
     Trade {
         partner: String,
         partner_citizen: bool,
@@ -183,6 +194,9 @@ pub enum Question {
     },
     /// What to do with time on its hands.
     FreeTime,
+    /// Whether a merchant makes a market with its float now, or goes on
+    /// earning it (C1.6).
+    Market,
 }
 
 impl Question {
@@ -195,6 +209,7 @@ impl Question {
             Question::Buy { item } => format!("buy {item}"),
             Question::Trade { partner, .. } => format!("trade {partner}"),
             Question::FreeTime => "free time".into(),
+            Question::Market => "market".into(),
         }
     }
 }
@@ -248,27 +263,55 @@ pub enum Choice {
         price: Span<i64>,
         quantity: Span<i32>,
     },
+    /// Leave a standing bid for `item` at the hall, which anyone may sell
+    /// into while the citizen works (C1.5's demand). Needs a price and a
+    /// quantity.
+    Bid {
+        item: String,
+        price: Span<i64>,
+        quantity: Span<i32>,
+    },
+    /// Stock its stall at the bazaar with `item`, renting one first if it
+    /// keeps none (C1.5). Needs a price and a quantity.
+    Stock {
+        item: String,
+        price: Span<i64>,
+        quantity: Span<i32>,
+    },
     /// Don't sell: keep what it holds.
     Keep,
     /// Don't buy: go and gather it.
     Gather { item: String },
     /// Accept the trade as it stands.
     Accept,
-    /// Ask for more Strands on their side. Needs a price: how many more.
+    /// Ask for a deal this many Strands better. Needs a price: how many.
+    /// There's no chat, so a citizen says it with its own side of the
+    /// window (C1.5): it takes that much off what it gives, Strands first,
+    /// then goods at its books. "For that, you get this."
     Counter { strands: Span<i64> },
+    /// Put up this many Strands for the goods they offer. Needs a price.
+    Pay { strands: Span<i64> },
     Decline,
     /// Sit out a while where it is.
     Rest,
     /// Pass the time at the Exchange hall, among people.
     Hall,
+    /// Make a market in `items` at the hall (C1.6): quote both sides of
+    /// each, sized to what it holds. `float` is what it has to do it with,
+    /// in Strands: its Strands, those on its bids included, and its stock
+    /// at its books. `making` says it's at it already.
+    MakeMarket { items: Vec<String>, float: i64, making: bool },
 }
 
 impl Choice {
     /// The parameters it takes: (price, quantity).
     fn takes(&self) -> (Option<Span<i64>>, Option<Span<i32>>) {
         match self {
-            Choice::Sell { price, quantity, .. } | Choice::Buy { price, quantity, .. } => (Some(*price), Some(*quantity)),
-            Choice::Counter { strands } => (Some(*strands), None),
+            Choice::Sell { price, quantity, .. }
+            | Choice::Buy { price, quantity, .. }
+            | Choice::Bid { price, quantity, .. }
+            | Choice::Stock { price, quantity, .. } => (Some(*price), Some(*quantity)),
+            Choice::Counter { strands } | Choice::Pay { strands } => (Some(*strands), None),
             _ => (None, None),
         }
     }
@@ -419,11 +462,11 @@ pub enum By {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Asked {
-    Settled { confidence: f32 },
+    Settled { confidence: f32, choice: Decision },
     /// Decided, but under the threshold.
-    Unsure { confidence: f32 },
+    Unsure { confidence: f32, choice: Decision },
     Escalated { reason: String },
-    OffMenu { why: String },
+    OffMenu { why: String, choice: Decision },
     /// It answered after its time budget.
     Slow { millis: u64 },
     /// Its spend budget is gone.
@@ -433,6 +476,42 @@ pub enum Asked {
     Late,
 }
 
+impl Asked {
+    /// For a report: `settled`, `off menu`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Asked::Settled { .. } => "settled",
+            Asked::Unsure { .. } => "unsure",
+            Asked::Escalated { .. } => "escalated",
+            Asked::OffMenu { .. } => "off menu",
+            Asked::Slow { .. } => "slow",
+            Asked::Broke => "broke",
+            Asked::Pending => "pending",
+            Asked::Late => "late",
+        }
+    }
+}
+
+/// One layer's turn at a question: who, what came of it, and how long it
+/// took to answer (or to say it was still thinking).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Turn {
+    pub layer: String,
+    #[serde(flatten)]
+    pub asked: Asked,
+    pub micros: u64,
+}
+
+impl Turn {
+    fn new(layer: impl Into<String>, asked: Asked, took: Duration) -> Turn {
+        Turn {
+            layer: layer.into(),
+            asked,
+            micros: took.as_micros().min(u64::MAX as u128) as u64,
+        }
+    }
+}
+
 /// The cascade's answer, and how it got there.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ruling {
@@ -440,7 +519,7 @@ pub struct Ruling {
     pub decision: Option<Decision>,
     pub by: By,
     /// Each layer asked, in order, and what came of it.
-    pub trail: Vec<(String, Asked)>,
+    pub trail: Vec<Turn>,
 }
 
 /// A question a layer is still thinking over.
@@ -502,9 +581,12 @@ impl Cascade {
             let w = self.waiting.swap_remove(i);
             let layer = &mut self.layers[w.layer];
             let name = layer.decider.name().to_string();
-            match layer.decider.poll(w.ticket) {
+            let asked = Instant::now();
+            let answer = layer.decider.poll(w.ticket);
+            let took = asked.elapsed();
+            match answer {
                 None if now < w.until => {
-                    trail.push((name.clone(), Asked::Pending));
+                    trail.push(Turn::new(&name, Asked::Pending, took));
                     let decision = self.carry_on(s, &w.offered);
                     self.waiting.push(w);
                     return Ruling {
@@ -515,12 +597,12 @@ impl Cascade {
                 }
                 // Too late: fall back on what was offered before it
                 None => {
-                    trail.push((name, Asked::Late));
+                    trail.push(Turn::new(name, Asked::Late, took));
                     return self.fall_back(s, w.offered, trail);
                 }
                 Some(verdict) => {
                     offered = w.offered;
-                    match weigh(s, layer, verdict, &mut offered, &mut trail) {
+                    match weigh(s, layer, verdict, took, &mut offered, &mut trail) {
                         Weighed::Settled(d) => return settled(d, name, trail),
                         // A pending answer can't pend again
                         Weighed::Pending(_) | Weighed::Passed => from = w.layer + 1,
@@ -532,17 +614,17 @@ impl Cascade {
             let layer = &mut self.layers[i];
             let name = layer.decider.name().to_string();
             if layer.spend.is_some_and(|limit| layer.decider.spent() >= limit) {
-                trail.push((name, Asked::Broke));
+                trail.push(Turn::new(name, Asked::Broke, Duration::ZERO));
                 continue;
             }
             let asked = Instant::now();
             let verdict = layer.decider.decide(s);
             let took = asked.elapsed();
             if took > layer.time && !matches!(verdict, Verdict::Pending(_)) {
-                trail.push((name, Asked::Slow { millis: took.as_millis() as u64 }));
+                trail.push(Turn::new(name, Asked::Slow { millis: took.as_millis() as u64 }, took));
                 continue;
             }
-            match weigh(s, layer, verdict, &mut offered, &mut trail) {
+            match weigh(s, layer, verdict, took, &mut offered, &mut trail) {
                 Weighed::Settled(d) => return settled(d, name, trail),
                 Weighed::Passed => {}
                 Weighed::Pending(ticket) => {
@@ -571,9 +653,22 @@ impl Cascade {
         self.waiting.iter().any(|w| w.key == key)
     }
 
+    /// Each layer's name, bottom first.
+    pub fn names(&self) -> Vec<String> {
+        self.layers.iter().map(|l| l.decider.name().to_string()).collect()
+    }
+
+    /// What each layer has cost so far, in US cents, bottom first.
+    pub fn spent(&self) -> Vec<(String, f64)> {
+        self.layers
+            .iter()
+            .map(|l| (l.decider.name().to_string(), l.decider.spent()))
+            .collect()
+    }
+
     /// No layer settled it: the best offered, else the rules' pick, else
     /// carry on.
-    fn fall_back(&mut self, s: &Situation, offered: Vec<(Decision, f32, String)>, trail: Vec<(String, Asked)>) -> Ruling {
+    fn fall_back(&mut self, s: &Situation, offered: Vec<(Decision, f32, String)>, trail: Vec<Turn>) -> Ruling {
         if let Some((d, _, name)) = best(offered) {
             return Ruling {
                 decision: Some(d),
@@ -630,36 +725,37 @@ fn weigh(
     s: &Situation,
     layer: &Layer,
     verdict: Verdict,
+    took: Duration,
     offered: &mut Vec<(Decision, f32, String)>,
-    trail: &mut Vec<(String, Asked)>,
+    trail: &mut Vec<Turn>,
 ) -> Weighed {
     let name = layer.decider.name().to_string();
     match verdict {
         Verdict::Decided { choice, confidence } => {
             if let Err(why) = s.admits(&choice) {
-                trail.push((name, Asked::OffMenu { why }));
+                trail.push(Turn::new(name, Asked::OffMenu { why, choice }, took));
                 Weighed::Passed
             } else if confidence >= layer.threshold {
-                trail.push((name, Asked::Settled { confidence }));
+                trail.push(Turn::new(name, Asked::Settled { confidence, choice }, took));
                 Weighed::Settled(choice)
             } else {
-                trail.push((name.clone(), Asked::Unsure { confidence }));
+                trail.push(Turn::new(&name, Asked::Unsure { confidence, choice }, took));
                 offered.push((choice, confidence, name));
                 Weighed::Passed
             }
         }
         Verdict::Escalate { reason } => {
-            trail.push((name, Asked::Escalated { reason }));
+            trail.push(Turn::new(name, Asked::Escalated { reason }, took));
             Weighed::Passed
         }
         Verdict::Pending(ticket) => {
-            trail.push((name, Asked::Pending));
+            trail.push(Turn::new(name, Asked::Pending, took));
             Weighed::Pending(ticket)
         }
     }
 }
 
-fn settled(decision: Decision, name: String, trail: Vec<(String, Asked)>) -> Ruling {
+fn settled(decision: Decision, name: String, trail: Vec<Turn>) -> Ruling {
     Ruling {
         decision: Some(decision),
         by: By::Layer { name },
@@ -675,15 +771,54 @@ fn best(offered: Vec<(Decision, f32, String)>) -> Option<(Decision, f32, String)
     })
 }
 
+/// A citizen's decision log, shared by its lives (C3.1).
+pub type SharedLog = Arc<Mutex<Log>>;
+
+/// The most decisions a mind waits on outcomes for. Past it the oldest is
+/// forgotten: its outcome goes unrecorded.
+const OPEN_MAX: usize = 64;
+/// The most standing bids a mind keeps track of, for their fills.
+const ORDERS_MAX: usize = 64;
+
+/// A logged decision whose outcome isn't known yet.
+struct Open {
+    id: u64,
+    choice: Choice,
+    asked: Instant,
+    held: Held,
+}
+
 /// A citizen's mind: its temperament, and the cascade that decides for it.
+/// With a log (C3.1), it writes each decision down, and what came of it as
+/// its loop says ([`settle`](Self::settle), [`placed`](Self::placed),
+/// [`stocked`](Self::stocked)).
 pub struct Mind {
     pub temperament: Temperament,
     cascade: Cascade,
+    log: Option<SharedLog>,
+    /// Game seconds to a real one, for an outcome's time
+    scale: f64,
+    open: Vec<Open>,
+    /// The last decision logged
+    last: Option<u64>,
+    /// Standing bids, by order, and the decision each came of
+    orders: HashMap<Uuid, u64>,
+    /// Stalls stocked, by item, and the decision that last stocked each
+    stalls: HashMap<String, u64>,
 }
 
 impl Mind {
     pub fn new(cascade: Cascade, temperament: Temperament) -> Mind {
-        Mind { temperament, cascade }
+        Mind {
+            temperament,
+            cascade,
+            log: None,
+            scale: 1.0,
+            open: Vec::new(),
+            last: None,
+            orders: HashMap::new(),
+            stalls: HashMap::new(),
+        }
     }
 
     /// The rules alone, middling in everything: the sim's bots.
@@ -691,9 +826,126 @@ impl Mind {
         Mind::new(Cascade::rules(), Temperament::default())
     }
 
-    pub fn ask(&mut self, s: &Situation) -> Ruling {
-        self.cascade.ask(s, Instant::now())
+    /// Writes its decisions and their outcomes to `log`.
+    pub fn with_log(mut self, log: SharedLog) -> Mind {
+        self.log = Some(log);
+        self
     }
+
+    /// The server's `SIM_TICK_SCALE`: an outcome's time is in game seconds.
+    pub fn set_scale(&mut self, scale: f64) {
+        self.scale = scale;
+    }
+
+    pub fn ask(&mut self, s: &Situation) -> Ruling {
+        let ruling = self.cascade.ask(s, Instant::now());
+        if let Some(log) = &self.log {
+            let id = lock(log).decision(s, &ruling);
+            self.last = Some(id);
+            if let Some(d) = ruling.decision.filter(|d| d.pick < s.menu.len()) {
+                if self.open.len() >= OPEN_MAX {
+                    self.open.remove(0);
+                }
+                self.open.push(Open {
+                    id,
+                    choice: s.choice(&d).clone(),
+                    asked: Instant::now(),
+                    held: s.holdings.clone(),
+                });
+            }
+        }
+        ruling
+    }
+
+    /// How many decisions wait on their outcome: a mark to
+    /// [`settle`](Self::settle) from.
+    pub fn mark(&self) -> usize {
+        self.open.len()
+    }
+
+    /// Logs what came of every decision since `mark`: `fate` of the entry
+    /// each picked, with the change in what it holds, from its situation's
+    /// holdings to `after`, measured the same way.
+    pub fn settle(&mut self, mark: usize, after: &Held, fate: impl Fn(&Choice) -> Fate) {
+        if mark >= self.open.len() {
+            return;
+        }
+        let settled: Vec<Open> = self.open.drain(mark..).collect();
+        let Some(log) = &self.log else { return };
+        let mut log = lock(log);
+        let t = log::now_ms();
+        for open in settled {
+            let fate = fate(&open.choice);
+            let (strands, items) = match fate {
+                // Nothing was done on its account
+                Fate::Passed | Fate::Superseded => Default::default(),
+                _ => log::change(&open.held, after),
+            };
+            log.write(&Record::Outcome {
+                t,
+                id: open.id,
+                fate,
+                took: open.asked.elapsed().as_secs_f64() * self.scale,
+                strands,
+                items,
+            });
+        }
+    }
+
+    /// The last decision put up a standing bid, `order`: its fills are
+    /// logged against it.
+    pub fn placed(&mut self, order: Uuid) {
+        if let Some(id) = self.last {
+            if self.orders.len() >= ORDERS_MAX {
+                self.orders.clear();
+            }
+            self.orders.insert(order, id);
+        }
+    }
+
+    /// The last decision stocked a stall with `item`: its sales are logged
+    /// against it.
+    pub fn stocked(&mut self, item: &str) {
+        if let Some(id) = self.last {
+            self.stalls.insert(item.to_string(), id);
+        }
+    }
+
+    /// A standing bid filled: `quantity` for `strands`. `done` once nothing
+    /// of it is left on the book.
+    pub fn filled(&mut self, order: Uuid, quantity: i64, strands: i64, done: bool) {
+        let id = if done { self.orders.remove(&order) } else { self.orders.get(&order).copied() };
+        if let Some(id) = id {
+            self.fill(id, quantity, strands);
+        }
+    }
+
+    /// A standing bid left the book unfilled.
+    pub fn closed(&mut self, order: Uuid) {
+        self.orders.remove(&order);
+    }
+
+    /// The stall sold `quantity` of `item` for `strands`.
+    pub fn sold(&mut self, item: &str, quantity: i64, strands: i64) {
+        if let Some(&id) = self.stalls.get(item) {
+            self.fill(id, quantity, strands);
+        }
+    }
+
+    fn fill(&self, id: u64, quantity: i64, strands: i64) {
+        if let Some(log) = &self.log {
+            lock(log).write(&Record::Fill {
+                t: log::now_ms(),
+                id,
+                quantity,
+                strands,
+            });
+        }
+    }
+}
+
+fn lock(log: &SharedLog) -> std::sync::MutexGuard<'_, Log> {
+    log.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(test)]
@@ -821,8 +1073,15 @@ mod tests {
         assert_eq!(ruling.decision, Some(Decision::plain(2)));
         assert_eq!(ruling.by, By::Layer { name: "c".into() });
         assert_eq!(ruling.trail.len(), 3);
-        assert!(matches!(ruling.trail[0].1, Asked::Escalated { .. }));
-        assert_eq!(ruling.trail[1].1, Asked::Unsure { confidence: 0.4 });
+        assert!(matches!(ruling.trail[0].asked, Asked::Escalated { .. }));
+        assert_eq!(
+            ruling.trail[1].asked,
+            Asked::Unsure {
+                confidence: 0.4,
+                choice: Decision::plain(1)
+            }
+        );
+        assert_eq!(ruling.trail[1].layer, "b");
     }
 
     #[test]
@@ -869,7 +1128,7 @@ mod tests {
     fn an_off_menu_answer_is_an_escalation() {
         let mut stack = Stack::new().layer("a", decided(7, 1.0), 0.5).layer("b", decided(1, 0.9), 0.5);
         let ruling = stack.cascade().ask(&situation(3), Instant::now());
-        assert!(matches!(&ruling.trail[0].1, Asked::OffMenu { why } if why.contains("off a menu of 3")));
+        assert!(matches!(&ruling.trail[0].asked, Asked::OffMenu { why, choice } if why.contains("off a menu of 3") && choice.pick == 7));
         assert_eq!(ruling.by, By::Layer { name: "b".into() });
         // Off the menu and nothing else: the rules', never the invented one
         let mut stack = Stack::new().layer("a", decided(7, 1.0), 0.5);
@@ -912,8 +1171,9 @@ mod tests {
         broke.spend = Some(10.0);
         let rules = Layer::new(scripted("last", Duration::ZERO, 0.0), 0.5, Duration::from_secs(1));
         let ruling = Cascade::new(vec![slow, broke, rules]).ask(&situation(3), Instant::now());
-        assert!(matches!(ruling.trail[0].1, Asked::Slow { .. }));
-        assert_eq!(ruling.trail[1].1, Asked::Broke);
+        assert!(matches!(ruling.trail[0].asked, Asked::Slow { .. }));
+        assert!(ruling.trail[0].micros >= 30_000, "{}", ruling.trail[0].micros);
+        assert_eq!(ruling.trail[1].asked, Asked::Broke);
         assert_eq!(*asked.lock().unwrap(), ["slow", "last"], "a spent layer isn't asked");
         assert_eq!(ruling.by, By::Layer { name: "last".into() });
     }
@@ -960,7 +1220,8 @@ mod tests {
         stack.asked();
         // Past its budget with no answer: what the rules offered, no waiting on
         let ruling = cascade.ask(&s, t0 + Duration::from_secs(2));
-        assert_eq!(ruling.trail, vec![("model".to_string(), Asked::Late)]);
+        assert_eq!(ruling.trail.len(), 1);
+        assert_eq!((ruling.trail[0].layer.as_str(), &ruling.trail[0].asked), ("model", &Asked::Late));
         assert_eq!(ruling.decision, Some(Decision::plain(1)));
         assert_eq!(ruling.by, By::Offered { name: "rules".into() });
         assert!(stack.asked().is_empty());
@@ -982,7 +1243,7 @@ mod tests {
         // It picks entry 3, but by now the menu has two
         *later.lock().unwrap() = Some(decided(3, 1.0));
         let ruling = cascade.ask(&situation(2), t0 + Duration::from_millis(10));
-        assert!(matches!(ruling.trail[0].1, Asked::OffMenu { .. }));
+        assert!(matches!(ruling.trail[0].asked, Asked::OffMenu { .. }));
         assert_eq!(ruling.by, By::Rules);
     }
 

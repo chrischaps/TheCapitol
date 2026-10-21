@@ -1352,8 +1352,8 @@ impl GameState {
     }
 
     /// The server's clock now if it's known, else this machine's: when a
-    /// subscription ends is the server's to say.
-    fn utc_now(&self) -> DateTime<Utc> {
+    /// subscription ends, or a stall's rent, is the server's to say.
+    pub fn utc_now(&self) -> DateTime<Utc> {
         let ms = self.server_time_ms().unwrap_or_else(local_unix_ms);
         DateTime::from_timestamp_millis(ms).unwrap_or_default()
     }

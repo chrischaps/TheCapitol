@@ -158,10 +158,7 @@ pub fn route(streets: &[Vec<Point>], stall: &Landmark, from: Point) -> Vec<Point
     let mut prev = vec![usize::MAX; nodes.len()];
     let mut done = vec![false; nodes.len()];
     best[s] = 0.0;
-    loop {
-        let Some(u) = (0..nodes.len()).filter(|&i| !done[i] && best[i] < f64::MAX).min_by(|&a, &b| best[a].total_cmp(&best[b])) else {
-            break;
-        };
+    while let Some(u) = (0..nodes.len()).filter(|&i| !done[i] && best[i] < f64::MAX).min_by(|&a, &b| best[a].total_cmp(&best[b])) {
         if u == g {
             break;
         }

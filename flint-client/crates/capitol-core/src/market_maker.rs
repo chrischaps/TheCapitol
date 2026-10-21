@@ -21,6 +21,9 @@
 //!
 //! **Funding** ([`fund`]) tops the bot up with Strands and stock through
 //! `POST /player/grant`, which a server serves only with `DEV_GRANTS=on`.
+//! It's for `capitol-bot --market` and the sim's makers only. A town's
+//! merchant (C1.6) is never funded: it earns its float, and its quotes are
+//! held to its own wealth by a [`Limit`] an item ([`share`]).
 //!
 //! **Where.** Orders are placed at the Exchange hall (D6), so the bot must be
 //! there ([`Bot::go_to_exchange`]) before [`Maker::start`], and stays.
@@ -132,6 +135,28 @@ pub struct Quote {
 fn level_size(size: i32, price: i64) -> i32 {
     let floor = (MIN_ORDER_VALUE + price - 1) / price.max(1);
     size.max(floor.min(i32::MAX as i64) as i32)
+}
+
+/// What a merchant lets one item's quotes hold (C1.6), in place of the
+/// config's target and every Strand it has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limit {
+    /// Units it aims to hold. It bids up to twice this.
+    pub target: i32,
+    /// Strands the item's bids may hold, fees included.
+    pub budget: i64,
+}
+
+/// A merchant's limit for an item at `reference`, its `wealth` shared evenly
+/// over `items`: the share is the bids' budget, and half of it, in units, the
+/// target. So it holds about half its share in stock and half in Strands,
+/// and both grow with its wealth.
+pub fn share(wealth: i64, reference: i64, items: usize) -> Limit {
+    let share = (wealth / items.max(1) as i64).max(0);
+    Limit {
+        target: (share / 2 / reference.max(1)).clamp(1, i32::MAX as i64) as i32,
+        budget: share,
+    }
 }
 
 /// What the maker wants on the book for one item: bids best first, then
@@ -307,7 +332,7 @@ fn open_orders<'a>(bot: &'a Bot, item: &str) -> Vec<&'a MarketOrder> {
 }
 
 /// Units of `item` free and on the bot's asks.
-fn position(bot: &Bot, item: &str) -> i32 {
+pub fn position(bot: &Bot, item: &str) -> i32 {
     let asked: i32 = open_orders(bot, item)
         .iter()
         .filter(|o| o.side == OrderSide::Sell)
@@ -317,7 +342,7 @@ fn position(bot: &Bot, item: &str) -> i32 {
 }
 
 /// The bot's Strands, those on its bids included.
-fn all_strands(bot: &Bot) -> i64 {
+pub fn all_strands(bot: &Bot) -> i64 {
     let escrowed: i64 = bot
         .state()
         .market()
@@ -333,6 +358,8 @@ fn all_strands(bot: &Bot) -> i64 {
 pub struct Maker {
     config: MakerConfig,
     references: HashMap<String, Reference>,
+    /// Each item's [`Limit`], where one is set: a merchant's (C1.6).
+    limits: HashMap<String, Limit>,
     pub stats: MakerStats,
 }
 
@@ -341,6 +368,7 @@ impl Maker {
         Maker {
             config,
             references: HashMap::new(),
+            limits: HashMap::new(),
             stats: MakerStats::default(),
         }
     }
@@ -352,6 +380,11 @@ impl Maker {
     /// The reference price for `item`, once [`start`](Self::start) has run.
     pub fn reference(&self, item: &str) -> Option<i64> {
         self.references.get(item).map(|r| r.price)
+    }
+
+    /// Holds `item`'s quotes to `limit` from the next requote on.
+    pub fn limit(&mut self, item: &str, limit: Limit) {
+        self.limits.insert(item.to_string(), limit);
     }
 
     /// Watches every item, learns the bot's orders and box, and sets each
@@ -375,10 +408,17 @@ impl Maker {
     /// trades or one of the maker's orders in it fills, and every item every
     /// [`REQUOTE_EVERY`].
     pub fn run(&mut self, bot: &mut Bot, deadline: Option<Instant>) -> Result<(), BotError> {
+        self.run_while(bot, deadline, |_| true)
+    }
+
+    /// As [`run`](Self::run), and stops too once `keep` says no; it's asked
+    /// every half second or so. A merchant stops for a trade request, or
+    /// its town stopping.
+    pub fn run_while(&mut self, bot: &mut Bot, deadline: Option<Instant>, mut keep: impl FnMut(&Bot) -> bool) -> Result<(), BotError> {
         let mut dirty: BTreeSet<String> = self.config.items.iter().cloned().collect();
         let mut box_stale = false;
         let mut last_sweep = Instant::now();
-        while deadline.is_none_or(|d| Instant::now() < d) {
+        while deadline.is_none_or(|d| Instant::now() < d) && keep(bot) {
             if box_stale {
                 bot.fetch_market_box()?;
                 box_stale = false;
@@ -426,7 +466,24 @@ impl Maker {
         let Some(reference) = self.reference(item) else {
             return Ok(());
         };
-        let wanted = quotes(&self.config, reference, position(bot, item), all_strands(bot));
+        let wanted = match self.limits.get(item) {
+            None => quotes(&self.config, reference, position(bot, item), all_strands(bot)),
+            Some(limit) => {
+                // Its own bids' Strands, and as many free as the budget allows
+                let escrowed: i64 = open_orders(bot, item)
+                    .iter()
+                    .filter(|o| o.side == OrderSide::Buy)
+                    .map(|o| o.escrow_strands)
+                    .sum();
+                let free = bot.state().strands().unwrap_or(0);
+                let strands = (free + escrowed).min(limit.budget + self.config.reserve);
+                let config = MakerConfig {
+                    target: limit.target,
+                    ..self.config.clone()
+                };
+                quotes(&config, reference, position(bot, item), strands)
+            }
+        };
         let (cancel, place) = plan(&wanted, &open_orders(bot, item));
         let mut returned = false;
         for id in cancel {
@@ -648,6 +705,27 @@ mod tests {
         let mostly = order(OrderSide::Sell, 55, 6);
         let (_, place) = plan(&wanted, &[&kept, &mostly]);
         assert!(!place.iter().any(|q| q.side == OrderSide::Sell && q.price == 55));
+    }
+
+    #[test]
+    fn a_merchants_share_grows_with_its_wealth() {
+        // 600 over three goods: 200 a good, half of it in logs at 8
+        assert_eq!(share(600, 8, 3), Limit { target: 12, budget: 200 });
+        assert_eq!(share(1200, 8, 3), Limit { target: 25, budget: 400 });
+        // Dear goods still get a unit to aim for
+        assert_eq!(share(600, 500, 3).target, 1);
+        assert_eq!(share(-5, 8, 3), Limit { target: 1, budget: 0 });
+        // Quoted at the limit, its bids stay within the budget
+        let mut c = config();
+        c.reserve = 0;
+        let limit = share(600, 8, 3);
+        c.target = limit.target;
+        let spent: i64 = quotes(&c, 8, 0, limit.budget)
+            .iter()
+            .filter(|q| q.side == OrderSide::Buy)
+            .map(|q| buy_debit(q.price, q.quantity))
+            .sum();
+        assert!(spent > 0 && spent <= limit.budget, "{spent}");
     }
 
     #[test]

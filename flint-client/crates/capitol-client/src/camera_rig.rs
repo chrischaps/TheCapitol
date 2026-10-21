@@ -2,9 +2,11 @@
 //! geometry is pure Rhai (`rig_pose`, `rig_pitch`, `rig_distance`), so
 //! these load the script into a bare engine with only the `cap_*` API, and
 //! drive it across every zoom, yaw and focus to check what it promises:
-//! the tilt rides the zoom, the horizon stays out of frame once the fog has
-//! thinned, the map is the whole world north up, and the camera never goes
-//! into the land or the tower.
+//! the tilt rides the zoom, the near end stands over your shoulder (E3.13),
+//! the horizon stays out of frame once the fog has thinned, the map is the
+//! whole world north up, and the camera never goes into the land or the
+//! tower; and close in it pulls in out of walls, and the bazaar takes it
+//! down to the shoulder and gives it back.
 
 use crate::atmosphere::{CLEAR_FROM, FLAT_BY};
 use crate::coords::layer::GROUND;
@@ -95,8 +97,11 @@ fn yaws() -> impl Iterator<Item = f64> {
 fn the_tilt_rides_the_zoom() {
     let rig = Rig::load();
     let street = rig.num("street_zoom");
-    assert!((rig.pitch(0.0) - 15.0).abs() < 1e-9);
+    let shoulder = rig.num("shoulder_zoom");
+    assert!((rig.pitch(0.0) - 5.0).abs() < 1e-9, "nearly level at the shoulder");
+    assert!((rig.pitch(shoulder) - 15.0).abs() < 1e-9, "as the dial used to end, at 11 m");
     assert!((rig.pitch(street) - 50.0).abs() < 1e-9);
+    assert!(shoulder > 0.0 && shoulder < street);
     assert!(rig.pitch(1.0) > 89.0);
     let mut last = 0.0;
     for zoom in zooms() {
@@ -194,14 +199,18 @@ fn the_camera_never_goes_into_the_land_or_the_tower() {
         }
     }
     focus.extend([(0.0, 60.0), (300.0, 0.0), (-283.0, 283.0)]);
-    // By zoom 0.65 the camera is over the needle (90 m up), clear of it all.
-    for zoom in zooms().take_while(|&z| z <= 0.7).step_by(8) {
+    let shoulder = rig.num("shoulder_zoom");
+    // By zoom 0.75 the camera is over the needle (90 m up), clear of it all.
+    for zoom in zooms().take_while(|&z| z <= 0.75).step_by(8) {
         for yaw in yaws().step_by(2) {
             for &(fx, fz) in &focus {
                 let pose = rig.pose(fx, fz, zoom, yaw);
                 let [x, y, z] = pose.p;
-                // Above the land and a bridge's rails (1.6 m), by the near plane.
-                assert!(y >= GROUND + 1.6 + NEAR, "into the land at {:?}", pose.p);
+                // Above the land and a bridge's rails (1.6 m), by the near
+                // plane; at the shoulder (E3.13), at standing height, over
+                // the rails beside you and looking along the deck.
+                let least = if zoom < shoulder { 1.8 } else { 1.6 + NEAR };
+                assert!(y >= GROUND + least, "into the land at {:?} zoom {zoom:.2}", pose.p);
                 // Clear of the tower within the near plane on every side.
                 let r = (x * x + z * z).sqrt();
                 let lo = ((r - NEAR) / 0.25).max(0.0) as usize;
@@ -237,7 +246,13 @@ fn in_the_wilds_the_camera_keeps_over_the_land_and_sees_the_point() {
                 for yaw in yaws().step_by(4) {
                     let pose = rig.pose(fx, fz, zoom, yaw);
                     let ([px, py, pz], [tx, ty, tz]) = (pose.p, pose.t);
-                    assert!((ty - ground(tx, tz)).abs() < 1e-3, "looks at the ground");
+                    // Past the shoulder's reach it looks at the ground; at
+                    // the shoulder (E3.13), at chest height ahead of you
+                    if zoom >= rig.num("shoulder_zoom") {
+                        assert!((ty - ground(tx, tz)).abs() < 1e-3, "looks at the ground");
+                    } else {
+                        assert!(ty >= ground(fx as f32, fz as f32) - 1e-3, "looks over the ground");
+                    }
                     assert!(py >= ground(px, pz) + 1.4, "into the land at {:?}", pose.p);
                     // The line from the camera to the point, a metre at a time.
                     let len = ((px - tx).powi(2) + (pz - tz).powi(2)).sqrt();
@@ -357,4 +372,158 @@ fn a_shot_lets_go_with_what_it_framed_still_in_frame() {
             .all(|&(_, a)| a <= rig.num("framing_angle") + 0.5),
         "degrees off the rig's centre: {off:?}"
     );
+}
+
+/// E3.13: at the near end the camera stands about 3 m behind you and 2 m
+/// up, nearly level, a little to your right, looking past you at chest
+/// height. You're in frame, left of the middle, and the street ahead fills
+/// the rest.
+#[test]
+fn the_near_end_stands_over_your_shoulder() {
+    let rig = Rig::load();
+    for yaw in yaws() {
+        let (fx, fz) = (0.0, 200.0);
+        let pose = rig.pose(fx, fz, 0.0, yaw);
+        let [px, py, pz] = pose.p;
+        let [tx, ty, tz] = pose.t;
+        let height = py - GROUND;
+        assert!((1.8..2.4).contains(&height), "{height} m up");
+        let behind = ((px - fx as f32).powi(2) + (pz - fz as f32).powi(2)).sqrt();
+        assert!((2.6..3.6).contains(&behind), "{behind} m from you");
+        // It looks ahead of you: further from the camera than you are
+        let to_look = ((tx - px).powi(2) + (tz - pz).powi(2)).sqrt();
+        assert!(to_look > behind, "looks past you");
+        assert!((ty - GROUND - 1.6).abs() < 0.01, "at chest height");
+        // You, at chest height, in frame and left of the middle
+        let d = [fx as f32 - px, GROUND + 1.0 - py, fz as f32 - pz];
+        let f = {
+            let v = [tx - px, ty - py, tz - pz];
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            v.map(|x| x / l)
+        };
+        let r = {
+            let v = [-f[2], 0.0, f[0]];
+            let l = (v[0] * v[0] + v[2] * v[2]).sqrt();
+            v.map(|x| x / l)
+        };
+        let along = d[0] * f[0] + d[1] * f[1] + d[2] * f[2];
+        let half_h = (VFOV / 2.0).to_radians().tan() as f32 * 16.0 / 9.0;
+        let x = (d[0] * r[0] + d[2] * r[2]) / along / half_h;
+        assert!(along > NEAR + 1.0, "you're past the near plane: {along}");
+        assert!((-0.6..-0.02).contains(&x), "you at screen x {x:.2}, yaw {yaw:.2}");
+    }
+}
+
+#[test]
+fn the_dial_runs_smoothly_through_the_shoulder() {
+    let rig = Rig::load();
+    let mut last: Option<Pose> = None;
+    for zoom in zooms().take_while(|&z| z <= 0.6) {
+        let pose = rig.pose(0.0, 200.0, zoom, 0.4);
+        if let Some(prev) = &last {
+            let step = (0..3).map(|i| (pose.p[i] - prev.p[i]).powi(2)).sum::<f32>().sqrt();
+            let look = (0..3).map(|i| (pose.t[i] - prev.t[i]).powi(2)).sum::<f32>().sqrt();
+            let d = (0..3).map(|i| (pose.p[i] - pose.t[i]).powi(2)).sum::<f32>().sqrt();
+            assert!(step < 0.06 * d.max(4.0), "the camera jumps {step} m at zoom {zoom:.3}");
+            assert!(look < 0.2, "the look jumps {look} m at zoom {zoom:.3}");
+        }
+        last = Some(pose);
+    }
+}
+
+/// A rig of the script's, as the live one is, for the functions that keep
+/// state (`this`).
+fn with_this(rig: &Rig, state: &mut rhai::Dynamic, name: &str, args: impl FuncArgs) {
+    let options = CallFnOptions::new().eval_ast(false).bind_this_ptr(state);
+    rig.engine
+        .call_fn_with_options::<()>(options, &mut Scope::new(), &rig.ast, name, args)
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+}
+
+#[test]
+fn a_wall_brings_the_camera_in_along_its_line_but_not_onto_you() {
+    let rig = Rig::load();
+    let pose = Map::from_iter([
+        ("px".into(), 0.0_f64.into()),
+        ("py".into(), 2.0_f64.into()),
+        ("pz".into(), 4.0_f64.into()),
+        ("tx".into(), 0.0_f64.into()),
+        ("ty".into(), 2.0_f64.into()),
+        ("tz".into(), 0.0_f64.into()),
+    ]);
+    let pulled = |share: f64| -> f64 {
+        let m: Map = rig.call("pulled", (pose.clone(), share));
+        m["pz"].as_float().unwrap()
+    };
+    assert_eq!(pulled(1.0), 4.0);
+    assert!((pulled(0.5) - 2.0).abs() < 1e-9, "half way in");
+    assert!((pulled(0.0) - rig.num("pull_least")).abs() < 1e-9, "never onto you");
+    // Far out, walls don't pull it: 1 whatever stands about
+    let head: rhai::Array = vec![0.0_f64.into(), 1.6_f64.into(), 0.0_f64.into()];
+    let far: f64 = rig.call("clear_share", (pose.clone(), 40.0_f64, head));
+    assert_eq!(far, 1.0);
+    // Lifted, it looks at the same point from higher up
+    let up: Map = rig.call("lifted", (pose.clone(), 1.5_f64));
+    assert_eq!((up["py"].as_float().unwrap(), up["ty"].as_float().unwrap()), (3.5, 2.0));
+}
+
+#[test]
+fn walking_swings_the_camera_behind_you_close_in_only() {
+    let rig = Rig::load();
+    // As the script reads a look direction: camera at (sin, cos) from you
+    let behind = |vx: f64, vz: f64| -> f64 { (-vx).atan2(-vz) };
+    let step = |yaw: f64, zoom: f64, since: f64| -> f64 { rig.call("follow_yaw", (yaw, -1.5_f64, 0.0_f64, zoom, since, 0.1_f64)) };
+    // Walking west at the shoulder: the yaw moves toward behind you
+    let target = behind(-1.5, 0.0);
+    let mut yaw = 0.0;
+    for _ in 0..200 {
+        yaw = step(yaw, 0.0, 10.0);
+    }
+    assert!((yaw - target).abs() < 0.01, "{yaw} toward {target}");
+    // Not at street zoom, not just after you've turned it, not standing still
+    assert_eq!(step(0.0, rig.num("street_zoom"), 10.0), 0.0);
+    assert_eq!(step(0.0, 0.0, 0.5), 0.0);
+    let still: f64 = rig.call("follow_yaw", (0.0_f64, 0.1_f64, 0.0_f64, 0.0_f64, 10.0_f64, 0.1_f64));
+    assert_eq!(still, 0.0);
+}
+
+#[test]
+fn the_bazaar_takes_the_view_down_and_gives_it_back() {
+    let rig = Rig::load();
+    let street = rig.num("street_zoom");
+    let state = |zoom: f64| {
+        rhai::Dynamic::from_map(Map::from_iter([
+            ("zoom_to".into(), zoom.into()),
+            ("in_bazaar".into(), false.into()),
+            ("before".into(), rhai::Dynamic::UNIT),
+            ("zoomed".into(), false.into()),
+            ("arriving".into(), false.into()),
+        ]))
+    };
+    let zoom_to = |s: &rhai::Dynamic| s.clone().cast::<Map>()["zoom_to"].as_float().unwrap();
+
+    // In: down to the shoulder; out: back to the street
+    let mut s = state(street);
+    with_this(&rig, &mut s, "bazaar_ease", (true,));
+    assert_eq!(zoom_to(&s), 0.0);
+    with_this(&rig, &mut s, "bazaar_ease", (true,));
+    assert_eq!(zoom_to(&s), 0.0, "once, as you come in");
+    with_this(&rig, &mut s, "bazaar_ease", (false,));
+    assert!((zoom_to(&s) - street).abs() < 1e-9);
+
+    // A wheel turned inside counts: leaving keeps it
+    let mut s = state(street);
+    with_this(&rig, &mut s, "bazaar_ease", (true,));
+    let mut m = s.cast::<Map>();
+    m.insert("zoomed".into(), true.into());
+    m.insert("zoom_to".into(), 0.12.into());
+    let mut s = rhai::Dynamic::from_map(m);
+    with_this(&rig, &mut s, "bazaar_ease", (false,));
+    assert!((zoom_to(&s) - 0.12).abs() < 1e-9);
+
+    // Already close in, it's left alone, coming and going
+    let mut s = state(0.02);
+    with_this(&rig, &mut s, "bazaar_ease", (true,));
+    with_this(&rig, &mut s, "bazaar_ease", (false,));
+    assert!((zoom_to(&s) - 0.02).abs() < 1e-9);
 }

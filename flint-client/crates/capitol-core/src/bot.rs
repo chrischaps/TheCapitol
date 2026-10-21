@@ -174,6 +174,11 @@ pub enum BotError {
     /// node is out of range. `reason` is the server's, or says it never answered.
     #[error("the server didn't start extracting node {node_id}: {reason}")]
     Refused { node_id: Uuid, reason: String },
+    /// Someone asked to trade (C1.5), and a bot that
+    /// [answers trades](Bot::answer_trades) stopped what it was doing: a
+    /// walk, where it stands. Nothing went wrong; the step can be taken again.
+    #[error("{0} asked to trade")]
+    Interrupted(String),
     #[error("{0}")]
     Failed(String),
 }
@@ -254,6 +259,8 @@ pub struct Bot {
     dropped: Option<String>,
     /// Why the server ended the session for good.
     ended: Option<String>,
+    /// Walks stop for a trade request ([`Bot::answer_trades`]).
+    answers_trades: bool,
 }
 
 impl Bot {
@@ -332,6 +339,7 @@ impl Bot {
             live: false,
             dropped: None,
             ended: None,
+            answers_trades: false,
         })
     }
 
@@ -381,6 +389,41 @@ impl Bot {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// From now on a trade request stops a walk where the bot stands, with
+    /// [`BotError::Interrupted`], so a citizen can answer it within the
+    /// request's 30 s and the trade's range (C1.5). Off by default.
+    pub fn answer_trades(&mut self, on: bool) {
+        self.answers_trades = on;
+    }
+
+    /// Runs one of the store's trade actions (`trade_accept_request`,
+    /// `trade_offer` and the rest) and sends what it returns. A refusal is
+    /// the store's: nothing is sent.
+    pub fn trade_act(
+        &mut self,
+        action: impl FnOnce(&mut GameState, Instant) -> Result<ClientMessage, crate::state::TradeRefusal>,
+    ) -> Result<(), crate::state::TradeRefusal> {
+        let message = action(&mut self.state, Instant::now())?;
+        self.send(message);
+        Ok(())
+    }
+
+    /// Someone has asked to trade, and the bot answers trades.
+    pub fn asked_to_trade(&self) -> bool {
+        self.answers_trades && asked(&self.state)
+    }
+
+    /// Stops where it stands for a trade request.
+    fn interrupted(&mut self) -> BotError {
+        let (x, y) = self.position();
+        self.send(ClientMessage::Move { x, y });
+        let who = match self.state.trade() {
+            crate::state::Trade::Incoming { name, .. } => name.clone(),
+            _ => "someone".into(),
+        };
+        BotError::Interrupted(who)
     }
 
     pub fn state(&self) -> &GameState {
@@ -721,20 +764,26 @@ impl Bot {
         if distance < ARRIVED {
             return Ok(());
         }
+        if self.asked_to_trade() {
+            return Err(self.interrupted());
+        }
         self.send(ClientMessage::Move { x, y });
         let secs = secs.unwrap_or(distance / rules::PLAYER_SPEED);
         let timeout = Duration::from_secs_f64(secs * 1.5 + 5.0);
+        let answers = self.answers_trades;
         let seen = self.until(
             &format!("arriving at ({x:.0}, {y:.0})"),
             timeout,
             |s, seen| {
                 blocked(seen).is_some()
+                    || (answers && asked(s))
                     || s.local_player()
                         .is_some_and(|p| (p.x - x).hypot(p.y - y) < ARRIVED)
             },
         )?;
         match blocked(&seen) {
             Some(e) => Err(e),
+            None if self.asked_to_trade() => Err(self.interrupted()),
             None => Ok(()),
         }
     }
@@ -819,6 +868,9 @@ impl Bot {
             self.link()?;
             if let Some(e) = blocked(&changes) {
                 return Err(e);
+            }
+            if self.asked_to_trade() {
+                return Err(self.interrupted());
             }
             if changes
                 .iter()
@@ -1315,6 +1367,20 @@ impl Bot {
             return Ok(());
         };
         self.walk_to(hall.door.0, hall.door.1)
+    }
+
+    /// Walks to the bazaar's gate (E3.10), on the avenue across from the
+    /// hall, round the water from wherever the bot is (#211). A world
+    /// without a bazaar needs no walk.
+    pub fn go_to_bazaar(&mut self) -> Result<(), BotError> {
+        let Some(bazaar) = self.landmark(|l| l.kind == LandmarkKind::Bazaar)? else {
+            return Ok(());
+        };
+        let (x, y) = self.position();
+        if bazaar.distance_to(x, y) > 0.0 {
+            self.down_the_avenue(bazaar.door.1)?;
+        }
+        self.walk_to(bazaar.door.0, bazaar.door.1)
     }
 
     /// Onto the south arterial's crown at `y`: the way in to the bazaar,
@@ -1889,6 +1955,11 @@ impl Bot {
     }
 }
 
+/// Someone has asked us to trade, and we haven't answered.
+fn asked(state: &GameState) -> bool {
+    matches!(state.trade(), crate::state::Trade::Incoming { .. })
+}
+
 /// The server's refusal of `command`, if `seen` holds one.
 fn refusal(seen: &[StateEvent], command: &str) -> Option<String> {
     seen.iter().find_map(|e| match e {
@@ -2106,6 +2177,7 @@ mod tests {
             live: false,
             dropped: None,
             ended: None,
+            answers_trades: false,
         };
         let draws: Vec<f64> = (0..1000).map(|_| bot.random()).collect();
         assert!(draws.iter().all(|r| (0.0..1.0).contains(r)));

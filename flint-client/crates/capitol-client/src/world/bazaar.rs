@@ -512,6 +512,15 @@ impl BazaarLayer {
         &self.signs
     }
 
+    /// Every stall as a solid, up to its back wall's top, for the camera to
+    /// keep out of (E3.13).
+    pub fn solids(&self) -> impl Iterator<Item = crate::world::solids::Solid> + '_ {
+        self.frames.iter().map(|f| {
+            let r = f.rect(0.0, f.depth, -f.width / 2.0, f.width / 2.0);
+            crate::world::solids::Solid { corners: [r[0], r[1], r[2], r[3]], bottom: PAVE, top: WALL_TOP }
+        })
+    }
+
     /// Whether a stall stands between `eye` and `at` (world metres), so a
     /// name written at `at` would show through its roof. Each stall is a
     /// solid: its floor up to its roof, which slopes from its back wall down
