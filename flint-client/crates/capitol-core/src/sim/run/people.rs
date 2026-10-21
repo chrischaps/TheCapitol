@@ -1,32 +1,139 @@
 //! A citizen among people (C1.5): answering trades, standing bids for what
 //! its trade needs, and a stall for what it makes more of than the hall
-//! takes. Everything here follows the normal rules and pays the normal
-//! costs: the fee on a bid, the rent on a stall (D2).
+//! takes. Among other citizens it asks for trades too (#295). Everything
+//! here follows the normal rules and pays the normal costs: the fee on a
+//! bid, the rent on a stall (D2).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use capitol_protocol::rest::PlaceOrder;
 use capitol_protocol::rules::bazaar::{RENT_DAY_SECS, MAX_SHOP_NAME};
 use capitol_protocol::rules::market::OrderSide;
+use uuid::Uuid;
 
 use super::super::plan::Holdings;
+use super::super::report::Entry;
 use super::super::{Trade, STALL_DAYS};
 use super::{Action, SimBot};
 use crate::bazaar;
 use crate::bot::BotError;
 use crate::citizen::decide::log::Fate;
 use crate::citizen::decide::{Choice, Question, Who};
-use crate::citizen::meet::{self, Answering, Met};
+use crate::citizen::meet::{self, Answering, Asking, Met, Neighbour};
 use crate::citizen::town::{Standing, Tether};
 
 /// A standing bid is taken down and thought over again after this many
 /// game seconds, at the citizen's next visit to the hall.
 const BID_LIFE: f64 = 3600.0;
+/// How far from its spot a lingering citizen looks for a citizen to ask
+/// (#295): about fifteen metres, across the hall's steps.
+const ASK_REACH: f64 = 150.0;
+/// Game seconds before it asks the same citizen again: half a game hour.
+const ASK_AGAIN: f64 = 1800.0;
+/// How close it stands to ask: about a metre and a quarter, as it stands
+/// with company (C2.1).
+const BESIDE: f64 = 12.0;
 
 impl SimBot {
     /// Answers the trade someone asked for, where the citizen stands.
     pub(super) fn meet(&mut self, town: Option<&Tether>) -> Result<(), BotError> {
-        let me = Answering {
+        let me = self.answering();
+        let citizen = match self.bot.state().trade() {
+            crate::state::Trade::Incoming { name, citizen, .. } => {
+                if let Some(town) = town {
+                    let doing = format!("trading with {name}");
+                    town.health(|h| h.doing(Standing::Working, &doing));
+                }
+                *citizen
+            }
+            _ => false,
+        };
+        let mark = self.mind.mark();
+        let met = meet::answer(&mut self.bot, &mut self.mind, &me);
+        self.after_trade(mark, town, met, citizen, false)
+    }
+
+    /// While it lingers `about` a spot among others, whether to ask a
+    /// citizen near it to trade (#295): the mind's answer from
+    /// [`meet::ask_menu`], and if it says ask, over beside them and the
+    /// asking. Each is asked once in [`ASK_AGAIN`] at most. `true` if it
+    /// asked someone.
+    pub(super) fn ask_around(&mut self, about: (f64, f64), town: Option<&Tether>) -> Result<bool, BotError> {
+        if !self.people {
+            return Ok(false);
+        }
+        let now = Instant::now();
+        let again = self.wall(ASK_AGAIN);
+        self.asked.retain(|_, at| now.duration_since(*at) < again);
+        let neighbours: Vec<Neighbour> = meet::neighbours(self.bot.state(), about, ASK_REACH)
+            .into_iter()
+            .filter(|n| !self.asked.contains_key(&n.id))
+            .collect();
+        let holdings = self.holdings();
+        let market = meet::quotes(self.bot.state());
+        let Some(menu) = meet::ask_menu(self.role, &holdings, &market, &neighbours) else {
+            return Ok(false);
+        };
+        let mark = self.mind.mark();
+        let rest = menu.len() - 1;
+        let (partner, asking) = match self.decide(Question::Ask, menu, rest, &holdings) {
+            Some((d, Choice::BuyFrom { partner, item, .. })) => (
+                partner,
+                Asking::Buy {
+                    item,
+                    quantity: d.quantity.unwrap_or(1),
+                    price: d.price.unwrap_or(1),
+                },
+            ),
+            Some((d, Choice::SellTo { partner, item, .. })) => (
+                partner,
+                Asking::Sell {
+                    item,
+                    quantity: d.quantity.unwrap_or(1),
+                },
+            ),
+            _ => {
+                self.settle(mark, None, &Ok(()));
+                return Ok(false);
+            }
+        };
+        let Some(them) = neighbours.iter().find(|n| n.name == partner).map(|n| n.id) else {
+            self.settle(mark, None, &Ok(()));
+            return Ok(false);
+        };
+        self.asked.insert(them, now);
+        if let Some(town) = town {
+            let doing = asking.label(&partner);
+            town.health(|h| h.doing(Standing::Working, &doing));
+        }
+        let me = self.answering();
+        let met = self.step_up_to(them).and_then(|()| meet::ask(&mut self.bot, &mut self.mind, &me, them, &asking));
+        self.after_trade(mark, town, met, true, true)?;
+        Ok(true)
+    }
+
+    /// Over to beside the player `them`, near enough to trade, turned
+    /// their way.
+    fn step_up_to(&mut self, them: Uuid) -> Result<(), BotError> {
+        let Some((ox, oy)) = self.bot.state().player(them).map(|p| (p.x, p.y)) else {
+            return Ok(());
+        };
+        let (x, y) = self.bot.position();
+        let (dx, dy) = (x - ox, y - oy);
+        let d = dx.hypot(dy);
+        if d > BESIDE * 1.5 {
+            // Blocked short of them: the ask finds them out of range
+            match self.bot.walk_to(ox + dx / d * BESIDE, oy + dy / d * BESIDE) {
+                Ok(()) | Err(BotError::Blocked { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        self.bot.face(ox, oy)
+    }
+
+    /// The citizen as a trade's cascade sees it.
+    fn answering(&self) -> Answering<'static> {
+        Answering {
             who: Who {
                 name: self.bot.name().to_string(),
                 role: self.role.slug().to_string(),
@@ -34,15 +141,22 @@ impl SimBot {
             },
             product: self.role.product(),
             hours: self.now(),
-        };
-        if let (Some(town), crate::state::Trade::Incoming { name, .. }) = (town, self.bot.state().trade()) {
-            let doing = format!("trading with {name}");
-            town.health(|h| h.doing(Standing::Working, &doing));
         }
-        let mark = self.mind.mark();
-        let met = meet::answer(&mut self.bot, &mut self.mind, &me);
+    }
+
+    /// What a trade it was in came to, since `mark`: the trade's last
+    /// decision logged with it (C3.1), a trade that went through written
+    /// down for the report (with a `citizen` or a person, and whether it
+    /// `asked`), and the health line.
+    fn after_trade(
+        &mut self,
+        mark: usize,
+        town: Option<&Tether>,
+        met: Result<Met, BotError>,
+        citizen: bool,
+        asked: bool,
+    ) -> Result<(), BotError> {
         self.journal();
-        // The trade's last decision, which it came to (C3.1)
         let fate = match &met {
             Ok(Met::Traded { .. }) => Fate::Traded,
             Ok(Met::Declined { .. }) => Fate::Declined,
@@ -52,6 +166,14 @@ impl SimBot {
         let after = meet::held(self.bot.state());
         self.mind.settle(mark, &after, |_| fate.clone());
         let met = met?;
+        if let Met::Traded { strands, .. } = &met {
+            self.entries.push(Entry::Dealt {
+                citizen,
+                asked,
+                strands: *strands,
+                at: self.now(),
+            });
+        }
         if let Some(town) = town {
             town.health(|h| h.doing(Standing::Working, &met.label()));
         }

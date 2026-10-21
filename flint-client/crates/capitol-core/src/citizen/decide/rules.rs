@@ -33,6 +33,12 @@
 //! People (C1.5): a standing bid is at the books' price (under it for the
 //! thrifty, who'd sooner gather), a stall's price above it (more for the
 //! bold), and a P2P trade is weighed whole at the books ([`trade`]).
+//!
+//! Asking (#295): a citizen lingering among others asks one who makes what
+//! its trade needs to sell it some, or one whose trade needs what it makes
+//! to buy, the more readily the more sociable (a thrifty buyer a little
+//! less), against resting where it is. It asks for what it would bid for at
+//! the books, and offers all it holds.
 
 use super::{Choice, Decider, Decision, Lot, Question, Quote, Situation, Verdict};
 use crate::sim::{BANK_FIBER_AT, LOT, MERCHANT_FLOAT, SELL_AT, STALL_AT};
@@ -147,6 +153,26 @@ impl Decider for RulesDecider {
                 Choice::Bridge { .. } => (0.65 + 0.2 * t.patience as f64 + whim(s, i), Decision::plain(i)),
                 Choice::Stall { .. } => (0.55 + 0.3 * t.patience as f64 + whim(s, i), Decision::plain(i)),
                 Choice::Home => (0.75, Decision::plain(i)),
+                // Asking a neighbour (#295): for a lot at the books' price,
+                // or to take all it holds; more readily the more sociable
+                Choice::BuyFrom { item, price, quantity, .. } => {
+                    let w = worth(s, item).unwrap_or(price.min);
+                    let want = (LOT as f64 * (1.5 - t.thrift as f64)).round() as i32;
+                    let d = Decision {
+                        pick: i,
+                        price: Some(price.clamp(w.max(1))),
+                        quantity: Some(quantity.clamp(want)),
+                    };
+                    (0.8 + 0.25 * t.sociability as f64 - 0.2 * t.thrift as f64, d)
+                }
+                Choice::SellTo { item, quantity, .. } => {
+                    let d = Decision {
+                        pick: i,
+                        price: None,
+                        quantity: Some(quantity.clamp(s.holdings.count(item))),
+                    };
+                    (0.65 + 0.25 * t.sociability as f64, d)
+                }
             };
             scored.push((i, u, d));
         }
@@ -700,6 +726,50 @@ mod tests {
         assert_eq!(d, Decision { pick: 0, price: Some(12), quantity: Some(2 * STALL_AT) });
         assert_eq!(decide(&stall(STALL_AT - 1, Temperament::default())).0.pick, 1);
         assert_eq!(decide(&stall(2 * STALL_AT, with(|t| t.risk = 0.0))).0.price, Some(11));
+    }
+
+    #[test]
+    fn a_sociable_citizen_asks_its_neighbour_and_a_shy_one_rests() {
+        let ask = |t, selling: bool| {
+            let mut menu = vec![
+                Choice::BuyFrom {
+                    partner: "Ada Woodward".into(),
+                    item: "log".into(),
+                    price: Span::new(5, 15),
+                    quantity: Span::new(1, 20),
+                },
+                Choice::Rest,
+            ];
+            if selling {
+                menu.insert(
+                    1,
+                    Choice::SellTo {
+                        partner: "Ivor Mason".into(),
+                        item: "plank".into(),
+                        quantity: Span::new(1, 14),
+                    },
+                );
+            }
+            let mut s = situation(Question::Ask, menu, t);
+            s.holdings.items.insert("plank".into(), 14);
+            s.market.push(Quote {
+                item: "log".into(),
+                bid: None,
+                ask: None,
+                last: Some(10),
+            });
+            s
+        };
+        // Middling: a lot of logs at the books, surely enough
+        let (d, conf) = decide(&ask(Temperament::default(), false));
+        assert_eq!(d, Decision { pick: 0, price: Some(10), quantity: Some(LOT) });
+        assert!(conf >= super::super::RULES_THRESHOLD, "{conf}");
+        assert_eq!(decide(&ask(Temperament::default(), true)).0.pick, 0);
+        // Thrifty: sells before it buys, and offers all it holds
+        let thrifty = with(|t| t.thrift = 1.0);
+        assert_eq!(decide(&ask(thrifty, true)).0, Decision { pick: 1, price: None, quantity: Some(14) });
+        // Shy: leaves them be
+        assert_eq!(decide(&ask(with(|t| t.sociability = 0.0), true)).0.pick, 2);
     }
 
     #[test]

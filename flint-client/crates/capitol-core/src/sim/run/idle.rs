@@ -204,8 +204,9 @@ impl SimBot {
     }
 
     /// Stands until `end`, or until someone asks to trade or the town says
-    /// stop. Every [`DRIFT_EVERY`], a sociable citizen standing `about` a
-    /// spot may drift over to someone near it.
+    /// stop. Every [`DRIFT_EVERY`], a citizen standing `about` a spot may
+    /// ask a citizen near it to trade (#295), or if it doesn't, and it's
+    /// sociable, drift over to someone near it.
     pub(super) fn stay(&mut self, end: Instant, town: Option<&Tether>, about: Option<Point>) -> Result<(), BotError> {
         let first = DRIFT_EVERY * self.random();
         let mut drift_at = Instant::now() + self.wall(first);
@@ -219,7 +220,9 @@ impl SimBot {
             }
             if let Some(about) = about.filter(|_| Instant::now() >= drift_at) {
                 drift_at = Instant::now() + self.wall(DRIFT_EVERY);
-                self.drift(about)?;
+                if !self.ask_around(about, town)? {
+                    self.drift(about)?;
+                }
             }
             self.bot.idle(left.min(STOP_CHECK))?;
         }

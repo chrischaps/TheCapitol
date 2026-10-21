@@ -209,6 +209,9 @@ pub enum Question {
     /// Whether a merchant makes a market with its float now, or goes on
     /// earning it (C1.6).
     Market,
+    /// Whether to ask a citizen nearby to trade, and what for, while it
+    /// lingers among others (#295, [`meet::ask`](crate::citizen::meet::ask)).
+    Ask,
 }
 
 impl Question {
@@ -222,6 +225,7 @@ impl Question {
             Question::Trade { partner, .. } => format!("trade {partner}"),
             Question::FreeTime => "free time".into(),
             Question::Market => "market".into(),
+            Question::Ask => "ask".into(),
         }
     }
 }
@@ -325,6 +329,23 @@ pub enum Choice {
     Stall { stall: String },
     /// Go straight home at dusk (C2.1).
     Home,
+    /// Ask `partner`, a citizen nearby whose trade makes `item`, to sell
+    /// some (#295): it puts up Strands for them in the window, about
+    /// `price` each for `quantity`. Needs a price and a quantity.
+    BuyFrom {
+        partner: String,
+        item: String,
+        price: Span<i64>,
+        quantity: Span<i32>,
+    },
+    /// Ask `partner`, a citizen nearby whose trade needs `item`, to buy
+    /// some (#295): it lays `quantity` out in the window, and they say what
+    /// they'd pay. Needs a quantity.
+    SellTo {
+        partner: String,
+        item: String,
+        quantity: Span<i32>,
+    },
 }
 
 impl Choice {
@@ -334,8 +355,10 @@ impl Choice {
             Choice::Sell { price, quantity, .. }
             | Choice::Buy { price, quantity, .. }
             | Choice::Bid { price, quantity, .. }
-            | Choice::Stock { price, quantity, .. } => (Some(*price), Some(*quantity)),
+            | Choice::Stock { price, quantity, .. }
+            | Choice::BuyFrom { price, quantity, .. } => (Some(*price), Some(*quantity)),
             Choice::Counter { strands } | Choice::Pay { strands } => (Some(*strands), None),
+            Choice::SellTo { quantity, .. } => (None, Some(*quantity)),
             _ => (None, None),
         }
     }

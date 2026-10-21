@@ -847,6 +847,114 @@ fn a_citizen_counters_a_short_offer_declines_a_lowball_and_takes_a_fair_one() {
     assert!(matches!(&met[1], Met::Traded { .. }), "{met:?}");
 }
 
+/// #295, two citizens through `meet::ask` and `meet::answer`, the town's own
+/// code on both sides: a planks crafter asks a wood gatherer for ten logs,
+/// is shown all forty, puts up ten logs' worth and is countered down to ten,
+/// and the trade goes through. Then the gatherer asks the crafter to buy ten
+/// more, lays them out, and takes what the crafter pays at its books.
+#[test]
+#[ignore = "needs a local stack with DEV_GRANTS=on: docker-compose up -d, then cargo run in backend/"]
+fn two_citizens_trade_when_one_asks_the_other() {
+    use capitol_core::citizen::decide::{Mind, Temperament, Who};
+    use capitol_core::citizen::meet::{self, Answering, Asking, Met};
+
+    let mut wood = Bot::sign_in(live(), &Account::numbered(&format!("woodward{}", stamp()), 1)).expect("signed in");
+    let mut saw = Bot::sign_in(live(), &Account::numbered(&format!("sawyer{}", stamp()), 1)).expect("signed in");
+    granted(&mut wood, 0, &[("log", 40, 50)]);
+    granted(&mut saw, 500, &[]);
+    saw.go_to_exchange().expect("the sawyer reached the hall");
+    wood.watch_market("log").expect("the log book");
+    saw.watch_market("log").expect("the log book");
+    if meet::worth(saw.state(), "log").is_none() {
+        use capitol_core::protocol::rest::PlaceOrder;
+        use capitol_core::protocol::rules::market::OrderSide;
+        saw.place_order(PlaceOrder {
+            side: OrderSide::Buy,
+            item_type: "log".into(),
+            price: 10,
+            quantity: 1,
+            item_id: None,
+            qualities: None,
+            min_grade: None,
+            grade_rule: None,
+        })
+        .expect("a bid to price logs by");
+    }
+    for bot in [&mut wood, &mut saw] {
+        bot.until("a worth", Duration::from_secs(5), |s, _| meet::worth(s, "log").is_some()).expect("logs have a worth");
+    }
+    let worth = meet::worth(saw.state(), "log").unwrap();
+    assert_eq!(meet::worth(wood.state(), "log"), Some(worth), "both see the same books");
+    // Side by side on the hall's floor
+    let (wood_id, saw_id) = (wood.state().me().unwrap(), saw.state().me().unwrap());
+    let (x, y) = wood.position();
+    saw.walk_to(x + 12.0, y).expect("beside the woodcutter");
+    for (bot, other) in [(&mut wood, saw_id), (&mut saw, wood_id)] {
+        bot.until("each other in sight", Duration::from_secs(10), |s, _| s.player(other).is_some()).expect("in sight");
+    }
+    let me = |bot: &Bot, role: &str, product: Option<&'static str>| Answering {
+        who: Who {
+            name: bot.name().to_string(),
+            role: role.into(),
+            temperament: Temperament::default(),
+        },
+        product,
+        hours: 0.0,
+    };
+    // Answers one trade, on a thread of its own
+    let answer_one = |mut bot: Bot, role: &'static str, product: Option<&'static str>| {
+        thread::spawn(move || {
+            bot.answer_trades(true);
+            let me = me(&bot, role, product);
+            let mut mind = Mind::rules();
+            let end = Instant::now() + Duration::from_secs(60);
+            while Instant::now() < end {
+                if bot.asked_to_trade() {
+                    let met = meet::answer(&mut bot, &mut mind, &me).expect("answered");
+                    return (bot, Some(met));
+                }
+                bot.idle(Duration::from_millis(100)).expect("idle");
+            }
+            (bot, None)
+        })
+    };
+
+    // The sawyer asks for ten logs: shown forty, countered down to ten.
+    // Its balance less any bid it priced logs by
+    let before = saw.state().strands().expect("a balance");
+    let answering = answer_one(wood, "gatherer-wood", Some("log"));
+    let buying = Asking::Buy {
+        item: "log".into(),
+        quantity: 10,
+        price: worth,
+    };
+    let sawyer = me(&saw, "crafter-planks", Some("plank"));
+    let asked = meet::ask(&mut saw, &mut Mind::rules(), &sawyer, wood_id, &buying).expect("asked");
+    let (mut wood, answered) = answering.join().expect("the woodcutter's thread");
+    assert_eq!(asked, Met::Traded { partner: wood.name().to_string(), strands: -10 * worth });
+    assert!(matches!(answered, Some(Met::Traded { strands, .. }) if strands == 10 * worth), "{answered:?}");
+    saw.settle().expect("refetched");
+    saw.until("the logs", Duration::from_secs(10), |s, _| s.strands() == Some(before - 10 * worth)).expect("paid ten logs' worth");
+    assert_eq!(saw.count(container_type::PLAYER_INVENTORY, "log"), 10);
+
+    // The woodcutter asks the sawyer to buy ten more, at its books
+    let answering = answer_one(saw, "crafter-planks", Some("plank"));
+    let selling = Asking::Sell {
+        item: "log".into(),
+        quantity: 10,
+    };
+    let woodward = me(&wood, "gatherer-wood", Some("log"));
+    let asked = meet::ask(&mut wood, &mut Mind::rules(), &woodward, saw_id, &selling).expect("asked");
+    let (mut saw, answered) = answering.join().expect("the sawyer's thread");
+    assert_eq!(asked, Met::Traded { partner: saw.name().to_string(), strands: 10 * worth });
+    assert!(matches!(answered, Some(Met::Traded { .. })), "{answered:?}");
+    saw.settle().expect("refetched");
+    saw.until("the logs", Duration::from_secs(10), |s, _| s.strands() == Some(before - 20 * worth)).expect("paid for ten more");
+    assert_eq!(saw.count(container_type::PLAYER_INVENTORY, "log"), 20);
+    wood.settle().expect("refetched");
+    assert_eq!(wood.count(container_type::PLAYER_INVENTORY, "log"), 20);
+}
+
 /// C1.5's second check, against a running town (`capitol-town`, a server of
 /// its own with `DEV_GRANTS=on` for the person only): a person sells ten
 /// logs at the market's price, and somebody buys them within a game hour.

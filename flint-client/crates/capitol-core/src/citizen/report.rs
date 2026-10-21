@@ -198,6 +198,40 @@ pub struct TownReport {
     pub soak: Option<Soak>,
     /// Hours of the day's clock the town ran (a game day is 24)
     pub day_hours: f64,
+    pub in_person: InPerson,
+}
+
+/// Trades made in a trade window rather than at the hall (C1.5, #295).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InPerson {
+    /// With people
+    pub with_people: usize,
+    /// Between two citizens, each counted once, from the one that asked
+    pub between_citizens: usize,
+    /// The Strands that changed hands between citizens
+    pub strands: i64,
+}
+
+impl InPerson {
+    fn count(runs: &[(BotRun, BTreeMap<String, u64>)]) -> InPerson {
+        let mut n = InPerson::default();
+        for entry in runs.iter().flat_map(|(run, _)| &run.entries) {
+            match entry {
+                Entry::Dealt { citizen: false, .. } => n.with_people += 1,
+                Entry::Dealt {
+                    citizen: true,
+                    asked: true,
+                    strands,
+                    ..
+                } => {
+                    n.between_citizens += 1;
+                    n.strands += strands.abs();
+                }
+                _ => {}
+            }
+        }
+        n
+    }
 }
 
 impl TownReport {
@@ -256,6 +290,7 @@ impl TownReport {
             sim: Report::build(&bot_runs, tick_hours, scale, wall_secs),
             soak,
             day_hours: wall_secs / capitol_protocol::rules::DAY_LENGTH_SECS as f64 * 24.0,
+            in_person: InPerson::count(runs),
         }
     }
 
@@ -284,6 +319,13 @@ impl TownReport {
             load(&mut md, soak);
         }
         self.trades_md(&mut md);
+        let p = &self.in_person;
+        let _ = writeln!(
+            md,
+            "In trade windows: {} trades with people, {} between citizens (each asked by one), with {} Strands changing hands between citizens.
+",
+            p.with_people, p.between_citizens, p.strands
+        );
         self.citizens_md(&mut md);
         self.rulings_md(&mut md);
         md.push('\n');

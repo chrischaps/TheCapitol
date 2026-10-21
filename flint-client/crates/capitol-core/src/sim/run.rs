@@ -11,7 +11,8 @@
 //! free time and a noon break somewhere worth being, keeps a spot on the
 //! hall's steps or the bazaar's lane at market hours, drifts toward company,
 //! turns to whoever it trades with, and stops a moment beside a person it
-//! passes. A town's merchants (C1.6, [`merchant`]) earn a float and make a
+//! passes. Lingering among other citizens, it may ask one for a trade
+//! (#295). A town's merchants (C1.6, [`merchant`]) earn a float and make a
 //! market.
 
 mod idle;
@@ -342,6 +343,8 @@ struct SimBot {
     spot: Option<((f64, f64), (f64, f64))>,
     /// The day it last took its noon break (C2.1).
     noon_day: Option<i64>,
+    /// The citizens it has asked to trade lately, and when (#295).
+    asked: HashMap<Uuid, Instant>,
 }
 
 /// What a bot does next.
@@ -385,6 +388,7 @@ impl SimBot {
             merchant: None,
             spot: None,
             noon_day: None,
+            asked: HashMap::new(),
         }
     }
 

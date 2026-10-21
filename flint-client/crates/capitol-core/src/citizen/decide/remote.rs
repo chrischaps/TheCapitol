@@ -285,7 +285,7 @@ fn temperament(t: &Temperament) -> Value {
         "risk": r(t.risk),
         "risk_means": "asks above the bid, hoping someone pays up",
         "sociability": r(t.sociability),
-        "sociability_means": "spends free time among people at the hall",
+        "sociability_means": "spends free time among people at the hall, and asks the citizens there to trade",
         "patience": r(t.patience),
         "patience_means": "sells and banks in bigger lots, less often",
     })
@@ -326,6 +326,7 @@ pub fn question(q: &Question) -> String {
         ),
         Question::FreeTime => "What should you do with your free time?".into(),
         Question::Market => "Should you make a market at the hall with your float now, or go on earning it?".into(),
+        Question::Ask => "Should you ask one of the citizens near you to trade, or leave them be?".into(),
     }
 }
 
@@ -353,6 +354,8 @@ pub fn label(c: &Choice) -> String {
         Choice::Stall { .. } => "your stall".into(),
         Choice::Home => "home".into(),
         Choice::MakeMarket { .. } => "make a market".into(),
+        Choice::BuyFrom { partner, item, .. } => format!("buy {item} from {partner}"),
+        Choice::SellTo { partner, item, .. } => format!("sell {item} to {partner}"),
     }
 }
 
@@ -427,6 +430,20 @@ pub fn entry(c: &Choice) -> String {
             "Make a market in {} at the hall: quote both sides with your float of {float} Strands{}",
             items.join(", "),
             if *making { " (you're at it already)" } else { "" }
+        ),
+        Choice::BuyFrom {
+            partner,
+            item,
+            price,
+            quantity,
+        } => format!(
+            "Ask {partner}, who makes {item}, to sell you some: put up {} Strands each for {} of them",
+            range(price),
+            count(quantity)
+        ),
+        Choice::SellTo { partner, item, quantity } => format!(
+            "Ask {partner}, whose trade needs {item}, to buy some of yours: lay out {} of them and see what they pay",
+            count(quantity)
         ),
     }
 }

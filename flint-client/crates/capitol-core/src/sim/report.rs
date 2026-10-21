@@ -43,6 +43,15 @@ pub enum Entry {
     },
     /// An order's listing fee.
     Fee { strands: i64 },
+    /// A trade in a trade window went through (C1.5, #295): with a citizen
+    /// or a person, whether this bot asked for it, and the Strands that
+    /// came in (less than nothing when it paid).
+    Dealt {
+        citizen: bool,
+        asked: bool,
+        strands: i64,
+        at: f64,
+    },
 }
 
 /// One bot's run, as the report needs it.
@@ -75,6 +84,7 @@ impl BotRun {
                     expected += if *sold { value } else { -value };
                 }
                 Entry::Fee { strands } => expected -= strands,
+                Entry::Dealt { strands, .. } => expected += strands,
                 _ => {}
             }
         }
@@ -233,6 +243,9 @@ impl Report {
                     } => sales.entry(item.clone()).or_default().push((*quantity as i64, *price)),
                     Entry::Traded { .. } => {}
                     Entry::Fee { strands } => fees += strands,
+                    // The swarm trades only at the hall; a town's report
+                    // counts trades in person
+                    Entry::Dealt { .. } => {}
                 }
             }
         }

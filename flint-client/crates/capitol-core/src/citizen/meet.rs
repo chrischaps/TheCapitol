@@ -1,4 +1,5 @@
-//! Citizens meet people (C1.5): a citizen answers the trades it's asked to.
+//! Citizens meet people (C1.5): a citizen answers the trades it's asked to,
+//! and asks a citizen nearby for one (#295).
 //!
 //! There's no chat, so a citizen speaks through its side of the trade
 //! window:
@@ -24,19 +25,31 @@
 //! trade, else the middle of the book), what it can't put a worth to it
 //! won't sell, and goods it can't value it won't pay for. All of it is the
 //! trade any player makes: nothing is granted (D2).
+//!
+//! **Asking** (#295, [`ask`]). A citizen lingering among others knows the
+//! citizens near it by their trade names ([`trade_of`]), as anyone could.
+//! When one makes what its trade needs and nobody is selling it at the hall,
+//! or needs what it makes and nobody is bidding, it may ask them
+//! ([`ask_menu`], [`Question::Ask`]). It walks over and asks, and the window
+//! goes as any other: buying, it waits for their wares and puts up Strands
+//! for them, no more than it decided to spend; selling, it lays out what it
+//! offered and waits for their Strands. Both sides weigh it through the same
+//! [`Question::Trade`], each at its own books, and each turns to the other.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use capitol_protocol::rules::Zone;
+use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::ws::TradeOfferItem;
 use uuid::Uuid;
 
 use super::decide::rules::worth_in;
 use super::decide::log::Fate;
 use super::decide::{Choice, Held, Lot, Mind, Place, Question, Quote, Situation, Span, When, Who};
+use super::persona::trade_of;
 use crate::bot::{Bot, BotError, TRADE_THINK};
-use crate::sim::MARKET_ITEMS;
+use crate::sim::plan::Holdings;
+use crate::sim::{Role, LOT, MARKET_ITEMS, SELL_AT};
 use crate::state::{Container, GameState, Offer, OpenTrade, StateEvent, Trade, TradeEvent};
 
 /// How long a window may stand with nothing offered before it's closed.
@@ -45,6 +58,11 @@ pub const PATIENCE: Duration = Duration::from_secs(60);
 pub const LONGEST: Duration = Duration::from_secs(300);
 /// How long it waits for the trade to open once it has said yes.
 const OPENING: Duration = Duration::from_secs(5);
+/// How long an asker waits for the other side to put anything up: they lay
+/// out their wares as the window opens, so not long (#295).
+const ASKED_PATIENCE: Duration = Duration::from_secs(15);
+/// How many of the citizens nearby an asker thinks of asking: the nearest.
+const ASK_AMONG: usize = 3;
 
 /// The books a citizen watches, as it sees them: best bid and ask, and the
 /// last trade, of each of [`MARKET_ITEMS`].
@@ -256,8 +274,9 @@ pub fn trim(ours: &Offer, strands: i64, market: &[Quote]) -> Side {
 /// How a trade a citizen answered came out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Met {
-    /// It went through.
-    Traded { partner: String },
+    /// It went through: `strands` came to the citizen in it (less than
+    /// nothing when it paid).
+    Traded { partner: String, strands: i64 },
     /// The citizen declined it.
     Declined { partner: String },
     /// It ended otherwise: they cancelled or walked off, nobody offered
@@ -269,7 +288,7 @@ impl Met {
     /// For a health line: "traded with Ada".
     pub fn label(&self) -> String {
         match self {
-            Met::Traded { partner } => format!("traded with {partner}"),
+            Met::Traded { partner, .. } => format!("traded with {partner}"),
             Met::Declined { partner } => format!("declined {partner}'s trade"),
             Met::Ended { partner, reason } => format!("a trade with {partner} ended: {reason}"),
         }
@@ -343,13 +362,141 @@ pub fn answer(bot: &mut Bot, mind: &mut Mind, me: &Answering) -> Result<Met, Bot
         return Ok(ended(&partner, "it never opened"));
     };
     bot.say(format!("trading with {partner}"));
-    // Turned to them, as anyone at a trade stands (C2.1). Before anything
-    // is offered, so the turn's frames carry no news of the trade. Two
-    // citizens would face each other, but no citizen asks another yet (#295)
-    let facing = bot.state().open_trade().and_then(|o| bot.state().player(o.partner_id)).map(|p| (p.x, p.y));
-    if let Some((x, y)) = facing {
-        bot.face(x, y)?;
+    face_partner(bot)?;
+    let wares = window(bot.state().inventory(), me.product, &quotes(bot.state()));
+    if !wares.is_empty() {
+        let (items, strands) = wares.offer();
+        let _ = bot.trade_act(|s, now| s.trade_offer(now, items, strands));
     }
+    haggle(bot, mind, me, partner, trade_id, PATIENCE, menu)
+}
+
+/// What a citizen asks a neighbour for (#295): what a [`Choice::BuyFrom`]
+/// or [`Choice::SellTo`] came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Asking {
+    /// Their `item`, `quantity` of it at about `price` each: it puts up no
+    /// more Strands than that comes to.
+    Buy { item: String, quantity: i32, price: i64 },
+    /// `quantity` of its `item`, laid out for what they'll pay.
+    Sell { item: String, quantity: i32 },
+}
+
+impl Asking {
+    /// For a health line: "asking Ada Woodward for log".
+    pub fn label(&self, partner: &str) -> String {
+        match self {
+            Asking::Buy { item, .. } => format!("asking {partner} for {item}"),
+            Asking::Sell { item, .. } => format!("offering {partner} its {item}"),
+        }
+    }
+}
+
+/// Asks the citizen `them`, who must be within trading range, to trade
+/// (see the module's docs), and returns how it came out. `Err` only for
+/// what any call fails on.
+pub fn ask(bot: &mut Bot, mind: &mut Mind, me: &Answering, them: Uuid, asking: &Asking) -> Result<Met, BotError> {
+    let Some(partner) = bot.state().player(them).map(|p| p.name.clone()) else {
+        return Ok(ended("someone", "they'd gone"));
+    };
+    if let Err(refused) = bot.trade_act(|s, now| s.trade_initiate(now, them)) {
+        return Ok(ended(&partner, &refused.to_string()));
+    }
+    bot.say(format!("asking {partner} to trade"));
+    // They answer at their next step, within the request's life
+    let wait = Duration::from_secs(rules::TRADE_REQUEST_TTL_SECS + 5);
+    let seen = match bot.until("an answer", wait, |s, _| !matches!(s.trade(), Trade::Requested { .. })) {
+        Ok(seen) => seen,
+        Err(BotError::Timeout { .. }) => return Ok(ended(&partner, "no answer")),
+        Err(e) => return Err(e),
+    };
+    let trade_id = match bot.state().trade() {
+        Trade::Open(open) if open.partner_id == them => open.trade_id,
+        Trade::Open(_) => {
+            let _ = bot.trade_act(|s, now| s.trade_cancel(now));
+            return Ok(ended(&partner, "another trade opened"));
+        }
+        // Someone else asked meanwhile: the loop answers them
+        Trade::Incoming { .. } => return Ok(ended(&partner, "someone else asked")),
+        _ if seen.iter().any(|e| matches!(e, StateEvent::Trade(TradeEvent::Declined { .. }))) => {
+            return Ok(ended(&partner, "they said no"))
+        }
+        _ => return Ok(ended(&partner, "no answer")),
+    };
+    face_partner(bot)?;
+    match asking {
+        Asking::Buy { quantity, price, .. } => {
+            // Its Strands go up for their wares, once it sees them
+            let budget = price * *quantity as i64;
+            haggle(bot, mind, me, partner, trade_id, ASKED_PATIENCE, |deal, open, strands, market| {
+                menu(deal, open, strands.min(budget), market)
+            })
+        }
+        Asking::Sell { item, quantity } => {
+            let side = some_of(bot.state().inventory(), item, *quantity);
+            if side.is_empty() {
+                let _ = bot.trade_act(|s, now| s.trade_cancel(now));
+                return Ok(ended(&partner, "it had none to sell"));
+            }
+            let (items, strands) = side.offer();
+            let _ = bot.trade_act(|s, now| s.trade_offer(now, items, strands));
+            // Their wares are no answer: it waits for their Strands
+            haggle(bot, mind, me, partner, trade_id, PATIENCE, |deal, open, strands, market| {
+                if open.theirs.strands == 0 {
+                    return Vec::new();
+                }
+                menu(deal, open, strands, market)
+            })
+        }
+    }
+}
+
+/// Up to `quantity` of `item` from the inventory, the biggest stacks first.
+fn some_of(inventory: Option<&Container>, item: &str, quantity: i32) -> Side {
+    let mut stacks: Vec<_> = inventory
+        .into_iter()
+        .flat_map(|inv| inv.items())
+        .filter(|i| i.item_type == item && i.quantity > 0)
+        .collect();
+    stacks.sort_by_key(|i| std::cmp::Reverse(i.quantity));
+    let mut left = quantity;
+    let mut side = Side::default();
+    for stack in stacks {
+        if left <= 0 {
+            break;
+        }
+        let n = left.min(stack.quantity);
+        side.lines.push((stack.item_id, stack.item_type.clone(), n));
+        left -= n;
+    }
+    side
+}
+
+/// Turns to whoever the open trade is with, as anyone at a trade stands
+/// (C2.1). Before anything is offered, so the turn's frames carry no news
+/// of the trade. Two citizens in a trade turn to each other.
+fn face_partner(bot: &mut Bot) -> Result<(), BotError> {
+    let facing = bot.state().open_trade().and_then(|o| bot.state().player(o.partner_id)).map(|p| (p.x, p.y));
+    match facing {
+        Some((x, y)) => bot.face(x, y),
+        None => Ok(()),
+    }
+}
+
+/// The open trade `trade_id` with `partner`, until it's over: each time
+/// their side settles, it asks the cascade about it from what `menu_for`
+/// offers (an empty menu: wait for more), and says what it decided with
+/// its own side. It gives up on a window they put nothing in for
+/// `patience`.
+fn haggle(
+    bot: &mut Bot,
+    mind: &mut Mind,
+    me: &Answering,
+    partner: String,
+    trade_id: Uuid,
+    patience: Duration,
+    menu_for: impl Fn(&Deal, &OpenTrade, i64, &[Quote]) -> Vec<Choice>,
+) -> Result<Met, BotError> {
     let me_id = bot.state().me();
     // Each fresh look at their offer supersedes the last (C3.1); the
     // caller logs what the last came to
@@ -357,11 +504,8 @@ pub fn answer(bot: &mut Bot, mind: &mut Mind, me: &Answering) -> Result<Met, Bot
     let began = Instant::now();
     let mut changed = Instant::now();
     let mut deal = Deal::default();
-    let wares = window(bot.state().inventory(), me.product, &quotes(bot.state()));
-    if !wares.is_empty() {
-        let (items, strands) = wares.offer();
-        let _ = bot.trade_act(|s, now| s.trade_offer(now, items, strands));
-    }
+    // The window as last seen: what went through, if it does
+    let mut last: Option<OpenTrade> = None;
     loop {
         let changes = bot.until("a trade", Duration::ZERO, |_, _| true)?;
         for change in &changes {
@@ -371,7 +515,8 @@ pub fn answer(bot: &mut Bot, mind: &mut Mind, me: &Answering) -> Result<Met, Bot
                 }
                 StateEvent::Trade(TradeEvent::Executed { trade_id: id }) if *id == trade_id => {
                     bot.say(format!("traded with {partner}"));
-                    return Ok(Met::Traded { partner });
+                    let strands = last.as_ref().map_or(0, |o| o.theirs.strands - o.mine.strands);
+                    return Ok(Met::Traded { partner, strands });
                 }
                 StateEvent::Trade(TradeEvent::Cancelled { trade_id: id, reason }) if *id == trade_id => {
                     return Ok(ended(&partner, reason));
@@ -382,8 +527,9 @@ pub fn answer(bot: &mut Bot, mind: &mut Mind, me: &Answering) -> Result<Met, Bot
         let Some(open) = bot.state().open_trade().filter(|o| o.trade_id == trade_id).cloned() else {
             return Ok(ended(&partner, "the window closed"));
         };
+        last = Some(open.clone());
         let nothing = open.theirs.items.is_empty() && open.theirs.strands == 0;
-        if began.elapsed() > LONGEST || (nothing && changed.elapsed() > PATIENCE) {
+        if began.elapsed() > LONGEST || (nothing && changed.elapsed() > patience) {
             let _ = bot.trade_act(|s, now| s.trade_cancel(now));
             let why = if nothing { "nothing was offered" } else { "it took too long" };
             return Ok(ended(&partner, why));
@@ -394,7 +540,10 @@ pub fn answer(bot: &mut Bot, mind: &mut Mind, me: &Answering) -> Result<Met, Bot
         if !nothing && deal.weighed.as_ref() != Some(&open.theirs) {
             let market = quotes(bot.state());
             let strands = bot.state().strands().unwrap_or(0);
-            let menu = menu(&deal, &open, strands, &market);
+            let menu = menu_for(&deal, &open, strands, &market);
+            if menu.is_empty() {
+                continue;
+            }
             let s = situation(bot, me, question(&open), menu);
             deal.weighed = Some(open.theirs.clone());
             mind.settle(mark, &s.holdings, |_| Fate::Superseded);
@@ -429,6 +578,94 @@ pub fn answer(bot: &mut Bot, mind: &mut Mind, me: &Answering) -> Result<Met, Bot
             let _ = bot.trade_act(|s, now| s.trade_accept(now));
         }
     }
+}
+
+/// A citizen near an asker, as it sees them (#295): who, where, and the
+/// trade their name names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Neighbour {
+    pub id: Uuid,
+    pub name: String,
+    pub at: (f64, f64),
+    pub trade: Role,
+}
+
+/// The citizens within `reach` of `about` whose names name a trade, the
+/// nearest to the bot first, [`ASK_AMONG`] at most. People aren't asked:
+/// a person's name says nothing of what they do.
+pub fn neighbours(state: &GameState, about: (f64, f64), reach: f64) -> Vec<Neighbour> {
+    let Some(me) = state.local_player() else {
+        return Vec::new();
+    };
+    let (mx, my) = (me.x, me.y);
+    let mut near: Vec<Neighbour> = state
+        .players()
+        .values()
+        .filter(|p| p.citizen && p.id != me.id && (p.x - about.0).hypot(p.y - about.1) <= reach)
+        .filter_map(|p| {
+            Some(Neighbour {
+                id: p.id,
+                name: p.name.clone(),
+                at: (p.x, p.y),
+                trade: trade_of(&p.name)?,
+            })
+        })
+        .collect();
+    near.sort_by(|a, b| (a.at.0 - mx).hypot(a.at.1 - my).total_cmp(&(b.at.0 - mx).hypot(b.at.1 - my)));
+    near.truncate(ASK_AMONG);
+    near
+}
+
+/// The menu for asking one of `neighbours` to trade (#295), if there's a
+/// question to ask, for a citizen of `role` holding `holdings`:
+///
+/// - **buy from** one who makes what its trade needs, when nobody is
+///   selling it at the hall, it can put a worth to it, and it can afford
+///   some (up to half again the worth, up to two lots), keeping a deed's
+///   price back until it has a plot, as a bid does;
+/// - **sell to** one whose trade needs what it makes, when nobody is
+///   bidding for it at the hall, it can put a worth to it, and it holds
+///   half of [`SELL_AT`] or more;
+///
+/// and **rest**, last: leave them be.
+pub fn ask_menu(role: Role, holdings: &Holdings, market: &[Quote], neighbours: &[Neighbour]) -> Option<Vec<Choice>> {
+    let book = |item: &str| market.iter().find(|q| q.item == item);
+    let selling = |item: &&str| book(item).is_some_and(|q| q.ask.is_some());
+    let bidding = |item: &&str| book(item).is_some_and(|q| q.bid.is_some());
+    let reserve = if holdings.plot_room.is_none() { holdings.deed_cost } else { 0 };
+    let budget = holdings.strands - reserve;
+    let mut menu = Vec::new();
+    for n in neighbours {
+        let wanted = n.trade.product().filter(|item| role.needs().contains(item) && !selling(item));
+        if let Some((item, worth)) = wanted.and_then(|item| Some((item, worth_in(market, item)?.max(1)))) {
+            let top = worth + (worth / 2).max(1);
+            let afford = (budget / top).min(2 * LOT as i64) as i32;
+            if afford > 0 {
+                menu.push(Choice::BuyFrom {
+                    partner: n.name.clone(),
+                    item: item.to_string(),
+                    price: Span::new((worth / 2).max(1), top),
+                    quantity: Span::new(1, afford),
+                });
+            }
+        }
+        let needed = role.product().filter(|item| n.trade.needs().contains(item) && !bidding(item));
+        if let Some(item) = needed.filter(|item| worth_in(market, item).is_some()) {
+            let held = holdings.count(item);
+            if held >= SELL_AT / 2 {
+                menu.push(Choice::SellTo {
+                    partner: n.name.clone(),
+                    item: item.to_string(),
+                    quantity: Span::new(1, held),
+                });
+            }
+        }
+    }
+    if menu.is_empty() {
+        return None;
+    }
+    menu.push(Choice::Rest);
+    Some(menu)
 }
 
 fn ended(partner: &str, reason: &str) -> Met {
@@ -650,6 +887,120 @@ mod tests {
         };
         let (choice, _) = weigh(&Deal::default(), &open(Offer::default(), ore), 500);
         assert_eq!(choice, Choice::Decline);
+    }
+
+    fn neighbour(n: u128, name: &str) -> Neighbour {
+        Neighbour {
+            id: Uuid::from_u128(n),
+            name: name.into(),
+            at: (0.0, 0.0),
+            trade: trade_of(name).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_citizen_asks_whoever_makes_what_it_needs_or_needs_what_it_makes() {
+        let sawyer = Role::Crafter(crate::sim::Craft::Planks);
+        let ada = neighbour(1, "Ada Woodward");
+        let ivor = neighbour(2, "Ivor Mason");
+        let hazel = neighbour(3, "Hazel Reeder");
+        let mut holdings = Holdings {
+            strands: 500,
+            plot_room: Some(2),
+            deed_cost: 250,
+            ..Holdings::default()
+        };
+        holdings.items.insert("plank".into(), 14);
+        let mut market = logs_at(10);
+        market.push(Quote {
+            item: "plank".into(),
+            bid: None,
+            ask: None,
+            last: Some(20),
+        });
+        let menu = ask_menu(sawyer, &holdings, &market, &[ada.clone(), ivor.clone(), hazel.clone()]).unwrap();
+        assert_eq!(
+            menu,
+            vec![
+                Choice::BuyFrom {
+                    partner: "Ada Woodward".into(),
+                    item: "log".into(),
+                    price: Span::new(5, 15),
+                    quantity: Span::new(1, 2 * LOT),
+                },
+                Choice::SellTo {
+                    partner: "Ivor Mason".into(),
+                    item: "plank".into(),
+                    quantity: Span::new(1, 14),
+                },
+                Choice::Rest,
+            ]
+        );
+        // A fiber gatherer makes nothing it needs, nor needs what it makes
+        assert_eq!(ask_menu(sawyer, &holdings, &market, &[hazel]), None);
+        // Someone selling logs at the hall, someone bidding for planks: the
+        // book first
+        let mut booked = market.clone();
+        booked[0].ask = Some(11);
+        booked[1].bid = Some(19);
+        assert_eq!(ask_menu(sawyer, &holdings, &booked, &[ada.clone(), ivor.clone()]), None);
+        // No plot yet: a deed's price kept back, so three logs at most
+        let homeless = Holdings {
+            strands: 300,
+            plot_room: None,
+            ..holdings.clone()
+        };
+        let menu = ask_menu(sawyer, &homeless, &market, std::slice::from_ref(&ada)).unwrap();
+        assert!(matches!(&menu[0], Choice::BuyFrom { quantity, .. } if quantity.max == 3), "{menu:?}");
+        // Logs it can't put a worth to: nothing to ask for
+        assert_eq!(ask_menu(sawyer, &holdings, &[], &[ada]), None);
+    }
+
+    #[test]
+    fn some_of_takes_the_biggest_stacks_first() {
+        let inv = Container::new(
+            Uuid::from_u128(100),
+            "player_inventory",
+            24,
+            6,
+            &[
+                capitol_protocol::rest::SlotItem::new(LOGS, "log".into(), "Log".into(), 50, 4, 0),
+                capitol_protocol::rest::SlotItem::new(MORE_LOGS, "log".into(), "Log".into(), 50, 9, 1),
+                capitol_protocol::rest::SlotItem::new(ORE, "iron_ore".into(), "Ore".into(), 50, 3, 2),
+            ],
+        );
+        let side = some_of(Some(&inv), "log", 11);
+        assert_eq!(side.lines, vec![(MORE_LOGS, "log".to_string(), 9), (LOGS, "log".to_string(), 2)]);
+        assert!(some_of(Some(&inv), "plank", 5).is_empty());
+    }
+
+    #[test]
+    fn a_citizen_buying_from_another_gets_what_it_set_out_to_spend_for() {
+        // The asker sets out to spend 100 (ten logs at 10); the other lays
+        // out all forty. It puts up all it set out to spend
+        let budget = 100;
+        let asker = open(Offer::default(), logs(&[(LOGS, 40)]));
+        let (choice, ours) = weigh(&Deal::default(), &asker, budget);
+        assert!(matches!(choice, Choice::Pay { .. }));
+        assert_eq!(ours, Side { lines: Vec::new(), strands: 100 });
+        // The other counters: for that, ten logs
+        let seller = open(logs(&[(LOGS, 40)]), strands(100));
+        let (choice, theirs) = weigh(&Deal::default(), &seller, 0);
+        assert!(matches!(choice, Choice::Counter { .. }));
+        assert_eq!(theirs.lines, vec![(LOGS, "log".to_string(), 10)]);
+        // The asker pays the same for the ten, and the other takes it
+        let paid = Deal {
+            paid_for: Some(lots(&logs(&[(LOGS, 40)]))),
+            ..Deal::default()
+        };
+        let (_, ours) = weigh(&paid, &open(strands(100), logs(&[(LOGS, 10)])), budget);
+        assert_eq!(ours.strands, 100);
+        let spent = Deal {
+            countered: true,
+            ..Deal::default()
+        };
+        let (choice, _) = weigh(&spent, &open(logs(&[(LOGS, 10)]), strands(100)), 0);
+        assert_eq!(choice, Choice::Accept);
     }
 
     #[test]

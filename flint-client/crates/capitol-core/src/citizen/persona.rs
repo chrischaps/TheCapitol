@@ -276,6 +276,14 @@ fn surnames(role: Role) -> &'static [&'static str] {
     }
 }
 
+/// The trade a name's surname names, if it's one of the trade names: how
+/// one citizen tells what another makes, as anyone in the town could, from
+/// the name over its head (#295). Each surname belongs to one trade.
+pub fn trade_of(name: &str) -> Option<Role> {
+    let surname = name.rsplit(' ').next()?;
+    crate::sim::ROLES.into_iter().find(|role| surnames(*role).contains(&surname))
+}
+
 /// The `n`th name for a citizen of `role`. Given names step through the
 /// list a stride at a time, so any 48 citizens in a row have 48 different
 /// ones; the surname is a hashed pick among the role's. A mint that finds a
@@ -384,6 +392,18 @@ mod tests {
         let (given, surname) = ada.split_once(' ').unwrap();
         assert!(GIVEN.contains(&given));
         assert!(surnames(Role::Builder).contains(&surname));
+    }
+
+    #[test]
+    fn a_trade_name_says_the_trade_and_belongs_to_one() {
+        for role in ROLES {
+            for n in 0..40 {
+                assert_eq!(trade_of(&name(role, n)), Some(role));
+            }
+        }
+        assert_eq!(trade_of("Ada Lovelace"), None);
+        assert_eq!(trade_of("Sawyer"), Some(Role::Crafter(Craft::Planks)));
+        assert_eq!(trade_of(""), None);
     }
 
     #[test]
