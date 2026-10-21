@@ -165,6 +165,11 @@ pub struct StallMark {
     /// Where its name hangs: the middle of its sign, or over an empty
     /// counter (X, Y, Z).
     pub sign: [f32; 3],
+    /// The way its sign's front faces, how wide a name may run on it, and
+    /// how far each face stands from `sign` (`world::bazaar::Sign`).
+    pub sign_facing: [f32; 3],
+    pub sign_width: f32,
+    pub sign_depth: f32,
     /// Its shop's colour, linear RGB.
     pub colour: [f32; 3],
     /// Its shop's name and keeper, if it's kept.
@@ -177,9 +182,6 @@ pub struct StallMark {
     pub near: bool,
     /// Its shop panel is open.
     pub open: bool,
-    /// No roof stands between the camera and its sign, so its name may be
-    /// drawn there (#274).
-    pub seen: bool,
 }
 
 impl BazaarMark {
@@ -778,6 +780,10 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
                 m.insert("x".into(), (s.sign[0] as f64).into());
                 m.insert("y".into(), (s.sign[1] as f64).into());
                 m.insert("z".into(), (s.sign[2] as f64).into());
+                m.insert("fx".into(), (s.sign_facing[0] as f64).into());
+                m.insert("fz".into(), (s.sign_facing[2] as f64).into());
+                m.insert("sign_w".into(), (s.sign_width as f64).into());
+                m.insert("sign_d".into(), (s.sign_depth as f64).into());
                 m.insert("r".into(), (s.colour[0] as f64).into());
                 m.insert("g".into(), (s.colour[1] as f64).into());
                 m.insert("b".into(), (s.colour[2] as f64).into());
@@ -787,7 +793,6 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
                 m.insert("mine".into(), s.mine.into());
                 m.insert("near".into(), s.near.into());
                 m.insert("open".into(), s.open.into());
-                m.insert("seen".into(), s.seen.into());
                 rhai::Dynamic::from_map(m)
             })
             .collect();

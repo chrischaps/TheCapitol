@@ -563,7 +563,7 @@ impl CapitolExtension {
     /// sign and shop, and whether you're in its range. Offline with
     /// `--bazaar-sample`, you stand at `camera_target` (world metres).
     /// `None` until the terrain brings a bazaar.
-    fn bazaar_mark(&self, camera_target: [f32; 2], eye: [f32; 3]) -> Option<script_api::BazaarMark> {
+    fn bazaar_mark(&self, camera_target: [f32; 2]) -> Option<script_api::BazaarMark> {
         let landmarks = &self.built.as_ref()?.landmarks;
         landmarks.iter().find(|l| l.kind == LandmarkKind::Bazaar)?;
         let (you, directory, mine, walking) = match (&self.session, &self.bazaar_sample) {
@@ -599,13 +599,15 @@ impl CapitolExtension {
                     corners: stall.corners.map(world),
                     sign: sign.map_or_else(|| { let [x, z] = world(stall.position); [x, 1.5, z] }, |s| s.at),
                     colour: sign.map_or([0.8, 0.78, 0.72], |s| s.colour),
+                    sign_facing: sign.map_or([0.0, 0.0, 1.0], |s| s.facing),
+                    sign_width: sign.map_or(0.0, |s| s.width),
+                    sign_depth: sign.map_or(0.0, |s| s.depth),
                     name: shop.map(|s| s.name.clone()),
                     keeper: shop.map(|s| s.owner_name.clone()),
                     citizen: shop.is_some_and(|s| s.owner_citizen),
                     mine: mine.as_deref() == Some(stall.id.as_str()),
                     near: you.is_some_and(|[x, y]| rules::bazaar::at_the_stall(stall, x, y)),
                     open: self.shop.stall.as_deref() == Some(stall.id.as_str()),
-                    seen: sign.is_some_and(|s| !self.bazaar.hidden(eye, s.at)),
                 }
             })
             .collect();
@@ -1095,7 +1097,7 @@ impl PlayerExtension for CapitolExtension {
             world::bazaar::LAMPS_MESH,
             &[("emissive_scale", world::bazaar::lantern_light(glow))],
         );
-        let mark = self.bazaar_mark([camera.target.x, camera.target.z], camera.position.to_array());
+        let mark = self.bazaar_mark([camera.target.x, camera.target.z]);
         if let Ok(mut shared) = self.shared.bazaar.lock() {
             *shared = mark;
         }
