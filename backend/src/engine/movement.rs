@@ -149,22 +149,22 @@ mod tests {
     fn test_movement_toward_destination() {
         let terrain = get_terrain();
         // Start inside Capitol, move within Capitol
-        let mut player = make_player(6000.0, 6000.0, Some(6050.0), Some(6000.0));
+        let mut player = make_player(6800.0, 6800.0, Some(6850.0), Some(6800.0));
         let result = process_movement(&mut player, &terrain, &world().1);
 
         assert!(result.moved);
-        assert!(player.x > 6000.0);
-        assert_eq!(player.y, 6000.0);
+        assert!(player.x > 6800.0);
+        assert_eq!(player.y, 6800.0);
     }
 
     #[test]
     fn test_arrival_at_destination() {
         let terrain = get_terrain();
-        let mut player = make_player(6049.9, 6000.0, Some(6050.0), Some(6000.0));
+        let mut player = make_player(6849.9, 6800.0, Some(6850.0), Some(6800.0));
         let result = process_movement(&mut player, &terrain, &world().1);
 
         assert!(result.moved);
-        assert!((player.x - 6050.0).abs() < 1.0);
+        assert!((player.x - 6850.0).abs() < 1.0);
         assert!(player.dest_x.is_none());
     }
 
@@ -172,7 +172,7 @@ mod tests {
     fn test_zone_transition() {
         let terrain = get_terrain();
         // Start at center (Capitol)
-        let mut player = make_player(6000.0, 6000.0, Some(6000.0), Some(6150.0));
+        let mut player = make_player(6800.0, 6800.0, Some(6800.0), Some(6950.0));
         player.current_zone = Some("capitol".to_string());
 
         // Move south toward the moat bridge at 270° (south)
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn test_no_movement_without_destination() {
         let terrain = get_terrain();
-        let mut player = make_player(6000.0, 6000.0, None, None);
+        let mut player = make_player(6800.0, 6800.0, None, None);
         let result = process_movement(&mut player, &terrain, &world().1);
 
         assert!(!result.moved);
@@ -206,7 +206,7 @@ mod tests {
     fn test_movement_blocked_by_water() {
         let terrain = get_terrain();
         // Try to cross moat going east (no bridge at 0° for moat)
-        let mut player = make_player(6180.0, 6000.0, Some(6250.0), Some(6000.0));
+        let mut player = make_player(6980.0, 6800.0, Some(7050.0), Some(6800.0));
 
         // Move until blocked
         for _ in 0..50 {
@@ -277,15 +277,15 @@ mod tests {
     fn a_climb_is_slower_than_the_flat() {
         let land = world().1.land();
         // On the flat in the city, a tick is a whole 5 units.
-        let mut flat = make_player(6000.0, 9300.0, Some(6000.0), Some(9400.0));
+        let mut flat = make_player(6800.0, 10100.0, Some(6800.0), Some(10200.0));
         process_movement(&mut flat, &world().0, &world().1);
-        assert!((flat.y - 9305.0).abs() < 1e-9);
+        assert!((flat.y - 10105.0).abs() < 1e-9);
 
         // Somewhere in the wilds that rises 1 in 2, dry, heading straight up it.
         let (x, y) = (0..3600)
             .map(|i| {
                 let a = (i as f64 * 0.1).to_radians();
-                (6000.0 + 4600.0 * a.stable_cos(), 6000.0 + 4600.0 * a.stable_sin())
+                (6800.0 + 5400.0 * a.stable_cos(), 6800.0 + 5400.0 * a.stable_sin())
             })
             .find(|&(x, y)| {
                 let s = slope_at(x, y, land);
@@ -313,7 +313,7 @@ mod tests {
         let crag = (0..3600)
             .map(|i| {
                 let a = (i as f64 * 0.1).to_radians();
-                (6000.0 + 5000.0 * a.stable_cos(), 6000.0 + 5000.0 * a.stable_sin())
+                (6800.0 + 5800.0 * a.stable_cos(), 6800.0 + 5800.0 * a.stable_sin())
             })
             .find(|&(x, y)| slope_at(x, y, land) > CLIFF_SLOPE + 0.3)
             .expect("a crag in the wilds");

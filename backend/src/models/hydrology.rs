@@ -48,6 +48,12 @@ const PLAIN_EDGE: f64 = RURAL_OUTER_RADIUS + 100.0;
 const PLAIN_BLEND: f64 = 200.0;
 /// The plain's fall towards the city, in the routing field.
 const PLAIN_FALL: f64 = 0.01;
+/// How high the routing field stands at the plain's edge. It's the fall's
+/// 750 in from there, as it was across the 12000 world's plain, so the
+/// widened plain (#308) tilts as steeply and holds the foothills' water back
+/// no higher. Measured from the inner rim, the 1600-deep plain stood twice
+/// as high at its edge, and dammed most of the water off it.
+const PLAIN_EDGE_RISE: f64 = 7.5;
 /// How high the routing field's noise on the plain stands.
 const PLAIN_NOISE: f64 = 4.0;
 /// How high a road stands in the routing field, so water skirts it.
@@ -62,6 +68,9 @@ pub const RIVER_CELLS: f64 = 600.0;
 const LAKE_MIN_CELLS: usize = 20;
 /// ...and is this deep somewhere.
 const LAKE_MIN_DEPTH: f64 = 4.0;
+/// A course out of a lake rises at least this far under its level, so its
+/// source is well inside the shore: see `Grid::path_into_the_lake`.
+const SOURCE_DEPTH: f64 = 0.5;
 /// A ford is no deeper than this.
 const FORD_DEPTH: f64 = 1.5;
 /// Fords on one river are at least this far apart along it.
@@ -236,7 +245,7 @@ impl Grid {
                 if w > 0.0 {
                     let noise = value_noise(land.seed ^ PLAIN_FIELD, x, y, 450.0) - 0.5;
                     let berm = if roads.clearance((x, y), CELL) < CELL { BERM } else { 0.0 };
-                    route[c] += w * (PLAIN_FALL * (r - INNER_RADIUS) + PLAIN_NOISE * noise + berm);
+                    route[c] += w * (PLAIN_EDGE_RISE + PLAIN_FALL * (r - PLAIN_EDGE) + PLAIN_NOISE * noise + berm);
                 }
             }
         }
@@ -258,6 +267,42 @@ impl Grid {
 
     fn point(&self, c: usize) -> (f64, f64) {
         centre(c % self.n, c / self.n)
+    }
+
+    /// The cell a point is in.
+    fn cell_at(&self, (x, y): (f64, f64)) -> usize {
+        let at = |v: f64| ((v / CELL).floor().max(0.0) as usize).min(self.n - 1);
+        at(y) * self.n + at(x)
+    }
+
+    /// From a lake's cell `from` to the nearest of its cells at least
+    /// [`SOURCE_DEPTH`] under its level, by its cells: where a course out of
+    /// the lake rises. A cell only just under the level can be one the shore
+    /// leaves out, where it meets the rest of the lake corner to corner and
+    /// its own ring is too small to keep (`lake_from_rings`). Outward from
+    /// `from`, so the path runs mouth to source, as [`Network::trace`] builds.
+    fn path_into_the_lake(&self, from: usize, pits: &Pits) -> Vec<usize> {
+        let p = pits.lake_of[from];
+        let level = pits.pits[p as usize].level;
+        let mut came = HashMap::from([(from, from)]);
+        let mut queue = std::collections::VecDeque::from([from]);
+        while let Some(c) = queue.pop_front() {
+            if level - self.h[c] >= SOURCE_DEPTH {
+                let mut path = vec![c];
+                while *path.last().unwrap() != from {
+                    path.push(came[path.last().unwrap()]);
+                }
+                path.reverse();
+                return path;
+            }
+            for m in self.neighbours(c) {
+                if pits.lake_of[m] == p && !came.contains_key(&m) {
+                    came.insert(m, c);
+                    queue.push_back(m);
+                }
+            }
+        }
+        vec![from]
     }
 
     /// Floods in from the rims, lowest first; equal levels go first in, first
@@ -631,7 +676,7 @@ impl Network {
                 let best = inflow[0];
                 if lake(best) {
                     from_pit = Some(pits.lake_of[best]);
-                    path.push(best);
+                    path.extend(grid.path_into_the_lake(best, pits));
                     break;
                 }
                 path.push(best);
@@ -657,13 +702,16 @@ impl Network {
     }
 
     /// What each course drains at each of its cells. A course out of a lake
-    /// carries what the lake spills from its first point, not the lake cell's own.
-    /// It's a river where this passes [`RIVER_CELLS`], and a stream elsewhere.
-    fn course_acc(&self, c: &Traced) -> Vec<f64> {
+    /// carries what the lake spills from its first point, not the lake cells'
+    /// own. It's a river where this passes [`RIVER_CELLS`], and a stream elsewhere.
+    fn course_acc(&self, c: &Traced, pits: &Pits) -> Vec<f64> {
         let mut acc: Vec<f64> = c.cells.iter().map(|&cell| self.acc[cell]).collect();
         let n = acc.len();
-        if c.from_pit.is_some() && n > 1 {
-            acc[0] = acc[1];
+        if let Some(p) = c.from_pit {
+            let out = c.cells.iter().position(|&cell| pits.lake_of[cell] != p).unwrap_or(n - 1).min(n - 1);
+            for k in 0..out {
+                acc[k] = acc[out];
+            }
         }
         // Its last cell is in the lake or the course it runs into.
         if matches!(c.end, End::Pit(_) | End::Joins { .. }) && n > 1 {
@@ -700,7 +748,7 @@ impl Network {
             if !matches!(c.end, End::Soaked | End::Inner) {
                 continue;
             }
-            let peak = self.course_acc(c).into_iter().fold(0.0, f64::max);
+            let peak = self.course_acc(c, pits).into_iter().fold(0.0, f64::max);
             let last = *c.cells.last().unwrap();
             let roll = (splitmix64(land.seed ^ POND_FIELD ^ last as u64) >> 11) as f64 / (1u64 << 53) as f64;
             let chance = if c.end == End::Inner { 1.0 } else { (POND_CHANCE * (flow(peak) - 0.4)).clamp(0.05, 0.8) };
@@ -734,13 +782,21 @@ impl Network {
                 let s = WILDERNESS_OUTER_RADIUS / (dx * dx + dy * dy).sqrt();
                 shape.push((CENTER_X + dx * s, CENTER_Y + dy * s));
             }
-            let mut acc = self.course_acc(c);
+            let mut acc = self.course_acc(c, pits);
             while acc.len() < shape.len() {
                 acc.push(*acc.last().unwrap());
             }
             let mut surface: Vec<f64> = shape.iter().map(|&(x, y)| height_at(x, y, land)).collect();
             if let Some(p) = c.from_pit {
-                surface[0] = pits.pits[p as usize].level;
+                // At the lake's level until it leaves the lake's cells.
+                let level = pits.pits[p as usize].level;
+                surface[0] = level;
+                for (i, &q) in shape.iter().enumerate().skip(1) {
+                    if pits.lake_of[grid.cell_at(q)] != p {
+                        break;
+                    }
+                    surface[i] = level;
+                }
             }
             for i in 1..surface.len() {
                 surface[i] = surface[i].min(surface[i - 1]);

@@ -64,8 +64,9 @@ const BRIDGE_COST: f64 = 400.0;
 const FORD_COST: f64 = 10.0;
 /// The cost of each stream cell a trail wades.
 const WADE_COST: f64 = 30.0;
-/// About where a valley trail ends: its valley's head.
-pub const HEAD_RADIUS: f64 = 5200.0;
+/// About where a valley trail ends: its valley's head, 1400 into the wilds
+/// (r5200 on the 12000 world, moved out with the rural edge, #308).
+pub const HEAD_RADIUS: f64 = RURAL_OUTER_RADIUS + 1400.0;
 /// How far either side of [`HEAD_RADIUS`] a valley's head may be.
 const HEAD_BAND: f64 = 100.0;
 /// How far, in degrees, a valley's head may be off its arterial's bearing.
@@ -73,8 +74,8 @@ const HEAD_BAND: f64 = 100.0;
 const VALLEY_SPREAD_DEG: f64 = 20.0;
 /// A pass trail keeps out past here, so it crosses its massif high. If the
 /// massif has no way over, [`PASS_FALLBACK_RADII`] are tried in turn.
-pub const PASS_MIN_RADIUS: f64 = 4700.0;
-const PASS_FALLBACK_RADII: [f64; 2] = [4300.0, 4000.0];
+pub const PASS_MIN_RADIUS: f64 = RURAL_OUTER_RADIUS + 900.0;
+const PASS_FALLBACK_RADII: [f64; 2] = [RURAL_OUTER_RADIUS + 500.0, RURAL_OUTER_RADIUS + 200.0];
 /// How far, in degrees, a pass trail may stray past the bearings of the two
 /// valleys it joins.
 const PASS_ARC_MARGIN_DEG: f64 = 10.0;
@@ -705,7 +706,8 @@ impl Grid {
     }
 
     /// A path through cell centres made a trail: straightened, rounded, and
-    /// checked, with both ends kept exactly. None if no straightening passes.
+    /// checked (no turn too sharp, no loop over itself, nowhere too steep or
+    /// wet), with both ends kept exactly. None if no straightening passes.
     fn shape(&self, raw: &[P]) -> Option<Vec<P>> {
         let raw = street_plan::dedupe(raw);
         if raw.len() < 2 {
@@ -720,7 +722,7 @@ impl Grid {
                 p = round_corners(&p, MAX_TURN_DEG);
             }
             let p = densify(&street_plan::dedupe(&p), VERTEX_SPACING);
-            (sharpest_turn(&p) <= MAX_TURN_DEG && self.walkable(&p)).then_some(p)
+            (sharpest_turn(&p) <= MAX_TURN_DEG && !street_plan::self_crosses(&p) && self.walkable(&p)).then_some(p)
         })
     }
 

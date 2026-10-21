@@ -600,8 +600,8 @@ mod tests {
         let mut crag = None;
         'search: for i in 0..400 {
             let a = i as f64 * 0.9_f64.to_radians();
-            for r in [4800.0, 5000.0, 5200.0, 5400.0] {
-                let p = (6000.0 + r * a.stable_cos(), 6000.0 + r * a.stable_sin());
+            for r in [5600.0, 5800.0, 6000.0, 6200.0] {
+                let p = (crate::rules::CENTER_X + r * a.stable_cos(), crate::rules::CENTER_Y + r * a.stable_sin());
                 if land::slope_at(p.0, p.1, &land) > CLIFF_SLOPE + 0.3 {
                     crag = Some(p);
                     break 'search;

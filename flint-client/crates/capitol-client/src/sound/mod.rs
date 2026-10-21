@@ -41,6 +41,7 @@ pub mod dsp;
 pub mod library;
 
 use crate::settings::Volumes;
+use capitol_protocol::rules::RURAL_OUTER_RADIUS;
 use dsp::{smoothstep, Rng};
 use flint_core::{EntityId, Vec3};
 use flint_player::{Bus, ExtensionCtx, SoundOptions};
@@ -93,6 +94,9 @@ impl Mix {
     }
 }
 
+/// Where the land starts to rise, in server units: the rural edge.
+const RURAL_EDGE: f32 = RURAL_OUTER_RADIUS as f32;
+
 /// The mix at `r` server units from the centre, `shore` units from the
 /// nearest water's edge (0 over the water) and with the camera `height`
 /// metres above the ground.
@@ -144,7 +148,7 @@ impl Default for Wild {
 /// edge, where the land rises), and quiet by a lake.
 pub fn wild(m: Mix, r: f32, height: f32, w: Wild) -> Mix {
     let ground = 1.0 - smoothstep(80.0, 450.0, height);
-    let wilds = smoothstep(3800.0, 4000.0, r);
+    let wilds = smoothstep(RURAL_EDGE, RURAL_EDGE + 200.0, r);
     let shelter = 1.0 - wilds * (1.0 - (0.3 + 0.7 * w.exposure));
     let hush = 1.0 - 0.65 * w.lake * ground;
     Mix {
@@ -467,7 +471,7 @@ impl Soundscape {
             .fold(f32::INFINITY, f32::min);
         let (running, lake) = self.wild_water.at(ears.focus);
         let w = Wild {
-            exposure: if r > 3800.0 { exposure(ears.focus) } else { 1.0 },
+            exposure: if r > RURAL_EDGE { exposure(ears.focus) } else { 1.0 },
             running,
             lake,
         };

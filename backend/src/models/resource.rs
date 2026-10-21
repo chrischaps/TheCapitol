@@ -140,7 +140,7 @@ impl From<&ResourceNodeState> for ResourceNodeInfo {
 mod tests {
     use capitol_protocol::fmath::StableMath;
     use capitol_protocol::rules::{
-        check_water_crossing, Zone, CENTER_X, CENTER_Y, NEARBY_NODE_RANGE, SPAWN_SCATTER,
+        check_water_crossing, Zone, CENTER_X, CENTER_Y, NEARBY_NODE_RANGE, RURAL_OUTER_RADIUS, SPAWN_SCATTER,
         SPAWN_X, SPAWN_Y, WORLD_SIZE,
     };
 
@@ -172,15 +172,22 @@ mod tests {
     const WORLD_SHIFT: f64 = 2000.0;
     const WORLD_GROWS_MIGRATION: &str = include_str!("../../migrations/20261107_001_world_grows.sql");
 
-    /// A row from before the world grew, where W1's migration put it.
+    /// How far RW1's migration moved them again, when the rural ring widened
+    /// and the world grew to 13600 (#308). Rows written between the two are
+    /// on the 12000 world.
+    const RURAL_WIDENS_SHIFT: f64 = 800.0;
+    const RURAL_WIDENS_MIGRATION: &str = include_str!("../../migrations/20261122_001_rural_widens.sql");
+
+    /// A row from the 8000 world, where both shifts put it.
     fn shifted(x: f64) -> f64 {
-        ((x + WORLD_SHIFT) * 10.0).round() / 10.0
+        ((x + WORLD_SHIFT + RURAL_WIDENS_SHIFT) * 10.0).round() / 10.0
     }
 
     #[test]
-    fn the_world_grows_by_the_shift() {
-        assert_eq!(WORLD_SHIFT, CENTER_X - 4000.0);
+    fn the_world_grows_by_the_shifts() {
+        assert_eq!(WORLD_SHIFT + RURAL_WIDENS_SHIFT, CENTER_X - 4000.0);
         assert!(WORLD_GROWS_MIGRATION.contains("position_x = position_x + 2000"));
+        assert!(RURAL_WIDENS_MIGRATION.contains("position_x = position_x + 800"));
     }
 
     /// The numbers in each `(a, b, ...)` row of a migration's VALUES list.
@@ -358,20 +365,23 @@ mod tests {
         crate::content::load().unwrap().resources.iter().map(|r| SpawnTable::from(&r.to_type())).collect()
     }
 
-    const NEW_NODES_MIGRATION: &str = include_str!("../../migrations/20261106_001_seeded_nodes_by_zone.sql");
+    /// The whole plan, E2.3's nodes and the wilds', on the 13600 world. RW1
+    /// re-planned it when the rural ring widened (#308), and deleted every
+    /// planned row before it: E2.3's (`20261106_001_seeded_nodes_by_zone`),
+    /// W6's and #225's wild ones, and #222's moves of them.
+    const PLAN_MIGRATION: &str = include_str!("../../migrations/post-content/20261122_001_rural_widens_nodes.sql");
 
-    /// The wilds' nodes, on the 12000 world: W6's (#199), which #225 replaced
-    /// with copper, tin, reeds and old growth.
-    const WILD_NODES_MIGRATION: &str = include_str!("../../migrations/20261114_001_wild_yields.sql");
-
-    /// The planned nodes the default world's water moved (#222).
-    const PLANNED_MOVES_MIGRATION: &str = include_str!("../../migrations/20261112_001_wild_water_nodes.sql");
+    /// Moves of planned nodes written since the re-plan, in the order they run:
+    /// each a migration of `('id', x, y)` rows on the 13600 world, from
+    /// [`print_planned_node_moves`], as #222's were before it.
+    const PLANNED_MOVES_MIGRATIONS: [&str; 0] = [];
 
     /// The plan, where the migrations leave its nodes: as planned, then moved
-    /// by [`PLANNED_MOVES_MIGRATION`] (its `('id', x, y)` rows).
+    /// by [`PLANNED_MOVES_MIGRATIONS`].
     fn planned_nodes() -> Vec<NodeSeed> {
-        let moves: std::collections::HashMap<Uuid, (f64, f64)> = PLANNED_MOVES_MIGRATION
-            .lines()
+        let moves: std::collections::HashMap<Uuid, (f64, f64)> = PLANNED_MOVES_MIGRATIONS
+            .iter()
+            .flat_map(|sql| sql.lines())
             .filter_map(|line| {
                 let row = line.trim().strip_prefix("('")?.trim_end_matches([',', ';']).strip_suffix(')')?;
                 let f: Vec<&str> = row.split(',').map(|f| f.trim().trim_matches('\'')).collect();
@@ -387,32 +397,19 @@ mod tests {
             .collect()
     }
 
-    /// The `('id', 'type', x, y, quality)` rows of a node seed insert, where
-    /// W1's migration moved them.
-    fn insert_rows(sql: &str) -> Vec<NodeSeed> {
-        insert_rows_at(sql, shifted)
-    }
-
-    /// The rows of the node seed inserts the migrations make, in order: E2.3's
-    /// (from before W1's shift), then the wilds' (#225's, which deleted W6's).
+    /// The `('id', 'type', x, y, quality)` rows of the plan's insert: every
+    /// planned node, since RW1 re-planned them whole (#308).
     fn migrated_plan() -> Vec<NodeSeed> {
-        let mut rows = insert_rows(NEW_NODES_MIGRATION);
-        rows.extend(insert_rows_at(WILD_NODES_MIGRATION, |v| v));
-        rows
-    }
-
-    /// The `('id', 'type', x, y, quality)` rows of a node seed insert, each
-    /// coordinate through `at`.
-    fn insert_rows_at(sql: &str, at: fn(f64) -> f64) -> Vec<NodeSeed> {
-        sql.lines()
+        PLAN_MIGRATION
+            .lines()
             .filter_map(|line| {
-                let row = line.trim().strip_prefix("('")?.trim_end_matches(',').strip_suffix(')')?;
+                let row = line.trim().strip_prefix("('")?.trim_end_matches([',', ';']).strip_suffix(')')?;
                 let f: Vec<&str> = row.split(',').map(|f| f.trim().trim_matches('\'')).collect();
                 Some(NodeSeed {
                     id: f[0].parse().ok()?,
                     resource_type: f[1].to_string(),
-                    x: at(f[2].parse().ok()?),
-                    y: at(f[3].parse().ok()?),
+                    x: f[2].parse().ok()?,
+                    y: f[3].parse().ok()?,
                     base_quality: f[4].parse().ok()?,
                 })
             })
@@ -468,10 +465,10 @@ mod tests {
         assert!(report.moves.is_empty(), "{} nodes moved: {:?}", report.moves.len(), report.moves);
     }
 
-    /// Prints the `('id', x, y)` rows of a planned node move migration: E2.3's
-    /// nodes that a change to the default world puts in the way, where
-    /// startup's fit would move them (#222). Paste them into a new migration
-    /// and point [`PLANNED_MOVES_MIGRATION`] at it:
+    /// Prints the `('id', x, y)` rows of a planned node move migration: the
+    /// planned nodes that a change to the default world puts in the way, where
+    /// startup's fit would move them (#222). Paste them into a new
+    /// post-content migration and add it to [`PLANNED_MOVES_MIGRATIONS`]:
     /// `cargo test print_planned_node_moves -- --ignored --nocapture`.
     #[test]
     #[ignore]
@@ -528,11 +525,15 @@ mod tests {
     /// nodes that no migration writes yet:
     /// `cargo test print_new_nodes -- --ignored --nocapture`. They go in a new
     /// post-content migration (`migrations/post-content/`, #207) as a plain
-    /// `INSERT INTO resource_nodes`, and in [`migrated_plan`].
+    /// `INSERT INTO resource_nodes`, and in [`migrated_plan`]. With
+    /// `PRINT_ALL_NODES=1` it prints the whole plan, for a re-plan that
+    /// replaces every planned row, as RW1's did (#308).
     #[test]
     #[ignore]
     fn print_new_nodes() {
-        let migrated: std::collections::HashSet<Uuid> = migrated_plan().iter().map(|s| s.id).collect();
+        let all = std::env::var_os("PRINT_ALL_NODES").is_some();
+        let migrated: std::collections::HashSet<Uuid> =
+            if all { Default::default() } else { migrated_plan().iter().map(|s| s.id).collect() };
         let plan: Vec<NodeSeed> = default_plan().into_iter().filter(|s| !migrated.contains(&s.id)).collect();
         for s in &plan {
             println!("    ('{}', '{}', {:.1}, {:.1}, {}),", s.id, s.resource_type, s.x, s.y, s.base_quality);
@@ -658,8 +659,8 @@ mod tests {
         let r = |s: &NodeSeed| (s.x - CENTER_X).stable_hypot(s.y - CENTER_Y);
         let mean = |v: &[&NodeSeed]| v.iter().map(|s| s.base_quality as f64).sum::<f64>() / v.len() as f64;
         let wild: Vec<&NodeSeed> = plan.iter().filter(|s| Zone::from_position(s.x, s.y) == Zone::Wilderness).collect();
-        let edge: Vec<&NodeSeed> = wild.iter().copied().filter(|s| r(s) < 4300.0).collect();
-        let ranges: Vec<&NodeSeed> = wild.iter().copied().filter(|s| r(s) > 5000.0).collect();
+        let edge: Vec<&NodeSeed> = wild.iter().copied().filter(|s| r(s) < RURAL_OUTER_RADIUS + 500.0).collect();
+        let ranges: Vec<&NodeSeed> = wild.iter().copied().filter(|s| r(s) > RURAL_OUTER_RADIUS + 1200.0).collect();
         let (near, far) = (mean(&edge), mean(&ranges));
         assert!(far > near + 5.0, "the wilds: {near:.1} by the rural edge, {far:.1} in the ranges");
         for kind in ["old_growth", "fallen_branches", "rock_outcrop", "clay_bank"] {

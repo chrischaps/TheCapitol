@@ -215,7 +215,15 @@ mod tests {
 
         crate::content::load_and_sync(&db).await.unwrap();
         assert!(run_post_content(&db).await.unwrap() > 0);
-        assert_eq!(nodes().await.unwrap(), before + seeds, "every staged seed is planted");
+        // Every staged seed is planted, then RW1's re-plan (#308) replaces
+        // every planned node with its own rows. The first set's nodes (the
+        // seeded grass) stay.
+        assert!(seeds > 0);
+        let replan = include_str!("../migrations/post-content/20261122_001_rural_widens_nodes.sql")
+            .lines()
+            .filter(|l| l.trim_start().starts_with("('"))
+            .count() as i64;
+        assert_eq!(nodes().await.unwrap(), before + replan, "the re-plan's nodes and the grass");
         let staging: Option<String> =
             sqlx::query_scalar("SELECT to_regclass('resource_node_seeds')::text").fetch_one(&db).await.unwrap();
         assert_eq!(staging, None);

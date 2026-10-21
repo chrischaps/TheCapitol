@@ -2,7 +2,7 @@
 //! test that writes them (#284). `backend/tools/rural-plan.ps1` runs it in
 //! release and turns the SVGs into PNGs.
 //!
-//! It draws the ring r3000 to r3800 with its half-sectors shaded by built
+//! It draws the ring r3000 to r4600 with its half-sectors shaded by built
 //! share, the plain's water, the lots and the roads, and rings the places
 //! that break a target. Under `Farms` it names each sector's character and
 //! marks the farm gates. Server y points down, as SVG's does, so world

@@ -1,7 +1,8 @@
 # Where the wilds' nodes grow, and how good they are there (W6, #199).
 #
-# The Wilderness runs from r3800 to the world's edge at r6000. The land is 0
-# out to r3900, then rises through the foothills into eight massifs whose
+# The Wilderness runs from r4600 to the world's edge at r6800 (moved out 800
+# with the rural edge, #308). The land is 0
+# out to r4700, then rises through the foothills into eight massifs whose
 # crests stand near 640 (protocol `land`). Only the node planner reads this
 # file (backend/src/engine/node_spawn/wilds.rs); nothing is synced to a table.
 #
@@ -28,7 +29,7 @@
 #             (protocol `land::massif_at`), so copper and tin keep apart
 
 [quality]
-depth = [[3800, -15], [4400, 0], [5600, 10]]
+depth = [[4600, -15], [5200, 0], [6400, 10]]
 height = [[0, 0], [250, 3], [550, 8]]
 
 # Old growth, on the valley floors and the low ground between the ranges,

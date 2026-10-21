@@ -470,7 +470,19 @@ mod tests {
         // where the field can't hold the bed.
         let mut checked = 0;
         for course in t.rivers.iter() {
+            // A course that joins another is cut short of it, so the water
+            // there is the other's. Past the edge it can meet it lower down
+            // (#312), which this then doesn't see.
+            let end = course.points.last().unwrap();
+            let main = match &course.mouth {
+                Mouth::Joins(id) => t.rivers.iter().chain(t.streams).find(|c| &c.id == id),
+                _ => None,
+            };
+            let short = main.map_or(0.0, |m| width_near(m, end.x, end.y));
             for p in course.points.iter().step_by(5) {
+                if dist(p, end.x, end.y) < short {
+                    continue;
+                }
                 let [x, z] = to_world(p.x, p.y);
                 let Some(v) = b
                     .rivers
@@ -516,8 +528,9 @@ mod tests {
             .map(speed)
             .fold(0.0, f32::max);
         assert!(at_ford > 2.0, "{at_ford} m/s at {}", ford.id);
-        // Downstream: each course's flow points from its first point on.
-        let river = &t.rivers[0];
+        // Downstream: each course's flow points from its first point on. One
+        // out of a lake rises inside it, where only the lake is drawn.
+        let river = t.rivers.iter().find(|r| r.source.is_none()).unwrap();
         let (p, q) = (&river.points[0], &river.points[1]);
         let [px, pz] = to_world(p.x, p.y);
         let [qx, qz] = to_world(q.x, q.y);
@@ -604,3 +617,4 @@ mod tests {
         assert!(riding.count() > 1000);
     }
 }
+

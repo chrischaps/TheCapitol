@@ -270,7 +270,8 @@ impl Default for WorldGenParams {
             trade_ring_width: 30.0,
             arterial_width: 60.0,
             // The arterials run out to where the wilderness starts. That is
-            // 3800, where they ended before the suburb deepened (#117).
+            // the rural edge: 3800, where they ended before the suburb deepened
+            // (#117), and 4600 since the rural ring widened (#308).
             arterial_end_radius: rules::RURAL_OUTER_RADIUS,
             urban_radial_spacing: 100.0,
             urban_spoke_count: 48,
@@ -1484,7 +1485,7 @@ mod tests {
     #[test]
     fn test_terrain_config_default() {
         let config = TerrainConfig::get_default();
-        assert_eq!(config.world_size, 12000.0);
+        assert_eq!(config.world_size, 13600.0);
         assert_eq!(config.water_rings.len(), 3);
     }
 
@@ -1559,7 +1560,24 @@ mod tests {
         // ring, a lane in from the avenue and an alley to a square
         // (`models::bazaar`), with the lane and the alley as two new roads.
         // No other road, lot, park or node moved.
-        assert_eq!(TerrainConfig::get_default().version(), "8067c60f47cb8c7c");
+        //
+        // RW1 (#308) widened the rural ring to r4600 and grew the world to
+        // 13600, centred on (6800, 6800), so every coordinate moved by +800
+        // (rural plan RD10). Against `8067c60f47cb8c7c` moved by +800: every
+        // urban, guild and suburban lot keeps its id, 33 suburban lots in
+        // four neighbourhoods by the rural edge move by 0.02 to 2.4 (with a
+        // collector, three entrances and three cul-de-sacs there, and two
+        // parks; most likely the old rural trails, which start at the
+        // suburb's edge and now run twice as far), and nothing else in the
+        // city moves. The arterials run on to r4600. The old trails stretch
+        // with the ring, so it has 121 rural lots, not 52 (32 of the old ids
+        // kept). Past r3800 the land, the water (53 rivers, 200 streams, 67
+        // lakes, 43 fords) and the wild trails are new; the plain's tilt is
+        // measured from its edge, a course out of a lake rises well inside
+        // it, and a trail never crosses itself. The planned nodes are
+        // re-planned whole, clear of the wild water
+        // (`post-content/20261122_001_rural_widens_nodes.sql`).
+        assert_eq!(TerrainConfig::get_default().version(), "c6d7cc1d08d95958");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one
@@ -1662,7 +1680,7 @@ mod tests {
     /// with `Zone::from_position`, and the params never carry them out.
     #[test]
     fn zone_radii_stay_the_protocol_table() {
-        let json = serde_json::json!({ "seed": 42, "suburban_outer_radius": 2800.0, "rural_outer_radius": 3800.0 });
+        let json = serde_json::json!({ "seed": 42, "suburban_outer_radius": 2800.0, "rural_outer_radius": 4600.0 });
         let params: WorldGenParams = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(
             [params.capitol_radius, params.trade_outer_radius, params.guild_outer_radius, params.urban_outer_radius, params.suburban_outer_radius, params.rural_outer_radius],
@@ -1728,7 +1746,7 @@ mod tests {
     fn test_movement_allowed_no_water() {
         let config = TerrainConfig::get_default();
         // Movement within Capitol (inside moat)
-        let result = config.validate_movement(6000.0, 6000.0, 6050.0, 6050.0);
+        let result = config.validate_movement(6800.0, 6800.0, 6850.0, 6850.0);
         assert!(result.allowed);
     }
 
@@ -1736,7 +1754,7 @@ mod tests {
     fn test_movement_blocked_by_moat() {
         let config = TerrainConfig::get_default();
         // Try to cross moat going East (no bridge there)
-        let result = config.validate_movement(6150.0, 6000.0, 6250.0, 6000.0);
+        let result = config.validate_movement(6950.0, 6800.0, 7050.0, 6800.0);
         assert!(!result.allowed);
         assert_eq!(result.blocked_by, Some("moat".to_string()));
     }
@@ -1745,7 +1763,7 @@ mod tests {
     fn test_movement_allowed_on_bridge() {
         let config = TerrainConfig::get_default();
         // Cross moat going South (bridge at 90° in screen coords where Y+ is south)
-        let result = config.validate_movement(6000.0, 6150.0, 6000.0, 6250.0);
+        let result = config.validate_movement(6800.0, 6950.0, 6800.0, 7050.0);
         assert!(result.allowed);
     }
 

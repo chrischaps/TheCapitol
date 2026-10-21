@@ -50,9 +50,10 @@ use flint_player::{ExtensionGpu, GrassConfig, GrassGround, GrassHeight, GroundFi
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Texels along each side of the mask. Over its 1200 m that's about
+/// Texels along each side of the mask. Over its 1360 m that's about
 /// 0.39 m a texel: finer than the narrowest trail (0.6 m) and its verge.
-pub const MASK_SIZE: usize = 3072;
+/// (3072 over 1200 m before the world grew, #308.)
+pub const MASK_SIZE: usize = 3480;
 
 /// How far the grass reaches from the centre, in server units: the world's
 /// edge. The mask is the square round it.
@@ -65,8 +66,9 @@ const GRASS_EDGE: f64 = WILDERNESS_OUTER_RADIUS;
 /// in the ranges, within 0.22 m (`blades_stand_on_the_land`). A grid at
 /// the land's own metre would cost a third as much (14 ms against 40, once
 /// a terrain), but its points fall between the land's, which smooths the
-/// sharpest ground: 5 cm and 0.48 m.
-pub const HEIGHTS: usize = 2048;
+/// sharpest ground: 5 cm and 0.48 m. (2048 over 1200 m before the world
+/// grew, #308.)
+pub const HEIGHTS: usize = 2320;
 
 /// Where the grass gives way in the wilds: the slopes (rise over run) over
 /// which it thins out, the heights (m) over which the scree takes it, and
@@ -795,7 +797,7 @@ mod tests {
 
     /// Coarser than the game's, to keep the tests quick; still under a
     /// metre a texel.
-    const SIZE: usize = 1536;
+    const SIZE: usize = 1740;
 
     fn fixture() -> &'static TerrainResponse {
         static T: OnceLock<TerrainResponse> = OnceLock::new();
@@ -1056,7 +1058,7 @@ mod tests {
         let (mut high, mut wet, mut low, mut low_grows) = (0, 0, 0, 0);
         for k in 0..720 {
             let a = (k as f64).to_radians() * 0.5;
-            for s in 0..40 {
+            for s in 0.. {
                 let r = land::FROM + 100.0 + s as f64 * 50.0;
                 if r > GRASS_EDGE - EDGE_IN {
                     break;

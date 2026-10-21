@@ -190,7 +190,7 @@ fn at_shared_vertex(x: P, a: [P; 2], b: [P; 2]) -> bool {
 }
 
 /// Whether `points` crosses itself anywhere but at a vertex it visits twice.
-#[cfg(test)]
+/// The audit uses it, and the wild trails check each one they shape (#308).
 pub(crate) fn self_crosses(points: &[P]) -> bool {
     let n = points.len();
     for i in 0..n.saturating_sub(1) {

@@ -32,7 +32,7 @@ use crate::world::ground::value_noise;
 use crate::world::land::{sample_at, SAMPLES};
 use crate::world::mesh::{MeshBuf, UP};
 use crate::world::palette::{self, hex};
-use capitol_protocol::rules::{CENTER_X, CENTER_Y, WILDERNESS_OUTER_RADIUS};
+use capitol_protocol::rules::{CENTER_X, CENTER_Y, RURAL_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS};
 use flint_import::{AlphaMode, ImportedMaterial};
 use flint_player::{ExtensionGpu, GroundField};
 
@@ -54,7 +54,7 @@ const STEEP: (f32, f32) = (0.3, 0.7);
 const SLOPE_REACH: isize = 2;
 /// The server radii over which it comes in at the ranges' foot, and goes
 /// again past the world's edge.
-const FROM: (f32, f32) = (3850.0, 4150.0);
+const FROM: (f32, f32) = (RURAL_OUTER_RADIUS as f32 + 50.0, RURAL_OUTER_RADIUS as f32 + 350.0);
 const OUT: (f32, f32) = (WILDERNESS_OUTER_RADIUS as f32 - 200.0, WILDERNESS_OUTER_RADIUS as f32 + 300.0);
 /// Each sheet's height (m) over the ground and how opaque it is where the
 /// mist lies thickest.

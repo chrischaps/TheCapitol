@@ -1,7 +1,7 @@
 //! Server space <-> Flint world space (plan §4.6). Every conversion goes
 //! through here.
 //!
-//! Server space runs 0..12000 on both axes, centre (6000, 6000), y pointing
+//! Server space runs 0..13600 on both axes, centre (6800, 6800), y pointing
 //! down the screen (south), angle 0 = east and 90 = south.
 //!
 //! Flint is right-handed and Y-up: its look-at builds `right = forward × up`,
@@ -13,7 +13,7 @@
 
 use capitol_protocol::rules::{CENTER_X, CENTER_Y};
 
-/// World metres per server unit. The world is 1200 m across, a player
+/// World metres per server unit. The world is 1360 m across, a player
 /// (radius 8) is about 1.6 m wide, and a 60-unit arterial is 6 m.
 pub const S: f32 = 0.1;
 

@@ -519,7 +519,7 @@ pub(crate) mod tests {
             "INSERT INTO plots (id, terrain_id, zone_id, grid_x, grid_y, world_x, world_y,
                                 bounds_min_x, bounds_min_y, bounds_max_x, bounds_max_y,
                                 size_category, owner_id, assessed_value)
-             VALUES ($1, $2, 'urban', 0, 0, 7200, 6000, 7190, 5990, 7210, 6010, 'medium', $3, $4)",
+             VALUES ($1, $2, 'urban', 0, 0, 8000, 6800, 7990, 6790, 8010, 6810, 'medium', $3, $4)",
         )
         .bind(id)
         .bind(format!("test-{id}"))
@@ -697,10 +697,10 @@ pub(crate) mod tests {
     async fn a_new_lot_takes_down_the_bench_under_it(db: PgPool) {
         let ada = player(&db, "ada", 0).await;
         let pack = inventory(&db, ada).await;
-        let under = bench(&db, ada, 7203.0, 6001.0).await;
-        let beside = bench(&db, ada, 7300.0, 6000.0).await;
+        let under = bench(&db, ada, 8003.0, 6801.0).await;
+        let beside = bench(&db, ada, 8100.0, 6800.0).await;
 
-        let report = sync_plots(&db, &[lot("new", 7200.0, 6000.0)], OnOwned::Keep).await.unwrap();
+        let report = sync_plots(&db, &[lot("new", 8000.0, 6800.0)], OnOwned::Keep).await.unwrap();
 
         assert_eq!(report.inserted, 1);
         assert!(!station_exists(&db, under).await);
@@ -719,9 +719,9 @@ pub(crate) mod tests {
     async fn the_owner_hears_when_they_come_back(db: PgPool) {
         let ada = player(&db, "ada", 0).await;
         inventory(&db, ada).await;
-        let under = bench(&db, ada, 7200.0, 6000.0).await;
+        let under = bench(&db, ada, 8000.0, 6800.0).await;
 
-        sync_plots(&db, &[lot("new", 7200.0, 6000.0)], OnOwned::Release).await.unwrap();
+        sync_plots(&db, &[lot("new", 8000.0, 6800.0)], OnOwned::Release).await.unwrap();
 
         assert_eq!(notices::take_all(&db, ada).await.unwrap(), vec![displaced(under, "new")]);
     }
@@ -732,9 +732,9 @@ pub(crate) mod tests {
     async fn a_commit_without_force_refuses_to_cover_a_bench(db: PgPool) {
         let ada = player(&db, "ada", 0).await;
         let pack = inventory(&db, ada).await;
-        let under = bench(&db, ada, 7200.0, 6000.0).await;
+        let under = bench(&db, ada, 8000.0, 6800.0).await;
 
-        let err = sync_plots(&db, &[lot("new", 7200.0, 6000.0)], OnOwned::Refuse).await.unwrap_err();
+        let err = sync_plots(&db, &[lot("new", 8000.0, 6800.0)], OnOwned::Refuse).await.unwrap_err();
 
         match err {
             SyncError::Conflicts { plots, stations } => {
@@ -756,7 +756,7 @@ pub(crate) mod tests {
         let ada = player(&db, "ada", 0).await;
         let pack = inventory(&db, ada).await;
         let lot_id = plot(&db, Some(ada), 0).await;
-        let on_it = bench(&db, ada, 7200.0, 6000.0).await;
+        let on_it = bench(&db, ada, 8000.0, 6800.0).await;
         sqlx::query("UPDATE stations SET plot_id = $1 WHERE id = $2").bind(lot_id).bind(on_it).execute(&db).await.unwrap();
 
         let report = sync_plots(&db, &[], OnOwned::Release).await.unwrap();
@@ -786,16 +786,16 @@ pub(crate) mod tests {
     async fn a_kept_plot_holds_back_the_lots_over_it(db: PgPool) {
         let ada = player(&db, "ada", 0).await;
         let hers = plot(&db, Some(ada), 1000).await;
-        shape(&db, hers, &lot("old", 7200.0, 6000.0)).await;
+        shape(&db, hers, &lot("old", 8000.0, 6800.0)).await;
         // An unowned lot elsewhere that the new terrain moves onto her ground
         let moving = plot(&db, None, 0).await;
-        shape(&db, moving, &lot("elsewhere", 7500.0, 6000.0)).await;
+        shape(&db, moving, &lot("elsewhere", 8300.0, 6800.0)).await;
         let moved = format!("test-{moving}");
         let lots = [
-            lot("over", 7205.0, 6003.0),
-            lot(&moved, 7195.0, 5995.0),
-            lot("beside", 7220.0, 6000.0), // shares her edge, no more
-            lot("far", 7400.0, 6000.0),
+            lot("over", 8005.0, 6803.0),
+            lot(&moved, 7995.0, 6795.0),
+            lot("beside", 8020.0, 6800.0), // shares her edge, no more
+            lot("far", 8200.0, 6800.0),
         ];
 
         let report = sync_plots(&db, &lots, OnOwned::Keep).await.unwrap();

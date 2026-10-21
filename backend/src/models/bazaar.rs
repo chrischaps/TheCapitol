@@ -286,7 +286,7 @@ mod tests {
 
     fn built() -> (Quarter, (f64, f64), WorldGenParams) {
         let params = WorldGenParams::default();
-        let center = (6000.0, 6000.0);
+        let center = (6800.0, 6800.0);
         (quarter(center, &params), center, params)
     }
 

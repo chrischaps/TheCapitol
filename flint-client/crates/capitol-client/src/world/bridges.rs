@@ -813,8 +813,9 @@ mod tests {
         let ground = |at: [f32; 2]| layer::GROUND + rise_on(field, at);
         let spans = trail_spans(fixture(), ground);
         // The default world's trails cross a river away from its fords
-        // three times (W5 routes them to the fords where it can).
-        assert_eq!(spans.len(), 3);
+        // seven times (W5 routes them to the fords where it can; three on
+        // the 12000 world, before #308).
+        assert_eq!(spans.len(), 7);
         for span in &spans {
             // The toes sit on the trail on either bank.
             for (s, toe) in [(span.start, span.toes.0), (span.end, span.toes.1)] {

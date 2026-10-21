@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Runs the ignored test rural::render::tests::rural_plan_report in release.
-  For each seed it writes an SVG plan view of the ring r3000 to r3800 (its
+  For each seed it writes an SVG plan view of the ring r3000 to r4600 (its
   roads, lots and water, with the 16 half-sectors shaded by built share) and
   a metrics JSON, plus index.html and report.md with the targets table of
   the-capitol-rural.md section 5. Then it converts each SVG to a PNG with

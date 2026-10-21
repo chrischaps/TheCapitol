@@ -287,7 +287,7 @@ fn nearest_on_segment(a: (f64, f64), b: (f64, f64), p: (f64, f64)) -> (f64, f64)
 /// Plans the wilds' nodes for `tables` (woods first) and adds them to `seeds`,
 /// keeping them [`MIN_GAP`] from everything in `taken`.
 pub(super) fn plan(
-    terrain: &TerrainConfig,
+    land: &Land,
     ground: &Ground,
     tables: &[&SpawnTable],
     taken: &mut PointGrid,
@@ -306,12 +306,12 @@ pub(super) fn plan(
     if rows.is_empty() {
         return;
     }
-    let land = Land::new(terrain);
+    let terrain = land.terrain;
     let mut trees: Vec<(f64, f64)> = Vec::new();
     for (table, habitat, floor, density) in rows {
         let count = (density * wild_km2()).round() as usize;
         let mut rng = SplitMix64::stream(seed, &[key(&table.id), Zone::Wilderness.ring_order() as u64]);
-        let mut place = Placing { ground, land: &land, taken, table, habitat, land_test };
+        let mut place = Placing { ground, land, taken, table, habitat, land_test };
         let spots = match table.cluster {
             Cluster::Woods => {
                 let suited = land.suited(habitat);
@@ -619,7 +619,7 @@ mod tests {
         }
         let wild: Vec<&NodeSeed> = plan.iter().filter(|s| Zone::from_position(s.x, s.y) == Zone::Wilderness).collect();
         let r = |s: &NodeSeed| (s.x - CENTER_X).stable_hypot(s.y - CENTER_Y);
-        for (lo, hi) in [(3800.0, 4300.0), (4300.0, 5000.0), (5000.0, 6000.0)] {
+        for (lo, hi) in [(4600.0, 5100.0), (5100.0, 5800.0), (5800.0, 6800.0)] {
             let band: Vec<&&NodeSeed> = wild.iter().filter(|s| (lo..hi).contains(&r(s))).collect();
             let mean = band.iter().map(|s| s.base_quality as f64).sum::<f64>() / band.len().max(1) as f64;
             println!("r{lo}-{hi}: {} nodes, mean quality {mean:.1}", band.len());

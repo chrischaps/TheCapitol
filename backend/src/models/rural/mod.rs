@@ -1,4 +1,4 @@
-//! The rural ring, r3000 to r3800 (`the-capitol-rural.md`).
+//! The rural ring, r3000 to r4600 (`the-capitol-rural.md`, RD10).
 //!
 //! Today's layout is still `terrain.rs`'s radial trails. Rural v2 builds the
 //! farms here, a work package at a time, behind [`RuralLayout::Farms`]. So far:
@@ -207,7 +207,7 @@ pub(crate) mod tests {
                 .flat_map(|r| r.points.iter())
                 .map(|p| (p.0 - c.0).stable_hypot(p.1 - c.1))
                 .fold(0.0, f64::max);
-            assert!(far < 3780.0, "seed {seed}: a lane reaches r{far:.0}");
+            assert!(far < capitol_protocol::rules::RURAL_OUTER_RADIUS - 20.0, "seed {seed}: a lane reaches r{far:.0}");
         }
     }
 }

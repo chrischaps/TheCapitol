@@ -598,7 +598,7 @@ mod on_the_land {
         let at = (0..3600)
             .map(|i| {
                 let a = (i as f64 * 0.1).to_radians();
-                (6000.0 + 4600.0 * a.stable_cos(), 6000.0 + 4600.0 * a.stable_sin())
+                (6800.0 + 5400.0 * a.stable_cos(), 6800.0 + 5400.0 * a.stable_sin())
             })
             .find(|&(x, y)| (0.45..0.55).contains(&land::slope_at(x, y, land)))
             .expect("a hillside");

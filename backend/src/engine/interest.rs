@@ -201,7 +201,7 @@ mod tests {
     #[ignore]
     fn positions_load() {
         use capitol_protocol::fmath::StableMath;
-        use capitol_protocol::rules::{CENTER_X, CENTER_Y, SPAWN_SCATTER, SPAWN_X, SPAWN_Y};
+        use capitol_protocol::rules::{CENTER_X, CENTER_Y, RURAL_OUTER_RADIUS, SPAWN_SCATTER, SPAWN_X, SPAWN_Y};
         const TICKS: u32 = 50;
         // A SplitMix64, so the layouts are the same every run
         let mut seed = 0x256u64;
@@ -221,7 +221,7 @@ mod tests {
                         let (x, y) = if layout == "at the spawn" {
                             (SPAWN_X + (next() - 0.5) * 8.0 * SPAWN_SCATTER, SPAWN_Y + (next() - 0.5) * 8.0 * SPAWN_SCATTER)
                         } else {
-                            let (r, a) = (3800.0 * next().sqrt(), std::f64::consts::TAU * next());
+                            let (r, a) = (RURAL_OUTER_RADIUS * next().sqrt(), std::f64::consts::TAU * next());
                             (CENTER_X + r * a.stable_cos(), CENTER_Y + r * a.stable_sin())
                         };
                         let mut p = player(&format!("Citizen{i:03} Fletcher"), x, y);

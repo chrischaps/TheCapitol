@@ -33,10 +33,11 @@ use std::sync::{Arc, RwLock};
 pub const TEXEL: f64 = 10.0;
 /// Quads along a chunk's side (`land_mesh`), and chunks along the field's.
 pub const CHUNK: usize = 64;
-pub const CHUNKS: usize = 24;
+pub const CHUNKS: usize = 26;
 /// Samples along the field's side.
 pub const SAMPLES: usize = CHUNK * CHUNKS + 1;
-/// Half the field's side, in server units: 7680, past [`OUTER`].
+/// Half the field's side, in server units: 8320, past [`OUTER`] (8200 since
+/// the world grew to 13600, #308; it was 24 chunks, 7680, before).
 pub const HALF: f64 = (CHUNK * CHUNKS) as f64 * TEXEL * 0.5;
 
 /// Where the land starts: [`SEAM`] inside r3150, where the wild water's
@@ -395,7 +396,7 @@ pub(crate) mod tests {
         }
         let top = (0..360)
             .map(|deg| {
-                let [x, y] = polar(5600.0, deg as f64 + 22.5);
+                let [x, y] = polar(6400.0, deg as f64 + 22.5);
                 rise_on(f, to_world(x, y))
             })
             .fold(0.0, f32::max);

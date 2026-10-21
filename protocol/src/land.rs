@@ -5,7 +5,7 @@
 //! compute the same ground from the params alone: only the params go on the
 //! wire (`/terrain`'s `land`), never the heights.
 //!
-//! - Inside the rural edge (r3800) the height is exactly 0, so nothing in the
+//! - Inside the rural edge (r4600) the height is exactly 0, so nothing in the
 //!   city moves. The foothills rise from [`LandParams::foothill_radius`].
 //! - Rolling ground is fBm over seeded gradient noise. The ranges are ridged
 //!   noise, gathered into [`LandParams::ridge_count`] massifs round the ring.
@@ -69,8 +69,10 @@ impl Default for LandParams {
             valley_bearing_degrees: 0.0,
             massif_wander: 0.3,
             valley_floor: 0.2,
-            foothill_radius: 3900.0,
-            range_radius: 5600.0,
+            // 100 past the rural edge, and the ranges full height 1700 on.
+            // Both moved out 800 with the rural edge (RD10, #308).
+            foothill_radius: 4700.0,
+            range_radius: 6400.0,
             peak_height: 640.0,
             rolling_height: 70.0,
             rolling_wavelength: 1100.0,
@@ -483,7 +485,7 @@ mod tests {
     #[test]
     fn nothing_inside_the_rural_edge_rises() {
         let land = LandParams::default();
-        for step in 0..=380 {
+        for step in 0..=(RURAL_OUTER_RADIUS / 10.0) as usize {
             let r = step as f64 * 10.0;
             for d in 0..72 {
                 let (x, y) = at(r, d as f64 * 5.0);
@@ -501,7 +503,7 @@ mod tests {
         let land = LandParams::default();
         let (mut peak, mut deep_sum, mut n) = (0.0f64, 0.0, 0);
         for step in 0..200 {
-            let r = 5000.0 + step as f64 * 5.0;
+            let r = 5800.0 + step as f64 * 5.0;
             for d in 0..360 {
                 let (x, y) = at(r, d as f64);
                 let h = height_at(x, y, &land);
@@ -511,7 +513,7 @@ mod tests {
                 n += 1;
             }
         }
-        let (x, y) = at(3950.0, 10.0);
+        let (x, y) = at(4750.0, 10.0);
         let foothill = height_at(x, y, &land);
         assert!(foothill > 0.0 && foothill < 10.0, "foothills start gently: {foothill}");
         assert!(peak > land.peak_height * 0.5, "the ranges stand up: {peak}");
@@ -526,7 +528,7 @@ mod tests {
         let land = LandParams { massif_wander: 0.0, ..LandParams::default() };
         let mean = |deg: f64| {
             (0..400).map(|i| {
-                let (x, y) = at(4900.0 + i as f64 * 2.5, deg);
+                let (x, y) = at(5700.0 + i as f64 * 2.5, deg);
                 height_at(x, y, &land)
             }).sum::<f64>() / 400.0
         };
@@ -539,13 +541,13 @@ mod tests {
     fn the_land_is_continuous() {
         let land = LandParams::default();
         for i in 0..2000 {
-            let (x, y) = at(3850.0 + i as f64 * 1.07, i as f64 * 0.37);
+            let (x, y) = at(4650.0 + i as f64 * 1.07, i as f64 * 0.37);
             let a = height_at(x, y, &land);
             let b = height_at(x + 0.01, y, &land);
             assert!((a - b).abs() < 0.2, "a step at ({x}, {y}): {a} vs {b}");
         }
         // No seam where atan2 wraps (due west)
-        let (x, y) = at(5200.0, 180.0);
+        let (x, y) = at(6000.0, 180.0);
         let (a, b) = (height_at(x, y - 0.001, &land), height_at(x, y + 0.001, &land));
         assert!((a - b).abs() < 0.01);
     }
@@ -553,7 +555,7 @@ mod tests {
     #[test]
     fn slope_and_normal_agree() {
         let land = LandParams::default();
-        let (x, y) = at(5300.0, 70.0);
+        let (x, y) = at(6100.0, 70.0);
         let s = slope_at(x, y, &land);
         let (nx, ny, nz) = normal_at(x, y, &land);
         assert!(((nx * nx + ny * ny + nz * nz) - 1.0).abs() < 1e-12);
@@ -568,7 +570,7 @@ mod tests {
         // Keyed on the offset from the centre: one height per offset,
         // whatever the world's size. (W1's trap, #194.)
         let land = LandParams::default();
-        let (x, y) = at(5000.0, 33.0);
+        let (x, y) = at(5800.0, 33.0);
         let h = height_at(x, y, &land);
         let (dx, dy) = (x - CENTER_X, y - CENTER_Y);
         assert_eq!(height_at(CENTER_X + dx, CENTER_Y + dy, &land), h);
@@ -578,7 +580,7 @@ mod tests {
     fn seeds_make_different_ranges() {
         let a = LandParams::default();
         let b = LandParams { seed: 7, ..LandParams::default() };
-        let (x, y) = at(5400.0, 100.0);
+        let (x, y) = at(6200.0, 100.0);
         assert_ne!(height_at(x, y, &a), height_at(x, y, &b));
     }
 
@@ -590,11 +592,11 @@ mod tests {
         let k = land.ridge_count;
         for i in 0..k {
             let mid = (land.valley_bearing_degrees + (i as f64 + 0.5) * 360.0 / k as f64).to_radians();
-            let (x, y) = (CENTER_X + 5000.0 * mid.stable_cos(), CENTER_Y + 5000.0 * mid.stable_sin());
+            let (x, y) = (CENTER_X + 5800.0 * mid.stable_cos(), CENTER_Y + 5800.0 * mid.stable_sin());
             assert_eq!(massif_at(x, y, &land), Some(i), "the middle of arc {i}");
         }
         let flat = LandParams { ridge_count: 0, ..LandParams::default() };
-        assert_eq!(massif_at(CENTER_X + 5000.0, CENTER_Y, &flat), None);
+        assert_eq!(massif_at(CENTER_X + 5800.0, CENTER_Y, &flat), None);
     }
 
     #[test]
@@ -627,22 +629,24 @@ mod tests {
         assert_eq!(samples, PINNED, "now: [{}]", shown.join(", "));
     }
 
+    /// The same offsets from the centre as on the 12000 world, so moving the
+    /// world (#308) changed only the land's radii, not where the noise is read.
     const SAMPLES: [(f64, f64); 10] = [
-        (6000.0, 6000.0),
-        (9900.5, 6000.0),
-        (10123.25, 7311.75),
-        (1500.0, 3000.0),
-        (6200.0, 625.5),
-        (2117.0, 8890.0),
-        (11100.0, 4800.0),
-        (3333.3, 1444.4),
-        (8400.0, 10800.0),
-        (6000.0, 11999.0),
+        (6800.0, 6800.0),
+        (10700.5, 6800.0),
+        (10923.25, 8111.75),
+        (2300.0, 3800.0),
+        (7000.0, 1425.5),
+        (2917.0, 9690.0),
+        (11900.0, 5600.0),
+        (4133.3, 2244.4),
+        (9200.0, 11600.0),
+        (6800.0, 12799.0),
     ];
 
     const PINNED: [u64; 10] = [
-        0x0000000000000000, 0x9F9ADB4E9D9282B7, 0x7540528897F64368, 0x223FD30ADDFCB52B, 0x968D9C6476492A30,
-        0x583003B549F44063, 0xCCB1A1CD316166BC, 0xE70669B1C7404027, 0x42889123215AAF2C, 0x2E05CBD1961BECD9,
+        0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0xD70D76363C8B5F19, 0x1D1A91F15EA4264A,
+        0xA8A021C3F9DB603D, 0x12D70F046902FD4D, 0x81F01109B0F00112, 0x0DF9EACF143E2220, 0x71E6BA3B9F17E25E,
     ];
 
     /// Draws the land as a shaded relief, for review:

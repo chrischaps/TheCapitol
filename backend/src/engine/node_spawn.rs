@@ -168,6 +168,11 @@ pub fn plan_with(
     land: LandTest,
 ) -> Vec<NodeSeed> {
     let ground = Ground::new(terrain);
+    // The wild water runs on into the rural ring (#222), so every zone's
+    // nodes keep off it, not only the wilds' (#308). Before, startup's fit
+    // moved the ones the plan put in it, and a migration wrote the moves.
+    let wild_land = wilds::Land::new(terrain);
+    let dry = |t: &SpawnTable, z: Zone, at: (f64, f64)| wild_land.water_clearance(at) >= MOVE_CLEAR && land(t, z, at);
     let mut taken = PointGrid::new(MIN_GAP);
     for &p in existing {
         taken.insert(p);
@@ -193,7 +198,7 @@ pub fn plan_with(
                 taken: &mut taken,
                 zone,
                 table,
-                land,
+                land: &dry,
                 woods: None,
             };
             let spots = match pattern(table.cluster, zone, &ground, &in_zone_trees) {
@@ -227,7 +232,7 @@ pub fn plan_with(
         }
     }
     let wild: Vec<&SpawnTable> = order.into_iter().filter(|t| t.grows_wild()).collect();
-    wilds::plan(terrain, &ground, &wild, &mut taken, seed, land, &mut seeds);
+    wilds::plan(&wild_land, &ground, &wild, &mut taken, seed, land, &mut seeds);
     seeds
 }
 

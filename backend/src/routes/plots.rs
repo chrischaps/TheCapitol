@@ -598,14 +598,14 @@ mod tests {
     }
 
     /// The wilds can't be owned (WD6): not a wilderness plot, not a plot whose
-    /// row says rural but stands past r3800, and not one off the world.
+    /// row says rural but stands past the rural edge, and not one off the world.
     #[test]
     fn nothing_in_the_wilds_is_claimable() {
         use capitol_protocol::rules::{CENTER_X, CENTER_Y, RURAL_OUTER_RADIUS};
         assert!(claimable("urban", CENTER_X + 1200.0, CENTER_Y));
         assert!(claimable("rural", CENTER_X, CENTER_Y + RURAL_OUTER_RADIUS - 1.0));
-        assert!(!claimable("wilderness", CENTER_X, CENTER_Y + 4500.0));
-        assert!(!claimable("rural", CENTER_X, CENTER_Y + 4500.0));
+        assert!(!claimable("wilderness", CENTER_X, CENTER_Y + RURAL_OUTER_RADIUS + 700.0));
+        assert!(!claimable("rural", CENTER_X, CENTER_Y + RURAL_OUTER_RADIUS + 700.0));
         assert!(!claimable("wilderness", CENTER_X + 1200.0, CENTER_Y));
         assert!(!claimable("capitol", CENTER_X, CENTER_Y));
         assert!(!claimable("atlantis", CENTER_X + 1200.0, CENTER_Y));
@@ -617,7 +617,7 @@ mod tests {
     async fn a_claim_in_the_wilds_is_refused(db: PgPool) {
         let ada = player(&db, "ada", 1_000_000).await;
         let lot = plot(&db, None, 0).await;
-        sqlx::query("UPDATE plots SET world_y = world_y + 4500 WHERE id = $1").bind(lot).execute(&db).await.unwrap();
+        sqlx::query("UPDATE plots SET world_y = world_y + 5000 WHERE id = $1").bind(lot).execute(&db).await.unwrap();
         let (tx, mut rx) = events();
 
         assert!(matches!(claim(&db, &tx, ada, lot).await, Err(AppError::BadRequest(m)) if m == NOT_CLAIMABLE));

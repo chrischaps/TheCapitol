@@ -308,7 +308,7 @@ mod tests {
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO stations (id, station_type, owner_id, position_x, position_y, plot_id, kit_quality)
-             VALUES ($1, 'storage_chest', $2, 7200, 6000, $3, 50)",
+             VALUES ($1, 'storage_chest', $2, 8000, 6800, $3, 50)",
         )
         .bind(id)
         .bind(owner)
