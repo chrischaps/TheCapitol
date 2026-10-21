@@ -1,5 +1,5 @@
 //! The wilds' water past the world's edge (#229). W3's hydrology ends every
-//! `mouth: edge` course on r6000, but the land runs on past it and settles
+//! `mouth: edge` course on r6800 (r6000 before #308), but the land runs on past it and settles
 //! to flat by `land::OUTER` (W9). So the client runs each one on, as
 //! scenery nobody can walk to, before the land is carved:
 //!
@@ -723,7 +723,8 @@ mod tests {
         let mouths: Vec<&WaterPoint> = edge_courses().iter().map(|(was, _)| was.points.last().unwrap()).collect();
         for k in 0..7200 {
             let deg = k as f64 * 0.05;
-            for r in [5900.0, 5960.0, 5990.0, 5999.5] {
+            let edge = WILDERNESS_OUTER_RADIUS;
+            for r in [edge - 100.0, edge - 40.0, edge - 10.0, edge - 0.5] {
                 let [x, y] = polar(r, deg);
                 let a = land::height(x, y, &t.land, &before.0, &before.1);
                 let b = land::height(x, y, &t.land, &after.0, &after.1);
@@ -731,7 +732,7 @@ mod tests {
                 // it can reach a hair past that of the course's last stretch.
                 // No node stands within 30 of the edge.
                 let bank = mouths.iter().map(|m| (m.x - x).hypot(m.y - y) - 0.5 * m.width).fold(f64::MAX, f64::min);
-                if r > 5970.0 && bank < REACH {
+                if r > edge - 30.0 && bank < REACH {
                     assert!((a - b).abs() < 2.0, "r{r} at {deg}°, {bank} from a mouth's bank: {a} to {b}");
                 } else {
                     assert_eq!(a, b, "r{r} at {deg}°");

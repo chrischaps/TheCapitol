@@ -113,8 +113,8 @@ mod tests {
     use super::*;
 
     /// Across the canal of `one_canal`, which only its bridge at 90° crosses.
-    const FROM: Point = (6100.0, 7100.0);
-    const TO: Point = (6100.0, 6900.0);
+    const FROM: Point = (6900.0, 7900.0);
+    const TO: Point = (6900.0, 7700.0);
 
     #[test]
     fn a_walk_across_the_canal_is_sent_a_leg_at_a_time_by_the_bridge() {
@@ -152,7 +152,7 @@ mod tests {
         // The prediction is at the first corner, on the road south of the
         // bridge, and the server still out east of it, where the canal
         // stands between it and the next corner
-        let behind = (6100.0, 7000.0 + 30.0);
+        let behind = (6900.0, 7800.0 + 30.0);
         assert!(!graph.walkable(behind, corners[1]), "{corners:?}");
         assert_eq!(walk.next(Some(&graph), true, behind, now), None, "waits for the server");
         assert_eq!(walk.next(Some(&graph), true, corners[0], now), Some(corners[1]));
@@ -165,14 +165,14 @@ mod tests {
         assert_eq!(walk.plan(None, FROM, TO, now), TO);
         assert_eq!(walk.corners().collect::<Vec<_>>(), vec![TO]);
         // The server walks it alone; the prediction's stop ends it
-        assert_eq!(walk.next(None, false, (6100.0, 7000.0), now), None);
+        assert_eq!(walk.next(None, false, (6900.0, 7800.0), now), None);
         assert!(walk.is_walking());
-        assert_eq!(walk.next(None, true, (6100.0, 7000.0), now), None);
+        assert_eq!(walk.next(None, true, (6900.0, 7800.0), now), None);
         assert!(!walk.is_walking());
 
         let graph = WalkGraph::new(&one_canal());
-        let nowhere = (7500.0, 7500.0);
-        assert_eq!(walk.plan(Some(&graph), nowhere, (6000.0, 6100.0), now), (6000.0, 6100.0));
+        let nowhere = (8300.0, 8300.0);
+        assert_eq!(walk.plan(Some(&graph), nowhere, (6800.0, 6900.0), now), (6800.0, 6900.0));
         assert_eq!(walk.corners().count(), 1);
     }
 
@@ -184,12 +184,12 @@ mod tests {
         walk.plan(Some(&graph), FROM, TO, now);
         let later = now + Duration::from_secs(600);
         // Not there, and not able to go on: long past due, it gives up
-        assert_eq!(walk.next(Some(&graph), true, (6400.0, 7400.0), later), None);
+        assert_eq!(walk.next(Some(&graph), true, (7200.0, 8200.0), later), None);
         assert!(!walk.is_walking());
 
         walk.plan(Some(&graph), FROM, TO, now);
-        let first = walk.plan(Some(&graph), FROM, (6150.0, 7150.0), now);
-        assert_eq!(first, (6150.0, 7150.0), "a straight walk on the same side");
+        let first = walk.plan(Some(&graph), FROM, (6950.0, 7950.0), now);
+        assert_eq!(first, (6950.0, 7950.0), "a straight walk on the same side");
         assert_eq!(walk.corners().count(), 1);
         walk.stop();
         assert_eq!(walk.destination(), None);

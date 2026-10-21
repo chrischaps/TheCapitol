@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn polar_round_trips_through_server_space() {
-        for (r, deg) in [(0.0, 0.0), (600.0, 45.0), (2400.0, 200.0), (5999.0, 359.0)] {
+        for (r, deg) in [(0.0, 0.0), (600.0, 45.0), (2400.0, 200.0), (capitol_protocol::rules::WILDERNESS_OUTER_RADIUS - 1.0, 359.0)] {
             let [wx, wz] = polar_to_world(r, deg);
             let [x, y] = to_server(wx, wz);
             let (dx, dy) = (x - CENTER_X, y - CENTER_Y);

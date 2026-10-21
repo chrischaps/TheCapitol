@@ -3722,7 +3722,7 @@ mod tests {
     ///
     /// ```sql
     /// with s as (insert into stations (id, station_type, owner_id, position_x, position_y)
-    ///   select gen_random_uuid(), 'workbench', id, 6000, 9330 from players where name = 'Automate1'
+    ///   select gen_random_uuid(), 'workbench', id, 6800, 10130 from players where name = 'Automate1'
     ///   returning id),
     /// c as (insert into containers (id, container_type, owner_id, station_id)
     ///   select gen_random_uuid(), 'station_inventory', null, id from s returning id)

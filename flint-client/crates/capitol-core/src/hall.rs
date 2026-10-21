@@ -86,15 +86,15 @@ mod tests {
         Landmark {
             id: "exchange_hall".into(),
             kind: LandmarkKind::ExchangeHall,
-            position: (6085.0, 6297.5),
+            position: (6885.0, 7097.5),
             corners: [
-                (6045.0, 6347.5),
-                (6045.0, 6247.5),
-                (6125.0, 6247.5),
-                (6125.0, 6347.5),
+                (6845.0, 7147.5),
+                (6845.0, 7047.5),
+                (6925.0, 7047.5),
+                (6925.0, 7147.5),
             ],
             entrance_edge: (0, 1),
-            door: (6045.0, 6297.5),
+            door: (6845.0, 7097.5),
         }
     }
 
@@ -102,7 +102,7 @@ mod tests {
     fn the_approach_is_on_the_pavement_in_front_of_the_door_and_in_range() {
         let h = hall();
         let [x, y] = approach(&h);
-        assert_eq!([x, y], [6025.0, 6297.5]);
+        assert_eq!([x, y], [6825.0, 7097.5]);
         assert!(rules::market::at_the_hall(&h, x, y));
     }
 
@@ -110,29 +110,29 @@ mod tests {
     fn a_click_in_range_opens_and_one_from_afar_walks_then_opens_on_arrival() {
         let h = hall();
         let mut v = Visit::default();
-        assert_eq!(v.click(&h, [6000.0, 6300.0]), Step::Open);
+        assert_eq!(v.click(&h, [6800.0, 7100.0]), Step::Open);
         assert!(!v.walking());
 
-        let from = [6000.0, 6900.0];
+        let from = [6800.0, 7700.0];
         assert_eq!(
             v.click(&h, from),
             Step::WalkTo {
-                x: 6025.0,
-                y: 6297.5
+                x: 6825.0,
+                y: 7097.5
             }
         );
-        assert!(!v.arrived(&h, [6000.0, 6600.0]), "still on the way");
-        assert!(v.arrived(&h, [6010.0, 6390.0]), "in range");
-        assert!(!v.arrived(&h, [6010.0, 6380.0]), "only once");
+        assert!(!v.arrived(&h, [6800.0, 7400.0]), "still on the way");
+        assert!(v.arrived(&h, [6810.0, 7190.0]), "in range");
+        assert!(!v.arrived(&h, [6810.0, 7180.0]), "only once");
     }
 
     #[test]
     fn walking_elsewhere_drops_the_visit() {
         let h = hall();
         let mut v = Visit::default();
-        v.click(&h, [6000.0, 6900.0]);
+        v.click(&h, [6800.0, 7700.0]);
         v.walked();
-        assert!(!v.arrived(&h, [6025.0, 6297.5]));
+        assert!(!v.arrived(&h, [6825.0, 7097.5]));
     }
 
     #[test]

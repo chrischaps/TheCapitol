@@ -9,7 +9,7 @@
 //     sky in the top third of the frame, and from the outer zones the
 //     tower on the horizon;
 //   - street (32 m): about 50° down, where the camera rests;
-//   - map (880 m): straight down, north at the top, the whole r6000
+//   - map (1000 m): straight down, north at the top, the whole r6800
 //     world in frame, the light flattened into the 2D client's palette
 //     (atmosphere.rs keys that on height).
 //
@@ -81,7 +81,9 @@
 // Camera distance from the point it looks at (m) at zoom 0 and zoom 1.
 // Zoom is linear in the log of distance, so each wheel notch feels alike.
 fn near_distance() { 4.5 }
-fn far_distance() { 880.0 }
+// The far end frames the whole world at the rig's 70° (680 m, r6800, since
+// #308 grew it; 880 m framed r6000).
+fn far_distance() { 1000.0 }
 // The shoulder view (E3.13) fades in from this distance down to the near
 // end: the look rises to chest height, moves ahead of you and over your
 // right shoulder (m). 11 m is where the dial used to end.
@@ -129,8 +131,8 @@ fn map_pitch() { 89.9 }
 // near end (E3.13) doesn't move them.
 fn centre_from() { zoom_at(166.5) }
 fn north_from() { zoom_at(366.5) }
-// Keep the free point on the world (r6000, 600 m).
-fn world_radius() { 600.0 }
+// Keep the free point on the world (r6800, 680 m).
+fn world_radius() { cap_world_radius() }
 // How fast things settle: 1/e in 1/k seconds.
 fn follow_k() { 6.0 }
 // The nudge when a canal stops you (P4.3): how long it rings, and how far
@@ -682,16 +684,19 @@ fn view_shot(view) {
     } else if view == "from-suburban" {
         #{ pos: [141.0, 16.0, 141.0], at: [0.0, 30.0, 0.0] }
     } else if view == "from-rural" {
-        #{ pos: [145.0, 22.0, -251.0], at: [0.0, 30.0, 0.0] }
+        // Out in the middle of the rural ring (r3800), between its two
+        // roads, the countryside running in to the city.
+        #{ pos: [190.0, 22.0, -329.0], at: [0.0, 30.0, 0.0] }
     } else if view == "range" {
-        // Over the southern massif's summit (59 m), looking east along the
-        // ring: down into the south valley and its trail, and across to
-        // the next massif's tops.
-        #{ pos: [-226.9, 74.0, 486.7], at: [193.3, 30.0, 478.4] }
+        // Over the southern massif's summit (47 m, r6440 since #308), looking
+        // east along the ring: down into the south valley and its trail, and
+        // across to the next massif's tops.
+        #{ pos: [-279.0, 61.7, 580.4], at: [212.0, 30.0, 583.0] }
     } else {
-        // from-wilderness: on a ridge of the north-west massif (47 m),
-        // over its valleys and the plain to the tower, gold at the centre.
-        #{ pos: [-206.2, 50.5, -463.2], at: [0.0, 22.0, 0.0] }
+        // from-wilderness: on a ridge of the north-west massif (61 m, r5920
+        // since #308), over its valleys and the plain to the tower, gold at
+        // the centre.
+        #{ pos: [-296.0, 64.1, -512.7], at: [0.0, 22.0, 0.0] }
     }
 }
 

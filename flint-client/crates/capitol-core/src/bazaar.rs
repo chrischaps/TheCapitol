@@ -640,7 +640,8 @@ mod tests {
         let stalls: Vec<&Landmark> = terrain.landmarks.iter().filter(|l| l.kind == LandmarkKind::Stall).collect();
         assert!(stalls.len() >= 34, "{} stalls: refresh the fixture", stalls.len());
         let mouth = terrain.landmarks.iter().find(|l| l.kind == LandmarkKind::Bazaar).unwrap();
-        for from in [(6000.0, mouth.door.1), (6000.0, 6550.0)] {
+        let avenue = terrain.center_x;
+        for from in [(avenue, mouth.door.1), (avenue, terrain.center_y + 550.0)] {
             for s in &stalls {
                 let legs = route(&streets, s, from);
                 let end = *legs.last().unwrap();

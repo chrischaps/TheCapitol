@@ -483,8 +483,19 @@ impl CapitolExtension {
             self.land_in = true;
             self.nodes.land_changed();
         }
-        names.extend(self.land_meshes.update(gpu, eye));
+        let land = self.land_meshes.update(gpu, eye);
+        names.extend(land.iter().map(|(name, _)| name.clone()));
         attach_each(ctx, names.iter());
+        // The plain's chunks have nothing on them tall enough to throw a
+        // shadow, and the low sun's cascades take in a hundred of them.
+        for (name, _) in land.iter().filter(|(_, casts)| !casts) {
+            let Some(id) = ctx.world.get_id(name) else { continue };
+            let mut table = toml::Table::new();
+            table.insert("cast_shadows".into(), false.into());
+            if let Err(e) = ctx.world.merge_component(id, "material", table.into()) {
+                tracing::warn!("land: can't keep {name}'s shadow off: {e}");
+            }
+        }
     }
 
     /// The valleys' mist as thick as the hour and the camera's height say

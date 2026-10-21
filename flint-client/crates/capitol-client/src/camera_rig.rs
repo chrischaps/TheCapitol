@@ -12,6 +12,7 @@ use crate::atmosphere::{CLEAR_FROM, FLAT_BY};
 use crate::coords::layer::GROUND;
 use crate::script_api::{self, Shared};
 use crate::world::tower;
+use capitol_protocol::rules::Zone;
 use capitol_protocol::terrain::WaterRing;
 use rhai::{CallFnOptions, Engine, FuncArgs, Map, Scope, AST};
 use std::path::Path;
@@ -22,8 +23,8 @@ const VFOV: f64 = 70.0;
 /// The camera's near plane (scene `[camera] near`): geometry nearer than
 /// this is cut away, so the camera keeps at least this far from anything.
 const NEAR: f32 = 1.0;
-/// The world's edge (r6000), in metres.
-const WORLD_R: f64 = 600.0;
+/// The world's edge (r6800 since #308), in metres.
+const WORLD_R: f64 = capitol_protocol::rules::WILDERNESS_OUTER_RADIUS * crate::coords::S as f64;
 
 struct Rig {
     engine: Engine,
@@ -238,7 +239,10 @@ fn in_the_wilds_the_camera_keeps_over_the_land_and_sees_the_point() {
     let ground = |x: f32, z: f32| GROUND + crate::world::land::rise_on(field, [x, z]);
     let mut checked = 0;
     let mut risen = 0;
-    for r in [420.0, 470.0, 520.0, 560.0, 590.0] {
+    // Across the wilds, from the foothills out to near the world's edge.
+    let (inner, outer) = Zone::Wilderness.radii();
+    for share in [0.2, 0.4, 0.6, 0.8, 0.95] {
+        let r = (inner + share * (outer - inner)) * crate::coords::S as f64;
         for k in 0..24 {
             let a = k as f64 * std::f64::consts::TAU / 24.0;
             let (fx, fz) = (r * a.cos(), r * a.sin());
@@ -271,6 +275,32 @@ fn in_the_wilds_the_camera_keeps_over_the_land_and_sees_the_point() {
         }
     }
     assert!(risen * 3 > checked, "{risen} of {checked} on the hills");
+}
+
+#[test]
+fn the_wild_shots_stand_on_their_ridge_and_see_the_tower() {
+    // W11's shots, moved out with the land (#309): each stands a few metres
+    // over the ground under it, not over the plain the ranges left, and
+    // from-wilderness sees the tower over the land between.
+    let field = crate::world::land::tests::fixture_field();
+    let rig = Rig::load_on(Some(field));
+    let ground = |x: f64, z: f64| (GROUND + crate::world::land::rise_on(field, [x as f32, z as f32])) as f64;
+    for (view, over) in [("from-wilderness", 2.0..6.0), ("range", 10.0..20.0)] {
+        let shot: Map = rig.call("view_shot", (view.to_string(),));
+        let pos = shot["pos"].clone().into_typed_array::<f64>().unwrap();
+        let rise = ground(pos[0], pos[2]) - GROUND as f64;
+        assert!(rise > 40.0, "{view}: on the ranges, not the plain ({rise:.1} m up)");
+        let stands = pos[1] - ground(pos[0], pos[2]);
+        assert!(over.contains(&stands), "{view}: {stands:.1} m over the ground");
+    }
+    let shot: Map = rig.call("view_shot", ("from-wilderness".to_string(),));
+    let [p, at] = ["pos", "at"].map(|k| shot[k].clone().into_typed_array::<f64>().unwrap());
+    for i in 1..200 {
+        let t = i as f64 / 200.0;
+        let (x, z) = (p[0] + (at[0] - p[0]) * t, p[2] + (at[2] - p[2]) * t);
+        let y = p[1] + (at[1] - p[1]) * t;
+        assert!(y > ground(x, z), "a hill hides the tower at ({x:.0}, {z:.0})");
+    }
 }
 
 #[test]

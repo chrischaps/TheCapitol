@@ -1280,9 +1280,9 @@ mod tests {
 
     #[test]
     fn a_band_gap_is_zero_inside_and_the_distance_outside() {
-        assert_eq!(band_gap((3000.0, 3800.0), 3350.0), 0.0);
+        assert_eq!(band_gap((3000.0, 4600.0), 3350.0), 0.0);
         assert_eq!(band_gap((1800.0, 3000.0), 3350.0), 350.0);
-        assert_eq!(band_gap((3000.0, 3800.0), 2500.0), 500.0);
+        assert_eq!(band_gap((3000.0, 4600.0), 2500.0), 500.0);
     }
 
     #[test]

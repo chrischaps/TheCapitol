@@ -18,7 +18,7 @@
 // Each is a function below that gets the click (#{ x, z } in world
 // metres, `shift`, `alt`) and returns true when it took it.
 //
-// Walking: cap_move(x, z) sends you (clamped to the world disc, r6000 server
+// Walking: cap_move(x, z) sends you (clamped to the world disc, r6800 server
 // units), and cap_destination() is where you're going until you arrive.
 // A gold ring lies there, with a faint dashed line marching to it from
 // your feet. The click itself drops a ripple, as the spike's did (P0.4).

@@ -971,7 +971,7 @@ mod tests {
     #[test]
     fn a_node_gets_a_clearing_and_nothing_else_changes() {
         let mut m = mask().clone();
-        // Somewhere full of grass in the wilderness.
+        // Somewhere full of grass in the rural ring.
         let c = (0..360)
             .map(|k| {
                 let a = (k as f64).to_radians();

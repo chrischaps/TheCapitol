@@ -252,9 +252,9 @@ mod tests {
 
     fn terrain(version: &str) -> TerrainResponse {
         TerrainResponse {
-            world_size: 12000.0,
-            center_x: 6000.0,
-            center_y: 6000.0,
+            world_size: 13600.0,
+            center_x: 6800.0,
+            center_y: 6800.0,
             water_rings: vec![],
             roads: vec![],
             terrain_plots: vec![],
