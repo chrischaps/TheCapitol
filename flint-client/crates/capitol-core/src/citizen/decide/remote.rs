@@ -7,8 +7,8 @@
 //! layer's [`Remote`] under its ticket until the cascade polls for it.
 //!
 //! This module also puts a [`Situation`] into words a model can read:
-//! [`state`] for everything but the menu, and [`label`] and [`entry`] for
-//! each entry on it.
+//! [`state`] for everything but the menu, as JSON, or [`prose`], the same
+//! as a paragraph (#303); and [`label`] and [`entry`] for each entry on it.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -152,6 +152,110 @@ pub fn state(s: &Situation) -> Value {
         "market": s.market,
         "question": question(&s.question),
     })
+}
+
+/// [`state`] as a paragraph in the second person, as TypeSafe's own
+/// examples give theirs (#303). A middling trait (0.34 to 0.66) is named
+/// as middling, the rest by what they make the citizen do.
+pub fn prose(s: &Situation) -> String {
+    let mut out = format!(
+        "The Capitol is a trading game with no combat: citizens gather, craft, trade and bank to grow rich, and prices are in Strands. \
+         You are {}, {}. ",
+        s.who.name,
+        role(&s.who.role)
+    );
+    out.push_str(&character(&s.who.temperament));
+    out.push_str(&format!(
+        " You are in the {} zone{}, {:.1} game hours into this life. ",
+        s.at.zone,
+        s.when.time_of_day.map_or(String::new(), |d| format!(" and it is {}", clock(d))),
+        s.when.hours
+    ));
+    let h = &s.holdings;
+    let mut held = vec![format!("{} Strands", h.strands)];
+    held.extend(h.items.iter().filter(|(_, &n)| n != 0).map(|(item, n)| format!("{n} {}", item.replace('_', " "))));
+    out.push_str(&format!("You hold {}. ", list(&held)));
+    let tools: Vec<String> = h.tools.iter().cloned().collect();
+    out.push_str(&match tools.as_slice() {
+        [] => "You have no tools. ".to_string(),
+        t => format!("Your tools: {}. ", list(t)),
+    });
+    let stations: Vec<String> = h.stations.iter().cloned().collect();
+    if !stations.is_empty() {
+        out.push_str(&format!("Your stations: {}. ", list(&stations)));
+    }
+    out.push_str(&match h.plot_room {
+        Some(room) => format!("You own a plot with room for {room} more stations. "),
+        None => format!("You own no plot; a deed would cost {} Strands. ", h.deed_cost),
+    });
+    if s.market.is_empty() {
+        out.push_str("You don't know the hall's books. ");
+    } else {
+        let books: Vec<String> = s.market.iter().map(book).collect();
+        out.push_str(&format!("At the Exchange hall: {}. ", books.join("; ")));
+    }
+    out.push_str(&question(&s.question));
+    out
+}
+
+/// `crafter-planks` as `a planks crafter`, `gatherer-ore` as `an ore
+/// gatherer`.
+fn role(slug: &str) -> String {
+    let name = match slug.split_once('-') {
+        Some((what, of)) => format!("{} {what}", of.replace('_', " ")),
+        None => slug.to_string(),
+    };
+    let article = if name.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+    format!("{article} {name}")
+}
+
+/// A temperament as a sentence or two.
+fn character(t: &Temperament) -> String {
+    let traits = [
+        (t.thrift, "thrift", "thrifty: you hold out for a fair price and would rather gather than overpay", "free with money: you don't haggle"),
+        (t.risk, "risk", "bold: you ask above the bid, hoping someone pays up", "cautious: you sell near the bid"),
+        (t.sociability, "sociability", "sociable: you like to pass free time among people at the hall", "solitary: you'd rather rest alone"),
+        (t.patience, "patience", "patient: you sell and bank in big lots, less often", "impatient: you sell and bank in small lots, often"),
+    ];
+    let mut said = Vec::new();
+    let mut middling = Vec::new();
+    for (v, name, high, low) in traits {
+        if v >= 0.67 {
+            said.push(format!("You are {high}."));
+        } else if v <= 0.33 {
+            said.push(format!("You are {low}."));
+        } else {
+            middling.push(name);
+        }
+    }
+    if !middling.is_empty() {
+        said.push(format!("You are middling in {}.", list(&middling)));
+    }
+    said.join(" ")
+}
+
+fn book(q: &super::Quote) -> String {
+    let side = |v: Option<i64>, none: &str, some: &str| v.map_or(none.to_string(), |p| format!("{some} {p}"));
+    format!(
+        "{} {}, {}, {}",
+        q.item.replace('_', " "),
+        side(q.bid, "no bids", "bid"),
+        side(q.ask, "no offers", "ask"),
+        side(q.last, "never traded", "last traded at")
+    )
+}
+
+/// `a, b and c`.
+fn list<S: AsRef<str>>(items: &[S]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.as_ref().to_string(),
+        [rest @ .., last] => format!(
+            "{} and {}",
+            rest.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join(", "),
+            last.as_ref()
+        ),
+    }
 }
 
 fn temperament(t: &Temperament) -> Value {
@@ -328,6 +432,71 @@ mod tests {
     fn repeated_labels_are_told_apart() {
         let menu = vec![Choice::Gather { item: "log".into() }, Choice::Rest, Choice::Gather { item: "log".into() }];
         assert_eq!(labels(&menu), ["gather log", "rest", "gather log (2)"]);
+    }
+
+    #[test]
+    fn a_situation_reads_as_a_paragraph() {
+        use super::super::{Held, Place, Quote, When, Who};
+        let mut holdings = Held {
+            strands: 40,
+            deed_cost: 250,
+            ..Held::default()
+        };
+        holdings.items.insert("plank".into(), 12);
+        holdings.items.insert("fiber".into(), 120);
+        let s = Situation {
+            who: Who {
+                name: "Percy Sawyer".into(),
+                role: "crafter-planks".into(),
+                temperament: Temperament {
+                    thrift: 0.8,
+                    risk: 0.1,
+                    sociability: 0.5,
+                    patience: 0.5,
+                },
+            },
+            at: Place {
+                x: 0.0,
+                y: 0.0,
+                zone: "urban".into(),
+            },
+            when: When {
+                time_of_day: Some(0.4),
+                hours: 5.2,
+            },
+            holdings,
+            market: vec![Quote {
+                item: "iron_ore".into(),
+                bid: None,
+                ask: Some(5),
+                last: Some(3),
+            }],
+            question: Question::Sell { item: "plank".into() },
+            menu: vec![Choice::Keep],
+            carry_on: Some(0),
+        };
+        let text = prose(&s);
+        for part in [
+            "You are Percy Sawyer, a planks crafter.",
+            "iron ore no bids",
+            "You are thrifty",
+            "You are cautious",
+            "middling in sociability and patience",
+            "it is 09:36",
+            "You hold 40 Strands, 120 fiber and 12 plank.",
+            "a deed would cost 250 Strands",
+            "iron ore no bids, ask 5, last traded at 3",
+            "Should you sell your plank now",
+        ] {
+            assert!(text.contains(part), "{part:?} in {text}");
+        }
+    }
+
+    #[test]
+    fn a_role_reads_with_its_article() {
+        assert_eq!(role("gatherer-ore"), "an ore gatherer");
+        assert_eq!(role("crafter-iron_ingots"), "an iron ingots crafter");
+        assert_eq!(role("builder"), "a builder");
     }
 
     #[test]

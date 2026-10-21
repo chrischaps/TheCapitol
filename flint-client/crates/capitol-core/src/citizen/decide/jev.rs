@@ -4,7 +4,10 @@
 //! Jev answers questions whose answers the caller defines, with
 //! probabilities rather than text. A situation goes to it as one request,
 //! `POST /v1/systemone`, whose questions Jev weighs in parallel:
-//! - the situation (everything but the menu) is its `state`;
+//! - the situation (everything but the menu) is its `state`, as a
+//!   paragraph ([`prose`](super::remote::prose)): Jev's answers at 0.9 and
+//!   over agreed with the rules 98% of the time that way, against 94% as
+//!   JSON, for 30% fewer tokens (#303);
 //! - the menu is a `choice` question, one option for each entry, named by
 //!   its [`label`](super::remote::label) and described with its ranges;
 //! - each parameter an entry takes is a `score` question, over up to ten
@@ -16,8 +19,8 @@
 //! low and goes up a layer. Jev can't answer off the menu.
 //!
 //! Its key is `TYPESAFE_API_KEY`, and with none it escalates everything.
-//! `JEV_MODEL` picks the model [default: `jev-latest`], and `TYPESAFE_URL`
-//! the server. Input costs $0.042 a million tokens; output is free.
+//! `JEV_MODEL` picks the model [default: `jev-latest`], `TYPESAFE_URL` the
+//! server, and `JEV_STATE=json` sends the state as JSON instead (#303). Input costs $0.042 a million tokens; output is free.
 
 use std::collections::BTreeMap;
 
@@ -40,6 +43,8 @@ pub struct JevDecider {
     model: String,
     url: String,
     key: Option<String>,
+    /// The state as a paragraph rather than JSON (#303)
+    prose: bool,
     remote: Remote,
 }
 
@@ -50,6 +55,7 @@ impl JevDecider {
             model: remote::env("JEV_MODEL").unwrap_or_else(|| DEFAULT_MODEL.into()),
             url: remote::env("TYPESAFE_URL").unwrap_or_else(|| DEFAULT_URL.into()),
             key: remote::env("TYPESAFE_API_KEY"),
+            prose: !remote::env("JEV_STATE").is_some_and(|v| v.eq_ignore_ascii_case("json")),
             remote: Remote::default(),
         }
     }
@@ -69,7 +75,7 @@ impl Decider for JevDecider {
         if s.menu.is_empty() {
             return Verdict::Escalate { reason: "an empty menu".into() };
         }
-        let asking = Asking::new(s, &self.model);
+        let asking = Asking::new(s, &self.model, self.prose);
         let url = format!("{}/v1/systemone", self.url.trim_end_matches('/'));
         let ticket = self.remote.send(async move {
             match remote::post(&url, &key, &asking.body).await {
@@ -121,7 +127,8 @@ pub struct Asking {
 }
 
 impl Asking {
-    pub fn new(s: &Situation, model: &str) -> Asking {
+    /// `prose`: the state as a paragraph rather than JSON.
+    pub fn new(s: &Situation, model: &str, prose: bool) -> Asking {
         let options = remote::labels(&s.menu);
         let criteria: Map<String, Value> = options
             .iter()
@@ -146,7 +153,14 @@ impl Asking {
             ];
             for (is_price, span) in asks.into_iter().flatten() {
                 let levels = levels(span);
+                // A span of one value isn't asked: the answer is that value
                 if levels.len() < 2 {
+                    params.push(Param {
+                        key: String::new(),
+                        entry: i,
+                        price: is_price,
+                        levels,
+                    });
                     continue;
                 }
                 let key = format!("{} {}", if is_price { "price" } else { "quantity" }, i);
@@ -170,7 +184,7 @@ impl Asking {
         Asking {
             body: json!({
                 "model": model,
-                "state": remote::state(s),
+                "state": if prose { Value::String(remote::prose(s)) } else { remote::state(s) },
                 "questions": questions,
             }),
             options,
@@ -191,10 +205,16 @@ impl Asking {
         let confidence = pick["confidence"].as_f64().ok_or("no confidence in the reply")? as f32;
         let mut decision = Decision::plain(entry);
         for param in self.params.iter().filter(|p| p.entry == entry) {
-            let score = answers[param.key.as_str()]["score"]
-                .as_f64()
-                .ok_or_else(|| format!("no score for {}", param.key))?;
-            let value = level(&param.levels, score);
+            let value = match param.levels.as_slice() {
+                [] => return Err(format!("{} has an empty span", param.key)),
+                [only] => *only,
+                levels => {
+                    let score = answers[param.key.as_str()]["score"]
+                        .as_f64()
+                        .ok_or_else(|| format!("no score for {}", param.key))?;
+                    level(levels, score)
+                }
+            };
             if param.price {
                 decision.price = Some(value);
             } else {
@@ -295,6 +315,14 @@ mod tests {
     }
 
     #[test]
+    fn the_state_may_go_as_prose() {
+        let asking = Asking::new(&situation(), "jev-latest", true);
+        let state = asking.body["state"].as_str().unwrap();
+        assert!(state.starts_with("The Capitol is a trading game"), "{state}");
+        assert_eq!(asking.body["questions"]["pick"]["type"], "choice", "the questions don't change");
+    }
+
+    #[test]
     fn levels_cover_the_span() {
         assert_eq!(levels(Span::new(3, 6)), [3, 4, 5, 6]);
         assert_eq!(levels(Span::new(5, 5)), [5]);
@@ -314,7 +342,7 @@ mod tests {
 
     #[test]
     fn a_menu_becomes_a_choice_and_its_parameters_scores() {
-        let asking = Asking::new(&situation(), "jev-latest");
+        let asking = Asking::new(&situation(), "jev-latest", false);
         let q = &asking.body["questions"];
         assert_eq!(asking.body["model"], "jev-latest");
         assert_eq!(q["pick"]["type"], "choice");
@@ -331,7 +359,7 @@ mod tests {
     #[test]
     fn a_reply_reads_as_a_decision_inside_its_spans() {
         let s = situation();
-        let asking = Asking::new(&s, "jev-latest");
+        let asking = Asking::new(&s, "jev-latest", false);
         let reply = json!({
             "model": "jev-1.13.0",
             "answers": {
@@ -356,7 +384,7 @@ mod tests {
     #[test]
     fn a_plain_pick_takes_no_parameters() {
         let s = situation();
-        let asking = Asking::new(&s, "jev-latest");
+        let asking = Asking::new(&s, "jev-latest", false);
         let reply = json!({"answers": {"pick": {"choice": "keep", "confidence": 0.6}}});
         let Verdict::Decided { choice, .. } = asking.verdict(&reply).unwrap() else { panic!() };
         assert_eq!(choice, Decision::plain(1));
@@ -364,8 +392,27 @@ mod tests {
     }
 
     #[test]
+    fn a_span_of_one_value_takes_that_value_unasked() {
+        let mut s = situation();
+        s.menu[0] = Choice::Sell {
+            item: "plank".into(),
+            price: Span::new(3, 3),
+            quantity: Span::new(1, 6),
+        };
+        let asking = Asking::new(&s, "jev-latest", false);
+        assert!(asking.body["questions"].get("price 0").is_none(), "nothing to ask");
+        let reply = json!({"answers": {
+            "pick": {"choice": "sell plank", "confidence": 0.95},
+            "quantity 0": {"score": 2.0}
+        }});
+        let Verdict::Decided { choice, .. } = asking.verdict(&reply).unwrap() else { panic!() };
+        assert_eq!((choice.price, choice.quantity), (Some(3), Some(3)));
+        assert!(s.admits(&choice).is_ok());
+    }
+
+    #[test]
     fn an_unknown_option_is_an_error() {
-        let asking = Asking::new(&situation(), "jev-latest");
+        let asking = Asking::new(&situation(), "jev-latest", false);
         let reply = json!({"answers": {"pick": {"choice": "juggle", "confidence": 0.9}}});
         assert!(asking.verdict(&reply).is_err());
     }
@@ -376,6 +423,7 @@ mod tests {
             model: DEFAULT_MODEL.into(),
             url: DEFAULT_URL.into(),
             key: None,
+            prose: false,
             remote: Remote::default(),
         };
         assert!(matches!(jev.decide(&situation()), Verdict::Escalate { .. }));
