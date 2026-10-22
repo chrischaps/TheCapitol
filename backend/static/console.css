@@ -577,6 +577,8 @@ table.ledger { width: 100%; border-collapse: collapse; font-size: 14px; }
 .ledger td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--hair); vertical-align: baseline; }
 .ledger .num { text-align: right; white-space: nowrap; }
 .ledger .dim { color: var(--ink-dim); }
+.ledger .up { color: var(--up); }
+.ledger .down { color: var(--down); }
 .ledger tr.off .now { color: var(--accent); font-weight: 600; }
 .ledger tr.off .now::before { content: "◆ "; font-size: 9px; vertical-align: 2px; }
 .ledger code { font: 12px ui-monospace, Consolas, monospace; color: var(--ink-dim); }

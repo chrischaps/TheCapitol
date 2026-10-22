@@ -16,6 +16,10 @@
 //! started or the town went down; down when the town says it's stopping, or
 //! when it goes quiet for [`TOWN_QUIET_MS`], which the sampler looks for each
 //! sample ([`Town::quiet`]).
+//!
+//! Since D2.2 the newest report also names each citizen's trade
+//! ([`Town::roles`]), for the wealth by role in each sample's
+//! `Distribution`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -129,6 +133,15 @@ impl Town {
         Some(TownLatest { received_ms: *received_ms, up: inner.up, report })
     }
 
+    /// Each citizen's trade, by name, from the newest report: empty until
+    /// a town reports. It holds after the town goes down, since the trades
+    /// don't change while it's away.
+    pub fn roles(&self) -> HashMap<String, String> {
+        let inner = self.inner();
+        let Some((report, _)) = inner.latest.as_ref() else { return HashMap::new() };
+        report.citizens.iter().map(|c| (c.name.clone(), c.role.clone())).collect()
+    }
+
     /// The reports since the last sample, for this one; `None` if none came
     pub fn take_sample(&self) -> Option<TownSummary> {
         self.inner().sample.take()
@@ -214,6 +227,20 @@ mod tests {
         town.receive(report(1, &[("Bo", &[])]), 11_000);
         town.receive(report(1, &[("Ada", &[]), ("Bo", &[])]), 16_000);
         assert!(town.latest().unwrap().report.citizens[0].decisions.is_empty());
+    }
+
+    #[test]
+    fn the_newest_report_names_each_citizens_trade() {
+        let town = Town::new();
+        assert!(town.roles().is_empty(), "no town, no trades");
+        let mut first = report(1, &[("Ada", &[]), ("Bo", &[])]);
+        first.citizens[0].role = "merchant".into();
+        first.citizens[1].role = "gatherer-wood".into();
+        town.receive(first, 1_000);
+        let roles = town.roles();
+        assert_eq!((roles["Ada"].as_str(), roles["Bo"].as_str()), ("merchant", "gatherer-wood"));
+        town.quiet(1_000 + TOWN_QUIET_MS);
+        assert_eq!(town.roles().len(), 2, "kept while the town is down");
     }
 
     #[test]

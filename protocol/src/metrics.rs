@@ -20,6 +20,9 @@
 //! Since D4.1 the town reports in: `capitol-town` posts a [`TownReport`]
 //! each game minute, and each sample carries a [`TownSummary`] of the
 //! reports in its window.
+//! Since D2.2 each sample says how people's and citizens' Strands are spread
+//! ([`Distribution`]): the Gini, the richest tenth's share, and the Strands
+//! each trade holds.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -91,6 +94,10 @@ pub struct Sample {
     /// reports in
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub town: Option<TownSummary>,
+    /// How people's and citizens' Strands are spread now (D2.2); `None` in
+    /// a sample stored before it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<Distribution>,
 }
 
 /// What the books haven't explained since the server started: the drift
@@ -234,6 +241,7 @@ impl Sample {
             watches: Vec::new(),
             drift: Drift::default(),
             town: None,
+            distribution: None,
         }
     }
 }
@@ -252,6 +260,76 @@ pub fn gini(balances: &[i64]) -> Option<f64> {
     // Σ (2i - n - 1) xᵢ over n Σx, with i from 1 in rising order
     let weighted: f64 = held.iter().enumerate().map(|(i, x)| (2.0 * (i as f64 + 1.0) - n - 1.0) * *x as f64).sum();
     Some(weighted / (n * total as f64))
+}
+
+/// The share of what's held that the richest tenth hold: 0.1 when everyone
+/// holds the same, 1 when they hold it all. The tenth is rounded up, so
+/// it's at least one account. A debt counts as nothing. `None` for fewer
+/// than two, or when nobody holds anything.
+pub fn top_tenth_share(balances: &[i64]) -> Option<f64> {
+    let mut held: Vec<i64> = balances.iter().map(|b| (*b).max(0)).collect();
+    let total: i64 = held.iter().sum();
+    if held.len() < 2 || total == 0 {
+        return None;
+    }
+    held.sort_unstable_by(|a, b| b.cmp(a));
+    let tenth = held.len().div_ceil(10);
+    Some(held[..tenth].iter().sum::<i64>() as f64 / total as f64)
+}
+
+/// The role of a person's account in [`Distribution::roles`]
+pub const ROLE_PERSON: &str = "person";
+/// The role of a citizen the town hasn't named a trade for: no town has
+/// reported, or it isn't on the roster
+pub const ROLE_CITIZEN: &str = "citizen";
+
+/// How the Strands people and citizens hold are spread (D2.2). Admins'
+/// aren't counted, as the Gini watch doesn't count them, nor is escrow.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Distribution {
+    /// People's and citizens' accounts
+    pub accounts: u64,
+    /// The [`gini`] of their Strands
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gini: Option<f64>,
+    /// The share the richest tenth of them hold ([`top_tenth_share`])
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_tenth: Option<f64>,
+    /// Their Strands by role: each citizen's trade from the town's report
+    /// (`gatherer-wood`, `merchant`), [`ROLE_CITIZEN`] for one it doesn't
+    /// name, and [`ROLE_PERSON`] for people
+    pub roles: BTreeMap<String, Holding>,
+}
+
+/// What the accounts in one role hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Holding {
+    pub accounts: u64,
+    pub strands: i64,
+}
+
+impl Distribution {
+    /// The spread of `ledger`'s Strands over its accounts but `admins`'.
+    /// `role` names a citizen's trade from its name, when the town says.
+    pub fn of<'a>(ledger: &Ledger, admins: &HashSet<Uuid>, role: impl Fn(&str) -> Option<&'a str>) -> Distribution {
+        let mut balances = Vec::with_capacity(ledger.accounts.len());
+        let mut roles: BTreeMap<String, Holding> = BTreeMap::new();
+        for account in ledger.accounts.iter().filter(|a| !admins.contains(&a.player_id)) {
+            balances.push(account.strands);
+            let name = if account.citizen { role(&account.name).unwrap_or(ROLE_CITIZEN) } else { ROLE_PERSON };
+            let holding = roles.entry(name.to_string()).or_default();
+            holding.accounts += 1;
+            holding.strands += account.strands;
+        }
+        Distribution {
+            accounts: balances.len() as u64,
+            gini: gini(&balances),
+            top_tenth: top_tenth_share(&balances),
+            roles,
+        }
+    }
 }
 
 /// A run of samples' flows added up.
@@ -801,6 +879,46 @@ mod tests {
         assert!((g - 0.25).abs() < 1e-12, "{g}");
         assert_eq!(gini(&[100]), None);
         assert_eq!(gini(&[0, 0]), None);
+    }
+
+    #[test]
+    fn the_richest_tenth_is_at_least_one_account() {
+        assert_eq!(top_tenth_share(&[10; 10]), Some(0.1));
+        // Eleven accounts make a tenth of two
+        let mut eleven = vec![0; 9];
+        eleven.extend([60, 40]);
+        assert_eq!(top_tenth_share(&eleven), Some(1.0));
+        // A debt is nothing
+        assert_eq!(top_tenth_share(&[30, 10, -50]), Some(0.75));
+        assert_eq!(top_tenth_share(&[100]), None);
+        assert_eq!(top_tenth_share(&[0, -5]), None);
+    }
+
+    #[test]
+    fn wealth_is_split_by_trade_without_the_admins() {
+        let mut accounts = vec![
+            account(1, true, 300, &[]),
+            account(2, true, 100, &[]),
+            account(3, true, 50, &[]),
+            account(4, false, 20, &[]),
+            account(5, false, 9000, &[]),
+        ];
+        accounts[0].name = "Ada".into();
+        accounts[1].name = "Bram".into();
+        let books = ledger(10_000, accounts, 500, &[], &[]);
+        let admins = HashSet::from([Uuid::from_u128(5)]);
+        let trades = BTreeMap::from([("Ada", "merchant"), ("Bram", "gatherer-wood")]);
+        let d = Distribution::of(&books, &admins, |name| trades.get(name).copied());
+        assert_eq!(d.accounts, 4);
+        assert_eq!(d.gini, gini(&[300, 100, 50, 20]));
+        assert_eq!(d.top_tenth, Some(300.0 / 470.0));
+        let held = |role: &str| d.roles[role];
+        assert_eq!(held("merchant"), Holding { accounts: 1, strands: 300 });
+        assert_eq!(held("gatherer-wood"), Holding { accounts: 1, strands: 100 });
+        // A citizen the town doesn't name, and a person
+        assert_eq!(held(ROLE_CITIZEN), Holding { accounts: 1, strands: 50 });
+        assert_eq!(held(ROLE_PERSON), Holding { accounts: 1, strands: 20 });
+        assert_eq!(d.roles.len(), 4, "admins have no role");
     }
 
     #[test]

@@ -16,6 +16,9 @@
 //! window (`engine::town`), and the stored minute the minute's. Each sample
 //! the sampler also looks whether the town has gone quiet, and marks it down.
 //!
+//! Since D2.2 each sample says how people's and citizens' Strands are spread
+//! (`Distribution`), by the trades the town's newest report names.
+//!
 //! It runs beside the tick, as a loop of its own (`load::Loop::Sampler`). It
 //! takes the game's lock only to read, twice a sample: the ledger's count of
 //! the players, and its own.
@@ -26,7 +29,7 @@ use std::time::Duration;
 
 use capitol_protocol::ledger::Ledger;
 use capitol_protocol::metrics::{
-    EventBus, Feed, Players, Sample, Trades, KEEP_DAYS, RING_SAMPLES, SAMPLE_SECS, SERIES_TIMES, STORE_EVERY,
+    Distribution, EventBus, Feed, Players, Sample, Trades, KEEP_DAYS, RING_SAMPLES, SAMPLE_SECS, SERIES_TIMES, STORE_EVERY,
 };
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -135,6 +138,7 @@ pub async fn run_sampler_loop(state: AppState, every: Duration) {
                         watches: sample.watches.clone(),
                         drift: sample.drift.clone(),
                         town: town.clone(),
+                        distribution: sample.distribution.clone(),
                         ..stored
                     };
                     store(&state.db, &whole).await
@@ -179,6 +183,8 @@ async fn take(state: &AppState, last: &Ledger) -> Result<(Sample, Ledger, HashSe
         capacity: super::tick::GameState::EVENT_CAPACITY as u64,
     };
     drop(game);
+    let roles = state.town.roles();
+    sample.distribution = Some(Distribution::of(&now, &admins, |name| roles.get(name).map(String::as_str)));
     // Last, once nothing can fail: a missed sample leaves the town's reports
     // for the next
     sample.town = state.town.take_sample();

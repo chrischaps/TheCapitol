@@ -17,8 +17,8 @@
 //! by the tick's phases and the loops beside it (D0.1), each with its slow
 //! statements (D3.2).
 //! `fixtures/rest/sample.json` is one of the Observatory's samples (D0.2): ten
-//! seconds of a 20-citizen town, with its wealth pooling (D2.5), and its two
-//! reports' summary (D4.1).
+//! seconds of a 20-citizen town, with its wealth pooling (D2.5), its two
+//! reports' summary (D4.1), and its wealth by trade (D2.2).
 //! `fixtures/rest/admin_feed.json` is one of each of the rest of what
 //! `GET /admin/stream` sends (D0.3); the sample is `sample.json`.
 //! `fixtures/rest/town_report.json` is `POST /admin/town/report` (D4.1): a
@@ -41,7 +41,7 @@ use capitol_protocol::rest::{
     MarketSummaryResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
 };
 use capitol_protocol::ledger::{Ledger, Load, LoadWindow};
-use capitol_protocol::metrics::{Feed, Sample, TownReport};
+use capitol_protocol::metrics::{Feed, Sample, TownReport, ROLE_PERSON};
 use capitol_protocol::watch::{Watch, WatchKind};
 use capitol_protocol::rules::market::{sort_levels, GradeRule, OrderSide};
 
@@ -230,6 +230,11 @@ fn a_sample_round_trips_with_its_window() {
     let town = sample.town.as_ref().unwrap();
     assert_eq!(town.decisions(), 45);
     assert_eq!(town.standing["working"] + town.standing["resting"], sample.players.citizens);
+    // People's and citizens' Strands, by trade, without the admins'
+    let spread = sample.distribution.as_ref().unwrap();
+    assert_eq!(spread.roles.values().map(|h| h.strands).sum::<i64>(), sample.strands.citizens + sample.strands.people);
+    assert_eq!(spread.roles.values().map(|h| h.accounts).sum::<u64>(), spread.accounts);
+    assert_eq!(spread.roles[ROLE_PERSON].accounts, sample.players.people);
     assert_eq!(serde_json::to_string(&sample).unwrap(), json);
 }
 
@@ -241,6 +246,10 @@ fn a_sample_from_before_the_town_reported_still_reads() {
     let old: Sample = serde_json::from_value(value).unwrap();
     assert!(old.town.is_none());
     assert!(!serde_json::to_string(&old).unwrap().contains("\"town\""));
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value.as_object_mut().unwrap().remove("distribution");
+    let old: Sample = serde_json::from_value(value).unwrap();
+    assert!(old.distribution.is_none());
 }
 
 #[test]

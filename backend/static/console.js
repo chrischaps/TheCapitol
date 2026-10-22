@@ -57,6 +57,8 @@
     live: "off",
     // The last answer from /health, for the overview's health tile
     health: null,
+    // The Gini watch's threshold, from the knobs, drawn over the Gini
+    giniWatch: null,
   };
 
   // ---------------------------------------------------------------------------
@@ -249,8 +251,8 @@
 
   // The fields each set of charts reads: the tick's `load` is most of a
   // sample, so it's read only for the performance tab (#411), and the
-  // money's flows and trades only for the economy tab
-  const FIELDS = { base: "players,strands,drift", load: "load", money: "strand_flows,new_accounts,market,bazaar" };
+  // money's flows and trades, and the wealth by trade, only for the economy tab
+  const FIELDS = { base: "players,strands,drift", load: "load", money: "strand_flows,new_accounts,market,bazaar,distribution" };
 
   async function readSeries(set) {
     const from = rangeFrom();
@@ -388,7 +390,7 @@
           // shows under its hundred
           y: spec.log
             ? { distr: 3, log: 10 }
-            : { range: (u, min, max) => [Math.min(0, (min ?? 0) * 1.1), Math.max(0, (max ?? 1) * 1.1) || 1] },
+            : { range: spec.range ?? ((u, min, max) => [Math.min(0, (min ?? 0) * 1.1), Math.max(0, (max ?? 1) * 1.1) || 1]) },
         },
         axes: [
           { ...axis, values: (u, vals) => vals.map((v) => clock(v * 1000)) },
@@ -413,7 +415,7 @@
             // gives its own amount
             value: (u, v, si, i) => {
               const own = rows?.own?.[s.key] && i != null ? rows.own[s.key][i] : v;
-              return own == null ? "–" : spec.legend(own);
+              return own == null ? "–" : (s.legend ?? spec.legend)(own);
             },
           })),
         ],
@@ -527,6 +529,7 @@
   }
 
   const count = (v) => nf.format(Math.round(v));
+  const percent = (v) => `${Math.round(v * 100)}%`;
   const short = (v) => (Math.abs(v) >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : Math.abs(v) >= 1e4 ? `${Math.round(v / 1e3)}k` : nf.format(v));
 
   const CHARTS = {
@@ -548,6 +551,19 @@
         { label: "People", color: "--s2", value: (s) => s.strands.people },
         { label: "Admins", color: "--s3", value: (s) => s.strands.admins },
         { label: "Escrow", color: "--s4", value: (s) => s.strands.escrow },
+      ],
+    }),
+    // The Gini and the richest tenth's share both run 0 to 1, so they share
+    // an axis, with the Gini watch's threshold over them (D2.5)
+    spread: () => lineChart($("chart-spread"), {
+      has: (s) => s.distribution?.gini != null,
+      range: () => [0, 1],
+      axis: (v) => v.toFixed(1),
+      legend: (v) => v.toFixed(2),
+      series: [
+        { label: "Gini", color: "--s1", value: (s) => s.distribution.gini },
+        { label: "Richest tenth's share", color: "--s2", legend: percent, value: (s) => s.distribution.top_tenth },
+        { label: "Gini watch", color: "--budget", width: 1, dash: [5, 4], value: () => state.giniWatch },
       ],
     }),
     tick: () => lineChart($("chart-tick"), {
@@ -583,7 +599,7 @@
     legend: (v) => `${v.toFixed(2)}× a game day`,
     series: [{ key: "velocity", label: "Velocity", color: "--s2", width: 2 }],
   });
-  const PAGE_CHARTS = { overview: ["players"], economy: ["strands", "flows", "escrow", "velocity"], performance: ["tick"] };
+  const PAGE_CHARTS = { overview: ["players"], economy: ["strands", "flows", "escrow", "velocity", "spread"], performance: ["tick"] };
 
   function chart(name) {
     state.charts[name] ??= CHARTS[name]();
@@ -854,6 +870,7 @@
     strands();
     if (books) flows();
     escrow();
+    distribution();
   }
 
   function strands() {
@@ -872,6 +889,66 @@
       line += d === 0 ? ` Unchanged ${since(first)}.` : ` ${d > 0 ? "Up" : "Down"} ${nf.format(Math.abs(d))} ${since(first)}.`;
     }
     $("strands-headline").textContent = line;
+  }
+
+  // How evenly people's and citizens' Strands are held (D2.2), and by which
+  // trade: each citizen's from the town's report, "citizen" for one it
+  // doesn't name, and "person" for people. Admins aren't counted.
+  function distribution() {
+    if (state.giniWatch == null) loadKnobs();
+    chart("spread");
+    const s = latest((s) => s.distribution);
+    const d = s?.distribution;
+    if (!d || d.gini == null) {
+      $("spread-headline").textContent = d ? "Too few hold any Strands to say how evenly." : "Waiting for a sample that says.";
+      $("roles-headline").textContent = "Waiting for a sample that says.";
+      $("roles").tBodies[0].replaceChildren(emptyRow(6, "No sample says yet."));
+      return;
+    }
+    const tenth = Math.max(1, Math.ceil(d.accounts / 10));
+    const even = d.gini < 0.3 ? "fairly evenly" : d.gini < 0.5 ? "unevenly" : d.gini < 0.7 ? "very unevenly" : "in a few hands";
+    let line = `Strands are held ${even}: a Gini of ${d.gini.toFixed(2)} over ${plural(d.accounts, "account", "accounts")}, and the richest ${plural(tenth, "holds", "hold")} ${percent(d.top_tenth)} of them.`;
+    const first = inRange((s) => s.distribution?.gini != null)[0];
+    if (first && first !== s) {
+      const was = first.distribution.gini;
+      const moved = d.gini - was;
+      line += Math.abs(moved) < 0.005 ? ` Steady ${since(first)}.` : ` ${moved > 0 ? "Up" : "Down"} from ${was.toFixed(2)} ${since(first)}.`;
+    }
+    if (state.giniWatch != null && d.gini > state.giniWatch) line += ` That's over the watch's ${state.giniWatch.toFixed(2)}.`;
+    $("spread-headline").textContent = line;
+    roles(d, inRange((s) => s.distribution).map((s) => s.distribution));
+  }
+
+  const trade = (role) => role === "person" ? "People" : role === "citizen" ? "Citizens with no trade named" : capital(role.replace(/^([a-z]+)-(.+)$/, "$1 ($2)"));
+  const each = (h) => h.strands / Math.max(h.accounts, 1);
+  /** One of a trade, in a sentence: "a merchant", "a person" */
+  const one = (role) => role === "person" ? "a person" : role === "citizen" ? "a citizen with no trade named" : `a ${trade(role).toLowerCase()}`;
+
+  // The wealth table: each trade's accounts and Strands now, against the
+  // first sample in the range that has the trade (the town names them only
+  // once it reports in), as the soak report's table of trades has them
+  function roles(d, inRange) {
+    const total = Object.values(d.roles).reduce((n, h) => n + Math.max(h.strands, 0), 0);
+    const rows = Object.entries(d.roles).sort((a, b) => b[1].strands - a[1].strands);
+    const byEach = [...rows].sort((a, b) => each(b[1]) - each(a[1]));
+    const [richest, poorest] = [byEach[0], byEach.at(-1)];
+    $("roles-headline").textContent = rows.length < 2 || each(richest[1]) === each(poorest[1])
+      ? `Every trade holds ${nf.format(Math.round(each(richest[1])))} Strands each.`
+      : `${capital(one(richest[0]))} holds the most, ${nf.format(Math.round(each(richest[1])))} Strands on average; ${one(poorest[0])} the least, ${nf.format(Math.round(each(poorest[1])))}.`;
+    $("roles").tBodies[0].replaceChildren(...rows.map(([role, h]) => {
+      const before = inRange.find((d) => d.roles?.[role])?.roles[role];
+      const change = before ? each(h) - each(before) : null;
+      const tr = document.createElement("tr");
+      tr.append(
+        cell(trade(role)),
+        cell(nf.format(h.accounts), "num"),
+        cell(nf.format(h.strands), "num"),
+        cell(nf.format(Math.round(each(h))), "num"),
+        cell(change == null ? "–" : `${change > 0 ? "+" : change < 0 ? "−" : "±"}${nf.format(Math.abs(Math.round(change)))}`, `num ${change > 0 ? "up" : change < 0 ? "down" : "dim"}`),
+        cell(total ? percent(Math.max(h.strands, 0) / total) : "–", "num dim"),
+      );
+      return tr;
+    }));
   }
 
   // ---------------------------------------------------------------------------
@@ -1158,6 +1235,8 @@
       if (!(e instanceof SignedOut)) $("tuning-headline").textContent = "The knobs couldn't be read.";
       return;
     }
+    state.giniWatch = knobs.find((k) => k.key === "watch_gini")?.value ?? state.giniWatch;
+    state.charts.spread?.update();
     const off = knobs.filter((k) => k.value !== k.default);
     $("tuning-headline").textContent = off.length === 0
       ? `Every one of the ${knobs.length} knobs is at its default.`
