@@ -13,7 +13,8 @@
 // and who's on, the books' drift, and the newest on the wire. D1.3 adds
 // the map. D2.1 grows the economy tab: where the Strands come from and
 // go, what buy orders hold, and how fast the money moves. D2.3 adds prices
-// against target.
+// against target, and D2.4 what's made and used, the stock, and the
+// workshops.
 
 "use strict";
 
@@ -48,7 +49,7 @@
     samples: new Map(),
     sorted: null,
     // How far back each set of fields has been read, as Unix ms
-    covered: { base: Infinity, load: Infinity, money: Infinity },
+    covered: { base: Infinity, load: Infinity, money: Infinity, making: Infinity },
     annotations: new Map(),
     wire: [],
     wireKind: "all",
@@ -204,7 +205,7 @@
     state.charts = {};
     state.samples.clear();
     state.sorted = null;
-    state.covered = { base: Infinity, load: Infinity, money: Infinity };
+    state.covered = { base: Infinity, load: Infinity, money: Infinity, making: Infinity };
     state.annotations.clear();
     state.wire = [];
     mapStop();
@@ -254,8 +255,14 @@
 
   // The fields each set of charts reads: the tick's `load` is most of a
   // sample, so it's read only for the performance tab (#411), and the
-  // money's flows and trades, and the wealth by trade, only for the economy tab
-  const FIELDS = { base: "players,strands,drift", load: "load", money: "strand_flows,new_accounts,market,bazaar,distribution,books" };
+  // money's flows and trades, and the wealth by trade, only for the economy
+  // tab, and the units and crafts too (D2.4)
+  const FIELDS = {
+    base: "players,strands,drift",
+    load: "load",
+    money: "strand_flows,new_accounts,market,bazaar,distribution,books",
+    making: "units,unit_flows,crafts",
+  };
 
   async function readSeries(set) {
     const from = rangeFrom();
@@ -280,11 +287,12 @@
         if (!res.ok || !res.body) throw new Error(`stream: ${res.status}`);
         // After a gap, the samples missed are in the series
         if (state.lastSampleAt) {
-          state.covered = { base: Infinity, load: Infinity, money: Infinity };
+          state.covered = { base: Infinity, load: Infinity, money: Infinity, making: Infinity };
           await Promise.all([
             readSeries("base"),
             state.tab === "performance" ? readSeries("load") : null,
             state.tab === "economy" ? readSeries("money") : null,
+            state.tab === "economy" ? readSeries("making") : null,
           ]);
         }
         setLive("live");
@@ -388,7 +396,8 @@
         height: spec.height ?? 260,
         cursor: { points: { size: 6 }, drag: { x: false, y: false } },
         scales: {
-          x: { time: true, range: () => [rangeFrom() / 1000, Date.now() / 1000] },
+          // Binned rows run to the end of the bin still filling, so its bar shows
+          x: { time: true, range: () => [rangeFrom() / 1000, Math.max(Date.now() / 1000, binEnd())] },
           // A log scale for the tick, so a mean of half a millisecond still
           // shows under its hundred
           y: spec.log
@@ -425,6 +434,12 @@
         plugins: [marks(), latestInLegend()],
       };
       u = new uPlot(opts, data(), el);
+    }
+
+    /** Where the last bin ends, in Unix seconds; 0 for rows that aren't bins */
+    function binEnd() {
+      const x = rows?.x;
+      return x?.length > 1 ? x.at(-1) + (x[1] - x[0]) / 2 : 0;
     }
 
     // On a log scale, a label and a rule at each power of ten and none between
@@ -602,7 +617,13 @@
     legend: (v) => `${v.toFixed(2)}× a game day`,
     series: [{ key: "velocity", label: "Velocity", color: "--s2", width: 2 }],
   });
-  const PAGE_CHARTS = { overview: ["players"], economy: ["strands", "flows", "escrow", "velocity", "spread", "prices"], performance: ["tick"] };
+  CHARTS.making = () => lineChart($("chart-making"), {
+    rows: () => making.rows,
+    axis: short,
+    legend: (v) => `${v > 0 ? "+" : ""}${count(v)}`,
+    series: () => making.lines.map((l) => ({ key: l.key, label: l.label, color: l.color, bars: true })).reverse(),
+  });
+  const PAGE_CHARTS = { overview: ["players"], economy: ["strands", "flows", "escrow", "velocity", "spread", "prices", "making"], performance: ["tick"] };
 
   function chart(name) {
     state.charts[name] ??= CHARTS[name]();
@@ -1026,17 +1047,19 @@
   };
 
   async function economy() {
-    if (state.covered.money > rangeFrom() || !books) {
+    if (state.covered.money > rangeFrom() || state.covered.making > rangeFrom() || !books || !recipeNames) {
       if (!books) $("flows-headline").textContent = "Reading the books.";
       try {
         books ??= await getJson("/admin/books");
-        await readSeries("money");
+        recipeNames ??= new Map((await getJson("/recipes")).recipes.map((r) => [r.id, r.name]));
+        await Promise.all([readSeries("money"), readSeries("making")]);
       } catch (e) { if (e instanceof SignedOut) return; console.warn(e); }
     }
     strands();
     if (books) flows();
     escrow();
     distribution();
+    if (books) productionStories();
     await prices();
   }
 
@@ -1346,6 +1369,241 @@
     if (most > held) line += ` At most ${nf.format(most)} in ${window_()}.`;
     h.textContent = line;
   }
+
+  // ---------------------------------------------------------------------------
+  // Production (D2.4): units made and used by how, binned as the money is;
+  // each item's rates and stock; and each recipe's crafts and quality out
+
+  // How units come and go (`UnitFlow`), in the order they stack: what
+  // brings units in, then what takes them out
+  const UNIT_FLOWS = {
+    gathered: { label: "Gathered", say: "gathered" },
+    crafted: { label: "Crafted", say: "crafted" },
+    withdrawn: { label: "Withdrawn", say: "withdrawn from the Exchange" },
+    kit_returned: { label: "Kits back", say: (n) => `taken down to ${n === 1 ? "a kit" : "kits"}` },
+    granted: { label: "Granted", say: "admins' grants" },
+    consumed: { label: "Used in crafts", say: "used in crafts" },
+    worn_out: { label: "Worn out", say: "tools worn out" },
+    deposited: { label: "Deposited", say: "deposited at the Exchange" },
+    kit_placed: { label: "Kits placed", say: (n) => `set up as ${n === 1 ? "a station" : "stations"}` },
+    lost: { label: "Lost", say: "lost with foreclosed stations" },
+  };
+  // The items the stock table names; the quieter ones are counted under it
+  const STOCK_ROWS = 20;
+  // A sparkline needs no more points than it has pixels
+  const SPARK_POINTS = 120;
+
+  // The recipes' names (`GET /recipes`), read once
+  let recipeNames = null;
+  let making = { lines: [], rows: null, key: "" };
+
+  /** `n` for every game hour of `ms` */
+  const perGameHour = (n, ms) => (ms > 0 ? (n * books.day_ms) / 24 / ms : 0);
+  const rate = (v) => (v === 0 ? "–" : v < 10 ? (Math.round(v * 10) / 10).toLocaleString("en") : count(v));
+  const signed = (v) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${nf.format(Math.abs(v))}`;
+
+  /** The range's unit flows in the money's bins, and its totals by item and by recipe */
+  function production() {
+    const binMs = BIN_MINUTES[state.hours] * 60_000;
+    const first = Math.floor(rangeFrom() / binMs) * binMs;
+    const bins = Array.from({ length: Math.ceil((Date.now() - first) / binMs) }, (_, k) => ({ at: first + k * binMs, ms: 0, flows: {} }));
+    const shown = inRange((s) => s.unit_flows);
+    const items = {};
+    const recipes = {};
+    let ms = 0;
+    for (const s of shown) {
+      ms += s.since_ms;
+      const b = bins[Math.floor((s.at_ms - first) / binMs)];
+      if (b) b.ms += s.since_ms;
+      for (const [it, byFlow] of Object.entries(s.unit_flows)) {
+        const row = (items[it] ??= { made: 0, used: 0 });
+        for (const [flow, n] of Object.entries(byFlow)) {
+          if (n > 0) row.made += n;
+          else row.used -= n;
+          if (b) b.flows[flow] = (b.flows[flow] ?? 0) + n;
+        }
+      }
+      for (const [id, c] of Object.entries(s.crafts ?? {})) {
+        const r = (recipes[id] ??= { runs: 0, units: 0, quality: 0 });
+        r.runs += c.runs;
+        r.units += c.units;
+        r.quality += c.quality;
+      }
+    }
+    return { binMs, bins, shown, items, recipes, ms };
+  }
+
+  function madeAndUsed(p) {
+    const totals = {};
+    for (const b of p.bins) for (const [f, v] of Object.entries(b.flows)) totals[f] = (totals[f] ?? 0) + v;
+    const order = [...Object.keys(UNIT_FLOWS), ...Object.keys(totals).filter((f) => !UNIT_FLOWS[f])];
+    const lines = order.filter((f) => totals[f]).map((key) => ({
+      key,
+      side: totals[key] > 0 ? "in" : "out",
+      label: UNIT_FLOWS[key]?.label ?? capital(item(key)),
+      say: (n) => { const say = UNIT_FLOWS[key]?.say ?? item(key); return typeof say === "function" ? say(n) : say; },
+      color: UNIT_FLOWS[key] ? `--uf-${key}` : "--fl-other",
+    }));
+    // Stacked up from zero for what came in and down for what went out, as
+    // the money's bars are
+    const values = {};
+    const own = {};
+    for (const l of lines) {
+      values[l.key] = [];
+      own[l.key] = [];
+    }
+    for (const b of p.bins) {
+      let up = 0;
+      let down = 0;
+      for (const l of lines) {
+        const v = b.flows[l.key] ?? 0;
+        own[l.key].push(b.ms ? v : null);
+        if (!b.ms || v === 0) values[l.key].push(null);
+        else values[l.key].push(v > 0 ? (up += v) : (down += v));
+      }
+    }
+    const x = p.bins.map((b) => (b.at + p.binMs / 2) / 1000);
+    const key = lines.map((l) => l.key).join();
+    const rebuild = key !== making.key;
+    making = { lines, key, rows: { x, shown: p.shown, values, own } };
+    if (rebuild) state.charts.making?.rebuild();
+    chart("making");
+
+    const h = $("making-headline");
+    if (!p.shown.length) return void (h.textContent = "Waiting for the first sample.");
+    const side = (s, sign) => lines.filter((l) => l.side === s).map((l) => [l, sign * totals[l.key]]).sort((a, b) => b[1] - a[1]);
+    const ins = side("in", 1);
+    const outs = side("out", -1);
+    const came = ins.reduce((a, [, v]) => a + v, 0);
+    const went = outs.reduce((a, [, v]) => a + v, 0);
+    const when = capital(since(p.shown[0]));
+    if (came === 0 && went === 0) return void (h.textContent = `${when}, nothing was made and nothing used up.`);
+    let line = `${when}, ${plural(came, "unit", "units")} came into the world`;
+    if (ins.length > 1) line += `, ${Math.round((100 * ins[0][1]) / came)}% of them ${ins[0][0].say(2)}`;
+    else if (ins.length) line += `, all ${ins[0][0].say(2)}`;
+    line += went === 0 ? ", and none left it." : `, and ${nf.format(went)} left it: ${andList(outs.map(([l, v]) => `${nf.format(v)} ${l.say(v)}`))}.`;
+    h.textContent = line;
+  }
+
+  function stock(p) {
+    const now = latest((s) => s.units);
+    const body = $("stock").tBodies[0];
+    const h = $("stock-headline");
+    if (!now) {
+      h.textContent = "Waiting for the first sample.";
+      return void body.replaceChildren(emptyRow(6, "No sample has counted the units yet."));
+    }
+    const runs = inRange((s) => s.units);
+    const step = Math.max(1, Math.ceil(runs.length / SPARK_POINTS));
+    const thinned = runs.filter((_, i) => i % step === 0 || i === runs.length - 1);
+    const start = runs[0] ?? now;
+    const rows = [...new Set([...Object.keys(now.units), ...Object.keys(p.items)])].map((it) => {
+      const flow = p.items[it] ?? { made: 0, used: 0 };
+      const held = now.units[it] ?? 0;
+      return {
+        it,
+        made: perGameHour(flow.made, p.ms),
+        used: perGameHour(flow.used, p.ms),
+        busy: flow.made + flow.used,
+        held,
+        change: held - (start.units[it] ?? 0),
+      };
+    }).sort((a, b) => b.busy - a.busy || b.held - a.held || a.it.localeCompare(b.it));
+
+    const trs = rows.slice(0, STOCK_ROWS).map((r) => {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 100 28");
+      svg.setAttribute("preserveAspectRatio", "none");
+      svg.setAttribute("aria-label", `${capital(item(r.it))}'s stock over ${window_()}`);
+      drawSpark(svg, thinned.map((s) => s.units[r.it] ?? 0), true);
+      const tr = document.createElement("tr");
+      tr.append(
+        cell(capital(item(r.it))),
+        cell(rate(r.made), "num"),
+        cell(rate(r.used), "num"),
+        cell(nf.format(r.held), "num"),
+        cell(r.change === 0 ? "–" : signed(r.change), `num ${r.change > 0 ? "up" : r.change < 0 ? "down" : "dim"}`),
+        cell(svg, "trend"),
+      );
+      return tr;
+    });
+    const quiet = rows.slice(STOCK_ROWS);
+    if (quiet.length) {
+      const tr = document.createElement("tr");
+      tr.className = "more";
+      const td = cell(`And ${plural(quiet.length, "quieter item", "quieter items")}, holding ${plural(quiet.reduce((a, r) => a + r.held, 0), "unit", "units")} between them.`);
+      td.colSpan = 6;
+      tr.append(td);
+      trs.push(tr);
+    }
+    body.replaceChildren(...trs);
+
+    const busiest = rows.find((r) => r.made > 0);
+    if (!busiest) {
+      const held = rows.reduce((a, r) => a + r.held, 0);
+      h.textContent = `Nothing was made ${since(start)}. The city holds ${plural(held, "unit", "units")} of ${plural(rows.filter((r) => r.held).length, "item", "items")}.`;
+      return;
+    }
+    const grew = rows.filter((r) => r.change > 0).sort((a, b) => b.change - a.change)[0];
+    const fell = rows.filter((r) => r.change < 0).sort((a, b) => a.change - b.change)[0];
+    let line = `${capital(item(busiest.it))} was made most, ${rate(busiest.made)} a game hour`;
+    if (grew === busiest) line += `, and piled up most, ${signed(grew.change)}`;
+    const moved = [grew !== busiest && grew && `${item(grew.it)} piled up most, ${signed(grew.change)}`, fell && `${item(fell.it)} ran down most, ${signed(fell.change)}`].filter(Boolean);
+    h.textContent = line + (moved.length ? `; ${andList(moved)}.` : grew || fell ? "." : ", and no stock changed.");
+  }
+
+  function workshops(p) {
+    const body = $("recipes").tBodies[0];
+    const h = $("recipes-headline");
+    const name = (id) => recipeNames?.get(id) ?? capital(item(id));
+    if (!p.shown.length) {
+      h.textContent = "Waiting for the first sample.";
+      return void body.replaceChildren(emptyRow(5, "No sample yet."));
+    }
+    const rows = Object.entries(p.recipes).map(([id, r]) => ({ id, ...r })).sort((a, b) => b.runs - a.runs || a.id.localeCompare(b.id));
+    if (!rows.length) {
+      h.textContent = `No craft finished ${since(p.shown[0])}.`;
+      return void body.replaceChildren(emptyRow(5, `Nothing was crafted in ${window_()}.`));
+    }
+    body.replaceChildren(...rows.map((r) => {
+      const q = r.quality / r.runs;
+      const bar = document.createElement("span");
+      bar.className = "account-bar";
+      bar.style.width = `${Math.max(1, Math.min(100, q))}%`;
+      const track = document.createElement("span");
+      track.className = "account-track";
+      track.append(bar);
+      const grade = document.createElement("span");
+      grade.className = "grade";
+      grade.title = `Q${q.toFixed(1)}`;
+      grade.append(track, text("span", String(Math.round(q))));
+      const tr = document.createElement("tr");
+      tr.append(
+        cell(name(r.id)),
+        cell(nf.format(r.runs), "num"),
+        cell(rate(perGameHour(r.runs, p.ms)), "num"),
+        cell(nf.format(r.units), "num"),
+        cell(grade),
+      );
+      return tr;
+    }));
+    const runs = rows.reduce((a, r) => a + r.runs, 0);
+    const top = rows[0];
+    let line = `${name(top.id)} was crafted most: ${plural(top.runs, "time", "times")} ${since(p.shown[0])}, ${rate(perGameHour(top.runs, p.ms))} a game hour, at a mean quality of ${Math.round(top.quality / top.runs)}.`;
+    if (rows.length > 1) {
+      const mean = rows.reduce((a, r) => a + r.quality, 0) / runs;
+      line += ` ${plural(rows.length, "recipe", "recipes")} ran ${plural(runs, "craft", "crafts")} in all, at ${Math.round(mean)} on average.`;
+    }
+    h.textContent = line;
+  }
+
+  function productionStories() {
+    const p = production();
+    madeAndUsed(p);
+    stock(p);
+    workshops(p);
+  }
+
 
   async function performance() {
     if (state.covered.load > rangeFrom()) {

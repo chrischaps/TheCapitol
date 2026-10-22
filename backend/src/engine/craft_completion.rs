@@ -27,6 +27,8 @@ use super::tools::{self, BrokenTool, HeldTool, Wear};
 pub struct FinishedCraft {
     pub player_id: Uuid,
     pub operation_id: Uuid,
+    /// The recipe it ran, for the books' count of crafts (D2.4)
+    pub recipe_id: String,
     /// (item_id, the units to consume from it)
     pub inputs: Vec<(Uuid, Units)>,
     pub outputs: Vec<CraftOutput>,
@@ -114,6 +116,11 @@ pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Finished
         }
         gazette::tally(&mut tx, craft.player_id, &output.item_type, output.quantity).await.map_err(db_error)?;
         flows.add(&output.item_type, UnitFlow::Crafted, output.quantity as i64);
+    }
+    // A craft's outputs all come out at one quality
+    if let Some(first) = craft.outputs.first() {
+        let made = craft.outputs.iter().map(|o| o.quantity as i64).sum();
+        flows.crafted(&craft.recipe_id, made, first.quality);
     }
 
     ledger::commit(tx, flows).await.map_err(db_error)?;
@@ -305,6 +312,7 @@ mod tests {
         FinishedCraft {
             player_id: player.id,
             operation_id: Uuid::new_v4(),
+            recipe_id: "rope_basic".into(),
             inputs: vec![(fiber, Units::uniform(2, 60))],
             outputs: vec![CraftOutput {
                 item_type: "rope".into(),

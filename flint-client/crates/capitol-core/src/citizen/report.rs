@@ -661,6 +661,7 @@ mod tests {
                 BTreeMap::from([(UnitFlow::Gathered.as_str().to_string(), gathered)]),
             )]),
             units_settled: true,
+            crafts: BTreeMap::new(),
             load,
         }
     }

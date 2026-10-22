@@ -601,6 +601,7 @@ mod tests {
             units: BTreeMap::from([("stone".to_string(), stone)]),
             unit_flows: BTreeMap::new(),
             units_settled: true,
+            crafts: BTreeMap::new(),
             load: Load::default(),
         };
         // Ada paid 3 in tax, and 2 Strands and a stone came from nowhere

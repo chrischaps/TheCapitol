@@ -81,6 +81,7 @@ pub fn process_crafting(
                 finished.push(FinishedCraft {
                     player_id: operation.player_id,
                     operation_id: operation.operation_id,
+                    recipe_id: operation.recipe_id.clone(),
                     inputs: operation.input_items_to_consume.clone(),
                     outputs,
                     tool: operation.tool.clone(),

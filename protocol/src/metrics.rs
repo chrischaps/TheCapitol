@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::annotation::Annotation;
-use crate::ledger::{Ledger, LoadWindow};
+use crate::ledger::{Crafts, Ledger, LoadWindow};
 use crate::rest::MarketTrade;
 use crate::watch::Watch;
 
@@ -75,6 +75,10 @@ pub struct Sample {
     pub unit_flows: BTreeMap<String, BTreeMap<String, i64>>,
     /// Whether both ends' units and flows were read in a quiet moment
     pub units_settled: bool,
+    /// The crafts finished over the window, by recipe id (D2.4); a sample
+    /// stored before them reads with none
+    #[serde(default)]
+    pub crafts: BTreeMap<String, Crafts>,
     /// The market's fills over the window, by item type
     pub market: BTreeMap<String, Trades>,
     /// The bazaar's sales over the window, by item type
@@ -242,6 +246,14 @@ impl Sample {
                 }
             }
         }
+        let mut crafts = BTreeMap::new();
+        for (recipe, now) in &end.crafts {
+            let was = if same_boot { start.crafts.get(recipe).copied().unwrap_or_default() } else { Crafts::default() };
+            let done = now.since(&was);
+            if done.runs > 0 {
+                crafts.insert(recipe.clone(), done);
+            }
+        }
         let since_ms = end.at_ms - start.at_ms;
         Sample {
             at_ms: end.at_ms,
@@ -254,6 +266,7 @@ impl Sample {
             units: end.units.clone(),
             unit_flows,
             units_settled: start.units_settled && end.units_settled,
+            crafts,
             market: BTreeMap::new(),
             bazaar: BTreeMap::new(),
             books: BTreeMap::new(),
@@ -803,8 +816,30 @@ mod tests {
             units: units.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             unit_flows,
             units_settled: true,
+            crafts: BTreeMap::new(),
             load: Load::default(),
         }
+    }
+
+    /// A window's crafts are the ends' difference, by recipe; a recipe
+    /// that made nothing in it is left out, and a new boot counts from
+    /// nothing again.
+    #[test]
+    fn a_samples_crafts_are_its_windows() {
+        let crafted = |at_ms, booted_ms, crafts: &[(&str, Crafts)]| Ledger {
+            booted_ms,
+            crafts: crafts.iter().map(|(r, c)| (r.to_string(), *c)).collect(),
+            ..ledger(at_ms, vec![], 0, &[], &[])
+        };
+        let rope = |runs, quality| Crafts { runs, units: runs as i64, quality };
+        let l0 = crafted(0, 1, &[("rope_basic", rope(2, 120)), ("tool_handle", rope(1, 40))]);
+        let l1 = crafted(10_000, 1, &[("rope_basic", rope(5, 300)), ("tool_handle", rope(1, 40))]);
+        let sample = Sample::between(&l0, &l1, &HashSet::new());
+        assert_eq!(sample.crafts.len(), 1, "the handle made nothing");
+        assert_eq!(sample.crafts["rope_basic"], rope(3, 180));
+        assert_eq!(sample.crafts["rope_basic"].mean_quality(), Some(60.0));
+        let rebooted = crafted(20_000, 2, &[("rope_basic", rope(1, 70))]);
+        assert_eq!(Sample::between(&l1, &rebooted, &HashSet::new()).crafts["rope_basic"], rope(1, 70));
     }
 
     /// Four ledgers ten seconds apart: a deposit, a newcomer, a bid into

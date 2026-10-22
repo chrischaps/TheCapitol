@@ -879,6 +879,7 @@ pub async fn craft_once(
         }
     }
 
+    flows.crafted(&recipe.id, outputs.iter().map(|o| o.quantity as i64).sum(), quality);
     for output in &outputs {
         flows.add(&output.item_type, UnitFlow::Crafted, output.quantity as i64);
         let made = Units::uniform(output.quantity, output.quality);

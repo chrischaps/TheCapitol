@@ -48,7 +48,49 @@ pub struct Ledger {
     /// committing between. A busy server may never give a quiet moment;
     /// then this is false and the two may be a write apart.
     pub units_settled: bool,
+    /// The crafts finished since the server started, by recipe id: by
+    /// hand and by a station's automation (D2.4). A ledger from before
+    /// reads with none.
+    #[serde(default)]
+    pub crafts: BTreeMap<String, Crafts>,
     pub load: Load,
+}
+
+/// Crafts of one recipe: since the server started on a [`Ledger`], over the
+/// window on a sample (D2.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Crafts {
+    /// Crafts finished
+    pub runs: u64,
+    /// Units they made, every output
+    pub units: i64,
+    /// Their outputs' quality, summed over the runs: a craft's outputs all
+    /// come out at one quality
+    pub quality: i64,
+}
+
+impl Crafts {
+    /// One craft, making `units` at `quality`
+    pub fn add(&mut self, units: i64, quality: i32) {
+        self.runs += 1;
+        self.units += units;
+        self.quality += i64::from(quality);
+    }
+
+    /// The mean quality out; `None` with no runs
+    pub fn mean_quality(&self) -> Option<f64> {
+        (self.runs > 0).then(|| self.quality as f64 / self.runs as f64)
+    }
+
+    /// What these crafts are past `before`'s: `self` from a later moment
+    pub fn since(&self, before: &Crafts) -> Crafts {
+        Crafts {
+            runs: self.runs.saturating_sub(before.runs),
+            units: self.units - before.units,
+            quality: self.quality - before.quality,
+        }
+    }
 }
 
 /// One account's Strands, and everything its audit trail says moved them.
@@ -594,6 +636,7 @@ mod tests {
             units: BTreeMap::new(),
             unit_flows: BTreeMap::new(),
             units_settled: true,
+            crafts: BTreeMap::new(),
             load: Load::default(),
         }
     }

@@ -24,13 +24,18 @@
 //!   terrain change's return of a plot's stations, with whatever found no
 //!   room: `property_tax`, `plot_sync`)
 //! - a dev grant (`grants`)
+//!
+//! A craft also counts itself by recipe (D2.4): its outputs and their
+//! quality, in [`Flows::crafted`], counted with its units, so the
+//! Observatory's samples show each recipe's throughput and the quality it
+//! makes.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
-use capitol_protocol::ledger::{AccountBooks, Ledger, UnitFlow};
+use capitol_protocol::ledger::{AccountBooks, Crafts, Ledger, UnitFlow};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -39,6 +44,8 @@ use crate::state::AppState;
 /// Units in (positive) and out (negative) since the server started, by item
 /// type and flow
 static FLOWS: LazyLock<Mutex<BTreeMap<(String, UnitFlow), i64>>> = LazyLock::new(Default::default);
+/// Crafts finished since the server started, by recipe id (D2.4)
+static CRAFTS: LazyLock<Mutex<BTreeMap<String, Crafts>>> = LazyLock::new(Default::default);
 /// Unit writes that have begun to commit, and those that have finished and
 /// been counted. While they differ a write is between its commit and its
 /// count, and the units and their flows don't agree.
@@ -55,7 +62,11 @@ const SNAPSHOT_WAIT: Duration = Duration::from_millis(20);
 
 /// The units a transaction makes and destroys, counted once it commits.
 #[derive(Debug, Default, Clone, PartialEq)]
-pub struct Flows(Vec<(String, UnitFlow, i64)>);
+pub struct Flows {
+    units: Vec<(String, UnitFlow, i64)>,
+    /// The crafts it finishes: (recipe id, units made, their quality)
+    crafts: Vec<(String, i64, i32)>,
+}
 
 impl Flows {
     pub fn new() -> Flows {
@@ -66,12 +77,18 @@ impl Flows {
     /// filed negative, so the flows sum to the change in units.
     pub fn add(&mut self, item_type: &str, flow: UnitFlow, n: i64) {
         if n != 0 {
-            self.0.push((item_type.to_string(), flow, if flow.is_faucet() { n } else { -n }));
+            self.units.push((item_type.to_string(), flow, if flow.is_faucet() { n } else { -n }));
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.units.is_empty() && self.crafts.is_empty()
+    }
+
+    /// A craft of `recipe_id` finished, making `units` at `quality`. Its
+    /// outputs are counted apart, with [`add`](Self::add).
+    pub fn crafted(&mut self, recipe_id: &str, units: i64, quality: i32) {
+        self.crafts.push((recipe_id.to_string(), units, quality));
     }
 
     /// A use of a tool of `item_type` that may have been its last: `wear`
@@ -100,13 +117,22 @@ impl Committing {
     pub fn done(self, flows: Flows) {
         #[cfg(test)]
         TEST_FLOWS.with(|mine| add(&mut mine.borrow_mut(), &flows));
+        #[cfg(test)]
+        TEST_CRAFTS.with(|mine| add_crafts(&mut mine.borrow_mut(), &flows));
         add(&mut FLOWS.lock().unwrap_or_else(|e| e.into_inner()), &flows);
+        add_crafts(&mut CRAFTS.lock().unwrap_or_else(|e| e.into_inner()), &flows);
     }
 }
 
 fn add(all: &mut BTreeMap<(String, UnitFlow), i64>, flows: &Flows) {
-    for (item_type, flow, n) in &flows.0 {
+    for (item_type, flow, n) in &flows.units {
         *all.entry((item_type.clone(), *flow)).or_insert(0) += n;
+    }
+}
+
+fn add_crafts(all: &mut BTreeMap<String, Crafts>, flows: &Flows) {
+    for (recipe_id, units, quality) in &flows.crafts {
+        all.entry(recipe_id.clone()).or_default().add(*units, *quality);
     }
 }
 
@@ -116,6 +142,7 @@ fn add(all: &mut BTreeMap<(String, UnitFlow), i64>, flows: &Flows) {
 #[cfg(test)]
 thread_local! {
     static TEST_FLOWS: std::cell::RefCell<BTreeMap<(String, UnitFlow), i64>> = Default::default();
+    static TEST_CRAFTS: std::cell::RefCell<BTreeMap<String, Crafts>> = Default::default();
 }
 
 impl Drop for Committing {
@@ -156,6 +183,14 @@ pub async fn snapshot(state: &AppState) -> Result<Ledger, sqlx::Error> {
     snapshot_within(state, SNAPSHOT_TRIES).await
 }
 
+/// The crafts counted so far, by recipe id.
+fn crafts_now() -> BTreeMap<String, Crafts> {
+    #[cfg(not(test))]
+    return CRAFTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    #[cfg(test)]
+    return TEST_CRAFTS.with(|mine| mine.borrow().clone());
+}
+
 /// [`snapshot`], waiting for a quiet moment at most `tries` times. Each try
 /// reads every unit again, which a busy server pays for: the sampler (D0.2)
 /// tries once, every ten seconds.
@@ -179,11 +214,12 @@ pub(crate) async fn books(db: &PgPool) -> Result<Ledger, sqlx::Error> {
 /// [`books`], trying at most `most` times for a quiet moment.
 async fn books_within(db: &PgPool, most: u32) -> Result<Ledger, sqlx::Error> {
     let mut tries = 0;
-    let (mut tx, unit_flows, units, units_settled) = loop {
+    let (mut tx, unit_flows, crafts, units, units_settled) = loop {
         tries += 1;
         let started = STARTED.load(Ordering::SeqCst);
         let quiet = started == FINISHED.load(Ordering::SeqCst);
         let unit_flows = flows_now();
+        let crafts = crafts_now();
         let mut tx = db.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             .execute(&mut *tx)
@@ -192,7 +228,7 @@ async fn books_within(db: &PgPool, most: u32) -> Result<Ledger, sqlx::Error> {
         let units = units_held(&mut tx).await?;
         let settled = quiet && STARTED.load(Ordering::SeqCst) == started;
         if settled || tries >= most {
-            break (tx, unit_flows, units, settled);
+            break (tx, unit_flows, crafts, units, settled);
         }
         tx.rollback().await?;
         tokio::time::sleep(SNAPSHOT_WAIT).await;
@@ -239,6 +275,7 @@ async fn books_within(db: &PgPool, most: u32) -> Result<Ledger, sqlx::Error> {
         units,
         unit_flows,
         units_settled,
+        crafts,
         load: Default::default(),
     })
 }
@@ -279,7 +316,7 @@ mod tests {
         flows.add("log", UnitFlow::Consumed, 2);
         flows.add("plank", UnitFlow::Crafted, 0);
         assert_eq!(
-            flows.0,
+            flows.units,
             vec![("log".to_string(), UnitFlow::Gathered, 3), ("log".to_string(), UnitFlow::Consumed, -2)]
         );
     }
@@ -388,6 +425,7 @@ mod tests {
         let craft = super::super::craft_completion::FinishedCraft {
             player_id: ada,
             operation_id: Uuid::new_v4(),
+            recipe_id: "rope_basic".into(),
             inputs: vec![(fiber, Units::uniform(2, 60))],
             outputs: vec![super::super::craft_completion::CraftOutput {
                 item_type: "rope".into(),
@@ -418,6 +456,9 @@ mod tests {
         assert_eq!((u["granted"], u["deposited"], u["withdrawn"], u["consumed"], u["crafted"]), (5, -10, 4, -2, 1));
         assert_eq!(u["kit_returned"], 2, "Ada's chest and Cy's");
         assert_eq!(books.units.items["chest_kit"], (2, 2));
+        // The rope is counted by its recipe too (D2.4)
+        let rope = Crafts { runs: 1, units: 1, quality: 60 };
+        assert_eq!(end.crafts.get("rope_basic").map(|c| c.since(&start.crafts.get("rope_basic").copied().unwrap_or_default())), Some(rope));
     }
 
     #[test]

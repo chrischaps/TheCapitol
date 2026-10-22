@@ -54,6 +54,20 @@
   --fl-tax: #c9a00c;
   --fl-other: #8a8070;
   --fl-escrow: #2b4c7e;
+  /* the units' flows (D2.4), in the money's inks: what's gathered in the
+     deposits' green, what's crafted in the grants' blue, what's used up in
+     the sinks' gold, reds and browns. Defined once, so each theme's inks
+     carry through */
+  --uf-gathered: var(--fl-deposits);
+  --uf-crafted: var(--fl-grants);
+  --uf-withdrawn: var(--fl-withdrawals);
+  --uf-kit_returned: var(--fl-newcomers);
+  --uf-granted: var(--fl-refunds);
+  --uf-consumed: var(--fl-tax);
+  --uf-worn_out: var(--fl-deeds);
+  --uf-deposited: var(--fl-rent);
+  --uf-kit_placed: var(--fl-fees);
+  --uf-lost: var(--fl-other);
   /* the wire's kinds */
   --k-annotation: #7a6214;
   --k-fill: #2b4c7e;
@@ -455,6 +469,19 @@ input {
 .account-bar { display: block; height: 100%; border-radius: 1px; }
 .account-net { border-top: 1px solid var(--rule); border-bottom: 3px double var(--rule); font-weight: 600; }
 .account-net > :nth-child(2) { color: var(--ink-dim); font-weight: 400; }
+
+/* Production (D2.4): the stock's runs as sparklines in the table, and each
+   recipe's mean quality as a bar out of 100 */
+#stock .trend-head, #recipes .quality-head { width: 30%; min-width: 120px; }
+#stock .trend { padding-top: 3px; padding-bottom: 3px; vertical-align: middle; }
+#stock .trend svg { display: block; width: 100%; height: 22px; color: var(--s2); }
+#stock .trend .area { fill: currentColor; opacity: 0.12; }
+#stock .trend .line { fill: none; stroke: currentColor; stroke-width: 1.5; }
+.ledger .grade { display: grid; grid-template-columns: 1fr 2.5em; gap: 8px; align-items: center; }
+.ledger .grade .account-track { background: var(--well); }
+.ledger .grade .account-bar { background: var(--s3); }
+.ledger .grade > :last-child { text-align: right; font-variant-numeric: tabular-nums; }
+.ledger tr.more td { color: var(--ink-dim); font-style: italic; border-bottom: 0; }
 
 /* uPlot, in the page's type and inks */
 .uplot { font-family: inherit; }
