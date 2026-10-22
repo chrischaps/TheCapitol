@@ -312,6 +312,37 @@
       </article>
     </section>
 
+    <section class="page" id="page-citizen" data-page="citizen" hidden>
+      <p class="crumbs"><a href="#town">← The roster</a></p>
+      <article class="story">
+        <h1 class="citizen-name" id="citizen-name">A citizen</h1>
+        <p class="headline" id="citizen-headline">Reading the citizen.</p>
+        <p class="dek" id="citizen-dek"></p>
+        <div class="tiles" id="citizen-tiles"></div>
+        <p class="citizen-where"><span id="citizen-where"></span> <a href="#map" class="follow" id="citizen-follow" hidden>See them on the map</a></p>
+      </article>
+
+      <article class="story">
+        <h2 class="head">Their Strands</h2>
+        <p class="headline" id="citizen-strands-headline">Reading the books.</p>
+        <p class="dek">Strands in hand after every move, from the server's books. A buy order's escrow leaves the hand when it's placed and comes back only if it's cancelled.</p>
+        <div class="chart" id="chart-citizen-strands"></div>
+        <div class="table-wrap">
+          <table class="ledger moves" id="citizen-moves">
+            <thead><tr><th>When</th><th>Move</th><th class="num">Strands</th><th class="num">After</th><th>Note</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="story">
+        <h2 class="head">Their last decisions</h2>
+        <p class="headline" id="citizen-decisions-headline">Waiting for the town to report in.</p>
+        <p class="dek">The newest questions this citizen settled, as the town last sent them: what was on the menu, what stood, and how each layer of the cascade answered, in the order they were asked.</p>
+        <ol class="decisions" id="citizen-decisions"></ol>
+      </article>
+    </section>
+
     <section class="page" id="page-tuning" data-page="tuning" hidden>
       <article class="story">
         <h2 class="head">The knobs</h2>

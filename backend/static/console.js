@@ -18,6 +18,8 @@
 // town's report, how the questions were settled and what that costs.
 // D6.2 makes the tuning tab: each knob beside its chart, set and reset
 // live, and presets as TOML.
+// D4.3 adds a page for one citizen: their Strands, their decisions,
+// their dot.
 
 "use strict";
 
@@ -216,6 +218,7 @@
     map.layers = map.nodes = null;
     map.follow = map.hover = null;
     Object.assign(townView, { latest: undefined, readAt: 0, made: null });
+    Object.assign(citizenView, { detail: undefined, readAt: 0 });
     setLive("off");
     showLogin(why);
   }
@@ -337,7 +340,7 @@
         addSample(sample);
         state.lastSampleAt = Date.now();
         tickLive();
-        render(["overview", "economy", "performance", "town", "tuning"]);
+        render(["overview", "economy", "performance", "town", "citizen", "tuning"]);
         break;
       }
       case "annotation": {
@@ -345,7 +348,7 @@
         if (addAnnotation(a)) {
           for (const chart of Object.values(state.charts)) chart.redraw();
           if (a.kind === "tunable_changed") loadKnobs();
-          if (a.kind === "town_up" || a.kind === "town_down") { townView.readAt = 0; render(["town"]); }
+          if (a.kind === "town_up" || a.kind === "town_down") { townView.readAt = 0; render(["town", "citizen"]); }
           render(["events", "overview"]);
         }
         break;
@@ -390,6 +393,8 @@
     let series = [];
     let rows = null;
     const bars = uPlot.paths.bars({ size: [0.72, 48], align: 0 });
+    // A balance holds until the next move changes it
+    const steps = uPlot.paths.stepped({ align: 1 });
 
     function build() {
       series = typeof spec.series === "function" ? spec.series() : spec.series;
@@ -430,6 +435,7 @@
             width: s.bars ? 0 : s.width ?? 1.75,
             dash: s.dash,
             ...(s.bars ? { fill: token(s.color), paths: bars } : {}),
+            ...(s.step ? { paths: steps } : {}),
             points: { show: false },
             spanGaps: false,
             // A stacked bar is drawn to its running total, but the legend
@@ -448,7 +454,7 @@
     /** Where the last bin ends, in Unix seconds; 0 for rows that aren't bins */
     function binEnd() {
       const x = rows?.x;
-      return x?.length > 1 ? x.at(-1) + (x[1] - x[0]) / 2 : 0;
+      return x?.length > 1 && !rows.moments ? x.at(-1) + (x[1] - x[0]) / 2 : 0;
     }
 
     // On a log scale, a label and a rule at each power of ten and none between
@@ -459,7 +465,8 @@
 
     function data() {
       // Rows a spec works out itself, such as bins: `x` in Unix seconds,
-      // `values` drawn and `own` the legend's, each by series key
+      // `values` drawn and `own` the legend's, each by series key. Rows
+      // marked `moments` are points in time, not bins.
       if (spec.rows) {
         rows = spec.rows();
         shown = rows.shown;
@@ -747,6 +754,7 @@
     performance: ["tick", "phases", "over", "commands", "bus", "sockets", "pool", "txns"],
     town: ["townOn", "rulings", "cost"],
     tuning: ["tune-sinks", "tune-production", "tune-distribution", "tune-prices", "tune-tick"],
+    citizen: ["citizenStrands"],
   };
 
   function chart(name) {
@@ -2025,22 +2033,32 @@
     if (state.covered.town > rangeFrom()) {
       try { await readSeries("town"); } catch (e) { if (e instanceof SignedOut) return; console.warn(e); }
     }
-    if (reload || Date.now() - townView.readAt > TOWN_READ_MS) {
-      townView.readAt = Date.now();
-      try {
-        books ??= await getJson("/admin/books");
-        townView.latest = await getJson("/admin/town");
-        if (!townView.latest) townView.made ??= await getJson("/admin/citizens");
-      } catch (e) {
-        if (e instanceof SignedOut) return;
-        console.warn(e);
-        if (townView.latest === undefined) $("town-headline").textContent = "The roster couldn't be read.";
-      }
+    try { await readTown(reload); } catch (e) {
+      if (e instanceof SignedOut) return;
+      console.warn(e);
+      if (townView.latest === undefined) $("town-headline").textContent = "The roster couldn't be read.";
     }
     townOn();
     rosterTable();
     rulings();
     if (books) cost();
+  }
+
+  /** The town's newest report, at most every TOWN_READ_MS; the town tab and a citizen's page share it */
+  async function readTown(reload = false) {
+    if (!reload && Date.now() - townView.readAt <= TOWN_READ_MS) return;
+    townView.readAt = Date.now();
+    books ??= await getJson("/admin/books");
+    townView.latest = await getJson("/admin/town");
+    if (!townView.latest) townView.made ??= await getJson("/admin/citizens");
+  }
+
+  /** A citizen's name, as a link to their page (D4.3) */
+  function citizenLink(name) {
+    const a = text("a", name);
+    a.href = `#citizen/${encodeURIComponent(name)}`;
+    a.className = "who";
+    return a;
   }
 
   // --- Who's on
@@ -2119,7 +2137,7 @@
       $("roster-dek").textContent = "Every citizen this server has made, oldest first. Their trades and days come with the town's first report.";
       return void body.replaceChildren(...(made.length ? made.map(madeRow) : [emptyRow(7, "No citizens yet. scripts/town.sh up makes a town of them.")]));
     }
-    $("roster-dek").textContent = `Every citizen on the town's roster, as its report of ${clockSecs(t.report.at_ms)} has them. Click a heading to sort.`;
+    $("roster-dek").textContent = `Every citizen on the town's roster, as its report of ${clockSecs(t.report.at_ms)} has them. Click a heading to sort, or a name for that citizen's page.`;
     const find = townView.find.trim().toLowerCase();
     const key = ROSTER_SORT[townView.sort] ?? ROSTER_SORT.name;
     const rows = t.report.citizens
@@ -2152,7 +2170,7 @@
     when.className = "dim";
     const failure = c.failure ? [c.failure.why, " ", when] : c.restarts ? plural(c.restarts, "restart", "restarts") : "–";
     tr.append(
-      cell(["◇ ", c.name]),
+      cell(["◇ ", citizenLink(c.name)]),
       cell(trade(c.role), "trade"),
       cell(standing),
       cell(c.phase ?? "–", "dim"),
@@ -2181,7 +2199,7 @@
   function madeRow(c) {
     const tr = document.createElement("tr");
     tr.append(
-      cell(["◇ ", c.name]),
+      cell(["◇ ", citizenLink(c.name)]),
       cell("–", "dim"),
       cell(c.key ? "never reported" : "no key, so it can't sign in", "dim"),
       cell("–", "dim"),
@@ -2397,6 +2415,353 @@
     const total = Object.values(t?.report.layers ?? {}).reduce((a, l) => a + l.cents_total, 0);
     if (t?.up && total > 0) line += ` This run of the town has spent ${cents(total)} since ${clock(t.report.started_ms)}.`;
     h.textContent = line;
+  }
+
+  // ---------------------------------------------------------------------------
+  // One citizen (D4.3), at `#citizen/<name>`: who they are and what they're
+  // doing, from the town's report; their Strands over the range and their
+  // newest moves, from `GET /admin/player`; their last decisions, from the
+  // report the town tab holds; and a way to their dot on the map.
+
+  const CITIZEN_READ_MS = 10_000;
+  // How close the map comes in to follow someone from their page: this many
+  // world units across its shorter side
+  const FOLLOW_SPAN = 1500;
+
+  const citizenView = {
+    name: null,
+    detail: undefined, // PlayerDetail; null when nobody is called `name`, undefined until read
+    readAt: 0,
+    hours: null,
+    rows: null,
+  };
+  // The chart before the books are read: it's built as the page opens
+  const NO_STRANDS = { x: [], values: { strands: [] }, shown: [], moments: true };
+  citizenView.rows = NO_STRANDS;
+
+  // Each kind of move as the moves table names it, and as a sentence says it
+  const MOVES = {
+    exchange_deposit: ["Deposit", "deposits at the Exchange"],
+    exchange_withdraw: ["Withdrawal", "changing Strands back at the Exchange"],
+    deed_purchase: ["Deed", "deeds"],
+    deed_refund: ["Deed refund", "deed refunds"],
+    foreclosure_refund: ["Foreclosure refund", "foreclosure refunds"],
+    tax_payment: ["Tax", "tax"],
+    property_tax: ["Property tax", "property tax"],
+    admin_adjustment: ["Grant", "admins' grants"],
+    market_escrow: ["Buy order", "buy orders' escrow"],
+    market_refund: ["Escrow back", "escrow back from buy orders"],
+    market_sale: ["Sale", "selling on the market"],
+    market_fee: ["Market fee", "the market's fees"],
+    bazaar_rent: ["Stall rent", "stall rent"],
+    bazaar_purchase: ["Bazaar buy", "buying at the bazaar"],
+    bazaar_sale: ["Bazaar sale", "selling at the bazaar"],
+    bazaar_refund: ["Bazaar refund", "the bazaar's refunds"],
+    trade_sent: ["Trade, paid", "paying in trades"],
+    trade_received: ["Trade, paid in", "being paid in trades"],
+  };
+  const moveLabel = (kind) => MOVES[kind]?.[0] ?? capital(kind.replace(/_/g, " "));
+  const moveSays = (kind) => MOVES[kind]?.[1] ?? kind.replace(/_/g, " ");
+
+  // How each standing reads after a citizen's name
+  const STANDING_SAYS = {
+    starting: "is starting up",
+    working: "is working",
+    resting: "is resting",
+    offline: "has lost the server and is trying to get back on",
+    waiting: "is waiting to get back on",
+    away: "is away",
+    retired: "has retired: the server refused its key",
+    stopped: "has stopped",
+  };
+
+  /** The town's row for the citizen called `name`, if the newest report has one */
+  const rowOf = (name) => townView.latest?.report.citizens.find((c) => c.name.toLowerCase() === name.toLowerCase()) ?? null;
+
+  async function citizen() {
+    const v = citizenView;
+    const name = v.name;
+    const fresh = v.detail !== undefined && v.hours === state.hours && Date.now() - v.readAt < CITIZEN_READ_MS;
+    try {
+      await readTown();
+      if (!fresh) {
+        v.readAt = Date.now();
+        const res = await api(`/admin/player?name=${encodeURIComponent(name)}&hours=${state.hours}`);
+        if (res.status !== 404 && !res.ok) throw new Error(`/admin/player: ${res.status}`);
+        const detail = res.status === 404 ? null : await res.json();
+        // Moved on to someone else meanwhile
+        if (v.name !== name) return;
+        v.detail = detail;
+        v.hours = state.hours;
+      }
+    } catch (e) {
+      if (e instanceof SignedOut) return;
+      console.warn(e);
+      if (v.detail === undefined) $("citizen-headline").textContent = `${name} couldn't be read.`;
+    }
+    if (state.tab !== "citizen" || v.name !== name) return;
+    citizenHead();
+    citizenStrands();
+    citizenMoves();
+    citizenDecisions();
+  }
+
+  /** On to the citizen called `name`: nothing of the last one shows meanwhile */
+  function openCitizen(name) {
+    const v = citizenView;
+    if (v.name?.toLowerCase() === name.toLowerCase()) return;
+    Object.assign(v, { name, detail: undefined, readAt: 0, rows: NO_STRANDS });
+    $("citizen-name").replaceChildren(text("span", "◇"), ` ${name}`);
+    $("citizen-headline").textContent = `Reading ${name}.`;
+    for (const id of ["citizen-dek", "citizen-where"]) $(id).textContent = "";
+    $("citizen-follow").hidden = true;
+    $("citizen-tiles").replaceChildren();
+    $("citizen-moves").tBodies[0].replaceChildren();
+    $("citizen-decisions").replaceChildren();
+    $("citizen-strands-headline").textContent = "Reading the books.";
+    $("citizen-decisions-headline").textContent = "Reading the town's report.";
+    document.title = `${name} · The Observatory`;
+    // From far down the roster, start at the top of the page
+    window.scrollTo(0, 0);
+  }
+
+  // --- Who they are
+
+  function citizenHead() {
+    const v = citizenView;
+    const d = v.detail;
+    const c = rowOf(v.name);
+    const name = d?.name ?? c?.name ?? v.name;
+    const isCitizen = d ? d.citizen : c != null;
+    $("citizen-name").replaceChildren(...(isCitizen ? [text("span", "◇"), " "] : []), name);
+    const h = $("citizen-headline");
+    if (d === null && !c) {
+      h.textContent = `Nobody on this server is called ${v.name}.`;
+      $("citizen-dek").textContent = "Names are matched whatever their case. A citizen made on another server, the usual world or the town, isn't here.";
+      return void $("citizen-tiles").replaceChildren();
+    }
+
+    // The headline: who, and what they're at
+    if (c) {
+      let line = `${name}, ${one(c.role)}, ${STANDING_SAYS[c.standing] ?? `is ${c.standing}`}`;
+      // "is away" and "away until 19:00" read as one
+      const at = c.activity.trim();
+      line += !at ? "." : at.toLowerCase().startsWith(c.standing) ? `${at.slice(c.standing.length).replace(/^[:,]?\s*/, " ").trimEnd()}.` : `: ${at}.`;
+      if (townView.latest && !townView.latest.up) line += ` The town is down, so that's as its last report had it, ${ago(townView.latest.received_ms)}.`;
+      h.textContent = line;
+    } else {
+      h.textContent = isCitizen
+        ? `${name} is a citizen, but not on the roster of the town reporting to this server.`
+        : `${name} is a person, not a citizen: nobody's report speaks for them.`;
+    }
+
+    // The dek: their day, their troubles
+    const parts = [];
+    if (c?.phase) parts.push(`It's the ${c.phase} part of ${possessive(name)} day.`);
+    if (c?.failure) parts.push(`The last thing that went wrong, ${ago(c.failure.at_ms)}: ${c.failure.why}`);
+    if (c?.restarts) parts.push(`${capital(plural(c.restarts, "restart", "restarts"))} since the town started.`);
+    $("citizen-dek").textContent = parts.join(" ");
+
+    // The figures
+    const tiles = [];
+    const tile = (label, value, unit, sub, level = "") => {
+      const el = document.createElement("div");
+      el.className = "tile";
+      el.dataset.level = level;
+      const l = text("p", label);
+      l.className = "label";
+      const val = text("p", value);
+      val.className = "value";
+      if (unit) val.append(text("small", ` ${unit}`));
+      const s = text("p", sub);
+      s.className = "sub";
+      el.append(l, val, s);
+      tiles.push(el);
+    };
+    if (d) {
+      const change = d.strands - d.opening;
+      tile("In hand", nf.format(d.strands), "Strands", c?.strands != null && c.strands !== d.strands ? `The town's last report said ${nf.format(c.strands)}.` : "As the server's books have it.");
+      tile("In buy orders", nf.format(d.escrow), "Strands", d.escrow ? "Held in escrow until the orders fill or are cancelled." : "No buy order holds any.");
+      tile(capital(window_()), signed(change), "Strands", d.moves ? `From ${nf.format(d.opening)} to ${nf.format(d.strands)}.` : "Nothing moved.", change > 0 ? "good" : change < 0 ? "bad" : "");
+      tile("Moves", nf.format(d.moves), "", d.recent.length ? `The newest ${ago(d.recent[0].at_ms)}.` : "None ever.");
+    } else if (c?.strands != null) {
+      tile("In hand", nf.format(c.strands), "Strands", "As the town's last report had it.");
+    }
+    $("citizen-tiles").replaceChildren(...tiles);
+
+    // Where they are
+    const w = d?.walker;
+    const where = $("citizen-where");
+    if (w) {
+      const zone = zoneAt(w.x, w.y);
+      where.textContent = `${name} is out in the world${zone ? `, in the ${zone}` : ""}, at ${nf.format(Math.round(w.x))}, ${nf.format(Math.round(w.y))}: ${doing(w)}.`;
+    } else {
+      where.textContent = d ? `${name} isn't in the world now.` : "";
+    }
+    $("citizen-follow").hidden = !w;
+  }
+
+  /** The zone at a point, if the map has read the zones' rings */
+  function zoneAt(x, y) {
+    const t = map.terrain;
+    const zones = map.layers?.zones;
+    if (!t || !zones) return null;
+    const r = Math.hypot(x - t.cx, y - t.cy);
+    const z = zones.find((z) => r >= z.inner && r < z.outer);
+    return z ? `${capital(z.zone.replace(/_/g, " "))} zone` : null;
+  }
+
+  // --- Their Strands
+
+  CHARTS.citizenStrands = () => lineChart($("chart-citizen-strands"), {
+    rows: () => citizenView.rows,
+    axis: short,
+    legend: (v) => `${count(v)} Strands`,
+    series: [{ key: "strands", label: "In hand", color: "--s2", width: 2, step: true }],
+  });
+
+  function citizenStrands() {
+    const d = citizenView.detail;
+    const h = $("citizen-strands-headline");
+    if (!d) {
+      citizenView.rows = NO_STRANDS;
+      chart("citizenStrands");
+      h.textContent = d === null ? "There are no books to read." : "Reading the books.";
+      return;
+    }
+    // From the range's start, through each move, to now
+    const now = Date.now();
+    const x = [d.from_ms / 1000, ...d.balance.map((p) => p.at_ms / 1000), now / 1000];
+    const strands = [d.opening, ...d.balance.map((p) => p.strands), d.strands];
+    citizenView.rows = { x, values: { strands }, shown: [], moments: true };
+    chart("citizenStrands");
+
+    if (!d.moves) {
+      h.textContent = `${d.name} held ${plural(d.strands, "Strand", "Strands")} all through ${window_()}: none moved.`;
+      return;
+    }
+    const change = d.strands - d.opening;
+    let line = change === 0
+      ? `${possessive(d.name)} Strands came back to ${nf.format(d.strands)} over ${window_()}, after ${plural(d.moves, "move", "moves")}`
+      : `${possessive(d.name)} Strands went ${change > 0 ? "up" : "down"} ${nf.format(Math.abs(change))} over ${window_()}, from ${nf.format(d.opening)} to ${nf.format(d.strands)}, in ${plural(d.moves, "move", "moves")}`;
+    const flows = Object.entries(d.flows).filter(([, v]) => v);
+    const most = (sign) => flows.filter(([, v]) => Math.sign(v) === sign).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))[0];
+    const [into, out] = [most(1), most(-1)];
+    const why = [
+      into && `the most in from ${moveSays(into[0])} (${signed(into[1])})`,
+      out && `the most out to ${moveSays(out[0])} (${signed(out[1])})`,
+    ].filter(Boolean);
+    h.textContent = why.length ? `${line}: ${andList(why)}.` : `${line}.`;
+  }
+
+  function citizenMoves() {
+    const d = citizenView.detail;
+    const body = $("citizen-moves").tBodies[0];
+    if (!d) return void body.replaceChildren();
+    if (!d.recent.length) return void body.replaceChildren(emptyRow(5, `${d.name} has never moved a Strand.`));
+    const today = new Date().toDateString();
+    body.replaceChildren(...d.recent.map((m) => {
+      const tr = document.createElement("tr");
+      const when = text("time", new Date(m.at_ms).toDateString() === today ? clockSecs(m.at_ms) : `${day(m.at_ms)}, ${clock(m.at_ms)}`);
+      when.dateTime = new Date(m.at_ms).toISOString();
+      tr.append(
+        cell(when, "dim"),
+        cell(moveLabel(m.kind)),
+        cell(signed(m.amount), `num ${m.amount > 0 ? "up" : m.amount < 0 ? "down" : ""}`),
+        cell(nf.format(m.strands), "num"),
+        cell(m.description ?? "–", m.description ? "" : "dim"),
+      );
+      return tr;
+    }));
+  }
+
+  // --- Their last decisions
+
+  // How a layer's turn came out, as a colour: it settled, it passed it up, it failed
+  const TURN_TONE = { settled: "up", unsure: "pass", escalated: "pass", pending: "pass", "off menu": "down", slow: "down", broke: "down", late: "down" };
+
+  function citizenDecisions() {
+    const v = citizenView;
+    const c = rowOf(v.name);
+    const name = c?.name ?? v.detail?.name ?? v.name;
+    const h = $("citizen-decisions-headline");
+    const list = $("citizen-decisions");
+    if (townView.latest === undefined) return void (h.textContent = "Reading the town's report.");
+    if (!townView.latest) {
+      list.replaceChildren();
+      return void (h.textContent = "No town has reported in to this server, so there are no decisions to show.");
+    }
+    if (!c) {
+      list.replaceChildren();
+      return void (h.textContent = v.detail?.citizen === false
+        ? `${name} is a person, and makes up their own mind.`
+        : `${name} isn't on the town's roster, so the town sends no decisions for them.`);
+    }
+    const ds = [...c.decisions].reverse();
+    if (!ds.length) {
+      list.replaceChildren();
+      return void (h.textContent = `${name} hasn't settled a question since this server started.`);
+    }
+    const newest = ds[0];
+    let line = `${possessive(name)} newest decision, ${ago(newest.at_ms)}, was ${newest.picked ? `“${newest.picked}”` : "nothing, from an empty menu"}, ${rulingSays(newest.by)}.`;
+    if (ds.length > 1) {
+      const by = {};
+      for (const d of ds) by[d.by] = (by[d.by] ?? 0) + 1;
+      const kinds = Object.entries(by).sort((a, b) => b[1] - a[1]);
+      line += kinds.length === 1
+        ? ` So ${ds.length === 2 ? "was the one" : `were the ${nf.format(ds.length - 1)}`} before it.`
+        : ` Of the last ${nf.format(ds.length)}, ${andList(kinds.map(([k, n]) => `${nf.format(n)} ${n === 1 ? "was" : "were"} settled ${rulingSays(k)}`))}.`;
+    }
+    h.textContent = line;
+    list.replaceChildren(...ds.map(decisionItem));
+  }
+
+  function decisionItem(d) {
+    const li = document.createElement("li");
+    li.className = "decision";
+
+    const head = document.createElement("p");
+    head.className = "decision-head";
+    const when = text("time", clockSecs(d.at_ms));
+    when.dateTime = new Date(d.at_ms).toISOString();
+    const q = text("span", capital(d.question));
+    q.className = "question";
+    const by = text("span", rulingSays(d.by));
+    by.className = "by";
+    by.style.setProperty("--c", `var(${rulingColor(d.by)})`);
+    head.append(when, q, by);
+
+    // The menu, with what stood marked
+    const menu = document.createElement("ul");
+    menu.className = "menu";
+    menu.setAttribute("aria-label", "The menu");
+    for (const entry of d.menu) {
+      const item_ = text("li", entry);
+      if (entry === d.picked) {
+        item_.className = "picked";
+        const terms = [d.quantity != null && plural(d.quantity, "unit", "units"), d.price != null && `at ${plural(d.price, "Strand", "Strands")}`].filter(Boolean);
+        if (terms.length) item_.append(text("small", ` ${terms.join(" ")}`));
+      }
+      menu.append(item_);
+    }
+    if (!d.menu.length) menu.append(Object.assign(text("li", "An empty menu"), { className: "dim" }));
+
+    // Each layer's turn, in the order they were asked
+    const trail = document.createElement("ol");
+    trail.className = "trail";
+    trail.setAttribute("aria-label", "How each layer answered");
+    for (const t of d.trail) {
+      const step = document.createElement("li");
+      const layer = text("span", capital(layerName(t.layer)));
+      layer.className = "layer";
+      const outcome = text("span", t.outcome);
+      outcome.className = "outcome";
+      outcome.dataset.tone = TURN_TONE[t.outcome] ?? "";
+      step.append(layer, " ", outcome, text("small", ` ${ms(t.micros / 1000)}`));
+      trail.append(step);
+    }
+    li.append(head, menu, ...(d.trail.length ? [trail] : []));
+    return li;
   }
 
   // ---------------------------------------------------------------------------
@@ -2725,6 +3090,8 @@
     pending: null,
     hover: null,
     follow: null,
+    // A player to follow when the map next opens (D4.3)
+    want: null,
     frame: 0,
     palette: null,
     size: { w: 0, h: 0 },
@@ -3172,7 +3539,14 @@
     const h = map.hover;
     if (map.follow) {
       const m = map.walkers.get(map.follow);
-      if (m) return void (note.textContent = `Following ${m.w.citizen ? "◇ " : ""}${m.w.name}, ${doing(m.w)}. Click the map to let go.`);
+      if (m) {
+        // A citizen's name goes to their page (D4.3)
+        return void note.replaceChildren(
+          "Following ",
+          ...(m.w.citizen ? ["◇ ", citizenLink(m.w.name)] : [m.w.name]),
+          `, ${doing(m.w)}. Click the map to let go.`,
+        );
+      }
     }
     if (!h) return void (note.textContent = "Point at anyone to see what they're doing; click to follow them.");
     switch (h.kind) {
@@ -3284,6 +3658,13 @@
     }
     sizeMap();
     if (!map.view) fitView();
+    // Sent from a citizen's page: follow them, close enough to see the streets
+    if (map.want) {
+      map.follow = map.want;
+      map.want = null;
+      if (!map.on.has("people")) setLayer("people", true);
+      map.view.scale = Math.max(map.view.scale, Math.min(map.size.w, map.size.h) / FOLLOW_SPAN);
+    }
     if (!map.timers.length) {
       readPositions();
       readLayers();
@@ -3532,7 +3913,9 @@
   // ---------------------------------------------------------------------------
   // The tabs, the range and the theme
 
-  const PAGES = { overview, map: mapPage, economy, performance, town: () => town(), tuning, events };
+  const PAGES = { overview, map: mapPage, economy, performance, town: () => town(), citizen, tuning, events };
+  // A page that isn't a tab of its own lights its parent's
+  const TAB_OF = { citizen: "town" };
 
   /** Redraw the open page if it's one of `pages` */
   function render(pages) {
@@ -3541,11 +3924,20 @@
     }
   }
 
-  function show(tab) {
+  /** A page from the hash: `town`, or `citizen/<name>` for one citizen's (D4.3) */
+  function show(hash) {
+    const cut = hash.indexOf("/");
+    let tab = cut < 0 ? hash : hash.slice(0, cut);
+    const arg = cut < 0 ? "" : decodeURIComponent(hash.slice(cut + 1)).trim();
+    if (tab === "citizen") {
+      if (arg) openCitizen(arg);
+      else tab = "town";
+    }
+    if (tab !== "citizen") document.title = "The Observatory";
     if (!PAGES[tab]) tab = "overview";
     state.tab = tab;
     if (tab !== "map") mapStop();
-    for (const a of document.querySelectorAll("#tabs a")) a.setAttribute("aria-selected", String(a.dataset.tab === tab));
+    for (const a of document.querySelectorAll("#tabs a")) a.setAttribute("aria-selected", String(a.dataset.tab === (TAB_OF[tab] ?? tab)));
     for (const p of document.querySelectorAll(".page")) p.hidden = p.dataset.page !== tab;
     // A chart built while hidden had no width; size it now it shows
     for (const name of PAGE_CHARTS[tab] ?? []) state.charts[name]?.rebuild();
@@ -3631,6 +4023,8 @@
     mapControls();
     rosterControls();
     tuningControls();
+    // The link goes to the map; this says whom to follow there
+    $("citizen-follow").addEventListener("click", () => { map.want = citizenView.detail?.player_id ?? null; });
     addEventListener("hashchange", () => show(location.hash.slice(1)));
     $("sign-out").addEventListener("click", () => signOut(null));
 

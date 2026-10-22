@@ -667,6 +667,57 @@ table.ledger { width: 100%; border-collapse: collapse; font-size: 14px; }
   #town-layers th:nth-child(6), #town-layers td:nth-child(6) { display: none; }
 }
 
+/* A name in the roster, or the map's note, goes to that citizen's page */
+a.who { color: inherit; text-decoration: underline; text-decoration-color: var(--hair); text-underline-offset: 3px; }
+a.who:hover { text-decoration-color: var(--accent); }
+
+/* ---- one citizen (D4.3) ------------------------------------------------ */
+
+.crumbs { margin: 22px 0 0; font-size: 13px; letter-spacing: 0.08em; }
+.crumbs a, .citizen-where a { color: var(--accent); text-decoration: none; }
+.crumbs a:hover, .citizen-where a:hover { text-decoration: underline; }
+.citizen-name {
+  margin: 10px 0 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--rule);
+  font-family: "Cinzel", Georgia, serif;
+  font-weight: 400;
+  font-size: clamp(26px, 5vw, 38px);
+  line-height: 1.1;
+  color: var(--title);
+}
+.citizen-name span { color: var(--accent); font-size: 0.6em; vertical-align: 0.25em; }
+.citizen-where { margin: 12px 0 0; font-size: 15px; }
+.citizen-where a { white-space: nowrap; }
+.citizen-where a::after { content: " →"; }
+.moves td:first-child { white-space: nowrap; }
+@media (max-width: 640px) {
+  .moves th:nth-child(5), .moves td:nth-child(5) { display: none; }
+}
+
+/* A decision: when and what, the menu with what stood marked, then each
+   layer's turn in the order it was asked */
+.decisions { list-style: none; margin: 10px 0 0; padding: 0; }
+.decision { padding: 12px 0; border-bottom: 1px solid var(--hair); }
+.decision-head { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.decision-head time { color: var(--ink-dim); font-size: 13px; font-variant-numeric: tabular-nums; }
+.decision-head .question { font-weight: 600; }
+.decision-head .by { font-size: 13px; color: var(--ink-dim); }
+.decision-head .by::before { content: "● "; font-size: 9px; vertical-align: 2px; color: var(--c); }
+.decision .menu { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.decision .menu li { padding: 2px 10px; border: 1px solid var(--hair); border-radius: 999px; font-size: 13px; color: var(--ink-dim); }
+.decision .menu li.picked { color: var(--ink); border-color: var(--accent); background: var(--well); }
+.decision .menu li.picked::before { content: "◆ "; font-size: 9px; vertical-align: 1px; color: var(--accent); }
+.decision .menu small { color: var(--ink-dim); }
+.decision .trail { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 0; font-size: 13px; }
+.decision .trail li + li::before { content: "→"; margin: 0 8px; color: var(--ink-dim); }
+.decision .trail .layer { font-weight: 600; }
+.decision .trail small { color: var(--ink-dim); }
+.decision .outcome[data-tone="up"] { color: var(--up); }
+.decision .outcome[data-tone="pass"] { color: var(--waiting); }
+.decision .outcome[data-tone="down"] { color: var(--down); }
+.decisions .empty { color: var(--ink-dim); font-style: italic; }
+
 /* ---- the wire ---------------------------------------------------------- */
 
 .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }

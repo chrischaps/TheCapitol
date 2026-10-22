@@ -413,6 +413,79 @@ pub struct FillHeat {
     pub stalls: std::collections::BTreeMap<String, crate::metrics::Trades>,
 }
 
+/// `GET /admin/player`'s query (D4.3): the player called `name` (any case),
+/// and how many hours back their Strands go, held to 1 to
+/// [`MAP_HEAT_MAX_HOURS`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema, utoipa::IntoParams))]
+pub struct PlayerQuery {
+    pub name: String,
+    #[serde(default = "MapQuery::default_hours")]
+    pub hours: u32,
+}
+
+/// The most points [`PlayerDetail::balance`] holds: past it, the range is cut
+/// in this many even slices and each keeps its last.
+pub const PLAYER_POINTS: usize = 720;
+/// The moves [`PlayerDetail::recent`] holds, the newest.
+pub const PLAYER_MOVES: usize = 20;
+
+/// `GET /admin/player` (D4.3): one player, for the console's page of one
+/// citizen. Their Strands over the range come from `currency_transactions`,
+/// each move's balance after it, so they reach back past the server's start.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct PlayerDetail {
+    pub player_id: Uuid,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
+    /// Their Strands in hand now
+    pub strands: i64,
+    /// Their Strands held in their buy orders' escrow now
+    pub escrow: i64,
+    /// Where the range starts (Unix ms)
+    pub from_ms: i64,
+    /// Their Strands when the range started: the balance before its first
+    /// move, or [`strands`](Self::strands) if they made none in it
+    pub opening: i64,
+    /// Their balance after each move in the range, oldest first, at most
+    /// [`PLAYER_POINTS`]
+    pub balance: Vec<StrandPoint>,
+    /// The moves in the range
+    pub moves: u64,
+    /// The range's moves added up by transaction type
+    pub flows: std::collections::BTreeMap<String, i64>,
+    /// Their newest moves, newest first, at most [`PLAYER_MOVES`], however
+    /// long ago
+    pub recent: Vec<StrandMove>,
+    /// Where the server has them; `None` when they're not in the world
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub walker: Option<Walker>,
+}
+
+/// A player's Strands at a moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct StrandPoint {
+    pub at_ms: i64,
+    pub strands: i64,
+}
+
+/// One move of a player's Strands: a `currency_transactions` row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct StrandMove {
+    pub at_ms: i64,
+    /// Its transaction type, as `AdminBooks::flows` names them
+    pub kind: String,
+    pub amount: i64,
+    /// Their Strands after it
+    pub strands: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// `POST /admin/citizens`'s answer. The key's secret (`play` and `trade`) is
 /// shown this once: it's how `capitol-town` signs the citizen in, since a
 /// citizen has no password.

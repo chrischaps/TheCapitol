@@ -32,6 +32,8 @@
 //! and a person's lot, their stations, and an hour's fills at the hall and two stalls.
 //! `fixtures/rest/admin_books.json` is `GET /admin/books` (D2.1): every transaction
 //! type this build knows and what it does to the Strands.
+//! `fixtures/rest/admin_player.json` is `GET /admin/player` (D4.3): a citizen's
+//! hour, a deposit, a buy order's escrow and a sale less its fee, out walking.
 
 use std::fs;
 use std::path::Path;
@@ -303,6 +305,21 @@ fn the_admin_map_round_trips() {
     assert_eq!(map.heat.market.vwap(), Some(412.0 / 96.0));
     assert_eq!(map.heat.stalls["bazaar_stall_12"].strands, 60);
     assert_eq!(serde_json::to_string(&map).unwrap(), json);
+}
+
+#[test]
+fn a_players_detail_round_trips() {
+    use capitol_protocol::rest::PlayerDetail;
+    let json = fixture("admin_player.json");
+    let player: PlayerDetail = serde_json::from_str(&json).unwrap();
+    assert!(player.citizen && player.walker.is_some());
+    // What they opened with and the range's flows add up to what they hold
+    assert_eq!(player.opening + player.flows.values().sum::<i64>(), player.strands);
+    assert_eq!(player.balance.last().unwrap().strands, player.strands);
+    assert_eq!(player.recent[0].strands, player.strands);
+    assert_eq!(player.recent[0].description.as_deref(), Some("Fee on 9 logs"));
+    assert_eq!(player.recent[1].description, None);
+    assert_eq!(serde_json::to_string(&player).unwrap(), json);
 }
 
 #[test]

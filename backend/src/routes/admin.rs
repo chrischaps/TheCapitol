@@ -15,7 +15,8 @@ use futures::{Stream, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
 use capitol_protocol::rest::{
     AdminBooks, AdminMap, ApiKeyScope, CitizenInfo, CreateCitizenRequest, CreatedApiKey, CreatedCitizen, Doing, FillHeat, MapPlot,
-    MapQuery, MapZone, MapStation, SuccessResponse, Walker, WalkersQuery, MAP_HEAT_MAX_HOURS, WALKERS_MAX_RADIUS,
+    MapQuery, MapZone, MapStation, PlayerDetail, PlayerQuery, StrandMove, StrandPoint, SuccessResponse, Walker,
+    WalkersQuery, MAP_HEAT_MAX_HOURS, PLAYER_MOVES, PLAYER_POINTS, WALKERS_MAX_RADIUS,
 };
 use capitol_protocol::metrics::Trades;
 use capitol_protocol::rules::Zone;
@@ -58,6 +59,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/walkers", get(get_walkers))
         .route("/positions", get(get_positions).layer(CompressionLayer::new()))
         .route("/map", get(get_map).layer(CompressionLayer::new()))
+        .route("/player", get(get_player).layer(CompressionLayer::new()))
         .route("/books", get(get_books))
         .route("/accounts/{id}/subscription", post(subscribe_account))
         .route("/citizens", get(list_citizens).post(create_citizen))
@@ -568,6 +570,140 @@ pub async fn get_positions(
     Ok(Json(walkers(state.game.read().await.players.values())))
 }
 
+/// One player by name (D4.3), for the console's page of one citizen: their
+/// Strands over the last `hours`, what moved them, and where they are.
+pub async fn get_player(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Query(query): Query<PlayerQuery>,
+) -> Result<Json<PlayerDetail>, AppError> {
+    require_admin(&user)?;
+    let from = Utc::now() - chrono::Duration::hours(i64::from(query.hours.clamp(1, MAP_HEAT_MAX_HOURS)));
+    let mut detail = player_detail(&state.db, &query.name, from)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("No player is called {}", query.name)))?;
+    detail.walker = walkers(state.game.read().await.players.get(&detail.player_id).into_iter()).pop();
+    Ok(Json(detail))
+}
+
+/// [`get_player`] from the database, all but the walker; `None` if nobody is
+/// called `name`. A citizen comes first, since no two share a name.
+async fn player_detail(
+    db: &sqlx::PgPool,
+    name: &str,
+    from: chrono::DateTime<Utc>,
+) -> Result<Option<PlayerDetail>, sqlx::Error> {
+    let found: Option<(uuid::Uuid, String, bool, i64)> = sqlx::query_as(
+        "SELECT p.id, p.name, COALESCE(acc.kind = 'citizen', FALSE), p.strand_balance
+         FROM players p
+         JOIN accounts acc ON acc.id = p.account_id
+         WHERE lower(p.name) = lower($1)
+         ORDER BY COALESCE(acc.kind = 'citizen', FALSE) DESC, p.created_at
+         LIMIT 1",
+    )
+    .bind(name.trim())
+    .fetch_optional(db)
+    .await?;
+    let Some((player_id, name, citizen, strands)) = found else { return Ok(None) };
+
+    let escrow: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(escrow_strands), 0)::int8 FROM market_orders WHERE player_id = $1")
+            .bind(player_id)
+            .fetch_one(db)
+            .await?;
+
+    // A move's amount is its balance after less before, whatever sign its
+    // `amount` was written with
+    let by_kind: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT transaction_type, SUM(balance_after - balance_before)::int8, COUNT(*)
+         FROM currency_transactions
+         WHERE player_id = $1 AND occurred_at >= $2
+         GROUP BY transaction_type",
+    )
+    .bind(player_id)
+    .bind(from)
+    .fetch_all(db)
+    .await?;
+    let moves = by_kind.iter().map(|(_, _, n)| *n as u64).sum::<u64>();
+
+    let opening: Option<i64> = sqlx::query_scalar(
+        "SELECT balance_before FROM currency_transactions
+         WHERE player_id = $1 AND occurred_at >= $2
+         ORDER BY occurred_at, id
+         LIMIT 1",
+    )
+    .bind(player_id)
+    .bind(from)
+    .fetch_optional(db)
+    .await?;
+
+    // Past PLAYER_POINTS moves, the range in even slices, each its last
+    let slice_ms = ((Utc::now() - from).num_milliseconds() / PLAYER_POINTS as i64).max(1);
+    let points: Vec<(chrono::DateTime<Utc>, i64)> = if moves as usize <= PLAYER_POINTS {
+        sqlx::query_as(
+            "SELECT occurred_at, balance_after FROM currency_transactions
+             WHERE player_id = $1 AND occurred_at >= $2
+             ORDER BY occurred_at, id",
+        )
+        .bind(player_id)
+        .bind(from)
+        .fetch_all(db)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT DISTINCT ON (date_bin($3 * interval '1 millisecond', occurred_at, $2))
+                    occurred_at, balance_after
+             FROM currency_transactions
+             WHERE player_id = $1 AND occurred_at >= $2
+             ORDER BY date_bin($3 * interval '1 millisecond', occurred_at, $2), occurred_at DESC, id DESC",
+        )
+        .bind(player_id)
+        .bind(from)
+        .bind(slice_ms as f64)
+        .fetch_all(db)
+        .await?
+    };
+
+    let recent: Vec<(chrono::DateTime<Utc>, String, i64, i64, Option<String>)> = sqlx::query_as(
+        "SELECT occurred_at, transaction_type, balance_after - balance_before, balance_after, description
+         FROM currency_transactions
+         WHERE player_id = $1
+         ORDER BY occurred_at DESC, id DESC
+         LIMIT $2",
+    )
+    .bind(player_id)
+    .bind(PLAYER_MOVES as i64)
+    .fetch_all(db)
+    .await?;
+
+    Ok(Some(PlayerDetail {
+        player_id,
+        name,
+        citizen,
+        strands,
+        escrow,
+        from_ms: from.timestamp_millis(),
+        opening: opening.unwrap_or(strands),
+        balance: points
+            .into_iter()
+            .map(|(at, strands)| StrandPoint { at_ms: at.timestamp_millis(), strands })
+            .collect(),
+        moves,
+        flows: by_kind.into_iter().map(|(kind, sum, _)| (kind, sum)).collect(),
+        recent: recent
+            .into_iter()
+            .map(|(at, kind, amount, strands, description)| StrandMove {
+                at_ms: at.timestamp_millis(),
+                kind,
+                amount,
+                strands,
+                description,
+            })
+            .collect(),
+        walker: None,
+    }))
+}
+
 /// How the console reads a sample's Strand flows (D2.1): which transaction
 /// types are faucets and which sinks, what a new account starts with, and
 /// how long a game day is.
@@ -729,5 +865,102 @@ mod tests {
         // The radius is held to the most it looks
         let all = walkers_near(&players, WalkersQuery { x: 6800.0, y: 6800.0, radius: 1e9 });
         assert_eq!(all.len(), 2);
+    }
+
+    /// These need the local Postgres (`docker-compose up -d`).
+    mod db {
+        use super::super::player_detail;
+        use crate::engine::currency::{add_strands, subtract_strands, TransactionType};
+        use crate::routes::auth::create_account;
+        use capitol_protocol::rest::{AccountKind, PLAYER_POINTS};
+        use chrono::Utc;
+        use sqlx::PgPool;
+        use uuid::Uuid;
+
+        async fn make(db: &PgPool, name: &str, kind: AccountKind) -> Uuid {
+            let mut tx = db.begin().await.unwrap();
+            let (_, player) = create_account(&mut tx, &format!("{name}@test.local"), "x", name, kind).await.unwrap();
+            tx.commit().await.unwrap();
+            player
+        }
+
+        async fn balance(db: &PgPool, player: Uuid) -> i64 {
+            sqlx::query_scalar("SELECT strand_balance FROM players WHERE id = $1").bind(player).fetch_one(db).await.unwrap()
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "needs the local Postgres (docker-compose up -d)"]
+        async fn a_players_strands_over_the_range_and_their_newest_moves(db: PgPool) {
+            let ada = make(&db, "Ada Reeder", AccountKind::Citizen).await;
+            let start = balance(&db, ada).await;
+            // Before the range: a move an hour and a half ago
+            add_strands(&db, ada, 40, TransactionType::ExchangeDeposit, Some("labour"), None).await.unwrap();
+            sqlx::query("UPDATE currency_transactions SET occurred_at = NOW() - interval '90 minutes' WHERE player_id = $1")
+                .bind(ada)
+                .execute(&db)
+                .await
+                .unwrap();
+            let opening = balance(&db, ada).await;
+            add_strands(&db, ada, 25, TransactionType::MarketSale, None, None).await.unwrap();
+            subtract_strands(&db, ada, 10, TransactionType::MarketFee, None, None).await.unwrap();
+            subtract_strands(&db, ada, 5, TransactionType::MarketFee, None, None).await.unwrap();
+
+            let from = Utc::now() - chrono::Duration::hours(1);
+            let d = player_detail(&db, "ada reeder", from).await.unwrap().expect("found by name, any case");
+            assert_eq!((d.player_id, d.name.as_str(), d.citizen), (ada, "Ada Reeder", true));
+            assert_eq!((d.opening, d.strands, d.escrow), (opening, start + 50, 0));
+            assert_eq!(d.moves, 3, "the deposit is before the range");
+            let strands: Vec<i64> = d.balance.iter().map(|p| p.strands).collect();
+            assert_eq!(strands, [opening + 25, opening + 15, opening + 10]);
+            assert_eq!(d.flows["market_sale"], 25);
+            assert_eq!(d.flows["market_fee"], -15, "a sink reads negative");
+            assert!(!d.flows.contains_key("exchange_deposit"));
+            let recent: Vec<(&str, i64)> = d.recent.iter().map(|m| (m.kind.as_str(), m.amount)).collect();
+            assert_eq!(
+                recent,
+                [("market_fee", -5), ("market_fee", -10), ("market_sale", 25), ("exchange_deposit", 40)],
+                "newest first, before the range too"
+            );
+            assert_eq!(d.recent[3].description.as_deref(), Some("labour"));
+
+            assert!(player_detail(&db, "Nobody", from).await.unwrap().is_none());
+            // Nothing in the range: the line is flat at what they hold
+            let quiet = player_detail(&db, "Ada Reeder", Utc::now() + chrono::Duration::seconds(5)).await.unwrap().unwrap();
+            assert_eq!((quiet.moves, quiet.opening, quiet.balance.len()), (0, quiet.strands, 0));
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "needs the local Postgres (docker-compose up -d)"]
+        async fn a_busy_players_moves_are_thinned_to_the_last_in_each_slice(db: PgPool) {
+            let bo = make(&db, "Bo", AccountKind::Human).await;
+            let start = balance(&db, bo).await;
+            // Three moves a minute over the hour, each one Strand up
+            let n = 3 * 60;
+            let many = PLAYER_POINTS + n;
+            sqlx::query(
+                "INSERT INTO currency_transactions (player_id, amount, balance_before, balance_after, transaction_type, occurred_at)
+                 SELECT $1, 1, $2 + k - 1, $2 + k, 'market_sale', NOW() - interval '59 minutes' + (k * interval '1 second' * 3540 / $3)
+                 FROM generate_series(1, $3) AS k",
+            )
+            .bind(bo)
+            .bind(start)
+            .bind(many as i64)
+            .execute(&db)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE players SET strand_balance = $2 WHERE id = $1")
+                .bind(bo)
+                .bind(start + many as i64)
+                .execute(&db)
+                .await
+                .unwrap();
+
+            let d = player_detail(&db, "Bo", Utc::now() - chrono::Duration::hours(1)).await.unwrap().unwrap();
+            assert_eq!(d.moves, many as u64);
+            assert!(d.balance.len() <= PLAYER_POINTS && d.balance.len() > PLAYER_POINTS / 2, "{}", d.balance.len());
+            assert!(d.balance.windows(2).all(|w| w[0].at_ms <= w[1].at_ms && w[0].strands < w[1].strands));
+            assert_eq!(d.balance.last().unwrap().strands, start + many as i64, "the last slice keeps the newest");
+            assert_eq!((d.opening, d.flows["market_sale"]), (start, many as i64));
+        }
     }
 }
