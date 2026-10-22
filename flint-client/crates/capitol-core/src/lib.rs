@@ -55,6 +55,7 @@ pub mod bazaar;
 pub mod bot;
 pub mod card;
 pub mod catalog;
+pub mod chat;
 pub mod citizen;
 pub mod craft;
 pub mod exchange;

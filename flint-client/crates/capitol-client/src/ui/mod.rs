@@ -12,6 +12,8 @@
 //! - [`trade`]: a trade request's card, and the two-sided trade window (P7.3).
 //! - [`gazette`]: the Capitol Gazette, toggled with G or its notice board
 //!   (E3.9): the day's edition as a page of newsprint.
+//! - [`chat`]: the chat panel (Commons S1.3), Local and Capitol, opened
+//!   with Enter or the header's Chat chip; closed, the last lines fade.
 //! - [`impound`]: what a foreclosure kept for you when your pack was
 //!   full, opened from the header's Impound chip (#141).
 //! - [`market`]: the market panel, toggled with M: items, the ladder, the
@@ -42,6 +44,7 @@
 
 pub mod automation;
 pub mod card;
+pub mod chat;
 pub mod containers;
 pub mod crafting;
 pub mod dev_overlay;

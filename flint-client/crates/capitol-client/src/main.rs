@@ -162,6 +162,10 @@ struct Args {
     /// nothing, for filming the street (#345)
     #[arg(long, value_name = "STALL")]
     bazaar_sample: Option<String>,
+    /// Offline, open the chat (S1.3) on a sample of both channels, with the
+    /// crafting and inventory panels open and the hint card up
+    #[arg(long)]
+    chat_sample: bool,
     /// Offline, open the impound (#141) on a sample: what a foreclosed
     /// workshop leaves when your pack is full
     #[arg(long)]
@@ -361,6 +365,7 @@ fn main() -> Result<()> {
         .with_gazette_sample(args.gazette_sample && args.offline.is_some())
         .with_card_sample(args.card_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_impound_sample(args.impound_sample && args.offline.is_some())
+        .with_chat_sample(args.chat_sample && args.offline.is_some())
         .with_station_panel_sample(args.station_panel_sample.as_deref())
         .with_mute(args.mute || args.exit_after.is_some())
         .with_juice_sample(args.juice_sample && args.offline.is_some())

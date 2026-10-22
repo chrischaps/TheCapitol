@@ -35,7 +35,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("[Click] grass", "Gather fiber"),
             ("[Click] a station, or [O]", "Open it, or the nearest"),
-            ("[Enter]", "Craft what's set"),
+            ("[Enter], crafting", "Craft what's set"),
             ("Right-click a kit", "Place its station"),
             ("[Esc] or right-click", "Stop placing"),
             ("[Alt] + [Click] a plot", "See its deed"),
@@ -51,6 +51,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("[X]", "Fiber exchange"),
             ("[M]", "The market"),
             ("[G]", "The Gazette"),
+            ("[Enter]", "Talk: Enter sends, Esc closes"),
             ("[F10]", "Settings"),
             ("[F8]", "Point and walk, or over the shoulder"),
             ("[F7]", "Dev overlay"),

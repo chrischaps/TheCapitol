@@ -40,7 +40,7 @@ use capitol_core::protocol::rest::{
 use capitol_core::protocol::rules::market::{OrderSide, OrderStatus};
 use capitol_core::protocol::rules::Zone;
 use capitol_core::protocol::terrain::{Landmark, TerrainResponse};
-use capitol_core::protocol::ws::{ClientMessage, ItemCount};
+use capitol_core::protocol::ws::{Channel, ClientMessage, ItemCount};
 use capitol_core::state::{GameState, StateEvent, Trade, TradeAction, TradeEvent, Yield};
 use capitol_core::station::{self, Kit, Placing, Visit};
 use capitol_core::talk::{Line, Log};
@@ -227,6 +227,8 @@ pub struct Session {
     cards: capitol_core::card::Cards,
     /// Who you've muted (S1.4)
     mutes: capitol_core::mutes::Mutes,
+    /// Talk (Commons S1.3): both channels, the input line, what's in flight.
+    chat: capitol_core::chat::Chat,
     /// Placing a station from a kit (P6.2), while it lasts.
     placing: Option<Placing>,
     /// What placing has to tell the player since the extension last took it.
@@ -427,6 +429,7 @@ impl Session {
             gazette_asked: None,
             cards: Default::default(),
             mutes: Default::default(),
+            chat: capitol_core::chat::Chat::new(),
             placing: None,
             placing_notes: Vec::new(),
             visit: Visit::default(),
@@ -1203,7 +1206,8 @@ impl Session {
         std::mem::take(&mut self.heard)
     }
 
-    fn talk_time(&self, now: Instant) -> f64 {
+    /// The talk log's clock at `now`, in seconds.
+    pub fn talk_time(&self, now: Instant) -> f64 {
         now.saturating_duration_since(self.epoch).as_secs_f64()
     }
 
@@ -1553,6 +1557,24 @@ impl Session {
 
     pub fn gazette_mut(&mut self) -> &mut capitol_core::gazette::Reader {
         &mut self.gazette
+    }
+
+    /// What's been said (S1.2), as the chat panel reads it.
+    pub fn talk(&self) -> &Log {
+        &self.talk
+    }
+
+    /// The talk log and the chat's input side (S1.3: the line, what's in
+    /// flight), for the panel, which reads one and writes the other.
+    pub fn talk_and_chat(&mut self) -> (&mut Log, &mut capitol_core::chat::Chat) {
+        (&mut self.talk, &mut self.chat)
+    }
+
+    /// Say the chat's input line on `channel`, if there's anything to say.
+    pub fn say(&mut self, channel: Channel) {
+        if let Some(text) = self.chat.send(channel) {
+            self.net.ws(ClientMessage::Say { channel, text });
+        }
     }
 
     /// Ask the Gazette to print your name, or not.
@@ -2172,6 +2194,8 @@ impl Session {
                     self.gazette.connected();
                     self.cards.connected();
                     self.mutes.connected();
+                    // What was in flight went down with the old socket
+                    self.chat.connected();
                 }
             }
             let trade_before = self.state.trade().clone();
@@ -2287,9 +2311,21 @@ impl Session {
                             y: *y,
                             at: self.talk_time(now),
                         };
+                        // Your own line comes back: it's sent, and not news
+                        let mine = self.state.me() == Some(*from);
+                        if mine {
+                            self.chat.heard_back(*channel, text);
+                        }
                         if self.talk.heard(line.clone()) {
+                            if mine {
+                                self.talk.own(*channel);
+                            }
                             self.heard.push(line);
                         }
+                    }
+                    StateEvent::ServerError { message, command } if command == "say" => {
+                        tracing::info!("chat: say refused: {message}");
+                        self.chat.refused(message, now);
                     }
                     // A tool slot refused: shown where a refused move is
                     StateEvent::ServerError {
@@ -2461,6 +2497,7 @@ impl Session {
             self.gazette = capitol_core::gazette::Reader::new(None);
             self.gazette_asked = None;
             self.cards = Default::default();
+            self.chat = capitol_core::chat::Chat::new();
             self.placing = None;
             self.placing_notes.clear();
             self.visit = Visit::default();
@@ -4289,6 +4326,112 @@ Bea: {}",
             a.state().strands() == ada_strands && rope(a) == ada_rope
         });
         ada.log_out();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[ignore = "needs the local stack; walks two new accounts a little way"]
+    fn a_local_line_is_heard_nearby_and_not_across_town() {
+        use capitol_core::bot::{Account, Bot};
+        use capitol_core::net::NetConfig;
+        use capitol_core::protocol::rules;
+
+        let server = std::env::var("CAPITOL_SERVER").unwrap_or(DEFAULT_SERVER.into());
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            % 100_000_000;
+        // Bea joins Ada where Ada came in; Cy goes 200 m on up the arterial
+        let account = |name: &str| Account::numbered(&format!("{name}{stamp}"), 1);
+        let (ada, bea, cy) = (account("chata"), account("chatb"), account("chatc"));
+        let sign_in = |who: &Account| Bot::sign_in(NetConfig::with_base_url(&server), who).expect("signed in");
+        // The bots stay on until the sessions take their avatars (E0.8), so
+        // each stands where its walk left it, saved yet or not
+        let mut bots: Vec<Bot> = [&ada, &bea, &cy].into_iter().map(sign_in).collect();
+        let (x, y) = bots[0].position();
+        bots[1].walk_to(x + 4.0, y).expect("beside Ada");
+        let toward = (rules::CENTER_X - x, rules::CENTER_Y - y);
+        let k = 200.0 / toward.0.hypot(toward.1);
+        bots[2].walk_to(x + toward.0 * k, y + toward.1 * k).expect("up the road");
+
+        let dir = std::env::temp_dir().join(format!("capitol-chat-{}", std::process::id()));
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let mut terrain = TerrainSource::offline(&fixture).unwrap();
+        let mut sessions: Vec<Session> = [&ada, &bea, &cy]
+            .iter()
+            .enumerate()
+            .map(|(n, who)| {
+                let mut s = Session::start(&server, SessionFile::load(dir.join(format!("s{n}.toml")))).unwrap();
+                s.log_in(&who.email, &who.password);
+                s
+            })
+            .collect();
+        let mut wait = |sessions: &mut Vec<Session>, what: &str, done: &dyn Fn(&[Session]) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !done(sessions) {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                for s in sessions.iter_mut() {
+                    s.update(Instant::now(), &mut terrain);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait(&mut sessions, "all three in the world", &|s| s.iter().all(|s| s.state().local_player().is_some()));
+        let at = |s: &Session| s.state().local_player().map(|p| (p.x, p.y)).unwrap();
+        let (a, b, c) = (at(&sessions[0]), at(&sessions[1]), at(&sessions[2]));
+        let apart = |p: (f64, f64), q: (f64, f64)| (p.0 - q.0).hypot(p.1 - q.1);
+        eprintln!("Ada at {a:?}, Bea {:.1} away, Cy {:.0} away", apart(a, b), apart(a, c));
+        assert!(apart(a, b) < rules::talk::HEARD);
+        assert!(apart(a, c) > rules::talk::HEARD * 4.0);
+
+        // Ada says hello nearby: Bea hears it, and so does Ada, as hers
+        let line = format!("Good morning, {}", bea.name);
+        sessions[0].talk_and_chat().1.draft = line.clone();
+        sessions[0].say(Channel::Local);
+        assert!(sessions[0].talk_and_chat().1.draft.is_empty(), "a send clears the line");
+        let heard = |s: &Session, text: &str| s.talk().lines(Channel::Local).any(|l| l.text == text);
+        wait(&mut sessions, "Bea to hear it", &|s| heard(&s[1], &line) && heard(&s[0], &line));
+        let ada_id = sessions[0].state().me();
+        let got = sessions[1].talk().lines(Channel::Local).next_back().unwrap().clone();
+        assert_eq!((Some(got.from), got.name.as_str()), (ada_id, ada.name.as_str()));
+        assert_eq!(sessions[1].talk().unread(Channel::Local), 1);
+        assert_eq!(sessions[0].talk().unread(Channel::Local), 0, "your own line isn't news");
+        assert_eq!(sessions[0].talk_and_chat().1.in_flight(), 0);
+
+        // A Capitol line reaches Cy, across town; the local one never did
+        let news = format!("Planks at the bazaar {stamp}");
+        sessions[0].talk_and_chat().1.draft = news.clone();
+        sessions[0].say(Channel::Capitol);
+        let shouted = |s: &Session| s.talk().lines(Channel::Capitol).any(|l| l.text == news);
+        wait(&mut sessions, "everyone to hear the Capitol line", &|s| s.iter().all(shouted));
+        assert!(!heard(&sessions[2], &line), "Cy, far off, didn't hear the local line");
+
+        // Talking too fast: the line comes back to the input with the reason
+        let mut said = 2;
+        let refused = loop {
+            sessions[1].talk_and_chat().1.draft = format!("line {said}");
+            sessions[1].say(Channel::Capitol);
+            said += 1;
+            assert!(said < 12, "never refused");
+            if said >= 9 {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while sessions[1].talk_and_chat().1.in_flight() > 0 && Instant::now() < deadline {
+                    sessions[1].update(Instant::now(), &mut terrain);
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if let Some(r) = sessions[1].talk_and_chat().1.refusal(Instant::now()) {
+                    break r.clone();
+                }
+            }
+        };
+        eprintln!("refused: {}", refused.message);
+        assert_eq!(sessions[1].talk_and_chat().1.draft, refused.text, "the refused line is back in the input");
+        for s in &mut sessions {
+            s.log_out();
+        }
+        drop(bots);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

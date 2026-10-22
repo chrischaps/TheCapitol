@@ -172,6 +172,12 @@ impl Log {
         self.book_mut(channel).unread = 0;
     }
 
+    /// The last line heard on `channel` was your own (S1.3): it isn't news.
+    pub fn own(&mut self, channel: Channel) {
+        let book = self.book_mut(channel);
+        book.unread = book.unread.saturating_sub(1);
+    }
+
     /// `from`'s latest local line and when it was heard, while it's kept
     /// for their bubble.
     pub fn latest(&self, from: Uuid) -> Option<(&str, f64)> {
@@ -236,6 +242,18 @@ mod tests {
         assert_eq!(texts[0], "l50");
         assert_eq!(texts[KEPT - 1], "l249");
         assert_eq!(log.lines(Channel::Capitol).count(), 1);
+    }
+
+    #[test]
+    fn your_own_line_isnt_unread() {
+        let mut log = Log::new();
+        log.heard(line(1, Channel::Capitol, "theirs", 0.0));
+        log.heard(line(2, Channel::Capitol, "mine", 1.0));
+        log.own(Channel::Capitol);
+        assert_eq!(log.unread(Channel::Capitol), 1);
+        log.read(Channel::Capitol);
+        log.own(Channel::Capitol);
+        assert_eq!(log.unread(Channel::Capitol), 0);
     }
 
     #[test]

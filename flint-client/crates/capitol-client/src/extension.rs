@@ -177,6 +177,13 @@ pub struct CapitolExtension {
     station: ui::station::StationPanel,
     /// Enter (the `craft` action) was pressed since `ui` last looked.
     craft_key: bool,
+    /// The chat panel (Commons S1.3), and `--chat-sample`: talk on both
+    /// channels, with the crafting and inventory panels open, offline.
+    chat: ui::chat::ChatPanel,
+    chat_sample: Option<(capitol_core::talk::Log, capitol_core::chat::Chat, uuid::Uuid, capitol_core::state::GameState, ui::hints::Hints)>,
+    /// Enter (the `chat` action) was pressed since `ui` last looked: chat,
+    /// unless it's for crafting (`ui::chat::enter_means`).
+    chat_key: bool,
     /// Esc, or a right click on the world, since the last frame: stop
     /// placing (P6.2).
     cancel_placing: bool,
@@ -276,6 +283,9 @@ impl CapitolExtension {
             bazaar_sample: None,
             station: ui::station::StationPanel::default(),
             craft_key: false,
+            chat: ui::chat::ChatPanel::default(),
+            chat_sample: None,
+            chat_key: false,
             cancel_placing: false,
             cursor: (0.0, 0.0),
             right_down: None,
@@ -450,6 +460,28 @@ impl CapitolExtension {
         if on && self.session.is_none() {
             self.gazette_sample = Some(ui::gazette::sample());
             self.gazette.open = true;
+        }
+        self
+    }
+
+    /// Offline, open the chat on a sample of both channels, with the
+    /// crafting and inventory panels open and the hint card up
+    /// (`--chat-sample`, S1.3).
+    pub fn with_chat_sample(mut self, on: bool) -> Self {
+        if on && self.session.is_none() {
+            let state = ui::station::sample();
+            // A fresh tour, so the first card shows, kept out of save/
+            let path = std::env::temp_dir().join("capitol-chat-sample-hints.toml");
+            let _ = std::fs::remove_file(&path);
+            let mut hints = ui::hints::Hints::load(path);
+            // An empty pack, so the tour starts at its first card
+            let empty = capitol_core::state::Container::new(uuid::Uuid::nil(), "inventory", 24, 6, &[]);
+            hints.follow("chat-sample", state.me(), Some(&empty), state.catalog());
+            let (log, chat, me) = ui::chat::sample(Instant::now(), 0.0);
+            self.chat_sample = Some((log, chat, me, state, hints));
+            self.chat.open_typing();
+            self.crafting.open = true;
+            self.inventory.open = true;
         }
         self
     }
@@ -880,6 +912,7 @@ impl PlayerExtension for CapitolExtension {
         self.apply_settings(ctx, now);
         // Taken in `ui`, where the panel knows its recipe.
         self.craft_key |= !self.at_login() && ctx.input.is_action_just_pressed("craft");
+        self.chat_key |= !self.at_login() && ctx.input.is_action_just_pressed("chat");
         let station_key = !self.at_login() && ctx.input.is_action_just_pressed("station");
         let trade_key = !self.at_login() && ctx.input.is_action_just_pressed("trade");
         if let Some(session) = &mut self.session {
@@ -1336,6 +1369,14 @@ impl PlayerExtension for CapitolExtension {
             }
             return true;
         }
+        // While you type, egui has Esc; this is the open chat after a click
+        // on the world
+        if self.chat.open {
+            if key.pressed() {
+                self.chat.close();
+            }
+            return true;
+        }
         false
     }
 
@@ -1407,6 +1448,8 @@ impl PlayerExtension for CapitolExtension {
                     exchange_open: self.exchange.open,
                     market_open: self.market.open,
                     gazette_open: self.gazette.open,
+                    chat_open: self.chat.open,
+                    chat_unread: [capitol_core::protocol::ws::Channel::Local, capitol_core::protocol::ws::Channel::Capitol].map(|c| session.talk().unread(c)).iter().sum(),
                     gazette_news: session
                         .gazette()
                         .unread()
@@ -1439,6 +1482,9 @@ impl PlayerExtension for CapitolExtension {
                 }
                 if clicks.gazette {
                     self.gazette.toggle();
+                }
+                if clicks.chat {
+                    self.chat.toggle();
                 }
                 if clicks.hall {
                     self.shared.visit_hall.store(true, Ordering::Relaxed);
@@ -1494,11 +1540,15 @@ impl PlayerExtension for CapitolExtension {
             }
             if !at_login {
                 let now = Instant::now();
-                // Enter crafts at the open station, else on the crafting panel.
+                // Enter crafts at the open station, else on the crafting
+                // panel, when either is set to a recipe; otherwise it talks.
                 let enter = std::mem::take(&mut self.craft_key);
                 let at_station = self.station.recipe(session.state()).is_some();
-                let key =
-                    (enter && !at_station && self.crafting.open).then_some(CraftAction::Craft);
+                let ready = self.crafting.open && self.crafting.recipe(session.state()).is_some();
+                if std::mem::take(&mut self.chat_key) && ui::chat::enter_means(ready, at_station) == ui::chat::Enter::Chat {
+                    self.chat.open_typing();
+                }
+                let key = (enter && !at_station && ready).then_some(CraftAction::Craft);
                 let station_key = (enter && at_station).then_some(StationAction::Craft);
                 let view = ui::crafting::View {
                     state: session.state(),
@@ -1517,6 +1567,19 @@ impl PlayerExtension for CapitolExtension {
                         }
                     }
                     Some(CraftAction::Cancel) => session.cancel_craft(),
+                    None => {}
+                }
+                // Talk (S1.3): beside the crafting panel if it reaches down
+                // The inventory's rect is last frame's: it's drawn after.
+                let before = self.station.rect.or(self.inventory.rect);
+                let (clock, me) = (session.talk_time(now), session.state().me());
+                let view = ui::chat::View { now, clock, me, beside: self.crafting.rect, before, cards: true };
+                let (log, chat) = session.talk_and_chat();
+                match self.chat.show(ctx, log, chat, &view) {
+                    Some(ui::chat::Action::Say(channel)) => session.say(channel),
+                    Some(ui::chat::Action::Card { id, name, citizen }) => {
+                        session.open_card(capitol_core::card::Who::Id(id), Some(capitol_core::card::Hint { name, citizen }))
+                    }
                     None => {}
                 }
                 let state = session.state();
@@ -1673,7 +1736,7 @@ impl PlayerExtension for CapitolExtension {
                 } else {
                     // The inventory's and the station's rects are last frame's: they're drawn after.
                     let panels: Vec<_> =
-                        [self.inventory.rect, self.crafting.rect, self.exchange.rect, self.market.rect, self.impound.rect, self.shop.rect, self.station.rect, self.card.rect]
+                        [self.inventory.rect, self.crafting.rect, self.exchange.rect, self.market.rect, self.impound.rect, self.shop.rect, self.station.rect, self.card.rect, self.chat.rect]
                             .into_iter()
                             .flatten()
                             .collect();
@@ -1693,7 +1756,8 @@ impl PlayerExtension for CapitolExtension {
                         .claim_refused(now)
                         .or_else(|| session.pay_refused(now)),
                 };
-                match self.plot_panel.show(ctx, &view, self.crafting.rect) {
+                let beside = self.chat.rect.filter(|_| self.chat.open).or(self.crafting.rect);
+                match self.plot_panel.show(ctx, &view, beside) {
                     Some(ui::plot::Action::Claim(id)) => session.claim_plot(id),
                     Some(ui::plot::Action::PayTax(id, amount)) => session.pay_tax(id, amount),
                     Some(ui::plot::Action::Close) => session.close_plot(),
@@ -1839,7 +1903,8 @@ impl PlayerExtension for CapitolExtension {
                 ui::inscription(ctx, &self.shared, &self.terrain.status());
             }
         } else if !at_login {
-            let clear_of = self.plot_panel.rect.or(self.market.rect).or(self.crafting.rect);
+            let chat = self.chat.rect.filter(|_| self.chat.open);
+            let clear_of = self.plot_panel.rect.or(self.market.rect).or(chat).or(self.crafting.rect);
             ui::controls(ctx, &self.terrain.status(), clear_of);
         }
         if self.icon_sheet {
@@ -1898,6 +1963,21 @@ impl PlayerExtension for CapitolExtension {
                 self.station.tab = tab;
             }
             self.inventory.show(ctx, &mut self.icons, state.catalog(), state.inventory(), None, 0.0);
+        }
+        if let Some((log, chat, me, state, hints)) = &mut self.chat_sample {
+            let phase = capitol_core::craft::Phase::Idle;
+            let view = ui::crafting::View { state, phase: &phase, refused: None };
+            self.crafting.show(ctx, &mut self.icons, &view, 0.0);
+            // The sample's clock started at 0 as the run did
+            let clock = ctx.input(|i| i.time);
+            let (me, before) = (Some(*me), self.inventory.rect);
+            let view = ui::chat::View { now: Instant::now(), clock, me, beside: self.crafting.rect, before, cards: false };
+            if let Some(ui::chat::Action::Say(channel)) = self.chat.show(ctx, log, chat, &view) {
+                chat.send(channel);
+            }
+            self.inventory.show(ctx, &mut self.icons, state.catalog(), state.inventory(), None, 0.0);
+            let panels: Vec<_> = [self.inventory.rect, self.crafting.rect, self.chat.rect].into_iter().flatten().collect();
+            hints.show(ctx, Instant::now(), &panels);
         }
         if let Some(reader) = &mut self.gazette_sample {
             self.gazette.reading(reader);

@@ -122,6 +122,14 @@ bindings = [{ type = "key", code = "F8" }]
 kind = "button"
 bindings = [{ type = "key", code = "Enter" }]
 
+# Talk (Commons S1.3): open the chat with its input focused. The same key
+# as `craft`: the extension decides which it is. With the crafting panel or
+# a station set to a recipe it crafts, otherwise it opens the chat. Typing in the
+# chat, egui has the keys, so Enter sends there and never reaches either.
+[actions.chat]
+kind = "button"
+bindings = [{ type = "key", code = "Enter" }, { type = "key", code = "NumpadEnter" }]
+
 # Open the nearest station, walking to it if it's out of reach (P6.3).
 # The same as clicking it, and a key captures can press.
 [actions.station]

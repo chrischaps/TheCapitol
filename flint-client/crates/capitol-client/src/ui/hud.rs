@@ -130,6 +130,10 @@ pub struct HeaderView<'a> {
     pub gazette_open: bool,
     /// An edition is out you haven't read: its headline, for the hint.
     pub gazette_news: Option<String>,
+    /// The same for the chat panel (Commons S1.3).
+    pub chat_open: bool,
+    /// Lines said on either channel you haven't read.
+    pub chat_unread: usize,
     /// The same for the shortcut overlay (P8.3).
     pub help_open: bool,
     /// The same for the settings panel.
@@ -157,6 +161,7 @@ pub struct HeaderClicks {
     pub exchange: bool,
     pub market: bool,
     pub gazette: bool,
+    pub chat: bool,
     /// The hall hint: go to the hall.
     pub hall: bool,
     /// The impound's chip: open or close its panel.
@@ -240,6 +245,7 @@ pub fn header(
                             .on_hover_text("The Capitol Gazette (G)")
                             .clicked(),
                     };
+                    clicks.chat = chat_chip(ui, view.chat_open, view.chat_unread).clicked();
                     clicks.market = theme::toggle_chip(ui, "Market", view.market_open)
                         .on_hover_text("The market (M)")
                         .clicked();
@@ -405,6 +411,29 @@ pub fn impound_chip(ui: &mut egui::Ui, stacks: usize, open: bool) -> egui::Respo
 
 /// A new edition of the Gazette is out (E3.9): a gold-edged chip that
 /// breathes, with the headline on hover. A click opens it.
+/// The chat's chip (Commons S1.3): lit while it's open, with a gold count
+/// of the lines you haven't read.
+fn chat_chip(ui: &mut egui::Ui, open: bool, unread: usize) -> egui::Response {
+    let hover = match unread {
+        0 => "Talk (Enter)".to_owned(),
+        1 => "Talk (Enter): a line you haven't read".to_owned(),
+        n => format!("Talk (Enter): {n} lines you haven't read"),
+    };
+    let chip = theme::toggle_chip(ui, "Chat", open).on_hover_text(hover);
+    if unread > 0 && !open {
+        let text = if unread > 99 { "99+".to_owned() } else { unread.to_string() };
+        let font = theme::strong(size::TINY);
+        let galley = ui.painter().layout_no_wrap(text, font, theme::BG_DARK);
+        let r = (galley.size().y * 0.5 + 2.0).max(7.0);
+        let w = (galley.size().x * 0.5 + 4.0).max(r);
+        let c = chip.rect.right_top() + egui::vec2(-2.0, 2.0);
+        let badge = egui::Rect::from_center_size(c, egui::vec2(w * 2.0, r * 2.0));
+        ui.painter().rect_filled(badge, r, theme::GOLD);
+        ui.painter().galley(badge.center() - galley.size() * 0.5, galley, theme::BG_DARK);
+    }
+    chip
+}
+
 fn news_chip(ui: &mut egui::Ui, headline: &str) -> egui::Response {
     let t = ui.input(|i| i.time) as f32;
     let k = 0.5 + 0.5 * (t * 2.2).sin();
