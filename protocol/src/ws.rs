@@ -17,6 +17,7 @@ use crate::rest::{
 };
 use crate::rules::stacking::Units;
 use crate::tunables::Fees;
+use crate::tutorial::{Step, Steps};
 
 /// Client to server.
 ///
@@ -732,6 +733,21 @@ pub enum ServerMessage {
         made: i32,
         cap: i32,
     },
+    // The road in (#438): the tutorial
+    /// Where you are on the road in: sent after `auth_ok`, and to each of
+    /// your sockets when you hide the card or bring it back (plan D2)
+    #[serde(rename = "tutorial")]
+    Tutorial {
+        /// The steps done, by name, in the tour's order
+        done: Steps,
+        /// The card is hidden for now, on every device
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dismissed: bool,
+    },
+    /// You did `step` (#439), to each of your sockets. `done` is every step
+    /// done now; when it holds them all, the tour is finished.
+    #[serde(rename = "tutorial_step")]
+    TutorialStep { step: Step, done: Steps },
 }
 
 /// What a [`ServerMessage::GuildNotice`] tells you.
@@ -827,6 +843,8 @@ impl ServerMessage {
             ServerMessage::WageTaken { .. } => "wage_taken",
             ServerMessage::WageShiftEnded { .. } => "wage_shift_ended",
             ServerMessage::WagePaid { .. } => "wage_paid",
+            ServerMessage::Tutorial { .. } => "tutorial",
+            ServerMessage::TutorialStep { .. } => "tutorial_step",
         }
     }
 }

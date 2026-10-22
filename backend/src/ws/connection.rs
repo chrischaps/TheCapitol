@@ -152,6 +152,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let _ = sender
         .send(Message::Text(serde_json::to_string(&auth_ok).unwrap().into()))
         .await;
+    // Where they are on the road in (#438), straight after
+    match crate::engine::tutorial::progress(&state.db, player_id).await {
+        Ok(progress) => {
+            let tutorial = crate::engine::tutorial::message(progress);
+            let _ = sender.send(Message::Text(serde_json::to_string(&tutorial).unwrap().into())).await;
+        }
+        Err(e) => tracing::error!("Failed to read {}'s tutorial: {:?}", player_id, e),
+    }
     // Signed in: from here, one that ends without saying why just went
     counted.ends(SocketEnd::Vanished);
 
@@ -1047,6 +1055,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         }
                     }
                     // Their guild changed, or they joined or left one (S4.1)
+                    Ok(GameEvent::Tutorial { player_id: to, message }) => {
+                        if to == player_id {
+                            let _ = sender.send(Message::Text(serde_json::to_string(&message).unwrap().into())).await;
+                        }
+                    }
                     Ok(GameEvent::GuildChanged { guild_id, players }) => {
                         if players.contains(&player_id) {
                             let msg = ServerMessage::GuildChanged { guild_id };

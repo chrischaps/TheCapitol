@@ -80,6 +80,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         (name = "Account", description = "API keys for bots"),
         (name = "Health", description = "Server health checks"),
         (name = "Player", description = "Player state and movement"),
+        (name = "Tutorial", description = "The road in: where you are on the tutorial"),
         (name = "Letters", description = "Letters that wait for someone who's away, for a Strand's postage"),
         (name = "Guilds", description = "The guild registry: founding, roles and the roster"),
         (name = "Wages", description = "Piece-rate work at someone else's station or on their lot, the pay escrowed up front"),
@@ -128,6 +129,9 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::letters::get_letters,
         crate::routes::letters::read,
         crate::routes::letters::drop_letter,
+        // The road in
+        crate::routes::tutorial::get_tutorial,
+        crate::routes::tutorial::set_dismissed,
         // Guilds
         crate::routes::guilds::list,
         crate::routes::guilds::found,
@@ -232,6 +236,8 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         PlayerMeResponse,
         PlayerCard,
         MutesResponse,
+        capitol_protocol::tutorial::TutorialProgress,
+        capitol_protocol::tutorial::SetDismissed,
         MutedPlayer,
         // Guilds
         FoundGuild,

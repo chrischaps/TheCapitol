@@ -243,6 +243,7 @@ fn test_for(message: &M) -> fn() {
         M::CommissionDelivered { .. } => commission_notices_are_reported,
         M::CommissionExpired { .. } => commission_notices_are_reported,
         M::GuildChanged { .. } | M::GuildNotice { .. } => guild_messages_are_reported,
+        M::Tutorial { .. } | M::TutorialStep { .. } => the_road_in_follows_the_server,
         M::WageOffered { .. }
         | M::WageUpdated { .. }
         | M::WageClosed { .. }
@@ -268,7 +269,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 73, "one fixture per ServerMessage variant");
+    assert_eq!(count, 75, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1480,6 +1481,25 @@ fn wages_wait_for_the_work_page() {
         let message: M = serde_json::from_str(&json).expect("it parses");
         assert_eq!(state.apply_ws(&message), vec![], "{name}");
     }
+}
+
+#[test]
+fn the_road_in_follows_the_server() {
+    use capitol_protocol::tutorial::{Step, Steps};
+    let mut state = connected();
+    assert_eq!(state.tutorial(), None, "nothing until the server says");
+    let done = Steps::from_iter([Step::Walk]);
+    assert!(state.apply_ws(&M::Tutorial { done, dismissed: true }).is_empty());
+    let tour = state.tutorial().unwrap();
+    assert_eq!((tour.done, tour.dismissed), (done, true));
+
+    let done = done.with(Step::GatherGrass);
+    let events = state.apply_ws(&M::TutorialStep { step: Step::GatherGrass, done });
+    assert_eq!(events, vec![StateEvent::TutorialStep { step: Step::GatherGrass }]);
+    let tour = state.tutorial().unwrap();
+    assert_eq!(tour.done, done);
+    assert!(tour.dismissed, "a step doesn't bring the card back");
+    assert_eq!(tour.done.current(), Some(Step::OpenPack));
 }
 
 #[test]

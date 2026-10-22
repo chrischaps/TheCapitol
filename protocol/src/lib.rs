@@ -20,6 +20,8 @@
 //!   client quotes (D6.1)
 //! - [`watch`]: the rules that warn when the books drift, wealth pools, a
 //!   price strays, the tax doesn't bite or the tick runs over (D2.5)
+//! - [`tutorial`]: the road in's steps and chapters, and where a player is
+//!   on it (#438)
 //!
 //! The `backend` feature adds the server-only derives (utoipa schemas, sqlx rows).
 //! Clients leave it off.
@@ -33,5 +35,6 @@ pub mod rest;
 pub mod rules;
 pub mod terrain;
 pub mod tunables;
+pub mod tutorial;
 pub mod watch;
 pub mod ws;

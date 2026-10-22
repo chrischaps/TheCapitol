@@ -282,6 +282,9 @@ pub enum GameEvent {
     /// everyone, for the board's Work page; `Some` to that player alone, as
     /// a worker's pay as it's made.
     Wages { to: Option<Uuid>, message: capitol_protocol::ws::ServerMessage },
+    /// The road in (#438): `message` (`tutorial` or `tutorial_step`) to each
+    /// of `player_id`'s sockets
+    Tutorial { player_id: Uuid, message: capitol_protocol::ws::ServerMessage },
     // E3.3: the market API
     /// `player_id`'s order is on the book
     OrderPlaced { player_id: Uuid, order: MarketOrder },

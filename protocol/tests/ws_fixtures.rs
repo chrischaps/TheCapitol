@@ -86,6 +86,8 @@ const SERVER_TYPES: &[&str] = &[
     "wage_taken",
     "wage_shift_ended",
     "wage_paid",
+    "tutorial",
+    "tutorial_step",
 ];
 
 const CLIENT_TYPES: &[&str] = &[

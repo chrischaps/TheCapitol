@@ -275,6 +275,9 @@ pub enum StateEvent {
     /// Commons S4.1): read `GET /player/guild` again. The guild panel is
     /// S4.4's (#400).
     GuildChanged { guild_id: Uuid },
+    /// You did a step of the road in (`tutorial_step`, #438). The tour
+    /// itself is [`GameState::tutorial`].
+    TutorialStep { step: capitol_protocol::tutorial::Step },
     /// Something in a guild that names you (`guild_notice`, S4.1): live, or
     /// as you come back.
     GuildNotice {
@@ -450,6 +453,9 @@ pub struct GameState {
     strands: Option<i64>,
     /// Your account's subscription, from `auth_ok` and `/player/me` (E4.1).
     subscription: Option<Subscription>,
+    /// Where you are on the road in, from `tutorial` and `tutorial_step`
+    /// (#438). `None` until the server says.
+    tutorial: Option<capitol_protocol::tutorial::TutorialProgress>,
     /// The fees the server charges now, from `auth_ok` and `fees_changed`
     /// (D6.1). The defaults until it says.
     fees: Fees,
@@ -503,6 +509,7 @@ impl GameState {
             recipes: Vec::new(),
             strands: None,
             subscription: None,
+            tutorial: None,
             fees: Fees::default(),
             is_admin: false,
             presence: None,
@@ -903,6 +910,14 @@ impl GameState {
                 first_line: first_line.clone(),
             }),
             M::GuildChanged { guild_id } => out.push(StateEvent::GuildChanged { guild_id: *guild_id }),
+            // The road in (#438): the server keeps the tour and judges it
+            M::Tutorial { done, dismissed } => {
+                self.tutorial = Some(capitol_protocol::tutorial::TutorialProgress { done: *done, dismissed: *dismissed });
+            }
+            M::TutorialStep { step, done } => {
+                self.tutorial.get_or_insert_with(Default::default).done = *done;
+                out.push(StateEvent::TutorialStep { step: *step });
+            }
             M::GuildNotice { guild_id, guild, tag, kind, who, name, citizen } => out.push(StateEvent::GuildNotice {
                 guild_id: *guild_id,
                 guild: guild.clone(),
@@ -1497,6 +1512,11 @@ impl GameState {
     /// admin overlay. The admin routes check the token again whatever this says.
     pub fn is_admin(&self) -> bool {
         self.is_admin
+    }
+
+    /// Where you are on the road in (#438). `None` until the server says.
+    pub fn tutorial(&self) -> Option<capitol_protocol::tutorial::TutorialProgress> {
+        self.tutorial
     }
 
     /// Your account's subscription, as of now. `None` until the server says.

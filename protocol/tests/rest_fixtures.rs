@@ -53,6 +53,8 @@
 //! a shift gathering on a named offer, and an open forge;
 //! `offer_wages.json` is `POST /wages`, and `shift_ended.json` is
 //! `DELETE /wages/{id}/shift`, the employer stopping it.
+//! `fixtures/rest/tutorial.json` is `GET /tutorial` (#438): the road in
+//! walked out of order, out to the hall, the card showing.
 
 use std::fs;
 use std::path::Path;
@@ -503,4 +505,16 @@ fn wages_round_trip_with_their_work_and_shift() {
     assert_eq!(ended.shift.end, Some(ShiftEnd::Employer));
     assert_eq!(ended.paid, 48);
     assert_eq!(serde_json::to_string(&ended).unwrap(), json);
+}
+
+#[test]
+fn the_road_in_round_trips_in_the_tours_order() {
+    use capitol_protocol::tutorial::{Chapter, Step, TutorialProgress};
+    let json = fixture("tutorial.json");
+    let progress: TutorialProgress = serde_json::from_str(&json).unwrap();
+    assert!(progress.done.chapter_done(Chapter::Arrival));
+    assert!(progress.done.has(Step::Deposit), "done out of order still counts");
+    assert_eq!(progress.done.current(), Some(Step::SeeRuralLot));
+    assert!(!progress.dismissed && !progress.finished());
+    assert_eq!(serde_json::to_string(&progress).unwrap(), json);
 }

@@ -149,6 +149,11 @@ pub(crate) async fn create_account(
             .execute(&mut *tx)
             .await?;
     }
+    // At the start of the road in (#438)
+    sqlx::query("INSERT INTO tutorial_progress (player_id) VALUES ($1)")
+        .bind(player_id)
+        .execute(&mut *tx)
+        .await?;
     Ok((account_id, player_id))
 }
 

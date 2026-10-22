@@ -12,6 +12,7 @@ pub mod guilds;
 pub mod health;
 pub mod inventory;
 pub mod letters;
+pub mod tutorial;
 pub mod wages;
 pub mod market;
 pub mod player;

@@ -48,6 +48,7 @@ pub mod tunables;
 pub mod units;
 pub mod watches;
 pub mod trading;
+pub mod tutorial;
 pub mod wages;
 pub mod zone_sync;
 

@@ -143,6 +143,29 @@ The tutorial runs in a live market that may be empty. A step that needs someone 
   - `tutorial_progress`, seeded empty for every existing player;
   - the state on connect, `tutorial_step` and `tutorial_finished`;
   - `GET /tutorial` and `PUT /tutorial/dismissed`.
+
+  *As built:*
+  - **The steps.** `protocol::tutorial` has 30 steps in 6 chapters (`Step::ALL`, `Chapter::ALL`).
+    - A step's number is its bit in `Steps` and is never reused; a new step takes the next free bit.
+    - On the wire `Steps` is a list of names in the tour's order, and an unknown name is passed over, so a client a step behind still reads the rest.
+    - `Step::judge` gives `Server`, `Client` or `Waivable`. Four steps are `Client`: `open_pack`, `read_zone_card`, `open_office` and `read_tax`. One is `Waivable`: `collect_box` (D10).
+    - `TutorialProgress { done, dismissed }`, with `finished()` true once every step is done.
+  - **The table.** `tutorial_progress` (`20261217_001_tutorial_progress.sql`) has `steps` (BIGINT bits), `dismissed`, `started_at` and `finished_at`.
+    - The migration seeds an empty row for every player, and `create_account` makes the row for new accounts.
+    - A player with no row (a test's) reads as a fresh tour.
+  - **The store.** `engine::tutorial`:
+    - `progress`.
+    - `mark(player, step)`: one upsert. It returns the progress the first time and `None` after, and sets `finished_at` with the last step. #439 calls it.
+    - `set_dismissed`, which tells every socket through `GameEvent::Tutorial`.
+  - **On the wire.**
+    - `tutorial { done, dismissed }` follows `auth_ok` on every socket.
+    - `tutorial_step { step, done }` is defined for #439 to send.
+    - `GET /tutorial` and `PUT /tutorial/dismissed { dismissed }`, tagged Tutorial in the OpenAPI spec.
+  - **In Flint.** `GameState::tutorial()` keeps the tour, and `StateEvent::TutorialStep` is there for #441's tick.
+  - **Differs from the issue:**
+    - The state is a `tutorial` message after `auth_ok`, not a field on it, which would have touched every place that builds `auth_ok`.
+    - **There's no `tutorial_finished`.** The `tutorial_step` whose `done` holds every step is the finish.
+    - Nothing is "skipped", only `dismissed` (D2).
 - **O0.2 The server judges each step** (#439, M): `engine::tutorial::saw`, one line where each action succeeds, and a test per step.
 - **O0.3 The deed grant** (#440, M):
   - `deed_grants`, and `claim()` with `use_grant`;
