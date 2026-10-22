@@ -181,7 +181,7 @@ pub(crate) mod tests {
             let m = &world.measured.metrics;
             let pct = |v: Option<f64>| 100.0 * v.unwrap_or(f64::NAN);
             eprintln!(
-                "seed {seed}: {} lots, area {:.0}, {:.0} × {:.0}, {:.1}% take 6, {:.0}% take 8, stations median {:.0} mean {:.2},                  lots {:.0}%, green {:.0}%, gap {:.1}%",
+                "seed {seed}: {} lots, area {:.0}, {:.0} × {:.0}, {:.1}% take 6, {:.0}% take 8, stations median {:.0} mean {:.2}, lots {:.0}%, green {:.0}%, gap {:.1}%",
                 m.lots,
                 m.lot_area_median.unwrap_or(f64::NAN),
                 m.lot_width_median.unwrap_or(f64::NAN),
