@@ -82,7 +82,14 @@ pub async fn list_plots(
         sql.push_str(&format!(" AND p.owner_id = '{}'", owner));
     }
 
-    sql.push_str(&format!(" ORDER BY p.zone_id, p.grid_y, p.grid_x LIMIT {} OFFSET {}", limit, offset));
+    match (query.near_x, query.near_y) {
+        // Numbers, so formatting them in is safe
+        (Some(x), Some(y)) if x.is_finite() && y.is_finite() => sql.push_str(&format!(
+            " ORDER BY (p.world_x - ({x})) * (p.world_x - ({x})) + (p.world_y - ({y})) * (p.world_y - ({y})), p.id"
+        )),
+        _ => sql.push_str(" ORDER BY p.zone_id, p.grid_y, p.grid_x"),
+    }
+    sql.push_str(&format!(" LIMIT {} OFFSET {}", limit, offset));
 
     // Execute query
     let rows: Vec<PlotWithJoins> = sqlx::query_as(&sql)

@@ -1406,12 +1406,14 @@ impl Bot {
         }
     }
 
-    /// Up to 100 unclaimed plots in `zone`.
-    pub fn unclaimed_plots(&mut self, zone: &str) -> Result<Vec<PlotInfo>, BotError> {
+    /// Up to 100 unclaimed plots in `zone`, the nearest `(x, y)`.
+    pub fn unclaimed_plots(&mut self, zone: &str, (x, y): (f64, f64)) -> Result<Vec<PlotInfo>, BotError> {
         let request = RestRequest::ListPlots(ListPlotsQuery {
             zone: Some(zone.to_string()),
             unclaimed: Some(true),
             limit: Some(100),
+            near_x: Some(x),
+            near_y: Some(y),
             ..Default::default()
         });
         match self.call("listing plots", request)? {

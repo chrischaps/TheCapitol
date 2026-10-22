@@ -1972,6 +1972,12 @@ pub struct ListPlotsQuery {
     /// Pagination offset
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<i32>,
+    /// With `near_y`: nearest this point first, not in grid order, so a page
+    /// of a zone's lots is the ones round a spot, not one corner's (#419)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_y: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -250,6 +250,22 @@ impl Role {
         }
     }
 
+    /// How many stations the role puts on its lot, so the lot it buys has
+    /// the room (#419). The workbench stands off the plot. A plank crafter
+    /// needs the sawbench; an ingot crafter the forge and the kiln for its
+    /// charcoal; a tool crafter those and the anvil; a builder the kiln,
+    /// forge, sawbench and anvil (#305), its chest last, where it fits. A
+    /// role with no stations never claims, so its 1 is only a floor.
+    pub fn room_wanted(&self) -> i32 {
+        match self {
+            Role::Crafter(Craft::Planks) => 1,
+            Role::Crafter(Craft::Ingots) => 2,
+            Role::Crafter(Craft::Tools) => 3,
+            Role::Builder => 4,
+            Role::Gatherer(_) | Role::Merchant => 1,
+        }
+    }
+
     /// Whether the role earns by banking fiber at the exchange.
     pub fn banks(&self) -> bool {
         matches!(self, Role::Gatherer(Gather::Fiber) | Role::Merchant)

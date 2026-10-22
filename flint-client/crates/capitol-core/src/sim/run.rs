@@ -54,9 +54,6 @@ const DEFAULT_DEED: i64 = 250;
 const PLOT_ZONES: [&str; 2] = ["rural", "suburban"];
 /// The most spots on its lot a bot walks to before it gives up on placing.
 const PLACE_TRIES: usize = 8;
-/// The stations a builder's lot should take: the kiln, forge, sawbench and
-/// anvil (#305). A lot with less room is bought only when none has more.
-const ROOM_WANTED: i32 = 4;
 /// Walks out to look for a resource before the gather gives up.
 const MAX_EXPLORES: usize = 6;
 /// Spots an explore picks before it gives up on ones it has no way to.
@@ -688,7 +685,7 @@ impl SimBot {
         if strands < fund(self.deed_cost) {
             return Ok(());
         }
-        self.claim_near(&[persona.home.zone.as_str()], persona.home.spot(), |cost| fund(cost) <= strands)
+        self.claim_near(&[persona.home.zone.as_str()], persona.home.spot(), 1, false, |cost| fund(cost) <= strands)
     }
 
     /// Waits for the server after a drop: until `deadline`, or for a citizen
@@ -1243,39 +1240,63 @@ impl SimBot {
     }
 
     /// Buys the nearest unclaimed plot it can afford with its [`FLOAT`] left
-    /// over (#294): for a citizen, near its home (C1.2), so the lot it builds
-    /// on is the one it lives on.
+    /// over (#294) and room for its role's stations (#419): for a citizen,
+    /// near its home (C1.2), so the lot it builds on is the one it lives on.
+    /// A citizen whose home zone has such a lot it can't afford yet saves for
+    /// it rather than buying elsewhere; only a home zone with no lot that
+    /// takes its stations sends it to the others.
     fn claim(&mut self) -> Result<(), BotError> {
         let strands = self.bot.state().strands().unwrap_or(0) - FLOAT;
+        let wanted = self.role.room_wanted();
         match self.persona.as_ref().map(|p| p.home) {
             Some(home) => {
                 let mut zones = vec![home.zone.as_str()];
                 zones.extend(PLOT_ZONES.iter().filter(|z| **z != home.zone.as_str()));
-                self.claim_near(&zones, home.spot(), |cost| cost <= strands)
+                self.claim_near(&zones, home.spot(), wanted, true, |cost| cost <= strands)
             }
             None => {
                 let here = self.bot.position();
-                self.claim_near(&PLOT_ZONES, here, |cost| cost <= strands)
+                self.claim_near(&PLOT_ZONES, here, wanted, false, |cost| cost <= strands)
             }
         }
     }
 
     /// Buys the unclaimed plot nearest `(x, y)` whose deed it can `afford`,
-    /// from the first of `zones` that has one with [`ROOM_WANTED`], or failing
-    /// that the first with any (#305).
-    fn claim_near(&mut self, zones: &[&str], (x, y): (f64, f64), afford: impl Fn(i64) -> bool) -> Result<(), BotError> {
+    /// from the first of `zones` that has one with room for `wanted`
+    /// stations, or failing that the first with any (#305). The deed it
+    /// saves for is the first zone's (#419). With `wait_for_first`, a first
+    /// zone that has a lot with the room, but none it can afford, is waited
+    /// for: it buys nothing.
+    fn claim_near(
+        &mut self,
+        zones: &[&str],
+        (x, y): (f64, f64),
+        wanted: i32,
+        wait_for_first: bool,
+        afford: impl Fn(i64) -> bool,
+    ) -> Result<(), BotError> {
         let strands = self.bot.state().strands().unwrap_or(0);
         let mut listed: Vec<Vec<capitol_protocol::rest::PlotInfo>> = Vec::new();
-        for &zone in zones {
-            let mut plots = self.bot.unclaimed_plots(zone)?;
+        for (i, &zone) in zones.iter().enumerate() {
+            let mut plots = self.bot.unclaimed_plots(zone, (x, y))?;
             plots.retain(|p| p.deed_cost.is_some());
-            if let Some(cost) = plots.iter().filter_map(|p| p.deed_cost).min() {
-                self.deed_cost = cost as i64;
+            let roomy = || plots.iter().filter(|p| lot::takes(p, wanted));
+            if i == 0 {
+                if let Some(cost) = roomy().filter_map(|p| p.deed_cost).min() {
+                    self.deed_cost = cost as i64;
+                }
+                let affordable = roomy().any(|p| p.deed_cost.is_some_and(|c| afford(c as i64)));
+                if wait_for_first && roomy().next().is_some() && !affordable {
+                    return Err(BotError::Failed(format!(
+                        "saving for a lot in {zone}: {} Strands, holding {strands}",
+                        self.deed_cost
+                    )));
+                }
             }
             plots.retain(|p| p.deed_cost.is_some_and(|c| afford(c as i64)));
             listed.push(plots);
         }
-        for wanted in [ROOM_WANTED, 1] {
+        for wanted in [wanted, 1] {
             for plots in &listed {
                 let mut plots: Vec<_> = plots.iter().filter(|p| lot::takes(p, wanted)).collect();
                 plots.sort_by(|a, b| {
