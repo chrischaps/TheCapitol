@@ -198,6 +198,7 @@ pub fn ws_scope(message: &ClientMessage) -> ApiKeyScope {
         // A `read` key may ask, but `engine::presence` refuses it: it only watches.
         ClientMessage::ClaimPresence => ApiKeyScope::Read,
         ClientMessage::Move { .. }
+        | ClientMessage::Steer { .. }
         | ClientMessage::Extract { .. }
         | ClientMessage::CancelExtraction
         | ClientMessage::Craft { .. }
@@ -440,6 +441,8 @@ mod tests {
         assert!(!read.allows(ws_scope(&ClientMessage::TradeAccept)));
         let play = Scopes::of(&[Play]);
         assert!(play.allows(ws_scope(&ClientMessage::Move { x: 1.0, y: 2.0 })));
+        assert!(play.allows(ws_scope(&ClientMessage::Steer { heading: 0, throttle: 10, at: None })));
+        assert!(!read.allows(ws_scope(&ClientMessage::Steer { heading: 0, throttle: 0, at: None })));
         assert!(!play.allows(ws_scope(&ClientMessage::TradeAccept)));
     }
 

@@ -342,6 +342,7 @@ mod tests {
         }
         for driving in [
             ClientMessage::Move { x: 1.0, y: 2.0 },
+            ClientMessage::Steer { heading: 0, throttle: 10, at: None },
             ClientMessage::CancelCrafting,
             ClientMessage::TradeCancel,
             ClientMessage::CloseStation,

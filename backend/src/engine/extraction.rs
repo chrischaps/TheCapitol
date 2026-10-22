@@ -277,6 +277,7 @@ pub fn start_extraction(
     // Stop any movement
     player.dest_x = None;
     player.dest_y = None;
+    player.steer = None;
 
     // Start extraction
     let duration = gather_duration(resource_type, tool.as_ref());
@@ -672,6 +673,7 @@ mod tests {
             current_zone: None,
             action_state: ActionState::Idle,
             citizen: false,
+            steer: None,
         }
     }
 

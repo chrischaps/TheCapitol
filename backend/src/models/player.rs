@@ -56,6 +56,35 @@ pub struct PlayerState {
     /// A citizen's, not a person's (C0.1): marked to everyone who sees them
     #[serde(default)]
     pub citizen: bool,
+    /// Walking on a heading (controls T0.2), instead of to `dest_x`/`dest_y`.
+    /// Never saved: a reload stands still.
+    #[serde(skip)]
+    pub steer: Option<Steering>,
+}
+
+/// A player walking on a heading, from `steer`s (controls T0.2,
+/// `capitol_protocol::rules::steer`). The waypoints are walked first, then
+/// the heading; a throttle of 0 is a stop, which clears once they're walked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Steering {
+    /// The heading's unit vector (`rules::steer::direction`)
+    pub dir: (f64, f64),
+    /// Tenths of the walking speed, 10 at most
+    pub throttle: u8,
+    /// Corners and the stop point still to reach, oldest first: 8 at most
+    pub waypoints: std::collections::VecDeque<Waypoint>,
+    /// Ticks until it lapses unless a steer renews it
+    pub lease_ticks: u16,
+}
+
+/// A point a steering player walks to before going on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Waypoint {
+    pub x: f64,
+    pub y: f64,
+    /// The throttle it's walked at: the one the client was walking when it
+    /// marked the point, so the server's copy of the walk keeps its pace
+    pub throttle: u8,
 }
 
 impl From<Player> for PlayerState {
@@ -74,6 +103,7 @@ impl From<Player> for PlayerState {
             action_state: ActionState::Idle,
             // `load_player` reads it from the account
             citizen: false,
+            steer: None,
         }
     }
 }

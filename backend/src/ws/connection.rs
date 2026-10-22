@@ -348,6 +348,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         });
                                     }
                                 }
+                                // Walk on a heading (T0.2): the tick checks `at` against where
+                                // the player is
+                                ClientMessage::Steer { heading, throttle, at } => {
+                                    state.game.write().await.queue_command(crate::engine::Command::Steer {
+                                        player_id,
+                                        heading,
+                                        throttle,
+                                        at: at.map(|[x, y]| (x, y)),
+                                    });
+                                }
                                 ClientMessage::Extract { node_id } => {
                                     if let Ok(node_uuid) = Uuid::parse_str(&node_id) {
                                         // Grass on someone's lot is theirs (#102)

@@ -33,6 +33,18 @@ pub enum ClientMessage {
     Subscribe { channel: String },
     #[serde(rename = "move")]
     Move { x: f64, y: f64 },
+    /// Walk on a heading (controls T0.2, [`crate::rules::steer`]): `heading`
+    /// a fraction of a turn (0 east, a quarter turn south), `throttle` in
+    /// tenths, and `at` a waypoint reached first. A stop is throttle 0 with
+    /// `at` where the client stopped. It lapses unless renewed, clears a
+    /// `move`'s destination, and is never saved.
+    #[serde(rename = "steer")]
+    Steer {
+        heading: u16,
+        throttle: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<[f64; 2]>,
+    },
     #[serde(rename = "extract")]
     Extract { node_id: String },
     #[serde(rename = "cancel_extraction")]
@@ -151,6 +163,7 @@ impl ClientMessage {
             ClientMessage::Auth { .. } => "auth",
             ClientMessage::Subscribe { .. } => "subscribe",
             ClientMessage::Move { .. } => "move",
+            ClientMessage::Steer { .. } => "steer",
             ClientMessage::Extract { .. } => "extract",
             ClientMessage::CancelExtraction => "cancel_extraction",
             ClientMessage::Craft { .. } => "craft",

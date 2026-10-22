@@ -45,6 +45,10 @@ macro_rules! phase {
 /// Ticks between sweeps for unanswered trade requests (once a second)
 const TRADE_EXPIRY_TICKS: u64 = 10;
 
+/// A steering player held against something hears `movement_blocked` at
+/// most once in this many ticks (2 s); they keep the steer meanwhile (T0.2)
+const STEER_BLOCKED_TICKS: u64 = 20;
+
 /// Why a trade ended when one side's socket fell behind (C0.3)
 pub const TRADE_LAGGED: &str = "Connection fell behind";
 
@@ -73,6 +77,9 @@ pub struct GameState {
     pub pending_items: Vec<PendingItem>,
     /// The tool each gather under way started with, by player (E1.5)
     pub gather_tools: HashMap<Uuid, HeldTool>,
+    /// The tick each steering player was last told they're blocked, so a
+    /// walk held into a bank hears it once every [`STEER_BLOCKED_TICKS`]
+    steer_blocked_at: HashMap<Uuid, u64>,
     /// Crafts that ran their time this tick, for the tick loop to write
     pub finished_crafts: Vec<FinishedCraft>,
     // M4: Stations
@@ -141,6 +148,7 @@ impl GameState {
             tick_count: 0,
             pending_items: Vec::new(),
             gather_tools: HashMap::new(),
+            steer_blocked_at: HashMap::new(),
             finished_crafts: Vec::new(),
             stations: HashMap::new(),
             station_types: HashMap::new(),
@@ -215,8 +223,10 @@ impl GameState {
         let sockets = self.connections.get_mut(&player_id).ok_or(presence::Refused::Closed)?;
         sockets.claim(socket)?;
         tracing::info!("Connection {} holds player {}", socket, player_id);
-        if !self.players.contains_key(&player_id) {
-            self.add_player(player);
+        match self.players.get_mut(&player_id) {
+            // The new holder didn't send the old one's steer (T0.2)
+            Some(held) => held.steer = None,
+            None => self.add_player(player),
         }
         Ok(())
     }
@@ -311,6 +321,7 @@ impl GameState {
             }
         }
         self.gather_tools.remove(&player_id);
+        self.steer_blocked_at.remove(&player_id);
         // Remove any pending trade requests
         self.trade_manager.pending_requests.remove(&player_id);
         self.trade_manager.pending_requests.retain(|_, (initiator, _)| *initiator != player_id);
@@ -379,18 +390,18 @@ impl GameState {
             match command {
                 Command::Move { player_id, dest_x, dest_y } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
-                        // Cancel any current action if moving
-                        match &player.action_state {
-                            ActionState::Extracting { .. } => {
-                                cancel_extraction(player, &mut self.resource_nodes, &self.event_sender);
-                            }
-                            ActionState::Crafting { .. } => {
-                                cancel_crafting(player, &mut self.crafting_operations, &self.event_sender);
-                            }
-                            ActionState::Idle => {}
-                        }
+                        start_moving(player, &mut self.resource_nodes, &mut self.crafting_operations, &self.event_sender);
                         player.dest_x = Some(dest_x);
                         player.dest_y = Some(dest_y);
+                        player.steer = None;
+                    }
+                }
+                Command::Steer { player_id, heading, throttle, at } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        if throttle > 0 {
+                            start_moving(player, &mut self.resource_nodes, &mut self.crafting_operations, &self.event_sender);
+                        }
+                        super::movement::steer(player, heading, throttle, at);
                     }
                 }
                 Command::StartExtraction { player_id, node_id, tool } => {
@@ -653,6 +664,7 @@ impl GameState {
         use crate::models::Zone;
 
         for player in self.players.values_mut() {
+            let steering = player.steer.is_some();
             let result = process_movement(player, &self.ground);
 
             // Broadcast zone transition if player changed zones
@@ -668,8 +680,16 @@ impl GameState {
                 });
             }
 
-            // Broadcast movement blocked if player was stopped by water
+            // Broadcast movement blocked if player was stopped by water. A
+            // steer held into it hears once every STEER_BLOCKED_TICKS.
             if let Some(blocked) = result.blocked {
+                if steering {
+                    let said = self.steer_blocked_at.get(&player.id);
+                    if said.is_some_and(|&said| self.tick_count < said + STEER_BLOCKED_TICKS) {
+                        continue;
+                    }
+                    self.steer_blocked_at.insert(player.id, self.tick_count);
+                }
                 let _ = self.event_sender.send(GameEvent::MovementBlocked {
                     player_id: player.id,
                     reason: blocked.reason,
@@ -743,6 +763,21 @@ impl GameState {
             &self.event_sender,
         );
         self.finished_crafts.extend(finished);
+    }
+}
+
+/// A player sets off, by a `move` or a steer that walks (T0.2): a gather or
+/// a craft under way stops.
+fn start_moving(
+    player: &mut PlayerState,
+    nodes: &mut HashMap<Uuid, ResourceNodeState>,
+    crafting_operations: &mut HashMap<Uuid, CraftingOperation>,
+    event_sender: &broadcast::Sender<GameEvent>,
+) {
+    match &player.action_state {
+        ActionState::Extracting { .. } => cancel_extraction(player, nodes, event_sender),
+        ActionState::Crafting { .. } => cancel_crafting(player, crafting_operations, event_sender),
+        ActionState::Idle => {}
     }
 }
 
@@ -1205,6 +1240,7 @@ mod tests {
             current_zone: None,
             action_state: ActionState::Idle,
             citizen: false,
+            steer: None,
         }
     }
 
@@ -1723,6 +1759,88 @@ mod tests {
         assert!(game.trade_manager.is_in_trade(b));
     }
 
+    // Steering (controls T0.2, #316)
+
+    fn steer(game: &mut GameState, player_id: Uuid, heading: u16, throttle: u8, at: Option<(f64, f64)>) {
+        game.queue_command(Command::Steer { player_id, heading, throttle, at });
+        game.process_commands();
+    }
+
+    #[test]
+    fn a_walking_steer_stops_a_gather_and_a_move_ends_the_steer() {
+        let (mut game, a, _, _rx) = two_players(10.0);
+        let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
+        game.queue_command(Command::StartExtraction { player_id: a, node_id, tool: None });
+        game.process_commands();
+        assert!(matches!(game.players[&a].action_state, ActionState::Extracting { .. }));
+
+        // Letting go of W just after E leaves the gather alone
+        steer(&mut game, a, 0, 0, Some(AT));
+        assert!(matches!(game.players[&a].action_state, ActionState::Extracting { .. }));
+        assert!(game.players[&a].steer.is_none());
+
+        steer(&mut game, a, 0, 10, None);
+        assert_eq!(game.players[&a].action_state, ActionState::Idle, "walking off stops it, as a move does");
+        assert!(game.players[&a].steer.is_some());
+
+        game.queue_command(Command::Move { player_id: a, dest_x: CENTER_X, dest_y: CENTER_Y + 20.0 });
+        game.process_commands();
+        let ada = &game.players[&a];
+        assert!(ada.steer.is_none());
+        assert_eq!((ada.dest_x, ada.dest_y), (Some(CENTER_X), Some(CENTER_Y + 20.0)));
+    }
+
+    #[test]
+    fn starting_a_gather_ends_the_steer() {
+        let (mut game, a, _, _rx) = two_players(10.0);
+        let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
+        steer(&mut game, a, 0, 10, None);
+        game.queue_command(Command::StartExtraction { player_id: a, node_id, tool: None });
+        game.process_commands();
+        assert!(matches!(game.players[&a].action_state, ActionState::Extracting { .. }));
+        assert!(game.players[&a].steer.is_none());
+        game.process_movement();
+        assert_eq!((game.players[&a].x, game.players[&a].y), AT, "they stand to gather");
+    }
+
+    #[test]
+    fn the_avatar_moving_to_another_device_ends_the_steer() {
+        let mut game = game();
+        let ada = player("Ada", CENTER_X, CENTER_Y);
+        let id = ada.id;
+        connect(&mut game, ada.clone(), "desk");
+        steer(&mut game, id, 0, 10, None);
+        assert!(game.players[&id].steer.is_some());
+        connect(&mut game, ada, "phone");
+        assert!(game.players[&id].steer.is_none(), "the phone never sent it");
+    }
+
+    #[test]
+    fn a_steer_held_into_the_edge_hears_it_once_every_two_seconds() {
+        use capitol_protocol::rules::WILDERNESS_OUTER_RADIUS;
+        let mut game = game();
+        let ada = player("Ada", CENTER_X + WILDERNESS_OUTER_RADIUS - 1.0, CENTER_Y);
+        let id = ada.id;
+        game.add_player(ada);
+        let mut rx = game.subscribe();
+        let mut told = Vec::new();
+        for tick in 0..50 {
+            game.tick_count = tick;
+            // Held east, renewed every second
+            if tick % 10 == 0 {
+                steer(&mut game, id, 0, 10, None);
+            }
+            game.process_movement();
+            while let Ok(event) = rx.try_recv() {
+                if matches!(event, GameEvent::MovementBlocked { player_id, .. } if player_id == id) {
+                    told.push(tick);
+                }
+            }
+        }
+        assert_eq!(told, [0, 20, 40]);
+        assert!(game.players[&id].steer.is_some(), "still pushing");
+    }
+
     // B9: a refused extraction says why, to the requester only
 
     /// Put a Wild Grass node `dx` units east of `at` into `game`, and return its id
@@ -1945,6 +2063,31 @@ mod tests {
         assert!(matches!(heard.try_recv().unwrap(), GameEvent::ExtractionCompleted { tool: Some(ref t), .. } if t.durability == 1));
         assert!(matches!(heard.try_recv().unwrap(), GameEvent::InventoryUpdated { .. }));
         assert!(matches!(heard.try_recv().unwrap(), GameEvent::ExtractionCompleted { tool: Some(ref t), .. } if t.durability == 0));
+    }
+
+    /// A steering player's position is saved, and they come back standing (T0.2)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_steering_player_is_saved_and_reloads_with_no_steer(db: sqlx::PgPool) {
+        let (ada, _, _) = gatherer(&db, 2).await;
+        let account: Uuid = sqlx::query_scalar("SELECT account_id FROM players WHERE id = $1")
+            .bind(ada)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let mut game = game();
+        let player = crate::ws::load_player(&db, account).await.unwrap();
+        game.add_player(PlayerState { x: CENTER_X, y: CENTER_Y, ..player });
+        steer(&mut game, ada, 0, 10, Some((CENTER_X + 3.0, CENTER_Y)));
+        game.process_movement();
+        game.process_movement();
+        assert!(game.players[&ada].steer.is_some());
+
+        persist_positions(&db, &saved_positions(&game)).await.unwrap();
+        let back = crate::ws::load_player(&db, account).await.unwrap();
+        assert_eq!((back.x, back.y), (CENTER_X + 8.0, CENTER_Y));
+        assert_eq!((back.dest_x, back.dest_y), (None, None));
+        assert!(back.steer.is_none());
     }
 
     /// Every player's position in one statement, a destination or none (#304)

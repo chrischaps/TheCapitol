@@ -168,6 +168,9 @@ pub mod resources;
 /// Moving on the land: slope, cliffs, and the wild water (W4).
 pub mod ground;
 
+/// Walking on a heading: the `steer` message's heading, throttle and lease (T0.2).
+pub mod steer;
+
 /// Letter grade for an item quality (0-100): A >= 90, B >= 75, C >= 55, D >= 35,
 /// otherwise F. WebSocket events carry only the number, so clients grade it here.
 pub fn quality_grade(quality: i32) -> &'static str {

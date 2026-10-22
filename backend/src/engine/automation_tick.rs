@@ -972,6 +972,7 @@ mod tests {
             current_zone: None,
             action_state: ActionState::Idle,
             citizen: false,
+            steer: None,
         }
     }
 

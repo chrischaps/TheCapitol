@@ -182,6 +182,7 @@ pub fn start_crafting(
     // Stop any movement
     player.dest_x = None;
     player.dest_y = None;
+    player.steer = None;
 
     // Create crafting operation
     let operation_id = Uuid::new_v4();
@@ -260,6 +261,7 @@ mod tests {
             current_zone: None,
             action_state: ActionState::Idle,
             citizen: false,
+            steer: None,
         }
     }
 

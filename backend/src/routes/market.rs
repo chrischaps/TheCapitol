@@ -820,6 +820,7 @@ mod tests {
             current_zone: None,
             action_state: ActionState::Idle,
             citizen: false,
+            steer: None,
         });
         assert!(at_the_exchange(&game, &db, ada.id, "collect from the market box").await.is_err());
     }

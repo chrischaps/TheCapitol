@@ -11,6 +11,14 @@ pub enum Command {
         dest_x: f64,
         dest_y: f64,
     },
+    /// Walk on a heading (controls T0.2): `heading` and `throttle` as the
+    /// `steer` message has them, unchecked, and `at` a waypoint first
+    Steer {
+        player_id: Uuid,
+        heading: u16,
+        throttle: u8,
+        at: Option<(f64, f64)>,
+    },
     StartExtraction {
         player_id: Uuid,
         node_id: Uuid,

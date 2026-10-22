@@ -189,6 +189,14 @@ Both modes have the same speed, ground rules and reach. Bots may steer (`Bot::st
   - **A slide may not end within 2 of a ring's water off a bridge, or of the edge, nearer to it than it started.** Without that, a square push into a canal slid 60° into the 2-unit margin, the next stop pushed it back out, and it crept along in a jitter. A river's stop is already at the last dry sample, so it needs no margin.
   - The old `ground.rs` test fixture lies in the square's corner, off the world's disc. Walks on it must head toward the centre, or the edge stops them.
 - **T0.2 The `steer` message** (#316, M): the wire, the state, the lease, the stop, the clearing.
+  *As built:* `rules::steer` holds the shared parts: `direction` and its inverse `heading_of` (for T0.4's quantising; every heading comes back as itself), `pace` (tenths, clamped to 10) and the constants `LEASE_TICKS` (30), `MAX_WAYPOINTS` (8) and `AT_REACH` (100). On the server, `movement::steer` takes a steer and `steer_step` walks one. Decisions the plan didn't make:
+  - **A waypoint is walked at the pace the client had when it marked it**: the steer's throttle before this one, or this one's if that was 0, or full. So a corner where you speed up, or a stop, is walked on the server at the pace the prediction walked it. Each waypoint carries its throttle.
+  - **A tick that reaches a waypoint ends on it.** The rest of that tick isn't carried round the corner. T0.4's prediction walks the same fixed 100 ms steps, so if it marks `at` at a step's end, the server's copy turns on the same point.
+  - **A waypoint that can't be reached is dropped** where the walk stopped, and the steer goes on to the next one or the heading. A stop whose `at` is blocked ends there.
+  - **A stop with no `at`** stands on the next tick.
+  - **The 2 s cooldown is per player** (`GameState::steer_blocked_at`, by tick), for a block met while steering. A click walk still hears each block, since a block ends it.
+  - **Socket close** needs nothing of its own: the holder's socket closing takes the avatar out of the world, steer and all. A presence claim clears the steer, not the destination, since a click walk already carried on across a claim.
+  - Until T0.3 (#317), steers share the socket's general rate bucket.
 - **T0.3 A rate bucket for steering** (#317, S).
 - **T0.4 `Steering`, steer prediction and the loopback** (#318, L).
 

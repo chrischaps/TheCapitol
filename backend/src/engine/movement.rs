@@ -1,7 +1,9 @@
-use crate::models::{PlayerState, Zone, ZoneTransition};
+use crate::models::{PlayerState, Steering, Waypoint, Zone, ZoneTransition};
 
-use capitol_protocol::rules::ground::Ground;
-use capitol_protocol::rules::{ARRIVAL_EPSILON, TICK_SECS as TICK_DURATION_SECS};
+use capitol_protocol::fmath::StableMath;
+use capitol_protocol::rules::ground::{Blocked, Ground, Step};
+use capitol_protocol::rules::steer::{self, AT_REACH, FULL, LEASE_TICKS, MAX_WAYPOINTS};
+use capitol_protocol::rules::{in_world, ARRIVAL_EPSILON, TICK_SECS as TICK_DURATION_SECS};
 
 /// Result of processing movement
 pub struct MovementResult {
@@ -22,55 +24,76 @@ pub struct MovementBlocked {
     pub stopped_y: f64,
 }
 
-/// One tick of a player's walk, by `Ground::step`: slowed by the slope and
-/// the water, stopped by a cliff, a river or a lake (W4), the moat and the
-/// canals away from their bridges and the edge of the world, and sliding
-/// along what stopped it where it can (T0.1, #315). The Flint client
-/// predicts with the same step.
-pub fn process_movement(player: &mut PlayerState, ground: &Ground) -> MovementResult {
-    let (dest_x, dest_y) = match (player.dest_x, player.dest_y) {
-        (Some(x), Some(y)) => (x, y),
-        _ => return MovementResult { moved: false, zone_transition: None, blocked: None },
-    };
-
-    let dx = dest_x - player.x;
-    let dy = dest_y - player.y;
-    let distance = (dx * dx + dy * dy).sqrt();
-
-    let old_zone = player.current_zone.clone();
-    let mut blocked_result: Option<MovementBlocked> = None;
-
-    if distance < ARRIVAL_EPSILON {
-        // Arrived at destination
-        player.x = dest_x;
-        player.y = dest_y;
-        player.dest_x = None;
-        player.dest_y = None;
-    } else {
-        let walk = player.speed as f64 * TICK_DURATION_SECS;
-        let step = ground.step((player.x, player.y), (dest_x, dest_y), walk);
-        player.x = step.x;
-        player.y = step.y;
-
-        match step.blocked {
-            Some(blocked) => {
-                // Clear destination - player can't reach it
-                player.dest_x = None;
-                player.dest_y = None;
-                blocked_result = Some(MovementBlocked {
-                    reason: blocked.reason(),
-                    water_id: blocked.water_id().to_string(),
-                    stopped_x: player.x,
-                    stopped_y: player.y,
-                });
-            }
-            None if (step.x, step.y) == (dest_x, dest_y) => {
-                player.dest_x = None;
-                player.dest_y = None;
-            }
-            None => {}
+impl MovementBlocked {
+    fn at(player: &PlayerState, blocked: Blocked) -> Self {
+        MovementBlocked {
+            reason: blocked.reason(),
+            water_id: blocked.water_id().to_string(),
+            stopped_x: player.x,
+            stopped_y: player.y,
         }
     }
+}
+
+/// Take a `steer` (controls T0.2): walk on `heading` at `throttle` tenths
+/// of the speed, after walking to `at`. It clears any destination, and a
+/// `move` clears it in turn. The caller cancels a gather or a craft first
+/// when it walks (`throttle` over 0), as for a `move`.
+///
+/// - **A stop** is throttle 0: the player walks to `at`, if it has one, and
+///   stands. With no steer under way it does nothing, so letting go of W
+///   doesn't stop a walk to a node that E just started.
+/// - **`at`** is walked at the throttle the client had when it marked the
+///   point, so the server's copy of the walk keeps its pace. One over
+///   [`AT_REACH`] from where the player is, or off the world, is ignored.
+///   Past [`MAX_WAYPOINTS`], the oldest goes.
+/// - **Any steer renews the lease** to [`LEASE_TICKS`].
+pub fn steer(player: &mut PlayerState, heading: u16, throttle: u8, at: Option<(f64, f64)>) {
+    let throttle = throttle.min(FULL);
+    if player.steer.is_none() && throttle == 0 {
+        return;
+    }
+    let (x, y) = (player.x, player.y);
+    let at = at.filter(|&(ax, ay)| in_world(ax, ay) && (ax - x).stable_hypot(ay - y) <= AT_REACH);
+    let steering = player.steer.get_or_insert_with(|| Steering {
+        dir: steer::direction(heading),
+        throttle: 0,
+        waypoints: Default::default(),
+        lease_ticks: LEASE_TICKS,
+    });
+    if let Some((x, y)) = at {
+        let pace = [steering.throttle, throttle].into_iter().find(|&t| t > 0).unwrap_or(FULL);
+        if steering.waypoints.len() >= MAX_WAYPOINTS {
+            steering.waypoints.pop_front();
+        }
+        steering.waypoints.push_back(Waypoint { x, y, throttle: pace });
+    }
+    if throttle > 0 {
+        steering.dir = steer::direction(heading);
+    }
+    steering.throttle = throttle;
+    steering.lease_ticks = LEASE_TICKS;
+    player.dest_x = None;
+    player.dest_y = None;
+}
+
+/// One tick of a player's walk, by the shared ground step: slowed by the
+/// slope and the water, stopped by a cliff, a river or a lake (W4), the
+/// moat and the canals away from their bridges and the edge of the world,
+/// and sliding along what stopped it where it can (T0.1, #315). The Flint
+/// client predicts with the same step.
+///
+/// A steering player walks the steer ([`steer_step`]); anyone else walks to
+/// their destination, if they have one.
+pub fn process_movement(player: &mut PlayerState, ground: &Ground) -> MovementResult {
+    let old_zone = player.current_zone.clone();
+    let blocked_result = if player.steer.is_some() {
+        steer_step(player, ground)
+    } else if let (Some(x), Some(y)) = (player.dest_x, player.dest_y) {
+        dest_step(player, ground, (x, y))
+    } else {
+        return MovementResult { moved: false, zone_transition: None, blocked: None };
+    };
 
     // Check for zone transition
     let new_zone = Zone::from_position(player.x, player.y);
@@ -91,6 +114,81 @@ pub fn process_movement(player: &mut PlayerState, ground: &Ground) -> MovementRe
         zone_transition,
         blocked: blocked_result,
     }
+}
+
+/// A tick toward the destination by `Ground::step`. A block ends the walk.
+fn dest_step(player: &mut PlayerState, ground: &Ground, (dest_x, dest_y): (f64, f64)) -> Option<MovementBlocked> {
+    let dx = dest_x - player.x;
+    let dy = dest_y - player.y;
+    let distance = (dx * dx + dy * dy).sqrt();
+
+    if distance < ARRIVAL_EPSILON {
+        // Arrived at destination
+        player.x = dest_x;
+        player.y = dest_y;
+        player.dest_x = None;
+        player.dest_y = None;
+        return None;
+    }
+    let walk = player.speed as f64 * TICK_DURATION_SECS;
+    let step = ground.step((player.x, player.y), (dest_x, dest_y), walk);
+    player.x = step.x;
+    player.y = step.y;
+
+    match step.blocked {
+        Some(blocked) => {
+            // Clear destination - player can't reach it
+            player.dest_x = None;
+            player.dest_y = None;
+            Some(MovementBlocked::at(player, blocked))
+        }
+        None => {
+            if (step.x, step.y) == (dest_x, dest_y) {
+                player.dest_x = None;
+                player.dest_y = None;
+            }
+            None
+        }
+    }
+}
+
+/// A tick of a steer: to the next waypoint, or else along the heading by
+/// `Ground::walk_step`, at the throttle's share of the speed. A tick that
+/// reaches a waypoint ends there: the client's prediction walks the same
+/// fixed steps, so its corners fall on a step's end.
+///
+/// - A waypoint that can't be reached is dropped where the walk stopped.
+/// - Blocked on the heading, the player stands and keeps the steer.
+/// - The lease runs down a tick at a time, and the steer clears when it
+///   runs out, or when a stop has walked its waypoints.
+fn steer_step(player: &mut PlayerState, ground: &Ground) -> Option<MovementBlocked> {
+    let walk = player.speed as f64 * TICK_DURATION_SECS;
+    let from = (player.x, player.y);
+    let steering = player.steer.as_mut()?;
+    let step = match steering.waypoints.front().copied() {
+        Some(wp) => {
+            let to = (wp.x, wp.y);
+            let near = (to.0 - from.0).stable_hypot(to.1 - from.1) < ARRIVAL_EPSILON;
+            let step = if near {
+                Step { x: to.0, y: to.1, blocked: None }
+            } else {
+                ground.step(from, to, walk * steer::pace(wp.throttle))
+            };
+            if step.blocked.is_some() || (step.x, step.y) == to {
+                steering.waypoints.pop_front();
+            }
+            step
+        }
+        None if steering.throttle > 0 => ground.walk_step(from, steering.dir, walk * steer::pace(steering.throttle)),
+        None => Step { x: from.0, y: from.1, blocked: None },
+    };
+    steering.lease_ticks = steering.lease_ticks.saturating_sub(1);
+    if steering.lease_ticks == 0 || (steering.throttle == 0 && steering.waypoints.is_empty()) {
+        player.steer = None;
+    }
+    player.x = step.x;
+    player.y = step.y;
+    step.blocked.map(|blocked| MovementBlocked::at(player, blocked))
 }
 
 #[cfg(test)]
@@ -118,6 +216,7 @@ mod tests {
             current_zone: None,
             action_state: ActionState::Idle,
             citizen: false,
+            steer: None,
         }
     }
 
@@ -390,5 +489,188 @@ mod tests {
             }
         }
         assert!(crossed > 0, "no stream to wade");
+    }
+
+    // Steering (controls T0.2, #316)
+
+    use capitol_protocol::rules::steer::{QUARTER, LEASE_TICKS, MAX_WAYPOINTS};
+    use capitol_protocol::rules::{CENTER_X, CENTER_Y, WILDERNESS_OUTER_RADIUS};
+
+    const EAST: u16 = 0;
+    const SOUTH: u16 = QUARTER;
+
+    fn near(a: (f64, f64), b: (f64, f64)) -> bool {
+        (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9
+    }
+
+    fn at(player: &PlayerState) -> (f64, f64) {
+        (player.x, player.y)
+    }
+
+    #[test]
+    fn a_steer_walks_its_heading_at_a_moves_speed() {
+        let ground = &world().1;
+        let mut walker = make_player(CENTER_X, CENTER_Y, Some(CENTER_X + 1000.0), Some(CENTER_Y));
+        let mut steerer = make_player(CENTER_X, CENTER_Y, None, None);
+        steer(&mut steerer, EAST, 10, None);
+        for _ in 0..10 {
+            process_movement(&mut walker, ground);
+            process_movement(&mut steerer, ground);
+            assert!(near(at(&steerer), at(&walker)), "{:?} vs {:?}", at(&steerer), at(&walker));
+        }
+        assert!(near(at(&steerer), (CENTER_X + 50.0, CENTER_Y)), "a second at 50 a second");
+
+        // Half throttle, half the pace; and south is +y
+        let mut half = make_player(CENTER_X, CENTER_Y, None, None);
+        steer(&mut half, SOUTH, 5, None);
+        process_movement(&mut half, ground);
+        assert!(near(at(&half), (CENTER_X, CENTER_Y + 2.5)), "{:?}", at(&half));
+
+        // Over 10 is clamped to full
+        let mut over = make_player(CENTER_X, CENTER_Y, None, None);
+        steer(&mut over, EAST, 200, None);
+        assert_eq!(over.steer.as_ref().unwrap().throttle, 10);
+    }
+
+    #[test]
+    fn a_steer_clears_the_destination_and_a_zero_steer_with_none_does_nothing() {
+        let dest = (Some(CENTER_X + 40.0), Some(CENTER_Y));
+        let mut player = make_player(CENTER_X, CENTER_Y, dest.0, dest.1);
+        // Letting go of W while a click walk (or E's walk to a node) is under way
+        steer(&mut player, EAST, 0, Some((CENTER_X, CENTER_Y)));
+        assert!(player.steer.is_none());
+        assert_eq!((player.dest_x, player.dest_y), dest, "the walk carries on");
+
+        steer(&mut player, SOUTH, 10, None);
+        assert!(player.steer.is_some());
+        assert_eq!((player.dest_x, player.dest_y), (None, None));
+    }
+
+    #[test]
+    fn a_waypoint_is_walked_before_the_heading() {
+        let ground = &world().1;
+        let mut player = make_player(CENTER_X, CENTER_Y, None, None);
+        // Heading south, from a corner 3 east
+        steer(&mut player, SOUTH, 10, Some((CENTER_X + 3.0, CENTER_Y)));
+        process_movement(&mut player, ground);
+        assert_eq!(at(&player), (CENTER_X + 3.0, CENTER_Y), "the tick that reaches the corner ends on it");
+        process_movement(&mut player, ground);
+        assert!(near(at(&player), (CENTER_X + 3.0, CENTER_Y + 5.0)), "{:?}", at(&player));
+    }
+
+    #[test]
+    fn a_waypoint_keeps_the_pace_it_was_marked_at() {
+        let ground = &world().1;
+        let mut player = make_player(CENTER_X, CENTER_Y, None, None);
+        steer(&mut player, EAST, 5, None);
+        // Speeding up at a corner 10 on: the server walks there at the old 5
+        steer(&mut player, SOUTH, 10, Some((CENTER_X + 10.0, CENTER_Y)));
+        process_movement(&mut player, ground);
+        assert!(near(at(&player), (CENTER_X + 2.5, CENTER_Y)), "{:?}", at(&player));
+    }
+
+    #[test]
+    fn a_stop_walks_to_its_at_and_clears() {
+        let ground = &world().1;
+        let mut player = make_player(CENTER_X, CENTER_Y, None, None);
+        steer(&mut player, EAST, 10, None);
+        process_movement(&mut player, ground);
+        // The client stopped 12 further on than the server has it
+        let stop = (CENTER_X + 17.0, CENTER_Y);
+        steer(&mut player, EAST, 0, Some(stop));
+        let mut ticks = 0;
+        while player.steer.is_some() {
+            process_movement(&mut player, ground);
+            ticks += 1;
+            assert!(ticks < 10, "the stop never ended");
+        }
+        assert_eq!(ticks, 3, "5, 5 and the last 2");
+        assert_eq!(at(&player), stop, "it stands where the client stopped, not a step on");
+        process_movement(&mut player, ground);
+        assert_eq!(at(&player), stop);
+
+        // A stop with no `at` stands at once
+        steer(&mut player, EAST, 10, None);
+        steer(&mut player, EAST, 0, None);
+        process_movement(&mut player, ground);
+        assert_eq!(at(&player), stop);
+        assert!(player.steer.is_none());
+    }
+
+    #[test]
+    fn an_at_too_far_or_off_the_world_is_ignored() {
+        let mut player = make_player(CENTER_X, CENTER_Y, None, None);
+        steer(&mut player, EAST, 10, Some((CENTER_X + 100.5, CENTER_Y)));
+        assert!(player.steer.as_ref().unwrap().waypoints.is_empty(), "over 100 away");
+        steer(&mut player, EAST, 10, Some((CENTER_X, CENTER_Y + 100.0)));
+        assert_eq!(player.steer.as_ref().unwrap().waypoints.len(), 1, "100 is in reach");
+
+        let edge = CENTER_X + WILDERNESS_OUTER_RADIUS;
+        let mut out = make_player(edge - 1.0, CENTER_Y, None, None);
+        steer(&mut out, EAST, 10, Some((edge + 5.0, CENTER_Y)));
+        assert!(out.steer.as_ref().unwrap().waypoints.is_empty(), "off the world");
+    }
+
+    #[test]
+    fn past_eight_waypoints_the_oldest_goes() {
+        let mut player = make_player(CENTER_X, CENTER_Y, None, None);
+        for k in 0..=MAX_WAYPOINTS {
+            steer(&mut player, EAST, 10, Some((CENTER_X + k as f64, CENTER_Y)));
+        }
+        let waypoints = &player.steer.as_ref().unwrap().waypoints;
+        assert_eq!(waypoints.len(), MAX_WAYPOINTS);
+        assert_eq!(waypoints.front().unwrap().x, CENTER_X + 1.0);
+    }
+
+    #[test]
+    fn the_lease_runs_out_after_30_ticks_unless_renewed() {
+        let ground = &world().1;
+        // At 2 tenths, a unit a tick: short of the moat
+        let mut player = make_player(CENTER_X, CENTER_Y, None, None);
+        steer(&mut player, EAST, 2, None);
+        for _ in 1..LEASE_TICKS {
+            process_movement(&mut player, ground);
+        }
+        assert!(player.steer.is_some(), "29 ticks in");
+        // A renewal starts it over
+        steer(&mut player, EAST, 2, None);
+        for _ in 0..LEASE_TICKS {
+            process_movement(&mut player, ground);
+        }
+        assert!(player.steer.is_none(), "30 ticks after the last steer");
+        let walked = at(&player);
+        assert!(near(walked, (CENTER_X + f64::from(2 * LEASE_TICKS - 1), CENTER_Y)), "{walked:?}");
+        process_movement(&mut player, ground);
+        assert_eq!(at(&player), walked, "and it stands");
+    }
+
+    #[test]
+    fn blocked_on_its_heading_a_steer_stands_and_keeps_going() {
+        let ground = &world().1;
+        // Square into the world's edge
+        let start = (CENTER_X + WILDERNESS_OUTER_RADIUS - 1.0, CENTER_Y);
+        let mut player = make_player(start.0, start.1, None, None);
+        steer(&mut player, EAST, 10, None);
+        for _ in 0..3 {
+            let result = process_movement(&mut player, ground);
+            assert!(result.blocked.is_some());
+            assert_eq!(at(&player), start);
+            assert!(player.steer.is_some(), "the steer stays, for when it turns");
+        }
+        // Turning back walks
+        steer(&mut player, 2 * QUARTER, 10, None);
+        let result = process_movement(&mut player, ground);
+        assert!(result.blocked.is_none());
+        assert!(player.x < start.0);
+    }
+
+    #[test]
+    fn a_steer_is_never_saved() {
+        let mut player = make_player(CENTER_X, CENTER_Y, None, None);
+        steer(&mut player, EAST, 10, Some((CENTER_X + 1.0, CENTER_Y)));
+        let json = serde_json::to_string(&player).unwrap();
+        assert!(!json.contains("steer"), "{json}");
+        let back: PlayerState = serde_json::from_str(&json).unwrap();
+        assert!(back.steer.is_none());
     }
 }

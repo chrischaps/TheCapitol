@@ -342,10 +342,15 @@ Server responds:
   "y": 3987.25
 }
 
-// Walk on a heading (planned, controls T0.2, #316). heading is a fraction of
-// a turn (u16: 0 east, 16384 south), throttle is tenths (0-10), and at is an
-// optional waypoint reached first. A stop is throttle 0 at the predicted
-// position. It lapses after 3 s unless renewed, and is never persisted.
+// Walk on a heading (controls T0.2, #316; rules::steer). heading is a fraction
+// of a turn (u16: 0 east, 16384 south), throttle is tenths (0-10, more is 10),
+// and at is an optional waypoint reached first, at the pace the client had
+// when it marked it (ignored over 100 from the server position or off the
+// world; 8 at most wait). A stop is throttle 0 at the predicted position; with
+// no steer under way it does nothing, so a walk E started carries on. A steer
+// clears a move's destination and a move clears the steer. It lapses after 3 s
+// (30 ticks) unless renewed, and is never persisted. Held into a block, the
+// player stands, keeps the steer, and hears movement_blocked once every 2 s.
 {
   "type": "steer",
   "heading": 16384,
@@ -581,7 +586,7 @@ Within each tick, systems process in a defined order to ensure consistency:
    - Mark invalid commands for error response
 
 2. MOVEMENT
-   - Walk each player toward its destination, or along its steer (planned, controls T0.2), by one shared step (`rules::ground`: slopes, cliffs, rivers and lakes, fords, the moat and canal rings, the world edge). No velocity is stored.
+   - Walk each player toward its destination, or along its steer (controls T0.2: its waypoints, then its heading; a tick that reaches a waypoint ends there), by one shared step (`rules::ground`: slopes, cliffs, rivers and lakes, fords, the moat and canal rings, the world edge). No velocity is stored.
    - No collision with buildings or other players (controls F1, #330)
    - Update spatial index (who is near whom)
 
@@ -630,7 +635,7 @@ Player commands are queued between ticks and processed atomically at tick bounda
 enum GameCommand {
     // Movement
     Move { player_id: PlayerId, destination: Position },
-    Steer { player_id: PlayerId, heading: Direction, throttle: f32, at: Option<Position> }, // planned, controls T0.2; a stop is a zero-throttle steer
+    Steer { player_id: PlayerId, heading: u16, throttle: u8, at: Option<Position> }, // controls T0.2; a stop is a zero-throttle steer, and one that walks cancels a gather or craft as Move does
     
     // Interaction
     Extract { player_id: PlayerId, node_id: NodeId, tool_id: ItemId },
@@ -938,7 +943,7 @@ struct Player {
     
     position: Position,
     destination: Option<Position>,
-    steer: Option<Steer>,                   // runtime only, never persisted (planned, controls T0.2)
+    steer: Option<Steering>,                // runtime only, never persisted (controls T0.2): dir, throttle, up to 8 waypoints, lease_ticks
     speed: f32,
     
     strand_balance: u64,

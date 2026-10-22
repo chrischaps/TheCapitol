@@ -77,6 +77,7 @@ const CLIENT_TYPES: &[&str] = &[
     "auth",
     "subscribe",
     "move",
+    "steer",
     "extract",
     "cancel_extraction",
     "craft",
