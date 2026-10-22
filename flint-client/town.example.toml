@@ -51,6 +51,16 @@ server = "http://localhost:3000"
 layers = ["rules"]
 # layers = ["rules", "jev"]
 
+# Who finds a citizen's words (#311): "phrasebook" [default], the lines of
+# S1.6 in three voices by temperament, or "claude-haiku" (or
+# "claude-sonnet"), which asks Claude for each line through
+# $ANTHROPIC_API_KEY and says the phrasebook's if Claude has nothing within
+# 2 s. A Haiku line costs about 0.006 cents, and a citizen spends at most
+# 5 cents a life on talk before it falls back to its phrasebook. Hear one
+# first with `capitol-town voice`. A citizen may name its own `voice`.
+voice = "phrasebook"
+# voice = "claude-haiku"
+
 # When citizens play (#276): the share of each habit `mint` draws, by
 # weight. A town of this mix is on about 3% of the time, so keeping 20 on
 # takes about 640 citizens: `mint --online 20` makes that many. Changing

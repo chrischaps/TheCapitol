@@ -218,7 +218,7 @@ impl Decider for ClaudeDecider {
 
 /// Posts a request, trying once more after a moment if the API is busy
 /// (429, 529) or failed (5xx).
-async fn send(url: &str, key: &str, body: &Value) -> Result<Value, String> {
+pub(crate) async fn send(url: &str, key: &str, body: &Value) -> Result<Value, String> {
     let post = || {
         remote::post_with(
             remote::client()

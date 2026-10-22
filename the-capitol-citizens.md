@@ -215,7 +215,7 @@ The first citizens walk after C0.1, C0.6 and C1.1, about three sessions. The who
 
 ## 8. Later (outside this plan)
 
-- **Chat and the citizens' voice.** Planned in `the-capitol-commons.md` (S1, #381 to #386, with #311). M9's chat (local and global) first. Then a model layer can give citizens lines: greetings, haggling, letters to the Gazette, all under the same budget as D4.
+- **Chat and the citizens' voice.** Planned in `the-capitol-commons.md` (S1, #381 to #386, with #311). M9's chat (local and global) first. Then a model layer can give citizens lines: greetings, haggling, letters to the Gazette, all under the same budget as D4. *Since #311:* `citizen::voice::ClaudeSpeaker`, Haiku over the S1.6 phrasebook, chosen by a roster's `voice`, with its own cap (`TALK_SPEND`, 5¢ a citizen a life). See the commons plan's S1 notes.
 - **Night by day.** Since #276 game night changes what a citizen does, not whether it's on. Chris's further ideas each want a ticket of their own (`economy`, `needs-decision`) once he wants them: the bazaar kept by day only, a game rule for people too; and night-only resources, say mushrooms, which are content (`backend/content/`, E2's spawn tables).
 - **Distillation.** New rules learned from the decision log.
 - **Guilds and contracts** (M9), which citizens join and keep. Planned in `the-capitol-commons.md` D11: citizens answer and post commissions (#391), take wages (#394) and join guilds (#401).

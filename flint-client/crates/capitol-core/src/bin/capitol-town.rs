@@ -35,6 +35,7 @@ use capitol_core::citizen::decide::{self, Cascade};
 use capitol_core::citizen::habit::{self, Habit, Kind};
 use capitol_core::citizen::report::{Soak, TownReport};
 use capitol_core::citizen::schedule;
+use capitol_core::citizen::voice;
 use capitol_core::citizen::town::{self, Admin, Hours, Logs, Reporter, Roster, Town};
 use capitol_core::net::{self, NetConfig, RestRequest, RestResponse};
 use capitol_core::protocol::ledger::Ledger;
@@ -109,6 +110,16 @@ USAGE:
                                  Each round more varies the temperaments
                                  and the scale of books and stock
                                  [default: 1 round, about 100]
+    capitol-town voice [--voice <name>]
+                                 Hear a voice (#311): three made-up
+                                 citizens, reserved, even and warm, each
+                                 say a line for every occasion (a greeting,
+                                 the words round a trade, a sale, an answer
+                                 and a letter's reply), with how long each
+                                 took and what they cost. A model's line
+                                 is waited for here, where a town says the
+                                 phrasebook's after 2 s [default:
+                                 claude-haiku]
 
 FLAGS:
     --roster <path>   The roster [default: town.toml]
@@ -155,6 +166,10 @@ FLAGS:
                       sample a costly layer [default: 1]
     --in-flight <n>   With replay, how many decisions may wait on a slow
                       layer at once; 1 replays one at a time [default: 8]
+    --voice <name>    With voice, whose words: phrasebook, claude-haiku or
+                      claude-sonnet ($ANTHROPIC_API_KEY). A roster gives
+                      its citizens one with `voice = \"claude-haiku\"`
+                      [default: phrasebook]
     -h, --help        Print this
 
 The roster holds keys, so keep it out of git (flint-client/.gitignore has
@@ -204,6 +219,7 @@ enum Action {
         in_flight: usize,
     },
     Corpus { dir: Option<PathBuf>, rounds: u32 },
+    Voice { name: String },
 }
 
 /// How many citizens a mint makes.
@@ -257,6 +273,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
     let mut sample_given = false;
     let mut compared: Vec<PathBuf> = Vec::new();
     let mut out = None;
+    let mut voice_name = None;
     let mut options = Options {
         action: Action::Run,
         roster: PathBuf::from(town::ROSTER),
@@ -280,7 +297,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         let reading_books = matches!(&action, Some(Action::Books { file }) if file.as_os_str().is_empty());
         let comparing = matches!(action, Some(Action::Compare { .. }));
         let mut set = |a: Action| match action.replace(a) {
-            Some(_) => Err("run, soak, books, compare, mint, habits, status, replay and corpus go one at a time".to_string()),
+            Some(_) => Err("run, soak, books, compare, mint, habits, status, replay, corpus and voice go one at a time".to_string()),
             None => Ok(()),
         };
         match arg.as_str() {
@@ -312,6 +329,12 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                 in_flight: IN_FLIGHT,
             })?,
             "corpus" => set(Action::Corpus { dir: None, rounds: 1 })?,
+            "voice" => set(Action::Voice { name: String::new() })?,
+            "--voice" => {
+                let name = value()?;
+                voice::check_voice(&name)?;
+                voice_name = Some(name);
+            }
             "--rounds" => {
                 let n: u32 = number(&arg, &value()?)?;
                 if n == 0 {
@@ -424,10 +447,16 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             dir: corpus_dir,
             rounds: rounds.take().unwrap_or(1),
         },
+        (Action::Voice { .. }, None, None) => Action::Voice {
+            name: voice_name.take().unwrap_or_else(|| "claude-haiku".into()),
+        },
         (action, None, None) => action,
     };
     if layers.is_some() {
         return Err("--layers goes with replay".into());
+    }
+    if voice_name.is_some() {
+        return Err("--voice goes with voice".into());
     }
     if rounds.is_some() {
         return Err("--rounds goes with corpus".into());
@@ -1051,6 +1080,66 @@ fn corpus(options: &Options, dir: Option<&Path>, rounds: u32) -> Result<(), Stri
     Ok(())
 }
 
+/// Three made-up citizens say a line for every occasion in `name`'s voice,
+/// and what each took and cost (#311).
+fn audition(name: &str) -> Result<(), String> {
+    use capitol_core::citizen::phrases::{Moment, Occasion, Words};
+    if name != voice::DEFAULT_VOICE && std::env::var("ANTHROPIC_API_KEY").map_or(true, |k| k.trim().is_empty()) {
+        return Err(format!("{name} needs $ANTHROPIC_API_KEY"));
+    }
+    let citizens = [
+        ("Wren Ashby", "gatherer-ore", 0.15, 0.8),
+        ("Percy Sawyer", "crafter-planks", 0.5, 0.5),
+        ("Ada Reeder", "merchant", 0.9, 0.2),
+    ];
+    let mut cents = 0.0;
+    for (n, (citizen, role, sociability, thrift)) in citizens.into_iter().enumerate() {
+        let who = decide::Who {
+            name: citizen.into(),
+            role: role.into(),
+            temperament: decide::Temperament {
+                sociability,
+                thrift,
+                ..Default::default()
+            },
+        };
+        println!("── {citizen}, {role}, sociability {sociability}");
+        let mut speaker = voice::speaker(name, who, n as u64)?;
+        let first = citizen.split_whitespace().next().unwrap_or(citizen);
+        for occasion in Occasion::ALL {
+            let mut moment = Moment::with("Bram Cole", uuid::Uuid::from_u128(7 + n as u128), Some(unix_ms()));
+            moment.heard = match occasion {
+                Occasion::Answer => Some(format!("{first}, are you selling today?")),
+                Occasion::Letter => Some(format!(
+                    "Dear {first},\nThank you for your help at the hall last week. Will you be there tomorrow?\nBram"
+                )),
+                _ => None,
+            };
+            let asked = Instant::now();
+            let words = match speaker.line(occasion, &moment) {
+                Words::Pending(ticket) => loop {
+                    if let Some(words) = speaker.poll(ticket) {
+                        break words;
+                    }
+                    if asked.elapsed() > decide::remote::TIMEOUT {
+                        break Words::Nothing;
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                },
+                words => words,
+            };
+            let took = asked.elapsed().as_secs_f64();
+            match words {
+                Words::Line(line) => println!("   {occasion:?} ({took:.1} s): {}", line.replace('\n', " / ")),
+                _ => println!("   {occasion:?} ({took:.1} s): nothing, so the phrasebook speaks"),
+            }
+        }
+        cents += speaker.spent();
+    }
+    println!("spent {cents:.4}¢ on {} lines", citizens.len() * Occasion::ALL.len());
+    Ok(())
+}
+
 /// Prints the health and writes it beside the roster, and appends who was
 /// where in their day to the presence log (C1.2).
 fn report(town: &Town, server: &str, roster: &Path) {
@@ -1175,6 +1264,7 @@ fn main() -> ExitCode {
             in_flight,
         } => replay(&options, logs, layers, stride, in_flight),
         Action::Corpus { ref dir, rounds } => corpus(&options, dir.as_deref(), rounds),
+        Action::Voice { ref name } => audition(name),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -1308,6 +1398,16 @@ mod tests {
         assert!(parse(args("replay --in-flight 0")).is_err());
         assert!(parse(args("--in-flight 4")).is_err(), "--in-flight without replay");
         assert_eq!(parse(args("corpus")).unwrap().unwrap().action, Action::Corpus { dir: None, rounds: 1 });
+        assert_eq!(
+            parse(args("voice")).unwrap().unwrap().action,
+            Action::Voice { name: "claude-haiku".into() }
+        );
+        assert_eq!(
+            parse(args("voice --voice phrasebook")).unwrap().unwrap().action,
+            Action::Voice { name: "phrasebook".into() }
+        );
+        assert!(parse(args("voice --voice oracle")).unwrap_err().contains("is no voice"));
+        assert!(parse(args("run --voice claude-haiku")).unwrap_err().contains("goes with voice"));
         assert_eq!(
             parse(args("corpus here --rounds 5")).unwrap().unwrap().action,
             Action::Corpus {

@@ -55,6 +55,7 @@ use super::decide::{self, Cascade, Mind, SharedLog};
 use super::habit::{Habit, Kind, Mix, Presence};
 use super::persona::{self, Avenue, Home, Market, Persona, Temperament};
 use super::schedule::{self, Phase, Schedule};
+use super::voice;
 use crate::bot::{Bot, BotError};
 use crate::net::{self, NetConfig, RestRequest, RestResponse};
 use crate::sim::report::{BotRun, Entry};
@@ -87,6 +88,8 @@ struct RosterFile {
     server: Option<String>,
     /// The decision layers every citizen has, bottom first (C1.3).
     layers: Option<Vec<String>>,
+    /// Who finds every citizen's words (#311): `phrasebook` unless it says.
+    voice: Option<String>,
     /// When citizens play (#276): the town's mix of habits.
     habits: Option<HabitsFile>,
     #[serde(default, rename = "citizen")]
@@ -126,6 +129,8 @@ struct CitizenFile {
     key_file: Option<PathBuf>,
     /// This citizen's layers, in place of the town's.
     layers: Option<Vec<String>>,
+    /// This citizen's voice, in place of the town's.
+    voice: Option<String>,
     // The persona (C1.2). Any part left out is the one the name seeds.
     home: Option<HomeFile>,
     market: Option<String>,
@@ -223,6 +228,8 @@ pub struct Roster {
     pub server: Option<String>,
     /// The town's decision layers, bottom first: `["rules"]` unless it says.
     pub layers: Vec<String>,
+    /// Who finds the town's words (#311): `phrasebook` unless it says.
+    pub voice: String,
     /// The town's mix of habits (#276), for the citizens it seeds.
     pub mix: Mix,
     pub citizens: Vec<Citizen>,
@@ -235,6 +242,8 @@ pub struct Citizen {
     pub role: Role,
     /// Its decision layers (C1.3): its own, or the town's.
     pub layers: Vec<String>,
+    /// Its voice (#311): its own, or the town's.
+    pub voice: String,
     pub persona: Persona,
     key: Key,
 }
@@ -276,6 +285,7 @@ impl Roster {
                 path: path.to_path_buf(),
                 server: None,
                 layers: default_layers(),
+                voice: voice::DEFAULT_VOICE.to_string(),
                 mix: Mix::default(),
                 citizens: Vec::new(),
             })
@@ -288,6 +298,8 @@ impl Roster {
         let dir = path.parent().unwrap_or(Path::new("."));
         let layers = file.layers.unwrap_or_else(default_layers);
         decide::check_layers(&layers).map_err(|e| format!("{}: layers: {e}", path.display()))?;
+        let town_voice = file.voice.unwrap_or_else(|| voice::DEFAULT_VOICE.to_string());
+        voice::check_voice(&town_voice).map_err(|e| format!("{}: voice: {e}", path.display()))?;
         let mix = match file.habits.and_then(|h| h.mix) {
             Some(m) => Mix {
                 dedicated: m.dedicated,
@@ -316,10 +328,13 @@ impl Roster {
             }
             let own = c.layers.unwrap_or_else(|| layers.clone());
             decide::check_layers(&own).map_err(|e| what(&format!("has layers that won't do: {e}")))?;
+            let own_voice = c.voice.unwrap_or_else(|| town_voice.clone());
+            voice::check_voice(&own_voice).map_err(|e| what(&format!("has a voice that won't do: {e}")))?;
             citizens.push(Citizen {
                 name: c.name,
                 role,
                 layers: own,
+                voice: own_voice,
                 persona,
                 key,
             });
@@ -328,6 +343,7 @@ impl Roster {
             path: path.to_path_buf(),
             server: file.server,
             layers,
+            voice: town_voice,
             mix,
             citizens,
         })
@@ -342,6 +358,7 @@ impl Roster {
             name: name.to_string(),
             role,
             layers: self.layers.clone(),
+            voice: self.voice.clone(),
             persona: Persona::seeded_in(role, seed(name), &self.mix),
             key: Key::Inline(secret.to_string()),
         };
@@ -1063,7 +1080,14 @@ fn one_life(
     if let Some(log) = log {
         mind = mind.with_log(log.clone());
     }
-    sim::run::live(bot, citizen.role, &citizen.persona, seed(&citizen.name), mind, tether)
+    let who = decide::Who {
+        name: citizen.name.clone(),
+        role: citizen.role.slug().to_string(),
+        temperament: citizen.persona.temperament,
+    };
+    // The roster checked the voice
+    let voice = voice::voice(&citizen.voice, who, seed(&citizen.name)).map_err(BotError::Failed)?;
+    sim::run::live(bot, citizen.role, &citizen.persona, seed(&citizen.name), mind, voice, tether)
 }
 
 /// Signed out until its next session (`until`, unix ms), or the town stops.
@@ -1226,6 +1250,7 @@ name = "Percy Sawyer"
 role = "crafter-planks"
 key_file = "keys/percy.key"
 layers = ["rules"]
+voice = "claude-haiku"
 "#;
 
     #[test]
@@ -1240,6 +1265,10 @@ layers = ["rules"]
         // The town's layers, which Percy changes
         assert_eq!(roster.layers, ["rules"]);
         assert_eq!(roster.citizens[0].layers, ["rules"]);
+        // The town's voice, which Percy changes
+        assert_eq!(roster.voice, "phrasebook");
+        assert_eq!(roster.citizens[0].voice, "phrasebook");
+        assert_eq!(roster.citizens[1].voice, "claude-haiku");
         // From the roster's own directory
         assert_eq!(roster.citizens[1].key, Key::File(Path::new("town").join("keys/percy.key")));
     }
@@ -1259,6 +1288,12 @@ layers = ["rules"]
         assert!(Roster::parse("", path).unwrap().citizens.is_empty());
         assert!(err("layers = [\"rules\", \"oracle\"]").contains("\"oracle\" is no layer"));
         assert!(err("layers = []").contains("at least one"));
+        assert!(err("voice = \"oracle\"").contains("\"oracle\" is no voice"));
+        assert!(err("[[citizen]]
+name = \"A\"
+role = \"builder\"
+key = \"k\"
+voice = \"x\"").contains("has a voice"));
         assert!(err("[[citizen]]
 name = \"A\"
 role = \"builder\"
@@ -1347,6 +1382,7 @@ schedule = { wake = "06:10", market = "09:30-11:00", home = "18:50", bed = "21:1
                     name: name.clone(),
                     role,
                     layers: default_layers(),
+                    voice: voice::DEFAULT_VOICE.to_string(),
                     persona: Persona::seeded(role, seed(&name)),
                     key: Key::Inline("k".into()),
                 };

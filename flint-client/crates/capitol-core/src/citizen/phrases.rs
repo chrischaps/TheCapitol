@@ -2,9 +2,11 @@
 //! occasion, in three voices by temperament, picked by a seeded whim so the
 //! same moment gives the same line on replay.
 //!
-//! The phrasebook is the rules layer of the [`Speaker`] seam. A Claude layer
-//! (#311) goes over the same seam later: it gets the same [`Occasion`] and
-//! [`Moment`], and the phrasebook answers whenever it has nothing yet.
+//! The phrasebook is the rules layer of the [`Speaker`] seam. A model layer
+//! (#311, [`voice`](super::voice)) goes over the same seam: it gets the same
+//! [`Occasion`] and [`Moment`], answers later ([`Words::Pending`]), and the
+//! phrasebook answers whenever it has nothing, or nothing in time
+//! ([`TALK_WAIT`]). The world never waits on it.
 //!
 //! Lines may carry `{name}` (the other's first name) and `{hello}` (good
 //! morning, afternoon or evening by the server's clock). They never name
@@ -17,13 +19,13 @@
 //! day per sender, and never more than [`LINES_PER_WINDOW`] in the chat
 //! bucket's window, half what the server allows.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use capitol_protocol::rules;
 use uuid::Uuid;
 
-use super::decide::Temperament;
+use super::decide::{Temperament, Ticket};
 
 /// When a citizen speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -110,11 +112,40 @@ impl Moment {
     }
 }
 
-/// Something that finds a citizen's words: the phrasebook, and later a model
-/// (#311). `None` is silence, which is always allowed.
-pub trait Speaker: Send {
-    fn line(&mut self, occasion: Occasion, moment: &Moment) -> Option<String>;
+/// What a [`Speaker`] gives for an occasion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Words {
+    /// The line, now.
+    Line(String),
+    /// Asked; the line comes to [`Speaker::poll`] under the ticket.
+    Pending(Ticket),
+    /// Nothing from this speaker (no key, its budget spent, a refusal, a
+    /// ramble): the phrasebook answers.
+    Nothing,
 }
+
+/// Something that finds a citizen's words: the phrasebook, or a model over
+/// it (#311).
+pub trait Speaker: Send {
+    /// What its lines are counted under in [`Voice::tally`].
+    fn name(&self) -> &str;
+
+    fn line(&mut self, occasion: Occasion, moment: &Moment) -> Words;
+
+    /// A pending line's answer, once it has come: a [`Words::Line`] or
+    /// [`Words::Nothing`].
+    fn poll(&mut self, _ticket: Ticket) -> Option<Words> {
+        None
+    }
+
+    /// What its lines have cost so far, in US cents.
+    fn spent(&self) -> f64 {
+        0.0
+    }
+}
+
+/// The phrasebook's name in a [`Voice::tally`].
+pub const PHRASEBOOK: &str = "phrasebook";
 
 /// The rules layer: the lines below, in the citizen's voice.
 #[derive(Debug, Clone, Copy)]
@@ -132,12 +163,22 @@ impl Phrasebook {
     }
 }
 
-impl Speaker for Phrasebook {
-    fn line(&mut self, occasion: Occasion, moment: &Moment) -> Option<String> {
+impl Phrasebook {
+    /// Its line for `occasion` at `moment`: the same moment, the same line.
+    pub fn say(&self, occasion: Occasion, moment: &Moment) -> String {
         let lines = lines(occasion, self.band);
         let whim = mix(mix(self.seed, occasion as u64), moment.key);
-        let line = lines[(whim % lines.len() as u64) as usize];
-        Some(fill(line, moment))
+        fill(lines[(whim % lines.len() as u64) as usize], moment)
+    }
+}
+
+impl Speaker for Phrasebook {
+    fn name(&self) -> &str {
+        PHRASEBOOK
+    }
+
+    fn line(&mut self, occasion: Occasion, moment: &Moment) -> Words {
+        Words::Line(self.say(occasion, moment))
     }
 }
 
@@ -366,62 +407,107 @@ pub const LINE_WINDOW: Duration = Duration::from_secs(10);
 /// Lines in a [`LINE_WINDOW`]: half the server's bucket (8), so a citizen
 /// is never refused for talking.
 pub const LINES_PER_WINDOW: usize = 4;
+/// How long a model's line is waited for before the phrasebook's is said
+/// instead (#311): a greeting's pause ([`Bot`](crate::bot::Bot)'s two
+/// seconds), which Haiku's p95 of 1.7 s fits (C3.2). An answer waits until
+/// its moment if that's later.
+pub const TALK_WAIT: Duration = Duration::from_secs(2);
+/// How long a model's reply to a letter is waited for: a letter is no
+/// conversation.
+pub const LETTER_WAIT: Duration = Duration::from_secs(60);
 
-/// A citizen's voice: its [`Speaker`], and the limits on how often it may
-/// use it. Pure: every call is given the time.
+/// A line on its way: when it may be said, until when a model's is waited
+/// for, and to whom.
+struct Due {
+    at: Instant,
+    until: Instant,
+    /// `None` out loud; a letter's sender for a reply.
+    to: Option<Uuid>,
+    words: Coming,
+}
+
+enum Coming {
+    Ready(String),
+    /// Asked of the model, with the phrasebook's line if it has nothing.
+    Asked(Ticket, String),
+}
+
+/// A citizen's voice: its [`Speaker`] over its phrasebook, and the limits
+/// on how often it may use them. Pure: every call is given the time.
 pub struct Voice {
     speaker: Box<dyn Speaker>,
+    /// What it says when the speaker has nothing: the speaker itself, for
+    /// the phrasebook.
+    book: Phrasebook,
     /// Whom it greeted, by game hour.
     greeted: HashMap<Uuid, i64>,
     /// Whom it last answered, and when.
     answered: HashMap<Uuid, Instant>,
     /// Whose letters it replied to, by game day.
     replied: HashMap<Uuid, i64>,
-    /// Answers waiting their moment: when, and the line.
-    due: Vec<(Instant, String)>,
+    /// Lines waiting their moment, or a model's words.
+    due: Vec<Due>,
     /// When it spoke, over the last [`LINE_WINDOW`].
     spoken: VecDeque<Instant>,
+    /// Lines found, by the speaker that found the words.
+    tally: BTreeMap<String, usize>,
     rng: u64,
 }
 
 impl Voice {
-    pub fn new(speaker: Box<dyn Speaker>, seed: u64) -> Voice {
+    /// `speaker` over the phrasebook in `temperament`'s voice.
+    pub fn new(speaker: Box<dyn Speaker>, temperament: &Temperament, seed: u64) -> Voice {
         Voice {
             speaker,
+            book: Phrasebook::new(temperament, seed),
             greeted: HashMap::new(),
             answered: HashMap::new(),
             replied: HashMap::new(),
             due: Vec::new(),
             spoken: VecDeque::new(),
+            tally: BTreeMap::new(),
             rng: mix(seed, 0x5eed) | 1,
         }
     }
 
-    /// The phrasebook in `temperament`'s voice.
+    /// The phrasebook in `temperament`'s voice, alone.
     pub fn phrasebook(temperament: &Temperament, seed: u64) -> Voice {
-        Voice::new(Box::new(Phrasebook::new(temperament, seed)), seed)
+        Voice::new(Box::new(Phrasebook::new(temperament, seed)), temperament, seed)
     }
 
     /// A greeting for `who` at `server_ms`, unless it greeted them this game
-    /// hour already.
+    /// hour already. `None` while a model finds the words: they come from
+    /// [`due`](Self::due).
     pub fn greet(&mut self, who: Uuid, moment: &Moment, server_ms: i64, now: Instant) -> Option<String> {
         let hour = server_ms.div_euclid(GAME_HOUR_MS);
-        if self.greeted.get(&who) == Some(&hour) {
+        if self.greeted.get(&who) == Some(&hour) || !self.room(now) {
             return None;
         }
-        let line = self.speak(Occasion::Greeting, moment, now)?;
         self.greeted.insert(who, hour);
-        Some(line)
+        self.speak(Occasion::Greeting, moment, now)
     }
 
-    /// A line for `occasion` now, if the window has room for it.
+    /// A line for `occasion` now, if the window has room for it. `None`
+    /// while a model finds the words: they come from [`due`](Self::due).
     pub fn speak(&mut self, occasion: Occasion, moment: &Moment, now: Instant) -> Option<String> {
         if !self.room(now) {
             return None;
         }
-        let line = self.speaker.line(occasion, moment)?;
-        self.spoken.push_back(now);
-        Some(line)
+        match self.ask(occasion, moment) {
+            Coming::Ready(line) => {
+                self.spoken.push_back(now);
+                Some(line)
+            }
+            words => {
+                self.due.push(Due {
+                    at: now,
+                    until: now + TALK_WAIT,
+                    to: None,
+                    words,
+                });
+                None
+            }
+        }
     }
 
     /// `from` named it in a local line: an answer is due 2 to 5 s from
@@ -431,47 +517,135 @@ impl Voice {
         if self.answered.get(&from).is_some_and(|at| now.duration_since(*at) < ANSWER_AGAIN) {
             return false;
         }
-        let Some(line) = self.speaker.line(Occasion::Answer, moment) else {
-            return false;
-        };
         self.answered.insert(from, now);
         let (least, most) = ANSWER_AFTER;
-        let after = least + (most - least) * self.random();
-        self.due.push((now + Duration::from_secs_f64(after), line));
+        let at = now + Duration::from_secs_f64(least + (most - least) * self.random());
+        let words = self.ask(Occasion::Answer, moment);
+        self.due.push(Due {
+            at,
+            until: at.max(now + TALK_WAIT),
+            to: None,
+            words,
+        });
         true
     }
 
-    /// The answers whose moment has come, as far as the window has room.
-    /// One the window has no room for waits.
+    /// The lines whose moment has come, as far as the window has room. One
+    /// the window has no room for waits.
     pub fn due(&mut self, now: Instant) -> Vec<String> {
+        self.settle(now);
         let mut out = Vec::new();
-        self.due.sort_by_key(|(at, _)| *at);
-        while self.due.first().is_some_and(|(at, _)| *at <= now) && self.room(now) {
-            let (_, line) = self.due.remove(0);
+        self.due.sort_by_key(|d| d.at);
+        while let Some(i) = self.due.iter().position(|d| d.to.is_none() && d.at <= now && matches!(d.words, Coming::Ready(_))) {
+            if !self.room(now) {
+                break;
+            }
+            let Coming::Ready(line) = self.due.remove(i).words else {
+                unreachable!("found ready");
+            };
             self.spoken.push_back(now);
             out.push(line);
         }
         out
     }
 
-    /// Whether any answer is waiting.
+    /// Whether any line is waiting, out loud or by letter.
     pub fn has_due(&self) -> bool {
         !self.due.is_empty()
     }
 
-    /// A reply to a letter from `from` (S1.5), unless it replied to them
-    /// this game day already. Nothing calls it until the mailbox lands
-    /// ([#432](https://github.com/chrischaps/TheCapitol/issues/432)). A letter isn't talk, so the window doesn't
-    /// count it: the server's bucket counts letters with lines, but a
-    /// reply a game day apart never comes near it.
-    pub fn letter(&mut self, from: Uuid, moment: &Moment, server_ms: i64) -> Option<String> {
+    /// A reply to a letter from `from` (S1.5) is due, unless it replied to
+    /// them this game day already. True if one was; it comes from
+    /// [`replies`](Self::replies). Nothing calls it until the mailbox lands
+    /// ([#432](https://github.com/chrischaps/TheCapitol/issues/432)). A
+    /// letter isn't talk, so the window doesn't count it: the server's
+    /// bucket counts letters with lines, but a reply a game day apart never
+    /// comes near it.
+    pub fn letter(&mut self, from: Uuid, moment: &Moment, server_ms: i64, now: Instant) -> bool {
         let day = server_ms.div_euclid(GAME_DAY_MS);
         if self.replied.get(&from) == Some(&day) {
-            return None;
+            return false;
         }
-        let line = self.speaker.line(Occasion::Letter, moment)?;
         self.replied.insert(from, day);
-        Some(line)
+        let words = self.ask(Occasion::Letter, moment);
+        self.due.push(Due {
+            at: now,
+            until: now + LETTER_WAIT,
+            to: Some(from),
+            words,
+        });
+        true
+    }
+
+    /// The letters' replies that are ready: to whom, and the reply.
+    pub fn replies(&mut self, now: Instant) -> Vec<(Uuid, String)> {
+        self.settle(now);
+        let (ready, waiting) = std::mem::take(&mut self.due)
+            .into_iter()
+            .partition::<Vec<_>, _>(|d| d.to.is_some() && matches!(d.words, Coming::Ready(_)));
+        self.due = waiting;
+        ready
+            .into_iter()
+            .filter_map(|d| match (d.to, d.words) {
+                (Some(to), Coming::Ready(line)) => Some((to, line)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What its speaker's lines have cost so far, in US cents.
+    pub fn spent(&self) -> f64 {
+        self.speaker.spent()
+    }
+
+    /// The lines it has found, by the speaker that found the words:
+    /// [`PHRASEBOOK`] when a model had nothing in time. Nothing reports it
+    /// yet ([#433](https://github.com/chrischaps/TheCapitol/issues/433)).
+    pub fn tally(&self) -> &BTreeMap<String, usize> {
+        &self.tally
+    }
+
+    fn count(&mut self, by: &str) {
+        *self.tally.entry(by.to_string()).or_default() += 1;
+    }
+
+    /// The speaker's words for `occasion`, or what's coming of them.
+    fn ask(&mut self, occasion: Occasion, moment: &Moment) -> Coming {
+        match self.speaker.line(occasion, moment) {
+            Words::Line(line) => {
+                let name = self.speaker.name().to_string();
+                self.count(&name);
+                Coming::Ready(line)
+            }
+            Words::Pending(ticket) => Coming::Asked(ticket, self.book.say(occasion, moment)),
+            Words::Nothing => {
+                self.count(PHRASEBOOK);
+                Coming::Ready(self.book.say(occasion, moment))
+            }
+        }
+    }
+
+    /// Takes in a model's words that have come, and the phrasebook's for
+    /// those it has waited on long enough.
+    fn settle(&mut self, now: Instant) {
+        let name = self.speaker.name().to_string();
+        let mut found = Vec::new();
+        for d in &mut self.due {
+            let Coming::Asked(ticket, fallback) = &mut d.words else {
+                continue;
+            };
+            let (by, line) = match self.speaker.poll(*ticket) {
+                Some(Words::Line(line)) => (name.as_str(), line),
+                Some(_) => (PHRASEBOOK, std::mem::take(fallback)),
+                None if now >= d.until => (PHRASEBOOK, std::mem::take(fallback)),
+                None => continue,
+            };
+            found.push(by.to_string());
+            d.words = Coming::Ready(line);
+        }
+        for by in found {
+            self.count(&by);
+        }
     }
 
     /// Room for a line in the window ending `now`.
@@ -531,9 +705,9 @@ mod tests {
         // lines rather than sticking on one
         let mut seen = std::collections::HashSet::new();
         for seed in 0..4 {
-            let mut book = Phrasebook::new(&temper(0.5), seed);
+            let book = Phrasebook::new(&temper(0.5), seed);
             for minute in 0..60 {
-                seen.insert(book.line(Occasion::Greeting, &moment("Ada", ADA, NOON + minute * GAME_MINUTE_MS)));
+                seen.insert(book.say(Occasion::Greeting, &moment("Ada", ADA, NOON + minute * GAME_MINUTE_MS)));
             }
         }
         assert_eq!(seen.len(), lines(Occasion::Greeting, Band::Even).len());
@@ -648,10 +822,114 @@ mod tests {
     #[test]
     fn a_letter_is_answered_once_a_game_day_per_sender() {
         let mut voice = Voice::phrasebook(&temper(0.9), 6);
+        let now = Instant::now();
         let ada = moment("Ada", ADA, NOON);
-        assert!(voice.letter(ADA, &ada, NOON).is_some());
-        assert!(voice.letter(ADA, &ada, NOON + GAME_HOUR_MS * 5).is_none());
-        assert!(voice.letter(BRAM, &ada, NOON + GAME_HOUR_MS * 5).is_some());
-        assert!(voice.letter(ADA, &ada, NOON + GAME_DAY_MS).is_some());
+        assert!(voice.letter(ADA, &ada, NOON, now));
+        assert!(!voice.letter(ADA, &ada, NOON + GAME_HOUR_MS * 5, now));
+        assert!(voice.letter(BRAM, &ada, NOON + GAME_HOUR_MS * 5, now));
+        assert!(voice.letter(ADA, &ada, NOON + GAME_DAY_MS, now));
+        let replies = voice.replies(now);
+        assert_eq!(replies.iter().map(|(to, _)| *to).collect::<Vec<_>>(), [ADA, BRAM, ADA]);
+        assert!(voice.due(now).is_empty(), "a reply is a letter, not a line out loud");
+        assert!(!voice.has_due());
+    }
+
+    /// A model that answers when the test says: each line it's asked for
+    /// pends, and `answer` gives the oldest its words.
+    struct Slow {
+        asked: Asked,
+    }
+
+    /// Each line asked for, by ticket, and its words once the test gives them.
+    type Asked = std::sync::Arc<std::sync::Mutex<Vec<(u64, Option<Words>)>>>;
+
+    impl Speaker for Slow {
+        fn name(&self) -> &str {
+            "slow"
+        }
+
+        fn line(&mut self, _: Occasion, _: &Moment) -> Words {
+            let mut asked = self.asked.lock().unwrap();
+            let ticket = asked.len() as u64;
+            asked.push((ticket, None));
+            Words::Pending(Ticket(ticket))
+        }
+
+        fn poll(&mut self, ticket: Ticket) -> Option<Words> {
+            self.asked.lock().unwrap().iter_mut().find(|(t, _)| *t == ticket.0)?.1.take()
+        }
+    }
+
+    fn slow() -> (Voice, Asked) {
+        let asked = Asked::default();
+        let speaker = Slow { asked: std::sync::Arc::clone(&asked) };
+        (Voice::new(Box::new(speaker), &temper(0.5), 7), asked)
+    }
+
+    fn answer(asked: &Asked, ticket: u64, words: Words) {
+        asked.lock().unwrap()[ticket as usize].1 = Some(words);
+    }
+
+    #[test]
+    fn a_models_line_is_said_when_it_comes() {
+        let (mut voice, asked) = slow();
+        let now = Instant::now();
+        let ada = moment("Ada", ADA, NOON);
+        assert_eq!(voice.greet(ADA, &ada, NOON, now), None, "the world doesn't wait");
+        assert!(voice.has_due());
+        assert!(voice.due(now + Duration::from_millis(500)).is_empty(), "not yet come");
+        answer(&asked, 0, Words::Line("Well met, Ada.".into()));
+        assert_eq!(voice.due(now + Duration::from_millis(900)), ["Well met, Ada."]);
+        assert!(!voice.has_due());
+        assert_eq!(voice.tally().get("slow"), Some(&1));
+        // A greeting waiting on the model is still a greeting this hour
+        assert_eq!(voice.greet(ADA, &ada, NOON, now + LINE_WINDOW), None);
+        assert_eq!(asked.lock().unwrap().len(), 1, "and isn't asked again");
+    }
+
+    #[test]
+    fn the_phrasebook_speaks_when_a_model_is_late_or_has_nothing() {
+        let (mut voice, asked) = slow();
+        let now = Instant::now();
+        let ada = moment("Ada", ADA, NOON);
+        let book = Phrasebook::new(&temper(0.5), 7);
+        // Late: the phrasebook's own line, at the end of the wait
+        assert_eq!(voice.speak(Occasion::Accepting, &ada, now), None);
+        assert!(voice.due(now + TALK_WAIT - Duration::from_millis(1)).is_empty());
+        assert_eq!(voice.due(now + TALK_WAIT), [book.say(Occasion::Accepting, &ada)]);
+        // An answer past its wait is dropped, not said twice
+        answer(&asked, 0, Words::Line("Too late.".into()));
+        assert!(voice.due(now + TALK_WAIT * 2).is_empty());
+        // Nothing (a refusal, a ramble): the phrasebook, at once
+        let later = now + LINE_WINDOW;
+        assert_eq!(voice.speak(Occasion::Declining, &ada, later), None);
+        answer(&asked, 1, Words::Nothing);
+        assert_eq!(voice.due(later), [book.say(Occasion::Declining, &ada)]);
+        assert_eq!(voice.tally().get(PHRASEBOOK), Some(&2));
+    }
+
+    #[test]
+    fn a_models_answer_still_waits_for_its_moment() {
+        let (mut voice, asked) = slow();
+        let now = Instant::now();
+        let mut ada = moment("Ada", ADA, NOON);
+        ada.heard = Some("Bram, any rope?".into());
+        assert!(voice.spoken_to(ADA, &ada, now));
+        answer(&asked, 0, Words::Line("Not today, Ada.".into()));
+        assert!(voice.due(now + Duration::from_millis(1999)).is_empty(), "too soon, though it's come");
+        assert_eq!(voice.due(now + Duration::from_secs(5)), ["Not today, Ada."]);
+    }
+
+    #[test]
+    fn a_letters_reply_waits_longer_for_a_model() {
+        let (mut voice, asked) = slow();
+        let now = Instant::now();
+        let ada = moment("Ada", ADA, NOON);
+        assert!(voice.letter(ADA, &ada, NOON, now));
+        assert!(voice.replies(now + TALK_WAIT * 5).is_empty(), "a letter is no conversation");
+        answer(&asked, 0, Words::Line("Dear Ada, thank you.".into()));
+        assert_eq!(voice.replies(now + TALK_WAIT * 5), [(ADA, "Dear Ada, thank you.".to_string())]);
+        assert!(voice.letter(BRAM, &ada, NOON, now));
+        assert_eq!(voice.replies(now + LETTER_WAIT).len(), 1, "the phrasebook's, at the end of the wait");
     }
 }

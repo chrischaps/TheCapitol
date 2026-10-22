@@ -207,7 +207,15 @@ pub fn run(config: &SimConfig) -> Result<(Report, PathBuf, PathBuf), String> {
 /// buying a lot to live on first if it has saved enough, and then the
 /// night's work from home. `Ok` once stopped, or away; `Err` when the bot
 /// couldn't start, or the server won't have it back.
-pub(crate) fn live(mut bot: Bot, role: Role, persona: &Persona, seed: u64, mut mind: Mind, town: &Tether) -> Result<Ended, BotError> {
+pub(crate) fn live(
+    mut bot: Bot,
+    role: Role,
+    persona: &Persona,
+    seed: u64,
+    mut mind: Mind,
+    voice: Voice,
+    town: &Tether,
+) -> Result<Ended, BotError> {
     let scale = bot.health()?.sim_tick_scale.unwrap_or(1.0);
     mind.set_scale(scale);
     for item in MARKET_ITEMS {
@@ -218,7 +226,7 @@ pub(crate) fn live(mut bot: Bot, role: Role, persona: &Persona, seed: u64, mut m
     bot.my_orders()?;
     bot.answer_trades(true);
     bot.greet_people(true);
-    bot.speak_with(Voice::phrasebook(&persona.temperament, seed));
+    bot.speak_with(voice);
     let strands = bot.state().strands();
     town.health(|h| h.strands = strands);
     let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true, mind);

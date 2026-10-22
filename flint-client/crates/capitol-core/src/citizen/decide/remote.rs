@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{Choice, Lot, Question, Situation, Span, Temperament, Ticket, Verdict};
+use super::{Choice, Lot, Question, Situation, Span, Temperament, Ticket, Verdict, Who};
 
 /// How long one request may take before it's dropped. Past a layer's time
 /// budget its answer is late anyway.
@@ -55,22 +55,33 @@ pub fn client() -> &'static reqwest::Client {
 }
 
 /// A request's answer, what it cost in US cents, and the model that
-/// answered, if it said.
-pub type Answer = (Verdict, f64, Option<String>);
+/// answered, if it said. A decision's answer is a [`Verdict`]; a citizen's
+/// words (#311) are their own.
+pub type Answer<T = Verdict> = (T, f64, Option<String>);
 
 /// A remote layer's requests in flight, their answers, and its spend.
-#[derive(Default)]
-pub struct Remote {
+pub struct Remote<T = Verdict> {
     next: u64,
-    answers: Arc<Mutex<HashMap<u64, Verdict>>>,
+    answers: Arc<Mutex<HashMap<u64, T>>>,
     cents: Arc<Mutex<f64>>,
     models: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
-impl Remote {
+impl<T> Default for Remote<T> {
+    fn default() -> Self {
+        Remote {
+            next: 0,
+            answers: Arc::default(),
+            cents: Arc::default(),
+            models: Arc::default(),
+        }
+    }
+}
+
+impl<T: Send + 'static> Remote<T> {
     /// Sends `ask` off. Its answer comes to [`poll`](Self::poll) under the
     /// ticket.
-    pub fn send(&mut self, ask: impl Future<Output = Answer> + Send + 'static) -> Ticket {
+    pub fn send(&mut self, ask: impl Future<Output = Answer<T>> + Send + 'static) -> Ticket {
         self.next += 1;
         let ticket = self.next;
         let answers = self.answers.clone();
@@ -89,7 +100,7 @@ impl Remote {
         Ticket(ticket)
     }
 
-    pub fn poll(&mut self, ticket: Ticket) -> Option<Verdict> {
+    pub fn poll(&mut self, ticket: Ticket) -> Option<T> {
         lock(&self.answers).remove(&ticket.0)
     }
 
@@ -177,7 +188,12 @@ pub fn prose(s: &Situation) -> String {
 /// same at every decision a citizen makes, so a model layer can cache it
 /// (C3.2).
 pub fn persona(s: &Situation) -> String {
-    format!("You are {}, {}. {}", s.who.name, role(&s.who.role), character(&s.who.temperament))
+    persona_of(&s.who)
+}
+
+/// [`persona`] from the citizen alone, for what it says (#311).
+pub fn persona_of(who: &Who) -> String {
+    format!("You are {}, {}. {}", who.name, role(&who.role), character(&who.temperament))
 }
 
 /// The rest of [`prose`]: where and when, what the citizen holds, the
@@ -292,7 +308,7 @@ fn temperament(t: &Temperament) -> Value {
 }
 
 /// 0.5 as `12:00`.
-fn clock(day: f64) -> String {
+pub fn clock(day: f64) -> String {
     let minutes = (day.rem_euclid(1.0) * 24.0 * 60.0).round() as i64 % (24 * 60);
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }

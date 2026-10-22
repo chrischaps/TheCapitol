@@ -29,3 +29,4 @@ pub mod phrases;
 pub mod report;
 pub mod schedule;
 pub mod town;
+pub mod voice;
