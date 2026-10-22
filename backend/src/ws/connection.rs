@@ -242,12 +242,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
                             // Every `error` below names the command it refuses (#89).
                             let command = client_msg.type_name();
-                            // Talk has its own bucket, so it never costs a step (Commons D2)
-                            let allowance = if matches!(client_msg, ClientMessage::Say { .. }) {
-                                Ok(())
-                            } else {
-                                state.limiter.check(limit_key)
-                            };
+                            // Talk has its own bucket, so it never costs a step (Commons D2),
+                            // and so does steering, so a turn never costs a command (controls T0.3)
+                            let bucket = crate::rate_limit::Key::of_ws(limit_key, &client_msg);
+                            let allowance = bucket.map_or(Ok(()), |bucket| state.limiter.check(bucket));
+                            if allowance.is_err() && matches!(client_msg, ClientMessage::Steer { .. }) {
+                                // Dropped unanswered: the client never waits on a steer
+                                tracing::debug!("Rate limited WS steer from player {player_id}");
+                                continue;
+                            }
                             if let Err(wait) = allowance {
                                 tracing::info!("Rate limited WS {command} from player {player_id}");
                                 let _ = sender.send(Message::Text(

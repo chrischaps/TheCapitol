@@ -476,7 +476,7 @@ POST /world/craft
 | World interaction | 60 | Bounded by tick rate anyway |
 | Inventory | 120 | Frequent UI access |
 | WebSocket messages | 60 | Inputs rate-limited |
-| Steering (WS `steer`) | 15/s, burst 30 | Its own bucket per connection. Over-limit steers are dropped silently *(planned, controls T0.3, #317)* |
+| Steering (WS `steer`) | 15/s, burst 30 | Its own bucket per connection (`Key::Steer`), so steers never take a command's token. Over-limit steers are dropped with no `error`. `RATE_LIMIT_STEER_BURST`, `RATE_LIMIT_STEER_PER_SEC` |
 
 Bots and CLI clients have same limits - no advantage over UI players.
 

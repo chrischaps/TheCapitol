@@ -198,6 +198,7 @@ Both modes have the same speed, ground rules and reach. Bots may steer (`Bot::st
   - **Socket close** needs nothing of its own: the holder's socket closing takes the avatar out of the world, steer and all. A presence claim clears the steer, not the destination, since a click walk already carried on across a claim.
   - Until T0.3 (#317), steers share the socket's general rate bucket.
 - **T0.3 A rate bucket for steering** (#317, S).
+  *As built:* `Key::Steer(n)` is numbered as the connection's `Key::Connection(n)` (`Key::steering`), and `Key::of_ws(connection, message)` names the bucket each WebSocket message draws from: none for `say`, the steer bucket for `steer`, the connection's for the rest. `RateLimitConfig::limits(&key) -> (burst, per_sec)` replaces `capacity`, `window` and `per_sec`, and the prune uses it. A steer over its limit is dropped with only a `debug` log line; `RATE_LIMITS=off` lets it through like everything else. A turn held at 8 a second never runs the bucket dry.
 - **T0.4 `Steering`, steer prediction and the loopback** (#318, L).
 
 ### T1: Direct mode on keys and mouse (`ct:T1-direct`)

@@ -2,7 +2,9 @@
 //!
 //! Each key gets a token bucket that holds a window's allowance (a minute,
 //! or 10 s for chat) and refills at that rate, so a client may burst up to
-//! its limit and is then held to the steady rate. Four places draw from it:
+//! its limit and is then held to the steady rate. Steering's bucket has a
+//! burst and a refill of its own instead ([`RateLimitConfig::limits`]). Five
+//! places draw from it:
 //!
 //! - `/auth/*`, keyed by the caller's IP ([`by_ip`])
 //! - every authenticated REST route, keyed by account and [`Category`]
@@ -12,6 +14,10 @@
 //!   ([`Key::chat`]), apart from the connection's bucket, so talking never
 //!   costs a step, and an account's second session can't double it
 //!   (commons plan D2). Over it, a line is refused with [`chat_message`].
+//! - `steer` (controls T0.3), per connection ([`Key::Steer`]), apart from its
+//!   commands: a steering client sends about 8 a second while it turns, which
+//!   would empty the commands' 60 a minute in 7 s. Over it, a steer is
+//!   dropped with no answer, since the client never waits for one.
 //!
 //! Over the limit, REST answers `429 Too Many Requests` with `Retry-After`,
 //! and the WebSocket answers the command with an `error`. capitol-core waits
@@ -42,6 +48,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use capitol_protocol::ws::ClientMessage;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -92,6 +99,9 @@ pub enum Key {
     Account(Uuid, Category),
     /// One WebSocket connection. Connections are numbered by [`RateLimiter::connection`].
     Connection(u64),
+    /// The steers of one WebSocket connection, numbered as its
+    /// [`Key::Connection`] is ([`Key::steering`]).
+    Steer(u64),
 }
 
 impl Key {
@@ -101,11 +111,32 @@ impl Key {
         Key::Account(account_id, Category::Chat)
     }
 
+    /// The steer bucket of the connection whose key this is, or `None` when
+    /// it isn't a connection's.
+    pub fn steering(self) -> Option<Key> {
+        match self {
+            Key::Connection(n) => Some(Key::Steer(n)),
+            _ => None,
+        }
+    }
+
     fn category(&self) -> Category {
         match self {
             Key::Ip(_) => Category::Auth,
             Key::Account(_, category) => *category,
-            Key::Connection(_) => Category::Ws,
+            // A steer is a WebSocket message, counted by limits of its own
+            Key::Connection(_) | Key::Steer(_) => Category::Ws,
+        }
+    }
+
+    /// The bucket a WebSocket message on the connection `connection` draws
+    /// from, or `None` for one the socket doesn't count: `say` is counted
+    /// by the talk it makes ([`Key::chat`]).
+    pub fn of_ws(connection: Key, message: &ClientMessage) -> Option<Key> {
+        match message {
+            ClientMessage::Say { .. } => None,
+            ClientMessage::Steer { .. } => connection.steering(),
+            _ => Some(connection),
         }
     }
 }
@@ -126,6 +157,10 @@ pub struct RateLimitConfig {
     pub ws_per_min: u32,
     /// Lines of talk and letters, per account, in [`CHAT_WINDOW_SECS`].
     pub chat_per_10s: u32,
+    /// Steers a connection may send at once,
+    pub steer_burst: u32,
+    /// and then a second (controls T0.3).
+    pub steer_per_sec: u32,
 }
 
 /// The window chat is counted over: 8 lines in it, by default, and then one
@@ -137,6 +172,8 @@ impl Default for RateLimitConfig {
     /// (three every 5 s, `capitol_core::poll`), with room for a bot scouting
     /// `/world/nearby` every second. Market reads share `read`; market writes
     /// are the table's 30. Chat is the commons plan's (D2): 8 lines in 10 s.
+    /// Steering is the controls plan's (D3): 15 a second, nearly twice what a
+    /// turning client sends, with 30 in hand for a reconnect's resend.
     fn default() -> Self {
         Self {
             enabled: true,
@@ -148,6 +185,8 @@ impl Default for RateLimitConfig {
             market_per_min: 30,
             ws_per_min: 60,
             chat_per_10s: 8,
+            steer_burst: 30,
+            steer_per_sec: 15,
         }
     }
 }
@@ -160,8 +199,9 @@ pub const LOOPBACK_AUTH_PER_MIN_DEBUG: u32 = 1000;
 impl RateLimitConfig {
     /// `RATE_LIMITS=off` (or `0`, `false`) turns limiting off. Each limit
     /// can be set on its own: `RATE_LIMIT_AUTH_PER_MIN`, `_LOOPBACK_AUTH_`,
-    /// `_READ_`, `_WORLD_`, `_INVENTORY_`, `_MARKET_` and `_WS_PER_MIN`, and
-    /// `RATE_LIMIT_CHAT_PER_10S`.
+    /// `_READ_`, `_WORLD_`, `_INVENTORY_`, `_MARKET_` and `_WS_PER_MIN`,
+    /// `RATE_LIMIT_CHAT_PER_10S`, and `RATE_LIMIT_STEER_BURST` and
+    /// `RATE_LIMIT_STEER_PER_SEC`.
     pub fn from_env() -> Self {
         Self::from_vars(|name| std::env::var(name).ok(), cfg!(debug_assertions))
     }
@@ -197,28 +237,25 @@ impl RateLimitConfig {
             market_per_min: limit("RATE_LIMIT_MARKET_PER_MIN", d.market_per_min),
             ws_per_min: limit("RATE_LIMIT_WS_PER_MIN", d.ws_per_min),
             chat_per_10s: limit("RATE_LIMIT_CHAT_PER_10S", d.chat_per_10s),
+            steer_burst: limit("RATE_LIMIT_STEER_BURST", d.steer_burst),
+            steer_per_sec: limit("RATE_LIMIT_STEER_PER_SEC", d.steer_per_sec),
         }
     }
 
-    /// The limit for `key`, in its [`window`](Self::window).
-    fn capacity(&self, key: &Key) -> u32 {
-        match key {
+    /// `key`'s bucket: how many it holds, and its refill in requests a
+    /// second. Most hold a window's allowance (a minute, or 10 s for chat)
+    /// and refill over that window; steering has its own burst and refill.
+    pub fn limits(&self, key: &Key) -> (f64, f64) {
+        let allowance = match key {
+            Key::Steer(_) => return (self.steer_burst as f64, self.steer_per_sec as f64),
             Key::Ip(ip) if ip.to_canonical().is_loopback() => self.loopback_auth_per_min,
             key => self.limit(key.category()),
-        }
-    }
-
-    /// How many seconds `key`'s allowance is counted over.
-    fn window(key: &Key) -> f64 {
-        match key.category() {
+        };
+        let window = match key.category() {
             Category::Chat => CHAT_WINDOW_SECS,
             _ => 60.0,
-        }
-    }
-
-    /// The bucket's refill, in requests a second.
-    fn per_sec(&self, key: &Key) -> f64 {
-        self.capacity(key) as f64 / Self::window(key)
+        };
+        (allowance as f64, allowance as f64 / window)
     }
 
     fn limit(&self, category: Category) -> u32 {
@@ -277,15 +314,14 @@ impl RateLimiter {
         if !self.config.enabled {
             return Ok(());
         }
-        let capacity = self.config.capacity(&key) as f64;
-        let per_sec = self.config.per_sec(&key);
+        let (capacity, per_sec) = self.config.limits(&key);
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         if buckets.len() >= PRUNE_AT {
             // A bucket that has refilled is the same as no bucket.
             let config = &self.config;
             buckets.retain(|k, b| {
-                let cap = config.capacity(k) as f64;
-                b.tokens + now.saturating_duration_since(b.at).as_secs_f64() * config.per_sec(k) < cap
+                let (cap, per_sec) = config.limits(k);
+                b.tokens + now.saturating_duration_since(b.at).as_secs_f64() * per_sec < cap
             });
         }
         let bucket = buckets.entry(key).or_insert(Bucket {
@@ -492,6 +528,90 @@ mod tests {
         assert!(l.check_at(fresh, t).is_ok());
     }
 
+    fn steer() -> ClientMessage {
+        ClientMessage::Steer { heading: 0, throttle: 10, at: None }
+    }
+
+    #[test]
+    fn thirty_steers_pass_at_once_and_the_next_is_dropped() {
+        let l = limiter(RateLimitConfig::default());
+        let t = Instant::now();
+        let steers = l.connection().steering().unwrap();
+        for n in 0..30 {
+            assert!(l.check_at(steers, t).is_ok(), "steer {n} refused");
+        }
+        let wait = l.check_at(steers, t).unwrap_err();
+        // 15 a second: one every 67 ms
+        assert!((wait.as_secs_f64() - 1.0 / 15.0).abs() < 0.001, "{wait:?}");
+    }
+
+    #[test]
+    fn the_steer_bucket_refills_at_fifteen_a_second() {
+        let l = limiter(RateLimitConfig::default());
+        let t = Instant::now();
+        let steers = l.connection().steering().unwrap();
+        for _ in 0..30 {
+            l.check_at(steers, t).unwrap();
+        }
+        // A second on, 15 more and no more.
+        let later = t + Duration::from_secs(1);
+        for n in 0..15 {
+            assert!(l.check_at(steers, later).is_ok(), "steer {n} refused");
+        }
+        assert!(l.check_at(steers, later).is_err());
+        // A turn held for a minute at 8 a second never runs dry.
+        let mut now = later + Duration::from_secs(2);
+        for n in 0..480 {
+            assert!(l.check_at(steers, now).is_ok(), "steer {n} of a long turn refused");
+            now += Duration::from_millis(125);
+        }
+    }
+
+    #[test]
+    fn steers_never_take_a_command_token() {
+        let l = limiter(RateLimitConfig::default());
+        let t = Instant::now();
+        let socket = l.connection();
+        let mv = ClientMessage::Move { x: 1.0, y: 2.0 };
+        assert_eq!(Key::of_ws(socket, &steer()), socket.steering());
+        assert_eq!(Key::of_ws(socket, &mv), Some(socket));
+        let say = ClientMessage::Say {
+            channel: capitol_protocol::ws::Channel::Local,
+            text: "hi".into(),
+        };
+        assert_eq!(Key::of_ws(socket, &say), None);
+        // Steered out, the socket still has every one of its 60 commands,
+        for _ in 0..100 {
+            let _ = l.check_at(Key::of_ws(socket, &steer()).unwrap(), t);
+        }
+        for n in 0..60 {
+            assert!(l.check_at(Key::of_ws(socket, &mv).unwrap(), t).is_ok(), "move {n} refused");
+        }
+        // and with them spent, a `move` waits while the steers, refilled a
+        // little, go on.
+        assert!(l.check_at(Key::of_ws(socket, &mv).unwrap(), t).is_err());
+        let soon = t + Duration::from_millis(100);
+        assert!(l.check_at(Key::of_ws(socket, &steer()).unwrap(), soon).is_ok());
+        assert!(l.check_at(Key::of_ws(socket, &mv).unwrap(), soon).is_err());
+        // Another socket's steers are its own.
+        let other = l.connection().steering().unwrap();
+        assert!(l.check_at(other, t).is_ok());
+        assert_eq!(Key::Ip(IpAddr::from([10, 0, 0, 1])).steering(), None);
+    }
+
+    #[test]
+    fn off_lets_steers_through_too() {
+        let l = limiter(RateLimitConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        let t = Instant::now();
+        let steers = l.connection().steering().unwrap();
+        for _ in 0..1000 {
+            l.check_at(steers, t).unwrap();
+        }
+    }
+
     #[test]
     fn off_lets_chat_through_too() {
         let l = limiter(RateLimitConfig {
@@ -560,11 +680,15 @@ mod tests {
             ("RATE_LIMIT_WS_PER_MIN", "zero"),
             ("RATE_LIMIT_READ_PER_MIN", "0"),
             ("RATE_LIMIT_CHAT_PER_10S", "20"),
+            ("RATE_LIMIT_STEER_BURST", "40"),
+            ("RATE_LIMIT_STEER_PER_SEC", "-3"),
         ]
         .into();
         let c = RateLimitConfig::from_vars(|k| vars.get(k).map(|v| v.to_string()), false);
         assert!(c.enabled);
         assert_eq!(c.chat_per_10s, 20);
+        assert_eq!(c.steer_burst, 40);
+        assert_eq!(c.steer_per_sec, 15);
         assert_eq!(c.auth_per_min, 100);
         assert_eq!(c.loopback_auth_per_min, 100);
         assert_eq!(c.ws_per_min, 60);
