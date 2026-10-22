@@ -747,3 +747,9 @@ fn stats_show_the_corrections_and_the_interpolation_depth() {
     assert_eq!(stats.corrected, stats.last_correction);
     assert!(stats.lag.is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Steering (T0.4)
+// ---------------------------------------------------------------------------
+
+mod steering;

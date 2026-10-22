@@ -51,7 +51,7 @@ const TRADE_EXPIRY_TICKS: u64 = 10;
 
 /// A steering player held against something hears `movement_blocked` at
 /// most once in this many ticks (2 s); they keep the steer meanwhile (T0.2)
-const STEER_BLOCKED_TICKS: u64 = 20;
+const STEER_BLOCKED_TICKS: u64 = capitol_protocol::rules::steer::BLOCKED_TICKS;
 
 /// Why a trade ended when one side's socket fell behind (C0.3)
 pub const TRADE_LAGGED: &str = "Connection fell behind";

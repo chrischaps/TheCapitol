@@ -1,9 +1,8 @@
-use crate::models::{PlayerState, Steering, Waypoint, Zone, ZoneTransition};
+use crate::models::{PlayerState, Zone, ZoneTransition};
 
-use capitol_protocol::fmath::StableMath;
-use capitol_protocol::rules::ground::{Blocked, Ground, Step};
-use capitol_protocol::rules::steer::{self, AT_REACH, FULL, LEASE_TICKS, MAX_WAYPOINTS};
-use capitol_protocol::rules::{in_world, ARRIVAL_EPSILON, TICK_SECS as TICK_DURATION_SECS};
+use capitol_protocol::rules::ground::{Blocked, Ground};
+use capitol_protocol::rules::steer;
+use capitol_protocol::rules::{ARRIVAL_EPSILON, TICK_SECS as TICK_DURATION_SECS};
 
 /// Result of processing movement
 pub struct MovementResult {
@@ -36,45 +35,14 @@ impl MovementBlocked {
 }
 
 /// Take a `steer` (controls T0.2): walk on `heading` at `throttle` tenths
-/// of the speed, after walking to `at`. It clears any destination, and a
-/// `move` clears it in turn. The caller cancels a gather or a craft first
-/// when it walks (`throttle` over 0), as for a `move`.
-///
-/// - **A stop** is throttle 0: the player walks to `at`, if it has one, and
-///   stands. With no steer under way it does nothing, so letting go of W
-///   doesn't stop a walk to a node that E just started.
-/// - **`at`** is walked at the throttle the client had when it marked the
-///   point, so the server's copy of the walk keeps its pace. One over
-///   [`AT_REACH`] from where the player is, or off the world, is ignored.
-///   Past [`MAX_WAYPOINTS`], the oldest goes.
-/// - **Any steer renews the lease** to [`LEASE_TICKS`].
+/// of the speed, after walking to `at`, by [`steer::take`]. It clears any
+/// destination, and a `move` clears it in turn. The caller cancels a gather
+/// or a craft first when it walks (`throttle` over 0), as for a `move`.
 pub fn steer(player: &mut PlayerState, heading: u16, throttle: u8, at: Option<(f64, f64)>) {
-    let throttle = throttle.min(FULL);
-    if player.steer.is_none() && throttle == 0 {
-        return;
+    if steer::take(&mut player.steer, (player.x, player.y), heading, throttle, at) {
+        player.dest_x = None;
+        player.dest_y = None;
     }
-    let (x, y) = (player.x, player.y);
-    let at = at.filter(|&(ax, ay)| in_world(ax, ay) && (ax - x).stable_hypot(ay - y) <= AT_REACH);
-    let steering = player.steer.get_or_insert_with(|| Steering {
-        dir: steer::direction(heading),
-        throttle: 0,
-        waypoints: Default::default(),
-        lease_ticks: LEASE_TICKS,
-    });
-    if let Some((x, y)) = at {
-        let pace = [steering.throttle, throttle].into_iter().find(|&t| t > 0).unwrap_or(FULL);
-        if steering.waypoints.len() >= MAX_WAYPOINTS {
-            steering.waypoints.pop_front();
-        }
-        steering.waypoints.push_back(Waypoint { x, y, throttle: pace });
-    }
-    if throttle > 0 {
-        steering.dir = steer::direction(heading);
-    }
-    steering.throttle = throttle;
-    steering.lease_ticks = LEASE_TICKS;
-    player.dest_x = None;
-    player.dest_y = None;
 }
 
 /// One tick of a player's walk, by the shared ground step: slowed by the
@@ -152,40 +120,11 @@ fn dest_step(player: &mut PlayerState, ground: &Ground, (dest_x, dest_y): (f64, 
     }
 }
 
-/// A tick of a steer: to the next waypoint, or else along the heading by
-/// `Ground::walk_step`, at the throttle's share of the speed. A tick that
-/// reaches a waypoint ends there: the client's prediction walks the same
-/// fixed steps, so its corners fall on a step's end.
-///
-/// - A waypoint that can't be reached is dropped where the walk stopped.
-/// - Blocked on the heading, the player stands and keeps the steer.
-/// - The lease runs down a tick at a time, and the steer clears when it
-///   runs out, or when a stop has walked its waypoints.
+/// A tick of a steer, by [`steer::tick`]: to the next waypoint, or else
+/// along the heading, and the lease run down.
 fn steer_step(player: &mut PlayerState, ground: &Ground) -> Option<MovementBlocked> {
     let walk = player.speed as f64 * TICK_DURATION_SECS;
-    let from = (player.x, player.y);
-    let steering = player.steer.as_mut()?;
-    let step = match steering.waypoints.front().copied() {
-        Some(wp) => {
-            let to = (wp.x, wp.y);
-            let near = (to.0 - from.0).stable_hypot(to.1 - from.1) < ARRIVAL_EPSILON;
-            let step = if near {
-                Step { x: to.0, y: to.1, blocked: None }
-            } else {
-                ground.step(from, to, walk * steer::pace(wp.throttle))
-            };
-            if step.blocked.is_some() || (step.x, step.y) == to {
-                steering.waypoints.pop_front();
-            }
-            step
-        }
-        None if steering.throttle > 0 => ground.walk_step(from, steering.dir, walk * steer::pace(steering.throttle)),
-        None => Step { x: from.0, y: from.1, blocked: None },
-    };
-    steering.lease_ticks = steering.lease_ticks.saturating_sub(1);
-    if steering.lease_ticks == 0 || (steering.throttle == 0 && steering.waypoints.is_empty()) {
-        player.steer = None;
-    }
+    let step = steer::tick(&mut player.steer, (player.x, player.y), ground, walk);
     player.x = step.x;
     player.y = step.y;
     step.blocked.map(|blocked| MovementBlocked::at(player, blocked))

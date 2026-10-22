@@ -28,6 +28,8 @@
 //! - [`trading`]: trading as a player does it: shift-click someone to
 //!   ask, or walk closer and ask, and your offer as you build it.
 //! - [`station`]: stations in the world: whether one is in reach.
+//! - [`steering`]: walking on a heading (controls T0.4): the movement input
+//!   turned into `steer`s, which [`motion::Motion::steer`] predicts.
 //! - [`automation`]: a station working on its own (E4.4): where it
 //!   stands, a pause in plain words, and the form that sets it up.
 //! - [`plot`]: what the plot panel offers for a plot: yours, someone
@@ -76,6 +78,7 @@ pub mod signin;
 pub mod sim;
 pub mod state;
 pub mod station;
+pub mod steering;
 pub mod talk;
 pub mod terrain;
 pub mod trading;

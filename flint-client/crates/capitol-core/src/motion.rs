@@ -68,6 +68,23 @@
 //! holds the moat and the canals and the world's edge too, so it stops at
 //! a canal on the point the server does. Without it, the walk is flat.
 //!
+//! **Steering** (controls T0.4, #318). [`Motion::steer`] walks the local
+//! player on a heading, as `steer` does on the server. The prediction walks
+//! the server's fixed 100 ms steps ([`steer::tick`]'s
+//! [`Ground::walk_step`]) and draws the way through the step under way. A
+//! turn, or a change of pace, takes effect at the step's end, which is sent
+//! as the turn's `at`: the server ends a tick on a waypoint, so its copy of
+//! the walk turns on the same point and keeps its time. A stop is where the
+//! prediction stands when it's made, and the server walks on to it. While
+//! steering, a snapshot is checked against the trail and then against the
+//! steer's own path for a window ahead (the server is ahead of a prediction
+//! that draws a step the server has already taken). Off both, the
+//! prediction moves to where the server will be after `lag` of the same
+//! steer, and keeps walking: it never stops for a standing server or a
+//! `movement_blocked`, and never follows. After a stop, the rest of the
+//! step it cut short is allowed too, since the server can have walked it
+//! before it heard. [`Loopback`] is a server to try it all against.
+//!
 //! [`Motion::sample`] fills a buffer the `Motion` owns and returns it, so it
 //! doesn't allocate once the buffer has grown to the number of players.
 
@@ -76,11 +93,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use capitol_protocol::rules::ground::Ground;
+use capitol_protocol::rules::steer::{self, FULL};
 
-use capitol_protocol::rules::{ARRIVAL_EPSILON, PLAYER_SPEED, TICK_MS};
+use capitol_protocol::rules::{ARRIVAL_EPSILON, PLAYER_SPEED, TICK_MS, TICK_SECS};
 use uuid::Uuid;
 
 use crate::state::{GameState, StateEvent};
+
+mod loopback;
+pub use loopback::Loopback;
 
 /// The server's tick: the time between two snapshots.
 const TICK: Duration = Duration::from_millis(TICK_MS);
@@ -191,6 +212,8 @@ pub struct Motion {
     poses: Vec<Pose>,
     /// The land the local player walks on, once the terrain is known.
     ground: Option<Arc<Ground>>,
+    /// Counts reconnects, for [`Motion::placed`].
+    session: u64,
 }
 
 impl Default for Motion {
@@ -212,6 +235,7 @@ impl Motion {
             local: None,
             poses: Vec::new(),
             ground: None,
+            session: 0,
         }
     }
 
@@ -243,7 +267,9 @@ impl Motion {
                     self.tracks.remove(id);
                 }
                 StateEvent::MovementBlocked { x, y, .. } => {
-                    if let Some(local) = &mut self.local {
+                    // A steer keeps walking when it's blocked, on both ends,
+                    // and the snapshot of the same tick says where it is.
+                    if let Some(local) = self.local.as_mut().filter(|local| local.walk.is_none()) {
                         local.snap(now, *x, *y);
                     }
                 }
@@ -265,10 +291,44 @@ impl Motion {
         if let Some(local) = &mut self.local {
             if local.synced {
                 local.advance(now, &self.config, self.ground.as_deref());
-                local.following = false;
+                local.stop();
                 local.dest = Some((x, y));
             }
         }
+    }
+
+    /// The local player steers (controls T0.4): walks on `heading` at
+    /// `throttle` tenths of the speed, or stops on a throttle of 0. It ends
+    /// a click's walk. Returns the `at` to send with the `steer`:
+    ///
+    /// - **a turn** or a change of pace: the end of the step under way,
+    ///   where the prediction turns;
+    /// - **a stop**: where the prediction stands now;
+    /// - nothing for a start from standing, for a steer that changes
+    ///   nothing (a renewal), or for a second change in one step, which
+    ///   follows the first from the point that one sent.
+    ///
+    /// Does nothing before the first snapshot has placed the local player.
+    /// [`Steering::drive`](crate::steering::Steering::drive) calls it.
+    pub fn steer(&mut self, now: Instant, heading: u16, throttle: u8) -> Option<(f64, f64)> {
+        let local = self.local.as_mut().filter(|local| local.synced)?;
+        local.advance(now, &self.config, self.ground.as_deref());
+        local.steer(now, heading, throttle, &self.config, self.ground.as_deref())
+    }
+
+    /// Whether the local player is walking on a heading.
+    pub fn steering(&self) -> bool {
+        self.local.as_ref().is_some_and(|local| local.walk.is_some())
+    }
+
+    /// The session the local player is placed in: `None` before the first
+    /// snapshot, and from a reconnect until the snapshot after it, and a
+    /// new number after each reconnect.
+    pub fn placed(&self) -> Option<u64> {
+        self.local
+            .as_ref()
+            .filter(|local| local.synced)
+            .map(|_| self.session)
     }
 
     /// The local player stops where the prediction has them now (T1.1, a
@@ -355,6 +415,7 @@ impl Motion {
     /// The session reconnected, or connected for the first time. Positions may
     /// have jumped while it was away, so everything snaps to the next snapshot.
     fn reset(&mut self) {
+        self.session += 1;
         self.last_stamp = None;
         self.tracks.clear();
         if let Some(local) = &mut self.local {
@@ -566,6 +627,12 @@ struct Local {
     /// `ws/connection.rs`). `dest` is then a point a step ahead of the server
     /// on its heading, renewed by every snapshot.
     following: bool,
+    /// Walking on a heading (T0.4), instead of to `dest`.
+    walk: Option<Walk>,
+    /// The step a steer's stop cut short, from the stop to where the step
+    /// would have ended. The server may walk it before it hears the stop,
+    /// then walks back (#480).
+    cut: Option<((f64, f64), (f64, f64))>,
     /// Added to the prediction when drawing. It decays to zero, so a
     /// correction blends instead of jumping.
     offset: (f64, f64),
@@ -597,6 +664,8 @@ impl Local {
             y: 0.0,
             dest: None,
             following: false,
+            walk: None,
+            cut: None,
             offset: (0.0, 0.0),
             facing: 0.0,
             advanced: now,
@@ -619,21 +688,26 @@ impl Local {
             x: self.x + self.offset.0,
             y: self.y + self.offset.1,
             facing: self.facing,
-            moving: self.dest.is_some(),
+            moving: self.dest.is_some() || self.walk.as_ref().is_some_and(|walk| walk.from != walk.to),
         }
     }
 
     fn stop(&mut self) {
         self.dest = None;
         self.following = false;
+        self.walk = None;
+        self.cut = None;
     }
 
-    /// Jumps straight to `(x, y)` and stops: no blend, no trail.
+    /// Jumps straight to `(x, y)`: no blend, no trail. A click's walk stops;
+    /// a steer is left for the caller to [`Local::restart_walk`].
     fn snap(&mut self, now: Instant, x: f64, y: f64) {
         self.synced = true;
         self.x = x;
         self.y = y;
-        self.stop();
+        self.dest = None;
+        self.following = false;
+        self.cut = None;
         self.offset = (0.0, 0.0);
         self.advanced = now;
         self.trail.reset(Sample { at: now, x, y });
@@ -648,6 +722,37 @@ impl Local {
         }
         let dt = (now - self.advanced).as_secs_f64();
         self.advanced = now;
+
+        if let Some(mut walk) = self.walk.take() {
+            // The whole steps since, then the way through the one under way.
+            let mut walking = true;
+            while now >= walk.began + TICK {
+                walk.began += TICK;
+                walk.from = walk.to;
+                walk.marked = false;
+                match walk.next.take() {
+                    Some(Some((dir, throttle))) => (walk.dir, walk.throttle) = (dir, throttle),
+                    Some(None) => {
+                        walking = false;
+                        break;
+                    }
+                    None => {}
+                }
+                walk.to = steer_step(ground, walk.from, walk.dir, walk.throttle, config);
+            }
+            let (from, to) = (walk.from, walk.to);
+            if walking {
+                let t = ((now - walk.began).as_secs_f64() / TICK_SECS).min(1.0);
+                self.x = from.0 + (to.0 - from.0) * t;
+                self.y = from.1 + (to.1 - from.1) * t;
+                if to != from {
+                    self.facing = (to.1 - from.1).atan2(to.0 - from.0);
+                }
+                self.walk = Some(walk);
+            } else {
+                (self.x, self.y) = from;
+            }
+        }
 
         if let Some((dx, dy)) = self.dest {
             let (ex, ey) = (dx - self.x, dy - self.y);
@@ -706,6 +811,7 @@ impl Local {
         if moved > config.teleport_distance {
             // No walk does that in a tick.
             self.snap(now, sx, sy);
+            self.restart_walk(now, config, ground);
             return;
         }
         self.server = (sx, sy);
@@ -742,6 +848,33 @@ impl Local {
             if on_a_walk {
                 self.lag = (self.lag * 0.8 + lag * 0.2).clamp(0.0, window);
             }
+            return;
+        }
+        // A steer's stop is where the prediction stood, part way through a
+        // step. A server that ticks early has walked the rest of the step
+        // before it hears, and walks back.
+        if let Some((a, b)) = self.cut {
+            if off_segment(a.0, a.1, b.0, b.1, sx, sy).0 <= config.reconcile_distance {
+                return;
+            }
+        }
+        if self.walk.is_some() {
+            // Steering: ahead on the steer's own path, as for a click below.
+            if self.on_the_way(sx, sy, config, ground) {
+                return;
+            }
+            // Off it: the server walks the same steer, a lag behind, so aim
+            // for where it is by now and walk on from there. A server that
+            // stands is a steer it hasn't had yet, or one that lapsed, and
+            // the next renewal starts it: no stopping, and no following.
+            let mut target = (sx, sy);
+            if let (true, Some(walk)) = (server_moved, &self.walk) {
+                for _ in 0..(self.lag / TICK_SECS).round() as usize {
+                    target = steer_step(ground, target, walk.dir, walk.throttle, config);
+                }
+            }
+            self.correct(now, sx, sy, target.0, target.1, config);
+            self.restart_walk(now, config, ground);
             return;
         }
         // The server can be ahead on the way we're going. Its tick steps a
@@ -809,6 +942,148 @@ impl Local {
             x: tx,
             y: ty,
         });
+    }
+
+    /// Takes a steer, already advanced to `now`. See [`Motion::steer`].
+    fn steer(
+        &mut self,
+        now: Instant,
+        heading: u16,
+        throttle: u8,
+        config: &MotionConfig,
+        ground: Option<&Ground>,
+    ) -> Option<(f64, f64)> {
+        let throttle = throttle.min(FULL);
+        let dir = steer::direction(heading);
+        let want = (throttle > 0).then_some((dir, throttle));
+        let Some(walk) = &mut self.walk else {
+            // A stop with no steer under way does nothing, as on the server:
+            // a click's walk carries on.
+            if throttle > 0 {
+                self.stop();
+                self.walk = Some(Walk::new(now, (self.x, self.y), dir, throttle, config, ground));
+            }
+            return None;
+        };
+        if walk.marked {
+            // A change already waits at this step's end, and the server has
+            // that point. This one follows it from there.
+            walk.next = Some(want);
+            return None;
+        }
+        if throttle == 0 {
+            self.cut = Some(((self.x, self.y), walk.to));
+            self.walk = None;
+            return Some((self.x, self.y));
+        }
+        if (dir, throttle) == (walk.dir, walk.throttle) {
+            return None;
+        }
+        walk.next = Some(want);
+        walk.marked = true;
+        Some(walk.to)
+    }
+
+    /// Starts the steer's steps over from where the prediction is now,
+    /// after a correction, taking any change that waited for the step's end.
+    fn restart_walk(&mut self, now: Instant, config: &MotionConfig, ground: Option<&Ground>) {
+        let Some(walk) = &mut self.walk else {
+            return;
+        };
+        match walk.next.take() {
+            Some(Some((dir, throttle))) => (walk.dir, walk.throttle) = (dir, throttle),
+            Some(None) => {
+                self.walk = None;
+                return;
+            }
+            None => {}
+        }
+        walk.marked = false;
+        walk.began = now;
+        walk.from = (self.x, self.y);
+        walk.to = steer_step(ground, walk.from, walk.dir, walk.throttle, config);
+    }
+
+    /// Whether `(x, y)` lies on the steer's path from here, for a window's
+    /// worth of its steps.
+    fn on_the_way(&self, x: f64, y: f64, config: &MotionConfig, ground: Option<&Ground>) -> bool {
+        let Some(walk) = &self.walk else {
+            return false;
+        };
+        let (mut dir, mut throttle) = (walk.dir, walk.throttle);
+        let mut next = walk.next;
+        let (mut a, mut b) = ((self.x, self.y), walk.to);
+        let steps = (config.reconcile_window.as_secs_f64() / TICK_SECS).ceil() as usize;
+        for _ in 0..=steps {
+            if off_segment(a.0, a.1, b.0, b.1, x, y).0 <= config.reconcile_distance {
+                return true;
+            }
+            match next.take() {
+                Some(Some(change)) => (dir, throttle) = change,
+                Some(None) => return false,
+                None => {}
+            }
+            (a, b) = (b, steer_step(ground, b, dir, throttle, config));
+        }
+        false
+    }
+}
+
+/// The local player's walk on a heading (T0.4), in the server's fixed
+/// steps.
+#[derive(Debug, Clone)]
+struct Walk {
+    dir: (f64, f64),
+    throttle: u8,
+    /// The step under way: from where, to where, and when it began.
+    from: (f64, f64),
+    to: (f64, f64),
+    began: Instant,
+    /// What changes at the step's end: a new heading and throttle, or
+    /// `None` to stop there.
+    next: Option<Option<((f64, f64), u8)>>,
+    /// A steer went with `at` on this step's end.
+    marked: bool,
+}
+
+impl Walk {
+    fn new(
+        now: Instant,
+        from: (f64, f64),
+        dir: (f64, f64),
+        throttle: u8,
+        config: &MotionConfig,
+        ground: Option<&Ground>,
+    ) -> Self {
+        Self {
+            dir,
+            throttle,
+            from,
+            to: steer_step(ground, from, dir, throttle, config),
+            began: now,
+            next: None,
+            marked: false,
+        }
+    }
+}
+
+/// One tick of a steer on `dir` at `throttle` from `from`: the server's
+/// step ([`steer::tick`]), or a flat one with no ground. The walk is worked
+/// out as the server works it, so the two agree to the bit.
+fn steer_step(
+    ground: Option<&Ground>,
+    from: (f64, f64),
+    dir: (f64, f64),
+    throttle: u8,
+    config: &MotionConfig,
+) -> (f64, f64) {
+    let walk = config.speed * TICK_SECS * steer::pace(throttle);
+    match ground {
+        Some(ground) => {
+            let step = ground.walk_step(from, dir, walk);
+            (step.x, step.y)
+        }
+        None => (from.0 + dir.0 * walk, from.1 + dir.1 * walk),
     }
 }
 

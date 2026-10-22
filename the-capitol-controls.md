@@ -150,6 +150,7 @@ Both modes have the same speed, ground rules and reach. Bots may steer (`Bot::st
 **Protocol (`protocol/`):**
 - `rules::ground::walk_step`, with the rings and the edge in `Ground` (T0.1).
 - `ClientMessage::Steer` and `rules::steer::direction` (T0.2).
+- `rules::steer::Steering`, `take` and `tick`: a steer under way, taken and walked, for the server and the loopback alike (T0.4).
 - `fixtures/client/steer.json`.
 
 **Server (`backend/`):**
@@ -200,6 +201,17 @@ Both modes have the same speed, ground rules and reach. Bots may steer (`Bot::st
 - **T0.3 A rate bucket for steering** (#317, S).
   *As built:* `Key::Steer(n)` is numbered as the connection's `Key::Connection(n)` (`Key::steering`), and `Key::of_ws(connection, message)` names the bucket each WebSocket message draws from: none for `say`, the steer bucket for `steer`, the connection's for the rest. `RateLimitConfig::limits(&key) -> (burst, per_sec)` replaces `capacity`, `window` and `per_sec`, and the prune uses it. A steer over its limit is dropped with only a `debug` log line; `RATE_LIMITS=off` lets it through like everything else. A turn held at 8 a second never runs the bucket dry.
 - **T0.4 `Steering`, steer prediction and the loopback** (#318, L).
+  *As built:* the steer's state and its tick moved from the backend to `rules::steer` (`Steering`, `Waypoint`, `take`, `tick`, `BLOCKED_TICKS`), so the server and `motion::Loopback` walk the same code. `Steering::drive(now, way, &mut motion)` is the glue the game calls each frame: it returns the `ClientMessage` to send, if any. Decisions the plan didn't make:
+  - **`Motion::steer(now, heading, throttle)` returns the `at`**, rather than taking one: the prediction knows where its step ends.
+  - **A turn, or a change of pace, takes effect at the end of the step under way**, and that point goes as its `at`. The server ends a tick on it, so the corner falls at the same place on both ends and the server keeps its time. So a turn shows 0 to 100 ms after the input (50 on average). A second change in the same step goes with no `at` and follows the first.
+  - **A stop is where the prediction stands** when it's made, mid-step, so the avatar doesn't walk on. When the server's tick falls just after the steer lands, it has walked the rest of that step before it hears, and walks back up to 5 units. The prediction allows it (`Local::cut`), so the player sees nothing; others see a small step back. That's #480.
+  - **Reconciling a steer:** the trail first, then the steer's own path for a window ahead (the server can be up to a step ahead of the drawn position). Off both, the prediction moves to the server's position walked on `lag` worth of the same steer, and keeps walking. `movement_blocked` is ignored while steering: the server keeps the steer, and the same tick's snapshot says where it is. A stop sent while on a click's walk does nothing, as on the server.
+  - **The rate:** a bucket of 8 a second, 2 deep. A turn needs 2 tokens and spends 1, so a stop or a start is never held up by a sweep of the mouse. A turn under half a degree isn't sent.
+  - **Throttle steps:** under 0.25 deflection is neutral, under 0.75 is half. T2.1's radial deadzone may move them.
+  - **The latch stops a walk** that's under way, then holds until the input is neutral.
+  - **Reconnects** are noticed through `Motion::placed()`, a session number that changes on every reconnect.
+  - **`Bot::steer(dir, secs)`** sends a steer, renews it each second, then stops with no `at`.
+  - The loopback tests run every case at a 0, 80 and 200 ms round trip and at five tick phases. Two of the phases (+20 and +60 ms) put the server's tick just after the steer lands, which is when it runs ahead.
 
 ### T1: Direct mode on keys and mouse (`ct:T1-direct`)
 
@@ -278,7 +290,7 @@ That's about the size of the wilds' W4 to W6 together.
 
 | Risk | Mitigation |
 |---|---|
-| **Reconcile under turning at high latency.** | T0.4's loopback tests at 200 ms gate it, with `at` waypoints on stops and turns. The fallback is a wider tolerance while steering. |
+| **Reconcile under turning at high latency.** | T0.4's loopback tests at 200 ms gate it, with `at` waypoints on stops and turns. The fallback is a wider tolerance while steering. *As built:* a sweep of 90° a second for 4 s has no correction at 200 ms. |
 | **The engine PR (T1.2) blocks the camera.** | T1.3 lands first and is played with the cursor free. Chris merges Flint PRs. |
 | **The latch feels sticky** (you have to let go of W before you can walk after E). | Tune it in T1.5. It clears on neutral input, never on a timer. |
 | **Walking through walls spoils the shoulder view.** | F1 (#330) is the decision. Until then the camera pulls in out of the buildings' walls, so at least the view never looks through a wall. |

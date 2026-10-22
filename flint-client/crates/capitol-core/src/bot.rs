@@ -44,7 +44,7 @@ use capitol_protocol::rest::{
     ResourceNodeInfo, SplitStackRequest, SplitStackResponse, StationAutomation, StationInfo, StationTool,
     StockListing, SubscribeRequest, Subscription, WithdrawRequest, WithdrawResponse,
 };
-use capitol_protocol::rules::{self, Zone};
+use capitol_protocol::rules::{self, steer, Zone};
 use capitol_protocol::terrain::{Landmark, LandmarkKind};
 use capitol_protocol::ws::{Channel, ClientMessage, ServerMessage};
 use uuid::Uuid;
@@ -59,6 +59,7 @@ use crate::market::MarketEvent;
 use crate::paths::{self, NoWay, WalkGraph};
 use crate::poll::{Fetch, Poller};
 use crate::state::{answers, GameState, StateEvent, Yield};
+use crate::steering;
 
 /// How long one frame waits for the network. The poller and the trade timers
 /// run once per frame, so this is the bot's clock resolution.
@@ -861,6 +862,28 @@ impl Bot {
                 None => return Ok(()),
             }
         }
+    }
+
+    /// Walks on `dir` (any length, in server units) for `secs`, as a person
+    /// holding a key does (controls T0.4): a `steer`, renewed every
+    /// [`steering::RENEW`], then a stop where it is. For scripted soaks of
+    /// direct control. It's no faster than [`Bot::walk_to`], and a bank or
+    /// a canal in the way stops it or slides it along, as it would a person;
+    /// citizens keep `walk_to`.
+    pub fn steer(&mut self, dir: (f64, f64), secs: f64) -> Result<(), BotError> {
+        let heading = steer::heading_of(dir.0, dir.1);
+        let walk = ClientMessage::Steer { heading, throttle: steer::FULL, at: None };
+        let end = Instant::now() + Duration::from_secs_f64(secs);
+        while Instant::now() < end {
+            self.send(walk.clone());
+            let renew = (Instant::now() + steering::RENEW).min(end);
+            self.until("steering", steering::RENEW + FRAME * 4, |_, _| Instant::now() >= renew)?;
+        }
+        // A stop with no `at` stands on the server's next tick.
+        self.send(ClientMessage::Steer { heading, throttle: 0, at: None });
+        let still = Instant::now() + Duration::from_millis(3 * rules::TICK_MS);
+        self.until("stopping", Duration::from_secs(1), |_, _| Instant::now() >= still)?;
+        Ok(())
     }
 
     /// Whom a greeting walk passes by without a pause: itself, and everyone
