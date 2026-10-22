@@ -63,7 +63,10 @@ pub enum OnOwned {
 /// `oldfarm_` is R5's big farms. The smaller farms (#423) kept the `farm_`
 /// ids, so the migration that brought them in renamed the old rows
 /// (`20261201_001_rural_smaller_farms.sql`), and they're released the same way.
-pub const RETIRED_LOTS: &[&str] = &["rural_plot_", "oldfarm_"];
+///
+/// `oldsub_` is the suburb's narrower lots, renamed the same way when the
+/// wider ones came in (#422, `20261205_001_suburb_wider_lots.sql`).
+pub const RETIRED_LOTS: &[&str] = &["rural_plot_", "oldfarm_", "oldsub_"];
 
 fn retired(terrain_id: &str) -> bool {
     RETIRED_LOTS.iter().any(|prefix| terrain_id.starts_with(prefix))
@@ -879,6 +882,15 @@ pub(crate) mod tests {
         assert!(retired("oldfarm_3_a0_L_0"));
         assert!(retired("rural_plot_trail_3_L_1"));
         assert!(!retired("farm_3_a0_L_0"));
+        assert!(!retired("sub_0_0_3_L_2"));
+    }
+
+    /// #422: the migration's renamed narrow suburban lots are retired, and
+    /// the wider ones, which kept the `sub_` ids, aren't.
+    #[test]
+    fn the_old_suburban_lots_are_retired_and_the_new_ones_are_not() {
+        assert!(retired("oldsub_0_0_3_L_2"));
+        assert!(retired("oldsub_5_1_7_B_0"));
         assert!(!retired("sub_0_0_3_L_2"));
     }
 

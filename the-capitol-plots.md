@@ -18,7 +18,7 @@ Today the counts run the wrong way round. The ring with the least land has the m
 | zone | ring | land | lots | built | lot area, median | room at 50, median | take 4 | category, capacity |
 |---|---|---|---|---|---|---|---|---|
 | urban | r1000–1800 | 7.0M | 3008 | 4.3M (61%) | 1.4k (about 35 × 40) | 1 | 0% | medium, 9 |
-| suburban | r1800–3000 | 18.1M | 1905 | 12.8M (71%) | 6.7k | 3 | 22% | large, 16 |
+| suburban | r1800–3000 | 18.1M | 1905 | 12.8M (71%) | 6.7k | 3 | 22% (6% by `sim::lot`'s own rule, #422) | large, 16 |
 | rural | r3000–4600 | 38.2M | 117 | 13.9M (36%) | 117k | 48 | 100% | estate, 25 |
 
 - **Urban is smaller than #420 says.** #420's "48 × 48" is the lot's bounding box. The lots themselves are 40 of frontage by about 35 of depth, after the street insets. Every urban lot takes exactly one station.
@@ -94,6 +94,15 @@ Today: five rows of lots about 106 deep in the 1200 band, frontage 64 (`suburb/l
 - **Pies and combs:** fewer pie lots round a bulb (2 to 4, by area), and a looser comb in pattern (b), so the loop patterns stop making slivers.
 - **Targets:** `the-capitol-suburb-v2.md` §4.4 takes the new count and area, and a share-that-takes-4 row.
 
+*As built (#422):* **frontage 100 and 2 or 3 pies, as planned; the comb left alone.**
+- **The count:** 1162 to 1210 lots on the five seeds (1192 in the default world), area median 10.2k to 10.4k, width about 100, depth about 105.
+- **Take 4:** 89 to 93%. Counted with `models::station_room`, a copy of `sim::lot::takes`. By that exact rule the old suburb took 4 on only 5 to 7% of lots, not §2's 22%, whose packing was looser.
+- **The pies were the hard part.** A pie narrows to its bulb, so one under a quarter of the round takes 3 at most. Fewer, wider pies were then dropped, because their fronts cut the bulb's neck. Three changes fixed that: the count is the one that keeps the most ground once each pie is clear of the roads; stem lots stop 30 short of the bulb, not 20; and a pie's front may push out 40, not 12. Now 90% of the pies take 4.
+- **The comb:** a looser comb in (b) wasn't needed once the pies held.
+- **Built share:** lots cover 67 to 69% of the ring (71% before). The rest went to parks (green 18 to 19%), and the streets are the same.
+- **The flip:** old rows are renamed `oldsub_…` and retired (PD4). The suburb's branches and clay are re-planned (677 nodes, with the rural branches planned after them). No seeded grass moves, and nothing outside the suburb moved. Pin `bf5dce48376e59c0`.
+- **The suburb plan** has the detail: `the-capitol-suburb-v2.md` §4.2 (#422 note) and §4.4.
+
 ### 5.3 Rural (#423): smaller farms, the same lanes
 
 Before: 117 farms with frontage U[380, 500], field gap U[240, 440] and depth U[280, 380] clipped by the bands (`RuralParams`).
@@ -132,7 +141,7 @@ For each part:
 |---|---|---|
 | [#420](https://github.com/chrischaps/TheCapitol/issues/420) | This plan | |
 | [#423](https://github.com/chrischaps/TheCapitol/issues/423) | Rural: about 400 farms of about 35k to 40k. *Done:* 361 to 378 long lots of about 36k (§5.3) | #420 |
-| [#422](https://github.com/chrischaps/TheCapitol/issues/422) | Suburban: about 1200 lots, wider and less triangular | #420 |
+| [#422](https://github.com/chrischaps/TheCapitol/issues/422) | Suburban: about 1200 lots, wider and less triangular. *Done:* 1162 to 1210 lots of about 10.3k, 89 to 93% taking 4 (§5.2) | #420 |
 | [#421](https://github.com/chrischaps/TheCapitol/issues/421) | Urban: a new grid with about 600 lots of about 80 × 100 | #420 |
 
 PD2's capacity splits (#424) land with whichever part lands first, once Chris has decided. Until then, each part keeps today's `size_category`.

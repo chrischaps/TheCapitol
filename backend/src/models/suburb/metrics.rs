@@ -31,6 +31,7 @@ use super::patterns::StreetMeta;
 use crate::models::lot_clearance;
 use crate::models::terrain::{TerrainConfig, WorldGenParams};
 use crate::models::geom::{quads_overlap_strict, SpatialGrid};
+use crate::models::station_room;
 use crate::models::street_plan;
 use crate::models::terrain::point_to_segment_distance;
 
@@ -158,6 +159,8 @@ pub struct Metrics {
     pub lot_area_p95: Option<f64>,
     pub lot_width_median: Option<f64>,
     pub lot_depth_median: Option<f64>,
+    /// The share of lots that take 4 stations at 50 spacing (plots plan §3).
+    pub takes_four_share: Option<f64>,
     pub convex_share: Option<f64>,
     pub overlaps: usize,
     pub lots_before: usize,
@@ -250,10 +253,11 @@ pub const TARGETS: &[Target] = &[
     soft("parallel_spacing_median", "parallel spacing, median", Check::Range(216.0, 256.0)),
     soft("parallel_spacing_p5", "parallel spacing, p5", Check::Min(200.0)),
     soft("connected_share", "streets connected to an arterial", Check::Min(1.0)),
-    soft("lot_area_median", "lot area, median", Check::Range(6600.0, 7500.0)),
-    soft("lot_area_p5", "lot area, p5", Check::Min(4000.0)),
-    soft("lot_area_p95", "lot area, p95", Check::Max(11000.0)),
-    soft("lot_width_median", "lot width at mid-depth, median", Check::Range(55.0, 65.0)),
+    soft("lot_area_median", "lot area, median", Check::Range(9000.0, 12000.0)),
+    soft("lot_area_p5", "lot area, p5", Check::Min(6000.0)),
+    soft("lot_area_p95", "lot area, p95", Check::Max(15000.0)),
+    soft("lot_width_median", "lot width at mid-depth, median", Check::Range(90.0, 110.0)),
+    soft("takes_four_share", "lots that take 4 stations", Check::Min(0.70)),
     soft("lot_depth_median", "lot depth, median", Check::Range(100.0, 125.0)),
     soft("convex_share", "convex lots", Check::Min(1.0)),
     Target { metric: "overlaps", label: "lot-lot overlaps", check: Check::Max(0.0), hard: true },
@@ -643,6 +647,8 @@ pub fn measure(plan: &Plan) -> Measured {
     m.lot_width_median = percentile(&widths, 0.5);
     let depths: Vec<f64> = lots.iter().map(|l| depth(l)).collect();
     m.lot_depth_median = percentile(&depths, 0.5);
+    let four = lots.iter().filter(|l| station_room::takes(&l.corners, 4)).count();
+    m.takes_four_share = (!lots.is_empty()).then(|| four as f64 / lots.len() as f64);
     let convex = lots.iter().filter(|l| is_convex(&l.corners)).count();
     for l in lots.iter().filter(|l| !is_convex(&l.corners)) {
         mark("concave", centroid(&l.corners), format!("{} is not convex", l.id));

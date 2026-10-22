@@ -519,9 +519,14 @@ pub(crate) fn quad(a: &Ray, b: &Ray) -> [P; 4] {
 /// Push fronts out until each lot's front edge is clear of the roads: on a
 /// curve's convex side the chord between two rays cuts into the road.
 pub(crate) fn push_fronts(rays: &mut [Ray], world: &World) {
+    push_fronts_by(rays, world, MAX_FRONT_PUSH);
+}
+
+/// `push_fronts`, by up to `most`.
+pub(crate) fn push_fronts_by(rays: &mut [Ray], world: &World, most: f64) {
     for j in 0..rays.len().saturating_sub(1) {
         let mut pushed = 0.0;
-        while pushed < MAX_FRONT_PUSH && !world.edge_clear(rays[j].front(), rays[j + 1].front()) {
+        while pushed < most && !world.edge_clear(rays[j].front(), rays[j + 1].front()) {
             for k in [j, j + 1] {
                 if !rays[k].fixed && rays[k].f + PUSH_STEP < rays[k].b {
                     rays[k].f += PUSH_STEP;

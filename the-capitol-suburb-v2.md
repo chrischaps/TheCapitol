@@ -171,12 +171,12 @@ At 1600–2400 every neighbourhood frame was 740 deep, so every one fitted exact
 ### 4.2 Lots fill the blocks
 A walker runs over the welded roads, using a `StreetMeta` for each street (role, which sides are fronted, bulb centre, neighbourhood). Lots stay 4-corner `TerrainPlot`s, so **the protocol doesn't change**.
 1. **Runs.** Each fronted side of a street is split into runs between junction exclusions. At a T, the through road owns the corner.
-2. **Widths.** Lot widths are measured at mid-depth, accounting for curvature, so lots on curves become pies. `n = round(L/60)`. Neighbouring lots share each side ray, so a run tiles exactly.
+2. **Widths.** Lot widths are measured at mid-depth, accounting for curvature, so lots on curves become pies. `n = round(L/60)` (L/100 since #422). Neighbouring lots share each side ray, so a run tiles exactly.
 3. **Depth.** Ray-march to the next obstacle.
    - If that is a fronted road within 2·D, the lot takes half the distance, so back-to-back lots share a rear line.
    - Otherwise the depth is min(hit, 110).
    - On the concave side of a curve, depth is clamped to 0.85/κ.
-4. **Bulbs.** Bulbs get 4–5 pie lots, with rays from the bulb centre. (#108: 2–5, by area.)
+4. **Bulbs.** Bulbs get 4–5 pie lots, with rays from the bulb centre. (#108: 2–5, by area; #422: 2–3, by the ground they keep.)
 5. **Overlap pass.** Lots go in priority order: through roads, then stems, then pies. (#108 puts pies first; see *As built* below.)
    - Each is checked with `quads_overlap_strict`. `polygons_overlap` (terrain.rs:481) can't be used: it counts lots that only touch, and back-to-back lots always touch.
    - A lot that overlaps shrinks (bisection, down to 60% depth) or is dropped.
@@ -208,6 +208,14 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
   - 1.2% near roads.
 
   Lots can't take these without going outside 95–130 deep. #111's parks and paths are meant for exactly this leftover ground. `neighbourhood_lots_meet_their_targets` holds the gap at ≤ 10% until then.
+
+*As built (#422, plots plan §5.2): wider lots, about 1200 of them.* The streets didn't move. The lots along them did:
+- **Frontage 100, not 64.** At 64, only 5–7% of lots take 4 stations at 50 spacing (`models::station_room`, a copy of the client's packing rule). 100 × 105 does, and gives about 1200 lots of about 10.3k. Rows stay at five, as the plots plan decided.
+- **Pies: 2 or 3, not 4 or 5.** A pie narrows to the bulb, so one under a quarter of the round takes 3 at most. The count is now the one that keeps the most ground once each pie is pulled clear of the roads (as the overlap pass would), and of the counts within 95% of that, the fewest. The old rule (the most pies each over 0.65 × frontage × depth) gave 2-pie fans at frontage 100 whose wedges ran into the next street, and over half the pies were dropped.
+- **Stems stop 30 short of the bulb, not 20, and a pie's front pushes out up to 40, not 12.** At 20, a wide pie's front, from the stem's last ray round to a ray well past the bulb's neck, cut the bulb however far out its other end went. Past 40 (`BULB_REACH`) the stem keeps its last ray and the pies lose their side. Each bulb keeps a small verge in front of its pies.
+- **The comb in (b) is unchanged.** The plots plan suggested loosening it, but with the pies fixed (b)'s neighbourhoods hold their lots without it.
+- **Result** (mixed, seeds 42, 7, 1234, 99999, 2024): 1162–1210 lots, area median 10.2k–10.4k, p5 ≥ 7000, p95 ≤ 13.3k, width median 100–102, depth 104–105. 89–93% take 4: rows 91%, stems 85%, pies 90%. Lots cover 67–69% (71% before), green 18–19% (116 parks at seed 42, not 128), gap 2.6–3.3%. No overlaps, all convex, nothing trimmed or dropped.
+- **The flip:** `20261205_001_suburb_wider_lots.sql` renames old suburban plot rows `oldsub_…` (`oldsub_` is in `plot_sync::RETIRED_LOTS`, so startup releases an owned one with its deed refunded and its stations given back), and moves a saved `world_config` still at frontage 64 to 100. `post-content/20261205_001_suburb_wider_lots_nodes.sql` re-plans 677 nodes: the suburb's branches and clay, and the rural branches after them on the same grid. No seeded grass moves. Pin `bf5dce48376e59c0`.
 
 ### 4.3 Modules
 - **`backend/src/models/geom.rs`:**
@@ -268,8 +276,10 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 | cul-de-sac | ≤ 300 long, ≤ 20 lots |
 | parallel spacing | median 236 ± 20, p5 ≥ 200 |
 | connected to an arterial | 100% |
-| lot area | median 6600–7500, p5 ≥ 4000, p95 ≤ 11000 |
-| lot width at mid-depth | median 55–65 |
+| suburban lots | 1050–1350 (hard, since #422; 1905 before) |
+| lot area | median 9000–12000, p5 ≥ 6000, p95 ≤ 15000 (6600–7500, ≥ 4000, ≤ 11000 until #422) |
+| lot width at mid-depth | median 90–110 (55–65 until #422) |
+| lots that take 4 stations at 50 spacing | ≥ 70% (hard, since #422; `models::station_room`) |
 | lot depth | median 100–125 |
 | convex lots | 100% |
 | lot-lot overlaps | 0 (hard) |

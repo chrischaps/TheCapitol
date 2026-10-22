@@ -97,11 +97,34 @@ mod tests {
 
     /// Acceptance for #111: the mixed suburb, at five seeds and the wide
     /// canals. It asserts the hard targets, and those the patterns already
-    /// hold one by one, and prints the soft ones it misses.
+    /// hold one by one, and prints the soft ones it misses. Every world is
+    /// printed before any is asserted, so a miss shows them all.
     #[test]
     fn neighbourhood_suburb_meets_its_targets() {
-        for (name, params) in worlds() {
-            let world = metrics::measure_world(&params, None);
+        let measured: Vec<_> = worlds().into_iter().map(|(name, params)| (name, metrics::measure_world(&params, None))).collect();
+        for (name, world) in &measured {
+            let m = &world.measured.metrics;
+            let soft: Vec<String> = metrics::violations(m).iter().map(|v| format!("{} {}", v.label, metrics::fmt_num(v.value))).collect();
+            let pct = |v: Option<f64>| 100.0 * v.unwrap_or(f64::NAN);
+            eprintln!(
+                "{name}: {} lots, area {:.0} (p5 {:.0}, p95 {:.0}), {:.0} × {:.0}, {:.0}% take 4, \
+                 trimmed {:.1}%, dropped {:.1}%, lots {:.0}%, green {:.0}%, gap {:.1}%, {} parks; soft misses: {soft:?}",
+                m.lots,
+                m.lot_area_median.unwrap_or(f64::NAN),
+                m.lot_area_p5.unwrap_or(f64::NAN),
+                m.lot_area_p95.unwrap_or(f64::NAN),
+                m.lot_width_median.unwrap_or(f64::NAN),
+                m.lot_depth_median.unwrap_or(f64::NAN),
+                pct(m.takes_four_share),
+                pct(m.trimmed_share),
+                pct(m.dropped_share),
+                pct(m.cover_lots),
+                pct(m.cover_green),
+                pct(m.cover_gap),
+                m.parks,
+            );
+        }
+        for (name, world) in measured {
             let m: Metrics = world.measured.metrics;
             let why = format!("{name}: {m:#?}");
             // Entrances, counted per neighbourhood by the street they come
@@ -117,13 +140,16 @@ mod tests {
             assert!(m.culdesac_max_len.unwrap() <= 300.0, "{why}");
             assert!(m.culdesac_max_lots.unwrap() <= 20.0, "{why}");
             assert_eq!(m.connected_share, Some(1.0), "{why}");
-            // Lots.
+            // Lots: about 1200 (plots plan §3, #422).
+            assert!((1050..=1350).contains(&m.lots), "{why}");
             assert_eq!(m.overlaps, 0, "{why}");
             assert_eq!(m.convex_share, Some(1.0), "{why}");
             assert_eq!(m.arterial_fronting, 0, "{why}");
-            assert!((6600.0..=7500.0).contains(&m.lot_area_median.unwrap()), "{why}");
-            assert!(m.lot_area_p5.unwrap() >= 4000.0 && m.lot_area_p95.unwrap() <= 11000.0, "{why}");
-            assert!((55.0..=65.0).contains(&m.lot_width_median.unwrap()), "{why}");
+            // About 100 × 105 since #422 (plots plan §3): most take 4 stations.
+            assert!((9000.0..=12000.0).contains(&m.lot_area_median.unwrap()), "{why}");
+            assert!(m.lot_area_p5.unwrap() >= 6000.0 && m.lot_area_p95.unwrap() <= 15000.0, "{why}");
+            assert!((90.0..=110.0).contains(&m.lot_width_median.unwrap()), "{why}");
+            assert!(m.takes_four_share.unwrap() >= 0.70, "{why}");
             assert!((100.0..=125.0).contains(&m.lot_depth_median.unwrap()), "{why}");
             assert!(m.trimmed_share.unwrap() <= 0.10, "{why}");
             assert!(m.dropped_share.unwrap() <= 0.03, "{why}");
@@ -131,10 +157,7 @@ mod tests {
             assert!(m.cover_lots.unwrap() >= 0.55, "{why}");
             assert!((0.08..=0.20).contains(&m.cover_green.unwrap()), "{why}");
             assert!(m.cover_gap.unwrap() <= 0.05, "{why}");
-            assert!(m.parks > 0 && m.park_area_min.is_none_or(|a| a >= 0.5 * 64.0 * 110.0 - 1e-6), "{why}");
-
-            let soft: Vec<String> = metrics::violations(&m).iter().map(|v| format!("{} {}", v.label, metrics::fmt_num(v.value))).collect();
-            eprintln!("{name}: {} lots, {} parks, gap {:.3}; soft misses: {soft:?}", m.lots, m.parks, m.cover_gap.unwrap());
+            assert!(m.parks > 0 && m.park_area_min.is_none_or(|a| a >= 0.5 * 100.0 * 110.0 - 1e-6), "{why}");
         }
     }
 

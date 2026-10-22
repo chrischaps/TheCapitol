@@ -107,7 +107,7 @@ pub struct NeighbourhoodParams {
     /// The frame's shared radial warp: amplitude A (at most 40) and
     /// wavelength λ (at least 1200). #111 tuned them to 30 and 1200: a
     /// 40 warp costs the band 20 of depth, and the lots fall under the
-    /// 6600 area floor.
+    /// 6600 area floor of the time (9000 since #422).
     pub warp_amplitude: f64,
     pub warp_wavelength: f64,
     pub pattern_weights: PatternWeights,
@@ -118,9 +118,10 @@ pub struct NeighbourhoodParams {
 impl Default for NeighbourhoodParams {
     fn default() -> Self {
         Self {
-            // 64 × the 106 a five-row band fits (#117) keeps the plan's
-            // 60 × 110 area (#108).
-            lot_frontage: 64.0,
+            // 100 × the 106 a five-row band fits (#117): about 1200 lots
+            // of about 10k, most taking 4 stations (#422, plots plan §5.2).
+            // 64 before, which kept the suburb plan's 60 × 110 (#108).
+            lot_frontage: 100.0,
             lot_depth: 110.0,
             lot_depth_min: 95.0,
             lot_depth_max: 130.0,
@@ -1144,7 +1145,17 @@ mod tests {
         // (`20261201_001_rural_smaller_farms.sql`). No seeded grass moves, and
         // the planned nodes the farms move are re-planned
         // (`post-content/20261201_001_rural_smaller_farms_nodes.sql`).
-        assert_eq!(TerrainConfig::get_default().version(), "250c61ad7fdb7733");
+        //
+        // #422 made the suburb's lots wider (plots plan §5.2): frontage 100,
+        // not 64, and 2 or 3 pies round a bulb, not 4 or 5. 1192 lots of
+        // about 10.3k for 1905 of about 6.7k, 90% taking 4 stations. The
+        // streets didn't move; the parks are the open ground the lots leave,
+        // so they did (116, not 128). Nothing outside the suburb moved. Old
+        // suburban rows are renamed `oldsub_` and released by startup's sync
+        // (`20261205_001_suburb_wider_lots.sql`). No seeded grass moves, and
+        // the planned nodes the lots move are re-planned
+        // (`post-content/20261205_001_suburb_wider_lots_nodes.sql`).
+        assert_eq!(TerrainConfig::get_default().version(), "bf5dce48376e59c0");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one
@@ -1200,7 +1211,7 @@ mod tests {
         json["suburban"]["neighbourhood"] = serde_json::json!({ "lot_depth": 120.0, "force_pattern": "central_loop" });
         let new: WorldGenParams = serde_json::from_value(json).unwrap();
         assert_eq!(new.suburban.neighbourhood.lot_depth, 120.0);
-        assert_eq!(new.suburban.neighbourhood.lot_frontage, 64.0);
+        assert_eq!(new.suburban.neighbourhood.lot_frontage, 100.0);
         assert_eq!(new.suburban.neighbourhood.force_pattern, Some(NeighbourhoodPattern::CentralLoop));
     }
 
@@ -1223,7 +1234,7 @@ mod tests {
     fn the_default_world_has_a_suburb() {
         let t = TerrainConfig::get_default();
         assert!(t.roads.iter().any(|r| r.road_type == RoadType::Suburban));
-        assert!(t.terrain_plots.iter().filter(|l| l.zone == "suburban").count() > 1500);
+        assert!(t.terrain_plots.iter().filter(|l| l.zone == "suburban").count() > 1000);
         assert!(t.terrain_plots.iter().any(|l| l.zone == "urban"));
     }
 

@@ -511,9 +511,11 @@ pub(crate) mod tests {
             assert_eq!(m.overlaps, 0, "{why}");
             assert_eq!(m.convex_share, Some(1.0), "{why}");
             assert_eq!(m.arterial_fronting, 0, "{why}");
-            assert!((6600.0..=7500.0).contains(&m.lot_area_median.unwrap()), "{why}");
-            assert!(m.lot_area_p5.unwrap() >= 4000.0 && m.lot_area_p95.unwrap() <= 11000.0, "{why}");
-            assert!((55.0..=65.0).contains(&m.lot_width_median.unwrap()), "{why}");
+            // About 100 × 105 since #422 (plots plan §3): most take 4 stations.
+            assert!((9000.0..=12000.0).contains(&m.lot_area_median.unwrap()), "{why}");
+            assert!(m.lot_area_p5.unwrap() >= 6000.0 && m.lot_area_p95.unwrap() <= 15000.0, "{why}");
+            assert!((90.0..=110.0).contains(&m.lot_width_median.unwrap()), "{why}");
+            assert!(m.takes_four_share.unwrap() >= 0.70, "{why}");
             assert!((100.0..=125.0).contains(&m.lot_depth_median.unwrap()), "{why}");
             assert!(m.trimmed_share.unwrap() <= 0.10, "{why}");
             assert!(m.dropped_share.unwrap() <= 0.03, "{why}");

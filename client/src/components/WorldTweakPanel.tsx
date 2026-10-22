@@ -227,7 +227,7 @@ export default function WorldTweakPanel() {
               <ParamSelect label="Pattern" value={params.suburban.neighbourhood.force_pattern ?? ''} options={SUBURB_PATTERNS} onChange={(v) => updateParam('suburban.neighbourhood.force_pattern', v || null)} />
               <ParamSlider label="Collector Width" value={params.suburban.neighbourhood.collector_width} min={10} max={40} step={1} onChange={(v) => updateParam('suburban.neighbourhood.collector_width', v)} />
               <ParamSlider label="Local Street Width" value={params.suburban.neighbourhood.local_width} min={8} max={30} step={1} onChange={(v) => updateParam('suburban.neighbourhood.local_width', v)} />
-              <ParamSlider label="Lot Frontage" value={params.suburban.neighbourhood.lot_frontage} min={40} max={100} step={1} onChange={(v) => updateParam('suburban.neighbourhood.lot_frontage', v)} />
+              <ParamSlider label="Lot Frontage" value={params.suburban.neighbourhood.lot_frontage} min={40} max={160} step={1} onChange={(v) => updateParam('suburban.neighbourhood.lot_frontage', v)} />
               <ParamSlider label="Lot Depth" value={params.suburban.neighbourhood.lot_depth} min={params.suburban.neighbourhood.lot_depth_min} max={params.suburban.neighbourhood.lot_depth_max} step={1} onChange={(v) => updateParam('suburban.neighbourhood.lot_depth', v)} />
               <ParamSlider label="Split Chance" value={params.suburban.neighbourhood.split_chance} min={0} max={1} step={0.05} onChange={(v) => updateParam('suburban.neighbourhood.split_chance', v)} />
               <ParamSlider label="Warp Amplitude" value={params.suburban.neighbourhood.warp_amplitude} min={0} max={40} step={1} onChange={(v) => updateParam('suburban.neighbourhood.warp_amplitude', v)} />

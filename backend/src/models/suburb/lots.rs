@@ -12,14 +12,17 @@
 //!   through road owns the corner: the end's first lot depth is left to it.
 //! - **Widths.** A run is measured at mid-depth, so a lot on a curve becomes
 //!   a pie, and is cut into `n = round(L / frontage)` equal widths there.
+//!   The frontage is 100 since #422 (64 before), so most lots take 4 stations.
 //! - **Depth.** A ray-march to the first road or the neighbourhood's edge. A
 //!   fronted road within `2·lot_depth_max` gives half the distance, so lots
 //!   back to back share a rear line. Otherwise `min(hit, lot_depth)`, or up
 //!   to `lot_depth_max` where the ray leaves the neighbourhood within
 //!   `2·lot_depth_max`, to take up the edge strips. On the
 //!   concave side of a curve, the ray stops at `0.85/κ` from the centre line.
-//! - **Bulbs.** 4–5 pie lots round each, on rays from the bulb centre, between
-//!   the last rays of the stem's two sides.
+//! - **Bulbs.** 2–3 pie lots round each, on rays from the bulb centre, between
+//!   the last rays of the stem's two sides: as many as keep the most ground
+//!   once each is clear of the roads, and of those that keep nearly as much,
+//!   the fewest (#422; 4–5 before, which made slivers).
 //! - **Overlap pass.** Pies first, then through roads, then cul-de-sac
 //!   stems. A lot that overlaps one placed before it (`quads_overlap_strict`),
 //!   or isn't clear of every road, shrinks by bisection down to 60% depth, or
@@ -46,10 +49,10 @@ use capitol_protocol::terrain::{RoadSegment, TerrainPlot};
 use super::neighbourhood::Neighbourhood;
 use super::patterns::{Role, StreetMeta};
 use super::SuburbPlan;
-use crate::models::geom::Polyline;
+use crate::models::geom::{quad_is_convex, Polyline};
 use crate::models::lot_geometry::{
-    at, blend, curvature, dist, dist_to_seg, dot, place, point, push_fronts, quad, seg_seg_dist, tangent, Candidate,
-    LotParams, Ray, Region, World,
+    at, blend, curvature, dist, dist_to_seg, dot, place, point, push_fronts, push_fronts_by, quad, seg_seg_dist, shrink_to_fit, tangent,
+    Candidate, LotParams, Ray, Region, World,
 };
 use crate::models::terrain::{NeighbourhoodParams, SuburbanGenParams};
 
@@ -69,12 +72,22 @@ const BULB_REACH: f64 = 40.0;
 const HUG_REACH: f64 = 1.0;
 /// ...if it's within about 40° of the ray.
 const HUG_COS: f64 = 0.76;
-/// The most pies round a bulb, and the fewest.
-const PIES: (usize, usize) = (5, 2);
-/// A pie smaller than this share of frontage × depth is too small.
-const MIN_PIE: f64 = 0.65;
+/// The most pies round a bulb, and the fewest. Since #422, 3 at most: a
+/// quarter of the bulb's round is about the narrowest pie that takes 4
+/// stations, as the plots plan wants of a suburban lot.
+const PIES: (usize, usize) = (3, 2);
+/// A bulb takes the fewest pies that keep this share of the most ground any
+/// count keeps.
+const PIE_KEEP: f64 = 0.95;
+/// How far a pie's front may be pushed out along its ray to clear the bulb.
+/// A wide pie's front runs from the stem's last ray to a ray well round the
+/// bulb, so it has further to go than a lot on a curve (`push_fronts`).
+const PIE_PUSH: f64 = 40.0;
 /// A stem's lots stop this far short of its bulb, so the pies wrap round it.
-const STEM_SHORT: f64 = 20.0;
+/// At 20 a wide pie's front, from the stem's last ray, cuts the bulb's neck
+/// however far out its other end goes (#422). Under `BULB_REACH`, or the stem
+/// keeps its last ray and the pies lose their side.
+const STEM_SHORT: f64 = 30.0;
 
 /// The suburb's lots: as wide and deep as the neighbourhood params say, off
 /// the road's edge, short of an edge they back onto and of the line they
@@ -416,17 +429,25 @@ impl Street<'_> {
                 })
                 .collect()
         };
-        // The most pies whose every lot is big enough. Narrow pies hold too
-        // little ground, so a tight bulb takes fewer, wider ones.
-        let least = MIN_PIE * self.p.frontage * self.p.depth;
-        let big_enough = |rays: &[Option<Ray>]| {
-            rays.windows(2).all(|w| match (w[0], w[1]) {
-                (Some(a), Some(b)) => TerrainPlot::calculate_area(&quad(&a, &b)) >= least,
-                _ => true,
+        // As many pies as keep the most ground once each is clear of the
+        // roads (#422): a wide pie reaches the next street and is cut back or
+        // dropped, and a narrow one is a sliver. Of the counts that keep
+        // nearly the most, the fewest, so the pies stay wide.
+        let kept: Vec<(Vec<(usize, [P; 4])>, f64)> = (PIES.1..=PIES.0)
+            .map(|count| {
+                let quads = self.pie_quads(fan(count));
+                let area = quads.iter().map(|(_, q)| self.kept_area(q)).sum();
+                (quads, area)
             })
-        };
-        let mut rays = (PIES.1..=PIES.0).rev().map(fan).find(|r| big_enough(r)).unwrap_or_else(|| fan(PIES.1));
-        // Fronts are pushed only along unbroken stretches of rays.
+            .collect();
+        let most = kept.iter().map(|k| k.1).fold(0.0, f64::max);
+        let (quads, _) = kept.into_iter().find(|k| k.1 >= PIE_KEEP * most).expect("the most is among them");
+        quads.into_iter().map(|(k, q)| self.candidate(0, "B", k, q)).collect()
+    }
+
+    /// The pies between `rays`, numbered round the bulb. Fronts are pushed
+    /// only along unbroken stretches of rays.
+    fn pie_quads(&self, mut rays: Vec<Option<Ray>>) -> Vec<(usize, [P; 4])> {
         let mut out = Vec::new();
         let mut j = 0;
         while j < rays.len() {
@@ -435,13 +456,21 @@ impl Street<'_> {
                 j += 1;
             }
             let mut stretch: Vec<Ray> = rays[start..j].iter_mut().map(|r| r.take().unwrap()).collect();
-            push_fronts(&mut stretch, self.world);
+            push_fronts_by(&mut stretch, self.world, PIE_PUSH);
             for (k, w) in stretch.windows(2).enumerate() {
-                out.push(self.candidate(0, "B", start + k, quad(&w[0], &w[1])));
+                out.push((start + k, quad(&w[0], &w[1])));
             }
             j += 1;
         }
         out
+    }
+
+    /// What's left of a lot once the overlap pass has pulled it clear of
+    /// the roads and the water, as `place` would, or 0 if it's dropped.
+    fn kept_area(&self, q: &[P; 4]) -> f64 {
+        let least = self.p.min_area * self.p.frontage * self.p.depth;
+        let ok = |q: &[P; 4]| quad_is_convex(q) && TerrainPlot::calculate_area(q) >= least && self.world.quad_clear(q);
+        shrink_to_fit(*q, self.p.min_shrink, ok).map_or(0.0, |q| TerrainPlot::calculate_area(&q))
     }
 }
 
@@ -495,9 +524,11 @@ mod tests {
             assert_eq!(m.overlaps, 0, "{why}");
             assert_eq!(m.convex_share, Some(1.0), "{why}");
             assert_eq!(m.arterial_fronting, 0, "{why}");
-            assert!((6600.0..=7500.0).contains(&m.lot_area_median.unwrap()), "{why}");
-            assert!(m.lot_area_p5.unwrap() >= 4000.0 && m.lot_area_p95.unwrap() <= 11000.0, "{why}");
-            assert!((55.0..=65.0).contains(&m.lot_width_median.unwrap()), "{why}");
+            // About 100 × 105 since #422 (plots plan §3): most take 4 stations.
+            assert!((9000.0..=12000.0).contains(&m.lot_area_median.unwrap()), "{why}");
+            assert!(m.lot_area_p5.unwrap() >= 6000.0 && m.lot_area_p95.unwrap() <= 15000.0, "{why}");
+            assert!((90.0..=110.0).contains(&m.lot_width_median.unwrap()), "{why}");
+            assert!(m.takes_four_share.unwrap() >= 0.70, "{why}");
             assert!((100.0..=125.0).contains(&m.lot_depth_median.unwrap()), "{why}");
             assert!(m.trimmed_share.unwrap() <= 0.10, "{why}");
             assert!(m.dropped_share.unwrap() <= 0.03, "{why}");

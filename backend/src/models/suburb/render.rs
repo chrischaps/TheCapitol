@@ -22,9 +22,9 @@ const OUT_PX: f64 = 2400.0;
 /// The key takes a column this wide on the left, so it never covers the plan.
 const LEGEND_PX: f64 = 480.0;
 /// Lots are shaded from this area...
-const AREA_LO: f64 = 4000.0;
+const AREA_LO: f64 = 6000.0;
 /// ...to this one, the p5 and p95 targets.
-const AREA_HI: f64 = 11000.0;
+const AREA_HI: f64 = 15000.0;
 
 pub(crate) const PAPER: &str = "#f3eee2";
 pub(crate) const INK: &str = "#2e2a24";

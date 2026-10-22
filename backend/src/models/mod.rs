@@ -10,6 +10,8 @@ pub mod player;
 pub mod plot;
 pub mod recipe;
 pub mod resource;
+#[cfg(test)]
+pub mod station_room;
 pub mod rural;
 pub mod station;
 pub mod street_plan;
