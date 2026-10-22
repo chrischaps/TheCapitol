@@ -41,6 +41,10 @@
 //! `fixtures/rest/mailbox.json` is `GET /letters?box=in` (S1.5): a citizen's
 //! letter unread, a person's read, and older ones to come;
 //! `send_letter.json` is `POST /letters`, a reply in paragraphs.
+//! `fixtures/rest/post_commission.json`, `deliver_commission.json`,
+//! `commissions.json` and `commission_delivery.json` are `POST /commissions`,
+//! `POST /commissions/{id}/deliver` and their answers (S2.1): a citizen's
+//! commission part delivered beside a person's, and the delivery that fills it.
 
 use std::fs;
 use std::path::Path;
@@ -397,4 +401,40 @@ fn a_mailbox_round_trips_with_its_unread_and_paragraphs() {
     let letter: SendLetter = serde_json::from_str(&json).unwrap();
     assert_eq!(talk::clean_letter(&letter.body).unwrap(), letter.body, "already clean");
     assert_eq!(serde_json::to_string(&letter).unwrap(), json);
+}
+
+#[test]
+fn commissions_round_trip_marking_only_the_citizen() {
+    use capitol_protocol::rest::{CommissionDelivery, CommissionsResponse, DeliverCommission, PostCommission};
+    use capitol_protocol::rules::court::{commission_value, CommissionStatus};
+    use capitol_protocol::rules::stacking::Units;
+
+    let json = fixture("post_commission.json");
+    let post: PostCommission = serde_json::from_str(&json).unwrap();
+    assert_eq!((post.min_quality, post.due_days), (55, 4));
+    assert_eq!(serde_json::to_string(&post).unwrap(), json);
+    // Without a quality, any
+    let any: PostCommission = serde_json::from_str(r#"{"item_type":"plank","quantity":5,"price":30,"due_days":1}"#).unwrap();
+    assert_eq!(any.min_quality, 0);
+
+    let json = fixture("deliver_commission.json");
+    let deliver: DeliverCommission = serde_json::from_str(&json).unwrap();
+    assert_eq!((deliver.qualities.as_ref().map(Units::count), deliver.quantity), (Some(8), None));
+    assert_eq!(serde_json::to_string(&deliver).unwrap(), json);
+
+    let json = fixture("commissions.json");
+    let board: CommissionsResponse = serde_json::from_str(&json).unwrap();
+    let citizens: Vec<bool> = board.commissions.iter().map(|c| c.poster_citizen).collect();
+    assert_eq!(citizens, [true, false]);
+    for c in &board.commissions {
+        assert_eq!(c.status, CommissionStatus::Open);
+        assert_eq!(c.escrow_strands, commission_value(c.price, c.quantity - c.delivered));
+    }
+    assert_eq!(serde_json::to_string(&board).unwrap(), json);
+
+    let json = fixture("commission_delivery.json");
+    let done: CommissionDelivery = serde_json::from_str(&json).unwrap();
+    assert_eq!((done.commission.status, done.commission.escrow_strands), (CommissionStatus::Filled, 0));
+    assert_eq!(done.paid, commission_value(done.commission.price, done.units.count() as i32));
+    assert_eq!(serde_json::to_string(&done).unwrap(), json);
 }

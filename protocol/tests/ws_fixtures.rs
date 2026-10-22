@@ -73,6 +73,11 @@ const SERVER_TYPES: &[&str] = &[
     "resync",
     "said",
     "letter_arrived",
+    "commission_posted",
+    "commission_updated",
+    "commission_closed",
+    "commission_delivered",
+    "commission_expired",
 ];
 
 const CLIENT_TYPES: &[&str] = &[

@@ -12,8 +12,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::rest::{
-    AutomationMode, DepthLevel, Maker, MarketOrder, MarketTrade, PauseReason, Produced, StationAutomation, StationTool,
-    Subscription,
+    AutomationMode, Commission, DepthLevel, Maker, MarketOrder, MarketTrade, PauseReason, Produced, StationAutomation,
+    StationTool, Subscription,
 };
 use crate::rules::stacking::Units;
 use crate::tunables::Fees;
@@ -637,6 +637,47 @@ pub enum ServerMessage {
         citizen: bool,
         first_line: String,
     },
+    // Commons S2.1: the hall's board of commissions (D5). The first three go
+    // to everyone, so the board stays live.
+    /// A commission went up on the board
+    #[serde(rename = "commission_posted")]
+    CommissionPosted { commission: Commission },
+    /// Units were delivered to a commission: `delivered` is how many so far
+    #[serde(rename = "commission_updated")]
+    CommissionUpdated { commission: Commission },
+    /// A commission came down, filled, cancelled or expired (its `status`
+    /// says which)
+    #[serde(rename = "commission_closed")]
+    CommissionClosed { commission: Commission },
+    // Commons S2.1: to the poster. One that happened while they were away is
+    // sent as they come back.
+    /// `deliverer_name` delivered `units` to your commission and was paid
+    /// `paid` from its escrow. The units are in your market box, at the
+    /// Exchange hall, or wait in the court for room there. `left` 0 means
+    /// it's filled.
+    #[serde(rename = "commission_delivered")]
+    CommissionDelivered {
+        commission_id: Uuid,
+        item_type: String,
+        deliverer_id: Uuid,
+        deliverer_name: String,
+        /// The deliverer is a citizen (C0.1)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        deliverer_citizen: bool,
+        units: Units,
+        paid: i64,
+        left: i32,
+    },
+    /// Your commission ran past its due date with `delivered` of `quantity`
+    /// in, and `refunded` of its escrow came back to your balance
+    #[serde(rename = "commission_expired")]
+    CommissionExpired {
+        commission_id: Uuid,
+        item_type: String,
+        delivered: i32,
+        quantity: i32,
+        refunded: i64,
+    },
 }
 
 impl ServerMessage {
@@ -704,6 +745,11 @@ impl ServerMessage {
             ServerMessage::Resync { .. } => "resync",
             ServerMessage::Said { .. } => "said",
             ServerMessage::LetterArrived { .. } => "letter_arrived",
+            ServerMessage::CommissionPosted { .. } => "commission_posted",
+            ServerMessage::CommissionUpdated { .. } => "commission_updated",
+            ServerMessage::CommissionClosed { .. } => "commission_closed",
+            ServerMessage::CommissionDelivered { .. } => "commission_delivered",
+            ServerMessage::CommissionExpired { .. } => "commission_expired",
         }
     }
 }

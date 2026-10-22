@@ -4,6 +4,7 @@ pub mod auth;
 pub mod bazaar;
 pub mod bureaucracy;
 pub mod catalog;
+pub mod commissions;
 pub mod console;
 pub mod exchange;
 pub mod gazette;

@@ -287,20 +287,50 @@ async fn open_orders(db: &PgPool) -> Result<Vec<BookOrder>, sqlx::Error> {
     Ok(orders)
 }
 
-/// Run the matcher forever, a cycle a second.
+/// How many cycles apart the court moves delivered units waiting for room
+/// in their posters' market boxes (Commons S2.1): every 10 s.
+const WAITING_CYCLES: u64 = 10;
+
+/// Run the matcher forever, a cycle a second. The court's commissions ride
+/// the same loop (Commons S2.1): each cycle expires what's come due, and
+/// every [`WAITING_CYCLES`] it moves delivered units on as boxes have room.
 pub async fn run_market_loop(market: Arc<Market>, db: PgPool, events: broadcast::Sender<GameEvent>) {
     tracing::info!("Market matching every {CYCLE_MS}ms, {} orders on the book", market.with_book(|b| b.len()));
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(CYCLE_MS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut n: u64 = 0;
     loop {
+        n = n.wrapping_add(1);
         interval.tick().await;
         let timed = super::load::Loop::Market.timed();
         let cycle = run_cycle(&market, &db, &events, Utc::now())
             .instrument(tracing::info_span!("loop.market"))
             .await;
+        court_cycle(&db, &events, n.is_multiple_of(WAITING_CYCLES))
+            .instrument(tracing::info_span!("loop.court"))
+            .await;
         drop(timed);
         if cycle != Cycle::default() {
             tracing::debug!("Market: {cycle:?}");
+        }
+    }
+}
+
+/// The court's part of a cycle: expire the commissions due, and with
+/// `waiting`, move delivered units into boxes that have room now.
+async fn court_cycle(db: &PgPool, events: &broadcast::Sender<GameEvent>, waiting: bool) {
+    match super::commissions::expire_due(db, Utc::now()).await {
+        Ok(closed) => crate::routes::commissions::announce_closed(db, events, closed).await,
+        Err(e) => tracing::warn!("Court: expiring commissions: {}", e.message()),
+    }
+    if waiting {
+        match super::commissions::move_waiting(db).await {
+            Ok(boxes) => {
+                for (player_id, container_id) in boxes {
+                    let _ = events.send(GameEvent::InventoryUpdated { player_id, container_id, slots: Vec::new() });
+                }
+            }
+            Err(e) => tracing::warn!("Court: moving delivered units on: {e}"),
         }
     }
 }

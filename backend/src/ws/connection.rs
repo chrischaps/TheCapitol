@@ -1136,7 +1136,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                         }
                     }
-                    Ok(GameEvent::BazaarNotice { player_id: to, notice_id, message }) => {
+                    Ok(
+                        GameEvent::BazaarNotice { player_id: to, notice_id, message }
+                        | GameEvent::Notice { player_id: to, notice_id, message },
+                    ) => {
                         if to == player_id && take_notice(&state.db, Some(notice_id)).await {
                             let _ = sender.send(Message::Text(serde_json::to_string(&message).unwrap().into())).await;
                         }
@@ -1324,6 +1327,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     // D6.1: a fee moved, to everyone, so previews follow
                     Ok(GameEvent::FeesChanged { fees }) => {
                         let msg = ServerMessage::FeesChanged { fees };
+                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                    }
+                    // Commons S2.1: the hall's board, to everyone
+                    Ok(GameEvent::Board { change, commission }) => {
+                        let msg = change.message(commission);
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
                     Err(()) => {

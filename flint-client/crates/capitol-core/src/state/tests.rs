@@ -237,6 +237,11 @@ fn test_for(message: &M) -> fn() {
         M::Resync { .. } => a_socket_that_fell_behind_resyncs_like_a_reconnect,
         M::Said { .. } => said_is_reported,
         M::LetterArrived { .. } => a_letter_is_reported,
+        M::CommissionPosted { .. } => the_board_changes_nothing_yet,
+        M::CommissionUpdated { .. } => the_board_changes_nothing_yet,
+        M::CommissionClosed { .. } => the_board_changes_nothing_yet,
+        M::CommissionDelivered { .. } => commission_notices_are_reported,
+        M::CommissionExpired { .. } => commission_notices_are_reported,
     }
 }
 
@@ -256,7 +261,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 60, "one fixture per ServerMessage variant");
+    assert_eq!(count, 65, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1370,6 +1375,41 @@ fn bazaar_notices_are_reported() {
     assert_eq!(
         state.apply_ws(&fixture("stall_lapsed")),
         vec![StateEvent::StallLapsed { stall_id: "bazaar_stall_4".into(), name: "Ada's Ropes".into(), returned: 3, waiting: 0 }]
+    );
+}
+
+fn server_fixture(name: &str) -> M {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../protocol/tests/fixtures/server");
+    let json = std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap();
+    serde_json::from_str(&json).unwrap()
+}
+
+/// The board's messages keep nothing until the Wanted page's store (S2.3)
+#[test]
+fn the_board_changes_nothing_yet() {
+    let mut state = connected();
+    for name in ["commission_posted", "commission_updated", "commission_closed"] {
+        assert_eq!(state.apply_ws(&server_fixture(name)), vec![], "{name}");
+    }
+}
+
+#[test]
+fn commission_notices_are_reported() {
+    let mut state = connected();
+    assert_eq!(
+        state.apply_ws(&server_fixture("commission_delivered")),
+        vec![StateEvent::CommissionDelivered {
+            item_type: "iron_ore".into(),
+            deliverer_name: "Citizen Cy".into(),
+            deliverer_citizen: true,
+            units: crate::protocol::rules::stacking::Units::from_pairs([(60, 5), (72, 3)]),
+            paid: 48,
+            left: 12,
+        }]
+    );
+    assert_eq!(
+        state.apply_ws(&server_fixture("commission_expired")),
+        vec![StateEvent::CommissionExpired { item_type: "iron_ore".into(), delivered: 8, quantity: 20, refunded: 72 }]
     );
 }
 

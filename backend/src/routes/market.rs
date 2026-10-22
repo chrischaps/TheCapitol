@@ -615,7 +615,7 @@ pub(crate) async fn collect_from(
 /// Refuses `doing` unless the player stands within `HALL_RANGE` of the
 /// Exchange hall: where they are now if they're online, else their saved
 /// position. A world without a hall (an admin's custom one) refuses nothing.
-async fn at_the_exchange(
+pub(crate) async fn at_the_exchange(
     game: &RwLock<GameState>,
     db: &PgPool,
     player_id: Uuid,

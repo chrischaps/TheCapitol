@@ -27,6 +27,8 @@ use capitol_protocol::rest::{
     Gazette, GazetteByline, GazetteDeeds, GazetteMade, GazetteMover, GazettePrice, GazetteProducer, GazetteResponse,
     GazetteSale, GazetteShares, GazetteShop, GazetteStalls,
 };
+use capitol_protocol::rest::{Commission, CommissionDelivery, CommissionsResponse, DeliverCommission, PostCommission};
+use capitol_protocol::rules::court::CommissionStatus;
 use capitol_protocol::rules::market::{GradeRule, OrderSide, OrderStatus};
 use capitol_protocol::terrain::{
     Bridge, Landmark, LandmarkKind, RoadSegment, RoadType, TerrainPark, TerrainPlot, TerrainResponse, WaterRing,
@@ -82,6 +84,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         (name = "Exchange", description = "Currency exchange operations"),
         (name = "Market", description = "Orders, books, price history and the market box"),
         (name = "Bazaar", description = "Stalls, the shops merchants keep in them, and buying from them"),
+        (name = "Commissions", description = "The hall's board: standing requests with the money down, delivered at the Exchange hall"),
         (name = "Gazette", description = "The Capitol Gazette: a daily digest of the economy"),
         (name = "Plots", description = "Land plot ownership and permissions"),
         (name = "Bureaucracy", description = "Zone information and deed prices"),
@@ -156,6 +159,12 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::bazaar::stock,
         crate::routes::bazaar::unlist,
         crate::routes::bazaar::buy,
+        // Commissions
+        crate::routes::commissions::post_commission,
+        crate::routes::commissions::list_commissions,
+        crate::routes::commissions::get_commission,
+        crate::routes::commissions::cancel_commission,
+        crate::routes::commissions::deliver_commission,
         crate::routes::inventory::get_impound,
         crate::routes::inventory::collect_impound,
         // Gazette
@@ -283,6 +292,13 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         StockListing,
         BuyListing,
         BazaarPurchase,
+        // Commissions
+        PostCommission,
+        Commission,
+        CommissionStatus,
+        DeliverCommission,
+        CommissionDelivery,
+        CommissionsResponse,
         // Gazette
         Gazette,
         GazettePrice,

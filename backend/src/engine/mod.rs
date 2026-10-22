@@ -4,6 +4,7 @@ pub mod automation;
 pub mod automation_tick;
 pub mod bazaar;
 pub mod catalog;
+pub mod commissions;
 mod commands;
 #[cfg(test)]
 pub(crate) mod conservation;
@@ -49,6 +50,6 @@ pub mod trading;
 pub mod zone_sync;
 
 pub use commands::Command;
-pub use events::GameEvent;
+pub use events::{BoardChange, GameEvent};
 pub use extraction::extraction_refusal;
 pub use tick::{run_tick_loop, GameState};

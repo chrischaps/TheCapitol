@@ -3,7 +3,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::models::{PlayerPosition, SlotItem};
-use capitol_protocol::rest::{DepthLevel, MarketOrder, MarketTrade};
+use capitol_protocol::rest::{Commission, DepthLevel, MarketOrder, MarketTrade};
 use capitol_protocol::ws::{ToolUse, TradeItemInfo};
 
 #[derive(Debug, Clone, Serialize)]
@@ -265,6 +265,16 @@ pub enum GameEvent {
     MutesChanged { player_id: Uuid },
     /// D6.1: an admin moved a fee (to everyone)
     FeesChanged { fees: capitol_protocol::tunables::Fees },
+    /// Commons S2.1: a commission went up on the hall's board, was delivered
+    /// to, or came down (to everyone, so the board stays live)
+    Board { change: BoardChange, commission: Commission },
+    /// A notice queued for `player_id` (`notices::queue`), as `notice_id`:
+    /// their socket sends it live if it can take it first (Commons S2.1)
+    Notice {
+        player_id: Uuid,
+        notice_id: Uuid,
+        message: capitol_protocol::ws::ServerMessage,
+    },
     // E3.3: the market API
     /// `player_id`'s order is on the book
     OrderPlaced { player_id: Uuid, order: MarketOrder },
@@ -282,4 +292,26 @@ pub enum GameEvent {
 pub struct SlotUpdate {
     pub slot_index: i32,
     pub item: Option<SlotItem>,
+}
+
+/// What happened to a commission on the board (Commons S2.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum BoardChange {
+    Posted,
+    /// Units were delivered to it
+    Updated,
+    /// Filled, cancelled or expired
+    Closed,
+}
+
+impl BoardChange {
+    /// The message every socket sends for it
+    pub fn message(self, commission: Commission) -> capitol_protocol::ws::ServerMessage {
+        use capitol_protocol::ws::ServerMessage;
+        match self {
+            BoardChange::Posted => ServerMessage::CommissionPosted { commission },
+            BoardChange::Updated => ServerMessage::CommissionUpdated { commission },
+            BoardChange::Closed => ServerMessage::CommissionClosed { commission },
+        }
+    }
 }

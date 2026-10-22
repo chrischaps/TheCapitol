@@ -1919,6 +1919,105 @@ pub struct GrantResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /commissions (Commons S2.1, plan D5)
+// ---------------------------------------------------------------------------
+
+/// `POST /commissions`: ask for `quantity` units of an item at or over
+/// `min_quality`, at `price` each, due in `due_days`. The whole price is
+/// escrowed, and the court's fee (`rules::court::court_fee`) is charged on
+/// top. Only at the Exchange hall.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct PostCommission {
+    pub item_type: String,
+    /// The lowest quality taken, 0 to 100: every unit delivered meets it.
+    /// Without it, any. A grade's is `rules::market::grade_floor`.
+    #[serde(default)]
+    pub min_quality: i32,
+    pub quantity: i32,
+    /// Strands per unit
+    pub price: i64,
+    /// Due in 1 to 7 days
+    pub due_days: i64,
+}
+
+/// A commission on the hall's board, as anyone sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Commission {
+    pub id: Uuid,
+    pub poster_id: Uuid,
+    pub poster_name: String,
+    /// The poster is a citizen (C0.1)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub poster_citizen: bool,
+    pub item_type: String,
+    pub min_quality: i32,
+    pub quantity: i32,
+    /// Units delivered so far
+    pub delivered: i32,
+    /// Strands per unit
+    pub price: i64,
+    /// What's unspent of its escrow: `price × (quantity - delivered)` while
+    /// it's open, 0 once it's closed
+    pub escrow_strands: i64,
+    /// The court's fee it paid (kept on a cancel or an expiry)
+    pub fee: i64,
+    pub posted_at: DateTime<Utc>,
+    pub due_at: DateTime<Utc>,
+    pub status: rules::court::CommissionStatus,
+}
+
+/// `POST /commissions/{id}/deliver`: units from your stack toward it. Only
+/// at the Exchange hall, and never to your own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct DeliverCommission {
+    /// The stack the units come from, in your inventory or market box
+    pub item_id: Uuid,
+    /// Which units, as `[quality, count]` pairs, every one at the
+    /// commission's quality. Without it, the lowest that meet it go first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualities: Option<Units>,
+    /// The most to deliver. Without it, as many as fit, up to what's wanted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity: Option<i32>,
+}
+
+/// What a delivery did: the units handed over, what they were paid, and the
+/// commission as it stands after them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CommissionDelivery {
+    pub commission: Commission,
+    pub units: Units,
+    /// Strands paid out of escrow to you
+    pub paid: i64,
+}
+
+/// `GET /commissions` query string. Without any, every open commission.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::IntoParams))]
+pub struct CommissionsQuery {
+    /// Only this item type
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+    /// Only your own
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mine: bool,
+    /// Only those in this state; without it, the open ones
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<rules::court::CommissionStatus>,
+}
+
+/// `GET /commissions`: newest first, at most 200.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CommissionsResponse {
+    pub commissions: Vec<Commission>,
+}
+
+// ---------------------------------------------------------------------------
 // /gazette (E3.9)
 // ---------------------------------------------------------------------------
 

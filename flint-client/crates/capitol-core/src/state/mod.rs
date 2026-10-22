@@ -293,6 +293,26 @@ pub enum StateEvent {
         returned: u32,
         waiting: u32,
     },
+    /// Someone delivered to your commission (`commission_delivered`,
+    /// Commons S2.1) and was paid from its escrow. `left` 0 means it's
+    /// filled. Flint toasts it, as a bazaar sale.
+    CommissionDelivered {
+        item_type: String,
+        deliverer_name: String,
+        /// The deliverer is a citizen (C0.1)
+        deliverer_citizen: bool,
+        units: crate::protocol::rules::stacking::Units,
+        paid: i64,
+        left: i32,
+    },
+    /// Your commission ran past its due date (`commission_expired`, Commons
+    /// S2.1), and `refunded` of its escrow came back.
+    CommissionExpired {
+        item_type: String,
+        delivered: i32,
+        quantity: i32,
+        refunded: i64,
+    },
     /// A bazaar answer changed [`GameState::bazaar`]: the directory, a shop
     /// seen at its stall, or yours.
     BazaarUpdated,
@@ -878,6 +898,28 @@ impl GameState {
                     units: units.clone(),
                     paid: *paid,
                 });
+            }
+            // Commons S2.1: the hall's board, to everyone. Nothing here keeps
+            // the board yet: the Wanted page's store does (S2.3, #389).
+            M::CommissionPosted { .. } | M::CommissionUpdated { .. } | M::CommissionClosed { .. } => {}
+            // Commons S2.1: to the poster
+            M::CommissionDelivered { item_type, deliverer_name, deliverer_citizen, units, paid, left, .. } => {
+                out.push(StateEvent::CommissionDelivered {
+                    item_type: item_type.clone(),
+                    deliverer_name: deliverer_name.clone(),
+                    deliverer_citizen: *deliverer_citizen,
+                    units: units.clone(),
+                    paid: *paid,
+                    left: *left,
+                })
+            }
+            M::CommissionExpired { item_type, delivered, quantity, refunded, .. } => {
+                out.push(StateEvent::CommissionExpired {
+                    item_type: item_type.clone(),
+                    delivered: *delivered,
+                    quantity: *quantity,
+                    refunded: *refunded,
+                })
             }
             M::StallLapsed { stall_id, name, returned, waiting } => {
                 self.bazaar.apply_ws(message);

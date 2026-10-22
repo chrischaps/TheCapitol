@@ -839,6 +839,40 @@ impl Session {
         self.bazaar_asked = None;
     }
 
+    /// Turns a delivery to your commission, or its expiry, into a toast, as
+    /// a bazaar sale is (Commons S2.1). The board itself is S2.3's (#389).
+    fn note_commission(&mut self, change: &StateEvent) {
+        let catalog = self.state.catalog();
+        let note = match change {
+            StateEvent::CommissionDelivered { item_type, deliverer_name, deliverer_citizen, units, paid, left } => {
+                let who = if *deliverer_citizen { format!("{deliverer_name}, a citizen,") } else { deliverer_name.clone() };
+                let rest = match left {
+                    0 => " It's filled.".to_owned(),
+                    n => format!(" {n} still wanted."),
+                };
+                TradeNote::new(
+                    "Delivered to your commission",
+                    format!(
+                        "{who} delivered {} {} ({}) and was paid {paid} Strands. They're in your market box at the Exchange hall.{rest}",
+                        units.count(),
+                        catalog.item_name(item_type),
+                        grade_words(units)
+                    ),
+                )
+            }
+            StateEvent::CommissionExpired { item_type, delivered, quantity, refunded } => TradeNote::new(
+                "Your commission ran out",
+                format!(
+                    "{delivered} of {quantity} {} came in before it was due. {refunded} Strands came back to you.",
+                    catalog.item_name(item_type)
+                ),
+            ),
+            _ => return,
+        };
+        tracing::info!("commission: {}: {}", note.title, note.body);
+        self.market_notes.push(note);
+    }
+
     /// Opens the station nearest you, as a click on it would (the O key).
     pub fn open_nearest_station(&mut self, now: Instant) {
         let Some(me) = self.state.local_player() else {
@@ -2348,6 +2382,9 @@ impl Session {
                     StateEvent::AutomationProduced { station_id } => self.produced.push(*station_id),
                     StateEvent::Market(event) => self.note_market(event),
                     StateEvent::BazaarSale { .. } | StateEvent::StallLapsed { .. } => self.note_bazaar(change),
+                    StateEvent::CommissionDelivered { .. } | StateEvent::CommissionExpired { .. } => {
+                        self.note_commission(change)
+                    }
                     StateEvent::GazettePublished { day, headline, .. } => {
                         self.gazette.published(*day, headline)
                     }
