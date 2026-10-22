@@ -633,6 +633,40 @@ table.ledger { width: 100%; border-collapse: collapse; font-size: 14px; }
   .work .share-bar { display: none; }
 }
 
+/* ---- the town (D4.2) ---------------------------------------------------- */
+
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.roster-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin-top: 14px; }
+.roster-tools[hidden] { display: none; }
+.roster-tools .filters { margin-top: 0; }
+.roster-find { flex: 1 1 220px; max-width: 360px; }
+.roster-find input { margin-top: 0; padding: 6px 10px; font-size: 14px; }
+/* A heading sorts: a button in the heading's own type, with the direction after */
+.ledger th[data-sort] button {
+  font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit;
+  background: none; border: 0; padding: 0; cursor: pointer;
+}
+.ledger th[data-sort] button:hover { color: var(--ink); }
+.ledger th[aria-sort="ascending"] button, .ledger th[aria-sort="descending"] button { color: var(--ink); }
+.ledger th[aria-sort="ascending"] button::after { content: " ▴"; }
+.ledger th[aria-sort="descending"] button::after { content: " ▾"; }
+.roster .standing::before { content: "● "; font-size: 9px; vertical-align: 2px; color: var(--ink-dim); }
+.roster .standing-working::before { color: var(--up); }
+.roster .standing-resting::before, .roster .standing-starting::before { color: var(--s3); }
+.roster .standing-offline::before, .roster .standing-waiting::before { color: var(--accent); }
+.roster .standing-retired::before, .roster .standing-stopped::before { color: var(--down); }
+.roster .standing-away, .roster .standing-retired, .roster .standing-stopped { color: var(--ink-dim); }
+.roster td.trade { white-space: nowrap; }
+.roster td.failure { color: var(--down); min-width: 16em; max-width: 28em; }
+.roster td.failure .dim { display: block; font-size: 12px; }
+@media (max-width: 640px) {
+  .roster th:nth-child(2), .roster td:nth-child(2),
+  .roster th:nth-child(4), .roster td:nth-child(4),
+  .roster th:nth-child(7), .roster td:nth-child(7) { display: none; }
+  #town-layers th:nth-child(4), #town-layers td:nth-child(4),
+  #town-layers th:nth-child(6), #town-layers td:nth-child(6) { display: none; }
+}
+
 /* ---- the wire ---------------------------------------------------------- */
 
 .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }

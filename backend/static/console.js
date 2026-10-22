@@ -14,7 +14,8 @@
 // the map. D2.1 grows the economy tab: where the Strands come from and
 // go, what buy orders hold, and how fast the money moves. D2.3 adds prices
 // against target, and D2.4 what's made and used, the stock, and the
-// workshops.
+// workshops. D4.2 grows the town tab: who's on, the roster from the
+// town's report, how the questions were settled and what that costs.
 
 "use strict";
 
@@ -49,7 +50,7 @@
     samples: new Map(),
     sorted: null,
     // How far back each set of fields has been read, as Unix ms
-    covered: { base: Infinity, load: Infinity, money: Infinity, making: Infinity },
+    covered: { base: Infinity, load: Infinity, money: Infinity, making: Infinity, town: Infinity },
     annotations: new Map(),
     wire: [],
     wireKind: "all",
@@ -205,13 +206,14 @@
     state.charts = {};
     state.samples.clear();
     state.sorted = null;
-    state.covered = { base: Infinity, load: Infinity, money: Infinity, making: Infinity };
+    state.covered = { base: Infinity, load: Infinity, money: Infinity, making: Infinity, town: Infinity };
     state.annotations.clear();
     state.wire = [];
     mapStop();
     map.walkers.clear();
     map.layers = map.nodes = null;
     map.follow = map.hover = null;
+    Object.assign(townView, { latest: undefined, readAt: 0, made: null });
     setLive("off");
     showLogin(why);
   }
@@ -263,6 +265,7 @@
     load: "load,events",
     money: "strand_flows,new_accounts,market,bazaar,distribution,books",
     making: "units,unit_flows,crafts",
+    town: "town",
   };
 
   async function readSeries(set) {
@@ -288,12 +291,13 @@
         if (!res.ok || !res.body) throw new Error(`stream: ${res.status}`);
         // After a gap, the samples missed are in the series
         if (state.lastSampleAt) {
-          state.covered = { base: Infinity, load: Infinity, money: Infinity, making: Infinity };
+          state.covered = { base: Infinity, load: Infinity, money: Infinity, making: Infinity, town: Infinity };
           await Promise.all([
             readSeries("base"),
             state.tab === "performance" ? readSeries("load") : null,
             state.tab === "economy" ? readSeries("money") : null,
             state.tab === "economy" ? readSeries("making") : null,
+            state.tab === "town" ? readSeries("town") : null,
           ]);
         }
         setLive("live");
@@ -338,6 +342,7 @@
         if (addAnnotation(a)) {
           for (const chart of Object.values(state.charts)) chart.redraw();
           if (a.kind === "tunable_changed") loadKnobs();
+          if (a.kind === "town_up" || a.kind === "town_down") { townView.readAt = 0; render(["town"]); }
           render(["events", "overview"]);
         }
         break;
@@ -693,6 +698,7 @@
     overview: ["players"],
     economy: ["strands", "flows", "escrow", "velocity", "spread", "prices", "making"],
     performance: ["tick", "phases", "over", "commands", "bus", "sockets", "pool", "txns"],
+    town: ["townOn", "rulings", "cost"],
   };
 
   function chart(name) {
@@ -1935,36 +1941,412 @@
     $("db-headline").textContent = line;
   }
 
-  let roster = null;
+  // ---------------------------------------------------------------------------
+  // The town (D4.2): who's on, the roster as the town's newest report has
+  // it, how the questions were settled and what the layers cost. The roster
+  // is `GET /admin/town`, read at most every TOWN_READ_MS while the tab is
+  // open; the rest is each sample's `town`, the reports over its window.
+
+  const TOWN_READ_MS = 15_000;
+  // The roster rows shown before "Show all"
+  const ROSTER_ROWS = 50;
+  // C3's yardstick for a citizen-day: 100 decisions a game hour over a
+  // 14-hour working day (the-capitol-citizens.md, C3.3)
+  const C3_DAY_DECISIONS = 1400;
+  // Signed in, or in a session and trying to be
+  const ON = new Set(["starting", "working", "resting", "offline", "waiting"]);
+  // The roster's standings in the order a sort puts them
+  const STANDINGS = ["working", "resting", "starting", "waiting", "offline", "away", "retired", "stopped"];
+
+  const townView = {
+    latest: undefined, // TownLatest; null when no town has reported, undefined until read
+    readAt: 0,
+    made: null, // `/admin/citizens`, for a server no town has reported to
+    // Those who are on first, by default
+    sort: prefs.get("observatory.roster.sort") ?? "standing",
+    desc: prefs.get("observatory.roster.desc") === "1",
+    show: "all",
+    // The whole roster, not the first ROSTER_ROWS
+    every: false,
+    find: "",
+  };
+
   async function town(reload = false) {
-    if (!roster || reload) {
-      try { roster = await getJson("/admin/citizens"); } catch (e) {
-        if (!(e instanceof SignedOut)) $("town-headline").textContent = "The roster couldn't be read.";
-        return;
-      }
-      const body = $("roster").tBodies[0];
-      body.replaceChildren(...(roster.length ? roster.map(citizenRow) : [emptyRow(4, "No citizens yet. scripts/town.sh up makes a town of them.")]));
+    if (state.covered.town > rangeFrom()) {
+      try { await readSeries("town"); } catch (e) { if (e instanceof SignedOut) return; console.warn(e); }
     }
-    const on = latest((s) => s.players)?.players.citizens;
-    $("town-headline").textContent = roster.length === 0
-      ? "This server has made no citizens."
-      : on == null ? `The town has ${plural(roster.length, "citizen", "citizens")}.`
-          : on === 0 ? `The town has ${plural(roster.length, "citizen", "citizens")}, and none of them is about now.`
-            : `The town has ${plural(roster.length, "citizen", "citizens")}, and ${nf.format(on)} ${on === 1 ? "is" : "are"} about now.`;
+    if (reload || Date.now() - townView.readAt > TOWN_READ_MS) {
+      townView.readAt = Date.now();
+      try {
+        books ??= await getJson("/admin/books");
+        townView.latest = await getJson("/admin/town");
+        if (!townView.latest) townView.made ??= await getJson("/admin/citizens");
+      } catch (e) {
+        if (e instanceof SignedOut) return;
+        console.warn(e);
+        if (townView.latest === undefined) $("town-headline").textContent = "The roster couldn't be read.";
+      }
+    }
+    townOn();
+    rosterTable();
+    rulings();
+    if (books) cost();
   }
 
-  function citizenRow(c) {
+  // --- Who's on
+
+  CHARTS.townOn = () => lineChart($("chart-town-on"), {
+    has: (s) => s.players,
+    axis: count,
+    legend: count,
+    series: [
+      { label: "Signed in", color: "--s1", width: 2, value: (s) => s.players.citizens },
+      { label: "Working", color: "--s2", value: (s) => (s.town ? s.town.standing.working ?? 0 : null) },
+      { label: "Resting", color: "--s3", value: (s) => (s.town ? s.town.standing.resting ?? 0 : null) },
+    ],
+  });
+
+  function townOn() {
+    chart("townOn");
+    const t = townView.latest;
+    const h = $("town-on-headline");
+    if (t === undefined) return void (h.textContent = "Reading the town's report.");
+    if (!t) return void (h.textContent = "No town has reported in to this server. scripts/town.sh up starts one.");
+    const by = {};
+    for (const c of t.report.citizens) by[c.standing] = (by[c.standing] ?? 0) + 1;
+    const n = t.report.citizens.length;
+    if (!t.up) return void (h.textContent = `The town is down. Its last report came ${ago(t.received_ms)}, with ${plural(n, "citizen", "citizens")} on the roster.`);
+    const on = t.report.citizens.filter((c) => ON.has(c.standing)).length;
+    const parts = STANDINGS.filter((k) => ON.has(k) && by[k]).map((k) => `${nf.format(by[k])} ${k}`);
+    let line = on === 0
+      ? `None of the town's ${plural(n, "citizen", "citizens")} is on.`
+      : `${nf.format(on)} of the town's ${plural(n, "citizen", "citizens")} ${on === 1 ? "is" : "are"} on: ${andList(parts)}.`;
+    if (by.away) line += ` ${nf.format(by.away)} ${by.away === 1 ? "is" : "are"} away until their next session.`;
+    const list = inRange((s) => s.players);
+    if (list.length > 1) {
+      const peak = list.reduce((a, s) => (s.players.citizens > a.players.citizens ? s : a));
+      if (peak.players.citizens > on) line += ` The most signed in at once ${since(list[0])} was ${nf.format(peak.players.citizens)}, at ${clock(peak.at_ms)}.`;
+    }
+    if (by.retired) line += ` ${plural(by.retired, "citizen has", "citizens have")} retired: the server refused ${by.retired === 1 ? "its key" : "their keys"}.`;
+    h.textContent = line;
+  }
+
+  // --- The roster
+
+  const ROSTER_SORT = {
+    name: (c) => c.name.toLowerCase(),
+    role: (c) => c.role,
+    standing: (c) => STANDINGS.indexOf(c.standing),
+    phase: (c) => c.phase ?? "~",
+    strands: (c) => c.strands ?? -Infinity,
+    activity: (c) => c.activity.toLowerCase(),
+    // Sorted up, the newest failure comes first
+    failure: (c) => -(c.failure?.at_ms ?? -Infinity),
+  };
+  const ROSTER_SHOW = {
+    all: () => true,
+    on: (c) => ON.has(c.standing),
+    working: (c) => c.standing === "working",
+    resting: (c) => c.standing === "resting",
+    away: (c) => c.standing === "away",
+    failed: (c) => c.failure != null,
+  };
+
+  function rosterTable() {
+    const t = townView.latest;
+    const body = $("roster").tBodies[0];
+    const h = $("town-headline");
+    $("roster-tools").hidden = !t;
+    for (const th of $("roster").tHead.rows[0].cells) {
+      th.setAttribute("aria-sort", th.dataset.sort === townView.sort ? (townView.desc ? "descending" : "ascending") : "none");
+    }
+    if (t === undefined) return;
+    if (!t) {
+      const made = townView.made ?? [];
+      h.textContent = made.length
+        ? `This server has made ${plural(made.length, "citizen", "citizens")}, but no town has reported in, so there's no more to say of them yet.`
+        : "This server has made no citizens.";
+      $("roster-dek").textContent = "Every citizen this server has made, oldest first. Their trades and days come with the town's first report.";
+      return void body.replaceChildren(...(made.length ? made.map(madeRow) : [emptyRow(7, "No citizens yet. scripts/town.sh up makes a town of them.")]));
+    }
+    $("roster-dek").textContent = `Every citizen on the town's roster, as its report of ${clockSecs(t.report.at_ms)} has them. Click a heading to sort.`;
+    const find = townView.find.trim().toLowerCase();
+    const key = ROSTER_SORT[townView.sort] ?? ROSTER_SORT.name;
+    const rows = t.report.citizens
+      .filter(ROSTER_SHOW[townView.show])
+      .filter((c) => !find || [c.name, c.role, c.activity, c.failure?.why ?? ""].some((f) => f.toLowerCase().includes(find)))
+      .sort((a, b) => {
+        const [x, y] = [key(a), key(b)];
+        const by = x < y ? -1 : x > y ? 1 : 0;
+        return (townView.desc ? -by : by) || a.name.localeCompare(b.name);
+      });
+    const shown = townView.every ? rows : rows.slice(0, ROSTER_ROWS);
+    body.replaceChildren(...(rows.length ? shown.map(rosterRow) : [emptyRow(7, "No citizen on the roster matches.")]));
+    if (shown.length < rows.length) body.append(moreRow(rows.length));
+    const n = t.report.citizens.length;
+    let line = rows.length === n
+      ? `The roster holds ${plural(n, "citizen", "citizens")}.`
+      : `Showing ${nf.format(rows.length)} of the roster's ${plural(n, "citizen", "citizens")}.`;
+    const failed = t.report.citizens.filter((c) => c.failure && c.failure.at_ms > rangeFrom()).length;
+    if (failed) line += ` For ${plural(failed, "of them", "of them")}, something went wrong in ${window_()}.`;
+    const richest = t.report.citizens.filter((c) => c.strands != null).sort((a, b) => b.strands - a.strands)[0];
+    if (richest) line += ` The richest is ${richest.name}, ${one(richest.role)}, with ${plural(richest.strands, "Strand", "Strands")}.`;
+    h.textContent = line;
+  }
+
+  function rosterRow(c) {
     const tr = document.createElement("tr");
-    const key = c.key
-      ? [text("code", `${c.key.prefix}…`), ` ${c.key.scopes.join(" + ")}`]
-      : ["none, so it can't sign in"];
+    const standing = text("span", c.standing);
+    standing.className = `standing standing-${c.standing}`;
+    const when = text("span", `${ago(c.failure?.at_ms ?? 0)}${c.restarts ? `, ${plural(c.restarts, "restart", "restarts")}` : ""}`);
+    when.className = "dim";
+    const failure = c.failure ? [c.failure.why, " ", when] : c.restarts ? plural(c.restarts, "restart", "restarts") : "–";
     tr.append(
       cell(["◇ ", c.name]),
-      cell(day(c.created_at), "dim"),
-      cell(key, c.key ? "" : "dim"),
-      cell(c.key?.last_used_at ? ago(Date.parse(c.key.last_used_at)) : "never", "dim"),
+      cell(trade(c.role), "trade"),
+      cell(standing),
+      cell(c.phase ?? "–", "dim"),
+      cell(c.strands == null ? "–" : nf.format(c.strands), "num"),
+      cell(c.activity),
+      cell(failure, c.failure ? "failure" : "dim"),
     );
     return tr;
+  }
+
+  /** The row under a cut roster, which shows the rest */
+  function moreRow(n) {
+    const tr = document.createElement("tr");
+    tr.className = "more";
+    const b = text("button", `Show all ${nf.format(n)}`);
+    b.type = "button";
+    b.className = "quiet";
+    b.addEventListener("click", () => { townView.every = true; rosterTable(); });
+    const td = cell([`The first ${nf.format(ROSTER_ROWS)} of ${nf.format(n)}. `, b]);
+    td.colSpan = 7;
+    tr.append(td);
+    return tr;
+  }
+
+  /** A citizen the server made, before any town has reported */
+  function madeRow(c) {
+    const tr = document.createElement("tr");
+    tr.append(
+      cell(["◇ ", c.name]),
+      cell("–", "dim"),
+      cell(c.key ? "never reported" : "no key, so it can't sign in", "dim"),
+      cell("–", "dim"),
+      cell("–", "num dim"),
+      cell(c.key?.last_used_at ? `signed in ${ago(Date.parse(c.key.last_used_at))}` : "–", "dim"),
+      cell("–", "dim"),
+    );
+    return tr;
+  }
+
+  function rosterControls() {
+    for (const th of $("roster").tHead.rows[0].cells) {
+      th.querySelector("button").addEventListener("click", () => {
+        const k = th.dataset.sort;
+        // Strands sort richest first; the rest A to Z
+        townView.desc = townView.sort === k ? !townView.desc : k === "strands";
+        townView.sort = k;
+        prefs.set("observatory.roster.sort", k);
+        prefs.set("observatory.roster.desc", townView.desc ? "1" : "0");
+        rosterTable();
+      });
+    }
+    $("roster-filters").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-show]");
+      if (!b) return;
+      townView.show = b.dataset.show;
+      townView.every = false;
+      for (const x of $("roster-filters").querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b));
+      rosterTable();
+    });
+    $("roster-find").addEventListener("input", (e) => {
+      townView.find = e.target.value;
+      townView.every = false;
+      rosterTable();
+    });
+  }
+
+  // --- How they decide
+
+  /** A ruling's colour: the layers by name, the fallbacks after */
+  function rulingColor(label) {
+    if (label === "rules") return "--s1";
+    if (label === "jev") return "--s2";
+    if (label.endsWith(", unsure")) return "--s3";
+    if (label === "the rules' own pick") return "--s4";
+    if (label === "carry on") return "--fl-other";
+    return "--s5";
+  }
+  const layerName = (l) => (l === "rules" ? "the rules" : l === "jev" ? "Jev" : l);
+  const possessive = (s) => (s.endsWith("s") ? `${s}'` : `${s}'s`);
+  /** How a ruling reads in a sentence: "by the rules", "by Jev's pick, unsure" */
+  function rulingSays(label) {
+    if (label === "carry on") return "by carrying on";
+    if (label === "the rules' own pick") return "by the rules' own pick";
+    if (label.startsWith("waiting on ")) return `waiting on ${layerName(label.slice(11))}`;
+    if (label.endsWith(", unsure")) return `by ${possessive(layerName(label.slice(0, -8)))} pick, unsure`;
+    return `by ${layerName(label)}`;
+  }
+
+  /** The range's town summaries in the money's bins: rulings, cost and citizen-days; and the layers over the range */
+  function binTown() {
+    const binMs = BIN_MINUTES[state.hours] * 60_000;
+    const first = Math.floor(rangeFrom() / binMs) * binMs;
+    const bins = Array.from({ length: Math.ceil((Date.now() - first) / binMs) }, (_, k) => ({
+      at: first + k * binMs, ms: 0, rulings: {}, decisions: 0, cents: 0, days: 0,
+    }));
+    const shown = inRange((s) => s.town);
+    const layers = {};
+    for (const s of shown) {
+      // As `LayerReport::add` adds them
+      for (const [name, l] of Object.entries(s.town.layers)) {
+        const t = (layers[name] ??= { asked: 0, outcomes: {}, micros: 0, max_micros: 0, cents: 0 });
+        t.asked += l.asked;
+        for (const [o, n] of Object.entries(l.outcomes)) t.outcomes[o] = (t.outcomes[o] ?? 0) + n;
+        t.micros += l.micros;
+        t.max_micros = Math.max(t.max_micros, l.max_micros);
+        t.cents += l.cents;
+      }
+      const b = bins[Math.floor((s.at_ms - first) / binMs)];
+      if (!b) continue;
+      b.ms += s.since_ms;
+      for (const [by, n] of Object.entries(s.town.rulings)) {
+        b.rulings[by] = (b.rulings[by] ?? 0) + n;
+        b.decisions += n;
+      }
+      for (const l of Object.values(s.town.layers)) b.cents += l.cents;
+      if (s.players && books) b.days += (s.players.citizens * s.since_ms) / books.day_ms;
+    }
+    return { binMs, bins, shown, layers };
+  }
+
+  let ruled = { lines: [], rows: null, key: "" };
+  CHARTS.rulings = () => lineChart($("chart-rulings"), {
+    rows: () => ruled.rows,
+    axis: short,
+    legend: count,
+    series: () => ruled.lines.map((l) => ({ key: l.key, label: l.label, color: l.color, bars: true })).reverse(),
+  });
+
+  function rulings() {
+    const p = binTown();
+    const totals = {};
+    for (const b of p.bins) for (const [by, n] of Object.entries(b.rulings)) totals[by] = (totals[by] ?? 0) + n;
+    const lines = Object.keys(totals).filter((k) => totals[k]).sort((a, b) => totals[b] - totals[a])
+      .map((key) => ({ key, label: capital(key), color: rulingColor(key) }));
+    // Stacked up from zero, the most common at the bottom
+    const values = {};
+    const own = {};
+    for (const l of lines) {
+      values[l.key] = [];
+      own[l.key] = [];
+    }
+    for (const b of p.bins) {
+      let up = 0;
+      for (const l of lines) {
+        const v = b.rulings[l.key] ?? 0;
+        own[l.key].push(b.ms ? v : null);
+        values[l.key].push(!b.ms || v === 0 ? null : (up += v));
+      }
+    }
+    const x = p.bins.map((b) => (b.at + p.binMs / 2) / 1000);
+    const key = lines.map((l) => l.key).join();
+    const rebuild = key !== ruled.key;
+    ruled = { lines, key, rows: { x, shown: p.shown, values, own } };
+    if (rebuild) state.charts.rulings?.rebuild();
+    chart("rulings");
+
+    const all = Object.values(totals).reduce((a, n) => a + n, 0);
+    const h = $("rulings-headline");
+    if (!p.shown.length) h.textContent = townView.latest ? "No sample in the range has heard from the town." : "Waiting for the town to report in.";
+    else if (!all) h.textContent = `No citizen settled a question ${since(p.shown[0])}.`;
+    else {
+      const pct = (n) => { const v = (100 * n) / all; return v >= 1 ? `${Math.round(v)}%` : "under 1%"; };
+      const parts = lines.slice(0, 4).map((l) => `${pct(totals[l.key])} ${rulingSays(l.key)}`);
+      if (lines.length > 4) parts.push(`${pct(lines.slice(4).reduce((a, l) => a + totals[l.key], 0))} otherwise`);
+      h.textContent = `Of ${plural(all, "question", "questions")} settled ${since(p.shown[0])}, ${andList(parts)}.`;
+    }
+    layerTable(p.layers);
+  }
+
+  function layerTable(layers) {
+    const names = Object.keys(layers).sort((a, b) => layers[b].asked - layers[a].asked);
+    const rows = names.map((name) => {
+      const l = layers[name];
+      const settled = l.outcomes.settled ?? 0;
+      const other = Object.entries(l.outcomes).filter(([o, n]) => o !== "settled" && n).sort((a, b) => b[1] - a[1]).map(([o, n]) => `${nf.format(n)} ${o}`);
+      const tr = document.createElement("tr");
+      tr.append(
+        cell(capital(layerName(name))),
+        cell(nf.format(l.asked), "num"),
+        cell(l.asked ? `${nf.format(settled)} (${Math.round((100 * settled) / l.asked)}%)` : "–", "num"),
+        cell(other.length ? other.join(", ") : "–", other.length ? "" : "dim"),
+        cell(l.asked ? ms(l.micros / l.asked / 1000) : "–", "num"),
+        cell(l.asked ? ms(l.max_micros / 1000) : "–", "num"),
+        cell(cents(l.cents), l.cents ? "num" : "num dim"),
+      );
+      return tr;
+    });
+    $("town-layers").tBodies[0].replaceChildren(...(rows.length ? rows : [emptyRow(7, "No layer was asked in the range.")]));
+  }
+
+  // --- What it costs
+
+  /** US cents, to a sensible precision */
+  function cents(v) {
+    if (!v) return "0¢";
+    if (v >= 100) return `$${(v / 100).toFixed(2)}`;
+    return `${Number(v.toPrecision(2))}¢`;
+  }
+
+  let costRows = null;
+  CHARTS.cost = () => lineChart($("chart-cost"), {
+    rows: () => costRows,
+    height: 180,
+    axis: (v) => (v == null ? "" : cents(v)),
+    legend: cents,
+    series: [
+      { key: "day", label: "A citizen-day on", color: "--s2", width: 2 },
+      { key: "c3", label: "C3's day of 1,400", color: "--s4", width: 1.5, dash: [5, 4] },
+    ],
+  });
+
+  function cost() {
+    const p = binTown();
+    costRows = {
+      x: p.bins.map((b) => (b.at + p.binMs / 2) / 1000),
+      shown: p.shown,
+      values: {
+        day: p.bins.map((b) => (b.ms && b.days > 0 ? b.cents / b.days : null)),
+        c3: p.bins.map((b) => (b.ms && b.decisions > 0 ? (b.cents / b.decisions) * C3_DAY_DECISIONS : null)),
+      },
+    };
+    chart("cost");
+
+    const h = $("cost-headline");
+    if (!p.shown.length) return void (h.textContent = townView.latest ? "No sample in the range has heard from the town." : "Waiting for the town to report in.");
+    const spent = p.bins.reduce((a, b) => a + b.cents, 0);
+    const days = p.bins.reduce((a, b) => a + b.days, 0);
+    const decisions = p.bins.reduce((a, b) => a + b.decisions, 0);
+    if (!decisions) return void (h.textContent = `No citizen settled a question ${since(p.shown[0])}, so nothing was spent.`);
+    if (!spent) {
+      const paid = Object.keys(p.layers).filter((l) => l !== "rules");
+      return void (h.textContent = paid.length
+        ? `The layers cost nothing ${since(p.shown[0])}: ${andList(paid.map(layerName))} ${paid.length === 1 ? "was" : "were"} asked, but spent nothing.`
+        : `The town's ${plural(decisions, "decision", "decisions")} cost nothing ${since(p.shown[0])}: only the rules were asked, and they're free.`);
+    }
+    const c3 = cents((spent / decisions) * C3_DAY_DECISIONS);
+    let line = `The layers spent ${cents(spent)} ${since(p.shown[0])}`;
+    line += days > 0
+      ? `: ${cents(spent / days)} for each citizen signed in for a game day, or ${c3} on C3's day of 1,400 decisions.`
+      : `, or ${c3} on C3's day of 1,400 decisions.`;
+    const t = townView.latest;
+    const total = Object.values(t?.report.layers ?? {}).reduce((a, l) => a + l.cents_total, 0);
+    if (t?.up && total > 0) line += ` This run of the town has spent ${cents(total)} since ${clock(t.report.started_ms)}.`;
+    h.textContent = line;
   }
 
   async function loadKnobs() {
@@ -2927,6 +3309,7 @@
       });
     }
     mapControls();
+    rosterControls();
     addEventListener("hashchange", () => show(location.hash.slice(1)));
     $("sign-out").addEventListener("click", () => signOut(null));
 

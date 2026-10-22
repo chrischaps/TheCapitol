@@ -252,15 +252,63 @@
 
     <section class="page" id="page-town" data-page="town" hidden>
       <article class="story">
+        <h2 class="head">Who's on</h2>
+        <p class="headline" id="town-on-headline">Waiting for the town to report in.</p>
+        <p class="dek">Citizens signed in to the world, and of the roster, those the town's report has at work or resting. They keep human hours, so most are away at any moment.</p>
+        <div class="chart" id="chart-town-on"></div>
+      </article>
+
+      <article class="story">
         <h2 class="head">The roster</h2>
         <p class="headline" id="town-headline">Reading the roster.</p>
-        <p class="dek">Every citizen this server has made, oldest first, with the key it signs in by.</p>
+        <p class="dek" id="roster-dek">Every citizen on the town's roster, as its newest report has them. Click a heading to sort.</p>
+        <div class="roster-tools" id="roster-tools">
+          <div class="filters" id="roster-filters" role="group" aria-label="Show only">
+            <button type="button" data-show="all" aria-pressed="true">All</button>
+            <button type="button" data-show="on" aria-pressed="false">On</button>
+            <button type="button" data-show="working" aria-pressed="false">Working</button>
+            <button type="button" data-show="resting" aria-pressed="false">Resting</button>
+            <button type="button" data-show="away" aria-pressed="false">Away</button>
+            <button type="button" data-show="failed" aria-pressed="false">Failed</button>
+          </div>
+          <label class="roster-find"><span class="sr">Find a citizen</span>
+            <input type="search" id="roster-find" placeholder="Find by name, trade or what they're doing" autocomplete="off">
+          </label>
+        </div>
         <div class="table-wrap">
-          <table class="ledger" id="roster">
-            <thead><tr><th>Citizen</th><th>Made</th><th>Key</th><th>Last used</th></tr></thead>
+          <table class="ledger roster" id="roster">
+            <thead><tr>
+              <th data-sort="name" aria-sort="ascending"><button type="button">Citizen</button></th>
+              <th data-sort="role"><button type="button">Trade</button></th>
+              <th data-sort="standing"><button type="button">Standing</button></th>
+              <th data-sort="phase"><button type="button">Day</button></th>
+              <th data-sort="strands" class="num"><button type="button">Strands</button></th>
+              <th data-sort="activity"><button type="button">Doing</button></th>
+              <th data-sort="failure"><button type="button">Last went wrong</button></th>
+            </tr></thead>
             <tbody></tbody>
           </table>
         </div>
+      </article>
+
+      <article class="story">
+        <h2 class="head">How they decide</h2>
+        <p class="headline" id="rulings-headline">Waiting for the town to report in.</p>
+        <p class="dek">Every question a citizen settled, by what settled it: a layer of the cascade, a layer's pick it wasn't sure of, the rules' own pick when nothing above was sure, or carrying on.</p>
+        <div class="chart" id="chart-rulings"></div>
+        <div class="table-wrap">
+          <table class="ledger" id="town-layers">
+            <thead><tr><th>Layer</th><th class="num">Asked</th><th class="num">Settled</th><th>Otherwise</th><th class="num">Mean</th><th class="num">Longest</th><th class="num">Cost</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="story">
+        <h2 class="head">What it costs</h2>
+        <p class="headline" id="cost-headline">Waiting for the town to report in.</p>
+        <p class="dek">What the layers spent, in US cents, for each citizen signed in for a game day of two hours. C3's yardstick, a working day of 1,400 decisions, is beside it.</p>
+        <div class="chart" id="chart-cost"></div>
       </article>
     </section>
 
