@@ -49,6 +49,10 @@
 //! leader sees it: a citizen among the members, a citizen's application and
 //! an officer's invitation waiting; `guilds.json` is `GET /guilds`, and
 //! `found_guild.json` is `POST /guilds`, a charter in paragraphs.
+//! `fixtures/rest/wages.json` is `GET /wages?mine=true` (S2.6): a citizen on
+//! a shift gathering on a named offer, and an open forge;
+//! `offer_wages.json` is `POST /wages`, and `shift_ended.json` is
+//! `DELETE /wages/{id}/shift`, the employer stopping it.
 
 use std::fs;
 use std::path::Path;
@@ -472,4 +476,31 @@ fn a_guild_round_trips_as_its_leader_sees_it() {
     assert_eq!(guild::clean_tag(&found.tag).unwrap(), found.tag);
     assert_eq!(guild::clean_charter(&found.charter).unwrap(), found.charter);
     assert_eq!(serde_json::to_string(&found).unwrap(), json);
+}
+
+#[test]
+fn wages_round_trip_with_their_work_and_shift() {
+    use capitol_protocol::rest::{OfferWages, ShiftEnded, WagesResponse};
+    use capitol_protocol::rules::court::court_fee;
+    use capitol_protocol::rules::wages::{offer_value, OfferStatus, ShiftEnd, Work};
+    let json = fixture("wages.json");
+    let wages: WagesResponse = serde_json::from_str(&json).unwrap();
+    let [field, forge] = &wages.offers[..] else { panic!("two offers") };
+    assert!(matches!(field.work, Work::Gather { .. }) && matches!(forge.work, Work::Craft { .. }));
+    let shift = field.shift.as_ref().expect("a shift on it");
+    assert!(shift.worker_citizen && shift.ended_at.is_none() && Some(shift) == wages.shift.as_ref());
+    assert_eq!(field.escrow_strands, offer_value(field.rate, field.cap - field.made));
+    assert_eq!((forge.status, forge.fee), (OfferStatus::Open, court_fee(offer_value(forge.rate, forge.cap))));
+    assert_eq!(serde_json::to_string(&wages).unwrap(), json);
+
+    let json = fixture("offer_wages.json");
+    let offer: OfferWages = serde_json::from_str(&json).unwrap();
+    assert_eq!(offer.worker_id, None, "open to anyone");
+    assert_eq!(serde_json::to_string(&offer).unwrap(), json);
+
+    let json = fixture("shift_ended.json");
+    let ended: ShiftEnded = serde_json::from_str(&json).unwrap();
+    assert_eq!(ended.shift.end, Some(ShiftEnd::Employer));
+    assert_eq!(ended.paid, 48);
+    assert_eq!(serde_json::to_string(&ended).unwrap(), json);
 }

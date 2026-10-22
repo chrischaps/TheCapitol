@@ -912,6 +912,14 @@ impl GameState {
                 name: name.clone(),
                 citizen: *citizen,
             }),
+            // Commons S2.6: wages. The board's Work page, hiring and working,
+            // and their toasts are S2.7's (#393); until then they change nothing.
+            M::WageOffered { .. }
+            | M::WageUpdated { .. }
+            | M::WageClosed { .. }
+            | M::WageTaken { .. }
+            | M::WageShiftEnded { .. }
+            | M::WagePaid { .. } => {}
             // E3.10: to the merchant. The store takes the sale off your
             // listing, or closes your shop.
             M::BazaarSale { stall_id, item_type, buyer_name, buyer_citizen, units, paid, .. } => {

@@ -98,7 +98,7 @@ pub fn tap(event: &GameEvent) -> Option<Feed> {
         ),
         // A station pausing because its owner went home is the usual end of
         // a day, not a warning
-        GameEvent::AutomationPaused { reason: PauseReason::OwnerOffline, .. } => None,
+        GameEvent::AutomationPaused { reason: PauseReason::OwnerOffline | PauseReason::Shift, .. } => None,
         GameEvent::AutomationPaused { owner_id, station_type, reason, .. } => {
             let why = match reason {
                 PauseReason::MissingInput { item_type } => format!("its box has no {item_type}"),
@@ -106,6 +106,7 @@ pub fn tap(event: &GameEvent) -> Option<Feed> {
                 PauseReason::ToolBroken => "its tool broke".to_string(),
                 PauseReason::ToolMissing => "it has no tool".to_string(),
                 PauseReason::OwnerOffline => "its owner left".to_string(),
+                PauseReason::Shift => "someone is working it".to_string(),
             };
             warning(*owner_id, WarningKind::AutomationPaused, format!("A {station_type} paused: {why}"))
         }

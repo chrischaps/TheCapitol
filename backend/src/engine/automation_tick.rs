@@ -19,8 +19,10 @@
 //! every cycle, so it resumes on its own once the box is loaded or emptied or
 //! a tool goes in. A free player's stations pause `owner_offline` while
 //! they're away and resume when they're back; a subscriber's keep working
-//! (D8). Every pause queues an `automation_paused` notice for the owner
-//! (#138) in the transaction that writes it.
+//! (D8). A station someone is working for wages pauses `shift` for the
+//! shift and resumes after it (Commons D7, `engine::wages`). Every pause
+//! queues an `automation_paused` notice for the owner (#138) in the
+//! transaction that writes it.
 //!
 //! What runs is in memory ([`Works`], on `GameState`), loaded from
 //! `stations.automation` at startup, so a restart resumes where it was. The
@@ -215,6 +217,8 @@ struct Owner {
     player_id: Uuid,
     /// A subscriber's stations work while they're away (D8)
     subscribed: bool,
+    /// Someone is working the station for wages (Commons D7)
+    on_shift: bool,
 }
 
 /// Run the automation tick forever, a cycle every `CYCLE_MS / scale` (the
@@ -287,6 +291,13 @@ pub async fn run_cycle(
         };
         let may_work = owner.subscribed || online.contains(&owner.player_id);
         let step = match (&automation.state, may_work) {
+            // A shift has the station: it waits for it, whatever else it waits on
+            (AutomationState::Paused { reason: PauseReason::Shift }, _) if owner.on_shift => continue,
+            (AutomationState::Running | AutomationState::Paused { .. }, _) if owner.on_shift => {
+                Step::Pause(PauseReason::Shift)
+            }
+            (AutomationState::Paused { reason: PauseReason::Shift }, true) => Step::Resume,
+            (AutomationState::Paused { reason: PauseReason::Shift }, false) => Step::Pause(PauseReason::OwnerOffline),
             (AutomationState::Running, false) => Step::Pause(PauseReason::OwnerOffline),
             (AutomationState::Paused { reason: PauseReason::OwnerOffline }, true) => Step::Resume,
             (AutomationState::Paused { .. }, false) => continue,
@@ -534,10 +545,13 @@ fn announce_made(
     }
 }
 
-/// The owner of each of `station_ids` that still exists.
+/// The owner of each of `station_ids` that still exists, and whether a wage
+/// shift has it.
 async fn owners_of(db: &PgPool, station_ids: &[Uuid], now: DateTime<Utc>) -> Result<HashMap<Uuid, Owner>, sqlx::Error> {
-    let rows: Vec<(Uuid, Uuid, String, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT s.id, s.owner_id, a.subscription_status, a.subscription_until
+    let rows: Vec<(Uuid, Uuid, String, Option<DateTime<Utc>>, bool)> = sqlx::query_as(
+        "SELECT s.id, s.owner_id, a.subscription_status, a.subscription_until,
+                EXISTS (SELECT 1 FROM wage_offers o JOIN wage_shifts w ON w.offer_id = o.id
+                        WHERE o.station_id = s.id AND o.status = 'open' AND w.ended_at IS NULL)
          FROM stations s
          JOIN players p ON p.id = s.owner_id
          JOIN accounts a ON a.id = p.account_id
@@ -548,9 +562,9 @@ async fn owners_of(db: &PgPool, station_ids: &[Uuid], now: DateTime<Utc>) -> Res
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, player_id, status, until)| {
+        .map(|(id, player_id, status, until, on_shift)| {
             let subscription = Subscription { status: SubscriptionStatus::parse(&status), until };
-            (id, Owner { player_id, subscribed: subscription.is_active_at(now) })
+            (id, Owner { player_id, subscribed: subscription.is_active_at(now), on_shift })
         })
         .collect())
 }
@@ -1513,6 +1527,54 @@ mod tests {
             .unwrap();
             world.cycle().await;
             assert_eq!(stored(&db, bram_bench).await.state, paused(PauseReason::OwnerOffline));
+        }
+
+        /// A wage shift has the station to itself (Commons D7): its
+        /// automation pauses for the shift, whatever else it waited on, and
+        /// goes on when the shift ends
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "needs the local Postgres (docker-compose up -d)"]
+        async fn a_wage_shift_pauses_the_station_and_its_end_starts_it_again(db: PgPool) {
+            use crate::engine::wages;
+            use capitol_protocol::rest::OfferWages;
+            use capitol_protocol::rules::wages::Work;
+            let world = World::new(db.clone()).await;
+            let (ada, _) = player(&db, "ada", true).await;
+            let (bo, _) = player(&db, "bo", false).await;
+            let (bench, inbox) = station(&db, ada, "workbench").await;
+            load_handles(&db, ada, inbox).await;
+            world.start(ada, bench, "tool_handle", AutomationMode::Forever).await;
+            sqlx::query("UPDATE players SET strand_balance = 100 WHERE id = $1").bind(ada).execute(&db).await.unwrap();
+            let now = Utc::now();
+            let handles = OfferWages {
+                work: Work::Craft { station_id: bench, recipe_id: "tool_handle".into() },
+                rate: 2,
+                cap: 5,
+                term_days: 1,
+                worker_id: None,
+            };
+            let (offer, _) = wages::offer(&db, ada, &handles, now).await.unwrap();
+            wages::take(&db, bo, offer.id, now).await.unwrap();
+
+            assert_eq!(world.cycle().await.paused, 1);
+            assert_eq!(stored(&db, bench).await.state, paused(PauseReason::Shift));
+            assert_eq!(pause_notices(&db, ada).await, vec![PauseReason::Shift], "Ada hears why");
+            // Its craft falls due, and waits
+            assert_eq!(world.finish_craft(bench).await, Cycle::default());
+            assert_eq!(all_in(&db, inbox, "tool_handle").await.count(), 0);
+
+            // The shift ends: it goes on
+            wages::stop(&db, bo, offer.id, now).await.unwrap();
+            assert_eq!(world.cycle().await.resumed, 1);
+            assert_eq!(stored(&db, bench).await.state, AutomationState::Running);
+            assert_eq!(world.finish_craft(bench).await.crafts, 1);
+
+            // A shift that comes while it waits on its box still has it
+            sqlx::query("DELETE FROM items WHERE container_id = $1").bind(inbox).execute(&db).await.unwrap();
+            assert_eq!(world.finish_craft(bench).await.paused, 1);
+            wages::take(&db, bo, offer.id, now).await.unwrap();
+            assert_eq!(world.cycle().await.paused, 1);
+            assert_eq!(stored(&db, bench).await.state, paused(PauseReason::Shift));
         }
 
         #[sqlx::test(migrations = "./migrations")]

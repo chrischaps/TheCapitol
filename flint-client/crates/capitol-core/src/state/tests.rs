@@ -243,6 +243,12 @@ fn test_for(message: &M) -> fn() {
         M::CommissionDelivered { .. } => commission_notices_are_reported,
         M::CommissionExpired { .. } => commission_notices_are_reported,
         M::GuildChanged { .. } | M::GuildNotice { .. } => guild_messages_are_reported,
+        M::WageOffered { .. }
+        | M::WageUpdated { .. }
+        | M::WageClosed { .. }
+        | M::WageTaken { .. }
+        | M::WageShiftEnded { .. }
+        | M::WagePaid { .. } => wages_wait_for_the_work_page,
     }
 }
 
@@ -262,7 +268,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 67, "one fixture per ServerMessage variant");
+    assert_eq!(count, 73, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1461,6 +1467,19 @@ fn a_letter_is_reported() {
         state.apply_ws(&letter),
         vec![StateEvent::LetterArrived { id, from, name: "Brin".into(), citizen: true, first_line: "Thank you…".into() }]
     );
+}
+
+/// Wages' messages (Commons S2.6) parse and change nothing until the Work
+/// page reads them (S2.7, #393)
+#[test]
+fn wages_wait_for_the_work_page() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../protocol/tests/fixtures/server");
+    let mut state = connected();
+    for name in ["wage_offered", "wage_updated", "wage_closed", "wage_taken", "wage_shift_ended", "wage_paid"] {
+        let json = std::fs::read_to_string(dir.join(format!("{name}.json"))).expect("the fixture");
+        let message: M = serde_json::from_str(&json).expect("it parses");
+        assert_eq!(state.apply_ws(&message), vec![], "{name}");
+    }
 }
 
 #[test]

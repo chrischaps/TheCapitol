@@ -12,7 +12,7 @@ use capitol_protocol::rest::{
 };
 
 use crate::engine::automation::AutomationError;
-use crate::engine::container_access::{check_station_access, live_position, AccessError};
+use crate::engine::container_access::{check_station_use, live_position, AccessError};
 use crate::engine::GameEvent;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -234,9 +234,10 @@ pub async fn get_station_container(
     .await?;
 
     // The one station rule: its owner, the plot's owner, or anyone the plot's
-    // station_use_level admits, within range (#80)
+    // station_use_level admits, within range (#80), or a worker on a wage
+    // shift there (Commons D7)
     let at = live_position(&state.game, player_id).await;
-    check_station_access(&state.db, player_id, station_id, at).await?;
+    check_station_use(&state.db, player_id, station_id, at).await?;
 
     // Get container
     let container: Container = sqlx::query_as(

@@ -9,6 +9,7 @@ use crate::models::{ActionState, Item, ItemType, PlayerState, Recipe};
 use super::events::GameEvent;
 use super::craft_completion::{CraftOutput, FinishedCraft};
 use super::tools::HeldTool;
+use super::wages::ShiftWork;
 
 /// Active crafting operation tracked in game state
 #[derive(Debug, Clone)]
@@ -25,6 +26,8 @@ pub struct CraftingOperation {
     pub station_quality: i32,
     /// The tool the recipe needs, as it was at the start (E1.5)
     pub tool: Option<HeldTool>,
+    /// The wage shift it's made on (Commons D7), set by the tick once it starts
+    pub wage: Option<ShiftWork>,
 }
 
 /// Process crafting for all players actively crafting.
@@ -85,6 +88,7 @@ pub fn process_crafting(
                     inputs: operation.input_items_to_consume.clone(),
                     outputs,
                     tool: operation.tool.clone(),
+                    wage: operation.wage.clone(),
                 });
             }
 
@@ -203,6 +207,7 @@ pub fn start_crafting(
         inputs,
         station_quality,
         tool,
+        wage: None,
     });
 
     // Emit event

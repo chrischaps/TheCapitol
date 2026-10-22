@@ -8,7 +8,7 @@ use uuid::Uuid;
 use capitol_protocol::rest::{ExtractRequest, ExtractResponse, NearbyQuery, NearbyResponse};
 use capitol_protocol::rules::{SPAWN_X, SPAWN_Y};
 
-use crate::engine::container_access::gathering_refusal;
+use crate::engine::container_access::gathering_terms;
 use crate::engine::{extraction_refusal, Command};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -149,10 +149,9 @@ pub async fn start_extraction(
         }
     }
 
-    // Grass on someone's lot is theirs (#102)
-    if let Some(reason) = gathering_refusal(&state.db, &state.game, player_id, req.node_id).await? {
-        return Err(AppError::Forbidden(reason));
-    }
+    // Grass on someone's lot is theirs (#102), unless they're on a wage shift
+    // for it (Commons D7)
+    let wage = gathering_terms(&state.db, &state.game, player_id, req.node_id).await?.map_err(AppError::Forbidden)?;
 
     // Queue extraction command
     let mut game = state.game.write().await;
@@ -160,6 +159,7 @@ pub async fn start_extraction(
         player_id,
         node_id: req.node_id,
         tool,
+        wage,
     });
 
     Ok(Json(ExtractResponse {

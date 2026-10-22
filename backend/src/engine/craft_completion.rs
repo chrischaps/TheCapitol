@@ -8,6 +8,11 @@
 //!
 //! A craft takes the very units its quality was worked out from (E1.8): the start names them
 //! (the best of each stack first), and completion takes exactly those, or fails.
+//!
+//! A craft on a wage shift (Commons D7) takes its inputs from the station's box rather than the
+//! crafter's own, puts its output back in that box as the employer's, marked as the worker's
+//! make, and pays for it out of the offer's escrow (`wages::pay`), all in the same transaction.
+//! If the shift ended while it ran, nothing changes.
 
 use capitol_protocol::ledger::UnitFlow;
 use capitol_protocol::rest::StationTool;
@@ -21,6 +26,7 @@ use super::ledger::{self, Flows};
 use super::station_tools;
 use super::units::{self, Marked, NewStack};
 use super::tools::{self, BrokenTool, HeldTool, Wear};
+use super::wages::{self, ShiftWork};
 
 /// A craft that has run its time, waiting to be written
 #[derive(Debug, Clone)]
@@ -34,6 +40,10 @@ pub struct FinishedCraft {
     pub outputs: Vec<CraftOutput>,
     /// The tool the recipe needs, as it was at the start (E1.5). It wears once.
     pub tool: Option<HeldTool>,
+    /// The wage shift it was made on (Commons D7): its inputs are from the
+    /// station's box, its output goes back there as the employer's, and it's
+    /// paid for in the same transaction
+    pub wage: Option<ShiftWork>,
 }
 
 /// A craft that was written.
@@ -48,6 +58,8 @@ pub struct Finished {
     /// When the tool was a station's (E1.6): the station, and what its slot
     /// holds now, for `station_tool_changed`
     pub station_tool: Option<(Uuid, Option<StationTool>)>,
+    /// On a wage shift, what its pay has to tell people (`wages::announce`)
+    pub wage: Option<wages::News>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,8 +90,13 @@ pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Finished
     let mut changed: Vec<Uuid> = Vec::new();
     // What it used up, made and wore out, counted once it's written (C1.7)
     let mut flows = Flows::new();
+    // On a wage shift, the station's box: where the inputs are and the output goes
+    let station_box = match &craft.wage {
+        Some(work) => Some(station_box(&mut tx, work).await?),
+        None => None,
+    };
 
-    consume_inputs(&mut tx, craft, &mut changed, &mut flows).await?;
+    consume_inputs(&mut tx, craft, station_box.map(|(id, _)| id), &mut changed, &mut flows).await?;
     let (mut tool, mut broken, mut station_tool) = (None, None, None);
     if let Some(held) = &craft.tool {
         let wear = match held.station_id {
@@ -110,7 +127,13 @@ pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Finished
         }
     }
     for output in &craft.outputs {
-        let container = place_output(&mut tx, craft.player_id, output).await?;
+        let container = match (&craft.wage, station_box) {
+            (Some(work), Some((box_id, slot_count))) => {
+                place_made(&mut tx, box_id, slot_count, work.employer_id, craft.player_id, output).await?;
+                box_id
+            }
+            _ => place_output(&mut tx, craft.player_id, output).await?,
+        };
         if !changed.contains(&container) {
             changed.push(container);
         }
@@ -122,16 +145,49 @@ pub async fn finish_craft(db: &PgPool, craft: &FinishedCraft) -> Result<Finished
         let made = craft.outputs.iter().map(|o| o.quantity as i64).sum();
         flows.crafted(&craft.recipe_id, made, first.quality);
     }
+    let mut wage = None;
+    if let (Some(work), Some(first)) = (&craft.wage, craft.outputs.first()) {
+        let made = craft.outputs.iter().fold(Units::new(), |mut all, o| {
+            all.merge(&Units::uniform(o.quantity, o.quality));
+            all
+        });
+        match wages::pay(&mut tx, work, &first.item_type, &made, chrono::Utc::now()).await {
+            Ok(Ok(news)) => wage = Some(news),
+            Ok(Err(why)) => return Err(why.to_string()),
+            Err(e) => {
+                tracing::error!("Craft completion: paying wages: {}", e.message());
+                return Err("The craft couldn't be saved. Try again".to_string());
+            }
+        }
+    }
 
     ledger::commit(tx, flows).await.map_err(db_error)?;
-    Ok(Finished { changed, tool, broken, station_tool })
+    Ok(Finished { changed, tool, broken, station_tool, wage })
+}
+
+/// The box of the station the shift `work` is at, and its slot count.
+async fn station_box(tx: &mut Transaction<'_, Postgres>, work: &ShiftWork) -> Result<(Uuid, i32), String> {
+    let capitol_protocol::rules::wages::Work::Craft { station_id, .. } = &work.work else {
+        return Err(wages::SHIFT_OVER.to_string());
+    };
+    sqlx::query_as(
+        "SELECT c.id, ct.slot_count FROM containers c JOIN container_types ct ON ct.id = c.container_type
+         WHERE c.station_id = $1",
+    )
+    .bind(station_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_error)?
+    .ok_or_else(|| wages::SHIFT_OVER.to_string())
 }
 
 /// Check every input again and use it up. Rows are locked as they're read, so a move or trade
-/// running at the same moment waits for this transaction rather than slipping between.
+/// running at the same moment waits for this transaction rather than slipping between. Each is
+/// still the crafter's, or with `station_box` (a wage shift), still in that box, whoever's it is.
 async fn consume_inputs(
     tx: &mut Transaction<'_, Postgres>,
     craft: &FinishedCraft,
+    station_box: Option<Uuid>,
     changed: &mut Vec<Uuid>,
     flows: &mut Flows,
 ) -> Result<(), String> {
@@ -147,11 +203,16 @@ async fn consume_inputs(
     }
 
     for (item_id, lot) in wanted {
-        let held: Option<(Option<Uuid>, String)> = sqlx::query_as(
-            "SELECT container_id, item_type FROM items WHERE id = $1 AND owner_id = $2 FOR UPDATE",
-        )
-        .bind(item_id)
-        .bind(craft.player_id)
+        let held: Option<(Option<Uuid>, String)> = match station_box {
+            None => sqlx::query_as("SELECT container_id, item_type FROM items WHERE id = $1 AND owner_id = $2 FOR UPDATE")
+                .bind(item_id)
+                .bind(craft.player_id),
+            Some(box_id) => {
+                sqlx::query_as("SELECT container_id, item_type FROM items WHERE id = $1 AND container_id = $2 FOR UPDATE")
+                    .bind(item_id)
+                    .bind(box_id)
+            }
+        }
         .fetch_optional(&mut **tx)
         .await
         .map_err(db_error)?;
@@ -212,7 +273,20 @@ pub async fn place_in(
     owner_id: Uuid,
     output: &CraftOutput,
 ) -> Result<(), String> {
-    let made = Marked::by(Some(owner_id), &Units::uniform(output.quantity, output.quality));
+    place_made(tx, container_id, slot_count, owner_id, owner_id, output).await
+}
+
+/// [`place_in`], made by `maker`: on a wage shift the output is the
+/// employer's, and its units carry the worker's mark (Commons D7).
+async fn place_made(
+    tx: &mut Transaction<'_, Postgres>,
+    container_id: Uuid,
+    slot_count: i32,
+    owner_id: Uuid,
+    maker: Uuid,
+    output: &CraftOutput,
+) -> Result<(), String> {
+    let made = Marked::by(Some(maker), &Units::uniform(output.quantity, output.quality));
     if output.stackable && units::join_first_stack(tx, container_id, &output.item_type, &made).await.map_err(db_error)? {
         return Ok(());
     }
@@ -323,6 +397,7 @@ mod tests {
                 durability: None,
             }],
             tool: None,
+            wage: None,
         }
     }
 

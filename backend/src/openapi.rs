@@ -33,6 +33,7 @@ use capitol_protocol::rest::{
     FoundGuild, GuildDetail, GuildInvite, GuildInviteKind, GuildMember, GuildSummary, GuildsResponse, MyGuild, SetGuildRole,
 };
 use capitol_protocol::rules::guild::GuildRole;
+use capitol_protocol::rest::{OfferWages, ShiftEnded, WageOffer, WageShift, WagesResponse};
 use capitol_protocol::rules::market::{GradeRule, OrderSide, OrderStatus};
 use capitol_protocol::terrain::{
     Bridge, Landmark, LandmarkKind, RoadSegment, RoadType, TerrainPark, TerrainPlot, TerrainResponse, WaterRing,
@@ -81,6 +82,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         (name = "Player", description = "Player state and movement"),
         (name = "Letters", description = "Letters that wait for someone who's away, for a Strand's postage"),
         (name = "Guilds", description = "The guild registry: founding, roles and the roster"),
+        (name = "Wages", description = "Piece-rate work at someone else's station or on their lot, the pay escrowed up front"),
         (name = "World", description = "World state, resource nodes, and extraction"),
         (name = "Inventory", description = "Container and item management"),
         (name = "Recipes", description = "Crafting recipe information"),
@@ -137,6 +139,13 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::guilds::expel,
         crate::routes::guilds::set_role,
         crate::routes::player::get_guild,
+        // Wages
+        crate::routes::wages::offer,
+        crate::routes::wages::get_wages,
+        crate::routes::wages::get_offer,
+        crate::routes::wages::withdraw,
+        crate::routes::wages::take,
+        crate::routes::wages::stop,
         // World
         crate::routes::world::get_nearby,
         crate::routes::world::get_all_nodes,
@@ -241,6 +250,14 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         LetterBox,
         Mailbox,
         LettersUnread,
+        OfferWages,
+        WageOffer,
+        WageShift,
+        WagesResponse,
+        ShiftEnded,
+        capitol_protocol::rules::wages::Work,
+        capitol_protocol::rules::wages::OfferStatus,
+        capitol_protocol::rules::wages::ShiftEnd,
         MoveRequest,
         InventoryResponse,
         InventoryItem,

@@ -80,6 +80,12 @@ const SERVER_TYPES: &[&str] = &[
     "commission_expired",
     "guild_changed",
     "guild_notice",
+    "wage_offered",
+    "wage_updated",
+    "wage_closed",
+    "wage_taken",
+    "wage_shift_ended",
+    "wage_paid",
 ];
 
 const CLIENT_TYPES: &[&str] = &[

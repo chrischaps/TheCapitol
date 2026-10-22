@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::rest::{
     AutomationMode, Commission, DepthLevel, Maker, MarketOrder, MarketTrade, PauseReason, Produced, StationAutomation,
-    StationTool, Subscription,
+    StationTool, Subscription, WageOffer, WageShift,
 };
 use crate::rules::stacking::Units;
 use crate::tunables::Fees;
@@ -698,6 +698,40 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         citizen: bool,
     },
+    // Commons S2.6: wages (D7). The first three go to everyone, so the
+    // board's Work page stays live.
+    /// A wage offer went up
+    #[serde(rename = "wage_offered")]
+    WageOffered { offer: WageOffer },
+    /// An offer was taken, worked or a shift on it ended: `made` and `shift`
+    /// say where it stands
+    #[serde(rename = "wage_updated")]
+    WageUpdated { offer: WageOffer },
+    /// An offer came down, filled, withdrawn, expired or gone (its `status`
+    /// says which)
+    #[serde(rename = "wage_closed")]
+    WageClosed { offer: WageOffer },
+    /// To the employer: someone took your offer and started a shift. One
+    /// that happened while you were away is sent as you come back.
+    #[serde(rename = "wage_taken")]
+    WageTaken { offer_id: Uuid, shift: WageShift },
+    /// To the employer and the worker: a shift ended, having made `shift.made`
+    /// and been paid `paid`, for `reason`. One that ended while you were away
+    /// is sent as you come back.
+    #[serde(rename = "wage_shift_ended")]
+    WageShiftEnded { offer_id: Uuid, shift: WageShift, paid: i64 },
+    /// To the worker, quietly: units made on your shift and paid for out of
+    /// the escrow, in the transaction that made them. `made` is the offer's
+    /// total so far, of `cap`.
+    #[serde(rename = "wage_paid")]
+    WagePaid {
+        offer_id: Uuid,
+        item_type: String,
+        units: Units,
+        paid: i64,
+        made: i32,
+        cap: i32,
+    },
 }
 
 /// What a [`ServerMessage::GuildNotice`] tells you.
@@ -787,6 +821,12 @@ impl ServerMessage {
             ServerMessage::CommissionExpired { .. } => "commission_expired",
             ServerMessage::GuildChanged { .. } => "guild_changed",
             ServerMessage::GuildNotice { .. } => "guild_notice",
+            ServerMessage::WageOffered { .. } => "wage_offered",
+            ServerMessage::WageUpdated { .. } => "wage_updated",
+            ServerMessage::WageClosed { .. } => "wage_closed",
+            ServerMessage::WageTaken { .. } => "wage_taken",
+            ServerMessage::WageShiftEnded { .. } => "wage_shift_ended",
+            ServerMessage::WagePaid { .. } => "wage_paid",
         }
     }
 }

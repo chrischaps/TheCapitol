@@ -396,6 +396,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine::automation_tick::run_automation_loop(automation_game, automation_db, automation_scale).await;
     });
 
+    // Commons S2.6: wage offers and shifts that have run their course
+    let wages_game = game_state.clone();
+    let wages_db = app_state.db.clone();
+    tokio::spawn(async move {
+        engine::wages::run_wage_loop(wages_game, wages_db).await;
+    });
+
     // D0.2: the Observatory's samples, every ten seconds
     if config.sample_secs > 0 {
         let sampler_state = app_state.clone();
@@ -432,6 +439,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest("/players", routes::players::router(app_state.clone()))
         .nest("/letters", routes::letters::router(app_state.clone()))
         .nest("/guilds", routes::guilds::router(app_state.clone()))
+        .nest("/wages", routes::wages::router(app_state.clone()))
         .nest("/world", routes::world::router(app_state.clone()))
         .nest("/recipes", routes::recipes::router(app_state.clone()))
         .route("/catalog", get(routes::catalog::get_catalog))

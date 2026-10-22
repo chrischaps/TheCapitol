@@ -278,6 +278,10 @@ pub enum GameEvent {
         notice_id: Uuid,
         message: capitol_protocol::ws::ServerMessage,
     },
+    /// Commons S2.6: wages' news (`wages::announce`). `to` `None` goes to
+    /// everyone, for the board's Work page; `Some` to that player alone, as
+    /// a worker's pay as it's made.
+    Wages { to: Option<Uuid>, message: capitol_protocol::ws::ServerMessage },
     // E3.3: the market API
     /// `player_id`'s order is on the book
     OrderPlaced { player_id: Uuid, order: MarketOrder },

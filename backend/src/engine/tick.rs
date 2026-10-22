@@ -19,6 +19,7 @@ use super::tools::{self, HeldTool, Wear};
 use super::movement::process_movement;
 use super::regeneration::process_regeneration;
 use super::trading::{TradeManager, TRADE_RANGE};
+use super::wages::{self, ShiftWork};
 use crate::models::{ActionState, ContainerType, ItemType, PlayerPosition, PlayerState, Recipe, ResourceNodeState, ResourceType, StationState, StationType, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
 
@@ -77,6 +78,8 @@ pub struct GameState {
     pub pending_items: Vec<PendingItem>,
     /// The tool each gather under way started with, by player (E1.5)
     pub gather_tools: HashMap<Uuid, HeldTool>,
+    /// The wage shift each gather under way is on, by player (Commons D7)
+    gather_wages: HashMap<Uuid, ShiftWork>,
     /// The tick each steering player was last told they're blocked, so a
     /// walk held into a bank hears it once every [`STEER_BLOCKED_TICKS`]
     steer_blocked_at: HashMap<Uuid, u64>,
@@ -148,6 +151,7 @@ impl GameState {
             tick_count: 0,
             pending_items: Vec::new(),
             gather_tools: HashMap::new(),
+            gather_wages: HashMap::new(),
             steer_blocked_at: HashMap::new(),
             finished_crafts: Vec::new(),
             stations: HashMap::new(),
@@ -321,6 +325,7 @@ impl GameState {
             }
         }
         self.gather_tools.remove(&player_id);
+        self.gather_wages.remove(&player_id);
         self.steer_blocked_at.remove(&player_id);
         // Remove any pending trade requests
         self.trade_manager.pending_requests.remove(&player_id);
@@ -404,7 +409,7 @@ impl GameState {
                         super::movement::steer(player, heading, throttle, at);
                     }
                 }
-                Command::StartExtraction { player_id, node_id, tool } => {
+                Command::StartExtraction { player_id, node_id, tool, wage } => {
                     let Some(node) = self.resource_nodes.get_mut(&node_id) else {
                         self.extraction_failed(player_id, "That resource is gone");
                         continue;
@@ -418,11 +423,16 @@ impl GameState {
                         // Nobody to tell: they left between queueing and this tick
                         continue;
                     };
-                    if let Err(reason) =
-                        start_extraction(player, node, resource_type, tool, &mut self.gather_tools, &self.event_sender)
-                    {
-                        self.extraction_failed(player_id, reason);
-                    }
+                    match start_extraction(player, node, resource_type, tool, &mut self.gather_tools, &self.event_sender) {
+                        Ok(()) => match wage {
+                            Some(work) => self.gather_wages.insert(player_id, work),
+                            None => self.gather_wages.remove(&player_id),
+                        },
+                        Err(reason) => {
+                            self.extraction_failed(player_id, reason);
+                            None
+                        }
+                    };
                 }
                 Command::CancelExtraction { player_id } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
@@ -474,7 +484,7 @@ impl GameState {
                         cancel_crafting(player, &mut self.crafting_operations, &self.event_sender);
                     }
                 }
-                Command::CraftAtStation { player_id, station_id, recipe_id, inputs, tool } => {
+                Command::CraftAtStation { player_id, station_id, recipe_id, inputs, tool, wage } => {
                     // Validate range and start crafting. Who may use the station was
                     // checked against the plot's permissions before this was queued
                     // (`container_access::check_station_access`, #80).
@@ -522,7 +532,12 @@ impl GameState {
                                 &mut self.crafting_operations,
                                 &self.event_sender,
                             ) {
-                                Ok(_) => {}
+                                Ok(operation_id) => {
+                                    // On a wage shift, it's paid for when it's written
+                                    if let Some(op) = self.crafting_operations.get_mut(&operation_id) {
+                                        op.wage = wage;
+                                    }
+                                }
                                 Err(e) => {
                                     let _ = self.event_sender.send(GameEvent::CraftingFailed {
                                         player_id,
@@ -743,7 +758,10 @@ impl GameState {
             &self.event_sender,
             &self.tunables.get(),
         );
-        self.pending_items.extend(new_items);
+        self.pending_items.extend(new_items.into_iter().map(|mut item| {
+            item.wage = self.gather_wages.remove(&item.player_id);
+            item
+        }));
     }
 
     fn process_regeneration(&mut self) {
@@ -1003,6 +1021,9 @@ async fn finish_crafts(db: &sqlx::PgPool, finished: Vec<FinishedCraft>, event_se
                 if let Some((station_id, tool)) = done.station_tool {
                     super::station_tools::announce(event_sender, station_id, tool);
                 }
+                if let Some(news) = done.wage {
+                    wages::announce(event_sender, news);
+                }
                 for container_id in done.changed {
                     let _ = event_sender.send(GameEvent::InventoryUpdated {
                         player_id: craft.player_id,
@@ -1071,7 +1092,13 @@ async fn persist_positions(db: &sqlx::PgPool, positions: &[SavedPosition]) -> Re
 /// The tool wears in the same transaction that writes the item. If it left the
 /// player's inventory while they gathered, the gather is what bare hands would
 /// have given, or nothing for a resource that needs the tool.
-async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broadcast::Sender<GameEvent>) {
+///
+/// A gather on a wage shift (Commons D7) goes into the employer's market box,
+/// marked as the gatherer's make, and is paid for in the same transaction
+/// ([`place_for_wages`]). If the shift ended while it ran, nothing is
+/// written. If the employer's box has no room, it's the gatherer's, unpaid,
+/// and the shift ends (`box_full`).
+pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broadcast::Sender<GameEvent>) {
     let mut tx = match db.begin().await {
         Ok(tx) => tx,
         Err(e) => {
@@ -1080,6 +1107,8 @@ async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broad
         }
     };
     let (mut used, mut broken) = (None, None);
+    // On a wage shift: what the pay has to tell people, and whose box it went in
+    let (mut wage_news, mut box_owner) = (None, None);
     // What it made and wore out, counted once it's written (C1.7)
     let mut flows = ledger::Flows::new();
     if let Some(gather) = item.tool.take() {
@@ -1123,14 +1152,45 @@ async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broad
             }
         }
     } else {
-        let container_id = match place_gathered(&mut tx, &item).await {
-            Ok(Some(container_id)) => container_id,
-            Ok(None) => return,
-            Err(e) => {
-                tracing::error!("Failed to persist {} for {}: {:?}", item.item_type, item.player_id, e);
-                return;
-            }
+        let paid = match &item.wage {
+            Some(work) => match place_for_wages(&mut tx, &item, work).await {
+                Ok(Ok(placed)) => placed,
+                Ok(Err(why)) => {
+                    let _ = events.send(GameEvent::ExtractionFailed { player_id: item.player_id, reason: why.to_string() });
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to pay wages on a gather by {}: {}", item.player_id, e.message());
+                    return;
+                }
+            },
+            None => None,
         };
+        let container_id = match paid {
+            Some((container_id, news)) => {
+                wage_news = Some(news);
+                box_owner = item.wage.as_ref().map(|w| w.employer_id);
+                container_id
+            }
+            None => match place_gathered(&mut tx, &item).await {
+                Ok(Some(container_id)) => container_id,
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::error!("Failed to persist {} for {}: {:?}", item.item_type, item.player_id, e);
+                    return;
+                }
+            },
+        };
+        // The employer's box had no room: the gatherer keeps it, unpaid, and the shift ends
+        if let (Some(work), None) = (&item.wage, &wage_news) {
+            match wages::end_shift(&mut tx, work, capitol_protocol::rules::wages::ShiftEnd::BoxFull, chrono::Utc::now()).await {
+                Ok(news) => wage_news = Some(news),
+                Err(e) => {
+                    tracing::error!("Failed to end {}'s shift on a full box: {}", item.player_id, e.message());
+                    return;
+                }
+            }
+        }
         if let Err(e) = super::gazette::tally(&mut tx, item.player_id, &item.item_type, item.quantity).await {
             tracing::error!("Failed to tally a gather for the Gazette: {:?}", e);
             return;
@@ -1154,7 +1214,7 @@ async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broad
     });
     if let Some(container_id) = container_id {
         let _ = events.send(GameEvent::InventoryUpdated {
-            player_id: item.player_id,
+            player_id: box_owner.unwrap_or(item.player_id),
             container_id,
             slots: Vec::new(), // Client will refresh all slots
         });
@@ -1162,6 +1222,37 @@ async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broad
     if let Some(broken) = &broken {
         tools::announce_broken(events, broken);
     }
+    if let Some(news) = wage_news {
+        wages::announce(events, news);
+    }
+}
+
+/// Put a gather made on the wage shift `work` into the employer's market box,
+/// as theirs, marked as the gatherer's make, and pay for it (Commons D7).
+/// `Ok(Ok(None))`: their box has no room, and nothing was written. `Ok(Err)`:
+/// the shift is over; the caller writes nothing.
+async fn place_for_wages(
+    conn: &mut sqlx::PgConnection,
+    item: &PendingItem,
+    work: &ShiftWork,
+) -> Result<Result<Option<(Uuid, wages::News)>, &'static str>, wages::WageError> {
+    let into = super::market::market_box(conn, work.employer_id).await?;
+    let gathered = units::Marked::by(Some(item.player_id), &Units::uniform(item.quantity, item.quality));
+    if !units::join_first_stack(conn, into, &item.item_type, &gathered).await? {
+        let Some(slot) = super::market::free_slot(conn, into).await? else {
+            return Ok(Ok(None));
+        };
+        let stack = units::NewStack {
+            item_type: &item.item_type,
+            owner_id: Some(work.employer_id),
+            container_id: Some(into),
+            slot_index: Some(slot),
+            durability: None,
+        };
+        units::insert_stack(conn, stack, &gathered).await?;
+    }
+    let news = wages::pay(conn, work, &item.item_type, &gathered.units(), chrono::Utc::now()).await?;
+    Ok(news.map(|news| Some((into, news))))
 }
 
 /// `player_id`'s inventory and how many slots it has, if they have one.
@@ -1777,7 +1868,7 @@ mod tests {
     fn a_walking_steer_stops_a_gather_and_a_move_ends_the_steer() {
         let (mut game, a, _, _rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
-        game.queue_command(Command::StartExtraction { player_id: a, node_id, tool: None });
+        game.queue_command(Command::StartExtraction { player_id: a, node_id, tool: None, wage: None });
         game.process_commands();
         assert!(matches!(game.players[&a].action_state, ActionState::Extracting { .. }));
 
@@ -1802,7 +1893,7 @@ mod tests {
         let (mut game, a, _, _rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
         steer(&mut game, a, 0, 10, None);
-        game.queue_command(Command::StartExtraction { player_id: a, node_id, tool: None });
+        game.queue_command(Command::StartExtraction { player_id: a, node_id, tool: None, wage: None });
         game.process_commands();
         assert!(matches!(game.players[&a].action_state, ActionState::Extracting { .. }));
         assert!(game.players[&a].steer.is_none());
@@ -1890,7 +1981,7 @@ mod tests {
     #[test]
     fn extract_an_unknown_node_tells_the_player() {
         let (mut game, a, _, mut rx) = two_players(10.0);
-        let command = Command::StartExtraction { player_id: a, node_id: Uuid::new_v4(), tool: None };
+        let command = Command::StartExtraction { player_id: a, node_id: Uuid::new_v4(), tool: None, wage: None };
         let reason = extraction_refused(&mut game, &mut rx, command, a);
         assert!(reason.contains("gone"), "{reason}");
     }
@@ -1900,7 +1991,7 @@ mod tests {
         let (mut game, a, _, mut rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
         game.resource_nodes.get_mut(&node_id).unwrap().resource_type = "moonflower".into();
-        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None }, a);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None, wage: None }, a);
         assert!(reason.contains("moonflower"), "{reason}");
     }
 
@@ -1910,7 +2001,7 @@ mod tests {
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
         game.players.get_mut(&a).unwrap().action_state =
             ActionState::Extracting { node_id: Uuid::new_v4(), progress: 0, duration: 30 };
-        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None }, a);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None, wage: None }, a);
         assert!(reason.contains("Already performing an action"), "{reason}");
     }
 
@@ -1918,11 +2009,11 @@ mod tests {
     fn extract_a_node_someone_else_is_gathering_tells_the_second_player() {
         let (mut game, a, b, mut rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
-        game.queue_command(Command::StartExtraction { player_id: a, node_id, tool: None });
+        game.queue_command(Command::StartExtraction { player_id: a, node_id, tool: None, wage: None });
         game.process_commands();
         while rx.try_recv().is_ok() {}
 
-        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: b, node_id, tool: None }, b);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: b, node_id, tool: None, wage: None }, b);
         assert!(reason.contains("Someone else is already gathering this Wild Grass"), "{reason}");
     }
 
@@ -1930,7 +2021,7 @@ mod tests {
     fn extract_a_depleted_node_tells_the_player() {
         let (mut game, a, _, mut rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Depleted);
-        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None }, a);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None, wage: None }, a);
         assert!(reason.contains("grow back"), "{reason}");
     }
 
@@ -1938,7 +2029,7 @@ mod tests {
     fn extract_out_of_range_says_how_far() {
         let (mut game, a, _, mut rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, EXTRACTION_RANGE + 30.0, NodeState::Available);
-        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None }, a);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None, wage: None }, a);
         assert!(reason.contains("Too far"), "{reason}");
         assert!(reason.contains(&format!("{:.0} units", EXTRACTION_RANGE + 30.0)), "{reason}");
     }
@@ -1948,7 +2039,7 @@ mod tests {
         let (mut game, a, _, mut rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
         game.resource_types.get_mut("grass").unwrap().required_tool = Some("sickle".into());
-        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None }, a);
+        let reason = extraction_refused(&mut game, &mut rx, Command::StartExtraction { player_id: a, node_id, tool: None, wage: None }, a);
         assert!(reason.contains("sickle"), "{reason}");
     }
 
@@ -1956,7 +2047,7 @@ mod tests {
     fn an_extraction_in_range_sends_no_failure() {
         let (mut game, a, _, mut rx) = two_players(10.0);
         let node_id = grass_node(&mut game, AT, 5.0, NodeState::Available);
-        game.queue_command(Command::StartExtraction { player_id: a, node_id, tool: None });
+        game.queue_command(Command::StartExtraction { player_id: a, node_id, tool: None, wage: None });
         game.process_commands();
         let mut started = false;
         while let Ok(event) = rx.try_recv() {
@@ -2018,6 +2109,7 @@ mod tests {
             quantity: 5,
             quality: 52,
             tool: Some(super::super::extraction::GatherTool { held: sickle.clone(), by_hand: Some((3, 58)) }),
+            wage: None,
         }
     }
 
@@ -2214,6 +2306,7 @@ mod tests {
             quantity: 5,
             quality,
             tool: None,
+            wage: None,
         };
         let mut conn = db.acquire().await.unwrap();
 

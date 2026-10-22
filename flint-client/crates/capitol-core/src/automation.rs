@@ -102,6 +102,10 @@ pub fn pause_words(reason: &PauseReason, catalog: &Catalog, recipe: Option<&Reci
             "It goes on when you're back. A subscription keeps it working while you're away"
                 .to_owned(),
         ),
+        PauseReason::Shift => (
+            "Someone is working it".to_owned(),
+            "It goes on when their shift ends".to_owned(),
+        ),
     };
     Words { what, fix }
 }
@@ -242,6 +246,7 @@ mod tests {
             PauseReason::ToolBroken,
             PauseReason::ToolMissing,
             PauseReason::OwnerOffline,
+            PauseReason::Shift,
         ];
         for reason in &reasons {
             let w = pause_words(reason, &catalog, Some(&recipe));

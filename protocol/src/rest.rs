@@ -1517,6 +1517,9 @@ pub enum PauseReason {
     ToolMissing,
     /// The owner left and isn't a subscriber (D8)
     OwnerOffline,
+    /// Someone is working it for wages (Commons D7): it starts again when
+    /// the shift ends
+    Shift,
 }
 
 /// `PUT /stations/{id}/automation`. Setting it stops the station and starts
@@ -2692,6 +2695,118 @@ pub struct DeedPrice {
     pub plot_size: String,
     /// Maximum stations allowed on plots in this zone
     pub station_capacity: i32,
+}
+
+// ---------------------------------------------------------------------------
+// /wages (Commons S2.6, plan D7)
+// ---------------------------------------------------------------------------
+
+/// `POST /wages`: offer piece-rate work at a station of yours or on a lot of
+/// yours, at `rate` a unit, up to `cap` units, for `term_days`. `rate × cap`
+/// is escrowed, and the court's fee (`rules::court::court_fee`) is charged on
+/// top. From anywhere.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct OfferWages {
+    pub work: rules::wages::Work,
+    /// Strands a unit
+    pub rate: i64,
+    /// The most units paid for
+    pub cap: i32,
+    /// It runs 1 to 7 days
+    pub term_days: i64,
+    /// Only this player may take it. Without it, anyone but you.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<Uuid>,
+}
+
+/// A wage offer, as anyone sees it on the board's Work page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct WageOffer {
+    pub id: Uuid,
+    pub employer_id: Uuid,
+    pub employer_name: String,
+    /// The employer is a citizen (C0.1)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub employer_citizen: bool,
+    /// The one player it's for, if it's named
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_name: Option<String>,
+    pub work: rules::wages::Work,
+    /// Where the work is: the station, or the lot's middle
+    pub x: f64,
+    pub y: f64,
+    /// Strands a unit
+    pub rate: i64,
+    pub cap: i32,
+    /// Units made and paid for so far, over every shift
+    pub made: i32,
+    /// What's unspent of its escrow: `rate × (cap - made)` while it's open,
+    /// 0 once it's closed
+    pub escrow_strands: i64,
+    /// The court's fee it paid (kept when it closes)
+    pub fee: i64,
+    pub posted_at: DateTime<Utc>,
+    pub ends_at: DateTime<Utc>,
+    pub status: rules::wages::OfferStatus,
+    /// The shift being worked on it now, if there is one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shift: Option<WageShift>,
+}
+
+/// A worker's shift on an offer: running while `ended_at` is empty.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct WageShift {
+    pub id: Uuid,
+    pub offer_id: Uuid,
+    pub worker_id: Uuid,
+    pub worker_name: String,
+    /// The worker is a citizen (C0.1)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worker_citizen: bool,
+    pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+    /// Units made and paid for on this shift
+    pub made: i32,
+    /// Why it ended, once it has
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<rules::wages::ShiftEnd>,
+}
+
+/// `GET /wages` query string. Without any, every open offer.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::IntoParams))]
+pub struct WagesQuery {
+    /// Only those you offered, or are named on
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mine: bool,
+    /// Only those in this state; without it, the open ones
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<rules::wages::OfferStatus>,
+}
+
+/// `GET /wages`: newest first, at most 200, and your own shift if you're on one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct WagesResponse {
+    pub offers: Vec<WageOffer>,
+    /// The shift you're working, if you are
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shift: Option<WageShift>,
+}
+
+/// `DELETE /wages/{id}/shift`: what the shift came to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ShiftEnded {
+    pub shift: WageShift,
+    /// Strands paid on it, all told
+    pub paid: i64,
 }
 
 #[cfg(test)]

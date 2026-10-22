@@ -3,6 +3,7 @@ use uuid::Uuid;
 use crate::models::Item;
 
 use super::tools::HeldTool;
+use super::wages::ShiftWork;
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -24,6 +25,9 @@ pub enum Command {
         node_id: Uuid,
         /// The best tool held for it, looked up before queueing (`tools::tool_for_node`)
         tool: Option<HeldTool>,
+        /// The wage shift it's gathered on (Commons D7,
+        /// `container_access::gathering_terms`): it goes to the employer, paid for
+        wage: Option<ShiftWork>,
     },
     CancelExtraction {
         player_id: Uuid,
@@ -51,6 +55,9 @@ pub enum Command {
         inputs: Vec<Item>,
         /// The station's own tool, or else the best held (`station_tools::tool_for_station_recipe`)
         tool: Option<HeldTool>,
+        /// The wage shift it's made on (Commons D7): the inputs are from the
+        /// station's box, and the output goes back into it, paid for
+        wage: Option<ShiftWork>,
     },
     // M5: Trading commands
     InitiateTrade {

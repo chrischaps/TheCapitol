@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::models::{ActionState, ItemType, NodeState, PlayerState, ResourceNodeState, ResourceType};
 use super::events::GameEvent;
 use super::tools::HeldTool;
+use super::wages::ShiftWork;
 
 /// Maximum distance from player to node for extraction (world units)
 pub use capitol_protocol::rules::EXTRACTION_RANGE;
@@ -29,6 +30,9 @@ pub struct PendingItem {
     pub quality: i32,
     /// The tool that did it, if one did (E1.5)
     pub tool: Option<GatherTool>,
+    /// The wage shift it was gathered on (Commons D7): it goes into the
+    /// employer's market box, paid for in the same transaction
+    pub wage: Option<ShiftWork>,
 }
 
 /// The tool behind a gather, and what the gather would have been without it.
@@ -110,6 +114,8 @@ pub fn process_extractions(
                     quantity,
                     quality,
                     tool,
+                    // The tick's, from the shift it started on
+                    wage: None,
                 });
 
                 if let Some(node) = nodes.get_mut(&node_id) {

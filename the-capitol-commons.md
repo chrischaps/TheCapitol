@@ -193,7 +193,21 @@ Weekly, from records the city already keeps.
 - **S2.3 Flint: the board's Wanted page** (#389, L).
 - **S2.4 The Gazette's Wanted column** (#390, S).
 - **S2.5 Citizens answer and post commissions** (#391, M).
-- **S2.6 Wages on the server** (#392, L).
+- **S2.6 Wages on the server** (#392, L). *As built:*
+  - **Tables and routes.** `wage_offers` and `wage_shifts` (`20261216_001_wages.sql`), with one running shift per offer and one per worker held by unique indexes. `engine::wages` and `routes::wages`: `POST/GET /wages`, `GET/DELETE /wages/{id}`, `POST /wages/{id}/take`, `DELETE /wages/{id}/shift`, all from anywhere.
+  - **Rules.** `rules::wages` holds the bounds (the market's rate and quantity, 1 to 7 days) and `payable`. An employer has at most five offers open (`MAX_OPEN_OFFERS`), as with commissions. A craft offer's recipe must be made at that kind of station (a hand recipe at any). A gather offer's resource must grow within the lot's bounds: its bounding box, not its outline ([#435](https://github.com/chrischaps/TheCapitol/issues/435)).
+  - **Shift access.** `container_access::check_station_use` admits a worker on a shift to open the station and craft there, but only the offer's recipe (`wages::recipe_refusal`), and the shift wins over a public plot's access. Moves in and out of the box and the tool slot stay `check_station_access`'s, so a worker can't take anything by hand. `container_access::gathering_terms` admits them to that resource on that lot.
+  - **Crafting on a shift.** The craft carries its `ShiftWork` through `Command`, the op and `FinishedCraft`. Its inputs come from the station's box, whoever deposited them, named or all in slot order. `finish_craft` checks they're still in the box, puts the output there as the employer's marked as the worker's make, and pays in the same transaction (`wages::pay`).
+  - **Gathering on a shift.** A gather goes into the employer's market box, also paid in its transaction. If the shift ended while the work ran, nothing is written.
+  - **The cap.** The last craft or gather may make more than the cap leaves. The employer gets all of it, and the units over the cap are unpaid.
+  - **A full market box.** If the employer's market box has no room, the gatherer keeps the units, unpaid, and the shift ends `box_full`.
+  - **Automation.** It pauses `shift` (`PauseReason::Shift`, read from `owners_of`) whatever else it waited on, and resumes after.
+  - **Endings.** `run_wage_loop` sweeps every 5 s:
+    - `expired` at the term;
+    - `gone` when the station goes or changes hands, or the lot does (the FK sets the id NULL);
+    - `away` after 5 minutes off. The clock is in the loop's memory, so a restart gives a worker the 5 minutes again.
+  - **Telling people.** Notices go to the employer (`wage_taken`) and to both sides (`wage_shift_ended`), queued and sent live through `GameEvent::Notice`. `wage_offered`, `wage_updated` and `wage_closed` go to everyone, and `wage_paid` quietly to the worker (`GameEvent::Wages`).
+  - **The books.** `ledger::court_held` counts the unspent escrow, and `conservation::fees_kept` the fees. The Flint client parses the six messages and does nothing with them until S2.7.
 - **S2.7 Flint: hiring and working** (#393, M).
 - **S2.8 Citizens take wages** (#394, M).
 

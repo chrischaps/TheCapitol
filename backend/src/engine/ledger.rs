@@ -296,9 +296,9 @@ pub(crate) async fn held_strands(conn: &mut sqlx::PgConnection) -> Result<i64, s
 }
 
 /// Strands the Contract Court holds: what's unspent of open commissions'
-/// escrow (S2.1), and wage offers' once there are wages (S2.6).
+/// escrow (S2.1), and wage offers' (S2.6).
 async fn court_held(conn: &mut sqlx::PgConnection) -> Result<i64, sqlx::Error> {
-    super::commissions::held(conn).await
+    Ok(super::commissions::held(conn).await? + super::wages::held(conn).await?)
 }
 
 /// Every unit in the world, by item type.
@@ -479,6 +479,7 @@ mod tests {
                 durability: None,
             }],
             tool: None,
+            wage: None,
         };
         super::super::craft_completion::finish_craft(&db, &craft).await.unwrap();
         super::super::station_removal::remove_station(&db, ada, ada_chest).await.unwrap();

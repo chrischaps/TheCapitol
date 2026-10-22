@@ -18,7 +18,7 @@ use capitol_protocol::rest::{ApiKeyScope, Maker};
 use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo, TradeOfferItem};
 
 use crate::engine::container_access::{
-    check_container_access, check_station_access, live_position, movable_item, move_refusal,
+    check_container_access, check_station_use, live_position, movable_item, move_refusal, StationUse,
 };
 use crate::api_keys::{self, KeyAuth, KeyGrant};
 use crate::engine::GameEvent;
@@ -412,10 +412,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 }
                                 ClientMessage::Extract { node_id } => {
                                     if let Ok(node_uuid) = Uuid::parse_str(&node_id) {
-                                        // Grass on someone's lot is theirs (#102)
-                                        let refusal = crate::engine::container_access::gathering_refusal(
+                                        // Grass on someone's lot is theirs (#102), unless
+                                        // they're on a wage shift for it (Commons D7)
+                                        let (wage, refusal) = match crate::engine::container_access::gathering_terms(
                                             &state.db, &state.game, player_id, node_uuid,
-                                        ).await.unwrap_or_else(|e| Some(format!("Database error: {}", e)));
+                                        ).await {
+                                            Ok(Ok(wage)) => (wage, None),
+                                            Ok(Err(why)) => (None, Some(why)),
+                                            Err(e) => (None, Some(format!("Database error: {}", e))),
+                                        };
                                         // The best tool for it, if it takes one (E1.5)
                                         let tool = crate::engine::tools::tool_for_node(
                                             &state.db, &state.game, player_id, node_uuid,
@@ -438,6 +443,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             player_id,
                                             node_id: node_uuid,
                                             tool,
+                                            wage,
                                         });
                                     } else {
                                         let _ = sender.send(Message::Text(
@@ -764,12 +770,23 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     // The same station rule as opening it (#80). The
                                     // tick checks range again, but not who may use it.
                                     let at = live_position(&state.game, player_id).await;
-                                    if let Err(e) = check_station_access(&state.db, player_id, station_uuid, at).await {
+                                    let wage = match check_station_use(&state.db, player_id, station_uuid, at).await {
+                                        Ok(StationUse::Free { .. }) => None,
+                                        Ok(StationUse::Shift(work)) => Some(work),
+                                        Err(e) => {
+                                            let _ = sender.send(Message::Text(
+                                                serde_json::to_string(&ServerMessage::CraftingFailed {
+                                                    player_id,
+                                                    reason: e.message(),
+                                                }).unwrap().into()
+                                            )).await;
+                                            continue;
+                                        }
+                                    };
+                                    // On a wage shift, only the offer's recipe (Commons D7)
+                                    if let Some(reason) = wage.as_ref().and_then(|w| crate::engine::wages::recipe_refusal(w, &recipe_id)) {
                                         let _ = sender.send(Message::Text(
-                                            serde_json::to_string(&ServerMessage::CraftingFailed {
-                                                player_id,
-                                                reason: e.message(),
-                                            }).unwrap().into()
+                                            serde_json::to_string(&ServerMessage::CraftingFailed { player_id, reason }).unwrap().into()
                                         )).await;
                                         continue;
                                     }
@@ -779,8 +796,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         .filter_map(|id| Uuid::parse_str(id).ok())
                                         .collect();
 
-                                    // Fetch items for crafting validation
-                                    let items = fetch_player_items(&state, player_id, &item_uuids).await;
+                                    // Fetch items for crafting validation: the player's
+                                    // own, or on a wage shift the station box's
+                                    let items = match &wage {
+                                        Some(_) => fetch_box_items(&state, station_uuid, &item_uuids).await,
+                                        None => fetch_player_items(&state, player_id, &item_uuids).await,
+                                    };
 
                                     if items.is_empty() && !item_uuids.is_empty() {
                                         let _ = sender.send(Message::Text(
@@ -807,6 +828,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         recipe_id,
                                         inputs: items,
                                         tool,
+                                        wage,
                                     });
                                 }
                                 // M5: Trading
@@ -1341,6 +1363,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let msg = change.message(commission);
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
+                    // Commons S2.6: the board's Work page to everyone, a
+                    // worker's pay to them alone
+                    Ok(GameEvent::Wages { to, message }) => {
+                        if to.is_none_or(|to| to == player_id) {
+                            let _ = sender.send(Message::Text(serde_json::to_string(&message).unwrap().into())).await;
+                        }
+                    }
                     Err(()) => {
                         // Channel closed
                         counted.ends(SocketEnd::ServerStopping);
@@ -1552,6 +1581,28 @@ async fn fetch_player_items(state: &AppState, player_id: Uuid, item_ids: &[Uuid]
     // In the order asked for: a craft takes its units from the stacks in that
     // order, as the client's quality range assumes (`capitol-core` `craft::check`).
     items.sort_by_key(|item| item_ids.iter().position(|id| *id == item.id));
+    items
+}
+
+/// The stacks in `station_id`'s box a wage shift's craft may take from
+/// (Commons D7), whoever's they are: those named, in the order asked for, or
+/// with none named, every one in slot order.
+async fn fetch_box_items(state: &AppState, station_id: Uuid, item_ids: &[Uuid]) -> Vec<crate::models::Item> {
+    let mut items: Vec<crate::models::Item> = sqlx::query_as(&format!(
+        "SELECT {} FROM items
+         WHERE container_id = (SELECT id FROM containers WHERE station_id = $1)
+           AND (cardinality($2::uuid[]) = 0 OR id = ANY($2))
+         ORDER BY slot_index NULLS LAST, id",
+        crate::models::ITEM_COLUMNS
+    ))
+    .bind(station_id)
+    .bind(item_ids)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    if !item_ids.is_empty() {
+        items.sort_by_key(|item| item_ids.iter().position(|id| *id == item.id));
+    }
     items
 }
 
@@ -1853,9 +1904,10 @@ async fn handle_open_station(
     station_id: Uuid,
 ) -> Result<(String, String, Uuid), String> {
     // The one station rule: its owner, the plot's owner, or anyone the plot's
-    // station_use_level admits, within range (#80)
+    // station_use_level admits, within range (#80), or a worker on a wage
+    // shift there (Commons D7)
     let at = live_position(&state.game, player_id).await;
-    check_station_access(&state.db, player_id, station_id, at)
+    check_station_use(&state.db, player_id, station_id, at)
         .await
         .map_err(|e| e.message())?;
 

@@ -505,6 +505,7 @@ mod tests {
                 durability: None,
             }],
             tool: Some(tool),
+            wage: None,
         }
     }
 

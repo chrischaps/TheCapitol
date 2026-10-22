@@ -22,6 +22,11 @@
 //! splits ([`move_refusal`]): nothing goes into the impound (#141), and the
 //! market box is used only at the Exchange hall, and only to take things out
 //! (#244).
+//!
+//! A worker on a wage shift (Commons D7) may open the station it's at and
+//! craft the offer's recipe there ([`check_station_use`]), or gather the
+//! offer's resource on its lot ([`gathering_terms`]), and nothing more: they
+//! can't move things in or out of its box, or put a tool in it.
 
 use capitol_protocol::rules::market::at_the_hall;
 use sqlx::PgPool;
@@ -31,6 +36,7 @@ use uuid::Uuid;
 use super::impound::IMPOUND;
 use super::market::MARKET_BOX;
 use super::tick::GameState;
+use super::wages::{self, ShiftWork};
 use crate::models::{Container, Item, LandmarkKind, PermissionLevel};
 
 /// Why a player can't use a station or a container, or move an item.
@@ -133,6 +139,52 @@ pub async fn check_station_access(
     station_id: Uuid,
     at: Option<(f64, f64)>,
 ) -> Result<Uuid, AccessError> {
+    let access = load_station_access(db, player_id, station_id, at).await?;
+    station_access(player_id, &access)?;
+    Ok(access.station_owner)
+}
+
+/// How a player may use a station: as [`station_access`] admits them, or as
+/// a worker on a wage shift there (Commons D7), to open it and craft the
+/// offer's recipe alone (`wages::recipe_refusal`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StationUse {
+    /// Its owner, its plot's owner, or anyone the plot admits
+    Free { owner: Uuid },
+    /// On this shift
+    Shift(ShiftWork),
+}
+
+/// [`check_station_access`], or a running wage shift at the station: the
+/// rule for opening it and crafting at it. Moving things in or out of its
+/// box, and its tool slot, stay [`check_station_access`]'s. On a shift
+/// there, the shift wins, so a public station's worker is still paid for the
+/// offer's recipe.
+pub async fn check_station_use(
+    db: &PgPool,
+    player_id: Uuid,
+    station_id: Uuid,
+    at: Option<(f64, f64)>,
+) -> Result<StationUse, AccessError> {
+    let access = load_station_access(db, player_id, station_id, at).await?;
+    if let Some(work) = wages::shift_at_station(db, player_id, station_id).await? {
+        if access.distance > access.interaction_range {
+            return Err(AccessError::TooFar);
+        }
+        return Ok(StationUse::Shift(work));
+    }
+    station_access(player_id, &access)?;
+    Ok(StationUse::Free { owner: access.station_owner })
+}
+
+/// What [`station_access`] decides `player_id`'s use of `station_id` on,
+/// standing at `at` (or at their saved position).
+async fn load_station_access(
+    db: &PgPool,
+    player_id: Uuid,
+    station_id: Uuid,
+    at: Option<(f64, f64)>,
+) -> Result<StationAccess, AccessError> {
     let row: Option<(Uuid, f32, f32, f32, Option<Uuid>, Option<String>, f64, f64)> =
         sqlx::query_as(
             "SELECT s.owner_id, s.position_x, s.position_y, st.interaction_range,
@@ -154,17 +206,13 @@ pub async fn check_station_access(
 
     let (px, py) = at.unwrap_or((px, py));
     let (dx, dy) = (px - sx as f64, py - sy as f64);
-    station_access(
-        player_id,
-        &StationAccess {
-            station_owner,
-            plot_owner,
-            station_use_level,
-            distance: (dx * dx + dy * dy).sqrt(),
-            interaction_range: range as f64,
-        },
-    )?;
-    Ok(station_owner)
+    Ok(StationAccess {
+        station_owner,
+        plot_owner,
+        station_use_level,
+        distance: (dx * dx + dy * dy).sqrt(),
+        interaction_range: range as f64,
+    })
 }
 
 /// Load a container and check that `player_id` may move items into or out of it.
@@ -340,28 +388,46 @@ pub fn may_gather(player_id: Uuid, plot_owner: Option<Uuid>, level: Option<&str>
 
 /// Why `player_id` may not gather `node_id` because of whose lot it stands on,
 /// in words the player can act on. `None` means the lot doesn't stand in the
-/// way (the other reasons are [`super::extraction_refusal`]'s). Call it before
-/// queueing `StartExtraction`, from REST and WS alike.
+/// way (the other reasons are [`super::extraction_refusal`]'s).
+#[cfg(test)]
 pub async fn gathering_refusal(
     db: &PgPool,
     game: &RwLock<GameState>,
     player_id: Uuid,
     node_id: Uuid,
 ) -> Result<Option<String>, sqlx::Error> {
-    let (lot, resource) = {
+    Ok(gathering_terms(db, game, player_id, node_id).await?.err())
+}
+
+/// On what terms `player_id` may gather `node_id`, as far as whose lot it
+/// stands on goes: `Ok(None)` as anyone may (their own lot, an open one, or
+/// none), `Ok(Some(work))` for wages, on a running shift for this resource
+/// on this lot (Commons D7), or `Err` with why not ([`gathering_refusal`]'s
+/// words). Call it before queueing `StartExtraction`, from REST and WS
+/// alike, and queue the work with it.
+pub async fn gathering_terms(
+    db: &PgPool,
+    game: &RwLock<GameState>,
+    player_id: Uuid,
+    node_id: Uuid,
+) -> Result<Result<Option<ShiftWork>, String>, sqlx::Error> {
+    let (lot, resource_type, resource) = {
         let game = game.read().await;
         let Some(node) = game.resource_nodes.get(&node_id) else {
-            return Ok(None); // the tick says the node is gone
+            return Ok(Ok(None)); // the tick says the node is gone
         };
         let Some(lot) = game.terrain.lot_at(node.x, node.y) else {
-            return Ok(None);
+            return Ok(Ok(None));
         };
         let resource = game
             .resource_types
             .get(&node.resource_type)
             .map_or_else(|| node.resource_type.clone(), |t| t.name.clone());
-        (lot.id.clone(), resource)
+        (lot.id.clone(), node.resource_type.clone(), resource)
     };
+    if let Some(work) = wages::shift_on_lot(db, player_id, &lot, &resource_type).await? {
+        return Ok(Ok(Some(work)));
+    }
 
     let row: Option<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT p.owner_id, pp.station_use_level, pl.name
@@ -374,13 +440,13 @@ pub async fn gathering_refusal(
     .fetch_optional(db)
     .await?;
     let Some((owner, level, owner_name)) = row else {
-        return Ok(None);
+        return Ok(Ok(None));
     };
     if may_gather(player_id, Some(owner), level.as_deref()) {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     let whose = owner_name.map_or_else(|| "someone else's".to_string(), |name| format!("{name}'s"));
-    Ok(Some(format!("This {resource} grows on {whose} lot")))
+    Ok(Err(format!("This {resource} grows on {whose} lot")))
 }
 
 #[cfg(test)]
@@ -749,6 +815,48 @@ mod db_tests {
             .await
             .unwrap();
         assert_eq!(refusal(guest).await.unwrap(), None);
+    }
+
+    /// A wage shift for the lot's grass lets its worker gather it, as the
+    /// employer's (Commons D7), and only while it runs
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_wage_shift_lets_its_worker_gather_on_the_lot(db: PgPool) {
+        use capitol_protocol::rest::OfferWages;
+        use capitol_protocol::rules::wages::Work;
+        let (owner, _) = player(&db, "owner").await;
+        let (worker, _) = player(&db, "worker").await;
+        let (game, on_lot, _) = game_with_a_lot();
+        let plot: Uuid = sqlx::query_scalar(
+            "INSERT INTO plots (zone_id, grid_x, grid_y, world_x, world_y, bounds_min_x,
+                                bounds_min_y, bounds_max_x, bounds_max_y, size_category, terrain_id, owner_id)
+             VALUES ((SELECT id FROM zones LIMIT 1), 9998, 9998, 0, 0, -10, -10, 10, 10, 'small', 'test_lot', $1)
+             RETURNING id",
+        )
+        .bind(owner)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO plot_permissions (plot_id) VALUES ($1)").bind(plot).execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO resource_nodes (id, resource_type, position_x, position_y, base_quality) VALUES ($1, 'grass', 0, 0, 50)")
+            .bind(on_lot)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE players SET strand_balance = 100 WHERE id = $1").bind(owner).execute(&db).await.unwrap();
+        let terms = |who| gathering_terms(&db, &game, who, on_lot);
+        assert!(terms(worker).await.unwrap().is_err(), "the owner's grass");
+
+        let now = chrono::Utc::now();
+        let grass = OfferWages { work: Work::Gather { plot_id: plot, resource: "grass".into() }, rate: 1, cap: 5, term_days: 1, worker_id: None };
+        let (offer, _) = wages::offer(&db, owner, &grass, now).await.unwrap();
+        wages::take(&db, worker, offer.id, now).await.unwrap();
+        let Ok(Some(work)) = terms(worker).await.unwrap() else { panic!("on a shift for it") };
+        assert_eq!((work.offer_id, work.employer_id), (offer.id, owner));
+        assert_eq!(terms(owner).await.unwrap(), Ok(None), "the owner gathers as ever");
+
+        wages::stop(&db, worker, offer.id, now).await.unwrap();
+        assert!(terms(worker).await.unwrap().is_err(), "the shift's over");
     }
 
     #[sqlx::test(migrations = "./migrations")]

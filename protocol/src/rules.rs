@@ -182,6 +182,8 @@ pub mod standing;
 
 /// Guilds: names and tags, the fees, and each role's rights (D10, S4.1).
 pub mod guild;
+/// Piece-rate wages: an offer's bounds, its pay and why a shift ends (D7, S2.6).
+pub mod wages;
 
 /// Letter grade for an item quality (0-100): A >= 90, B >= 75, C >= 55, D >= 35,
 /// otherwise F. WebSocket events carry only the number, so clients grade it here.
