@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use super::*;
+use capitol_protocol::land::slope_at;
 use capitol_protocol::rules::ground::CLIFF_SLOPE;
 use capitol_protocol::rules::{Frame, RURAL_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS, WORLD_SIZE};
 use crate::models::{TerrainConfig, WorldGenParams};

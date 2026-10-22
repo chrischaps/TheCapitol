@@ -1835,53 +1835,86 @@ mod tests {
         points.iter().map(|p| p.0.stable_hypot(p.1)).sum::<f64>() + cells.len() as f64
     }
 
-    #[test]
-    fn test_terrain_generation_performance() {
+    /// One world's generation, timed against the reference workload: its CPU
+    /// time, the reference's, and the ratio.
+    fn generation_ratio(params: &WorldGenParams) -> (std::time::Duration, std::time::Duration, f64) {
         use cpu_time::ThreadTime;
         use std::hint::black_box;
-
-        let params = WorldGenParams::default();
 
         // CPU time on this thread, not wall time: generation is single-threaded, and in a
         // parallel `cargo test` (or beside other agents' builds) the wall clock counts the
         // time other work held the core. Wall time hit 14.5s that way (#91).
+        // The thread's CPU clock ticks every 15.6ms on Windows, and in release one
+        // run of the reference is about 60ms, so one reading was ±25% (#464). So
+        // it runs until a quarter second has passed, and the time is the mean.
         let reference = || {
             let start = ThreadTime::now();
-            black_box(reference_workload());
-            start.elapsed()
+            let mut runs = 0;
+            while runs == 0 || start.elapsed() < std::time::Duration::from_millis(250) {
+                black_box(reference_workload());
+                runs += 1;
+            }
+            start.elapsed() / runs
         };
         let before = reference();
         let start = ThreadTime::now();
-        let _config = TerrainConfig::from_params(&params);
+        black_box(TerrainConfig::from_params(params));
         let elapsed = start.elapsed();
-        let machine = before.min(reference());
-
         // CPU time still varies with the machine and with what shares its cores: a fixed
         // 6s limit passed at ~5.4s on one CI runner and failed at ~7.4s on another with
         // the same code, and on a desktop the full parallel suite nearly doubles it
         // (#236). So the limit is in units of the reference workload, timed on this
         // thread either side of generation (the faster of the two, to shed a hiccup).
-        let ratio = elapsed.as_secs_f64() / machine.as_secs_f64();
-        println!(
-            "Terrain generation took: {:?} of CPU, {:.1}× the reference ({:?})",
-            elapsed, ratio, machine
-        );
-        // Typical: ~2.7s debug, with `capitol_protocol` and libm optimised even in
-        // debug (the root Cargo.toml, #221). Of that, the water is ~0.25s and the wild
-        // trails ~0.65s, mostly `land::height_at`. Unoptimised, the noise made it ~3.7s.
-        // As a ratio: 4.5–4.8× on a Windows desktop, quiet or in the full suite, and
-        // 3.7× on a CI runner. The limit leaves CI ~1.9× of headroom and still fails a
-        // doubling like #221's on the desktop, where `land` runs this before it pushes.
-        // Pre-optimization was ~115s debug, about 200×.
+        let machine = before.min(reference());
+        (elapsed, machine, elapsed.as_secs_f64() / machine.as_secs_f64())
+    }
+
+    /// The default world and the grown one (PV2's, `WorldGenParams::grown`)
+    /// each generate within [`LIMIT`] times the reference workload.
+    #[test]
+    fn test_terrain_generation_performance() {
+        // The history, in debug: pre-optimization was ~115s, about 200×. With
+        // `capitol_protocol` and libm optimised even in debug (the root
+        // Cargo.toml, #221) it was ~2.7s, 4.5–4.8× on a Windows desktop and 3.7× on
+        // a CI runner. The farms (R7, #290) took it to 5.8–6.9× alone and 7.5× in the
+        // full suite, so the limit went from 7× to 8×. The grown world (PV2, #454)
+        // read 8.5× (5.3s), and beside its tests the default went over 8× too.
         //
-        // The farms (R7, #290) add about 0.6s, or 18%: the balance pass ~0.25s and the
-        // farms laid round the water ~0.28s. Alone on a loaded desktop that's 5.8–6.9×
-        // against the trails' ~5.4×, and 7.5× in the full parallel suite, so the limit
-        // went from 7× to 8×. A doubling still fails it.
-        const LIMIT: f64 = 8.0;
-        assert!(ratio < LIMIT,
-            "Terrain generation took too long: {:?} of CPU, {:.1}× the reference workload's {:?} \
-             (expected under {LIMIT}×)", elapsed, ratio, machine);
+        // #458 made the lots' clearing, the junctions' weld and the land's noise
+        // cheaper, all to the bit (the pin holds). On a desktop busy with other
+        // agents' builds, the default world went from 3.3–3.9s (5.9–6.7×) to
+        // 2.3–2.8s (4.1–4.8×), and the grown one from 4.8–5.9s (8.4–9.2×) to 3.4s
+        // (5.8×). Most of what's left is the suburb's lots and parks (~0.95s, 1.3s
+        // grown), the wild trails (~0.65s, 0.85s), the water (~0.3s, 0.5s) and the
+        // rural plan (~0.2s, 0.4s). The limit still fails a doubling of the default.
+        //
+        // In release (#464) the reference speeds up far more than generation does
+        // (it's hashing and sorting in the backend, which debug doesn't optimise,
+        // where generation leans on the protocol, optimised in both), so a world
+        // reads about 2.3× higher. Release has its own limit: the default went
+        // from 0.9–1.0s (10.9–13.2×) to 0.63s (9.1–9.6×), and the grown one from
+        // 1.1–1.5s (15.6–18×) to 0.89s (13.4–14.2×). It too fails a doubling.
+        const LIMIT: f64 = if cfg!(debug_assertions) { 8.0 } else { 18.0 };
+        // A run beside other tests' threads can read high once: they share the
+        // caches and the core's turbo, which the CPU clock doesn't shed. A real
+        // slowdown reads high every time, so a world gets three tries (#458).
+        const TRIES: usize = 3;
+        for (name, params) in [("default", WorldGenParams::default()), ("grown", WorldGenParams::grown())] {
+            let mut best = f64::INFINITY;
+            for _ in 0..TRIES {
+                let (elapsed, machine, ratio) = generation_ratio(&params);
+                println!("The {name} world took {elapsed:?} of CPU, {ratio:.1}× the reference ({machine:?})");
+                best = best.min(ratio);
+                if best < LIMIT {
+                    break;
+                }
+            }
+            assert!(
+                best < LIMIT,
+                "The {name} world took too long: at best {best:.1}× the reference workload in {TRIES} tries \
+                 (expected under {LIMIT}×)"
+            );
+        }
     }
 
     #[test]

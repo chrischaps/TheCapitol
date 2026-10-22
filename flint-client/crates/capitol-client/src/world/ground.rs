@@ -241,6 +241,21 @@ mod tests {
     }
 
     #[test]
+    fn the_far_plane_reaches_the_skirt_and_across_the_land() {
+        // The scene's `[camera] far` is a number in a file, so it's tied to
+        // the world here (PV2, #458): past the disc's skirt, and across the
+        // whole land, settled edge to settled edge. A world grown past what
+        // it reaches fails this, rather than showing a cut horizon.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scenes/capitol.scene.toml");
+        let scene: toml::Value = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let far = scene["camera"]["far"].as_float().expect("the scene sets a far plane");
+        let s = crate::coords::S as f64;
+        let skirt = SKIRT.max(EDGE * 3.0) * s;
+        let land = 2.0 * crate::world::land::OUTER * s;
+        assert!(far > skirt && far > land, "far {far} m, skirt {skirt} m, land {land} m");
+    }
+
+    #[test]
     fn each_zone_wears_its_own_tint_away_from_its_edges() {
         for zone in Zone::ALL.into_iter().filter(|z| *z != Zone::Wilderness) {
             let (lo, hi) = zone.radii();

@@ -35,7 +35,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
 use capitol_protocol::fmath::StableMath;
-use capitol_protocol::land::{height_at, slope_at, LandParams};
+use capitol_protocol::land::{LandParams, Relief};
 use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot};
 
 use super::hydrology::Hydrology;
@@ -237,7 +237,7 @@ pub fn lay(land: &LandParams, water: &Hydrology, roads: &[RoadSegment], lots: &[
 /// with a branch to each lake and ford it doesn't already reach, cheapest
 /// first. A branch that meets one laid before it joins it there.
 fn spurs(grid: &Grid, water: &Hydrology, network: &[RoadSegment], bearings: &[f64], width: f64) -> Vec<RoadSegment> {
-    let frame = grid.land.frame;
+    let frame = grid.relief.land().frame;
     let rural = frame.rural_edge();
     // Which road owns each cell: the network's vertices, then each spur's.
     let mut owned_by: HashMap<usize, usize> = HashMap::new();
@@ -386,7 +386,9 @@ enum Wet {
 
 struct Grid {
     n: usize,
-    land: LandParams,
+    /// The land, its octaves made ready: the lattice and the checks sample it
+    /// hundreds of thousands of times (#458).
+    relief: Relief,
     /// The ground's slope at each cell's centre; infinite where no trail may go.
     slope: Vec<f64>,
     /// The ground's height at each cell's centre.
@@ -430,7 +432,7 @@ impl Grid {
         let n = (frame.world_size() / CELL).ceil() as usize;
         let mut grid = Grid {
             n,
-            land: land.clone(),
+            relief: Relief::new(land),
             slope: vec![f64::INFINITY; n * n],
             height: vec![0.0; n * n],
             wet: vec![Wet::Dry; n * n],
@@ -450,7 +452,7 @@ impl Grid {
         let lattice: Vec<f64> = (0..m * m)
             .map(|k| {
                 let (x, y) = ((k % m) as f64 * half, (k / m) as f64 * half);
-                if in_ring(x, y, 2.0 * CELL) { height_at(x, y, land) } else { 0.0 }
+                if in_ring(x, y, 2.0 * CELL) { grid.relief.height(x, y) } else { 0.0 }
             })
             .collect();
         let slope = |a: usize, b: usize| {
@@ -610,7 +612,7 @@ impl Grid {
     fn vertex_cells(&self, points: &[P], min_r: f64) -> HashMap<usize, P> {
         let mut out = HashMap::new();
         for &p in points {
-            if self.land.frame.radius(p.0, p.1) >= min_r {
+            if self.relief.land().frame.radius(p.0, p.1) >= min_r {
                 out.entry(self.cell_of(p)).or_insert(p);
             }
         }
@@ -742,7 +744,7 @@ impl Grid {
             (0..=steps).all(|k| {
                 let t = k as f64 / steps as f64;
                 let (x, y) = (w[0].0 + t * (w[1].0 - w[0].0), w[0].1 + t * (w[1].1 - w[0].1));
-                slope_at(x, y, &self.land) < WALK_LIMIT
+                self.relief.slope(x, y) < WALK_LIMIT
                     && !self.lakes.iter().any(|(min, max, rings)| {
                         x >= min.0 && x <= max.0 && y >= min.1 && y <= max.1 && rings_contain(rings, x, y)
                     })

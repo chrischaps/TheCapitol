@@ -142,6 +142,97 @@ const MASSIF_WAVELENGTH: f64 = 3600.0;
 
 /// The height of the ground at a world position.
 pub fn height_at(x: f64, y: f64, land: &LandParams) -> f64 {
+    let fields = |field: u64, octaves: u32| (0..octaves.max(1)).map(move |o| Octave::of(land.seed, field, o));
+    height_from(
+        x,
+        y,
+        land,
+        fields(ROLLING, land.rolling_octaves),
+        fields(RIDGES, land.ridge_octaves),
+        fields(WANDER, 2),
+        fields(MASSIF, 1),
+    )
+}
+
+/// One octave of a noise field: its seed, and the seeded shift of its
+/// lattice, so no two octaves share a grid point (and none sits on the
+/// world centre).
+#[derive(Debug, Clone, Copy)]
+struct Octave {
+    seed: u64,
+    offset: (f64, f64),
+}
+
+impl Octave {
+    fn of(seed: u64, field: u64, octave: u32) -> Self {
+        let s = octave_seed(seed, field, octave);
+        Octave { seed: s, offset: offset(s) }
+    }
+}
+
+/// The land's noise fields made ready once: every octave's seed and lattice
+/// shift, which [`height_at`] works out again at each sample. Where a pass
+/// samples the land thousands of times (the water's grid, the trails'
+/// lattice and their checks, the wild nodes), this is the same ground to the
+/// bit for about three quarters of the hashing (#458).
+#[derive(Debug, Clone)]
+pub struct Relief {
+    land: LandParams,
+    rolling: Vec<Octave>,
+    ridges: Vec<Octave>,
+    wander: [Octave; 2],
+    massif: [Octave; 1],
+}
+
+impl Relief {
+    pub fn new(land: &LandParams) -> Self {
+        let fields = |field: u64, octaves: u32| (0..octaves.max(1)).map(|o| Octave::of(land.seed, field, o)).collect();
+        Relief {
+            land: land.clone(),
+            rolling: fields(ROLLING, land.rolling_octaves),
+            ridges: fields(RIDGES, land.ridge_octaves),
+            wander: [Octave::of(land.seed, WANDER, 0), Octave::of(land.seed, WANDER, 1)],
+            massif: [Octave::of(land.seed, MASSIF, 0)],
+        }
+    }
+
+    /// The params it was made from.
+    pub fn land(&self) -> &LandParams {
+        &self.land
+    }
+
+    /// [`height_at`], to the bit.
+    pub fn height(&self, x: f64, y: f64) -> f64 {
+        height_from(
+            x,
+            y,
+            &self.land,
+            self.rolling.iter().copied(),
+            self.ridges.iter().copied(),
+            self.wander.iter().copied(),
+            self.massif.iter().copied(),
+        )
+    }
+
+    /// [`slope_at`], to the bit.
+    pub fn slope(&self, x: f64, y: f64) -> f64 {
+        let h = GRADIENT_STEP;
+        let gx = (self.height(x + h, y) - self.height(x - h, y)) / (2.0 * h);
+        let gy = (self.height(x, y + h) - self.height(x, y - h)) / (2.0 * h);
+        (gx * gx + gy * gy).sqrt()
+    }
+}
+
+/// The height, given each field's octaves.
+fn height_from(
+    x: f64,
+    y: f64,
+    land: &LandParams,
+    rolling: impl Iterator<Item = Octave>,
+    ridges: impl Iterator<Item = Octave>,
+    wander: impl Iterator<Item = Octave>,
+    stature: impl Iterator<Item = Octave>,
+) -> f64 {
     let (dx, dy) = (x - land.frame.center.0, y - land.frame.center.1);
     let r = (dx * dx + dy * dy).sqrt();
     let foothill = land.plain_edge();
@@ -153,25 +244,31 @@ pub fn height_at(x: f64, y: f64, land: &LandParams) -> f64 {
     let hills = smoothstep((r - foothill) / FOOTHILL_DEPTH);
     let ranges = smoothstep((r - foothill) / (land.range_radius - foothill).max(1.0));
 
-    let rolling = 0.5 + 0.5 * fbm(land.seed, ROLLING, dx, dy, land.rolling_wavelength, land.rolling_octaves);
-    let crest = ridged(land.seed, RIDGES, dx, dy, land.ridge_wavelength, land.ridge_octaves);
+    let rolling = 0.5 + 0.5 * fbm(rolling, dx, dy, land.rolling_wavelength);
+    let crest = ridged(ridges, dx, dy, land.ridge_wavelength);
     hills * land.rolling_height * rolling
-        + ranges * land.peak_height * massif(land, dx, dy) * RIDGE_GAIN * crest * crest
+        + ranges * land.peak_height * massif(land, dx, dy, wander, stature) * RIDGE_GAIN * crest * crest
 }
 
 /// How much of the ranges' height stands here, 0 to 1: the massifs round the
 /// ring, with valleys between them and some higher than others.
-fn massif(land: &LandParams, dx: f64, dy: f64) -> f64 {
+fn massif(
+    land: &LandParams,
+    dx: f64,
+    dy: f64,
+    wander: impl Iterator<Item = Octave>,
+    stature: impl Iterator<Item = Octave>,
+) -> f64 {
     if land.ridge_count == 0 {
         return 1.0;
     }
-    let bearing = dy.stable_atan2(dx) + land.massif_wander * fbm(land.seed, WANDER, dx, dy, 2400.0, 2);
+    let bearing = dy.stable_atan2(dx) + land.massif_wander * fbm(wander, dx, dy, 2400.0);
     let k = land.ridge_count as f64;
     // 0 on a valley's line, 1 midway between two. Integer k keeps it seamless
     // where atan2 wraps.
     let lobe = 0.5 - 0.5 * (k * (bearing - land.valley_bearing_degrees.to_radians())).stable_cos();
     // Some massifs stand higher than others: noise at about a massif's width.
-    let stature = 0.75 + 0.25 * fbm(land.seed, MASSIF, dx, dy, MASSIF_WAVELENGTH, 1);
+    let stature = 0.75 + 0.25 * fbm(stature, dx, dy, MASSIF_WAVELENGTH);
     let floor = land.valley_floor.clamp(0.0, 1.0);
     stature * (floor + (1.0 - floor) * lobe)
 }
@@ -186,7 +283,8 @@ pub fn massif_at(x: f64, y: f64, land: &LandParams) -> Option<u32> {
         return None;
     }
     let (dx, dy) = (x - land.frame.center.0, y - land.frame.center.1);
-    let bearing = dy.stable_atan2(dx) + land.massif_wander * fbm(land.seed, WANDER, dx, dy, 2400.0, 2);
+    let wander = (0..2).map(|o| Octave::of(land.seed, WANDER, o));
+    let bearing = dy.stable_atan2(dx) + land.massif_wander * fbm(wander, dx, dy, 2400.0);
     let k = land.ridge_count as f64;
     let turns = (bearing - land.valley_bearing_degrees.to_radians()) / std::f64::consts::TAU;
     Some(((turns * k).floor().rem_euclid(k)) as u32)
@@ -425,14 +523,12 @@ fn smoothstep(t: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Fractal noise in about [-1, 1]: `octaves` layers of gradient noise, each
-/// at half the wavelength and half the weight of the one before.
-fn fbm(seed: u64, field: u64, dx: f64, dy: f64, wavelength: f64, octaves: u32) -> f64 {
+/// Fractal noise in about [-1, 1]: the octaves' layers of gradient noise,
+/// each at half the wavelength and half the weight of the one before.
+fn fbm(octaves: impl Iterator<Item = Octave>, dx: f64, dy: f64, wavelength: f64) -> f64 {
     let (mut sum, mut weight, mut total) = (0.0, 1.0, 0.0);
     let (mut x, mut y) = rotate(dx / wavelength, dy / wavelength);
-    for octave in 0..octaves.max(1) {
-        let s = octave_seed(seed, field, octave);
-        let (ox, oy) = offset(s);
+    for Octave { seed: s, offset: (ox, oy) } in octaves {
         sum += weight * gradient_noise(s, x + ox, y + oy);
         total += weight;
         weight *= 0.5;
@@ -444,12 +540,10 @@ fn fbm(seed: u64, field: u64, dx: f64, dy: f64, wavelength: f64, octaves: u32) -
 /// Ridged fractal noise in [0, 1]: sharp crests where the noise crosses zero.
 /// Each octave is weighted by the crest under it, so the detail gathers on
 /// the ridgelines and the valleys stay smooth.
-fn ridged(seed: u64, field: u64, dx: f64, dy: f64, wavelength: f64, octaves: u32) -> f64 {
+fn ridged(octaves: impl Iterator<Item = Octave>, dx: f64, dy: f64, wavelength: f64) -> f64 {
     let (mut sum, mut weight, mut total, mut crest) = (0.0, 1.0, 0.0, 1.0);
     let (mut x, mut y) = rotate(dx / wavelength, dy / wavelength);
-    for octave in 0..octaves.max(1) {
-        let s = octave_seed(seed, field, octave);
-        let (ox, oy) = offset(s);
+    for Octave { seed: s, offset: (ox, oy) } in octaves {
         let signal = 1.0 - gradient_noise(s, x + ox, y + oy).abs();
         let signal = signal * signal * crest;
         crest = (signal * 2.0).clamp(0.0, 1.0);
@@ -530,6 +624,21 @@ mod tests {
     fn at(r: f64, degrees: f64) -> (f64, f64) {
         let a = degrees.to_radians();
         (CENTER_X + r * a.stable_cos(), CENTER_Y + r * a.stable_sin())
+    }
+
+    #[test]
+    fn a_relief_is_the_height_to_the_bit() {
+        // #458: the prepared octaves change no sample, on the default land
+        // or on one with other octaves, no massifs and another seed.
+        let other = LandParams { seed: 7, rolling_octaves: 3, ridge_octaves: 0, ridge_count: 0, ..LandParams::default() };
+        for land in [LandParams::default(), other] {
+            let relief = Relief::new(&land);
+            for step in 0..200 {
+                let (x, y) = at(4000.0 + step as f64 * 13.7, step as f64 * 7.3);
+                assert_eq!(relief.height(x, y).to_bits(), height_at(x, y, &land).to_bits(), "({x}, {y})");
+                assert_eq!(relief.slope(x, y).to_bits(), slope_at(x, y, &land).to_bits(), "({x}, {y})");
+            }
+        }
     }
 
     #[test]

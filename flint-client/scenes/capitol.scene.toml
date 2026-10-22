@@ -19,6 +19,10 @@ preload_audio = false
 # map view 620 m up the depth buffer then resolves about 2 cm, not 20 (see
 # plan §4.6). Far is 6 km, just past the ground's 5 km skirt: what's
 # drawn. The fog reaches all of it, however far (Flint ADR 0078, H10).
+# It's tied to the world's size: past the skirt (world/ground.rs SKIRT,
+# at least 3 world radii) and across the whole land (2 × land::OUTER,
+# 1.64 km for the 13600 world). A test in world/ground.rs holds it to
+# both, so a world grown past what 6 km reaches fails there (PV2, #458).
 [camera]
 near = 1.0
 far = 6000.0

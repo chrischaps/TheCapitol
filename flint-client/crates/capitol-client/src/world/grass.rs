@@ -56,25 +56,40 @@ use flint_player::{ExtensionGpu, GrassConfig, GrassGround, GrassHeight, GroundFi
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Texels along each side of the mask. Over its 1360 m that's about
-/// 0.39 m a texel: finer than the narrowest trail (0.6 m) and its verge.
-/// (3072 over 1200 m before the world grew, #308.)
-pub const MASK_SIZE: usize = 3480;
+/// The mask's texel, in server units: about 0.39 m, finer than the
+/// narrowest trail (0.6 m) and its verge. It's fixed, and the mask's size
+/// follows the world's (PV2, #458): 87 texels to 340 units is the 3480
+/// over 1360 m the 13600 world has had since it grew (#308; 3072 over
+/// 1200 m before).
+const MASK_TEXEL: f64 = 340.0 / 87.0;
+
+/// Texels along each side of the mask: 3480 for the 13600 world, and 4248
+/// for a 16600 one.
+pub const MASK_SIZE: usize = texels(2.0 * GRASS_EDGE, MASK_TEXEL);
 
 /// How far the grass reaches from the centre, in server units: the world's
 /// edge. The mask is the square round it.
 const GRASS_EDGE: f64 = WILDERNESS_OUTER_RADIUS;
 
+/// How many of `texel` span `side`, to the nearest.
+const fn texels(side: f64, texel: f64) -> usize {
+    (side / texel).round() as usize
+}
+
+/// The spacing of the heights the blades stand on, in server units: about
+/// 0.59 m, fixed like [`MASK_TEXEL`] (58 to 340 units is the 13600 world's
+/// 2320, #308; 2048 over 1200 m before).
+const HEIGHT_STEP: f64 = 340.0 / 58.0;
+
 /// Heights along each side of the grid the blades stand on, over the
-/// mask's square: about 0.59 m apart. The engine stands each blade on the
+/// mask's square: 2320 for the 13600 world. The engine stands each blade on the
 /// blend of the four round it (Flint ADR 0098, #228), which keeps 99% of
 /// blades within 2 cm of the land and the worst, on the rough ground high
 /// in the ranges, within 0.22 m (`blades_stand_on_the_land`). A grid at
 /// the land's own metre would cost a third as much (14 ms against 40, once
 /// a terrain), but its points fall between the land's, which smooths the
-/// sharpest ground: 5 cm and 0.48 m. (2048 over 1200 m before the world
-/// grew, #308.)
-pub const HEIGHTS: usize = 2320;
+/// sharpest ground: 5 cm and 0.48 m.
+pub const HEIGHTS: usize = texels(2.0 * GRASS_EDGE, HEIGHT_STEP);
 
 /// Where the grass gives way in the wilds: the slopes (rise over run) over
 /// which it thins out, the heights (m) over which the scree takes it, and
@@ -902,6 +917,15 @@ mod tests {
     use capitol_protocol::terrain::WaterRing;
     use std::path::Path;
     use std::sync::OnceLock;
+
+    #[test]
+    fn the_mask_and_heights_follow_the_world_at_a_fixed_texel() {
+        // The 13600 world keeps the sizes it had (#308), so its grass and
+        // captures don't move; a 16600 one (PV2) gets more of the same texel.
+        assert_eq!((texels(13600.0, MASK_TEXEL), texels(13600.0, HEIGHT_STEP)), (3480, 2320));
+        assert_eq!((texels(16600.0, MASK_TEXEL), texels(16600.0, HEIGHT_STEP)), (4248, 2832));
+        assert_eq!(MASK_SIZE, texels(capitol_protocol::rules::WORLD_SIZE, MASK_TEXEL));
+    }
 
     /// Coarser than the game's, to keep the tests quick; still under a
     /// metre a texel.

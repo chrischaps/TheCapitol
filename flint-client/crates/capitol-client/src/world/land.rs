@@ -33,12 +33,16 @@ use std::sync::{Arc, RwLock};
 pub const TEXEL: f64 = 10.0;
 /// Quads along a chunk's side (`land_mesh`), and chunks along the field's.
 pub const CHUNK: usize = 64;
-pub const CHUNKS: usize = 26;
+/// As few as reach [`OUTER`] either side of the centre, from the world's
+/// size (PV2, #458): 26 for the 13600 world (24 before it grew, #308), and
+/// 31 for a 16600 one.
+pub const CHUNKS: usize = (2.0 * OUTER / (CHUNK as f64 * TEXEL)).ceil() as usize;
 /// Samples along the field's side.
 pub const SAMPLES: usize = CHUNK * CHUNKS + 1;
-/// Half the field's side, in server units: 8320, past [`OUTER`] (8200 since
-/// the world grew to 13600, #308; it was 24 chunks, 7680, before).
+/// Half the field's side, in server units: 8320 for the 13600 world, past
+/// [`OUTER`] (8200).
 pub const HALF: f64 = (CHUNK * CHUNKS) as f64 * TEXEL * 0.5;
+const _: () = assert!(HALF >= OUTER && HALF - OUTER < CHUNK as f64 * TEXEL);
 
 /// Where the land starts: [`SEAM`] inside r3150, where the wild water's
 /// courses stop (the hydrology's inner rim, `rules::WATER_INNER_RADIUS`), so

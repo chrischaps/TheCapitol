@@ -292,6 +292,12 @@ fn bring_to(points: &mut Vec<P>, seg: usize, x: P) {
 /// between a picked road and any other gets a vertex in both.
 pub(crate) fn weld_junctions(roads: &mut [RoadSegment], weld: impl Fn(&RoadSegment) -> bool) {
     let picked: Vec<usize> = (0..roads.len()).filter(|&i| weld(&roads[i])).collect();
+    // Each road's box, kept as its points change. A road whose box is out of
+    // reach of an end, or doesn't meet another road's box, can't be welded
+    // to it, so it's passed over without walking its segments (#458). The
+    // welds are the same to the bit: the boxes only skip roads that the
+    // tests below would have turned down.
+    let mut boxes: Vec<(P, P)> = roads.iter().map(|r| bounds(&r.points)).collect();
 
     // Ends onto the roads they stop at.
     for &i in &picked {
@@ -310,6 +316,13 @@ pub(crate) fn weld_junctions(roads: &mut [RoadSegment], weld: impl Fn(&RoadSegme
                 if k == i || other.points.len() < 2 {
                     continue;
                 }
+                // Farther from the box than the reach (by a unit, for the
+                // rounding in `nearest_on`) is farther from every segment.
+                let (lo, hi) = boxes[k];
+                let reach = other.width / 2.0 + JOIN_REACH + 1.0;
+                if end.0 < lo.0 - reach || end.0 > hi.0 + reach || end.1 < lo.1 - reach || end.1 > hi.1 + reach {
+                    continue;
+                }
                 if let Some((seg, q, d)) = nearest_on(&other.points, end) {
                     let reach = other.width / 2.0 + JOIN_REACH;
                     if d <= reach && best.is_none_or(|b| d < b.3) {
@@ -322,6 +335,8 @@ pub(crate) fn weld_junctions(roads: &mut [RoadSegment], weld: impl Fn(&RoadSegme
                 let pts = &mut roads[i].points;
                 pts[end_idx] = v;
                 *pts = dedupe(pts);
+                boxes[k] = bounds(&roads[k].points);
+                boxes[i] = bounds(&roads[i].points);
             }
         }
     }
@@ -335,9 +350,17 @@ pub(crate) fn weld_junctions(roads: &mut [RoadSegment], weld: impl Fn(&RoadSegme
                 if k == i || (k < i && picked.contains(&k)) {
                     continue;
                 }
+                // `first_unjoined` looks only at the segments of k in i's
+                // box, and there are none when the boxes don't meet.
+                let ((alo, ahi), (blo, bhi)) = (boxes[i], boxes[k]);
+                if !boxes_meet(alo, ahi, blo, bhi, 0.0) {
+                    continue;
+                }
                 while let Some((si, sk, x)) = first_unjoined(&roads[i].points, &roads[k].points) {
                     let v = insert_vertex(&mut roads[k].points, sk, x);
                     bring_to(&mut roads[i].points, si, v);
+                    boxes[k] = bounds(&roads[k].points);
+                    boxes[i] = bounds(&roads[i].points);
                     fixed = true;
                 }
             }

@@ -404,6 +404,60 @@ fn a_shot_lets_go_with_what_it_framed_still_in_frame() {
     );
 }
 
+#[test]
+fn each_fixed_view_frames_the_zone_its_name_says() {
+    // The `--view` shots are fixed in metres, so moving the rings (PV2's
+    // flip, #459) can leave one framing the wrong zone (#458). A from-
+    // view (and the range, on a summit) stands in its zone; a close view
+    // looks at its zone, from it or the ring next to it; the bridge looks
+    // at the inner canal's south crossing from its quay.
+    let rig = Rig::load();
+    let zone_at = |p: &[f64]| {
+        let [x, y] = crate::coords::to_server(p[0] as f32, p[2] as f32);
+        Zone::from_position(x, y)
+    };
+    let stands = [
+        ("from-urban", Zone::Urban),
+        ("from-suburban", Zone::Suburban),
+        ("from-rural", Zone::Rural),
+        ("from-wilderness", Zone::Wilderness),
+        ("range", Zone::Wilderness),
+    ];
+    let looks = [
+        ("suburb", Zone::Suburban),
+        ("urban", Zone::Urban),
+        ("capitol", Zone::Capitol),
+        ("crown", Zone::Capitol),
+    ];
+    let shot = |view: &str| {
+        let shot: Map = rig.call("view_shot", (view.to_string(),));
+        let get = |k: &str| shot[k].clone().into_typed_array::<f64>().unwrap();
+        (get("pos"), get("at"))
+    };
+    for (view, zone) in stands {
+        let (pos, _) = shot(view);
+        assert_eq!(zone_at(&pos), zone, "--view {view} stands at {pos:?}");
+        assert!(
+            (pos[0] * pos[0] + pos[2] * pos[2]).sqrt() < WORLD_R,
+            "--view {view} stands off the world"
+        );
+    }
+    for (view, zone) in looks {
+        let (pos, at) = shot(view);
+        assert_eq!(zone_at(&at), zone, "--view {view} looks at {at:?}");
+        let rings = zone_at(&pos).ring_order().abs_diff(zone.ring_order());
+        assert!(rings <= 1, "--view {view} stands {rings} rings from {zone:?}, at {pos:?}");
+    }
+    // The bridge: the inner canal's crossing at server angle 90 (south).
+    let canal = capitol_protocol::rules::TRADE_OUTER_RADIUS;
+    let [bx, bz] = crate::coords::polar_to_world(canal, 90.0);
+    let (pos, at) = shot("bridge");
+    for (what, p) in [("stands", &pos), ("looks", &at)] {
+        let d = ((p[0] - bx as f64).powi(2) + (p[2] - bz as f64).powi(2)).sqrt();
+        assert!(d < 10.0, "--view bridge {what} {d:.1} m from the crossing");
+    }
+}
+
 /// E3.13: at the near end the camera stands about 3 m behind you and 2 m
 /// up, nearly level, a little to your right, looking past you at chest
 /// height. You're in frame, left of the middle, and the street ahead fills

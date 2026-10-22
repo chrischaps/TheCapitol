@@ -34,7 +34,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
 use capitol_protocol::fmath::StableMath;
-use capitol_protocol::land::{height_at, LandParams};
+use capitol_protocol::land::{height_at, LandParams, Relief};
 use capitol_protocol::terrain::{Ford, Lake, Mouth, RoadSegment, WaterCourse, WaterPoint};
 
 /// The grid's cell, in world units.
@@ -263,6 +263,7 @@ impl Grid {
         let n = (rings.size / CELL).round() as usize;
         let mut h = vec![f64::NAN; n * n];
         let mut route = vec![f64::NAN; n * n];
+        let relief = Relief::new(land);
         for j in 0..n {
             for i in 0..n {
                 let (x, y) = centre(i, j);
@@ -271,7 +272,7 @@ impl Grid {
                     continue;
                 }
                 let c = j * n + i;
-                h[c] = height_at(x, y, land);
+                h[c] = relief.height(x, y);
                 route[c] = h[c];
                 let w = rings.plain_weight(r);
                 if w > 0.0 {

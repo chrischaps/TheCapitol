@@ -186,7 +186,8 @@ fn slide(from: (f64, f64), to: (f64, f64), obstacles: &Obstacles, near: &[Segmen
 /// Whether every sampled point of the edge `a`..`b` is clear.
 fn edge_clear(a: (f64, f64), b: (f64, f64), obstacles: &Obstacles, near: &[Segment]) -> bool {
     let n = (dist(a, b) / SAMPLE_STEP).ceil().max(1.0) as usize;
-    (0..=n).all(|k| !obstacles.blocked(lerp(a, b, k as f64 / n as f64), near))
+    let sample = |k: usize, _: usize| lerp(a, b, k as f64 / n as f64);
+    !obstacles.any_blocked(near, &sample, (0, n), (0, 0))
 }
 
 /// Whether every sampled point of the lot, on its edges and across it, is clear.
@@ -201,16 +202,84 @@ fn clear(corners: &[(f64, f64); 4], obstacles: &Obstacles, near: &[Segment]) -> 
         (depth / (SAMPLE_STEP * 2.0)).ceil().max(1.0) as usize,
         (width / (SAMPLE_STEP * 2.0)).ceil().max(1.0) as usize,
     );
-    for i in 1..nd {
+    if nd < 2 || nw < 2 {
+        return true;
+    }
+    let sample = |i: usize, j: usize| {
         let v = i as f64 / nd as f64;
         let (l, r) = (lerp(corners[0], corners[3], v), lerp(corners[1], corners[2], v));
-        for j in 1..nw {
-            if obstacles.blocked(lerp(l, r, j as f64 / nw as f64), near) {
-                return false;
-            }
+        lerp(l, r, j as f64 / nw as f64)
+    };
+    !obstacles.any_blocked(near, &sample, (1, nd - 1), (1, nw - 1))
+}
+
+/// Slack for rounding in [`Obstacles::any_blocked`]'s bounds, in world
+/// units: far more than a sample's rounding (about 1e-11 at these
+/// coordinates), far less than [`TOUCH`].
+const BOUND_SLACK: f64 = 1e-6;
+
+impl Obstacles {
+    /// Whether any sample `at(i, j)`, for `i` in `is` and `j` in `js` (both
+    /// inclusive), is [`blocked`](Self::blocked): the same answer as asking
+    /// of every one in turn, for a fraction of the work (#458).
+    ///
+    /// `at` must be bilinear in (i, j), as a lot's samples are (lerps of
+    /// lerps), or linear, as an edge's are. Then every sample of a block of
+    /// them lies in the hull of the block's four corner samples, so within
+    /// `reach` of their middle, and an obstacle farther than that from the
+    /// middle can't block any of them. A block drops those and splits in two
+    /// until none are left, or it's one sample, which is asked as `blocked`
+    /// asks it. So the clearing is unchanged to the bit: only obstacles that
+    /// provably miss a sample, with [`BOUND_SLACK`] to spare, go unasked.
+    fn any_blocked(
+        &self,
+        near: &[Segment],
+        at: &dyn Fn(usize, usize) -> (f64, f64),
+        is: (usize, usize),
+        js: (usize, usize),
+    ) -> bool {
+        let near: Vec<&Segment> = near.iter().collect();
+        self.blocked_in(&near, &self.bands, at, is, js)
+    }
+
+    fn blocked_in(
+        &self,
+        near: &[&Segment],
+        bands: &[(f64, f64)],
+        at: &dyn Fn(usize, usize) -> (f64, f64),
+        is: (usize, usize),
+        js: (usize, usize),
+    ) -> bool {
+        if is == (is.0, is.0) && js == (js.0, js.0) {
+            // As `blocked`, over what's left.
+            let p = at(is.0, js.0);
+            let r = ((p.0 - self.center.0).powi(2) + (p.1 - self.center.1).powi(2)).sqrt();
+            return bands.iter().any(|&(lo, hi)| r > lo + TOUCH && r < hi - TOUCH)
+                || near.iter().any(|s| distance_to_segment(p, s.a, s.b) < s.half - TOUCH);
+        }
+        let corners = [at(is.0, js.0), at(is.1, js.0), at(is.0, js.1), at(is.1, js.1)];
+        let mid = (
+            corners.iter().map(|c| c.0).sum::<f64>() / 4.0,
+            corners.iter().map(|c| c.1).sum::<f64>() / 4.0,
+        );
+        let reach = corners.iter().map(|&c| dist(mid, c)).fold(0.0, f64::max) + BOUND_SLACK;
+        let r = dist(mid, self.center);
+        let bands: Vec<(f64, f64)> =
+            bands.iter().copied().filter(|&(lo, hi)| r + reach > lo + TOUCH && r - reach < hi - TOUCH).collect();
+        let near: Vec<&Segment> =
+            near.iter().copied().filter(|s| distance_to_segment(mid, s.a, s.b) - reach < s.half - TOUCH).collect();
+        if bands.is_empty() && near.is_empty() {
+            return false;
+        }
+        // Split the longer way.
+        if is.1 - is.0 >= js.1 - js.0 {
+            let m = (is.0 + is.1) / 2;
+            self.blocked_in(&near, &bands, at, (is.0, m), js) || self.blocked_in(&near, &bands, at, (m + 1, is.1), js)
+        } else {
+            let m = (js.0 + js.1) / 2;
+            self.blocked_in(&near, &bands, at, is, (js.0, m)) || self.blocked_in(&near, &bands, at, is, (m + 1, js.1))
         }
     }
-    true
 }
 
 /// Pull one lot clear of the obstacles, or `None` if it can't be.

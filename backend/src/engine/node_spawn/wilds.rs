@@ -28,7 +28,7 @@
 use std::collections::VecDeque;
 
 use capitol_protocol::fmath::StableMath;
-use capitol_protocol::land::{height_at, massif_at, slope_at};
+use capitol_protocol::land::{height_at, massif_at, slope_at, Relief};
 use capitol_protocol::rules::ground::{self, Footing, CLIFF_SLOPE};
 use capitol_protocol::rules::resources::Cluster;
 use capitol_protocol::rules::{
@@ -131,13 +131,13 @@ impl<'a> Land<'a> {
     /// Heights at every cell from just inside the rural edge out, and the
     /// slope there from its neighbours' (central differences over two cells).
     fn sample(&mut self) {
-        let land = &self.terrain.land;
+        let relief = Relief::new(&self.terrain.land);
         let (lo, hi) = (self.frame().rural_edge() - 2.0 * CELL, self.frame().world_edge() + 2.0 * CELL);
         for k in 0..self.cells.len() {
             let (x, y) = self.centre(k);
             let r = self.radius(x, y);
             if (lo..=hi).contains(&r) {
-                self.cells[k].height = height_at(x, y, land) as f32;
+                self.cells[k].height = relief.height(x, y) as f32;
                 self.cells[k].sampled = true;
             }
         }
