@@ -502,7 +502,7 @@ impl Maker {
                 Ok(_) => self.stats.placed += 1,
                 // Short of Strands or units for now: the next look tries again
                 Err(BotError::Rest { source, .. }) if source.status().is_some_and(|s| s < 500) => {
-                    bot.say(format!("{item}: {source}"));
+                    bot.log(format!("{item}: {source}"));
                 }
                 Err(e) => return Err(e),
             }

@@ -1,12 +1,14 @@
 //! Citizens meet people (C1.5): a citizen answers the trades it's asked to,
 //! and asks a citizen nearby for one (#295).
 //!
-//! There's no chat, so a citizen speaks through its side of the trade
-//! window:
+//! A citizen deals through its side of the trade window, and says a line
+//! from its phrasebook as it acts (Commons S1.6, [`phrases`](super::phrases)):
 //!
 //! 1. **It takes the request** and stands where it is: a citizen's walks stop
 //!    for a request ([`Bot::answer_trades`]), because the server drops one
-//!    after 30 s and executes a trade only within range.
+//!    after 30 s and executes a trade only within range. Once the window is
+//!    open it steps over to within earshot ([`HEARD`](rules::talk::HEARD)),
+//!    since a trade is asked from further off than a word carries.
 //! 2. **It lays out its wares**: everything it holds of what its role makes,
 //!    if it can put a worth to it. That's the shop window.
 //! 3. **It weighs what they put up**, once they've stopped changing it for
@@ -47,6 +49,7 @@ use super::decide::rules::worth_in;
 use super::decide::log::Fate;
 use super::decide::{Choice, Held, Lot, Mind, Place, Question, Quote, Situation, Span, When, Who};
 use super::persona::trade_of;
+use super::phrases::Occasion;
 use crate::bot::{Bot, BotError, TRADE_THINK};
 use crate::sim::plan::Holdings;
 use crate::sim::{Role, LOT, MARKET_ITEMS, SELL_AT};
@@ -63,6 +66,9 @@ const OPENING: Duration = Duration::from_secs(5);
 const ASKED_PATIENCE: Duration = Duration::from_secs(15);
 /// How many of the citizens nearby an asker thinks of asking: the nearest.
 const ASK_AMONG: usize = 3;
+/// How close an answering citizen steps to whoever asked it, so its words
+/// carry: well within [`HEARD`](rules::talk::HEARD).
+const EARSHOT: f64 = 15.0;
 
 /// The books a citizen watches, as it sees them: best bid and ask, and the
 /// last trade, of each of [`MARKET_ITEMS`].
@@ -361,8 +367,10 @@ pub fn answer(bot: &mut Bot, mind: &mut Mind, me: &Answering) -> Result<Met, Bot
     let Some(trade_id) = bot.state().open_trade().map(|o| o.trade_id) else {
         return Ok(ended(&partner, "it never opened"));
     };
-    bot.say(format!("trading with {partner}"));
+    bot.log(format!("trading with {partner}"));
+    come_over(bot)?;
     face_partner(bot)?;
+    speak_to_partner(bot, Occasion::Opening);
     let wares = window(bot.state().inventory(), me.product, &quotes(bot.state()));
     if !wares.is_empty() {
         let (items, strands) = wares.offer();
@@ -402,7 +410,8 @@ pub fn ask(bot: &mut Bot, mind: &mut Mind, me: &Answering, them: Uuid, asking: &
     if let Err(refused) = bot.trade_act(|s, now| s.trade_initiate(now, them)) {
         return Ok(ended(&partner, &refused.to_string()));
     }
-    bot.say(format!("asking {partner} to trade"));
+    bot.log(format!("asking {partner} to trade"));
+    bot.speak(Occasion::Opening, them);
     // They answer at their next step, within the request's life
     let wait = Duration::from_secs(rules::TRADE_REQUEST_TTL_SECS + 5);
     let seen = match bot.until("an answer", wait, |s, _| !matches!(s.trade(), Trade::Requested { .. })) {
@@ -472,6 +481,33 @@ fn some_of(inventory: Option<&Container>, item: &str, quantity: i32) -> Side {
     side
 }
 
+/// Steps over to within [`EARSHOT`] of whoever the open trade is with, if
+/// they stand further off, so what it says reaches them. A walk it can't
+/// make is no matter: the trade goes on from where it stands.
+fn come_over(bot: &mut Bot) -> Result<(), BotError> {
+    let Some((x, y)) = bot.state().open_trade().and_then(|o| bot.state().player(o.partner_id)).map(|p| (p.x, p.y))
+    else {
+        return Ok(());
+    };
+    let (mx, my) = bot.position();
+    let (dx, dy) = (mx - x, my - y);
+    let d = dx.hypot(dy);
+    if d <= rules::talk::HEARD * 0.8 {
+        return Ok(());
+    }
+    match bot.walk_to(x + dx / d * EARSHOT, y + dy / d * EARSHOT) {
+        Ok(()) | Err(BotError::Blocked { .. } | BotError::Timeout { .. }) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Says the line for `occasion` to whoever the open trade is with.
+fn speak_to_partner(bot: &mut Bot, occasion: Occasion) {
+    if let Some(partner) = bot.state().open_trade().map(|o| o.partner_id) {
+        bot.speak(occasion, partner);
+    }
+}
+
 /// Turns to whoever the open trade is with, as anyone at a trade stands
 /// (C2.1). Before anything is offered, so the turn's frames carry no news
 /// of the trade. Two citizens in a trade turn to each other.
@@ -514,7 +550,7 @@ fn haggle(
                     changed = Instant::now()
                 }
                 StateEvent::Trade(TradeEvent::Executed { trade_id: id }) if *id == trade_id => {
-                    bot.say(format!("traded with {partner}"));
+                    bot.log(format!("traded with {partner}"));
                     let strands = last.as_ref().map_or(0, |o| o.theirs.strands - o.mine.strands);
                     return Ok(Met::Traded { partner, strands });
                 }
@@ -549,20 +585,26 @@ fn haggle(
             mind.settle(mark, &s.holdings, |_| Fate::Superseded);
             let ruling = mind.ask(&s);
             let side = match ruling.decision.map(|d| (d, s.choice(&d).clone())) {
-                Some((_, Choice::Accept)) => Side::of(&open.mine),
+                Some((_, Choice::Accept)) => {
+                    bot.speak(Occasion::Accepting, open.partner_id);
+                    Side::of(&open.mine)
+                }
                 Some((d, Choice::Counter { .. })) => {
                     deal.countered = true;
+                    bot.speak(Occasion::Countering, open.partner_id);
                     trim(&open.mine, d.price.unwrap_or(0), &market)
                 }
                 Some((d, Choice::Pay { .. })) => {
                     deal.paid_for = Some(lots(&open.theirs));
+                    bot.speak(Occasion::Accepting, open.partner_id);
                     Side {
                         lines: Vec::new(),
                         strands: d.price.unwrap_or(0),
                     }
                 }
                 _ => {
-                    bot.say(format!("declining {partner}'s offer"));
+                    bot.log(format!("declining {partner}'s offer"));
+                    bot.speak(Occasion::Declining, open.partner_id);
                     let _ = bot.trade_act(|s, now| s.trade_cancel(now));
                     return Ok(Met::Declined { partner });
                 }

@@ -46,10 +46,11 @@ use capitol_protocol::rest::{
 };
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::terrain::{Landmark, LandmarkKind};
-use capitol_protocol::ws::{ClientMessage, ServerMessage};
+use capitol_protocol::ws::{Channel, ClientMessage, ServerMessage};
 use uuid::Uuid;
 
 use crate::bazaar;
+use crate::citizen::phrases::{self, Moment, Occasion, Voice};
 use crate::catalog::container_type;
 use crate::net::{
     auth_error_is_final, ConnectionState, Net, NetConfig, NetEvent, NetStats, RestError, RestRequest, RestResponse, Tag,
@@ -99,6 +100,8 @@ const GREET_RANGE: f64 = 30.0;
 const GREET_MOMENT: Duration = Duration::from_secs(2);
 /// How long before it stops for the same person again.
 const GREET_AGAIN: Duration = Duration::from_secs(120);
+/// How often [`Bot::hail_citizens`] hails one.
+const HAIL_EVERY: Duration = Duration::from_secs(20);
 /// The step [`Bot::face`] takes to turn: 15 cm, under a tick's walk, but
 /// enough for a client to see which way it went.
 const FACE_STEP: f64 = 1.5;
@@ -277,6 +280,12 @@ pub struct Bot {
     answers_trades: bool,
     /// Walks pause beside a person ([`Bot::greet_people`]): whom, and when.
     greets: Option<HashMap<Uuid, Instant>>,
+    /// What it says, and how often ([`Bot::speak_with`]).
+    voice: Option<Voice>,
+    /// Prints the talk it hears ([`Bot::print_talk`]).
+    prints_talk: bool,
+    /// Hails citizens by name ([`Bot::hail_citizens`]): when it last did.
+    hails: Option<Option<Instant>>,
 }
 
 impl Bot {
@@ -298,7 +307,7 @@ impl Bot {
                 });
                 match bot.call("register", register)? {
                     RestResponse::Auth(auth) => {
-                        bot.say(format!("registered {}", account.email));
+                        bot.log(format!("registered {}", account.email));
                         auth
                     }
                     other => return Err(unexpected("register", &other)),
@@ -357,6 +366,9 @@ impl Bot {
             ended: None,
             answers_trades: false,
             greets: None,
+            voice: None,
+            prints_talk: false,
+            hails: None,
         })
     }
 
@@ -372,7 +384,7 @@ impl Bot {
             self.name = me.name.clone();
         }
         let (x, y) = self.position();
-        self.say(format!("in the world at ({x:.0}, {y:.0})"));
+        self.log(format!("in the world at ({x:.0}, {y:.0})"));
         Ok(())
     }
 
@@ -387,7 +399,7 @@ impl Bot {
                 self.state
                     .apply_rest(&RestResponse::Subscription(subscription));
                 if let Some(until) = subscription.until {
-                    self.say(format!(
+                    self.log(format!(
                         "subscribed until {}",
                         until.format("%-d %b %Y %H:%M UTC")
                     ));
@@ -485,7 +497,7 @@ impl Bot {
                 if tag < crate::poll::FIRST_TAG {
                     self.replies.push((tag, result));
                 } else if let Err(e) = result {
-                    self.say(format!("a refetch failed: {e}"));
+                    self.log(format!("a refetch failed: {e}"));
                 }
             }
         }
@@ -495,6 +507,20 @@ impl Bot {
         if let Some(journal) = &mut self.journal {
             journal.extend(changes.iter().filter(|c| journaled(c)).cloned());
         }
+        if self.voice.is_some() {
+            self.answer_talk(&changes);
+        }
+        if self.prints_talk {
+            for change in &changes {
+                if let StateEvent::Said { name, citizen, channel, text, .. } = change {
+                    let mark = if *citizen { " (citizen)" } else { "" };
+                    self.log(format_args!("hears {name}{mark} on {channel:?}: \"{text}\""));
+                }
+            }
+        }
+        if self.hails.is_some() {
+            self.hail();
+        }
         // Nobody plays the avatar: pick it up (E0.8). A bot on a key is
         // refused while one of the player's own clients is connected, and
         // hears `held_by: None` again when the last one goes.
@@ -502,7 +528,7 @@ impl Bot {
             matches!(c, StateEvent::Presence(p) if !p.yours && p.held_by.is_none())
         });
         if free {
-            self.say("nobody is playing the avatar; taking it");
+            self.log("nobody is playing the avatar; taking it");
             self.net.ws(ClientMessage::ClaimPresence);
         }
         // What the market store wants said: watching, and asking again
@@ -530,7 +556,7 @@ impl Bot {
             NetEvent::Connection(ConnectionState::Reconnecting { reason, .. })
                 if self.live && self.dropped.is_none() =>
             {
-                self.say(format!("lost the server ({reason}); reconnecting"));
+                self.log(format!("lost the server ({reason}); reconnecting"));
                 self.dropped = Some(reason.clone());
             }
             NetEvent::Connection(ConnectionState::AuthFailed { message }) => {
@@ -620,8 +646,8 @@ impl Bot {
         self.last_position = None;
         let (x, y) = self.position();
         match self.state.presence() {
-            Some(p) if !p.yours => self.say("back, watching: someone else holds the avatar"),
-            _ => self.say(format!("back in the world at ({x:.0}, {y:.0})")),
+            Some(p) if !p.yours => self.log("back, watching: someone else holds the avatar"),
+            _ => self.log(format!("back in the world at ({x:.0}, {y:.0})")),
         }
         Ok(())
     }
@@ -741,14 +767,14 @@ impl Bot {
             // A drop or a refused key stops the walk like any other call
             Err(e @ (BotError::Offline(_) | BotError::Revoked(_) | BotError::AuthFailed(_))) => return Err(e),
             Err(e) => {
-                self.say(format!("no terrain to plan the walk on ({e}); going straight"));
+                self.log(format!("no terrain to plan the walk on ({e}); going straight"));
                 None
             }
         };
         let legs = match walks.as_ref().map(|w| w.plan(from, (x, y))) {
             Some(Ok(legs)) => legs,
             Some(Err(NoWay::Unreachable)) => {
-                self.say(format!("no way to ({x:.0}, {y:.0})"));
+                self.log(format!("no way to ({x:.0}, {y:.0})"));
                 return Err(BotError::Blocked {
                     reason: NO_WAY.into(),
                     x: from.0,
@@ -756,7 +782,7 @@ impl Bot {
                 });
             }
             Some(Err(NoWay::Stranded)) => {
-                self.say(format!("no way out from ({:.0}, {:.0}); going straight", from.0, from.1));
+                self.log(format!("no way out from ({:.0}, {:.0}); going straight", from.0, from.1));
                 vec![(x, y)]
             }
             None => vec![(x, y)],
@@ -855,6 +881,7 @@ impl Bot {
         let (px, py) = self.position();
         self.send(ClientMessage::Move { x: px, y: py });
         self.face(x, y)?;
+        self.speak(Occasion::Greeting, id);
         let end = Instant::now() + GREET_MOMENT;
         let answers = self.answers_trades;
         self.until("a moment", GREET_MOMENT + FRAME * 4, |s, _| {
@@ -949,7 +976,7 @@ impl Bot {
         // Stop short of the moat, on the line in.
         let along = to_go / (to_go + SCOUT_STOP);
         let stop = (x + (cx - x) * along, y + (cy - y) * along);
-        self.say(format!(
+        self.log(format!(
             "no {item_type} in sight; scouting toward the Capitol"
         ));
         self.send(ClientMessage::Move {
@@ -976,7 +1003,7 @@ impl Bot {
                 if let Some(node) = self.nearest_node(item_type) {
                     // Stop here; the walk to the node replaces the scouting move.
                     let (x, y) = self.position();
-                    self.say(format!(
+                    self.log(format!(
                         "found {} at ({:.0}, {:.0}), {:.0} away",
                         node.resource_type,
                         node.x,
@@ -1067,11 +1094,11 @@ impl Bot {
             let node = self.scout(item_type)?;
             match self.extract(&node) {
                 Ok(item) if item.quantity == 0 => {
-                    self.say(format!("came away from the {} with nothing", node.resource_type));
+                    self.log(format!("came away from the {} with nothing", node.resource_type));
                     yields.push(item);
                 }
                 Ok(item) => {
-                    self.say(format!(
+                    self.log(format!(
                         "extracted {} {} (quality {}); holding {}",
                         item.quantity,
                         item.item_name,
@@ -1081,7 +1108,7 @@ impl Bot {
                     yields.push(item);
                 }
                 Err(BotError::Refused { node_id, reason }) => {
-                    self.say(format!("node {node_id} refused ({reason}); trying another"));
+                    self.log(format!("node {node_id} refused ({reason}); trying another"));
                 }
                 Err(e) => return Err(e),
             }
@@ -1500,7 +1527,7 @@ impl Bot {
     pub fn place_order(&mut self, order: PlaceOrder) -> Result<MarketOrder, BotError> {
         match self.call("placing an order", RestRequest::PlaceOrder(order))? {
             RestResponse::Order(order) => {
-                self.say(format!(
+                self.log(format!(
                     "{} {} {} at {} each",
                     order.side.as_str(),
                     order.quantity_total,
@@ -1517,7 +1544,7 @@ impl Bot {
     pub fn cancel_order(&mut self, order_id: Uuid) -> Result<MarketOrder, BotError> {
         match self.call("cancelling an order", RestRequest::CancelOrder { order_id })? {
             RestResponse::Order(order) => {
-                self.say(format!("cancelled {} {}", order.side.as_str(), order.item_type));
+                self.log(format!("cancelled {} {}", order.side.as_str(), order.item_type));
                 Ok(order)
             }
             other => Err(unexpected("cancelling an order", &other)),
@@ -1634,7 +1661,7 @@ impl Bot {
         };
         match self.call("renting a stall", request)? {
             RestResponse::Shop(shop) => {
-                self.say(format!("renting {stall_id} as {} for {days} days", shop.name));
+                self.log(format!("renting {stall_id} as {} for {days} days", shop.name));
                 Ok(shop)
             }
             other => Err(unexpected("renting a stall", &other)),
@@ -1653,7 +1680,7 @@ impl Bot {
         let before = kind.as_deref().map_or(0, |k| held(self, k));
         match self.call("stocking our stall", RestRequest::Stock(listing))? {
             RestResponse::Listed(listing) => {
-                self.say(format!(
+                self.log(format!(
                     "listed {} {} at {} each",
                     listing.units.count(),
                     listing.item_type,
@@ -1719,7 +1746,7 @@ impl Bot {
         let before = kind.as_deref().map_or(0, |k| self.held(k));
         match self.call("buying at a stall", RestRequest::Buy { listing_id, request })? {
             RestResponse::Bought { purchase, .. } => {
-                self.say(format!(
+                self.log(format!(
                     "bought {} at {stall_id} for {}",
                     purchase.units.count(),
                     purchase.paid
@@ -1834,8 +1861,8 @@ impl Bot {
     ) -> Result<(), BotError> {
         let home = self.position();
         match near {
-            Some(name) => self.say(format!("wandering within {radius:.0} of {name}")),
-            None => self.say(format!(
+            Some(name) => self.log(format!("wandering within {radius:.0} of {name}")),
+            None => self.log(format!(
                 "wandering within {radius:.0} of ({:.0}, {:.0})",
                 home.0, home.1
             )),
@@ -1851,7 +1878,7 @@ impl Bot {
                     }
                     None => {
                         if !lost {
-                            self.say(format!("{name} isn't online; waiting here"));
+                            self.log(format!("{name} isn't online; waiting here"));
                             lost = true;
                         }
                         self.idle(Duration::from_secs(1))?;
@@ -1889,7 +1916,7 @@ impl Bot {
         deadline: Option<Instant>,
     ) -> Result<(), BotError> {
         use crate::state::{Trade, TradeEvent};
-        self.say(format!("trading with {name}"));
+        self.log(format!("trading with {name}"));
         let mut offered: Option<Uuid> = None;
         let mut thinking_since = Instant::now();
         let mut asked_at: Option<Instant> = None;
@@ -1904,14 +1931,14 @@ impl Bot {
                 match event {
                     TradeEvent::OfferChanged { .. } => thinking_since = now,
                     TradeEvent::Executed { .. } => {
-                        self.say("trade done");
+                        self.log("trade done");
                         offered = None;
                     }
                     TradeEvent::Cancelled { reason, .. } => {
-                        self.say(format!("trade cancelled: {reason}"));
+                        self.log(format!("trade cancelled: {reason}"));
                         offered = None;
                     }
-                    TradeEvent::Refused { reason, .. } => self.say(format!("refused: {reason}")),
+                    TradeEvent::Refused { reason, .. } => self.log(format!("refused: {reason}")),
                     _ => {}
                 }
             }
@@ -1922,7 +1949,7 @@ impl Bot {
             match trade {
                 Trade::Incoming { from, .. } if from == them => {
                     if let Ok(m) = self.state.trade_accept_request(now) {
-                        self.say("accepting their request");
+                        self.log("accepting their request");
                         self.send(m);
                     }
                 }
@@ -1935,7 +1962,7 @@ impl Bot {
                     if offered != Some(open.trade_id) {
                         offered = Some(open.trade_id);
                         let items = offer.items(self);
-                        self.say(format!(
+                        self.log(format!(
                             "offering {} stacks and {} Strands",
                             items.len(),
                             offer.strands
@@ -1952,7 +1979,7 @@ impl Bot {
                         && now.duration_since(thinking_since) >= TRADE_THINK
                     {
                         if let Ok(m) = self.state.trade_accept(now) {
-                            self.say("accepting");
+                            self.log("accepting");
                             self.send(m);
                         }
                     }
@@ -1986,7 +2013,7 @@ impl Bot {
                     {
                         asked_at = Some(now);
                         if let Ok(m) = self.state.trade_initiate(now, them) {
-                            self.say(format!("asking {name} to trade"));
+                            self.log(format!("asking {name} to trade"));
                             self.send(m);
                         }
                     }
@@ -2016,9 +2043,148 @@ impl Bot {
     }
 
     /// Prints `Name: message`, unless the bot is [`quiet`](Self::quiet).
-    pub fn say(&self, message: impl fmt::Display) {
+    pub fn log(&self, message: impl fmt::Display) {
         if !self.quiet {
             println!("{}: {message}", self.name);
+        }
+    }
+
+    /// Says `text` on `channel` (Commons S1.1), as it is.
+    pub fn say(&self, channel: Channel, text: impl Into<String>) {
+        let text = text.into();
+        self.log(format_args!("says \"{text}\""));
+        self.send(ClientMessage::Say { channel, text });
+    }
+
+    /// From now on the bot speaks (Commons S1.6), in `voice`'s words and
+    /// within its limits: it greets a person it stops beside
+    /// ([`greet_people`](Self::greet_people)), answers a person who names it
+    /// in a local line, thanks a buyer at its stall who stands near, and
+    /// says what its trades [`speak`](Self::speak). Off by default.
+    pub fn speak_with(&mut self, voice: Voice) {
+        self.voice = Some(voice);
+    }
+
+    /// Says the voice's line for `occasion` to `to`, out loud, if the bot has
+    /// a voice, plays its avatar here, and someone stands near enough to
+    /// hear; a greeting only once a game hour per person. True if it spoke.
+    pub fn speak(&mut self, occasion: Occasion, to: Uuid) -> bool {
+        if self.voice.is_none() || !self.heard() {
+            return false;
+        }
+        let (Some(name), Some(ms)) = (self.state.player(to).map(|p| p.name.clone()), self.state.server_time_ms()) else {
+            return false;
+        };
+        let moment = Moment::with(&name, to, Some(ms));
+        let now = Instant::now();
+        let Some(voice) = self.voice.as_mut() else {
+            return false;
+        };
+        let line = match occasion {
+            Occasion::Greeting => voice.greet(to, &moment, ms, now),
+            _ => voice.speak(occasion, &moment, now),
+        };
+        match line {
+            Some(line) => {
+                self.say(Channel::Local, line);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Someone besides the bot is near enough to hear a local line, and the
+    /// bot plays its avatar here (a watcher can't talk locally).
+    fn heard(&self) -> bool {
+        let Some(me) = self.state.local_player() else {
+            return false;
+        };
+        self.state.plays_here()
+            && self
+                .state
+                .players()
+                .values()
+                .any(|p| p.id != me.id && (p.x - me.x).hypot(p.y - me.y) <= rules::talk::HEARD)
+    }
+
+    /// From now on the bot prints every line of talk it hears, with
+    /// [`log`](Self::log): to watch citizens talk with no client (S1.6).
+    pub fn print_talk(&mut self, on: bool) {
+        self.prints_talk = on;
+    }
+
+    /// From now on the bot says hello by name to a citizen within earshot,
+    /// at most once a [`HAIL_EVERY`], to see them answer (S1.6).
+    pub fn hail_citizens(&mut self, on: bool) {
+        self.hails = on.then_some(None);
+    }
+
+    fn hail(&mut self) {
+        let now = Instant::now();
+        if self.hails.flatten().is_some_and(|at| now.duration_since(at) < HAIL_EVERY) {
+            return;
+        }
+        let Some(me) = self.state.local_player() else {
+            return;
+        };
+        let near = self.state.players().values().find(|p| {
+            p.citizen && p.id != me.id && (p.x - me.x).hypot(p.y - me.y) <= rules::talk::HEARD
+        });
+        if let Some(name) = near.map(|p| phrases::first_name(&p.name).to_string()) {
+            self.hails = Some(Some(now));
+            self.say(Channel::Local, format!("Hello, {name}!"));
+        }
+    }
+
+    /// What the voice hears in a frame's `changes`: a person naming it, a
+    /// sale at its stall. Then it says the answers that are due.
+    fn answer_talk(&mut self, changes: &[StateEvent]) {
+        let now = Instant::now();
+        let ms = self.state.server_time_ms();
+        let Some(me) = self.state.local_player().map(|p| (p.id, p.name.clone(), p.x, p.y)) else {
+            return;
+        };
+        let mut buyers = Vec::new();
+        for change in changes {
+            match change {
+                // A person, not a citizen: two citizens naming each other
+                // would never stop
+                StateEvent::Said {
+                    from,
+                    name,
+                    citizen: false,
+                    channel: Channel::Local,
+                    text,
+                    ..
+                } if *from != me.0 && phrases::names(text, &me.1) => {
+                    let mut moment = Moment::with(name, *from, ms);
+                    moment.heard = Some(text.clone());
+                    if let Some(voice) = self.voice.as_mut() {
+                        voice.spoken_to(*from, &moment, now);
+                    }
+                }
+                StateEvent::BazaarSale { buyer_name, .. } => buyers.push(buyer_name.clone()),
+                _ => {}
+            }
+        }
+        // A buyer standing by is thanked; one who bought from afar isn't
+        for buyer in buyers {
+            let near = self.state.players().values().find(|p| {
+                p.id != me.0 && p.name == buyer && (p.x - me.2).hypot(p.y - me.3) <= rules::talk::HEARD
+            });
+            if let Some(id) = near.map(|p| p.id) {
+                self.speak(Occasion::Sale, id);
+            }
+        }
+        let due = match self.voice.as_mut() {
+            Some(voice) if voice.has_due() => voice.due(now),
+            _ => return,
+        };
+        // Whoever spoke may have walked off: then nobody hears it
+        if self.heard() {
+            for line in due {
+                self.say(Channel::Local, line);
+            }
         }
     }
 
@@ -2273,6 +2439,36 @@ mod tests {
     }
 
     #[test]
+    fn a_voice_speaks_only_with_someone_in_earshot() {
+        use capitol_protocol::ws::PlayerPosition;
+        let (me, ada) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut bot = offline_bot(false);
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        bot.state.apply_ws(&ServerMessage::AuthOk {
+            player_id: me,
+            server_time_ms: now_ms,
+            subscription: Default::default(),
+            fees: Default::default(),
+            is_admin: false,
+        });
+        let apart = |d: f64| ServerMessage::Positions {
+            players: vec![
+                PlayerPosition { id: me, name: "Wren Cooper".into(), x: 6800.0, y: 6800.0, citizen: true },
+                PlayerPosition { id: ada, name: "Ada".into(), x: 6800.0 + d, y: 6800.0, citizen: false },
+            ],
+        };
+        bot.state.apply_ws(&apart(20.0));
+        assert!(!bot.speak(Occasion::Opening, ada), "a bot without a voice says nothing");
+        bot.speak_with(Voice::phrasebook(&Default::default(), 1));
+        bot.state.apply_ws(&apart(rules::talk::HEARD + 5.0));
+        assert!(!bot.speak(Occasion::Greeting, ada), "nobody in earshot");
+        bot.state.apply_ws(&apart(20.0));
+        assert!(bot.speak(Occasion::Greeting, ada));
+        assert!(!bot.speak(Occasion::Greeting, ada), "once a game hour");
+        assert!(bot.speak(Occasion::Opening, ada));
+    }
+
+    #[test]
     fn random_stays_in_the_unit_interval_and_moves() {
         let net = Net::spawn(NetConfig::with_base_url("http://127.0.0.1:9")).unwrap();
         let mut bot = Bot {
@@ -2295,6 +2491,9 @@ mod tests {
             ended: None,
             answers_trades: false,
             greets: None,
+            voice: None,
+            prints_talk: false,
+            hails: None,
         };
         let draws: Vec<f64> = (0..1000).map(|_| bot.random()).collect();
         assert!(draws.iter().all(|r| (0.0..1.0).contains(r)));

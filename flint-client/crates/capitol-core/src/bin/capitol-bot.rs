@@ -7,6 +7,7 @@
 //! capitol-bot --prefix trader --trade Chris --ask  # a trading partner for Chris
 //! capitol-bot --api-key cap_…          # the script, as the key's own player
 //! capitol-bot --subscribe 30 --wander             # a subscriber, for a month
+//! capitol-bot --wander --listen --hail          # among citizens, printing what they say (S1.6)
 //! capitol-bot --sim 20 --hours 2               # the economy sim (E2.7), with a report
 //! capitol-bot --prefix maker --market fiber,plank,iron_ingot --fund   # a market maker (E3.8)
 //! ```
@@ -38,6 +39,10 @@ FLAGS:
     --prefix <name>     Accounts are <name>1@bots.capitol.local and up, players
                         <Name>1 and up. Registered on first use. [default: bot]
     --wander            Stroll around instead of running the script
+    --at <x,y>          Walk here first, round the water
+    --listen            Print the talk the bot hears, local and Capitol
+    --hail              Say hello by name to a citizen within earshot, every
+                        20 s at most, to hear it answer (with --listen)
     --near <player>     Wander around this player, and follow them
     --radius <units>    How far a wanderer strays from where it started [default: 120]
     --seconds <s>       Stop wandering, or making a market, after this long
@@ -97,6 +102,9 @@ struct Options {
     accounts: usize,
     prefix: String,
     wander: bool,
+    at: Option<(f64, f64)>,
+    listen: bool,
+    hail: bool,
     near: Option<String>,
     radius: f64,
     seconds: Option<f64>,
@@ -120,6 +128,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         accounts: 1,
         prefix: "bot".into(),
         wander: false,
+        at: None,
+        listen: false,
+        hail: false,
         near: None,
         radius: 120.0,
         seconds: None,
@@ -161,6 +172,13 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
                 }
             }
             "--wander" => options.wander = true,
+            "--at" => {
+                let value = value()?;
+                let (x, y) = value.split_once(',').ok_or("--at takes x,y")?;
+                options.at = Some((number(&flag, x.trim())?, number(&flag, y.trim())?));
+            }
+            "--listen" => options.listen = true,
+            "--hail" => options.hail = true,
             "--near" => options.near = Some(value()?),
             "--radius" => options.radius = number(&flag, &value()?)?,
             "--seconds" => options.seconds = Some(number(&flag, &value()?)?),
@@ -298,6 +316,11 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
     if let Some(days) = options.subscribe {
         bot.subscribe(days)?;
     }
+    bot.print_talk(options.listen);
+    bot.hail_citizens(options.hail);
+    if let Some((x, y)) = options.at {
+        bot.walk_to(x, y)?;
+    }
     let deadline = options
         .seconds
         .map(|s| Instant::now() + Duration::from_secs_f64(s));
@@ -312,7 +335,7 @@ fn run(options: &Options, n: usize) -> Result<(), BotError> {
         bot.stay_up(deadline, |bot| bot.wander(options.radius, options.near.as_deref(), deadline))
     } else if let Some(want) = options.gather {
         bot.gather("fiber", want)?;
-        bot.say(format!("holding {want} fiber or more"));
+        bot.log(format!("holding {want} fiber or more"));
         Ok(())
     } else {
         println!("{}", bot.run_script()?);
@@ -329,8 +352,8 @@ const FUND_QUALITY: i32 = 50;
 fn make_market(bot: &mut Bot, config: &MakerConfig, fund: bool, deadline: Option<Instant>) -> Result<(), BotError> {
     if fund {
         match market_maker::fund(bot, config, FUND_STRANDS, FUND_QUALITY)? {
-            Some(granted) => bot.say(format!("funded: {} Strands, stock in the market box", granted.strands)),
-            None => bot.say("already funded"),
+            Some(granted) => bot.log(format!("funded: {} Strands, stock in the market box", granted.strands)),
+            None => bot.log("already funded"),
         }
     }
     let mut maker = Maker::new(config.clone());
@@ -338,12 +361,12 @@ fn make_market(bot: &mut Bot, config: &MakerConfig, fund: bool, deadline: Option
     bot.go_to_exchange()?;
     maker.start(bot)?;
     for item in &config.items {
-        bot.say(format!("{item} round {}", maker.reference(item).unwrap_or(0)));
+        bot.log(format!("{item} round {}", maker.reference(item).unwrap_or(0)));
     }
     bot.stay_up(deadline, |bot| maker.run(bot, deadline))?;
     maker.withdraw(bot)?;
     let s = &maker.stats;
-    bot.say(format!(
+    bot.log(format!(
         "done: {} orders placed, {} cancelled, {} units bought, {} sold",
         s.placed, s.cancelled, s.bought, s.sold
     ));

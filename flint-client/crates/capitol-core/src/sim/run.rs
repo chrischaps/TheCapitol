@@ -41,6 +41,7 @@ use crate::citizen::decide::log::Fate;
 use crate::citizen::decide::{Choice, Decision, Held, Mind, Place, Question, Situation, When, Who};
 use crate::citizen::meet;
 use crate::citizen::persona::{Market, Persona};
+use crate::citizen::phrases::Voice;
 use crate::citizen::schedule::Phase;
 use crate::citizen::town::{Ended, Standing, Tether};
 use crate::market::MarketEvent;
@@ -217,6 +218,7 @@ pub(crate) fn live(mut bot: Bot, role: Role, persona: &Persona, seed: u64, mut m
     bot.my_orders()?;
     bot.answer_trades(true);
     bot.greet_people(true);
+    bot.speak_with(Voice::phrasebook(&persona.temperament, seed));
     let strands = bot.state().strands();
     town.health(|h| h.strands = strands);
     let mut citizen = SimBot::new(bot, role, seed, scale, Instant::now(), true, mind);
