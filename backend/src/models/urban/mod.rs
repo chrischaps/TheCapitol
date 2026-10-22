@@ -28,7 +28,8 @@
 //! shared vertices (`street_plan::audit`), by construction. Where a ring
 //! street crosses an arterial it has a vertex on the arterial's centre line,
 //! but the arterial isn't welded to it: the farms and suburban lots laid
-//! along an arterial follow its vertices, and a weld moved 137 of them.
+//! along an arterial follow its vertices, and a weld moved 137 of them
+//! (#436).
 
 #[cfg(test)]
 pub(crate) mod metrics;
