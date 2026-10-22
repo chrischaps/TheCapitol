@@ -13,6 +13,10 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// How far a walk has to end from where it began to count for
+/// [`Step::Walk`]: judged where the server sees the walk end (#439)
+pub const WALK_DISTANCE: f64 = 20.0;
+
 /// A chapter of the road in (plan §4), in the order they're walked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -290,6 +294,12 @@ impl Steps {
         chapter.steps().all(|s| self.has(s))
     }
 
+    /// Every chapter before the Deeds Office is done, which opens the deed
+    /// grant (#440): the road in has been walked, and the claim is next
+    pub fn deed_earned(self) -> bool {
+        Chapter::ALL.into_iter().take_while(|c| *c != Chapter::DeedsOffice).all(|c| self.chapter_done(c))
+    }
+
     pub fn finished(self) -> bool {
         self == Steps::every()
     }
@@ -384,6 +394,22 @@ mod tests {
         assert!(!arrival.finished());
         assert_eq!(Steps::every().current(), None);
         assert!(Steps::every().finished());
+    }
+
+    #[test]
+    fn the_deed_is_earned_by_every_chapter_before_the_office() {
+        let before: Steps = [Chapter::Arrival, Chapter::RoadIn, Chapter::Hall, Chapter::People]
+            .into_iter()
+            .flat_map(Chapter::steps)
+            .collect();
+        assert!(before.deed_earned());
+        // One step short, wherever it is, and it isn't
+        for step in before.iter() {
+            assert!(!Steps::from_bits(before.bits() & !step.bit()).deed_earned(), "{step:?}");
+        }
+        // The office and settling in don't count toward it
+        let after: Steps = Chapter::DeedsOffice.steps().chain(Chapter::SettleIn.steps()).collect();
+        assert!(!after.deed_earned());
     }
 
     #[test]

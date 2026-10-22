@@ -310,9 +310,13 @@ pub async fn configure_automation(
     Json(req): Json<ConfigureAutomation>,
 ) -> Result<Json<StationAutomation>, AppError> {
     let player_id = player_of(&state, &auth_user).await?;
-    let recipes = state.game.read().await.recipes.clone();
+    let (recipes, events) = {
+        let game = state.game.read().await;
+        (game.recipes.clone(), game.event_sender.clone())
+    };
     let result =
-        crate::engine::automation::configure(&state.db, &recipes, player_id, station_id, &req.recipe_id, req.mode).await;
+        crate::engine::automation::configure(&state.db, &events, &recipes, player_id, station_id, &req.recipe_id, req.mode)
+            .await;
     announce_automation(&state, station_id, result).await
 }
 

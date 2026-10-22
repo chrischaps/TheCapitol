@@ -20,6 +20,7 @@ use uuid::Uuid;
 use capitol_protocol::rest::{MutesResponse, PlayerCard};
 use capitol_protocol::rules::{self, standing};
 
+use crate::engine::tutorial::{self, Did};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
@@ -52,7 +53,11 @@ pub async fn get_card(
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<PlayerCard>, AppError> {
-    card(&state.db, auth_user.account_id, Who::Id(id)).await.map(Json)
+    let card = card(&state.db, auth_user.account_id, Who::Id(id)).await?;
+    if !card.mine {
+        tutorial::saw_by_account(&state, auth_user.account_id, Did::OpenedCard).await;
+    }
+    Ok(Json(card))
 }
 
 /// Someone's card, by their name, ignoring case: for a letter

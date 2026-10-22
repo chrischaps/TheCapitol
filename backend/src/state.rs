@@ -91,6 +91,37 @@ impl AppState {
     }
 }
 
+/// An `AppState` for database tests that go through a route (#439): the
+/// test's database, the local Redis (`REDIS_URL`, or the default), and a game
+/// on the default terrain, with nobody in it. The terrain is generated once
+/// for every test that asks.
+#[cfg(test)]
+pub async fn for_tests(db: PgPool) -> AppState {
+    use crate::models::{TerrainConfig, WorldGenParams};
+    static TERRAIN: std::sync::OnceLock<crate::models::TerrainConfig> = std::sync::OnceLock::new();
+    let terrain = TERRAIN.get_or_init(TerrainConfig::get_default).clone();
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into());
+    let redis = connect_redis(&redis_url).await.expect("needs the local Redis (docker-compose up -d)");
+    let config = Config {
+        database_url: String::new(),
+        redis_url,
+        jwt_secret: "test".into(),
+        host: "127.0.0.1".into(),
+        port: 0,
+        access_ttl_secs: 15 * 60,
+        refresh_ttl_secs: 24 * 60 * 60,
+        rate_limits: Default::default(),
+        mock_subscriptions: true,
+        dev_grants: false,
+        sim_tick_scale: 1.0,
+        slow_statement: Duration::from_millis(50),
+        sample_secs: 0,
+    };
+    let game = Arc::new(RwLock::new(GameState::with_terrain(WorldGenParams::default(), terrain)));
+    let market = Arc::new(Market::load(&db).await.unwrap());
+    AppState::new(db, redis, config, game, market, Live::default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

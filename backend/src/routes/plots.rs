@@ -18,6 +18,7 @@ use capitol_protocol::rest::{
 use crate::engine::currency::{announce_balances, subtract_strands_in, TransactionType};
 use crate::engine::gazette::{self, DeedEvent};
 use crate::engine::property_tax::pay_tax_debt;
+use crate::engine::tutorial::{self, Did};
 use crate::engine::GameEvent;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -161,8 +162,23 @@ async fn claimed_plots(db: &PgPool) -> Result<Vec<ClaimedPlot>, sqlx::Error> {
 )]
 pub async fn get_plot(
     State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
     Path(plot_id): Path<Uuid>,
 ) -> Result<Json<PlotInfo>, AppError> {
+    let plot = plot_info(&state, plot_id).await?;
+    saw_plot(&state, auth_user.account_id, &plot).await;
+    Ok(Json(plot))
+}
+
+/// A look at a plot in a home zone counts on the road in, a step a zone (#439)
+async fn saw_plot(state: &AppState, account_id: Uuid, plot: &PlotInfo) {
+    if let Some(zone) = Zone::from_str(&plot.zone_id) {
+        tutorial::saw_by_account(state, account_id, Did::SawPlot(zone)).await;
+    }
+}
+
+/// The plot `plot_id`, as `GET /plots/{id}` gives it
+async fn plot_info(state: &AppState, plot_id: Uuid) -> Result<PlotInfo, AppError> {
     let row: Option<PlotWithJoins> = sqlx::query_as(
         "SELECT p.id, p.zone_id, p.grid_x, p.grid_y, p.world_x, p.world_y,
                 p.bounds_min_x, p.bounds_min_y, p.bounds_max_x, p.bounds_max_y,
@@ -184,7 +200,7 @@ pub async fn get_plot(
 
     let row = row.ok_or_else(|| AppError::NotFound("Plot not found".into()))?;
 
-    Ok(Json(row.to_plot_info(&state.tunables.get())))
+    Ok(row.to_plot_info(&state.tunables.get()))
 }
 
 /// Get the plot at a specific position
@@ -200,12 +216,15 @@ pub async fn get_plot(
 )]
 pub async fn get_plot_at_position(
     State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
     Query(query): Query<PositionQuery>,
 ) -> Result<Json<Option<PlotInfo>>, AppError> {
     let Some(plot) = find_plot_at_position(&state.db, query.x, query.y).await? else {
         return Ok(Json(None));
     };
-    Ok(Json(Some(get_plot(State(state), Path(plot.id)).await?.0)))
+    let plot = plot_info(&state, plot.id).await?;
+    saw_plot(&state, auth_user.account_id, &plot).await;
+    Ok(Json(Some(plot)))
 }
 
 #[utoipa::path(
@@ -239,7 +258,7 @@ pub async fn claim_plot(
     let new_balance = claim(&state.db, &events, player_id, plot_id, &state.tunables.get()).await?;
 
     // Fetch updated plot info
-    let plot_info = get_plot(State(state.clone()), Path(plot_id)).await?.0;
+    let plot_info = plot_info(&state, plot_id).await?;
 
     Ok(Json(ClaimPlotResponse {
         plot: plot_info,
@@ -280,7 +299,7 @@ pub async fn pay_tax(
     let (_, new_balance) = pay_tax_debt(&state.db, player_id, plot_id, request.amount).await?;
     let events = state.game.read().await.event_sender.clone();
     announce_balances(&events, [(player_id, new_balance)]);
-    let plot = get_plot(State(state.clone()), Path(plot_id)).await?.0;
+    let plot = plot_info(&state, plot_id).await?;
     Ok(Json(PayTaxResponse { plot, new_balance }))
 }
 
@@ -373,6 +392,7 @@ async fn claim(
         let _ = events.send(GameEvent::PlotClaimed { terrain_id, owner_id: player_id, claimed_at });
     }
     announce_balances(events, [(player_id, new_balance)]);
+    tutorial::saw(db, events, player_id, Did::Claimed).await;
     Ok(new_balance)
 }
 
@@ -541,6 +561,25 @@ mod tests {
         assert_eq!(owner(&db, lot).await, Some(Some(ada)));
         assert_eq!(balance(&db, ada).await, 5);
         assert_eq!(ledger(&db, ada).await, vec![(-deed, "deed_purchase".to_string())]);
+    }
+
+    /// A claim counts on the road in, and one refused doesn't (#439)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_claim_counts_on_the_road_in(db: PgPool) {
+        use capitol_protocol::tutorial::{Step, Steps};
+        let deed = urban_deed(&db).await;
+        let (ada, bo) = (player(&db, "ada", deed).await, player(&db, "bo", 0).await);
+        let lot = plot(&db, None, 0).await;
+        let (tx, mut rx) = events();
+        let done = |player| tutorial::progress(&db, player);
+
+        assert!(claim(&db, &tx, bo, lot, &Tunables::default()).await.is_err(), "bo can't afford it");
+        assert_eq!(done(bo).await.unwrap().done, Steps::NONE);
+        claim(&db, &tx, ada, lot, &Tunables::default()).await.unwrap();
+        assert_eq!(done(ada).await.unwrap().done, Steps::from_iter([Step::ClaimHome]));
+        let told = std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(e, GameEvent::Tutorial { player_id, .. } if player_id == ada));
+        assert!(told, "and told");
     }
 
     /// The zone's deed price tunable sets what a claim charges, and the plot

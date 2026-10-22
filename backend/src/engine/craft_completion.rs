@@ -320,19 +320,20 @@ fn db_error(e: sqlx::Error) -> String {
 
 /// These need the local Postgres (`docker-compose up -d`). Each runs in a fresh database that
 /// `sqlx::test` creates from the migrations and drops afterwards. Run them with
-/// `cargo test craft_completion -- --ignored`.
+/// `cargo test craft_completion -- --ignored`. The crafter and the rope are
+/// shared with the tick's tests.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    struct Crafter {
-        id: Uuid,
+    pub(crate) struct Crafter {
+        pub(crate) id: Uuid,
         inventory: Uuid,
-        input: Uuid,
+        pub(crate) input: Uuid,
         output: Uuid,
     }
 
-    async fn crafter(db: &PgPool, name: &str) -> Crafter {
+    pub(crate) async fn crafter(db: &PgPool, name: &str) -> Crafter {
         let account = Uuid::new_v4();
         sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'x')")
             .bind(account)
@@ -363,7 +364,7 @@ mod tests {
         Crafter { id, inventory: containers[0], input: containers[1], output: containers[2] }
     }
 
-    async fn stack(db: &PgPool, owner: Uuid, container: Uuid, slot: i32, item_type: &str, qty: i32) -> Uuid {
+    pub(crate) async fn stack(db: &PgPool, owner: Uuid, container: Uuid, slot: i32, item_type: &str, qty: i32) -> Uuid {
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO items (id, item_type, quality, quantity, owner_id, container_id, slot_index)
@@ -382,7 +383,7 @@ mod tests {
     }
 
     /// Basic rope: 2 fiber at 60, 1 rope
-    fn rope(player: &Crafter, fiber: Uuid) -> FinishedCraft {
+    pub(crate) fn rope(player: &Crafter, fiber: Uuid) -> FinishedCraft {
         FinishedCraft {
             player_id: player.id,
             operation_id: Uuid::new_v4(),

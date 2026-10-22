@@ -1209,7 +1209,8 @@ mod tests {
 
             /// Set `station_id` making `recipe_id` and start it, as the routes do
             async fn start(&self, owner: Uuid, station_id: Uuid, recipe_id: &str, mode: AutomationMode) {
-                automation::configure(&self.db, &self.recipes, owner, station_id, recipe_id, mode).await.unwrap();
+                let events = self.game.read().await.event_sender.clone();
+                automation::configure(&self.db, &events, &self.recipes, owner, station_id, recipe_id, mode).await.unwrap();
                 let a = automation::start(&self.db, &self.recipes, owner, station_id).await.unwrap();
                 automation::announce(&*self.game.read().await, station_id, a);
             }
@@ -1588,7 +1589,8 @@ mod tests {
             load_handles(&db, ada, inbox).await;
             world.start(ada, bench, "tool_handle", AutomationMode::Count(5)).await;
             world.start(ada, empty, "tool_handle", AutomationMode::Forever).await;
-            automation::configure(&db, &world.recipes, ada, idle, "tool_handle", AutomationMode::Forever).await.unwrap();
+            let events = world.game.read().await.event_sender.clone();
+            automation::configure(&db, &events, &world.recipes, ada, idle, "tool_handle", AutomationMode::Forever).await.unwrap();
             world.finish_craft(bench).await;
             world.finish_craft(empty).await;
             assert_eq!(stored(&db, bench).await.done, 1);

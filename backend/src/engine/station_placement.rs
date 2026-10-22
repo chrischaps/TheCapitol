@@ -23,6 +23,7 @@ use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::container_access::live_position;
+use super::tutorial::Did;
 use crate::models::{StationInfo, StationType, STATION_TYPE_COLUMNS};
 use crate::state::AppState;
 
@@ -142,7 +143,8 @@ impl Placed {
 /// their kit `kit_item_id`. `at` is where they stand now
 /// ([`live_position`]); when it's `None`, the position comes from their
 /// `players` row, which can be up to 10 s old. The game state isn't touched:
-/// the caller adds the station to it with [`Placed::remember`].
+/// the caller adds the station to it with [`Placed::remember`]. Once it's
+/// down, it's judged for the road in: off a plot, or at home (#439).
 pub async fn place_station(
     state: &AppState,
     player_id: Uuid,
@@ -166,7 +168,10 @@ pub async fn place_station(
             // The wilds' rivers, streams and lakes too (W4)
             .or_else(|| game.ground.water_at(x, y).map(String::from))
     };
-    place(&state.db, Request { player_id, station_type, x, y, kit_item_id, at, water: water.as_deref() }).await
+    let placed = place(&state.db, Request { player_id, station_type, x, y, kit_item_id, at, water: water.as_deref() }).await?;
+    let events = state.game.read().await.event_sender.clone();
+    super::tutorial::saw(&state.db, &events, player_id, Did::Placed { at_home: placed.plot_id.is_some() }).await;
+    Ok(placed)
 }
 
 /// A placement, with what the game state knows about it already read

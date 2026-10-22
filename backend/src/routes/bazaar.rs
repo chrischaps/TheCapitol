@@ -28,6 +28,7 @@ use uuid::Uuid;
 use super::market::{player_of, position_of, tell_balance};
 use crate::engine::bazaar::{self, BazaarError, Lapsed};
 use crate::engine::{GameEvent, GameState};
+use crate::engine::tutorial::{self, Did};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::LandmarkKind;
@@ -104,6 +105,8 @@ pub async fn get_shop(
     // Your own shop you see from anywhere
     if bazaar::stall_of(&state.db, player_id, now).await?.as_deref() != Some(stall_id.as_str()) {
         at(&state.game, &state.db, player_id, &stall, "see its prices").await?;
+        // Whether or not anyone rents it, they stood there and asked (D10)
+        tutorial::saw(&state.db, &events(&state).await, player_id, Did::LookedInAtStall).await;
     }
     bazaar::shop(&state.db, &stall_id, now)
         .await?

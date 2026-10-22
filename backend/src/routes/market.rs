@@ -34,6 +34,7 @@ use uuid::Uuid;
 use crate::engine::currency::announce_balances;
 use crate::engine::{GameEvent, GameState};
 use crate::engine::market::{self, MarketError};
+use crate::engine::tutorial::{self, Did};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::models::{Item, ItemType, LandmarkKind, SlotItem, ITEM_COLUMNS, ITEM_TYPE_COLUMNS};
@@ -111,6 +112,7 @@ pub async fn place_order(
         let _ = events.send(GameEvent::InventoryUpdated { player_id, container_id, slots: Vec::new() });
     }
     tell_balance(&state.db, &events, player_id).await;
+    tutorial::saw(&state.db, &events, player_id, Did::Ordered(req.side)).await;
     Ok(Json(order))
 }
 
@@ -542,6 +544,7 @@ pub async fn collect(
         for container_id in [box_id, inventory] {
             let _ = events.send(GameEvent::InventoryUpdated { player_id, container_id, slots: Vec::new() });
         }
+        tutorial::saw(&state.db, &events, player_id, Did::Collected).await;
     }
     Ok(Json(response))
 }

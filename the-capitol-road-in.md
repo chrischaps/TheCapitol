@@ -167,6 +167,18 @@ The tutorial runs in a live market that may be empty. A step that needs someone 
     - **There's no `tutorial_finished`.** The `tutorial_step` whose `done` holds every step is the finish.
     - Nothing is "skipped", only `dismissed` (D2).
 - **O0.2 The server judges each step** (#439, M): `engine::tutorial::saw`, one line where each action succeeds, and a test per step.
+
+  *As built:*
+  - **`saw(db, events, player, Did)`.** `Did` says what was done (`Gathered(item)`, `Crafted(recipe)`, `Placed { at_home }`, `Ordered(side)`, `SawPlot(zone)` and so on), and `Did::step` says which step it counts for, if any. Most things count for none: clay, iron, a Capitol line, a look at a guild plot. `saw` is one upsert (`mark`) when the deed counts, and it tells the player's sockets with `tutorial_step` the first time. A failure is logged, and the action stands either way.
+  - **Where each is judged:**
+    - The tick's writer judges gathers (by the item: fiber, sticks, stone, logs), crafts (by recipe) and walks. A walk is judged where it ends: `GameState` keeps where each walk began, and one that ends `tutorial::WALK_DISTANCE` (20) or more away is handed to the writer. The writer keeps a `Judged` cache, so each player's step costs one query a run, not one per gather.
+    - `station_placement::place_station`: off a plot is `place_workbench` (only a workbench can stand off one), on your own plot is `place_at_home`.
+    - `automation::configure`, which now takes the event sender, and `claim` in `routes::plots`.
+    - The routes: the exchange deposit, `place_order`, `collect` (once something comes out), `get_shop`, the Gazette's two reads, `get_card` (someone else's, not your own), a letter's `read`, and `GET /plots/{id}` and `/plots/at` (a step for each home zone). The plot routes now need the caller's account, which their auth layer already gave them.
+    - A local line, in the socket's `say` handler.
+  - **The stall counts once you're at it**, after the range check and before the shop is looked up. So a bazaar with no stalls rented doesn't block the road (D10).
+  - **The grant's hook.** `Steps::deed_earned()` is every chapter before the Deeds Office. `saw` logs the moment it turns true, and #440 opens the grant there.
+  - **Tests.** Each step has a test through the route or engine function it's judged in. `state::for_tests` is an `AppState` for route tests, on the local Redis. Refusals are tested too: a deposit of nothing, an order from out of range, a stall from afar, a claim you can't afford, someone else's station, an empty market box, your own card, a letter you didn't receive, a failed pull. A local line is only tested by its `Did`, since the socket has no test harness ([#463](https://github.com/chrischaps/TheCapitol/issues/463)).
 - **O0.3 The deed grant** (#440, M):
   - `deed_grants`, and `claim()` with `use_grant`;
   - the assessed value at the zone's price, foreclosure refunds 0, and a retired lot returns the grant;

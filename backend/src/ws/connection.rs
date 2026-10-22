@@ -386,9 +386,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         y,
                                         holds_avatar,
                                     };
-                                    if let Err(message) = state.talk.say(&events, &state.limiter, speaker, channel, &text) {
-                                        let msg = ServerMessage::Error { message, command: command.into() };
-                                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                    match state.talk.say(&events, &state.limiter, speaker, channel, &text) {
+                                        // Judged here, untested: the socket has no harness (#463)
+                                        Ok(()) => {
+                                            crate::engine::tutorial::saw(&state.db, &events, player_id, crate::engine::tutorial::Did::Said(channel)).await;
+                                        }
+                                        Err(message) => {
+                                            let msg = ServerMessage::Error { message, command: command.into() };
+                                            let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                        }
                                     }
                                 }
                                 ClientMessage::UnsubscribeMarket { item_type } => match item_type {
@@ -704,10 +710,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         )).await;
                                         continue;
                                     };
-                                    let recipes = state.game.read().await.recipes.clone();
+                                    let (recipes, events) = {
+                                        let game = state.game.read().await;
+                                        (game.recipes.clone(), game.event_sender.clone())
+                                    };
                                     let result = match &client_msg {
                                         ClientMessage::ConfigureAutomation { recipe_id, mode, .. } => {
-                                            crate::engine::automation::configure(&state.db, &recipes, player_id, station_uuid, recipe_id, *mode).await
+                                            crate::engine::automation::configure(&state.db, &events, &recipes, player_id, station_uuid, recipe_id, *mode).await
                                         }
                                         ClientMessage::StartAutomation { .. } => {
                                             crate::engine::automation::start(&state.db, &recipes, player_id, station_uuid).await

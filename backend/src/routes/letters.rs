@@ -22,6 +22,7 @@ use uuid::Uuid;
 use super::market::{player_of, tell_balance};
 use crate::engine::letters::{self, LetterError};
 use crate::engine::GameEvent;
+use crate::engine::tutorial::{self, Did};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::rate_limit::{self, Key};
@@ -128,6 +129,8 @@ pub async fn read(
 ) -> Result<Json<LettersUnread>, AppError> {
     let player = player_of(&state.db, auth_user.account_id).await?;
     let unread = letters::read(&state.db, player, id, Utc::now()).await.map_err(refused)?;
+    let events = state.game.read().await.event_sender.clone();
+    tutorial::saw(&state.db, &events, player, Did::ReadLetter).await;
     Ok(Json(LettersUnread { unread }))
 }
 

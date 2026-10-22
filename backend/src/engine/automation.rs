@@ -17,6 +17,7 @@ use capitol_protocol::rest::{AutomationMode, AutomationState, StationAutomation}
 use capitol_protocol::rules::tools::ToolType;
 use sqlx::types::Json;
 use sqlx::{PgConnection, PgPool};
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::container_access::AccessError;
@@ -124,9 +125,10 @@ pub fn check_config(
 }
 
 /// Set what `station_id` makes. Setting it stops the station and starts the
-/// count again.
+/// count again. It counts on the road in (#439).
 pub async fn configure(
     db: &PgPool,
+    events: &broadcast::Sender<GameEvent>,
     recipes: &HashMap<String, Recipe>,
     player_id: Uuid,
     station_id: Uuid,
@@ -139,6 +141,7 @@ pub async fn configure(
     let automation = StationAutomation { recipe_id: recipe_id.into(), mode, state: AutomationState::Stopped, done: 0 };
     save(&mut tx, station_id, &automation).await?;
     tx.commit().await?;
+    super::tutorial::saw(db, events, player_id, super::tutorial::Did::SetAutomation).await;
     Ok(automation)
 }
 
@@ -376,13 +379,14 @@ mod tests {
         #[ignore = "needs the local Postgres (docker-compose up -d)"]
         async fn configure_start_and_stop_round_trip(db: PgPool) {
             let recipes = setup(&db).await;
+            let (events, _) = broadcast::channel(16);
             let (ada, _) = player(&db, "ada").await;
             let bench = station(&db, ada, "workbench").await;
             assert_eq!(stored(&db, bench).await, None);
             assert!(matches!(start(&db, &recipes, ada, bench).await, Err(AutomationError::NotConfigured)));
             assert!(matches!(stop(&db, ada, bench).await, Err(AutomationError::NotConfigured)));
 
-            let set = configure(&db, &recipes, ada, bench, "tool_handle", AutomationMode::Count(20)).await.unwrap();
+            let set = configure(&db, &events, &recipes, ada, bench, "tool_handle", AutomationMode::Count(20)).await.unwrap();
             assert_eq!(set, StationAutomation {
                 recipe_id: "tool_handle".into(),
                 mode: AutomationMode::Count(20),
@@ -414,7 +418,7 @@ mod tests {
             assert_eq!(restarted.done, 0, "a start from stopped counts again");
 
             // A new setting stops it
-            let reset = configure(&db, &recipes, ada, bench, "knapped_stone", AutomationMode::Forever).await.unwrap();
+            let reset = configure(&db, &events, &recipes, ada, bench, "knapped_stone", AutomationMode::Forever).await.unwrap();
             assert_eq!((reset.recipe_id.as_str(), &reset.state), ("knapped_stone", &AutomationState::Stopped));
             assert_eq!(stored(&db, bench).await, Some(reset));
         }
@@ -423,31 +427,38 @@ mod tests {
         #[ignore = "needs the local Postgres (docker-compose up -d)"]
         async fn only_the_owner_sets_it_going(db: PgPool) {
             let recipes = setup(&db).await;
+            let (events, _) = broadcast::channel(16);
             let (ada, _) = player(&db, "ada").await;
             let (bob, _) = player(&db, "bob").await;
             let bench = station(&db, ada, "workbench").await;
-            configure(&db, &recipes, ada, bench, "tool_handle", AutomationMode::Forever).await.unwrap();
+            configure(&db, &events, &recipes, ada, bench, "tool_handle", AutomationMode::Forever).await.unwrap();
 
-            assert!(matches!(configure(&db, &recipes, bob, bench, "tool_handle", AutomationMode::Forever).await,
+            assert!(matches!(configure(&db, &events, &recipes, bob, bench, "tool_handle", AutomationMode::Forever).await,
                 Err(AutomationError::NotYourStation)));
             assert!(matches!(start(&db, &recipes, bob, bench).await, Err(AutomationError::NotYourStation)));
             assert!(matches!(stop(&db, bob, bench).await, Err(AutomationError::NotYourStation)));
             assert!(matches!(start(&db, &recipes, ada, Uuid::new_v4()).await,
                 Err(AutomationError::Access(AccessError::StationNotFound))));
             assert_eq!(stored(&db, bench).await.map(|a| a.state), Some(AutomationState::Stopped));
+            // Setting the job counts on the road in, and being refused doesn't (#439)
+            use capitol_protocol::tutorial::{Step, Steps};
+            let done = |player| crate::engine::tutorial::progress(&db, player);
+            assert_eq!(done(ada).await.unwrap().done, Steps::from_iter([Step::SetAutomation]));
+            assert_eq!(done(bob).await.unwrap().done, Steps::NONE);
         }
 
         #[sqlx::test(migrations = "./migrations")]
         #[ignore = "needs the local Postgres (docker-compose up -d)"]
         async fn a_tool_recipe_needs_the_tool_installed_to_set_and_to_start(db: PgPool) {
             let recipes = setup(&db).await;
+            let (events, _) = broadcast::channel(16);
             let (ada, inventory) = player(&db, "ada").await;
             let anvil = station(&db, ada, "anvil").await;
             let chest = station(&db, ada, "storage_chest").await;
 
-            assert!(matches!(configure(&db, &recipes, ada, anvil, "iron_axe_head", AutomationMode::Forever).await,
+            assert!(matches!(configure(&db, &events, &recipes, ada, anvil, "iron_axe_head", AutomationMode::Forever).await,
                 Err(AutomationError::NeedsTool(ToolType::Hammer))));
-            assert!(matches!(configure(&db, &recipes, ada, chest, "tool_handle", AutomationMode::Forever).await,
+            assert!(matches!(configure(&db, &events, &recipes, ada, chest, "tool_handle", AutomationMode::Forever).await,
                 Err(AutomationError::NotACraftingStation)));
             assert_eq!(stored(&db, anvil).await, None, "a refusal stores nothing");
 
@@ -462,7 +473,7 @@ mod tests {
             .await
             .unwrap();
             crate::engine::station_tools::install_tool(&db, ada, anvil, hammer, HERE).await.unwrap();
-            configure(&db, &recipes, ada, anvil, "iron_axe_head", AutomationMode::Count(5)).await.unwrap();
+            configure(&db, &events, &recipes, ada, anvil, "iron_axe_head", AutomationMode::Count(5)).await.unwrap();
 
             // Taken out again before the start: the start says why it won't
             crate::engine::station_tools::remove_tool(&db, ada, anvil, HERE).await.unwrap();

@@ -19,16 +19,19 @@ use super::tools::{self, HeldTool, Wear};
 use super::movement::process_movement;
 use super::regeneration::process_regeneration;
 use super::trading::{TradeManager, TRADE_RANGE};
+use super::tutorial::{Did, Judged};
 use super::wages::{self, ShiftWork};
 use crate::models::{ActionState, ContainerType, ItemType, PlayerPosition, PlayerState, Recipe, ResourceNodeState, ResourceType, StationState, StationType, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
 
 use capitol_protocol::ledger::UnitFlow;
 use capitol_protocol::rest::{CatalogResponse, Subscription, SubscriptionStatus};
+use capitol_protocol::fmath::StableMath;
 use capitol_protocol::rules::ground::Ground;
 use capitol_protocol::rules::quality;
 use capitol_protocol::rules::stacking::Units;
 use capitol_protocol::rules::TICK_MS as TICK_RATE_MS;
+use capitol_protocol::tutorial::WALK_DISTANCE;
 
 /// Runs `$body` as one phase of the tick (D0.1): in the span `$span`, and
 /// timed as [`Phase`]`::$phase`. For the phases that await, the loop uses
@@ -83,6 +86,12 @@ pub struct GameState {
     /// The tick each steering player was last told they're blocked, so a
     /// walk held into a bank hears it once every [`STEER_BLOCKED_TICKS`]
     steer_blocked_at: HashMap<Uuid, u64>,
+    /// Where each walk under way began, by player, so its end can be judged
+    /// for the road in's first step (#439)
+    walks_from: HashMap<Uuid, (f64, f64)>,
+    /// Players whose walk ended this tick at least `WALK_DISTANCE` from where
+    /// it began, for the writer to judge
+    walked: Vec<Uuid>,
     /// Crafts that ran their time this tick, for the tick loop to write
     pub finished_crafts: Vec<FinishedCraft>,
     // M4: Stations
@@ -153,6 +162,8 @@ impl GameState {
             gather_tools: HashMap::new(),
             gather_wages: HashMap::new(),
             steer_blocked_at: HashMap::new(),
+            walks_from: HashMap::new(),
+            walked: Vec::new(),
             finished_crafts: Vec::new(),
             stations: HashMap::new(),
             station_types: HashMap::new(),
@@ -187,6 +198,10 @@ impl GameState {
 
     pub fn take_finished_crafts(&mut self) -> Vec<FinishedCraft> {
         std::mem::take(&mut self.finished_crafts)
+    }
+
+    pub fn take_walked(&mut self) -> Vec<Uuid> {
+        std::mem::take(&mut self.walked)
     }
 
     pub fn queue_command(&mut self, command: Command) {
@@ -327,6 +342,7 @@ impl GameState {
         self.gather_tools.remove(&player_id);
         self.gather_wages.remove(&player_id);
         self.steer_blocked_at.remove(&player_id);
+        self.walks_from.remove(&player_id);
         // Remove any pending trade requests
         self.trade_manager.pending_requests.remove(&player_id);
         self.trade_manager.pending_requests.retain(|_, (initiator, _)| *initiator != player_id);
@@ -680,7 +696,19 @@ impl GameState {
 
         for player in self.players.values_mut() {
             let steering = player.steer.is_some();
+            if steering || player.dest_x.is_some() {
+                self.walks_from.entry(player.id).or_insert((player.x, player.y));
+            }
             let result = process_movement(player, &self.ground);
+            // A walk that's over, here or by whatever cleared it since, is
+            // judged by how far it ended from where it began
+            if player.steer.is_none() && player.dest_x.is_none() {
+                if let Some((x, y)) = self.walks_from.remove(&player.id) {
+                    if (player.x - x).stable_hypot(player.y - y) >= WALK_DISTANCE {
+                        self.walked.push(player.id);
+                    }
+                }
+            }
 
             // Broadcast zone transition if player changed zones
             if let Some(transition) = result.zone_transition {
@@ -806,6 +834,8 @@ const POSITION_SAVE_TICKS: u64 = 100;
 struct Finished {
     gathers: Vec<PendingItem>,
     crafts: Vec<FinishedCraft>,
+    /// Walks that ended far enough to judge for the road in (#439)
+    walks: Vec<Uuid>,
 }
 
 pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppState) {
@@ -849,6 +879,7 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
 
         let gathers: Vec<PendingItem>;
         let crafts: Vec<FinishedCraft>;
+        let walks: Vec<Uuid>;
         let positions: Option<Vec<SavedPosition>>;
         let game_tick_count;
         {
@@ -859,6 +890,7 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
             game.tick();
             gathers = game.take_pending_items();
             crafts = game.take_finished_crafts();
+            walks = game.take_walked();
             game_tick_count = game.tick_count;
             // Read under the tick's own lock, and written once it's let go.
             // The world's count, never reset, so this comes round every 100
@@ -872,9 +904,9 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
         // Gathers are written wearing their tools, and crafts with their inputs
         // re-checked and consumed in one transaction (B10, #61). The writer
         // tells the gatherers and crafters only once each is written.
-        if !gathers.is_empty() || !crafts.is_empty() {
+        if !gathers.is_empty() || !crafts.is_empty() || !walks.is_empty() {
             let _timed = Phase::Writes.timed();
-            if to_writer.send(Finished { gathers, crafts }).is_err() {
+            if to_writer.send(Finished { gathers, crafts, walks }).is_err() {
                 tracing::error!("The writer has stopped: this tick's gathers and crafts weren't saved");
             }
         }
@@ -981,15 +1013,25 @@ pub async fn run_tick_loop(game_state: Arc<RwLock<GameState>>, app_state: AppSta
 /// gathers into one inventory are written one after the other, as they
 /// were when the tick wrote them itself. One writer has a ceiling: about
 /// 40% busy at 200 citizens (#407).
+///
+/// Once each is written, it's judged for the road in (#439), as is each walk
+/// that ended. A player's step is asked about once a run ([`Judged`]).
 async fn run_writer(db: sqlx::PgPool, events: broadcast::Sender<GameEvent>, mut from_tick: mpsc::UnboundedReceiver<Finished>) {
-    while let Some(Finished { gathers, crafts }) = from_tick.recv().await {
+    let mut judged = Judged::default();
+    while let Some(Finished { gathers, crafts, walks }) = from_tick.recv().await {
         let _timed = Loop::Writer.timed();
         async {
             for item in gathers {
-                persist_gather(&db, item, &events).await;
+                let (player, item_type) = (item.player_id, item.item_type.clone());
+                if persist_gather(&db, item, &events).await {
+                    judged.saw(&db, &events, player, Did::Gathered(&item_type)).await;
+                }
             }
             if !crafts.is_empty() {
-                finish_crafts(&db, crafts, &events).await;
+                finish_crafts(&db, crafts, &events, &mut judged).await;
+            }
+            for player in walks {
+                judged.saw(&db, &events, player, Did::Walked).await;
             }
         }
         .instrument(tracing::info_span!("loop.writer"))
@@ -999,8 +1041,14 @@ async fn run_writer(db: sqlx::PgPool, events: broadcast::Sender<GameEvent>, mut 
 
 /// Finish crafts: inputs re-checked, consumed and the output written in one
 /// transaction (B10, #61). Only then is the crafter told, with one
-/// `inventory_updated` per container that changed.
-async fn finish_crafts(db: &sqlx::PgPool, finished: Vec<FinishedCraft>, event_sender: &broadcast::Sender<GameEvent>) {
+/// `inventory_updated` per container that changed, and the craft judged for
+/// the road in.
+async fn finish_crafts(
+    db: &sqlx::PgPool,
+    finished: Vec<FinishedCraft>,
+    event_sender: &broadcast::Sender<GameEvent>,
+    judged: &mut Judged,
+) {
     for craft in finished {
         match finish_craft(db, &craft).await {
             Ok(done) => {
@@ -1031,6 +1079,7 @@ async fn finish_crafts(db: &sqlx::PgPool, finished: Vec<FinishedCraft>, event_se
                         slots: Vec::new(),
                     });
                 }
+                judged.saw(db, event_sender, craft.player_id, Did::Crafted(&craft.recipe_id)).await;
             }
             Err(reason) => {
                 let _ = event_sender.send(GameEvent::CraftingFailed {
@@ -1098,12 +1147,15 @@ async fn persist_positions(db: &sqlx::PgPool, positions: &[SavedPosition]) -> Re
 /// ([`place_for_wages`]). If the shift ended while it ran, nothing is
 /// written. If the employer's box has no room, it's the gatherer's, unpaid,
 /// and the shift ends (`box_full`).
-pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broadcast::Sender<GameEvent>) {
+///
+/// Returns whether something was gathered and written: not a failed pull,
+/// nor a gather that wrote nothing.
+pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, events: &broadcast::Sender<GameEvent>) -> bool {
     let mut tx = match db.begin().await {
         Ok(tx) => tx,
         Err(e) => {
             tracing::error!("Failed to start saving a gather: {:?}", e);
-            return;
+            return false;
         }
     };
     let (mut used, mut broken) = (None, None);
@@ -1130,12 +1182,12 @@ pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, eve
                             gather.held.item_type
                         ),
                     });
-                    return;
+                    return false;
                 }
             },
             Err(e) => {
                 tracing::error!("Failed to wear tool {}: {:?}", gather.held.item_id, e);
-                return;
+                return false;
             }
         }
     }
@@ -1148,7 +1200,7 @@ pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, eve
             Ok(found) => found.map(|(container_id, _)| container_id),
             Err(e) => {
                 tracing::error!("Failed to find {}'s inventory: {:?}", item.player_id, e);
-                return;
+                return false;
             }
         }
     } else {
@@ -1157,11 +1209,11 @@ pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, eve
                 Ok(Ok(placed)) => placed,
                 Ok(Err(why)) => {
                     let _ = events.send(GameEvent::ExtractionFailed { player_id: item.player_id, reason: why.to_string() });
-                    return;
+                    return false;
                 }
                 Err(e) => {
                     tracing::error!("Failed to pay wages on a gather by {}: {}", item.player_id, e.message());
-                    return;
+                    return false;
                 }
             },
             None => None,
@@ -1174,10 +1226,10 @@ pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, eve
             }
             None => match place_gathered(&mut tx, &item).await {
                 Ok(Some(container_id)) => container_id,
-                Ok(None) => return,
+                Ok(None) => return false,
                 Err(e) => {
                     tracing::error!("Failed to persist {} for {}: {:?}", item.item_type, item.player_id, e);
-                    return;
+                    return false;
                 }
             },
         };
@@ -1187,20 +1239,20 @@ pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, eve
                 Ok(news) => wage_news = Some(news),
                 Err(e) => {
                     tracing::error!("Failed to end {}'s shift on a full box: {}", item.player_id, e.message());
-                    return;
+                    return false;
                 }
             }
         }
         if let Err(e) = super::gazette::tally(&mut tx, item.player_id, &item.item_type, item.quantity).await {
             tracing::error!("Failed to tally a gather for the Gazette: {:?}", e);
-            return;
+            return false;
         }
         flows.add(&item.item_type, UnitFlow::Gathered, item.quantity as i64);
         Some(container_id)
     };
     if let Err(e) = ledger::commit(tx, flows).await {
         tracing::error!("Failed to save a gather: {:?}", e);
-        return;
+        return false;
     }
 
     let _ = events.send(GameEvent::ExtractionCompleted {
@@ -1225,6 +1277,7 @@ pub(crate) async fn persist_gather(db: &sqlx::PgPool, mut item: PendingItem, eve
     if let Some(news) = wage_news {
         wages::announce(events, news);
     }
+    item.quantity > 0
 }
 
 /// Put a gather made on the wage shift `work` into the employer's market box,
@@ -2154,14 +2207,77 @@ mod tests {
         let writer = tokio::spawn(run_writer(db.clone(), events, from_tick));
 
         let both = vec![sickle_gather(ada, &sickle), sickle_gather(ada, &sickle)];
-        to_writer.send(Finished { gathers: both, crafts: Vec::new() }).unwrap();
+        to_writer.send(Finished { gathers: both, crafts: Vec::new(), walks: Vec::new() }).unwrap();
         drop(to_writer);
         writer.await.unwrap();
 
         assert_eq!(fiber(&db, inventory).await.map(|f| f.0), Some(10), "both written");
         assert!(matches!(heard.try_recv().unwrap(), GameEvent::ExtractionCompleted { tool: Some(ref t), .. } if t.durability == 1));
         assert!(matches!(heard.try_recv().unwrap(), GameEvent::InventoryUpdated { .. }));
+        assert!(matches!(heard.try_recv().unwrap(), GameEvent::Tutorial { .. }), "the first counts on the road in");
         assert!(matches!(heard.try_recv().unwrap(), GameEvent::ExtractionCompleted { tool: Some(ref t), .. } if t.durability == 0));
+    }
+
+    /// A walk is judged where it ends: one that ends `WALK_DISTANCE` or more
+    /// from where it began is handed on to the writer, a step aside isn't
+    /// (#439)
+    #[test]
+    fn a_walk_that_ends_far_enough_is_handed_on_to_judge() {
+        use capitol_protocol::rules::{SPAWN_X, SPAWN_Y};
+        let mut game = game();
+        let ada = player("ada", SPAWN_X, SPAWN_Y);
+        let id = ada.id;
+        game.add_player(ada);
+        let walk = |game: &mut GameState, dy: f64| {
+            game.queue_command(Command::Move { player_id: id, dest_x: SPAWN_X, dest_y: SPAWN_Y - dy });
+            for _ in 0..20 {
+                game.tick();
+            }
+        };
+        walk(&mut game, WALK_DISTANCE / 2.0);
+        assert!(game.take_walked().is_empty(), "a step aside isn't a walk");
+        walk(&mut game, WALK_DISTANCE * 2.0);
+        assert_eq!(game.players[&id].y, SPAWN_Y - WALK_DISTANCE * 2.0, "it ended");
+        assert_eq!(game.take_walked(), vec![id]);
+        assert!(game.walks_from.is_empty());
+    }
+
+    /// What the writer wrote is judged for the road in: a gather, a craft and
+    /// a walk each count once, and a failed pull counts for nothing (#439)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_writer_judges_what_it_wrote_for_the_road_in(db: sqlx::PgPool) {
+        use super::super::craft_completion::tests::{crafter, rope, stack};
+        use super::super::tutorial::progress;
+        use capitol_protocol::tutorial::{Step, Steps};
+        use capitol_protocol::ws::ServerMessage;
+
+        let (ada, _, sickle) = gatherer(&db, 10).await;
+        let cy = crate::engine::plot_sync::tests::player(&db, "cy", 0).await;
+        let bo = crafter(&db, "bo").await;
+        let fiber = stack(&db, bo.id, bo.input, 0, "fiber", 4).await;
+        let mut failed = sickle_gather(cy, &sickle);
+        (failed.quantity, failed.quality, failed.tool) = (0, 0, None);
+
+        let (events, mut heard) = broadcast::channel(64);
+        let (to_writer, from_tick) = mpsc::unbounded_channel();
+        let writer = tokio::spawn(run_writer(db.clone(), events, from_tick));
+        let gathers = vec![sickle_gather(ada, &sickle), failed, sickle_gather(ada, &sickle)];
+        to_writer.send(Finished { gathers, crafts: vec![rope(&bo, fiber)], walks: vec![ada, ada] }).unwrap();
+        drop(to_writer);
+        writer.await.unwrap();
+
+        let done = |player| progress(&db, player);
+        assert_eq!(done(ada).await.unwrap().done, Steps::from_iter([Step::Walk, Step::GatherGrass]));
+        assert_eq!(done(bo.id).await.unwrap().done, Steps::from_iter([Step::TwistRope]));
+        assert_eq!(done(cy).await.unwrap().done, Steps::NONE, "a failed pull gathered nothing");
+        let mut told = Vec::new();
+        while let Ok(event) = heard.try_recv() {
+            if let GameEvent::Tutorial { player_id, message: ServerMessage::TutorialStep { step, .. } } = event {
+                told.push((player_id, step));
+            }
+        }
+        assert_eq!(told, [(ada, Step::GatherGrass), (bo.id, Step::TwistRope), (ada, Step::Walk)], "each once");
     }
 
     /// A steering player's position is saved, and they come back standing (T0.2)

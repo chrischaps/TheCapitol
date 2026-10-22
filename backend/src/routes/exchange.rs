@@ -11,6 +11,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::engine::{ledger, units};
+use crate::engine::tutorial::{self, Did};
 use crate::engine::currency::{add_strands_in, announce_balances, subtract_strands_in, TransactionType};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -46,6 +47,8 @@ pub async fn deposit_fiber(
     let player_id = player_of(&state.db, auth_user.account_id).await?;
     let response = deposit(&state.db, player_id, &req.item_ids, &state.tunables.get().fees).await?;
     tell_balance(&state, player_id, response.new_balance).await;
+    let events = state.game.read().await.event_sender.clone();
+    tutorial::saw(&state.db, &events, player_id, Did::Deposited).await;
     Ok(Json(response))
 }
 

@@ -13,6 +13,7 @@ use capitol_protocol::rest::{GazetteByline, GazetteQuery, GazetteResponse};
 use uuid::Uuid;
 
 use crate::engine::gazette;
+use crate::engine::tutorial::{self, Did};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
@@ -41,6 +42,7 @@ pub async fn latest(
     Extension(auth_user): Extension<AuthUser>,
 ) -> Result<Json<GazetteResponse>, AppError> {
     let edition = gazette::edition(&state.db, None).await?;
+    tutorial::saw_by_account(&state, auth_user.account_id, Did::ReadGazette).await;
     Ok(Json(GazetteResponse { edition, named: named(&state, auth_user.account_id).await? }))
 }
 
@@ -59,6 +61,7 @@ pub async fn by_date(
     Query(query): Query<GazetteQuery>,
 ) -> Result<Json<GazetteResponse>, AppError> {
     let edition = gazette::edition(&state.db, Some(query.date)).await?;
+    tutorial::saw_by_account(&state, auth_user.account_id, Did::ReadGazette).await;
     Ok(Json(GazetteResponse { edition, named: named(&state, auth_user.account_id).await? }))
 }
 
