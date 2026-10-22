@@ -11,6 +11,8 @@
 //! capitol-town --report             # and write what the town did when it stops (C1.7)
 //! capitol-town soak --hours 24      # a day, then the report, load and conservation (C1.7)
 //! capitol-town books town.soak-….ledgers.jsonl  # a soak's books, even one that was killed
+//! capitol-town soak --hours 2 --tunables tax-high.toml  # a soak under a preset (D6.3)
+//! capitol-town compare a.balance.json b.balance.json    # two soaks side by side (D6.3)
 //! capitol-town --status             # the running town's last health
 //! capitol-town replay --layers rules # the decision logs, replayed (C3.1)
 //! capitol-town corpus               # a made-up town's log to replay (C3.3)
@@ -26,6 +28,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use capitol_core::citizen::balance::{self, Balance, Preset};
 use capitol_core::citizen::decide::{corpus, log};
 use capitol_core::citizen::decide::replay::Replayer;
 use capitol_core::citizen::decide::{self, Cascade};
@@ -60,7 +63,17 @@ USAGE:
                                  whether every Strand and unit is accounted
                                  for. It reads the world's books as an admin
                                  (--admin), so run it on a database of its
-                                 own. Exits 1 if they drifted.
+                                 own. Exits 1 if they drifted. With
+                                 --tunables, it sets a preset first.
+    capitol-town compare <a.balance.json> <b.balance.json> [--out <md>]
+                                 Hold two soaks up against each other: the
+                                 knobs each ran under, whether their books
+                                 balanced, the citizens' Strands by trade,
+                                 the Gini, the faucets and sinks, and prices
+                                 against their targets. Printed, or written
+                                 to --out. scripts/balance.ps1 runs the two
+                                 soaks, each on a new town, and this. Exits
+                                 1 if either's books drifted.
     capitol-town books <ledgers.jsonl>
                                  Reconcile the books a soak wrote down as it
                                  read them, first reading against last, and
@@ -110,6 +123,12 @@ FLAGS:
     --hours <h>       With soak, how long, in hours of the day's clock
     --sample <secs>   With soak, how often it reads the server's load
                       [default: 60]
+    --tunables <toml> With soak, a preset to run under (D6.3): it's set on
+                      the server before the books are read, and every knob
+                      it doesn't name goes back to its default. One knob a
+                      line, `property_tax_rate = 0.2`; a family's by its id,
+                      `\"yield.grass\" = 1.5` or under `[yield]`
+    --out <md>        With compare, where to write it [default: printed]
     --count <n>       With mint, how many citizens to make
     --online <n>      With mint, make enough citizens to keep n on, on
                       average: about 32 for each with the default mix
@@ -145,7 +164,8 @@ town.presence.csv. Each citizen logs its decisions, and what came of them,
 to town.decisions/<name>.jsonl. Reports go beside it too, as
 town.report-<when>.md, and a soak's as town.soak-<when>.md with its load,
 a minute a row, in town.soak-<when>.csv, and every reading of the
-server's books, as it's taken, in town.soak-<when>.ledgers.jsonl. A
+server's books, as it's taken, in town.soak-<when>.ledgers.jsonl, and
+what a balance run compares in town.soak-<when>.balance.json. A
 running town also reports to the server each game minute, for its admin
 console, with the key in town.report-key: a run with
 $CAPITOL_ADMIN_EMAIL and $CAPITOL_ADMIN_PASSWORD set mints one if
@@ -173,6 +193,7 @@ enum Action {
     Run,
     Soak { hours: f64 },
     Books { file: PathBuf },
+    Compare { a: PathBuf, b: PathBuf, out: Option<PathBuf> },
     Mint { size: Size },
     Habits,
     Status,
@@ -210,6 +231,8 @@ struct Options {
     sample: Duration,
     /// With run or soak, everyone on all the time, whatever their habits
     always_on: bool,
+    /// With soak, the preset to run under (D6.3)
+    tunables: Option<PathBuf>,
 }
 
 impl Options {
@@ -232,6 +255,8 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
     let mut rounds = None;
     let mut log_mb_given = false;
     let mut sample_given = false;
+    let mut compared: Vec<PathBuf> = Vec::new();
+    let mut out = None;
     let mut options = Options {
         action: Action::Run,
         roster: PathBuf::from(town::ROSTER),
@@ -243,6 +268,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         report: false,
         sample: Duration::from_secs(60),
         always_on: false,
+        tunables: None,
     };
     let mut admin_given = false;
     let mut every_given = false;
@@ -252,14 +278,22 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         let replaying = matches!(action, Some(Action::Replay { .. }));
         let corpus = matches!(action, Some(Action::Corpus { .. }));
         let reading_books = matches!(&action, Some(Action::Books { file }) if file.as_os_str().is_empty());
+        let comparing = matches!(action, Some(Action::Compare { .. }));
         let mut set = |a: Action| match action.replace(a) {
-            Some(_) => Err("run, soak, books, mint, habits, status, replay and corpus go one at a time".to_string()),
+            Some(_) => Err("run, soak, books, compare, mint, habits, status, replay and corpus go one at a time".to_string()),
             None => Ok(()),
         };
         match arg.as_str() {
             "run" => set(Action::Run)?,
             "soak" => set(Action::Soak { hours: 0.0 })?,
             "books" => set(Action::Books { file: PathBuf::new() })?,
+            "compare" => set(Action::Compare {
+                a: PathBuf::new(),
+                b: PathBuf::new(),
+                out: None,
+            })?,
+            "--tunables" => options.tunables = Some(value()?.into()),
+            "--out" => out = Some(PathBuf::from(value()?)),
             "mint" => set(Action::Mint { size: Size::Count(0) })?,
             "habits" => set(Action::Habits)?,
             "--always-on" => options.always_on = true,
@@ -353,6 +387,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
             log if replaying && !log.starts_with('-') => logs.push(PathBuf::from(log)),
             dir if corpus && !dir.starts_with('-') && corpus_dir.is_none() => corpus_dir = Some(PathBuf::from(dir)),
             file if reading_books && !file.starts_with('-') => action = Some(Action::Books { file: file.into() }),
+            file if comparing && !file.starts_with('-') && compared.len() < 2 => compared.push(file.into()),
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -375,6 +410,10 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
         (Action::Books { file }, None, None) if file.as_os_str().is_empty() => {
             return Err("books needs the file of a soak's books".into())
         }
+        (Action::Compare { .. }, None, None) => match <[PathBuf; 2]>::try_from(std::mem::take(&mut compared)) {
+            Ok([a, b]) => Action::Compare { a, b, out: out.take() },
+            Err(_) => return Err("compare needs two soaks' .balance.json files".into()),
+        },
         (Action::Replay { .. }, None, None) => Action::Replay {
             logs,
             layers: layers.take().unwrap_or_else(|| decide::DEFAULT_LAYERS.map(String::from).to_vec()),
@@ -419,6 +458,12 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, Stri
     }
     if sample_given && !matches!(options.action, Action::Soak { .. }) {
         return Err("--sample goes with soak".into());
+    }
+    if options.tunables.is_some() && !matches!(options.action, Action::Soak { .. }) {
+        return Err("--tunables goes with soak".into());
+    }
+    if out.is_some() {
+        return Err("--out goes with compare".into());
     }
     Ok(Some(options))
 }
@@ -602,8 +647,31 @@ fn soak(options: &Options, hours: f64) -> Result<bool, String> {
     let server = server(options, &roster);
     let admin = admin(options, "soak")?;
     let config = NetConfig::with_base_url(&server);
+    // The preset is set before the books are read, so the whole soak runs
+    // under it (D6.3)
+    let preset = match &options.tunables {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+            Some((path, Preset::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?))
+        }
+        None => None,
+    };
+    let mut tunables = admin.tunables(&config)?;
+    if let Some((path, preset)) = &preset {
+        let update = preset.update(&tunables);
+        if !update.values.is_empty() {
+            tunables = admin.set_tunables(&config, update)?;
+        }
+        println!("capitol-town: the knobs are {}'s", path.display());
+    }
+    let knobs = balance::off_default(&tunables);
+    for (key, value) in &knobs {
+        println!("    {key} = {value}");
+    }
     let start = admin.ledger(&config)?;
-    let scale = capitol_core::protocol::rules::TICK_MS as f64 / start.load.tick_period_ms;
+    // The period is the tick over the scale, as a float: rounded back to
+    // what was set, 30 and not 30.000003
+    let scale = (capitol_core::protocol::rules::TICK_MS as f64 / start.load.tick_period_ms * 100.0).round() / 100.0;
     let length = schedule::real(hours / 24.0);
     println!(
         "capitol-town: a soak of {hours} hours of the day's clock ({:.0} real minutes) at {scale}×, from books of {} accounts, {} Strands and {} units",
@@ -657,8 +725,49 @@ fn soak(options: &Options, hours: f64) -> Result<bool, String> {
             }
         );
     }
+    let label = preset.as_ref().map_or("the server's knobs".to_string(), |(path, _)| {
+        path.file_name().map_or(path.display().to_string(), |n| n.to_string_lossy().into_owned())
+    });
+    if let Some(run) = Balance::of(&report, &label, knobs, &targets(&config)) {
+        let path = md.with_extension("balance.json");
+        let json = capitol_core::serde_json::to_string_pretty(&run).map_err(|e| format!("writing the balance: {e}"))?;
+        std::fs::write(&path, json).map_err(|e| format!("writing {}: {e}", path.display()))?;
+        println!("capitol-town: what a balance run compares is in {}", path.display());
+    }
     println!("capitol-town: the soak's report is in {}", md.display());
     Ok(report.conserved())
+}
+
+/// Each item's target price from the catalog (D2.3); none if it can't be read
+fn targets(config: &NetConfig) -> std::collections::BTreeMap<String, i64> {
+    match net::call_once(config, None, &RestRequest::Catalog) {
+        Ok(RestResponse::Catalog(catalog)) => {
+            catalog.item_types.iter().filter_map(|t| Some((t.id.clone(), t.target_price?))).collect()
+        }
+        Ok(_) | Err(_) => {
+            eprintln!("capitol-town: couldn't read the catalog, so prices are held up against the sim's D5 values");
+            Default::default()
+        }
+    }
+}
+
+/// Two soaks' balances side by side (D6.3), printed or written to `out`.
+/// `Ok(false)` when either's books drifted.
+fn compare(a: &Path, b: &Path, out: Option<&Path>) -> Result<bool, String> {
+    let read = |path: &Path| -> Result<Balance, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+        capitol_core::serde_json::from_str(&text).map_err(|e| format!("{} isn't a soak's balance: {e}", path.display()))
+    };
+    let (a, b) = (read(a)?, read(b)?);
+    let md = balance::compare(&a, &b);
+    match out {
+        Some(path) => {
+            std::fs::write(path, &md).map_err(|e| format!("writing {}: {e}", path.display()))?;
+            println!("capitol-town: the comparison is in {}", path.display());
+        }
+        None => print!("{md}"),
+    }
+    Ok(a.conserved() && b.conserved())
 }
 
 /// Appends `ledger` to a soak's books, a line of JSON.
@@ -1051,6 +1160,11 @@ fn main() -> ExitCode {
             Ok(false) => Err("the books drifted".to_string()),
             Err(e) => Err(e),
         },
+        Action::Compare { ref a, ref b, ref out } => match compare(a, b, out.as_deref()) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("a run's books drifted".to_string()),
+            Err(e) => Err(e),
+        },
         Action::Mint { size } => mint(&options, size),
         Action::Habits => habits(&options),
         Action::Status => status(&options),
@@ -1125,6 +1239,25 @@ mod tests {
         assert!(parse(args("soak --hours 2 --sample 1")).is_err());
         assert!(parse(args("soak --hours 2 --report")).is_err(), "a soak always reports");
         assert!(parse(args("soak mint --hours 2")).is_err());
+    }
+
+    #[test]
+    fn a_soak_takes_a_preset_and_compare_two_runs() {
+        let o = parse(args("soak --hours 2 --tunables tax-high.toml")).unwrap().unwrap();
+        assert_eq!(o.tunables, Some(PathBuf::from("tax-high.toml")));
+        assert!(parse(args("run --tunables tax-high.toml")).unwrap_err().contains("--tunables goes with soak"));
+        let o = parse(args("compare a.balance.json b.balance.json --out c.md")).unwrap().unwrap();
+        assert_eq!(
+            o.action,
+            Action::Compare {
+                a: "a.balance.json".into(),
+                b: "b.balance.json".into(),
+                out: Some("c.md".into())
+            }
+        );
+        assert!(parse(args("compare a.balance.json")).unwrap_err().contains("two"));
+        assert!(parse(args("compare a b c")).is_err(), "a third file");
+        assert!(parse(args("soak --hours 2 --out c.md")).unwrap_err().contains("--out goes with compare"));
     }
 
     #[test]

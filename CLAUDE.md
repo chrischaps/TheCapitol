@@ -136,6 +136,8 @@ flint-client\play.bat                                  # play in the usual world
 
 A running town reports to its server each game minute (D4.1, `GET /admin/town`, and each sample's `town`), with a key it mints into `flint-client/town/town.report-key` the first time. Citizens keep human hours (#276): each signs in when its habit says, on the real clock, a few hours some days in its own evenings, so most of the roster is away at any moment. `capitol-town habits --roster flint-client/town/town.toml` shows who's on when, and `up --always-on` keeps the whole roster on. Its roster, keys, admin and the server's log are in `flint-client/town/` (git-ignored). It runs copies of the binaries, so it never locks `cargo run`'s exe. The client keeps one server's sign-in, so a switch between the two asks for your password again ([#338](https://github.com/chrischaps/TheCapitol/issues/338)).
 
+**A balance run** (D6.3) lives the same town twice, under two presets of tunables, and compares them: `scripts\balance.ps1 A.toml B.toml [-Hours 2] [-Citizens 20] [-Merchants 2] [-Scale 10]`. Each run gets a new town on a database (`capitol_balance`), port (3400) and Redis db (2) of its own, the backend's `soak` build at `SIM_TICK_SCALE`, and `capitol-town soak --tunables <preset> --always-on`. Then `capitol-town compare` writes `flint-client/balance/<when>/balance.md`: the knobs, whether each run's books balanced, the citizens' Strands by trade, the Gini, faucets and sinks by type, and prices against their targets. A preset is TOML keyed as `/admin/tunables` keys its knobs (`property_tax_rate = 0.2`, `"yield.grass" = 1.5`); `scripts/presets/` has two. `town.ps1` and `balance.ps1` share `scripts/town-common.ps1`.
+
 ### Client (React/TypeScript/Vite)
 ```bash
 cd client

@@ -12,7 +12,7 @@ use capitol_protocol::rest::*;
 use capitol_protocol::annotation::{Annotation, AnnotationsQuery};
 use capitol_protocol::metrics::{Series, SeriesQuery};
 use capitol_protocol::terrain::TerrainResponse;
-use capitol_protocol::tunables::TunablesResponse;
+use capitol_protocol::tunables::{TunablesResponse, TunablesUpdate};
 use std::time::Duration;
 
 use reqwest::Method;
@@ -196,6 +196,9 @@ pub enum RestRequest {
     Annotations(AnnotationsQuery),
     /// `GET /admin/tunables`: every live knob, read-only in the client
     Tunables,
+    /// `PUT /admin/tunables`: set knobs, all or none, for a balance run's
+    /// preset (D6.3). Needs an admin's token.
+    SetTunables(TunablesUpdate),
     /// `GET /admin/walkers`: the players near a point, with where the server
     /// is walking them, for the admin's world layers
     Walkers(WalkersQuery),
@@ -362,7 +365,7 @@ impl RestRequest {
             | CreateCitizen(_)
             | TownKey
             | TownReport(_) => Method::POST,
-            UpdatePlotPermissions { .. } | SetByline(_) | ConfigureAutomation { .. } => Method::PUT,
+            UpdatePlotPermissions { .. } | SetByline(_) | ConfigureAutomation { .. } | SetTunables(_) => Method::PUT,
             RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } | Unlist { .. } => Method::DELETE,
             ApiKeys
             | Health
@@ -476,7 +479,7 @@ impl RestRequest {
             TownReport(_) => "/admin/town/report".into(),
             Series(_) => "/admin/series".into(),
             Annotations(_) => "/admin/annotations".into(),
-            Tunables => "/admin/tunables".into(),
+            Tunables | SetTunables(_) => "/admin/tunables".into(),
             Walkers(_) => "/admin/walkers".into(),
         }
     }
@@ -508,6 +511,7 @@ impl RestRequest {
             Buy { request, .. } => req.json(request),
             CreateCitizen(b) => req.json(b),
             TownReport(b) => req.json(b),
+            SetTunables(b) => req.json(b),
             Gazette { day: Some(date) } => req.query(&GazetteQuery { date: *date }),
             MarketDepth(q) => req.query(q),
             MyOrders(q) => req.query(q),
@@ -605,7 +609,7 @@ impl RestRequest {
             Q::TownReport(_) => A::Success(de(body)?),
             Q::Series(_) => A::Series(Box::new(de(body)?)),
             Q::Annotations(_) => A::Annotations(de(body)?),
-            Q::Tunables => A::Tunables(de(body)?),
+            Q::Tunables | Q::SetTunables(_) => A::Tunables(de(body)?),
             Q::Walkers(_) => A::Walkers(de(body)?),
         })
     }
@@ -899,6 +903,7 @@ mod tests {
             (RestRequest::Series(Default::default()), "GET", "/admin/series".into()),
             (RestRequest::Annotations(Default::default()), "GET", "/admin/annotations".into()),
             (RestRequest::Tunables, "GET", "/admin/tunables".into()),
+            (RestRequest::SetTunables(TunablesUpdate { values: Default::default() }), "PUT", "/admin/tunables".into()),
             (
                 RestRequest::Walkers(WalkersQuery { x: 1.0, y: 2.0, radius: 3.0 }),
                 "GET",

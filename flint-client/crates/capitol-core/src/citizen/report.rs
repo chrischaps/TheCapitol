@@ -734,6 +734,34 @@ mod tests {
         assert!(report.to_markdown().contains("- Spent on tax: 1 Strands"));
     }
 
+    /// A balance run (D6.3) reads the soak's report: the server's Strands by
+    /// trade, the Gini, the flows, and prices against their targets
+    #[test]
+    fn a_soaks_balance_is_cut_from_its_report() {
+        use crate::citizen::balance::Balance;
+        let samples = vec![ledger(0, 100, 0, 0, 0), ledger(120_000, 160, 12_000, 20, 20)];
+        let soak = Soak {
+            start: samples[0].clone(),
+            end: samples[1].clone(),
+            samples,
+        };
+        let report = TownReport::build(&runs(), 120.0, 10.0, Some(soak));
+        let knobs = BTreeMap::from([("property_tax_rate".to_string(), 0.2)]);
+        let targets = BTreeMap::from([("log".to_string(), 5)]);
+        let run = Balance::of(&report, "tax-20pct.toml", knobs.clone(), &targets).unwrap();
+        assert_eq!((run.preset.as_str(), &run.tunables, run.citizens), ("tax-20pct.toml", &knobs, 2));
+        let percy = run.trades.iter().find(|t| t.role == "gatherer (wood)").unwrap();
+        assert_eq!((percy.start, percy.end), (100, 160));
+        assert_eq!(run.flows["exchange_deposit"], 60);
+        assert_eq!((run.faucets, run.sinks), (60, 0));
+        let log = run.prices.iter().find(|p| p.item == "log").unwrap();
+        assert_eq!((log.traded, log.mean, log.target), (10, Some(6.0), Some(5)), "a trade counts once, not each side");
+        assert!((log.off().unwrap() - 0.2).abs() < 1e-9);
+        assert_eq!(run.gini_end, None, "one citizen has no spread");
+        assert!(run.conserved());
+        assert!(Balance::of(&TownReport::build(&runs(), 120.0, 10.0, None), "x", BTreeMap::new(), &targets).is_none());
+    }
+
     /// A soak killed before its end still has the readings it wrote down
     #[test]
     fn the_books_a_soak_kept_read_back() {

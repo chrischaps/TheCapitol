@@ -46,6 +46,7 @@ use capitol_protocol::ledger::Ledger;
 use capitol_protocol::metrics::{CitizenReport, TownFailure, TownReport, TOWN_FAILURES};
 use capitol_protocol::rest::{CreateCitizenRequest, LoginRequest};
 use capitol_protocol::rules::{self, Zone};
+use capitol_protocol::tunables::{TunablesResponse, TunablesUpdate};
 use serde::Deserialize;
 
 use super::decide::log::{self, Log};
@@ -484,6 +485,27 @@ impl Admin {
             Ok(other) => Err(format!("reading the ledger: unexpected {other:?}")),
             Err(e) if e.status() == Some(403) => Err(format!("reading the ledger: {e}. Is {} an admin?", self.email)),
             Err(e) => Err(format!("reading the ledger: {e}")),
+        }
+    }
+
+    /// Every live knob, `GET /admin/tunables` (D6.1)
+    pub fn tunables(&self, config: &NetConfig) -> Result<TunablesResponse, String> {
+        self.tunables_call(config, &RestRequest::Tunables, "reading the tunables")
+    }
+
+    /// Sets knobs, all of them or none, `PUT /admin/tunables`, for a
+    /// balance run's preset (D6.3). Returns every knob as it is now.
+    pub fn set_tunables(&self, config: &NetConfig, update: TunablesUpdate) -> Result<TunablesResponse, String> {
+        self.tunables_call(config, &RestRequest::SetTunables(update), "setting the tunables")
+    }
+
+    fn tunables_call(&self, config: &NetConfig, request: &RestRequest, doing: &str) -> Result<TunablesResponse, String> {
+        let token = self.sign_in(config)?;
+        match net::call_once(config, Some(&token), request) {
+            Ok(RestResponse::Tunables(tunables)) => Ok(tunables),
+            Ok(other) => Err(format!("{doing}: unexpected {other:?}")),
+            Err(e) if e.status() == Some(403) => Err(format!("{doing}: {e}. Is {} an admin?", self.email)),
+            Err(e) => Err(format!("{doing}: {e}")),
         }
     }
 }

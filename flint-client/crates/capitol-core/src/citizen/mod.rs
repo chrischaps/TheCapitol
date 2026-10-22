@@ -15,7 +15,10 @@
 //! - [`idle`]: where it spends the time between its tasks (C2.1).
 //! - [`report`]: what the town did, and in a soak whether the server's books
 //!   balanced and how hard it worked (C1.7).
+//! - [`balance`]: a soak under a preset of tunables, and two of them held up
+//!   against each other (D6.3).
 
+pub mod balance;
 pub mod decide;
 pub mod habit;
 pub mod idle;

@@ -22,6 +22,8 @@
 /soak/
 # scripts/town.sh's town: its roster, keys, admin and the server's log (#337)
 /town/
+# scripts/balance.ps1's runs: two towns' rosters, logs, soaks and the comparison (D6.3)
+/balance/
 # The sounds, written at start by crates/capitol-client/src/sound/library.rs
 /audio/*.wav
 /audio/.synth-version

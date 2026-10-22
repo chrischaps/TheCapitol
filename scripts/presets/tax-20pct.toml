@@ -1,0 +1,4 @@
+# Ten times today's property tax: 20% of a deed a week (#335 asks whether
+# tax bites). Every other knob at its default. A preset for
+# scripts/balance.ps1 (D6.3).
+property_tax_rate = 0.2

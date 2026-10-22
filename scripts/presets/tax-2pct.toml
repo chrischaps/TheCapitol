@@ -1,0 +1,3 @@
+# Today's property tax: 2% of a deed a week, charged an hour at a time.
+# Every other knob at its default. A preset for scripts/balance.ps1 (D6.3).
+property_tax_rate = 0.02
