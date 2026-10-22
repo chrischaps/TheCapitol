@@ -259,7 +259,8 @@ That's about the size of the wilds' W4 to W6 together.
 
 - **F1, walls** (#330): solid buildings in `walk_step`, if Chris decides for them.
 - **F2, the pad inside panels** (#331).
-- **F3, rebinds that survive a restart** (#332). Flint's user override is saved under one name and loaded under another.
+- **F3, rebinds that survive a restart** (#332). Flint's user override is saved under one name and loaded under another. Fixed in Flint#85: the player looks for `<config>/flint/input_<game_id>.toml` once the game default sets the id, and saves there. The Capitol's live at `%APPDATA%\flint\input_capitol.toml`.
+- **F4, a controls menu** (#425). Scripts can't start a rebind (`begin_rebind_capture` is Rust-only), so rebinding today means editing that file by hand.
 - **The map in Direct.** If Direct stays, a key that lifts the camera to the map and back.
 - **Mouse-look in Click mode.** If both stay, holding the right button could turn the camera in place of today's drag.
 - **Remote avatars' gait.** Analog throttle is held to three steps because the walk blend is yes or no. A blended gait would let the pad walk at any speed.
