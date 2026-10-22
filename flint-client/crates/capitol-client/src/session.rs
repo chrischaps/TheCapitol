@@ -471,6 +471,26 @@ impl Session {
         self.walk(now, x, y);
     }
 
+    /// Stop where the prediction has you (T1.1: the control mode switched).
+    /// The server hears a `move` to that spot, so it stops where you did,
+    /// and whatever the walk was for (a gather, a visit, a stall) is
+    /// dropped. Nothing while standing.
+    pub fn stop_walk(&mut self, now: Instant) {
+        if self.destination().is_none() || !self.state.plays_here() {
+            return;
+        }
+        self.harvest.walked();
+        self.visit.walked();
+        self.approach.walked();
+        self.hall.walked();
+        self.stall.walked();
+        self.route.stop();
+        if let Some((x, y)) = self.motion.stop(now) {
+            self.net.ws(ClientMessage::Move { x, y });
+            self.last_move = Some((x, y));
+        }
+    }
+
     /// Every walk goes round the water: by the walk graph, a leg at a time
     /// ([`Self::tend_route`] sends the rest), or straight while there's no
     /// graph or no way round.

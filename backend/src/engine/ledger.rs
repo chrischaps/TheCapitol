@@ -50,7 +50,7 @@ static BOOTED_MS: LazyLock<i64> = LazyLock::new(|| chrono::Utc::now().timestamp_
 
 /// How many times a snapshot waits for a moment with no unit write
 /// committing, and how long between
-const SNAPSHOT_TRIES: u32 = 50;
+pub const SNAPSHOT_TRIES: u32 = 50;
 const SNAPSHOT_WAIT: Duration = Duration::from_millis(20);
 
 /// The units a transaction makes and destroys, counted once it commits.
@@ -153,8 +153,15 @@ fn flows_now() -> BTreeMap<String, BTreeMap<String, i64>> {
 /// moment when no unit write is committing, so the two agree; a server too
 /// busy to give one in a second says so (`units_settled`).
 pub async fn snapshot(state: &AppState) -> Result<Ledger, sqlx::Error> {
+    snapshot_within(state, SNAPSHOT_TRIES).await
+}
+
+/// [`snapshot`], waiting for a quiet moment at most `tries` times. Each try
+/// reads every unit again, which a busy server pays for: the sampler (D0.2)
+/// tries once, every ten seconds.
+pub async fn snapshot_within(state: &AppState, tries: u32) -> Result<Ledger, sqlx::Error> {
     let db = &state.db;
-    let mut ledger = books(db).await?;
+    let mut ledger = books_within(db, tries).await?;
     ledger.load = super::load::read(tick_period(state.config.sim_tick_scale));
     ledger.load.players_in_world = state.game.read().await.players.len() as u64;
     ledger.load.db_pool_size = db.size();
@@ -164,7 +171,13 @@ pub async fn snapshot(state: &AppState) -> Result<Ledger, sqlx::Error> {
 }
 
 /// The books without the load: accounts, escrow, units and unit flows.
-async fn books(db: &PgPool) -> Result<Ledger, sqlx::Error> {
+#[cfg(test)]
+pub(crate) async fn books(db: &PgPool) -> Result<Ledger, sqlx::Error> {
+    books_within(db, SNAPSHOT_TRIES).await
+}
+
+/// [`books`], trying at most `most` times for a quiet moment.
+async fn books_within(db: &PgPool, most: u32) -> Result<Ledger, sqlx::Error> {
     let mut tries = 0;
     let (mut tx, unit_flows, units, units_settled) = loop {
         tries += 1;
@@ -178,7 +191,7 @@ async fn books(db: &PgPool) -> Result<Ledger, sqlx::Error> {
         // The first read takes the snapshot the rest share
         let units = units_held(&mut tx).await?;
         let settled = quiet && STARTED.load(Ordering::SeqCst) == started;
-        if settled || tries >= SNAPSHOT_TRIES {
+        if settled || tries >= most {
             break (tx, unit_flows, units, settled);
         }
         tx.rollback().await?;

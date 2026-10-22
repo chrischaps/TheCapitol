@@ -33,6 +33,10 @@ pub struct Config {
     /// and counted against the phase it ran in (D3.2). `SLOW_STATEMENT_MS`,
     /// 50 unless set.
     pub slow_statement: std::time::Duration,
+    /// Seconds between the Observatory's samples (D0.2):
+    /// `METRICS_SAMPLE_SECS`, `metrics::SAMPLE_SECS` unless set. 0 turns the
+    /// sampler off, to measure what it costs the tick.
+    pub sample_secs: u64,
 }
 
 impl Config {
@@ -66,6 +70,7 @@ impl Config {
                 }
             },
             slow_statement: std::time::Duration::from_millis(secs("SLOW_STATEMENT_MS", 50)),
+            sample_secs: secs("METRICS_SAMPLE_SECS", capitol_protocol::metrics::SAMPLE_SECS),
         })
     }
 }

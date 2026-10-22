@@ -395,6 +395,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine::automation_tick::run_automation_loop(automation_game, automation_db, automation_scale).await;
     });
 
+    // D0.2: the Observatory's samples, every ten seconds
+    if config.sample_secs > 0 {
+        let sampler_state = app_state.clone();
+        let every = std::time::Duration::from_secs(config.sample_secs);
+        tokio::spawn(async move {
+            engine::sampler::run_sampler_loop(sampler_state, every).await;
+        });
+    } else {
+        tracing::warn!("The sampler is off (METRICS_SAMPLE_SECS=0)");
+    }
+
     // D0.4: a marker on the console's charts where the server came up
     let boot = if config.sim_tick_scale == 1.0 {
         "The server started".to_string()

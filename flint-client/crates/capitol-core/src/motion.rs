@@ -64,7 +64,9 @@
 //! **On the land** (W4, #197), once [`Motion::set_ground`] has the terrain's
 //! [`Ground`], the prediction walks as the server does: slower up and down
 //! hills and through streams, and stopped by a cliff, a river or a lake. So
-//! the avatar doesn't rubber-band on a hill. Without it, the walk is flat.
+//! the avatar doesn't rubber-band on a hill. Since T0.1 (#315) the ground
+//! holds the moat and the canals and the world's edge too, so it stops at
+//! a canal on the point the server does. Without it, the walk is flat.
 //!
 //! [`Motion::sample`] fills a buffer the `Motion` owns and returns it, so it
 //! doesn't allocate once the buffer has grown to the number of players.
@@ -267,6 +269,18 @@ impl Motion {
                 local.dest = Some((x, y));
             }
         }
+    }
+
+    /// The local player stops where the prediction has them now (T1.1, a
+    /// switch of control mode). Returns where, in server units, for the
+    /// `move` that stops the server there too: it's a step or two behind on
+    /// the same path, so it walks on to the spot and no further. `None`
+    /// before the first snapshot.
+    pub fn stop(&mut self, now: Instant) -> Option<(f64, f64)> {
+        let local = self.local.as_mut().filter(|local| local.synced)?;
+        local.advance(now, &self.config, self.ground.as_deref());
+        local.stop();
+        Some((local.x, local.y))
     }
 
     /// Where the local player clicked to walk to, for a destination marker.

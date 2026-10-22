@@ -350,13 +350,14 @@ pub fn water_name(ring_id: &str) -> String {
 }
 
 /// How far short of the water's edge a blocked move stops.
-const BLOCK_BACKOFF: f64 = 2.0;
+pub(crate) const BLOCK_BACKOFF: f64 = 2.0;
 
 /// Test a straight move from `from` to `to` against every water ring, in order.
 /// Returns the first block, or `None` if the move stays dry or crosses only at bridges.
 ///
-/// This is the server's movement test. A client can run it to predict a
-/// `movement_blocked` before the server sends one.
+/// The server's walk tests each step with [`ring_crossing`], through
+/// [`ground::Ground::walk_step`]. This is the same test over a whole line,
+/// for a route, or a check that the way in is open.
 pub fn check_water_crossing(
     center: (f64, f64),
     rings: &[WaterRing],

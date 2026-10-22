@@ -189,6 +189,7 @@ engine/
   property_tax.rs - Hourly tax processing
   ledger.rs      - The world's books: units made and destroyed, and GET /admin/ledger (C1.7)
   load.rs        - Tick time and sockets as running totals, for the ledger (C1.7)
+  sampler.rs     - The Observatory's samples: one every 10 s, a day in memory, one a minute to metrics_samples (D0.2)
 
 models/          - Database types and game state structs
   account.rs     - Account, AccountInfo (includes is_admin flag)

@@ -1001,17 +1001,10 @@ impl TerrainConfig {
     }
 }
 
-/// Result of movement validation
-#[derive(Debug, Clone)]
-pub struct MovementValidation {
-    pub allowed: bool,
-    pub blocked_at: Option<(f64, f64)>,
-    pub blocked_by: Option<String>,
-}
-
 impl TerrainConfig {
-    /// The land and the wild water, indexed for walking on (W4, #197).
-    /// Build it once per terrain: `GameState` keeps it beside the terrain.
+    /// The land, the wild water and the rings, for walking on (W4, #197;
+    /// the rings since T0.1, #315). Build it once per terrain: `GameState`
+    /// keeps it beside the terrain.
     pub fn ground(&self) -> capitol_protocol::rules::ground::Ground {
         capitol_protocol::rules::ground::Ground::new(
             &self.land,
@@ -1021,27 +1014,7 @@ impl TerrainConfig {
             &self.fords,
             &self.roads,
         )
-    }
-
-    /// Validate if movement from one point to another crosses water without a bridge
-    pub fn validate_movement(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64) -> MovementValidation {
-        match rules::check_water_crossing(
-            (self.center_x, self.center_y),
-            &self.water_rings,
-            (from_x, from_y),
-            (to_x, to_y),
-        ) {
-            Some(block) => MovementValidation {
-                allowed: false,
-                blocked_at: Some((block.x, block.y)),
-                blocked_by: Some(block.ring_id),
-            },
-            None => MovementValidation {
-                allowed: true,
-                blocked_at: None,
-                blocked_by: None,
-            },
-        }
+        .with_rings((self.center_x, self.center_y), &self.water_rings)
     }
 }
 
@@ -1329,28 +1302,29 @@ mod tests {
     }
 
     #[test]
-    fn test_movement_allowed_no_water() {
-        let config = TerrainConfig::get_default();
-        // Movement within Capitol (inside moat)
-        let result = config.validate_movement(6800.0, 6800.0, 6850.0, 6850.0);
-        assert!(result.allowed);
-    }
-
-    #[test]
-    fn test_movement_blocked_by_moat() {
-        let config = TerrainConfig::get_default();
-        // Try to cross moat going East (no bridge there)
-        let result = config.validate_movement(6950.0, 6800.0, 7050.0, 6800.0);
-        assert!(!result.allowed);
-        assert_eq!(result.blocked_by, Some("moat".to_string()));
-    }
-
-    #[test]
-    fn test_movement_allowed_on_bridge() {
-        let config = TerrainConfig::get_default();
-        // Cross moat going South (bridge at 90° in screen coords where Y+ is south)
-        let result = config.validate_movement(6800.0, 6950.0, 6800.0, 7050.0);
-        assert!(result.allowed);
+    fn the_rings_stop_a_walk_but_their_bridges_let_it_over() {
+        let ground = TerrainConfig::get_default().ground();
+        // Within the Capitol, inside the moat: a whole step.
+        let step = ground.step((6800.0, 6800.0), (6850.0, 6850.0), 5.0);
+        assert_eq!(step.blocked, None);
+        // East, square into the moat, where there's no bridge.
+        let mut at = (6950.0, 6800.0);
+        let blocked = loop {
+            let step = ground.step(at, (7050.0, 6800.0), 5.0);
+            at = (step.x, step.y);
+            if let Some(blocked) = step.blocked {
+                break blocked;
+            }
+            assert!(at.0 < 7050.0, "walked over the moat");
+        };
+        assert_eq!(blocked.water_id(), "moat");
+        // South, over the moat's bridge.
+        let mut at = (6800.0, 6950.0);
+        while at != (6800.0, 7050.0) {
+            let step = ground.step(at, (6800.0, 7050.0), 5.0);
+            assert_eq!(step.blocked, None, "at {at:?}");
+            at = (step.x, step.y);
+        }
     }
 
     #[test]

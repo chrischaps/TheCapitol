@@ -195,6 +195,12 @@ struct Args {
     /// Open the settings panel at start (F10 toggles it). For captures
     #[arg(long)]
     settings_panel: bool,
+    /// Point and walk (click) or over the shoulder (direct) for this run,
+    /// over the settings. Without it, offline runs and captures
+    /// (--exit-after, --input-script) are click, whatever is saved, so
+    /// every capture recipe stays as it was. F8 switches either way
+    #[arg(long, value_enum, value_name = "MODE")]
+    controls: Option<settings::ControlMode>,
     /// Pin the time of day, 0 to 1 from midnight (0.25 dawn, 0.5 noon, 0.8
     /// evening), in place of the server's clock. Offline it's evening
     /// unless this says otherwise. For captures
@@ -355,6 +361,12 @@ fn main() -> Result<()> {
         .with_node_sample(args.node_sample)
         .with_citizen_sample(args.citizen_sample.as_deref())
         .with_trade_offer(args.trade_offer.as_deref())
+        .with_controls(args.controls.or_else(|| {
+            let capture = args.offline.is_some()
+                || args.exit_after.is_some()
+                || args.input_script.is_some();
+            capture.then_some(settings::ControlMode::Click)
+        }))
         .with_settings(
             settings::SettingsFile::load(
                 args.settings_file

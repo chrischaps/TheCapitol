@@ -98,6 +98,9 @@ pub struct Shared {
     /// How the camera rig answers you (P8.4), from the settings, for
     /// `cap_setting`.
     pub camera_feel: Arc<Mutex<crate::settings::CameraFeel>>,
+    /// How you walk and look (T1.1), for `cap_setting`. Its mode is the one
+    /// in play, which a capture or `--controls` may pin apart from the file.
+    pub controls: Arc<Mutex<crate::settings::Controls>>,
     /// egui, once its fonts are in, so `cap_name_tags` measures names with
     /// the fonts the HUD draws them in. `None` until the first `ui`.
     pub egui: Arc<Mutex<Option<egui::Context>>>,
@@ -416,15 +419,22 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     engine.register_fn("cap_clean", move || clean.load(Ordering::Relaxed));
     // `cap_setting(name) -> value`: one of the player's settings (P8.4),
     // for the scripts that need it: "camera_sensitivity" (a multiple of the
-    // rig's turn and zoom rates, 1.0 as made) and "invert_orbit" (bool). ()
-    // for any other name. A workaround: settings are read here rather than
-    // from the engine's store, which extensions can't reach (issue #71).
+    // rig's turn and zoom rates, 1.0 as made), "invert_orbit" (bool),
+    // "control_mode" ("click" or "direct", the one in play, T1.1),
+    // "look_sensitivity" (a multiple of the action camera's mouse-look) and
+    // "invert_look_y" (bool). () for any other name. Settings are read here
+    // rather than from the engine's store; see settings.rs for why.
     let feel = shared.camera_feel.clone();
+    let controls = shared.controls.clone();
     engine.register_fn("cap_setting", move |name: &str| -> rhai::Dynamic {
         let feel = feel.lock().map(|f| *f).unwrap_or_default();
+        let controls = controls.lock().map(|c| *c).unwrap_or_default();
         match name {
             "camera_sensitivity" => (feel.sensitivity as f64).into(),
             "invert_orbit" => feel.invert_orbit.into(),
+            "control_mode" => controls.mode.name().into(),
+            "look_sensitivity" => (controls.look_sensitivity as f64).into(),
+            "invert_look_y" => controls.invert_look_y.into(),
             _ => rhai::Dynamic::UNIT,
         }
     });
