@@ -75,7 +75,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         license(name = "MIT")
     ),
     servers(
-        (url = "http://localhost:3000", description = "Local development server")
+        (url = "/", description = "This server (the one serving these docs)")
     ),
     modifiers(&SecurityAddon),
     tags(
