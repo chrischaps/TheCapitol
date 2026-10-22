@@ -3,8 +3,9 @@
 //! with. `capitol-bot --market plank,iron_ingot` runs one, and the economy
 //! sim's makers run the same loop.
 //!
-//! - **The reference** is the item's last trade or, before it has traded, D5's
-//!   labour value ([`seed_price`]). It follows the trades, but only within
+//! - **The reference** is the item's last trade or, before it has traded, its
+//!   target price, D5's labour value, from the catalog (`target_price` in
+//!   `items.toml`, D2.3). It follows the trades, but only within
 //!   [`DRIFT`]× of where it started, so a run of one-sided fills can't walk it
 //!   off.
 //! - **Quotes** ([`quotes`]): `depth` levels a side. The first is half the
@@ -39,49 +40,6 @@ use uuid::Uuid;
 use crate::bot::{Bot, BotError};
 use crate::market::MarketEvent;
 use crate::state::StateEvent;
-
-/// D5's value chain, in Strands a unit: where an item's price starts before
-/// it has traded. Rough labour at 1 labour-minute ≈ 15 Strands. Kits and
-/// tools are there for completeness; the makers mostly quote materials.
-pub const SEED_PRICES: &[(&str, i64)] = &[
-    ("fiber", 1),
-    ("rope", 3),
-    ("sticks", 3),
-    ("clay", 4),
-    ("plank", 5),
-    ("charcoal", 5),
-    ("stone", 5),
-    ("iron_nails", 6),
-    ("log", 8),
-    ("brick", 8),
-    ("tool_handle", 13),
-    ("knapped_stone", 13),
-    ("iron_ore", 20),
-    ("iron_ingot", 50),
-    ("stone_axe", 50),
-    ("stone_pickaxe", 50),
-    ("stone_hammer", 50),
-    ("stone_sickle", 50),
-    ("iron_sickle_blade", 60),
-    ("iron_axe_head", 110),
-    ("iron_pickaxe_head", 110),
-    ("iron_hammer_head", 110),
-    ("iron_axe", 130),
-    ("iron_pickaxe", 130),
-    ("iron_hammer", 130),
-    ("iron_sickle", 130),
-    ("workbench_kit", 12),
-    ("chest_kit", 12),
-    ("kiln_kit", 90),
-    ("forge_kit", 150),
-    ("sawbench_kit", 150),
-    ("anvil_kit", 320),
-];
-
-/// D5's price for `item_type`, if it has one.
-pub fn seed_price(item_type: &str) -> Option<i64> {
-    SEED_PRICES.iter().find(|(i, _)| *i == item_type).map(|(_, p)| *p)
-}
 
 /// How far the reference may follow the trades from where it started, as a
 /// factor either way.
@@ -390,14 +348,15 @@ impl Maker {
     }
 
     /// Watches every item, learns the bot's orders and box, and sets each
-    /// reference from the last trade, or D5. An item with neither is an error.
+    /// reference from the last trade, or the catalog's target price. An item
+    /// with neither is an error.
     pub fn start(&mut self, bot: &mut Bot) -> Result<(), BotError> {
         let summary = bot.market_summary()?;
         for item in &self.config.items {
             bot.watch_market(item)?;
             let last = summary.items.iter().find(|s| &s.item_type == item).and_then(|s| s.last_price);
-            let price = last.or_else(|| seed_price(item)).ok_or_else(|| {
-                BotError::Failed(format!("{item} has never traded and D5 gives it no price"))
+            let price = last.or_else(|| bot.state().catalog().target_price(item)).ok_or_else(|| {
+                BotError::Failed(format!("{item} has never traded and the catalog gives it no target price"))
             })?;
             self.references.insert(item.clone(), Reference::new(price));
         }
@@ -616,12 +575,13 @@ mod tests {
     }
 
     #[test]
-    fn every_item_the_sim_trades_has_a_seed() {
+    fn every_item_the_sim_trades_has_a_target() {
+        let catalog = crate::catalog::Catalog::fallback();
         for item in ["fiber", "log", "plank", "iron_ore", "iron_ingot", "charcoal", "brick", "stone", "rope"] {
-            assert!(seed_price(item).is_some(), "{item}");
+            assert!(catalog.target_price(item).is_some(), "{item}");
         }
-        assert_eq!(seed_price("iron_ingot"), Some(50));
-        assert_eq!(seed_price("unobtainium"), None);
+        assert_eq!(catalog.target_price("iron_ingot"), Some(50));
+        assert_eq!(catalog.target_price("unobtainium"), None);
     }
 
     #[test]

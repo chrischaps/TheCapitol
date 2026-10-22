@@ -10,6 +10,11 @@
 #              tool or placeable (a station kit)
 #   stackable  false for one-per-slot items such as kits and tools
 #   weight     per unit
+#   target_price  optional: Strands a unit the economy is balanced to, D5's
+#              value chain at about 15 Strands a labour-minute. Market makers
+#              quote round it before an item has traded, and the Observatory
+#              charts the market's price against it and watches for an item
+#              off target (D2.3).
 #   tool       only for a tool (E1.4): { tool_type, tier, base_power,
 #              max_durability }. tool_type is sickle, axe, pickaxe, hammer
 #              or saw; tier is the material, stone, bronze, iron or steel.
@@ -26,6 +31,7 @@ name = "Plant Fiber"
 category = "raw_material"
 stackable = true
 weight = 0.1
+target_price = 1
 
 [[item]]
 id = "rope"
@@ -33,6 +39,7 @@ name = "Rope"
 category = "processed_material"
 stackable = true
 weight = 0.2
+target_price = 3
 
 [[item]]
 id = "workbench_kit"
@@ -40,6 +47,7 @@ name = "Workbench Kit"
 category = "placeable"
 stackable = false
 weight = 10
+target_price = 12
 
 [[item]]
 id = "forge_kit"
@@ -47,6 +55,7 @@ name = "Forge Kit"
 category = "placeable"
 stackable = false
 weight = 15
+target_price = 150
 
 [[item]]
 id = "chest_kit"
@@ -54,6 +63,7 @@ name = "Storage Chest Kit"
 category = "placeable"
 stackable = false
 weight = 8
+target_price = 12
 
 # The stone tier (D5): a knapped edge, a handle and rope.
 [[item]]
@@ -62,6 +72,7 @@ name = "Stone Sickle"
 category = "tool"
 stackable = false
 weight = 0.8
+target_price = 50
 tool = { tool_type = "sickle", tier = "stone", base_power = 10.0, max_durability = 60 }
 
 # What the D5 resources yield (E2.2). E2.4 (#163) brings the rest of D5's items.
@@ -71,6 +82,7 @@ name = "Sticks"
 category = "raw_material"
 stackable = true
 weight = 0.3
+target_price = 3
 
 [[item]]
 id = "clay"
@@ -78,6 +90,7 @@ name = "Clay"
 category = "raw_material"
 stackable = true
 weight = 0.5
+target_price = 4
 
 [[item]]
 id = "stone"
@@ -85,6 +98,7 @@ name = "Stone"
 category = "raw_material"
 stackable = true
 weight = 1.0
+target_price = 5
 
 [[item]]
 id = "log"
@@ -92,6 +106,7 @@ name = "Log"
 category = "raw_material"
 stackable = true
 weight = 3.0
+target_price = 8
 
 [[item]]
 id = "iron_ore"
@@ -99,6 +114,7 @@ name = "Iron Ore"
 category = "raw_material"
 stackable = true
 weight = 1.5
+target_price = 20
 
 # The stone axe and pickaxe, and their parts: trees and veins need them, so
 # without them logs and ore couldn't be had (E2.2). The D5 stone tier.
@@ -108,6 +124,7 @@ name = "Tool Handle"
 category = "processed_material"
 stackable = true
 weight = 0.4
+target_price = 13
 
 [[item]]
 id = "knapped_stone"
@@ -115,6 +132,7 @@ name = "Knapped Stone"
 category = "processed_material"
 stackable = true
 weight = 0.5
+target_price = 13
 
 [[item]]
 id = "stone_axe"
@@ -122,6 +140,7 @@ name = "Stone Axe"
 category = "tool"
 stackable = false
 weight = 1.4
+target_price = 50
 tool = { tool_type = "axe", tier = "stone", base_power = 10.0, max_durability = 60 }
 
 [[item]]
@@ -130,6 +149,7 @@ name = "Stone Pickaxe"
 category = "tool"
 stackable = false
 weight = 1.6
+target_price = 50
 tool = { tool_type = "pickaxe", tier = "stone", base_power = 10.0, max_durability = 60 }
 
 # The rest of D5 (E2.4). The stone hammer opens the anvil and the kits.
@@ -139,6 +159,7 @@ name = "Stone Hammer"
 category = "tool"
 stackable = false
 weight = 1.4
+target_price = 50
 tool = { tool_type = "hammer", tier = "stone", base_power = 10.0, max_durability = 60 }
 
 # What the sawbench, kiln and forge make from logs, clay and ore.
@@ -148,6 +169,7 @@ name = "Plank"
 category = "processed_material"
 stackable = true
 weight = 1.0
+target_price = 5
 
 [[item]]
 id = "charcoal"
@@ -155,6 +177,7 @@ name = "Charcoal"
 category = "processed_material"
 stackable = true
 weight = 0.4
+target_price = 5
 
 [[item]]
 id = "brick"
@@ -162,6 +185,7 @@ name = "Brick"
 category = "processed_material"
 stackable = true
 weight = 1.2
+target_price = 8
 
 [[item]]
 id = "iron_ingot"
@@ -169,6 +193,7 @@ name = "Iron Ingot"
 category = "processed_material"
 stackable = true
 weight = 1.0
+target_price = 50
 
 [[item]]
 id = "iron_nails"
@@ -176,6 +201,7 @@ name = "Iron Nails"
 category = "processed_material"
 stackable = true
 weight = 0.05
+target_price = 6
 
 # Iron heads, forged at the anvil and hafted at the workbench.
 [[item]]
@@ -184,6 +210,7 @@ name = "Iron Sickle Blade"
 category = "component"
 stackable = true
 weight = 0.6
+target_price = 60
 
 [[item]]
 id = "iron_axe_head"
@@ -191,6 +218,7 @@ name = "Iron Axe Head"
 category = "component"
 stackable = true
 weight = 1.2
+target_price = 110
 
 [[item]]
 id = "iron_pickaxe_head"
@@ -198,6 +226,7 @@ name = "Iron Pickaxe Head"
 category = "component"
 stackable = true
 weight = 1.4
+target_price = 110
 
 [[item]]
 id = "iron_hammer_head"
@@ -205,6 +234,7 @@ name = "Iron Hammer Head"
 category = "component"
 stackable = true
 weight = 1.2
+target_price = 110
 
 # The iron tier: more yield, cleaner quality, and over three times the life.
 [[item]]
@@ -213,6 +243,7 @@ name = "Iron Sickle"
 category = "tool"
 stackable = false
 weight = 1.0
+target_price = 130
 tool = { tool_type = "sickle", tier = "iron", base_power = 18.0, max_durability = 200 }
 
 [[item]]
@@ -221,6 +252,7 @@ name = "Iron Axe"
 category = "tool"
 stackable = false
 weight = 1.6
+target_price = 130
 tool = { tool_type = "axe", tier = "iron", base_power = 18.0, max_durability = 200 }
 
 [[item]]
@@ -229,6 +261,7 @@ name = "Iron Pickaxe"
 category = "tool"
 stackable = false
 weight = 1.8
+target_price = 130
 tool = { tool_type = "pickaxe", tier = "iron", base_power = 18.0, max_durability = 200 }
 
 [[item]]
@@ -237,6 +270,7 @@ name = "Iron Hammer"
 category = "tool"
 stackable = false
 weight = 1.6
+target_price = 130
 tool = { tool_type = "hammer", tier = "iron", base_power = 18.0, max_durability = 200 }
 
 # The wilds' yields (#225): bronze's two ores, and reeds for a better rope.
@@ -337,6 +371,7 @@ name = "Kiln Kit"
 category = "placeable"
 stackable = false
 weight = 14
+target_price = 90
 
 [[item]]
 id = "sawbench_kit"
@@ -344,6 +379,7 @@ name = "Sawbench Kit"
 category = "placeable"
 stackable = false
 weight = 12
+target_price = 150
 
 [[item]]
 id = "anvil_kit"
@@ -351,3 +387,4 @@ name = "Anvil Kit"
 category = "placeable"
 stackable = false
 weight = 20
+target_price = 320

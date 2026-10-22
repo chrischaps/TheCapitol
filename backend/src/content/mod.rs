@@ -38,6 +38,8 @@ pub struct ItemDef {
     pub category: String,
     pub stackable: bool,
     pub weight: f32,
+    /// Strands a unit the economy is balanced to (D2.3, D5's value chain)
+    pub target_price: Option<i64>,
     /// Set for a tool (E1.4)
     pub tool: Option<ToolDef>,
 }
@@ -240,6 +242,7 @@ impl ItemDef {
             tier: self.tool.as_ref().map(|t| t.tier.clone()),
             base_power: self.tool.as_ref().map(|t| t.base_power),
             max_durability: self.tool.as_ref().map(|t| t.max_durability),
+            target_price: self.target_price,
         }
     }
 }
@@ -575,6 +578,11 @@ pub fn validate(content: &Content) -> Vec<String> {
     validate_wilds(&content.wilds, &content.resources, &mut problems);
     for s in &content.stations {
         item(&mut problems, format!("station '{}' (its kit)", s.id), &s.kit);
+    }
+    for i in &content.items {
+        if i.target_price.is_some_and(|p| p < 1) {
+            problems.push(format!("item '{}' has a target price under 1 Strand", i.id));
+        }
     }
     for i in &content.items {
         let Some(tool) = &i.tool else { continue };
@@ -937,12 +945,13 @@ async fn upsert(tx: &mut Transaction<'_, Postgres>, content: &Content) -> Result
     for i in &content.items {
         sqlx::query(
             "INSERT INTO item_types (id, name, category, stackable, weight,
-                 tool_type, tier, base_power, max_durability)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 tool_type, tier, base_power, max_durability, target_price)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, category = EXCLUDED.category,
                  stackable = EXCLUDED.stackable, weight = EXCLUDED.weight,
                  tool_type = EXCLUDED.tool_type, tier = EXCLUDED.tier,
-                 base_power = EXCLUDED.base_power, max_durability = EXCLUDED.max_durability",
+                 base_power = EXCLUDED.base_power, max_durability = EXCLUDED.max_durability,
+                 target_price = EXCLUDED.target_price",
         )
         .bind(&i.id)
         .bind(&i.name)
@@ -953,6 +962,7 @@ async fn upsert(tx: &mut Transaction<'_, Postgres>, content: &Content) -> Result
         .bind(i.tool.as_ref().map(|t| &t.tier))
         .bind(i.tool.as_ref().map(|t| t.base_power))
         .bind(i.tool.as_ref().map(|t| t.max_durability))
+        .bind(i.target_price)
         .execute(&mut **tx)
         .await?;
         n += 1;
@@ -1340,13 +1350,24 @@ mod tests {
             // D5: the forge kit is bricks, stone and rope, under a hammer
             "recipes {\"id\":\"craft_forge\"",
         ];
+        // D2.3 gives items target prices, which no seed had
+        fn untargeted(row: &str) -> String {
+            match row.split_once("\"target_price\":") {
+                Some((head, tail)) => {
+                    let rest = tail.trim_start_matches(|c: char| c.is_ascii_digit());
+                    format!("{head}\"target_price\":null{rest}")
+                }
+                None => row.to_string(),
+            }
+        }
         let before = static_tables(&db).await;
         let report = sync(&db, &load().unwrap()).await.unwrap();
         assert_eq!(report.retired, 0);
         let after = static_tables(&db).await;
+        let untargeted_after: Vec<_> = after.iter().map(|row| untargeted(row)).collect();
         let changed: Vec<_> = before
             .iter()
-            .filter(|row| !after.contains(row))
+            .filter(|row| !untargeted_after.contains(row))
             .filter(|row| !CHANGED_ON_PURPOSE.iter().any(|p| row.starts_with(p)))
             .collect();
         assert!(changed.is_empty(), "the sync changed seeded rows:

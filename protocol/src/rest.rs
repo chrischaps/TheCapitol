@@ -961,6 +961,11 @@ pub struct CatalogItemType {
     /// Stackable items merge into one slot; kits and tools don't.
     pub stackable: bool,
     pub weight: f32,
+    /// Strands a unit the economy is balanced to (D2.3): D5's value chain,
+    /// where a market maker's quotes start before the item has traded, and
+    /// what the Observatory judges the market's price against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_price: Option<i64>,
     /// Set when the item is a tool (E1.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<CatalogTool>,

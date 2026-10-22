@@ -2023,6 +2023,7 @@ fn a_catalog_replaces_the_fallback_and_brings_the_recipes() {
         category: "processed_material".into(),
         stackable: true,
         weight: 0.5,
+        target_price: None,
         tool: None,
     });
     assert_eq!(

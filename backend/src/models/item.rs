@@ -10,7 +10,7 @@ use capitol_protocol::rules::tools;
 
 /// The `item_types` columns an [`ItemType`] reads, for `SELECT`s.
 pub const ITEM_TYPE_COLUMNS: &str =
-    "id, name, category, stackable, weight, tool_type, tier, base_power, max_durability";
+    "id, name, category, stackable, weight, tool_type, tier, base_power, max_durability, target_price";
 
 /// A stack's maker as SQL (#242): `json` `{name, citizen}` for the player whose
 /// mark every unit of stack `$item` carries, NULL when a unit has none, the
@@ -54,6 +54,8 @@ pub struct ItemType {
     pub base_power: Option<f64>,
     /// The tool's uses at Q50
     pub max_durability: Option<i32>,
+    /// Strands a unit the economy is balanced to (D2.3)
+    pub target_price: Option<i64>,
 }
 
 impl ItemType {

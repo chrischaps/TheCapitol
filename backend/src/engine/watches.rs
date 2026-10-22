@@ -10,8 +10,8 @@
 //! which goes out on the admin stream, and each sample lists the watches
 //! firing as it was taken.
 //!
-//! No item has a target price yet: D2.3 (#362) puts `target_price` in the
-//! content, and until then the off-target watch has nothing to watch.
+//! The off-target watch judges each item with a `target_price` in the
+//! content (D2.3, #362), as the game loaded it at startup.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -25,16 +25,19 @@ use uuid::Uuid;
 use super::annotations;
 use crate::state::AppState;
 
-/// The watches, and the last ledger whose units were read in a quiet moment.
+/// The watches, the items' target prices, and the last ledger whose units
+/// were read in a quiet moment.
 #[derive(Default)]
 pub struct Watcher {
     watches: Watches,
+    targets: BTreeMap<String, f64>,
     settled: Option<Ledger>,
 }
 
 impl Watcher {
-    pub fn new() -> Watcher {
-        Watcher::default()
+    /// A watcher judging prices against `targets`, Strands a unit by item type.
+    pub fn new(targets: BTreeMap<String, f64>) -> Watcher {
+        Watcher { targets, ..Watcher::default() }
     }
 
     /// Judge `sample`, taken between the ledgers `last` and `now`, and say
@@ -52,9 +55,7 @@ impl Watcher {
         };
         let fired = {
             let reading = self.reading(last, now, admins, sample, deeds);
-            // D2.3 (#362) gives items their target prices
-            let targets = BTreeMap::new();
-            self.watches.observe(&reading, &state.tunables.get().watches, &targets)
+            self.watches.observe(&reading, &state.tunables.get().watches, &self.targets)
         };
         for fired in fired {
             tracing::warn!("Watch: {}", fired.text);

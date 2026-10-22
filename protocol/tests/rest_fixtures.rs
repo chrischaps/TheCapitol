@@ -18,7 +18,8 @@
 //! statements (D3.2).
 //! `fixtures/rest/sample.json` is one of the Observatory's samples (D0.2): ten
 //! seconds of a 20-citizen town, with its wealth pooling (D2.5), its two
-//! reports' summary (D4.1), and its wealth by trade (D2.2).
+//! reports' summary (D4.1), its wealth by trade (D2.2), and the books in logs
+//! and planks (D2.3), planks with nobody bidding.
 //! `fixtures/rest/admin_feed.json` is one of each of the rest of what
 //! `GET /admin/stream` sends (D0.3); the sample is `sample.json`.
 //! `fixtures/rest/town_report.json` is `POST /admin/town/report` (D4.1): a
@@ -225,6 +226,8 @@ fn a_sample_round_trips_with_its_window() {
     assert_eq!(sample.load.loops["sampler"].runs, 1);
     assert_eq!(sample.strands.total(), 61240 + 412 + 50000 + 1836);
     assert_eq!(sample.market["log"].vwap(), Some(36.0 / 7.0));
+    assert_eq!(sample.books["log"].best_bid, Some(5));
+    assert_eq!(sample.books["plank"].best_bid, None);
     assert_eq!(sample.players.people + sample.players.citizens, sample.load.players_in_world);
     assert_eq!(sample.watches, [Watch::of(WatchKind::Gini)]);
     let town = sample.town.as_ref().unwrap();

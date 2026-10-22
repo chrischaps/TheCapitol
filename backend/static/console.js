@@ -12,7 +12,8 @@
 // the town, D6.2 tuning). D1.2 made the overview: tiles for health, the tick
 // and who's on, the books' drift, and the newest on the wire. D1.3 adds
 // the map. D2.1 grows the economy tab: where the Strands come from and
-// go, what buy orders hold, and how fast the money moves.
+// go, what buy orders hold, and how fast the money moves. D2.3 adds prices
+// against target.
 
 "use strict";
 
@@ -59,6 +60,8 @@
     health: null,
     // The Gini watch's threshold, from the knobs, drawn over the Gini
     giniWatch: null,
+    // Each item's target price from /catalog, once read (D2.3)
+    targets: null,
   };
 
   // ---------------------------------------------------------------------------
@@ -252,7 +255,7 @@
   // The fields each set of charts reads: the tick's `load` is most of a
   // sample, so it's read only for the performance tab (#411), and the
   // money's flows and trades, and the wealth by trade, only for the economy tab
-  const FIELDS = { base: "players,strands,drift", load: "load", money: "strand_flows,new_accounts,market,bazaar,distribution" };
+  const FIELDS = { base: "players,strands,drift", load: "load", money: "strand_flows,new_accounts,market,bazaar,distribution,books" };
 
   async function readSeries(set) {
     const from = rangeFrom();
@@ -599,11 +602,174 @@
     legend: (v) => `${v.toFixed(2)}× a game day`,
     series: [{ key: "velocity", label: "Velocity", color: "--s2", width: 2 }],
   });
-  const PAGE_CHARTS = { overview: ["players"], economy: ["strands", "flows", "escrow", "velocity", "spread"], performance: ["tick"] };
+  const PAGE_CHARTS = { overview: ["players"], economy: ["strands", "flows", "escrow", "velocity", "spread", "prices"], performance: ["tick"] };
 
   function chart(name) {
     state.charts[name] ??= CHARTS[name]();
     state.charts[name].update();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Prices against target (D2.3): each item's market VWAP over a trailing
+  // window, as a share of the price the content balances it to
+
+  // A sample's ten seconds seldom hold a fill, so each point is the VWAP of
+  // the fills in the ten minutes up to it
+  const TRAIL_MS = 10 * 60_000;
+  // The most items the chart draws, the most traded first: one per series colour
+  const PRICE_LINES = 5;
+
+  /** Each item's target price, Strands a unit, from the catalog (read once) */
+  async function readTargets() {
+    if (state.targets) return state.targets;
+    const res = await fetch("/catalog");
+    if (!res.ok) throw new Error(`/catalog: ${res.status}`);
+    const catalog = await res.json();
+    state.targets = new Map(catalog.item_types.filter((t) => t.target_price).map((t) => [t.id, t.target_price]));
+    return state.targets;
+  }
+
+  /** `item`'s trailing VWAP at each of `shown`, null where nothing traded */
+  function trailing(shown, item) {
+    const out = [];
+    let lo = 0;
+    let units = 0;
+    let strands = 0;
+    for (const s of shown) {
+      const t = s.market?.[item];
+      if (t) { units += t.units; strands += t.strands; }
+      while (shown[lo].at_ms <= s.at_ms - TRAIL_MS) {
+        const old = shown[lo++].market?.[item];
+        if (old) { units -= old.units; strands -= old.strands; }
+      }
+      out.push(units > 0 ? strands / units : null);
+    }
+    return out;
+  }
+
+  /** The market over the range, by item: fills, units, Strands, and the newest book */
+  function marketOver(list) {
+    const items = new Map();
+    const of = (id) => {
+      if (!items.has(id)) items.set(id, { id, trades: 0, units: 0, strands: 0, book: null });
+      return items.get(id);
+    };
+    for (const s of list) {
+      for (const [id, t] of Object.entries(s.market ?? {})) {
+        const i = of(id);
+        i.trades += t.trades;
+        i.units += t.units;
+        i.strands += t.strands;
+      }
+    }
+    const newest = list.at(-1);
+    for (const [id, b] of Object.entries(newest?.books ?? {})) of(id).book = b;
+    return items;
+  }
+
+  // The chart's items, so it's rebuilt when the most traded change, and each
+  // one's trailing price as a share of target by `at_ms`, worked out once a
+  // render by `prices`
+  let priceLines = [];
+  let priceTrail = new Map();
+  CHARTS.prices = () => lineChart($("chart-prices"), {
+    has: (s) => s.market,
+    log: true,
+    axis: (v) => `${Number((v * 100).toPrecision(2))}%`,
+    legend: (v) => `${Math.round(v * 100)}% of target`,
+    series: [
+      ...priceLines.map((id, k) => ({
+        label: capital(item(id)),
+        color: `--s${k + 1}`,
+        width: 2,
+        value: (s) => priceTrail.get(id)?.get(s.at_ms) ?? null,
+      })),
+      { label: "Target", color: "--marker", width: 1, dash: [5, 4], value: () => 1 },
+    ],
+  });
+
+  async function prices() {
+    let targets;
+    try { targets = await readTargets(); } catch (e) {
+      console.warn(e);
+      return void ($("prices-headline").textContent = "The catalog couldn't be read, so there are no targets to judge by.");
+    }
+    const list = inRange((s) => s.market);
+    const items = marketOver(list);
+    const firing = new Set((latest((s) => s.watches)?.watches ?? []).filter((w) => w.kind === "off_target").map((w) => w.item));
+    const rows = [...items.values()]
+      .filter((i) => targets.has(i.id) && (i.units > 0 || i.book))
+      .map((i) => ({ ...i, target: targets.get(i.id), vwap: i.units > 0 ? i.strands / i.units : null, off: firing.has(i.id) }))
+      .sort((a, b) => b.strands - a.strands || a.id.localeCompare(b.id));
+
+    // The chart: the most traded, rebuilt when they change
+    const lines = rows.filter((r) => r.units > 0).slice(0, PRICE_LINES).map((r) => r.id);
+    priceTrail = new Map(lines.map((id) => {
+      const target = targets.get(id);
+      return [id, new Map(trailing(list, id).map((v, k) => [list[k].at_ms, v == null ? null : v / target]))];
+    }));
+    if (lines.join() !== priceLines.join()) {
+      priceLines = lines;
+      state.charts.prices?.destroy();
+      delete state.charts.prices;
+    }
+    chart("prices");
+
+    $("prices").tBodies[0].replaceChildren(...(rows.length ? rows.map(priceRow(list)) : [emptyRow(7, "Nothing with a target has traded or rested on the book in the range.")]));
+    $("prices-headline").textContent = pricesHeadline(rows, list);
+  }
+
+  function pricesHeadline(rows, list) {
+    if (!list.length) return "Waiting for the first sample.";
+    const traded = rows.filter((r) => r.vwap != null);
+    if (!traded.length) {
+      return rows.length ? `Nothing with a target traded ${since(list[0])}, though ${plural(rows.length, "item rests", "items rest")} on the book.` : `Nothing traded on the market ${since(list[0])}.`;
+    }
+    const off = rows.filter((r) => r.off);
+    const far = traded.map((r) => ({ r, by: r.vwap / r.target })).sort((a, b) => Math.abs(Math.log(b.by)) - Math.abs(Math.log(a.by)))[0];
+    const at = (r) => `${capital(item(r.id))} trades at ${price(r.vwap)} against a target of ${nf.format(r.target)}`;
+    const lead = off.length
+      ? `${off.length === 1 ? `${capital(item(off[0].id))} is` : `${plural(off.length, "item is", "items are")}`} off target for a game day.`
+      : "";
+    if (Math.abs(Math.log(far.by)) < Math.log(1.1)) {
+      return `${lead}${lead ? " " : ""}Every item traded ${since(list[0])} is within a tenth of its target.`.trim();
+    }
+    const pct = Math.round(Math.abs(far.by - 1) * 100);
+    return `${lead}${lead ? " Furthest: " : ""}${at(far.r)}, ${pct}% ${far.by < 1 ? "under" : "over"}.`;
+  }
+
+  const price = (v) => (v == null ? "–" : v < 10 ? Number(v.toFixed(2)).toString() : nf.format(Math.round(v)));
+
+  function priceRow(list) {
+    return (r) => {
+      const tr = document.createElement("tr");
+      if (r.off) tr.className = "off";
+      const by = r.vwap == null ? null : r.vwap / r.target;
+      const against = by == null ? "–" : Math.abs(by - 1) < 0.005 ? "on target" : `${by < 1 ? "−" : "+"}${Math.round(Math.abs(by - 1) * 100)}%`;
+      const book = r.book
+        ? [r.book.bids ? `${nf.format(r.book.bids)} bid at ${nf.format(r.book.best_bid)}` : "no bids", r.book.asks ? `${nf.format(r.book.asks)} asked at ${nf.format(r.book.best_ask)}` : "no asks"].join(" · ")
+        : "empty";
+      const spark = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      spark.setAttribute("class", "spark");
+      spark.setAttribute("viewBox", "0 0 100 28");
+      spark.setAttribute("preserveAspectRatio", "none");
+      spark.setAttribute("aria-hidden", "true");
+      // Over the whole range, so it shows when the item traded, and scaled to
+      // its own lows and highs, so a small drift still shows
+      drawSpark(spark, trailing(list, r.id), false);
+      tr.title = r.off ? "The off-target watch is firing: a game day's VWAP is further from target than the threshold." : "";
+      tr.append(
+        cell(capital(item(r.id))),
+        cell(nf.format(r.target), "num dim"),
+        cell(price(r.vwap), "num now"),
+        // Half again either way is where the watch's default threshold sits
+        cell(against, `num ${by == null ? "dim" : by <= 0.5 || by >= 1.5 ? "far" : ""}`),
+        cell(r.units ? `${nf.format(r.units)} in ${plural(r.trades, "fill", "fills")}` : "none", "num dim"),
+        cell(book, "dim"),
+        cell(spark, "trend"),
+      );
+      return tr;
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -871,6 +1037,7 @@
     if (books) flows();
     escrow();
     distribution();
+    await prices();
   }
 
   function strands() {

@@ -62,7 +62,7 @@ impl SimBot {
     /// What the merchant has to make a market with, in Strands: its
     /// Strands, those on its bids included, and its goods, in hand, in the
     /// market box and on its asks, at its maker's references, or else its
-    /// books, or else D5's price.
+    /// books, or else the catalog's target price.
     fn float(&self) -> i64 {
         let Some(merchant) = &self.merchant else { return 0 };
         let goods: i64 = merchant
@@ -74,7 +74,7 @@ impl SimBot {
                     .as_ref()
                     .and_then(|m| m.reference(item))
                     .or_else(|| meet::worth(self.bot.state(), item))
-                    .or_else(|| market_maker::seed_price(item))
+                    .or_else(|| self.bot.state().catalog().target_price(item))
                     .unwrap_or(0);
                 market_maker::position(&self.bot, item) as i64 * price
             })

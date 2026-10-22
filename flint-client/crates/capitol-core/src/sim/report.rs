@@ -283,7 +283,8 @@ impl Report {
                     price_mean: (traded > 0)
                         .then(|| fills.iter().map(|(q, p)| q * p).sum::<i64>() as f64 / traded as f64),
                     price_high: fills.iter().map(|(_, p)| *p).max(),
-                    d5_price: crate::market_maker::seed_price(&item),
+                    // The seed content's: a report reads no server's catalog
+                    d5_price: crate::catalog::Catalog::fallback().target_price(&item),
                     item,
                     gathered,
                     crafted,

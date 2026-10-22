@@ -83,6 +83,12 @@ impl Catalog {
         }
     }
 
+    /// Strands a unit the economy is balanced to (D2.3), if the content
+    /// gives the item one: D5's value chain, in `items.toml`.
+    pub fn target_price(&self, id: &str) -> Option<i64> {
+        self.item_type(id)?.target_price
+    }
+
     pub fn station_types(&self) -> &[CatalogStationType] {
         &self.data.station_types
     }

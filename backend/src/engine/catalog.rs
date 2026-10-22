@@ -25,6 +25,7 @@ pub fn build(game: &GameState) -> CatalogResponse {
             category: t.category.clone(),
             stackable: t.stackable,
             weight: t.weight,
+            target_price: t.target_price,
             tool: t.tool(),
         })
         .collect();

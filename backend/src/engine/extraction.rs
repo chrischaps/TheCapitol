@@ -643,6 +643,7 @@ mod tests {
             tier: None,
             base_power: None,
             max_durability: None,
+            target_price: Some(1),
         };
         let items: HashMap<_, _> = [("fiber".to_string(), fiber)].into();
         let mut done = Vec::new();

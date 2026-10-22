@@ -79,6 +79,10 @@ pub struct Sample {
     pub market: BTreeMap<String, Trades>,
     /// The bazaar's sales over the window, by item type
     pub bazaar: BTreeMap<String, Trades>,
+    /// The market's open orders as it was taken, by item type (D2.3); only
+    /// items with some, and a sample stored before it reads with none
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub books: BTreeMap<String, Book>,
     pub players: Players,
     pub events: EventBus,
     /// The watches firing as it was taken (D2.5); a sample stored before
@@ -159,6 +163,22 @@ impl Trades {
     }
 }
 
+/// One item's book at a moment: what rests on each side (D2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Book {
+    /// Units wanted on open buy orders
+    pub bids: i64,
+    /// Units offered on open sell orders
+    pub asks: i64,
+    /// The highest bid, Strands a unit
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_bid: Option<i64>,
+    /// The lowest ask, Strands a unit
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_ask: Option<i64>,
+}
+
 /// Who is in the world now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
@@ -236,6 +256,7 @@ impl Sample {
             units_settled: start.units_settled && end.units_settled,
             market: BTreeMap::new(),
             bazaar: BTreeMap::new(),
+            books: BTreeMap::new(),
             players: Players::default(),
             events: EventBus::default(),
             watches: Vec::new(),

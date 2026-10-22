@@ -19,6 +19,9 @@
 //! Since D2.2 each sample says how people's and citizens' Strands are spread
 //! (`Distribution`), by the trades the town's newest report names.
 //!
+//! Since D2.3 each sample carries the market's books as it was taken: the
+//! units resting on each side of each item and the best price either side.
+//!
 //! It runs beside the tick, as a loop of its own (`load::Loop::Sampler`). It
 //! takes the game's lock only to read, twice a sample: the ledger's count of
 //! the players, and its own.
@@ -29,7 +32,7 @@ use std::time::Duration;
 
 use capitol_protocol::ledger::Ledger;
 use capitol_protocol::metrics::{
-    Distribution, EventBus, Feed, Players, Sample, Trades, KEEP_DAYS, RING_SAMPLES, SAMPLE_SECS, SERIES_TIMES, STORE_EVERY,
+    Book, Distribution, EventBus, Feed, Players, Sample, Trades, KEEP_DAYS, RING_SAMPLES, SAMPLE_SECS, SERIES_TIMES, STORE_EVERY,
 };
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -110,7 +113,7 @@ pub async fn run_sampler_loop(state: AppState, every: Duration) {
     // whole minute, so the table's samples add up as the ring's do
     let mut minute = last.clone();
     let mut taken: u64 = 0;
-    let mut watcher = super::watches::Watcher::new();
+    let mut watcher = super::watches::Watcher::new(targets(&state).await);
     loop {
         interval.tick().await;
         let timed = Loop::Sampler.timed();
@@ -133,6 +136,7 @@ pub async fn run_sampler_loop(state: AppState, every: Duration) {
             let stored = match window(&state.db, &minute, &ledger, &admins).await {
                 Ok(stored) => {
                     let whole = Sample {
+                        books: sample.books.clone(),
                         players: sample.players,
                         events: sample.events,
                         watches: sample.watches.clone(),
@@ -170,11 +174,19 @@ pub async fn run_sampler_loop(state: AppState, every: Duration) {
     }
 }
 
+/// Each item's target price (D2.3), Strands a unit, as the game loaded the
+/// content.
+async fn targets(state: &AppState) -> BTreeMap<String, f64> {
+    let game = state.game.read().await;
+    game.item_types.values().filter_map(|t| Some((t.id.clone(), t.target_price? as f64))).collect()
+}
+
 /// The sample from `last` to now, the ledger it ends on, and the admins.
 async fn take(state: &AppState, last: &Ledger) -> Result<(Sample, Ledger, HashSet<Uuid>), sqlx::Error> {
     let now = ledger::snapshot_within(state, LEDGER_TRIES).await?;
     let admins = admins(&state.db).await?;
     let mut sample = window(&state.db, last, &now, &admins).await?;
+    sample.books = books(&state.db).await?;
     let game = state.game.read().await;
     let citizens = game.players.values().filter(|p| p.citizen).count() as u64;
     sample.players = Players { people: game.players.len() as u64 - citizens, citizens };
@@ -232,6 +244,26 @@ async fn trades(db: &PgPool, venue: Venue, from_ms: i64, to_ms: i64) -> Result<B
     Ok(rows
         .into_iter()
         .map(|(item, trades, units, strands)| (item, Trades { trades: trades as u64, units, strands }))
+        .collect())
+}
+
+/// The market's open orders now, by item type (D2.3).
+async fn books(db: &PgPool) -> Result<BTreeMap<String, Book>, sqlx::Error> {
+    let rows: Vec<(String, i64, i64, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT item_type,
+                COALESCE(SUM(quantity_remaining) FILTER (WHERE side = 'buy'), 0)::BIGINT,
+                COALESCE(SUM(quantity_remaining) FILTER (WHERE side = 'sell'), 0)::BIGINT,
+                MAX(price) FILTER (WHERE side = 'buy'),
+                MIN(price) FILTER (WHERE side = 'sell')
+         FROM market_orders
+         WHERE status = 'open' AND quantity_remaining > 0 AND expires_at > NOW()
+         GROUP BY item_type",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(item, bids, asks, best_bid, best_ask)| (item, Book { bids, asks, best_bid, best_ask }))
         .collect())
 }
 
@@ -450,6 +482,49 @@ mod tests {
             assert_eq!(fiber, Trades { trades: 2, units: 5, strands: 23 });
             assert_eq!(fiber.vwap(), Some(4.6));
             assert!(trades(&db, Venue::Market, 0, ms("2026-10-21T12:00:10Z")).await.unwrap().is_empty());
+        }
+
+        /// A book is what's still open and unexpired on each side, with the
+        /// best price either side
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "needs the local Postgres (docker-compose up -d)"]
+        async fn books_count_whats_open(db: PgPool) {
+            let ada = player(&db, "ada", 100).await;
+            let order = |side: &'static str, price: i64, remaining: i32, status: &'static str, expires: &'static str| {
+                let db = db.clone();
+                async move {
+                    let buy = side == "buy";
+                    sqlx::query(
+                        "INSERT INTO market_orders (id, player_id, side, item_type, min_grade, grade_rule, price,
+                                                    quantity_total, quantity_remaining, status, fee, expires_at)
+                         VALUES ($1, $2, $3, 'fiber', $4, $5, $6, 10, $7, $8, 1, NOW() + $9::INTERVAL)",
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind(ada)
+                    .bind(side)
+                    .bind(buy.then_some("F"))
+                    .bind(buy.then_some("average"))
+                    .bind(price)
+                    .bind(remaining)
+                    .bind(status)
+                    .bind(expires)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+                }
+            };
+            order("buy", 4, 10, "open", "1 hour").await;
+            order("buy", 5, 3, "open", "1 hour").await;
+            order("sell", 7, 6, "open", "1 hour").await;
+            order("sell", 6, 2, "open", "1 hour").await;
+            // None of these rest on the book
+            order("buy", 9, 0, "filled", "1 hour").await;
+            order("sell", 2, 5, "cancelled", "1 hour").await;
+            order("sell", 1, 5, "open", "-1 minute").await;
+
+            let books = books(&db).await.unwrap();
+            assert_eq!(books.len(), 1);
+            assert_eq!(books["fiber"], Book { bids: 13, asks: 8, best_bid: Some(5), best_ask: Some(6) });
         }
 
         /// A series reads the table up to where the ring starts and the ring
