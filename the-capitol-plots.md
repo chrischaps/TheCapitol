@@ -30,6 +30,8 @@ The deed is 250 in all three zones, as a live trial in the town. Before that tri
 
 ## 3. Targets
 
+*Superseded (2026-10-22) by `the-capitol-plots-v2.md`: about 1000 lots in each zone, sized 1:2:4. The targets below are what #421 to #423 built to.*
+
 | zone | lots | lot area (median) | room at 50 | lots that take 4 |
 |---|---|---|---|---|
 | urban | **500 to 700** | 7k to 9k (about 80 × 100) | 4 | ≥ 90% |
