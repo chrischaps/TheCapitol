@@ -69,8 +69,11 @@ pub struct BotRun {
 
 impl BotRun {
     /// What the hourly tax took: whatever the balance lost that the bot's own
-    /// deposits, deeds and trades don't explain. A bot ends with no order
-    /// open, so no Strands sit in escrow.
+    /// deposits, deeds and trades don't explain. A sim bot ends with no order
+    /// open, so no Strands sit in escrow. A citizen doesn't: its standing
+    /// orders rest in escrow, their fills and its stall's sales reach the
+    /// balance with no [`Entry::Traded`], and bazaar rent has no entry at
+    /// all. So a town reads its tax from the server's books instead (#334).
     pub fn tax(&self) -> i64 {
         let mut expected = self.strands_start;
         for entry in &self.entries {
@@ -151,7 +154,9 @@ pub struct Report {
     pub wall_secs: f64,
     pub items: Vec<ItemLine>,
     pub tools_broke: BTreeMap<String, usize>,
-    pub tax: i64,
+    /// What the tax took, or `None` when nothing measured it: a town
+    /// without a soak's books (#334)
+    pub tax: Option<i64>,
     pub deeds: usize,
     pub deed_strands: i64,
     pub fiber_deposited: i64,
@@ -305,7 +310,7 @@ impl Report {
             wall_secs,
             items,
             tools_broke,
-            tax: runs.iter().map(BotRun::tax).sum(),
+            tax: Some(runs.iter().map(BotRun::tax).sum()),
             deeds,
             deed_strands,
             fiber_deposited,
@@ -490,10 +495,13 @@ impl Report {
             let _ = writeln!(md, "- {tool}: {n}");
         }
         let _ = writeln!(md, "\n## Strands\n");
+        let tax = self
+            .tax
+            .map_or("not measured: only the server's books can say, in a soak".to_string(), |t| format!("{t} Strands"));
         let _ = writeln!(
             md,
-            "- Fiber deposited: {}\n- Deeds bought: {} for {} Strands\n- Spent on tax: {} Strands\n- Market fees: {} Strands",
-            self.fiber_deposited, self.deeds, self.deed_strands, self.tax, self.fees
+            "- Fiber deposited: {}\n- Deeds bought: {} for {} Strands\n- Spent on tax: {tax}\n- Market fees: {} Strands",
+            self.fiber_deposited, self.deeds, self.deed_strands, self.fees
         );
         if let Some((start, end)) = self.makers {
             let _ = writeln!(md, "- Market makers: {start} Strands at the start, {end} at the end");
@@ -714,7 +722,7 @@ mod tests {
         assert_eq!(plank.d5_price, Some(5));
         assert_eq!(report.fees, 3);
         assert_eq!(report.makers, Some((20_000, 20_018)));
-        assert_eq!(report.tax, 0);
+        assert_eq!(report.tax, Some(0));
         let md = report.to_markdown();
         assert!(md.contains("| 20 | 4 | 5.0 (5) | 6 |"), "{md}");
         assert!(md.contains("- Market makers: 20000 Strands at the start, 20018 at the end"), "{md}");

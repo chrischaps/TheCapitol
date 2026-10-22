@@ -40,6 +40,13 @@ impl Soak {
         reconcile(&self.start, &self.end)
     }
 
+    /// What the tax took over the soak, from the server's books: the hourly
+    /// tax, and any owed tax paid off.
+    pub fn tax(&self) -> i64 {
+        let flows = self.reconciliation().strands.flows;
+        -["property_tax", "tax_payment"].iter().filter_map(|kind| flows.get(*kind)).sum::<i64>()
+    }
+
     /// The load between each reading and the next.
     pub fn windows(&self) -> Vec<(i64, LoadWindow)> {
         self.samples
@@ -283,11 +290,15 @@ impl TownReport {
         let trades = trades.into_values().collect();
         let tick_hours = wall_secs * scale / 3600.0;
         let bot_runs: Vec<BotRun> = runs.iter().map(|(run, _)| run.clone()).collect();
+        let mut sim = Report::build(&bot_runs, tick_hours, scale, wall_secs);
+        // A citizen's residue isn't its tax: escrow, fills and rent are in
+        // it too (#334). Only the books measure it.
+        sim.tax = soak.as_ref().map(Soak::tax);
         TownReport {
             citizens,
             trades,
             rulings,
-            sim: Report::build(&bot_runs, tick_hours, scale, wall_secs),
+            sim,
             soak,
             day_hours: wall_secs / capitol_protocol::rules::DAY_LENGTH_SECS as f64 * 24.0,
             in_person: InPerson::count(runs),
@@ -629,6 +640,7 @@ mod tests {
         assert!(md.contains("| rules | 18 | 90.0% |"), "{md}");
         assert!(md.contains("## Production"), "the sim's sections follow");
         assert!(!md.contains("## Conservation"), "no soak, no books");
+        assert!(md.contains("- Spent on tax: not measured"), "no books, no tax: {md}");
         assert!(report.conserved());
         assert!(report.load_csv().is_none());
     }
@@ -693,6 +705,33 @@ mod tests {
         let report = TownReport::build(&runs(), 120.0, 10.0, Some(drifted));
         assert!(!report.conserved());
         assert!(report.to_markdown().contains("| log | +22 | +20 | 2 |"));
+    }
+
+    /// The C1.7b soak's shape (#334): a standing bid's fill and a stall's
+    /// rent reach Percy's balance with no entry in his run, and Strands rest
+    /// in escrow, so his residue says -49. The books say the tax took 1.
+    #[test]
+    fn a_soaks_tax_is_the_books_not_the_residue() {
+        let start = ledger(0, 100, 0, 0, 0);
+        let mut end = ledger(60_000, 70, 6000, 0, 0);
+        end.accounts[0].flows = BTreeMap::from([
+            ("market_sale".to_string(), 60),
+            ("bazaar_rent".to_string(), -80),
+            ("market_escrow".to_string(), -9),
+            ("property_tax".to_string(), -1),
+        ]);
+        end.escrow_strands = 9;
+        let runs = vec![run("Percy Sawyer", "gatherer (wood)", vec![], 100, 149)];
+        assert_eq!(runs[0].0.tax(), -49, "the residue counts what isn't tax");
+        let soak = Soak {
+            start: start.clone(),
+            end: end.clone(),
+            samples: vec![start, end],
+        };
+        assert_eq!(soak.tax(), 1);
+        let report = TownReport::build(&runs, 60.0, 10.0, Some(soak));
+        assert_eq!(report.sim.tax, Some(1));
+        assert!(report.to_markdown().contains("- Spent on tax: 1 Strands"));
     }
 
     /// A soak killed before its end still has the readings it wrote down
