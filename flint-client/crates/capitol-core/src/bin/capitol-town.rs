@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -32,9 +32,10 @@ use capitol_core::citizen::decide::{self, Cascade};
 use capitol_core::citizen::habit::{self, Habit, Kind};
 use capitol_core::citizen::report::{Soak, TownReport};
 use capitol_core::citizen::schedule;
-use capitol_core::citizen::town::{self, Admin, Hours, Logs, Roster, Town};
+use capitol_core::citizen::town::{self, Admin, Hours, Logs, Reporter, Roster, Town};
 use capitol_core::net::{self, NetConfig, RestRequest, RestResponse};
 use capitol_core::protocol::ledger::Ledger;
+use capitol_core::protocol::metrics::{self, TOWN_REPORT_MS};
 use capitol_core::sim::Role;
 
 const USAGE: &str = "\
@@ -144,7 +145,11 @@ town.presence.csv. Each citizen logs its decisions, and what came of them,
 to town.decisions/<name>.jsonl. Reports go beside it too, as
 town.report-<when>.md, and a soak's as town.soak-<when>.md with its load,
 a minute a row, in town.soak-<when>.csv, and every reading of the
-server's books, as it's taken, in town.soak-<when>.ledgers.jsonl. Ctrl-C lets each citizen finish
+server's books, as it's taken, in town.soak-<when>.ledgers.jsonl. A
+running town also reports to the server each game minute, for its admin
+console, with the key in town.report-key: a run with
+$CAPITOL_ADMIN_EMAIL and $CAPITOL_ADMIN_PASSWORD set mints one if
+there's none. Ctrl-C lets each citizen finish
 its step and stops; any order it has resting on the book stays up, as a
 market maker's does. A second Ctrl-C stops at once.";
 
@@ -154,6 +159,8 @@ const GRACE: Duration = Duration::from_secs(20);
 /// at the end, so the market's matching (each second) and the writes under
 /// way land first.
 const SETTLE: Duration = Duration::from_secs(5);
+/// How long a report to the server may take before it's given up on
+const POST_TIMEOUT: Duration = Duration::from_secs(5);
 /// A decision log's size before it rotates, in MB, unless told otherwise.
 const LOG_MB: u64 = log::LOG_LIMIT >> 20;
 /// How many decisions a replay lets wait on a slow layer at once, unless
@@ -724,6 +731,7 @@ fn live(
     if let Some(logs) = &logs {
         println!("capitol-town: decisions to {}", logs.dir.display());
     }
+    let poster = report_to_server(options, roster, server, &town);
     let status = &roster.path;
     let began = Instant::now();
     let mut next = began + options.every;
@@ -755,10 +763,146 @@ fn live(
     println!("capitol-town: stopping; each citizen finishes its step");
     let stuck = town.wait(GRACE);
     report(&town, server, status);
+    if let Some(poster) = poster {
+        poster.finish();
+    }
     if stuck > 0 {
         println!("capitol-town: {stuck} still mid-step after {GRACE:?}; leaving them");
     }
     Ok((town, began.elapsed()))
+}
+
+/// The town's reports to the server's console (D4.1), each game minute, on
+/// a thread of their own, so a slow server never holds the town up.
+struct Poster {
+    stop: mpsc::Sender<()>,
+    thread: thread::JoinHandle<()>,
+}
+
+impl Poster {
+    /// Sends the town's last report, saying it's stopping, and waits a
+    /// moment for it to go.
+    fn finish(self) {
+        let _ = self.stop.send(());
+        let end = Instant::now() + POST_TIMEOUT + Duration::from_secs(1);
+        while !self.thread.is_finished() && Instant::now() < end {
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// Starts reporting the town to `server`, if it has a key to report with.
+fn report_to_server(options: &Options, roster: &Roster, server: &str, town: &Town) -> Option<Poster> {
+    let mut config = NetConfig::with_base_url(server);
+    config.rest_timeout = POST_TIMEOUT;
+    let admin = admin(options, "reporting").ok();
+    let key_path = town::report_key_path(&roster.path);
+    let mut key = report_key(&key_path, admin.as_ref(), &config)?;
+    let mut reporter = Reporter::new(town.view(), unix_ms());
+    let (stop, stopped) = mpsc::channel::<()>();
+    let every = Duration::from_millis(TOWN_REPORT_MS);
+    let spawned = thread::Builder::new().name("town-report".into()).spawn(move || {
+        // A report the server didn't take goes again with the next
+        let mut unsent: Option<metrics::TownReport> = None;
+        loop {
+            let last = !matches!(stopped.recv_timeout(every), Err(mpsc::RecvTimeoutError::Timeout));
+            let report = reporter.report(unix_ms(), last);
+            let report = match unsent.take() {
+                Some(earlier) => earlier.then(report),
+                None => report,
+            };
+            unsent = post(&config, &mut key, admin.as_ref(), &key_path, report, unsent.is_some());
+            if last {
+                return;
+            }
+        }
+    });
+    match spawned {
+        Ok(thread) => {
+            println!("capitol-town: the town reports to {server}/admin/town/report each game minute");
+            Some(Poster { stop, thread })
+        }
+        Err(e) => {
+            eprintln!("capitol-town: can't report to the server: {e}");
+            None
+        }
+    }
+}
+
+/// The town's report key: the one beside the roster, else, with an admin to
+/// hand, a new one, kept there. `None` if it has none, and won't report.
+fn report_key(path: &Path, admin: Option<&Admin>, config: &NetConfig) -> Option<String> {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        let key = text.trim();
+        if !key.is_empty() {
+            return Some(key.to_string());
+        }
+    }
+    let Some(admin) = admin else {
+        println!(
+            "capitol-town: no {}, so the server's console won't hear from the town. Run it once with \
+             $CAPITOL_ADMIN_EMAIL and $CAPITOL_ADMIN_PASSWORD set and it mints one",
+            path.display()
+        );
+        return None;
+    };
+    match mint_report_key(admin, config, path) {
+        Ok(key) => Some(key),
+        Err(e) => {
+            eprintln!("capitol-town: {e}; the town won't report to the server");
+            None
+        }
+    }
+}
+
+/// A new report key from `admin`, kept at `path`.
+fn mint_report_key(admin: &Admin, config: &NetConfig, path: &Path) -> Result<String, String> {
+    let key = admin.town_key(config)?;
+    std::fs::write(path, format!("{key}\n")).map_err(|e| format!("keeping the town's key in {}: {e}", path.display()))?;
+    println!("capitol-town: minted the town's report key, kept in {}", path.display());
+    Ok(key)
+}
+
+/// Posts `report`. A key the server no longer knows (revoked, or the town's
+/// database made anew) is replaced, with an admin to hand, and the report
+/// sent again. Returns the report if the server didn't answer, or failed, to
+/// go again with the next; one it refused is dropped. A failure is said
+/// once (`failing` says the last post failed), until a report gets through.
+fn post(
+    config: &NetConfig,
+    key: &mut String,
+    admin: Option<&Admin>,
+    key_path: &Path,
+    report: metrics::TownReport,
+    failing: bool,
+) -> Option<metrics::TownReport> {
+    let request = RestRequest::TownReport(Box::new(report));
+    let mut result = net::call_once(config, Some(key), &request);
+    if let (Err(e), Some(admin)) = (&result, admin) {
+        if e.is_unauthorized() {
+            match mint_report_key(admin, config, key_path) {
+                Ok(new) => {
+                    *key = new;
+                    result = net::call_once(config, Some(key), &request);
+                }
+                Err(e) => eprintln!("capitol-town: {e}"),
+            }
+        }
+    }
+    let error = match result {
+        Ok(_) => {
+            if failing {
+                println!("capitol-town: the server takes the town's reports again");
+            }
+            return None;
+        }
+        Err(e) => e,
+    };
+    if !failing {
+        eprintln!("capitol-town: the server didn't take the town's report: {error}");
+    }
+    let RestRequest::TownReport(report) = request else { unreachable!("it was made a report") };
+    error.status().is_none_or(|status| status >= 500).then_some(*report)
 }
 
 /// Replays `logs` (the roster's decision logs if none) with the stack

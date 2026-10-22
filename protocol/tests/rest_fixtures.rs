@@ -17,9 +17,13 @@
 //! by the tick's phases and the loops beside it (D0.1), each with its slow
 //! statements (D3.2).
 //! `fixtures/rest/sample.json` is one of the Observatory's samples (D0.2): ten
-//! seconds of a 20-citizen town, with its wealth pooling (D2.5).
+//! seconds of a 20-citizen town, with its wealth pooling (D2.5), and its two
+//! reports' summary (D4.1).
 //! `fixtures/rest/admin_feed.json` is one of each of the rest of what
 //! `GET /admin/stream` sends (D0.3); the sample is `sample.json`.
+//! `fixtures/rest/town_report.json` is `POST /admin/town/report` (D4.1): a
+//! citizen at work with two decisions, a merchant resting after a failure,
+//! and one away.
 
 use std::fs;
 use std::path::Path;
@@ -30,7 +34,7 @@ use capitol_protocol::rest::{
     MarketSummaryResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
 };
 use capitol_protocol::ledger::{Ledger, Load, LoadWindow};
-use capitol_protocol::metrics::{Feed, Sample};
+use capitol_protocol::metrics::{Feed, Sample, TownReport};
 use capitol_protocol::watch::{Watch, WatchKind};
 use capitol_protocol::rules::market::{sort_levels, GradeRule, OrderSide};
 
@@ -216,7 +220,33 @@ fn a_sample_round_trips_with_its_window() {
     assert_eq!(sample.market["log"].vwap(), Some(36.0 / 7.0));
     assert_eq!(sample.players.people + sample.players.citizens, sample.load.players_in_world);
     assert_eq!(sample.watches, [Watch::of(WatchKind::Gini)]);
+    let town = sample.town.as_ref().unwrap();
+    assert_eq!(town.decisions(), 45);
+    assert_eq!(town.standing["working"] + town.standing["resting"], sample.players.citizens);
     assert_eq!(serde_json::to_string(&sample).unwrap(), json);
+}
+
+#[test]
+fn a_sample_from_before_the_town_reported_still_reads() {
+    let json = fixture("sample.json");
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value.as_object_mut().unwrap().remove("town");
+    let old: Sample = serde_json::from_value(value).unwrap();
+    assert!(old.town.is_none());
+    assert!(!serde_json::to_string(&old).unwrap().contains("\"town\""));
+}
+
+#[test]
+fn a_town_report_round_trips_with_its_decisions() {
+    let json = fixture("town_report.json");
+    let report: TownReport = serde_json::from_str(&json).unwrap();
+    assert_eq!(report.citizens.len(), 3);
+    assert_eq!(report.citizens[0].decisions[1].trail[1].layer, "jev");
+    assert!(report.citizens[2].decisions.is_empty(), "nothing new from one away");
+    assert_eq!(report.layers["jev"].mean_ms(), Some(212.4));
+    assert_eq!(report.standing()["away"], 1);
+    assert!(!report.stopping);
+    assert_eq!(serde_json::to_string(&report).unwrap(), json);
 }
 
 #[test]

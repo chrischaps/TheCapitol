@@ -46,6 +46,9 @@ fn checked_scopes(scopes: &[ApiKeyScope]) -> Result<Vec<ApiKeyScope>, AppError> 
     if scopes.is_empty() {
         return Err(AppError::BadRequest("A key needs at least one scope: read, play or trade".into()));
     }
+    if scopes.contains(&ApiKeyScope::Town) {
+        return Err(AppError::BadRequest("The town scope is the town's report key, which an admin mints at /admin/town/key".into()));
+    }
     Ok(scopes)
 }
 
@@ -168,6 +171,7 @@ mod tests {
     fn scopes_are_deduplicated_and_none_is_refused() {
         assert_eq!(checked_scopes(&[Trade, Read, Trade]).unwrap(), vec![Read, Trade]);
         assert!(checked_scopes(&[]).is_err());
+        assert!(checked_scopes(&[Read, Town]).is_err(), "only an admin mints the town's key");
     }
 
     #[test]

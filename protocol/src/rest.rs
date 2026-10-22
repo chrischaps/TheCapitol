@@ -158,7 +158,8 @@ impl AccountKind {
 /// an access token
 pub const API_KEY_PREFIX: &str = "cap_";
 
-/// What an API key may do (E0.9). `play` and `trade` imply `read`.
+/// What an API key may do (E0.9). `play` and `trade` imply `read`. `town`
+/// implies nothing else: it's the town's key for its reports (D4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -169,6 +170,10 @@ pub enum ApiKeyScope {
     Play,
     /// Trades, the exchange and plots (and, from E3, the market)
     Trade,
+    /// `POST /admin/town/report` and nothing else: what `capitol-town`
+    /// reports with (D4.1). Only an admin mints one, at
+    /// `POST /admin/town/key`.
+    Town,
 }
 
 impl ApiKeyScope {
@@ -177,6 +182,7 @@ impl ApiKeyScope {
             ApiKeyScope::Read => "read",
             ApiKeyScope::Play => "play",
             ApiKeyScope::Trade => "trade",
+            ApiKeyScope::Town => "town",
         }
     }
 
@@ -185,6 +191,7 @@ impl ApiKeyScope {
             "read" => Some(ApiKeyScope::Read),
             "play" => Some(ApiKeyScope::Play),
             "trade" => Some(ApiKeyScope::Trade),
+            "town" => Some(ApiKeyScope::Town),
             _ => None,
         }
     }

@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::engine::market_matcher::Market;
 use crate::engine::tunables::Live;
 use crate::engine::sampler::Samples;
+use crate::engine::town::Town;
 use crate::engine::GameState;
 use crate::rate_limit::RateLimiter;
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
@@ -59,6 +60,8 @@ pub struct AppState {
     pub tunables: Live,
     /// The Observatory's newest day of samples (D0.2)
     pub samples: Arc<Samples>,
+    /// The town's newest report (D4.1)
+    pub town: Arc<Town>,
 }
 
 impl AppState {
@@ -79,6 +82,7 @@ impl AppState {
             market,
             tunables,
             samples: Arc::new(Samples::new()),
+            town: Arc::new(Town::new()),
         }
     }
 }

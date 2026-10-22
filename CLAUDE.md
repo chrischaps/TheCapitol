@@ -128,7 +128,7 @@ flint-client\play.bat --server http://127.0.0.1:3300   # play in the town (regis
 flint-client\play.bat                                  # play in the usual world
 ```
 
-Citizens keep human hours (#276): each signs in when its habit says, on the real clock, a few hours some days in its own evenings, so most of the roster is away at any moment. `capitol-town habits --roster flint-client/town/town.toml` shows who's on when, and `up --always-on` keeps the whole roster on. Its roster, keys, admin and the server's log are in `flint-client/town/` (git-ignored). It runs copies of the binaries, so it never locks `cargo run`'s exe. The client keeps one server's sign-in, so a switch between the two asks for your password again ([#338](https://github.com/chrischaps/TheCapitol/issues/338)).
+A running town reports to its server each game minute (D4.1, `GET /admin/town`, and each sample's `town`), with a key it mints into `flint-client/town/town.report-key` the first time. Citizens keep human hours (#276): each signs in when its habit says, on the real clock, a few hours some days in its own evenings, so most of the roster is away at any moment. `capitol-town habits --roster flint-client/town/town.toml` shows who's on when, and `up --always-on` keeps the whole roster on. Its roster, keys, admin and the server's log are in `flint-client/town/` (git-ignored). It runs copies of the binaries, so it never locks `cargo run`'s exe. The client keeps one server's sign-in, so a switch between the two asks for your password again ([#338](https://github.com/chrischaps/TheCapitol/issues/338)).
 
 ### Client (React/TypeScript/Vite)
 ```bash

@@ -17,6 +17,9 @@
 //!
 //! Since D2.5 each sample says which watches were firing as it was taken
 //! (`crate::watch`).
+//! Since D4.1 the town reports in: `capitol-town` posts a [`TownReport`]
+//! each game minute, and each sample carries a [`TownSummary`] of the
+//! reports in its window.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -73,6 +76,10 @@ pub struct Sample {
     /// them reads with none
     #[serde(default)]
     pub watches: Vec<Watch>,
+    /// The town's reports over the window (D4.1); `None` while no town
+    /// reports in
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub town: Option<TownSummary>,
 }
 
 /// Strands by who holds them.
@@ -192,6 +199,7 @@ impl Sample {
             players: Players::default(),
             events: EventBus::default(),
             watches: Vec::new(),
+            town: None,
         }
     }
 }
@@ -323,6 +331,301 @@ pub struct Series {
 /// when it was taken, and the window it covers
 pub const SERIES_TIMES: [&str; 3] = ["at_ms", "booted_ms", "since_ms"];
 
+// ---------------------------------------------------------------------------
+// The town's report (D4.1)
+// ---------------------------------------------------------------------------
+
+/// How often the town reports, in ms: each game minute, five real seconds
+pub const TOWN_REPORT_MS: u64 = (crate::rules::DAY_LENGTH_SECS * 1000 / (24 * 60)) as u64;
+/// A town that hasn't reported in this long, in ms, has gone quiet: it's
+/// marked down
+pub const TOWN_QUIET_MS: i64 = 60_000;
+/// The failures a report carries, the newest
+pub const TOWN_FAILURES: usize = 20;
+/// The decisions a citizen's row carries, the newest
+pub const CITIZEN_DECISIONS: usize = 5;
+
+/// `POST /admin/town/report` (D4.1): the town, as `capitol-town` sees it,
+/// each game minute ([`TOWN_REPORT_MS`]). Its counts are over the window
+/// since the report before. The town's files (`town.status`, the presence
+/// log, the decision logs) are written as before; this is what reaches the
+/// server.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct TownReport {
+    /// When the town wrote it, by the town's clock (Unix ms)
+    pub at_ms: i64,
+    /// When this run of the town started: a new one is a new run
+    pub started_ms: i64,
+    /// The window's length, in ms: since the report before, or since the
+    /// town started
+    pub since_ms: i64,
+    /// The town is stopping, and this is its last report
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stopping: bool,
+    /// Every citizen on the roster, in its order
+    pub citizens: Vec<CitizenReport>,
+    /// Each decision layer's turns over the window, by name
+    pub layers: BTreeMap<String, LayerReport>,
+    /// How the questions were settled over the window: by a layer's name,
+    /// `rules, unsure`, `the rules' own pick`, `carry on`
+    pub rulings: BTreeMap<String, u64>,
+    /// The newest failures, oldest first, at most [`TOWN_FAILURES`]
+    pub failures: Vec<TownFailure>,
+    /// Failures over the window. A citizen that fails twice between two
+    /// reports shows only its last in `failures`, but both count here.
+    pub failed: u64,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+impl TownReport {
+    /// This report and the `later` one after it, as one: for a report the
+    /// server didn't take, sent again with the next. The citizens are the
+    /// later report's, each with its own decisions if it has new ones, else
+    /// this one's; the counts add up.
+    pub fn then(mut self, later: TownReport) -> TownReport {
+        let mut decisions: BTreeMap<String, Vec<DecisionBrief>> =
+            self.citizens.into_iter().map(|c| (c.name, c.decisions)).collect();
+        let mut citizens = later.citizens;
+        for c in citizens.iter_mut().filter(|c| c.decisions.is_empty()) {
+            c.decisions = decisions.remove(&c.name).unwrap_or_default();
+        }
+        for (name, layer) in &later.layers {
+            self.layers.entry(name.clone()).or_default().add(layer);
+        }
+        for (by, n) in later.rulings {
+            *self.rulings.entry(by).or_insert(0) += n;
+        }
+        TownReport {
+            at_ms: later.at_ms,
+            started_ms: later.started_ms,
+            since_ms: self.since_ms + later.since_ms,
+            stopping: later.stopping,
+            citizens,
+            layers: self.layers,
+            rulings: self.rulings,
+            failures: later.failures,
+            failed: self.failed + later.failed,
+        }
+    }
+
+    /// Its citizens, by standing: `{"working": 18, "away": 600}`
+    pub fn standing(&self) -> BTreeMap<String, u64> {
+        let mut by = BTreeMap::new();
+        for c in &self.citizens {
+            *by.entry(c.standing.clone()).or_insert(0) += 1;
+        }
+        by
+    }
+}
+
+/// One citizen in a [`TownReport`]: its health line, and its newest
+/// decisions.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CitizenReport {
+    pub name: String,
+    /// `gatherer-wood`, `merchant`
+    pub role: String,
+    /// Where its life stands: `starting`, `working`, `resting`, `offline`,
+    /// `waiting`, `away`, `retired` or `stopped`
+    pub standing: String,
+    /// Where in its day it is: `work`, `market`, `home`, `night`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strands: Option<i64>,
+    /// What it's doing, as its health line says
+    pub activity: String,
+    /// Lives started after the first
+    pub restarts: u32,
+    /// The last thing that went wrong
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<TownFailure>,
+    /// Its newest decisions, oldest first, at most [`CITIZEN_DECISIONS`].
+    /// Empty when it has made none since the report before: the server
+    /// keeps the last it was sent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<DecisionBrief>,
+}
+
+/// One decision, as the console's drill-down shows it: the question, the
+/// menu, what stood and how each layer answered.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct DecisionBrief {
+    /// By the town's clock (Unix ms)
+    pub at_ms: i64,
+    /// `work`, `sell plank`, `free time`
+    pub question: String,
+    /// The menu's entries: `work: plank`, `sell plank`, `keep`
+    pub menu: Vec<String>,
+    /// The entry that stood; `None` for an empty menu
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picked: Option<String>,
+    /// Its price, if it took one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<i64>,
+    /// Its quantity, if it took one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity: Option<i32>,
+    /// How it was settled, as [`TownReport::rulings`] counts it
+    pub by: String,
+    /// Each layer asked, in order
+    pub trail: Vec<LayerTurn>,
+}
+
+/// One layer's turn at a decision.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct LayerTurn {
+    pub layer: String,
+    /// `settled`, `unsure`, `escalated`, `off menu`, `slow`, `broke`,
+    /// `pending` or `late`
+    pub outcome: String,
+    pub micros: u64,
+}
+
+/// A decision layer's turns over a window, every citizen's together.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct LayerReport {
+    /// Times it was asked
+    pub asked: u64,
+    /// What came of them, by [`LayerTurn::outcome`]
+    pub outcomes: BTreeMap<String, u64>,
+    /// Time it took over them all, in microseconds
+    pub micros: u64,
+    /// The longest one took
+    pub max_micros: u64,
+    /// US cents it cost over the window
+    pub cents: f64,
+    /// US cents it has cost since the town started
+    pub cents_total: f64,
+}
+
+impl LayerReport {
+    /// The times it settled a question
+    pub fn settled(&self) -> u64 {
+        self.outcomes.get("settled").copied().unwrap_or(0)
+    }
+
+    /// Its mean time to answer, in ms; `None` if it wasn't asked
+    pub fn mean_ms(&self) -> Option<f64> {
+        (self.asked > 0).then(|| self.micros as f64 / self.asked as f64 / 1000.0)
+    }
+
+    /// One turn more
+    pub fn turn(&mut self, outcome: &str, micros: u64) {
+        self.asked += 1;
+        *self.outcomes.entry(outcome.to_string()).or_insert(0) += 1;
+        self.micros += micros;
+        self.max_micros = self.max_micros.max(micros);
+    }
+
+    /// `later`'s window after this one's: the counts add up, and the total
+    /// cost is the later one's
+    pub fn add(&mut self, later: &LayerReport) {
+        self.asked += later.asked;
+        for (outcome, n) in &later.outcomes {
+            *self.outcomes.entry(outcome.clone()).or_insert(0) += n;
+        }
+        self.micros += later.micros;
+        self.max_micros = self.max_micros.max(later.max_micros);
+        self.cents += later.cents;
+        self.cents_total = later.cents_total;
+    }
+}
+
+/// Something that went wrong for a citizen.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct TownFailure {
+    /// By the town's clock (Unix ms)
+    pub at_ms: i64,
+    pub citizen: String,
+    pub why: String,
+}
+
+/// `GET /admin/town` (D4.1): the newest report, with each citizen's last
+/// decisions, however many reports ago they came.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct TownLatest {
+    /// When it came in, by the server's clock (Unix ms)
+    pub received_ms: i64,
+    /// Whether the town is on: it hasn't said it's stopping, nor gone quiet
+    /// for [`TOWN_QUIET_MS`]
+    pub up: bool,
+    pub report: TownReport,
+}
+
+/// What a [`Sample`] keeps of the town's reports over its window.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct TownSummary {
+    /// When the newest report came in, by the server's clock (Unix ms)
+    pub reported_ms: i64,
+    /// When the town's run started, by the town's clock
+    pub started_ms: i64,
+    /// Reports over the window
+    pub reports: u64,
+    /// The roster now, by standing, as the newest report has it
+    pub standing: BTreeMap<String, u64>,
+    /// How the questions were settled over the window
+    pub rulings: BTreeMap<String, u64>,
+    /// Each layer's turns over the window
+    pub layers: BTreeMap<String, LayerReport>,
+    /// Failures over the window
+    pub failed: u64,
+}
+
+impl TownSummary {
+    /// Adds `report`, which came in at `received_ms`, to the window
+    pub fn add(&mut self, report: &TownReport, received_ms: i64) {
+        self.reported_ms = received_ms;
+        self.started_ms = report.started_ms;
+        self.reports += 1;
+        self.standing = report.standing();
+        for (by, n) in &report.rulings {
+            *self.rulings.entry(by.clone()).or_insert(0) += n;
+        }
+        for (name, layer) in &report.layers {
+            self.layers.entry(name.clone()).or_default().add(layer);
+        }
+        self.failed += report.failed;
+    }
+
+    /// This window and the `later` one after it, as one
+    pub fn then(mut self, later: &TownSummary) -> TownSummary {
+        self.reported_ms = later.reported_ms;
+        self.started_ms = later.started_ms;
+        self.reports += later.reports;
+        self.standing = later.standing.clone();
+        for (by, n) in &later.rulings {
+            *self.rulings.entry(by.clone()).or_insert(0) += n;
+        }
+        for (name, layer) in &later.layers {
+            self.layers.entry(name.clone()).or_default().add(layer);
+        }
+        self.failed += later.failed;
+        self
+    }
+
+    /// Questions settled over the window, however they were
+    pub fn decisions(&self) -> u64 {
+        self.rulings.values().sum()
+    }
+
+    /// US cents the layers cost over the window
+    pub fn cents(&self) -> f64 {
+        self.layers.values().map(|l| l.cents).sum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +750,68 @@ mod tests {
         assert!((g - 0.25).abs() < 1e-12, "{g}");
         assert_eq!(gini(&[100]), None);
         assert_eq!(gini(&[0, 0]), None);
+    }
+
+    #[test]
+    fn a_town_reports_each_game_minute() {
+        assert_eq!(TOWN_REPORT_MS, 5_000);
+    }
+
+    /// Two reports in a sample's window: the counts add up, the standing and
+    /// the total cost are the newer one's
+    #[test]
+    fn a_summary_adds_up_its_reports() {
+        let citizen = |name: &str, standing: &str| CitizenReport {
+            name: name.into(),
+            role: "gatherer-wood".into(),
+            standing: standing.into(),
+            ..CitizenReport::default()
+        };
+        let mut jev = LayerReport::default();
+        jev.turn("settled", 300_000);
+        jev.turn("unsure", 100_000);
+        jev.cents = 0.02;
+        jev.cents_total = 1.5;
+        let first = TownReport {
+            started_ms: 7,
+            citizens: vec![citizen("Ada", "working"), citizen("Bo", "starting")],
+            layers: BTreeMap::from([("jev".to_string(), jev.clone())]),
+            rulings: BTreeMap::from([("jev".to_string(), 1), ("jev, unsure".to_string(), 1)]),
+            failed: 1,
+            ..TownReport::default()
+        };
+        jev.cents_total = 1.52;
+        let second = TownReport {
+            citizens: vec![citizen("Ada", "working"), citizen("Bo", "working")],
+            layers: BTreeMap::from([("jev".to_string(), jev)]),
+            rulings: BTreeMap::from([("jev".to_string(), 1)]),
+            ..first.clone()
+        };
+        let mut summary = TownSummary::default();
+        summary.add(&first, 100);
+        summary.add(&second, 105);
+        assert_eq!(summary.reported_ms, 105);
+        assert_eq!(summary.reports, 2);
+        assert_eq!(summary.standing, BTreeMap::from([("working".to_string(), 2)]));
+        assert_eq!(summary.decisions(), 3);
+        assert_eq!(summary.failed, 2);
+        let jev = &summary.layers["jev"];
+        assert_eq!((jev.asked, jev.settled(), jev.max_micros), (4, 2, 300_000));
+        assert_eq!(jev.mean_ms(), Some(200.0));
+        assert!((summary.cents() - 0.04).abs() < 1e-9);
+        assert_eq!(jev.cents_total, 1.52);
+
+        // A report sent again with the next one counts as both
+        let both = first.clone().then(second.clone());
+        assert_eq!(both.citizens, second.citizens);
+        assert_eq!((both.failed, both.rulings.values().sum::<u64>()), (2, 3));
+        assert_eq!((both.layers["jev"].asked, both.layers["jev"].cents_total), (4, 1.52));
+
+        // Two windows run together are the one over both reports
+        let (mut a, mut b) = (TownSummary::default(), TownSummary::default());
+        a.add(&first, 100);
+        b.add(&second, 105);
+        assert_eq!(a.then(&b), summary);
     }
 
     #[test]

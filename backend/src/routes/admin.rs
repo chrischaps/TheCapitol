@@ -8,14 +8,15 @@ use axum::{
     Json, Router,
 };
 use capitol_protocol::annotation::AnnotationKind;
-use capitol_protocol::metrics::Feed;
+use capitol_protocol::metrics::{Feed, TownLatest, TownReport};
 use futures::{Stream, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
-use capitol_protocol::rest::{CitizenInfo, CreateCitizenRequest, CreatedCitizen};
+use capitol_protocol::rest::{ApiKeyScope, CitizenInfo, CreateCitizenRequest, CreatedApiKey, CreatedCitizen, SuccessResponse};
 use capitol_protocol::tunables::{TunablesResponse, TunablesUpdate};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::api_keys;
 use crate::citizens;
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -47,6 +48,9 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/tunables", get(get_tunables).put(put_tunables))
         .route("/accounts/{id}/subscription", post(subscribe_account))
         .route("/citizens", get(list_citizens).post(create_citizen))
+        .route("/town", get(get_town))
+        .route("/town/key", post(mint_town_key))
+        .route("/town/report", post(post_town_report))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
@@ -95,6 +99,50 @@ pub async fn list_citizens(
 ) -> Result<Json<Vec<CitizenInfo>>, AppError> {
     require_admin(&user)?;
     Ok(Json(citizens::list(&state.db).await?))
+}
+
+/// Mint the town's report key (D4.1) on the admin's own account, revoking
+/// the one before. `capitol-town` mints it once and keeps it beside its
+/// roster. The secret is in this answer only.
+pub async fn mint_town_key(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<CreatedApiKey>, AppError> {
+    require_admin(&user)?;
+    let (key, secret) = api_keys::mint_town_key(&state.db, user.account_id).await?;
+    tracing::info!("Admin {} minted the town's report key {}", user.account_id, key.id);
+    Ok(Json(CreatedApiKey { key, secret }))
+}
+
+/// The town's report (D4.1), each game minute, by its key (the only route
+/// that key reaches) or an admin. It's kept as the newest and added to the
+/// samples' windows. One from a town coming on, or stopping, marks the
+/// charts.
+pub async fn post_town_report(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(report): Json<TownReport>,
+) -> Result<Json<SuccessResponse>, AppError> {
+    let town_key = user.key.is_some_and(|key| key.scopes.allows(ApiKeyScope::Town));
+    if !town_key {
+        require_admin(&user)?;
+    }
+    if let Some(mark) = state.town.receive(report, Utc::now().timestamp_millis()) {
+        tracing::info!("{}", mark.text);
+        annotations::note(&state.db, mark.kind, &mark.text).await;
+    }
+    Ok(Json(SuccessResponse::ok()))
+}
+
+/// The town's newest report (D4.1), each citizen with its last decisions,
+/// and whether it's on; `null` if no town has reported since the server
+/// started.
+pub async fn get_town(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<Option<TownLatest>>, AppError> {
+    require_admin(&user)?;
+    Ok(Json(state.town.latest()))
 }
 
 /// Get current world generation parameters

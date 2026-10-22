@@ -1,6 +1,6 @@
 //! The REST half of the client: one [`RestRequest`] variant per backend route
-//! (admin routes aside, but for the citizens `capitol-town` mints and the
-//! ledger its soak reads), each
+//! (admin routes aside, but for the citizens `capitol-town` mints, the
+//! ledger its soak reads and the town's reports), each
 //! paired with the [`RestResponse`] variant it decodes to.
 //!
 //! The bearer token (or a bot's API key, E0.9) is attached whenever the IO
@@ -175,6 +175,12 @@ pub enum RestRequest {
     Citizens,
     /// `GET /admin/ledger`: the world's books, for the town's soak (C1.7)
     Ledger,
+    /// `POST /admin/town/key`: mint the town's report key (D4.1). Needs an
+    /// admin's token.
+    TownKey,
+    /// `POST /admin/town/report`: the town, each game minute (D4.1), by its
+    /// key. Boxed: it's a row a citizen.
+    TownReport(Box<capitol_protocol::metrics::TownReport>),
 }
 
 /// A decoded REST response. Each [`RestRequest`] decodes to exactly one variant.
@@ -329,7 +335,9 @@ impl RestRequest {
             | RentStall { .. }
             | Stock(_)
             | Buy { .. }
-            | CreateCitizen(_) => Method::POST,
+            | CreateCitizen(_)
+            | TownKey
+            | TownReport(_) => Method::POST,
             UpdatePlotPermissions { .. } | SetByline(_) | ConfigureAutomation { .. } => Method::PUT,
             RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } | Unlist { .. } => Method::DELETE,
             ApiKeys
@@ -432,6 +440,8 @@ impl RestRequest {
             Buy { listing_id, .. } => format!("/bazaar/listings/{listing_id}/buy"),
             CreateCitizen(_) | Citizens => "/admin/citizens".into(),
             Ledger => "/admin/ledger".into(),
+            TownKey => "/admin/town/key".into(),
+            TownReport(_) => "/admin/town/report".into(),
         }
     }
 
@@ -461,6 +471,7 @@ impl RestRequest {
             Stock(b) => req.json(b),
             Buy { request, .. } => req.json(request),
             CreateCitizen(b) => req.json(b),
+            TownReport(b) => req.json(b),
             Gazette { day: Some(date) } => req.query(&GazetteQuery { date: *date }),
             MarketDepth(q) => req.query(q),
             MyOrders(q) => req.query(q),
@@ -550,6 +561,8 @@ impl RestRequest {
             Q::CreateCitizen(_) => A::Citizen(Box::new(de(body)?)),
             Q::Citizens => A::Citizens(de(body)?),
             Q::Ledger => A::Ledger(Box::new(de(body)?)),
+            Q::TownKey => A::CreatedApiKey(de(body)?),
+            Q::TownReport(_) => A::Success(de(body)?),
         })
     }
 }
@@ -817,6 +830,8 @@ mod tests {
             ),
             (RestRequest::Citizens, "GET", "/admin/citizens".into()),
             (RestRequest::Ledger, "GET", "/admin/ledger".into()),
+            (RestRequest::TownKey, "POST", "/admin/town/key".into()),
+            (RestRequest::TownReport(Box::default()), "POST", "/admin/town/report".into()),
             (RestRequest::MyStall, "GET", "/bazaar/mine".into()),
             (
                 RestRequest::Shop { stall_id: "bazaar_stall_3".into() },

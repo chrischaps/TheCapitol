@@ -25,6 +25,10 @@
 //!   spent its time on and got stuck on, as the sim's report entries, and how
 //!   its questions were settled. [`Town::runs`] hands them to the report
 //!   ([`super::report`]).
+//! - **The server's console** (D4.1): each citizen's health and its mind's
+//!   [`Pulse`](super::decide::pulse::Pulse), which a [`Reporter`] makes into
+//!   a `TownReport` each game minute, for `capitol-town` to post with the
+//!   town's key ([`report_key_path`]).
 //!
 //! [`Schedule`]: super::schedule::Schedule
 //! [`Habit`]: super::habit::Habit
@@ -39,11 +43,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use capitol_protocol::ledger::Ledger;
+use capitol_protocol::metrics::{CitizenReport, TownFailure, TownReport, TOWN_FAILURES};
 use capitol_protocol::rest::{CreateCitizenRequest, LoginRequest};
 use capitol_protocol::rules::{self, Zone};
 use serde::Deserialize;
 
 use super::decide::log::{self, Log};
+use super::decide::pulse::{Pulse, SharedPulse};
 use super::decide::{self, Cascade, Mind, SharedLog};
 use super::habit::{Habit, Kind, Mix, Presence};
 use super::persona::{self, Avenue, Home, Market, Persona, Temperament};
@@ -409,6 +415,12 @@ pub fn decisions_path(roster: &Path) -> PathBuf {
     roster.with_extension("decisions")
 }
 
+/// Where the town keeps its key for its reports to the server (D4.1):
+/// beside the roster, `town.report-key`. It holds a secret, like the roster.
+pub fn report_key_path(roster: &Path) -> PathBuf {
+    roster.with_extension("report-key")
+}
+
 /// Where `capitol-town corpus` writes its made-up town's log (C3.3).
 pub fn corpus_path(roster: &Path) -> PathBuf {
     roster.with_extension("corpus")
@@ -448,6 +460,18 @@ impl Admin {
             Ok(RestResponse::Auth(auth)) => Ok(auth.token),
             Ok(other) => Err(format!("signing in as {}: unexpected {other:?}", self.email)),
             Err(e) => Err(format!("signing in as {}: {e}", self.email)),
+        }
+    }
+
+    /// A new key for the town's reports (D4.1), `POST /admin/town/key`,
+    /// which revokes the one before. Returns its secret.
+    pub fn town_key(&self, config: &NetConfig) -> Result<String, String> {
+        let token = self.sign_in(config)?;
+        match net::call_once(config, Some(&token), &RestRequest::TownKey) {
+            Ok(RestResponse::CreatedApiKey(created)) => Ok(created.secret),
+            Ok(other) => Err(format!("minting the town's key: unexpected {other:?}")),
+            Err(e) if e.status() == Some(403) => Err(format!("minting the town's key: {e}. Is {} an admin?", self.email)),
+            Err(e) => Err(format!("minting the town's key: {e}")),
         }
     }
 
@@ -572,6 +596,8 @@ pub struct Health {
     pub activity: String,
     /// The last thing that went wrong, and when.
     pub failure: Option<(Instant, String)>,
+    /// Things that went wrong, all told.
+    pub failures: u64,
     /// Lives started after the first.
     pub restarts: u32,
 }
@@ -586,6 +612,7 @@ impl Health {
             strands: None,
             activity: "waiting its turn".into(),
             failure: None,
+            failures: 0,
             restarts: 0,
         }
     }
@@ -597,6 +624,7 @@ impl Health {
 
     pub fn failed(&mut self, why: String) {
         self.failure = Some((Instant::now(), why));
+        self.failures += 1;
     }
 
     /// One line: who, what role, where its life stands and where in its
@@ -758,6 +786,7 @@ pub struct Town {
     stop: Arc<AtomicBool>,
     health: Vec<Arc<Mutex<Health>>>,
     books: Vec<Arc<Mutex<Book>>>,
+    pulses: Vec<SharedPulse>,
     lives: Vec<thread::JoinHandle<()>>,
 }
 
@@ -776,6 +805,7 @@ impl Town {
             stop,
             health: Vec::new(),
             books: Vec::new(),
+            pulses: Vec::new(),
             lives: Vec::new(),
         };
         let now = local_unix_ms();
@@ -783,18 +813,20 @@ impl Town {
         for citizen in &roster.citizens {
             let health = Arc::new(Mutex::new(Health::new(&citizen.name, citizen.role)));
             let book = Arc::new(Mutex::new(Book::default()));
+            let pulse = Pulse::shared();
             let log = logs.and_then(|logs| open_log(citizen, logs));
-            let (citizen, server, stop, h, b) =
-                (citizen.clone(), server.to_string(), town.stop.clone(), health.clone(), book.clone());
+            let (citizen, server, stop, h, b, p) =
+                (citizen.clone(), server.to_string(), town.stop.clone(), health.clone(), book.clone(), pulse.clone());
             // Only those signing in now wait their turn
             let on = hours == Hours::AlwaysOn || matches!(citizen.persona.habit.at(now), Presence::On { .. });
             let turn = if on { STAGGER * arriving } else { Duration::ZERO };
             arriving += u32::from(on);
             let life = thread::Builder::new()
                 .name(format!("citizen-{}", citizen.name))
-                .spawn(move || live(&citizen, &server, turn, hours, &stop, &h, &b, log.as_ref()))?;
+                .spawn(move || live(&citizen, &server, turn, hours, &stop, &h, &b, &p, log.as_ref()))?;
             town.health.push(health);
             town.books.push(book);
+            town.pulses.push(pulse);
             town.lives.push(life);
         }
         Ok(town)
@@ -824,6 +856,15 @@ impl Town {
                 (run, book.rulings)
             })
             .collect()
+    }
+
+    /// Its citizens' health and pulses, for a [`Reporter`] on another
+    /// thread.
+    pub fn view(&self) -> TownView {
+        TownView {
+            health: self.health.clone(),
+            pulses: self.pulses.clone(),
+        }
     }
 
     /// A line a citizen, in roster order.
@@ -911,6 +952,7 @@ fn live(
     stop: &AtomicBool,
     health: &Mutex<Health>,
     book: &Mutex<Book>,
+    pulse: &SharedPulse,
     log: Option<&SharedLog>,
 ) {
     let clock_offset_ms = AtomicI64::new(0);
@@ -942,7 +984,7 @@ fn live(
             h.doing(Standing::Starting, "signing in");
         });
         let began = Instant::now();
-        let life = panic::catch_unwind(AssertUnwindSafe(|| one_life(citizen, server, &tether, log)));
+        let life = panic::catch_unwind(AssertUnwindSafe(|| one_life(citizen, server, &tether, pulse, log)));
         let why = match life {
             Ok(Ok(Ended::Stopped)) => break,
             // The presence check at the top has it away
@@ -983,13 +1025,19 @@ fn live(
 /// One life: sign in by the key and play the role through the session,
 /// until it's over or the town stops. The bot goes with it, so its socket
 /// closes and the avatar leaves the world.
-fn one_life(citizen: &Citizen, server: &str, tether: &Tether, log: Option<&SharedLog>) -> Result<Ended, BotError> {
+fn one_life(
+    citizen: &Citizen,
+    server: &str,
+    tether: &Tether,
+    pulse: &SharedPulse,
+    log: Option<&SharedLog>,
+) -> Result<Ended, BotError> {
     let key = citizen.key().map_err(BotError::Failed)?;
     let bot = Bot::with_api_key(NetConfig::with_base_url(server), &key)?.quiet();
     tether.server_time_was(bot.state().server_time_ms());
     // The roster checked the layers
     let cascade = Cascade::from_names(&citizen.layers).map_err(BotError::Failed)?;
-    let mut mind = Mind::new(cascade, citizen.persona.temperament);
+    let mut mind = Mind::new(cascade, citizen.persona.temperament).with_pulse(pulse.clone());
     if let Some(log) = log {
         mind = mind.with_log(log.clone());
     }
@@ -1012,6 +1060,103 @@ fn away(tether: &Tether, habit: &Habit, until: Option<i64>) {
         h.doing(Standing::Away, &back);
     });
     pause(tether.stop, wait);
+}
+
+// ---------------------------------------------------------------------------
+// The report to the server (D4.1)
+// ---------------------------------------------------------------------------
+
+/// The town's citizens as a [`Reporter`] reads them: their health and
+/// their minds' pulses, shared with their lives.
+#[derive(Clone)]
+pub struct TownView {
+    health: Vec<Arc<Mutex<Health>>>,
+    pulses: Vec<SharedPulse>,
+}
+
+/// Makes the town's reports to the server (D4.1): what each citizen is
+/// doing and has newly decided, the layers' turns and cost, and what went
+/// wrong, each over the window since the report before.
+pub struct Reporter {
+    view: TownView,
+    started_ms: i64,
+    last_ms: i64,
+    /// Each citizen's failures, as last counted
+    seen: Vec<u64>,
+    /// The newest failures, oldest first
+    failures: Vec<TownFailure>,
+}
+
+impl Reporter {
+    /// For the town in `view`, which started at `started_ms` (Unix ms).
+    pub fn new(view: TownView, started_ms: i64) -> Reporter {
+        let seen = vec![0; view.health.len()];
+        Reporter {
+            view,
+            started_ms,
+            last_ms: started_ms,
+            seen,
+            failures: Vec::new(),
+        }
+    }
+
+    /// The town at `now_ms` (Unix ms); `stopping` makes it the last.
+    pub fn report(&mut self, now_ms: i64, stopping: bool) -> TownReport {
+        let now = Instant::now();
+        let mut report = TownReport {
+            at_ms: now_ms,
+            started_ms: self.started_ms,
+            since_ms: now_ms - self.last_ms,
+            stopping,
+            ..TownReport::default()
+        };
+        self.last_ms = now_ms;
+        let mut spent: BTreeMap<String, f64> = BTreeMap::new();
+        for (i, (health, pulse)) in self.view.health.iter().zip(&self.view.pulses).enumerate() {
+            let h = health.lock().unwrap_or_else(|e| e.into_inner());
+            let failure = h.failure.as_ref().map(|(at, why)| TownFailure {
+                at_ms: now_ms - now.saturating_duration_since(*at).as_millis() as i64,
+                citizen: h.name.clone(),
+                why: why.clone(),
+            });
+            // A citizen that failed twice since the last report shows only
+            // its last, but both count
+            let new = h.failures - self.seen[i];
+            self.seen[i] = h.failures;
+            report.failed += new;
+            if let Some(failure) = failure.as_ref().filter(|_| new > 0) {
+                self.failures.push(failure.clone());
+            }
+            let beat = pulse.lock().unwrap_or_else(|e| e.into_inner()).take();
+            for (name, layer) in &beat.layers {
+                *spent.entry(name.clone()).or_insert(0.0) += layer.cents_total;
+                report.layers.entry(name.clone()).or_default().add(layer);
+            }
+            for (by, n) in beat.rulings {
+                *report.rulings.entry(by).or_insert(0) += n;
+            }
+            report.citizens.push(CitizenReport {
+                name: h.name.clone(),
+                role: h.role.slug().to_string(),
+                standing: h.standing.to_string(),
+                phase: h.phase.map(|p| p.as_str().to_string()),
+                strands: h.strands,
+                activity: h.activity.clone(),
+                restarts: h.restarts,
+                failure,
+                decisions: beat.decisions,
+            });
+        }
+        // A layer's cost so far is every citizen's together
+        for (name, total) in spent {
+            report.layers.entry(name).or_default().cents_total = total;
+        }
+        self.failures.sort_by_key(|f| f.at_ms);
+        let over = self.failures.len().saturating_sub(TOWN_FAILURES);
+        self.failures.drain(..over);
+        report.failures = self.failures.clone();
+        report
+    }
 }
 
 /// Sleeps for `how_long`, or until `stop`.
@@ -1310,6 +1455,58 @@ key = "j"
         let start = Instant::now();
         pause(&stop, Duration::from_secs(30));
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    /// A rules mind with `pulse` decides `n` work questions
+    fn decide(pulse: &SharedPulse, n: usize) {
+        use decide::{Choice, Held, Place, Question, Situation, When, Who};
+        let s = Situation {
+            who: Who { name: "Ada Reeder".into(), role: "gatherer-wood".into(), temperament: Temperament::default() },
+            at: Place { x: 0.0, y: 0.0, zone: "rural".into() },
+            when: When { time_of_day: Some(0.5), hours: 1.0 },
+            holdings: Held::default(),
+            market: Vec::new(),
+            question: Question::Work,
+            menu: vec![Choice::Work { goal: "log".into(), step: "more log".into() }, Choice::Rest],
+            carry_on: Some(0),
+        };
+        let mut mind = Mind::new(Cascade::rules(), Temperament::default()).with_pulse(pulse.clone());
+        for _ in 0..n {
+            mind.ask(&s);
+        }
+    }
+
+    #[test]
+    fn a_report_says_what_each_citizen_did_since_the_last() {
+        let ada = Arc::new(Mutex::new(Health::new("Ada Reeder", Role::Gatherer(Gather::Wood))));
+        let bo = Arc::new(Mutex::new(Health::new("Bo Tanner", Role::Merchant)));
+        let (ada_pulse, bo_pulse) = (Pulse::shared(), Pulse::shared());
+        let view = TownView { health: vec![ada.clone(), bo.clone()], pulses: vec![ada_pulse.clone(), bo_pulse.clone()] };
+        let mut reporter = Reporter::new(view, 1_000);
+
+        ada.lock().unwrap().doing(Standing::Working, "more log");
+        decide(&ada_pulse, 2);
+        decide(&bo_pulse, 1);
+        bo.lock().unwrap().failed("placing a bid: refused".into());
+        bo.lock().unwrap().failed("placing a bid: refused again".into());
+        let report = reporter.report(6_000, false);
+        assert_eq!((report.started_ms, report.since_ms, report.stopping), (1_000, 5_000, false));
+        assert_eq!(report.citizens[0].standing, "working");
+        assert_eq!(report.citizens[0].role, "gatherer-wood");
+        assert_eq!(report.citizens[0].decisions.len(), 2);
+        assert_eq!(report.layers["rules"].asked, 3, "both citizens' turns");
+        assert_eq!(report.rulings.values().sum::<u64>(), 3);
+        assert_eq!(report.failed, 2, "both failures count");
+        assert_eq!(report.failures.len(), 1, "the last of them shows");
+        assert_eq!(report.failures[0].why, "placing a bid: refused again");
+        assert_eq!(report.citizens[1].failure.as_ref().unwrap().citizen, "Bo Tanner");
+
+        // Nothing new: no decisions sent, no failures counted, the last kept
+        let report = reporter.report(11_000, true);
+        assert_eq!((report.since_ms, report.stopping), (5_000, true));
+        assert!(report.citizens.iter().all(|c| c.decisions.is_empty()));
+        assert!(report.rulings.is_empty());
+        assert_eq!((report.failed, report.failures.len()), (0, 1));
     }
 
     #[test]

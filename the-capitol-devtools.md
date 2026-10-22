@@ -163,7 +163,7 @@ The first set:
   - the last N failures
   - each citizen's last few decisions, for the console's drill-down
 
-  The town's admin mints a scoped `town` key. The backend keeps the latest report in memory and folds a summary into the next sample.
+  The town's admin mints a scoped `town` key. The backend keeps the latest report in memory and folds a summary into the next sample. *As built (D4.1, #368):* see §6.
 - **Watches** are rules in code with thresholds as tunables: drift, Gini, an item off target, tax revenue, tick p95. A rule fires on its edge, not every sample. *As built (D2.5, #364):* `capitol_protocol::watch`, run by the sampler through `engine::watches`; see D2.5.
 - **`NetStats`** sits in `capitol-core`:
   - RTT from the Ping, with the Pong stamped
@@ -244,6 +244,26 @@ The first set:
 ### D4: The town (`dt:D4-town`)
 - **D4.1 The town reports in.**
   - The `TownReport` type, `POST /admin/town/report`, the scoped key, and `capitol-town` posting each game minute. The files stay as they are.
+  - *As built (#368):*
+    - **The type.** `capitol_protocol::metrics::TownReport`, sent each game minute and counted over the window since the one before, holds:
+      - a `CitizenReport` per citizen on the roster: name, role, standing, phase, Strands, activity, restarts, its last failure, and its newest decisions (`CITIZEN_DECISIONS`, 5);
+      - `layers`: each layer's `LayerReport` over the window, with times asked, outcomes, total and longest microseconds, cents over the window and cents since the town started;
+      - `rulings`, by `By::label`;
+      - the newest `failures` (`TOWN_FAILURES`, 20), and `failed`, the count over the window;
+      - `started_ms`, which tells one run from the next, and `stopping` for the last word.
+    - **Decisions are sent once.** A `DecisionBrief` holds the question, the menu as labels, what stood, by whom, and each layer's turn. A citizen's decisions go only in the first report after they're made, and the server keeps the last it was sent, so 600 away citizens cost nothing.
+    - **The fixture** is `rest/town_report.json`.
+    - **The key.** The `town` scope (`ApiKeyScope::Town`) reaches `POST /admin/town/report` and nothing else: no GET, no WebSocket. It needs no subscription. `POST /account/api-keys` refuses it. An admin mints it at `POST /admin/town/key` on their own account (`api_keys::mint_town_key`), which revokes the one before.
+    - **The town's side.**
+      - `capitol-town run` and `soak` read the key from `town.report-key` beside the roster (git-ignored). With `$CAPITOL_ADMIN_EMAIL` and `$CAPITOL_ADMIN_PASSWORD` set, as `town.sh` and `town.ps1` set them, they mint it when it's missing and again on a 401.
+      - Each citizen's `Mind` notes its decisions in a `Pulse` (`decide/pulse.rs`), kept across its lives. A layer's cost is the change in its cascade's `spent()`.
+      - A `Reporter` (`citizen/town.rs`) takes the pulses and the health lines each `TOWN_REPORT_MS` (5 s, a game minute), on a thread of its own with a 5 s timeout. A failure is printed once, until a report gets through again.
+      - A report the server doesn't answer, or fails (5xx), goes again with the next (`TownReport::then`), so its window's counts aren't lost. One it refuses (4xx) is dropped.
+    - **The server's side.**
+      - `engine::town::Town` (`AppState::town`) keeps the newest report and merges each citizen's last decisions into it, for `GET /admin/town` (`TownLatest`, or `null`).
+      - It adds each report to two windows. Each `Sample` carries the sample's window as `town: TownSummary`: reports, the standing now, rulings, layers and failures. The stored minute carries the minute's window, which goes back if the store fails.
+      - Town up is written on a report from a new run, or the first since boot or since it went down. Town down is written on `stopping`, or when the sampler finds no report for `TOWN_QUIET_MS` (60 s).
+      - Without the sampler (`METRICS_SAMPLE_SECS=0`) nothing marks a quiet town down.
 - **D4.2 The town tab.**
   - The roster (sort, filter), who's on now, decision mix per layer over time, and cost per citizen-day.
 - **D4.3 One citizen.**

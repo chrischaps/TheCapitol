@@ -12,6 +12,10 @@
 //! sample is put to the watches (`watches::Watcher`) before it goes out, and
 //! says which are firing.
 //!
+//! Since D4.1 each sample carries a summary of the town's reports over its
+//! window (`engine::town`), and the stored minute the minute's. Each sample
+//! the sampler also looks whether the town has gone quiet, and marks it down.
+//!
 //! It runs beside the tick, as a loop of its own (`load::Loop::Sampler`). It
 //! takes the game's lock only to read, twice a sample: the ledger's count of
 //! the players, and its own.
@@ -107,6 +111,10 @@ pub async fn run_sampler_loop(state: AppState, every: Duration) {
     loop {
         interval.tick().await;
         let timed = Loop::Sampler.timed();
+        if let Some(mark) = state.town.quiet(Utc::now().timestamp_millis()) {
+            tracing::info!("{}", mark.text);
+            super::annotations::note(&state.db, mark.kind, &mark.text).await;
+        }
         let (mut sample, ledger, admins) = match take(&state, &last).await {
             Ok(taken) => taken,
             Err(e) => {
@@ -118,17 +126,29 @@ pub async fn run_sampler_loop(state: AppState, every: Duration) {
         taken += 1;
         watcher.check(&state, &last, &ledger, &admins, &mut sample).await;
         if taken.is_multiple_of(STORE_EVERY) {
+            let town = state.town.take_minute();
             let stored = match window(&state.db, &minute, &ledger, &admins).await {
                 Ok(stored) => {
-                    let watches = sample.watches.clone();
-                    store(&state.db, &Sample { players: sample.players, events: sample.events, watches, ..stored }).await
+                    let whole = Sample {
+                        players: sample.players,
+                        events: sample.events,
+                        watches: sample.watches.clone(),
+                        town: town.clone(),
+                        ..stored
+                    };
+                    store(&state.db, &whole).await
                 }
                 Err(e) => Err(e),
             };
             match stored {
                 Ok(()) => minute = ledger.clone(),
                 // The next minute's stored sample starts from the same place
-                Err(e) => tracing::warn!("Couldn't store a sample: {e}"),
+                Err(e) => {
+                    tracing::warn!("Couldn't store a sample: {e}");
+                    if let Some(town) = town {
+                        state.town.restore_minute(town);
+                    }
+                }
             }
         }
         if taken % PRUNE_EVERY == 1 {
@@ -158,6 +178,9 @@ async fn take(state: &AppState, last: &Ledger) -> Result<(Sample, Ledger, HashSe
         capacity: super::tick::GameState::EVENT_CAPACITY as u64,
     };
     drop(game);
+    // Last, once nothing can fail: a missed sample leaves the town's reports
+    // for the next
+    sample.town = state.town.take_sample();
     Ok((sample, now, admins))
 }
 

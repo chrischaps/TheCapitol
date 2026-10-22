@@ -9,7 +9,11 @@
 //! - `trade`: trades, the exchange and plots (and, from E3, the market).
 //!
 //! `play` and `trade` imply `read`. A key never reaches `/account` (a key
-//! can't mint or revoke keys) or `/admin`.
+//! can't mint or revoke keys) or `/admin`, but for one route:
+//! - `town`: `POST /admin/town/report` and nothing else, not even a GET or
+//!   the WebSocket. It's the town's key for its reports (D4.1), which only
+//!   an admin mints (`POST /admin/town/key`), on their own account. It
+//!   needs no subscription: it isn't a bot.
 //!
 //! A key isn't a session: it doesn't replace the account's login (#78), so a
 //! bot on a key leaves its owner signed in over REST. Over the WebSocket a
@@ -49,24 +53,37 @@ pub const MAX_KEYS: i64 = 10;
 /// What a key was minted with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Scopes {
+    read: bool,
     play: bool,
     trade: bool,
+    town: bool,
 }
 
 impl Scopes {
     pub fn of(scopes: &[ApiKeyScope]) -> Scopes {
+        let play = scopes.contains(&ApiKeyScope::Play);
+        let trade = scopes.contains(&ApiKeyScope::Trade);
         Scopes {
-            play: scopes.contains(&ApiKeyScope::Play),
-            trade: scopes.contains(&ApiKeyScope::Trade),
+            read: play || trade || scopes.contains(&ApiKeyScope::Read),
+            play,
+            trade,
+            town: scopes.contains(&ApiKeyScope::Town),
         }
     }
 
     pub fn allows(self, needed: ApiKeyScope) -> bool {
         match needed {
-            ApiKeyScope::Read => true,
+            ApiKeyScope::Read => self.read,
             ApiKeyScope::Play => self.play,
             ApiKeyScope::Trade => self.trade,
+            ApiKeyScope::Town => self.town,
         }
+    }
+
+    /// Whether it's the town's report key alone (D4.1), which needs no
+    /// subscription.
+    pub fn town_only(self) -> bool {
+        self.town && !self.read
     }
 
     /// Whether a WebSocket on this key takes the player over. A read-only
@@ -140,6 +157,9 @@ pub fn is_secret(token: &str) -> bool {
 /// it's given a scope.
 pub fn rest_scope(method: &Method, path: &str) -> Option<ApiKeyScope> {
     let path = path.trim_end_matches('/');
+    if method == Method::POST && path == "/admin/town/report" {
+        return Some(ApiKeyScope::Town);
+    }
     let mut parts = path.trim_start_matches('/').split('/');
     let group = parts.next().unwrap_or("");
     if matches!(group, "account" | "admin" | "auth") {
@@ -272,8 +292,10 @@ pub async fn authenticate(db: &PgPool, secret: &str) -> Result<KeyAuth, sqlx::Er
         return Ok(KeyAuth::Unknown);
     };
     let now = Utc::now();
+    let scopes = Scopes::of(&scopes.iter().filter_map(|s| ApiKeyScope::parse(s)).collect::<Vec<_>>());
     let subscription = Subscription { status: SubscriptionStatus::parse(&status), until }.as_of(now);
-    if AccountKind::parse(&kind) != Some(AccountKind::Citizen) && !subscription.is_active_at(now) {
+    let needs_subscription = AccountKind::parse(&kind) != Some(AccountKind::Citizen) && !scopes.town_only();
+    if needs_subscription && !subscription.is_active_at(now) {
         return Ok(KeyAuth::Unsubscribed(subscription));
     }
     if last_used_at.is_none_or(|at| now - at > chrono::Duration::minutes(1)) {
@@ -283,14 +305,30 @@ pub async fn authenticate(db: &PgPool, secret: &str) -> Result<KeyAuth, sqlx::Er
             .execute(db)
             .await?;
     }
-    let scopes: Vec<ApiKeyScope> = scopes.iter().filter_map(|s| ApiKeyScope::parse(s)).collect();
     Ok(KeyAuth::Live(KeyUser {
         account_id,
-        grant: KeyGrant {
-            id,
-            scopes: Scopes::of(&scopes),
-        },
+        grant: KeyGrant { id, scopes },
     }))
+}
+
+/// The name every town key is minted with
+pub const TOWN_KEY_NAME: &str = "town reports";
+
+/// Mint the town's report key (D4.1) for `account_id`, an admin's, revoking
+/// any town key it held before: a town has one key, and a new one is how a
+/// lost one is replaced. The secret is in the answer only.
+pub async fn mint_town_key(db: &PgPool, account_id: Uuid) -> Result<(ApiKeyInfo, String), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    sqlx::query(
+        "UPDATE api_keys SET revoked_at = NOW()
+         WHERE account_id = $1 AND scopes = ARRAY['town'] AND revoked_at IS NULL",
+    )
+    .bind(account_id)
+    .execute(&mut *tx)
+    .await?;
+    let minted = mint(&mut *tx, account_id, TOWN_KEY_NAME, &[ApiKeyScope::Town]).await?;
+    tx.commit().await?;
+    Ok(minted)
 }
 
 /// The account's unrevoked keys, to hang up when its subscription lapses.
@@ -364,6 +402,21 @@ mod tests {
         // Subscribing is the account's own business, as paying will be
         assert_eq!(rest(Method::POST, "/player/subscription"), None);
         assert_eq!(rest(Method::PATCH, "/player/move"), None);
+    }
+
+    #[test]
+    fn the_town_key_reaches_its_report_and_nothing_else() {
+        assert_eq!(rest(Method::POST, "/admin/town/report"), Some(Town));
+        assert_eq!(rest(Method::POST, "/admin/town/report/"), Some(Town));
+        assert_eq!(rest(Method::GET, "/admin/town"), None);
+        assert_eq!(rest(Method::POST, "/admin/town/key"), None);
+        let town = Scopes::of(&[Town]);
+        assert!(town.allows(Town) && town.town_only());
+        assert!(!town.allows(Read) && !town.allows(Play) && !town.allows(Trade));
+        assert!(!town.takes_presence());
+        // Nor does any other scope reach it
+        let all = Scopes::of(&[Read, Play, Trade]);
+        assert!(!all.allows(Town) && !all.town_only());
     }
 
     #[test]
@@ -482,6 +535,23 @@ mod tests {
         let made = crate::citizens::mint(&db, "Wren Cooper").await.unwrap();
         let user = authenticate(&db, &made.secret).await.unwrap().live().expect("a citizen plays unsubscribed");
         assert_eq!(user.account_id, made.citizen.account_id);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_town_key_needs_no_subscription_and_replaces_the_last(db: PgPool) {
+        let clerk = account(&db).await;
+        let (first, first_secret) = mint_town_key(&db, clerk).await.unwrap();
+        assert_eq!(first.scopes, vec![Town]);
+        let user = authenticate(&db, &first_secret).await.unwrap().live().expect("a town key needs no subscription");
+        assert!(user.grant.scopes.town_only());
+        // A bot's key on the same account still does
+        let (_, bot) = mint(&db, clerk, &["read"]).await;
+        assert!(matches!(authenticate(&db, &bot).await.unwrap(), KeyAuth::Unsubscribed(_)));
+
+        let (_, second_secret) = mint_town_key(&db, clerk).await.unwrap();
+        assert!(matches!(authenticate(&db, &first_secret).await.unwrap(), KeyAuth::Unknown), "the old one is revoked");
+        assert!(authenticate(&db, &second_secret).await.unwrap().live().is_some());
     }
 
     #[test]

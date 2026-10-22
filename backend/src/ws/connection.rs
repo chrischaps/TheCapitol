@@ -14,7 +14,7 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use capitol_protocol::rules::stacking::{Pick, Units};
-use capitol_protocol::rest::Maker;
+use capitol_protocol::rest::{ApiKeyScope, Maker};
 use capitol_protocol::ws::{ClientMessage, ServerMessage, TradeItemInfo, TradeOfferItem};
 
 use crate::engine::container_access::{
@@ -1352,6 +1352,10 @@ async fn authenticate(token: &str, state: &AppState) -> Result<Authed, String> {
         return Ok(Authed { account_id: claims.sub, key: None, holder: Holder::Session(claims.sid) });
     }
     match api_keys::authenticate(&state.db, token).await {
+        // The town's report key (D4.1) can't so much as watch
+        Ok(KeyAuth::Live(user)) if !user.grant.scopes.allows(ApiKeyScope::Read) => {
+            Err(api_keys::refusal("connect", Some(ApiKeyScope::Read)))
+        }
         Ok(KeyAuth::Live(user)) => Ok(Authed {
             account_id: user.account_id,
             key: Some(user.grant),

@@ -14,6 +14,7 @@
 /town.toml
 /town.status
 /town.presence.csv
+/town.report-key
 /keys/
 /town.decisions/
 /town.corpus/

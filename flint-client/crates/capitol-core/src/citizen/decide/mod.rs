@@ -28,6 +28,8 @@
 //!
 //! - [`rules`]: the rules layer, a utility pick weighted by temperament.
 //! - [`log`]: the decision log, each decision and what came of it (C3.1).
+//! - [`pulse`]: what a citizen's decisions tell the server's console, live
+//!   (D4.1).
 //! - [`replay`]: any stack of layers run over a log offline (C3.1).
 //! - [`jev`]: Jev, TypeSafe's choice model, as the fast tier (C3.3).
 //! - [`chat`]: a chat model through an OpenAI-compatible API, such as
@@ -42,6 +44,7 @@ pub mod claude;
 pub mod corpus;
 pub mod jev;
 pub mod log;
+pub mod pulse;
 pub mod remote;
 pub mod replay;
 pub mod rules;
@@ -55,6 +58,7 @@ use uuid::Uuid;
 
 use crate::sim::plan::Holdings;
 use log::{Fate, Log, Record};
+use pulse::SharedPulse;
 pub use rules::RulesDecider;
 
 // ---------------------------------------------------------------------------
@@ -931,6 +935,10 @@ pub struct Mind {
     /// How its questions were settled since they were last taken
     /// ([`By::label`]), for the town's report (C1.7)
     rulings: BTreeMap<String, u64>,
+    /// Where it tells the console what it decides (D4.1)
+    pulse: Option<SharedPulse>,
+    /// What each layer had cost when it last told the pulse, bottom first
+    spent: Vec<f64>,
 }
 
 impl Mind {
@@ -945,6 +953,8 @@ impl Mind {
             orders: HashMap::new(),
             stalls: HashMap::new(),
             rulings: BTreeMap::new(),
+            pulse: None,
+            spent: Vec::new(),
         }
     }
 
@@ -959,6 +969,12 @@ impl Mind {
         self
     }
 
+    /// Tells `pulse` what it decides, for the town's report (D4.1).
+    pub fn with_pulse(mut self, pulse: SharedPulse) -> Mind {
+        self.pulse = Some(pulse);
+        self
+    }
+
     /// The server's `SIM_TICK_SCALE`: an outcome's time is in game seconds.
     pub fn set_scale(&mut self, scale: f64) {
         self.scale = scale;
@@ -967,6 +983,16 @@ impl Mind {
     pub fn ask(&mut self, s: &Situation) -> Ruling {
         let ruling = self.cascade.ask(s, Instant::now());
         *self.rulings.entry(ruling.by.label()).or_insert(0) += 1;
+        if let Some(pulse) = &self.pulse {
+            let spent = self.cascade.spent();
+            self.spent.resize(spent.len(), 0.0);
+            let cost: Vec<(String, f64)> = spent
+                .into_iter()
+                .zip(&mut self.spent)
+                .map(|((name, now), was)| (name, now - std::mem::replace(was, now)))
+                .collect();
+            pulse.lock().unwrap_or_else(|e| e.into_inner()).decided(s, &ruling, &cost, log::now_ms());
+        }
         if let Some(log) = &self.log {
             let id = lock(log).decision(s, &ruling);
             self.last = Some(id);
@@ -1085,6 +1111,7 @@ fn lock(log: &SharedLog) -> std::sync::MutexGuard<'_, Log> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capitol_protocol::metrics;
     use std::sync::{Arc, Mutex};
 
     /// A situation with a work menu of `n` entries, carrying on with the first.
@@ -1379,6 +1406,54 @@ mod tests {
         let ruling = cascade.ask(&situation(2), t0 + Duration::from_millis(10));
         assert!(matches!(ruling.trail[0].asked, Asked::OffMenu { .. }));
         assert_eq!(ruling.by, By::Rules);
+    }
+
+    #[test]
+    fn a_pulse_hears_each_decision_and_what_it_cost() {
+        let asked = Arc::default();
+        let paid = Layer::new(
+            Scripted {
+                name: "paid",
+                says: decided(1, 0.9),
+                asked: Arc::clone(&asked),
+                later: Arc::default(),
+                cost: 0.25,
+                sleep: Duration::ZERO,
+            },
+            0.5,
+            Duration::from_secs(1),
+        );
+        let pulse = pulse::Pulse::shared();
+        let mut mind = Mind::new(Cascade::new(vec![paid]), Temperament::default()).with_pulse(pulse.clone());
+        mind.ask(&situation(3));
+        mind.ask(&situation(3));
+        let beat = pulse.lock().unwrap().take();
+        let paid = &beat.layers["paid"];
+        assert_eq!((paid.asked, paid.settled()), (2, 2));
+        assert_eq!((paid.cents, paid.cents_total), (0.25, 0.25), "its spend so far is counted once");
+        assert_eq!(beat.rulings, BTreeMap::from([("paid".to_string(), 2)]));
+        assert_eq!(beat.decisions.len(), 2);
+        let last = &beat.decisions[1];
+        assert_eq!(last.question, "work");
+        assert_eq!(last.menu, ["work: goal 0", "work: goal 1", "work: goal 2"]);
+        assert_eq!(last.picked.as_deref(), Some("work: goal 1"));
+        assert_eq!((last.trail[0].layer.as_str(), last.trail[0].outcome.as_str()), ("paid", "settled"));
+
+        // Nothing new: no decisions, but the cost so far still shows
+        let quiet = pulse.lock().unwrap().take();
+        assert!(quiet.decisions.is_empty() && quiet.rulings.is_empty());
+        assert_eq!(quiet.layers["paid"].cents_total, 0.25);
+        assert_eq!(quiet.layers["paid"].asked, 0);
+
+        // A new life's mind starts its cascade's spend from nothing
+        let mut next = Mind::new(Cascade::rules(), Temperament::default()).with_pulse(pulse.clone());
+        for _ in 0..(metrics::CITIZEN_DECISIONS + 2) {
+            next.ask(&situation(2));
+        }
+        let beat = pulse.lock().unwrap().take();
+        assert_eq!(beat.decisions.len(), metrics::CITIZEN_DECISIONS, "only the newest");
+        assert_eq!(beat.layers["paid"].cents_total, 0.25, "kept over its lives");
+        assert_eq!(beat.layers["rules"].asked, metrics::CITIZEN_DECISIONS as u64 + 2);
     }
 
     #[test]
