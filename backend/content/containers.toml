@@ -55,6 +55,15 @@ name = "Bazaar Stock"
 slot_count = 0
 layout_columns = 1
 
+# The Contract Court's shared escrow (S0.2, commons plan D5): a commission's
+# delivered units wait here as a stack with no slot and no owner, until
+# they're paid for or go back
+[[container]]
+id = "court_escrow"
+name = "Court Escrow"
+slot_count = 0
+layout_columns = 1
+
 # What a foreclosure took down and the owner's inventory had no room for
 # (#141). Things only come out of it. 480 slots: an estate's 25 stations
 # with full boxes, their kits and their tools.

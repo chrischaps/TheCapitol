@@ -40,7 +40,10 @@ pub struct Ledger {
     /// here, so two ledgers with different boots can't check units.
     pub booted_ms: i64,
     pub accounts: Vec<AccountBooks>,
-    /// Strands held for open buy orders
+    /// Strands held for someone, outside every balance: open buy orders'
+    /// escrow, and since S0.2 the court's (commissions and wage offers) and
+    /// later the guilds' treasuries. The backend's `ledger::held_strands`
+    /// is the one sum.
     pub escrow_strands: i64,
     /// Every unit in the world, by item type: inventories, boxes, stalls,
     /// escrow, impounds
@@ -269,7 +272,7 @@ impl UnitFlow {
 /// Every `currency_transactions.transaction_type` this build knows, in the
 /// order the console stacks them: faucets, sinks, transfers, escrow. One
 /// missing here is [`StrandFlow::Other`].
-pub const TRANSACTION_TYPES: [&str; 18] = [
+pub const TRANSACTION_TYPES: [&str; 27] = [
     "exchange_deposit",
     "deed_refund",
     "foreclosure_refund",
@@ -281,6 +284,10 @@ pub const TRANSACTION_TYPES: [&str; 18] = [
     "property_tax",
     "market_fee",
     "bazaar_rent",
+    "court_fee",
+    "postage",
+    "guild_fee",
+    "guild_dues",
     "trade_sent",
     "trade_received",
     "bazaar_purchase",
@@ -288,6 +295,11 @@ pub const TRANSACTION_TYPES: [&str; 18] = [
     "market_escrow",
     "market_sale",
     "market_refund",
+    "court_escrow",
+    "court_payout",
+    "court_refund",
+    "guild_deposit",
+    "guild_withdrawal",
 ];
 
 /// What a `currency_transactions` type does to the world's Strands.
@@ -301,7 +313,10 @@ pub enum StrandFlow {
     Sink,
     /// Between players, in pairs that net to nothing
     Transfer,
-    /// Into and out of a buy order's escrow
+    /// Into and out of Strands held for someone ([`Ledger::escrow_strands`]):
+    /// a buy order's escrow, the court's (S0.2), a guild's treasury (S4.2).
+    /// Money paid out of a holding to someone else is this too, not a
+    /// [`Transfer`](Self::Transfer): only its leaving the holding explains it.
     Escrow,
     /// A type this build doesn't know, counted in the world's sum as it is
     Other,
@@ -314,11 +329,11 @@ impl StrandFlow {
             "exchange_deposit" | "deed_refund" | "foreclosure_refund" | "bazaar_refund" | "admin_adjustment" => {
                 StrandFlow::Faucet
             }
-            "exchange_withdraw" | "deed_purchase" | "tax_payment" | "property_tax" | "market_fee" | "bazaar_rent" => {
-                StrandFlow::Sink
-            }
+            "exchange_withdraw" | "deed_purchase" | "tax_payment" | "property_tax" | "market_fee" | "bazaar_rent"
+            | "court_fee" | "postage" | "guild_fee" | "guild_dues" => StrandFlow::Sink,
             "trade_sent" | "trade_received" | "bazaar_purchase" | "bazaar_sale" => StrandFlow::Transfer,
-            "market_escrow" | "market_sale" | "market_refund" => StrandFlow::Escrow,
+            "market_escrow" | "market_sale" | "market_refund" | "court_escrow" | "court_payout" | "court_refund"
+            | "guild_deposit" | "guild_withdrawal" => StrandFlow::Escrow,
             _ => StrandFlow::Other,
         }
     }
@@ -720,6 +735,31 @@ mod tests {
         assert_eq!(books.end_total - books.start_total, 100 + 200 - 251);
     }
 
+    /// The court's money (S0.2): a payout leaves the holding for someone who
+    /// never put it in, and the books still hold.
+    #[test]
+    fn the_courts_escrow_and_payouts_hold() {
+        let start = ledger(vec![account(1, "Ada Reeder", 500, &[]), account(2, "Percy Sawyer", 100, &[])], 40);
+        // Ada posts a commission worth 200, at the court's fee of 5 + 1; Percy
+        // delivers 3 of its 5 units and is paid 120; Ada cancels the rest and
+        // gets 80 back. A guild of Percy's takes 30 into its treasury.
+        let end = ledger(
+            vec![
+                account(
+                    1,
+                    "Ada Reeder",
+                    500 - 200 - 6 + 80,
+                    &[("court_escrow", -200), ("court_fee", -6), ("court_refund", 80)],
+                ),
+                account(2, "Percy Sawyer", 100 + 120 - 30, &[("court_payout", 120), ("guild_deposit", -30)]),
+            ],
+            40 + 30,
+        );
+        let books = reconcile(&start, &end).strands;
+        assert!(books.holds(), "{books:?}");
+        assert_eq!((books.sinks, books.transfers, books.escrow_drift), (-6, 0, 0));
+    }
+
     #[test]
     fn a_write_without_a_trail_is_drift() {
         let start = ledger(vec![account(1, "Ada Reeder", 400, &[])], 0);
@@ -796,6 +836,16 @@ mod tests {
         assert_eq!(StrandFlow::of("property_tax"), StrandFlow::Sink);
         assert_eq!(StrandFlow::of("bazaar_sale"), StrandFlow::Transfer);
         assert_eq!(StrandFlow::of("something_new"), StrandFlow::Other);
+        // The commons' types (S0.2): fees are sinks, and everything into or
+        // out of the court's escrow or a treasury is escrow, payouts too
+        for sink in ["court_fee", "postage", "guild_fee", "guild_dues"] {
+            assert_eq!(StrandFlow::of(sink), StrandFlow::Sink, "{sink}");
+        }
+        for held in ["court_escrow", "court_payout", "court_refund", "guild_deposit", "guild_withdrawal"] {
+            assert_eq!(StrandFlow::of(held), StrandFlow::Escrow, "{held}");
+        }
+        let known: std::collections::HashSet<&str> = TRANSACTION_TYPES.iter().copied().collect();
+        assert_eq!(known.len(), TRANSACTION_TYPES.len(), "a type listed twice");
     }
 
     #[test]

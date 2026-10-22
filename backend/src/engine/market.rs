@@ -490,6 +490,7 @@ pub(crate) mod tests {
     pub(crate) async fn place(db: &PgPool, player_id: Uuid, order: &PlaceOrder) -> Result<MarketOrder, MarketError> {
         super::place(db, player_id, order, &Fees::default()).await
     }
+    use crate::engine::conservation::{assert_audited, balances_of, every_unit, strands_accounted, units_of_type};
     use crate::engine::market_matcher::{run_cycle, Market};
     use crate::engine::units::test_units::{all_in, stack_of, units};
     use rand::rngs::StdRng;
@@ -780,19 +781,6 @@ pub(crate) mod tests {
         assert!(fills > 30, "only {fills} fills in six runs");
     }
 
-    /// Strands held, in open escrow and paid in fees: the total there is
-    async fn strands_accounted(db: &PgPool) -> i64 {
-        let (held, escrowed, fees): (i64, i64, i64) = sqlx::query_as(
-            "SELECT (SELECT COALESCE(SUM(strand_balance), 0)::BIGINT FROM players),
-                    (SELECT COALESCE(SUM(escrow_strands), 0)::BIGINT FROM market_orders WHERE status = 'open'),
-                    (SELECT COALESCE(SUM(fee), 0)::BIGINT FROM market_orders)",
-        )
-        .fetch_one(db)
-        .await
-        .unwrap();
-        held + escrowed + fees
-    }
-
     async fn conservation_run(pool: &PgPool, seed: u64, steps: usize) -> usize {
         const TYPES: [&str; 2] = ["rope", "fiber"];
         let db = pool.clone();
@@ -809,13 +797,7 @@ pub(crate) mod tests {
             }
             players.push(p);
         }
-        let start_strands: BTreeMap<Uuid, i64> = {
-            let mut m = BTreeMap::new();
-            for p in &players {
-                m.insert(p.id, balance(&db, p.id).await);
-            }
-            m
-        };
+        let start_strands = balances_of(&db, players.iter().map(|p| p.id)).await;
         let total_strands = strands_accounted(&db).await;
         let mut start_units = BTreeMap::new();
         for item_type in TYPES {
@@ -920,16 +902,7 @@ pub(crate) mod tests {
                 _ => assert!(order.units.is_empty() && order.escrow_strands == 0),
             }
         }
-        for (player, start) in start_strands {
-            let audited: i64 = sqlx::query_scalar(
-                "SELECT COALESCE(SUM(amount), 0)::BIGINT FROM currency_transactions WHERE player_id = $1",
-            )
-            .bind(player)
-            .fetch_one(&mut *conn)
-            .await
-            .unwrap();
-            assert_eq!(balance(&db, player).await, start + audited);
-        }
+        assert_audited(&db, &start_strands).await;
 
         // The book is the DB's open orders, each with what's left of it
         fills += run_cycle(&market, &db, &events, Utc::now()).await.fills;
@@ -944,32 +917,5 @@ pub(crate) mod tests {
             }
         }
         fills
-    }
-
-    /// Every unit of `item_type` there is, held or in escrow, in one query
-    async fn units_of_type(db: &PgPool, item_type: &str) -> Units {
-        let rows: Vec<(i16, i64)> = sqlx::query_as(
-            "SELECT u.quality, SUM(u.count)::BIGINT FROM item_units u JOIN items i ON i.id = u.item_id
-             WHERE i.item_type = $1 GROUP BY u.quality",
-        )
-        .bind(item_type)
-        .fetch_all(db)
-        .await
-        .unwrap();
-        Units::from_pairs(rows.into_iter().map(|(q, c)| (q as i32, c as i32)))
-    }
-
-    /// [`units_of_type`] stack by stack, checking each one's summaries match its units
-    async fn every_unit(db: &PgPool, item_type: &str) -> Units {
-        let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM items WHERE item_type = $1")
-            .bind(item_type)
-            .fetch_all(db)
-            .await
-            .unwrap();
-        let mut all = Units::new();
-        for id in ids {
-            all.merge(&units(db, id).await);
-        }
-        all
     }
 }

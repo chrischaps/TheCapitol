@@ -247,9 +247,7 @@ async fn books_within(db: &PgPool, most: u32) -> Result<Ledger, sqlx::Error> {
     )
     .fetch_all(&mut *tx)
     .await?;
-    let escrow_strands: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(escrow_strands), 0)::BIGINT FROM market_orders")
-        .fetch_one(&mut *tx)
-        .await?;
+    let escrow_strands = held_strands(&mut tx).await?;
     tx.commit().await?;
 
     let mut flows: BTreeMap<Uuid, BTreeMap<String, i64>> = BTreeMap::new();
@@ -283,6 +281,24 @@ async fn books_within(db: &PgPool, most: u32) -> Result<Ledger, sqlx::Error> {
 /// The tick's period at `scale`, as `tick::run_tick_loop` sets it.
 fn tick_period(scale: f64) -> Duration {
     Duration::from_secs_f64(capitol_protocol::rules::TICK_MS as f64 / 1000.0 / scale)
+}
+
+/// Every Strand held for someone, outside every balance: the ledger's
+/// `escrow_strands`, which its escrow flows explain (S0.2). Each table that
+/// holds Strands adds its sum here, or the ledger reports its holdings as
+/// drift: the market's buy orders, the court's commissions and wage offers,
+/// and later the guilds' treasuries (S4.2).
+pub(crate) async fn held_strands(conn: &mut sqlx::PgConnection) -> Result<i64, sqlx::Error> {
+    let market: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(escrow_strands), 0)::BIGINT FROM market_orders")
+        .fetch_one(&mut *conn)
+        .await?;
+    Ok(market + court_held(conn).await?)
+}
+
+/// Strands the Contract Court holds: what's unspent of open commissions'
+/// escrow (S2.1) and wage offers' (S2.6). Nothing until those tables exist.
+async fn court_held(_conn: &mut sqlx::PgConnection) -> Result<i64, sqlx::Error> {
+    Ok(0)
 }
 
 /// Every unit in the world, by item type.
@@ -367,6 +383,33 @@ mod tests {
         .await
         .unwrap();
         (id, container(db, "station_inventory", None, Some(id)).await)
+    }
+
+    /// A fresh world (S0.2): the court's escrow box is there exactly once,
+    /// nothing is held, and its books hold against an empty one.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_fresh_world_has_one_court_escrow_and_no_drift(db: PgPool) {
+        use capitol_protocol::ledger::reconcile;
+
+        let boxes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM containers WHERE container_type = 'court_escrow'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(boxes, 1);
+        let second = sqlx::query("INSERT INTO containers (id, container_type) VALUES ($1, 'court_escrow')")
+            .bind(Uuid::new_v4())
+            .execute(&db)
+            .await;
+        assert!(second.is_err(), "a second court escrow box");
+
+        let fresh = books(&db).await.unwrap();
+        assert_eq!(fresh.escrow_strands, 0);
+        let mut empty = fresh.clone();
+        empty.accounts.clear();
+        let books = reconcile(&empty, &fresh);
+        assert!(books.strands.holds(), "{:#?}", books.strands);
+        assert!(books.units.holds(), "{:#?}", books.units);
     }
 
     /// A day's work between two snapshots: a grant, a deposit and a

@@ -39,6 +39,30 @@ pub enum TransactionType {
     BazaarSale,
     /// Rent given back for days a stall didn't stand (E3.12's migration)
     BazaarRefund,
+    /// The Contract Court's fee on a commission or a wage offer: the filing
+    /// and escrow fees as one sink, kept on a cancel (S0.2,
+    /// `rules::court::court_fee`)
+    CourtFee,
+    /// Strands into a commission's or a wage offer's escrow (S0.2)
+    CourtEscrow,
+    /// Out of the court's escrow to a deliverer or a worker, for what they
+    /// delivered or made (S0.2). It's escrow, not a transfer: the poster's
+    /// half is the `CourtEscrow` they paid in.
+    CourtPayout,
+    /// What's unspent of a commission's or a wage offer's escrow, back to
+    /// whoever put it in (S0.2)
+    CourtRefund,
+    /// A letter's postage: a sink (S1.5)
+    Postage,
+    /// Founding a guild, or a change to its roster: a sink (S4.1)
+    GuildFee,
+    /// A guild's weekly dues, from its treasury: a sink (S4.2)
+    GuildDues,
+    /// A member's Strands into a guild's treasury. Escrow, not a transfer:
+    /// the treasury is held for the guild, outside every balance (S4.2)
+    GuildDeposit,
+    /// An officer's draw from a guild's treasury (S4.2)
+    GuildWithdrawal,
 }
 
 impl TransactionType {
@@ -62,6 +86,15 @@ impl TransactionType {
             TransactionType::BazaarPurchase => "bazaar_purchase",
             TransactionType::BazaarSale => "bazaar_sale",
             TransactionType::BazaarRefund => "bazaar_refund",
+            TransactionType::CourtFee => "court_fee",
+            TransactionType::CourtEscrow => "court_escrow",
+            TransactionType::CourtPayout => "court_payout",
+            TransactionType::CourtRefund => "court_refund",
+            TransactionType::Postage => "postage",
+            TransactionType::GuildFee => "guild_fee",
+            TransactionType::GuildDues => "guild_dues",
+            TransactionType::GuildDeposit => "guild_deposit",
+            TransactionType::GuildWithdrawal => "guild_withdrawal",
         }
     }
 }
@@ -366,6 +399,26 @@ pub fn announce_balances(events: &broadcast::Sender<GameEvent>, balances: impl I
 mod tests {
     use super::*;
     use crate::engine::market::tests::{balance, player};
+    use capitol_protocol::ledger::{StrandFlow, TRANSACTION_TYPES};
+
+    /// Every type the server writes is one the ledger files, and the other
+    /// way round, so none shows on the console as `other` (S0.2)
+    #[test]
+    fn every_type_is_one_the_ledger_knows() {
+        use TransactionType::*;
+        let all = [
+            ExchangeDeposit, ExchangeWithdraw, TradeReceived, TradeSent, AdminAdjustment, DeedPurchase, DeedRefund,
+            ForeclosureRefund, TaxPayment, PropertyTax, MarketEscrow, MarketFee, MarketRefund, MarketSale, BazaarRent,
+            BazaarPurchase, BazaarSale, BazaarRefund, CourtFee, CourtEscrow, CourtPayout, CourtRefund, Postage,
+            GuildFee, GuildDues, GuildDeposit, GuildWithdrawal,
+        ];
+        let mut written: Vec<&str> = all.iter().map(|t| t.as_str()).collect();
+        assert!(written.iter().all(|t| StrandFlow::of(t) != StrandFlow::Other));
+        written.sort();
+        let mut known = TRANSACTION_TYPES.to_vec();
+        known.sort();
+        assert_eq!(written, known);
+    }
 
     /// A move is one statement (#208): the balance and its audit row together,
     /// and a refusal writes neither and leaves the caller's transaction usable.

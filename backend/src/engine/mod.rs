@@ -5,6 +5,8 @@ pub mod automation_tick;
 pub mod bazaar;
 pub mod catalog;
 mod commands;
+#[cfg(test)]
+pub(crate) mod conservation;
 pub mod container_access;
 mod craft_completion;
 mod crafting;

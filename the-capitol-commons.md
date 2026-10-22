@@ -43,7 +43,7 @@ It's also the economy's own fix. The town is short of demand. Strands pool with 
 - **Interest.** Interest-based fan-out (#256, #275): `GameEvent` broadcasts filtered per socket by `INTEREST_CELL` (300 units, 3×3 cells). Local talk can copy `ExtractionStarted`'s filter (`connection.rs:951`).
 - **Notices** that wait for an offline player (`engine/notices.rs`, `player_notices`, #138). Any `ServerMessage` can be queued and is taken once. This is mail's delivery.
 - **The market's escrow** (`engine/market.rs`): one box, one transaction per action, and a conservation property test. It can't be reused as it stands, because `close` reads `market_orders`. Its parts can: `escrow_units`, `units::{take_units, insert_stack}`, `currency::*_strands_in`, `market_box` and the harness.
-- **The ledger** (C1.7) counts escrowed Strands from `market_orders` only (`ledger.rs:201`). New escrow must be added there, or it reads as drift.
+- **The ledger** (C1.7) counts escrowed Strands from `market_orders` only (`ledger::held_strands`, with the court's part in `court_held`). Each new table that holds Strands adds its sum there and points at it. New escrow must be added there, or it reads as drift.
 - **The Gazette** (E3.9) composes a day from records, honours a byline opt-out (`players.gazette_named`), and its **notice board** already stands in the hall's forecourt. The board is a client prop: a click opens the paper (`hall.rs`, `cap_board_at`).
 - **The hall:** `rules::market::at_the_hall` is where orders are placed (E3.4).
 - **Guilds:** guild-district lots (#83, all `guild_hall`) and a `PermissionLevel::Guild` that `container_access` treats as owner-only "until those systems exist" (#80).
@@ -159,7 +159,7 @@ Weekly, from records the city already keeps.
 ## 5. Architecture notes
 
 - **Protocol.** New `rules::talk`, `rules::court` and `rules::standing`. `ClientMessage::Say`, `ServerMessage::{Said, LetterArrived}`, and the commission, wage and guild events, each with a fixture. All of them are pure and tested in `protocol`, and both ends call them.
-- **Strands.** The court's money moves through `currency::*_strands_in` with new types (`court_fee`, `court_escrow`, `court_payout`, `court_refund`, `postage`, `guild_*`), each with its `StrandFlow` arm (S0.2).
+- **Strands.** The court's money moves through `currency::*_strands_in` with new types (`court_fee`, `court_escrow`, `court_payout`, `court_refund`, `postage`, `guild_*`), each with its `StrandFlow` arm (S0.2). The fees, postage and dues are sinks. Everything into or out of a holding is `Escrow`, a payout to a deliverer or a worker and a guild deposit or withdrawal included: the holding is counted in the world's Strands, so only its leaving explains the money, and a `Transfer` would show as drift.
 - **The ledger.** Held Strands become the market's escrow plus the court's plus the treasuries (`ledger.rs:201`).
 - **Units.** Units in transit sit in one `court_escrow` box. Moves in and out of escrow count no unit flow.
 - **Conservation.** One harness (`engine::conservation`, lifted from the market's test) runs seeded lives of commissions, wages and guilds. Strands and units in must equal Strands and units out, plus fees.
@@ -173,7 +173,7 @@ Weekly, from records the city already keeps.
 ### S0: Groundwork (`cm:S0-groundwork`)
 
 - **S0.1 Text rules and a chat bucket** (#378, S). *As built:* `rules::talk` (`clean`, `clean_letter`, `MAX_LINE`, `MAX_LETTER`, `HEARD`, `CAPITOL_BACKLOG`, `TalkError`). A newline or tab in a line folds as whitespace rather than vanishing, a letter folds a run of blank lines to one, and direction overrides (U+202A to U+202E, U+2066 to U+2069) are dropped with the control characters, so a line can't turn a name round; joiners stay for emoji. `Category::Chat` is counted over a 10 s window (`CHAT_WINDOW_SECS`; the others stay a minute), `RATE_LIMIT_CHAT_PER_10S` sets it, and it's keyed by account (`Key::chat(account_id)`), since `POST /letters` has the account and not the player, and an account has one player. `rate_limit::chat_message` is the "You're talking too fast" words for `say` and letters.
-- **S0.2 Court escrow groundwork** (#379, M): the box, the transaction types, `rules::court`, the ledger and the shared harness.
+- **S0.2 Court escrow groundwork** (#379, M): the box, the transaction types, `rules::court`, the ledger and the shared harness. *As built:* the `court_escrow` box (`20261203_001_court_escrow.sql`, one, by a unique index). Nine new `TransactionType`s, and `currency::tests::every_type_is_one_the_ledger_knows` holds the server's and `ledger::TRANSACTION_TYPES` to the same list. `court_payout`, `guild_deposit` and `guild_withdrawal` are `StrandFlow::Escrow`, not `Transfer` as first planned: each moves money into or out of a holding the ledger counts (see §5). `rules::court`: `filing_fee`, `escrow_fee`, `court_fee` (value 0 costs 5). The ledger's `escrow_strands` is `ledger::held_strands`, the market's plus `court_held` (0 until S2.1). `engine::conservation` (test-only): `strands_accounted` (balances + held + `fees_kept`, where S2.1 and S2.6 add the court's fee column), `units_of_type`, `every_unit`, `balances_of` and `assert_audited`.
 - **S0.3 A person's card** (#380, M): `GET /players/{id}/card`, and the card in Flint from a click on a person or a name.
 
 ### S1: Talk (`cm:S1-talk`)
