@@ -25,6 +25,7 @@ use std::sync::{Arc, Barrier, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use capitol_protocol::land;
 use capitol_protocol::rest::{PlaceOrder, ResourceNodeInfo, StationInfo};
 use capitol_protocol::rules::market::{OrderSide, OrderStatus};
 use capitol_protocol::rules::Zone;
@@ -58,6 +59,15 @@ const PLACE_TRIES: usize = 8;
 const MAX_EXPLORES: usize = 6;
 /// Spots an explore picks before it gives up on ones it has no way to.
 const EXPLORE_TRIES: usize = 4;
+/// Explores nearer in that find nothing before a gather tries the wilds
+/// (#336).
+const WILD_AFTER: usize = 2;
+/// The [`risk`](crate::citizen::decide::Temperament::risk) from which a
+/// citizen explores the wilds first: about a third of them, since a
+/// temperament is two draws averaged.
+const VENTURE_RISK: f32 = 0.6;
+/// Spots an explore for ore looks over, to walk to the highest (#336).
+const HIGH_GROUND_LOOKS: usize = 6;
 /// Failures in a row before a bot sits out a game minute.
 const FAILURES_BEFORE_REST: u32 = 5;
 /// How long a bot's order waits for a fill before it's taken down. Matching
@@ -1046,13 +1056,17 @@ impl SimBot {
         Ok(())
     }
 
-    /// One pull from a node of `resource`, finding one first.
+    /// One pull from a node of `resource`, or of any resource that yields
+    /// the same with the same tool (#336), finding one first.
     fn gather(&mut self, resource: &str) -> Result<(), BotError> {
+        let kinds = kinds(self.bot.state().catalog(), resource);
+        let mut explored = 0;
         for _ in 0..MAX_EXPLORES {
             self.learn_nodes();
             let pick = self.random();
-            let Some(node) = self.nearest(resource, pick) else {
-                self.explore(resource)?;
+            let Some(node) = self.nearest(&kinds, pick) else {
+                self.explore(&kinds, explored)?;
+                explored += 1;
                 continue;
             };
             match self.bot.extract(&node) {
@@ -1091,27 +1105,35 @@ impl SimBot {
         }
     }
 
-    /// A near node of `resource` that nobody is gathering and that's available,
-    /// or was depleted long enough ago to have grown back. One of the three
-    /// nearest, picked by `pick` (in [0, 1)), so a crowd spreads out rather
-    /// than queueing at one patch.
-    fn nearest(&self, resource: &str, pick: f64) -> Option<ResourceNodeInfo> {
-        let regrow = self
-            .bot
-            .state()
-            .catalog()
-            .resource_type(resource)
-            .map_or(600.0, |r| r.regeneration_ticks as f64 / 10.0);
-        let regrown = self.wall(regrow);
+    /// A near node of one of `kinds` that nobody is gathering and that's
+    /// available, or was depleted long enough ago to have grown back. One of
+    /// the three nearest, picked by `pick` (in [0, 1)), so a crowd spreads
+    /// out rather than queueing at one patch.
+    fn nearest(&self, kinds: &[String], pick: f64) -> Option<ResourceNodeInfo> {
+        let regrown: HashMap<&str, Duration> = kinds
+            .iter()
+            .map(|kind| {
+                let regrow = self
+                    .bot
+                    .state()
+                    .catalog()
+                    .resource_type(kind)
+                    .map_or(600.0, |r| r.regeneration_ticks as f64 / 10.0);
+                (kind.as_str(), self.wall(regrow))
+            })
+            .collect();
         let (x, y) = self.bot.position();
         let now = Instant::now();
         let state = self.bot.state();
         let mut near: Vec<&ResourceNodeInfo> = self
             .atlas
             .values()
-            .filter(|s| s.node.resource_type == resource)
             .filter(|s| s.shunned_until.is_none_or(|t| now >= t))
-            .filter(|s| s.node.state == "available" || now.duration_since(s.at) >= regrown)
+            .filter(|s| {
+                regrown.get(s.node.resource_type.as_str()).is_some_and(|regrown| {
+                    s.node.state == "available" || now.duration_since(s.at) >= *regrown
+                })
+            })
             .filter(|s| state.harvester(s.node.id).is_none())
             .map(|s| &s.node)
             .collect();
@@ -1121,36 +1143,51 @@ impl SimBot {
         near.get(i.min(near.len().saturating_sub(1))).map(|n| (*n).clone())
     }
 
-    /// Walks somewhere new in the nearest zone `resource` grows in, then asks
-    /// what's around.
-    fn explore(&mut self, resource: &str) -> Result<(), BotError> {
+    /// Walks somewhere new where one of `kinds` grows, then asks what's
+    /// around: in the nearest zone it grows in, or out in the wilds (#336),
+    /// first for a citizen who [ventures](Self::ventures), and for anyone
+    /// once [`WILD_AFTER`] explores nearer in have come to nothing. This
+    /// gather has explored `explored` times already.
+    fn explore(&mut self, kinds: &[String], explored: usize) -> Result<(), BotError> {
         let (x, y) = self.bot.position();
         let (cx, cy) = (Zone::CENTER_X, Zone::CENTER_Y);
         let r_now = (x - cx).hypot(y - cy);
         let a_now = (y - cy).atan2(x - cx);
-        let bands: Vec<(f64, f64)> = self
-            .bot
-            .state()
-            .catalog()
-            .resource_type(resource)
-            .map(|r| {
-                r.spawns
-                    .iter()
-                    .filter(|s| s.density > 0.0 && s.zone != Zone::Wilderness.as_str())
-                    .filter_map(|s| Zone::from_str(&s.zone))
-                    .map(|z| z.radii())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let (inner, outer) = bands
-            .into_iter()
-            .min_by(|a, b| band_gap(*a, r_now).total_cmp(&band_gap(*b, r_now)))
+        let catalog = self.bot.state().catalog();
+        let zones: Vec<Zone> = kinds
+            .iter()
+            .filter_map(|kind| catalog.resource_type(kind))
+            .flat_map(|r| r.spawns.iter())
+            .filter(|s| s.density > 0.0)
+            .filter_map(|s| Zone::from_str(&s.zone))
+            .collect();
+        // Ore is in the rock: for what a pickaxe works, it looks up at the
+        // high ground, which in the wilds finds iron twice as often (#336)
+        let dug = kinds
+            .iter()
+            .filter_map(|kind| catalog.resource_type(kind))
+            .any(|r| r.tool_type.as_ref().or(r.required_tool.as_ref()).is_some_and(|t| t == "pickaxe"));
+        let wilds = self.ventures() || explored >= WILD_AFTER;
+        let (inner, outer) = search_band(&zones, r_now, wilds)
             .unwrap_or((rules_spawn_radius() - 300.0, rules_spawn_radius() + 300.0));
+        let walks = if dug { self.bot.walks().ok() } else { None };
         for _ in 0..EXPLORE_TRIES {
-            let r = inner + 60.0 + (outer - inner - 120.0).max(0.0) * self.random();
-            // Along the ring from here, a little either way.
-            let a = a_now + (self.random() - 0.5) * 0.6;
-            match self.bot.walk_to(cx + r * a.cos(), cy + r * a.sin()) {
+            let looks = if walks.is_some() { HIGH_GROUND_LOOKS } else { 1 };
+            let mut spots = Vec::with_capacity(looks);
+            for _ in 0..looks {
+                let r = inner + 60.0 + (outer - inner - 120.0).max(0.0) * self.random();
+                // Along the ring from here, a little either way.
+                let a = a_now + (self.random() - 0.5) * 0.6;
+                spots.push((cx + r * a.cos(), cy + r * a.sin()));
+            }
+            let height = |&(x, y): &(f64, f64)| {
+                walks.as_ref().map_or(0.0, |w| land::height_at(x, y, w.ground().land()))
+            };
+            let (x, y) = spots
+                .into_iter()
+                .max_by(|a, b| height(a).total_cmp(&height(b)))
+                .expect("at least one spot");
+            match self.bot.walk_to(x, y) {
                 // A spot the walk graph can't reach, in a lake, say: it never
                 // set out, so another is tried (#280)
                 Err(BotError::Blocked { reason, .. }) if reason == NO_WAY => continue,
@@ -1160,6 +1197,15 @@ impl SimBot {
         }
         self.bot.refetch(Fetch::NearbyNodes);
         self.bot.settle()
+    }
+
+    /// Whether it looks in the wilds first when it explores (#336): a
+    /// citizen who takes chances, about a third of them, walks out to the
+    /// ranges for their better grade. A swarm bot, with no persona, doesn't.
+    fn ventures(&self) -> bool {
+        self.persona
+            .as_ref()
+            .is_some_and(|p| p.temperament.risk >= VENTURE_RISK)
     }
 
     fn place(&mut self, kit: &str, station: &str, on_plot: bool) -> Result<(), BotError> {
@@ -1340,6 +1386,42 @@ fn band_gap((inner, outer): (f64, f64), r: f64) -> f64 {
     (inner - r).max(r - outer).max(0.0)
 }
 
+/// `resource` and every other resource that yields the same item with the
+/// same tool: a log from a tree or from old growth (#336).
+fn kinds(catalog: &Catalog, resource: &str) -> Vec<String> {
+    let Some(this) = catalog.resource_type(resource) else {
+        return vec![resource.to_string()];
+    };
+    let mut kinds = vec![this.id.clone()];
+    kinds.extend(
+        catalog
+            .resource_types()
+            .iter()
+            .filter(|r| r.id != this.id)
+            .filter(|r| r.yields_item == this.yields_item && r.required_tool == this.required_tool)
+            .map(|r| r.id.clone()),
+    );
+    kinds
+}
+
+/// The band an explore looks in, from `r_now`, among the `zones` a resource
+/// grows in: the nearest of them short of the Wilderness, or with `wilds`
+/// the Wilderness, if it grows there (#336). A resource that grows only in
+/// the wilds is looked for there either way. `None` when it grows nowhere.
+fn search_band(zones: &[Zone], r_now: f64, wilds: bool) -> Option<(f64, f64)> {
+    let wild = zones.contains(&Zone::Wilderness).then(|| Zone::Wilderness.radii());
+    let near = zones
+        .iter()
+        .filter(|z| **z != Zone::Wilderness)
+        .map(|z| z.radii())
+        .min_by(|a, b| band_gap(*a, r_now).total_cmp(&band_gap(*b, r_now)));
+    match (near, wild) {
+        (_, Some(wild)) if wilds => Some(wild),
+        (Some(near), _) => Some(near),
+        (None, wild) => wild,
+    }
+}
+
 fn rules_spawn_radius() -> f64 {
     use capitol_protocol::rules::{SPAWN_X, SPAWN_Y};
     (SPAWN_X - Zone::CENTER_X).hypot(SPAWN_Y - Zone::CENTER_Y)
@@ -1364,6 +1446,40 @@ mod tests {
         assert_eq!(band_gap((3000.0, 4600.0), 3350.0), 0.0);
         assert_eq!(band_gap((1800.0, 3000.0), 3350.0), 350.0);
         assert_eq!(band_gap((3000.0, 4600.0), 2500.0), 500.0);
+    }
+
+    #[test]
+    fn a_log_comes_from_a_tree_or_old_growth_and_ore_from_its_own_vein() {
+        let catalog = Catalog::fallback();
+        assert_eq!(kinds(&catalog, "tree"), ["tree", "old_growth"]);
+        assert_eq!(kinds(&catalog, "old_growth"), ["old_growth", "tree"]);
+        assert_eq!(kinds(&catalog, "iron_vein"), ["iron_vein"]);
+        assert_eq!(kinds(&catalog, "no_such"), ["no_such"]);
+    }
+
+    #[test]
+    fn an_explore_goes_to_the_wilds_when_asked_or_when_nothing_else_grows_it() {
+        let (rural, wilderness) = (Zone::Rural.radii(), Zone::Wilderness.radii());
+        let ore = [Zone::Rural, Zone::Wilderness];
+        let r_home = (rural.0 + rural.1) / 2.0;
+        assert_eq!(search_band(&ore, r_home, false), Some(rural));
+        assert_eq!(search_band(&ore, r_home, true), Some(wilderness));
+        // Copper and tin grow only in the wilds
+        assert_eq!(search_band(&[Zone::Wilderness], r_home, false), Some(wilderness));
+        // Grass doesn't grow there at all
+        assert_eq!(search_band(&[Zone::Rural], r_home, true), Some(rural));
+        assert_eq!(search_band(&[], r_home, true), None);
+    }
+
+    #[test]
+    fn about_a_third_of_citizens_venture_out_first() {
+        let venturers = (0..1000u64)
+            .filter(|&seed| {
+                let persona = Persona::seeded(Role::Gatherer(super::super::Gather::Ore), seed);
+                persona.temperament.risk >= VENTURE_RISK
+            })
+            .count();
+        assert!((250..=420).contains(&venturers), "{venturers} of 1000 venture out first");
     }
 
     #[test]
