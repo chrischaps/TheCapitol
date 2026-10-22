@@ -237,12 +237,14 @@ mod tests {
         // for more, the flip to the farms (#290) re-plans the nodes they
         // move, and so do the smaller farms (#423), the wider suburban lots
         // (#422) and the urban grid (#421). Then Plots v2's flip (#459)
-        // replaces every planned node again with its own rows. The first
+        // replaces every planned node again with its own rows, and
+        // Arrival's commons (#443) adds its own round the spawn. The first
         // set's nodes (the seeded grass) stay.
         assert!(seeds > 0);
         let rows = |sql: &str, prefix: &str| sql.lines().filter(|l| l.trim_start().starts_with(prefix)).count() as i64;
         let flip = rows(include_str!("../migrations/post-content/20261220_001_plots_v2_flip_nodes.sql"), "('");
-        assert_eq!(nodes().await.unwrap(), before + flip, "the re-plan's nodes and the grass");
+        let commons = rows(include_str!("../migrations/post-content/20261222_001_arrival_commons.sql"), "('");
+        assert_eq!(nodes().await.unwrap(), before + flip + commons, "the re-plan's nodes, the commons and the grass");
         let staging: Option<String> =
             sqlx::query_scalar("SELECT to_regclass('resource_node_seeds')::text").fetch_one(&db).await.unwrap();
         assert_eq!(staging, None);

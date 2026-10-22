@@ -66,6 +66,14 @@ const RIGHT_CLICK_SLOP: f64 = 6.0;
 /// on screen, in points (#442). Nearer the edge, the card's arrow points.
 const LEAD_MARGIN: f32 = 32.0;
 
+/// How far you may walk from the workbench's clear spot before it's looked
+/// for again near you (#443), server units: well past the 75 a station goes
+/// down from, so it holds while you walk over to it.
+const SPOT_KEEP: f64 = 120.0;
+
+/// How long, with no clear spot near, before it's looked for again (#443).
+const SPOT_AGAIN: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// `--deeds-sample` (#448): the Deeds Office offline, on the zone card's
 /// sample facts, a sample register and a deed.
 struct DeedsSample {
@@ -199,6 +207,10 @@ pub struct CapitolExtension {
     /// Where the road in's card leads (#442): how far, and which way while
     /// it's off screen. Found in `pre_update`, said on the card.
     lead: Option<ui::hints::Lead>,
+    /// The workbench's clear spot (#443), server units, and when it was
+    /// last looked for: kept while it stays clear and near, so the ring
+    /// doesn't follow you (`keep_clear_spot`). `None` until the step asks.
+    clear_spot: Option<(Option<[f64; 2]>, Instant)>,
     /// The bazaar (E3.11): its building, the open stall's shop panel, and
     /// `--bazaar-sample`'s shops offline.
     bazaar: world::bazaar::BazaarLayer,
@@ -319,6 +331,7 @@ impl CapitolExtension {
             hall_sample: false,
             hall_hint: None,
             lead: None,
+            clear_spot: None,
             bazaar: world::bazaar::BazaarLayer::default(),
             shop: ui::shop::ShopPanel::default(),
             bazaar_sample: None,
@@ -816,6 +829,48 @@ impl CapitolExtension {
         })
     }
 
+    /// Where you stand for the road in's card (world metres): your avatar,
+    /// or offline with `--hints-sample` or `--deeds-sample`, `camera_target`.
+    fn lead_from(&self, camera_target: [f32; 2]) -> Option<[f32; 2]> {
+        match &self.session {
+            Some(session) => {
+                let p = session.state().local_player()?;
+                Some(crate::coords::to_world(p.x, p.y))
+            }
+            None if self.hints_sample || self.deeds_sample.is_some() => Some(camera_target),
+            None => None,
+        }
+    }
+
+    /// Finds the workbench's clear spot while the card asks for one (#443,
+    /// `Target::ClearSpot`), and keeps it while it stays clear (no bench
+    /// put down there since) and you stay near it: the ring stays put
+    /// rather than following you. When there's none near, it looks again
+    /// after [`SPOT_AGAIN`], not every frame.
+    fn keep_clear_spot(&mut self, camera_target: [f32; 2], now: Instant) {
+        if self.hints.target() != Some(Target::ClearSpot) {
+            self.clear_spot = None;
+            return;
+        }
+        let (Some(terrain), Some(you)) = (&self.built, self.lead_from(camera_target)) else {
+            return;
+        };
+        let you = crate::coords::to_server(you[0], you[1]);
+        let none = HashMap::new();
+        let stations = self.session.as_ref().map_or(&none, |s| s.state().stations()).values();
+        let kept = match self.clear_spot {
+            Some((Some(at), _)) => {
+                (at[0] - you[0]).hypot(at[1] - you[1]) <= SPOT_KEEP
+                    && onboarding::Ground::near(at, 0.0, terrain, stations.clone()).clear(at)
+            }
+            Some((None, looked)) => now.saturating_duration_since(looked) < SPOT_AGAIN,
+            None => false,
+        };
+        if !kept {
+            self.clear_spot = Some((onboarding::clear_spot(you, terrain, stations), now));
+        }
+    }
+
     /// Where the road in's card leads, if it names a place this client can
     /// find (#442), and where you stand, both world metres. A node is the
     /// nearest live one of its kinds, a lot its zone's stop on the road in
@@ -827,14 +882,7 @@ impl CapitolExtension {
     /// `camera_target`. Call after the hall's and the bazaar's marks are
     /// set this frame.
     fn lead_mark(&self, camera_target: [f32; 2]) -> Option<(script_api::LeadMark, [f32; 2])> {
-        let you = match &self.session {
-            Some(session) => {
-                let p = session.state().local_player()?;
-                crate::coords::to_world(p.x, p.y)
-            }
-            None if self.hints_sample || self.deeds_sample.is_some() => camera_target,
-            None => return None,
-        };
+        let you = self.lead_from(camera_target)?;
         // The lot the Deeds Office showed you (#448), wherever the card
         // leads nowhere of its own: the claim's step, or no card at all
         let target = match self.hints.target() {
@@ -849,6 +897,11 @@ impl CapitolExtension {
         };
         let mark = match target {
             Target::Point([x, y]) => ring(crate::coords::to_world(x, y), 1.2),
+            // As wide as the bench's own ring, so it reads as its footprint
+            Target::ClearSpot => {
+                let [x, y] = self.clear_spot.and_then(|(spot, _)| spot)?;
+                ring(crate::coords::to_world(x, y), crate::stations::ring_radius("workbench"))
+            }
             Target::Node(kinds) => {
                 let nodes = match (&self.session, &self.node_sampled) {
                     (Some(session), _) => session.state().nodes(),
@@ -1273,6 +1326,11 @@ impl PlayerExtension for CapitolExtension {
             if let Some(step) = self.hints.waive(now) {
                 session.tutorial_seen(step);
             }
+            // The quality card's numbers, from your own pack (#443)
+            let state = session.state();
+            let pack = [state.inventory(), state.crafting_input(), state.crafting_output()];
+            let held = pack.into_iter().flatten().flat_map(|c| c.slots.iter().flatten());
+            self.hints.set_lesson(onboarding::QualityLesson::of(held, state.recipe("rope_basic")));
             if plots(ctx, session, &self.shared, &self.lots, &mut self.sound) {
                 // The deed is spent (#448): the office steps aside for the
                 // gold rings, and the lot it showed is yours now or let go
@@ -1581,6 +1639,7 @@ impl PlayerExtension for CapitolExtension {
         // Where the road in's card leads (#442): ringed on the ground by
         // `input.rhai` while it's on screen, pointed to from the card while
         // it isn't.
+        self.keep_clear_spot([camera.target.x, camera.target.z], Instant::now());
         let found = self.lead_mark([camera.target.x, camera.target.z]);
         // The card speaks of its own step's place, and of the shown lot
         // only on the claim's step (#448): any other step's card would

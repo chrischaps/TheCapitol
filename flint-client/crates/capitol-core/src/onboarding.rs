@@ -19,10 +19,15 @@
 //! way and a gold ring marks the place. A step names a kind of place, never
 //! one place, so the client finds it from what it holds (the nearest live
 //! node of a kind, [`nearest_node`]) and a regenerated world can't strand
-//! it.
+//! it. The workbench's place is found from the ground near you
+//! ([`clear_spot`], #443).
+//!
+//! Arrival's quality card (#443) reads its numbers from the player's own
+//! pack ([`QualityLesson`]).
 
-use capitol_protocol::rest::ResourceNodeInfo;
-use capitol_protocol::rules::Zone;
+use capitol_protocol::rest::{RecipeInfo, ResourceNodeInfo, SlotItem, StationInfo};
+use capitol_protocol::rules::{self, quality, Zone};
+use capitol_protocol::terrain::{quad_contains, TerrainResponse};
 use capitol_protocol::tutorial::{Chapter, Step, TutorialProgress};
 use capitol_protocol::ws::PlayerPosition;
 use uuid::Uuid;
@@ -122,6 +127,11 @@ pub enum Target {
     Person,
     /// The Deeds Office's desk, in the hall's forecourt (#448).
     Office,
+    /// Open ground near you where a workbench may stand (#443): off every
+    /// lot, on dry ground, clear of every station, and beside the road
+    /// rather than on it ([`clear_spot`]). The extension keeps the spot it
+    /// found while it stays clear, so the ring doesn't follow you about.
+    ClearSpot,
 }
 
 /// Where `step` leads, if anywhere. A gather leads to the nodes the server
@@ -131,6 +141,7 @@ pub enum Target {
 /// #449): the workbench's clear spot, the road's stops, the Deeds Office.
 pub fn target(step: Step) -> Option<Target> {
     Some(match step {
+        Step::PlaceWorkbench => Target::ClearSpot,
         Step::GatherGrass => Target::Node(&["grass"]),
         Step::GatherBranches => Target::Node(&["fallen_branches"]),
         Step::GatherStone => Target::Node(&["rock_outcrop"]),
@@ -181,6 +192,211 @@ pub fn nearest_person<'a>(
             let d = |p: &PlayerPosition| (p.x - from[0]).powi(2) + (p.y - from[1]).powi(2);
             d(a).total_cmp(&d(b))
         })
+}
+
+/// How far from you [`clear_spot`] looks, in server units: inside the 75 a
+/// station goes down from, so you can place it from where you stand.
+pub const SPOT_REACH: f64 = 60.0;
+
+/// How far apart [`clear_spot`] tries spots, along each ring and between
+/// rings.
+const SPOT_STEP: f64 = 5.0;
+
+/// How near you [`clear_spot`] looks first: a step or so off, so the ring
+/// lies beside you rather than under your feet, and the bench doesn't go
+/// down on top of you.
+pub const SPOT_NEAR: f64 = 15.0;
+
+/// The room a clear spot keeps from a lot's edge: a bench's footprint (a
+/// ring of 1.45 m, 14.5 units, `stations::footprint`) and a little, so the
+/// whole bench stands off the lot, not only its middle.
+pub const SPOT_LOT_GAP: f64 = 16.0;
+
+/// The room it keeps from a road's edge, where one would do: the same, so
+/// the bench stands beside the road, not half on it.
+pub const SPOT_ROAD_GAP: f64 = 16.0;
+
+/// The room it keeps past the stations' least spacing (50), so a station
+/// nudged a little since doesn't make it too close.
+pub const SPOT_STATION_GAP: f64 = 2.0;
+
+/// The ground round one place, gathered once to test many spots on it:
+/// the lots, roads and stations near it.
+pub struct Ground<'a> {
+    terrain: &'a TerrainResponse,
+    lots: Vec<&'a [(f64, f64); 4]>,
+    /// Each road segment near, and the road's half width.
+    roads: Vec<([f64; 2], [f64; 2], f64)>,
+    stations: Vec<[f64; 2]>,
+}
+
+impl<'a> Ground<'a> {
+    /// The ground within `reach` of `from`, from the terrain and the
+    /// stations the client knows.
+    pub fn near(
+        from: [f64; 2],
+        reach: f64,
+        terrain: &'a TerrainResponse,
+        stations: impl IntoIterator<Item = &'a StationInfo>,
+    ) -> Self {
+        let near = |p: [f64; 2], pad: f64| (p[0] - from[0]).hypot(p[1] - from[1]) <= reach + pad;
+        let lots = terrain
+            .terrain_plots
+            .iter()
+            .filter(|lot| {
+                // A quad's far corner can be a long way off: a farm is about
+                // 400 long, so take any lot whose box comes within reach.
+                let xs = lot.corners.iter().map(|c| c.0);
+                let ys = lot.corners.iter().map(|c| c.1);
+                let (x0, x1) = xs.fold((f64::MAX, f64::MIN), |(a, b), x| (a.min(x), b.max(x)));
+                let (y0, y1) = ys.fold((f64::MAX, f64::MIN), |(a, b), y| (a.min(y), b.max(y)));
+                let gap = SPOT_LOT_GAP + reach;
+                from[0] >= x0 - gap && from[0] <= x1 + gap && from[1] >= y0 - gap && from[1] <= y1 + gap
+            })
+            .map(|lot| &lot.corners)
+            .collect();
+        let roads = terrain
+            .roads
+            .iter()
+            .flat_map(|road| {
+                road.points.windows(2).map(move |w| ([w[0].0, w[0].1], [w[1].0, w[1].1], road.width / 2.0))
+            })
+            .filter(|&(a, b, half)| to_segment(from, a, b) <= reach + half + SPOT_ROAD_GAP)
+            .collect();
+        let stations = stations
+            .into_iter()
+            .map(|s| [s.x, s.y])
+            .filter(|&p| near(p, rules::STATION_MIN_SPACING + SPOT_STATION_GAP))
+            .collect();
+        Ground { terrain, lots, roads, stations }
+    }
+
+    /// Whether a workbench may stand at `at`, with room to spare: off every
+    /// lot by [`SPOT_LOT_GAP`], out of the water, and clear of every
+    /// station by the least spacing and [`SPOT_STATION_GAP`]. The server's
+    /// own tests (`station::check`) are these without the room.
+    pub fn clear(&self, at: [f64; 2]) -> bool {
+        let [x, y] = at;
+        let off_lots = self.lots.iter().all(|corners| {
+            !quad_contains(corners, x, y)
+                && (0..4).all(|i| {
+                    let (a, b) = (corners[i], corners[(i + 1) % 4]);
+                    to_segment(at, [a.0, a.1], [b.0, b.1]) >= SPOT_LOT_GAP
+                })
+        });
+        let spaced = self
+            .stations
+            .iter()
+            .all(|s| (s[0] - x).hypot(s[1] - y) >= rules::STATION_MIN_SPACING + SPOT_STATION_GAP);
+        let centre = (self.terrain.center_x, self.terrain.center_y);
+        off_lots
+            && spaced
+            && rules::in_water(centre, &self.terrain.water_rings, (x, y)).is_none()
+            && rules::ground::water_at(self.terrain, x, y).is_none()
+    }
+
+    /// Whether `at` is on a road, or within [`SPOT_ROAD_GAP`] of its edge.
+    pub fn on_road(&self, at: [f64; 2]) -> bool {
+        self.roads.iter().any(|&(a, b, half)| to_segment(at, a, b) < half + SPOT_ROAD_GAP)
+    }
+}
+
+/// The nearest spot to `from` (server units) where a workbench may stand,
+/// [`SPOT_NEAR`] to [`SPOT_REACH`] off: off every lot, on dry ground and clear of every
+/// station (`Ground::clear`), and off the road where any such spot is
+/// (`Ground::on_road`), so it's beside the road rather than on it. `None`
+/// when there's nowhere: a farm's middle, say, where every spot near is
+/// the farm's.
+pub fn clear_spot<'a>(
+    from: [f64; 2],
+    terrain: &'a TerrainResponse,
+    stations: impl IntoIterator<Item = &'a StationInfo>,
+) -> Option<[f64; 2]> {
+    let ground = Ground::near(from, SPOT_REACH, terrain, stations);
+    let rings = (SPOT_REACH / SPOT_STEP) as usize;
+    let spots = ((SPOT_NEAR / SPOT_STEP) as usize..=rings).flat_map(|ring| {
+        let r = ring as f64 * SPOT_STEP;
+        let n = ((std::f64::consts::TAU * r / SPOT_STEP).ceil() as usize).max(1);
+        (0..n).map(move |k| {
+            let a = std::f64::consts::TAU * k as f64 / n as f64;
+            [from[0] + r * a.cos(), from[1] + r * a.sin()]
+        })
+    });
+    let mut on_road = None;
+    for at in spots {
+        let road = ground.on_road(at);
+        if road && on_road.is_some() {
+            continue;
+        }
+        if !ground.clear(at) {
+            continue;
+        }
+        if !road {
+            return Some(at);
+        }
+        on_road = Some(at);
+    }
+    on_road
+}
+
+/// The distance from `p` to the segment `a`–`b`.
+fn to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 == 0.0 { 0.0 } else { (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0) };
+    (a[0] + t * dx - p[0]).hypot(a[1] + t * dy - p[1])
+}
+
+/// The quality card's numbers (#443, plan §4.1), from the player's own
+/// pack: the rope they twisted, and what their best and worst fiber would
+/// twist to, by the server's own cascade (`rules::quality`) over
+/// `rope_basic`'s weights, as the crafting panel's preview reckons it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualityLesson {
+    /// Each quality the ropes held come in at, best first, at most two.
+    pub ropes: Vec<i32>,
+    /// The worst and the best unit of fiber held, if any is.
+    pub fiber: Option<(i32, i32)>,
+    /// The range two of the worst would twist to, then two of the best:
+    /// what's left to the roll. `None` without fiber, or the recipe.
+    pub twists: Option<((i32, i32), (i32, i32))>,
+}
+
+impl QualityLesson {
+    /// The numbers from `items` (the pack, and crafting's inputs and its
+    /// output, where a rope just twisted waits), for the rope `recipe`.
+    /// `None` while there's no rope to talk about.
+    pub fn of<'a>(items: impl IntoIterator<Item = &'a SlotItem>, recipe: Option<&RecipeInfo>) -> Option<Self> {
+        let mut ropes: Vec<i32> = Vec::new();
+        let mut fiber: Option<(i32, i32)> = None;
+        for item in items {
+            match item.item_type.as_str() {
+                "rope" => ropes.extend(item.units.pairs().map(|(q, _)| q)),
+                "fiber" => {
+                    if let (Some(lo), Some(hi)) = (item.units.min(), item.units.max()) {
+                        fiber = Some(fiber.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+                    }
+                }
+                _ => {}
+            }
+        }
+        ropes.sort_unstable_by(|a, b| b.cmp(a));
+        ropes.dedup();
+        ropes.truncate(2);
+        if ropes.is_empty() {
+            return None;
+        }
+        let twists = fiber.zip(recipe).and_then(|((lo, hi), recipe)| {
+            let input = recipe.inputs.first()?;
+            let twist = |q: i32| {
+                let mut inputs = quality::Inputs::default();
+                inputs.add(&input.item_type, input.quantity, q);
+                quality::output_range(&inputs, quality::NO_STATION, 0, &recipe.quality_weights)
+            };
+            Some((twist(lo), twist(hi)))
+        });
+        Some(QualityLesson { ropes, fiber, twists })
+    }
 }
 
 /// Where `step` sits in its chapter: its place from 0, and how many steps
@@ -326,6 +542,128 @@ mod tests {
         assert_eq!(near.x, -20.0, "passing over the spent, the worked and the trees");
         assert_eq!(nearest_node(&nodes, &["grass"], [28.0, 0.0]).unwrap().x, 30.0);
         assert!(nearest_node(&nodes, &["rock_outcrop"], [0.0, 0.0]).is_none());
+    }
+
+    fn bench(x: f64, y: f64) -> StationInfo {
+        StationInfo {
+            id: uuid::Uuid::nil(),
+            station_type: "workbench".into(),
+            name: "Workbench".into(),
+            category: "crafting".into(),
+            icon: None,
+            x,
+            y,
+            owner_id: uuid::Uuid::nil(),
+            container_id: None,
+            interaction_range: 75.0,
+            quality: 50,
+            tool: None,
+            automation: None,
+            production: Vec::new(),
+        }
+    }
+
+    /// A road 20 wide along y = 1000, a lot north of it from 1015, and
+    /// nothing south of it, round (4000, 4000)'s far side
+    fn roadside() -> TerrainResponse {
+        use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot};
+        TerrainResponse {
+            world_size: 8000.0,
+            center_x: 4000.0,
+            center_y: 4000.0,
+            water_rings: vec![],
+            roads: vec![RoadSegment {
+                id: "lane".into(),
+                road_type: RoadType::Arterial,
+                points: vec![(800.0, 1000.0), (1200.0, 1000.0)],
+                width: 20.0,
+            }],
+            terrain_plots: vec![TerrainPlot {
+                id: "farm".into(),
+                corners: [(800.0, 1015.0), (1200.0, 1015.0), (1200.0, 1300.0), (800.0, 1300.0)],
+                street_facing_edge: (0, 1),
+                area: 114_000.0,
+                adjacent_street_id: "lane".into(),
+                zone: "rural".into(),
+            }],
+            parks: vec![],
+            landmarks: vec![],
+            land: Default::default(),
+            rivers: vec![],
+            streams: vec![],
+            lakes: vec![],
+            fords: vec![],
+            version: None,
+        }
+    }
+
+    /// The server would take a bench there: `station::check`'s own tests,
+    /// off every plot
+    fn the_server_takes(at: [f64; 2], stations: &[StationInfo], terrain: &TerrainResponse) -> bool {
+        crate::station::check(at, at, uuid::Uuid::nil(), true, stations, &[], Some(terrain)) == Ok(None)
+    }
+
+    #[test]
+    fn the_workbench_goes_on_a_clear_spot_beside_the_road() {
+        assert_eq!(target(Step::PlaceWorkbench), Some(Target::ClearSpot));
+        let terrain = roadside();
+        let none: [StationInfo; 0] = [];
+        // On the road: the nearest spot off it, which is south, away from the farm
+        let spot = clear_spot([1000.0, 1000.0], &terrain, &none).expect("a spot");
+        assert!(the_server_takes(spot, &none, &terrain), "{spot:?}");
+        assert!(spot[1] < 1000.0 - 10.0 - SPOT_ROAD_GAP + 1e-9, "beside the road, not on it or the farm: {spot:?}");
+        assert!((spot[0] - 1000.0).hypot(spot[1] - 1000.0) <= 10.0 + SPOT_ROAD_GAP + 5.0, "the nearest such: {spot:?}");
+
+        // Someone's bench there already: the next is clear of it
+        let theirs = [bench(spot[0], spot[1])];
+        let next = clear_spot([1000.0, 1000.0], &terrain, &theirs).expect("another");
+        assert!(the_server_takes(next, &theirs, &terrain));
+        assert!((next[0] - spot[0]).hypot(next[1] - spot[1]) >= 50.0 + SPOT_STATION_GAP);
+
+        // In the farm's middle, every spot near is the farm's
+        assert_eq!(clear_spot([1000.0, 1200.0], &terrain, &none), None);
+        // At its edge, the spot is out on the road's verge
+        let verge = clear_spot([1000.0, 1030.0], &terrain, &none).expect("the verge");
+        assert!(the_server_takes(verge, &none, &terrain));
+    }
+
+    /// On the default world, from the spawn: a spot the server takes, off
+    /// the arterial (#443)
+    #[test]
+    fn a_newcomer_has_a_clear_spot_by_the_spawn() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain.json");
+        let terrain = crate::terrain::read_terrain_file(&path).expect("the fixture");
+        let spawn = [rules::SPAWN_X, rules::SPAWN_Y];
+        let none: [StationInfo; 0] = [];
+        let spot = clear_spot(spawn, &terrain, &none).expect("a spot by the spawn");
+        assert!(the_server_takes(spot, &none, &terrain), "{spot:?}");
+        assert!(!Ground::near(spawn, SPOT_REACH, &terrain, &none).on_road(spot), "{spot:?}");
+    }
+
+    #[test]
+    fn the_quality_card_reads_the_players_own_pack() {
+        use capitol_protocol::rules::stacking::Units;
+        let catalog = crate::catalog::Catalog::fallback();
+        let rope = catalog.recipes().iter().find(|r| r.id == "rope_basic");
+        assert!(rope.is_some(), "the rope recipe is in the catalog");
+        let item = |kind: &str, units: &[(i32, i32)]| {
+            SlotItem::new(uuid::Uuid::nil(), kind.into(), kind.into(), 0, 0, 0).with_units(Units::from_pairs(units.iter().copied()))
+        };
+        // No rope yet: nothing to say
+        assert_eq!(QualityLesson::of(&[item("fiber", &[(50, 4)])], rope), None);
+
+        let pack = [item("fiber", &[(41, 2), (58, 1)]), item("rope", &[(52, 1)]), item("fiber", &[(66, 3)]), item("sticks", &[(90, 1)])];
+        let lesson = QualityLesson::of(&pack, rope).unwrap();
+        assert_eq!(lesson.ropes, vec![52]);
+        assert_eq!(lesson.fiber, Some((41, 66)), "across every stack, and only fiber");
+        // The rope is fiber and the roll (rope_basic: ±3)
+        assert_eq!(lesson.twists, Some(((38, 44), (63, 69))));
+
+        // Two ropes of two qualities, best first; the fiber all spent
+        let two = [item("rope", &[(44, 1), (58, 1)])];
+        let lesson = QualityLesson::of(&two, rope).unwrap();
+        assert_eq!(lesson.ropes, vec![58, 44]);
+        assert_eq!((lesson.fiber, lesson.twists), (None, None));
     }
 
     #[test]

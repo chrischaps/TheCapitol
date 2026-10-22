@@ -20,7 +20,7 @@
 
 use std::time::{Duration, Instant};
 
-use capitol_core::onboarding::{place_in_chapter, target, Did, Target, Tour};
+use capitol_core::onboarding::{place_in_chapter, target, Did, QualityLesson, Target, Tour};
 use capitol_core::protocol::tutorial::{Chapter, Grant, Step, Steps, TutorialProgress};
 use egui::{Align2, Id, RichText};
 
@@ -64,7 +64,7 @@ pub fn chapter_name(chapter: Chapter) -> &'static str {
 fn chapter_close(chapter: Chapter) -> &'static str {
     match chapter {
         Chapter::Arrival => {
-            "You can gather, make things by hand and at a bench, and open with a tool what hands can't. The road north leads in."
+            "You can gather by hand, make things at a bench of your own, and work with a tool what hands can't. The road runs north into the city."
         }
         Chapter::RoadIn => {
             "You've read the deeds of a farm, a house and a yard, and what each zone is like. The hall is ahead, under the tower."
@@ -93,65 +93,65 @@ fn next_chapter(chapter: Chapter) -> Option<Chapter> {
 /// Each chapter's own work package may reword its steps (#443 to #449).
 fn words(step: Step) -> (&'static str, &'static str, &'static str) {
     match step {
-        // Arrival
+        // Arrival (#443): making things among the farms, at the spawn
         Step::Walk => (
             "Find your feet",
-            "Click the ground and you'll walk there, round the water by the bridges and fords.",
+            "You've come in on the south road, among the farms. Click the ground and you'll walk there, round the water by the bridges and fords.",
             "[Click] walk  ·  [W] [A] [S] [D] pan",
         ),
         Step::GatherGrass => (
             "Gather fiber",
-            "The tufts of tall grass are fiber. Click one to gather it, and you'll walk over if it's far.",
+            "Everything here starts as something growing. The tall grass is fiber: click a tuft to pull some, and you'll walk over if it's far.",
             "[Click] a tuft",
         ),
         Step::OpenPack => (
             "Your pack",
-            "What you gather lands in your inventory, bottom right. Drag to sort it.",
+            "What you gather goes in your pack. Hover the fiber: each tuft had a quality of its own, and the stack keeps every one.",
             "[I] opens and closes it",
         ),
         Step::TwistRope => (
             "Twist some rope",
-            "Open crafting and press Fill to bring fiber from your pack. Two fiber twist into a rope.",
+            "Open crafting, pick Basic Rope and press Fill: two fiber from your pack twist into a rope. Hands are enough for this.",
             "[C] crafting  ·  [Enter] craft",
         ),
         Step::MakeWorkbench => (
             "A workbench kit",
-            "Hands only go so far. Ten fiber make a workbench kit, in the same crafting panel.",
+            "Hands only go so far. Ten fiber make a workbench kit, in the same panel. Pull more grass if you're short.",
             "[C] crafting",
         ),
         Step::PlaceWorkbench => (
             "Set it down",
-            "Right-click the kit in your pack and put it on open ground. Off a lot, a workbench is the one station allowed.",
-            "Right-click a kit  ·  [Click] to place",
+            "Off the lots, a workbench is the one thing anyone may build. Right-click the kit in your pack, then click the clear spot ringed beside the road.",
+            "Right-click the kit  ·  [Click] to place",
         ),
         Step::GatherBranches => (
             "Fallen branches",
-            "Branches lie under the trees. Gather them as you did the grass.",
+            "Branches lie under the trees in the copse. Gather two by hand, as you did the grass.",
             "[Click] the branches",
         ),
         Step::GatherStone => (
             "Loose stone",
-            "Stone lies on the scree round the outcrops. Gather some.",
-            "[Click] a stone pile",
+            "Stone lies round the outcrops, one at a pull by hand. You'll want four.",
+            "[Click] an outcrop",
         ),
         Step::MakeHandle => (
             "A handle",
-            "Open the workbench: two branches and a rope make a tool handle.",
+            "Open your workbench: two branches and a rope bind into a tool handle.",
             "[O] the nearest station",
         ),
         Step::KnapStone => (
             "An edge",
-            "At the same bench, knap two stones to an edge.",
+            "At the same bench, strike stone on stone: two make a knapped edge, and an axe takes two edges.",
             "[O] the nearest station",
         ),
         Step::MakeAxe => (
             "A stone axe",
-            "Two edges, a handle and a rope make an axe. Better parts make a better axe: quality carries through.",
+            "Two edges, the handle and a second rope make an axe. The edges count for most of it: good stone, a good axe.",
             "[O] the nearest station",
         ),
         Step::FellTree => (
             "Fell a tree",
-            "With the axe in your pack, a tree gives logs. Hands alone won't do it.",
+            "Your hands couldn't take a tree; an axe can. With it in your pack, fell one in the copse for its logs.",
             "[Click] a tree",
         ),
         // The road in (#445): a stop in each zone up the south road, its
@@ -290,6 +290,9 @@ enum Card {
     ChapterDone(Chapter, Instant),
     /// Every step done; when the last one was.
     Closing(Instant),
+    /// The quality card (#443), in the bench kit's place until it's read,
+    /// and when it came up.
+    Lesson(Instant),
 }
 
 /// Which card is drawn, for remembering each one's size.
@@ -298,6 +301,7 @@ enum Face {
     Step(Step),
     Chapter(Chapter),
     Closing,
+    Lesson,
 }
 
 /// Where the step at hand's place is, as the extension found it this frame
@@ -382,6 +386,11 @@ pub struct Hints {
     /// Each card's size, full and compact, as last drawn: where it fits
     /// is judged from these (`place`).
     sizes: Vec<((Face, bool), egui::Vec2)>,
+    /// The quality card's numbers, from the pack this frame
+    /// ([`Hints::set_lesson`]): `None` while there's no rope to talk about.
+    lesson: Option<QualityLesson>,
+    /// The quality card was read this session ("Go on").
+    lesson_read: bool,
 }
 
 impl Hints {
@@ -456,6 +465,40 @@ impl Hints {
         self.sample_close = which
             .strip_suffix("-done")
             .and_then(|key| Chapter::ALL.into_iter().find(|c| chapter_key(*c) == key));
+        // At the bench kit, the quality card first, on a sample pack
+        self.lesson = super::quality_card::sample();
+    }
+
+    /// The quality card's numbers (#443), from the pack and crafting's
+    /// slots this frame (`QualityLesson::of`). Call before [`Hints::show`].
+    /// While the card is up it keeps its last numbers through a frame with
+    /// none (the rope between crafting's output and the pack), so it doesn't
+    /// blink to the kit's card and back under the pointer.
+    pub fn set_lesson(&mut self, lesson: Option<QualityLesson>) {
+        if lesson.is_some() || !matches!(self.card, Some(Card::Lesson(_))) {
+            self.lesson = lesson;
+        }
+    }
+
+    /// The quality card is still to show: there's a rope to talk about, and
+    /// it hasn't been read this session.
+    fn lesson_due(&self) -> bool {
+        self.lesson.is_some() && !self.lesson_read
+    }
+
+    /// The card to show now: [`next_card`]'s, but with the quality card in
+    /// the bench kit's place, between twisting the rope and the kit (plan
+    /// §4.1), until it's read or the kit is made.
+    fn card_now(&self, tour: Tour, now: Instant) -> Option<Card> {
+        let at_kit = tour.current() == Some(Step::MakeWorkbench);
+        match self.card {
+            Some(Card::Lesson(at)) if at_kit && self.lesson_due() => Some(Card::Lesson(at)),
+            Some(Card::Lesson(_)) => next_card(None, tour, now),
+            card => match next_card(card, tour, now) {
+                Some(Card::Step(Step::MakeWorkbench, _)) if self.lesson_due() => Some(Card::Lesson(now)),
+                next => next,
+            },
+        }
     }
 
     /// The tour as the server last said, if it has.
@@ -537,7 +580,7 @@ impl Hints {
                 None => Card::Closing(now),
             });
         }
-        self.card = next_card(self.card, tour, now);
+        self.card = self.card_now(tour, now);
         let Some(card) = self.card else {
             return false;
         };
@@ -545,6 +588,7 @@ impl Hints {
             Card::Step(step, at) | Card::Done(step, at) => (Face::Step(step), at),
             Card::ChapterDone(chapter, at) => (Face::Chapter(chapter), at),
             Card::Closing(at) => (Face::Closing, at),
+            Card::Lesson(at) => (Face::Lesson, at),
         };
         let age = now.saturating_duration_since(since).as_secs_f32();
         let fading = |stays: Duration| {
@@ -554,13 +598,14 @@ impl Hints {
                 .min((left / FADE_OUT).clamp(0.0, 1.0))
         };
         let alpha = match card {
-            Card::Step(..) => (age / FADE_IN).min(1.0),
+            Card::Step(..) | Card::Lesson(_) => (age / FADE_IN).min(1.0),
             Card::Done(..) => 1.0,
             Card::ChapterDone(..) => fading(CHAPTER_FOR),
             Card::Closing(_) => fading(CLOSING_FOR),
         };
         let eased = 1.0 - (1.0 - alpha).powi(3);
         let mut hide = false;
+        let mut read = false;
         // Under the header, as the panels are (anchors are screen-relative).
         let top = ctx.available_rect().top() + 12.0;
         let size = |compact| {
@@ -591,6 +636,11 @@ impl Hints {
                         }
                         Face::Chapter(chapter) => chapter_card(ui, chapter, spot.compact),
                         Face::Closing => closing_card(ui, spot.compact),
+                        Face::Lesson => {
+                            if let Some(lesson) = &self.lesson {
+                                read = super::quality_card::show(ui, lesson, spot.compact);
+                            }
+                        }
                     }
                 });
             });
@@ -607,6 +657,7 @@ impl Hints {
                 Face::Step(s) => (words(s).0.to_owned(), body(s, self.box_goods)),
                 Face::Chapter(c) => (chapter_done_title(c), chapter_close(c)),
                 Face::Closing => (CLOSING.0.to_owned(), CLOSING.1),
+                Face::Lesson => (super::quality_card::TITLE.to_owned(), super::quality_card::WORDS),
             };
             let layer = shown.response.layer_id;
             egui::show_tooltip_at_pointer(ctx, layer, Id::new("capitol_hint_words"), |ui| {
@@ -616,6 +667,10 @@ impl Hints {
             });
         }
         self.rect = Some(shown.response.rect);
+        if read {
+            // On to the bench kit's card, next frame
+            self.lesson_read = true;
+        }
         if hide {
             tracing::info!("hints: hidden for now");
             self.hide();
@@ -1030,6 +1085,48 @@ mod tests {
         // The last chapter's close is the closing card
         let card = Some(Card::Done(Step::ReadTax, t0));
         assert_eq!(next_card(card, tour(&Step::ALL), t1), Some(Card::Closing(t1)));
+    }
+
+    /// The quality card comes between the rope and the bench kit (plan
+    /// §4.1), in the kit's place, once, and only with a rope to talk about
+    #[test]
+    fn the_quality_card_stands_between_the_rope_and_the_kit() {
+        let t0 = Instant::now();
+        let mut hints = Hints::default();
+        hints.with_sample("twist_rope");
+        let rope = tour(&up_to(Step::MakeWorkbench).iter().collect::<Vec<_>>());
+        // The rope's tick, then the card instead of the kit's
+        hints.card = Some(Card::Done(Step::TwistRope, t0));
+        let t1 = t0 + TICK_FOR;
+        assert_eq!(hints.card_now(rope, t1), Some(Card::Lesson(t1)));
+        hints.card = hints.card_now(rope, t1);
+        assert_eq!(hints.target(), None, "it leads nowhere");
+        let t2 = t1 + Duration::from_secs(30);
+        assert_eq!(hints.card_now(rope, t2), Some(Card::Lesson(t1)), "it waits to be read");
+        // Read: the kit's card
+        hints.lesson_read = true;
+        assert_eq!(hints.card_now(rope, t2), Some(Card::Step(Step::MakeWorkbench, t2)));
+
+        // No rope in the pack (sold, say): straight to the kit
+        let mut hints = Hints::default();
+        hints.follow(Some(TutorialProgress { done: up_to(Step::MakeWorkbench), dismissed: false, ..Default::default() }));
+        hints.set_lesson(None);
+        assert_eq!(hints.card_now(rope, t0), Some(Card::Step(Step::MakeWorkbench, t0)));
+        // A session that starts at the kit has it first
+        hints.set_lesson(super::super::quality_card::sample());
+        assert_eq!(hints.card_now(rope, t0), Some(Card::Lesson(t0)));
+        // The kit made before it's read: on, without it
+        hints.card = Some(Card::Lesson(t0));
+        let kit = tour(&up_to(Step::PlaceWorkbench).iter().collect::<Vec<_>>());
+        assert_eq!(hints.card_now(kit, t1), Some(Card::Step(Step::PlaceWorkbench, t1)));
+    }
+
+    #[test]
+    fn the_bench_leads_to_a_clear_spot() {
+        let mut hints = Hints::default();
+        hints.with_sample("place_workbench");
+        hints.card = next_card(None, hints.tour.unwrap(), Instant::now());
+        assert_eq!(hints.target(), Some(Target::ClearSpot));
     }
 
     #[test]

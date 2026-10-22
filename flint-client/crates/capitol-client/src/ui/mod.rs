@@ -63,6 +63,7 @@ pub mod mail;
 pub mod market;
 pub mod market_chart;
 pub mod plot;
+pub mod quality_card;
 pub mod sample;
 pub mod settings;
 pub mod shop;

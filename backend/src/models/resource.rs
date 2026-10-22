@@ -148,8 +148,12 @@ mod tests {
     use uuid::Uuid;
 
     use crate::engine::node_placement::{place_nodes, KEEP_CLEAR};
-    use crate::engine::node_spawn::{self, NodeSeed, SpawnTable};
+    use crate::engine::node_spawn::{self, arrival, NodeSeed, SpawnTable};
     use crate::models::terrain::{point_to_segment_distance, TerrainConfig, WorldGenParams};
+
+    /// A short walk from the spawn, for Arrival's nodes (#443): what
+    /// `/world/nearby` shows from it.
+    const ARRIVAL_WALK: f64 = NEARBY_NODE_RANGE;
 
     const WORLD_SCALE_MIGRATION: &str =
         include_str!("../../migrations/20260212_001_world_scale.sql");
@@ -442,6 +446,30 @@ mod tests {
             .filter(|&&(x, y, _)| (x - SPAWN_X).stable_hypot(y - SPAWN_Y) <= NEARBY_NODE_RANGE)
             .count();
         assert!(in_sight >= 4, "only {in_sight} nodes in sight of the spawn");
+
+        // Arrival (#443) gathers grass, fallen branches and stone by hand and
+        // fells a tree: every kind within a short walk, off every lot (so a
+        // farmer's claim can't take the chapter from a newcomer), and enough
+        // of each for a crowd to walk it at once with none waiting on a
+        // regrowth. Before the commons (`node_spawn::arrival`) the nearest
+        // tree stood 300 off and the nearest outcrop 466.
+        let mut counts = std::collections::BTreeMap::<String, usize>::new();
+        let nodes = seeded_nodes()
+            .into_iter()
+            .map(|(x, y, _)| ("grass".to_string(), x, y))
+            .chain(planned_nodes().into_iter().map(|s| (s.resource_type, s.x, s.y)));
+        for (kind, x, y) in nodes {
+            let near = (x - SPAWN_X).stable_hypot(y - SPAWN_Y) <= ARRIVAL_WALK;
+            if near && !terrain.terrain_plots.iter().any(|lot| quad_contains(&lot.corners, x, y)) {
+                *counts.entry(kind).or_default() += 1;
+            }
+        }
+        for (kind, pulls) in arrival::PULLS {
+            let wanted = arrival::CROWD * pulls;
+            let got = counts.get(kind).copied().unwrap_or(0);
+            assert!(got >= wanted, "{got} {kind} within {ARRIVAL_WALK} of the spawn, off the lots, for {wanted}: {counts:?}");
+        }
+        assert!(counts.get("tree").copied().unwrap_or(0) >= arrival::COPSE_TREES, "a copse: {counts:?}");
     }
 
     /// E2.3's nodes on the default world, kept clear of the seeds as the
@@ -498,10 +526,13 @@ mod tests {
     }
 
     /// Re-plans of some of the nodes since the flip, in the order they run:
-    /// each deletes the planned rows it lists by id (a `'id',` line) and
-    /// inserts its own (a `('id', 'type', x, y, quality)` line), from
-    /// `print_node_replan`.
-    const REPLAN_MIGRATIONS: [&str; 0] = [];
+    /// each deletes the planned rows it lists by id (a `'id',` line), if any,
+    /// and inserts its own (a `('id', 'type', x, y, quality)` line), from
+    /// `print_node_replan`, or from `print_new_nodes` for one that only adds.
+    const REPLAN_MIGRATIONS: [&str; 1] = [
+        // Arrival's commons round the spawn (#443): only adds
+        include_str!("../../migrations/post-content/20261222_001_arrival_commons.sql"),
+    ];
 
     /// The `('id', 'type', x, y, quality)` rows of the plan's insert: every
     /// planned node, since the flip re-planned them whole (#459), less what

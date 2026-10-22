@@ -29,8 +29,13 @@
 //! says, on ground a walker can reach (W6, #199; see [`wilds`]). Placing them
 //! last leaves the other zones' nodes, ids and all, as E2.3 planned them.
 //!
+//! **Arrival's commons** ([`arrival`], #443) is placed last of all: the
+//! trees, branches, outcrops and grass the road in's first chapter gathers,
+//! within a short walk of the spawn.
+//!
 //! **Not placed here.** Grass is seeded by migrations already
-//! ([`SEEDED_BY_MIGRATIONS`]).
+//! ([`SEEDED_BY_MIGRATIONS`]), but for the commons' own, which the default
+//! plan proposes and a migration writes once (see [`arrival`]).
 
 use std::collections::HashMap;
 use std::f64::consts::TAU;
@@ -53,6 +58,7 @@ use crate::models::{NodeState, ResourceNodeState, ResourceType};
 /// there, so the planner leaves them be.
 pub const SEEDED_BY_MIGRATIONS: [&str; 1] = ["grass"];
 
+pub mod arrival;
 pub mod wilds;
 
 /// Zones whose nodes come from the land (altitude, slope, water) in W6 (#199),
@@ -239,8 +245,10 @@ pub fn plan_with(
             }
         }
     }
-    let wild: Vec<&SpawnTable> = order.into_iter().filter(|t| t.grows_wild()).collect();
+    let wild: Vec<&SpawnTable> = order.iter().copied().filter(|t| t.grows_wild()).collect();
     wilds::plan(&wild_land, &ground, &wild, &mut taken, seed, land, &mut seeds);
+    // Arrival's commons round the spawn (#443), last of all
+    arrival::plan(&ground, &order, terrain.land.frame.spawn(), &mut taken, seed, &dry, &mut seeds);
     seeds
 }
 
@@ -790,15 +798,37 @@ mod tests {
     #[test]
     fn grass_is_left_alone_and_the_wilds_come_last() {
         let tables = content_tables();
-        let seeds = plan(&small_world(), &tables, &[], 1);
-        assert!(!seeds.is_empty());
-        assert!(seeds.iter().all(|s| s.resource_type != "grass"));
+        let all = plan(&small_world(), &tables, &[], 1);
+        assert!(!all.is_empty());
         assert!(!tables.iter().find(|t| t.id == "grass").unwrap().is_planned());
+        // The commons comes last of all (#443), and is the only grass
+        let spawn = small_world().land.frame.spawn();
+        let near_spawn = |s: &NodeSeed| (s.x - spawn.0).stable_hypot(s.y - spawn.1) <= arrival::REACH;
+        let commons = all.len() - all.iter().rev().take_while(|s| near_spawn(s)).count();
+        let (seeds, commons) = all.split_at(commons);
+        assert!(!commons.is_empty());
+        assert!(seeds.iter().all(|s| s.resource_type != "grass"));
         // Every wild node after every other, so the wilds can't move E2.3's.
         let first_wild = seeds.iter().position(|s| Zone::from_position(s.x, s.y) == Zone::Wilderness).unwrap();
         assert!(seeds[first_wild..].iter().all(|s| Zone::from_position(s.x, s.y) == Zone::Wilderness));
         let without: Vec<SpawnTable> = tables.iter().cloned().map(|t| SpawnTable { habitat: None, ..t }).collect();
-        assert_eq!(plan(&small_world(), &without, &[], 1), seeds[..first_wild]);
+        let tame = plan(&small_world(), &without, &[], 1);
+        assert_eq!(&tame[..first_wild], &seeds[..first_wild]);
+    }
+
+    /// A regenerate plans the planned types only (`replan`): the same plan,
+    /// less the commons' grass, which a migration wrote once (#443)
+    #[test]
+    fn a_regenerate_plans_the_same_commons_but_its_grass() {
+        let tables = content_tables();
+        let planned: Vec<SpawnTable> = tables.iter().filter(|t| t.is_planned()).cloned().collect();
+        let all = plan(&small_world(), &tables, &[], 1);
+        let grass: Vec<&NodeSeed> = all.iter().filter(|s| s.resource_type == "grass").collect();
+        assert!(!grass.is_empty(), "the commons has grass");
+        // Grass stands in the way of nothing the regenerate plans: it went last
+        let existing: Vec<(f64, f64)> = grass.iter().map(|s| (s.x, s.y)).collect();
+        let without: Vec<NodeSeed> = all.iter().filter(|s| s.resource_type != "grass").cloned().collect();
+        assert_eq!(plan(&small_world(), &planned, &existing, 1), without);
     }
 
     #[test]
