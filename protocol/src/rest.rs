@@ -2102,6 +2102,20 @@ pub struct Commission {
     pub posted_at: DateTime<Utc>,
     pub due_at: DateTime<Utc>,
     pub status: rules::court::CommissionStatus,
+    /// Units the claims standing hold and haven't delivered yet (S2.2): only
+    /// their claimants may bring them. What anyone may claim or deliver is
+    /// `rules::court::unclaimed`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub claimed: i32,
+    /// Its poster has taken it down while claims stood (S2.2): the unclaimed
+    /// part was refunded, and only the claims are delivered. It closes as
+    /// they end.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub withdrawn: bool,
+}
+
+fn is_zero(n: &i32) -> bool {
+    *n == 0
 }
 
 /// `POST /commissions/{id}/deliver`: units from your stack toward it. Only
@@ -2151,6 +2165,53 @@ pub struct CommissionsQuery {
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 pub struct CommissionsResponse {
     pub commissions: Vec<Commission>,
+}
+
+/// `POST /commissions/{id}/claim`: promise to deliver `quantity` units (S2.2,
+/// D6). The share is held for you for a day, never past the due date, and
+/// nobody else may claim or deliver it meanwhile. From anywhere.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ClaimCommission {
+    pub quantity: i32,
+}
+
+/// A claim on a commission: a promise to deliver.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct CommissionClaim {
+    pub id: Uuid,
+    pub commission_id: Uuid,
+    pub claimant_id: Uuid,
+    pub claimant_name: String,
+    /// The claimant is a citizen (C0.1)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claimant_citizen: bool,
+    /// The units promised
+    pub quantity: i32,
+    /// How many of them are in
+    pub delivered: i32,
+    pub claimed_at: DateTime<Utc>,
+    /// When it runs out: `rules::court::claim_until`
+    pub until: DateTime<Utc>,
+    pub status: rules::court::ClaimStatus,
+}
+
+/// A claim made or ended, and the commission after it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ClaimResponse {
+    pub claim: CommissionClaim,
+    pub commission: Commission,
+}
+
+/// `GET /commissions/claims` (yours, standing) and
+/// `GET /commissions/{id}/claims` (all of one commission's): standing first,
+/// then newest first.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ClaimsResponse {
+    pub claims: Vec<CommissionClaim>,
 }
 
 // ---------------------------------------------------------------------------

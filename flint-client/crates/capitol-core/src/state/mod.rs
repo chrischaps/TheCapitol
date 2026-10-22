@@ -952,6 +952,9 @@ impl GameState {
             // Commons S2.1: the hall's board, to everyone. Nothing here keeps
             // the board yet: the Wanted page's store does (S2.3, #389).
             M::CommissionPosted { .. } | M::CommissionUpdated { .. } | M::CommissionClosed { .. } => {}
+            // Commons S2.2: claims' notices, to the poster and the claimant.
+            // The Wanted page (S2.3, #389) shows and toasts them.
+            M::CommissionClaimed { .. } | M::ClaimDueSoon { .. } | M::ClaimLapsed { .. } => {}
             // Commons S2.1: to the poster
             M::CommissionDelivered { item_type, deliverer_name, deliverer_citizen, units, paid, left, .. } => {
                 out.push(StateEvent::CommissionDelivered {

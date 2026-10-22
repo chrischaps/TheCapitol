@@ -45,6 +45,10 @@
 //! `commissions.json` and `commission_delivery.json` are `POST /commissions`,
 //! `POST /commissions/{id}/deliver` and their answers (S2.1): a citizen's
 //! commission part delivered beside a person's, and the delivery that fills it.
+//! `fixtures/rest/claim_commission.json` and `claim_response.json` are
+//! `POST /commissions/{id}/claim` and its answer (S2.2): a citizen's claim on
+//! 4, and the commission holding them; `claims.json` is
+//! `GET /commissions/{id}/claims`, that claim part delivered and a person's kept.
 //! `fixtures/rest/my_guild.json` is `GET /player/guild` (S4.1) as a guild's
 //! leader sees it: a citizen among the members, a citizen's application and
 //! an officer's invitation waiting; `guilds.json` is `GET /guilds`, and
@@ -447,6 +451,31 @@ fn commissions_round_trip_marking_only_the_citizen() {
     assert_eq!((done.commission.status, done.commission.escrow_strands), (CommissionStatus::Filled, 0));
     assert_eq!(done.paid, commission_value(done.commission.price, done.units.count() as i32));
     assert_eq!(serde_json::to_string(&done).unwrap(), json);
+}
+
+#[test]
+fn claims_round_trip_marking_only_the_citizen() {
+    use capitol_protocol::rest::{ClaimCommission, ClaimResponse, ClaimsResponse};
+    use capitol_protocol::rules::court::{claim_until, unclaimed, ClaimStatus};
+
+    let json = fixture("claim_commission.json");
+    let claim: ClaimCommission = serde_json::from_str(&json).unwrap();
+    assert_eq!(claim.quantity, 4);
+    assert_eq!(serde_json::to_string(&claim).unwrap(), json);
+
+    let json = fixture("claim_response.json");
+    let made: ClaimResponse = serde_json::from_str(&json).unwrap();
+    let c = &made.commission;
+    assert_eq!((made.claim.status, made.claim.quantity, c.claimed, c.withdrawn), (ClaimStatus::Open, 4, 4, false));
+    assert_eq!(made.claim.until, claim_until(made.claim.claimed_at, c.due_at));
+    assert_eq!(unclaimed(c.quantity - c.delivered, c.claimed, c.withdrawn), 8);
+    assert_eq!(serde_json::to_string(&made).unwrap(), json);
+
+    let json = fixture("claims.json");
+    let claims: ClaimsResponse = serde_json::from_str(&json).unwrap();
+    let marks: Vec<(bool, ClaimStatus)> = claims.claims.iter().map(|k| (k.claimant_citizen, k.status)).collect();
+    assert_eq!(marks, [(true, ClaimStatus::Open), (false, ClaimStatus::Kept)]);
+    assert_eq!(serde_json::to_string(&claims).unwrap(), json);
 }
 
 #[test]

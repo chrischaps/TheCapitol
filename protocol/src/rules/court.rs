@@ -17,7 +17,15 @@
 //! market's price and quantity, [`validate`]), and [`delivery`] is which
 //! units a delivery takes: the deliverer's named units, or the lowest that
 //! meet the quality, so the better ones stay theirs.
+//!
+//! **Claims** (D6, S2.2): a deliverer's promise to bring k units, which holds
+//! that share for them until [`claim_until`]: a day, never past the due date.
+//! Nobody else may deliver or claim a held share ([`unclaimed`],
+//! [`deliverable`]). A claim delivered in full is kept; one that runs out is
+//! lapsed, a breach on its claimant's record, and so is one released with
+//! [`CLAIM_GRACE_SECS`] or less left ([`release_status`]).
 
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::market::{order_value, validate, OrderError};
@@ -190,6 +198,115 @@ pub fn delivery(
     from.pick(n, Pick::Lowest).ok_or(short)
 }
 
+/// The longest a claim holds its share, in seconds: a game day (D6).
+pub const CLAIM_SECS: i64 = DAY_SECS;
+/// A claim released with more than this left, in seconds, is no breach; a
+/// later release is a lapse. The claimant is told when this much is left.
+pub const CLAIM_GRACE_SECS: i64 = 60 * 60;
+
+/// Where a claim is in its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ClaimStatus {
+    /// Holding its share
+    Open,
+    /// Delivered in full in time
+    Kept,
+    /// Ran out short, or released late: a breach. Its share went back to the
+    /// board.
+    Lapsed,
+    /// Given up in good time: no breach
+    Released,
+}
+
+impl ClaimStatus {
+    /// The column's value, and the wire's.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClaimStatus::Open => "open",
+            ClaimStatus::Kept => "kept",
+            ClaimStatus::Lapsed => "lapsed",
+            ClaimStatus::Released => "released",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ClaimStatus> {
+        match s {
+            "open" => Some(ClaimStatus::Open),
+            "kept" => Some(ClaimStatus::Kept),
+            "lapsed" => Some(ClaimStatus::Lapsed),
+            "released" => Some(ClaimStatus::Released),
+            _ => None,
+        }
+    }
+}
+
+/// Why a claim can't be made as asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimError {
+    /// A quantity under 1
+    Nothing,
+    /// More than the unclaimed part, which is this many
+    TooMany(i32),
+}
+
+impl ClaimError {
+    pub fn message(&self) -> String {
+        match self {
+            ClaimError::Nothing => "Claim at least one unit".to_string(),
+            ClaimError::TooMany(0) => "Everything still wanted is claimed".to_string(),
+            ClaimError::TooMany(n) => format!("Only {n} still wanted are unclaimed"),
+        }
+    }
+}
+
+/// What a commission still wants that no claim holds: anyone may claim or
+/// deliver it. `left` is what's still wanted, `claimed` what the claims
+/// standing hold of it. Nothing, once its poster has withdrawn it: then only
+/// the claims are delivered.
+pub fn unclaimed(left: i32, claimed: i32, withdrawn: bool) -> i32 {
+    if withdrawn {
+        0
+    } else {
+        (left - claimed).max(0)
+    }
+}
+
+/// The most a deliverer may bring: the unclaimed part, and what's still
+/// owed on their own claim (`own`, 0 without one). Their deliveries count
+/// against their claim first.
+pub fn deliverable(unclaimed: i32, own: i32) -> i32 {
+    unclaimed + own.max(0)
+}
+
+/// Whether a claim on `quantity` units may be made when `unclaimed` are.
+pub fn validate_claim(quantity: i32, unclaimed: i32) -> Result<(), ClaimError> {
+    if quantity < 1 {
+        Err(ClaimError::Nothing)
+    } else if quantity > unclaimed {
+        Err(ClaimError::TooMany(unclaimed.max(0)))
+    } else {
+        Ok(())
+    }
+}
+
+/// When a claim made at `now` on a commission due at `due_at` runs out: a
+/// day on, or the due date if that's sooner.
+pub fn claim_until(now: DateTime<Utc>, due_at: DateTime<Utc>) -> DateTime<Utc> {
+    (now + Duration::seconds(CLAIM_SECS)).min(due_at)
+}
+
+/// How a claim running until `until` ends if its claimant releases it at
+/// `now`: released with more than [`CLAIM_GRACE_SECS`] left, lapsed after.
+pub fn release_status(now: DateTime<Utc>, until: DateTime<Utc>) -> ClaimStatus {
+    if until - now > Duration::seconds(CLAIM_GRACE_SECS) {
+        ClaimStatus::Released
+    } else {
+        ClaimStatus::Lapsed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +397,47 @@ mod tests {
         assert_eq!(delivery(&held, 55, 20, Some(&mixed), None), Err(DeliveryError::BelowGrade));
         assert_eq!(delivery(&held, 55, 20, Some(&Units::uniform(2, 95)), None), Err(DeliveryError::NotHeld));
         assert_eq!(delivery(&held, 55, 20, Some(&Units::new()), None), Err(DeliveryError::Nothing));
+    }
+
+    #[test]
+    fn a_claim_status_reads_back_as_written() {
+        for status in [ClaimStatus::Open, ClaimStatus::Kept, ClaimStatus::Lapsed, ClaimStatus::Released] {
+            assert_eq!(ClaimStatus::parse(status.as_str()), Some(status));
+        }
+        assert_eq!(ClaimStatus::parse("expired"), None);
+    }
+
+    #[test]
+    fn claims_never_hold_more_than_is_wanted() {
+        // 12 still wanted, 7 of them claimed
+        assert_eq!(unclaimed(12, 7, false), 5);
+        assert_eq!(validate_claim(5, unclaimed(12, 7, false)), Ok(()));
+        assert_eq!(validate_claim(6, unclaimed(12, 7, false)), Err(ClaimError::TooMany(5)));
+        assert_eq!(validate_claim(1, unclaimed(7, 7, false)), Err(ClaimError::TooMany(0)));
+        assert_eq!(validate_claim(0, 5), Err(ClaimError::Nothing));
+        // Withdrawn, nothing is open to claim
+        assert_eq!(unclaimed(12, 7, true), 0);
+        // A claimant brings the unclaimed part and their own share; others only
+        // the unclaimed part
+        assert_eq!(deliverable(unclaimed(12, 7, false), 4), 9);
+        assert_eq!(deliverable(unclaimed(12, 7, false), 0), 5);
+        assert_eq!(deliverable(unclaimed(12, 7, true), 4), 4);
+    }
+
+    #[test]
+    fn a_claim_runs_a_day_but_never_past_the_due_date() {
+        let now = DateTime::parse_from_rfc3339("2026-10-22T12:00:00Z").unwrap().with_timezone(&Utc);
+        assert_eq!(claim_until(now, now + Duration::days(3)), now + Duration::days(1));
+        assert_eq!(claim_until(now, now + Duration::hours(5)), now + Duration::hours(5));
+    }
+
+    #[test]
+    fn a_release_in_the_last_hour_is_a_lapse() {
+        let until = DateTime::parse_from_rfc3339("2026-10-22T12:00:00Z").unwrap().with_timezone(&Utc);
+        assert_eq!(release_status(until - Duration::hours(5), until), ClaimStatus::Released);
+        assert_eq!(release_status(until - Duration::minutes(61), until), ClaimStatus::Released);
+        assert_eq!(release_status(until - Duration::minutes(60), until), ClaimStatus::Lapsed);
+        assert_eq!(release_status(until - Duration::minutes(5), until), ClaimStatus::Lapsed);
+        assert_eq!(release_status(until + Duration::minutes(5), until), ClaimStatus::Lapsed);
     }
 }

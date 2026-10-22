@@ -316,10 +316,17 @@ pub async fn run_market_loop(market: Arc<Market>, db: PgPool, events: broadcast:
     }
 }
 
-/// The court's part of a cycle: expire the commissions due, and with
-/// `waiting`, move delivered units into boxes that have room now.
+/// The court's part of a cycle: lapse the claims that ran out and warn those
+/// with an hour left, expire the commissions due, and with `waiting`, move
+/// delivered units into boxes that have room now. Claims go first, so one
+/// that runs out with its commission lapses on its own clock.
 async fn court_cycle(db: &PgPool, events: &broadcast::Sender<GameEvent>, waiting: bool) {
-    match super::commissions::expire_due(db, Utc::now()).await {
+    let now = Utc::now();
+    match super::commissions::claims_due(db, now).await {
+        Ok(sweep) => crate::routes::commissions::announce_claims(db, events, sweep).await,
+        Err(e) => tracing::warn!("Court: lapsing claims: {}", e.message()),
+    }
+    match super::commissions::expire_due(db, now).await {
         Ok(closed) => crate::routes::commissions::announce_closed(db, events, closed).await,
         Err(e) => tracing::warn!("Court: expiring commissions: {}", e.message()),
     }

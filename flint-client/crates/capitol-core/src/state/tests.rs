@@ -240,6 +240,7 @@ fn test_for(message: &M) -> fn() {
         M::CommissionPosted { .. } => the_board_changes_nothing_yet,
         M::CommissionUpdated { .. } => the_board_changes_nothing_yet,
         M::CommissionClosed { .. } => the_board_changes_nothing_yet,
+        M::CommissionClaimed { .. } | M::ClaimDueSoon { .. } | M::ClaimLapsed { .. } => the_board_changes_nothing_yet,
         M::CommissionDelivered { .. } => commission_notices_are_reported,
         M::CommissionExpired { .. } => commission_notices_are_reported,
         M::GuildChanged { .. } | M::GuildNotice { .. } => guild_messages_are_reported,
@@ -269,7 +270,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 75, "one fixture per ServerMessage variant");
+    assert_eq!(count, 78, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1392,11 +1393,20 @@ fn server_fixture(name: &str) -> M {
     serde_json::from_str(&json).unwrap()
 }
 
-/// The board's messages keep nothing until the Wanted page's store (S2.3)
+/// The board's messages, and the claims' notices (S2.2), keep nothing until
+/// the Wanted page's store (S2.3)
 #[test]
 fn the_board_changes_nothing_yet() {
     let mut state = connected();
-    for name in ["commission_posted", "commission_updated", "commission_closed"] {
+    let names = [
+        "commission_posted",
+        "commission_updated",
+        "commission_closed",
+        "commission_claimed",
+        "claim_due_soon",
+        "claim_lapsed",
+    ];
+    for name in names {
         assert_eq!(state.apply_ws(&server_fixture(name)), vec![], "{name}");
     }
 }

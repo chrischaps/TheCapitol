@@ -27,8 +27,11 @@ use capitol_protocol::rest::{
     Gazette, GazetteByline, GazetteDeeds, GazetteMade, GazetteMover, GazettePrice, GazetteProducer, GazetteResponse,
     GazetteSale, GazetteShares, GazetteShop, GazetteStalls,
 };
-use capitol_protocol::rest::{Commission, CommissionDelivery, CommissionsResponse, DeliverCommission, PostCommission};
-use capitol_protocol::rules::court::CommissionStatus;
+use capitol_protocol::rest::{
+    ClaimCommission, ClaimResponse, ClaimsResponse, Commission, CommissionClaim, CommissionDelivery, CommissionsResponse,
+    DeliverCommission, PostCommission,
+};
+use capitol_protocol::rules::court::{ClaimStatus, CommissionStatus};
 use capitol_protocol::rest::{
     FoundGuild, GuildDetail, GuildInvite, GuildInviteKind, GuildMember, GuildSummary, GuildsResponse, MyGuild, SetGuildRole,
 };
@@ -92,7 +95,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         (name = "Exchange", description = "Currency exchange operations"),
         (name = "Market", description = "Orders, books, price history and the market box"),
         (name = "Bazaar", description = "Stalls, the shops merchants keep in them, and buying from them"),
-        (name = "Commissions", description = "The hall's board: standing requests with the money down, delivered at the Exchange hall"),
+        (name = "Commissions", description = "The hall's board: standing requests with the money down, claimed from anywhere and delivered at the Exchange hall"),
         (name = "Gazette", description = "The Capitol Gazette: a daily digest of the economy"),
         (name = "Plots", description = "Land plot ownership and permissions"),
         (name = "Bureaucracy", description = "Zone information and deed prices"),
@@ -194,6 +197,10 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::commissions::get_commission,
         crate::routes::commissions::cancel_commission,
         crate::routes::commissions::deliver_commission,
+        crate::routes::commissions::claim_commission,
+        crate::routes::commissions::release_claim,
+        crate::routes::commissions::my_claims,
+        crate::routes::commissions::commission_claims,
         crate::routes::inventory::get_impound,
         crate::routes::inventory::collect_impound,
         // Gazette
@@ -349,6 +356,11 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         DeliverCommission,
         CommissionDelivery,
         CommissionsResponse,
+        ClaimCommission,
+        CommissionClaim,
+        ClaimStatus,
+        ClaimResponse,
+        ClaimsResponse,
         // Gazette
         Gazette,
         GazettePrice,

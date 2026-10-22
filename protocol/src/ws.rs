@@ -679,6 +679,50 @@ pub enum ServerMessage {
         quantity: i32,
         refunded: i64,
     },
+    // Commons S2.2: claims (D6). Each is queued, so one that happened while
+    // you were away is sent as you come back.
+    /// To the poster: `claimant_name` promised `quantity` of your commission
+    /// by `until`, and that share is held for them
+    #[serde(rename = "commission_claimed")]
+    CommissionClaimed {
+        commission_id: Uuid,
+        claim_id: Uuid,
+        item_type: String,
+        claimant_id: Uuid,
+        claimant_name: String,
+        /// The claimant is a citizen (C0.1)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        claimant_citizen: bool,
+        quantity: i32,
+        until: DateTime<Utc>,
+    },
+    /// To the claimant: an hour or less is left on your claim, with
+    /// `delivered` of `quantity` in
+    #[serde(rename = "claim_due_soon")]
+    ClaimDueSoon {
+        commission_id: Uuid,
+        claim_id: Uuid,
+        item_type: String,
+        quantity: i32,
+        delivered: i32,
+        until: DateTime<Utc>,
+    },
+    /// To the poster and the claimant: a claim ran out with `delivered` of
+    /// `quantity` in, or was released late. What it held is open again, and
+    /// it's a breach on the claimant's record.
+    #[serde(rename = "claim_lapsed")]
+    ClaimLapsed {
+        commission_id: Uuid,
+        claim_id: Uuid,
+        item_type: String,
+        claimant_id: Uuid,
+        claimant_name: String,
+        /// The claimant is a citizen (C0.1)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        claimant_citizen: bool,
+        quantity: i32,
+        delivered: i32,
+    },
     // Commons S4.1: guilds
     /// Your guild's roster changed, or you joined, left or were expelled:
     /// read it again with `GET /player/guild`.
@@ -835,6 +879,9 @@ impl ServerMessage {
             ServerMessage::CommissionClosed { .. } => "commission_closed",
             ServerMessage::CommissionDelivered { .. } => "commission_delivered",
             ServerMessage::CommissionExpired { .. } => "commission_expired",
+            ServerMessage::CommissionClaimed { .. } => "commission_claimed",
+            ServerMessage::ClaimDueSoon { .. } => "claim_due_soon",
+            ServerMessage::ClaimLapsed { .. } => "claim_lapsed",
             ServerMessage::GuildChanged { .. } => "guild_changed",
             ServerMessage::GuildNotice { .. } => "guild_notice",
             ServerMessage::WageOffered { .. } => "wage_offered",

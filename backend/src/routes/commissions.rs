@@ -1,11 +1,13 @@
 //! `/commissions` (Commons S2.1, plan D5): the hall's board. Posting,
-//! delivering, cancelling and reading commissions.
+//! delivering, cancelling and reading commissions, and claiming them (S2.2,
+//! D6).
 //!
 //! Each is `engine::commissions`'s, one transaction. Once it commits, the
 //! route tells everyone the board changed (`GameEvent::Board`), sends the
 //! poster their notice if they're on, and says which balances and containers
 //! changed. Posting and delivering happen at the Exchange hall, from within
-//! `HALL_RANGE` of its footprint; reading and cancelling work from anywhere.
+//! `HALL_RANGE` of its footprint; reading, cancelling, claiming and
+//! releasing work from anywhere.
 
 use axum::{
     extract::{Path, Query, State},
@@ -13,7 +15,8 @@ use axum::{
     Extension, Json, Router,
 };
 use capitol_protocol::rest::{
-    Commission, CommissionDelivery, CommissionsQuery, CommissionsResponse, DeliverCommission, PostCommission,
+    ClaimCommission, ClaimResponse, ClaimsResponse, Commission, CommissionDelivery, CommissionsQuery, CommissionsResponse,
+    DeliverCommission, PostCommission,
 };
 use capitol_protocol::rules::court::CommissionStatus;
 use chrono::Utc;
@@ -23,7 +26,7 @@ use uuid::Uuid;
 
 use super::market::{at_the_exchange, player_of, tell_balance};
 use crate::engine::bazaar::Notice;
-use crate::engine::commissions::{self, Closed, CourtError};
+use crate::engine::commissions::{self, ClaimSweep, Closed, CourtError, Ended};
 use crate::engine::{BoardChange, GameEvent};
 use crate::error::AppError;
 use crate::middleware::auth::AuthUser;
@@ -32,8 +35,11 @@ use crate::state::AppState;
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/", post(post_commission).get(list_commissions))
+        .route("/claims", get(my_claims))
         .route("/{id}", get(get_commission).delete(cancel_commission))
         .route("/{id}/deliver", post(deliver_commission))
+        .route("/{id}/claim", post(claim_commission).delete(release_claim))
+        .route("/{id}/claims", get(commission_claims))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
@@ -113,14 +119,15 @@ pub async fn deliver_commission(
 }
 
 /// Cancel one of your open commissions: what's unspent of its escrow comes
-/// back. The court's fee isn't refunded.
+/// back. The court's fee isn't refunded. While claims stand it's withdrawn
+/// instead: the unclaimed part comes back now, and it closes as they end.
 #[utoipa::path(
     delete,
     path = "/commissions/{id}",
     params(("id" = Uuid, Path, description = "The commission")),
     responses(
-        (status = 200, description = "Cancelled, as it stands now", body = Commission),
-        (status = 400, description = "Not open"),
+        (status = 200, description = "Cancelled, or withdrawn while claims stand, as it stands now", body = Commission),
+        (status = 400, description = "Not open, or withdrawn already"),
         (status = 404, description = "No such commission of yours")
     ),
     security(("bearer_auth" = [])),
@@ -132,10 +139,107 @@ pub async fn cancel_commission(
     Path(commission_id): Path<Uuid>,
 ) -> Result<Json<Commission>, AppError> {
     let player_id = player_of(&state.db, auth_user.account_id).await?;
-    let closed = commissions::cancel(&state.db, player_id, commission_id).await.map_err(refused)?;
+    let closed = commissions::cancel(&state.db, player_id, commission_id, Utc::now())
+        .await
+        .map_err(refused)?;
     let commission = closed.commission.clone();
     announce_closed(&state.db, &events(&state).await, vec![closed]).await;
     Ok(Json(commission))
+}
+
+/// Claim part of a commission: a promise to deliver `quantity` by a day
+/// from now (never past its due date). The share is held for you meanwhile.
+#[utoipa::path(
+    post,
+    path = "/commissions/{id}/claim",
+    params(("id" = Uuid, Path, description = "The commission")),
+    request_body = ClaimCommission,
+    responses(
+        (status = 200, description = "Claimed: the claim and the commission holding it", body = ClaimResponse),
+        (status = 400, description = "Not open, your own, claimed by you already, or more than is unclaimed"),
+        (status = 404, description = "No such commission")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Commissions"
+)]
+pub async fn claim_commission(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(commission_id): Path<Uuid>,
+    Json(req): Json<ClaimCommission>,
+) -> Result<Json<ClaimResponse>, AppError> {
+    let player_id = player_of(&state.db, auth_user.account_id).await?;
+    let claimed = commissions::claim(&state.db, player_id, commission_id, &req, Utc::now())
+        .await
+        .map_err(refused)?;
+
+    let events = events(&state).await;
+    let commission = claimed.response.commission.clone();
+    let _ = events.send(GameEvent::Board { change: BoardChange::Updated, commission });
+    tell(&events, claimed.notice);
+    Ok(Json(claimed.response))
+}
+
+/// Give up your claim on a commission: its share goes back to the board.
+/// With an hour or less left it's a lapse, a breach on your record.
+#[utoipa::path(
+    delete,
+    path = "/commissions/{id}/claim",
+    params(("id" = Uuid, Path, description = "The commission")),
+    responses(
+        (status = 200, description = "Released, or lapsed if late: the claim and the commission after it", body = ClaimResponse),
+        (status = 404, description = "No such commission, or no claim of yours on it")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Commissions"
+)]
+pub async fn release_claim(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(commission_id): Path<Uuid>,
+) -> Result<Json<ClaimResponse>, AppError> {
+    let player_id = player_of(&state.db, auth_user.account_id).await?;
+    let ended = commissions::release(&state.db, player_id, commission_id, Utc::now())
+        .await
+        .map_err(refused)?;
+    let response = ended.response.clone();
+    announce_ended(&state.db, &events(&state).await, vec![ended]).await;
+    Ok(Json(response))
+}
+
+/// Your claims standing, the soonest to run out first
+#[utoipa::path(
+    get,
+    path = "/commissions/claims",
+    responses((status = 200, description = "Your standing claims", body = ClaimsResponse)),
+    security(("bearer_auth" = [])),
+    tag = "Commissions"
+)]
+pub async fn my_claims(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+) -> Result<Json<ClaimsResponse>, AppError> {
+    let player_id = player_of(&state.db, auth_user.account_id).await?;
+    let claims = commissions::claims_of(&state.db, player_id).await?;
+    Ok(Json(ClaimsResponse { claims }))
+}
+
+/// Every claim on a commission, standing or ended: standing first, then
+/// newest first
+#[utoipa::path(
+    get,
+    path = "/commissions/{id}/claims",
+    params(("id" = Uuid, Path, description = "The commission")),
+    responses((status = 200, description = "At most 200", body = ClaimsResponse)),
+    security(("bearer_auth" = [])),
+    tag = "Commissions"
+)]
+pub async fn commission_claims(
+    State(state): State<AppState>,
+    Path(commission_id): Path<Uuid>,
+) -> Result<Json<ClaimsResponse>, AppError> {
+    let claims = commissions::claims_on(&state.db, commission_id).await?;
+    Ok(Json(ClaimsResponse { claims }))
 }
 
 /// The board: open commissions newest first, or as the query narrows it
@@ -180,19 +284,53 @@ pub async fn get_commission(
         .ok_or_else(|| AppError::NotFound(CourtError::NotFound.message()))
 }
 
-/// Tell everyone that `closed` came down, send each poster their notice if
-/// they're on, and their balance where a refund moved it. The routes' cancel
-/// and the market loop's expiry both end here.
+/// Tell everyone that `closed` came down (or was withdrawn, still open while
+/// claims stand), send each notice to whoever's on, and the poster their
+/// balance where a refund moved it. The routes' cancel and the market loop's
+/// expiry both end here.
 pub async fn announce_closed(db: &PgPool, events: &broadcast::Sender<GameEvent>, closed: Vec<Closed>) {
-    for Closed { commission, refunded, notice } in closed {
-        let poster = commission.poster_id;
-        let _ = events.send(GameEvent::Board { change: BoardChange::Closed, commission });
-        if let Some(notice) = notice {
-            tell(events, notice);
-        }
-        if refunded > 0 {
-            tell_balance(db, events, poster).await;
-        }
+    for Closed { commission, refunded, notices } in closed {
+        announce(db, events, commission, refunded, notices).await;
+    }
+}
+
+/// Tell everyone that a claim ended short and how its commission stands now,
+/// send each notice to whoever's on, and the poster their balance where a
+/// withdrawn commission refunded the share. A release and the market loop's
+/// lapses both end here.
+pub async fn announce_ended(db: &PgPool, events: &broadcast::Sender<GameEvent>, ended: Vec<Ended>) {
+    for Ended { response, refunded, notices } in ended {
+        announce(db, events, response.commission, refunded, notices).await;
+    }
+}
+
+/// The market loop's sweep of the claims: the lapses, and the warnings that
+/// an hour is left.
+pub async fn announce_claims(db: &PgPool, events: &broadcast::Sender<GameEvent>, sweep: ClaimSweep) {
+    announce_ended(db, events, sweep.lapsed).await;
+    for notice in sweep.warned {
+        tell(events, notice);
+    }
+}
+
+async fn announce(
+    db: &PgPool,
+    events: &broadcast::Sender<GameEvent>,
+    commission: Commission,
+    refunded: i64,
+    notices: Vec<Notice>,
+) {
+    let poster = commission.poster_id;
+    let change = match commission.status {
+        CommissionStatus::Open => BoardChange::Updated,
+        _ => BoardChange::Closed,
+    };
+    let _ = events.send(GameEvent::Board { change, commission });
+    for notice in notices {
+        tell(events, notice);
+    }
+    if refunded > 0 {
+        tell_balance(db, events, poster).await;
     }
 }
 
@@ -205,7 +343,7 @@ fn tell(events: &broadcast::Sender<GameEvent>, notice: Notice) {
 /// What the court refused, as the API says it.
 fn refused(e: CourtError) -> AppError {
     match e {
-        CourtError::NotFound => AppError::NotFound(e.message()),
+        CourtError::NotFound | CourtError::NoClaim => AppError::NotFound(e.message()),
         CourtError::Db(e) => AppError::Database(e),
         e => AppError::BadRequest(e.message()),
     }
