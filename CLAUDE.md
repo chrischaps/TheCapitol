@@ -20,6 +20,7 @@ The Capitol is an MMO economic simulation where the economy is the primary gamep
 - `the-capitol-devtools.md` - The Observatory: dev tooling and monitoring. An admin console the backend serves at `/admin/console` (samples every 10 s, SSE, the economy, the tick by phase, the town reporting in), live server-side tunables marked on every chart, balance runs that compare two presets, and an F7 dev overlay in the Flint client (issues labelled `devtools`, #351, #353 to #377)
 - `the-capitol-commons.md` - The Commons: the city's social half. Local talk and a Capitol channel, letters, delivery commissions with escrow and claims on the hall's board, piece-rate wages, standing in words, weekly leaderboards, and guilds with a treasury, dues and a hall, with citizens in all of it (issues labelled `commons`, #352, #378 to #401, plus #311)
 - `the-capitol-plots.md` - Plot sizes: closer to even lot counts across the zones, about 600 urban, 1200 suburban and 400 rural, each lot taking 4 stations, with the targets, the capacity question (#424) and how each part moves the default world (umbrella #420; parts #421 urban, #422 suburban, #423 rural, all built: 520, about 1200 and about 380)
+- `the-capitol-road-in.md` - The Road In: the tutorial grows into a walk from the spawn up the south road to the hall, with hands-on practice in every system and a stop in each home zone. It ends at a Deeds Office by the hall with **a deed of the player's choice** as the reward, judged on the server, with citizens walking it too (umbrella #437; issues labelled `tutorial`, #438 to #452)
 
 ## Current Focus: The Commons
 
@@ -61,7 +62,7 @@ Rules that hold across issues:
 - Assume another agent may be working at the same time, on this machine or another. Claim the issue first, use your own worktree, stage by path, and never touch changes you didn't make. See the next section.
 - **Cut a ticket for every limitation you hit.** This covers anything you work round instead of fix: an engine gap, a missing hook, a tool that can't do something, a backend quirk. Open a GitHub issue for it in the same session. Say what's missing, what the workaround costs, and what removing the workaround involves. Then link the issue from the workaround's code comment and the plan. A limitation recorded only in a closing comment or a vault note gets lost.
 - **Label every issue you open** with:
-  - at least one area: `citizens`, `economy`, `flint-client`, `wilds`, `suburb-v2`, `rural`, `controls`, `devtools` (the Observatory: the admin console, tunables, overlays), `commons` or `infra` (CI, scripts, tooling);
+  - at least one area: `citizens`, `economy`, `flint-client`, `wilds`, `suburb-v2`, `rural`, `controls`, `devtools` (the Observatory: the admin console, tunables, overlays), `commons`, `tutorial` (the road in) or `infra` (CI, scripts, tooling);
   - its kind: a phase label for a planned work package, `bug` for something broken or a limitation, or `enhancement`;
   - `engine-upstream` or `fc:backend-prereq` where they apply;
   - `needs-decision` when only Chris can settle it.
