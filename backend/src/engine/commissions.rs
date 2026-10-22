@@ -896,11 +896,13 @@ mod tests {
                 0..=2 => {
                     let quality = [0, 0, 20, 40, 55, 75, 90][rng.gen_range(0..7)];
                     let req = ask(item_type, quality, rng.gen_range(1..12), rng.gen_range(1..40), rng.gen_range(1..=3));
-                    post(db, p.id, &req, now).await.map(|c| posted.push(c.id))
+                    post(db, p.id, &req, now).await.map(|c| posted.push((c.id, item_type)))
                 }
                 _ if posted.is_empty() => continue,
                 3..=7 => {
-                    let c = posted[rng.gen_range(0..posted.len())];
+                    let (c, wanted) = posted[rng.gen_range(0..posted.len())];
+                    // Mostly what it asks for; now and then the wrong thing
+                    let item_type = if rng.gen_bool(0.85) { wanted } else { item_type };
                     let stacks: Vec<Uuid> = sqlx::query_scalar(
                         "SELECT i.id FROM items i JOIN containers c ON c.id = i.container_id
                          WHERE i.owner_id = $1 AND i.item_type = $2 AND c.container_type IN ('player_inventory', 'market_box')
@@ -926,7 +928,7 @@ mod tests {
                     })
                 }
                 8 => {
-                    let c = posted[rng.gen_range(0..posted.len())];
+                    let (c, _) = posted[rng.gen_range(0..posted.len())];
                     cancel(db, p.id, c).await.map(|_| ())
                 }
                 _ => {
@@ -963,7 +965,7 @@ mod tests {
             assert_eq!(every_unit(db, item_type).await, start_units[item_type]);
         }
         let mut conn = db.acquire().await.unwrap();
-        for id in &posted {
+        for (id, _) in &posted {
             let c = load(&mut conn, *id).await.unwrap().unwrap();
             match c.status {
                 CommissionStatus::Open => assert_eq!(c.escrow_strands, commission_value(c.price, c.quantity - c.delivered)),
