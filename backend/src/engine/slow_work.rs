@@ -229,6 +229,15 @@ mod tests {
             .with(SlowWork.with_filter(interest()));
         let _default = tracing::subscriber::set_default(subscriber);
         let db = pool.connect_with(statement_logging(connect, Duration::from_millis(20))).await.unwrap();
+        // While this is the only subscriber anywhere, tracing asks the thread
+        // that first hits a callsite for its own default, and other tests'
+        // threads have none: sqlx's statement events could be cached as never
+        // wanted, and the debug one for `SELECT 1` then never seen (#412).
+        // So hit them here, then have every callsite asked again.
+        sqlx::query("SELECT pg_sleep(0.05)").execute(&db).await.unwrap();
+        sqlx::query("SELECT 1").execute(&db).await.unwrap();
+        tracing::callsite::rebuild_interest_cache();
+        log.0.lock().unwrap().clear();
         take_awaits();
 
         let before = load::read(Duration::from_millis(100));
