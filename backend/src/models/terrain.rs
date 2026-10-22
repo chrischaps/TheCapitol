@@ -175,6 +175,10 @@ pub struct WorldGenParams {
     pub suburban_outer_radius: f64,
     #[serde(skip)]
     pub rural_outer_radius: f64,
+    /// The side of the world's square, as the zone radii are skipped: the
+    /// Wilderness runs to its disc's edge, round its middle (PV2, #454).
+    #[serde(skip)]
+    pub world_size: f64,
     // Water/Canals
     pub moat_width: f64,
     pub moat_bridge_width: f64,
@@ -186,9 +190,10 @@ pub struct WorldGenParams {
     pub guild_ring_width: f64,
     pub trade_ring_radius: f64,
     pub trade_ring_width: f64,
-    // Arterials
+    // Arterials. They run out to the rural edge, where the wilds' trails
+    // take over: always `rural_outer_radius`, so they're not a param of
+    // their own (PV2, #454).
     pub arterial_width: f64,
-    pub arterial_end_radius: f64,
     // The urban grid (#421): its quay, rings of blocks and spokes.
     pub urban: UrbanParams,
     // Suburban (nested)
@@ -224,8 +229,50 @@ impl WorldGenParams {
         }
     }
 
+    /// The rings these params lay the world in: their zone radii round the
+    /// middle of a world `world_size` across. The land, the water, the
+    /// trails and the wild nodes all read it (PV2, #454).
+    pub fn frame(&self) -> rules::Frame {
+        rules::Frame::new(
+            self.world_size,
+            [
+                self.capitol_radius,
+                self.trade_outer_radius,
+                self.guild_outer_radius,
+                self.urban_outer_radius,
+                self.suburban_outer_radius,
+                self.rural_outer_radius,
+            ],
+        )
+    }
+
+    /// The land's params in this world's frame: the foothills and the
+    /// ranges past its rural edge, round its centre.
+    pub fn framed_land(&self) -> LandParams {
+        self.land.clone().in_frame(self.frame())
+    }
+
+    /// Plots v2's rings (`the-capitol-plots-v2.md`, PV1): urban out to
+    /// r2160, the suburb to r3600, rural to r6100, and the wilds to the
+    /// edge of a world 16600 across. Test-only until the flip (#459) moves
+    /// the table: WP2 to WP5 (#455 to #458) lay their v2 generators on it.
+    /// Each zone's own v2 params are its package's; this sets only the
+    /// rings, so the generators that read their radii from here follow.
+    #[cfg(test)]
+    pub fn grown() -> Self {
+        Self {
+            urban_outer_radius: 2160.0,
+            suburban_outer_radius: 3600.0,
+            rural_outer_radius: 6100.0,
+            world_size: 16600.0,
+            ..Self::default()
+        }
+    }
+
     /// The zone radii a params object names with values off the protocol's
-    /// table. Deserializing ignores them (#118); this is for saying so.
+    /// table. Deserializing ignores them (#118); this is for saying so. The
+    /// arterials' old end (`arterial_end_radius`) counts too: it's always
+    /// the rural edge now (PV2, #454).
     pub fn untunable_radii_in(json: &serde_json::Value) -> Vec<(&'static str, f64)> {
         let table = Self::default();
         [
@@ -235,6 +282,7 @@ impl WorldGenParams {
             ("urban_outer_radius", table.urban_outer_radius),
             ("suburban_outer_radius", table.suburban_outer_radius),
             ("rural_outer_radius", table.rural_outer_radius),
+            ("arterial_end_radius", table.rural_outer_radius),
         ]
         .into_iter()
         .filter_map(|(key, radius)| json.get(key)?.as_f64().filter(|&v| v != radius).map(|v| (key, v)))
@@ -252,6 +300,7 @@ impl Default for WorldGenParams {
             urban_outer_radius: rules::URBAN_OUTER_RADIUS,
             suburban_outer_radius: rules::SUBURBAN_OUTER_RADIUS,
             rural_outer_radius: rules::RURAL_OUTER_RADIUS,
+            world_size: rules::WORLD_SIZE,
             moat_width: 20.0,
             moat_bridge_width: 30.0,
             canal_inner_width: 15.0,
@@ -262,10 +311,6 @@ impl Default for WorldGenParams {
             trade_ring_radius: 400.0,
             trade_ring_width: 30.0,
             arterial_width: 60.0,
-            // The arterials run out to where the wilderness starts. That is
-            // the rural edge: 3800, where they ended before the suburb deepened
-            // (#117), and 4600 since the rural ring widened (#308).
-            arterial_end_radius: rules::RURAL_OUTER_RADIUS,
             urban: UrbanParams::default(),
             suburban: SuburbanGenParams::default(),
             wild_trail_width: 8.0,
@@ -378,14 +423,30 @@ impl TerrainConfig {
         format!("{hash:016x}")
     }
 
+    /// The world `WorldGenParams::grown()` builds, once for every test that
+    /// reads it: it takes several seconds, and the performance test runs
+    /// beside the others (PV2, #454).
+    #[cfg(test)]
+    pub(crate) fn grown() -> &'static TerrainConfig {
+        static WORLD: std::sync::OnceLock<TerrainConfig> = std::sync::OnceLock::new();
+        WORLD.get_or_init(|| Self::from_params(&WorldGenParams::grown()))
+    }
+
     /// The world's frame before anything is laid on it: its size, centre,
     /// water rings and land, with no roads, lots or water courses. The urban
-    /// grid's v2 measure (#455) lays its own roads on it.
+    /// grid's v2 measure (#455) lays its own roads on it. It's laid in the
+    /// params' frame (`WorldGenParams::frame`): the default's is the
+    /// protocol's table.
     pub(crate) fn bare(params: &WorldGenParams) -> Self {
+        let frame = params.frame();
+        // The land in the world's frame, so the water, the trails and the
+        // wild nodes follow its rings. A saved config's foothills and ranges
+        // don't count: they're offsets past the rural edge (PV2, #454).
+        let land = params.framed_land();
         TerrainConfig {
-            world_size: capitol_protocol::rules::WORLD_SIZE,
-            center_x: capitol_protocol::rules::CENTER_X,
-            center_y: capitol_protocol::rules::CENTER_Y,
+            world_size: frame.world_size(),
+            center_x: frame.center.0,
+            center_y: frame.center.1,
             water_rings: vec![
                 // Moat: Capitol/Trade boundary
                 WaterRing {
@@ -429,7 +490,7 @@ impl TerrainConfig {
             terrain_plots: Vec::new(),
             parks: Vec::new(),
             landmarks: Vec::new(),
-            land: params.land.clone(),
+            land,
             rivers: Vec::new(),
             streams: Vec::new(),
             lakes: Vec::new(),
@@ -446,7 +507,7 @@ impl TerrainConfig {
 
         // The water comes from the land, and skirts the roads. The farms keep
         // clear of it (#287).
-        let water = super::hydrology::generate(&params.land, &config.roads);
+        let water = super::hydrology::generate(&config.land, &config.roads);
 
         // Generate terrain plots for all zones
         config.terrain_plots = config.generate_suburban_plots_internal(&params.suburban_params());
@@ -465,7 +526,7 @@ impl TerrainConfig {
         // The wild trails run on from the arterials, round the water, and
         // after the lots, which keep off them anyway: none stand past the
         // rural edge. The water was laid before them, so it doesn't skirt them.
-        let trails = super::trails::lay(&params.land, &water, &config.roads, &config.terrain_plots, params.wild_trail_width);
+        let trails = super::trails::lay(&config.land, &water, &config.roads, &config.terrain_plots, params.wild_trail_width);
         config.roads.extend(trails);
         (config.rivers, config.streams, config.lakes, config.fords) =
             (water.rivers, water.streams, water.lakes, water.fords);
@@ -609,7 +670,8 @@ impl TerrainConfig {
                 let angle_deg = bridge.angle_degrees;
 
                 let start_radius = guild_ring_radius;
-                let end_radius = params.arterial_end_radius;
+                // Out to the rural edge, where the wild trails go on.
+                let end_radius = params.rural_outer_radius;
 
                 let start_x = self.center_x + start_radius * angle_rad.stable_cos();
                 let start_y = self.center_y + start_radius * angle_rad.stable_sin();
@@ -1659,6 +1721,66 @@ mod tests {
         println!("{} parks, {:.0} square units, {:.1}% of the suburb", t.parks.len(), area, share * 100.0);
         assert!((area - squares).abs() <= 0.02 * squares, "traced {area:.0}, squares {squares:.0}");
         assert!((0.08..=0.18).contains(&share), "parks are {:.1}% of the suburb", share * 100.0);
+    }
+
+    /// Plots v2's rings build (PV2, #454): the land is flat out to the grown
+    /// rural edge + 100 and rises past it, the water keeps out past the
+    /// grown suburb, and the arterials and the wild trails meet at the grown
+    /// rural edge. The zones' own v2 layouts are #455 to #457's; this only
+    /// checks that what reads the frame follows it.
+    #[test]
+    fn a_grown_world_builds() {
+        use capitol_protocol::land::height_at;
+        let params = WorldGenParams::grown();
+        let frame = params.frame();
+        let start = std::time::Instant::now();
+        let t = TerrainConfig::grown();
+        println!("grown world: {:.1}s", start.elapsed().as_secs_f64());
+
+        assert_eq!((t.world_size, t.center_x, t.center_y), (16600.0, 8300.0, 8300.0));
+        assert_eq!(t.land.frame, frame);
+        assert_eq!((t.land.foothill_radius, t.land.range_radius), (6200.0, 7900.0));
+        let at = |r: f64, d: f64| {
+            let a = d.to_radians();
+            (t.center_x + r * a.stable_cos(), t.center_y + r * a.stable_sin())
+        };
+        // Flat out to r6200, just short of it (cos and sin can stand a hair past).
+        for step in 0..=124 {
+            let r = (step as f64 * 50.0).min(6199.99);
+            for d in 0..72 {
+                let (x, y) = at(r, d as f64 * 5.0);
+                assert_eq!(height_at(x, y, &t.land), 0.0, "r{r} at {}°", d * 5);
+            }
+        }
+        let peak = (0..360).map(|d| height_at(at(7600.0, d as f64).0, at(7600.0, d as f64).1, &t.land)).fold(0.0, f64::max);
+        assert!(peak > 100.0, "the grown ranges stand up: {peak}");
+
+        // The water keeps out past the grown suburb, and reaches the grown edge.
+        let inner = frame.water_inner_radius();
+        assert_eq!(inner, 3750.0);
+        let courses: Vec<&WaterCourse> = t.rivers.iter().chain(&t.streams).collect();
+        assert!(!t.rivers.is_empty() && !t.lakes.is_empty(), "{} rivers, {} lakes", t.rivers.len(), t.lakes.len());
+        for c in &courses {
+            for p in &c.points {
+                let r = frame.radius(p.x, p.y);
+                assert!(r > inner - super::super::hydrology::CELL && r <= frame.world_edge() + 0.01, "{} at r{r:.0}", c.id);
+            }
+        }
+        let past_old_edge = courses.iter().flat_map(|c| &c.points).filter(|p| frame.radius(p.x, p.y) > rules::WILDERNESS_OUTER_RADIUS).count();
+        assert!(past_old_edge > 0, "the water runs out past the table's r6800");
+
+        // The arterials end at the grown rural edge, and the trails start there.
+        for road in t.roads.iter().filter(|r| r.id.strip_prefix("arterial_").is_some_and(|k| k.parse::<u32>().is_ok())) {
+            let end = *road.points.last().unwrap();
+            assert!((frame.radius(end.0, end.1) - 6100.0).abs() < 1e-6, "{} ends at r{:.1}", road.id, frame.radius(end.0, end.1));
+        }
+        let trails: Vec<&RoadSegment> = t.roads.iter().filter(|r| r.id.starts_with("wild_trail_")).collect();
+        assert_eq!(trails.len(), 8, "a valley trail up from each arterial");
+        for trail in &trails {
+            let r = frame.radius(trail.points[0].0, trail.points[0].1);
+            assert!((r - 6100.0).abs() < 1.0, "{} starts at r{r:.0}", trail.id);
+            assert!(trail.points.iter().all(|p| frame.radius(p.0, p.1) < frame.world_edge()), "{} leaves the world", trail.id);
+        }
     }
 
     /// A fixed workload shaped like generation: libm trig through `StableMath`,

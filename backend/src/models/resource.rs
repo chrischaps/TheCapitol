@@ -650,7 +650,7 @@ mod tests {
             let (h, slope) = (height_at(s.x, s.y, &terrain.land), slope_at(s.x, s.y, &terrain.land));
             let at = format!("{} at ({}, {}), height {h:.0}, slope {slope:.2}", s.resource_type, s.x, s.y);
             let habitat = tables.iter().find(|t| t.id == s.resource_type).unwrap().habitat.as_ref().unwrap();
-            let r = (s.x - CENTER_X).stable_hypot(s.y - CENTER_Y);
+            let r = (s.x - CENTER_X).stable_hypot(s.y - CENTER_Y) - RURAL_OUTER_RADIUS;
             assert!(habitat.suits(r, h, slope), "{at} isn't in its habitat");
             assert!(slope <= CLIFF_SLOPE, "{at} is on a cliff");
             assert!(land.reached((s.x, s.y)), "{at} can't be reached");

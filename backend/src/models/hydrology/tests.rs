@@ -3,6 +3,17 @@ use std::sync::OnceLock;
 use super::*;
 use capitol_protocol::fmath::StableMath;
 use capitol_protocol::land::{carve, ground_at, relief, Water};
+use capitol_protocol::rules::{
+    Frame, CENTER_X, CENTER_Y, SUBURBAN_OUTER_RADIUS, WATER_INNER_RADIUS as INNER_RADIUS, WILDERNESS_OUTER_RADIUS,
+    WORLD_SIZE,
+};
+
+/// The table's plain's edge, where the land starts to rise (r4700).
+const PLAIN_EDGE: f64 = capitol_protocol::rules::RURAL_OUTER_RADIUS + capitol_protocol::land::FOOTHILLS_PAST_RURAL;
+
+fn radius(x: f64, y: f64) -> f64 {
+    Frame::TABLE.radius(x, y)
+}
 
 /// The default world's roads, which the water skirts: all but the wild
 /// trails, which are laid round the water after it (W5).
@@ -194,7 +205,7 @@ fn the_plain_soaks_the_water_up_all_across_it() {
                 Mouth::Lake(id) if r < PLAIN_EDGE => {
                     ponds += 1;
                     for &(x, y) in lakes[id.as_str()].rings.iter().flatten() {
-                        let clear = Roads::near(roads()).clearance((x, y), POND_KERB);
+                        let clear = Roads::near(roads(), &Rings::of(&LandParams::default())).clearance((x, y), POND_KERB);
                         assert!(clear >= POND_KERB - 1e-6, "{id} is {clear:.1} from a road");
                     }
                 }

@@ -41,10 +41,11 @@ pub const SAMPLES: usize = CHUNK * CHUNKS + 1;
 pub const HALF: f64 = (CHUNK * CHUNKS) as f64 * TEXEL * 0.5;
 
 /// Where the land starts: [`SEAM`] inside r3150, where the wild water's
-/// courses stop (the hydrology's inner rim), so the carve is fully in
-/// before the first bed. Everything between here and the rural edge is
-/// flat but for the water.
-pub const FROM: f64 = 3100.0;
+/// courses stop (the hydrology's inner rim, `rules::WATER_INNER_RADIUS`), so
+/// the carve is fully in before the first bed. Everything between here and
+/// the rural edge is flat but for the water. It follows the suburb's edge
+/// (PV2, #454).
+pub const FROM: f64 = capitol_protocol::rules::WATER_INNER_RADIUS - SEAM;
 /// How far the water's banks read wet: the carve of the ground raised by
 /// this much (server units) reaches about `WET_RISE / BANK_SLOPE` past
 /// the bank.

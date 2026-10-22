@@ -62,10 +62,20 @@ Today the zone generators read their radii from `WorldGenParams`, but the land, 
 - **The land:** the foothills start 100 past the edge, and the ranges 1800 past it (r4700 and r6400 today).
 - **`arterial_end_radius`** is always the rural edge.
 - **`content/wilds.toml`'s quality by radius** is measured from the rural edge.
-- **`SPAWN_Y`** is the suburb's edge + 300, on the south arterial.
+- **`SPAWN_Y`** is the suburb's edge + 350, on the south arterial (r3350 today, so it doesn't move; r3950 on the grown rings).
 - **`rules::WATER_INNER_RADIUS`** (the suburb's edge + 150) is what the hydrology and Flint's `land::FROM` both use.
 
 After this, a future move of the rings is a change to the table.
+
+**As built (#454):**
+- **`rules::Frame { center, radii }`** holds the centre and the seven zone outer radii; `Frame::TABLE` is the protocol's table, and `Frame::new(world_size, [capitol … rural])` puts the Wilderness out to the disc's edge round the square's middle. It has `rural_edge()`, `suburb_edge()`, `world_edge()`, `world_size()`, `water_inner_radius()`, `spawn()`, `radius(x, y)`, `zone_at(x, y)` and `radii_of(zone)`.
+- **`WorldGenParams`** gains a `#[serde(skip)] world_size`, and `frame()` and `framed_land()`. `WorldGenParams::grown()` (`#[cfg(test)]`) sets urban 2160, suburban 3600, rural 6100 and world 16600, so the centre is (8300, 8300). `TerrainConfig::from_params` takes the world's size and centre from the frame.
+- **`LandParams.frame`** is `#[serde(skip)]`. `foothill_radius` and `range_radius` stay on the wire, so the JSON and `default_terrain_version_is_pinned` hold, but `LandParams::in_frame(frame)` sets them to the rural edge + `land::FOOTHILLS_PAST_RURAL` (100) and + `RANGES_PAST_RURAL` (1800), and `from_params` always does. So a saved config can't move them. On the table, 4600 + 100 and 4600 + 1800 are exactly 4700 and 6400, so the land's pinned samples hold.
+- **The hydrology** reads its rings from the land's frame. **The trails'** radii are offsets: `HEAD_PAST_RURAL`, `PASS_MIN_PAST_RURAL` and `OPEN_GROUND_PAST_RURAL`. **The wild nodes** use `terrain.land.frame`. `wilds.toml`'s `depth` (quality and habitat) is measured past the rural edge: `[[0, -15], [600, 0], [1800, 10]]`.
+- **`arterial_end_radius`** is gone. The arterials end at `rural_outer_radius`, and `untunable_radii_in` refuses a config that names it with any other value.
+- **Flint's `land::FROM`** is `rules::WATER_INNER_RADIUS − SEAM`.
+- **`a_grown_world_builds`** builds `grown()` in about 5 to 6 s in debug, against about 3 s for the default world, before #455 to #457 lay the zones' v2 layouts. Then it checks the land, the water, the arterials and the trails against the grown rings. `the_wilds_follow_a_grown_frame` plans the wild nodes there. Both share one build, `TerrainConfig::grown()` (test-only, cached), which later tests should use too. #455's `urban::metrics::v2` lost its `arterial_end_radius`, and can now take `..WorldGenParams::grown()`.
+- **Still on the table** until the flip: the walk (`rules::ground`), `Zone::from_position`, `land::Water::new` (`Water::in_world` takes a size), the non-wild node planner, and the relief drawings. Cut as [#465](https://github.com/chrischaps/TheCapitol/issues/465).
 
 ### PV3. Old lots retire as `rw2_`
 
@@ -236,7 +246,7 @@ These aren't issues yet. They're cut after Chris reviews this section.
 | Issue | Package | Depends on |
 |---|---|---|
 | [#453](https://github.com/chrischaps/TheCapitol/issues/453) | V0.0 This plan | |
-| [#454](https://github.com/chrischaps/TheCapitol/issues/454) | V0.1 One frame of radii: the land, the water, the trails and the wild nodes follow the zone table; `grown()` | #453 |
+| [#454](https://github.com/chrischaps/TheCapitol/issues/454) | V0.1 One frame of radii: the land, the water, the trails and the wild nodes follow the zone table; `grown()`. Built: see PV2's as-built note | #453 |
 | [#458](https://github.com/chrischaps/TheCapitol/issues/458) | V0.2 Generation time, and Flint pre-work (land chunks, `FROM`, grass sizes, a camera-zone test) | #454 |
 | [#455](https://github.com/chrischaps/TheCapitol/issues/455) | V1.1 Urban: five rings of blocks. *As built:* `rings: 5`, `outer_spokes: 32` past r1800, outer ring street r2125.5 under an edge at r2160: 1016 lots, median 8.56k, 100% take 4, none take 5. Tested on the grid alone (`urban::metrics::measure_grid`, `v2`) | #454 |
 | [#456](https://github.com/chrischaps/TheCapitol/issues/456) | V1.2 Suburb: lots of about 130 × 130 in a band about 1440 deep | #454 |

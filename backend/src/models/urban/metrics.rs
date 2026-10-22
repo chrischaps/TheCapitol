@@ -73,7 +73,6 @@ pub fn v2(seed: u64) -> WorldGenParams {
         urban_outer_radius: 2160.0,
         suburban_outer_radius: 3600.0,
         rural_outer_radius: 6100.0,
-        arterial_end_radius: 6100.0,
         // 32 bearings round the outer ring of blocks, past r1800, so no
         // block is much over 500 long: at 24 they'd be 540 out there.
         urban: UrbanParams { rings: 5, outer_spokes: 32, ..UrbanParams::default() },

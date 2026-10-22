@@ -304,7 +304,8 @@ pub struct WildsDef {
 
 /// How a wild node's base-quality ceiling rises: points added to its
 /// resource's `base_quality_max`, interpolated between `[at, add]` rows by
-/// radius (`depth`) and by the land's height (`height`).
+/// how far past the rural edge (`depth`, PV2 #454) and by the land's height
+/// (`height`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WildQualityDef {
@@ -313,8 +314,8 @@ pub struct WildQualityDef {
 }
 
 impl WildQualityDef {
-    /// The ceiling for a resource whose own is `max`, at radius `r` and
-    /// height `h`: never over 100, nor under `floor`.
+    /// The ceiling for a resource whose own is `max`, `r` past the rural
+    /// edge and at height `h`: never over 100, nor under `floor`.
     pub fn ceiling(&self, max: i32, floor: i32, r: f64, h: f64) -> i32 {
         let add = interpolate(&self.depth, r) + interpolate(&self.height, h);
         ((max as f64 + add).round() as i32).min(100).max(floor)
@@ -347,7 +348,7 @@ pub struct HabitatDef {
     pub height: Option<[f64; 2]>,
     /// Rise over run (`land::slope_at`)
     pub slope: Option<[f64; 2]>,
-    /// Radius from the centre
+    /// How far past the rural edge
     pub depth: Option<[f64; 2]>,
     /// For woods: the share of the habitat that's woods
     pub cover: Option<f64>,
@@ -369,7 +370,8 @@ pub enum Massifs {
 }
 
 impl HabitatDef {
-    /// Whether the land at radius `r`, height `h` and slope `s` suits it.
+    /// Whether the land `r` past the rural edge, at height `h` and slope
+    /// `s`, suits it.
     pub fn suits(&self, r: f64, h: f64, s: f64) -> bool {
         let within = |b: Option<[f64; 2]>, v: f64| b.is_none_or(|[lo, hi]| (lo..=hi).contains(&v));
         within(self.depth, r) && within(self.height, h) && within(self.slope, s)

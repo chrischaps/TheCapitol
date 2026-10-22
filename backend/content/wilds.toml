@@ -11,7 +11,9 @@
 #             base_quality_max plus the `depth` and `height` points here,
 #             never over 100. Each is a list of [at, add] rows, rising by
 #             `at`, interpolated between them and held flat past either end.
-#   depth     at: radius from the centre
+#   depth     at: how far past the rural edge (r4600 on the table). Measured
+#             from the edge, so the rows follow the rings when they move
+#             (PV2, #454): 0 is r4600 today.
 #   height    at: the land's height there
 #
 # [[habitat]] one per resource with a wilderness spawn row: where in the
@@ -21,7 +23,7 @@
 #   resource  an id from resources.toml
 #   height    the land's height
 #   slope     rise over run; at most rules::ground::CLIFF_SLOPE (1.2)
-#   depth     radius from the centre
+#   depth     how far past the rural edge, as [quality]'s
 #   cover     woods only: the share of the habitat that's woods
 #   woods_of  woods only: grow in this resource's woods' noise field rather
 #             than one of its own, so the woods run on from its (#225)
@@ -29,7 +31,7 @@
 #             (protocol `land::massif_at`), so copper and tin keep apart
 
 [quality]
-depth = [[4600, -15], [5200, 0], [6400, 10]]
+depth = [[0, -15], [600, 0], [1800, 10]]
 height = [[0, 0], [250, 3], [550, 8]]
 
 # Old growth, on the valley floors and the low ground between the ranges,

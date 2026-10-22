@@ -6,7 +6,11 @@
 //! wire (`/terrain`'s `land`), never the heights.
 //!
 //! - Inside the rural edge (r4600) the height is exactly 0, so nothing in the
-//!   city moves. The foothills rise from [`LandParams::foothill_radius`].
+//!   city moves. The foothills rise from [`LandParams::foothill_radius`],
+//!   [`FOOTHILLS_PAST_RURAL`] past it.
+//! - The land is laid in a [`rules::Frame`]: its centre and its rural edge.
+//!   The radii are offsets past that edge, so a world on other rings (a
+//!   test's grown world, PV2, #454) has its land follow them.
 //! - Rolling ground is fBm over seeded gradient noise. The ranges are ridged
 //!   noise, gathered into [`LandParams::ridge_count`] massifs round the ring.
 //!   With eight, the valleys between them open where the eight arterials leave
@@ -22,7 +26,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::fmath::StableMath;
-use crate::rules;
+use crate::rules::{self, Frame};
 use crate::terrain::{Lake, WaterCourse};
 
 /// What shapes the land. Lengths are world units.
@@ -41,10 +45,14 @@ pub struct LandParams {
     pub massif_wander: f64,
     /// How much of a massif's height its valleys keep, 0 to 1.
     pub valley_floor: f64,
-    /// Where the ground starts to rise. Never inside the rural edge: the
-    /// height is 0 to `max(foothill_radius, RURAL_OUTER_RADIUS)`.
+    /// Where the ground starts to rise: [`FOOTHILLS_PAST_RURAL`] past the
+    /// frame's rural edge. Never inside that edge: the height is 0 to
+    /// `max(foothill_radius, rural edge)`. It's on the wire so a client
+    /// draws the server's land, but it follows the frame ([`LandParams::in_frame`]):
+    /// a saved config can't move it (PV2, #454).
     pub foothill_radius: f64,
-    /// Where the ranges reach their full height.
+    /// Where the ranges reach their full height: [`RANGES_PAST_RURAL`] past
+    /// the frame's rural edge, as `foothill_radius` follows it.
     pub range_radius: f64,
     /// About the height of the highest crests (one in a thousand points of the
     /// wilds); a few summits stand a little over it.
@@ -59,6 +67,37 @@ pub struct LandParams {
     pub ridge_wavelength: f64,
     /// Octaves of ridges.
     pub ridge_octaves: u32,
+    /// The rings the land is laid in: its centre and its rural edge. Never
+    /// on the wire or in a saved config: the server's generator sets it from
+    /// the world's radii (`TerrainConfig::from_params`), and anyone else's
+    /// is the protocol's table (PV2, #454).
+    #[serde(skip)]
+    pub frame: Frame,
+}
+
+/// How far past the rural edge the foothills start (r4700 on the table).
+pub const FOOTHILLS_PAST_RURAL: f64 = 100.0;
+/// How far past the rural edge the ranges reach their full height (r6400 on
+/// the table).
+pub const RANGES_PAST_RURAL: f64 = 1800.0;
+
+impl LandParams {
+    /// These params laid in `frame`: the foothills and the ranges move with
+    /// its rural edge, and the noise is keyed on the offset from its centre.
+    pub fn in_frame(self, frame: Frame) -> Self {
+        Self {
+            foothill_radius: frame.rural_edge() + FOOTHILLS_PAST_RURAL,
+            range_radius: frame.rural_edge() + RANGES_PAST_RURAL,
+            frame,
+            ..self
+        }
+    }
+
+    /// Where the plain ends and the ground starts to rise: [`height_at`] is
+    /// 0 out to here.
+    pub fn plain_edge(&self) -> f64 {
+        self.foothill_radius.max(self.frame.rural_edge())
+    }
 }
 
 impl Default for LandParams {
@@ -69,16 +108,18 @@ impl Default for LandParams {
             valley_bearing_degrees: 0.0,
             massif_wander: 0.3,
             valley_floor: 0.2,
-            // 100 past the rural edge, and the ranges full height 1700 on.
-            // Both moved out 800 with the rural edge (RD10, #308).
-            foothill_radius: 4700.0,
-            range_radius: 6400.0,
+            // 100 past the rural edge, and the ranges full height 1700 on
+            // (r4700 and r6400). Both moved out 800 with the rural edge
+            // (RD10, #308), and follow the frame since PV2 (#454).
+            foothill_radius: rules::RURAL_OUTER_RADIUS + FOOTHILLS_PAST_RURAL,
+            range_radius: rules::RURAL_OUTER_RADIUS + RANGES_PAST_RURAL,
             peak_height: 640.0,
             rolling_height: 70.0,
             rolling_wavelength: 1100.0,
             rolling_octaves: 5,
             ridge_wavelength: 2200.0,
             ridge_octaves: 5,
+            frame: Frame::TABLE,
         }
     }
 }
@@ -101,9 +142,9 @@ const MASSIF_WAVELENGTH: f64 = 3600.0;
 
 /// The height of the ground at a world position.
 pub fn height_at(x: f64, y: f64, land: &LandParams) -> f64 {
-    let (dx, dy) = (x - rules::CENTER_X, y - rules::CENTER_Y);
+    let (dx, dy) = (x - land.frame.center.0, y - land.frame.center.1);
     let r = (dx * dx + dy * dy).sqrt();
-    let foothill = land.foothill_radius.max(rules::RURAL_OUTER_RADIUS);
+    let foothill = land.plain_edge();
     if r <= foothill {
         return 0.0;
     }
@@ -144,7 +185,7 @@ pub fn massif_at(x: f64, y: f64, land: &LandParams) -> Option<u32> {
     if land.ridge_count == 0 {
         return None;
     }
-    let (dx, dy) = (x - rules::CENTER_X, y - rules::CENTER_Y);
+    let (dx, dy) = (x - land.frame.center.0, y - land.frame.center.1);
     let bearing = dy.stable_atan2(dx) + land.massif_wander * fbm(land.seed, WANDER, dx, dy, 2400.0, 2);
     let k = land.ridge_count as f64;
     let turns = (bearing - land.valley_bearing_degrees.to_radians()) / std::f64::consts::TAU;
@@ -262,6 +303,8 @@ pub struct Water {
     /// row-major, `cols` across.
     buckets: Vec<Bucket>,
     cols: usize,
+    /// The side of the world's square the index covers, and [`BEYOND`] past it.
+    world_size: f64,
 }
 
 /// One stretch of a river or stream: its ends, and the width, depth and
@@ -312,8 +355,15 @@ impl Water {
     /// Indexes the water. Rivers and streams carve alike, so they can come
     /// chained in one iterator.
     pub fn new<'a>(courses: impl IntoIterator<Item = &'a WaterCourse>, lakes: &[Lake]) -> Self {
-        let cols = ((rules::WORLD_SIZE + 2.0 * BEYOND) / BUCKET).ceil() as usize;
-        let mut water = Water { buckets: vec![Bucket::default(); cols * cols], cols, ..Water::default() };
+        Self::in_world(rules::WORLD_SIZE, courses, lakes)
+    }
+
+    /// [`Water::new`] for a world `world_size` across, not the table's: a
+    /// test's grown world (PV2, #454). `new`'s callers keep the table's
+    /// size until the flip (#465).
+    pub fn in_world<'a>(world_size: f64, courses: impl IntoIterator<Item = &'a WaterCourse>, lakes: &[Lake]) -> Self {
+        let cols = ((world_size + 2.0 * BEYOND) / BUCKET).ceil() as usize;
+        let mut water = Water { buckets: vec![Bucket::default(); cols * cols], cols, world_size, ..Water::default() };
         for course in courses {
             for w in course.points.windows(2) {
                 let (p, q) = (w[0], w[1]);
@@ -361,7 +411,7 @@ impl Water {
     }
 
     fn bucket(&self, x: f64, y: f64) -> Option<&Bucket> {
-        let span = -BEYOND..rules::WORLD_SIZE + BEYOND;
+        let span = -BEYOND..self.world_size + BEYOND;
         if self.cols == 0 || !span.contains(&x) || !span.contains(&y) {
             return None;
         }
@@ -614,6 +664,54 @@ mod tests {
         assert_eq!(carve(100.0, -800.0, CENTER_Y, &water), 48.0, "the bed's middle");
         assert_eq!(carve(100.0, -800.0, CENTER_Y + 200.0, &water), 100.0, "out of reach");
         assert_eq!(carve(100.0, -BEYOND - 1.0, CENTER_Y, &water), 100.0, "past the index");
+    }
+
+    /// The table's land is the land in the table's frame: r4700 and r6400
+    /// (PV2, #454).
+    #[test]
+    fn the_default_land_is_laid_in_the_table() {
+        let land = LandParams::default();
+        assert_eq!(land.clone().in_frame(Frame::TABLE), land);
+        assert_eq!((land.foothill_radius, land.range_radius), (4700.0, 6400.0));
+        assert_eq!(land.plain_edge(), 4700.0);
+    }
+
+    /// A world on other rings has its land follow them: flat out to its own
+    /// rural edge + 100, the ranges up past it, and the same heights at the
+    /// same offsets from its own foothills' start, round its own centre.
+    #[test]
+    fn the_land_follows_its_frame() {
+        let grown = Frame::new(16600.0, [200.0, 600.0, 1000.0, 2160.0, 3600.0, 6100.0]);
+        let land = LandParams::default().in_frame(grown);
+        assert_eq!((land.foothill_radius, land.range_radius), (6200.0, 7900.0));
+        let (cx, cy) = grown.center;
+        let at = |r: f64, d: f64| {
+            let a = d.to_radians();
+            (cx + r * a.stable_cos(), cy + r * a.stable_sin())
+        };
+        // Out to the grown world's foothills (r6200), just short of them, as
+        // a point at r6200 by cos and sin can stand a hair past.
+        for step in 0..=620 {
+            let r = (step as f64 * 10.0).min(6199.99);
+            for d in 0..36 {
+                let (x, y) = at(r, d as f64 * 10.0);
+                assert_eq!(height_at(x, y, &land), 0.0, "r{r} at {}°", d * 10);
+            }
+        }
+        let (mut peak, mut n) = (0.0f64, 0);
+        for step in 0..100 {
+            for d in 0..90 {
+                let (x, y) = at(7400.0 + step as f64 * 8.0, d as f64 * 4.0);
+                peak = peak.max(height_at(x, y, &land));
+                n += 1;
+            }
+        }
+        assert!(n > 0 && peak > land.peak_height * 0.5, "the grown world's ranges stand up: {peak}");
+        // The table's foothills, 100 past r4600, start as gently as the grown
+        // world's do 100 past r6100.
+        let (x, y) = at(6250.0, 10.0);
+        let foothill = height_at(x, y, &land);
+        assert!(foothill > 0.0 && foothill < 10.0, "foothills start gently: {foothill}");
     }
 
     /// The same bits on every platform: CI runs this on Linux, and it was

@@ -32,7 +32,7 @@ use capitol_protocol::land::{height_at, massif_at, slope_at};
 use capitol_protocol::rules::ground::{self, Footing, CLIFF_SLOPE};
 use capitol_protocol::rules::resources::Cluster;
 use capitol_protocol::rules::{
-    Zone, CENTER_X, CENTER_Y, EXTRACTION_RANGE, RURAL_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS, WORLD_SIZE,
+    Frame, Zone, EXTRACTION_RANGE,
 };
 use capitol_protocol::terrain::Lake;
 
@@ -61,9 +61,9 @@ pub const SLOW_RIVER: f64 = 0.02;
 /// a walker stands to gather it.
 pub const SHALLOWS_BANK: f64 = 6.0;
 
-/// The wilds' area, in km².
-fn wild_km2() -> f64 {
-    let (inner, outer) = Zone::Wilderness.radii();
+/// The wilds' area in `frame`, in km².
+fn wild_km2(frame: &Frame) -> f64 {
+    let (inner, outer) = frame.radii_of(Zone::Wilderness);
     std::f64::consts::PI * (outer * outer - inner * inner) / 1e6
 }
 
@@ -81,7 +81,9 @@ struct LandCell {
 }
 
 /// The wilds, sampled on a grid of [`CELL`] for finding the ground each
-/// habitat wants, with the wild water indexed for the clearances.
+/// habitat wants, with the wild water indexed for the clearances. They're
+/// the wilds of the terrain's land's frame (`LandParams::frame`), so a world
+/// on other rings has its nodes follow them (PV2, #454).
 pub struct Land<'a> {
     terrain: &'a TerrainConfig,
     cells: Vec<LandCell>,
@@ -93,7 +95,7 @@ pub struct Land<'a> {
 
 impl<'a> Land<'a> {
     pub fn new(terrain: &'a TerrainConfig) -> Self {
-        let cols = (WORLD_SIZE / CELL).ceil() as usize;
+        let cols = (terrain.land.frame.world_size() / CELL).ceil() as usize;
         let mut land = Self { terrain, cells: vec![LandCell::default(); cols * cols], cols, water: SegmentGrid::new(), lakes: Vec::new() };
         land.sample();
         land.index_water();
@@ -102,12 +104,25 @@ impl<'a> Land<'a> {
         land
     }
 
+    /// The rings the wilds are laid in.
+    fn frame(&self) -> &Frame {
+        &self.terrain.land.frame
+    }
+
+    /// How far `(x, y)` is from the centre: `stable_hypot`, as the plan was
+    /// pinned with.
+    fn radius(&self, x: f64, y: f64) -> f64 {
+        let (cx, cy) = self.frame().center;
+        (x - cx).stable_hypot(y - cy)
+    }
+
     fn centre(&self, k: usize) -> (f64, f64) {
         (((k % self.cols) as f64 + 0.5) * CELL, ((k / self.cols) as f64 + 0.5) * CELL)
     }
 
     fn cell_at(&self, (x, y): (f64, f64)) -> Option<usize> {
-        if !(0.0..WORLD_SIZE).contains(&x) || !(0.0..WORLD_SIZE).contains(&y) {
+        let size = self.frame().world_size();
+        if !(0.0..size).contains(&x) || !(0.0..size).contains(&y) {
             return None;
         }
         Some((y / CELL) as usize * self.cols + (x / CELL) as usize)
@@ -117,10 +132,10 @@ impl<'a> Land<'a> {
     /// slope there from its neighbours' (central differences over two cells).
     fn sample(&mut self) {
         let land = &self.terrain.land;
-        let (lo, hi) = (RURAL_OUTER_RADIUS - 2.0 * CELL, WILDERNESS_OUTER_RADIUS + 2.0 * CELL);
+        let (lo, hi) = (self.frame().rural_edge() - 2.0 * CELL, self.frame().world_edge() + 2.0 * CELL);
         for k in 0..self.cells.len() {
             let (x, y) = self.centre(k);
-            let r = (x - CENTER_X).stable_hypot(y - CENTER_Y);
+            let r = self.radius(x, y);
             if (lo..=hi).contains(&r) {
                 self.cells[k].height = height_at(x, y, land) as f32;
                 self.cells[k].sampled = true;
@@ -219,8 +234,8 @@ impl<'a> Land<'a> {
         let mut queue = VecDeque::new();
         for k in 0..self.cells.len() {
             let (x, y) = self.centre(k);
-            let r = (x - CENTER_X).stable_hypot(y - CENTER_Y);
-            if r < RURAL_OUTER_RADIUS && walkable(&self.cells[k]) {
+            let r = self.radius(x, y);
+            if r < self.frame().rural_edge() && walkable(&self.cells[k]) {
                 self.cells[k].reached = true;
                 queue.push_back(k);
             }
@@ -267,9 +282,9 @@ impl<'a> Land<'a> {
             .filter(|&k| self.cells[k].reached)
             .map(|k| (k, self.centre(k)))
             .filter(|&(k, (x, y))| {
-                let r = (x - CENTER_X).stable_hypot(y - CENTER_Y);
-                Zone::from_position(x, y) == Zone::Wilderness
-                    && habitat.suits(r, self.cells[k].height as f64, self.cells[k].slope as f64)
+                let past = self.radius(x, y) - self.frame().rural_edge();
+                self.frame().zone_at(x, y) == Zone::Wilderness
+                    && habitat.suits(past, self.cells[k].height as f64, self.cells[k].slope as f64)
                     && (habitat.massifs.is_none() || habitat.on_massif(massif_at(x, y, &self.terrain.land)))
             })
             .map(|(_, p)| p)
@@ -309,7 +324,7 @@ pub(super) fn plan(
     let terrain = land.terrain;
     let mut trees: Vec<(f64, f64)> = Vec::new();
     for (table, habitat, floor, density) in rows {
-        let count = (density * wild_km2()).round() as usize;
+        let count = (density * wild_km2(land.frame())).round() as usize;
         let mut rng = SplitMix64::stream(seed, &[key(&table.id), Zone::Wilderness.ring_order() as u64]);
         let mut place = Placing { ground, land, taken, table, habitat, land_test };
         let spots = match table.cluster {
@@ -333,8 +348,8 @@ pub(super) fn plan(
         let quality = &content::wilds().quality;
         let mut ids = SplitMix64::stream(seed, &[key(&table.id), Zone::Wilderness.ring_order() as u64, u64::MAX]);
         for (x, y) in spots {
-            let r = (x - CENTER_X).stable_hypot(y - CENTER_Y);
-            let ceiling = quality.ceiling(table.quality.1, floor, r, height_at(x, y, &terrain.land));
+            let past = land.radius(x, y) - land.frame().rural_edge();
+            let ceiling = quality.ceiling(table.quality.1, floor, past, height_at(x, y, &terrain.land));
             let base_quality = floor + rng.below((ceiling - floor + 1) as u64) as i32;
             let mut bytes = [0u8; 16];
             bytes[..8].copy_from_slice(&ids.next_u64().to_le_bytes());
@@ -366,18 +381,19 @@ impl Placing<'_, '_> {
     /// other node.
     fn try_take(&mut self, at: (f64, f64), bank: bool) -> Option<(f64, f64)> {
         let at = (round_tenth(at.0), round_tenth(at.1));
-        let r = (at.0 - CENTER_X).stable_hypot(at.1 - CENTER_Y);
+        let frame = self.land.frame();
+        let r = self.land.radius(at.0, at.1);
         let land = &self.land.terrain.land;
         let water = if bank { BANK_CLEAR } else { MOVE_CLEAR };
-        let fits = r <= WILDERNESS_OUTER_RADIUS - MOVE_CLEAR
-            && Zone::from_position(at.0, at.1) == Zone::Wilderness
+        let fits = r <= frame.world_edge() - MOVE_CLEAR
+            && frame.zone_at(at.0, at.1) == Zone::Wilderness
             && self.land.reached(at)
             && self.ground.open(at, MOVE_CLEAR, false)
             && self.land.water_clearance(at) >= water
             && self.taken.clear_of(at, MIN_GAP)
             && {
                 let slope = slope_at(at.0, at.1, land);
-                slope <= CLIFF_SLOPE && self.habitat.suits(r, height_at(at.0, at.1, land), slope)
+                slope <= CLIFF_SLOPE && self.habitat.suits(r - frame.rural_edge(), height_at(at.0, at.1, land), slope)
             }
             && (self.habitat.massifs.is_none() || self.habitat.on_massif(massif_at(at.0, at.1, land)))
             && (self.land_test)(self.table, Zone::Wilderness, at);
@@ -393,11 +409,12 @@ impl Placing<'_, '_> {
     /// stand on, out of the water and within gathering range.
     fn try_take_wet(&mut self, at: (f64, f64), bank: (f64, f64)) -> Option<(f64, f64)> {
         let at = (round_tenth(at.0), round_tenth(at.1));
-        let r = (at.0 - CENTER_X).stable_hypot(at.1 - CENTER_Y);
+        let frame = self.land.frame();
+        let r = self.land.radius(at.0, at.1);
         let land = &self.land.terrain.land;
-        let fits = r <= WILDERNESS_OUTER_RADIUS - MOVE_CLEAR
-            && Zone::from_position(at.0, at.1) == Zone::Wilderness
-            && Zone::from_position(bank.0, bank.1) == Zone::Wilderness
+        let fits = r <= frame.world_edge() - MOVE_CLEAR
+            && frame.zone_at(at.0, at.1) == Zone::Wilderness
+            && frame.zone_at(bank.0, bank.1) == Zone::Wilderness
             && (at.0 - bank.0).stable_hypot(at.1 - bank.1) <= EXTRACTION_RANGE
             && self.land.in_the_water(at)
             && !self.land.in_the_water(bank)
@@ -405,7 +422,7 @@ impl Placing<'_, '_> {
             && slope_at(bank.0, bank.1, land) <= CLIFF_SLOPE
             && self.ground.open(at, MOVE_CLEAR, false)
             && self.taken.clear_of(at, MIN_GAP)
-            && self.habitat.suits(r, height_at(at.0, at.1, land), slope_at(at.0, at.1, land))
+            && self.habitat.suits(r - frame.rural_edge(), height_at(at.0, at.1, land), slope_at(at.0, at.1, land))
             && (self.land_test)(self.table, Zone::Wilderness, at);
         fits.then(|| {
             self.taken.insert(at);
@@ -569,6 +586,7 @@ impl Placing<'_, '_> {
 
 #[cfg(test)]
 mod tests {
+    use capitol_protocol::rules::{CENTER_X, CENTER_Y};
     use super::*;
 
     /// Prints the wilds' land and what the default plan lays there, for tuning
@@ -615,7 +633,7 @@ mod tests {
             let Some(spawn) = t.spawns.iter().find(|s| s.zone == "wilderness") else { continue };
             let got: Vec<&NodeSeed> = plan.iter().filter(|s| s.resource_type == t.id && Zone::from_position(s.x, s.y) == Zone::Wilderness).collect();
             let mean = got.iter().map(|s| s.base_quality as f64).sum::<f64>() / got.len().max(1) as f64;
-            println!("{}: {} of {:.0}, mean quality {mean:.1}", t.id, got.len(), spawn.density * wild_km2());
+            println!("{}: {} of {:.0}, mean quality {mean:.1}", t.id, got.len(), spawn.density * wild_km2(&Frame::TABLE));
         }
         let wild: Vec<&NodeSeed> = plan.iter().filter(|s| Zone::from_position(s.x, s.y) == Zone::Wilderness).collect();
         let r = |s: &NodeSeed| (s.x - CENTER_X).stable_hypot(s.y - CENTER_Y);
@@ -639,5 +657,37 @@ mod tests {
         }
         let in_lakes = plan.iter().filter(|s| s.resource_type == "reed_bed" && terrain.lakes.iter().any(|l| l.contains(s.x, s.y))).count();
         println!("reed beds in lakes: {in_lakes}, the rest in rivers");
+    }
+
+    /// On Plots v2's grown rings (PV2, #454) the wilds' nodes grow in the
+    /// grown wilds, r6100 to r8300 round (8300, 8300), as many as their
+    /// densities ask of that bigger ring, and their quality's depth is
+    /// measured from the grown rural edge.
+    #[test]
+    fn the_wilds_follow_a_grown_frame() {
+        let terrain = TerrainConfig::grown();
+        let frame = terrain.land.frame;
+        assert_eq!((frame.rural_edge(), frame.world_edge()), (6100.0, 8300.0));
+        let land = Land::new(terrain);
+        assert!(land.cells.iter().enumerate().all(|(k, c)| {
+            let (x, y) = land.centre(k);
+            !c.sampled || frame.radius(x, y) >= 6100.0 - 2.0 * CELL - 1.0
+        }));
+        let tables = crate::engine::node_spawn::tests::content_tables();
+        let wild: Vec<&SpawnTable> = tables.iter().filter(|t| t.grows_wild()).collect();
+        let (ground, mut taken, mut seeds) = (Ground::new(terrain), PointGrid::new(MIN_GAP), Vec::new());
+        plan(&land, &ground, &wild, &mut taken, 42, &|_, _, _| true, &mut seeds);
+        for t in &wild {
+            let spawn = t.spawns.iter().find(|s| s.zone == Zone::Wilderness.as_str()).unwrap();
+            let want = (spawn.density * wild_km2(&frame)).round();
+            let got = seeds.iter().filter(|s| s.resource_type == t.id).count();
+            assert!(got as f64 >= 0.9 * want, "{}: {got} of {want}", t.id);
+        }
+        for s in &seeds {
+            let r = frame.radius(s.x, s.y);
+            assert!(r > 6100.0 && r <= 8300.0 - MOVE_CLEAR, "{} at r{r:.0}", s.resource_type);
+        }
+        // Past r6800, where the table's world ends.
+        assert!(seeds.iter().any(|s| frame.radius(s.x, s.y) > 7300.0));
     }
 }

@@ -192,6 +192,8 @@ pub fn plan_with(
 
     for &table in &order {
         for (zone, spawn) in table.planned_rows() {
+            // The protocol's table, not the terrain's frame, as the wilds
+            // read: a grown world's zone nodes wait for the flip (#465).
             let (inner, outer) = zone.radii();
             let km2 = std::f64::consts::PI * (outer * outer - inner * inner) / 1e6;
             let count = (spawn.density * km2).round() as usize;
@@ -608,6 +610,8 @@ pub struct Ground<'a> {
     parks: &'a [TerrainPark],
     /// Each water ring as (inner, outer) radius, widened by the kerb.
     bands: Vec<(f64, f64)>,
+    /// The terrain's centre, which the rings stand round.
+    center: (f64, f64),
 }
 
 impl<'a> Ground<'a> {
@@ -629,7 +633,7 @@ impl<'a> Ground<'a> {
             .iter()
             .map(|ring| (ring.inner_radius() - WATER_KERB, ring.outer_radius() + WATER_KERB))
             .collect();
-        Self { roads, lots, lot_cells, parks: &terrain.parks, bands }
+        Self { roads, lots, lot_cells, parks: &terrain.parks, bands, center: (terrain.center_x, terrain.center_y) }
     }
 
     /// Whether a node may stand at `at`: `road_clear` from every road edge and
@@ -643,7 +647,7 @@ impl<'a> Ground<'a> {
     }
 
     fn water_clearance(&self, (x, y): (f64, f64)) -> f64 {
-        let r = (x - CENTER_X).stable_hypot(y - CENTER_Y);
+        let r = (x - self.center.0).stable_hypot(y - self.center.1);
         self.bands.iter().map(|&(inner, outer)| (inner - r).max(r - outer)).fold(f64::MAX, f64::min)
     }
 

@@ -3,7 +3,16 @@ use std::sync::OnceLock;
 
 use super::*;
 use capitol_protocol::rules::ground::CLIFF_SLOPE;
+use capitol_protocol::rules::{Frame, RURAL_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS, WORLD_SIZE};
 use crate::models::{TerrainConfig, WorldGenParams};
+
+/// The table's radii past its rural edge.
+const PASS_MIN_RADIUS: f64 = RURAL_OUTER_RADIUS + PASS_MIN_PAST_RURAL;
+const OPEN_GROUND: f64 = RURAL_OUTER_RADIUS + OPEN_GROUND_PAST_RURAL;
+
+fn radius(x: f64, y: f64) -> f64 {
+    Frame::TABLE.radius(x, y)
+}
 
 // A trail is always walkable: W4 stops a walk only past CLIFF_SLOPE.
 const _: () = assert!(WALK_LIMIT < CLIFF_SLOPE);
@@ -155,7 +164,7 @@ fn every_lake_and_every_range_can_be_reached_by_trail() {
             .map(|(x, y)| {
                 let id = world.roads.iter().find(|t| t.id.starts_with("wild_trail_") && dist(t.points[0], (x, y)) < 1e-6);
                 assert!(id.is_some(), "the arterial ending at ({x:.0}, {y:.0}) has no trail on");
-                bearing_deg(x, y)
+                bearing_deg(Frame::TABLE.center, x, y)
             })
             .collect();
         assert_eq!(bearings.len(), 8);
@@ -164,7 +173,7 @@ fn every_lake_and_every_range_can_be_reached_by_trail() {
             let (a, b) = (bearings[k], bearings[(k + 1) % bearings.len()]);
             let span = (b - a).rem_euclid(360.0);
             let high = vertices.iter().any(|&(x, y)| {
-                let along = (bearing_deg(x, y) - a).rem_euclid(360.0);
+                let along = (bearing_deg(Frame::TABLE.center, x, y) - a).rem_euclid(360.0);
                 along > 0.25 * span && along < 0.75 * span && radius(x, y) >= PASS_MIN_RADIUS
             });
             assert!(high, "no trail crosses the massif between {a:.0}° and {b:.0}°");

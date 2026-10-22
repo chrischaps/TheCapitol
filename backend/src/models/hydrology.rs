@@ -4,8 +4,11 @@
 //! A pure function of [`LandParams`] and the roads, so the default world's
 //! water is pinned with the rest of it (`default_terrain_version_is_pinned`).
 //!
-//! 1. **Sample** `land::height_at` on a grid of [`CELL`] from [`INNER_RADIUS`],
-//!    just out from the suburb, to the world's edge. Water is steered by a
+//! 1. **Sample** `land::height_at` on a grid of [`CELL`] from the water's
+//!    inner rim (`rules::WATER_INNER_RADIUS`), just out from the suburb, to
+//!    the world's edge. The rings are the land's frame (`LandParams::frame`),
+//!    so a world on other rings has its water follow them (PV2, #454).
+//!    Water is steered by a
 //!    routing field: the height, plus, on the flat rural plain, a gentle fall
 //!    towards the city with some noise, and a berm along every road. The
 //!    ground itself stays as it is.
@@ -32,21 +35,14 @@ use std::collections::{BinaryHeap, HashMap};
 
 use capitol_protocol::fmath::StableMath;
 use capitol_protocol::land::{height_at, LandParams};
-use capitol_protocol::rules::{
-    CENTER_X, CENTER_Y, RURAL_OUTER_RADIUS, SUBURBAN_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS, WORLD_SIZE,
-};
 use capitol_protocol::terrain::{Ford, Lake, Mouth, RoadSegment, WaterCourse, WaterPoint};
 
 /// The grid's cell, in world units.
 pub const CELL: f64 = 30.0;
-/// The grid's inner rim. No water comes in past it, so the suburb stays dry.
-pub const INNER_RADIUS: f64 = SUBURBAN_OUTER_RADIUS + 150.0;
-/// Where the plain ends and the land starts to rise (`land::height_at` is 0
-/// inside it).
-const PLAIN_EDGE: f64 = RURAL_OUTER_RADIUS + 100.0;
 /// How far past the plain's edge its routing field fades out.
 const PLAIN_BLEND: f64 = 200.0;
-/// The plain's fall towards the city, in the routing field.
+/// The plain's fall towards the city, in the routing field, from the plain's
+/// edge (`LandParams::plain_edge`, where the land starts to rise).
 const PLAIN_FALL: f64 = 0.01;
 /// How high the routing field stands at the plain's edge. It's the fall's
 /// 750 in from there, as it was across the 12000 world's plain, so the
@@ -85,11 +81,52 @@ pub struct Hydrology {
     pub fords: Vec<Ford>,
 }
 
+/// The rings the water is laid in, from the land's frame.
+#[derive(Debug, Clone, Copy)]
+struct Rings {
+    center: (f64, f64),
+    /// The grid's inner rim (`Frame::water_inner_radius`). No water comes in
+    /// past it, so the suburb stays dry.
+    inner: f64,
+    /// Where the plain ends and the land starts to rise (`land::height_at`
+    /// is 0 inside it).
+    plain_edge: f64,
+    /// The world's edge.
+    outer: f64,
+    /// The side of the world's square.
+    size: f64,
+}
+
+impl Rings {
+    fn of(land: &LandParams) -> Self {
+        let frame = &land.frame;
+        Rings {
+            center: frame.center,
+            inner: frame.water_inner_radius(),
+            plain_edge: land.plain_edge(),
+            outer: frame.world_edge(),
+            size: frame.world_size(),
+        }
+    }
+
+    fn radius(&self, x: f64, y: f64) -> f64 {
+        let (dx, dy) = (x - self.center.0, y - self.center.1);
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    /// How much of the plain's routing field stands at radius `r`: all of it
+    /// on the plain, none once the land has risen.
+    fn plain_weight(&self, r: f64) -> f64 {
+        1.0 - smoothstep((r - self.plain_edge) / PLAIN_BLEND)
+    }
+}
+
 /// The water for this land, round these roads (those past the suburb steer
-/// it; the rest are ignored).
+/// it; the rest are ignored). It's laid in the land's frame.
 pub fn generate(land: &LandParams, roads: &[RoadSegment]) -> Hydrology {
-    let roads = Roads::near(roads);
-    let grid = Grid::sample(land, &roads);
+    let rings = Rings::of(land);
+    let roads = Roads::near(roads, &rings);
+    let grid = Grid::sample(land, &roads, rings);
     let mut flood = grid.flood();
     let pits = grid.pits(&flood);
     gather(&grid, &mut flood, &pits);
@@ -116,14 +153,14 @@ struct Roads {
 const ROAD_BUCKET: f64 = 120.0;
 
 impl Roads {
-    fn near(roads: &[RoadSegment]) -> Self {
+    fn near(roads: &[RoadSegment], rings: &Rings) -> Self {
         let mut segments = Vec::new();
         let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
         let key = |v: f64| (v / ROAD_BUCKET).floor() as i64;
         for road in roads {
             for w in road.points.windows(2) {
                 let (a, b) = (w[0], w[1]);
-                if radius(a.0, a.1).max(radius(b.0, b.1)) < INNER_RADIUS - 100.0 {
+                if rings.radius(a.0, a.1).max(rings.radius(b.0, b.1)) < rings.inner - 100.0 {
                     continue;
                 }
                 let half = road.width / 2.0;
@@ -168,12 +205,7 @@ struct Grid {
     /// What steers the water: the height, and on the plain its fall, noise
     /// and the roads' berms.
     route: Vec<f64>,
-}
-
-/// How much of the plain's routing field stands at radius `r`: all of it on
-/// the plain, none once the land has risen.
-fn plain_weight(r: f64) -> f64 {
-    1.0 - smoothstep((r - PLAIN_EDGE) / PLAIN_BLEND)
+    rings: Rings,
 }
 
 /// Smooth value noise in [0, 1] at about `wavelength`.
@@ -227,29 +259,29 @@ struct Flood {
 }
 
 impl Grid {
-    fn sample(land: &LandParams, roads: &Roads) -> Self {
-        let n = (WORLD_SIZE / CELL).round() as usize;
+    fn sample(land: &LandParams, roads: &Roads, rings: Rings) -> Self {
+        let n = (rings.size / CELL).round() as usize;
         let mut h = vec![f64::NAN; n * n];
         let mut route = vec![f64::NAN; n * n];
         for j in 0..n {
             for i in 0..n {
                 let (x, y) = centre(i, j);
-                let r = radius(x, y);
-                if !(INNER_RADIUS..=WILDERNESS_OUTER_RADIUS).contains(&r) {
+                let r = rings.radius(x, y);
+                if !(rings.inner..=rings.outer).contains(&r) {
                     continue;
                 }
                 let c = j * n + i;
                 h[c] = height_at(x, y, land);
                 route[c] = h[c];
-                let w = plain_weight(r);
+                let w = rings.plain_weight(r);
                 if w > 0.0 {
                     let noise = value_noise(land.seed ^ PLAIN_FIELD, x, y, 450.0) - 0.5;
                     let berm = if roads.clearance((x, y), CELL) < CELL { BERM } else { 0.0 };
-                    route[c] += w * (PLAIN_EDGE_RISE + PLAIN_FALL * (r - PLAIN_EDGE) + PLAIN_NOISE * noise + berm);
+                    route[c] += w * (PLAIN_EDGE_RISE + PLAIN_FALL * (r - rings.plain_edge) + PLAIN_NOISE * noise + berm);
                 }
             }
         }
-        Grid { n, h, route }
+        Grid { n, h, route, rings }
     }
 
     fn inside(&self, c: usize) -> bool {
@@ -322,7 +354,7 @@ impl Grid {
                 continue;
             }
             let (x, y) = self.point(c);
-            let edge = radius(x, y) > 0.5 * (INNER_RADIUS + WILDERNESS_OUTER_RADIUS);
+            let edge = self.rings.radius(x, y) > 0.5 * (self.rings.inner + self.rings.outer);
             rim.insert(c as u32, if edge { Rim::Edge } else { Rim::Inner });
             filled[c] = self.route[c];
             queued[c] = true;
@@ -398,7 +430,7 @@ impl Grid {
             let depth = group.iter().map(|&c| level - self.h[c]).fold(0.0, f64::max);
             let in_hills = group.iter().all(|&c| {
                 let (x, y) = self.point(c);
-                plain_weight(radius(x, y)) == 0.0
+                self.rings.plain_weight(self.rings.radius(x, y)) == 0.0
             });
             if in_hills && group.len() >= LAKE_MIN_CELLS && depth >= LAKE_MIN_DEPTH {
                 let id = pits.len() as u32;
@@ -425,11 +457,6 @@ struct Pits {
 
 fn centre(i: usize, j: usize) -> (f64, f64) {
     ((i as f64 + 0.5) * CELL, (j as f64 + 0.5) * CELL)
-}
-
-fn radius(x: f64, y: f64) -> f64 {
-    let (dx, dy) = (x - CENTER_X, y - CENTER_Y);
-    (dx * dx + dy * dy).sqrt()
 }
 
 /// A min-heap entry: lowest level first, then first pushed.
@@ -503,8 +530,8 @@ fn soak(grid: &Grid, flood: &Flood, seed: u64) -> Vec<f64> {
     for &c in flood.order.iter().rev() {
         let c = c as usize;
         let (x, y) = grid.point(c);
-        let onset = PLAIN_EDGE - SOAK_ONSET * value_noise(seed ^ SOAK_FIELD, x, y, 900.0);
-        let w = smoothstep((onset - radius(x, y)) / 100.0);
+        let onset = grid.rings.plain_edge - SOAK_ONSET * value_noise(seed ^ SOAK_FIELD, x, y, 900.0);
+        let w = smoothstep((onset - grid.rings.radius(x, y)) / 100.0);
         if w > 0.0 {
             let rate = SOAK * w * (0.3 + 1.4 * value_noise(seed ^ SOAK_FIELD ^ 1, x, y, 350.0));
             flow[c] = (flow[c] - rate * flow[c].sqrt()).max(0.0);
@@ -760,7 +787,7 @@ impl Network {
                 m != k && !matches!(self.courses[m].end, End::Joins { course, .. } if course == k)
             });
             let others = others.map(|(_, s)| s.as_slice());
-            if let Some(pond) = pond(&shapes[k], flow(peak), roll, &lakes, others, roads) {
+            if let Some(pond) = pond(&shapes[k], flow(peak), roll, &lakes, others, roads, &grid.rings) {
                 pond_of[k] = Some(lakes.len());
                 lakes.push(pond);
             }
@@ -778,9 +805,10 @@ impl Network {
             if c.end == End::Edge {
                 // On to the edge itself.
                 let (x, y) = *shape.last().unwrap();
-                let (dx, dy) = (x - CENTER_X, y - CENTER_Y);
-                let s = WILDERNESS_OUTER_RADIUS / (dx * dx + dy * dy).sqrt();
-                shape.push((CENTER_X + dx * s, CENTER_Y + dy * s));
+                let Rings { center: (cx, cy), outer, .. } = grid.rings;
+                let (dx, dy) = (x - cx, y - cy);
+                let s = outer / (dx * dx + dy * dy).sqrt();
+                shape.push((cx + dx * s, cy + dy * s));
             }
             let mut acc = self.course_acc(c, pits);
             while acc.len() < shape.len() {
@@ -1260,7 +1288,7 @@ const POND_KERB: f64 = 8.0;
 /// A pond where a course soaks away, lying along its last stretch, sized by
 /// its flow `q`. It's made smaller to fit, and given up (the course peters
 /// out instead) if even small it would reach a road, another lake or
-/// another course, or come in past [`INNER_RADIUS`].
+/// another course, or come in past the inner rim (`Rings::inner`).
 fn pond<'a>(
     shape: &[(f64, f64)],
     q: f64,
@@ -1268,6 +1296,7 @@ fn pond<'a>(
     lakes: &[Lake],
     others: impl Iterator<Item = &'a [(f64, f64)]>,
     roads: &Roads,
+    rings: &Rings,
 ) -> Option<Lake> {
     let n = shape.len();
     let end = shape[n - 1];
@@ -1294,7 +1323,7 @@ fn pond<'a>(
             })
             .collect();
         let fits = ring.iter().chain([&(cx, cy)]).all(|&p| {
-            radius(p.0, p.1) >= INNER_RADIUS + 10.0
+            rings.radius(p.0, p.1) >= rings.inner + 10.0
                 && roads.clearance(p, POND_KERB) >= POND_KERB
                 && !lakes.iter().any(|l| l.contains(p.0, p.1))
         }) && !lakes.iter().any(|l| l.rings.iter().flatten().any(|&(x, y)| contains(&ring, x, y)))

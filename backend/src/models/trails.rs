@@ -36,9 +36,6 @@ use std::collections::{BinaryHeap, HashMap};
 
 use capitol_protocol::fmath::StableMath;
 use capitol_protocol::land::{height_at, slope_at, LandParams};
-use capitol_protocol::rules::{
-    CENTER_X, CENTER_Y, RURAL_OUTER_RADIUS, WILDERNESS_OUTER_RADIUS, WORLD_SIZE,
-};
 use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot};
 
 use super::hydrology::Hydrology;
@@ -65,17 +62,20 @@ const FORD_COST: f64 = 10.0;
 /// The cost of each stream cell a trail wades.
 const WADE_COST: f64 = 30.0;
 /// About where a valley trail ends: its valley's head, 1400 into the wilds
-/// (r5200 on the 12000 world, moved out with the rural edge, #308).
-pub const HEAD_RADIUS: f64 = RURAL_OUTER_RADIUS + 1400.0;
-/// How far either side of [`HEAD_RADIUS`] a valley's head may be.
+/// (r5200 on the 12000 world, moved out with the rural edge, #308). Like
+/// every radius here, it's measured past the land's frame's rural edge
+/// (PV2, #454).
+pub const HEAD_PAST_RURAL: f64 = 1400.0;
+/// How far either side of the head's radius a valley's head may be.
 const HEAD_BAND: f64 = 100.0;
 /// How far, in degrees, a valley's head may be off its arterial's bearing.
 /// The massifs wander up to about 17° (`LandParams::massif_wander`).
 const VALLEY_SPREAD_DEG: f64 = 20.0;
-/// A pass trail keeps out past here, so it crosses its massif high. If the
-/// massif has no way over, [`PASS_FALLBACK_RADII`] are tried in turn.
-pub const PASS_MIN_RADIUS: f64 = RURAL_OUTER_RADIUS + 900.0;
-const PASS_FALLBACK_RADII: [f64; 2] = [RURAL_OUTER_RADIUS + 500.0, RURAL_OUTER_RADIUS + 200.0];
+/// A pass trail keeps out past here (past the rural edge), so it crosses its
+/// massif high. If the massif has no way over, [`PASS_FALLBACK_PAST_RURAL`]
+/// are tried in turn.
+pub const PASS_MIN_PAST_RURAL: f64 = 900.0;
+const PASS_FALLBACK_PAST_RURAL: [f64; 2] = [500.0, 200.0];
 /// How far, in degrees, a pass trail may stray past the bearings of the two
 /// valleys it joins.
 const PASS_ARC_MARGIN_DEG: f64 = 10.0;
@@ -104,9 +104,9 @@ const SPUR_MIN: f64 = 1.5 * CELL;
 /// A spur that can't be made a trail all the way is cut back this many
 /// cells at a time until it can.
 const TRIM_CELLS: usize = 4;
-/// Lakes and fords this near the city are on the open foot of the hills,
-/// where anyone can walk straight to them: they get no spur.
-pub const OPEN_GROUND: f64 = RURAL_OUTER_RADIUS + 200.0;
+/// Lakes and fords this near the city (past the rural edge) are on the open
+/// foot of the hills, where anyone can walk straight to them: they get no spur.
+pub const OPEN_GROUND_PAST_RURAL: f64 = 200.0;
 /// A ford with a trail vertex this near needs no spur.
 const FORD_REACH: f64 = 80.0;
 /// A massif's climb goes to the highest ground in the middle of it: past
@@ -123,12 +123,9 @@ pub const WALK_LIMIT: f64 = 0.98;
 /// How finely a trail is checked for slope and lakes.
 const CHECK_STEP: f64 = 2.0;
 
-fn radius(x: f64, y: f64) -> f64 {
-    ((x - CENTER_X) * (x - CENTER_X) + (y - CENTER_Y) * (y - CENTER_Y)).sqrt()
-}
-
-fn bearing_deg(x: f64, y: f64) -> f64 {
-    (y - CENTER_Y).stable_atan2(x - CENTER_X).to_degrees().rem_euclid(360.0)
+/// The bearing of `(x, y)` from the centre `c`, in degrees.
+fn bearing_deg(c: P, x: f64, y: f64) -> f64 {
+    (y - c.1).stable_atan2(x - c.0).to_degrees().rem_euclid(360.0)
 }
 
 fn angle_between(a: f64, b: f64) -> f64 {
@@ -148,15 +145,19 @@ fn point_segment(p: P, a: P, b: P) -> f64 {
 }
 
 /// The wild trails for this land, water and roads. `lots` are kept clear.
+/// They're laid in the land's frame (`LandParams::frame`): from its rural
+/// edge out to its world's edge.
 pub fn lay(land: &LandParams, water: &Hydrology, roads: &[RoadSegment], lots: &[TerrainPlot], width: f64) -> Vec<RoadSegment> {
+    let frame = land.frame;
+    let rural = frame.rural_edge();
     // The arterials that run out to the rural edge, by bearing.
     let mut starts: Vec<P> = roads
         .iter()
         .filter(|r| r.road_type == RoadType::Arterial && r.id.starts_with("arterial_"))
         .filter_map(|r| r.points.last().copied())
-        .filter(|&(x, y)| radius(x, y) >= RURAL_OUTER_RADIUS - 1.0)
+        .filter(|&(x, y)| frame.radius(x, y) >= rural - 1.0)
         .collect();
-    starts.sort_by(|a, b| bearing_deg(a.0, a.1).total_cmp(&bearing_deg(b.0, b.1)));
+    starts.sort_by(|a, b| bearing_deg(frame.center, a.0, a.1).total_cmp(&bearing_deg(frame.center, b.0, b.1)));
 
     let grid = Grid::new(land, water, roads, lots, &starts);
     let mut trails: Vec<RoadSegment> = Vec::new();
@@ -165,11 +166,11 @@ pub fn lay(land: &LandParams, water: &Hydrology, roads: &[RoadSegment], lots: &[
     // 1. Up the valleys.
     let mut valleys: Vec<Option<usize>> = Vec::new();
     for (i, &start) in starts.iter().enumerate() {
-        let bearing = bearing_deg(start.0, start.1);
+        let bearing = bearing_deg(frame.center, start.0, start.1);
         let from = grid.cell_of(start);
         let target = |c: usize| {
             let (x, y) = grid.centre(c);
-            (radius(x, y) - HEAD_RADIUS).abs() <= HEAD_BAND && angle_between(bearing_deg(x, y), bearing) <= VALLEY_SPREAD_DEG
+            (frame.radius(x, y) - (rural + HEAD_PAST_RURAL)).abs() <= HEAD_BAND && angle_between(bearing_deg(frame.center, x, y), bearing) <= VALLEY_SPREAD_DEG
         };
         let found = grid.search(&[from], |_| true, target).and_then(|cells| {
             let mut raw = vec![start];
@@ -184,7 +185,7 @@ pub fn lay(land: &LandParams, water: &Hydrology, roads: &[RoadSegment], lots: &[
 
     // 2. Over the massifs, from each valley's head to the next valley's trail.
     let n = starts.len();
-    let bearings: Vec<f64> = starts.iter().map(|&(x, y)| bearing_deg(x, y)).collect();
+    let bearings: Vec<f64> = starts.iter().map(|&(x, y)| bearing_deg(frame.center, x, y)).collect();
     for i in 0..n {
         let (Some(from), Some(to)) = (valleys[i], valleys[(i + 1) % n]) else { continue };
         if n < 2 {
@@ -192,14 +193,14 @@ pub fn lay(land: &LandParams, water: &Hydrology, roads: &[RoadSegment], lots: &[
         }
         let head = *trails[from].points.last().expect("a trail has points");
         let mut laid = None;
-        for min_r in std::iter::once(PASS_MIN_RADIUS).chain(PASS_FALLBACK_RADII) {
+        for min_r in std::iter::once(PASS_MIN_PAST_RURAL).chain(PASS_FALLBACK_PAST_RURAL).map(|past| rural + past) {
             let joins = grid.vertex_cells(&trails[to].points, min_r);
             // Over this massif, not round the world the other way.
             let (a, b) = (bearings[i] - PASS_ARC_MARGIN_DEG, bearings[(i + 1) % n] + PASS_ARC_MARGIN_DEG);
             let span = (b - a).rem_euclid(360.0);
             let allowed = |c: usize| {
                 let (x, y) = grid.centre(c);
-                radius(x, y) >= min_r && (bearing_deg(x, y) - a).rem_euclid(360.0) <= span
+                frame.radius(x, y) >= min_r && (bearing_deg(frame.center, x, y) - a).rem_euclid(360.0) <= span
             };
             let found = grid.search(&[grid.cell_of(head)], allowed, |c| joins.contains_key(&c)).and_then(|cells| {
                 let last = *cells.last().expect("a path has cells");
@@ -225,7 +226,7 @@ pub fn lay(land: &LandParams, water: &Hydrology, roads: &[RoadSegment], lots: &[
     // that reach the rural edge can meet them, and those keep their vertices:
     // every trail that meets one starts on one of its ends.
     let edge: Vec<RoadSegment> =
-        roads.iter().filter(|r| r.points.iter().any(|p| radius(p.0, p.1) >= RURAL_OUTER_RADIUS - CELL)).cloned().collect();
+        roads.iter().filter(|r| r.points.iter().any(|p| frame.radius(p.0, p.1) >= rural - CELL)).cloned().collect();
     let base = edge.len();
     let mut all: Vec<RoadSegment> = edge.into_iter().chain(trails).collect();
     street_plan::weld_junctions(&mut all, |r| r.id.starts_with("wild_"));
@@ -236,13 +237,15 @@ pub fn lay(land: &LandParams, water: &Hydrology, roads: &[RoadSegment], lots: &[
 /// with a branch to each lake and ford it doesn't already reach, cheapest
 /// first. A branch that meets one laid before it joins it there.
 fn spurs(grid: &Grid, water: &Hydrology, network: &[RoadSegment], bearings: &[f64], width: f64) -> Vec<RoadSegment> {
+    let frame = grid.land.frame;
+    let rural = frame.rural_edge();
     // Which road owns each cell: the network's vertices, then each spur's.
     let mut owned_by: HashMap<usize, usize> = HashMap::new();
     let mut roads: Vec<Vec<P>> = network.iter().map(|r| r.points.clone()).collect();
     for (k, r) in network.iter().enumerate() {
         // Not from right by the arterials' ends, where a spur would run
         // beside the arterial.
-        for c in grid.vertex_cells(&r.points, RURAL_OUTER_RADIUS + SPUR_FROM).into_keys() {
+        for c in grid.vertex_cells(&r.points, rural + SPUR_FROM).into_keys() {
             owned_by.entry(c).or_insert(k);
         }
     }
@@ -257,7 +260,7 @@ fn spurs(grid: &Grid, water: &Hydrology, network: &[RoadSegment], bearings: &[f6
     // with a trail vertex on its shore already has its trail.
     let mut wanted: Vec<(f64, usize, P, Goal)> = Vec::new();
     for (k, shore) in grid.shores.iter().enumerate() {
-        let near_plain = grid.lakes[k].2.iter().flatten().any(|p| radius(p.0, p.1) < OPEN_GROUND);
+        let near_plain = grid.lakes[k].2.iter().flatten().any(|p| frame.radius(p.0, p.1) < rural + OPEN_GROUND_PAST_RURAL);
         if near_plain || shore.iter().any(|c| owned_by.contains_key(c)) {
             continue;
         }
@@ -274,7 +277,7 @@ fn spurs(grid: &Grid, water: &Hydrology, network: &[RoadSegment], bearings: &[f6
     }
     for ford in &water.fords {
         let at = (ford.x, ford.y);
-        if radius(at.0, at.1) < OPEN_GROUND || near_any(&roads, &[at], FORD_REACH) {
+        if frame.radius(at.0, at.1) < rural + OPEN_GROUND_PAST_RURAL || near_any(&roads, &[at], FORD_REACH) {
             continue;
         }
         let c = grid.cell_of(at);
@@ -287,7 +290,7 @@ fn spurs(grid: &Grid, water: &Hydrology, network: &[RoadSegment], bearings: &[f6
     let mut tops: Vec<Option<usize>> = vec![None; bearings.len()];
     for c in (0..grid.n * grid.n).filter(|&c| forest.cost[c].is_finite() && grid.slope[c] <= TRAIL_SLOPE) {
         let (x, y) = grid.centre(c);
-        let bearing = bearing_deg(x, y);
+        let bearing = bearing_deg(frame.center, x, y);
         for (k, top) in tops.iter_mut().enumerate() {
             let (a, b) = (bearings[k], bearings[(k + 1) % bearings.len()]);
             let span = (b - a).rem_euclid(360.0);
@@ -422,7 +425,9 @@ const NEIGHBOURS: [(i64, i64); 8] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (
 
 impl Grid {
     fn new(land: &LandParams, water: &Hydrology, roads: &[RoadSegment], lots: &[TerrainPlot], starts: &[P]) -> Self {
-        let n = (WORLD_SIZE / CELL).ceil() as usize;
+        let frame = land.frame;
+        let rural = frame.rural_edge();
+        let n = (frame.world_size() / CELL).ceil() as usize;
         let mut grid = Grid {
             n,
             land: land.clone(),
@@ -437,8 +442,8 @@ impl Grid {
         // a cell gentle at its centre can hold a cliff's edge. One height a
         // lattice point is far cheaper than `slope_at` at each of nine.
         let in_ring = |x: f64, y: f64, pad: f64| {
-            let r = radius(x, y);
-            (RURAL_OUTER_RADIUS - CELL - pad..=WILDERNESS_OUTER_RADIUS - EDGE_MARGIN + pad).contains(&r)
+            let r = frame.radius(x, y);
+            (rural - CELL - pad..=frame.world_edge() - EDGE_MARGIN + pad).contains(&r)
         };
         let half = CELL / 2.0;
         let m = 2 * n + 1;
@@ -477,13 +482,13 @@ impl Grid {
         for road in roads {
             for w in road.points.windows(2) {
                 let (a, b) = (w[0], w[1]);
-                if radius(a.0, a.1).max(radius(b.0, b.1)) < RURAL_OUTER_RADIUS - 2.0 * CELL {
+                if frame.radius(a.0, a.1).max(frame.radius(b.0, b.1)) < rural - 2.0 * CELL {
                     continue;
                 }
                 let reach = road.width / 2.0 + ROAD_CLEAR;
                 grid.each_cell((a.0.min(b.0), a.1.min(b.1)), (a.0.max(b.0), a.1.max(b.1)), reach, |g, c| {
                     let (x, y) = g.centre(c);
-                    if radius(x, y) < RURAL_OUTER_RADIUS && point_segment((x, y), a, b) <= reach && !start_cells.contains(&c) {
+                    if frame.radius(x, y) < rural && point_segment((x, y), a, b) <= reach && !start_cells.contains(&c) {
                         g.slope[c] = f64::INFINITY;
                     }
                 });
@@ -491,7 +496,7 @@ impl Grid {
         }
         for lot in lots {
             let c = &lot.corners;
-            if c.iter().all(|p| radius(p.0, p.1) < RURAL_OUTER_RADIUS - 2.0 * CELL) {
+            if c.iter().all(|p| frame.radius(p.0, p.1) < rural - 2.0 * CELL) {
                 continue;
             }
             let min = c.iter().fold((f64::MAX, f64::MAX), |m, p| (m.0.min(p.0), m.1.min(p.1)));
@@ -605,7 +610,7 @@ impl Grid {
     fn vertex_cells(&self, points: &[P], min_r: f64) -> HashMap<usize, P> {
         let mut out = HashMap::new();
         for &p in points {
-            if radius(p.0, p.1) >= min_r {
+            if self.land.frame.radius(p.0, p.1) >= min_r {
                 out.entry(self.cell_of(p)).or_insert(p);
             }
         }
