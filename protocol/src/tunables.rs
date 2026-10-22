@@ -16,6 +16,10 @@
 //! [`crate::rules::market::LISTING_FEE_PERCENT`] and
 //! [`crate::rules::bazaar::RENT_PER_DAY`], a 2% weekly property tax, and 1×
 //! for every multiplier.
+//!
+//! Since D2.5 the watches' thresholds are knobs too ([`WatchThresholds`]):
+//! when the Gini, a price off its target, the tax an hour and the tick's p95
+//! warn (`crate::watch`).
 
 use std::collections::BTreeMap;
 
@@ -27,6 +31,14 @@ use crate::rules::EXCHANGE_FEE_RATE;
 
 /// The weekly property tax by default, as a fraction of the deed (2%)
 pub const PROPERTY_TAX_RATE: f64 = 0.02;
+/// The Gini over which wealth is pooling, by default
+pub const WATCH_GINI: f64 = 0.7;
+/// How far an item's price may stray from its target by default: half
+pub const WATCH_OFF_TARGET: f64 = 0.5;
+/// The property tax an hour under which it isn't biting, by default (#335)
+pub const WATCH_TAX_PER_HOUR: f64 = 1.0;
+/// The tick's p95, in ticks, over which it's over budget, by default: one
+pub const WATCH_TICK_P95: f64 = 1.0;
 
 // ---------------------------------------------------------------------------
 // Fees: what a client quotes
@@ -123,8 +135,10 @@ pub enum Unit {
     Percent,
     /// Whole Strands
     Strands,
-    /// Times its content value: 1.5 is "×1.5"
+    /// Times its content value, or the thing it's measured against: 1.5 is "×1.5"
     Multiplier,
+    /// A plain number, such as a Gini: 0.7 is "0.7"
+    Ratio,
 }
 
 impl Unit {
@@ -135,6 +149,7 @@ impl Unit {
             Unit::Percent => format!("{}%", trim(value)),
             Unit::Strands => format!("{} Strands", trim(value)),
             Unit::Multiplier => format!("×{}", trim(value)),
+            Unit::Ratio => trim(value),
         }
     }
 }
@@ -256,6 +271,50 @@ pub const KNOBS: &[Knob] = &[
         chart: "production",
         family: Some(Family::Resource),
     },
+    Knob {
+        key: "watch_gini",
+        label: "Watch: wealth's Gini over",
+        unit: Unit::Ratio,
+        min: 0.0,
+        max: 1.0,
+        step: 0.01,
+        default: WATCH_GINI,
+        chart: "distribution",
+        family: None,
+    },
+    Knob {
+        key: "watch_off_target",
+        label: "Watch: a price off its target by",
+        unit: Unit::Fraction,
+        min: 0.05,
+        max: 10.0,
+        step: 0.01,
+        default: WATCH_OFF_TARGET,
+        chart: "prices",
+        family: None,
+    },
+    Knob {
+        key: "watch_tax_per_hour",
+        label: "Watch: property tax an hour under",
+        unit: Unit::Strands,
+        min: 0.0,
+        max: 1_000_000.0,
+        step: 1.0,
+        default: WATCH_TAX_PER_HOUR,
+        chart: "sinks",
+        family: None,
+    },
+    Knob {
+        key: "watch_tick_p95",
+        label: "Watch: the tick's p95 over, in ticks",
+        unit: Unit::Multiplier,
+        min: 0.01,
+        max: 10.0,
+        step: 0.01,
+        default: WATCH_TICK_P95,
+        chart: "tick",
+        family: None,
+    },
 ];
 
 impl Knob {
@@ -318,6 +377,8 @@ pub struct Tunables {
     /// Each resource's gather yield, times its content's. One not here is 1.
     #[serde(rename = "yield")]
     pub yields: BTreeMap<String, f64>,
+    /// When the watches warn (D2.5)
+    pub watches: WatchThresholds,
 }
 
 impl Default for Tunables {
@@ -328,6 +389,36 @@ impl Default for Tunables {
             node_regen_rate: 1.0,
             deed_price: BTreeMap::new(),
             yields: BTreeMap::new(),
+            watches: WatchThresholds::default(),
+        }
+    }
+}
+
+/// The thresholds the watches warn at (D2.5, `crate::watch`). Drift has
+/// none: any is too much.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(default)]
+pub struct WatchThresholds {
+    /// Wealth's Gini, over people and citizens, over which it's pooling
+    pub gini: f64,
+    /// How far a game day's price may stray from its target, as a fraction
+    /// of the target either way
+    pub off_target: f64,
+    /// Strands of property tax an hour under which it isn't biting. 0 never
+    /// warns.
+    pub tax_per_hour: f64,
+    /// The tick's p95, in ticks: 1 is its period, the budget
+    pub tick_p95: f64,
+}
+
+impl Default for WatchThresholds {
+    fn default() -> Self {
+        WatchThresholds {
+            gini: WATCH_GINI,
+            off_target: WATCH_OFF_TARGET,
+            tax_per_hour: WATCH_TAX_PER_HOUR,
+            tick_p95: WATCH_TICK_P95,
         }
     }
 }
@@ -367,6 +458,10 @@ impl Tunables {
             ("stall_rent_per_day", None) => self.fees.stall_rent_per_day as f64,
             ("property_tax_rate", None) => self.property_tax_rate,
             ("node_regen_rate", None) => self.node_regen_rate,
+            ("watch_gini", None) => self.watches.gini,
+            ("watch_off_target", None) => self.watches.off_target,
+            ("watch_tax_per_hour", None) => self.watches.tax_per_hour,
+            ("watch_tick_p95", None) => self.watches.tick_p95,
             ("deed_price", Some(zone)) => self.deed_multiplier(zone),
             ("yield", Some(resource)) => self.yield_multiplier(resource),
             _ => return None,
@@ -397,6 +492,10 @@ impl Tunables {
             ("stall_rent_per_day", None) => self.fees.stall_rent_per_day = value as i64,
             ("property_tax_rate", None) => self.property_tax_rate = value,
             ("node_regen_rate", None) => self.node_regen_rate = value,
+            ("watch_gini", None) => self.watches.gini = value,
+            ("watch_off_target", None) => self.watches.off_target = value,
+            ("watch_tax_per_hour", None) => self.watches.tax_per_hour = value,
+            ("watch_tick_p95", None) => self.watches.tick_p95 = value,
             ("deed_price", Some(zone)) => family_map(&mut self.deed_price, zone),
             ("yield", Some(resource)) => family_map(&mut self.yields, resource),
             _ => return Err(TunableError::UnknownKey),
@@ -557,6 +656,9 @@ mod tests {
         assert_eq!(t.set("deed_price.urban", 2.0, anything), Ok(2.0));
         assert_eq!(t.deed_cost("urban", 500), 1000);
         assert_eq!(t.deed_cost("rural", 250), 250);
+        assert_eq!(t.set("watch_gini", 0.55, anything), Ok(0.55));
+        assert_eq!(t.watches.gini, 0.55);
+        assert_eq!(t.set("watch_gini", 0.7, anything), Ok(0.7), "back to its default");
         let overrides = t.overrides();
         assert_eq!(overrides.len(), 4, "{overrides:?}");
         assert_eq!(overrides["yield.grass"], 1.5);
@@ -613,6 +715,7 @@ mod tests {
         assert_eq!(Unit::Percent.format(1.0), "1%");
         assert_eq!(Unit::Strands.format(20.0), "20 Strands");
         assert_eq!(Unit::Multiplier.format(1.5), "×1.5");
+        assert_eq!(Unit::Ratio.format(0.7), "0.7");
     }
 
     #[test]
@@ -622,7 +725,7 @@ mod tests {
         let zones = vec!["urban".to_string(), "rural".to_string()];
         let resources = vec!["clay".to_string(), "grass".to_string()];
         let list = TunablesResponse::list(&t, &zones, &resources);
-        assert_eq!(list.knobs.len(), 5 + 2 + 2);
+        assert_eq!(list.knobs.len(), 9 + 2 + 2);
         let clay = list.knobs.iter().find(|k| k.key == "yield.clay").unwrap();
         assert_eq!((clay.value, clay.default, clay.label.as_str()), (3.0, 1.0, "Gather yield: clay"));
     }

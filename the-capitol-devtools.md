@@ -164,7 +164,7 @@ The first set:
   - each citizen's last few decisions, for the console's drill-down
 
   The town's admin mints a scoped `town` key. The backend keeps the latest report in memory and folds a summary into the next sample.
-- **Watches** are rules in code with thresholds as tunables: drift, Gini, an item off target, tax revenue, tick p95. A rule fires on its edge, not every sample.
+- **Watches** are rules in code with thresholds as tunables: drift, Gini, an item off target, tax revenue, tick p95. A rule fires on its edge, not every sample. *As built (D2.5, #364):* `capitol_protocol::watch`, run by the sampler through `engine::watches`; see D2.5.
 - **`NetStats`** sits in `capitol-core`:
   - RTT from the Ping, with the Pong stamped
   - messages and bytes per type per second, in and out
@@ -216,6 +216,18 @@ The first set:
   - Made and destroyed per item per game hour, stock levels, recipe throughput, and the mean quality out per recipe.
 - **D2.5 Watches.**
   - Rules, thresholds as tunables, warnings as annotations, shown in the console and the overlay.
+  - *As built (#364):*
+    - **The rules.** `capitol_protocol::watch` holds the five rules as pure code. `Watches::observe` takes a `Reading` each sample and returns what fired (`Fired`: the `Watch` and a plain sentence):
+      - **drift:** Strands or units the books don't explain, counted since the server started, so it stays red until a restart. Strands are judged every sample from the window's `reconcile`. Units are judged only from one settled ledger to the next, which a busy town seldom gives (#408).
+      - **gini:** the Gini of people's and citizens' Strands, not admins', with at least 10 accounts. `metrics::gini` is there for D2.2.
+      - **off target:** one watch per item, `Watch { kind, item }`. It fires when the market's VWAP over the last game day (2 h) is further from the item's target than the threshold, either way, once a whole game day has been watched.
+      - **tax revenue:** the mean of the last 3 hourly runs, under a floor, while any deed is held. Revenue is `property_tax` plus `tax_payment`. Each run is told apart by `loops.tax.runs`, and everything collected since the run before is its own, so a run that lands a sample late still counts in full, at any `SIM_TICK_SCALE`.
+      - **tick p95:** the window's p95 bucket over the tick's period times the threshold. Past the last bucket counts as over.
+    - **Firing.** A watch fires on its edge. It clears only after `CLEAR_AFTER` (30) samples back within, five minutes, so a value hovering at its threshold doesn't fire every other sample. A rule with nothing to judge (no ticks, no trades, no tax run yet) leaves its watch as it was.
+    - **The thresholds** are four new knobs: `watch_gini` (0.7, a new `Unit::Ratio`), `watch_off_target` (50%), `watch_tax_per_hour` (1 Strand, which #335's 1 Strand a day trips) and `watch_tick_p95` (×1 of the period). They live in `Tunables::watches` (`WatchThresholds`) and are read each sample, so a change takes on the next. A Gini of 1 or a tax floor of 0 never fires.
+    - **The backend.** `engine::watches::Watcher` runs in the sampler loop. It counts the deeds held, writes each firing as a `watch_fired` annotation through `annotations::note` (so it reaches the stream and `/admin/series`), and logs it as a warning. `Sample::watches` lists the watches firing as each sample was taken, stored ones too, for the console and D5.3's overlay. The `sample.json` fixture has a Gini firing.
+    - **No item has a target yet.** D2.3 (#362) puts `target_price` in the content and hands it to `Watcher::check`, which passes an empty map until then.
+    - **Verified** on a scratch server with 2 s samples. An unaudited balance write fired drift and the Gini once each, and the next 20 samples carried them as firing. Raising `watch_gini` to 0.8 cleared it a minute later, and lowering it to 0.5 fired it again, with each change annotated.
 
 ### D3: Server performance (`dt:D3-perf`)
 - **D3.1 The performance tab.**

@@ -39,6 +39,7 @@ mod tick;
 pub mod tools;
 pub mod tunables;
 pub mod units;
+pub mod watches;
 pub mod trading;
 pub mod zone_sync;
 

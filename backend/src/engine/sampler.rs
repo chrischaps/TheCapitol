@@ -8,7 +8,9 @@
 //! The newest day of them sits in [`Samples`], a ring in `AppState`. One a
 //! minute is written to `metrics_samples`, covering the whole minute since
 //! the one stored before, so the table's samples add up as the ring's do.
-//! Those older than [`KEEP_DAYS`] are pruned each hour.
+//! Those older than [`KEEP_DAYS`] are pruned each hour. Since D2.5 each
+//! sample is put to the watches (`watches::Watcher`) before it goes out, and
+//! says which are firing.
 //!
 //! It runs beside the tick, as a loop of its own (`load::Loop::Sampler`). It
 //! takes the game's lock only to read, twice a sample: the ledger's count of
@@ -101,10 +103,11 @@ pub async fn run_sampler_loop(state: AppState, every: Duration) {
     // whole minute, so the table's samples add up as the ring's do
     let mut minute = last.clone();
     let mut taken: u64 = 0;
+    let mut watcher = super::watches::Watcher::new();
     loop {
         interval.tick().await;
         let timed = Loop::Sampler.timed();
-        let (sample, ledger, admins) = match take(&state, &last).await {
+        let (mut sample, ledger, admins) = match take(&state, &last).await {
             Ok(taken) => taken,
             Err(e) => {
                 // The next window runs from the same start, and is longer
@@ -113,9 +116,13 @@ pub async fn run_sampler_loop(state: AppState, every: Duration) {
             }
         };
         taken += 1;
+        watcher.check(&state, &last, &ledger, &admins, &mut sample).await;
         if taken.is_multiple_of(STORE_EVERY) {
             let stored = match window(&state.db, &minute, &ledger, &admins).await {
-                Ok(stored) => store(&state.db, &Sample { players: sample.players, events: sample.events, ..stored }).await,
+                Ok(stored) => {
+                    let watches = sample.watches.clone();
+                    store(&state.db, &Sample { players: sample.players, events: sample.events, watches, ..stored }).await
+                }
                 Err(e) => Err(e),
             };
             match stored {

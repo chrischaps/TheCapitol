@@ -17,7 +17,7 @@
 //! by the tick's phases and the loops beside it (D0.1), each with its slow
 //! statements (D3.2).
 //! `fixtures/rest/sample.json` is one of the Observatory's samples (D0.2): ten
-//! seconds of a 20-citizen town.
+//! seconds of a 20-citizen town, with its wealth pooling (D2.5).
 //! `fixtures/rest/admin_feed.json` is one of each of the rest of what
 //! `GET /admin/stream` sends (D0.3); the sample is `sample.json`.
 
@@ -31,6 +31,7 @@ use capitol_protocol::rest::{
 };
 use capitol_protocol::ledger::{Ledger, Load, LoadWindow};
 use capitol_protocol::metrics::{Feed, Sample};
+use capitol_protocol::watch::{Watch, WatchKind};
 use capitol_protocol::rules::market::{sort_levels, GradeRule, OrderSide};
 
 fn fixture(name: &str) -> String {
@@ -214,6 +215,7 @@ fn a_sample_round_trips_with_its_window() {
     assert_eq!(sample.strands.total(), 61240 + 412 + 50000 + 1836);
     assert_eq!(sample.market["log"].vwap(), Some(36.0 / 7.0));
     assert_eq!(sample.players.people + sample.players.citizens, sample.load.players_in_world);
+    assert_eq!(sample.watches, [Watch::of(WatchKind::Gini)]);
     assert_eq!(serde_json::to_string(&sample).unwrap(), json);
 }
 
@@ -235,6 +237,8 @@ fn a_sample_stored_before_the_lag_counts_still_reads() {
     let json = fixture("sample.json");
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
     value["load"].as_object_mut().unwrap().remove("events_lagged");
+    value.as_object_mut().unwrap().remove("watches");
     let old: Sample = serde_json::from_value(value).unwrap();
     assert!(old.load.events_lagged.is_empty());
+    assert!(old.watches.is_empty(), "a sample from before the watches");
 }

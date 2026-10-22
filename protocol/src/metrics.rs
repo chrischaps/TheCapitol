@@ -14,6 +14,9 @@
 //! Since D0.3, `GET /admin/stream` sends each sample live as a [`Feed`], with
 //! the annotations and the game's fills, deeds, Gazettes and warnings, and
 //! `GET /admin/series` serves them back as a [`Series`].
+//!
+//! Since D2.5 each sample says which watches were firing as it was taken
+//! (`crate::watch`).
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -23,6 +26,7 @@ use uuid::Uuid;
 use crate::annotation::Annotation;
 use crate::ledger::{Ledger, LoadWindow};
 use crate::rest::MarketTrade;
+use crate::watch::Watch;
 
 /// Seconds between samples
 pub const SAMPLE_SECS: u64 = 10;
@@ -65,6 +69,10 @@ pub struct Sample {
     pub bazaar: BTreeMap<String, Trades>,
     pub players: Players,
     pub events: EventBus,
+    /// The watches firing as it was taken (D2.5); a sample stored before
+    /// them reads with none
+    #[serde(default)]
+    pub watches: Vec<Watch>,
 }
 
 /// Strands by who holds them.
@@ -183,8 +191,25 @@ impl Sample {
             bazaar: BTreeMap::new(),
             players: Players::default(),
             events: EventBus::default(),
+            watches: Vec::new(),
         }
     }
+}
+
+/// The Gini of `balances`: 0 when everyone holds the same, towards 1 as one
+/// holds it all. A debt counts as nothing. `None` for fewer than two, or
+/// when nobody holds anything.
+pub fn gini(balances: &[i64]) -> Option<f64> {
+    let mut held: Vec<i64> = balances.iter().map(|b| (*b).max(0)).collect();
+    let total: i64 = held.iter().sum();
+    if held.len() < 2 || total == 0 {
+        return None;
+    }
+    held.sort_unstable();
+    let n = held.len() as f64;
+    // Σ (2i - n - 1) xᵢ over n Σx, with i from 1 in rising order
+    let weighted: f64 = held.iter().enumerate().map(|(i, x)| (2.0 * (i as f64 + 1.0) - n - 1.0) * *x as f64).sum();
+    Some(weighted / (n * total as f64))
 }
 
 /// A run of samples' flows added up.
@@ -410,6 +435,18 @@ mod tests {
     fn vwap_is_strands_over_units() {
         assert_eq!(Trades { trades: 2, units: 4, strands: 22 }.vwap(), Some(5.5));
         assert_eq!(Trades::default().vwap(), None);
+    }
+
+    #[test]
+    fn the_gini_runs_from_even_to_one_holding_all() {
+        assert_eq!(gini(&[50, 50, 50, 50]), Some(0.0));
+        assert_eq!(gini(&[0, 0, 0, 100]), Some(0.75));
+        // The order doesn't matter, and a debt is nothing
+        assert_eq!(gini(&[100, -40, 0, 0]), Some(0.75));
+        let g = gini(&[1, 2, 3, 4]).unwrap();
+        assert!((g - 0.25).abs() < 1e-12, "{g}");
+        assert_eq!(gini(&[100]), None);
+        assert_eq!(gini(&[0, 0]), None);
     }
 
     #[test]

@@ -18,6 +18,8 @@
 //!   Observatory's D0.4)
 //! - [`tunables`]: the economy's live knobs, and the [`tunables::Fees`] a
 //!   client quotes (D6.1)
+//! - [`watch`]: the rules that warn when the books drift, wealth pools, a
+//!   price strays, the tax doesn't bite or the tick runs over (D2.5)
 //!
 //! The `backend` feature adds the server-only derives (utoipa schemas, sqlx rows).
 //! Clients leave it off.
@@ -31,4 +33,5 @@ pub mod rest;
 pub mod rules;
 pub mod terrain;
 pub mod tunables;
+pub mod watch;
 pub mod ws;
