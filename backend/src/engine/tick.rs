@@ -373,6 +373,7 @@ impl GameState {
 
     fn process_commands(&mut self) {
         let commands: Vec<Command> = std::mem::take(&mut self.command_queue);
+        super::load::commands_taken(commands.len());
 
         for command in commands {
             match command {

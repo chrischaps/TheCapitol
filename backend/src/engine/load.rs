@@ -6,13 +6,15 @@
 //! Since D0.1 the tick's time is also kept by [`Phase`], and the loops
 //! beside it by [`Loop`], each with a histogram like the tick's. Since D3.2
 //! each also counts its slow statements ([`slow_statement`]), and since D0.3
-//! each reader of the event bus counts the events it missed ([`Receiver`]).
+//! each reader of the event bus counts the events it missed ([`Receiver`]),
+//! and since D3.1 each tick counts the commands waiting for it
+//! ([`commands_taken`]).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use capitol_protocol::ledger::{Load, PhaseLoad, TICK_BUCKETS_MS};
+use capitol_protocol::ledger::{Load, PhaseLoad, COMMAND_BUCKETS, TICK_BUCKETS_MS};
 
 /// Running totals of something timed: how often, how long, the slowest,
 /// and a histogram over [`TICK_BUCKETS_MS`].
@@ -68,6 +70,10 @@ static SOCKET_RESYNCS: AtomicU64 = AtomicU64::new(0);
 
 static LAGGED: [AtomicU64; Receiver::ALL.len()] = [const { AtomicU64::new(0) }; Receiver::ALL.len()];
 
+static COMMANDS: AtomicU64 = AtomicU64::new(0);
+static COMMAND_DEPTHS: [AtomicU64; COMMAND_BUCKETS.len() + 1] = [const { AtomicU64::new(0) }; COMMAND_BUCKETS.len() + 1];
+static COMMAND_QUEUE_MAX: AtomicU64 = AtomicU64::new(0);
+
 static SLOW_ELSEWHERE: AtomicU64 = AtomicU64::new(0);
 /// `SLOW_STATEMENT_MS`, as the pool was told it, in µs
 static SLOW_THRESHOLD_MICROS: AtomicU64 = AtomicU64::new(0);
@@ -76,6 +82,15 @@ static SLOW_THRESHOLD_MICROS: AtomicU64 = AtomicU64::new(0);
 /// not the wait for the next.
 pub fn tick_took(took: Duration) {
     TICK.took(took);
+}
+
+/// A tick took up the command queue, and `n` commands were waiting (D3.1).
+pub fn commands_taken(n: usize) {
+    let n = n as u64;
+    COMMANDS.fetch_add(n, Ordering::Relaxed);
+    COMMAND_QUEUE_MAX.fetch_max(n, Ordering::Relaxed);
+    let bucket = COMMAND_BUCKETS.iter().position(|bound| n as f64 <= *bound).unwrap_or(COMMAND_BUCKETS.len());
+    COMMAND_DEPTHS[bucket].fetch_add(1, Ordering::Relaxed);
 }
 
 /// A part of the tick's work (D0.1). Between them they cover all of it, so
@@ -400,6 +415,9 @@ pub fn read(tick_period: Duration) -> Load {
             .iter()
             .map(|r| (r.as_str().to_string(), LAGGED[r.index()].load(Ordering::Relaxed)))
             .collect(),
+        commands: COMMANDS.load(Ordering::Relaxed),
+        command_buckets: COMMAND_DEPTHS.iter().map(|b| b.load(Ordering::Relaxed)).collect(),
+        command_queue_max: COMMAND_QUEUE_MAX.load(Ordering::Relaxed),
         ..Load::default()
     }
 }
@@ -422,6 +440,8 @@ mod tests {
         }
         Receiver::AdminStream.lagged(3);
         let _never_signed_in = Socket::opened();
+        commands_taken(0);
+        commands_taken(7);
         let after = read(Duration::from_millis(100));
         assert!(after.ticks >= before.ticks + 2);
         assert!(after.tick_max_ms >= 2000.0);
@@ -434,6 +454,11 @@ mod tests {
         assert_eq!(after.events_lagged.len(), 3);
         assert!(after.sockets_opened >= before.sockets_opened + 2);
         assert_eq!(after.tick_period_ms, 100.0);
+        assert!(after.commands >= before.commands + 7);
+        assert!(after.command_queue_max >= 7);
+        // None waiting is the first bucket; 7 is under the 10 bound
+        assert!(after.command_buckets[0] > before.command_buckets[0]);
+        assert!(after.command_buckets[4] > before.command_buckets[4]);
     }
 
     #[test]

@@ -254,12 +254,13 @@
   }
 
   // The fields each set of charts reads: the tick's `load` is most of a
-  // sample, so it's read only for the performance tab (#411), and the
-  // money's flows and trades, and the wealth by trade, only for the economy
-  // tab, and the units and crafts too (D2.4)
+  // sample, so it's read only for the performance tab (#411), with the event
+  // bus's backlog beside it (D3.1), and the money's flows and trades, and the
+  // wealth by trade, only for the economy tab, and the units and crafts too
+  // (D2.4)
   const FIELDS = {
     base: "players,strands,drift",
-    load: "load",
+    load: "load,events",
     money: "strand_flows,new_accounts,market,bazaar,distribution,books",
     making: "units,unit_flows,crafts",
   };
@@ -592,6 +593,7 @@
       series: [
         { label: "Mean", color: "--s1", value: (s) => s.load.tick_mean_ms },
         { label: "p95", color: "--s2", value: (s) => s.load.tick_p95_ms },
+        { label: "p99", color: "--s3", value: (s) => s.load.tick_p99_ms },
         { label: "Budget", color: "--budget", width: 1, dash: [5, 4], value: (s) => s.load.tick_period_ms },
       ],
     }),
@@ -623,7 +625,75 @@
     legend: (v) => `${v > 0 ? "+" : ""}${count(v)}`,
     series: () => making.lines.map((l) => ({ key: l.key, label: l.label, color: l.color, bars: true })).reverse(),
   });
-  const PAGE_CHARTS = { overview: ["players"], economy: ["strands", "flows", "escrow", "velocity", "spread", "prices", "making"], performance: ["tick"] };
+  // The tick's work (D3.1): each phase's mean ms a tick, stacked in bars
+  CHARTS.phases = () => lineChart($("chart-phases"), {
+    rows: () => perf.rows,
+    axis: (v) => `${Number(v.toPrecision(2))} ms`,
+    legend: ms,
+    // Drawn outermost first, so each bar's inner phases paint over it
+    series: () => perf.lines.map((l) => ({ key: l.key, label: l.label, color: l.color, bars: true })).reverse(),
+  });
+  CHARTS.over = () => lineChart($("chart-over"), {
+    rows: () => perf.over,
+    height: 160,
+    axis: count,
+    legend: (v) => plural(v, "tick", "ticks"),
+    series: [{ key: "over", label: "Over budget", color: "--down", bars: true }],
+  });
+  CHARTS.commands = () => lineChart($("chart-commands"), {
+    has: (s) => s.load?.ticks > 0 && s.load.command_queue_p99 !== undefined,
+    height: 160,
+    axis: (v) => Number(v.toPrecision(2)).toString(),
+    legend: (v) => `${Number(v.toFixed(2))} commands`,
+    series: [
+      { label: "A tick", color: "--s1", value: (s) => s.load.commands / s.load.ticks },
+      { label: "p99", color: "--s2", value: (s) => s.load.command_queue_p99 },
+    ],
+  });
+  CHARTS.bus = () => lineChart($("chart-bus"), {
+    has: (s) => s.load && s.events,
+    height: 160,
+    axis: count,
+    legend: (v) => plural(v, "event", "events"),
+    series: [
+      { label: "Backlog", color: "--s2", value: (s) => s.events.queued },
+      { label: "Missed", color: "--down", value: (s) => missed(s.load) },
+      { label: "Resyncs", color: "--s3", legend: (v) => plural(v, "socket", "sockets"), value: (s) => s.load.socket_resyncs },
+    ],
+  });
+  CHARTS.sockets = () => lineChart($("chart-sockets"), {
+    has: (s) => s.load,
+    height: 160,
+    axis: count,
+    legend: count,
+    series: [
+      { label: "Open", color: "--s1", width: 2, value: (s) => s.load.sockets_open },
+      { label: "Opened", color: "--s2", value: (s) => s.load.sockets_opened },
+      { label: "Dropped", color: "--down", value: (s) => s.load.sockets_dropped },
+    ],
+  });
+  CHARTS.pool = () => lineChart($("chart-pool"), {
+    has: (s) => s.load?.db_pool_size > 0,
+    height: 160,
+    axis: count,
+    legend: (v) => plural(v, "connection", "connections"),
+    series: [
+      { label: "In use", color: "--s2", width: 2, value: (s) => s.load.db_pool_size - s.load.db_pool_idle },
+      { label: "Pool", color: "--budget", width: 1, dash: [5, 4], value: (s) => s.load.db_pool_size },
+    ],
+  });
+  CHARTS.txns = () => lineChart($("chart-txns"), {
+    has: (s) => s.load,
+    height: 160,
+    axis: short,
+    legend: (v) => `${nf.format(Math.round(v))} a second`,
+    series: [{ label: "Transactions", color: "--s1", value: (s) => s.load.db_transactions_per_sec }],
+  });
+  const PAGE_CHARTS = {
+    overview: ["players"],
+    economy: ["strands", "flows", "escrow", "velocity", "spread", "prices", "making"],
+    performance: ["tick", "phases", "over", "commands", "bus", "sockets", "pool", "txns"],
+  };
 
   function chart(name) {
     state.charts[name] ??= CHARTS[name]();
@@ -1605,21 +1675,264 @@
   }
 
 
+  // Performance (D3.1): the tick and its phases, the loops beside it, the
+  // queues, the sockets and the database
+
+  // What each phase is, in words, and its colour, and what each loop is.
+  // Positions, tax and subscriptions are both: the phase starts what the loop
+  // does. One the page doesn't know is still drawn, by its own name
+  const WORK = {
+    lock: { say: "waiting for the game's lock", color: "--fl-deeds" },
+    commands: { say: "players' commands", color: "--s3" },
+    movement: { say: "movement", color: "--s2" },
+    extraction: { say: "gathering", color: "--fl-deposits" },
+    crafting: { say: "crafting", color: "--fl-fees" },
+    regeneration: { say: "regrowing nodes", color: "--fl-refunds" },
+    trades: { say: "expiring trade requests", color: "--fl-newcomers" },
+    broadcast: { say: "broadcasting positions", color: "--s1" },
+    writes: { say: "handing saves to the writer", color: "--fl-rent" },
+    positions: { say: "reading positions to save", color: "--fl-tax" },
+    tax: { say: "starting the property tax", color: "--fl-withdrawals" },
+    subscriptions: { say: "starting subscriptions' lapse", color: "--fl-other" },
+  };
+  const LOOPS = {
+    automation: { say: "stations' automation", color: "--fl-fees" },
+    market: { say: "the market's matching", color: "--s3" },
+    bazaar: { say: "the bazaar's sweep", color: "--fl-rent" },
+    writer: { say: "the writer's saves of gathers and crafts", color: "--s2" },
+    positions: { say: "the position save", color: "--fl-tax" },
+    tax: { say: "the property tax", color: "--fl-withdrawals" },
+    subscriptions: { say: "subscriptions' lapse", color: "--fl-other" },
+    sampler: { say: "the Observatory's sampler", color: "--s1" },
+  };
+  // The bars each have a phase of their own up to here; the rest share one
+  const PHASE_LINES = 6;
+
+  let perf = { lines: [], key: "", rows: null, over: null };
+
+  /** Events every reader of the bus missed over a sample's window */
+  const missed = (l) => Object.values(l.events_lagged ?? {}).reduce((a, n) => a + n, 0);
+  /** A percentile's bucket bound: null is past the last of them */
+  const bound = (v) => (v == null || v === Infinity ? `over ${ms(1000)}` : ms(v));
+  const say = (name, words = WORK) => words[name]?.say ?? item(name);
+
+  /** The range's samples with a load, in bins: ticks, ticks over, and each phase's time */
+  function binLoad(shown) {
+    const binMs = BIN_MINUTES[state.hours] * 60_000;
+    const first = Math.floor(rangeFrom() / binMs) * binMs;
+    const bins = Array.from({ length: Math.ceil((Date.now() - first) / binMs) }, (_, k) => ({ at: first + k * binMs, ticks: 0, over: 0, secs: {} }));
+    for (const s of shown) {
+      const b = bins[Math.floor((s.at_ms - first) / binMs)];
+      if (!b) continue;
+      b.ticks += s.load.ticks;
+      b.over += s.load.ticks_over ?? 0;
+      for (const [name, p] of Object.entries(s.load.phases ?? {})) b.secs[name] = (b.secs[name] ?? 0) + p.secs;
+    }
+    return { binMs, bins };
+  }
+
+  /** Each phase or loop over the range: its runs, time, slow statements, and the worst sample's p95 */
+  function workOver(shown, part) {
+    const out = new Map();
+    for (const s of shown) {
+      for (const [name, p] of Object.entries(s.load[part] ?? {})) {
+        const w = out.get(name) ?? { name, runs: 0, secs: 0, p95: null, slow: 0 };
+        w.runs += p.runs;
+        w.secs += p.secs;
+        w.slow += p.slow_statements ?? 0;
+        // A p95 past the last bucket is null though it ran: the worst of all
+        if (p.runs > 0) w.p95 = p.p95_ms == null || w.p95 === Infinity ? Infinity : Math.max(w.p95 ?? 0, p.p95_ms);
+        out.set(name, w);
+      }
+    }
+    return [...out.values()];
+  }
+
   async function performance() {
     if (state.covered.load > rangeFrom()) {
       $("tick-headline").textContent = "Reading the tick's history.";
       try { await readSeries("load"); } catch (e) { if (e instanceof SignedOut) return; console.warn(e); }
     }
     chart("tick");
-    const s = latest((s) => s.load);
-    if (!s) return void ($("tick-headline").textContent = "Waiting for the first sample.");
-    const l = s.load;
-    let line = l.ticks === 0
+    const shown = inRange((s) => s.load);
+    if (!shown.length) {
+      for (const id of ["tick", "phases", "over", "queues", "sockets", "db"]) $(`${id}-headline`).textContent = "Waiting for the first sample.";
+      return;
+    }
+    const l = shown.at(-1).load;
+    $("tick-headline").textContent = l.ticks === 0
       ? "No tick ran in the last ten seconds."
-      : `The tick takes ${ms(l.tick_mean_ms)} on average and ${ms(l.tick_p95_ms)} at p95, of its ${ms(l.tick_period_ms)}.`;
-    const over = inRange((s) => s.load).reduce((n, s) => n + (s.load.ticks_over ?? 0), 0);
-    line += over === 0 ? ` None ran over in ${window_()}.` : ` ${plural(over, "tick", "ticks")} ran over in ${window_()}.`;
-    $("tick-headline").textContent = line;
+      : `The tick takes ${ms(l.tick_mean_ms)} on average, ${bound(l.tick_p95_ms)} at p95 and ${bound(l.tick_p99_ms)} at p99, of its ${ms(l.tick_period_ms)}.`;
+    phases(shown);
+    over(shown);
+    for (const name of ["commands", "bus", "sockets", "pool", "txns"]) chart(name);
+    queuesHeadline(shown);
+    socketsHeadline(shown);
+    dbHeadline(shown);
+  }
+
+  function phases(shown) {
+    const { binMs, bins } = binLoad(shown);
+    const ticks = shown.reduce((a, s) => a + s.load.ticks, 0);
+    const work = workOver(shown, "phases").filter((w) => w.secs > 0).sort((a, b) => b.secs - a.secs);
+    const tickSecs = work.reduce((a, w) => a + w.secs, 0);
+
+    // The biggest phases each have a bar; the rest share one
+    const own = work.slice(0, work.length > PHASE_LINES ? PHASE_LINES - 1 : PHASE_LINES);
+    const rest = work.slice(own.length);
+    const lines = [
+      ...own.map((w) => ({ key: w.name, label: capital(w.name), color: WORK[w.name]?.color ?? "--fl-other", names: [w.name] })),
+      ...(rest.length ? [{ key: "rest", label: "Everything else", color: "--fl-other", names: rest.map((w) => w.name) }] : []),
+    ];
+    // Each bar stacks up from zero, so each phase is drawn to its running
+    // total, and the legend gives its own
+    const values = {};
+    const ownValues = {};
+    for (const line of lines) { values[line.key] = []; ownValues[line.key] = []; }
+    for (const b of bins) {
+      let up = 0;
+      for (const line of lines) {
+        const v = b.ticks ? (line.names.reduce((a, n) => a + (b.secs[n] ?? 0), 0) * 1000) / b.ticks : null;
+        ownValues[line.key].push(v);
+        values[line.key].push(v ? (up += v) : null);
+      }
+    }
+    const x = bins.map((b) => (b.at + binMs / 2) / 1000);
+    const key = lines.map((line) => line.key).join();
+    const rebuild = key !== perf.key;
+    perf = {
+      lines,
+      key,
+      rows: { x, shown, values, own: ownValues },
+      over: { x, shown, values: { over: bins.map((b) => (b.ticks ? b.over || null : null)) }, own: { over: bins.map((b) => (b.ticks ? b.over : null)) } },
+    };
+    if (rebuild) state.charts.phases?.rebuild();
+    chart("phases");
+
+    const loops = workOver(shown, "loops").filter((w) => w.runs > 0).sort((a, b) => b.secs - a.secs);
+    const rangeSecs = shown.reduce((a, s) => a + s.since_ms, 0) / 1000;
+    workTable(work, tickSecs, loops, rangeSecs);
+
+    const h = $("phases-headline");
+    if (!ticks || !tickSecs) return void (h.textContent = `No tick ran ${since(shown[0])}.`);
+    const top = work[0];
+    let line = `${capital(since(shown[0]))} a tick took ${ms((tickSecs * 1000) / ticks)} on average, and ${say(top.name)} took the most of it: ${ms((top.secs * 1000) / ticks)}, ${Math.round((100 * top.secs) / tickSecs)}%.`;
+    const busiest = loops[0];
+    if (busiest && rangeSecs > 0) {
+      const busy = busiest.secs / rangeSecs;
+      line += ` Beside the tick, the busiest is ${say(busiest.name, LOOPS)}: ${busy < 0.01 ? "under 1%" : `${Math.round(busy * 100)}%`} of the time, at ${ms((busiest.secs * 1000) / busiest.runs)} a run.`;
+    }
+    const slow = [
+      ...work.map((w) => ({ ...w, words: say(w.name) })),
+      ...loops.map((w) => ({ ...w, words: say(w.name, LOOPS) })),
+    ].filter((w) => w.slow > 0).sort((a, b) => b.slow - a.slow);
+    if (slow.length) line += ` Slow statements: ${andList(slow.slice(0, 3).map((w) => `${nf.format(w.slow)} in ${w.words}`))}.`;
+    h.textContent = line;
+  }
+
+  /** Every phase and loop: its runs, mean, worst p95, share and slow statements */
+  function workTable(phases, tickSecs, loops, rangeSecs) {
+    const group = (title, n) => {
+      const tr = document.createElement("tr");
+      tr.className = "group";
+      const th = document.createElement("th");
+      th.colSpan = 6;
+      th.textContent = n ? title : `${title}: nothing ran`;
+      tr.append(th);
+      return tr;
+    };
+    const row = (w, whole, words) => {
+      const tr = document.createElement("tr");
+      const share = whole > 0 ? w.secs / whole : 0;
+      const bar = document.createElement("span");
+      bar.className = "share-bar";
+      bar.style.width = `max(1px, ${Math.min(100, share * 100)}%)`;
+      bar.style.background = `var(${words[w.name]?.color ?? "--fl-other"})`;
+      tr.title = capital(say(w.name, words));
+      tr.append(
+        cell(capital(item(w.name))),
+        cell(nf.format(w.runs), "num dim"),
+        cell(ms(w.runs ? (w.secs * 1000) / w.runs : null), "num now"),
+        cell(w.p95 == null ? "–" : bound(w.p95), "num dim"),
+        cell([bar, share < 0.005 ? "<1%" : `${Math.round(share * 100)}%`], "num share"),
+        cell(w.slow ? nf.format(w.slow) : "–", `num ${w.slow ? "down" : "dim"}`),
+      );
+      return tr;
+    };
+    $("work").tBodies[0].replaceChildren(
+      group("In the tick", phases.length),
+      ...phases.map((w) => row(w, tickSecs, WORK)),
+      group("Beside it", loops.length),
+      ...loops.map((w) => row(w, rangeSecs, LOOPS)),
+    );
+  }
+
+  function over(shown) {
+    chart("over");
+    const ticks = shown.reduce((a, s) => a + s.load.ticks, 0);
+    const n = shown.reduce((a, s) => a + (s.load.ticks_over ?? 0), 0);
+    const period = shown.at(-1).load.tick_period_ms;
+    const h = $("over-headline");
+    if (!ticks) return void (h.textContent = `No tick ran ${since(shown[0])}.`);
+    if (n === 0) return void (h.textContent = `None of ${plural(ticks, "tick", "ticks")} ran over its ${ms(period)} ${since(shown[0])}.`);
+    const worst = shown.reduce((a, s) => ((s.load.ticks_over ?? 0) > (a.load.ticks_over ?? 0) ? s : a));
+    const share = (100 * n) / ticks;
+    h.textContent = `${capital(plural(n, "tick", "ticks"))} of ${nf.format(ticks)} ran over ${ms(period)} ${since(shown[0])}, ${share < 1 ? "under 1%" : `${Math.round(share)}%`}. The most in ten seconds was ${nf.format(worst.load.ticks_over)}, at ${clock(worst.at_ms)}.`;
+  }
+
+  const READERS = { sockets: "the sockets", admin_tap: "the Observatory's tap", admin_stream: "admin streams" };
+
+  function queuesHeadline(shown) {
+    const counted = shown.filter((s) => s.load.command_queue_p99 !== undefined);
+    const ticks = counted.reduce((a, s) => a + s.load.ticks, 0);
+    const commands = counted.reduce((a, s) => a + s.load.commands, 0);
+    let line;
+    if (!counted.length) line = "This server doesn't count its commands.";
+    else if (!ticks) line = "No tick took up the queue.";
+    else if (commands === 0) line = `No command came in ${since(counted[0])}.`;
+    else {
+      const deepest = counted.some((s) => s.load.ticks > 0 && s.load.command_queue_p99 == null)
+        ? `over ${nf.format(1000)}`
+        : nf.format(Math.max(...counted.map((s) => s.load.command_queue_p99 ?? 0)));
+      line = `${capital(plural(commands, "command", "commands"))} came in ${since(counted[0])}, ${Number((commands / ticks).toFixed(2))} a tick, and at the 99th percentile no more than ${deepest} waited for one.`;
+    }
+    const lost = shown.reduce((a, s) => a + missed(s.load), 0);
+    const resyncs = shown.reduce((a, s) => a + s.load.socket_resyncs, 0);
+    const bus = latest((s) => s.events)?.events;
+    if (lost === 0) {
+      line += " No reader fell behind the event bus";
+      line += bus ? `, and its backlog is ${plural(bus.queued, "event", "events")} of ${nf.format(bus.capacity)}.` : ".";
+    } else {
+      const by = {};
+      for (const s of shown) for (const [r, n] of Object.entries(s.load.events_lagged ?? {})) by[r] = (by[r] ?? 0) + n;
+      const who = Object.entries(by).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]).map(([r, n]) => `${READERS[r] ?? item(r)} ${nf.format(n)}`);
+      line += ` Readers missed ${plural(lost, "event", "events")} on the bus, ${andList(who)}`;
+      line += resyncs ? `, and ${plural(resyncs, "socket", "sockets")} resynced.` : ".";
+    }
+    $("queues-headline").textContent = line;
+  }
+
+  function socketsHeadline(shown) {
+    const l = shown.at(-1).load;
+    const opened = shown.reduce((a, s) => a + s.load.sockets_opened, 0);
+    const dropped = shown.reduce((a, s) => a + s.load.sockets_dropped, 0);
+    let line = `${capital(plural(l.sockets_open, "socket is", "sockets are"))} open, for ${plural(l.players_in_world, "avatar", "avatars")} in the world.`;
+    line += ` ${capital(plural(opened, "socket", "sockets"))} opened ${since(shown[0])}`;
+    line += dropped === 0 ? ", and none dropped." : `, and ${nf.format(dropped)} dropped, gone without a word or unwritable.`;
+    $("sockets-headline").textContent = line;
+  }
+
+  function dbHeadline(shown) {
+    const l = shown.at(-1).load;
+    const used = l.db_pool_size - l.db_pool_idle;
+    const peak = Math.max(...shown.map((s) => s.load.db_pool_size - s.load.db_pool_idle));
+    const full = shown.filter((s) => s.load.db_pool_size > 0 && s.load.db_pool_idle === 0).length;
+    const secs = shown.reduce((a, s) => a + s.since_ms / 1000, 0);
+    const tps = shown.reduce((a, s) => a + s.load.db_transactions_per_sec * (s.since_ms / 1000), 0) / Math.max(1, secs);
+    let line = `${capital(plural(used, "connection", "connections"))} of the pool's ${nf.format(l.db_pool_size)} ${used === 1 ? "is" : "are"} in use, and at most ${nf.format(peak)} ${since(shown[0])}`;
+    line += full ? `; it was full in ${plural(full, "sample", "samples")}.` : ".";
+    line += ` The database runs ${nf.format(Math.round(tps))} transactions a second on average, ${nf.format(Math.round(l.db_transactions_per_sec))} in the last ten seconds.`;
+    $("db-headline").textContent = line;
   }
 
   let roster = null;

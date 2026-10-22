@@ -26,6 +26,10 @@ pub const STARTING_STRANDS: i64 = 100;
 /// tick. A last bucket past them holds the slower ticks.
 pub const TICK_BUCKETS_MS: [f64; 10] = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 250.0, 1000.0];
 
+/// The upper bounds of [`Load::command_buckets`]: commands waiting when a
+/// tick took them up (D3.1). A last bucket past them holds the deeper queues.
+pub const COMMAND_BUCKETS: [f64; 10] = [0.0, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 250.0, 1000.0];
+
 /// `GET /admin/ledger`: the world's books at one moment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
@@ -164,6 +168,17 @@ pub struct Load {
     /// `admin_tap` and `admin_stream` (D0.3). Empty from a server before it.
     #[serde(default)]
     pub events_lagged: BTreeMap<String, u64>,
+    /// Commands the ticks took up from the queue (D3.1)
+    #[serde(default)]
+    pub commands: u64,
+    /// Ticks by how many commands were waiting for them, under
+    /// [`COMMAND_BUCKETS`], and one more for deeper queues. Empty from a
+    /// server before D3.1.
+    #[serde(default)]
+    pub command_buckets: Vec<u64>,
+    /// The deepest the queue has been when a tick took it up
+    #[serde(default)]
+    pub command_queue_max: u64,
 }
 
 /// One phase of the tick, or one loop beside it, as running totals.
@@ -514,6 +529,15 @@ pub struct LoadWindow {
     /// before it reads with none
     #[serde(default)]
     pub events_lagged: BTreeMap<String, u64>,
+    /// Commands the ticks took up over the window (D3.1); a sample stored
+    /// before it reads with none
+    #[serde(default)]
+    pub commands: u64,
+    /// The bound of the [`COMMAND_BUCKETS`] the 99th percentile of the
+    /// queue's depth falls under, a tick at a time; `None` past the last,
+    /// or with no ticks or no buckets
+    #[serde(default)]
+    pub command_queue_p99: Option<f64>,
 }
 
 /// One phase, or one loop, between two loads.
@@ -540,7 +564,7 @@ impl PhaseWindow {
             runs,
             secs,
             mean_ms: if runs > 0 { secs * 1000.0 / runs as f64 } else { 0.0 },
-            p95_ms: percentile(&buckets, runs, 0.95),
+            p95_ms: percentile(&TICK_BUCKETS_MS, &buckets, runs, 0.95),
             slow_statements: b.slow_statements.saturating_sub(a.map_or(0, |a| a.slow_statements)),
         }
     }
@@ -554,15 +578,15 @@ fn since(a: &[u64], b: &[u64]) -> Vec<u64> {
         .collect()
 }
 
-/// The bound of the bucket the `q`th of `runs` falls under; `None` past the
-/// last.
-fn percentile(buckets: &[u64], runs: u64, q: f64) -> Option<f64> {
+/// The bound in `bounds` of the bucket the `q`th of `runs` falls under;
+/// `None` past the last.
+fn percentile(bounds: &[f64], buckets: &[u64], runs: u64, q: f64) -> Option<f64> {
     let rank = ((runs as f64 * q).ceil() as u64).max(1);
     let mut seen = 0;
     for (i, n) in buckets.iter().enumerate() {
         seen += n;
         if seen >= rank {
-            return TICK_BUCKETS_MS.get(i).copied();
+            return bounds.get(i).copied();
         }
     }
     None
@@ -576,7 +600,10 @@ impl LoadWindow {
     pub fn between(a: &Load, b: &Load, secs: f64) -> LoadWindow {
         let ticks = b.ticks.saturating_sub(a.ticks);
         let buckets = since(&a.tick_buckets, &b.tick_buckets);
-        let percentile = |q: f64| percentile(&buckets, ticks, q);
+        let tick_percentile = |q: f64| percentile(&TICK_BUCKETS_MS, &buckets, ticks, q);
+        // Every tick takes the queue up once, so the depths count ticks
+        let depths = since(&a.command_buckets, &b.command_buckets);
+        let depth_runs: u64 = depths.iter().sum();
         // The buckets wholly over the period: those whose lower bound is at
         // or past it. One the period falls inside isn't counted.
         let ticks_over = TICK_BUCKETS_MS
@@ -589,9 +616,9 @@ impl LoadWindow {
             ticks,
             tick_period_ms: b.tick_period_ms,
             tick_mean_ms: if ticks > 0 { (b.tick_secs - a.tick_secs) * 1000.0 / ticks as f64 } else { 0.0 },
-            tick_p50_ms: percentile(0.5),
-            tick_p95_ms: percentile(0.95),
-            tick_p99_ms: percentile(0.99),
+            tick_p50_ms: tick_percentile(0.5),
+            tick_p95_ms: tick_percentile(0.95),
+            tick_p99_ms: tick_percentile(0.99),
             ticks_over,
             sockets_open: b.sockets_open,
             sockets_opened: b.sockets_opened.saturating_sub(a.sockets_opened),
@@ -609,6 +636,8 @@ impl LoadWindow {
                 .iter()
                 .map(|(receiver, n)| (receiver.clone(), n.saturating_sub(a.events_lagged.get(receiver).copied().unwrap_or(0))))
                 .collect(),
+            commands: b.commands.saturating_sub(a.commands),
+            command_queue_p99: if depth_runs > 0 { percentile(&COMMAND_BUCKETS, &depths, depth_runs, 0.99) } else { None },
         }
     }
 }
@@ -796,5 +825,20 @@ mod tests {
         assert_eq!(w.ticks_over, 2, "the 20 ms tick and the slow one");
         assert_eq!(w.sockets_dropped, 1);
         assert!((w.db_transactions_per_sec - 10.0).abs() < 1e-9);
+        assert_eq!((w.commands, w.command_queue_p99), (0, None), "a server before D3.1 has no queue to read");
+    }
+
+    #[test]
+    fn a_load_window_reads_the_command_queue_from_its_buckets() {
+        let a = Load { command_buckets: vec![0; COMMAND_BUCKETS.len() + 1], ..Load::default() };
+        let mut b = a.clone();
+        // 100 ticks: 90 found nothing waiting, 9 up to 5 and 1 found 40
+        b.command_buckets[0] = 90;
+        b.command_buckets[3] = 9;
+        b.command_buckets[6] = 1;
+        b.commands = 9 * 4 + 40;
+        let w = LoadWindow::between(&a, &b, 10.0);
+        assert_eq!(w.commands, 76);
+        assert_eq!(w.command_queue_p99, Some(5.0));
     }
 }

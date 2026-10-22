@@ -202,8 +202,51 @@
       <article class="story">
         <h2 class="head">The tick</h2>
         <p class="headline" id="tick-headline">Waiting for the first sample.</p>
-        <p class="dek">The tick's mean and its 95th percentile over each ten seconds, against the time each tick is given.</p>
+        <p class="dek">The tick's mean, and its 95th and 99th percentiles, over each ten seconds, against the time each tick is given. The percentiles are the bounds of the buckets they fall in.</p>
         <div class="chart" id="chart-tick"></div>
+      </article>
+
+      <article class="story">
+        <h2 class="head">Where the time goes</h2>
+        <p class="headline" id="phases-headline">Waiting for the first sample.</p>
+        <p class="dek">A tick's work by phase, stacked: the mean milliseconds of each tick the phase took in each bar. The loops beside the tick, and the writer it hands its saves to, are in the table and not the bars. The last bar is still filling.</p>
+        <div class="chart" id="chart-phases"></div>
+        <div class="table-wrap">
+          <table class="ledger work" id="work">
+            <thead><tr><th>Work</th><th class="num">Runs</th><th class="num">Mean</th><th class="num">Worst p95</th><th class="num" title="A phase's share of the tick's time; a loop's share of the range it was busy">Share</th><th class="num" title="Statements that took the slow threshold or longer (D3.2)">Slow</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="story">
+        <h2 class="head">Over budget</h2>
+        <p class="headline" id="over-headline">Waiting for the first sample.</p>
+        <p class="dek">Ticks whose work took longer than their period, by bar. One that runs over makes the next start late.</p>
+        <div class="chart chart-short" id="chart-over"></div>
+      </article>
+
+      <article class="story">
+        <h2 class="head">The queues</h2>
+        <p class="headline" id="queues-headline">Waiting for the first sample.</p>
+        <p class="dek">Commands waiting for each tick, from the players' sockets and the routes: the mean a tick and the 99th percentile's bucket. Under it, the game's event bus: the backlog of its slowest reader, and the events readers missed by falling behind it, which makes a socket resync.</p>
+        <div class="chart chart-short" id="chart-commands"></div>
+        <div class="chart chart-short" id="chart-bus"></div>
+      </article>
+
+      <article class="story">
+        <h2 class="head">Sockets</h2>
+        <p class="headline" id="sockets-headline">Waiting for the first sample.</p>
+        <p class="dek">WebSockets open, and those opened and dropped (gone without a word, or unwritable) in each ten seconds.</p>
+        <div class="chart chart-short" id="chart-sockets"></div>
+      </article>
+
+      <article class="story">
+        <h2 class="head">The database</h2>
+        <p class="headline" id="db-headline">Waiting for the first sample.</p>
+        <p class="dek">Connections in use from the server's pool, against its size, and transactions a second: every client's, from <code>pg_stat_database</code>, so a statement outside a transaction counts as one.</p>
+        <div class="chart chart-short" id="chart-pool"></div>
+        <div class="chart chart-short" id="chart-txns"></div>
       </article>
     </section>
 
