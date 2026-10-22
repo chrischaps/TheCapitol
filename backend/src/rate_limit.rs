@@ -1,13 +1,17 @@
 //! Rate limits (E0.7, TDD §2.6).
 //!
-//! Each key gets a token bucket that holds a minute's allowance and refills
-//! at that rate, so a client may burst up to its per-minute limit and is then
-//! held to the steady rate. Three places draw from it:
+//! Each key gets a token bucket that holds a window's allowance (a minute,
+//! or 10 s for chat) and refills at that rate, so a client may burst up to
+//! its limit and is then held to the steady rate. Four places draw from it:
 //!
 //! - `/auth/*`, keyed by the caller's IP ([`by_ip`])
 //! - every authenticated REST route, keyed by account and [`Category`]
 //!   ([`crate::middleware::auth::auth_middleware`] calls [`RateLimiter::check`])
 //! - WebSocket commands, counted per connection (`ws/connection.rs`)
+//! - talk: `say` (S1.1) and `POST /letters` (S1.5), keyed by account
+//!   ([`Key::chat`]), apart from the connection's bucket, so talking never
+//!   costs a step, and an account's second session can't double it
+//!   (commons plan D2). Over it, a line is refused with [`chat_message`].
 //!
 //! Over the limit, REST answers `429 Too Many Requests` with `Retry-After`,
 //! and the WebSocket answers the command with an `error`. capitol-core waits
@@ -60,6 +64,10 @@ pub enum Category {
     Market,
     /// WebSocket commands, per connection.
     Ws,
+    /// Lines of talk and letters, per account, counted over 10 s rather than
+    /// a minute (S0.1). Never a REST route's category: the routes that send
+    /// text check it themselves, as well as their own.
+    Chat,
 }
 
 impl Category {
@@ -87,6 +95,13 @@ pub enum Key {
 }
 
 impl Key {
+    /// The talk bucket of the account `account_id`: one for all its
+    /// sessions, whether they talk over the socket or write letters.
+    #[cfg_attr(not(test), allow(dead_code))] // `say` (S1.1, #381) and `POST /letters` (S1.5, #385) check it
+    pub fn chat(account_id: Uuid) -> Key {
+        Key::Account(account_id, Category::Chat)
+    }
+
     fn category(&self) -> Category {
         match self {
             Key::Ip(_) => Category::Auth,
@@ -96,7 +111,8 @@ impl Key {
     }
 }
 
-/// Requests per minute, per category, and whether to count at all.
+/// Requests per minute, per category (lines per 10 s for chat), and whether
+/// to count at all.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RateLimitConfig {
     pub enabled: bool,
@@ -109,13 +125,19 @@ pub struct RateLimitConfig {
     pub inventory_per_min: u32,
     pub market_per_min: u32,
     pub ws_per_min: u32,
+    /// Lines of talk and letters, per account, in [`CHAT_WINDOW_SECS`].
+    pub chat_per_10s: u32,
 }
+
+/// The window chat is counted over: 8 lines in it, by default, and then one
+/// every 1.25 s.
+pub const CHAT_WINDOW_SECS: f64 = 10.0;
 
 impl Default for RateLimitConfig {
     /// TDD §2.6. Reads aren't in its table: they're the client's polls
     /// (three every 5 s, `capitol_core::poll`), with room for a bot scouting
     /// `/world/nearby` every second. Market reads share `read`; market writes
-    /// are the table's 30.
+    /// are the table's 30. Chat is the commons plan's (D2): 8 lines in 10 s.
     fn default() -> Self {
         Self {
             enabled: true,
@@ -126,6 +148,7 @@ impl Default for RateLimitConfig {
             inventory_per_min: 120,
             market_per_min: 30,
             ws_per_min: 60,
+            chat_per_10s: 8,
         }
     }
 }
@@ -138,7 +161,8 @@ pub const LOOPBACK_AUTH_PER_MIN_DEBUG: u32 = 1000;
 impl RateLimitConfig {
     /// `RATE_LIMITS=off` (or `0`, `false`) turns limiting off. Each limit
     /// can be set on its own: `RATE_LIMIT_AUTH_PER_MIN`, `_LOOPBACK_AUTH_`,
-    /// `_READ_`, `_WORLD_`, `_INVENTORY_`, `_MARKET_` and `_WS_PER_MIN`.
+    /// `_READ_`, `_WORLD_`, `_INVENTORY_`, `_MARKET_` and `_WS_PER_MIN`, and
+    /// `RATE_LIMIT_CHAT_PER_10S`.
     pub fn from_env() -> Self {
         Self::from_vars(|name| std::env::var(name).ok(), cfg!(debug_assertions))
     }
@@ -173,18 +197,32 @@ impl RateLimitConfig {
             inventory_per_min: limit("RATE_LIMIT_INVENTORY_PER_MIN", d.inventory_per_min),
             market_per_min: limit("RATE_LIMIT_MARKET_PER_MIN", d.market_per_min),
             ws_per_min: limit("RATE_LIMIT_WS_PER_MIN", d.ws_per_min),
+            chat_per_10s: limit("RATE_LIMIT_CHAT_PER_10S", d.chat_per_10s),
         }
     }
 
-    /// The per-minute limit for `key`.
+    /// The limit for `key`, in its [`window`](Self::window).
     fn capacity(&self, key: &Key) -> u32 {
         match key {
             Key::Ip(ip) if ip.to_canonical().is_loopback() => self.loopback_auth_per_min,
-            key => self.per_min(key.category()),
+            key => self.limit(key.category()),
         }
     }
 
-    fn per_min(&self, category: Category) -> u32 {
+    /// How many seconds `key`'s allowance is counted over.
+    fn window(key: &Key) -> f64 {
+        match key.category() {
+            Category::Chat => CHAT_WINDOW_SECS,
+            _ => 60.0,
+        }
+    }
+
+    /// The bucket's refill, in requests a second.
+    fn per_sec(&self, key: &Key) -> f64 {
+        self.capacity(key) as f64 / Self::window(key)
+    }
+
+    fn limit(&self, category: Category) -> u32 {
         match category {
             Category::Auth => self.auth_per_min,
             Category::Read => self.read_per_min,
@@ -192,6 +230,7 @@ impl RateLimitConfig {
             Category::Inventory => self.inventory_per_min,
             Category::Market => self.market_per_min,
             Category::Ws => self.ws_per_min,
+            Category::Chat => self.chat_per_10s,
         }
     }
 }
@@ -240,14 +279,14 @@ impl RateLimiter {
             return Ok(());
         }
         let capacity = self.config.capacity(&key) as f64;
-        let per_sec = capacity / 60.0;
+        let per_sec = self.config.per_sec(&key);
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         if buckets.len() >= PRUNE_AT {
             // A bucket that has refilled is the same as no bucket.
             let config = &self.config;
             buckets.retain(|k, b| {
                 let cap = config.capacity(k) as f64;
-                b.tokens + now.saturating_duration_since(b.at).as_secs_f64() * cap / 60.0 < cap
+                b.tokens + now.saturating_duration_since(b.at).as_secs_f64() * config.per_sec(k) < cap
             });
         }
         let bucket = buckets.entry(key).or_insert(Bucket {
@@ -285,6 +324,16 @@ pub fn too_many(retry_after: Duration) -> Response {
 pub fn ws_message(retry_after: Duration) -> String {
     format!(
         "Too many commands; wait {:.1} s",
+        retry_after.as_secs_f64().max(0.1)
+    )
+}
+
+/// The words for a line of talk or a letter over [`Category::Chat`]'s limit:
+/// `say`'s `error` and `POST /letters`' refusal.
+#[cfg_attr(not(test), allow(dead_code))] // `say` (S1.1, #381) and `POST /letters` (S1.5, #385) answer with it
+pub fn chat_message(retry_after: Duration) -> String {
+    format!(
+        "You're talking too fast; wait {:.1} s",
         retry_after.as_secs_f64().max(0.1)
     )
 }
@@ -378,6 +427,81 @@ mod tests {
     }
 
     #[test]
+    fn chat_allows_eight_lines_in_ten_seconds() {
+        let l = limiter(RateLimitConfig::default());
+        let t = Instant::now();
+        let me = Key::chat(Uuid::from_u128(1));
+        for n in 0..8 {
+            assert!(l.check_at(me, t).is_ok(), "line {n} refused");
+        }
+        let wait = l.check_at(me, t).unwrap_err();
+        // Then one every 1.25 s, not one every 7.5 s as a per-minute 8 would.
+        assert!((wait.as_secs_f64() - 1.25).abs() < 0.01, "{wait:?}");
+        assert!(l.check_at(me, t + Duration::from_millis(1250)).is_ok());
+        assert!(l.check_at(me, t + Duration::from_millis(1250)).is_err());
+        // Ten quiet seconds and the whole burst is back.
+        let later = t + Duration::from_secs(20);
+        for _ in 0..8 {
+            l.check_at(me, later).unwrap();
+        }
+        assert!(l.check_at(me, later).is_err());
+        assert_eq!(
+            chat_message(Duration::from_millis(1250)),
+            "You're talking too fast; wait 1.2 s"
+        );
+    }
+
+    #[test]
+    fn an_accounts_sessions_share_one_chat_bucket() {
+        let l = limiter(RateLimitConfig::default());
+        let t = Instant::now();
+        let (ada, bea) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        // Two sockets of one account: their commands are counted apart,
+        let (desk, laptop) = (l.connection(), l.connection());
+        assert_ne!(desk, laptop);
+        // but what they say is counted together, with the letters she writes.
+        for _ in 0..4 {
+            l.check_at(Key::chat(ada), t).unwrap(); // `say` on the desk
+            l.check_at(Key::chat(ada), t).unwrap(); // `say` on the laptop, or a letter
+        }
+        assert!(l.check_at(Key::chat(ada), t).is_err());
+        assert!(l.check_at(Key::chat(bea), t).is_ok(), "another account isn't touched");
+    }
+
+    #[test]
+    fn chat_never_touches_the_connection_bucket() {
+        let l = limiter(RateLimitConfig::default());
+        let t = Instant::now();
+        let me = Uuid::from_u128(1);
+        let socket = l.connection();
+        for _ in 0..100 {
+            let _ = l.check_at(Key::chat(me), t);
+        }
+        // Talked out, she still has every one of her 60 commands,
+        for n in 0..60 {
+            assert!(l.check_at(socket, t).is_ok(), "command {n} refused");
+        }
+        // and her account's REST allowance.
+        assert!(l.check_at(Key::Account(me, Category::World), t).is_ok());
+        // Walked out, she can still talk.
+        assert!(l.check_at(socket, t).is_err());
+        let fresh = Key::chat(Uuid::from_u128(2));
+        assert!(l.check_at(fresh, t).is_ok());
+    }
+
+    #[test]
+    fn off_lets_chat_through_too() {
+        let l = limiter(RateLimitConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        let t = Instant::now();
+        for _ in 0..100 {
+            l.check_at(Key::chat(Uuid::from_u128(1)), t).unwrap();
+        }
+    }
+
+    #[test]
     fn a_normal_client_never_waits() {
         // Three polls every 5 s and a containers refetch each second, for ten minutes.
         let l = limiter(RateLimitConfig::default());
@@ -432,10 +556,12 @@ mod tests {
             ("RATE_LIMIT_AUTH_PER_MIN", "100"),
             ("RATE_LIMIT_WS_PER_MIN", "zero"),
             ("RATE_LIMIT_READ_PER_MIN", "0"),
+            ("RATE_LIMIT_CHAT_PER_10S", "20"),
         ]
         .into();
         let c = RateLimitConfig::from_vars(|k| vars.get(k).map(|v| v.to_string()), false);
         assert!(c.enabled);
+        assert_eq!(c.chat_per_10s, 20);
         assert_eq!(c.auth_per_min, 100);
         assert_eq!(c.loopback_auth_per_min, 100);
         assert_eq!(c.ws_per_min, 60);

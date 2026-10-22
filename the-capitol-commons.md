@@ -172,7 +172,7 @@ Weekly, from records the city already keeps.
 
 ### S0: Groundwork (`cm:S0-groundwork`)
 
-- **S0.1 Text rules and a chat bucket** (#378, S).
+- **S0.1 Text rules and a chat bucket** (#378, S). *As built:* `rules::talk` (`clean`, `clean_letter`, `MAX_LINE`, `MAX_LETTER`, `HEARD`, `CAPITOL_BACKLOG`, `TalkError`). A newline or tab in a line folds as whitespace rather than vanishing, a letter folds a run of blank lines to one, and direction overrides (U+202A to U+202E, U+2066 to U+2069) are dropped with the control characters, so a line can't turn a name round; joiners stay for emoji. `Category::Chat` is counted over a 10 s window (`CHAT_WINDOW_SECS`; the others stay a minute), `RATE_LIMIT_CHAT_PER_10S` sets it, and it's keyed by account (`Key::chat(account_id)`), since `POST /letters` has the account and not the player, and an account has one player. `rate_limit::chat_message` is the "You're talking too fast" words for `say` and letters.
 - **S0.2 Court escrow groundwork** (#379, M): the box, the transaction types, `rules::court`, the ledger and the shared harness.
 - **S0.3 A person's card** (#380, M): `GET /players/{id}/card`, and the card in Flint from a click on a person or a name.
 
