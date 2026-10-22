@@ -172,7 +172,8 @@ pub(crate) mod tests {
 
     /// Acceptance for #456 (Plots v2's suburb, V1.2): the mixed suburb at
     /// r2160 to r3600 with `NeighbourhoodParams::grown`, at the four report
-    /// seeds. About 1000 lots of about 18.5k, each pattern as it is today.
+    /// seeds. About 1000 lots of about 18.5k, each pattern as it is today,
+    /// 90% of them taking 6 stations and the median 8 (#468).
     #[test]
     fn grown_suburb_meets_its_targets() {
         let measured: Vec<_> = [42, 7, 1234, 99999].into_iter().map(|s| (s, metrics::measure_world(&grown_world(s), None))).collect();
@@ -180,12 +181,15 @@ pub(crate) mod tests {
             let m = &world.measured.metrics;
             let pct = |v: Option<f64>| 100.0 * v.unwrap_or(f64::NAN);
             eprintln!(
-                "seed {seed}: {} lots, area {:.0}, {:.0} × {:.0}, {:.0}% take 8, lots {:.0}%, green {:.0}%, gap {:.1}%",
+                "seed {seed}: {} lots, area {:.0}, {:.0} × {:.0}, {:.1}% take 6, {:.0}% take 8, stations median {:.0} mean {:.2},                  lots {:.0}%, green {:.0}%, gap {:.1}%",
                 m.lots,
                 m.lot_area_median.unwrap_or(f64::NAN),
                 m.lot_width_median.unwrap_or(f64::NAN),
                 m.lot_depth_median.unwrap_or(f64::NAN),
+                pct(m.takes_six_share),
                 pct(m.takes_eight_share),
+                m.stations_median.unwrap_or(f64::NAN),
+                m.stations_mean.unwrap_or(f64::NAN),
                 pct(m.cover_lots),
                 pct(m.cover_green),
                 pct(m.cover_gap),
@@ -200,7 +204,9 @@ pub(crate) mod tests {
             metrics::Grown::assert_streets(&m, &why);
             // About 1000 (plots plan v2 §3).
             assert!((900..=1100).contains(&m.lots), "{why}");
-            metrics::Grown { takes_eight: 0.50, area_max: 19000.0, depth_min: 120.0, green_max: 0.25 }.assert_lots(&m, &why);
+            // 90% take 6 stations, a whole workshop (#468): 92 to 93%.
+            metrics::Grown { takes_six: 0.90, area_max: 19000.0, depth_min: 120.0, green_max: 0.25 }.assert_lots(&m, &why);
+            assert!(m.stations_median.unwrap() >= 8.0, "{why}");
             let least = 0.5 * 140.0 * 134.0;
             assert!(m.parks > 0 && m.park_area_min.is_none_or(|a| a >= least - 1e-6), "{why}");
         }

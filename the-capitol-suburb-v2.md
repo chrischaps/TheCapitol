@@ -293,8 +293,8 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 - **T spacing p10 90–140 and parallel spacing p5 down to 25: pattern (c).** Its corner stems fan from the loop, so their roots sit close together along it and run nearly parallel there. That's the fan's shape, not crowding: (a) alone holds p10 ≥ 180 and p5 ≥ 216.
 - ~~**entrances per neighbourhood, most 5–7.**~~ A false miss: the metric counted per sector, so split sectors read double. Since #115 it counts per neighbourhood, and every neighbourhood reads 2–4.
 
-#### Plots v2 targets (V1.2, #456)
-Plots v2 (`the-capitol-plots-v2.md`) moves the suburb to **r2160 to r3600** (1440 deep) for about 1000 lots of about 17k that take 8 stations. Until the flip (#459) these are test-only params, `NeighbourhoodParams::grown()`, measured on `suburb::tests::grown_world(seed)`: #454's `WorldGenParams::grown()` (urban to r2160, suburb to r3600, rural to r6100, world 16600) with `grown()`'s lots. The whole world is generated, so the land and water follow the grown rings and keep out of the suburb. `metrics::GROWN_TARGETS` holds the targets below in place of the rows they replace; the street rows are unchanged.
+#### Plots v2 targets (V1.2, #456; V1.4, #468)
+Plots v2 (`the-capitol-plots-v2.md`) moves the suburb to **r2160 to r3600** (1440 deep) for about 1000 lots of about 17k, 90% of which take 6 stations, a whole workshop (the plan first said 80% taking 8: #466). Until the flip (#459) these are test-only params, `NeighbourhoodParams::grown()`, measured on `suburb::tests::grown_world(seed)`: #454's `WorldGenParams::grown()` (urban to r2160, suburb to r3600, rural to r6100, world 16600) with `grown()`'s lots. The whole world is generated, so the land and water follow the grown rings and keep out of the suburb. `metrics::GROWN_TARGETS` holds the targets below in place of the rows they replace; the street rows are unchanged.
 
 | Metric | Plots v2 target |
 |---|---|
@@ -302,7 +302,8 @@ Plots v2 (`the-capitol-plots-v2.md`) moves the suburb to **r2160 to r3600** (144
 | lot area | median 15000–19000, p5 ≥ 10000, p95 ≤ 28000 |
 | lot width at mid-depth | median 125–155 |
 | lot depth | median 120–140 |
-| lots that take 8 stations | ≥ 80% (the plots plan's; **missed**, about half do: #466) |
+| lots that take 6 stations | ≥ 90% (#468; take 8 is printed, not held: #466) |
+| stations a lot takes | median ≥ 8 (in `grown_suburb_meets_its_targets`) |
 | cul-de-sac | ≤ 400 long, ≤ 20 lots |
 | parallel spacing | median 284 ± 20, p5 ≥ 240 |
 | coverage: green | 8–27% |
@@ -313,10 +314,18 @@ Plots v2 (`the-capitol-plots-v2.md`) moves the suburb to **r2160 to r3600** (144
 - **Stems to 400** (`cul_de_sac_max`), so (b)'s combs still reach the middle of the deeper band, as 300 does today (2.9 lot depths against 2.7). (c)'s stems run to the frame's edge, also up to 390.
 - **Pattern (c)'s `STEM` is unchanged at 170.** Every split half still fits it at v2, since the halves grow with the lots; 120 was tried and lost lots and take-8 share.
 - **Pattern (b)'s `fits`** wants 4 street spacings across at the first row (`loops::ACROSS`), not 3. At warp 25 some split halves cleared 3S by a hair and got a racetrack round a park with a stem in each comb. Whole sectors are about 6S and halves about 3S at both radii, so the default world doesn't move.
-- **Bulbs** keep 2 or 3 pies, a 30 stem short and a 40 push. Two pies a bulb are dropped: a front half way round the bulb cuts through it (#422's finding again).
+- **Bulbs** keep 2 or 3 pies, a 30 stem short and a 40 push. Two pies a bulb are dropped: a front half way round the bulb cuts through it (#422's finding again). V1.4 deepens the pies (below).
 - **Result** (mixed, seeds 42, 7, 1234, 99999): **970–996 lots**, area median **18.4k–18.8k** (p5 ≥ 10.8k, p95 ≤ 26.4k), width median 140–142, depth 129–131, **52–56% take 8**, lots 67–68%, green 20–22%, gap 3%, no overlaps, nothing trimmed or dropped, audit clean, no 4-ways, junctions ≥ 75.8°. Forced: (a) 1034–1055 lots, median 19.0k–19.3k, 62–66% take 8, green 11–14%; (b) 941–968 lots, 45–51%, green 23–27%; (c) 943–993 lots, 46–54%, green 21–27%, depth median down to 119 (the loop's inside).
-- **Why not 80%:** row and stem lots take 8 at about 82%, but pies (about a fifth of the lots) never do, and the fans round U-turns, racetrack corners and (c)'s loop about a third. #466 has the options for Chris. The tests hold what's reached (`metrics::Grown`).
-- **Drawing it:** `suburb-plan.ps1 -Params grown` (env `SUBURB_PARAMS=grown`) uses `grown()` at r2160 to r3600, holds the plan to these targets, shades lots over 10k–28k, and draws in sand those that don't take 8.
+- **Why not 80% taking 8:** row and stem lots take 8 at about 82%, but pies (about a fifth of the lots) never do, and the fans round U-turns, racetrack corners and (c)'s loop about a third. Chris settled #466 on 90% taking 6.
+
+*As built (#468)*, the pies take 6:
+- **The pies were the whole shortfall.** At V1.2, 72–77% of lots took 6. Rows, stems and fans took 6 at 92–95%, but only 2% of pies did: a pie narrows to about 90 at its bulb and is about 120 deep, so it takes 5. Run 10 deeper, 59% of seed 42's would take 6; 20 deeper, 98%.
+- **Pies 155 deep** (`NeighbourhoodParams::pie_depth`, new, 0 by default). After the fronts are pushed clear of the bulb, each of a pie's rays runs on to 155 from its front, short of the region's edge and the first road or water (`lots::Street::deepen`). That takes it past the rear line it shared with the lots behind; pies go first in the overlap pass, so those lots give the ground back. The ray a pie shares with the stem's last lot runs on too, which matters: deepening only the pie's own rays reached 70–77% of pies. 145 to 165 all land within a point of each other; 155 is the plateau's middle.
+- **Bigger bulbs don't help.** From a radius of 20 a pie's front, from the stem's last ray, cuts the bulb's neck and can't be pushed clear, so most pies are dropped (a radius of 20 kept 60–72 pies a world of about 200, 30 kept 52–64). A stem short of 35 (and reach 45) was half a point better and 25 lost most pies; both were left at 30 and 40. Weighting pattern (a) up wasn't needed.
+- **What's left:** pies against the region's edge or a road (most of the 10–17% of pies short of 6), pies on a stem with no lots near its bulb, which sweep only 180° and come out as slivers, and the fans in the U-turns and loop corners.
+- **What it costs:** the lots behind a pie are shallower, so thin strips open beside some stems: the gap rises from about 3% to 3.1–3.6%. Take 8 rises too, from 52–56% to 54–59%.
+- **Result** (mixed, seeds 42, 7, 1234, 99999): **962–988 lots**, area median **18.5k–18.8k** (p5 ≥ 11.4k, p95 ≤ 25.5k), width median 143–144, depth 131–132, **92.0–92.6% take 6** (pies 83–90%), 54–59% take 8, stations median 8 and mean 7.5–7.6, lots 69–70%, green 17–19%, gap 3.1–3.6%, no overlaps, nothing trimmed or dropped, the streets as at V1.2. Forced: (a) 1022–1044 lots, 94.8–95.6% take 6, green 10–13%; (b) 967–995 lots, 93.2–94.6%, green 16–18%; (c) 952–1006 lots, 90.3–92.4%, green 16–22%. `metrics::Grown` holds 90% mixed and for (c), 92% for (b) and 93% for (a).
+- **Drawing it:** `suburb-plan.ps1 -Params grown` (env `SUBURB_PARAMS=grown`) uses `grown()` at r2160 to r3600, holds the plan to these targets, shades lots over 10k–28k, and draws in sand those that don't take 6.
 
 ## 5. Work packages
 

@@ -636,7 +636,8 @@ pub(crate) mod tests {
             let why = format!("seed {seed}: {m:#?}");
             metrics::Grown::assert_streets(&m, &why);
             assert!(m.parallel_spacing_p5.unwrap() >= 240.0, "{why}");
-            metrics::Grown { takes_eight: 0.58, area_max: 19500.0, depth_min: 125.0, green_max: 0.20 }.assert_lots(&m, &why);
+            // 95 to 96% take 6 stations (#468).
+            metrics::Grown { takes_six: 0.93, area_max: 19500.0, depth_min: 125.0, green_max: 0.20 }.assert_lots(&m, &why);
         }
     }
 

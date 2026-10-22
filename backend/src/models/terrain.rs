@@ -109,6 +109,12 @@ pub struct NeighbourhoodParams {
     /// Cul-de-sac turnaround radius, and the longest stem.
     pub bulb_radius: f64,
     pub cul_de_sac_max: f64,
+    /// How deep a pie round a bulb reaches from its front, at least, where
+    /// the ground allows, past the rear line it would share with the lots
+    /// behind. 0, the default, leaves a pie as deep as the lots beside it
+    /// (#468: Plots v2's pies, which narrow to the bulb, take 6 stations
+    /// only some 20 deeper).
+    pub pie_depth: f64,
     /// The frame's shared radial warp: amplitude A (at most 40) and
     /// wavelength λ (at least 1200). #111 tuned them to 30 and 1200: a
     /// 40 warp costs the band 20 of depth, and the lots fall under the
@@ -139,6 +145,7 @@ impl Default for NeighbourhoodParams {
             link_spacing: 400.0,
             bulb_radius: 13.0,
             cul_de_sac_max: 300.0,
+            pie_depth: 0.0,
             warp_amplitude: 30.0,
             warp_wavelength: 1200.0,
             pattern_weights: PatternWeights::default(),
@@ -151,9 +158,9 @@ impl NeighbourhoodParams {
     /// The suburb of Plots v2 (`the-capitol-plots-v2.md` V1.2, #456), for
     /// the grown world's band, r2160 to r3600. #459 makes these the
     /// defaults when the world grows. Measured over seeds 42, 7, 1234 and
-    /// 99999: 970 to 1000 lots of about 18.5k (140 × 130), about half of
-    /// them taking 8 stations, not the plots plan's 80%: pies and the fans
-    /// round U-turns can't (#466). `the-capitol-suburb-v2.md` §4.4.
+    /// 99999: 960 to 990 lots of about 18.6k (140 × 130), 92 to 93% of them
+    /// taking 6 stations, a whole workshop (#468), and 54 to 59% taking 8
+    /// (#466). `the-capitol-suburb-v2.md` §4.4.
     /// - **Warp 10.** The 1440 band less the warp fits five rows of lots
     ///   134 deep. At 30 they're 130 by the fit, and about 127 as laid
     ///   (the warp tilts the rows), under the 128 a lot needs to take 8.
@@ -161,6 +168,12 @@ impl NeighbourhoodParams {
     ///   130 × 128, so a run takes one lot fewer rather than any narrower.
     /// - **Stems to 400,** so pattern (b)'s combs still reach the middle of
     ///   its band, as they do at 300 in today's.
+    /// - **Pies 155 deep** (#468). A pie narrows to about 90 at its bulb,
+    ///   so as deep as the lots beside it (about 120 from the bulb's edge)
+    ///   it takes 5 stations, and only 2% of pies took 6. At least 155 deep
+    ///   where the ground allows, 83 to 90% do. A bigger bulb doesn't help:
+    ///   at a radius of 20 or more a pie's front, from the stem's last ray,
+    ///   cuts the bulb's neck, and most pies are dropped.
     #[cfg(test)]
     pub fn grown() -> Self {
         Self {
@@ -170,6 +183,7 @@ impl NeighbourhoodParams {
             lot_depth_min: 118.0,
             lot_depth_max: 140.0,
             cul_de_sac_max: 400.0,
+            pie_depth: 155.0,
             warp_amplitude: 10.0,
             ..Self::default()
         }

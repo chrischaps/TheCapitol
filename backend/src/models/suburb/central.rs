@@ -481,7 +481,9 @@ pub(crate) mod tests {
             let m = metrics::measure_world(&params, None).measured.metrics;
             let why = format!("seed {seed}: {m:#?}");
             metrics::Grown::assert_streets(&m, &why);
-            metrics::Grown { takes_eight: 0.42, area_max: 19000.0, depth_min: 115.0, green_max: 0.29 }.assert_lots(&m, &why);
+            // 90 to 92% take 6 stations (#468): most of the rest are the
+            // fans in the loop's corners.
+            metrics::Grown { takes_six: 0.90, area_max: 19000.0, depth_min: 115.0, green_max: 0.29 }.assert_lots(&m, &why);
         }
     }
 

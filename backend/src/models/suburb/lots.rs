@@ -24,7 +24,10 @@
 //! - **Bulbs.** 2–3 pie lots round each, on rays from the bulb centre, between
 //!   the last rays of the stem's two sides: as many as keep the most ground
 //!   once each is clear of the roads, and of those that keep nearly as much,
-//!   the fewest (#422; 4–5 before, which made slivers).
+//!   the fewest (#422; 4–5 before, which made slivers). With a `pie_depth`
+//!   (Plots v2's suburb, #468), each pie's rays then reach at least that far
+//!   from its front, where the ground allows: past the rear line it shares
+//!   with the lots behind, which give the ground back in the overlap pass.
 //! - **Overlap pass.** Pies first, then through roads, then cul-de-sac
 //!   stems. A lot that overlaps one placed before it (`quads_overlap_strict`),
 //!   or isn't clear of every road, shrinks by bisection down to 60% depth, or
@@ -146,8 +149,9 @@ pub(crate) fn lay(roads: &[RoadSegment], plan: &SuburbPlan, params: &SuburbanGen
         };
         if m.fronted != (false, false) {
             let region = region_of(n, params, center);
-            let (bulb_radius, width_min) = (params.neighbourhood.bulb_radius, params.neighbourhood.lot_width_min);
-            candidates.extend(Street { world: &world, road, meta: m, street, region, p: &p, bulb_radius, width_min }.lots());
+            let np = &params.neighbourhood;
+            let (bulb_radius, width_min, pie_depth) = (np.bulb_radius, np.lot_width_min, np.pie_depth);
+            candidates.extend(Street { world: &world, road, meta: m, street, region, p: &p, bulb_radius, width_min, pie_depth }.lots());
         }
     }
     // The overlap pass's order: 0 for pies, 1 for through roads, 2 for
@@ -167,6 +171,8 @@ struct Street<'a> {
     bulb_radius: f64,
     /// `NeighbourhoodParams::lot_width_min`.
     width_min: f64,
+    /// `NeighbourhoodParams::pie_depth`.
+    pie_depth: f64,
 }
 
 impl Street<'_> {
@@ -465,12 +471,31 @@ impl Street<'_> {
             }
             let mut stretch: Vec<Ray> = rays[start..j].iter_mut().map(|r| r.take().unwrap()).collect();
             push_fronts_by(&mut stretch, self.world, PIE_PUSH);
+            if self.pie_depth > 0.0 {
+                stretch.iter_mut().for_each(|r| self.deepen(r));
+            }
             for (k, w) in stretch.windows(2).enumerate() {
                 out.push((start + k, quad(&w[0], &w[1])));
             }
             j += 1;
         }
         out
+    }
+
+    /// A pie's ray, run on to `pie_depth` from its front, short of the
+    /// region's edge and the first road or water (#468). A pie narrows to
+    /// its bulb, so it takes 6 stations only some 20 deeper than a row lot
+    /// that does. Pies go first in the overlap pass, so the lots it reaches
+    /// behind, a stem's or the next row's, give it the ground. A ray the
+    /// stem's last lot shares runs on too: that lot keeps its own back.
+    fn deepen(&self, r: &mut Ray) {
+        let want = r.f + self.pie_depth;
+        if r.b >= want {
+            return;
+        }
+        let exit = self.region.exit(r.o, r.d, r.f) - self.p.edge_gap;
+        let hit = self.world.first_hit(r.o, r.d, r.f, want).map_or(f64::INFINITY, |(t, _)| t - self.p.edge_gap);
+        r.b = r.b.max(want.min(exit).min(hit));
     }
 
     /// What's left of a lot once the overlap pass has pulled it clear of

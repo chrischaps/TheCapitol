@@ -44,8 +44,10 @@ Each zone's v2 targets test holds them over seeds 42, 7, 1234 and 99999, as #421
 | zone | lots | lot area | room |
 |---|---|---|---|
 | urban | 900 to 1100 | median 7.5k to 9.5k | ≥ 95% take 4, **none takes 5** |
-| suburban | 900 to 1100 | median 15k to 19k | ≥ 80% take 8 |
+| suburban | 900 to 1100 | median 15k to 19k | ≥ 90% take 6, a whole workshop; median 8 |
 | rural | 900 to 1100 | mean 31k to 38k | ≥ 99% take 12 |
+
+The suburban room was "≥ 80% take 8" until #466 found that pies round cul-de-sac bulbs and the fans round U-turns can't take 8, so only about half the lots did. Chris settled it on 2026-10-22: 90% taking 6 is enough, with room to build outside and floors (#461) adding more at a cost. Take 8 is still measured and printed, not held (#468).
 
 ## 4. Decisions
 
@@ -258,7 +260,8 @@ These aren't issues yet. They're cut after Chris reviews this section.
 | [#454](https://github.com/chrischaps/TheCapitol/issues/454) | V0.1 One frame of radii: the land, the water, the trails and the wild nodes follow the zone table; `grown()`. Built: see PV2's as-built note | #453 |
 | [#458](https://github.com/chrischaps/TheCapitol/issues/458) | V0.2 Generation time, and Flint pre-work (land chunks, `FROM`, grass sizes, a camera-zone test). *As built:* see the generation-time risk in §6; Flint's `land::CHUNKS` comes from `land::OUTER`, the grass mask and heights from the world's size at a fixed texel (3480 and 2320 for 13600, 4248 and 2832 for 16600), the scene's `far` is held by a test to the skirt and the land, and `each_fixed_view_frames_the_zone_its_name_says` checks the `--view` shots | #454 |
 | [#455](https://github.com/chrischaps/TheCapitol/issues/455) | V1.1 Urban: five rings of blocks. *As built:* `rings: 5`, `outer_spokes: 32` past r1800, outer ring street r2125.5 under an edge at r2160: 1016 lots, median 8.56k, 100% take 4, none take 5. Tested on the grid alone (`urban::metrics::measure_grid`, `v2`) | #454 |
-| [#456](https://github.com/chrischaps/TheCapitol/issues/456) | V1.2 Suburb: lots of about 130 × 130 in a band about 1440 deep. *As built:* r2160 to r3600 as planned; `NeighbourhoodParams::grown()` lays lots 140 × 134 (frontage 140, none under 136, warp 10 for 5 rows 134 deep, stems to 400): 970–996 lots, median 18.4k–18.8k, but only **52–56% take 8** ([#466](https://github.com/chrischaps/TheCapitol/issues/466): pies and U-turn fans can't, needs Chris). (c)'s `STEM` needed no change; (b) now wants 4S across. Tested on `grown()` (`suburb::tests::grown_world`, `the-capitol-suburb-v2.md` §4.4) | #454 |
+| [#456](https://github.com/chrischaps/TheCapitol/issues/456) | V1.2 Suburb: lots of about 130 × 130 in a band about 1440 deep. *As built:* r2160 to r3600 as planned; `NeighbourhoodParams::grown()` lays lots 140 × 134 (frontage 140, none under 136, warp 10 for 5 rows 134 deep, stems to 400): 970–996 lots, median 18.4k–18.8k, but only **52–56% take 8** ([#466](https://github.com/chrischaps/TheCapitol/issues/466): pies and U-turn fans can't; Chris made the target 90% taking 6). (c)'s `STEM` needed no change; (b) now wants 4S across. Tested on `grown()` (`suburb::tests::grown_world`, `the-capitol-suburb-v2.md` §4.4) | #454 |
+| [#468](https://github.com/chrischaps/TheCapitol/issues/468) | V1.4 Suburb: pie lots take 6, so 90% of the suburb holds a whole workshop. *As built:* pies were the whole shortfall (2% of them took 6). `NeighbourhoodParams::pie_depth` 155 runs each pie's rays on to 155 from its front where the ground allows, past the rear line it shared with the lots behind: 83–90% of pies take 6, and **92.0–92.6% of all lots** (960–990 lots, median 8 stations, mean 7.5–7.6, median area 18.5k–18.8k, take 8 54–59%). Bigger bulbs don't help: from a radius of 20 the pies' fronts cut the bulb's neck and most are dropped | #456 |
 | [#457](https://github.com/chrischaps/TheCapitol/issues/457) | V1.3 Rural: three main lanes, farms of about 34k | #454 |
 | [#459](https://github.com/chrischaps/TheCapitol/issues/459) | V2.0 The flip | #455, #456, #457, #458 |
 | [#460](https://github.com/chrischaps/TheCapitol/issues/460) | V2.1 After the flip: town reset, node densities, the nightly | #459 |

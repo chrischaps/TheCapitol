@@ -526,7 +526,8 @@ pub(crate) mod tests {
             let m = metrics::measure_world(&params, None).measured.metrics;
             let why = format!("seed {seed}: {m:#?}");
             metrics::Grown::assert_streets(&m, &why);
-            metrics::Grown { takes_eight: 0.42, area_max: 19000.0, depth_min: 120.0, green_max: 0.29 }.assert_lots(&m, &why);
+            // 93 to 95% take 6 stations (#468).
+            metrics::Grown { takes_six: 0.92, area_max: 19000.0, depth_min: 120.0, green_max: 0.29 }.assert_lots(&m, &why);
         }
     }
 

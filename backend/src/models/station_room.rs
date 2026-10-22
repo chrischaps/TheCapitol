@@ -43,10 +43,10 @@ fn lattice(len: f64, step: f64, edge: f64) -> Vec<f64> {
     (0..n).map(|k| first + k as f64 * step / len).collect()
 }
 
-fn pack(order: &[P], most: usize) -> usize {
+fn pack(order: &[P], cap: usize) -> usize {
     let mut placed: Vec<P> = Vec::new();
     for &p in order {
-        if placed.len() >= most {
+        if placed.len() >= cap {
             break;
         }
         if placed.iter().all(|s| dist(*s, p) >= SPOT_SPACING - 1e-6) {
@@ -59,6 +59,13 @@ fn pack(order: &[P], most: usize) -> usize {
 /// Whether an empty lot with these corners takes `wanted` stations, as
 /// `sim::lot::takes` says, with its capacity out of the way.
 pub fn takes(c: &[P; 4], wanted: usize) -> bool {
+    most(c, wanted) >= wanted
+}
+
+/// The most stations, up to `cap`, an empty lot with these corners takes by
+/// `takes`'s rule: `takes(c, n)` holds for every n up to it and none past
+/// it, as each order packs greedily. One packing, not a scan of n (#468).
+pub fn most(c: &[P; 4], cap: usize) -> usize {
     let len_u = (dist(c[0], c[1]) + dist(c[3], c[2])) / 2.0;
     let len_v = (dist(c[0], c[3]) + dist(c[1], c[2])) / 2.0;
     let edge = EDGE.min(0.4 * len_u.min(len_v));
@@ -86,7 +93,7 @@ pub fn takes(c: &[P; 4], wanted: usize) -> bool {
     let along = |p: P| (p.0 - a.0) * axis.0 + (p.1 - a.1) * axis.1;
     let mut orders = vec![centred, by(fine.clone(), &along), by(fine.clone(), &|p| -along(p))];
     orders.extend(c.iter().map(|&corner| by(fine.clone(), &|p| dist(p, corner))));
-    orders.iter().any(|order| pack(order, wanted) >= wanted)
+    orders.iter().map(|order| pack(order, cap)).max().unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -111,5 +118,18 @@ mod tests {
         assert!(takes(&triangle, 3) && !takes(&triangle, 4));
         let strip = [(0.0, 0.0), (19.0, 0.0), (19.0, 127.0), (0.0, 127.0)];
         assert!(takes(&strip, 3) && !takes(&strip, 4));
+    }
+
+    /// `most` is the largest n that `takes` admits (#468).
+    #[test]
+    fn most_is_the_largest_n_taken() {
+        let pie = [(10403.4, 9354.0), (10407.2, 9263.8), (10433.4, 9205.4), (10557.7, 9311.5)];
+        for c in [boxed(80.0, 100.0), boxed(140.0, 130.0), boxed(150.0, 120.0), boxed(64.0, 106.0), pie] {
+            let n = most(&c, 24);
+            assert!(n > 0 && takes(&c, n) && !takes(&c, n + 1), "{c:?}: {n}");
+            assert_eq!(most(&c, n - 1), n - 1);
+        }
+        // Three rows of three: 2 × 55 + 2 × 10 = 130 each way.
+        assert_eq!(most(&boxed(140.0, 130.0), 24), 9);
     }
 }

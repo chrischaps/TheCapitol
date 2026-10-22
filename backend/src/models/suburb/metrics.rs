@@ -164,9 +164,16 @@ pub struct Metrics {
     pub lot_depth_median: Option<f64>,
     /// The share of lots that take 4 stations at 50 spacing (plots plan §3).
     pub takes_four_share: Option<f64>,
-    /// The share that take 8: a whole workshop, as Plots v2 wants of a
-    /// suburban lot (#456).
+    /// The share that take 6: a whole workshop, as Plots v2 wants of a
+    /// suburban lot (#468).
+    pub takes_six_share: Option<f64>,
+    /// The share that take 8, Plots v2's first suburban target (#456),
+    /// retired for 6 (#466). Printed, not held.
     pub takes_eight_share: Option<f64>,
+    /// The most stations each lot takes (`station_room::most`): the median
+    /// and the mean (#468).
+    pub stations_median: Option<f64>,
+    pub stations_mean: Option<f64>,
     pub convex_share: Option<f64>,
     pub overlaps: usize,
     pub lots_before: usize,
@@ -280,9 +287,10 @@ pub const TARGETS: &[Target] = &[
 
 /// The suburb of Plots v2 (#456, `the-capitol-suburb-v2.md` §4.4): the
 /// targets of [`TARGETS`] that its bigger lots move, each by the metric it
-/// stands in for. Lots of about 140 × 130 that take 8 stations, not 100 ×
-/// 105 that take 4, and stems and street spacing that grow with them. The
-/// 80% taking 8 is the plan's, and missed: about half do (#466).
+/// stands in for. Lots of about 140 × 130 that take 6 stations, a whole
+/// workshop, not 100 × 105 that take 4, and stems and street spacing that
+/// grow with them. The plan first wanted 80% to take 8, which pies and the
+/// fans round U-turns can't; Chris settled on 90% taking 6 (#466, #468).
 pub const GROWN_TARGETS: &[(&str, Target)] = &[
     ("culdesac_max_len", soft("culdesac_max_len", "longest cul-de-sac stem", Check::Max(400.0))),
     ("parallel_spacing_median", soft("parallel_spacing_median", "parallel spacing, median", Check::Range(264.0, 304.0))),
@@ -291,7 +299,7 @@ pub const GROWN_TARGETS: &[(&str, Target)] = &[
     ("lot_area_p5", soft("lot_area_p5", "lot area, p5", Check::Min(10000.0))),
     ("lot_area_p95", soft("lot_area_p95", "lot area, p95", Check::Max(28000.0))),
     ("lot_width_median", soft("lot_width_median", "lot width at mid-depth, median", Check::Range(125.0, 155.0))),
-    ("takes_four_share", soft("takes_eight_share", "lots that take 8 stations", Check::Min(0.80))),
+    ("takes_four_share", soft("takes_six_share", "lots that take 6 stations", Check::Min(0.90))),
     ("lot_depth_median", soft("lot_depth_median", "lot depth, median", Check::Range(120.0, 140.0))),
     ("cover_green", soft("cover_green", "coverage: green", Check::Range(0.08, 0.27))),
 ];
@@ -688,10 +696,15 @@ pub fn measure(plan: &Plan) -> Measured {
     m.lot_width_median = percentile(&widths, 0.5);
     let depths: Vec<f64> = lots.iter().map(|l| depth(l)).collect();
     m.lot_depth_median = percentile(&depths, 0.5);
-    let four = lots.iter().filter(|l| station_room::takes(&l.corners, 4)).count();
-    m.takes_four_share = (!lots.is_empty()).then(|| four as f64 / lots.len() as f64);
-    let eight = lots.iter().filter(|l| station_room::takes(&l.corners, 8)).count();
-    m.takes_eight_share = (!lots.is_empty()).then(|| eight as f64 / lots.len() as f64);
+    // One packing a lot, up to more than any suburban lot takes.
+    let room: Vec<usize> = lots.iter().map(|l| station_room::most(&l.corners, 24)).collect();
+    let share = |n: usize| (!lots.is_empty()).then(|| room.iter().filter(|&&r| r >= n).count() as f64 / lots.len() as f64);
+    m.takes_four_share = share(4);
+    m.takes_six_share = share(6);
+    m.takes_eight_share = share(8);
+    let room_f: Vec<f64> = room.iter().map(|&r| r as f64).collect();
+    m.stations_median = percentile(&room_f, 0.5);
+    m.stations_mean = (!lots.is_empty()).then(|| room_f.iter().sum::<f64>() / lots.len() as f64);
     let convex = lots.iter().filter(|l| is_convex(&l.corners)).count();
     for l in lots.iter().filter(|l| !is_convex(&l.corners)) {
         mark("concave", centroid(&l.corners), format!("{} is not convex", l.id));
@@ -836,10 +849,10 @@ fn bounds(c: &[P; 4]) -> (P, P) {
 }
 
 /// What a Plots v2 suburb (#456) holds of its lots, where the patterns
-/// differ: the share taking 8 stations, the median area's top, the median
+/// differ: the share taking 6 stations, the median area's top, the median
 /// depth's floor and the green's top. The rest is the same for all.
 pub struct Grown {
-    pub takes_eight: f64,
+    pub takes_six: f64,
     pub area_max: f64,
     pub depth_min: f64,
     pub green_max: f64,
@@ -868,9 +881,9 @@ impl Grown {
         assert!(m.lot_area_p5.unwrap() >= 10000.0 && m.lot_area_p95.unwrap() <= 28000.0, "{why}");
         assert!((125.0..=155.0).contains(&m.lot_width_median.unwrap()), "{why}");
         assert!((self.depth_min..=140.0).contains(&m.lot_depth_median.unwrap()), "{why}");
-        // The plots plan wants 80% to take 8. Pies and the fans round
-        // U-turns and corners can't, so about half do (#456, #466).
-        assert!(m.takes_eight_share.unwrap() >= self.takes_eight, "{why}");
+        // A whole workshop: Plots v2 wants 90% to take 6 (#468). Take 8,
+        // the plan's first target, is printed but not held (#466).
+        assert!(m.takes_six_share.unwrap() >= self.takes_six, "{why}");
         assert!(m.trimmed_share.unwrap() <= 0.10, "{why}");
         assert!(m.dropped_share.unwrap() <= 0.03, "{why}");
         assert!(m.cover_lots.unwrap() >= 0.55, "{why}");

@@ -30,7 +30,7 @@
   Whose lots: today (the default) or grown, Plots v2's
   (NeighbourhoodParams::grown, #456). grown puts the suburb at r2160 to
   r3600 unless -Inner and -Outer say otherwise, holds it to Plots v2's
-  targets, and draws the lots that don't take 8 stations in sand.
+  targets, and draws the lots that don't take 6 stations in sand (#468).
 
 .PARAMETER Out
   Output folder. Default: target/suburb-plan at the repo root.

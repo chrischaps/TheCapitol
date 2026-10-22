@@ -903,7 +903,7 @@ mod tests {
                 neighbourhoods: &neighbourhoods,
                 greens: &greens,
                 area: if grown { (10000.0, 28000.0) } else { (AREA_LO, AREA_HI) },
-                takes: grown.then_some(8),
+                takes: grown.then_some(6),
             };
             std::fs::write(out.join(format!("{name}.svg")), svg(&view)).unwrap();
             let json = serde_json::json!({ "metrics": m, "violations": viol, "markers": measured.markers });
