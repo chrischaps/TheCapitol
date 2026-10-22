@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::engine::market_matcher::Market;
 use crate::engine::tunables::Live;
 use crate::engine::sampler::Samples;
+use crate::engine::talk::Talk;
 use crate::engine::town::Town;
 use crate::engine::GameState;
 use crate::rate_limit::RateLimiter;
@@ -62,6 +63,8 @@ pub struct AppState {
     pub samples: Arc<Samples>,
     /// The town's newest report (D4.1)
     pub town: Arc<Town>,
+    /// The Capitol channel's last lines, in memory only (Commons S1.1)
+    pub talk: Arc<Talk>,
 }
 
 impl AppState {
@@ -83,6 +86,7 @@ impl AppState {
             tunables,
             samples: Arc::new(Samples::new()),
             town: Arc::new(Town::new()),
+            talk: Arc::new(Talk::new()),
         }
     }
 }

@@ -248,6 +248,19 @@ pub enum StateEvent {
         number: i64,
         headline: String,
     },
+    /// Someone said a line you hear (`said`, Commons S1.1): a local one near
+    /// you, or one on the Capitol channel. Speech over heads (S1.2) and the
+    /// chat panel (S1.3) show it.
+    Said {
+        from: Uuid,
+        name: String,
+        /// The speaker is a citizen (C0.1)
+        citizen: bool,
+        channel: crate::protocol::ws::Channel,
+        text: String,
+        x: f64,
+        y: f64,
+    },
     /// Someone bought from your bazaar stall (`bazaar_sale`, E3.10). Flint
     /// toasts it (E3.11).
     BazaarSale {
@@ -824,6 +837,16 @@ impl GameState {
                 day: *day,
                 number: *number,
                 headline: headline.clone(),
+            }),
+            // Commons S1.1: the server sends only what you hear
+            M::Said { from, name, citizen, channel, text, x, y } => out.push(StateEvent::Said {
+                from: *from,
+                name: name.clone(),
+                citizen: *citizen,
+                channel: *channel,
+                text: text.clone(),
+                x: *x,
+                y: *y,
             }),
             // E3.10: to the merchant. The store takes the sale off your
             // listing, or closes your shop.

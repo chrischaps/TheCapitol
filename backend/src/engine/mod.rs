@@ -30,6 +30,7 @@ pub mod plot_sync;
 pub mod presence;
 pub mod property_tax;
 pub mod sampler;
+pub mod talk;
 mod regeneration;
 pub mod slow_work;
 pub mod slot_moves;

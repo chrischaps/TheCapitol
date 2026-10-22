@@ -154,6 +154,14 @@ pub enum ClientMessage {
     /// key is refused while one of the player's own clients is connected.
     #[serde(rename = "claim_presence")]
     ClaimPresence,
+    // Commons S1.1: talk
+    /// Say a line (Commons D1): `local` to those within
+    /// [`crate::rules::talk::HEARD`] of you, `capitol` to everyone. It's
+    /// cleaned by [`crate::rules::talk::clean`] and counted in the account's
+    /// chat bucket. Answered by the `said` everyone who hears it gets, you
+    /// among them, or `error`. A watcher (E0.8) may say only `capitol`.
+    #[serde(rename = "say")]
+    Say { channel: Channel, text: String },
 }
 
 impl ClientMessage {
@@ -189,6 +197,7 @@ impl ClientMessage {
             ClientMessage::SubscribeMarket { .. } => "subscribe_market",
             ClientMessage::UnsubscribeMarket { .. } => "unsubscribe_market",
             ClientMessage::ClaimPresence => "claim_presence",
+            ClientMessage::Say { .. } => "say",
         }
     }
 }
@@ -595,6 +604,25 @@ pub enum ServerMessage {
     /// any notices waiting for you.
     #[serde(rename = "resync")]
     Resync { missed: u64 },
+    // Commons S1.1: talk
+    /// `name` said `text` on `channel`, standing at `x`, `y` (Commons D1).
+    /// Local lines come only from within [`crate::rules::talk::HEARD`] of
+    /// you; Capitol lines from anyone, and the last
+    /// [`crate::rules::talk::CAPITOL_BACKLOG`] of them follow your first
+    /// `subscribed` to `position`. Your own lines come back too. Nothing
+    /// said is stored.
+    #[serde(rename = "said")]
+    Said {
+        from: Uuid,
+        name: String,
+        /// The speaker is a citizen (C0.1)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        citizen: bool,
+        channel: Channel,
+        text: String,
+        x: f64,
+        y: f64,
+    },
 }
 
 impl ServerMessage {
@@ -660,6 +688,7 @@ impl ServerMessage {
             ServerMessage::FeesChanged { .. } => "fees_changed",
             ServerMessage::Presence { .. } => "presence",
             ServerMessage::Resync { .. } => "resync",
+            ServerMessage::Said { .. } => "said",
         }
     }
 }
@@ -680,6 +709,16 @@ pub struct ToolUse {
 pub struct ItemCount {
     pub item_type: String,
     pub quantity: i32,
+}
+
+/// Where a line is said (Commons D1). Guilds come with S4.4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    /// Heard by those within [`crate::rules::talk::HEARD`] of the speaker
+    Local,
+    /// Heard by everyone in the world
+    Capitol,
 }
 
 /// Who holds a player's avatar, in [`ServerMessage::Presence`] (E0.8).

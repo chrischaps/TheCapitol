@@ -257,6 +257,9 @@ pub enum GameEvent {
     MarketTrade { trade: MarketTrade },
     /// E3.9: the Gazette's edition about `day` is out (to everyone)
     GazettePublished { day: i64, number: i64, headline: String },
+    /// Commons S1.1: a line said. Each socket decides whether its player
+    /// hears it (`talk::hears`). `seq` numbers Capitol lines, 0 for a local one.
+    Said { seq: u64, line: super::talk::Line },
     /// D6.1: an admin moved a fee (to everyone)
     FeesChanged { fees: capitol_protocol::tunables::Fees },
     // E3.3: the market API

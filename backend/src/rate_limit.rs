@@ -97,7 +97,6 @@ pub enum Key {
 impl Key {
     /// The talk bucket of the account `account_id`: one for all its
     /// sessions, whether they talk over the socket or write letters.
-    #[cfg_attr(not(test), allow(dead_code))] // `say` (S1.1, #381) and `POST /letters` (S1.5, #385) check it
     pub fn chat(account_id: Uuid) -> Key {
         Key::Account(account_id, Category::Chat)
     }
@@ -330,7 +329,6 @@ pub fn ws_message(retry_after: Duration) -> String {
 
 /// The words for a line of talk or a letter over [`Category::Chat`]'s limit:
 /// `say`'s `error` and `POST /letters`' refusal.
-#[cfg_attr(not(test), allow(dead_code))] // `say` (S1.1, #381) and `POST /letters` (S1.5, #385) answer with it
 pub fn chat_message(retry_after: Duration) -> String {
     format!(
         "You're talking too fast; wait {:.1} s",

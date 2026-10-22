@@ -97,6 +97,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     let player_id = player.id;
+    // Who says this socket's lines, and from where while the avatar's away (S1.1)
+    let (my_name, my_citizen, home) = (player.name.clone(), player.citizen, (player.x, player.y));
     let key = authed.key;
     // A key with only `read` watches: it never holds the avatar (`api_keys`).
     let may_hold = key.is_none_or(|key| key.scopes.takes_presence());
@@ -186,6 +188,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let mut market_items: std::collections::HashSet<String> = std::collections::HashSet::new();
     // This connection's command allowance (E0.7)
     let limit_key = state.limiter.connection();
+    // Whether this socket holds the avatar, as its last `presence` said: only
+    // then does it hear local talk (Commons D1)
+    let mut holds_avatar = false;
+    // The newest Capitol line this socket has, from the backlog or since
+    let mut heard_capitol: u64 = 0;
 
     loop {
         tokio::select! {
@@ -194,6 +201,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             event = presence_events.recv() => {
                 match event {
                     Some(PresenceEvent::Changed { yours, held_by }) => {
+                        holds_avatar = yours;
                         let msg = ServerMessage::Presence { yours, held_by };
                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                     }
@@ -231,7 +239,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
                             // Every `error` below names the command it refuses (#89).
                             let command = client_msg.type_name();
-                            if let Err(wait) = state.limiter.check(limit_key) {
+                            // Talk has its own bucket, so it never costs a step (Commons D2)
+                            let allowance = if matches!(client_msg, ClientMessage::Say { .. }) {
+                                Ok(())
+                            } else {
+                                state.limiter.check(limit_key)
+                            };
+                            if let Err(wait) = allowance {
                                 tracing::info!("Rate limited WS {command} from player {player_id}");
                                 let _ = sender.send(Message::Text(
                                     serde_json::to_string(&ServerMessage::Error {
@@ -286,6 +300,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                 Err(e) => tracing::error!("Failed to load notices for {}: {:?}", player_id, e),
                                             }
                                         }
+                                        // The Capitol channel's last lines (S1.1); any still on
+                                        // `event_rx` are numbered at or below `heard_capitol`
+                                        if first {
+                                            let (seq, lines) = state.talk.backlog();
+                                            heard_capitol = seq;
+                                            for msg in lines {
+                                                let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                            }
+                                        }
                                     }
                                 }
                                 ClientMessage::SubscribeMarket { item_type } => {
@@ -327,6 +350,27 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         Err(msg) => Err(msg),
                                     };
                                     if let Err(message) = claimed {
+                                        let msg = ServerMessage::Error { message, command: command.into() };
+                                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                    }
+                                }
+                                // Talk (S1.1): the avatar's place now, or where it was last
+                                ClientMessage::Say { channel, text } => {
+                                    let (events, (x, y)) = {
+                                        let game = state.game.read().await;
+                                        let at = game.players.get(&player_id).map_or(home, |p| (p.x, p.y));
+                                        (game.event_sender.clone(), at)
+                                    };
+                                    let speaker = crate::engine::talk::Speaker {
+                                        player_id,
+                                        account_id: authed.account_id,
+                                        name: my_name.clone(),
+                                        citizen: my_citizen,
+                                        x,
+                                        y,
+                                        holds_avatar,
+                                    };
+                                    if let Err(message) = state.talk.say(&events, &state.limiter, speaker, channel, &text) {
                                         let msg = ServerMessage::Error { message, command: command.into() };
                                         let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
                                     }
@@ -954,6 +998,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         if player.id == player_id || my_cell.is_none_or(|mine| crate::engine::interest::near(mine, cell)) {
                             let msg = ServerMessage::PlayerJoined { player };
                             let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                        }
+                    }
+                    // Talk (S1.1): local by the cell and then the distance, Capitol to all
+                    Ok(GameEvent::Said { seq, line }) => {
+                        let fresh = line.channel != capitol_protocol::ws::Channel::Capitol || seq > heard_capitol;
+                        if fresh && crate::engine::talk::hears(&line, player_id, holds_avatar, seen.as_deref(), my_cell) {
+                            heard_capitol = heard_capitol.max(seq);
+                            let _ = sender.send(Message::Text(serde_json::to_string(&line.message()).unwrap().into())).await;
                         }
                     }
                     // Leaving goes to everyone, near or far: it ends their trades

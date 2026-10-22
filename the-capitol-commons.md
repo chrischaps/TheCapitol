@@ -178,7 +178,7 @@ Weekly, from records the city already keeps.
 
 ### S1: Talk (`cm:S1-talk`)
 
-- **S1.1 Say** (#381, M): local talk and the Capitol channel on the server.
+- **S1.1 Say** (#381, M): local talk and the Capitol channel on the server. *As built:* `say { channel, text }` and `said { from, name, citizen, channel, text, x, y }` (`citizen` left out for a person, as everywhere else), `Channel` `local | capitol`. `engine::talk` holds it: `Talk::say` cleans, refuses a watcher's local line ("Play here to talk to people nearby"), counts the chat bucket and sends `GameEvent::Said`; `talk::hears` is each socket's test, the interest cell and then `HEARD`, read off the last tick's `Positions` (`Positions::position_of`). The backlog is `AppState::talk`, in memory. Capitol lines are numbered under the backlog's lock, so a socket that has just taken the backlog skips the copy of a line still on its way to it. Differs from the issue: `say` isn't counted in the connection's bucket as well, only in the chat one, so talking never costs a step (D2). A watcher hears no local lines either, its own avatar's included: a socket tracks `presence` for it. There's no admin camera on the server (`sees_everyone` means everyone in the world is in sight, not an admin), so an admin hears local talk as anyone does.
 - **S1.2 Flint: speech over heads** (#382, M).
 - **S1.3 Flint: the chat panel and the chat key** (#383, M).
 - **S1.4 Mutes** (#384, S).

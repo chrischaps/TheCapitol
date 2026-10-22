@@ -204,6 +204,8 @@ pub fn drives_avatar_ws(message: &ClientMessage) -> bool {
             | ClientMessage::StartAutomation { .. }
             | ClientMessage::StopAutomation { .. }
             | ClientMessage::ClaimPresence
+            // A watcher may talk on the Capitol channel; `talk` refuses it a local line
+            | ClientMessage::Say { .. }
     )
 }
 
@@ -337,6 +339,7 @@ mod tests {
             ClientMessage::SubscribeMarket { item_type: "logs".into() },
             ClientMessage::StartAutomation { station_id: "s".into() },
             ClientMessage::ClaimPresence,
+            ClientMessage::Say { channel: capitol_protocol::ws::Channel::Capitol, text: "Hello".into() },
         ] {
             assert!(!drives_avatar_ws(&watching), "{watching:?}");
         }

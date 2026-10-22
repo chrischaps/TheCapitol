@@ -235,6 +235,7 @@ fn test_for(message: &M) -> fn() {
         M::BazaarSale { .. } => bazaar_notices_are_reported,
         M::StallLapsed { .. } => bazaar_notices_are_reported,
         M::Resync { .. } => a_socket_that_fell_behind_resyncs_like_a_reconnect,
+        M::Said { .. } => said_is_reported,
     }
 }
 
@@ -1378,6 +1379,34 @@ fn gazette_published_is_reported() {
     assert_eq!(
         state.apply_ws(&M::GazettePublished { day: 248_952, number: 13, headline: headline.clone() }),
         vec![StateEvent::GazettePublished { day: 248_952, number: 13, headline }]
+    );
+}
+
+#[test]
+fn said_is_reported() {
+    use crate::protocol::ws::Channel;
+    let mut state = connected();
+    let from = Uuid::from_u128(7);
+    let said = M::Said {
+        from,
+        name: "Brin".into(),
+        citizen: true,
+        channel: Channel::Local,
+        text: "Rope, anyone?".into(),
+        x: 6800.0,
+        y: 6790.5,
+    };
+    assert_eq!(
+        state.apply_ws(&said),
+        vec![StateEvent::Said {
+            from,
+            name: "Brin".into(),
+            citizen: true,
+            channel: Channel::Local,
+            text: "Rope, anyone?".into(),
+            x: 6800.0,
+            y: 6790.5,
+        }]
     );
 }
 

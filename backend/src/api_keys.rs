@@ -214,7 +214,9 @@ pub fn ws_scope(message: &ClientMessage) -> ApiKeyScope {
         | ClientMessage::RemoveTool { .. }
         | ClientMessage::ConfigureAutomation { .. }
         | ClientMessage::StartAutomation { .. }
-        | ClientMessage::StopAutomation { .. } => ApiKeyScope::Play,
+        | ClientMessage::StopAutomation { .. }
+        // A citizen talks on its Play key (Commons S1.1)
+        | ClientMessage::Say { .. } => ApiKeyScope::Play,
         ClientMessage::TradeInitiate { .. }
         | ClientMessage::TradeAcceptRequest
         | ClientMessage::TradeDeclineRequest
@@ -444,6 +446,9 @@ mod tests {
         assert!(play.allows(ws_scope(&ClientMessage::Steer { heading: 0, throttle: 10, at: None })));
         assert!(!read.allows(ws_scope(&ClientMessage::Steer { heading: 0, throttle: 0, at: None })));
         assert!(!play.allows(ws_scope(&ClientMessage::TradeAccept)));
+        // A citizen talks on its Play key (Commons S1.1)
+        let say = ClientMessage::Say { channel: capitol_protocol::ws::Channel::Local, text: "Hello".into() };
+        assert!(play.allows(ws_scope(&say)) && !read.allows(ws_scope(&say)));
     }
 
     #[test]

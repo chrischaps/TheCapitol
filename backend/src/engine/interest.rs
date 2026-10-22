@@ -209,6 +209,13 @@ impl Positions {
         }
     }
 
+    /// Where `player_id` stands, if they're in the world (talk's distance,
+    /// S1.1): a look through their own cell
+    pub fn position_of(&self, player_id: Uuid) -> Option<(f64, f64)> {
+        let cell = self.cell_of(player_id)?;
+        self.cells[&cell].players.iter().find(|p| p.id == player_id).map(|p| (p.x, p.y))
+    }
+
     /// The players in sight of someone in `cell`, none if they're nowhere
     pub fn near(&self, cell: Option<Cell>) -> Vec<PlayerPosition> {
         self.around(cell).flat_map(|b| b.players.iter().cloned()).collect()
