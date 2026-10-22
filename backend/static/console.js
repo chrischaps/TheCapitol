@@ -16,6 +16,8 @@
 // against target, and D2.4 what's made and used, the stock, and the
 // workshops. D4.2 grows the town tab: who's on, the roster from the
 // town's report, how the questions were settled and what that costs.
+// D6.2 makes the tuning tab: each knob beside its chart, set and reset
+// live, and presets as TOML.
 
 "use strict";
 
@@ -298,6 +300,7 @@
             state.tab === "economy" ? readSeries("money") : null,
             state.tab === "economy" ? readSeries("making") : null,
             state.tab === "town" ? readSeries("town") : null,
+            state.tab === "tuning" ? Promise.all([readSeries("money"), readSeries("making"), readSeries("load")]) : null,
           ]);
         }
         setLive("live");
@@ -334,7 +337,7 @@
         addSample(sample);
         state.lastSampleAt = Date.now();
         tickLive();
-        render(["overview", "economy", "performance", "town"]);
+        render(["overview", "economy", "performance", "town", "tuning"]);
         break;
       }
       case "annotation": {
@@ -579,7 +582,7 @@
     }),
     // The Gini and the richest tenth's share both run 0 to 1, so they share
     // an axis, with the Gini watch's threshold over them (D2.5)
-    spread: () => lineChart($("chart-spread"), {
+    spread: (el = $("chart-spread")) => lineChart(el, {
       has: (s) => s.distribution?.gini != null,
       range: () => [0, 1],
       axis: (v) => v.toFixed(1),
@@ -590,7 +593,7 @@
         { label: "Gini watch", color: "--budget", width: 1, dash: [5, 4], value: () => state.giniWatch },
       ],
     }),
-    tick: () => lineChart($("chart-tick"), {
+    tick: (el = $("chart-tick")) => lineChart(el, {
       has: (s) => s.load,
       log: true,
       axis: (v) => (v == null ? "" : `${v} ms`),
@@ -694,11 +697,56 @@
     legend: (v) => `${nf.format(Math.round(v))} a second`,
     series: [{ label: "Transactions", color: "--s1", value: (s) => s.load.db_transactions_per_sec }],
   });
+  // The tuning tab's charts (D6.2), each beside its knobs. The sinks and
+  // what's made are the economy's stacked bars drawn as a line each, so the
+  // line a knob moves reads on its own; the rest are the other tabs' charts
+  // drawn again
+  CHARTS["tune-sinks"] = () => lineChart($("chart-tune-sinks"), {
+    rows: () => sideRows(money, "out", -1, KNOB_SINKS),
+    axis: short,
+    legend: (v) => `${count(v)} Strands`,
+    series: () => sinkLines().map((l) => ({ key: l.key, label: l.label, color: l.color, width: 2 })),
+  });
+  // The sinks a knob moves have a line even when nothing flowed, so the tax
+  // knob always has its tax line beside it, flat at nothing if need be
+  const KNOB_SINKS = ["tax", "deeds", "rent", "fees", "withdrawals"];
+  function sinkLines() {
+    const out = money.lines.filter((l) => l.side === "out");
+    const missing = KNOB_SINKS.filter((k) => !out.some((l) => l.key === k))
+      .map((key) => ({ key, side: "out", label: LINES[key].label, say: LINES[key].say, color: `--fl-${key}` }));
+    return [...out, ...missing];
+  }
+  CHARTS["tune-production"] = () => lineChart($("chart-tune-production"), {
+    rows: () => sideRows(making, "in", 1),
+    axis: short,
+    legend: (v) => plural(Math.round(v), "unit", "units"),
+    series: () => making.lines.filter((l) => l.side === "in").map((l) => ({ key: l.key, label: l.label, color: l.color, width: 2 })),
+  });
+  CHARTS["tune-distribution"] = () => CHARTS.spread($("chart-tune-distribution"));
+  CHARTS["tune-prices"] = () => CHARTS.prices($("chart-tune-prices"));
+  CHARTS["tune-tick"] = () => CHARTS.tick($("chart-tune-tick"));
+
+  /**
+   * One side of a stacked chart's rows as each line's own amount a bar, `sign`
+   * up. Each of `always` the range has no flow of is drawn at nothing where
+   * the bin has samples.
+   */
+  function sideRows(set, side, sign, always = []) {
+    const r = set.rows;
+    if (!r) return { x: [], shown: [], values: {} };
+    const values = {};
+    for (const l of set.lines) if (l.side === side) values[l.key] = r.own[l.key].map((v) => (v == null ? null : sign * v || 0));
+    const any = Object.values(r.own)[0];
+    for (const key of always) values[key] ??= r.x.map((_, i) => (any && any[i] == null ? null : 0));
+    return { x: r.x, shown: r.shown, values };
+  }
+
   const PAGE_CHARTS = {
     overview: ["players"],
     economy: ["strands", "flows", "escrow", "velocity", "spread", "prices", "making"],
     performance: ["tick", "phases", "over", "commands", "bus", "sockets", "pool", "txns"],
     town: ["townOn", "rulings", "cost"],
+    tuning: ["tune-sinks", "tune-production", "tune-distribution", "tune-prices", "tune-tick"],
   };
 
   function chart(name) {
@@ -769,7 +817,7 @@
   // render by `prices`
   let priceLines = [];
   let priceTrail = new Map();
-  CHARTS.prices = () => lineChart($("chart-prices"), {
+  CHARTS.prices = (el = $("chart-prices")) => lineChart(el, {
     has: (s) => s.market,
     log: true,
     axis: (v) => `${Number((v * 100).toPrecision(2))}%`,
@@ -807,8 +855,10 @@
     }));
     if (lines.join() !== priceLines.join()) {
       priceLines = lines;
-      state.charts.prices?.destroy();
-      delete state.charts.prices;
+      for (const name of ["prices", "tune-prices"]) {
+        state.charts[name]?.destroy();
+        delete state.charts[name];
+      }
     }
     chart("prices");
 
@@ -1348,7 +1398,7 @@
     const key = lines.map((l) => l.key).join();
     const rebuild = key !== money.key;
     money = { lines, key, rows: { x, shown, values, own }, velocity: { x, shown, values: { velocity } } };
-    if (rebuild) state.charts.flows?.rebuild();
+    if (rebuild) for (const name of ["flows", "tune-sinks"]) state.charts[name]?.rebuild();
     chart("flows");
     chart("velocity");
     flowsHeadline(shown, lines, totals);
@@ -1542,7 +1592,7 @@
     const key = lines.map((l) => l.key).join();
     const rebuild = key !== making.key;
     making = { lines, key, rows: { x, shown: p.shown, values, own } };
-    if (rebuild) state.charts.making?.rebuild();
+    if (rebuild) for (const name of ["making", "tune-production"]) state.charts[name]?.rebuild();
     chart("making");
 
     const h = $("making-headline");
@@ -2349,32 +2399,302 @@
     h.textContent = line;
   }
 
+  // ---------------------------------------------------------------------------
+  // Tuning (D6.2): every knob beside the chart it's watched on, set or reset
+  // live, and the lot exported and imported as a TOML preset
+
+  const TUNE_CHARTS = ["sinks", "production", "distribution", "prices", "tick"];
+  // The line a knob moves on its chart, for the swatch beside it. A family's
+  // knobs go by the family's key
+  const KNOB_LINE = {
+    exchange_fee_rate: "--fl-withdrawals",
+    listing_fee_percent: "--fl-fees",
+    stall_rent_per_day: "--fl-rent",
+    property_tax_rate: "--fl-tax",
+    watch_tax_per_hour: "--fl-tax",
+    deed_price: "--fl-deeds",
+    yield: "--uf-gathered",
+    node_regen_rate: "--uf-gathered",
+    watch_gini: "--budget",
+    watch_off_target: "--marker",
+    watch_tick_p95: "--budget",
+  };
+  // The knobs as the server last said, and each one's row by key
+  let knobs = null;
+  const knobRows = new Map();
+
+  // A fraction is typed as the percent it reads as
+  const typed = (k, v) => (k.unit === "fraction" ? Number((v * 100).toFixed(6)) : v);
+  const untyped = (k, v) => (k.unit === "fraction" ? v / 100 : v);
+  const AFFIX = { fraction: ["", "%"], percent: ["", "%"], strands: ["", "Strands"], multiplier: ["×", ""], ratio: ["", ""] };
+  const knobOf = (key) => knobs?.find((k) => k.key === key);
+
   async function loadKnobs() {
-    let knobs;
-    try { ({ knobs } = await getJson("/admin/tunables")); } catch (e) {
+    let list;
+    try { ({ knobs: list } = await getJson("/admin/tunables")); } catch (e) {
       if (!(e instanceof SignedOut)) $("tuning-headline").textContent = "The knobs couldn't be read.";
       return;
     }
-    state.giniWatch = knobs.find((k) => k.key === "watch_gini")?.value ?? state.giniWatch;
+    showKnobs(list);
+  }
+
+  function showKnobs(list) {
+    knobs = list;
+    state.giniWatch = knobOf("watch_gini")?.value ?? state.giniWatch;
     state.charts.spread?.update();
+    state.charts["tune-distribution"]?.update();
     const off = knobs.filter((k) => k.value !== k.default);
     $("tuning-headline").textContent = off.length === 0
       ? `Every one of the ${knobs.length} knobs is at its default.`
       : off.length <= 3
         ? `${off.length} of ${knobs.length} knobs ${off.length === 1 ? "is" : "are"} off ${off.length === 1 ? "its default" : "their defaults"}: ${off.map((k) => `${k.label} at ${unit(k.unit, k.value)}`).join(", ")}.`
         : `${off.length} of ${knobs.length} knobs are off their defaults.`;
-    $("knobs").tBodies[0].replaceChildren(...knobs.map((k) => {
-      const tr = document.createElement("tr");
-      if (k.value !== k.default) tr.className = "off";
-      tr.append(
-        cell([k.label, " ", text("code", k.key)]),
-        cell(unit(k.unit, k.value), "num now"),
-        cell(unit(k.unit, k.default), "num dim"),
-        cell(k.unit === "strands" ? `${nf.format(k.min)} to ${nf.format(k.max)} Strands` : `${unit(k.unit, k.min)} to ${unit(k.unit, k.max)}`, "num dim"),
-        cell(k.chart.charAt(0).toUpperCase() + k.chart.slice(1), "dim"),
-      );
-      return tr;
-    }));
+
+    // The rows are made once for a set of knobs, then kept, so a value being
+    // typed survives a change that comes in from elsewhere
+    const keys = knobs.map((k) => k.key).join();
+    if (keys !== [...knobRows.keys()].join()) {
+      knobRows.clear();
+      const groups = new Map();
+      for (const k of knobs) {
+        const g = TUNE_CHARTS.includes(k.chart) ? k.chart : "other";
+        if (!groups.has(g)) groups.set(g, []);
+        groups.get(g).push(knobRow(k));
+      }
+      for (const story of document.querySelectorAll(".tune")) {
+        const rows = groups.get(story.dataset.chart) ?? [];
+        story.querySelector("tbody").replaceChildren(...rows.map((r) => r.tr));
+        if (story.dataset.chart === "other") story.hidden = rows.length === 0;
+      }
+    }
+    for (const k of knobs) paintKnob(k);
+    $("reset-all").disabled = off.length === 0;
+  }
+
+  function knobRow(k) {
+    const tr = document.createElement("tr");
+    const input = document.createElement("input");
+    input.type = "number";
+    input.inputMode = "decimal";
+    input.className = "knob-input";
+    input.min = typed(k, k.min);
+    input.max = typed(k, k.max);
+    input.step = typed(k, k.step);
+    input.title = `${unit(k.unit, k.min)} to ${unit(k.unit, k.max)}`;
+    input.setAttribute("aria-label", k.label);
+    input.addEventListener("input", () => input.setCustomValidity(""));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { input.value = typed(k, knobOf(k.key).value); input.blur(); }
+    });
+    input.addEventListener("change", () => {
+      const v = Number(input.value);
+      if (input.value === "" || !Number.isFinite(v)) return void (input.value = typed(k, knobOf(k.key).value));
+      setKnobs({ [k.key]: untyped(k, v) }, input);
+    });
+    const reset = document.createElement("button");
+    reset.type = "button";
+    reset.className = "quiet";
+    reset.textContent = "Reset";
+    reset.setAttribute("aria-label", `Reset ${k.label} to ${unit(k.unit, k.default)}`);
+    reset.addEventListener("click", () => setKnobs({ [k.key]: k.default }, input));
+
+    const swatch = document.createElement("i");
+    swatch.className = "swatch";
+    swatch.style.setProperty("--c", `var(${KNOB_LINE[k.key.split(".")[0]] ?? "--rule"})`);
+    swatch.setAttribute("aria-hidden", "true");
+    const [before, after] = AFFIX[k.unit] ?? ["", ""];
+    const now = document.createElement("label");
+    now.className = "knob-now";
+    now.append(text("span", before), input, text("span", after));
+    const name = text("span", k.label.replace(/_/g, " "));
+    name.className = "knob-name";
+    const sub = document.createElement("span");
+    sub.className = "knob-sub";
+    sub.append(text("code", k.key), " ", text("span", `· ${unit(k.unit, k.default)} by default`));
+    tr.append(
+      cell([swatch, name, sub]),
+      cell(now, "num now"),
+      cell(reset, "num"),
+    );
+    const row = { tr, input, reset };
+    knobRows.set(k.key, row);
+    return row;
+  }
+
+  function paintKnob(k) {
+    const row = knobRows.get(k.key);
+    if (!row) return;
+    const off = k.value !== k.default;
+    row.tr.classList.toggle("off", off);
+    row.reset.disabled = !off;
+    if (document.activeElement !== row.input) row.input.value = typed(k, k.value);
+  }
+
+  /** The words of a refusal: the server's `error`, or the status */
+  async function refusal(res) {
+    const body = await res.text();
+    try { return JSON.parse(body).error ?? body; } catch { return body || `The server said ${res.status}.`; }
+  }
+
+  /** Set knobs by key. A refusal is said at `input`, and the knob put back */
+  async function setKnobs(values, input) {
+    let res;
+    try {
+      res = await api("/admin/tunables", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values }) });
+    } catch (e) {
+      if (e instanceof SignedOut) return;
+      res = null;
+    }
+    if (!res?.ok) {
+      const why = res ? await refusal(res) : "The server didn't answer, so nothing changed.";
+      for (const key of Object.keys(values)) paintKnob(knobOf(key));
+      if (input) { input.setCustomValidity(why); input.reportValidity(); } else presetNote(why);
+      return false;
+    }
+    showKnobs((await res.json()).knobs);
+    return true;
+  }
+
+  function presetNote(s) { $("preset-note").textContent = s; }
+
+  /** What moved between two lists of the knobs, as "Property tax a week to 5%" */
+  function moved(before, after) {
+    const was = new Map(before.map((k) => [k.key, k.value]));
+    return after.filter((k) => was.get(k.key) !== k.value).map((k) => `${k.label} to ${unit(k.unit, k.value)}`);
+  }
+
+  async function exportPreset() {
+    let res;
+    try { res = await api("/admin/tunables/preset"); } catch (e) { if (!(e instanceof SignedOut)) presetNote("The server didn't answer."); return; }
+    if (!res.ok) return presetNote(await refusal(res));
+    const url = URL.createObjectURL(new Blob([await res.text()], { type: "application/toml" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `tunables-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}.toml`;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const off = (knobs ?? []).filter((k) => k.value !== k.default).length;
+    presetNote(`Saved ${a.download}: every one of the ${knobs?.length ?? ""} knobs, ${off === 0 ? "all at their defaults" : `${off} off ${off === 1 ? "its default" : "their defaults"}`}.`);
+  }
+
+  async function importPreset(file) {
+    const before = knobs ?? [];
+    let res;
+    try {
+      res = await api("/admin/tunables/preset", { method: "PUT", headers: { "Content-Type": "application/toml" }, body: await file.text() });
+    } catch (e) { if (!(e instanceof SignedOut)) presetNote("The server didn't answer, so nothing changed."); return; }
+    if (!res.ok) return presetNote(`${file.name} wasn't taken, and nothing changed. ${await refusal(res)}`);
+    const { knobs: after } = await res.json();
+    showKnobs(after);
+    const changes = moved(before, after);
+    presetNote(changes.length === 0
+      ? `Imported ${file.name}: it matched every knob, so nothing changed.`
+      : `Imported ${file.name}: ${changes.length <= 4 ? changes.join(", ") : plural(changes.length, "knob", "knobs") + " changed"}.`);
+  }
+
+  // Resetting every knob takes a second click within a few seconds, rather
+  // than a dialog
+  let resetArmed = null;
+  async function resetAll() {
+    const b = $("reset-all");
+    const off = (knobs ?? []).filter((k) => k.value !== k.default);
+    if (!off.length) return;
+    if (!resetArmed) {
+      b.textContent = `Reset all ${off.length}? Click again`;
+      resetArmed = setTimeout(() => { resetArmed = null; b.textContent = "Reset every knob"; }, 4000);
+      return;
+    }
+    clearTimeout(resetArmed);
+    resetArmed = null;
+    b.textContent = "Reset every knob";
+    const before = knobs;
+    if (await setKnobs(Object.fromEntries(off.map((k) => [k.key, k.default])))) {
+      presetNote(`Reset ${plural(moved(before, knobs).length, "knob", "knobs")} to ${off.length === 1 ? "its default" : "their defaults"}.`);
+    }
+  }
+
+  async function tuning() {
+    if (!knobs) await loadKnobs();
+    const from = rangeFrom();
+    if (!books || state.covered.money > from || state.covered.making > from || state.covered.load > from) {
+      try {
+        books ??= await getJson("/admin/books");
+        await Promise.all([readSeries("money"), readSeries("making"), readSeries("load")]);
+      } catch (e) { if (e instanceof SignedOut) return; console.warn(e); }
+    }
+    // The economy's own sums, which its tab's stories write too
+    if (books) {
+      flows();
+      madeAndUsed(production());
+    }
+    distribution();
+    await prices();
+    for (const c of TUNE_CHARTS) chart(`tune-${c}`);
+    tuneHeadlines();
+  }
+
+  /** Each line's total over the range, biggest first, as [line, amount] */
+  function totalsOf(set, side, sign) {
+    const own = set.rows?.own ?? {};
+    return set.lines
+      .filter((l) => l.side === side)
+      .map((l) => [l, sign * (own[l.key] ?? []).reduce((a, v) => a + (v ?? 0), 0)])
+      .filter(([, n]) => n > 0)
+      .sort((a, b) => b[1] - a[1]);
+  }
+
+  function tuneHeadlines() {
+    const first = (rows) => rows?.shown?.[0];
+    const list = (parts) => parts.length < 2 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
+
+    const sinks = totalsOf(money, "out", -1);
+    const s0 = first(money.rows);
+    $("tune-sinks-headline").textContent = !s0
+      ? "Waiting for the first sample."
+      : sinks.length === 0
+        ? `Nothing was taken out of the world ${since(s0)}.`
+        : `${capital(sinks[0][0].say)} took ${nf.format(sinks[0][1])} Strands ${since(s0)}${sinks.length > 1 ? `; ${list(sinks.slice(1).map(([l, n]) => `${l.say} ${nf.format(n)}`))}` : ""}.`
+          + (sinks.some(([l]) => l.key === "tax") ? "" : " No tax was paid.");
+
+    const made = totalsOf(making, "in", 1);
+    const m0 = first(making.rows);
+    $("tune-production-headline").textContent = !m0
+      ? "Waiting for the first sample."
+      : made.length === 0
+        ? `Nothing came into the world ${since(m0)}.`
+        : `${capital(list(made.map(([l, n]) => `${plural(n, "unit", "units")} ${l.say(n)}`)))} ${since(m0)}.`;
+
+    const d = latest((s) => s.distribution?.gini != null)?.distribution;
+    $("tune-distribution-headline").textContent = !d
+      ? "Waiting for a sample that says."
+      : state.giniWatch == null
+        ? `The Gini is ${d.gini.toFixed(2)}.`
+        : `The Gini is ${d.gini.toFixed(2)}, ${d.gini > state.giniWatch ? "over" : "under"} the watch's ${state.giniWatch.toFixed(2)}.`;
+
+    const firing = (latest((s) => s.watches)?.watches ?? []).filter((w) => w.kind === "off_target").map((w) => item(w.item));
+    const off = knobOf("watch_off_target");
+    $("tune-prices-headline").textContent = firing.length
+      ? `${capital(list(firing))} ${firing.length === 1 ? "has" : "have"} been off target by ${off ? unit(off.unit, off.value) : "the watch's share"} or more for a game day.`
+      : `No item has been off target by ${off ? unit(off.unit, off.value) : "the watch's share"} for a game day.`;
+
+    const l = latest((s) => s.load?.ticks > 0)?.load;
+    const watch = knobOf("watch_tick_p95");
+    $("tune-tick-headline").textContent = !l
+      ? "Waiting for the first sample."
+      : `The tick's p95 is ${ms(l.tick_p95_ms)} against a budget of ${ms(l.tick_period_ms)}${watch ? `; the watch fires over ${ms(watch.value * l.tick_period_ms)}` : ""}.`;
+  }
+
+  function tuningControls() {
+    $("preset-export").addEventListener("click", exportPreset);
+    $("preset-import").addEventListener("click", () => $("preset-file").click());
+    $("preset-file").addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (file) importPreset(file);
+    });
+    $("reset-all").addEventListener("click", resetAll);
   }
 
   // ---------------------------------------------------------------------------
@@ -3212,7 +3532,7 @@
   // ---------------------------------------------------------------------------
   // The tabs, the range and the theme
 
-  const PAGES = { overview, map: mapPage, economy, performance, town: () => town(), tuning: loadKnobs, events };
+  const PAGES = { overview, map: mapPage, economy, performance, town: () => town(), tuning, events };
 
   /** Redraw the open page if it's one of `pages` */
   function render(pages) {
@@ -3310,6 +3630,7 @@
     }
     mapControls();
     rosterControls();
+    tuningControls();
     addEventListener("hashchange", () => show(location.hash.slice(1)));
     $("sign-out").addEventListener("click", () => signOut(null));
 

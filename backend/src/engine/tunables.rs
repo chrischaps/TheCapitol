@@ -12,6 +12,9 @@
 //! every value before setting any, writes the rows and a `tunable_changed`
 //! annotation per knob in one transaction, then swaps the new set in. When a
 //! fee moved, every socket hears `fees_changed`, so a client's previews follow.
+//!
+//! [`preset`] writes and reads the knobs as TOML, for the console's tuning tab
+//! (D6.2) and the balance runs (D6.3).
 
 use std::sync::Arc;
 
@@ -210,6 +213,81 @@ pub async fn update(
     Ok(changes)
 }
 
+/// A preset: every knob as TOML, to export, edit and import (D6.2).
+///
+/// ```toml
+/// [tunables]
+/// # Property tax a week: 2% by default, 0% to 50%
+/// property_tax_rate = 0.05
+/// "yield.clay" = 2.0
+/// ```
+///
+/// A family's key is quoted, since a bare dotted key would be a table in TOML.
+/// Values are in the knob's own terms (a fraction, a multiplier, Strands), as
+/// `PUT /admin/tunables` takes them. Importing a preset sets every knob: the
+/// ones it names to their values, and the rest to their defaults, so the world
+/// runs on the preset and nothing left over from before.
+pub mod preset {
+    use std::collections::BTreeMap;
+    use std::fmt::Write;
+
+    use capitol_protocol::tunables::{TunableValue, TunablesUpdate};
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Preset {
+        #[serde(default)]
+        tunables: BTreeMap<String, f64>,
+    }
+
+    /// `knobs` as a preset, with each one's label, default and range in a
+    /// comment over it. `exported` heads it: "2026-10-22 14:05 UTC".
+    pub fn write(knobs: &[TunableValue], exported: &str) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "# The Capitol: a preset of the live tunables, exported {exported}.");
+        out.push_str(
+            "#\n\
+             # Importing it sets every knob: the ones named here to their values, and\n\
+             # the rest to their defaults. Values are in each knob's own terms: a\n\
+             # fraction (0.02 is 2%), a percent, a multiplier, Strands or ticks.\n\
+             \n\
+             [tunables]\n",
+        );
+        for k in knobs {
+            let _ = writeln!(
+                out,
+                "# {}: {} by default, {} to {}",
+                k.label,
+                k.unit.format(k.default),
+                k.unit.format(k.min),
+                k.unit.format(k.max),
+            );
+            let _ = writeln!(out, "{} = {:?}", key(&k.key), k.value);
+        }
+        out
+    }
+
+    /// A key as TOML has it: bare when it can be, quoted otherwise
+    fn key(k: &str) -> String {
+        if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            k.to_string()
+        } else {
+            format!("\"{}\"", k.replace('\\', "\\\\").replace('"', "\\\""))
+        }
+    }
+
+    /// The update a preset makes against `knobs`, the world's list: each knob
+    /// to the preset's value or, if it doesn't name it, to its default. A key
+    /// it names that isn't on the list stays in, so the update refuses it.
+    pub fn read(text: &str, knobs: &[TunableValue]) -> Result<TunablesUpdate, String> {
+        let preset: Preset = toml::from_str(text).map_err(|e| format!("Not a preset: {}", e.message()))?;
+        let mut values: BTreeMap<String, f64> = knobs.iter().map(|k| (k.key.clone(), k.default)).collect();
+        values.extend(preset.tunables);
+        Ok(TunablesUpdate { values })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +317,56 @@ mod tests {
             ("property_tax_rate".into(), TunableError::OutOfRange { min: 0.0, max: 0.5 }),
         ]);
         assert_eq!(e.message(&update), "nonsense: no such tunable; property_tax_rate: 0.9 is outside 0 to 0.5");
+    }
+
+    fn list(tunables: &Tunables) -> Vec<capitol_protocol::tunables::TunableValue> {
+        let known = known();
+        capitol_protocol::tunables::TunablesResponse::list(tunables, &known.zones, &known.resources).knobs
+    }
+
+    /// A preset exported, changed and imported sets what it says (D6.2's Verify)
+    #[test]
+    fn a_preset_round_trips() {
+        let mut moved = Tunables::default();
+        let ok = |_: Family, _: &str| true;
+        moved.set("property_tax_rate", 0.05, ok).unwrap();
+        moved.set("yield.clay", 2.0, ok).unwrap();
+        moved.set("stall_rent_per_day", 35.0, ok).unwrap();
+        let text = preset::write(&list(&moved), "2026-10-22 14:05 UTC");
+        assert!(text.contains("\n# Property tax a week: 2% by default, 0% to 50%\nproperty_tax_rate = 0.05\n"), "{text}");
+        assert!(text.contains("\n\"yield.clay\" = 2.0\n"), "{text}");
+
+        // Read back unchanged: every knob as it was
+        let update = preset::read(&text, &list(&Tunables::default())).unwrap();
+        let mut read = Tunables::default();
+        for (key, value) in &update.values {
+            read.set(key, *value, ok).unwrap();
+        }
+        assert_eq!(read, moved);
+
+        // Changed by hand, as a person would, an integer for a float among it
+        let edited = text.replace("property_tax_rate = 0.05", "property_tax_rate = 0.1").replace("\"yield.clay\" = 2.0", "\"yield.clay\" = 3");
+        let update = preset::read(&edited, &list(&moved)).unwrap();
+        assert_eq!(update.values["property_tax_rate"], 0.1);
+        assert_eq!(update.values["yield.clay"], 3.0);
+        assert_eq!(update.values["stall_rent_per_day"], 35.0);
+    }
+
+    /// A preset that leaves a knob out puts it back to its default; one that
+    /// names a knob there isn't keeps it, so the update refuses it
+    #[test]
+    fn a_preset_sets_every_knob() {
+        let mut moved = Tunables::default();
+        moved.set("yield.clay", 2.0, |_, _| true).unwrap();
+        let update = preset::read("[tunables]\nproperty_tax_rate = 0.05\nnonsense = 1\n", &list(&moved)).unwrap();
+        assert_eq!(update.values["property_tax_rate"], 0.05);
+        assert_eq!(update.values["yield.clay"], 1.0);
+        assert_eq!(update.values["nonsense"], 1.0);
+        assert_eq!(update.values.len(), list(&moved).len() + 1);
+
+        let Err(e) = preset::read("[tunable]\nproperty_tax_rate = 0.05\n", &list(&moved)) else { panic!("read a typo") };
+        assert!(e.starts_with("Not a preset: "), "{e}");
+        assert!(preset::read("[tunables]\nproperty_tax_rate = \"5%\"\n", &list(&moved)).is_err());
     }
 
     mod db {
