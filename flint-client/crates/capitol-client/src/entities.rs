@@ -230,6 +230,8 @@ impl Players {
                     me: Some(*id) == me,
                     citizen: avatar.citizen,
                     craft: crafting.then_some(avatar.craft.shown),
+                    // Filled from the talk log after (Commons S1.2)
+                    line: None,
                 });
             }
             true
@@ -511,6 +513,57 @@ pub fn sample(target: [f32; 2], camera: [f32; 2]) -> (GameState, Vec<Pose>) {
         });
     }
     (state, poses)
+}
+
+/// What the sample's row says (`--talk-sample`, Commons S1.2): who (their
+/// place in the row), when (game seconds) and the line. The second is long
+/// enough to run past three rows.
+const SAMPLE_TALK: [(usize, f64, &str); 3] = [
+    (1, 1.0, "Morning. The kiln's lit, if you're after bricks."),
+    (
+        3,
+        3.0,
+        "Has anyone seen what iron fetches this week? The book's gone mad since the wilds opened, and I've a forge to feed.",
+    ),
+    (2, 5.0, "I'll walk out to the ranges tomorrow."),
+];
+
+/// The sample's row talking (`--talk-sample`): its lines, said on time.
+#[derive(Debug, Default)]
+pub struct TalkSample {
+    pub log: capitol_core::talk::Log,
+    said: usize,
+}
+
+impl TalkSample {
+    /// Say whatever is due by `now` (game seconds), standing in the row
+    /// `state` and `poses` hold, and return the lines just said.
+    pub fn tick(&mut self, now: f64, state: &GameState, poses: &[Pose]) -> Vec<capitol_core::talk::Line> {
+        let mut said = Vec::new();
+        while let Some(&(who, at, text)) = SAMPLE_TALK.get(self.said) {
+            if now < at {
+                break;
+            }
+            self.said += 1;
+            let id = Uuid::from_u128(0xc0_02_00 + who as u128);
+            let (Some(pose), Some(player)) = (poses.iter().find(|p| p.id == id), state.player(id)) else {
+                continue;
+            };
+            let line = capitol_core::talk::Line {
+                from: id,
+                name: player.name.clone(),
+                citizen: player.citizen,
+                channel: capitol_core::protocol::ws::Channel::Local,
+                text: text.to_owned(),
+                x: pose.x,
+                y: pose.y,
+                at: now,
+            };
+            self.log.heard(line.clone());
+            said.push(line);
+        }
+        said
+    }
 }
 
 // ── The figure ───────────────────────────────────────────────────────────

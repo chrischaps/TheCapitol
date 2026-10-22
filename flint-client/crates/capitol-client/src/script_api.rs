@@ -384,6 +384,96 @@ pub struct PlayerLabel {
     pub citizen: bool,
     /// How far their craft has got, 0 to 1, while they craft (P5.5).
     pub craft: Option<f32>,
+    /// What they're saying (Commons S1.2).
+    pub line: Option<Speech>,
+}
+
+/// A line over a player's head (Commons S1.2), as the talk log has it this
+/// frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Speech {
+    pub text: String,
+    /// The bubble's alpha as it opens and fades.
+    pub alpha: f32,
+    /// Seconds since it was said: the newest bubble hangs lowest.
+    pub age: f32,
+}
+
+impl Speech {
+    /// From what `talk::Log::bubble` gives.
+    pub fn of((text, alpha, age): (&str, f32, f64)) -> Self {
+        Self {
+            text: text.to_owned(),
+            alpha,
+            age: age as f32,
+        }
+    }
+}
+
+/// A tag's `bubble` for `hud.rhai`: `#{ x, y, w, h, size, a, tip_x, tip_y,
+/// rows: [#{ text, x, y }], caption, paper, edge, ink, dim }`. The box's
+/// top left and size, where its tail points, each row's centre and top, the
+/// speaker's name when it had no room over their head (`#{ text, x, y,
+/// size, glyph }`, the name's top left, or `()`), and the theme's paper and
+/// inks as `[r, g, b]`, so the HUD keeps the panels' look.
+fn bubble_map(b: &crate::labels::Bubble) -> rhai::Map {
+    use crate::ui::theme;
+    let f = |v: f32| rhai::Dynamic::from(v as f64);
+    let rgb = |c: egui::Color32| {
+        rhai::Dynamic::from_array(
+            [c.r(), c.g(), c.b()]
+                .iter()
+                .map(|v| f(*v as f32 / 255.0))
+                .collect(),
+        )
+    };
+    let mut m = rhai::Map::new();
+    for (k, v) in [
+        ("x", b.x),
+        ("y", b.y),
+        ("w", b.w),
+        ("h", b.h),
+        ("size", b.size),
+        ("a", b.alpha),
+        ("tip_x", b.tip[0]),
+        ("tip_y", b.tip[1]),
+    ] {
+        m.insert(k.into(), f(v));
+    }
+    let rows: rhai::Array = b
+        .rows
+        .iter()
+        .map(|r| {
+            let mut row = rhai::Map::new();
+            row.insert("text".into(), r.text.clone().into());
+            row.insert("x".into(), f(r.x));
+            row.insert("y".into(), f(r.y));
+            row.into()
+        })
+        .collect();
+    m.insert("rows".into(), rows.into());
+    let caption = b.caption.as_ref().map_or(rhai::Dynamic::UNIT, |c| {
+        let mut m = rhai::Map::new();
+        m.insert("text".into(), c.text.clone().into());
+        m.insert("x".into(), f(c.x));
+        m.insert("y".into(), f(c.y));
+        m.insert("size".into(), f(c.size));
+        let glyph = c.glyph.map_or(rhai::Dynamic::UNIT, |[x, y, r]| {
+            let mut g = rhai::Map::new();
+            g.insert("x".into(), f(x));
+            g.insert("y".into(), f(y));
+            g.insert("r".into(), f(r));
+            g.into()
+        });
+        m.insert("glyph".into(), glyph);
+        m.into()
+    });
+    m.insert("caption".into(), caption);
+    m.insert("paper".into(), rgb(theme::PAPER));
+    m.insert("edge".into(), rgb(theme::PAPER_EDGE));
+    m.insert("ink".into(), rgb(theme::INK));
+    m.insert("dim".into(), rgb(theme::INK_DIM));
+    m
 }
 
 /// `cap_debug()`'s map.
@@ -544,11 +634,14 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
             })
             .collect()
     });
-    // `cap_name_tags() -> [#{ name, x, y, size, a, me, glyph }]`: the names
-    // to draw, in order, projected with the camera this frame renders with.
-    // Each tag's x, y is its name's top left. A citizen's `glyph` is
-    // `#{ x, y, r }`, the lozenge's centre and half-height; anyone else's
-    // is `()`. See `labels::place`.
+    // `cap_name_tags() -> [#{ name, x, y, size, a, me, glyph, named,
+    // bubble }]`: the names to draw, in order, projected with the camera
+    // this frame renders with. Each tag's x, y is its name's top left. A
+    // citizen's `glyph` is `#{ x, y, r }`, the lozenge's centre and
+    // half-height; anyone else's is `()`. Someone talking has a `bubble`
+    // (S1.2, see `bubble_map`); anyone else's is `()`. A speaker whose name
+    // had no room isn't `named`: their name is the bubble's caption. See
+    // `labels::place`.
     let players = shared.players.clone();
     let egui = shared.egui.clone();
     let projector = shared.projector.clone();
@@ -598,6 +691,9 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
                         g.into()
                     });
                     m.insert("glyph".into(), glyph);
+                    m.insert("named".into(), t.named.into());
+                    let bubble = t.bubble.map_or(rhai::Dynamic::UNIT, |b| bubble_map(&b).into());
+                    m.insert("bubble".into(), bubble);
                     m.into()
                 })
                 .collect()
@@ -1209,6 +1305,7 @@ mod tests {
             me: true,
             citizen: false,
             craft: Some(0.25),
+            line: None,
         });
         let z: f64 = engine.eval("cap_follow()[2]").unwrap();
         assert_eq!(z, -2.0);
@@ -1432,6 +1529,7 @@ mod tests {
             me,
             citizen: false,
             craft: None,
+            line: None,
         };
         shared
             .players

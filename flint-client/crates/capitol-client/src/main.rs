@@ -241,6 +241,10 @@ struct Args {
     #[arg(long, requires = "offline", value_name = "stroll", num_args = 0..=1,
         default_missing_value = "row", value_parser = ["row", "stroll"])]
     citizen_sample: Option<String>,
+    /// With `--citizen-sample`, the row talks: lines over their heads at
+    /// 1 s, 3 s and 5 s, a long one among them (Commons S1.2). For captures
+    #[arg(long, requires = "citizen_sample")]
+    talk_sample: bool,
 }
 
 /// A time of day for `--time-of-day`: 0 to 1, 1 being midnight again.
@@ -366,6 +370,7 @@ fn main() -> Result<()> {
         .with_automation_sample(args.automation_sample)
         .with_node_sample(args.node_sample)
         .with_citizen_sample(args.citizen_sample.as_deref())
+        .with_talk_sample(args.talk_sample)
         .with_trade_offer(args.trade_offer.as_deref())
         .with_controls(args.controls.or_else(|| {
             let capture = args.offline.is_some()

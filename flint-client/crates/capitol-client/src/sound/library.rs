@@ -48,6 +48,7 @@ pub const RECIPES: &[(&str, Recipe)] = &[
     ("hawker_2", || vec![hawker(2)]),
     ("hawker_3", || vec![hawker(3)]),
     ("coins", || vec![coins()]),
+    ("murmur", || vec![murmur()]),
 ];
 
 /// Make every sound, a thread each (the recipes share nothing).
@@ -670,6 +671,61 @@ fn coins() -> Vec<f32> {
     v
 }
 
+/// Someone talking nearby (Commons S1.2): a few soft syllables, rising a
+/// little and settling, no word made out, as if overheard through the
+/// street's air rather than said to you. The voice is the hawkers', spoken
+/// low instead of sung.
+fn murmur() -> Vec<f32> {
+    // (start s, length s, pitch Hz, vowel)
+    let syllables: [(f32, f32, f32, usize); 4] = [
+        (0.0, 0.15, 148.0, 1),
+        (0.12, 0.19, 171.0, 3),
+        (0.29, 0.13, 158.0, 0),
+        (0.39, 0.3, 128.0, 2),
+    ];
+    let n = samples(0.8);
+    // One breath of voice under them all, its pitch gliding syllable to syllable.
+    let pitch = |t: f32| {
+        let mut hz = syllables[0].2;
+        for &(at, _, to, _) in &syllables[1..] {
+            hz += (to - hz) * smoothstep(at, at + 0.06, t);
+        }
+        hz
+    };
+    let mut buzz = Buzz(0.0);
+    let mut breath = Rng::new(41);
+    let source: Vec<f32> = (0..n)
+        .map(|i| {
+            let t = i as f32 / SR as f32;
+            buzz.next(pitch(t)) + 0.1 * breath.white()
+        })
+        .collect();
+    let mut v = vec![0.0f32; n];
+    for &(at, len, _, vowel) in &syllables {
+        let (f1, f2, f3) = VOWELS[vowel];
+        let (mut a, mut b, mut c) = (Biquad::bandpass(f1, 4.0), Biquad::bandpass(f2, 5.0), Biquad::bandpass(f3, 6.0));
+        let from = samples(at);
+        let syllable: Vec<f32> = source[from..]
+            .iter()
+            .take(samples(len + 0.08))
+            .enumerate()
+            .map(|(k, x)| {
+                let t = k as f32 / SR as f32;
+                let env = smoothstep(0.0, 0.035, t) * (1.0 - smoothstep(len - 0.04, len + 0.06, t));
+                (a.run(*x) + 0.4 * b.run(*x) + 0.12 * c.run(*x)) * env
+            })
+            .collect();
+        mix_into(&mut v, &syllable, from, 1.0);
+    }
+    // Heard, not listened to: the consonants' edges gone.
+    let (mut low, mut high) = (Biquad::lowpass(1150.0, 0.7), Biquad::highpass(90.0, 0.7));
+    let v: Vec<f32> = v.iter().map(|x| low.run(high.run(*x))).collect();
+    let mut v = reverb(&v, 0.14, 0.3, 0.35);
+    fade_out(&mut v, 0.15);
+    to_peak(&mut v, 0.55);
+    v
+}
+
 /// A hawker crying their wares down the street: a few sung syllables,
 /// each a vowel at a pitch, gliding between them, the long last note
 /// wavering, in the street's close air.
@@ -752,6 +808,18 @@ mod tests {
                 assert!(across < typical * 12.0, "{file}: {across} vs {typical}");
             }
         }
+    }
+
+    #[test]
+    fn a_murmur_opens_and_closes_in_silence() {
+        let v = murmur();
+        let edge = samples(0.004);
+        let p = peak(&v);
+        assert!(peak(&v[..edge]) < 0.02 * p, "a click at the start");
+        assert!(peak(&v[v.len() - edge..]) < 0.02 * p, "cut off ringing");
+        // Short and soft: under a second, never louder than the hawkers.
+        assert!(v.len() < samples(1.3));
+        assert!(p <= 0.55 + 1e-6);
     }
 
     #[test]

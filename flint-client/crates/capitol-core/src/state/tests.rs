@@ -255,7 +255,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 58, "one fixture per ServerMessage variant");
+    assert_eq!(count, 59, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------

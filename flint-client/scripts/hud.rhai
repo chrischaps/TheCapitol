@@ -1,6 +1,7 @@
 // The world HUD (plan §4.3): what hangs over the world, drawn on the
 // screen. So far that's the players' names (P4.2), placed through
-// world_to_screen, and the zone banner (P4.5).
+// world_to_screen, what they say over them (Commons S1.2), and the zone
+// banner (P4.5).
 //
 // Rust's labels.rs projects where each name hangs with the camera this
 // frame renders with, and decides which names to draw, where, how big and
@@ -19,7 +20,8 @@
 
 // ── Tuning ───────────────────────────────────────────────────────────────
 
-// The names' fades, sizes and spacing are in labels.rs.
+// The names' fades, sizes and spacing are in labels.rs, and so are the
+// bubbles': the wrap, the padding and the tail's drop.
 
 // The banner: seconds to fade in, when it starts to fade out, and gone.
 fn banner_in() { 0.8 }
@@ -88,7 +90,18 @@ fn zone_banner() {
 // ── The names ────────────────────────────────────────────────────────────
 
 fn names() {
-    for t in cap_name_tags() {
+    let tags = cap_name_tags();
+    // Every tail first, then the slips over them, so a tail running up
+    // past a lower slip to a lifted one goes behind it.
+    for t in tags {
+        if t.bubble != () { bubble_tail(t.bubble); }
+    }
+    for t in tags {
+        if t.bubble != () { bubble(t.bubble); }
+    }
+    for t in tags {
+        // A speaker whose name had no room is named in their bubble.
+        if !t.named { continue; }
         if t.glyph != () { citizen_glyph(t.glyph, t.a); }
         draw_text(t.x + 1.0, t.y + 1.0, t.name, t.size, 0.0, 0.0, 0.0, 0.65 * t.a);
         if t.me {
@@ -98,6 +111,62 @@ fn names() {
             // The panels' body text, #e0e0e0.
             draw_text(t.x, t.y, t.name, t.size, 0.878, 0.878, 0.878, t.a);
         }
+    }
+}
+
+// What someone says (S1.2): a slip of the Gazette's paper over their
+// head, its ink, a hairline edge and a tail down to the name. The
+// citizen's lozenge stays on the name below. When the name had no room
+// over the head, it heads the slip instead, smaller and in the dimmer ink,
+// lozenge and all. The colours are the theme's (`paper`, `edge`, `ink`,
+// `dim`), handed over by cap_name_tags.
+// The tail: from under the slip down to the name (or the head), edged,
+// with the paper running down inside it.
+fn bubble_tail(b) {
+    let a = b.a;
+    let p = b.paper;
+    let e = b.edge;
+    let foot = b.y + b.h;
+    let half = tail_half(b);
+    let tail = [[b.tip_x - half, foot - 1.0], [b.tip_x + half, foot - 1.0], [b.tip_x, b.tip_y]];
+    draw_polygon(tail, e[0], e[1], e[2], 0.9 * a, 0);
+    let inner = [[b.tip_x - half + 1.0, foot - 1.0], [b.tip_x + half - 1.0, foot - 1.0], [b.tip_x, b.tip_y - 1.6]];
+    draw_polygon(inner, p[0], p[1], p[2], 0.96 * a, 0);
+}
+
+// Half the tail's width where it leaves the slip.
+fn tail_half(b) { (b.size * 0.32).max(1.5) }
+
+fn bubble(b) {
+    let a = b.a;
+    let p = b.paper;
+    let e = b.edge;
+    let k = b.ink;
+    let round = b.size * 0.45;
+    let foot = b.y + b.h;
+    // A soft shadow, so the slip lifts off a bright street.
+    draw_rect_ex(b.x + 1.0, b.y + 2.0, b.w, b.h, 0.0, 0.0, 0.0, 0.28 * a, round, 0);
+    draw_rect_ex(b.x, b.y, b.w, b.h, p[0], p[1], p[2], 0.96 * a, round, 0);
+    draw_rect_outline_ex(b.x, b.y, b.w, b.h, e[0], e[1], e[2], 0.9 * a, 1.0, round, 0);
+    // Open the edge where the tail leaves, so slip and tail are one.
+    let half = tail_half(b) - 1.0;
+    draw_rect(b.tip_x - half, foot - 2.0, 2.0 * half, 2.0, p[0], p[1], p[2], 0.96 * a);
+    let c = b.caption;
+    if c != () {
+        let d = b.dim;
+        if c.glyph != () {
+            draw_polygon(lozenge(c.glyph.x, c.glyph.y, c.glyph.r), d[0], d[1], d[2], 0.9 * a, 0);
+        }
+        draw_text_opts(c.x, c.y, c.text, c.size, #{
+            font: "strong",
+            color: [d[0], d[1], d[2], a],
+        });
+    }
+    for r in b.rows {
+        draw_text_opts(r.x, r.y, r.text, b.size, #{
+            align: "center",
+            color: [k[0], k[1], k[2], a],
+        });
     }
 }
 

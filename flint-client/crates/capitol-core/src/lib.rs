@@ -35,6 +35,8 @@
 //! - [`signin`]: log in, or register, one event at a time.
 //! - [`auth`]: the way in for a person: the login form's states, a stored
 //!   token tried first, and the server's health while signed out.
+//! - [`talk`]: the lines heard on each channel, what's unread, and the
+//!   bubble over each speaker (Commons S1.2).
 //! - [`terrain`]: `/terrain` with a disk cache, revalidated by version.
 //! - [`paths`]: walking round the water: a walk graph of the roads and
 //!   trails, and A* over it (C0.5, #211).
@@ -71,6 +73,7 @@ pub mod signin;
 pub mod sim;
 pub mod state;
 pub mod station;
+pub mod talk;
 pub mod terrain;
 pub mod trading;
 

@@ -112,6 +112,8 @@ pub struct CapitolExtension {
     /// settled
     citizen_strolls: bool,
     citizen_stroll: Option<Stroll>,
+    /// `--talk-sample` (S1.2): the citizen sample's row talks.
+    talk_sample: Option<crate::entities::TalkSample>,
     /// The grass fields over the rural ring and the wilderness (P8.6c).
     grass: world::grass::Grass,
     /// The wilds' height field, sampled off the main thread (W9), its
@@ -236,6 +238,7 @@ impl CapitolExtension {
             citizen_sample: None,
             citizen_strolls: false,
             citizen_stroll: None,
+            talk_sample: None,
             grass: world::grass::Grass::default(),
             land: world::land::Builder::default(),
             land_meshes: world::land_mesh::LandMeshes::default(),
@@ -375,6 +378,14 @@ impl CapitolExtension {
         if let (Some(mode), None) = (mode, &self.session) {
             self.citizen_sample = Some(None);
             self.citizen_strolls = mode == "stroll";
+        }
+        self
+    }
+
+    /// The citizen sample's row talks (`--talk-sample`, Commons S1.2).
+    pub fn with_talk_sample(mut self, on: bool) -> Self {
+        if on && self.citizen_sample.is_some() {
+            self.talk_sample = Some(Default::default());
         }
         self
     }
@@ -933,6 +944,8 @@ impl PlayerExtension for CapitolExtension {
             self.players.update(ctx, poses, state, dt, &self.shared);
             let poses = (self.layer != crate::debug_layers::Layer::Off).then(|| poses.to_vec());
             debug_layers(session, self.layer, poses.as_deref(), self.dev.open, &self.shared);
+            speak(&self.shared, |id| session.bubble(id, now));
+            murmurs(&mut self.sound, &session.take_heard());
             trade(ctx, session, &self.shared, now);
             open_card(session, &self.shared);
             for note in session.take_market_notes() {
@@ -1046,6 +1059,11 @@ impl PlayerExtension for CapitolExtension {
             if let Some((state, poses)) = sample {
                 let dt = ctx.clock.delta_time.min(0.1) as f32;
                 self.players.update(ctx, poses, state, dt, &self.shared);
+                if let Some(talk) = &mut self.talk_sample {
+                    let now = ctx.clock.total_time;
+                    murmurs(&mut self.sound, &talk.tick(now, state, poses));
+                    speak(&self.shared, |id| talk.log.bubble(id, now).map(script_api::Speech::of));
+                }
             }
         }
         if self.session.is_none() && self.shared.visit_hall.swap(false, Ordering::Relaxed) {
@@ -1958,6 +1976,29 @@ fn visit_stall(
 /// What you hear (P8.1): ease the beds toward where you are, and play
 /// each one-shot due. The ears are on you, or offline on the point the
 /// camera looks at.
+/// Hang what each player is saying over their name (Commons S1.2), once
+/// `entities::Players` has placed the names this frame.
+fn speak(shared: &script_api::Shared, bubble: impl Fn(uuid::Uuid) -> Option<script_api::Speech>) {
+    if let Ok(mut labels) = shared.players.lock() {
+        for label in labels.iter_mut() {
+            label.line = bubble(label.id);
+        }
+    }
+}
+
+/// A murmur for each line just heard: a local one where it was said, a
+/// Capitol one from nowhere.
+fn murmurs(sound: &mut Soundscape, lines: &[capitol_core::talk::Line]) {
+    use capitol_core::protocol::ws::Channel;
+    for line in lines {
+        let at = (line.channel == Channel::Local).then(|| {
+            let [x, z] = crate::coords::to_world(line.x, line.y);
+            [x, crate::world::land::ground_y([x, z]) + 1.6, z]
+        });
+        sound.murmur(at);
+    }
+}
+
 fn listen(ctx: &mut ExtensionCtx, shared: &script_api::Shared, sound: &mut Soundscape) {
     let cam = ctx.camera;
     let focus = shared

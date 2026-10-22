@@ -21,8 +21,25 @@
 //! A citizen's name has a small lozenge before it (C0.2, Citizens D3), in
 //! their lantern's pale. The name and the glyph are centred together over
 //! the head, and clash as one box.
+//!
+//! A line someone says (Commons S1.2, plan D3) hangs over their name in a
+//! bubble, wrapped to [`WRAP`] characters a row and [`ROWS`] rows, with an
+//! ellipsis past that. The bubble is part of the speaker's box, so it's
+//! never drawn over another name. A speaker within earshot of you
+//! ([`HEARD`]) comes before the silent ones, even past `MAX_NAMES`: in a
+//! conversation, the one talking is the one to read. The names are placed
+//! first, then the bubbles, newest first: where a bubble would meet a name
+//! or another bubble, it slides aside a little if that clears it, or else
+//! it's lifted over it. So two people talking side by
+//! side both show, and a new line hangs lowest and pushes the older ones
+//! up, as a chat does, without moving anyone's name. A speaker whose name
+//! has no room (it would clash with one placed before it, yours say, as
+//! the row closes up from further off) still gets their bubble, with their
+//! name, and a citizen's lozenge, as a caption at its head.
+//!
+//! [`HEARD`]: capitol_core::protocol::rules::talk::HEARD
 
-use crate::script_api::PlayerLabel;
+use crate::script_api::{PlayerLabel, Speech};
 
 /// Names are whole out to `NEAR` metres from the camera and gone by `FAR`.
 pub const NEAR: f32 = 70.0;
@@ -43,6 +60,21 @@ const MIN_ALPHA: f32 = 0.02;
 /// to the name, as shares of the text size.
 pub const GLYPH_R: f32 = 0.24;
 pub const GLYPH_GAP: f32 = 0.3;
+/// A bubble's rows: at most this many characters, and this many rows.
+pub const WRAP: usize = 28;
+pub const ROWS: usize = 3;
+/// A bubble's padding round its text, as shares of the text size.
+pub const PAD_X: f32 = 0.55;
+pub const PAD_Y: f32 = 0.3;
+/// The tail from the bubble down to the name, in points.
+pub const TAIL: f32 = 7.0;
+/// A caption's size, as a share of the bubble's text.
+pub const CAPTION: f32 = 0.8;
+/// How far a bubble may slide aside to clear another, as a share of its
+/// width. Its tail still points at the speaker.
+pub const SLIDE: f32 = 0.35;
+/// How many times a bubble is moved to clear another before it gives up.
+const TRIES: usize = 8;
 
 /// Where an anchor landed on the screen: logical points, and its depth
 /// (distance along the view) in metres. `None` behind the camera.
@@ -59,6 +91,95 @@ pub struct Tag {
     pub me: bool,
     /// A citizen's lozenge, left of the name: its centre and half-height.
     pub glyph: Option<[f32; 3]>,
+    /// The name is drawn. False for a speaker whose name had no room: it's
+    /// their bubble's caption instead.
+    pub named: bool,
+    /// What they're saying, over the name.
+    pub bubble: Option<Bubble>,
+}
+
+/// A line over a speaker's head: a box, its rows, and its tail.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bubble {
+    /// The box's top left, width and height, in logical points.
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    /// The text, a row at a time.
+    pub rows: Vec<Row>,
+    pub size: f32,
+    pub alpha: f32,
+    /// Where the tail points: the middle of the name's top, a hair above,
+    /// or over the head when the name had no room.
+    pub tip: [f32; 2],
+    /// Who's speaking, at the bubble's head, when their name had no room.
+    pub caption: Option<Caption>,
+}
+
+/// A speaker's name in their bubble: its top left, its size, and a
+/// citizen's lozenge (centre and half-height) before it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Caption {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub size: f32,
+    pub glyph: Option<[f32; 3]>,
+}
+
+/// A row of a bubble: its text, its centre and its top.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// `text` in rows of at most `width` characters, broken between words (or
+/// inside one too long for a row), and at most `rows` of them: past that,
+/// the last row ends in an ellipsis.
+pub fn wrap(text: &str, width: usize, rows: usize) -> Vec<String> {
+    let mut out: Vec<Vec<char>> = Vec::new();
+    let mut row: Vec<char> = Vec::new();
+    for word in text.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        loop {
+            let need = if row.is_empty() {
+                word.len()
+            } else {
+                row.len() + 1 + word.len()
+            };
+            if need <= width {
+                if !row.is_empty() {
+                    row.push(' ');
+                }
+                row.append(&mut word);
+                break;
+            }
+            if !row.is_empty() {
+                out.push(std::mem::take(&mut row));
+                continue;
+            }
+            // Longer than a row on its own: break it.
+            let rest = word.split_off(width);
+            out.push(std::mem::replace(&mut word, rest));
+        }
+    }
+    if !row.is_empty() {
+        out.push(row);
+    }
+    if out.len() > rows {
+        out.truncate(rows);
+        if let Some(last) = out.last_mut() {
+            last.truncate(width.saturating_sub(1));
+            while last.last().is_some_and(|c| c.is_whitespace()) {
+                last.pop();
+            }
+            last.push('…');
+        }
+    }
+    out.into_iter().map(|r| r.into_iter().collect()).collect()
 }
 
 /// The names to draw, in drawing order (yours, then nearest you first).
@@ -77,8 +198,11 @@ pub fn place(
         depth: f32,
         alpha: f32,
         rank: f32,
+        /// Saying something within earshot of you (anywhere, offline).
+        speaking: bool,
     }
     let me = players.iter().find(|p| p.me).map(|p| p.at);
+    let earshot = capitol_core::protocol::rules::talk::HEARD as f32 * crate::coords::S;
     let mut candidates: Vec<Candidate> = players
         .iter()
         .zip(screens)
@@ -86,9 +210,12 @@ pub fn place(
             let [x, y, depth] = (*s)?;
             let (near, far) = if p.me { (MY_NEAR, MY_FAR) } else { (NEAR, FAR) };
             let alpha = (1.0 - smooth((depth - near) / (far - near))) * p.alpha;
-            let rank = match me {
-                Some(m) => (p.at[0] - m[0]).hypot(p.at[2] - m[2]),
-                None => depth,
+            let (rank, heard) = match me {
+                Some(m) => {
+                    let d = (p.at[0] - m[0]).hypot(p.at[2] - m[2]);
+                    (d, d <= earshot)
+                }
+                None => (depth, true),
             };
             (alpha >= MIN_ALPHA).then_some(Candidate {
                 p,
@@ -96,18 +223,36 @@ pub fn place(
                 depth,
                 alpha,
                 rank,
+                speaking: heard && p.line.is_some(),
             })
         })
         .collect();
-    // You first, then nearest first: those are the names that win a clash.
-    candidates.sort_by(|a, b| b.p.me.cmp(&a.p.me).then(a.rank.total_cmp(&b.rank)));
+    // You first, then whoever is talking near you, then nearest first:
+    // those are the names that win a clash.
+    candidates.sort_by(|a, b| {
+        b.p.me
+            .cmp(&a.p.me)
+            .then(b.speaking.cmp(&a.speaking))
+            .then(a.rank.total_cmp(&b.rank))
+    });
 
     let mut placed: Vec<Tag> = Vec::new();
     // Each placed name's box, [x, y, w, h], for the clash test.
     let mut boxes: Vec<[f32; 4]> = Vec::new();
+    // The lines to hang once every name is placed.
+    struct Said<'a> {
+        tag: usize,
+        line: &'a Speech,
+        alpha: f32,
+        /// The middle of the top of the name, or the head, it hangs over.
+        over: [f32; 2],
+        /// When the name goes in it: whether they're a citizen.
+        caption: Option<bool>,
+    }
+    let mut said: Vec<Said> = Vec::new();
     let mut others = 0;
     for c in candidates {
-        if !c.p.me && others >= MAX_NAMES {
+        if !c.p.me && !c.speaking && others >= MAX_NAMES {
             break;
         }
         let size = lerp(SIZE_NEAR, SIZE_FAR, smooth((c.depth - 20.0) / (FAR - 20.0)));
@@ -123,17 +268,29 @@ pub fn place(
         if x + w < 0.0 || x > view[0] || y + h < 0.0 || y > view[1] {
             continue;
         }
-        let clash = boxes.iter().any(|&[ox, oy, ow, oh]| {
-            x < ox + ow + GAP && ox < x + w + GAP && y < oy + oh + GAP && oy < y + h + GAP
-        });
-        if clash {
+        let named = clashes(&boxes, [x, y, w, h]).is_none();
+        let line = c.p.line.as_ref().filter(|_| c.speaking);
+        if !named && line.is_none() {
             continue;
         }
-        others += usize::from(!c.p.me);
-        boxes.push([x, y, w, h]);
+        // Those talking near you are over and above the rest.
+        others += usize::from(!c.p.me && !c.speaking);
+        if named {
+            boxes.push([x, y, w, h]);
+        }
         // Level with the middle of the lower-case letters.
         let r = GLYPH_R * size;
         let glyph = c.p.citizen.then_some([x + r, y + h * 0.55, r]);
+        if let Some(line) = c.p.line.as_ref() {
+            let over = if named { [c.at[0], y] } else { c.at };
+            said.push(Said {
+                tag: placed.len(),
+                line,
+                alpha: line.alpha * c.alpha,
+                over,
+                caption: (!named).then_some(c.p.citizen),
+            });
+        }
         placed.push(Tag {
             name: c.p.name.clone(),
             x: x + lead,
@@ -141,10 +298,117 @@ pub fn place(
             size,
             alpha: c.alpha,
             me: c.p.me,
-            glyph,
+            glyph: glyph.filter(|_| named),
+            named,
+            bubble: None,
         });
     }
+    // Newest first, so it hangs lowest.
+    said.sort_by(|a, b| a.line.age.total_cmp(&b.line.age));
+    for s in said {
+        let t = &placed[s.tag];
+        let caption = s.caption.map(|c| (t.name.as_str(), c));
+        let b = bubble(&s.line.text, s.alpha, t.size, s.over, caption, &mut boxes, &mut measure);
+        placed[s.tag].bubble = b;
+    }
+    // A speaker whose name had no room and whose bubble found none either
+    // has nothing to show.
+    placed.retain(|t| t.named || t.bubble.is_some());
     placed
+}
+
+/// The first of `boxes` that `b` comes within `GAP` of.
+fn clashes(boxes: &[[f32; 4]], [x, y, w, h]: [f32; 4]) -> Option<[f32; 4]> {
+    boxes.iter().copied().find(|&[ox, oy, ow, oh]| {
+        x < ox + ow + GAP && ox < x + w + GAP && y < oy + oh + GAP && oy < y + h + GAP
+    })
+}
+
+/// Lay out `text` in a bubble over the name whose top middle is `over`,
+/// lifted over any box in its way, and add its box to `boxes`. `None` when
+/// there's nothing to say, or nowhere clear to say it.
+fn bubble(
+    text: &str,
+    alpha: f32,
+    size: f32,
+    over: [f32; 2],
+    caption: Option<(&str, bool)>,
+    boxes: &mut Vec<[f32; 4]>,
+    measure: &mut impl FnMut(&str, f32) -> (f32, f32),
+) -> Option<Bubble> {
+    if alpha < MIN_ALPHA {
+        return None;
+    }
+    let rows = wrap(text, WRAP, ROWS);
+    if rows.is_empty() {
+        return None;
+    }
+    let measured: Vec<(f32, f32)> = rows.iter().map(|r| measure(r, size)).collect();
+    let row_h = measured.iter().map(|m| m.1).fold(0.0, f32::max);
+    let (pad_x, pad_y) = (PAD_X * size, PAD_Y * size);
+    // The caption's size, its glyph's room, its width and its height.
+    let cap = caption.map(|(name, citizen)| {
+        let size = size * CAPTION;
+        let lead = if citizen { (2.0 * GLYPH_R + GLYPH_GAP) * size } else { 0.0 };
+        let (w, h) = measure(name, size);
+        (name, citizen, size, lead, lead + w, h)
+    });
+    let cap_w = cap.map_or(0.0, |c| c.4);
+    let cap_h = cap.map_or(0.0, |c| c.5);
+    let w = measured.iter().map(|m| m.0).fold(cap_w, f32::max) + 2.0 * pad_x;
+    let h = cap_h + row_h * rows.len() as f32 + 2.0 * pad_y;
+    let mut x = over[0] - w / 2.0;
+    let mut y = over[1] - TAIL - h;
+    for _ in 0..TRIES {
+        if let Some([ox, oy, ow, _]) = clashes(boxes, [x, y, w, h]) {
+            // Aside, the shorter way, if that's near enough and clear...
+            let right = ox + ow + GAP + 1.0 - x;
+            let left = ox - GAP - 1.0 - (x + w);
+            let aside = x + if right.abs() < left.abs() { right } else { left };
+            let near = (aside + w / 2.0 - over[0]).abs() <= SLIDE * w;
+            if near && clashes(boxes, [aside, y, w, h]).is_none() {
+                x = aside;
+            } else {
+                // ...or up over it, centred again.
+                (x, y) = (over[0] - w / 2.0, oy - GAP - 1.0 - h);
+            }
+            continue;
+        }
+        boxes.push([x, y, w, h]);
+        let middle = x + w / 2.0;
+        let rows = rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, text)| Row {
+                text,
+                x: middle,
+                y: y + pad_y + cap_h + row_h * i as f32,
+            })
+            .collect();
+        let caption = cap.map(|(name, citizen, size, lead, w, h)| {
+            let (left, top) = (middle - w / 2.0, y + pad_y);
+            let r = GLYPH_R * size;
+            Caption {
+                text: name.to_owned(),
+                x: left + lead,
+                y: top,
+                size,
+                glyph: citizen.then_some([left + r, top + h * 0.55, r]),
+            }
+        });
+        return Some(Bubble {
+            x,
+            y,
+            w,
+            h,
+            rows,
+            size,
+            alpha,
+            tip: [over[0], over[1] - 1.0],
+            caption,
+        });
+    }
+    None
 }
 
 fn smooth(t: f32) -> f32 {
@@ -172,6 +436,7 @@ mod tests {
             me,
             citizen: false,
             craft: None,
+            line: None,
         }
     }
 
@@ -194,8 +459,9 @@ mod tests {
         (text.chars().count() as f32 * size * 0.6, size)
     }
 
+    /// The names drawn over heads, not in bubbles.
     fn names(tags: &[Tag]) -> Vec<&str> {
-        tags.iter().map(|t| t.name.as_str()).collect()
+        tags.iter().filter(|t| t.named).map(|t| t.name.as_str()).collect()
     }
 
     #[test]
@@ -417,5 +683,233 @@ mod tests {
         let each = start.elapsed() / 100;
         // In Rhai this took milliseconds. Debug builds are slow; still far under.
         assert!(each.as_micros() < 2000, "{each:?}");
+    }
+
+    fn saying(p: PlayerLabel, text: &str) -> PlayerLabel {
+        said(p, text, 0.0)
+    }
+
+    fn said(p: PlayerLabel, text: &str, age: f32) -> PlayerLabel {
+        PlayerLabel {
+            line: Some(Speech {
+                text: text.into(),
+                alpha: 1.0,
+                age,
+            }),
+            ..p
+        }
+    }
+
+    #[test]
+    fn a_line_wraps_to_28_characters_a_row_between_words() {
+        assert_eq!(
+            wrap("Has anyone seen the price of iron this week?", WRAP, ROWS),
+            ["Has anyone seen the price of", "iron this week?"]
+        );
+        assert_eq!(wrap("Morning.", WRAP, ROWS), ["Morning."]);
+        // A word too long for a row is broken inside.
+        let long = "x".repeat(60);
+        assert_eq!(
+            wrap(&long, WRAP, ROWS),
+            ["x".repeat(28), "x".repeat(28), "x".repeat(4)]
+        );
+        // Nothing to say, no rows.
+        assert!(wrap("   ", WRAP, ROWS).is_empty());
+        let text = "The kiln's lit if you need bricks, and the forge will be by noon.";
+        for row in wrap(text, WRAP, ROWS) {
+            assert!(row.chars().count() <= WRAP, "{row}");
+        }
+    }
+
+    #[test]
+    fn past_three_rows_the_last_ends_in_an_ellipsis() {
+        let rows = wrap(&["word"; 20].join(" "), WRAP, ROWS);
+        assert_eq!(rows.len(), ROWS);
+        assert_eq!(rows[2], "word word word word word…");
+        // A full last row gives up its last character for it.
+        let rows = wrap(&"x".repeat(100), WRAP, ROWS);
+        assert_eq!(rows[2], format!("{}…", "x".repeat(27)));
+        assert_eq!(rows[2].chars().count(), WRAP);
+        // Three rows exactly need none.
+        let rows = wrap(&"x".repeat(84), WRAP, ROWS);
+        assert!(rows.iter().all(|r| !r.ends_with('…')));
+    }
+
+    #[test]
+    fn a_bubble_hangs_over_its_speakers_name() {
+        let tags = place(
+            &[saying(player("Ada", false), "Hello there")],
+            &[Some([500.0, 300.0, 10.0])],
+            VIEW,
+            measure,
+        );
+        let t = &tags[0];
+        let b = t.bubble.as_ref().expect("a bubble");
+        assert_eq!(b.rows.len(), 1);
+        assert_eq!(b.rows[0].text, "Hello there");
+        assert!((b.x + b.w / 2.0 - 500.0).abs() < 1e-3, "centred");
+        assert!((b.y + b.h + TAIL - t.y).abs() < 1e-3, "a tail over the name");
+        assert_eq!(b.tip[0], 500.0);
+        let (w, _) = measure("Hello there", t.size);
+        assert!(b.w > w && b.h > t.size, "padded");
+        // Silent, none.
+        let tags = place(&[player("Ada", false)], &[Some([500.0, 300.0, 10.0])], VIEW, measure);
+        assert_eq!(tags[0].bubble, None);
+    }
+
+    #[test]
+    fn a_bubble_is_lifted_clear_of_a_name_and_never_drawn_over_one() {
+        // Bo's name sits where Ada's bubble would go.
+        let screens = [Some([500.0, 300.0, 10.0]), Some([500.0, 270.0, 8.0])];
+        let silent = [player("Ada", false), player("Bo", false)];
+        assert_eq!(names(&place(&silent, &screens, VIEW, measure)), ["Bo", "Ada"]);
+        // Talking, Ada comes first, and her bubble is lifted over Bo's name.
+        let talking = [saying(player("Ada", false), "Hello there"), player("Bo", false)];
+        let tags = place(&talking, &screens, VIEW, measure);
+        assert_eq!(names(&tags), ["Ada", "Bo"]);
+        let (b, bo) = (tags[0].bubble.as_ref().unwrap(), &tags[1]);
+        assert!(b.y + b.h + GAP < bo.y, "{} {}", b.y + b.h, bo.y);
+        assert_eq!(b.tip[0], 500.0, "its tail still at Ada");
+    }
+
+    #[test]
+    fn two_people_talking_side_by_side_both_show_one_bubble_lifted_over_the_other() {
+        let (aw, _) = measure("Ada", SIZE_NEAR);
+        let (bw, _) = measure("Bo", SIZE_NEAR);
+        let bx = 500.0 + aw / 2.0 + GAP + 4.0 + bw / 2.0;
+        let players = [
+            saying(player("Ada", false), "Hello there"),
+            saying(player("Bo", false), "And to you"),
+        ];
+        let screens = [Some([500.0, 300.0, 10.0]), Some([bx, 300.0, 10.0])];
+        let tags = place(&players, &screens, VIEW, measure);
+        assert_eq!(names(&tags), ["Ada", "Bo"]);
+        let a = tags[0].bubble.as_ref().unwrap();
+        let b = tags[1].bubble.as_ref().unwrap();
+        assert!(b.y + b.h + GAP < a.y, "Bo's over Ada's: {} {}", b.y + b.h, a.y);
+        // Its tail still points at Bo.
+        assert_eq!(b.tip[0], bx);
+    }
+
+    #[test]
+    fn a_bubble_just_overlapping_another_slides_aside_rather_than_up() {
+        let players = [
+            saying(player("Ada", false), "Hello there"),
+            saying(player("Bo", false), "And to you"),
+        ];
+        let screens = [Some([500.0, 300.0, 10.0]), Some([600.0, 300.0, 10.0])];
+        let tags = place(&players, &screens, VIEW, measure);
+        let a = tags[0].bubble.as_ref().unwrap();
+        let b = tags[1].bubble.as_ref().unwrap();
+        assert_eq!(a.y, b.y, "level");
+        assert!(b.x >= a.x + a.w + GAP, "beside it: {} {}", b.x, a.x + a.w);
+        // The tail still points at Bo, from under the slip.
+        assert_eq!(b.tip[0], 600.0);
+        assert!(b.tip[0] > b.x && b.tip[0] < b.x + b.w);
+        // The rows follow the slip.
+        assert_eq!(b.rows[0].x, b.x + b.w / 2.0);
+    }
+
+    #[test]
+    fn the_newest_line_hangs_lowest_and_pushes_the_older_up() {
+        let (aw, _) = measure("Ada", SIZE_NEAR);
+        let (bw, _) = measure("Bo", SIZE_NEAR);
+        let bx = 500.0 + aw / 2.0 + GAP + 4.0 + bw / 2.0;
+        let screens = [Some([500.0, 300.0, 10.0]), Some([bx, 300.0, 10.0])];
+        let lowest = |ada: f32, bo: f32| {
+            let players = [
+                said(player("Ada", false), "Hello there", ada),
+                said(player("Bo", false), "And to you", bo),
+            ];
+            let tags = place(&players, &screens, VIEW, measure);
+            let (a, b) = (tags[0].bubble.clone().unwrap(), tags[1].bubble.clone().unwrap());
+            if a.y > b.y { "Ada" } else { "Bo" }
+        };
+        assert_eq!(lowest(0.5, 3.0), "Ada");
+        assert_eq!(lowest(3.0, 0.5), "Bo");
+    }
+
+    #[test]
+    fn a_speaker_whose_name_has_no_room_still_talks_and_is_named_in_the_bubble() {
+        // Corin's name would clash with yours, close up beside it.
+        let players = [
+            standing("Me", true, 0.0, 0.0),
+            saying(standing("Corin", false, 1.6, 0.0), "Morning."),
+        ];
+        let players = [players[0].clone(), PlayerLabel { citizen: true, ..players[1].clone() }];
+        let screens = [Some([500.0, 300.0, 10.0]), Some([520.0, 300.0, 10.0])];
+        let tags = place(&players, &screens, VIEW, measure);
+        assert_eq!(names(&tags), ["Me"]);
+        let corin = tags.iter().find(|t| t.name == "Corin").expect("still there");
+        assert!(!corin.named && corin.glyph.is_none(), "no name over the head");
+        let b = corin.bubble.as_ref().expect("a bubble");
+        let c = b.caption.as_ref().expect("named in it");
+        assert_eq!(c.text, "Corin");
+        assert!(c.glyph.is_some(), "a citizen's mark goes with the name");
+        assert!(c.y >= b.y && b.rows[0].y > c.y, "the caption heads the bubble");
+        assert!(c.size < b.size);
+        assert_eq!(b.tip, [520.0, 299.0], "the tail to the head");
+        // Clear of your name.
+        let me = &tags[0];
+        assert!(b.y + b.h + GAP < me.y || b.y > me.y + me.size);
+        // Silent, a name with no room is simply left out.
+        let quiet = [players[0].clone(), standing("Corin", false, 1.6, 0.0)];
+        assert_eq!(place(&quiet, &screens, VIEW, measure).len(), 1);
+    }
+
+    #[test]
+    fn a_citizens_bubble_hangs_over_the_glyph_and_name_together() {
+        let tags = place(
+            &[saying(citizen("Corin"), "Morning.")],
+            &[Some([500.0, 300.0, 10.0])],
+            VIEW,
+            measure,
+        );
+        let b = tags[0].bubble.as_ref().unwrap();
+        assert!((b.x + b.w / 2.0 - 500.0).abs() < 1e-3, "{}", b.x + b.w / 2.0);
+    }
+
+    #[test]
+    fn a_speaker_in_earshot_is_kept_past_max_names_and_one_out_of_it_isnt() {
+        let earshot = capitol_core::protocol::rules::talk::HEARD as f32 * crate::coords::S;
+        let mut players: Vec<_> = (0..40)
+            .map(|i| standing(&format!("P{i}"), false, 0.01 * i as f32, 0.0))
+            .collect();
+        players.push(saying(standing("Near", false, earshot - 0.1, 0.0), "Over here"));
+        players.push(saying(standing("Far", false, earshot + 2.0, 0.0), "Can you hear me?"));
+        players.push(standing("Me", true, 0.0, 0.0));
+        // A grid far enough apart that nothing clashes, bubbles and all.
+        let screens: Vec<_> = (0..players.len())
+            .map(|i| {
+                Some([
+                    100.0 + (i % 6) as f32 * 300.0,
+                    100.0 + (i / 6) as f32 * 120.0,
+                    10.0,
+                ])
+            })
+            .collect();
+        let view = [1920.0, 1200.0];
+        let tags = place(&players, &screens, view, measure);
+        let shown = names(&tags);
+        assert_eq!(shown[..2], ["Me", "Near"], "you, then the one talking");
+        assert!(!shown.contains(&"Far"));
+        assert_eq!(tags.len(), MAX_NAMES + 2);
+        assert!(tags[1].bubble.is_some());
+    }
+
+    #[test]
+    fn a_fading_line_takes_its_bubble_with_it() {
+        let mut p = saying(player("Ada", false), "Hello");
+        if let Some(line) = &mut p.line {
+            line.alpha = 0.5;
+        }
+        p.alpha = 0.5;
+        let tags = place(&[p.clone()], &[Some([500.0, 300.0, 10.0])], VIEW, measure);
+        assert_eq!(tags[0].bubble.as_ref().unwrap().alpha, 0.25);
+        if let Some(line) = &mut p.line {
+            line.alpha = 0.0;
+        }
+        let tags = place(&[p], &[Some([500.0, 300.0, 10.0])], VIEW, measure);
+        assert_eq!(tags[0].bubble, None);
     }
 }

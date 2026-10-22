@@ -43,6 +43,7 @@ use capitol_core::protocol::terrain::{Landmark, TerrainResponse};
 use capitol_core::protocol::ws::{ClientMessage, ItemCount};
 use capitol_core::state::{GameState, StateEvent, Trade, TradeAction, TradeEvent, Yield};
 use capitol_core::station::{self, Kit, Placing, Visit};
+use capitol_core::talk::{Line, Log};
 use capitol_core::trading::{self, Approach, Draft};
 use flint_runtime::PersistentStore;
 use uuid::Uuid;
@@ -252,6 +253,13 @@ pub struct Session {
     traded: Vec<Traded>,
     /// The last time an offer in the open trade changed, and whose.
     offer_changed: Option<(bool, Instant)>,
+    /// Talk heard (Commons S1.2): each channel's lines, and what each
+    /// speaker is saying over their head.
+    talk: Log,
+    /// Talk's clock: its seconds count from here.
+    epoch: Instant,
+    /// Lines heard since the frame last took them, for the murmur.
+    heard: Vec<Line>,
 }
 
 /// Something to tell the player about trading, as a toast.
@@ -427,6 +435,9 @@ impl Session {
             trade_notes: Vec::new(),
             traded: Vec::new(),
             offer_changed: None,
+            talk: Log::new(),
+            epoch: Instant::now(),
+            heard: Vec::new(),
         };
         session.apply(effects);
         Ok(session)
@@ -1171,6 +1182,22 @@ impl Session {
     /// its type and why.
     pub fn take_automation_notes(&mut self) -> Vec<(Uuid, String, PauseReason)> {
         std::mem::take(&mut self.automation_notes)
+    }
+
+    /// What `id` is saying over their head at `now` (Commons S1.2).
+    pub fn bubble(&self, id: Uuid, now: Instant) -> Option<crate::script_api::Speech> {
+        self.talk
+            .bubble(id, self.talk_time(now))
+            .map(crate::script_api::Speech::of)
+    }
+
+    /// Lines heard since the frame last asked, for the murmur.
+    pub fn take_heard(&mut self) -> Vec<Line> {
+        std::mem::take(&mut self.heard)
+    }
+
+    fn talk_time(&self, now: Instant) -> f64 {
+        now.saturating_duration_since(self.epoch).as_secs_f64()
     }
 
     /// Stations that finished a craft on their own since the frame last asked.
@@ -2190,6 +2217,31 @@ impl Session {
                     StateEvent::GazettePublished { day, headline, .. } => {
                         self.gazette.published(*day, headline)
                     }
+                    // The backlog comes again on a new socket
+                    StateEvent::SnapshotStale => self.talk.rejoined(self.talk_time(now)),
+                    StateEvent::Said {
+                        from,
+                        name,
+                        citizen,
+                        channel,
+                        text,
+                        x,
+                        y,
+                    } => {
+                        let line = Line {
+                            from: *from,
+                            name: name.clone(),
+                            citizen: *citizen,
+                            channel: *channel,
+                            text: text.clone(),
+                            x: *x,
+                            y: *y,
+                            at: self.talk_time(now),
+                        };
+                        if self.talk.heard(line.clone()) {
+                            self.heard.push(line);
+                        }
+                    }
                     // A tool slot refused: shown where a refused move is
                     StateEvent::ServerError {
                         message,
@@ -2374,6 +2426,8 @@ impl Session {
             self.trade_notes.clear();
             self.traded.clear();
             self.offer_changed = None;
+            self.talk = Log::new();
+            self.heard.clear();
         }
     }
 

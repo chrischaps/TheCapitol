@@ -54,6 +54,12 @@ use std::thread::JoinHandle;
 /// Overall level of the beds, and of the one-shots.
 const AMBIENCE: f32 = 0.8;
 const EFFECTS: f32 = 1.0;
+/// A murmur's volume where someone talks, and a Capitol line's, which is
+/// heard everywhere and should never crowd the street.
+const MURMUR_LOCAL: f32 = 0.45;
+const MURMUR_CAPITOL: f32 = 0.16;
+/// Seconds between two murmurs at the most.
+const MURMUR_GAP: f64 = 0.35;
 
 /// Each bed's level at full weight, by ear.
 const BEDS: [(&str, &str, f32); 6] = [
@@ -397,6 +403,8 @@ pub struct Soundscape {
     next_call: f64,
     /// When each worked tuft next rustles.
     rustles: Vec<(String, f64)>,
+    /// When someone talking may next be heard to murmur.
+    next_murmur: f64,
     cues: Vec<Cue>,
     mix: Mix,
 }
@@ -421,6 +429,7 @@ impl Soundscape {
             next_bell: 25.0,
             next_call: 1.5,
             rustles: Vec::new(),
+            next_murmur: 0.0,
             cues: Vec::new(),
             mix: Mix::default(),
         }
@@ -466,6 +475,26 @@ impl Soundscape {
     /// A plot is yours: the tower rings for you.
     pub fn claimed(&mut self) {
         self.cue(Cue::flat("bell", 0.6));
+    }
+
+    /// Someone said something (Commons S1.2): a soft murmur where they
+    /// stand, so it falls off with distance, or for a Capitol line, which
+    /// has no place, a quieter one with none. Lines in a burst (the Capitol
+    /// backlog on joining) murmur once.
+    pub fn murmur(&mut self, at: Option<[f32; 3]>) {
+        if self.now < self.next_murmur {
+            return;
+        }
+        self.next_murmur = self.now + MURMUR_GAP;
+        let volume = if at.is_some() { MURMUR_LOCAL } else { MURMUR_CAPITOL };
+        let pitch = self.rng.range(0.9, 1.12);
+        self.cue(Cue {
+            sound: "murmur".to_owned(),
+            volume: volume * EFFECTS,
+            at,
+            pitch,
+            interface: false,
+        });
     }
 
     fn cue(&mut self, c: Cue) {
@@ -754,6 +783,30 @@ mod tests {
 
     const STREET: f32 = 25.0;
     const DRY: f32 = 1000.0;
+
+    #[test]
+    fn talk_murmurs_where_its_said_and_a_capitol_line_quietly_nowhere() {
+        let mut s = Soundscape::new(false);
+        s.murmur(Some([1.0, 1.6, 2.0]));
+        let cues = s.update(Ears::default(), &[], 0.5);
+        let local = cues.iter().find(|c| c.sound == "murmur").expect("a murmur");
+        assert_eq!(local.at, Some([1.0, 1.6, 2.0]));
+        s.murmur(None);
+        let cues = s.update(Ears::default(), &[], 0.5);
+        let capitol = cues.iter().find(|c| c.sound == "murmur").expect("a murmur");
+        assert_eq!(capitol.at, None);
+        assert!(capitol.volume < local.volume * 0.5);
+        // The backlog's forty lines in one frame murmur once.
+        for _ in 0..40 {
+            s.murmur(None);
+        }
+        let cues = s.update(Ears::default(), &[], 0.016);
+        assert_eq!(cues.iter().filter(|c| c.sound == "murmur").count(), 1);
+        // Muted, nothing.
+        let mut quiet = Soundscape::new(true);
+        quiet.murmur(Some([0.0; 3]));
+        assert!(quiet.update(Ears::default(), &[], 0.5).is_empty());
+    }
 
     #[test]
     fn the_core_hums_and_the_wilderness_blows() {
