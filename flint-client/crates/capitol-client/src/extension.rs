@@ -984,8 +984,37 @@ impl CapitolExtension {
             }
             // Out on the paving before the desk, where you'd be served
             Target::Office => ring(self.hall.site()?.office_front(), 1.1),
+            // Your own land (#449), its edge traced as the stops' are
+            Target::Home => self.home_mark()?,
+            // A station of yours that can be set to work, at home first,
+            // ringed as wide as its own ring
+            Target::MyStation => {
+                let state = self.session.as_ref()?.state();
+                let home = onboarding::home_plot(state.plots());
+                let station = onboarding::my_station(state.stations().values(), state.me(), home, from)?;
+                ring(
+                    crate::coords::to_world(station.x, station.y),
+                    crate::stations::ring_radius(&station.station_type),
+                )
+            }
         };
         Some((mark, you))
+    }
+
+    /// Your home lot as the road in's ring marks it (#449): its drawn edge,
+    /// else its claimed quad. Offline with `--hints-sample`, the farm the
+    /// road in stops at stands in for it.
+    fn home_mark(&self) -> Option<script_api::LeadMark> {
+        let Some(session) = &self.session else {
+            let stop = self.hints_sample.then(|| self.road_stop(rules::Zone::Rural)).flatten()?;
+            return self.lots.get(&stop.lot.id).filter(|l| !l.outline.is_empty()).map(lot_mark);
+        };
+        let plot = onboarding::home_plot(session.state().plots())?;
+        let lot = plot.terrain_id.as_ref().and_then(|id| self.lots.get(id));
+        let outline = plot_outline(plot, lot);
+        let n = outline.len().max(1) as f32;
+        let at = outline.iter().fold([0.0, 0.0], |m, p| [m[0] + p[0] / n, m[1] + p[1] / n]);
+        Some(script_api::LeadMark { at, radius: 2.5, outline })
     }
 
     /// The road in's stop in `zone` (#445): the lot
@@ -1331,6 +1360,8 @@ impl PlayerExtension for CapitolExtension {
             let pack = [state.inventory(), state.crafting_input(), state.crafting_output()];
             let held = pack.into_iter().flatten().flat_map(|c| c.slots.iter().flatten());
             self.hints.set_lesson(onboarding::QualityLesson::of(held, state.recipe("rope_basic")));
+            // Settle in's words, from your own lot (#449)
+            self.hints.set_home(onboarding::home_plot(state.plots()));
             if plots(ctx, session, &self.shared, &self.lots, &mut self.sound) {
                 // The deed is spent (#448): the office steps aside for the
                 // gold rings, and the lot it showed is yours now or let go
@@ -2201,6 +2232,10 @@ impl PlayerExtension for CapitolExtension {
                             .collect();
                     if self.hints.show(ctx, now, &panels, self.lead) {
                         session.set_tutorial_dismissed(true);
+                    }
+                    // The tax card read (#449): its "Noted" is the step
+                    if let Some(step) = self.hints.noted() {
+                        session.tutorial_seen(step);
                     }
                 }
                 let state = session.state();

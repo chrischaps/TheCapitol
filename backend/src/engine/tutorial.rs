@@ -772,6 +772,73 @@ mod tests {
         assert_eq!(done(&db, ada).await, Steps::from_iter([Step::PlaceWorkbench, Step::PlaceAtHome]));
     }
 
+    /// Settle in finishes the road (#449), through the judges it's walked by:
+    /// a workbench placed at home, its job set (edges, forever: rope is made
+    /// by hand, so no station takes it), and the tax card read. `finished_at`
+    /// waits for every step, in whatever order: Ada reads the tax card last,
+    /// Bram first, and the job finishes his.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d) and Redis"]
+    async fn settling_in_finishes_the_road_and_nothing_sooner(db: PgPool) {
+        use crate::engine::automation;
+        use crate::engine::station_placement::place_station;
+        use capitol_protocol::rest::AutomationMode;
+        use capitol_protocol::tutorial::Chapter;
+        let state = for_tests(db.clone()).await;
+        let content = crate::content::load().unwrap();
+        crate::content::sync(&db, &content).await.unwrap();
+        let recipes = content.recipes.iter().map(|r| (r.id.clone(), r.to_recipe())).collect();
+        let (events, _rx) = broadcast::channel(64);
+        let (ada, bram) = (player(&db, "Ada", 0).await, player(&db, "Bram", 0).await);
+
+        // Bram reads the tax card early: it's kept, and finishes nothing
+        seen(&db, &events, bram, Step::ReadTax).await.unwrap();
+        assert_eq!(done(&db, bram).await, Steps::from_iter([Step::ReadTax]));
+        assert_eq!(finished_at(&db, bram).await, None);
+
+        for (who, n) in [(ada, 0), (bram, 1)] {
+            for step in Step::ALL.into_iter().filter(|s| s.chapter() != Chapter::SettleIn) {
+                mark(&db, who, step).await.unwrap();
+            }
+            assert_eq!(finished_at(&db, who).await, None, "the road walked, the home not settled");
+            // A workbench at home: each a lot of their own, side by side
+            let pack = container(&db, who, "player_inventory").await;
+            let kit = stack(&db, who, pack, 0, "workbench_kit", 1).await;
+            let lot = crate::engine::plot_sync::tests::plot(&db, Some(who), 250).await;
+            let at = (8000.0 + 1000.0 * n as f64, 6800.0);
+            sqlx::query("UPDATE plots SET world_x = $1, bounds_min_x = $1 - 10, bounds_max_x = $1 + 10 WHERE id = $2")
+                .bind(at.0 as f32)
+                .bind(lot)
+                .execute(&db)
+                .await
+                .unwrap();
+            stand(&db, who, at).await;
+            let bench = place_station(&state, who, "workbench", at.0, at.1, kit).await.unwrap();
+            assert_eq!(bench.plot_id, Some(lot));
+            assert!(done(&db, who).await.has(Step::PlaceAtHome));
+            assert_eq!(finished_at(&db, who).await, None, "a station isn't the end");
+            // Its job
+            automation::configure(&db, &events, &recipes, who, bench.info.id, "knapped_stone", AutomationMode::Forever)
+                .await
+                .unwrap();
+            assert!(done(&db, who).await.has(Step::SetAutomation));
+        }
+        assert_eq!(finished_at(&db, ada).await, None, "Ada's tax card is still to read");
+        assert!(finished_at(&db, bram).await.is_some(), "Bram's job was his last step");
+        assert!(progress(&db, bram).await.unwrap().finished());
+
+        // Rope is made by hand: no station takes it as a job
+        let bench: Uuid =
+            sqlx::query_scalar("SELECT id FROM stations WHERE owner_id = $1").bind(ada).fetch_one(&db).await.unwrap();
+        let rope = automation::configure(&db, &events, &recipes, ada, bench, "rope_basic", AutomationMode::Forever).await;
+        assert!(matches!(rope, Err(automation::AutomationError::WrongStation { needs: None, .. })));
+
+        // The tax card, read last, finishes Ada's
+        seen(&db, &events, ada, Step::ReadTax).await.unwrap();
+        assert!(progress(&db, ada).await.unwrap().finished());
+        assert!(finished_at(&db, ada).await.is_some());
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d) and Redis"]
     async fn a_deposit_counts_and_a_refused_one_doesnt(db: PgPool) {

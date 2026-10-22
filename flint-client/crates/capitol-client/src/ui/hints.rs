@@ -13,14 +13,23 @@
 //! the header's road-in chip or a line in the `?` overlay brings it back.
 //! The tour can't be skipped: the deed comes only with the finish.
 //!
+//! Settle in (#449) speaks of your own lot ([`Hints::set_home`]): what it
+//! fits by the zone card's count, and its week's tax. The tax card asks
+//! nothing of the world, so its "Noted" is the step ([`Hints::noted`]). The
+//! closing card ("Well begun") has the city's seal, and points at the
+//! Gazette and at `?`. Once the tour is finished nothing shows: no card, no
+//! header chip, no line in the `?` overlay.
+//!
 //! A step can lead somewhere (`onboarding::target`). The extension finds
 //! the place and hands back a [`Lead`]: off screen, the card points the way
 //! with the hall chip's arrow (`hud::bearing`); on screen, `input.rhai`
 //! rings it in gold on the ground (`draw_lead`).
 
+use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
-use capitol_core::onboarding::{place_in_chapter, target, Did, QualityLesson, Target, Tour};
+use capitol_core::onboarding::{place_in_chapter, target, Did, Home, QualityLesson, Target, Tour};
+use capitol_core::protocol::rest::PlotInfo;
 use capitol_core::protocol::tutorial::{Chapter, Grant, Step, Steps, TutorialProgress};
 use egui::{Align2, Id, RichText};
 
@@ -33,8 +42,9 @@ const TICK_FOR: Duration = Duration::from_millis(900);
 const FADE_IN: f32 = 0.35;
 /// How long a chapter's close stays: a beat longer than a step's tick.
 const CHAPTER_FOR: Duration = Duration::from_millis(5500);
-/// How long the closing card stays, and how long it takes to go.
-const CLOSING_FOR: Duration = Duration::from_secs(8);
+/// How long the closing card stays, and how long it takes to go: long
+/// enough to read its words and its two ways on (#449).
+const CLOSING_FOR: Duration = Duration::from_secs(12);
 const FADE_OUT: f32 = 0.6;
 /// The card's width inside its frame.
 const WIDTH: f32 = 252.0;
@@ -243,24 +253,83 @@ fn words(step: Step) -> (&'static str, &'static str, &'static str) {
             "Any free lot in the three rings is yours for the deed. \"Show me\" marks one to walk out and see; claim it at the desk, or from the lot's own panel.",
             "[Alt] + [Click] a lot  ·  Claim with your deed",
         ),
-        // Settle in
+        // Settle in (#449): the first hour at home. The station's and the
+        // tax's words are your own lot's ([`home_words`]); these are for a
+        // home the client hasn't listed yet.
         Step::PlaceAtHome => (
             "A station at home",
-            "Place a station on your own lot. The room there is yours to fill.",
-            "Right-click a kit",
+            "The room on your own lot is yours to fill. Make a kit by hand (a storage chest takes 8 fiber, \
+             a workbench 10) and set it down there. A workbench at home can be set to work, next.",
+            "[C] crafting  ·  Right-click the kit",
         ),
         Step::SetAutomation => (
             "Work that runs",
-            "Set a station's job, and it works while you're away.",
-            "[O] a station  ·  Automation",
+            "A workbench of yours can work without you. Open it, and on its Automation tab choose \
+             Knapped Stone and Forever, then Start: it takes stone from its own box and leaves the edges there. \
+             It waits while you're away and goes on when you're back; a subscription keeps it working.",
+            "[O] the nearest station  ·  Automation",
         ),
         Step::ReadTax => (
             "What the city asks",
-            "Every deed owes tax each week. Read what yours asks, on its panel.",
+            "Every deed owes a week's tax, a share of what it's assessed at, taken from your Strands a little \
+             each hour. An hour you can't pay is owed: Alt-click your lot to see the debt and pay it. Four weeks \
+             unpaid and the lot is foreclosed: its stations come down and back to you, and the land goes back to the city.",
             "[Alt] + [Click] your lot",
         ),
     }
 }
+
+/// Settle in's words for your own lot (#449), where the card has one: what
+/// it fits, by #444's count, and what it's taxed. `None` for any other step,
+/// or with no home listed yet ([`words`]' then).
+fn home_words(step: Step, home: Option<&Home>) -> Option<String> {
+    let home = home?;
+    let noun = capitol_core::deeds::home_noun(home.zone);
+    match step {
+        Step::PlaceAtHome => {
+            // The deed's capacity reads more than fits on most lots (plan D9)
+            let allows = if home.fits < home.capacity.max(0) as usize {
+                format!(", though its deed allows {}", home.capacity)
+            } else {
+                String::new()
+            };
+            let stations = if home.fits == 1 { "station" } else { "stations" };
+            Some(format!(
+                "Your {noun} fits {} {stations}{allows}: the room is yours to fill. Make a kit by hand \
+                 (a storage chest takes 8 fiber, a workbench 10) and set it down on your own land. \
+                 A workbench at home can be set to work, next.",
+                home.fits
+            ))
+        }
+        Step::ReadTax => {
+            let Some(week) = home.weekly_tax else {
+                return Some(format!(
+                    "Every deed owes tax, a share of what it's assessed at, taken a little each hour. \
+                     The rate stands at nothing just now, so your {noun} owes none. Alt-click it to see \
+                     a debt and pay it, if one comes."
+                ));
+            };
+            let owes = if home.owed > 0 {
+                format!(" It owes {} now.", home.owed)
+            } else {
+                String::new()
+            };
+            Some(format!(
+                "Your {noun} is assessed at {} Strands, and its tax is {week} a week, taken from your Strands \
+                 a little each hour. An hour you can't pay is owed: Alt-click your {noun} to see the debt and pay it.{owes} \
+                 Four weeks unpaid ({} Strands) and it's foreclosed: its stations come down and back to you, \
+                 and the land goes back to the city. A bought deed is refunded less the debt; the road in's, nothing.",
+                home.assessed,
+                week * capitol_core::protocol::rules::FORECLOSE_AFTER_WEEKS,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The tax card's "Noted": it asks nothing of the world, so reading it is
+/// the step (`read_tax`, a client-reported one).
+const NOTED: &str = "Noted";
 
 /// The market box's card once its box is known empty (#446, plan D10):
 /// nothing's filled, so it says so, and the road goes on without it.
@@ -271,11 +340,12 @@ const BOX_EMPTY: &str = "Nothing's filled yet, so your box is empty: a price can
 const WAIVE_AFTER: Duration = Duration::from_secs(7);
 
 /// A step's words on its card: [`words`], but for the market box once it's
-/// known empty (`box_goods`, `Some(false)`).
-fn body(step: Step, box_goods: Option<bool>) -> &'static str {
+/// known empty (`box_goods`, `Some(false)`), and Settle in's for your own
+/// lot (`home`, [`home_words`]).
+fn body(step: Step, box_goods: Option<bool>, home: Option<&Home>) -> Cow<'static, str> {
     match (step, box_goods) {
-        (Step::CollectBox, Some(false)) => BOX_EMPTY,
-        _ => words(step).1,
+        (Step::CollectBox, Some(false)) => BOX_EMPTY.into(),
+        _ => home_words(step, home).map_or(words(step).1.into(), Cow::Owned),
     }
 }
 
@@ -391,6 +461,10 @@ pub struct Hints {
     lesson: Option<QualityLesson>,
     /// The quality card was read this session ("Go on").
     lesson_read: bool,
+    /// Your home, for Settle in's words (#449, [`Hints::set_home`]).
+    home: Option<Home>,
+    /// The tax card's "Noted" was clicked: [`Hints::noted`] tells it.
+    noted: bool,
 }
 
 impl Hints {
@@ -467,6 +541,9 @@ impl Hints {
             .and_then(|key| Chapter::ALL.into_iter().find(|c| chapter_key(*c) == key));
         // At the bench kit, the quality card first, on a sample pack
         self.lesson = super::quality_card::sample();
+        // Settling in, on a sample farm
+        let settling = self.tour.and_then(Tour::current).is_some_and(|s| s.chapter() == Chapter::SettleIn);
+        self.home = settling.then(sample_home);
     }
 
     /// The quality card's numbers (#443), from the pack and crafting's
@@ -478,6 +555,22 @@ impl Hints {
         if lesson.is_some() || !matches!(self.card, Some(Card::Lesson(_))) {
             self.lesson = lesson;
         }
+    }
+
+    /// Your home lot (`onboarding::home_plot` of your plots), for Settle
+    /// in's words: what it fits and what it's taxed (#449). Call once a
+    /// frame; the room is packed once a lot, not every frame.
+    pub fn set_home(&mut self, plot: Option<&PlotInfo>) {
+        self.home = plot.and_then(|p| Home::of(p, self.home.as_ref()));
+    }
+
+    /// The tax card's "Noted" was clicked since last asked: the step to tell
+    /// the server (`tutorial_seen { read_tax }`), the first time.
+    pub fn noted(&mut self) -> Option<Step> {
+        if !std::mem::take(&mut self.noted) {
+            return None;
+        }
+        self.saw(Did::ReadTax)
     }
 
     /// The quality card is still to show: there's a rope to talk about, and
@@ -606,6 +699,7 @@ impl Hints {
         let eased = 1.0 - (1.0 - alpha).powi(3);
         let mut hide = false;
         let mut read = false;
+        let mut noted = false;
         // Under the header, as the panels are (anchors are screen-relative).
         let top = ctx.available_rect().top() + 12.0;
         let size = |compact| {
@@ -631,8 +725,10 @@ impl Hints {
                         Face::Step(step) => {
                             let done = matches!(card, Card::Done(..));
                             let lead = lead.filter(|_| !done);
-                            let body = body(step, self.box_goods);
-                            hide = step_card(ui, step, body, done, spot.compact, lead);
+                            let body = body(step, self.box_goods, self.home.as_ref());
+                            let asked = step_card(ui, step, &body, done, spot.compact, lead);
+                            hide = asked.hide;
+                            noted = asked.noted;
                         }
                         Face::Chapter(chapter) => chapter_card(ui, chapter, spot.compact),
                         Face::Closing => closing_card(ui, spot.compact),
@@ -654,10 +750,10 @@ impl Hints {
         // the area's own response isn't hovered while a child widget is.
         if spot.compact && shown.response.contains_pointer() {
             let (title, body) = match face {
-                Face::Step(s) => (words(s).0.to_owned(), body(s, self.box_goods)),
-                Face::Chapter(c) => (chapter_done_title(c), chapter_close(c)),
-                Face::Closing => (CLOSING.0.to_owned(), CLOSING.1),
-                Face::Lesson => (super::quality_card::TITLE.to_owned(), super::quality_card::WORDS),
+                Face::Step(s) => (words(s).0.to_owned(), body(s, self.box_goods, self.home.as_ref())),
+                Face::Chapter(c) => (chapter_done_title(c), chapter_close(c).into()),
+                Face::Closing => (CLOSING.0.to_owned(), CLOSING.1.into()),
+                Face::Lesson => (super::quality_card::TITLE.to_owned(), super::quality_card::WORDS.into()),
             };
             let layer = shown.response.layer_id;
             egui::show_tooltip_at_pointer(ctx, layer, Id::new("capitol_hint_words"), |ui| {
@@ -670,6 +766,10 @@ impl Hints {
         if read {
             // On to the bench kit's card, next frame
             self.lesson_read = true;
+        }
+        if noted {
+            // The caller tells the server ([`Hints::noted`])
+            self.noted = true;
         }
         if hide {
             tracing::info!("hints: hidden for now");
@@ -776,13 +876,24 @@ fn next_card(card: Option<Card>, tour: Tour, now: Instant) -> Option<Card> {
     }
 }
 
+/// What a step's card was asked this frame.
+#[derive(Debug, Clone, Copy, Default)]
+struct Asked {
+    /// "Hide for now"
+    hide: bool,
+    /// The tax card's "Noted" (#449)
+    noted: bool,
+}
+
 /// A step's card: its chapter and place in it, then the step, its `body`
 /// (its words, as [`body`] picks them), and where it leads if anywhere;
-/// `compact` leaves out the words. True if "Hide for now" was clicked.
-fn step_card(ui: &mut egui::Ui, step: Step, body: &str, done: bool, compact: bool, lead: Option<Lead>) -> bool {
+/// `compact` leaves out the words. The tax card, which asks nothing of the
+/// world, ends with "Noted", which is the step.
+fn step_card(ui: &mut egui::Ui, step: Step, body: &str, done: bool, compact: bool, lead: Option<Lead>) -> Asked {
     let (title, _, keys) = words(step);
     let (at, of) = place_in_chapter(step);
     let mut hide = false;
+    let mut noted = false;
     ui.horizontal(|ui| {
         ui.label(theme::label(chapter_name(step.chapter())));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -826,7 +937,14 @@ fn step_card(ui: &mut egui::Ui, step: Step, body: &str, done: bool, compact: boo
         ui.spacing_mut().item_spacing.x = 4.0;
         keys_row(ui, keys);
     });
-    hide
+    if step == Step::ReadTax && !done {
+        ui.add_space(8.0);
+        noted = theme::accent_button(ui, NOTED, theme::GOLD, true)
+            .on_hover_text("Read and understood: on to the last card")
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked();
+    }
+    Asked { hide, noted }
 }
 
 /// Where the step leads: the hall chip's arrow, turned the way it lies,
@@ -887,32 +1005,47 @@ fn chapter_card(ui: &mut egui::Ui, chapter: Chapter, compact: bool) {
     }
 }
 
-/// The closing card's title and words.
+/// The closing card's title and words (#449).
 const CLOSING: (&str, &str) = (
     "Well begun",
-    "You've walked the road in and made a home. The rest is yours: \
-     make, trade, and make your name.",
+    "You've walked the road in and made a home, and the city has you on its books. \
+     The rest is yours: make, trade, and make your name.",
 );
 
-/// The last card: the road is walked. `compact` leaves out its words.
+/// The closing card's way on: where the city says what it's doing. The
+/// Wanted page joins it once the board's commissions are in (S2.3,
+/// [#389](https://github.com/chrischaps/TheCapitol/issues/389)).
+const CLOSING_ON: &str = "the Gazette, each morning";
+
+/// The last card: the road is walked, the seal pressed, and where to look
+/// from here. `compact` leaves out its words.
 fn closing_card(ui: &mut egui::Ui, compact: bool) {
     let (title, body) = CLOSING;
-    let last = Chapter::SettleIn.steps().count();
-    ui.label(theme::label(chapter_name(Chapter::SettleIn)));
+    // A pip a chapter now, every one gold
+    let chapters = Chapter::ALL.len();
+    ui.label(theme::label(&format!("The road in · {chapters} of {chapters}")));
     ui.add_space(2.0);
-    theme::step_pips(ui, last, last);
+    theme::step_pips(ui, chapters, chapters);
     ui.add_space(4.0);
-    ui.label(theme::title(title, size::HEADING + 2.0));
+    ui.horizontal(|ui| {
+        let title = ui.label(theme::title(title, size::HEADING + 2.0));
+        // The city's seal, as on the Registrar's letter: the road's last stamp
+        let h = title.rect.height();
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(h, h), egui::Sense::hover());
+        theme::capitol_seal(ui.painter(), rect.center(), h * 0.46);
+    });
     if !compact {
         ui.add_space(2.0);
         ui.label(RichText::new(body).color(theme::TEXT).size(size::BODY));
     }
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        theme::keycap(ui, "?");
-        ui.label(theme::dim("shows every control, any time"));
-    });
+    for (key, what) in [("G", CLOSING_ON), ("?", "every control, any time")] {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            theme::keycap(ui, key);
+            ui.label(theme::dim(what));
+        });
+    }
 }
 
 /// A chapter's name in `--hints-sample`: the protocol's, `road_in`.
@@ -924,6 +1057,22 @@ fn chapter_key(chapter: Chapter) -> &'static str {
         Chapter::People => "people",
         Chapter::DeedsOffice => "deeds_office",
         Chapter::SettleIn => "settle_in",
+    }
+}
+
+/// `--hints-sample`'s home for Settle in: a farm as the default world's
+/// typically are since Plots v2 (12 stations of a deed's 25, #459), on a
+/// granted deed assessed at the rural price, 250, so 5 a week.
+fn sample_home() -> Home {
+    Home {
+        plot_id: uuid::Uuid::nil(),
+        zone: capitol_core::protocol::rules::Zone::Rural,
+        fits: 12,
+        capacity: 25,
+        placed: 0,
+        assessed: 250,
+        weekly_tax: Some(5),
+        owed: 0,
     }
 }
 
@@ -1226,14 +1375,14 @@ mod tests {
         hints.market_box(None, t0);
         assert_eq!(hints.waive(later), None, "not fetched: nothing's known");
         hints.market_box(Some(true), t0);
-        assert_eq!(body(Step::CollectBox, hints.box_goods), words(Step::CollectBox).1);
+        assert_eq!(body(Step::CollectBox, hints.box_goods, None), words(Step::CollectBox).1);
         assert_eq!(hints.waive(later), None, "something waits: collect it");
 
         // Known empty from t1: it says so, and moves on once it's been read
         let t1 = t0 + Duration::from_secs(2);
         hints.market_box(Some(false), t1);
         hints.market_box(Some(false), t1 + Duration::from_secs(1));
-        assert_eq!(body(Step::CollectBox, hints.box_goods), BOX_EMPTY);
+        assert_eq!(body(Step::CollectBox, hints.box_goods, None), BOX_EMPTY);
         assert_eq!(hints.waive(t1 + WAIVE_AFTER - Duration::from_millis(10)), None, "still being read");
         hints.hide();
         hints.card = Some(Card::Step(Step::CollectBox, t0));
@@ -1251,7 +1400,66 @@ mod tests {
         hints.card = next_card(None, hints.tour.unwrap(), t0);
         hints.market_box(Some(false), t0);
         assert_eq!(hints.waive(later), None);
-        assert_eq!(body(Step::BuyOrder, Some(false)), words(Step::BuyOrder).1);
+        assert_eq!(body(Step::BuyOrder, Some(false), None), words(Step::BuyOrder).1);
+    }
+
+    /// Settle in speaks of your own lot (#449): what it fits against what
+    /// its deed allows, and its tax in Strands. With no home listed, the
+    /// plain words; nothing else changes.
+    #[test]
+    fn settling_in_speaks_of_your_own_lot() {
+        let farm = sample_home();
+        let station = body(Step::PlaceAtHome, None, Some(&farm));
+        assert!(station.contains("Your farm fits 12 stations, though its deed allows 25"), "{station}");
+        let tax = body(Step::ReadTax, None, Some(&farm));
+        assert!(tax.contains("assessed at 250 Strands") && tax.contains("5 a week"), "{tax}");
+        assert!(tax.contains("Four weeks unpaid (20 Strands)") && !tax.contains("owes"), "{tax}");
+        let owing = Home { owed: 3, ..farm.clone() };
+        assert!(body(Step::ReadTax, None, Some(&owing)).contains("It owes 3 now."));
+        let untaxed = Home { weekly_tax: None, ..farm.clone() };
+        assert!(body(Step::ReadTax, None, Some(&untaxed)).contains("owes none"));
+        // A yard that fits all its deed allows says nothing of the deed
+        let yard = Home { zone: capitol_core::protocol::rules::Zone::Urban, fits: 4, capacity: 4, ..farm.clone() };
+        let yard = body(Step::PlaceAtHome, None, Some(&yard));
+        assert!(yard.contains("Your yard fits 4 stations:") && !yard.contains("allows"), "{yard}");
+        // No home yet: the plain words; other steps keep theirs
+        assert_eq!(body(Step::ReadTax, None, None), words(Step::ReadTax).1);
+        assert_eq!(body(Step::SetAutomation, None, Some(&farm)), words(Step::SetAutomation).1);
+        // The settle_in samples stand on a farm, the others on none
+        let mut hints = Hints::default();
+        hints.with_sample("read_tax");
+        assert_eq!(hints.home, Some(sample_home()));
+        hints.with_sample("hall");
+        assert_eq!(hints.home, None);
+    }
+
+    /// The tax card's "Noted" is the step, told once (#449)
+    #[test]
+    fn the_tax_card_is_read_when_noted() {
+        let mut hints = Hints::default();
+        hints.with_sample("read_tax");
+        assert_eq!(hints.noted(), None, "nothing clicked");
+        hints.noted = true;
+        assert_eq!(hints.noted(), Some(Step::ReadTax));
+        hints.noted = true;
+        assert_eq!(hints.noted(), None, "told once");
+        // It leads nowhere; the two before it lead home
+        hints.card = next_card(None, hints.tour.unwrap(), Instant::now());
+        assert_eq!(hints.target(), None);
+        hints.with_sample("place_at_home");
+        hints.card = next_card(None, hints.tour.unwrap(), Instant::now());
+        assert_eq!(hints.target(), Some(Target::Home));
+    }
+
+    /// Finished, nothing of the road in shows: no card, chip or line
+    #[test]
+    fn a_finished_road_leaves_nothing_behind() {
+        let mut hints = Hints::default();
+        hints.with_sample("settle_in-done");
+        assert!(hints.tour.unwrap().finished());
+        assert_eq!(hints.hidden(), None, "no chip, no line in the overlay");
+        assert_eq!(next_card(None, hints.tour.unwrap(), Instant::now()), None);
+        assert!(CLOSING_FOR > CHAPTER_FOR, "the last card stays longest");
     }
 
     #[test]

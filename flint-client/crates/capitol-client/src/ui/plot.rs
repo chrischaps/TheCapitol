@@ -177,6 +177,10 @@ fn body(ui: &mut egui::Ui, plot: &PlotInfo, view: &View, confirm: &mut Option<uu
             "Value",
             theme::text(format!("{} Strands", plot.assessed_value)),
         );
+        // What it's taxed, as the road in's tax card says it (#449)
+        if let Some(week) = weekly_tax(plot) {
+            row(ui, "Tax", theme::text(format!("{week} a week")));
+        }
     }
 
     match &view.offer {
@@ -360,6 +364,13 @@ fn debt(ui: &mut egui::Ui, plot: &PlotInfo, view: &View) -> Option<Action> {
         .clicked()
         .then_some(Action::PayTax(plot.id, pay))
         .filter(|_| enabled)
+}
+
+/// A week's tax on an owned plot: a quarter of the debt that forecloses it
+/// (`rules::FORECLOSE_AFTER_WEEKS`). `None` unowned or untaxed.
+fn weekly_tax(plot: &PlotInfo) -> Option<i64> {
+    let weeks = capitol_core::protocol::rules::FORECLOSE_AFTER_WEEKS;
+    plot.forecloses_at.filter(|f| *f > 0 && plot.owner_id.is_some()).map(|f| f / weeks)
 }
 
 /// One label and value, spread across the panel (React's `.plot-info-row`).
@@ -589,5 +600,16 @@ mod tests {
             deed: DeedOffer::None,
         };
         assert_eq!(run(&view, None), (None, None));
+    }
+
+    /// A week's tax is a quarter of the debt that forecloses the plot (#449)
+    #[test]
+    fn an_owned_plot_says_its_weeks_tax() {
+        let mut p = plot(Some(Uuid::from_u128(1)));
+        assert_eq!(weekly_tax(&p), None, "untaxed");
+        p.forecloses_at = Some(40);
+        assert_eq!(weekly_tax(&p), Some(10));
+        p.owner_id = None;
+        assert_eq!(weekly_tax(&p), None, "nobody's to tax");
     }
 }

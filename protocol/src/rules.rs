@@ -101,6 +101,13 @@ pub fn weekday(day: i64) -> &'static str {
     WEEKDAYS[(day - GAZETTE_FIRST_DAY).rem_euclid(7) as usize]
 }
 
+/// How many weeks of tax a plot may owe before it's foreclosed (#131). Tax
+/// weeks are the calendar's, 168 hours, charged an hour at a time, not the
+/// Capitol's fourteen-hour [`WEEKDAYS`]. `PlotInfo::forecloses_at` is this
+/// many weeks of the plot's tax, so a client reads a week's tax from it
+/// (the road in's tax card, #449).
+pub const FORECLOSE_AFTER_WEEKS: i64 = 4;
+
 // ---------------------------------------------------------------------------
 // Speeds and ranges (world units)
 // ---------------------------------------------------------------------------

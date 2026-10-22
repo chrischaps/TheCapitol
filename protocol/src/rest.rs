@@ -2538,8 +2538,10 @@ pub struct PlotInfo {
     /// `POST /plots/{id}/pay-tax` pays it off.
     #[serde(default)]
     pub tax_owed: i64,
-    /// The debt at which the plot is foreclosed: four weeks of its tax.
-    /// `None` while it's unowned or owes no tax.
+    /// The debt at which the plot is foreclosed: four weeks of its tax
+    /// (`rules::FORECLOSE_AFTER_WEEKS`), so a week's tax is a quarter of it.
+    /// `None` while it's unowned or untaxed (a rate of 0), whether or not
+    /// anything is owed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forecloses_at: Option<i64>,
     /// What a deed to this plot costs in Strands: its zone's `deed_cost`

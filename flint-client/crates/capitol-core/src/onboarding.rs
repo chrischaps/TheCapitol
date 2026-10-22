@@ -23,9 +23,10 @@
 //! ([`clear_spot`], #443).
 //!
 //! Arrival's quality card (#443) reads its numbers from the player's own
-//! pack ([`QualityLesson`]).
+//! pack ([`QualityLesson`]). Settle in's cards (#449) read theirs from the
+//! player's own lot ([`Home`]): what it fits, and what it's taxed.
 
-use capitol_protocol::rest::{RecipeInfo, ResourceNodeInfo, SlotItem, StationInfo};
+use capitol_protocol::rest::{PlotInfo, RecipeInfo, ResourceNodeInfo, SlotItem, StationInfo};
 use capitol_protocol::rules::{self, quality, Zone};
 use capitol_protocol::terrain::{quad_contains, TerrainResponse};
 use capitol_protocol::tutorial::{Chapter, Step, TutorialProgress};
@@ -43,6 +44,8 @@ pub enum Did {
     ReadZoneCard,
     /// Looked in at the Deeds Office (#448).
     OpenedOffice,
+    /// Read the tax card, and said so with its "Noted" (#449).
+    ReadTax,
 }
 
 impl Did {
@@ -52,6 +55,7 @@ impl Did {
             Did::UsedInventory | Did::OpenedCrafting => Step::OpenPack,
             Did::ReadZoneCard => Step::ReadZoneCard,
             Did::OpenedOffice => Step::OpenOffice,
+            Did::ReadTax => Step::ReadTax,
         }
     }
 }
@@ -132,6 +136,13 @@ pub enum Target {
     /// rather than on it ([`clear_spot`]). The extension keeps the spot it
     /// found while it stays clear, so the ring doesn't follow you about.
     ClearSpot,
+    /// Your home (#449): the lot your deed claimed ([`home_plot`]), its
+    /// edge traced.
+    Home,
+    /// A station of yours that can be set to work (#449): a crafting
+    /// station with a box, the one on your home lot first, else the
+    /// nearest ([`my_station`]).
+    MyStation,
 }
 
 /// Where `step` leads, if anywhere. A gather leads to the nodes the server
@@ -158,6 +169,10 @@ pub fn target(step: Step) -> Option<Target> {
         // The claim leads to the lot the office showed you, if any: the
         // client's to say (#448)
         Step::OpenOffice => Target::Office,
+        // Settle in (#449): your own land, then a station of yours on it.
+        // The tax card asks nothing of the world, so it leads nowhere.
+        Step::PlaceAtHome => Target::Home,
+        Step::SetAutomation => Target::MyStation,
         _ => return None,
     })
 }
@@ -192,6 +207,88 @@ pub fn nearest_person<'a>(
             let d = |p: &PlayerPosition| (p.x - from[0]).powi(2) + (p.y - from[1]).powi(2);
             d(a).total_cmp(&d(b))
         })
+}
+
+/// Your home, as Settle in's cards say it (#449): the lot [`home_plot`]
+/// picks, what it fits, and what it's taxed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Home {
+    pub plot_id: Uuid,
+    pub zone: Zone,
+    /// The stations it fits on its own, empty, at the packing #444's zone
+    /// card counts by (`sim::lot::layout`, which the server's
+    /// `station_room` copies), capped by its capacity
+    pub fits: usize,
+    /// What its deed allows (`station_capacity`)
+    pub capacity: i32,
+    /// The stations on it now
+    pub placed: i32,
+    /// What it's assessed at: what the deed cost, or the zone's price for a
+    /// granted one (plan D4)
+    pub assessed: i32,
+    /// A week's tax, at the live rate; `None` where it's untaxed
+    pub weekly_tax: Option<i64>,
+    /// Tax owed and unpaid
+    pub owed: i64,
+}
+
+impl Home {
+    /// `plot` as a home. `before` is the last one worked out: on the same
+    /// lot with the same capacity, its room is kept rather than packed
+    /// again, since it's asked every frame Settle in is open. `None` for a
+    /// lot outside the home zones.
+    pub fn of(plot: &PlotInfo, before: Option<&Home>) -> Option<Home> {
+        let zone = Zone::from_str(&plot.zone_id).filter(|z| crate::deeds::HOME_ZONES.contains(z))?;
+        let fits = match before {
+            Some(b) if b.plot_id == plot.id && b.capacity == plot.station_capacity => b.fits,
+            _ => crate::sim::lot::layout(crate::sim::lot::corners(plot), plot.station_capacity.max(0) as usize).len(),
+        };
+        Some(Home {
+            plot_id: plot.id,
+            zone,
+            fits,
+            capacity: plot.station_capacity,
+            placed: plot.station_count,
+            assessed: plot.assessed_value,
+            weekly_tax: plot.forecloses_at.filter(|f| *f > 0).map(|f| f / rules::FORECLOSE_AFTER_WEEKS),
+            owed: plot.tax_owed,
+        })
+    }
+
+    /// The debt that forecloses it: four weeks of its tax.
+    pub fn forecloses_at(&self) -> Option<i64> {
+        self.weekly_tax.map(|w| w * rules::FORECLOSE_AFTER_WEEKS)
+    }
+}
+
+/// Your home among your `plots`: a lot in the rural, suburban or urban
+/// rings, the one claimed last if you hold more than one (a deed bought
+/// before the grant was spent, say: plan D6). Ties go by id.
+pub fn home_plot(plots: &[PlotInfo]) -> Option<&PlotInfo> {
+    plots
+        .iter()
+        .filter(|p| p.owner_id.is_some())
+        .filter(|p| Zone::from_str(&p.zone_id).is_some_and(|z| crate::deeds::HOME_ZONES.contains(&z)))
+        .max_by(|a, b| a.claimed_at.cmp(&b.claimed_at).then_with(|| b.id.cmp(&a.id)))
+}
+
+/// A station of `me`'s that can be set to work (E4.2's rule: a crafting
+/// station with a box), for the automation step: one on `home` first, the
+/// nearest to `from` (server units) among those, else the nearest anywhere,
+/// such as Arrival's workbench by the road.
+pub fn my_station<'a>(
+    stations: impl IntoIterator<Item = &'a StationInfo>,
+    me: Option<Uuid>,
+    home: Option<&PlotInfo>,
+    from: [f64; 2],
+) -> Option<&'a StationInfo> {
+    let me = me?;
+    let at_home = |s: &StationInfo| home.is_some_and(|h| h.contains(s.x, s.y));
+    let d = |s: &StationInfo| (s.x - from[0]).powi(2) + (s.y - from[1]).powi(2);
+    stations
+        .into_iter()
+        .filter(|s| s.owner_id == me && s.category == "crafting" && s.container_id.is_some())
+        .min_by(|a, b| at_home(b).cmp(&at_home(a)).then(d(a).total_cmp(&d(b))))
 }
 
 /// How far from you [`clear_spot`] looks, in server units: inside the 75 a
@@ -457,7 +554,7 @@ mod tests {
     /// the client never reports one it judges
     #[test]
     fn every_report_is_one_the_server_takes() {
-        for did in [Did::UsedInventory, Did::OpenedCrafting, Did::ReadZoneCard, Did::OpenedOffice] {
+        for did in [Did::UsedInventory, Did::OpenedCrafting, Did::ReadZoneCard, Did::OpenedOffice, Did::ReadTax] {
             assert!(did.step().judge().client_reports(), "{did:?}");
         }
     }
@@ -685,5 +782,102 @@ mod tests {
         assert_eq!(place_in_chapter(Step::FellTree), (11, 12));
         assert_eq!(place_in_chapter(Step::SeeRuralLot), (0, 4));
         assert_eq!(place_in_chapter(Step::ClaimHome), (1, 2));
+    }
+
+    /// A farm-sized lot, 120 by 300, of `zone`, owned by `owner`
+    fn lot(n: u128, zone: &str, owner: Option<Uuid>, claimed: i64) -> PlotInfo {
+        use capitol_protocol::rest::Bounds;
+        PlotInfo {
+            id: Uuid::from_u128(n),
+            zone_id: zone.into(),
+            world_x: 60.0,
+            world_y: 150.0,
+            bounds: Bounds::new(0.0, 0.0, 120.0, 300.0),
+            size_category: "large".into(),
+            plot_type: "residential".into(),
+            owner_id: owner,
+            owner_name: None,
+            owner_citizen: false,
+            claimed_at: chrono::DateTime::from_timestamp(claimed, 0),
+            assessed_value: 250,
+            tax_owed: 0,
+            forecloses_at: owner.map(|_| 20),
+            deed_cost: Some(250),
+            station_count: 0,
+            station_capacity: 25,
+            terrain_id: None,
+            corners: Some([(0.0, 0.0), (120.0, 0.0), (120.0, 300.0), (0.0, 300.0)]),
+        }
+    }
+
+    /// Settle in leads to your own land, then to a station of yours on it,
+    /// and the tax card leads nowhere: it asks nothing of the world (#449)
+    #[test]
+    fn settling_in_leads_home() {
+        assert_eq!(target(Step::PlaceAtHome), Some(Target::Home));
+        assert_eq!(target(Step::SetAutomation), Some(Target::MyStation));
+        assert_eq!(target(Step::ReadTax), None);
+        assert_eq!(Tour::default().report(Did::ReadTax), Some(Step::ReadTax));
+        assert!(Did::ReadTax.step().judge().client_reports(), "the server takes the tax card's word");
+    }
+
+    /// Home is the home lot claimed last; a guild plot isn't one
+    #[test]
+    fn home_is_the_home_lot_claimed_last() {
+        let me = Some(Uuid::from_u128(1));
+        let plots = [lot(2, "rural", me, 100), lot(3, "suburban", me, 200), lot(4, "guild", me, 300)];
+        assert_eq!(home_plot(&plots).unwrap().id, Uuid::from_u128(3));
+        assert_eq!(home_plot(&plots[2..]), None, "a guild plot isn't a home");
+        assert_eq!(home_plot(&[]), None);
+    }
+
+    /// Its room is #444's count, worked out once a lot; its tax a quarter of
+    /// the debt that forecloses it
+    #[test]
+    fn a_home_says_what_it_fits_and_what_it_owes() {
+        let me = Some(Uuid::from_u128(1));
+        let mut plot = lot(2, "rural", me, 100);
+        let home = Home::of(&plot, None).expect("a farm is a home");
+        let fits = crate::sim::lot::layout(crate::sim::lot::corners(&plot), 25).len();
+        assert!(fits > 4 && fits <= 25, "{fits}");
+        assert_eq!((home.zone, home.fits, home.capacity, home.placed), (Zone::Rural, fits, 25, 0));
+        assert_eq!((home.weekly_tax, home.forecloses_at(), home.assessed), (Some(5), Some(20), 250));
+        // A station placed and a debt run up: the room is kept, the rest follows
+        plot.station_count = 1;
+        plot.tax_owed = 3;
+        let kept = Home { fits: 99, ..home.clone() };
+        let after = Home::of(&plot, Some(&kept)).unwrap();
+        assert_eq!((after.fits, after.placed, after.owed), (99, 1, 3));
+        // Another lot is packed afresh
+        let other = lot(3, "rural", me, 100);
+        assert_eq!(Home::of(&other, Some(&kept)).unwrap().fits, fits);
+        // Untaxed, it says so; a guild plot isn't a home
+        plot.forecloses_at = None;
+        assert_eq!(Home::of(&plot, None).unwrap().weekly_tax, None);
+        assert_eq!(Home::of(&lot(4, "guild", me, 0), None), None);
+    }
+
+    /// The automation step leads to a crafting station of yours with a box:
+    /// at home first, else the nearest (Arrival's bench by the road)
+    #[test]
+    fn the_job_goes_on_a_station_of_yours_at_home_first() {
+        let me = Uuid::from_u128(1);
+        let home = lot(2, "rural", Some(me), 100);
+        let mine = |n: u128, x: f64, y: f64| StationInfo {
+            id: Uuid::from_u128(n),
+            owner_id: me,
+            container_id: Some(Uuid::from_u128(n + 100)),
+            ..bench(x, y)
+        };
+        let road = mine(10, -40.0, 0.0);
+        let at_home = mine(11, 60.0, 250.0);
+        let chest = StationInfo { category: "storage".into(), station_type: "storage_chest".into(), ..mine(12, 60.0, 20.0) };
+        let theirs = StationInfo { owner_id: Uuid::from_u128(7), ..mine(13, 60.0, 40.0) };
+        let stations = [road.clone(), at_home.clone(), chest, theirs];
+        let from = [-30.0, 0.0];
+        assert_eq!(my_station(&stations, Some(me), Some(&home), from).unwrap().id, at_home.id);
+        assert_eq!(my_station(&stations, Some(me), None, from).unwrap().id, road.id, "no home: the nearest");
+        assert_eq!(my_station(&stations[2..], Some(me), Some(&home), from), None, "a chest makes nothing");
+        assert_eq!(my_station(&stations, None, Some(&home), from), None);
     }
 }

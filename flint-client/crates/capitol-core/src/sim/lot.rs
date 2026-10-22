@@ -30,7 +30,7 @@ fn clear(a: (f64, f64), b: (f64, f64)) -> bool {
 }
 
 /// The lot's corners, or its box for a lot from before B7.
-fn corners(plot: &PlotInfo) -> [(f64, f64); 4] {
+pub fn corners(plot: &PlotInfo) -> [(f64, f64); 4] {
     plot.corners.unwrap_or_else(|| {
         let b = plot.bounds;
         [(b.min_x, b.min_y), (b.max_x, b.min_y), (b.max_x, b.max_y), (b.min_x, b.max_y)]

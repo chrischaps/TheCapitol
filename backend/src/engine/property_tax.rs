@@ -40,8 +40,9 @@ use capitol_protocol::ws::{ItemCount, ServerMessage};
 /// Hours per week. `tax_carry` counts in 168ths of a strand.
 const HOURS_PER_WEEK: i64 = 168;
 
-/// How many weeks of tax a plot may owe before it's foreclosed (#131)
-pub const FORECLOSE_AFTER_WEEKS: i64 = 4;
+/// How many weeks of tax a plot may owe before it's foreclosed (#131): the
+/// protocol's, so a client reads a week's tax off `forecloses_at` (#449)
+pub use capitol_protocol::rules::FORECLOSE_AFTER_WEEKS;
 
 /// A week's tax on a plot assessed at `assessed_value`
 pub fn weekly_tax(assessed_value: i32, rate: f64) -> i64 {
