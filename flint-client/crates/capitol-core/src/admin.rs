@@ -214,6 +214,7 @@ mod tests {
             default,
             value,
             chart: "money".into(),
+            base_strands: None,
         }
     }
 

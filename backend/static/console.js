@@ -2876,12 +2876,15 @@
     const sub = document.createElement("span");
     sub.className = "knob-sub";
     sub.append(text("code", k.key), " ", text("span", `· ${unit(k.unit, k.default)} by default`));
+    // A multiplier over a price says the price, and what it comes to (#431)
+    const base = k.base_strands == null ? null : text("span", "");
+    if (base) sub.append(" ", base);
     tr.append(
       cell([swatch, name, sub]),
       cell(now, "num now"),
       cell(reset, "num"),
     );
-    const row = { tr, input, reset };
+    const row = { tr, input, reset, base };
     knobRows.set(k.key, row);
     return row;
   }
@@ -2893,6 +2896,10 @@
     row.tr.classList.toggle("off", off);
     row.reset.disabled = !off;
     if (document.activeElement !== row.input) row.input.value = typed(k, k.value);
+    if (row.base) {
+      const now = k.value === 1 ? k.base_strands : Math.max(1, Math.round(k.base_strands * k.value));
+      row.base.textContent = `· times ${nf.format(k.base_strands)} Strands a deed` + (now === k.base_strands ? "" : `, now ${nf.format(now)}`);
+    }
   }
 
   /** The words of a refusal: the server's `error`, or the status */

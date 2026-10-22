@@ -543,6 +543,10 @@ pub struct TunableValue {
     pub value: f64,
     /// The console chart it's watched on
     pub chart: String,
+    /// For a multiplier over a price, the price it multiplies, in Strands:
+    /// a `deed_price.<zone>` knob's zone's `deed_cost` (#431)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_strands: Option<i64>,
 }
 
 /// `GET /admin/tunables`, and `PUT`'s answer: every knob, one per zone and
@@ -588,10 +592,22 @@ impl TunablesResponse {
                     step: knob.step,
                     default: knob.default,
                     chart: knob.chart.to_string(),
+                    base_strands: None,
                 });
             }
         }
         TunablesResponse { knobs }
+    }
+
+    /// Give each zone's deed price knob the price it multiplies, from
+    /// `deed_costs` (zone id to `zones.deed_cost`)
+    pub fn with_deed_costs(mut self, deed_costs: &BTreeMap<String, i64>) -> Self {
+        for knob in &mut self.knobs {
+            if let Some(zone) = knob.key.strip_prefix("deed_price.") {
+                knob.base_strands = deed_costs.get(zone).copied();
+            }
+        }
+        self
     }
 }
 
@@ -728,6 +744,20 @@ mod tests {
         assert_eq!(list.knobs.len(), 9 + 2 + 2);
         let clay = list.knobs.iter().find(|k| k.key == "yield.clay").unwrap();
         assert_eq!((clay.value, clay.default, clay.label.as_str()), (3.0, 1.0, "Gather yield: clay"));
+        assert!(list.knobs.iter().all(|k| k.base_strands.is_none()));
+    }
+
+    #[test]
+    fn a_deed_knob_carries_the_price_it_multiplies() {
+        let zones = vec!["urban".to_string(), "rural".to_string()];
+        let costs = BTreeMap::from([("urban".to_string(), 1200)]);
+        let list = TunablesResponse::list(&Tunables::default(), &zones, &[]).with_deed_costs(&costs);
+        let base = |key: &str| list.knobs.iter().find(|k| k.key == key).unwrap().base_strands;
+        assert_eq!(base("deed_price.urban"), Some(1200));
+        assert_eq!(base("deed_price.rural"), None);
+        assert_eq!(base("property_tax_rate"), None);
+        let json = serde_json::to_string(&list).unwrap();
+        assert_eq!(json.matches("base_strands").count(), 1, "{json}");
     }
 
     #[test]

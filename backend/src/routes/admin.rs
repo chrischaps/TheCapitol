@@ -441,7 +441,7 @@ pub async fn get_tunables(
 ) -> Result<Json<TunablesResponse>, AppError> {
     require_admin(&user)?;
     let known = known_ids(&state).await?;
-    Ok(Json(TunablesResponse::list(&state.tunables.get(), &known.zones, &known.resources)))
+    Ok(Json(known.list(&state.tunables.get())))
 }
 
 /// Change tunables, all of them or none: an unknown key or a value out of its
@@ -465,7 +465,7 @@ pub async fn get_tunables_preset(
 ) -> Result<impl IntoResponse, AppError> {
     require_admin(&user)?;
     let known = known_ids(&state).await?;
-    let knobs = TunablesResponse::list(&state.tunables.get(), &known.zones, &known.resources).knobs;
+    let knobs = known.list(&state.tunables.get()).knobs;
     let text = tunables::preset::write(&knobs, &Utc::now().format("%Y-%m-%d %H:%M UTC").to_string());
     Ok(([(header::CONTENT_TYPE, "application/toml; charset=utf-8")], text))
 }
@@ -480,7 +480,7 @@ pub async fn put_tunables_preset(
 ) -> Result<Json<TunablesResponse>, AppError> {
     require_admin(&user)?;
     let known = known_ids(&state).await?;
-    let knobs = TunablesResponse::list(&state.tunables.get(), &known.zones, &known.resources).knobs;
+    let knobs = known.list(&state.tunables.get()).knobs;
     let update = tunables::preset::read(&text, &knobs).map_err(AppError::BadRequest)?;
     set_tunables(&state, &user, &update, &known).await
 }
@@ -501,7 +501,7 @@ async fn set_tunables(
         Err(tunables::UpdateError::Db(e)) => return Err(e.into()),
         Err(e) => return Err(AppError::BadRequest(e.message(update))),
     }
-    Ok(Json(TunablesResponse::list(&state.tunables.get(), &known.zones, &known.resources)))
+    Ok(Json(known.list(&state.tunables.get())))
 }
 
 #[derive(Serialize)]

@@ -569,6 +569,7 @@ mod tests {
             default,
             value,
             chart: "sinks".into(),
+            base_strands: None,
         }
     }
 

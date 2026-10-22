@@ -831,6 +831,7 @@ mod tests {
             default: 0.01,
             value,
             chart: "money".into(),
+            base_strands: None,
         };
         watch.observe(&RestResponse::Tunables(TunablesResponse { knobs: vec![knob("a", 0.01), knob("b", 0.025)] }));
         let marks = (1..=6).map(|i| Annotation { id: i, at_ms: i * 1000, kind: AnnotationKind::Boot, text: format!("#{i}") });

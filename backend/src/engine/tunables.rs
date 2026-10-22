@@ -16,11 +16,12 @@
 //! [`preset`] writes and reads the knobs as TOML, for the console's tuning tab
 //! (D6.2) and the balance runs (D6.3).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use capitol_protocol::annotation::AnnotationKind;
-use capitol_protocol::tunables::{Family, Knob, TunableError, Tunables, TunablesUpdate};
+use capitol_protocol::tunables::{Family, Knob, TunableError, Tunables, TunablesResponse, TunablesUpdate};
 use sqlx::PgPool;
 use tokio::sync::{broadcast, Mutex};
 
@@ -52,20 +53,31 @@ impl Live {
 pub struct Known {
     pub zones: Vec<String>,
     pub resources: Vec<String>,
+    /// Each zone's deed price before its knob, so the console can say what
+    /// the knob multiplies (#431)
+    pub deed_costs: BTreeMap<String, i64>,
 }
 
 impl Known {
     /// Read the zones from the database; the resources are the caller's
     /// (`GameState::resource_types`)
     pub async fn read(db: &PgPool, resources: impl IntoIterator<Item = String>) -> Result<Known, sqlx::Error> {
-        let zones: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM zones WHERE has_plots AND deed_cost IS NOT NULL ORDER BY ring_order",
+        let rows: Vec<(String, i32)> = sqlx::query_as(
+            "SELECT id, deed_cost FROM zones WHERE has_plots AND deed_cost IS NOT NULL ORDER BY ring_order",
         )
         .fetch_all(db)
         .await?;
+        let zones = rows.iter().map(|(id, _)| id.clone()).collect();
+        let deed_costs = rows.into_iter().map(|(id, cost)| (id, cost as i64)).collect();
         let mut resources: Vec<String> = resources.into_iter().collect();
         resources.sort();
-        Ok(Known { zones, resources })
+        Ok(Known { zones, resources, deed_costs })
+    }
+
+    /// Every knob of `tunables` for these zones and resources, as
+    /// `GET /admin/tunables` lists them
+    pub fn list(&self, tunables: &Tunables) -> TunablesResponse {
+        TunablesResponse::list(tunables, &self.zones, &self.resources).with_deed_costs(&self.deed_costs)
     }
 
     pub fn has(&self, family: Family, id: &str) -> bool {
@@ -291,10 +303,13 @@ pub mod preset {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     fn known() -> Known {
-        Known { zones: vec!["urban".into(), "rural".into()], resources: vec!["grass".into(), "clay".into()] }
+        Known {
+            zones: vec!["urban".into(), "rural".into()],
+            resources: vec!["grass".into(), "clay".into()],
+            ..Known::default()
+        }
     }
 
     fn values(pairs: &[(&str, f64)]) -> TunablesUpdate {
@@ -320,8 +335,7 @@ mod tests {
     }
 
     fn list(tunables: &Tunables) -> Vec<capitol_protocol::tunables::TunableValue> {
-        let known = known();
-        capitol_protocol::tunables::TunablesResponse::list(tunables, &known.zones, &known.resources).knobs
+        known().list(tunables).knobs
     }
 
     /// A preset exported, changed and imported sets what it says (D6.2's Verify)
