@@ -4,17 +4,23 @@
 //! server's tour: which step, and what counts as done, is the server's, as
 //! `capitol_core::onboarding::Tour` reads it. Nothing is kept here.
 //!
-//! A finished step shows its tick for a moment before the next card fades
-//! in. The last gives way to a closing card that points at `?`. "Hide for
-//! now" hides the card on every device (`dismissed`, plan D2), and the
-//! header's road-in chip or a line in the `?` overlay brings it back. The
-//! tour can't be skipped: the deed comes only with the finish.
+//! The card is the chapter's (#442): its name, the step's words, and pips
+//! for that chapter's steps only. A finished step shows its tick for a
+//! moment before the next card fades in. A finished chapter has a card of
+//! its own, a beat longer ("Arrival: done", what you can now do, and what's
+//! next), and the last gives way to a closing card that points at `?`.
+//! "Hide for now" hides the card on every device (`dismissed`, plan D2), and
+//! the header's road-in chip or a line in the `?` overlay brings it back.
+//! The tour can't be skipped: the deed comes only with the finish.
 //!
-//! #442 makes this the chapter card, with markers that lead you there.
+//! A step can lead somewhere (`onboarding::target`). The extension finds
+//! the place and hands back a [`Lead`]: off screen, the card points the way
+//! with the hall chip's arrow (`hud::bearing`); on screen, `input.rhai`
+//! rings it in gold on the ground (`draw_lead`).
 
 use std::time::{Duration, Instant};
 
-use capitol_core::onboarding::{place_in_chapter, Did, Tour};
+use capitol_core::onboarding::{place_in_chapter, target, Did, Target, Tour};
 use capitol_core::protocol::tutorial::{Chapter, Step, Steps, TutorialProgress};
 use egui::{Align2, Id, RichText};
 
@@ -25,6 +31,8 @@ use super::theme::{self, size};
 const TICK_FOR: Duration = Duration::from_millis(900);
 /// How long a card takes to fade in.
 const FADE_IN: f32 = 0.35;
+/// How long a chapter's close stays: a beat longer than a step's tick.
+const CHAPTER_FOR: Duration = Duration::from_millis(5500);
 /// How long the closing card stays, and how long it takes to go.
 const CLOSING_FOR: Duration = Duration::from_secs(8);
 const FADE_OUT: f32 = 0.6;
@@ -49,6 +57,27 @@ pub fn chapter_name(chapter: Chapter) -> &'static str {
         Chapter::DeedsOffice => "The Deeds Office",
         Chapter::SettleIn => "Settle in",
     }
+}
+
+/// What a chapter's close says you can now do: one line, in the same
+/// voice. The last chapter's close is the closing card ([`CLOSING`]).
+fn chapter_close(chapter: Chapter) -> &'static str {
+    match chapter {
+        Chapter::Arrival => {
+            "You can gather, make things by hand and at a bench, and open with a tool what hands can't. The road north leads in."
+        }
+        Chapter::RoadIn => "You've read the deeds of a farm, a street and a yard. The hall is ahead, under the tower.",
+        Chapter::Hall => "You can trade at the Exchange, keep orders on its book, browse the bazaar and read the day's news.",
+        Chapter::People => "You can speak to those near you, read a stranger's card and open your letters.",
+        Chapter::DeedsOffice => "The land is yours, and on the city's books. Now make something of it.",
+        Chapter::SettleIn => CLOSING.1,
+    }
+}
+
+/// The chapter after `chapter`, if there is one.
+fn next_chapter(chapter: Chapter) -> Option<Chapter> {
+    let at = Chapter::ALL.iter().position(|c| *c == chapter)?;
+    Chapter::ALL.get(at + 1).copied()
 }
 
 /// What a step's card says: a title, the words, and a line of keys. It's
@@ -222,8 +251,49 @@ enum Card {
     Step(Step, Instant),
     /// A step just done, with its tick, and when it was.
     Done(Step, Instant),
+    /// A chapter just finished, and when its card came up.
+    ChapterDone(Chapter, Instant),
     /// Every step done; when the last one was.
     Closing(Instant),
+}
+
+/// Which card is drawn, for remembering each one's size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Face {
+    Step(Step),
+    Chapter(Chapter),
+    Closing,
+}
+
+/// Where the step at hand's place is, as the extension found it this frame
+/// (`onboarding::target`), for the card's line on where to go.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lead {
+    /// How far it is from you, in metres.
+    pub metres: f32,
+    /// Which way it lies on screen while it's off it, as `hud::bearing`
+    /// gives it. `None` while it's on screen, where its ring marks it.
+    pub off_screen: Option<f32>,
+}
+
+/// Inside this, you're there (metres).
+const HERE: f32 = 6.0;
+
+/// The card's line on where to go.
+fn lead_words(lead: Lead) -> String {
+    if lead.metres < HERE {
+        return "Here, ringed in gold".to_owned();
+    }
+    let far = if lead.metres >= 1000.0 {
+        format!("{:.1} km", lead.metres / 1000.0)
+    } else {
+        let to = if lead.metres < 100.0 { 5.0 } else { 10.0 };
+        format!("{} m", ((lead.metres / to).round() * to) as i32)
+    };
+    match lead.off_screen {
+        Some(_) => format!("{far} that way"),
+        None => format!("{far} off, ringed in gold"),
+    }
 }
 
 /// Where the road in stands while its card is hidden, for the header's
@@ -248,11 +318,14 @@ pub struct Hints {
     /// Hidden (or brought back) as asked, until the server says so too.
     asked_hidden: Option<bool>,
     card: Option<Card>,
+    /// `--hints-sample <chapter>-done`: that chapter's close, shown from
+    /// the first frame drawn.
+    sample_close: Option<Chapter>,
     /// Where the card was drawn, for panels that need to keep clear.
     pub rect: Option<egui::Rect>,
     /// Each card's size, full and compact, as last drawn: where it fits
     /// is judged from these (`place`).
-    sizes: Vec<((Option<Step>, bool), egui::Vec2)>,
+    sizes: Vec<((Face, bool), egui::Vec2)>,
 }
 
 impl Hints {
@@ -282,6 +355,24 @@ impl Hints {
         self.told = self.told.with(step);
         tracing::info!("hints: saw {}", step.name());
         Some(step)
+    }
+
+    /// `--hints-sample`: follow the sample tour `which` names ([`sample`]),
+    /// and for `<chapter>-done`, open on that chapter's close.
+    pub fn with_sample(&mut self, which: &str) {
+        self.follow(Some(sample(which)));
+        self.sample_close = which
+            .strip_suffix("-done")
+            .and_then(|key| Chapter::ALL.into_iter().find(|c| chapter_key(*c) == key));
+    }
+
+    /// Where the card at hand leads, if anywhere: only a step's card, shown,
+    /// and not yet done. The extension finds the place and marks it.
+    pub fn target(&self) -> Option<Target> {
+        match self.card {
+            Some(Card::Step(step, _)) if !self.is_hidden() => target(step),
+            _ => None,
+        }
     }
 
     /// The card is hidden for now, as asked here or by any device.
@@ -314,9 +405,16 @@ impl Hints {
 
     /// Draw the card, if there is one. Call once a frame while in the world.
     /// It keeps clear of the open `panels` where it can (#99): see `place`.
+    /// `lead` is where the step's target is, if it has one and it was found.
     /// True if "Hide for now" was clicked: the card is hidden here, and the
     /// caller tells the server (`set_tutorial_dismissed`).
-    pub fn show(&mut self, ctx: &egui::Context, now: Instant, panels: &[egui::Rect]) -> bool {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        now: Instant,
+        panels: &[egui::Rect],
+        lead: Option<Lead>,
+    ) -> bool {
         self.rect = None;
         let Some(tour) = self.tour else {
             return false;
@@ -325,25 +423,33 @@ impl Hints {
             self.card = None;
             return false;
         }
+        if let Some(chapter) = self.sample_close.take() {
+            self.card = Some(match next_chapter(chapter) {
+                Some(_) => Card::ChapterDone(chapter, now),
+                None => Card::Closing(now),
+            });
+        }
         self.card = next_card(self.card, tour, now);
         let Some(card) = self.card else {
             return false;
         };
-        let (step, since) = match card {
-            Card::Step(step, at) => (Some(step), at),
-            Card::Done(step, at) => (Some(step), at),
-            Card::Closing(at) => (None, at),
+        let (face, since) = match card {
+            Card::Step(step, at) | Card::Done(step, at) => (Face::Step(step), at),
+            Card::ChapterDone(chapter, at) => (Face::Chapter(chapter), at),
+            Card::Closing(at) => (Face::Closing, at),
         };
         let age = now.saturating_duration_since(since).as_secs_f32();
+        let fading = |stays: Duration| {
+            let left = stays.as_secs_f32() - age;
+            (age / FADE_IN)
+                .min(1.0)
+                .min((left / FADE_OUT).clamp(0.0, 1.0))
+        };
         let alpha = match card {
             Card::Step(..) => (age / FADE_IN).min(1.0),
             Card::Done(..) => 1.0,
-            Card::Closing(_) => {
-                let left = CLOSING_FOR.as_secs_f32() - age;
-                (age / FADE_IN)
-                    .min(1.0)
-                    .min((left / FADE_OUT).clamp(0.0, 1.0))
-            }
+            Card::ChapterDone(..) => fading(CHAPTER_FOR),
+            Card::Closing(_) => fading(CLOSING_FOR),
         };
         let eased = 1.0 - (1.0 - alpha).powi(3);
         let mut hide = false;
@@ -352,7 +458,7 @@ impl Hints {
         let size = |compact| {
             self.sizes
                 .iter()
-                .find(|(k, _)| *k == (step, compact))
+                .find(|(k, _)| *k == (face, compact))
                 .map(|(_, v)| *v)
         };
         let spot = place(ctx.screen_rect(), top, [size(false), size(true)], panels);
@@ -368,16 +474,18 @@ impl Hints {
                 ui.multiply_opacity(eased);
                 theme::panel_edged(theme::GOLD).show(ui, |ui| {
                     ui.set_width(WIDTH);
-                    match step {
-                        Some(step) => {
+                    match face {
+                        Face::Step(step) => {
                             let done = matches!(card, Card::Done(..));
-                            hide = step_card(ui, step, done, spot.compact);
+                            let lead = lead.filter(|_| !done);
+                            hide = step_card(ui, step, done, spot.compact, lead);
                         }
-                        None => closing_card(ui, spot.compact),
+                        Face::Chapter(chapter) => chapter_card(ui, chapter, spot.compact),
+                        Face::Closing => closing_card(ui, spot.compact),
                     }
                 });
             });
-        let key = (step, spot.compact);
+        let key = (face, spot.compact);
         let drawn = shown.response.rect.size();
         match self.sizes.iter_mut().find(|(k, _)| *k == key) {
             Some((_, v)) => *v = drawn,
@@ -386,14 +494,18 @@ impl Hints {
         // A compact card's words are a hover away. Anywhere on the card:
         // the area's own response isn't hovered while a child widget is.
         if spot.compact && shown.response.contains_pointer() {
-            let (title, body) = step.map_or(CLOSING, |s| {
-                let (title, body, _) = words(s);
-                (title, body)
-            });
+            let (title, body) = match face {
+                Face::Step(s) => {
+                    let (title, body, _) = words(s);
+                    (title.to_owned(), body)
+                }
+                Face::Chapter(c) => (chapter_done_title(c), chapter_close(c)),
+                Face::Closing => (CLOSING.0.to_owned(), CLOSING.1),
+            };
             let layer = shown.response.layer_id;
             egui::show_tooltip_at_pointer(ctx, layer, Id::new("capitol_hint_words"), |ui| {
                 ui.set_max_width(WIDTH);
-                ui.label(theme::title(title, size::BODY));
+                ui.label(theme::title(&title, size::BODY));
                 ui.label(RichText::new(body).color(theme::TEXT).size(size::BODY));
             });
         }
@@ -479,26 +591,34 @@ fn next_card(card: Option<Card>, tour: Tour, now: Instant) -> Option<Card> {
         Some(Card::Done(step, at)) if now.saturating_duration_since(at) < TICK_FOR => {
             Some(Card::Done(step, at))
         }
+        Some(Card::ChapterDone(chapter, at)) if now.saturating_duration_since(at) < CHAPTER_FOR => {
+            Some(Card::ChapterDone(chapter, at))
+        }
         Some(Card::Closing(at)) if now.saturating_duration_since(at) < CLOSING_FOR => {
             Some(Card::Closing(at))
         }
         Some(Card::Closing(_)) => None,
-        // After a tick, or with nothing up: the step at hand, or the
-        // closing card if the tour was just finished here (not finished
-        // before this session).
-        last => match current {
-            Some(step) => Some(Card::Step(step, now)),
-            None if tour.finished() && matches!(last, Some(Card::Done(..))) => {
+        // After a tick, or with nothing up: the chapter's close if that
+        // tick finished one, else the step at hand; or the closing card if
+        // the tour was just finished here (not finished before this
+        // session).
+        last => match (current, last) {
+            (Some(_), Some(Card::Done(done, _))) if tour.chapter_done(done.chapter()) => {
+                Some(Card::ChapterDone(done.chapter(), now))
+            }
+            (Some(step), _) => Some(Card::Step(step, now)),
+            (None, Some(Card::Done(..) | Card::ChapterDone(..))) if tour.finished() => {
                 Some(Card::Closing(now))
             }
-            None => None,
+            (None, _) => None,
         },
     }
 }
 
-/// A step's card: its chapter and place in it, then the step; `compact`
-/// leaves out its words. True if "Hide for now" was clicked.
-fn step_card(ui: &mut egui::Ui, step: Step, done: bool, compact: bool) -> bool {
+/// A step's card: its chapter and place in it, then the step, and where it
+/// leads if anywhere; `compact` leaves out its words. True if "Hide for
+/// now" was clicked.
+fn step_card(ui: &mut egui::Ui, step: Step, done: bool, compact: bool, lead: Option<Lead>) -> bool {
     let (title, body, keys) = words(step);
     let (at, of) = place_in_chapter(step);
     let mut hide = false;
@@ -529,12 +649,74 @@ fn step_card(ui: &mut egui::Ui, step: Step, done: bool, compact: bool) -> bool {
         ui.add_space(2.0);
         ui.label(RichText::new(body).color(theme::TEXT).size(size::BODY));
     }
+    if let Some(lead) = lead {
+        ui.add_space(4.0);
+        lead_row(ui, lead);
+    }
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         keys_row(ui, keys);
     });
     hide
+}
+
+/// Where the step leads: the hall chip's arrow, turned the way it lies,
+/// while it's off screen; a small gold ring, as on the ground, while it's
+/// on; and how far.
+fn lead_row(ui: &mut egui::Ui, lead: Lead) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+        match lead.off_screen {
+            Some(angle) => super::hud::arrow(ui.painter(), rect.center(), angle, theme::GOLD),
+            None => {
+                let t = ui.input(|i| i.time) as f32;
+                let r = 4.2 + 0.5 * (t * 1.6).sin();
+                ui.painter()
+                    .circle_stroke(rect.center(), r, egui::Stroke::new(1.5_f32, theme::GOLD));
+                ui.ctx().request_repaint();
+            }
+        }
+        ui.label(
+            RichText::new(lead_words(lead))
+                .font(theme::strong(size::SMALL))
+                .color(theme::GOLD_LIGHT),
+        );
+    });
+}
+
+/// A chapter's close: its title.
+fn chapter_done_title(chapter: Chapter) -> String {
+    format!("{}: done", chapter_name(chapter))
+}
+
+/// A chapter's close: which of the six it was, every pip gold and a seal
+/// pressed beside the title, as a clerk stamps a finished form; what you
+/// can now do, and the chapter that comes next. `compact` leaves out the
+/// line.
+fn chapter_card(ui: &mut egui::Ui, chapter: Chapter, compact: bool) {
+    let steps = chapter.steps().count();
+    let n = Chapter::ALL.iter().position(|c| *c == chapter).unwrap_or(0) + 1;
+    ui.label(theme::label(&format!("Chapter {n} of {}", Chapter::ALL.len())));
+    ui.add_space(2.0);
+    theme::step_pips(ui, steps, steps);
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let title = ui.label(theme::title(&chapter_done_title(chapter), size::HEADING + 2.0));
+        let h = title.rect.height();
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(h, h), egui::Sense::hover());
+        theme::wax_seal(ui.painter(), rect.center(), h * 0.42);
+        theme::tick(ui.painter(), rect.shrink(h * 0.3), theme::PAPER);
+    });
+    if !compact {
+        ui.add_space(2.0);
+        ui.label(RichText::new(chapter_close(chapter)).color(theme::TEXT).size(size::BODY));
+    }
+    if let Some(next) = next_chapter(chapter) {
+        ui.add_space(6.0);
+        ui.label(theme::dim(format!("Next: {}", chapter_name(next))));
+    }
 }
 
 /// The closing card's title and words.
@@ -565,13 +747,48 @@ fn closing_card(ui: &mut egui::Ui, compact: bool) {
     });
 }
 
+/// A chapter's name in `--hints-sample`: the protocol's, `road_in`.
+fn chapter_key(chapter: Chapter) -> &'static str {
+    match chapter {
+        Chapter::Arrival => "arrival",
+        Chapter::RoadIn => "road_in",
+        Chapter::Hall => "hall",
+        Chapter::People => "people",
+        Chapter::DeedsOffice => "deeds_office",
+        Chapter::SettleIn => "settle_in",
+    }
+}
+
+/// Every step before `step`, in the tour's order.
+fn up_to(step: Step) -> Steps {
+    Step::ALL.into_iter().take_while(|s| *s != step).collect()
+}
+
 /// `--hints-sample`: the card on a fresh tour (`new`, the default), half
 /// way up the road (`half`), or hidden there, for the header's chip and
-/// the `?` overlay's line (`hidden`, `help`).
+/// the `?` overlay's line (`hidden`, `help`). A step's name (`gather_stone`)
+/// stands the tour at that step, and a chapter's (`hall`) at its first.
+/// `<chapter>-done` (`arrival-done`) stands it just past that chapter,
+/// for its close ([`Hints::with_sample`]).
 pub fn sample(which: &str) -> TutorialProgress {
-    let half: Steps = Step::ALL.into_iter().take_while(|s| *s != Step::SellOrder).collect();
+    let at = |done| TutorialProgress { done, dismissed: false };
+    let chapter = |key: &str| Chapter::ALL.into_iter().find(|c| chapter_key(*c) == key);
+    let first = |c: Chapter| c.steps().next().expect("a chapter has steps");
+    if let Some(step) = Step::from_name(which) {
+        return at(up_to(step));
+    }
+    if let Some(c) = chapter(which) {
+        return at(up_to(first(c)));
+    }
+    if let Some(c) = which.strip_suffix("-done").and_then(chapter) {
+        return at(match next_chapter(c) {
+            Some(next) => up_to(first(next)),
+            None => Steps::every(),
+        });
+    }
+    let half = up_to(Step::SellOrder);
     match which {
-        "half" => TutorialProgress { done: half, dismissed: false },
+        "half" => at(half),
         "hidden" | "help" => TutorialProgress { done: half, dismissed: true },
         _ => TutorialProgress::default(),
     }
@@ -673,6 +890,73 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_chapter_has_its_close_a_beat_longer_then_the_next() {
+        let t0 = Instant::now();
+        let arrival: Vec<Step> = Chapter::Arrival.steps().collect();
+        let (last, rest) = arrival.split_last().unwrap();
+        let card = next_card(None, tour(rest), t0);
+        assert_eq!(card, Some(Card::Step(*last, t0)));
+        let walked = tour(&arrival);
+        let card = next_card(card, walked, t0);
+        assert_eq!(card, Some(Card::Done(*last, t0)));
+        let t1 = t0 + TICK_FOR;
+        let card = next_card(card, walked, t1);
+        assert_eq!(card, Some(Card::ChapterDone(Chapter::Arrival, t1)));
+        assert!(CHAPTER_FOR > TICK_FOR * 3, "a beat longer");
+        let card = next_card(card, walked, t1 + CHAPTER_FOR / 2);
+        assert_eq!(card, Some(Card::ChapterDone(Chapter::Arrival, t1)));
+        let t2 = t1 + CHAPTER_FOR;
+        assert_eq!(next_card(card, walked, t2), Some(Card::Step(Step::SeeRuralLot, t2)));
+
+        // A step that doesn't finish its chapter goes straight on
+        let card = next_card(None, tour(&[]), t0);
+        let card = next_card(card, tour(&[Step::Walk]), t0);
+        assert_eq!(next_card(card, tour(&[Step::Walk]), t1), Some(Card::Step(Step::GatherGrass, t1)));
+
+        // The last chapter's close is the closing card
+        let card = Some(Card::Done(Step::ReadTax, t0));
+        assert_eq!(next_card(card, tour(&Step::ALL), t1), Some(Card::Closing(t1)));
+    }
+
+    #[test]
+    fn only_a_step_card_shown_leads_anywhere() {
+        let mut hints = Hints::default();
+        hints.with_sample("gather_stone");
+        assert_eq!(hints.target(), None, "nothing until the card is up");
+        hints.card = next_card(None, hints.tour.unwrap(), Instant::now());
+        assert_eq!(hints.target(), Some(Target::Node(&["rock_outcrop"])));
+        hints.hide();
+        assert_eq!(hints.target(), None, "hidden is quiet");
+        hints.bring_back();
+        hints.card = Some(Card::ChapterDone(Chapter::Arrival, Instant::now()));
+        assert_eq!(hints.target(), None);
+    }
+
+    #[test]
+    fn the_samples_stand_where_they_say() {
+        assert_eq!(Tour::from(sample("gather_stone")).current(), Some(Step::GatherStone));
+        assert_eq!(Tour::from(sample("hall")).current(), Some(Step::Deposit));
+        assert_eq!(Tour::from(sample("arrival-done")).current(), Some(Step::SeeRuralLot));
+        assert!(Tour::from(sample("arrival-done")).chapter_done(Chapter::Arrival));
+        assert!(Tour::from(sample("settle_in-done")).finished());
+        let mut hints = Hints::default();
+        hints.with_sample("people-done");
+        assert_eq!(hints.sample_close, Some(Chapter::People));
+        hints.with_sample("new");
+        assert_eq!(hints.sample_close, None);
+    }
+
+    #[test]
+    fn the_way_is_said_plainly() {
+        let lead = |metres, off_screen| lead_words(Lead { metres, off_screen });
+        assert_eq!(lead(3.0, None), "Here, ringed in gold");
+        assert_eq!(lead(3.0, Some(1.0)), "Here, ringed in gold");
+        assert_eq!(lead(42.0, None), "40 m off, ringed in gold");
+        assert_eq!(lead(143.0, Some(0.5)), "140 m that way");
+        assert_eq!(lead(3480.0, Some(0.5)), "3.5 km that way");
+    }
+
+    #[test]
     fn hiding_holds_until_brought_back_and_the_server_agrees() {
         let mut hints = Hints::default();
         assert_eq!(hints.hidden(), None, "nothing before the server says");
@@ -724,5 +1008,8 @@ mod tests {
         }
         let names: std::collections::HashSet<_> = Chapter::ALL.into_iter().map(chapter_name).collect();
         assert_eq!(names.len(), Chapter::ALL.len());
+        for chapter in Chapter::ALL {
+            assert!(!chapter_close(chapter).is_empty(), "{chapter:?}");
+        }
     }
 }

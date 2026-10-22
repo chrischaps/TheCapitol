@@ -83,6 +83,9 @@ pub struct Shared {
     /// The bazaar's stalls (E3.11) as the extension left them this frame.
     /// `None` when the terrain has no bazaar.
     pub bazaar: Arc<Mutex<Option<BazaarMark>>>,
+    /// Where the road in's card leads this frame (#442), for its ring.
+    /// `None` while the card leads nowhere, or is hidden.
+    pub lead: Arc<Mutex<Option<LeadMark>>>,
     /// The stall a script last asked to go to (`cap_visit_stall`). The
     /// extension takes it next frame.
     pub visit_stall: Arc<Mutex<Option<String>>>,
@@ -159,6 +162,18 @@ pub struct BazaarMark {
     pub stalls: Vec<StallMark>,
     /// The stall you're walking to, if any.
     pub walking: Option<String>,
+}
+
+/// Where the road in's card leads (#442), in world metres, for its gold
+/// ring (`input.rhai`'s `draw_lead`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LeadMark {
+    /// The ring's middle, on the ground.
+    pub at: [f32; 2],
+    /// Its radius.
+    pub radius: f32,
+    /// A lot's edge, traced with it; empty for anything else.
+    pub outline: Vec<[f32; 2]>,
 }
 
 /// One stall in the bazaar.
@@ -1006,6 +1021,27 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         if let Ok(mut v) = visit.lock() {
             *v = Some(id.to_string());
         }
+    });
+    // `cap_lead() -> #{ x, z, r, outline } or ()`: where the road in's card
+    // leads (#442), world metres: the ring's middle and radius, and a lot's
+    // edge as [[x, z], ...] (empty for anything else). `()` while the card
+    // leads nowhere or is hidden.
+    let lead = shared.lead.clone();
+    engine.register_fn("cap_lead", move || -> rhai::Dynamic {
+        let Some(l) = lead.lock().ok().and_then(|l| l.clone()) else {
+            return rhai::Dynamic::UNIT;
+        };
+        let mut m = rhai::Map::new();
+        m.insert("x".into(), (l.at[0] as f64).into());
+        m.insert("z".into(), (l.at[1] as f64).into());
+        m.insert("r".into(), (l.radius as f64).into());
+        let outline: rhai::Array = l
+            .outline
+            .iter()
+            .map(|p| rhai::Dynamic::from_array(vec![(p[0] as f64).into(), (p[1] as f64).into()]))
+            .collect();
+        m.insert("outline".into(), outline.into());
+        m.into()
     });
     // `cap_in_bazaar(x, z) -> bool`: whether the ground point (x, z), world
     // metres, is in the bazaar: on a stall or within 2 m of one, which takes

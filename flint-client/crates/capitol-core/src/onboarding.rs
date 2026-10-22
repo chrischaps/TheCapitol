@@ -14,8 +14,16 @@
 //!
 //! Hiding the card is for now, never for good (plan D2): it's `dismissed`
 //! on the server, so it holds on every device, and the tour waits.
+//!
+//! A step can lead you somewhere ([`Target`], #442): the card points the
+//! way and a gold ring marks the place. A step names a kind of place, never
+//! one place, so the client finds it from what it holds (the nearest live
+//! node of a kind, [`nearest_node`]) and a regenerated world can't strand
+//! it.
 
-use capitol_protocol::tutorial::{Step, TutorialProgress};
+use capitol_protocol::rest::ResourceNodeInfo;
+use capitol_protocol::rules::Zone;
+use capitol_protocol::tutorial::{Chapter, Step, TutorialProgress};
 
 /// Something only the screen shows, which the server takes for a step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +78,11 @@ impl Tour {
         self.progress.finished()
     }
 
+    /// Every step of `chapter` is done, in whatever order.
+    pub fn chapter_done(self, chapter: Chapter) -> bool {
+        self.progress.done.chapter_done(chapter)
+    }
+
     /// The card is hidden for now, and there's still a road to walk.
     pub fn hidden(self) -> bool {
         self.progress.dismissed && !self.finished()
@@ -80,6 +93,58 @@ impl Tour {
         let step = did.step();
         (!self.done(step)).then_some(step)
     }
+}
+
+/// Where a step's card leads you (#442).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Target {
+    /// A point on the ground, server units.
+    Point([f64; 2]),
+    /// The nearest live node of one of these resource types ([`nearest_node`]).
+    Node(&'static [&'static str]),
+    /// A lot in this zone: the nearest, until the road in's stops are
+    /// chosen (#445).
+    Lot(Zone),
+    /// The Exchange hall's door.
+    Hall,
+    /// The nearest stall in the bazaar.
+    Stall,
+}
+
+/// Where `step` leads, if anywhere. A gather leads to the nodes the server
+/// judges it by (`engine::tutorial`: fiber, sticks, stone, a log): the
+/// kinds that grow round the spawn, so not the wilds' old growth, which a
+/// stone axe can't fell. Each chapter's work package adds its own (#443 to
+/// #449): the workbench's clear spot, the road's stops, the Deeds Office.
+pub fn target(step: Step) -> Option<Target> {
+    Some(match step {
+        Step::GatherGrass => Target::Node(&["grass"]),
+        Step::GatherBranches => Target::Node(&["fallen_branches"]),
+        Step::GatherStone => Target::Node(&["rock_outcrop"]),
+        Step::FellTree => Target::Node(&["tree"]),
+        Step::SeeRuralLot => Target::Lot(Zone::Rural),
+        Step::SeeSuburbanLot => Target::Lot(Zone::Suburban),
+        Step::SeeUrbanLot => Target::Lot(Zone::Urban),
+        Step::Deposit | Step::SellOrder | Step::BuyOrder | Step::CollectBox => Target::Hall,
+        Step::VisitStall => Target::Stall,
+        _ => return None,
+    })
+}
+
+/// The nearest node to `from` (server units) that's one of `kinds` and
+/// there to take: not spent, and not being worked by someone else.
+pub fn nearest_node<'a>(
+    nodes: impl IntoIterator<Item = &'a ResourceNodeInfo>,
+    kinds: &[&str],
+    from: [f64; 2],
+) -> Option<&'a ResourceNodeInfo> {
+    nodes
+        .into_iter()
+        .filter(|n| n.state == "available" && kinds.contains(&n.resource_type.as_str()))
+        .min_by(|a, b| {
+            let d = |n: &ResourceNodeInfo| (n.x - from[0]).powi(2) + (n.y - from[1]).powi(2);
+            d(a).total_cmp(&d(b))
+        })
 }
 
 /// Where `step` sits in its chapter: its place from 0, and how many steps
@@ -143,6 +208,76 @@ mod tests {
         for did in [Did::UsedInventory, Did::OpenedCrafting, Did::ReadZoneCard] {
             assert!(did.step().judge().client_reports(), "{did:?}");
         }
+    }
+
+    #[test]
+    fn a_chapter_is_done_when_its_steps_are_in_any_order() {
+        let mut steps: Vec<Step> = Chapter::Arrival.steps().collect();
+        steps.reverse();
+        let (last, rest) = steps.split_last().unwrap();
+        assert!(!tour(rest, false).chapter_done(Chapter::Arrival));
+        let mut all = rest.to_vec();
+        all.push(*last);
+        assert!(tour(&all, false).chapter_done(Chapter::Arrival));
+        assert!(!tour(&all, false).chapter_done(Chapter::RoadIn));
+    }
+
+    #[test]
+    fn the_steps_that_lead_somewhere() {
+        assert_eq!(target(Step::Walk), None, "anywhere will do");
+        assert_eq!(target(Step::GatherGrass), Some(Target::Node(&["grass"])));
+        assert_eq!(target(Step::FellTree), Some(Target::Node(&["tree"])));
+        assert_eq!(target(Step::SeeSuburbanLot), Some(Target::Lot(Zone::Suburban)));
+        assert_eq!(target(Step::VisitStall), Some(Target::Stall));
+        // Everything at the Exchange leads to the hall; the Gazette reads anywhere
+        for step in Chapter::Hall.steps().filter(|s| !matches!(s, Step::VisitStall | Step::ReadGazette)) {
+            assert_eq!(target(step), Some(Target::Hall), "{step:?}");
+        }
+        assert_eq!(target(Step::ReadGazette), None);
+    }
+
+    /// Every node a step leads to is a kind the content has, and the
+    /// fallback catalog's yields are the items the server judges the
+    /// gathers by
+    #[test]
+    fn every_node_target_is_a_kind_that_yields_what_the_step_wants() {
+        let catalog = crate::catalog::Catalog::fallback();
+        for (step, item) in [
+            (Step::GatherGrass, "fiber"),
+            (Step::GatherBranches, "sticks"),
+            (Step::GatherStone, "stone"),
+            (Step::FellTree, "log"),
+        ] {
+            let Some(Target::Node(kinds)) = target(step) else {
+                panic!("{step:?} leads to a node");
+            };
+            for kind in kinds {
+                let t = catalog.resource_type(kind).unwrap_or_else(|| panic!("{kind} is in the catalog"));
+                assert_eq!(t.yields_item, item, "{kind}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_nearest_live_node_of_the_kind() {
+        let node = |kind: &str, x: f64, state: &str| ResourceNodeInfo {
+            id: uuid::Uuid::from_u128(u128::from(x.to_bits())),
+            resource_type: kind.into(),
+            x,
+            y: 0.0,
+            state: state.into(),
+        };
+        let nodes = [
+            node("grass", 30.0, "available"),
+            node("tree", 5.0, "available"),
+            node("grass", 8.0, "depleted"),
+            node("grass", -12.0, "harvesting"),
+            node("grass", -20.0, "available"),
+        ];
+        let near = nearest_node(&nodes, &["grass"], [0.0, 0.0]).unwrap();
+        assert_eq!(near.x, -20.0, "passing over the spent, the worked and the trees");
+        assert_eq!(nearest_node(&nodes, &["grass"], [28.0, 0.0]).unwrap().x, 30.0);
+        assert!(nearest_node(&nodes, &["rock_outcrop"], [0.0, 0.0]).is_none());
     }
 
     #[test]

@@ -40,7 +40,7 @@ use crate::{spike_world, ui, world};
 use capitol_core::auth::{Notice, Phase};
 use capitol_core::harvest::Note;
 use capitol_core::net::ConnectionState;
-use capitol_core::onboarding::Did;
+use capitol_core::onboarding::{self, Did, Target};
 use capitol_core::plot::Offer;
 use capitol_core::protocol::rules::{self, water_name, STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
 use capitol_core::protocol::terrain::{LandmarkKind, TerrainResponse};
@@ -60,6 +60,10 @@ const FORM_FADE: f32 = 0.8;
 /// How far the cursor may move between a right press and its release, in
 /// pixels, for it to be a click (cancel placing) rather than an orbit.
 const RIGHT_CLICK_SLOP: f64 = 6.0;
+
+/// How far in from the screen's edges a lead's place must be to count as
+/// on screen, in points (#442). Nearer the edge, the card's arrow points.
+const LEAD_MARGIN: f32 = 32.0;
 
 
 /// `--citizen-sample stroll` (#346), once the camera settled: where it
@@ -175,6 +179,9 @@ pub struct CapitolExtension {
     /// Where the hall is on screen, as the header's hint points (radians,
     /// 0 to the right, clockwise), while goods wait and you're not there.
     hall_hint: Option<f32>,
+    /// Where the road in's card leads (#442): how far, and which way while
+    /// it's off screen. Found in `pre_update`, said on the card.
+    lead: Option<ui::hints::Lead>,
     /// The bazaar (E3.11): its building, the open stall's shop panel, and
     /// `--bazaar-sample`'s shops offline.
     bazaar: world::bazaar::BazaarLayer,
@@ -290,6 +297,7 @@ impl CapitolExtension {
             hall: world::hall::HallLayer::default(),
             hall_sample: false,
             hall_hint: None,
+            lead: None,
             bazaar: world::bazaar::BazaarLayer::default(),
             shop: ui::shop::ShopPanel::default(),
             bazaar_sample: None,
@@ -521,10 +529,16 @@ impl CapitolExtension {
     /// Offline, the road in's card on a sample tour (`--hints-sample`,
     /// #441): `new`, `half` way up the road, or `hidden`, which shows the
     /// header's chip instead, or `help`, hidden with the `?` overlay open
-    /// on its line.
+    /// on its line. A step's or a chapter's name stands the tour there, and
+    /// `<chapter>-done` shows that chapter's close (#442, `hints::sample`).
+    /// With `--chat-sample`, it's the card in front of that sample's panels.
     pub fn with_hints_sample(mut self, which: Option<&str>) -> Self {
         if let Some(which) = which.filter(|_| self.session.is_none()) {
-            self.hints.follow(Some(ui::hints::sample(which)));
+            if let Some((.., hints)) = &mut self.chat_sample {
+                hints.with_sample(which);
+                return self;
+            }
+            self.hints.with_sample(which);
             self.hints_sample = true;
             self.shortcuts.open = which == "help";
         }
@@ -697,6 +711,96 @@ impl CapitolExtension {
             news,
             reading: self.gazette.open,
         })
+    }
+
+    /// Where the road in's card leads, if it names a place this client can
+    /// find (#442), and where you stand, both world metres. A node is the
+    /// nearest live one of its kinds, a lot the nearest in its zone, a stall
+    /// the nearest's counter. Offline with `--hints-sample`, you stand at
+    /// `camera_target`. Call after the hall's and the bazaar's marks are
+    /// set this frame.
+    fn lead_mark(&self, camera_target: [f32; 2]) -> Option<(script_api::LeadMark, [f32; 2])> {
+        let target = self.hints.target()?;
+        let you = match &self.session {
+            Some(session) => {
+                let p = session.state().local_player()?;
+                crate::coords::to_world(p.x, p.y)
+            }
+            None if self.hints_sample => camera_target,
+            None => return None,
+        };
+        let from = crate::coords::to_server(you[0], you[1]);
+        let far = |p: [f64; 2]| (p[0] - from[0]).powi(2) + (p[1] - from[1]).powi(2);
+        let ring = |at, radius| script_api::LeadMark {
+            at,
+            radius,
+            outline: Vec::new(),
+        };
+        let mark = match target {
+            Target::Point([x, y]) => ring(crate::coords::to_world(x, y), 1.2),
+            Target::Node(kinds) => {
+                let nodes = match (&self.session, &self.node_sampled) {
+                    (Some(session), _) => session.state().nodes(),
+                    (None, Some(sample)) => sample.nodes(),
+                    (None, None) => return None,
+                };
+                let node = onboarding::nearest_node(nodes.values(), kinds, from)?;
+                let id = node.id.to_string();
+                // Its ring as the node's own are drawn, if it's shown
+                let shown = self
+                    .shared
+                    .nodes
+                    .lock()
+                    .ok()
+                    .and_then(|n| n.iter().find(|m| m.id == id).map(|m| (m.at, m.r)));
+                let (at, r) = shown.unwrap_or((crate::coords::to_world(node.x, node.y), 1.5));
+                ring(at, r + 0.7)
+            }
+            Target::Lot(zone) => {
+                let middle = |l: &Lot| {
+                    let n = l.outline.len() as f64;
+                    l.outline
+                        .iter()
+                        .fold([0.0, 0.0], |m, p| [m[0] + p[0] / n, m[1] + p[1] / n])
+                };
+                let lot = self
+                    .lots
+                    .values()
+                    .filter(|l| l.zone == zone && !l.outline.is_empty())
+                    .min_by(|a, b| far(middle(a)).total_cmp(&far(middle(b))))?;
+                let [x, y] = middle(lot);
+                script_api::LeadMark {
+                    at: crate::coords::to_world(x, y),
+                    radius: 2.5,
+                    outline: lot
+                        .outline
+                        .iter()
+                        .map(|p| crate::coords::to_world(p[0], p[1]))
+                        .collect(),
+                }
+            }
+            Target::Hall => {
+                let hall = self.shared.hall.lock().ok()?.clone()?;
+                ring(hall.door, 2.5)
+            }
+            Target::Stall => {
+                let bazaar = self.shared.bazaar.lock().ok()?.clone()?;
+                // Out on the lane before its counter, where its sign faces
+                let counter = |s: &script_api::StallMark| {
+                    [
+                        s.sign[0] + s.sign_facing[0] * 1.2,
+                        s.sign[2] + s.sign_facing[2] * 1.2,
+                    ]
+                };
+                let near = |p: [f32; 2]| (p[0] - you[0]).powi(2) + (p[1] - you[1]).powi(2);
+                let stall = bazaar
+                    .stalls
+                    .iter()
+                    .min_by(|a, b| near(counter(a)).total_cmp(&near(counter(b))))?;
+                ring(counter(stall), 1.4)
+            }
+        };
+        Some((mark, you))
     }
 
     /// The bazaar's stalls as scripts see them (E3.11): each one's footprint,
@@ -1313,6 +1417,31 @@ impl PlayerExtension for CapitolExtension {
         if let Ok(mut shared) = self.shared.bazaar.lock() {
             *shared = mark;
         }
+        // Where the road in's card leads (#442): ringed on the ground by
+        // `input.rhai` while it's on screen, pointed to from the card while
+        // it isn't.
+        let found = self.lead_mark([camera.target.x, camera.target.z]);
+        self.lead = found.as_ref().map(|(mark, you)| {
+            let [x, z] = mark.at;
+            let metres = (x - you[0]).hypot(z - you[1]);
+            let on_screen = self.shared.projector.as_ref().is_some_and(|p| {
+                let view = p.view();
+                let y = p.ground_height(x, z).unwrap_or(0.0);
+                view.world_to_screen([x, y + 0.5, z]).is_some_and(|s| {
+                    s.x > LEAD_MARGIN
+                        && s.x < view.width - LEAD_MARGIN
+                        && s.y > LEAD_MARGIN
+                        && s.y < view.height - LEAD_MARGIN
+                })
+            });
+            let off_screen = (!on_screen).then(|| {
+                ui::hud::bearing(camera.position.to_array(), camera.target.to_array(), [x, 0.0, z])
+            });
+            ui::hints::Lead { metres, off_screen }
+        });
+        if let Ok(mut shared) = self.shared.lead.lock() {
+            *shared = found.map(|(mark, _)| mark);
+        }
         // The grass, cleared round every node the server has shown us, as
         // wide as its kind needs.
         let shown = match (&self.session, &self.node_sampled) {
@@ -1823,7 +1952,7 @@ impl PlayerExtension for CapitolExtension {
                             .into_iter()
                             .flatten()
                             .collect();
-                    if self.hints.show(ctx, now, &panels) {
+                    if self.hints.show(ctx, now, &panels, self.lead) {
                         session.set_tutorial_dismissed(true);
                     }
                 }
@@ -2074,7 +2203,7 @@ impl PlayerExtension for CapitolExtension {
             }
             self.inventory.show(ctx, &mut self.icons, state.catalog(), state.inventory(), None, 0.0);
             let panels: Vec<_> = [self.inventory.rect, self.crafting.rect, self.chat.rect].into_iter().flatten().collect();
-            hints.show(ctx, Instant::now(), &panels);
+            hints.show(ctx, Instant::now(), &panels, None);
         }
         if self.hints_sample {
             if let Some(hidden) = self.hints.hidden() {
@@ -2105,7 +2234,7 @@ impl PlayerExtension for CapitolExtension {
                 };
                 ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
             }
-            self.hints.show(ctx, Instant::now(), &[]);
+            self.hints.show(ctx, Instant::now(), &[], self.lead);
         }
         if let Some(reader) = &mut self.gazette_sample {
             self.gazette.reading(reader);

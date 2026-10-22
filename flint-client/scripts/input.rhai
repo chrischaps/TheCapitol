@@ -119,6 +119,13 @@
 // itself is Rust's (ui/trade.rs), and refusals and endings come here as
 // `trade_note` toasts.
 //
+// The road in (#442): where the card's step leads (cap_lead: the nearest
+// tuft or tree of its kind, a lot, the hall's door, a stall's counter) is
+// ringed in gold on the ground, slowly, with a glint over it, as the notice
+// board's over its lamp, and a few motes rising, as from the hall. A lot's
+// edge is traced with it. Off screen, the card's arrow points the way
+// instead (ui/hints.rs).
+//
 // Plots (P6.4): alt-click a lot to see it in the plot panel (Rust asks
 // the server what's there, cap_pick_plot). While the panel is open, the
 // picked lot's edge is traced on the ground: a fine line with a brighter
@@ -504,6 +511,8 @@ fn on_draw_ui() {
         stall_under_cursor()
     } else { () };
     if bazaar != () { draw_bazaar(bazaar, over_stall, now); }
+    let lead = cap_lead();
+    if lead != () && !cap_clean() { draw_lead(lead, now); }
 
     if hover != () && placing == () && over == () && !over_hall && !over_board && over_stall == () {
         let n = cap_node_at(hover[0], hover[1]);
@@ -1000,6 +1009,61 @@ fn draw_hall_prompt(h, over) {
     draw_text_opts(at.x - lm.width / 2.0, ly, line, 13.0, #{
         font: "strong", color: [ink[0], ink[1], ink[2], if over || h.near { 0.9 } else { 0.7 }],
     });
+}
+
+// ── The road in (#442) ───────────────────────────────────────────────────
+
+// How often a ripple goes out from the lead's ring, and a mote rises from
+// it (s), how long a mote takes, and how high it goes (m).
+fn lead_ripple() { 2.8 }
+fn lead_mote_every() { 0.9 }
+fn lead_mote_life() { 2.6 }
+fn lead_mote_rise() { 2.4 }
+
+// Where the road in's card leads: a gold ring breathing slowly on the
+// ground, a dashed one turning outside it, a ripple going out now and then,
+// a lot's edge traced faintly, a glint hanging over it and a few motes
+// rising from the ring. Slow on purpose: it's a place to go, not an alarm.
+fn draw_lead(l, now) {
+    let y = cap_mark_y();
+    let c = gold();
+    let r = l.r * (1.0 + 0.05 * (now * 1.2).sin());
+    ring(l.x, l.z, y, r, c, 0.75, 2.0, 48);
+    dashed_ring(l.x, l.z, y, r + 0.35, c, 0.3, 1.5, 24, now * 0.12);
+    let k = (now % lead_ripple()) / lead_ripple();
+    let e = 1.0 - (1.0 - k) * (1.0 - k);
+    ring(l.x, l.z, y, r * (1.0 + 0.8 * e), c, 0.4 * (1.0 - k), 1.0, 48);
+    let n = l.outline.len();
+    if n > 1 {
+        let glow = 0.5 + 0.12 * (now * 1.2).sin();
+        for i in 0..n {
+            let a = l.outline[i];
+            let b = l.outline[(i + 1) % n];
+            ground_line(a[0], a[1], b[0], b[1], y, c, glow, 2.0);
+        }
+    }
+    let ground = cap_ground_at(l.x, l.z);
+    let p = world_to_screen(l.x, ground + 2.2 + 0.12 * (now * 1.4).sin(), l.z);
+    if p.visible {
+        let gr = 6.0 * (0.55 + 0.45 * (now * 1.8).sin()) + 3.0;
+        draw_circle(p.x, p.y, gr * 1.9, c[0], c[1], c[2], 0.12);
+        mote_glint(p.x, p.y, gr, now * 0.4, 0.9);
+    }
+    let count = (lead_mote_life() / lead_mote_every()).ceiling().to_int();
+    let first = (now / lead_mote_every()).floor().to_int();
+    for j in 0..count {
+        let i = first - j;
+        let age = now - i.to_float() * lead_mote_every();
+        let k = age / lead_mote_life();
+        if k < 0.0 || k >= 1.0 { continue; }
+        // Each from its own place round the ring
+        let a = (i * 61 % 100).to_float() / 100.0 * 2.0 * PI();
+        let up = lead_mote_rise() * (1.0 - (1.0 - k) * (1.0 - k));
+        let q = world_to_screen(l.x + r * a.cos(), ground + 0.2 + up, l.z + r * a.sin());
+        if !q.visible { continue; }
+        let fade = (k / 0.2).min(1.0) * (1.0 - k);
+        mote_glint(q.x, q.y, 3.0 + 2.0 * (1.0 - k), age * 1.3 + a, 0.8 * fade);
+    }
 }
 
 // ── The bazaar (E3.11) ───────────────────────────────────────────────────

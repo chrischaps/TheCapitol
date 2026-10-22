@@ -366,14 +366,7 @@ fn hall_chip(ui: &mut egui::Ui, angle: f32) -> egui::Response {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-            let c = rect.center();
-            let (s, k) = angle.sin_cos();
-            let at = |along: f32, across: f32| c + egui::vec2(k * along - s * across, s * along + k * across);
-            ui.painter().add(egui::Shape::convex_polygon(
-                vec![at(5.5, 0.0), at(-4.0, 4.0), at(-1.5, 0.0), at(-4.0, -4.0)],
-                theme::GOLD,
-                Stroke::NONE,
-            ));
+            arrow(ui.painter(), rect.center(), angle, theme::GOLD);
             ui.label(
                 RichText::new("Goods at the hall")
                     .font(theme::strong(size::SMALL))
@@ -387,6 +380,18 @@ fn hall_chip(ui: &mut egui::Ui, angle: f32) -> egui::Response {
         .interact(egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Your market box holds goods. Collect them at the Exchange hall: click to walk there")
+}
+
+/// An arrowhead about 11 points long at `c`, pointing at `angle` (as
+/// [`bearing`] gives it): the hall chip's, and the road in's card's (#442).
+pub fn arrow(painter: &egui::Painter, c: egui::Pos2, angle: f32, colour: egui::Color32) {
+    let (s, k) = angle.sin_cos();
+    let at = |along: f32, across: f32| c + egui::vec2(k * along - s * across, s * along + k * across);
+    painter.add(egui::Shape::convex_polygon(
+        vec![at(5.5, 0.0), at(-4.0, 4.0), at(-1.5, 0.0), at(-4.0, -4.0)],
+        colour,
+        Stroke::NONE,
+    ));
 }
 
 /// The road in, its card hidden for now (#441): its name and a row of small
