@@ -191,12 +191,13 @@ pub const TARGETS: &[Target] = &[
 ];
 
 /// Plots v2's targets (`the-capitol-plots-v2.md` §3, V1.3, #457), for its
-/// ring of r3600 to r6100 and four main roads a sector: about 1000 farms of
-/// about 34k, built 40 to 50%, nearly every one taking 12 stations. The
-/// rows that hold the ring together are today's, with a road joining each
-/// pair of main roads.
+/// ring of r3600 to r6100 and four main roads a sector: about 900 farms of
+/// about 35k, built 40 to 50%, nearly every one taking 12 stations. The
+/// farms were 900 to 1100 until #472 let the water half way across them,
+/// as today's comes, at a cost of about 35. The rows that hold the ring
+/// together are today's, with a road joining each pair of main roads.
 pub const V2_TARGETS: &[Target] = &[
-    hard("lots", "farms", Check::Range(900.0, 1100.0)),
+    hard("lots", "farms", Check::Range(850.0, 1050.0)),
     hard("lot_area_mean", "mean farm area", Check::Range(31_000.0, 38_000.0)),
     hard("built_share", "ring built share", Check::Range(0.40, 0.50)),
     hard("take_12_share", "farms that take 12 stations", Check::Min(0.99)),

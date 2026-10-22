@@ -519,13 +519,16 @@ struct Network {
 const SOAK_ONSET: f64 = 400.0;
 /// The depth of the plain [`SOAK`] and [`SOAK_ONSET`] were tuned on, from
 /// the water's inner rim (r3150) to the plain's edge (r4700). A deeper plain
-/// starts soaking a course up further in, and more slowly, by the square
-/// root of its depth over this (V1.3, #457): exactly 1 on today's plain, and
-/// about 1.26 on Plots v2's, r3750 to r6200. There the deepest courses reach
-/// about 950 in from the plain's edge, as today's do; unscaled they stopped
-/// about 750 in. Scaled by the whole ratio they'd reach half way across the
-/// farms, as today's do in proportion, but cost about 65 of the 1000 farms
-/// (`the-capitol-rural.md`, RD7's V1.3 note). Which to keep is #472.
+/// starts soaking a course up further in, and more slowly, by its depth over
+/// this (#472, Chris's call): exactly 1 on today's plain, and about 1.58 on
+/// Plots v2's, r3750 to r6200. So the water comes as far into the farms in
+/// proportion as today's: the deepest courses reach r4798 to r4857 on the
+/// four seeds, half way across the farms and 55 to 57% of the way across
+/// the plain, where today's deepest (r3712, seed 42) is 56% and 64%.
+/// Unscaled they stopped about 750 in, and scaled by the square root
+/// (V1.3, #457) about 950 in, a third of the way across the farms. The
+/// water costs about 35 farms more than under the square root
+/// (`the-capitol-rural.md`, RD7's notes).
 const PLAIN_DEPTH: f64 = 1550.0;
 
 /// The flow through each cell, as on the plain the ground soaks it up.
@@ -535,7 +538,7 @@ const PLAIN_DEPTH: f64 = 1550.0;
 /// gives out soon after it comes down and a big river runs on, and where the
 /// soaking starts varies too, so the courses don't all end on one circle.
 fn soak(grid: &Grid, flood: &Flood, seed: u64) -> Vec<f64> {
-    let scale = ((grid.rings.plain_edge - grid.rings.inner) / PLAIN_DEPTH).sqrt();
+    let scale = (grid.rings.plain_edge - grid.rings.inner) / PLAIN_DEPTH;
     let mut flow = vec![0.0f64; flood.down.len()];
     for &c in &flood.order {
         flow[c as usize] = 1.0;

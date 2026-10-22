@@ -336,14 +336,33 @@ pub(crate) mod tests {
         WorldGenParams { seed, rural: RuralParams::v2(), ..WorldGenParams::grown() }
     }
 
+    /// How far the deepest river or stream comes in from the plain's edge
+    /// (the land's rise, 100 past the rural edge), as a share of the plain
+    /// down to the water's rim (#472). With the soaking scaled by the plain's
+    /// depth, Plots v2's deepest courses reach 0.55 to 0.57 of the way across
+    /// on the four seeds (r4798 to r4857, half way across the farms). Today's
+    /// reach 0.34 to 0.64 (r3712 to r4166; seed 42's is 0.64, 56% of the way
+    /// across the farms). The floor is about 10% under the least.
+    const V2_WATER_REACH: f64 = 0.49;
+
+    /// The deepest course's radius in `t`, and how far across the plain
+    /// that is, from its edge (0) to the water's rim (1).
+    fn water_reach(params: &WorldGenParams, t: &TerrainConfig) -> (f64, f64) {
+        let frame = params.frame();
+        let reach = t.rivers.iter().chain(&t.streams).flat_map(|c| &c.points).map(|p| frame.radius(p.x, p.y)).fold(f64::MAX, f64::min);
+        let (edge, rim) = (t.land.plain_edge(), frame.water_inner_radius());
+        (reach, (edge - reach) / (edge - rim))
+    }
+
     /// V1.3's acceptance (`the-capitol-plots-v2.md` §3): on the four seeds,
     /// Plots v2's ring holds every hard row of `metrics::V2_TARGETS`: about
-    /// 1000 farms of about 34k, built 40 to 50%, nearly all taking 12
+    /// 900 farms of about 35k, built 40 to 50%, nearly all taking 12
     /// stations, with today's rows for the sectors, the roads, the audit,
-    /// the water and the gaps. The water still comes onto the plain: its
-    /// deepest course reaches at least 700 in past the rural edge, and none
-    /// comes in past the water's rim (how far it should is #472). Each seed
-    /// builds a grown world of its own, so this is the one v2 test that does.
+    /// the water and the gaps. The water comes about half way across the
+    /// farms, as today's deepest does (#472): the deepest course reaches at least
+    /// [`V2_WATER_REACH`] of the way across the plain, and none comes in past
+    /// the water's rim. Each seed builds a grown world of its own, so this is
+    /// the one v2 test that does.
     #[test]
     fn v2_farms_meet_their_targets() {
         let mut failed = Vec::new();
@@ -355,19 +374,19 @@ pub(crate) mod tests {
                 assert!(m.value(t.metric).is_some(), "seed {seed}: {} wasn't measured", t.label);
             }
             let frame = params.frame();
-            let t = &measured.terrain;
-            let reach = t.rivers.iter().chain(&t.streams).flat_map(|c| &c.points).map(|p| frame.radius(p.x, p.y)).fold(f64::MAX, f64::min);
+            let (reach, share) = water_reach(&params, &measured.terrain);
             eprintln!(
-                "seed {seed}: {} farms of {:.1}k, {:.1}% built, {:.1}% take 12, half-sectors {:.0} to {:.0}%, water in to r{reach:.0}, {:.0} ms",
+                "seed {seed}: {} farms of {:.1}k, {:.1}% built, {:.1}% take 12, half-sectors {:.0} to {:.0}%, water in to r{reach:.0} ({:.0}% across the plain), {:.0} ms",
                 m.lots,
                 m.lot_area_mean.unwrap() / 1000.0,
                 m.built_share.unwrap() * 100.0,
                 m.take_12_share.unwrap() * 100.0,
                 m.half_sector_min.unwrap() * 100.0,
                 m.half_sector_max.unwrap() * 100.0,
+                share * 100.0,
                 m.gen_ms
             );
-            assert!(reach <= frame.rural_edge() - 700.0, "seed {seed}: the water reaches in only to r{reach:.0}");
+            assert!(share >= V2_WATER_REACH, "seed {seed}: the water reaches in only to r{reach:.0}, {:.0}% across the plain", share * 100.0);
             assert!(reach > frame.water_inner_radius() - crate::models::hydrology::CELL, "seed {seed}: water at r{reach:.0}");
             let hard = metrics::violations_against(m, metrics::V2_TARGETS).into_iter().filter(|v| v.hard);
             failed.extend(hard.map(|v| format!("seed {seed}: {} {} (target {})", v.label, v.value, v.target)));

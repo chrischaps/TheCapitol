@@ -108,7 +108,8 @@ The sectors' characters are a seeded shuffle of 4 *concession* and 4 *winding*, 
 - **Then `lot_clearance::finish_lots`,** still last.
 - **The cost.** A farm lost to a pond leaves a field. A road can't move for the water, but the water already moves for the road.
 - *As built (#287):* `rural/balance.rs`, on a 10-square raster of each sector with the parks' chamfer (`parks::chamfer_with`). A half-sector wants a spur under 25% built (`BUILT_MIN`: the margin over §5's 20% is for what the water takes) with a hole over 380 across in radius. A spur (`roads::spur_to`) leaves the nearest point of any of the sector's roads, runs on past the hole's centre by half its radius, keeps the spur's clearances, and ends at a farm gate; spurs are `lane_{s}_{k}` after the sector's own. `rural::plan_balanced` adds them before the weld, and `generate_roads_and_rural_plan` hands the metrics the gates. **On seeds 0 to 39 the pass never fires:** the roads already spread the farms (dry, every half-sector is 24 to 37% built, and no hole is over about 340). What lowers a half-sector is the water afterwards, which the walk now goes round. It's kept as the plan's guard, and its test takes a sector's outer road away to make a hole.
-- *As built (V1.3, #457):* **the balance pass on Plots v2's ring** never fires on the four seeds either: four main roads leave no hole near 380. Its provisional farms skip the room rule (`room: 0`), since they only measure the ground. **The water on the deeper plain.** Plots v2's plain runs from the water's rim at r3750 to the land's rise at r6200, 2450 deep against today's 1550. Unscaled, the plain soaked the water up as soon as on today's: the deepest courses stopped at r5300 to r5490, about 750 in from the plain's edge. `hydrology::soak` now starts soaking later and more slowly by the square root of the plain's depth over 1550 (`PLAIN_DEPTH`), which is exactly 1 on today's plain. On Plots v2's it's about 1.26, and the deepest courses reach r5200 to r5350, about 950 in: as far as today's deepest (r3711, about 990 in). Scaled by the whole ratio, the water reached r4730 to r4910, half way across the farms as today's reaches in proportion, but it cost about 65 farms and left the ring under 900. That choice is [#472](https://github.com/chrischaps/TheCapitol/issues/472)'s. `v2_farms_meet_their_targets` holds the reach to at least 700 in from the rural edge.
+- *As built (V1.3, #457):* **the balance pass on Plots v2's ring** never fires on the four seeds either: four main roads leave no hole near 380. Its provisional farms skip the room rule (`room: 0`), since they only measure the ground. **The water on the deeper plain.** Plots v2's plain runs from the water's rim at r3750 to the land's rise at r6200, 2450 deep against today's 1550. Unscaled, the plain soaked the water up as soon as on today's: the deepest courses stopped at r5300 to r5490, about 750 in from the plain's edge. `hydrology::soak` now starts soaking later and more slowly by the square root of the plain's depth over 1550 (`PLAIN_DEPTH`), which is exactly 1 on today's plain. On Plots v2's it's about 1.26, and the deepest courses reach r5200 to r5350, about 950 in: as far as today's deepest (r3711, about 990 in).
+- *As built ([#472](https://github.com/chrischaps/TheCapitol/issues/472), Chris's call, 2026-10-22):* **the soaking scales by the whole ratio of the plain's depth over 1550, not its square root,** so the water comes as far into the grown plain in proportion as today's comes into its own. The ratio is exactly 1 on today's plain, so the default world doesn't move (the pin, `farms_meet_their_targets`, the node plan and the hydrology tests hold). On Plots v2's it's about 1.58, and the deepest courses reach r4798 to r4857 on the four seeds: half way across the farms (50 to 52% of the way in from the rural edge), and 55 to 57% of the way across the plain from its edge to the water's rim. Today's deepest reach 34 to 64% of the way across the plain on the same seeds (r3712 to r4166); seed 42's, the deepest, comes 56% of the way across the farms. The water costs about 35 farms more than under the square root: 889 to 901, against 925 to 934, so V1.3's farm target is 850 to 1050 now (§5). `v2_farms_meet_their_targets` holds the deepest reach to at least 49% of the way across the plain (`V2_WATER_REACH`, about 10% under the least measured). **Getting farms back.** The walk already slides a farm on past a course rather than dropping it (`farms.rs`: the farm is pulled back short of the water, and the walk slides on 10 at a time until a farm starts clear), so each crossing costs the water's width and banks and what's left of the farm that won't fit before it, not a whole farm and its field. With frontage U[132, 146] and 132 the floor, the cut-down loop tries only the drawn frontage, and a last try at 132 would win a farm only where the water is within 14 of fitting, and it would move today's walk, whose draws step past 100. Nothing cheap was left that didn't move the default world, so the target moved instead.
 
 ### RD8. Farms are pasture in Flint ([R6 #289](https://github.com/chrischaps/TheCapitol/issues/289))
 
@@ -228,16 +229,18 @@ On seeds 0 to 39: 363 to 380 farms, 35.2k to 36.7k on average, 34 to 36% built, 
 
 | Metric | Target | 42 | 7 | 1234 | 99999 |
 |---|---|---:|---:|---:|---:|
-| **Farms** | 900 to 1100 | 933 | 927 | 934 | 925 |
-| **Mean farm area** | 31k to 38k | 35.2k | 34.9k | 34.9k | 35.0k |
-| Farm area, least / most | | 27.4k / 41.9k | 25.7k / 42.0k | 26.4k / 42.1k | 26.8k / 42.1k |
-| **Ring built share** | 40 to 50% | 43% | 42% | 43% | 42% |
+| **Farms** | 850 to 1050 (900 to 1100 before #472) | 901 | 896 | 889 | 897 |
+| **Mean farm area** | 31k to 38k | 35.1k | 34.8k | 34.8k | 35.0k |
+| Farm area, least / most | | 27.4k / 41.9k | 25.7k / 42.0k | 26.3k / 42.1k | 26.8k / 42.1k |
+| **Ring built share** | 40 to 50% | 42% | 41% | 41% | 41% |
 | **Farms that take 12 stations** | ≥ 99% | 100% | 100% | 100% | 100% |
-| **Half-sector built share, least / most** | ≥ 20% / ≤ 60% | 37 / 49% | 31 / 48% | 35 / 49% | 36 / 50% |
+| **Half-sector built share, least / most** | ≥ 20% / ≤ 60% | 37 / 47% | 31 / 47% | 35 / 46% | 34 / 49% |
 | **Main roads / roads joining them, fewest** | ≥ 4 / ≥ 3 | 4 / 3 | 4 / 3 | 4 / 3 | 4 / 3 |
 | **Audit issues / loose ends off a gate** | 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
 | **Farms on water / gap, least** | 0 / ≥ 40 | 0 / 40.0 | 0 / 40.0 | 0 / 40.0 | 0 / 40.0 |
-| The water's deepest reach | ≤ r5400 | r5270 | r5272 | r5243 | r5263 |
+| **The water's deepest reach, across the plain** | ≥ 49% | r4857, 55% | r4798, 57% | r4857, 55% | r4809, 57% |
+
+Since [#472](https://github.com/chrischaps/TheCapitol/issues/472) the soaking scales by the plain's whole depth (RD7's #472 note). Under #457's square root the farms were 925 to 934, 42 to 43% built, and the water reached r5243 to r5272, a third of the way across the farms.
 | Generation, release (ms) | | 1448 | 1463 | 1402 | 1378 |
 
 On seeds 0 to 12 as well: 913 to 943 farms, 34.6k to 35.2k on average, 42 to 43% built, all taking 12. The grown world builds in about 1.45 s in release with these farms, against about 1.15 s with today's draws on its ring, and about 6.5 s in debug.
@@ -357,7 +360,7 @@ Follow-up: [#292](https://github.com/chrischaps/TheCapitol/issues/292), the rura
 
 Later: [#423](https://github.com/chrischaps/TheCapitol/issues/423) (plots plan `the-capitol-plots.md` §5.3) made the farms smaller, about 400 of about 36k (RD6's #423 note, §5's as-built table). Capacity at the new size is [#424](https://github.com/chrischaps/TheCapitol/issues/424).
 
-Plots v2 (`the-capitol-plots-v2.md`): [#457](https://github.com/chrischaps/TheCapitol/issues/457) (V1.3) laid the farms for the grown ring, r3600 to r6100: four main roads a sector, about 930 farms of about 35k, every one taking 12 (RD6's, RD7's and RD10's V1.3 notes, §5's v2 table). The flip ([#459](https://github.com/chrischaps/TheCapitol/issues/459)) makes them the default.
+Plots v2 (`the-capitol-plots-v2.md`): [#457](https://github.com/chrischaps/TheCapitol/issues/457) (V1.3) laid the farms for the grown ring, r3600 to r6100: four main roads a sector, about 900 farms of about 35k, every one taking 12, with the water half way across them since [#472](https://github.com/chrischaps/TheCapitol/issues/472) (RD6's, RD7's and RD10's V1.3 notes, §5's v2 table). The flip ([#459](https://github.com/chrischaps/TheCapitol/issues/459)) makes them the default.
 
 ## 9. Risks
 

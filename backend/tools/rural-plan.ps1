@@ -25,7 +25,7 @@
 
 .PARAMETER V2
   Plots v2's ring (the-capitol-plots-v2.md, V1.3, #457): r3600 to r6100 in
-  the grown world, 16600 across, with three main roads a sector and its
+  the grown world, 16600 across, with four main roads a sector and its
   farms, measured against its targets. The plans are named farms-v2-<seed>,
   and the default output folder is target/rural-plan-v2.
 
