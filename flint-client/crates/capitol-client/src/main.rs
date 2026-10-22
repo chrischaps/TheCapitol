@@ -144,7 +144,7 @@ struct Args {
     #[arg(long)]
     gazette_sample: bool,
     /// Offline, open a person's card (S0.3) on a sample: "citizen" (the
-    /// default), "person" or "mine"
+    /// default), "person", "muted" (the person, muted, S1.4) or "mine"
     #[arg(long, value_name = "WHO", num_args = 0..=1, default_missing_value = "citizen")]
     card_sample: Option<String>,
     /// Offline, the Exchange hall as if you stood where the camera looks

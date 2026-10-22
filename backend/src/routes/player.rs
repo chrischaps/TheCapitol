@@ -6,7 +6,7 @@ use axum::{
 use uuid::Uuid;
 
 use capitol_protocol::rest::{
-    CurrencyResponse, Destination, InventoryResponse, MoveRequest, MoveResponse,
+    CurrencyResponse, Destination, InventoryResponse, MoveRequest, MoveResponse, MutesResponse,
     GrantRequest, GrantResponse, PlayerMeResponse, SubscribeRequest, Subscription,
 };
 use capitol_protocol::rules::{in_world, Zone};
@@ -25,10 +25,29 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/currency", get(get_currency))
         .route("/subscription", post(mock_subscribe))
         .route("/grant", post(dev_grant))
+        .route("/mutes", get(get_mutes))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
         ))
+}
+
+/// The people you've muted, newest first (S1.4)
+#[utoipa::path(
+    get,
+    path = "/player/mutes",
+    responses(
+        (status = 200, description = "Who you've muted", body = MutesResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Player"
+)]
+pub async fn get_mutes(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+) -> Result<Json<MutesResponse>, AppError> {
+    let player = super::players::player_of(&state.db, auth_user.account_id).await?;
+    Ok(Json(MutesResponse { mutes: crate::mutes::list(&state.db, player).await? }))
 }
 
 /// Get the player's name, live position, zone and balance

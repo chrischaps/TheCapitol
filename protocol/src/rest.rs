@@ -673,6 +673,29 @@ pub struct PlayerCard {
     /// The card is your own
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mine: bool,
+    /// You've muted them (S1.4): nothing they say reaches you
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub muted: bool,
+}
+
+/// `GET /player/mutes` (S1.4): the people you've muted, newest first.
+/// `PUT` and `DELETE /players/{id}/mute` answer with the list as it stands
+/// after them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MutesResponse {
+    pub mutes: Vec<MutedPlayer>,
+}
+
+/// Someone you've muted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MutedPlayer {
+    pub id: Uuid,
+    pub name: String,
+    /// A citizen (C0.1): they can be muted like anyone
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
 }
 
 /// `GET /player/inventory`

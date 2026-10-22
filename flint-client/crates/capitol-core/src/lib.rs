@@ -64,6 +64,7 @@ pub mod harvest;
 pub mod market;
 pub mod market_maker;
 pub mod motion;
+pub mod mutes;
 pub mod net;
 pub mod onboarding;
 pub mod paths;

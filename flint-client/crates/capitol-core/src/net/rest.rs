@@ -50,6 +50,12 @@ pub enum RestRequest {
     PlayerCard { player_id: Uuid },
     /// `GET /players/by-name/{name}`: the same, by their name in any case
     PlayerCardByName { name: String },
+    /// `GET /player/mutes`: who you've muted (S1.4)
+    Mutes,
+    /// `PUT /players/{id}/mute`
+    Mute { player_id: Uuid },
+    /// `DELETE /players/{id}/mute`
+    Unmute { player_id: Uuid },
     /// `POST /player/move`. The WebSocket `move` is what the game uses.
     PlayerMove(MoveRequest),
     /// `GET /player/inventory`
@@ -221,6 +227,8 @@ pub enum RestResponse {
     Me(PlayerMeResponse),
     /// Someone's card (S0.3)
     Card(PlayerCard),
+    /// Who you've muted (S1.4), after a mute or an unmute too
+    Mutes(MutesResponse),
     Move(MoveResponse),
     Inventory(InventoryResponse),
     Currency(CurrencyResponse),
@@ -365,14 +373,21 @@ impl RestRequest {
             | CreateCitizen(_)
             | TownKey
             | TownReport(_) => Method::POST,
-            UpdatePlotPermissions { .. } | SetByline(_) | ConfigureAutomation { .. } | SetTunables(_) => Method::PUT,
-            RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } | Unlist { .. } => Method::DELETE,
+            UpdatePlotPermissions { .. }
+            | SetByline(_)
+            | ConfigureAutomation { .. }
+            | SetTunables(_)
+            | Mute { .. } => Method::PUT,
+            RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } | Unlist { .. } | Unmute { .. } => {
+                Method::DELETE
+            }
             ApiKeys
             | Health
             | Terrain { .. }
             | PlayerMe
             | PlayerCard { .. }
             | PlayerCardByName { .. }
+            | Mutes
             | PlayerInventory
             | PlayerCurrency
             | WorldNearby(_)
@@ -422,6 +437,8 @@ impl RestRequest {
             PlayerMe => "/player/me".into(),
             PlayerCard { player_id } => format!("/players/{player_id}/card"),
             PlayerCardByName { name } => format!("/players/by-name/{}", path_segment(name)),
+            Mutes => "/player/mutes".into(),
+            Mute { player_id } | Unmute { player_id } => format!("/players/{player_id}/mute"),
             PlayerMove(_) => "/player/move".into(),
             PlayerInventory => "/player/inventory".into(),
             PlayerCurrency => "/player/currency".into(),
@@ -548,6 +565,7 @@ impl RestRequest {
             Q::Terrain { .. } => A::Terrain(Box::new(de(body)?)),
             Q::PlayerMe => A::Me(de(body)?),
             Q::PlayerCard { .. } | Q::PlayerCardByName { .. } => A::Card(de(body)?),
+            Q::Mutes | Q::Mute { .. } | Q::Unmute { .. } => A::Mutes(de(body)?),
             Q::PlayerMove(_) => A::Move(de(body)?),
             Q::PlayerInventory => A::Inventory(de(body)?),
             Q::PlayerCurrency => A::Currency(de(body)?),
@@ -781,6 +799,9 @@ mod tests {
                 "GET",
                 "/players/by-name/Ada%20Reeder%2F2%3F%C3%A9".into(),
             ),
+            (RestRequest::Mutes, "GET", "/player/mutes".into()),
+            (RestRequest::Mute { player_id: id }, "PUT", format!("/players/{id}/mute")),
+            (RestRequest::Unmute { player_id: id }, "DELETE", format!("/players/{id}/mute")),
             (
                 RestRequest::ListPlots(Default::default()),
                 "GET",

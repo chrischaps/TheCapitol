@@ -124,6 +124,14 @@ impl Cards {
         }
     }
 
+    /// You muted or unmuted `id` (S1.4): their card, if it's the one held,
+    /// says so.
+    pub fn set_muted(&mut self, id: Uuid, muted: bool) {
+        if let Some(card) = self.card.as_mut().filter(|c| c.id == id) {
+            card.muted = muted;
+        }
+    }
+
     /// Signed in again: whatever was out won't be answered.
     pub fn connected(&mut self) {
         self.asked = None;
@@ -180,6 +188,7 @@ mod tests {
             standing: standing::NEW_IN_TOWN.into(),
             guild: None,
             mine: false,
+            muted: false,
         }
     }
 
@@ -249,6 +258,19 @@ mod tests {
         cards.open(Who::Name(" ada reeder".into()), None);
         assert!(matches!(cards.shown(), Shown::Card(c) if c.id == Uuid::from_u128(1)));
         assert_eq!(cards.wants(), None);
+    }
+
+    #[test]
+    fn muting_marks_the_card_held_and_no_other() {
+        let mut cards = Cards::default();
+        let ada = Who::Id(Uuid::from_u128(1));
+        cards.open(ada.clone(), None);
+        cards.sent(ada);
+        cards.answered(card(1, "Ada"));
+        cards.set_muted(Uuid::from_u128(2), true);
+        assert!(matches!(cards.shown(), Shown::Card(c) if !c.muted));
+        cards.set_muted(Uuid::from_u128(1), true);
+        assert!(matches!(cards.shown(), Shown::Card(c) if c.muted));
     }
 
     #[test]

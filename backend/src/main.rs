@@ -20,6 +20,7 @@ mod error;
 mod middleware;
 mod migrations;
 mod models;
+mod mutes;
 mod openapi;
 mod rate_limit;
 mod routes;

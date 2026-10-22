@@ -12,11 +12,16 @@
 //! The server isn't one of the `Settings`: it's the session's, as on the
 //! login form. Changing it here starts a session on the new server, which
 //! signs you in there with that server's stored token, or shows the form.
+//!
+//! Signed in, the last section lists the people you've muted (S1.4), each
+//! with Unmute. Muting is done from a person's card.
 
 use super::theme::{self, size, DIM, GOLD};
 use crate::session::{normalize_server, server_label};
 use crate::settings::{ControlMode, Settings, Shadows, SENSITIVITY};
+use capitol_core::mutes::Mutes;
 use egui::{Align2, Id, RichText};
+use uuid::Uuid;
 
 /// The panel's width inside its frame.
 const WIDTH: f32 = 300.0;
@@ -37,6 +42,8 @@ const BAR: f32 = 12.0;
 pub enum Action {
     /// Talk to this server instead (already normalized).
     SetServer(String),
+    /// Hear them again (S1.4).
+    Unmute(Uuid),
     Close,
 }
 
@@ -44,6 +51,8 @@ pub enum Action {
 pub struct View<'a> {
     /// The server the session talks to, or `None` offline.
     pub server: Option<&'a str>,
+    /// Who you've muted, or `None` offline.
+    pub mutes: Option<&'a Mutes>,
 }
 
 #[derive(Default)]
@@ -56,9 +65,19 @@ pub struct SettingsPanel {
     server_focus: bool,
     /// Where the panel was drawn this frame. `None` while it's closed.
     pub rect: Option<egui::Rect>,
+    /// Whether it was open when [`SettingsPanel::just_opened`] last asked
+    seen_open: bool,
 }
 
 impl SettingsPanel {
+    /// Whether it has opened since this was last asked: true once per
+    /// opening, so the mutes are asked for afresh.
+    pub fn just_opened(&mut self) -> bool {
+        let opened = self.open && !self.seen_open;
+        self.seen_open = self.open;
+        opened
+    }
+
     pub fn toggle(&mut self) {
         self.open = !self.open;
         if !self.open {
@@ -202,6 +221,13 @@ impl SettingsPanel {
             theme::switch(ui, &mut k.invert_look_y)
         })
         .on_hover_text("Over the shoulder, moving the mouse up looks down");
+
+        if let Some(mutes) = view.mutes {
+            section(ui, "Muted");
+            if let Some(id) = muted(ui, mutes) {
+                return Some(Action::Unmute(id));
+            }
+        }
         action
     }
 
@@ -269,6 +295,33 @@ impl SettingsPanel {
     }
 }
 
+/// The people you've muted, newest first, each with Unmute.
+fn muted(ui: &mut egui::Ui, mutes: &Mutes) -> Option<Uuid> {
+    let Some(list) = mutes.list() else {
+        ui.label(theme::dim("Asking the city…").size(size::SMALL).italics());
+        return None;
+    };
+    if list.is_empty() {
+        ui.label(theme::dim("No one. Mute someone from their card.").size(size::SMALL).italics());
+        return None;
+    }
+    let mut unmute = None;
+    for person in list {
+        ui.horizontal(|ui| {
+            if person.citizen {
+                theme::citizen_mark(ui, size::BODY, None);
+            }
+            ui.label(theme::text(&person.name).size(size::BODY));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::link(ui, "Unmute", size::SMALL).on_hover_text("Hear them again").clicked() {
+                    unmute = Some(person.id);
+                }
+            });
+        });
+    }
+    unmute
+}
+
 /// A section's name, small and spaced, over its rows.
 fn section(ui: &mut egui::Ui, name: &str) {
     ui.add_space(10.0);
@@ -297,6 +350,7 @@ mod tests {
                 theme::install(ctx);
                 let view = View {
                     server: Some("http://localhost:3000"),
+                    mutes: None,
                 };
                 action = panel.show(ctx, settings, &view);
             });
@@ -316,6 +370,56 @@ mod tests {
         let rect = panel.rect.expect("drawn");
         assert!(rect.width() >= WIDTH && rect.height() > 300.0, "{rect:?}");
         assert_eq!(settings, Settings::default(), "drawing changes nothing");
+    }
+
+    #[test]
+    fn the_muted_are_listed_each_with_unmute() {
+        use capitol_core::protocol::rest::MutedPlayer;
+        let ada = Uuid::from_u128(0xada);
+        let mut mutes = Mutes::default();
+        mutes.answered(vec![MutedPlayer { id: ada, name: "Ada Reeder".into(), citizen: false }]);
+        let mut panel = SettingsPanel::default();
+        panel.toggle();
+        let mut settings = Settings::default();
+        let run = |panel: &mut SettingsPanel, settings: &mut Settings, click: Option<egui::Pos2>| {
+            let ctx = theme::test_context();
+            let mut action = None;
+            // The sections' scroll area grows to its height over a few frames
+            for frame in 0..14 {
+                // Tall enough that the last section isn't scrolled out of sight
+                let mut raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 1600.0))),
+                    ..Default::default()
+                };
+                if let (Some(p), 12) = (click, frame) {
+                    raw.events.push(egui::Event::PointerMoved(p));
+                    for pressed in [true, false] {
+                        raw.events.push(egui::Event::PointerButton {
+                            pos: p,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        });
+                    }
+                }
+                let _ = ctx.run(raw, |ctx| {
+                    theme::install(ctx);
+                    let view = View { server: Some("http://localhost:3000"), mutes: Some(&mutes) };
+                    if let Some(a) = panel.show(ctx, settings, &view) {
+                        action = Some(a);
+                    }
+                });
+            }
+            action
+        };
+        run(&mut panel, &mut settings, None);
+        let rect = panel.rect.expect("drawn");
+        // Unmute sits at the right of the last section's row, over the footer
+        let found = (0..(rect.height() as i32 / 4))
+            .map(|k| egui::pos2(rect.right() - 40.0, rect.bottom() - 4.0 * k as f32))
+            .find_map(|at| run(&mut panel, &mut settings, Some(at)));
+        assert_eq!(found, Some(Action::Unmute(ada)));
+        assert_eq!(settings, Settings::default(), "unmuting changes no setting");
     }
 
     #[test]

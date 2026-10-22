@@ -8,8 +8,9 @@
 //! It says what anyone in the city could know: the name, with the lozenge
 //! for a citizen; how long they've been here; where they live; what's said
 //! of them (standing in words, D8: "new in town" until S3.1) and their guild
-//! once there are guilds (S4.1). Then Trade, as T or a shift-click asks.
-//! Write (S1.5) and Mute (S1.4) join it when those land.
+//! once there are guilds (S4.1). Then Trade, as T or a shift-click asks,
+//! and under it a quiet Mute (S1.4): their words stop reaching you, on every
+//! device, and they aren't told. Write (S1.5) joins them when it lands.
 //!
 //! The card is edged in the light its person carries: a person's amber
 //! lantern, a citizen's pale one, and gold for your own, the colour of
@@ -35,6 +36,10 @@ const NAME: f32 = 19.0;
 pub enum Action {
     /// Ask them to trade.
     Trade(Uuid),
+    /// Stop hearing them (S1.4).
+    Mute(Uuid),
+    /// Hear them again.
+    Unmute(Uuid),
     Close,
 }
 
@@ -180,16 +185,33 @@ fn known(ui: &mut egui::Ui, card: &PlayerCard, view: &View) -> Option<Action> {
         return None;
     }
     ui.add_space(8.0);
-    // Write (S1.5, #385) and Mute (S1.4, #384) stand beside it once they land
+    // Write (S1.5, #385) stands beside it once it lands
     let trade = ui.horizontal(|ui| theme::accent_button(ui, "Trade", theme::TRADE, view.online)).inner;
-    trade
+    let mut action = trade
         .on_hover_text("Ask them to trade (or shift-click them)")
         .clicked()
-        .then_some(Action::Trade(card.id))
+        .then_some(Action::Trade(card.id));
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if card.muted {
+            ui.label(theme::dim("Muted: their words don't reach you").size(size::SMALL).italics());
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (words, hover, asks) = if card.muted {
+                ("Unmute", "Hear them again", Action::Unmute(card.id))
+            } else {
+                ("Mute", "Stop hearing them, on every device. They aren't told.", Action::Mute(card.id))
+            };
+            if theme::link(ui, words, size::SMALL).on_hover_text(hover).clicked() && view.online {
+                action = Some(asks);
+            }
+        });
+    });
+    action
 }
 
-/// `--card-sample [citizen|person|mine]`: what a click on that one shows,
-/// the server's answer already in.
+/// `--card-sample [citizen|person|muted|mine]`: what a click on that one
+/// shows, the server's answer already in. `muted` is the person, muted.
 pub fn sample(which: &str) -> (capitol_core::card::Cards, i64) {
     use capitol_core::card::{Cards, Who};
     use capitol_core::protocol::rules;
@@ -199,13 +221,14 @@ pub fn sample(which: &str) -> (capitol_core::card::Cards, i64) {
     ))
     .expect("the card fixture parses");
     match which {
-        "person" => {
+        "person" | "muted" => {
             card = PlayerCard {
                 id: Uuid::from_u128(0xada),
                 name: "Ada Reeder".into(),
                 citizen: false,
                 since: today - 3,
                 home: Some("suburban".into()),
+                muted: which == "muted",
                 ..card
             }
         }
@@ -266,7 +289,7 @@ mod tests {
 
     #[test]
     fn every_sample_card_draws_top_right_on_a_small_screen() {
-        for which in ["citizen", "person", "mine"] {
+        for which in ["citizen", "person", "muted", "mine"] {
             let (cards, today) = sample(which);
             let (action, rect) = run(&cards, today, 853.0, None);
             let rect = rect.expect("drawn");
@@ -275,15 +298,50 @@ mod tests {
         }
     }
 
-    #[test]
-    fn trade_on_someone_elses_card_asks_them() {
-        let (cards, today) = sample("person");
-        let (_, rect) = run(&cards, today, 1280.0, None);
+    /// Every action a click somewhere on the card asks for, scanning its
+    /// lower half on a grid, so the test holds whatever the spacing.
+    fn actions_on(cards: &Cards, today: i64) -> Vec<Action> {
+        let (_, rect) = run(cards, today, 1280.0, None);
         let rect = rect.expect("drawn");
-        // The button stands at the card's foot, on the left
-        let at = egui::pos2(rect.left() + 34.0, rect.bottom() - 24.0);
-        let (action, _) = run(&cards, today, 1280.0, Some(at));
-        assert_eq!(action, Some(Action::Trade(Uuid::from_u128(0xada))));
+        let mut found = Vec::new();
+        let mut y = rect.center().y;
+        while y < rect.bottom() {
+            for x in [rect.left() + 34.0, rect.center().x, rect.right() - 30.0] {
+                if let (Some(a), _) = run(cards, today, 1280.0, Some(egui::pos2(x, y))) {
+                    if !found.contains(&a) {
+                        found.push(a);
+                    }
+                }
+            }
+            y += 6.0;
+        }
+        found
+    }
+
+    #[test]
+    fn someone_elses_card_asks_them_to_trade_or_mutes_them() {
+        let (cards, today) = sample("person");
+        let ada = Uuid::from_u128(0xada);
+        let found = actions_on(&cards, today);
+        assert!(found.contains(&Action::Trade(ada)) && found.contains(&Action::Mute(ada)), "{found:?}");
+        assert!(!found.contains(&Action::Unmute(ada)), "{found:?}");
+    }
+
+    #[test]
+    fn a_muted_card_says_so_and_unmutes() {
+        let (mut cards, today) = sample("person");
+        let ada = Uuid::from_u128(0xada);
+        cards.set_muted(ada, true);
+        let found = actions_on(&cards, today);
+        assert!(found.contains(&Action::Unmute(ada)) && !found.contains(&Action::Mute(ada)), "{found:?}");
+        assert!(found.contains(&Action::Trade(ada)), "they can still be traded with: {found:?}");
+    }
+
+    #[test]
+    fn your_own_card_has_no_mute() {
+        let (cards, today) = sample("mine");
+        let found = actions_on(&cards, today);
+        assert!(found.iter().all(|a| matches!(a, Action::Close)), "{found:?}");
     }
 
     #[test]

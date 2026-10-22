@@ -7,9 +7,10 @@
 //!
 //! A line goes out as [`GameEvent::Said`]. Each socket decides for itself
 //! whether its player hears it ([`hears`]), as it does for gathering: the
-//! interest cell first, which is cheap, then the distance.
+//! interest cell first, which is cheap, then the distance. A line from
+//! someone the listener has muted (S1.4, `crate::mutes`) never reaches them.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 
 use capitol_protocol::rules::talk::{self, CAPITOL_BACKLOG, HEARD};
@@ -133,19 +134,31 @@ impl Talk {
         Ok(())
     }
 
-    /// The last Capitol lines, oldest first, and the newest one's number: a
-    /// socket sends these, then skips any Capitol line numbered at or below it
-    pub fn backlog(&self) -> (u64, Vec<ServerMessage>) {
+    /// The last Capitol lines, oldest first, but those from anyone in
+    /// `muted`, and the newest one's number: a socket sends these, then
+    /// skips any Capitol line numbered at or below it
+    pub fn backlog(&self, muted: &HashSet<Uuid>) -> (u64, Vec<ServerMessage>) {
         let backlog = self.capitol.lock().expect("talk's backlog lock");
-        (backlog.seq, backlog.lines.iter().map(|(_, line)| line.message()).collect())
+        let heard = backlog.lines.iter().filter(|(_, line)| !muted.contains(&line.from));
+        (backlog.seq, heard.map(|(_, line)| line.message()).collect())
     }
 }
 
 /// Whether the socket of `listener`, standing in `cell` on the positions
-/// `seen`, hears `line`. Capitol lines reach everyone. A local line reaches
-/// only a socket that holds the avatar: the speaker's own, or one within
-/// [`HEARD`] of where it was said.
-pub fn hears(line: &Line, listener: Uuid, holds_avatar: bool, seen: Option<&Positions>, cell: Option<Cell>) -> bool {
+/// `seen`, hears `line`. Nothing from anyone in `muted` does. Capitol lines
+/// reach everyone else. A local line reaches only a socket that holds the
+/// avatar: the speaker's own, or one within [`HEARD`] of where it was said.
+pub fn hears(
+    line: &Line,
+    listener: Uuid,
+    holds_avatar: bool,
+    seen: Option<&Positions>,
+    cell: Option<Cell>,
+    muted: &HashSet<Uuid>,
+) -> bool {
+    if muted.contains(&line.from) {
+        return false;
+    }
     match line.channel {
         Channel::Capitol => true,
         Channel::Local => {
@@ -213,7 +226,7 @@ mod tests {
 
     /// Whether `listener` hears `line` on `positions`, holding the avatar
     fn heard_by(line: &Line, listener: &PlayerState, positions: &Positions) -> bool {
-        hears(line, listener.id, true, Some(positions), positions.cell_of(listener.id))
+        hears(line, listener.id, true, Some(positions), positions.cell_of(listener.id), &HashSet::new())
     }
 
     #[test]
@@ -229,7 +242,10 @@ mod tests {
         assert!(heard_by(&line, &ada, &positions), "the speaker hears herself");
         assert!(heard_by(&line, &near_by, &positions));
         assert!(!heard_by(&line, &too_far, &positions));
-        assert!(!hears(&line, near_by.id, false, Some(&positions), positions.cell_of(near_by.id)), "a watcher hears no local line");
+        assert!(
+            !hears(&line, near_by.id, false, Some(&positions), positions.cell_of(near_by.id), &HashSet::new()),
+            "a watcher hears no local line"
+        );
     }
 
     /// Two players either side of a cell's edge are in sight of each other,
@@ -247,7 +263,7 @@ mod tests {
         let [(_, line)] = said(&mut rx).try_into().unwrap();
         assert!(heard_by(&line, &over, &positions), "28 units off, across the edge");
         assert!(!heard_by(&line, &far, &positions));
-        assert!(!hears(&line, Uuid::new_v4(), true, Some(&positions), None), "nor one out of the world");
+        assert!(!hears(&line, Uuid::new_v4(), true, Some(&positions), None, &HashSet::new()), "nor one out of the world");
     }
 
     #[test]
@@ -260,7 +276,7 @@ mod tests {
         let [(seq, line)] = said(&mut rx).try_into().unwrap();
         assert_eq!(seq, 1);
         assert!(heard_by(&line, &far, &positions));
-        assert!(hears(&line, far.id, false, None, None), "a watcher with nobody in sight hears it too");
+        assert!(hears(&line, far.id, false, None, None, &HashSet::new()), "a watcher with nobody in sight hears it too");
     }
 
     #[test]
@@ -272,7 +288,7 @@ mod tests {
             talk.say(&events, &unlimited(), speaker(&ada), Channel::Capitol, &format!("line {n}")).unwrap();
         }
         talk.say(&events, &unlimited(), speaker(&ada), Channel::Local, "not kept").unwrap();
-        let (seq, lines) = talk.backlog();
+        let (seq, lines) = talk.backlog(&HashSet::new());
         assert_eq!(seq, 45);
         let texts: Vec<String> = lines
             .iter()
@@ -283,6 +299,32 @@ mod tests {
             .collect();
         let want: Vec<String> = (6..=45).map(|n| format!("line {n}")).collect();
         assert_eq!(texts, want);
+    }
+
+    /// S1.4: neither channel reaches the muter, nor the backlog, and both
+    /// still reach everyone else
+    #[test]
+    fn a_muted_speakers_lines_reach_everyone_but_the_muter() {
+        let ada = player("Ada", AT.0, AT.1);
+        let bram = player("Bram", AT.0 + 10.0, AT.1);
+        let cass = player("Cass", AT.0, AT.1 + 10.0);
+        let positions = Positions::of([&ada, &bram, &cass], &HashMap::new());
+        let bram_muted = HashSet::from([ada.id]);
+        let talk = Talk::new();
+        let (events, mut rx) = broadcast::channel(16);
+        talk.say(&events, &unlimited(), speaker(&ada), Channel::Local, "Rope, anyone?").unwrap();
+        talk.say(&events, &unlimited(), speaker(&ada), Channel::Capitol, "Rope at the hall").unwrap();
+        talk.say(&events, &unlimited(), speaker(&cass), Channel::Capitol, "Planks too").unwrap();
+        let lines = said(&mut rx);
+        let reaches = |line: &Line, who: &PlayerState, muted: &HashSet<Uuid>| {
+            hears(line, who.id, true, Some(&positions), positions.cell_of(who.id), muted)
+        };
+        let to_bram: Vec<&str> = lines.iter().filter(|(_, l)| reaches(l, &bram, &bram_muted)).map(|(_, l)| l.text.as_str()).collect();
+        assert_eq!(to_bram, ["Planks too"]);
+        assert!(lines.iter().all(|(_, l)| reaches(l, &cass, &HashSet::new())), "Cass hears them all");
+        let (_, backlog) = talk.backlog(&bram_muted);
+        assert!(matches!(&backlog[..], [ServerMessage::Said { text, .. }] if text == "Planks too"), "{backlog:?}");
+        assert_eq!(talk.backlog(&HashSet::new()).1.len(), 2);
     }
 
     #[test]
@@ -310,7 +352,7 @@ mod tests {
         let refused = talk.say(&events, &limiter, speaker(&ada), Channel::Capitol, "and again").unwrap_err();
         assert!(refused.starts_with("You're talking too fast"), "{refused}");
         assert_eq!(said(&mut rx).len(), 8);
-        assert_eq!(talk.backlog().1.len(), 4, "the refused line isn't kept");
+        assert_eq!(talk.backlog(&HashSet::new()).1.len(), 4, "the refused line isn't kept");
         let bram = player("Bram", AT.0, AT.1);
         talk.say(&events, &limiter, speaker(&bram), Channel::Local, "me too").unwrap();
     }

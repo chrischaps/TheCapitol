@@ -4,17 +4,20 @@
 //! in the city could know: the name, whether they're a citizen, how long
 //! they've been here, where they live and what's said of them. Nothing of
 //! their Strands or goods.
+//!
+//! Mutes (S1.4) are here too: `PUT` and `DELETE /players/{id}/mute`, and
+//! `GET /player/mutes` beside the rest of you. `crate::mutes` keeps them.
 
 use axum::{
     extract::{Path, State},
-    routing::get,
+    routing::{get, put},
     Extension, Json, Router,
 };
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use capitol_protocol::rest::PlayerCard;
+use capitol_protocol::rest::{MutesResponse, PlayerCard};
 use capitol_protocol::rules::{self, standing};
 
 use crate::error::AppError;
@@ -25,6 +28,7 @@ pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/{id}/card", get(get_card))
         .route("/by-name/{name}", get(get_card_by_name))
+        .route("/{id}/mute", put(mute).delete(unmute))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::middleware::auth::auth_middleware,
@@ -75,6 +79,62 @@ pub async fn get_card_by_name(
     card(&state.db, auth_user.account_id, Who::Name(&name)).await.map(Json)
 }
 
+/// Stop hearing someone: nothing they say reaches you, on any device
+#[utoipa::path(
+    put,
+    path = "/players/{id}/mute",
+    params(("id" = Uuid, Path, description = "Who to mute")),
+    responses(
+        (status = 200, description = "The people you've muted now", body = MutesResponse),
+        (status = 400, description = "You can't mute yourself"),
+        (status = 404, description = "No such player")
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Player"
+)]
+pub async fn mute(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<MutesResponse>, AppError> {
+    set_mute(&state, auth_user.account_id, id, true).await
+}
+
+/// Hear someone again
+#[utoipa::path(
+    delete,
+    path = "/players/{id}/mute",
+    params(("id" = Uuid, Path, description = "Who to unmute")),
+    responses(
+        (status = 200, description = "The people you've muted now", body = MutesResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Player"
+)]
+pub async fn unmute(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<MutesResponse>, AppError> {
+    set_mute(&state, auth_user.account_id, id, false).await
+}
+
+async fn set_mute(state: &AppState, account: Uuid, other: Uuid, on: bool) -> Result<Json<MutesResponse>, AppError> {
+    let player = player_of(&state.db, account).await?;
+    let events = state.game.read().await.event_sender.clone();
+    crate::mutes::set(&state.db, &events, player, other, on).await?;
+    Ok(Json(MutesResponse { mutes: crate::mutes::list(&state.db, player).await? }))
+}
+
+/// The account's player.
+pub async fn player_of(db: &PgPool, account: Uuid) -> Result<Uuid, AppError> {
+    sqlx::query_scalar("SELECT id FROM players WHERE account_id = $1 LIMIT 1")
+        .bind(account)
+        .fetch_optional(db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("No player for this account".into()))
+}
+
 /// Whose card.
 pub enum Who<'a> {
     Id(Uuid),
@@ -86,9 +146,11 @@ pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard,
     // Their oldest plot is their home; one claimed before claims were dated counts last
     const CARD: &str = "SELECT p.id, p.name, a.kind = 'citizen', a.created_at, p.account_id = $2,
                 (SELECT pl.zone_id FROM plots pl WHERE pl.owner_id = p.id
-                 ORDER BY pl.claimed_at NULLS LAST, pl.id LIMIT 1)
+                 ORDER BY pl.claimed_at NULLS LAST, pl.id LIMIT 1),
+                EXISTS (SELECT 1 FROM player_mutes m JOIN players me ON me.id = m.player_id
+                        WHERE me.account_id = $2 AND m.muted_id = p.id)
          FROM players p JOIN accounts a ON a.id = p.account_id";
-    type Row = (Uuid, String, bool, DateTime<Utc>, bool, Option<String>);
+    type Row = (Uuid, String, bool, DateTime<Utc>, bool, Option<String>, bool);
     let row: Option<Row> = match who {
         Who::Id(id) => {
             sqlx::query_as(&format!("{CARD} WHERE p.id = $1"))
@@ -108,7 +170,7 @@ pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard,
             .await?
         }
     };
-    let (id, name, citizen, created, mine, home) =
+    let (id, name, citizen, created, mine, home, muted) =
         row.ok_or_else(|| AppError::NotFound("No one goes by that".into()))?;
     Ok(PlayerCard {
         id,
@@ -120,6 +182,7 @@ pub async fn card(db: &PgPool, viewer: Uuid, who: Who<'_>) -> Result<PlayerCard,
         // Guilds come in S4.1 (#397)
         guild: None,
         mine,
+        muted,
     })
 }
 
@@ -175,7 +238,13 @@ mod tests {
         assert_eq!(seen.standing, standing::NEW_IN_TOWN);
 
         let own = card(&db, ada_acc, Who::Id(ada)).await.unwrap();
-        assert!(own.mine);
+        assert!(own.mine && !own.muted);
+
+        // Muted by Bea (S1.4): her card of Ada says so, and no one else's
+        let (events, _rx) = tokio::sync::broadcast::channel(4);
+        crate::mutes::set(&db, &events, bea, ada, true).await.unwrap();
+        assert!(card(&db, bea_acc, Who::Id(ada)).await.unwrap().muted);
+        assert!(!card(&db, ada_acc, Who::Id(bea)).await.unwrap().muted, "a mute is one way");
     }
 
     #[sqlx::test(migrations = "./migrations")]

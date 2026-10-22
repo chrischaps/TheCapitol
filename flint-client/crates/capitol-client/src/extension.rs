@@ -1660,6 +1660,8 @@ impl PlayerExtension for CapitolExtension {
                     Some(ui::card::Action::Trade(id)) => {
                         session.trade_with(now, id);
                     }
+                    Some(ui::card::Action::Mute(id)) => session.mute(id, true),
+                    Some(ui::card::Action::Unmute(id)) => session.mute(id, false),
                     Some(ui::card::Action::Close) => session.close_card(),
                     None => {}
                 }
@@ -1801,8 +1803,15 @@ impl PlayerExtension for CapitolExtension {
                 }
             }
         }
+        // Muted on another device since: ask again as it opens (S1.4)
+        if self.settings_panel.just_opened() {
+            if let Some(session) = self.session.as_mut() {
+                session.refresh_mutes();
+            }
+        }
         let view = ui::settings::View {
             server: self.session.as_ref().map(|s| s.server()),
+            mutes: self.session.as_ref().map(|s| s.mutes()),
         };
         // A pinned mode is what the panel shows and changes, for this run
         // alone: swapped in for the panel and back out, so the file keeps
@@ -1817,6 +1826,11 @@ impl PlayerExtension for CapitolExtension {
         }
         match asked {
             Some(ui::settings::Action::SetServer(server)) => self.switch_server(&server),
+            Some(ui::settings::Action::Unmute(id)) => {
+                if let Some(session) = self.session.as_mut() {
+                    session.mute(id, false);
+                }
+            }
             Some(ui::settings::Action::Close) => self.settings_panel.toggle(),
             None => {}
         }

@@ -36,6 +36,8 @@
 //! hour, a deposit, a buy order's escrow and a sale less its fee, out walking.
 //! `fixtures/rest/player_card.json` is `GET /players/{id}/card` (S0.3): a
 //! citizen with a farm, a week in the city, in no guild, seen by someone else.
+//! `fixtures/rest/mutes.json` is `GET /player/mutes` (S1.4): a citizen and a
+//! person muted.
 
 use std::fs;
 use std::path::Path;
@@ -363,4 +365,14 @@ fn a_card_round_trips_leaving_out_what_isnt_so() {
     assert_eq!(card.home.as_deref().and_then(Zone::from_str), Some(Zone::Rural));
     assert_eq!((card.standing.as_str(), card.guild.as_deref()), (standing::NEW_IN_TOWN, None));
     assert_eq!(serde_json::to_string(&card).unwrap(), json);
+}
+
+#[test]
+fn mutes_round_trip_marking_only_the_citizen() {
+    use capitol_protocol::rest::MutesResponse;
+    let json = fixture("mutes.json");
+    let mutes: MutesResponse = serde_json::from_str(&json).unwrap();
+    let citizens: Vec<bool> = mutes.mutes.iter().map(|m| m.citizen).collect();
+    assert_eq!(citizens, [true, false]);
+    assert_eq!(serde_json::to_string(&mutes).unwrap(), json);
 }

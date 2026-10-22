@@ -88,6 +88,10 @@ const GAZETTE_TAG: Tag = 70;
 /// The tag on a person's card (S0.3).
 const CARD_TAG: Tag = 110;
 
+/// The tag on the mutes' calls (S1.4): the list, a mute and an unmute,
+/// each answered with the list.
+const MUTES_TAG: Tag = 140;
+
 /// The tag on taking things out of the impound (#141). The poller
 /// refetches the containers on its answer.
 const IMPOUND_TAG: Tag = 80;
@@ -221,6 +225,8 @@ pub struct Session {
     gazette_asked: Option<capitol_core::gazette::Ask>,
     /// A person's card (S0.3): whose is open, and the call for it.
     cards: capitol_core::card::Cards,
+    /// Who you've muted (S1.4)
+    mutes: capitol_core::mutes::Mutes,
     /// Placing a station from a kit (P6.2), while it lasts.
     placing: Option<Placing>,
     /// What placing has to tell the player since the extension last took it.
@@ -420,6 +426,7 @@ impl Session {
             gazette: capitol_core::gazette::Reader::new(None),
             gazette_asked: None,
             cards: Default::default(),
+            mutes: Default::default(),
             placing: None,
             placing_notes: Vec::new(),
             visit: Visit::default(),
@@ -1512,6 +1519,33 @@ impl Session {
         }
     }
 
+    /// Mute `player` (`on`) or hear them again (S1.4). The server drops
+    /// their lines from then on, on every device; the answer is the list.
+    pub fn mute(&mut self, player: Uuid, on: bool) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        let request = if on { RestRequest::Mute { player_id: player } } else { RestRequest::Unmute { player_id: player } };
+        self.net.rest(request, MUTES_TAG);
+    }
+
+    /// Who you've muted, as last heard.
+    pub fn mutes(&self) -> &capitol_core::mutes::Mutes {
+        &self.mutes
+    }
+
+    /// Ask for the list again, as the settings panel opens.
+    pub fn refresh_mutes(&mut self) {
+        self.mutes.refresh();
+    }
+
+    fn tend_mutes(&mut self) {
+        if self.auth.phase() == Phase::InWorld && self.mutes.wants() {
+            self.mutes.sent();
+            self.net.rest(RestRequest::Mutes, MUTES_TAG);
+        }
+    }
+
     /// The Gazette as the client knows it.
     pub fn gazette(&self) -> &capitol_core::gazette::Reader {
         &self.gazette
@@ -2066,6 +2100,20 @@ impl Session {
                         self.cards.failed(e.status() == Some(404));
                     }
                 },
+                NetEvent::Rest(MUTES_TAG, result) => match result {
+                    Ok(RestResponse::Mutes(answer)) => {
+                        self.mutes.answered(answer.mutes.clone());
+                        if let capitol_core::card::Shown::Card(card) = self.cards.shown() {
+                            let (id, muted) = (card.id, self.mutes.contains(card.id));
+                            self.cards.set_muted(id, muted);
+                        }
+                    }
+                    Ok(_) => self.mutes.failed(),
+                    Err(e) => {
+                        tracing::warn!("mutes: failed: {e}");
+                        self.mutes.failed();
+                    }
+                },
                 NetEvent::Rest(MARKET_READ_TAG, Ok(RestResponse::MarketSummary(summary))) => {
                     self.market_summary = Some(summary.clone());
                 }
@@ -2123,6 +2171,7 @@ impl Session {
                 if matches!(connection, ConnectionState::Connected { .. }) {
                     self.gazette.connected();
                     self.cards.connected();
+                    self.mutes.connected();
                 }
             }
             let trade_before = self.state.trade().clone();
@@ -2311,6 +2360,7 @@ impl Session {
             self.tend_bazaar(now);
             self.tend_gazette();
             self.tend_card();
+            self.tend_mutes();
             for (request, tag) in self.poller.tick(now) {
                 self.net.rest(request, tag);
             }

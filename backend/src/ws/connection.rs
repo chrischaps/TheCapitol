@@ -193,6 +193,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let mut holds_avatar = false;
     // The newest Capitol line this socket has, from the backlog or since
     let mut heard_capitol: u64 = 0;
+    // Who this socket's player has muted (S1.4): read on subscribe, and
+    // again whenever they mute or unmute someone, on any device
+    let mut muted: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
 
     loop {
         tokio::select! {
@@ -300,10 +303,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                 Err(e) => tracing::error!("Failed to load notices for {}: {:?}", player_id, e),
                                             }
                                         }
-                                        // The Capitol channel's last lines (S1.1); any still on
-                                        // `event_rx` are numbered at or below `heard_capitol`
+                                        // The Capitol channel's last lines (S1.1), but the muted's
+                                        // (S1.4); any still on `event_rx` are numbered at or
+                                        // below `heard_capitol`
                                         if first {
-                                            let (seq, lines) = state.talk.backlog();
+                                            muted = read_mutes(&state, player_id, muted).await;
+                                            let (seq, lines) = state.talk.backlog(&muted);
                                             heard_capitol = seq;
                                             for msg in lines {
                                                 let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
@@ -942,6 +947,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         // The next `positions` tells it again what everyone in sight is doing
                         seen = None;
                         sees_everyone = false;
+                        // A `mutes_changed` may be among what it missed
+                        muted = read_mutes(&state, player_id, muted).await;
                         let messages = resync(&state.db, &state.game, &state.market, player_id, connection_id, missed, &market_items).await;
                         let mut sent = Ok(());
                         for msg in messages {
@@ -1003,9 +1010,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     // Talk (S1.1): local by the cell and then the distance, Capitol to all
                     Ok(GameEvent::Said { seq, line }) => {
                         let fresh = line.channel != capitol_protocol::ws::Channel::Capitol || seq > heard_capitol;
-                        if fresh && crate::engine::talk::hears(&line, player_id, holds_avatar, seen.as_deref(), my_cell) {
+                        if fresh && crate::engine::talk::hears(&line, player_id, holds_avatar, seen.as_deref(), my_cell, &muted) {
                             heard_capitol = heard_capitol.max(seq);
                             let _ = sender.send(Message::Text(serde_json::to_string(&line.message()).unwrap().into())).await;
+                        }
+                    }
+                    // They muted or unmuted someone, here or on another device (S1.4)
+                    Ok(GameEvent::MutesChanged { player_id: who }) => {
+                        if who == player_id {
+                            muted = read_mutes(&state, player_id, muted).await;
                         }
                     }
                     // Leaving goes to everyone, near or far: it ends their trades
@@ -1381,6 +1394,22 @@ async fn resync(
 }
 
 /// Whether socket `connection_id` holds the player's avatar (E0.8).
+/// Who `player_id` has muted now (S1.4). If the database can't say, the
+/// mutes the socket already had stand.
+async fn read_mutes(
+    state: &AppState,
+    player_id: Uuid,
+    had: std::collections::HashSet<Uuid>,
+) -> std::collections::HashSet<Uuid> {
+    match crate::mutes::of(&state.db, player_id).await {
+        Ok(muted) => muted,
+        Err(e) => {
+            tracing::error!("Failed to read {player_id}'s mutes: {e:?}");
+            had
+        }
+    }
+}
+
 async fn holds(state: &AppState, player_id: Uuid, connection_id: u64) -> bool {
     state.game.read().await.holds_presence(player_id, connection_id)
 }

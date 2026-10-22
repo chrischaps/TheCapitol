@@ -1171,6 +1171,7 @@ impl GameState {
             | R::Collected(_)
             | R::Gazette(_)
             | R::Card(_)
+            | R::Mutes(_)
             | R::Byline(_)
             | R::CreatedApiKey(_)
             | R::ApiKeys(_)
