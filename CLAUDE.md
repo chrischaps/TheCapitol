@@ -222,6 +222,7 @@ routes/          - Axum REST handlers
   bureaucracy.rs - Government/bureaucracy endpoints
   bazaar.rs      - The bazaar's directory, stalls, listings and buying (E3.10)
   gazette.rs     - The Gazette's editions and your byline (E3.9)
+  console.rs     - The Observatory's console page at /admin/console, from backend/static/ (D1.1)
 
 ws/              - WebSocket handlers
   mod.rs         - Connection upgrade, message routing

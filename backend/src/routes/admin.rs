@@ -51,6 +51,8 @@ pub fn router(state: AppState) -> Router<AppState> {
             state,
             crate::middleware::auth::auth_middleware,
         ))
+        // After the auth layer, so the console's page loads without a token
+        .merge(super::console::router())
 }
 
 /// Start or extend an account's subscription by `days` (E4.1). There are no

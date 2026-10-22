@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>The Observatory</title>
+<link rel="stylesheet" href="/admin/console/uPlot.css">
+<link rel="stylesheet" href="/admin/console/console.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1 13 8 8 15 3 8Z' fill='%23c9a227'/%3E%3C/svg%3E">
+</head>
+<body>
+<div class="sheet">
+
+<header class="masthead">
+  <div class="rule-double"></div>
+  <h1 class="title">The Capitol Observatory</h1>
+  <p class="dateline">
+    <span id="dateline-day"></span>
+    <span class="dot" aria-hidden="true">·</span>
+    <span id="dateline-server"></span>
+    <span class="dot signed-in-only" aria-hidden="true">·</span>
+    <span class="live signed-in-only" id="live" data-state="off"><i aria-hidden="true"></i><span id="live-text">Not yet live</span></span>
+  </p>
+  <div class="rule-double"></div>
+</header>
+
+<main id="login-view" class="login" hidden>
+  <form id="login-form" class="login-card" autocomplete="on">
+    <p class="kicker">For the city's keepers</p>
+    <p class="login-lede">Watch the world while it runs: the money, the tick, the town and the knobs that turn them. Sign in with an admin's account.</p>
+    <label>Email
+      <input type="email" name="email" id="login-email" autocomplete="username" required>
+    </label>
+    <label>Password
+      <input type="password" name="password" id="login-password" autocomplete="current-password" required>
+    </label>
+    <p class="login-error" id="login-error" role="alert" hidden></p>
+    <button type="submit" id="login-submit">Sign in</button>
+  </form>
+</main>
+
+<div id="console-view" hidden>
+  <nav class="bar">
+    <div class="tabs" role="tablist" id="tabs">
+      <a role="tab" href="#overview" data-tab="overview">Overview</a>
+      <a role="tab" href="#economy" data-tab="economy">Economy</a>
+      <a role="tab" href="#performance" data-tab="performance">Performance</a>
+      <a role="tab" href="#town" data-tab="town">Town</a>
+      <a role="tab" href="#tuning" data-tab="tuning">Tuning</a>
+      <a role="tab" href="#events" data-tab="events">Events</a>
+    </div>
+    <div class="tools">
+      <div class="range" role="group" aria-label="How far back the charts go" id="range">
+        <button type="button" data-hours="1">1 h</button>
+        <button type="button" data-hours="6">6 h</button>
+        <button type="button" data-hours="24">24 h</button>
+      </div>
+      <button type="button" class="quiet" id="theme" title="Paper or night">◐</button>
+      <button type="button" class="quiet" id="sign-out">Sign out</button>
+    </div>
+  </nav>
+
+  <main class="pages">
+    <section class="page" id="page-overview" data-page="overview" hidden>
+      <article class="story">
+        <h2 class="head">Who's about</h2>
+        <p class="headline" id="players-headline">Waiting for the first sample.</p>
+        <p class="dek" id="overview-dek"></p>
+        <div class="chart" id="chart-players"></div>
+      </article>
+    </section>
+
+    <section class="page" id="page-economy" data-page="economy" hidden>
+      <article class="story">
+        <h2 class="head">The city's Strands</h2>
+        <p class="headline" id="strands-headline">Waiting for the first sample.</p>
+        <p class="dek">Strands held by each class, and what open buy orders hold in escrow.</p>
+        <div class="chart" id="chart-strands"></div>
+      </article>
+    </section>
+
+    <section class="page" id="page-performance" data-page="performance" hidden>
+      <article class="story">
+        <h2 class="head">The tick</h2>
+        <p class="headline" id="tick-headline">Waiting for the first sample.</p>
+        <p class="dek">The tick's mean and its 95th percentile over each ten seconds, against the time each tick is given.</p>
+        <div class="chart" id="chart-tick"></div>
+      </article>
+    </section>
+
+    <section class="page" id="page-town" data-page="town" hidden>
+      <article class="story">
+        <h2 class="head">The roster</h2>
+        <p class="headline" id="town-headline">Reading the roster.</p>
+        <p class="dek">Every citizen this server has made, oldest first, with the key it signs in by.</p>
+        <div class="table-wrap">
+          <table class="ledger" id="roster">
+            <thead><tr><th>Citizen</th><th>Made</th><th>Key</th><th>Last used</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="page" id="page-tuning" data-page="tuning" hidden>
+      <article class="story">
+        <h2 class="head">The knobs</h2>
+        <p class="headline" id="tuning-headline">Reading the knobs.</p>
+        <p class="dek">Every live tunable, as the server holds it now. Each change is marked on every chart.</p>
+        <div class="table-wrap">
+          <table class="ledger" id="knobs">
+            <thead><tr><th>Knob</th><th class="num">Now</th><th class="num">Default</th><th class="num">Range</th><th>Watched on</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="page" id="page-events" data-page="events" hidden>
+      <article class="story">
+        <h2 class="head">The wire</h2>
+        <p class="headline" id="events-headline">Listening.</p>
+        <p class="dek">What the server noted, and the fills, deeds, Gazettes and warnings as they happen. Newest first.</p>
+        <div class="filters" id="filters" role="group" aria-label="Show only">
+          <button type="button" data-kind="all" aria-pressed="true">All</button>
+          <button type="button" data-kind="annotation" aria-pressed="false">Notes</button>
+          <button type="button" data-kind="fill" aria-pressed="false">Fills</button>
+          <button type="button" data-kind="deed" aria-pressed="false">Deeds</button>
+          <button type="button" data-kind="gazette" aria-pressed="false">Gazette</button>
+          <button type="button" data-kind="warning" aria-pressed="false">Warnings</button>
+        </div>
+        <ol class="wire" id="wire"></ol>
+      </article>
+    </section>
+  </main>
+</div>
+
+<footer class="colophon">
+  <div class="rule"></div>
+  <p>Sampled every ten seconds. Markers on a chart are what the server noted: a boot, a Gazette, a knob turned.</p>
+</footer>
+</div>
+
+<script src="/admin/console/uPlot.js"></script>
+<script src="/admin/console/console.js"></script>
+</body>
+</html>
