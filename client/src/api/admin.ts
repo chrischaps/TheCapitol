@@ -37,6 +37,17 @@ export interface NeighbourhoodParams {
   force_pattern: NeighbourhoodPattern | null
 }
 
+// The urban grid (#421): from the canal, a bank, the quay street, then rings
+// of blocks, each two rows of lots back to back between ring streets.
+export interface UrbanParams {
+  bank: number
+  street_width: number
+  lot_depth: number
+  rings: number
+  spokes: number
+  lot_frontage: number
+}
+
 export interface WorldGenParams {
   // The zone radii aren't here: they're the protocol's table, not tweakable (#118)
   // Water/Canals
@@ -53,13 +64,8 @@ export interface WorldGenParams {
   // Arterials
   arterial_width: number
   arterial_end_radius: number
-  // Urban grid
-  urban_radial_spacing: number
-  urban_spoke_count: number
-  urban_street_width: number
-  // Urban plots
-  urban_plot_frontage: number
-  urban_plot_depth: number
+  // Urban: the quay, rings of blocks and spokes (#421)
+  urban: UrbanParams
   // Suburban
   suburban: SuburbanGenParams
   // Rural: the farms and their lanes (Rural v2)

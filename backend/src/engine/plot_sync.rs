@@ -66,7 +66,10 @@ pub enum OnOwned {
 ///
 /// `oldsub_` is the suburb's narrower lots, renamed the same way when the
 /// wider ones came in (#422, `20261205_001_suburb_wider_lots.sql`).
-pub const RETIRED_LOTS: &[&str] = &["rural_plot_", "oldfarm_", "oldsub_"];
+///
+/// `urban_plot_` is the old urban grid's small lots. The new grid's lots are
+/// `urb_…` (#421), so no row needs renaming: every old id is gone.
+pub const RETIRED_LOTS: &[&str] = &["rural_plot_", "oldfarm_", "oldsub_", "urban_plot_"];
 
 fn retired(terrain_id: &str) -> bool {
     RETIRED_LOTS.iter().any(|prefix| terrain_id.starts_with(prefix))
@@ -883,6 +886,14 @@ pub(crate) mod tests {
         assert!(retired("rural_plot_trail_3_L_1"));
         assert!(!retired("farm_3_a0_L_0"));
         assert!(!retired("sub_0_0_3_L_2"));
+    }
+
+    /// #421: the old urban grid's lots are retired, and the new grid's aren't.
+    #[test]
+    fn the_old_urban_lots_are_retired_and_the_new_ones_are_not() {
+        assert!(retired("urban_plot_3_17_0"));
+        assert!(retired("urban_plot_0_5_1_d1"));
+        assert!(!retired("urb_0_5_i_2"));
     }
 
     /// #422: the migration's renamed narrow suburban lots are retired, and

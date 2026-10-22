@@ -86,6 +86,19 @@ Today: arcs every 100 and 48 spokes (`urban_radial_spacing`, `urban_spoke_count`
 - **Reuse:** `lot_geometry`'s overlap pass and `street_plan::audit` for the streets. The lots are trapezoids, so `sim::lot`'s packing already handles them.
 - **Flint:** `world/houses.rs`'s urban styles on the bigger footprint: a narrow house on the street with a yard behind for the workshop.
 
+*As built (#421):* **three rings of blocks and 24 bearings, as planned, with a canal bank and a quay on the inside.**
+- **The layout** (`models/urban/`): from the canal's water, a bank of 80, then the quay (`urb_ring_0`), then three rings of blocks, each two rows of lots 95 deep back to back between ring streets (`urb_ring_1` to `urb_ring_3`). The streets are 16 wide. The 24 bearings are 16 spokes (`urb_spoke_{j}`) and the 8 arterials. The outer ring street stands at r1713, so about 80 is left before the suburb, as the old grid left about 90.
+- **Why a bank?** The urban clay is planned on a strip 18 to 48 off the canal's water and 30 clear of any road. The old grid's first row backed onto the canal, so the clay had nowhere to go but the gaps. Now the quay keeps back from the water, and the clay lies along the bank (r1035 to r1056).
+- **Lots** are `urb_{ring}_{block}_{i|o}_{k}`: `i` fronts the inner ring street and `o` the outer, `k` along the row. A row is split into as many lots as fit at 80 along its **inner** edge, the narrow end of every lot in it. Measured at the middle, a row beside an arterial came out about 83 at the front but 78 at the back, and those lots took only 3. Each lot's street edge is its first two corners.
+- **Laid clear of the roads:** a side on a spoke or arterial runs parallel to it, 1 past the kerb. A lot's edge at the smaller radius is a chord, and it sags toward the centre, so its corners stand out by `1 / cos(half the lot's angle)`. So `finish_lots` trims and drops none.
+- **The numbers:** 520 lots, area median 8.6k (p5 7.8k, p95 9.8k), width median 90 (least 81), depth 93. **Every lot takes 4.** Lots cover 64% of the ring from the water to r1800, which is 4.48M, against 4.3M before. The grid has no seed, so it's the same on every seed. `urban::tests::the_urban_grid_meets_its_targets` holds 500 to 700 lots, a 7k to 9k median and ≥ 90% taking 4, with none trimmed or dropped and a clean street audit. `backend/tools/urban-plan.ps1` draws it.
+- **Why 520, not 600?** At 76 on the narrow end there are 560, but only 76% take 4. 16 bearings make 528 at 80, or 576 at 77 with lots narrower than 80, and their blocks are 680 long. Depth 100 makes 520 of 9.2k, over the target. So 24 bearings, 80 and 95 it is.
+- **Not welded to the arterials.** Each ring street has a vertex on each arterial's centre line, but the arterial gets none. Welding them added 4 vertices to each arterial, and the farms and suburban lots laid along an arterial follow its vertices, so 137 of those moved. Nothing reads the junction off the arterial: the citizens' walk graph joins a vertex lying on another road.
+- **The suburb's edge moved a little.** The old spokes ran on to r1800, into the suburb's first row. The new ones stop at the outer ring street, so 123 suburban lots on 19 streets at the suburb's inner edge grow or re-space, and one is gone. Startup syncs with `OnOwned::Keep`, so an owned one keeps its shape. The farms, the arterials and the water didn't move.
+- **The flip:** the old `urban_plot_` lots are in `RETIRED_LOTS`, and the new ids differ, so no row needs renaming: startup releases an owned old lot, refunds the deed and gives its stations back. A saved `world_config`'s old urban keys (`urban_radial_spacing` and the rest) are skipped by serde, so it builds the new grid. The planned nodes the grid moves (the urban clay, and the suburb's branches and clay planned after it, 131 in all) are re-planned (`post-content/20261207_001_urban_grid_nodes.sql`). No seeded grass moves. Pin `9d6cec09d529c7dd`.
+- **Flint:** an urban house stands across its lot's front, 2.8 to 3.6 m deep, and 7 in 10 lots have a workshop at the back of the yard: a flat-roofed shed of the house's brick with wide timber doors.
+- **Capacity:** at 8.6k the lots are `large` (16) by today's `size_category`, though 16 stations don't fit on one at 50 spacing. #424 settles it.
+
 ### 5.2 Suburban (#422): wider and fewer
 
 Today: five rows of lots about 106 deep in the 1200 band, frontage 64 (`suburb/lots.rs`), 1905 lots, many near-triangular strips that take 2 or 3 stations (#305).
@@ -122,7 +135,7 @@ Before: 117 farms with frontage U[380, 500], field gap U[240, 440] and depth U[2
 ## 6. Verification
 
 For each part:
-- Its targets test, over the four seeds, and its plan drawing (`suburb-plan.ps1`, `rural-plan.ps1`, and a new urban one for #421).
+- Its targets test, over the four seeds, and its plan drawing (`suburb-plan.ps1`, `rural-plan.ps1` and `urban-plan.ps1`).
 - `scripts/ci.sh full` before landing: the parts are migrations and generation.
 - The Flint client against the new world: houses, plots, grass and the pasture. Take captures in `flint-client/renders/`. **[H]** Each zone should read the way §1 says: a yard by the market, a garden on a street, a farm on a lane.
 - A town run after all three: citizens settle, and the share of a 640 roster that finds a home goes up from today's.
@@ -142,6 +155,6 @@ For each part:
 | [#420](https://github.com/chrischaps/TheCapitol/issues/420) | This plan | |
 | [#423](https://github.com/chrischaps/TheCapitol/issues/423) | Rural: about 400 farms of about 35k to 40k. *Done:* 361 to 378 long lots of about 36k (§5.3) | #420 |
 | [#422](https://github.com/chrischaps/TheCapitol/issues/422) | Suburban: about 1200 lots, wider and less triangular. *Done:* 1162 to 1210 lots of about 10.3k, 89 to 93% taking 4 (§5.2) | #420 |
-| [#421](https://github.com/chrischaps/TheCapitol/issues/421) | Urban: a new grid with about 600 lots of about 80 × 100 | #420 |
+| [#421](https://github.com/chrischaps/TheCapitol/issues/421) | Urban: a new grid with about 600 lots of about 80 × 100. *Done:* 520 lots of about 8.6k, every one taking 4 (§5.1) | #420 |
 
 PD2's capacity splits (#424) land with whichever part lands first, once Chris has decided. Until then, each part keeps today's `size_category`.

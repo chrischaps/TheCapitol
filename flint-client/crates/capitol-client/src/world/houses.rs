@@ -5,8 +5,9 @@
 //!   square to the street, set back from it and kept off the sides by the
 //!   zone's margins. Where the lot is too small for the zone's smallest
 //!   house, there's none.
-//! - **By zone** ([`style`]): urban terraces fill their narrow lots,
-//!   two or three storeys under slate or a flat roof with a cornice; the
+//! - **By zone** ([`style`]): urban terraces fill their lots' street
+//!   fronts, two or three storeys under slate or a flat roof with a
+//!   cornice, most with a workshop at the back of the yard (#421); the
 //!   suburbs are post-war houses, one storey or two, in pale render under
 //!   tile, some with a garage; rural lots get a steep-roofed farmhouse with
 //!   a chimney, set back from the lane on a drive, and often a barn behind
@@ -169,7 +170,8 @@ struct Style {
     bay: f32,
     /// The chance of a chimney, on a pitched roof.
     chimney: f32,
-    /// The chance of a garage (suburbs) or a barn (fields), room allowing.
+    /// The chance of a garage (suburbs), a barn (fields) or a workshop at
+    /// the back of the yard (urban), room allowing.
     outbuilding: f32,
 }
 
@@ -237,10 +239,11 @@ fn style(zone: Zone) -> Style {
             chimney: 0.3,
             outbuilding: 0.0,
         },
-        // Urban, and anything else that ever carries lots.
+        // Urban, and anything else that ever carries lots. Since #421 a lot
+        // is about 8.5 m by 9.5: the house across its front, the yard behind.
         _ => Style {
             setback: (0.1, 0.3),
-            depth: (2.6, 3.2),
+            depth: (2.8, 3.6),
             width: (9.0, 9.0),
             min_width: 1.8,
             min_depth: 2.0,
@@ -256,7 +259,7 @@ fn style(zone: Zone) -> Style {
             window: 0.55,
             bay: 1.1,
             chimney: 0.35,
-            outbuilding: 0.0,
+            outbuilding: 0.7,
         },
     }
 }
@@ -481,10 +484,17 @@ fn plan(id: &str, lot: &Lot) -> Option<Plan> {
     let roof = rng.pick(st.roofs);
     let setback = rng.range(st.setback);
     let (want_depth, want_width) = (rng.range(st.depth), rng.range(st.width));
-    // A farm's barn, drawn first so the house leaves room behind for it:
-    // the gap to it, its width and its depth.
-    let barn = (lot.zone == Zone::Rural && rng.chance(st.outbuilding))
-        .then(|| (rng.range((2.5, 4.5)), rng.range((4.0, 5.2)), rng.range((4.6, 6.0))));
+    // A farm's barn, or the workshop at the back of an urban yard (#421),
+    // drawn first so the house leaves room behind for it: the gap to it,
+    // its width and its depth.
+    let workshop = lot.zone == Zone::Urban;
+    let barn = (matches!(lot.zone, Zone::Rural | Zone::Urban) && rng.chance(st.outbuilding)).then(|| {
+        if workshop {
+            (rng.range((1.6, 2.6)), rng.range((3.6, 5.6)), rng.range((2.4, 3.2)))
+        } else {
+            (rng.range((2.5, 4.5)), rng.range((4.0, 5.2)), rng.range((4.6, 6.0)))
+        }
+    });
     let behind = barn.map_or(0.0, |(gap, _, bd)| gap + bd);
     // What stands out past the walls: the eaves, or a flat roof's cornice.
     let flat = roof == Roof::Flat;
@@ -604,8 +614,28 @@ fn plan(id: &str, lot: &Lot) -> Option<Plan> {
     if let Some((gap, bw, bd)) = barn {
         let t1 = t0 + metres(depth + gap);
         let fits = (far - t1) as f32 * S - st.back >= bd;
-        if let Some(rect) = fits
-            .then(|| frame.place(t1, (bw, bd), st.side + 0.3, 0.25, rng.unit()))
+        let along = rng.unit();
+        if workshop {
+            // A low shed of the house's brick, against the back line, under
+            // a flat roof, with wide timber doors onto the yard.
+            if let Some(rect) = fits.then(|| frame.place(t1, (bw, bd), st.side + 0.2, 0.0, along)).flatten() {
+                blocks.push(Block {
+                    rect,
+                    storeys: 1,
+                    storey: rng.range((2.5, 3.0)),
+                    roof: Roof::Flat,
+                    pitch: 0.0,
+                    eave: 0.0,
+                    wall: palette::shade(wall, 0.88),
+                    roof_colour,
+                    chimney: None,
+                    door: Door::Wide(hex(palette::BARN_DOOR)),
+                    window: 0.5,
+                    bay: 99.0,
+                });
+            }
+        } else if let Some(rect) = fits
+            .then(|| frame.place(t1, (bw, bd), st.side + 0.3, 0.25, along))
             .flatten()
         {
             blocks.push(Block {

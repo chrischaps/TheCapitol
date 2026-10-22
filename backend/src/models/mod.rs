@@ -18,6 +18,7 @@ pub mod street_plan;
 pub mod suburb;
 pub mod terrain;
 pub mod trails;
+pub mod urban;
 pub mod zone;
 
 pub use account::*;

@@ -6,6 +6,7 @@ use capitol_protocol::rules;
 use capitol_protocol::land::LandParams;
 
 use super::rural::RuralParams;
+use super::urban::UrbanParams;
 use super::street_plan;
 
 // The terrain types the client sees are shared through capitol-protocol, so
@@ -188,15 +189,10 @@ pub struct WorldGenParams {
     // Arterials
     pub arterial_width: f64,
     pub arterial_end_radius: f64,
-    // Urban grid
-    pub urban_radial_spacing: f64,
-    pub urban_spoke_count: u32,
-    pub urban_street_width: f64,
+    // The urban grid (#421): its quay, rings of blocks and spokes.
+    pub urban: UrbanParams,
     // Suburban (nested)
     pub suburban: SuburbanGenParams,
-    // Urban plots
-    pub urban_plot_frontage: f64,
-    pub urban_plot_depth: f64,
     // The wild trails past the rural edge (W5, #198).
     pub wild_trail_width: f64,
     // Rural v2 (`the-capitol-rural.md`): the farms and their roads. Its own
@@ -270,12 +266,8 @@ impl Default for WorldGenParams {
             // the rural edge: 3800, where they ended before the suburb deepened
             // (#117), and 4600 since the rural ring widened (#308).
             arterial_end_radius: rules::RURAL_OUTER_RADIUS,
-            urban_radial_spacing: 100.0,
-            urban_spoke_count: 48,
-            urban_street_width: 16.0,
+            urban: UrbanParams::default(),
             suburban: SuburbanGenParams::default(),
-            urban_plot_frontage: 40.0,
-            urban_plot_depth: 50.0,
             wild_trail_width: 8.0,
             rural: RuralParams::default(),
             guild_plot_frontage: 150.0,
@@ -545,7 +537,8 @@ impl TerrainConfig {
         roads.extend(self.generate_arterial_roads_with_params(params));
 
         // Urban grid
-        roads.extend(self.generate_urban_grid_with_params(params));
+        let grid = self.generate_urban_grid_with_params(params, &roads);
+        roads.extend(grid);
 
         // Suburban streets
         roads.extend(super::suburb::plan(&params.suburban_params(), (self.center_x, self.center_y)).roads);
@@ -662,60 +655,10 @@ impl TerrainConfig {
         roads
     }
 
-    /// Generate radial urban grid streets within the Urban zone
-    fn generate_urban_grid_with_params(&self, params: &WorldGenParams) -> Vec<RoadSegment> {
-        let mut roads = Vec::new();
-        // Start past the outer canal so roads/plots don't overlap the water ring
-        let inner_radius = params.guild_outer_radius + params.canal_outer_width / 2.0;
-        let outer_radius = params.urban_outer_radius;
-        let radial_spacing = params.urban_radial_spacing;
-        let spoke_count = params.urban_spoke_count;
-        let street_width = params.urban_street_width;
-
-        let mut id = 0;
-
-        // Generate concentric arc streets
-        let mut r = inner_radius + radial_spacing;
-        while r < outer_radius {
-            let num_segments = 64;
-            let mut points = Vec::new();
-
-            for i in 0..=num_segments {
-                let angle = (i as f64 / num_segments as f64) * 2.0 * PI;
-                let x = self.center_x + r * angle.stable_cos();
-                let y = self.center_y + r * angle.stable_sin();
-                points.push((x, y));
-            }
-
-            roads.push(RoadSegment {
-                id: format!("urban_arc_{}", id),
-                road_type: RoadType::Grid,
-                points,
-                width: street_width,
-            });
-            id += 1;
-            r += radial_spacing;
-        }
-
-        // Generate radial spoke streets
-        let angle_step = 2.0 * PI / spoke_count as f64;
-        for i in 0..spoke_count {
-            let angle = i as f64 * angle_step;
-
-            let x1 = self.center_x + inner_radius * angle.stable_cos();
-            let y1 = self.center_y + inner_radius * angle.stable_sin();
-            let x2 = self.center_x + outer_radius * angle.stable_cos();
-            let y2 = self.center_y + outer_radius * angle.stable_sin();
-
-            roads.push(RoadSegment {
-                id: format!("urban_spoke_{}", i),
-                road_type: RoadType::Grid,
-                points: vec![(x1, y1), (x2, y2)],
-                width: street_width,
-            });
-        }
-
-        roads
+    /// The urban grid's streets (#421): its ring streets and spokes. The
+    /// arterials must be in `roads` already.
+    fn generate_urban_grid_with_params(&self, params: &WorldGenParams, roads: &[RoadSegment]) -> Vec<RoadSegment> {
+        super::urban::grid(params, (self.center_x, self.center_y), roads).roads()
     }
 
     /// The suburban lots for the already-generated roads in self.roads, as
@@ -727,145 +670,9 @@ impl TerrainConfig {
         super::suburb::lots::lay(&self.roads, &super::suburb::plan(params, center), params, center)
     }
 
-    /// Generate plots filling the urban grid blocks (trapezoids between arcs and spokes)
+    /// The urban lots (#421), in the blocks between the grid's streets.
     fn generate_urban_plots(&self, params: &WorldGenParams) -> Vec<TerrainPlot> {
-        let mut plots = Vec::new();
-        // Start past the outer canal so plots don't overlap the water ring
-        let inner_radius = params.guild_outer_radius + params.canal_outer_width / 2.0;
-        let outer_radius = params.urban_outer_radius;
-        let radial_spacing = params.urban_radial_spacing;
-        let spoke_count = params.urban_spoke_count;
-        let half_w = params.urban_street_width / 2.0;
-        let frontage = params.urban_plot_frontage;
-        let depth = params.urban_plot_depth;
-
-        let angle_step = 2.0 * PI / spoke_count as f64;
-
-        // Some spokes are really arterials (every 45 degrees, at the canal
-        // bridges), which are far wider than a grid street. A block side on
-        // one of those is inset by the arterial's half width instead.
-        let arterial_angles: Vec<f64> = self
-            .roads
-            .iter()
-            .filter(|r| r.road_type == RoadType::Arterial)
-            .filter_map(|r| r.points.last())
-            .map(|&(x, y)| (y - self.center_y).stable_atan2(x - self.center_x))
-            .collect();
-        let side_half = |a: f64| {
-            let on_arterial = arterial_angles.iter().any(|&b| {
-                let d = (a - b).rem_euclid(2.0 * PI);
-                d.min(2.0 * PI - d) < 1e-6
-            });
-            if on_arterial { half_w.max(params.arterial_width / 2.0) } else { half_w }
-        };
-
-        // Walk concentric rings
-        let mut r = inner_radius + radial_spacing;
-        let mut ring_idx = 0u32;
-        while r < outer_radius {
-            // Inner arc inset from road centerline. The first ring backs onto
-            // the canal, not a street, so it keeps back from the water's kerb.
-            let r_in = if ring_idx == 0 {
-                inner_radius + super::lot_clearance::WATER_KERB + 1.0
-            } else {
-                r - radial_spacing + half_w
-            };
-            let r_out = r - half_w;                 // outer arc inset from road centerline
-
-            // Skip if block is too thin after insets
-            if r_out - r_in < depth.min(20.0) {
-                r += radial_spacing;
-                ring_idx += 1;
-                continue;
-            }
-
-            for spoke_idx in 0..spoke_count {
-                let a1 = spoke_idx as f64 * angle_step;
-                let a2 = (spoke_idx + 1) as f64 * angle_step;
-
-                // Angular insets for street width at inner and outer arcs
-                let (h1, h2) = (side_half(a1), side_half(a2));
-                let block_a1_in = a1 + h1 / r_in;
-                let block_a2_in = a2 - h2 / r_in;
-                let block_a1_out = a1 + h1 / r_out;
-                let block_a2_out = a2 - h2 / r_out;
-
-                // Check if block has positive angular extent
-                if block_a2_in <= block_a1_in || block_a2_out <= block_a1_out {
-                    continue;
-                }
-
-                // Calculate arc length at the midpoint radius to determine subdivision
-                let mid_r = (r_in + r_out) / 2.0;
-                let arc_length = mid_r * (block_a2_in - block_a1_in);
-
-                // Subdivide along arc if block is wider than frontage
-                let num_subdivs = if frontage > 0.0 {
-                    (arc_length / frontage).ceil() as u32
-                } else {
-                    1
-                }.max(1);
-
-                // Also subdivide radially if block is deeper than depth
-                let block_depth = r_out - r_in;
-                let num_depth_subdivs = if depth > 0.0 {
-                    (block_depth / depth).ceil() as u32
-                } else {
-                    1
-                }.max(1);
-
-                for d in 0..num_depth_subdivs {
-                    let sub_r_in = r_in + (block_depth / num_depth_subdivs as f64) * d as f64;
-                    let sub_r_out = r_in + (block_depth / num_depth_subdivs as f64) * (d + 1) as f64;
-
-                    // Recalculate angular insets for this depth band
-                    let sub_a1_in = a1 + h1 / sub_r_in;
-                    let sub_a2_in = a2 - h2 / sub_r_in;
-                    let sub_a1_out = a1 + h1 / sub_r_out;
-                    let sub_a2_out = a2 - h2 / sub_r_out;
-
-                    for s in 0..num_subdivs {
-                        let frac0 = s as f64 / num_subdivs as f64;
-                        let frac1 = (s + 1) as f64 / num_subdivs as f64;
-
-                        let sa1_in = sub_a1_in + (sub_a2_in - sub_a1_in) * frac0;
-                        let sa2_in = sub_a1_in + (sub_a2_in - sub_a1_in) * frac1;
-                        let sa1_out = sub_a1_out + (sub_a2_out - sub_a1_out) * frac0;
-                        let sa2_out = sub_a1_out + (sub_a2_out - sub_a1_out) * frac1;
-
-                        let corners = [
-                            (self.center_x + sub_r_in * sa1_in.stable_cos(), self.center_y + sub_r_in * sa1_in.stable_sin()),
-                            (self.center_x + sub_r_in * sa2_in.stable_cos(), self.center_y + sub_r_in * sa2_in.stable_sin()),
-                            (self.center_x + sub_r_out * sa2_out.stable_cos(), self.center_y + sub_r_out * sa2_out.stable_sin()),
-                            (self.center_x + sub_r_out * sa1_out.stable_cos(), self.center_y + sub_r_out * sa1_out.stable_sin()),
-                        ];
-
-                        let area = TerrainPlot::calculate_area(&corners);
-                        if area < 50.0 {
-                            continue; // Skip degenerate plots
-                        }
-
-                        // Find nearest arc road for adjacent_street_id
-                        let adjacent_id = format!("urban_arc_{}", ring_idx);
-
-                        plots.push(TerrainPlot {
-                            id: format!("urban_plot_{}_{}_{}{}", ring_idx, spoke_idx, s,
-                                if num_depth_subdivs > 1 { format!("_d{}", d) } else { String::new() }),
-                            corners,
-                            street_facing_edge: (0, 1),
-                            area,
-                            adjacent_street_id: adjacent_id,
-                            zone: "urban".to_string(),
-                        });
-                    }
-                }
-            }
-
-            r += radial_spacing;
-            ring_idx += 1;
-        }
-
-        plots
+        super::urban::grid(params, (self.center_x, self.center_y), &self.roads).lots(&params.urban)
     }
 
     /// Guild halls: big lots either side of the guild ring road, from the inner
@@ -1155,7 +962,21 @@ mod tests {
         // (`20261205_001_suburb_wider_lots.sql`). No seeded grass moves, and
         // the planned nodes the lots move are re-planned
         // (`post-content/20261205_001_suburb_wider_lots_nodes.sql`).
-        assert_eq!(TerrainConfig::get_default().version(), "bf5dce48376e59c0");
+        //
+        // #421 laid a new urban grid (plots plan §5.1): a canal bank and a
+        // quay, then three rings of back-to-back blocks between four ring
+        // streets, cut by 16 spokes and the 8 arterials. 520 lots of about
+        // 8.6k (`urb_…`), every one taking 4 stations, for 3008 of about 1.4k
+        // (`urban_plot_…`, now in `RETIRED_LOTS`, so startup releases an
+        // owned one). The old grid's spokes ran on to r1800, into the
+        // suburb's first row, so 123 suburban lots on 19 streets at its
+        // inner edge grow or re-space, one is gone, and the parks shift;
+        // startup keeps an owned one as it was. The arterials, the farms and
+        // the water didn't move. No seeded grass moves, and the planned nodes
+        // the grid moves (the urban clay, now on the canal bank, and the
+        // suburb's branches and clay planned after it) are re-planned
+        // (`post-content/20261207_001_urban_grid_nodes.sql`).
+        assert_eq!(TerrainConfig::get_default().version(), "9d6cec09d529c7dd");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one
@@ -1360,9 +1181,11 @@ mod tests {
     fn test_ring_roads_generated() {
         let config = TerrainConfig::get_default();
         let ring_roads: Vec<_> = config.roads.iter()
-            .filter(|r| r.id.contains("ring"))
+            .filter(|r| r.id.contains("ring") && !super::super::urban::is_grid_street(r))
             .collect();
         assert_eq!(ring_roads.len(), 2, "Expected 2 ring roads (guild and trade)");
+        // And the urban grid's: the quay and three more (#421).
+        assert_eq!(config.roads.iter().filter(|r| r.id.starts_with("urb_ring_")).count(), 4);
     }
 
     #[test]

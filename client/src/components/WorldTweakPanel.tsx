@@ -216,11 +216,12 @@ export default function WorldTweakPanel() {
             </Section>
 
             <Section title="Urban Grid">
-              <ParamSlider label="Radial Spacing" value={params.urban_radial_spacing} min={30} max={300} step={5} onChange={(v) => updateParam('urban_radial_spacing', v)} />
-              <ParamSlider label="Spoke Count" value={params.urban_spoke_count} min={8} max={128} step={1} onChange={(v) => updateParam('urban_spoke_count', v)} />
-              <ParamSlider label="Street Width" value={params.urban_street_width} min={4} max={40} step={1} onChange={(v) => updateParam('urban_street_width', v)} />
-              <ParamSlider label="Plot Frontage" value={params.urban_plot_frontage} min={20} max={100} step={1} onChange={(v) => updateParam('urban_plot_frontage', v)} />
-              <ParamSlider label="Plot Depth" value={params.urban_plot_depth} min={20} max={100} step={1} onChange={(v) => updateParam('urban_plot_depth', v)} />
+              <ParamSlider label="Canal Bank" value={params.urban.bank} min={0} max={200} step={5} onChange={(v) => updateParam('urban.bank', v)} />
+              <ParamSlider label="Street Width" value={params.urban.street_width} min={4} max={40} step={1} onChange={(v) => updateParam('urban.street_width', v)} />
+              <ParamSlider label="Lot Depth" value={params.urban.lot_depth} min={40} max={160} step={1} onChange={(v) => updateParam('urban.lot_depth', v)} />
+              <ParamSlider label="Rings of Blocks" value={params.urban.rings} min={1} max={6} step={1} onChange={(v) => updateParam('urban.rings', v)} />
+              <ParamSlider label="Spokes" value={params.urban.spokes} min={8} max={64} step={8} onChange={(v) => updateParam('urban.spokes', v)} />
+              <ParamSlider label="Lot Frontage Min" value={params.urban.lot_frontage} min={40} max={160} step={1} onChange={(v) => updateParam('urban.lot_frontage', v)} />
             </Section>
 
             <Section title="Suburban">

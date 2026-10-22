@@ -19,7 +19,7 @@ The Capitol is an MMO economic simulation where the economy is the primary gamep
 - `the-capitol-rural.md` - Rural v2: farms on lanes. The rural ring is relaid as farms on straight concession roads and winding lanes, with fields between them, even across all 8 sectors, and clear of the plain's water. Since RW1 (#308) it runs r3000 to r4600, so two roads fit across. Since #423 there are about 380 farms of about 36k, and the world is 13600 so the wilds keep their depth (RD10, #307 to #310) (issues labelled `rural`, #282, #284 to #291, #307 to #310, plus #223)
 - `the-capitol-devtools.md` - The Observatory: dev tooling and monitoring. An admin console the backend serves at `/admin/console` (samples every 10 s, SSE, the economy, the tick by phase, the town reporting in), live server-side tunables marked on every chart, balance runs that compare two presets, and an F7 dev overlay in the Flint client (issues labelled `devtools`, #351, #353 to #377)
 - `the-capitol-commons.md` - The Commons: the city's social half. Local talk and a Capitol channel, letters, delivery commissions with escrow and claims on the hall's board, piece-rate wages, standing in words, weekly leaderboards, and guilds with a treasury, dues and a hall, with citizens in all of it (issues labelled `commons`, #352, #378 to #401, plus #311)
-- `the-capitol-plots.md` - Plot sizes: closer to even lot counts across the zones, about 600 urban, 1200 suburban and 400 rural, each lot taking 4 stations, with the targets, the capacity question (#424) and how each part moves the default world (umbrella #420; parts #421 urban, #422 suburban, #423 rural)
+- `the-capitol-plots.md` - Plot sizes: closer to even lot counts across the zones, about 600 urban, 1200 suburban and 400 rural, each lot taking 4 stations, with the targets, the capacity question (#424) and how each part moves the default world (umbrella #420; parts #421 urban, #422 suburban, #423 rural, all built: 520, about 1200 and about 380)
 
 ## Current Focus: The Commons
 
@@ -215,6 +215,7 @@ models/          - Database types and game state structs
   lot_geometry.rs - Lot geometry the suburb and the farms share: road index, rays, regions, water, overlap pass (R2)
   plot.rs        - Plot ownership, permissions, property tax
   suburb/        - The suburb's neighbourhoods, streets, lots and parks (suburb v2)
+  urban/         - The urban grid (#421): a canal bank and quay, three rings of back-to-back blocks, 24 bearings, about 520 `urb_*` lots of about 8.6k; `backend/tools/urban-plan.ps1` draws it
   rural/         - The rural ring (Rural v2): the plan harness, `backend/tools/rural-plan.ps1` (R1), the sectors, concession roads and winding lanes (R3), the farms clear of the water (`farms.rs`) and the balance pass's spurs (`balance.rs`) (R4)
 
 routes/          - Axum REST handlers
