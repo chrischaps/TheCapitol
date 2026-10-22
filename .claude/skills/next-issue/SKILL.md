@@ -1,6 +1,6 @@
 ---
 name: next-issue
-description: Pick up and implement the next open issue for The Capitol (any open issue, ranked bugs first, then the current plan's work packages, then follow-ups; or a specific issue number). Use when asked to "tackle the next issue", "do the next one", "work on #N", or to continue the Observatory (devtools), Citizens, Economy v1, Flint client, suburb or wilds work. Finds the next unblocked issue on GitHub, loads the plan context, works in its own worktree, verifies against the issue's acceptance list, then commits, pushes and closes.
+description: Pick up and implement the next open issue for The Capitol (any open issue, ranked bugs first, then the current plan's work packages, then follow-ups; or a specific issue number). Use when asked to "tackle the next issue", "do the next one", "work on #N", or to continue the Commons, the Observatory (devtools), Citizens, Economy v1, Flint client, suburb or wilds work. Finds the next unblocked issue on GitHub, loads the plan context, works in its own worktree, verifies against the issue's acceptance list, then commits, pushes and closes.
 ---
 
 # next-issue
@@ -9,7 +9,8 @@ Every open issue on `chrischaps/TheCapitol` is in the queue, whatever its label.
 
 | Area label | Plan doc at the repo root |
 |---|---|
-| `devtools` (the current plan) | `the-capitol-devtools.md`: D0.1 … D6.3 |
+| `commons` (the current plan) | `the-capitol-commons.md`: S0.1 … S4.5, plus #311 |
+| `devtools` | `the-capitol-devtools.md`: D0.1 … D6.3 |
 | `citizens` | `the-capitol-citizens.md`: C0.1 … C3.3 |
 | `economy` | `the-capitol-economy.md`: E0.1 … E4.4 |
 | `flint-client` | `the-capitol-flint-client.md`: P0.1 … P8.7, B1 … B13, engine hooks H… |
@@ -19,7 +20,7 @@ Every open issue on `chrischaps/TheCapitol` is in the queue, whatever its label.
 
 | Kind label | Meaning |
 |---|---|
-| a phase (`dt:D*`, `cz:C*`, `ec:E*`, `fc:P*`, `fc:backend-prereq`) | a work package from its plan, whose header line links the plan |
+| a phase (`cm:S*`, `dt:D*`, `cz:C*`, `ec:E*`, `fc:P*`, `fc:backend-prereq`) | a work package from its plan, whose header line links the plan |
 | `bug` | something broken: a follow-up, a regression, a limitation that costs players or agents |
 | `engine-upstream` | the fix goes to Flint as a PR (see below) |
 | `needs-decision` | waiting on Chris. Write up the options, comment, and stop |
@@ -43,7 +44,7 @@ scripts/issue.sh list      # claims held by every agent, on every machine
 
 **Rank** what's left in three tiers. Take the lowest number in the highest tier that has one:
 1. **Bugs that hurt.** They lose players' items or Strands, crash the client on a normal path, or break CI or `land` for every agent. Judge by the text, not just the `bug` label.
-2. **The current plan's work packages.** Issues with a phase label of the current plan (`dt:*`, while the root `CLAUDE.md` says the Observatory is the focus), in dependency order.
+2. **The current plan's work packages.** Issues with a phase label of the current plan (`cm:*`, while the root `CLAUDE.md` says the Commons is the focus), in dependency order.
 3. **Everything else:** other plans' leftovers, follow-ups, limitations, polish. Lowest number first, whatever the area.
 
 Chris can always name an issue or a tier ("do the next client one"); that wins. If an issue has no area label, or no kind label, add the right ones while you're there (`gh issue edit <n> --add-label ...`).

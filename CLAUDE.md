@@ -21,14 +21,19 @@ The Capitol is an MMO economic simulation where the economy is the primary gamep
 - `the-capitol-commons.md` - The Commons: the city's social half. Local talk and a Capitol channel, letters, delivery commissions with escrow and claims on the hall's board, piece-rate wages, standing in words, weekly leaderboards, and guilds with a treasury, dues and a hall, with citizens in all of it (issues labelled `commons`, #352, #378 to #401, plus #311)
 - `the-capitol-plots.md` - Plot sizes: closer to even lot counts across the zones, about 600 urban, 1200 suburban and 400 rural, each lot taking 4 stations, with the targets, the capacity question (#424) and how each part moves the default world (umbrella #420; parts #421 urban, #422 suburban, #423 rural)
 
-## Current Focus: The Observatory (devtools)
+## Current Focus: The Commons
 
-Citizens live in the town now, and the 200-citizen soak showed what's missing: every balance finding (#294, #335, #304) was dug out of file reports after the run. Active work is **the Observatory**: one place to watch the world while it runs, change a knob and see the effect on the same chart. The plan is `the-capitol-devtools.md`. The work queue is the GitHub issues labelled `devtools` (#353 to #377), created in dependency order. The phase labels run `dt:D0-groundwork` to `dt:D6-balance-runs`. It has three parts:
-- an admin console the backend serves at `/admin/console`, fed by samples every 10 s over SSE;
-- live server-side tunables, each change marked on every chart;
-- an F7 dev overlay in the Flint client.
+The city is lived in, but nobody says anything: every trade is a window of numbers, and what one person wants of another can't be said, promised, kept or broken. Active work is **the Commons**, the city's social half. The question it answers is whether the economy can become a society. It's also the economy's own fix: a commission is demand you can see, and it pays the walk (#294, #336). The plan is `the-capitol-commons.md`. The work queue is the GitHub issues labelled `commons` (#378 to #401, plus #311), created in dependency order. The phase labels run `cm:S0-groundwork` to `cm:S4-guilds`. In order:
+- talk: local speech over heads, a Capitol channel and letters (S1);
+- commissions on the hall's board with escrow and claims, and piece-rate wages (S2);
+- standing in words and weekly leaderboards (S3);
+- guilds with a treasury, dues and a hall (S4).
 
-The first slice is D0.1 to D0.3, D1.1, D1.2 and D2.1: a live chart of the money and the tick, on the town. The console reads like the Gazette's sibling, with a plain sentence over each chart.
+Citizens are in all of it, marked honestly. The first slice is S0.1, S0.2 and S0.3, which have no dependencies and can run side by side, then talk (S1), which unblocks #311 (a Claude layer for what citizens say).
+
+### The Observatory (built)
+
+**The Observatory** is one place to watch the world while it runs, change a knob and see the effect on the same chart. The plan is `the-capitol-devtools.md`, and the issues are labelled `devtools` (#353 to #377), with phase labels `dt:D0-groundwork` to `dt:D6-balance-runs`. It has an admin console the backend serves at `/admin/console`, fed by samples every 10 s over SSE; live server-side tunables, each change marked on every chart; and an F7 dev overlay in the Flint client. D6.3's balance runs (#377) and some follow-ups are still open.
 
 ### Citizens (built)
 
