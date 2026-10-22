@@ -1006,7 +1006,10 @@ mod tests {
     }
 
     /// Both rings sampled on a fine polar grid: most of the open ground has
-    /// grass, and some of it is full.
+    /// grass, and some of it is full. Since #423 the rural ring has about 380
+    /// farms, not 117, and each clears its yard and drive, claimed or not:
+    /// about 79% of the ring has grass, against over 85% before. So the floor
+    /// is 75%.
     fn mostly_grass(m: &Mask) {
         for (lo, hi) in [
             (Zone::Rural.radii().0 + 200.0, Zone::Rural.radii().1),
@@ -1024,7 +1027,7 @@ mod tests {
                 }
             }
             let (any, full) = (any as f64 / n as f64, full as f64 / n as f64);
-            assert!(any > 0.85, "{lo}..{hi}: {any} has grass");
+            assert!(any > 0.75, "{lo}..{hi}: {any} has grass");
             assert!(full > 0.25, "{lo}..{hi}: {full} full");
         }
     }

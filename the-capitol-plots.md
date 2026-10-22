@@ -96,12 +96,19 @@ Today: five rows of lots about 106 deep in the 1200 band, frontage 64 (`suburb/l
 
 ### 5.3 Rural (#423): smaller farms, the same lanes
 
-Today: 117 farms with frontage U[380, 500], field gap U[240, 440] and depth U[280, 380] clipped by the bands (`RuralParams`).
-- **Two farms deep along every road.** The bands are about 330 to 366 a side, so two farms of about 165 deep stand where today's one does: a front farm on the road, and a back farm behind it on a short drive, laid like a farm gate's road (`farm_{s}_{road}_{L|R}_{k}b`). On frontage of about 220 each is about 36k.
-- **Frontage U[200, 260], field gap U[100, 200].** Today a farm and its gap take about 780 of road. These take about 380, so twice as many farms fit along each road. The gap keeps the fields between farms, at a scale that suits the smaller farm.
-- **That's about 117 × 2 (along the road) × 2 (deep) ≈ 470** before the overlap pass and the water take their share. The target is 400. If the count comes out high, widen the field gap first: that keeps the fields.
-- **If the back farms read badly in Flint** (pasture with no road), the fallback is a third road between the mains in each sector, which needs no drives.
-- **Targets:** `the-capitol-rural.md` §5 takes the new count (350 to 450) and mean area (32k to 42k). The half-sector shares and the gap of 40 stay.
+Before: 117 farms with frontage U[380, 500], field gap U[240, 440] and depth U[280, 380] clipped by the bands (`RuralParams`).
+
+*Planned:* a back row of farms on drives, or failing that a third road between the mains.
+
+*As built (#423):* **long lots, neither of those.**
+- **The draws:** frontage U[120, 160], field gap U[50, 100] and depth U[230, 310]. Farms are about 140 × 260, narrower and closer along the same roads.
+- **The count:** 361 to 378 farms of about 36k on the four seeds. The built share stays 34 to 35%. The roads, the water and every other lot are unchanged.
+- **Why not front farms alone at about 210 × 190?** They reached only 251 to 290.
+- **Why not back farms?** Each needs a drive across the farm in front of it, and Flint draws a drive a fixed 26 out from the lot's street edge (`houses::DRIVE_OUT`).
+- **The character:** it holds. The long lot is concession country's own shape. The fields lie behind the farms now, where they lay between them before.
+- **The ids** keep `farm_…`. The migration renames the old rows `oldfarm_…`, and `oldfarm_` is in `RETIRED_LOTS` (PD4).
+- **Room:** the median farm takes 15 stations at 50 spacing. The least, a junction wedge of about 16k, takes 8. All are `estate` (25); #424 settles that.
+- **The rural plan** has the full table: `the-capitol-rural.md` §5 and RD6's #423 note.
 
 ## 6. Verification
 
@@ -124,7 +131,7 @@ For each part:
 | Issue | Part | Depends on |
 |---|---|---|
 | [#420](https://github.com/chrischaps/TheCapitol/issues/420) | This plan | |
-| [#423](https://github.com/chrischaps/TheCapitol/issues/423) | Rural: about 400 farms of about 35k to 40k | #420 |
+| [#423](https://github.com/chrischaps/TheCapitol/issues/423) | Rural: about 400 farms of about 35k to 40k. *Done:* 361 to 378 long lots of about 36k (§5.3) | #420 |
 | [#422](https://github.com/chrischaps/TheCapitol/issues/422) | Suburban: about 1200 lots, wider and less triangular | #420 |
 | [#421](https://github.com/chrischaps/TheCapitol/issues/421) | Urban: a new grid with about 600 lots of about 80 × 100 | #420 |
 

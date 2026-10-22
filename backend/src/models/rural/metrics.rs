@@ -169,8 +169,8 @@ const fn soft(metric: &'static str, label: &'static str, check: Check) -> Target
 
 /// The targets table in `the-capitol-rural.md` §5.
 pub const TARGETS: &[Target] = &[
-    hard("lots", "farms", Check::Range(95.0, 135.0)),
-    soft("lot_area_mean", "mean farm area", Check::Range(100_000.0, 140_000.0)),
+    hard("lots", "farms", Check::Range(350.0, 450.0)),
+    soft("lot_area_mean", "mean farm area", Check::Range(32_000.0, 42_000.0)),
     soft("built_share", "ring built share", Check::Range(0.30, 0.40)),
     hard("half_sector_min", "half-sector built share, least", Check::Min(0.20)),
     hard("half_sector_max", "half-sector built share, most", Check::Max(0.55)),

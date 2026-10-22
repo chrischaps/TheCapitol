@@ -3,10 +3,10 @@
 //! - **The walk.** Every lane, side road and spur has farms on both sides,
 //!   and each sector has the side of each arterial that faces it. A side is
 //!   walked from one end with alternating draws (`RuralParams`, tuned in R5,
-//!   #288): a farm's frontage U[380, 500], then a field gap U[240, 440]
-//!   before the next. Each farm's depth is drawn U[280, 380], then clipped by
-//!   the region and the other roads. Where no farm fits (at a junction, or by the region's edge) the
-//!   frontage is cut down to 240, and then the walk slides on.
+//!   #288, and made long lots in #423): a farm's frontage U[120, 160], then a
+//!   field gap U[50, 100] before the next. Each farm's depth is drawn
+//!   U[230, 310], then clipped by the region and the other roads. Where no farm fits (at a junction, or by the region's edge) the
+//!   frontage is cut down to 100, and then the walk slides on.
 //! - **A farm** is a trapezoid on its road's chord: its front edge runs
 //!   between the two points the frontage spans, a verge off the road, and its
 //!   sides run square to that edge. Where the road bows toward it the front
@@ -52,12 +52,12 @@ pub const EDGE_INSET: f64 = 20.0;
 pub const BANK: f64 = 10.0;
 /// A farm's frontage is cut down to this, a step at a time, before the walk
 /// gives up on it and slides on...
-const MIN_FRONTAGE: f64 = 240.0;
+const MIN_FRONTAGE: f64 = 100.0;
 const SHORTEN: f64 = 20.0;
 /// ...this far.
 const SLIDE: f64 = 10.0;
 /// A farm shallower than this at either side isn't one.
-const MIN_DEPTH: f64 = 140.0;
+const MIN_DEPTH: f64 = 110.0;
 /// On a bend's outside, a farm's front is pushed out this much at a time,
 /// to at most this past its verge.
 const PUSH_STEP: f64 = 2.0;
@@ -319,7 +319,7 @@ mod tests {
             assert!(m.gap_min.unwrap() >= LOT_GAP - 1e-6, "seed {seed}: two farms {:.1} apart", m.gap_min.unwrap());
             let least = m.half_sector_min.unwrap();
             assert!(least >= 0.20, "seed {seed}: a half-sector {least:.2} built, of {:?}", m.half_sector_shares);
-            assert!((95..=135).contains(&m.lots), "seed {seed}: {} farms", m.lots);
+            assert!((350..=450).contains(&m.lots), "seed {seed}: {} farms", m.lots);
         }
     }
 

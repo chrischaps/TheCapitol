@@ -1136,7 +1136,15 @@ mod tests {
         // (`plot_sync::RETIRED_LOTS`). Two seeded grass nodes move
         // (`20261126_001_rural_farms.sql`), and the planned nodes the farms
         // move are re-planned (`post-content/20261126_001_rural_farms_nodes.sql`).
-        assert_eq!(TerrainConfig::get_default().version(), "4742a2a314848a25");
+        //
+        // #423 made the farms smaller (plots plan §5.3): long lots, narrower
+        // and closer along the same lanes, 377 of about 36k for 117 of about
+        // 117k. Only the rural lots moved: no road, no water, no other lot.
+        // Old farm rows are renamed `oldfarm_` and released by startup's sync
+        // (`20261201_001_rural_smaller_farms.sql`). No seeded grass moves, and
+        // the planned nodes the farms move are re-planned
+        // (`post-content/20261201_001_rural_smaller_farms_nodes.sql`).
+        assert_eq!(TerrainConfig::get_default().version(), "250c61ad7fdb7733");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one

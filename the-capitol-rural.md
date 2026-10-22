@@ -126,6 +126,8 @@ The sectors' characters are a seeded shuffle of 4 *concession* and 4 *winding*, 
   - **The farmstead** stands 6 to 11 m back (`style(Rural).setback`), down to what the lot leaves once the barn's room is kept behind the house. The barn is drawn first for that, at the same 0.65. On the 117 farms of the default world, 75 have a barn (64%) and 114 stand 5 m back or more. On today's lots, about 20 × 14.5 m since RW1, none had room for a barn before R6, and 4 do now. The drive runs straight in from 26 past the lot's street edge (onto the lane, short of its far verge) to the front door, and the grass keeps off all of it. On a claimed farm it's drawn as a strip of packed earth (`palette::FARM_TRACK`), from inside the hedge bank to the door. Across the verge it's bare ground, and the hedge bank has no gap for it.
   - **Checking both layouts.** The backend's `rural::tests::dump_farms_terrain` (ignored) writes the default world under `Farms` as `/terrain` JSON. The client's ignored `farms_*` tests in `grass`, `houses` and `plots` read it from `$FARMS_TERRAIN` or `renders/farms-terrain.json`. Since R7 the fixture holds the farms: the tests run on it with the farms' thresholds, and the dump is gone.
 
+- *As built (#423, plots plan §5.3):* **long lots.** The farms were made smaller, about 400 of about 36k for 117 of about 117k, to bring the zones' lot counts closer to even (#420). Two routes were planned. One was a back row of farms on drives. The other, the fallback, was a third road between the mains. Neither was needed. Narrower, closer farms along the same roads, with the depth kept, reach the count: frontage U[120, 160], field gap U[50, 100] and depth U[230, 310]. The cut-down floor is 100 (`MIN_FRONTAGE`). Front farms alone at about 210 × 190 made only 251 to 290. A farm of about 140 × 260 is the long lot of concession country, so the ring keeps its character, and the fields now lie behind the farms more than between them. The balance pass was left as it was: its spurs added almost nothing at these sizes. The ids keep the `farm_…` scheme. So the migration renames the old rows `oldfarm_…`, and startup's sync releases an owned one (`plot_sync::RETIRED_LOTS`). The smallest farms are wedges at junctions of 16k to 17k, which take 8 stations at 50 spacing. The median farm takes 15, under the `estate` capacity of 25 (#424).
+
 ### RD9. The deed stays flat until Chris decides ([#292](https://github.com/chrischaps/TheCapitol/issues/292))
 
 The rural deed is a flat 250, and the tax is flat too. A farm is four times the land, so after the flip 250 buys four times as much. That may be right, since the countryside is the first rung next to the spawn, but it's Chris's call. #292 is `needs-decision`. Nothing in this plan changes prices.
@@ -172,8 +174,8 @@ R1's harness prints these, and R5's test asserts the hard ones over seeds 42, 7,
 
 | Metric | Target | Hard? |
 |---|---|---|
-| Farms | 95 to 135 (45 to 65 before RD10) | yes |
-| Mean farm area | 100k to 140k | soft |
+| Farms | 350 to 450 (95 to 135 before #423, 45 to 65 before RD10) | yes |
+| Mean farm area | 32k to 42k (100k to 140k before #423) | soft |
 | Ring built share | 30 to 40% | soft |
 | Built share of each of the 16 half-sectors | 20 to 55% | yes |
 | CV of the half-sectors' built shares | ≤ 0.30 | soft |
@@ -202,7 +204,22 @@ R1's harness prints these, and R5's test asserts the hard ones over seeds 42, 7,
 | **Gap between farms, least** | ≥ 40 | 40.0 | 40.0 | 40.0 | 40.0 |
 | Trimmed by `finish_lots` | | 0 | 0 | 0 | 0 |
 
-On seeds 0 to 39: 110 to 123 farms, 112k to 121k on average, 34 to 38% built, every half-sector 24 to 47%, and a CV of 0.15 or less.
+**As built** ([#423](https://github.com/chrischaps/TheCapitol/issues/423), plots plan §5.3): smaller farms, about 400 of about 36k, so the counts across the zones come closer to even. They're long lots: narrower and closer along the same roads, with the depth kept (RD6's #423 note). No road and no water moved.
+
+| Metric | Target | 42 | 7 | 1234 | 99999 |
+|---|---|---:|---:|---:|---:|
+| **Farms** | 350 to 450 | 377 | 377 | 378 | 361 |
+| Mean farm area | 32k to 42k | 35.8k | 35.8k | 35.7k | 35.5k |
+| Farm area, least / most | | 16.0k / 49.1k | 17.1k / 48.2k | 16.3k / 48.9k | 15.7k / 48.4k |
+| Ring built share | 30 to 40% | 35% | 35% | 35% | 34% |
+| **Half-sector built share, least** | ≥ 20% | 31% | 31% | 31% | 25% |
+| **Half-sector built share, most** | ≤ 55% | 39% | 40% | 38% | 37% |
+| CV of the half-sectors' shares | ≤ 0.30 | 0.06 | 0.06 | 0.06 | 0.08 |
+| **Farms on water / gap, least** | 0 / ≥ 40 | 0 / 40.0 | 0 / 40.0 | 0 / 40.0 | 0 / 40.0 |
+
+On seeds 0 to 39: 363 to 380 farms, 35.2k to 36.7k on average, 34 to 36% built, every half-sector 25 to 41%, a CV of 0.09 or less, and every hard row met.
+
+*R5's figures, for the farms before #423:* on seeds 0 to 39: 110 to 123 farms, 112k to 121k on average, 34 to 38% built, every half-sector 24 to 47%, and a CV of 0.15 or less.
 
 **The baseline** (today's trails on the 800-deep ring, R1, #284; RW1 stretches them to r4600, so R5 measures it again). `backend/tools/rural-plan.ps1` prints it. ✗ marks a miss, and hard targets are in bold.
 
@@ -314,6 +331,8 @@ The flip is one commit, and `scripts/ci.sh full` runs before it lands. It covers
 | R8 | [#291](https://github.com/chrischaps/TheCapitol/issues/291) | Remove the old trails, their params and the switch. *As built:* `terrain.rs` loses `generate_rural_paths_with_params`, the trails' lots, the four `rural_trail_*` / `rural_plot_*` params, `catmull_rom_spline` and seven polygon and polyline helpers, which only the trails and their lots used. `RuralLayout` is gone, and the farms' lot generator is `generate_farms`. The pin holds at `4742a2a314848a25`. `rural-plan.ps1 -Layout` and `RURAL_LAYOUT` are gone too; the plans are still named `farms-…`. `metrics::is_rural_road` takes only `lane_*`. The React tweak panel's four trail sliders are now the lane width and the farms' frontage and depth ranges (§6's as-built note) | S | R7 |
 
 Follow-up: [#292](https://github.com/chrischaps/TheCapitol/issues/292), the rural deed's price for four times the land (`needs-decision`).
+
+Later: [#423](https://github.com/chrischaps/TheCapitol/issues/423) (plots plan `the-capitol-plots.md` §5.3) made the farms smaller, about 400 of about 36k (RD6's #423 note, §5's as-built table). Capacity at the new size is [#424](https://github.com/chrischaps/TheCapitol/issues/424).
 
 ## 9. Risks
 

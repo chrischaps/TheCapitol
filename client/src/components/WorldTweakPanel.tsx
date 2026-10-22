@@ -235,7 +235,7 @@ export default function WorldTweakPanel() {
 
             <Section title="Rural">
               <ParamSlider label="Lane Width" value={params.rural.lane_width} min={4} max={20} step={1} onChange={(v) => updateParam('rural.lane_width', v)} />
-              <ParamSlider label="Farm Frontage Min" value={params.rural.frontage[0]} min={200} max={params.rural.frontage[1]} step={10} onChange={(v) => updateParam('rural.frontage.0', v)} />
+              <ParamSlider label="Farm Frontage Min" value={params.rural.frontage[0]} min={100} max={params.rural.frontage[1]} step={10} onChange={(v) => updateParam('rural.frontage.0', v)} />
               <ParamSlider label="Farm Frontage Max" value={params.rural.frontage[1]} min={params.rural.frontage[0]} max={800} step={10} onChange={(v) => updateParam('rural.frontage.1', v)} />
               <ParamSlider label="Farm Depth Min" value={params.rural.depth[0]} min={150} max={params.rural.depth[1]} step={10} onChange={(v) => updateParam('rural.depth.0', v)} />
               <ParamSlider label="Farm Depth Max" value={params.rural.depth[1]} min={params.rural.depth[0]} max={600} step={10} onChange={(v) => updateParam('rural.depth.1', v)} />

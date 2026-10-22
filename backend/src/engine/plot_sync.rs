@@ -59,7 +59,11 @@ pub enum OnOwned {
 /// does. Only a lot that's gone is released, so a world whose saved params
 /// still build the trails keeps them until R8 (#291) removes the layout.
 /// Nobody is connected at startup, and no notice tells an owner why (#342).
-pub const RETIRED_LOTS: &[&str] = &["rural_plot_"];
+///
+/// `oldfarm_` is R5's big farms. The smaller farms (#423) kept the `farm_`
+/// ids, so the migration that brought them in renamed the old rows
+/// (`20261201_001_rural_smaller_farms.sql`), and they're released the same way.
+pub const RETIRED_LOTS: &[&str] = &["rural_plot_", "oldfarm_"];
 
 fn retired(terrain_id: &str) -> bool {
     RETIRED_LOTS.iter().any(|prefix| terrain_id.starts_with(prefix))
@@ -866,6 +870,16 @@ pub(crate) mod tests {
         assert_eq!(size_category("rural", 28_600.0), "estate");
         assert_eq!(size_category("guild_district", 1_440.0), "guild_hall");
         assert_eq!(size_category("guild_district", 28_600.0), "guild_hall");
+    }
+
+    /// #423: the migration's renamed big farms are retired, and the smaller
+    /// farms, which kept the `farm_` ids, aren't.
+    #[test]
+    fn the_old_farms_are_retired_and_the_new_ones_are_not() {
+        assert!(retired("oldfarm_3_a0_L_0"));
+        assert!(retired("rural_plot_trail_3_L_1"));
+        assert!(!retired("farm_3_a0_L_0"));
+        assert!(!retired("sub_0_0_3_L_2"));
     }
 
     #[test]

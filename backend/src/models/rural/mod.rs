@@ -54,9 +54,9 @@ impl Default for RuralParams {
     fn default() -> Self {
         Self {
             lane_width: 8.0,
-            frontage: (380.0, 500.0),
-            field_gap: (240.0, 440.0),
-            depth: (280.0, 380.0),
+            frontage: (120.0, 160.0),
+            field_gap: (50.0, 100.0),
+            depth: (230.0, 310.0),
         }
     }
 }
@@ -247,6 +247,7 @@ pub(crate) mod tests {
         let missed = |v: &[crate::models::suburb::metrics::Violation]| -> Vec<String> {
             v.iter().map(|v| format!("{} {} (target {})", v.label, crate::models::suburb::metrics::fmt_num(v.value), v.target)).collect()
         };
+        let mut failed = Vec::new();
         for seed in SEEDS {
             let m = metrics::measure_world(&farms_world(seed), None).measured.metrics;
             // A metric with nothing to measure misses nothing, so the hard
@@ -255,7 +256,6 @@ pub(crate) mod tests {
                 assert!(m.value(t.metric).is_some(), "seed {seed}: {} wasn't measured", t.label);
             }
             let (hard, soft): (Vec<_>, Vec<_>) = metrics::violations(&m).into_iter().partition(|v| v.hard);
-            assert!(hard.is_empty(), "seed {seed} misses {:?}", missed(&hard));
             eprintln!(
                 "seed {seed}: {} farms of {:.0}k, {:.0}% built, half-sectors {:.0} to {:.0}% (CV {:.2}); soft misses: {:?}",
                 m.lots,
@@ -266,7 +266,9 @@ pub(crate) mod tests {
                 m.half_sector_cv.unwrap(),
                 missed(&soft)
             );
+            failed.extend(hard.iter().map(|v| format!("seed {seed}: {}", missed(std::slice::from_ref(v))[0])));
         }
+        assert!(failed.is_empty(), "hard misses: {failed:?}");
     }
 
     #[test]

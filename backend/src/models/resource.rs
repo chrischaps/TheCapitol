@@ -418,9 +418,10 @@ mod tests {
     /// Re-plans of some of the nodes since RW1, in the order they run: each
     /// deletes the planned rows it lists by id (a `'id',` line) and inserts
     /// its own (a `('id', 'type', x, y, quality)` line), from `print_new_nodes`.
-    const REPLAN_MIGRATIONS: [&str; 2] = [
+    const REPLAN_MIGRATIONS: [&str; 3] = [
         include_str!("../../migrations/post-content/20261125_001_rural_iron_veins.sql"),
         include_str!("../../migrations/post-content/20261126_001_rural_farms_nodes.sql"),
+        include_str!("../../migrations/post-content/20261201_001_rural_smaller_farms_nodes.sql"),
     ];
 
     /// The `('id', 'type', x, y, quality)` rows of the plan's insert: every

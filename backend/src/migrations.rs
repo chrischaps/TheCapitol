@@ -234,8 +234,9 @@ mod tests {
         assert!(run_post_content(&db).await.unwrap() > 0);
         // Every staged seed is planted, then RW1's re-plan (#308) replaces
         // every planned node with its own rows, #210 swaps the rural veins
-        // for more, and the flip to the farms (#290) re-plans the nodes they
-        // move. The first set's nodes (the seeded grass) stay.
+        // for more, the flip to the farms (#290) re-plans the nodes they
+        // move, and so do the smaller farms (#423). The first set's nodes
+        // (the seeded grass) stay.
         assert!(seeds > 0);
         let rows = |sql: &str, prefix: &str| sql.lines().filter(|l| l.trim_start().starts_with(prefix)).count() as i64;
         let replan = rows(include_str!("../migrations/post-content/20261122_001_rural_widens_nodes.sql"), "('");
@@ -243,7 +244,9 @@ mod tests {
         let veins = rows(veins, "('") - rows(veins, "'");
         let farms = include_str!("../migrations/post-content/20261126_001_rural_farms_nodes.sql");
         let farms = rows(farms, "('") - rows(farms, "'");
-        assert_eq!(nodes().await.unwrap(), before + replan + veins + farms, "the re-plan's nodes and the grass");
+        let smaller = include_str!("../migrations/post-content/20261201_001_rural_smaller_farms_nodes.sql");
+        let smaller = rows(smaller, "('") - rows(smaller, "'");
+        assert_eq!(nodes().await.unwrap(), before + replan + veins + farms + smaller, "the re-plan's nodes and the grass");
         let staging: Option<String> =
             sqlx::query_scalar("SELECT to_regclass('resource_node_seeds')::text").fetch_one(&db).await.unwrap();
         assert_eq!(staging, None);
