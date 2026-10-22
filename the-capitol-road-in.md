@@ -134,6 +134,8 @@ The card shows the stations a typical lot **fits** at `STATION_MIN_SPACING`, not
 ### D10. The market never blocks the road
 The tutorial runs in a live market that may be empty. A step that needs someone else (an order filling, a trade) is taught, then waived with words if it doesn't happen. No step costs more than a few Strands, and those are returnable (an order's escrow).
 
+**One step waits for a person: opening someone's card (`open_card`, Chris's choice, #484).** It isn't waivable. A server is expected always to have players or citizens about, so a world with nobody else in it should be rare, and then the player waits until someone comes back. A dev world with one human runs the town's citizens or a second client. The market waits for no one. A person, if it comes to it, is worth waiting for.
+
 ## 6. Phases and work packages
 
 ### O0: Groundwork (`tu:O0-groundwork`)
