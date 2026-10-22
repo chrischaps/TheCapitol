@@ -1,3 +1,4 @@
+pub mod admin_feed;
 pub mod annotations;
 pub mod automation;
 pub mod automation_tick;

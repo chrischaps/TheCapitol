@@ -117,6 +117,11 @@ pub struct Load {
     /// before D3.2.
     #[serde(default)]
     pub slow_statement_ms: f64,
+    /// Events missed by receivers of the event bus that fell behind
+    /// (`RecvError::Lagged`), by receiver: `sockets`, and the Observatory's
+    /// `admin_tap` and `admin_stream` (D0.3). Empty from a server before it.
+    #[serde(default)]
+    pub events_lagged: BTreeMap<String, u64>,
 }
 
 /// One phase of the tick, or one loop beside it, as running totals.
@@ -437,6 +442,10 @@ pub struct LoadWindow {
     pub loops: BTreeMap<String, PhaseWindow>,
     /// Slow statements outside the tick and the loops (D3.2)
     pub slow_statements_elsewhere: u64,
+    /// Events each receiver missed over the window (D0.3); a sample stored
+    /// before it reads with none
+    #[serde(default)]
+    pub events_lagged: BTreeMap<String, u64>,
 }
 
 /// One phase, or one loop, between two loads.
@@ -527,6 +536,11 @@ impl LoadWindow {
             phases: phase_windows(&a.phases, &b.phases),
             loops: phase_windows(&a.loops, &b.loops),
             slow_statements_elsewhere: b.slow_statements_elsewhere.saturating_sub(a.slow_statements_elsewhere),
+            events_lagged: b
+                .events_lagged
+                .iter()
+                .map(|(receiver, n)| (receiver.clone(), n.saturating_sub(a.events_lagged.get(receiver).copied().unwrap_or(0))))
+                .collect(),
         }
     }
 }

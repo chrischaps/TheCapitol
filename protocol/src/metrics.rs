@@ -10,13 +10,19 @@
 //! Every flow in a sample is since the sample before, so a run of samples
 //! adds up to what [`reconcile`](crate::ledger::reconcile) says about the
 //! ledgers at its ends ([`tally`]).
+//!
+//! Since D0.3, `GET /admin/stream` sends each sample live as a [`Feed`], with
+//! the annotations and the game's fills, deeds, Gazettes and warnings, and
+//! `GET /admin/series` serves them back as a [`Series`].
 
 use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::annotation::Annotation;
 use crate::ledger::{Ledger, LoadWindow};
+use crate::rest::MarketTrade;
 
 /// Seconds between samples
 pub const SAMPLE_SECS: u64 = 10;
@@ -206,6 +212,91 @@ pub fn tally<'a>(samples: impl IntoIterator<Item = &'a Sample>) -> Tally {
     tally.unit_flows.retain(|_, n| *n != 0);
     tally
 }
+
+/// One thing on `GET /admin/stream` (D0.3), sent as a server-sent event
+/// named for its `type`, with the whole of it, tag and all, as its data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Feed {
+    /// A new sample, as it went into the ring
+    Sample(Box<Sample>),
+    /// A new annotation, as it went into `admin_events`
+    Annotation(Annotation),
+    /// A fill on the market
+    Fill { trade: MarketTrade },
+    /// A deed changed hands: claimed, released or foreclosed
+    Deed {
+        terrain_id: String,
+        change: DeedChange,
+        /// Who claimed it, or whose it was; `None` for a release, which
+        /// doesn't say
+        owner_id: Option<Uuid>,
+    },
+    /// A day's Gazette came out
+    Gazette { day: i64, number: i64, headline: String },
+    /// Something went wrong for a player: tax unpaid, a subscription run
+    /// out, a station taken down or paused
+    Warning {
+        player_id: Uuid,
+        kind: WarningKind,
+        /// A plain sentence for the console
+        text: String,
+    },
+    /// This stream fell behind and `missed` things went past it. The
+    /// samples are in `/admin/series`; the rest are gone.
+    Lagged { missed: u64 },
+}
+
+impl Feed {
+    /// Its `type`, which is also its event's name
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Feed::Sample(_) => "sample",
+            Feed::Annotation(_) => "annotation",
+            Feed::Fill { .. } => "fill",
+            Feed::Deed { .. } => "deed",
+            Feed::Gazette { .. } => "gazette",
+            Feed::Warning { .. } => "warning",
+            Feed::Lagged { .. } => "lagged",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DeedChange {
+    Claimed,
+    Released,
+    Foreclosed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WarningKind {
+    TaxDelinquent,
+    SubscriptionLapsed,
+    StationDisplaced,
+    AutomationPaused,
+}
+
+/// `GET /admin/series` (D0.3): the samples and annotations between two
+/// times, oldest first. The newest day's samples come from the ring, ten
+/// seconds apart; before that, and after a restart, from `metrics_samples`,
+/// a minute apart. Each sample's `since_ms` says how long it covers. Asked
+/// for `fields`, each sample holds only those, with its times.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Series {
+    pub samples: Vec<Sample>,
+    pub annotations: Vec<Annotation>,
+}
+
+/// The fields every sample keeps in a `/admin/series` asked for some:
+/// when it was taken, and the window it covers
+pub const SERIES_TIMES: [&str; 3] = ["at_ms", "booted_ms", "since_ms"];
 
 #[cfg(test)]
 mod tests {

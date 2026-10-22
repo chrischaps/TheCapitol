@@ -1,9 +1,16 @@
+use std::convert::Infallible;
+use std::sync::Arc;
+
 use axum::{
     extract::{Extension, Query, State},
+    response::sse::{Event as SseEvent, KeepAlive, Sse},
     routing::{get, post, put},
     Json, Router,
 };
 use capitol_protocol::annotation::AnnotationKind;
+use capitol_protocol::metrics::Feed;
+use futures::{Stream, StreamExt};
+use tokio::sync::broadcast::error::RecvError;
 use capitol_protocol::rest::{CitizenInfo, CreateCitizenRequest, CreatedCitizen};
 use capitol_protocol::tunables::{TunablesResponse, TunablesUpdate};
 use chrono::Utc;
@@ -15,7 +22,7 @@ use crate::middleware::auth::AuthUser;
 use crate::models::{ActionState, TerrainConfig, WorldGenParams};
 use crate::state::AppState;
 use crate::engine::currency::{announce_balances, balances_of};
-use crate::engine::{annotations, ledger, node_placement, node_spawn, tunables};
+use crate::engine::{admin_feed, annotations, ledger, load, node_placement, node_spawn, sampler, tunables};
 use crate::engine::plot_sync::{sync_plots, OnOwned, SyncError};
 use crate::engine::GameEvent;
 
@@ -35,6 +42,8 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/stats", get(get_server_stats))
         .route("/ledger", get(get_ledger))
         .route("/annotations", get(get_annotations))
+        .route("/stream", get(stream))
+        .route("/series", get(get_series))
         .route("/tunables", get(get_tunables).put(put_tunables))
         .route("/accounts/{id}/subscription", post(subscribe_account))
         .route("/citizens", get(list_citizens).post(create_citizen))
@@ -285,7 +294,7 @@ pub struct AnnotationsQuery {
 }
 
 /// The annotations (D0.4): what explains a bend in a chart, oldest first.
-/// D0.3's `/admin/series` and stream serve them with the samples.
+/// `/admin/series` and the stream (D0.3) serve them with the samples too.
 pub async fn get_annotations(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
@@ -295,6 +304,80 @@ pub async fn get_annotations(
     let since_ms = query.since_ms.unwrap_or_else(|| Utc::now().timestamp_millis() - 24 * 3_600_000);
     let limit = query.limit.unwrap_or(1000).clamp(1, 10_000);
     Ok(Json(annotations::since(&state.db, since_ms, limit).await?))
+}
+
+/// The Observatory's live feed (D0.3), as server-sent events: each sample as
+/// it's taken, each annotation as it's written, and the game's fills, deeds,
+/// Gazettes and warnings (`engine::admin_feed`). Each event is named for its
+/// `type` and carries a `Feed` as JSON. It opens with the newest sample, so a
+/// console has something to draw before the next. A stream that falls behind
+/// gets a `lagged` event saying how much went past.
+///
+/// It takes the bearer header like every admin route, so a browser reads it
+/// with `fetch`, not `EventSource`, which can't send one.
+pub async fn stream(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, AppError> {
+    require_admin(&user)?;
+    let feed = admin_feed::subscribe();
+    let first = state.samples.latest().map(|s| Arc::new(Feed::Sample(Box::new(s))));
+    let live = futures::stream::unfold(feed, |mut feed| async move {
+        let next = match feed.recv().await {
+            Ok(next) => next,
+            Err(RecvError::Lagged(missed)) => {
+                load::Receiver::AdminStream.lagged(missed);
+                Arc::new(Feed::Lagged { missed })
+            }
+            Err(RecvError::Closed) => return None,
+        };
+        Some((next, feed))
+    });
+    let events = futures::stream::iter(first).chain(live).map(|feed| {
+        Ok(SseEvent::default().event(feed.type_name()).json_data(&*feed).unwrap_or_else(|e| {
+            tracing::error!("Couldn't write a {} to an admin stream: {e}", feed.type_name());
+            SseEvent::default().comment("unwritable")
+        }))
+    });
+    Ok(Sse::new(events).keep_alive(KeepAlive::default()))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SeriesQuery {
+    /// Unix ms, exclusive; the default is an hour before `to_ms`
+    pub from_ms: Option<i64>,
+    /// Unix ms, inclusive; the default is now
+    pub to_ms: Option<i64>,
+    /// The sample's fields to send, comma-separated (`load,strands`); each
+    /// sample keeps its times too. The default is all of them.
+    pub fields: Option<String>,
+}
+
+/// The samples and annotations between two times (D0.3), oldest first, as
+/// `capitol_protocol::metrics::Series`: the newest day from the ring, ten
+/// seconds apart, and before it a minute apart from `metrics_samples`.
+pub async fn get_series(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Query(query): Query<SeriesQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&user)?;
+    let to_ms = query.to_ms.unwrap_or_else(|| Utc::now().timestamp_millis());
+    let from_ms = query.from_ms.unwrap_or(to_ms - 3_600_000);
+    if from_ms >= to_ms {
+        return Err(AppError::BadRequest("from_ms must be before to_ms".into()));
+    }
+    let fields: Option<Vec<String>> = query.fields.as_deref().map(|f| {
+        f.split(',').map(str::trim).filter(|f| !f.is_empty()).map(str::to_string).collect()
+    });
+    let samples = sampler::series(&state.samples, &state.db, from_ms, to_ms, fields.as_deref()).await?;
+    // `since` counts from its time inclusive; the series' start is exclusive
+    let annotations: Vec<_> = annotations::since(&state.db, from_ms + 1, 10_000)
+        .await?
+        .into_iter()
+        .filter(|a| a.at_ms <= to_ms)
+        .collect();
+    Ok(Json(serde_json::json!({ "samples": samples, "annotations": annotations })))
 }
 
 /// The zones and resources the tunables' families may name, as the world has them now

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use capitol_protocol::ledger::Ledger;
 use capitol_protocol::metrics::{
-    EventBus, Players, Sample, Trades, KEEP_DAYS, RING_SAMPLES, SAMPLE_SECS, STORE_EVERY,
+    EventBus, Feed, Players, Sample, Trades, KEEP_DAYS, RING_SAMPLES, SAMPLE_SECS, SERIES_TIMES, STORE_EVERY,
 };
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -64,6 +64,11 @@ impl Samples {
         let ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
         let first = ring.partition_point(|s| s.at_ms <= since_ms);
         ring.range(first..).cloned().collect()
+    }
+
+    /// When the oldest sample was taken; `None` when there are none
+    pub fn oldest_ms(&self) -> Option<i64> {
+        self.ring.lock().unwrap_or_else(|e| e.into_inner()).front().map(|s| s.at_ms)
     }
 
     pub fn latest(&self) -> Option<Sample> {
@@ -126,6 +131,7 @@ pub async fn run_sampler_loop(state: AppState, every: Duration) {
                 Err(e) => tracing::warn!("Couldn't prune the samples: {e}"),
             }
         }
+        super::admin_feed::send(Feed::Sample(Box::new(sample.clone())));
         state.samples.push(sample);
         last = ledger;
         drop(timed);
@@ -203,6 +209,81 @@ pub async fn store(db: &PgPool, sample: &Sample) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// The samples after `from_ms` and up to `to_ms` (Unix ms), oldest first,
+/// for `/admin/series` (D0.3): from the ring where it reaches, and before
+/// that from `metrics_samples`, a minute apart. With `fields`, each holds
+/// only those and its times (`SERIES_TIMES`).
+pub async fn series(
+    ring: &Samples,
+    db: &PgPool,
+    from_ms: i64,
+    to_ms: i64,
+    fields: Option<&[String]>,
+) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let keep: Option<Vec<String>> =
+        fields.map(|f| SERIES_TIMES.iter().map(|t| t.to_string()).chain(f.iter().cloned()).collect());
+    // Read the ring first, so the table is read only up to where the ring
+    // was then: a day's oldest sample popped in between leaves no gap
+    let ring_from = ring.oldest_ms().unwrap_or(i64::MAX);
+    let ring: Vec<Sample> = ring.since(from_ms).into_iter().filter(|s| s.at_ms <= to_ms).collect();
+    let mut samples = if from_ms < ring_from {
+        stored(db, from_ms, to_ms.min(ring_from - 1), keep.as_deref()).await?
+    } else {
+        Vec::new()
+    };
+    samples.extend(ring.iter().filter_map(|s| {
+        let value = serde_json::to_value(s).ok()?;
+        Some(match &keep {
+            Some(keep) => project(value, keep),
+            None => value,
+        })
+    }));
+    Ok(samples)
+}
+
+/// `sample` with only the keys in `keep`.
+fn project(sample: serde_json::Value, keep: &[String]) -> serde_json::Value {
+    match sample {
+        serde_json::Value::Object(map) => map.into_iter().filter(|(k, _)| keep.contains(k)).collect(),
+        other => other,
+    }
+}
+
+/// The stored samples after `from_ms` and up to `to_ms` (Unix ms), oldest
+/// first; with `keep`, only those keys of each.
+async fn stored(
+    db: &PgPool,
+    from_ms: i64,
+    to_ms: i64,
+    keep: Option<&[String]>,
+) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let from = DateTime::<Utc>::from_timestamp_millis(from_ms).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+    let to = DateTime::<Utc>::from_timestamp_millis(to_ms).unwrap_or_else(Utc::now);
+    let rows: Vec<serde_json::Value> = match keep {
+        // Projected in the database, so a month of whole samples never
+        // crosses the wire for one chart's field
+        Some(keep) => {
+            sqlx::query_scalar(
+                "SELECT COALESCE((SELECT jsonb_object_agg(key, value) FROM jsonb_each(sample) WHERE key = ANY($3)), '{}'::jsonb)
+                 FROM metrics_samples WHERE at > $1 AND at <= $2 ORDER BY at",
+            )
+            .bind(from)
+            .bind(to)
+            .bind(keep)
+            .fetch_all(db)
+            .await?
+        }
+        None => {
+            sqlx::query_scalar("SELECT sample FROM metrics_samples WHERE at > $1 AND at <= $2 ORDER BY at")
+                .bind(from)
+                .bind(to)
+                .fetch_all(db)
+                .await?
+        }
+    };
+    Ok(rows)
+}
+
 /// Deletes the stored samples from before `before`, and says how many.
 pub async fn prune(db: &PgPool, before: DateTime<Utc>) -> Result<u64, sqlx::Error> {
     Ok(sqlx::query("DELETE FROM metrics_samples WHERE at < $1").bind(before).execute(db).await?.rows_affected())
@@ -249,16 +330,10 @@ mod tests {
         use capitol_protocol::metrics::tally;
         use capitol_protocol::rest::{GrantItem, GrantRequest};
 
-        // `/admin/series` (D0.3) will read the table like this
         /// The stored samples after `since_ms` (Unix ms), oldest first.
         async fn stored_since(db: &PgPool, since_ms: i64) -> Result<Vec<Sample>, sqlx::Error> {
-            let since = DateTime::<Utc>::from_timestamp_millis(since_ms).unwrap_or(DateTime::<Utc>::MIN_UTC);
-            let rows: Vec<sqlx::types::Json<Sample>> =
-                sqlx::query_scalar("SELECT sample FROM metrics_samples WHERE at > $1 ORDER BY at")
-                    .bind(since)
-                    .fetch_all(db)
-                    .await?;
-            Ok(rows.into_iter().map(|s| s.0).collect())
+            let rows = stored(db, since_ms, Utc::now().timestamp_millis() + 60_000, None).await?;
+            Ok(rows.into_iter().map(|s| serde_json::from_value(s).unwrap()).collect())
         }
 
         /// A run of samples over grants, a deposit and a fill adds up to what
@@ -338,6 +413,40 @@ mod tests {
             assert_eq!(fiber, Trades { trades: 2, units: 5, strands: 23 });
             assert_eq!(fiber.vwap(), Some(4.6));
             assert!(trades(&db, Venue::Market, 0, ms("2026-10-21T12:00:10Z")).await.unwrap().is_empty());
+        }
+
+        /// A series reads the table up to where the ring starts and the ring
+        /// after, and asked for fields keeps only those and the times
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "needs the local Postgres (docker-compose up -d)"]
+        async fn a_series_runs_from_the_table_into_the_ring(db: PgPool) {
+            let now = Utc::now().timestamp_millis() / 60_000 * 60_000;
+            let ring = Samples::new();
+            // The table, a minute apart: four minutes ago to now
+            for minutes in (0..=4).rev() {
+                store(&db, &sample(now - minutes * 60_000)).await.unwrap();
+            }
+            // The ring, ten seconds apart, the last two minutes
+            for tens in (0..12).rev() {
+                ring.push(sample(now - tens * 10_000));
+            }
+            let at = |s: &serde_json::Value| s["at_ms"].as_i64().unwrap();
+            let all = series(&ring, &db, now - 5 * 60_000, now, None).await.unwrap();
+            let ats: Vec<i64> = all.iter().map(|s| (at(s) - now) / 10_000).collect();
+            assert_eq!(ats, [-24, -18, -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0]);
+            let whole: Vec<Sample> = all.into_iter().map(|s| serde_json::from_value(s).unwrap()).collect();
+            assert_eq!(whole[0], sample(now - 4 * 60_000));
+
+            let fields = ["strands".to_string()];
+            let some = series(&ring, &db, now - 5 * 60_000, now - 100_000, Some(&fields)).await.unwrap();
+            assert_eq!(some.iter().map(at).collect::<Vec<_>>(), [now - 240_000, now - 180_000, now - 120_000, now - 110_000, now - 100_000]);
+            for s in &some {
+                let mut keys: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
+                keys.sort();
+                assert_eq!(keys, ["at_ms", "booted_ms", "since_ms", "strands"], "{s}");
+            }
+            // Within the ring, the table isn't read
+            assert_eq!(series(&ring, &db, now - 30_000, now, None).await.unwrap().len(), 3);
         }
 
         /// A stored sample reads back as it was, and a prune takes only the old

@@ -179,6 +179,7 @@ pub async fn update(
     }
 
     let mut tx = db.begin().await?;
+    let mut noted = Vec::with_capacity(changes.len());
     for change in &changes {
         let default = Knob::find(&change.key).map(|(knob, _)| knob.default);
         if Some(change.to) == default {
@@ -193,9 +194,10 @@ pub async fn update(
             .execute(&mut *tx)
             .await?;
         }
-        annotations::record(&mut *tx, AnnotationKind::TunableChanged, &describe(change)).await?;
+        noted.push(annotations::record(&mut *tx, AnnotationKind::TunableChanged, &describe(change)).await?);
     }
     tx.commit().await?;
+    noted.into_iter().for_each(annotations::announce);
 
     let fees = next.fees;
     live.current.store(Arc::new(next));

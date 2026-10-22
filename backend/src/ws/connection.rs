@@ -883,6 +883,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     Err(RecvError::Lagged(missed)) => {
                         tracing::warn!("Player {player_id}'s connection {connection_id} fell {missed} events behind; resyncing it");
                         counted.resynced();
+                        crate::engine::load::Receiver::Sockets.lagged(missed);
                         // The next `positions` tells it again what everyone in sight is doing
                         seen = None;
                         sees_everyone = false;

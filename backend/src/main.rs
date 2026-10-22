@@ -406,6 +406,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("The sampler is off (METRICS_SAMPLE_SECS=0)");
     }
 
+    // D0.3: the game events an admin's stream shows, from the game's bus
+    let tapped = game_state.read().await.subscribe();
+    tokio::spawn(engine::admin_feed::run_tap(tapped));
+
     // D0.4: a marker on the console's charts where the server came up
     let boot = if config.sim_tick_scale == 1.0 {
         "The server started".to_string()

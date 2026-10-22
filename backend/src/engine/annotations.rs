@@ -6,9 +6,12 @@
 //! the town coming and going (D4.1) and a watch firing (D2.5) will write
 //! theirs here too. [`note`] is [`record`] for the places an annotation is
 //! only a side note: it logs a failure instead of failing what it annotates.
-//! [`since`] reads them back, for `/admin/series` and the stream (D0.3).
+//! [`since`] reads them back, for `/admin/series` (D0.3). [`announce`] sends
+//! one to the admin stream: [`note`] does, and a caller of [`record`] in a
+//! transaction does once it commits.
 
 use capitol_protocol::annotation::{Annotation, AnnotationKind};
+use capitol_protocol::metrics::Feed;
 use chrono::{DateTime, Utc};
 use sqlx::{PgExecutor, PgPool};
 
@@ -27,11 +30,17 @@ pub async fn record<'e>(
     Ok(Annotation { id, at_ms: at.timestamp_millis(), kind, text: text.to_string() })
 }
 
-/// [`record`], logging a failure rather than returning it: a boot, a commit or
-/// an edition goes ahead without its marker.
+/// To the admin stream (D0.3), once it's stored for good.
+pub fn announce(annotation: Annotation) {
+    super::admin_feed::send(Feed::Annotation(annotation));
+}
+
+/// [`record`] and [`announce`], logging a failure rather than returning it: a
+/// boot, a commit or an edition goes ahead without its marker.
 pub async fn note(db: &PgPool, kind: AnnotationKind, text: &str) {
-    if let Err(e) = record(db, kind, text).await {
-        tracing::error!("Couldn't record the {} annotation \"{text}\": {e}", kind.as_str());
+    match record(db, kind, text).await {
+        Ok(annotation) => announce(annotation),
+        Err(e) => tracing::error!("Couldn't record the {} annotation \"{text}\": {e}", kind.as_str()),
     }
 }
 

@@ -18,6 +18,8 @@
 //! statements (D3.2).
 //! `fixtures/rest/sample.json` is one of the Observatory's samples (D0.2): ten
 //! seconds of a 20-citizen town.
+//! `fixtures/rest/admin_feed.json` is one of each of the rest of what
+//! `GET /admin/stream` sends (D0.3); the sample is `sample.json`.
 
 use std::fs;
 use std::path::Path;
@@ -28,7 +30,7 @@ use capitol_protocol::rest::{
     MarketSummaryResponse, NearbyStationsResponse, PlaceOrder, SplitStackResponse,
 };
 use capitol_protocol::ledger::{Ledger, Load, LoadWindow};
-use capitol_protocol::metrics::Sample;
+use capitol_protocol::metrics::{Feed, Sample};
 use capitol_protocol::rules::market::{sort_levels, GradeRule, OrderSide};
 
 fn fixture(name: &str) -> String {
@@ -213,4 +215,26 @@ fn a_sample_round_trips_with_its_window() {
     assert_eq!(sample.market["log"].vwap(), Some(36.0 / 7.0));
     assert_eq!(sample.players.people + sample.players.citizens, sample.load.players_in_world);
     assert_eq!(serde_json::to_string(&sample).unwrap(), json);
+}
+
+#[test]
+fn the_admin_feed_round_trips_one_of_each() {
+    let json = fixture("admin_feed.json");
+    let feed: Vec<Feed> = serde_json::from_str(&json).unwrap();
+    let types: Vec<&str> = feed.iter().map(Feed::type_name).collect();
+    assert_eq!(types, ["annotation", "fill", "deed", "deed", "gazette", "warning", "lagged"]);
+    assert_eq!(serde_json::to_string(&feed).unwrap(), json);
+    // A sample goes out as itself, tagged
+    let sample = fixture("sample.json");
+    let tagged = serde_json::to_string(&Feed::Sample(Box::new(serde_json::from_str(&sample).unwrap()))).unwrap();
+    assert_eq!(tagged, format!("{{\"type\":\"sample\",{}", &sample[1..]));
+}
+
+#[test]
+fn a_sample_stored_before_the_lag_counts_still_reads() {
+    let json = fixture("sample.json");
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value["load"].as_object_mut().unwrap().remove("events_lagged");
+    let old: Sample = serde_json::from_value(value).unwrap();
+    assert!(old.load.events_lagged.is_empty());
 }

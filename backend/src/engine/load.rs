@@ -5,7 +5,8 @@
 //!
 //! Since D0.1 the tick's time is also kept by [`Phase`], and the loops
 //! beside it by [`Loop`], each with a histogram like the tick's. Since D3.2
-//! each also counts its slow statements ([`slow_statement`]).
+//! each also counts its slow statements ([`slow_statement`]), and since D0.3
+//! each reader of the event bus counts the events it missed ([`Receiver`]).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -64,6 +65,8 @@ static LOOPS: [Timings; Loop::ALL.len()] = [const { Timings::new() }; Loop::ALL.
 static SOCKETS_OPENED: AtomicU64 = AtomicU64::new(0);
 static SOCKETS_ENDED: [AtomicU64; SocketEnd::ALL.len()] = [const { AtomicU64::new(0) }; SocketEnd::ALL.len()];
 static SOCKET_RESYNCS: AtomicU64 = AtomicU64::new(0);
+
+static LAGGED: [AtomicU64; Receiver::ALL.len()] = [const { AtomicU64::new(0) }; Receiver::ALL.len()];
 
 static SLOW_ELSEWHERE: AtomicU64 = AtomicU64::new(0);
 /// `SLOW_STATEMENT_MS`, as the pool was told it, in µs
@@ -258,6 +261,39 @@ pub fn slow_statement(work: Work) {
     counter.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Who reads the game's event bus, for a count of what each missed (D0.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Receiver {
+    /// A player's WebSocket, which resyncs when it falls behind (C0.3)
+    Sockets,
+    /// The Observatory's tap, which passes fills, deeds, the Gazette and
+    /// warnings on to the admin stream
+    AdminTap,
+    /// An admin's `/admin/stream`, on the Observatory's own feed
+    AdminStream,
+}
+
+impl Receiver {
+    const ALL: [Receiver; 3] = [Receiver::Sockets, Receiver::AdminTap, Receiver::AdminStream];
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Receiver::Sockets => "sockets",
+            Receiver::AdminTap => "admin_tap",
+            Receiver::AdminStream => "admin_stream",
+        }
+    }
+
+    fn index(&self) -> usize {
+        Receiver::ALL.iter().position(|r| r == self).expect("every receiver is in ALL")
+    }
+
+    /// It fell behind, and `missed` events went past it (`RecvError::Lagged`).
+    pub fn lagged(self, missed: u64) {
+        LAGGED[self.index()].fetch_add(missed, Ordering::Relaxed);
+    }
+}
+
 /// How a WebSocket ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocketEnd {
@@ -360,6 +396,10 @@ pub fn read(tick_period: Duration) -> Load {
         socket_resyncs: SOCKET_RESYNCS.load(Ordering::Relaxed),
         slow_statements_elsewhere: SLOW_ELSEWHERE.load(Ordering::Relaxed),
         slow_statement_ms: SLOW_THRESHOLD_MICROS.load(Ordering::Relaxed) as f64 / 1000.0,
+        events_lagged: Receiver::ALL
+            .iter()
+            .map(|r| (r.as_str().to_string(), LAGGED[r.index()].load(Ordering::Relaxed)))
+            .collect(),
         ..Load::default()
     }
 }
@@ -380,6 +420,7 @@ mod tests {
             socket.ends(SocketEnd::Vanished);
             socket.resynced();
         }
+        Receiver::AdminStream.lagged(3);
         let _never_signed_in = Socket::opened();
         let after = read(Duration::from_millis(100));
         assert!(after.ticks >= before.ticks + 2);
@@ -389,6 +430,8 @@ mod tests {
         assert!(after.tick_buckets[TICK_BUCKETS_MS.len()] > before.tick_buckets[TICK_BUCKETS_MS.len()]);
         assert!(after.sockets_ended["vanished"] > before.sockets_ended["vanished"]);
         assert!(after.socket_resyncs > before.socket_resyncs);
+        assert!(after.events_lagged["admin_stream"] >= before.events_lagged["admin_stream"] + 3);
+        assert_eq!(after.events_lagged.len(), 3);
         assert!(after.sockets_opened >= before.sockets_opened + 2);
         assert_eq!(after.tick_period_ms, 100.0);
     }
