@@ -20,8 +20,10 @@ use crate::terrain::WaterRing;
 /// square ([`in_world`]); the corners are out of it. It grew from 8000 to
 /// 12000 for the wilds (W1, #194), and every stored position moved by +2000.
 /// It grew again, to 13600, when the rural ring widened to two roads deep
-/// (RD10, #308), and every stored position moved by +800.
-pub const WORLD_SIZE: f64 = 13600.0;
+/// (RD10, #308), and every stored position moved by +800. It grew to 16600
+/// when every zone took Plots v2's rings (V2.0, #459), and every stored
+/// position moved by +1500.
+pub const WORLD_SIZE: f64 = 16600.0;
 /// World centre X; the Capitol tower stands here.
 pub const CENTER_X: f64 = WORLD_SIZE / 2.0;
 /// World centre Y.
@@ -39,10 +41,10 @@ pub fn in_world(x: f64, y: f64) -> bool {
 /// road runs straight north to the moat's one bridge, so the first thing a
 /// player sees is the way in, with the tower at the end of it.
 pub const SPAWN_X: f64 = CENTER_X;
-/// Spawn Y: [`SPAWN_PAST_SUBURB`] past the suburb's outer edge, 3350 south of
-/// the centre. It stayed put when the suburb deepened (#117), so it no longer
-/// tracks the rural zone's outer edge; it follows the suburb's ([`Frame::spawn`],
-/// PV2, #454).
+/// Spawn Y: [`SPAWN_PAST_SUBURB`] past the suburb's outer edge, 3950 south of
+/// the centre (3350 before Plots v2, #459). It stayed put when the suburb
+/// deepened (#117), so it no longer tracks the rural zone's outer edge; it
+/// follows the suburb's ([`Frame::spawn`], PV2, #454).
 pub const SPAWN_Y: f64 = CENTER_Y + SUBURBAN_OUTER_RADIUS + SPAWN_PAST_SUBURB;
 /// How far past the suburb's outer edge new players arrive, on the south
 /// arterial: just into the farms.
@@ -216,23 +218,26 @@ pub const CAPITOL_RADIUS: f64 = 200.0;
 pub const TRADE_OUTER_RADIUS: f64 = 600.0;
 /// Outer radius of the Guild District.
 pub const GUILD_OUTER_RADIUS: f64 = 1000.0;
-/// Outer radius of the Urban zone.
-pub const URBAN_OUTER_RADIUS: f64 = 1800.0;
-/// Outer radius of the Suburban zone. The suburb is 1200 deep so that a
-/// neighbourhood fits 5 rows of streets. At 800 deep every one was 3 rows (#117).
-pub const SUBURBAN_OUTER_RADIUS: f64 = 3000.0;
-/// Outer radius of the Rural zone. The ring is 1600 deep so that two roads
-/// with farms either side fit across it. At 800 deep there was room for one
-/// (rural plan RD10, #308).
-pub const RURAL_OUTER_RADIUS: f64 = 4600.0;
+/// Outer radius of the Urban zone: five rings of blocks, the outer ring
+/// street at r2125.5 (Plots v2, #455, #459; r1800 and three rings before).
+pub const URBAN_OUTER_RADIUS: f64 = 2160.0;
+/// Outer radius of the Suburban zone. The suburb is 1440 deep so that a
+/// neighbourhood fits 5 rows of lots about 134 deep (Plots v2, #456, #459).
+/// It was 1200 deep, r1800 to r3000, for 5 rows of about 106, and at 800 deep
+/// every one was 3 rows (#117).
+pub const SUBURBAN_OUTER_RADIUS: f64 = 3600.0;
+/// Outer radius of the Rural zone. The ring is 2500 deep so that four main
+/// lanes with farms of about 35k either side fit across it (Plots v2, #457,
+/// #459). It was 1600 deep, r3000 to r4600, for two (rural plan RD10, #308).
+pub const RURAL_OUTER_RADIUS: f64 = 6100.0;
 /// Outer radius of the Wilderness, "the wilds": the edge of the world disc,
-/// 2200 past the rural edge (W1, #194; moved out with it, #308).
+/// 2200 past the rural edge (W1, #194; moved out with it, #308, #459).
 pub const WILDERNESS_OUTER_RADIUS: f64 = WORLD_SIZE / 2.0;
 
 /// How far past the suburb's outer edge the wild water may come in: the
 /// hydrology's inner rim, so the suburb stays dry.
 pub const WATER_PAST_SUBURB: f64 = 150.0;
-/// The hydrology's inner rim (r3150): no course or lake comes in past it.
+/// The hydrology's inner rim (r3750): no course or lake comes in past it.
 /// Flint's `land::FROM` starts the land just inside it.
 pub const WATER_INNER_RADIUS: f64 = SUBURBAN_OUTER_RADIUS + WATER_PAST_SUBURB;
 
@@ -343,10 +348,10 @@ impl Zone {
 /// One frame of radii: where the world's centre is and how far out each
 /// zone's ring runs (PV2, #454). The protocol's table is [`Frame::TABLE`],
 /// and it's what everything reads at runtime. The generators read a frame
-/// instead, so a test can lay a world on other rings (the backend's
-/// `WorldGenParams::grown()`) without moving the default one. The walk
-/// ([`ground`]), [`Zone::from_position`] and the non-wild node planner
-/// still read the table (#465).
+/// instead, so a test can lay a world on other rings without moving the
+/// default one. The walk ([`ground`]), [`Zone::from_position`] and the
+/// non-wild node planner read the table (#465): Plots v2's rings are the
+/// table since the flip (#459).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Frame {
     /// The world's centre: the Capitol tower.
@@ -720,11 +725,11 @@ mod tests {
     #[test]
     fn the_table_frame_is_the_table() {
         let f = Frame::TABLE;
-        assert_eq!(f, Frame::new(WORLD_SIZE, [200.0, 600.0, 1000.0, 1800.0, 3000.0, 4600.0]));
+        assert_eq!(f, Frame::new(WORLD_SIZE, [200.0, 600.0, 1000.0, 2160.0, 3600.0, 6100.0]));
         assert_eq!(f.world_size(), WORLD_SIZE);
         assert_eq!(f.spawn(), (SPAWN_X, SPAWN_Y));
-        assert_eq!(SPAWN_Y, CENTER_Y + 3350.0);
-        assert_eq!((f.water_inner_radius(), WATER_INNER_RADIUS), (3150.0, 3150.0));
+        assert_eq!(SPAWN_Y, CENTER_Y + 3950.0);
+        assert_eq!((f.water_inner_radius(), WATER_INNER_RADIUS), (3750.0, 3750.0));
         for zone in Zone::ALL {
             assert_eq!(f.radii_of(zone), zone.radii());
         }
@@ -732,25 +737,28 @@ mod tests {
             let (x, y) = (i as f64 * 37.3 % WORLD_SIZE, i as f64 * 91.7 % WORLD_SIZE);
             assert_eq!(f.zone_at(x, y), Zone::from_position(x, y));
         }
-        let grown = Frame::new(16600.0, [200.0, 600.0, 1000.0, 2160.0, 3600.0, 6100.0]);
-        assert_eq!(grown.center, (8300.0, 8300.0));
-        assert_eq!(grown.radii_of(Zone::Wilderness), (6100.0, 8300.0));
-        assert_eq!(grown.spawn(), (8300.0, 8300.0 + 3950.0));
-        assert_eq!(grown.zone_at(grown.spawn().0, grown.spawn().1), Zone::Rural);
+        // RW1's world (#308), the table before Plots v2 (#459).
+        let before = Frame::new(13600.0, [200.0, 600.0, 1000.0, 1800.0, 3000.0, 4600.0]);
+        assert_eq!(before.center, (6800.0, 6800.0));
+        assert_eq!(before.radii_of(Zone::Wilderness), (4600.0, 6800.0));
+        assert_eq!(before.spawn(), (6800.0, 6800.0 + 3350.0));
+        assert_eq!(before.zone_at(before.spawn().0, before.spawn().1), Zone::Rural);
     }
 
-    /// The world is the r6800 disc: the wilds run 2200 past the rural edge,
+    /// The world is the r8300 disc: the wilds run 2200 past the rural edge,
     /// and the square's corners are out of it.
     #[test]
     fn the_world_is_the_disc() {
-        assert_eq!((WORLD_SIZE, CENTER_X, CENTER_Y), (13600.0, 6800.0, 6800.0));
-        assert_eq!(Zone::Rural.radii(), (3000.0, 4600.0));
-        assert_eq!(Zone::Wilderness.radii(), (4600.0, 6800.0));
+        assert_eq!((WORLD_SIZE, CENTER_X, CENTER_Y), (16600.0, 8300.0, 8300.0));
+        assert_eq!(Zone::Urban.radii(), (1000.0, 2160.0));
+        assert_eq!(Zone::Suburban.radii(), (2160.0, 3600.0));
+        assert_eq!(Zone::Rural.radii(), (3600.0, 6100.0));
+        assert_eq!(Zone::Wilderness.radii(), (6100.0, 8300.0));
         assert!(!Zone::Wilderness.has_plots());
         assert!(in_world(CENTER_X, CENTER_Y));
         assert!(in_world(CENTER_X, CENTER_Y + WILDERNESS_OUTER_RADIUS));
         assert!(in_world(SPAWN_X, SPAWN_Y));
-        assert!(!in_world(CENTER_X + 4900.0, CENTER_Y + 4900.0), "a corner");
+        assert!(!in_world(CENTER_X + 5900.0, CENTER_Y + 5900.0), "a corner");
         assert!(!in_world(0.0, 0.0));
         assert!(!in_world(CENTER_X - WILDERNESS_OUTER_RADIUS - 0.01, CENTER_Y));
     }

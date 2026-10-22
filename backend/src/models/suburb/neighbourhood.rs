@@ -382,32 +382,15 @@ mod tests {
         assert!((0..20).map(splits).any(|s| s > 0) && (0..20).map(splits).any(|s| s < 8), "the split is a draw");
     }
 
-    /// At the default radii the suburb is 1200 deep, so every neighbourhood,
-    /// whole or a split half, fits 5 rows. At 800 deep they were all 3 (#117).
-    /// The narrower inner arc at 1800 still lets every drawn split stand.
+    /// In Plots v2's suburb, r2160 to r3600 with a warp of 10, every
+    /// neighbourhood, whole or a split half, fits 5 rows of lots 134 deep,
+    /// and every drawn split stands (#456). The 1200 band before the flip
+    /// (#459) fitted 5 rows about 106 deep, and at 800 deep they were all 3
+    /// (#117).
     #[test]
-    fn every_neighbourhood_fits_five_rows_and_every_split_stands() {
+    fn every_neighbourhood_fits_five_rows_134_deep() {
         for seed in 0..50 {
             let p = params(seed);
-            let all = neighbourhoods(&p, C);
-            for n in &all {
-                let rows = n.frame.fit.as_ref().map_or(0, |f| f.rows.len());
-                assert_eq!(rows, 5, "seed {seed} sector {} nbhd {}", n.sector, n.index);
-            }
-            let drawn = (0..8u64)
-                .filter(|&s| SplitMix64::stream(p.seed, &[s]).next_f64() < p.neighbourhood.split_chance)
-                .count();
-            assert_eq!(all.len() - 8, drawn, "seed {seed}: a drawn split didn't fit");
-        }
-    }
-
-    /// In Plots v2's suburb, r2160 to r3600 with a warp of 10, every
-    /// neighbourhood fits 5 rows of lots 134 deep, and every drawn split
-    /// stands (#456).
-    #[test]
-    fn every_grown_neighbourhood_fits_five_rows_134_deep() {
-        for seed in 0..50 {
-            let p = crate::models::suburb::tests::grown_world(seed).suburban_params();
             let all = neighbourhoods(&p, C);
             for n in &all {
                 let fit = n.frame.fit.as_ref().expect("rows fit");

@@ -8,7 +8,8 @@ use capitol_protocol::rules::{
     WORLD_SIZE,
 };
 
-/// The table's plain's edge, where the land starts to rise (r4700).
+/// The table's plain's edge, where the land starts to rise (r6200; r4700
+/// before Plots v2's flip, #459).
 const PLAIN_EDGE: f64 = capitol_protocol::rules::RURAL_OUTER_RADIUS + capitol_protocol::land::FOOTHILLS_PAST_RURAL;
 
 fn radius(x: f64, y: f64) -> f64 {

@@ -2,7 +2,7 @@
 //! test that writes them (#284). `backend/tools/rural-plan.ps1` runs it in
 //! release and turns the SVGs into PNGs.
 //!
-//! It draws the ring r3000 to r4600 with its half-sectors shaded by built
+//! It draws the ring r3600 to r6100 with its half-sectors shaded by built
 //! share, the plain's water, the lots and the roads, and rings the places
 //! that break a target. Under `Farms` it names each sector's character and
 //! marks the farm gates. Server y points down, as SVG's does, so world
@@ -494,7 +494,7 @@ fn legend(s: &mut String, v: &View, lo: P, k: f64, h: f64) {
 }
 
 /// The markdown table: a row per metric, a column per plan, against
-/// `targets` (`metrics::TARGETS`, or `V2_TARGETS` for Plots v2's ring).
+/// `targets` (`metrics::TARGETS`).
 pub fn table(plans: &[(String, Metrics, Vec<Violation>)], targets: &[Target]) -> String {
     let mut s = String::new();
     let _ = write!(s, "| metric | target |");
@@ -569,11 +569,10 @@ mod tests {
     /// `cargo test --release rural_plan_report -- --ignored --nocapture`.
     ///
     /// Env: `RURAL_SEEDS` (comma-separated, default 42,7,1234,99999),
-    /// `RURAL_SECTOR` (0–7, one sector only), `RURAL_V2` (any value: Plots
-    /// v2's ring, r3600 to r6100 in the grown world, with its farms, against
-    /// its targets; V1.3, #457) and `RURAL_OUT` (default `target/rural-plan/`
-    /// at the workspace root). The plans are still named `farms-…`, as they
-    /// were beside the old trails' (#291), and `farms-v2-…` for Plots v2's.
+    /// `RURAL_SECTOR` (0–7, one sector only) and `RURAL_OUT` (default
+    /// `target/rural-plan/` at the workspace root). The plans are still named
+    /// `farms-…`, as they were beside the old trails' (#291). Since Plots
+    /// v2's flip (#459) the default ring is v2's, so `RURAL_V2` is gone.
     #[test]
     #[ignore]
     fn rural_plan_report() {
@@ -581,9 +580,8 @@ mod tests {
             .split(',')
             .map(|s| s.trim().parse().expect("RURAL_SEEDS is a list of numbers"))
             .collect();
-        let v2 = std::env::var("RURAL_V2").is_ok_and(|v| !v.trim().is_empty());
-        let layout = if v2 { "farms-v2" } else { "farms" }.to_string();
-        let targets = if v2 { metrics::V2_TARGETS } else { metrics::TARGETS };
+        let layout = "farms".to_string();
+        let targets = metrics::TARGETS;
         let sector: Option<u8> = std::env::var("RURAL_SECTOR")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -593,11 +591,7 @@ mod tests {
 
         let mut plans = Vec::new();
         for seed in seeds {
-            let params = if v2 {
-                WorldGenParams { seed, rural: crate::models::rural::RuralParams::v2(), ..WorldGenParams::grown() }
-            } else {
-                WorldGenParams { seed, ..Default::default() }
-            };
+            let params = WorldGenParams { seed, ..Default::default() };
             let measured = metrics::measure_world(&params, sector);
             let t = &measured.terrain;
             let kept = t.terrain_plots.iter().filter(|l| l.zone == "rural").count();

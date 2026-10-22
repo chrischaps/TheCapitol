@@ -26,12 +26,6 @@
 .PARAMETER Outer
   The suburb's outer radius. Default: the protocol's SUBURBAN_OUTER_RADIUS.
 
-.PARAMETER Params
-  Whose lots: today (the default) or grown, Plots v2's
-  (NeighbourhoodParams::grown, #456). grown puts the suburb at r2160 to
-  r3600 unless -Inner and -Outer say otherwise, holds it to Plots v2's
-  targets, and draws the lots that don't take 6 stations in sand (#468).
-
 .PARAMETER Out
   Output folder. Default: target/suburb-plan at the repo root.
 
@@ -42,8 +36,7 @@
 .EXAMPLE
   powershell -File backend/tools/suburb-plan.ps1
   powershell -File backend/tools/suburb-plan.ps1 -Seeds 42 -Sector 3
-  powershell -File backend/tools/suburb-plan.ps1 -Inner 1600 -Outer 2400
-  powershell -File backend/tools/suburb-plan.ps1 -Params grown -Out target/suburb-grown
+  powershell -File backend/tools/suburb-plan.ps1 -Inner 2000 -Outer 3400
   powershell -File backend/tools/suburb-plan.ps1 -Pattern loops_and_lollipops
   powershell -File backend/tools/suburb-plan.ps1 -Out target/suburb-new -Compare target/suburb-plan
 #>
@@ -53,8 +46,6 @@ param(
     [int]$Sector = -1,
     [int]$Inner = 0,
     [int]$Outer = 0,
-    [ValidateSet("today", "grown")]
-    [string]$Params = "today",
     [string]$Out = "",
     [string]$Compare = ""
 )
@@ -72,7 +63,6 @@ $env:SUBURB_PATTERN = $Pattern
 $env:SUBURB_SECTOR = if ($Sector -ge 0) { "$Sector" } else { "" }
 $env:SUBURB_INNER = if ($Inner -gt 0) { "$Inner" } else { "" }
 $env:SUBURB_OUTER = if ($Outer -gt 0) { "$Outer" } else { "" }
-$env:SUBURB_PARAMS = $Params
 $env:SUBURB_OUT = $Out
 
 # Clear old plans out, so index.html and the PNGs match this run.

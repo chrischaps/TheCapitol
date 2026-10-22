@@ -5,7 +5,7 @@
 //! compute the same ground from the params alone: only the params go on the
 //! wire (`/terrain`'s `land`), never the heights.
 //!
-//! - Inside the rural edge (r4600) the height is exactly 0, so nothing in the
+//! - Inside the rural edge (r6100) the height is exactly 0, so nothing in the
 //!   city moves. The foothills rise from [`LandParams::foothill_radius`],
 //!   [`FOOTHILLS_PAST_RURAL`] past it.
 //! - The land is laid in a [`rules::Frame`]: its centre and its rural edge.
@@ -75,9 +75,9 @@ pub struct LandParams {
     pub frame: Frame,
 }
 
-/// How far past the rural edge the foothills start (r4700 on the table).
+/// How far past the rural edge the foothills start (r6200 on the table).
 pub const FOOTHILLS_PAST_RURAL: f64 = 100.0;
-/// How far past the rural edge the ranges reach their full height (r6400 on
+/// How far past the rural edge the ranges reach their full height (r7900 on
 /// the table).
 pub const RANGES_PAST_RURAL: f64 = 1800.0;
 
@@ -109,8 +109,9 @@ impl Default for LandParams {
             massif_wander: 0.3,
             valley_floor: 0.2,
             // 100 past the rural edge, and the ranges full height 1700 on
-            // (r4700 and r6400). Both moved out 800 with the rural edge
-            // (RD10, #308), and follow the frame since PV2 (#454).
+            // (r6200 and r7900). Both moved out 800 with the rural edge
+            // (RD10, #308), follow the frame since PV2 (#454), and moved out
+            // 1500 more with Plots v2's rings (#459).
             foothill_radius: rules::RURAL_OUTER_RADIUS + FOOTHILLS_PAST_RURAL,
             range_radius: rules::RURAL_OUTER_RADIUS + RANGES_PAST_RURAL,
             peak_height: 640.0,
@@ -653,7 +654,9 @@ mod tests {
         }
         // Even when the params ask for foothills inside it
         let low = LandParams { foothill_radius: 2000.0, ..LandParams::default() };
-        let (x, y) = at(RURAL_OUTER_RADIUS, 30.0);
+        // Just short of the edge: a point at r6100 by cos and sin can stand
+        // a hair past it.
+        let (x, y) = at(RURAL_OUTER_RADIUS - 0.01, 30.0);
         assert_eq!(height_at(x, y, &low), 0.0);
     }
 
@@ -662,7 +665,7 @@ mod tests {
         let land = LandParams::default();
         let (mut peak, mut deep_sum, mut n) = (0.0f64, 0.0, 0);
         for step in 0..200 {
-            let r = 5800.0 + step as f64 * 5.0;
+            let r = 7300.0 + step as f64 * 5.0;
             for d in 0..360 {
                 let (x, y) = at(r, d as f64);
                 let h = height_at(x, y, &land);
@@ -672,7 +675,7 @@ mod tests {
                 n += 1;
             }
         }
-        let (x, y) = at(4750.0, 10.0);
+        let (x, y) = at(6250.0, 10.0);
         let foothill = height_at(x, y, &land);
         assert!(foothill > 0.0 && foothill < 10.0, "foothills start gently: {foothill}");
         assert!(peak > land.peak_height * 0.5, "the ranges stand up: {peak}");
@@ -687,7 +690,7 @@ mod tests {
         let land = LandParams { massif_wander: 0.0, ..LandParams::default() };
         let mean = |deg: f64| {
             (0..400).map(|i| {
-                let (x, y) = at(5700.0 + i as f64 * 2.5, deg);
+                let (x, y) = at(7200.0 + i as f64 * 2.5, deg);
                 height_at(x, y, &land)
             }).sum::<f64>() / 400.0
         };
@@ -700,13 +703,13 @@ mod tests {
     fn the_land_is_continuous() {
         let land = LandParams::default();
         for i in 0..2000 {
-            let (x, y) = at(4650.0 + i as f64 * 1.07, i as f64 * 0.37);
+            let (x, y) = at(6150.0 + i as f64 * 1.07, i as f64 * 0.37);
             let a = height_at(x, y, &land);
             let b = height_at(x + 0.01, y, &land);
             assert!((a - b).abs() < 0.2, "a step at ({x}, {y}): {a} vs {b}");
         }
         // No seam where atan2 wraps (due west)
-        let (x, y) = at(6000.0, 180.0);
+        let (x, y) = at(7500.0, 180.0);
         let (a, b) = (height_at(x, y - 0.001, &land), height_at(x, y + 0.001, &land));
         assert!((a - b).abs() < 0.01);
     }
@@ -714,7 +717,7 @@ mod tests {
     #[test]
     fn slope_and_normal_agree() {
         let land = LandParams::default();
-        let (x, y) = at(6100.0, 70.0);
+        let (x, y) = at(7600.0, 70.0);
         let s = slope_at(x, y, &land);
         let (nx, ny, nz) = normal_at(x, y, &land);
         assert!(((nx * nx + ny * ny + nz * nz) - 1.0).abs() < 1e-12);
@@ -729,7 +732,7 @@ mod tests {
         // Keyed on the offset from the centre: one height per offset,
         // whatever the world's size. (W1's trap, #194.)
         let land = LandParams::default();
-        let (x, y) = at(5800.0, 33.0);
+        let (x, y) = at(7300.0, 33.0);
         let h = height_at(x, y, &land);
         let (dx, dy) = (x - CENTER_X, y - CENTER_Y);
         assert_eq!(height_at(CENTER_X + dx, CENTER_Y + dy, &land), h);
@@ -739,7 +742,7 @@ mod tests {
     fn seeds_make_different_ranges() {
         let a = LandParams::default();
         let b = LandParams { seed: 7, ..LandParams::default() };
-        let (x, y) = at(6200.0, 100.0);
+        let (x, y) = at(7700.0, 100.0);
         assert_ne!(height_at(x, y, &a), height_at(x, y, &b));
     }
 
@@ -751,11 +754,11 @@ mod tests {
         let k = land.ridge_count;
         for i in 0..k {
             let mid = (land.valley_bearing_degrees + (i as f64 + 0.5) * 360.0 / k as f64).to_radians();
-            let (x, y) = (CENTER_X + 5800.0 * mid.stable_cos(), CENTER_Y + 5800.0 * mid.stable_sin());
+            let (x, y) = (CENTER_X + 7300.0 * mid.stable_cos(), CENTER_Y + 7300.0 * mid.stable_sin());
             assert_eq!(massif_at(x, y, &land), Some(i), "the middle of arc {i}");
         }
         let flat = LandParams { ridge_count: 0, ..LandParams::default() };
-        assert_eq!(massif_at(CENTER_X + 5800.0, CENTER_Y, &flat), None);
+        assert_eq!(massif_at(CENTER_X + 7300.0, CENTER_Y, &flat), None);
     }
 
     #[test]
@@ -775,33 +778,34 @@ mod tests {
         assert_eq!(carve(100.0, -BEYOND - 1.0, CENTER_Y, &water), 100.0, "past the index");
     }
 
-    /// The table's land is the land in the table's frame: r4700 and r6400
-    /// (PV2, #454).
+    /// The table's land is the land in the table's frame: r6200 and r7900
+    /// (PV2, #454; r4700 and r6400 before Plots v2, #459).
     #[test]
     fn the_default_land_is_laid_in_the_table() {
         let land = LandParams::default();
         assert_eq!(land.clone().in_frame(Frame::TABLE), land);
-        assert_eq!((land.foothill_radius, land.range_radius), (4700.0, 6400.0));
-        assert_eq!(land.plain_edge(), 4700.0);
+        assert_eq!((land.foothill_radius, land.range_radius), (6200.0, 7900.0));
+        assert_eq!(land.plain_edge(), 6200.0);
     }
 
     /// A world on other rings has its land follow them: flat out to its own
     /// rural edge + 100, the ranges up past it, and the same heights at the
     /// same offsets from its own foothills' start, round its own centre.
+    /// The other rings here are RW1's (#308), the table before Plots v2.
     #[test]
     fn the_land_follows_its_frame() {
-        let grown = Frame::new(16600.0, [200.0, 600.0, 1000.0, 2160.0, 3600.0, 6100.0]);
-        let land = LandParams::default().in_frame(grown);
-        assert_eq!((land.foothill_radius, land.range_radius), (6200.0, 7900.0));
-        let (cx, cy) = grown.center;
+        let before = Frame::new(13600.0, [200.0, 600.0, 1000.0, 1800.0, 3000.0, 4600.0]);
+        let land = LandParams::default().in_frame(before);
+        assert_eq!((land.foothill_radius, land.range_radius), (4700.0, 6400.0));
+        let (cx, cy) = before.center;
         let at = |r: f64, d: f64| {
             let a = d.to_radians();
             (cx + r * a.stable_cos(), cy + r * a.stable_sin())
         };
-        // Out to the grown world's foothills (r6200), just short of them, as
-        // a point at r6200 by cos and sin can stand a hair past.
-        for step in 0..=620 {
-            let r = (step as f64 * 10.0).min(6199.99);
+        // Out to that world's foothills (r4700), just short of them, as a
+        // point at r4700 by cos and sin can stand a hair past.
+        for step in 0..=470 {
+            let r = (step as f64 * 10.0).min(4699.99);
             for d in 0..36 {
                 let (x, y) = at(r, d as f64 * 10.0);
                 assert_eq!(height_at(x, y, &land), 0.0, "r{r} at {}°", d * 10);
@@ -810,15 +814,15 @@ mod tests {
         let (mut peak, mut n) = (0.0f64, 0);
         for step in 0..100 {
             for d in 0..90 {
-                let (x, y) = at(7400.0 + step as f64 * 8.0, d as f64 * 4.0);
+                let (x, y) = at(5900.0 + step as f64 * 8.0, d as f64 * 4.0);
                 peak = peak.max(height_at(x, y, &land));
                 n += 1;
             }
         }
-        assert!(n > 0 && peak > land.peak_height * 0.5, "the grown world's ranges stand up: {peak}");
-        // The table's foothills, 100 past r4600, start as gently as the grown
-        // world's do 100 past r6100.
-        let (x, y) = at(6250.0, 10.0);
+        assert!(n > 0 && peak > land.peak_height * 0.5, "that world's ranges stand up: {peak}");
+        // The table's foothills, 100 past r6100, start as gently as that
+        // world's do 100 past r4600.
+        let (x, y) = at(4750.0, 10.0);
         let foothill = height_at(x, y, &land);
         assert!(foothill > 0.0 && foothill < 10.0, "foothills start gently: {foothill}");
     }
@@ -837,23 +841,27 @@ mod tests {
     }
 
     /// The same offsets from the centre as on the 12000 world, so moving the
-    /// world (#308) changed only the land's radii, not where the noise is read.
+    /// world (#308) changed only the land's radii, not where the noise is
+    /// read. Plots v2's flip (#459) moved the rural edge out 1500, so the
+    /// first three (the centre and two in the city) moved by +1500 with the
+    /// world, and the rest out 1500 more along their bearings, the same depth
+    /// into the wilds as before.
     const SAMPLES: [(f64, f64); 10] = [
-        (6800.0, 6800.0),
-        (10700.5, 6800.0),
-        (10923.25, 8111.75),
-        (2300.0, 3800.0),
-        (7000.0, 1425.5),
-        (2917.0, 9690.0),
-        (11900.0, 5600.0),
-        (4133.3, 2244.4),
-        (9200.0, 11600.0),
-        (6800.0, 12799.0),
+        (8300.0, 8300.0),
+        (12200.5, 8300.0),
+        (12423.25, 9611.75),
+        (2552.0, 4468.0),
+        (8555.75, 1426.5),
+        (3213.75, 12085.5),
+        (14860.25, 6756.5),
+        (4875.5, 2450.0),
+        (11370.75, 14441.75),
+        (8300.0, 15799.0),
     ];
 
     const PINNED: [u64; 10] = [
-        0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0xD70D76363C8B5F19, 0x1D1A91F15EA4264A,
-        0xA8A021C3F9DB603D, 0x12D70F046902FD4D, 0x81F01109B0F00112, 0x0DF9EACF143E2220, 0x71E6BA3B9F17E25E,
+        0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x8DAD8116867C7875, 0x464CFF35904D805F,
+        0x308172BE11971DF4, 0x1831712557C4F86F, 0xD059E55FC8CFB902, 0xFA30B96DE9F1F064, 0x3CBBDAAFD536E30C,
     ];
 
     /// Draws the land as a shaded relief, for review:

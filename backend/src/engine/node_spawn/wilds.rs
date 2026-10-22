@@ -659,19 +659,20 @@ mod tests {
         println!("reed beds in lakes: {in_lakes}, the rest in rivers");
     }
 
-    /// On Plots v2's grown rings (PV2, #454) the wilds' nodes grow in the
-    /// grown wilds, r6100 to r8300 round (8300, 8300), as many as their
-    /// densities ask of that bigger ring, and their quality's depth is
-    /// measured from the grown rural edge.
+    /// On rings off the table (PV2, #454), here RW1's from before Plots v2's
+    /// flip (#459), the wilds' nodes grow in that world's wilds, r4600 to
+    /// r6800 round (6800, 6800), as many as their densities ask of that
+    /// smaller ring, and their quality's depth is measured from its rural
+    /// edge.
     #[test]
-    fn the_wilds_follow_a_grown_frame() {
-        let terrain = TerrainConfig::grown();
+    fn the_wilds_follow_their_frame() {
+        let terrain = TerrainConfig::rw1();
         let frame = terrain.land.frame;
-        assert_eq!((frame.rural_edge(), frame.world_edge()), (6100.0, 8300.0));
+        assert_eq!((frame.rural_edge(), frame.world_edge()), (4600.0, 6800.0));
         let land = Land::new(terrain);
         assert!(land.cells.iter().enumerate().all(|(k, c)| {
             let (x, y) = land.centre(k);
-            !c.sampled || frame.radius(x, y) >= 6100.0 - 2.0 * CELL - 1.0
+            !c.sampled || frame.radius(x, y) >= 4600.0 - 2.0 * CELL - 1.0
         }));
         let tables = crate::engine::node_spawn::tests::content_tables();
         let wild: Vec<&SpawnTable> = tables.iter().filter(|t| t.grows_wild()).collect();
@@ -685,9 +686,9 @@ mod tests {
         }
         for s in &seeds {
             let r = frame.radius(s.x, s.y);
-            assert!(r > 6100.0 && r <= 8300.0 - MOVE_CLEAR, "{} at r{r:.0}", s.resource_type);
+            assert!(r > 4600.0 && r <= 6800.0 - MOVE_CLEAR, "{} at r{r:.0}", s.resource_type);
         }
-        // Past r6800, where the table's world ends.
-        assert!(seeds.iter().any(|s| frame.radius(s.x, s.y) > 7300.0));
+        // Out where the table's wilds are still plain: inside r6100.
+        assert!(seeds.iter().any(|s| frame.radius(s.x, s.y) < 5600.0));
     }
 }

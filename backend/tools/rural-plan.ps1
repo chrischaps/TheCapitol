@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Runs the ignored test rural::render::tests::rural_plan_report in release.
-  For each seed it writes an SVG plan view of the ring r3000 to r4600 (its
+  For each seed it writes an SVG plan view of the ring r3600 to r6100 (its
   roads, farms and water, with the 16 half-sectors shaded by built share) and
   a metrics JSON, plus index.html and report.md with the targets table of
   the-capitol-rural.md section 5. Then it converts each SVG to a PNG with
@@ -23,12 +23,6 @@
 .PARAMETER Out
   Output folder. Default: target/rural-plan at the repo root.
 
-.PARAMETER V2
-  Plots v2's ring (the-capitol-plots-v2.md, V1.3, #457): r3600 to r6100 in
-  the grown world, 16600 across, with four main roads a sector and its
-  farms, measured against its targets. The plans are named farms-v2-<seed>,
-  and the default output folder is target/rural-plan-v2.
-
 .PARAMETER Compare
   An earlier output folder. Writes compare.html, which shows each plan
   beside the one with the same name there and puts the two tables together.
@@ -37,21 +31,19 @@
   powershell -File backend/tools/rural-plan.ps1
   powershell -File backend/tools/rural-plan.ps1 -Seed 42 -Sector 2
   powershell -File backend/tools/rural-plan.ps1 -Out target/rural-new -Compare target/rural-plan
-  powershell -File backend/tools/rural-plan.ps1 -V2 -Seed 42
 #>
 param(
     [string]$Seeds = "",
     [long]$Seed = -1,
     [int]$Sector = -1,
     [string]$Out = "",
-    [string]$Compare = "",
-    [switch]$V2
+    [string]$Compare = ""
 )
 
 $ErrorActionPreference = "Stop"
 $backend = Split-Path $PSScriptRoot -Parent
 $repo = Split-Path $backend -Parent
-if (-not $Out) { $Out = Join-Path $repo $(if ($V2) { "target/rural-plan-v2" } else { "target/rural-plan" }) }
+if (-not $Out) { $Out = Join-Path $repo "target/rural-plan" }
 if (-not [System.IO.Path]::IsPathRooted($Out)) { $Out = Join-Path (Get-Location) $Out }
 New-Item -ItemType Directory -Force $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
@@ -59,7 +51,6 @@ $Out = (Resolve-Path $Out).Path
 $env:RURAL_SEEDS = if ($Seed -ge 0) { "$Seed" } else { $Seeds }
 $env:RURAL_SECTOR = if ($Sector -ge 0) { "$Sector" } else { "" }
 $env:RURAL_OUT = $Out
-$env:RURAL_V2 = if ($V2) { "1" } else { "" }
 
 # Clear old plans out, so index.html and the PNGs match this run.
 Get-ChildItem -Path (Join-Path $Out "*") -File -Include *.svg, *.png, *.json |

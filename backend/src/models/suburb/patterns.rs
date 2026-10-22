@@ -615,8 +615,8 @@ fn strand(cx: &Ctx, n: &Neighbourhood, layout: &Parallels, k0: usize, side0: usi
 pub(crate) mod tests {
     use super::*;
     use crate::models::suburb::graph::{Graph, JunctionKind};
-    use crate::models::suburb::metrics::{self, Plan, Scope};
-    use crate::models::terrain::{TerrainConfig, WorldGenParams};
+    use crate::models::suburb::metrics;
+    use crate::models::terrain::WorldGenParams;
 
     pub(crate) fn parallels_world(seed: u64) -> WorldGenParams {
         let mut params = WorldGenParams { seed, ..Default::default() };
@@ -624,20 +624,20 @@ pub(crate) mod tests {
         params
     }
 
-    /// Acceptance for #456, pattern (a): its streets and lots in Plots v2's
-    /// suburb, at the four report seeds. Its lots are the largest, over
-    /// 19k at the median, and take 8 the most: it has the fewest pies.
+    /// Acceptance for #107 and #456, pattern (a) everywhere: its streets and
+    /// lots in Plots v2's suburb, at the four report seeds. Its lots are the
+    /// largest, over 19k at the median, and take 8 the most: it has the
+    /// fewest pies.
     #[test]
-    fn grown_warped_parallels_meet_their_targets() {
+    fn warped_parallels_meet_their_targets() {
         for seed in [42, 7, 1234, 99999] {
-            let mut params = crate::models::suburb::tests::grown_world(seed);
-            params.suburban.neighbourhood.force_pattern = Some(NeighbourhoodPattern::WarpedParallels);
+            let params = parallels_world(seed);
             let m = metrics::measure_world(&params, None).measured.metrics;
             let why = format!("seed {seed}: {m:#?}");
-            metrics::Grown::assert_streets(&m, &why);
+            metrics::Lots::assert_streets(&m, &why);
             assert!(m.parallel_spacing_p5.unwrap() >= 240.0, "{why}");
             // 95 to 96% take 6 stations (#468).
-            metrics::Grown { takes_six: 0.93, area_max: 19500.0, depth_min: 125.0, green_max: 0.20 }.assert_lots(&m, &why);
+            metrics::Lots { takes_six: 0.93, area_max: 19500.0, depth_min: 125.0, green_max: 0.20 }.assert_lots(&m, &why);
         }
     }
 
@@ -660,32 +660,6 @@ pub(crate) mod tests {
         assert_eq!(pick(&w, 0.26), Some('b'));
         assert_eq!(pick(&w, 0.999), Some('b'));
         assert_eq!(pick::<char>(&[], 0.5), None);
-    }
-
-    /// Acceptance for #107: pattern (a) everywhere, at the four report seeds.
-    #[test]
-    fn warped_parallels_meet_their_targets() {
-        for seed in [42, 7, 1234, 99999] {
-            let params = parallels_world(seed);
-            let t = TerrainConfig::from_params(&params);
-            let scope = Scope {
-                center: (t.center_x, t.center_y),
-                inner: params.urban_outer_radius,
-                outer: params.suburban_outer_radius,
-                sector: None,
-            };
-            let plan = Plan { roads: &t.roads, lots: &[], before: &[], cleared: &[], scope, coverage: false, greens: &[], streets: &[], culdesac_max: 300.0 };
-            let m = metrics::measure(&plan).metrics;
-            let why = format!("seed {seed}: {m:#?}");
-            assert!(m.suburban_roads > 50, "{why}");
-            assert_eq!(m.audit_issues, 0, "{why}");
-            assert_eq!(m.four_ways, 0, "{why}");
-            assert!(m.min_junction_angle.unwrap() >= 70.0, "{why}");
-            assert!(m.t_spacing_min.unwrap() >= 40.0, "{why}");
-            assert!(m.culdesac_max_len.unwrap() <= 300.0, "{why}");
-            assert_eq!(m.connected_share, Some(1.0), "{why}");
-            assert!(m.parallel_spacing_p5.unwrap() >= 200.0, "{why}");
-        }
     }
 
     #[test]

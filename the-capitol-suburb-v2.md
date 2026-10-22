@@ -2,7 +2,7 @@
 
 *Plan, 2026-10-17. Tracking issue #103; work packages #104 to #113.*
 
-The suburb (annulus r 1800–3000 since #117, 1600–2400 before; cut by 8 arterials) is to be rebuilt as post-war neighbourhoods. This doc is the "Read first" for every `suburb-v2` issue. Keep it true: if a decision changes, update it in the same commit.
+The suburb (annulus r 2160–3600 since Plots v2's flip, #459; 1800–3000 from #117, 1600–2400 before; cut by 8 arterials) is to be rebuilt as post-war neighbourhoods. This doc is the "Read first" for every `suburb-v2` issue. Keep it true: if a decision changes, update it in the same commit.
 
 ## 1. Why
 
@@ -254,7 +254,7 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 - **Report test:** `#[ignore]` test `suburb::render::tests::suburb_plan_report`. Env: `SUBURB_SEEDS`, `SUBURB_PATTERN` (#109), `SUBURB_SECTOR`, `SUBURB_OUT` (default `target/suburb-plan/`).
 - **Outputs:** an SVG per seed (named `neighbourhood-<seed>`, as before #113, so `-Compare` still lines up with older runs), metrics JSON, an `index.html` grid and a markdown table.
 - **PNG:** `backend/tools/suburb-plan.ps1` runs the test in release and converts each SVG with headless Chrome. Look at the PNGs beside `reference/`.
-- **Script options:** `-Seeds`, `-Pattern` (force one pattern wherever it fits, #109), `-Sector n`, `-Inner` and `-Outer` (the suburb's radii, #117), `-Params grown` (Plots v2's lots and band, #456) and `-Out`. `-Compare <dir>` writes `compare.html`, with each plan beside the one of the same name in an earlier run.
+- **Script options:** `-Seeds`, `-Pattern` (force one pattern wherever it fits, #109), `-Sector n`, `-Inner` and `-Outer` (the suburb's radii, #117) and `-Out` (`-Params grown`, Plots v2's lots and band, #456, until the flip, #459, made them the default). `-Compare <dir>` writes `compare.html`, with each plan beside the one of the same name in an earlier run.
 - **Reading the SVG:** roads are drawn at true width and coloured by role. Suburban lots are shaded by area, with the street edge darker. Lots `finish_lots` trimmed are edged orange, and lots it dropped are drawn dashed magenta at their generated shape. A red ring marks each place that breaks a target; hover it in a browser for the reason. For the Neighbourhood layout (#106), the view also draws each frame dashed, with its rows dotted, a label giving the row count and lot depth, the green buffers, greenways and edge strips, and each entrance as a stub from its gate to a dot on the arterial.
 - **Definitions that work from the roads alone (`suburb/metrics.rs`).** They were written to work for Legacy too, and still hold for the hand-built test plans:
   - **neighbourhood:** the one its streets' `StreetMeta` names (`metrics::Plan::streets`, #115). A plan without them (the hand-built test plans) takes a 45° sector between arterials;
@@ -294,7 +294,9 @@ A walker runs over the welded roads, using a `StreetMeta` for each street (role,
 - ~~**entrances per neighbourhood, most 5–7.**~~ A false miss: the metric counted per sector, so split sectors read double. Since #115 it counts per neighbourhood, and every neighbourhood reads 2–4.
 
 #### Plots v2 targets (V1.2, #456; V1.4, #468)
-Plots v2 (`the-capitol-plots-v2.md`) moves the suburb to **r2160 to r3600** (1440 deep) for about 1000 lots of about 17k, 90% of which take 6 stations, a whole workshop (the plan first said 80% taking 8: #466). Until the flip (#459) these are test-only params, `NeighbourhoodParams::grown()`, measured on `suburb::tests::grown_world(seed)`: #454's `WorldGenParams::grown()` (urban to r2160, suburb to r3600, rural to r6100, world 16600) with `grown()`'s lots. The whole world is generated, so the land and water follow the grown rings and keep out of the suburb. `metrics::GROWN_TARGETS` holds the targets below in place of the rows they replace; the street rows are unchanged.
+Plots v2 (`the-capitol-plots-v2.md`) moves the suburb to **r2160 to r3600** (1440 deep) for about 1000 lots of about 17k, 90% of which take 6 stations, a whole workshop (the plan first said 80% taking 8: #466). Until the flip (#459) these were test-only params, `NeighbourhoodParams::grown()`, measured on `suburb::tests::grown_world(seed)`: #454's `WorldGenParams::grown()` (urban to r2160, suburb to r3600, rural to r6100, world 16600) with `grown()`'s lots. The whole world is generated, so the land and water follow the grown rings and keep out of the suburb. `metrics::GROWN_TARGETS` held the targets below in place of the rows they replace; the street rows are unchanged.
+
+*As built (V2.0, #459):* **these are the defaults and the only targets.** `NeighbourhoodParams::default()` is `grown()`'s set, `metrics::TARGETS` carries the rows below in place of the old ones, and `neighbourhood_suburb_meets_its_targets` (the old `grown_suburb_meets_its_targets`, over the five seeds and the wide canals), `warped_parallels_meet_their_targets`, `loops_and_lollipops_meet_their_targets` and `central_loop_meets_its_targets` hold them through `metrics::Lots` (the old `Grown`). The old world's lot targets and their tests are retired. On the default world (seed 42): 977 lots, median 18.6k, 144 × 131, 92.0% taking 6, median 8 stations, 56% taking 8, lots 69%, green 18%, gap 3.6%. Over seeds 42, 7, 1234, 99999 and 2024: 962 to 988 lots, 92.0 to 94.0% taking 6. The soft misses are the old ones: roads 9% (paving width), and (c)'s fans' parallel spacing p5 on seeds 42, 1234 and 99999. A saved `world_config` at frontage 100 moved to the whole v2 set (`20261220_001_plots_v2_flip.sql`), and every old suburban plot is `rw2_…`, released by startup's sync.
 
 | Metric | Plots v2 target |
 |---|---|
@@ -325,7 +327,7 @@ Plots v2 (`the-capitol-plots-v2.md`) moves the suburb to **r2160 to r3600** (144
 - **What's left:** pies against the region's edge or a road (most of the 10–17% of pies short of 6), pies on a stem with no lots near its bulb, which sweep only 180° and come out as slivers (#470), and the fans in the U-turns and loop corners.
 - **What it costs:** the lots behind a pie are shallower, so thin strips open beside some stems: the gap rises from about 3% to 3.1–3.6%. Take 8 rises too, from 52–56% to 54–59%.
 - **Result** (mixed, seeds 42, 7, 1234, 99999): **962–988 lots**, area median **18.5k–18.8k** (p5 ≥ 11.4k, p95 ≤ 25.5k), width median 143–144, depth 131–132, **92.0–92.6% take 6** (pies 83–90%), 54–59% take 8, stations median 8 and mean 7.5–7.6, lots 69–70%, green 17–19%, gap 3.1–3.6%, no overlaps, nothing trimmed or dropped, the streets as at V1.2. Forced: (a) 1022–1044 lots, 94.8–95.6% take 6, green 10–13%; (b) 967–995 lots, 93.2–94.6%, green 16–18%; (c) 952–1006 lots, 90.3–92.4%, green 16–22%. `metrics::Grown` holds 90% mixed and for (c), 92% for (b) and 93% for (a).
-- **Drawing it:** `suburb-plan.ps1 -Params grown` (env `SUBURB_PARAMS=grown`) uses `grown()` at r2160 to r3600, holds the plan to these targets, shades lots over 10k–28k, and draws in sand those that don't take 6.
+- **Drawing it:** `suburb-plan.ps1` holds the plan to these targets, shades lots over 10k–28k, and draws in sand those that don't take 6 (`-Params grown`, env `SUBURB_PARAMS`, until the flip made them the default).
 
 ## 5. Work packages
 

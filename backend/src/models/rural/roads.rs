@@ -577,8 +577,17 @@ mod tests {
 
     const C: P = (6800.0, 6800.0);
 
+    /// RW1's ring (#308), r3000 to r4600, with its two main roads a sector
+    /// each swaying on its own: the defaults before Plots v2's flip (#459).
+    /// The roads' own rules don't change with the ring.
     fn ring() -> Ring {
         Ring { center: C, inner: 3000.0, outer: 4600.0, arterial_width: 60.0, lane_width: 8.0, sway: 1.0, lanes_follow: false }
+    }
+
+    /// The two main roads' bands on RW1's ring: 330 to 470 and 1130 to 1270
+    /// into its 1600 of depth.
+    fn two_mains() -> Vec<(f64, f64)> {
+        vec![(330.0 / 1600.0, 470.0 / 1600.0), (1130.0 / 1600.0, 1270.0 / 1600.0)]
     }
 
     fn sector(character: Character) -> Sector {
@@ -602,7 +611,7 @@ mod tests {
         let (mut ones, mut twos, mut gates) = (0, 0, 0);
         for seed in 0..200 {
             let mut rng = SplitMix64::stream(seed, &[1]);
-            let laid = lay(&sector(Character::Concession), &ring(), &RuralParams::default().mains, &mut rng);
+            let laid = lay(&sector(Character::Concession), &ring(), &two_mains(), &mut rng);
             let (inner, outer) = (&laid.roads[0].points, &laid.roads[1].points);
             for (main, lo, hi) in [(inner, 3330.0, 3470.0), (outer, 4130.0, 4270.0)] {
                 assert!(main.len() == 3 || main.len() == 4, "seed {seed}: {} points", main.len());
@@ -644,7 +653,7 @@ mod tests {
         let mut spurs = 0;
         for seed in 0..200 {
             let mut rng = SplitMix64::stream(seed, &[1]);
-            let laid = lay(&sector(Character::Winding), &ring(), &RuralParams::default().mains, &mut rng);
+            let laid = lay(&sector(Character::Winding), &ring(), &two_mains(), &mut rng);
             let (inner, outer) = (&laid.roads[0].points, &laid.roads[1].points);
             for (lane, lo, hi) in [(inner, 3150.0, 3650.0), (outer, 3950.0, 4450.0)] {
                 let (near, far) = lane.iter().map(|&p| radius(p)).fold((f64::MAX, f64::MIN), |(l, h), r| (l.min(r), h.max(r)));
@@ -671,13 +680,13 @@ mod tests {
         assert!(spurs >= 190, "only {spurs} of 200 winding sectors got a spur");
     }
 
-    /// Plots v2's ring (V1.3, #457): each sector's four main roads keep to
+    /// Plots v2's ring (V1.3, #457; the default since #459): each sector's four main roads keep to
     /// their bands down the 2500 of depth, a winding sector's lanes follow
     /// one another at least [`LANES_APART`] apart, and a road joins every
     /// pair of neighbouring main roads.
     #[test]
     fn four_main_roads_keep_their_bands_and_each_pair_is_joined() {
-        let v2 = RuralParams::v2();
+        let v2 = RuralParams::default();
         let ring = Ring { center: C, inner: 3600.0, outer: 6100.0, arterial_width: 60.0, lane_width: 8.0, sway: v2.sway, lanes_follow: v2.lanes_follow };
         let n = v2.mains.len();
         assert_eq!(n, 4);

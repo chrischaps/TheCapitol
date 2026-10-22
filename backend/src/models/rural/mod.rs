@@ -1,10 +1,11 @@
-//! The rural ring, r3000 to r4600 (`the-capitol-rural.md`, RD10).
+//! The rural ring, r3600 to r6100 (`the-capitol-rural.md`, RD10; r3000 to
+//! r4600 before Plots v2's flip, #459).
 //!
 //! Rural v2's farms on lanes, since the flip (R7, #290). R8 (#291) removed
 //! the old radial trails they replaced. The modules:
 //! - `sectors`: the sectors between the arterials and the deck of their
 //!   characters (RD1, RD2, #286);
-//! - `roads`: each sector's two concession roads or winding lanes, the roads
+//! - `roads`: each sector's four concession roads or winding lanes, the roads
 //!   between them, and the roads to farm gates (RD3 to RD5, #286; RD10, #310);
 //! - `farms`: the farms along every lane and the arterials (RD6, #287);
 //! - `balance`: spurs into the ground the farms leave open (RD7, #287);
@@ -65,43 +66,25 @@ pub struct RuralParams {
     pub lanes_follow: bool,
     /// The main roads across every sector, from arterial to arterial, inner
     /// first: the band of the ring's depth each keeps to, as shares of it
-    /// (RD10). Two today, at 330 to 470 and 1130 to 1270 into the 1600-deep
-    /// ring; Plots v2's ring takes three (V1.3, #457).
+    /// (RD10). Four since Plots v2 (V1.3, #457; the flip, #459), about 620
+    /// apart down the 2500-deep ring; two before, at 330 to 470 and 1130 to
+    /// 1270 into the 1600-deep ring.
     pub mains: Vec<(f64, f64)>,
 }
 
-/// The ring's depth today's bands were drawn in, so their shares give the
-/// same roads (RD10).
-const DEPTH_TODAY: f64 = 1600.0;
-
 impl Default for RuralParams {
+    /// Plots v2's farms (`the-capitol-plots-v2.md`, V1.3, #457; the default
+    /// since the flip, #459), for the ring of r3600 to r6100: four main
+    /// lanes a sector, evenly down the 2500 of depth, following one another
+    /// at half the sway, and farms of about 35k along them, every one
+    /// taking 12 stations: about 900. Before the flip the ring was r3000 to
+    /// r4600 with two mains (330 to 470 and 1130 to 1270 into the 1600 of
+    /// depth) and 377 farms of about 36k, drawn from frontage U[120, 160],
+    /// field gap U[50, 100] and depth U[230, 310], cut down to 100 wide and
+    /// 110 deep, and asked no room (#423).
     fn default() -> Self {
         Self {
             lane_width: 8.0,
-            frontage: (120.0, 160.0),
-            field_gap: (50.0, 100.0),
-            depth: (230.0, 310.0),
-            min_frontage: 100.0,
-            min_depth: 110.0,
-            room: 0,
-            sway: 1.0,
-            lanes_follow: false,
-            mains: vec![
-                (330.0 / DEPTH_TODAY, 470.0 / DEPTH_TODAY),
-                (1130.0 / DEPTH_TODAY, 1270.0 / DEPTH_TODAY),
-            ],
-        }
-    }
-}
-
-impl RuralParams {
-    /// Plots v2's farms (`the-capitol-plots-v2.md`, V1.3, #457), for its
-    /// ring of r3600 to r6100: three main roads a sector, evenly down the
-    /// 2500 of depth, and narrower farms closer along them, about 1000 of
-    /// about 34k. Test-only until the flip (#459) makes them the default.
-    #[cfg(test)]
-    pub fn v2() -> Self {
-        Self {
             frontage: (132.0, 146.0),
             field_gap: (40.0, 46.0),
             depth: (230.0, 290.0),
@@ -111,7 +94,6 @@ impl RuralParams {
             sway: 0.5,
             lanes_follow: true,
             mains: vec![(0.113, 0.147), (0.36, 0.394), (0.606, 0.64), (0.853, 0.887)],
-            ..Self::default()
         }
     }
 }
@@ -231,7 +213,7 @@ pub(crate) mod tests {
     fn every_seed_deals_at_least_three_sectors_of_each_character() {
         // The world's own arterials cut eight sectors...
         let t = TerrainConfig::from_params(&farms_world(42));
-        let bearings = sectors::arterial_bearings(&t.roads, center(&t), 3000.0);
+        let bearings = sectors::arterial_bearings(&t.roads, center(&t), capitol_protocol::rules::SUBURBAN_OUTER_RADIUS);
         assert_eq!(bearings.len(), 8);
         for (i, b) in bearings.iter().enumerate() {
             assert!((b.to_degrees() - 45.0 * i as f64).abs() < 1e-6, "arterial {i} at {:.3}°", b.to_degrees());
@@ -247,11 +229,12 @@ pub(crate) mod tests {
     }
 
     /// R3's and RW3's acceptance: under `Farms`, the audit is clean on the
-    /// lanes but for loose ends at farm gates. Every sector has two main
-    /// roads that meet an arterial at a shared vertex at both ends, and at
-    /// least one road between them. Every other road starts on a vertex of a
-    /// main road, and ends on the other's or at a gate, but for the balance
-    /// pass's spurs (#287), which may leave any of the sector's roads.
+    /// lanes but for loose ends at farm gates. Every sector has its main
+    /// roads (four since Plots v2, #457, #459) that meet an arterial at a
+    /// shared vertex at both ends, and a road between each pair. Every other
+    /// road starts on a vertex of a main road, and ends on the next one's or
+    /// at a gate, but for the balance pass's spurs (#287), which may leave
+    /// any of the sector's roads.
     #[test]
     fn the_lanes_are_clean_and_join_the_arterials() {
         for seed in SEEDS {
@@ -275,9 +258,10 @@ pub(crate) mod tests {
                 t.roads.iter().filter(|r| r.id.starts_with("arterial_") && !r.id.starts_with("arterial_inner")).collect();
             let road = |id: &str| t.roads.iter().find(|r| r.id == id).unwrap_or_else(|| panic!("seed {seed}: no {id}"));
             let on = |r: &RoadSegment, p: P| r.points.iter().any(|&q| same(q, p));
+            let n = params.rural.mains.len();
             for s in 0..8 {
-                let mains = [road(&format!("lane_{s}_0")), road(&format!("lane_{s}_1"))];
-                for main in mains {
+                let mains: Vec<&RoadSegment> = (0..n).map(|k| road(&format!("lane_{s}_{k}"))).collect();
+                for main in &mains {
                     for end in [main.points[0], *main.points.last().unwrap()] {
                         let on_arterial = arterials.iter().any(|a| on(a, end));
                         assert!(on_arterial, "seed {seed}: {} ends at {end:?}, not on an arterial's vertex", main.id);
@@ -290,60 +274,24 @@ pub(crate) mod tests {
                     let at_gate = gates.iter().any(|&g| same(g, end));
                     let off_another = t.roads.iter().any(|r| r.id.starts_with(&prefix) && r.id != lane.id && on(r, start));
                     assert!(from.is_some() || (at_gate && off_another), "seed {seed}: {} starts on no road of its sector", lane.id);
-                    let joins = from.is_some_and(|i| on(mains[1 - i], end));
+                    let joins = from.is_some_and(|i| [i.wrapping_sub(1), i + 1].iter().any(|&k| mains.get(k).is_some_and(|m| on(m, end))));
                     assert!(joins || at_gate, "seed {seed}: {} ends on neither road nor gate", lane.id);
                 }
                 let counted = metrics::sector_roads(&t.roads, s);
-                assert!(counted.mains == 2 && counted.links >= 1, "seed {seed}: sector {s} has {counted:?}");
+                assert!(counted.mains == n && counted.links >= n - 1, "seed {seed}: sector {s} has {counted:?}");
             }
         }
-    }
-
-    /// R5's acceptance (plan §5): every hard target holds on the four seeds,
-    /// and the soft ones missed are printed, as the suburb's are.
-    #[test]
-    fn farms_meet_their_targets() {
-        let missed = |v: &[crate::models::suburb::metrics::Violation]| -> Vec<String> {
-            v.iter().map(|v| format!("{} {} (target {})", v.label, crate::models::suburb::metrics::fmt_num(v.value), v.target)).collect()
-        };
-        let mut failed = Vec::new();
-        for seed in SEEDS {
-            let m = metrics::measure_world(&farms_world(seed), None).measured.metrics;
-            // A metric with nothing to measure misses nothing, so the hard
-            // ones must all have been measured.
-            for t in metrics::TARGETS.iter().filter(|t| t.hard) {
-                assert!(m.value(t.metric).is_some(), "seed {seed}: {} wasn't measured", t.label);
-            }
-            let (hard, soft): (Vec<_>, Vec<_>) = metrics::violations(&m).into_iter().partition(|v| v.hard);
-            eprintln!(
-                "seed {seed}: {} farms of {:.0}k, {:.0}% built, half-sectors {:.0} to {:.0}% (CV {:.2}); soft misses: {:?}",
-                m.lots,
-                m.lot_area_mean.unwrap() / 1000.0,
-                m.built_share.unwrap() * 100.0,
-                m.half_sector_min.unwrap() * 100.0,
-                m.half_sector_max.unwrap() * 100.0,
-                m.half_sector_cv.unwrap(),
-                missed(&soft)
-            );
-            failed.extend(hard.iter().map(|v| format!("seed {seed}: {}", missed(std::slice::from_ref(v))[0])));
-        }
-        assert!(failed.is_empty(), "hard misses: {failed:?}");
-    }
-
-    /// Plots v2's ring (V1.3, #457): the grown world's rings, r3600 to
-    /// r6100, with `RuralParams::v2`'s farms.
-    pub(crate) fn v2_world(seed: u64) -> WorldGenParams {
-        WorldGenParams { seed, rural: RuralParams::v2(), ..WorldGenParams::grown() }
     }
 
     /// How far the deepest river or stream comes in from the plain's edge
     /// (the land's rise, 100 past the rural edge), as a share of the plain
     /// down to the water's rim (#472). With the soaking scaled by the plain's
     /// depth, Plots v2's deepest courses reach 0.55 to 0.57 of the way across
-    /// on the four seeds (r4798 to r4857, half way across the farms). Today's
-    /// reach 0.34 to 0.64 (r3712 to r4166; seed 42's is 0.64, 56% of the way
-    /// across the farms). The floor is about 10% under the least.
-    const V2_WATER_REACH: f64 = 0.49;
+    /// on the four seeds (r4798 to r4857, half way across the farms). RW1's
+    /// reached 0.34 to 0.64 (r3712 to r4166 on its plain; seed 42's was 0.64,
+    /// 56% of the way across the farms). The floor is about 10% under the
+    /// least.
+    const WATER_REACH: f64 = 0.49;
 
     /// The deepest course's radius in `t`, and how far across the plain
     /// that is, from its edge (0) to the water's rim (1).
@@ -354,29 +302,36 @@ pub(crate) mod tests {
         (reach, (edge - reach) / (edge - rim))
     }
 
-    /// V1.3's acceptance (`the-capitol-plots-v2.md` §3): on the four seeds,
-    /// Plots v2's ring holds every hard row of `metrics::V2_TARGETS`: about
-    /// 900 farms of about 35k, built 40 to 50%, nearly all taking 12
-    /// stations, with today's rows for the sectors, the roads, the audit,
-    /// the water and the gaps. The water comes about half way across the
-    /// farms, as today's deepest does (#472): the deepest course reaches at least
-    /// [`V2_WATER_REACH`] of the way across the plain, and none comes in past
-    /// the water's rim. Each seed builds a grown world of its own, so this is
-    /// the one v2 test that does.
+    /// R5's and V1.3's acceptance (`the-capitol-rural.md` §5,
+    /// `the-capitol-plots-v2.md` §3): on the four seeds, the ring holds
+    /// every hard row of `metrics::TARGETS`: about 900 farms of about 35k,
+    /// built 40 to 50%, nearly all taking 12 stations, with RW1's rows for
+    /// the sectors, the roads, the audit, the water and the gaps. The soft
+    /// ones missed are printed, as the suburb's are. The water comes about
+    /// half way across the farms, as RW1's deepest did (#472): the deepest
+    /// course reaches at least [`WATER_REACH`] of the way across the plain,
+    /// and none comes in past the water's rim.
     #[test]
-    fn v2_farms_meet_their_targets() {
+    fn farms_meet_their_targets() {
         let mut failed = Vec::new();
         for seed in SEEDS {
-            let params = v2_world(seed);
+            let params = farms_world(seed);
             let measured = metrics::measure_world(&params, None);
             let m = &measured.measured.metrics;
-            for t in metrics::V2_TARGETS.iter().filter(|t| t.hard) {
+            // A metric with nothing to measure misses nothing, so the hard
+            // ones must all have been measured.
+            for t in metrics::TARGETS.iter().filter(|t| t.hard) {
                 assert!(m.value(t.metric).is_some(), "seed {seed}: {} wasn't measured", t.label);
             }
+            let soft: Vec<String> = metrics::violations(m)
+                .into_iter()
+                .filter(|v| !v.hard)
+                .map(|v| format!("{} {} (target {})", v.label, crate::models::suburb::metrics::fmt_num(v.value), v.target))
+                .collect();
             let frame = params.frame();
             let (reach, share) = water_reach(&params, &measured.terrain);
             eprintln!(
-                "seed {seed}: {} farms of {:.1}k, {:.1}% built, {:.1}% take 12, half-sectors {:.0} to {:.0}%, water in to r{reach:.0} ({:.0}% across the plain), {:.0} ms",
+                "seed {seed}: {} farms of {:.1}k, {:.1}% built, {:.1}% take 12, half-sectors {:.0} to {:.0}%, water in to r{reach:.0} ({:.0}% across the plain), {:.0} ms; soft misses: {soft:?}",
                 m.lots,
                 m.lot_area_mean.unwrap() / 1000.0,
                 m.built_share.unwrap() * 100.0,
@@ -386,9 +341,9 @@ pub(crate) mod tests {
                 share * 100.0,
                 m.gen_ms
             );
-            assert!(share >= V2_WATER_REACH, "seed {seed}: the water reaches in only to r{reach:.0}, {:.0}% across the plain", share * 100.0);
+            assert!(share >= WATER_REACH, "seed {seed}: the water reaches in only to r{reach:.0}, {:.0}% across the plain", share * 100.0);
             assert!(reach > frame.water_inner_radius() - crate::models::hydrology::CELL, "seed {seed}: water at r{reach:.0}");
-            let hard = metrics::violations_against(m, metrics::V2_TARGETS).into_iter().filter(|v| v.hard);
+            let hard = metrics::violations(m).into_iter().filter(|v| v.hard);
             failed.extend(hard.map(|v| format!("seed {seed}: {} {} (target {})", v.label, v.value, v.target)));
         }
         assert!(failed.is_empty(), "hard misses: {failed:?}");

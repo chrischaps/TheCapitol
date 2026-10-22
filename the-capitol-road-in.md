@@ -6,7 +6,7 @@
 
 A new player lands on the south road among the farms, with the tower far ahead. Today they learn four things (walk, gather, look in the pack, twist rope), then they're on their own. Their first deed then comes from pulling grass for the better part of an hour, and when they have one they choose a lot with no idea what the choice means.
 
-**The road in** turns that first hour into the city's welcome. The spawn and the hall are on the same road, about 3000 apart, and the road runs through every zone a player can live in. So the tutorial walks it:
+**The road in** turns that first hour into the city's welcome. The spawn and the hall are on the same road, about 3500 apart (about 3000 before Plots v2's flip, #459), and the road runs through every zone a player can live in. So the tutorial walks it:
 1. **Arrival:** make things among the farms, from a handful of grass to a stone axe that fells a tree your hands couldn't.
 2. **The road in:** walk up to the hall, stopping at a farm, a suburban street and an urban yard to see what living there is like.
 3. **The hall:** the Exchange, the order book, the bazaar and the Gazette.
@@ -53,12 +53,12 @@ The question the plan answers: **can a player's first choice of home be an infor
 
 **Nothing compares the zones.**
 - `RestRequest::DeedPrices` and `Zones` exist in `capitol-core/net/rest.rs`, but nothing sends them.
-- The plot panel shows one lot's capacity. That's `station_capacity`, not what fits. Since the plot sizes (#420), an urban lot (520 of about 8.6k) and a suburban lot (about 1200 of about 10k) both fit 4 at 50 spacing, and a farm (about 380 of about 36k) fits about 15 (`the-capitol-plots.md` §5). Capacity reads 16 for the first two and 25 for a farm, and only the farm's is near what fits (#424).
+- The plot panel shows one lot's capacity. That's `station_capacity`, not what fits. Since Plots v2 (#459, `the-capitol-plots-v2.md`), an urban lot (about 1000 of about 8.6k) fits 4 at 50 spacing, a suburban lot (about 980 of about 18.6k) 6 to 8, a whole workshop, and a farm (about 900 of about 35k) 12 or more. Capacity reads 16 for the urban lots and 25 for the others (`size_category`, PV4), and none is what fits until #473 sets it from the room indoors and out (#424, decided). Before the flip the plot sizes (#420) had 520 urban and about 1200 suburban lots fitting 4, and about 380 farms fitting about 15.
 
 **The geography:**
-- The spawn is `rules::SPAWN_X/Y` on the south arterial at r3350, in the rural ring.
+- The spawn is `rules::SPAWN_X/Y` on the south arterial at r3950, 350 past the suburb, in the rural ring (r3350 before Plots v2's flip, #459).
 - The Exchange hall, the notice board and the bazaar are up the same road.
-- At `PLAYER_SPEED` (50) the walk is about a minute.
+- At `PLAYER_SPEED` (50) the walk is about 70 seconds (about a minute before the flip): from r3950 in to the hall by the trade ring, about 3500. The rings it crosses are wider too: about 350 of farms, 1440 of suburb and 1160 of urban grid.
 
 **Parts to reuse:**
 - Way-finding: `hud::bearing`, the hall's prompt and motes, the notice board's glint (`input.rhai`, `draw_hall`).

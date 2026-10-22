@@ -490,20 +490,12 @@ pub(crate) mod tests {
         assert!(!fits(&shallow, p));
     }
 
-    /// Plots v2's suburb, as `loops_world`.
-    fn grown_loops_world(seed: u64) -> WorldGenParams {
-        let mut params = crate::models::suburb::tests::grown_world(seed);
-        params.suburban.neighbourhood.force_pattern = Some(NeighbourhoodPattern::LoopsAndLollipops);
-        params.suburban.neighbourhood.pattern_weights.central_loop = 0.0;
-        params
-    }
-
-    /// In Plots v2's suburb too, (b) fits every whole sector and no split
-    /// half, which `ACROSS` keeps (#456).
+    /// In Plots v2's suburb, (b) fits every whole sector and no split half,
+    /// which `ACROSS` keeps (#456).
     #[test]
-    fn grown_whole_sectors_fit_and_halves_do_not() {
+    fn whole_sectors_fit_and_halves_do_not() {
         for seed in [42, 7, 1234, 99999] {
-            let params = grown_loops_world(seed).suburban_params();
+            let params = loops_world(seed).suburban_params();
             let all = crate::models::suburb::neighbourhood::neighbourhoods(&params, (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y));
             for n in &all {
                 let whole = all.iter().filter(|m| m.sector == n.sector).count() == 1;
@@ -512,12 +504,13 @@ pub(crate) mod tests {
         }
     }
 
-    /// Acceptance for #456, pattern (b) in Plots v2's suburb, at the four
-    /// report seeds. Its band between the combs is a green spine, as today.
+    /// Acceptance for #109 and #456: the street invariants and the lot
+    /// checks, with the pattern forced to Loops, in Plots v2's suburb at the
+    /// four report seeds. Its band between the combs is a green spine.
     #[test]
-    fn grown_loops_and_lollipops_meet_their_targets() {
+    fn loops_and_lollipops_meet_their_targets() {
         for seed in [42, 7, 1234, 99999] {
-            let params = grown_loops_world(seed);
+            let params = loops_world(seed);
             let t = TerrainConfig::from_params(&params);
             let plan = crate::models::suburb::plan(&params.suburban_params(), (t.center_x, t.center_y));
             let loops = plan.roads.iter().filter(|r| r.id.starts_with("loop_")).count();
@@ -525,51 +518,9 @@ pub(crate) mod tests {
             assert!(loops >= 1 && stems >= 5, "seed {seed}: {loops} loops, {stems} inner-comb stems");
             let m = metrics::measure_world(&params, None).measured.metrics;
             let why = format!("seed {seed}: {m:#?}");
-            metrics::Grown::assert_streets(&m, &why);
+            metrics::Lots::assert_streets(&m, &why);
             // 93 to 95% take 6 stations (#468).
-            metrics::Grown { takes_six: 0.92, area_max: 19000.0, depth_min: 120.0, green_max: 0.29 }.assert_lots(&m, &why);
-        }
-    }
-
-    /// Acceptance for #109: the WP4 street invariants and the WP5 lot
-    /// checks, with the pattern forced to Loops, at the four report seeds.
-    #[test]
-    fn loops_and_lollipops_meet_their_targets() {
-        for seed in [42, 7, 1234, 99999] {
-            let params = loops_world(seed);
-            let t = TerrainConfig::from_params(&params);
-            let sp = params.suburban_params();
-            let plan = crate::models::suburb::plan(&sp, (t.center_x, t.center_y));
-            let loops = plan.roads.iter().filter(|r| r.id.starts_with("loop_")).count();
-            let stems = plan.roads.iter().filter(|r| r.id.starts_with("culdesac_") && r.id.contains("_i")).count();
-            assert!(loops >= 1 && stems >= 5, "seed {seed}: {loops} loops, {stems} inner-comb stems");
-
-            let m = metrics::measure_world(&params, None).measured.metrics;
-            let why = format!("seed {seed}: {m:#?}");
-            // Streets (WP4).
-            assert_eq!(m.audit_issues, 0, "{why}");
-            assert_eq!(m.four_ways, 0, "{why}");
-            assert!(m.min_junction_angle.unwrap() >= 70.0, "{why}");
-            assert!(m.t_spacing_min.unwrap() >= 40.0, "{why}");
-            assert!(m.culdesac_max_len.unwrap() <= 300.0, "{why}");
-            assert_eq!(m.connected_share, Some(1.0), "{why}");
-            // Lots (WP5).
-            assert!(m.culdesac_max_lots.unwrap() <= 20.0, "{why}");
-            assert_eq!(m.overlaps, 0, "{why}");
-            assert_eq!(m.convex_share, Some(1.0), "{why}");
-            assert_eq!(m.arterial_fronting, 0, "{why}");
-            // About 100 × 105 since #422 (plots plan §3): most take 4 stations.
-            assert!((9000.0..=12000.0).contains(&m.lot_area_median.unwrap()), "{why}");
-            assert!(m.lot_area_p5.unwrap() >= 6000.0 && m.lot_area_p95.unwrap() <= 15000.0, "{why}");
-            assert!((90.0..=110.0).contains(&m.lot_width_median.unwrap()), "{why}");
-            assert!(m.takes_four_share.unwrap() >= 0.70, "{why}");
-            assert!((100.0..=125.0).contains(&m.lot_depth_median.unwrap()), "{why}");
-            assert!(m.trimmed_share.unwrap() <= 0.10, "{why}");
-            assert!(m.dropped_share.unwrap() <= 0.03, "{why}");
-            // The band between the two combs and the corners between bulbs
-            // are a green spine and pocket parks (#111): what's too thin to
-            // use is the gap.
-            assert!(m.cover_gap.unwrap() <= 0.05, "{why}");
+            metrics::Lots { takes_six: 0.92, area_max: 19000.0, depth_min: 120.0, green_max: 0.29 }.assert_lots(&m, &why);
         }
     }
 

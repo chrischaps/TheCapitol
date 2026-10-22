@@ -171,11 +171,12 @@ mod tests {
     /// Env: `URBAN_SEED` (default 42; the grid has no seed, but the world
     /// round it does) and `URBAN_OUT` (default `target/urban-plan/`).
     ///
-    /// `URBAN_OUTER` draws Plots v2's grid (#455) with the urban edge there
-    /// instead: `metrics::v2`'s params, measured and drawn on the grid alone
-    /// (`metrics::measure_grid`), since the rest of the world doesn't follow
-    /// the v2 radii yet. `URBAN_RINGS` and `URBAN_OUTER_SPOKES` set the
-    /// rings of blocks and the outer rings' bearings, in either world.
+    /// `URBAN_OUTER` draws the grid with the urban edge there instead,
+    /// measured and drawn on the grid alone (`metrics::measure_grid`), since
+    /// the rest of the world doesn't follow other radii. `URBAN_RINGS` and
+    /// `URBAN_OUTER_SPOKES` set the rings of blocks and the outer rings'
+    /// bearings, in either world. Plots v2's grid (#455) is the default
+    /// since the flip (#459).
     #[test]
     #[ignore]
     fn urban_plan_report() {
@@ -189,7 +190,7 @@ mod tests {
         let var = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
         let outer: Option<f64> = var("URBAN_OUTER").map(|v| v.trim().parse().expect("URBAN_OUTER is a radius"));
         let mut params = match outer {
-            Some(r) => WorldGenParams { urban_outer_radius: r, ..super::super::metrics::v2(seed) },
+            Some(r) => WorldGenParams { seed, urban_outer_radius: r, ..Default::default() },
             None => WorldGenParams { seed, ..Default::default() },
         };
         if let Some(rings) = var("URBAN_RINGS") {
@@ -207,7 +208,7 @@ mod tests {
         let edge = params.urban_outer_radius;
         let r = edge + 100.0;
         let world = match outer {
-            Some(_) => format!("v2 grid, edge r{edge:.0}"),
+            Some(_) => format!("grid, edge r{edge:.0}"),
             None => format!("seed {seed}"),
         };
         let views = [

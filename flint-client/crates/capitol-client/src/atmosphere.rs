@@ -8,7 +8,7 @@
 //! light flattens into a map (P3.9), whatever the hour.
 //!
 //! Fog works on distance from the camera, and from high up all of the city
-//! is far away: at the map view (1000 m up) the scene's fog would cover it in
+//! is far away: at the map view (1200 m up) the scene's fog would cover it in
 //! haze. So the density eases to nothing as the camera climbs. Fog stays on
 //! the whole way: the canals' water takes the scene's fog like the land does
 //! (Flint ADR 0078, H10), so at density zero it's clear too.
@@ -48,12 +48,12 @@ use crate::world::mist;
 /// quay and tower view.
 pub const CLEAR_FROM: f32 = 100.0;
 /// Above this the fog's density is zero. The district view (about 230 m) and
-/// the map (1000 m) see the city clear.
+/// the map (1200 m) see the city clear.
 pub const CLEAR_BY: f32 = 250.0;
 /// From this height the light starts to flatten: above the district view,
 /// so the city keeps its dusk until it's well on the way to a map.
 pub const FLAT_FROM: f32 = 280.0;
-/// By this height the light is flat. The rig's map is 1000 m up.
+/// By this height the light is flat. The rig's map is 1200 m up.
 pub const FLAT_BY: f32 = 600.0;
 // The fog is gone before the light starts to change.
 const _: () = assert!(CLEAR_BY <= FLAT_FROM);
@@ -339,7 +339,7 @@ mod tests {
         for height in [5.0, 25.0, 210.0, 260.0] {
             assert_eq!(flatness(height), 0.0, "{height} m");
         }
-        // The rig's map (1000 m) is flat.
-        assert_eq!(flatness(1000.0), 1.0);
+        // The rig's map (1200 m) is flat.
+        assert_eq!(flatness(1200.0), 1.0);
     }
 }

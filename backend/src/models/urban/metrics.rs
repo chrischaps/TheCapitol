@@ -8,7 +8,6 @@ use capitol_protocol::fmath::StableMath;
 use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot};
 use serde::Serialize;
 
-use super::UrbanParams;
 use crate::models::lot_clearance::finish_lots;
 use crate::models::station_room;
 use crate::models::street_plan;
@@ -60,24 +59,6 @@ fn quantile(sorted: &[f64], q: f64) -> f64 {
         return f64::NAN;
     }
     sorted[((sorted.len() - 1) as f64 * q).round() as usize]
-}
-
-/// Plots v2's world (#455): the urban edge at r2160 and five rings of blocks,
-/// with the suburb and the rural ring moved out to match. A stand-in for
-/// #454's `WorldGenParams::grown()`. The land and the water don't follow these
-/// radii until #454, and the urban ring doesn't need them, so it's measured
-/// with `measure_grid`, not as a whole world.
-pub fn v2(seed: u64) -> WorldGenParams {
-    WorldGenParams {
-        seed,
-        urban_outer_radius: 2160.0,
-        suburban_outer_radius: 3600.0,
-        rural_outer_radius: 6100.0,
-        // 32 bearings round the outer ring of blocks, past r1800, so no
-        // block is much over 500 long: at 24 they'd be 540 out there.
-        urban: UrbanParams { rings: 5, outer_spokes: 32, ..UrbanParams::default() },
-        ..WorldGenParams::default()
-    }
 }
 
 /// The world `params` makes, and its urban numbers.

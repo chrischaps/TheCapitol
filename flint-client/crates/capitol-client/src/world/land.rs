@@ -401,7 +401,7 @@ pub(crate) mod tests {
         }
         let top = (0..360)
             .map(|deg| {
-                let [x, y] = polar(6400.0, deg as f64 + 22.5);
+                let [x, y] = polar(7900.0, deg as f64 + 22.5);
                 rise_on(f, to_world(x, y))
             })
             .fold(0.0, f32::max);

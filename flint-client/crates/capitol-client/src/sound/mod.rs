@@ -45,7 +45,7 @@ pub mod dsp;
 pub mod library;
 
 use crate::settings::Volumes;
-use capitol_protocol::rules::{RURAL_OUTER_RADIUS, SUBURBAN_OUTER_RADIUS};
+use capitol_protocol::rules::{RURAL_OUTER_RADIUS, SUBURBAN_OUTER_RADIUS, URBAN_OUTER_RADIUS};
 use dsp::{smoothstep, Rng};
 use flint_core::{EntityId, Vec3};
 use flint_player::{Bus, ExtensionCtx, SoundOptions};
@@ -112,23 +112,29 @@ const RURAL_EDGE: f32 = RURAL_OUTER_RADIUS as f32;
 /// Where the suburb's gardens give way to the farms: the breeze gives way
 /// to the open country's wind across it.
 const SUBURB_EDGE: f32 = SUBURBAN_OUTER_RADIUS as f32;
+/// Where the city's streets give way to the gardens: the city's murmur has
+/// gone by just inside it, and the breeze and the birds come in across it.
+/// They were fixed at r1700 to r1900 while it stood at r1800, and follow it
+/// out since Plots v2 (#459).
+const URBAN_EDGE: f32 = URBAN_OUTER_RADIUS as f32;
 /// How many of the gardens' birds still call over the farms, which run on
-/// 1600 deep to the foot of the ranges since #308.
+/// 2500 deep to the foot of the ranges since Plots v2 (#459; 1600 since
+/// #308).
 const FARM_BIRDS: f32 = 0.4;
 
 /// The mix at `r` server units from the centre, `shore` units from the
 /// nearest water's edge (0 over the water) and with the camera `height`
 /// metres above the ground.
 pub fn mix(r: f32, shore: f32, height: f32) -> Mix {
-    let city = 1.0 - smoothstep(500.0, 1700.0, r);
-    let breeze = smoothstep(900.0, 1800.0, r) * (1.0 - smoothstep(SUBURB_EDGE, SUBURB_EDGE + 600.0, r));
+    let city = 1.0 - smoothstep(500.0, URBAN_EDGE - 100.0, r);
+    let breeze = smoothstep(900.0, URBAN_EDGE, r) * (1.0 - smoothstep(SUBURB_EDGE, SUBURB_EDGE + 600.0, r));
     let wind = smoothstep(SUBURB_EDGE - 100.0, SUBURB_EDGE + 700.0, r);
     // Equal power across the three, whatever their sum.
     let sum = (city + breeze + wind).max(1e-6);
     let ground = 1.0 - smoothstep(80.0, 450.0, height);
     let air = 1.0 - ground;
     // The gardens' birds, fewer over the farms, and none up in the ranges.
-    let birds = smoothstep(1000.0, 1900.0, r)
+    let birds = smoothstep(1000.0, URBAN_EDGE + 100.0, r)
         * (1.0 - (1.0 - FARM_BIRDS) * smoothstep(SUBURB_EDGE, SUBURB_EDGE + 600.0, r))
         * (1.0 - smoothstep(RURAL_EDGE - 400.0, RURAL_EDGE + 200.0, r));
     Mix {

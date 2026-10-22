@@ -252,7 +252,13 @@ const fn soft(metric: &'static str, label: &'static str, check: Check) -> Target
     Target { metric, label, check, hard: false }
 }
 
-/// The targets table in `the-capitol-suburb-v2.md` §4.4.
+/// The targets table in `the-capitol-suburb-v2.md` §4.4: Plots v2's suburb
+/// (#456), the only one since the flip (#459). Lots of about 140 × 130
+/// that take 6 stations, a whole workshop, and stems and street spacing
+/// that grow with them. The plan first wanted 80% to take 8, which pies and
+/// the fans round U-turns can't; Chris settled on 90% taking 6 (#466,
+/// #468). Before the flip the lots were about 100 × 105, 70% taking 4,
+/// with stems to 300 and rows about 236 apart.
 pub const TARGETS: &[Target] = &[
     Target { metric: "audit_issues", label: "street_plan::audit issues", check: Check::Max(0.0), hard: true },
     soft("four_ways", "suburban 4-ways", Check::Max(0.0)),
@@ -261,59 +267,29 @@ pub const TARGETS: &[Target] = &[
     soft("t_spacing_p10", "T spacing along a road, p10", Check::Min(150.0)),
     soft("entrances_min", "entrances per neighbourhood, fewest", Check::Min(2.0)),
     soft("entrances_max", "entrances per neighbourhood, most", Check::Max(4.0)),
-    soft("culdesac_max_len", "longest cul-de-sac stem", Check::Max(300.0)),
+    soft("culdesac_max_len", "longest cul-de-sac stem", Check::Max(400.0)),
     soft("culdesac_max_lots", "most lots on a cul-de-sac", Check::Max(20.0)),
-    soft("parallel_spacing_median", "parallel spacing, median", Check::Range(216.0, 256.0)),
-    soft("parallel_spacing_p5", "parallel spacing, p5", Check::Min(200.0)),
+    soft("parallel_spacing_median", "parallel spacing, median", Check::Range(264.0, 304.0)),
+    soft("parallel_spacing_p5", "parallel spacing, p5", Check::Min(240.0)),
     soft("connected_share", "streets connected to an arterial", Check::Min(1.0)),
-    soft("lot_area_median", "lot area, median", Check::Range(9000.0, 12000.0)),
-    soft("lot_area_p5", "lot area, p5", Check::Min(6000.0)),
-    soft("lot_area_p95", "lot area, p95", Check::Max(15000.0)),
-    soft("lot_width_median", "lot width at mid-depth, median", Check::Range(90.0, 110.0)),
-    soft("takes_four_share", "lots that take 4 stations", Check::Min(0.70)),
-    soft("lot_depth_median", "lot depth, median", Check::Range(100.0, 125.0)),
+    soft("lot_area_median", "lot area, median", Check::Range(15000.0, 19000.0)),
+    soft("lot_area_p5", "lot area, p5", Check::Min(10000.0)),
+    soft("lot_area_p95", "lot area, p95", Check::Max(28000.0)),
+    soft("lot_width_median", "lot width at mid-depth, median", Check::Range(125.0, 155.0)),
+    soft("takes_six_share", "lots that take 6 stations", Check::Min(0.90)),
+    soft("lot_depth_median", "lot depth, median", Check::Range(120.0, 140.0)),
     soft("convex_share", "convex lots", Check::Min(1.0)),
     Target { metric: "overlaps", label: "lot-lot overlaps", check: Check::Max(0.0), hard: true },
     soft("trimmed_share", "lots trimmed by finish_lots", Check::Max(0.10)),
     soft("dropped_share", "lots dropped by finish_lots", Check::Max(0.03)),
     soft("cover_lots", "coverage: lots", Check::Min(0.55)),
     soft("cover_roads", "coverage: roads", Check::Range(0.15, 0.22)),
-    soft("cover_green", "coverage: green", Check::Range(0.08, 0.20)),
+    soft("cover_green", "coverage: green", Check::Range(0.08, 0.27)),
     soft("cover_gap", "coverage: gap", Check::Max(0.05)),
     soft("arterial_fronting", "lots fronting arterials", Check::Max(0.0)),
     // "Well under the 5 s test" in a debug build; the report runs in release.
     soft("gen_ms", "generation (ms)", Check::Max(2500.0)),
 ];
-
-/// The suburb of Plots v2 (#456, `the-capitol-suburb-v2.md` §4.4): the
-/// targets of [`TARGETS`] that its bigger lots move, each by the metric it
-/// stands in for. Lots of about 140 × 130 that take 6 stations, a whole
-/// workshop, not 100 × 105 that take 4, and stems and street spacing that
-/// grow with them. The plan first wanted 80% to take 8, which pies and the
-/// fans round U-turns can't; Chris settled on 90% taking 6 (#466, #468).
-pub const GROWN_TARGETS: &[(&str, Target)] = &[
-    ("culdesac_max_len", soft("culdesac_max_len", "longest cul-de-sac stem", Check::Max(400.0))),
-    ("parallel_spacing_median", soft("parallel_spacing_median", "parallel spacing, median", Check::Range(264.0, 304.0))),
-    ("parallel_spacing_p5", soft("parallel_spacing_p5", "parallel spacing, p5", Check::Min(240.0))),
-    ("lot_area_median", soft("lot_area_median", "lot area, median", Check::Range(15000.0, 19000.0))),
-    ("lot_area_p5", soft("lot_area_p5", "lot area, p5", Check::Min(10000.0))),
-    ("lot_area_p95", soft("lot_area_p95", "lot area, p95", Check::Max(28000.0))),
-    ("lot_width_median", soft("lot_width_median", "lot width at mid-depth, median", Check::Range(125.0, 155.0))),
-    ("takes_four_share", soft("takes_six_share", "lots that take 6 stations", Check::Min(0.90))),
-    ("lot_depth_median", soft("lot_depth_median", "lot depth, median", Check::Range(120.0, 140.0))),
-    ("cover_green", soft("cover_green", "coverage: green", Check::Range(0.08, 0.27))),
-];
-
-/// The targets a plan is held to: [`TARGETS`], or Plots v2's where `grown`.
-pub fn targets(grown: bool) -> Vec<&'static Target> {
-    TARGETS
-        .iter()
-        .map(|t| match GROWN_TARGETS.iter().find(|(metric, _)| grown && *metric == t.metric) {
-            Some((_, g)) => g,
-            None => t,
-        })
-        .collect()
-}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Violation {
@@ -327,11 +303,11 @@ pub struct Violation {
 /// The targets `m` misses. A metric with nothing to measure (no parallel
 /// streets, say) misses nothing.
 pub fn violations(m: &Metrics) -> Vec<Violation> {
-    violations_of(m, &targets(false))
+    violations_of(m, TARGETS)
 }
 
 /// The targets of `targets` that `m` misses.
-pub fn violations_of(m: &Metrics, targets: &[&'static Target]) -> Vec<Violation> {
+pub fn violations_of(m: &Metrics, targets: &[Target]) -> Vec<Violation> {
     targets
         .iter()
         .filter_map(|t| {
@@ -848,19 +824,19 @@ fn bounds(c: &[P; 4]) -> (P, P) {
     (lo, hi)
 }
 
-/// What a Plots v2 suburb (#456) holds of its lots, where the patterns
-/// differ: the share taking 6 stations, the median area's top, the median
-/// depth's floor and the green's top. The rest is the same for all.
-pub struct Grown {
+/// What the suburb (Plots v2's since #456, #459) holds of its lots, where
+/// the patterns differ: the share taking 6 stations, the median area's
+/// top, the median depth's floor and the green's top. The rest is the same
+/// for all.
+pub struct Lots {
     pub takes_six: f64,
     pub area_max: f64,
     pub depth_min: f64,
     pub green_max: f64,
 }
 
-impl Grown {
-    /// The street invariants, as at today's radii, with Plots v2's longer
-    /// stems (`NeighbourhoodParams::grown`).
+impl Lots {
+    /// The street invariants, with Plots v2's longer stems (400, not 300).
     pub fn assert_streets(m: &Metrics, why: &str) {
         assert_eq!(m.audit_issues, 0, "{why}");
         assert_eq!(m.four_ways, 0, "{why}");
@@ -983,10 +959,9 @@ mod tests {
     fn targets_name_real_metrics() {
         let m = Metrics { cover_gap: Some(0.0), ..Default::default() };
         let json = serde_json::to_value(&m).unwrap();
-        for t in targets(false).into_iter().chain(targets(true)) {
+        for t in TARGETS {
             assert!(json.get(t.metric).is_some(), "{} is not a metric", t.metric);
         }
-        assert!(GROWN_TARGETS.iter().all(|(metric, _)| TARGETS.iter().any(|t| t.metric == *metric)), "a grown target stands in for one of today's");
         let bad = Metrics { overlaps: 2, four_ways: 0, ..Default::default() };
         let v = violations(&bad);
         assert!(v.iter().any(|v| v.metric == "overlaps" && v.hard));

@@ -1,4 +1,4 @@
-//! The urban ring, from the outer canal to r1800: a planned grid of
+//! The urban ring, from the outer canal to r2160: a planned grid of
 //! workshop yards a step from the market (#421, plots plan §5.1).
 //!
 //! From the canal outward:
@@ -11,8 +11,9 @@
 //!   from the quay to the outer ring street. Every third bearing is an
 //!   arterial, which is the spoke there.
 //!
-//! Plots v2 (#455) grows it to five rings of blocks, with the urban edge at
-//! r2160: about 1000 lots. Out there a block between spokes every 15° is
+//! Plots v2 (#455) grew it to five rings of blocks, with the urban edge at
+//! r2160 (r1800 and three rings before the flip, #459): about 1000 lots.
+//! Out there a block between spokes every 15° is
 //! 540 long, so the rings of blocks past r1800 can take bearings of their
 //! own (`outer_spokes`, 32 in v2). The ring street where the two sets meet
 //! has a vertex at every bearing of both: the inner spokes end on it and
@@ -98,9 +99,15 @@ impl Default for UrbanParams {
             bank: 80.0,
             street_width: 16.0,
             lot_depth: 95.0,
-            rings: 3,
+            // Five rings of blocks, the outer ring street at r2125.5 under the
+            // edge at r2160 (Plots v2, #455, #459; three before).
+            rings: 5,
             spokes: 24,
-            outer_spokes: 0,
+            // 32 bearings round the rings of blocks past r1800, so no block
+            // is much over 500 long: at 24 they'd be 540 out there. Their
+            // cross streets meet the ring street at r1919.5 as T-junctions,
+            // offset from the inner spokes (Chris, 2026-10-22).
+            outer_spokes: 32,
             outer_past: 1800.0,
             lot_frontage: 80.0,
         }
@@ -331,38 +338,20 @@ mod tests {
         SEEDS.map(|seed| WorldGenParams { seed, ..WorldGenParams::default() }).into()
     }
 
-    /// The plots plan's §3 targets for the urban ring (#421): 500 to 700
-    /// lots of 7k to 9k, nine in ten taking 4 stations at 50 spacing, laid
-    /// clear of every road so `finish_lots` trims and drops none, on
-    /// streets that meet at shared vertices.
+    /// Plots v2's §3 targets for the urban ring (#455; the default since the
+    /// flip, #459): with the urban edge at r2160 and five rings of blocks,
+    /// 900 to 1100 lots with a median of 7.5k to 9.5k, at least 95% taking 4
+    /// stations at 50 spacing and none taking 5, laid clear of every road so
+    /// `finish_lots` trims and drops none, on streets that meet at shared
+    /// vertices. 32 bearings round the outer rings keep every block about 500
+    /// long or less. Before the flip the targets were #421's: 500 to 700
+    /// lots of 7k to 9k, nine in ten taking 4.
     #[test]
     fn the_urban_grid_meets_its_targets() {
         for params in worlds() {
             let (_, m) = metrics::measure(&params);
             eprintln!("seed {}: {m:?}", params.seed);
             let why = format!("seed {}: {m:#?}", params.seed);
-            assert!((500..=700).contains(&m.lots), "{why}");
-            assert!((7000.0..=9000.0).contains(&m.area_median), "{why}");
-            assert!(m.takes_four_share >= 0.90, "{why}");
-            assert_eq!(m.takes_five, 0, "{why}");
-            assert_eq!((m.trimmed, m.dropped), (0, 0), "{why}");
-            assert_eq!(m.audit_issues, 0, "{why}");
-        }
-    }
-
-    /// Plots v2's §3 targets for the urban ring (#455): with the urban edge
-    /// at r2160 and five rings of blocks, 900 to 1100 lots with a median of
-    /// 7.5k to 9.5k, at least 95% taking 4 stations and none taking 5, with
-    /// no trims and a clean street audit. 32 bearings round the outer ring
-    /// keep every block about 500 long or less. Measured on the grid alone
-    /// (`metrics::measure_grid`), since the land doesn't follow the v2 radii
-    /// until #454.
-    #[test]
-    fn the_v2_urban_grid_meets_its_targets() {
-        for seed in SEEDS {
-            let (_, m) = metrics::measure_grid(&metrics::v2(seed));
-            eprintln!("v2 seed {seed}: {m:?}");
-            let why = format!("v2 seed {seed}: {m:#?}");
             assert!((900..=1100).contains(&m.lots), "{why}");
             assert!((7500.0..=9500.0).contains(&m.area_median), "{why}");
             assert!(m.takes_four_share >= 0.95, "{why}");

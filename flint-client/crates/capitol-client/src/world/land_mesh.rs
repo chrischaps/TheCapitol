@@ -498,7 +498,7 @@ mod tests {
                 flat += 1;
             }
             // Where the ranges stand full height.
-            assert!(chunk_at(at(6400.0)).rises(field), "the ranges at {deg}");
+            assert!(chunk_at(at(7900.0)).rises(field), "the ranges at {deg}");
         }
         assert!(flat > 0);
     }

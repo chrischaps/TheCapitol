@@ -69,7 +69,12 @@ pub enum OnOwned {
 ///
 /// `urban_plot_` is the old urban grid's small lots. The new grid's lots are
 /// `urb_…` (#421), so no row needs renaming: every old id is gone.
-pub const RETIRED_LOTS: &[&str] = &["rural_plot_", "oldfarm_", "oldsub_", "urban_plot_"];
+///
+/// `rw2_` is the suburb's and the farms' lots from before Plots v2's flip
+/// (#459, `20261220_001_plots_v2_flip.sql`), when every zone moved out to its
+/// v2 ring: the new lots keep the `sub_` and `farm_` schemes. The urban lots
+/// kept theirs, since the first three rings of blocks didn't move.
+pub const RETIRED_LOTS: &[&str] = &["rural_plot_", "oldfarm_", "oldsub_", "urban_plot_", "rw2_"];
 
 fn retired(terrain_id: &str) -> bool {
     RETIRED_LOTS.iter().any(|prefix| terrain_id.starts_with(prefix))
@@ -903,6 +908,18 @@ pub(crate) mod tests {
         assert!(retired("oldsub_0_0_3_L_2"));
         assert!(retired("oldsub_5_1_7_B_0"));
         assert!(!retired("sub_0_0_3_L_2"));
+    }
+
+    /// #459: the flip's renamed suburban and rural lots are retired, and
+    /// the new ones, which keep the `sub_` and `farm_` ids, aren't; nor are
+    /// the urban lots, which kept theirs.
+    #[test]
+    fn the_lots_from_before_plots_v2_are_retired_and_the_new_ones_are_not() {
+        assert!(retired("rw2_sub_0_0_3_L_2"));
+        assert!(retired("rw2_farm_3_a0_L_0"));
+        assert!(!retired("sub_0_0_3_L_2"));
+        assert!(!retired("farm_3_2_R_14"));
+        assert!(!retired("urb_0_5_i_2"));
     }
 
     #[test]

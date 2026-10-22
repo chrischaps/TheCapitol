@@ -1,6 +1,6 @@
 # The Capitol: Rural v2, Farms on Lanes
 
-*Plan of record, 2026-10-20. Issues are labelled `rural`. The plan is #282 (R0), and the work runs from #284 to #291. It absorbs #223. Widened the same day to r3000 to r4600, with the world grown to 13600 (RD10, #307 to #310).*
+*Plan of record, 2026-10-20. Issues are labelled `rural`. The plan is #282 (R0), and the work runs from #284 to #291. It absorbs #223. Widened the same day to r3000 to r4600, with the world grown to 13600 (RD10, #307 to #310). Since Plots v2's flip (#459) the ring runs r3600 to r6100 with four main lanes a sector, in a world 16600 across (RD10's V2.0 note).*
 
 This doc is the "Read first" for every `rural` issue. Keep it true: when a decision changes, update it in the same commit.
 
@@ -150,6 +150,8 @@ The rural deed is a flat 250, and the tax is flat too. A farm is four times the 
 
 - *As built (V1.3, [#457](https://github.com/chrischaps/TheCapitol/issues/457)):* **Plots v2's ring, 2500 deep, takes four main roads a sector, not the three the plots plan sized it for.** The bands are shares of the depth now (`RuralParams::mains`: today's two are 330/1600 to 470/1600 and 1130/1600 to 1270/1600, which give today's radii to the bit). Plots v2's four are 0.113 to 0.147, 0.36 to 0.394, 0.606 to 0.64 and 0.853 to 0.887, about 620 apart. Three were tried first, at about 830 apart: the farms fronting them come to about 780 of about 35k, and no draw gets them to 900. The count is road length over farm spacing, a farm must be 132 wide to take 12 and 40 from the next, and three rows of farms on a 2500 ring leave a strip about 270 deep between each pair, which only the side roads cross. A fourth road puts a row of farms in those strips, and four rows of about 270-deep farms back to back fill the depth. **The roads between them:** a concession sector draws its one or two side roads for each pair of neighbouring main roads, and the road to a gate only off the outermost; a winding sector has a cross-lane for each pair. **Winding lanes follow one another** (`RuralParams::lanes_follow`): all a sector's lanes take the first one's sines, each from its own band, so they run alongside like contour lanes. Each still keeps 500 from the next, or is drawn on its own. Their sway is half today's (`RuralParams::sway`, 0.5). Swaying on their own, lanes about 620 apart pinched the farms between them short of 12 in places and left strips in others, and winding sectors carried about 103 farms against about 120 in a concession one; following, about 108.
 
+- *As built (V2.0, [#459](https://github.com/chrischaps/TheCapitol/issues/459)):* **Plots v2's ring is the ring.** `rules::RURAL_OUTER_RADIUS` is 6100 and the suburb's edge 3600, so the ring is r3600 to r6100, 2500 deep, and the world is 16600 across, centred on (8300, 8300): the wilds keep their 2200 and run r6100 to r8300. `RuralParams::default()` is V1.3's four mains with its farms (the `v2()` helper is gone), and §5's v2 targets are the only ones (`metrics::TARGETS`; `farms_meet_their_targets` holds them with the water's reach). On the default world: 901 farms of about 35.1k, 42% built, every one taking 12. The land rises from r6200 and stands full height at r7900; the water keeps out past r3750 and reaches about half way across the farms. The spawn is r3950 on the south arterial, in the inner band, and moved 600 out with the suburb's edge. One migration (`20261220_001_plots_v2_flip.sql`) moved every stored position by +1500, retired the old farms as `rw2_farm_…`, and moved the seeded grass out with the ring; every planned node was re-planned (`post-content/20261220_001_plots_v2_flip_nodes.sql`).
+
 **The cost.** This is the third time the whole world has moved on purpose (after B1 and W1). Every position in a live database shifts once, so the change can't land in the middle of a citizens' soak (#257, #306). There's also more to walk: the edge of the wilds is 800 further from the tower.
 
 ## 4. The layout, step by step
@@ -180,18 +182,20 @@ R1's harness prints these, and R5's test asserts the hard ones over seeds 42, 7,
 
 | Metric | Target | Hard? |
 |---|---|---|
-| Farms | 350 to 450 (95 to 135 before #423, 45 to 65 before RD10) | yes |
-| Mean farm area | 32k to 42k (100k to 140k before #423) | soft |
-| Ring built share | 30 to 40% | soft |
-| Built share of each of the 16 half-sectors | 20 to 55% | yes |
+| Farms | 850 to 1050 since Plots v2's flip (#459; 350 to 450 from #423, 95 to 135 before it, 45 to 65 before RD10) | yes |
+| Mean farm area | 31k to 38k (32k to 42k from #423, soft; 100k to 140k before it) | yes |
+| Ring built share | 40 to 50% (30 to 40%, soft, before #459) | yes |
+| Farms that take 12 stations (`station_room::takes`) | ≥ 99% (since #459) | yes |
+| Built share of each of the 16 half-sectors | 20 to 60% (20 to 55% before #459) | yes |
 | CV of the half-sectors' built shares | ≤ 0.30 | soft |
 | Sectors of each character | ≥ 3 | yes |
-| Main roads in a sector, arterial to arterial | ≥ 2 | yes |
-| Roads joining them, in a sector | ≥ 1 | yes |
+| Main roads in a sector, arterial to arterial | ≥ 4 (≥ 2 before #459) | yes |
+| Roads joining them, in a sector | ≥ 3 (≥ 1 before #459) | yes |
 | `street_plan::audit` on rural roads | clean but for farm-gate ends | yes |
 | Loose road ends off a farm gate | 0 | yes |
 | Farms on water | 0 | yes |
 | Gap between farms | ≥ 40 | yes |
+| The water's deepest reach, across the plain from its edge to the water's rim | ≥ 49% (since #472) | yes |
 
 **As built** (R5, #288): the farms under `layout = Farms`. `rural::tests::farms_meet_their_targets` asserts the hard rows on these four seeds and prints the soft misses (none). R4's figures are in its §8 row.
 
@@ -225,7 +229,7 @@ R1's harness prints these, and R5's test asserts the hard ones over seeds 42, 7,
 
 On seeds 0 to 39: 363 to 380 farms, 35.2k to 36.7k on average, 34 to 36% built, every half-sector 25 to 41%, a CV of 0.09 or less, and every hard row met.
 
-**Plots v2's ring** (V1.3, [#457](https://github.com/chrischaps/TheCapitol/issues/457)): r3600 to r6100 in the grown world, with `RuralParams::v2()`'s four main roads and farms, against `metrics::V2_TARGETS` (plots plan §3). `rural::tests::v2_farms_meet_their_targets` asserts the hard rows on the four seeds, and `rural-plan.ps1 -V2` draws them.
+**Plots v2's ring** (V1.3, [#457](https://github.com/chrischaps/TheCapitol/issues/457); the default since the flip, [#459](https://github.com/chrischaps/TheCapitol/issues/459)): r3600 to r6100 in the 16600 world, with four main roads and its farms, against the targets above (plots plan §3; `metrics::V2_TARGETS` until the flip folded them into `TARGETS`). `rural::tests::farms_meet_their_targets` asserts the hard rows on the four seeds (`v2_farms_meet_their_targets` until the flip), and `rural-plan.ps1` draws them (`-V2` until the flip).
 
 | Metric | Target | 42 | 7 | 1234 | 99999 |
 |---|---|---:|---:|---:|---:|
@@ -360,7 +364,7 @@ Follow-up: [#292](https://github.com/chrischaps/TheCapitol/issues/292), the rura
 
 Later: [#423](https://github.com/chrischaps/TheCapitol/issues/423) (plots plan `the-capitol-plots.md` §5.3) made the farms smaller, about 400 of about 36k (RD6's #423 note, §5's as-built table). Capacity at the new size is [#424](https://github.com/chrischaps/TheCapitol/issues/424).
 
-Plots v2 (`the-capitol-plots-v2.md`): [#457](https://github.com/chrischaps/TheCapitol/issues/457) (V1.3) laid the farms for the grown ring, r3600 to r6100: four main roads a sector, about 900 farms of about 35k, every one taking 12, with the water half way across them since [#472](https://github.com/chrischaps/TheCapitol/issues/472) (RD6's, RD7's and RD10's V1.3 notes, §5's v2 table). The flip ([#459](https://github.com/chrischaps/TheCapitol/issues/459)) makes them the default.
+Plots v2 (`the-capitol-plots-v2.md`): [#457](https://github.com/chrischaps/TheCapitol/issues/457) (V1.3) laid the farms for the grown ring, r3600 to r6100: four main roads a sector, about 900 farms of about 35k, every one taking 12, with the water half way across them since [#472](https://github.com/chrischaps/TheCapitol/issues/472) (RD6's, RD7's and RD10's V1.3 notes, §5's v2 table). The flip ([#459](https://github.com/chrischaps/TheCapitol/issues/459)) made them the default (RD10's V2.0 note).
 
 ## 9. Risks
 

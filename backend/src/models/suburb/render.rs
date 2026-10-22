@@ -23,9 +23,10 @@ const OUT_PX: f64 = 2400.0;
 /// The key takes a column this wide on the left, so it never covers the plan.
 const LEGEND_PX: f64 = 480.0;
 /// Lots are shaded from this area...
-const AREA_LO: f64 = 6000.0;
-/// ...to this one, the p5 and p95 targets.
-const AREA_HI: f64 = 15000.0;
+const AREA_LO: f64 = 10000.0;
+/// ...to this one, the p5 and p95 targets (Plots v2's since the flip, #459;
+/// 6000 and 15000 before).
+const AREA_HI: f64 = 28000.0;
 /// A lot that doesn't take `View::takes` stations is this colour.
 const SHORT: &str = "#d8c9a3";
 
@@ -133,7 +134,7 @@ pub struct View<'a> {
     /// Lots are shaded by area over this range: the p5 and p95 targets.
     pub area: (f64, f64),
     /// Lots that don't take this many stations are drawn in `SHORT`, so
-    /// the plan shows where they are (8 for Plots v2's lots, #456).
+    /// the plan shows where they are (6 for Plots v2's lots, #456, #468).
     pub takes: Option<usize>,
 }
 
@@ -678,7 +679,7 @@ fn legend(s: &mut String, v: &View, lo: P, k: f64, h: f64) {
 }
 
 /// The markdown table: a row per target, a column per plan.
-pub fn table(plans: &[(String, Metrics, Vec<Violation>)], targets: &[&Target]) -> String {
+pub fn table(plans: &[(String, Metrics, Vec<Violation>)], targets: &[Target]) -> String {
     let mut s = String::new();
     let _ = write!(s, "| metric | target |");
     for (name, ..) in plans {
@@ -727,7 +728,7 @@ pub fn table(plans: &[(String, Metrics, Vec<Violation>)], targets: &[&Target]) -
 }
 
 /// A page with the table and every plan view, in a grid.
-pub fn index_html(plans: &[(String, Metrics, Vec<Violation>)], targets: &[&Target]) -> String {
+pub fn index_html(plans: &[(String, Metrics, Vec<Violation>)], targets: &[Target]) -> String {
     let names: Vec<&str> = plans.iter().map(|(name, ..)| name.as_str()).collect();
     page("Suburb plan", &table(plans, targets), &names)
 }
@@ -791,7 +792,6 @@ mod tests {
 
     use super::*;
     use crate::models::suburb::metrics::{Measurement, TARGETS};
-    use crate::models::suburb::tests::grown_world;
     use crate::models::terrain::{NeighbourhoodParams, NeighbourhoodPattern, SuburbanGenParams, WorldGenParams};
     use capitol_protocol::rules::{SUBURBAN_OUTER_RADIUS, URBAN_OUTER_RADIUS};
 
@@ -806,8 +806,6 @@ mod tests {
     /// Env: `SUBURB_SEEDS` (comma-separated, default 42,7,1234,99999),
     /// `SUBURB_SECTOR` (0–7, one sector only),
     /// `SUBURB_INNER` and `SUBURB_OUTER` (the suburb's radii, to try other depths; #117),
-    /// `SUBURB_PARAMS` (`today`, the default, or `grown`: Plots v2's lots,
-    /// `NeighbourhoodParams::grown`, at r2160 to r3600 unless the radii say otherwise; #456),
     /// `SUBURB_PATTERN` (`warped_parallels`, `loops_and_lollipops` or `central_loop`: force one
     /// wherever it fits; #109) and `SUBURB_OUT` (default `target/suburb-plan/` at the workspace root).
     #[test]
@@ -845,16 +843,10 @@ mod tests {
         let radius = |name: &str, default: f64| -> f64 {
             env_or(name, &default.to_string()).trim().parse().unwrap_or_else(|_| panic!("{name} is a number"))
         };
-        let grown = match env_or("SUBURB_PARAMS", "today").trim().to_lowercase().as_str() {
-            "today" => false,
-            "grown" => true,
-            v => panic!("SUBURB_PARAMS={v}: today or grown"),
-        };
-        let defaults = if grown { grown_world(0) } else { WorldGenParams::default() };
+        // Plots v2's lots since the flip (#459); `SUBURB_PARAMS` is gone.
+        let defaults = WorldGenParams::default();
         let inner = radius("SUBURB_INNER", defaults.urban_outer_radius);
         let outer = radius("SUBURB_OUTER", defaults.suburban_outer_radius);
-        let layout = if grown { format!("{layout}-grown") } else { layout };
-        let targets = metrics::targets(grown);
         assert!(
             defaults.guild_outer_radius < inner && inner < outer && outer < defaults.rural_outer_radius,
             "SUBURB_INNER and SUBURB_OUTER must sit between the guild district and the rural edge"
@@ -879,7 +871,7 @@ mod tests {
             let mut m = measured.metrics;
             m.layout = layout.clone();
             let gen_ms = m.gen_ms;
-            let viol = metrics::violations_of(&m, &targets);
+            let viol = metrics::violations_of(&m, TARGETS);
 
             let name = match sector {
                 Some(s) => format!("{layout}-{seed}-s{s}"),
@@ -902,8 +894,8 @@ mod tests {
                 violations: &viol,
                 neighbourhoods: &neighbourhoods,
                 greens: &greens,
-                area: if grown { (10000.0, 28000.0) } else { (AREA_LO, AREA_HI) },
-                takes: grown.then_some(6),
+                area: (AREA_LO, AREA_HI),
+                takes: Some(6),
             };
             std::fs::write(out.join(format!("{name}.svg")), svg(&view)).unwrap();
             let json = serde_json::json!({ "metrics": m, "violations": viol, "markers": measured.markers });
@@ -918,9 +910,9 @@ mod tests {
             plans.push((name, m, viol));
         }
 
-        let table = table(&plans, &targets);
+        let table = table(&plans, TARGETS);
         std::fs::write(out.join("report.md"), &table).unwrap();
-        std::fs::write(out.join("index.html"), index_html(&plans, &targets)).unwrap();
+        std::fs::write(out.join("index.html"), index_html(&plans, TARGETS)).unwrap();
         eprintln!("\n{table}\nwrote {}", out.display());
     }
 
@@ -969,7 +961,7 @@ mod tests {
         assert!(doc.starts_with("<svg") && doc.trim_end().ends_with("</svg>"));
         assert!(doc.contains("culdesac_1 · cul-de-sac"));
         assert!(doc.contains(Role::Arterial.colour()));
-        let md = table(&[("t".into(), measured.metrics, viol)], &metrics::targets(false));
+        let md = table(&[("t".into(), measured.metrics, viol)], TARGETS);
         assert_eq!(md.lines().count(), 2 + 7 + TARGETS.len() + 1);
     }
 }

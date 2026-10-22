@@ -45,8 +45,8 @@ fn with_players() -> GameState {
     let mut state = connected();
     state.apply_ws(&M::Positions {
         players: vec![
-            pos(ME, "Ada", 6800.0, 6800.0),
-            pos(OTHER, "Brin", 7100.0, 6800.0),
+            pos(ME, "Ada", 8300.0, 8300.0),
+            pos(OTHER, "Brin", 8600.0, 8300.0),
         ],
     });
     state
@@ -56,8 +56,8 @@ fn node(id: Uuid, state: &str) -> ResourceNodeInfo {
     ResourceNodeInfo {
         id,
         resource_type: "grass".into(),
-        x: 6810.0,
-        y: 6810.0,
+        x: 8310.0,
+        y: 8310.0,
         state: state.into(),
     }
 }
@@ -69,8 +69,8 @@ fn station(id: Uuid, owner: Uuid) -> StationInfo {
         name: "Workbench".into(),
         category: "crafting".into(),
         icon: Some("workbench".into()),
-        x: 6820.0,
-        y: 6820.0,
+        x: 8320.0,
+        y: 8320.0,
         owner_id: owner,
         container_id: Some(STATION_BOX),
         interaction_range: 75.0,
@@ -112,9 +112,9 @@ fn plot(owner: Option<Uuid>) -> PlotInfo {
     PlotInfo {
         id: PLOT,
         zone_id: "urban".into(),
-        world_x: 8000.0,
-        world_y: 6800.0,
-        bounds: Bounds::new(7980.0, 6780.0, 8020.0, 6820.0),
+        world_x: 9500.0,
+        world_y: 8300.0,
+        bounds: Bounds::new(9480.0, 8280.0, 9520.0, 8320.0),
         size_category: "small".into(),
         plot_type: "standard".into(),
         owner_id: owner,
@@ -467,7 +467,7 @@ fn first_position_sets_the_starting_zone() {
     assert_eq!(state.zone(), Some(Zone::Wilderness));
     // Moving doesn't recompute it; the server says when the zone changes.
     let events = state.apply_ws(&M::Positions {
-        players: vec![pos(ME, "Ada", 6800.0, 6800.0)],
+        players: vec![pos(ME, "Ada", 8300.0, 8300.0)],
     });
     assert_eq!(events, vec![StateEvent::PositionsUpdated]);
     assert_eq!(state.zone(), Some(Zone::Wilderness));
@@ -553,12 +553,12 @@ fn movement_blocked_moves_me_back() {
         player_id,
         reason: "Cannot cross the moat without a bridge".into(),
         water_id: "moat".into(),
-        stopped_x: 6790.0,
-        stopped_y: 6801.0,
+        stopped_x: 8290.0,
+        stopped_y: 8301.0,
     };
     // Sent only to the blocked player, but filter anyway.
     assert!(state.apply_ws(&blocked(OTHER)).is_empty());
-    assert_eq!(state.player(OTHER).unwrap().x, 7100.0);
+    assert_eq!(state.player(OTHER).unwrap().x, 8600.0);
 
     let events = state.apply_ws(&blocked(ME));
     assert_eq!(
@@ -566,12 +566,12 @@ fn movement_blocked_moves_me_back() {
         vec![StateEvent::MovementBlocked {
             reason: "Cannot cross the moat without a bridge".into(),
             water: "moat".into(),
-            x: 6790.0,
-            y: 6801.0
+            x: 8290.0,
+            y: 8301.0
         }]
     );
     let me = state.local_player().unwrap();
-    assert_eq!((me.x, me.y), (6790.0, 6801.0));
+    assert_eq!((me.x, me.y), (8290.0, 8301.0));
 }
 
 #[test]
@@ -1049,8 +1049,8 @@ fn station_placed_fills_in_from_the_catalog() {
         station_type: "storage_chest".into(),
         name: "Storage Chest".into(),
         owner_id: ME,
-        x: 6850.0,
-        y: 6860.0,
+        x: 8350.0,
+        y: 8360.0,
         container_id: STATION_BOX,
         quality: 82,
     });
@@ -1452,8 +1452,8 @@ fn said_is_reported() {
         citizen: true,
         channel: Channel::Local,
         text: "Rope, anyone?".into(),
-        x: 6800.0,
-        y: 6790.5,
+        x: 8300.0,
+        y: 8290.5,
     };
     assert_eq!(
         state.apply_ws(&said),
@@ -1463,8 +1463,8 @@ fn said_is_reported() {
             citizen: true,
             channel: Channel::Local,
             text: "Rope, anyone?".into(),
-            x: 6800.0,
-            y: 6790.5,
+            x: 8300.0,
+            y: 8290.5,
         }]
     );
 }
@@ -1771,8 +1771,8 @@ fn me_response(online: bool) -> R {
     R::Me(PlayerMeResponse {
         player_id: ME,
         name: "Ada".into(),
-        x: 6800.0,
-        y: 10150.0,
+        x: 8300.0,
+        y: 12250.0,
         zone: "rural".into(),
         strand_balance: 250,
         online,
@@ -1796,15 +1796,15 @@ fn player_me_is_the_local_player_before_any_positions() {
             },
         ]
     );
-    assert_eq!(state.local_player(), Some(&pos(ME, "Ada", 6800.0, 10150.0)));
+    assert_eq!(state.local_player(), Some(&pos(ME, "Ada", 8300.0, 12250.0)));
     assert_eq!(state.strands(), Some(250));
 
     // The first positions moves me without joining me again.
     let events = state.apply_ws(&M::Positions {
-        players: vec![pos(ME, "Ada", 6800.0, 10145.0)],
+        players: vec![pos(ME, "Ada", 8300.0, 12245.0)],
     });
     assert!(!events.contains(&StateEvent::PlayerJoined(ME)));
-    assert_eq!(state.local_player().unwrap().y, 10145.0);
+    assert_eq!(state.local_player().unwrap().y, 12245.0);
 }
 
 #[test]
@@ -1812,7 +1812,7 @@ fn player_me_never_moves_a_player_positions_already_placed() {
     let mut state = with_players();
     let events = state.apply_rest(&me_response(true));
     assert_eq!(events, vec![StateEvent::CurrencyChanged { balance: 250 }]);
-    assert_eq!(state.local_player(), Some(&pos(ME, "Ada", 6800.0, 6800.0)));
+    assert_eq!(state.local_player(), Some(&pos(ME, "Ada", 8300.0, 8300.0)));
 }
 
 #[test]
@@ -1911,8 +1911,8 @@ fn recipes_and_plots_are_stored() {
     );
     assert!(state.apply_rest(&R::Plot(plot(Some(ME)))).is_empty());
     assert_eq!(state.plots().len(), 1);
-    assert!(state.my_plot_at(8000.0, 6800.0).is_some());
-    assert!(state.my_plot_at(8100.0, 6800.0).is_none());
+    assert!(state.my_plot_at(9500.0, 8300.0).is_some());
+    assert!(state.my_plot_at(9600.0, 8300.0).is_none());
 }
 
 #[test]
@@ -2012,8 +2012,8 @@ fn placing_a_station_by_rest_adds_it() {
         station_type: "workbench".into(),
         name: "Workbench".into(),
         owner_id: ME,
-        x: 6820.0,
-        y: 6820.0,
+        x: 8320.0,
+        y: 8320.0,
         container_id: STATION_BOX,
         quality: 50,
     });
@@ -2212,8 +2212,8 @@ fn a_placed_station_takes_its_kind_from_the_catalog() {
         station_type: "storage_chest".into(),
         name: "Storage Chest".into(),
         owner_id: ME,
-        x: 6800.0,
-        y: 6800.0,
+        x: 8300.0,
+        y: 8300.0,
         container_id: Uuid::from_u128(78),
         quality: 82,
     });

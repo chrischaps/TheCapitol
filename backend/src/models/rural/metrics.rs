@@ -173,30 +173,16 @@ const fn soft(metric: &'static str, label: &'static str, check: Check) -> Target
     Target { metric, label, check, hard: false }
 }
 
-/// The targets table in `the-capitol-rural.md` §5.
+/// The targets table in `the-capitol-rural.md` §5: Plots v2's
+/// (`the-capitol-plots-v2.md` §3, V1.3, #457), the only ones since the flip
+/// (#459), for the ring of r3600 to r6100 and four main roads a sector:
+/// about 900 farms of about 35k, built 40 to 50%, nearly every one taking
+/// 12 stations. The farms were 900 to 1100 until #472 let the water half
+/// way across them, as the 1600-deep ring's came, at a cost of about 35.
+/// The rows that hold the ring together are RW1's, with a road joining
+/// each pair of main roads. Before the flip the targets were 350 to 450
+/// farms of 32k to 42k, built 30 to 40%, with two mains and a link.
 pub const TARGETS: &[Target] = &[
-    hard("lots", "farms", Check::Range(350.0, 450.0)),
-    soft("lot_area_mean", "mean farm area", Check::Range(32_000.0, 42_000.0)),
-    soft("built_share", "ring built share", Check::Range(0.30, 0.40)),
-    hard("half_sector_min", "half-sector built share, least", Check::Min(0.20)),
-    hard("half_sector_max", "half-sector built share, most", Check::Max(0.55)),
-    soft("half_sector_cv", "CV of half-sector built shares", Check::Max(0.30)),
-    hard("sector_character_min", "sectors of each character, fewest", Check::Min(3.0)),
-    hard("sector_mains_min", "main roads in a sector, fewest", Check::Min(2.0)),
-    hard("sector_links_min", "roads joining them in a sector, fewest", Check::Min(1.0)),
-    hard("audit_issues", "street_plan::audit issues, but for loose ends", Check::Max(0.0)),
-    hard("loose_ends_off_gate", "loose road ends off a farm gate", Check::Max(0.0)),
-    hard("lots_on_water", "farms on water", Check::Max(0.0)),
-    hard("gap_min", "gap between farms, least", Check::Min(MIN_GAP)),
-];
-
-/// Plots v2's targets (`the-capitol-plots-v2.md` §3, V1.3, #457), for its
-/// ring of r3600 to r6100 and four main roads a sector: about 900 farms of
-/// about 35k, built 40 to 50%, nearly every one taking 12 stations. The
-/// farms were 900 to 1100 until #472 let the water half way across them,
-/// as today's comes, at a cost of about 35. The rows that hold the ring
-/// together are today's, with a road joining each pair of main roads.
-pub const V2_TARGETS: &[Target] = &[
     hard("lots", "farms", Check::Range(850.0, 1050.0)),
     hard("lot_area_mean", "mean farm area", Check::Range(31_000.0, 38_000.0)),
     hard("built_share", "ring built share", Check::Range(0.40, 0.50)),

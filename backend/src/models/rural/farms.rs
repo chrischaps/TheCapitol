@@ -339,7 +339,7 @@ mod tests {
             assert!(m.gap_min.unwrap() >= LOT_GAP - 1e-6, "seed {seed}: two farms {:.1} apart", m.gap_min.unwrap());
             let least = m.half_sector_min.unwrap();
             assert!(least >= 0.20, "seed {seed}: a half-sector {least:.2} built, of {:?}", m.half_sector_shares);
-            assert!((350..=450).contains(&m.lots), "seed {seed}: {} farms", m.lots);
+            assert!((850..=1050).contains(&m.lots), "seed {seed}: {} farms", m.lots);
         }
     }
 

@@ -1366,10 +1366,10 @@ mod tests {
         let [x, y] = shared.move_to.lock().unwrap().unwrap();
         assert!(capitol_protocol::rules::in_world(x, y), "({x}, {y}) is off the disc");
         // Pulled in toward the centre: north-east, on the edge.
-        let (dx, dy) = (x - 6800.0, y - 6800.0);
-        assert!((dx.hypot(dy) - 6800.0).abs() < 0.1 && (dx + dy).abs() < 1e-6);
+        let (dx, dy) = (x - 8300.0, y - 8300.0);
+        assert!((dx.hypot(dy) - 8300.0).abs() < 0.1 && (dx + dy).abs() < 1e-6);
         let [x, y] = clamp_to_world(5.0, -2.5);
-        assert!((x - 6850.0).abs() < 1e-3 && (y - 6775.0).abs() < 1e-3);
+        assert!((x - 8350.0).abs() < 1e-3 && (y - 8275.0).abs() < 1e-3);
     }
 
     #[test]
@@ -1411,7 +1411,7 @@ mod tests {
         assert!(engine.eval::<()>("cap_picked_plot()").is_ok());
         engine.run("cap_pick_plot(5.0, -2.5)").unwrap();
         let [x, y] = shared.pick_plot.lock().unwrap().unwrap();
-        assert!((x - 6850.0).abs() < 1e-3 && (y - 6775.0).abs() < 1e-3);
+        assert!((x - 8350.0).abs() < 1e-3 && (y - 8275.0).abs() < 1e-3);
         *shared.picked_plot.lock().unwrap() = Some(PlotMark {
             outline: vec![[0.0, 0.0], [2.0, 0.0], [2.0, 3.0]],
             y: 0.7,

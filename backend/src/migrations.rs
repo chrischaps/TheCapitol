@@ -236,22 +236,13 @@ mod tests {
         // every planned node with its own rows, #210 swaps the rural veins
         // for more, the flip to the farms (#290) re-plans the nodes they
         // move, and so do the smaller farms (#423), the wider suburban lots
-        // (#422) and the urban grid (#421). The first set's nodes (the
-        // seeded grass) stay.
+        // (#422) and the urban grid (#421). Then Plots v2's flip (#459)
+        // replaces every planned node again with its own rows. The first
+        // set's nodes (the seeded grass) stay.
         assert!(seeds > 0);
         let rows = |sql: &str, prefix: &str| sql.lines().filter(|l| l.trim_start().starts_with(prefix)).count() as i64;
-        let replan = rows(include_str!("../migrations/post-content/20261122_001_rural_widens_nodes.sql"), "('");
-        let veins = include_str!("../migrations/post-content/20261125_001_rural_iron_veins.sql");
-        let veins = rows(veins, "('") - rows(veins, "'");
-        let farms = include_str!("../migrations/post-content/20261126_001_rural_farms_nodes.sql");
-        let farms = rows(farms, "('") - rows(farms, "'");
-        let smaller = include_str!("../migrations/post-content/20261201_001_rural_smaller_farms_nodes.sql");
-        let smaller = rows(smaller, "('") - rows(smaller, "'");
-        let wider = include_str!("../migrations/post-content/20261205_001_suburb_wider_lots_nodes.sql");
-        let wider = rows(wider, "('") - rows(wider, "'");
-        let grid = include_str!("../migrations/post-content/20261207_001_urban_grid_nodes.sql");
-        let grid = rows(grid, "('") - rows(grid, "'");
-        assert_eq!(nodes().await.unwrap(), before + replan + veins + farms + smaller + wider + grid, "the re-plan's nodes and the grass");
+        let flip = rows(include_str!("../migrations/post-content/20261220_001_plots_v2_flip_nodes.sql"), "('");
+        assert_eq!(nodes().await.unwrap(), before + flip, "the re-plan's nodes and the grass");
         let staging: Option<String> =
             sqlx::query_scalar("SELECT to_regclass('resource_node_seeds')::text").fetch_one(&db).await.unwrap();
         assert_eq!(staging, None);

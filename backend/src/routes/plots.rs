@@ -691,7 +691,9 @@ mod tests {
     async fn a_claim_in_the_wilds_is_refused(db: PgPool) {
         let ada = player(&db, "ada", 1_000_000).await;
         let lot = plot(&db, None, 0).await;
-        sqlx::query("UPDATE plots SET world_y = world_y + 5000 WHERE id = $1").bind(lot).execute(&db).await.unwrap();
+        // Out past the rural edge, in the wilds.
+        let (x, y) = (capitol_protocol::rules::CENTER_X, capitol_protocol::rules::CENTER_Y + capitol_protocol::rules::RURAL_OUTER_RADIUS + 700.0);
+        sqlx::query("UPDATE plots SET world_x = $2, world_y = $3 WHERE id = $1").bind(lot).bind(x as f32).bind(y as f32).execute(&db).await.unwrap();
         let (tx, mut rx) = events();
 
         assert!(matches!(claim(&db, &tx, ada, lot, &Tunables::default()).await, Err(AppError::BadRequest(m)) if m == NOT_CLAIMABLE));

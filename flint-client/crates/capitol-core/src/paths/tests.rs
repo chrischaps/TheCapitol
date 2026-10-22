@@ -116,7 +116,7 @@ fn the_edges_near_a_point_come_once_each() {
         let (lo, hi) = if key(a) <= key(b) { (key(a), key(b)) } else { (key(b), key(a)) };
         assert!(seen.insert((lo, hi)), "{a:?}–{b:?} came twice");
     }
-    assert!(graph.edges_near(polar(6790.0, 33.0), 1.0).is_empty());
+    assert!(graph.edges_near(polar(8290.0, 33.0), 1.0).is_empty());
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn the_wilds_are_walked_by_the_trails() {
     };
     let (mut tried, mut found) = (0, 0);
     while tried < 40 {
-        let to = polar(3950.0 + 1700.0 * next(), 360.0 * next());
+        let to = polar(5450.0 + 1700.0 * next(), 360.0 * next());
         // Somewhere a walker could stand: dry, and gentle all round
         let gentle = (0..8).all(|k| {
             let p = (to.0 + 15.0 * (k as f64).cos(), to.1 + 15.0 * (k as f64).sin());
@@ -307,7 +307,7 @@ fn what_the_graph_calls_walkable_the_server_walks() {
     };
     let (mut tried, mut walkable) = (0, 0);
     while tried < 4000 {
-        let a = polar(4800.0 + 1950.0 * next(), 360.0 * next());
+        let a = polar(6300.0 + 1950.0 * next(), 360.0 * next());
         let slope = land::slope_at(a.0, a.1, &land);
         let steep = tried % 2 == 0;
         if slope > CLIFF_SLOPE || (steep && slope < 0.9) || graph.ground.footing(a.0, a.1) != Footing::Dry {
@@ -336,17 +336,20 @@ fn the_walks_the_server_stopped_go_there_and_back() {
     // crest the graph's tests stepped over, the next a ford that ends a
     // quarter short of its river's bank, then one clipped a lake's corner on
     // the way back. The last two had no trail node in sight within 800.
+    // Since Plots v2's flip (#459) each stands 1500 further out on its
+    // bearing, the same depth into the wilds, but the land there is new:
+    // two had no way in, and moved to the nearest spot that has one.
     let (_, graph) = world();
     let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
     for node in [
-        (12803.9, 9775.6),
-        (12847.3, 9445.1),
-        (1825.6, 10172.6),
-        (12217.6, 9420.6),
-        (11878.2, 2714.2),
-        (12152.2, 2837.1),
-        (2403.4, 5223.2),
-        (5215.3, 11587.1),
+        (15652.9, 11950.4),
+        (15721.6, 11546.2),
+        (2084.1, 12514.4),
+        (15137.2, 11613.8),
+        (14546.9, 3273.9),
+        (14857.7, 3444.5),
+        (2491.5, 6216.8),
+        (6243.9, 14511.1),
     ] {
         walk(graph, hall, node);
         walk(graph, node, hall);
@@ -355,10 +358,12 @@ fn the_walks_the_server_stopped_go_there_and_back() {
 
 #[test]
 fn a_pocket_walled_by_crests_has_no_way_in_or_out() {
-    // A copper vein the backend planted where the crests wall it in (#280)
+    // A copper vein the backend planted where the crests wall it in (#280).
+    // Since Plots v2's flip (#459) moved the ranges out, it's a spot in a
+    // pocket of the east-south-east massif, found by searching the wilds.
     let (_, graph) = world();
     let hall = graph.landmark(LandmarkKind::ExchangeHall).unwrap().door;
-    let vein = (8365.8, 783.3);
+    let vein = (15329.1, 11083.0);
     assert_eq!(graph.plan(hall, vein), Err(NoWay::Unreachable));
     assert_eq!(graph.plan(vein, hall), Err(NoWay::Stranded));
 }
@@ -390,3 +395,5 @@ fn walks_go_round_the_ponds_of_the_rural_ring() {
     eprintln!("round {walked} ponds");
     assert!(walked > 0, "no pond in the rural ring to walk round");
 }
+
+

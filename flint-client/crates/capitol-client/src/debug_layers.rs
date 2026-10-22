@@ -319,11 +319,11 @@ mod tests {
     fn the_ground_in_words() {
         let params = land::LandParams::default();
         // The plain is flat; the ranges are not
-        assert_eq!(ground_words(6800.0, 6800.0, &params), "flat");
+        assert_eq!(ground_words(8300.0, 8300.0, &params), "flat");
         let high = (0..360)
             .map(|d| {
                 let a = (d as f64).to_radians();
-                (6800.0 + 6000.0 * a.cos(), 6800.0 + 6000.0 * a.sin())
+                (8300.0 + 7500.0 * a.cos(), 8300.0 + 7500.0 * a.sin())
             })
             .map(|(x, y)| ground_words(x, y, &params))
             .find(|w| w.contains("massif"));

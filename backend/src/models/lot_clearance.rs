@@ -480,9 +480,9 @@ mod tests {
                 *zones.entry(p.zone.as_str()).or_default() += 1;
             }
             eprintln!("{} lots: {:?}", t.terrain_plots.len(), zones);
-            // The neighbourhoods lay about 1200 suburban lots (#422), and the
-            // urban grid about 520 (#421).
-            assert!(zones["urban"] > 400 && zones["suburban"] > 1000 && zones["rural"] > 40, "{zones:?}");
+            // Plots v2's rings (#459): about 1000 urban lots (#455), 1000
+            // suburban (#456) and 900 farms (#457).
+            assert!(zones["urban"] > 900 && zones["suburban"] > 900 && zones["rural"] > 800, "{zones:?}");
             assert!(zones.get("guild_district").copied().unwrap_or(0) >= 40, "{zones:?}");
         }
     }

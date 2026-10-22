@@ -1,6 +1,6 @@
 # The Capitol: The Wilds
 
-*Plan of record, 2026-10-18. Issues are labelled `wilds`. The plan was #193 (W0), and the work runs from #194 to #204.*
+*Plan of record, 2026-10-18. Issues are labelled `wilds`. The plan was #193 (W0), and the work runs from #194 to #204. The wilds have moved out twice since, with the rural ring: to r4600 to r6800 in a 13600 world (RD10, #308), and to r6100 to r8300 in a 16600 world (Plots v2's flip, #459; WD1's notes). The radii in this plan are the 12000 world's unless a note says otherwise.*
 
 ## 1. Vision
 
@@ -40,6 +40,7 @@ Chris decided the shape on 2026-10-18: grow the world, use a real height field, 
   - *Why shift rather than allow negative coordinates:* every bounds check, fixture and client assumes 0..WORLD_SIZE, and B1 already did a world rescale this way.
 - **The edge.** The world is the r6000 disc. The square's corners are out of bounds.
 - *Later (2026-10-20, rural plan RD10, #307):* the rural ring widens to r4600, and the world grows again, to 13600 (centre (6800, 6800), a +800 shift). The wilds keep their 2200 depth, at r4600 to r6800, and are regenerated there ([#308](https://github.com/chrischaps/TheCapitol/issues/308)). The radii in this plan are the 12000 world's.
+- *Later (2026-10-22, Plots v2, [#459](https://github.com/chrischaps/TheCapitol/issues/459)):* every zone moves out (urban to r2160, the suburb to r3600, the rural ring to r6100), and the world grows to 16600 (centre (8300, 8300), a +1500 shift). The wilds keep their 2200 depth, at r6100 to r8300. Since #454 the land, the water, the trails and the wild nodes are laid past the rural edge (`rules::Frame`), so they followed the table without a change of their own: the foothills from r6200, the ranges full height at r7900, the water's rim at r3750, and `wilds.toml`'s quality by depth past the edge. The height is still keyed on the offset from the centre, so the noise the ranges are cut from is read in the same place, but the ranges now stand 1500 further out on it: the land is new, and so are the water, the trails, the nodes and the Flint client's fixed views (`--view range` and `from-wilderness`).
 
 ### WD2. The height field is a shared, pure function ([W2 #195](https://github.com/chrischaps/TheCapitol/issues/195))
 

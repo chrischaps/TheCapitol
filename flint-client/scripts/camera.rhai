@@ -9,7 +9,7 @@
 //     sky in the top third of the frame, and from the outer zones the
 //     tower on the horizon;
 //   - street (32 m): about 50° down, where the camera rests;
-//   - map (1000 m): straight down, north at the top, the whole r6800
+//   - map (1200 m): straight down, north at the top, the whole r8300
 //     world in frame, the light flattened into the 2D client's palette
 //     (atmosphere.rs keys that on height).
 //
@@ -84,9 +84,9 @@
 // Camera distance from the point it looks at (m) at zoom 0 and zoom 1.
 // Zoom is linear in the log of distance, so each wheel notch feels alike.
 fn near_distance() { 4.5 }
-// The far end frames the whole world at the rig's 70° (680 m, r6800, since
-// #308 grew it; 880 m framed r6000).
-fn far_distance() { 1000.0 }
+// The far end frames the whole world at the rig's 70° (830 m, r8300, since
+// Plots v2's flip grew it, #459; 1000 m framed r6800, and 880 m r6000).
+fn far_distance() { 1200.0 }
 // The shoulder view (E3.13) fades in from this distance down to the near
 // end: the look rises to chest height, moves ahead of you and over your
 // right shoulder (m). 11 m is where the dial used to end.
@@ -124,11 +124,12 @@ fn district_distance() { 232.0 }
 fn district_zoom() { zoom_at(district_distance()) }
 // Tilt (degrees below level) at zoom 0, at the shoulder's edge (11 m), at
 // street and at the map. Just short of 90 at the map, so the look-at keeps
-// a heading.
+// a heading: 89.92, so from 1200 m up it's still under 2 m off straight
+// down (89.9 from 1000 m before #459).
 fn closest_pitch() { 5.0 }
 fn shoulder_pitch() { 15.0 }
 fn street_pitch() { 50.0 }
-fn map_pitch() { 89.9 }
+fn map_pitch() { 89.92 }
 // The view drifts from the point to the Capitol from this far out (m), and
 // turns north up from the second. They're distances, so moving the dial's
 // near end (E3.13) doesn't move them.
@@ -708,21 +709,23 @@ fn view_shot(view) {
         // outer zone, each from its own side of the city.
         #{ pos: [-92.0, 10.0, 92.0], at: [0.0, 30.0, 0.0] }
     } else if view == "from-suburban" {
-        #{ pos: [141.0, 16.0, 141.0], at: [0.0, 30.0, 0.0] }
+        // A sixth of the way into the suburb (r2400 since Plots v2, #459).
+        #{ pos: [170.0, 16.0, 170.0], at: [0.0, 30.0, 0.0] }
     } else if view == "from-rural" {
-        // Out in the middle of the rural ring (r3800), between its two
-        // roads, the countryside running in to the city.
-        #{ pos: [190.0, 22.0, -329.0], at: [0.0, 30.0, 0.0] }
+        // Out in the middle of the rural ring (r4850 since Plots v2, #459),
+        // between its second and third main lanes, the countryside running
+        // in to the city.
+        #{ pos: [242.5, 22.0, -419.9], at: [0.0, 30.0, 0.0] }
     } else if view == "range" {
-        // Over the southern massif's summit (47 m, r6440 since #308), looking
-        // east along the ring: down into the south valley and its trail, and
-        // across to the next massif's tops.
-        #{ pos: [-279.0, 61.7, 580.4], at: [212.0, 30.0, 583.0] }
+        // Over the southern massif's summit (61 m, r7720 since Plots v2,
+        // #459), looking east along the ring: down into the south valley and
+        // its trail, and across to the next massif's tops.
+        #{ pos: [-285.4, 75.9, 717.3], at: [205.6, 30.0, 719.9] }
     } else {
-        // from-wilderness: on a ridge of the north-west massif (61 m, r5920
-        // since #308), over its valleys and the plain to the tower, gold at
-        // the centre.
-        #{ pos: [-296.0, 64.1, -512.7], at: [0.0, 22.0, 0.0] }
+        // from-wilderness: on a ridge of the north-west massif (66 m, r7805
+        // since Plots v2, #459), over its valleys and the plain to the
+        // tower, gold at the centre.
+        #{ pos: [-298.7, 69.2, -721.1], at: [0.0, 22.0, 0.0] }
     }
 }
 

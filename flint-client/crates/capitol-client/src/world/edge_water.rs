@@ -1,7 +1,8 @@
 //! The wilds' water past the world's edge (#229). W3's hydrology ends every
-//! `mouth: edge` course on r6800 (r6000 before #308), but the land runs on past it and settles
-//! to flat by `land::OUTER` (W9). So the client runs each one on, as
-//! scenery nobody can walk to, before the land is carved:
+//! `mouth: edge` course on r8300 (r6000 before #308, r6800 before #459),
+//! but the land runs on past it and settles to flat by `land::OUTER` (W9).
+//! So the client runs each one on, as scenery nobody can walk to, before the
+//! land is carved:
 //!
 //! - **Where it runs.** A priority-flood comes in over the [`settled`]
 //!   land from a ring short of the flat ([`SINK`]), as W3's does from the
@@ -798,7 +799,9 @@ mod tests {
         }
         eprintln!("valley sides: {steep} of {sides} climb over 1, the steepest {worst:.2}");
         assert!(sides > 1000, "{sides}");
-        assert!(steep * 100 <= sides, "{steep} of {sides} sides climb steeper than 45°");
+        // 1% until the 16600 world (#459), where a river runs along the
+        // edge and its inward bank keeps the ranges' slope: 2.2% (#479).
+        assert!(steep * 100 <= sides * 3, "{steep} of {sides} sides climb steeper than 45°");
     }
 
     #[test]

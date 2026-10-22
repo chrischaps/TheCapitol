@@ -127,16 +127,35 @@ pub struct NeighbourhoodParams {
 }
 
 impl Default for NeighbourhoodParams {
+    /// The suburb of Plots v2 (`the-capitol-plots-v2.md` V1.2, #456; the
+    /// default since the flip, #459), for the band r2160 to r3600. Measured
+    /// over seeds 42, 7, 1234 and 99999: 960 to 990 lots of about 18.6k (140
+    /// × 130), 92 to 93% of them taking 6 stations, a whole workshop (#468),
+    /// and 54 to 59% taking 8 (#466). `the-capitol-suburb-v2.md` §4.4.
+    /// - **Warp 10.** The 1440 band less the warp fits five rows of lots
+    ///   134 deep. At 30 they're 130 by the fit, and about 127 as laid
+    ///   (the warp tilts the rows), under the 128 a lot needs to take 8.
+    /// - **Frontage 140, and none under 136.** A lot takes 8 from about
+    ///   130 × 128, so a run takes one lot fewer rather than any narrower.
+    /// - **Stems to 400,** so pattern (b)'s combs still reach the middle of
+    ///   its band, as they did at 300 in the 1200 band.
+    /// - **Pies 155 deep** (#468). A pie narrows to about 90 at its bulb,
+    ///   so as deep as the lots beside it (about 120 from the bulb's edge)
+    ///   it takes 5 stations, and only 2% of pies took 6. At least 155 deep
+    ///   where the ground allows, 83 to 90% do. A bigger bulb doesn't help:
+    ///   at a radius of 20 or more a pie's front, from the stem's last ray,
+    ///   cuts the bulb's neck, and most pies are dropped.
+    ///
+    /// Before the flip the suburb was r1800 to r3000, with lots 100 wide
+    /// (#422; 64 before, the suburb plan's 60 × 110, #108), 110 deep (95 to
+    /// 130), warp 30, stems to 300 and pies as deep as the lots beside them.
     fn default() -> Self {
         Self {
-            // 100 × the 106 a five-row band fits (#117): about 1200 lots
-            // of about 10k, most taking 4 stations (#422, plots plan §5.2).
-            // 64 before, which kept the suburb plan's 60 × 110 (#108).
-            lot_frontage: 100.0,
-            lot_width_min: 0.0,
-            lot_depth: 110.0,
-            lot_depth_min: 95.0,
-            lot_depth_max: 130.0,
+            lot_frontage: 140.0,
+            lot_width_min: 136.0,
+            lot_depth: 134.0,
+            lot_depth_min: 118.0,
+            lot_depth_max: 140.0,
             local_width: 16.0,
             collector_width: 20.0,
             buffer: 20.0,
@@ -144,48 +163,12 @@ impl Default for NeighbourhoodParams {
             greenway_width: 40.0,
             link_spacing: 400.0,
             bulb_radius: 13.0,
-            cul_de_sac_max: 300.0,
-            pie_depth: 0.0,
-            warp_amplitude: 30.0,
-            warp_wavelength: 1200.0,
-            pattern_weights: PatternWeights::default(),
-            force_pattern: None,
-        }
-    }
-}
-
-impl NeighbourhoodParams {
-    /// The suburb of Plots v2 (`the-capitol-plots-v2.md` V1.2, #456), for
-    /// the grown world's band, r2160 to r3600. #459 makes these the
-    /// defaults when the world grows. Measured over seeds 42, 7, 1234 and
-    /// 99999: 960 to 990 lots of about 18.6k (140 × 130), 92 to 93% of them
-    /// taking 6 stations, a whole workshop (#468), and 54 to 59% taking 8
-    /// (#466). `the-capitol-suburb-v2.md` §4.4.
-    /// - **Warp 10.** The 1440 band less the warp fits five rows of lots
-    ///   134 deep. At 30 they're 130 by the fit, and about 127 as laid
-    ///   (the warp tilts the rows), under the 128 a lot needs to take 8.
-    /// - **Frontage 140, and none under 136.** A lot takes 8 from about
-    ///   130 × 128, so a run takes one lot fewer rather than any narrower.
-    /// - **Stems to 400,** so pattern (b)'s combs still reach the middle of
-    ///   its band, as they do at 300 in today's.
-    /// - **Pies 155 deep** (#468). A pie narrows to about 90 at its bulb,
-    ///   so as deep as the lots beside it (about 120 from the bulb's edge)
-    ///   it takes 5 stations, and only 2% of pies took 6. At least 155 deep
-    ///   where the ground allows, 83 to 90% do. A bigger bulb doesn't help:
-    ///   at a radius of 20 or more a pie's front, from the stem's last ray,
-    ///   cuts the bulb's neck, and most pies are dropped.
-    #[cfg(test)]
-    pub fn grown() -> Self {
-        Self {
-            lot_frontage: 140.0,
-            lot_width_min: 136.0,
-            lot_depth: 134.0,
-            lot_depth_min: 118.0,
-            lot_depth_max: 140.0,
             cul_de_sac_max: 400.0,
             pie_depth: 155.0,
             warp_amplitude: 10.0,
-            ..Self::default()
+            warp_wavelength: 1200.0,
+            pattern_weights: PatternWeights::default(),
+            force_pattern: None,
         }
     }
 }
@@ -300,21 +283,44 @@ impl WorldGenParams {
         self.land.clone().in_frame(self.frame())
     }
 
-    /// Plots v2's rings (`the-capitol-plots-v2.md`, PV1): urban out to
-    /// r2160, the suburb to r3600, rural to r6100, and the wilds to the
-    /// edge of a world 16600 across. Test-only until the flip (#459) moves
-    /// the table: WP2 to WP5 (#455 to #458) lay their v2 generators on it.
-    /// Each zone's own v2 params are its package's; this sets only the
-    /// rings, so the generators that read their radii from here follow.
+    /// RW1's rings (#308), the protocol's table before Plots v2's flip
+    /// (#459): urban out to r1800, the suburb to r3000, rural to r4600, in a
+    /// world 13600 across, with the zones' params of the time. For tests
+    /// that check that what reads the frame follows it off the table.
     #[cfg(test)]
-    pub fn grown() -> Self {
-        Self {
-            urban_outer_radius: 2160.0,
-            suburban_outer_radius: 3600.0,
-            rural_outer_radius: 6100.0,
-            world_size: 16600.0,
+    pub fn rw1() -> Self {
+        let mut params = Self {
+            urban_outer_radius: 1800.0,
+            suburban_outer_radius: 3000.0,
+            rural_outer_radius: 4600.0,
+            world_size: 13600.0,
+            urban: UrbanParams { rings: 3, outer_spokes: 0, ..UrbanParams::default() },
+            rural: RuralParams {
+                frontage: (120.0, 160.0),
+                field_gap: (50.0, 100.0),
+                depth: (230.0, 310.0),
+                min_frontage: 100.0,
+                min_depth: 110.0,
+                room: 0,
+                sway: 1.0,
+                lanes_follow: false,
+                mains: vec![(330.0 / 1600.0, 470.0 / 1600.0), (1130.0 / 1600.0, 1270.0 / 1600.0)],
+                ..RuralParams::default()
+            },
             ..Self::default()
-        }
+        };
+        params.suburban.neighbourhood = NeighbourhoodParams {
+            lot_frontage: 100.0,
+            lot_width_min: 0.0,
+            lot_depth: 110.0,
+            lot_depth_min: 95.0,
+            lot_depth_max: 130.0,
+            cul_de_sac_max: 300.0,
+            pie_depth: 0.0,
+            warp_amplitude: 30.0,
+            ..NeighbourhoodParams::default()
+        };
+        params
     }
 
     /// The zone radii a params object names with values off the protocol's
@@ -471,13 +477,21 @@ impl TerrainConfig {
         format!("{hash:016x}")
     }
 
-    /// The world `WorldGenParams::grown()` builds, once for every test that
-    /// reads it: it takes several seconds, and the performance test runs
-    /// beside the others (PV2, #454).
+    /// The default world, built once for every test that reads it: it takes
+    /// a few seconds, and the performance test runs beside the others (PV2,
+    /// #454; Plots v2's world since the flip, #459).
     #[cfg(test)]
-    pub(crate) fn grown() -> &'static TerrainConfig {
+    pub(crate) fn default_world() -> &'static TerrainConfig {
         static WORLD: std::sync::OnceLock<TerrainConfig> = std::sync::OnceLock::new();
-        WORLD.get_or_init(|| Self::from_params(&WorldGenParams::grown()))
+        WORLD.get_or_init(Self::get_default)
+    }
+
+    /// The world `WorldGenParams::rw1()` builds, off the table, once for
+    /// every test that reads it.
+    #[cfg(test)]
+    pub(crate) fn rw1() -> &'static TerrainConfig {
+        static WORLD: std::sync::OnceLock<TerrainConfig> = std::sync::OnceLock::new();
+        WORLD.get_or_init(|| Self::from_params(&WorldGenParams::rw1()))
     }
 
     /// The world's frame before anything is laid on it: its size, centre,
@@ -952,8 +966,8 @@ mod tests {
 
     #[test]
     fn test_terrain_config_default() {
-        let config = TerrainConfig::get_default();
-        assert_eq!(config.world_size, 13600.0);
+        let config = TerrainConfig::default_world();
+        assert_eq!(config.world_size, 16600.0);
         assert_eq!(config.water_rings.len(), 3);
     }
 
@@ -1093,7 +1107,25 @@ mod tests {
         // the grid moves (the urban clay, now on the canal bank, and the
         // suburb's branches and clay planned after it) are re-planned
         // (`post-content/20261207_001_urban_grid_nodes.sql`).
-        assert_eq!(TerrainConfig::get_default().version(), "9d6cec09d529c7dd");
+        //
+        // Plots v2's flip (#459, `the-capitol-plots-v2.md`) moved the rings
+        // out and gave every zone its v2 layout: urban to r2160 with five
+        // rings of blocks and 32 bearings past r1800, the suburb to r3600 with
+        // lots of about 140 x 134 and pies 155 deep, the rural ring to r6100
+        // with four main lanes and farms that take 12, and the world to 16600,
+        // centred on (8300, 8300), so every coordinate moved by +1500. Against
+        // `9d6cec09d529c7dd` moved by +1500, the 520 urban lots and the 72
+        // guild halls keep their ids and their shapes; the two new rings of
+        // blocks add 496 urban lots. The suburb is new (977 lots for 1191,
+        // 121 parks for 116), and so are the farms (901 for 377, on 69 lanes),
+        // the land (the foothills from r6200, the ranges full height at
+        // r7900), the water (72 rivers, 266 streams, 73 lakes, 78 fords; its
+        // rim at r3750) and the wild trails. 404 roads, 2966 lots. Old
+        // suburban and rural rows are renamed `rw2_` and released by
+        // startup's sync; the seeded grass moves out with the rings, and every
+        // planned node is re-planned (`20261220_001_plots_v2_flip.sql` and
+        // `post-content/20261220_001_plots_v2_flip_nodes.sql`).
+        assert_eq!(TerrainConfig::default_world().version(), "38cfec4d08f9918f");
     }
 
     /// Writes the default world as JSON to `$TERRAIN_DUMP`, to diff one
@@ -1103,7 +1135,7 @@ mod tests {
     #[ignore]
     fn dump_default_terrain() {
         let path = std::env::var("TERRAIN_DUMP").expect("set TERRAIN_DUMP to the output path");
-        let terrain = TerrainConfig::get_default();
+        let terrain = TerrainConfig::default_world();
         std::fs::write(&path, serde_json::to_string_pretty(&terrain).unwrap()).unwrap();
         println!("{} -> {path}", terrain.version());
     }
@@ -1112,7 +1144,7 @@ mod tests {
     /// version alone; a real move doesn't (#128).
     #[test]
     fn version_ignores_last_bit_float_noise() {
-        let terrain = TerrainConfig::get_default();
+        let terrain = TerrainConfig::default_world();
         let mut nudged = terrain.clone();
         let x = &mut nudged.terrain_plots[0].corners[0].0;
         *x = f64::from_bits(x.to_bits() + 1);
@@ -1149,7 +1181,7 @@ mod tests {
         json["suburban"]["neighbourhood"] = serde_json::json!({ "lot_depth": 120.0, "force_pattern": "central_loop" });
         let new: WorldGenParams = serde_json::from_value(json).unwrap();
         assert_eq!(new.suburban.neighbourhood.lot_depth, 120.0);
-        assert_eq!(new.suburban.neighbourhood.lot_frontage, 100.0);
+        assert_eq!(new.suburban.neighbourhood.lot_frontage, 140.0);
         assert_eq!(new.suburban.neighbourhood.force_pattern, Some(NeighbourhoodPattern::CentralLoop));
     }
 
@@ -1170,9 +1202,9 @@ mod tests {
     /// of the world round them.
     #[test]
     fn the_default_world_has_a_suburb() {
-        let t = TerrainConfig::get_default();
+        let t = TerrainConfig::default_world();
         assert!(t.roads.iter().any(|r| r.road_type == RoadType::Suburban));
-        assert!(t.terrain_plots.iter().filter(|l| l.zone == "suburban").count() > 1000);
+        assert!(t.terrain_plots.iter().filter(|l| l.zone == "suburban").count() > 900);
         assert!(t.terrain_plots.iter().any(|l| l.zone == "urban"));
     }
 
@@ -1188,7 +1220,7 @@ mod tests {
         let mut stale = WorldGenParams::default();
         stale.suburban.inner_radius = 1.0;
         stale.suburban.outer_radius = 2.0;
-        assert_eq!(TerrainConfig::from_params(&stale).version(), TerrainConfig::get_default().version());
+        assert_eq!(TerrainConfig::from_params(&stale).version(), TerrainConfig::default_world().version());
     }
 
     /// The zone radii aren't tweakable (#118): params sent or saved with
@@ -1196,13 +1228,13 @@ mod tests {
     /// with `Zone::from_position`, and the params never carry them out.
     #[test]
     fn zone_radii_stay_the_protocol_table() {
-        let json = serde_json::json!({ "seed": 42, "suburban_outer_radius": 2800.0, "rural_outer_radius": 4600.0 });
+        let json = serde_json::json!({ "seed": 42, "suburban_outer_radius": 2800.0, "rural_outer_radius": 6100.0 });
         let params: WorldGenParams = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(
             [params.capitol_radius, params.trade_outer_radius, params.guild_outer_radius, params.urban_outer_radius, params.suburban_outer_radius, params.rural_outer_radius],
             rules::ZONE_OUTER_RADII[..6]
         );
-        assert_eq!(TerrainConfig::from_params(&params).version(), TerrainConfig::get_default().version());
+        assert_eq!(TerrainConfig::from_params(&params).version(), TerrainConfig::default_world().version());
         // Only the one off the table is named.
         assert_eq!(WorldGenParams::untunable_radii_in(&json), [("suburban_outer_radius", 2800.0)]);
         let out = serde_json::to_value(WorldGenParams::default()).unwrap();
@@ -1221,7 +1253,7 @@ mod tests {
 
     #[test]
     fn test_moat_has_one_bridge() {
-        let config = TerrainConfig::get_default();
+        let config = TerrainConfig::default_world();
         let moat = config.water_rings.iter().find(|r| r.id == "moat").unwrap();
         assert_eq!(moat.bridges.len(), 1);
         assert_eq!(moat.bridges[0].angle_degrees, 90.0); // South (90° in screen coords where Y+ is down)
@@ -1229,14 +1261,14 @@ mod tests {
 
     #[test]
     fn test_inner_canal_has_four_bridges() {
-        let config = TerrainConfig::get_default();
+        let config = TerrainConfig::default_world();
         let canal = config.water_rings.iter().find(|r| r.id == "canal_inner").unwrap();
         assert_eq!(canal.bridges.len(), 4);
     }
 
     #[test]
     fn test_outer_canal_has_eight_bridges() {
-        let config = TerrainConfig::get_default();
+        let config = TerrainConfig::default_world();
         let canal = config.water_rings.iter().find(|r| r.id == "canal_outer").unwrap();
         assert_eq!(canal.bridges.len(), 8);
     }
@@ -1260,25 +1292,25 @@ mod tests {
 
     #[test]
     fn the_rings_stop_a_walk_but_their_bridges_let_it_over() {
-        let ground = TerrainConfig::get_default().ground();
+        let ground = TerrainConfig::default_world().ground();
         // Within the Capitol, inside the moat: a whole step.
-        let step = ground.step((6800.0, 6800.0), (6850.0, 6850.0), 5.0);
+        let step = ground.step((8300.0, 8300.0), (8350.0, 8350.0), 5.0);
         assert_eq!(step.blocked, None);
         // East, square into the moat, where there's no bridge.
-        let mut at = (6950.0, 6800.0);
+        let mut at = (8450.0, 8300.0);
         let blocked = loop {
-            let step = ground.step(at, (7050.0, 6800.0), 5.0);
+            let step = ground.step(at, (8550.0, 8300.0), 5.0);
             at = (step.x, step.y);
             if let Some(blocked) = step.blocked {
                 break blocked;
             }
-            assert!(at.0 < 7050.0, "walked over the moat");
+            assert!(at.0 < 8550.0, "walked over the moat");
         };
         assert_eq!(blocked.water_id(), "moat");
         // South, over the moat's bridge.
-        let mut at = (6800.0, 6950.0);
-        while at != (6800.0, 7050.0) {
-            let step = ground.step(at, (6800.0, 7050.0), 5.0);
+        let mut at = (8300.0, 8450.0);
+        while at != (8300.0, 8550.0) {
+            let step = ground.step(at, (8300.0, 8550.0), 5.0);
             assert_eq!(step.blocked, None, "at {at:?}");
             at = (step.x, step.y);
         }
@@ -1286,7 +1318,7 @@ mod tests {
 
     #[test]
     fn test_arterial_roads_generated() {
-        let config = TerrainConfig::get_default();
+        let config = TerrainConfig::default_world();
         let arterials: Vec<_> = config.roads.iter()
             .filter(|r| r.road_type == RoadType::Arterial)
             .collect();
@@ -1296,13 +1328,14 @@ mod tests {
 
     #[test]
     fn test_ring_roads_generated() {
-        let config = TerrainConfig::get_default();
+        let config = TerrainConfig::default_world();
         let ring_roads: Vec<_> = config.roads.iter()
             .filter(|r| r.id.contains("ring") && !super::super::urban::is_grid_street(r))
             .collect();
         assert_eq!(ring_roads.len(), 2, "Expected 2 ring roads (guild and trade)");
-        // And the urban grid's: the quay and three more (#421).
-        assert_eq!(config.roads.iter().filter(|r| r.id.starts_with("urb_ring_")).count(), 4);
+        // And the urban grid's: the quay and five more (#421; five rings of
+        // blocks since Plots v2, #455, #459).
+        assert_eq!(config.roads.iter().filter(|r| r.id.starts_with("urb_ring_")).count(), 6);
     }
 
     #[test]
@@ -1367,7 +1400,7 @@ mod tests {
 
     #[test]
     fn test_suburban_connectivity() {
-        let config = TerrainConfig::get_default();
+        let config = TerrainConfig::default_world();
         let params = SuburbanGenParams::default();
 
         // Build adjacency graph and verify all suburban streets can reach arterials
@@ -1600,7 +1633,7 @@ mod tests {
     #[test]
     fn the_exchange_hall_stands_on_the_capitol_avenue() {
         let params = WorldGenParams::default();
-        let config = TerrainConfig::get_default();
+        let config = TerrainConfig::default_world();
         let hall = config.landmark(LandmarkKind::ExchangeHall).expect("a hall");
         let center = (config.center_x, config.center_y);
         let r = |(x, y): (f64, f64)| (x - center.0).stable_hypot(y - center.1);
@@ -1649,7 +1682,7 @@ mod tests {
     /// (`models::bazaar`) hold for it.
     #[test]
     fn the_bazaar_quarter_stands_in_the_trade_district_clear_of_the_rest() {
-        let config = TerrainConfig::get_default();
+        let config = TerrainConfig::default_world();
         let center = (config.center_x, config.center_y);
         let stalls: Vec<&Landmark> = config.landmarks.iter().filter(|l| l.kind == LandmarkKind::Stall).collect();
         assert!(stalls.len() >= 34, "{} stalls", stalls.len());
@@ -1772,19 +1805,17 @@ mod tests {
         assert!((0.08..=0.18).contains(&share), "parks are {:.1}% of the suburb", share * 100.0);
     }
 
-    /// Plots v2's rings build (PV2, #454): the land is flat out to the grown
-    /// rural edge + 100 and rises past it, the water keeps out past the
-    /// grown suburb, and the arterials and the wild trails meet at the grown
-    /// rural edge. The zones' own v2 layouts are #455 to #457's; this only
-    /// checks that what reads the frame follows it.
+    /// Plots v2's rings, the table since the flip (#459), build (PV2, #454):
+    /// the land is flat out to the rural edge + 100 and rises past it, the
+    /// water keeps out past the suburb, and the arterials and the wild
+    /// trails meet at the rural edge.
     #[test]
-    fn a_grown_world_builds() {
+    fn the_default_world_follows_the_table() {
         use capitol_protocol::land::height_at;
-        let params = WorldGenParams::grown();
+        let params = WorldGenParams::default();
         let frame = params.frame();
-        let start = std::time::Instant::now();
-        let t = TerrainConfig::grown();
-        println!("grown world: {:.1}s", start.elapsed().as_secs_f64());
+        assert_eq!(frame, rules::Frame::TABLE);
+        let t = TerrainConfig::default_world();
 
         assert_eq!((t.world_size, t.center_x, t.center_y), (16600.0, 8300.0, 8300.0));
         assert_eq!(t.land.frame, frame);
@@ -1815,8 +1846,8 @@ mod tests {
                 assert!(r > inner - super::super::hydrology::CELL && r <= frame.world_edge() + 0.01, "{} at r{r:.0}", c.id);
             }
         }
-        let past_old_edge = courses.iter().flat_map(|c| &c.points).filter(|p| frame.radius(p.x, p.y) > rules::WILDERNESS_OUTER_RADIUS).count();
-        assert!(past_old_edge > 0, "the water runs out past the table's r6800");
+        let past_old_edge = courses.iter().flat_map(|c| &c.points).filter(|p| frame.radius(p.x, p.y) > 6800.0).count();
+        assert!(past_old_edge > 0, "the water runs out past RW1's edge, r6800");
 
         // The arterials end at the grown rural edge, and the trails start there.
         for road in t.roads.iter().filter(|r| r.id.strip_prefix("arterial_").is_some_and(|k| k.parse::<u32>().is_ok())) {
@@ -1884,8 +1915,8 @@ mod tests {
         (elapsed, machine, elapsed.as_secs_f64() / machine.as_secs_f64())
     }
 
-    /// The default world and the grown one (PV2's, `WorldGenParams::grown`)
-    /// each generate within [`LIMIT`] times the reference workload.
+    /// The default world generates within [`LIMIT`] times the reference
+    /// workload.
     #[test]
     fn test_terrain_generation_performance() {
         // The history, in debug: pre-optimization was ~115s, about 200×. With
@@ -1909,12 +1940,22 @@ mod tests {
         // reads about 2.3× higher. Release has its own limit: the default went
         // from 0.9–1.0s (10.9–13.2×) to 0.63s (9.1–9.6×), and the grown one from
         // 1.1–1.5s (15.6–18×) to 0.89s (13.4–14.2×). It too fails a doubling.
-        const LIMIT: f64 = if cfg!(debug_assertions) { 8.0 } else { 18.0 };
+        //
+        // Plots v2's flip (#459) made the grown world the default, with every
+        // zone's v2 layout on it, so the test times one world again. Its farms
+        // ask every walk's farm whether it takes 12 stations, so the default
+        // now reads 7.6-8.0x in debug (4.5-4.6s; the farms 1.4s of it, the
+        // wild trails 0.85s, the suburb's lots 0.7s, the roads and the water
+        // 0.5s each, the parks 0.45s) and 16.2-20x in release (1.13-1.19s;
+        // the trails and the farms 0.33s each). Both were at their limits of
+        // 8x and 18x, so they rose to 11x and 26x: a doubling, about 16x and
+        // 36x, still fails.
+        const LIMIT: f64 = if cfg!(debug_assertions) { 11.0 } else { 26.0 };
         // A run beside other tests' threads can read high once: they share the
         // caches and the core's turbo, which the CPU clock doesn't shed. A real
         // slowdown reads high every time, so a world gets three tries (#458).
         const TRIES: usize = 3;
-        for (name, params) in [("default", WorldGenParams::default()), ("grown", WorldGenParams::grown())] {
+        for (name, params) in [("default", WorldGenParams::default())] {
             let mut best = f64::INFINITY;
             for _ in 0..TRIES {
                 let (elapsed, machine, ratio) = generation_ratio(&params);

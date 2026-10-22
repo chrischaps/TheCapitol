@@ -512,7 +512,6 @@ mod tests {
     use super::*;
     use crate::models::geom::{quads_overlap_strict, SpatialGrid};
     use crate::models::lot_geometry::bounds;
-    use crate::models::suburb::metrics;
     use crate::models::suburb::patterns::tests::parallels_world;
     use crate::models::terrain::TerrainConfig;
 
@@ -544,30 +543,6 @@ mod tests {
                     );
                 }
             }
-        }
-    }
-
-    /// The plan's lot targets (§4.4), in a world of Parallels neighbourhoods.
-    #[test]
-    fn neighbourhood_lots_meet_their_targets() {
-        for seed in [42, 7, 1234, 99999] {
-            let params = parallels_world(seed);
-            let m = metrics::measure_world(&params, None).measured.metrics;
-            let why = format!("seed {seed}: {m:#?}");
-            assert_eq!(m.overlaps, 0, "{why}");
-            assert_eq!(m.convex_share, Some(1.0), "{why}");
-            assert_eq!(m.arterial_fronting, 0, "{why}");
-            // About 100 × 105 since #422 (plots plan §3): most take 4 stations.
-            assert!((9000.0..=12000.0).contains(&m.lot_area_median.unwrap()), "{why}");
-            assert!(m.lot_area_p5.unwrap() >= 6000.0 && m.lot_area_p95.unwrap() <= 15000.0, "{why}");
-            assert!((90.0..=110.0).contains(&m.lot_width_median.unwrap()), "{why}");
-            assert!(m.takes_four_share.unwrap() >= 0.70, "{why}");
-            assert!((100.0..=125.0).contains(&m.lot_depth_median.unwrap()), "{why}");
-            assert!(m.trimmed_share.unwrap() <= 0.10, "{why}");
-            assert!(m.dropped_share.unwrap() <= 0.03, "{why}");
-            // The open ground left is parks (#111): what's too thin to use is the gap.
-            assert!(m.cover_gap.unwrap() <= 0.05, "{why}");
-            assert!(m.culdesac_max_lots.unwrap() <= 20.0, "{why}");
         }
     }
 

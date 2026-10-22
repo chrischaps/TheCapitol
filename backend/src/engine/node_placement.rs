@@ -53,8 +53,10 @@ pub const LOT_MARGIN: f64 = 10.0;
 /// How far a moved node stands from every other node.
 pub const NODE_SPACING: f64 = 30.0;
 
-/// How far from where it stood a node is looked for a new spot.
-const SEARCH_RADIUS: f64 = 400.0;
+/// How far from where it stood a node is looked for a new spot. 400 until
+/// Plots v2 (#459), whose suburb, of lots about 1.4 times as wide, left a
+/// grass node in a regenerated world with doubled streets no spot within it.
+const SEARCH_RADIUS: f64 = 600.0;
 
 /// The step between the rings searched, and between spots along each ring.
 const SEARCH_STEP: f64 = 5.0;

@@ -213,7 +213,7 @@ mod tests {
         assert!(thick > 2000, "only {thick} texels where it lies thick");
         // Its floor is the ground under it.
         let field = fixture_field();
-        for at in [[CENTER_X + 5000.0, CENTER_Y], [CENTER_X, CENTER_Y - 5600.0]] {
+        for at in [[CENTER_X + 6500.0, CENTER_Y], [CENTER_X, CENTER_Y - 7100.0]] {
             let [x, z] = to_world(at[0], at[1]);
             let [floor, _] = map.at([x, z]);
             let ground = crate::world::land::rise_on(field, [x, z]) + layer::GROUND;
@@ -223,9 +223,9 @@ mod tests {
 
     #[test]
     fn it_lies_where_hollows_are_and_takes_the_airs_colour() {
-        assert_eq!(thickness(0.0, 0.0, 5.0, 5000.0), 1.0);
-        assert_eq!(thickness(0.0, 0.0, 0.2, 5000.0), 0.0, "no hollow");
-        assert_eq!(thickness(40.0, 0.0, 5.0, 5000.0), 0.0, "on the tops");
+        assert_eq!(thickness(0.0, 0.0, 5.0, 6500.0), 1.0);
+        assert_eq!(thickness(0.0, 0.0, 0.2, 6500.0), 0.0, "no hollow");
+        assert_eq!(thickness(40.0, 0.0, 5.0, 6500.0), 0.0, "on the tops");
         assert_eq!(thickness(0.0, 0.0, 5.0, 3000.0), 0.0, "in the city");
         // Paler than the air, a little brighter, and dark at night.
         let dusk = colour([0.22, 0.11, 0.14]);

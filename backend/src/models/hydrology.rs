@@ -518,10 +518,11 @@ struct Network {
 /// plain [`PLAIN_DEPTH`] deep.
 const SOAK_ONSET: f64 = 400.0;
 /// The depth of the plain [`SOAK`] and [`SOAK_ONSET`] were tuned on, from
-/// the water's inner rim (r3150) to the plain's edge (r4700). A deeper plain
-/// starts soaking a course up further in, and more slowly, by its depth over
-/// this (#472, Chris's call): exactly 1 on today's plain, and about 1.58 on
-/// Plots v2's, r3750 to r6200. So the water comes as far into the farms in
+/// the water's inner rim (r3150) to the plain's edge (r4700), RW1's plain. A
+/// deeper plain starts soaking a course up further in, and more slowly, by
+/// its depth over this (#472, Chris's call): exactly 1 on RW1's plain, and
+/// about 1.58 on Plots v2's, r3750 to r6200, the table's since the flip
+/// (#459). So the water comes as far into the farms in
 /// proportion as today's: the deepest courses reach r4798 to r4857 on the
 /// four seeds, half way across the farms and 55 to 57% of the way across
 /// the plain, where today's deepest (r3712, seed 42) is 56% and 64%.

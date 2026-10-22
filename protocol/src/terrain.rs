@@ -159,7 +159,7 @@ pub struct WaterPoint {
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub enum Mouth {
-    /// It runs off the world's edge (r6800).
+    /// It runs off the world's edge (r8300).
     Edge,
     /// It runs into this lake.
     Lake(String),

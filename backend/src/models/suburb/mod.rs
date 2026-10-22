@@ -72,12 +72,14 @@ pub(crate) mod tests {
 
     use capitol_protocol::terrain::RoadType;
 
-    use super::metrics::{self, Metrics};
+    use super::metrics;
     use super::neighbourhood::{ENTRANCE_OFFSET, ENTRANCE_SPACING};
     use crate::models::terrain::{point_to_segment_distance, TerrainConfig, WorldGenParams};
 
     /// The suburb as it ships: every pattern, mixed by the default weights.
-    fn mixed_world(seed: u64) -> WorldGenParams {
+    /// Plots v2's since the flip (#459): r2160 to r3600, lots of about 140
+    /// × 134 (#456, #468).
+    pub(crate) fn mixed_world(seed: u64) -> WorldGenParams {
         WorldGenParams { seed, ..Default::default() }
     }
 
@@ -89,99 +91,26 @@ pub(crate) mod tests {
         params
     }
 
-    /// The grown world of Plots v2 (`WorldGenParams::grown`, #454), with
-    /// the suburb's own v2 lots (`NeighbourhoodParams::grown`, #456): the
-    /// suburb at r2160 to r3600.
-    pub(crate) fn grown_world(seed: u64) -> WorldGenParams {
-        let mut params = WorldGenParams { seed, ..WorldGenParams::grown() };
-        params.suburban.neighbourhood = crate::models::terrain::NeighbourhoodParams::grown();
-        params
-    }
-
     fn worlds() -> Vec<(String, WorldGenParams)> {
         let mut all: Vec<_> = [42, 7, 1234, 99999, 2024].into_iter().map(|s| (format!("seed {s}"), mixed_world(s))).collect();
         all.push(("wide canals, seed 42".into(), wide_canal_world(42)));
         all
     }
 
-    /// Acceptance for #111: the mixed suburb, at five seeds and the wide
-    /// canals. It asserts the hard targets, and those the patterns already
-    /// hold one by one, and prints the soft ones it misses. Every world is
+    /// Acceptance for #111 and #456 (Plots v2's suburb, V1.2; the default
+    /// since the flip, #459): the mixed suburb at r2160 to r3600, at five
+    /// seeds and the wide canals. About 1000 lots of about 18.5k, 90% of
+    /// them taking 6 stations and the median 8 (#468). Every world is
     /// printed before any is asserted, so a miss shows them all.
     #[test]
     fn neighbourhood_suburb_meets_its_targets() {
         let measured: Vec<_> = worlds().into_iter().map(|(name, params)| (name, metrics::measure_world(&params, None))).collect();
-        for (name, world) in &measured {
-            let m = &world.measured.metrics;
-            let soft: Vec<String> = metrics::violations(m).iter().map(|v| format!("{} {}", v.label, metrics::fmt_num(v.value))).collect();
-            let pct = |v: Option<f64>| 100.0 * v.unwrap_or(f64::NAN);
-            eprintln!(
-                "{name}: {} lots, area {:.0} (p5 {:.0}, p95 {:.0}), {:.0} × {:.0}, {:.0}% take 4, \
-                 trimmed {:.1}%, dropped {:.1}%, lots {:.0}%, green {:.0}%, gap {:.1}%, {} parks; soft misses: {soft:?}",
-                m.lots,
-                m.lot_area_median.unwrap_or(f64::NAN),
-                m.lot_area_p5.unwrap_or(f64::NAN),
-                m.lot_area_p95.unwrap_or(f64::NAN),
-                m.lot_width_median.unwrap_or(f64::NAN),
-                m.lot_depth_median.unwrap_or(f64::NAN),
-                pct(m.takes_four_share),
-                pct(m.trimmed_share),
-                pct(m.dropped_share),
-                pct(m.cover_lots),
-                pct(m.cover_green),
-                pct(m.cover_gap),
-                m.parks,
-            );
-        }
-        for (name, world) in measured {
-            let m: Metrics = world.measured.metrics;
-            let why = format!("{name}: {m:#?}");
-            // Entrances, counted per neighbourhood by the street they come
-            // from (#115): as many as each one allocated.
-            let allocated: Vec<usize> = world.neighbourhoods.iter().map(|n| n.entrances.len()).collect();
-            assert_eq!(m.entrances, allocated, "{why}");
-            assert!(m.entrances_min.unwrap() >= 2.0 && m.entrances_max.unwrap() <= 4.0, "{why}");
-            // Streets.
-            assert_eq!(m.audit_issues, 0, "{why}");
-            assert_eq!(m.four_ways, 0, "{why}");
-            assert!(m.min_junction_angle.unwrap() >= 70.0, "{why}");
-            assert!(m.t_spacing_min.unwrap() >= 40.0, "{why}");
-            assert!(m.culdesac_max_len.unwrap() <= 300.0, "{why}");
-            assert!(m.culdesac_max_lots.unwrap() <= 20.0, "{why}");
-            assert_eq!(m.connected_share, Some(1.0), "{why}");
-            // Lots: about 1200 (plots plan §3, #422).
-            assert!((1050..=1350).contains(&m.lots), "{why}");
-            assert_eq!(m.overlaps, 0, "{why}");
-            assert_eq!(m.convex_share, Some(1.0), "{why}");
-            assert_eq!(m.arterial_fronting, 0, "{why}");
-            // About 100 × 105 since #422 (plots plan §3): most take 4 stations.
-            assert!((9000.0..=12000.0).contains(&m.lot_area_median.unwrap()), "{why}");
-            assert!(m.lot_area_p5.unwrap() >= 6000.0 && m.lot_area_p95.unwrap() <= 15000.0, "{why}");
-            assert!((90.0..=110.0).contains(&m.lot_width_median.unwrap()), "{why}");
-            assert!(m.takes_four_share.unwrap() >= 0.70, "{why}");
-            assert!((100.0..=125.0).contains(&m.lot_depth_median.unwrap()), "{why}");
-            assert!(m.trimmed_share.unwrap() <= 0.10, "{why}");
-            assert!(m.dropped_share.unwrap() <= 0.03, "{why}");
-            // Ground: with the parks, the gap is what's too thin to use.
-            assert!(m.cover_lots.unwrap() >= 0.55, "{why}");
-            assert!((0.08..=0.20).contains(&m.cover_green.unwrap()), "{why}");
-            assert!(m.cover_gap.unwrap() <= 0.05, "{why}");
-            assert!(m.parks > 0 && m.park_area_min.is_none_or(|a| a >= 0.5 * 100.0 * 110.0 - 1e-6), "{why}");
-        }
-    }
-
-    /// Acceptance for #456 (Plots v2's suburb, V1.2): the mixed suburb at
-    /// r2160 to r3600 with `NeighbourhoodParams::grown`, at the four report
-    /// seeds. About 1000 lots of about 18.5k, each pattern as it is today,
-    /// 90% of them taking 6 stations and the median 8 (#468).
-    #[test]
-    fn grown_suburb_meets_its_targets() {
-        let measured: Vec<_> = [42, 7, 1234, 99999].into_iter().map(|s| (s, metrics::measure_world(&grown_world(s), None))).collect();
         for (seed, world) in &measured {
             let m = &world.measured.metrics;
             let pct = |v: Option<f64>| 100.0 * v.unwrap_or(f64::NAN);
+            let soft: Vec<String> = metrics::violations(m).iter().map(|v| format!("{} {}", v.label, metrics::fmt_num(v.value))).collect();
             eprintln!(
-                "seed {seed}: {} lots, area {:.0}, {:.0} × {:.0}, {:.1}% take 6, {:.0}% take 8, stations median {:.0} mean {:.2}, lots {:.0}%, green {:.0}%, gap {:.1}%",
+                "{seed}: {} lots, area {:.0}, {:.0} × {:.0}, {:.1}% take 6, {:.0}% take 8, stations median {:.0} mean {:.2}, lots {:.0}%, green {:.0}%, gap {:.1}%",
                 m.lots,
                 m.lot_area_median.unwrap_or(f64::NAN),
                 m.lot_width_median.unwrap_or(f64::NAN),
@@ -194,18 +123,20 @@ pub(crate) mod tests {
                 pct(m.cover_green),
                 pct(m.cover_gap),
             );
+            eprintln!("{seed}: soft misses: {soft:?}");
         }
         for (seed, world) in measured {
             let m = world.measured.metrics;
-            let why = format!("seed {seed}: {m:#?}");
+            let why = format!("{seed}: {m:#?}");
             let allocated: Vec<usize> = world.neighbourhoods.iter().map(|n| n.entrances.len()).collect();
             assert_eq!(m.entrances, allocated, "{why}");
             assert!(m.entrances_min.unwrap() >= 2.0 && m.entrances_max.unwrap() <= 4.0, "{why}");
-            metrics::Grown::assert_streets(&m, &why);
+            metrics::Lots::assert_streets(&m, &why);
+            assert!(m.culdesac_max_lots.unwrap() <= 20.0, "{why}");
             // About 1000 (plots plan v2 §3).
             assert!((900..=1100).contains(&m.lots), "{why}");
             // 90% take 6 stations, a whole workshop (#468): 92 to 93%.
-            metrics::Grown { takes_six: 0.90, area_max: 19000.0, depth_min: 120.0, green_max: 0.25 }.assert_lots(&m, &why);
+            metrics::Lots { takes_six: 0.90, area_max: 19000.0, depth_min: 120.0, green_max: 0.25 }.assert_lots(&m, &why);
             assert!(m.stations_median.unwrap() >= 8.0, "{why}");
             let least = 0.5 * 140.0 * 134.0;
             assert!(m.parks > 0 && m.park_area_min.is_none_or(|a| a >= least - 1e-6), "{why}");
@@ -228,19 +159,14 @@ pub(crate) mod tests {
         assert_eq!(one.measured.metrics.entrances, allocated);
     }
 
-    /// Entrances are coordinated across each arterial (plan §4.1.5): as laid,
+    /// Entrances are coordinated across each arterial (plan §4.1.5; in Plots
+    /// v2's suburb since #456): as laid,
     /// not just as allocated. Where suburban streets from the two sides
     /// meet an arterial they're at least `ENTRANCE_OFFSET` apart along it,
     /// so there's no 4-way, and one side's are `ENTRANCE_SPACING` apart.
     #[test]
     fn entrances_line_up_across_the_arterials() {
         entrances_line_up(worlds());
-    }
-
-    /// The same in Plots v2's suburb (#456).
-    #[test]
-    fn grown_entrances_line_up_across_the_arterials() {
-        entrances_line_up([42, 7, 1234, 99999].into_iter().map(|s| (format!("grown, seed {s}"), grown_world(s))).collect());
     }
 
     fn entrances_line_up(worlds: Vec<(String, WorldGenParams)>) {

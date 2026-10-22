@@ -927,9 +927,11 @@ mod tests {
         assert_eq!(MASK_SIZE, texels(capitol_protocol::rules::WORLD_SIZE, MASK_TEXEL));
     }
 
-    /// Coarser than the game's, to keep the tests quick; still under a
-    /// metre a texel.
-    const SIZE: usize = 1740;
+    /// Coarser than the game's, to keep the tests quick: half its texels a
+    /// side, so the same 0.78 m texel whatever the world's size (1740 for
+    /// the 13600 world; at 1740 the 16600 world's farmyards came out a
+    /// texel wider all round, and only 86% of its farms read as pasture).
+    const SIZE: usize = MASK_SIZE / 2;
 
     fn fixture() -> &'static TerrainResponse {
         static T: OnceLock<TerrainResponse> = OnceLock::new();
@@ -1238,7 +1240,7 @@ mod tests {
         let c = (0..360)
             .map(|k| {
                 let a = (k as f64).to_radians();
-                [CENTER_X + 3600.0 * a.cos(), CENTER_Y + 3600.0 * a.sin()]
+                [CENTER_X + 4500.0 * a.cos(), CENTER_Y + 4500.0 * a.sin()]
             })
             .find(|&p| base.value_at(p) > 200)
             .expect("a full spot");

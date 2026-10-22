@@ -183,16 +183,34 @@ mod tests {
     const SHIFTED_NODE_MOVES_MIGRATIONS: [&str; 1] =
         [include_str!("../../migrations/20261126_001_rural_farms.sql")];
 
-    /// A row from the 8000 world, where both shifts put it.
+    /// How far Plots v2's flip moved them again, when every zone took its v2
+    /// rings and the world grew to 16600 (#459).
+    const FLIP_SHIFT: f64 = 1500.0;
+    /// The flip, which shifts them and then moves the seeded grass out with
+    /// the rings (`print_grass_remap`'s rows).
+    const FLIP_MIGRATION: &str = include_str!("../../migrations/20261220_001_plots_v2_flip.sql");
+
+    /// Moves for seeded nodes written on the 16600 world, after the flip's
+    /// own, in the order they run. From `print_node_moves`.
+    const FLIPPED_NODE_MOVES_MIGRATIONS: [&str; 0] = [];
+
+    /// A row from the 8000 world, where W1's and RW1's shifts put it.
     fn shifted(x: f64) -> f64 {
         ((x + WORLD_SHIFT + RURAL_WIDENS_SHIFT) * 10.0).round() / 10.0
     }
 
+    /// A row from the 13600 world, where the flip's shift puts it on the
+    /// 16600 one.
+    fn flipped(x: f64) -> f64 {
+        ((x + FLIP_SHIFT) * 10.0).round() / 10.0
+    }
+
     #[test]
     fn the_world_grows_by_the_shifts() {
-        assert_eq!(WORLD_SHIFT + RURAL_WIDENS_SHIFT, CENTER_X - 4000.0);
+        assert_eq!(WORLD_SHIFT + RURAL_WIDENS_SHIFT + FLIP_SHIFT, CENTER_X - 4000.0);
         assert!(WORLD_GROWS_MIGRATION.contains("position_x = position_x + 2000"));
         assert!(RURAL_WIDENS_MIGRATION.contains("position_x = position_x + 800"));
+        assert!(FLIP_MIGRATION.contains("position_x = position_x + 1500"));
     }
 
     /// The numbers in each `(a, b, ...)` row of a migration's VALUES list.
@@ -220,9 +238,10 @@ mod tests {
     }
 
     /// The `(x, y, quality)` rows the world-scale migration seeds, where the
-    /// later migrations leave them: moved by the node move migrations, then
-    /// by the world's growth, then by the moves written since.
-    fn seeded_nodes() -> Vec<(f64, f64, i32)> {
+    /// migrations before the flip's grass leave them: moved by the node move
+    /// migrations, then by the world's growth, then by the moves written
+    /// since, then by the flip's shift.
+    fn flipped_nodes() -> Vec<(f64, f64, i32)> {
         let before = move_rows(&NODE_MOVES_MIGRATIONS);
         let after = move_rows(&SHIFTED_NODE_MOVES_MIGRATIONS);
         value_rows(WORLD_SCALE_MIGRATION)
@@ -231,9 +250,70 @@ mod tests {
             .map(|row| {
                 let (x, y) = moved(&before, (row[0], row[1]));
                 let (x, y) = moved(&after, (shifted(x), shifted(y)));
-                (x, y, row[2] as i32)
+                (flipped(x), flipped(y), row[2] as i32)
             })
             .collect()
+    }
+
+    /// The seeded rows where every migration leaves them: the flip's grass
+    /// moved out with the rings (`FLIP_MIGRATION`), then the moves since.
+    fn seeded_nodes() -> Vec<(f64, f64, i32)> {
+        let flip = move_rows(&[FLIP_MIGRATION]);
+        let since = move_rows(&FLIPPED_NODE_MOVES_MIGRATIONS);
+        flipped_nodes()
+            .into_iter()
+            .map(|(x, y, q)| {
+                let (x, y) = moved(&flip, (x, y));
+                let (x, y) = moved(&since, (x, y));
+                (x, y, q)
+            })
+            .collect()
+    }
+
+    /// Where Plots v2's rings put a seeded node from RW1's (#459): its
+    /// radius remapped zone by zone, the suburb's 1800 to 3000 onto 2160 to
+    /// 3600 and the rural ring's 3000 to 4600 onto 3600 to 6100, on the same
+    /// bearing from the centre. So a node keeps its zone and its place
+    /// across it. The grass in sight of the spawn moves with it instead,
+    /// 600 out along the south arterial (from r3350 to r3950), so a new
+    /// player still arrives with grass in sight: remapped, only 2 of its 6
+    /// would be.
+    fn remapped(x: f64, y: f64) -> (f64, f64) {
+        const PIECES: [((f64, f64), (f64, f64)); 2] = [((1800.0, 3000.0), (2160.0, 3600.0)), ((3000.0, 4600.0), (3600.0, 6100.0))];
+        let spawn_before = (SPAWN_X, SPAWN_Y - 600.0);
+        if (x - spawn_before.0).stable_hypot(y - spawn_before.1) <= NEARBY_NODE_RANGE {
+            return (x, ((y + 600.0) * 10.0).round() / 10.0);
+        }
+        let (dx, dy) = (x - CENTER_X, y - CENTER_Y);
+        let r = dx.stable_hypot(dy);
+        let Some(((a, b), (c, d))) = PIECES.into_iter().find(|((a, b), _)| (*a..=*b).contains(&r)) else { return (x, y) };
+        let k = (c + (r - a) * (d - c) / (b - a)) / r;
+        (((CENTER_X + dx * k) * 10.0).round() / 10.0, ((CENTER_Y + dy * k) * 10.0).round() / 10.0)
+    }
+
+    /// Prints the VALUES rows of the flip's grass move (#459): each seeded
+    /// node from where the shift leaves it to where Plots v2's rings put it
+    /// (`remapped`), then fitted to the default world by `place_nodes`, clear
+    /// of its roads, lots and water and of each other:
+    /// `cargo test print_grass_remap -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn print_grass_remap() {
+        let nodes = flipped_nodes();
+        let at: Vec<(Uuid, (f64, f64))> =
+            nodes.iter().enumerate().map(|(i, &(x, y, _))| (Uuid::from_u128(i as u128), remapped(x, y))).collect();
+        let report = place_nodes(TerrainConfig::default_world(), &at);
+        let mut stayed = 0;
+        for (i, &(x, y, _)) in nodes.iter().enumerate() {
+            let id = Uuid::from_u128(i as u128);
+            let to = report.moves.iter().find(|m| m.id == id).map_or(at[i].1, |m| m.to);
+            if to == (x, y) {
+                stayed += 1;
+                continue;
+            }
+            println!("    ({x:.1}, {y:.1}, {:.1}, {:.1}),", to.0, to.1);
+        }
+        println!("-- {} remapped, {} fitted, {stayed} stayed, {} stuck: {:?}", nodes.len() - stayed, report.moves.len(), report.stuck.len(), report.stuck);
     }
 
     /// How far a point is from the edge of the nearest road; negative inside one.
@@ -254,12 +334,12 @@ mod tests {
     /// with other params has its nodes moved by `node_placement` (#70).
     #[test]
     fn seeded_nodes_sit_clear_of_the_default_terrain() {
-        let terrain = TerrainConfig::get_default();
+        let terrain = TerrainConfig::default_world();
         let nodes = seeded_nodes();
         assert_eq!(nodes.len(), 156);
 
         for &(x, y, quality) in &nodes {
-            let clearance = road_clearance(&terrain, x, y);
+            let clearance = road_clearance(terrain, x, y);
             // The rule startup's `place_nodes` moves a node by. Before #112 the
             // seeds also sat 20 clear, but the Neighbourhood suburb's streets
             // pass some at 15-20, where nothing moves them.
@@ -286,7 +366,7 @@ mod tests {
     /// nodes to it moves none of them. Startup changes nothing there.
     #[test]
     fn the_default_terrain_moves_no_seeded_node() {
-        let report = place_nodes(&TerrainConfig::get_default(), &seeded_positions());
+        let report = place_nodes(TerrainConfig::default_world(), &seeded_positions());
         assert!(report.moves.is_empty(), "{} seeded nodes moved: {:?}", report.moves.len(), report.moves);
         assert!(report.stuck.is_empty());
     }
@@ -295,12 +375,12 @@ mod tests {
     /// default world's roads run over, from where the migrations leave them
     /// to where `place_nodes` puts them. Run it after a change that moves the
     /// default world (`default_terrain_version_is_pinned`), paste the rows into
-    /// a new migration, and add that to `SHIFTED_NODE_MOVES_MIGRATIONS` (#290):
+    /// a new migration, and add that to `FLIPPED_NODE_MOVES_MIGRATIONS` (#290):
     /// `cargo test print_node_moves -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn print_node_moves() {
-        let report = place_nodes(&TerrainConfig::get_default(), &seeded_positions());
+        let report = place_nodes(TerrainConfig::default_world(), &seeded_positions());
         for m in &report.moves {
             println!("    ({:.1}, {:.1}, {:.1}, {:.1}),", m.from.0, m.from.1, m.to.0, m.to.1);
         }
@@ -319,7 +399,8 @@ mod tests {
 
         let report = place_nodes(&terrain, &seeded_positions());
         assert!(!report.moves.is_empty(), "the new streets miss every seeded node");
-        assert!(report.stuck.is_empty(), "{} nodes found no clear spot", report.stuck.len());
+        let stuck: Vec<(f64, f64)> = report.stuck.iter().map(|id| seeded_positions().iter().find(|n| n.0 == *id).unwrap().1).collect();
+        assert!(stuck.is_empty(), "{} nodes found no clear spot: {stuck:?}", stuck.len());
 
         let mut fitted = seeded_positions();
         for m in &report.moves {
@@ -339,13 +420,13 @@ mod tests {
 
     #[test]
     fn a_new_player_arrives_on_the_road_in_with_grass_in_sight() {
-        let terrain = TerrainConfig::get_default();
+        let terrain = TerrainConfig::default_world();
         assert_eq!(Zone::from_position(SPAWN_X, SPAWN_Y), Zone::Rural);
 
         // On the arterial, even at the edge of the scatter, with room for the
         // player's own radius.
         for dx in [-SPAWN_SCATTER, 0.0, SPAWN_SCATTER] {
-            let clearance = road_clearance(&terrain, SPAWN_X + dx, SPAWN_Y);
+            let clearance = road_clearance(terrain, SPAWN_X + dx, SPAWN_Y);
             assert!(clearance <= -8.0, "spawn + {dx} is {clearance:.1} from the road edge");
         }
 
@@ -367,7 +448,7 @@ mod tests {
     /// migration's were.
     fn default_plan() -> Vec<NodeSeed> {
         let existing: Vec<(f64, f64)> = seeded_nodes().iter().map(|&(x, y, _)| (x, y)).collect();
-        node_spawn::plan(&TerrainConfig::get_default(), &content_tables(), &existing, WorldGenParams::default().seed)
+        node_spawn::plan(TerrainConfig::default_world(), &content_tables(), &existing, WorldGenParams::default().seed)
     }
 
     /// Whether a planned node stands in the water on purpose (the reeds).
@@ -383,14 +464,15 @@ mod tests {
         crate::content::load().unwrap().resources.iter().map(|r| SpawnTable::from(&r.to_type())).collect()
     }
 
-    /// The whole plan, E2.3's nodes and the wilds', on the 13600 world. RW1
-    /// re-planned it when the rural ring widened (#308), and deleted every
-    /// planned row before it: E2.3's (`20261106_001_seeded_nodes_by_zone`),
-    /// W6's and #225's wild ones, and #222's moves of them.
-    const PLAN_MIGRATION: &str = include_str!("../../migrations/post-content/20261122_001_rural_widens_nodes.sql");
+    /// The whole plan, E2.3's nodes and the wilds', on the 16600 world.
+    /// Plots v2's flip re-planned it when every zone took its v2 rings
+    /// (#459), and deleted every planned row before it: RW1's whole re-plan
+    /// (`20261122_001_rural_widens_nodes`, which had deleted E2.3's, W6's,
+    /// #225's and #222's before it) and the partial re-plans since.
+    const PLAN_MIGRATION: &str = include_str!("../../migrations/post-content/20261220_001_plots_v2_flip_nodes.sql");
 
     /// Moves of planned nodes written since the re-plan, in the order they run:
-    /// each a migration of `('id', x, y)` rows on the 13600 world, from
+    /// each a migration of `('id', x, y)` rows on the 16600 world, from
     /// [`print_planned_node_moves`], as #222's were before it.
     const PLANNED_MOVES_MIGRATIONS: [&str; 0] = [];
 
@@ -415,19 +497,14 @@ mod tests {
             .collect()
     }
 
-    /// Re-plans of some of the nodes since RW1, in the order they run: each
-    /// deletes the planned rows it lists by id (a `'id',` line) and inserts
-    /// its own (a `('id', 'type', x, y, quality)` line), from `print_new_nodes`.
-    const REPLAN_MIGRATIONS: [&str; 5] = [
-        include_str!("../../migrations/post-content/20261125_001_rural_iron_veins.sql"),
-        include_str!("../../migrations/post-content/20261126_001_rural_farms_nodes.sql"),
-        include_str!("../../migrations/post-content/20261201_001_rural_smaller_farms_nodes.sql"),
-        include_str!("../../migrations/post-content/20261205_001_suburb_wider_lots_nodes.sql"),
-        include_str!("../../migrations/post-content/20261207_001_urban_grid_nodes.sql"),
-    ];
+    /// Re-plans of some of the nodes since the flip, in the order they run:
+    /// each deletes the planned rows it lists by id (a `'id',` line) and
+    /// inserts its own (a `('id', 'type', x, y, quality)` line), from
+    /// `print_node_replan`.
+    const REPLAN_MIGRATIONS: [&str; 0] = [];
 
     /// The `('id', 'type', x, y, quality)` rows of the plan's insert: every
-    /// planned node, since RW1 re-planned them whole (#308), less what
+    /// planned node, since the flip re-planned them whole (#459), less what
     /// [`REPLAN_MIGRATIONS`] deleted and with what they inserted, by id.
     fn migrated_plan() -> Vec<NodeSeed> {
         let inserts = |sql: &'static str| {
@@ -461,7 +538,7 @@ mod tests {
     /// about its density, and none on a road, the water or a lot.
     #[test]
     fn the_default_world_grows_what_d5_says() {
-        let terrain = TerrainConfig::get_default();
+        let terrain = TerrainConfig::default_world();
         let plan = default_plan();
         let tables = content_tables();
         for table in &tables {
@@ -477,7 +554,7 @@ mod tests {
             }
         }
         for s in &plan {
-            let clearance = road_clearance(&terrain, s.x, s.y);
+            let clearance = road_clearance(terrain, s.x, s.y);
             assert!(clearance >= KEEP_CLEAR, "{} at ({}, {}) is {clearance:.1} from a road", s.resource_type, s.x, s.y);
             assert!(terrain.lot_at(s.x, s.y).is_none(), "{} on a lot at ({}, {})", s.resource_type, s.x, s.y);
             let r = (s.x - CENTER_X).stable_hypot(s.y - CENTER_Y);
@@ -501,7 +578,7 @@ mod tests {
         let n = nodes.len() as u128;
         let dry = planned_nodes().into_iter().filter(|s| !grows_in_the_water(s));
         nodes.extend(dry.enumerate().map(|(i, s)| (Uuid::from_u128(n + i as u128), (s.x, s.y))));
-        let report = place_nodes(&TerrainConfig::get_default(), &nodes);
+        let report = place_nodes(TerrainConfig::default_world(), &nodes);
         assert!(report.moves.is_empty(), "{} nodes moved: {:?}", report.moves.len(), report.moves);
     }
 
@@ -516,7 +593,7 @@ mod tests {
         let planned = planned_nodes();
         let nodes: Vec<(Uuid, (f64, f64))> =
             seeded_positions().into_iter().chain(planned.iter().map(|s| (s.id, (s.x, s.y)))).collect();
-        let report = place_nodes(&TerrainConfig::get_default(), &nodes);
+        let report = place_nodes(TerrainConfig::default_world(), &nodes);
         for m in &report.moves {
             println!("    ('{}', {:.1}, {:.1}),", m.id, m.to.0, m.to.1);
         }
@@ -542,7 +619,7 @@ mod tests {
     /// leave them. Only the reeds, which grow there (#225).
     #[test]
     fn no_node_stands_in_the_wild_water() {
-        let terrain = TerrainConfig::get_default();
+        let terrain = TerrainConfig::default_world();
         let planned: Vec<NodeSeed> = planned_nodes().into_iter().filter(|s| !grows_in_the_water(s)).collect();
         let nodes = seeded_positions().into_iter().map(|(_, p)| p).chain(planned.iter().map(|s| (s.x, s.y)));
         let mut wet = Vec::new();
@@ -568,7 +645,7 @@ mod tests {
     /// post-content migration (`migrations/post-content/`, #207) as a plain
     /// `INSERT INTO resource_nodes`, and in [`migrated_plan`]. With
     /// `PRINT_ALL_NODES=1` it prints the whole plan, for a re-plan that
-    /// replaces every planned row, as RW1's did (#308).
+    /// replaces every planned row, as RW1's (#308) and the flip's (#459) did.
     #[test]
     #[ignore]
     fn print_new_nodes() {
@@ -633,8 +710,8 @@ mod tests {
         use capitol_protocol::land::{height_at, slope_at};
         use capitol_protocol::rules::ground::CLIFF_SLOPE;
 
-        let terrain = TerrainConfig::get_default();
-        let land = Land::new(&terrain);
+        let terrain = TerrainConfig::default_world();
+        let land = Land::new(terrain);
         let plan = default_plan();
         let wild: Vec<&NodeSeed> = plan.iter().filter(|s| Zone::from_position(s.x, s.y) == Zone::Wilderness).collect();
         let tables = content_tables();
@@ -654,7 +731,7 @@ mod tests {
             assert!(habitat.suits(r, h, slope), "{at} isn't in its habitat");
             assert!(slope <= CLIFF_SLOPE, "{at} is on a cliff");
             assert!(land.reached((s.x, s.y)), "{at} can't be reached");
-            let road = road_clearance(&terrain, s.x, s.y);
+            let road = road_clearance(terrain, s.x, s.y);
             assert!(road >= MOVE_CLEAR, "{at} is {road:.1} from a road or trail");
             let water = land.water_clearance((s.x, s.y));
             let clear = if s.resource_type == "clay_bank" { BANK_CLEAR } else { MOVE_CLEAR };
@@ -696,7 +773,7 @@ mod tests {
         for s in reeds {
             let at = format!("reeds at ({}, {})", s.x, s.y);
             assert!(land.in_the_water((s.x, s.y)), "{at} aren't in the water");
-            assert!(road_clearance(&terrain, s.x, s.y) >= MOVE_CLEAR, "{at} are by a road or trail");
+            assert!(road_clearance(terrain, s.x, s.y) >= MOVE_CLEAR, "{at} are by a road or trail");
             let reach = capitol_protocol::rules::EXTRACTION_RANGE - 1.0;
             let bank = (0..72).any(|k| {
                 let a = k as f64 * std::f64::consts::TAU / 72.0;
@@ -714,7 +791,7 @@ mod tests {
     #[test]
     fn copper_and_tin_grow_on_different_massifs() {
         use capitol_protocol::land::massif_at;
-        let terrain = TerrainConfig::get_default();
+        let terrain = TerrainConfig::default_world();
         let plan = default_plan();
         let massifs = |ore: &str| -> std::collections::BTreeSet<u32> {
             plan.iter().filter(|s| s.resource_type == ore).filter_map(|s| massif_at(s.x, s.y, &terrain.land)).collect()
@@ -758,7 +835,7 @@ mod tests {
         use std::fmt::Write;
         let out = std::env::var("NODE_PLAN_OUT").unwrap_or_else(|_| "../target/node-plan".into());
         std::fs::create_dir_all(&out).unwrap();
-        let terrain = TerrainConfig::get_default();
+        let terrain = TerrainConfig::default_world();
         let plan = default_plan();
         let seeds: Vec<(f64, f64)> = seeded_nodes().iter().map(|&(x, y, _)| (x, y)).collect();
         const KINDS: [(&str, &str, &str); 7] = [
