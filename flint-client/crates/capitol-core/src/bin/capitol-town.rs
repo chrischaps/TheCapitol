@@ -83,8 +83,12 @@ USAGE:
                                  Run a stack of decision layers over the
                                  citizens' decision logs, offline, and
                                  report its agreement with what they chose,
-                                 its escalation rate, latency and cost. A
-                                 log is a file or a directory of them
+                                 its escalation rate, latency and cost; and
+                                 what came of the choices that stood when
+                                 they were recorded, by layer and by how
+                                 sure it was (lived, #302), which costs
+                                 nothing with --layers rules. A log is a
+                                 file or a directory of them
                                  [default: town.decisions beside the roster]
     capitol-town corpus [<dir>] [--rounds <n>]
                                  Write a log of made-up situations, every

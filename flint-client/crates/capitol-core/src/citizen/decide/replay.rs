@@ -26,14 +26,20 @@
 //!   how many of them picked the entry recorded. The recorded pick is
 //!   mostly the rules', so this says how well a layer's confidence tracks
 //!   agreeing with them, not how often it's right;
-//! - and the outcomes and fills the log recorded, for context.
+//! - the outcomes and fills the log recorded;
+//! - and **lived** (#302): calibration against what came of each choice,
+//!   not against the rules. It reads the log's own rulings, not the
+//!   replay's, so it costs nothing to run: each layer whose answer stood
+//!   when it was recorded, by how sure it was and by question, with how
+//!   many of its choices [worked](Lived::worked), how many failed, and
+//!   what they [came to](Lived::value) in Strands at the books.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use super::log::Record;
-use super::{Asked, By, Cascade, Decision, Question, Ruling, Situation, Turn};
+use super::log::{Fate, Record};
+use super::{Asked, By, Cascade, Choice, Decision, Question, Ruling, Situation, Turn};
 
 /// How often a pending layer is asked again.
 const POLL: Duration = Duration::from_millis(2);
@@ -80,6 +86,51 @@ impl LayerStats {
     }
 }
 
+/// What came of the choices a layer made live (#302).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Lived {
+    /// Its answers that stood: settled by it, or the best offered
+    pub stood: usize,
+    /// Of those, the ones whose outcome was logged, and that were acted on
+    /// (a superseded choice wasn't)
+    pub known: usize,
+    /// Did what it chose: a step or an errand done; a sale, a buy or a
+    /// trade that moved goods or Strands; a bid or a stall that filled; a
+    /// keep, a gather or a decline as chosen
+    pub worked: usize,
+    pub failed: usize,
+    /// What its choices came to, in Strands at the books when each was
+    /// made: the change in Strands and goods to its outcome, or for a bid
+    /// or a stall, its fills (its escrow and its stock come back, so they
+    /// aren't counted). Goods with no book count nothing.
+    pub value: i64,
+}
+
+impl Lived {
+    fn add(&mut self, o: &Lived) {
+        self.stood += o.stood;
+        self.known += o.known;
+        self.worked += o.worked;
+        self.failed += o.failed;
+        self.value += o.value;
+    }
+
+    /// The share of its known choices that worked.
+    pub fn worked_share(&self) -> f64 {
+        share(self.worked, self.known)
+    }
+}
+
+/// A layer's live choices, all told, by confidence and by question.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LivedStats {
+    pub all: Lived,
+    /// By its confidence, in tenths; the rules' own pick has none
+    pub tenths: BTreeMap<usize, Lived>,
+    /// By question and the kind of entry chosen: `sell: keep`
+    pub questions: BTreeMap<String, Lived>,
+}
+
 /// What a replay found.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Report {
@@ -108,6 +159,9 @@ pub struct Report {
     /// The outcomes recorded, by [`Fate::as_str`](super::log::Fate::as_str)
     pub outcomes: BTreeMap<&'static str, usize>,
     pub fills: usize,
+    /// What came of the choices each layer made live, by the layer whose
+    /// answer stood (#302)
+    pub lived: BTreeMap<String, LivedStats>,
     /// Lines that wouldn't read
     pub unreadable: Vec<String>,
     pub differences: Vec<Difference>,
@@ -197,6 +251,7 @@ impl Replayer {
         report.logs += 1;
         let mut citizen = String::new();
         let mut run_layers: Vec<String> = Vec::new();
+        let mut lives = Lives::default();
         for record in records {
             let record = match record {
                 Ok(record) => record,
@@ -213,8 +268,10 @@ impl Replayer {
                     report.runs = self.runs.len();
                     citizen = who;
                     run_layers = layers;
+                    lives.run = run;
                 }
                 Record::Decision { id, situation, ruling, .. } => {
+                    lives.decision(id, &situation, &ruling);
                     self.seen += 1;
                     if !(self.seen - 1).is_multiple_of(self.stride) {
                         continue;
@@ -228,10 +285,19 @@ impl Replayer {
                     };
                     flights.send(report, flight);
                 }
-                Record::Outcome { fate, .. } => *report.outcomes.entry(fate.as_str()).or_default() += 1,
-                Record::Fill { .. } => report.fills += 1,
+                Record::Outcome {
+                    id, fate, strands, items, ..
+                } => {
+                    *report.outcomes.entry(fate.as_str()).or_default() += 1;
+                    lives.outcome(id, fate, strands, &items);
+                }
+                Record::Fill { id, quantity, strands, .. } => {
+                    report.fills += 1;
+                    lives.fill(id, quantity, strands);
+                }
             }
         }
+        lives.fold(&mut report.lived);
         flights.drain(report);
         for cascade in &flights.cascades {
             for (stats, (_, cents)) in report.layers.iter_mut().zip(cascade.spent()) {
@@ -248,6 +314,157 @@ impl Replayer {
     pub fn finish(self) -> Report {
         self.report
     }
+}
+
+/// One log's live choices, waiting on their outcomes and fills (#302).
+#[derive(Default)]
+struct Lives {
+    /// The run being read: decision ids are the run's
+    run: i64,
+    lives: Vec<Life>,
+    by_id: HashMap<(i64, u64), usize>,
+    /// What the layers below a pending one said, by question, for the
+    /// ruling that comes of its answer: that trail has only its own turn
+    offered: HashMap<String, Vec<Turn>>,
+}
+
+/// A choice that stood, and what came of it.
+struct Life {
+    layer: String,
+    tenth: Option<usize>,
+    question: String,
+    choice: Choice,
+    /// Each book's price when it was decided
+    books: BTreeMap<String, i64>,
+    fate: Option<Fate>,
+    moved: bool,
+    value: i64,
+    fills: usize,
+}
+
+impl Lives {
+    fn decision(&mut self, id: u64, s: &Situation, ruling: &Ruling) {
+        let key = s.question.key();
+        let name = match &ruling.by {
+            By::Waiting { .. } => {
+                self.offered.insert(key, ruling.trail.clone());
+                return;
+            }
+            By::Layer { name } | By::Offered { name } => name.clone(),
+            By::Rules => "rules".into(),
+            By::CarryOn => return,
+        };
+        let earlier = self.offered.remove(&key).unwrap_or_default();
+        let Some(d) = ruling.decision.filter(|d| d.pick < s.menu.len()) else { return };
+        // The rules' own pick, when no layer offered one, has no confidence
+        let tenth = (ruling.by != By::Rules)
+            .then(|| {
+                ruling.trail.iter().chain(&earlier).find_map(|t| match &t.asked {
+                    Asked::Settled { confidence, choice } | Asked::Unsure { confidence, choice } if t.layer == name && *choice == d => {
+                        Some(tenth(*confidence))
+                    }
+                    _ => None,
+                })
+            })
+            .flatten();
+        let choice = s.choice(&d).clone();
+        self.by_id.insert((self.run, id), self.lives.len());
+        self.lives.push(Life {
+            layer: name,
+            tenth,
+            question: format!("{}: {}", kind(&s.question), entry_kind(&choice)),
+            choice,
+            books: s.market.iter().filter_map(|q| Some((q.item.clone(), book(q)?))).collect(),
+            fate: None,
+            moved: false,
+            value: 0,
+            fills: 0,
+        });
+    }
+
+    fn outcome(&mut self, id: u64, fate: Fate, strands: i64, items: &BTreeMap<String, i32>) {
+        let Some(life) = self.by_id.get(&(self.run, id)).map(|&i| &mut self.lives[i]) else { return };
+        life.moved = strands != 0 || !items.is_empty();
+        // A bid's escrow and a stall's stock come back; their fills are
+        // what they came to
+        if !matches!(life.choice, Choice::Bid { .. } | Choice::Stock { .. }) {
+            life.value = strands + items.iter().map(|(item, n)| *n as i64 * life.books.get(item).copied().unwrap_or(0)).sum::<i64>();
+        }
+        life.fate = Some(fate);
+    }
+
+    fn fill(&mut self, id: u64, quantity: i64, strands: i64) {
+        let Some(life) = self.by_id.get(&(self.run, id)).map(|&i| &mut self.lives[i]) else { return };
+        let (item, buying) = match &life.choice {
+            Choice::Bid { item, .. } => (item, true),
+            Choice::Stock { item, .. } => (item, false),
+            _ => return,
+        };
+        let goods = quantity * life.books.get(item).copied().unwrap_or(0);
+        life.value += if buying { goods - strands } else { strands - goods };
+        life.fills += 1;
+    }
+
+    fn fold(self, into: &mut BTreeMap<String, LivedStats>) {
+        for life in self.lives {
+            let mut lived = Lived {
+                stood: 1,
+                ..Lived::default()
+            };
+            match &life.fate {
+                None | Some(Fate::Superseded) => {}
+                Some(fate) => {
+                    lived.known = 1;
+                    lived.value = life.value;
+                    let worked = match fate {
+                        Fate::Failed { .. } | Fate::Ended { .. } => false,
+                        Fate::Passed | Fate::Declined => true,
+                        _ => match life.choice {
+                            Choice::Bid { .. } | Choice::Stock { .. } => life.fills > 0,
+                            Choice::Sell { .. }
+                            | Choice::Buy { .. }
+                            | Choice::BuyFrom { .. }
+                            | Choice::SellTo { .. }
+                            | Choice::Accept
+                            | Choice::Counter { .. }
+                            | Choice::Pay { .. } => life.moved,
+                            _ => true,
+                        },
+                    };
+                    lived.worked = worked as usize;
+                    lived.failed = matches!(fate, Fate::Failed { .. }) as usize;
+                }
+            }
+            let stats = into.entry(life.layer).or_default();
+            stats.all.add(&lived);
+            if let Some(t) = life.tenth {
+                stats.tenths.entry(t).or_default().add(&lived);
+            }
+            stats.questions.entry(life.question).or_default().add(&lived);
+        }
+    }
+}
+
+/// A book's price: its last trade's, else the middle of its bid and ask,
+/// else whichever it has.
+fn book(q: &super::Quote) -> Option<i64> {
+    q.last.or(match (q.bid, q.ask) {
+        (Some(b), Some(a)) => Some((b + a) / 2),
+        (b, a) => b.or(a),
+    })
+}
+
+/// A confidence in tenths, 0 to 9.
+fn tenth(confidence: f32) -> usize {
+    ((confidence * 10.0).floor().max(0.0) as usize).min(9)
+}
+
+/// An entry's kind, as the log tags it: `sell`, `make_market`.
+fn entry_kind(c: &Choice) -> String {
+    serde_json::to_value(c)
+        .ok()
+        .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(str::to_string))
+        .unwrap_or_default()
 }
 
 /// A logged decision to replay.
@@ -430,8 +647,7 @@ fn fold(report: &mut Report, asking: Asking) {
                 *stats.reasons.entry(reason).or_default() += 1;
             }
             if let Asked::Settled { confidence, choice } | Asked::Unsure { confidence, choice } = &turn.asked {
-                let tenth = ((confidence * 10.0).floor().max(0.0) as usize).min(9);
-                let entry = stats.calibration.entry(tenth).or_default();
+                let entry = stats.calibration.entry(tenth(*confidence)).or_default();
                 entry.0 += 1;
                 entry.1 += (recorded.decision.map(|d| d.pick) == Some(choice.pick)) as usize;
             }
@@ -509,6 +725,19 @@ fn micros(v: Option<u64>) -> String {
         Some(us) if us >= 10_000 => format!("{} ms", us / 1000),
         Some(us) => format!("{us} µs"),
     }
+}
+
+/// `41/50 (3) +120`: worked of known, failed, value; and the unknown.
+fn lived(l: &Lived) -> String {
+    let mut s = format!("{}/{}", l.worked, l.known);
+    if l.failed > 0 {
+        s.push_str(&format!(" ({} failed)", l.failed));
+    }
+    s.push_str(&format!(" {:+}", l.value));
+    if l.stood > l.known {
+        s.push_str(&format!(", {} unknown", l.stood - l.known));
+    }
+    s
 }
 
 fn decision(d: &Option<Decision>) -> String {
@@ -619,6 +848,24 @@ impl fmt::Display for Report {
             self.fills,
             if self.fills == 1 { "" } else { "s" }
         )?;
+        if !self.lived.is_empty() {
+            writeln!(f, "  lived        what came of the choices that stood, as recorded: worked/known (failed) and Strands at the books")?;
+        }
+        for (layer, stats) in &self.lived {
+            writeln!(f, "  {:<12} {}", layer, lived(&stats.all))?;
+            if !stats.tenths.is_empty() {
+                let tenths: Vec<String> = stats
+                    .tenths
+                    .iter()
+                    .rev()
+                    .map(|(t, l)| format!("{:.1}+ {}", *t as f64 / 10.0, lived(l)))
+                    .collect();
+                writeln!(f, "  {:<12} by confidence: {}", "", tenths.join(" · "))?;
+            }
+            for (question, l) in &stats.questions {
+                writeln!(f, "  {:<12}   {question:<18} {}", "", lived(l))?;
+            }
+        }
         if !self.unreadable.is_empty() {
             writeln!(f, "  unreadable   {} line(s), first {}", self.unreadable.len(), self.unreadable[0])?;
         }
@@ -975,6 +1222,123 @@ mod tests {
         // The bid's two fills, not a third once it's done; the stall's sale,
         // and nothing for a stall it never stocked
         assert_eq!(fills, [(id, 2, 14), (id, 1, 7), (id, 3, 30)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A live log of `rules → jev`, written as the town writes it: lived
+    /// reads the rulings recorded, joined to their outcomes and fills.
+    #[test]
+    fn lived_measures_the_choices_that_stood_by_what_came_of_them() {
+        let dir = temp("lived");
+        let path = log::file_for(&dir, "Percy Sawyer");
+        let layers = vec!["rules".to_string(), "jev".to_string()];
+        let mut log = Log::open(&path, "Percy Sawyer", "builder", &layers, log::LOG_LIMIT, log::LOG_KEEP).unwrap();
+        let mut s = situations().into_iter().find(|s| s.question == Question::FreeTime).unwrap();
+        s.question = Question::Buy { item: "log".into() };
+        s.market = vec![super::super::Quote {
+            item: "log".into(),
+            bid: Some(4),
+            ask: Some(8),
+            last: None,
+        }];
+        s.menu = vec![
+            Choice::Bid {
+                item: "log".into(),
+                price: Span::new(1, 9),
+                quantity: Span::new(1, 9),
+            },
+            Choice::Gather { item: "log".into() },
+        ];
+        s.carry_on = Some(1);
+        let turn = |layer: &str, asked: Asked| Turn {
+            layer: layer.into(),
+            asked,
+            micros: 1,
+        };
+        let bid = Decision {
+            pick: 0,
+            price: Some(5),
+            quantity: Some(3),
+        };
+        // The rules aren't sure, Jev thinks it over, then bids at 0.95
+        let waiting = Ruling {
+            decision: Some(Decision::plain(1)),
+            by: By::Waiting { name: "jev".into() },
+            trail: vec![
+                turn(
+                    "rules",
+                    Asked::Unsure {
+                        confidence: 0.5,
+                        choice: Decision::plain(1),
+                    },
+                ),
+                turn("jev", Asked::Pending),
+            ],
+        };
+        let answered = Ruling {
+            decision: Some(bid),
+            by: By::Layer { name: "jev".into() },
+            trail: vec![turn("jev", Asked::Settled { confidence: 0.95, choice: bid })],
+        };
+        let carried = log.decision(&s, &waiting);
+        let id = log.decision(&s, &answered);
+        let outcome = |id, fate, strands| Record::Outcome {
+            t: 1,
+            id,
+            fate,
+            took: 1.0,
+            strands,
+            items: BTreeMap::new(),
+        };
+        log.write(&outcome(carried, Fate::Passed, 0));
+        // The escrow left its Strands: that isn't what the bid came to
+        log.write(&outcome(id, Fate::Done, -15));
+        log.write(&Record::Fill {
+            t: 2,
+            id,
+            quantity: 2,
+            strands: 10,
+        });
+        // Then Jev's 0.7 offer stands over the rules' 0.5, and fails
+        let mut offered = answered.clone();
+        let gather = Decision::plain(1);
+        offered.by = By::Offered { name: "jev".into() };
+        offered.decision = Some(gather);
+        offered.trail = vec![
+            turn(
+                "rules",
+                Asked::Unsure {
+                    confidence: 0.5,
+                    choice: Decision::plain(1),
+                },
+            ),
+            turn("jev", Asked::Unsure { confidence: 0.7, choice: gather }),
+        ];
+        let failed = log.decision(&s, &offered);
+        log.write(&outcome(failed, Fate::Failed { why: "no logs".into() }, 0));
+        // A rules' pick that a trade went before
+        let settled = Ruling {
+            decision: Some(gather),
+            by: By::Layer { name: "rules".into() },
+            trail: vec![turn("rules", Asked::Settled { confidence: 0.8, choice: gather })],
+        };
+        let superseded = log.decision(&s, &settled);
+        log.write(&outcome(superseded, Fate::Superseded, 0));
+        drop(log);
+        let report = replay(&path, Cascade::rules);
+        let jev = &report.lived["jev"];
+        assert_eq!((jev.all.stood, jev.all.known, jev.all.worked, jev.all.failed), (2, 2, 1, 1), "{report}");
+        // Two logs at the books' 6, for 10
+        assert_eq!(jev.tenths[&9].value, 2);
+        assert_eq!(jev.tenths[&9].worked, 1);
+        assert_eq!((jev.tenths[&7].worked, jev.tenths[&7].failed), (0, 1));
+        assert_eq!(jev.questions["buy: bid"].worked, 1);
+        assert_eq!(jev.questions["buy: gather"].failed, 1);
+        // The carry-on while Jev thought isn't anyone's choice
+        let rules = &report.lived["rules"];
+        assert_eq!((rules.all.stood, rules.all.known), (1, 0));
+        let text = report.to_string();
+        assert!(text.contains("lived") && text.contains("0.9+ 1/1 +2"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
