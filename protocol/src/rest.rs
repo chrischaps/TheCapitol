@@ -299,6 +299,44 @@ pub enum Doing {
     Crafting { recipe_id: String },
 }
 
+/// `GET /admin/books` (D2.1): how the console reads a sample's
+/// `strand_flows`. The page holds no copy of what's a faucet and what's a
+/// sink, so a type added here shows on its chart without touching it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct AdminBooks {
+    /// Every transaction type this build knows, in the order they stack
+    /// (`ledger::TRANSACTION_TYPES`)
+    pub flows: Vec<BooksFlow>,
+    /// What each new account starts with (`ledger::STARTING_STRANDS`)
+    pub starting_strands: i64,
+    /// A game day, in real ms: what velocity is counted over
+    pub day_ms: i64,
+}
+
+/// One transaction type, and what it does to the world's Strands.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct BooksFlow {
+    pub kind: String,
+    pub flow: crate::ledger::StrandFlow,
+}
+
+impl AdminBooks {
+    /// This build's books
+    pub fn current() -> AdminBooks {
+        use crate::ledger::{StrandFlow, STARTING_STRANDS, TRANSACTION_TYPES};
+        AdminBooks {
+            flows: TRANSACTION_TYPES
+                .iter()
+                .map(|kind| BooksFlow { kind: kind.to_string(), flow: StrandFlow::of(kind) })
+                .collect(),
+            starting_strands: STARTING_STRANDS,
+            day_ms: rules::DAY_LENGTH_SECS * 1000,
+        }
+    }
+}
+
 /// `GET /admin/map`'s query (D1.3): how many hours back the trade heat
 /// reaches, held to 1 to [`MAP_HEAT_MAX_HOURS`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

@@ -40,6 +40,20 @@
   --axis: #6b6150;
   --budget: rgba(155, 47, 37, 0.7);
   --marker: rgba(122, 98, 20, 0.75);
+  /* the money's lines (D2.1): what comes in in greens and blues, what goes
+     out in the reds and browns of the sinks, tax a bright yellow so a
+     sliver of it still shows */
+  --fl-deposits: #2f6b3a;
+  --fl-refunds: #7d9a5e;
+  --fl-grants: #2b4c7e;
+  --fl-newcomers: #7f9db3;
+  --fl-withdrawals: #b08a74;
+  --fl-deeds: #9b2f25;
+  --fl-rent: #c25a2a;
+  --fl-fees: #6d4a7e;
+  --fl-tax: #c9a00c;
+  --fl-other: #8a8070;
+  --fl-escrow: #2b4c7e;
   /* the wire's kinds */
   --k-annotation: #7a6214;
   --k-fill: #2b4c7e;
@@ -112,6 +126,17 @@
     --axis: #8a8a96;
     --budget: rgba(239, 68, 68, 0.7);
     --marker: rgba(201, 162, 39, 0.7);
+    --fl-deposits: #22c55e;
+    --fl-refunds: #86efac;
+    --fl-grants: #3b82f6;
+    --fl-newcomers: #93c5fd;
+    --fl-withdrawals: #d6a48a;
+    --fl-deeds: #ef4444;
+    --fl-rent: #f97316;
+    --fl-fees: #a78bfa;
+    --fl-tax: #facc15;
+    --fl-other: #8a8a96;
+    --fl-escrow: #e8a24a;
     --k-annotation: #c9a227;
     --k-fill: #3b82f6;
     --k-deed: #22c55e;
@@ -181,6 +206,17 @@
   --axis: #8a8a96;
   --budget: rgba(239, 68, 68, 0.7);
   --marker: rgba(201, 162, 39, 0.7);
+  --fl-deposits: #22c55e;
+  --fl-refunds: #86efac;
+  --fl-grants: #3b82f6;
+  --fl-newcomers: #93c5fd;
+  --fl-withdrawals: #d6a48a;
+  --fl-deeds: #ef4444;
+  --fl-rent: #f97316;
+  --fl-fees: #a78bfa;
+  --fl-tax: #facc15;
+  --fl-other: #8a8a96;
+  --fl-escrow: #e8a24a;
   --k-annotation: #c9a227;
   --k-fill: #3b82f6;
   --k-deed: #22c55e;
@@ -398,6 +434,27 @@ input {
 .dek { margin: 0; color: var(--ink-dim); font-size: 14px; }
 .dek:empty { display: none; }
 .chart { margin-top: 14px; min-height: 260px; position: relative; }
+.chart-short { min-height: 160px; }
+
+/* The money's account (D2.1): each kind's total over the range as a bar,
+   in a ruled table like the Gazette's market column */
+.account { margin-top: 18px; border-top: 1px solid var(--rule); font-size: 14px; }
+.account-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 9rem) 1fr minmax(64px, auto);
+  gap: 12px;
+  align-items: center;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--hair);
+}
+.account-row > :last-child { text-align: right; font-variant-numeric: tabular-nums; }
+.account-row[data-side="in"] > :last-child { color: var(--up); }
+.account-row[data-side="out"] > :last-child { color: var(--down); }
+.account-row[data-side="in"] + .account-row[data-side="out"] { border-top: 1px solid var(--rule); }
+.account-track { display: block; height: 10px; }
+.account-bar { display: block; height: 100%; border-radius: 1px; }
+.account-net { border-top: 1px solid var(--rule); border-bottom: 3px double var(--rule); font-weight: 600; }
+.account-net > :nth-child(2) { color: var(--ink-dim); font-weight: 400; }
 
 /* uPlot, in the page's type and inks */
 .uplot { font-family: inherit; }

@@ -29,6 +29,8 @@
 //! also what `GET /admin/positions` (D1.3) sends, for every player.
 //! `fixtures/rest/admin_map.json` is `GET /admin/map` (D1.3): two zones, a citizen's farm
 //! and a person's lot, their stations, and an hour's fills at the hall and two stalls.
+//! `fixtures/rest/admin_books.json` is `GET /admin/books` (D2.1): every transaction
+//! type this build knows and what it does to the Strands.
 
 use std::fs;
 use std::path::Path;
@@ -289,6 +291,24 @@ fn the_admin_map_round_trips() {
     assert_eq!(map.heat.market.vwap(), Some(412.0 / 96.0));
     assert_eq!(map.heat.stalls["bazaar_stall_12"].strands, 60);
     assert_eq!(serde_json::to_string(&map).unwrap(), json);
+}
+
+#[test]
+fn the_admin_books_are_this_builds() {
+    use capitol_protocol::rest::AdminBooks;
+    let json = fixture("admin_books.json");
+    let books: AdminBooks = serde_json::from_str(&json).unwrap();
+    assert_eq!(books, AdminBooks::current());
+    assert_eq!(serde_json::to_string(&books).unwrap(), json);
+}
+
+#[test]
+fn a_sample_from_before_new_accounts_reads_as_none() {
+    let json = fixture("sample.json");
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value.as_object_mut().unwrap().remove("new_accounts");
+    let old: Sample = serde_json::from_value(value).unwrap();
+    assert_eq!(old.new_accounts, 0);
 }
 
 #[test]

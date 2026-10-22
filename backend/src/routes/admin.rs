@@ -12,7 +12,7 @@ use capitol_protocol::metrics::{Feed, SeriesQuery, TownLatest, TownReport};
 use futures::{Stream, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
 use capitol_protocol::rest::{
-    AdminMap, ApiKeyScope, CitizenInfo, CreateCitizenRequest, CreatedApiKey, CreatedCitizen, Doing, FillHeat, MapPlot,
+    AdminBooks, AdminMap, ApiKeyScope, CitizenInfo, CreateCitizenRequest, CreatedApiKey, CreatedCitizen, Doing, FillHeat, MapPlot,
     MapQuery, MapZone, MapStation, SuccessResponse, Walker, WalkersQuery, MAP_HEAT_MAX_HOURS, WALKERS_MAX_RADIUS,
 };
 use capitol_protocol::metrics::Trades;
@@ -55,6 +55,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/walkers", get(get_walkers))
         .route("/positions", get(get_positions).layer(CompressionLayer::new()))
         .route("/map", get(get_map).layer(CompressionLayer::new()))
+        .route("/books", get(get_books))
         .route("/accounts/{id}/subscription", post(subscribe_account))
         .route("/citizens", get(list_citizens).post(create_citizen))
         .route("/town", get(get_town))
@@ -526,6 +527,14 @@ pub async fn get_positions(
 ) -> Result<Json<Vec<Walker>>, AppError> {
     require_admin(&user)?;
     Ok(Json(walkers(state.game.read().await.players.values())))
+}
+
+/// How the console reads a sample's Strand flows (D2.1): which transaction
+/// types are faucets and which sinks, what a new account starts with, and
+/// how long a game day is.
+pub async fn get_books(Extension(user): Extension<AuthUser>) -> Result<Json<AdminBooks>, AppError> {
+    require_admin(&user)?;
+    Ok(Json(AdminBooks::current()))
 }
 
 /// The console map's layers that change slowly (D1.3): the owned lots, the

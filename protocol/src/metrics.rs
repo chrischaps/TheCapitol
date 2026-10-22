@@ -59,6 +59,12 @@ pub struct Sample {
     /// What the audit trail says moved Strands over the window, by
     /// transaction type
     pub strand_flows: BTreeMap<String, i64>,
+    /// Accounts made over the window, each with
+    /// [`STARTING_STRANDS`](crate::ledger::STARTING_STRANDS) and no audit
+    /// row: the one faucet `strand_flows` can't show (D2.1). A sample stored
+    /// before it reads as none.
+    #[serde(default)]
+    pub new_accounts: u64,
     /// Every unit in the world now, by item type
     pub units: BTreeMap<String, i64>,
     /// Units made (positive) and destroyed (negative) over the window, by
@@ -175,6 +181,7 @@ impl Sample {
         let before: BTreeMap<Uuid, &BTreeMap<String, i64>> =
             start.accounts.iter().map(|a| (a.player_id, &a.flows)).collect();
         let mut strand_flows = BTreeMap::new();
+        let mut new_accounts = 0;
         for account in &end.accounts {
             let class = if account.citizen {
                 &mut strands.citizens
@@ -185,6 +192,7 @@ impl Sample {
             };
             *class += account.strands;
             let was = before.get(&account.player_id);
+            new_accounts += u64::from(was.is_none());
             for (kind, sum) in &account.flows {
                 let moved = sum - was.and_then(|f| f.get(kind)).copied().unwrap_or(0);
                 if moved != 0 {
@@ -215,6 +223,7 @@ impl Sample {
             load: LoadWindow::between(&start.load, &end.load, since_ms as f64 / 1000.0),
             strands,
             strand_flows,
+            new_accounts,
             units: end.units.clone(),
             unit_flows,
             units_settled: start.units_settled && end.units_settled,
@@ -752,6 +761,7 @@ mod tests {
         assert_eq!(samples[0].since_ms, 10_000);
         assert_eq!(samples[0].strand_flows, BTreeMap::from([("exchange_deposit".to_string(), 30)]));
         assert_eq!(samples[0].unit_flows["log"], BTreeMap::from([("gathered".to_string(), 4)]));
+        assert_eq!(samples.iter().map(|s| s.new_accounts).collect::<Vec<_>>(), [1, 0, 0], "the newcomer, once");
         assert_eq!(samples[1].strands, Strands { citizens: 150, people: 100, admins: 4970, escrow: 10 });
         assert_eq!(samples[1].strands.total(), 5230);
         assert!(samples[1].unit_flows.is_empty(), "nothing made or destroyed");

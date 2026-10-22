@@ -11,7 +11,8 @@
 // per tab that later packages grow (D2 the economy, D3.1 performance, D4.2
 // the town, D6.2 tuning). D1.2 made the overview: tiles for health, the tick
 // and who's on, the books' drift, and the newest on the wire. D1.3 adds
-// the map.
+// the map. D2.1 grows the economy tab: where the Strands come from and
+// go, what buy orders hold, and how fast the money moves.
 
 "use strict";
 
@@ -46,7 +47,7 @@
     samples: new Map(),
     sorted: null,
     // How far back each set of fields has been read, as Unix ms
-    covered: { base: Infinity, load: Infinity },
+    covered: { base: Infinity, load: Infinity, money: Infinity },
     annotations: new Map(),
     wire: [],
     wireKind: "all",
@@ -198,7 +199,7 @@
     state.charts = {};
     state.samples.clear();
     state.sorted = null;
-    state.covered = { base: Infinity, load: Infinity };
+    state.covered = { base: Infinity, load: Infinity, money: Infinity };
     state.annotations.clear();
     state.wire = [];
     mapStop();
@@ -247,8 +248,9 @@
   }
 
   // The fields each set of charts reads: the tick's `load` is most of a
-  // sample, so it's read only for the performance tab (#411)
-  const FIELDS = { base: "players,strands,drift", load: "load" };
+  // sample, so it's read only for the performance tab (#411), and the
+  // money's flows and trades only for the economy tab
+  const FIELDS = { base: "players,strands,drift", load: "load", money: "strand_flows,new_accounts,market,bazaar" };
 
   async function readSeries(set) {
     const from = rangeFrom();
@@ -273,8 +275,12 @@
         if (!res.ok || !res.body) throw new Error(`stream: ${res.status}`);
         // After a gap, the samples missed are in the series
         if (state.lastSampleAt) {
-          state.covered = { base: Infinity, load: Infinity };
-          await Promise.all([readSeries("base"), state.tab === "performance" ? readSeries("load") : null]);
+          state.covered = { base: Infinity, load: Infinity, money: Infinity };
+          await Promise.all([
+            readSeries("base"),
+            state.tab === "performance" ? readSeries("load") : null,
+            state.tab === "economy" ? readSeries("money") : null,
+          ]);
         }
         setLive("live");
         wait = 1000;
@@ -357,8 +363,14 @@
     el.after(note);
     let u = null;
     let shown = [];
+    // A spec's series can be a function, read again on each rebuild: the
+    // money's chart has a bar for each kind of flow the range holds
+    let series = [];
+    let rows = null;
+    const bars = uPlot.paths.bars({ size: [0.72, 48], align: 0 });
 
     function build() {
+      series = typeof spec.series === "function" ? spec.series() : spec.series;
       const font = '12px "Source Sans 3", system-ui, sans-serif';
       const axis = {
         stroke: token("--axis"),
@@ -376,7 +388,7 @@
           // shows under its hundred
           y: spec.log
             ? { distr: 3, log: 10 }
-            : { range: (u, min, max) => [Math.min(0, min ?? 0), (max ?? 1) * 1.1 || 1] },
+            : { range: (u, min, max) => [Math.min(0, (min ?? 0) * 1.1), Math.max(0, (max ?? 1) * 1.1) || 1] },
         },
         axes: [
           { ...axis, values: (u, vals) => vals.map((v) => clock(v * 1000)) },
@@ -389,14 +401,20 @@
         ],
         series: [
           { value: (u, v) => (v == null ? "–" : clock(v * 1000)) },
-          ...spec.series.map((s) => ({
+          ...series.map((s, k) => ({
             label: s.label,
             stroke: token(s.color),
-            width: s.width ?? 1.75,
+            width: s.bars ? 0 : s.width ?? 1.75,
             dash: s.dash,
+            ...(s.bars ? { fill: token(s.color), paths: bars } : {}),
             points: { show: false },
             spanGaps: false,
-            value: (u, v) => (v == null ? "–" : spec.legend(v)),
+            // A stacked bar is drawn to its running total, but the legend
+            // gives its own amount
+            value: (u, v, si, i) => {
+              const own = rows?.own?.[s.key] && i != null ? rows.own[s.key][i] : v;
+              return own == null ? "–" : spec.legend(own);
+            },
           })),
         ],
         plugins: [marks(), latestInLegend()],
@@ -411,10 +429,17 @@
     }
 
     function data() {
+      // Rows a spec works out itself, such as bins: `x` in Unix seconds,
+      // `values` drawn and `own` the legend's, each by series key
+      if (spec.rows) {
+        rows = spec.rows();
+        shown = rows.shown;
+        return [rows.x, ...series.map((s) => rows.values[s.key] ?? rows.x.map(() => null))];
+      }
       shown = inRange(spec.has);
       // A log scale has no zero: a phase that didn't run is a gap
       const value = spec.log ? (f) => (s) => { const v = f(s); return v > 0 ? v : null; } : (f) => f;
-      return [shown.map((s) => s.at_ms / 1000), ...spec.series.map((s) => shown.map(value(s.value)))];
+      return [shown.map((s) => s.at_ms / 1000), ...series.map((s) => shown.map(value(s.value)))];
     }
 
     // With the cursor off the chart, the legend gives the newest values
@@ -537,7 +562,28 @@
       ],
     }),
   };
-  const PAGE_CHARTS = { overview: ["players"], economy: ["strands"], performance: ["tick"] };
+  CHARTS.flows = () => lineChart($("chart-flows"), {
+    rows: () => money.rows,
+    axis: short,
+    legend: (v) => `${v > 0 ? "+" : ""}${count(v)}`,
+    // Drawn outermost first, so each bar's inner lines paint over it
+    series: () => money.lines.map((l) => ({ key: l.key, label: l.label, color: l.color, bars: true })).reverse(),
+  });
+  CHARTS.escrow = () => lineChart($("chart-escrow"), {
+    has: (s) => s.strands,
+    height: 160,
+    axis: short,
+    legend: (v) => `${count(v)} Strands`,
+    series: [{ label: "Escrow", color: "--fl-escrow", value: (s) => s.strands.escrow }],
+  });
+  CHARTS.velocity = () => lineChart($("chart-velocity"), {
+    rows: () => money.velocity,
+    height: 180,
+    axis: (v) => `${Number(v.toFixed(2))}×`,
+    legend: (v) => `${v.toFixed(2)}× a game day`,
+    series: [{ key: "velocity", label: "Velocity", color: "--s2", width: 2 }],
+  });
+  const PAGE_CHARTS = { overview: ["players"], economy: ["strands", "flows", "escrow", "velocity"], performance: ["tick"] };
 
   function chart(name) {
     state.charts[name] ??= CHARTS[name]();
@@ -797,7 +843,20 @@
     escrow: (p) => `Escrow holds ${p}`,
   };
 
-  function economy() {
+  async function economy() {
+    if (state.covered.money > rangeFrom() || !books) {
+      if (!books) $("flows-headline").textContent = "Reading the books.";
+      try {
+        books ??= await getJson("/admin/books");
+        await readSeries("money");
+      } catch (e) { if (e instanceof SignedOut) return; console.warn(e); }
+    }
+    strands();
+    if (books) flows();
+    escrow();
+  }
+
+  function strands() {
     chart("strands");
     const s = latest((s) => s.strands);
     if (!s) return void ($("strands-headline").textContent = "Waiting for the first sample.");
@@ -813,6 +872,235 @@
       line += d === 0 ? ` Unchanged ${since(first)}.` : ` ${d > 0 ? "Up" : "Down"} ${nf.format(Math.abs(d))} ${since(first)}.`;
     }
     $("strands-headline").textContent = line;
+  }
+
+  // ---------------------------------------------------------------------------
+  // The money (D2.1): faucets and sinks by kind, binned over the range;
+  // escrow; and velocity, trade over the supply
+
+  // How the server classes each transaction type (`GET /admin/books`): the
+  // page holds no copy of what's a faucet and what's a sink
+  let books = null;
+
+  // The lines the flows are drawn in. Several types can share one; a type
+  // the page has no words for is drawn on its own, on its sign's side
+  const LINE_OF = {
+    exchange_deposit: "deposits",
+    deed_refund: "refunds",
+    foreclosure_refund: "refunds",
+    bazaar_refund: "refunds",
+    admin_adjustment: "grants",
+    exchange_withdraw: "withdrawals",
+    deed_purchase: "deeds",
+    tax_payment: "tax",
+    property_tax: "tax",
+    market_fee: "fees",
+    bazaar_rent: "rent",
+  };
+  const LINES = {
+    deposits: { label: "Deposits", say: "labour's deposits at the Exchange" },
+    refunds: { label: "Refunds", say: "refunds" },
+    grants: { label: "Grants", say: "admins' grants" },
+    newcomers: { label: "Newcomers", say: "newcomers' first Strands" },
+    withdrawals: { label: "Withdrawals", say: "Strands changed back at the Exchange" },
+    deeds: { label: "Deeds", say: "deeds" },
+    rent: { label: "Stall rent", say: "stall rent" },
+    fees: { label: "Market fees", say: "the market's fees" },
+    tax: { label: "Tax", say: "tax" },
+  };
+  // A bar is five minutes of the last hour, a quarter of the last six, an
+  // hour of the last day: about two dozen bars at any range
+  const BIN_MINUTES = { 1: 5, 6: 15, 24: 60 };
+
+  let money = { lines: [], rows: null, velocity: null, key: "" };
+
+  /** The server's class for a transaction type */
+  const classOf = (kind) => books.flows.find((f) => f.kind === kind)?.flow ?? "other";
+
+  /** Which line a transaction type is drawn in, or null for one that only moves Strands about */
+  function lineOf(kind) {
+    const flow = classOf(kind);
+    if (flow === "transfer" || flow === "escrow") return null;
+    return LINE_OF[kind] ?? kind;
+  }
+
+  /** The range's samples in bins, each with its flows by line, its trade and the supply */
+  function binMoney() {
+    const binMs = BIN_MINUTES[state.hours] * 60_000;
+    const first = Math.floor(rangeFrom() / binMs) * binMs;
+    const bins = Array.from({ length: Math.ceil((Date.now() - first) / binMs) }, (_, k) => ({
+      at: first + k * binMs, ms: 0, flows: {}, market: 0, bazaar: 0, hand: 0, supply: 0, supplies: 0,
+    }));
+    const shown = inRange((s) => s.strand_flows);
+    const sumOf = (trades) => Object.values(trades ?? {}).reduce((a, t) => a + t.strands, 0);
+    for (const s of shown) {
+      const b = bins[Math.floor((s.at_ms - first) / binMs)];
+      if (!b) continue;
+      b.ms += s.since_ms;
+      for (const [kind, v] of Object.entries(s.strand_flows)) {
+        const line = lineOf(kind);
+        if (line) b.flows[line] = (b.flows[line] ?? 0) + v;
+      }
+      if (s.new_accounts) b.flows.newcomers = (b.flows.newcomers ?? 0) + s.new_accounts * books.starting_strands;
+      b.market += sumOf(s.market);
+      b.bazaar += sumOf(s.bazaar);
+      // A trade between players is two rows that net to nothing; what was
+      // received is what changed hands
+      b.hand += Math.max(0, s.strand_flows.trade_received ?? 0);
+      if (s.strands) {
+        b.supply += Object.values(s.strands).reduce((a, n) => a + n, 0);
+        b.supplies++;
+      }
+    }
+    return { binMs, bins, shown };
+  }
+
+  /** The lines with a flow in the range: what came in, then what went out, each in the server's order */
+  function moneyLines(totals) {
+    const order = [...new Set([...books.flows.map((f) => lineOf(f.kind)).filter(Boolean), "newcomers"])];
+    const keys = [...order, ...Object.keys(totals).filter((l) => !order.includes(l))].filter((l) => totals[l]);
+    const faucet = (l) =>
+      l === "newcomers" || (LINES[l] ? books.flows.some((f) => lineOf(f.kind) === l && f.flow === "faucet") : totals[l] > 0);
+    return [...keys.filter(faucet), ...keys.filter((l) => !faucet(l))].map((key) => ({
+      key,
+      side: faucet(key) ? "in" : "out",
+      label: LINES[key]?.label ?? capital(item(key)),
+      say: LINES[key]?.say ?? item(key),
+      color: LINES[key] ? `--fl-${key}` : "--fl-other",
+    }));
+  }
+
+  function flows() {
+    const { binMs, bins, shown } = binMoney();
+    const totals = {};
+    for (const b of bins) for (const [l, v] of Object.entries(b.flows)) totals[l] = (totals[l] ?? 0) + v;
+    const lines = moneyLines(totals);
+
+    // Each bar stacks up from zero for what came in and down for what went
+    // out, so each line is drawn to its running total
+    const values = {};
+    const own = {};
+    for (const l of lines) {
+      values[l.key] = [];
+      own[l.key] = [];
+    }
+    for (const b of bins) {
+      let up = 0;
+      let down = 0;
+      for (const l of lines) {
+        const v = b.flows[l.key] ?? 0;
+        own[l.key].push(b.ms ? v : null);
+        if (!b.ms || v === 0) values[l.key].push(null);
+        else values[l.key].push(v > 0 ? (up += v) : (down += v));
+      }
+    }
+    const x = bins.map((b) => (b.at + binMs / 2) / 1000);
+    // How many times the money would change hands in a game day at the bin's pace
+    const velocity = bins.map((b) => {
+      if (!b.ms || !b.supplies) return null;
+      const supply = b.supply / b.supplies;
+      return supply > 0 ? ((b.market + b.bazaar + b.hand) / supply) * (books.day_ms / b.ms) : null;
+    });
+
+    const key = lines.map((l) => l.key).join();
+    const rebuild = key !== money.key;
+    money = { lines, key, rows: { x, shown, values, own }, velocity: { x, shown, values: { velocity } } };
+    if (rebuild) state.charts.flows?.rebuild();
+    chart("flows");
+    chart("velocity");
+    flowsHeadline(shown, lines, totals);
+    account(lines, totals);
+    velocityHeadline(shown, bins);
+  }
+
+  /** "a, b and c" */
+  const andList = (parts) => (parts.length < 2 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`);
+
+  function flowsHeadline(shown, lines, totals) {
+    const h = $("flows-headline");
+    if (!shown.length) return void (h.textContent = "Waiting for the first sample.");
+    const side = (s, sign) => lines.filter((l) => l.side === s).map((l) => [l, sign * totals[l.key]]).sort((a, b) => b[1] - a[1]);
+    const ins = side("in", 1);
+    const outs = side("out", -1);
+    const came = ins.reduce((a, [, v]) => a + v, 0);
+    const went = outs.reduce((a, [, v]) => a + v, 0);
+    const when = capital(since(shown[0]));
+    if (came === 0 && went === 0) return void (h.textContent = `${when}, no Strands came into the city or left it.`);
+    let line = `${when}, ${plural(came, "Strand", "Strands")} came in`;
+    if (ins.length > 1) line += `, ${Math.round((100 * ins[0][1]) / came)}% of them ${ins[0][0].say}`;
+    else if (ins.length) line += `, all ${ins[0][0].say}`;
+    line += went === 0 ? ", and none went out." : `, and ${nf.format(went)} went out: ${andList(outs.map(([l, v]) => `${l.say} ${nf.format(v)}`))}.`;
+    // Whether tax bites (#335) is what this chart was made to show
+    if (went > 0) {
+      const tax = outs.find(([l]) => l.key === "tax")?.[1] ?? 0;
+      const share = (100 * tax) / went;
+      line += tax === 0
+        ? " No tax was paid."
+        : outs.length > 1 ? ` Tax took ${share < 1 ? "under 1%" : `${Math.round(share)}%`} of it.` : "";
+    }
+    h.textContent = line;
+  }
+
+  /** The range's account: each line's total as a bar, and what it nets to */
+  function account(lines, totals) {
+    const box = $("money-account");
+    if (!lines.length) return void box.replaceChildren();
+    const most = Math.max(...lines.map((l) => Math.abs(totals[l.key])));
+    const signed = (v) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${nf.format(Math.abs(v))}`;
+    const row = (l) => {
+      const v = totals[l.key];
+      const bar = document.createElement("span");
+      bar.className = "account-bar";
+      // Never thinner than a hairline, so a Strand of tax still shows
+      bar.style.width = `max(2px, ${(100 * Math.abs(v)) / most}%)`;
+      bar.style.background = `var(${l.color})`;
+      const track = document.createElement("span");
+      track.className = "account-track";
+      track.append(bar);
+      const r = document.createElement("div");
+      r.className = "account-row";
+      r.dataset.side = l.side;
+      r.append(text("span", l.label), track, text("span", signed(v)));
+      return r;
+    };
+    const net = lines.reduce((a, l) => a + totals[l.key], 0);
+    const foot = document.createElement("div");
+    foot.className = "account-row account-net";
+    const says = net === 0 ? "The city's Strands held level." : `The city has ${nf.format(Math.abs(net))} ${net > 0 ? "more" : "fewer"} than it had.`;
+    foot.append(text("span", "Net"), text("span", says), text("span", signed(net)));
+    box.replaceChildren(...lines.map(row), foot);
+  }
+
+  function velocityHeadline(shown, bins) {
+    const h = $("velocity-headline");
+    const live = bins.filter((b) => b.ms && b.supplies);
+    if (!live.length) return void (h.textContent = "Waiting for the first sample.");
+    const ms = live.reduce((a, b) => a + b.ms, 0);
+    const supply = live.reduce((a, b) => a + b.supply / b.supplies, 0) / live.length;
+    const [market, bazaar, hand] = ["market", "bazaar", "hand"].map((k) => live.reduce((a, b) => a + b[k], 0));
+    const traded = market + bazaar + hand;
+    if (traded === 0) return void (h.textContent = `Nothing changed hands ${since(shown[0])}: the money sat still.`);
+    const v = supply > 0 ? (traded / supply) * (books.day_ms / ms) : 0;
+    const pct = (n) => `${Math.round((100 * n) / traded)}%`;
+    const where = [market && `${pct(market)} on the market`, bazaar && `${pct(bazaar)} at the bazaar`, hand && `${pct(hand)} hand to hand`].filter(Boolean);
+    const times = v < 0.01 ? "less than a hundredth of a time" : `${v.toFixed(2)} times`;
+    h.textContent = `At the pace of ${window_()}, the city's money changes hands ${times} a game day: ${plural(traded, "Strand", "Strands")} traded, ${andList(where)}.`;
+  }
+
+  function escrow() {
+    chart("escrow");
+    const h = $("escrow-headline");
+    const s = latest((s) => s.strands);
+    if (!s) return void (h.textContent = "Waiting for the first sample.");
+    const held = s.strands.escrow;
+    const total = Object.values(s.strands).reduce((a, b) => a + b, 0);
+    const most = Math.max(held, ...inRange((s) => s.strands).map((s) => s.strands.escrow));
+    if (most === 0) return void (h.textContent = `No buy order held a Strand in ${window_()}.`);
+    let line = held === 0
+      ? "No buy order holds a Strand now."
+      : `Buy orders hold ${plural(held, "Strand", "Strands")}, ${((100 * held) / total).toFixed(1)}% of the money.`;
+    if (most > held) line += ` At most ${nf.format(most)} in ${window_()}.`;
+    h.textContent = line;
   }
 
   async function performance() {

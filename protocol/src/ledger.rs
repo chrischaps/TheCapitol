@@ -209,8 +209,34 @@ impl UnitFlow {
     }
 }
 
+/// Every `currency_transactions.transaction_type` this build knows, in the
+/// order the console stacks them: faucets, sinks, transfers, escrow. One
+/// missing here is [`StrandFlow::Other`].
+pub const TRANSACTION_TYPES: [&str; 18] = [
+    "exchange_deposit",
+    "deed_refund",
+    "foreclosure_refund",
+    "bazaar_refund",
+    "admin_adjustment",
+    "exchange_withdraw",
+    "deed_purchase",
+    "tax_payment",
+    "property_tax",
+    "market_fee",
+    "bazaar_rent",
+    "trade_sent",
+    "trade_received",
+    "bazaar_purchase",
+    "bazaar_sale",
+    "market_escrow",
+    "market_sale",
+    "market_refund",
+];
+
 /// What a `currency_transactions` type does to the world's Strands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
 pub enum StrandFlow {
     /// Strands from outside: labour's deposits, refunds, grants
     Faucet,
@@ -574,6 +600,14 @@ mod tests {
 
     /// A deposit, a deed, a market fill with a refund, a P2P trade, and a
     /// newcomer: all explained, so nothing drifts.
+    #[test]
+    fn every_known_type_has_a_flow_in_the_order_they_stack() {
+        let flows: Vec<StrandFlow> = TRANSACTION_TYPES.iter().map(|t| StrandFlow::of(t)).collect();
+        assert!(!flows.contains(&StrandFlow::Other));
+        let order = |f: &StrandFlow| [StrandFlow::Faucet, StrandFlow::Sink, StrandFlow::Transfer, StrandFlow::Escrow].iter().position(|g| g == f);
+        assert!(flows.windows(2).all(|w| order(&w[0]) <= order(&w[1])));
+    }
+
     #[test]
     fn strands_explained_by_their_trails_hold() {
         let start = ledger(
