@@ -417,6 +417,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("The sampler is off (METRICS_SAMPLE_SECS=0)");
     }
 
+    // #444: the zone card packs every home lot once a world. Do it now, so
+    // the first player to open the card doesn't wait for it.
+    let facts_state = app_state.clone();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        match engine::zone_facts::rooms(&facts_state).await {
+            Ok(_) => tracing::info!("Zone facts: lots packed in {:.1?}", started.elapsed()),
+            Err(e) => tracing::warn!("Zone facts: couldn't pack the lots: {e}"),
+        }
+    });
+
     // D0.3: the game events an admin's stream shows, from the game's bus
     let tapped = game_state.read().await.subscribe();
     tokio::spawn(engine::admin_feed::run_tap(tapped));

@@ -143,6 +143,8 @@ pub enum RestRequest {
     Zones,
     /// `GET /bureaucracy/deed-prices`
     DeedPrices,
+    /// `GET /bureaucracy/zone-facts`: what living in each home zone is like (#444)
+    ZoneFacts,
 
     /// `GET /tutorial`: where you are on the road in (#438). The game has it
     /// from the socket's `tutorial`; this is for a bot.
@@ -280,6 +282,7 @@ pub enum RestResponse {
     DeedPrices(DeedPricesResponse),
     /// Your place on the road in, from both `GET` and `PUT`
     Tutorial(capitol_protocol::tutorial::TutorialProgress),
+    ZoneFacts(ZoneFactsResponse),
     Subscription(Subscription),
     Granted(GrantResponse),
     /// An order as placed, or as cancelled
@@ -432,6 +435,7 @@ impl RestRequest {
             | Zones
             | DeedPrices
             | Tutorial
+            | ZoneFacts
             | MarketDepth(_)
             | MyOrders(_)
             | MarketHistory(_)
@@ -503,6 +507,7 @@ impl RestRequest {
             DeedPrices => "/bureaucracy/deed-prices".into(),
             Tutorial => "/tutorial".into(),
             SetTutorialDismissed(_) => "/tutorial/dismissed".into(),
+            ZoneFacts => "/bureaucracy/zone-facts".into(),
             Subscribe(_) => "/player/subscription".into(),
             Grant(_) => "/player/grant".into(),
             PlaceOrder(_) | MarketDepth(_) => "/market/orders".into(),
@@ -633,6 +638,7 @@ impl RestRequest {
             Q::Zones => A::Zones(de(body)?),
             Q::DeedPrices => A::DeedPrices(de(body)?),
             Q::Tutorial | Q::SetTutorialDismissed(_) => A::Tutorial(de(body)?),
+            Q::ZoneFacts => A::ZoneFacts(de(body)?),
             Q::Subscribe(_) => A::Subscription(de(body)?),
             Q::Grant(_) => A::Granted(de(body)?),
             Q::PlaceOrder(_) | Q::CancelOrder { .. } => A::Order(de(body)?),
@@ -897,6 +903,11 @@ mod tests {
                 RestRequest::SetTutorialDismissed(capitol_protocol::tutorial::SetDismissed { dismissed: true }),
                 "PUT",
                 "/tutorial/dismissed".into(),
+            ),
+            (
+                RestRequest::ZoneFacts,
+                "GET",
+                "/bureaucracy/zone-facts".into(),
             ),
             (
                 RestRequest::Subscribe(SubscribeRequest { days: 30 }),

@@ -123,6 +123,9 @@ pub struct CapitolExtension {
     land_meshes: world::land_mesh::LandMeshes,
     land_in: bool,
     plot_panel: ui::plot::PlotPanel,
+    /// The zone card (#444), and `--zone-card-sample`'s facts offline
+    zone_card: ui::zone_card::ZoneCard,
+    zone_card_sample: Option<Vec<capitol_core::protocol::rest::ZoneFacts>>,
     atmosphere: Atmosphere,
     /// `--time-of-day`: the hour pinned, 0..1 from midnight, in place of
     /// the server's clock (P8.6a).
@@ -256,6 +259,8 @@ impl CapitolExtension {
             land_meshes: world::land_mesh::LandMeshes::default(),
             land_in: false,
             plot_panel: ui::plot::PlotPanel::default(),
+            zone_card: ui::zone_card::ZoneCard::default(),
+            zone_card_sample: None,
             atmosphere: Atmosphere::default(),
             time_of_day: None,
             icons: ItemIcons::load(std::path::Path::new(ItemIcons::DIR)),
@@ -468,6 +473,19 @@ impl CapitolExtension {
         if let (Some(which), None) = (which, &self.session) {
             self.mail_sample = Some(ui::mail::sample(which));
             self.mail.open = true;
+        }
+        self
+    }
+
+    /// Offline, open the zone card (#444) on sample facts: one zone by its
+    /// id, or "compare" for all three (`--zone-card-sample`).
+    pub fn with_zone_card_sample(mut self, which: Option<&str>) -> Self {
+        if let (Some(which), None) = (which, &self.session) {
+            self.zone_card_sample = Some(ui::zone_card::sample());
+            match which {
+                "compare" => self.zone_card.open_compare(),
+                zone => self.zone_card.open_one(zone),
+            }
         }
         self
     }
@@ -1796,7 +1814,7 @@ impl PlayerExtension for CapitolExtension {
                 // The settings panel takes the hint card's corner, and the
                 // Gazette and the letters the middle of the screen; the card
                 // waits behind them rather than showing through.
-                if self.settings_panel.open || self.gazette.open || self.mail.open {
+                if self.settings_panel.open || self.gazette.open || self.mail.open || self.zone_card.is_open() {
                     self.hints.rect = None;
                 } else {
                     // The inventory's and the station's rects are last frame's: they're drawn after.
@@ -1827,9 +1845,19 @@ impl PlayerExtension for CapitolExtension {
                 match self.plot_panel.show(ctx, &view, beside) {
                     Some(ui::plot::Action::Claim(id)) => session.claim_plot(id),
                     Some(ui::plot::Action::PayTax(id, amount)) => session.pay_tax(id, amount),
+                    Some(ui::plot::Action::AboutZone(zone)) => {
+                        self.zone_card.open_one(&zone);
+                        session.ask_zone_facts();
+                        if let Some(step) = self.hints.saw(Did::ReadZoneCard) {
+                            session.tutorial_seen(step);
+                        }
+                    }
                     Some(ui::plot::Action::Close) => session.close_plot(),
                     None => {}
                 }
+                // The zone card (#444), over the plot panel that opened it
+                let facts = session.state().zone_facts().map(|f| f.zones.as_slice());
+                let _ = self.zone_card.show(ctx, facts);
                 let view = ui::station::View {
                     state: session.state(),
                     phase: session.crafting().phase(),
@@ -2086,6 +2114,9 @@ impl PlayerExtension for CapitolExtension {
             {
                 reader.turn(by);
             }
+        }
+        if let Some(facts) = &self.zone_card_sample {
+            let _ = self.zone_card.show(ctx, Some(facts));
         }
         if let Some((mail, view)) = &mut self.mail_sample {
             let _ = self.mail.show(ctx, mail, view);

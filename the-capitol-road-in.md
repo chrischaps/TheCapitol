@@ -129,7 +129,7 @@ Every step that does something in the world is judged by the server, at the poin
 Claims have no range check today, and this plan keeps it so. The office is where the grant is explained and the zones compared, not a toll. Once the office has been visited, any lot's plot panel offers "Claim with your deed".
 
 ### D9. The zone card tells the truth
-The card shows the stations a typical lot **fits** at `STATION_MIN_SPACING`, not its `station_capacity`. Today that's 4 for an urban or a suburban lot, against a capacity of 16 (#424). It also shows the live price and tax, the walk to the hall, and what grows nearby. Each zone's play style is in one line, from `the-capitol-plots.md` §1. If a zone is a poor choice for a workshop, the card says so, and the fix belongs to that zone's own issue.
+The card shows the stations a typical lot **fits** at `STATION_MIN_SPACING`, not its `station_capacity`. In the default world since Plots v2 (#459) that's 4 for an urban lot against a capacity of 16, 3 to 8 for a suburban one and 12 to 15 for a farm, both against 25 (#424). The card says each gap in words. It also shows the live price and tax, the walk to the hall, and what grows nearby. Each zone's play style is in one line, from `the-capitol-plots.md` §1. If a zone is a poor choice for a workshop, the card says so, and the fix belongs to that zone's own issue.
 
 ### D10. The market never blocks the road
 The tutorial runs in a live market that may be empty. A step that needs someone else (an order filling, a trade) is taught, then waived with words if it doesn't happen. No step costs more than a few Strands, and those are returnable (an order's escrow).
@@ -213,6 +213,7 @@ The tutorial runs in a live market that may be empty. A step that needs someone 
 
 - **O1.1 Arrival** (#443, M): chapter 1, the quality card, and spawn nodes for every kind the chapter needs.
 - **O1.2 The zone card** (#444, M): `GET /bureaucracy/zone-facts`, `ui/zone_card.rs`, and the three-column comparison.
+  - *As built:* `engine::zone_facts` packs every home lot with `station_room::most`, capped by its capacity, once a terrain version (about 1.3 s in release, warmed at startup), and reads the price, the tax and the free lots live. The walk is from each lot's middle to the hall's door. What grows is the spawn tables' rows for the zone, densest first, and the typical lot is one that fits the median, nearest the median area. The card is "The Land Office": every column's plan is at one scale, long side across, with `sim::lot::layout`'s stations as gold dots and a 50 m bar, so a farm's room against a yard's reads at a glance. `capitol_core::zone_card` owns up to fewer than a whole workshop (`WORKSHOP`, 6) and fewer than the capacity. The plot panel opens it ("About the Urban zone"), and `ZoneCard::open_compare` is there for #448. `--zone-card-sample [zone|compare]` captures it offline. Opening it from the plot panel reports `Did::ReadZoneCard` as `tutorial_seen` (#441); #448's office should do the same where it opens the comparison.
 - **O1.3 The road in** (#445, S): a stop in each zone, chosen by rule so it survives regeneration.
 
 ### O2: The hall and the people (`tu:O2-hall`)

@@ -13,6 +13,9 @@
 //! A plot of yours that owes tax shows the debt, a bar of how near it is to
 //! foreclosure, and a button that pays what your strands cover (#138).
 //!
+//! Under the zone, a home zone's plot offers "About the <zone>", which
+//! opens the zone card on it (#444).
+//!
 //! The panel is edged in gold, the colour of what's yours (plan §1), and
 //! the claimed plot's gold edge in the world answers it.
 
@@ -30,11 +33,13 @@ const FADE: f32 = 0.18;
 const RISE: f32 = 12.0;
 
 /// What the panel asks for this frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Claim(uuid::Uuid),
     /// Pay this many strands of the plot's tax debt.
     PayTax(uuid::Uuid, i64),
+    /// Open the zone card on this zone (#444)
+    AboutZone(String),
     Close,
 }
 
@@ -125,7 +130,14 @@ fn body(ui: &mut egui::Ui, plot: &PlotInfo, view: &View) -> Option<Action> {
     let zone = Zone::from_str(&plot.zone_id);
     let zone_name = zone.map_or_else(|| words(&plot.zone_id), |z| z.display_name().to_owned());
     let zone_ink = zone.map_or(TEXT, theme::zone);
-    row(ui, "Zone", RichText::new(zone_name).color(zone_ink));
+    row(ui, "Zone", RichText::new(zone_name.clone()).color(zone_ink));
+    if zone.is_some_and(|z| matches!(z, Zone::Urban | Zone::Suburban | Zone::Rural)) {
+        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+            if theme::link(ui, &format!("About the {zone_name} zone"), size::LABEL).clicked() {
+                action = Some(Action::AboutZone(plot.zone_id.clone()));
+            }
+        });
+    }
     row(ui, "Size", theme::text(words(&plot.size_category)));
     row(ui, "Type", theme::text(words(&plot.plot_type)));
     let full = plot.station_count >= plot.station_capacity;

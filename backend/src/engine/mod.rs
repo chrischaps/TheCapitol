@@ -51,6 +51,7 @@ pub mod watches;
 pub mod trading;
 pub mod tutorial;
 pub mod wages;
+pub mod zone_facts;
 pub mod zone_sync;
 
 pub use commands::Command;

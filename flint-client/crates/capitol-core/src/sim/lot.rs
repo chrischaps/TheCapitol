@@ -81,7 +81,7 @@ fn lattice(len: f64, step: f64, edge: f64) -> Vec<f64> {
 /// pie, a trapezoid or a suburban lot that's nearly a triangle, where the
 /// lattice bunches up at the narrow end.
 pub fn spots(plot: &PlotInfo, taken: &[(f64, f64)]) -> Vec<(f64, f64)> {
-    ordered(plot, taken, left(plot))
+    ordered(corners(plot), taken, left(plot))
 }
 
 /// What the lot's capacity has left.
@@ -91,8 +91,7 @@ fn left(plot: &PlotInfo) -> usize {
 
 /// [`spots`], in the first order that packs `enough`, or else the one that
 /// packs the most.
-fn ordered(plot: &PlotInfo, taken: &[(f64, f64)], enough: usize) -> Vec<(f64, f64)> {
-    let c = corners(plot);
+fn ordered(c: [(f64, f64); 4], taken: &[(f64, f64)], enough: usize) -> Vec<(f64, f64)> {
     let len_u = (dist(c[0], c[1]) + dist(c[3], c[2])) / 2.0;
     let len_v = (dist(c[0], c[3]) + dist(c[1], c[2])) / 2.0;
     let edge = EDGE.min(0.4 * len_u.min(len_v));
@@ -167,7 +166,14 @@ pub fn room(plot: &PlotInfo, taken: &[(f64, f64)]) -> i32 {
 /// Whether an empty `plot` takes `wanted` stations.
 pub fn takes(plot: &PlotInfo, wanted: i32) -> bool {
     let wanted = (wanted.max(0) as usize).min(left(plot));
-    pack(&ordered(plot, &[], wanted), &[], wanted).len() >= wanted
+    pack(&ordered(corners(plot), &[], wanted), &[], wanted).len() >= wanted
+}
+
+/// Where `most` stations would stand on an empty lot with these corners, as
+/// [`room`] places them: for drawing a lot's room, as the zone card does
+/// (#444).
+pub fn layout(corners: [(f64, f64); 4], most: usize) -> Vec<(f64, f64)> {
+    pack(&ordered(corners, &[], most), &[], most)
 }
 
 #[cfg(test)]

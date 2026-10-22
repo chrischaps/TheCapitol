@@ -64,6 +64,8 @@ const MOVE_TAG: Tag = 20;
 const PLOT_TAG: Tag = 30;
 const CLAIM_TAG: Tag = 31;
 const PAY_TAX_TAG: Tag = 32;
+/// The tag on the zone card's facts (#444).
+const ZONE_FACTS_TAG: Tag = 33;
 
 /// The tag on the exchange panel's deposits and withdrawals (P7.2). The
 /// poller refetches the containers and the balance on either answer.
@@ -1165,6 +1167,15 @@ impl Session {
         self.claim_refused = None;
         self.net
             .rest(RestRequest::PlotAt(PositionQuery { x, y }), PLOT_TAG);
+    }
+
+    /// Asks for the home zones' facts, for the zone card (#444): each time
+    /// it opens, since the price and the free lots are live.
+    pub fn ask_zone_facts(&mut self) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        self.net.rest(RestRequest::ZoneFacts, ZONE_FACTS_TAG);
     }
 
     /// Closes the plot panel.

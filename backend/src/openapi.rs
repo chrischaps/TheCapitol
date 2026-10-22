@@ -6,7 +6,7 @@ use utoipa::{Modify, OpenApi};
 use capitol_protocol::rest::{
     AccountInfo, AccountKind, ApiKeyInfo, ApiKeyScope, CreateApiKeyRequest, CreatedApiKey, AuthResponse, Bounds, CatalogContainerType, CatalogItemType, CatalogTool, CatalogResourceType,
     CatalogResponse, CatalogStationType, ClaimPlotRequest, ClaimPlotResponse, ClaimedPlot, ContainerResponse, ContainersResponse,
-    CurrencyResponse, DeedPrice, DeedPricesResponse, DepositRequest, DepositResponse,
+    CurrencyResponse, DeedPrice, DeedPricesResponse, ZoneFacts, ZoneFactsResponse, ZoneGrowth, DepositRequest, DepositResponse,
     ExtractRequest, ExtractResponse, HealthResponse, InventoryItem, InventoryResponse,
     ListPlotsResponse, LoginRequest, LogoutRequest, RefreshRequest, MoveItemRequest, MoveItemResponse,
     MoveRequest, NearbyResponse, NearbyStationsResponse, PlaceStationRequest,
@@ -220,6 +220,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         // Bureaucracy
         crate::routes::bureaucracy::get_zones,
         crate::routes::bureaucracy::get_deed_prices,
+        crate::routes::bureaucracy::get_zone_facts,
         // Terrain
         crate::routes::terrain::get_terrain,
     ),
@@ -389,6 +390,9 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         ZoneInfo,
         DeedPricesResponse,
         DeedPrice,
+        ZoneFactsResponse,
+        ZoneFacts,
+        ZoneGrowth,
         // Terrain
         TerrainResponse,
         WaterRing,

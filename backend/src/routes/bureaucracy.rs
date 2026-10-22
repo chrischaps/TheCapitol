@@ -3,7 +3,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use capitol_protocol::rest::{DeedPrice, DeedPricesResponse, ZonesResponse};
+use capitol_protocol::rest::{DeedPrice, DeedPricesResponse, ZoneFactsResponse, ZonesResponse};
 
 use crate::error::AppError;
 use crate::models::ZoneInfo;
@@ -13,6 +13,7 @@ pub fn router(_state: AppState) -> Router<AppState> {
     Router::new()
         .route("/zones", get(get_zones))
         .route("/deed-prices", get(get_deed_prices))
+        .route("/zone-facts", get(get_zone_facts))
 }
 
 /// Get all zone definitions
@@ -78,4 +79,23 @@ pub async fn get_deed_prices(
         .collect();
 
     Ok(Json(DeedPricesResponse { prices }))
+}
+
+/// What living in each home zone is like (#444)
+///
+/// One entry per zone a player can claim in: the live deed price and a
+/// week's tax on it, the stations a typical lot fits (not its capacity),
+/// lots free, the walk to the hall, what grows there, and the play style in
+/// a line. The room and the walk are worked out once for each world, so the
+/// first ask after a terrain commit can take a few seconds.
+#[utoipa::path(
+    get,
+    path = "/bureaucracy/zone-facts",
+    responses(
+        (status = 200, description = "Each home zone's facts, from the city out", body = ZoneFactsResponse)
+    ),
+    tag = "Bureaucracy"
+)]
+pub async fn get_zone_facts(State(state): State<AppState>) -> Result<Json<ZoneFactsResponse>, AppError> {
+    Ok(Json(ZoneFactsResponse { zones: crate::engine::zone_facts::facts(&state).await? }))
 }

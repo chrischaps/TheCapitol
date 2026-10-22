@@ -82,6 +82,7 @@ pub mod steering;
 pub mod talk;
 pub mod terrain;
 pub mod trading;
+pub mod zone_card;
 
 /// The wire types, shared with the backend.
 pub use capitol_protocol as protocol;

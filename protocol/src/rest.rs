@@ -2769,6 +2769,65 @@ pub struct DeedPrice {
     pub station_capacity: i32,
 }
 
+/// `GET /bureaucracy/zone-facts`: what living in each home zone is like, so
+/// the choice of one is an informed one (the road in, #444, plan D9). One
+/// entry per zone a player can claim in, from the city out: urban, suburban
+/// and rural.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ZoneFactsResponse {
+    pub zones: Vec<ZoneFacts>,
+}
+
+/// One home zone's facts. The price, the tax and the free lots are live; the
+/// room, the walk and what grows are worked out once for each world.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ZoneFacts {
+    /// `rules::Zone` id: `urban`, `suburban` or `rural`
+    pub zone_id: String,
+    pub zone_name: String,
+    /// What living there is like, in one line (plots plan §1)
+    pub style: String,
+    /// The deed's price in Strands, at its tunable (D6.1)
+    pub deed_cost: i32,
+    /// A week's tax on a deed at that price, at the live rate
+    pub tax_per_week: i64,
+    /// The stations a typical lot fits at `STATION_MIN_SPACING`: the median
+    /// over the zone's lots of what fits, capped by each lot's capacity. Not
+    /// the capacity alone (D9).
+    pub stations_median: i32,
+    /// The stations the least roomy lot fits
+    pub stations_least: i32,
+    /// What a typical lot's capacity allows, for the honest gap between the two
+    pub station_capacity: i32,
+    /// Unclaimed lots, now
+    pub lots_free: i64,
+    pub lots_total: i64,
+    /// The straight walk to the Exchange hall from the nearest lot, in
+    /// seconds at `PLAYER_SPEED`
+    pub walk_nearest_secs: f64,
+    /// The same from the median lot
+    pub walk_median_secs: f64,
+    /// What grows in the zone, densest first (the spawn tables)
+    pub grows: Vec<ZoneGrowth>,
+    /// A typical lot, for drawing: one that fits the median, of about the
+    /// median size, its corners relative to its middle
+    pub typical_lot: [(f64, f64); 4],
+    /// Its area in square units
+    pub typical_area: f64,
+}
+
+/// One resource that grows in a zone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ZoneGrowth {
+    pub resource_id: String,
+    pub name: String,
+    /// Nodes per km² of the zone's open ground
+    pub density: f64,
+}
+
 // ---------------------------------------------------------------------------
 // /wages (Commons S2.6, plan D7)
 // ---------------------------------------------------------------------------

@@ -70,6 +70,7 @@ pub mod slots;
 pub mod station;
 pub mod theme;
 pub mod trade;
+pub mod zone_card;
 
 use crate::script_api::Shared;
 

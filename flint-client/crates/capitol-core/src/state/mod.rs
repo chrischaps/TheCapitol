@@ -37,7 +37,7 @@ use std::collections::HashMap;
 
 use capitol_protocol::rest::{
     CatalogResponse, ClaimedPlot, PauseReason, PlotInfo, RecipeInfo, ResourceNodeInfo,
-    StationInfo, Subscription, SubscriptionStatus, PRODUCTION_LOG_LEN,
+    StationInfo, Subscription, SubscriptionStatus, ZoneFactsResponse, PRODUCTION_LOG_LEN,
 };
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::tunables::Fees;
@@ -468,6 +468,9 @@ pub struct GameState {
     plots: Vec<PlotInfo>,
     /// The plot the plot panel shows, picked with `/plots/at`.
     picked_plot: Option<PlotInfo>,
+    /// What living in each home zone is like, for the zone card (#444):
+    /// `/bureaucracy/zone-facts`, asked each time the card opens.
+    zone_facts: Option<ZoneFactsResponse>,
     /// Everyone's claimed lots, by `terrain_id` (P8.6b): `/plots/claimed`
     /// with the snapshot, then WS `plot_claimed` and `plot_released`.
     claimed: HashMap<String, ClaimedPlot>,
@@ -515,6 +518,7 @@ impl GameState {
             presence: None,
             plots: Vec::new(),
             picked_plot: None,
+            zone_facts: None,
             claimed: HashMap::new(),
             claimed_version: 0,
             trade: trade::TradeBook::default(),
@@ -1269,6 +1273,7 @@ impl GameState {
             }
             // The same as the `tutorial` the server sends every socket after a PUT
             R::Tutorial(progress) => self.tutorial = Some(*progress),
+            R::ZoneFacts(facts) => self.zone_facts = Some(facts.clone()),
             R::Success(_)
             | R::DeedPrices(_)
             | R::Terrain(_)
@@ -1588,6 +1593,11 @@ impl GameState {
     /// comes in next (a claim, a refetch, the plot list).
     pub fn picked_plot(&self) -> Option<&PlotInfo> {
         self.picked_plot.as_ref()
+    }
+
+    /// The home zones' facts, once the server has said (#444).
+    pub fn zone_facts(&self) -> Option<&ZoneFactsResponse> {
+        self.zone_facts.as_ref()
     }
 
     /// Closes the plot panel.
