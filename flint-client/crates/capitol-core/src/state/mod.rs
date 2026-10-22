@@ -269,6 +269,9 @@ pub enum StateEvent {
         name: String,
         /// The writer is a citizen (C0.1)
         citizen: bool,
+        /// The writer is one of the city's offices, not a player (#447):
+        /// `from` is nil, and there's no one to answer
+        office: bool,
         first_line: String,
     },
     /// Your guild changed, or you joined or left one (`guild_changed`,
@@ -906,11 +909,12 @@ impl GameState {
                 x: *x,
                 y: *y,
             }),
-            M::LetterArrived { id, from, name, citizen, first_line } => out.push(StateEvent::LetterArrived {
+            M::LetterArrived { id, from, name, citizen, office, first_line } => out.push(StateEvent::LetterArrived {
                 id: *id,
                 from: *from,
                 name: name.clone(),
                 citizen: *citizen,
+                office: *office,
                 first_line: first_line.clone(),
             }),
             M::GuildChanged { guild_id } => out.push(StateEvent::GuildChanged { guild_id: *guild_id }),

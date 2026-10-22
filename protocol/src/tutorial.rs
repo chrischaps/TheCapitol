@@ -305,6 +305,12 @@ impl Steps {
         chapter.steps().all(|s| self.has(s))
     }
 
+    /// Every chapter before `chapter` is done, in whatever order: the tour
+    /// has come to it. People opening sends the Registrar's letter (#447).
+    pub fn chapter_open(self, chapter: Chapter) -> bool {
+        Chapter::ALL.into_iter().take_while(|c| *c != chapter).all(|c| self.chapter_done(c))
+    }
+
     /// Every chapter before the Deeds Office is done, which opens the deed
     /// grant (#440): the road in has been walked, and the claim is next
     pub fn deed_earned(self) -> bool {
@@ -421,6 +427,20 @@ mod tests {
         // The office and settling in don't count toward it
         let after: Steps = Chapter::DeedsOffice.steps().chain(Chapter::SettleIn.steps()).collect();
         assert!(!after.deed_earned());
+    }
+
+    #[test]
+    fn a_chapter_opens_once_every_one_before_it_is_done() {
+        assert!(Steps::NONE.chapter_open(Chapter::Arrival), "the first is open from the start");
+        let before: Steps = [Chapter::Arrival, Chapter::RoadIn, Chapter::Hall].into_iter().flat_map(Chapter::steps).collect();
+        assert!(before.chapter_open(Chapter::People));
+        assert!(!before.chapter_open(Chapter::DeedsOffice));
+        for step in before.iter() {
+            assert!(!Steps::from_bits(before.bits() & !step.bit()).chapter_open(Chapter::People), "{step:?}");
+        }
+        // Its own steps, done ahead, don't open it
+        let ahead = Steps::from_bits(before.bits() & !Step::Deposit.bit()).with(Step::SayLocal);
+        assert!(!ahead.chapter_open(Chapter::People));
     }
 
     #[test]

@@ -753,6 +753,38 @@ pub fn wax_seal(painter: &egui::Painter, c: egui::Pos2, r: f32) {
     painter.circle_stroke(c, r * 0.52, Stroke::new((r * 0.14).max(0.8), PAPER_EDGE.gamma_multiply(0.7)));
 }
 
+/// The Capitol's seal (#447), which an office's letter carries where a
+/// person's has their initial: the same wax, with the tower pressed into it
+/// (its shaft, the lantern at its head and the spire) over a line of ground.
+pub fn capitol_seal(painter: &egui::Painter, c: egui::Pos2, r: f32) {
+    wax_seal(painter, c, r);
+    let ink = PAPER;
+    let w = r * 0.13;
+    let foot = c.y + r * 0.42;
+    let shoulder = c.y - r * 0.12;
+    let p = |x: f32, y: f32| egui::pos2(c.x + x, y);
+    // The shaft, tapering a little as it rises
+    painter.add(egui::Shape::convex_polygon(
+        vec![p(-w * 1.25, foot), p(w * 1.25, foot), p(w, shoulder), p(-w, shoulder)],
+        ink,
+        Stroke::NONE,
+    ));
+    // The lantern, a shade wider, then the spire to a point
+    let lantern = shoulder - r * 0.12;
+    painter.rect_filled(
+        egui::Rect::from_min_max(p(-w * 1.6, lantern), p(w * 1.6, shoulder)),
+        0.0,
+        ink,
+    );
+    painter.add(egui::Shape::convex_polygon(
+        vec![p(-w * 1.2, lantern), p(w * 1.2, lantern), p(0.0, c.y - r * 0.58)],
+        ink,
+        Stroke::NONE,
+    ));
+    // The ground it stands on
+    painter.line_segment([p(-r * 0.36, foot), p(r * 0.36, foot)], Stroke::new((r * 0.08).max(0.7), ink));
+}
+
 /// An envelope filling `rect`: sealed, a paper face with its flap down and a
 /// seal on it; opened, an outline in `ink` with its flap up.
 pub fn envelope(painter: &egui::Painter, rect: egui::Rect, sealed: bool, ink: Color32) {

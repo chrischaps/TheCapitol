@@ -14,6 +14,12 @@
 //! A reader who's muted the writer (S1.4) never gets the letter, and the
 //! writer can't tell: it's written, paid for and in their out box as any
 //! other, and nobody is told whether a letter was read.
+//!
+//! A letter can also come from one of the city's offices ([`Office`], #447):
+//! the Registrar's, as the road in's People chapter opens. An office isn't
+//! a player (road-in plan D1, no NPCs), so its letter has no `sender_id`,
+//! only `from_office`; it pays no postage, keeps no copy, takes no reply,
+//! and goes once an account ([`send_from_office`], kept in `office_letters`).
 
 use capitol_protocol::rest::{Correspondent, Letter, LetterBox, Mailbox};
 use capitol_protocol::rules::talk::{self, TalkError};
@@ -126,6 +132,7 @@ pub async fn send(
             from,
             name: writer.name.clone(),
             citizen: writer.citizen,
+            office: false,
             first_line: talk::first_line(&body),
         };
         let notice_id = notices::queue(&mut *tx, to, &id.to_string(), &message).await?;
@@ -141,16 +148,167 @@ pub async fn send(
     })
 }
 
+/// One of the city's offices, which writes as the bureaucracy (road-in plan
+/// D1): plain, a little dry, kindly meant, never a character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Office {
+    /// The Registrar: the city's books of who lives here, and its deeds
+    Registrar,
+}
+
+impl Office {
+    /// As `letters.from_office` keeps it
+    pub fn key(self) -> &'static str {
+        match self {
+            Office::Registrar => "registrar",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Office> {
+        [Office::Registrar].into_iter().find(|o| o.key() == key)
+    }
+
+    /// The name on its letters
+    pub fn name(self) -> &'static str {
+        match self {
+            Office::Registrar => "The Registrar",
+        }
+    }
+
+    /// Who it is on a letter: no one with a card, so its id is nil
+    pub fn correspondent(self) -> Correspondent {
+        Correspondent { id: Uuid::nil(), name: self.name().into(), citizen: false, office: true }
+    }
+
+    /// The writer of a letter from the office `key`; one this build doesn't
+    /// know is still the city's
+    fn correspondent_for(key: &str) -> Correspondent {
+        match Office::from_key(key) {
+            Some(office) => office.correspondent(),
+            None => Correspondent { id: Uuid::nil(), name: "The Capitol".into(), citizen: false, office: true },
+        }
+    }
+}
+
+/// A letter an office sends, once an account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfficeLetter {
+    /// The road in's People chapter has opened (#447): the bureaucracy's
+    /// welcome, and the Deeds Office's invitation
+    RegistrarWelcome,
+}
+
+impl OfficeLetter {
+    /// As `office_letters.letter` keeps it
+    pub fn key(self) -> &'static str {
+        match self {
+            OfficeLetter::RegistrarWelcome => "registrar_welcome",
+        }
+    }
+
+    pub fn office(self) -> Office {
+        match self {
+            OfficeLetter::RegistrarWelcome => Office::Registrar,
+        }
+    }
+
+    /// What it says. The deed is earned by the People chapter too, so the
+    /// letter asks for that first rather than say the deed is already theirs.
+    pub fn body(self) -> &'static str {
+        match self {
+            OfficeLetter::RegistrarWelcome => {
+                "Welcome to the Capitol.\n\n\
+                 The Registry has noted your road in: things made with your own hands, the deeds of a \
+                 farm, a house and a yard, and trade at the hall.\n\n\
+                 Your deed is drawn up. Say a word to whoever is near and read a neighbour's card (a pale \
+                 lozenge marks a citizen, who lives and works here as you do), then come to the office by \
+                 the hall and choose where you'll live. The land is granted; its tax is yours, as \
+                 anyone's is.\n\n\
+                 The Registrar"
+            }
+        }
+    }
+}
+
+/// `letter` for `player`, from its office, at `now`: unless their account
+/// has had it already, whatever became of it since. No postage, and no copy
+/// kept by the office. Its `letter_arrived` is queued, so a reader who's
+/// away hears of it when they come back. Returns the reader, the notice's
+/// id and the message to send live, or `None` if it went before (or there's
+/// no such player).
+pub async fn send_from_office(
+    db: &PgPool,
+    player: Uuid,
+    letter: OfficeLetter,
+    now: DateTime<Utc>,
+) -> Result<Option<(Uuid, Uuid, ServerMessage)>, LetterError> {
+    let body = talk::clean_letter(letter.body()).map_err(LetterError::Text)?;
+    let now = now.trunc_subsecs(6);
+    let mut tx = db.begin().await?;
+    let first: Option<Uuid> = sqlx::query_scalar(
+        "INSERT INTO office_letters (account_id, letter, sent_at)
+         SELECT account_id, $2, $3 FROM players WHERE id = $1
+         ON CONFLICT DO NOTHING
+         RETURNING account_id",
+    )
+    .bind(player)
+    .bind(letter.key())
+    .bind(now)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if first.is_none() {
+        return Ok(None);
+    }
+    let office = letter.office();
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO letters (id, sender_id, from_office, recipient_id, body, sent_at, kept_by_sender)
+         VALUES ($1, NULL, $2, $3, $4, $5, FALSE)",
+    )
+    .bind(id)
+    .bind(office.key())
+    .bind(player)
+    .bind(&body)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+    let message = ServerMessage::LetterArrived {
+        id,
+        from: Uuid::nil(),
+        name: office.name().into(),
+        citizen: false,
+        office: true,
+        first_line: talk::first_line(&body),
+    };
+    let notice_id = notices::queue(&mut *tx, player, &id.to_string(), &message).await?;
+    trim(&mut tx, player, LetterBox::In).await?;
+    tx.commit().await?;
+    Ok(Some((player, notice_id, message)))
+}
+
 /// A page of `player`'s `which` box, newest first: the letters sent before
 /// the letter `before`, if it's given.
 pub async fn page(db: &PgPool, player: Uuid, which: LetterBox, before: Option<Uuid>) -> Result<Mailbox, LetterError> {
     let (owner, kept) = columns(which);
-    type Row = (Uuid, String, DateTime<Utc>, Option<DateTime<Utc>>, Uuid, String, bool, Uuid, String, bool);
+    type Row = (
+        Uuid,
+        String,
+        DateTime<Utc>,
+        Option<DateTime<Utc>>,
+        Option<String>,
+        Option<Uuid>,
+        Option<String>,
+        Option<bool>,
+        Uuid,
+        String,
+        bool,
+    );
+    // An office's letter has no sender: its writer is `from_office`
     let mut rows: Vec<Row> = sqlx::query_as(&format!(
-        "SELECT l.id, l.body, l.sent_at, l.read_at,
+        "SELECT l.id, l.body, l.sent_at, l.read_at, l.from_office,
                 s.id, s.name, sa.kind = 'citizen', r.id, r.name, ra.kind = 'citizen'
          FROM letters l
-         JOIN players s ON s.id = l.sender_id JOIN accounts sa ON sa.id = s.account_id
+         LEFT JOIN players s ON s.id = l.sender_id LEFT JOIN accounts sa ON sa.id = s.account_id
          JOIN players r ON r.id = l.recipient_id JOIN accounts ra ON ra.id = r.account_id
          WHERE l.{owner} = $1 AND l.{kept}
            AND ($2::uuid IS NULL OR (l.sent_at, l.id) < (SELECT sent_at, id FROM letters WHERE id = $2))
@@ -166,10 +324,16 @@ pub async fn page(db: &PgPool, player: Uuid, which: LetterBox, before: Option<Uu
     rows.truncate(PAGE);
     let letters = rows
         .into_iter()
-        .map(|(id, body, sent_at, read_at, s, s_name, s_citizen, r, r_name, r_citizen)| Letter {
+        .map(|(id, body, sent_at, read_at, office, s, s_name, s_citizen, r, r_name, r_citizen)| Letter {
             id,
-            from: Correspondent { id: s, name: s_name, citizen: s_citizen },
-            to: Correspondent { id: r, name: r_name, citizen: r_citizen },
+            from: match (office, s, s_name) {
+                (Some(office), _, _) => Office::correspondent_for(&office),
+                (None, Some(s), Some(s_name)) => {
+                    Correspondent { id: s, name: s_name, citizen: s_citizen.unwrap_or(false), office: false }
+                }
+                (None, _, _) => unreachable!("a letter has a writer or an office (letters_one_writer)"),
+            },
+            to: Correspondent { id: r, name: r_name, citizen: r_citizen, office: false },
             body,
             sent_at,
             // A writer isn't told whether it was read
@@ -237,7 +401,7 @@ async fn correspondent(conn: &mut PgConnection, player: Uuid) -> Result<Option<C
     .bind(player)
     .fetch_optional(conn)
     .await?;
-    Ok(row.map(|(name, citizen)| Correspondent { id: player, name, citizen }))
+    Ok(row.map(|(name, citizen)| Correspondent { id: player, name, citizen, office: false }))
 }
 
 /// Drops what's past [`talk::MAILBOX`] from `player`'s `which` box: keeps
@@ -328,6 +492,7 @@ mod tests {
                 from: ada,
                 name: "Ada".into(),
                 citizen: false,
+                office: false,
                 first_line: "The rope held.".into(),
             }]
         );
@@ -361,6 +526,47 @@ mod tests {
         // The refused one left nothing behind
         assert_eq!(page(&db, bea, LetterBox::In, None).await.unwrap().letters.len(), 2);
         assert_eq!(StrandFlow::of(TransactionType::Postage.as_str()), StrandFlow::Sink);
+    }
+
+    /// The Registrar's letter (#447): from no player, free, once an account,
+    /// waiting for a reader who's away; read and dropped as any other, and
+    /// gone when dropped, since the office keeps no copy
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn an_office_writes_once_an_account_and_keeps_no_copy(db: PgPool) {
+        let bea = player(&db, "Bea", 0).await;
+        let start = balances_of(&db, [bea]).await;
+        let (to, _, message) = send_from_office(&db, bea, OfficeLetter::RegistrarWelcome, at(0)).await.unwrap().expect("the first time");
+        assert_eq!(to, bea);
+        let ServerMessage::LetterArrived { from, office: true, ref first_line, .. } = message else {
+            panic!("{message:?}");
+        };
+        assert!(from.is_nil());
+        assert_eq!(first_line, "Welcome to the Capitol.");
+        assert!(OfficeLetter::RegistrarWelcome.body().chars().count() <= talk::MAX_LETTER);
+        assert!(send_from_office(&db, bea, OfficeLetter::RegistrarWelcome, at(1)).await.unwrap().is_none(), "once");
+
+        // Bea was away: it waits for her
+        let waiting = notices::take_all(&db, bea, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap();
+        assert_eq!(waiting, vec![message]);
+        let inbox = page(&db, bea, LetterBox::In, None).await.unwrap();
+        assert_eq!((inbox.letters.len(), inbox.unread), (1, 1));
+        let letter = &inbox.letters[0];
+        assert_eq!(letter.from, Correspondent { id: Uuid::nil(), name: "The Registrar".into(), citizen: false, office: true });
+        assert_eq!(letter.to.name, "Bea");
+        // Free: no postage, nothing moved
+        assert_eq!(postage_paid(&db).await, 0);
+        assert_audited(&db, &start).await;
+        // An answer goes nowhere: there's no one to write to
+        assert!(matches!(send(&db, bea, Uuid::nil(), "Thank you.", false, at(2)).await, Err(LetterError::NoOne)));
+
+        assert_eq!(read(&db, bea, letter.id, at(3)).await.unwrap(), 0);
+        drop_letter(&db, bea, letter.id).await.unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM letters").fetch_one(&db).await.unwrap();
+        assert_eq!(rows, 0, "the office kept no copy, so it's gone");
+        assert!(send_from_office(&db, bea, OfficeLetter::RegistrarWelcome, at(4)).await.unwrap().is_none(), "dropped, it isn't sent again");
+        // No such player, no letter
+        assert!(send_from_office(&db, Uuid::new_v4(), OfficeLetter::RegistrarWelcome, at(5)).await.unwrap().is_none());
     }
 
     #[sqlx::test(migrations = "./migrations")]

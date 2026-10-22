@@ -157,6 +157,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         Ok(progress) => {
             let tutorial = crate::engine::tutorial::message(progress);
             let _ = sender.send(Message::Text(serde_json::to_string(&tutorial).unwrap().into())).await;
+            // The Registrar's letter, if People has opened and it never went
+            // (#447). It's queued, so the first subscribe sends it.
+            if progress.done.chapter_open(capitol_protocol::tutorial::Chapter::People) && !progress.finished() {
+                crate::engine::tutorial::registrar_writes(&state.db, None, player_id).await;
+            }
         }
         Err(e) => tracing::error!("Failed to read {}'s tutorial: {:?}", player_id, e),
     }

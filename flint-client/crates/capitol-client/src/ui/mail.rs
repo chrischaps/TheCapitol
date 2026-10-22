@@ -6,7 +6,9 @@
 //! haven't read, an open one for the rest, the unread first. A letter opens
 //! on a sheet of the Gazette's paper in its ink (`theme::PAPER`,
 //! `theme::INK`), sealed at its foot with its writer's initial, with
-//! *Reply* and *Drop* under it. Writing is the same sheet, with a pen:
+//! *Reply* and *Drop* under it. A letter from one of the city's offices
+//! (the Registrar's, #447) is sealed with the Capitol's tower instead
+//! (`theme::capitol_seal`), its name opens no card, and it takes no reply. Writing is the same sheet, with a pen:
 //! what's left of the 1000 characters, and the Strand of postage.
 //!
 //! The rules are `capitol_core::mail`'s, and the panel works them directly.
@@ -213,7 +215,12 @@ fn row(ui: &mut egui::Ui, mail: &mut Mail, letter: &Letter, which: LetterBox, vi
         let g = painter.text(egui::pos2(x, top), Align2::LEFT_TOP, prefix, theme::body(size::BODY), DIM);
         x = g.right();
     }
-    if other.citizen {
+    if other.office {
+        // The Capitol's seal, small, where a citizen's lozenge would be
+        let r = size::BODY * 0.46;
+        theme::capitol_seal(&painter, egui::pos2(x + r, top + size::BODY * 0.62), r);
+        x += r * 2.0 + 5.0;
+    } else if other.citizen {
         // The lozenge, as `theme::citizen_mark` draws it, without taking room
         let r = crate::labels::GLYPH_R * size::BODY;
         let c = egui::pos2(x + r * 0.8, top + size::BODY * 0.62);
@@ -266,18 +273,24 @@ fn read(ui: &mut egui::Ui, mail: &mut Mail, letter: &Letter, view: &View) -> Opt
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             ui.label(RichText::new(if mine { "To" } else { "From" }).font(theme::body(size::SMALL)).color(theme::INK_DIM).italics());
-            if other.citizen {
-                theme::citizen_mark(ui, SALUTATION, Some(theme::INK));
-            }
-            let name = ui
-                .add(
-                    egui::Label::new(RichText::new(&other.name).font(theme::display(SALUTATION)).color(theme::INK))
-                        .sense(Sense::click()),
-                )
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text("Who they are");
-            if name.clicked() {
-                action = Some(Action::Card(other.clone()));
+            if other.office {
+                // An office has no card: its name is only its name
+                ui.label(RichText::new(&other.name).font(theme::display(SALUTATION)).color(theme::INK))
+                    .on_hover_text("One of the city's offices, not a person");
+            } else {
+                if other.citizen {
+                    theme::citizen_mark(ui, SALUTATION, Some(theme::INK));
+                }
+                let name = ui
+                    .add(
+                        egui::Label::new(RichText::new(&other.name).font(theme::display(SALUTATION)).color(theme::INK))
+                            .sense(Sense::click()),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Who they are");
+                if name.clicked() {
+                    action = Some(Action::Card(other.clone()));
+                }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
@@ -291,23 +304,36 @@ fn read(ui: &mut egui::Ui, mail: &mut Mail, letter: &Letter, view: &View) -> Opt
         ui.add_space(4.0);
         ink_rule(ui);
         ui.add_space(8.0);
-        egui::ScrollArea::vertical().id_salt("capitol_mail_letter").max_height(room - 70.0).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("capitol_mail_letter").max_height(room - 96.0).show(ui, |ui| {
             ui.label(RichText::new(&letter.body).font(theme::body(HAND)).color(theme::INK));
         });
         ui.add_space(6.0);
-        // Sealed at its foot with the writer's initial
+        // Sealed at its foot with the writer's initial, or an office's
+        // with the Capitol's seal
         ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), Sense::hover());
-            theme::wax_seal(ui.painter(), rect.center(), 13.0);
-            let initial: String = letter.from.name.chars().take(1).collect::<String>().to_uppercase();
-            ui.painter().text(rect.center() + egui::vec2(0.0, 0.5), Align2::CENTER_CENTER, initial, theme::display(12.0), theme::PAPER);
+            if letter.from.office {
+                theme::capitol_seal(ui.painter(), rect.center(), 13.0);
+            } else {
+                theme::wax_seal(ui.painter(), rect.center(), 13.0);
+                let initial: String = letter.from.name.chars().take(1).collect::<String>().to_uppercase();
+                ui.painter().text(rect.center() + egui::vec2(0.0, 0.5), Align2::CENTER_CENTER, initial, theme::display(12.0), theme::PAPER);
+            }
         });
     });
     ui.add_space(10.0);
     ui.columns(2, |c| {
-        let again = if mine { "Write again" } else { "Reply" };
-        if theme::accent_button(&mut c[0], again, GOLD, view.online).clicked() {
-            mail.reply(letter.id);
+        if other.office {
+            // Nobody to answer: the office's seal is its last word
+            c[0].vertical_centered(|ui| {
+                ui.add_space(10.0);
+                ui.label(theme::dim("The office takes no replies").italics());
+            });
+        } else {
+            let again = if mine { "Write again" } else { "Reply" };
+            if theme::accent_button(&mut c[0], again, GOLD, view.online).clicked() {
+                mail.reply(letter.id);
+            }
         }
         let drop = c[1]
             .vertical_centered_justified(|ui| {
@@ -439,7 +465,16 @@ fn ink_rule(ui: &mut egui::Ui) {
     theme::rule_in(ui, theme::INK_RULE.gamma_multiply(0.6));
 }
 
-/// `--mail-sample [in|letter|write|sent]`: the mailbox offline, from the
+/// The Registrar's letter, as the server writes it, for the sample.
+const REGISTRAR_SAMPLE: &str = "Welcome to the Capitol.\n\n\
+    The Registry has noted your road in: things made with your own hands, the deeds of a farm, a house \
+    and a yard, and trade at the hall.\n\n\
+    Your deed is drawn up. Say a word to whoever is near and read a neighbour's card (a pale lozenge marks \
+    a citizen, who lives and works here as you do), then come to the office by the hall and choose where \
+    you'll live. The land is granted; its tax is yours, as anyone's is.\n\n\
+    The Registrar";
+
+/// `--mail-sample [in|letter|write|sent|registrar|registrar-in]`: the mailbox offline, from the
 /// protocol's fixture box (`mailbox.json`), on that view.
 pub fn sample(which: &str) -> (Mail, View) {
     use capitol_core::mail::Ask;
@@ -457,7 +492,7 @@ pub fn sample(which: &str) -> (Mail, View) {
     for (n, (name, citizen, body, hours)) in more.into_iter().enumerate() {
         let mut letter = inbox.letters[1].clone();
         letter.id = uuid::Uuid::from_u128(0x5000 + n as u128);
-        letter.from = Correspondent { id: uuid::Uuid::from_u128(0x6000 + n as u128), name: name.into(), citizen };
+        letter.from = Correspondent { id: uuid::Uuid::from_u128(0x6000 + n as u128), name: name.into(), citizen, office: false };
         letter.body = body.into();
         letter.sent_at = now - capitol_core::chrono::Duration::hours(hours);
         letter.read_at = Some(letter.sent_at + capitol_core::chrono::Duration::hours(1));
@@ -465,6 +500,16 @@ pub fn sample(which: &str) -> (Mail, View) {
     }
     inbox.more = false;
     let me = inbox.letters[0].to.clone();
+    if which.starts_with("registrar") {
+        // As `engine::letters::OfficeLetter::RegistrarWelcome` writes it
+        let mut letter = inbox.letters[0].clone();
+        letter.id = uuid::Uuid::from_u128(0x447);
+        letter.from = Correspondent { id: uuid::Uuid::nil(), name: "The Registrar".into(), citizen: false, office: true };
+        letter.body = REGISTRAR_SAMPLE.into();
+        letter.sent_at = now - capitol_core::chrono::Duration::minutes(3);
+        letter.read_at = None;
+        inbox.letters.insert(0, letter);
+    }
     let brin = inbox.letters[0].from.clone();
     let mut mail = Mail::default();
     mail.connected();
@@ -485,7 +530,7 @@ pub fn sample(which: &str) -> (Mail, View) {
     mail.paged(Mailbox { letters: vec![sent], unread: 1, more: false });
     mail.tab = LetterBox::In;
     match which {
-        "letter" => mail.open_letter(inbox.letters[0].id, now),
+        "letter" | "registrar" => mail.open_letter(inbox.letters[0].id, now),
         "write" => {
             mail.write_to(brin);
             if let Some(d) = mail.draft_mut() {
@@ -537,7 +582,7 @@ mod tests {
 
     #[test]
     fn every_view_draws_inside_a_small_screen() {
-        for which in ["in", "letter", "write", "sent"] {
+        for which in ["in", "letter", "write", "sent", "registrar"] {
             let (mut mail, view) = sample(which);
             let (_, rect) = run(&mut mail, &view, 853.0, None);
             let rect = rect.expect("drawn");
@@ -568,6 +613,23 @@ mod tests {
         let at = egui::pos2(rect.left() + 99.0, rect.top() + 114.0);
         let (action, _) = run(&mut mail, &view, 1280.0, Some(at));
         assert!(matches!(&action, Some(Action::Card(c)) if c.name == "Brin"), "{action:?}");
+    }
+
+    /// The Registrar's letter (#447): its name is only a name, and there's
+    /// no Reply to press
+    #[test]
+    fn an_offices_letter_opens_no_card_and_takes_no_reply() {
+        let (mut mail, view) = sample("registrar");
+        assert!(matches!(mail.showing(), Showing::Letter(id) if mail.letter(id).is_some_and(|l| l.from.office)));
+        let (_, rect) = run(&mut mail, &view, 1280.0, None);
+        let rect = rect.unwrap();
+        let (action, _) = run(&mut mail, &view, 1280.0, Some(egui::pos2(rect.left() + 99.0, rect.top() + 114.0)));
+        assert_eq!(action, None);
+        // Where Reply would be
+        let at = egui::pos2(rect.left() + rect.width() * 0.25, rect.bottom() - 30.0);
+        let (action, _) = run(&mut mail, &view, 1280.0, Some(at));
+        assert_eq!(action, None);
+        assert!(mail.draft().is_none(), "nothing to write");
     }
 
     #[test]

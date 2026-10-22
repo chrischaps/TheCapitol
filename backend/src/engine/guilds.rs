@@ -503,7 +503,7 @@ pub async fn list(db: &PgPool) -> Result<Vec<GuildSummary>, sqlx::Error> {
             name,
             tag,
             members: members as u32,
-            leader: Correspondent { id: leader, name: leader_name, citizen },
+            leader: Correspondent { id: leader, name: leader_name, citizen, office: false },
             founded_at,
         })
         .collect())
@@ -557,8 +557,8 @@ pub async fn detail(db: &PgPool, guild_id: Uuid, viewer: Option<Uuid>) -> Result
         tag,
         charter,
         founded_at,
-        founder: Correspondent { id: f, name: f_name, citizen: f_citizen },
-        leader: Correspondent { id: l, name: l_name, citizen: l_citizen },
+        founder: Correspondent { id: f, name: f_name, citizen: f_citizen, office: false },
+        leader: Correspondent { id: l, name: l_name, citizen: l_citizen, office: false },
         members,
         waiting,
     })
@@ -720,8 +720,8 @@ async fn invites(conn: &mut PgConnection, column: &str, id: Uuid) -> Result<Vec<
                 guild,
                 tag,
                 kind: GuildInviteKind::parse(&kind)?,
-                player: Correspondent { id: p, name: p_name, citizen: p_citizen },
-                by: Correspondent { id: b, name: b_name, citizen: b_citizen },
+                player: Correspondent { id: p, name: p_name, citizen: p_citizen, office: false },
+                by: Correspondent { id: b, name: b_name, citizen: b_citizen, office: false },
                 created_at,
             })
         })
@@ -766,7 +766,7 @@ async fn correspondent(conn: &mut PgConnection, player: Uuid) -> Result<Option<C
     .bind(player)
     .fetch_optional(conn)
     .await?;
-    Ok(row.map(|(name, citizen)| Correspondent { id: player, name, citizen }))
+    Ok(row.map(|(name, citizen)| Correspondent { id: player, name, citizen, office: false }))
 }
 
 /// `player`'s account's subscription, as its row has it.

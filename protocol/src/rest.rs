@@ -741,6 +741,12 @@ pub struct Correspondent {
     /// A citizen (C0.1)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub citizen: bool,
+    /// One of the city's offices, not a player (#447): the Registrar's
+    /// letter on the road in. Its `id` is nil, it has no card, and it takes
+    /// no reply. It's the bureaucracy's voice, never a character (road-in
+    /// plan D1).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub office: bool,
 }
 
 /// A letter, as its box shows it.

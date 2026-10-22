@@ -15,18 +15,20 @@
 //! `tutorial_seen` (#441, [`Did::Seen`]); it counts for no other step.
 //!
 //! The step that completes every chapter before the Deeds Office opens the
-//! player's deed grant (`deed_grants`, #440).
+//! player's deed grant (`deed_grants`, #440), and the one that completes
+//! every chapter before People brings the Registrar's letter
+//! ([`registrar_writes`], #447).
 
 use capitol_protocol::rules::market::OrderSide;
 use capitol_protocol::rules::Zone;
-use capitol_protocol::tutorial::{Step, Steps, TutorialProgress};
+use capitol_protocol::tutorial::{Chapter, Step, Steps, TutorialProgress};
 use capitol_protocol::ws::{Channel, ServerMessage};
 use sqlx::PgPool;
 use std::collections::HashSet;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::engine::{deed_grants, GameEvent};
+use crate::engine::{deed_grants, letters, GameEvent};
 use crate::state::AppState;
 
 /// Every step's bits, as stored
@@ -170,8 +172,30 @@ pub async fn saw(db: &PgPool, events: &broadcast::Sender<GameEvent>, player: Uui
         player_id: player,
         message: ServerMessage::TutorialStep { step, done: after.done },
     });
-    if after.done.deed_earned() && !Steps::from_bits(after.done.bits() & !step.bit()).deed_earned() {
+    let before = Steps::from_bits(after.done.bits() & !step.bit());
+    if after.done.chapter_open(Chapter::People) && !before.chapter_open(Chapter::People) {
+        registrar_writes(db, Some(events), player).await;
+    }
+    if after.done.deed_earned() && !before.deed_earned() {
         open_grant(db, player).await;
+    }
+}
+
+/// The People chapter has opened for `player` (#447): the Registrar's
+/// letter goes, once an account (`letters::send_from_office`). With
+/// `events` it's sent live to any socket of theirs; it waits as a notice
+/// either way, so a player who's away hears of it on their return. A
+/// socket calls it with none as it connects, in case this one failed.
+pub async fn registrar_writes(db: &PgPool, events: Option<&broadcast::Sender<GameEvent>>, player: Uuid) {
+    match letters::send_from_office(db, player, letters::OfficeLetter::RegistrarWelcome, chrono::Utc::now()).await {
+        Ok(Some((player_id, notice_id, message))) => {
+            tracing::info!("The Registrar has written to {player}");
+            if let Some(events) = events {
+                let _ = events.send(GameEvent::BazaarNotice { player_id, notice_id, message });
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("Couldn't send the Registrar's letter to {player}: {}", e.message()),
     }
 }
 
@@ -614,6 +638,68 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    /// The step that opens People brings the Registrar's letter (#447), live
+    /// and as a notice that waits; it comes once an account, however the
+    /// chapter is come to again
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_registrar_writes_once_as_people_opens(db: PgPool) {
+        use crate::engine::{letters, notices};
+        use capitol_protocol::rest::LetterBox;
+        let ada = player(&db, "Ada", 0).await;
+        let (events, mut rx) = broadcast::channel(16);
+        let before: Vec<Step> = [Chapter::Arrival, Chapter::RoadIn, Chapter::Hall]
+            .into_iter()
+            .flat_map(Chapter::steps)
+            .filter(|s| *s != Step::Deposit)
+            .collect();
+        for step in &before {
+            mark(&db, ada, *step).await.unwrap();
+        }
+        // A People step done ahead opens nothing
+        saw(&db, &events, ada, Did::OpenedCard).await;
+        assert!(matches!(rx.try_recv().unwrap(), GameEvent::Tutorial { .. }));
+        assert!(rx.try_recv().is_err(), "no letter yet");
+        assert!(letters::page(&db, ada, LetterBox::In, None).await.unwrap().letters.is_empty());
+
+        saw(&db, &events, ada, Did::Deposited).await;
+        assert!(matches!(rx.try_recv().unwrap(), GameEvent::Tutorial { .. }));
+        let notice = match rx.try_recv().unwrap() {
+            GameEvent::BazaarNotice { player_id, notice_id, message } => {
+                assert_eq!(player_id, ada);
+                assert!(
+                    matches!(&message, ServerMessage::LetterArrived { from, name, office: true, citizen: false, .. }
+                        if from.is_nil() && name == "The Registrar"),
+                    "{message:?}"
+                );
+                notice_id
+            }
+            _ => panic!("not the letter"),
+        };
+        let inbox = letters::page(&db, ada, LetterBox::In, None).await.unwrap();
+        assert_eq!((inbox.letters.len(), inbox.unread), (1, 1));
+        assert_eq!(inbox.letters[0].from, letters::Office::Registrar.correspondent());
+
+        // Not taken live (Ada was away), it waits for her return, and goes once
+        let waiting = notices::take_all(&db, ada, capitol_protocol::tunables::PROPERTY_TAX_RATE).await.unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert!(!notices::take(&db, notice).await.unwrap());
+
+        // Connecting again, or dropping it and coming to People again, sends no second
+        registrar_writes(&db, Some(&events), ada).await;
+        letters::drop_letter(&db, ada, inbox.letters[0].id).await.unwrap();
+        sqlx::query("UPDATE tutorial_progress SET steps = steps & ~$2::BIGINT WHERE player_id = $1")
+            .bind(ada)
+            .bind(Step::Deposit.bit() as i64)
+            .execute(&db)
+            .await
+            .unwrap();
+        saw(&db, &events, ada, Did::Deposited).await;
+        assert!(matches!(rx.try_recv().unwrap(), GameEvent::Tutorial { .. }));
+        assert!(rx.try_recv().is_err(), "once an account");
+        assert!(letters::page(&db, ada, LetterBox::In, None).await.unwrap().letters.is_empty());
+    }
+
     /// The writer's cache asks once a run, so a second sight of a step is free
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "needs the local Postgres (docker-compose up -d)"]
@@ -800,6 +886,19 @@ mod tests {
         let _ = get_card(State(state.clone()), as_them(&db, ada).await, Path(ada)).await.unwrap();
         assert_eq!(done(&db, ada).await, Steps::NONE, "your own");
         let _ = get_card(State(state), as_them(&db, ada).await, Path(bram)).await.unwrap();
+        assert_eq!(done(&db, ada).await, Steps::from_iter([Step::OpenCard]));
+    }
+
+    /// A name in the Gazette opens a card by name, and that counts too (#447)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d) and Redis"]
+    async fn a_card_by_name_counts_and_your_own_doesnt(db: PgPool) {
+        use crate::routes::players::get_card_by_name;
+        let state = for_tests(db.clone()).await;
+        let (ada, _bram) = (player(&db, "Ada", 0).await, player(&db, "Bram", 0).await);
+        let _ = get_card_by_name(State(state.clone()), as_them(&db, ada).await, Path("ada".into())).await.unwrap();
+        assert_eq!(done(&db, ada).await, Steps::NONE, "your own");
+        let _ = get_card_by_name(State(state), as_them(&db, ada).await, Path("BRAM".into())).await.unwrap();
         assert_eq!(done(&db, ada).await, Steps::from_iter([Step::OpenCard]));
     }
 

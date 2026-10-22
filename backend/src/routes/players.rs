@@ -81,7 +81,12 @@ pub async fn get_card_by_name(
     Extension(auth_user): Extension<AuthUser>,
     Path(name): Path<String>,
 ) -> Result<Json<PlayerCard>, AppError> {
-    card(&state.db, auth_user.account_id, Who::Name(&name)).await.map(Json)
+    let card = card(&state.db, auth_user.account_id, Who::Name(&name)).await?;
+    // The Gazette's names open cards this way, and count as any other (#447)
+    if !card.mine {
+        tutorial::saw_by_account(&state, auth_user.account_id, Did::OpenedCard).await;
+    }
+    Ok(Json(card))
 }
 
 /// Stop hearing someone: nothing they say reaches you, on any device

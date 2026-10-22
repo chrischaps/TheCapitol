@@ -24,6 +24,8 @@
 use capitol_protocol::rest::ResourceNodeInfo;
 use capitol_protocol::rules::Zone;
 use capitol_protocol::tutorial::{Chapter, Step, TutorialProgress};
+use capitol_protocol::ws::PlayerPosition;
+use uuid::Uuid;
 
 /// Something only the screen shows, which the server takes for a step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +114,9 @@ pub enum Target {
     Stall,
     /// The notice board by the hall's door, where the Gazette is pinned (#446).
     Board,
+    /// Someone else: the nearest person or citizen in sight
+    /// ([`nearest_person`], #447). Nobody near, it leads nowhere.
+    Person,
 }
 
 /// Where `step` leads, if anywhere. A gather leads to the nodes the server
@@ -133,6 +138,7 @@ pub fn target(step: Step) -> Option<Target> {
         Step::Deposit | Step::SellOrder | Step::BuyOrder | Step::CollectBox => Target::Hall,
         Step::VisitStall => Target::Stall,
         Step::ReadGazette => Target::Board,
+        Step::OpenCard => Target::Person,
         _ => return None,
     })
 }
@@ -149,6 +155,22 @@ pub fn nearest_node<'a>(
         .filter(|n| n.state == "available" && kinds.contains(&n.resource_type.as_str()))
         .min_by(|a, b| {
             let d = |n: &ResourceNodeInfo| (n.x - from[0]).powi(2) + (n.y - from[1]).powi(2);
+            d(a).total_cmp(&d(b))
+        })
+}
+
+/// The nearest player to `from` (server units) who isn't `me`: a person or
+/// a citizen, whoever's card there is to open.
+pub fn nearest_person<'a>(
+    players: impl IntoIterator<Item = &'a PlayerPosition>,
+    me: Option<Uuid>,
+    from: [f64; 2],
+) -> Option<&'a PlayerPosition> {
+    players
+        .into_iter()
+        .filter(|p| Some(p.id) != me)
+        .min_by(|a, b| {
+            let d = |p: &PlayerPosition| (p.x - from[0]).powi(2) + (p.y - from[1]).powi(2);
             d(a).total_cmp(&d(b))
         })
 }
@@ -293,6 +315,19 @@ mod tests {
         assert_eq!(near.x, -20.0, "passing over the spent, the worked and the trees");
         assert_eq!(nearest_node(&nodes, &["grass"], [28.0, 0.0]).unwrap().x, 30.0);
         assert!(nearest_node(&nodes, &["rock_outcrop"], [0.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn a_card_to_open_is_the_nearest_someone_else() {
+        assert_eq!(target(Step::OpenCard), Some(Target::Person));
+        assert_eq!(target(Step::SayLocal), None, "said anywhere");
+        assert_eq!(target(Step::ReadLetter), None, "read anywhere");
+        let at = |n: u128, x: f64, citizen: bool| PlayerPosition { id: Uuid::from_u128(n), name: format!("P{n}"), x, y: 0.0, citizen };
+        let me = Uuid::from_u128(1);
+        let players = [at(1, 0.0, false), at(2, 40.0, false), at(3, -25.0, true)];
+        assert_eq!(nearest_person(&players, Some(me), [0.0, 0.0]).unwrap().id, Uuid::from_u128(3), "a citizen's card will do");
+        assert_eq!(nearest_person(&players, Some(me), [38.0, 0.0]).unwrap().id, Uuid::from_u128(2));
+        assert!(nearest_person(&players[..1], Some(me), [0.0, 0.0]).is_none(), "nobody but you");
     }
 
     #[test]

@@ -253,11 +253,15 @@ impl Mail {
     }
 
     /// Answer the letter `id`: to whoever wrote it, or, in your out box,
-    /// to whoever you wrote it to.
+    /// to whoever you wrote it to. An office's letter (#447) takes no
+    /// answer: there's no one to write to.
     pub fn reply(&mut self, id: Uuid) {
         let Some(letter) = self.letter(id) else { return };
         let mine = self.out_box.letters.iter().any(|l| l.id == id);
         let to = if mine { letter.to.clone() } else { letter.from.clone() };
+        if to.office {
+            return;
+        }
         self.write_to(to);
     }
 
@@ -387,7 +391,7 @@ mod tests {
     use super::*;
 
     fn who(n: u128, name: &str) -> Correspondent {
-        Correspondent { id: Uuid::from_u128(n), name: name.into(), citizen: false }
+        Correspondent { id: Uuid::from_u128(n), name: name.into(), citizen: false, office: false }
     }
 
     fn at(minutes: i64) -> DateTime<Utc> {
@@ -505,6 +509,19 @@ mod tests {
         mail.delivered(sent);
         assert_eq!((mail.tab, mail.showing(), mail.draft()), (LetterBox::Out, Showing::List, None));
         assert_eq!(mail.letters(LetterBox::Out)[0].id, Uuid::from_u128(7));
+    }
+
+    /// The Registrar's letter (#447) is read and dropped as any other, but
+    /// there's no one to answer
+    #[test]
+    fn an_offices_letter_takes_no_reply() {
+        let mut registrar = letter(1, 0, 10, false);
+        registrar.from = Correspondent { id: Uuid::nil(), name: "The Registrar".into(), citizen: false, office: true };
+        let mut mail = signed_in(vec![registrar]);
+        mail.open_letter(Uuid::from_u128(1), at(20));
+        mail.reply(Uuid::from_u128(1));
+        assert_eq!(mail.showing(), Showing::Letter(Uuid::from_u128(1)), "still reading it");
+        assert_eq!(mail.draft(), None);
     }
 
     #[test]

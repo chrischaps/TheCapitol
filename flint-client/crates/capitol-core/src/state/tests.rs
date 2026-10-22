@@ -1473,10 +1473,10 @@ fn said_is_reported() {
 fn a_letter_is_reported() {
     let mut state = connected();
     let (id, from) = (Uuid::from_u128(385), Uuid::from_u128(7));
-    let letter = M::LetterArrived { id, from, name: "Brin".into(), citizen: true, first_line: "Thank you…".into() };
+    let letter = M::LetterArrived { id, from, name: "Brin".into(), citizen: true, office: false, first_line: "Thank you…".into() };
     assert_eq!(
         state.apply_ws(&letter),
-        vec![StateEvent::LetterArrived { id, from, name: "Brin".into(), citizen: true, first_line: "Thank you…".into() }]
+        vec![StateEvent::LetterArrived { id, from, name: "Brin".into(), citizen: true, office: false, first_line: "Thank you…".into() }]
     );
 }
 

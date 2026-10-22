@@ -808,6 +808,18 @@ impl CapitolExtension {
                 let hall = self.shared.hall.lock().ok()?.clone()?;
                 ring([hall.board_top[0], hall.board_top[2]], 1.6)
             }
+            Target::Person => {
+                let state = self.session.as_ref()?.state();
+                let person = onboarding::nearest_person(state.players().values(), state.me(), from)?;
+                // At their feet as they're drawn, so the ring walks with them
+                let drawn = self
+                    .shared
+                    .players
+                    .lock()
+                    .ok()
+                    .and_then(|p| p.iter().find(|l| l.id == person.id).map(|l| [l.at[0], l.at[2]]));
+                ring(drawn.unwrap_or(crate::coords::to_world(person.x, person.y)), 0.9)
+            }
         };
         Some((mark, you))
     }

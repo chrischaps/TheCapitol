@@ -195,7 +195,7 @@ fn known(ui: &mut egui::Ui, card: &PlayerCard, view: &View) -> Option<Action> {
         }
         let write = theme::accent_button(&mut c[1], "Write", GOLD, view.online);
         if write.on_hover_text("Write them a letter, for a Strand's postage").clicked() {
-            action = Some(Action::Write(Correspondent { id: card.id, name: card.name.clone(), citizen: card.citizen }));
+            action = Some(Action::Write(Correspondent { id: card.id, name: card.name.clone(), citizen: card.citizen, office: false }));
         }
     });
     ui.add_space(4.0);
@@ -331,7 +331,7 @@ mod tests {
         let ada = Uuid::from_u128(0xada);
         let found = actions_on(&cards, today);
         assert!(found.contains(&Action::Trade(ada)) && found.contains(&Action::Mute(ada)), "{found:?}");
-        let write = Action::Write(Correspondent { id: ada, name: "Ada Reeder".into(), citizen: false });
+        let write = Action::Write(Correspondent { id: ada, name: "Ada Reeder".into(), citizen: false, office: false });
         assert!(found.contains(&write), "{found:?}");
         assert!(!found.contains(&Action::Unmute(ada)), "{found:?}");
     }

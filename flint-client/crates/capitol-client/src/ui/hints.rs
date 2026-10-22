@@ -72,7 +72,9 @@ fn chapter_close(chapter: Chapter) -> &'static str {
         Chapter::Hall => {
             "You can change fiber for Strands, leave a price on the book, shop the stalls and read what the city made yesterday."
         }
-        Chapter::People => "You can speak to those near you, read a stranger's card and open your letters.",
+        Chapter::People => {
+            "You can speak to whoever's near, read anyone's card and tell a citizen by their mark. Letters wait for you while you're away."
+        }
         Chapter::DeedsOffice => "The land is yours, and on the city's books. Now make something of it.",
         Chapter::SettleIn => CLOSING.1,
     }
@@ -212,17 +214,20 @@ fn words(step: Step) -> (&'static str, &'static str, &'static str) {
         // People
         Step::SayLocal => (
             "A word",
-            "Those near you hear what you say. Say something.",
+            "Press Enter and say something on the Local tab. Whoever's within a few paces (3 m) hears it, \
+             over your head; the Capitol tab is heard by the whole city.",
             "[Enter] talk",
         ),
         Step::OpenCard => (
             "Someone's card",
-            "Click a passer-by to read their card: who they are, and where they live.",
-            "[Click] a person",
+            "Click anyone to read their card. A pale lozenge by a name marks a citizen: they live and work \
+             here too, and are marked so you always know. To trade, Shift-click someone or press T; \
+             nobody has to.",
+            "[Click] a person  ·  [Shift] + [Click] trade",
         ),
         Step::ReadLetter => (
             "The Registrar's letter",
-            "A letter waits in your box. Open it.",
+            "The Registrar has written to you. It waits in your letters, sealed: open it.",
             "[L] your letters",
         ),
         // The Deeds Office
@@ -312,6 +317,11 @@ const TAKEN: &str = "This one's taken; most near the road are. Its deed reads th
 
 /// Inside this, you're there (metres).
 const HERE: f32 = 6.0;
+
+/// A card to open with nobody in sight (#447): a name in print opens one too.
+/// A world with nobody in it at all can't do the step
+/// ([#484](https://github.com/chrischaps/TheCapitol/issues/484)).
+const NOBODY_NEAR: &str = "Nobody in sight. A name in the Gazette opens a card too.";
 
 /// The card's line on where to go.
 fn lead_words(lead: Lead) -> String {
@@ -728,6 +738,10 @@ fn step_card(ui: &mut egui::Ui, step: Step, body: &str, done: bool, compact: boo
         if lead.taken {
             ui.label(theme::dim(TAKEN));
         }
+    } else if !done && target(step) == Some(Target::Person) {
+        // Nobody in sight to lead to (#447): there are other ways to a card
+        ui.add_space(4.0);
+        ui.label(theme::dim(NOBODY_NEAR).italics());
     }
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {

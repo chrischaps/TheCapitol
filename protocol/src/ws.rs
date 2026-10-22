@@ -645,6 +645,10 @@ pub enum ServerMessage {
         /// The writer is a citizen (C0.1)
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         citizen: bool,
+        /// The writer is one of the city's offices, not a player (#447):
+        /// `from` is nil, and there's no one to answer
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        office: bool,
         first_line: String,
     },
     // Commons S2.1: the hall's board of commissions (D5). The first three go
