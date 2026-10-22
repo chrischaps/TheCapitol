@@ -84,6 +84,9 @@ const CHART_TAG: Tag = 1 << 32;
 /// The tag on the Gazette's calls (E3.9).
 const GAZETTE_TAG: Tag = 70;
 
+/// The tag on a person's card (S0.3).
+const CARD_TAG: Tag = 110;
+
 /// The tag on taking things out of the impound (#141). The poller
 /// refetches the containers on its answer.
 const IMPOUND_TAG: Tag = 80;
@@ -215,6 +218,8 @@ pub struct Session {
     gazette: capitol_core::gazette::Reader,
     /// The Gazette's call that's out.
     gazette_asked: Option<capitol_core::gazette::Ask>,
+    /// A person's card (S0.3): whose is open, and the call for it.
+    cards: capitol_core::card::Cards,
     /// Placing a station from a kit (P6.2), while it lasts.
     placing: Option<Placing>,
     /// What placing has to tell the player since the extension last took it.
@@ -406,6 +411,7 @@ impl Session {
             market_notes: Vec::new(),
             gazette: capitol_core::gazette::Reader::new(None),
             gazette_asked: None,
+            cards: Default::default(),
             placing: None,
             placing_notes: Vec::new(),
             visit: Visit::default(),
@@ -1449,6 +1455,36 @@ impl Session {
         self.net.rest(request, GAZETTE_TAG);
     }
 
+    /// Open someone's card (S0.3): asked for next frame, with what the click
+    /// knew shown until it comes.
+    pub fn open_card(&mut self, who: capitol_core::card::Who, hint: Option<capitol_core::card::Hint>) {
+        self.cards.open(who, hint);
+    }
+
+    pub fn close_card(&mut self) {
+        self.cards.close();
+    }
+
+    /// The card open, if any.
+    pub fn cards(&self) -> &capitol_core::card::Cards {
+        &self.cards
+    }
+
+    fn tend_card(&mut self) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        use capitol_core::card::Who;
+        if let Some(who) = self.cards.wants() {
+            let request = match &who {
+                Who::Id(player_id) => RestRequest::PlayerCard { player_id: *player_id },
+                Who::Name(name) => RestRequest::PlayerCardByName { name: name.clone() },
+            };
+            self.cards.sent(who);
+            self.net.rest(request, CARD_TAG);
+        }
+    }
+
     /// The Gazette as the client knows it.
     pub fn gazette(&self) -> &capitol_core::gazette::Reader {
         &self.gazette
@@ -1993,6 +2029,16 @@ impl Session {
                         (None, _) => {}
                     }
                 }
+                NetEvent::Rest(CARD_TAG, result) => match result {
+                    Ok(RestResponse::Card(card)) => self.cards.answered(card.clone()),
+                    Ok(_) => self.cards.failed(false),
+                    Err(e) => {
+                        if e.status() != Some(404) {
+                            tracing::warn!("card: failed: {e}");
+                        }
+                        self.cards.failed(e.status() == Some(404));
+                    }
+                },
                 NetEvent::Rest(MARKET_READ_TAG, Ok(RestResponse::MarketSummary(summary))) => {
                     self.market_summary = Some(summary.clone());
                 }
@@ -2049,6 +2095,7 @@ impl Session {
                 // An edition may have come out while the link was down
                 if matches!(connection, ConnectionState::Connected { .. }) {
                     self.gazette.connected();
+                    self.cards.connected();
                 }
             }
             let trade_before = self.state.trade().clone();
@@ -2211,6 +2258,7 @@ impl Session {
             self.tend_admin(now);
             self.tend_bazaar(now);
             self.tend_gazette();
+            self.tend_card();
             for (request, tag) in self.poller.tick(now) {
                 self.net.rest(request, tag);
             }
@@ -2310,6 +2358,7 @@ impl Session {
             self.market_notes.clear();
             self.gazette = capitol_core::gazette::Reader::new(None);
             self.gazette_asked = None;
+            self.cards = Default::default();
             self.placing = None;
             self.placing_notes.clear();
             self.visit = Visit::default();

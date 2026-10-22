@@ -11,6 +11,7 @@ pub mod health;
 pub mod inventory;
 pub mod market;
 pub mod player;
+pub mod players;
 pub mod plots;
 pub mod recipes;
 pub mod stations;

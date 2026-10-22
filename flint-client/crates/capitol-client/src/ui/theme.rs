@@ -65,6 +65,10 @@ pub const TRADE: Color32 = rgb(0x3b82f6);
 /// The bazaar (E3.11): its lanterns' amber, warm across the avenue from the
 /// hall's blue. The shop panel's edge and its calls to action.
 pub const BAZAAR: Color32 = rgb(0xe8a24a);
+/// A person's lantern and a citizen's (`entities.rs`): a person's card (S0.3)
+/// is edged in the light they carry.
+pub const LANTERN: Color32 = rgb(crate::entities::LANTERN);
+pub const CITIZEN_LANTERN: Color32 = rgb(crate::entities::CITIZEN_LANTERN);
 pub const ERROR: Color32 = rgb(0xdc3545);
 /// The ground of an error box: the error colour at 10%.
 pub const ERROR_WASH: Color32 = rgba(220, 53, 69, 0.1);
@@ -579,7 +583,8 @@ pub fn scrolled<R>(
     .inner
 }
 
-fn rule_in(ui: &mut Ui, colour: Color32) {
+/// A hairline across the space in `colour`: a header's rule in its accent.
+pub fn rule_in(ui: &mut Ui, colour: Color32) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter()
@@ -707,6 +712,31 @@ fn tag(ui: &mut Ui, text: &str, colour: Color32) -> Response {
             )
         })
         .response
+}
+
+/// A citizen's mark (C0.2) before their name: the slender lozenge, a lamp's
+/// pane, that the HUD draws in their lantern's pale (`hud.rhai`). `text` is
+/// the name's size. With `ink` it's an outline in that ink, for paper, and a
+/// little fuller, as a thin line of ink is fainter than a lamp; without, it's
+/// filled in the pale, as in the world.
+pub fn citizen_mark(ui: &mut Ui, text: f32, ink: Option<Color32>) -> Response {
+    let r = crate::labels::GLYPH_R * if ink.is_some() { 1.3 } else { 1.0 } * text;
+    let w = r * 0.72;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(w * 2.0 + 2.0, text), egui::Sense::hover());
+    // Level with the middle of the lower-case letters, as in the world
+    let c = rect.center() + egui::vec2(0.0, text * 0.06);
+    let points = vec![
+        c + egui::vec2(0.0, -r),
+        c + egui::vec2(w, 0.0),
+        c + egui::vec2(0.0, r),
+        c + egui::vec2(-w, 0.0),
+    ];
+    let shape = match ink {
+        Some(ink) => egui::Shape::convex_polygon(points, Color32::TRANSPARENT, Stroke::new(1.2_f32, ink)),
+        None => egui::Shape::convex_polygon(points, CITIZEN_LANTERN, Stroke::NONE),
+    };
+    ui.painter().add(shape);
+    response.on_hover_text("A citizen: an AI who lives, works and trades in the city, by the same rules as anyone")
 }
 
 /// Underlined words that act, in dim gold.

@@ -542,7 +542,7 @@ const SELF: Livery = Livery {
 };
 
 /// A person's lantern: warm, like the windows of the Capitol at dusk.
-const LANTERN: u32 = 0xffa94a;
+pub const LANTERN: u32 = 0xffa94a;
 /// A citizen's: as strong, but the pale of lamp oil a little toward the
 /// moon, so beside the amber it reads as another flame and not a cold one.
 /// (A neutral pale, #e8e4d4, read as paper at dusk, not light.) The glyph

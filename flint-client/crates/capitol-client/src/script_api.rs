@@ -96,6 +96,9 @@ pub struct Shared {
     /// The player a script last asked to trade with (`cap_trade_with`,
     /// P7.3). The extension takes it next frame.
     pub trade_with: Arc<Mutex<Option<String>>>,
+    /// The player a script last asked to see the card of (`cap_open_card`,
+    /// S0.3). The extension takes it next frame.
+    pub open_card: Arc<Mutex<Option<String>>>,
     /// Where trading stands, for the thread between you (`cap_trade`).
     pub trade: Arc<Mutex<Option<TradeMark>>>,
     /// How the camera rig answers you (P8.4), from the settings, for
@@ -628,6 +631,14 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     engine.register_fn("cap_trade_with", move |id: &str| {
         if let Ok(mut t) = trade_with.lock() {
             *t = Some(id.to_owned());
+        }
+    });
+    // `cap_open_card(id)`: open the card of the player `id` (from
+    // `cap_player_at`): who they are (S0.3). Opened next frame.
+    let open_card = shared.open_card.clone();
+    engine.register_fn("cap_open_card", move |id: &str| {
+        if let Ok(mut c) = open_card.lock() {
+            *c = Some(id.to_owned());
         }
     });
     // `cap_trade() -> #{ state, x, y, z, mine, theirs } or ()`: where trading
@@ -1408,7 +1419,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shift_click_picks_another_player_never_you() {
+    fn a_click_picks_another_player_for_a_trade_or_their_card_never_you() {
         let shared = Shared::default();
         let mut engine = rhai::Engine::new();
         register(&mut engine, &shared);
@@ -1436,6 +1447,11 @@ mod tests {
             Some(uuid::Uuid::from_u128(2).to_string().as_str())
         );
         assert!(engine.eval::<()>("cap_player_at(5.0, 5.0)").is_ok());
+        engine.eval::<()>("cap_open_card(cap_player_at(0.9, 0.0).id)").unwrap();
+        assert_eq!(
+            shared.open_card.lock().unwrap().as_deref(),
+            Some(uuid::Uuid::from_u128(2).to_string().as_str())
+        );
         assert!(engine.eval::<()>("cap_trade()").is_ok());
         *shared.trade.lock().unwrap() = Some(TradeMark {
             state: "open",

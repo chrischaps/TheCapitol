@@ -148,6 +148,10 @@ pub struct CapitolExtension {
     /// read offline.
     gazette: ui::gazette::GazettePanel,
     gazette_sample: Option<capitol_core::gazette::Reader>,
+    /// A person's card (S0.3), and `--card-sample`: a card, and today's
+    /// game day, to show offline.
+    card: ui::card::CardPanel,
+    card_sample: Option<(capitol_core::card::Cards, i64)>,
     /// What a foreclosure kept for you (#141), and `--impound-sample`: an
     /// impound and a pack to show offline.
     impound: ui::impound::ImpoundPanel,
@@ -255,6 +259,8 @@ impl CapitolExtension {
             market_sample: None,
             gazette: ui::gazette::GazettePanel::default(),
             gazette_sample: None,
+            card: ui::card::CardPanel::default(),
+            card_sample: None,
             impound: ui::impound::ImpoundPanel::default(),
             impound_sample: None,
             station_panel_sample: None,
@@ -414,6 +420,15 @@ impl CapitolExtension {
     pub fn with_exchange(mut self, spec: Option<&str>) -> Self {
         if let Some(spec) = spec {
             self.exchange.preset(spec);
+        }
+        self
+    }
+
+    /// Offline, open a person's card on a sample (`--card-sample`): a
+    /// citizen, a person, or your own.
+    pub fn with_card_sample(mut self, which: Option<&str>) -> Self {
+        if let (Some(which), None) = (which, &self.session) {
+            self.card_sample = Some(ui::card::sample(which));
         }
         self
     }
@@ -919,6 +934,7 @@ impl PlayerExtension for CapitolExtension {
             let poses = (self.layer != crate::debug_layers::Layer::Off).then(|| poses.to_vec());
             debug_layers(session, self.layer, poses.as_deref(), self.dev.open, &self.shared);
             trade(ctx, session, &self.shared, now);
+            open_card(session, &self.shared);
             for note in session.take_market_notes() {
                 let mut data = toml::Table::new();
                 data.insert("title".into(), note.title.into());
@@ -1612,6 +1628,21 @@ impl PlayerExtension for CapitolExtension {
                 match self.gazette.show(ctx, &view) {
                     Some(ui::gazette::Action::Turn(by)) => session.gazette_mut().turn(by),
                     Some(ui::gazette::Action::Byline(named)) => session.set_byline(named),
+                    Some(ui::gazette::Action::Card(name)) => {
+                        session.open_card(capitol_core::card::Who::Name(name), None)
+                    }
+                    None => {}
+                }
+                // A person's card (S0.3), over the Gazette when it's opened from it
+                let today = rules::day_number(
+                    session.state().server_time_ms().unwrap_or_else(|| capitol_core::chrono::Utc::now().timestamp_millis()),
+                );
+                let view = ui::card::View { shown: session.cards().shown(), today, online: true };
+                match self.card.show(ctx, &view) {
+                    Some(ui::card::Action::Trade(id)) => {
+                        session.trade_with(now, id);
+                    }
+                    Some(ui::card::Action::Close) => session.close_card(),
                     None => {}
                 }
                 // The settings panel takes the hint card's corner, and the
@@ -1622,7 +1653,7 @@ impl PlayerExtension for CapitolExtension {
                 } else {
                     // The inventory's and the station's rects are last frame's: they're drawn after.
                     let panels: Vec<_> =
-                        [self.inventory.rect, self.crafting.rect, self.exchange.rect, self.market.rect, self.impound.rect, self.shop.rect, self.station.rect]
+                        [self.inventory.rect, self.crafting.rect, self.exchange.rect, self.market.rect, self.impound.rect, self.shop.rect, self.station.rect, self.card.rect]
                             .into_iter()
                             .flatten()
                             .collect();
@@ -1844,6 +1875,13 @@ impl PlayerExtension for CapitolExtension {
                 reader.turn(by);
             }
         }
+        if let Some((cards, today)) = &mut self.card_sample {
+            // Trade is drawn as it would be signed in; offline it asks no one
+            let view = ui::card::View { shown: cards.shown(), today: *today, online: true };
+            if let Some(ui::card::Action::Close) = self.card.show(ctx, &view) {
+                cards.close();
+            }
+        }
         if let Some(juice) = &mut self.juice {
             juice.ui(ctx, &mut self.icons, &self.shared);
         }
@@ -2037,6 +2075,24 @@ fn debug_layers(session: &mut Session, layer: crate::debug_layers::Layer, poses:
     session.watch_walkers(round);
     if let Ok(mut debug) = shared.debug.lock() {
         *debug = mark;
+    }
+}
+
+/// A person's card (S0.3): open the one a script asked for (`cap_open_card`),
+/// with the name over their head and their mark to show until it comes.
+fn open_card(session: &mut Session, shared: &Shared) {
+    let Some(id) = shared.open_card.lock().ok().and_then(|mut c| c.take()) else { return };
+    match uuid::Uuid::parse_str(&id) {
+        Ok(player) => {
+            let hint = shared.players.lock().ok().and_then(|players| {
+                players
+                    .iter()
+                    .find(|p| p.id == player)
+                    .map(|p| capitol_core::card::Hint { name: p.name.clone(), citizen: p.citizen })
+            });
+            session.open_card(capitol_core::card::Who::Id(player), hint);
+        }
+        Err(e) => tracing::warn!("cap_open_card: {id:?} isn't a player id: {e}"),
     }
 }
 

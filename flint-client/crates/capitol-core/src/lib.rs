@@ -51,6 +51,7 @@ pub mod auth;
 pub mod automation;
 pub mod bazaar;
 pub mod bot;
+pub mod card;
 pub mod catalog;
 pub mod citizen;
 pub mod craft;

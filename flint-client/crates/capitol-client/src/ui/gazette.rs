@@ -45,12 +45,14 @@ pub struct View<'a> {
 }
 
 /// What the reader did.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     /// Turn back (-1) or on (+1) a day
     Turn(i64),
     /// Print your name, or keep it out
     Byline(bool),
+    /// See who someone named on the page is: their card (S0.3)
+    Card(String),
 }
 
 /// The panel and the file that keeps what you've read.
@@ -188,16 +190,16 @@ fn page(ui: &mut egui::Ui, view: &View, open: &mut bool, height: f32) -> Option<
             if ui.available_width() >= THREE_COLUMNS {
                 // Ragged right, as `columns` would justify every line
                 ui.columns(3, |c| {
-                    c[0].vertical(|ui| exchange(ui, g));
+                    c[0].vertical(|ui| exchange(ui, g, &mut action));
                     c[1].vertical(|ui| sale_and_land(ui, g));
-                    c[2].vertical(|ui| hands(ui, g));
+                    c[2].vertical(|ui| hands(ui, g, &mut action));
                 });
             } else {
-                exchange(ui, g);
+                exchange(ui, g, &mut action);
                 ui.add_space(10.0);
                 sale_and_land(ui, g);
                 ui.add_space(10.0);
-                hands(ui, g);
+                hands(ui, g, &mut action);
             }
             ui.add_space(10.0);
             rule(ui, 1.0);
@@ -293,7 +295,7 @@ fn front_page(ui: &mut egui::Ui, g: &Gazette) {
 
 /// From the Exchange: the day's trading, the movers and every price. Then the
 /// bazaar's stalls (#240), which print no prices.
-fn exchange(ui: &mut egui::Ui, g: &Gazette) {
+fn exchange(ui: &mut egui::Ui, g: &Gazette, action: &mut Option<Action>) {
     section(ui, "From the Exchange");
     ui.label(ink(&g.markets, size::BODY));
     if !g.prices.is_empty() {
@@ -303,13 +305,13 @@ fn exchange(ui: &mut egui::Ui, g: &Gazette) {
     // An edition from before the Gazette counted the stalls has no story
     if !g.stalls_story.is_empty() {
         ui.add_space(10.0);
-        stalls(ui, g);
+        stalls(ui, g, action);
     }
 }
 
 /// At the Stalls: what sold at the bazaar and its busiest shops, by name
 /// only where the keeper lets the Gazette print it.
-fn stalls(ui: &mut egui::Ui, g: &Gazette) {
+fn stalls(ui: &mut egui::Ui, g: &Gazette, action: &mut Option<Action>) {
     section(ui, "At the Stalls");
     ui.label(ink(&g.stalls_story, size::BODY));
     let Some(st) = g.stalls.as_ref().filter(|st| !st.shops.is_empty()) else {
@@ -328,7 +330,9 @@ fn stalls(ui: &mut egui::Ui, g: &Gazette) {
                 None => ui.label(ink("Name withheld", size::SMALL).strong()),
             };
             if let Some(keeper) = &shop.keeper {
-                ui.label(dim(keeper, size::SMALL));
+                if person(ui, dim(keeper, size::SMALL)) {
+                    *action = Some(Action::Card(keeper.clone()));
+                }
             }
             let sales = if shop.sales == 1 { "1 sale".to_string() } else { format!("{} sales", shop.sales) };
             ui.label(dim(&format!("· {sales}, chiefly {}", shop.item_name), size::SMALL));
@@ -411,7 +415,7 @@ fn sale_and_land(ui: &mut egui::Ui, g: &Gazette) {
 }
 
 /// The day's busiest hands, then what the city made of what.
-fn hands(ui: &mut egui::Ui, g: &Gazette) {
+fn hands(ui: &mut egui::Ui, g: &Gazette, action: &mut Option<Action>) {
     section(ui, "Busy Hands");
     ui.label(ink(&g.producers_story, size::BODY));
     if !g.producers.is_empty() {
@@ -422,8 +426,16 @@ fn hands(ui: &mut egui::Ui, g: &Gazette) {
                 if p.citizen {
                     citizen_mark(ui, size::SMALL);
                 }
-                let name = p.name.as_deref().unwrap_or("Name withheld");
-                ui.label(ink(name, size::SMALL).strong());
+                match &p.name {
+                    Some(name) => {
+                        if person(ui, ink(name, size::SMALL).strong()) {
+                            *action = Some(Action::Card(name.clone()));
+                        }
+                    }
+                    None => {
+                        ui.label(ink("Name withheld", size::SMALL).strong());
+                    }
+                }
                 ui.label(dim(&format!("{} units, chiefly {}", p.units, p.item_name), size::SMALL));
             });
         }
@@ -466,24 +478,20 @@ fn made_table(ui: &mut egui::Ui, g: &Gazette) {
         });
 }
 
-/// A citizen's mark (C0.2) before their name: the slender lozenge, a lamp's
-/// pane, that the HUD draws in their lantern's pale (`hud.rhai`), here as an
-/// ink outline so it reads on the paper, and a little fuller, as a thin line
-/// of ink is fainter than a lamp. `text` is the name's size.
+/// A citizen's mark (C0.2) before their name, as an ink outline so it reads
+/// on the paper (`theme::citizen_mark`). `text` is the name's size.
 fn citizen_mark(ui: &mut egui::Ui, text: f32) {
-    let r = crate::labels::GLYPH_R * 1.3 * text;
-    let w = r * 0.72;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(w * 2.0 + 2.0, text), Sense::hover());
-    // Level with the middle of the lower-case letters, as in the world
-    let c = rect.center() + egui::vec2(0.0, text * 0.06);
-    let points = vec![
-        c + egui::vec2(0.0, -r),
-        c + egui::vec2(w, 0.0),
-        c + egui::vec2(0.0, r),
-        c + egui::vec2(-w, 0.0),
-    ];
-    ui.painter().add(egui::Shape::convex_polygon(points, Color32::TRANSPARENT, Stroke::new(1.2_f32, theme::INK)));
-    response.on_hover_text("A citizen: an AI who lives, works and trades in the city, by the same rules as anyone");
+    theme::citizen_mark(ui, text, Some(theme::INK));
+}
+
+/// A person's name in the columns: underlined under the pointer, and a click
+/// opens their card (S0.3). Whether it was clicked.
+fn person(ui: &mut egui::Ui, name: RichText) -> bool {
+    let r = ui.add(egui::Label::new(name).sense(Sense::click()));
+    if r.hovered() {
+        ui.painter().hline(r.rect.x_range(), r.rect.bottom() - 1.0, Stroke::new(1.0_f32, theme::INK_RULE));
+    }
+    r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Who they are").clicked()
 }
 
 /// Whether the Gazette prints your name, and the switch.

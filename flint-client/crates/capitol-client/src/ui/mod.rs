@@ -41,6 +41,7 @@
 //!   the prediction, the store's counts and the interest cell.
 
 pub mod automation;
+pub mod card;
 pub mod containers;
 pub mod crafting;
 pub mod dev_overlay;

@@ -649,6 +649,32 @@ pub struct PlayerMeResponse {
     pub citizen: bool,
 }
 
+/// `GET /players/{id}/card` and `GET /players/by-name/{name}` (S0.3): who
+/// someone is, as anyone may see it. Chat, mutes, letters, standing and
+/// guilds all open it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct PlayerCard {
+    pub id: Uuid,
+    pub name: String,
+    /// A citizen (C0.1), marked as one to everyone
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
+    /// The game day their account was made (`rules::day_number`)
+    pub since: i64,
+    /// The zone of their oldest plot (`Zone::as_str`), if they hold one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
+    /// What the city says of them, in words (D8): `rules::standing`
+    pub standing: String,
+    /// Their guild's name, once there are guilds (S4.1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guild: Option<String>,
+    /// The card is your own
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mine: bool,
+}
+
 /// `GET /player/inventory`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]

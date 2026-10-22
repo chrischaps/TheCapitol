@@ -34,6 +34,8 @@
 //! type this build knows and what it does to the Strands.
 //! `fixtures/rest/admin_player.json` is `GET /admin/player` (D4.3): a citizen's
 //! hour, a deposit, a buy order's escrow and a sale less its fee, out walking.
+//! `fixtures/rest/player_card.json` is `GET /players/{id}/card` (S0.3): a
+//! citizen with a farm, a week in the city, in no guild, seen by someone else.
 
 use std::fs;
 use std::path::Path;
@@ -349,4 +351,16 @@ fn a_sample_stored_before_the_lag_counts_still_reads() {
     let old: Sample = serde_json::from_value(value).unwrap();
     assert!(old.load.events_lagged.is_empty());
     assert!(old.watches.is_empty(), "a sample from before the watches");
+}
+
+#[test]
+fn a_card_round_trips_leaving_out_what_isnt_so() {
+    use capitol_protocol::rest::PlayerCard;
+    use capitol_protocol::rules::{standing, Zone};
+    let json = fixture("player_card.json");
+    let card: PlayerCard = serde_json::from_str(&json).unwrap();
+    assert!(card.citizen && !card.mine);
+    assert_eq!(card.home.as_deref().and_then(Zone::from_str), Some(Zone::Rural));
+    assert_eq!((card.standing.as_str(), card.guild.as_deref()), (standing::NEW_IN_TOWN, None));
+    assert_eq!(serde_json::to_string(&card).unwrap(), json);
 }

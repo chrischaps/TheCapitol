@@ -143,6 +143,10 @@ struct Args {
     /// Offline, open the Capitol Gazette on a sample edition (E3.9)
     #[arg(long)]
     gazette_sample: bool,
+    /// Offline, open a person's card (S0.3) on a sample: "citizen" (the
+    /// default), "person" or "mine"
+    #[arg(long, value_name = "WHO", num_args = 0..=1, default_missing_value = "citizen")]
+    card_sample: Option<String>,
     /// Offline, the Exchange hall as if you stood where the camera looks
     /// with goods in your market box: the gold mote, the header's hint and,
     /// in range, the prompt (E3.7)
@@ -351,6 +355,7 @@ fn main() -> Result<()> {
         .with_dev_sample(args.dev_sample && args.offline.is_some())
         .with_bazaar_sample(args.bazaar_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_gazette_sample(args.gazette_sample && args.offline.is_some())
+        .with_card_sample(args.card_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_impound_sample(args.impound_sample && args.offline.is_some())
         .with_station_panel_sample(args.station_panel_sample.as_deref())
         .with_mute(args.mute || args.exit_after.is_some())

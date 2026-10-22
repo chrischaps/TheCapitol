@@ -7,6 +7,7 @@
 //
 //   1. placing a station: put it here              (P6.2)
 //   2. shift-click a player: trade, or walk closer  (P7.3)
+//      click a player: their card, who they are     (S0.3, here)
 //   3. a station: open it, or walk closer           (P6.3)
 //      the Gazette's notice board: read it         (E3.9, here)
 //      a bazaar stall: its shop, or walk there      (E3.11, here)
@@ -215,6 +216,7 @@ fn on_update() {
     };
     if place_station(click) { return; }
     if trade_with(click) { return; }
+    if open_card(click) { return; }
     if open_station(click) { return; }
     if read_gazette() { return; }
     if visit_stall() { return; }
@@ -234,6 +236,13 @@ fn trade_with(click) {
     let p = cap_player_at(click.x, click.z);
     if p == () { return false; }
     cap_trade_with(p.id);
+    true
+}
+// A plain click on someone: their card (S0.3). Shift asked to trade above.
+fn open_card(click) {
+    let p = cap_player_at(click.x, click.z);
+    if p == () { return false; }
+    cap_open_card(p.id);
     true
 }
 fn open_station(click) {           // P6.3

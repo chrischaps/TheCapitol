@@ -177,6 +177,9 @@ pub mod talk;
 /// The Contract Court's fee on commissions and wage offers (S0.2).
 pub mod court;
 
+/// Standing in words: only the first band's until S3.1 (D8, S0.3).
+pub mod standing;
+
 /// Letter grade for an item quality (0-100): A >= 90, B >= 75, C >= 55, D >= 35,
 /// otherwise F. WebSocket events carry only the number, so clients grade it here.
 pub fn quality_grade(quality: i32) -> &'static str {

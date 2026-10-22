@@ -46,6 +46,10 @@ pub enum RestRequest {
 
     /// `GET /player/me`: name, live position, zone and balance (B2)
     PlayerMe,
+    /// `GET /players/{id}/card`: who someone is (S0.3)
+    PlayerCard { player_id: Uuid },
+    /// `GET /players/by-name/{name}`: the same, by their name in any case
+    PlayerCardByName { name: String },
     /// `POST /player/move`. The WebSocket `move` is what the game uses.
     PlayerMove(MoveRequest),
     /// `GET /player/inventory`
@@ -212,6 +216,8 @@ pub enum RestResponse {
     /// `/terrain` still has the `cached_version` the request named.
     TerrainUnchanged,
     Me(PlayerMeResponse),
+    /// Someone's card (S0.3)
+    Card(PlayerCard),
     Move(MoveResponse),
     Inventory(InventoryResponse),
     Currency(CurrencyResponse),
@@ -362,6 +368,8 @@ impl RestRequest {
             | Health
             | Terrain { .. }
             | PlayerMe
+            | PlayerCard { .. }
+            | PlayerCardByName { .. }
             | PlayerInventory
             | PlayerCurrency
             | WorldNearby(_)
@@ -409,6 +417,8 @@ impl RestRequest {
             Health => "/health".into(),
             Terrain { .. } => "/terrain".into(),
             PlayerMe => "/player/me".into(),
+            PlayerCard { player_id } => format!("/players/{player_id}/card"),
+            PlayerCardByName { name } => format!("/players/by-name/{}", path_segment(name)),
             PlayerMove(_) => "/player/move".into(),
             PlayerInventory => "/player/inventory".into(),
             PlayerCurrency => "/player/currency".into(),
@@ -533,6 +543,7 @@ impl RestRequest {
             Q::Health => A::Health(de(body)?),
             Q::Terrain { .. } => A::Terrain(Box::new(de(body)?)),
             Q::PlayerMe => A::Me(de(body)?),
+            Q::PlayerCard { .. } | Q::PlayerCardByName { .. } => A::Card(de(body)?),
             Q::PlayerMove(_) => A::Move(de(body)?),
             Q::PlayerInventory => A::Inventory(de(body)?),
             Q::PlayerCurrency => A::Currency(de(body)?),
@@ -598,6 +609,20 @@ impl RestRequest {
             Q::Walkers(_) => A::Walkers(de(body)?),
         })
     }
+}
+
+/// `text` as one path segment: everything but the unreserved characters
+/// percent-encoded, so a name with a space, a slash or a `?` stays one
+/// segment (RFC 3986 §2.3).
+fn path_segment(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for b in text.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Runs one request to completion. `base` has no trailing slash.
@@ -746,6 +771,12 @@ mod tests {
             (RestRequest::Recipes, "GET", "/recipes".into()),
             (RestRequest::Catalog, "GET", "/catalog".into()),
             (RestRequest::PlayerMe, "GET", "/player/me".into()),
+            (RestRequest::PlayerCard { player_id: id }, "GET", format!("/players/{id}/card")),
+            (
+                RestRequest::PlayerCardByName { name: "Ada Reeder/2?é".into() },
+                "GET",
+                "/players/by-name/Ada%20Reeder%2F2%3F%C3%A9".into(),
+            ),
             (
                 RestRequest::ListPlots(Default::default()),
                 "GET",
