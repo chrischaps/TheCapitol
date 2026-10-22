@@ -1499,7 +1499,7 @@ fn the_road_in_follows_the_server() {
     let mut state = connected();
     assert_eq!(state.tutorial(), None, "nothing until the server says");
     let done = Steps::from_iter([Step::Walk]);
-    assert!(state.apply_ws(&M::Tutorial { done, dismissed: true }).is_empty());
+    assert!(state.apply_ws(&M::Tutorial { done, dismissed: true, grant: Default::default() }).is_empty());
     let tour = state.tutorial().unwrap();
     assert_eq!((tour.done, tour.dismissed), (done, true));
 
@@ -1512,9 +1512,33 @@ fn the_road_in_follows_the_server() {
     assert_eq!(tour.done.current(), Some(Step::OpenPack));
 
     // Brought back (#441): the PUT's answer says so before the socket does
-    let back = capitol_protocol::tutorial::TutorialProgress { done, dismissed: false };
+    let back = capitol_protocol::tutorial::TutorialProgress { done, dismissed: false, ..Default::default() };
     assert!(state.apply_rest(&R::Tutorial(back)).is_empty());
     assert_eq!(state.tutorial(), Some(back));
+}
+
+/// The deed opens with the step that walks the road, as the server opens
+/// it, and the `tutorial` after a claim says it's spent (#448)
+#[test]
+fn the_deed_opens_with_the_road_and_the_claim_spends_it() {
+    use capitol_protocol::tutorial::{Chapter, Grant, Step, Steps};
+    let mut state = connected();
+    let road: Steps = [Chapter::Arrival, Chapter::RoadIn, Chapter::Hall, Chapter::People]
+        .into_iter()
+        .flat_map(Chapter::steps)
+        .collect();
+    let short = Steps::from_bits(road.bits() & !Step::ReadLetter.bit());
+    state.apply_ws(&M::Tutorial { done: short, dismissed: false, grant: Grant::Unearned });
+    assert_eq!(state.tutorial().unwrap().grant, Grant::Unearned);
+    state.apply_ws(&M::TutorialStep { step: Step::ReadLetter, done: road });
+    assert_eq!(state.tutorial().unwrap().grant, Grant::Open);
+    let claimed = road.with(Step::ClaimHome);
+    state.apply_ws(&M::TutorialStep { step: Step::ClaimHome, done: claimed });
+    state.apply_ws(&M::Tutorial { done: claimed, dismissed: false, grant: Grant::Spent });
+    assert_eq!(state.tutorial().unwrap().grant, Grant::Spent);
+    // A later step doesn't open it again
+    state.apply_ws(&M::TutorialStep { step: Step::PlaceAtHome, done: claimed.with(Step::PlaceAtHome) });
+    assert_eq!(state.tutorial().unwrap().grant, Grant::Spent);
 }
 
 #[test]

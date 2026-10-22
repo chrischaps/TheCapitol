@@ -37,7 +37,7 @@ use std::collections::HashMap;
 
 use capitol_protocol::rest::{
     CatalogResponse, ClaimedPlot, PauseReason, PlotInfo, RecipeInfo, ResourceNodeInfo,
-    StationInfo, Subscription, SubscriptionStatus, ZoneFactsResponse, PRODUCTION_LOG_LEN,
+    StationInfo, Subscription, SubscriptionStatus, ZoneFactsResponse, FreeLotsResponse, PRODUCTION_LOG_LEN,
 };
 use capitol_protocol::rules::{self, Zone};
 use capitol_protocol::tunables::Fees;
@@ -474,6 +474,8 @@ pub struct GameState {
     /// What living in each home zone is like, for the zone card (#444):
     /// `/bureaucracy/zone-facts`, asked each time the card opens.
     zone_facts: Option<ZoneFactsResponse>,
+    /// The Deeds Office's list of one zone's free lots, as last asked (#448)
+    free_lots: Option<FreeLotsResponse>,
     /// Everyone's claimed lots, by `terrain_id` (P8.6b): `/plots/claimed`
     /// with the snapshot, then WS `plot_claimed` and `plot_released`.
     claimed: HashMap<String, ClaimedPlot>,
@@ -522,6 +524,7 @@ impl GameState {
             plots: Vec::new(),
             picked_plot: None,
             zone_facts: None,
+            free_lots: None,
             claimed: HashMap::new(),
             claimed_version: 0,
             trade: trade::TradeBook::default(),
@@ -919,11 +922,18 @@ impl GameState {
             }),
             M::GuildChanged { guild_id } => out.push(StateEvent::GuildChanged { guild_id: *guild_id }),
             // The road in (#438): the server keeps the tour and judges it
-            M::Tutorial { done, dismissed } => {
-                self.tutorial = Some(capitol_protocol::tutorial::TutorialProgress { done: *done, dismissed: *dismissed });
+            M::Tutorial { done, dismissed, grant } => {
+                self.tutorial = Some(capitol_protocol::tutorial::TutorialProgress {
+                    done: *done,
+                    dismissed: *dismissed,
+                    grant: *grant,
+                });
             }
             M::TutorialStep { step, done } => {
-                self.tutorial.get_or_insert_with(Default::default).done = *done;
+                let tour = self.tutorial.get_or_insert_with(Default::default);
+                tour.done = *done;
+                // The step that walks the road opens the deed, as the server does (#448)
+                tour.grant = tour.grant.after(*done);
                 out.push(StateEvent::TutorialStep { step: *step });
             }
             M::GuildNotice { guild_id, guild, tag, kind, who, name, citizen } => out.push(StateEvent::GuildNotice {
@@ -1278,6 +1288,7 @@ impl GameState {
             // The same as the `tutorial` the server sends every socket after a PUT
             R::Tutorial(progress) => self.tutorial = Some(*progress),
             R::ZoneFacts(facts) => self.zone_facts = Some(facts.clone()),
+            R::FreeLots(lots) => self.free_lots = Some(lots.clone()),
             R::Success(_)
             | R::DeedPrices(_)
             | R::Terrain(_)
@@ -1602,6 +1613,11 @@ impl GameState {
     /// The home zones' facts, once the server has said (#444).
     pub fn zone_facts(&self) -> Option<&ZoneFactsResponse> {
         self.zone_facts.as_ref()
+    }
+
+    /// One zone's free lots, as the Deeds Office last asked (#448)
+    pub fn free_lots(&self) -> Option<&FreeLotsResponse> {
+        self.free_lots.as_ref()
     }
 
     /// Closes the plot panel.

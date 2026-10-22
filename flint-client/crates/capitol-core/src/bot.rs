@@ -1474,7 +1474,17 @@ impl Bot {
 
     /// Buys the deed to `plot_id`. Returns the plot, now ours.
     pub fn claim_plot(&mut self, plot_id: Uuid) -> Result<PlotInfo, BotError> {
-        match self.call("claiming a plot", RestRequest::ClaimPlot { plot_id })? {
+        self.claim(plot_id, false)
+    }
+
+    /// Claims `plot_id` with the deed the road in earned, paying nothing
+    /// (#440, #448). Returns the plot, now ours.
+    pub fn claim_with_grant(&mut self, plot_id: Uuid) -> Result<PlotInfo, BotError> {
+        self.claim(plot_id, true)
+    }
+
+    fn claim(&mut self, plot_id: Uuid, use_grant: bool) -> Result<PlotInfo, BotError> {
+        match self.call("claiming a plot", RestRequest::ClaimPlot { plot_id, use_grant })? {
             RestResponse::ClaimPlot(claim) => Ok(claim.plot),
             other => Err(unexpected("claiming a plot", &other)),
         }

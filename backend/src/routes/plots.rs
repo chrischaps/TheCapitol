@@ -427,6 +427,10 @@ async fn claim(
         announce_balances(events, [(player_id, new_balance)]);
     }
     tutorial::saw(db, events, player_id, Did::Claimed).await;
+    if granted {
+        // The deed's spent: their sockets hear it, so no lot offers it again
+        tutorial::tell(db, events, player_id).await;
+    }
     Ok(new_balance)
 }
 
@@ -745,6 +749,8 @@ mod tests {
     async fn a_claim_with_the_grant_takes_the_plot_and_no_strands(db: PgPool) {
         use crate::engine::conservation::{assert_audited, balances_of, strands_accounted};
         use crate::engine::deed_grants::tests::{grant_of, the_road, walked};
+        use capitol_protocol::tutorial::Grant;
+        use capitol_protocol::ws::ServerMessage;
         let deed = urban_deed(&db).await;
         let ada = player(&db, "ada", deed + 5).await;
         walked(&db, ada, the_road()).await;
@@ -767,6 +773,12 @@ mod tests {
         let sent: Vec<GameEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(matches!(&sent[0], GameEvent::PlotClaimed { owner_id, .. } if *owner_id == ada));
         assert!(!sent.iter().any(|e| matches!(e, GameEvent::CurrencyChanged { .. })), "no balance to hear");
+        // Their sockets hear the deed spent, so no lot offers it again (#448)
+        let spent = sent.iter().any(|e| {
+            matches!(e, GameEvent::Tutorial { player_id, message: ServerMessage::Tutorial { grant: Grant::Spent, .. } } if *player_id == ada)
+        });
+        assert!(spent, "told the deed is spent: {sent:?}");
+        assert_eq!(tutorial::progress(&db, ada).await.unwrap().grant, Grant::Spent);
         assert_eq!(strands_accounted(&db).await, books);
         assert_audited(&db, &start).await;
 

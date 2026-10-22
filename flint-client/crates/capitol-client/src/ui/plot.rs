@@ -16,10 +16,17 @@
 //! Under the zone, a home zone's plot offers "About the <zone>", which
 //! opens the zone card on it (#444).
 //!
+//! While the deed the road in earned is open (#448), a free home lot offers
+//! "Claim with your deed" under the Strands price, which stays for anyone
+//! who'd rather pay and keep the deed (D6). It asks once more before it
+//! spends it. Before the Deeds Office has been looked in at, a line says
+//! the deed waits there instead (D8; `capitol_core::deeds::offer`).
+//!
 //! The panel is edged in gold, the colour of what's yours (plan §1), and
 //! the claimed plot's gold edge in the world answers it.
 
 use super::theme::{self, size, DIM, ENOUGH, GOLD, SHORT, TEXT};
+use capitol_core::deeds::DeedOffer;
 use capitol_core::plot::{words, Offer};
 use capitol_core::protocol::rest::PlotInfo;
 use capitol_core::protocol::rules::Zone;
@@ -36,6 +43,8 @@ const RISE: f32 = 12.0;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Claim(uuid::Uuid),
+    /// Claim it with the deed the road in earned (#448).
+    ClaimWithDeed(uuid::Uuid),
     /// Pay this many strands of the plot's tax debt.
     PayTax(uuid::Uuid, i64),
     /// Open the zone card on this zone (#444)
@@ -56,6 +65,8 @@ pub struct View<'a> {
     pub paying: bool,
     /// Why the last claim or payment was refused, while it's fresh.
     pub refused: Option<&'a str>,
+    /// What the road in's deed offers here (#448).
+    pub deed: DeedOffer,
 }
 
 /// What the panel keeps between frames.
@@ -63,6 +74,8 @@ pub struct View<'a> {
 pub struct PlotPanel {
     /// The plot last shown, so it can fade out after the store lets go.
     last: Option<PlotInfo>,
+    /// "Claim with your deed" was clicked once on this plot: it asks again.
+    confirm: Option<uuid::Uuid>,
     /// Where the panel was drawn this frame, for the controls hint to keep
     /// clear of. `None` while it's closed.
     pub rect: Option<egui::Rect>,
@@ -97,7 +110,7 @@ impl PlotPanel {
             .show(ctx, |ui| {
                 ui.multiply_opacity(ease);
                 theme::panel_edged(GOLD)
-                    .show(ui, |ui| body(ui, plot, view))
+                    .show(ui, |ui| body(ui, plot, view, &mut self.confirm))
                     .inner
             });
         self.rect = open.then_some(area.response.rect);
@@ -106,7 +119,7 @@ impl PlotPanel {
 }
 
 /// The panel's insides.
-fn body(ui: &mut egui::Ui, plot: &PlotInfo, view: &View) -> Option<Action> {
+fn body(ui: &mut egui::Ui, plot: &PlotInfo, view: &View, confirm: &mut Option<uuid::Uuid>) -> Option<Action> {
     ui.set_width(WIDTH);
     let mut action = None;
     ui.horizontal(|ui| {
@@ -189,6 +202,9 @@ fn body(ui: &mut egui::Ui, plot: &PlotInfo, view: &View) -> Option<Action> {
             if let Some(a) = claim(ui, plot, offer, view) {
                 action = Some(a);
             }
+            if let Some(a) = deed(ui, plot, view, confirm) {
+                action = Some(a);
+            }
         }
     }
     if let Some(why) = view.refused {
@@ -247,6 +263,63 @@ fn claim(ui: &mut egui::Ui, plot: &PlotInfo, offer: &Offer, view: &View) -> Opti
         })
         .clicked()
         .then_some(Action::Claim(plot.id))
+}
+
+/// The road in's deed, under the price (#448): "Claim with your deed",
+/// asked twice, or where it waits.
+fn deed(ui: &mut egui::Ui, plot: &PlotInfo, view: &View, confirm: &mut Option<uuid::Uuid>) -> Option<Action> {
+    if *confirm != Some(plot.id) {
+        *confirm = None;
+    }
+    match view.deed {
+        DeedOffer::None => None,
+        DeedOffer::AtTheOffice => {
+            ui.add_space(6.0);
+            ui.vertical_centered(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new("Your deed waits at the Deeds Office, by the hall.")
+                            .color(theme::GOLD_LIGHT)
+                            .size(size::LABEL),
+                    )
+                    .wrap(),
+                );
+            });
+            None
+        }
+        DeedOffer::Claim if confirm.is_some() => {
+            ui.add_space(6.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("Spend your deed on this lot?").color(theme::GOLD_LIGHT).size(size::BODY));
+            });
+            let mut action = None;
+            ui.columns(2, |cols| {
+                if theme::accent_button(&mut cols[0], "Not yet", DIM, true).clicked() {
+                    *confirm = None;
+                }
+                if theme::accent_button(&mut cols[1], "Yes, claim it", GOLD, !view.claiming)
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    *confirm = None;
+                    action = Some(Action::ClaimWithDeed(plot.id));
+                }
+            });
+            action
+        }
+        DeedOffer::Claim => {
+            ui.add_space(6.0);
+            let text = if view.claiming { "Claiming…" } else { "Claim with your deed" };
+            if theme::accent_button(ui, text, GOLD, !view.claiming)
+                .on_hover_text("The deed the road in earned: this lot for nothing, taxed as any deed is")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                *confirm = Some(plot.id);
+            }
+            None
+        }
+    }
 }
 
 /// The tax a plot of yours owes, how near that is to foreclosure, and the
@@ -387,6 +460,7 @@ mod tests {
             claiming: false,
             paying: false,
             refused: None,
+            deed: DeedOffer::None,
         };
         let (_, rect) = run(&view, None);
         let rect = rect.expect("drawn");
@@ -411,6 +485,7 @@ mod tests {
             claiming: false,
             paying: false,
             refused: None,
+            deed: DeedOffer::None,
         };
         let (_, rect) = run(&view, None);
         let rect = rect.unwrap();
@@ -434,6 +509,7 @@ mod tests {
             claiming: false,
             paying: false,
             refused: None,
+            deed: DeedOffer::None,
         };
         let (_, rect) = run(&view, None);
         let rect = rect.unwrap();
@@ -447,6 +523,60 @@ mod tests {
         assert_eq!(run(&broke, Some(button)).0, None, "nothing to pay with");
     }
 
+    /// The road in's deed (#448): offered under the price even when the
+    /// Strands fall short, and asked twice before it's spent
+    #[test]
+    fn a_free_lot_claims_with_the_deed_on_the_second_ask() {
+        let p = plot(None);
+        let view = View {
+            plot: Some(&p),
+            offer: Offer::TooDear { cost: 500, short: 400 },
+            strands: Some(100),
+            claiming: false,
+            paying: false,
+            refused: None,
+            deed: DeedOffer::Claim,
+        };
+        let ctx = theme::test_context();
+        let mut panel = PlotPanel::default();
+        let mut frame = |click: Option<egui::Pos2>| {
+            let mut out = (None, None);
+            for f in 0..6 {
+                let mut raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0))),
+                    ..Default::default()
+                };
+                if let (Some(p), 3) = (click, f) {
+                    raw.events.push(egui::Event::PointerMoved(p));
+                    for pressed in [true, false] {
+                        raw.events.push(egui::Event::PointerButton {
+                            pos: p,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        });
+                    }
+                }
+                let _ = ctx.run(raw, |ctx| {
+                    theme::install(ctx);
+                    if let Some(a) = panel.show(ctx, &view, None) {
+                        out.0 = Some(a);
+                    }
+                    out.1 = panel.rect;
+                });
+            }
+            out
+        };
+        let rect = frame(None).1.expect("drawn");
+        // The deed's button is the panel's last, at its foot
+        let at = egui::pos2(rect.center().x, rect.bottom() - 30.0);
+        assert_eq!(frame(Some(at)).0, None, "the first click only asks");
+        let rect = frame(None).1.unwrap();
+        // "Yes, claim it" is the right of the two at the foot
+        let yes = egui::pos2(rect.right() - 60.0, rect.bottom() - 30.0);
+        assert_eq!(frame(Some(yes)).0, Some(Action::ClaimWithDeed(p.id)));
+    }
+
     #[test]
     fn nothing_picked_draws_nothing() {
         let view = View {
@@ -456,6 +586,7 @@ mod tests {
             claiming: false,
             paying: false,
             refused: None,
+            deed: DeedOffer::None,
         };
         assert_eq!(run(&view, None), (None, None));
     }

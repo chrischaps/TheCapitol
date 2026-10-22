@@ -80,6 +80,9 @@ pub struct Shared {
     /// A script asked to open the Gazette (`cap_read_gazette`, E3.9). The
     /// extension takes it next frame.
     pub read_gazette: Arc<AtomicBool>,
+    /// A script asked to look in at the Deeds Office (`cap_open_office`,
+    /// #448). The extension takes it next frame.
+    pub open_office: Arc<AtomicBool>,
     /// The bazaar's stalls (E3.11) as the extension left them this frame.
     /// `None` when the terrain has no bazaar.
     pub bazaar: Arc<Mutex<Option<BazaarMark>>>,
@@ -154,6 +157,14 @@ pub struct HallMark {
     pub news: bool,
     /// The Gazette is open.
     pub reading: bool,
+    /// The Deeds Office's desk beside it (#448): round its slot, and the
+    /// middle of its awning (X, Y, Z), where its prompt hangs.
+    pub office: [[f32; 2]; 4],
+    pub office_top: [f32; 3],
+    /// Your deed waits there, earned and not yet spent.
+    pub deed_waits: bool,
+    /// The Deeds Office's panel is open.
+    pub office_open: bool,
 }
 
 /// The bazaar (E3.11) as scripts see it: its stalls, in world metres.
@@ -221,6 +232,11 @@ impl HallMark {
     /// Whether the ground point (x, z) is on the notice board's slot.
     pub fn board_covers(&self, x: f32, z: f32) -> bool {
         quad_covers(&self.board, x, z, 0.1)
+    }
+
+    /// Whether the ground point (x, z) is on the Deeds Office's slot.
+    pub fn office_covers(&self, x: f32, z: f32) -> bool {
+        quad_covers(&self.office, x, z, 0.1)
     }
 }
 
@@ -893,10 +909,13 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         }
     });
     // `cap_hall() -> #{ corners, door_x, door_z, x, y, z, near, goods, open,
-    // board_x, board_y, board_z, news, reading } or ()`: the Exchange hall
+    // board_x, board_y, board_z, news, reading, office_x, office_y, office_z,
+    // deed_waits, office_open } or ()`: the Exchange hall
     // (E3.7), world metres. `board_*` is the top of the Gazette's notice
     // board in its forecourt (E3.9), `news` an edition you haven't read,
-    // and `reading` the Gazette open. `corners` is
+    // and `reading` the Gazette open. `office_*` is the top of the Deeds
+    // Office's awning beside it (#448), `deed_waits` your deed earned and
+    // unspent, and `office_open` its panel open. `corners` is
     // [[x, z], ...] round its footprint, `door_*` the middle of its entrance
     // side, and `x, y, z` the middle of its roof. `near` when you're in range
     // to trade there, `goods` when your market box holds anything, `open`
@@ -926,6 +945,11 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
         m.insert("board_z".into(), (h.board_top[2] as f64).into());
         m.insert("news".into(), h.news.into());
         m.insert("reading".into(), h.reading.into());
+        m.insert("office_x".into(), (h.office_top[0] as f64).into());
+        m.insert("office_y".into(), (h.office_top[1] as f64).into());
+        m.insert("office_z".into(), (h.office_top[2] as f64).into());
+        m.insert("deed_waits".into(), h.deed_waits.into());
+        m.insert("office_open".into(), h.office_open.into());
         m.into()
     });
     // `cap_board_at(x, z) -> bool`: whether the ground point (x, z), world
@@ -940,6 +964,18 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     // `cap_read_gazette()`: open the Gazette. Sent next frame.
     let read = shared.read_gazette.clone();
     engine.register_fn("cap_read_gazette", move || read.store(true, Ordering::Relaxed));
+    // `cap_office_at(x, z) -> bool`: whether the ground point (x, z), world
+    // metres, is on the Deeds Office's desk (#448).
+    let hall = shared.hall.clone();
+    engine.register_fn("cap_office_at", move |x: f64, z: f64| -> bool {
+        hall.lock()
+            .ok()
+            .and_then(|h| h.as_ref().map(|h| h.office_covers(x as f32, z as f32)))
+            .unwrap_or(false)
+    });
+    // `cap_open_office()`: look in at the Deeds Office. Sent next frame.
+    let office = shared.open_office.clone();
+    engine.register_fn("cap_open_office", move || office.store(true, Ordering::Relaxed));
     // `cap_hall_at(x, z) -> bool`: whether the ground point (x, z), world
     // metres, is on the hall's footprint (or a hand's width off it).
     let hall = shared.hall.clone();

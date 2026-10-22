@@ -21,7 +21,7 @@
 use std::time::{Duration, Instant};
 
 use capitol_core::onboarding::{place_in_chapter, target, Did, Target, Tour};
-use capitol_core::protocol::tutorial::{Chapter, Step, Steps, TutorialProgress};
+use capitol_core::protocol::tutorial::{Chapter, Grant, Step, Steps, TutorialProgress};
 use egui::{Align2, Id, RichText};
 
 use super::shortcuts::keys_row;
@@ -75,7 +75,9 @@ fn chapter_close(chapter: Chapter) -> &'static str {
         Chapter::People => {
             "You can speak to whoever's near, read anyone's card and tell a citizen by their mark. Letters wait for you while you're away."
         }
-        Chapter::DeedsOffice => "The land is yours, and on the city's books. Now make something of it.",
+        Chapter::DeedsOffice => {
+            "The land is yours, on the city's books and taxed as any deed is. The deed is spent; the room is yours to fill."
+        }
         Chapter::SettleIn => CLOSING.1,
     }
 }
@@ -233,13 +235,13 @@ fn words(step: Step) -> (&'static str, &'static str, &'static str) {
         // The Deeds Office
         Step::OpenOffice => (
             "The Deeds Office",
-            "Beside the hall, a desk under an awning sets the zones side by side. Look in.",
+            "The road has earned you a deed. It waits at the desk under the red awning, beside the Gazette's board, where the zones are set side by side.",
             "[Click] the desk",
         ),
         Step::ClaimHome => (
-            "A home",
-            "Choose a lot in any home zone and claim it. The road has earned you its deed.",
-            "[Alt] + [Click] a lot",
+            "Choose a home",
+            "Any free lot in the three rings is yours for the deed. \"Show me\" marks one to walk out and see; claim it at the desk, or from the lot's own panel.",
+            "[Alt] + [Click] a lot  ·  Claim with your deed",
         ),
         // Settle in
         Step::PlaceAtHome => (
@@ -323,17 +325,22 @@ const HERE: f32 = 6.0;
 /// ([#484](https://github.com/chrischaps/TheCapitol/issues/484)).
 const NOBODY_NEAR: &str = "Nobody in sight. A name in the Gazette opens a card too.";
 
+/// How far, as the card says it: "15 m", "370 m", "1.2 km".
+pub fn far(metres: f32) -> String {
+    if metres >= 1000.0 {
+        format!("{:.1} km", metres / 1000.0)
+    } else {
+        let to = if metres < 100.0 { 5.0 } else { 10.0 };
+        format!("{} m", ((metres / to).round() * to) as i32)
+    }
+}
+
 /// The card's line on where to go.
 fn lead_words(lead: Lead) -> String {
     if lead.metres < HERE {
         return "Here, ringed in gold".to_owned();
     }
-    let far = if lead.metres >= 1000.0 {
-        format!("{:.1} km", lead.metres / 1000.0)
-    } else {
-        let to = if lead.metres < 100.0 { 5.0 } else { 10.0 };
-        format!("{} m", ((lead.metres / to).round() * to) as i32)
-    };
+    let far = far(lead.metres);
     match lead.off_screen {
         Some(_) => format!("{far} that way"),
         None => format!("{far} off, ringed in gold"),
@@ -449,6 +456,22 @@ impl Hints {
         self.sample_close = which
             .strip_suffix("-done")
             .and_then(|key| Chapter::ALL.into_iter().find(|c| chapter_key(*c) == key));
+    }
+
+    /// The tour as the server last said, if it has.
+    pub fn progress(&self) -> Option<TutorialProgress> {
+        self.tour.map(Tour::progress)
+    }
+
+    /// The step whose card is up, shown and not yet done: what the card
+    /// may lead to, when the extension has a place for it that
+    /// `onboarding::target` can't name (the lot the Deeds Office showed
+    /// you, #448).
+    pub fn leading(&self) -> Option<Step> {
+        match self.card {
+            Some(Card::Step(step, _)) if !self.is_hidden() => Some(step),
+            _ => None,
+        }
     }
 
     /// Where the card at hand leads, if anywhere: only a step's card, shown,
@@ -861,7 +884,7 @@ fn up_to(step: Step) -> Steps {
 /// `<chapter>-done` (`arrival-done`) stands it just past that chapter,
 /// for its close ([`Hints::with_sample`]).
 pub fn sample(which: &str) -> TutorialProgress {
-    let at = |done| TutorialProgress { done, dismissed: false };
+    let at = |done: Steps| TutorialProgress { done, dismissed: false, grant: Grant::Unearned.after(done) };
     let chapter = |key: &str| Chapter::ALL.into_iter().find(|c| chapter_key(*c) == key);
     let first = |c: Chapter| c.steps().next().expect("a chapter has steps");
     if let Some(step) = Step::from_name(which) {
@@ -880,7 +903,7 @@ pub fn sample(which: &str) -> TutorialProgress {
     match which {
         "collect_box-empty" => at(up_to(Step::CollectBox)),
         "half" => at(half),
-        "hidden" | "help" => TutorialProgress { done: half, dismissed: true },
+        "hidden" | "help" => TutorialProgress { done: half, dismissed: true, ..Default::default() },
         _ => TutorialProgress::default(),
     }
 }
@@ -890,7 +913,7 @@ mod tests {
     use super::*;
 
     fn tour(done: &[Step]) -> Tour {
-        Tour::from(TutorialProgress { done: done.iter().copied().collect(), dismissed: false })
+        Tour::from(TutorialProgress { done: done.iter().copied().collect(), dismissed: false, ..Default::default() })
     }
 
     #[test]
@@ -1072,7 +1095,7 @@ mod tests {
         assert!(hints.hidden().is_some(), "once agreed, the server's word is the word");
 
         // A finished tour has nothing to hide
-        hints.follow(Some(TutorialProgress { done: Steps::every(), dismissed: true }));
+        hints.follow(Some(TutorialProgress { done: Steps::every(), dismissed: true, ..Default::default() }));
         assert_eq!(hints.hidden(), None);
     }
 
@@ -1083,7 +1106,7 @@ mod tests {
         hints.follow(Some(TutorialProgress::default()));
         assert_eq!(hints.saw(Did::UsedInventory), Some(Step::OpenPack));
         assert_eq!(hints.saw(Did::OpenedCrafting), None, "already on its way");
-        hints.follow(Some(TutorialProgress { done: Steps::from_iter([Step::OpenPack]), dismissed: false }));
+        hints.follow(Some(TutorialProgress { done: Steps::from_iter([Step::OpenPack]), dismissed: false, ..Default::default() }));
         assert_eq!(hints.saw(Did::UsedInventory), None, "done");
         // Signed out and in again: told afresh
         hints.follow(None);

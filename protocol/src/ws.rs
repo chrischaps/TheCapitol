@@ -800,6 +800,10 @@ pub enum ServerMessage {
         /// The card is hidden for now, on every device
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         dismissed: bool,
+        /// The deed the road in earns (#448), left out while unearned. Sent
+        /// again when a claim spends it.
+        #[serde(default, skip_serializing_if = "crate::tutorial::Grant::is_unearned")]
+        grant: crate::tutorial::Grant,
     },
     /// You did `step` (#439), to each of your sockets. `done` is every step
     /// done now; when it holds them all, the tour is finished.

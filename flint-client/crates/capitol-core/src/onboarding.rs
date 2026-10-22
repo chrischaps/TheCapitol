@@ -36,6 +36,8 @@ pub enum Did {
     OpenedCrafting,
     /// Opened a zone card (#444).
     ReadZoneCard,
+    /// Looked in at the Deeds Office (#448).
+    OpenedOffice,
 }
 
 impl Did {
@@ -44,6 +46,7 @@ impl Did {
         match self {
             Did::UsedInventory | Did::OpenedCrafting => Step::OpenPack,
             Did::ReadZoneCard => Step::ReadZoneCard,
+            Did::OpenedOffice => Step::OpenOffice,
         }
     }
 }
@@ -117,6 +120,8 @@ pub enum Target {
     /// Someone else: the nearest person or citizen in sight
     /// ([`nearest_person`], #447). Nobody near, it leads nowhere.
     Person,
+    /// The Deeds Office's desk, in the hall's forecourt (#448).
+    Office,
 }
 
 /// Where `step` leads, if anywhere. A gather leads to the nodes the server
@@ -139,6 +144,9 @@ pub fn target(step: Step) -> Option<Target> {
         Step::VisitStall => Target::Stall,
         Step::ReadGazette => Target::Board,
         Step::OpenCard => Target::Person,
+        // The claim leads to the lot the office showed you, if any: the
+        // client's to say (#448)
+        Step::OpenOffice => Target::Office,
         _ => return None,
     })
 }
@@ -189,7 +197,7 @@ mod tests {
     use capitol_protocol::tutorial::{Chapter, Steps};
 
     fn tour(done: &[Step], dismissed: bool) -> Tour {
-        Tour::from(TutorialProgress { done: done.iter().copied().collect(), dismissed })
+        Tour::from(TutorialProgress { done: done.iter().copied().collect(), dismissed, ..Default::default() })
     }
 
     #[test]
@@ -214,7 +222,7 @@ mod tests {
         assert!(hidden.hidden());
         assert_eq!(hidden.current(), Some(Step::GatherGrass), "the tour waits");
         // Finished, there's nothing to hide
-        let done = Tour::from(TutorialProgress { done: Steps::every(), dismissed: true });
+        let done = Tour::from(TutorialProgress { done: Steps::every(), dismissed: true, ..Default::default() });
         assert!(done.finished() && !done.hidden());
         assert_eq!(done.current(), None);
     }
@@ -233,7 +241,7 @@ mod tests {
     /// the client never reports one it judges
     #[test]
     fn every_report_is_one_the_server_takes() {
-        for did in [Did::UsedInventory, Did::OpenedCrafting, Did::ReadZoneCard] {
+        for did in [Did::UsedInventory, Did::OpenedCrafting, Did::ReadZoneCard, Did::OpenedOffice] {
             assert!(did.step().judge().client_reports(), "{did:?}");
         }
     }
@@ -262,6 +270,9 @@ mod tests {
             assert_eq!(target(step), Some(Target::Hall), "{step:?}");
         }
         assert_eq!(target(Step::ReadGazette), Some(Target::Board));
+        // The Deeds Office's desk; the claim's lot is the one it showed you
+        assert_eq!(target(Step::OpenOffice), Some(Target::Office));
+        assert_eq!(target(Step::ClaimHome), None);
     }
 
     /// Each stop of the road in leads to its zone's lot, and the zone card,

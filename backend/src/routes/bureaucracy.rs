@@ -1,9 +1,12 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     routing::get,
     Json, Router,
 };
-use capitol_protocol::rest::{DeedPrice, DeedPricesResponse, ZoneFactsResponse, ZonesResponse};
+use capitol_protocol::rest::{
+    DeedPrice, DeedPricesResponse, FreeLotsQuery, FreeLotsResponse, ZoneFactsResponse, ZonesResponse,
+};
+use capitol_protocol::rules::Zone;
 
 use crate::error::AppError;
 use crate::models::ZoneInfo;
@@ -14,6 +17,7 @@ pub fn router(_state: AppState) -> Router<AppState> {
         .route("/zones", get(get_zones))
         .route("/deed-prices", get(get_deed_prices))
         .route("/zone-facts", get(get_zone_facts))
+        .route("/free-lots", get(get_free_lots))
 }
 
 /// Get all zone definitions
@@ -98,4 +102,31 @@ pub async fn get_deed_prices(
 )]
 pub async fn get_zone_facts(State(state): State<AppState>) -> Result<Json<ZoneFactsResponse>, AppError> {
     Ok(Json(ZoneFactsResponse { zones: crate::engine::zone_facts::facts(&state).await? }))
+}
+
+/// The lots free in one home zone (the Deeds Office, #448)
+///
+/// Every unclaimed lot in `zone`, nearest the Exchange hall first, with the
+/// stations it fits (capped by its capacity, as the zone card counts them)
+/// and its straight walk to the hall's door. Which lots are free is read
+/// live; the room and the walk are worked out once for each world.
+#[utoipa::path(
+    get,
+    path = "/bureaucracy/free-lots",
+    params(FreeLotsQuery),
+    responses(
+        (status = 200, description = "The zone's free lots, nearest the hall first", body = FreeLotsResponse),
+        (status = 400, description = "Not a home zone")
+    ),
+    tag = "Bureaucracy"
+)]
+pub async fn get_free_lots(
+    State(state): State<AppState>,
+    Query(query): Query<FreeLotsQuery>,
+) -> Result<Json<FreeLotsResponse>, AppError> {
+    let zone = Zone::from_str(&query.zone)
+        .filter(|z| crate::engine::zone_facts::HOME_ZONES.contains(z))
+        .ok_or_else(|| AppError::BadRequest("Lots are listed for the urban, suburban and rural zones".into()))?;
+    let lots = crate::engine::zone_facts::free_lots(&state, zone).await?;
+    Ok(Json(FreeLotsResponse { zone_id: zone.as_str().to_owned(), lots }))
 }

@@ -66,6 +66,14 @@ const RIGHT_CLICK_SLOP: f64 = 6.0;
 /// on screen, in points (#442). Nearer the edge, the card's arrow points.
 const LEAD_MARGIN: f32 = 32.0;
 
+/// `--deeds-sample` (#448): the Deeds Office offline, on the zone card's
+/// sample facts, a sample register and a deed.
+struct DeedsSample {
+    facts: Vec<capitol_core::protocol::rest::ZoneFacts>,
+    lots: capitol_core::protocol::rest::FreeLotsResponse,
+    grant: capitol_core::protocol::tutorial::Grant,
+}
+
 
 /// `--citizen-sample stroll` (#346), once the camera settled: where it
 /// looked, where it stood, the street there (#349) and when.
@@ -131,6 +139,14 @@ pub struct CapitolExtension {
     /// The zone card (#444), and `--zone-card-sample`'s facts offline
     zone_card: ui::zone_card::ZoneCard,
     zone_card_sample: Option<Vec<capitol_core::protocol::rest::ZoneFacts>>,
+    /// The Deeds Office's panel (#448), the lot it showed you (ringed on the
+    /// ground until you claim it or stop), and that lot's header chip this
+    /// frame while the road in's card isn't pointing to it
+    deeds: ui::deeds::DeedsOffice,
+    shown_lot: Option<ui::deeds::Shown>,
+    shown_chip: Option<ui::hud::ShownLot>,
+    /// `--deeds-sample`: the facts, a register and the deed, offline
+    deeds_sample: Option<DeedsSample>,
     atmosphere: Atmosphere,
     /// `--time-of-day`: the hour pinned, 0..1 from midnight, in place of
     /// the server's clock (P8.6a).
@@ -269,6 +285,10 @@ impl CapitolExtension {
             plot_panel: ui::plot::PlotPanel::default(),
             zone_card: ui::zone_card::ZoneCard::default(),
             zone_card_sample: None,
+            deeds: ui::deeds::DeedsOffice::default(),
+            shown_lot: None,
+            shown_chip: None,
+            deeds_sample: None,
             atmosphere: Atmosphere::default(),
             time_of_day: None,
             icons: ItemIcons::load(std::path::Path::new(ItemIcons::DIR)),
@@ -499,6 +519,43 @@ impl CapitolExtension {
         self
     }
 
+    /// Offline, open the Deeds Office (#448) on sample facts and a sample
+    /// register (`--deeds-sample`): `compare` (the default), `lots` (the
+    /// farms, the deed open), `shown` (the first farm shown on the ground),
+    /// `unearned`, `spent` or `confirm` (the claim asked once).
+    pub fn with_deeds_sample(mut self, which: Option<&str>) -> Self {
+        use capitol_core::protocol::tutorial::Grant;
+        if let (Some(which), None) = (which, &self.session) {
+            let grant = match which {
+                "unearned" => Grant::Unearned,
+                "spent" => Grant::Spent,
+                _ => Grant::Open,
+            };
+            let lots = ui::deeds::sample_lots(rules::Zone::Rural);
+            // Shown, you've left the office to walk out and look: its chip
+            match which {
+                "shown" => {}
+                "lots" | "spent" | "confirm" => self.deeds.open_on(rules::Zone::Rural),
+                _ => self.deeds.open(),
+            }
+            if which == "confirm" {
+                self.deeds.ask_to_claim(lots.lots[0].plot_id);
+            }
+            if which == "shown" {
+                let first = &lots.lots[0];
+                self.shown_lot = Some(ui::deeds::Shown {
+                    terrain_id: first.terrain_id.clone(),
+                    plot_id: first.plot_id,
+                    zone: rules::Zone::Rural,
+                    x: first.x,
+                    y: first.y,
+                });
+            }
+            self.deeds_sample = Some(DeedsSample { facts: ui::zone_card::sample(), lots, grant });
+        }
+        self
+    }
+
     /// Offline, open the Gazette on the protocol's sample edition
     /// (`--gazette-sample`).
     pub fn with_gazette_sample(mut self, on: bool) -> Self {
@@ -700,6 +757,7 @@ impl CapitolExtension {
             (None, Some(reader)) => reader.unread(),
             _ => false,
         };
+        let (office, office_top) = site.office();
         Some(script_api::HallMark {
             corners: hall.corners.map(world),
             door: site.door(),
@@ -711,6 +769,50 @@ impl CapitolExtension {
             board_top,
             news,
             reading: self.gazette.open,
+            office,
+            office_top,
+            deed_waits: self.grant().is_open(),
+            office_open: self.deeds.is_open(),
+        })
+    }
+
+    /// Where the deed the road in earns stands (#448): the server's, or a
+    /// sample's offline.
+    fn grant(&self) -> capitol_core::protocol::tutorial::Grant {
+        match (&self.session, &self.deeds_sample) {
+            (Some(session), _) => session.state().tutorial().map(|t| t.grant).unwrap_or_default(),
+            (None, Some(sample)) => sample.grant,
+            // `--hints-sample`'s tour, earned as the server would have it
+            (None, None) => self.hints.progress().map(|t| t.grant).unwrap_or_default(),
+        }
+    }
+
+    /// Look in at the Deeds Office (#448): its panel on the zones side by
+    /// side, with the facts asked for afresh. Opening it is the road in's
+    /// office step, and the comparison is the zone card's.
+    fn open_office(&mut self) {
+        self.deeds.open();
+        if let Some(session) = &mut self.session {
+            session.ask_zone_facts();
+            for did in [Did::OpenedOffice, Did::ReadZoneCard] {
+                if let Some(step) = self.hints.saw(did) {
+                    session.tutorial_seen(step);
+                }
+            }
+        }
+    }
+
+    /// The lot the Deeds Office showed you, as the road in's ring marks it:
+    /// its edge traced, or a ring at its middle if it isn't drawn.
+    fn shown_mark(&self) -> Option<script_api::LeadMark> {
+        let shown = self.shown_lot.as_ref()?;
+        Some(match self.lots.get(&shown.terrain_id).filter(|l| !l.outline.is_empty()) {
+            Some(lot) => lot_mark(lot),
+            None => script_api::LeadMark {
+                at: crate::coords::to_world(shown.x, shown.y),
+                radius: 2.5,
+                outline: Vec::new(),
+            },
         })
     }
 
@@ -718,19 +820,26 @@ impl CapitolExtension {
     /// find (#442), and where you stand, both world metres. A node is the
     /// nearest live one of its kinds, a lot its zone's stop on the road in
     /// ([`Self::road_stop`]), a stall the counter of the nearest someone
-    /// keeps (or the nearest), the board the Gazette's notice board.
-    /// Offline with `--hints-sample`, you stand at
+    /// keeps (or the nearest), the board the Gazette's notice board, the
+    /// office the paving before its desk. Where the card leads nowhere of
+    /// its own, it's the lot the Deeds Office showed you (#448), if any.
+    /// Offline with `--hints-sample` or `--deeds-sample`, you stand at
     /// `camera_target`. Call after the hall's and the bazaar's marks are
     /// set this frame.
     fn lead_mark(&self, camera_target: [f32; 2]) -> Option<(script_api::LeadMark, [f32; 2])> {
-        let target = self.hints.target()?;
         let you = match &self.session {
             Some(session) => {
                 let p = session.state().local_player()?;
                 crate::coords::to_world(p.x, p.y)
             }
-            None if self.hints_sample => camera_target,
+            None if self.hints_sample || self.deeds_sample.is_some() => camera_target,
             None => return None,
+        };
+        // The lot the Deeds Office showed you (#448), wherever the card
+        // leads nowhere of its own: the claim's step, or no card at all
+        let target = match self.hints.target() {
+            Some(target) => target,
+            None => return self.shown_mark().map(|mark| (mark, you)),
         };
         let from = crate::coords::to_server(you[0], you[1]);
         let ring = |at, radius| script_api::LeadMark {
@@ -820,6 +929,8 @@ impl CapitolExtension {
                     .and_then(|p| p.iter().find(|l| l.id == person.id).map(|l| [l.at[0], l.at[2]]));
                 ring(drawn.unwrap_or(crate::coords::to_world(person.x, person.y)), 0.9)
             }
+            // Out on the paving before the desk, where you'd be served
+            Target::Office => ring(self.hall.site()?.office_front(), 1.1),
         };
         Some((mark, you))
     }
@@ -1088,6 +1199,10 @@ impl PlayerExtension for CapitolExtension {
         if self.shared.read_gazette.swap(false, Ordering::Relaxed) {
             self.gazette.open = true;
         }
+        // The Deeds Office (#448): a click on its desk, from anywhere (D8)
+        if self.shared.open_office.swap(false, Ordering::Relaxed) {
+            self.open_office();
+        }
         // Letters (S1.5): L
         if !self.at_login() && ctx.input.is_action_just_pressed("mail") {
             self.mail.toggle();
@@ -1158,7 +1273,12 @@ impl PlayerExtension for CapitolExtension {
             if let Some(step) = self.hints.waive(now) {
                 session.tutorial_seen(step);
             }
-            plots(ctx, session, &self.shared, &self.lots, &mut self.sound);
+            if plots(ctx, session, &self.shared, &self.lots, &mut self.sound) {
+                // The deed is spent (#448): the office steps aside for the
+                // gold rings, and the lot it showed is yours now or let go
+                self.deeds.close();
+                self.shown_lot = None;
+            }
             // Signed out, the store is empty, so everyone fades away.
             let (poses, state) = session.sample(now);
             let dt = ctx.clock.delta_time.min(0.1) as f32;
@@ -1462,7 +1582,12 @@ impl PlayerExtension for CapitolExtension {
         // `input.rhai` while it's on screen, pointed to from the card while
         // it isn't.
         let found = self.lead_mark([camera.target.x, camera.target.z]);
-        self.lead = found.as_ref().map(|(mark, you)| {
+        // The card speaks of its own step's place, and of the shown lot
+        // only on the claim's step (#448): any other step's card would
+        // send you there for the wrong reason
+        let card_leads = self.hints.target().is_some()
+            || self.hints.leading() == Some(capitol_core::protocol::tutorial::Step::ClaimHome);
+        self.lead = found.as_ref().filter(|_| card_leads).map(|(mark, you)| {
             let [x, z] = mark.at;
             let metres = (x - you[0]).hypot(z - you[1]);
             let on_screen = self.shared.projector.as_ref().is_some_and(|p| {
@@ -1482,6 +1607,21 @@ impl PlayerExtension for CapitolExtension {
             let taken = matches!(self.hints.target(), Some(Target::Lot(zone))
                 if self.road_stop(zone).is_some_and(|s| s.taken));
             ui::hints::Lead { metres, off_screen, taken }
+        });
+        // The shown lot's chip (#448), unless the card's claim step is
+        // pointing to it already
+        self.shown_chip = self.shown_lot.as_ref().filter(|_| self.hints.leading() != Some(capitol_core::protocol::tutorial::Step::ClaimHome)).and_then(|shown| {
+            let you = found.as_ref().map(|(_, you)| *you).or_else(|| {
+                let p = self.session.as_ref()?.state().local_player()?;
+                Some(crate::coords::to_world(p.x, p.y))
+            })?;
+            let [x, z] = crate::coords::to_world(shown.x, shown.y);
+            let noun = capitol_core::deeds::home_noun(shown.zone);
+            Some(ui::hud::ShownLot {
+                what: format!("A {noun}"),
+                far: Some((x - you[0]).hypot(z - you[1])).filter(|m| *m >= 6.0).map_or_else(|| "here".to_owned(), ui::hints::far),
+                angle: ui::hud::bearing(camera.position.to_array(), camera.target.to_array(), [x, 0.0, z]),
+            })
         });
         if let Ok(mut shared) = self.shared.lead.lock() {
             *shared = found.map(|(mark, _)| mark);
@@ -1680,6 +1820,7 @@ impl PlayerExtension for CapitolExtension {
                     mail_unread: session.mail().unread(),
                     help_open: self.shortcuts.open,
                     road_in: self.hints.hidden(),
+                    shown_lot: self.shown_chip.clone(),
                     settings_open: self.settings_panel.open,
                     inventory_pulse: pulse,
                     hall_hint: self.hall_hint,
@@ -1704,6 +1845,9 @@ impl PlayerExtension for CapitolExtension {
                 if clicks.road_in {
                     self.hints.bring_back();
                     session.set_tutorial_dismissed(false);
+                }
+                if let (true, Some(shown)) = (clicks.shown_lot, &self.shown_lot) {
+                    session.move_to(Instant::now(), shown.x, shown.y);
                 }
                 if clicks.exchange {
                     self.exchange.toggle();
@@ -1987,7 +2131,7 @@ impl PlayerExtension for CapitolExtension {
                 // The settings panel takes the hint card's corner, and the
                 // Gazette and the letters the middle of the screen; the card
                 // waits behind them rather than showing through.
-                if self.settings_panel.open || self.gazette.open || self.mail.open || self.zone_card.is_open() {
+                if self.settings_panel.open || self.gazette.open || self.mail.open || self.zone_card.is_open() || self.deeds.is_open() {
                     self.hints.rect = None;
                 } else {
                     // The inventory's and the station's rects are last frame's: they're drawn after.
@@ -2013,10 +2157,14 @@ impl PlayerExtension for CapitolExtension {
                     refused: session
                         .claim_refused(now)
                         .or_else(|| session.pay_refused(now)),
+                    deed: picked.map_or(capitol_core::deeds::DeedOffer::None, |p| {
+                        capitol_core::deeds::offer(p, state.tutorial())
+                    }),
                 };
                 let beside = self.chat.rect.filter(|_| self.chat.open).or(self.crafting.rect);
                 match self.plot_panel.show(ctx, &view, beside) {
                     Some(ui::plot::Action::Claim(id)) => session.claim_plot(id),
+                    Some(ui::plot::Action::ClaimWithDeed(id)) => session.claim_with_grant(id),
                     Some(ui::plot::Action::PayTax(id, amount)) => session.pay_tax(id, amount),
                     Some(ui::plot::Action::AboutZone(zone)) => {
                         self.zone_card.open_one(&zone);
@@ -2031,6 +2179,23 @@ impl PlayerExtension for CapitolExtension {
                 // The zone card (#444), over the plot panel that opened it
                 let facts = session.state().zone_facts().map(|f| f.zones.as_slice());
                 let _ = self.zone_card.show(ctx, facts);
+                // The Deeds Office (#448)
+                let state = session.state();
+                let view = ui::deeds::View {
+                    facts: state.zone_facts().map(|f| f.zones.as_slice()),
+                    lots: state.free_lots(),
+                    grant: state.tutorial().map(|t| t.grant).unwrap_or_default(),
+                    shown: self.shown_lot.as_ref().map(|s| s.terrain_id.as_str()),
+                    claiming: session.claiming(),
+                    refused: session.claim_refused(now),
+                };
+                match self.deeds.show(ctx, &view) {
+                    Some(ui::deeds::Action::List(zone)) => session.ask_free_lots(zone.as_str()),
+                    Some(ui::deeds::Action::ShowMe(shown)) => self.shown_lot = Some(shown),
+                    Some(ui::deeds::Action::StopShowing) => self.shown_lot = None,
+                    Some(ui::deeds::Action::Claim(id)) => session.claim_with_grant(id),
+                    Some(ui::deeds::Action::Close) | None => {}
+                }
                 let view = ui::station::View {
                     state: session.state(),
                     phase: session.crafting().phase(),
@@ -2275,6 +2440,7 @@ impl PlayerExtension for CapitolExtension {
                     impound: None,
                     impound_open: false,
                     road_in: Some(hidden),
+                    shown_lot: None,
                 };
                 ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
             }
@@ -2290,6 +2456,50 @@ impl PlayerExtension for CapitolExtension {
         }
         if let Some(facts) = &self.zone_card_sample {
             let _ = self.zone_card.show(ctx, Some(facts));
+        }
+        if let Some(sample) = &self.deeds_sample {
+            let view = ui::deeds::View {
+                facts: Some(&sample.facts),
+                lots: Some(&sample.lots),
+                grant: sample.grant,
+                shown: self.shown_lot.as_ref().map(|s| s.terrain_id.as_str()),
+                claiming: false,
+                refused: None,
+            };
+            match self.deeds.show(ctx, &view) {
+                Some(ui::deeds::Action::ShowMe(shown)) => self.shown_lot = Some(shown),
+                Some(ui::deeds::Action::StopShowing) => self.shown_lot = None,
+                _ => {}
+            }
+            if let Some(lot) = &self.shown_chip {
+                let view = HeaderView {
+                    zone: None,
+                    strands: Some(100),
+                    who: "Ada Reeder",
+                    patron: None,
+                    connection: None,
+                    down: false,
+                    inventory_open: false,
+                    crafting_open: false,
+                    exchange_open: false,
+                    market_open: false,
+                    gazette_open: false,
+                    gazette_news: None,
+                    chat_open: false,
+                    chat_unread: 0,
+                    mail_open: false,
+                    mail_unread: 0,
+                    help_open: false,
+                    settings_open: false,
+                    inventory_pulse: 0.0,
+                    hall_hint: None,
+                    impound: None,
+                    impound_open: false,
+                    road_in: None,
+                    shown_lot: Some(lot.clone()),
+                };
+                ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
+            }
         }
         if let Some((mail, view)) = &mut self.mail_sample {
             let _ = self.mail.show(ctx, mail, view);
@@ -2810,13 +3020,16 @@ fn crafted(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::S
 /// `plot_claimed` with the claimed plot's middle (`x`, `z`, world metres)
 /// and about how far it reaches from there (`r`, metres), and `plot_note`
 /// with a `title` and `body` when a pick found nothing.
+/// The plot panel's pick, its outline, and the claims just made: their
+/// rings and toasts. True if the road in's deed paid for one (#448).
 fn plots(
     ctx: &mut ExtensionCtx,
     session: &mut Session,
     shared: &script_api::Shared,
     lots: &HashMap<String, Lot>,
     sound: &mut Soundscape,
-) {
+) -> bool {
+    let mut granted_any = false;
     if let Some([x, y]) = shared.pick_plot.lock().ok().and_then(|mut p| p.take()) {
         session.pick_plot(x, y);
     }
@@ -2833,7 +3046,8 @@ fn plots(
     if let Ok(mut picked) = shared.picked_plot.lock() {
         *picked = mark;
     }
-    for plot_id in session.take_claimed() {
+    for (plot_id, granted) in session.take_claimed() {
+        granted_any |= granted;
         let Some(plot) = session.state().plot(plot_id) else {
             continue;
         };
@@ -2849,6 +3063,7 @@ fn plots(
             "r".into(),
             (w.hypot(h) * 0.5 * crate::coords::S as f64).into(),
         );
+        data.insert("granted".into(), granted.into());
         ctx.fire_event("plot_claimed", data);
         sound.claimed();
     }
@@ -2938,6 +3153,19 @@ fn plots(
         data.insert("body".into(), format!("{}. {}", words.what, words.fix).into());
         tracing::info!("automation: your {name} paused: {}", words.what);
         ctx.fire_event("automation_note", data);
+    }
+    granted_any
+}
+
+/// A lot as the road in's ring marks it (#442): its edge traced, and a ring
+/// at its middle.
+fn lot_mark(lot: &Lot) -> script_api::LeadMark {
+    let n = lot.outline.len().max(1) as f64;
+    let [x, y] = lot.outline.iter().fold([0.0, 0.0], |m, p| [m[0] + p[0] / n, m[1] + p[1] / n]);
+    script_api::LeadMark {
+        at: crate::coords::to_world(x, y),
+        radius: 2.5,
+        outline: lot.outline.iter().map(|p| crate::coords::to_world(p[0], p[1])).collect(),
     }
 }
 

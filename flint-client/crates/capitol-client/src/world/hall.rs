@@ -14,11 +14,16 @@
 //!   deep blue; at dusk it lights (H23, `material.emissive_scale` on
 //!   [`LAMPS_MESH`], by the hour, as the houses' windows do), so from the
 //!   map the hall is a blue gem on the avenue;
-//! - **three market stalls** in the forecourt under striped awnings, their
-//!   counters stacked with goods, and in the fourth's place, on the side
-//!   nearer the tower, the **Gazette's notice board** (E3.9): a green
-//!   board under a little roof, the day's pages pinned to it and a lamp
-//!   over them that lights at dusk.
+//! - **two market stalls** in the forecourt under striped awnings, their
+//!   counters stacked with goods; on the side nearer the tower, the
+//!   **Gazette's notice board** (E3.9): a green board under a little roof,
+//!   the day's pages pinned to it and a lamp over them that lights at dusk;
+//!   and beside it the **Deeds Office** (#448): a clerk's desk under a
+//!   plain wax-red awning with a gold valance, its ledger open, an inkwell,
+//!   the registry's brass stamp and a stack of deeds tied for collection,
+//!   a sign with the city's seal hanging from the awning and a lamp that
+//!   lights at dusk. A desk, not a clerk: the bureaucracy has no face
+//!   (plan D1).
 //!
 //! The design is drawn for an 8 × 10 m footprint (80 × 100 server units)
 //! and scaled to the one given, so a moved or resized hall still fits it.
@@ -85,6 +90,10 @@ const CLOTH: u32 = 0xe9e1cf;
 const AWNINGS: [u32; 4] = [TRADE, 0xc9a227, 0x2f7f6f, 0x9b3b3b];
 /// The notice board's green, and its pages' paper and ink.
 const BOARD: u32 = 0x2d3b30;
+/// The Deeds Office's awning, the wax of a seal, and its desk's leather.
+const SEAL: u32 = 0x8e2b26;
+const LEATHER: u32 = 0x2f4a3a;
+const INK: u32 = 0x1d1a22;
 const PAGE: u32 = 0xf0e6cf;
 const PAGE_INK: u32 = 0x3a332a;
 /// The stalls' slots, along the front either side of the steps. The board
@@ -94,6 +103,10 @@ const SLOTS: [(f32, f32); 4] = [(-4.65, -3.7), (-3.45, -2.5), (2.5, 3.45), (3.7,
 const STALL_U: f32 = 0.55;
 /// The board's top, its roof's.
 const BOARD_TOP: f32 = PAVE + 2.25;
+/// The Deeds Office's awning, at the back, where its prompt hangs.
+const OFFICE_TOP: f32 = PAVE + 2.25;
+/// Its desk's top.
+const DESK_TOP: f32 = PAVE + 0.8;
 /// What's for sale on the counters: fiber, timber, ore, brick, rope.
 const GOODS: [u32; 5] = [0x93ae48, 0xb08a5c, 0x6b6f78, 0x9b4a32, 0xd8c08a];
 
@@ -195,14 +208,41 @@ impl Site {
         }
     }
 
+    /// The slot the Deeds Office takes (#448): the inner one beside the
+    /// board.
+    fn office_slot(&self) -> usize {
+        match self.board_slot() {
+            3 => 2,
+            _ => 1,
+        }
+    }
+
     /// The Gazette's notice board (E3.9): where a click picks it, round
     /// its slot, and the middle of its roof, world (X, Y, Z), where its
     /// prompt hangs.
     pub fn board(&self) -> ([V2; 4], [f32; 3]) {
-        let (v0, v1) = SLOTS[self.board_slot()];
+        self.slot_mark(self.board_slot(), BOARD_TOP)
+    }
+
+    /// The Deeds Office's desk (#448): where a click picks it, round its
+    /// slot, and the middle of its awning, world (X, Y, Z), where its prompt
+    /// hangs.
+    pub fn office(&self) -> ([V2; 4], [f32; 3]) {
+        self.slot_mark(self.office_slot(), OFFICE_TOP)
+    }
+
+    /// Where the desk's clerk would stand to serve you, out on the paving
+    /// before it, world metres: where the road in's ring lies.
+    pub fn office_front(&self) -> V2 {
+        let (v0, v1) = SLOTS[self.office_slot()];
+        self.at(STALL_U - 0.35, (v0 + v1) * 0.5)
+    }
+
+    fn slot_mark(&self, slot: usize, top: f32) -> ([V2; 4], [f32; 3]) {
+        let (v0, v1) = SLOTS[slot];
         let r = self.rect(STALL_U - 0.45, STALL_U + 0.45, v0, v1);
         let [x, z] = self.at(STALL_U, (v0 + v1) * 0.5);
-        ([r[0], r[1], r[2], r[3]], [x, BOARD_TOP, z])
+        ([r[0], r[1], r[2], r[3]], [x, top, z])
     }
 }
 
@@ -225,15 +265,113 @@ pub fn build(site: &Site, phase: f64) -> Hall {
     cella(&mut h, site);
     lantern(&mut h, site);
     clock(&mut h, site, phase);
-    let board = site.board_slot();
+    let (board, office) = (site.board_slot(), site.office_slot());
     for (k, &(v0, v1)) in SLOTS.iter().enumerate() {
         if k == board {
             notice_board(&mut h, site, STALL_U, v0, v1);
+        } else if k == office {
+            deeds_desk(&mut h, site, STALL_U, v0, v1);
         } else {
             stall(&mut h, site, STALL_U, v0, v1, k);
         }
     }
     h
+}
+
+/// The Deeds Office (#448): a clerk's desk under a plain wax-red awning,
+/// its front in green leather trimmed with gold; on it the ledger open, an
+/// inkwell and its pen, the registry's brass stamp, and a stack of deeds
+/// tied with red; a sign with the city's gold seal hanging from the
+/// awning's front, and a lamp beside it that lights at dusk with the hall.
+fn deeds_desk(h: &mut Hall, s: &Site, uc: f32, v0: f32, v1: f32) {
+    let timber = hex(TIMBER);
+    let mid = (v0 + v1) * 0.5;
+    // The desk: a leather-fronted body under a timber top that overhangs it
+    prism(&mut h.stone, &s.rect(uc - 0.2, uc + 0.24, v0 + 0.1, v1 - 0.1), PAVE, DESK_TOP - 0.05, hex(LEATHER), true);
+    prism(&mut h.stone, &s.rect(uc - 0.25, uc + 0.27, v0 + 0.06, v1 - 0.06), DESK_TOP - 0.05, DESK_TOP, timber, true);
+    // A gold rule along the front, under the top
+    let n = s.front();
+    let face = uc - 0.2 - 0.004;
+    let (p, q) = (s.at(face, v0 + 0.1), s.at(face, v1 - 0.1));
+    let (y0, y1) = (DESK_TOP - 0.13, DESK_TOP - 0.1);
+    h.gold.quad([lift(p, y0), lift(q, y0), lift(q, y1), lift(p, y1)], n, hex(GOLD));
+    // The ledger, open: two pale pages, a little apart, the spine between
+    let page = hex(PAGE);
+    prism(&mut h.stone, &s.rect(uc - 0.16, uc + 0.06, mid - 0.2, mid - 0.01), DESK_TOP, DESK_TOP + 0.025, page, true);
+    prism(&mut h.stone, &s.rect(uc - 0.16, uc + 0.06, mid + 0.01, mid + 0.2), DESK_TOP, DESK_TOP + 0.025, page, true);
+    prism(&mut h.stone, &s.rect(uc - 0.16, uc + 0.06, mid - 0.01, mid + 0.01), DESK_TOP, DESK_TOP + 0.015, hex(SEAL), true);
+    // Lines of the record on each page
+    for k in 0..4 {
+        let u = uc - 0.12 + 0.045 * k as f32;
+        for (a, b) in [(mid - 0.17, mid - 0.04), (mid + 0.04, mid + 0.17)] {
+            let r = s.rect(u, u + 0.012, a, b);
+            let y = DESK_TOP + 0.026;
+            h.stone.quad([lift(r[0], y), lift(r[1], y), lift(r[2], y), lift(r[3], y)], [0.0, 1.0, 0.0], hex(PAGE_INK));
+        }
+    }
+    // The inkwell and its pen, on the side away from the board
+    let side = if v1 > 0.0 { -1.0 } else { 1.0 };
+    let well_v = mid + side * 0.3;
+    prism(&mut h.stone, &square(s, uc + 0.12, well_v, 0.035), DESK_TOP, DESK_TOP + 0.07, hex(INK), true);
+    prism(&mut h.gold, &square(s, uc + 0.12, well_v, 0.012), DESK_TOP + 0.07, DESK_TOP + 0.22, hex(BRONZE), true);
+    // The registry's stamp: a brass foot and a timber handle
+    let stamp_v = mid - side * 0.3;
+    prism(&mut h.gold, &square(s, uc + 0.1, stamp_v, 0.04), DESK_TOP, DESK_TOP + 0.04, hex(GOLD), true);
+    prism(&mut h.stone, &square(s, uc + 0.1, stamp_v, 0.016), DESK_TOP + 0.04, DESK_TOP + 0.15, timber, true);
+    prism(&mut h.stone, &square(s, uc + 0.1, stamp_v, 0.028), DESK_TOP + 0.15, DESK_TOP + 0.18, timber, true);
+    // Deeds tied for collection: three, each a little smaller, with a red band
+    for k in 0..3 {
+        let half = 0.07 - 0.008 * k as f32;
+        let y = DESK_TOP + 0.03 * k as f32;
+        prism(&mut h.stone, &square(s, uc + 0.17, mid + side * 0.12, half), y, y + 0.028, hex(0xe6d9b8), true);
+    }
+    prism(&mut h.stone, &s.rect(uc + 0.16, uc + 0.18, mid + side * 0.12 - 0.075, mid + side * 0.12 + 0.075), DESK_TOP + 0.085, DESK_TOP + 0.095, hex(SEAL), true);
+    // The posts, low at the front and high at the back, as a stall's are
+    let (front, back) = (PAVE + 1.95, OFFICE_TOP);
+    for (u, v) in [(uc - 0.4, v0), (uc - 0.4, v1), (uc + 0.4, v0), (uc + 0.4, v1)] {
+        let top = if u < uc { front } else { back };
+        prism(&mut h.stone, &square(s, u, v, 0.03), PAVE, top, timber, false);
+    }
+    // The awning: one plain cloth of the seal's red, both faces, with a gold
+    // valance off its front edge
+    let (ua, ub) = (uc - 0.55, uc + 0.45);
+    let ya = front - 0.05;
+    let red = hex(SEAL);
+    let corners = [lift(s.at(ua, v0), ya), lift(s.at(ub, v0), back), lift(s.at(ub, v1), back), lift(s.at(ua, v1), ya)];
+    let normal = slope_normal(corners);
+    h.stone.quad(corners, normal, red);
+    h.stone.quad(corners, normal.map(|x| -x), mix(red, [0.0, 0.0, 0.0, 1.0], 0.3));
+    let drop = [lift(s.at(ua, v0), ya), lift(s.at(ua, v1), ya), lift(s.at(ua, v1), ya - 0.12), lift(s.at(ua, v0), ya - 0.12)];
+    h.gold.quad(drop, s.front(), hex(GOLD));
+    h.gold.quad(drop, s.front().map(|x| -x), hex(GOLD));
+    // The sign, hanging under the valance on two cords: a dark board with
+    // the city's seal in gold on both faces
+    let su = ua + 0.03;
+    let (sy0, sy1) = (ya - 0.5, ya - 0.2);
+    for v in [mid - 0.14, mid + 0.14] {
+        prism(&mut h.gold, &square(s, su, v, 0.006), sy1, ya - 0.12, hex(BRONZE), false);
+    }
+    prism(&mut h.stone, &s.rect(su - 0.015, su + 0.015, mid - 0.2, mid + 0.2), sy0, sy1, hex(BOARD), true);
+    let seal = |h: &mut Hall, u: f32, normal: [f32; 3]| {
+        let c = lift(s.at(u, mid), (sy0 + sy1) * 0.5);
+        // Round and closed: the fan winds each piece to face `normal`
+        let rim: Vec<[f32; 3]> = (0..=12)
+            .map(|k| {
+                let t = k as f32 / 12.0 * std::f32::consts::TAU;
+                let p = s.at(u, mid + 0.1 * t.cos());
+                lift(p, c[1] + 0.1 * t.sin())
+            })
+            .collect();
+        h.gold.fan(c, &rim, normal, hex(GOLD));
+    };
+    seal(h, su - 0.017, s.front());
+    seal(h, su + 0.017, s.front().map(|x| -x));
+    // The lamp, at the awning's corner on the board's side, lit at dusk
+    let lamp_v = if v1 > 0.0 { v1 - 0.1 } else { v0 + 0.1 };
+    let [x, z] = s.at(ua + 0.08, lamp_v);
+    let lamp = [[x - 0.05, z - 0.05], [x + 0.05, z - 0.05], [x + 0.05, z + 0.05], [x - 0.05, z + 0.05]];
+    prism(&mut h.light, &lamp, ya - 0.3, ya - 0.18, glow(hex(CLOCK_FACE), 1.3), true);
+    prism(&mut h.gold, &square(s, ua + 0.08, lamp_v, 0.008), ya - 0.18, ya - 0.05, hex(BRONZE), false);
 }
 
 /// The Gazette's notice board (E3.9): two posts, a green board between
@@ -957,6 +1095,24 @@ mod tests {
                 assert!(!blocks, "{name} triangle in the way to the door: {pts:?}");
             }
         }
+    }
+
+    /// The Deeds Office stands beside the board, on the footprint, and
+    /// its prompt over it (#448)
+    #[test]
+    fn the_deeds_office_stands_beside_the_board() {
+        let hall = hall();
+        let s = Site::new(&hall);
+        let ((board, _), (office, top)) = (s.board(), s.office());
+        let middle = |q: &[V2; 4]| [(q[0][0] + q[2][0]) * 0.5, (q[0][1] + q[2][1]) * 0.5];
+        let (b, o) = (middle(&board), middle(&office));
+        let apart = (b[0] - o[0]).hypot(b[1] - o[1]);
+        assert!((1.0..1.5).contains(&apart), "the next slot along: {apart} m");
+        assert!(s.board_slot().abs_diff(s.office_slot()) == 1);
+        assert!((top[0] - o[0]).abs() < 1e-4 && (top[2] - o[1]).abs() < 1e-4 && top[1] > DESK_TOP);
+        // Its front, where the ring lies, is on the paving before it
+        let [x, y] = to_server(s.office_front()[0], s.office_front()[1]);
+        assert!(hall.distance_to(x, y) < 0.05);
     }
 
     #[test]

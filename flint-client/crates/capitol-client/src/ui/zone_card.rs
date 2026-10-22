@@ -65,10 +65,59 @@ pub struct ZoneCard {
     shown: Option<Shown>,
     /// What was shown last, so it can fade out after it closes
     last: Option<Shown>,
-    /// Each zone's stations on its typical lot, packed once per lot
-    dots: HashMap<String, Dots>,
+    plans: Plans,
     /// Where it was drawn this frame, `None` while it's closed
     pub rect: Option<Rect>,
+}
+
+/// The zones' columns side by side, each with its typical lot's plan, every
+/// plan at one scale: the card's, and the Deeds Office's comparison (#448).
+/// It keeps each zone's stations on its typical lot, packed once per lot.
+#[derive(Default)]
+pub struct Plans {
+    dots: HashMap<String, Dots>,
+}
+
+/// How wide `count` columns are, with the scroll bar's gutter.
+pub fn columns_width(count: usize) -> f32 {
+    COLUMN * count as f32 + GAP * count.saturating_sub(1) as f32 + GUTTER
+}
+
+impl Plans {
+    /// `columns` side by side, scrolling in at most `room` points, every
+    /// plan at the one scale that fits the biggest of `all`.
+    pub fn show(&mut self, ui: &mut egui::Ui, id: &str, columns: &[&ZoneFacts], all: &[ZoneFacts], room: f32) {
+        let width = columns_width(columns.len());
+        let scale = plan_scale(all);
+        theme::scrolled(ui, id, room, |ui| {
+            // The full width, so the scroll bar stands in the gutter
+            ui.set_min_width(width);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
+                for f in columns {
+                    ui.vertical(|ui| {
+                        ui.set_width(COLUMN);
+                        let dots = self.dots_for(f);
+                        column(ui, f, dots, scale);
+                    });
+                }
+            });
+        });
+    }
+
+    /// The stations on `f`'s typical lot, as `sim::lot` places them.
+    fn dots_for(&mut self, f: &ZoneFacts) -> &[(f64, f64)] {
+        let want = f.stations_median.max(0) as usize;
+        let stale = self
+            .dots
+            .get(&f.zone_id)
+            .is_none_or(|(corners, dots)| *corners != f.typical_lot || dots.len() > want);
+        if stale {
+            let dots = lot::layout(f.typical_lot, want);
+            self.dots.insert(f.zone_id.clone(), (f.typical_lot, dots));
+        }
+        &self.dots[&f.zone_id].1
+    }
 }
 
 impl ZoneCard {
@@ -142,7 +191,7 @@ impl ZoneCard {
             Shown::One(_) => 1,
             Shown::Compare => 3,
         };
-        let width = COLUMN * count as f32 + GAP * (count - 1) as f32 + GUTTER;
+        let width = columns_width(count);
         ui.set_width(width);
         let mut action = None;
         ui.horizontal(|ui| {
@@ -170,22 +219,9 @@ impl ZoneCard {
             return action;
         }
         // Every plan at one scale: the biggest lot fills its box.
-        let scale = plan_scale(facts.unwrap_or_default());
         let foot = 26.0;
-        theme::scrolled(ui, "capitol_zone_card_scroll", (room - 90.0 - foot).max(160.0), |ui| {
-            // The full width, so the scroll bar stands in the gutter
-            ui.set_min_width(width);
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = GAP;
-                for f in &columns {
-                    ui.vertical(|ui| {
-                        ui.set_width(COLUMN);
-                        let dots = self.dots_for(f);
-                        column(ui, f, dots, scale);
-                    });
-                }
-            });
-        });
+        let all = facts.unwrap_or_default();
+        self.plans.show(ui, "capitol_zone_card_scroll", &columns, all, (room - 90.0 - foot).max(160.0));
         ui.add_space(6.0);
         theme::divider(ui);
         ui.add_space(4.0);
@@ -201,19 +237,6 @@ impl ZoneCard {
         action
     }
 
-    /// The stations on `f`'s typical lot, as `sim::lot` places them.
-    fn dots_for(&mut self, f: &ZoneFacts) -> &[(f64, f64)] {
-        let want = f.stations_median.max(0) as usize;
-        let stale = self
-            .dots
-            .get(&f.zone_id)
-            .is_none_or(|(corners, dots)| *corners != f.typical_lot || dots.len() > want);
-        if stale {
-            let dots = lot::layout(f.typical_lot, want);
-            self.dots.insert(f.zone_id.clone(), (f.typical_lot, dots));
-        }
-        &self.dots[&f.zone_id].1
-    }
 }
 
 /// Points of the plan per world unit, so the biggest typical lot of `all`,
@@ -475,7 +498,7 @@ mod tests {
     fn the_dots_are_the_stations_a_typical_lot_fits() {
         let mut card = ZoneCard::default();
         for f in sample() {
-            let dots = card.dots_for(&f).len();
+            let dots = card.plans.dots_for(&f).len();
             assert_eq!(dots as i32, f.stations_median, "{}", f.zone_id);
         }
     }

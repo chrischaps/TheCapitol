@@ -21,7 +21,7 @@
 
 use capitol_protocol::rules::market::OrderSide;
 use capitol_protocol::rules::Zone;
-use capitol_protocol::tutorial::{Chapter, Step, Steps, TutorialProgress};
+use capitol_protocol::tutorial::{Chapter, Grant, Step, Steps, TutorialProgress};
 use capitol_protocol::ws::{Channel, ServerMessage};
 use sqlx::PgPool;
 use std::collections::HashSet;
@@ -37,17 +37,37 @@ fn every() -> i64 {
 }
 
 fn progress_of(steps: i64, dismissed: bool) -> TutorialProgress {
-    TutorialProgress { done: Steps::from_bits(steps as u64), dismissed }
+    TutorialProgress { done: Steps::from_bits(steps as u64), dismissed, ..Default::default() }
 }
 
-/// Where `player` is on the road in.
+/// Where `player` is on the road in, their deed grant with it (#448).
 pub async fn progress(db: &PgPool, player: Uuid) -> Result<TutorialProgress, sqlx::Error> {
     let row: Option<(i64, bool)> =
         sqlx::query_as("SELECT steps, dismissed FROM tutorial_progress WHERE player_id = $1")
             .bind(player)
             .fetch_optional(db)
             .await?;
-    Ok(row.map(|(steps, dismissed)| progress_of(steps, dismissed)).unwrap_or_default())
+    let progress = row.map(|(steps, dismissed)| progress_of(steps, dismissed)).unwrap_or_default();
+    with_grant(db, player, progress).await
+}
+
+/// `progress` with `player`'s deed grant as it stands: open or spent from
+/// its row, and open with none when the steps have earned it, as a claim
+/// would open it then (`deed_grants::take_in`).
+async fn with_grant(db: &PgPool, player: Uuid, progress: TutorialProgress) -> Result<TutorialProgress, sqlx::Error> {
+    let used: Option<bool> = sqlx::query_scalar(
+        "SELECT g.used_at IS NOT NULL FROM deed_grants g JOIN players p ON p.account_id = g.account_id
+         WHERE p.id = $1",
+    )
+    .bind(player)
+    .fetch_optional(db)
+    .await?;
+    let grant = match used {
+        Some(true) => Grant::Spent,
+        Some(false) => Grant::Open,
+        None => Grant::Unearned.after(progress.done),
+    };
+    Ok(TutorialProgress { grant, ..progress })
 }
 
 /// `player` did `step`. The first time, it's kept, `finished_at` set if it
@@ -305,14 +325,25 @@ pub async fn set_dismissed(
     .bind(dismissed)
     .fetch_one(db)
     .await?;
-    let progress = progress_of(steps, dismissed);
+    let progress = with_grant(db, player, progress_of(steps, dismissed)).await?;
     let _ = events.send(GameEvent::Tutorial { player_id: player, message: message(progress) });
     Ok(progress)
 }
 
+/// Tell each of `player`'s sockets where they are on the road in now, as
+/// after a claim spends their deed (#448). A failure is logged.
+pub async fn tell(db: &PgPool, events: &broadcast::Sender<GameEvent>, player: Uuid) {
+    match progress(db, player).await {
+        Ok(progress) => {
+            let _ = events.send(GameEvent::Tutorial { player_id: player, message: message(progress) });
+        }
+        Err(e) => tracing::warn!("Couldn't tell {player} where they are on the road in: {e}"),
+    }
+}
+
 /// The `tutorial` message for `progress`
 pub fn message(progress: TutorialProgress) -> ServerMessage {
-    ServerMessage::Tutorial { done: progress.done, dismissed: progress.dismissed }
+    ServerMessage::Tutorial { done: progress.done, dismissed: progress.dismissed, grant: progress.grant }
 }
 
 #[cfg(test)]

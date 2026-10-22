@@ -147,6 +147,12 @@ struct Args {
     /// "suburban", "rural", or "compare" (the default) for all three
     #[arg(long, value_name = "ZONE", num_args = 0..=1, default_missing_value = "compare")]
     zone_card_sample: Option<String>,
+    /// Offline, open the Deeds Office (#448) on sample facts and a sample
+    /// register: "compare" (the default), "lots" (the farms, your deed
+    /// open), "shown" (the first farm shown on the ground), "confirm" (its
+    /// claim asked once), "unearned" or "spent"
+    #[arg(long, value_name = "PAGE", num_args = 0..=1, default_missing_value = "compare")]
+    deeds_sample: Option<String>,
     /// Offline, open a person's card (S0.3) on a sample: "citizen" (the
     /// default), "person", "muted" (the person, muted, S1.4) or "mine"
     #[arg(long, value_name = "WHO", num_args = 0..=1, default_missing_value = "citizen")]
@@ -379,6 +385,7 @@ fn main() -> Result<()> {
         .with_bazaar_sample(args.bazaar_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_gazette_sample(args.gazette_sample && args.offline.is_some())
         .with_zone_card_sample(args.zone_card_sample.as_deref().filter(|_| args.offline.is_some()))
+        .with_deeds_sample(args.deeds_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_card_sample(args.card_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_mail_sample(args.mail_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_impound_sample(args.impound_sample && args.offline.is_some())

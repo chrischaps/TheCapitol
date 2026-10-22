@@ -124,8 +124,9 @@ pub enum RestRequest {
     Plot { plot_id: Uuid },
     /// `GET /plots/at?x=&y=`
     PlotAt(PositionQuery),
-    /// `POST /plots/{id}/claim`
-    ClaimPlot { plot_id: Uuid },
+    /// `POST /plots/{id}/claim`. With `use_grant`, the deed the road in
+    /// earned pays for it, not Strands (#440, #448).
+    ClaimPlot { plot_id: Uuid, use_grant: bool },
     /// `POST /plots/{id}/pay-tax` (#138)
     PayTax {
         plot_id: Uuid,
@@ -145,6 +146,8 @@ pub enum RestRequest {
     DeedPrices,
     /// `GET /bureaucracy/zone-facts`: what living in each home zone is like (#444)
     ZoneFacts,
+    /// `GET /bureaucracy/free-lots?zone=`: the Deeds Office's list (#448)
+    FreeLots(FreeLotsQuery),
 
     /// `GET /tutorial`: where you are on the road in (#438). The game has it
     /// from the socket's `tutorial`; this is for a bot.
@@ -283,6 +286,7 @@ pub enum RestResponse {
     /// Your place on the road in, from both `GET` and `PUT`
     Tutorial(capitol_protocol::tutorial::TutorialProgress),
     ZoneFacts(ZoneFactsResponse),
+    FreeLots(FreeLotsResponse),
     Subscription(Subscription),
     Granted(GrantResponse),
     /// An order as placed, or as cancelled
@@ -436,6 +440,7 @@ impl RestRequest {
             | DeedPrices
             | Tutorial
             | ZoneFacts
+            | FreeLots(_)
             | MarketDepth(_)
             | MyOrders(_)
             | MarketHistory(_)
@@ -498,7 +503,7 @@ impl RestRequest {
             ClaimedPlots => "/plots/claimed".into(),
             Plot { plot_id } => format!("/plots/{plot_id}"),
             PlotAt(_) => "/plots/at".into(),
-            ClaimPlot { plot_id } => format!("/plots/{plot_id}/claim"),
+            ClaimPlot { plot_id, .. } => format!("/plots/{plot_id}/claim"),
             PayTax { plot_id, .. } => format!("/plots/{plot_id}/pay-tax"),
             PlotPermissions { plot_id } | UpdatePlotPermissions { plot_id, .. } => {
                 format!("/plots/{plot_id}/permissions")
@@ -508,6 +513,7 @@ impl RestRequest {
             Tutorial => "/tutorial".into(),
             SetTutorialDismissed(_) => "/tutorial/dismissed".into(),
             ZoneFacts => "/bureaucracy/zone-facts".into(),
+            FreeLots(_) => "/bureaucracy/free-lots".into(),
             Subscribe(_) => "/player/subscription".into(),
             Grant(_) => "/player/grant".into(),
             PlaceOrder(_) | MarketDepth(_) => "/market/orders".into(),
@@ -576,6 +582,9 @@ impl RestRequest {
             MarketHistory(q) => req.query(q),
             UpdatePlotPermissions { update, .. } => req.json(update),
             PayTax { request, .. } => req.json(request),
+            // No body pays in Strands, as every client did before the grant
+            ClaimPlot { use_grant: true, .. } => req.json(&ClaimPlotRequest { use_grant: true }),
+            FreeLots(q) => req.query(q),
             WorldNearby(q) => req.query(q),
             ListPlots(q) => req.query(q),
             PlotAt(q) => req.query(q),
@@ -639,6 +648,7 @@ impl RestRequest {
             Q::DeedPrices => A::DeedPrices(de(body)?),
             Q::Tutorial | Q::SetTutorialDismissed(_) => A::Tutorial(de(body)?),
             Q::ZoneFacts => A::ZoneFacts(de(body)?),
+            Q::FreeLots(_) => A::FreeLots(de(body)?),
             Q::Subscribe(_) => A::Subscription(de(body)?),
             Q::Grant(_) => A::Granted(de(body)?),
             Q::PlaceOrder(_) | Q::CancelOrder { .. } => A::Order(de(body)?),
@@ -873,7 +883,7 @@ mod tests {
                 format!("/stations/{id}/container"),
             ),
             (
-                RestRequest::ClaimPlot { plot_id: id },
+                RestRequest::ClaimPlot { plot_id: id, use_grant: false },
                 "POST",
                 format!("/plots/{id}/claim"),
             ),

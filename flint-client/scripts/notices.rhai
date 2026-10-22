@@ -108,7 +108,9 @@ fn on_event(name, data) {
         return;
     }
     if name == "plot_claimed" {
-        toasts = add_toast(toasts, "The deed is yours", "Place stations here", "good", t);
+        // Claimed with the deed the road in earned (#448): a settler's words
+        let body = if data.granted == true { "Granted for the road in, and on the city's books. Place stations here" } else { "Place stations here" };
+        toasts = add_toast(toasts, "The deed is yours", body, "good", t);
         return;
     }
     if name == "extraction_note" || name == "plot_note" || name == "placement_note"

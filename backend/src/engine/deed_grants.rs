@@ -194,8 +194,11 @@ pub(crate) mod tests {
 
         tutorial::saw(&db, &events, ada, Did::Gathered("fiber")).await;
         assert_eq!(grant_of(&db, ada).await, None, "a step short");
+        assert_eq!(tutorial::progress(&db, ada).await.unwrap().grant, capitol_protocol::tutorial::Grant::Unearned);
         tutorial::saw(&db, &events, ada, Did::Walked).await;
         assert_eq!(grant_of(&db, ada).await, Some((false, None, false)), "open, and not spent");
+        // And the client hears it open (#448)
+        assert_eq!(tutorial::progress(&db, ada).await.unwrap().grant, capitol_protocol::tutorial::Grant::Open);
         tutorial::saw(&db, &events, ada, Did::Walked).await;
         let grants: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deed_grants").fetch_one(&db).await.unwrap();
         assert_eq!(grants, 1);

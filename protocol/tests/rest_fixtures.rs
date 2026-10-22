@@ -59,7 +59,11 @@
 //! `offer_wages.json` is `POST /wages`, and `shift_ended.json` is
 //! `DELETE /wages/{id}/shift`, the employer stopping it.
 //! `fixtures/rest/tutorial.json` is `GET /tutorial` (#438): the road in
-//! walked out of order, out to the hall, the card showing.
+//! walked out of order, out to the hall, the card showing;
+//! `tutorial_granted.json` is the road walked to the Deeds Office, its deed
+//! open to spend (#448).
+//! `fixtures/rest/free_lots.json` is `GET /bureaucracy/free-lots?zone=rural`
+//! (#448): two farms, nearest the hall first.
 
 use std::fs;
 use std::path::Path;
@@ -549,4 +553,22 @@ fn the_road_in_round_trips_in_the_tours_order() {
     assert_eq!(progress.done.current(), Some(Step::SeeRuralLot));
     assert!(!progress.dismissed && !progress.finished());
     assert_eq!(serde_json::to_string(&progress).unwrap(), json);
+}
+
+#[test]
+fn the_deed_waits_at_the_office_and_its_free_lots_round_trip() {
+    use capitol_protocol::rest::FreeLotsResponse;
+    use capitol_protocol::tutorial::{Grant, Step, TutorialProgress};
+    let json = fixture("tutorial_granted.json");
+    let progress: TutorialProgress = serde_json::from_str(&json).unwrap();
+    assert!(progress.done.deed_earned());
+    assert_eq!(progress.grant, Grant::Open);
+    assert_eq!(progress.done.current(), Some(Step::ClaimHome));
+    assert_eq!(serde_json::to_string(&progress).unwrap(), json);
+
+    let json = fixture("free_lots.json");
+    let lots: FreeLotsResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(lots.zone_id, "rural");
+    assert!(lots.lots.windows(2).all(|w| w[0].walk_secs <= w[1].walk_secs), "nearest the hall first");
+    assert_eq!(serde_json::to_string(&lots).unwrap(), json);
 }

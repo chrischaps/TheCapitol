@@ -157,6 +157,21 @@ pub struct HeaderView<'a> {
     /// The road in's card is hidden for now (#441): its chip, with the
     /// chapter's pips, brings it back. `None` hides the chip.
     pub road_in: Option<super::hints::Hidden>,
+    /// A lot the Deeds Office showed you (#448), while the road in's card
+    /// isn't pointing to it: its chip, with how far and an arrow that
+    /// points the way ([`bearing`]). `None` hides it.
+    pub shown_lot: Option<ShownLot>,
+}
+
+/// A lot the Deeds Office marked on the ground, as its header chip says it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShownLot {
+    /// "A farm", "A yard"
+    pub what: String,
+    /// "1.2 km", "40 m"
+    pub far: String,
+    /// Which way it lies on screen, as [`bearing`] gives it.
+    pub angle: f32,
 }
 
 /// What was clicked in the header.
@@ -176,6 +191,8 @@ pub struct HeaderClicks {
     pub impound: bool,
     /// The road in's chip: bring its card back.
     pub road_in: bool,
+    /// The shown lot's chip: walk there.
+    pub shown_lot: bool,
     pub help: bool,
     pub settings: bool,
     /// Where the Inventory button was drawn, for pickups to fly to.
@@ -248,6 +265,9 @@ pub fn header(
                     }
                     if let Some(angle) = view.hall_hint {
                         clicks.hall = hall_chip(ui, angle).clicked();
+                    }
+                    if let Some(lot) = &view.shown_lot {
+                        clicks.shown_lot = shown_lot_chip(ui, lot).clicked();
                     }
                     if let Some(stacks) = view.impound.filter(|n| *n > 0) {
                         clicks.impound = impound_chip(ui, stacks, view.impound_open).clicked();
@@ -380,6 +400,30 @@ fn hall_chip(ui: &mut egui::Ui, angle: f32) -> egui::Response {
         .interact(egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Your market box holds goods. Collect them at the Exchange hall: click to walk there")
+}
+
+/// A lot the Deeds Office showed you (#448): a gold chip, as the hall's,
+/// with an arrow that points to it on screen and how far it is. A click
+/// walks you there.
+fn shown_lot_chip(ui: &mut egui::Ui, lot: &ShownLot) -> egui::Response {
+    let shown = theme::chip(theme::GOLD_DIM, theme::GOLD_WASH).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(RichText::new(&lot.far).size(size::SMALL).color(theme::GOLD_DIM));
+            ui.label(
+                RichText::new(&lot.what)
+                    .font(theme::strong(size::SMALL))
+                    .color(theme::GOLD_LIGHT),
+            );
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+            arrow(ui.painter(), rect.center(), lot.angle, theme::GOLD);
+        });
+    });
+    shown
+        .response
+        .interact(egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("The lot the Deeds Office showed you, ringed in gold: click to walk there")
 }
 
 /// An arrowhead about 11 points long at `c`, pointing at `angle` (as

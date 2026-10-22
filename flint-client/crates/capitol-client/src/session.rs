@@ -66,6 +66,7 @@ const CLAIM_TAG: Tag = 31;
 const PAY_TAX_TAG: Tag = 32;
 /// The tag on the zone card's facts (#444).
 const ZONE_FACTS_TAG: Tag = 33;
+const FREE_LOTS_TAG: Tag = 34;
 
 /// The tag on the exchange panel's deposits and withdrawals (P7.2). The
 /// poller refetches the containers and the balance on either answer.
@@ -183,7 +184,11 @@ pub struct Session {
     /// Why the last tax payment was refused, and when.
     pay_refused: Option<(String, Instant)>,
     /// Plots you claimed since the frame last took them.
-    claimed: Vec<Uuid>,
+    /// Plots claimed since the frame last asked, and whether the deed the
+    /// road in earned paid for each (#448).
+    claimed: Vec<(Uuid, bool)>,
+    /// The claim out is with the grant.
+    claiming_with_grant: bool,
     /// What's worth telling the player about picking a plot, since the
     /// frame last took them.
     plot_notes: Vec<PlotNote>,
@@ -419,6 +424,7 @@ impl Session {
             paying: None,
             pay_refused: None,
             claimed: Vec::new(),
+            claiming_with_grant: false,
             plot_notes: Vec::new(),
             broken_tools: Vec::new(),
             automation_notes: Vec::new(),
@@ -1178,6 +1184,16 @@ impl Session {
         self.net.rest(RestRequest::ZoneFacts, ZONE_FACTS_TAG);
     }
 
+    /// Asks for one home zone's free lots, for the Deeds Office (#448):
+    /// each time its list is shown, since which are free is live.
+    pub fn ask_free_lots(&mut self, zone: &str) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        let query = capitol_core::protocol::rest::FreeLotsQuery { zone: zone.to_owned() };
+        self.net.rest(RestRequest::FreeLots(query), FREE_LOTS_TAG);
+    }
+
     /// Closes the plot panel.
     pub fn close_plot(&mut self) {
         self.state.unpick_plot();
@@ -1186,13 +1202,24 @@ impl Session {
 
     /// Buys the deed to `plot_id`, unless a claim is already out.
     pub fn claim_plot(&mut self, plot_id: Uuid) {
+        self.claim(plot_id, false);
+    }
+
+    /// Claims `plot_id` with the deed the road in earned (#440, #448),
+    /// unless a claim is already out. The server judges whether it's open.
+    pub fn claim_with_grant(&mut self, plot_id: Uuid) {
+        self.claim(plot_id, true);
+    }
+
+    fn claim(&mut self, plot_id: Uuid, use_grant: bool) {
         if self.auth.phase() != Phase::InWorld || self.claiming.is_some() {
             return;
         }
-        tracing::info!("plot: claiming {plot_id}");
+        tracing::info!("plot: claiming {plot_id}{}", if use_grant { " with the road in's deed" } else { "" });
         self.claiming = Some(plot_id);
+        self.claiming_with_grant = use_grant;
         self.claim_refused = None;
-        self.net.rest(RestRequest::ClaimPlot { plot_id }, CLAIM_TAG);
+        self.net.rest(RestRequest::ClaimPlot { plot_id, use_grant }, CLAIM_TAG);
     }
 
     /// Pays `amount` strands of the tax `plot_id` owes, unless a payment is
@@ -1237,8 +1264,9 @@ impl Session {
             .map(|(why, _)| why.as_str())
     }
 
-    /// The plots you claimed since the last call.
-    pub fn take_claimed(&mut self) -> Vec<Uuid> {
+    /// The plots you claimed since the last call, each with whether the
+    /// deed the road in earned paid for it.
+    pub fn take_claimed(&mut self) -> Vec<(Uuid, bool)> {
         std::mem::take(&mut self.claimed)
     }
 
@@ -2086,13 +2114,13 @@ impl Session {
                 }
                 NetEvent::Rest(CLAIM_TAG, Ok(RestResponse::ClaimPlot(claim))) => {
                     tracing::info!(
-                        "plot: claimed {} for {} Strands, {} left",
+                        "plot: claimed {}, assessed at {} Strands, {} left",
                         claim.plot.id,
                         claim.plot.assessed_value,
                         claim.new_balance
                     );
                     self.claiming = None;
-                    self.claimed.push(claim.plot.id);
+                    self.claimed.push((claim.plot.id, std::mem::take(&mut self.claiming_with_grant)));
                 }
                 NetEvent::Rest(EXCHANGE_TAG, result) => {
                     let asked = self.exchanging.take();
@@ -3298,7 +3326,7 @@ mod tests {
                 assert!(session.claiming());
                 wait(&mut session, "the claim", &|s| !s.claiming());
                 assert_eq!(session.claim_refused(Instant::now()), None);
-                assert_eq!(session.take_claimed(), vec![plot.id]);
+                assert_eq!(session.take_claimed(), vec![(plot.id, false)]);
                 let st = session.state();
                 assert_eq!(st.strands(), Some(before - cost));
                 assert_eq!(st.picked_plot().unwrap().owner_id, st.me());

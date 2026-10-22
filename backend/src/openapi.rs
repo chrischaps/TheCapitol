@@ -221,6 +221,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         crate::routes::bureaucracy::get_zones,
         crate::routes::bureaucracy::get_deed_prices,
         crate::routes::bureaucracy::get_zone_facts,
+        crate::routes::bureaucracy::get_free_lots,
         // Terrain
         crate::routes::terrain::get_terrain,
     ),
@@ -245,6 +246,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         PlayerCard,
         MutesResponse,
         capitol_protocol::tutorial::TutorialProgress,
+        capitol_protocol::tutorial::Grant,
         capitol_protocol::tutorial::SetDismissed,
         MutedPlayer,
         // Guilds
@@ -393,6 +395,8 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         ZoneFactsResponse,
         ZoneFacts,
         ZoneGrowth,
+        capitol_protocol::rest::FreeLotsResponse,
+        capitol_protocol::rest::FreeLot,
         // Terrain
         TerrainResponse,
         WaterRing,

@@ -234,6 +234,20 @@ pub struct DayRecords {
     pub work: Vec<Work>,
     /// What sold at the bazaar's stalls (#240)
     pub stalls: Vec<StallTrade>,
+    /// Who settled with the road in's deed (#448), in the order they did
+    pub settlers: Vec<Settler>,
+}
+
+/// Someone who claimed a home with the deed the road in earned (#448)
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Settler {
+    /// Their name, if they let the Gazette print it
+    pub name: Option<String>,
+    pub citizen: bool,
+    pub zone: String,
+    /// The plot's middle, server units
+    pub x: f64,
+    pub y: f64,
 }
 
 /// Read day `day`'s records.
@@ -364,6 +378,20 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
     .fetch_all(db)
     .await?;
 
+    let settlers: Vec<(String, bool, bool, String, f32, f32)> = sqlx::query_as(
+        "SELECT p.name, p.gazette_named, COALESCE(a.kind = 'citizen', FALSE), d.zone_id, pl.world_x, pl.world_y
+         FROM deed_events d
+         JOIN players p ON p.id = d.player_id
+         LEFT JOIN accounts a ON a.id = p.account_id
+         JOIN plots pl ON pl.id = d.plot_id
+         WHERE d.kind = 'granted' AND d.at >= $1 AND d.at < $2
+         ORDER BY d.at, d.id",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await?;
+
     type StallRow = (Uuid, String, String, bool, bool, String, Option<String>, i64, i64, i64);
     let stalls: Vec<StallRow> = sqlx::query_as(
         "SELECT s.merchant_id,
@@ -393,6 +421,16 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
         best_sale,
         deeds: deeds.into_iter().map(|(zone, (claimed, foreclosed))| (zone, claimed, foreclosed)).collect(),
         claimed_by_people,
+        settlers: settlers
+            .into_iter()
+            .map(|(name, named, citizen, zone, x, y)| Settler {
+                name: named.then_some(name),
+                citizen,
+                zone,
+                x: x as f64,
+                y: y as f64,
+            })
+            .collect(),
         work: work
             .into_iter()
             .map(|(player_id, name, named, citizen, item_type, item_name, quantity)| Work {
@@ -589,6 +627,7 @@ pub fn compose(records: &DayRecords) -> Gazette {
         deeds_story.push_str(&claimed_share(s));
         producers_story.push_str(&made_share(s, made.first()));
     }
+    deeds_story.push_str(&settled(&records.settlers));
 
     // The front page: the biggest story the day has
     let big_move = movers.first().filter(|m| m.change_pct.abs() >= FRONT_PAGE_MOVE);
@@ -985,6 +1024,53 @@ fn sold_share(s: &GazetteShares, both: bool) -> String {
 }
 
 /// The new deeds, people's against citizens'
+/// How many settlers the land column names before it counts the rest
+const SETTLERS_NAMED: usize = 4;
+
+/// Who settled with the road in's deed (#448): " Settled: Ada, a farm out
+/// to the south-west; Citizen Bo, a yard north-east of the tower." Roads
+/// have no names yet, so a home is placed by its bearing from the tower
+/// ([#483](https://github.com/chrischaps/TheCapitol/issues/483)).
+fn settled(settlers: &[Settler]) -> String {
+    if settlers.is_empty() {
+        return String::new();
+    }
+    let homes: Vec<String> = settlers
+        .iter()
+        .take(SETTLERS_NAMED)
+        .map(|s| format!("{}, {}", name_of(s.name.as_deref(), s.citizen), home_of(s)))
+        .collect();
+    let more = settlers.len().saturating_sub(SETTLERS_NAMED);
+    let tail = match more {
+        0 => String::new(),
+        1 => "; and one more".to_string(),
+        n => format!("; and {} more", count_word(n as i64, false)),
+    };
+    format!(" Settled, with the deed the road in earns: {}{tail}.", homes.join("; "))
+}
+
+/// "a farm out to the south-west", "a house on a street to the north",
+/// "a yard north-east of the tower"
+fn home_of(s: &Settler) -> String {
+    let bearing = compass(s.x - rules::CENTER_X, s.y - rules::CENTER_Y);
+    match Zone::from_str(&s.zone) {
+        Some(Zone::Rural) => format!("a farm out to the {bearing}"),
+        Some(Zone::Suburban) => format!("a house on a street to the {bearing}"),
+        Some(Zone::Urban) => format!("a yard {bearing} of the tower"),
+        _ => format!("a lot to the {bearing}"),
+    }
+}
+
+/// The eight-point bearing of `(dx, dy)` from the tower, server units (y
+/// points south)
+fn compass(dx: f64, dy: f64) -> &'static str {
+    use capitol_protocol::fmath::StableMath;
+    const POINTS: [&str; 8] = ["east", "north-east", "north", "north-west", "west", "south-west", "south", "south-east"];
+    let turn = (-dy).stable_atan2(dx) / std::f64::consts::TAU;
+    let k = (turn * 8.0).round() as i64;
+    POINTS[k.rem_euclid(8) as usize]
+}
+
 fn claimed_share(s: &GazetteShares) -> String {
     match (s.claimed, s.claimed_by_people) {
         (0, _) => String::new(),
@@ -1221,6 +1307,8 @@ mod tests {
                 StallTrade { citizen: true, ..stall(3, Some("Cy"), "Cy's Planks", "Plank", (3, 6, 240)) },
                 stall(2, None, "Bo's Bits", "Logs", (2, 10, 30)),
             ],
+            // The fixture's day predates the road in's deed (#448)
+            settlers: Vec::new(),
         }
     }
 
@@ -1282,6 +1370,43 @@ mod tests {
                 assert!(g.lead.contains(credited) || g.lead.contains(made), "{}", g.lead);
             }
         }
+    }
+
+    /// A deed spent on the road in makes the land column the next day
+    /// (#448), named only as its holder lets the paper name them
+    #[test]
+    fn settlers_are_named_with_where_they_settled() {
+        let at = |dx: f64, dy: f64| (rules::CENTER_X + dx, rules::CENTER_Y + dy);
+        let settler = |name: Option<&str>, citizen, zone: &str, (x, y): (f64, f64)| Settler {
+            name: name.map(str::to_owned),
+            citizen,
+            zone: zone.into(),
+            x,
+            y,
+        };
+        let records = DayRecords {
+            day: DAY,
+            deeds: vec![("rural".into(), 2, 0), ("urban".into(), 1, 0)],
+            claimed_by_people: 2,
+            settlers: vec![
+                settler(Some("Ada"), false, "rural", at(-3000.0, 3000.0)),
+                settler(Some("Bo"), true, "urban", at(0.0, -1500.0)),
+                settler(None, false, "suburban", at(2500.0, 0.0)),
+            ],
+            ..Default::default()
+        };
+        let g = compose(&records);
+        assert!(
+            g.deeds_story.ends_with(
+                " Settled, with the deed the road in earns: Ada, a farm out to the south-west; \
+                 Citizen Bo, a yard north of the tower; a trader who keeps out of the papers, a house on a street to the east."
+            ),
+            "{}",
+            g.deeds_story
+        );
+        let crowd = DayRecords { settlers: vec![records.settlers[0].clone(); 6], ..records.clone() };
+        assert!(compose(&crowd).deeds_story.ends_with("; and two more."), "{}", compose(&crowd).deeds_story);
+        assert!(!compose(&DayRecords { day: DAY, ..Default::default() }).deeds_story.contains("Settled"));
     }
 
     #[test]

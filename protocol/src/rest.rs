@@ -2834,6 +2834,46 @@ pub struct ZoneGrowth {
     pub density: f64,
 }
 
+/// `GET /bureaucracy/free-lots?zone=`: the Deeds Office's list (#448)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema, utoipa::IntoParams))]
+pub struct FreeLotsQuery {
+    /// `urban`, `suburban` or `rural`
+    pub zone: String,
+}
+
+/// Every lot free in one home zone, now, with what the zone card says of
+/// each: the stations it fits and its walk to the hall (#448)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct FreeLotsResponse {
+    pub zone_id: String,
+    /// Nearest the hall first
+    pub lots: Vec<FreeLot>,
+}
+
+/// One free lot, as the Deeds Office lists it
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct FreeLot {
+    /// The plot's id, for `POST /plots/{id}/claim`
+    pub plot_id: Uuid,
+    /// The lot's id in `/terrain`, for finding it on the ground
+    pub terrain_id: String,
+    /// Its middle, server units
+    pub x: f64,
+    pub y: f64,
+    /// Its area in square units
+    pub area: f64,
+    /// The stations it fits at `STATION_MIN_SPACING`, capped by its
+    /// capacity (D9), and the capacity
+    pub fits: i32,
+    pub capacity: i32,
+    /// The straight walk from its middle to the hall's door, in seconds at
+    /// `PLAYER_SPEED`
+    pub walk_secs: f64,
+}
+
 // ---------------------------------------------------------------------------
 // /wages (Commons S2.6, plan D7)
 // ---------------------------------------------------------------------------

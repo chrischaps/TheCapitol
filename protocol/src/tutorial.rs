@@ -341,6 +341,42 @@ impl<'de> Deserialize<'de> for Steps {
     }
 }
 
+/// Where a player's deed grant stands (#440, #448): the road in's reward,
+/// one an account (plan D6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Grant {
+    /// The road in isn't walked yet
+    #[default]
+    Unearned,
+    /// Earned and not yet spent: one free claim on any home lot
+    Open,
+    /// Spent on a lot, held or foreclosed. A retired lot hands it back,
+    /// and it's open again.
+    Spent,
+}
+
+impl Grant {
+    pub fn is_unearned(&self) -> bool {
+        *self == Grant::Unearned
+    }
+
+    pub fn is_open(self) -> bool {
+        self == Grant::Open
+    }
+
+    /// The grant after the steps came to be `done`: the step that walks
+    /// the road opens it (`Steps::deed_earned`), as the server does then.
+    /// Spent stays spent.
+    pub fn after(self, done: Steps) -> Grant {
+        match self {
+            Grant::Unearned if done.deed_earned() => Grant::Open,
+            grant => grant,
+        }
+    }
+}
+
 /// Where a player is on the road in: `GET /tutorial`, and what `tutorial`
 /// carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -353,6 +389,9 @@ pub struct TutorialProgress {
     /// waits; it can't be skipped.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dismissed: bool,
+    /// The deed the road in earns (#448): left out while it's unearned
+    #[serde(default, skip_serializing_if = "Grant::is_unearned")]
+    pub grant: Grant,
 }
 
 impl TutorialProgress {
@@ -449,6 +488,23 @@ mod tests {
         assert_eq!(serde_json::to_string(&done).unwrap(), r#"["walk","deposit"]"#);
         let back: Steps = serde_json::from_str(r#"["deposit","a_step_from_later","walk"]"#).unwrap();
         assert_eq!(back, done);
+    }
+
+    #[test]
+    fn the_grant_opens_with_the_road_and_spent_stays_spent() {
+        let road: Steps = [Chapter::Arrival, Chapter::RoadIn, Chapter::Hall, Chapter::People]
+            .into_iter()
+            .flat_map(Chapter::steps)
+            .collect();
+        assert_eq!(Grant::Unearned.after(Steps::from_iter([Step::Walk])), Grant::Unearned);
+        assert_eq!(Grant::Unearned.after(road), Grant::Open);
+        assert_eq!(Grant::Spent.after(road), Grant::Spent);
+        // Unearned is left off the wire, so an older server's reads the same
+        let p = TutorialProgress { done: Steps::from_iter([Step::Walk]), ..Default::default() };
+        assert_eq!(serde_json::to_string(&p).unwrap(), r#"{"done":["walk"]}"#);
+        let open = TutorialProgress { done: road, grant: Grant::Open, ..Default::default() };
+        let back: TutorialProgress = serde_json::from_str(&serde_json::to_string(&open).unwrap()).unwrap();
+        assert_eq!(back, open);
     }
 
     #[test]

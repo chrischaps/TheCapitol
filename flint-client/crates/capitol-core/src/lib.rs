@@ -60,6 +60,7 @@ pub mod catalog;
 pub mod chat;
 pub mod citizen;
 pub mod craft;
+pub mod deeds;
 pub mod exchange;
 pub mod gazette;
 pub mod hall;

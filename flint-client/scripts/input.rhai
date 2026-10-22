@@ -10,6 +10,7 @@
 //      click a player: their card, who they are     (S0.3, here)
 //   3. a station: open it, or walk closer           (P6.3)
 //      the Gazette's notice board: read it         (E3.9, here)
+//      the Deeds Office's desk: look in            (#448, here)
 //      a bazaar stall: its shop, or walk there      (E3.11, here)
 //      the Exchange hall: the market, or walk there (E3.7, here)
 //   4. alt-click a plot: select it                  (P6.4, here)
@@ -94,6 +95,13 @@
 // opens the paper (cap_read_gazette) wherever you are: reading needs no
 // walk. Hovering it names it, and while an edition is out you haven't
 // read, a gold glint breathes over its lamp.
+//
+// The Deeds Office (#448) is the desk beside it, under the wax-red awning.
+// A click on it (cap_office_at, tried up its posts) opens the office's
+// panel (cap_open_office) wherever you are: the office explains the deed
+// and compares the zones, and is never a toll (plan D8). Hovering it names
+// it, and while your deed waits there, earned and unspent, a gold glint
+// hangs over its awning.
 //
 // Placing a station (P6.2): a right click on a kit in the inventory starts
 // it. Rust draws the ghost, the station itself, tinted and translucent,
@@ -226,6 +234,7 @@ fn on_update() {
     if open_card(click) { return; }
     if open_station(click) { return; }
     if read_gazette() { return; }
+    if open_office() { return; }
     if visit_stall() { return; }
     if visit_hall() { return; }
     if select_plot(click) { return; }
@@ -295,6 +304,25 @@ fn read_gazette() {                 // E3.9
     if !board_under_cursor() { return false; }
     cap_read_gazette();
     true
+}
+
+// The Deeds Office's desk under the cursor: look in.
+fn open_office() {                  // #448
+    if !office_under_cursor() { return false; }
+    cap_open_office();
+    true
+}
+
+// Whether the cursor's ray meets the desk: its point at each height up its
+// posts, on its slot.
+fn office_under_cursor() {
+    if cap_hall() == () { return false; }
+    let y = cap_ground_y();
+    for k in 0..10 {
+        let p = screen_to_ground(mouse_x(), mouse_y(), y + 0.25 * k.to_float());
+        if p != () && cap_office_at(p[0], p[1]) { return true; }
+    }
+    false
 }
 
 // Whether the cursor's ray meets the board: its point at each height up
@@ -501,20 +529,22 @@ fn on_draw_ui() {
     let hall = cap_hall();
     let free = hall != () && placing == () && over == ();
     let over_board = free && board_under_cursor();
-    let over_hall = free && !over_board && hall_under_cursor();
+    let over_office = free && !over_board && office_under_cursor();
+    let over_hall = free && !over_board && !over_office && hall_under_cursor();
     if hall != () {
         draw_hall(hall, over_hall, now);
         draw_board(hall, over_board, now);
+        draw_office(hall, over_office, now);
     }
     let bazaar = cap_bazaar();
-    let over_stall = if bazaar != () && placing == () && over == () && !over_board && !over_hall {
+    let over_stall = if bazaar != () && placing == () && over == () && !over_board && !over_office && !over_hall {
         stall_under_cursor()
     } else { () };
     if bazaar != () { draw_bazaar(bazaar, over_stall, now); }
     let lead = cap_lead();
     if lead != () && !cap_clean() { draw_lead(lead, now); }
 
-    if hover != () && placing == () && over == () && !over_hall && !over_board && over_stall == () {
+    if hover != () && placing == () && over == () && !over_hall && !over_board && !over_office && over_stall == () {
         let n = cap_node_at(hover[0], hover[1]);
         if n != () && n.state == "available" && !n.targeted { draw_reticle_on(n, now); }
         else { draw_reticle(hover, now); }
@@ -1174,6 +1204,50 @@ fn draw_board(h, over, now) {
     draw_text_opts(at.x - lm.width / 2.0, ly, line, 13.0, #{
         font: "strong", color: [ink[0], ink[1], ink[2], 0.92],
     });
+}
+
+// ── The Deeds Office (#448) ──────────────────────────────────────────────
+
+// Its name and what a click does, over it while you hover it; and while
+// your deed waits, earned and unspent, a gold glint over its awning, slower
+// than the news's: a thing kept for you, not news.
+fn draw_office(h, over, now) {
+    if h.deed_waits && !h.office_open { draw_deed_glint(h, now); }
+    if !over || h.office_open { return; }
+    let at = world_to_screen(h.office_x, h.office_y + 0.6, h.office_z);
+    if !at.visible { return; }
+    let title = "The Deeds Office";
+    let line = if h.deed_waits { "Your deed waits here · click to look in" } else { "Click to compare the zones" };
+    let size = 16.0;
+    let m = measure_text_ex(title, size, "display", 0.0);
+    let top = (at.y - 40.0).max(64.0);
+    draw_text_opts(at.x - m.width / 2.0 + 1.0, top + 1.0, title, size, #{
+        font: "display", color: [0.0, 0.0, 0.0, 0.6],
+    });
+    draw_text_opts(at.x - m.width / 2.0, top, title, size, #{
+        font: "display", color: [0.98, 0.9, 0.84, 0.97],
+    });
+    let lm = measure_text_ex(line, 13.0, "strong", 0.0);
+    let ly = top + m.height + 5.0;
+    let ink = if h.deed_waits { [0.95, 0.83, 0.46] } else { [0.92, 0.92, 0.92] };
+    draw_text_opts(at.x - lm.width / 2.0 + 1.0, ly + 1.0, line, 13.0, #{
+        font: "strong", color: [0.0, 0.0, 0.0, 0.55],
+    });
+    draw_text_opts(at.x - lm.width / 2.0, ly, line, 13.0, #{
+        font: "strong", color: [ink[0], ink[1], ink[2], 0.92],
+    });
+}
+
+// The glint over the office's awning: the motes' four-pointed star, turning
+// slowly, over a soft gold halo.
+fn draw_deed_glint(h, now) {
+    let p = world_to_screen(h.office_x, h.office_y + 0.3, h.office_z);
+    if !p.visible { return; }
+    let swell = 0.55 + 0.45 * (now * 1.1).sin();
+    let r = 6.0 * swell + 3.5;
+    let c = gold();
+    draw_circle(p.x, p.y, r * 1.8, c[0], c[1], c[2], 0.14 * swell + 0.04);
+    mote_glint(p.x, p.y, r, now * 0.25, 0.9);
 }
 
 // A four-pointed glint over the board's lamp, swelling and fading slowly,

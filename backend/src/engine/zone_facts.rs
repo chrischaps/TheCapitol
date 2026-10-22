@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use capitol_protocol::fmath::StableMath;
-use capitol_protocol::rest::{ZoneFacts, ZoneGrowth};
+use capitol_protocol::rest::{FreeLot, ZoneFacts, ZoneGrowth};
 use capitol_protocol::rules::{Zone, PLAYER_SPEED};
 use capitol_protocol::terrain::{LandmarkKind, TerrainPlot};
 use capitol_protocol::tunables::Tunables;
@@ -44,6 +44,8 @@ pub fn style(zone: Zone) -> &'static str {
 /// One lot, as the card reads it.
 #[derive(Debug, Clone)]
 struct Lot {
+    /// Its id in `/terrain`
+    id: String,
     zone: Zone,
     corners: [(f64, f64); 4],
     area: f64,
@@ -112,7 +114,7 @@ fn pack(version: String, plots: &[TerrainPlot], hall: (f64, f64), capacities: &H
             let fits = station_room::most(&p.corners, capacity.max(0) as usize) as i32;
             let (mx, my) = middle(&p.corners);
             let walk = (mx - hall.0).stable_hypot(my - hall.1) / PLAYER_SPEED;
-            Some(Lot { zone, corners: p.corners, area: p.area, fits, capacity, walk })
+            Some(Lot { id: p.id.clone(), zone, corners: p.corners, area: p.area, fits, capacity, walk })
         })
         .collect();
     Rooms { version, lots }
@@ -214,6 +216,49 @@ pub async fn facts(state: &AppState) -> Result<Vec<ZoneFacts>, sqlx::Error> {
         .collect())
 }
 
+/// Every lot free in `zone` now, nearest the hall first, with the stations
+/// each fits and its walk (the Deeds Office, #448). The room and the walk
+/// come from [`rooms`]; which lots are free is read live.
+pub async fn free_lots(state: &AppState, zone: Zone) -> Result<Vec<FreeLot>, sqlx::Error> {
+    let rooms = rooms(state).await?;
+    let free: HashMap<String, uuid::Uuid> = sqlx::query_as::<_, (String, uuid::Uuid)>(
+        "SELECT terrain_id, id FROM plots
+         WHERE owner_id IS NULL AND terrain_id IS NOT NULL AND zone_id = $1",
+    )
+    .bind(zone.as_str())
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .collect();
+    Ok(listed(&rooms, zone, &free))
+}
+
+/// `zone`'s lots of `rooms` that are in `free` (terrain id to plot id),
+/// nearest the hall first
+fn listed(rooms: &Rooms, zone: Zone, free: &HashMap<String, uuid::Uuid>) -> Vec<FreeLot> {
+    let mut lots: Vec<FreeLot> = rooms
+        .lots
+        .iter()
+        .filter(|l| l.zone == zone)
+        .filter_map(|l| {
+            let plot_id = *free.get(&l.id)?;
+            let (x, y) = middle(&l.corners);
+            Some(FreeLot {
+                plot_id,
+                terrain_id: l.id.clone(),
+                x,
+                y,
+                area: l.area,
+                fits: l.fits,
+                capacity: l.capacity,
+                walk_secs: l.walk,
+            })
+        })
+        .collect();
+    lots.sort_by(|a, b| a.walk_secs.total_cmp(&b.walk_secs).then_with(|| a.terrain_id.cmp(&b.terrain_id)));
+    lots
+}
+
 fn assemble(zone: Zone, room: &Room, deed_cost: i32, tunables: &Tunables, claimed: i64, grows: Vec<ZoneGrowth>) -> ZoneFacts {
     ZoneFacts {
         zone_id: zone.as_str().to_owned(),
@@ -235,7 +280,8 @@ fn assemble(zone: Zone, room: &Room, deed_cost: i32, tunables: &Tunables, claime
 }
 
 /// The database tests need `DATABASE_URL`, the local Redis and the default
-/// terrain: `cargo test -p capitol-backend zone_facts::`.
+/// terrain, so they're ignored with the rest and run in `ci.sh db`:
+/// `cargo test -p capitol-backend zone_facts:: -- --include-ignored`.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +313,7 @@ mod tests {
     /// capacity alone; the walk to the hall grows outward; a claim takes a
     /// lot off the free count.
     #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
     async fn the_facts_match_the_default_world(db: PgPool) {
         let state = for_tests(db.clone()).await;
         let owner = player(&db, "Homer", 0).await;
@@ -305,5 +352,59 @@ mod tests {
         assert!(urban.walk_nearest_secs < suburban.walk_nearest_secs && suburban.walk_nearest_secs < rural.walk_nearest_secs);
         assert_eq!(urban.lots_free, urban.lots_total - 1, "the claim is off the free count");
         assert_eq!(suburban.lots_free, suburban.lots_total);
+    }
+
+    /// The Deeds Office's list (#448): only the zone's free lots, each a
+    /// plot to claim, nearest the hall first, with the card's room and walk
+    #[test]
+    fn the_free_lots_are_the_zones_unclaimed_nearest_first() {
+        let lot = |id: &str, zone, walk| Lot {
+            id: id.to_owned(),
+            zone,
+            corners: [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+            area: 100.0,
+            fits: 4,
+            capacity: 16,
+            walk,
+        };
+        let rooms = Rooms {
+            version: "v".into(),
+            lots: vec![
+                lot("far", Zone::Rural, 90.0),
+                lot("near", Zone::Rural, 70.0),
+                lot("taken", Zone::Rural, 60.0),
+                lot("yard", Zone::Urban, 20.0),
+            ],
+        };
+        let free: HashMap<String, uuid::Uuid> = ["far", "near", "yard"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, id)| (id.to_owned(), uuid::Uuid::from_u128(i as u128 + 1)))
+            .collect();
+        let listed = listed(&rooms, Zone::Rural, &free);
+        let ids: Vec<&str> = listed.iter().map(|l| l.terrain_id.as_str()).collect();
+        assert_eq!(ids, ["near", "far"]);
+        assert_eq!(listed[0].plot_id, uuid::Uuid::from_u128(2));
+        assert_eq!((listed[0].x, listed[0].y, listed[0].fits, listed[0].walk_secs), (5.0, 5.0, 4, 70.0));
+    }
+
+    /// On the default world every free lot is listed, and a claimed one isn't
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_offices_list_is_the_default_worlds_free_lots(db: PgPool) {
+        let state = for_tests(db.clone()).await;
+        // The plot rows, as startup's sync makes them
+        let lots = state.game.read().await.terrain.terrain_plots.clone();
+        crate::engine::plot_sync::sync_plots(&db, &lots, crate::engine::plot_sync::OnOwned::Keep).await.unwrap();
+        let facts = facts(&state).await.unwrap();
+        let rural = facts.iter().find(|f| f.zone_id == "rural").unwrap();
+        let before = free_lots(&state, Zone::Rural).await.unwrap();
+        assert_eq!(before.len() as i64, rural.lots_free);
+        let owner = player(&db, "Homer", 0).await;
+        sqlx::query("UPDATE plots SET owner_id = $1 WHERE id = $2").bind(owner).bind(before[0].plot_id).execute(&db).await.unwrap();
+        let after = free_lots(&state, Zone::Rural).await.unwrap();
+        assert_eq!(after.len(), before.len() - 1);
+        assert!(after.iter().all(|l| l.plot_id != before[0].plot_id));
+        assert!(after.iter().all(|l| l.fits <= l.capacity));
     }
 }

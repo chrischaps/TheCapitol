@@ -49,6 +49,7 @@ pub mod card;
 pub mod chat;
 pub mod containers;
 pub mod crafting;
+pub mod deeds;
 pub mod dev_overlay;
 pub mod exchange;
 pub mod gazette;
