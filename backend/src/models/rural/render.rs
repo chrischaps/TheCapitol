@@ -13,7 +13,8 @@ use std::fmt::Write as _;
 use capitol_protocol::fmath::StableMath;
 use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot};
 
-use super::metrics::{self, half_sectors, is_rural_road, Metrics, Waters, HALF_SECTOR_DEG, TARGETS};
+use super::metrics::{self, half_sectors, is_rural_road, Metrics, Waters, HALF_SECTOR_DEG};
+use crate::models::suburb::metrics::Target;
 use super::sectors::{Character, Sector};
 use crate::models::suburb::metrics::{centroid, fmt_num, Marker, Scope, Violation};
 use crate::models::suburb::render::{esc, mix, poly, pt, DROPPED, INK, PAPER, TRIMMED, VIOLATION};
@@ -492,8 +493,9 @@ fn legend(s: &mut String, v: &View, lo: P, k: f64, h: f64) {
     let _ = writeln!(s, "</g>");
 }
 
-/// The markdown table: a row per metric, a column per plan.
-pub fn table(plans: &[(String, Metrics, Vec<Violation>)]) -> String {
+/// The markdown table: a row per metric, a column per plan, against
+/// `targets` (`metrics::TARGETS`, or `V2_TARGETS` for Plots v2's ring).
+pub fn table(plans: &[(String, Metrics, Vec<Violation>)], targets: &[Target]) -> String {
     let mut s = String::new();
     let _ = write!(s, "| metric | target |");
     for (name, ..) in plans {
@@ -513,6 +515,7 @@ pub fn table(plans: &[(String, Metrics, Vec<Violation>)]) -> String {
         ("dropped_share", "lots dropped by finish_lots"),
         ("lot_area_min", "lot area, least"),
         ("lot_area_max", "lot area, most"),
+        ("take_12_share", "farms that take 12 stations"),
         ("gap_nearest_median", "gap to the nearest lot, median"),
         ("overlaps", "lot-lot overlaps"),
         ("water_clearance_min", "closest a dry lot comes to water"),
@@ -527,7 +530,7 @@ pub fn table(plans: &[(String, Metrics, Vec<Violation>)]) -> String {
         }
         s.push('\n');
     }
-    for t in TARGETS {
+    for t in targets {
         let label = if t.hard { format!("**{}**", t.label) } else { t.label.to_string() };
         let _ = write!(s, "| {label} | {} |", t.check.describe());
         for (_, m, viol) in plans {
@@ -566,9 +569,11 @@ mod tests {
     /// `cargo test --release rural_plan_report -- --ignored --nocapture`.
     ///
     /// Env: `RURAL_SEEDS` (comma-separated, default 42,7,1234,99999),
-    /// `RURAL_SECTOR` (0–7, one sector only) and `RURAL_OUT` (default
-    /// `target/rural-plan/` at the workspace root). The plans are still named
-    /// `farms-…`, as they were beside the old trails' (#291).
+    /// `RURAL_SECTOR` (0–7, one sector only), `RURAL_V2` (any value: Plots
+    /// v2's ring, r3600 to r6100 in the grown world, with its farms, against
+    /// its targets; V1.3, #457) and `RURAL_OUT` (default `target/rural-plan/`
+    /// at the workspace root). The plans are still named `farms-…`, as they
+    /// were beside the old trails' (#291), and `farms-v2-…` for Plots v2's.
     #[test]
     #[ignore]
     fn rural_plan_report() {
@@ -576,7 +581,9 @@ mod tests {
             .split(',')
             .map(|s| s.trim().parse().expect("RURAL_SEEDS is a list of numbers"))
             .collect();
-        let layout = "farms".to_string();
+        let v2 = std::env::var("RURAL_V2").is_ok_and(|v| !v.trim().is_empty());
+        let layout = if v2 { "farms-v2" } else { "farms" }.to_string();
+        let targets = if v2 { metrics::V2_TARGETS } else { metrics::TARGETS };
         let sector: Option<u8> = std::env::var("RURAL_SECTOR")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -586,13 +593,17 @@ mod tests {
 
         let mut plans = Vec::new();
         for seed in seeds {
-            let params = WorldGenParams { seed, ..Default::default() };
+            let params = if v2 {
+                WorldGenParams { seed, rural: crate::models::rural::RuralParams::v2(), ..WorldGenParams::grown() }
+            } else {
+                WorldGenParams { seed, ..Default::default() }
+            };
             let measured = metrics::measure_world(&params, sector);
             let t = &measured.terrain;
             let kept = t.terrain_plots.iter().filter(|l| l.zone == "rural").count();
             assert_eq!(measured.cleared.iter().flatten().count(), kept, "seed {seed}: the lots before finish_lots don't match");
             let m = Metrics { layout: layout.clone(), ..measured.measured.metrics };
-            let viol = metrics::violations(&m);
+            let viol = metrics::violations_against(&m, targets);
             let (name, title) = match sector {
                 Some(s) => (format!("{layout}-{seed}-s{s}"), format!("Rural {layout} · seed {seed} · sector {s}")),
                 None => (format!("{layout}-{seed}"), format!("Rural {layout} · seed {seed}")),
@@ -625,7 +636,7 @@ mod tests {
             plans.push((name, m, viol));
         }
 
-        let table = table(&plans);
+        let table = table(&plans, targets);
         std::fs::write(out.join("report.md"), &table).unwrap();
         let names: Vec<&str> = plans.iter().map(|(name, ..)| name.as_str()).collect();
         std::fs::write(out.join("index.html"), page("Rural plan", &table, &names)).unwrap();
@@ -685,7 +696,7 @@ mod tests {
         assert!(doc.contains("0 winding") && doc.contains("farm gate"));
         assert!(doc.contains("half-sector 1 · 0.0% built"));
         assert!(doc.contains(ARTERIAL));
-        let md = table(&[("t".into(), measured.metrics, viol)]);
-        assert_eq!(md.lines().count(), 2 + 14 + TARGETS.len() + 1);
+        let md = table(&[("t".into(), measured.metrics, viol)], metrics::TARGETS);
+        assert_eq!(md.lines().count(), 2 + 15 + metrics::TARGETS.len() + 1);
     }
 }

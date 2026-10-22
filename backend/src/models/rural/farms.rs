@@ -32,6 +32,7 @@ use capitol_protocol::terrain::{Lake, RoadSegment, RoadType, TerrainPlot, WaterC
 use super::sectors::{Sector, RURAL};
 use super::RuralParams;
 use crate::models::geom::{Polyline, SplitMix64};
+use crate::models::station_room;
 use crate::models::lot_geometry::{
     at, bounds, dist, place, point, seg_seg_dist, shrink_to_fit, tangent, Candidate, LotParams, Region, World,
 };
@@ -50,14 +51,12 @@ pub const LANE_VERGE: f64 = 17.0;
 pub const EDGE_INSET: f64 = 20.0;
 /// Farms keep this far from a river's, a stream's or a lake's edge.
 pub const BANK: f64 = 10.0;
-/// A farm's frontage is cut down to this, a step at a time, before the walk
-/// gives up on it and slides on...
-const MIN_FRONTAGE: f64 = 100.0;
+/// A farm's frontage is cut down a step at a time, to no less than
+/// `RuralParams::min_frontage`, before the walk gives up on it and slides
+/// on...
 const SHORTEN: f64 = 20.0;
 /// ...this far.
 const SLIDE: f64 = 10.0;
-/// A farm shallower than this at either side isn't one.
-const MIN_DEPTH: f64 = 110.0;
 /// On a bend's outside, a farm's front is pushed out this much at a time,
 /// to at most this past its verge.
 const PUSH_STEP: f64 = 2.0;
@@ -124,18 +123,38 @@ pub(crate) fn world<'a>(params: &WorldGenParams, center: P, roads: &'a [RoadSegm
 /// Every sector's farms, after the overlap pass.
 pub fn lay(params: &WorldGenParams, center: P, roads: &[RoadSegment], sectors: &[Sector], water: Option<Water>) -> Vec<TerrainPlot> {
     let world = world(params, center, roads, water);
-    let mut candidates: Vec<(u8, Candidate)> = sectors.iter().flat_map(|s| candidates(params, center, &world, s)).collect();
-    // Stable, so each class keeps sector and road order.
-    candidates.sort_by_key(|&(class, _)| class);
-    place(candidates.into_iter().map(|(_, c)| c), &world, &lot_params(&params.rural), "rural")
+    lay_in(params, center, &world, sectors)
 }
 
 /// One sector's farms, after the overlap pass. No farm of one sector comes
 /// near another's, so this is `lay`'s for the sector.
 pub(crate) fn lay_sector(params: &WorldGenParams, center: P, world: &World, sector: &Sector) -> Vec<TerrainPlot> {
-    let mut candidates = candidates(params, center, world, sector);
+    lay_in(params, center, world, std::slice::from_ref(sector))
+}
+
+/// The farms of `sectors` in `world`: every road's walk, then one overlap
+/// pass over them in class order, and only those with room kept.
+fn lay_in(params: &WorldGenParams, center: P, world: &World, sectors: &[Sector]) -> Vec<TerrainPlot> {
+    let mut candidates: Vec<(u8, Candidate)> = sectors.iter().flat_map(|s| candidates(params, center, world, s)).collect();
+    // Stable, so each class keeps sector and road order.
     candidates.sort_by_key(|&(class, _)| class);
-    place(candidates.into_iter().map(|(_, c)| c), world, &lot_params(&params.rural), "rural")
+    let placed = place(candidates.into_iter().map(|(_, c)| c), world, &lot_params(&params.rural), "rural");
+    with_room(&params.rural, placed)
+}
+
+/// Whether a farm with these corners has the room `RuralParams::room` asks
+/// of one: always, when it asks none.
+fn roomy(draws: &RuralParams, corners: &[P; 4]) -> bool {
+    draws.room == 0 || station_room::takes(corners, draws.room)
+}
+
+/// The farms the overlap pass left with the room a farm needs. It may have
+/// pulled one back short of it, and that one is left as a field.
+fn with_room(draws: &RuralParams, farms: Vec<TerrainPlot>) -> Vec<TerrainPlot> {
+    if draws.room == 0 {
+        return farms;
+    }
+    farms.into_iter().filter(|f| roomy(draws, &f.corners)).collect()
 }
 
 /// A sector's farms before the overlap pass, each with its class: 0 on an
@@ -174,7 +193,7 @@ fn candidates(params: &WorldGenParams, center: P, world: &World, sector: &Sector
         let Some(k) = r.id.strip_prefix(&prefix).and_then(|k| k.parse::<u64>().ok()) else { continue };
         let line = Polyline::new(r.points.clone());
         let walk = Walk { world, region: &region, road, verge: LANE_VERGE, draws: &params.rural };
-        let class = if k < 2 { 1 } else { 2 };
+        let class = if k < params.rural.mains.len() as u64 { 1 } else { 2 };
         for (side, letter) in [(1.0, "L"), (-1.0, "R")] {
             let mut rng = SplitMix64::stream(params.seed, &[RURAL, s as u64, FARMS, k, side_key(side)]);
             let farms = walk.farms(&line, side, &mut rng, |n| format!("farm_{s}_{k}_{letter}_{n}"));
@@ -218,7 +237,7 @@ impl Walk<'_> {
         let length = line.length();
         let mut out = Vec::new();
         let mut s = 0.0;
-        while s + MIN_FRONTAGE <= length {
+        while s + self.draws.min_frontage <= length {
             if !self.starts(line, side, s) {
                 s += SLIDE;
                 continue;
@@ -226,8 +245,8 @@ impl Walk<'_> {
             let (frontage, depth) = (rng.range(self.draws.frontage.0, self.draws.frontage.1), rng.range(self.draws.depth.0, self.draws.depth.1));
             let mut w = frontage.min(length - s);
             let mut laid = None;
-            while w >= MIN_FRONTAGE {
-                if let Some(corners) = self.farm(line, side, s, w, depth) {
+            while w >= self.draws.min_frontage {
+                if let Some(corners) = self.farm(line, side, s, w, depth).filter(|c| roomy(self.draws, c)) {
                     laid = Some(corners);
                     break;
                 }
@@ -285,14 +304,15 @@ impl Walk<'_> {
         let p = LotParams { depth, depth_max: depth, ..lot_params(self.draws) };
         let backs = [p0, p1].map(|o| self.world.back_from(self.region, o, n, f, half, depth, &p).min(f + depth));
         let shallow = backs[0].min(backs[1]) - f;
-        if shallow < MIN_DEPTH {
+        let min_depth = self.draws.min_depth;
+        if shallow < min_depth {
             return None;
         }
         // A road or the water that runs in between the sides: pulled back
         // short of it here, so the walk can cut the frontage or slide on past
         // it, rather than the overlap pass drop the farm and leave a field.
         let corners = [fronts[0], fronts[1], at(p1, n, backs[1]), at(p0, n, backs[0])];
-        shrink_to_fit(corners, MIN_DEPTH / shallow, |q| self.world.quad_clear(q))
+        shrink_to_fit(corners, min_depth / shallow, |q| self.world.quad_clear(q))
     }
 }
 

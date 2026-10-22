@@ -108,6 +108,7 @@ The sectors' characters are a seeded shuffle of 4 *concession* and 4 *winding*, 
 - **Then `lot_clearance::finish_lots`,** still last.
 - **The cost.** A farm lost to a pond leaves a field. A road can't move for the water, but the water already moves for the road.
 - *As built (#287):* `rural/balance.rs`, on a 10-square raster of each sector with the parks' chamfer (`parks::chamfer_with`). A half-sector wants a spur under 25% built (`BUILT_MIN`: the margin over §5's 20% is for what the water takes) with a hole over 380 across in radius. A spur (`roads::spur_to`) leaves the nearest point of any of the sector's roads, runs on past the hole's centre by half its radius, keeps the spur's clearances, and ends at a farm gate; spurs are `lane_{s}_{k}` after the sector's own. `rural::plan_balanced` adds them before the weld, and `generate_roads_and_rural_plan` hands the metrics the gates. **On seeds 0 to 39 the pass never fires:** the roads already spread the farms (dry, every half-sector is 24 to 37% built, and no hole is over about 340). What lowers a half-sector is the water afterwards, which the walk now goes round. It's kept as the plan's guard, and its test takes a sector's outer road away to make a hole.
+- *As built (V1.3, #457):* **the balance pass on Plots v2's ring** never fires on the four seeds either: four main roads leave no hole near 380. Its provisional farms skip the room rule (`room: 0`), since they only measure the ground. **The water on the deeper plain.** Plots v2's plain runs from the water's rim at r3750 to the land's rise at r6200, 2450 deep against today's 1550. Unscaled, the plain soaked the water up as soon as on today's: the deepest courses stopped at r5300 to r5490, about 750 in from the plain's edge. `hydrology::soak` now starts soaking later and more slowly by the square root of the plain's depth over 1550 (`PLAIN_DEPTH`), which is exactly 1 on today's plain. On Plots v2's it's about 1.26, and the deepest courses reach r5200 to r5350, about 950 in: as far as today's deepest (r3711, about 990 in). Scaled by the whole ratio, the water reached r4730 to r4910, half way across the farms as today's reaches in proportion, but it cost about 65 farms and left the ring under 900. That choice is [#472](https://github.com/chrischaps/TheCapitol/issues/472)'s. `v2_farms_meet_their_targets` holds the reach to at least 700 in from the rural edge.
 
 ### RD8. Farms are pasture in Flint ([R6 #289](https://github.com/chrischaps/TheCapitol/issues/289))
 
@@ -128,6 +129,8 @@ The sectors' characters are a seeded shuffle of 4 *concession* and 4 *winding*, 
 
 - *As built (#423, plots plan §5.3):* **long lots.** The farms were made smaller, about 400 of about 36k for 117 of about 117k, to bring the zones' lot counts closer to even (#420). Two routes were planned. One was a back row of farms on drives. The other, the fallback, was a third road between the mains. Neither was needed. Narrower, closer farms along the same roads, with the depth kept, reach the count: frontage U[120, 160], field gap U[50, 100] and depth U[230, 310]. The cut-down floor is 100 (`MIN_FRONTAGE`). Front farms alone at about 210 × 190 made only 251 to 290. A farm of about 140 × 260 is the long lot of concession country, so the ring keeps its character, and the fields now lie behind the farms more than between them. The balance pass was left as it was: its spurs added almost nothing at these sizes. The ids keep the `farm_…` scheme. So the migration renames the old rows `oldfarm_…`, and startup's sync releases an owned one (`plot_sync::RETIRED_LOTS`). The smallest farms are wedges at junctions of 16k to 17k, which take 8 stations at 50 spacing. The median farm takes 15, under the `estate` capacity of 25 (#424).
 
+- *As built (V1.3, [#457](https://github.com/chrischaps/TheCapitol/issues/457), Plots v2 `the-capitol-plots-v2.md`):* **Plots v2's farms**, for the grown ring of r3600 to r6100, are `RuralParams::v2()` (test-only until the flip, #459). Today's defaults reproduce today's ring exactly, so the pin holds. The v2 draws are frontage U[132, 146], field gap U[40, 46] and depth U[230, 290]. **Every farm takes 12 stations** (`RuralParams::room`, `station_room::takes`): the walk cuts down or slides on past a farm that doesn't, and the overlap pass leaves one it pulls back short of 12 as a field. 12 need a farm about 132 wide (three across at 55, 10 in from each side) and 185 deep, so the cut-down floor is 132 (`min_frontage`) and the shallowest farm 185 (`min_depth`). Today's floors, 100 and 110, are params now too. The issue's draws (frontage U[115, 150], gap U[35, 70]) left 17 to 19% of farms short of 12, and a gap under 40 is one the overlap pass drops. `takes` was too slow to ask of every farm a walk tries (generation went from 1.1 to 5.5 s in release). It now builds each packing order only when the one before it fails, and rules out a lot that's short by Groemer's packing bound first, with the same answers (`the_packing_bound_never_rules_out_a_lot_that_fits`). `station_room` isn't test-only any more.
+
 ### RD9. The deed stays flat until Chris decides ([#292](https://github.com/chrischaps/TheCapitol/issues/292))
 
 The rural deed is a flat 250, and the tax is flat too. A farm is four times the land, so after the flip 250 buys four times as much. That may be right, since the countryside is the first rung next to the spawn, but it's Chris's call. #292 is `needs-decision`. Nothing in this plan changes prices.
@@ -143,6 +146,8 @@ The rural deed is a flat 250, and the tax is flat too. A farm is four times the 
 - **Winding sectors get two lanes, linked.** Chris picked this over one lane with more spurs. An inner lane runs about ρ0 3400 and an outer one about ρ0 4200, at least 500 apart, joined by one winding *cross-lane*. The spur stays.
 - **Flint follows the bigger world:** the fixture, the land mesh and `GroundField`, the grass mask, the fog, the views and the edge water ([RW2 #309](https://github.com/chrischaps/TheCapitol/issues/309)).
 - **What doesn't change:** the farm sizes, gaps and verges (RD6), the deck (RD2), the half-sector checks (§5), and the spawn on the south arterial at r3350, which now stands in the inner band.
+
+- *As built (V1.3, [#457](https://github.com/chrischaps/TheCapitol/issues/457)):* **Plots v2's ring, 2500 deep, takes four main roads a sector, not the three the plots plan sized it for.** The bands are shares of the depth now (`RuralParams::mains`: today's two are 330/1600 to 470/1600 and 1130/1600 to 1270/1600, which give today's radii to the bit). Plots v2's four are 0.113 to 0.147, 0.36 to 0.394, 0.606 to 0.64 and 0.853 to 0.887, about 620 apart. Three were tried first, at about 830 apart: the farms fronting them come to about 780 of about 35k, and no draw gets them to 900. The count is road length over farm spacing, a farm must be 132 wide to take 12 and 40 from the next, and three rows of farms on a 2500 ring leave a strip about 270 deep between each pair, which only the side roads cross. A fourth road puts a row of farms in those strips, and four rows of about 270-deep farms back to back fill the depth. **The roads between them:** a concession sector draws its one or two side roads for each pair of neighbouring main roads, and the road to a gate only off the outermost; a winding sector has a cross-lane for each pair. **Winding lanes follow one another** (`RuralParams::lanes_follow`): all a sector's lanes take the first one's sines, each from its own band, so they run alongside like contour lanes. Each still keeps 500 from the next, or is drawn on its own. Their sway is half today's (`RuralParams::sway`, 0.5). Swaying on their own, lanes about 620 apart pinched the farms between them short of 12 in places and left strips in others, and winding sectors carried about 103 farms against about 120 in a concession one; following, about 108.
 
 **The cost.** This is the third time the whole world has moved on purpose (after B1 and W1). Every position in a live database shifts once, so the change can't land in the middle of a citizens' soak (#257, #306). There's also more to walk: the edge of the wilds is 800 further from the tower.
 
@@ -218,6 +223,24 @@ R1's harness prints these, and R5's test asserts the hard ones over seeds 42, 7,
 | **Farms on water / gap, least** | 0 / ≥ 40 | 0 / 40.0 | 0 / 40.0 | 0 / 40.0 | 0 / 40.0 |
 
 On seeds 0 to 39: 363 to 380 farms, 35.2k to 36.7k on average, 34 to 36% built, every half-sector 25 to 41%, a CV of 0.09 or less, and every hard row met.
+
+**Plots v2's ring** (V1.3, [#457](https://github.com/chrischaps/TheCapitol/issues/457)): r3600 to r6100 in the grown world, with `RuralParams::v2()`'s four main roads and farms, against `metrics::V2_TARGETS` (plots plan §3). `rural::tests::v2_farms_meet_their_targets` asserts the hard rows on the four seeds, and `rural-plan.ps1 -V2` draws them.
+
+| Metric | Target | 42 | 7 | 1234 | 99999 |
+|---|---|---:|---:|---:|---:|
+| **Farms** | 900 to 1100 | 933 | 927 | 934 | 925 |
+| **Mean farm area** | 31k to 38k | 35.2k | 34.9k | 34.9k | 35.0k |
+| Farm area, least / most | | 27.4k / 41.9k | 25.7k / 42.0k | 26.4k / 42.1k | 26.8k / 42.1k |
+| **Ring built share** | 40 to 50% | 43% | 42% | 43% | 42% |
+| **Farms that take 12 stations** | ≥ 99% | 100% | 100% | 100% | 100% |
+| **Half-sector built share, least / most** | ≥ 20% / ≤ 60% | 37 / 49% | 31 / 48% | 35 / 49% | 36 / 50% |
+| **Main roads / roads joining them, fewest** | ≥ 4 / ≥ 3 | 4 / 3 | 4 / 3 | 4 / 3 | 4 / 3 |
+| **Audit issues / loose ends off a gate** | 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| **Farms on water / gap, least** | 0 / ≥ 40 | 0 / 40.0 | 0 / 40.0 | 0 / 40.0 | 0 / 40.0 |
+| The water's deepest reach | ≤ r5400 | r5270 | r5272 | r5243 | r5263 |
+| Generation, release (ms) | | 1448 | 1463 | 1402 | 1378 |
+
+On seeds 0 to 12 as well: 913 to 943 farms, 34.6k to 35.2k on average, 42 to 43% built, all taking 12. The grown world builds in about 1.45 s in release with these farms, against about 1.15 s with today's draws on its ring, and about 6.5 s in debug.
 
 *R5's figures, for the farms before #423:* on seeds 0 to 39: 110 to 123 farms, 112k to 121k on average, 34 to 38% built, every half-sector 24 to 47%, and a CV of 0.15 or less.
 
@@ -333,6 +356,8 @@ The flip is one commit, and `scripts/ci.sh full` runs before it lands. It covers
 Follow-up: [#292](https://github.com/chrischaps/TheCapitol/issues/292), the rural deed's price for four times the land (`needs-decision`).
 
 Later: [#423](https://github.com/chrischaps/TheCapitol/issues/423) (plots plan `the-capitol-plots.md` §5.3) made the farms smaller, about 400 of about 36k (RD6's #423 note, §5's as-built table). Capacity at the new size is [#424](https://github.com/chrischaps/TheCapitol/issues/424).
+
+Plots v2 (`the-capitol-plots-v2.md`): [#457](https://github.com/chrischaps/TheCapitol/issues/457) (V1.3) laid the farms for the grown ring, r3600 to r6100: four main roads a sector, about 930 farms of about 35k, every one taking 12 (RD6's, RD7's and RD10's V1.3 notes, §5's v2 table). The flip ([#459](https://github.com/chrischaps/TheCapitol/issues/459)) makes them the default.
 
 ## 9. Risks
 

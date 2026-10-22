@@ -514,8 +514,19 @@ struct Network {
     courses: Vec<Traced>,
 }
 
-/// How far in from the plain's edge the soaking may start, at most.
+/// How far in from the plain's edge the soaking may start, at most, on a
+/// plain [`PLAIN_DEPTH`] deep.
 const SOAK_ONSET: f64 = 400.0;
+/// The depth of the plain [`SOAK`] and [`SOAK_ONSET`] were tuned on, from
+/// the water's inner rim (r3150) to the plain's edge (r4700). A deeper plain
+/// starts soaking a course up further in, and more slowly, by the square
+/// root of its depth over this (V1.3, #457): exactly 1 on today's plain, and
+/// about 1.26 on Plots v2's, r3750 to r6200. There the deepest courses reach
+/// about 950 in from the plain's edge, as today's do; unscaled they stopped
+/// about 750 in. Scaled by the whole ratio they'd reach half way across the
+/// farms, as today's do in proportion, but cost about 65 of the 1000 farms
+/// (`the-capitol-rural.md`, RD7's V1.3 note). Which to keep is #472.
+const PLAIN_DEPTH: f64 = 1550.0;
 
 /// The flow through each cell, as on the plain the ground soaks it up.
 ///
@@ -524,6 +535,7 @@ const SOAK_ONSET: f64 = 400.0;
 /// gives out soon after it comes down and a big river runs on, and where the
 /// soaking starts varies too, so the courses don't all end on one circle.
 fn soak(grid: &Grid, flood: &Flood, seed: u64) -> Vec<f64> {
+    let scale = ((grid.rings.plain_edge - grid.rings.inner) / PLAIN_DEPTH).sqrt();
     let mut flow = vec![0.0f64; flood.down.len()];
     for &c in &flood.order {
         flow[c as usize] = 1.0;
@@ -531,10 +543,10 @@ fn soak(grid: &Grid, flood: &Flood, seed: u64) -> Vec<f64> {
     for &c in flood.order.iter().rev() {
         let c = c as usize;
         let (x, y) = grid.point(c);
-        let onset = grid.rings.plain_edge - SOAK_ONSET * value_noise(seed ^ SOAK_FIELD, x, y, 900.0);
+        let onset = grid.rings.plain_edge - SOAK_ONSET * scale * value_noise(seed ^ SOAK_FIELD, x, y, 900.0);
         let w = smoothstep((onset - grid.rings.radius(x, y)) / 100.0);
         if w > 0.0 {
-            let rate = SOAK * w * (0.3 + 1.4 * value_noise(seed ^ SOAK_FIELD ^ 1, x, y, 350.0));
+            let rate = SOAK / scale * w * (0.3 + 1.4 * value_noise(seed ^ SOAK_FIELD ^ 1, x, y, 350.0));
             flow[c] = (flow[c] - rate * flow[c].sqrt()).max(0.0);
         }
         let d = flood.down[c];

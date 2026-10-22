@@ -908,11 +908,12 @@ impl TerrainConfig {
     }
 
     /// The rural lots as `from_params` lays them, before `finish_lots`, and
-    /// the roads they're laid against: the ones from before the water, the
-    /// wild trails and the bazaar. For the rural plan report (#284).
+    /// the roads they're laid against: `roads`, the ones from before the
+    /// water, the wild trails and the bazaar
+    /// (`generate_roads_and_rural_plan`'s). For the rural plan report (#284).
     #[cfg(test)]
-    pub(crate) fn rural_plots_before(&self, params: &WorldGenParams) -> (Vec<TerrainPlot>, Vec<RoadSegment>) {
-        let laid = TerrainConfig { roads: self.generate_all_roads_with_params(params), ..self.clone() };
+    pub(crate) fn rural_plots_before(&self, params: &WorldGenParams, roads: Vec<RoadSegment>) -> (Vec<TerrainPlot>, Vec<RoadSegment>) {
+        let laid = TerrainConfig { roads, ..self.clone() };
         let water = super::rural::farms::Water { rivers: &self.rivers, streams: &self.streams, lakes: &self.lakes };
         (laid.generate_farms(params, water), laid.roads)
     }

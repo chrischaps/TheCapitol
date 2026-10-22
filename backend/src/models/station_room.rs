@@ -1,4 +1,6 @@
-//! How many stations fit on a lot, for the layouts' targets (plots plan §3).
+//! How many stations fit on a lot, for the layouts' targets (plots plan §3),
+//! and for Plots v2's farms, which must each take 12 (`RuralParams::room`,
+//! V1.3, #457).
 //!
 //! A copy of the Flint client's packing rule, `capitol_core::sim::lot::takes`
 //! (#305), which the backend can't call: stations at least `SPOT_SPACING`
@@ -56,9 +58,72 @@ fn pack(order: &[P], cap: usize) -> usize {
     placed.len()
 }
 
+/// The most stations that could stand in a convex lot `edge` in from its
+/// sides, by Groemer's packing bound: N points at least `d` apart in a convex
+/// set of area A and perimeter P number at most 2A / (√3 d²) + P / (2d) + 1.
+/// The set is the lot inset by `edge`, whose corners are where the inset
+/// sides meet. `None` when the lot isn't convex or the inset doesn't stay a
+/// quad, and the packing has to say. No order can pack past it, so it only
+/// ever saves packing, and [`takes`] and [`most`] answer as the client does
+/// (V1.3, #457).
+fn most_that_fit(c: &[P; 4], edge: f64) -> Option<f64> {
+    let cross = |o: P, a: P, b: P| (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0);
+    let turns: Vec<f64> = (0..4).map(|i| cross(c[i], c[(i + 1) % 4], c[(i + 2) % 4])).collect();
+    let sign = turns[0].signum();
+    if sign == 0.0 || turns.iter().any(|t| t.signum() != sign) {
+        return None;
+    }
+    // Each side moved `edge` inward, as a point and a direction.
+    let sides: Vec<(P, P)> = (0..4)
+        .map(|i| {
+            let (a, b) = (c[i], c[(i + 1) % 4]);
+            let len = dist(a, b);
+            let d = ((b.0 - a.0) / len, (b.1 - a.1) / len);
+            // Inward is to the left of a counter-clockwise walk.
+            let n = (-d.1 * sign, d.0 * sign);
+            ((a.0 + n.0 * edge, a.1 + n.1 * edge), d)
+        })
+        .collect();
+    let meet = |(p, d): (P, P), (q, e): (P, P)| -> Option<P> {
+        let denom = d.0 * e.1 - d.1 * e.0;
+        if denom.abs() < 1e-12 {
+            return None;
+        }
+        let s = ((q.0 - p.0) * e.1 - (q.1 - p.1) * e.0) / denom;
+        Some((p.0 + d.0 * s, p.1 + d.1 * s))
+    };
+    let mut k = [(0.0, 0.0); 4];
+    for i in 0..4 {
+        k[i] = meet(sides[(i + 3) % 4], sides[i])?;
+    }
+    // Still a quad that runs the same way, every side forward of its own.
+    for i in 0..4 {
+        let (a, b) = (k[i], k[(i + 1) % 4]);
+        let d = sides[i].1;
+        if (b.0 - a.0) * d.0 + (b.1 - a.1) * d.1 <= 0.0 || cross(k[i], k[(i + 1) % 4], k[(i + 2) % 4]).signum() != sign {
+            return None;
+        }
+    }
+    let area = (0..4).map(|i| k[i].0 * k[(i + 1) % 4].1 - k[(i + 1) % 4].0 * k[i].1).sum::<f64>().abs() / 2.0;
+    let perimeter: f64 = (0..4).map(|i| dist(k[i], k[(i + 1) % 4])).sum();
+    let d = SPOT_SPACING - 1e-6;
+    Some(2.0 * area / (3f64.sqrt() * d * d) + perimeter / (2.0 * d) + 1.0)
+}
+
+fn edge_of(c: &[P; 4]) -> f64 {
+    let len_u = (dist(c[0], c[1]) + dist(c[3], c[2])) / 2.0;
+    let len_v = (dist(c[0], c[3]) + dist(c[1], c[2])) / 2.0;
+    EDGE.min(0.4 * len_u.min(len_v))
+}
+
 /// Whether an empty lot with these corners takes `wanted` stations, as
-/// `sim::lot::takes` says, with its capacity out of the way.
+/// `sim::lot::takes` says, with its capacity out of the way. A lot the
+/// packing bound rules out is answered without packing: the farms ask this
+/// of every farm they try (V1.3, #457).
 pub fn takes(c: &[P; 4], wanted: usize) -> bool {
+    if most_that_fit(c, edge_of(c)).is_some_and(|most| most < wanted as f64) {
+        return false;
+    }
     most(c, wanted) >= wanted
 }
 
@@ -66,9 +131,22 @@ pub fn takes(c: &[P; 4], wanted: usize) -> bool {
 /// `takes`'s rule: `takes(c, n)` holds for every n up to it and none past
 /// it, as each order packs greedily. One packing, not a scan of n (#468).
 pub fn most(c: &[P; 4], cap: usize) -> usize {
+    // No order packs past the bound, so it caps the packing too.
+    let cap = match most_that_fit(c, edge_of(c)) {
+        Some(bound) => cap.min(bound.max(0.0).floor() as usize),
+        None => cap,
+    };
+    packed(c, cap)
+}
+
+/// [`most`] without the bound: the best of the client's orders, each packed
+/// greedily up to `cap`. Each order is built only when the ones before it
+/// fall short of `cap`, and the first starts with the coarse lattice, so a
+/// lot that lattice fills needs no fine grid at all.
+fn packed(c: &[P; 4], cap: usize) -> usize {
     let len_u = (dist(c[0], c[1]) + dist(c[3], c[2])) / 2.0;
     let len_v = (dist(c[0], c[3]) + dist(c[1], c[2])) / 2.0;
-    let edge = EDGE.min(0.4 * len_u.min(len_v));
+    let edge = edge_of(c);
     let middle = at(c, 0.5, 0.5);
     let fits = |p: P| quad_contains(c, p.0, p.1) && (0..4).all(|i| to_segment(p, c[i], c[(i + 1) % 4]) >= edge);
     let grid = |step: f64| -> Vec<P> {
@@ -84,16 +162,35 @@ pub fn most(c: &[P; 4], cap: usize) -> usize {
         points.sort_by(|a, b| key(*a).total_cmp(&key(*b)));
         points
     };
-    let fine = grid(FINE);
+    // The centred order packs its coarse prefix first, so what that prefix
+    // packs, the whole order packs at least.
     let mut centred = by(grid(SPOT_SPACING), &|p| dist(p, middle));
+    let mut best = pack(&centred, cap);
+    if best >= cap {
+        return best;
+    }
+    let fine = grid(FINE);
     centred.extend(by(fine.clone(), &|p| dist(p, middle)));
+    best = best.max(pack(&centred, cap));
     let (a, b) = if len_u >= len_v { (at(c, 0.0, 0.5), at(c, 1.0, 0.5)) } else { (at(c, 0.5, 0.0), at(c, 0.5, 1.0)) };
     let len = dist(a, b).max(1e-9);
     let axis = ((b.0 - a.0) / len, (b.1 - a.1) / len);
     let along = |p: P| (p.0 - a.0) * axis.0 + (p.1 - a.1) * axis.1;
-    let mut orders = vec![centred, by(fine.clone(), &along), by(fine.clone(), &|p| -along(p))];
-    orders.extend(c.iter().map(|&corner| by(fine.clone(), &|p| dist(p, corner))));
-    orders.iter().map(|order| pack(order, cap)).max().unwrap_or(0)
+    let keys: [&dyn Fn(P) -> f64; 6] = [
+        &along,
+        &|p| -along(p),
+        &|p| dist(p, c[0]),
+        &|p| dist(p, c[1]),
+        &|p| dist(p, c[2]),
+        &|p| dist(p, c[3]),
+    ];
+    for key in keys {
+        if best >= cap {
+            break;
+        }
+        best = best.max(pack(&by(fine.clone(), key), cap));
+    }
+    best
 }
 
 #[cfg(test)]
@@ -131,5 +228,32 @@ mod tests {
         }
         // Three rows of three: 2 × 55 + 2 × 10 = 130 each way.
         assert_eq!(most(&boxed(140.0, 130.0), 24), 9);
+    }
+
+    /// The packing bound only ever rules out what the packing can't do: on
+    /// boxes and skewed quads of every size round a farm's, no order packs
+    /// past it, and `most` is what the packing alone finds.
+    #[test]
+    fn the_packing_bound_never_rules_out_a_lot_that_fits() {
+        let mut rng = crate::models::geom::SplitMix64::stream(7, &[1]);
+        let mut ruled_out = 0;
+        for _ in 0..600 {
+            let (w, h) = (rng.range(60.0, 200.0), rng.range(60.0, 320.0));
+            let (skew, lean) = (rng.range(-30.0, 30.0), rng.range(-25.0, 25.0));
+            let c = [(0.0, 0.0), (w, lean), (w + skew, h + lean), (skew, h)];
+            let unbounded = packed(&c, 40);
+            if let Some(bound) = most_that_fit(&c, edge_of(&c)) {
+                assert!((unbounded as f64) <= bound, "{c:?} packs {unbounded}, past the bound {bound:.2}");
+                ruled_out += [4, 8, 12, 15].iter().filter(|&&n| bound < n as f64).count();
+            }
+            assert_eq!(most(&c, 40), unbounded, "{c:?}");
+            for n in [4, 8, 12, 15] {
+                assert_eq!(takes(&c, n), unbounded >= n, "{c:?} takes {n}?");
+            }
+        }
+        assert!(ruled_out > 200, "the bound ruled out only {ruled_out}");
+        // A farm a hair short of 12, and one that takes them.
+        assert!(most_that_fit(&boxed(140.0, 150.0), EDGE).unwrap() < 12.0);
+        assert!(takes(&boxed(132.0, 190.0), 12));
     }
 }

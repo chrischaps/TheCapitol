@@ -26,7 +26,7 @@ use capitol_protocol::terrain::{Lake, RoadSegment, RoadType, TerrainPlot, WaterC
 use serde::Serialize;
 
 use crate::models::suburb::metrics::{percentile, Check, Marker, Scope, Target, Violation};
-use crate::models::lot_clearance;
+use crate::models::{lot_clearance, station_room};
 use crate::models::geom::{quads_overlap_strict, SpatialGrid};
 use crate::models::street_plan;
 use crate::models::terrain::{point_to_segment_distance, TerrainConfig, WorldGenParams};
@@ -49,6 +49,9 @@ pub const MIN_GAP: f64 = 40.0;
 const EDGE_PAD: f64 = 40.0;
 /// Grid cell for the sampling lookups.
 const CELL: f64 = 100.0;
+/// Lots further apart than this, box to box, aren't measured against each
+/// other: no farm's nearest neighbour is that far.
+const NEAR: f64 = 200.0;
 
 /// Whether `road` is one of the ring's own, a `lane_*` (R3). The wild trails
 /// (`wild_*`) are `Trail` too, but they're the wilds'.
@@ -128,6 +131,9 @@ pub struct Metrics {
     pub lot_area_mean: Option<f64>,
     pub lot_area_min: Option<f64>,
     pub lot_area_max: Option<f64>,
+    /// The share of the farms that take 12 stations at 50 spacing
+    /// (`station_room::takes`), Plots v2's room for a farm (§3).
+    pub take_12_share: Option<f64>,
 
     /// The share of the ring a rural lot stands on.
     pub built_share: Option<f64>,
@@ -184,9 +190,36 @@ pub const TARGETS: &[Target] = &[
     hard("gap_min", "gap between farms, least", Check::Min(MIN_GAP)),
 ];
 
+/// Plots v2's targets (`the-capitol-plots-v2.md` §3, V1.3, #457), for its
+/// ring of r3600 to r6100 and four main roads a sector: about 1000 farms of
+/// about 34k, built 40 to 50%, nearly every one taking 12 stations. The
+/// rows that hold the ring together are today's, with a road joining each
+/// pair of main roads.
+pub const V2_TARGETS: &[Target] = &[
+    hard("lots", "farms", Check::Range(900.0, 1100.0)),
+    hard("lot_area_mean", "mean farm area", Check::Range(31_000.0, 38_000.0)),
+    hard("built_share", "ring built share", Check::Range(0.40, 0.50)),
+    hard("take_12_share", "farms that take 12 stations", Check::Min(0.99)),
+    hard("half_sector_min", "half-sector built share, least", Check::Min(0.20)),
+    hard("half_sector_max", "half-sector built share, most", Check::Max(0.60)),
+    soft("half_sector_cv", "CV of half-sector built shares", Check::Max(0.30)),
+    hard("sector_character_min", "sectors of each character, fewest", Check::Min(3.0)),
+    hard("sector_mains_min", "main roads in a sector, fewest", Check::Min(4.0)),
+    hard("sector_links_min", "roads joining them in a sector, fewest", Check::Min(3.0)),
+    hard("audit_issues", "street_plan::audit issues, but for loose ends", Check::Max(0.0)),
+    hard("loose_ends_off_gate", "loose road ends off a farm gate", Check::Max(0.0)),
+    hard("lots_on_water", "farms on water", Check::Max(0.0)),
+    hard("gap_min", "gap between farms, least", Check::Min(MIN_GAP)),
+];
+
 /// The targets `m` misses. A metric with nothing to measure misses nothing.
 pub fn violations(m: &Metrics) -> Vec<Violation> {
-    TARGETS
+    violations_against(m, TARGETS)
+}
+
+/// The targets of `targets` that `m` misses.
+pub fn violations_against(m: &Metrics, targets: &[Target]) -> Vec<Violation> {
+    targets
         .iter()
         .filter_map(|t| {
             let v = m.value(t.metric)?;
@@ -225,11 +258,12 @@ pub fn measure_world(params: &WorldGenParams, sector: Option<u8>) -> Measurement
     let terrain = TerrainConfig::from_params(params);
     let gen_ms = started.elapsed().as_secs_f64() * 1000.0;
     let center = (terrain.center_x, terrain.center_y);
-    let (before, laid_on) = terrain.rural_plots_before(params);
+    // The plan again, for its gates (the balance pass's too) and deck, and
+    // the roads the farms were laid against.
+    let (roads, ring) = terrain.generate_roads_and_rural_plan(params);
+    let (before, laid_on) = terrain.rural_plots_before(params, roads);
     let cleared = lot_clearance::clear_each(&before, &laid_on, &terrain.water_rings, center);
     let scope = Scope { center, inner: params.suburban_outer_radius, outer: params.rural_outer_radius, sector };
-    // The plan again, for its gates (the balance pass's too) and deck.
-    let ring = terrain.generate_roads_and_rural_plan(params).1;
     let plan = Plan {
         roads: &terrain.roads,
         lots: &terrain.terrain_plots,
@@ -314,6 +348,10 @@ pub fn measure(plan: &Plan) -> Measured {
     }
     m.lot_area_min = areas.iter().copied().reduce(f64::min);
     m.lot_area_max = areas.iter().copied().reduce(f64::max);
+    if !lots.is_empty() {
+        let twelve = lots.iter().filter(|l| station_room::takes(&l.corners, 12)).count();
+        m.take_12_share = Some(twelve as f64 / lots.len() as f64);
+    }
 
     let before: Vec<usize> = (0..plan.before.len())
         .filter(|&i| plan.before[i].zone == "rural" && scope.contains(centroid(&plan.before[i].corners)))
@@ -326,11 +364,20 @@ pub fn measure(plan: &Plan) -> Measured {
         m.trimmed_share = Some(trimmed as f64 / before.len() as f64);
     }
 
-    // Gaps. There are tens of lots, so every pair.
+    // Gaps, between every pair of lots that come within [`NEAR`] of each
+    // other: a farm's nearest neighbour is a field away, and a ring of Plots
+    // v2's has about 1000 (V1.3, #457).
     let mut nearest = vec![f64::INFINITY; lots.len()];
     let mut gap_min: Option<f64> = None;
+    let boxes: Vec<(P, P)> = lots.iter().map(|l| bounds(&l.corners)).collect();
+    let mut grid = SpatialGrid::new(scope.center.0, scope.center.1, scope.outer + CELL, CELL);
+    for (i, l) in lots.iter().enumerate() {
+        grid.insert(i, &l.corners);
+    }
     for i in 0..lots.len() {
-        for k in i + 1..lots.len() {
+        let (lo, hi) = boxes[i];
+        let near = grid.query_aabb(lo.0 - NEAR, lo.1 - NEAR, hi.0 + NEAR, hi.1 + NEAR);
+        for k in near.into_iter().filter(|&k| k > i) {
             let (a, b) = (&lots[i].corners, &lots[k].corners);
             let overlap = quads_overlap_strict(a, b);
             let gap = if overlap { 0.0 } else { quad_gap(a, b) };

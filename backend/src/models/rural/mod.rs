@@ -48,7 +48,31 @@ pub struct RuralParams {
     pub field_gap: (f64, f64),
     /// ...and its depth, before the region and the other roads clip it.
     pub depth: (f64, f64),
+    /// Where a farm doesn't fit, its frontage is cut down to no less than
+    /// this before the walk slides on...
+    pub min_frontage: f64,
+    /// ...and a farm shallower than this at either side isn't one.
+    pub min_depth: f64,
+    /// The stations a farm must take at 50 spacing (`station_room::takes`),
+    /// or the walk cuts it down or slides on, and the overlap pass leaves
+    /// one it pulls back short of it as a field. 0 asks none, as today.
+    pub room: usize,
+    /// How far the winding lanes sway, as a share of today's (RD4).
+    pub sway: f64,
+    /// A winding sector's main lanes follow one another: one set of sines
+    /// for them all, so they run alongside as contour lanes do, rather than
+    /// each sway on its own and pinch the farms between them (RD4).
+    pub lanes_follow: bool,
+    /// The main roads across every sector, from arterial to arterial, inner
+    /// first: the band of the ring's depth each keeps to, as shares of it
+    /// (RD10). Two today, at 330 to 470 and 1130 to 1270 into the 1600-deep
+    /// ring; Plots v2's ring takes three (V1.3, #457).
+    pub mains: Vec<(f64, f64)>,
 }
+
+/// The ring's depth today's bands were drawn in, so their shares give the
+/// same roads (RD10).
+const DEPTH_TODAY: f64 = 1600.0;
 
 impl Default for RuralParams {
     fn default() -> Self {
@@ -57,6 +81,37 @@ impl Default for RuralParams {
             frontage: (120.0, 160.0),
             field_gap: (50.0, 100.0),
             depth: (230.0, 310.0),
+            min_frontage: 100.0,
+            min_depth: 110.0,
+            room: 0,
+            sway: 1.0,
+            lanes_follow: false,
+            mains: vec![
+                (330.0 / DEPTH_TODAY, 470.0 / DEPTH_TODAY),
+                (1130.0 / DEPTH_TODAY, 1270.0 / DEPTH_TODAY),
+            ],
+        }
+    }
+}
+
+impl RuralParams {
+    /// Plots v2's farms (`the-capitol-plots-v2.md`, V1.3, #457), for its
+    /// ring of r3600 to r6100: three main roads a sector, evenly down the
+    /// 2500 of depth, and narrower farms closer along them, about 1000 of
+    /// about 34k. Test-only until the flip (#459) makes them the default.
+    #[cfg(test)]
+    pub fn v2() -> Self {
+        Self {
+            frontage: (132.0, 146.0),
+            field_gap: (40.0, 46.0),
+            depth: (230.0, 290.0),
+            min_frontage: 132.0,
+            min_depth: 185.0,
+            room: 12,
+            sway: 0.5,
+            lanes_follow: true,
+            mains: vec![(0.113, 0.147), (0.36, 0.394), (0.606, 0.64), (0.853, 0.887)],
+            ..Self::default()
         }
     }
 }
@@ -65,8 +120,10 @@ impl Default for RuralParams {
 #[derive(Debug, Default)]
 pub struct Plan {
     pub sectors: Vec<Sector>,
-    /// `lane_{s}_{k}`: each sector's inner main road is `k = 0` and its outer
-    /// one `k = 1`. The balance pass's spurs come after a sector's own.
+    /// `lane_{s}_{k}`: each sector's main roads are `k = 0` (the inner one) up
+    /// to one less than `RuralParams::mains` has, and the roads between them
+    /// and to a gate come next. The balance pass's spurs come after a
+    /// sector's own.
     pub roads: Vec<RoadSegment>,
     /// Where the side roads and spurs end. A loose end is allowed only here.
     pub gates: Vec<P>,
@@ -88,11 +145,13 @@ pub fn plan(params: &WorldGenParams, center: P, roads: &[RoadSegment]) -> Plan {
         outer: params.rural_outer_radius,
         arterial_width: params.arterial_width,
         lane_width: params.rural.lane_width,
+        sway: params.rural.sway,
+        lanes_follow: params.rural.lanes_follow,
     };
     let mut plan = Plan::default();
     for sector in &sectors {
         let mut rng = SplitMix64::stream(params.seed, &[RURAL, sector.index as u64]);
-        let laid = roads::lay(sector, &ring, &mut rng);
+        let laid = roads::lay(sector, &ring, &params.rural.mains, &mut rng);
         plan.roads.extend(laid.roads);
         plan.gates.extend(laid.gates);
     }
@@ -267,6 +326,51 @@ pub(crate) mod tests {
                 missed(&soft)
             );
             failed.extend(hard.iter().map(|v| format!("seed {seed}: {}", missed(std::slice::from_ref(v))[0])));
+        }
+        assert!(failed.is_empty(), "hard misses: {failed:?}");
+    }
+
+    /// Plots v2's ring (V1.3, #457): the grown world's rings, r3600 to
+    /// r6100, with `RuralParams::v2`'s farms.
+    pub(crate) fn v2_world(seed: u64) -> WorldGenParams {
+        WorldGenParams { seed, rural: RuralParams::v2(), ..WorldGenParams::grown() }
+    }
+
+    /// V1.3's acceptance (`the-capitol-plots-v2.md` §3): on the four seeds,
+    /// Plots v2's ring holds every hard row of `metrics::V2_TARGETS`: about
+    /// 1000 farms of about 34k, built 40 to 50%, nearly all taking 12
+    /// stations, with today's rows for the sectors, the roads, the audit,
+    /// the water and the gaps. The water still comes onto the plain: its
+    /// deepest course reaches at least 700 in past the rural edge, and none
+    /// comes in past the water's rim (how far it should is #472). Each seed
+    /// builds a grown world of its own, so this is the one v2 test that does.
+    #[test]
+    fn v2_farms_meet_their_targets() {
+        let mut failed = Vec::new();
+        for seed in SEEDS {
+            let params = v2_world(seed);
+            let measured = metrics::measure_world(&params, None);
+            let m = &measured.measured.metrics;
+            for t in metrics::V2_TARGETS.iter().filter(|t| t.hard) {
+                assert!(m.value(t.metric).is_some(), "seed {seed}: {} wasn't measured", t.label);
+            }
+            let frame = params.frame();
+            let t = &measured.terrain;
+            let reach = t.rivers.iter().chain(&t.streams).flat_map(|c| &c.points).map(|p| frame.radius(p.x, p.y)).fold(f64::MAX, f64::min);
+            eprintln!(
+                "seed {seed}: {} farms of {:.1}k, {:.1}% built, {:.1}% take 12, half-sectors {:.0} to {:.0}%, water in to r{reach:.0}, {:.0} ms",
+                m.lots,
+                m.lot_area_mean.unwrap() / 1000.0,
+                m.built_share.unwrap() * 100.0,
+                m.take_12_share.unwrap() * 100.0,
+                m.half_sector_min.unwrap() * 100.0,
+                m.half_sector_max.unwrap() * 100.0,
+                m.gen_ms
+            );
+            assert!(reach <= frame.rural_edge() - 700.0, "seed {seed}: the water reaches in only to r{reach:.0}");
+            assert!(reach > frame.water_inner_radius() - crate::models::hydrology::CELL, "seed {seed}: water at r{reach:.0}");
+            let hard = metrics::violations_against(m, metrics::V2_TARGETS).into_iter().filter(|v| v.hard);
+            failed.extend(hard.map(|v| format!("seed {seed}: {} {} (target {})", v.label, v.value, v.target)));
         }
         assert!(failed.is_empty(), "hard misses: {failed:?}");
     }

@@ -20,6 +20,7 @@ use capitol_protocol::terrain::{RoadSegment, RoadType, TerrainPlot};
 use super::farms;
 use super::roads::{self, Ring};
 use super::sectors::{Sector, RURAL};
+use super::RuralParams;
 use crate::models::geom::SplitMix64;
 use crate::models::lot_geometry::{dist_to_seg, Region};
 use crate::models::suburb::parks::chamfer_with;
@@ -67,7 +68,12 @@ pub fn spurs(params: &WorldGenParams, center: P, roads: &[RoadSegment], sectors:
         outer: params.rural_outer_radius,
         arterial_width: params.arterial_width,
         lane_width: params.rural.lane_width,
+        sway: params.rural.sway,
+        lanes_follow: params.rural.lanes_follow,
     };
+    // The provisional farms only measure the ground, so they skip the room
+    // rule's packing, which is the slow part of laying them (V1.3, #457).
+    let params = &WorldGenParams { rural: RuralParams { room: 0, ..params.rural.clone() }, ..params.clone() };
     let (mut out, mut gates) = (Vec::new(), Vec::new());
     for sector in sectors {
         let mut rng = SplitMix64::stream(params.seed, &[RURAL, sector.index as u64, BALANCE]);
