@@ -373,6 +373,7 @@ mod tests {
             unit_flows: BTreeMap::new(),
             units_settled: true,
             crafts: BTreeMap::new(),
+            grants: Default::default(),
             load: Load::default(),
         };
         Sample::between(&ledger(at_ms - 10_000), &ledger(at_ms), &HashSet::new())

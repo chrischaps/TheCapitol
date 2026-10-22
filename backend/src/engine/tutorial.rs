@@ -12,6 +12,9 @@
 //! for, so no client can say "I did it". What counts for which step is
 //! [`Did::step`]. The steps only the client can see (`Judge::Client`) wait
 //! for `tutorial_seen` (#441).
+//!
+//! The step that completes every chapter before the Deeds Office opens the
+//! player's deed grant (`deed_grants`, #440).
 
 use capitol_protocol::rules::market::OrderSide;
 use capitol_protocol::rules::Zone;
@@ -22,7 +25,7 @@ use std::collections::HashSet;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::engine::GameEvent;
+use crate::engine::{deed_grants, GameEvent};
 use crate::state::AppState;
 
 /// Every step's bits, as stored
@@ -163,8 +166,21 @@ pub async fn saw(db: &PgPool, events: &broadcast::Sender<GameEvent>, player: Uui
         message: ServerMessage::TutorialStep { step, done: after.done },
     });
     if after.done.deed_earned() && !Steps::from_bits(after.done.bits() & !step.bit()).deed_earned() {
-        // The grant opens here (#440)
-        tracing::info!("{player} has walked the road in and earned their deed");
+        open_grant(db, player).await;
+    }
+}
+
+/// `player` has walked the road in: open their deed grant (#440). If this
+/// fails, the claim opens it from the steps instead (`deed_grants::take_in`).
+async fn open_grant(db: &PgPool, player: Uuid) {
+    let opened = match db.acquire().await {
+        Ok(mut conn) => deed_grants::open(&mut conn, player).await,
+        Err(e) => Err(e),
+    };
+    match opened {
+        Ok(true) => tracing::info!("{player} has walked the road in and earned their deed"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("Couldn't open {player}'s deed grant: {e}"),
     }
 }
 

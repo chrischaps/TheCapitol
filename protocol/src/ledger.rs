@@ -60,7 +60,28 @@ pub struct Ledger {
     /// reads with none.
     #[serde(default)]
     pub crafts: BTreeMap<String, Crafts>,
+    /// The road in's deed grants (#440): land given, not bought. They're a
+    /// faucet of land, outside the Strands' books, since no Strand moves
+    /// when one is spent. A ledger from before reads with none.
+    #[serde(default)]
+    pub grants: DeedGrants,
     pub load: Load,
+}
+
+/// The road in's deed grants as they stand (#440, plan D5): opened by
+/// walking it, spent on a lot, and handed back when a granted lot is retired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct DeedGrants {
+    /// Grants earned, ever: one an account at most
+    pub opened: u64,
+    /// Those spent on a plot, now. A foreclosed plot's grant stays spent.
+    pub used: u64,
+    /// Those a retired lot has handed back, spent again since or not
+    pub returned: u64,
+    /// What the granted plots held now are assessed at: the zone's deed
+    /// price when each was claimed (D4), and what their tax is on
+    pub granted_value: i64,
 }
 
 /// Crafts of one recipe: since the server started on a [`Ledger`], over the
@@ -681,6 +702,7 @@ mod tests {
             unit_flows: BTreeMap::new(),
             units_settled: true,
             crafts: BTreeMap::new(),
+            grants: Default::default(),
             load: Load::default(),
         }
     }

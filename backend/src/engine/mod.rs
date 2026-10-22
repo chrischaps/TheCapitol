@@ -12,6 +12,7 @@ pub mod container_access;
 mod craft_completion;
 mod crafting;
 pub mod currency;
+pub mod deed_grants;
 mod events;
 mod extraction;
 pub mod gazette;

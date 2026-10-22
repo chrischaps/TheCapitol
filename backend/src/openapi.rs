@@ -5,7 +5,7 @@ use utoipa::{Modify, OpenApi};
 
 use capitol_protocol::rest::{
     AccountInfo, AccountKind, ApiKeyInfo, ApiKeyScope, CreateApiKeyRequest, CreatedApiKey, AuthResponse, Bounds, CatalogContainerType, CatalogItemType, CatalogTool, CatalogResourceType,
-    CatalogResponse, CatalogStationType, ClaimPlotResponse, ClaimedPlot, ContainerResponse, ContainersResponse,
+    CatalogResponse, CatalogStationType, ClaimPlotRequest, ClaimPlotResponse, ClaimedPlot, ContainerResponse, ContainersResponse,
     CurrencyResponse, DeedPrice, DeedPricesResponse, DepositRequest, DepositResponse,
     ExtractRequest, ExtractResponse, HealthResponse, InventoryItem, InventoryResponse,
     ListPlotsResponse, LoginRequest, LogoutRequest, RefreshRequest, MoveItemRequest, MoveItemResponse,
@@ -378,6 +378,7 @@ Bots are for subscribers: minting a key, and signing in with one, take a running
         ListPlotsResponse,
         PlotInfo,
         Bounds,
+        ClaimPlotRequest,
         ClaimPlotResponse,
         PayTaxRequest,
         PayTaxResponse,

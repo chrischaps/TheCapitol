@@ -305,9 +305,10 @@ pub async fn commit_world_params(
         }
     }
     tracing::info!(
-        "Admin {} commit synced plots: {} added, {} updated, {} removed, {} owned released, {} stations off a plot taken down",
+        "Admin {} commit synced plots: {} added, {} updated, {} removed, {} owned released ({} granted, their grants handed back), {} stations off a plot taken down",
         user.account_id, report.inserted, report.updated, report.deleted,
         if query.force { report.conflicts.len() } else { 0 },
+        report.grants_returned.len(),
         report.displaced.len()
     );
 

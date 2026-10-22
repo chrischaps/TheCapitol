@@ -156,6 +156,8 @@ pub async fn tally_many(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeedEvent {
     Claimed,
+    /// Claimed with the road in's deed grant (#440): a settler, not a buyer
+    Granted,
     Foreclosed,
 }
 
@@ -169,6 +171,7 @@ pub async fn record_deed(
 ) -> Result<(), sqlx::Error> {
     let kind = match kind {
         DeedEvent::Claimed => "claimed",
+        DeedEvent::Granted => "granted",
         DeedEvent::Foreclosed => "foreclosed",
     };
     sqlx::query("INSERT INTO deed_events (plot_id, zone_id, kind, player_id) VALUES ($1, $2, $3, $4)")
@@ -336,8 +339,9 @@ pub async fn gather(db: &PgPool, day: i64) -> Result<DayRecords, sqlx::Error> {
     let mut claimed_by_people = 0;
     for (zone, kind, citizen, n) in deed_rows {
         let entry = deeds.entry(zone).or_default();
+        // A grant's claim is a claim in the land column (#440)
         match kind.as_str() {
-            "claimed" => {
+            "claimed" | "granted" => {
                 entry.0 += n;
                 if !citizen {
                     claimed_by_people += n;

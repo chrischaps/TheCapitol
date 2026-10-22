@@ -2610,6 +2610,17 @@ impl Bounds {
     }
 }
 
+/// `POST /plots/{id}/claim`'s body, which may be left off: a claim with no
+/// body pays the deed in Strands
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct ClaimPlotRequest {
+    /// Claim with the deed the road in earned (#440) instead of paying:
+    /// one an account, on a rural, suburban or urban lot
+    #[serde(default)]
+    pub use_grant: bool,
+}
+
 /// `POST /plots/{id}/claim`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]

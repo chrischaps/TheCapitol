@@ -338,14 +338,14 @@ async fn collect_debt(db: &PgPool, plot_id: Uuid, owner_id: Uuid) -> i64 {
 /// once the row is locked, the plot is no longer owned or owes less.
 pub async fn foreclose(db: &PgPool, plot_id: Uuid, rate: f64) -> Result<Option<Foreclosure>, String> {
     let mut tx = db.begin().await.map_err(|e| e.to_string())?;
-    let row: Option<(Option<Uuid>, i32, i32, Option<String>, String)> = sqlx::query_as(
-        "SELECT owner_id, assessed_value, tax_owed, terrain_id, zone_id FROM plots WHERE id = $1 FOR UPDATE",
+    let row: Option<(Option<Uuid>, i32, i32, Option<String>, String, bool)> = sqlx::query_as(
+        "SELECT owner_id, assessed_value, tax_owed, terrain_id, zone_id, granted FROM plots WHERE id = $1 FOR UPDATE",
     )
     .bind(plot_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
-    let Some((Some(owner_id), assessed_value, tax_owed, terrain_id, zone_id)) = row else {
+    let Some((Some(owner_id), assessed_value, tax_owed, terrain_id, zone_id, granted)) = row else {
         return Ok(None);
     };
     let tax_owed = tax_owed as i64;
@@ -364,7 +364,10 @@ pub async fn foreclose(db: &PgPool, plot_id: Uuid, rate: f64) -> Result<Option<F
     gazette::record_deed(&mut tx, plot_id, &zone_id, DeedEvent::Foreclosed, owner_id)
         .await
         .map_err(|e| e.to_string())?;
-    let refund = (assessed_value as i64 - tax_owed).max(0);
+    // A granted plot was never paid for, so its debt is written off against
+    // nothing: free land never becomes Strands (#440, plan D5). The grant
+    // stays spent.
+    let refund = if granted { 0 } else { (assessed_value as i64 - tax_owed).max(0) };
     let balance = if refund > 0 {
         add_strands_in(
             &mut tx,
@@ -890,6 +893,29 @@ mod tests {
         assert_eq!(report.foreclosures[0].refund, 0);
         assert_eq!(balance(&db, ada).await, 0);
         assert!(ledger(&db, ada).await.is_empty());
+    }
+
+    /// A granted plot was never paid for, so foreclosing it refunds nothing,
+    /// and the grant stays spent (#440, plan D5)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn foreclosing_a_granted_plot_refunds_nothing(db: PgPool) {
+        use crate::engine::deed_grants::tests::{grant_of, granted};
+        let ada = player(&db, "ada", 0).await;
+        let lot = plot(&db, Some(ada), VALUE).await;
+        granted(&db, ada, lot).await;
+        owe(&db, lot, 480).await;
+
+        let report = process_property_taxes(&db, RATE).await;
+
+        assert_eq!(report.foreclosures.len(), 1);
+        assert_eq!((report.foreclosures[0].refund, report.foreclosures[0].balance), (0, 0));
+        assert_eq!(owner(&db, lot).await, Some(None));
+        assert_eq!(balance(&db, ada).await, 0);
+        assert!(ledger(&db, ada).await.is_empty());
+        assert_eq!(grant_of(&db, ada).await, Some((true, Some(lot), false)), "spent, not handed back");
+        let still: bool = sqlx::query_scalar("SELECT granted FROM plots WHERE id = $1").bind(lot).fetch_one(&db).await.unwrap();
+        assert!(!still, "the next owner buys it plainly");
     }
 
     #[sqlx::test(migrations = "./migrations")]

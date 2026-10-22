@@ -674,6 +674,7 @@ mod tests {
             )]),
             units_settled: true,
             crafts: BTreeMap::new(),
+            grants: Default::default(),
             load,
         }
     }

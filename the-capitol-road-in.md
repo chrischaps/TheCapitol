@@ -183,6 +183,22 @@ The tutorial runs in a live market that may be empty. A step that needs someone 
   - `deed_grants`, and `claim()` with `use_grant`;
   - the assessed value at the zone's price, foreclosure refunds 0, and a retired lot returns the grant;
   - the ledger and the Observatory.
+
+  *As built:*
+  - **The table.** `deed_grants` (`20261221_001_deed_grants.sql`) is keyed by `account_id`, so it's one an account, with `player_id`, `opened_at`, `used_at`, `plot_id` and `returned_at`. `plots.granted` marks a plot claimed with one, and a release clears it. `deed_events` takes the kind `granted`, which the Gazette's land column counts as a claim.
+  - **`engine::deed_grants`.**
+    - `open`: `tutorial::saw` calls it the moment `deed_earned()` turns true.
+    - `take_in`: locks the grant in the claim's transaction. A claim that finds none opens it from `tutorial_progress` when the steps say it's earned, so a failed open never costs the player their deed.
+    - `use_in` and `hand_back_in`, and `books` for the ledger.
+  - **The claim.** `POST /plots/{id}/claim` takes an optional body, `ClaimPlotRequest { use_grant }`. With no body it pays in Strands, so every client works as before.
+    - With the grant, in the same transaction: the zone must be rural, suburban or urban; the grant is locked, checked and spent; nothing is charged; the plot is assessed at the zone's live price (`zones.deed_cost` × `deed_price.<zone>`); and the deed event is `granted`.
+    - It's refused with words: not earned yet, already used, or not a home zone.
+    - No balance is announced, since none changed.
+  - **Foreclosure** refunds 0 on a granted plot, and its grant stays spent. **`plot_sync`** hands a granted plot's grant back on a retired lot or a forced commit (`SyncReport::grants_returned`), and refunds no Strands for it.
+  - **The books.** No `currency_transactions` row is written: that table is the Strands' audit, and no Strand moves. So there's no `DeedGrant` transaction type, and `every_type_is_one_the_ledger_knows` didn't change.
+    - Land has books of its own: `Ledger::grants` and `Sample::grants` (`protocol::ledger::DeedGrants`). They hold opened, used and returned, and `granted_value`, the assessed value of the granted plots held now.
+    - `/admin/ledger` shows them, and the Observatory's economy page has a **Land given** story.
+  - **Not yet:** the client can't tell yet whether a player holds an unspent grant (#448 needs it for "Claim with your deed"), and `plot_claimed` and the admin feed don't tell a granted claim from a bought one.
 - **O0.4 Flint follows the server's tour** (#441, M): `Tour` as a view, `hints.toml` and `judge` retired, and Skip becomes Hide with a way back.
 - **O0.5 The chapter card and markers** (#442, M): the chapter card and its close card, the bearing arrow, and a ground ring at each step's target.
 

@@ -15,11 +15,12 @@
 //! backend's `write_the_gazette_fixture` from a busy day's records.
 //! `fixtures/rest/ledger.json` is `GET /admin/ledger` (C1.7), its load split
 //! by the tick's phases and the loops beside it (D0.1), each with its slow
-//! statements (D3.2).
+//! statements (D3.2), and the road in's deed grants (#440): three opened, one
+//! handed back by a retired lot, two held.
 //! `fixtures/rest/sample.json` is one of the Observatory's samples (D0.2): ten
 //! seconds of a 20-citizen town, with its wealth pooling (D2.5), its two
 //! reports' summary (D4.1), its wealth by trade (D2.2), and the books in logs
-//! and planks (D2.3), planks with nobody bidding.
+//! and planks (D2.3), planks with nobody bidding, and its deed grants (#440).
 //! `fixtures/rest/admin_feed.json` is one of each of the rest of what
 //! `GET /admin/stream` sends (D0.3); the sample is `sample.json`.
 //! `fixtures/rest/town_report.json` is `POST /admin/town/report` (D4.1): a
@@ -196,6 +197,7 @@ fn the_ledger_round_trips_with_its_phases() {
     let load = &ledger.load;
     assert_eq!(load.phases.len(), 13);
     assert_eq!(load.loops.len(), 3);
+    assert_eq!((ledger.grants.opened, ledger.grants.used, ledger.grants.granted_value), (3, 2, 17200));
     // The phases cover the whole tick
     let phases: f64 = load.phases.values().map(|p| p.secs).sum();
     assert!((phases - load.tick_secs).abs() < 1e-9, "{phases} of {}", load.tick_secs);
@@ -265,6 +267,7 @@ fn a_sample_round_trips_with_its_window() {
     assert_eq!(spread.roles.values().map(|h| h.strands).sum::<i64>(), sample.strands.citizens + sample.strands.people);
     assert_eq!(spread.roles.values().map(|h| h.accounts).sum::<u64>(), spread.accounts);
     assert_eq!(spread.roles[ROLE_PERSON].accounts, sample.players.people);
+    assert_eq!(sample.grants.returned, 1);
     assert_eq!(serde_json::to_string(&sample).unwrap(), json);
 }
 

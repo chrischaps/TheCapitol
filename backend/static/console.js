@@ -268,7 +268,7 @@
   const FIELDS = {
     base: "players,strands,drift",
     load: "load,events",
-    money: "strand_flows,new_accounts,market,bazaar,distribution,books",
+    money: "strand_flows,new_accounts,grants,market,bazaar,distribution,books",
     making: "units,unit_flows,crafts",
     town: "town",
   };
@@ -1192,6 +1192,7 @@
     strands();
     if (books) flows();
     escrow();
+    grants();
     distribution();
     if (books) productionStories();
     await prices();
@@ -1501,6 +1502,21 @@
       ? "No buy order holds a Strand now."
       : `Buy orders hold ${plural(held, "Strand", "Strands")}, ${((100 * held) / total).toFixed(1)}% of the money.`;
     if (most > held) line += ` At most ${nf.format(most)} in ${window_()}.`;
+    h.textContent = line;
+  }
+
+  /** The road in's deed grants (#440): land given, not bought, outside the Strands' books */
+  function grants() {
+    const h = $("grants-headline");
+    const s = latest((s) => s.grants);
+    if (!s) return void (h.textContent = "Waiting for the first sample.");
+    const { opened, used, returned, granted_value: value } = s.grants;
+    if (opened === 0) return void (h.textContent = "Nobody has walked the road in to their deed yet.");
+    let line = `${plural(opened, "deed has", "deeds have")} been earned on the road in`;
+    line += used === 0
+      ? ", and none is spent yet."
+      : `, and ${nf.format(used)} ${used === 1 ? "holds a lot" : "hold lots"} assessed at ${plural(value, "Strand", "Strands")}.`;
+    if (returned) line += ` ${plural(returned, "was", "were")} handed back by a retired lot.`;
     h.textContent = line;
   }
 

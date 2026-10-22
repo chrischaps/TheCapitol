@@ -47,7 +47,8 @@ pub enum OnOwned {
     /// Covered workbenches are still taken down, and a gone lot of a retired
     /// layout ([`RETIRED_LOTS`]) is released.
     Keep,
-    /// Release them, refund the deed and remove their stations, their contents
+    /// Release them, refund the deed (or hand a granted plot's grant back,
+    /// #440) and remove their stations, their contents
     /// going back as a foreclosure's do, to inventories or impounds (`force`).
     /// Covered workbenches are taken down.
     Release,
@@ -127,6 +128,9 @@ pub struct SyncReport {
     /// The owners whose deeds were refunded. The caller tells them their
     /// balance (`currency_changed`, #148).
     pub refunded: Vec<Uuid>,
+    /// The owners of released granted plots, whose deed grant was handed
+    /// back to spend again (#440)
+    pub grants_returned: Vec<Uuid>,
 }
 
 #[derive(Debug)]
@@ -176,6 +180,8 @@ struct Existing {
     owner_id: Option<Uuid>,
     corners: Option<[(f64, f64); 4]>,
     assessed_value: i32,
+    /// Claimed with the road in's deed grant (#440)
+    granted: bool,
 }
 
 /// Take a plot from its owner, inside the caller's transaction: its stations
@@ -191,7 +197,7 @@ pub async fn release_plot(tx: &mut PgConnection, plot_id: Uuid) -> Result<Vec<Uu
         .fetch_all(&mut *tx)
         .await?;
     sqlx::query(
-        "UPDATE plots SET owner_id = NULL, claimed_at = NULL, assessed_value = 0,
+        "UPDATE plots SET owner_id = NULL, claimed_at = NULL, assessed_value = 0, granted = FALSE,
                 tax_owed = 0, tax_carry = 0, last_tax_paid = NULL, station_count = 0
          WHERE id = $1",
     )
@@ -211,16 +217,16 @@ pub async fn release_plot(tx: &mut PgConnection, plot_id: Uuid) -> Result<Vec<Uu
 
 /// Make the `plots` table match `lots`. See the module docs.
 pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) -> Result<SyncReport, SyncError> {
-    let rows: Vec<(Uuid, String, Option<Uuid>, Option<Vec<f64>>, i32)> = sqlx::query_as(
-        "SELECT id, terrain_id, owner_id, corners, assessed_value FROM plots WHERE terrain_id IS NOT NULL",
+    let rows: Vec<(Uuid, String, Option<Uuid>, Option<Vec<f64>>, i32, bool)> = sqlx::query_as(
+        "SELECT id, terrain_id, owner_id, corners, assessed_value, granted FROM plots WHERE terrain_id IS NOT NULL",
     )
     .fetch_all(db)
     .await?;
     let existing: HashMap<String, Existing> = rows
         .into_iter()
-        .map(|(id, terrain_id, owner_id, corners, assessed_value)| {
+        .map(|(id, terrain_id, owner_id, corners, assessed_value, granted)| {
             let corners = corners_from_column(corners.as_deref());
-            (terrain_id, Existing { id, owner_id, corners, assessed_value })
+            (terrain_id, Existing { id, owner_id, corners, assessed_value, granted })
         })
         .collect();
     let wanted: HashMap<&str, &TerrainPlot> = lots.iter().map(|l| (l.id.as_str(), l)).collect();
@@ -285,8 +291,16 @@ pub async fn sync_plots(db: &PgPool, lots: &[TerrainPlot], on_owned: OnOwned) ->
         took(&mut report.returned_to, returned.containers);
         report.removed_stations.extend(release_plot(&mut tx, c.plot_id).await?);
         // The refund is in this transaction, so a plot is never released
-        // without its owner getting the deed back.
-        let value = existing[&c.terrain_id].assessed_value;
+        // without its owner getting the deed back. A granted plot's deed was
+        // the grant, so the grant goes back, unused, not Strands (#440, D5).
+        let row = &existing[&c.terrain_id];
+        if row.granted {
+            if crate::engine::deed_grants::hand_back_in(&mut tx, c.owner_id, c.plot_id).await? {
+                report.grants_returned.push(c.owner_id);
+            }
+            continue;
+        }
+        let value = row.assessed_value;
         if value > 0 {
             add_strands_in(
                 &mut tx,
@@ -636,6 +650,29 @@ pub(crate) mod tests {
         assert_eq!(balance(&db, ada).await, 300);
         assert_eq!(ledger(&db, ada).await, vec![(250, "deed_refund".to_string())]);
         assert_eq!(report.refunded, vec![ada]);
+    }
+
+    /// A granted plot on a retired lot hands its grant back, unused, and no
+    /// Strand is refunded for it; a bought one beside it is refunded (#440, D5)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_retired_granted_lot_hands_the_grant_back(db: PgPool) {
+        use crate::engine::deed_grants::tests::{grant_of, granted};
+        let ada = player(&db, "ada", 50).await;
+        let gift = plot(&db, Some(ada), 8600).await;
+        sqlx::query("UPDATE plots SET terrain_id = 'rw2_sub_1_0_2_L_3' WHERE id = $1").bind(gift).execute(&db).await.unwrap();
+        granted(&db, ada, gift).await;
+        let bought = plot(&db, Some(ada), 250).await;
+        sqlx::query("UPDATE plots SET terrain_id = 'rw2_farm_4_7' WHERE id = $1").bind(bought).execute(&db).await.unwrap();
+
+        let report = sync_plots(&db, &[], OnOwned::Keep).await.unwrap();
+
+        assert_eq!(report.released.len(), 2);
+        assert_eq!(report.grants_returned, vec![ada]);
+        assert_eq!(report.refunded, vec![ada], "for the bought one");
+        assert_eq!(balance(&db, ada).await, 300);
+        assert_eq!(ledger(&db, ada).await, vec![(250, "deed_refund".to_string())]);
+        assert_eq!(grant_of(&db, ada).await, Some((false, None, true)), "open again, marked returned");
     }
 
     /// The refund is in the sync's transaction, so a failed one releases nothing

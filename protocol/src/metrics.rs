@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::annotation::Annotation;
-use crate::ledger::{Crafts, Ledger, LoadWindow};
+use crate::ledger::{Crafts, DeedGrants, Ledger, LoadWindow};
 use crate::rest::MarketTrade;
 use crate::watch::Watch;
 
@@ -68,6 +68,10 @@ pub struct Sample {
     /// before it reads as none.
     #[serde(default)]
     pub new_accounts: u64,
+    /// The road in's deed grants now (#440): land given, outside the
+    /// Strands' books. A sample stored before them reads as none.
+    #[serde(default)]
+    pub grants: DeedGrants,
     /// Every unit in the world now, by item type
     pub units: BTreeMap<String, i64>,
     /// Units made (positive) and destroyed (negative) over the window, by
@@ -263,6 +267,7 @@ impl Sample {
             strands,
             strand_flows,
             new_accounts,
+            grants: end.grants,
             units: end.units.clone(),
             unit_flows,
             units_settled: start.units_settled && end.units_settled,
@@ -817,6 +822,7 @@ mod tests {
             unit_flows,
             units_settled: true,
             crafts: BTreeMap::new(),
+            grants: Default::default(),
             load: Load::default(),
         }
     }

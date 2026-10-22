@@ -12,10 +12,11 @@ use uuid::Uuid;
 
 use capitol_protocol::rules::Zone;
 use capitol_protocol::rest::{
-    ClaimPlotResponse, ClaimedPlot, ListPlotsQuery, ListPlotsResponse, PayTaxRequest, PayTaxResponse, PositionQuery,
+    ClaimPlotRequest, ClaimPlotResponse, ClaimedPlot, ListPlotsQuery, ListPlotsResponse, PayTaxRequest, PayTaxResponse, PositionQuery,
 };
 
 use crate::engine::currency::{announce_balances, subtract_strands_in, TransactionType};
+use crate::engine::deed_grants;
 use crate::engine::gazette::{self, DeedEvent};
 use crate::engine::property_tax::pay_tax_debt;
 use crate::engine::tutorial::{self, Did};
@@ -233,9 +234,10 @@ pub async fn get_plot_at_position(
     params(
         ("id" = Uuid, Path, description = "Plot ID to claim")
     ),
+    request_body(content = Option<ClaimPlotRequest>, description = "Optional: `use_grant` claims with the road in's deed (#440)"),
     responses(
         (status = 200, description = "Plot claimed", body = ClaimPlotResponse),
-        (status = 400, description = "Plot already claimed or insufficient funds"),
+        (status = 400, description = "Plot already claimed, insufficient funds, or no deed grant to use"),
         (status = 404, description = "Plot not found")
     ),
     security(("bearer_auth" = [])),
@@ -245,7 +247,9 @@ pub async fn claim_plot(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Path(plot_id): Path<Uuid>,
+    request: Option<Json<ClaimPlotRequest>>,
 ) -> Result<Json<ClaimPlotResponse>, AppError> {
+    let Json(request) = request.unwrap_or_default();
     // Get player
     let player_id = sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM players WHERE account_id = $1 LIMIT 1"
@@ -255,7 +259,8 @@ pub async fn claim_plot(
     .await?;
 
     let events = state.game.read().await.event_sender.clone();
-    let new_balance = claim(&state.db, &events, player_id, plot_id, &state.tunables.get()).await?;
+    let paying = if request.use_grant { Paying::Grant } else { Paying::Strands };
+    let new_balance = claim(&state.db, &events, player_id, plot_id, &state.tunables.get(), paying).await?;
 
     // Fetch updated plot info
     let plot_info = plot_info(&state, plot_id).await?;
@@ -303,10 +308,6 @@ pub async fn pay_tax(
     Ok(Json(PayTaxResponse { plot, new_balance }))
 }
 
-/// Charge the deed and give the plot to `player_id`, in one transaction. The
-/// plot row is locked first, so two players can't both pay for it, and the
-/// money only moves if the claim commits. Once it has, everyone is told
-/// (`plot_claimed`, B13), and the player hears their balance. Returns it.
 const NOT_CLAIMABLE: &str = "This zone does not allow plot ownership";
 
 /// Whether a plot can be owned: its zone has plots, and so does the ground it
@@ -315,12 +316,27 @@ fn claimable(zone_id: &str, x: f64, y: f64) -> bool {
     Zone::from_str(zone_id).is_some_and(|zone| zone.has_plots()) && Zone::from_position(x, y).has_plots()
 }
 
+/// How a claim pays for its deed
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Paying {
+    Strands,
+    /// With the deed the road in earned (#440): nothing is charged
+    Grant,
+}
+
+/// Charge the deed, or spend the grant, and give the plot to `player_id`, in
+/// one transaction. The plot row is locked first, so two players can't both
+/// pay for it, and the money or the grant only goes if the claim commits.
+/// Either way the plot is assessed at the zone's live deed price (D6.1, and
+/// plan D4 for a grant). Once it has, everyone is told (`plot_claimed`, B13),
+/// and the player hears their balance. Returns it.
 async fn claim(
     db: &PgPool,
     events: &broadcast::Sender<GameEvent>,
     player_id: Uuid,
     plot_id: Uuid,
     tunables: &Tunables,
+    paying: Paying,
 ) -> Result<i64, AppError> {
     let mut tx = db.begin().await?;
 
@@ -350,32 +366,48 @@ async fn claim(
         return Err(AppError::BadRequest(NOT_CLAIMABLE.into()));
     }
     let deed_cost = deed_cost.ok_or_else(|| AppError::BadRequest(NOT_CLAIMABLE.into()))?;
-    // The zone's deed price tunable (D6.1). The plot is assessed at what was paid.
+    // The zone's deed price tunable (D6.1). The plot is assessed at it.
     let deed_cost = tunables.deed_cost(&zone_id, deed_cost);
 
-    // Deduct Strands
-    let new_balance = subtract_strands_in(
-        &mut tx,
-        player_id,
-        deed_cost as i64,
-        TransactionType::DeedPurchase,
-        Some(&format!("Purchased plot in {}", zone_id)),
-        Some(plot_id),
-    )
-    .await
-    .map_err(AppError::BadRequest)?;
+    let new_balance = match paying {
+        Paying::Strands => subtract_strands_in(
+            &mut tx,
+            player_id,
+            deed_cost as i64,
+            TransactionType::DeedPurchase,
+            Some(&format!("Purchased plot in {}", zone_id)),
+            Some(plot_id),
+        )
+        .await
+        .map_err(AppError::BadRequest)?,
+        // No Strand moves, so the balance is only read (D5)
+        Paying::Grant => {
+            if !Zone::from_str(&zone_id).is_some_and(deed_grants::home_zone) {
+                return Err(AppError::BadRequest(deed_grants::Refused::NotAHomeZone.message().into()));
+            }
+            deed_grants::take_in(&mut tx, player_id).await?.map_err(|r| AppError::BadRequest(r.message().into()))?;
+            deed_grants::use_in(&mut tx, player_id, plot_id).await?;
+            sqlx::query_scalar("SELECT strand_balance FROM players WHERE id = $1")
+                .bind(player_id)
+                .fetch_one(&mut *tx)
+                .await?
+        }
+    };
+    let granted = paying == Paying::Grant;
 
     // Claim the plot
     let (terrain_id, claimed_at): (Option<String>, DateTime<Utc>) = sqlx::query_as(
-        "UPDATE plots SET owner_id = $1, claimed_at = NOW(), assessed_value = $2 WHERE id = $3
+        "UPDATE plots SET owner_id = $1, claimed_at = NOW(), assessed_value = $2, granted = $4 WHERE id = $3
          RETURNING terrain_id, claimed_at"
     )
     .bind(player_id)
     .bind(deed_cost)
     .bind(plot_id)
+    .bind(granted)
     .fetch_one(&mut *tx)
     .await?;
-    gazette::record_deed(&mut tx, plot_id, &zone_id, DeedEvent::Claimed, player_id).await?;
+    let event = if granted { DeedEvent::Granted } else { DeedEvent::Claimed };
+    gazette::record_deed(&mut tx, plot_id, &zone_id, event, player_id).await?;
 
     // Create default permissions if not exists
     sqlx::query(
@@ -391,7 +423,9 @@ async fn claim(
     if let Some(terrain_id) = terrain_id {
         let _ = events.send(GameEvent::PlotClaimed { terrain_id, owner_id: player_id, claimed_at });
     }
-    announce_balances(events, [(player_id, new_balance)]);
+    if !granted {
+        announce_balances(events, [(player_id, new_balance)]);
+    }
     tutorial::saw(db, events, player_id, Did::Claimed).await;
     Ok(new_balance)
 }
@@ -556,7 +590,7 @@ mod tests {
         let lot = plot(&db, None, 0).await;
         let (tx, _rx) = events();
 
-        assert_eq!(claim(&db, &tx, ada, lot, &Tunables::default()).await.unwrap(), 5);
+        assert_eq!(claim(&db, &tx, ada, lot, &Tunables::default(), Paying::Strands).await.unwrap(), 5);
 
         assert_eq!(owner(&db, lot).await, Some(Some(ada)));
         assert_eq!(balance(&db, ada).await, 5);
@@ -574,9 +608,9 @@ mod tests {
         let (tx, mut rx) = events();
         let done = |player| tutorial::progress(&db, player);
 
-        assert!(claim(&db, &tx, bo, lot, &Tunables::default()).await.is_err(), "bo can't afford it");
+        assert!(claim(&db, &tx, bo, lot, &Tunables::default(), Paying::Strands).await.is_err(), "bo can't afford it");
         assert_eq!(done(bo).await.unwrap().done, Steps::NONE);
-        claim(&db, &tx, ada, lot, &Tunables::default()).await.unwrap();
+        claim(&db, &tx, ada, lot, &Tunables::default(), Paying::Strands).await.unwrap();
         assert_eq!(done(ada).await.unwrap().done, Steps::from_iter([Step::ClaimHome]));
         let told = std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(e, GameEvent::Tutorial { player_id, .. } if player_id == ada));
         assert!(told, "and told");
@@ -594,7 +628,7 @@ mod tests {
         let mut tunables = Tunables::default();
         tunables.set("deed_price.urban", 2.0, |_, _| true).unwrap();
 
-        assert_eq!(claim(&db, &tx, ada, lot, &tunables).await.unwrap(), 5);
+        assert_eq!(claim(&db, &tx, ada, lot, &tunables, Paying::Strands).await.unwrap(), 5);
 
         assert_eq!(ledger(&db, ada).await, vec![(-deed * 2, "deed_purchase".to_string())]);
         let assessed: i32 = sqlx::query_scalar("SELECT assessed_value FROM plots WHERE id = $1")
@@ -614,7 +648,7 @@ mod tests {
 
         let (tx, mut rx) = events();
 
-        assert!(matches!(claim(&db, &tx, ada, lot, &Tunables::default()).await, Err(AppError::BadRequest(_))));
+        assert!(matches!(claim(&db, &tx, ada, lot, &Tunables::default(), Paying::Strands).await, Err(AppError::BadRequest(_))));
         assert!(rx.try_recv().is_err(), "a failed claim tells no one");
 
         assert_eq!(owner(&db, lot).await, Some(None));
@@ -634,7 +668,7 @@ mod tests {
         let (tx, _rx) = events();
 
         let tunables = Tunables::default();
-        let (a, b) = tokio::join!(claim(&db, &tx, ada, lot, &tunables), claim(&db, &tx, bram, lot, &tunables));
+        let (a, b) = tokio::join!(claim(&db, &tx, ada, lot, &tunables, Paying::Strands), claim(&db, &tx, bram, lot, &tunables, Paying::Strands));
 
         assert!(a.is_ok() != b.is_ok(), "exactly one claim wins");
         let (winner, loser) = if a.is_ok() { (ada, bram) } else { (bram, ada) };
@@ -653,7 +687,7 @@ mod tests {
         let (tx, mut rx) = events();
         assert!(claimed_plots(&db).await.unwrap().is_empty());
 
-        claim(&db, &tx, ada, lot, &Tunables::default()).await.unwrap();
+        claim(&db, &tx, ada, lot, &Tunables::default(), Paying::Strands).await.unwrap();
 
         let listed = claimed_plots(&db).await.unwrap();
         assert_eq!(listed.len(), 1);
@@ -696,10 +730,85 @@ mod tests {
         sqlx::query("UPDATE plots SET world_x = $2, world_y = $3 WHERE id = $1").bind(lot).bind(x as f32).bind(y as f32).execute(&db).await.unwrap();
         let (tx, mut rx) = events();
 
-        assert!(matches!(claim(&db, &tx, ada, lot, &Tunables::default()).await, Err(AppError::BadRequest(m)) if m == NOT_CLAIMABLE));
+        assert!(matches!(claim(&db, &tx, ada, lot, &Tunables::default(), Paying::Strands).await, Err(AppError::BadRequest(m)) if m == NOT_CLAIMABLE));
         assert!(rx.try_recv().is_err());
         assert_eq!(owner(&db, lot).await, Some(None));
         assert_eq!(balance(&db, ada).await, 1_000_000);
+    }
+
+    /// A claim with the grant moves no Strand: the plot is the player's,
+    /// assessed at the zone's live price, the grant is spent, the Gazette
+    /// hears of a settler, and the books still balance. A second is refused,
+    /// though paying still works (#440)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_claim_with_the_grant_takes_the_plot_and_no_strands(db: PgPool) {
+        use crate::engine::conservation::{assert_audited, balances_of, strands_accounted};
+        use crate::engine::deed_grants::tests::{grant_of, the_road, walked};
+        let deed = urban_deed(&db).await;
+        let ada = player(&db, "ada", deed + 5).await;
+        walked(&db, ada, the_road()).await;
+        let (lot, next, bought) = (plot(&db, None, 0).await, plot(&db, None, 0).await, plot(&db, None, 0).await);
+        let (tx, mut rx) = events();
+        let mut tunables = Tunables::default();
+        tunables.set("deed_price.urban", 1.5, |_, _| true).unwrap();
+        let (start, books) = (balances_of(&db, [ada]).await, strands_accounted(&db).await);
+
+        assert_eq!(claim(&db, &tx, ada, lot, &tunables, Paying::Grant).await.unwrap(), deed + 5);
+
+        assert_eq!(owner(&db, lot).await, Some(Some(ada)));
+        let (assessed, granted): (i32, bool) =
+            sqlx::query_as("SELECT assessed_value, granted FROM plots WHERE id = $1").bind(lot).fetch_one(&db).await.unwrap();
+        assert_eq!((assessed as i64, granted), ((deed as f64 * 1.5).round() as i64, true), "taxed as a bought deed (D4)");
+        assert_eq!(grant_of(&db, ada).await, Some((true, Some(lot), false)));
+        assert!(ledger(&db, ada).await.is_empty(), "no Strand moved");
+        let kind: String = sqlx::query_scalar("SELECT kind FROM deed_events WHERE plot_id = $1").bind(lot).fetch_one(&db).await.unwrap();
+        assert_eq!(kind, "granted");
+        let sent: Vec<GameEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(matches!(&sent[0], GameEvent::PlotClaimed { owner_id, .. } if *owner_id == ada));
+        assert!(!sent.iter().any(|e| matches!(e, GameEvent::CurrencyChanged { .. })), "no balance to hear");
+        assert_eq!(strands_accounted(&db).await, books);
+        assert_audited(&db, &start).await;
+
+        let again = claim(&db, &tx, ada, next, &tunables, Paying::Grant).await;
+        assert!(matches!(again, Err(AppError::BadRequest(m)) if m == deed_grants::Refused::Used.message()));
+        assert_eq!(owner(&db, next).await, Some(None));
+        claim(&db, &tx, ada, bought, &Tunables::default(), Paying::Strands).await.unwrap();
+        assert_eq!(balance(&db, ada).await, 5, "a second home is bought as before (D6)");
+    }
+
+    /// No grant before the road is walked, and none on a guild lot (D6).
+    /// A refusal takes nothing and spends nothing.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_claim_with_the_grant_is_refused_off_the_road_and_off_the_home_zones(db: PgPool) {
+        use crate::engine::deed_grants::tests::{grant_of, the_road, walked};
+        use capitol_protocol::rules::{CENTER_X, CENTER_Y};
+        let ada = player(&db, "ada", 0).await;
+        let lot = plot(&db, None, 0).await;
+        let guild = plot(&db, None, 0).await;
+        sqlx::query("UPDATE plots SET zone_id = 'guild_district', size_category = 'guild_hall', world_x = $2, world_y = $3 WHERE id = $1")
+            .bind(guild)
+            .bind((CENTER_X + 800.0) as f32)
+            .bind(CENTER_Y as f32)
+            .execute(&db)
+            .await
+            .unwrap();
+        let (tx, mut rx) = events();
+        let refused = |r: Result<i64, AppError>, why: deed_grants::Refused| {
+            assert!(matches!(r, Err(AppError::BadRequest(m)) if m == why.message()));
+        };
+
+        refused(claim(&db, &tx, ada, lot, &Tunables::default(), Paying::Grant).await, deed_grants::Refused::NotEarned);
+        walked(&db, ada, the_road()).await;
+        refused(claim(&db, &tx, ada, guild, &Tunables::default(), Paying::Grant).await, deed_grants::Refused::NotAHomeZone);
+
+        assert!(rx.try_recv().is_err());
+        assert_eq!((owner(&db, lot).await, owner(&db, guild).await), (Some(None), Some(None)));
+        assert_eq!(grant_of(&db, ada).await, None, "nothing opened by a refused claim");
+        // The road walked, a grant opened only now, from the steps
+        claim(&db, &tx, ada, lot, &Tunables::default(), Paying::Grant).await.unwrap();
+        assert_eq!(grant_of(&db, ada).await, Some((true, Some(lot), false)));
     }
 
     /// Only lots are listed: a pre-B7 plot has nothing for a client to draw on

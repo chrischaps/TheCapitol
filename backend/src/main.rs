@@ -170,6 +170,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             report.released.len(), report.removed_stations.len() - report.displaced.len(), report.released.join(", ")
         );
     }
+    if !report.grants_returned.is_empty() {
+        tracing::warn!("Handed {} deed grant(s) back with their granted plots (#440)", report.grants_returned.len());
+    }
     if !report.held_back.is_empty() {
         tracing::warn!(
             "Held back {} lot(s) that overlap a kept plot, until it's released: {}",

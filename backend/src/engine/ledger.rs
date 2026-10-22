@@ -25,6 +25,10 @@
 //!   room: `property_tax`, `plot_sync`)
 //! - a dev grant (`grants`)
 //!
+//! Land has books of its own: the road in's deed grants (#440), land given
+//! with no Strand moving, are counted as they stand (`deed_grants::books`),
+//! with what their plots are assessed at.
+//!
 //! A craft also counts itself by recipe (D2.4): its outputs and their
 //! quality, in [`Flows::crafted`], counted with its units, so the
 //! Observatory's samples show each recipe's throughput and the quality it
@@ -248,6 +252,7 @@ async fn books_within(db: &PgPool, most: u32) -> Result<Ledger, sqlx::Error> {
     .fetch_all(&mut *tx)
     .await?;
     let escrow_strands = held_strands(&mut tx).await?;
+    let grants = super::deed_grants::books(&mut tx).await?;
     tx.commit().await?;
 
     let mut flows: BTreeMap<Uuid, BTreeMap<String, i64>> = BTreeMap::new();
@@ -274,6 +279,7 @@ async fn books_within(db: &PgPool, most: u32) -> Result<Ledger, sqlx::Error> {
         unit_flows,
         units_settled,
         crafts,
+        grants,
         load: Default::default(),
     })
 }
