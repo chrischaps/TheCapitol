@@ -133,7 +133,9 @@ fn body(ui: &mut egui::Ui, plot: &PlotInfo, view: &View) -> Option<Action> {
     row(ui, "Zone", RichText::new(zone_name.clone()).color(zone_ink));
     if zone.is_some_and(|z| matches!(z, Zone::Urban | Zone::Suburban | Zone::Rural)) {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-            if theme::link(ui, &format!("About the {zone_name} zone"), size::LABEL).clicked() {
+            // "About the Urban zone": the display name already ends "Zone"
+            let about = format!("About the {} zone", zone_name.trim_end_matches(" Zone"));
+            if theme::link(ui, &about, size::LABEL).clicked() {
                 action = Some(Action::AboutZone(plot.zone_id.clone()));
             }
         });

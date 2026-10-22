@@ -13,6 +13,8 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+pub mod stops;
+
 /// How far a walk has to end from where it began to count for
 /// [`Step::Walk`]: judged where the server sees the walk end (#439)
 pub const WALK_DISTANCE: f64 = 20.0;

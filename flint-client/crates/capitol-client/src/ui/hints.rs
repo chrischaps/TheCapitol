@@ -66,7 +66,9 @@ fn chapter_close(chapter: Chapter) -> &'static str {
         Chapter::Arrival => {
             "You can gather, make things by hand and at a bench, and open with a tool what hands can't. The road north leads in."
         }
-        Chapter::RoadIn => "You've read the deeds of a farm, a street and a yard. The hall is ahead, under the tower.",
+        Chapter::RoadIn => {
+            "You've read the deeds of a farm, a house and a yard, and what each zone is like. The hall is ahead, under the tower."
+        }
         Chapter::Hall => "You can trade at the Exchange, keep orders on its book, browse the bazaar and read the day's news.",
         Chapter::People => "You can speak to those near you, read a stranger's card and open your letters.",
         Chapter::DeedsOffice => "The land is yours, and on the city's books. Now make something of it.",
@@ -146,26 +148,27 @@ fn words(step: Step) -> (&'static str, &'static str, &'static str) {
             "With the axe in your pack, a tree gives logs. Hands alone won't do it.",
             "[Click] a tree",
         ),
-        // The road in
+        // The road in (#445): a stop in each zone up the south road, its
+        // lot `protocol::tutorial::stops` picks
         Step::SeeRuralLot => (
-            "A farm",
-            "Walk up the south road toward the tower. Read a farm's deed on the way: its room, its price, its tax.",
-            "[Alt] + [Click] a lot",
+            "The farms",
+            "Farms have the most room, and the longest walk to market. Read the deed of the farm ringed by the road, and its zone's card. Then on up the road to the suburb.",
+            "[Alt] + [Click] the lot  ·  About the zone",
         ),
         Step::SeeSuburbanLot => (
-            "A suburban lot",
-            "Further in, the streets curl into neighbourhoods. Read the deed of a lot there.",
-            "[Alt] + [Click] a lot",
+            "The suburb",
+            "A house and garden on a quiet street, with room for a trade and a shorter walk in. Read this lot's deed, and its zone's card. Then on to the city's blocks.",
+            "[Alt] + [Click] the lot  ·  About the zone",
         ),
         Step::SeeUrbanLot => (
-            "An urban yard",
-            "Inside the canal the city tightens into blocks. Read the deed of a yard in the grid.",
-            "[Alt] + [Click] a lot",
+            "The city",
+            "A small yard a step from the market: little room, the shortest walk. Read this lot's deed, and its zone's card. Then up the road to the hall, under the tower.",
+            "[Alt] + [Click] the lot  ·  About the zone",
         ),
         Step::ReadZoneCard => (
             "What a zone is like",
-            "A lot's panel opens its zone's card: what fits, the walk to the hall, what grows near. Read one.",
-            "[Alt] + [Click] a lot",
+            "A lot's panel opens its zone's card: what fits, the price and the tax, the walk to the hall, what grows near. Read one.",
+            "[Alt] + [Click] a lot  ·  About the zone",
         ),
         // The hall
         Step::Deposit => (
@@ -274,7 +277,13 @@ pub struct Lead {
     /// Which way it lies on screen while it's off it, as `hud::bearing`
     /// gives it. `None` while it's on screen, where its ring marks it.
     pub off_screen: Option<f32>,
+    /// It's a lot, and someone owns it: the road in's stop prefers a free
+    /// one, but one that's taken teaches as well (#445).
+    pub taken: bool,
 }
+
+/// The card's line under the lead for a stop that's taken (#445).
+const TAKEN: &str = "This one's taken; most near the road are. Its deed reads the same.";
 
 /// Inside this, you're there (metres).
 const HERE: f32 = 6.0;
@@ -652,6 +661,9 @@ fn step_card(ui: &mut egui::Ui, step: Step, done: bool, compact: bool, lead: Opt
     if let Some(lead) = lead {
         ui.add_space(4.0);
         lead_row(ui, lead);
+        if lead.taken {
+            ui.label(theme::dim(TAKEN));
+        }
     }
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
@@ -948,7 +960,7 @@ mod tests {
 
     #[test]
     fn the_way_is_said_plainly() {
-        let lead = |metres, off_screen| lead_words(Lead { metres, off_screen });
+        let lead = |metres, off_screen| lead_words(Lead { metres, off_screen, taken: false });
         assert_eq!(lead(3.0, None), "Here, ringed in gold");
         assert_eq!(lead(3.0, Some(1.0)), "Here, ringed in gold");
         assert_eq!(lead(42.0, None), "40 m off, ringed in gold");

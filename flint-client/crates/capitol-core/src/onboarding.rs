@@ -102,8 +102,9 @@ pub enum Target {
     Point([f64; 2]),
     /// The nearest live node of one of these resource types ([`nearest_node`]).
     Node(&'static [&'static str]),
-    /// A lot in this zone: the nearest, until the road in's stops are
-    /// chosen (#445).
+    /// The road in's stop in this zone (#445): the lot
+    /// `protocol::tutorial::stops::stop` picks by the south arterial, free
+    /// if one near is, so a regenerated world moves it with its lots.
     Lot(Zone),
     /// The Exchange hall's door.
     Hall,
@@ -125,6 +126,8 @@ pub fn target(step: Step) -> Option<Target> {
         Step::SeeRuralLot => Target::Lot(Zone::Rural),
         Step::SeeSuburbanLot => Target::Lot(Zone::Suburban),
         Step::SeeUrbanLot => Target::Lot(Zone::Urban),
+        // Left till after the three lots, you're at the last stop
+        Step::ReadZoneCard => Target::Lot(Zone::Urban),
         Step::Deposit | Step::SellOrder | Step::BuyOrder | Step::CollectBox => Target::Hall,
         Step::VisitStall => Target::Stall,
         _ => return None,
@@ -234,6 +237,15 @@ mod tests {
             assert_eq!(target(step), Some(Target::Hall), "{step:?}");
         }
         assert_eq!(target(Step::ReadGazette), None);
+    }
+
+    /// Each stop of the road in leads to its zone's lot, and the zone card,
+    /// if it's still to read, to the last of them (#445)
+    #[test]
+    fn the_road_in_leads_to_its_stops() {
+        let stops: Vec<_> = Chapter::RoadIn.steps().map(target).collect();
+        let lot = |z| Some(Target::Lot(z));
+        assert_eq!(stops, [lot(Zone::Rural), lot(Zone::Suburban), lot(Zone::Urban), lot(Zone::Urban)]);
     }
 
     /// Every node a step leads to is a kind the content has, and the

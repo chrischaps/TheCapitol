@@ -79,7 +79,7 @@ Each step is in `protocol::tutorial`. Most are judged by the server (D7).
 6. Gather branches and stone, then make a handle and knapped stone at the bench.
 7. Make a stone axe and fell a tree.
 
-**4.2 The road in** (#445): three stops on the south arterial, one each in the rural, suburban and urban rings. At each, Alt-click a marked lot and open the zone card (#444).
+**4.2 The road in** (#445): three stops on the south arterial, one each in the rural, suburban and urban rings. At each, Alt-click a marked lot and open the zone card (#444). Each stop's lot is chosen by rule (`protocol::tutorial::stops`), so a regenerated world moves it with its lots.
 
 **4.3 The hall** (#446):
 1. Deposit fiber.
@@ -222,6 +222,12 @@ The tutorial runs in a live market that may be empty. A step that needs someone 
 - **O1.2 The zone card** (#444, M): `GET /bureaucracy/zone-facts`, `ui/zone_card.rs`, and the three-column comparison.
   - *As built:* `engine::zone_facts` packs every home lot with `station_room::most`, capped by its capacity, once a terrain version (about 1.3 s in release, warmed at startup), and reads the price, the tax and the free lots live. The walk is from each lot's middle to the hall's door. What grows is the spawn tables' rows for the zone, densest first, and the typical lot is one that fits the median, nearest the median area. The card is "The Land Office": every column's plan is at one scale, long side across, with `sim::lot::layout`'s stations as gold dots and a 50 m bar, so a farm's room against a yard's reads at a glance. `capitol_core::zone_card` owns up to fewer than a whole workshop (`WORKSHOP`, 6) and fewer than the capacity. The plot panel opens it ("About the Urban zone"), and `ZoneCard::open_compare` is there for #448. `--zone-card-sample [zone|compare]` captures it offline. Opening it from the plot panel reports `Did::ReadZoneCard` as `tutorial_seen` (#441); #448's office should do the same where it opens the comparison.
 - **O1.3 The road in** (#445, S): a stop in each zone, chosen by rule so it survives regeneration.
+  - *As built:*
+    - **The rule** is `protocol::tutorial::stops` (`stop`, `stop_point`, `STOP_REACH`), so the client and the citizens (#450) find the same lot from the same `/terrain`. Each zone's stop is the lot of that zone nearest a point on the south arterial, measured to the lot's nearest edge. It prefers the nearest free lot within `STOP_REACH` (150) of the point, and takes the nearest whatever its owner when none that near is free. Ties go by id.
+    - **The points** are laid in the frame's rings, not at fixed radii, so a move of `ZONE_OUTER_RADII` moves them too. The farm's is half way from the suburb's edge to the spawn (r3775), and the suburb's and the city's are the middles of their rings (r2880, r1580). The issue's r3200, r2400 and r1400 were the same places before Plots v2's flip (#459).
+    - **On the default world** the stops are `farm_1_a1_R_0` (60 off the road), `sub_2_0_6_R_14` (50) and `urb_2_5_i_3` (31). From the spawn that's about 4 s to the farm, 18 s on to the suburb, 26 s to the city and about 20 s to the hall, at 50 a second. `models::terrain::tests::the_road_ins_stops_are_lots_of_their_zone_by_the_south_road` checks each is of its zone and within 150 of the road, free or taken, and that the next free one is too.
+    - **In Flint**, `Target::Lot(zone)` is now the zone's stop (`CapitolExtension::road_stop`, with everyone's claims from `claimed_lots()`), not O0.5's nearest drawn lot. `read_zone_card` leads to the city's stop, where you are if it's still to do. A taken stop adds a line under the lead: "This one's taken; most near the road are. Its deed reads the same." Each stop's card says what the zone is for, asks for the deed and the zone card, and ends pointing up the road to the next stop.
+    - **The plot panel's link** read "About the Urban Zone zone" (`Zone::display_name` already ends in "Zone"). It now reads "About the Urban zone".
 
 ### O2: The hall and the people (`tu:O2-hall`)
 

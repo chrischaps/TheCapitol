@@ -44,6 +44,7 @@ use capitol_core::onboarding::{self, Did, Target};
 use capitol_core::plot::Offer;
 use capitol_core::protocol::rules::{self, water_name, STATION_INTERACTION_RANGE, STATION_MIN_SPACING};
 use capitol_core::protocol::terrain::{LandmarkKind, TerrainResponse};
+use capitol_core::protocol::tutorial::stops;
 use capitol_core::state::Activity;
 use capitol_core::station::{Note as PlaceNote, Phase as PlacePhase};
 use flint_player::{ExtensionCtx, KeyInput, PlayerExtension};
@@ -715,8 +716,8 @@ impl CapitolExtension {
 
     /// Where the road in's card leads, if it names a place this client can
     /// find (#442), and where you stand, both world metres. A node is the
-    /// nearest live one of its kinds, a lot the nearest in its zone, a stall
-    /// the nearest's counter. Offline with `--hints-sample`, you stand at
+    /// nearest live one of its kinds, a lot its zone's stop on the road in
+    /// ([`Self::road_stop`]), a stall the nearest's counter. Offline with `--hints-sample`, you stand at
     /// `camera_target`. Call after the hall's and the bazaar's marks are
     /// set this frame.
     fn lead_mark(&self, camera_target: [f32; 2]) -> Option<(script_api::LeadMark, [f32; 2])> {
@@ -730,7 +731,6 @@ impl CapitolExtension {
             None => return None,
         };
         let from = crate::coords::to_server(you[0], you[1]);
-        let far = |p: [f64; 2]| (p[0] - from[0]).powi(2) + (p[1] - from[1]).powi(2);
         let ring = |at, radius| script_api::LeadMark {
             at,
             radius,
@@ -757,23 +757,21 @@ impl CapitolExtension {
                 ring(at, r + 0.7)
             }
             Target::Lot(zone) => {
-                let middle = |l: &Lot| {
-                    let n = l.outline.len() as f64;
-                    l.outline
-                        .iter()
-                        .fold([0.0, 0.0], |m, p| [m[0] + p[0] / n, m[1] + p[1] / n])
+                // The road in's stop (#445): its drawn edge, or its quad if
+                // it's too thin to draw
+                let stop = self.road_stop(zone)?;
+                let outline: Vec<[f64; 2]> = match self.lots.get(&stop.lot.id) {
+                    Some(l) if !l.outline.is_empty() => l.outline.clone(),
+                    _ => stop.lot.corners.iter().map(|c| [c.0, c.1]).collect(),
                 };
-                let lot = self
-                    .lots
-                    .values()
-                    .filter(|l| l.zone == zone && !l.outline.is_empty())
-                    .min_by(|a, b| far(middle(a)).total_cmp(&far(middle(b))))?;
-                let [x, y] = middle(lot);
+                let n = outline.len() as f64;
+                let [x, y] = outline
+                    .iter()
+                    .fold([0.0, 0.0], |m, p| [m[0] + p[0] / n, m[1] + p[1] / n]);
                 script_api::LeadMark {
                     at: crate::coords::to_world(x, y),
                     radius: 2.5,
-                    outline: lot
-                        .outline
+                    outline: outline
                         .iter()
                         .map(|p| crate::coords::to_world(p[0], p[1]))
                         .collect(),
@@ -801,6 +799,20 @@ impl CapitolExtension {
             }
         };
         Some((mark, you))
+    }
+
+    /// The road in's stop in `zone` (#445): the lot
+    /// `protocol::tutorial::stops` picks by the south arterial, from the
+    /// terrain the world was built from and everyone's claims. Offline,
+    /// `--claim-sample`'s.
+    fn road_stop(&self, zone: rules::Zone) -> Option<stops::Stop<'_>> {
+        let terrain = self.built.as_ref()?;
+        let taken = |id: &str| match (&self.session, &self.claim_sample) {
+            (Some(session), _) => session.state().claimed_lots().contains_key(id),
+            (None, Some(sample)) => sample.claimed.iter().any(|c| c == id),
+            (None, None) => false,
+        };
+        stops::stop(&terrain.terrain_plots, &rules::Frame::TABLE, zone, taken)
     }
 
     /// The bazaar's stalls as scripts see them (E3.11): each one's footprint,
@@ -1437,7 +1449,10 @@ impl PlayerExtension for CapitolExtension {
             let off_screen = (!on_screen).then(|| {
                 ui::hud::bearing(camera.position.to_array(), camera.target.to_array(), [x, 0.0, z])
             });
-            ui::hints::Lead { metres, off_screen }
+            // A stop someone owns teaches as well, and the card says so (#445)
+            let taken = matches!(self.hints.target(), Some(Target::Lot(zone))
+                if self.road_stop(zone).is_some_and(|s| s.taken));
+            ui::hints::Lead { metres, off_screen, taken }
         });
         if let Ok(mut shared) = self.shared.lead.lock() {
             *shared = found.map(|(mark, _)| mark);

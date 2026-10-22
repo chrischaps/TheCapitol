@@ -2006,5 +2006,64 @@ mod tests {
         assert!(!near_second.contains(&0));
         assert!(near_second.contains(&1));
     }
+
+    /// The road in's stops (#445): on the default world each resolves to a
+    /// lot of its own zone within 150 of the south arterial, free or taken,
+    /// and they come in order up the road from the spawn to the hall.
+    #[test]
+    fn the_road_ins_stops_are_lots_of_their_zone_by_the_south_road() {
+        use capitol_protocol::tutorial::stops::{self, STOP_ZONES};
+        let world = TerrainConfig::default_world();
+        let frame = WorldGenParams::default().frame();
+        let (cx, cy) = frame.center;
+        let road = world
+            .roads
+            .iter()
+            .find(|r| {
+                r.road_type == RoadType::Arterial
+                    && r.points.iter().all(|p| (p.0 - cx).abs() < 1e-6 && p.1 > cy)
+                    && r.points.iter().any(|p| p.1 - cy > frame.suburb_edge())
+            })
+            .expect("the south arterial runs out past the suburb");
+        // Straight south, however many junctions split it
+        let lo = road.points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+        let hi = road.points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+        let off_road = |lot: &TerrainPlot| {
+            lot.corners
+                .iter()
+                .map(|p| {
+                    let y = p.1.clamp(lo, hi);
+                    ((p.0 - cx).powi(2) + (p.1 - y).powi(2)).sqrt()
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        let mut last = frame.spawn().1;
+        for zone in STOP_ZONES {
+            let lots = &world.terrain_plots;
+            let free = stops::stop(lots, &frame, zone, |_| false).expect("a stop");
+            let all_taken = stops::stop(lots, &frame, zone, |_| true).expect("a stop");
+            let next = stops::stop(lots, &frame, zone, |id| id == free.lot.id).expect("a stop");
+            assert_eq!(free.lot.id, all_taken.lot.id, "{zone}: all taken, still the nearest");
+            assert!(all_taken.taken && !free.taken);
+            assert_ne!(next.lot.id, free.lot.id, "{zone}: a free one near the road instead");
+            assert!(!next.taken, "{zone}: there's a free one within reach");
+            for lot in [free.lot, next.lot] {
+                assert_eq!(lot.zone, zone.as_str(), "{zone}: {}", lot.id);
+                let off = off_road(lot);
+                assert!(off <= 150.0, "{zone}: {} is {off:.0} off the south road", lot.id);
+            }
+            let (_, y) = stops::stop_point(&frame, zone).unwrap();
+            assert!(y < last, "{zone} is further up the road");
+            println!(
+                "{zone}: {} ({:.0} off the road; next {} at {:.0}), {:.0} s on from the last",
+                free.lot.id,
+                off_road(free.lot),
+                next.lot.id,
+                off_road(next.lot),
+                (last - y) / rules::PLAYER_SPEED
+            );
+            last = y;
+        }
+    }
 }
 
