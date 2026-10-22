@@ -109,6 +109,10 @@ const BAZAAR_READ_TAG: Tag = 91;
 /// annotations and the tunables.
 const ADMIN_TAG: Tag = 100;
 
+/// The tag on hiding the road in's card, or bringing it back (#441). The
+/// state takes the answer, as every answer.
+const TUTORIAL_TAG: Tag = 150;
+
 /// How often the directory and your stall are asked for again, while in the
 /// world: they change only when a merchant rents, stocks or sells out.
 const BAZAAR_REFRESH: Duration = Duration::from_secs(60);
@@ -1650,6 +1654,24 @@ impl Session {
         (&mut self.talk, &mut self.chat)
     }
 
+    /// Tell the server the screen showed `step` (#441): one only the client
+    /// can see, as `capitol_core::onboarding::Did` names. It answers with
+    /// `tutorial_step` the first time.
+    pub fn tutorial_seen(&mut self, step: capitol_core::protocol::tutorial::Step) {
+        if self.auth.phase() == Phase::InWorld {
+            self.net.ws(ClientMessage::TutorialSeen { step });
+        }
+    }
+
+    /// Hide the road in's card for now, or bring it back, on every device
+    /// (plan D2).
+    pub fn set_tutorial_dismissed(&mut self, dismissed: bool) {
+        if self.auth.phase() == Phase::InWorld {
+            let request = capitol_core::protocol::tutorial::SetDismissed { dismissed };
+            self.net.rest(RestRequest::SetTutorialDismissed(request), TUTORIAL_TAG);
+        }
+    }
+
     /// Say the chat's input line on `channel`, if there's anything to say.
     pub fn say(&mut self, channel: Channel) {
         if let Some(text) = self.chat.send(channel) {
@@ -2237,6 +2259,9 @@ impl Session {
                 NetEvent::Rest(ADMIN_TAG, Err(e)) => {
                     tracing::warn!("admin: a read failed: {e}");
                     self.admin.failed(e);
+                }
+                NetEvent::Rest(TUTORIAL_TAG, Err(e)) => {
+                    tracing::warn!("tutorial: couldn't hide or show the card: {e}");
                 }
                 NetEvent::Rest(MARKET_READ_TAG, Err(e)) => {
                     tracing::warn!("market: a refresh failed: {e}");

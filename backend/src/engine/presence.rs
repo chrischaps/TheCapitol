@@ -206,6 +206,8 @@ pub fn drives_avatar_ws(message: &ClientMessage) -> bool {
             | ClientMessage::ClaimPresence
             // A watcher may talk on the Capitol channel; `talk` refuses it a local line
             | ClientMessage::Say { .. }
+            // What a screen showed: the pack opened on any device is opened (#441)
+            | ClientMessage::TutorialSeen { .. }
     )
 }
 
@@ -340,6 +342,7 @@ mod tests {
             ClientMessage::StartAutomation { station_id: "s".into() },
             ClientMessage::ClaimPresence,
             ClientMessage::Say { channel: capitol_protocol::ws::Channel::Capitol, text: "Hello".into() },
+            ClientMessage::TutorialSeen { step: capitol_protocol::tutorial::Step::OpenPack },
         ] {
             assert!(!drives_avatar_ws(&watching), "{watching:?}");
         }

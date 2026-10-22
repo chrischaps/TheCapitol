@@ -163,6 +163,14 @@ pub enum ClientMessage {
     /// among them, or `error`. A watcher (E0.8) may say only `capitol`.
     #[serde(rename = "say")]
     Say { channel: Channel, text: String },
+    // The road in (#441): what only the screen shows
+    /// You did a step the server can't see: opened your pack, read a zone
+    /// card (plan D7). Taken only for a step whose [`Step::judge`] lets the
+    /// client report it ([`crate::tutorial::Judge::client_reports`]), and
+    /// answered by `tutorial_step` the first time, or `error` for a step
+    /// the server judges itself.
+    #[serde(rename = "tutorial_seen")]
+    TutorialSeen { step: Step },
 }
 
 impl ClientMessage {
@@ -199,6 +207,7 @@ impl ClientMessage {
             ClientMessage::UnsubscribeMarket { .. } => "unsubscribe_market",
             ClientMessage::ClaimPresence => "claim_presence",
             ClientMessage::Say { .. } => "say",
+            ClientMessage::TutorialSeen { .. } => "tutorial_seen",
         }
     }
 }

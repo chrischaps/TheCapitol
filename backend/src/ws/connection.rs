@@ -397,6 +397,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         }
                                     }
                                 }
+                                // What only the screen shows (#441, plan D7): taken for the
+                                // steps the client may report, and refused for the rest
+                                ClientMessage::TutorialSeen { step } => {
+                                    use crate::engine::tutorial::{saw, Did};
+                                    if step.judge().client_reports() {
+                                        let events = state.game.read().await.event_sender.clone();
+                                        saw(&state.db, &events, player_id, Did::Seen(step)).await;
+                                    } else {
+                                        let message = format!("The server sees {} for itself", step.name());
+                                        let msg = ServerMessage::Error { message, command: command.into() };
+                                        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await;
+                                    }
+                                }
                                 ClientMessage::UnsubscribeMarket { item_type } => match item_type {
                                     Some(item_type) => {
                                         market_items.remove(&item_type);

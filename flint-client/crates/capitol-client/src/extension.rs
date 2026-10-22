@@ -204,8 +204,10 @@ pub struct CapitolExtension {
     /// trade it was last put in.
     trade_offer: Option<(String, i64)>,
     trade_offered: Option<uuid::Uuid>,
-    /// The first-session hints, and the shortcut overlay (P8.3).
+    /// The road in's card (P8.3, #441), and the shortcut overlay.
     hints: ui::hints::Hints,
+    /// `--hints-sample`: the card offline, on a sample tour in `hints`.
+    hints_sample: bool,
     shortcuts: ui::shortcuts::Shortcuts,
     /// The dev overlay on F7 (D5.2), and `--dev-sample`: offline, open on
     /// sample numbers.
@@ -301,6 +303,7 @@ impl CapitolExtension {
             trade_offer: None,
             trade_offered: None,
             hints: ui::hints::Hints::default(),
+            hints_sample: false,
             shortcuts: ui::shortcuts::Shortcuts::default(),
             dev: ui::dev_overlay::DevOverlay::default(),
             dev_sample: false,
@@ -485,18 +488,27 @@ impl CapitolExtension {
     pub fn with_chat_sample(mut self, on: bool) -> Self {
         if on && self.session.is_none() {
             let state = ui::station::sample();
-            // A fresh tour, so the first card shows, kept out of save/
-            let path = std::env::temp_dir().join("capitol-chat-sample-hints.toml");
-            let _ = std::fs::remove_file(&path);
-            let mut hints = ui::hints::Hints::load(path);
-            // An empty pack, so the tour starts at its first card
-            let empty = capitol_core::state::Container::new(uuid::Uuid::nil(), "inventory", 24, 6, &[]);
-            hints.follow("chat-sample", state.me(), Some(&empty), state.catalog());
+            // A fresh tour, so the first card shows
+            let mut hints = ui::hints::Hints::default();
+            hints.follow(Some(ui::hints::sample("new")));
             let (log, chat, me) = ui::chat::sample(Instant::now(), 0.0);
             self.chat_sample = Some((log, chat, me, state, hints));
             self.chat.open_typing();
             self.crafting.open = true;
             self.inventory.open = true;
+        }
+        self
+    }
+
+    /// Offline, the road in's card on a sample tour (`--hints-sample`,
+    /// #441): `new`, `half` way up the road, or `hidden`, which shows the
+    /// header's chip instead, or `help`, hidden with the `?` overlay open
+    /// on its line.
+    pub fn with_hints_sample(mut self, which: Option<&str>) -> Self {
+        if let Some(which) = which.filter(|_| self.session.is_none()) {
+            self.hints.follow(Some(ui::hints::sample(which)));
+            self.hints_sample = true;
+            self.shortcuts.open = which == "help";
         }
         self
     }
@@ -763,13 +775,21 @@ impl CapitolExtension {
 
     fn toggle_inventory(&mut self) {
         self.inventory.toggle();
-        self.hints.saw(Did::UsedInventory);
+        self.seen(Did::UsedInventory);
     }
 
     fn toggle_crafting(&mut self) {
         self.crafting.toggle();
         if self.crafting.open {
-            self.hints.saw(Did::OpenedCrafting);
+            self.seen(Did::OpenedCrafting);
+        }
+    }
+
+    /// The screen showed `did`: tell the server, if it's worth telling
+    /// (`tutorial_seen`, #441).
+    fn seen(&mut self, did: Did) {
+        if let (Some(step), Some(session)) = (self.hints.saw(did), &mut self.session) {
+            session.tutorial_seen(step);
         }
     }
 
@@ -943,7 +963,7 @@ impl PlayerExtension for CapitolExtension {
                 session.trade_key(now);
             }
             walk(ctx, session, &self.shared, now);
-            let gathered = gather(ctx, session, &self.shared, &mut self.sound, now);
+            gather(ctx, session, &self.shared, &mut self.sound, now);
             visit(ctx, session, &self.shared, now);
             // The Exchange hall (E3.7): a click on it opens the market there,
             // or walks you to its door and opens it as you come into range.
@@ -971,24 +991,10 @@ impl PlayerExtension for CapitolExtension {
             let (server, me) = (session.server().to_owned(), session.state().me());
             self.gazette.follow(&server, me, session.gazette_mut());
             self.gazette.reading(session.gazette_mut());
-            let made = crafted(ctx, session, &self.shared, &mut self.sound);
-            // The hints follow whoever is signed in (nobody, signed out).
-            let state = session.state();
-            self.hints.follow(
-                session.server(),
-                state.me(),
-                state.inventory(),
-                state.catalog(),
-            );
-            if session.destination().is_some() {
-                self.hints.saw(Did::Walked);
-            }
-            if gathered {
-                self.hints.saw(Did::Gathered);
-            }
-            if made {
-                self.hints.saw(Did::Crafted);
-            }
+            crafted(ctx, session, &self.shared, &mut self.sound);
+            // The road in's card follows the server's tour (#441), which
+            // judges the walking, gathering and making itself
+            self.hints.follow(session.state().tutorial());
             plots(ctx, session, &self.shared, &self.lots, &mut self.sound);
             // Signed out, the store is empty, so everyone fades away.
             let (poses, state) = session.sample(now);
@@ -1482,6 +1488,7 @@ impl PlayerExtension for CapitolExtension {
                     mail_open: self.mail.open,
                     mail_unread: session.mail().unread(),
                     help_open: self.shortcuts.open,
+                    road_in: self.hints.hidden(),
                     settings_open: self.settings_panel.open,
                     inventory_pulse: pulse,
                     hall_hint: self.hall_hint,
@@ -1493,13 +1500,19 @@ impl PlayerExtension for CapitolExtension {
                 inventory_chip = clicks.inventory_rect;
                 if clicks.inventory {
                     self.inventory.toggle();
-                    self.hints.saw(Did::UsedInventory);
+                    if let Some(step) = self.hints.saw(Did::UsedInventory) {
+                        session.tutorial_seen(step);
+                    }
                 }
                 if clicks.crafting {
                     self.crafting.toggle();
-                    if self.crafting.open {
-                        self.hints.saw(Did::OpenedCrafting);
+                    if let Some(step) = self.crafting.open.then(|| self.hints.saw(Did::OpenedCrafting)).flatten() {
+                        session.tutorial_seen(step);
                     }
+                }
+                if clicks.road_in {
+                    self.hints.bring_back();
+                    session.set_tutorial_dismissed(false);
                 }
                 if clicks.exchange {
                     self.exchange.toggle();
@@ -1792,7 +1805,9 @@ impl PlayerExtension for CapitolExtension {
                             .into_iter()
                             .flatten()
                             .collect();
-                    self.hints.show(ctx, now, &panels);
+                    if self.hints.show(ctx, now, &panels) {
+                        session.set_tutorial_dismissed(true);
+                    }
                 }
                 let state = session.state();
                 let picked = state.picked_plot();
@@ -1886,7 +1901,9 @@ impl PlayerExtension for CapitolExtension {
                 );
                 if let Some(m) = clicks.moved {
                     session.move_item(m);
-                    self.hints.saw(Did::UsedInventory);
+                    if let Some(step) = self.hints.saw(Did::UsedInventory) {
+                        session.tutorial_seen(step);
+                    }
                 }
                 if let Some(kit) = clicks.place {
                     session.begin_placing(&kit);
@@ -2031,6 +2048,37 @@ impl PlayerExtension for CapitolExtension {
             let panels: Vec<_> = [self.inventory.rect, self.crafting.rect, self.chat.rect].into_iter().flatten().collect();
             hints.show(ctx, Instant::now(), &panels);
         }
+        if self.hints_sample {
+            if let Some(hidden) = self.hints.hidden() {
+                let view = HeaderView {
+                    zone: None,
+                    strands: Some(100),
+                    who: "Ada Reeder",
+                    patron: None,
+                    connection: None,
+                    down: false,
+                    inventory_open: false,
+                    crafting_open: false,
+                    exchange_open: false,
+                    market_open: false,
+                    gazette_open: false,
+                    gazette_news: None,
+                    chat_open: false,
+                    chat_unread: 0,
+                    mail_open: false,
+                    mail_unread: 0,
+                    help_open: self.shortcuts.open,
+                    settings_open: false,
+                    inventory_pulse: 0.0,
+                    hall_hint: None,
+                    impound: None,
+                    impound_open: false,
+                    road_in: Some(hidden),
+                };
+                ui::hud::header(ctx, &view, &mut self.strands, Instant::now());
+            }
+            self.hints.show(ctx, Instant::now(), &[]);
+        }
         if let Some(reader) = &mut self.gazette_sample {
             self.gazette.reading(reader);
             if let Some(ui::gazette::Action::Turn(by)) =
@@ -2083,11 +2131,18 @@ impl PlayerExtension for CapitolExtension {
                     .map(|watch| ui::dev_overlay::Server::from_watch(watch, state.server_time_ms(), layer)),
             }
         });
-        if !self.in_world() {
+        if !self.in_world() && !self.hints_sample {
             self.shortcuts.open = false;
         }
-        if self.shortcuts.show(ctx) {
+        let asked = self.shortcuts.show(ctx, self.hints.hidden().is_some());
+        if asked.close {
             self.shortcuts.open = false;
+        }
+        if asked.road_in {
+            self.hints.bring_back();
+            if let Some(session) = &mut self.session {
+                session.set_tutorial_dismissed(false);
+            }
         }
         if let Some(action) = action {
             self.act(action);
@@ -2437,23 +2492,21 @@ fn fire_node_changes(ctx: &mut ExtensionCtx, changes: Vec<nodes::Changed>) {
 /// `extraction_completed` with the node's place (`x`, `z`), the yield
 /// (`item_name`, `quantity`, `quality`) and its `grade` letter and `colour`
 /// (sRGB, 0 to 1), and `extraction_note` with a `title` and `body` when an
-/// extraction didn't happen. True if anything was gathered.
+/// extraction didn't happen.
 fn gather(
     ctx: &mut ExtensionCtx,
     session: &mut Session,
     shared: &script_api::Shared,
     sound: &mut Soundscape,
     now: Instant,
-) -> bool {
+) {
     if let Some(id) = shared.extract.lock().ok().and_then(|mut e| e.take()) {
         match uuid::Uuid::parse_str(&id) {
             Ok(node) => session.extract(now, node),
             Err(e) => tracing::warn!("cap_extract: {id:?} isn't a node id: {e}"),
         }
     }
-    let yields = session.take_yields();
-    let any = yields.iter().any(|(_, item)| item.quantity > 0);
-    for (node, item) in yields {
+    for (node, item) in session.take_yields() {
         if item.quantity == 0 {
             // A failed pull (D5, #206): a note, not a "+0"
             let (title, body) = missed_words(session.state(), node, &item);
@@ -2491,7 +2544,6 @@ fn gather(
         data.insert("body".into(), body.into());
         ctx.fire_event("extraction_note", data);
     }
-    any
 }
 
 /// Stations (P6.3): open the station a script asked for
@@ -2526,16 +2578,9 @@ fn visit(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Sha
 /// Crafting (P5.5): fire `crafting_completed` at the scripts for each craft
 /// that finished, with where you stand (`x`, `z`), what it made
 /// (`item_name`, `quantity`, `quality`) and its `grade` and `colour`, as
-/// `extraction_completed` has. True if anything was made.
-fn crafted(
-    ctx: &mut ExtensionCtx,
-    session: &mut Session,
-    shared: &script_api::Shared,
-    sound: &mut Soundscape,
-) -> bool {
-    let made = session.take_crafted();
-    let any = !made.is_empty();
-    for item in made {
+/// `extraction_completed` has.
+fn crafted(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Shared, sound: &mut Soundscape) {
+    for item in session.take_crafted() {
         let [x, _, z] = shared
             .follow
             .lock()
@@ -2554,7 +2599,6 @@ fn crafted(
         ctx.fire_event("crafting_completed", data);
         sound.crafted();
     }
-    any
 }
 
 /// Plots (P6.4): pick the plot a script asked for (`cap_pick_plot`), tell

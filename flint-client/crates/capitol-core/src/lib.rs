@@ -21,8 +21,8 @@
 //!   stalls and yours, and the walk to a stall.
 //! - [`hall`]: going to the Exchange hall (E3.7): open the market there, or
 //!   walk to its door and open it on arrival; and goods waiting in the box.
-//! - [`onboarding`]: the first-session hints: which to show, and what
-//!   counts as done (P8.3).
+//! - [`onboarding`]: the road in as the client shows it (#441): a view
+//!   of the server's tour, and what only the screen can report.
 //! - [`poll`]: the polling scheduler. [`poll::Poller`] turns those events, and
 //!   a 5 s timer, into the REST refetches the server never pushes.
 //! - [`trading`]: trading as a player does it: shift-click someone to

@@ -154,6 +154,9 @@ pub struct HeaderView<'a> {
     pub impound: Option<usize>,
     /// Whether the impound panel is open, to light its chip.
     pub impound_open: bool,
+    /// The road in's card is hidden for now (#441): its chip, with the
+    /// chapter's pips, brings it back. `None` hides the chip.
+    pub road_in: Option<super::hints::Hidden>,
 }
 
 /// What was clicked in the header.
@@ -171,6 +174,8 @@ pub struct HeaderClicks {
     pub hall: bool,
     /// The impound's chip: open or close its panel.
     pub impound: bool,
+    /// The road in's chip: bring its card back.
+    pub road_in: bool,
     pub help: bool,
     pub settings: bool,
     /// Where the Inventory button was drawn, for pickups to fly to.
@@ -238,6 +243,9 @@ pub fn header(
                         zone_chip(ui, zone);
                     }
                     ui.add_space(4.0);
+                    if let Some(hidden) = view.road_in {
+                        clicks.road_in = road_in_chip(ui, hidden).clicked();
+                    }
                     if let Some(angle) = view.hall_hint {
                         clicks.hall = hall_chip(ui, angle).clicked();
                     }
@@ -379,6 +387,44 @@ fn hall_chip(ui: &mut egui::Ui, angle: f32) -> egui::Response {
         .interact(egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Your market box holds goods. Collect them at the Exchange hall: click to walk there")
+}
+
+/// The road in, its card hidden for now (#441): its name and a row of small
+/// pips for the chapter at hand, gold as far as you've come, on the gold
+/// wash. A click brings the card back.
+fn road_in_chip(ui: &mut egui::Ui, hidden: super::hints::Hidden) -> egui::Response {
+    let shown = theme::chip(theme::GOLD_DIM, theme::GOLD_WASH).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 7.0;
+            // Right to left: the pips, then the words before them
+            let (r, gap) = (2.5, 4.0);
+            let n = hidden.of as f32;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(n * (2.0 * r + gap) - gap, 2.0 * r), egui::Sense::hover());
+            for i in 0..hidden.of {
+                let c = egui::pos2(rect.left() + r + i as f32 * (2.0 * r + gap), rect.center().y);
+                match i.cmp(&hidden.at) {
+                    std::cmp::Ordering::Less => ui.painter().circle_filled(c, r, theme::GOLD),
+                    std::cmp::Ordering::Equal => ui.painter().circle_stroke(c, r - 0.5, Stroke::new(1.0_f32, theme::GOLD)),
+                    std::cmp::Ordering::Greater => ui.painter().circle_filled(c, r - 0.8, theme::BORDER),
+                };
+            }
+            ui.label(
+                RichText::new("The road in")
+                    .font(theme::strong(size::SMALL))
+                    .color(theme::GOLD_LIGHT),
+            );
+        });
+    });
+    shown
+        .response
+        .interact(egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(format!(
+            "{}, step {} of {}. The road in's card is hidden for now: click to bring it back",
+            super::hints::chapter_name(hidden.chapter),
+            hidden.at + 1,
+            hidden.of
+        ))
 }
 
 /// Goods held in your impound (#141): a parchment-edged chip with a

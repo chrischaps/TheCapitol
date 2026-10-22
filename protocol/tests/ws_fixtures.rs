@@ -124,6 +124,7 @@ const CLIENT_TYPES: &[&str] = &[
     "unsubscribe_market",
     "claim_presence",
     "say",
+    "tutorial_seen",
 ];
 
 fn fixtures(dir: &str) -> Vec<(String, String)> {

@@ -1,223 +1,155 @@
-//! First-session hints (P8.3): walk, gather, look in the inventory, craft
-//! rope. One hint shows at a time, the first step not yet done. Doing a step
-//! in any order counts, so a player who runs ahead never sees a hint for
-//! something they've already done.
+//! The road in, as the client shows it (#441, `the-capitol-road-in.md`).
 //!
-//! A [`Tour`] is one account's progress, saved by the client as a byte
-//! ([`Tour::bits`]) so the hints show once per account. Dismissing it ends
-//! the tour for good. An account that already holds things it could only
-//! have made has done it all, so an old account seeing the client for the
-//! first time is never taught to walk ([`Tour::judge`]).
+//! The server keeps the tour and judges each step from what the player did
+//! (#438, #439), so a [`Tour`] is only a view of the `tutorial` and
+//! `tutorial_step` it sent (`GameState::tutorial`): which step is at hand,
+//! where it sits in its chapter, and whether the card is hidden. Nothing is
+//! kept on this machine, and nothing is judged from what the pack holds:
+//! every account walks the road (plan D3).
+//!
+//! A few steps are only things on screen, which the server can't see:
+//! opening the pack, reading a zone card. The client says it saw them
+//! ([`Did`], sent as `tutorial_seen`), and the server takes that only for
+//! the steps `protocol::tutorial` lets the client report (plan D7).
+//!
+//! Hiding the card is for now, never for good (plan D2): it's `dismissed`
+//! on the server, so it holds on every device, and the tour waits.
 
-/// A thing a new player is shown how to do, in the order they're shown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Step {
-    Walk,
-    Gather,
-    Inventory,
-    Craft,
-}
+use capitol_protocol::tutorial::{Step, TutorialProgress};
 
-impl Step {
-    pub const ALL: [Step; 4] = [Step::Walk, Step::Gather, Step::Inventory, Step::Craft];
-
-    fn bit(self) -> u8 {
-        1 << self as u8
-    }
-
-    /// Its place in the tour, from 0.
-    pub fn index(self) -> usize {
-        self as usize
-    }
-}
-
-/// Something the player did that a step is waiting for.
+/// Something only the screen shows, which the server takes for a step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Did {
-    /// Asked to walk somewhere.
-    Walked,
-    /// An extraction yielded.
-    Gathered,
-    /// Opened or closed the inventory panel, or moved something in it.
+    /// Opened or closed the pack, or moved something in it.
     UsedInventory,
-    /// Opened the crafting panel, which is past looking at the inventory.
+    /// Opened the crafting panel, which is past looking in the pack.
     OpenedCrafting,
-    /// A craft finished.
-    Crafted,
+    /// Opened a zone card (#444).
+    ReadZoneCard,
 }
 
-/// Every step's bit.
-const ALL_DONE: u8 = 0b1111;
-/// Set when the player dismissed the hints.
-const DISMISSED: u8 = 0x80;
+impl Did {
+    /// The step it counts for.
+    pub fn step(self) -> Step {
+        match self {
+            Did::UsedInventory | Did::OpenedCrafting => Step::OpenPack,
+            Did::ReadZoneCard => Step::ReadZoneCard,
+        }
+    }
+}
 
-/// One account's progress through the hints.
+/// Where one account is on the road in, as the server last said.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Tour {
-    bits: u8,
+    progress: TutorialProgress,
+}
+
+impl From<TutorialProgress> for Tour {
+    fn from(progress: TutorialProgress) -> Tour {
+        Tour { progress }
+    }
 }
 
 impl Tour {
-    /// A tour as saved by [`Tour::bits`]. Unknown bits are kept.
-    pub fn from_bits(bits: u8) -> Tour {
-        Tour { bits }
+    pub fn progress(self) -> TutorialProgress {
+        self.progress
     }
 
-    /// What to save.
-    pub fn bits(self) -> u8 {
-        self.bits
-    }
-
-    /// The hint to show, or `None` once every step is done or the tour was
-    /// dismissed.
+    /// The step at hand: the first not done, in the tour's order. Done out
+    /// of order still counts. `None` once the tour is finished. Hidden or
+    /// not, this is where the player is.
     pub fn current(self) -> Option<Step> {
-        if self.bits & DISMISSED != 0 {
-            return None;
-        }
-        Step::ALL.into_iter().find(|s| !self.done(*s))
+        self.progress.done.current()
     }
 
     pub fn done(self, step: Step) -> bool {
-        self.bits & step.bit() != 0
+        self.progress.done.has(step)
     }
 
-    /// Every step done, as opposed to dismissed.
-    pub fn completed(self) -> bool {
-        self.bits & ALL_DONE == ALL_DONE
+    pub fn finished(self) -> bool {
+        self.progress.finished()
     }
 
-    pub fn dismissed(self) -> bool {
-        self.bits & DISMISSED != 0
+    /// The card is hidden for now, and there's still a road to walk.
+    pub fn hidden(self) -> bool {
+        self.progress.dismissed && !self.finished()
     }
 
-    /// Over, either way: no hint will show again.
-    pub fn over(self) -> bool {
-        self.current().is_none()
+    /// The step to tell the server `did` showed, if it isn't done yet.
+    pub fn report(self, did: Did) -> Option<Step> {
+        let step = did.step();
+        (!self.done(step)).then_some(step)
     }
+}
 
-    /// Count `did`. True if that changed the tour (it's worth saving).
-    pub fn saw(&mut self, did: Did) -> bool {
-        let steps: &[Step] = match did {
-            Did::Walked => &[Step::Walk],
-            Did::Gathered => &[Step::Gather],
-            Did::UsedInventory => &[Step::Inventory],
-            Did::OpenedCrafting => &[Step::Inventory],
-            Did::Crafted => &[Step::Craft],
-        };
-        self.mark(steps.iter().copied())
-    }
-
-    /// Stop the hints for good. True if they weren't stopped already.
-    pub fn dismiss(&mut self) -> bool {
-        let before = self.bits;
-        self.bits |= DISMISSED;
-        self.bits != before
-    }
-
-    /// Mark what the account's inventory shows it has done already:
-    /// anything at all means it has gathered (and so walked), and anything
-    /// that isn't a raw resource means it has crafted, which is the whole
-    /// tour. `is_raw` tells raw resources (fiber) from made things. True if
-    /// that changed the tour.
-    pub fn judge<'a>(
-        &mut self,
-        item_types: impl IntoIterator<Item = &'a str>,
-        is_raw: impl Fn(&str) -> bool,
-    ) -> bool {
-        let mut any = false;
-        let mut made = false;
-        for item_type in item_types {
-            any = true;
-            made |= !is_raw(item_type);
-        }
-        if made {
-            self.mark(Step::ALL)
-        } else if any {
-            self.mark([Step::Walk, Step::Gather])
-        } else {
-            false
-        }
-    }
-
-    fn mark(&mut self, steps: impl IntoIterator<Item = Step>) -> bool {
-        let before = self.bits;
-        for step in steps {
-            self.bits |= step.bit();
-        }
-        self.bits != before
-    }
+/// Where `step` sits in its chapter: its place from 0, and how many steps
+/// the chapter has. A chapter's pips are drawn from these.
+pub fn place_in_chapter(step: Step) -> (usize, usize) {
+    let chapter = step.chapter();
+    let at = chapter.steps().position(|s| s == step).unwrap_or(0);
+    (at, chapter.steps().count())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capitol_protocol::tutorial::{Chapter, Steps};
 
-    fn raw(t: &str) -> bool {
-        t == "fiber"
+    fn tour(done: &[Step], dismissed: bool) -> Tour {
+        Tour::from(TutorialProgress { done: done.iter().copied().collect(), dismissed })
     }
 
     #[test]
-    fn a_new_account_is_walked_through_in_order() {
-        let mut tour = Tour::default();
-        assert_eq!(tour.current(), Some(Step::Walk));
-        assert!(tour.saw(Did::Walked));
-        assert_eq!(tour.current(), Some(Step::Gather));
-        assert!(tour.saw(Did::Gathered));
-        assert_eq!(tour.current(), Some(Step::Inventory));
-        assert!(tour.saw(Did::UsedInventory));
-        assert_eq!(tour.current(), Some(Step::Craft));
-        assert!(tour.saw(Did::Crafted));
-        assert_eq!(tour.current(), None);
-        assert!(tour.completed() && !tour.dismissed() && tour.over());
+    fn a_new_account_starts_at_the_first_step() {
+        let new = Tour::default();
+        assert_eq!(new.current(), Some(Step::Walk));
+        assert!(!new.finished() && !new.hidden());
     }
 
     #[test]
-    fn running_ahead_skips_what_was_done() {
-        let mut tour = Tour::default();
+    fn the_step_at_hand_is_the_first_not_done_whatever_the_order() {
         // Clicking grass from afar walks there and gathers: both count.
-        tour.saw(Did::Gathered);
-        assert_eq!(tour.current(), Some(Step::Walk));
-        tour.saw(Did::Walked);
-        assert_eq!(tour.current(), Some(Step::Inventory));
-        // Opening crafting is past looking at the inventory.
-        assert!(tour.saw(Did::OpenedCrafting));
-        assert_eq!(tour.current(), Some(Step::Craft));
+        let ran_ahead = tour(&[Step::GatherGrass, Step::Deposit], false);
+        assert_eq!(ran_ahead.current(), Some(Step::Walk));
+        let half = tour(&[Step::Walk, Step::GatherGrass], false);
+        assert_eq!(half.current(), Some(Step::OpenPack));
     }
 
     #[test]
-    fn seeing_it_again_changes_nothing() {
-        let mut tour = Tour::default();
-        assert!(tour.saw(Did::Walked));
-        assert!(!tour.saw(Did::Walked));
+    fn hidden_is_for_now_and_keeps_the_place() {
+        let hidden = tour(&[Step::Walk], true);
+        assert!(hidden.hidden());
+        assert_eq!(hidden.current(), Some(Step::GatherGrass), "the tour waits");
+        // Finished, there's nothing to hide
+        let done = Tour::from(TutorialProgress { done: Steps::every(), dismissed: true });
+        assert!(done.finished() && !done.hidden());
+        assert_eq!(done.current(), None);
     }
 
     #[test]
-    fn dismissing_ends_it_for_good_and_survives_a_save() {
-        let mut tour = Tour::default();
-        tour.saw(Did::Walked);
-        assert!(tour.dismiss());
-        assert!(!tour.dismiss());
-        assert_eq!(tour.current(), None);
-        assert!(tour.dismissed() && !tour.completed());
-        let back = Tour::from_bits(tour.bits());
-        assert_eq!(back, tour);
-        assert!(back.over());
-        assert!(back.done(Step::Walk));
+    fn only_what_isnt_done_is_reported() {
+        let new = Tour::default();
+        assert_eq!(new.report(Did::UsedInventory), Some(Step::OpenPack));
+        assert_eq!(new.report(Did::OpenedCrafting), Some(Step::OpenPack));
+        assert_eq!(new.report(Did::ReadZoneCard), Some(Step::ReadZoneCard));
+        let looked = tour(&[Step::OpenPack], false);
+        assert_eq!(looked.report(Did::UsedInventory), None);
+    }
+
+    /// The server takes `tutorial_seen` only for steps it can't see, so
+    /// the client never reports one it judges
+    #[test]
+    fn every_report_is_one_the_server_takes() {
+        for did in [Did::UsedInventory, Did::OpenedCrafting, Did::ReadZoneCard] {
+            assert!(did.step().judge().client_reports(), "{did:?}");
+        }
     }
 
     #[test]
-    fn an_old_account_is_judged_by_what_it_holds() {
-        let mut empty = Tour::default();
-        assert!(!empty.judge([], raw));
-        assert_eq!(empty.current(), Some(Step::Walk));
-
-        let mut gatherer = Tour::default();
-        assert!(gatherer.judge(["fiber"], raw));
-        assert_eq!(gatherer.current(), Some(Step::Inventory));
-
-        let mut crafter = Tour::default();
-        assert!(crafter.judge(["fiber", "rope"], raw));
-        assert!(crafter.completed());
-        assert_eq!(crafter.current(), None);
+    fn a_step_knows_its_place_in_its_chapter() {
+        assert_eq!(place_in_chapter(Step::Walk), (0, Chapter::Arrival.steps().count()));
+        assert_eq!(place_in_chapter(Step::FellTree), (11, 12));
+        assert_eq!(place_in_chapter(Step::SeeRuralLot), (0, 4));
+        assert_eq!(place_in_chapter(Step::ClaimHome), (1, 2));
     }
 }

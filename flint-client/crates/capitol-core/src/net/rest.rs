@@ -144,6 +144,13 @@ pub enum RestRequest {
     /// `GET /bureaucracy/deed-prices`
     DeedPrices,
 
+    /// `GET /tutorial`: where you are on the road in (#438). The game has it
+    /// from the socket's `tutorial`; this is for a bot.
+    Tutorial,
+    /// `PUT /tutorial/dismissed`: hide the card for now, or bring it back
+    /// (#441, plan D2)
+    SetTutorialDismissed(capitol_protocol::tutorial::SetDismissed),
+
     /// `POST /player/subscription`: mock activation, on a server with
     /// `MOCK_SUBSCRIPTIONS` on (E4.1)
     Subscribe(SubscribeRequest),
@@ -271,6 +278,8 @@ pub enum RestResponse {
     PlotPermissions(PlotPermissions),
     Zones(ZonesResponse),
     DeedPrices(DeedPricesResponse),
+    /// Your place on the road in, from both `GET` and `PUT`
+    Tutorial(capitol_protocol::tutorial::TutorialProgress),
     Subscription(Subscription),
     Granted(GrantResponse),
     /// An order as placed, or as cancelled
@@ -393,6 +402,7 @@ impl RestRequest {
             | SetByline(_)
             | ConfigureAutomation { .. }
             | SetTunables(_)
+            | SetTutorialDismissed(_)
             | Mute { .. } => Method::PUT,
             RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } | Unlist { .. } | Unmute { .. } | DropLetter { .. } => {
                 Method::DELETE
@@ -421,6 +431,7 @@ impl RestRequest {
             | PlotPermissions { .. }
             | Zones
             | DeedPrices
+            | Tutorial
             | MarketDepth(_)
             | MyOrders(_)
             | MarketHistory(_)
@@ -490,6 +501,8 @@ impl RestRequest {
             }
             Zones => "/bureaucracy/zones".into(),
             DeedPrices => "/bureaucracy/deed-prices".into(),
+            Tutorial => "/tutorial".into(),
+            SetTutorialDismissed(_) => "/tutorial/dismissed".into(),
             Subscribe(_) => "/player/subscription".into(),
             Grant(_) => "/player/grant".into(),
             PlaceOrder(_) | MarketDepth(_) => "/market/orders".into(),
@@ -551,6 +564,7 @@ impl RestRequest {
             CreateCitizen(b) => req.json(b),
             TownReport(b) => req.json(b),
             SetTunables(b) => req.json(b),
+            SetTutorialDismissed(b) => req.json(b),
             Gazette { day: Some(date) } => req.query(&GazetteQuery { date: *date }),
             MarketDepth(q) => req.query(q),
             MyOrders(q) => req.query(q),
@@ -618,6 +632,7 @@ impl RestRequest {
             }
             Q::Zones => A::Zones(de(body)?),
             Q::DeedPrices => A::DeedPrices(de(body)?),
+            Q::Tutorial | Q::SetTutorialDismissed(_) => A::Tutorial(de(body)?),
             Q::Subscribe(_) => A::Subscription(de(body)?),
             Q::Grant(_) => A::Granted(de(body)?),
             Q::PlaceOrder(_) | Q::CancelOrder { .. } => A::Order(de(body)?),
@@ -876,6 +891,12 @@ mod tests {
                 RestRequest::DeedPrices,
                 "GET",
                 "/bureaucracy/deed-prices".into(),
+            ),
+            (RestRequest::Tutorial, "GET", "/tutorial".into()),
+            (
+                RestRequest::SetTutorialDismissed(capitol_protocol::tutorial::SetDismissed { dismissed: true }),
+                "PUT",
+                "/tutorial/dismissed".into(),
             ),
             (
                 RestRequest::Subscribe(SubscribeRequest { days: 30 }),

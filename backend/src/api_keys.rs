@@ -216,7 +216,9 @@ pub fn ws_scope(message: &ClientMessage) -> ApiKeyScope {
         | ClientMessage::StartAutomation { .. }
         | ClientMessage::StopAutomation { .. }
         // A citizen talks on its Play key (Commons S1.1)
-        | ClientMessage::Say { .. } => ApiKeyScope::Play,
+        | ClientMessage::Say { .. }
+        // and walks the road in on it (#450)
+        | ClientMessage::TutorialSeen { .. } => ApiKeyScope::Play,
         ClientMessage::TradeInitiate { .. }
         | ClientMessage::TradeAcceptRequest
         | ClientMessage::TradeDeclineRequest
@@ -449,6 +451,9 @@ mod tests {
         // A citizen talks on its Play key (Commons S1.1)
         let say = ClientMessage::Say { channel: capitol_protocol::ws::Channel::Local, text: "Hello".into() };
         assert!(play.allows(ws_scope(&say)) && !read.allows(ws_scope(&say)));
+        // and walks the road in on it (#450)
+        let seen = ClientMessage::TutorialSeen { step: capitol_protocol::tutorial::Step::OpenPack };
+        assert!(play.allows(ws_scope(&seen)) && !read.allows(ws_scope(&seen)));
     }
 
     #[test]

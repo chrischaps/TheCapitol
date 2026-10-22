@@ -170,6 +170,12 @@ struct Args {
     /// crafting and inventory panels open and the hint card up
     #[arg(long)]
     chat_sample: bool,
+    /// Offline, the road in's card (#441) on a sample tour: "new" (the
+    /// default), "half" (half way up the road), "hidden" (its card hidden:
+    /// the header's chip instead) or "help" (hidden, with the `?` overlay
+    /// open on its line)
+    #[arg(long, value_name = "TOUR", num_args = 0..=1, default_missing_value = "new")]
+    hints_sample: Option<String>,
     /// Offline, open the impound (#141) on a sample: what a foreclosed
     /// workshop leaves when your pack is full
     #[arg(long)]
@@ -371,6 +377,7 @@ fn main() -> Result<()> {
         .with_mail_sample(args.mail_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_impound_sample(args.impound_sample && args.offline.is_some())
         .with_chat_sample(args.chat_sample && args.offline.is_some())
+        .with_hints_sample(args.hints_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_station_panel_sample(args.station_panel_sample.as_deref())
         .with_mute(args.mute || args.exit_after.is_some())
         .with_juice_sample(args.juice_sample && args.offline.is_some())

@@ -1510,6 +1510,11 @@ fn the_road_in_follows_the_server() {
     assert_eq!(tour.done, done);
     assert!(tour.dismissed, "a step doesn't bring the card back");
     assert_eq!(tour.done.current(), Some(Step::OpenPack));
+
+    // Brought back (#441): the PUT's answer says so before the socket does
+    let back = capitol_protocol::tutorial::TutorialProgress { done, dismissed: false };
+    assert!(state.apply_rest(&R::Tutorial(back)).is_empty());
+    assert_eq!(state.tutorial(), Some(back));
 }
 
 #[test]

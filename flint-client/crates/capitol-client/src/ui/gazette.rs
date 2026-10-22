@@ -551,7 +551,8 @@ fn dim(text: &str, size: f32) -> RichText {
 }
 
 /// `save/gazette.toml`: the day each account last opened, by server and
-/// player id. Its own file, as `save/hints.toml` is.
+/// player id. Its own file, beside `save/session.toml`, because
+/// extensions can't reach the scripts' store (issue #71).
 struct ReadFile {
     path: PathBuf,
     store: PersistentStore,

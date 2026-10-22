@@ -1267,6 +1267,8 @@ impl GameState {
                 self.bazaar.bought(*listing_id, purchase);
                 out.push(StateEvent::BazaarUpdated);
             }
+            // The same as the `tutorial` the server sends every socket after a PUT
+            R::Tutorial(progress) => self.tutorial = Some(*progress),
             R::Success(_)
             | R::DeedPrices(_)
             | R::Terrain(_)

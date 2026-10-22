@@ -2,7 +2,8 @@
 //! world. `?` opens and closes it (read off the typed character in
 //! `CapitolExtension::on_window_event`, so it's `?` on any layout), and so
 //! does F1 (the `help` action, which `--input-script` can press) and the
-//! header's `?` chip. Esc or a click outside closes it.
+//! header's `?` chip. Esc or a click outside closes it. While the road
+//! in's card is hidden (#441), a line under the work brings it back.
 //!
 //! A row is written as words with keys in brackets: `"[Alt] + [Click] a
 //! plot"`. Each bracket is drawn as a key cap.
@@ -67,17 +68,27 @@ pub struct Shortcuts {
     pub open: bool,
 }
 
+/// What was asked of the overlay this frame.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Asked {
+    /// A click outside: close it.
+    pub close: bool,
+    /// Bring the road in's card back.
+    pub road_in: bool,
+}
+
 impl Shortcuts {
     pub fn toggle(&mut self) {
         self.open = !self.open;
     }
 
-    /// Draw it while it's open or fading. True if a click outside asked to
-    /// close it.
-    pub fn show(&mut self, ctx: &egui::Context) -> bool {
+    /// Draw it while it's open or fading. `road_in_hidden` adds the line
+    /// that brings the road in's card back.
+    pub fn show(&mut self, ctx: &egui::Context, road_in_hidden: bool) -> Asked {
+        let mut asked = Asked::default();
         let k = ctx.animate_bool_with_time(Id::new("capitol_shortcuts"), self.open, FADE);
         if k <= 0.0 {
-            return false;
+            return asked;
         }
         let screen = ctx.screen_rect();
         // The scrim takes clicks, so one outside the card closes it rather
@@ -96,7 +107,8 @@ impl Shortcuts {
         let card = egui::Area::new(Id::new("capitol_shortcuts"))
             .order(Order::Tooltip)
             .anchor(Align2::CENTER_CENTER, [0.0, 8.0 * (1.0 - k)])
-            .interactable(false)
+            // Only for the road in's line; a click elsewhere on it is let be
+            .interactable(self.open && road_in_hidden)
             .show(ctx, |ui| {
                 ui.multiply_opacity(k);
                 theme::panel_edged(theme::GOLD).show(ui, |ui| {
@@ -115,7 +127,18 @@ impl Shortcuts {
                             ui.add_space(12.0);
                             group(ui, GROUPS[2], KEYS_LEFT);
                         });
-                        ui.vertical(|ui| group(ui, GROUPS[1], KEYS_RIGHT));
+                        ui.vertical(|ui| {
+                            group(ui, GROUPS[1], KEYS_RIGHT);
+                            if road_in_hidden {
+                                ui.add_space(12.0);
+                                ui.label(theme::label("The road in"));
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(theme::text("Its card is hidden for now.").size(size::BODY));
+                                    asked.road_in = theme::link(ui, "Bring it back", size::BODY).clicked();
+                                });
+                            }
+                        });
                     });
                     ui.add_space(10.0);
                     ui.vertical_centered(|ui| {
@@ -125,11 +148,13 @@ impl Shortcuts {
             })
             .response
             .rect;
-        // The card isn't interactable, so a click on it reaches the scrim.
+        // The card is mostly not interactable, so a click on it can reach
+        // the scrim.
         let on_card = ctx
             .input(|i| i.pointer.interact_pos())
             .is_some_and(|p| card.contains(p));
-        self.open && scrim.clicked() && !on_card
+        asked.close = self.open && scrim.clicked() && !on_card;
+        asked
     }
 }
 

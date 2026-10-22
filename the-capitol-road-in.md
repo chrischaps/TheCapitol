@@ -200,6 +200,13 @@ The tutorial runs in a live market that may be empty. A step that needs someone 
     - `/admin/ledger` shows them, and the Observatory's economy page has a **Land given** story.
   - **Not yet:** the client can't tell yet whether a player holds an unspent grant (#448 needs it for "Claim with your deed"), and `plot_claimed` and the admin feed don't tell a granted claim from a bought one.
 - **O0.4 Flint follows the server's tour** (#441, M): `Tour` as a view, `hints.toml` and `judge` retired, and Skip becomes Hide with a way back.
+
+  *As built:*
+  - **`tutorial_seen { step }`** is the client's message. The server takes it for a step whose `Judge::client_reports()` holds: the four `Client` steps, and `collect_box`, the one `Waivable` step, which #446 waives with words (D10). For any other step it answers `error`. It's `Did::Seen(step)` in `engine::tutorial`, judged in the socket's handler. It needs a `play` key, as `say` does, so citizens can walk the road (#450), and it doesn't drive the avatar.
+  - **`capitol_core::onboarding::Tour`** is a view of `TutorialProgress`: the step at hand, `hidden()`, and `report(Did)`, the step to tell the server. `place_in_chapter(step)` gives the pips. Its `Did` is only what the screen shows: the pack used, crafting opened (both `open_pack`), and a zone card read (`read_zone_card`, for #444 to call). The walking, gathering and crafting are the server's.
+  - **`ui/hints.rs`** follows `GameState::tutorial()`. `save/hints.toml` and `Tour::judge` are gone, so nothing is kept on the machine. Each step tells the server once a session. The card shows its chapter's name and pips, and there are words for all 30 steps in the bureaucracy's voice, for each chapter's work package to reword.
+  - **Hide for now** hides the card here at once and sends `PUT /tutorial/dismissed` (`RestRequest::SetTutorialDismissed`). The state takes the answer, and the socket's `tutorial` after it. While the card is hidden, the header's chip ("The road in", with the chapter's pips) and a line in the `?` overlay bring it back.
+  - **`--hints-sample new|half|hidden|help`** shows the card offline on a fresh tour or one half way up the road, or, for a hidden one, the chip (`hidden`) or the overlay's line (`help`).
 - **O0.5 The chapter card and markers** (#442, M): the chapter card and its close card, the bearing arrow, and a ground ring at each step's target.
 
 ### O1: The road in (`tu:O1-road-in`)

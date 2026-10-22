@@ -65,6 +65,15 @@ pub enum Judge {
     Waivable,
 }
 
+impl Judge {
+    /// Whether a client's `tutorial_seen` counts for the step: one only the
+    /// screen shows, or one waived with words when nobody else came (D10).
+    /// Never a step the server judges alone.
+    pub fn client_reports(self) -> bool {
+        matches!(self, Judge::Client | Judge::Waivable)
+    }
+}
+
 /// One step of the road in. The number is the step's bit: never reuse or
 /// change one (see the module's notes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -432,5 +441,7 @@ mod tests {
         assert_eq!(client, [Step::OpenPack, Step::ReadZoneCard, Step::OpenOffice, Step::ReadTax]);
         // The claim, the reward's own step, is always the server's
         assert_eq!(Step::ClaimHome.judge(), Judge::Server);
+        assert!(!Step::ClaimHome.judge().client_reports());
+        assert!(Step::OpenPack.judge().client_reports() && Step::CollectBox.judge().client_reports());
     }
 }

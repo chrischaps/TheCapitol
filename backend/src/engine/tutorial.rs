@@ -10,8 +10,9 @@
 //! The server judges each step from what the player did (#439, plan D7):
 //! one [`saw`] at the point each action succeeds, never where it's asked
 //! for, so no client can say "I did it". What counts for which step is
-//! [`Did::step`]. The steps only the client can see (`Judge::Client`) wait
-//! for `tutorial_seen` (#441).
+//! [`Did::step`]. The steps only the client can see (`Judge::Client`), and
+//! those waived with words (`Judge::Waivable`), also come from the client's
+//! `tutorial_seen` (#441, [`Did::Seen`]); it counts for no other step.
 //!
 //! The step that completes every chapter before the Deeds Office opens the
 //! player's deed grant (`deed_grants`, #440).
@@ -106,6 +107,9 @@ pub enum Did<'a> {
     SetAutomation,
     /// Claimed a plot
     Claimed,
+    /// The client says it showed this step (`tutorial_seen`): only for a
+    /// step the client may report (`Judge::client_reports`)
+    Seen(Step),
 }
 
 impl Did<'_> {
@@ -139,7 +143,8 @@ impl Did<'_> {
             Did::SawPlot(Zone::Urban) => Step::SeeUrbanLot,
             Did::SetAutomation => Step::SetAutomation,
             Did::Claimed => Step::ClaimHome,
-            Did::Gathered(_) | Did::Crafted(_) | Did::Said(_) | Did::SawPlot(_) => return None,
+            Did::Seen(step) if step.judge().client_reports() => step,
+            Did::Gathered(_) | Did::Crafted(_) | Did::Said(_) | Did::SawPlot(_) | Did::Seen(_) => return None,
         })
     }
 }
@@ -511,9 +516,39 @@ mod tests {
             Did::Said(Channel::Capitol),
             Did::SawPlot(Zone::GuildDistrict),
             Did::SawPlot(Zone::Wilderness),
+            // The client can't say it did what the server judges (#441)
+            Did::Seen(Step::Walk),
+            Did::Seen(Step::ClaimHome),
+            Did::Seen(Step::Deposit),
         ] {
             assert_eq!(did.step(), None, "{did:?}");
         }
+    }
+
+    /// What only the screen shows, and what's waived with words, the client
+    /// reports (`tutorial_seen`, #441)
+    #[test]
+    fn the_client_reports_only_the_steps_it_may() {
+        for step in Step::ALL {
+            let reported = Did::Seen(step).step();
+            assert_eq!(reported.is_some(), step.judge() != Judge::Server, "{step:?}");
+            assert!(reported.is_none_or(|s| s == step));
+        }
+        assert_eq!(Did::Seen(Step::OpenPack).step(), Some(Step::OpenPack));
+        assert_eq!(Did::Seen(Step::CollectBox).step(), Some(Step::CollectBox));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn a_step_seen_by_the_client_is_kept_and_told(db: PgPool) {
+        let ada = player(&db, "Ada", 0).await;
+        let (events, mut rx) = broadcast::channel(16);
+        saw(&db, &events, ada, Did::Seen(Step::Walk)).await;
+        assert_eq!(done(&db, ada).await, Steps::NONE, "the server judges a walk");
+        assert!(rx.try_recv().is_err());
+        saw(&db, &events, ada, Did::Seen(Step::OpenPack)).await;
+        assert_eq!(done(&db, ada).await, Steps::from_iter([Step::OpenPack]));
+        assert!(matches!(rx.try_recv().unwrap(), GameEvent::Tutorial { player_id, .. } if player_id == ada));
     }
 
     #[sqlx::test(migrations = "./migrations")]

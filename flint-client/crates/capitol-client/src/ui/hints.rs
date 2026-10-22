@@ -1,24 +1,22 @@
-//! First-session hints (P8.3): one card at a time, top right under the
-//! header (clear of the zone banner, the panels and the toasts), for
-//! walking, gathering, the inventory and a first rope. Which
-//! card, and what counts as done, is `capitol_core::onboarding::Tour`; this
-//! keeps each account's tour in `save/hints.toml` and draws the card.
+//! The road in's card (#441, `the-capitol-road-in.md`): one at a time, top
+//! right under the header (clear of the zone banner, the panels and the
+//! toasts), for the step at hand. It's P8.3's hint card, grown to the
+//! server's tour: which step, and what counts as done, is the server's, as
+//! `capitol_core::onboarding::Tour` reads it. Nothing is kept here.
 //!
 //! A finished step shows its tick for a moment before the next card fades
-//! in. The last one gives way to a closing card that points at `?`, and
-//! then nothing, for good. "Skip the tips" ends it at once. The tour is per
-//! account and per server, so a second account on this machine sees the
-//! hints too, and an old account sees none (`Tour::judge`).
+//! in. The last gives way to a closing card that points at `?`. "Hide for
+//! now" hides the card on every device (`dismissed`, plan D2), and the
+//! header's road-in chip or a line in the `?` overlay brings it back. The
+//! tour can't be skipped: the deed comes only with the finish.
+//!
+//! #442 makes this the chapter card, with markers that lead you there.
 
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use capitol_core::catalog::Catalog;
-use capitol_core::onboarding::{Did, Step, Tour};
-use capitol_core::state::Container;
+use capitol_core::onboarding::{place_in_chapter, Did, Tour};
+use capitol_core::protocol::tutorial::{Chapter, Step, Steps, TutorialProgress};
 use egui::{Align2, Id, RichText};
-use flint_runtime::PersistentStore;
-use uuid::Uuid;
 
 use super::shortcuts::keys_row;
 use super::theme::{self, size};
@@ -41,28 +39,178 @@ const GAP: f32 = 12.0;
 /// How long it takes to step aside, or back, in seconds.
 const SLIDE: f32 = 0.25;
 
-/// What a step's card says: a title, the words, and a line of keys.
+/// A chapter's name, as its card and the header's chip say it.
+pub fn chapter_name(chapter: Chapter) -> &'static str {
+    match chapter {
+        Chapter::Arrival => "Arrival",
+        Chapter::RoadIn => "The road in",
+        Chapter::Hall => "The hall",
+        Chapter::People => "People",
+        Chapter::DeedsOffice => "The Deeds Office",
+        Chapter::SettleIn => "Settle in",
+    }
+}
+
+/// What a step's card says: a title, the words, and a line of keys. It's
+/// the bureaucracy's voice (plan D1): plain, a little dry, kindly meant.
+/// Each chapter's own work package may reword its steps (#443 to #449).
 fn words(step: Step) -> (&'static str, &'static str, &'static str) {
     match step {
+        // Arrival
         Step::Walk => (
             "Find your feet",
             "Click the ground and you'll walk there, round the water by the bridges and fords.",
             "[Click] walk  ·  [W] [A] [S] [D] pan",
         ),
-        Step::Gather => (
+        Step::GatherGrass => (
             "Gather fiber",
             "The tufts of tall grass are fiber. Click one to gather it, and you'll walk over if it's far.",
             "[Click] a tuft",
         ),
-        Step::Inventory => (
+        Step::OpenPack => (
             "Your pack",
             "What you gather lands in your inventory, bottom right. Drag to sort it.",
             "[I] opens and closes it",
         ),
-        Step::Craft => (
+        Step::TwistRope => (
             "Twist some rope",
             "Open crafting and press Fill to bring fiber from your pack. Two fiber twist into a rope.",
             "[C] crafting  ·  [Enter] craft",
+        ),
+        Step::MakeWorkbench => (
+            "A workbench kit",
+            "Hands only go so far. Ten fiber make a workbench kit, in the same crafting panel.",
+            "[C] crafting",
+        ),
+        Step::PlaceWorkbench => (
+            "Set it down",
+            "Right-click the kit in your pack and put it on open ground. Off a lot, a workbench is the one station allowed.",
+            "Right-click a kit  ·  [Click] to place",
+        ),
+        Step::GatherBranches => (
+            "Fallen branches",
+            "Branches lie under the trees. Gather them as you did the grass.",
+            "[Click] the branches",
+        ),
+        Step::GatherStone => (
+            "Loose stone",
+            "Stone lies on the scree round the outcrops. Gather some.",
+            "[Click] a stone pile",
+        ),
+        Step::MakeHandle => (
+            "A handle",
+            "Open the workbench: two branches and a rope make a tool handle.",
+            "[O] the nearest station",
+        ),
+        Step::KnapStone => (
+            "An edge",
+            "At the same bench, knap two stones to an edge.",
+            "[O] the nearest station",
+        ),
+        Step::MakeAxe => (
+            "A stone axe",
+            "Two edges, a handle and a rope make an axe. Better parts make a better axe: quality carries through.",
+            "[O] the nearest station",
+        ),
+        Step::FellTree => (
+            "Fell a tree",
+            "With the axe in your pack, a tree gives logs. Hands alone won't do it.",
+            "[Click] a tree",
+        ),
+        // The road in
+        Step::SeeRuralLot => (
+            "A farm",
+            "Walk up the south road toward the tower. Read a farm's deed on the way: its room, its price, its tax.",
+            "[Alt] + [Click] a lot",
+        ),
+        Step::SeeSuburbanLot => (
+            "A suburban lot",
+            "Further in, the streets curl into neighbourhoods. Read the deed of a lot there.",
+            "[Alt] + [Click] a lot",
+        ),
+        Step::SeeUrbanLot => (
+            "An urban yard",
+            "Inside the canal the city tightens into blocks. Read the deed of a yard in the grid.",
+            "[Alt] + [Click] a lot",
+        ),
+        Step::ReadZoneCard => (
+            "What a zone is like",
+            "A lot's panel opens its zone's card: what fits, the walk to the hall, what grows near. Read one.",
+            "[Alt] + [Click] a lot",
+        ),
+        // The hall
+        Step::Deposit => (
+            "The Exchange",
+            "At the hall by the tower, fiber is taken in for Strands, the city's coin. Deposit a little.",
+            "[X] the exchange",
+        ),
+        Step::SellOrder => (
+            "Offer something",
+            "The market's book takes orders at the hall. Put something up at a price you'd take.",
+            "[M] the market",
+        ),
+        Step::BuyOrder => (
+            "Bid for something",
+            "Now a buy order: what you'd pay, held in escrow until someone sells.",
+            "[M] the market",
+        ),
+        Step::CollectBox => (
+            "Your market box",
+            "What sells, and what you buy, waits in your market box at the hall. Collect it.",
+            "[M] the market",
+        ),
+        Step::VisitStall => (
+            "The bazaar",
+            "Behind the hall, people rent stalls. Walk the lane and look in at one.",
+            "[Click] a stall",
+        ),
+        Step::ReadGazette => (
+            "The Gazette",
+            "The day's records, printed at midnight. Read the latest edition.",
+            "[G] the Gazette",
+        ),
+        // People
+        Step::SayLocal => (
+            "A word",
+            "Those near you hear what you say. Say something.",
+            "[Enter] talk",
+        ),
+        Step::OpenCard => (
+            "Someone's card",
+            "Click a passer-by to read their card: who they are, and where they live.",
+            "[Click] a person",
+        ),
+        Step::ReadLetter => (
+            "The Registrar's letter",
+            "A letter waits in your box. Open it.",
+            "[L] your letters",
+        ),
+        // The Deeds Office
+        Step::OpenOffice => (
+            "The Deeds Office",
+            "Beside the hall, a desk under an awning sets the zones side by side. Look in.",
+            "[Click] the desk",
+        ),
+        Step::ClaimHome => (
+            "A home",
+            "Choose a lot in any home zone and claim it. The road has earned you its deed.",
+            "[Alt] + [Click] a lot",
+        ),
+        // Settle in
+        Step::PlaceAtHome => (
+            "A station at home",
+            "Place a station on your own lot. The room there is yours to fill.",
+            "Right-click a kit",
+        ),
+        Step::SetAutomation => (
+            "Work that runs",
+            "Set a station's job, and it works while you're away.",
+            "[O] a station  ·  Automation",
+        ),
+        Step::ReadTax => (
+            "What the city asks",
+            "Every deed owes tax each week. Read what yours asks, on its panel.",
+            "[Alt] + [Click] your lot",
         ),
     }
 }
@@ -78,13 +226,27 @@ enum Card {
     Closing(Instant),
 }
 
+/// Where the road in stands while its card is hidden, for the header's
+/// chip: the chapter, and the step at hand's place in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hidden {
+    pub chapter: Chapter,
+    /// The step at hand's place in its chapter, from 0
+    pub at: usize,
+    /// How many steps the chapter has
+    pub of: usize,
+}
+
+#[derive(Default)]
 pub struct Hints {
-    file: HintsFile,
-    /// Whose tour this is: the server and the player's id.
-    account: Option<(String, Uuid)>,
-    tour: Tour,
-    /// Whether this account's inventory has been looked at (`Tour::judge`).
-    judged: bool,
+    /// The tour as the server last said: `None` until it has, and from a
+    /// server older than the road in, which shows no card.
+    tour: Option<Tour>,
+    /// The steps told to the server this session ([`Hints::saw`]), so each
+    /// is told once while its answer is on the way.
+    told: Steps,
+    /// Hidden (or brought back) as asked, until the server says so too.
+    asked_hidden: Option<bool>,
     card: Option<Card>,
     /// Where the card was drawn, for panels that need to keep clear.
     pub rect: Option<egui::Rect>,
@@ -94,85 +256,78 @@ pub struct Hints {
 }
 
 impl Hints {
-    pub fn load(path: impl Into<PathBuf>) -> Hints {
-        Hints {
-            file: HintsFile::load(path),
-            account: None,
-            tour: Tour::default(),
-            judged: false,
-            card: None,
-            rect: None,
-            sizes: Vec::new(),
+    /// Follow the tour as the server has it (`GameState::tutorial`): `None`
+    /// signed out, or before it's said.
+    pub fn follow(&mut self, progress: Option<TutorialProgress>) {
+        let tour = progress.map(Tour::from);
+        if tour.is_none() && self.tour.is_some() {
+            // Signed out: the next account starts clean
+            *self = Hints { sizes: std::mem::take(&mut self.sizes), ..Hints::default() };
         }
+        if let (Some(tour), Some(asked)) = (tour, self.asked_hidden) {
+            if tour.progress().dismissed == asked {
+                self.asked_hidden = None;
+            }
+        }
+        self.tour = tour;
     }
 
-    /// Follow whoever is signed in on `server`: `me` once the server has
-    /// said who, and their inventory once it's arrived. Nothing shows until
-    /// both are known, so an old account never flashes a hint.
-    pub fn follow(
-        &mut self,
-        server: &str,
-        me: Option<Uuid>,
-        inventory: Option<&Container>,
-        catalog: &Catalog,
-    ) {
-        let account = me.map(|me| (server.to_owned(), me));
-        if account != self.account {
-            self.tour = account
-                .as_ref()
-                .map_or_else(Tour::default, |(s, me)| self.file.tour(s, *me));
-            self.account = account;
-            self.judged = false;
-            self.card = None;
+    /// The screen showed `did`. The step to tell the server
+    /// (`tutorial_seen`), the first time it's worth telling.
+    pub fn saw(&mut self, did: Did) -> Option<Step> {
+        let step = self.tour?.report(did)?;
+        if self.told.has(step) {
+            return None;
         }
-        if self.account.is_none() || self.judged {
-            return;
-        }
-        let Some(inventory) = inventory else {
-            return;
-        };
-        self.judged = true;
-        let raw = |t: &str| {
-            catalog
-                .item_type(t)
-                .is_some_and(|t| t.category == "raw_material")
-        };
-        if self
-            .tour
-            .judge(inventory.items().map(|i| i.item_type.as_str()), raw)
-        {
-            tracing::info!(
-                "hints: judged from the inventory: {:#06b}",
-                self.tour.bits()
-            );
-            self.save();
-        }
+        self.told = self.told.with(step);
+        tracing::info!("hints: saw {}", step.name());
+        Some(step)
     }
 
-    /// The player did `did`.
-    pub fn saw(&mut self, did: Did) {
-        if self.account.is_some() && self.tour.saw(did) {
-            tracing::info!("hints: {did:?}");
-            self.save();
-        }
+    /// The card is hidden for now, as asked here or by any device.
+    fn is_hidden(&self) -> bool {
+        self.tour
+            .is_some_and(|t| !t.finished() && self.asked_hidden.unwrap_or(t.progress().dismissed))
     }
 
-    fn save(&mut self) {
-        if let Some((server, me)) = &self.account {
-            self.file.set(server, *me, self.tour);
+    /// Where the road in stands while its card is hidden; `None` while it
+    /// shows, once it's finished, or before the server says.
+    pub fn hidden(&self) -> Option<Hidden> {
+        if !self.is_hidden() {
+            return None;
         }
+        let step = self.tour?.current()?;
+        let (at, of) = place_in_chapter(step);
+        Some(Hidden { chapter: step.chapter(), at, of })
+    }
+
+    /// Hide the card here at once; the caller asks the server.
+    pub fn hide(&mut self) {
+        self.asked_hidden = Some(true);
+        self.card = None;
+    }
+
+    /// Bring the card back here at once; the caller asks the server.
+    pub fn bring_back(&mut self) {
+        self.asked_hidden = Some(false);
     }
 
     /// Draw the card, if there is one. Call once a frame while in the world.
     /// It keeps clear of the open `panels` where it can (#99): see `place`.
-    pub fn show(&mut self, ctx: &egui::Context, now: Instant, panels: &[egui::Rect]) {
+    /// True if "Hide for now" was clicked: the card is hidden here, and the
+    /// caller tells the server (`set_tutorial_dismissed`).
+    pub fn show(&mut self, ctx: &egui::Context, now: Instant, panels: &[egui::Rect]) -> bool {
         self.rect = None;
-        if !self.judged {
-            return;
+        let Some(tour) = self.tour else {
+            return false;
+        };
+        if self.is_hidden() {
+            self.card = None;
+            return false;
         }
-        self.card = next_card(self.card, self.tour, now);
+        self.card = next_card(self.card, tour, now);
         let Some(card) = self.card else {
-            return;
+            return false;
         };
         let (step, since) = match card {
             Card::Step(step, at) => (Some(step), at),
@@ -191,7 +346,7 @@ impl Hints {
             }
         };
         let eased = 1.0 - (1.0 - alpha).powi(3);
-        let mut skip = false;
+        let mut hide = false;
         // Under the header, as the panels are (anchors are screen-relative).
         let top = ctx.available_rect().top() + 12.0;
         let size = |compact| {
@@ -216,7 +371,7 @@ impl Hints {
                     match step {
                         Some(step) => {
                             let done = matches!(card, Card::Done(..));
-                            skip = step_card(ui, step, done, spot.compact);
+                            hide = step_card(ui, step, done, spot.compact);
                         }
                         None => closing_card(ui, spot.compact),
                     }
@@ -243,11 +398,11 @@ impl Hints {
             });
         }
         self.rect = Some(shown.response.rect);
-        if skip && self.tour.dismiss() {
-            tracing::info!("hints: skipped");
-            self.save();
-            self.card = None;
+        if hide {
+            tracing::info!("hints: hidden for now");
+            self.hide();
         }
+        hide
     }
 }
 
@@ -256,7 +411,7 @@ impl Hints {
 struct Spot {
     /// Its inset from the screen's right edge.
     right: f32,
-    /// Its words go to a hover, leaving the title, the keys and Skip.
+    /// Its words go to a hover, leaving the title, the keys and Hide.
     compact: bool,
     /// Drawn over the panels, because no spot was clear of them.
     in_front: bool,
@@ -329,11 +484,11 @@ fn next_card(card: Option<Card>, tour: Tour, now: Instant) -> Option<Card> {
         }
         Some(Card::Closing(_)) => None,
         // After a tick, or with nothing up: the step at hand, or the
-        // closing card if the tour was just finished here (not skipped,
-        // and not finished before this session).
+        // closing card if the tour was just finished here (not finished
+        // before this session).
         last => match current {
             Some(step) => Some(Card::Step(step, now)),
-            None if tour.completed() && matches!(last, Some(Card::Done(..))) => {
+            None if tour.finished() && matches!(last, Some(Card::Done(..))) => {
                 Some(Card::Closing(now))
             }
             None => None,
@@ -341,22 +496,25 @@ fn next_card(card: Option<Card>, tour: Tour, now: Instant) -> Option<Card> {
     }
 }
 
-/// A step's card; `compact` leaves out its words. True if "Skip the tips"
-/// was clicked.
+/// A step's card: its chapter and place in it, then the step; `compact`
+/// leaves out its words. True if "Hide for now" was clicked.
 fn step_card(ui: &mut egui::Ui, step: Step, done: bool, compact: bool) -> bool {
     let (title, body, keys) = words(step);
-    let mut skip = false;
+    let (at, of) = place_in_chapter(step);
+    let mut hide = false;
     ui.horizontal(|ui| {
-        theme::step_pips(ui, Step::ALL.len(), step.index() + usize::from(done));
-        ui.add_space(4.0);
-        ui.label(theme::dim(format!(
-            "{} of {}",
-            step.index() + 1,
-            Step::ALL.len()
-        )));
+        ui.label(theme::label(chapter_name(step.chapter())));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            skip = theme::link(ui, "Skip the tips", size::SMALL).clicked();
+            hide = theme::link(ui, "Hide for now", size::SMALL)
+                .on_hover_text("The road in waits: the header's chip brings it back")
+                .clicked();
         });
+    });
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        theme::step_pips(ui, of, at + usize::from(done));
+        ui.add_space(4.0);
+        ui.label(theme::dim(format!("{} of {of}", at + 1)));
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -376,20 +534,23 @@ fn step_card(ui: &mut egui::Ui, step: Step, done: bool, compact: bool) -> bool {
         ui.spacing_mut().item_spacing.x = 4.0;
         keys_row(ui, keys);
     });
-    skip
+    hide
 }
 
 /// The closing card's title and words.
 const CLOSING: (&str, &str) = (
     "Well begun",
-    "You've walked, gathered and made rope. The rest is trade: \
-     build stations, claim a plot, and make your fortune.",
+    "You've walked the road in and made a home. The rest is yours: \
+     make, trade, and make your name.",
 );
 
-/// The last card: you've the hang of it. `compact` leaves out its words.
+/// The last card: the road is walked. `compact` leaves out its words.
 fn closing_card(ui: &mut egui::Ui, compact: bool) {
     let (title, body) = CLOSING;
-    theme::step_pips(ui, Step::ALL.len(), Step::ALL.len());
+    let last = Chapter::SettleIn.steps().count();
+    ui.label(theme::label(chapter_name(Chapter::SettleIn)));
+    ui.add_space(2.0);
+    theme::step_pips(ui, last, last);
     ui.add_space(4.0);
     ui.label(theme::title(title, size::HEADING + 2.0));
     if !compact {
@@ -404,61 +565,15 @@ fn closing_card(ui: &mut egui::Ui, compact: bool) {
     });
 }
 
-/// `save/hints.toml`: each account's tour, by server and player id, as
-/// [`Tour::bits`]. Its own file, beside `save/session.toml`, because
-/// extensions can't reach the scripts' store (issue #71).
-struct HintsFile {
-    path: PathBuf,
-    store: PersistentStore,
-}
-
-impl HintsFile {
-    const PATH: &'static str = "save/hints.toml";
-
-    fn load(path: impl Into<PathBuf>) -> HintsFile {
-        let path = path.into();
-        let mut store = PersistentStore::new();
-        if path.is_file() {
-            if let Err(e) = store.load_from_file(&path) {
-                tracing::warn!("hints: ignoring {}: {e}", path.display());
-            }
-        }
-        HintsFile { path, store }
-    }
-
-    fn key(server: &str, me: Uuid) -> String {
-        format!("{server} {me}")
-    }
-
-    fn tour(&self, server: &str, me: Uuid) -> Tour {
-        self.store
-            .get(&Self::key(server, me))
-            .and_then(|v| v.as_integer())
-            .and_then(|b| u8::try_from(b).ok())
-            .map_or_else(Tour::default, Tour::from_bits)
-    }
-
-    fn set(&mut self, server: &str, me: Uuid, tour: Tour) {
-        self.store.set(
-            &Self::key(server, me),
-            toml::Value::Integer(tour.bits().into()),
-        );
-        if let Some(dir) = self.path.parent() {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                tracing::warn!("hints: can't create {}: {e}", dir.display());
-                return;
-            }
-        }
-        match self.store.save_to_file(&self.path) {
-            Ok(()) => self.store.mark_clean(),
-            Err(e) => tracing::warn!("hints: can't write {}: {e}", self.path.display()),
-        }
-    }
-}
-
-impl Default for Hints {
-    fn default() -> Self {
-        Hints::load(HintsFile::PATH)
+/// `--hints-sample`: the card on a fresh tour (`new`, the default), half
+/// way up the road (`half`), or hidden there, for the header's chip and
+/// the `?` overlay's line (`hidden`, `help`).
+pub fn sample(which: &str) -> TutorialProgress {
+    let half: Steps = Step::ALL.into_iter().take_while(|s| *s != Step::SellOrder).collect();
+    match which {
+        "half" => TutorialProgress { done: half, dismissed: false },
+        "hidden" | "help" => TutorialProgress { done: half, dismissed: true },
+        _ => TutorialProgress::default(),
     }
 }
 
@@ -466,25 +581,8 @@ impl Default for Hints {
 mod tests {
     use super::*;
 
-    fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("capitol-hints-{}", std::process::id()));
-        dir.join(name)
-    }
-
-    #[test]
-    fn a_tour_is_kept_per_account_and_server() {
-        let path = temp("kept.toml");
-        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
-        let mut file = HintsFile::load(&path);
-        let mut tour = Tour::default();
-        tour.saw(Did::Walked);
-        file.set("http://localhost:3000", a, tour);
-
-        let file = HintsFile::load(&path);
-        assert_eq!(file.tour("http://localhost:3000", a), tour);
-        assert_eq!(file.tour("http://localhost:3000", b), Tour::default());
-        assert_eq!(file.tour("http://elsewhere:3000", a), Tour::default());
-        let _ = std::fs::remove_file(path);
+    fn tour(done: &[Step]) -> Tour {
+        Tour::from(TutorialProgress { done: done.iter().copied().collect(), dismissed: false })
     }
 
     #[test]
@@ -542,39 +640,89 @@ mod tests {
     #[test]
     fn a_done_step_ticks_then_gives_way() {
         let t0 = Instant::now();
-        let mut tour = Tour::default();
-        let card = next_card(None, tour, t0);
+        let card = next_card(None, tour(&[]), t0);
         assert_eq!(card, Some(Card::Step(Step::Walk, t0)));
-        tour.saw(Did::Walked);
+        // The server says the walk is done
+        let walked = tour(&[Step::Walk]);
         let t1 = t0 + Duration::from_secs(3);
-        let card = next_card(card, tour, t1);
+        let card = next_card(card, walked, t1);
         assert_eq!(card, Some(Card::Done(Step::Walk, t1)));
-        let card = next_card(card, tour, t1 + TICK_FOR / 2);
+        let card = next_card(card, walked, t1 + TICK_FOR / 2);
         assert_eq!(card, Some(Card::Done(Step::Walk, t1)));
         let t2 = t1 + TICK_FOR;
         assert_eq!(
-            next_card(card, tour, t2),
-            Some(Card::Step(Step::Gather, t2))
+            next_card(card, walked, t2),
+            Some(Card::Step(Step::GatherGrass, t2))
         );
     }
 
     #[test]
     fn the_closing_card_comes_once_and_only_after_the_last_step() {
         let t0 = Instant::now();
-        let mut tour = Tour::from_bits(0b0111);
-        let card = next_card(None, tour, t0);
-        assert_eq!(card, Some(Card::Step(Step::Craft, t0)));
-        tour.saw(Did::Crafted);
-        let card = next_card(card, tour, t0);
+        let (last, rest) = Step::ALL.split_last().unwrap();
+        let card = next_card(None, tour(rest), t0);
+        assert_eq!(card, Some(Card::Step(*last, t0)));
+        let finished = tour(&Step::ALL);
+        let card = next_card(card, finished, t0);
         let t1 = t0 + TICK_FOR;
-        let card = next_card(card, tour, t1);
+        let card = next_card(card, finished, t1);
         assert_eq!(card, Some(Card::Closing(t1)));
-        assert_eq!(next_card(card, tour, t1 + CLOSING_FOR), None);
+        assert_eq!(next_card(card, finished, t1 + CLOSING_FOR), None);
         // Finished in an earlier session: nothing at all.
-        assert_eq!(next_card(None, tour, t1), None);
-        // Skipped: nothing either.
-        let mut skipped = Tour::default();
-        skipped.dismiss();
-        assert_eq!(next_card(None, skipped, t0), None);
+        assert_eq!(next_card(None, finished, t1), None);
+    }
+
+    #[test]
+    fn hiding_holds_until_brought_back_and_the_server_agrees() {
+        let mut hints = Hints::default();
+        assert_eq!(hints.hidden(), None, "nothing before the server says");
+        let half = sample("half");
+        hints.follow(Some(half));
+        assert_eq!(hints.hidden(), None);
+
+        // Hidden here at once, before the server's answer
+        hints.hide();
+        let hidden = hints.hidden().expect("hidden");
+        assert_eq!((hidden.chapter, hidden.at, hidden.of), (Chapter::Hall, 1, 6));
+        hints.follow(Some(half));
+        assert!(hints.hidden().is_some(), "an old word from the server doesn't undo it");
+        hints.follow(Some(sample("hidden")));
+        assert!(hints.hidden().is_some());
+
+        // Brought back, as on another device
+        hints.bring_back();
+        assert_eq!(hints.hidden(), None);
+        hints.follow(Some(half));
+        hints.follow(Some(sample("hidden")));
+        assert!(hints.hidden().is_some(), "once agreed, the server's word is the word");
+
+        // A finished tour has nothing to hide
+        hints.follow(Some(TutorialProgress { done: Steps::every(), dismissed: true }));
+        assert_eq!(hints.hidden(), None);
+    }
+
+    #[test]
+    fn what_the_screen_showed_is_told_once() {
+        let mut hints = Hints::default();
+        assert_eq!(hints.saw(Did::UsedInventory), None, "nobody to tell yet");
+        hints.follow(Some(TutorialProgress::default()));
+        assert_eq!(hints.saw(Did::UsedInventory), Some(Step::OpenPack));
+        assert_eq!(hints.saw(Did::OpenedCrafting), None, "already on its way");
+        hints.follow(Some(TutorialProgress { done: Steps::from_iter([Step::OpenPack]), dismissed: false }));
+        assert_eq!(hints.saw(Did::UsedInventory), None, "done");
+        // Signed out and in again: told afresh
+        hints.follow(None);
+        hints.follow(Some(TutorialProgress::default()));
+        assert_eq!(hints.saw(Did::UsedInventory), Some(Step::OpenPack));
+    }
+
+    #[test]
+    fn every_step_has_words_and_every_chapter_a_name() {
+        for step in Step::ALL {
+            let (title, body, keys) = words(step);
+            assert!(!title.is_empty() && !body.is_empty() && !keys.is_empty(), "{step:?}");
+        }
+        let names: std::collections::HashSet<_> = Chapter::ALL.into_iter().map(chapter_name).collect();
+        assert_eq!(names.len(), Chapter::ALL.len());
     }
 }
