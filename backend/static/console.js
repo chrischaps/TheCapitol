@@ -8,8 +8,9 @@
 // server's annotations drawn as marks across it.
 //
 // D1.1 is the frame: sign-in, the tabs, the theme, the stream, and one story
-// per tab that later packages grow (D1.2 the overview, D2 the economy, D3.1
-// performance, D4.2 the town, D6.2 tuning).
+// per tab that later packages grow (D2 the economy, D3.1 performance, D4.2
+// the town, D6.2 tuning). D1.2 made the overview: tiles for health, the tick
+// and who's on, the books' drift, and the newest on the wire.
 
 "use strict";
 
@@ -52,6 +53,8 @@
     lastSampleAt: null,
     abort: null,
     live: "off",
+    // The last answer from /health, for the overview's health tile
+    health: null,
   };
 
   // ---------------------------------------------------------------------------
@@ -239,7 +242,7 @@
 
   // The fields each set of charts reads: the tick's `load` is most of a
   // sample, so it's read only for the performance tab (#411)
-  const FIELDS = { base: "players,strands", load: "load" };
+  const FIELDS = { base: "players,strands,drift", load: "load" };
 
   async function readSeries(set) {
     const from = rangeFrom();
@@ -309,7 +312,7 @@
         if (addAnnotation(a)) {
           for (const chart of Object.values(state.charts)) chart.redraw();
           if (a.kind === "tunable_changed") loadKnobs();
-          render(["events"]);
+          render(["events", "overview"]);
         }
         break;
       }
@@ -317,7 +320,7 @@
       case "gazette": break;
       default:
         addWire({ kind: feed.type, at_ms: feed.type === "fill" ? Date.parse(feed.trade.at) || Date.now() : Date.now(), feed });
-        render(["events"]);
+        render(["events", "overview"]);
     }
   }
 
@@ -537,7 +540,231 @@
   // ---------------------------------------------------------------------------
   // The pages: each story's sentence, from what the charts show
 
+  // The overview's tiles (D1.2): each reads the newest sample that has its
+  // field, says whether that's well, and draws a sparkline over the range.
+  // The tick's tiles read `load`, which the series sends only for the
+  // performance tab (#411), so until that tab is opened their sparklines
+  // hold what the stream has brought since the page opened.
+  const TILES = [
+    {
+      key: "health",
+      label: "Health",
+      read() {
+        const h = state.health;
+        const fresh = state.lastSampleAt && Date.now() - state.lastSampleAt < 3 * SAMPLE_MS;
+        if (!h) return { value: "…", sub: "Asking the server.", level: "" };
+        if (h.error) return { value: "Silent", sub: "The server didn't answer /health.", level: "bad", problem: "the server didn't answer its health check" };
+        const ill = [h.database !== "healthy" && "the database", h.redis !== "healthy" && "Redis"].filter(Boolean);
+        if (ill.length) {
+          const who = ill.join(" and ");
+          return { value: "Degraded", sub: `${who.charAt(0).toUpperCase()}${who.slice(1)} ${ill.length === 1 ? "doesn't" : "don't"} answer.`, level: "bad", problem: `${who} ${ill.length === 1 ? "doesn't" : "don't"} answer` };
+        }
+        if (state.live === "live" && state.lastSampleAt && !fresh) {
+          return { value: "Quiet", sub: `No sample since ${clock(state.lastSampleAt)}.`, level: "warn", problem: "the sampler has gone quiet" };
+        }
+        const scale = h.sim_tick_scale ? ` Time runs ×${h.sim_tick_scale}.` : "";
+        return { value: "Sound", sub: `The database and Redis answer.${scale}`, level: "good" };
+      },
+    },
+    {
+      key: "tps",
+      label: "Ticks a second",
+      zero: true,
+      has: (s) => s.load,
+      at: (s) => (s.load.secs > 0 ? s.load.ticks / s.load.secs : null),
+      read(s) {
+        const tps = this.at(s);
+        const want = 1000 / s.load.tick_period_ms;
+        if (tps == null) return { value: "–", sub: "No window yet." };
+        const low = tps < want * 0.95;
+        return {
+          value: tps.toFixed(1),
+          sub: `Of ${Number(want.toFixed(1))}.${s.load.ticks_over ? ` ${plural(s.load.ticks_over, "tick", "ticks")} over budget.` : ""}`,
+          level: low ? "warn" : "good",
+          problem: low && `the tick keeps ${tps.toFixed(1)} a second of its ${Number(want.toFixed(1))}`,
+        };
+      },
+    },
+    {
+      key: "p95",
+      label: "Tick p95",
+      zero: true,
+      has: (s) => s.load,
+      at: (s) => s.load.tick_p95_ms,
+      read(s) {
+        const { tick_p95_ms: p95, tick_period_ms: period, tick_mean_ms: mean } = s.load;
+        if (p95 == null) return { value: s.load.ticks ? `> ${ms(period)}` : "–", sub: s.load.ticks ? "Past the last bucket." : "No tick ran.", level: s.load.ticks ? "bad" : "" };
+        const over = p95 > period;
+        return {
+          value: Number(p95 < 10 ? p95.toFixed(2) : p95.toFixed(1)),
+          unit: "ms",
+          sub: `Of ${ms(period)}; ${ms(mean)} on average.`,
+          level: over ? "bad" : "good",
+          problem: over && `the tick's p95 is ${ms(p95)}, over its ${ms(period)}`,
+        };
+      },
+    },
+    {
+      key: "people",
+      label: "People on",
+      has: (s) => s.players,
+      at: (s) => s.players.people,
+      read(s) {
+        const sockets = latest((s) => s.load)?.load.sockets_open;
+        return { value: nf.format(s.players.people), sub: sockets == null ? "In the world now." : `${plural(sockets, "socket", "sockets")} open.` };
+      },
+    },
+    {
+      key: "citizens",
+      label: "Citizens on",
+      has: (s) => s.players,
+      at: (s) => s.players.citizens,
+      read(s) {
+        const t = latest((s) => s.town)?.town;
+        if (!t) return { value: nf.format(s.players.citizens), sub: "No town reports in." };
+        const st = t.standing ?? {};
+        const roles = ["working", "resting"].filter((k) => st[k]).map((k) => `${nf.format(st[k])} ${k}`);
+        const away = st.away ? `${nf.format(st.away)} away` : null;
+        return { value: nf.format(s.players.citizens), sub: [...roles, away].filter(Boolean).join(", ") + "." };
+      },
+    },
+    {
+      key: "drift",
+      label: "Drift",
+      zero: true,
+      at: (s) => (s.drift ? s.drift.strands + Object.values(s.drift.units ?? {}).reduce((a, n) => a + n, 0) : null),
+      // Samples from before #358 have no `drift`; the watch still says
+      has: (s) => s.drift || s.watches,
+      read(s) {
+        const firing = (s.watches ?? []).some((w) => w.kind === "drift");
+        const d = s.drift ?? { strands: 0, units: {} };
+        const units = Object.entries(d.units ?? {}).sort((a, b) => b[1] - a[1]);
+        if (!firing && d.strands === 0 && units.length === 0) {
+          return { value: "0", sub: "The books balance, since the server started.", level: "good" };
+        }
+        const parts = [];
+        if (d.strands) parts.push(`${nf.format(d.strands)} ${d.strands === 1 ? "Strand" : "Strands"}`);
+        for (const [i, n] of units.slice(0, 2)) parts.push(`${nf.format(n)} ${item(i)}`);
+        if (units.length > 2) parts.push(`${units.length - 2} more items`);
+        const what = parts.length ? parts.join(", ") : "an amount this sample doesn't carry";
+        return {
+          value: d.strands ? nf.format(d.strands) : units.length ? nf.format(units.reduce((a, [, n]) => a + n, 0)) : "≠ 0",
+          sub: `Unexplained since the server started: ${what}. It clears on a restart.`,
+          level: "bad",
+          problem: `the books have drifted by ${what}`,
+        };
+      },
+    },
+  ];
+
+  function buildTiles() {
+    const box = $("tiles");
+    if (box.childElementCount) return;
+    box.replaceChildren(...TILES.map((t) => {
+      const el = document.createElement("div");
+      el.className = "tile";
+      el.dataset.tile = t.key;
+      const label = text("p", t.label);
+      label.className = "label";
+      const value = text("p", "–");
+      value.className = "value";
+      const spark = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      spark.setAttribute("class", "spark");
+      spark.setAttribute("viewBox", "0 0 100 28");
+      spark.setAttribute("preserveAspectRatio", "none");
+      spark.setAttribute("aria-hidden", "true");
+      const sub = text("p", "");
+      sub.className = "sub";
+      el.append(label, value, spark, sub);
+      return el;
+    }));
+  }
+
+  /** A sparkline's area and line over `values`, a gap where one is null */
+  function drawSpark(svg, values, zero) {
+    const nums = values.filter((v) => v != null);
+    svg.replaceChildren();
+    if (nums.length < 2) return;
+    let lo = zero ? Math.min(0, ...nums) : Math.min(...nums);
+    let hi = Math.max(...nums);
+    // A flat line sits low when it's zero, mid-height otherwise
+    if (hi - lo < 1e-9) { if (zero && hi === 0) hi = 1; else { lo -= 1; hi += 1; } }
+    const x = (i) => (values.length === 1 ? 100 : (100 * i) / (values.length - 1));
+    const y = (v) => 26 - (24 * (v - lo)) / (hi - lo);
+    let line = "";
+    let area = "";
+    let run = [];
+    const close = () => {
+      if (run.length > 1) {
+        line += run.map(([i, v], k) => `${k ? "L" : "M"}${x(i).toFixed(2)},${y(v).toFixed(2)}`).join("");
+        area += `M${x(run[0][0]).toFixed(2)},28` + run.map(([i, v]) => `L${x(i).toFixed(2)},${y(v).toFixed(2)}`).join("") + `L${x(run.at(-1)[0]).toFixed(2)},28Z`;
+      }
+      run = [];
+    };
+    values.forEach((v, i) => (v == null ? close() : run.push([i, v])));
+    close();
+    const path = (d, cls) => {
+      const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      p.setAttribute("d", d);
+      p.setAttribute("class", cls);
+      p.setAttribute("vector-effect", "non-scaling-stroke");
+      return p;
+    };
+    svg.append(path(area, "area"), path(line, "line"));
+  }
+
+  // /health is the database and Redis answering; asked at most every 30 s,
+  // while the overview is open
+  async function checkHealth() {
+    if (state.health && Date.now() - state.health.at < 30_000) return;
+    const at = Date.now();
+    state.health = { ...(state.health ?? {}), at };
+    try {
+      const res = await fetch("/health");
+      state.health = res.ok ? { at, ...(await res.json()) } : { at, error: res.status };
+    } catch {
+      state.health = { at, error: "unreachable" };
+    }
+    if (state.tab === "overview") tiles();
+  }
+
+  function tiles() {
+    buildTiles();
+    const problems = [];
+    let any = false;
+    for (const t of TILES) {
+      const el = document.querySelector(`.tile[data-tile="${t.key}"]`);
+      const s = t.has ? latest(t.has) : null;
+      if (t.has && !s) {
+        el.dataset.level = "";
+        el.querySelector(".value").replaceChildren("–");
+        el.querySelector(".sub").textContent = "Waiting for a sample.";
+        drawSpark(el.querySelector(".spark"), []);
+        continue;
+      }
+      if (t.has) any = true;
+      const r = t.read(s);
+      el.dataset.level = r.level ?? "";
+      el.querySelector(".value").replaceChildren(String(r.value), ...(r.unit ? [text("small", ` ${r.unit}`)] : []));
+      el.querySelector(".sub").textContent = r.sub;
+      el.title = r.problem ? `${r.problem.charAt(0).toUpperCase()}${r.problem.slice(1)}.` : "";
+      if (r.problem) problems.push(r.problem);
+      drawSpark(el.querySelector(".spark"), t.at ? inRange(t.has).map((s) => t.at(s)) : [], t.zero);
+    }
+    const others = latest((s) => s.watches)?.watches.filter((w) => w.kind !== "drift" && w.kind !== "tick_p95") ?? [];
+    const watchWords = { gini: "wealth is pooling", tax_revenue: "the property tax is under its floor", off_target: "an item's price is off target" };
+    for (const kind of new Set(others.map((w) => w.kind))) problems.push(watchWords[kind] ?? `the ${kind.replace(/_/g, " ")} watch is firing`);
+    $("glance-headline").textContent = !any
+      ? (state.live === "live" ? "No samples yet: the sampler takes one every ten seconds." : "Waiting for the first sample.")
+      : problems.length === 0
+        ? "All's well: the server answers, the tick keeps time, and the books balance."
+        : `${problems.length === 1 ? "One thing to look at" : `${problems.length} things to look at`}: ${problems.join("; ")}.`;
+  }
+
   function overview() {
+    checkHealth();
+    tiles();
+    latestWire();
     chart("players");
     const s = latest((s) => s.players);
     if (!s) {
@@ -701,19 +928,47 @@
       ? `Nothing on the wire in ${window_()}.`
       : `${plural(recent.length, "thing", "things")} on the wire in ${window_()}${warnings ? `, ${nf.format(warnings)} of them ${warnings === 1 ? "a warning" : "warnings"}` : ""}.`;
     const shown = state.wire.filter((e) => state.wireKind === "all" || e.group === state.wireKind).slice(-200).reverse();
-    $("wire").replaceChildren(...(shown.length ? shown.map((e) => {
-      const li = document.createElement("li");
-      const time = text("time", clockSecs(e.at_ms));
-      time.dateTime = new Date(e.at_ms).toISOString();
-      const tag = text("span", e.tag);
-      tag.className = "kind";
-      tag.dataset.kind = e.group;
-      const words = text("span", e.text);
-      words.className = "text";
-      li.append(time, tag, words);
-      return li;
-    }) : [Object.assign(document.createElement("li"), { className: "empty", textContent: "Nothing yet. The wire fills as things happen." })]));
+    $("wire").replaceChildren(...(shown.length ? shown.map(wireItem) : [emptyWire()]));
   }
+
+  // The overview's few newest, fills folded together when several come at
+  // once so a busy market doesn't push the notes off
+  const LATEST = 8;
+  function latestWire() {
+    const from = rangeFrom();
+    const recent = state.wire.filter((e) => e.at_ms > from);
+    const notes = recent.filter((e) => e.kind === "annotation").length;
+    const warnings = recent.filter((e) => e.group === "warning").length;
+    $("latest-headline").textContent = recent.length === 0
+      ? `Nothing on the wire in ${window_()}.`
+      : `${plural(notes, "note", "notes")} and ${plural(warnings, "warning", "warnings")} in ${window_()}, among ${plural(recent.length, "thing", "things")} on the wire.`;
+    const shown = [];
+    for (let i = state.wire.length - 1; i >= 0 && shown.length < LATEST; i--) {
+      const e = state.wire[i];
+      const last = shown.at(-1);
+      if (e.group === "fill" && last?.group === "fill") {
+        last.folded = (last.folded ?? 1) + 1;
+        last.text = `${plural(last.folded, "fill", "fills")} on the market, the newest: ${last.first}`;
+        continue;
+      }
+      shown.push({ ...e, first: e.text });
+    }
+    $("latest-wire").replaceChildren(...(shown.length ? shown.map(wireItem) : [emptyWire()]));
+  }
+
+  function wireItem(e) {
+    const li = document.createElement("li");
+    const time = text("time", clockSecs(e.at_ms));
+    time.dateTime = new Date(e.at_ms).toISOString();
+    const tag = text("span", e.tag);
+    tag.className = "kind";
+    tag.dataset.kind = e.group;
+    const words = text("span", e.text);
+    words.className = "text";
+    li.append(time, tag, words);
+    return li;
+  }
+  const emptyWire = () => Object.assign(document.createElement("li"), { className: "empty", textContent: "Nothing yet. The wire fills as things happen." });
 
   // ---------------------------------------------------------------------------
   // Small DOM helpers

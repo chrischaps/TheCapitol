@@ -133,6 +133,7 @@ pub async fn run_sampler_loop(state: AppState, every: Duration) {
                         players: sample.players,
                         events: sample.events,
                         watches: sample.watches.clone(),
+                        drift: sample.drift.clone(),
                         town: town.clone(),
                         ..stored
                     };

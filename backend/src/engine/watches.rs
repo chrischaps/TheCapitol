@@ -46,6 +46,7 @@ impl Watcher {
                 // Judged next sample; the watches keep what they had
                 tracing::warn!("The watches couldn't count the deeds: {e}");
                 sample.watches = self.watches.firing();
+                sample.drift = self.watches.drift();
                 return;
             }
         };
@@ -60,6 +61,7 @@ impl Watcher {
             annotations::note(&state.db, AnnotationKind::WatchFired, &fired.text).await;
         }
         sample.watches = self.watches.firing();
+        sample.drift = self.watches.drift();
     }
 
     fn reading(&mut self, last: &Ledger, now: &Ledger, admins: &HashSet<Uuid>, sample: &Sample, deeds: u64) -> Reading {

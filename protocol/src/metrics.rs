@@ -76,10 +76,34 @@ pub struct Sample {
     /// them reads with none
     #[serde(default)]
     pub watches: Vec<Watch>,
+    /// What the books haven't explained since the server started, as the
+    /// drift watch counts it (D1.2's drift tile); a sample stored before it
+    /// reads as none
+    #[serde(default)]
+    pub drift: Drift,
     /// The town's reports over the window (D4.1); `None` while no town
     /// reports in
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub town: Option<TownSummary>,
+}
+
+/// What the books haven't explained since the server started: the drift
+/// watch's running count (`watch::Watches::drift`). It should be zero.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Drift {
+    /// Strands the audit trail doesn't explain
+    pub strands: i64,
+    /// Units each item's flows don't explain, by item type; only items with
+    /// some
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub units: BTreeMap<String, i64>,
+}
+
+impl Drift {
+    pub fn is_zero(&self) -> bool {
+        self.strands == 0 && self.units.is_empty()
+    }
 }
 
 /// Strands by who holds them.
@@ -199,6 +223,7 @@ impl Sample {
             players: Players::default(),
             events: EventBus::default(),
             watches: Vec::new(),
+            drift: Drift::default(),
             town: None,
         }
     }

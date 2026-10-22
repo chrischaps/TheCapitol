@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::ledger::{StrandBooks, UnitBooks};
-use crate::metrics::{gini, Sample, Trades};
+use crate::metrics::{gini, Drift, Sample, Trades};
 use crate::rules::DAY_LENGTH_SECS;
 use crate::tunables::WatchThresholds;
 
@@ -185,7 +185,7 @@ impl Watches {
     pub fn observe(&mut self, reading: &Reading, thresholds: &WatchThresholds, targets: &BTreeMap<String, f64>) -> Vec<Fired> {
         let began = *self.began_ms.get_or_insert(reading.at_ms);
         let mut verdicts = vec![
-            (Watch::of(WatchKind::Drift), self.drift(reading)),
+            (Watch::of(WatchKind::Drift), self.judge_drift(reading)),
             (Watch::of(WatchKind::Gini), gini_verdict(reading, thresholds.gini)),
             (Watch::of(WatchKind::TaxRevenue), self.tax(reading, thresholds.tax_per_hour)),
             (Watch::of(WatchKind::TickP95), tick_verdict(reading, thresholds.tick_p95)),
@@ -219,7 +219,12 @@ impl Watches {
         self.states.iter().filter(|(_, s)| s.firing).map(|(w, _)| w.clone()).collect()
     }
 
-    fn drift(&mut self, reading: &Reading) -> Verdict {
+    /// What the books haven't explained since the first reading
+    pub fn drift(&self) -> Drift {
+        Drift { strands: self.strand_drift, units: self.unit_drift.clone() }
+    }
+
+    fn judge_drift(&mut self, reading: &Reading) -> Verdict {
         self.strand_drift += reading.strand_drift;
         for (item, n) in reading.unit_drift.iter().flatten() {
             *self.unit_drift.entry(item.clone()).or_insert(0) += n.abs();
@@ -485,6 +490,11 @@ mod tests {
         };
         let fired = w.observe(&units, &t, &none());
         assert_eq!(fired[0].text, "The books drifted: 3 Strands the audit trail doesn't explain, 2 stone its flows don't and 1 log its flows don't");
+        // The samples carry the running count, for the console's drift tile
+        let drift = w.drift();
+        assert_eq!((drift.strands, &drift.units), (3, &BTreeMap::from([("log".to_string(), 1), ("stone".to_string(), 2)])));
+        assert!(!drift.is_zero());
+        assert!(Watches::new().drift().is_zero());
         // Units not read in a quiet moment can't be judged, and don't clear anything
         let mut w = Watches::new();
         assert!(w.observe(&Reading { unit_drift: None, ..calm(0) }, &t, &none()).is_empty());
