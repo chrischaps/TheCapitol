@@ -94,11 +94,11 @@ Under today's `size_category`, the v2 lots come out:
 
 ## 5. Buildings, weather and floors (V3, #461)
 
-*Design written 2026-10-22 and revised the same day after Chris's notes, for his review. Nothing here is built, and no work package is cut until he has read it. It takes over #418's questions and #462.*
+*Design written 2026-10-22, revised after Chris's notes, and decided by him the same day (§5.11). The work packages are #473 to #478. It takes over #418's questions and #462.*
 
 **Decided (Chris, 2026-10-22):**
 - **The building comes with the deed.** Every claimed lot has its building. Most stations on a lot stand *inside* it, and an urban lot is nearly all building, with little need for outside space.
-- **Indoors is sheltered from the weather.** Outdoors, weather wears down both the station and its installed tool. That also clears away stations left outdoors and abandoned.
+- **Indoors is sheltered from the weather.** Outdoors, weather wears down both the station and its installed tool. On a claimed plot it wears slowly, and a station there is never removed. On public land it wears fast and falls down, which clears away abandoned stations.
 - **Shelter is modest.** An outdoor station's tool wears about 1.5× as fast as an indoor one's. The suburb's gardens and the farms' yards are still good places to work.
 - **The building cuts away as you come close,** so you can see and use the stations inside.
 - **Owners can pay to build upward:** more storeys, more room indoors. With floors an urban lot may hold a whole workshop (all six types), at a cost. The other zones may build up too, but it should be less compelling there.
@@ -124,35 +124,42 @@ Under today's `size_category`, the v2 lots come out:
 Weather is new. There's no weather system today, only the Gazette's line, and no station wear: only tools wear, from use (E1.7).
 
 - **A station has a condition,** 0 to 100, new: `stations.condition`, starting at 100.
-- **Outdoors, the weather wears it:** −4 a game day (2 hours, `rules::DAY_LENGTH_SECS`), as a live tunable, `weather_wear`. **Indoors it doesn't wear.**
+- **Indoors it doesn't wear.**
+- **Outdoors on a claimed plot,** the weather wears it slowly: −1 a game day (2 hours, `rules::DAY_LENGTH_SECS`), a live tunable, `weather_wear_claimed`. That's 100 game days, about 8 real days, from new to 0. It never falls down: **a private station can always be repaired.**
+- **Outdoors on public land** (a station off any plot, D10), it wears fast: −4 a game day (`weather_wear_public`), about two real days to 0.
 - **Outdoors, the tool wears faster too:** an installed tool wears 1.5× per craft (`outdoor_tool_wear`, a tunable). Indoors it wears as it does today.
 - **Below 25, a station stops working on its own.** Automation pauses with a note, "needs repair", as it does for an empty box. You can still work it by hand.
-- **At 0 it falls down.** The station is removed and its kit is lost, and its box goes to the owner's impound, as a foreclosure's does (#141). After about 25 game days untended (about two real days), an abandoned outdoor station is gone. That's the clean-up.
+- **At 0 on a claimed plot, it stops.** It's out of use, by hand too, until it's repaired. It stays on the plot until the plot is released.
+- **At 0 on public land, it falls down.** The station is removed and its kit is lost, and its box goes to the owner's impound, as a foreclosure's does (#141). That's the clean-up of abandoned stations.
 - **Repair** is at the station, by its owner or anyone its use level admits. It takes a share of what the station's kit took: planks, bricks or ingots, about a quarter for a full repair, lowest grade first. It's a sink, and a reason to come back. A repair restores the condition to 100.
 - **Ticking:** the wear is a running sum. `condition` is worked out from `condition_at` and the time, and written when it's read, repaired or falls below a threshold. A sweep once a game hour finds the ones that fell to 25 or 0, so nothing ticks every station.
 - **Later:** the Gazette's forecast could become real, with fine days wearing nothing and storms more. The rate is one tunable, so that's a later change.
 
 ### 5.3 Floors
 
-- **A floor is another storey of the building,** with the footprint's indoor room again. An urban floor adds 4: 4, then 8, 12 and 16 with 3 floors. One floor gives an urban lot a whole workshop indoors.
-- **Up to 3 floors,** on urban, suburban and rural lots. Guild halls keep their own rules (Commons S4).
+- **A floor is another storey of the building,** with the footprint's indoor room again. An urban floor adds 4: 4, then 8, 12, 16 and on. One floor gives an urban lot a whole workshop indoors.
+- **No cap on floors,** on urban, suburban and rural lots. Each floor costs about twice the last (§5.4), so the price is the limit. Guild halls keep their own rules (Commons S4).
 - **No fire upstairs** (§5.1).
 - **Reaching upstairs:** a station upstairs has its real position inside the footprint, so the server's 2D reach works unchanged. You use it from the street or the yard within `interaction_range` (75), and the client shows the storey it's on (§5.7). There's no stair to walk.
 - **The data:**
-  - `plots.floors` 0 to 3, and `plots.floor_ready_at`;
+  - `plots.floors` (0 and up), and `plots.floor_ready_at`;
   - `stations.floor`, `stations.indoors` and `stations.condition`, with its `condition_at`.
 
 ### 5.4 What a floor costs
 
 A permit in Strands (the GDD's "plot upgrade permit", behind a `floor_permit_scale` tunable), plus building goods from your pack at their target prices (plank 5, brick 8, nails 6, ingot 50), taken lowest grade first:
 
+Each floor costs about **twice the last** (Chris, 2026-10-22): `rules::floors::cost(k)`. From the second floor on, both the permit and the bill of goods double.
+
 | floor | permit | planks | bricks | nails | ingots | goods | all in | build time |
 |---|---|---|---|---|---|---|---|---|
 | 1st | 400 | 30 | 45 | 15 | | 600 | **1,000** | 15 min |
-| 2nd | 700 | 40 | 70 | 15 | 3 | 1,000 | **1,700** | 30 min |
-| 3rd | 1,200 | 60 | 100 | 25 | 7 | 1,600 | **2,800** | 45 min |
+| 2nd | 800 | 40 | 70 | 15 | 7 | 1,200 | **2,000** | 30 min |
+| 3rd | 1,600 | 80 | 140 | 30 | 14 | 2,400 | **4,000** | 45 min |
+| kth | 400·2^(k−1) | | | | | 600·2^(k−1) | **1,000·2^(k−1)** | 15·k min |
 
 - **The first floor costs about an urban deed,** and buys 4 indoor stations in the city: a full workshop for about 2,000 in all.
+- **Tall buildings are possible but steep.** Five floors (24 indoor stations on an urban lot) cost 31,000 in all, and the sixth alone costs 32,000. The skyline shows who the city's big producers are.
 - **Both parts are sinks.** The Strands go to the Capitol, and the goods are used up (`UnitFlow::Built`).
 - **It goes up over time.** Nothing ticks: placing upstairs checks `floor_ready_at`. While it goes up, the client shows scaffolding.
 
@@ -163,15 +170,14 @@ There's no zone rule:
 - **Price.** A floor costs the same everywhere. But the suburb's and the farms' yards are cheap room, and only modestly worse than indoors (1.5× on tools, plus repairs).
 - **What it holds.** Floors hold no fire. The work that wants more room on a farm is more kilns and forges, and those need ground.
 
-### 5.6 Capacity (#424), proposed for Chris to decide
+### 5.6 Capacity (#424, decided)
 
 > **capacity = indoor room × (1 + open floors) + yard room**, each at 50 spacing.
 
 - **Where it's kept:** `plot_sync` works out the indoor and yard room when it lays a lot or the lot changes shape (`station_room`, with the footprint), and keeps them in `plots.indoor_room` and `plots.yard_room`.
-- **What it gives:** urban 4 (8, 12, 16 with floors), the suburb about 8 (12 to 20), farms about 14 (18 to 26). Each is a number the lot really holds.
+- **What it gives:** urban 4 (8, 12, 16 and on with floors), the suburb about 8, farms about 14, each plus their indoor room per floor. Each is a number the lot really holds.
 - **What changes:** `size_category` stays as a label, but no longer sets capacity.
 - **Stations by place:** each counts against its place, indoors on its storey or in the yard, so a full yard can't borrow from upstairs.
-- **The other option:** a number per zone. Simpler, but it caps bigger lots below what they hold.
 
 ### 5.7 Drawing it: the building and the cutaway (Flint)
 
@@ -180,7 +186,7 @@ There's no zone rule:
   - **Suburban:** a house with its workshop wing.
   - **Rural:** the farmhouse and the barn.
   - **Storeys:** the zone's seeded count plus the floors bought.
-- **The cutaway.** When the camera comes within about 25 m of a building whose stations you may use, or when you aim at one of them, the building opens:
+- **The cutaway.** A building opens when the camera comes within **25 m of your own** (or one whose stations you may use), or **10 m of anyone else's**, or when you aim at a station inside. Chris: start there and see how it feels; both are settings. When it opens:
   - the roof and the walls facing the camera fade out, down to a sill at knee height;
   - each storey's floor is drawn as a cut slab;
   - the stations inside are drawn and can be picked.
@@ -195,12 +201,12 @@ There's no zone rule:
 - **Indoors first:** a citizen places its stations indoors while there's room, then in the yard.
 - **Repairs:** it repairs a station below 50 when it's at home and holds the goods.
 - **Floors:** it builds a floor only for a station its role needs and its lot has no room for, once it holds the permit plus its float. In practice that's an urban builder, whose chain is all six types. No citizen builds outside the city.
-- **Clean-up:** a citizen that retires leaves its outdoor stations to the weather, which clears them.
+- **Clean-up:** a citizen that retires leaves its stations. On public land the weather clears them. On its plot they stand until the plot is released.
 
 ### 5.9 Protocol and messages
 
 - **`rules::building`:** `footprint(corners, zone)` and the zone's setback, depth share and margins.
-- **`rules::floors`:** `MAX_FLOORS`, `cost(k)`, `build_secs(k)`.
+- **`rules::floors`:** `cost(k)` and `build_secs(k)`. There's no cap.
 - **`rules::weather`:** the default wear rates and the 25 threshold.
 - **REST:** `POST /plots/{id}/floors` builds the next floor. `POST /stations/{id}/repair` repairs.
 - **`StationInfo`** gains `floor`, `indoors` and `condition`. **`PlotInfo`** gains `indoor_room`, `yard_room`, `floors`, `floor_ready_at` and `next_floor`. **`ClaimedPlot`** gains `floors`.
@@ -209,31 +215,29 @@ There's no zone rule:
   - `StationCondition { station_id, condition }` when a station crosses 50, 25 or 0, or is repaired;
   - `StationCollapsed` to the owner.
 - **The books:** `TransactionType::FloorPermit`, `UnitFlow::Built` for floor goods, and `UnitFlow::Repaired` for repair goods. The Observatory shows them among the sinks.
-- **Tunables:** `weather_wear`, `outdoor_tool_wear` and `floor_permit_scale`.
+- **Tunables:** `weather_wear_claimed`, `weather_wear_public`, `outdoor_tool_wear` and `floor_permit_scale`.
 
-### 5.10 Work packages, proposed
+### 5.10 Work packages
 
-These aren't issues yet. They're cut after Chris reviews this section.
-
-| Package | What | Size | Depends on |
+| Issue | Package | Size | Depends on |
 |---|---|---|---|
-| V3.1 | **The building and capacity:** `rules::building::footprint`; indoor and yard room in `plot_sync`; capacity from them (§5.6); `stations.indoors`; `PlotInfo` | M | #424 |
-| V3.2 | **Weather:** station condition, the weather's wear outdoors, the faster tool wear, the pause at 25, the fall at 0, repair, the hourly sweep, the tunables and the books | L | V3.1 |
-| V3.3 | **Floors:** `rules::floors`, the permit and goods, build time, `POST /plots/{id}/floors`, stations upstairs, no fire upstairs, release and refunds | L | V3.1 |
-| V3.4 | **Flint, the buildings and the cutaway:** houses on the footprint (closes #462), the cutaway, chimneys, storeys and scaffold, weathered stations | L | V3.1 |
-| V3.5 | **Flint, the panels:** condition and repair in the station panel, Build upward in the plot panel, the placement ghost indoors and upstairs | M | V3.2, V3.3 |
-| V3.6 | **Citizens:** indoors first, repairs, floors | M | V3.2, V3.3 |
+| [#473](https://github.com/chrischaps/TheCapitol/issues/473) | V3.1 **The building and capacity:** `rules::building::footprint`; indoor and yard room in `plot_sync`; capacity from them (§5.6, settles #424); `stations.indoors`; `PlotInfo` | M | |
+| [#474](https://github.com/chrischaps/TheCapitol/issues/474) | V3.2 **Weather:** station condition; slow wear on claimed plots, fast wear and the fall on public land; the faster tool wear; the pause at 25; repair; the hourly sweep; the tunables and the books | L | #473 |
+| [#475](https://github.com/chrischaps/TheCapitol/issues/475) | V3.3 **Floors:** `rules::floors` (doubling, no cap), the permit and goods, build time, `POST /plots/{id}/floors`, stations upstairs, no fire upstairs, release and refunds | L | #473 |
+| [#476](https://github.com/chrischaps/TheCapitol/issues/476) | V3.4 **Flint, the buildings and the cutaway:** houses on the footprint (closes #462), the cutaway at 25 m and 10 m, chimneys, storeys and scaffold, weathered stations | L | #473 |
+| [#477](https://github.com/chrischaps/TheCapitol/issues/477) | V3.5 **Flint, the panels:** condition and repair, Build upward, the placement ghost indoors and upstairs | M | #474, #475 |
+| [#478](https://github.com/chrischaps/TheCapitol/issues/478) | V3.6 **Citizens:** indoors first, repairs, floors | M | #474, #475 |
 
-### 5.11 Open questions for Chris
+### 5.11 Decided (Chris, 2026-10-22)
 
-1. **Capacity (#424):** indoor room × (1 + floors) + yard room (proposed), or a number per zone?
-2. **Weather rates:** −4 condition a game day outdoors (an abandoned station gone in about two real days), and tools 1.5× outdoors. Too fast, or too slow?
-3. **A collapse:** the kit is lost and the box goes to impound. Or should the kit come back damaged?
-4. **Repair:** about a quarter of the kit's materials for a full repair. Right?
-5. **Floors:** an urban floor adds 4 (the footprint's room), so 3 floors make 16. Cap urban at 2 floors (12)?
-6. **Price:** about 1,000 for the first floor, 5,500 for all three?
-7. **The cutaway:** open within about 25 m, or only when you aim at a station inside?
-8. **#417 (tighter urban spacing):** with buildings and floors, close it?
+1. **Capacity (#424):** indoor room × (1 + floors) + yard room.
+2. **Weather rates:** −1 a game day on a claimed plot, never cleared. −4 a game day on public land, which falls at 0. Tools wear 1.5× outdoors. All of these are tunables.
+3. **A collapse** (public land only): the kit is lost and the box goes to impound. A private station can always be repaired.
+4. **Repair:** about a quarter of the kit's materials.
+5. **Floors:** no cap. Cost rises steeply instead.
+6. **Price:** roughly doubling: 1,000, 2,000, 4,000 and on.
+7. **The cutaway:** 25 m for your own buildings, 10 m for others'. See how it feels.
+8. **#417 (tighter urban spacing):** closed.
 
 ## 6. Risks
 
@@ -267,7 +271,7 @@ These aren't issues yet. They're cut after Chris reviews this section.
 | [#457](https://github.com/chrischaps/TheCapitol/issues/457) | V1.3 Rural: three main lanes, farms of about 34k. *As built:* `RuralParams::v2()`, **four** main lanes a sector in bands that are shares of the depth, following winding lanes at half the sway, frontage U[132, 146], field gap U[40, 46], depth U[230, 290], and every farm taking 12 (`room`). On `grown()` over the four seeds: 925 to 934 farms, mean 34.9k to 35.2k, 42 to 43% built, 100% take 12, the water reaching r5243 to r5272 (#472). Tested by `rural::tests::v2_farms_meet_their_targets`, drawn by `rural-plan.ps1 -V2`. The default world doesn't move | #454 |
 | [#459](https://github.com/chrischaps/TheCapitol/issues/459) | V2.0 The flip | #455, #456, #457, #458 |
 | [#460](https://github.com/chrischaps/TheCapitol/issues/460) | V2.1 After the flip: town reset, node densities, the nightly | #459 |
-| [#461](https://github.com/chrischaps/TheCapitol/issues/461) | V3.0 Buildings, weather and floors: the design is written (§5), revised after Chris's notes, and awaits his review. V3.1 to V3.6 are cut after it | #424 |
+| [#461](https://github.com/chrischaps/TheCapitol/issues/461) | V3.0 Buildings, weather and floors: designed and decided (§5). The work is #473 to #478 | |
 
 ## 8. Verification
 
