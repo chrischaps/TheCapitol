@@ -34,8 +34,17 @@ fn lot_fill(area: f64) -> String {
     format!("#{:02x}{:02x}{:02x}", mix(214.0, 120.0), mix(196.0, 92.0), mix(160.0, 70.0))
 }
 
-/// The plan of `terrain` between `lo` and `hi`, in world units.
-pub fn svg(title: &str, terrain: &TerrainConfig, metrics: &Metrics, laid: &[TerrainPlot], lo: P, hi: P) -> String {
+/// The plan of `terrain` between `lo` and `hi`, in world units, with the
+/// urban ring out to `urban_outer`.
+pub fn svg(
+    title: &str,
+    terrain: &TerrainConfig,
+    metrics: &Metrics,
+    laid: &[TerrainPlot],
+    urban_outer: f64,
+    lo: P,
+    hi: P,
+) -> String {
     let (w, h) = (hi.0 - lo.0, hi.1 - lo.1);
     // World units per output pixel, so strokes read the same at any zoom.
     let k = w / OUT_PX;
@@ -54,8 +63,8 @@ pub fn svg(title: &str, terrain: &TerrainConfig, metrics: &Metrics, laid: &[Terr
 
     // The urban ring's ground, then the water rings over it.
     if let Some(canal) = terrain.water_rings.iter().find(|r| r.id == "canal_outer") {
-        let r = (canal.outer_radius() + capitol_protocol::rules::URBAN_OUTER_RADIUS) / 2.0;
-        let width = capitol_protocol::rules::URBAN_OUTER_RADIUS - canal.outer_radius();
+        let r = (canal.outer_radius() + urban_outer) / 2.0;
+        let width = urban_outer - canal.outer_radius();
         let _ = writeln!(s, r##"<circle cx="{:.1}" cy="{:.1}" r="{r:.1}" fill="none" stroke="{BANK}" stroke-width="{width:.1}"/>"##, center.0, center.1);
     }
     for ring in &terrain.water_rings {
@@ -97,7 +106,16 @@ pub fn svg(title: &str, terrain: &TerrainConfig, metrics: &Metrics, laid: &[Terr
 
     // Roads at their width.
     let _ = writeln!(s, r##"<g fill="none" stroke-linecap="round" stroke-linejoin="round">"##);
-    for road in terrain.roads.iter().filter(|r| in_view(&r.points)) {
+    // A road is in view if any segment's box is: an arterial has only its
+    // two ends, both out of a close-up.
+    let crosses_view = |pts: &[P]| {
+        pts.windows(2).any(|w| {
+            let (x0, x1) = (w[0].0.min(w[1].0), w[0].0.max(w[1].0));
+            let (y0, y1) = (w[0].1.min(w[1].1), w[0].1.max(w[1].1));
+            x1 > lo.0 - 100.0 && x0 < hi.0 + 100.0 && y1 > lo.1 - 100.0 && y0 < hi.1 + 100.0
+        })
+    };
+    for road in terrain.roads.iter().filter(|r| crosses_view(&r.points)) {
         let colour = if road.road_type == RoadType::Arterial { ARTERIAL } else { STREET };
         let _ = writeln!(
             s,
@@ -114,7 +132,15 @@ pub fn svg(title: &str, terrain: &TerrainConfig, metrics: &Metrics, laid: &[Terr
         title.to_string(),
         format!("{} lots · area median {:.0} (p5 {:.0}, p95 {:.0})", metrics.lots, metrics.area_median, metrics.area_p5, metrics.area_p95),
         format!("width median {:.0} (least {:.0}) · depth median {:.0}", metrics.width_median, metrics.width_min, metrics.depth_median),
-        format!("{:.0}% take 4 · {:.0}% of the ring built · trimmed {} · dropped {}", 100.0 * metrics.takes_four_share, 100.0 * metrics.cover, metrics.trimmed, metrics.dropped),
+        format!(
+            "{:.0}% take 4 · {} take 5 · {:.0}% of the ring built · trimmed {} · dropped {}",
+            100.0 * metrics.takes_four_share,
+            metrics.takes_five,
+            100.0 * metrics.cover,
+            metrics.trimmed,
+            metrics.dropped
+        ),
+        format!("outer ring street r{:.1} · urban edge r{urban_outer:.0}", metrics.outer_street),
     ];
     for (i, line) in lines.iter().enumerate() {
         let _ = writeln!(
@@ -144,6 +170,12 @@ mod tests {
     /// `cargo test --release urban_plan_report -- --ignored --nocapture`.
     /// Env: `URBAN_SEED` (default 42; the grid has no seed, but the world
     /// round it does) and `URBAN_OUT` (default `target/urban-plan/`).
+    ///
+    /// `URBAN_OUTER` draws Plots v2's grid (#455) with the urban edge there
+    /// instead: `metrics::v2`'s params, measured and drawn on the grid alone
+    /// (`metrics::measure_grid`), since the rest of the world doesn't follow
+    /// the v2 radii yet. `URBAN_RINGS` and `URBAN_OUTER_SPOKES` set the
+    /// rings of blocks and the outer rings' bearings, in either world.
     #[test]
     #[ignore]
     fn urban_plan_report() {
@@ -154,24 +186,49 @@ mod tests {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(format!("{}/../target/urban-plan", env!("CARGO_MANIFEST_DIR"))));
         std::fs::create_dir_all(&out).expect("create URBAN_OUT");
-        let params = WorldGenParams { seed, ..Default::default() };
-        let (terrain, m) = super::super::metrics::measure(&params);
+        let var = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
+        let outer: Option<f64> = var("URBAN_OUTER").map(|v| v.trim().parse().expect("URBAN_OUTER is a radius"));
+        let mut params = match outer {
+            Some(r) => WorldGenParams { urban_outer_radius: r, ..super::super::metrics::v2(seed) },
+            None => WorldGenParams { seed, ..Default::default() },
+        };
+        if let Some(rings) = var("URBAN_RINGS") {
+            params.urban.rings = rings.trim().parse().expect("URBAN_RINGS is a count");
+        }
+        if let Some(spokes) = var("URBAN_OUTER_SPOKES") {
+            params.urban.outer_spokes = spokes.trim().parse().expect("URBAN_OUTER_SPOKES is a count");
+        }
+        let (terrain, m) = match outer {
+            Some(_) => super::super::metrics::measure_grid(&params),
+            None => super::super::metrics::measure(&params),
+        };
         let laid = super::super::grid(&params, (terrain.center_x, terrain.center_y), &terrain.roads).lots(&params.urban);
         let c = (terrain.center_x, terrain.center_y);
-        let r = params.urban_outer_radius + 100.0;
+        let edge = params.urban_outer_radius;
+        let r = edge + 100.0;
+        let world = match outer {
+            Some(_) => format!("v2 grid, edge r{edge:.0}"),
+            None => format!("seed {seed}"),
+        };
         let views = [
-            ("urban", format!("Urban · seed {seed}"), (c.0 - r, c.1 - r), (c.0 + r, c.1 + r)),
-            ("urban-sector", format!("Urban · seed {seed} · 0° to 45°"), (c.0 + 900.0, c.1 - 150.0), (c.0 + 1900.0, c.1 + 1400.0)),
+            ("urban", format!("Urban · {world}"), (c.0 - r, c.1 - r), (c.0 + r, c.1 + r)),
+            (
+                "urban-sector",
+                format!("Urban · {world} · 0° to 45°"),
+                (c.0 + 900.0, c.1 - 150.0),
+                (c.0 + edge + 100.0, c.1 + 0.75 * edge + 50.0),
+            ),
         ];
         for (name, title, lo, hi) in &views {
-            std::fs::write(out.join(format!("{name}.svg")), svg(title, &terrain, &m, &laid, *lo, *hi)).unwrap();
+            std::fs::write(out.join(format!("{name}.svg")), svg(title, &terrain, &m, &laid, edge, *lo, *hi)).unwrap();
         }
         std::fs::write(out.join("urban.json"), serde_json::to_string_pretty(&m).unwrap()).unwrap();
         let table = format!(
-            "| lots | area median | p5 | p95 | width median | least | depth median | take 4 | built | trimmed | dropped |\n\
-             |---|---|---|---|---|---|---|---|---|---|---|\n\
-             | {} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0}% | {:.0}% | {} | {} |\n",
+            "| lots | outer street | area median | p5 | p95 | width median | least | depth median | take 4 | take 5 | built | trimmed | dropped |\n\
+             |---|---|---|---|---|---|---|---|---|---|---|---|---|\n\
+             | {} | r{:.1} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0}% | {} | {:.0}% | {} | {} |\n",
             m.lots,
+            m.outer_street,
             m.area_median,
             m.area_p5,
             m.area_p95,
@@ -179,6 +236,7 @@ mod tests {
             m.width_min,
             m.depth_median,
             100.0 * m.takes_four_share,
+            m.takes_five,
             100.0 * m.cover,
             m.trimmed,
             m.dropped

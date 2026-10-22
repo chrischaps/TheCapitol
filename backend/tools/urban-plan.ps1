@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Draws the urban grid and measures it (#421).
+  Draws the urban grid and measures it (#421), or Plots v2's (#455).
 
 .DESCRIPTION
   Runs the ignored test urban::render::tests::urban_plan_report in release.
@@ -14,6 +14,21 @@
 .PARAMETER Seed
   The world seed. The grid has none, but the world round it does. Default: 42.
 
+.PARAMETER Outer
+  The urban edge's radius, to draw Plots v2's grid (#455): its test-only
+  params (urban::metrics::v2), measured and drawn on the grid alone, since
+  the land and the other zones don't follow the v2 radii yet. Without it,
+  the default world. Plots v2 puts the edge at 2160.
+
+.PARAMETER Rings
+  Rings of blocks. One that won't fit inside the edge isn't laid. Default:
+  the world's own (3 in the default world, 5 in v2's).
+
+.PARAMETER OuterSpokes
+  Bearings round the outer rings of blocks, past r1800 (urban.outer_spokes,
+  #455); a multiple of 8, so the arterials are among them. 0 keeps the
+  inner rings' 24. Default: the world's own.
+
 .PARAMETER Out
   Output folder. Default: target/urban-plan at the repo root.
 
@@ -24,9 +39,13 @@
 .EXAMPLE
   powershell -File backend/tools/urban-plan.ps1
   powershell -File backend/tools/urban-plan.ps1 -Out target/urban-new -Compare target/urban-plan
+  powershell -File backend/tools/urban-plan.ps1 -Outer 2160 -Out target/urban-v2
 #>
 param(
     [long]$Seed = 42,
+    [double]$Outer = 0,
+    [int]$Rings = 0,
+    [int]$OuterSpokes = -1,
     [string]$Out = "",
     [string]$Compare = ""
 )
@@ -41,6 +60,9 @@ $Out = (Resolve-Path $Out).Path
 
 $env:URBAN_SEED = "$Seed"
 $env:URBAN_OUT = $Out
+$env:URBAN_OUTER = if ($Outer -gt 0) { "$Outer" } else { "" }
+$env:URBAN_RINGS = if ($Rings -gt 0) { "$Rings" } else { "" }
+$env:URBAN_OUTER_SPOKES = if ($OuterSpokes -ge 0) { "$OuterSpokes" } else { "" }
 
 # Clear old plans out, so index.html and the PNGs match this run.
 Get-ChildItem -Path (Join-Path $Out "*") -File -Include *.svg, *.png, *.json |

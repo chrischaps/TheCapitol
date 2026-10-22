@@ -378,9 +378,11 @@ impl TerrainConfig {
         format!("{hash:016x}")
     }
 
-    /// Build terrain from explicit world generation parameters
-    pub fn from_params(params: &WorldGenParams) -> Self {
-        let mut config = TerrainConfig {
+    /// The world's frame before anything is laid on it: its size, centre,
+    /// water rings and land, with no roads, lots or water courses. The urban
+    /// grid's v2 measure (#455) lays its own roads on it.
+    pub(crate) fn bare(params: &WorldGenParams) -> Self {
+        TerrainConfig {
             world_size: capitol_protocol::rules::WORLD_SIZE,
             center_x: capitol_protocol::rules::CENTER_X,
             center_y: capitol_protocol::rules::CENTER_Y,
@@ -432,8 +434,12 @@ impl TerrainConfig {
             streams: Vec::new(),
             lakes: Vec::new(),
             fords: Vec::new(),
-        };
+        }
+    }
 
+    /// Build terrain from explicit world generation parameters
+    pub fn from_params(params: &WorldGenParams) -> Self {
+        let mut config = Self::bare(params);
 
         // Generate roads using params
         config.roads = config.generate_all_roads_with_params(params);
@@ -560,7 +566,7 @@ impl TerrainConfig {
     }
 
     /// Generate circular ring roads within districts
-    fn generate_ring_roads_with_params(&self, params: &WorldGenParams) -> Vec<RoadSegment> {
+    pub(crate) fn generate_ring_roads_with_params(&self, params: &WorldGenParams) -> Vec<RoadSegment> {
         vec![
             self.generate_circular_road("guild_ring", params.guild_ring_radius, params.guild_ring_width),
             self.generate_circular_road("trade_ring", params.trade_ring_radius, params.trade_ring_width),
@@ -588,7 +594,7 @@ impl TerrainConfig {
     }
 
     /// Generate arterial roads connecting ring roads to wilderness edge
-    fn generate_arterial_roads_with_params(&self, params: &WorldGenParams) -> Vec<RoadSegment> {
+    pub(crate) fn generate_arterial_roads_with_params(&self, params: &WorldGenParams) -> Vec<RoadSegment> {
         let mut roads = Vec::new();
         let outer_canal = self.water_rings.iter().find(|r| r.id == "canal_outer");
         let inner_canal = self.water_rings.iter().find(|r| r.id == "canal_inner");

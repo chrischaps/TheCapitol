@@ -33,6 +33,7 @@ About 3000 lots at 8.6k, 17k and 34k come to about 60M of lots, against about 25
 - **These radii are estimates.** Each generator's count moves in steps (a ring of blocks, a row of lots), so V1.1 to V1.3 settle the exact radii and the flip uses theirs.
 - **How the land works out:**
   - **Urban:** #421's grid gives about 0.123 lots per unit of block radius, so five rings of blocks (outer ring street about r2125) make about 994.
+    *As built (V1.1, #455):* the outer ring street is at **r2125.5** (kerb r2133.5), so the urban edge stays at **r2160**: five rings need it at r2134 or more, and a sixth would need r2340. That makes **1016 lots**, median 8.56k, every one taking 4 and none taking 5. The ring of blocks past r1800 takes **32 bearings** (`UrbanParams::outer_spokes`), so no block is over 487 long; at 24 the outer ones would be 540 and the count 1032.
   - **Suburb:** 1000 × 17k at 67% built needs 25.7M, which is r2160 to about r3590. That band is about 1440 deep: less 60 for the warp, 5 rows of 130-deep lots.
   - **Rural:** 1000 × 34k at 45% built needs 76M, which is r3600 to about r6100. That share is higher than today's 35%, because a third main lane and narrower fields carry more farms.
 
@@ -237,7 +238,7 @@ These aren't issues yet. They're cut after Chris reviews this section.
 | [#453](https://github.com/chrischaps/TheCapitol/issues/453) | V0.0 This plan | |
 | [#454](https://github.com/chrischaps/TheCapitol/issues/454) | V0.1 One frame of radii: the land, the water, the trails and the wild nodes follow the zone table; `grown()` | #453 |
 | [#458](https://github.com/chrischaps/TheCapitol/issues/458) | V0.2 Generation time, and Flint pre-work (land chunks, `FROM`, grass sizes, a camera-zone test) | #454 |
-| [#455](https://github.com/chrischaps/TheCapitol/issues/455) | V1.1 Urban: five rings of blocks | #454 |
+| [#455](https://github.com/chrischaps/TheCapitol/issues/455) | V1.1 Urban: five rings of blocks. *As built:* `rings: 5`, `outer_spokes: 32` past r1800, outer ring street r2125.5 under an edge at r2160: 1016 lots, median 8.56k, 100% take 4, none take 5. Tested on the grid alone (`urban::metrics::measure_grid`, `v2`) | #454 |
 | [#456](https://github.com/chrischaps/TheCapitol/issues/456) | V1.2 Suburb: lots of about 130 × 130 in a band about 1440 deep | #454 |
 | [#457](https://github.com/chrischaps/TheCapitol/issues/457) | V1.3 Rural: three main lanes, farms of about 34k | #454 |
 | [#459](https://github.com/chrischaps/TheCapitol/issues/459) | V2.0 The flip | #455, #456, #457, #458 |
