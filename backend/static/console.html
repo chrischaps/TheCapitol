@@ -316,13 +316,70 @@
       <article class="story">
         <h2 class="head">The knobs</h2>
         <p class="headline" id="tuning-headline">Reading the knobs.</p>
-        <p class="dek">Every live tunable, as the server holds it now. Each change is marked on every chart.</p>
-        <div class="table-wrap">
-          <table class="ledger" id="knobs">
-            <thead><tr><th>Knob</th><th class="num">Now</th><th class="num">Default</th><th class="num">Range</th><th>Watched on</th></tr></thead>
-            <tbody></tbody>
-          </table>
+        <p class="dek">Every live tunable, beside the chart it's watched on. Type a value and press Enter, or Reset it: the server takes it at once, and the change is marked ◆ on every chart. A knob off its default is drawn in gold.</p>
+        <div class="presets" role="group" aria-label="Presets">
+          <button type="button" id="preset-export">Export a preset</button>
+          <button type="button" id="preset-import">Import a preset…</button>
+          <input type="file" id="preset-file" accept=".toml,application/toml,text/plain" hidden>
+          <button type="button" class="quiet" id="reset-all">Reset every knob</button>
+          <p class="preset-note" id="preset-note" role="status">A preset is TOML: every knob, with its default and range beside it. Importing one sets every knob, those it leaves out to their defaults.</p>
         </div>
+      </article>
+
+      <article class="story tune" data-chart="sinks">
+        <h2 class="head">The sinks</h2>
+        <p class="headline" id="tune-sinks-headline">Waiting for the first sample.</p>
+        <p class="dek">What tax, deeds, stall rent and the market's fees take out of the world, and the Strands changed back at the Exchange, in Strands a bar: five minutes of the last hour, a quarter of the last six, an hour of the last day.</p>
+        <div class="tune-grid">
+          <div class="tune-chart"><div class="chart" id="chart-tune-sinks"></div></div>
+          <div class="table-wrap"><table class="ledger knobs"><tbody></tbody></table></div>
+        </div>
+      </article>
+
+      <article class="story tune" data-chart="production">
+        <h2 class="head">What's made</h2>
+        <p class="headline" id="tune-production-headline">Waiting for the first sample.</p>
+        <p class="dek">Units that came into the world a bar, by how. Yield scales each gather; regrowth how soon a spent node can be gathered again.</p>
+        <div class="tune-grid">
+          <div class="tune-chart"><div class="chart" id="chart-tune-production"></div></div>
+          <div class="table-wrap"><table class="ledger knobs"><tbody></tbody></table></div>
+        </div>
+      </article>
+
+      <article class="story tune" data-chart="distribution">
+        <h2 class="head">How evenly it's held</h2>
+        <p class="headline" id="tune-distribution-headline">Waiting for the first sample.</p>
+        <p class="dek">The Gini of people's and citizens' Strands, and the richest tenth's share, under the Gini watch's line.</p>
+        <div class="tune-grid">
+          <div class="tune-chart"><div class="chart" id="chart-tune-distribution"></div></div>
+          <div class="table-wrap"><table class="ledger knobs"><tbody></tbody></table></div>
+        </div>
+      </article>
+
+      <article class="story tune" data-chart="prices">
+        <h2 class="head">Prices against target</h2>
+        <p class="headline" id="tune-prices-headline">Waiting for the first sample.</p>
+        <p class="dek">The most traded items' prices as a share of target, as on the Economy tab. The watch fires for an item this far off for a game day.</p>
+        <div class="tune-grid">
+          <div class="tune-chart"><div class="chart" id="chart-tune-prices"></div></div>
+          <div class="table-wrap"><table class="ledger knobs"><tbody></tbody></table></div>
+        </div>
+      </article>
+
+      <article class="story tune" data-chart="tick">
+        <h2 class="head">The tick</h2>
+        <p class="headline" id="tune-tick-headline">Waiting for the first sample.</p>
+        <p class="dek">The tick's mean and p95 against its budget, on a log scale, as on the Performance tab.</p>
+        <div class="tune-grid">
+          <div class="tune-chart"><div class="chart" id="chart-tune-tick"></div></div>
+          <div class="table-wrap"><table class="ledger knobs"><tbody></tbody></table></div>
+        </div>
+      </article>
+
+      <article class="story tune" data-chart="other" hidden>
+        <h2 class="head">Others</h2>
+        <p class="dek">Knobs with no chart of their own here.</p>
+        <div class="table-wrap"><table class="ledger knobs"><tbody></tbody></table></div>
       </article>
     </section>
 

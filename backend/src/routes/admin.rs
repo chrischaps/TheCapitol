@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Extension, Query, State},
+    http::header,
+    response::IntoResponse,
     response::sse::{Event as SseEvent, KeepAlive, Sse},
     routing::{get, post, put},
     Json, Router,
@@ -52,6 +54,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/stream", get(stream))
         .route("/series", get(get_series))
         .route("/tunables", get(get_tunables).put(put_tunables))
+        .route("/tunables/preset", get(get_tunables_preset).put(put_tunables_preset))
         .route("/walkers", get(get_walkers))
         .route("/positions", get(get_positions).layer(CompressionLayer::new()))
         .route("/map", get(get_map).layer(CompressionLayer::new()))
@@ -450,15 +453,51 @@ pub async fn put_tunables(
 ) -> Result<Json<TunablesResponse>, AppError> {
     require_admin(&user)?;
     let known = known_ids(&state).await?;
+    set_tunables(&state, &user, &update, &known).await
+}
+
+/// Every knob as a TOML preset to save and edit (D6.2)
+pub async fn get_tunables_preset(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<impl IntoResponse, AppError> {
+    require_admin(&user)?;
+    let known = known_ids(&state).await?;
+    let knobs = TunablesResponse::list(&state.tunables.get(), &known.zones, &known.resources).knobs;
+    let text = tunables::preset::write(&knobs, &Utc::now().format("%Y-%m-%d %H:%M UTC").to_string());
+    Ok(([(header::CONTENT_TYPE, "application/toml; charset=utf-8")], text))
+}
+
+/// Run the world on a preset: every knob it names to its value, and the rest
+/// to their defaults, all of them or none, as `PUT /admin/tunables`. The body
+/// is the preset's TOML. Answers with every knob.
+pub async fn put_tunables_preset(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    text: String,
+) -> Result<Json<TunablesResponse>, AppError> {
+    require_admin(&user)?;
+    let known = known_ids(&state).await?;
+    let knobs = TunablesResponse::list(&state.tunables.get(), &known.zones, &known.resources).knobs;
+    let update = tunables::preset::read(&text, &knobs).map_err(AppError::BadRequest)?;
+    set_tunables(&state, &user, &update, &known).await
+}
+
+async fn set_tunables(
+    state: &AppState,
+    user: &AuthUser,
+    update: &TunablesUpdate,
+    known: &tunables::Known,
+) -> Result<Json<TunablesResponse>, AppError> {
     let events = state.game.read().await.event_sender.clone();
-    match tunables::update(&state.db, &state.tunables, &update, &known, &events).await {
+    match tunables::update(&state.db, &state.tunables, update, known, &events).await {
         Ok(changes) => {
             for change in &changes {
                 tracing::info!("Admin {} set {} to {} (was {})", user.account_id, change.key, change.to, change.from);
             }
         }
         Err(tunables::UpdateError::Db(e)) => return Err(e.into()),
-        Err(e) => return Err(AppError::BadRequest(e.message(&update))),
+        Err(e) => return Err(AppError::BadRequest(e.message(update))),
     }
     Ok(Json(TunablesResponse::list(&state.tunables.get(), &known.zones, &known.resources)))
 }

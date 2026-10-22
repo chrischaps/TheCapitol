@@ -698,3 +698,41 @@ table.ledger { width: 100%; border-collapse: collapse; font-size: 14px; }
 
 .colophon { margin-top: 40px; text-align: center; color: var(--ink-dim); font-size: 12px; }
 .colophon p { margin: 8px 0 0; }
+
+/* ---- tuning (D6.2) ------------------------------------------------------ */
+
+/* The presets: a row of buttons, and a line saying what the last one did */
+.presets { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
+.presets button[disabled] { opacity: 0.45; cursor: default; }
+.preset-note { flex-basis: 100%; margin: 4px 0 0; font-size: 13px; line-height: 1.4; color: var(--ink-dim); }
+
+/* Each chart with its knobs beside it, the chart held in view while the
+   knobs scroll; one over the other on a narrow screen */
+.tune-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 4fr); gap: 0 24px; align-items: start; }
+.tune-grid > .tune-chart { position: sticky; top: 12px; }
+@media (max-width: 900px) {
+  .tune-grid { grid-template-columns: minmax(0, 1fr); }
+  .tune-grid > .tune-chart { position: relative; top: auto; }
+}
+.knobs td { vertical-align: middle; }
+.knobs .knob-name { display: inline; }
+.knobs .knob-sub { display: block; margin: 2px 0 0 17px; font-size: 12px; color: var(--ink-dim); }
+.knobs .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 8px; border-radius: 1px; background: var(--c); }
+.knobs .knob-now { display: inline-grid; grid-template-columns: 1em auto 3.6em; align-items: baseline; gap: 4px; font-variant-numeric: tabular-nums; }
+.knobs .knob-now > span:first-child { text-align: right; }
+.knobs .knob-now > span:last-child { text-align: left; }
+.knobs .knob-input {
+  width: 6.5em;
+  margin: 0;
+  padding: 4px 6px;
+  text-align: right;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.knobs .knob-input:invalid { border-color: var(--down); }
+.knobs tr.off .knob-input { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.knobs button[disabled] { visibility: hidden; }
+.knobs .knob-sub span { white-space: nowrap; }
+.knobs td:last-child { padding-right: 0; }
+.knobs td:last-child button { padding: 4px 6px; }
+.knobs .now { width: 1%; }
