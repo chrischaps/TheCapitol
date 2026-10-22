@@ -1,7 +1,7 @@
 # The Capitol's input, layered over Flint's built-in defaults (which keep
 # WASD as move_*, E as interact, and so on). The scene names it
 # (input_config); a player's own rebinds go over it, in flint/input_capitol.toml
-# under the OS config directory.
+# under the OS config directory (%APPDATA%\flint\input_capitol.toml on Windows).
 #
 # The camera rig (scripts/camera.rhai) is laid out as in Cities: Skylines:
 # WASD moves, Q/E orbit, R/F zoom, and the wheel zooms too (`zoom`, in
