@@ -68,6 +68,17 @@ pub struct Annotation {
     pub text: String,
 }
 
+/// `GET /admin/annotations`'s query: oldest first, from `since_ms`
+/// (inclusive; the default is the last 24 hours), at most `limit` (1000
+/// unless set, never over 10 000).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnnotationsQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

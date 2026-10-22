@@ -327,6 +327,22 @@ pub struct Series {
     pub annotations: Vec<Annotation>,
 }
 
+/// `GET /admin/series`'s query (D0.3). The client's admin overlay (D5.3)
+/// asks with it too.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeriesQuery {
+    /// Unix ms, exclusive; the default is an hour before `to_ms`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_ms: Option<i64>,
+    /// Unix ms, inclusive; the default is now
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_ms: Option<i64>,
+    /// The sample's fields to send, comma-separated (`load,strands`); each
+    /// sample keeps its times too. The default is all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<String>,
+}
+
 /// The fields every sample keeps in a `/admin/series` asked for some:
 /// when it was taken, and the window it covers
 pub const SERIES_TIMES: [&str; 3] = ["at_ms", "booted_ms", "since_ms"];

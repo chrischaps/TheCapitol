@@ -281,6 +281,20 @@ The first set:
   - The server's tick and watches.
   - World debug drawing through the Rhai `draw_*` calls: interest cells, node habitats, routes and citizens' targets.
   - Read-only tunables.
+  - *As built (#373):*
+    - **Who's an admin.** `auth_ok` carries `is_admin` from the token. It's left off the wire when false, so the fixture is unchanged. `GameState::is_admin` holds it. The admin routes check the token again whatever a client shows, and a 403 stops the client asking.
+    - **The server's column.** For an admin, F7's card grows a third column, which still fits 853×480 points. It shows:
+      - the tick, in a sentence, from the newest sample, with p95, the busiest phase, who's playing, the sockets and how long ago it was sampled;
+      - the last four annotations, marked in red for a watch firing and in gold for a tunable changing;
+      - the tunables off their defaults, read-only.
+    - **Polled, not streamed.** `capitol_core::admin::Watch` asks `/admin/series` (whole samples, from the newest it has) and `/admin/annotations` every `SAMPLE_SECS`, and `/admin/tunables` every minute or when a `tunable_changed` annotation comes. The samples come every 10 s either way, and a poll is one more REST call on the IO thread, where `/admin/stream` would be a second long-lived connection. A projected series (`fields`) doesn't decode as a `Sample`, so the client asks for whole ones. `SeriesQuery` and `AnnotationsQuery` moved into the protocol.
+    - **The world layers.** F6 (`debug_layer`), for an admin only, steps through four layers, then all, then off. They're drawn by `scripts/debug.rhai` from `cap_debug()` (`debug_layers.rs`):
+      - interest: your cell of the interest grid and the eight round it;
+      - nodes: each node within 600 u on a stalk, with its kind and its ground's height, slope and massif from `protocol::land`. The habitats aren't on the wire, so it can't say whether the ground suits ([#413](https://github.com/chrischaps/TheCapitol/issues/413)).
+      - walks: the walk graph round you (`WalkGraph::edges_near`);
+      - walkers: where the server is walking each player near you, and what they're doing.
+    - **Citizens' targets.** The server already keeps every player's destination, so the walkers come from a new route, `GET /admin/walkers?x&y&radius` (`rest::Walker`, fixture `rest/admin_walkers.json`). It's polled once a second while the layer is on. For a citizen that's its next leg, not its goal, which waits on D4.1's report ([#414](https://github.com/chrischaps/TheCapitol/issues/414)).
+    - **Not built.** The stream's warnings (tax unpaid and the like) don't reach the client: they're per player and belong in the console. The watches appear as soon as D2.5 writes `watch_fired` annotations.
 - **D5.4 Engine hooks** (`engine-upstream`, each with an ADR):
   - (a) games register `DebugPanel`s
   - (b) GPU timestamps per pass

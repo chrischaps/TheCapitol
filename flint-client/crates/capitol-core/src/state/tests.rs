@@ -313,6 +313,7 @@ fn subscription_follows_auth_ok_me_and_the_lapse() {
         server_time_ms: now_ms(),
         subscription: active(30),
         fees: Default::default(),
+        is_admin: false,
     });
     assert!(state.is_patron());
 
@@ -358,6 +359,7 @@ fn auth_ok_sets_the_local_player() {
         server_time_ms: ahead,
         subscription: Default::default(),
         fees: Default::default(),
+        is_admin: false,
     });
     assert!(events.is_empty());
     assert_eq!(state.me(), Some(ME));
@@ -371,6 +373,7 @@ fn auth_ok_sets_the_local_player() {
         server_time_ms: now_ms(),
         subscription: Default::default(),
         fees: Default::default(),
+        is_admin: false,
     });
     assert!((state.server_time_ms().unwrap() - now_ms()).abs() < 1000);
 }
@@ -1384,12 +1387,34 @@ fn the_fees_follow_the_server() {
     let mut state = GameState::new();
     assert_eq!(state.fees(), Fees::default(), "the defaults before the server says");
     let dear = Fees { exchange_fee_rate: 0.02, listing_fee_percent: 3.0, stall_rent_per_day: 40 };
-    state.apply_ws(&M::AuthOk { player_id: ME, server_time_ms: now_ms(), subscription: Default::default(), fees: dear });
+    state.apply_ws(&M::AuthOk { player_id: ME, server_time_ms: now_ms(), subscription: Default::default(), fees: dear, is_admin: false });
     assert_eq!(state.fees(), dear);
     let cheap = Fees { listing_fee_percent: 0.5, ..dear };
     assert!(state.apply_ws(&M::FeesChanged { fees: cheap }).is_empty());
     assert_eq!(state.fees(), cheap);
     assert_eq!(state.fees().listing_fee(1_000), 5);
+}
+
+#[test]
+fn auth_ok_says_whether_the_token_is_an_admins() {
+    let mut state = GameState::new();
+    assert!(!state.is_admin());
+    let auth_ok = |is_admin| M::AuthOk {
+        player_id: ME,
+        server_time_ms: now_ms(),
+        subscription: Default::default(),
+        fees: Default::default(),
+        is_admin,
+    };
+    state.apply_ws(&auth_ok(true));
+    assert!(state.is_admin());
+    // Each sign-in says again
+    state.apply_ws(&auth_ok(false));
+    assert!(!state.is_admin());
+    // And a person's leaves it off the wire, so the fixture is unchanged
+    let json = serde_json::to_string(&auth_ok(false)).unwrap();
+    assert!(!json.contains("is_admin"), "{json}");
+    assert!(serde_json::to_string(&auth_ok(true)).unwrap().contains("\"is_admin\":true"));
 }
 
 #[test]

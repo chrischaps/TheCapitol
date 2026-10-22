@@ -104,6 +104,12 @@ bindings = [{ type = "key", code = "F10" }]
 kind = "button"
 bindings = [{ type = "key", code = "F7" }]
 
+# The admin's world layers (D5.3): interest cells, nodes, the walk graph,
+# the walkers, all, off. Only for an admin's token.
+[actions.debug_layer]
+kind = "button"
+bindings = [{ type = "key", code = "F6" }]
+
 # The control mode (T1.1): point and walk, or over the shoulder, swapped
 # live for the A/B. Not F9, which is the engine's debug key.
 [actions.control_mode]

@@ -40,6 +40,9 @@ pub struct Shared {
     /// The corners your walk has still to pass round the water (#267), in
     /// world metres, ending at the destination. Empty when standing.
     pub route: Arc<Mutex<Vec<[f32; 2]>>>,
+    /// What the admin's world layers draw this frame (D5.3), for
+    /// `debug.rhai`. `None` while they're off.
+    pub debug: Arc<Mutex<Option<crate::debug_layers::Mark>>>,
     /// The zone you last entered (P4.5), for the banner in `hud.rhai`.
     pub banner: Arc<Mutex<Option<ZoneBanner>>>,
     /// Every resource node shown this frame (P4.4), as `nodes::Nodes` left
@@ -380,6 +383,65 @@ pub struct PlayerLabel {
     pub craft: Option<f32>,
 }
 
+/// `cap_debug()`'s map.
+fn debug_map(mark: &crate::debug_layers::Mark) -> rhai::Map {
+    let f = |v: f32| rhai::Dynamic::from(v as f64);
+    let pair = |p: [f32; 2]| rhai::Dynamic::from_array(vec![f(p[0]), f(p[1])]);
+    let mut m = rhai::Map::new();
+    m.insert("layer".into(), mark.layer.into());
+    let cells: rhai::Array = mark
+        .cells
+        .iter()
+        .map(|c| {
+            let mut cell = rhai::Map::new();
+            cell.insert("x0".into(), f(c.min[0]));
+            cell.insert("z0".into(), f(c.min[1]));
+            cell.insert("x1".into(), f(c.max[0]));
+            cell.insert("z1".into(), f(c.max[1]));
+            cell.insert("label".into(), c.label.clone().into());
+            cell.insert("mine".into(), c.mine.into());
+            cell.into()
+        })
+        .collect();
+    m.insert("cells".into(), cells.into());
+    let nodes: rhai::Array = mark
+        .nodes
+        .iter()
+        .map(|n| {
+            let mut node = rhai::Map::new();
+            node.insert("x".into(), f(n.at[0]));
+            node.insert("z".into(), f(n.at[1]));
+            node.insert("kind".into(), n.kind.clone().into());
+            node.insert("ground".into(), n.ground.clone().into());
+            node.insert("available".into(), n.available.into());
+            node.into()
+        })
+        .collect();
+    m.insert("nodes".into(), nodes.into());
+    let edges: rhai::Array = mark
+        .edges
+        .iter()
+        .map(|e| rhai::Dynamic::from_array(e.iter().map(|&v| f(v)).collect()))
+        .collect();
+    m.insert("edges".into(), edges.into());
+    let walkers: rhai::Array = mark
+        .walkers
+        .iter()
+        .map(|w| {
+            let mut walker = rhai::Map::new();
+            walker.insert("x".into(), f(w.at[0]));
+            walker.insert("z".into(), f(w.at[1]));
+            walker.insert("dest".into(), w.dest.map_or(rhai::Dynamic::UNIT, pair));
+            walker.insert("name".into(), w.name.clone().into());
+            walker.insert("citizen".into(), w.citizen.into());
+            walker.insert("doing".into(), w.doing.clone().into());
+            walker.into()
+        })
+        .collect();
+    m.insert("walkers".into(), walkers.into());
+    m
+}
+
 pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
     // `cap_spike_note() -> String`: the text written over the Capitol.
     let note = shared.note.clone();
@@ -619,6 +681,19 @@ pub fn register(engine: &mut rhai::Engine, shared: &Shared) {
                     .collect()
             })
             .unwrap_or_default()
+    });
+    // `cap_debug() -> #{ layer, cells, nodes, edges, walkers } or ()`: what
+    // the admin's world layers draw (D5.3), in world metres; () while
+    // they're off. `cells` are `#{ x0, z0, x1, z1, label, mine }`, `nodes`
+    // `#{ x, z, kind, ground, available }`, `edges` `[x0, z0, x1, z1]`, and
+    // `walkers` `#{ x, z, dest, name, citizen, doing }` with `dest` `[x, z]`
+    // or ().
+    let debug = shared.debug.clone();
+    engine.register_fn("cap_debug", move || -> rhai::Dynamic {
+        let Some(mark) = debug.lock().ok().and_then(|d| d.clone()) else {
+            return rhai::Dynamic::UNIT;
+        };
+        debug_map(&mark).into()
     });
     // `cap_zone_banner() -> #{ name, r, g, b, age, first } or ()`: the zone
     // you last entered, its colour (sRGB) and how many seconds ago its
@@ -1275,6 +1350,34 @@ mod tests {
         assert_eq!(*shared.place_at.lock().unwrap(), Some([7.0, 8.0]));
         engine.run("cap_place_off()").unwrap();
         assert_eq!(*shared.place_hover.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn the_debug_layers_reach_the_scripts_only_while_on() {
+        use crate::debug_layers::{Cell, Mark, NodeMark, WalkerMark};
+        let shared = Shared::default();
+        let mut engine = rhai::Engine::new();
+        register(&mut engine, &shared);
+        assert!(engine.eval::<()>("cap_debug()").is_ok(), "() while off");
+        *shared.debug.lock().unwrap() = Some(Mark {
+            layer: "every layer",
+            cells: vec![Cell { min: [0.0, 1.0], max: [30.0, 31.0], label: "(2, 3)".into(), mine: true }],
+            nodes: vec![NodeMark { at: [4.0, 5.0], kind: "iron_vein".into(), ground: "h 412".into(), available: true }],
+            edges: vec![[1.0, 2.0, 3.0, 4.0]],
+            walkers: vec![
+                WalkerMark { at: [6.0, 7.0], dest: Some([8.0, 9.0]), name: "Ada".into(), citizen: true, doing: String::new() },
+                WalkerMark { at: [1.0, 1.0], dest: None, name: "Bram".into(), citizen: false, doing: "crafting rope".into() },
+            ],
+        });
+        let words: String = engine
+            .eval(
+                r#"let d = cap_debug();
+                   let c = d.cells[0];
+                   let w = d.walkers;
+                   `${d.layer} ${c.label} ${c.mine} ${c.x1} ${d.nodes[0].kind} ${d.nodes[0].ground} ${d.edges[0][3]} ${w[0].dest[1]} ${w[1].dest == ()} ${w[1].doing}`"#,
+            )
+            .unwrap();
+        assert_eq!(words, "every layer (2, 3) true 30.0 iron_vein h 412 4.0 9.0 true crafting rope");
     }
 
     #[test]

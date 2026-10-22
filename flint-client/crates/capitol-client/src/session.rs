@@ -95,6 +95,10 @@ const IMPOUND_TAG: Tag = 80;
 const BAZAAR_TAG: Tag = 90;
 const BAZAAR_READ_TAG: Tag = 91;
 
+/// The tag on the admin overlay's reads (D5.3): the samples, the
+/// annotations and the tunables.
+const ADMIN_TAG: Tag = 100;
+
 /// How often the directory and your stall are asked for again, while in the
 /// world: they change only when a merchant rents, stocks or sells out.
 const BAZAAR_REFRESH: Duration = Duration::from_secs(60);
@@ -188,6 +192,10 @@ pub struct Session {
     /// The market panel is open (E3.5): the summary and your orders are
     /// fetched while it is.
     market_open: bool,
+    /// The dev overlay is open (D5.3): an admin's client watches the server
+    /// while it is.
+    admin_open: bool,
+    admin: capitol_core::admin::Watch,
     /// When they were last asked for; `None` asks at the next frame.
     market_asked: Option<Instant>,
     /// Every item with activity, from `/market/summary`.
@@ -387,6 +395,8 @@ impl Session {
             receipt: None,
             catalog_asked: false,
             market_open: false,
+            admin_open: false,
+            admin: Default::default(),
             market_asked: None,
             market_summary: None,
             market_busy: false,
@@ -1230,6 +1240,40 @@ impl Session {
             .filter(|(_, age)| *age < RECEIPT_FOR)
     }
 
+    /// The dev overlay opened or closed (D5.3). While it's open an admin's
+    /// client watches the server.
+    pub fn set_admin_open(&mut self, open: bool) {
+        self.admin_open = open;
+    }
+
+    /// The server as the admin overlay shows it: `None` unless `auth_ok`
+    /// said the token is an admin's, or once the server refused it.
+    pub fn admin(&self) -> Option<&capitol_core::admin::Watch> {
+        (self.state.is_admin() && !self.admin.refused()).then_some(&self.admin)
+    }
+
+    /// Ask for the players round `at` (server units) as the server is
+    /// moving them, for the citizens layer (D5.3), or stop with `None`.
+    pub fn watch_walkers(&mut self, at: Option<(f64, f64)>) {
+        self.admin.watch_walkers(at);
+    }
+
+    /// The terrain's walk graph, once it's built.
+    pub fn walks(&self) -> Option<&WalkGraph> {
+        self.walks.as_deref()
+    }
+
+    /// Asks for what the admin overlay and layers show, while they're up.
+    fn tend_admin(&mut self, now: Instant) {
+        if !self.state.is_admin() || self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        let Some(server_ms) = self.state.server_time_ms() else { return };
+        for request in self.admin.due(now, server_ms, self.admin_open) {
+            self.net.rest(request, ADMIN_TAG);
+        }
+    }
+
     /// The market panel opened or closed. While it's open the summary and
     /// your orders are kept fresh.
     pub fn set_market_open(&mut self, open: bool) {
@@ -1952,6 +1996,11 @@ impl Session {
                 NetEvent::Rest(MARKET_READ_TAG, Ok(RestResponse::MarketSummary(summary))) => {
                     self.market_summary = Some(summary.clone());
                 }
+                NetEvent::Rest(ADMIN_TAG, Ok(response)) => self.admin.observe(response),
+                NetEvent::Rest(ADMIN_TAG, Err(e)) => {
+                    tracing::warn!("admin: a read failed: {e}");
+                    self.admin.failed(e);
+                }
                 NetEvent::Rest(MARKET_READ_TAG, Err(e)) => {
                     tracing::warn!("market: a refresh failed: {e}");
                 }
@@ -2159,6 +2208,7 @@ impl Session {
             self.note_trades(&trade_before, &changes, now);
             self.send_draft(now);
             self.tend_market(now);
+            self.tend_admin(now);
             self.tend_bazaar(now);
             self.tend_gazette();
             for (request, tag) in self.poller.tick(now) {
@@ -2228,6 +2278,7 @@ impl Session {
             self.state = GameState::new();
             self.state.set_catalog(catalog);
             self.poller = Poller::new();
+            self.admin = Default::default();
             self.motion = Motion::new();
             self.last_move = None;
             self.route = Walk::default();

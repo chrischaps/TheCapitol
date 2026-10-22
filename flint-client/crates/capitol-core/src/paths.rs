@@ -330,6 +330,28 @@ impl WalkGraph {
         self.nodes.is_empty()
     }
 
+    /// The ground and water it tests a line against: the land's params among
+    /// them.
+    pub fn ground(&self) -> &Ground {
+        &self.ground
+    }
+
+    /// The graph's edges with an end within `radius` of `p`, each once, for
+    /// the admin's walk layer (D5.3).
+    pub fn edges_near(&self, p: Point, radius: f64) -> Vec<(Point, Point)> {
+        let mut out = Vec::new();
+        for i in self.near(p, radius) {
+            for &(j, _) in &self.edges[i as usize] {
+                let (a, b) = (self.nodes[i as usize], self.nodes[j as usize]);
+                // Both ends near: only from the lower, so it comes once
+                if i < j || distance(p, b) > radius {
+                    out.push((a, b));
+                }
+            }
+        }
+        out
+    }
+
     /// The waypoints of a walk from `from` to `to`, each a straight line the
     /// server lets through, ending at `to`. Just `[to]` when the straight
     /// line is walkable. `None` when no way is found ([`Self::plan`] says

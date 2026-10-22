@@ -195,6 +195,8 @@ pub struct CapitolExtension {
     /// sample numbers.
     dev: ui::dev_overlay::DevOverlay,
     dev_sample: bool,
+    /// The admin's world layer on F6 (D5.3).
+    layer: crate::debug_layers::Layer,
     /// The player's settings, and the file they're kept in (P8.4).
     settings: SettingsFile,
     settings_panel: ui::settings::SettingsPanel,
@@ -278,6 +280,7 @@ impl CapitolExtension {
             shortcuts: ui::shortcuts::Shortcuts::default(),
             dev: ui::dev_overlay::DevOverlay::default(),
             dev_sample: false,
+            layer: Default::default(),
             settings: SettingsFile::load(crate::settings::Settings::PATH),
             settings_panel: ui::settings::SettingsPanel::default(),
             graphics: None,
@@ -795,6 +798,20 @@ impl PlayerExtension for CapitolExtension {
         if ctx.input.is_action_just_pressed("dev_overlay") {
             self.dev.toggle();
         }
+        // The world layers (D5.3) are an admin's: a person's F6 says so
+        if !self.at_login() && ctx.input.is_action_just_pressed("debug_layer") {
+            let admin = self.session.as_ref().is_some_and(|s| s.admin().is_some());
+            let mut data = toml::Table::new();
+            if admin {
+                self.layer = self.layer.next();
+                data.insert("title".into(), "World layer".into());
+                data.insert("body".into(), format!("{}. F6 for the next", ui::slots::capitalised(self.layer.name())).into());
+            } else {
+                data.insert("title".into(), "World layers".into());
+                data.insert("body".into(), "Only for an admin's account".into());
+            }
+            ctx.fire_event("debug_note", data);
+        }
         if let Some(juice) = &mut self.juice {
             juice.update(ctx, &self.shared);
         }
@@ -899,6 +916,8 @@ impl PlayerExtension for CapitolExtension {
             let (poses, state) = session.sample(now);
             let dt = ctx.clock.delta_time.min(0.1) as f32;
             self.players.update(ctx, poses, state, dt, &self.shared);
+            let poses = (self.layer != crate::debug_layers::Layer::Off).then(|| poses.to_vec());
+            debug_layers(session, self.layer, poses.as_deref(), self.dev.open, &self.shared);
             trade(ctx, session, &self.shared, now);
             for note in session.take_market_notes() {
                 let mut data = toml::Table::new();
@@ -1831,7 +1850,7 @@ impl PlayerExtension for CapitolExtension {
         ui::slots::paint_shatters(ctx);
         // The dev overlay (D5.2): the store's counts and the net once there's
         // a server, the frames and the engine's entities always
-        let (session, sample) = (self.session.as_ref(), self.dev_sample);
+        let (session, sample, layer) = (self.session.as_ref(), self.dev_sample, self.layer.name());
         self.dev.show(ctx, || {
             let Some(session) = session else {
                 return match sample {
@@ -1853,6 +1872,10 @@ impl PlayerExtension for CapitolExtension {
                 interest: state
                     .local_player()
                     .map(|me| ui::dev_overlay::Interest::at(me.x, me.y)),
+                // An admin's token adds the server's column (D5.3)
+                server: session
+                    .admin()
+                    .map(|watch| ui::dev_overlay::Server::from_watch(watch, state.server_time_ms(), layer)),
             }
         });
         if !self.in_world() {
@@ -1991,6 +2014,29 @@ fn walk(ctx: &mut ExtensionCtx, session: &mut Session, shared: &script_api::Shar
         data.insert("steep".into(), (blocked.reason == rules::ground::TOO_STEEP).into());
         data.insert("reason".into(), blocked.reason.into());
         ctx.fire_event("movement_blocked", data);
+    }
+}
+
+/// The admin's world layers (D5.3): what `layer` shows round you, for
+/// `debug.rhai`, and the walkers asked for while it shows them. Off, or for
+/// anyone but an admin, nothing. Also tells the session whether the dev
+/// overlay is open, so it watches the server only then.
+fn debug_layers(session: &mut Session, layer: crate::debug_layers::Layer, poses: Option<&[capitol_core::motion::Pose]>, overlay: bool, shared: &Shared) {
+    use crate::debug_layers::Layer;
+    session.set_admin_open(overlay);
+    let me = session.state().local_player().map(|me| (me.x, me.y));
+    let on = layer != Layer::Off && session.admin().is_some();
+    let (mark, round) = match (on, me, poses) {
+        (true, Some(me), Some(poses)) => {
+            let walkers = session.admin().map_or(&[][..], |w| w.walkers());
+            let mark = crate::debug_layers::gather(layer, me, session.state(), session.walks(), walkers, poses);
+            (Some(mark), layer.wants_walkers().then_some(me))
+        }
+        _ => (None, None),
+    };
+    session.watch_walkers(round);
+    if let Ok(mut debug) = shared.debug.lock() {
+        *debug = mark;
     }
 }
 

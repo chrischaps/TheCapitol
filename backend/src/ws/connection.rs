@@ -145,6 +145,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         server_time_ms: chrono::Utc::now().timestamp_millis(),
         subscription,
         fees: state.tunables.get().fees,
+        is_admin: authed.is_admin,
     };
     let _ = sender
         .send(Message::Text(serde_json::to_string(&auth_ok).unwrap().into()))
@@ -1340,6 +1341,8 @@ async fn take_notice(db: &sqlx::PgPool, notice_id: Option<Uuid>) -> bool {
 /// Who a socket's `auth` message signs in as.
 struct Authed {
     account_id: Uuid,
+    /// The token says so; a key never does, as `/admin` is closed to keys
+    is_admin: bool,
     /// The API key it signed in with, if it did
     key: Option<KeyGrant>,
     /// Its session, or its key, for presence (E0.8)
@@ -1349,7 +1352,12 @@ struct Authed {
 async fn authenticate(token: &str, state: &AppState) -> Result<Authed, String> {
     if !api_keys::is_secret(token) {
         let claims = validate_token(token, state).await?;
-        return Ok(Authed { account_id: claims.sub, key: None, holder: Holder::Session(claims.sid) });
+        return Ok(Authed {
+            account_id: claims.sub,
+            is_admin: claims.is_admin,
+            key: None,
+            holder: Holder::Session(claims.sid),
+        });
     }
     match api_keys::authenticate(&state.db, token).await {
         // The town's report key (D4.1) can't so much as watch
@@ -1358,6 +1366,7 @@ async fn authenticate(token: &str, state: &AppState) -> Result<Authed, String> {
         }
         Ok(KeyAuth::Live(user)) => Ok(Authed {
             account_id: user.account_id,
+            is_admin: false,
             key: Some(user.grant),
             holder: Holder::Key(user.grant.id),
         }),

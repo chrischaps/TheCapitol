@@ -54,6 +54,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("[F10]", "Settings"),
             ("[F8]", "Point and walk, or over the shoulder"),
             ("[F7]", "Dev overlay"),
+            ("[F6]", "World layers (admins)"),
             ("[?] or [F1]", "This list"),
         ],
     ),

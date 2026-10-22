@@ -1069,7 +1069,7 @@ pub fn tool_lines(
     }
 }
 
-fn capitalised(word: &str) -> String {
+pub(crate) fn capitalised(word: &str) -> String {
     let mut chars = word.chars();
     chars
         .next()

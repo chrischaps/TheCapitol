@@ -46,6 +46,7 @@
 //! - [`citizen`]: AI players who live in the world, run by `capitol-town`
 //!   (C1.1).
 
+pub mod admin;
 pub mod auth;
 pub mod automation;
 pub mod bazaar;

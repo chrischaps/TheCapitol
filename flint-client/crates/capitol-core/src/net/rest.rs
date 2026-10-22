@@ -1,6 +1,7 @@
 //! The REST half of the client: one [`RestRequest`] variant per backend route
 //! (admin routes aside, but for the citizens `capitol-town` mints, the
-//! ledger its soak reads and the town's reports), each
+//! ledger its soak reads, the town's reports, and what the admin overlay
+//! shows, D5.3), each
 //! paired with the [`RestResponse`] variant it decodes to.
 //!
 //! The bearer token (or a bot's API key, E0.9) is attached whenever the IO
@@ -8,7 +9,10 @@
 //! (`backend/src/error.rs`) and become [`RestError::Http`].
 
 use capitol_protocol::rest::*;
+use capitol_protocol::annotation::{Annotation, AnnotationsQuery};
+use capitol_protocol::metrics::{Series, SeriesQuery};
 use capitol_protocol::terrain::TerrainResponse;
+use capitol_protocol::tunables::TunablesResponse;
 use std::time::Duration;
 
 use reqwest::Method;
@@ -181,6 +185,16 @@ pub enum RestRequest {
     /// `POST /admin/town/report`: the town, each game minute (D4.1), by its
     /// key. Boxed: it's a row a citizen.
     TownReport(Box<capitol_protocol::metrics::TownReport>),
+    /// `GET /admin/series`: the Observatory's samples, for the admin overlay
+    /// (D5.3)
+    Series(SeriesQuery),
+    /// `GET /admin/annotations`: what explains a bend in a chart
+    Annotations(AnnotationsQuery),
+    /// `GET /admin/tunables`: every live knob, read-only in the client
+    Tunables,
+    /// `GET /admin/walkers`: the players near a point, with where the server
+    /// is walking them, for the admin's world layers
+    Walkers(WalkersQuery),
 }
 
 /// A decoded REST response. Each [`RestRequest`] decodes to exactly one variant.
@@ -261,6 +275,10 @@ pub enum RestResponse {
     Citizen(Box<CreatedCitizen>),
     Citizens(Vec<CitizenInfo>),
     Ledger(Box<capitol_protocol::ledger::Ledger>),
+    Series(Box<Series>),
+    Annotations(Vec<Annotation>),
+    Tunables(TunablesResponse),
+    Walkers(Vec<Walker>),
 }
 
 /// Why a REST call failed.
@@ -370,7 +388,11 @@ impl RestRequest {
             | MyStall
             | Shop { .. }
             | Citizens
-            | Ledger => Method::GET,
+            | Ledger
+            | Series(_)
+            | Annotations(_)
+            | Tunables
+            | Walkers(_) => Method::GET,
         }
     }
 
@@ -442,6 +464,10 @@ impl RestRequest {
             Ledger => "/admin/ledger".into(),
             TownKey => "/admin/town/key".into(),
             TownReport(_) => "/admin/town/report".into(),
+            Series(_) => "/admin/series".into(),
+            Annotations(_) => "/admin/annotations".into(),
+            Tunables => "/admin/tunables".into(),
+            Walkers(_) => "/admin/walkers".into(),
         }
     }
 
@@ -481,6 +507,9 @@ impl RestRequest {
             WorldNearby(q) => req.query(q),
             ListPlots(q) => req.query(q),
             PlotAt(q) => req.query(q),
+            Series(q) => req.query(q),
+            Annotations(q) => req.query(q),
+            Walkers(q) => req.query(q),
             // The server's ETag is weak, `W/"<version>"` (B3).
             Terrain {
                 cached_version: Some(version),
@@ -563,6 +592,10 @@ impl RestRequest {
             Q::Ledger => A::Ledger(Box::new(de(body)?)),
             Q::TownKey => A::CreatedApiKey(de(body)?),
             Q::TownReport(_) => A::Success(de(body)?),
+            Q::Series(_) => A::Series(Box::new(de(body)?)),
+            Q::Annotations(_) => A::Annotations(de(body)?),
+            Q::Tunables => A::Tunables(de(body)?),
+            Q::Walkers(_) => A::Walkers(de(body)?),
         })
     }
 }
@@ -832,6 +865,14 @@ mod tests {
             (RestRequest::Ledger, "GET", "/admin/ledger".into()),
             (RestRequest::TownKey, "POST", "/admin/town/key".into()),
             (RestRequest::TownReport(Box::default()), "POST", "/admin/town/report".into()),
+            (RestRequest::Series(Default::default()), "GET", "/admin/series".into()),
+            (RestRequest::Annotations(Default::default()), "GET", "/admin/annotations".into()),
+            (RestRequest::Tunables, "GET", "/admin/tunables".into()),
+            (
+                RestRequest::Walkers(WalkersQuery { x: 1.0, y: 2.0, radius: 3.0 }),
+                "GET",
+                "/admin/walkers".into(),
+            ),
             (RestRequest::MyStall, "GET", "/bazaar/mine".into()),
             (
                 RestRequest::Shop { stall_id: "bazaar_stall_3".into() },

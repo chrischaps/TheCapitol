@@ -11,7 +11,11 @@
 //!   depth and the others it tracks (`MotionStats`);
 //! - the world: the engine's entities and what the store holds;
 //! - interest: your cell of the server's interest grid (C0.4), who's in
-//!   sight from it and how far its edge is.
+//!   sight from it and how far its edge is;
+//! - for an admin's token (D5.3), a third column, the server: its tick from
+//!   the newest of the Observatory's samples, what's been marked lately
+//!   (the watches firing among them), the tunables off their defaults, and
+//!   which world layer F6 has on.
 //!
 //! Each part opens with a plain sentence, as the Observatory's console
 //! does, and its numbers follow. The frames are recorded whether it's open
@@ -23,6 +27,9 @@ use std::time::Duration;
 
 use super::theme::{self, size};
 use capitol_core::net::NetStats;
+use capitol_core::protocol::annotation::{Annotation, AnnotationKind};
+use capitol_core::protocol::ledger::LoadWindow;
+use capitol_core::protocol::metrics::Sample;
 use capitol_core::protocol::rules::{interest_cell, INTEREST_CELL};
 use egui::{Align, Align2, Color32, Id, Layout, Order, Stroke};
 
@@ -49,6 +56,9 @@ const FADE: f32 = 0.12;
 const BUSIEST: usize = 3;
 /// A row's height.
 const ROW: f32 = 17.0;
+/// The annotations and the tuned knobs the server's column lists.
+const MARKS_SHOWN: usize = 4;
+const TUNED_SHOWN: usize = 4;
 
 /// The overlay: open or not, and what `pre_update` recorded for it.
 #[derive(Default)]
@@ -86,12 +96,18 @@ impl DevOverlay {
             .show(ctx, |ui| {
                 ui.multiply_opacity(k);
                 theme::panel_edged(theme::GOLD).show(ui, |ui| {
-                    ui.set_width(COLUMN * 2.0 + GAP);
+                    let columns = if view.server.is_some() { 3.0 } else { 2.0 };
+                    ui.set_width(COLUMN * columns + GAP * (columns - 1.0));
                     ui.spacing_mut().item_spacing.y = 2.0;
                     ui.horizontal(|ui| {
                         ui.label(theme::title("Observatory", size::HEADING));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             theme::keycap(ui, "F7");
+                            if let Some(server) = &view.server {
+                                ui.add_space(8.0);
+                                ui.label(theme::dim(format!("World layer: {}", server.layer)).size(size::SMALL));
+                                theme::keycap(ui, "F6");
+                            }
                         });
                     });
                     ui.add_space(2.0);
@@ -113,6 +129,12 @@ impl DevOverlay {
                                 prediction_part(ui, motion);
                             }
                         });
+                        if let Some(server) = &view.server {
+                            ui.vertical(|ui| {
+                                ui.set_width(COLUMN);
+                                server_parts(ui, server);
+                            });
+                        }
                     });
                 });
             });
@@ -162,6 +184,146 @@ pub struct View {
     pub world: Option<World>,
     /// Your interest cell, once the server has placed you.
     pub interest: Option<Interest>,
+    /// The server, for an admin's token (D5.3).
+    pub server: Option<Server>,
+}
+
+/// The server as an admin's client sees it (D5.3), from
+/// `capitol_core::admin::Watch`.
+#[derive(Debug, Clone, Default)]
+pub struct Server {
+    /// The newest sample, once one has come.
+    pub sample: Option<Sample>,
+    /// The newest annotations, newest first.
+    pub marks: Vec<Annotation>,
+    /// How many knobs there are, once read.
+    pub knobs: Option<usize>,
+    /// The knobs off their defaults: what each is called, its value and its
+    /// default, as the console says them.
+    pub tuned: Vec<(String, String, String)>,
+    /// The server's clock now (Unix ms), for how long ago things were.
+    pub now_ms: Option<i64>,
+    /// The world layer F6 has on.
+    pub layer: &'static str,
+}
+
+impl Server {
+    pub fn from_watch(watch: &capitol_core::admin::Watch, now_ms: Option<i64>, layer: &'static str) -> Server {
+        Server {
+            sample: watch.sample().cloned(),
+            marks: watch.annotations().rev().take(MARKS_SHOWN).cloned().collect(),
+            knobs: watch.tunables().map(<[_]>::len),
+            tuned: watch
+                .tuned()
+                .into_iter()
+                .map(|k| (k.label.clone(), k.unit.format(k.value), k.unit.format(k.default)))
+                .collect(),
+            now_ms,
+            layer,
+        }
+    }
+}
+
+/// The tick over a sample's window in a sentence: its mean against its
+/// budget, and how many ran over.
+pub fn tick_sentence(load: &LoadWindow) -> String {
+    if load.ticks == 0 {
+        return "No ticks in the newest sample.".to_owned();
+    }
+    let budget = load.tick_period_ms;
+    match load.ticks_over {
+        0 => format!("The tick takes {:.1} ms of its {budget:.0}, and none ran over.", load.tick_mean_ms),
+        n => format!(
+            "The tick takes {:.1} ms of its {budget:.0}; {} of {} ran over.",
+            load.tick_mean_ms,
+            count(n as usize),
+            count(load.ticks as usize)
+        ),
+    }
+}
+
+/// How long before `now_ms` `at_ms` was: `40 s ago`, `12 min ago`, `3 h ago`.
+pub fn ago(now_ms: i64, at_ms: i64) -> String {
+    let secs = (now_ms - at_ms).max(0) / 1000;
+    match secs {
+        0..=4 => "just now".to_owned(),
+        5..=59 => format!("{secs} s ago"),
+        60..=3599 => format!("{} min ago", secs / 60),
+        _ => format!("{} h ago", secs / 3600),
+    }
+}
+
+/// The server's column: the tick, what's been marked, and the tunables.
+fn server_parts(ui: &mut egui::Ui, server: &Server) {
+    part(ui, "Server");
+    match &server.sample {
+        None => sentence(ui, "Waiting on the first sample."),
+        Some(sample) => {
+            let load = &sample.load;
+            sentence(ui, &tick_sentence(load));
+            // The phase that takes the most of the tick, per tick
+            let busiest = load
+                .phases
+                .iter()
+                .max_by(|a, b| a.1.secs.total_cmp(&b.1.secs))
+                .filter(|(_, p)| p.secs > 0.0)
+                .map(|(name, p)| format!("{name} · {:.2} ms", p.secs * 1000.0 / load.ticks.max(1) as f64));
+            let p95 = load
+                .tick_p95_ms
+                .map_or_else(|| "past the last bucket".to_owned(), |ms| format!("under {ms} ms"));
+            let mut rows = vec![("p95", p95)];
+            if let Some(busiest) = busiest {
+                rows.push(("Busiest phase", busiest));
+            }
+            rows.push((
+                "Playing",
+                format!(
+                    "{} · {}",
+                    plural(sample.players.people as usize, "person", "people"),
+                    plural(sample.players.citizens as usize, "citizen", "citizens")
+                ),
+            ));
+            rows.push(("Sockets", count(load.sockets_open as usize)));
+            if let Some(now) = server.now_ms {
+                rows.push(("Sampled", ago(now, sample.at_ms)));
+            }
+            table(ui, &rows);
+        }
+    }
+
+    part(ui, "Marked");
+    if server.marks.is_empty() {
+        sentence(ui, "Nothing marked in the last hour.");
+    }
+    for mark in &server.marks {
+        let colour = match mark.kind {
+            AnnotationKind::WatchFired => theme::FRAME_HITCH,
+            AnnotationKind::TunableChanged => theme::GOLD,
+            _ => theme::TEXT,
+        };
+        if let Some(now) = server.now_ms {
+            ui.label(theme::dim(ago(now, mark.at_ms)).size(size::TINY));
+        }
+        ui.add(egui::Label::new(theme::text(&mark.text).size(size::SMALL).color(colour)).wrap());
+    }
+
+    part(ui, "Tunables");
+    match server.knobs {
+        None => sentence(ui, "Not read yet."),
+        Some(n) if server.tuned.is_empty() => sentence(ui, &format!("All {n} knobs at their defaults.")),
+        Some(n) => {
+            sentence(
+                ui,
+                &format!("{} of {n} off their defaults. The console sets them.", server.tuned.len()),
+            );
+            for (label, value, default) in server.tuned.iter().take(TUNED_SHOWN) {
+                row(ui, label, &format!("{value} (default {default})"), theme::GOLD);
+            }
+            if server.tuned.len() > TUNED_SHOWN {
+                ui.label(theme::dim(format!("and {} more", server.tuned.len() - TUNED_SHOWN)).size(size::TINY));
+            }
+        }
+    }
 }
 
 /// `--dev-sample`: numbers like a client's in a busy town, to see the
@@ -189,12 +351,31 @@ pub fn sample() -> View {
             tracks: 11,
         }),
     };
+    let now_ms = 1_792_620_000_000;
+    let sample: Sample = capitol_core::serde_json::from_str(SAMPLE).expect("the sample fixture decodes");
+    let mark = |id, ago_s: i64, kind, text: &str| Annotation { id, at_ms: now_ms - ago_s * 1000, kind, text: text.into() };
     View {
         net: Some(net),
         world: Some(World { people: 12, citizens: 9, nodes: 14_906, stations: 37, lots: 102 }),
         interest: Some(Interest::at(6812.0, 6745.0)),
+        server: Some(Server {
+            sample: Some(Sample { at_ms: now_ms - 4000, ..sample }),
+            marks: vec![
+                mark(44, 50, AnnotationKind::WatchFired, "Fiber gatherers hold 81% of the Strands"),
+                mark(43, 400, AnnotationKind::TunableChanged, "Property tax a week: 1% → 2.5%"),
+                mark(42, 1900, AnnotationKind::TownUp, "The town came on: 18 citizens"),
+            ],
+            knobs: Some(31),
+            tuned: vec![("Property tax a week".into(), "2.5%".into(), "1%".into())],
+            now_ms: Some(now_ms),
+            layer: "interest cells",
+        }),
     }
 }
+
+/// The protocol's sample fixture: ten seconds of a 20-citizen town, for
+/// `--dev-sample` and the tests.
+const SAMPLE: &str = include_str!("../../../../../protocol/tests/fixtures/rest/sample.json");
 
 /// What the store holds.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -616,6 +797,51 @@ mod tests {
     }
 
     #[test]
+    fn the_server_in_sentences() {
+        let sample: Sample = capitol_core::serde_json::from_str(SAMPLE).unwrap();
+        let mut load = sample.load.clone();
+        load.ticks = 100;
+        load.ticks_over = 0;
+        load.tick_mean_ms = 0.47;
+        load.tick_period_ms = 100.0;
+        assert_eq!(tick_sentence(&load), "The tick takes 0.5 ms of its 100, and none ran over.");
+        load.ticks_over = 3;
+        assert_eq!(tick_sentence(&load), "The tick takes 0.5 ms of its 100; 3 of 100 ran over.");
+        load.ticks = 0;
+        assert_eq!(tick_sentence(&load), "No ticks in the newest sample.");
+        assert_eq!(ago(100_000, 98_000), "just now");
+        assert_eq!(ago(100_000, 60_000), "40 s ago");
+        assert_eq!(ago(800_000, 20_000), "13 min ago");
+        assert_eq!(ago(3_700_000, 100_000), "1 h ago");
+    }
+
+    #[test]
+    fn the_server_column_comes_from_the_watch() {
+        use capitol_core::admin::Watch;
+        use capitol_core::net::RestResponse;
+        use capitol_core::protocol::tunables::{TunableValue, TunablesResponse, Unit};
+        let mut watch = Watch::default();
+        let knob = |key: &str, value| TunableValue {
+            key: key.into(),
+            label: format!("Knob {key}"),
+            unit: Unit::Fraction,
+            min: 0.0,
+            max: 1.0,
+            step: 0.001,
+            default: 0.01,
+            value,
+            chart: "money".into(),
+        };
+        watch.observe(&RestResponse::Tunables(TunablesResponse { knobs: vec![knob("a", 0.01), knob("b", 0.025)] }));
+        let marks = (1..=6).map(|i| Annotation { id: i, at_ms: i * 1000, kind: AnnotationKind::Boot, text: format!("#{i}") });
+        watch.observe(&RestResponse::Annotations(marks.collect()));
+        let server = Server::from_watch(&watch, Some(10_000), "off");
+        assert_eq!(server.knobs, Some(2));
+        assert_eq!(server.tuned, vec![("Knob b".to_owned(), "2.5%".to_owned(), "1%".to_owned())]);
+        assert_eq!(server.marks.iter().map(|m| m.id).collect::<Vec<_>>(), [6, 5, 4, 3], "newest first");
+    }
+
+    #[test]
     fn it_draws_open_and_offline() {
         let ctx = theme::test_context();
         let mut overlay = DevOverlay { open: true, ..Default::default() };
@@ -631,8 +857,17 @@ mod tests {
             tracks: 3,
         });
         let world = World { people: 4, citizens: 2, nodes: 100, stations: 2, lots: 9 };
-        let online = || View { net: Some(net.clone()), world: Some(world), interest: Some(Interest::at(6810.0, 6790.0)) };
+        let online = || View {
+            net: Some(net.clone()),
+            world: Some(world),
+            interest: Some(Interest::at(6810.0, 6790.0)),
+            server: None,
+        };
         let _ = ctx.run(Default::default(), |ctx| overlay.show(ctx, online));
+        // An admin's, with the server's column, and one still waiting on it all
+        let _ = ctx.run(Default::default(), |ctx| overlay.show(ctx, sample));
+        let waiting = || View { server: Some(Server::default()), ..View::default() };
+        let _ = ctx.run(Default::default(), |ctx| overlay.show(ctx, waiting));
         let _ = ctx.run(Default::default(), |ctx| overlay.show(ctx, View::default));
         // Never opened, it never asks
         let closed = DevOverlay::default();

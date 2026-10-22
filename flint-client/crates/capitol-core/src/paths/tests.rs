@@ -102,6 +102,24 @@ fn a_walk_across_a_canal_goes_by_a_bridge() {
 }
 
 #[test]
+fn the_edges_near_a_point_come_once_each() {
+    let (_, graph) = world();
+    let at = (SPAWN_X, SPAWN_Y);
+    let edges = graph.edges_near(at, 300.0);
+    assert!(edges.len() > 4, "only {} edges round the spawn", edges.len());
+    for &(a, b) in &edges {
+        assert!(distance(at, a) <= 300.0 || distance(at, b) <= 300.0, "{a:?}–{b:?} is far off");
+    }
+    let mut seen = std::collections::HashSet::new();
+    for &(a, b) in &edges {
+        let key = |p: Point| (p.0.to_bits(), p.1.to_bits());
+        let (lo, hi) = if key(a) <= key(b) { (key(a), key(b)) } else { (key(b), key(a)) };
+        assert!(seen.insert((lo, hi)), "{a:?}–{b:?} came twice");
+    }
+    assert!(graph.edges_near(polar(6790.0, 33.0), 1.0).is_empty());
+}
+
+#[test]
 fn a_walk_that_can_go_straight_does() {
     let (_, graph) = world();
     let to = (SPAWN_X + 40.0, SPAWN_Y - 300.0);

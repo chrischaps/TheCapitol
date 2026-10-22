@@ -7,11 +7,14 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
-use capitol_protocol::annotation::AnnotationKind;
-use capitol_protocol::metrics::{Feed, TownLatest, TownReport};
+use capitol_protocol::annotation::{AnnotationKind, AnnotationsQuery};
+use capitol_protocol::metrics::{Feed, SeriesQuery, TownLatest, TownReport};
 use futures::{Stream, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
-use capitol_protocol::rest::{ApiKeyScope, CitizenInfo, CreateCitizenRequest, CreatedApiKey, CreatedCitizen, SuccessResponse};
+use capitol_protocol::rest::{
+    ApiKeyScope, CitizenInfo, CreateCitizenRequest, CreatedApiKey, CreatedCitizen, Doing, SuccessResponse, Walker,
+    WalkersQuery, WALKERS_MAX_RADIUS,
+};
 use capitol_protocol::tunables::{TunablesResponse, TunablesUpdate};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -46,6 +49,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/stream", get(stream))
         .route("/series", get(get_series))
         .route("/tunables", get(get_tunables).put(put_tunables))
+        .route("/walkers", get(get_walkers))
         .route("/accounts/{id}/subscription", post(subscribe_account))
         .route("/citizens", get(list_citizens).post(create_citizen))
         .route("/town", get(get_town))
@@ -336,13 +340,6 @@ pub async fn get_ledger(
     Ok(Json(ledger::snapshot(&state).await?))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AnnotationsQuery {
-    /// Unix ms; the default is the last 24 hours
-    pub since_ms: Option<i64>,
-    pub limit: Option<i64>,
-}
-
 /// The annotations (D0.4): what explains a bend in a chart, oldest first.
 /// `/admin/series` and the stream (D0.3) serve them with the samples too.
 pub async fn get_annotations(
@@ -390,17 +387,6 @@ pub async fn stream(
         }))
     });
     Ok(Sse::new(events).keep_alive(KeepAlive::default()))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SeriesQuery {
-    /// Unix ms, exclusive; the default is an hour before `to_ms`
-    pub from_ms: Option<i64>,
-    /// Unix ms, inclusive; the default is now
-    pub to_ms: Option<i64>,
-    /// The sample's fields to send, comma-separated (`load,strands`); each
-    /// sample keeps its times too. The default is all of them.
-    pub fields: Option<String>,
 }
 
 /// The samples and annotations between two times (D0.3), oldest first, as
@@ -486,6 +472,44 @@ pub struct ServerStats {
     pub broadcast_subscribers: usize,
 }
 
+/// The players near a point as the server is moving them (D5.3): where each
+/// stands, where it's walking to and what it's doing, for the Flint client's
+/// admin layers. A citizen's destination is its next leg.
+pub async fn get_walkers(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Query(query): Query<WalkersQuery>,
+) -> Result<Json<Vec<Walker>>, AppError> {
+    require_admin(&user)?;
+    Ok(Json(walkers_near(&state.game.read().await.players, query)))
+}
+
+fn walkers_near(
+    players: &std::collections::HashMap<uuid::Uuid, crate::models::PlayerState>,
+    query: WalkersQuery,
+) -> Vec<Walker> {
+    let radius = query.radius.clamp(0.0, WALKERS_MAX_RADIUS);
+    let mut out: Vec<Walker> = players
+        .values()
+        .filter(|p| (p.x - query.x).powi(2) + (p.y - query.y).powi(2) <= radius * radius)
+        .map(|p| Walker {
+            player_id: p.id,
+            name: p.name.clone(),
+            citizen: p.citizen,
+            x: p.x,
+            y: p.y,
+            dest: p.dest_x.zip(p.dest_y).map(|(x, y)| [x, y]),
+            doing: match &p.action_state {
+                ActionState::Idle => Doing::Idle,
+                ActionState::Extracting { node_id, .. } => Doing::Extracting { node_id: *node_id },
+                ActionState::Crafting { recipe_id, .. } => Doing::Crafting { recipe_id: recipe_id.clone() },
+            },
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
 /// Get real-time server performance stats
 pub async fn get_server_stats(
     State(state): State<AppState>,
@@ -516,4 +540,56 @@ pub async fn get_server_stats(
     };
 
     Ok(Json(stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::PlayerState;
+    use uuid::Uuid;
+
+    fn player(name: &str, x: f64, y: f64, citizen: bool) -> PlayerState {
+        PlayerState {
+            id: Uuid::new_v4(),
+            account_id: Uuid::new_v4(),
+            name: name.into(),
+            x,
+            y,
+            dest_x: None,
+            dest_y: None,
+            speed: 50.0,
+            strand_balance: 0,
+            current_zone: None,
+            action_state: ActionState::Idle,
+            citizen,
+        }
+    }
+
+    #[test]
+    fn walkers_are_the_players_near_with_their_destinations() {
+        let mut ada = player("Ada", 6800.0, 6800.0, true);
+        ada.dest_x = Some(6900.0);
+        ada.dest_y = Some(6750.0);
+        let mut bram = player("Bram", 6900.0, 6800.0, false);
+        bram.action_state = ActionState::Crafting {
+            operation_id: Uuid::new_v4(),
+            recipe_id: "rope".into(),
+            progress: 0,
+            duration: 10,
+        };
+        let far = player("Cora", 6800.0 + WALKERS_MAX_RADIUS + 1.0, 6800.0, true);
+        let players: std::collections::HashMap<Uuid, PlayerState> =
+            [ada, bram, far].into_iter().map(|p| (p.id, p)).collect();
+
+        let near = walkers_near(&players, WalkersQuery { x: 6800.0, y: 6800.0, radius: 150.0 });
+        let names: Vec<&str> = near.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["Ada", "Bram"]);
+        assert_eq!(near[0].dest, Some([6900.0, 6750.0]));
+        assert!(near[0].citizen);
+        assert_eq!(near[1].doing, Doing::Crafting { recipe_id: "rope".into() });
+        assert_eq!(near[1].dest, None);
+        // The radius is held to the most it looks
+        let all = walkers_near(&players, WalkersQuery { x: 6800.0, y: 6800.0, radius: 1e9 });
+        assert_eq!(all.len(), 2);
+    }
 }

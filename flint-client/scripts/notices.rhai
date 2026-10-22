@@ -113,7 +113,8 @@ fn on_event(name, data) {
     }
     if name == "extraction_note" || name == "plot_note" || name == "placement_note"
         || name == "station_note" || name == "trade_note" || name == "tool_note"
-        || name == "market_note" || name == "automation_note" || name == "controls_note" {
+        || name == "market_note" || name == "automation_note" || name == "controls_note"
+        || name == "debug_note" {
         toasts = add_toast(toasts, data.title, data.body, "note", t);
         return;
     }

@@ -393,6 +393,8 @@ pub struct GameState {
     /// The fees the server charges now, from `auth_ok` and `fees_changed`
     /// (D6.1). The defaults until it says.
     fees: Fees,
+    /// The token is an admin's, by `auth_ok` (D5.3)
+    is_admin: bool,
     /// Whether this client plays the avatar, as the server last said (E0.8).
     /// `None` while not connected, or from a server too old to say.
     presence: Option<Presence>,
@@ -442,6 +444,7 @@ impl GameState {
             strands: None,
             subscription: None,
             fees: Fees::default(),
+            is_admin: false,
             presence: None,
             plots: Vec::new(),
             picked_plot: None,
@@ -521,10 +524,12 @@ impl GameState {
                 server_time_ms,
                 subscription,
                 fees,
+                is_admin,
             } => {
                 self.me = Some(*player_id);
                 self.subscription = Some(*subscription);
                 self.fees = *fees;
+                self.is_admin = *is_admin;
                 // Rebased on every AuthOk, so a reconnect corrects any drift.
                 self.clock_offset_ms = Some(server_time_ms - local_unix_ms());
             }
@@ -1147,7 +1152,11 @@ impl GameState {
             | R::ApiKeys(_)
             | R::Citizen(_)
             | R::Citizens(_)
-            | R::Ledger(_) => {}
+            | R::Ledger(_)
+            | R::Series(_)
+            | R::Annotations(_)
+            | R::Tunables(_)
+            | R::Walkers(_) => {}
         }
         out
     }
@@ -1360,6 +1369,12 @@ impl GameState {
     /// market's listing fee and a stall's rent from these.
     pub fn fees(&self) -> Fees {
         self.fees
+    }
+
+    /// Whether the server said the token is an admin's (D5.3), for the
+    /// admin overlay. The admin routes check the token again whatever this says.
+    pub fn is_admin(&self) -> bool {
+        self.is_admin
     }
 
     /// Your account's subscription, as of now. `None` until the server says.

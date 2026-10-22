@@ -200,6 +200,9 @@ pub enum ServerMessage {
     /// `subscription` is the account's, as of now (E4.1). `fees` are the
     /// ones charged now (D6.1): quote from them, and from each `fees_changed`
     /// after. A server older than D6.1 sends none, and charges the defaults.
+    /// `is_admin` is the token's (D5.3), so a client can show the admin's
+    /// overlay; it's left out for everyone else, and the admin routes check
+    /// the token again whatever a client shows.
     #[serde(rename = "auth_ok")]
     AuthOk {
         player_id: Uuid,
@@ -208,6 +211,8 @@ pub enum ServerMessage {
         subscription: Subscription,
         #[serde(default)]
         fees: Fees,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        is_admin: bool,
     },
     #[serde(rename = "auth_error")]
     AuthError { message: String },

@@ -257,6 +257,48 @@ pub struct CitizenInfo {
     pub key: Option<ApiKeyInfo>,
 }
 
+/// `GET /admin/walkers`' query (D5.3): the players within `radius` of
+/// (`x`, `y`), in server units. The radius is held to [`WALKERS_MAX_RADIUS`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema, utoipa::IntoParams))]
+pub struct WalkersQuery {
+    pub x: f64,
+    pub y: f64,
+    pub radius: f64,
+}
+
+/// The farthest `GET /admin/walkers` looks: the interest grid's 3×3 cells
+/// and a little over.
+pub const WALKERS_MAX_RADIUS: f64 = 2000.0;
+
+/// One player as the server is moving them (D5.3), for the admin's world
+/// layers: where they stand, where the server is walking them (a citizen's
+/// next leg, or a person's click), and what they're doing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Walker {
+    pub player_id: Uuid,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
+    pub x: f64,
+    pub y: f64,
+    /// Where it's walking to; `None` standing
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest: Option<[f64; 2]>,
+    pub doing: Doing,
+}
+
+/// What a [`Walker`] is busy with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Doing {
+    Idle,
+    Extracting { node_id: Uuid },
+    Crafting { recipe_id: String },
+}
+
 /// `POST /admin/citizens`'s answer. The key's secret (`play` and `trade`) is
 /// shown this once: it's how `capitol-town` signs the citizen in, since a
 /// citizen has no password.

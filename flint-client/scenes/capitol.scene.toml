@@ -199,6 +199,11 @@ source = "input.rhai"
 [entities.hud.script]
 source = "hud.rhai"
 
+# The admin's world layers on F6 (D5.3): interest cells, nodes on their
+# ground, the walk graph and where the server walks each player
+[entities.debug.script]
+source = "debug.rhai"
+
 # Notices: the toast stack and the pickups flying to the inventory (P8.2).
 # Last, so they draw over the names.
 [entities.notices.script]

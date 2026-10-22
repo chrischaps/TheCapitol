@@ -24,6 +24,8 @@
 //! `fixtures/rest/town_report.json` is `POST /admin/town/report` (D4.1): a
 //! citizen at work with two decisions, a merchant resting after a failure,
 //! and one away.
+//! `fixtures/rest/admin_walkers.json` is `GET /admin/walkers` (D5.3): a
+//! citizen walking to its next leg, a person gathering, one crafting.
 
 use std::fs;
 use std::path::Path;
@@ -260,6 +262,18 @@ fn the_admin_feed_round_trips_one_of_each() {
     let sample = fixture("sample.json");
     let tagged = serde_json::to_string(&Feed::Sample(Box::new(serde_json::from_str(&sample).unwrap()))).unwrap();
     assert_eq!(tagged, format!("{{\"type\":\"sample\",{}", &sample[1..]));
+}
+
+#[test]
+fn walkers_round_trip() {
+    use capitol_protocol::rest::{Doing, Walker};
+    let json = fixture("admin_walkers.json");
+    let walkers: Vec<Walker> = serde_json::from_str(&json).unwrap();
+    assert_eq!(walkers.len(), 3);
+    assert!(walkers[0].citizen && walkers[0].dest.is_some());
+    assert!(matches!(walkers[1].doing, Doing::Extracting { .. }));
+    assert_eq!(walkers[2].doing, Doing::Crafting { recipe_id: "rope".into() });
+    assert_eq!(serde_json::to_string(&walkers).unwrap(), json);
 }
 
 #[test]

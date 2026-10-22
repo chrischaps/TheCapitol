@@ -15,6 +15,7 @@ mod camera_path;
 mod camera_rig;
 mod coords;
 mod daylight;
+mod debug_layers;
 mod entities;
 mod extension;
 mod juice_sample;
