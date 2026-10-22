@@ -299,6 +299,82 @@ pub enum Doing {
     Crafting { recipe_id: String },
 }
 
+/// `GET /admin/map`'s query (D1.3): how many hours back the trade heat
+/// reaches, held to 1 to [`MAP_HEAT_MAX_HOURS`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema, utoipa::IntoParams))]
+pub struct MapQuery {
+    #[serde(default = "MapQuery::default_hours")]
+    pub hours: u32,
+}
+
+impl MapQuery {
+    fn default_hours() -> u32 {
+        1
+    }
+}
+
+/// The farthest back `GET /admin/map`'s heat reaches: the console's longest range.
+pub const MAP_HEAT_MAX_HOURS: u32 = 24;
+
+/// `GET /admin/map` (D1.3): what the console's map draws over `/terrain`
+/// and `/world/nodes`, besides the walkers (`GET /admin/positions`, read
+/// far more often). Each is marked for a citizen's, as the Gazette does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct AdminMap {
+    /// The zones' rings, centre out, from `rules::ZONE_OUTER_RADII`
+    pub zones: Vec<MapZone>,
+    /// Every owned lot, by its `/terrain` id
+    pub plots: Vec<MapPlot>,
+    pub stations: Vec<MapStation>,
+    /// The trade over the last `hours`, by where it happened
+    pub heat: FillHeat,
+}
+
+/// One zone's ring on the map.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MapZone {
+    /// `Zone::as_str`
+    pub zone: String,
+    pub inner: f64,
+    pub outer: f64,
+}
+
+/// An owned lot on the map.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MapPlot {
+    pub terrain_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
+}
+
+/// A placed station on the map.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct MapStation {
+    pub id: Uuid,
+    pub station_type: String,
+    pub x: f64,
+    pub y: f64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
+}
+
+/// The trade since `from_ms` by place: the market's fills at the Exchange
+/// hall, and the bazaar's sales at each stall (`/terrain`'s `bazaar_stall_*`
+/// landmarks). A fill has no other place to be.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct FillHeat {
+    pub from_ms: i64,
+    pub market: crate::metrics::Trades,
+    /// By stall id; stalls that sold nothing are left out
+    pub stalls: std::collections::BTreeMap<String, crate::metrics::Trades>,
+}
+
 /// `POST /admin/citizens`'s answer. The key's secret (`play` and `trade`) is
 /// shown this once: it's how `capitol-town` signs the citizen in, since a
 /// citizen has no password.

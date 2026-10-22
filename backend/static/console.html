@@ -44,6 +44,7 @@
   <nav class="bar">
     <div class="tabs" role="tablist" id="tabs">
       <a role="tab" href="#overview" data-tab="overview">Overview</a>
+      <a role="tab" href="#map" data-tab="map">Map</a>
       <a role="tab" href="#economy" data-tab="economy">Economy</a>
       <a role="tab" href="#performance" data-tab="performance">Performance</a>
       <a role="tab" href="#town" data-tab="town">Town</a>
@@ -81,6 +82,25 @@
         <p class="headline" id="latest-headline">Listening.</p>
         <p class="dek">The newest on the wire: what the server noted, and the fills, deeds and warnings. <a href="#events">The whole wire</a>.</p>
         <ol class="wire" id="latest-wire"></ol>
+      </article>
+    </section>
+
+    <section class="page" id="page-map" data-page="map" hidden>
+      <article class="story">
+        <h2 class="head">The map</h2>
+        <p class="headline" id="map-headline">Reading the land.</p>
+        <p class="dek">Everyone in the world where the server has them, read every two seconds, over the roads, the water and the zones. Drag to move, scroll or pinch to zoom.</p>
+        <div class="filters" id="layers" role="group" aria-label="Layers">
+          <button type="button" data-layer="people">People</button>
+          <button type="button" data-layer="nodes">Nodes</button>
+          <button type="button" data-layer="plots">Owned lots</button>
+          <button type="button" data-layer="stations">Stations</button>
+          <button type="button" data-layer="heat">Trade heat</button>
+          <button type="button" class="quiet" id="map-fit">Whole world</button>
+        </div>
+        <div class="map"><canvas id="map-canvas" tabindex="0" aria-label="The map of the world. Arrow keys move it, plus and minus zoom, 0 shows the whole world."></canvas></div>
+        <p class="note" id="map-note"></p>
+        <ul class="map-key" id="map-key"></ul>
       </article>
     </section>
 

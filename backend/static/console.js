@@ -10,7 +10,8 @@
 // D1.1 is the frame: sign-in, the tabs, the theme, the stream, and one story
 // per tab that later packages grow (D2 the economy, D3.1 performance, D4.2
 // the town, D6.2 tuning). D1.2 made the overview: tiles for health, the tick
-// and who's on, the books' drift, and the newest on the wire.
+// and who's on, the books' drift, and the newest on the wire. D1.3 adds
+// the map.
 
 "use strict";
 
@@ -66,6 +67,7 @@
   const clockSecs = (t) => new Date(t).toLocaleTimeString("en-GB");
   const day = (t) => new Date(t).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
   const item = (id) => String(id).replace(/_/g, " ");
+  const capital = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
   function ago(t) {
     const s = Math.max(0, Math.round((Date.now() - t) / 1000));
@@ -199,6 +201,10 @@
     state.covered = { base: Infinity, load: Infinity };
     state.annotations.clear();
     state.wire = [];
+    mapStop();
+    map.walkers.clear();
+    map.layers = map.nodes = null;
+    map.follow = map.hover = null;
     setLive("off");
     showLogin(why);
   }
@@ -320,6 +326,7 @@
       case "gazette": break;
       default:
         addWire({ kind: feed.type, at_ms: feed.type === "fill" ? Date.parse(feed.trade.at) || Date.now() : Date.now(), feed });
+        if (feed.type === "fill" || feed.type === "deed") layersSoon();
         render(["events", "overview"]);
     }
   }
@@ -884,6 +891,728 @@
   }
 
   // ---------------------------------------------------------------------------
+  // The map (D1.3): `/terrain` turned once into paths in world units, the
+  // walkers from `/admin/positions` every two seconds, eased between reads,
+  // and the slower layers from `/admin/map` and `/world/nodes`. It takes over
+  // from the React client's F1 debug camera for watching the world. The wilds are
+// drawn flat: the height field is Rust only (#415).
+
+  const POSITIONS_MS = 2_000;
+  const MAP_LAYERS_MS = 30_000;
+  const NODES_MS = 60_000;
+  const LAYERS = ["people", "nodes", "plots", "stations", "heat"];
+  const NODE_TYPES = ["grass", "reed_bed", "tree", "fallen_branches", "old_growth", "rock_outcrop", "clay_bank", "copper_vein", "tin_vein", "iron_vein"];
+  const stillness = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const map = {
+    terrain: null,
+    loading: null,
+    layers: null,
+    nodes: null,
+    // By player id: the walker, where it's drawn from and where it's going
+    walkers: new Map(),
+    movedAt: 0,
+    view: null,
+    on: new Set(savedLayers()),
+    timers: [],
+    pending: null,
+    hover: null,
+    follow: null,
+    frame: 0,
+    palette: null,
+    size: { w: 0, h: 0 },
+  };
+
+  function savedLayers() {
+    try {
+      const saved = JSON.parse(prefs.get("observatory.layers"));
+      if (Array.isArray(saved)) return saved.filter((l) => LAYERS.includes(l));
+    } catch { /* the default */ }
+    return ["people"];
+  }
+
+  /** The map's inks, read once a theme from its tokens */
+  function palette() {
+    if (map.palette) return map.palette;
+    const t = (n) => token(`--m-${n}`);
+    const nodes = {};
+    for (const n of NODE_TYPES) nodes[n] = token(`--n-${n}`);
+    map.palette = {
+      outside: token("--paper"), zoneA: t("zone-a"), zoneB: t("zone-b"), edge: t("edge"),
+      water: t("water"), stream: t("stream"), park: t("park"), lot: t("lot"),
+      road: t("road"), arterial: t("arterial"), trail: t("trail"), landmark: t("landmark"),
+      ownedCitizen: t("owned-citizen"), ownedPerson: t("owned-person"),
+      citizen: t("citizen"), person: t("person"), halo: t("halo"), path: t("path"),
+      heat: t("heat"), heatMode: t("heat-mode") || "multiply",
+      station: t("station"), label: t("label"), ink: token("--ink"), dim: token("--ink-dim"),
+      nodes, otherNode: token("--n-other"),
+    };
+    return map.palette;
+  }
+
+  function buildTerrain(t) {
+    const path = (pts, closed = false) => {
+      const p = new Path2D();
+      pts.forEach(([x, y], i) => (i ? p.lineTo(x, y) : p.moveTo(x, y)));
+      if (closed) p.closePath();
+      return p;
+    };
+    const rings = (list) => {
+      const p = new Path2D();
+      for (const ring of list) p.addPath(path(ring, true));
+      return p;
+    };
+    // One path per kind and width of road, so a draw is a handful of strokes
+    const roads = new Map();
+    for (const r of t.roads) {
+      const key = `${r.road_type}:${r.width}`;
+      if (!roads.has(key)) roads.set(key, { type: r.road_type, width: r.width, path: new Path2D() });
+      roads.get(key).path.addPath(path(r.points));
+    }
+    const order = { trail: 0, suburban: 1, grid: 2, arterial: 3 };
+    const lots = new Map();
+    const lotOutlines = new Path2D();
+    for (const lot of t.terrain_plots) {
+      const p = path(lot.corners, true);
+      lots.set(lot.id, p);
+      lotOutlines.addPath(p);
+    }
+    const course = (c) => ({
+      path: path(c.points.map((p) => [p.x, p.y])),
+      width: c.points.reduce((s, p) => s + p.width, 0) / Math.max(1, c.points.length),
+    });
+    const landmarks = new Map(t.landmarks.map((l) => [l.id, l]));
+    const buildings = new Path2D();
+    for (const l of t.landmarks) if (l.kind !== "square") buildings.addPath(path(l.corners, true));
+    return {
+      size: t.world_size,
+      cx: t.center_x,
+      cy: t.center_y,
+      roads: [...roads.values()].sort((a, b) => order[a.type] - order[b.type] || a.width - b.width),
+      lots,
+      lotOutlines,
+      lotCount: t.terrain_plots.length,
+      parks: rings(t.parks.flatMap((p) => p.rings)),
+      lakes: rings(t.lakes.flatMap((l) => l.rings)),
+      rivers: t.rivers.map(course),
+      streams: t.streams.map(course),
+      waterRings: t.water_rings,
+      landmarks,
+      buildings,
+    };
+  }
+
+  // ---- the view: the world point at the canvas's centre, and px a unit
+
+  function fitView() {
+    const { w, h } = map.size;
+    const t = map.terrain;
+    map.view = { cx: t.cx, cy: t.cy, scale: (Math.min(w, h) / t.size) * 0.98 };
+    map.follow = null;
+  }
+  const toScreen = (x, y) => {
+    const v = map.view;
+    return [(x - v.cx) * v.scale + map.size.w / 2, (y - v.cy) * v.scale + map.size.h / 2];
+  };
+  const toWorld = (sx, sy) => {
+    const v = map.view;
+    return [(sx - map.size.w / 2) / v.scale + v.cx, (sy - map.size.h / 2) / v.scale + v.cy];
+  };
+  function zoomAt(sx, sy, factor) {
+    const t = map.terrain;
+    const min = (Math.min(map.size.w, map.size.h) / t.size) * 0.6;
+    const scale = Math.min(8, Math.max(min, map.view.scale * factor));
+    const [wx, wy] = toWorld(sx, sy);
+    map.view.scale = scale;
+    // Keep the point under the cursor where it was, unless following someone
+    if (!map.follow) {
+      map.view.cx = wx - (sx - map.size.w / 2) / scale;
+      map.view.cy = wy - (sy - map.size.h / 2) / scale;
+    }
+    drawSoon();
+  }
+
+  // ---- the walkers, eased from where they were drawn to where they are
+
+  function easing() {
+    if (stillness.matches) return 1;
+    return Math.min(1, (window.performance.now() - map.movedAt) / POSITIONS_MS);
+  }
+  function walkerAt(m, k = easing()) {
+    return [m.fromX + (m.w.x - m.fromX) * k, m.fromY + (m.w.y - m.fromY) * k];
+  }
+  function takePositions(list) {
+    const k = easing();
+    const next = new Map();
+    for (const w of list) {
+      const had = map.walkers.get(w.player_id);
+      const [fx, fy] = had ? walkerAt(had, k) : [w.x, w.y];
+      // A jump (a teleport, a sign-in far off) isn't eased across the city
+      const far = Math.hypot(w.x - fx, w.y - fy) > 400;
+      next.set(w.player_id, { w, fromX: far ? w.x : fx, fromY: far ? w.y : fy });
+    }
+    map.walkers = next;
+    map.movedAt = window.performance.now();
+    if (map.follow && !next.has(map.follow)) map.follow = null;
+    mapHeadline();
+    drawSoon();
+  }
+
+  // ---- drawing
+
+  function drawSoon() {
+    if (map.frame || state.tab !== "map") return;
+    map.frame = requestAnimationFrame(() => {
+      map.frame = 0;
+      drawMap();
+      // Keep going while anyone is still easing to where they are
+      if (easing() < 1) drawSoon();
+    });
+  }
+
+  function drawMap() {
+    const canvas = $("map-canvas");
+    const t = map.terrain;
+    if (!t || !map.view || !map.size.w) return;
+    const ctx = canvas.getContext("2d");
+    const p = palette();
+    const dpr = devicePixelRatio || 1;
+    const v = map.view;
+    if (map.follow) {
+      const m = map.walkers.get(map.follow);
+      if (m) [v.cx, v.cy] = walkerAt(m);
+    }
+    const px = 1 / v.scale;
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = p.outside;
+    ctx.fillRect(0, 0, map.size.w, map.size.h);
+
+    // In world units from here
+    ctx.setTransform(dpr * v.scale, 0, 0, dpr * v.scale, dpr * (map.size.w / 2 - v.cx * v.scale), dpr * (map.size.h / 2 - v.cy * v.scale));
+    const disc = (r) => { ctx.beginPath(); ctx.arc(t.cx, t.cy, r, 0, Math.PI * 2); };
+    const zones = map.layers?.zones ?? [{ zone: "world", inner: 0, outer: t.size / 2 }];
+    for (let i = zones.length - 1; i >= 0; i--) {
+      disc(zones[i].outer);
+      ctx.fillStyle = i % 2 ? p.zoneB : p.zoneA;
+      ctx.fill();
+    }
+    disc(t.size / 2);
+    ctx.strokeStyle = p.edge;
+    ctx.lineWidth = 1.5 * px;
+    ctx.stroke();
+
+    ctx.fillStyle = p.park;
+    ctx.fill(t.parks, "evenodd");
+    ctx.fillStyle = p.water;
+    ctx.fill(t.lakes, "evenodd");
+    ctx.lineCap = ctx.lineJoin = "round";
+    ctx.strokeStyle = p.stream;
+    for (const s of t.streams) { ctx.lineWidth = Math.max(s.width, 0.75 * px); ctx.stroke(s.path); }
+    ctx.strokeStyle = p.water;
+    for (const r of t.rivers) { ctx.lineWidth = Math.max(r.width, 1.25 * px); ctx.stroke(r.path); }
+    // The moat and canals, broken where a bridge crosses
+    ctx.lineCap = "butt";
+    for (const ring of t.waterRings) {
+      const gaps = ring.bridges
+        .map((b) => [(b.angle_degrees * Math.PI) / 180, b.width / ring.radius])
+        .sort((a, b) => a[0] - b[0]);
+      ctx.lineWidth = Math.max(ring.width, 1.5 * px);
+      if (!gaps.length) { disc(ring.radius); ctx.stroke(); continue; }
+      gaps.forEach(([a, half], i) => {
+        const [b, nextHalf] = gaps[(i + 1) % gaps.length];
+        ctx.beginPath();
+        ctx.arc(t.cx, t.cy, ring.radius, a + half, (i + 1 === gaps.length ? b + Math.PI * 2 : b) - nextHalf);
+        ctx.stroke();
+      });
+    }
+
+    // Lots once they're big enough to tell apart
+    if (v.scale > 0.05) {
+      ctx.strokeStyle = p.lot;
+      ctx.lineWidth = px;
+      ctx.stroke(t.lotOutlines);
+    }
+    if (map.on.has("plots") && map.layers) {
+      for (const plot of map.layers.plots) {
+        const lot = t.lots.get(plot.terrain_id);
+        if (!lot) continue;
+        ctx.fillStyle = plot.citizen ? p.ownedCitizen : p.ownedPerson;
+        ctx.fill(lot);
+      }
+    }
+
+    ctx.lineCap = "round";
+    for (const r of t.roads) {
+      ctx.strokeStyle = r.type === "arterial" ? p.arterial : r.type === "trail" ? p.trail : p.road;
+      ctx.lineWidth = Math.max(r.width, (r.type === "arterial" ? 1.5 : r.type === "trail" ? 0.75 : 1) * px);
+      ctx.setLineDash(r.type === "trail" ? [6 * px, 4 * px] : []);
+      ctx.stroke(r.path);
+    }
+    ctx.setLineDash([]);
+    ctx.fillStyle = p.landmark;
+    ctx.fill(t.buildings);
+
+    // Screen space from here: marks keep their size at any zoom
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const inView = (sx, sy, pad = 20) => sx > -pad && sy > -pad && sx < map.size.w + pad && sy < map.size.h + pad;
+
+    if (v.scale < 0.12 && map.layers) zoneLabels(ctx, p, zones);
+    if (map.on.has("heat") && map.layers) heat(ctx, p);
+
+    if (map.on.has("nodes") && map.nodes) {
+      const r = Math.max(1.6, Math.min(4, 5 * v.scale));
+      for (const n of map.nodes) {
+        const [sx, sy] = toScreen(n.x, n.y);
+        if (!inView(sx, sy)) continue;
+        ctx.globalAlpha = n.state === "depleted" ? 0.35 : 1;
+        ctx.fillStyle = p.nodes[n.resource_type] || p.otherNode;
+        ctx.beginPath();
+        ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    if (map.on.has("stations") && map.layers) {
+      const s = Math.max(3, Math.min(7, 9 * v.scale));
+      ctx.lineWidth = 1.25;
+      for (const st of map.layers.stations) {
+        const [sx, sy] = toScreen(st.x, st.y);
+        if (!inView(sx, sy)) continue;
+        ctx.fillStyle = p.station;
+        ctx.fillRect(sx - s / 2, sy - s / 2, s, s);
+        if (st.citizen) { ctx.strokeStyle = p.citizen; ctx.strokeRect(sx - s / 2 - 1.5, sy - s / 2 - 1.5, s + 3, s + 3); }
+      }
+    }
+
+    if (map.on.has("people")) people(ctx, p, inView);
+    scaleBar(ctx, p);
+  }
+
+  function people(ctx, p, inView) {
+    const k = easing();
+    // Where each is walking to, faint, once there's room to see it
+    if (map.view.scale > 0.04) {
+      ctx.strokeStyle = p.path;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      for (const m of map.walkers.values()) {
+        if (!m.w.dest) continue;
+        const [sx, sy] = toScreen(...walkerAt(m, k));
+        const [dx, dy] = toScreen(...m.w.dest);
+        if (!inView(sx, sy) && !inView(dx, dy)) continue;
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(dx, dy);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    const marked = [];
+    for (const m of map.walkers.values()) {
+      const [sx, sy] = toScreen(...walkerAt(m, k));
+      if (!inView(sx, sy)) continue;
+      if (m.w.player_id === map.follow || m.w.player_id === map.hover?.id) marked.push([m, sx, sy]);
+      // A citizen is a hollow diamond, its mark everywhere; a person a dot
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = p.halo;
+      ctx.beginPath();
+      if (m.w.citizen) diamond(ctx, sx, sy, 4.5);
+      else ctx.arc(sx, sy, 3.5, 0, Math.PI * 2);
+      ctx.stroke();
+      if (m.w.citizen) {
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = p.citizen;
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = p.person;
+        ctx.fill();
+      }
+    }
+    ctx.font = '600 12px "Source Sans 3", system-ui, sans-serif';
+    for (const [m, sx, sy] of marked) {
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = p.ink;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 9, 0, Math.PI * 2);
+      ctx.stroke();
+      label(ctx, p, m.w.name, sx + 12, sy + 4);
+    }
+  }
+
+  function diamond(ctx, x, y, r) {
+    ctx.moveTo(x, y - r);
+    ctx.lineTo(x + r, y);
+    ctx.lineTo(x, y + r);
+    ctx.lineTo(x - r, y);
+    ctx.closePath();
+  }
+
+  function label(ctx, p, s, x, y) {
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = p.halo;
+    ctx.strokeText(s, x, y);
+    ctx.fillStyle = p.ink;
+    ctx.fillText(s, x, y);
+  }
+
+  const ZONE_NAMES = {
+    capitol: "Capitol", trade_district: "Trade", guild_district: "Guilds", urban: "Urban",
+    suburban: "Suburbs", rural: "Farms", wilderness: "The wilds",
+  };
+  function zoneLabels(ctx, p, zones) {
+    ctx.font = '600 10px "Source Sans 3", system-ui, sans-serif';
+    ctx.textAlign = "center";
+    ctx.fillStyle = p.label;
+    for (const z of zones) {
+      const name = ZONE_NAMES[z.zone];
+      if (!name || (z.outer - z.inner) * map.view.scale < 14) continue;
+      // Between two arterials, north by north-east, so no road runs through it
+      const r = (z.inner + z.outer) / 2;
+      const a = (-67.5 * Math.PI) / 180;
+      const [sx, sy] = toScreen(map.terrain.cx + r * Math.cos(a), map.terrain.cy + r * Math.sin(a));
+      ctx.fillText(name.toUpperCase().split("").join(" "), sx, sy + 3);
+    }
+    ctx.textAlign = "start";
+  }
+
+  /** Where the trade happened: the hall's fills at its door, each stall's sales at the stall */
+  function heatSpots() {
+    const t = map.terrain;
+    const h = map.layers.heat;
+    const spots = [];
+    const hall = t.landmarks.get("exchange_hall");
+    if (hall && h.market.trades) spots.push({ at: hall.door, trades: h.market });
+    for (const [id, trades] of Object.entries(h.stalls)) {
+      const stall = t.landmarks.get(id);
+      if (stall) spots.push({ at: stall.position, trades });
+    }
+    return spots;
+  }
+  function heat(ctx, p) {
+    const spots = heatSpots();
+    const most = Math.max(1, ...spots.map((s) => s.trades.strands));
+    ctx.save();
+    ctx.globalCompositeOperation = p.heatMode;
+    for (const s of spots) {
+      const [sx, sy] = toScreen(...s.at);
+      // Area by Strands, and never smaller than a thumbprint
+      const r = Math.max(10, Math.sqrt(s.trades.strands / most) * Math.max(36, 90 * map.view.scale));
+      const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, r);
+      g.addColorStop(0, p.heat);
+      g.addColorStop(1, "transparent");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function scaleBar(ctx, p) {
+    // The roundest length that's under 120 px
+    const units = [10, 25, 50, 100, 250, 500, 1000, 2500].reverse().find((u) => u * map.view.scale <= 120) ?? 10;
+    const w = units * map.view.scale;
+    const x = 14;
+    const y = map.size.h - 14;
+    ctx.strokeStyle = p.ink;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, y - 5);
+    ctx.lineTo(x, y);
+    ctx.lineTo(x + w, y);
+    ctx.lineTo(x + w, y - 5);
+    ctx.stroke();
+    ctx.font = '12px "Source Sans 3", system-ui, sans-serif';
+    label(ctx, p, `${nf.format(units)}`, x + w + 6, y);
+  }
+
+  // ---- what's under the cursor
+
+  function hitAt(sx, sy) {
+    let best = null;
+    let bestD = 10;
+    const consider = (kind, x, y, thing) => {
+      const [px_, py_] = toScreen(x, y);
+      const d = Math.hypot(px_ - sx, py_ - sy);
+      if (d < bestD) { best = { kind, thing, id: thing.player_id ?? thing.id }; bestD = d; }
+    };
+    if (map.on.has("people")) for (const m of map.walkers.values()) consider("walker", ...walkerAt(m), m.w);
+    if (best) return best;
+    if (map.on.has("stations") && map.layers) for (const s of map.layers.stations) consider("station", s.x, s.y, s);
+    if (best) return best;
+    if (map.on.has("nodes") && map.nodes) for (const n of map.nodes) consider("node", n.x, n.y, n);
+    return best;
+  }
+
+  function doing(w) {
+    switch (w.doing.kind) {
+      case "extracting": {
+        const node = map.nodes?.find((n) => n.id === w.doing.node_id);
+        return node ? `gathering at ${article(item(node.resource_type))}` : "gathering";
+      }
+      case "crafting": return `making ${item(w.doing.recipe_id)}`;
+      default:
+        if (!w.dest) return "standing still";
+        return `walking, ${nf.format(Math.round(Math.hypot(w.dest[0] - w.x, w.dest[1] - w.y)))} to go`;
+    }
+  }
+  const article = (s) => `${/^[aeiou]/.test(s) ? "an" : "a"} ${s}`;
+
+  function mapNote() {
+    const note = $("map-note");
+    const h = map.hover;
+    if (map.follow) {
+      const m = map.walkers.get(map.follow);
+      if (m) return void (note.textContent = `Following ${m.w.citizen ? "◇ " : ""}${m.w.name}, ${doing(m.w)}. Click the map to let go.`);
+    }
+    if (!h) return void (note.textContent = "Point at anyone to see what they're doing; click to follow them.");
+    switch (h.kind) {
+      case "walker": note.textContent = `${h.thing.citizen ? "◇ " : ""}${h.thing.name}${h.thing.citizen ? ", a citizen," : ""} ${doing(h.thing)}. Click to follow.`; break;
+      case "station": note.textContent = `${capital(item(h.thing.station_type))}, ${h.thing.citizen ? "a citizen's" : "a person's"}.`; break;
+      case "node": note.textContent = `${capital(item(h.thing.resource_type))}, ${h.thing.state}.`; break;
+    }
+  }
+
+  // ---- the words over and under it
+
+  function mapHeadline() {
+    if (state.tab !== "map") return;
+    const all = [...map.walkers.values()].map((m) => m.w);
+    const citizens = all.filter((w) => w.citizen).length;
+    const people = all.length - citizens;
+    if (!all.length) return void ($("map-headline").textContent = "Nobody is about. The roads are empty.");
+    const n = { walking: 0, gathering: 0, crafting: 0 };
+    for (const w of all) {
+      if (w.doing.kind === "extracting") n.gathering++;
+      else if (w.doing.kind === "crafting") n.crafting++;
+      else if (w.dest) n.walking++;
+    }
+    const who = citizens && people ? `${plural(citizens, "citizen", "citizens")} and ${plural(people, "person", "people")} are`
+      : citizens ? `${plural(citizens, "citizen is", "citizens are")}` : `${plural(people, "person is", "people are")}`;
+    const parts = [
+      n.walking && `${nf.format(n.walking)} walking`,
+      n.gathering && `${nf.format(n.gathering)} gathering`,
+      n.crafting && `${nf.format(n.crafting)} at a craft`,
+    ].filter(Boolean);
+    $("map-headline").textContent = parts.length ? `${who} out: ${parts.join(", ")}.` : `${who} out, and all of them standing still.`;
+  }
+
+  function mapKey() {
+    const p = palette();
+    const items = [];
+    const swatch = (cls, color, words) => {
+      const li = document.createElement("li");
+      const i = document.createElement("i");
+      i.className = cls;
+      i.style.setProperty("--c", color);
+      li.append(i, words);
+      items.push(li);
+    };
+    const walkers = [...map.walkers.values()];
+    if (map.on.has("people")) {
+      swatch("diamond", p.citizen, `Citizens ${nf.format(walkers.filter((m) => m.w.citizen).length)}`);
+      swatch("dot", p.person, `People ${nf.format(walkers.filter((m) => !m.w.citizen).length)}`);
+    }
+    if (map.on.has("nodes") && map.nodes) {
+      const by = new Map();
+      for (const n of map.nodes) by.set(n.resource_type, (by.get(n.resource_type) ?? 0) + 1);
+      for (const [type, n] of [...by].sort((a, b) => b[1] - a[1])) swatch("dot", p.nodes[type] || p.otherNode, `${capital(item(type))} ${nf.format(n)}`);
+    }
+    if (map.on.has("plots") && map.layers) {
+      const c = map.layers.plots.filter((x) => x.citizen).length;
+      swatch("lot", p.ownedCitizen, `Citizens' lots ${nf.format(c)}`);
+      swatch("lot", p.ownedPerson, `People's lots ${nf.format(map.layers.plots.length - c)}`);
+    }
+    if (map.on.has("stations") && map.layers) swatch("square", p.station, `Stations ${nf.format(map.layers.stations.length)}`);
+    if (map.on.has("heat") && map.layers) {
+      const h = map.layers.heat;
+      const stalls = Object.values(h.stalls);
+      const sales = stalls.reduce((n, s) => n + s.trades, 0);
+      const strands = stalls.reduce((n, s) => n + s.strands, 0);
+      swatch("glow", p.heat, h.market.trades + sales === 0
+        ? `No trade in ${window_()}`
+        : `${plural(h.market.trades, "fill", "fills")} at the hall for ${nf.format(h.market.strands)} Strands, and ${plural(sales, "sale", "sales")} at ${plural(stalls.length, "stall", "stalls")} for ${nf.format(strands)}, in ${window_()}`);
+    }
+    $("map-key").replaceChildren(...items);
+  }
+
+  // ---- reading it
+
+  async function readPositions() {
+    try { takePositions(await getJson("/admin/positions")); } catch (e) { if (!(e instanceof SignedOut)) console.warn("[observatory] positions", e); }
+    mapKey();
+    mapNote();
+  }
+  async function readLayers() {
+    try { map.layers = await getJson(`/admin/map?hours=${state.hours}`); } catch (e) { if (!(e instanceof SignedOut)) console.warn("[observatory] map", e); }
+    mapKey();
+    drawSoon();
+  }
+  async function readNodes() {
+    try { ({ nodes: map.nodes } = await getJson("/world/nodes")); } catch (e) { if (!(e instanceof SignedOut)) console.warn("[observatory] nodes", e); }
+    mapKey();
+    drawSoon();
+  }
+  /** After a deed or a fill: the layers again, once things settle */
+  function layersSoon() {
+    if (state.tab !== "map" || map.pending) return;
+    map.pending = setTimeout(() => { map.pending = null; readLayers(); }, 3_000);
+  }
+
+  async function mapPage() {
+    if (!map.terrain) {
+      map.loading ??= fetch("/terrain")
+        .then((res) => { if (!res.ok) throw new Error(`/terrain: ${res.status}`); return res.json(); })
+        .then((t) => { map.terrain = buildTerrain(t); })
+        .finally(() => { map.loading = null; });
+      $("map-headline").textContent = "Reading the land.";
+      try { await map.loading; } catch (e) {
+        console.warn(e);
+        $("map-headline").textContent = "The land couldn't be read from /terrain.";
+        return;
+      }
+      if (state.tab !== "map") return;
+    }
+    sizeMap();
+    if (!map.view) fitView();
+    if (!map.timers.length) {
+      readPositions();
+      readLayers();
+      readNodes();
+      map.timers = [
+        setInterval(() => { if (!document.hidden) readPositions(); }, POSITIONS_MS),
+        setInterval(() => { if (!document.hidden) readLayers(); }, MAP_LAYERS_MS),
+        setInterval(() => { if (!document.hidden) readNodes(); }, NODES_MS),
+      ];
+    }
+    mapHeadline();
+    mapKey();
+    mapNote();
+    drawSoon();
+  }
+
+  function mapStop() {
+    for (const t of map.timers) clearInterval(t);
+    map.timers = [];
+    clearTimeout(map.pending);
+    map.pending = null;
+  }
+
+  function sizeMap() {
+    const canvas = $("map-canvas");
+    const box = canvas.parentElement.getBoundingClientRect();
+    if (!box.width) return;
+    const dpr = devicePixelRatio || 1;
+    const was = Math.min(map.size.w, map.size.h);
+    map.size = { w: box.width, h: box.height };
+    canvas.width = Math.round(box.width * dpr);
+    canvas.height = Math.round(box.height * dpr);
+    // A resize keeps what's in view the same size relative to the canvas
+    if (map.view && was) map.view.scale *= Math.min(box.width, box.height) / was;
+    drawSoon();
+  }
+
+  function setLayer(layer, on) {
+    if (on) map.on.add(layer);
+    else map.on.delete(layer);
+    prefs.set("observatory.layers", JSON.stringify([...map.on]));
+    for (const b of document.querySelectorAll("#layers button[data-layer]")) b.setAttribute("aria-pressed", String(map.on.has(b.dataset.layer)));
+    mapKey();
+    drawSoon();
+  }
+
+  function mapControls() {
+    for (const b of document.querySelectorAll("#layers button[data-layer]")) {
+      b.setAttribute("aria-pressed", String(map.on.has(b.dataset.layer)));
+      b.addEventListener("click", () => setLayer(b.dataset.layer, !map.on.has(b.dataset.layer)));
+    }
+    $("map-fit").addEventListener("click", () => { if (map.terrain) { fitView(); mapNote(); drawSoon(); } });
+    const canvas = $("map-canvas");
+    new ResizeObserver(() => { if (state.tab === "map") sizeMap(); }).observe(canvas.parentElement);
+    stillness.addEventListener("change", drawSoon);
+
+    // Drag to move, wheel or pinch to zoom, click to follow
+    const pointers = new Map();
+    let moved = 0;
+    let pinch = null;
+    const local = (e) => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+    canvas.addEventListener("pointerdown", (e) => {
+      canvas.setPointerCapture(e.pointerId);
+      pointers.set(e.pointerId, local(e));
+      moved = 0;
+      if (pointers.size === 2) {
+        const [a, b] = [...pointers.values()];
+        pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]) };
+      }
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      const at = local(e);
+      const was = pointers.get(e.pointerId);
+      if (!was || !map.view) {
+        if (map.view && e.pointerType === "mouse") {
+          const hit = hitAt(...at);
+          if (hit?.id !== map.hover?.id) { map.hover = hit; mapNote(); drawSoon(); }
+          canvas.style.cursor = hit?.kind === "walker" ? "pointer" : "grab";
+        }
+        return;
+      }
+      pointers.set(e.pointerId, at);
+      if (pointers.size === 2 && pinch) {
+        const [a, b] = [...pointers.values()];
+        const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+        zoomAt((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, d / pinch.d);
+        pinch.d = d;
+        moved += 10;
+        return;
+      }
+      const dx = at[0] - was[0];
+      const dy = at[1] - was[1];
+      moved += Math.abs(dx) + Math.abs(dy);
+      if (moved > 4) {
+        map.follow = null;
+        map.view.cx -= dx / map.view.scale;
+        map.view.cy -= dy / map.view.scale;
+        canvas.style.cursor = "grabbing";
+        drawSoon();
+      }
+    });
+    const up = (e) => {
+      if (!pointers.has(e.pointerId)) return;
+      pointers.delete(e.pointerId);
+      if (pointers.size < 2) pinch = null;
+      canvas.style.cursor = "grab";
+      if (e.type === "pointerup" && moved <= 4 && map.view && pointers.size === 0) {
+        const hit = hitAt(...local(e));
+        map.follow = hit?.kind === "walker" ? hit.id : null;
+        map.hover = hit;
+        mapNote();
+        drawSoon();
+      }
+    };
+    canvas.addEventListener("pointerup", up);
+    canvas.addEventListener("pointercancel", up);
+    canvas.addEventListener("pointerleave", () => { if (map.hover && !pointers.size) { map.hover = null; mapNote(); drawSoon(); } });
+    canvas.addEventListener("wheel", (e) => {
+      if (!map.view) return;
+      e.preventDefault();
+      zoomAt(...local(e), Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0015)));
+    }, { passive: false });
+    canvas.addEventListener("keydown", (e) => {
+      if (!map.view) return;
+      const step = 80 / map.view.scale;
+      const keys = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+      if (keys[e.key]) { map.follow = null; map.view.cx += keys[e.key][0]; map.view.cy += keys[e.key][1]; drawSoon(); }
+      else if (e.key === "+" || e.key === "=") zoomAt(map.size.w / 2, map.size.h / 2, 1.25);
+      else if (e.key === "-") zoomAt(map.size.w / 2, map.size.h / 2, 0.8);
+      else if (e.key === "0") { fitView(); mapNote(); drawSoon(); }
+      else return;
+      e.preventDefault();
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // The wire
 
   const NOTE_TAGS = {
@@ -996,7 +1725,7 @@
   // ---------------------------------------------------------------------------
   // The tabs, the range and the theme
 
-  const PAGES = { overview, economy, performance, town: () => town(), tuning: loadKnobs, events };
+  const PAGES = { overview, map: mapPage, economy, performance, town: () => town(), tuning: loadKnobs, events };
 
   /** Redraw the open page if it's one of `pages` */
   function render(pages) {
@@ -1008,6 +1737,7 @@
   function show(tab) {
     if (!PAGES[tab]) tab = "overview";
     state.tab = tab;
+    if (tab !== "map") mapStop();
     for (const a of document.querySelectorAll("#tabs a")) a.setAttribute("aria-selected", String(a.dataset.tab === tab));
     for (const p of document.querySelectorAll(".page")) p.hidden = p.dataset.page !== tab;
     // A chart built while hidden had no width; size it now it shows
@@ -1021,13 +1751,18 @@
     for (const b of document.querySelectorAll("#range button")) b.setAttribute("aria-pressed", String(Number(b.dataset.hours) === hours));
     if (!state.token) return;
     readSeries("base").then(() => render([state.tab])).catch((e) => { if (!(e instanceof SignedOut)) console.warn(e); });
-    render([state.tab]);
+    // The map's heat covers the range too
+    if (state.tab === "map" && map.terrain) readLayers();
+    else render([state.tab]);
   }
 
   function setTheme(theme) {
     if (theme) document.documentElement.dataset.theme = theme;
     else delete document.documentElement.dataset.theme;
     for (const chart of Object.values(state.charts)) chart.rebuild();
+    map.palette = null;
+    mapKey();
+    drawSoon();
   }
   function currentTheme() {
     return document.documentElement.dataset.theme
@@ -1086,6 +1821,7 @@
         events();
       });
     }
+    mapControls();
     addEventListener("hashchange", () => show(location.hash.slice(1)));
     $("sign-out").addEventListener("click", () => signOut(null));
 

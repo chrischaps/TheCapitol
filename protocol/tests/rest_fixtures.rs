@@ -25,7 +25,10 @@
 //! citizen at work with two decisions, a merchant resting after a failure,
 //! and one away.
 //! `fixtures/rest/admin_walkers.json` is `GET /admin/walkers` (D5.3): a
-//! citizen walking to its next leg, a person gathering, one crafting.
+//! citizen walking to its next leg, a person gathering, one crafting. It's
+//! also what `GET /admin/positions` (D1.3) sends, for every player.
+//! `fixtures/rest/admin_map.json` is `GET /admin/map` (D1.3): two zones, a citizen's farm
+//! and a person's lot, their stations, and an hour's fills at the hall and two stalls.
 
 use std::fs;
 use std::path::Path;
@@ -274,6 +277,18 @@ fn walkers_round_trip() {
     assert!(matches!(walkers[1].doing, Doing::Extracting { .. }));
     assert_eq!(walkers[2].doing, Doing::Crafting { recipe_id: "rope".into() });
     assert_eq!(serde_json::to_string(&walkers).unwrap(), json);
+}
+
+#[test]
+fn the_admin_map_round_trips() {
+    use capitol_protocol::rest::AdminMap;
+    let json = fixture("admin_map.json");
+    let map: AdminMap = serde_json::from_str(&json).unwrap();
+    assert!(map.plots[0].citizen && !map.plots[1].citizen);
+    assert!(map.stations[0].citizen && !map.stations[1].citizen);
+    assert_eq!(map.heat.market.vwap(), Some(412.0 / 96.0));
+    assert_eq!(map.heat.stalls["bazaar_stall_12"].strands, 60);
+    assert_eq!(serde_json::to_string(&map).unwrap(), json);
 }
 
 #[test]

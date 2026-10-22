@@ -46,6 +46,40 @@
   --k-deed: #2f6b3a;
   --k-gazette: #231e17;
   --k-warning: #9b2f25;
+  /* the map: a printed plan in light, the city at night in dark */
+  --m-zone-a: #ebdfc4;
+  --m-zone-b: #e5d7b9;
+  --m-edge: rgba(35, 30, 23, 0.4);
+  --m-water: #7f9db3;
+  --m-stream: #a4bccb;
+  --m-park: rgba(76, 116, 62, 0.22);
+  --m-lot: rgba(35, 30, 23, 0.1);
+  --m-road: #b3a27e;
+  --m-arterial: #9a8660;
+  --m-trail: #9a8763;
+  --m-landmark: #8a7a5c;
+  --m-owned-citizen: rgba(138, 106, 18, 0.42);
+  --m-owned-person: rgba(43, 76, 126, 0.42);
+  --m-citizen: #7a6214;
+  --m-person: #231e17;
+  --m-halo: rgba(240, 230, 207, 0.9);
+  --m-path: rgba(35, 30, 23, 0.4);
+  --m-heat: rgba(190, 70, 30, 0.75);
+  --m-heat-mode: multiply;
+  --m-station: #2b4c7e;
+  --m-label: rgba(35, 30, 23, 0.45);
+  /* nodes by what grows there: plants, wood, stone, clay, the three metals */
+  --n-grass: #6f9a4a;
+  --n-reed_bed: #8fae5a;
+  --n-tree: #3f6b35;
+  --n-fallen_branches: #8a6a3a;
+  --n-old_growth: #24492a;
+  --n-rock_outcrop: #807a70;
+  --n-clay_bank: #b4673e;
+  --n-copper_vein: #c07a3c;
+  --n-tin_vein: #8d9aa6;
+  --n-iron_vein: #6d3b33;
+  --n-other: #6b6150;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -83,6 +117,38 @@
     --k-deed: #22c55e;
     --k-gazette: #f2d675;
     --k-warning: #ef4444;
+    --m-zone-a: #13131f;
+    --m-zone-b: #171726;
+    --m-edge: rgba(201, 162, 39, 0.35);
+    --m-water: #1f4f7a;
+    --m-stream: #2a5d86;
+    --m-park: rgba(34, 197, 94, 0.1);
+    --m-lot: rgba(140, 140, 170, 0.12);
+    --m-road: #3a3a4e;
+    --m-arterial: #6a6a80;
+    --m-trail: #4a4a5e;
+    --m-landmark: #5a5040;
+    --m-owned-citizen: rgba(201, 162, 39, 0.32);
+    --m-owned-person: rgba(59, 130, 246, 0.32);
+    --m-citizen: #f2d675;
+    --m-person: #ffffff;
+    --m-halo: rgba(10, 10, 15, 0.85);
+    --m-path: rgba(242, 214, 117, 0.35);
+    --m-heat: rgba(242, 140, 40, 0.7);
+    --m-heat-mode: lighter;
+    --m-station: #60a5fa;
+    --m-label: rgba(201, 162, 39, 0.5);
+    --n-grass: #7dbb55;
+    --n-reed_bed: #a6c96a;
+    --n-tree: #4f9a45;
+    --n-fallen_branches: #b08850;
+    --n-old_growth: #3f7f4a;
+    --n-rock_outcrop: #a09a90;
+    --n-clay_bank: #d88a5c;
+    --n-copper_vein: #e0954c;
+    --n-tin_vein: #b8c4ce;
+    --n-iron_vein: #c46a5c;
+    --n-other: #8a8a96;
   }
 }
 
@@ -120,6 +186,38 @@
   --k-deed: #22c55e;
   --k-gazette: #f2d675;
   --k-warning: #ef4444;
+  --m-zone-a: #13131f;
+  --m-zone-b: #171726;
+  --m-edge: rgba(201, 162, 39, 0.35);
+  --m-water: #1f4f7a;
+  --m-stream: #2a5d86;
+  --m-park: rgba(34, 197, 94, 0.1);
+  --m-lot: rgba(140, 140, 170, 0.12);
+  --m-road: #3a3a4e;
+  --m-arterial: #6a6a80;
+  --m-trail: #4a4a5e;
+  --m-landmark: #5a5040;
+  --m-owned-citizen: rgba(201, 162, 39, 0.32);
+  --m-owned-person: rgba(59, 130, 246, 0.32);
+  --m-citizen: #f2d675;
+  --m-person: #ffffff;
+  --m-halo: rgba(10, 10, 15, 0.85);
+  --m-path: rgba(242, 214, 117, 0.35);
+  --m-heat: rgba(242, 140, 40, 0.7);
+  --m-heat-mode: lighter;
+  --m-station: #60a5fa;
+  --m-label: rgba(201, 162, 39, 0.5);
+  --n-grass: #7dbb55;
+  --n-reed_bed: #a6c96a;
+  --n-tree: #4f9a45;
+  --n-fallen_branches: #b08850;
+  --n-old_growth: #3f7f4a;
+  --n-rock_outcrop: #a09a90;
+  --n-clay_bank: #d88a5c;
+  --n-copper_vein: #e0954c;
+  --n-tin_vein: #b8c4ce;
+  --n-iron_vein: #c46a5c;
+  --n-other: #8a8a96;
 }
 
 * { box-sizing: border-box; }
@@ -377,6 +475,32 @@ input {
 .tile .spark .area { fill: currentColor; opacity: 0.1; stroke: none; }
 .tile .sub { margin: 4px 0 0; font-size: 13px; line-height: 1.3; color: var(--ink-dim); }
 .dek a { color: var(--accent); }
+
+/* ---- the map ----------------------------------------------------------- */
+
+#layers { margin-top: 14px; }
+#layers #map-fit { margin-left: auto; border-radius: 3px; }
+.map {
+  position: relative;
+  margin-top: 12px;
+  height: clamp(360px, 68vh, 760px);
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  overflow: hidden;
+}
+.map canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+.map canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.map-key { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; color: var(--ink-dim); }
+.map-key li { display: inline-flex; align-items: center; gap: 6px; }
+.map-key i { display: inline-block; width: 9px; height: 9px; background: var(--c); }
+.map-key i.dot { border-radius: 50%; }
+.map-key i.diamond { width: 8px; height: 8px; background: transparent; border: 1.5px solid var(--c); transform: rotate(45deg); }
+.map-key i.lot { width: 12px; height: 9px; }
+.map-key i.square { width: 8px; height: 8px; }
+.map-key i.glow { width: 12px; height: 12px; border-radius: 50%; background: radial-gradient(circle, var(--c), transparent 70%); }
+@media (max-width: 640px) {
+  .map { height: 62vh; margin-left: -16px; margin-right: -16px; border-left: 0; border-right: 0; }
+}
 
 /* ---- tables ------------------------------------------------------------ */
 

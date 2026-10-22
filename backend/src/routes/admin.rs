@@ -12,9 +12,12 @@ use capitol_protocol::metrics::{Feed, SeriesQuery, TownLatest, TownReport};
 use futures::{Stream, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
 use capitol_protocol::rest::{
-    ApiKeyScope, CitizenInfo, CreateCitizenRequest, CreatedApiKey, CreatedCitizen, Doing, SuccessResponse, Walker,
-    WalkersQuery, WALKERS_MAX_RADIUS,
+    AdminMap, ApiKeyScope, CitizenInfo, CreateCitizenRequest, CreatedApiKey, CreatedCitizen, Doing, FillHeat, MapPlot,
+    MapQuery, MapZone, MapStation, SuccessResponse, Walker, WalkersQuery, MAP_HEAT_MAX_HOURS, WALKERS_MAX_RADIUS,
 };
+use capitol_protocol::metrics::Trades;
+use capitol_protocol::rules::Zone;
+use tower_http::compression::CompressionLayer;
 use capitol_protocol::tunables::{TunablesResponse, TunablesUpdate};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -50,6 +53,8 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/series", get(get_series))
         .route("/tunables", get(get_tunables).put(put_tunables))
         .route("/walkers", get(get_walkers))
+        .route("/positions", get(get_positions).layer(CompressionLayer::new()))
+        .route("/map", get(get_map).layer(CompressionLayer::new()))
         .route("/accounts/{id}/subscription", post(subscribe_account))
         .route("/citizens", get(list_citizens).post(create_citizen))
         .route("/town", get(get_town))
@@ -489,9 +494,11 @@ fn walkers_near(
     query: WalkersQuery,
 ) -> Vec<Walker> {
     let radius = query.radius.clamp(0.0, WALKERS_MAX_RADIUS);
+    walkers(players.values().filter(|p| (p.x - query.x).powi(2) + (p.y - query.y).powi(2) <= radius * radius))
+}
+
+fn walkers<'a>(players: impl Iterator<Item = &'a crate::models::PlayerState>) -> Vec<Walker> {
     let mut out: Vec<Walker> = players
-        .values()
-        .filter(|p| (p.x - query.x).powi(2) + (p.y - query.y).powi(2) <= radius * radius)
         .map(|p| Walker {
             player_id: p.id,
             name: p.name.clone(),
@@ -508,6 +515,89 @@ fn walkers_near(
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// Every player in the world as the server is moving them (D1.3), for the
+/// console's map, which reads it every two seconds while it's open. Gzipped:
+/// a walker is about 175 bytes, so 200 are 35 KB, and gzip takes over half.
+pub async fn get_positions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<Vec<Walker>>, AppError> {
+    require_admin(&user)?;
+    Ok(Json(walkers(state.game.read().await.players.values())))
+}
+
+/// The console map's layers that change slowly (D1.3): the owned lots, the
+/// stations, and where the last `hours` of trade happened.
+pub async fn get_map(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Query(query): Query<MapQuery>,
+) -> Result<Json<AdminMap>, AppError> {
+    require_admin(&user)?;
+    let hours = query.hours.clamp(1, MAP_HEAT_MAX_HOURS);
+    let from = Utc::now() - chrono::Duration::hours(i64::from(hours));
+
+    let plots: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT p.terrain_id, COALESCE(acc.kind = 'citizen', FALSE)
+         FROM plots p
+         JOIN players pl ON pl.id = p.owner_id
+         JOIN accounts acc ON acc.id = pl.account_id
+         WHERE p.terrain_id IS NOT NULL
+         ORDER BY p.terrain_id",
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let stations: Vec<(uuid::Uuid, String, f64, f64, bool)> = sqlx::query_as(
+        "SELECT s.id, s.station_type, s.position_x::float8, s.position_y::float8,
+                COALESCE(acc.kind = 'citizen', FALSE)
+         FROM stations s
+         LEFT JOIN players pl ON pl.id = s.owner_id
+         LEFT JOIN accounts acc ON acc.id = pl.account_id
+         ORDER BY s.id",
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let market: (i64, i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(SUM(quantity), 0)::int8, COALESCE(SUM(price * quantity), 0)::int8
+         FROM market_trades WHERE at > $1",
+    )
+    .bind(from)
+    .fetch_one(&state.db)
+    .await?;
+
+    let stalls: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+        "SELECT stall_id, COUNT(*), SUM(quantity)::int8, SUM(price * quantity)::int8
+         FROM bazaar_sales WHERE at > $1
+         GROUP BY stall_id ORDER BY stall_id",
+    )
+    .bind(from)
+    .fetch_all(&state.db)
+    .await?;
+
+    let trades = |(trades, units, strands): (i64, i64, i64)| Trades { trades: trades as u64, units, strands };
+    Ok(Json(AdminMap {
+        zones: Zone::ALL
+            .iter()
+            .map(|z| {
+                let (inner, outer) = z.radii();
+                MapZone { zone: z.as_str().to_string(), inner, outer }
+            })
+            .collect(),
+        plots: plots.into_iter().map(|(terrain_id, citizen)| MapPlot { terrain_id, citizen }).collect(),
+        stations: stations
+            .into_iter()
+            .map(|(id, station_type, x, y, citizen)| MapStation { id, station_type, x, y, citizen })
+            .collect(),
+        heat: FillHeat {
+            from_ms: from.timestamp_millis(),
+            market: trades(market),
+            stalls: stalls.into_iter().map(|(id, n, units, strands)| (id, trades((n, units, strands)))).collect(),
+        },
+    }))
 }
 
 /// Get real-time server performance stats
