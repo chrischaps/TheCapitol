@@ -739,6 +739,47 @@ pub fn citizen_mark(ui: &mut Ui, text: f32, ink: Option<Color32>) -> Response {
     response.on_hover_text("A citizen: an AI who lives, works and trades in the city, by the same rules as anyone")
 }
 
+/// A wax seal of radius `r` at `c`: a red-brown disc, its rim pressed into
+/// points, and the stamp's ring. The impound's chip and letters (S1.5) set it.
+pub fn wax_seal(painter: &egui::Painter, c: egui::Pos2, r: f32) {
+    let rim: Vec<egui::Pos2> = (0..16)
+        .map(|i| {
+            let a = i as f32 * std::f32::consts::TAU / 16.0;
+            let r = if i % 2 == 0 { r } else { r * 0.86 };
+            c + egui::vec2(a.cos() * r, a.sin() * r)
+        })
+        .collect();
+    painter.add(egui::Shape::convex_polygon(rim, INK_DOWN, Stroke::NONE));
+    painter.circle_stroke(c, r * 0.52, Stroke::new((r * 0.14).max(0.8), PAPER_EDGE.gamma_multiply(0.7)));
+}
+
+/// An envelope filling `rect`: sealed, a paper face with its flap down and a
+/// seal on it; opened, an outline in `ink` with its flap up.
+pub fn envelope(painter: &egui::Painter, rect: egui::Rect, sealed: bool, ink: Color32) {
+    let (l, r, t, b) = (rect.left(), rect.right(), rect.top(), rect.bottom());
+    let mid = rect.center().x;
+    let line = Stroke::new(1.0_f32, if sealed { PAPER_EDGE } else { ink });
+    if sealed {
+        painter.rect_filled(rect, 1.5, PAPER);
+        painter.add(egui::Shape::line(
+            vec![egui::pos2(l, t), egui::pos2(mid, t + rect.height() * 0.58), egui::pos2(r, t)],
+            Stroke::new(1.0_f32, INK_DIM.gamma_multiply(0.6)),
+        ));
+        wax_seal(painter, egui::pos2(mid, t + rect.height() * 0.58), rect.height() * 0.3);
+    } else {
+        painter.rect_stroke(rect, 1.5, line);
+        // The flap, folded back above it
+        painter.add(egui::Shape::line(
+            vec![egui::pos2(l, t), egui::pos2(mid, t - rect.height() * 0.45), egui::pos2(r, t)],
+            line,
+        ));
+        painter.add(egui::Shape::line(
+            vec![egui::pos2(l, b), egui::pos2(mid, t + rect.height() * 0.45), egui::pos2(r, b)],
+            Stroke::new(1.0_f32, ink.gamma_multiply(0.5)),
+        ));
+    }
+}
+
 /// Underlined words that act, in dim gold.
 pub fn link(ui: &mut Ui, text: &str, size: f32) -> Response {
     ui.add(

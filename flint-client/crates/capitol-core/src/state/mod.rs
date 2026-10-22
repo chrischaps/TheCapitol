@@ -261,6 +261,16 @@ pub enum StateEvent {
         x: f64,
         y: f64,
     },
+    /// A letter came for you (`letter_arrived`, Commons S1.5): live, or as
+    /// you come back. The mailbox (`crate::mail`) counts it unread.
+    LetterArrived {
+        id: Uuid,
+        from: Uuid,
+        name: String,
+        /// The writer is a citizen (C0.1)
+        citizen: bool,
+        first_line: String,
+    },
     /// Someone bought from your bazaar stall (`bazaar_sale`, E3.10). Flint
     /// toasts it (E3.11).
     BazaarSale {
@@ -848,6 +858,13 @@ impl GameState {
                 x: *x,
                 y: *y,
             }),
+            M::LetterArrived { id, from, name, citizen, first_line } => out.push(StateEvent::LetterArrived {
+                id: *id,
+                from: *from,
+                name: name.clone(),
+                citizen: *citizen,
+                first_line: first_line.clone(),
+            }),
             // E3.10: to the merchant. The store takes the sale off your
             // listing, or closes your shop.
             M::BazaarSale { stall_id, item_type, buyer_name, buyer_citizen, units, paid, .. } => {
@@ -1172,6 +1189,9 @@ impl GameState {
             | R::Gazette(_)
             | R::Card(_)
             | R::Mutes(_)
+            | R::Mailbox(_)
+            | R::Letter(_)
+            | R::LettersUnread(_)
             | R::Byline(_)
             | R::CreatedApiKey(_)
             | R::ApiKeys(_)

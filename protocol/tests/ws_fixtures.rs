@@ -72,6 +72,7 @@ const SERVER_TYPES: &[&str] = &[
     "presence",
     "resync",
     "said",
+    "letter_arrived",
 ];
 
 const CLIENT_TYPES: &[&str] = &[

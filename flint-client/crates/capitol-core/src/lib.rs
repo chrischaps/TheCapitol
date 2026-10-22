@@ -62,6 +62,7 @@ pub mod exchange;
 pub mod gazette;
 pub mod hall;
 pub mod harvest;
+pub mod mail;
 pub mod market;
 pub mod market_maker;
 pub mod motion;

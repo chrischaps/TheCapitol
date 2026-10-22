@@ -147,6 +147,10 @@ struct Args {
     /// default), "person", "muted" (the person, muted, S1.4) or "mine"
     #[arg(long, value_name = "WHO", num_args = 0..=1, default_missing_value = "citizen")]
     card_sample: Option<String>,
+    /// Offline, open the mailbox (S1.5) on sample letters: "in" (the
+    /// default), "letter", "write" or "sent"
+    #[arg(long, value_name = "VIEW", num_args = 0..=1, default_missing_value = "in")]
+    mail_sample: Option<String>,
     /// Offline, the Exchange hall as if you stood where the camera looks
     /// with goods in your market box: the gold mote, the header's hint and,
     /// in range, the prompt (E3.7)
@@ -364,6 +368,7 @@ fn main() -> Result<()> {
         .with_bazaar_sample(args.bazaar_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_gazette_sample(args.gazette_sample && args.offline.is_some())
         .with_card_sample(args.card_sample.as_deref().filter(|_| args.offline.is_some()))
+        .with_mail_sample(args.mail_sample.as_deref().filter(|_| args.offline.is_some()))
         .with_impound_sample(args.impound_sample && args.offline.is_some())
         .with_chat_sample(args.chat_sample && args.offline.is_some())
         .with_station_panel_sample(args.station_panel_sample.as_deref())

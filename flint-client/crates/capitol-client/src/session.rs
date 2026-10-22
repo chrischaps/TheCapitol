@@ -91,6 +91,8 @@ const CARD_TAG: Tag = 110;
 /// The tag on the mutes' calls (S1.4): the list, a mute and an unmute,
 /// each answered with the list.
 const MUTES_TAG: Tag = 140;
+/// The tag on the letters' calls (S1.5): one at a time.
+const MAIL_TAG: Tag = 120;
 
 /// The tag on taking things out of the impound (#141). The poller
 /// refetches the containers on its answer.
@@ -229,6 +231,11 @@ pub struct Session {
     mutes: capitol_core::mutes::Mutes,
     /// Talk (Commons S1.3): both channels, the input line, what's in flight.
     chat: capitol_core::chat::Chat,
+    /// Your letters (S1.5), and whether the mailbox is open to look at them.
+    mail: capitol_core::mail::Mail,
+    mail_open: bool,
+    /// Letters that came, for their toasts (`letter_note`): title and body.
+    letter_notes: Vec<(String, String)>,
     /// Placing a station from a kit (P6.2), while it lasts.
     placing: Option<Placing>,
     /// What placing has to tell the player since the extension last took it.
@@ -430,6 +437,9 @@ impl Session {
             cards: Default::default(),
             mutes: Default::default(),
             chat: capitol_core::chat::Chat::new(),
+            mail: Default::default(),
+            mail_open: false,
+            letter_notes: Vec::new(),
             placing: None,
             placing_notes: Vec::new(),
             visit: Visit::default(),
@@ -1508,6 +1518,42 @@ impl Session {
         &self.cards
     }
 
+    /// Your letters (S1.5).
+    pub fn mail(&self) -> &capitol_core::mail::Mail {
+        &self.mail
+    }
+
+    pub fn mail_mut(&mut self) -> &mut capitol_core::mail::Mail {
+        &mut self.mail
+    }
+
+    /// The mailbox is open: the box it shows is fetched if it hasn't been.
+    pub fn set_mail_open(&mut self, open: bool) {
+        self.mail_open = open;
+    }
+
+    /// Letters that came since last asked, for their toasts.
+    pub fn take_letter_notes(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.letter_notes)
+    }
+
+    fn tend_mail(&mut self) {
+        if self.auth.phase() != Phase::InWorld {
+            return;
+        }
+        use capitol_core::mail::Ask;
+        if let Some(ask) = self.mail.wants(self.mail_open) {
+            let request = match &ask {
+                Ask::Page(query) => RestRequest::Letters(query.clone()),
+                Ask::Send(letter) => RestRequest::SendLetter(letter.clone()),
+                Ask::Read(id) => RestRequest::ReadLetter { letter_id: *id },
+                Ask::Drop(id) => RestRequest::DropLetter { letter_id: *id },
+            };
+            self.mail.sent(ask);
+            self.net.rest(request, MAIL_TAG);
+        }
+    }
+
     fn tend_card(&mut self) {
         if self.auth.phase() != Phase::InWorld {
             return;
@@ -2112,6 +2158,20 @@ impl Session {
                         (None, _) => {}
                     }
                 }
+                NetEvent::Rest(MAIL_TAG, result) => match result {
+                    Ok(RestResponse::Mailbox(mailbox)) => self.mail.paged(mailbox.clone()),
+                    Ok(RestResponse::Letter(letter)) => {
+                        tracing::info!("mail: a letter to {} went", letter.to.name);
+                        self.mail.delivered(letter.clone());
+                    }
+                    Ok(RestResponse::LettersUnread(n)) => self.mail.counted(n.unread),
+                    Ok(other) => tracing::warn!("mail: an answer it didn't ask for: {other:?}"),
+                    Err(e) => {
+                        let why = refusal(e);
+                        tracing::info!("mail: refused: {why}");
+                        self.mail.failed(why);
+                    }
+                },
                 NetEvent::Rest(CARD_TAG, result) => match result {
                     Ok(RestResponse::Card(card)) => self.cards.answered(card.clone()),
                     Ok(_) => self.cards.failed(false),
@@ -2196,6 +2256,7 @@ impl Session {
                     self.mutes.connected();
                     // What was in flight went down with the old socket
                     self.chat.connected();
+                    self.mail.connected();
                 }
             }
             let trade_before = self.state.trade().clone();
@@ -2289,6 +2350,10 @@ impl Session {
                     StateEvent::BazaarSale { .. } | StateEvent::StallLapsed { .. } => self.note_bazaar(change),
                     StateEvent::GazettePublished { day, headline, .. } => {
                         self.gazette.published(*day, headline)
+                    }
+                    StateEvent::LetterArrived { name, citizen, first_line, .. } => {
+                        self.mail.arrived();
+                        self.letter_notes.push(capitol_core::mail::arrived_words(name, *citizen, first_line));
                     }
                     // The backlog comes again on a new socket
                     StateEvent::SnapshotStale => self.talk.rejoined(self.talk_time(now)),
@@ -2397,6 +2462,7 @@ impl Session {
             self.tend_gazette();
             self.tend_card();
             self.tend_mutes();
+            self.tend_mail();
             for (request, tag) in self.poller.tick(now) {
                 self.net.rest(request, tag);
             }
@@ -2498,6 +2564,8 @@ impl Session {
             self.gazette_asked = None;
             self.cards = Default::default();
             self.chat = capitol_core::chat::Chat::new();
+            self.mail.signed_out();
+            self.letter_notes.clear();
             self.placing = None;
             self.placing_notes.clear();
             self.visit = Visit::default();

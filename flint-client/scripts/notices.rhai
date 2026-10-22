@@ -9,7 +9,7 @@
 // takes a count ("×2") and starts its time again. At most four stand at
 // once. A fifth sends the oldest out early. A small diamond left of the
 // title says what kind of news it is: gold for something gained, ember for
-// a refusal, water blue for a canal.
+// a refusal, water blue for a canal, paper for a letter.
 //
 // Pickups. When a gather comes in, the yield rises off the tuft
 // (input.rhai), and a moment later its grade pips lift off after it and
@@ -118,6 +118,11 @@ fn on_event(name, data) {
         toasts = add_toast(toasts, data.title, data.body, "note", t);
         return;
     }
+    // A letter came (S1.5): marked in the paper's warm white
+    if name == "letter_note" {
+        toasts = add_toast(toasts, data.title, data.body, "letter", t);
+        return;
+    }
     if name == "movement_blocked" {
         if data.steep == true {
             toasts = add_toast(toasts, "Too steep", "Find a gentler way up", "note", t);
@@ -179,10 +184,12 @@ fn toast_alpha(q, now) {
     a
 }
 
-// The kind's mark: gold for good news, ember for a refusal, water blue.
+// The kind's mark: gold for good news, ember for a refusal, water blue,
+// and paper for a letter.
 fn kind_colour(kind) {
     if kind == "good" { gold() }
     else if kind == "water" { [0.55, 0.75, 1.0] }
+    else if kind == "letter" { [0.94, 0.90, 0.81] }
     else { [0.91, 0.53, 0.35] }
 }
 

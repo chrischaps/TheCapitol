@@ -306,11 +306,16 @@ impl RateLimiter {
 
 /// The `429` REST answers when a limit is reached.
 pub fn too_many(retry_after: Duration) -> Response {
+    too_many_saying(retry_after, "Too many requests".into())
+}
+
+/// [`too_many`], saying `error`: `POST /letters` says [`chat_message`].
+pub fn too_many_saying(retry_after: Duration, error: String) -> Response {
     // Whole seconds, rounded up, as `Retry-After` wants.
     let secs = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
     let mut response = (
         StatusCode::TOO_MANY_REQUESTS,
-        Json(serde_json::json!({ "error": "Too many requests", "retry_after": secs })),
+        Json(serde_json::json!({ "error": error, "retry_after": secs })),
     )
         .into_response();
     response

@@ -5,8 +5,8 @@
 //! it subscribes, and again on [`GameEvent::MutesChanged`], which [`set`]
 //! sends. A line from someone muted is dropped before it's sent
 //! (`talk::hears`), the Capitol backlog's included, so it never reaches
-//! the muter at all. A letter from them (S1.5) is refused in words that
-//! name no one, so the sender can't tell. Citizens can be muted like anyone.
+//! the muter at all. A letter from them (S1.5) is taken and paid for as
+//! any other, but only into the writer's out box, so the writer can't tell. Citizens can be muted like anyone.
 
 use std::collections::HashSet;
 

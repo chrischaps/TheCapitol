@@ -196,6 +196,7 @@ engine/
   currency.rs    - Strand/Fiber exchange operations
   property_tax.rs - Hourly tax processing
   ledger.rs      - The world's books: units made and destroyed, and GET /admin/ledger (C1.7)
+  letters.rs     - Letters: send with postage, the two boxes, the 200 cap (S1.5)
   load.rs        - Tick time and sockets as running totals, for the ledger (C1.7)
   sampler.rs     - The Observatory's samples: one every 10 s, a day in memory, one a minute to metrics_samples (D0.2)
 
@@ -230,6 +231,7 @@ routes/          - Axum REST handlers
   bureaucracy.rs - Government/bureaucracy endpoints
   bazaar.rs      - The bazaar's directory, stalls, listings and buying (E3.10)
   gazette.rs     - The Gazette's editions and your byline (E3.9)
+  letters.rs     - Letters: write, your in and out boxes, read and drop (S1.5)
   console.rs     - The Observatory's console page at /admin/console, from backend/static/ (D1.1)
 
 ws/              - WebSocket handlers

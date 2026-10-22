@@ -236,6 +236,7 @@ fn test_for(message: &M) -> fn() {
         M::StallLapsed { .. } => bazaar_notices_are_reported,
         M::Resync { .. } => a_socket_that_fell_behind_resyncs_like_a_reconnect,
         M::Said { .. } => said_is_reported,
+        M::LetterArrived { .. } => a_letter_is_reported,
     }
 }
 
@@ -255,7 +256,7 @@ fn every_variant_has_a_test() {
         test_for(&message)();
         count += 1;
     }
-    assert_eq!(count, 59, "one fixture per ServerMessage variant");
+    assert_eq!(count, 60, "one fixture per ServerMessage variant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1407,6 +1408,17 @@ fn said_is_reported() {
             x: 6800.0,
             y: 6790.5,
         }]
+    );
+}
+
+#[test]
+fn a_letter_is_reported() {
+    let mut state = connected();
+    let (id, from) = (Uuid::from_u128(385), Uuid::from_u128(7));
+    let letter = M::LetterArrived { id, from, name: "Brin".into(), citizen: true, first_line: "Thank you…".into() };
+    assert_eq!(
+        state.apply_ws(&letter),
+        vec![StateEvent::LetterArrived { id, from, name: "Brin".into(), citizen: true, first_line: "Thank you…".into() }]
     );
 }
 

@@ -56,6 +56,14 @@ pub enum RestRequest {
     Mute { player_id: Uuid },
     /// `DELETE /players/{id}/mute`
     Unmute { player_id: Uuid },
+    /// `GET /letters?box=&before=`: a page of your in or out box (S1.5)
+    Letters(LettersQuery),
+    /// `POST /letters`: write to someone, for a Strand's postage
+    SendLetter(SendLetter),
+    /// `POST /letters/{id}/read`
+    ReadLetter { letter_id: Uuid },
+    /// `DELETE /letters/{id}`: drop your copy
+    DropLetter { letter_id: Uuid },
     /// `POST /player/move`. The WebSocket `move` is what the game uses.
     PlayerMove(MoveRequest),
     /// `GET /player/inventory`
@@ -229,6 +237,12 @@ pub enum RestResponse {
     Card(PlayerCard),
     /// Who you've muted (S1.4), after a mute or an unmute too
     Mutes(MutesResponse),
+    /// A page of a box of letters (S1.5)
+    Mailbox(Mailbox),
+    /// A letter you sent
+    Letter(Letter),
+    /// Your unread letters, after one is read or dropped
+    LettersUnread(LettersUnread),
     Move(MoveResponse),
     Inventory(InventoryResponse),
     Currency(CurrencyResponse),
@@ -352,6 +366,8 @@ impl RestRequest {
             | Logout(_)
             | CreateApiKey(_)
             | PlayerMove(_)
+            | SendLetter(_)
+            | ReadLetter { .. }
             | Extract(_)
             | MoveItem(_)
             | SplitStack { .. }
@@ -378,7 +394,7 @@ impl RestRequest {
             | ConfigureAutomation { .. }
             | SetTunables(_)
             | Mute { .. } => Method::PUT,
-            RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } | Unlist { .. } | Unmute { .. } => {
+            RemoveStation { .. } | RevokeApiKey { .. } | CancelOrder { .. } | Unlist { .. } | Unmute { .. } | DropLetter { .. } => {
                 Method::DELETE
             }
             ApiKeys
@@ -388,6 +404,7 @@ impl RestRequest {
             | PlayerCard { .. }
             | PlayerCardByName { .. }
             | Mutes
+            | Letters(_)
             | PlayerInventory
             | PlayerCurrency
             | WorldNearby(_)
@@ -439,6 +456,9 @@ impl RestRequest {
             PlayerCardByName { name } => format!("/players/by-name/{}", path_segment(name)),
             Mutes => "/player/mutes".into(),
             Mute { player_id } | Unmute { player_id } => format!("/players/{player_id}/mute"),
+            Letters(_) | SendLetter(_) => "/letters".into(),
+            ReadLetter { letter_id } => format!("/letters/{letter_id}/read"),
+            DropLetter { letter_id } => format!("/letters/{letter_id}"),
             PlayerMove(_) => "/player/move".into(),
             PlayerInventory => "/player/inventory".into(),
             PlayerCurrency => "/player/currency".into(),
@@ -511,6 +531,8 @@ impl RestRequest {
             Logout(b) => req.json(b),
             CreateApiKey(b) => req.json(b),
             PlayerMove(b) => req.json(b),
+            SendLetter(b) => req.json(b),
+            Letters(q) => req.query(q),
             Extract(b) => req.json(b),
             MoveItem(b) => req.json(b),
             SplitStack { request, .. } => req.json(request),
@@ -566,6 +588,9 @@ impl RestRequest {
             Q::PlayerMe => A::Me(de(body)?),
             Q::PlayerCard { .. } | Q::PlayerCardByName { .. } => A::Card(de(body)?),
             Q::Mutes | Q::Mute { .. } | Q::Unmute { .. } => A::Mutes(de(body)?),
+            Q::Letters(_) => A::Mailbox(de(body)?),
+            Q::SendLetter(_) => A::Letter(de(body)?),
+            Q::ReadLetter { .. } | Q::DropLetter { .. } => A::LettersUnread(de(body)?),
             Q::PlayerMove(_) => A::Move(de(body)?),
             Q::PlayerInventory => A::Inventory(de(body)?),
             Q::PlayerCurrency => A::Currency(de(body)?),
@@ -794,6 +819,14 @@ mod tests {
             (RestRequest::Catalog, "GET", "/catalog".into()),
             (RestRequest::PlayerMe, "GET", "/player/me".into()),
             (RestRequest::PlayerCard { player_id: id }, "GET", format!("/players/{id}/card")),
+            (RestRequest::Letters(Default::default()), "GET", "/letters".into()),
+            (
+                RestRequest::SendLetter(SendLetter { to: id, body: "Hello".into() }),
+                "POST",
+                "/letters".into(),
+            ),
+            (RestRequest::ReadLetter { letter_id: id }, "POST", format!("/letters/{id}/read")),
+            (RestRequest::DropLetter { letter_id: id }, "DELETE", format!("/letters/{id}")),
             (
                 RestRequest::PlayerCardByName { name: "Ada Reeder/2?é".into() },
                 "GET",

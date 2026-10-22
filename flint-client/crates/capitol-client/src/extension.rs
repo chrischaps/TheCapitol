@@ -154,6 +154,9 @@ pub struct CapitolExtension {
     /// game day, to show offline.
     card: ui::card::CardPanel,
     card_sample: Option<(capitol_core::card::Cards, i64)>,
+    /// Letters (S1.5), and `--mail-sample`: sample boxes to show offline.
+    mail: ui::mail::MailPanel,
+    mail_sample: Option<(capitol_core::mail::Mail, ui::mail::View)>,
     /// What a foreclosure kept for you (#141), and `--impound-sample`: an
     /// impound and a pack to show offline.
     impound: ui::impound::ImpoundPanel,
@@ -271,6 +274,8 @@ impl CapitolExtension {
             gazette_sample: None,
             card: ui::card::CardPanel::default(),
             card_sample: None,
+            mail: ui::mail::MailPanel::default(),
+            mail_sample: None,
             impound: ui::impound::ImpoundPanel::default(),
             impound_sample: None,
             station_panel_sample: None,
@@ -450,6 +455,16 @@ impl CapitolExtension {
     pub fn with_card_sample(mut self, which: Option<&str>) -> Self {
         if let (Some(which), None) = (which, &self.session) {
             self.card_sample = Some(ui::card::sample(which));
+        }
+        self
+    }
+
+    /// Offline, open the mailbox on sample letters (`--mail-sample`): the
+    /// boxes, a letter, or one being written.
+    pub fn with_mail_sample(mut self, which: Option<&str>) -> Self {
+        if let (Some(which), None) = (which, &self.session) {
+            self.mail_sample = Some(ui::mail::sample(which));
+            self.mail.open = true;
         }
         self
     }
@@ -896,6 +911,10 @@ impl PlayerExtension for CapitolExtension {
         if self.shared.read_gazette.swap(false, Ordering::Relaxed) {
             self.gazette.open = true;
         }
+        // Letters (S1.5): L
+        if !self.at_login() && ctx.input.is_action_just_pressed("mail") {
+            self.mail.toggle();
+        }
         if ctx.input.is_action_just_pressed("settings") {
             self.settings_panel.toggle();
         }
@@ -986,6 +1005,12 @@ impl PlayerExtension for CapitolExtension {
                 data.insert("title".into(), note.title.into());
                 data.insert("body".into(), note.body.into());
                 ctx.fire_event("market_note", data);
+            }
+            for (title, body) in session.take_letter_notes() {
+                let mut data = toml::Table::new();
+                data.insert("title".into(), title.into());
+                data.insert("body".into(), body.into());
+                ctx.fire_event("letter_note", data);
             }
             if let Some((item, strands)) = &self.trade_offer {
                 offer_preset(session, item, *strands, &mut self.trade_offered, now);
@@ -1454,6 +1479,8 @@ impl PlayerExtension for CapitolExtension {
                         .gazette()
                         .unread()
                         .then(|| session.gazette().latest_headline().unwrap_or_default().to_owned()),
+                    mail_open: self.mail.open,
+                    mail_unread: session.mail().unread(),
                     help_open: self.shortcuts.open,
                     settings_open: self.settings_panel.open,
                     inventory_pulse: pulse,
@@ -1485,6 +1512,9 @@ impl PlayerExtension for CapitolExtension {
                 }
                 if clicks.chat {
                     self.chat.toggle();
+                }
+                if clicks.mail {
+                    self.mail.toggle();
                 }
                 if clicks.hall {
                     self.shared.visit_hall.store(true, Ordering::Relaxed);
@@ -1714,6 +1744,24 @@ impl PlayerExtension for CapitolExtension {
                     }
                     None => {}
                 }
+                // Letters (S1.5)
+                session.set_mail_open(self.mail.open);
+                let view = ui::mail::View {
+                    strands: session.state().strands(),
+                    now: session
+                        .state()
+                        .server_time_ms()
+                        .and_then(capitol_core::chrono::DateTime::from_timestamp_millis)
+                        .unwrap_or_else(capitol_core::chrono::Utc::now),
+                    online: true,
+                };
+                match self.mail.show(ctx, session.mail_mut(), &view) {
+                    Some(ui::mail::Action::Card(who)) => {
+                        let hint = capitol_core::card::Hint { name: who.name, citizen: who.citizen };
+                        session.open_card(capitol_core::card::Who::Id(who.id), Some(hint));
+                    }
+                    Some(ui::mail::Action::Close) | None => {}
+                }
                 // A person's card (S0.3), over the Gazette when it's opened from it
                 let today = rules::day_number(
                     session.state().server_time_ms().unwrap_or_else(|| capitol_core::chrono::Utc::now().timestamp_millis()),
@@ -1725,18 +1773,22 @@ impl PlayerExtension for CapitolExtension {
                     }
                     Some(ui::card::Action::Mute(id)) => session.mute(id, true),
                     Some(ui::card::Action::Unmute(id)) => session.mute(id, false),
+                    Some(ui::card::Action::Write(to)) => {
+                        session.mail_mut().write_to(to);
+                        self.mail.open = true;
+                    }
                     Some(ui::card::Action::Close) => session.close_card(),
                     None => {}
                 }
                 // The settings panel takes the hint card's corner, and the
-                // Gazette the middle of the screen; the card waits behind
-                // them rather than showing through.
-                if self.settings_panel.open || self.gazette.open {
+                // Gazette and the letters the middle of the screen; the card
+                // waits behind them rather than showing through.
+                if self.settings_panel.open || self.gazette.open || self.mail.open {
                     self.hints.rect = None;
                 } else {
                     // The inventory's and the station's rects are last frame's: they're drawn after.
                     let panels: Vec<_> =
-                        [self.inventory.rect, self.crafting.rect, self.exchange.rect, self.market.rect, self.impound.rect, self.shop.rect, self.station.rect, self.card.rect, self.chat.rect]
+                        [self.inventory.rect, self.crafting.rect, self.exchange.rect, self.market.rect, self.impound.rect, self.shop.rect, self.station.rect, self.card.rect, self.chat.rect, self.mail.rect]
                             .into_iter()
                             .flatten()
                             .collect();
@@ -1986,6 +2038,9 @@ impl PlayerExtension for CapitolExtension {
             {
                 reader.turn(by);
             }
+        }
+        if let Some((mail, view)) = &mut self.mail_sample {
+            let _ = self.mail.show(ctx, mail, view);
         }
         if let Some((cards, today)) = &mut self.card_sample {
             // Trade is drawn as it would be signed in; offline it asks no one

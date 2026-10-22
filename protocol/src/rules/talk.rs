@@ -25,6 +25,17 @@ pub const MAX_LINE: usize = 240;
 /// The most characters in a letter, newlines among them.
 pub const MAX_LETTER: usize = 1000;
 
+/// A letter's postage, in Strands (D4): a sink, and what keeps letters
+/// from being spam.
+pub const POSTAGE: i64 = 1;
+
+/// How many letters each box keeps (D4). Past it, the oldest read letters
+/// go first; only a box of unread ones loses its oldest unread.
+pub const MAILBOX: usize = 200;
+
+/// The most characters of a letter its notice and the mailbox's list show.
+pub const FIRST_LINE: usize = 60;
+
 /// How far a local line carries, in world units (D1): 3 m.
 pub const HEARD: f64 = 30.0;
 
@@ -79,6 +90,35 @@ pub fn clean_letter(text: &str) -> Result<String, TalkError> {
         blank = false;
     }
     within(letter, MAX_LETTER)
+}
+
+/// The start of a cleaned `letter`, for its notice and the mailbox's list:
+/// its first line, past a salutation ("Dear Brin,"), cut at a word to
+/// [`FIRST_LINE`] characters. An ellipsis says there's more, unless the
+/// line ends a sentence.
+pub fn first_line(letter: &str) -> String {
+    let mut lines = letter.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = lines.next().unwrap_or("");
+    let second = lines.next();
+    let saluted = first.ends_with(',') && first.chars().count() <= FIRST_LINE / 2;
+    let (line, more) = match second {
+        Some(next) if saluted => (next, lines.next().is_some()),
+        _ => (first, second.is_some()),
+    };
+    if line.chars().count() <= FIRST_LINE {
+        return if more && !line.ends_with(['.', '!', '?', '…']) {
+            format!("{}…", line.trim_end_matches([',', ';', ':']))
+        } else {
+            line.to_string()
+        };
+    }
+    let cut: String = line.chars().take(FIRST_LINE).collect();
+    // Back to the last space, unless that leaves too little
+    let at_word = match cut.rfind(' ') {
+        Some(i) if cut[..i].chars().count() >= FIRST_LINE / 2 => &cut[..i],
+        _ => cut.as_str(),
+    };
+    format!("{}…", at_word.trim_end_matches([' ', ',', ';', ':', '.']))
 }
 
 /// One line, trimmed and folded, with the control characters gone.
@@ -189,5 +229,26 @@ mod tests {
             TalkError::TooLong { max: 240 }.to_string(),
             "That's over 240 characters"
         );
+    }
+
+    #[test]
+    fn a_letters_first_line_is_cut_at_a_word() {
+        assert_eq!(first_line("Thank you for the planks."), "Thank you for the planks.");
+        assert_eq!(first_line("Dear Ada,
+
+The rope was good."), "The rope was good.", "past the salutation");
+        assert_eq!(first_line("Dear Ada,"), "Dear Ada,", "unless that's all");
+        assert_eq!(first_line("The rope held.
+
+More soon."), "The rope held.", "a sentence ends");
+        assert_eq!(first_line("About the rope:
+it held"), "About the rope…", "more follows");
+        let long = "I have forty planks of the best grade the sawbench gives and would trade them all for rope";
+        let cut = first_line(long);
+        assert!(cut.ends_with('…') && cut.chars().count() <= FIRST_LINE + 1, "{cut}");
+        assert_eq!(cut, "I have forty planks of the best grade the sawbench gives…");
+        // One long word is cut where it must be
+        let word = "a".repeat(100);
+        assert_eq!(first_line(&word).chars().count(), FIRST_LINE + 1);
     }
 }

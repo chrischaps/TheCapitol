@@ -698,6 +698,87 @@ pub struct MutedPlayer {
     pub citizen: bool,
 }
 
+/// Which of your two boxes of letters (S1.5): what came for you, or what
+/// you sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub enum LetterBox {
+    #[default]
+    In,
+    Out,
+}
+
+/// `POST /letters` (S1.5): a letter to the player `to`, for
+/// [`rules::talk::POSTAGE`]. It's addressed by id, from a card's Write or a
+/// letter's Reply, since names aren't unique
+/// ([#428](https://github.com/chrischaps/TheCapitol/issues/428)). The body
+/// is cleaned by [`rules::talk::clean_letter`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct SendLetter {
+    pub to: Uuid,
+    pub body: String,
+}
+
+/// `GET /letters`' query (S1.5): which box, and the page after the last.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LettersQuery {
+    /// `in`, the default, or `out`
+    #[serde(default, rename = "box")]
+    pub which: LetterBox,
+    /// The letters sent before this one: the last of the page before
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<Uuid>,
+}
+
+/// One end of a letter: who wrote it, or who it's to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Correspondent {
+    pub id: Uuid,
+    pub name: String,
+    /// A citizen (C0.1)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citizen: bool,
+}
+
+/// A letter, as its box shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Letter {
+    pub id: Uuid,
+    pub from: Correspondent,
+    pub to: Correspondent,
+    pub body: String,
+    pub sent_at: DateTime<Utc>,
+    /// When you opened it. Only in your in box: a writer isn't told whether
+    /// a letter was read, so a mute (S1.4) never shows as one never read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<DateTime<Utc>>,
+}
+
+/// `GET /letters?box=in|out&before=` (S1.5): a page of one box, newest
+/// first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct Mailbox {
+    pub letters: Vec<Letter>,
+    /// Letters unread in your in box, whichever box this is
+    pub unread: u32,
+    /// There are older letters: ask again with `before` the last one's id
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub more: bool,
+}
+
+/// `POST /letters/{id}/read` and `DELETE /letters/{id}` (S1.5): your in
+/// box's unread letters now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]
+pub struct LettersUnread {
+    pub unread: u32,
+}
+
 /// `GET /player/inventory`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "backend", derive(utoipa::ToSchema))]

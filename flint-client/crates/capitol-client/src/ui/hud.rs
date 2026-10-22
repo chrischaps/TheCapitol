@@ -134,6 +134,10 @@ pub struct HeaderView<'a> {
     pub chat_open: bool,
     /// Lines said on either channel you haven't read.
     pub chat_unread: usize,
+    /// The same for the mailbox (S1.5).
+    pub mail_open: bool,
+    /// Letters unread in your in box: an envelope on its chip.
+    pub mail_unread: u32,
     /// The same for the shortcut overlay (P8.3).
     pub help_open: bool,
     /// The same for the settings panel.
@@ -162,6 +166,7 @@ pub struct HeaderClicks {
     pub market: bool,
     pub gazette: bool,
     pub chat: bool,
+    pub mail: bool,
     /// The hall hint: go to the hall.
     pub hall: bool,
     /// The impound's chip: open or close its panel.
@@ -239,6 +244,7 @@ pub fn header(
                     if let Some(stacks) = view.impound.filter(|n| *n > 0) {
                         clicks.impound = impound_chip(ui, stacks, view.impound_open).clicked();
                     }
+                    clicks.mail = letters_chip(ui, view.mail_unread, view.mail_open).clicked();
                     clicks.gazette = match &view.gazette_news {
                         Some(headline) => news_chip(ui, headline).clicked(),
                         None => theme::toggle_chip(ui, "Gazette", view.gazette_open)
@@ -389,17 +395,7 @@ pub fn impound_chip(ui: &mut egui::Ui, stacks: usize, open: bool) -> egui::Respo
                     .color(theme::PAPER),
             );
             let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-            let c = rect.center();
-            // A wax seal: a red-brown disc, its rim pressed into points
-            let rim: Vec<egui::Pos2> = (0..16)
-                .map(|i| {
-                    let a = i as f32 * std::f32::consts::TAU / 16.0;
-                    let r = if i % 2 == 0 { 5.8 } else { 5.0 };
-                    c + egui::vec2(a.cos() * r, a.sin() * r)
-                })
-                .collect();
-            ui.painter().add(egui::Shape::convex_polygon(rim, theme::INK_DOWN, Stroke::NONE));
-            ui.painter().circle_stroke(c, 3.0, Stroke::new(0.8_f32, theme::PAPER_EDGE.gamma_multiply(0.7)));
+            theme::wax_seal(ui.painter(), rect.center(), 5.8);
         });
     });
     shown
@@ -409,8 +405,39 @@ pub fn impound_chip(ui: &mut egui::Ui, stacks: usize, open: bool) -> egui::Respo
         .on_hover_text("Held for you after a foreclosure: click to take it back")
 }
 
-/// A new edition of the Gazette is out (E3.9): a gold-edged chip that
-/// breathes, with the headline on hover. A click opens it.
+/// The mailbox's chip (S1.5): an envelope, open while nothing waits, and
+/// sealed with the count while letters wait unread. Lit in the paper while
+/// the mailbox is open. No word on it: the header is full.
+fn letters_chip(ui: &mut egui::Ui, unread: u32, open: bool) -> egui::Response {
+    let (edge, fill) = match (open, unread) {
+        (true, _) => (theme::PAPER, theme::CHIP),
+        (false, 0) => (theme::BORDER, theme::CHIP),
+        _ => (theme::PAPER_EDGE, theme::CHIP),
+    };
+    let shown = theme::chip(edge, fill).show(ui, |ui| {
+        ui.set_min_height(16.0);
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if unread > 0 {
+                ui.label(RichText::new(unread.to_string()).font(theme::strong(size::SMALL)).color(theme::PAPER));
+            }
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(17.0, 12.0), egui::Sense::hover());
+            let ink = if open { theme::TEXT } else { theme::DIM };
+            theme::envelope(ui.painter(), rect.translate(egui::vec2(0.0, 1.5)), unread > 0, ink);
+        });
+    });
+    let words = match unread {
+        0 => "Your letters (L)".to_string(),
+        1 => "A letter waits for you (L)".to_string(),
+        n => format!("{n} letters wait for you (L)"),
+    };
+    shown
+        .response
+        .interact(egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(words)
+}
+
 /// The chat's chip (Commons S1.3): lit while it's open, with a gold count
 /// of the lines you haven't read.
 fn chat_chip(ui: &mut egui::Ui, open: bool, unread: usize) -> egui::Response {
@@ -434,6 +461,8 @@ fn chat_chip(ui: &mut egui::Ui, open: bool, unread: usize) -> egui::Response {
     chip
 }
 
+/// A new edition of the Gazette is out (E3.9): a gold-edged chip that
+/// breathes, with the headline on hover. A click opens it.
 fn news_chip(ui: &mut egui::Ui, headline: &str) -> egui::Response {
     let t = ui.input(|i| i.time) as f32;
     let k = 0.5 + 0.5 * (t * 2.2).sin();

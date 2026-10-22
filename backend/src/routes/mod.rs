@@ -9,6 +9,7 @@ pub mod exchange;
 pub mod gazette;
 pub mod health;
 pub mod inventory;
+pub mod letters;
 pub mod market;
 pub mod player;
 pub mod players;

@@ -19,7 +19,8 @@ use uuid::Uuid;
 use super::property_tax::foreclosure_threshold;
 
 /// Queue `message` for `player_id`, about the lot `terrain_id` (or, for
-/// `automation_paused`, the station's id). Any unsent `tax_delinquent` or
+/// `automation_paused`, the station's id, and for `letter_arrived` the
+/// letter's). Any unsent `tax_delinquent` or
 /// `automation_paused` about the same thing is dropped: this says more.
 /// Returns the notice's id, for the live event to carry.
 pub async fn queue<'e>(

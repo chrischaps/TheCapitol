@@ -85,6 +85,11 @@ bindings = [{ type = "key", code = "KeyM" }]
 kind = "button"
 bindings = [{ type = "key", code = "KeyG" }]
 
+# Letters (S1.5): the mailbox
+[actions.mail]
+kind = "button"
+bindings = [{ type = "key", code = "KeyL" }]
+
 # The shortcut overlay (P8.3). `?` opens it too, read off the typed
 # character, so it's `?` on any layout. Binding Slash here as well would
 # fire on the same keypress and toggle the overlay twice.

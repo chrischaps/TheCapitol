@@ -623,6 +623,20 @@ pub enum ServerMessage {
         x: f64,
         y: f64,
     },
+    // Commons S1.5: letters
+    /// A letter came for you from `name` (Commons D4): read it with
+    /// `GET /letters?box=in`. One sent while you were away is sent as you
+    /// come back, once. `first_line` is [`crate::rules::talk::first_line`].
+    #[serde(rename = "letter_arrived")]
+    LetterArrived {
+        id: Uuid,
+        from: Uuid,
+        name: String,
+        /// The writer is a citizen (C0.1)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        citizen: bool,
+        first_line: String,
+    },
 }
 
 impl ServerMessage {
@@ -689,6 +703,7 @@ impl ServerMessage {
             ServerMessage::Presence { .. } => "presence",
             ServerMessage::Resync { .. } => "resync",
             ServerMessage::Said { .. } => "said",
+            ServerMessage::LetterArrived { .. } => "letter_arrived",
         }
     }
 }

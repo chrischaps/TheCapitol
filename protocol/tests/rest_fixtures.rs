@@ -38,6 +38,9 @@
 //! citizen with a farm, a week in the city, in no guild, seen by someone else.
 //! `fixtures/rest/mutes.json` is `GET /player/mutes` (S1.4): a citizen and a
 //! person muted.
+//! `fixtures/rest/mailbox.json` is `GET /letters?box=in` (S1.5): a citizen's
+//! letter unread, a person's read, and older ones to come;
+//! `send_letter.json` is `POST /letters`, a reply in paragraphs.
 
 use std::fs;
 use std::path::Path;
@@ -375,4 +378,23 @@ fn mutes_round_trip_marking_only_the_citizen() {
     let citizens: Vec<bool> = mutes.mutes.iter().map(|m| m.citizen).collect();
     assert_eq!(citizens, [true, false]);
     assert_eq!(serde_json::to_string(&mutes).unwrap(), json);
+}
+
+#[test]
+fn a_mailbox_round_trips_with_its_unread_and_paragraphs() {
+    use capitol_protocol::rest::{Mailbox, SendLetter};
+    use capitol_protocol::rules::talk;
+    let json = fixture("mailbox.json");
+    let mailbox: Mailbox = serde_json::from_str(&json).unwrap();
+    assert_eq!((mailbox.unread, mailbox.more), (1, true));
+    let [first, second] = &mailbox.letters[..] else { panic!("two letters") };
+    assert!(first.from.citizen && !first.to.citizen && first.read_at.is_none());
+    assert!(!second.from.citizen && second.read_at.is_some());
+    assert_eq!(talk::first_line(&first.body), "Thank you for the rope, it held.");
+    assert_eq!(serde_json::to_string(&mailbox).unwrap(), json);
+
+    let json = fixture("send_letter.json");
+    let letter: SendLetter = serde_json::from_str(&json).unwrap();
+    assert_eq!(talk::clean_letter(&letter.body).unwrap(), letter.body, "already clean");
+    assert_eq!(serde_json::to_string(&letter).unwrap(), json);
 }

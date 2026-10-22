@@ -9,15 +9,15 @@
 //! for a citizen; how long they've been here; where they live; what's said
 //! of them (standing in words, D8: "new in town" until S3.1) and their guild
 //! once there are guilds (S4.1). Then Trade, as T or a shift-click asks,
-//! and under it a quiet Mute (S1.4): their words stop reaching you, on every
-//! device, and they aren't told. Write (S1.5) joins them when it lands.
+//! and Write, a letter to them (S1.5); under them a quiet Mute (S1.4):
+//! their words stop reaching you, on every device, and they aren't told.
 //!
 //! The card is edged in the light its person carries: a person's amber
 //! lantern, a citizen's pale one, and gold for your own, the colour of
 //! what's yours. The words are `capitol_core::card`'s.
 
 use capitol_core::card::{home_words, time_in_city, Hint, Shown};
-use capitol_core::protocol::rest::PlayerCard;
+use capitol_core::protocol::rest::{Correspondent, PlayerCard};
 use egui::{Align2, Color32, Id, RichText};
 use uuid::Uuid;
 
@@ -32,7 +32,7 @@ const RISE: f32 = 10.0;
 const NAME: f32 = 19.0;
 
 /// What the card asks for this frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     /// Ask them to trade.
     Trade(Uuid),
@@ -40,6 +40,8 @@ pub enum Action {
     Mute(Uuid),
     /// Hear them again.
     Unmute(Uuid),
+    /// Write them a letter (S1.5).
+    Write(Correspondent),
     Close,
 }
 
@@ -185,12 +187,17 @@ fn known(ui: &mut egui::Ui, card: &PlayerCard, view: &View) -> Option<Action> {
         return None;
     }
     ui.add_space(8.0);
-    // Write (S1.5, #385) stands beside it once it lands
-    let trade = ui.horizontal(|ui| theme::accent_button(ui, "Trade", theme::TRADE, view.online)).inner;
-    let mut action = trade
-        .on_hover_text("Ask them to trade (or shift-click them)")
-        .clicked()
-        .then_some(Action::Trade(card.id));
+    let mut action = None;
+    ui.columns(2, |c| {
+        let trade = theme::accent_button(&mut c[0], "Trade", theme::TRADE, view.online);
+        if trade.on_hover_text("Ask them to trade (or shift-click them)").clicked() {
+            action = Some(Action::Trade(card.id));
+        }
+        let write = theme::accent_button(&mut c[1], "Write", GOLD, view.online);
+        if write.on_hover_text("Write them a letter, for a Strand's postage").clicked() {
+            action = Some(Action::Write(Correspondent { id: card.id, name: card.name.clone(), citizen: card.citizen }));
+        }
+    });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         if card.muted {
@@ -319,11 +326,13 @@ mod tests {
     }
 
     #[test]
-    fn someone_elses_card_asks_them_to_trade_or_mutes_them() {
+    fn someone_elses_card_asks_them_to_trade_writes_to_them_or_mutes_them() {
         let (cards, today) = sample("person");
         let ada = Uuid::from_u128(0xada);
         let found = actions_on(&cards, today);
         assert!(found.contains(&Action::Trade(ada)) && found.contains(&Action::Mute(ada)), "{found:?}");
+        let write = Action::Write(Correspondent { id: ada, name: "Ada Reeder".into(), citizen: false });
+        assert!(found.contains(&write), "{found:?}");
         assert!(!found.contains(&Action::Unmute(ada)), "{found:?}");
     }
 
