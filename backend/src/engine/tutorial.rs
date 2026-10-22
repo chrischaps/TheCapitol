@@ -227,6 +227,43 @@ impl Judged {
     }
 }
 
+/// The client says it showed `step` (`tutorial_seen`, #441): kept, through
+/// [`saw`], for a step it may report, or refused with words.
+///
+/// The market box is taught, then waived (#446, plan D10), and only when
+/// there's nothing to collect: both orders are on the book and the box is
+/// empty. With something in it, collecting is the step ([`Did::Collected`]).
+/// So the road never waits on the market, and a waiver never stands in for
+/// what the player could do.
+pub async fn seen(db: &PgPool, events: &broadcast::Sender<GameEvent>, player: Uuid, step: Step) -> Result<(), String> {
+    if !step.judge().client_reports() {
+        return Err(format!("The server sees {} for itself", step.name()));
+    }
+    if step == Step::CollectBox {
+        let unread = |e: sqlx::Error| {
+            tracing::warn!("Couldn't read {player}'s market box for the road in: {e}");
+            "The market box can't be read just now".to_owned()
+        };
+        let done = progress(db, player).await.map_err(unread)?.done;
+        if !(done.has(Step::SellOrder) && done.has(Step::BuyOrder)) {
+            return Err("Put a sell order and a buy order on the book first".to_owned());
+        }
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM items i JOIN containers c ON c.id = i.container_id
+                            WHERE c.owner_id = $1 AND c.container_type = 'market_box')",
+        )
+        .bind(player)
+        .fetch_one(db)
+        .await
+        .map_err(unread)?;
+        if waiting {
+            return Err("Something waits in your market box: collect it at the hall".to_owned());
+        }
+    }
+    saw(db, events, player, Did::Seen(step)).await;
+    Ok(())
+}
+
 /// Hide the card for now (`dismissed`), or bring it back, then tell each of
 /// `player`'s sockets, so it holds on every device (plan D2).
 pub async fn set_dismissed(
@@ -675,6 +712,51 @@ mod tests {
         stack(&db, ada, market_box, 0, "rope", 1).await;
         let _ = collect(State(state), as_them(&db, ada).await, all()).await.unwrap();
         assert_eq!(done(&db, ada).await, Steps::from_iter([Step::CollectBox]));
+    }
+
+    /// Nothing filled: the box is waived with words, and the hall's chapter
+    /// still finishes (#446, plan D10)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn waiving_the_market_box_still_finishes_the_hall(db: PgPool) {
+        use capitol_protocol::tutorial::Chapter;
+        let ada = player(&db, "Ada", 0).await;
+        let (events, mut rx) = broadcast::channel(16);
+        for step in [Step::Deposit, Step::SellOrder, Step::BuyOrder, Step::VisitStall, Step::ReadGazette] {
+            mark(&db, ada, step).await.unwrap();
+        }
+        assert!(!done(&db, ada).await.chapter_done(Chapter::Hall));
+        crate::engine::market::market_box(&mut db.acquire().await.unwrap(), ada).await.unwrap();
+        seen(&db, &events, ada, Step::CollectBox).await.expect("an empty box is waived");
+        let after = done(&db, ada).await;
+        assert!(after.has(Step::CollectBox));
+        assert!(after.chapter_done(Chapter::Hall), "the chapter finishes on the waiver");
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            GameEvent::Tutorial { message: ServerMessage::TutorialStep { step: Step::CollectBox, .. }, .. }
+        ));
+    }
+
+    /// Before both orders are placed, or with something to collect, the box
+    /// isn't waived: collecting is the step
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs the local Postgres (docker-compose up -d)"]
+    async fn the_market_box_isnt_waived_with_something_to_collect(db: PgPool) {
+        let ada = player(&db, "Ada", 0).await;
+        let (events, mut rx) = broadcast::channel(16);
+        mark(&db, ada, Step::SellOrder).await.unwrap();
+        assert!(seen(&db, &events, ada, Step::CollectBox).await.is_err(), "no buy order yet");
+        mark(&db, ada, Step::BuyOrder).await.unwrap();
+        let market_box = crate::engine::market::market_box(&mut db.acquire().await.unwrap(), ada).await.unwrap();
+        stack(&db, ada, market_box, 0, "rope", 1).await;
+        assert!(seen(&db, &events, ada, Step::CollectBox).await.is_err(), "a rope waits");
+        assert!(!done(&db, ada).await.has(Step::CollectBox));
+        assert!(rx.try_recv().is_err());
+        // Any other step the client may report is taken as before, and one it may not, refused
+        seen(&db, &events, ada, Step::OpenPack).await.unwrap();
+        assert!(done(&db, ada).await.has(Step::OpenPack));
+        assert!(seen(&db, &events, ada, Step::Deposit).await.is_err());
+        assert!(!done(&db, ada).await.has(Step::Deposit));
     }
 
     /// From the lane, even with nobody renting it (D10); from afar, refused

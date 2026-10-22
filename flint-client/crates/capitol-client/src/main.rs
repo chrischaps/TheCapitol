@@ -177,7 +177,8 @@ struct Args {
     /// Offline, the road in's card (#441) on a sample tour: "new" (the
     /// default), "half" (half way up the road), "hidden" (its card hidden:
     /// the header's chip instead) or "help" (hidden, with the `?` overlay
-    /// open on its line)
+    /// open on its line). A step's name or a chapter's stands it there, and
+    /// "collect_box-empty" is the market box's card with the box empty (#446)
     #[arg(long, value_name = "TOUR", num_args = 0..=1, default_missing_value = "new")]
     hints_sample: Option<String>,
     /// Offline, open the impound (#141) on a sample: what a foreclosed

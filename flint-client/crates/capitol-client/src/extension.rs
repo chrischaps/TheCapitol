@@ -717,7 +717,9 @@ impl CapitolExtension {
     /// Where the road in's card leads, if it names a place this client can
     /// find (#442), and where you stand, both world metres. A node is the
     /// nearest live one of its kinds, a lot its zone's stop on the road in
-    /// ([`Self::road_stop`]), a stall the nearest's counter. Offline with `--hints-sample`, you stand at
+    /// ([`Self::road_stop`]), a stall the counter of the nearest someone
+    /// keeps (or the nearest), the board the Gazette's notice board.
+    /// Offline with `--hints-sample`, you stand at
     /// `camera_target`. Call after the hall's and the bazaar's marks are
     /// set this frame.
     fn lead_mark(&self, camera_target: [f32; 2]) -> Option<(script_api::LeadMark, [f32; 2])> {
@@ -791,11 +793,20 @@ impl CapitolExtension {
                     ]
                 };
                 let near = |p: [f32; 2]| (p[0] - you[0]).powi(2) + (p[1] - you[1]).powi(2);
-                let stall = bazaar
-                    .stalls
-                    .iter()
-                    .min_by(|a, b| near(counter(a)).total_cmp(&near(counter(b))))?;
+                // A shop someone else keeps, if there is one (#446); an
+                // empty counter counts too, so an empty bazaar never blocks
+                let bare = |s: &script_api::StallMark| s.name.is_none() || s.mine;
+                let stall = bazaar.stalls.iter().min_by(|a, b| {
+                    bare(a)
+                        .cmp(&bare(b))
+                        .then(near(counter(a)).total_cmp(&near(counter(b))))
+                })?;
                 ring(counter(stall), 1.4)
+            }
+            Target::Board => {
+                // The Gazette's notice board, under its prompt (#446)
+                let hall = self.shared.hall.lock().ok()?.clone()?;
+                ring([hall.board_top[0], hall.board_top[2]], 1.6)
             }
         };
         Some((mark, you))
@@ -1129,6 +1140,12 @@ impl PlayerExtension for CapitolExtension {
             // The road in's card follows the server's tour (#441), which
             // judges the walking, gathering and making itself
             self.hints.follow(session.state().tutorial());
+            // The market box is waived with words when nothing's in it (#446, D10)
+            let goods = session.state().market_box().map(|b| capitol_core::hall::goods_waiting(Some(b)));
+            self.hints.market_box(goods, now);
+            if let Some(step) = self.hints.waive(now) {
+                session.tutorial_seen(step);
+            }
             plots(ctx, session, &self.shared, &self.lots, &mut self.sound);
             // Signed out, the store is empty, so everyone fades away.
             let (poses, state) = session.sample(now);

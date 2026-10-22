@@ -232,6 +232,14 @@ The tutorial runs in a live market that may be empty. A step that needs someone 
 ### O2: The hall and the people (`tu:O2-hall`)
 
 - **O2.1 The hall** (#446, S): the Exchange, both orders, the box (waivable), a stall and the Gazette.
+
+  *As built:*
+  - **The words** (`hints::words`, the bureaucracy's voice): the deposit says fiber in, Strands out, less the fee, which the panel sets in a line; the sell order says what an order book is in two lines ("a list of prices, waiting. Yours waits in it until someone meets it") and names what you made in Arrival; the buy order says the Strands wait in escrow and come back on a cancel; the stall says its prices show from its counter (`STALL_RANGE`, 20 units); the Gazette is pinned to the board by the hall's door, yesterday's prices and who made what. The close is "You can change fiber for Strands, leave a price on the book, shop the stalls and read what the city made yesterday." No step costs more than one order's escrow and the fees.
+  - **The market box is waived with words** (D10). The client knows the box once the market panel has fetched it, which it does while you place the orders. While the box step's card is up and the box is known empty, the card says so instead ("Nothing's filled yet, so your box is empty: a price can wait a day for its match. Your orders stay on the book, and the road goes on without them."). 7 s later (`WAIVE_AFTER`, from whichever came later, the card or the empty box) it sends `tutorial_seen { collect_box }`, once (`Hints::market_box`, `Hints::waive`). A hidden card waives nothing. With something in the box, the card asks you to collect it, and collecting counts as before.
+  - **The server judges the waiver too.** `tutorial_seen` now goes through `engine::tutorial::seen`, which the socket calls. A step the client may not report is refused as before, and `collect_box` is taken only once both orders are on the book and nothing waits in the box; otherwise it's refused with words ("Something waits in your market box: collect it at the hall"). So a fill on its way is collected, not waived, and a waiver never stands in for what the player could do. #450's citizens waive it the same way.
+  - **Where each step leads.** The Exchange's four lead to the hall's door, as before. The stall leads to the nearest stall someone else keeps, and to the nearest bare one only when nobody keeps any. The Gazette leads to its notice board (`Target::Board`, ringed under the board's prompt). The hall's prompt, its motes and the board's glint are #442's ring.
+  - **The Wanted page** waits: the commissions board (S2.3, #389) is still open, so there's no optional step yet.
+  - `--hints-sample collect_box-empty` shows the box's card with the box empty.
 - **O2.2 People** (#447, M): a line, a card, and the Registrar's letter. The letter needs a sender that isn't a player.
 
 ### O3: Home (`tu:O3-home`)

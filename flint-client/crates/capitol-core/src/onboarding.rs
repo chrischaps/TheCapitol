@@ -110,6 +110,8 @@ pub enum Target {
     Hall,
     /// The nearest stall in the bazaar.
     Stall,
+    /// The notice board by the hall's door, where the Gazette is pinned (#446).
+    Board,
 }
 
 /// Where `step` leads, if anywhere. A gather leads to the nodes the server
@@ -130,6 +132,7 @@ pub fn target(step: Step) -> Option<Target> {
         Step::ReadZoneCard => Target::Lot(Zone::Urban),
         Step::Deposit | Step::SellOrder | Step::BuyOrder | Step::CollectBox => Target::Hall,
         Step::VisitStall => Target::Stall,
+        Step::ReadGazette => Target::Board,
         _ => return None,
     })
 }
@@ -236,7 +239,7 @@ mod tests {
         for step in Chapter::Hall.steps().filter(|s| !matches!(s, Step::VisitStall | Step::ReadGazette)) {
             assert_eq!(target(step), Some(Target::Hall), "{step:?}");
         }
-        assert_eq!(target(Step::ReadGazette), None);
+        assert_eq!(target(Step::ReadGazette), Some(Target::Board));
     }
 
     /// Each stop of the road in leads to its zone's lot, and the zone card,

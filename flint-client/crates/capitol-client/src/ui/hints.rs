@@ -69,7 +69,9 @@ fn chapter_close(chapter: Chapter) -> &'static str {
         Chapter::RoadIn => {
             "You've read the deeds of a farm, a house and a yard, and what each zone is like. The hall is ahead, under the tower."
         }
-        Chapter::Hall => "You can trade at the Exchange, keep orders on its book, browse the bazaar and read the day's news.",
+        Chapter::Hall => {
+            "You can change fiber for Strands, leave a price on the book, shop the stalls and read what the city made yesterday."
+        }
         Chapter::People => "You can speak to those near you, read a stranger's card and open your letters.",
         Chapter::DeedsOffice => "The land is yours, and on the city's books. Now make something of it.",
         Chapter::SettleIn => CLOSING.1,
@@ -170,36 +172,42 @@ fn words(step: Step) -> (&'static str, &'static str, &'static str) {
             "A lot's panel opens its zone's card: what fits, the price and the tax, the walk to the hall, what grows near. Read one.",
             "[Alt] + [Click] a lot  ·  About the zone",
         ),
-        // The hall
+        // The hall (#446): no step costs more than an order's escrow, which comes back, and a fee
         Step::Deposit => (
             "The Exchange",
-            "At the hall by the tower, fiber is taken in for Strands, the city's coin. Deposit a little.",
+            "The hall under the tower takes fiber in and pays out Strands, the city's coin, less a small fee. \
+             The panel sets all three in a line. Deposit a little.",
             "[X] the exchange",
         ),
         Step::SellOrder => (
             "Offer something",
-            "The market's book takes orders at the hall. Put something up at a price you'd take.",
-            "[M] the market",
+            "The order book is a list of prices, waiting. Yours waits in it until someone meets it. \
+             Put up something you made on the road: a rope, a handle, an edge.",
+            "[M] the market  ·  Sell",
         ),
         Step::BuyOrder => (
             "Bid for something",
-            "Now a buy order: what you'd pay, held in escrow until someone sells.",
-            "[M] the market",
+            "Now bid for something you haven't got. Your Strands wait in escrow with the price, \
+             and come back if you cancel.",
+            "[M] the market  ·  Buy",
         ),
         Step::CollectBox => (
             "Your market box",
-            "What sells, and what you buy, waits in your market box at the hall. Collect it.",
-            "[M] the market",
+            "What a buy order gets you waits in your market box at the hall, with anything that comes back. \
+             Open the market and collect it.",
+            "[M] the market  ·  Collect",
         ),
         Step::VisitStall => (
             "The bazaar",
-            "Behind the hall, people rent stalls. Walk the lane and look in at one.",
+            "Across the avenue, people rent stalls and keep shops. Walk the lane and stand at a counter: \
+             its prices show from there.",
             "[Click] a stall",
         ),
         Step::ReadGazette => (
             "The Gazette",
-            "The day's records, printed at midnight. Read the latest edition.",
-            "[G] the Gazette",
+            "The Gazette is pinned to the board by the hall's door: yesterday's prices, and who made what. \
+             Read the latest.",
+            "[Click] the board  ·  [G] the Gazette",
         ),
         // People
         Step::SayLocal => (
@@ -244,6 +252,23 @@ fn words(step: Step) -> (&'static str, &'static str, &'static str) {
             "Every deed owes tax each week. Read what yours asks, on its panel.",
             "[Alt] + [Click] your lot",
         ),
+    }
+}
+
+/// The market box's card once its box is known empty (#446, plan D10):
+/// nothing's filled, so it says so, and the road goes on without it.
+const BOX_EMPTY: &str = "Nothing's filled yet, so your box is empty: a price can wait a day for its match. \
+     Your orders stay on the book, and the road goes on without them.";
+
+/// How long the market box's card says it's empty before it's waived.
+const WAIVE_AFTER: Duration = Duration::from_secs(7);
+
+/// A step's words on its card: [`words`], but for the market box once it's
+/// known empty (`box_goods`, `Some(false)`).
+fn body(step: Step, box_goods: Option<bool>) -> &'static str {
+    match (step, box_goods) {
+        (Step::CollectBox, Some(false)) => BOX_EMPTY,
+        _ => words(step).1,
     }
 }
 
@@ -330,6 +355,11 @@ pub struct Hints {
     /// `--hints-sample <chapter>-done`: that chapter's close, shown from
     /// the first frame drawn.
     sample_close: Option<Chapter>,
+    /// What your market box holds, as last fetched (#446): `Some(true)`
+    /// something waits, `Some(false)` it's empty, `None` not fetched.
+    box_goods: Option<bool>,
+    /// Since when it's been known empty, for the waiver.
+    box_empty_since: Option<Instant>,
     /// Where the card was drawn, for panels that need to keep clear.
     pub rect: Option<egui::Rect>,
     /// Each card's size, full and compact, as last drawn: where it fits
@@ -366,10 +396,46 @@ impl Hints {
         Some(step)
     }
 
+    /// What your market box holds, as last fetched (`hall::goods_waiting`
+    /// of `GameState::market_box`): `None` before it's fetched. Call once a
+    /// frame, before [`Hints::waive`].
+    pub fn market_box(&mut self, goods: Option<bool>, now: Instant) {
+        match goods {
+            Some(false) => {
+                self.box_empty_since.get_or_insert(now);
+            }
+            _ => self.box_empty_since = None,
+        }
+        self.box_goods = goods;
+    }
+
+    /// The market box is waived with words (#446, plan D10): its card is up
+    /// and shown, the box is known empty, and the card has said so for
+    /// [`WAIVE_AFTER`]. The step to tell the server (`tutorial_seen`), once.
+    /// The server looks in the box too, so a fill on its way is collected,
+    /// not waived.
+    pub fn waive(&mut self, now: Instant) -> Option<Step> {
+        let Some(Card::Step(Step::CollectBox, up)) = self.card else {
+            return None;
+        };
+        let empty = self.box_empty_since?;
+        let said = now.saturating_duration_since(up.max(empty));
+        if self.is_hidden() || said < WAIVE_AFTER || self.told.has(Step::CollectBox) {
+            return None;
+        }
+        self.told = self.told.with(Step::CollectBox);
+        tracing::info!("hints: nothing in the market box, so it's waived");
+        Some(Step::CollectBox)
+    }
+
     /// `--hints-sample`: follow the sample tour `which` names ([`sample`]),
     /// and for `<chapter>-done`, open on that chapter's close.
+    /// `collect_box-empty` is the market box's card with the box empty.
     pub fn with_sample(&mut self, which: &str) {
         self.follow(Some(sample(which)));
+        if which == "collect_box-empty" {
+            self.market_box(Some(false), Instant::now());
+        }
         self.sample_close = which
             .strip_suffix("-done")
             .and_then(|key| Chapter::ALL.into_iter().find(|c| chapter_key(*c) == key));
@@ -487,7 +553,8 @@ impl Hints {
                         Face::Step(step) => {
                             let done = matches!(card, Card::Done(..));
                             let lead = lead.filter(|_| !done);
-                            hide = step_card(ui, step, done, spot.compact, lead);
+                            let body = body(step, self.box_goods);
+                            hide = step_card(ui, step, body, done, spot.compact, lead);
                         }
                         Face::Chapter(chapter) => chapter_card(ui, chapter, spot.compact),
                         Face::Closing => closing_card(ui, spot.compact),
@@ -504,10 +571,7 @@ impl Hints {
         // the area's own response isn't hovered while a child widget is.
         if spot.compact && shown.response.contains_pointer() {
             let (title, body) = match face {
-                Face::Step(s) => {
-                    let (title, body, _) = words(s);
-                    (title.to_owned(), body)
-                }
+                Face::Step(s) => (words(s).0.to_owned(), body(s, self.box_goods)),
                 Face::Chapter(c) => (chapter_done_title(c), chapter_close(c)),
                 Face::Closing => (CLOSING.0.to_owned(), CLOSING.1),
             };
@@ -624,11 +688,11 @@ fn next_card(card: Option<Card>, tour: Tour, now: Instant) -> Option<Card> {
     }
 }
 
-/// A step's card: its chapter and place in it, then the step, and where it
-/// leads if anywhere; `compact` leaves out its words. True if "Hide for
-/// now" was clicked.
-fn step_card(ui: &mut egui::Ui, step: Step, done: bool, compact: bool, lead: Option<Lead>) -> bool {
-    let (title, body, keys) = words(step);
+/// A step's card: its chapter and place in it, then the step, its `body`
+/// (its words, as [`body`] picks them), and where it leads if anywhere;
+/// `compact` leaves out the words. True if "Hide for now" was clicked.
+fn step_card(ui: &mut egui::Ui, step: Step, body: &str, done: bool, compact: bool, lead: Option<Lead>) -> bool {
+    let (title, _, keys) = words(step);
     let (at, of) = place_in_chapter(step);
     let mut hide = false;
     ui.horizontal(|ui| {
@@ -800,6 +864,7 @@ pub fn sample(which: &str) -> TutorialProgress {
     }
     let half = up_to(Step::SellOrder);
     match which {
+        "collect_box-empty" => at(up_to(Step::CollectBox)),
         "half" => at(half),
         "hidden" | "help" => TutorialProgress { done: half, dismissed: true },
         _ => TutorialProgress::default(),
@@ -1010,6 +1075,49 @@ mod tests {
         hints.follow(None);
         hints.follow(Some(TutorialProgress::default()));
         assert_eq!(hints.saw(Did::UsedInventory), Some(Step::OpenPack));
+    }
+
+    /// Nothing filled: the card says so, and after a read the step is
+    /// waived (#446, plan D10). Not before the box is known, not with
+    /// something in it, not while hidden, and once.
+    #[test]
+    fn the_market_box_is_waived_with_words_when_nothing_has_filled() {
+        let t0 = Instant::now();
+        let mut hints = Hints::default();
+        hints.with_sample("collect_box");
+        hints.card = next_card(None, hints.tour.unwrap(), t0);
+        assert_eq!(hints.card, Some(Card::Step(Step::CollectBox, t0)));
+        let later = t0 + WAIVE_AFTER * 3;
+
+        hints.market_box(None, t0);
+        assert_eq!(hints.waive(later), None, "not fetched: nothing's known");
+        hints.market_box(Some(true), t0);
+        assert_eq!(body(Step::CollectBox, hints.box_goods), words(Step::CollectBox).1);
+        assert_eq!(hints.waive(later), None, "something waits: collect it");
+
+        // Known empty from t1: it says so, and moves on once it's been read
+        let t1 = t0 + Duration::from_secs(2);
+        hints.market_box(Some(false), t1);
+        hints.market_box(Some(false), t1 + Duration::from_secs(1));
+        assert_eq!(body(Step::CollectBox, hints.box_goods), BOX_EMPTY);
+        assert_eq!(hints.waive(t1 + WAIVE_AFTER - Duration::from_millis(10)), None, "still being read");
+        hints.hide();
+        hints.card = Some(Card::Step(Step::CollectBox, t0));
+        assert_eq!(hints.waive(later), None, "hidden waits");
+        hints.bring_back();
+        assert_eq!(hints.waive(t1 + WAIVE_AFTER), Some(Step::CollectBox));
+        assert_eq!(hints.waive(later), None, "told once");
+
+        // Only the market box's card waives anything
+        let mut hints = Hints::default();
+        hints.with_sample("collect_box-empty");
+        assert_eq!(hints.tour.unwrap().current(), Some(Step::CollectBox));
+        assert_eq!(hints.box_goods, Some(false));
+        hints.with_sample("buy_order");
+        hints.card = next_card(None, hints.tour.unwrap(), t0);
+        hints.market_box(Some(false), t0);
+        assert_eq!(hints.waive(later), None);
+        assert_eq!(body(Step::BuyOrder, Some(false)), words(Step::BuyOrder).1);
     }
 
     #[test]
